@@ -294,7 +294,10 @@ impl Upstream {
         let base = base.trim_end_matches('/').to_string();
         let uri: Uri = base.parse().map_err(|_| anyhow::anyhow!("{base} isn't a URL"))?;
         anyhow::ensure!(uri.scheme_str() == Some("http") && uri.host().is_some(), "{base}: an upstream is http://host:port");
-        let client = Client::builder(TokioExecutor::new()).pool_idle_timeout(Duration::from_secs(30)).build_http();
+        // No Nagle on the hop to the upstream either: WebSockets pass through it.
+        let mut connector = HttpConnector::new();
+        connector.set_nodelay(true);
+        let client = Client::builder(TokioExecutor::new()).pool_idle_timeout(Duration::from_secs(30)).build(connector);
         Ok(Self { base: base.into(), client: Arc::new(client) })
     }
 

@@ -351,6 +351,40 @@ async fn cors_preflights_are_answered_before_authentication() {
 }
 
 #[tokio::test]
+async fn the_nodes_service_token_file_signs_in_only_to_the_clusters_it_names() {
+    use base64::Engine;
+    let conf = tempfile::tempdir().unwrap();
+    let secret = "file-token-secret-1";
+    let line = format!("elastic/fleet-server/t1:{}\n", search_es::xpack::security::hash_password(secret));
+    std::fs::write(conf.path().join("service_tokens"), line).unwrap();
+    let token = base64::engine::general_purpose::STANDARD.encode([&[0u8, 1, 0, 1][..], format!("elastic/fleet-server/t1:{secret}").as_bytes()].concat());
+    // A `_` would split the Bearer token into a cluster name and a secret.
+    assert!(!token.contains('_'));
+    let node_settings = vec![
+        ("path.conf".to_string(), conf.path().to_string_lossy().into_owned()),
+        (search_server::node::FILE_SERVICE_TOKEN_CLUSTERS.to_string(), "c1".to_string()),
+    ];
+    let t = start(NodeConfig { domain: Some("search.test".into()), node_settings, ..NodeConfig::default() }, ListenOptions::default()).await;
+    let addr = t.addr;
+    let authenticate = |cluster: &str| {
+        let raw = format!("GET /_security/_authenticate HTTP/1.1\r\nHost: {cluster}.search.test\r\nAuthorization: Bearer {token}\r\n\r\n");
+        async move {
+            let mut s = TcpStream::connect(addr).await.unwrap();
+            s.write_all(raw.as_bytes()).await.unwrap();
+            read_response(&mut s, &mut Vec::new(), false).await
+        }
+    };
+    let r = authenticate("c1").await;
+    assert_eq!(r.status, 200, "{}", r.text());
+    assert!(r.text().contains("\"elastic/fleet-server\""), "{}", r.text());
+    // The same node's other tenant doesn't take it, and doesn't see the setting.
+    assert_eq!(authenticate("c2").await.status, 401);
+    let r = send(t.addr, "GET", "/_cluster/settings?include_defaults&flat_settings", &[("Authorization", &basic("c2", "pw2"))], b"").await;
+    assert_eq!(r.status, 200);
+    assert!(!r.text().contains("service_token_file"), "{}", r.text());
+}
+
+#[tokio::test]
 async fn idle_clusters_unload_and_wake() {
     let t = start(NodeConfig { idle_unload: Some(Duration::from_millis(60)), ..NodeConfig::default() }, ListenOptions::default()).await;
     let auth = basic("c1", "pw1");

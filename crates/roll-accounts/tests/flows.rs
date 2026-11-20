@@ -276,6 +276,19 @@ async fn an_invite_becomes_a_session_by_email_code() {
 
     let a = env.call(&mut b, Method::POST, "/v1/accounts/invites/peek", Some(json!({ "token": token }))).await;
     assert_eq!(a.json["email"], "ada@example.com");
+    // Resent (a lost mail): a fresh link, and the old one stops, a sign-in begun with it too.
+    let sent = count_codes(&env.outbox, "ada@example.com");
+    let begun = env.call(&mut Browser::default(), Method::POST, "/v1/accounts/email/start", Some(json!({ "email": "ada@example.com", "invite": token }))).await.json["challenge"].as_str().unwrap().to_string();
+    let early = env.code_for("ada@example.com", sent).await;
+    let list = env.operator(Method::GET, "/v1/accounts/invites", json!({})).await.json;
+    let id = list.as_array().unwrap().iter().find(|i| i["email"] == "ada@example.com").unwrap()["id"].as_str().unwrap().to_string();
+    let again = env.operator(Method::POST, &format!("/v1/accounts/invites/{id}/resend"), json!({})).await;
+    assert_eq!(again.status, StatusCode::OK, "{}", again.json);
+    let old = token;
+    let token = again.json["token"].as_str().unwrap().to_string();
+    assert_eq!(env.call(&mut b, Method::POST, "/v1/accounts/invites/peek", Some(json!({ "token": old }))).await.status, StatusCode::NOT_FOUND);
+    let late = env.call(&mut Browser::default(), Method::POST, "/v1/accounts/email/verify", Some(json!({ "challenge": begun, "code": early }))).await;
+    assert_eq!(late.json["code"], "bad_code", "a sign-in begun with the old link: {}", late.json);
     let a = env.email_sign_in(&mut b, "ada@example.com", Some(&token)).await;
     assert_eq!((a.status, a.json["status"].as_str()), (StatusCode::OK, Some("signed_in")), "{}", a.json);
     assert_eq!((a.json["user"]["handle"].as_str(), a.json["user"]["admin"].as_bool()), (Some("ada"), Some(false)));
@@ -388,6 +401,14 @@ async fn revocation_is_immediate() {
     assert_eq!(env.call(&mut phone, Method::GET, "/v1/accounts/me", None).await.status, StatusCode::UNAUTHORIZED);
     assert_eq!(env.call(&mut phone, Method::GET, "/v1/accounts/session", None).await.json["status"], "anonymous");
     assert!(!env.accounts.session_live(&user, &phone_session).unwrap());
+
+    // "Sign out of all other sessions": every one but this browser's.
+    let mut tablet = Browser::default();
+    env.email_sign_in(&mut tablet, "ada@example.com", None).await;
+    let a = env.call(&mut laptop, Method::DELETE, "/v1/accounts/me/sessions", None).await;
+    assert_eq!((a.status, a.json["ended"].as_u64()), (StatusCode::OK, Some(1)), "{}", a.json);
+    assert_eq!(env.call(&mut tablet, Method::GET, "/v1/accounts/me", None).await.status, StatusCode::UNAUTHORIZED);
+    assert_eq!(env.call(&mut laptop, Method::GET, "/v1/accounts/me", None).await.status, StatusCode::OK);
 
     // Disabling the user ends the rest, on the next request.
     assert!(env.accounts.session_live(&user, &laptop_session).unwrap());
@@ -958,6 +979,10 @@ async fn passkeys_sign_people_in_on_their_own_or_as_a_second_factor() {
     let a = env.call(&mut c, Method::POST, "/v1/accounts/signin/passkey", Some(json!({ "id": o["id"], "credential": phone.get(&o, WEB) }))).await;
     assert_eq!((a.status, a.json["status"].as_str(), a.json["user"]["email"].as_str()), (StatusCode::OK, Some("signed_in"), Some("ada@example.com")), "{}", a.json);
     assert_eq!(env.call(&mut c, Method::GET, "/v1/accounts/me", None).await.status, StatusCode::OK);
+    // Her sessions say how each signed in: this one with the passkey, the first by email code.
+    let sessions = env.call(&mut c, Method::GET, "/v1/accounts/me/sessions", None).await.json;
+    let how: Vec<(Value, Value, Value)> = sessions.as_array().unwrap().iter().map(|s| (s["current"].clone(), s["method"].clone(), s["passkey"].clone())).collect();
+    assert_eq!(how, [(json!(true), json!("passkey"), json!(true)), (json!(false), json!("email"), json!(false))], "{sessions}");
     // Refused: another site's origin, an authenticator that didn't verify the person, a copied key.
     let refused = |browser: &mut Browser, credential: Value, id: Value| {
         let env = &env;
@@ -1455,6 +1480,15 @@ async fn a_company_can_require_a_second_factor() {
     let people = env.operator(Method::GET, "/v1/accounts/users", json!({})).await.json;
     let factors = |email: &str| people.as_array().unwrap().iter().find(|u| u["email"] == email).map(|u| (u["totp"].as_bool().unwrap(), u["passkeys"].as_u64().unwrap())).unwrap();
     assert_eq!((factors("ada@example.com"), factors("bob@example.com")), ((true, 0), (false, 0)), "{people}");
+    // And when each last used roll (signing in counts).
+    assert!(people.as_array().unwrap().iter().all(|u| u["last_active_at"].as_i64().is_some_and(|t| t > 0)), "{people}");
+    // A token's use counts too (rolld's gate notes it): Bob, idle for months, is active again.
+    let bob_id = people.as_array().unwrap().iter().find(|u| u["email"] == "bob@example.com").unwrap()["id"].as_str().unwrap().to_string();
+    let db = code_sql::Db::open_or_test(&code_sql::Target::Sqlite(env._dir.path().join("accounts.db")), "accounts").unwrap();
+    db.write(|c| c.execute("UPDATE users SET last_active_at = 1 WHERE id = ?", [bob_id.as_str()])).unwrap();
+    env.accounts.note_active(&bob_id).unwrap();
+    let again = env.operator(Method::GET, "/v1/accounts/users", json!({})).await.json;
+    assert!(again.as_array().unwrap().iter().any(|u| u["id"] == bob_id.as_str() && u["last_active_at"].as_i64().is_some_and(|t| t > 1)), "{again}");
     assert_eq!(env.call(&mut bob, Method::GET, "/v1/workspace/projects", None).await.status, StatusCode::FORBIDDEN);
     env.operator(Method::PUT, "/v1/accounts/policy", json!({ "require_second_factor": false })).await;
     assert_eq!(env.call(&mut bob, Method::GET, "/v1/workspace/projects", None).await.status, StatusCode::OK);
@@ -1492,7 +1526,8 @@ async fn sessions_are_used_only_from_allowed_networks() {
     assert_eq!(env.call(&mut cafe, Method::GET, "/v1/accounts/me", None).await.status, StatusCode::OK);
 }
 
-/// An idle timeout (docs/accounts.md): a session unused longer than the company's minutes ends;
+/// An idle timeout and a longest session (docs/accounts.md): a session unused longer than the
+/// company's minutes ends, and so does one older than its hours, however much it's used;
 /// out-of-range values are refused.
 #[tokio::test]
 async fn a_company_sets_an_idle_timeout() {
@@ -1508,6 +1543,21 @@ async fn a_company_sets_an_idle_timeout() {
     let db = code_sql::Db::open_or_test(&code_sql::Target::Sqlite(env._dir.path().join("accounts.db")), "accounts").unwrap();
     db.write(|c| c.execute("UPDATE sessions SET seen_at = seen_at - 31 * 60000", ())).unwrap();
     assert_eq!(env.call(&mut b, Method::GET, "/v1/accounts/me", None).await.status, StatusCode::UNAUTHORIZED);
+
+    // The longest session (Okta's maximum session lifetime): 8 hours after its sign-in, however
+    // much it's used.
+    assert_eq!(env.operator(Method::PUT, "/v1/accounts/policy", json!({ "max_session_hours": 721 })).await.json["code"], "policy");
+    assert_eq!(env.operator(Method::PUT, "/v1/accounts/policy", json!({ "idle_minutes": 30, "max_session_hours": 8 })).await.json["max_session_hours"], 8);
+    let mut c = Browser::default();
+    env.email_sign_in(&mut c, "ada@example.com", None).await;
+    db.write(|c| c.execute("UPDATE sessions SET created_at = created_at - 7 * 3600000", ())).unwrap();
+    assert_eq!(env.call(&mut c, Method::GET, "/v1/accounts/me", None).await.status, StatusCode::OK, "7 hours in, in use");
+    // The session list says when it ends: 8 hours after its sign-in, not roll's 30 days.
+    let listed = env.call(&mut c, Method::GET, "/v1/accounts/me/sessions", None).await.json;
+    let s = &listed.as_array().unwrap()[0];
+    assert_eq!(s["expires_at"].as_i64().unwrap() - s["created_at"].as_i64().unwrap(), 8 * 3600000, "{listed}");
+    db.write(|c| c.execute("UPDATE sessions SET created_at = created_at - 3600000", ())).unwrap();
+    assert_eq!(env.call(&mut c, Method::GET, "/v1/accounts/me", None).await.status, StatusCode::UNAUTHORIZED, "8 hours in");
 }
 
 /// Phishing-resistant sign-in (docs/accounts.md): on for admins, an admin's session that hasn't
@@ -1664,4 +1714,61 @@ async fn a_person_deletes_their_own_account() {
     assert_eq!(count_codes(&env.outbox, "ada@example.com"), codes);
     let again = env.email_sign_in(&mut Browser::default(), "ada@example.com", Some(&env.invite("ada@example.com").await)).await.json;
     assert_ne!(again["user"]["id"].as_str(), Some(id.as_str()), "{again}");
+}
+
+/// An admin reads a person's security log and sessions from People (Okta's per-user System Log),
+/// and ends one session (a lost laptop) while the others stay; nobody else can.
+#[tokio::test]
+async fn an_admin_reads_a_persons_log_and_ends_one_session() {
+    let env = Env::new().await;
+    env.accounts.set_audit(Arc::new(Events::default()));
+    let root_invite = env.operator(Method::POST, "/v1/accounts/invites", json!({ "email": "root@example.com", "admin": true })).await.json["token"].as_str().unwrap().to_string();
+    let mut root = Browser::default();
+    env.email_sign_in(&mut root, "root@example.com", Some(&root_invite)).await;
+    let mut laptop = Browser::default();
+    let ada = env.email_sign_in(&mut laptop, "ada@example.com", Some(&env.invite("ada@example.com").await)).await.json["user"]["id"].as_str().unwrap().to_string();
+    let mut phone = Browser::default();
+    env.email_sign_in(&mut phone, "ada@example.com", None).await;
+    let mut bob = Browser::default();
+    env.email_sign_in(&mut bob, "bob@example.com", Some(&env.invite("bob@example.com").await)).await;
+
+    assert_eq!(env.call(&mut bob, Method::GET, &format!("/v1/accounts/users/{ada}/activity"), None).await.status, StatusCode::FORBIDDEN, "not an admin");
+    let log = env.call(&mut root, Method::GET, &format!("/v1/accounts/users/{ada}/activity"), None).await.json;
+    assert_eq!(log["events"].as_array().unwrap().iter().filter(|e| e["action"] == "sign_in" && e["ok"] == true).count(), 2, "{log}");
+    let sessions = env.call(&mut root, Method::GET, &format!("/v1/accounts/users/{ada}/sessions"), None).await.json;
+    let list = sessions.as_array().unwrap();
+    assert!(list.len() == 2 && list.iter().all(|s| s["current"] == false), "{sessions}");
+    // Her laptop's session (the older one) ends; her phone's stays.
+    let oldest = list.iter().min_by_key(|s| s["created_at"].as_i64()).unwrap()["id"].as_str().unwrap().to_string();
+    assert_eq!(env.call(&mut root, Method::DELETE, &format!("/v1/accounts/users/{ada}/sessions/{oldest}"), None).await.status, StatusCode::NO_CONTENT);
+    assert_eq!(env.call(&mut laptop, Method::GET, "/v1/accounts/me", None).await.status, StatusCode::UNAUTHORIZED);
+    assert_eq!(env.call(&mut phone, Method::GET, "/v1/accounts/me", None).await.status, StatusCode::OK);
+    assert_eq!(env.call(&mut root, Method::GET, "/v1/accounts/users/usr_nobody/sessions", None).await.status, StatusCode::NOT_FOUND);
+}
+
+/// Admin alerts (docs/accounts.md): making someone an admin or changing how people sign in mails
+/// every other admin, naming who did it; the admin who did it isn't mailed.
+#[tokio::test]
+async fn other_admins_are_told_of_security_changes() {
+    let env = Env::new().await;
+    let admin_invite = |email: &'static str| {
+        let env = &env;
+        async move { env.operator(Method::POST, "/v1/accounts/invites", json!({ "email": email, "admin": true })).await.json["token"].as_str().unwrap().to_string() }
+    };
+    let mut root = Browser::default();
+    env.email_sign_in(&mut root, "root@example.com", Some(&admin_invite("root@example.com").await)).await;
+    env.email_sign_in(&mut Browser::default(), "ruth@example.com", Some(&admin_invite("ruth@example.com").await)).await;
+    let ada = env.email_sign_in(&mut Browser::default(), "ada@example.com", Some(&env.invite("ada@example.com").await)).await.json["user"]["id"].as_str().unwrap().to_string();
+
+    assert_eq!(env.call(&mut root, Method::PATCH, &format!("/v1/accounts/users/{ada}"), Some(json!({ "admin": true }))).await.status, StatusCode::OK);
+    let told = mails_about(&env.outbox, "ruth@example.com", "was made an admin", 1).await;
+    assert!(told[0].0.starts_with("roll security: ") && told[0].1.contains("by root (root@example.com)"), "{told:?}");
+    assert_eq!(env.operator(Method::PUT, "/v1/accounts/policy", json!({ "require_second_factor": true })).await.status, StatusCode::OK);
+    let policy = mails_about(&env.outbox, "root@example.com", "sign-in policy changed", 1).await;
+    assert!(policy[0].1.contains("a second factor for everyone on") && policy[0].1.contains("by the operator's token"), "{policy:?}");
+    // Whoever made a change isn't told of it.
+    let mine = |to: &str| {
+        std::fs::read_dir(&env.outbox).unwrap().filter_map(|e| e.ok()).map(|e| serde_json::from_slice::<Value>(&std::fs::read(e.path()).unwrap()).unwrap()).filter(|m| m["to"] == to && m["subject"].as_str().unwrap().contains("was made an admin")).count()
+    };
+    assert_eq!(mine("root@example.com"), 0);
 }

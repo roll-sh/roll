@@ -52,7 +52,7 @@ pub fn router(accounts: Arc<Accounts>) -> Router {
         .route("/v1/accounts/me", get(me).patch(update_me).delete(delete_me))
         .route("/v1/accounts/me/email", post(change_email))
         .route("/v1/accounts/me/email/confirm", post(confirm_email))
-        .route("/v1/accounts/me/sessions", get(my_sessions))
+        .route("/v1/accounts/me/sessions", get(my_sessions).delete(end_other_sessions))
         .route("/v1/accounts/me/activity", get(my_activity))
         .route("/v1/accounts/me/sessions/{id}", delete(revoke_my_session))
         .route("/v1/accounts/me/identities/{provider}", delete(unlink))
@@ -69,9 +69,12 @@ pub fn router(accounts: Arc<Accounts>) -> Router {
         .route("/v1/accounts/invites", get(list_invites).post(create_invite))
         .route("/v1/accounts/invites/peek", post(peek_invite))
         .route("/v1/accounts/invites/{id}", delete(revoke_invite))
+        .route("/v1/accounts/invites/{id}/resend", post(resend_invite))
         .route("/v1/accounts/users", get(list_users))
         .route("/v1/accounts/users/{id}", axum::routing::patch(update_user))
-        .route("/v1/accounts/users/{id}/sessions", delete(revoke_user_sessions))
+        .route("/v1/accounts/users/{id}/sessions", get(user_sessions).delete(revoke_user_sessions))
+        .route("/v1/accounts/users/{id}/sessions/{session}", delete(revoke_user_session))
+        .route("/v1/accounts/users/{id}/activity", get(user_activity))
         .route("/v1/accounts/sso", get(list_sso).post(add_sso))
         .route("/v1/accounts/sso/start", post(sso_start))
         .route("/v1/accounts/sso/{id}", axum::routing::patch(update_sso).delete(remove_sso))
@@ -136,6 +139,19 @@ impl IntoResponse for Error {
 async fn blocking<T: Send + 'static>(a: &Arc<Accounts>, f: impl FnOnce(&Accounts) -> Result<T> + Send + 'static) -> Result<T> {
     let a = a.clone();
     tokio::task::spawn_blocking(move || f(&a)).await.map_err(|e| Error::Internal(e.to_string()))?
+}
+
+/// Tell the other admins what `by` just changed (alerts.rs). A failed lookup is logged: the change
+/// itself stands.
+async fn alert(a: &Arc<Accounts>, by: String, what: String) {
+    match blocking(a, move |a| a.alert_mails(&by, &what)).await {
+        Ok(mails) => mails.into_iter().for_each(|m| a.send_later(m, "admin alert")),
+        Err(e) => tracing::warn!(error = %e, "accounts: an admin alert failed"),
+    }
+}
+
+fn on_off(b: bool) -> &'static str {
+    if b { "on" } else { "off" }
 }
 
 /// The body as JSON, a 400 in the API's shape if it isn't.
@@ -311,7 +327,7 @@ async fn email_verify(State(a): S, ip: Ip, headers: HeaderMap, b: Bytes) -> Resu
             a.record_new(&user, "invite", "email", &who);
         }
         // Past the code, the person is known: a refusal now (disabled, SSO required) is theirs.
-        let issued = a.issue(&user, &ua).inspect_err(|e| a.record_sign_in(Some(&user), "email", Some(e), false, &who))?;
+        let issued = a.issue(&user, &ua, "email").inspect_err(|e| a.record_sign_in(Some(&user), "email", Some(e), false, &who))?;
         a.record_sign_in(Some(&user), "email", None, issued.second_factor, &who);
         signed_in_response(a, &user, issued)
     })
@@ -408,7 +424,8 @@ async fn finish_redirect(a: &Arc<Accounts>, headers: &HeaderMap, done: Result<Fi
             let (u2, m2, w2) = (user.clone(), method.to_string(), who.clone());
             // An SSO sign-in's method is `sso:<connection>`: its session length applies.
             let connection = method.strip_prefix("sso:").unwrap_or_default().to_string();
-            match blocking(a, move |a| if sso { a.issue_sso(&user, &ua, &connection, sid.as_deref()) } else { a.issue(&user, &ua) }).await {
+            let how = m2.clone();
+            match blocking(a, move |a| if sso { a.issue_sso(&user, &ua, &connection, sid.as_deref()) } else { a.issue(&user, &ua, &how) }).await {
                 Err(e) => {
                     a.record_sign_in(Some(&u2), &m2, Some(&e), false, &w2);
                     fail("/signin", e.redirect_code())
@@ -475,28 +492,61 @@ async fn list_sso(State(a): S, me: Me, op: Op) -> Result<Response> {
 }
 
 async fn add_sso(State(a): S, me: Me, op: Op, b: Bytes) -> Result<Response> {
-    admin_sudo(&a, &me, &op).await?;
+    let by = admin_sudo(&a, &me, &op).await?;
     let n: crate::sso::NewConnection = body(&b)?;
-    Ok((StatusCode::CREATED, Json(a.add_sso(n).await?)).into_response())
+    let c = a.add_sso(n).await?;
+    alert(&a, by, format!("the SSO connection {} was added, for {}", c.name, c.domains.join(", "))).await;
+    Ok((StatusCode::CREATED, Json(c)).into_response())
 }
 
 async fn update_sso(State(a): S, me: Me, op: Op, Path(id): Path<String>, b: Bytes) -> Result<Response> {
-    admin_sudo(&a, &me, &op).await?;
+    let by = admin_sudo(&a, &me, &op).await?;
     let ch: crate::sso::ConnectionChange = body(&b)?;
-    Ok(Json(blocking(&a, move |a| a.update_sso(&id, ch)).await?).into_response())
+    // What changed, in words (never the secret itself).
+    let mut what: Vec<String> = Vec::new();
+    if let Some(e) = ch.enforce {
+        what.push(format!("its sign-in enforced {}", on_off(e)));
+    }
+    if let Some(p) = ch.provision {
+        what.push(format!("new people made at sign-in {}", on_off(p)));
+    }
+    if let Some(d) = &ch.domains {
+        what.push(format!("its domains now {}", d.join(", ")));
+    }
+    if ch.client_id.is_some() || ch.client_secret.is_some() {
+        what.push("its client credentials replaced".into());
+    }
+    if let Some(h) = ch.session_hours {
+        what.push(if h == 0 { "its sessions' cap removed".into() } else { format!("its sessions last at most {h} hours") });
+    }
+    if let Some(n) = &ch.name {
+        what.push(format!("renamed {n}"));
+    }
+    let c = blocking(&a, move |a| a.update_sso(&id, ch)).await?;
+    if !what.is_empty() {
+        alert(&a, by, format!("the SSO connection {} changed: {}", c.name, what.join("; "))).await;
+    }
+    Ok(Json(c).into_response())
 }
 
 /// A SCIM token for the connection (replacing its old one): `{token, base_url}`, this once.
 async fn scim_token(State(a): S, me: Me, op: Op, Path(id): Path<String>) -> Result<Response> {
-    admin_sudo(&a, &me, &op).await?;
-    let token = blocking(&a, move |a| a.scim_token(&id)).await?;
+    let by = admin_sudo(&a, &me, &op).await?;
+    let token = blocking(&a, {
+        let id = id.clone();
+        move |a| a.scim_token(&id)
+    })
+    .await?;
+    let name = blocking(&a, move |a| Ok(a.sso_name(&id))).await?;
+    alert(&a, by, format!("a new SCIM token was made for {name} (its provider can now create and turn off people; the old token stopped)")).await;
     let base = format!("{}/v1/accounts/scim/v2", a.config.api_url);
     Ok(with_cookies((StatusCode::CREATED, Json(json!({ "token": token, "base_url": base }))).into_response(), None))
 }
 
 async fn remove_scim_token(State(a): S, me: Me, op: Op, Path(id): Path<String>) -> Result<Response> {
-    admin_sudo(&a, &me, &op).await?;
-    blocking(&a, move |a| a.remove_scim_token(&id)).await?;
+    let by = admin_sudo(&a, &me, &op).await?;
+    let name = blocking(&a, move |a| a.remove_scim_token(&id).map(|()| a.sso_name(&id))).await?;
+    alert(&a, by, format!("the SCIM token for {name} was removed")).await;
     Ok(StatusCode::NO_CONTENT.into_response())
 }
 
@@ -525,8 +575,13 @@ async fn verify_sso(State(a): S, me: Me, op: Op, Path(id): Path<String>) -> Resu
 }
 
 async fn remove_sso(State(a): S, me: Me, op: Op, Path(id): Path<String>) -> Result<Response> {
-    admin_sudo(&a, &me, &op).await?;
-    blocking(&a, move |a| a.remove_sso(&id)).await?;
+    let by = admin_sudo(&a, &me, &op).await?;
+    let name = blocking(&a, move |a| {
+        let name = a.sso_name(&id);
+        a.remove_sso(&id).map(|()| name)
+    })
+    .await?;
+    alert(&a, by, format!("the SSO connection {name} was removed (its people sign in other ways now)")).await;
     Ok(StatusCode::NO_CONTENT.into_response())
 }
 
@@ -659,9 +714,12 @@ async fn passkey_policy(State(a): S, me: Me, op: Op) -> Result<Response> {
 }
 
 async fn set_passkey_policy(State(a): S, me: Me, op: Op, b: Bytes) -> Result<Response> {
-    admin_sudo(&a, &me, &op).await?;
+    let by = admin_sudo(&a, &me, &op).await?;
     let p: crate::attestation::Policy = body(&b)?;
-    Ok(Json(blocking(&a, move |a| a.set_passkey_policy(p)).await?).into_response())
+    let p = blocking(&a, move |a| a.set_passkey_policy(p)).await?;
+    let models: Vec<&str> = p.models.iter().map(|m| m.name.as_str()).collect();
+    alert(&a, by, format!("hardware keys only is {} ({})", on_off(p.require), if models.is_empty() { "no models listed".into() } else { models.join(", ") })).await;
+    Ok(Json(p).into_response())
 }
 
 /// Account policy (docs/accounts.md): a second factor for everyone.
@@ -671,10 +729,19 @@ async fn account_policy(State(a): S, me: Me, op: Op) -> Result<Response> {
 }
 
 async fn set_account_policy(State(a): S, me: Me, op: Op, b: Bytes) -> Result<Response> {
-    admin_sudo(&a, &me, &op).await?;
+    let actor = admin_sudo(&a, &me, &op).await?;
     let p: crate::policy::AccountPolicy = body(&b)?;
     let by = me.map(|Extension(u)| (u.user, u.session));
-    Ok(Json(blocking(&a, move |a| a.set_account_policy_by(p, by.as_ref().map(|(u, s)| (u.as_str(), s.as_str())))).await?).into_response())
+    let p = blocking(&a, move |a| a.set_account_policy_by(p, by.as_ref().map(|(u, s)| (u.as_str(), s.as_str())))).await?;
+    let idle = p.idle_minutes.map_or_else(|| "a week".to_string(), |m| format!("{m} minutes"));
+    let passkeys = match p.phishing_resistant {
+        Some(crate::policy::Whom::Admins) => "admins",
+        Some(crate::policy::Whom::Everyone) => "everyone",
+        None => "nobody",
+    };
+    let longest = p.max_session_hours.map_or_else(|| "30 days".to_string(), |h| format!("{h} hours"));
+    alert(&a, actor, format!("the sign-in policy changed: a second factor for everyone {}, sessions end after {idle} unused and {longest} after sign-in, passkeys required for {passkeys}", on_off(p.require_second_factor))).await;
+    Ok(Json(p).into_response())
 }
 
 /// Allowed networks (docs/accounts.md): where people's sessions may be used from.
@@ -684,11 +751,13 @@ async fn network_policy(State(a): S, me: Me, op: Op) -> Result<Response> {
 }
 
 async fn set_network_policy(State(a): S, me: Me, op: Op, ip: Ip, b: Bytes) -> Result<Response> {
-    admin_sudo(&a, &me, &op).await?;
+    let by = admin_sudo(&a, &me, &op).await?;
     let p: crate::networks::NetworkPolicy = body(&b)?;
     // An admin's own address must stay on it; the operator's token has no session to lock out.
     let from = me.as_ref().and(ip.map(|Extension(roll_auth::ClientIp(i))| i));
-    Ok(Json(blocking(&a, move |a| a.set_network_policy(p, from)).await?).into_response())
+    let p = blocking(&a, move |a| a.set_network_policy(p, from)).await?;
+    alert(&a, by, format!("allowed networks are {} ({})", on_off(p.on), p.networks.join(", "))).await;
+    Ok(Json(p).into_response())
 }
 
 async fn list_resets(State(a): S, me: Me, op: Op) -> Result<Response> {
@@ -938,6 +1007,14 @@ async fn my_sessions(State(a): S, me: Me) -> Result<Response> {
     Ok(Json(blocking(&a, move |a| a.sessions_of(&u.user, &u.session)).await?).into_response())
 }
 
+/// End every session of yours but this one (Google's "sign out of all other sessions"): what to
+/// do first when Recent activity shows a sign-in you don't recognise.
+async fn end_other_sessions(State(a): S, me: Me) -> Result<Json<Value>> {
+    let u = signed_in(me)?;
+    let ended = blocking(&a, move |a| a.end_other_sessions(&u.user, &u.session)).await?;
+    Ok(Json(json!({ "ended": ended })))
+}
+
 async fn revoke_my_session(State(a): S, me: Me, Path(id): Path<String>) -> Result<StatusCode> {
     let u = signed_in(me)?;
     blocking(&a, move |a| a.revoke_session(&u.user, &id)).await?;
@@ -1001,7 +1078,16 @@ async fn create_invite(State(a): S, me: Me, op: Op, b: Bytes) -> Result<Response
     if let (true, Some(Extension(u))) = (admin, &me) {
         sudo(&a, u).await?;
     }
+    let actor = by.clone();
     let (invite, token, url) = blocking(&a, move |a| a.invite(&by, &email, admin, handle.as_deref())).await?;
+    if admin {
+        alert(&a, actor, format!("an invite that makes an admin was made for {}", invite.email)).await;
+    }
+    invite_sent(&a, invite, token, url, StatusCode::CREATED)
+}
+
+/// An invite's link, mailed to it and answered once (with its token): a new invite or a resent one.
+fn invite_sent(a: &Arc<Accounts>, invite: crate::Invite, token: String, url: String, status: StatusCode) -> Result<Response> {
     if a.mail_on() {
         let text = format!("You're invited to roll.\n\nSign in here within 7 days: {url}\n\nThe link works once, for {}.\n", invite.email);
         a.send_later(crate::Mail { to: invite.email.clone(), subject: "You're invited to roll".into(), text }, "invite");
@@ -1009,7 +1095,24 @@ async fn create_invite(State(a): S, me: Me, op: Op, b: Bytes) -> Result<Response
     let mut v = serde_json::to_value(&invite).map_err(|e| Error::Internal(e.to_string()))?;
     v["token"] = token.into();
     v["url"] = url.into();
-    Ok(with_cookies((StatusCode::CREATED, Json(v)).into_response(), None))
+    Ok(with_cookies((status, Json(v)).into_response(), None))
+}
+
+/// Send an unused invite again (Okta's and GitHub's "resend"): a fresh link for another 7 days,
+/// mailed again; the old link stops at once. An invite that makes an admin needs sudo mode, as
+/// making it did.
+async fn resend_invite(State(a): S, me: Me, op: Op, Path(id): Path<String>) -> Result<Response> {
+    admin(&a, &me, &op)?;
+    let makes_admin = blocking(&a, {
+        let id = id.clone();
+        move |a| Ok(a.invites()?.into_iter().find(|i| i.id == id).is_some_and(|i| i.admin))
+    })
+    .await?;
+    if let (true, Some(Extension(u))) = (makes_admin, &me) {
+        sudo(&a, u).await?;
+    }
+    let (invite, token, url) = blocking(&a, move |a| a.resend_invite(&id)).await?;
+    invite_sent(&a, invite, token, url, StatusCode::OK)
 }
 
 async fn list_invites(State(a): S, me: Me, op: Op) -> Result<Response> {
@@ -1035,9 +1138,65 @@ struct UserPatch {
 }
 
 async fn update_user(State(a): S, me: Me, op: Op, Path(id): Path<String>, b: Bytes) -> Result<Response> {
-    admin_sudo(&a, &me, &op).await?;
+    let by = admin_sudo(&a, &me, &op).await?;
     let UserPatch { admin, disabled } = body(&b)?;
-    Ok(Json(blocking(&a, move |a| a.update_user(&id, admin, disabled)).await?).into_response())
+    let was_admin = blocking(&a, {
+        let id = id.clone();
+        move |a| Ok(a.user(&id)?.admin)
+    })
+    .await?;
+    let target = blocking(&a, {
+        let id = id.clone();
+        move |a| a.user(&id)
+    })
+    .await?;
+    // The change is committed before a failure to cut off its roll code owner shows: the alert
+    // says what was done either way.
+    let done = blocking(&a, move |a| a.update_user(&id, admin, disabled)).await;
+    let who = format!("{} ({})", target.handle, target.email);
+    let mut what: Vec<String> = Vec::new();
+    match admin {
+        Some(true) if !was_admin => what.push(format!("{who} was made an admin")),
+        Some(false) if was_admin => what.push(format!("{who} is no longer an admin")),
+        _ => {}
+    }
+    if disabled == Some(true) && was_admin {
+        what.push(format!("the admin {who}'s account was turned off"));
+    }
+    if !what.is_empty() {
+        alert(&a, by, what.join("; ")).await;
+    }
+    Ok(Json(done?).into_response())
+}
+
+/// A person's security log, as an admin reads it from People (Okta's per-user System Log): the
+/// same events the person sees of themselves.
+async fn user_activity(State(a): S, me: Me, op: Op, Path(id): Path<String>, Query(q): Query<ActivityQuery>) -> Result<Response> {
+    admin(&a, &me, &op)?;
+    let events = blocking(&a, move |a| {
+        a.user(&id)?;
+        Ok(a.activity(&id, q.before, q.limit.unwrap_or(50)))
+    })
+    .await?;
+    Ok(Json(json!({ "events": events })).into_response())
+}
+
+/// A person's signed-in sessions, for an admin (none is "current": it's not the admin's own).
+async fn user_sessions(State(a): S, me: Me, op: Op, Path(id): Path<String>) -> Result<Response> {
+    admin(&a, &me, &op)?;
+    Ok(Json(blocking(&a, move |a| {
+        a.user(&id)?;
+        a.sessions_of(&id, "")
+    })
+    .await?)
+    .into_response())
+}
+
+/// End one of a person's sessions (a lost laptop), leaving the others.
+async fn revoke_user_session(State(a): S, me: Me, op: Op, Path((id, session)): Path<(String, String)>) -> Result<StatusCode> {
+    admin(&a, &me, &op)?;
+    blocking(&a, move |a| a.revoke_session(&id, &session)).await?;
+    Ok(StatusCode::NO_CONTENT)
 }
 
 async fn revoke_user_sessions(State(a): S, me: Me, op: Op, Path(id): Path<String>) -> Result<StatusCode> {

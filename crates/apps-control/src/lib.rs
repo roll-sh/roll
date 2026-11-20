@@ -54,6 +54,17 @@ pub mod store;
 pub mod traces;
 pub mod visit;
 pub mod vitals;
+pub mod heartbeats;
+pub mod slo;
+pub mod prom;
+pub mod edge;
+pub mod password;
+pub mod freeze;
+pub mod status_page;
+pub mod vulns;
+pub mod checks;
+pub mod forms;
+pub mod track;
 pub mod traffic;
 
 use integrations::{DomainTls, Resolver, Resources, SecretSource, Sources};
@@ -153,6 +164,9 @@ pub struct AppsConfig {
     /// registries whose names resolve to one (local development and tests only:
     /// `ROLL_APPS_ALLOW_PRIVATE`).
     pub allow_private: bool,
+    /// PagerDuty's Events API v2 and Opsgenie's Alert API, per region (`us`, `eu`): fixed, never
+    /// a tenant's URL ([`notify`]'s on-call targets). Tests point them at their own servers.
+    pub oncall_apis: OncallApis,
     /// Between two passes over spend limits (`spend`).
     pub spend_every: Duration,
     /// A failed cron run's first retry waits this long, each next one twice as long (10 min at most).
@@ -185,6 +199,7 @@ impl AppsConfig {
             visitor_recheck: Duration::from_secs(300),
             otlp_base: None,
             allow_private: false,
+            oncall_apis: OncallApis::default(),
             spend_every: Duration::from_secs(30),
             cron_retry_after: Duration::from_secs(30),
             keep_deployments: 10,
@@ -248,6 +263,10 @@ pub struct Apps {
     drain_done: Arc<Mutex<Vec<String>>>,
     /// Projects whose drains changed on this node: the drainer reads theirs again (only theirs).
     pub(crate) drains_dirty: Mutex<std::collections::HashSet<String>>,
+    /// Previews' runtime lines on their way to the drainer ([`Apps::drain_preview_lines`]), and
+    /// its end of the channel until it starts.
+    pub(crate) preview_lines: tokio::sync::mpsc::Sender<drains::PreviewBatch>,
+    pub(crate) preview_lines_rx: Mutex<Option<tokio::sync::mpsc::Receiver<drains::PreviewBatch>>>,
     /// Private environments' token hashes, by environment, as the owner last read or set them.
     access: Mutex<HashMap<String, Option<Access>>>,
     /// Bumped by every change to the access cache: a cold read caches what it read only if
@@ -257,6 +276,16 @@ pub struct Apps {
     visits: Mutex<HashMap<String, visit::Seen>>,
     /// Web Vitals beacons kept this minute, by environment: (minute, count).
     pub(crate) vitals_seen: Mutex<HashMap<String, (i64, u32)>>,
+    /// Custom events taken this minute, per environment ([`track`]).
+    pub(crate) events_seen: Mutex<HashMap<String, (i64, u32)>>,
+    /// Form submissions taken this minute, per environment ([`forms`]).
+    pub(crate) forms_seen: Mutex<HashMap<String, (i64, u32)>>,
+    /// Uptime checks' last results here, on the owner ([`checks`]), by environment and name.
+    pub(crate) check_states: Mutex<HashMap<String, checks::Run>>,
+    /// A pass of daily rescans is running, and when live deployments were last looked at for
+    /// one ([`vulns`]).
+    pub(crate) rescanning: std::sync::atomic::AtomicBool,
+    pub(crate) rescan_looked: std::sync::atomic::AtomicI64,
     /// When each environment's log was last looked at for new errors ([`errors`]).
     pub(crate) errors_seen: Mutex<HashMap<String, i64>>,
     /// Manual rollouts waiting for a person, by deployment: what they say, and the wake.
@@ -302,6 +331,19 @@ pub struct Apps {
     looping: Mutex<std::collections::HashSet<String>>,
     /// For notification targets: public addresses only, no redirects.
     notify_client: reqwest::Client,
+    /// A static site's proxy rewrites to other sites (`_redirects`' `https://… 200`): public
+    /// addresses only, no redirects followed, 30 s.
+    pub(crate) site_proxy_client: reqwest::Client,
+    /// Scrapes of instances' own Prometheus endpoints ([`prom`]): loopback, no redirects, no
+    /// proxy; and which environments' last scrape failed (said once).
+    pub(crate) scrape_client: reqwest::Client,
+    pub(crate) scrape_errors: Mutex<std::collections::HashSet<String>>,
+    /// The key edge functions' `next` addresses are signed with ([`edge`]), once read; and which
+    /// edge functions were said not to run (once each).
+    pub(crate) edge_key: Mutex<Option<Vec<u8>>>,
+    pub(crate) edge_noted: Mutex<std::collections::HashSet<String>>,
+    /// Password tries per environment and client, in the last ten minutes ([`password`]).
+    pub(crate) password_tries: Mutex<HashMap<password::Client, (i64, u32)>>,
     /// Shells open over HTTP (the dashboard's terminal), by id.
     sessions: Mutex<HashMap<String, Arc<shell::Session>>>,
     /// WebSocket shells open per environment (`env_key`), counted with the HTTP sessions.
@@ -312,6 +354,26 @@ pub struct Apps {
     /// HTTP/2 without TLS (prior knowledge), for h2c apps ([`model::Run::h2c`]).
     pub(crate) client_h2: hyper_util::client::legacy::Client<hyper_util::client::legacy::connect::HttpConnector, axum::body::Body>,
     stop: CancellationToken,
+}
+
+/// Where on-call targets are sent ([`AppsConfig::oncall_apis`]).
+#[derive(Clone, Debug)]
+pub struct OncallApis {
+    pub pagerduty_us: String,
+    pub pagerduty_eu: String,
+    pub opsgenie_us: String,
+    pub opsgenie_eu: String,
+}
+
+impl Default for OncallApis {
+    fn default() -> Self {
+        OncallApis {
+            pagerduty_us: "https://events.pagerduty.com/v2/enqueue".into(),
+            pagerduty_eu: "https://events.eu.pagerduty.com/v2/enqueue".into(),
+            opsgenie_us: "https://api.opsgenie.com/v2/alerts".into(),
+            opsgenie_eu: "https://api.eu.opsgenie.com/v2/alerts".into(),
+        }
+    }
 }
 
 pub(crate) fn env_key(service: &str, env: &str) -> String {
@@ -455,6 +517,7 @@ impl Apps {
     pub fn new(cfg: AppsConfig, store: Store, deps: Deps) -> Arc<Apps> {
         let cfg_allow = cfg.allow_private;
         let logs = LogHub::new(deps.objects.clone());
+        let (preview_lines, preview_lines_rx) = tokio::sync::mpsc::channel(drains::PREVIEW_BATCHES);
         Arc::new(Apps {
             cfg,
             store,
@@ -478,10 +541,17 @@ impl Apps {
             visitors: std::sync::OnceLock::new(),
             drain_done: Arc::new(Mutex::new(Vec::new())),
             drains_dirty: Mutex::new(Default::default()),
+            preview_lines,
+            preview_lines_rx: Mutex::new(Some(preview_lines_rx)),
             access: Mutex::new(HashMap::new()),
             access_gen: std::sync::atomic::AtomicU64::new(0),
             visits: Mutex::new(HashMap::new()),
             vitals_seen: Mutex::new(HashMap::new()),
+            events_seen: Mutex::new(HashMap::new()),
+            forms_seen: Mutex::new(HashMap::new()),
+            check_states: Mutex::new(HashMap::new()),
+            rescanning: Default::default(),
+            rescan_looked: Default::default(),
             errors_seen: Mutex::new(HashMap::new()),
             rollout_waits: Mutex::new(HashMap::new()),
             calling: Mutex::new(std::collections::HashSet::new()),
@@ -505,6 +575,12 @@ impl Apps {
             ws_shells: Mutex::new(HashMap::new()),
             tunnels: Mutex::new(HashMap::new()),
             notify_client: net::client(cfg_allow, Duration::from_secs(10)),
+            site_proxy_client: net::client(cfg_allow, Duration::from_secs(30)),
+            scrape_client: reqwest::Client::builder().redirect(reqwest::redirect::Policy::none()).no_proxy().timeout(Duration::from_secs(10)).build().expect("a client"),
+            scrape_errors: Mutex::new(Default::default()),
+            edge_key: Mutex::new(None),
+            edge_noted: Mutex::new(Default::default()),
+            password_tries: Mutex::new(HashMap::new()),
             looping: Mutex::new(std::collections::HashSet::new()),
             client: hyper_util::client::legacy::Client::builder(hyper_util::rt::TokioExecutor::new()).pool_idle_timeout(Duration::from_secs(30)).build_http(),
             client_h2: hyper_util::client::legacy::Client::builder(hyper_util::rt::TokioExecutor::new()).pool_idle_timeout(Duration::from_secs(30)).http2_only(true).build_http(),
@@ -1445,7 +1521,7 @@ impl Apps {
             _ => None,
         };
         let gate = self.access(&r.service, &r.name).await?;
-        let (private, signed_in) = (gate.is_some(), gate.is_some_and(|a| a.signed_in));
+        let (private, signed_in, password) = (gate.is_some(), gate.as_ref().is_some_and(|a| a.signed_in), gate.as_ref().is_some_and(|a| a.password_hash.is_some()));
         let (sid, e) = (r.service.clone(), r.name.clone());
         let waiting_for_ci = self.db(move |s| s.ci_waits()).await?.into_iter().find(|(w, _)| w.service == sid && w.env == e).map(|(w, _)| w.sha);
         Ok(Environment {
@@ -1458,6 +1534,7 @@ impl Apps {
             tcp: r.tcp_port.filter(|_| svc.run.tcp && svc.run.public && !private).map(|p| format!("{}:{p}", self.cfg.tcp_host)),
             private,
             signed_in,
+            password,
             next_run_at,
             schedules: self.schedule_states(&svc, &r).await,
             volume_used: match svc.run.volume {
@@ -1491,6 +1568,16 @@ impl Apps {
             firewall: r.firewall.clone(),
             headers: r.headers.clone(),
             routes: r.routes.clone(),
+            check_states: self.check_states_of(&r.service, &r.name, &r.checks),
+            checks: r.checks.clone(),
+            heartbeat_states: self.heartbeat_states_of(&r.service, &r.name, &r.heartbeats).await,
+            heartbeats: r.heartbeats.clone(),
+            split: r.split.clone(),
+            mirror: r.mirror.clone(),
+            pause_schedule: r.pause_schedule.clone(),
+            frozen: r.freeze.as_ref().is_some_and(|f| f.on(code_sql::now_ms())),
+            freeze: r.freeze.clone(),
+            heartbeat_urls: Default::default(),
             egress_refused: if r.egress.closed() { self.deps.runtime.egress_refused(&closed_network_name(&svc.project, &r.name), &r.egress.hosts) } else { Vec::new() },
             egress: r.egress.clone(),
             scaling,
@@ -1564,7 +1651,7 @@ impl Apps {
                 settings.push(json!({ "field": format!("run.{k}"), "from": x, "to": y, "put": { "run": { k: x } } }));
             }
         }
-        for k in ["wait_for_ci", "follow_tag", "redeploy_on_secrets", "traces", "vitals", "report", "egress", "allow_ips", "rate_limit", "firewall", "headers", "routes"] {
+        for k in ["wait_for_ci", "follow_tag", "redeploy_on_secrets", "traces", "vitals", "report", "egress", "allow_ips", "rate_limit", "firewall", "headers", "routes", "checks"] {
             let (x, y) = (a.get(k).cloned().unwrap_or(Value::Null), b.get(k).cloned().unwrap_or(Value::Null));
             if x != y {
                 settings.push(json!({ "field": k, "from": x, "to": y, "put": { k: x } }));
@@ -1608,7 +1695,7 @@ impl Apps {
     pub async fn put_environment(self: &Arc<Self>, service: &str, env: &str, body: Value) -> Result<Environment> {
         let o = body.as_object().cloned().unwrap_or_default();
         for k in o.keys() {
-            if !["branch", "ephemeral", "access", "variables_from", "wait_for_ci", "run", "follow_tag", "redeploy_on_secrets", "feedback", "maintenance", "pages", "allow_ips", "rate_limit", "firewall", "headers", "routes", "paused", "held", "hostname", "traces", "egress", "vitals", "report", "preview_host"].contains(&k.as_str()) {
+            if !["branch", "ephemeral", "access", "variables_from", "wait_for_ci", "run", "follow_tag", "redeploy_on_secrets", "feedback", "maintenance", "pages", "allow_ips", "rate_limit", "firewall", "headers", "routes", "checks", "heartbeats", "split", "mirror", "freeze", "pause_schedule", "paused", "held", "hostname", "traces", "egress", "vitals", "report", "preview_host"].contains(&k.as_str()) {
                 return Err(Error::BadRequest(format!("unknown field {k}")));
             }
         }
@@ -1733,6 +1820,86 @@ impl Apps {
             }
             Some(_) => return Err(Error::BadRequest(format!("routes is at most {} routes, or null", crate::model::MAX_ROUTES))),
         };
+        // Uptime checks: unique names, at most MAX_CHECKS.
+        // Paused by the clock: weekly windows, as a freeze's.
+        let pause_schedule = match o.get("pause_schedule") {
+            None => None,
+            Some(Value::Null) => Some(None),
+            Some(v) => {
+                let p: crate::freeze::PauseSchedule = serde_json::from_value(v.clone()).map_err(|e| Error::BadRequest(format!("pause_schedule: {e}")))?;
+                p.check()?;
+                Some(Some(p))
+            }
+        };
+        // Traffic mirroring: another environment of this service, as a split names one.
+        let mirror = match o.get("mirror") {
+            None => None,
+            Some(Value::Null) => Some(None),
+            Some(v) => {
+                let m: crate::model::Split = serde_json::from_value(v.clone()).map_err(|e| Error::BadRequest(format!("mirror: {e}")))?;
+                if !(1..=100).contains(&m.percent) || m.environment == env {
+                    return Err(Error::BadRequest("mirror is {environment: another environment, percent: 1–100}".into()));
+                }
+                let (sid, other) = (service.to_string(), m.environment.clone());
+                if self.db(move |s| s.environment(&sid, &other)).await.is_err() {
+                    return Err(Error::BadRequest(format!("mirror: this service has no environment {}", m.environment)));
+                }
+                Some(Some(m))
+            }
+        };
+        // A deploy freeze: on until lifted, until a time, or in weekly windows.
+        let freeze = match o.get("freeze") {
+            None => None,
+            Some(Value::Null) => Some(None),
+            Some(v) => {
+                let f: crate::freeze::Freeze = serde_json::from_value(v.clone()).map_err(|e| Error::BadRequest(format!("freeze: {e}")))?;
+                f.check()?;
+                Some(Some(f))
+            }
+        };
+        // A split test: another deployed-or-not environment of this service, never itself.
+        let split = match o.get("split") {
+            None => None,
+            Some(Value::Null) => Some(None),
+            Some(v) => {
+                let sp: crate::model::Split = serde_json::from_value(v.clone()).map_err(|e| Error::BadRequest(format!("split: {e}")))?;
+                if !(1..=99).contains(&sp.percent) {
+                    return Err(Error::BadRequest("split.percent is 1–99".into()));
+                }
+                if sp.environment == env {
+                    return Err(Error::BadRequest("split.environment is another environment".into()));
+                }
+                let (sid, other) = (service.to_string(), sp.environment.clone());
+                if self.db(move |s| s.environment(&sid, &other)).await.is_err() {
+                    return Err(Error::BadRequest(format!("split: this service has no environment {}", sp.environment)));
+                }
+                Some(Some(sp))
+            }
+        };
+        // Heartbeats: kept ones keep their tokens; a new one's token is in this answer, once.
+        let heartbeats = match o.get("heartbeats") {
+            None => None,
+            Some(v) => {
+                let (sid, e) = (service.to_string(), env.to_string());
+                let current = self.db(move |s| s.environment(&sid, &e)).await.map(|r| r.heartbeats).unwrap_or_default();
+                Some(self.heartbeats_of(v, &current)?)
+            }
+        };
+        let checks = match o.get("checks") {
+            None => None,
+            Some(Value::Null) => Some(Vec::new()),
+            Some(Value::Array(a)) if a.len() <= crate::model::MAX_CHECKS => {
+                let cs = a
+                    .iter()
+                    .map(|c| serde_json::from_value::<crate::model::Check>(c.clone()).map_err(|e| Error::BadRequest(format!("checks: {e}"))).and_then(crate::model::Check::check))
+                    .collect::<Result<Vec<_>>>()?;
+                if cs.iter().enumerate().any(|(i, c)| cs[..i].iter().any(|o| o.name == c.name)) {
+                    return Err(Error::BadRequest("checks: names are unique".into()));
+                }
+                Some(cs)
+            }
+            Some(_) => return Err(Error::BadRequest(format!("checks is at most {} checks, or null", crate::model::MAX_CHECKS))),
+        };
         // What its code may reach: `{mode: "roll", hosts?}` closes its network, null or
         // `{mode: "open"}` opens it.
         let egress = match o.get("egress") {
@@ -1761,7 +1928,7 @@ impl Apps {
             None => None,
             Some(Value::Null) => Some(None),
             Some(Value::Object(a)) => {
-                if let Some(k) = a.keys().find(|k| !["token", "bypass_sha256", "signed_in"].contains(&k.as_str())) {
+                if let Some(k) = a.keys().find(|k| !["token", "bypass_sha256", "signed_in", "password"].contains(&k.as_str())) {
                     return Err(Error::BadRequest(format!("access.{k} isn't a field")));
                 }
                 let signed_in = match a.get("signed_in") {
@@ -1769,10 +1936,16 @@ impl Apps {
                     Some(Value::Bool(b)) => *b,
                     Some(_) => return Err(Error::BadRequest("access.signed_in is a boolean".into())),
                 };
+                // A password visitors type (Vercel's password protection): its argon2id hash only.
+                let password = match a.get("password") {
+                    None | Some(Value::Null) => None,
+                    Some(Value::String(p)) if (8..=200).contains(&p.chars().count()) => Some(crate::password::hash(p).await.map_err(Error::Internal)?),
+                    Some(_) => return Err(Error::BadRequest("access.password is 8–200 characters".into())),
+                };
                 let token = match a.get("token") {
-                    None | Some(Value::Null) if signed_in => None,
+                    None | Some(Value::Null) if signed_in || password.is_some() => None,
                     Some(Value::String(t)) if (20..=200).contains(&t.len()) && t.bytes().all(|b| b.is_ascii_alphanumeric() || b"-_".contains(&b)) => Some(t.as_str()),
-                    _ => return Err(Error::BadRequest("access.token is 20–200 of A-Z, a-z, 0-9, - and _ (or access.signed_in is true)".into())),
+                    _ => return Err(Error::BadRequest("access.token is 20–200 of A-Z, a-z, 0-9, - and _ (or access.signed_in is true, or there's a password)".into())),
                 };
                 if signed_in && self.cfg.web_url.is_none() {
                     return Err(Error::Conflict("signing in needs roll's dashboard address on this node (web_url)".into()));
@@ -1782,9 +1955,9 @@ impl Apps {
                     Some(Value::String(h)) if h.len() == 64 && h.bytes().all(|b| b.is_ascii_hexdigit()) => Some(h.to_ascii_lowercase()),
                     Some(_) => return Err(Error::BadRequest("access.bypass_sha256 is a SHA-256 in hex".into())),
                 };
-                Some(Some(Access { token_hash: token.map(crate::public::token_hash), bypass_hash: bypass, signed_in }))
+                Some(Some(Access { token_hash: token.map(crate::public::token_hash), bypass_hash: bypass, signed_in, password_hash: password }))
             }
-            Some(_) => return Err(Error::BadRequest("access is {token?, signed_in?, bypass_sha256?} or null".into())),
+            Some(_) => return Err(Error::BadRequest("access is {token?, signed_in?, password?, bypass_sha256?} or null".into())),
         };
         // A new environment may start with another's variables (cloning staging from production).
         let variables_from = match o.get("variables_from") {
@@ -1914,29 +2087,10 @@ impl Apps {
             Some(_) => return Err(Error::BadRequest("feedback is a boolean".into())),
         }
         if let Some(on) = paused {
-            let (sid, e) = (service.to_string(), env.to_string());
-            self.db(move |s| s.set_paused(&sid, &e, on)).await?;
-            // Resumed: its secrets are watched again (a watch ends itself while it's paused).
-            if !on {
-                self.watch_secrets_of(service).await;
-            }
-            // At once on its owner: what runs stops, and the next tick keeps no floor; resumed,
-            // the next tick (or request) starts what it wants again.
-            let live = self.live(service, env);
-            live.set_paused(on);
-            if on {
-                live.sleep().await;
-                // What runs to its end (a job, a cron run) stops too: nothing of it runs.
-                self.cancel_jobs(service, env);
-                let runs: Vec<String> = self.running_runs.lock().iter().filter(|(_, (s, e))| s == service && e == env).map(|(id, _)| id.clone()).collect();
-                for id in runs {
-                    if let Some(t) = self.cancels.lock().get(&id) {
-                        t.cancel();
-                    }
-                }
-            } else {
-                live.tick().await;
-            }
+            self.set_env_paused(service, env, on).await?;
+            // A person's say holds over the schedule until its window ends ("held").
+            let k = format!("sched-paused:{service}/{env}");
+            let _ = self.db(move |s| s.set_state(&k, "held")).await;
             self.changed(service);
         }
         if let Some(m) = maintenance {
@@ -1977,10 +2131,40 @@ impl Apps {
             self.live(service, env).forget_gate();
             self.changed(service);
         }
+        if let Some(p) = pause_schedule {
+            let (sid, e) = (service.to_string(), env.to_string());
+            self.db(move |s| s.set_pause_schedule(&sid, &e, p.as_ref())).await?;
+            self.changed(service);
+        }
+        if let Some(m) = mirror {
+            let (sid, e) = (service.to_string(), env.to_string());
+            self.db(move |s| s.set_mirror(&sid, &e, m.as_ref())).await?;
+            self.live(service, env).forget_gate();
+            self.changed(service);
+        }
+        if let Some(f) = freeze {
+            let (sid, e) = (service.to_string(), env.to_string());
+            self.db(move |s| s.set_freeze(&sid, &e, f.as_ref())).await?;
+            self.changed(service);
+        }
+        if let Some(sp) = split {
+            let (sid, e) = (service.to_string(), env.to_string());
+            self.db(move |s| s.set_split(&sid, &e, sp.as_ref())).await?;
+            self.live(service, env).forget_gate();
+            self.changed(service);
+        }
         if let Some(routes) = routes {
             let (sid, e) = (service.to_string(), env.to_string());
             self.db(move |s| s.set_routes(&sid, &e, &routes)).await?;
             self.live(service, env).forget_gate();
+            self.changed(service);
+        }
+        if let Some(checks) = checks {
+            let (sid, e, names) = (service.to_string(), env.to_string(), checks.iter().map(|c| c.name.clone()).collect::<Vec<_>>());
+            self.db(move |s| s.set_checks(&sid, &e, &checks)).await?;
+            // A removed check's state goes with it.
+            let prefix = format!("{}/", crate::env_key(service, env));
+            self.check_states.lock().retain(|k, _| !k.strip_prefix(&prefix).is_some_and(|n| !names.iter().any(|x| x == n)));
             self.changed(service);
         }
         if let Some(limit) = rate_limit {
@@ -2057,7 +2241,27 @@ impl Apps {
             self.db(move |s| s.set_access(&sid, &e, a.as_ref())).await?;
             self.set_access_cache(service, env, Some(access));
         }
-        self.environment(service, env).await
+        let mut new_urls = Vec::new();
+        if let Some((beats, tokens)) = heartbeats {
+            let (sid, e) = (service.to_string(), env.to_string());
+            let fresh: Vec<String> = tokens.iter().map(|(n, _)| n.clone()).collect();
+            let slug = self
+                .db(move |s| {
+                    s.set_heartbeats(&sid, &e, &beats)?;
+                    // A new one (a name used before, an environment made again) starts with no ping.
+                    for name in &fresh {
+                        crate::heartbeats::forget(s, &sid, &e, name)?;
+                    }
+                    Ok(s.environment(&sid, &e)?.slug)
+                })
+                .await?;
+            // Where each new heartbeat pings: shown this once (only its token's hash is kept).
+            new_urls = tokens.into_iter().map(|(name, token)| (name, format!("{}{}{token}", self.url(&slug), crate::heartbeats::PATH))).collect();
+            self.changed(service);
+        }
+        let mut view = self.environment(service, env).await?;
+        view.heartbeat_urls.extend(new_urls);
+        Ok(view)
     }
 
     /// Tear an environment down: instances, volume, domains, variables; deployments stay in
@@ -2280,6 +2484,14 @@ impl Apps {
                 // Its token is a credential: never shown, as a sealed variable.
                 trace_endpoint = true;
             }
+        }
+        // A site's functions service: where its edge functions' `context.next()` reaches the
+        // site (this listener, as instances reach it; `crate::edge`), set at start so the runtime
+        // makes it reachable.
+        if svc.build.builder == crate::model::Builder::Functions
+            && let Some(base) = &self.cfg.otlp_base
+        {
+            vars.insert("ROLL_EDGE_BASE".into(), (self.deps.runtime.reach(base.trim_end_matches('/')), "roll"));
         }
         let sid = svc.id.clone();
         let links = self.db(move |s| s.links_minted(&sid)).await?;
@@ -3079,8 +3291,14 @@ impl Apps {
     pub async fn audit(self: &Arc<Self>, what: &str, service: &str, env: &str, actor: Option<String>, mut data: Value) {
         data["actor"] = json!(actor);
         let (kind, sid, e) = (format!("audit.{what}"), service.to_string(), env.to_string());
+        // To the drains that take `audit` too, as it's written (a SIEM's copy; best effort as
+        // drains are: webhooks follow the event log, durably).
+        let text = json!({ "event": kind, "data": data }).to_string();
         if let Err(err) = self.db(move |s| s.add_event(&kind, &sid, &e, None, &data)).await {
             tracing::warn!(service, error = %err, "apps: an audit entry wasn't written");
+        } else {
+            let line = crate::logs::LogLine { t: code_sql::now_ms(), stream: crate::logs::Stream::System, instance: None, deployment: None, text, level: None, trace: None };
+            self.logs.to_drains(&format!("audit:{service}/{env}"), line);
         }
         self.changed(service);
     }
@@ -3176,7 +3394,7 @@ impl Apps {
             }
             false => None,
         };
-        let g = Arc::new(live::Gate { maintenance: row.maintenance, allow, rate: row.rate_limit, firewall: row.firewall, pages: row.pages, preview: row.ephemeral, headers: row.headers, routes: row.routes, traces, vitals: row.vitals, challenge_key });
+        let g = Arc::new(live::Gate { maintenance: row.maintenance, allow, rate: row.rate_limit, firewall: row.firewall, pages: row.pages, preview: row.ephemeral, headers: row.headers, routes: row.routes, traces, vitals: row.vitals, challenge_key, split: row.split, mirror: row.mirror });
         live.set_gate(g.clone(), seen);
         Ok(g)
     }
@@ -3296,6 +3514,66 @@ impl Apps {
         gauge("roll_apps_egress_bytes_per_minute", "Bytes answered in the last finished minute.", r.egress_bytes as f64, "");
         gauge("roll_apps_over_capacity_per_minute", "Requests in the last finished minute that found every instance busy at max_instances.", r.over_capacity as f64, "");
         Ok(out)
+    }
+
+    /// `GET …/environments/{env}/slo`: its objective (the live deployment's, else the service's)
+    /// against its window: each indicator's total, failures, share and budget left, and the burn
+    /// alert firing now. Minutes for the last week, hours before (an hour's latency fails whole
+    /// when its slowest minute did). Null when it has none.
+    pub async fn slo_report(self: &Arc<Self>, service: &str, env: &str) -> Result<Value> {
+        let (svc, row) = self.service_env(service, env).await?;
+        let slo = match row.active.clone() {
+            Some(dep) => self.db(move |s| s.deployment(&dep)).await?.run.slo,
+            None => svc.for_env(&row)?.run.slo,
+        };
+        let Some(slo) = slo else { return Ok(json!({ "slo": null })) };
+        let now_min = code_sql::now_ms() / 60_000;
+        let since = now_min - slo.window_days as i64 * 24 * 60;
+        let (sid, e) = (service.to_string(), env.to_string());
+        let (minutes, hours) = self.db(move |s| Ok((s.minutes(&sid, &e, since)?, s.hours(&sid, &e, since / 60)?))).await?;
+        let minutes: Vec<_> = minutes.into_iter().filter(|r| r.minute < now_min).collect();
+        // Hours only before the first minute kept (a rolled-up hour isn't counted twice).
+        let first = minutes.first().map_or(now_min, |r| r.minute);
+        let hours: Vec<_> = hours.into_iter().filter(|h| (h.minute + 1) * 60 <= first).collect();
+        let show = |t: crate::slo::Tally| json!({ "total": t.total, "bad": t.bad, "sli": (t.total > 0).then(|| 100.0 * (t.total - t.bad) as f64 / t.total as f64), "budget_left": t.budget_left(slo.objective) });
+        let avail = crate::slo::availability(&minutes);
+        let avail = crate::slo::Tally { total: avail.total + crate::slo::availability(&hours).total, bad: avail.bad + crate::slo::availability(&hours).bad };
+        let latency = slo.latency_ms.map(|ms| {
+            let (m, h) = (crate::slo::latency(&minutes, ms, 1), crate::slo::latency(&hours, ms, 60));
+            show(crate::slo::Tally { total: m.total + h.total, bad: m.bad + h.bad })
+        });
+        let burning = crate::slo::burning(&slo, &minutes, now_min).map(|(i, rate, w)| json!({ "indicator": i, "burn_rate": (rate * 10.0).round() / 10.0, "window": w }));
+        Ok(json!({ "slo": slo, "availability": show(avail), "latency": latency, "burning": burning }))
+    }
+
+    /// Pause or resume an environment (`PUT … {paused}`, its pause schedule): at once on its
+    /// owner, what runs stops; resumed, the next tick starts what it wants again.
+    pub(crate) async fn set_env_paused(self: &Arc<Self>, service: &str, env: &str, on: bool) -> Result<()> {
+        let (sid, e) = (service.to_string(), env.to_string());
+        self.db(move |s| s.set_paused(&sid, &e, on)).await?;
+        // Resumed: its secrets are watched again (a watch ends itself while it's paused).
+        if !on {
+            self.watch_secrets_of(service).await;
+        }
+        // At once on its owner: what runs stops, and the next tick keeps no floor; resumed,
+        // the next tick (or request) starts what it wants again.
+        let live = self.live(service, env);
+        live.set_paused(on);
+        if on {
+            live.sleep().await;
+            // What runs to its end (a job, a cron run) stops too: nothing of it runs.
+            self.cancel_jobs(service, env);
+            let runs: Vec<String> = self.running_runs.lock().iter().filter(|(_, (s, e))| s == service && e == env).map(|(id, _)| id.clone()).collect();
+            for id in runs {
+                if let Some(t) = self.cancels.lock().get(&id) {
+                    t.cancel();
+                }
+            }
+        } else {
+            live.tick().await;
+        }
+        self.changed(service);
+        Ok(())
     }
 
     /// An environment's metrics over the last `minutes`: a point a minute for up to a week, a

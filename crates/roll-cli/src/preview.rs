@@ -231,6 +231,35 @@ pub enum Preview {
         #[arg(long, default_value_t = 60)]
         minutes: u32,
     },
+
+    /// What a preview's running services use right now: cores of CPU, resident memory against
+    /// what each runs with.
+    Metrics { preview: String },
+    /// Its recent traces (the project's `traces: true`: its services' OpenTelemetry spans),
+    /// newest first; `--trace <id>` one trace's spans.
+    Traces {
+        preview: String,
+        #[arg(long, default_value_t = 60)]
+        minutes: u32,
+        #[arg(long)]
+        trace: Option<String>,
+        /// Each route's time (p50, p95) against main's preview's same route, the slower ones first.
+        #[arg(long, conflicts_with = "trace")]
+        routes: bool,
+    },
+    /// A project's deploy hooks (a secret URL a headless CMS calls on publish to build the
+    /// previews of some branches again): lists them; `--add NAME` makes one (its URL printed
+    /// once), `--rm HOOK` deletes one.
+    Hooks {
+        project: String,
+        #[arg(long, conflicts_with = "rm")]
+        add: Option<String>,
+        /// With --add: branch globs (default every branch).
+        #[arg(long, requires = "add")]
+        branches: Vec<String>,
+        #[arg(long)]
+        rm: Option<String>,
+    },
     /// The secret CI sends (header `x-roll-preview-bypass`) to reach a project's private
     /// previews: shows whether there is one, `--rotate` makes a new one (printed once), `--off`
     /// removes it.
@@ -241,6 +270,34 @@ pub enum Preview {
         #[arg(long)]
         off: bool,
     },
+    /// A shell in a running service (started if it sleeps): this terminal is its terminal until
+    /// it exits. The preview's activity says who opened it.
+    Shell {
+        preview: String,
+        #[arg(long, short)]
+        service: Option<String>,
+    },
+    /// Copy files to or from a running service (as `roll apps cp`): `roll preview cp pv_… ./seed.sql
+    /// :/tmp/` puts a file (or a directory) under a directory there, `roll preview cp pv_… :/app/out.csv .`
+    /// brings one here. `:` marks the service's side. Up to 100 MiB at a time.
+    Cp {
+        preview: String,
+        src: String,
+        dst: String,
+        #[arg(long, short)]
+        service: Option<String>,
+    },
+    /// A port of a running service on this machine (a debugger's, an admin's: any port it listens
+    /// on, published or not), until Ctrl-C: `roll preview forward pv_… 9229`.
+    Forward {
+        preview: String,
+        port: u16,
+        #[arg(long, short)]
+        service: Option<String>,
+        /// The port here (the same one by default).
+        #[arg(long)]
+        local_port: Option<u16>,
+    },
     /// Print a service's link (with its access token when the preview is private); `--browser`
     /// opens it.
     Open {
@@ -250,6 +307,81 @@ pub enum Preview {
         #[arg(long)]
         browser: bool,
     },
+}
+
+/// `roll preview shell`: a session (`POST …/shell/sessions`), its screen read as server-sent
+/// events onto stdout until `event: closed`, keys typed in raw mode posted as they come, the
+/// window's size posted when it changes, the session closed on the way out.
+async fn shell(api: &Api, preview: &str, service: Option<&str>) -> anyhow::Result<()> {
+    use base64::Engine as _;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let (cols, rows) = crate::apps::term::size().unwrap_or((80, 24));
+    let opened = api.post(&format!("/v1/previews/{preview}/shell/sessions"), json!({ "service": service, "cols": cols, "rows": rows })).await?;
+    let sid = opened["id"].as_str().ok_or_else(|| anyhow::anyhow!("no shell came back"))?.to_string();
+    let base = format!("/v1/previews/{preview}/shell/sessions/{sid}");
+    let mut res = api.open_stream(&format!("{base}/screen")).await?;
+    let screen = tokio::spawn(async move {
+        let mut stdout = tokio::io::stdout();
+        let (mut buf, mut event) = (Vec::<u8>::new(), String::new());
+        while let Ok(Some(chunk)) = res.chunk().await {
+            buf.extend_from_slice(&chunk);
+            while let Some(i) = buf.iter().position(|&b| b == b'\n') {
+                let line = String::from_utf8_lossy(&buf[..i]).trim_end_matches('\r').to_string();
+                buf.drain(..=i);
+                if let Some(name) = line.strip_prefix("event:") {
+                    event = name.trim().to_string();
+                    if event == "closed" {
+                        return;
+                    }
+                } else if let Some(data) = line.strip_prefix("data:") {
+                    if let Ok(b) = base64::engine::general_purpose::STANDARD.decode(data.trim()) {
+                        let _ = stdout.write_all(&b).await;
+                        let _ = stdout.flush().await;
+                    }
+                } else if line.is_empty() {
+                    event.clear();
+                }
+            }
+        }
+    });
+    // Keystrokes on a task of their own: a read cancelled by the select below would lose them.
+    let (keys_tx, mut keys) = tokio::sync::mpsc::channel::<Vec<u8>>(64);
+    tokio::spawn(async move {
+        let mut stdin = tokio::io::stdin();
+        let mut buf = [0u8; 4096];
+        while let Ok(n) = stdin.read(&mut buf).await {
+            if n == 0 || keys_tx.send(buf[..n].to_vec()).await.is_err() {
+                break;
+            }
+        }
+    });
+    let raw = crate::apps::term::Raw::enter();
+    let mut winch = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::window_change())?;
+    let mut screen = screen;
+    // The shell ends when its screen does (its `exit`); the end of stdin (keys from a pipe) only
+    // stops the keys.
+    let mut typing = true;
+    let ended: anyhow::Result<()> = loop {
+        tokio::select! {
+            _ = &mut screen => break Ok(()),
+            k = keys.recv(), if typing => match k {
+                Some(b) => {
+                    if let Err(e) = api.post(&format!("{base}/keys"), json!({ "data": base64::engine::general_purpose::STANDARD.encode(&b) })).await {
+                        break Err(e);
+                    }
+                }
+                None => typing = false,
+            },
+            _ = winch.recv() => {
+                if let Some((c, r)) = crate::apps::term::size() {
+                    let _ = api.post(&format!("{base}/resize"), json!({ "cols": c, "rows": r })).await;
+                }
+            }
+        }
+    };
+    drop(raw);
+    let _ = api.call(reqwest::Method::DELETE, &base, None).await;
+    ended
 }
 
 /// A project by id or name.
@@ -419,7 +551,37 @@ impl Working {
             env.push((format!("GIT_CONFIG_VALUE_{i}"), (*v).into()));
         }
         let env: Vec<(&str, std::ffi::OsString)> = env.iter().map(|(k, v)| (k.as_str(), v.clone())).collect();
-        git(dir, &["push", "--quiet", &self.clone_url, refspec], &env).map(|_| ()).map_err(|e| anyhow::anyhow!("pushing {} to {}: {e:#}", self.branch, self.clone_url))
+        // A push to a URL updates the remote-tracking ref of any configured remote with that URL
+        // (newer git does; older didn't). Those refs are the user's: what the push made goes, what it
+        // moved goes back.
+        let tracking = |d: &std::path::Path| -> std::collections::HashMap<String, String> {
+            git(d, &["for-each-ref", "--format=%(refname) %(objectname)", "refs/remotes"], &[])
+                .unwrap_or_default()
+                .lines()
+                .filter_map(|l| l.split_once(' '))
+                .filter(|(r, _)| r.rsplit_once(&format!("/{}", self.branch)).is_some_and(|(_, rest)| rest.is_empty()))
+                .map(|(r, o)| (r.to_string(), o.to_string()))
+                .collect()
+        };
+        let before = tracking(dir);
+        let pushed = git(dir, &["push", "--quiet", &self.clone_url, refspec], &env).map(|_| ()).map_err(|e| anyhow::anyhow!("pushing {} to {}: {e:#}", self.branch, self.clone_url));
+        let after = tracking(dir);
+        // One the push removed (a delete's) is put back too.
+        for (r, was) in before.iter().filter(|(r, _)| !after.contains_key(*r)) {
+            let _ = git(dir, &["update-ref", r, was], &[]);
+        }
+        for (r, now) in after {
+            match before.get(&r) {
+                None => {
+                    let _ = git(dir, &["update-ref", "-d", &r, &now], &[]);
+                }
+                Some(was) if *was != now => {
+                    let _ = git(dir, &["update-ref", &r, was, &now], &[]);
+                }
+                Some(_) => {}
+            }
+        }
+        pushed
     }
 }
 
@@ -937,7 +1099,12 @@ pub async fn run(api: &Api, as_json: bool, cmd: Preview) -> anyhow::Result<()> {
                                         eprintln!("following {data} (ctrl-c to stop)");
                                     }
                                 } else if !(std::mem::take(&mut fresh) && last.as_deref() == Some(data.as_str())) {
-                                    println!("{data}");
+                                    // The service's stderr to ours, its stdout to ours.
+                                    if event == "stderr" {
+                                        eprintln!("{data}");
+                                    } else {
+                                        println!("{data}");
+                                    }
                                     last = Some(data);
                                 }
                             } else if line.is_empty() {
@@ -1081,6 +1248,146 @@ pub async fn run(api: &Api, as_json: bool, cmd: Preview) -> anyhow::Result<()> {
                 }
                 for g in groups {
                     println!("{:>5}x  {:>8}  {:<12} {}", g["count"], ago(g["last_seen"].as_i64().unwrap_or(0) / 1000), s(&g["service"]), s(&g["title"]));
+                }
+                return Ok(());
+            }
+            v
+        }
+
+        Preview::Traces { preview, minutes, trace, routes } => {
+            if routes {
+                let v = api.get(&format!("/v1/previews/{preview}/routes?minutes={minutes}")).await?;
+                if !as_json {
+                    let list = v["routes"].as_array().cloned().unwrap_or_default();
+                    if list.is_empty() {
+                        println!("no traces in the last {} minutes", v["minutes"].as_u64().unwrap_or(minutes as u64));
+                    }
+                    for r in list {
+                        let main = r["main_p50_ms"].as_u64().map_or_else(|| "main —".to_string(), |m| format!("main {m} ms"));
+                        let mark = if r["slower"].as_bool() == Some(true) { "slower" } else { "" };
+                        println!("{:>5}x  p50 {:>6} ms  p95 {:>6} ms  {:<14} {:<6} {}", r["count"], r["p50_ms"], r["p95_ms"], main, mark, s(&r["name"]));
+                    }
+                    return Ok(());
+                }
+                v
+            } else if let Some(t) = trace {
+                let v = api.get(&format!("/v1/previews/{preview}/traces/{t}")).await?;
+                if !as_json {
+                    let spans = v["spans"].as_array().cloned().unwrap_or_default();
+                    let t0 = spans.iter().filter_map(|s| s["start"].as_u64()).min().unwrap_or(0);
+                    for sp in spans {
+                        let (start, end) = (sp["start"].as_u64().unwrap_or(0), sp["end"].as_u64().unwrap_or(0));
+                        let mark = if sp["error"].as_bool() == Some(true) { "!" } else { " " };
+                        println!("{mark} +{:>6} ms {:>6} ms  {:<12} {}", start.saturating_sub(t0) / 1_000_000, end.saturating_sub(start) / 1_000_000, s(&sp["service"]), s(&sp["name"]));
+                    }
+                    return Ok(());
+                }
+                v
+            } else {
+                let v = api.get(&format!("/v1/previews/{preview}/traces?minutes={minutes}")).await?;
+                if !as_json {
+                    let traces = v["traces"].as_array().cloned().unwrap_or_default();
+                    if traces.is_empty() {
+                        println!("no traces in the last {} minutes (the project's `traces` setting turns them on)", v["minutes"].as_u64().unwrap_or(minutes as u64));
+                    }
+                    for t in traces {
+                        let mark = if t["error"].as_bool() == Some(true) { "!" } else { " " };
+                        println!("{mark} {:>8}  {:>6} ms  {:>3} spans  {:<12} {}  {}", ago(t["start_ms"].as_i64().unwrap_or(0) / 1000), t["ms"], t["spans"], s(&t["service"]), s(&t["name"]), s(&t["trace"]));
+                    }
+                    return Ok(());
+                }
+                v
+            }
+        }
+        Preview::Shell { preview, service } => return shell(api, &preview, service.as_deref()).await,
+        Preview::Forward { preview, port, service, local_port } => {
+            let local = local_port.unwrap_or(port);
+            let l = tokio::net::TcpListener::bind(("127.0.0.1", local)).await.map_err(|e| anyhow::anyhow!("127.0.0.1:{local} is taken ({e}): pick another with --local-port"))?;
+            let base = api.base.strip_prefix("http").map(|rest| format!("ws{rest}")).unwrap_or_else(|| api.base.clone());
+            let svc = service.as_deref().map(|s| format!("&service={}", crate::apps::enc(s))).unwrap_or_default();
+            let url = format!("{base}/v1/previews/{preview}/forward?port={port}{svc}");
+            let mut headers: Vec<(String, String)> = api.headers.clone();
+            if let Some(k) = api.bearer().await? {
+                headers.push(("authorization".into(), format!("Bearer {k}")));
+            }
+            eprintln!("127.0.0.1:{local} → {preview}:{port} (Ctrl-C ends it)");
+            tokio::select! {
+                r = crate::apps::tunnels(url, headers, l) => r?,
+                _ = tokio::signal::ctrl_c() => {}
+            }
+            return Ok(());
+        }
+        Preview::Cp { preview, src, dst, service } => {
+            let svc = service.map(|s| format!("&service={}", crate::apps::enc(&s))).unwrap_or_default();
+            let url = |path: &str| format!("/v1/previews/{preview}/files?path={}{svc}", crate::apps::enc(path));
+            match (src.strip_prefix(':'), dst.strip_prefix(':')) {
+                (Some(remote), None) => {
+                    let mut res = api.open_stream(&url(remote)).await?;
+                    let from = res.headers().get("x-roll-service").and_then(|v| v.to_str().ok()).unwrap_or("").to_string();
+                    // Read as it comes, bounded: a whole filesystem asked for stops at 1 GiB.
+                    let mut bytes = Vec::new();
+                    while let Some(chunk) = res.chunk().await? {
+                        anyhow::ensure!(bytes.len() + chunk.len() <= 1 << 30, "{remote} is more than 1 GiB as a tar: copy something smaller");
+                        bytes.extend_from_slice(&chunk);
+                    }
+                    let here = crate::apps::untar_to(&bytes, &dst)?;
+                    if !as_json {
+                        println!("{from}:{remote} → {}", here.display());
+                        return Ok(());
+                    }
+                    json!({ "service": from, "from": remote, "to": here })
+                }
+                (None, Some(remote)) => {
+                    let body = crate::apps::tar_of(&src)?;
+                    let v = api.put_bytes(&url(remote), "application/x-tar", body).await?;
+                    if !as_json {
+                        println!("{src} → {}:{remote}", v["service"].as_str().unwrap_or(""));
+                        return Ok(());
+                    }
+                    v
+                }
+                _ => anyhow::bail!("one side is the service's, marked with `:` (roll preview cp <preview> ./file :/tmp/ or roll preview cp <preview> :/app/file .)"),
+            }
+        }
+        Preview::Metrics { preview } => {
+            let v = api.get(&format!("/v1/previews/{preview}/metrics")).await?;
+            if !as_json {
+                let services = v["services"].as_array().cloned().unwrap_or_default();
+                if services.is_empty() {
+                    println!("no service is running");
+                }
+                for m in services {
+                    let mb = m["memory_bytes"].as_f64().unwrap_or(0.0) / 1_048_576.0;
+                    println!("{:<16} {:.2} CPU  {:.0} of {} MB", s(&m["service"]), m["cpu"].as_f64().unwrap_or(0.0), mb, m["memory_mb"]);
+                }
+                return Ok(());
+            }
+            v
+        }
+        Preview::Hooks { project, add, branches, rm } => {
+            let path = format!("/v1/previews/projects/{}/hooks", project_id(api, &project).await?);
+            let v = match (add, rm) {
+                (Some(name), _) => {
+                    let branches = if branches.is_empty() { vec!["*".to_string()] } else { branches };
+                    let v = api.post(&path, json!({ "name": name, "branches": branches })).await?;
+                    if !as_json {
+                        println!("{}{}", api.base.trim_end_matches('/'), s(&v["path"]));
+                        eprintln!("POST to it from the CMS's publish webhook; it's shown only now");
+                        return Ok(());
+                    }
+                    v
+                }
+                (_, Some(hook)) => {
+                    api.call(reqwest::Method::DELETE, &format!("{path}/{hook}"), None).await?;
+                    json!({ "deleted": hook })
+                }
+                _ => api.get(&path).await?,
+            };
+            if !as_json && v.get("hooks").is_some() {
+                for h in v["hooks"].as_array().into_iter().flatten() {
+                    let branches: Vec<&str> = h["branches"].as_array().into_iter().flatten().filter_map(|b| b.as_str()).collect();
+                    let ran = h["fired_at"].as_i64().map_or("not run yet".to_string(), |t| format!("ran {} ago", ago(t / 1000)));
+                    println!("{}  {:<20} {}  {ran}", s(&h["id"]), s(&h["name"]), branches.join(","));
                 }
                 return Ok(());
             }

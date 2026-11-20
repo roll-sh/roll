@@ -113,6 +113,14 @@ pub trait SyncTarget: Send + Sync {
         let _ = target;
         vec![]
     }
+    /// A kind a product's own route makes (`Secrets::create_product_sync`), never `POST …/syncs`:
+    /// the product checked its side (roll search: who may change the cluster). It isn't offered
+    /// in `GET …/syncs`, and `reveal` on the folder is enough to make, run or delete one, as
+    /// reading the value and pasting it into the product would be (`admin` may delete one too:
+    /// it doesn't include `reveal`, and stopping a sync sends nothing).
+    fn internal(&self) -> bool {
+        false
+    }
     /// A target this kind can push to, for this project: on create and before every push.
     fn check(&self, project: &str, resources: &Resources, target: &Json) -> Result<()>;
     /// Why the platform won't take `name` (prefix applied), if it won't: a name it keeps for
@@ -169,6 +177,10 @@ pub struct SecretSync {
     pub signed: bool,
     pub created_at: i64,
     pub created_by: String,
+    /// When an incident's cut-off paused it (`…/reach/cut-off`), and why: it pushes nothing until
+    /// an admin resumes it (`PATCH …/syncs/{id}`).
+    pub paused_at: Option<i64>,
+    pub paused_why: Option<String>,
     /// Only in the answer that made it.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub signing_secret: Option<String>,
@@ -201,6 +213,13 @@ pub struct NewSync {
     pub prefix: Option<String>,
 }
 
+/// `PATCH …/syncs/{id}`.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SyncChange {
+    pub paused: bool,
+}
+
 /// A kind the server offers (`GET …/syncs`).
 #[derive(Debug, Serialize)]
 pub struct SyncKind {
@@ -219,7 +238,7 @@ struct Row {
     sealed: Option<Vec<u8>>,
 }
 
-const COLUMNS: &str = "s.id, e.slug, s.path, s.kind, s.target, s.keys, s.prefix, s.secret, s.status, s.error, s.last_digest, s.state, s.last_synced_at, s.created_at, s.created_by, s.project_id";
+const COLUMNS: &str = "s.id, e.slug, s.path, s.kind, s.target, s.keys, s.prefix, s.secret, s.status, s.error, s.last_digest, s.state, s.last_synced_at, s.created_at, s.created_by, s.project_id, s.paused_at, s.paused_why";
 
 fn row(r: &code_sql::Row<'_>) -> code_sql::Result<Row> {
     let state: BTreeMap<String, String> = from_json(&r.get::<_, String>(11)?);
@@ -241,6 +260,8 @@ fn row(r: &code_sql::Row<'_>) -> code_sql::Result<Row> {
             signed: sealed.is_some(),
             created_at: r.get(13)?,
             created_by: r.get(14)?,
+            paused_at: r.get(16)?,
+            paused_why: r.get(17)?,
             signing_secret: None,
         },
         project: r.get(15)?,
@@ -299,7 +320,7 @@ struct Outcome {
 
 impl Secrets {
     pub fn sync_kinds(&self) -> Vec<SyncKind> {
-        self.syncs.kinds().map(|t| SyncKind { kind: t.kind().into(), label: t.label().into(), values: t.values(), signed: t.signed(), fields: t.fields().to_vec() }).collect()
+        self.syncs.kinds().filter(|t| !t.internal()).map(|t| SyncKind { kind: t.kind().into(), label: t.label().into(), values: t.values(), signed: t.signed(), fields: t.fields().to_vec() }).collect()
     }
 
     /// The project's syncs in environments the caller can read.
@@ -315,9 +336,12 @@ impl Secrets {
     /// credential of any of the folder's syncs), and what's missing. Names only.
     pub fn preview_sync(&self, project: &str, n: &NewSync, caller: &Caller) -> Result<SyncPreview> {
         let path = names::path(n.path.as_deref().unwrap_or("/"))?;
+        let target = self.syncs.get(&n.kind)?.clone();
+        if target.internal() {
+            return Err(Error::BadRequest(format!("{} syncs are made by the product they push to", n.kind)));
+        }
         caller.need(Action::Admin, &Scope::at(project, &n.environment, &path))?;
         self.project(project)?;
-        let target = self.syncs.get(&n.kind)?.clone();
         target.check(project, &self.members(project)?, &n.target)?;
         let creds: BTreeSet<String> = target.credentials(&n.target).into_iter().collect();
         let others: Vec<(String, Json)> = self.db.read(|c| {
@@ -338,10 +362,35 @@ impl Secrets {
     }
 
     pub fn create_sync(&self, project: &str, n: NewSync, caller: &Caller) -> Result<SecretSync> {
+        self.make_sync(project, n, caller, false)
+    }
+
+    /// A sync of an [`SyncTarget::internal`] kind, made by its product's own route (which
+    /// checked the caller on its side): `reveal` on the folder is enough.
+    pub fn create_product_sync(&self, project: &str, n: NewSync, caller: &Caller) -> Result<SecretSync> {
+        self.make_sync(project, n, caller, true)
+    }
+
+    /// What making or running a sync of `kind` needs: `admin` (it sends values out of roll),
+    /// `reveal` for a product's own kind. Deleting one needs the same, or `admin` for a product's
+    /// own kind too (`admin` doesn't include `reveal`, and stopping a sync sends nothing).
+    fn sync_needs(&self, kind: &str) -> Action {
+        match self.syncs.get(kind) {
+            Ok(t) if t.internal() => Action::Reveal,
+            _ => Action::Admin,
+        }
+    }
+
+    fn make_sync(&self, project: &str, n: NewSync, caller: &Caller, internal: bool) -> Result<SecretSync> {
         let path = names::path(n.path.as_deref().unwrap_or("/"))?;
-        caller.need(Action::Admin, &Scope::at(project, &n.environment, &path))?;
-        let dek = self.project(project)?;
         let target = self.syncs.get(&n.kind)?.clone();
+        match (target.internal(), internal) {
+            (true, false) => return Err(Error::BadRequest(format!("{} syncs are made by the product they push to", n.kind))),
+            (false, true) => return Err(Error::BadRequest(format!("{} syncs are made through roll secrets", n.kind))),
+            _ => {}
+        }
+        caller.need(self.sync_needs(&n.kind), &Scope::at(project, &n.environment, &path))?;
+        let dek = self.project(project)?;
         if !n.target.is_object() || json(&n.target).len() > TARGET_MAX {
             return Err(Error::BadRequest(format!("target is a JSON object of at most {TARGET_MAX} bytes")));
         }
@@ -393,7 +442,7 @@ impl Secrets {
                  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', NULL, NULL, '{}', NULL, 0, 0, ?, ?)",
                 params![id, project, env.id, path, n.kind, json(&n.target), keys.as_ref().map(json), prefix, sealed, now, caller.principal],
             )?;
-            audit::record(c, project, caller, "sync.create", Some(&n.environment), Some(&path), keys.as_deref().unwrap_or_default(), &format!("created {} sync {id}", n.kind), now)
+            audit::record(c, self.keys()?, project, caller, "sync.create", Some(&n.environment), Some(&path), keys.as_deref().unwrap_or_default(), &format!("created {} sync {id}", n.kind), now)
         })?;
         Ok(masked(SecretSync {
             id,
@@ -411,6 +460,8 @@ impl Secrets {
             signed: secret.is_some(),
             created_at: now,
             created_by: caller.principal.clone(),
+            paused_at: None,
+            paused_why: None,
             signing_secret: secret.map(|s| s.expose().to_string()),
         }))
     }
@@ -426,12 +477,39 @@ impl Secrets {
         caller.need(Action::Read, &Scope::project(project))?;
         self.project(project)?;
         let r = self.sync_row(project, id)?;
-        caller.need(Action::Admin, &Scope::at(project, &r.info.environment, &r.info.path))?;
+        let scope = Scope::at(project, &r.info.environment, &r.info.path);
+        if !caller.allows(Action::Admin, &scope) {
+            caller.need(self.sync_needs(&r.info.kind), &scope)?;
+        }
         let now = self.db.now_ms()?;
         self.db.write(|c| {
             c.execute("DELETE FROM syncs WHERE id = ?", [id])?;
-            audit::record(c, project, caller, "sync.delete", Some(&r.info.environment), Some(&r.info.path), &[], &format!("deleted {} sync {id}", r.info.kind), now)
+            audit::record(c, self.keys()?, project, caller, "sync.delete", Some(&r.info.environment), Some(&r.info.path), &[], &format!("deleted {} sync {id}", r.info.kind), now)
         })
+    }
+
+    /// Pause or resume a sync (`PATCH …/syncs/{id}`). Resuming marks it due: what changed while it
+    /// was paused goes out on the next pass.
+    pub fn update_sync(&self, project: &str, id: &str, change: SyncChange, caller: &Caller) -> Result<SecretSync> {
+        caller.need(Action::Read, &Scope::project(project))?;
+        self.project(project)?;
+        let r = self.sync_row(project, id)?;
+        caller.need(Action::Admin, &Scope::at(project, &r.info.environment, &r.info.path))?;
+        let now = self.db.now_ms()?;
+        self.db.write(|c| {
+            let what = match change.paused {
+                true => {
+                    c.execute("UPDATE syncs SET paused_at = ?, paused_why = NULL WHERE id = ? AND paused_at IS NULL", params![now, id])?;
+                    "paused"
+                }
+                false => {
+                    c.execute("UPDATE syncs SET paused_at = NULL, paused_why = NULL, checked_at = NULL, retry_at = 0 WHERE id = ?", [id])?;
+                    "resumed"
+                }
+            };
+            audit::record(c, self.keys()?, project, caller, "sync.update", Some(&r.info.environment), Some(&r.info.path), &[], &format!("{what} {} sync {id}", r.info.kind), now)
+        })?;
+        Ok(masked(self.sync_row(project, id)?.info))
     }
 
     /// Push every key now, whatever the digest says. 409 `running` while another push holds it.
@@ -439,7 +517,10 @@ impl Secrets {
         caller.need(Action::Read, &Scope::project(project))?;
         self.project(project)?;
         let r = self.sync_row(project, id)?;
-        caller.need(Action::Admin, &Scope::at(project, &r.info.environment, &r.info.path))?;
+        caller.need(self.sync_needs(&r.info.kind), &Scope::at(project, &r.info.environment, &r.info.path))?;
+        if r.info.paused_at.is_some() {
+            return Err(Error::Conflict("paused", format!("sync {id} is paused: resume it first")));
+        }
         let hold = self.claim_sync(id, r.info.last_digest.as_deref())?.ok_or_else(|| Error::Conflict("running", format!("sync {id} is being pushed right now")))?;
         self.push_sync(r, hold, None, true);
         Ok(self.sync_row(project, id)?.info)
@@ -452,7 +533,7 @@ impl Secrets {
         let now = self.db.now_ms()?;
         let hold = now + HOLD_MS;
         let seen = read_digest.unwrap_or("");
-        let n = self.db.write(|c| c.execute("UPDATE syncs SET running_until = ? WHERE id = ? AND running_until <= ? AND COALESCE(last_digest, '') = ?", params![hold, id, now, seen]))?;
+        let n = self.db.write(|c| c.execute("UPDATE syncs SET running_until = ? WHERE id = ? AND paused_at IS NULL AND running_until <= ? AND COALESCE(last_digest, '') = ?", params![hold, id, now, seen]))?;
         Ok((n == 1).then_some(hold))
     }
 
@@ -460,20 +541,18 @@ impl Secrets {
     fn sync_caller(&self, r: &Row) -> Result<Caller> {
         let principal = format!("sync:{}", r.info.id);
         if r.info.created_by == "operator" {
-            return Ok(Caller { principal, grants: Arc::new(Everything), ip: None, runtime: false, approval: None });
+            return Ok(Caller::acting(principal, Arc::new(Everything)));
         }
         let gone = || Error::Forbidden(format!("{} made this sync and can't reach secrets any more: make the sync again", r.info.created_by));
         // A person's: as they are now, while their account can sign in.
         if crate::access::is_person(&r.info.created_by) {
             let person = self.person(&r.info.created_by)?.ok_or_else(gone)?;
-            let mut c = self.person_caller(&r.info.created_by, person.admin)?;
-            c.principal = principal;
-            return Ok(c);
+            return Ok(self.person_caller(&r.info.created_by, person.admin)?.acting_as(principal));
         }
         // A roll-access grant: as it is now, or gone once revoked or expired (a person's acts as them).
         let token = r.info.created_by.strip_prefix("token:").ok_or_else(gone)?;
         let g = self.grants.as_ref().and_then(|g| g.grant(token)).ok_or_else(gone)?;
-        Ok(Caller { principal, grants: self.grant_grants(&g)?, ip: None, runtime: false, approval: None })
+        Ok(Caller::acting(principal, self.grant_grants(&g)?))
     }
 
     /// A pass over the syncs only when a change marked some due (`checked_at` NULL): what rolld
@@ -481,7 +560,7 @@ impl Secrets {
     /// syncs there are. One indexed read when nothing changed.
     pub fn sweep_due_syncs(&self) -> Result<(usize, usize)> {
         let now = self.db.now_ms()?;
-        let due = self.db.read(|c| c.query_row("SELECT 1 FROM syncs WHERE checked_at IS NULL AND retry_at <= ? AND running_until <= ? LIMIT 1", params![now, now], |_| Ok(())).optional())?;
+        let due = self.db.read(|c| c.query_row("SELECT 1 FROM syncs WHERE checked_at IS NULL AND paused_at IS NULL AND retry_at <= ? AND running_until <= ? LIMIT 1", params![now, now], |_| Ok(())).optional())?;
         if due.is_none() {
             return Ok((0, 0));
         }
@@ -517,9 +596,9 @@ impl Secrets {
             let batch: Vec<(Row, Option<i64>)> = self.db.write(|c| {
                 // Least recently checked first: every sync gets its turn, however many there are.
                 let rows = c.query(
-                    &format!("SELECT {COLUMNS}, s.checked_at FROM syncs s JOIN environments e ON e.id = s.env_id WHERE s.running_until <= ? AND s.retry_at <= ? AND COALESCE(s.checked_at, 0) < ?{marked} ORDER BY COALESCE(s.checked_at, 0), s.id LIMIT {CLAIM}"),
+                    &format!("SELECT {COLUMNS}, s.checked_at FROM syncs s JOIN environments e ON e.id = s.env_id WHERE s.paused_at IS NULL AND s.running_until <= ? AND s.retry_at <= ? AND COALESCE(s.checked_at, 0) < ?{marked} ORDER BY COALESCE(s.checked_at, 0), s.id LIMIT {CLAIM}"),
                     params![now, now, now],
-                    |r| Ok((row(r)?, r.get::<_, Option<i64>>(16)?)),
+                    |r| Ok((row(r)?, r.get::<_, Option<i64>>(18)?)),
                 )?;
                 for (r, _) in &rows {
                     c.execute("UPDATE syncs SET checked_at = ? WHERE id = ?", params![now, r.info.id])?;
@@ -573,7 +652,7 @@ impl Secrets {
         let outcome = caller.and_then(|caller| self.push_once(&r, &caller, digest, force));
         let now = self.db.now_ms().unwrap_or(hold - HOLD_MS);
         let (project, id, env, path) = (r.project.as_str(), r.info.id.as_str(), r.info.environment.as_str(), r.info.path.as_str());
-        let actor = Caller { principal: format!("sync:{id}"), grants: Arc::new(Everything), ip: None, runtime: false, approval: None };
+        let actor = Caller::acting(format!("sync:{id}"), Arc::new(Everything));
         let ok = outcome.is_ok();
         crate::metrics::Counters::add(if ok { &self.counters.syncs_pushed } else { &self.counters.sync_failures }, 1);
         let res = self.db.write(|c| {
@@ -590,10 +669,10 @@ impl Secrets {
             };
             // The audit row whether or not the hold was still ours: values went out either way.
             match &outcome {
-                Ok(o) if !o.keys.is_empty() || force => audit::record(c, project, &actor, "sync.push", Some(env), Some(path), &o.keys, &o.summary, now)?,
+                Ok(o) if !o.keys.is_empty() || force => audit::record(c, self.keys()?, project, &actor, "sync.push", Some(env), Some(path), &o.keys, &o.summary, now)?,
                 Ok(_) => {}
                 // Which keys reached the target before it failed isn't known: the row says so.
-                Err(e) => audit::record(c, project, &actor, "sync.push", Some(env), Some(path), &[], &clip(format!("{} sync failed (values may have reached the target in part): {e}", r.info.kind)), now)?,
+                Err(e) => audit::record(c, self.keys()?, project, &actor, "sync.push", Some(env), Some(path), &[], &clip(format!("{} sync failed (values may have reached the target in part): {e}", r.info.kind)), now)?,
             }
             Ok::<_, Error>(())
         });

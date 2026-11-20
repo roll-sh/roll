@@ -145,6 +145,10 @@ impl roll_previews::ports::Apps for RollApps {
         // One voice on a pull request: previews posts `roll/preview` and its comment for the
         // environment, so roll apps posts no commit status or GitHub Deployment of its own (apps' #249).
         let mut body = json!({ "branch": null, "ephemeral": true, "access": access, "egress": egress, "report": false });
+        // The project's traces: roll apps keeps the environment's itself (its own OpenTelemetry
+        // variables), and the preview's sheet reads them from it.
+        // Off is said too: roll apps keeps an environment's `traces` as it was when a field is left out.
+        body["traces"] = json!(t.traces);
         if self.feedback {
             body["feedback"] = json!(t.feedback);
         }
@@ -340,6 +344,18 @@ impl roll_previews::ports::Apps for RollApps {
         let Ok(Some((id, env))) = self.find(preview, service).await else { return Vec::new() };
         let v = self.api.get(&format!("{}/logs?tail={lines}", Self::env_path(&id, &env))).await.unwrap_or(Value::Null);
         v.as_array().into_iter().flatten().filter_map(|l| s(&l["text"])).collect()
+    }
+
+    async fn traces(&self, preview: &str, service: &str, minutes: i64) -> Vec<roll_previews::engine::traces::TraceRow> {
+        let Ok(Some((id, env))) = self.find(preview, service).await else { return Vec::new() };
+        let Ok(v) = self.api.get(&format!("{}/traces?minutes={minutes}", Self::env_path(&id, &env))).await else { return Vec::new() };
+        serde_json::from_value(v["traces"].clone()).unwrap_or_default()
+    }
+
+    async fn trace(&self, preview: &str, service: &str, trace: &str) -> Option<Vec<roll_previews::engine::traces::Span>> {
+        let (id, env) = self.find(preview, service).await.ok()??;
+        let v = self.api.get(&format!("{}/traces/{trace}", Self::env_path(&id, &env))).await.ok()?;
+        serde_json::from_value(v["spans"].clone()).ok()
     }
 
     fn status(&self, _preview: &str, _service: &str) -> Option<roll_previews::ServiceState> {
@@ -540,13 +556,25 @@ impl apps_control::integrations::GitPushes for GitPushes {
 
     async fn pushed(&self, push: apps_control::integrations::GitPush) {
         let Some(engine) = self.0.upgrade() else { return };
-        let pull = push.pull.map(|p| roll_previews::ports::GitPull { number: p.number, title: p.title, url: p.url, fork: p.fork });
-        let p = roll_previews::ports::GitPush { service: push.service, url: push.url, branch: push.branch, sha: push.sha, message: push.message, pull };
+        let pull = push.pull.map(|p| roll_previews::ports::GitPull { number: p.number, title: p.title, url: p.url, fork: p.fork, author: p.author });
+        let p = roll_previews::ports::GitPush { service: push.service, url: push.url, branch: push.branch, sha: push.sha, message: push.message, pusher: push.pusher, pull };
         tokio::spawn(async move {
             if let Err(e) = engine.git_push(&p).await {
                 tracing::warn!(service = %p.service, branch = %p.branch, error = %e, "previews: a Git URL service's push");
             }
         });
+    }
+}
+
+/// Names under a project's own preview domain that no roll apps environment holds (a service on
+/// roll's own runtime): roll apps' ingress hands them on, in process, to previews' router, which
+/// answers a 404 for a name it doesn't hold.
+pub struct DomainRouter(pub Arc<roll_previews::runtime::Runtime>);
+
+#[async_trait]
+impl apps_control::integrations::PreviewRouter for DomainRouter {
+    async fn serve(&self, req: axum::extract::Request) -> axum::response::Response {
+        roll_previews::runtime::serve_host(self.0.clone(), req).await
     }
 }
 
@@ -566,6 +594,51 @@ impl apps_control::integrations::FeedbackNotes for Notes {
 }
 
 /// roll apps' own (`Apps::reachable`): the instance's container and port, its lease held.
+/// roll apps' log drains, for previews' services on roll's runtime: whether a project's take
+/// previews' output is read again after [`DRAINS_FOR`].
+pub struct AppsDrains {
+    pub apps: Arc<apps_control::Apps>,
+    pub wanted: std::sync::Mutex<std::collections::HashMap<(String, roll_previews::ports::DrainSource), (std::time::Instant, bool)>>,
+}
+
+const DRAINS_FOR: std::time::Duration = std::time::Duration::from_secs(30);
+
+#[async_trait]
+impl roll_previews::ports::Drains for AppsDrains {
+    async fn wanted(&self, project: &str, source: roll_previews::ports::DrainSource) -> bool {
+        let key = (project.to_string(), source);
+        if let Some((at, w)) = self.wanted.lock().unwrap_or_else(|e| e.into_inner()).get(&key)
+            && at.elapsed() < DRAINS_FOR
+        {
+            return *w;
+        }
+        let w = self.apps.drains_take_previews(project, None, source.as_str()).await.unwrap_or(false);
+        let mut m = self.wanted.lock().unwrap_or_else(|e| e.into_inner());
+        if m.len() > 5000 {
+            m.clear();
+        }
+        m.insert(key, (std::time::Instant::now(), w));
+        w
+    }
+
+    fn send(&self, project: &str, environment: &str, service: &str, source: roll_previews::ports::DrainSource, lines: Vec<roll_previews::ports::DrainLine>) {
+        let lines = lines.into_iter().map(|l| apps_control::drains::PreviewLine { t: l.t, stderr: l.stderr, text: l.text }).collect();
+        self.apps.drain_preview_lines(project, environment, service, source.as_str(), lines);
+    }
+}
+
+/// Previews' OTLP intake reads spans with roll apps' reader.
+pub struct AppsSpans;
+
+impl roll_previews::ports::SpanReader for AppsSpans {
+    fn spans(&self, body: &[u8], json: bool, gzip: bool) -> anyhow::Result<Vec<roll_previews::engine::traces::Span>> {
+        Ok(apps_control::otlp::spans_of_request(body, json, gzip)?
+            .into_iter()
+            .map(|s| roll_previews::engine::traces::Span { trace: s.trace, span: s.span, parent: s.parent, name: s.name, service: s.service, start: s.start, end: s.end, error: s.error, attrs: s.attrs })
+            .collect())
+    }
+}
+
 pub struct AppsReach(pub Arc<apps_control::Apps>);
 
 #[async_trait]
@@ -657,8 +730,69 @@ impl roll_previews::ports::Apps for Services {
         Ok(group_errors(&lines))
     }
 
-    async fn follow(&self, preview: &str, service: &str, lines: usize) -> Option<tokio::sync::mpsc::Receiver<String>> {
+    async fn traces(&self, preview: &str, service: &str, minutes: i64) -> Vec<roll_previews::engine::traces::TraceRow> {
+        self.apps.traces(preview, service, minutes).await
+    }
+
+    async fn trace(&self, preview: &str, service: &str, trace: &str) -> Option<Vec<roll_previews::engine::traces::Span>> {
+        self.apps.trace(preview, service, trace).await
+    }
+
+    async fn follow(&self, preview: &str, service: &str, lines: usize) -> Option<tokio::sync::mpsc::Receiver<(bool, String)>> {
         if matches!(self.apps.find(preview, service).await, Ok(Some(_))) { None } else { self.runtime.follow(preview, service, lines).await }
+    }
+
+    /// A `roll.toml` service's terminal: a login shell exec'd in its container through the Docker
+    /// Engine API, as roll apps' shells are (roll apps' services have their own, on `pv-…`).
+    async fn shell(&self, preview: &str, service: &str, cols: u16, rows: u16) -> anyhow::Result<Option<roll_previews::ports::Shell>> {
+        if self.apps.find(preview, service).await?.is_some() {
+            return Ok(None);
+        }
+        let Some(engine) = apps_control::runtime::engine::Engine::local() else { anyhow::bail!("a shell needs Docker on a local socket") };
+        let container = self.runtime.shell_container(preview, service).await?;
+        // bash when the image has it, else sh; a login shell, so the image's profile applies.
+        let login = "if command -v bash >/dev/null 2>&1; then exec bash -l; else exec sh -l; fi";
+        let (id, io) = engine.exec_tty(&container, &["sh", "-c", login], &["TERM=xterm-256color"], cols, rows).await?;
+        Ok(Some(roll_previews::ports::Shell::upgraded(id, io)))
+    }
+
+    async fn resize_shell(&self, id: &str, cols: u16, rows: u16) -> anyhow::Result<()> {
+        match apps_control::runtime::engine::Engine::local() {
+            Some(e) => e.resize(id, cols, rows).await,
+            None => Ok(()),
+        }
+    }
+
+    fn hold(&self, preview: &str, service: &str) {
+        self.runtime.hold(preview, service);
+    }
+
+    /// A `roll.toml` service's port (roll apps' services have roll apps' own tunnel, on `pv-…`).
+    async fn forward(&self, preview: &str, service: &str, port: u16) -> anyhow::Result<Option<Box<dyn roll_previews::ports::ShellIo>>> {
+        if self.apps.find(preview, service).await?.is_some() {
+            return Ok(None);
+        }
+        self.runtime.forward(preview, service, port).await
+    }
+
+    /// A `roll.toml` service's files (roll apps' services have their own, on `pv-…`).
+    async fn read_files(&self, preview: &str, service: &str, path: &str) -> anyhow::Result<Option<roll_previews::ports::FileStream>> {
+        if self.apps.find(preview, service).await?.is_some() {
+            return Ok(None);
+        }
+        self.runtime.read_files(preview, service, path).await
+    }
+
+    async fn write_files(&self, preview: &str, service: &str, dir: &str, tar: bytes::Bytes) -> anyhow::Result<bool> {
+        if self.apps.find(preview, service).await?.is_some() {
+            return Ok(false);
+        }
+        self.runtime.write_files(preview, service, dir, tar).await
+    }
+
+    /// roll apps drains its own instances' output (a drain's `previews`).
+    async fn drain_from(&self, preview: &str, service: &str, since: &str) -> Option<tokio::sync::mpsc::Receiver<(bool, String)>> {
+        if matches!(self.apps.find(preview, service).await, Ok(Some(_))) { None } else { self.runtime.drain_from(preview, service, since).await }
     }
 
     async fn seed(&self, job: &roll_previews::ports::SeedJob) -> anyhow::Result<(i32, String)> {

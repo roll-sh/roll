@@ -25,6 +25,10 @@ pub struct AccountPolicy {
     /// none is roll's week.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub idle_minutes: Option<u32>,
+    /// The longest a session lasts after its sign-in, however much it's used (Okta's maximum
+    /// session lifetime), in hours: 1 to 720; none is roll's 30 days.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_session_hours: Option<u32>,
     /// Whose sessions must use a passkey: admins, or everyone.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub phishing_resistant: Option<Whom>,
@@ -40,13 +44,23 @@ pub enum Whom {
 /// The shortest idle timeout: a session's last use is noted every five minutes.
 const MIN_IDLE: u32 = 15;
 const MAX_IDLE: u32 = 7 * 24 * 60;
+/// roll's own longest session, 30 days.
+const MAX_SESSION_HOURS: u32 = 30 * 24;
 
 impl AccountPolicy {
     fn checked(self) -> Result<Self> {
         if self.idle_minutes.is_some_and(|m| !(MIN_IDLE..=MAX_IDLE).contains(&m)) {
             return Err(crate::Error::BadRequest(format!("an idle timeout is {MIN_IDLE} minutes to a week ({MAX_IDLE} minutes)"), Some("policy")));
         }
+        if self.max_session_hours.is_some_and(|h| !(1..=MAX_SESSION_HOURS).contains(&h)) {
+            return Err(crate::Error::BadRequest(format!("the longest session is 1 to {MAX_SESSION_HOURS} hours"), Some("policy")));
+        }
         Ok(self)
+    }
+
+    /// How long a session lasts after its sign-in at most, in ms.
+    pub(crate) fn max_session_ms(&self) -> i64 {
+        self.max_session_hours.map_or(crate::SESSION_TTL_MS, |h| (h as i64 * 3_600_000).min(crate::SESSION_TTL_MS))
     }
 
     /// How long a session may go unused, in ms.

@@ -122,6 +122,44 @@ pub struct CorsSettings {
     pub max_age: Option<i64>,
 }
 
+/// A remote cluster's credentials: a `cross_cluster` API key of cluster `target_id` that
+/// cluster `cluster_id` reaches it with as its remote `alias` (`cluster.remote.<alias>.credentials`).
+#[derive(Clone, Serialize)]
+pub struct RemoteLink {
+    #[serde(skip)]
+    pub cluster_id: String,
+    pub alias: String,
+    pub target_id: String,
+    /// The key's id on the target (never its secret).
+    pub key_id: String,
+    /// The encoded key, sealed under the deployment's key (as given without one). Never returned.
+    #[serde(skip)]
+    pub credentials: String,
+    /// roll made the key (revoked when the link goes); else the person gave it.
+    pub minted: bool,
+    pub created_at: i64,
+}
+
+impl std::fmt::Debug for RemoteLink {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RemoteLink")
+            .field("cluster_id", &self.cluster_id)
+            .field("alias", &self.alias)
+            .field("target_id", &self.target_id)
+            .field("key_id", &self.key_id)
+            .field("credentials", &"<redacted>")
+            .field("minted", &self.minted)
+            .field("created_at", &self.created_at)
+            .finish()
+    }
+}
+
+const REMOTE_COLS: &str = "cluster_id, alias, target_id, key_id, credentials, minted, created_at";
+
+fn remote_row(r: &Row) -> code_sql::Result<RemoteLink> {
+    Ok(RemoteLink { cluster_id: r.get(0)?, alias: r.get(1)?, target_id: r.get(2)?, key_id: r.get(3)?, credentials: r.get(4)?, minted: r.get(5)?, created_at: r.get(6)? })
+}
+
 /// One entry of a cluster's IP allowlist.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct IpRule {
@@ -395,6 +433,11 @@ impl Store {
         db.ensure_schema("CREATE INDEX IF NOT EXISTS search_clusters_purge ON search_clusters (purge_at) WHERE deleted_at IS NOT NULL")?;
         // Credentials revoked while their cluster was deleted, for its restore to revoke.
         db.ensure_schema("CREATE TABLE IF NOT EXISTS search_revokes (cluster_id TEXT NOT NULL, credential TEXT NOT NULL, at INTEGER NOT NULL, PRIMARY KEY (cluster_id, credential))")?;
+        // Remote clusters' credentials (`cluster.remote.<alias>.credentials`): a cross-cluster
+        // API key of `target_id`, sealed, for cluster `cluster_id`'s remote `alias`.
+        db.ensure_schema(
+            "CREATE TABLE IF NOT EXISTS search_remotes (cluster_id TEXT NOT NULL, alias TEXT NOT NULL, target_id TEXT NOT NULL, key_id TEXT NOT NULL, credentials TEXT NOT NULL, minted INTEGER NOT NULL, created_at INTEGER NOT NULL, PRIMARY KEY (cluster_id, alias))",
+        )?;
         // Catalogs written before `code-sql` lack nothing but may lack the index on parents
         // (created above); their extra columns (`seq`) and tables (`search_tombstones`) are unused.
         Ok(Self { db })
@@ -690,6 +733,7 @@ impl Store {
             x.execute("DELETE FROM search_usage WHERE cluster_id = ?1", params![id])?;
             x.execute("DELETE FROM search_storage WHERE cluster_id = ?1", params![id])?;
             x.execute("DELETE FROM search_revokes WHERE cluster_id = ?1", params![id])?;
+            x.execute("DELETE FROM search_remotes WHERE cluster_id = ?1", params![id])?;
             x.execute("DELETE FROM search_metrics WHERE cluster_id = ?1", params![id])?;
             x.execute("DELETE FROM search_slowlog WHERE cluster_id = ?1", params![id])?;
             x.execute("DELETE FROM search_analytics WHERE cluster_id = ?1", params![id])?;
@@ -757,9 +801,45 @@ impl Store {
             x.execute("DELETE FROM search_slowlog WHERE cluster_id = ?1", params![id])?;
             x.execute("DELETE FROM search_analytics WHERE cluster_id = ?1", params![id])?;
             x.execute("DELETE FROM search_storage WHERE cluster_id = ?1", params![id])?;
+            x.execute("DELETE FROM search_remotes WHERE cluster_id = ?1", params![id])?;
             x.execute("DELETE FROM search_revokes WHERE cluster_id = ?1", params![id])
         })?;
         Ok(())
+    }
+
+    /// Keeps (or replaces) cluster `r.cluster_id`'s credentials for its remote `r.alias`;
+    /// returns what it replaced.
+    pub async fn put_remote(&self, r: &RemoteLink) -> anyhow::Result<Option<RemoteLink>> {
+        Ok(self.db.write(|x| {
+            let old = x.query_row(&format!("SELECT {REMOTE_COLS} FROM search_remotes WHERE cluster_id = ?1 AND alias = ?2"), params![r.cluster_id, r.alias], remote_row).optional()?;
+            x.execute(
+                "INSERT INTO search_remotes (cluster_id, alias, target_id, key_id, credentials, minted, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7) \
+                 ON CONFLICT (cluster_id, alias) DO UPDATE SET target_id = excluded.target_id, key_id = excluded.key_id, credentials = excluded.credentials, minted = excluded.minted, created_at = excluded.created_at",
+                params![r.cluster_id, r.alias, r.target_id, r.key_id, r.credentials, r.minted, r.created_at],
+            )?;
+            Ok::<_, code_sql::Error>(old)
+        })?)
+    }
+
+    /// Cluster `cluster_id`'s credentials for its remote `alias`.
+    pub async fn remote(&self, cluster_id: &str, alias: &str) -> anyhow::Result<Option<RemoteLink>> {
+        Ok(self.db.read(|x| x.query_row(&format!("SELECT {REMOTE_COLS} FROM search_remotes WHERE cluster_id = ?1 AND alias = ?2"), params![cluster_id, alias], remote_row).optional())?)
+    }
+
+    /// Every remote cluster `cluster_id` holds credentials for, by alias.
+    pub async fn remotes(&self, cluster_id: &str) -> anyhow::Result<Vec<RemoteLink>> {
+        Ok(self.db.read(|x| x.query(&format!("SELECT {REMOTE_COLS} FROM search_remotes WHERE cluster_id = ?1 ORDER BY alias"), params![cluster_id], remote_row))?)
+    }
+
+    /// Forgets cluster `cluster_id`'s credentials for remote `alias`; returns them.
+    pub async fn delete_remote(&self, cluster_id: &str, alias: &str) -> anyhow::Result<Option<RemoteLink>> {
+        Ok(self.db.write(|x| {
+            let old = x.query_row(&format!("SELECT {REMOTE_COLS} FROM search_remotes WHERE cluster_id = ?1 AND alias = ?2"), params![cluster_id, alias], remote_row).optional()?;
+            if old.is_some() {
+                x.execute("DELETE FROM search_remotes WHERE cluster_id = ?1 AND alias = ?2", params![cluster_id, alias])?;
+            }
+            Ok::<_, code_sql::Error>(old)
+        })?)
     }
 
     /// Stores what a node handed on of a cluster's search analytics, in one transaction: the

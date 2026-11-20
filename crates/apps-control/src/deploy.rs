@@ -53,7 +53,12 @@ impl Apps {
     pub async fn deploy(self: &Arc<Self>, service: &str, env: &str, body: Value, by: By, upload: Option<Bytes>, key: Option<&str>) -> Result<Deployment> {
         self.refuse_capped(service)?;
         self.refuse_paused(service, env).await?;
-        let o = body.as_object().cloned().unwrap_or_default();
+        let mut o = body.as_object().cloned().unwrap_or_default();
+        // A person's deploy in a freeze: refused, or let through with `override` (said).
+        if matches!(by.trigger, Trigger::Manual | Trigger::Upload) {
+            let over = o.remove("override").is_some_and(|v| v == true);
+            self.refuse_frozen(service, env, over, by.actor.clone()).await?;
+        }
         for k in o.keys() {
             if !["revision", "image", "message", "no_traffic", "no_cache", "image_upload", "closed"].contains(&k.as_str()) {
                 return Err(Error::BadRequest(format!("unknown field {k}")));
@@ -222,6 +227,9 @@ impl Apps {
     pub async fn redeploy(self: &Arc<Self>, service: &str, env: &str, body: Value, actor: Option<String>, key: Option<&str>) -> Result<Deployment> {
         self.refuse_capped(service)?;
         self.refuse_paused(service, env).await?;
+        let mut body = body;
+        let over = body.as_object_mut().and_then(|o| o.remove("override")).is_some_and(|v| v == true);
+        self.refuse_frozen(service, env, over, actor.clone()).await?;
         if let Some(k) = key {
             if k.is_empty() || k.len() > 200 || !k.bytes().all(|b| b.is_ascii_graphic()) {
                 return Err(Error::BadRequest("Idempotency-Key is 1–200 printable ASCII characters".into()));
@@ -290,7 +298,9 @@ impl Apps {
     pub async fn promote(self: &Arc<Self>, service: &str, env: &str, body: Value, actor: Option<String>) -> Result<Deployment> {
         self.refuse_capped(service)?;
         self.refuse_paused(service, env).await?;
-        let o = body.as_object().cloned().unwrap_or_default();
+        let mut o = body.as_object().cloned().unwrap_or_default();
+        let over = o.remove("override").is_some_and(|v| v == true);
+        self.refuse_frozen(service, env, over, actor.clone()).await?;
         if let Some(k) = o.keys().find(|k| !["from", "message", "expect"].contains(&k.as_str())) {
             return Err(Error::BadRequest(format!("unknown field {k}")));
         }
@@ -468,11 +478,12 @@ impl Apps {
 
     pub async fn deployments(self: &Arc<Self>, service: &str, env: &str, before: Option<i64>) -> Result<Vec<Deployment>> {
         let (sid, e) = (service.to_string(), env.to_string());
-        self.db(move |s| {
+        let deps = self.db(move |s| {
             s.environment(&sid, &e)?;
             s.deployments(&sid, &e, 100, before)
         })
-        .await
+        .await?;
+        self.with_scans(service, deps).await
     }
 
     /// Old deployments of the services this node owns, past what each environment keeps
@@ -525,6 +536,8 @@ impl Apps {
         }
         let id = dep.to_string();
         d.steps = self.db(move |s| s.steps(&id)).await?;
+        let id = dep.to_string();
+        d.vulnerabilities = self.db(move |s| s.scan(&id)).await?.map(|(sum, _)| sum);
         Ok(d)
     }
 
@@ -796,6 +809,30 @@ impl Apps {
             anyhow::bail!("canceled");
         }
         let mut dep = d.clone();
+        // Its sidecars' images pinned with it (a rollback or a redeploy runs the same ones).
+        let mut run = run;
+        // Every one's registry is checked, a pinned one's too (its pull comes at create).
+        for sc in &run.sidecars {
+            self.check_registry(&sc.image).await.map_err(|e| e.context(format!("sidecar {}", sc.name)))?;
+        }
+        if run.sidecars.iter().any(|s| !s.image.contains("@sha256:")) {
+            for sc in run.sidecars.iter_mut().filter(|s| !s.image.contains("@sha256:")) {
+                let pinned = self.deps.runtime.pull(&sc.image, log, None).await.map_err(|e| e.context(format!("sidecar {}", sc.name)))?;
+                log.line(format!("sidecar {}: pinned {pinned}", sc.name));
+                sc.image = pinned;
+            }
+            let (id, img, r) = (d.id.clone(), image.clone(), run.clone());
+            self.db(move |s| s.set_built(&id, &img, None, Some(&r))).await?;
+        }
+        // Its image's known vulnerabilities: before the rollout with `run.block_on` (never a
+        // rollback's: it's how out of a bad deploy), else beside it.
+        match run.block_on.filter(|_| d.trigger != Trigger::Rollback) {
+            Some(floor) => self.hold_on_vulnerabilities(&svc.id, &env.name, &d.id, &image, floor, &log.stream(Stream::System)).await?,
+            None => {
+                let (this, sid, en, did, img, log) = (self.clone(), svc.id.clone(), env.name.clone(), d.id.clone(), image.clone(), log.stream(Stream::System));
+                tokio::spawn(async move { this.scan_deployment(&sid, &en, &did, &img, &log).await });
+            }
+        }
         dep.image = Some(image);
         dep.run = run;
         // The plan the build just stored (a single-page app, say).
@@ -1005,11 +1042,9 @@ impl Apps {
                     } else {
                         continue;
                     };
-                    into.requests += s.requests;
-                    into.errors += s.errors;
-                    into.crashes += s.crashes;
+                    into.add(&s);
                 }
-                if let Some(why) = judge(new, old, r.error_pct) {
+                if let Some(why) = judge(new, old, r.error_pct, tpl.run.slo.as_ref().map(|s| (s, r.slo_burn.unwrap_or(crate::model::Rollout::SLO_BURN))), r.p95_pct) {
                     sys.line(format!("canary: rolled back at {share}%: {why}"));
                     anyhow::bail!("rolled back at {share}% of requests: {why}");
                 }
@@ -1050,11 +1085,9 @@ impl Apps {
                     } else {
                         continue;
                     };
-                    into.requests += s.requests;
-                    into.errors += s.errors;
-                    into.crashes += s.crashes;
+                    into.add(&s);
                 }
-                if let Some(why) = judge(new, old, r.error_pct) {
+                if let Some(why) = judge(new, old, r.error_pct, tpl.run.slo.as_ref().map(|s| (s, r.slo_burn.unwrap_or(crate::model::Rollout::SLO_BURN))), r.p95_pct) {
                     sys.line(format!("canary: rolled back at {share}% while held: {why}"));
                     anyhow::bail!("rolled back at {share}% of requests: {why}");
                 }
@@ -1539,6 +1572,20 @@ impl Apps {
         // Other ports its custom domains send to (Railway's target ports).
         let (sid, en) = (svc.id.clone(), env.name.clone());
         let domain_ports = self.db(move |s| s.domain_ports(&sid, &en)).await?;
+        // Each sidecar gets its own settings and only the variables it names.
+        let sidecars: Vec<crate::runtime::SidecarSpec> = run
+            .sidecars
+            .iter()
+            .filter(|_| matches!(run.kind, RunType::Web | RunType::Worker))
+            .map(|sc| crate::runtime::SidecarSpec {
+                name: sc.name.clone(),
+                image: sc.image.clone(),
+                command: sc.command.clone(),
+                vars: sc.env.iter().map(|(k, v)| (k.clone(), v.clone())).chain(sc.variables.iter().filter_map(|n| vars.iter().find(|(k, _)| k == n).cloned())).collect(),
+                cpu: sc.cpu,
+                memory_mb: sc.memory_mb,
+            })
+            .collect();
         let spec = InstanceSpec {
             name: String::new(),
             service: svc.id.clone(),
@@ -1548,7 +1595,20 @@ impl Apps {
             command: run.start.clone(),
             vars,
             port: if run.kind == RunType::Web { run.port } else { None },
-            ports: if run.kind == RunType::Web && !closed { domain_ports } else { Vec::new() },
+            // Custom domains' own ports, and its metrics endpoint's when that's another (never a
+            // closed instance's: nothing reaches it but through its sandbox).
+            ports: if closed {
+                Vec::new()
+            } else {
+                let mut p = if run.kind == RunType::Web { domain_ports } else { Vec::new() };
+                if let Some(mp) = run.metrics.as_ref().and_then(|m| m.port)
+                    && Some(mp) != run.port.filter(|_| run.kind == RunType::Web)
+                    && !p.contains(&mp)
+                {
+                    p.push(mp);
+                }
+                p
+            },
             cpu: run.cpu,
             memory_mb: run.memory_mb,
             network: Some(network),
@@ -1566,6 +1626,7 @@ impl Apps {
                 failures: run.health_failures.unwrap_or(3),
                 start: Duration::from_secs(run.health_timeout_s as u64),
             }),
+            sidecars,
         };
         let spa = dep.plan.as_ref().is_some_and(|p| p["spa"] == true);
         // A static plan whose files were exported answers from them, with no instance.
@@ -1576,7 +1637,13 @@ impl Apps {
             }
             _ => None,
         };
-        Ok(Template { deployment: dep.id.clone(), spec, run, spa, site })
+        // Its edge functions, run by `<name>-fn` (what Run its functions makes).
+        let edge: Vec<apps_build::edge::EdgeFn> = match &site {
+            Some(_) => dep.plan.as_ref().and_then(|p| serde_json::from_value(p["edge"].clone()).ok()).unwrap_or_default(),
+            None => Vec::new(),
+        };
+        let edge_service: String = format!("{}-fn", svc.name).chars().take(40).collect();
+        Ok(Template { deployment: dep.id.clone(), spec, run, spa, site, edge, edge_service })
     }
 
     // ── the owner's background work ──
@@ -1855,8 +1922,11 @@ impl Apps {
         let (a, limit_mb) = (tpl.run.alerts.clone(), tpl.run.memory_mb);
         let now = code_sql::now_ms() / 60_000;
         let (sid, e) = (l.service.clone(), l.env.clone());
-        let Ok(rows) = self.db(move |s| s.minutes(&sid, &e, now - 5)).await else { return };
-        let rows: Vec<_> = rows.into_iter().filter(|r| r.minute < now).collect();
+        // Five minutes for the alerts; six hours with an objective, for its burn.
+        let back = if tpl.run.slo.is_some() { crate::slo::LONGEST } else { 5 };
+        let Ok(all) = self.db(move |s| s.minutes(&sid, &e, now - back)).await else { return };
+        let all: Vec<_> = all.into_iter().filter(|r| r.minute < now).collect();
+        let rows: Vec<_> = all.iter().filter(|r| r.minute >= now - 5).cloned().collect();
         let mut firing: Vec<(&'static str, serde_json::Value)> = Vec::new();
         if a.memory_pct > 0 && rows.len() >= 5 {
             let share = |r: &crate::store::MinuteRow| r.memory_bytes as f64 / r.instances.max(1) as f64 / (limit_mb as f64 * 1048576.0) * 100.0;
@@ -1881,6 +1951,18 @@ impl Apps {
                 firing.push(("alert.latency", serde_json::json!({ "value": value, "threshold": a.p95_ms })));
             }
         }
+        // Its log-based metrics: the minute's matching lines, as gauges beside its own metrics.
+        if !tpl.run.log_metrics.is_empty() {
+            let key = format!("env:{}/{}", l.service, l.env);
+            let since = code_sql::now_ms() - 60_000;
+            let sink = self.logs.sink(crate::traces::metric_key(&l.service, &l.env), Stream::System);
+            let at = code_sql::now_ms() as u64 * 1_000_000;
+            for m in &tpl.run.log_metrics {
+                let n = self.logs.count_recent(&key, &m.pattern, since);
+                let p = crate::otlp::Point { name: m.name.clone(), kind: "gauge".into(), unit: String::new(), time: at, value: n as f64, count: None, counter: false, attrs: vec![("source".into(), "log".into())] };
+                sink.line(serde_json::to_string(&p).expect("a point serializes"));
+            }
+        }
         // Its output saying something often enough (system lines are roll's, and the alert's
         // own line names the pattern: only stdout and stderr count).
         if let Some(pat) = a.log_match.as_deref() {
@@ -1891,7 +1973,12 @@ impl Apps {
                 firing.push(("alert.log", serde_json::json!({ "pattern": pat, "count": count, "threshold": a.log_count })));
             }
         }
-        for kind in ["alert.memory", "alert.errors", "alert.latency", "alert.capacity", "alert.log"] {
+        if let Some(slo) = &tpl.run.slo
+            && let Some((indicator, rate, window)) = crate::slo::burning(slo, &all, now)
+        {
+            firing.push(("alert.slo", serde_json::json!({ "indicator": indicator, "burn_rate": (rate * 10.0).round() / 10.0, "window": window, "objective": slo.objective })));
+        }
+        for kind in ["alert.memory", "alert.errors", "alert.latency", "alert.capacity", "alert.log", "alert.slo"] {
             let key = format!("{}/{}/{kind}", l.service, l.env);
             match firing.iter().find(|(k, _)| *k == kind) {
                 Some((_, data)) => {
@@ -1957,6 +2044,9 @@ impl Apps {
                     l.tick().await;
                     l.ticking.store(false, Ordering::SeqCst);
                 });
+            }
+            if n.is_multiple_of(crate::prom::EVERY_S) {
+                self.scrape_pass();
             }
             if n.is_multiple_of(10) {
                 self.flush_meters(false).await;
@@ -2373,6 +2463,10 @@ impl Apps {
     pub async fn cron_pass(self: &Arc<Self>, now: i64) {
         let Ok(services) = self.db(|s| s.services(None)).await else { return };
         self.schedules_pass(&services, now).await;
+        self.checks_pass(&services, now).await;
+        self.heartbeats_pass(&services, now).await;
+        self.rescan_pass(&services, now).await;
+        self.pause_pass(&services, now).await;
         for svc in services.into_iter().filter(|s| s.run.kind == RunType::Cron && self.owns(&s.id) && !self.capped(&s.id)) {
             let Some(schedule) = svc.run.schedule.as_deref().and_then(|s| crate::cron::Schedule::parse(s, svc.run.timezone.as_deref()).ok()) else { continue };
             let sid = svc.id.clone();
@@ -2655,10 +2749,29 @@ impl Apps {
 /// Whether a canary step fails: the new deployment answered `error_pct` or more of at least
 /// [`Rollout::MIN_REQUESTS`] requests with a 5xx, and more often than the old one (an outage
 /// both share, a database down, isn't the new code's fault).
-fn judge(new: crate::live::Served, old: crate::live::Served, error_pct: u8) -> Option<String> {
+fn judge(new: crate::live::Served, old: crate::live::Served, error_pct: u8, slo: Option<(&crate::model::Slo, f64)>, p95_pct: Option<u32>) -> Option<String> {
+    // Slower than the old one by more than it allows (Flagger's request duration), each side
+    // with enough answers timed.
+    if let (Some(pct), Some(n), Some(o)) = (p95_pct, new.p95_ms(), old.p95_ms())
+        && new.requests >= crate::model::Rollout::MIN_REQUESTS
+        && old.requests >= crate::model::Rollout::MIN_REQUESTS
+        && n > o * (1.0 + pct as f64 / 100.0)
+    {
+        return Some(format!("its p95 was about {n:.0} ms, the old deployment's {o:.0} ms (the step allows {pct}% worse)"));
+    }
     // Crashes no request saw (a failed health check, a process that exits).
     if new.crashes >= 2 && new.crashes > old.crashes {
         return Some(format!("its instances crashed {} times (the old deployment's {})", new.crashes, old.crashes));
+    }
+    // The objective's budget, spent too fast by the new one (and faster than the old one).
+    if let Some((s, max)) = slo
+        && new.requests >= crate::model::Rollout::MIN_REQUESTS
+        && new.error_pct() > old.error_pct()
+    {
+        let burn = (new.error_pct() / 100.0) / (1.0 - s.objective / 100.0);
+        if burn >= max {
+            return Some(format!("it spent the error budget of the {}% objective {burn:.1}× as fast as it lasts ({} of its {} requests were 5xx; the step allows {max}×)", s.objective, new.errors, new.requests));
+        }
     }
     if new.requests < crate::model::Rollout::MIN_REQUESTS || new.error_pct() < error_pct as f64 || new.error_pct() <= old.error_pct() {
         return None;
@@ -2755,6 +2868,13 @@ pub(crate) enum Held {
 }
 
 pub(crate) fn hold_of(svc: &crate::store::ServiceRow, e: &crate::store::EnvRow) -> Held {
+    // A freeze holds as a person's hold does, saying why.
+    if let Some(f) = e.freeze.as_ref().filter(|f| f.on(code_sql::now_ms())) {
+        return match svc.run.kind == RunType::Web && svc.run.volume.is_none() {
+            true => Held::Ready,
+            false => Held::Skip(format!("{}, and this service's can't wait beside the live one", f.says())),
+        };
+    }
     match e.held_by.as_deref() {
         None => Held::No,
         Some(MANUAL_HOLD) if svc.run.kind == RunType::Web && svc.run.volume.is_none() => Held::Ready,
@@ -2770,6 +2890,38 @@ impl Held {
             body["no_traffic"] = serde_json::json!(true);
         }
         body
+    }
+}
+
+#[cfg(test)]
+mod judge_tests {
+    use super::judge;
+    use crate::live::Served;
+
+    #[test]
+    fn a_step_that_spends_the_objectives_budget_too_fast_fails() {
+        let served = |requests: u64, errors: u64| Served { requests, errors, ..Default::default() };
+        let slo = crate::model::Slo { objective: 99.0, latency_ms: None, window_days: 28 };
+        // 3% of 100 is under the 5% rule, but 3× the 99% objective's budget: past a 2× step.
+        assert_eq!(judge(served(100, 3), served(100, 0), 5, None, None), None);
+        assert!(judge(served(100, 3), served(100, 0), 5, Some((&slo, 2.0)), None).unwrap().contains("3.0× as fast"));
+        assert_eq!(judge(served(100, 3), served(100, 0), 5, Some((&slo, 14.4)), None), None, "under the default burn");
+        assert_eq!(judge(served(100, 3), served(100, 5), 5, Some((&slo, 2.0)), None), None, "the old one is worse");
+        assert_eq!(judge(served(10, 3), served(100, 0), 5, Some((&slo, 2.0)), None), None, "too few requests to say");
+    }
+
+    #[test]
+    fn a_step_much_slower_than_the_old_deployment_fails() {
+        let timed = |ms: f64| {
+            let mut s = Served { requests: 100, ..Default::default() };
+            for _ in 0..100 {
+                s.took(ms);
+            }
+            s
+        };
+        assert!(judge(timed(400.0), timed(100.0), 5, None, Some(50)).unwrap().contains("p95"));
+        assert_eq!(judge(timed(120.0), timed(100.0), 5, None, Some(50)), None, "within 50%");
+        assert_eq!(judge(timed(400.0), timed(100.0), 5, None, None), None, "off unless asked");
     }
 }
 

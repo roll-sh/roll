@@ -570,7 +570,7 @@ impl Secrets {
                 "INSERT INTO kubernetes_clusters (id, project_id, name, api_url, token, ca, created_at, created_by) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
                 params![id, project, k.name, k.api_url, sealed_token, sealed_ca, now, k.created_by],
             )?;
-            audit::record(c, project, caller, "kubernetes.add", None, None, &[], &format!("added Kubernetes cluster {} ({host})", k.name), now)
+            audit::record(c, self.keys()?, project, caller, "kubernetes.add", None, None, &[], &format!("added Kubernetes cluster {} ({host})", k.name), now)
         })?;
         Ok(k)
     }
@@ -593,7 +593,7 @@ impl Secrets {
                 return Err(Error::Conflict("in_use", format!("{name} has {live} lease(s) still live: delete it once they've ended")));
             }
             c.execute("DELETE FROM kubernetes_clusters WHERE id = ?", [id])?;
-            audit::record(c, project, caller, "kubernetes.delete", None, None, &[], &format!("deleted Kubernetes cluster {name}"), now)
+            audit::record(c, self.keys()?, project, caller, "kubernetes.delete", None, None, &[], &format!("deleted Kubernetes cluster {name}"), now)
         })
     }
 

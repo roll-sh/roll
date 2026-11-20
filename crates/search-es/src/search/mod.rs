@@ -197,6 +197,8 @@ pub struct SearchOutcome {
     pub ranked: Vec<(usize, u32, f32)>,
     /// A cross-cluster search's `_clusters` section.
     pub clusters: Option<Value>,
+    /// `num_reduce_phases` of a search over linked remote clusters (printed unless 1).
+    pub reduce_phases: Option<usize>,
 }
 
 fn list(s: &str) -> Vec<String> {
@@ -2754,6 +2756,7 @@ fn execute_targets(cluster: &Cluster, req: &SearchRequest, targets: &[Target]) -
             pit_id: None,
             ranked,
             clusters: None,
+            reduce_phases: None,
         });
     }
     let opts = FetchOpts {
@@ -3036,6 +3039,7 @@ fn execute_targets(cluster: &Cluster, req: &SearchRequest, targets: &[Target]) -
         pit_id: None,
         ranked,
         clusters: None,
+        reduce_phases: None,
     })
 }
 
@@ -3868,6 +3872,9 @@ fn render_with(o: &SearchOutcome, req: &SearchRequest, top_hits: Vec<Value>) -> 
     if let Some(t) = o.terminated_early {
         m.insert("terminated_early".into(), Value::Bool(t));
     }
+    if let Some(n) = o.reduce_phases.filter(|n| *n != 1) {
+        m.insert("num_reduce_phases".into(), Value::from(n as i64));
+    }
     let mut shards = Map::new();
     shards.insert("total".into(), Value::from(o.shards_total as i64));
     shards.insert("successful".into(), Value::from((o.shards_total - o.failures.len()) as i64));
@@ -3973,6 +3980,8 @@ pub(crate) fn analytics_record(ctx: &Ctx, watch: Option<Watch>, req: &SearchRequ
 
 pub async fn search(ctx: &Ctx<'_>) -> EsResult<Reply> {
     let mut body = ctx.body()?;
+    // A search naming remote clusters keeps the body it was sent for the linked ones.
+    let original = ctx.param("index").is_some_and(|i| i.contains(':')).then(|| body.clone()).flatten();
     let watch = analytics_watch(ctx, body.as_ref());
     // OpenSearch: the search pipeline the request names, defines inline or its index defaults to.
     let pipeline = if ctx.cluster.dialect == crate::cluster::Dialect::OpenSearch {
@@ -4007,6 +4016,11 @@ pub async fn search(ctx: &Ctx<'_>) -> EsResult<Reply> {
     };
     if verbose && pipeline.is_none() {
         return Err(EsError::illegal_argument("The 'verbose pipeline' option requires a search pipeline to be defined."));
+    }
+    // Boxed: the remote fan-out stays off the request path's stack.
+    if let Some(mut out) = Box::pin(crate::remote::links::search(ctx, &req, original.as_ref())).await? {
+        analytics_record(ctx, watch, &req, &out);
+        return Reply::ok(render_take(&mut out, &req));
     }
     let Some(pipeline) = pipeline else {
         // Hits carry their stored `_source` bytes as they are when the page goes straight out
@@ -4336,10 +4350,10 @@ pub async fn msearch(ctx: &Ctx<'_>) -> EsResult<Reply> {
         if let Some(Value::Str(st)) = h.get("search_type") {
             req.dfs = st == "dfs_query_then_fetch";
         }
-        reqs.push(req);
+        reqs.push((req, b));
     }
     let mut errs = Vec::new();
-    for req in &reqs {
+    for (req, _) in &reqs {
         errs.extend(validate(req));
         if let Some(a) = &req.source.aggs {
             errs.extend(aggs::validation_errors(a));
@@ -4356,7 +4370,7 @@ pub async fn msearch(ctx: &Ctx<'_>) -> EsResult<Reply> {
     // such accounting.
     let mut held = (ctx.cluster.dialect != crate::cluster::Dialect::OpenSearch)
         .then(|| crate::breaker::Reservation::new(ctx.cluster.breakers.request(ctx.cluster, &ctx.state())));
-    for (mut req, watch) in reqs.into_iter().zip(watches) {
+    for ((mut req, body), watch) in reqs.into_iter().zip(watches) {
         // Each search is authorized as a search request of its own.
         let r = match crate::xpack::security::authorize_search(ctx, &req.indices, &req.opts) {
             Ok(narrowed) => {
@@ -4365,7 +4379,12 @@ pub async fn msearch(ctx: &Ctx<'_>) -> EsResult<Reply> {
                 }
                 // Queries that need inference, per search.
                 match crate::xpack::inference::query::rewrite_request(ctx, &mut req).await {
-                    Ok(()) => run(ctx, req.clone()),
+                    // Linked remote clusters' parts run there.
+                    Ok(()) => match Box::pin(crate::remote::links::search(ctx, &req, body.as_ref())).await {
+                        Ok(Some(out)) => Ok(out),
+                        Ok(None) => run(ctx, req.clone()),
+                        Err(e) => Err(e),
+                    },
                     Err(e) => Err(e),
                 }
             }

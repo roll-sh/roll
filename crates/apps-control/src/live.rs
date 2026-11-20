@@ -48,6 +48,9 @@ pub struct Template {
     /// A static site whose files were exported (`sites.rs`): the proxy serves them by this key
     /// (the image's digest) and no instance ever runs.
     pub site: Option<String>,
+    /// That site's edge functions ([`crate::edge`]), and the service that runs them.
+    pub edge: Vec<apps_build::edge::EdgeFn>,
+    pub edge_service: String,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -88,6 +91,8 @@ pub struct Inst {
     /// start.
     wanted: Vec<u16>,
     ports: Mutex<HashMap<u16, SocketAddr>>,
+    /// A scrape of its metrics endpoint is out ([`crate::prom`]).
+    scraping: AtomicBool,
 }
 
 /// An instance's last hour by minute ([`EnvLive::by_instance`]).
@@ -150,6 +155,7 @@ impl Inst {
             minutes: Mutex::new(std::collections::VecDeque::new()),
             wanted: Vec::new(),
             ports: Mutex::new(HashMap::new()),
+            scraping: AtomicBool::new(false),
         })
     }
 
@@ -160,6 +166,23 @@ impl Inst {
             i.wanted = tpl.spec.ports.clone();
         }
         i
+    }
+
+    /// Where it answers while it runs (never while suspended or stopped).
+    pub fn running_addr(&self) -> Option<SocketAddr> {
+        match *self.phase.lock() {
+            Phase::Running(a) => a,
+            _ => None,
+        }
+    }
+
+    /// Whether this scrape may start (none other is out).
+    pub fn begin_scrape(&self) -> bool {
+        !self.scraping.swap(true, Ordering::SeqCst)
+    }
+
+    pub fn end_scrape(&self) {
+        self.scraping.store(false, Ordering::SeqCst);
     }
 
     /// Where it answers on `port` (a custom domain's own), if it publishes it.
@@ -264,17 +287,61 @@ impl Drop for Held {
 }
 
 /// One deployment's answers during a canary step.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Served {
     pub requests: u64,
     pub errors: u64,
     /// Its instances that crashed or failed their health check (no request sees those).
     pub crashes: u64,
+    /// Its answers' times: how many in each of [`LAT_BUCKETS`] buckets of √2 steps (ms).
+    pub lat: [u32; LAT_BUCKETS],
+}
+
+/// Buckets of a step's answer times: bucket `i` holds up to √2^(i+1) ms (the last, the rest).
+pub const LAT_BUCKETS: usize = 48;
+
+impl Default for Served {
+    fn default() -> Self {
+        Served { requests: 0, errors: 0, crashes: 0, lat: [0; LAT_BUCKETS] }
+    }
 }
 
 impl Served {
     pub fn error_pct(&self) -> f64 {
         if self.requests == 0 { 0.0 } else { self.errors as f64 * 100.0 / self.requests as f64 }
+    }
+
+    /// One answer that took `ms`.
+    pub fn took(&mut self, ms: f64) {
+        let i = if ms <= 1.0 { 0 } else { ((ms.log2() * 2.0).ceil() as usize).saturating_sub(1).min(LAT_BUCKETS - 1) };
+        self.lat[i] = self.lat[i].saturating_add(1);
+    }
+
+    /// Its answers' p95 (the bucket's top, ms), when it timed any.
+    pub fn p95_ms(&self) -> Option<f64> {
+        let n: u64 = self.lat.iter().map(|&c| c as u64).sum();
+        if n == 0 {
+            return None;
+        }
+        let want = (n as f64 * 0.95).ceil() as u64;
+        let mut seen = 0;
+        for (i, &c) in self.lat.iter().enumerate() {
+            seen += c as u64;
+            if seen >= want {
+                return Some(2f64.powf((i + 1) as f64 / 2.0));
+            }
+        }
+        None
+    }
+
+    /// Another's counts added in.
+    pub fn add(&mut self, o: &Served) {
+        self.requests += o.requests;
+        self.errors += o.errors;
+        self.crashes += o.crashes;
+        for (a, b) in self.lat.iter_mut().zip(o.lat.iter()) {
+            *a = a.saturating_add(*b);
+        }
     }
 }
 
@@ -304,6 +371,10 @@ pub struct Gate {
     pub vitals: bool,
     /// Its challenge rules' key ([`crate::challenge`]), when it has such a rule.
     pub challenge_key: Option<Vec<u8>>,
+    /// Its split test.
+    pub split: Option<crate::model::Split>,
+    /// Where a share of its bodiless requests is copied.
+    pub mirror: Option<crate::model::Split>,
 }
 
 /// A rate-limit bucket: which (0 the environment's, 1 + i firewall rule i's) and whose.
@@ -327,8 +398,8 @@ impl Gate {
     /// matching, it does.
     /// What its firewall says of the request: the first rule that matches decides; none lets it
     /// in.
-    pub fn firewall_verdict(&self, method: &str, path: &str, user_agent: &str) -> Verdict {
-        match self.firewall.iter().enumerate().find(|(_, r)| r.matches(method, path, user_agent)) {
+    pub fn firewall_verdict(&self, asked: &crate::model::Asked<'_>) -> Verdict {
+        match self.firewall.iter().enumerate().find(|(_, r)| r.matches(asked)) {
             None => Verdict::Allow,
             Some((_, r)) if r.action == crate::model::FirewallAction::Allow => Verdict::Allow,
             Some((i, r)) if r.action == crate::model::FirewallAction::Limit => Verdict::Limit(i as u16 + 1, crate::model::RateLimit { per_minute: r.per_minute.unwrap_or(60), burst: r.burst }),
@@ -584,11 +655,14 @@ impl EnvLive {
 
     /// The proxy's answer to a request `inst` served: counted per deployment while a canary
     /// runs (the rollout judges the new deployment by them).
-    pub fn answered(&self, inst: &Inst, status: u16) {
+    pub fn answered(&self, inst: &Inst, status: u16, ms: Option<f64>) {
         self.count(&inst.deployment, |s| {
             s.requests += 1;
             if status >= 500 {
                 s.errors += 1;
+            }
+            if let Some(ms) = ms {
+                s.took(ms);
             }
         });
     }
@@ -1839,16 +1913,17 @@ impl EnvLive {
                         let d = u.cpu_ns.saturating_sub(prev) as f64 / 1e9;
                         i.record(now_ms() / 60_000, d, elapsed, u.memory_bytes);
                         cpu += d;
+                        // Its sidecars' use is the instance's (usage adds it): so is their size.
                         if let Some(tpl) = self.serving(&i.deployment) {
                             used += d;
-                            capacity += tpl.run.cpu * elapsed;
+                            capacity += (tpl.run.cpu + tpl.spec.sidecars_size().0) * elapsed;
                         }
                     }
                     *seen = Some(u.cpu_ns);
                     mem += u.memory_bytes;
                     if let Some(tpl) = self.serving(&i.deployment) {
                         mem_used += u.memory_bytes as f64;
-                        mem_cap += ((tpl.run.memory_mb as u64) << 20) as f64;
+                        mem_cap += (((tpl.run.memory_mb + tpl.spec.sidecars_size().1) as u64) << 20) as f64;
                     }
                 }
                 // A runtime that can't say what an instance uses (Fargate, which bills by size ×
@@ -1960,7 +2035,9 @@ impl EnvLive {
     }
 
     async fn reap_web(self: &Arc<Self>, tpl: &Arc<Template>) {
-        let run = &tpl.run;
+        // Its floor as its schedule has it now.
+        let scheduled = tpl.run.at(code_sql::now_ms());
+        let run = &scheduled;
         // A deployment's own URL's instances are reap_viewed's, not part of the scale.
         let insts: Vec<Arc<Inst>> = self.instances().into_iter().filter(|i| !self.only_viewed(&i.deployment)).collect();
         let suspend_after = Duration::from_secs(run.suspend_after_s as u64);
@@ -2089,7 +2166,8 @@ impl EnvLive {
     }
 
     async fn keep_workers(self: &Arc<Self>, tpl: &Arc<Template>) {
-        let run = &tpl.run;
+        let scheduled = tpl.run.at(code_sql::now_ms());
+        let run = &scheduled;
         // A worker that follows its work runs what its backlog wants; else its floor.
         let target = match &run.scale {
             Some(_) => self.wanted.load(Ordering::SeqCst).clamp(run.min_instances, run.max_instances.max(run.min_instances)),
@@ -2268,7 +2346,9 @@ impl EnvLive {
         let _ = self.runtime.stop(&inst.name, Duration::from_secs(10)).await;
         let secs = began.elapsed().as_secs_f64();
         // A run is metered at its allocation: it's short, and the container is gone after.
-        self.meter.lock().sample(now_ms(), secs * tpl.run.cpu * 0.5, (tpl.run.memory_mb as u64) << 20, secs, 1);
+        // With its sidecars' size: they run beside it.
+        let (side_cpu, side_mb) = tpl.spec.sidecars_size();
+        self.meter.lock().sample(now_ms(), secs * (tpl.run.cpu + side_cpu) * 0.5, ((tpl.run.memory_mb + side_mb) as u64) << 20, secs, 1);
         self.runtime.remove(&inst.name).await;
         let (code, timed_out, canceled) = ran?;
         Ok(Exit { deployment: tpl.deployment.clone(), container: inst.name.clone(), code, timed_out, canceled })
@@ -2313,7 +2393,9 @@ impl EnvLive {
             return Err(e);
         }
         self.runtime.settle(&inst.name).await;
-        Ok(ConsoleBox { name: inst.name.clone(), began: Instant::now(), cpu: tpl.run.cpu, memory_mb: tpl.run.memory_mb })
+        // Metered with its sidecars, which run beside it.
+        let (side_cpu, side_mb) = tpl.spec.sidecars_size();
+        Ok(ConsoleBox { name: inst.name.clone(), began: Instant::now(), cpu: tpl.run.cpu + side_cpu, memory_mb: tpl.run.memory_mb + side_mb })
     }
 
     /// A console ended: its container stops and goes, metered at its allocation as a run is.
@@ -2368,10 +2450,13 @@ mod tests {
                 registry: None,
                 files: vec![],
                 health: None,
+                sidecars: vec![],
             },
             run,
             spa: false,
             site: None,
+            edge: Vec::new(),
+            edge_service: String::new(),
         })
     }
 

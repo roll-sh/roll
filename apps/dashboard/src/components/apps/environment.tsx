@@ -72,6 +72,10 @@ export function EnvironmentPanel({ service, env, runner, onDeleted }: { service:
     setPromoting({ from, deployment: source.id, revision: source.revision, missing });
   };
   const [link, setLink] = useState<string | null>(null);
+  const [pauseFrom, setPauseFrom] = useState("fri 19:00");
+  const [pauseTo, setPauseTo] = useState("mon 07:00");
+  const [freezeWhy, setFreezeWhy] = useState("");
+  const [password, setPassword] = useState("");
   const [hook, setHook] = useState<string | null>(null);
   const [deleting, setDeleting] = useState(false);
   const [notice, setNotice] = useState(env.maintenance?.message ?? "");
@@ -235,6 +239,65 @@ export function EnvironmentPanel({ service, env, runner, onDeleted }: { service:
           <button className={btn} disabled={busy} aria-pressed={!!env.held} onClick={() => runner.run("hold", () => appsApi.putEnvironment(service.id, env.name, { held: !env.held }))}>
             {env.held ? "Resume deploys" : "Hold deploys"}
           </button>
+        </div>
+
+        <div className="flex flex-wrap items-center justify-between gap-3 px-5 py-4">
+          <div className="min-w-0 flex-1">
+            <p className="text-[13px] font-medium">Pause on a schedule</p>
+            <p className="mt-1 text-[12px] text-muted">
+              {env.pause_schedule
+                ? `Paused ${env.pause_schedule.windows.map((w) => `${w.from} – ${w.to}`).join(", ")}${env.pause_schedule.timezone ? ` (${env.pause_schedule.timezone})` : " (UTC)"}; resumed as each ends. Pausing or resuming by hand holds until the window ends.`
+                : "Nothing runs in the windows you set (a staging site at night): paused as one starts, resumed as it ends."}
+            </p>
+          </div>
+          {env.pause_schedule ? (
+            <button className={btn} disabled={busy} onClick={() => runner.run("pause-schedule", () => appsApi.putEnvironment(service.id, env.name, { pause_schedule: null }))}>
+              Remove the schedule
+            </button>
+          ) : (
+            <form
+              className="flex gap-2"
+              onSubmit={(e) => {
+                e.preventDefault();
+                void runner.run("pause-schedule", () => appsApi.putEnvironment(service.id, env.name, { pause_schedule: { windows: [{ from: pauseFrom.trim(), to: pauseTo.trim() }], timezone: Intl.DateTimeFormat().resolvedOptions().timeZone } }));
+              }}
+            >
+              <input value={pauseFrom} onChange={(e) => setPauseFrom(e.target.value)} aria-label="From" className={`${input} w-24 font-mono text-[12px]`} />
+              <input value={pauseTo} onChange={(e) => setPauseTo(e.target.value)} aria-label="To" className={`${input} w-24 font-mono text-[12px]`} />
+              <button type="submit" className={btn} disabled={busy}>
+                Pause then
+              </button>
+            </form>
+          )}
+        </div>
+
+        <div className="flex flex-wrap items-center justify-between gap-3 px-5 py-4">
+          <div className="min-w-0 flex-1">
+            <p className="text-[13px] font-medium">Freeze deploys</p>
+            <p className="mt-1 text-[12px] text-muted">
+              {env.freeze
+                ? `${env.frozen ? "Frozen now" : "Not frozen right now"}${env.freeze.reason ? `: ${env.freeze.reason}` : ""}${env.freeze.until ? `, until ${new Date(env.freeze.until).toLocaleString()}` : ""}${env.freeze.windows?.length ? `, ${env.freeze.windows.map((w) => `${w.from}–${w.to}`).join(", ")}` : ""}. A rollback always works.`
+                : "A change window: pushes and hooks build without going live, deploying by hand needs an override, a rollback always works."}
+            </p>
+          </div>
+          {env.freeze ? (
+            <button className={btn} disabled={busy} onClick={() => runner.run("unfreeze", () => appsApi.putEnvironment(service.id, env.name, { freeze: null }))}>
+              Lift the freeze
+            </button>
+          ) : (
+            <form
+              className="flex gap-2"
+              onSubmit={(e) => {
+                e.preventDefault();
+                void runner.run("freeze", () => appsApi.putEnvironment(service.id, env.name, { freeze: freezeWhy.trim() ? { reason: freezeWhy.trim() } : {} })).then((r) => r && setFreezeWhy(""));
+              }}
+            >
+              <input value={freezeWhy} onChange={(e) => setFreezeWhy(e.target.value)} placeholder="why (optional)" aria-label="Why" maxLength={200} className={`${input} w-44 text-[12px]`} />
+              <button type="submit" className={btn} disabled={busy}>
+                Freeze
+              </button>
+            </form>
+          )}
         </div>
 
         <div className="flex flex-wrap items-center justify-between gap-3 px-5 py-4">
@@ -410,11 +473,13 @@ export function EnvironmentPanel({ service, env, runner, onDeleted }: { service:
         <div className="space-y-3 px-5 py-4">
           <div className="flex flex-wrap items-center justify-between gap-3">
             <div>
-              <p className="text-[13px] font-medium">{env.signed_in ? "Signed in to roll" : env.private ? "Private" : "Public"}</p>
+              <p className="text-[13px] font-medium">{env.signed_in ? "Signed in to roll" : env.password ? "Password" : env.private ? "Private" : "Public"}</p>
               <p className="mt-1 text-[12px] text-muted">
                 {env.signed_in
                   ? "Only people signed in to roll who can open this project get in: anyone else is sent to sign in first, before anything wakes."
-                  : env.private
+                  : env.password
+                    ? "Visitors type its password on roll's page (a session for seven days); nothing wakes before they do."
+                    : env.private
                     ? "Only visitors with its link get in; everyone else gets a 401 before anything wakes."
                     : "Anyone with its URL can open it."}
               </p>
@@ -439,6 +504,24 @@ export function EnvironmentPanel({ service, env, runner, onDeleted }: { service:
               </button>
             </div>
           </div>
+          {!env.signed_in && (
+            <form
+              className="flex flex-wrap items-center gap-2"
+              onSubmit={(e) => {
+                e.preventDefault();
+                void runner.run("access", () => appsApi.putEnvironment(service.id, env.name, { access: { password } })).then((r) => {
+                  if (!r) return;
+                  setPassword("");
+                  setLink(null);
+                });
+              }}
+            >
+              <input type="password" value={password} onChange={(e) => setPassword(e.target.value)} placeholder={env.password ? "a new password (ends every session)" : "a password visitors type (8 or more)"} aria-label="Password" autoComplete="new-password" className={`${input} min-w-48 flex-1 text-[12px]`} />
+              <button type="submit" className={btn} disabled={busy || password.length < 8}>
+                {env.password ? "Change password" : "Use a password"}
+              </button>
+            </form>
+          )}
           {link && (
             <div className="rise rounded-lg border border-line bg-bg px-3 py-2">
               <p className="text-[11px] text-subtle">The private link, shown once (only its hash is kept):</p>

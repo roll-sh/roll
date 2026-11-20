@@ -1158,7 +1158,8 @@ pub fn get_settings(ctx: &Ctx) -> EsResult<Reply> {
         let m = super::nodes::NodeMetrics::sample(ctx.cluster);
         let mut node = vec![("node.attr.ml.allocated_processors_double".to_string(), format!("{:.1}", m.processors as f64))];
         node.extend(super::nodes::node_attributes(ctx.cluster, &m).into_iter().map(|(k, v)| (format!("node.attr.{k}"), v)));
-        node.extend(ctx.cluster.config.shown_node_settings());
+        // `roll.security.*` holds credentials and other tenants' names: never printed.
+        node.extend(ctx.cluster.config.shown_node_settings().into_iter().filter(|(k, _)| !k.starts_with("roll.security.")));
         for (k, v) in node {
             if !set.contains(&k) {
                 defaults.set(k, v);
@@ -1188,6 +1189,8 @@ pub async fn put_settings(ctx: &Ctx<'_>) -> EsResult<Reply> {
     }
     cluster_settings::validate_update_in(ctx.cluster.dialect, "persistent", &persistent)?;
     cluster_settings::validate_update_in(ctx.cluster.dialect, "transient", &transient)?;
+    // A remote naming a roll search cluster: only one of this cluster's owner.
+    Box::pin(crate::remote::links::check_settings(ctx.cluster, &[&persistent, &transient])).await?;
     // `Setting.Property.Deprecated` (warned on every update, a reset included; `ctx.warn` is
     // Elasticsearch-only).
     for k in persistent.iter().chain(transient.iter()).map(|(k, _)| k.as_str()) {

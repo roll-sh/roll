@@ -133,7 +133,7 @@ pub fn start(
     let apps_for_notes = apps.clone();
     let shots: Option<Arc<dyn fleet::Shoot>> = apps.clone().map(|a| Arc::new(services::AppsShots { reach: Arc::new(services::AppsReach(a)), runtime: runtime.clone() }) as Arc<dyn fleet::Shoot>);
     let engine = roll_previews::Engine::new(
-        roll_previews::engine::Config { domain, port: Some(args.api.port()), mail: Some(format!("127.0.0.1:{}", args.previews_smtp.port())), ..Default::default() },
+        roll_previews::engine::Config { domain, port: Some(args.api.port()), mail: Some(format!("127.0.0.1:{}", args.previews_smtp.port())), otlp: Some(format!("127.0.0.1:{}", args.api.port())), ..Default::default() },
         store.clone(),
         workspace,
         source.clone(),
@@ -145,13 +145,19 @@ pub fn start(
         leader,
     );
     runtime.attach(&engine);
+    // Its services' spans, read as roll apps reads its own.
+    let _ = engine.span_reader.set(Arc::new(services::AppsSpans));
     // roll apps' proxy lists a preview page's notes from the engine (`Engine::notes_for`).
     if let Some(a) = &apps_for_notes {
         a.set_feedback_notes(Arc::new(services::Notes(Arc::downgrade(&engine))));
+        // A project's own preview domain: names apps' ingress doesn't hold go to previews' router.
+        a.set_preview_router(Arc::new(services::DomainRouter(runtime.clone())));
         // Its pushes to branches of a Git URL service: those branches' previews.
         a.set_git_pushes(Arc::new(services::GitPushes(Arc::downgrade(&engine))));
         // And their status and pull request comment, where the code lives (roll's GitHub App).
         let _ = engine.git_report.set(Arc::new(services::GitReport { api: api.clone(), code: code.code.clone() }));
+        // roll.toml services' output to the project's log drains that take previews'.
+        let _ = engine.drains.set(Arc::new(services::AppsDrains { apps: a.clone(), wanted: Default::default() }));
     }
     if clustered {
         let _ = engine.cluster.set(cluster.clone());
