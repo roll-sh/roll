@@ -1478,8 +1478,6 @@ mod tests {
             .collect();
         assert!(unmarked.is_empty(), "removes or replaces something but isn't destructive (mark it .destructive() or .undoable()): {unmarked:?}");
         assert_eq!(def("workspace_remove_resource")["annotations"]["destructiveHint"], false);
-        // Skipping a protected environment's approvals is a person's: an agent applies only what's approved.
-        assert!(all().iter().find(|t| t.name == "secrets_apply_request").unwrap().request(&json!({ "project": "prj_a", "env": "production", "id": "req_a", "bypass": true })).is_err());
         // Revoking a credential can't be undone: clients that ask before destructive calls ask.
         for n in ["storage_revoke_key", "streams_revoke_key", "search_revoke_key", "search_unlink_remote", "previews_delete_hook"] {
             assert_eq!(def(n)["annotations"]["destructiveHint"], true, "{n}");
@@ -1509,6 +1507,8 @@ mod tests {
         for n in ["postgres_explain", "postgres_slow_queries", "postgres_advisors", "postgres_list_extensions"] {
             assert_eq!(def(n)["annotations"]["readOnlyHint"], true, "{n}");
         }
+        // Skipping a protected environment's approvals is a person's: an agent applies only what's approved.
+        assert!(all().iter().find(|t| t.name == "secrets_apply_request").unwrap().request(&json!({ "project": "prj_a", "env": "production", "id": "req_a", "bypass": true })).is_err());
         // A field is cleared only when `clear` names it: a null is left out (a client that fills
         // unused fields with null changes nothing), and only a field that can be is.
         let domain = all().iter().find(|t| t.name == "apps_update_domain").unwrap();
