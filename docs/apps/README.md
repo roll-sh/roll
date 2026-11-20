@@ -247,7 +247,9 @@ every deployment is immutable with instant rollback.
   roll code's reviewer providers: their own key, else the server's within their monthly cap,
   metered on their roll code usage as `explain` (`Code::ask_model`). The answer is a JSON schema's
   summary, cause, at most five steps and a confidence, each checked and bounded, kept with the
-  deployment (asking again reads it back; `again` asks anew) and shown as text, never markup:
+  deployment (asking again reads it back; `again` asks anew, at most once a minute, and one
+  question a deployment runs at a time, so clicks don't add up on the owner's bill) and shown as
+  text, never markup:
   model output is untrusted. `POST …/deploys/{dep}/explain`, the button on a failed deployment in
   Deployments, `roll apps deploys --explain DEP [--again]`. A service that doesn't deploy from a
   roll code repo (an image, an upload, a Git URL) has no owner to ask and isn't explained.
@@ -2254,8 +2256,10 @@ environment. A deleted service's answers nothing. It's read from the store, so a
 404, as any path that isn't one. A leaked address is rotated (`POST …/config/rotate`, the panel's
 "Rotate address", `roll apps env --rotate-config`): a new token, audited, and the old one keeps
 reading only while instances started with it may run, which is while the environment's live
-deployment (of the service, or of its site's functions service) was made before the rotation; the
-redeploy that hands out the new address ends it, so nothing running loses its config first. A change is in the audit trail with what changed
+deployment (of the service, or of its site's functions service) was made before the rotation. The
+redeploy that hands out the new address ends it; an older deployment still answering (at its own
+URL, as skew protection's target, or draining) reads nothing from then on. A second rotation
+waits for that redeploy (409), so the address live instances use is never dropped. A change is in the audit trail with what changed
 (`audit.environment`, `config`). Setting it on production is deploy-level, as any production
 setting is. A static site's edge functions read their site's config as `context.config` (and
 `Roll.config()` for Vercel-style middleware) with no fetch of their own: the functions server
@@ -2733,20 +2737,28 @@ A web service with `run.push` (Cloud Run's Pub/Sub push subscriptions) gets a ro
 as HTTP requests, so a service that reacts to events needs no consumer of its own and still sleeps
 when nothing comes: `[{ stream: "st_…", topic, group, path, environment?, dead_letter?,
 max_attempts?, timeout_s? }]`, at most four. On the service's owner, one loop per rule reads the
-topic as a server-managed consumer group (the broker's HTTP data plane, `commit=manual`, a five
-minute lease) and POSTs each record to `path` of the rule's environment (production by default:
+topic as a server-managed consumer group (the broker's HTTP data plane, `commit=manual`, a minute's
+lease; a fresh consumer each time a loop starts or a read fails, the one before it left, so a read
+whose records weren't all delivered starts again from the committed offset) and POSTs each record to `path` of the rule's environment (production by default:
 one environment, so two never split a group) through its own proxy, which wakes it, past its allow
-list, firewall and access gate as a schedule's call is. The body is the record's value, its
-`content-type` header the `Content-Type` (else `application/octet-stream`); where it came from is
-in `X-Roll-Stream`, `-Topic`, `-Partition`, `-Offset`, `-Timestamp`, `-Attempt` and `-Key` (base64),
-its other headers in `X-Roll-Header-<name>`, and the environment's `CRON_SECRET` in
-`Authorization: Bearer`, as crons carry it. A 2xx commits the group's offset past the record; each
+list, firewall and access gate as a schedule's call is. Each is a CloudEvent in binary mode (as
+Eventarc delivers one; `X-Roll-*` never reaches an app): the body is the record's value, its
+`content-type` header the `Content-Type` (else `application/octet-stream`), `ce-id`
+(`<topic>/<partition>/<offset>`, what to dedupe on), `ce-source` (`/streams/<stream>/topics/<topic>`),
+`ce-type` `sh.roll.stream.record`, `ce-time`, `ce-partitionkey` (its key, base64),
+`ce-rollpartition`, `ce-rolloffset` and `ce-rollattempt`; its own headers go as `ce-<name>` where
+CloudEvents allows the name (a-z, 0-9, at most 20) and it isn't one of those. The environment's
+`CRON_SECRET` is in `Authorization: Bearer`, as crons carry it: anyone can send `ce-*` headers, so
+an app checks it. A 2xx commits the group's offset past the record; each
 partition goes in order and delivery is at least once (a restart, a lost lease or a commit that
-didn't reach the stream delivers it again: key work on `X-Roll-Offset`). Anything else, or no
+didn't reach the stream delivers it again: key work on `ce-id`). A loop checks that its node still
+owns the service before each read, POST and commit, so a handoff doesn't deliver from two nodes. Anything else, or no
 answer within `timeout_s` (30 s), is tried again after 1 s, doubling to a minute, said in the
 environment's log on the first failure and then each minute. With `dead_letter`, a topic of the
 same stream, a record that failed `max_attempts` (5) times is appended there with `x-roll-error`
-and `x-roll-source` headers and its partition moves on; without one, it's tried until it's taken.
+and `x-roll-source` headers and its partition moves on; without one, it's tried until it's taken,
+and since a read's records go out in order, every partition of the rule waits for it: a rule that
+can meet a record its app never takes wants a dead letter.
 Loops run only while the environment has a live deployment and isn't paused, in maintenance or a
 preview, and a changed rule, address or secret restarts its loop. A stream is read only when it's
 on the service's own project and the project is the operator's, as `run.scale` reads one (the log

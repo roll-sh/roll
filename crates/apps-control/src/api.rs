@@ -716,6 +716,11 @@ async fn get_env(State(apps): S, Path((id, env)): Path<(String, String)>) -> R {
 /// A new `ROLL_CONFIG_URL` token; the old one reads until a deploy made after it is live.
 async fn rotate_config(State(apps): S, Path((id, env)): Path<(String, String)>, ext: Extensions) -> R {
     apps.environment(&id, &env).await?;
+    // One at a time: a second would drop the address running instances still read with.
+    let (sid, e) = (id.clone(), env.clone());
+    if apps.db(move |s| s.runtime_config_tokens(&sid, &e)).await?.is_some_and(|(_, before)| before.is_some()) {
+        return Err(Error::Conflict("the last rotation isn't finished: redeploy, so nothing runs with the address before it, then rotate again".into()));
+    }
     let (sid, e) = (id.clone(), env.clone());
     apps.db(move |s| s.rotate_runtime_config(&sid, &e)).await?.ok_or_else(|| Error::NotFound(format!("{env} has no runtime config")))?;
     apps.audit("config.rotated", &id, &env, actor(&ext), json!({})).await;
