@@ -140,6 +140,8 @@ pub fn router(code: Arc<Code>) -> Router {
         .route("/v1/code/changes/{id}/close", post(close_change))
         .route("/v1/code/changes/{id}/checks", post(report_check))
         .route("/v1/code/changes/{id}/preview", post(create_preview).delete(delete_preview))
+        .route("/v1/code/changes/{id}/unstored/{fingerprint}", get(unstored_target))
+        .route("/v1/code/changes/{id}/unstored/{fingerprint}/store", post(store_unstored))
         .route("/v1/code/work/{id}", get(get_work).patch(update_work))
         .route("/v1/code/work/{id}/heartbeat", post(heartbeat))
         .route("/v1/code/work/{id}/release", post(release))
@@ -722,6 +724,16 @@ async fn revise(State(code): S, caller: Caller, Path(id): Path<String>, Body(b):
 async fn land_change(State(code): S, caller: Caller, Path(id): Path<String>, Body(b): Body) -> Result<(StatusCode, Json<Value>)> {
     let (r, c) = code.writable_change(&caller, &id)?;
     Ok(landed_or_queued(code.land_change(&r, &caller, &c, bypass(&b)?, lane(&b)?).await?))
+}
+
+/// "Store in roll" for a `secret_unstored` notice (crate::unstored): roll secrets decides with
+/// the request's own grant, session or operator token.
+async fn unstored_target(State(code): S, caller: Caller, ext: axum::http::Extensions, Path((id, fp)): Path<(String, String)>) -> Result<Json<Value>> {
+    Ok(Json(code.unstored_target(&caller, &crate::SecretsAsker::of(&ext), &id, &fp).await?))
+}
+
+async fn store_unstored(State(code): S, caller: Caller, ext: axum::http::Extensions, Path((id, fp)): Path<(String, String)>, Body(b): Body) -> Result<Json<Value>> {
+    Ok(Json(code.store_unstored(&caller, &crate::SecretsAsker::of(&ext), &id, &fp, &b).await?))
 }
 
 async fn close_change(State(code): S, caller: Caller, Path(id): Path<String>) -> Result<Json<Change>> {

@@ -15,6 +15,7 @@ pub mod git;
 pub mod leaks;
 pub mod github;
 mod secret_leaks;
+mod unstored;
 pub mod mcp;
 pub mod model;
 pub mod names;
@@ -28,7 +29,7 @@ pub mod settings;
 pub mod streams;
 pub mod webhooks;
 
-pub use ext::{PreviewBackend, Runner, SecretEnv};
+pub use ext::{Asker, CredentialValue, PreviewBackend, Refused, Revealed, Runner, SecretEnv, SecretsAsker, StoreCredential, StoreTarget, StoredCredential};
 pub use service::{FileWrite, LandOutcome, WriteFiles};
 
 use axum::Json;

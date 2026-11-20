@@ -47,6 +47,11 @@ pub(crate) fn queue(c: &Conn<'_>, project: &str, env_id: &str, env: &str, reques
     // links) and no Discord mentions.
     let slack = text.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;");
     let body = json!({ "text": slack, "content": text, "allowed_mentions": { "parse": [] }, "project": project, "environment": env, "request": { "id": request, "by": by, "message": message, "keys": keys }, "link": link });
+    queue_body(c, project, env_id, &body, now)
+}
+
+/// Queue a notice's body (inside a write): the sweeper delivers it to the environment's URL.
+pub(crate) fn queue_body(c: &Conn<'_>, project: &str, env_id: &str, body: &Json, now: i64) -> Result<()> {
     c.execute(
         "INSERT INTO notices (id, project_id, env_id, body, attempts, next_at, sent_at, created_at) VALUES (?, ?, ?, ?, 0, ?, NULL, ?)",
         params![names::new_id("ntc", 16), project, env_id, body.to_string(), now, now],

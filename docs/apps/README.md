@@ -870,6 +870,10 @@ whole. The environment's log
   `integrations::SecretSource::resolve(project, env, service)`, and never stores a second copy
   of a project secret (rolld's `secrets::ForApps`; `NoSecrets` stands in where roll secrets
   isn't on).
+- Instances' OIDC tokens (`sub = roll-apps:<project>:<service>:<env>`, for clouds' federation
+  and roll secrets' workload logins) come from roll secrets' issuer through
+  `SecretSource::issue(project, service, env, aud, ttl)`: docs/secrets.md, "roll's tokens for
+  other products".
 - Service variables per environment (Railway's service variables), sealed at rest, are roll
   apps' own: a service's config (`PORT`, `NODE_ENV`) belongs to the service; project secrets
   come from roll secrets and service variables win on a clash.
