@@ -148,6 +148,9 @@ fn walk_object(c: &mut Ctx, existing: Option<&ObjectMapper>, path: &str, doc: &M
         if key.trim().is_empty() && !crate::opensearch::active() {
             return Err(DynamicError::Other(EsError::document_parsing(format!("Field name cannot contain only whitespace: [{key}]"))));
         }
+        if let Some(msg) = super::too_many_parts(key) {
+            return Err(DynamicError::Other(EsError::document_parsing(format!("failed to parse: {msg}")).caused_by(EsError::illegal_argument(msg))));
+        }
         if key.contains('.') {
             // Java's `split("\\.")`: trailing empty parts are dropped (`a.` is `a`).
             let mut parts: Vec<&str> = key.split('.').collect();

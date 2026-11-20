@@ -58,11 +58,21 @@ pub struct Settings {
     /// `roll/visual` commit status), pending while its pages differ from the baseline's and
     /// nobody has accepted them at that head; `required` also keeps it from landing in roll.
     pub visual_review: VisualReviewRule,
+    /// Lighthouse CI's budgets and Sentry's regression gates for what the preview ran: `check`
+    /// posts `roll/regressions`, failing while the change has routes slower than main's preview or
+    /// errors main's doesn't have (`slower_routes`, `new_errors`); `required` also keeps it from
+    /// landing in roll until they're gone or someone other than its author accepts them.
+    pub regressions: RegressionsRule,
     /// `catch` (the default): services send mail to roll's catcher (`SMTP_*` are roll's, mail
     /// providers' API keys are removed), listed on the preview, never delivered; `deliver`: the
     /// project's own mail settings reach previews.
     #[serde(default)]
     pub mail: MailRule,
+    /// Its `roll.toml` services get the OpenTelemetry SDK's variables, so an app with an SDK sends
+    /// its spans to the preview (the sheet's traces). Off by default: they're a preview's code's
+    /// words, kept a few hours.
+    #[serde(default)]
+    pub traces: bool,
     /// What its services' code may reach (docs/previews.md, "Egress"): `open` (the default)
     /// anything; `roll` only roll's own products, on a Docker network with no route out.
     #[serde(default)]
@@ -141,6 +151,15 @@ pub enum EgressRule {
     #[default]
     Open,
     Roll,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum RegressionsRule {
+    #[default]
+    Off,
+    Check,
+    Required,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -351,7 +370,9 @@ impl Default for Settings {
             github: GithubRule::default(),
             access: Access::Link,
             visual_review: VisualReviewRule::Off,
+            regressions: RegressionsRule::Off,
             mail: MailRule::Catch,
+            traces: false,
             egress: EgressRule::Open,
             egress_hosts: Vec::new(),
             egress_forks: EgressRule::Roll,
@@ -381,6 +402,35 @@ impl Default for GithubRule {
 /// Whether an environment name is production's.
 /// Whether an environment name looks like production's. Errs on the side of yes: `prod`,
 /// `production-eu`, `prd`, `live`, `main`, `master`.
+/// Whether a variable's value is a reference into roll secrets (`roll://ENV[/folder…]/KEY`).
+pub fn is_reference(v: &str) -> bool {
+    v.starts_with("roll://")
+}
+
+/// A reference's shape: `roll://ENV[/folder…]/KEY` in the preview's own project (no `PROJECT@`:
+/// a preview reads its own project's environments). roll secrets checks the rest when it reads it.
+pub fn check_reference(v: &str) -> std::result::Result<(), String> {
+    let rest = v.strip_prefix("roll://").unwrap_or(v);
+    if rest.contains('@') {
+        return Err("a preview reads its own project's environments: roll://ENV/KEY, without PROJECT@".into());
+    }
+    let parts: Vec<&str> = rest.split('/').collect();
+    let ok = |p: &str| !p.is_empty() && p.len() <= 128 && p.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-' | b'.'));
+    if parts.len() < 2 || !parts.iter().all(|p| ok(p)) {
+        return Err("a reference is roll://ENV/KEY or roll://ENV/folder/KEY".into());
+    }
+    Ok(())
+}
+
+/// The references a project's rules hold: `(scope, name, reference)`, `scope` `env` or
+/// `env_for <glob>`.
+pub fn references(s: &Settings) -> Vec<(String, String, String)> {
+    std::iter::once(("env".to_string(), &s.env))
+        .chain(s.env_for.iter().map(|(g, v)| (format!("env_for {g}"), v)))
+        .flat_map(|(scope, vars)| vars.iter().filter(|(_, v)| is_reference(v)).map(move |(k, v)| (scope.clone(), k.clone(), v.clone())))
+        .collect()
+}
+
 pub fn is_production(env: &str) -> bool {
     let e = env.to_ascii_lowercase();
     e.contains("prod") || e.split(['-', '_']).any(|w| matches!(w, "prd" | "live" | "main" | "master"))
@@ -462,6 +512,21 @@ impl Settings {
         let base = &self.secrets.base;
         if base.is_empty() || base.len() > 64 || !base.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_') {
             return bad("secrets.base: an environment name (1–64 of a-z, 0-9, - and _)".into());
+        }
+        // A `roll://ENV[/folder]/KEY` value is a reference into roll secrets, read there with the
+        // preview's environment (untrusted: never a protected environment or a sensitive key).
+        for (glob, vars) in std::iter::once(("env", &self.env)).chain(self.env_for.iter().map(|(g, v)| (g.as_str(), v))) {
+            for (k, v) in vars {
+                if is_reference(v)
+                    && let Err(m) = check_reference(v)
+                {
+                    return bad(format!("{glob}: {k}: {m}"));
+                }
+                // One that reads as a reference only once trimmed is refused, not kept as text.
+                if !is_reference(v) && v.trim_start().to_ascii_lowercase().starts_with("roll://") {
+                    return bad(format!("{glob}: {k}: a reference starts with roll:// itself (no spaces before it, lowercase)"));
+                }
+            }
         }
         if is_production(base) && !self.secrets.allow_production {
             return bad(format!("secrets.base {base:?} is production's: set secrets.allow_production to inherit it"));

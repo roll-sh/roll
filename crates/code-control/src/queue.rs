@@ -129,6 +129,14 @@ impl Code {
                 Err(e) => Settings { error: Some(format!("{FILE}: {e}")), ..Settings::default() },
             },
         };
+        let mut s = s;
+        // The allow-list for credentials, from the same head (never the change's).
+        if let Some(h) = &head
+            && let Ok(Some(f)) = self.store.read_file(&r.id, h, roll_auth::credentials::ALLOW_FILE).await
+            && f.mode == code_store::Mode::Regular
+        {
+            s.secrets_allow = roll_auth::credentials::Allow::parse(&String::from_utf8_lossy(&f.data));
+        }
         let s = Arc::new(s);
         self.settings_cache.lock().insert(r.id.clone(), (head, s.clone()));
         s
@@ -146,6 +154,9 @@ impl Code {
         let mut out = Self::base_blockers(r, c, settings);
         out.extend(self.review_blockers(r, c));
         out.extend(self.leak_blockers(r, c));
+        if settings.secrets.unstored_credentials == crate::settings::Unstored::Block {
+            out.extend(self.unstored_findings(r, c, settings));
+        }
         out
     }
 
@@ -174,6 +185,19 @@ impl Code {
                 "changed" => out.push(Blocker::new("visual", format!("its pages differ from {} by {:.1}%: someone must accept them on its preview", v.branch, v.percent.max(0.1)))),
                 "accepted" if own => out.push(Blocker::new("visual", "its visual change was accepted by its own author: someone else must accept it")),
                 _ => {}
+            }
+        }
+        // The project's previews keep regressions against main from landing (`regressions =
+        // "required"`): routes slower or errors new, until someone other than the author accepts them.
+        if let Some(e) = c.preview.as_ref().and_then(|p| p.environment.as_ref()).filter(|e| e.regressions.as_deref() == Some("required")) {
+            let routes = e.slower_routes.as_ref().map_or(0, |s| s.routes.len());
+            let errors = e.new_errors.as_ref().map_or(0, |n| n.total);
+            let own = e.regressions_accepted_by.as_deref().is_some_and(|by| by.eq_ignore_ascii_case(&c.author) || by.eq_ignore_ascii_case(c.author.trim_start_matches('@')));
+            // Not compared at the change's own head isn't clean: it waits for the comparison.
+            if !e.regressions_compared || e.head.as_deref().is_some_and(|h| h != c.head) {
+                out.push(Blocker::new("regressions", "not compared with main's preview at its head yet (a few minutes after its preview is ready, while main's preview is kept)"));
+            } else if routes + errors > 0 && (e.regressions_accepted_by.is_none() || own) {
+                out.push(Blocker::new("regressions", format!("against main's preview: {routes} route(s) slower, {errors} new error(s): fix them, or someone else accepts them on its preview")));
             }
         }
         if r.land_policy == LandPolicy::Queue {

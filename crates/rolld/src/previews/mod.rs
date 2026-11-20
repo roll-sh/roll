@@ -21,7 +21,7 @@ mod services;
 pub mod fleet;
 
 pub use data::*;
-pub use secrets::Secrets;
+pub use secrets::{Secrets, SecretsReveal};
 pub use services::{RollApps, Services};
 
 /// Which products run here (an adapter for each).
@@ -77,6 +77,16 @@ pub fn start(
     apps: Option<Arc<apps_control::Apps>>,
 ) -> anyhow::Result<Running> {
     let store = open_store(args, home)?;
+    // A preview's own variables sealed at rest with the deployment key (as roll's reviewer keys
+    // are); without one they're kept as written.
+    if let Some(key) = args.secret_key() {
+        match code_review::secret::Sealer::new(&key) {
+            Ok(s) => {
+                let _ = store.sealer.set(Arc::new(VarsSealer(s)));
+            }
+            Err(e) => tracing::warn!(error = %e, "previews: a preview's own variables aren't sealed"),
+        }
+    }
     let api = Api::new(args.api);
     let mut branchers: Vec<Arc<dyn Brancher>> = Vec::new();
     if on.postgres {
@@ -133,7 +143,13 @@ pub fn start(
     let apps_for_notes = apps.clone();
     let shots: Option<Arc<dyn fleet::Shoot>> = apps.clone().map(|a| Arc::new(services::AppsShots { reach: Arc::new(services::AppsReach(a)), runtime: runtime.clone() }) as Arc<dyn fleet::Shoot>);
     let engine = roll_previews::Engine::new(
-        roll_previews::engine::Config { domain, port: Some(args.api.port()), mail: Some(format!("127.0.0.1:{}", args.previews_smtp.port())), ..Default::default() },
+        {
+            let mut c = roll_previews::engine::Config { domain, port: Some(args.api.port()), mail: Some(format!("127.0.0.1:{}", args.previews_smtp.port())), otlp: Some(format!("127.0.0.1:{}", args.api.port())), ..Default::default() };
+            if let Some(s) = args.previews_compare_every {
+                (c.routes_every, c.new_errors_every) = (std::time::Duration::from_secs(s), std::time::Duration::from_secs(s));
+            }
+            c
+        },
         store.clone(),
         workspace,
         source.clone(),
@@ -145,6 +161,8 @@ pub fn start(
         leader,
     );
     runtime.attach(&engine);
+    // Its services' spans, read as roll apps reads its own.
+    let _ = engine.span_reader.set(Arc::new(services::AppsSpans));
     // roll apps' proxy lists a preview page's notes from the engine (`Engine::notes_for`).
     if let Some(a) = &apps_for_notes {
         a.set_feedback_notes(Arc::new(services::Notes(Arc::downgrade(&engine))));
@@ -180,6 +198,20 @@ pub fn start(
     tracing::info!("roll previews: on");
     let internal = shots.filter(|_| clustered).map(|s| fleet::internal_router(s, cluster.clone()));
     Ok(Running { engine, runtime, internal })
+}
+
+/// roll's reviewer's sealer (AES-256-GCM under `ROLL_SECRET_KEY`) for a preview's own variables,
+/// bound to the preview (`preview-vars:<id>`).
+struct VarsSealer(code_review::secret::Sealer);
+
+impl roll_previews::ports::Sealer for VarsSealer {
+    fn seal(&self, aad: &str, plain: &str) -> String {
+        self.0.seal(aad, plain)
+    }
+
+    fn open(&self, aad: &str, sealed: &str) -> Option<String> {
+        self.0.open(aad, sealed).ok()
+    }
 }
 
 pub fn open_store(args: &crate::Args, home: &Path) -> anyhow::Result<Arc<Store>> {

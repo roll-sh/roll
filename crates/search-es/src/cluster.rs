@@ -121,6 +121,11 @@ pub struct ClusterConfig {
     /// The pool of connector sync slots this cluster takes from (`None`: the process's, shared by
     /// every cluster on the node; tests give clusters a pool of their own).
     pub connector_slots: Option<std::sync::Arc<crate::xpack::entsearch::sync::slots::Slots>>,
+    /// The parent's catalog id, on a new branch's first load only: what it inherited from the
+    /// parent is marked then, so its jobs don't act on the parent's outside storage or run twice
+    /// ([`crate::branch`]). Later loads, and branches made before marking existed, have none:
+    /// their jobs are their own.
+    pub branch_of: Option<String>,
     /// Read service account tokens from `<path.conf>/service_tokens` too, as Elasticsearch
     /// does. The file is the node's, so a token in it would sign in to every cluster the node
     /// serves: the host sets this only for a node serving one cluster, or for the clusters its
@@ -147,6 +152,7 @@ impl ClusterConfig {
             catalog_id: None,
             owner: None,
             connector_slots: None,
+            branch_of: None,
             file_service_tokens: false,
             audit: None,
         }
@@ -186,6 +192,8 @@ pub struct Cluster {
     pub scripts: Arc<crate::scripting::ScriptService>,
     /// Open scrolls and points in time.
     pub contexts: crate::search::contexts::Contexts,
+    /// Scrolls and points in time over linked remote clusters ([`crate::remote::contexts`]).
+    pub ccs_contexts: crate::remote::contexts::CcsContexts,
     /// Compiled ingest pipelines.
     pub ingest: crate::ingest::pipeline::Cache,
     /// In-memory state of the x-pack APIs (async results, verified credentials).
@@ -597,6 +605,7 @@ impl Cluster {
             engine: Default::default(),
             scripts: Default::default(),
             contexts: Default::default(),
+            ccs_contexts: Default::default(),
             ingest: Default::default(),
             xpack: Default::default(),
             breakers: Default::default(),

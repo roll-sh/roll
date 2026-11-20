@@ -23,11 +23,15 @@ vi.mock("@/lib/access-api", async (orig) => ({
   ...(await orig<typeof import("@/lib/access-api")>()),
   accessApi: {
     // Every product on: past VS Code's and Cursor's limits.
-    toolsetCosts: async () => ({ products: [{ product: "postgres", tools: 200, read_only: 80, context_tokens: 20000 }, { product: "access", tools: 5, read_only: 3, context_tokens: 400 }], search: { tools: 3, read_only: 2, context_tokens: 900 } }),
+    toolsetCosts: async () => ({
+      products: [{ product: "postgres", tools: 200, read_only: 80, context_tokens: 20000 }, { product: "apps", tools: 89, read_only: 50, context_tokens: 12000 }, { product: "access", tools: 5, read_only: 3, context_tokens: 400 }],
+      areas: [{ toolset: "apps.observe", tools: 19, read_only: 15, context_tokens: 2900 }, { toolset: "apps.deploy", tools: 38, read_only: 12, context_tokens: 5700 }],
+      search: { tools: 3, read_only: 2, context_tokens: 900 },
+    }),
     tokens: async () => [],
     me: async () => ({ kind: "operator", locked: true }),
     checkup: async () => checkup,
-    catalog: async () => ({ products: ["postgres", "redis", "access"], actions: [], presets: [], routes: [], operator_only: [], api_url: "" }),
+    catalog: async () => ({ products: ["postgres", "redis", "apps", "access"], actions: [], presets: [], routes: [], operator_only: [], api_url: "" }),
     revoke: (id: string) => revoke(id),
     policy: async () => ({ max_days: null, require_expiry: false, max_idle_days: null }),
     notify: async () => ({ chat: null }),
@@ -57,5 +61,9 @@ describe("the access page", () => {
     await waitFor(() => expect(screen.queryAllByText(/tools=search/)).toHaveLength(0));
     await userEvent.click(await screen.findByRole("button", { name: "Redis" }));
     expect(screen.getAllByText(/\/v1\/mcp\?toolsets=redis/).length).toBeGreaterThan(0);
+    // Apps splits into areas: picking one narrows the URL to it.
+    await userEvent.click(screen.getByRole("button", { name: "Apps" }));
+    await userEvent.click(within(screen.getByRole("group", { name: "Apps areas" })).getByRole("button", { name: "Observe" }));
+    expect(screen.getAllByText(/toolsets=apps\.observe,redis/).length).toBeGreaterThan(0);
   });
 });

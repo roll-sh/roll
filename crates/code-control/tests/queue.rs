@@ -543,10 +543,15 @@ async fn blockers_keep_changes_out_of_the_queue() {
             page_health: None,
             page_a11y: None,
             page_links: None,
+            slower_routes: None,
+            new_errors: None,
             base_change: None,
             diff_url: None,
             pages: Vec::new(),
             speed_budget: None,
+            regressions: None,
+            regressions_accepted_by: None,
+            regressions_compared: false,
             visual_review: Some(code_control::model::PreviewVisualReview { state: state.into(), branch: "main".into(), percent: 8.0, by: by.map(Into::into), required: true, head: None, pages: Vec::new() }),
             notes: Vec::new(),
             issues: Vec::new(),
@@ -561,6 +566,27 @@ async fn blockers_keep_changes_out_of_the_queue() {
     let v = a.ok("GET", &format!("/v1/code/changes/{}", id(&c)), None).await;
     assert_eq!(kinds(&v), ["visual"], "{v}");
     a.code.report_environment(&id(&c), Some(&preview("accepted", Some("someone-else")))).unwrap();
+    let c = a.ok("GET", &format!("/v1/code/changes/{}", id(&c)), None).await;
+    assert_eq!(c["blockers"], json!([]));
+    // Required regressions against main's preview wait the same way: its author's acceptance
+    // doesn't count, someone else's does.
+    let regressed = |by: Option<&str>| {
+        let mut p = preview("accepted", Some("someone-else"));
+        let e = p.environment.as_mut().unwrap();
+        e.regressions = Some("required".into());
+        e.regressions_compared = by != Some("not compared");
+        e.new_errors = Some(code_control::model::PreviewNewErrors { branch: "main".into(), total: 1, errors: Vec::new() });
+        e.regressions_accepted_by = by.map(Into::into);
+        p
+    };
+    a.code.report_environment(&id(&c), Some(&regressed(None))).unwrap();
+    assert_eq!(kinds(&a.ok("GET", &format!("/v1/code/changes/{}", id(&c)), None).await), ["regressions"]);
+    // Not compared at its head isn't clean: it waits too.
+    a.code.report_environment(&id(&c), Some(&regressed(Some("not compared")))).unwrap();
+    assert_eq!(kinds(&a.ok("GET", &format!("/v1/code/changes/{}", id(&c)), None).await), ["regressions"]);
+    a.code.report_environment(&id(&c), Some(&regressed(Some(&author)))).unwrap();
+    assert_eq!(kinds(&a.ok("GET", &format!("/v1/code/changes/{}", id(&c)), None).await), ["regressions"]);
+    a.code.report_environment(&id(&c), Some(&regressed(Some("someone-else")))).unwrap();
     let c = a.ok("GET", &format!("/v1/code/changes/{}", id(&c)), None).await;
     assert_eq!(c["blockers"], json!([]));
     enqueue(&a, &c, "normal").await;
@@ -656,6 +682,58 @@ async fn a_change_that_adds_a_secrets_value_is_blocked_until_it_is_removed() {
     let scan = b.ok("GET", &format!("{P}/leaks?history=10"), None).await;
     assert_eq!((scan["found"].as_array().unwrap().len(), scan["commits"].as_u64()), (0, Some(2)));
     assert_eq!((scan["history"][0]["key"].as_str(), scan["history"][0]["path"].as_str(), scan["history"].as_array().unwrap().len()), (Some("STRIPE_KEY"), Some("src/pay.js"), 1));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_credential_roll_secrets_doesnt_hold_is_a_notice_or_by_roll_toml_a_blocker() {
+    // Built from pieces: push protection scans this repo. Obviously a fixture, still the shape.
+    let aws = ["AKIA", "ROLLFIXTURE", "23456"].concat();
+    let placeholder = ["sk_", "live_", &"x".repeat(24)].concat();
+    let files = json!({ "deploy.py": { "content": format!("import os\naws_access_key_id = \"{aws}\"\nstripe = \"{placeholder}\"\n") } });
+    let unstored = |v: &Value, field: &str| v[field].as_array().into_iter().flatten().filter(|b| b["kind"] == "secret_unstored").cloned().collect::<Vec<_>>();
+
+    let a = queue_app("", Arc::new(QueueRunner::default())).await;
+    a.code.set_secret_env(Arc::new(FakeSecrets));
+    let c = change(&a, "deploy", files.clone()).await;
+    let c = a.ok("GET", &format!("/v1/code/changes/{}", id(&c)), None).await;
+    // A notice by default, naming kind, file and line; the placeholder isn't one.
+    let found = unstored(&c, "notices");
+    assert_eq!(found.len(), 1, "{c}");
+    assert_eq!(found[0]["message"], "adds what looks like an AWS access key at deploy.py:2, which roll secrets doesn't hold: store it as AWS_ACCESS_KEY_ID (roll secrets scan --store AWS_ACCESS_KEY_ID=deploy.py:2) and read it with os.environ[\"AWS_ACCESS_KEY_ID\"], or allow it in .roll/secrets-allow");
+    assert_eq!((found[0]["path"].as_str(), found[0]["line"].as_u64()), (Some("deploy.py"), Some(2)));
+    assert!(unstored(&c, "blockers").is_empty() && !c.to_string().contains(&aws), "{c}");
+    // The default branch's allow-list keeps it, by path or by fingerprint.
+    let fp = found[0]["fingerprint"].as_str().unwrap().to_string();
+    for allow in ["# fixtures\ndeploy.*\n".to_string(), format!("{fp}\n")] {
+        a.ok("POST", &format!("{P}/land"), Some(json!({ "message": "allow", "files": { ".roll/secrets-allow": { "content": allow } }, "bypass": true }))).await;
+        let c = a.ok("GET", &format!("/v1/code/changes/{}", id(&c)), None).await;
+        assert!(unstored(&c, "notices").is_empty(), "{allow}: {c}");
+    }
+
+    // A repo whose roll.toml blocks them: the change can't be queued, even while roll secrets
+    // can't say what it holds (every credential counts as unstored until it can).
+    let b = queue_app("[secrets]\nunstored_credentials = \"block\"\n", Arc::new(QueueRunner::default())).await;
+    b.code.set_secret_env(Arc::new(DownSecrets));
+    let c = change(&b, "deploy", files).await;
+    let (s, v) = b.req("POST", &format!("/v1/code/changes/{}/enqueue", id(&c)), None, None).await;
+    assert_eq!(s, StatusCode::UNPROCESSABLE_ENTITY);
+    assert!(unstored(&v, "blockers").len() == 1 && !v.to_string().contains(&aws), "{v}");
+}
+
+/// roll secrets that can't answer: every lookup fails.
+struct DownSecrets;
+
+#[async_trait]
+impl code_control::SecretEnv for DownSecrets {
+    async fn for_repo(&self, _: &str, _: &str, _: &str) -> anyhow::Result<Vec<(String, String)>> {
+        anyhow::bail!("roll secrets is down")
+    }
+    async fn for_owner(&self, _: &str, _: &str, _: &str, _: &str) -> anyhow::Result<Vec<(String, String)>> {
+        anyhow::bail!("roll secrets is down")
+    }
+    async fn leaks(&self, _: &str, _: Vec<String>) -> anyhow::Result<Vec<(usize, String, String, String)>> {
+        anyhow::bail!("roll secrets is down")
+    }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

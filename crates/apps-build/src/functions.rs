@@ -7,7 +7,12 @@
 //! (a Web `Request` to a `Response`) or `exports.handler(event, context)` (Lambda's event, an
 //! answer `{statusCode, headers, body}`); Vercel's `export default (request)` (Web) or
 //! `(req, res)` (Node's, with `req.query`, `req.body`, `res.status()`, `res.json()`,
-//! `res.send()`). TypeScript runs as Node strips its types. Edge functions (Deno) aren't run.
+//! `res.send()`). TypeScript runs as Node strips its types.
+//!
+//! A site's edge functions ([`crate::edge`]) run in the same image on Deno (pinned), a server of
+//! their own on 127.0.0.1 that the Node server hands `/.roll/edge/<name>` to: roll sends each
+//! request on an edge function's path there, with the visitor's path in `x-edge-path` and where
+//! `context.next()` reads the site's own answer in `x-edge-next`.
 
 use crate::df::Df;
 use crate::{Commands, DEFAULT_PORT, Error, Overrides, Plan, Provider, Tree};
@@ -27,10 +32,14 @@ pub fn routes(tree: &dyn Tree) -> Vec<&'static str> {
     DIRS.iter().filter(|(d, _)| dirs(tree).contains(d)).map(|(_, r)| *r).collect()
 }
 
+/// Deno for edge functions, by digest: its binary only.
+const DENO: &str = "denoland/deno:bin-2.9.8@sha256:b507583d3c68ba69f3ed2ce5969ae5b8b70f43421c781279c7aea06435263543";
+
 pub(crate) fn plan(tree: &dyn Tree, o: &Overrides) -> Result<Plan, Error> {
     let found = dirs(tree);
-    if found.is_empty() {
-        return Err(Error::Invalid { file: "netlify/functions or api".into(), reason: "the functions builder found no functions (a .js, .mjs, .cjs, .ts or .mts file, or a directory with an index, in netlify/functions/ or api/)".into() });
+    let (edge, _) = crate::edge::find(tree);
+    if found.is_empty() && edge.is_empty() {
+        return Err(Error::Invalid { file: "netlify/functions or api".into(), reason: "the functions builder found no functions (a .js, .mjs, .cjs, .ts or .mts file, or a directory with an index, in netlify/functions/ or api/, or an edge function with its path)".into() });
     }
     let install = o.install.clone().unwrap_or_else(|| "if [ -f package-lock.json ]; then npm ci --omit=dev; elif [ -f package.json ]; then npm install --omit=dev; fi".into());
     let c = Commands { install: Some(&install), build: None, start: None, custom_install: o.install.is_some(), env: &o.build_env, files: &o.build_files };
@@ -40,12 +49,23 @@ pub(crate) fn plan(tree: &dyn Tree, o: &Overrides) -> Result<Plan, Error> {
     df.copy_source();
     df.run(&["/root/.npm"], &install);
     df.line(&format!("COPY <<'ROLL_FUNCTIONS' /roll/functions.mjs\n{SERVER}\nROLL_FUNCTIONS"));
+    if !edge.is_empty() {
+        let list = serde_json::to_string(&edge).expect("edge functions serialize");
+        df.line(&format!("COPY --from={DENO} /deno /usr/local/bin/deno"));
+        df.line(&format!("COPY <<'ROLL_EDGE' /roll/edge.mjs\n{EDGE_SERVER}\nROLL_EDGE"));
+        df.line(&format!("COPY <<'ROLL_EDGE_LIST' /roll/edge.json\n{list}\nROLL_EDGE_LIST"));
+        // Their imports (URLs, npm:) fetched now, where the build may reach them.
+        df.line("ENV DENO_DIR=/roll/deno DENO_NO_UPDATE_CHECK=1");
+        let files: Vec<String> = edge.iter().map(|f| format!("/app/{}", f.file)).collect();
+        df.line(&format!("RUN deno cache --allow-import {} && chmod -R a+rX /roll/deno", files.join(" ")));
+    }
     df.line("ENV NODE_ENV=production");
     df.line(&format!("ENV PORT={DEFAULT_PORT}"));
     df.line(&format!("EXPOSE {DEFAULT_PORT}"));
     df.line("USER node");
     df.line("CMD [\"node\", \"--experimental-strip-types\", \"--no-warnings\", \"/roll/functions.mjs\"]");
-    let notes = found.iter().map(|d| format!("{d}/: its functions, answered at {}", DIRS.iter().find(|(x, _)| x == d).map(|(_, r)| *r).unwrap_or(""))).collect();
+    let mut notes: Vec<String> = found.iter().map(|d| format!("{d}/: its functions, answered at {}", DIRS.iter().find(|(x, _)| x == d).map(|(_, r)| *r).unwrap_or(""))).collect();
+    notes.extend(edge.iter().map(|f| format!("{}: an edge function on {}, on Deno", f.file, f.paths.join(", "))));
     Ok(Plan {
         provider: Provider::Functions,
         framework: None,
@@ -61,11 +81,13 @@ pub(crate) fn plan(tree: &dyn Tree, o: &Overrides) -> Result<Plan, Error> {
         release: None,
         crons: Vec::new(),
         functions: Vec::new(),
+        edge: Vec::new(),
     })
 }
 
 /// The functions' server: Node's own HTTP, each function imported once, a body at most 6 MiB.
 const SERVER: &str = r#"import http from 'node:http';
+import { spawn } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import { pathToFileURL } from 'node:url';
 const ROOT = '/app', EXT = ['.mjs', '.js', '.cjs', '.mts', '.ts'], MAX = 6 << 20;
@@ -102,9 +124,37 @@ async function answer(res, r) {
   r.headers.forEach((v, k) => res.setHeader(k, v));
   res.end(Buffer.from(await r.arrayBuffer()));
 }
+// Edge functions: Deno beside this server, on 127.0.0.1, handed /.roll/edge/<name>.
+const EDGE = existsSync('/roll/edge.json') ? 8081 : 0;
+if (EDGE) {
+  const start = () => {
+    const c = spawn('deno', ['run', '--quiet', '--allow-net', '--allow-env', '--allow-read=/app,/roll', '--allow-import', '/roll/edge.mjs'], { stdio: 'inherit', env: { ...process.env, ROLL_EDGE_PORT: String(EDGE) } });
+    c.on('exit', (code) => { console.error(`edge functions' server exited (${code}); starting it again`); setTimeout(start, 1000); });
+  };
+  start();
+}
+async function edge(req, res) {
+  const body = req.method === 'GET' || req.method === 'HEAD' ? undefined : await read(req);
+  const headers = {};
+  for (const [k, v] of Object.entries(req.headers)) if (v !== undefined) headers[k] = Array.isArray(v) ? v.join(', ') : v;
+  let r;
+  for (let i = 0; ; i++) {
+    try {
+      r = await fetch(`http://127.0.0.1:${EDGE}${req.url}`, { method: req.method, headers, body, redirect: 'manual' });
+      break;
+    } catch (e) {
+      if (i >= 50) throw e;
+      await new Promise((ok) => setTimeout(ok, 100));
+    }
+  }
+  res.statusCode = r.status;
+  r.headers.forEach((v, k) => { if (k !== 'content-encoding' && k !== 'content-length' && k !== 'transfer-encoding') res.setHeader(k, v); });
+  res.end(Buffer.from(await r.arrayBuffer()));
+}
 http.createServer(async (req, res) => {
   try {
     const u = new URL(req.url, 'http://localhost');
+    if (EDGE && u.pathname.startsWith('/.roll/edge/')) return await edge(req, res);
     let m, f, kind;
     if ((m = u.pathname.match(/^\/\.netlify\/functions\/([^/]+)/))) [f, kind] = [find('netlify/functions', m[1]), 'netlify'];
     else if ((m = u.pathname.match(/^\/api\/([^/]+)/))) [f, kind] = [find('api', m[1].replace(/\.[A-Za-z]+$/, '')), 'vercel'];
@@ -146,6 +196,95 @@ http.createServer(async (req, res) => {
   }
 }).listen(Number(process.env.PORT ?? 8080), '0.0.0.0');"#;
 
+/// Edge functions' server, on Deno: Netlify's `(request, context)` with `context.next()`,
+/// `geo`, `ip`, `cookies`, `rewrite` and `Netlify.env`; Vercel's middleware `(request)`, its
+/// `next()` and `rewrite()` answers (`x-middleware-next`, `x-middleware-rewrite`). Nothing
+/// returned (undefined) is the site's own answer.
+const EDGE_SERVER: &str = r#"const fns = JSON.parse(await Deno.readTextFile('/roll/edge.json'));
+const loaded = new Map();
+globalThis.Netlify = { env: { get: (k) => Deno.env.get(k), has: (k) => Deno.env.has(k), toObject: () => Deno.env.toObject() } };
+// The site's runtime config (ROLL_CONFIG_URL), kept current by a long poll: `context.config`, and
+// `Roll.config()` for middleware.
+let config = {};
+globalThis.Roll = { config: () => config };
+const configUrl = Deno.env.get('ROLL_CONFIG_URL');
+if (configUrl) (async () => {
+  let tag = null;
+  for (;;) {
+    try {
+      const r = await fetch(tag ? `${configUrl}?wait=25` : configUrl, { headers: tag ? { 'if-none-match': tag } : {} });
+      if (r.status === 200) { tag = r.headers.get('etag'); config = (await r.json()).config ?? {}; }
+      else if (r.status !== 304) await new Promise((s) => setTimeout(s, 5000));
+    } catch { await new Promise((s) => setTimeout(s, 5000)); }
+  }
+})();
+const load = (f) => { if (!loaded.has(f.name)) loaded.set(f.name, import('file:///app/' + f.file)); return loaded.get(f.name); };
+function cookies(req, out) {
+  const jar = new Map();
+  for (const c of (req.headers.get('cookie') ?? '').split(';')) { const i = c.indexOf('='); if (i > 0) jar.set(c.slice(0, i).trim(), decodeURIComponent(c.slice(i + 1).trim())); }
+  return {
+    get: (n) => jar.get(n),
+    set: (o, v) => { const c = typeof o === 'string' ? { name: o, value: v } : o; out.push(`${c.name}=${encodeURIComponent(c.value)}; Path=${c.path ?? '/'}${c.maxAge != null ? `; Max-Age=${c.maxAge}` : ''}${c.httpOnly ? '; HttpOnly' : ''}${c.secure ? '; Secure' : ''}${c.sameSite ? `; SameSite=${c.sameSite}` : ''}`); },
+    delete: (n) => out.push(`${typeof n === 'string' ? n : n.name}=; Path=/; Max-Age=0`),
+  };
+}
+Deno.serve({ hostname: '127.0.0.1', port: Number(Deno.env.get('ROLL_EDGE_PORT') ?? 8081), onListen() {} }, async (incoming) => {
+  const u = new URL(incoming.url);
+  const m = u.pathname.match(/^\/\.roll\/edge\/([A-Za-z0-9_-]+)$/);
+  const f = m && fns.find((x) => x.name === m[1]);
+  // Where `next()` asks: roll's address for this service (ROLL_EDGE_BASE) and the signed path the
+  // request came with; never another host.
+  const nextPath = incoming.headers.get('x-edge-next') ?? '';
+  const root = Deno.env.get('ROLL_EDGE_BASE');
+  if (!f || !root || !nextPath.startsWith('/_roll/edge/')) return new Response('No such edge function.', { status: 404 });
+  const base = root + nextPath;
+  const path = incoming.headers.get('x-edge-path') ?? '/';
+  const headers = new Headers(incoming.headers);
+  for (const h of ['x-edge-path', 'x-edge-next']) headers.delete(h);
+  const host = headers.get('x-forwarded-host') ?? headers.get('host') ?? 'localhost';
+  const proto = headers.get('x-forwarded-proto') ?? 'https';
+  const body = incoming.method === 'GET' || incoming.method === 'HEAD' ? undefined : await incoming.arrayBuffer();
+  const request = new Request(`${proto}://${host}${path}`, { method: incoming.method, headers, body });
+  // The site's own answer for a request (this one, changed, or another of its paths).
+  const next = async (r, init) => {
+    const nr = r instanceof Request ? r : new Request(request, init ?? (r && typeof r === 'object' ? r : undefined));
+    const nu = new URL(nr.url);
+    const b = nr.method === 'GET' || nr.method === 'HEAD' ? undefined : await nr.arrayBuffer();
+    return fetch(base + nu.pathname + nu.search, { method: nr.method, headers: nr.headers, body: b, redirect: 'manual' });
+  };
+  const set = [];
+  try {
+    const mod = await load(f);
+    const fn = typeof mod.default === 'function' ? mod.default : mod.middleware;
+    if (typeof fn !== 'function') return new Response('The edge function exports no handler.', { status: 500 });
+    let res;
+    if (f.kind === 'netlify') {
+      const ip = (headers.get('x-forwarded-for') ?? '').split(',')[0].trim();
+      const country = headers.get('cf-ipcountry');
+      const context = { next, config, ip, requestId: headers.get('x-request-id') ?? crypto.randomUUID(), geo: country ? { country: { code: country } } : {}, cookies: cookies(request, set), params: {}, site: {}, deploy: {}, json: (o, i) => Response.json(o, i), rewrite: (to) => next(new Request(new URL(to, request.url), request)), waitUntil: () => {} };
+      res = (await fn(request, context)) ?? (await next());
+    } else {
+      res = await fn(request, { waitUntil: () => {} });
+      const rw = res?.headers.get('x-middleware-rewrite');
+      if (!res) res = await next();
+      else if (rw) res = await next(new Request(new URL(rw, request.url), request));
+      else if (res.headers.get('x-middleware-next')) {
+        const h = new Headers(request.headers);
+        for (const [k, v] of res.headers) if (k.startsWith('x-middleware-request-')) h.set(k.slice(21), v);
+        const n = await next(new Request(request, { headers: h }));
+        const out = new Response(n.body, n);
+        for (const [k, v] of res.headers) if (!k.startsWith('x-middleware-')) out.headers.set(k, v);
+        res = out;
+      }
+    }
+    if (set.length) { res = new Response(res.body, res); for (const c of set) res.headers.append('set-cookie', c); }
+    return res;
+  } catch (e) {
+    console.error(`edge function ${f.name}:`, e);
+    return new Response('The edge function failed.', { status: 500 });
+  }
+});"#;
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -153,5 +292,6 @@ mod tests {
     #[test]
     fn its_server_is_never_cut_short_by_its_heredoc() {
         assert!(!SERVER.lines().any(|l| l.trim() == "ROLL_FUNCTIONS"));
+        assert!(!EDGE_SERVER.lines().any(|l| l.trim() == "ROLL_EDGE"));
     }
 }

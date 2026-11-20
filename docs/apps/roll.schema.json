@@ -173,13 +173,105 @@
           "type": "boolean",
           "description": "Raw TCP, not HTTP."
         },
+        "log_metrics": {
+          "type": "array",
+          "description": "Counts of its log lines: [{name, pattern}]; each minute, the lines of its output matching pattern (any case) as a gauge named name, on Metrics and for scale."
+        },
+        "schedule_scale": {
+          "type": "array",
+          "description": "Floors by the clock: [{windows: [{from: \"mon 08:00\", to: \"fri 18:00\"}], timezone?, min_instances}]; in a window, its min_instances is the floor when higher."
+        },
+        "metrics": {
+          "type": "object",
+          "description": "Its own Prometheus endpoint, scraped every 15 s on each running instance: port (default the app's), path (default /metrics)."
+        },
+        "slo": {
+          "type": "object",
+          "description": "Its service level objective: objective (90-99.999) percent of requests not 5xx, and with latency_ms of minutes under it at p95, over window_days (default 28); alert.slo when the error budget burns fast."
+        },
+        "block_on": {
+          "type": "string",
+          "enum": ["critical", "high", "medium", "low"],
+          "description": "Fail a deploy whose image has a known vulnerability this severe or worse, before it goes live (never a rollback)."
+        },
         "rebuild_on_base": {
           "type": "boolean",
           "description": "Build again (same revision, no cache) when a base image moves."
         },
+        "latency_target_ms": {
+          "type": "integer",
+          "minimum": 50,
+          "maximum": 60000,
+          "description": "A web service scaled on its answers' p95 too: over this many ms for a window, another instance."
+        },
+        "queue_s": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 60,
+          "description": "A web service at max_instances with every instance at its concurrency: a request waits this long for a slot, then gets a 429."
+        },
+        "skew_protection": {
+          "type": "boolean",
+          "description": "A web service: a page loaded before a deploy keeps talking to the deployment that served it, for a day."
+        },
         "rollback_on_crash": {
           "type": "boolean",
           "description": "Roll back when a new deployment crash-loops."
+        },
+        "sidecars": {
+          "type": "array",
+          "maxItems": 4,
+          "description": "Containers beside each instance, in its network namespace (they reach each other on localhost): a web service's or a worker's.",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "name",
+              "image"
+            ],
+            "properties": {
+              "name": {
+                "type": "string",
+                "pattern": "^[a-z0-9-]{1,20}$"
+              },
+              "image": {
+                "type": "string",
+                "description": "Pinned to its digest with each deployment."
+              },
+              "command": {
+                "type": "string",
+                "description": "Run as sh -c instead of the image's own."
+              },
+              "env": {
+                "type": "object",
+                "maxProperties": 50,
+                "additionalProperties": {
+                  "type": "string"
+                },
+                "description": "Plain settings, shown as they are: never a secret."
+              },
+              "variables": {
+                "type": "array",
+                "maxItems": 50,
+                "items": {
+                  "type": "string"
+                },
+                "description": "The environment's own variables it gets, by name (its secrets too)."
+              },
+              "cpu": {
+                "type": "number",
+                "minimum": 0.1,
+                "maximum": 2,
+                "description": "Default 0.25, metered with the instance."
+              },
+              "memory_mb": {
+                "type": "integer",
+                "minimum": 64,
+                "maximum": 4096,
+                "description": "Default 128, metered with the instance."
+              }
+            }
+          }
         },
         "schedules": {
           "type": "array",

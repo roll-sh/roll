@@ -15,11 +15,52 @@ pub fn read_yaml(body: &[u8]) -> Result<Option<Value>, EsError> {
     if body.iter().all(u8::is_ascii_whitespace) {
         return Ok(None);
     }
+    // The parser refuses nesting past its recursion limit only once it gets there, and its
+    // scanner's work grows with the square of the flow nesting before that: deeper flow
+    // collections are refused before it starts.
+    if let Some(at) = too_deep_flow(body) {
+        let line = body[..at].iter().filter(|&&b| b == b'\n').count() + 1;
+        let col = at - body[..at].iter().rposition(|&b| b == b'\n').map_or(0, |p| p + 1) + 1;
+        return Err(EsError::x_content_parse(line, col, format!("recursion limit exceeded at line {line} column {col}")));
+    }
     let v: serde_yaml_ng::Value = serde_yaml_ng::from_slice(body).map_err(|e| {
         let (line, col) = e.location().map_or((0, 0), |l| (l.line(), l.column()));
         EsError::x_content_parse(line, col, e.to_string())
     })?;
     Ok(Some(from_yaml(v)))
+}
+
+/// `serde_yaml_ng`'s recursion limit.
+const MAX_FLOW_DEPTH: usize = 128;
+
+/// Where flow collections (`{`, `[`) outside quoted scalars first nest deeper than
+/// [`MAX_FLOW_DEPTH`]. A quote opens a scalar only where one can start (after whitespace or an
+/// indicator), so an apostrophe inside a plain scalar doesn't hide what follows.
+fn too_deep_flow(body: &[u8]) -> Option<usize> {
+    let (mut depth, mut quote, mut prev) = (0usize, None, b' ');
+    let mut i = 0;
+    while i < body.len() {
+        let b = body[i];
+        match quote {
+            Some(b'"') if b == b'\\' => i += 1,
+            Some(q) if b == q => quote = None,
+            Some(_) => {}
+            None => match b {
+                b'"' | b'\'' if prev.is_ascii_whitespace() || matches!(prev, b'[' | b'{' | b',' | b':' | b'-') => quote = Some(b),
+                b'{' | b'[' => {
+                    depth += 1;
+                    if depth > MAX_FLOW_DEPTH {
+                        return Some(i);
+                    }
+                }
+                b'}' | b']' => depth = depth.saturating_sub(1),
+                _ => {}
+            },
+        }
+        prev = b;
+        i += 1;
+    }
+    None
 }
 
 fn from_yaml(v: serde_yaml_ng::Value) -> Value {
