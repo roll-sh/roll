@@ -42,8 +42,9 @@ Everything below works the same from the dashboard (a project's **Secrets**) and
    The consent screen starts from the `development` preset, where revealing a value asks you first:
    the first `roll run` prints where to approve it and waits.
 2. **Pick a project and its environments.** A workspace project has `development`, `staging` and
-   `production` the first time you open its secrets. Add your own (`roll secrets envs add qa`) and
-   remember the project for this directory:
+   `production` the first time you open its secrets. Make the project in the dashboard (Projects →
+   New project) if you don't have one yet. Add your own environments (`roll secrets envs add qa`)
+   and remember the project for this directory:
 
    ```
    roll secrets setup -p shop -e development
@@ -93,7 +94,7 @@ Everything below works the same from the dashboard (a project's **Secrets**) and
    const secrets = createClient({ api: process.env.ROLL_API_URL!, token: process.env.ROLL_TOKEN! });
    const { values } = await secrets.values("staging");
    const keys = generateKeyPair();
-   const env = secrets.open(await secrets.resolve("production", { consumer: "app:web", sealTo: keys.publicKey }), keys.secretKey);
+   const env = secrets.open(await secrets.resolve("staging", { consumer: "app:web", sealTo: keys.publicKey }), keys.secretKey);
    const stop = secrets.watch("staging", { onChange: (v) => reconfigure(v.values) });
 
    // A process that reads values per request keeps them a while: within the TTL from memory,
@@ -146,7 +147,7 @@ Everything below works the same from the dashboard (a project's **Secrets**) and
 
    ```go
    c, err := secrets.FromEnv(ctx)
-   err = c.Watch(ctx, "production", secrets.Watch{OnChange: func(v *secrets.Values) error { return reload(v.Values) }})
+   err = c.Watch(ctx, "staging", secrets.Watch{OnChange: func(v *secrets.Values) error { return reload(v.Values) }})
    ```
 
    In Python, `sdk/python/roll_secrets` (`roll-secrets`, the standard library but for sealed
@@ -154,14 +155,14 @@ Everything below works the same from the dashboard (a project's **Secrets**) and
 
    ```python
    c = roll_secrets.from_env()
-   c.watch("production", lambda v: reload(v.values))
+   c.watch("staging", lambda v: reload(v.values))
    ```
 
    In Java, `sdk/java/secrets` (`sh.roll:roll-secrets`, Java 17 and the JDK only):
 
    ```java
    RollSecrets c = RollSecrets.builder().build(); // ROLL_API_URL, ROLL_TOKEN or ROLL_IDENTITY, ROLL_PROJECT
-   Watch w = c.watch("production", WatchOptions.of(v -> reload(v.values())));
+   Watch w = c.watch("staging", WatchOptions.of(v -> reload(v.values())));
    ```
 
    A Spring Boot app imports a folder into its `Environment` with `sdk/java/secrets-spring`
@@ -176,8 +177,8 @@ Everything below works the same from the dashboard (a project's **Secrets**) and
 
    ```csharp
    using var c = new RollSecretsClient(); // ROLL_API_URL, ROLL_TOKEN or ROLL_IDENTITY, ROLL_PROJECT
-   await using var w = c.Watch("production", new WatchOptions { OnChange = v => Reload(v.Values) });
-   builder.Configuration.AddRollSecrets("production", s => s.ReloadOnChange = true);
+   await using var w = c.Watch("staging", new WatchOptions { OnChange = v => Reload(v.Values) });
+   builder.Configuration.AddRollSecrets("staging", s => s.ReloadOnChange = true);
    var ct = await c.Transit("cards").EncryptAsync(cardNumber, $"order:{id}");
    ```
 
@@ -186,7 +187,7 @@ Everything below works the same from the dashboard (a project's **Secrets**) and
 
    ```ruby
    c = RollSecrets.from_env
-   c.watch("production") { |v| reload(v.values) }
+   c.watch("staging") { |v| reload(v.values) }
    ```
 9. **When something goes wrong**: `roll secrets history`, `roll secrets rollback --at 2h`, the
    audit log (`roll secrets audit`, or streamed to your SIEM), and `roll secrets share KEY` to hand
@@ -5095,7 +5096,7 @@ Batch 5 (each gated on its own, none enqueued):
 - #397: roll.toml's `[secrets]`, which the person approves;
 - #430: least-privilege token defaults, the first hour, and the Syncs tab split in three;
 - #432: Postgres decoy roles (on #392, now main);
-- the agents-sandbox reveal check (`feature/roll-secrets-sandbox-reveal`, gating).
+- the agents-sandbox reveal check (#440).
 
 The other threads' work that builds on these:
 - search's #361 builds on #407;
@@ -5104,6 +5105,48 @@ The other threads' work that builds on these:
 - roll MCP's value-request tools (on #277) and `secrets_verify_audit` (on #281).
 
 roll MCP adds no cut-off tool: #304 is a person's call, since it can revoke the agent's own token.
+
+**Ranked, 2026-11-20 04:30** (the thirty-third product review, cold, after batch 4 and #475). The store
+is still level with or ahead of the category. The gaps are at the new features' seams.
+
+1. **What a person made keeps their old rights after a demotion** (security, S; fixing in
+   `feature/roll-members`):
+   - `maker_reaches` asked only `Read` on the project, so a demoted admin's backup schedule kept
+     exporting every value, and their identities, gateways and ACME kept running;
+   - the fix: the action and scope each exercises, and identities capped by their maker's current
+     grant, as `Within` caps tokens.
+2. **Placeholders' seams** (security, M; fixing in `feature/roll-secrets-placeholders` before its PR):
+   - refuse wildcards under shared-hosting suffixes (`*.vercel.app`);
+   - sensitive keys only by an opt-in per binding;
+   - the person behind an in-process consumer re-checked;
+   - reach lists placeholders and a cut-off ends them;
+   - alerts limited per placeholder;
+   - no placeholder for a key holding a reference;
+   - `substitute` reads one key, cached with #248's invalidation, measured.
+3. **A proxy that can swap** (L; waits on previews, apps and agents): apps' egress is `CONNECT`
+   tunnels and never sees headers. roll secrets' half: a short-lived interception CA per consumer from
+   the project's PKI, name-constrained to the bound hosts. Previews first (the strictest egress).
+4. **Validity checks without tripping canaries** (M; fixing the design in `feature/roll-secrets-validity`):
+   - AWS: the account read from the key id offline, known canary accounts skipped, a live call only by
+     opt-in;
+   - roll's own tokens are looked up, never used, and decoys aren't findings.
+5. **The first hour's remaining dead ends** (S): the quick start's code used `production` with a
+   staging-only token, and step 2 assumed a project the CLI couldn't make (both fixed here). Still to do:
+   - the empty states lack the install line (`lib/install-line.ts`);
+   - `secrets-page.tsx:63`'s "no such project" has no link anywhere.
+6. **Workload identities match nested and list claims** (S; building `feature/roll-oidc-claims`):
+   `roll-oidc`'s `Jwt::str` reads top-level strings only, so Keycloak's `realm_access.roles` and
+   Entra's `groups` can't be matched. Doppler and Vault both take JSON pointers and lists.
+7. **Big changes on Postgres** (performance, M): 9,900 keys in one change took 11.7 s against 0.5 s on
+   SQLite, about one round trip per row. Batch the rows in `write.rs` and add the case to `bench`.
+8. **Test gaps** (S):
+   - demotion, not removal, stopping syncs, #407 bindings, placeholders and schedules;
+   - #357's "one node rotates" with two nodes;
+   - placeholders' wildcard and alert limits.
+9. **Integration:** previews to embed `proxy::filter` first; MCP's `secrets_audit` (#479); apps' #474
+   and search's #361 resolve as the runtime until #407 lands (known).
+
+Batch 5 conflicts with main again after #475 (#357, #465, #277, #432); it's being re-levelled.
 
 **Ranked, 2026-11-19 20:45** (the thirty-second review's list as it stands, plus what today's
 work found). First what can be built now:
@@ -5214,7 +5257,7 @@ members, the first hour, and the other products' credential inputs. Ranked:
     roll secrets' half (host-bound keys, `rlph_` placeholders, `substitute`, a reference filter) is
     building on `feature/roll-secrets-placeholders`.
 11. **Unmeasured:**
-    - #281's head row under many concurrent writers on Postgres (measure before it lands);
+    - #281's head row under many concurrent writers on Postgres: measured, and fixed in #475 (on main);
     - #248's "1,000 pods … 0.1 core" is arithmetic, not a load run.
 12. **Test gap:** rolld booting sealed (#367): no product or lease before the unseal, and every reader
     gets the key after it.
@@ -5281,7 +5324,8 @@ cache waited out. Ranked now:
    expires), and secrets' own workload logins trusting roll's issuer for apps' subjects; one issuer,
    never a second one. Built: 90-day rotation (published 2 days ahead, old key kept 2 h after the
    switch, retired keys kept sealed so old audit digests still verify), one audit row per subject,
-   audience and hour, `ForApps::issue` behind the same trust check as `resolve`.
+   audience and hour; `Secrets::issue` refuses an untrusted preview environment and one the project
+   doesn't have (#357's fix).
 5. **A sealed start for the deployment key** (#367, on #276): `ROLL_SECRET_KEY_SEALED=<split>:<threshold>`
    starts rolld with only `POST /v1/secrets/unseal` up; K shares from the split, checked against the
    store's key id, start every product with the key in memory (all eight readers take it as a value);
@@ -5441,7 +5485,7 @@ inconsistencies are fixed in #264:
    and printing checked to hold no plaintext; next, TOTP for Java, .NET and Ruby once #194 is on main.
 0b. **The polling path at scale** (#248): a 304 or an unchanged `digest` at 9,900 keys now takes
    0.1 ms on SQLite and 3 ms on Postgres (was 99 and 169 ms), so 1,000 pods polling every 30 s cost
-   ~0.1 core, not ~5.6. A digest reads only the columns it hashes and each folder once, and each node
+   ~0.1 core (worked out from single-request latency, not a load run), not ~5.6. A digest reads only the columns it hashes and each folder once, and each node
    keeps it while one read of the database's state (the project's change number, environments,
    imports, required keys, shared folders' projects) says the same, every permission it asked
    answers the same, and live links' generations and fingerprints hold. Next: the first digest after
