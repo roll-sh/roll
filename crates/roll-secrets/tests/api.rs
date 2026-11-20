@@ -4029,6 +4029,28 @@ async fn a_workload_logs_in_with_its_oidc_token_for_a_short_lived_scoped_token()
     assert_eq!(s, StatusCode::UNAUTHORIZED);
 }
 
+#[tokio::test]
+async fn an_identity_matches_a_nested_role_claim() {
+    let api = Api::new().await;
+    api.set("staging", "API_KEY", "staging-key").await;
+    // Keycloak puts a user's realm roles in an array under `realm_access`.
+    let keycloak = Issuer::new();
+    let realm = "https://sso.example.com/realms/acme";
+    let identity = |claims: Value| json!({ "name": "ci", "issuer": realm, "audience": "roll", "subject": "service-account-ci", "claims": claims, "environments": ["staging"], "actions": ["read", "reveal"], "jwks": keycloak.jwks().to_string() });
+    assert_eq!(api.call(Method::POST, "/identities", Some(identity(json!({ "/realm_access//roles": "deployer" })))).await.0, StatusCode::BAD_REQUEST);
+    let i = api.ok(Method::POST, "/identities", Some(identity(json!({ "/realm_access/roles": "deployer" })))).await;
+    assert_eq!(i["claims"], json!({ "/realm_access/roles": "deployer" }));
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() as i64;
+    let login = |roles: Value| {
+        let token = keycloak.sign(json!({ "iss": realm, "aud": "roll", "sub": "service-account-ci", "realm_access": { "roles": roles }, "exp": now + 300, "iat": now }));
+        api.call(Method::POST, "/v1/secrets/login", Some(json!({ "identity": i["id"], "token": token })))
+    };
+    let (s, l) = login(json!(["offline_access", "deployer"])).await;
+    assert_eq!(s, StatusCode::OK, "{l}");
+    let (s, l) = login(json!(["offline_access"])).await;
+    assert_eq!(s, StatusCode::FORBIDDEN, "{l}");
+}
+
 /// A signed GetCallerIdentity as roll's clients send one (STS checks the signature; roll checks the
 /// rest), dated `age` seconds ago, naming `server` in X-Roll-Server-ID. Each has its own signature.
 fn signed_caller_identity(url: &str, body: &str, server: Option<&str>, age: i64) -> Value {

@@ -165,7 +165,9 @@ endpoint for an hour's access token, rather than holding a long-lived token in a
       secret. The audience defaults to roll's API. `subject` is the token's `sub` or a pattern with
       `*`. A shared issuer (GitHub Actions, GitLab.com, Terraform Cloud, Buildkite, Google) must
       name one tenant literally (`repo:acme/web:…`), or anyone's job could sign in, and that rule is
-      never optional. `claims` are up to ten others that must match (`repository_owner_id`, `ref`).
+      never optional. `claims` are up to ten others that must match (`repository_owner_id`, `ref`),
+      each a name or a JSON pointer to a nested or list claim (`/realm_access/roles`), with the
+      same syntax as roll secrets' workload identities (docs/secrets.md, "Claims").
       `jwks` pins the issuer's keys for one roll can't reach.
     - **Signing in:** RFC 7523's grant,
       `grant_type=urn:ietf:params:oauth:grant-type:jwt-bearer&client_id=mcl_…&assertion=<the OIDC token>`.

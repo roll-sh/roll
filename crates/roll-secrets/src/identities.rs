@@ -57,7 +57,6 @@ CREATE INDEX IF NOT EXISTS aws_logins_at ON aws_logins (at);
 ";
 
 const IDENTITIES_MAX: i64 = 50;
-const CLAIMS_MAX: usize = 10;
 pub const TTL_MIN: i64 = 5;
 pub const TTL_MAX: i64 = 60;
 /// Logins a minute per identity and per client address (a CI matrix logs in many times at once).
@@ -339,13 +338,9 @@ impl Secrets {
         if subject.is_empty() || subject.len() > 512 || subject.chars().all(|c| c == '*') {
             return Err(bad("subject is the token's sub, or a pattern of it with * (never * alone)"));
         }
-        // Shared issuers' rule (roll-oidc's, as roll-access's trusted clients have it).
-        if let Some(shape) = roll_oidc::open_to_others(&issuer, &subject) {
-            return Err(bad(format!("{issuer} signs for everyone: the subject names one of its tenants, {shape}")));
-        }
-        if claims.len() > CLAIMS_MAX || claims.iter().any(|(k, v)| k.is_empty() || k.len() > 64 || v.is_empty() || v.len() > 256 || ["iss", "aud", "sub", "exp", "nbf", "iat"].contains(&k.as_str())) {
-            return Err(bad(format!("claims are at most {CLAIMS_MAX} other string claims (not iss, aud, sub or the times), each a value or a pattern")));
-        }
+        // Shared issuers' rule, then the claim rules (roll-oidc's, as roll-access's trusted
+        // clients have them).
+        roll_oidc::check_identity(&issuer, &subject, claims).map_err(bad)?;
         Ok((issuer, audience, subject, jwks, pinned_keys))
     }
 
@@ -490,7 +485,7 @@ impl Secrets {
                 if !wildcard(&i.subject, &sub) {
                     return Err(Error::Forbidden(format!("{sub} doesn't match identity {}'s subject", i.name)));
                 }
-                if let Some((k, _)) = i.claims.iter().find(|(k, want)| !jwt.str(k).is_some_and(|have| wildcard(want, have))) {
+                if let Some(k) = jwt.unmatched(&i.claims) {
                     return Err(Error::Forbidden(format!("the identity token's {k} doesn't match identity {}", i.name)));
                 }
                 sub

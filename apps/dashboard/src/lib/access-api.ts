@@ -488,6 +488,8 @@ export interface TrustedIdentity {
   issuer: string;
   audience?: string;
   subject: string;
+  /** Other claims that must match, as roll secrets' identities take them: a name or a JSON
+   *  pointer (`/realm_access/roles`) to a value or a `*` pattern; an array matches when any element does. */
   claims?: Record<string, string>;
   /** How many keys it pins (an issuer roll can't reach), in a listing. */
   pinned_keys?: number | null;
