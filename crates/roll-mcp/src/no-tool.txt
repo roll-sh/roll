@@ -17,6 +17,8 @@ GET /v1/access/tokens/{id}/tools                                             the
 PUT /v1/apps/projects/{project}/status-page                                  a person's call (it makes the project's service names public)
 POST /v1/apps/services                                                       covered by apps_create_service (POST /v1/apps/projects/{project}/services)
 GET /v1/apps/services/{id}/changes                                           the dashboard's (a server-sent change stream)
+POST /v1/apps/services/{id}/environments/{env}/config/rotate                 no tool yet: apps_rotate_config maps it once apps' stack lands (#508)
+POST /v1/apps/services/{id}/environments/{env}/deploys/{dep}/explain         no tool yet: apps_explain_deploy maps it once apps' stack lands (#502)
 GET /v1/apps/services/{id}/environments/{env}/files                          interactive (a shell, files, a forward): an admin's, live
 PUT /v1/apps/services/{id}/environments/{env}/files                          interactive (a shell, files, a forward): an admin's, live
 DELETE /v1/apps/services/{id}/environments/{env}/hook                        answers or sets a credential (a deploy hook's secret)
