@@ -147,7 +147,7 @@ secret: by writing it somewhere it's read.
   characters of two kinds or more, not a placeholder such as `${DB_PASSWORD}`, `<password>` or
   `password`, and not on loopback: a developer's `postgres:postgres@localhost` passes), a roll
   secret's share link (`shr_…#` and its key: the id alone is listed to readers), and roll's own credentials (`rlt_`,
-  `rlo_`, `rlf_`, `rlc_`, `rlk_`, `rlp_`, `rlb_`, by their checksum, so never a false positive). roll's are refused
+  `rlo_`, `rlf_`, `rlc_`, `rlk_`, `rlp_`, `rlb_`, `rlq_`, by their checksum, so never a false positive). roll's are refused
   in every product but roll secrets, where keeping one is the point; the others only in the
   products above (a database, a queue or apps' variables are where credentials belong).
 - The values of the project's own roll secrets too, for a token that may reveal them (the one that
@@ -613,6 +613,7 @@ previews are listed once those products are on.
 | `postgres_create_branch` | A copy-on-write branch of a project, from its parent now or at a point in time. | `POST /v1/projects/{project}/branches` |
 | `postgres_delete_branch` | Delete a branch and its compute. | `DELETE /v1/projects/{project}/branches/{branch}` |
 | `postgres_branch_history` | The range a branch can be restored to or branched from. | `GET /v1/projects/{project}/branches/{branch}/history` |
+| `postgres_create_replica` | A read-only endpoint on a branch that follows its primary. | `POST /v1/projects/{project}/branches/{branch}/replicas` |
 | `postgres_restore_branch` | Rewind a branch in place to a past point (the current state is kept as a branch). | `POST /v1/projects/{project}/branches/{branch}/restore` |
 | `postgres_reset_branch` | A branch back to its parent's current state, in place (Neon's reset from parent). | `POST /v1/projects/{id}/branches/{branch}/reset` |
 | `postgres_get_endpoint` | An endpoint's compute state and limits. | `GET /v1/endpoints/{id}` |
@@ -633,6 +634,9 @@ previews are listed once those products are on.
 | `postgres_usage` | Compute and storage use of a project, with cost estimates. | `GET /v1/projects/{project}/usage` |
 | `redis_list_databases` | Serverless Redis databases. | `GET /v1/redis/databases` |
 | `redis_get_database` | A Redis database's settings and connection (credentials need reveal). | `GET /v1/redis/databases/{database}` |
+| `redis_overview` | What roll Redis offers here: version, region, defaults, endpoints, pricing. | `GET /v1/redis` |
+| `redis_create_replica` | A read replica of a database (its password is a credential). | `POST /v1/redis/databases/{database}/replicas` |
+| `redis_delete_replica` | Remove a read replica. | `DELETE /v1/redis/replicas/{replica}` |
 | `redis_create_database` | A new serverless Redis database. | `POST /v1/redis/databases` |
 | `redis_delete_database` | Delete a database and its data. Irreversible. | `DELETE /v1/redis/databases/{database}` |
 | `redis_create_branch` | A fork of a database's data, now or at a point in time. | `POST /v1/redis/databases/{database}/branches` |
@@ -657,14 +661,19 @@ previews are listed once those products are on.
 | `storage_usage` | A bucket's usage. | `GET /v1/storage/buckets/{bucket}/usage` |
 | `storage_usage_all` | Storage and requests across every bucket. | `GET /v1/storage/usage` |
 | `storage_list_accounts` | Storage's accounts (12-digit ids): name, alias, the default. | `GET /v1/storage/accounts` |
+| `storage_overview` | What roll storage offers here: the S3 endpoint, region and the account's ids. | `GET /v1/storage` |
+| `storage_get_account` | One storage account. | `GET /v1/storage/accounts/{id}` |
 | `storage_list_keys` | An account's access keys: permission, buckets, IAM user, last use (never a secret). | `GET /v1/storage/keys` |
 | `storage_revoke_key` | Revoke an S3 access key at once. | `DELETE /v1/storage/keys/{id}` |
 | `storage_list_roles` | An account's IAM roles: ARN, trust, permissions policy, session length. | `GET /v1/storage/roles` |
 | `storage_get_role` | One IAM role. | `GET /v1/storage/roles/{name}` |
+| `storage_revoke_role_sessions` | Deny every session issued for a role until now. | `POST /v1/storage/roles/{name}/revoke` |
 | `storage_list_replication_targets` | Buckets outside roll that replication copies to (never the secret). | `GET /v1/storage/replication-targets` |
+| `storage_get_replication_target` | One replication target (never its secret). | `GET /v1/storage/replication-targets/{name}` |
 | `storage_update_bucket` | Change a bucket's versioning, lifecycle rules, CORS, trash days, tags or whether it's public: what's left out stays. | `PATCH /v1/storage/buckets/{bucket}` |
 | `storage_delete_objects` | Delete these keys, or every object under a prefix (to the trash). | `POST /v1/storage/buckets/{bucket}/delete` |
 | `streams_list` | Kafka-compatible streams. | `GET /v1/streams` |
+| `streams_overview` | What roll streams offers here: bootstrap address, SASL, pricing. | `GET /v1/kafka` |
 | `streams_get` | A stream's bootstrap address, topics and throughput. | `GET /v1/streams/{stream}` |
 | `streams_create` | A new stream (its first API key needs reveal to see). | `POST /v1/streams` |
 | `streams_delete` | Delete a stream with its topics and data. Irreversible. | `DELETE /v1/streams/{stream}` |
@@ -685,6 +694,7 @@ previews are listed once those products are on.
 | `streams_update_topic` | Grow a topic's partitions or change its configs, online. | `PATCH /v1/streams/{stream}/topics/{topic}` |
 | `streams_delete_group` | Delete a group and its committed offsets (refused while it has members). | `DELETE /v1/streams/{stream}/groups/{group}` |
 | `nosql_list_databases` | ScyllaDB/Cassandra-compatible databases. | `GET /v1/nosql/databases` |
+| `nosql_overview` | What roll NoSQL offers here: dialects, versions, endpoints. | `GET /v1/nosql` |
 | `nosql_get_database` | A database's settings and endpoints (credentials need reveal). | `GET /v1/nosql/databases/{database}` |
 | `nosql_create_database` | A new database. | `POST /v1/nosql/databases` |
 | `nosql_delete_database` | Delete a database and its data. Irreversible. | `DELETE /v1/nosql/databases/{database}` |
@@ -702,6 +712,8 @@ previews are listed once those products are on.
 | `queues_list_vhosts` | RabbitMQ-compatible virtual hosts. | `GET /v1/queues/vhosts` |
 | `queues_create_vhost` | A new virtual host. | `POST /v1/queues/vhosts` |
 | `queues_delete_vhost` | Delete a virtual host and everything in it. | `DELETE /v1/queues/vhosts/{vhost}` |
+| `queues_suspend_vhost` | Scale a virtual host to zero now (a client connecting wakes it). | `POST /v1/queues/vhosts/{vhost}/suspend` |
+| `queues_wake_vhost` | Start a suspended virtual host now. | `POST /v1/queues/vhosts/{vhost}/wake` |
 | `queues_list_queues` | A virtual host's queues with message counts. | `GET /v1/queues/vhosts/{vhost}/queues` |
 | `queues_declare_queue` | Create a queue. | `POST /v1/queues/vhosts/{vhost}/queues` |
 | `queues_delete_queue` | Delete a queue and its messages. | `DELETE /v1/queues/vhosts/{vhost}/queues/{queue}` |
@@ -742,7 +754,9 @@ previews are listed once those products are on.
 | `tasks_rerun` | A past run's function run again with its input. | `POST /v1/tasks/runs/{id}/rerun` |
 | `tasks_list_functions` | Durable functions. | `GET /v1/tasks/functions` |
 | `tasks_list_apps` | Synced apps: URL, functions, SDK, last sync. | `GET /v1/tasks/apps` |
+| `tasks_delete_app` | Stop syncing an app whose functions tasks runs. | `DELETE /v1/tasks/apps/{id}` |
 | `tasks_list_api_keys` | Tasks' API keys: name, prefix, made, last used (never the key). | `GET /v1/tasks/api-keys` |
+| `tasks_delete_api_key` | Revoke an API key at once. | `DELETE /v1/tasks/api-keys/{id}` |
 | `tasks_list_queues` | Queues with their parallelism, rate and backlog. | `GET /v1/tasks/queues` |
 | `tasks_stats` | Nodes, queue stats, dead letters, schedules and functions. | `GET /v1/tasks/stats` |
 | `tasks_list_dead_letters` | Messages that ran out of retries, newest first. | `GET /v1/tasks/dlq` |
@@ -808,6 +822,23 @@ previews are listed once those products are on.
 | `search_index_document` | Create or replace a document. | `PUT /v1/search/clusters/{cluster}/indices/{index}/docs/{doc}` |
 | `search_delete_document` | Delete a document. | `DELETE /v1/search/clusters/{cluster}/indices/{index}/docs/{doc}` |
 | `secrets_list_environments` | A project's secret environments. | `GET /v1/secrets/projects/{project}/environments` |
+| `secrets_project` | A project's environments, previews and history window. | `GET /v1/secrets/projects/{project}` |
+| `secrets_get_environment` | One environment's settings. | `GET /v1/secrets/projects/{project}/environments/{env}` |
+| `secrets_ensure_environment` | Make an environment, or check it matches (`replace` changes it). | `PUT /v1/secrets/projects/{project}/environments/{env}` |
+| `secrets_update_environment` | Rename an environment, or set its expiry or max age. | `PATCH /v1/secrets/projects/{project}/environments/{env}` |
+| `secrets_delete_environment` | Delete an environment and its secrets. | `DELETE /v1/secrets/projects/{project}/environments/{env}` |
+| `secrets_delete_ephemeral_environments` | Delete ephemeral environments with a label. | `DELETE /v1/secrets/projects/{project}/environments` |
+| `secrets_order_environments` | The environments' order. | `PUT /v1/secrets/projects/{project}/environments/order` |
+| `secrets_create_folder` | Make a folder. | `POST /v1/secrets/projects/{project}/environments/{env}/folders` |
+| `secrets_delete_folder` | Delete a folder and its keys. | `DELETE /v1/secrets/projects/{project}/environments/{env}/folders` |
+| `secrets_set_imports` | What a folder imports from, replacing the list. | `PUT /v1/secrets/projects/{project}/environments/{env}/imports` |
+| `secrets_set_required` | The keys every environment needs, replacing the list. | `PUT /v1/secrets/projects/{project}/required` |
+| `secrets_apply_changes` | Set and delete several keys in one change. | `POST /v1/secrets/projects/{project}/environments/{env}/changes` |
+| `secrets_revoke_share` | Revoke a one-off share link. | `DELETE /v1/secrets/projects/{project}/shares/{id}` |
+| `secrets_create_transit_key` | Make a transit key (roll's own material). | `POST /v1/secrets/projects/{project}/transit` |
+| `secrets_rotate_transit_key` | A new version of a transit key. | `POST /v1/secrets/projects/{project}/transit/{name}/rotate` |
+| `secrets_update_transit_key` | The oldest version that still decrypts. | `PATCH /v1/secrets/projects/{project}/transit/{name}` |
+| `secrets_backup_schedule` | Where and how often a project is backed up (never set here). | `GET /v1/secrets/projects/{project}/backup/schedule` |
 | `secrets_list` | Secret names and metadata in an environment (never values). | `GET /v1/secrets/projects/{project}/environments/{env}/secrets` |
 | `secrets_get` | One secret's metadata: type, version, link, tags, who changed it (never its value). | `GET /v1/secrets/projects/{project}/environments/{env}/secrets/{name}` |
 | `secrets_grid` | Every key in every environment: same, different or missing (by fingerprint), required. | `GET /v1/secrets/projects/{project}/grid` |
@@ -851,6 +882,12 @@ previews are listed once those products are on.
 | `secrets_rotate` | A new value for a secret, switched to: a generated one, or a managed link's, made where it lives. | `POST …/environments/{env}/secrets/{name}/rotate` |
 | `secrets_promote` | Copy another environment's secrets in (a change request into a protected one). | `POST …/environments/{env}/promote` |
 | `secrets_list_requests` | An environment's change requests. | `GET …/environments/{env}/requests` |
+| `secrets_request_value` | A link where a person pastes a value the agent doesn't have, sealed in their browser into the folder, never through the conversation (one answer and a day by default; it answers an `rlq_` token, and a link when roll knows the dashboard's address; either goes only to the person it's for). | `POST /v1/secrets/projects/{project}/environments/{env}/value-requests` |
+| `secrets_list_value_requests` | A project's value requests and their state (open, answered, expired, cancelled; never a value). | `GET /v1/secrets/projects/{project}/value-requests` |
+| `secrets_cancel_value_request` | Close a value request's link. | `DELETE /v1/secrets/projects/{project}/value-requests/{id}` |
+| `secrets_get_request` | One change request: what it changes, reviews, whether approvals are met. | `GET /v1/secrets/projects/{project}/environments/{env}/requests/{id}` |
+| `secrets_apply_request` | Apply an approved change request (never with bypass). | `POST /v1/secrets/projects/{project}/environments/{env}/requests/{id}/apply` |
+| `secrets_close_request` | Withdraw a change request. | `POST /v1/secrets/projects/{project}/environments/{env}/requests/{id}/close` |
 | `secrets_propose` | Propose changes for a person to review and apply: the way to change a protected environment. | `POST …/environments/{env}/requests` |
 | `secrets_transit_encrypt` | Encrypt with a project's encryption key (the key never leaves roll). | `POST /v1/secrets/projects/{project}/transit/{name}/encrypt` |
 | `secrets_transit_decrypt` | Decrypt a `roll:v<n>:` (or Vault's `vault:v<n>:`) ciphertext; reveal, audited. | `POST /v1/secrets/projects/{project}/transit/{name}/decrypt` |
@@ -911,6 +948,7 @@ previews are listed once those products are on.
 | `apps_metrics` | CPU, memory and requests of an environment, and each instance's own last hour (`by_instance`). | `GET /v1/apps/services/{service}/environments/{env}/metrics` |
 | `apps_plan` | How roll would build and run a repo, before making a service (a dry run). | `POST /v1/apps/plan` |
 | `apps_errors` | An environment's errors, grouped, the most frequent first. | `GET /v1/apps/services/{service}/environments/{env}/errors` |
+| `apps_push_status` | Each run.push rule's lag, deliveries, dead letters and failures. | `GET /v1/apps/services/{service}/environments/{env}/push` |
 | `apps_set_error_state` | Resolve, mute or reopen an error group (a resolved one seen again reopens as a regression). | `PATCH /v1/apps/services/{service}/environments/{env}/errors/{fingerprint}` |
 | `apps_rotate_config` | A new read token for an environment's runtime config (the old one reads until a redeploy). | `POST /v1/apps/services/{service}/environments/{env}/config/rotate` |
 | `apps_traces` | Recent traces (root span, duration, failures); `min_ms` keeps the slow ones. | `GET /v1/apps/services/{service}/environments/{env}/traces` |
@@ -996,6 +1034,7 @@ previews are listed once those products are on.
 | `previews_share` | A link for someone outside the team, for some hours (reveal: its token is in the answer). | `POST /v1/previews/{id}/shares` |
 | `previews_revoke_share` | Stop a preview's share link at once. | `DELETE /v1/previews/{id}/shares/{share}` |
 | `previews_settings` | A project's preview rules (changing them is admin, in the dashboard). | `GET /v1/previews/projects/{project}/settings` |
+| `previews_set_rules` | Change which changes get a preview, how long they live, budgets, GitHub (access, secrets, egress, variables, masking and jobs stay a person's). | `PUT /v1/previews/projects/{project}/settings` |
 | `previews_visitors` | The last people signed in to roll who opened a preview. | `GET /v1/previews/{id}/visitors` |
 | `previews_list_hooks` | A project's preview deploy hooks (never their secrets). | `GET /v1/previews/projects/{project}/hooks` |
 | `previews_delete_hook` | Delete a preview deploy hook. | `DELETE /v1/previews/projects/{project}/hooks/{hook}` |
@@ -1163,7 +1202,7 @@ waits on a sibling PR reaching main is last.
    were found this way). #24 and #25 are on main, so `feature/mcp-on-landing` is retired:
    secrets' #64 lands on main directly.
 22. **The operator's steps:** only if a load balancer that terminates HTTP sits in front of rolld (not
-   roll's own edge, which needs nothing), set `ROLL_TRUSTED_PROXIES` to its addresses; and register `rlt_`, `rlo_`, `rlf_`, `rlc_`, `rlk_`, `rlp_` and `rlb_` (`[a-z2-7]{40}` with a
+   roll's own edge, which needs nothing), set `ROLL_TRUSTED_PROXIES` to its addresses; and register `rlt_`, `rlo_`, `rlf_`, `rlc_`, `rlk_`, `rlp_`, `rlb_` and `rlq_` (`[a-z2-7]{40}` with a
    checksum) with GitHub's secret scanning partner program, so leaks on GitHub reach
    `/v1/access/leaks/github`.
 23. **Postgres e2e:** five history/replica e2e tests fail on this server because computes can't

@@ -178,7 +178,18 @@ pub fn find(all: &[Value], args: &Value) -> Value {
         json!({ "tools": pool.iter().map(|t| entry(t)).collect::<Vec<_>>(), "total": pool.len() })
     } else {
         let exact = pool.iter().find(|t| t["name"].as_str() == Some(query.trim()));
-        let q: Vec<String> = words(&query).into_iter().filter(|w| !STOP.contains(&w.as_str())).collect();
+        let raw = words(&query);
+        let mut q: Vec<String> = raw.iter().filter(|w| !STOP.contains(&w.as_str())).cloned().collect();
+        // Two words a tool's name has as one ("roll back" → `rollback`, "log in" → `login`): the
+        // stop words would otherwise drop half of it. Only a pair that is a name's word, so
+        // "deploy my" never becomes a word that half-matches `deploy`.
+        let names: std::collections::HashSet<String> = pool.iter().flat_map(|t| words(t["name"].as_str().unwrap_or(""))).collect();
+        for pair in raw.windows(2) {
+            let joined = format!("{}{}", pair[0], pair[1]);
+            if names.contains(&joined) && !q.contains(&joined) {
+                q.push(joined);
+            }
+        }
         let mut scored: Vec<(f64, &Value)> = match exact {
             Some(t) => vec![(f64::MAX, *t)],
             None => rank(&pool, &q),
@@ -323,6 +334,7 @@ mod finds {
             ("roll back secrets", "secrets_rollback"),
             ("which secrets nobody reads", "secrets_insights"),
             ("was the secrets audit log tampered with", "secrets_verify_audit"),
+            ("ask a person for an api key", "secrets_request_value"),
             ("who changed this secret and when", "secrets_audit"),
             ("one-time code", "secrets_totp"),
             ("vulnerabilities in my image", "apps_deploy_vulnerabilities"),

@@ -12,6 +12,9 @@
  * `roll-gateway-upstream:<upstream id>` as the associated data (agent-proto `upstream_key_context`),
  * so an endpoint's box never opens as an upstream's key, nor one upstream's as another's.
  *
+ * roll secrets' secret requests (docs/secrets.md, "Asking for a value") are the same box too, sealed
+ * to a request's own public key with `roll-secret-request:<id>:<KEY>` ([`sealTo`]).
+ *
  * In audited pure JS (`@noble/curves`, `@noble/hashes`, `@noble/ciphers`), not WebCrypto: a page
  * served over plain http (a dashboard reached over a tailnet by its name) has no `crypto.subtle`,
  * and older Safari has no X25519 in it. Only the randomness is the browser's
@@ -49,19 +52,24 @@ export function sealKey(sealKey: string, endpoint: string, key: string, fixed?: 
   return seal(sealKey, `roll-endpoint:${endpoint}`, key, fixed);
 }
 
+/** Seals `plain` to any X25519 public key (base64url), bound to `context`. */
+export function sealTo(publicKey: string, context: string, plain: string, fixed?: SealFixed): Promise<SealedSecret> {
+  return seal(publicKey, context, plain, fixed, "the public key isn't an X25519 key");
+}
+
 /** Seals an upstream's key to the gateway's daemon (`gateway.key`), for that upstream only. */
 export function sealUpstreamKey(sealKey: string, upstream: string, key: string, fixed?: SealFixed): Promise<SealedSecret> {
   return seal(sealKey, `roll-gateway-upstream:${upstream}`, key, fixed);
 }
 
-async function seal(sealKey: string, context: string, key: string, fixed?: SealFixed): Promise<SealedSecret> {
+async function seal(sealKey: string, context: string, key: string, fixed?: SealFixed, bad = "the machine's seal key isn't an X25519 key"): Promise<SealedSecret> {
   const daemon = fromB64url(sealKey);
-  if (daemon.length !== 32) throw new Error("the machine's seal key isn't an X25519 key");
+  if (daemon.length !== 32) throw new Error(bad);
   const eph = fixed?.ephemeral ?? crypto.getRandomValues(new Uint8Array(32));
   const epk = x25519.getPublicKey(eph);
   const shared = x25519.getSharedSecret(eph, daemon);
   // The daemon refuses an all-zero secret (a low-order key): so does this side.
-  if (shared.every((b) => b === 0)) throw new Error("the machine's seal key isn't an X25519 key");
+  if (shared.every((b) => b === 0)) throw new Error(bad);
   const salt = new Uint8Array(64);
   salt.set(epk, 0);
   salt.set(daemon, 32);

@@ -1,7 +1,7 @@
 import { Trash2 } from "lucide-react";
 import { useReducedMotion } from "@roll/brand";
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
-import { appsApi, SERVICE_NAME, type Build, type Environment, type Prices, type Reset, type Run, type Service, type ServicePatch, type Source } from "@/lib/apps-api";
+import { appsApi, SERVICE_NAME, type Build, type Environment, type Prices, type PushState, type Reset, type Run, type Service, type ServicePatch, type Source } from "@/lib/apps-api";
 import { Field, Segmented } from "../redis/shared";
 import { btn, Confirm, danger, input, Panel, panel, primary } from "../ui";
 import { Link } from "@/components/link";
@@ -10,7 +10,7 @@ import { DuplicatePanel } from "./duplicate";
 import { EnvironmentPanel, InstancesPanel } from "./environment";
 import { resourceKey } from "@/lib/workspace-resources";
 import { useWorkspace } from "@/lib/workspace-store";
-import { CPU, MEMORY, mb, type Runner } from "./shared";
+import { CPU, MEMORY, mb, since, type Runner } from "./shared";
 import { SidecarsPanel } from "./sidecars";
 import { ChecksPanel } from "./checks";
 import { HeartbeatsPanel } from "./heartbeats";
@@ -79,6 +79,8 @@ interface Form {
   rolloutStep: string;
   rolloutErrors: string;
   rolloutManual: boolean;
+  /** The new instances start beside the old ones (false: the old ones stop first). */
+  rolloutOverlap: boolean;
   h2c: boolean;
   public: boolean;
   restart: "always" | "on_failure" | "never";
@@ -167,6 +169,7 @@ export function formOf(s: Service): Form {
     rolloutStep: str(s.run.rollout?.step_s),
     rolloutErrors: str(s.run.rollout?.error_pct),
     rolloutManual: !!s.run.rollout?.manual,
+    rolloutOverlap: s.run.rollout?.overlap !== false,
     h2c: !!s.run.h2c,
     public: s.run.public !== false,
     restart: s.run.restart ?? "always",
@@ -269,8 +272,16 @@ export function patchOf(s: Service, f: Form): ServicePatch {
     run.metrics = f.metricsPath.trim() ? { path: f.metricsPath.trim(), ...(num(f.metricsPort) ? { port: Number(f.metricsPort) } : {}) } : null;
   if (f.sloObjective !== before.sloObjective || f.sloLatency !== before.sloLatency || f.sloWindow !== before.sloWindow)
     run.slo = f.sloObjective.trim() ? { objective: Number(f.sloObjective), ...(num(f.sloLatency) ? { latency_ms: Number(f.sloLatency) } : {}), ...(num(f.sloWindow) ? { window_days: Number(f.sloWindow) } : {}) } : null;
-  if (f.rolloutSteps !== before.rolloutSteps || f.rolloutStep !== before.rolloutStep || f.rolloutErrors !== before.rolloutErrors || f.rolloutManual !== before.rolloutManual)
-    run.rollout = { steps: rolloutSteps(f.rolloutSteps) ?? [], step_s: Number(f.rolloutStep) || 120, error_pct: Number(f.rolloutErrors) || 5, ...(f.rolloutManual ? { manual: true } : {}), ...(s.run.rollout?.slo_burn ? { slo_burn: s.run.rollout.slo_burn } : {}), ...(s.run.rollout?.p95_pct ? { p95_pct: s.run.rollout.p95_pct } : {}) };
+  if (f.rolloutSteps !== before.rolloutSteps || f.rolloutStep !== before.rolloutStep || f.rolloutErrors !== before.rolloutErrors || f.rolloutManual !== before.rolloutManual || f.rolloutOverlap !== before.rolloutOverlap)
+    run.rollout = {
+      steps: f.rolloutOverlap ? (rolloutSteps(f.rolloutSteps) ?? []) : [],
+      step_s: Number(f.rolloutStep) || 120,
+      error_pct: Number(f.rolloutErrors) || 5,
+      ...(f.rolloutManual ? { manual: true } : {}),
+      ...(s.run.rollout?.slo_burn ? { slo_burn: s.run.rollout.slo_burn } : {}),
+      ...(s.run.rollout?.p95_pct ? { p95_pct: s.run.rollout.p95_pct } : {}),
+      ...(f.rolloutOverlap ? {} : { overlap: false }),
+    };
   if (f.h2c !== before.h2c) run.h2c = f.h2c ? true : null;
   if (f.public !== before.public) run.public = f.public ? null : false;
   if (f.affinity !== before.affinity) run.affinity = f.affinity ? true : null;
@@ -626,7 +637,8 @@ export function SettingsTab({
                       <Field label="Dead-letter topic" hint="after 5 failed tries; none: tried until taken">{t("pushDead", "orders-dead")}</Field>
                     </>
                   )}
-                  {(service.run.push?.length ?? 0) > 1 && <p className="col-span-full text-[12px] text-subtle">And {(service.run.push?.length ?? 1) - 1} more set in roll.toml or the API, kept as they are.</p>}
+                  {(service.run.push?.length ?? 0) > 1 && <p className="col-span-full text-[12px] text-subtle">And {(service.run.push?.length ?? 1) - 1} more set through the API, kept as they are.</p>}
+                  {(service.run.push?.length ?? 0) > 0 && <PushStatus service={service.id} envs={[...new Set((service.run.push ?? []).map((p) => p.environment ?? "production"))]} />}
                 </>
               )}
               {form.type === "worker" && (
@@ -807,11 +819,19 @@ export function SettingsTab({
                 {t("drain", "30")}
               </Field>
               {!form.volumeMount.trim() && (
+                <Field label="During a deploy" hint={form.rolloutOverlap ? "the new instances start beside the old ones: no gap" : "the old ones stop first, so two never run at once (a bot, a scheduler)"}>
+                  <select value={form.rolloutOverlap ? "overlap" : "alone"} onChange={(e) => set("rolloutOverlap", e.target.value === "overlap")} className={`${input} w-full`}>
+                    <option value="overlap">New beside old</option>
+                    <option value="alone">Old stops first</option>
+                  </select>
+                </Field>
+              )}
+              {!form.volumeMount.trim() && form.rolloutOverlap && (
                 <Field label="Gradual rollout (%)" hint={rolloutSteps(form.rolloutSteps) ? "shares of requests a new deployment takes in turn; empty: at once" : "increasing percents, 1–99, up to five"}>
                   {t("rolloutSteps", "10, 50")}
                 </Field>
               )}
-              {!form.volumeMount.trim() && form.rolloutSteps.trim() && (
+              {!form.volumeMount.trim() && form.rolloutOverlap && form.rolloutSteps.trim() && (
                 <>
                   <Field label="Each step (s)">{t("rolloutStep", "120")}</Field>
                   <Field label="Roll back at 5xx (%)" hint="of its requests in a step, and more than the old one">
@@ -1185,5 +1205,43 @@ function RegistryLogin({ service, runner }: { service: Service; runner: Runner }
         </form>
       )}
     </div>
+  );
+}
+
+/** Each push rule as it stands on the service's owner: how far behind, delivered, failing. */
+function PushStatus({ service, envs }: { service: string; envs: string[] }) {
+  const [states, setStates] = useState<PushState[] | null>(null);
+  const key = envs.join(",");
+  useEffect(() => {
+    let live = true;
+    const load = () => Promise.all(envs.map((e) => appsApi.pushStates(service, e).catch(() => [] as PushState[]))).then((all) => live && setStates(all.flat()));
+    void load();
+    const t = setInterval(load, 15000);
+    return () => {
+      live = false;
+      clearInterval(t);
+    };
+  }, [service, key]); // eslint-disable-line react-hooks/exhaustive-deps
+  if (!states?.length) return null;
+  const now = Date.now();
+  return (
+    <ul className="col-span-full space-y-1 text-[12px]" aria-label="Pushes">
+      {states.map((s) => (
+        <li key={`${s.stream}/${s.topic}/${s.group}`} className="text-muted">
+          <span className="font-mono text-fg">{s.topic}</span> → <span className="font-mono">{s.path}</span>
+          {s.off ? (
+            <span className="text-subtle"> · off: {s.off}</span>
+          ) : (
+            <>
+              {s.lag != null && <span> · {s.lag.toLocaleString()} behind</span>}
+              <span> · {s.delivered.toLocaleString()} delivered</span>
+              {s.last_delivered_at && <span> {since(s.last_delivered_at, now)}</span>}
+              {s.dead_lettered > 0 && <span> · {s.dead_lettered.toLocaleString()} dead-lettered</span>}
+              {s.failing_since && <span className="text-danger"> · failing since {since(s.failing_since, now)}: {s.last_error}</span>}
+            </>
+          )}
+        </li>
+      ))}
+    </ul>
   );
 }

@@ -1939,6 +1939,8 @@ dependencies = [
  "roll-auth",
  "roll-cluster",
  "roll-net",
+ "roll-secrets",
+ "roll-workspace",
  "rsa",
  "serde",
  "serde_json",
@@ -5886,6 +5888,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "axum",
+ "base64 0.22.1",
  "bytes",
  "futures",
  "getrandom 0.4.3",
@@ -5911,6 +5914,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "bytes",
+ "getrandom 0.4.3",
  "tokio",
  "tracing",
 ]
