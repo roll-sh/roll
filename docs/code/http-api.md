@@ -218,6 +218,25 @@ POST /v1/code/changes/{id}/close → Change
 POST /v1/code/changes/{id}/checks {name, status, url?, summary?, head?} → Change
      head: the changeset the check ran on (any unique prefix); 409 if the change has moved past it
 POST /v1/code/changes/{id}/preview → Change · DELETE → Change
+GET  /v1/code/changes/{id}/unstored/{fingerprint} → UnstoredTarget            writers
+POST /v1/code/changes/{id}/unstored/{fingerprint}/store {key?, environment?, path?} → UnstoredStored     writers
+     "Store in roll" for a `secret_unstored` notice (docs/secrets.md, "Credentials roll doesn't hold"): roll
+     reads the credential from the change's own blob at the notice's path and line (its current head, the
+     default branch's .roll/secrets-allow applied) and stores it through roll secrets as a new key of the
+     project roll secrets trusts the repo for (Workspace::trusts, never canvas membership alone), as the
+     caller: roll secrets checks `write` in the folder with the request's own grant, session or operator
+     token, and makes one change, or a change request where the environment or folder needs approval.
+     Defaults: the notice's key; the environment and folder roll.toml's first `[checks.*] secrets` names
+     ("staging:/api"), else `development` and "/". Recorded in the audit log (`secret_unstored_stored`:
+     key and where, never the value). Neither answer ever holds the value; roll never rewrites the change.
+     404: no such notice on the change's head; 409 if landed or closed, from outside the repo (`trusted:
+     false`, a fork's pull request: its credential isn't the repo's), or the key is already there
+     (never overwritten); 422 when no project roll secrets trusts the repo for, or roll secrets is off;
+     403 without `write` in the folder.
+UnstoredTarget = {kind, file, line, fingerprint, key /* suggested */, project: {id, name},
+                  environments: string[] /* the caller may read, in order */, environment: string | null /* suggested */, path}
+UnstoredStored = {key, project, environment, path, file, line, replacement /* the file's language's read: os.environ["KEY"] */,
+                  change: number | null /* the environment's change */, request: string | null /* req_…, where it needs approval */}
 ```
 
 ## Merge queue

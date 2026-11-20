@@ -1,6 +1,8 @@
 //! `roll secrets …` and `roll run` (docs/secrets.md, "Consumption"): a project's secrets and
 //! environment variables, and a command run with them in its environment, without files.
 
+mod repo;
+
 use crate::Api;
 use anyhow::{Context, bail};
 use clap::{Args, Subcommand};
@@ -10,7 +12,8 @@ use std::io::Read;
 
 /// Which project, environment and folder: flags, then `ROLL_PROJECT`, `ROLL_ENV` and
 /// `ROLL_SECRETS_PATH`, then what `roll secrets setup` remembered for this directory or a parent,
-/// then `development` and `/`. A scoped token implies its project.
+/// then the repo's `roll.toml` `[secrets]` once approved (never a protected environment), then
+/// `development` and `/`. A scoped token implies its project.
 #[derive(Args, Clone, Debug)]
 pub struct AtArgs {
     /// The workspace project: a name or a `prj_…` id.
@@ -24,31 +27,179 @@ pub struct AtArgs {
     pub path: Option<String>,
 }
 
+/// Where a choice came from, for `doctor` and the refusals.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Source {
+    Flag,
+    Var,
+    Setup,
+    Repo,
+    Default,
+}
+
 /// [`AtArgs`] with the directory's defaults filled in.
 #[derive(Clone, Debug)]
 pub struct At {
     pub project: Option<String>,
     pub env: String,
     pub path: String,
+    /// Where each came from (a project of `None`: the token's own).
+    pub from: (Option<Source>, Source, Source),
+    /// The project as the person's setup names it.
+    pub label: Option<String>,
+    /// The repo's `[secrets]`, if the nearest `roll.toml` has one.
+    pub repo: Option<RepoSeen>,
+}
+
+/// The repo's table as this command saw it.
+#[derive(Clone, Debug)]
+pub struct RepoSeen {
+    pub found: repo::Found,
+    pub approval: Approval,
+    /// It would have filled something in that nothing above it did.
+    pub wanted: bool,
+    /// The branch pattern that chose the environment.
+    pub pattern: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Approval {
+    Approved,
+    Unapproved,
+    /// Approved once; the table has changed since.
+    Changed(repo::Table),
 }
 
 impl AtArgs {
     pub fn resolve(&self) -> At {
-        let here = std::env::current_dir().ok().and_then(|d| setup::nearest(&d));
-        At {
-            project: self.project.clone().or_else(|| here.as_ref().map(|h| h.project.clone())),
-            env: self.env.clone().or_else(|| here.as_ref().map(|h| h.env.clone())).unwrap_or_else(|| "development".into()),
-            path: self.path.clone().or_else(|| here.as_ref().map(|h| h.path.clone())).unwrap_or_else(|| "/".into()),
+        let cwd = std::env::current_dir().ok();
+        let own = cwd.as_deref().and_then(setup::nearest);
+        // A flag and its variable fill the same field: the variable's when they agree.
+        let given = |v: &Option<String>, var: &str| v.clone().map(|v| {
+            let from = if std::env::var(var).ok().as_deref() == Some(v.as_str()) { Source::Var } else { Source::Flag };
+            (v, from)
+        });
+        let or_own = |g: Option<(String, Source)>, o: Option<String>| g.or_else(|| o.map(|v| (v, Source::Setup)));
+        let mut project = or_own(given(&self.project, "ROLL_PROJECT"), own.as_ref().map(|o| o.project.clone()));
+        let mut env = or_own(given(&self.env, "ROLL_ENV"), own.as_ref().map(|o| o.env.clone()));
+        let mut path = or_own(given(&self.path, "ROLL_SECRETS_PATH"), own.as_ref().map(|o| o.path.clone()));
+        let label = match &project {
+            Some((_, Source::Setup)) => own.as_ref().map(|o| o.name.clone()),
+            Some((p, _)) => Some(p.clone()),
+            None => None,
+        };
+        let repo = cwd.as_deref().and_then(repo::nearest).map(|found| {
+            let approval = setup::approval(&found);
+            let t = &found.table;
+            // The table speaks for the project it names: given another one, none of it applies.
+            let other = matches!((&project, &t.project), (Some((p, _)), Some(named)) if p != named);
+            let wanted = !other && ((project.is_none() && t.project.is_some()) || (env.is_none() && (t.environment.is_some() || !t.branches.is_empty())) || (path.is_none() && t.path.is_some()));
+            let mut pattern = None;
+            if wanted && approval == Approval::Approved {
+                if project.is_none() {
+                    project = t.project.clone().map(|p| (p, Source::Repo));
+                }
+                if env.is_none() {
+                    let branch = if t.branches.is_empty() { None } else { repo::branch(&found.dir) };
+                    if let Some((e, p)) = t.environment_for(branch.as_deref()) {
+                        env = Some((e, Source::Repo));
+                        pattern = p;
+                    }
+                }
+                if path.is_none() {
+                    path = t.path.clone().map(|p| (p, Source::Repo));
+                }
+            }
+            RepoSeen { found, approval, wanted, pattern }
+        });
+        let label = label.or_else(|| project.as_ref().map(|p| p.0.clone()));
+        let (env, env_from) = env.unwrap_or_else(|| ("development".into(), Source::Default));
+        let (path, path_from) = path.unwrap_or_else(|| ("/".into(), Source::Default));
+        At { from: (project.as_ref().map(|p| p.1), env_from, path_from), project: project.map(|p| p.0), env, path, label, repo }
+    }
+}
+
+impl At {
+    /// What the repo suggests and why it isn't used, when it would have been: on stderr.
+    pub fn hint(&self) {
+        let Some(r) = self.repo.as_ref().filter(|r| r.wanted || (!r.found.ignored.is_empty() && r.found.table.is_empty())) else { return };
+        let file = r.found.file.display();
+        for why in &r.found.ignored {
+            eprintln!("roll: {file} [secrets]: {why}; ignored");
+        }
+        if !r.wanted {
+            return;
+        }
+        match &r.approval {
+            Approval::Approved => {}
+            Approval::Unapproved => eprintln!("roll: {file} suggests {}, but it isn't used until you approve it: roll secrets setup (in a script: roll secrets setup --approve)", r.found.table.describe()),
+            Approval::Changed(was) => eprintln!("roll: {file}'s [secrets] changed since you approved it (it was: {}; now: {}), so it isn't used until you approve it again: roll secrets setup (in a script: roll secrets setup --approve)", was.describe(), r.found.table.describe()),
+        }
+    }
+
+    /// `-e production`, `ROLL_ENV`, `your setup`, `roll.toml (branch release/*)`, `the default`.
+    fn said(&self, which: usize) -> String {
+        let flags = [("-p", "ROLL_PROJECT"), ("-e", "ROLL_ENV"), ("--path", "ROLL_SECRETS_PATH")];
+        let from = match which {
+            0 => match self.from.0 {
+                Some(s) => s,
+                None => return "the token".into(),
+            },
+            1 => self.from.1,
+            _ => self.from.2,
+        };
+        match from {
+            Source::Flag => flags[which].0.into(),
+            Source::Var => flags[which].1.into(),
+            Source::Setup => "your setup".into(),
+            Source::Repo => match (which, self.repo.as_ref().and_then(|r| r.pattern.as_deref())) {
+                (1, Some(p)) => format!("roll.toml (branch {p})"),
+                _ => "roll.toml".into(),
+            },
+            Source::Default => "the default".into(),
         }
     }
 }
 
+/// The environment's answer says whether it's protected; one the repo chose that is (or that may
+/// read a protected base) is refused: `-e`, `ROLL_ENV` or the person's own setup only.
+async fn refuse_protected(api: &Api, project: &str, at: &At) -> anyhow::Result<()> {
+    if at.from.1 != Source::Repo {
+        return Ok(());
+    }
+    let e = api.get(&format!("/v1/secrets/projects/{}/environments/{}", enc(project), enc(&at.env))).await.with_context(|| format!("checking whether {} (from roll.toml) is protected", at.env))?;
+    if e["protected"] == true || e["trusted"] == true {
+        let by = at.repo.as_ref().and_then(|r| r.pattern.as_deref()).map(|p| format!(" for branch {p}")).unwrap_or_default();
+        bail!(
+            "roll.toml's [secrets] chooses {env}{by}, which is protected: a repo never chooses a protected environment, even approved. Choose it yourself: -e {env}, ROLL_ENV={env}, or roll secrets setup -p {} -e {env}",
+            at.label.as_deref().unwrap_or(project),
+            env = at.env
+        );
+    }
+    Ok(())
+}
+
+/// Resolve, say what the repo suggests when it isn't used, find the project, and refuse a
+/// protected environment the repo chose.
+async fn locate(api: &Api, args: &AtArgs) -> anyhow::Result<(At, String)> {
+    let at = args.resolve();
+    at.hint();
+    let id = project(api, at.project.as_deref()).await?;
+    refuse_protected(api, &id, &at).await?;
+    Ok((at, id))
+}
+
 /// What `roll secrets setup` remembers per directory, in `~/.config/roll/secrets.json` (the
-/// user's own config, never the repo: like `doppler setup`).
+/// user's own config, never the repo: like `doppler setup`). Each key is a directory, except
+/// `approved`: the repo tables the person approved, by the directory of their `roll.toml`.
 mod setup {
+    use super::{Approval, repo};
     use serde::{Deserialize, Serialize};
+    use serde_json::Value;
     use std::collections::BTreeMap;
     use std::path::{Path, PathBuf};
+
+    const APPROVED: &str = "approved";
 
     #[derive(Clone, Debug, Serialize, Deserialize)]
     pub struct Dir {
@@ -58,42 +209,90 @@ mod setup {
         pub path: String,
     }
 
+    /// An approved table: its hash, when, and the table itself (to say what changed).
+    #[derive(Clone, Debug, Serialize, Deserialize)]
+    pub struct Approved {
+        pub sha256: String,
+        pub at: String,
+        pub table: repo::Table,
+    }
+
+    #[derive(Default)]
+    pub struct File {
+        pub dirs: BTreeMap<String, Dir>,
+        pub approved: BTreeMap<String, Approved>,
+        /// Entries this version doesn't know, kept as they are.
+        other: serde_json::Map<String, Value>,
+    }
+
     fn file() -> Option<PathBuf> {
         let base = std::env::var_os("XDG_CONFIG_HOME").map(PathBuf::from).or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".config")))?;
         Some(base.join("roll").join("secrets.json"))
     }
 
-    pub fn load() -> BTreeMap<String, Dir> {
-        file().and_then(|f| std::fs::read_to_string(f).ok()).and_then(|t| serde_json::from_str(&t).ok()).unwrap_or_default()
+    pub fn load() -> File {
+        let all: serde_json::Map<String, Value> = file().and_then(|f| std::fs::read_to_string(f).ok()).and_then(|t| serde_json::from_str(&t).ok()).unwrap_or_default();
+        let mut out = File::default();
+        for (k, v) in all {
+            if k == APPROVED {
+                out.approved = v.as_object().into_iter().flatten().filter_map(|(d, a)| Some((d.clone(), serde_json::from_value(a.clone()).ok()?))).collect();
+            } else if let Ok(d) = serde_json::from_value::<Dir>(v.clone()) {
+                out.dirs.insert(k, d);
+            } else {
+                out.other.insert(k, v);
+            }
+        }
+        out
     }
 
-    pub fn save(all: &BTreeMap<String, Dir>) -> anyhow::Result<PathBuf> {
+    pub fn save(all: &File) -> anyhow::Result<PathBuf> {
         let f = file().ok_or_else(|| anyhow::anyhow!("no HOME to keep the setup in"))?;
         std::fs::create_dir_all(f.parent().expect("a parent"))?;
-        std::fs::write(&f, serde_json::to_string_pretty(all)? + "\n")?;
+        let mut out = all.other.clone();
+        for (k, d) in &all.dirs {
+            out.insert(k.clone(), serde_json::to_value(d)?);
+        }
+        if !all.approved.is_empty() {
+            out.insert(APPROVED.into(), serde_json::to_value(&all.approved)?);
+        }
+        std::fs::write(&f, serde_json::to_string_pretty(&out)? + "\n")?;
         Ok(f)
     }
 
     /// The setup of `dir` or its nearest parent that has one, and the directory it's for.
     pub fn nearest(dir: &Path) -> Option<Dir> {
         let all = load();
-        dir.ancestors().find_map(|d| all.get(&d.to_string_lossy().to_string()).cloned())
+        dir.ancestors().find_map(|d| all.dirs.get(&d.to_string_lossy().to_string()).cloned())
+    }
+
+    /// Whether the person approved exactly this table for its directory.
+    pub fn approval(found: &repo::Found) -> Approval {
+        match load().approved.get(&found.dir.to_string_lossy().to_string()) {
+            None => Approval::Unapproved,
+            Some(a) if a.sha256 == found.table.digest() => Approval::Approved,
+            Some(a) => Approval::Changed(a.table.clone()),
+        }
     }
 }
 
 #[derive(Subcommand)]
 pub enum Secrets {
     /// Remember the project, environment and folder for this directory (and the ones under it),
-    /// so `roll run -- <cmd>` needs no flags here.
+    /// so `roll run -- <cmd>` needs no flags here. With no flags in a terminal: approve what the
+    /// repo's roll.toml `[secrets]` suggests, or pick from the projects and environments you can see.
     Setup {
         /// Show what applies here.
         #[arg(long)]
         show: bool,
-        /// Forget this directory's setup.
+        /// Forget this directory's setup (and its approval of the repo's table).
         #[arg(long, conflicts_with = "show")]
         clear: bool,
-        /// Create the project `-p` names when there's none (a terminal asks instead).
+        /// Approve the nearest roll.toml's `[secrets]` for its directory, as it is now (a changed
+        /// table asks again).
         #[arg(long, conflicts_with_all = ["show", "clear"])]
+        approve: bool,
+        /// Create the project `-p` names when there's none (a terminal asks instead).
+        #[arg(long, conflicts_with_all = ["show", "clear", "approve"])]
         create: bool,
     },
     /// List a folder's secrets (values masked; `--reveal` to show them).
@@ -519,6 +718,25 @@ pub enum Secrets {
     },
     /// Open a share's link (or `<id>#<key>`) and print its value; it counts as one of its opens.
     Open { link: String },
+    /// Ask someone outside roll to send values in: prints a link where they paste them, sealed in
+    /// their browser; they land in this folder as a change (a change request where it needs
+    /// approval). No keys: list the project's requests. `roll secrets requests` is change requests.
+    Request {
+        /// The keys to ask for.
+        keys: Vec<String>,
+        /// What to send and why, shown on the page (never a value).
+        #[arg(long, default_value = "")]
+        note: String,
+        /// How long the link lives: 30m, 12h, 7d (at most 30d).
+        #[arg(long, default_value = "7d")]
+        expires: String,
+        /// How many times it may be answered (each answer is a change).
+        #[arg(long, default_value_t = 1)]
+        answers: i64,
+        /// Cancel a request instead (its link stops working).
+        #[arg(long, conflicts_with_all = ["keys", "note"])]
+        cancel: Option<String>,
+    },
     /// Pushes of an environment to outside platforms (GitHub Actions, Vercel, Cloudflare, Supabase,
     /// AWS Parameter Store, Azure App Configuration, HashiCorp Vault, webhooks): list, add, run now,
     /// remove.
@@ -569,6 +787,26 @@ pub enum Secrets {
         #[arg(long)]
         format: Option<String>,
     },
+    /// roll's OIDC issuer key (the operator's): it signs clouds' and apps' tokens (the audit log's
+    /// digests have a key of their own: `audit key`).
+    Issuer {
+        #[command(subcommand)]
+        cmd: IssuerCmd,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum IssuerCmd {
+    /// Start a rotation: the next key is published now and signs two days later. With `--now
+    /// --retire KID` (a key that may have leaked): a new key signs at once and KID leaves the JWKS
+    /// now, so tokens it signed stop verifying.
+    Rotate {
+        #[arg(long, requires = "retire")]
+        now: bool,
+        /// The kid to pull from the JWKS at once.
+        #[arg(long, requires = "now", value_name = "KID")]
+        retire: Option<String>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -583,10 +821,31 @@ pub enum AuditCmd {
         /// with nothing but roll's public keys.
         #[arg(long, requires = "jwks")]
         file: Option<std::path::PathBuf>,
-        /// roll's public keys, as saved earlier from `/v1/secrets/oidc/jwks` and kept apart from
-        /// roll: keys fetched from the server being checked would vouch for themselves.
+        /// roll's digest keys, as saved earlier from `/v1/secrets/audit/jwks` and kept apart from
+        /// roll: keys fetched from the server being checked would vouch for themselves. Give it
+        /// again for an issuer JWKS (`/v1/secrets/oidc/jwks`) saved before the digest key, for the
+        /// digests it signed.
         #[arg(long, requires = "file")]
-        jwks: Option<std::path::PathBuf>,
+        jwks: Vec<std::path::PathBuf>,
+    },
+    /// The key that signs the digests (the operator's).
+    Key {
+        #[command(subcommand)]
+        cmd: AuditKeyCmd,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum AuditKeyCmd {
+    /// A new digest key signs now. With `--now --retire KID` (a key that may have leaked): KID is
+    /// pulled too, its digests vouch for nothing again, and every project's log is signed under the
+    /// new key at once.
+    Rotate {
+        #[arg(long, requires = "retire")]
+        now: bool,
+        /// The kid to pull.
+        #[arg(long, requires = "now", value_name = "KID")]
+        retire: Option<String>,
     },
 }
 
@@ -1349,9 +1608,13 @@ pub enum DecoyCmd {
     /// credential. It reads like any other key; any use of it raises `decoy_used`.
     Add {
         key: String,
-        /// What the value is: `rlt`, a roll token that allows nothing.
+        /// What the value is: `rlt`, a roll token that allows nothing; `postgres`, a connection
+        /// string for a role of `--resource` that can't log in.
         #[arg(long, default_value = "rlt")]
         kind: String,
+        /// The roll Postgres database a `postgres` decoy's role is made in.
+        #[arg(long)]
+        resource: Option<String>,
     },
 }
 
@@ -1546,7 +1809,7 @@ async fn project(api: &Api, given: Option<&str>) -> anyhow::Result<String> {
         }
         None => {
             let who = api.get("/v1/secrets/whoami").await?;
-            who["project"].as_str().map(String::from).context("which project? pass -p <name>, set ROLL_PROJECT, or remember one for this folder with `roll secrets setup -p <name>`")
+            who["project"].as_str().map(String::from).context("which project? pass -p <name>, set ROLL_PROJECT, or choose one for this folder: `roll secrets setup` (`-p <name>` names it)")
         }
     }
 }
@@ -1616,8 +1879,8 @@ fn approval_hint(e: anyhow::Error) -> anyhow::Error {
 }
 
 pub async fn run(api: &Api, json_out: bool, args: AtArgs, cmd: Secrets) -> anyhow::Result<()> {
-    if let Secrets::Setup { show, clear, create } = cmd {
-        return setup_dir(api, &args, show, clear, create).await;
+    if let Secrets::Setup { show, clear, approve, create } = cmd {
+        return setup_dir(api, &args, show, clear, approve, create).await;
     }
     // Opening a link needs no project: the link names its share.
     if let Secrets::Open { link } = &cmd {
@@ -1626,6 +1889,32 @@ pub async fn run(api: &Api, json_out: bool, args: AtArgs, cmd: Secrets) -> anyho
     // Health across projects spans them too.
     if let Secrets::Doctor = &cmd {
         return doctor(api, &args).await;
+    }
+    // The issuer's key is the server's, not a project's.
+    if let Secrets::Issuer { cmd: IssuerCmd::Rotate { now, retire } } = &cmd {
+        let body = if *now { json!({ "now": true, "retire": retire }) } else { json!({}) };
+        let v = api.call(Method::POST, "/v1/secrets/issuer/rotate", Some(body)).await?;
+        if json_out {
+            println!("{}", serde_json::to_string_pretty(&v)?);
+        } else if let Some(pulled) = v["pulled"].as_str() {
+            println!("{} signs now; {pulled} left the JWKS. Update any cloud trust or verifier that pinned {pulled}.", s(&v["kid"]));
+        } else {
+            println!("{} is published and signs from {}", s(&v["kid"]), chrono::DateTime::from_timestamp_millis(v["signs_from"].as_i64().unwrap_or(0)).map(|t| t.to_rfc3339()).unwrap_or_default());
+        }
+        return Ok(());
+    }
+    // So is the audit log's digest key.
+    if let Secrets::Audit { cmd: Some(AuditCmd::Key { cmd: AuditKeyCmd::Rotate { now, retire } }), .. } = &cmd {
+        let body = if *now { json!({ "now": true, "retire": retire }) } else { json!({}) };
+        let v = api.call(Method::POST, "/v1/secrets/audit/key/rotate", Some(body)).await?;
+        if json_out {
+            println!("{}", serde_json::to_string_pretty(&v)?);
+        } else if let Some(pulled) = v["pulled"].as_str() {
+            println!("{} signs digests now; {pulled} is pulled, and {} logs were signed under the new key. Save /v1/secrets/audit/jwks again for offline checks.", s(&v["kid"]), v["signed"]);
+        } else {
+            println!("{} signs digests now. Save /v1/secrets/audit/jwks again for offline checks.", s(&v["kid"]));
+        }
+        return Ok(());
     }
     if let Secrets::Health { all: true, .. } = &cmd {
         let v = api.get("/v1/secrets/findings").await?;
@@ -1661,7 +1950,7 @@ pub async fn run(api: &Api, json_out: bool, args: AtArgs, cmd: Secrets) -> anyho
     }
     // An export is checked on this machine, against keys saved earlier. A `prj_…` id needs no
     // server; a name is looked up.
-    if let Secrets::Audit { cmd: Some(AuditCmd::Verify { file: Some(file), jwks: Some(jwks), .. }), .. } = &cmd {
+    if let Secrets::Audit { cmd: Some(AuditCmd::Verify { file: Some(file), jwks, .. }), .. } = &cmd {
         let given = args.resolve().project.context("which project's log is it? pass -p (a prj_… id needs no server)")?;
         return verify_audit_file(&project(api, Some(&given)).await?, file, jwks, json_out);
     }
@@ -1681,8 +1970,8 @@ pub async fn run(api: &Api, json_out: bool, args: AtArgs, cmd: Secrets) -> anyho
     if let Secrets::Unseal { status, nodes } = cmd {
         return unseal(api, status, nodes).await;
     }
-    let at = args.resolve();
-    let c = Client { project: project(api, at.project.as_deref()).await?, api, at };
+    let (at, project) = locate(api, &args).await?;
+    let c = Client { project, api, at };
     let env = c.env(&c.at.env);
     let print = |v: &Value| -> anyhow::Result<()> {
         println!("{}", serde_json::to_string_pretty(v)?);
@@ -2987,7 +3276,7 @@ pub async fn run(api: &Api, json_out: bool, args: AtArgs, cmd: Secrets) -> anyho
                 println!("Revoked {id}");
             }
         },
-        Secrets::Keygen { .. } | Secrets::Key(_) | Secrets::Unseal { .. } | Secrets::Find { .. } | Secrets::Doctor | Secrets::Health { all: true, .. } => unreachable!("handled before a project is picked"),
+        Secrets::Keygen { .. } | Secrets::Key(_) | Secrets::Unseal { .. } | Secrets::Find { .. } | Secrets::Doctor | Secrets::Health { all: true, .. } | Secrets::Issuer { .. } => unreachable!("handled before a project is picked"),
         Secrets::Backup { to, out } => {
             let v = c.call(Method::POST, &format!("{}/backup", c.base()), Some(json!({ "recipient": to }))).await?;
             let text = serde_json::to_string_pretty(&v)?;
@@ -3236,8 +3525,12 @@ pub async fn run(api: &Api, json_out: bool, args: AtArgs, cmd: Secrets) -> anyho
                 println!("Deleted {id}");
             }
         },
-        Secrets::Decoy(DecoyCmd::Add { key, kind }) => {
-            let v = c.call(Method::POST, &format!("{env}/decoys"), Some(json!({ "key": key, "kind": kind, "path": c.at.path }))).await?;
+        Secrets::Decoy(DecoyCmd::Add { key, kind, resource }) => {
+            let mut body = json!({ "key": key, "kind": kind, "path": c.at.path });
+            if let Some(r) = resource {
+                body["resource"] = json!(r);
+            }
+            let v = c.call(Method::POST, &format!("{env}/decoys"), Some(body)).await?;
             if json_out {
                 return print(&v);
             }
@@ -3274,6 +3567,49 @@ pub async fn run(api: &Api, json_out: bool, args: AtArgs, cmd: Secrets) -> anyho
             eprintln!("Opens {views} time{}, until {}. The key is only in this link: send it, don't store it.", if views == 1 { "" } else { "s" }, chrono::DateTime::from_timestamp_millis(v["expires_at"].as_i64().unwrap_or(0)).map(|t| t.to_rfc3339()).unwrap_or_default());
         }
         Secrets::Open { .. } => unreachable!("handled above"),
+        Secrets::Request { keys, note, expires, answers, cancel } => {
+            if let Some(id) = cancel {
+                c.call(Method::DELETE, &format!("{}/value-requests/{}", c.base(), enc(&id)), None).await?;
+                println!("Cancelled {id}");
+                return Ok(());
+            }
+            if keys.is_empty() {
+                let v = c.call(Method::GET, &format!("{}/value-requests", c.base()), None).await?;
+                if json_out {
+                    return print(&v);
+                }
+                for r in v.as_array().into_iter().flatten() {
+                    let state = match (r["open"] == true, &r["outcome"]) {
+                        (true, _) => format!("open, {} answer{} left", r["answers_left"], if r["answers_left"] == 1 { "" } else { "s" }),
+                        (false, o) if o["change"].is_number() => format!("answered (change #{})", o["change"]),
+                        (false, o) if o["request"].is_string() => format!("answered (change request {})", s(&o["request"])),
+                        _ if r["cancelled_at"].is_number() => "cancelled".into(),
+                        _ => "expired".into(),
+                    };
+                    let keys: Vec<String> = r["keys"].as_array().into_iter().flatten().map(s).collect();
+                    println!("{}  {:<32} {}{}  {state}  by {}  {}", s(&r["id"]), keys.join(","), s(&r["environment"]), if r["path"] == "/" { String::new() } else { s(&r["path"]) }, s(&r["created_by"]), ago(r["created_at"].as_i64().unwrap_or(0)));
+                }
+                return Ok(());
+            }
+            let body = json!({ "keys": keys, "note": note, "ttl_minutes": minutes(&expires)?, "answers": answers });
+            let v = c.call(Method::POST, &format!("{env}/value-requests?{}", c.q()), Some(body)).await?;
+            if json_out {
+                return print(&v);
+            }
+            // The link's token is shown only now; the id (in the list) is for cancelling.
+            let (id, token) = (s(&v["id"]), s(&v["token"]));
+            let link = v["link"].as_str().map(String::from).or_else(|| std::env::var("ROLL_WEB_URL").ok().filter(|u| !u.is_empty()).map(|w| format!("{}/request/{token}", w.trim_end_matches('/'))));
+            println!("{}", link.as_deref().unwrap_or(&format!("/request/{token}")));
+            eprintln!(
+                "Send the link to whoever has the value{}; it's shown only now. It takes {} answer{} until {}; each lands in {}{} as a change (a change request where the folder needs approval). Cancel it with `roll secrets request --cancel {id}`.",
+                if link.is_some() { "" } else { " (the dashboard's address is unknown here: open that path on your dashboard, or set ROLL_WEB_URL to print the whole link)" },
+                answers,
+                if answers == 1 { "" } else { "s" },
+                chrono::DateTime::from_timestamp_millis(v["expires_at"].as_i64().unwrap_or(0)).map(|t| t.to_rfc3339()).unwrap_or_default(),
+                c.at.env,
+                if c.at.path == "/" { String::new() } else { c.at.path.clone() },
+            );
+        }
         Secrets::Syncs(cmd) => syncs(&c, cmd, json_out).await?,
         Secrets::Sinks(cmd) => sinks(&c, cmd, json_out).await?,
         Secrets::Purge { key, before } => {
@@ -3356,6 +3692,7 @@ pub async fn run(api: &Api, json_out: bool, args: AtArgs, cmd: Secrets) -> anyho
                 println!("{}  {:<8} {:<12} {:<24} {}  {state}", s(&l["id"]), s(&l["kind"]), s(&l["environment"]), s(&l["key"]), s(&l["consumer"]));
             }
         }
+        Secrets::Audit { cmd: Some(AuditCmd::Key { .. }), .. } => unreachable!("handled above"),
         Secrets::Audit { cmd: Some(AuditCmd::Verify { since, .. }), .. } => {
             let q = since.as_deref().map(parse_time).transpose()?.map(|t| format!("?since={t}")).unwrap_or_default();
             let v = c.call(Method::GET, &format!("{}/audit/verify{q}", c.base()), None).await?;
@@ -3434,15 +3771,21 @@ fn parse_time(t: &str) -> anyhow::Result<i64> {
 }
 
 /// `audit verify --file`: an export of `project`'s log, its chain and digests checked here against
-/// roll's public keys as saved in `jwks`.
-fn verify_audit_file(project: &str, file: &std::path::Path, jwks: &std::path::Path, json_out: bool) -> anyhow::Result<()> {
-    use roll_secrets_chain::{PublicKey, Walk};
+/// roll's public keys as saved in `jwks` (the digest JWKS, and an issuer JWKS for legacy digests).
+fn verify_audit_file(project: &str, file: &std::path::Path, jwks: &[std::path::PathBuf], json_out: bool) -> anyhow::Result<()> {
+    use roll_secrets_chain::{Keys, Signed, Walk};
     let text = std::fs::read_to_string(file).with_context(|| format!("reading {}", file.display()))?;
     let mut rows = text.lines().filter(|l| !l.trim().is_empty()).map(serde_json::from_str::<roll_secrets_chain::AuditEntry>).collect::<Result<Vec<_>, _>>().context("that isn't a JSONL export of the audit log (audit --format jsonl)")?;
     rows.sort_by_key(|r| r.seq);
-    let jwks: Value = serde_json::from_str(&std::fs::read_to_string(jwks).with_context(|| format!("reading {}", jwks.display()))?).context("that isn't a JWKS")?;
-    let keys: std::collections::HashMap<String, PublicKey> = PublicKey::from_jwks(&jwks).into_iter().collect();
-    let opened = |jws: &str| roll_secrets_chain::kid(jws).and_then(|k| keys.get(&k)).and_then(|k| roll_secrets_chain::open(jws, k));
+    let docs = jwks
+        .iter()
+        .map(|f| serde_json::from_str::<Value>(&std::fs::read_to_string(f).with_context(|| format!("reading {}", f.display()))?).with_context(|| format!("{} isn't a JWKS", f.display())))
+        .collect::<anyhow::Result<Vec<_>>>()?;
+    let keys = Keys::from_jwks(&docs);
+    let opened = |jws: &str| match keys.check(jws) {
+        Signed::Digest(d) | Signed::Legacy(d) | Signed::Pulled { digest: d, .. } => Some(d),
+        Signed::Bad => None,
+    };
     // The digests name their project: it must be the one asked about, and only it.
     let mut named: Vec<String> = rows.iter().filter_map(|r| r.digest.as_deref()).filter_map(opened).map(|d| d.project).collect();
     named.sort();
@@ -3455,7 +3798,7 @@ fn verify_audit_file(project: &str, file: &std::path::Path, jwks: &std::path::Pa
     }
     let mut walk = Walk::new(project, false);
     for r in &rows {
-        if !walk.push(r, &mut |k| keys.get(k).cloned()) {
+        if !walk.push(r, &keys) {
             break;
         }
     }
@@ -3489,6 +3832,15 @@ fn report_verification(v: &Value, json_out: bool) -> anyhow::Result<()> {
         }
         if v["unchained"].as_i64().unwrap_or(0) > 0 {
             println!("{} rows from before the chain began have no hash (unchained before #{})", v["unchained"], from.unwrap_or(1));
+        }
+        if let Some(l) = v["legacy"].as_object() {
+            println!("legacy: {}: {} digests through #{} (signed before the digest key)", l["signer"].as_str().unwrap_or("issuer key"), l["digests"], l["through"]);
+        }
+        for p in v["pulled"].as_array().into_iter().flatten() {
+            match p["countersigned"].as_i64() {
+                Some(by) => println!("pulled key {}: {} digests (#{}–#{}), covered by the good digest #{by}", s(&p["kid"]), p["digests"], p["first"], p["last"]),
+                None => println!("pulled key {}: {} digests (#{}–#{}), no later good digest covers them", s(&p["kid"]), p["digests"], p["first"], p["last"]),
+            }
         }
     }
     if v["ok"] != true {
@@ -4509,35 +4861,168 @@ async fn token_env(c: &Client<'_>, args: &AtArgs) -> anyhow::Result<String> {
     Ok(env.to_string())
 }
 
-/// `roll secrets setup`: remember (or show, or forget) where this directory's secrets are.
-async fn setup_dir(api: &Api, args: &AtArgs, show: bool, clear: bool, create: bool) -> anyhow::Result<()> {
+/// `roll secrets setup`: remember (or show, or forget) where this directory's secrets are, approve
+/// what the repo's `roll.toml` suggests, or pick in a terminal. `-p` names a project, made first
+/// when there's none ([`project_or_create`]).
+#[allow(clippy::fn_params_excessive_bools)]
+async fn setup_dir(api: &Api, args: &AtArgs, show: bool, clear: bool, approve: bool, create: bool) -> anyhow::Result<()> {
+    use std::io::IsTerminal;
     let here = std::env::current_dir()?;
     let key = here.to_string_lossy().to_string();
     let mut all = setup::load();
+    let found = repo::nearest(&here);
+    let approval = found.as_ref().map(setup::approval);
+    let table = found.as_ref().filter(|f| !f.table.is_empty());
     if show {
         match setup::nearest(&here) {
             Some(d) => println!("{} ({})  -e {}  --path {}", d.name, d.project, d.env, d.path),
             None => println!("Nothing set up for {key}: roll secrets setup -p <project> -e <environment>"),
         }
+        if let (Some(f), Some(a)) = (table, &approval) {
+            let state = match a {
+                Approval::Approved => "approved",
+                Approval::Unapproved => "not approved: roll secrets setup --approve",
+                Approval::Changed(_) => "changed since you approved it: roll secrets setup --approve",
+            };
+            println!("{} suggests {} ({state})", f.file.display(), f.table.describe());
+        }
+        for why in found.iter().flat_map(|f| f.ignored.iter()) {
+            println!("  ignored: {why}");
+        }
         return Ok(());
     }
     if clear {
-        let gone = all.remove(&key).is_some();
+        let gone = all.dirs.remove(&key).is_some();
+        let unapproved = all.approved.remove(&key).is_some();
         setup::save(&all)?;
         println!("{}", if gone { format!("Forgot the setup of {key}") } else { format!("{key} had no setup of its own") });
+        if unapproved {
+            println!("Forgot the approval of {key}/roll.toml's [secrets]");
+        }
         return Ok(());
     }
-    let name = args.project.clone().context("which project? roll secrets setup -p <project> [-e <environment>] [--path /folder]")?;
-    let id = project_or_create(api, &name, create).await?;
-    let env = args.env.clone().unwrap_or_else(|| "development".into());
+    let terminal = std::io::stdin().is_terminal();
+    if approve {
+        let f = table.context("no roll.toml with a [secrets] table here or above it")?;
+        return approve_table(api, &mut all, f).await;
+    }
+    if args.project.is_none() && args.env.is_none() && args.path.is_none()
+        && let (Some(f), Some(a)) = (table, &approval)
+    {
+        if *a == Approval::Approved {
+            println!("{} suggests {}, which you approved for {}.", f.file.display(), f.table.describe(), f.dir.display());
+            if !terminal || !ask("Choose a project of your own instead (it comes first)?")? {
+                return Ok(());
+            }
+        } else if !terminal {
+            bail!("{} suggests {}; approve it with roll secrets setup --approve, or choose: roll secrets setup -p <project> -e <environment>", f.file.display(), f.table.describe());
+        } else {
+            if let Approval::Changed(was) = a {
+                println!("{}'s [secrets] changed since you approved it (it was: {}).", f.file.display(), was.describe());
+            }
+            println!("{} suggests {}.", f.file.display(), f.table.describe());
+            for why in &f.ignored {
+                println!("  ignored: {why}");
+            }
+            if ask(&format!("Use it for {} and the directories under it?", f.dir.display()))? {
+                return approve_table(api, &mut all, f).await;
+            }
+            println!("Not approved: choose a project of your own.");
+        }
+    }
+    let (id, display, env) = match &args.project {
+        Some(name) => {
+            let id = project_or_create(api, name, create).await?;
+            (id.clone(), if name.starts_with("prj_") { id } else { name.clone() }, args.env.clone().unwrap_or_else(|| "development".into()))
+        }
+        None if terminal => pick(api, args.env.as_deref()).await?,
+        None => bail!("which project? roll secrets setup -p <project> [-e <environment>] [--path /folder]"),
+    };
     let path = args.path.clone().unwrap_or_else(|| "/".into());
     // The environment must exist (and be readable) before it's remembered.
     api.get(&format!("/v1/secrets/projects/{}/environments/{}", enc(&id), enc(&env))).await?;
-    let display = if name.starts_with("prj_") { id.clone() } else { name };
-    all.insert(key.clone(), setup::Dir { project: id, name: display.clone(), env: env.clone(), path: path.clone() });
+    all.dirs.insert(key.clone(), setup::Dir { project: id, name: display.clone(), env: env.clone(), path: path.clone() });
     let file = setup::save(&all)?;
     println!("{key} → {display}, {env}{}  (kept in {})", if path == "/" { String::new() } else { format!(" {path}") }, file.display());
     Ok(())
+}
+
+/// Keep the approval of the repo's table as it is now (its hash), saying which of the
+/// environments it names are protected and so never taken from it.
+async fn approve_table(api: &Api, all: &mut setup::File, f: &repo::Found) -> anyhow::Result<()> {
+    for why in &f.ignored {
+        eprintln!("roll: {} [secrets]: {why}; ignored", f.file.display());
+    }
+    // Best effort: the refusal itself happens on every use.
+    if let Ok(id) = project(api, f.table.project.as_deref()).await {
+        let named: std::collections::BTreeSet<&String> = f.table.environment.iter().chain(f.table.branches.values()).collect();
+        for e in named {
+            if let Ok(v) = api.get(&format!("/v1/secrets/projects/{}/environments/{}", enc(&id), enc(e))).await
+                && (v["protected"] == true || v["trusted"] == true)
+            {
+                eprintln!("roll: {e} is protected, so it's never taken from roll.toml: choose it yourself (-e {e})");
+            }
+        }
+    }
+    let dir = f.dir.to_string_lossy().to_string();
+    all.approved.insert(dir.clone(), setup::Approved { sha256: f.table.digest(), at: chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true), table: f.table.clone() });
+    let file = setup::save(all)?;
+    println!("Approved {}'s [secrets] for {dir}: {}  (kept in {}; a changed table asks again)", f.file.display(), f.table.describe(), file.display());
+    Ok(())
+}
+
+/// A yes or no on the terminal (default no).
+fn ask(question: &str) -> anyhow::Result<bool> {
+    use std::io::Write;
+    eprint!("{question} [y/N] ");
+    std::io::stderr().flush()?;
+    let mut line = String::new();
+    std::io::stdin().read_line(&mut line)?;
+    Ok(matches!(line.trim().to_ascii_lowercase().as_str(), "y" | "yes"))
+}
+
+/// One of `n` numbered choices on the terminal.
+fn choose(what: &str, n: usize) -> anyhow::Result<usize> {
+    use std::io::Write;
+    for _ in 0..3 {
+        eprint!("{what} [1-{n}]: ");
+        std::io::stderr().flush()?;
+        let mut line = String::new();
+        if std::io::stdin().read_line(&mut line)? == 0 {
+            break;
+        }
+        match line.trim().parse::<usize>() {
+            Ok(i) if (1..=n).contains(&i) => return Ok(i - 1),
+            _ => eprintln!("a number from 1 to {n}"),
+        }
+    }
+    bail!("no {} chosen", what.to_lowercase())
+}
+
+/// `setup` in a terminal: a project the login can see, then one of its environments (unless `-e`).
+async fn pick(api: &Api, env: Option<&str>) -> anyhow::Result<(String, String, String)> {
+    let list = api.get("/v1/workspace/projects").await.context("listing the projects you can see")?;
+    let projects: Vec<(String, String)> = list.as_array().into_iter().flatten().filter_map(|p| Some((p["id"].as_str()?.to_string(), p["name"].as_str()?.to_string()))).collect();
+    if projects.is_empty() {
+        bail!("no projects you can see: make one in the dashboard, then roll secrets setup");
+    }
+    for (i, (id, name)) in projects.iter().enumerate() {
+        println!("  {:>2}) {name}  {id}", i + 1);
+    }
+    let (id, name) = projects[choose("Project", projects.len())?].clone();
+    if let Some(e) = env {
+        return Ok((id, name, e.to_string()));
+    }
+    let list = api.get(&format!("/v1/secrets/projects/{}/environments", enc(&id))).await?;
+    let envs: Vec<(String, bool)> = list.as_array().into_iter().flatten().filter_map(|e| Some((e["slug"].as_str()?.to_string(), e["protected"] == true))).collect();
+    if envs.is_empty() {
+        bail!("{name} has no environments you can read");
+    }
+    for (i, (slug, protected)) in envs.iter().enumerate() {
+        println!("  {:>2}) {slug}{}", i + 1, if *protected { "  (protected)" } else { "" });
+    }
+    let env = envs[choose("Environment", envs.len())?].0.clone();
+    Ok((id, name, env))
 }
 
 /// `setup -p NAME`'s project, made first when there's none by that name: with `--create`, or after
@@ -4558,16 +5043,6 @@ async fn project_or_create(api: &Api, name: &str, create: bool) -> anyhow::Resul
         }
     }
     project(api, Some(name)).await
-}
-
-/// A yes or no on the terminal (default no).
-fn ask(question: &str) -> anyhow::Result<bool> {
-    use std::io::Write;
-    eprint!("{question} [y/N] ");
-    std::io::stderr().flush()?;
-    let mut line = String::new();
-    std::io::stdin().read_line(&mut line)?;
-    Ok(matches!(line.trim().to_ascii_lowercase().as_str(), "y" | "yes"))
 }
 
 /// The template filled from the environment, and the leases of the dynamic credentials in it.
@@ -4693,18 +5168,42 @@ async fn doctor(api: &Api, args: &AtArgs) -> anyhow::Result<()> {
         }
     };
     checks.push((true, format!("signed in at {} as {}{}", api.base, s(&who["principal"]), who["project"].as_str().map(|p| format!(", limited to {p}")).unwrap_or_default())));
-    // This directory's setup, and what it points at.
-    let here = std::env::current_dir().ok().and_then(|d| setup::nearest(&d));
+    // Where this directory's secrets are, and where each choice came from.
     let at = args.resolve();
-    checks.push(match &here {
-        Some(h) => (true, format!("this directory is set up for {} {}:{}", h.name, h.env, h.path)),
-        None if at.project.is_some() => (true, "no setup here; using the flags and environment".into()),
-        None => (false, "no project for this directory: roll secrets setup -p <project> -e <environment>".into()),
+    checks.push(match at.label.as_deref().or(who["project"].as_str()) {
+        None => (false, "no project for this directory: roll secrets setup (or -p <project> -e <environment>)".into()),
+        Some(name) => {
+            let (p, e, d) = (at.said(0), at.said(1), at.said(2));
+            let whence = if p == e && e == d { format!("all from {p}") } else { format!("project from {p}, environment from {e}, path from {d}") };
+            (true, format!("using {name} {}:{} ({whence})", at.env, at.path))
+        }
     });
+    // The repo's table: approved or not, used or not, and what it left out.
+    if let Some(r) = &at.repo {
+        let file = r.found.file.display();
+        if !r.found.table.is_empty() {
+            let t = r.found.table.describe();
+            checks.push(match (&r.approval, r.wanted) {
+                (Approval::Approved, true) => (true, format!("{file} suggests {t}: approved")),
+                (Approval::Approved, false) => (true, format!("{file} suggests {t}: approved, but flags or your setup come first")),
+                (a, wanted) => {
+                    let state = if matches!(a, Approval::Changed(_)) { "changed since you approved it" } else { "not approved" };
+                    let used = if wanted { ", so it isn't used" } else { " (flags or your setup come first)" };
+                    (!wanted, format!("{file} suggests {t}: {state}{used}; roll secrets setup (or --approve)"))
+                }
+            });
+        }
+        for why in &r.found.ignored {
+            checks.push((false, format!("{file} [secrets]: {why}; ignored")));
+        }
+    }
     let mut keys: Option<std::collections::BTreeSet<String>> = None;
     match project(api, at.project.as_deref()).await {
         Err(e) => checks.push((false, format!("the project: {e}"))),
         Ok(id) => {
+            if let Err(e) = refuse_protected(api, &id, &at).await {
+                checks.push((false, format!("{e:#}")));
+            }
             let env = format!("/v1/secrets/projects/{}/environments/{}", enc(&id), enc(&at.env));
             match api.get(&format!("{env}/secrets?path={}", enc(&at.path))).await {
                 Err(e) => checks.push((false, format!("{}:{}: {e}", at.env, at.path))),
@@ -5222,6 +5721,7 @@ pub(crate) fn no_answer(e: &anyhow::Error) -> bool {
 /// `--watch`, run it as a child and restart it when the environment's digest changes.
 pub async fn run_command(api: &Api, r: Run) -> anyhow::Result<()> {
     let at = r.at.resolve();
+    at.hint();
     // Finding the project may ask rolld (a name, or the token's own): in an outage, the fallback
     // file's own (checked again when it's opened) for the environment and folder asked.
     let project = match (project(api, at.project.as_deref()).await, &r.fallback) {
@@ -5229,6 +5729,8 @@ pub async fn run_command(api: &Api, r: Run) -> anyhow::Result<()> {
         (Err(e), Some(file)) if no_answer(&e) => crate::fallback::header(file).map(|h| h.project).map_err(|_| e)?,
         (Err(e), _) => return Err(e),
     };
+    // Never in an outage either: a repo can't route a protected environment's values to its code.
+    refuse_protected(api, &project, &at).await?;
     let c = Client { project, api, at: at.clone() };
     let (env, leases, follow) = run_env(&c, &at, &r).await?;
     let streams = crate::mask::Streams::choose(r.mask, r.no_mask);
@@ -5256,8 +5758,7 @@ pub async fn run_command(api: &Api, r: Run) -> anyhow::Result<()> {
 /// `roll ssh`: resolve the certificate and key (a dynamic link gets a new pair, for this session),
 /// write them to a private temporary directory, run `ssh` with them, and delete both when it exits.
 pub async fn ssh_command(api: &Api, a: Ssh) -> anyhow::Result<()> {
-    let at = a.at.resolve();
-    let project = project(api, at.project.as_deref()).await?;
+    let (at, project) = locate(api, &a.at).await?;
     let c = Client { project, api, at: at.clone() };
     // The directory is the user's alone (0700) and goes when this returns, key and all.
     let dir = tempfile::Builder::new().prefix("roll-ssh-").tempdir().context("making a private directory for the key")?;

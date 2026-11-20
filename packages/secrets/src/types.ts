@@ -88,9 +88,10 @@ export type Secret = {
   decoy?: Decoy;
 };
 /** A decoy key's mark: what it is, and its uses (each refused). */
-export type Decoy = { kind: "rlt"; created_at: number; created_by: string; uses: number; used_at: number | null; used_ip: string | null };
-/** `POST …/environments/{env}/decoys`: a new key whose value is a decoy credential. */
-export type NewDecoy = { key: string; kind: "rlt"; path?: string };
+export type Decoy = { kind: "rlt" | "postgres"; created_at: number; created_by: string; uses: number; used_at: number | null; used_ip: string | null };
+/** `POST …/environments/{env}/decoys`: a new key whose value is a decoy credential (`postgres`: a
+ * connection string for a role of `resource`, a roll Postgres database on the project's canvas). */
+export type NewDecoy = { key: string; kind: "rlt"; path?: string } | { key: string; kind: "postgres"; resource: string; path?: string };
 /** `expires_at`: null clears it; absent keeps it. */
 export type SetSecret = { value?: string; comment?: string; tags?: string[]; type?: SecretType; link?: Link | null; message?: string; expires_at?: number | null; if_version?: number };
 /** `path`: another folder for this one operation (default: the batch's). */
@@ -256,6 +257,10 @@ export type Share = { id: string; note: string; views_left: number; created_by: 
 export type ShareFrom = { environment: string; path?: string; key: string };
 /** `ciphertext`: base64url(nonce ‖ AES-256-GCM ciphertext) with `roll-share-v1` as associated data; `views` 1–10, `ttl_minutes` 5–10080. */
 export type NewShare = { ciphertext: string; note?: string; views?: number; ttl_minutes?: number; from?: ShareFrom };
+/** A secret request: a link asking someone outside roll for a folder's values (never a key). `outcome`: what the last answer became. */
+export type ValueRequest = { id: string; environment: string; path: string; keys: string[]; note: string; answers_left: number; created_by: string; created_at: number; expires_at: number; answered_at: number | null; cancelled_at: number | null; open: boolean; outcome: { change: number } | { request: string } | null; /** Only in create's answer: the link's answer token (`rlq_…`) and `<dashboard>/request/<token>`. */ token?: string; link?: string };
+/** `keys` 1–20; `ttl_minutes` 5–43200 (default 7 days); `answers` 1–10 (default 1). */
+export type NewValueRequest = { keys: string[]; note?: string; ttl_minutes?: number; answers?: number };
 export type KeyType = "url" | "int" | "port" | "bool" | "json" | "email" | "totp";
 /** A key every standard environment must define in a folder; typed keys also say what its value must be. */
 /** `owner`: who supplies it (a person or team), named in health and the daily notice. */
@@ -310,10 +315,12 @@ export type NewToken = { name: string; environments?: string[]; paths?: string[]
 /** `approval`: the approval that let the request through roll-access's gate (an `ask` approved; `until` when a rule it remembered allowed it). */
 /** `seq` and `hash` place a row in its project's chain (absent on rows from before it); an `audit.digest` row's `digest` is roll's signed JWS of it. */
 export type AuditEntry = { id: number; seq?: number; hash?: string; at: number; actor: string; action: string; environment: string | null; path: string | null; keys: string[]; summary: string; ip: string | null; approval?: Approval; digest?: string };
-/** Where the chain breaks: `edited`, `missing`, `rewritten`, `signature`, `truncated`, `cut`, `unchained`, `gap`, `head` or `stale`. */
+/** Where the chain breaks: `edited`, `missing`, `rewritten`, `signature`, `pulled`, `truncated`, `cut`, `unchained`, `gap`, `head` or `stale`. */
 export type AuditBreak = { seq?: number; reason: string; detail: string };
-/** `GET …/audit/verify`: rows `from`–`head` walked, signed by a digest `through` a row. */
-export type AuditVerification = { ok: boolean; from: number | null; through: number | null; signed_at: number | null; head: number | null; rows: number; digests: number; unchained: number; broken: AuditBreak | null };
+/** `GET …/audit/verify`: rows `from`–`head` walked, signed by a digest `through` a row. `legacy`: digests roll's issuer key signed before the digest key (they count); `pulled`: digests on keys pulled in an emergency (they don't), each covered by the good digest at `countersigned`, or not (`null`: a `pulled` break). */
+export type AuditVerification = { ok: boolean; from: number | null; through: number | null; signed_at: number | null; head: number | null; rows: number; digests: number; unchained: number; broken: AuditBreak | null; legacy?: AuditLegacy; pulled?: AuditPulled[] };
+export type AuditLegacy = { signer: "issuer key"; digests: number; through: number };
+export type AuditPulled = { kid: string; pulled_at: number; digests: number; first: number; last: number; countersigned: number | null };
 /** `by`: who approved it, in order (more than one when a policy asks for two people). */
 export type Approval = { id: string; by?: string[]; until?: number };
 /** `since`: rows at or after this time (ms); `before`: rows older than this id. */
@@ -359,7 +366,8 @@ export type SyncField = { name: string; label: string; required: boolean; placeh
 export type SyncKind = { kind: string; label: string; values: boolean; signed: boolean; fields: SyncField[] };
 /** `resealed`: "all", or how many projects still need the previous key (null without a key); `links`, `syncs`: the kinds registered. */
 /** `customer_managed`: projects whose data key a customer's own KMS key wraps too. */
-export type Health = { ok: boolean; key: "env" | "kms" | "file" | "missing"; resealed: "all" | number | null; customer_managed: number; links: string[]; syncs: string[] };
+/** `issuer_pulled`: issuer keys an emergency rotation pulled from the JWKS in the last 30 days. */
+export type Health = { ok: boolean; key: "env" | "kms" | "file" | "missing"; resealed: "all" | number | null; customer_managed: number; issuer_pulled?: { kid: string; pulled_at: number; detail: string }[]; links: string[]; syncs: string[] };
 /** An IAM user whose access keys roll rotates, acting as one of the project's AWS roles (`role` is its id). */
 export type AwsUser = { id: string; name: string; role: string; user: string; created_at: number; created_by: string };
 /** An AWS role a project registered for dynamic credentials (its trust policy pins `sts:ExternalId` = `roll-secrets:<project>`). */
