@@ -1316,6 +1316,32 @@ Short transactions, 8 clients, c5 against c6:
 tps: 5 pairs, at equal foreign +30.8% (±24.9% s.e.), per foreign core -0.39 log
 user cycles/txn: 5 pairs, at equal foreign +4.3% (±1.3% s.e.), slope +0.21
 
+## Block cache memory: exact block sizes (2026-11-19/20, agent 264)
+
+HANDOFF.md "Block cache memory" has what changed and why, and the CLOCK hand fix's off-lane
+memory runs. Plain dist, `50fd640af` (head) against `cand/a264` on it (exact). Lane C, TPC-H SF 1
+at a 256 MB cache: per arm a fresh engine in a container on a copy of the loaded data, a
+warm-up pass over the 22, then per query three runs in one `perf stat -p` window (user
+instructions per run), and VmHWM at the end. Harness `~/.cache/a264/tpch/pair.sh` (agent
+255's). Each pair one `tools/lane.sh` hold. "Foreign" is other tenants' work on the four server
+CPUs during the arm: the lane's eight CPUs read 3.4-5.5 cores.
+
+| pair (first, second) | foreign (head / exact) | q02 | q09 | q17 | q21 | the four | VmHWM head -> exact |
+|---|---|---|---|---|---|---|---|
+| 1 (head, exact) | 1.62 / 1.00 | (no counts: the perf container lacked the mount) | | | | | 541 -> 535 MB |
+| 2 (exact, head) | 0.90 / 2.25 | +3.24% | +0.71% | +1.98% | +1.58% | **+1.30%** (142.11 -> 143.96 G) | 550 -> 534 MB |
+| 3 (head, exact) | 0.92 / 0.39 | +3.60% | +0.66% | +1.83% | +1.53% | **+1.26%** (141.90 -> 143.68 G) | 547 -> 526 MB |
+
+The instructions rise because the same budget holds about 5% fewer blocks: what a block counts
+rose 4-5%, and the tables now count. Result hashes are equal. Cycles: -11 to +60% a query,
+noise at this load. OLTP, harness `~/.cache/a264/bench` (agent 255's), one pair each at 8
+clients:
+
+| workload | foreign (head / exact) | user instructions / op, head -> exact | Δ |
+|---|---|---|---|
+| point select (lane A) | 1.34 / 0.45 | 39,660 -> 39,677 | +0.04% |
+| 100-row range read (lane B) | 0.60 / 0.80 | 348,492 -> 348,409 | -0.02% |
+
 ## Read path, round 7: the audit since 6d3b7e9e5, the estimates' operator lookups (2026-11-18/19, agent 255)
 
 HANDOFF.md "Read path, round 7" has what changed and why. Harness `~/.cache/a255/bench`
