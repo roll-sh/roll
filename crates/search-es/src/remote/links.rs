@@ -256,7 +256,7 @@ pub fn remote_roles(ctx: &Ctx, alias: &str) -> Vec<Value> {
         for (i, perm) in perms.iter().enumerate() {
             // `remote_cluster` privileges naming the alias are the remote's cluster privileges
             // (`monitor_enrich` for ES|QL's ENRICH, `monitor_stats`).
-            let cluster: Vec<Value> = perm.remote_cluster.iter().filter(|e| names_alias(e)).flat_map(|e| e.get("privileges").and_then(Value::as_array).cloned().unwrap_or_default()).collect();
+            let cluster: Vec<Value> = perm.remote_cluster.iter().filter(|e| names_alias(e)).flat_map(|e| e.get("privileges").and_then(Value::as_array).cloned().unwrap_or_default()).map(|p| Value::Str(p.to_es_string().to_ascii_lowercase())).collect();
             let indices: Vec<Value> = perm
                 .remote_indices
                 .iter()

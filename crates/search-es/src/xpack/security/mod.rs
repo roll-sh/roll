@@ -1235,7 +1235,6 @@ pub(crate) fn who(p: &Principal) -> String {
     }
 }
 
-/// Elasticsearch's 403 for an action the principal's roles don't grant.
 /// Whether the request's principal may run cluster action `action`, else Elasticsearch's 403.
 pub fn check_cluster_action(ctx: &Ctx, action: &str) -> EsResult<()> {
     let p = principal(ctx);
@@ -1245,6 +1244,7 @@ pub fn check_cluster_action(ctx: &Ctx, action: &str) -> EsResult<()> {
     Err(denied(p, action, None))
 }
 
+/// Elasticsearch's 403 for an action the principal's roles don't grant.
 fn denied(p: &Principal, action: &str, indices: Option<&[String]>) -> EsError {
     audit::access_denied(p, action, indices);
     if let Some(id) = p.os() {

@@ -298,12 +298,14 @@ fn body_time_zone(ctx: &Ctx, m: &Map) -> EsResult<Option<String>> {
 /// Runs a request: the JSON response and the table (for text formats). A linked remote's part
 /// ([`ccs::requested`]) runs as one and answers its result for the coordinating cluster.
 async fn run(ctx: &Ctx<'_>, req: &Request, body: &Value, part: Option<std::sync::Arc<ccs::Part>>) -> EsResult<(Map, exec::Table)> {
-    // A remote's `ENRICH` reads its policies for the caller only with `monitor_enrich` on it
-    // (the `remote_cluster` privilege the link carries), as Elasticsearch's remote cluster does.
-    if part.as_ref().is_some_and(|p| p.alias.is_some() && !p.policies.is_empty()) {
-        crate::xpack::security::check_cluster_action(ctx, ccs::RESOLVE_POLICY)?;
+    // A remote's part runs only what it is, as this cluster parses it ([`ccs::admit_part`]): its
+    // shape, its `ENRICH`es' `monitor_enrich` here (the `remote_cluster` privilege the link
+    // carries) and their policies.
+    if let Some(p) = part.as_ref().filter(|p| p.alias.is_some()) {
+        let parsed = parser::parse_with(&req.query, &req.params)?;
+        ccs::admit_part(ctx, &parsed, p)?;
     }
-    let remotes = if part.is_some() { None } else { ccs::Ccs::of(ctx, body) };
+    let remotes = if part.is_some() { None } else { ccs::Ccs::of(ctx, body, &req.params) };
     let is_part = part.clone();
     let (mut out, table, stats) = ccs::part_scope(part, ccs::scope(remotes, run_query(ctx, req))).await?;
     if let Some(p) = is_part {

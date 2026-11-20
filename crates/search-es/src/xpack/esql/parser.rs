@@ -752,7 +752,14 @@ impl<'a> P<'a> {
                 let mut metadata = Vec::new();
                 if self.eat_kw("METADATA") {
                     loop {
-                        metadata.push(self.ident()?.0);
+                        // A quoted name is its text, quotes included, as Elasticsearch reads it
+                        // (no metadata field is named so: it's unresolved).
+                        if let Tok::Quoted(_) = self.peek().tok {
+                            let t = self.bump();
+                            metadata.push(self.src[t.start..t.end].to_string());
+                        } else {
+                            metadata.push(self.ident()?.0);
+                        }
                         if !self.eat_op(",") {
                             break;
                         }

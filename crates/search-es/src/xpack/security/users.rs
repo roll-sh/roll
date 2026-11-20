@@ -563,6 +563,7 @@ pub fn parse_role(name: &str, v: &Value, api_key: bool) -> EsResult<Value> {
         out.insert("remote_indices".into(), r);
     }
     if let Some(r) = remote_cluster {
+        check_remote_cluster(name, &r)?;
         out.insert("remote_cluster".into(), r);
     }
     if let Some(r) = restriction {
@@ -1145,6 +1146,26 @@ pub fn get_user_privileges(ctx: &Ctx) -> EsResult<Reply> {
         }
     }
     Reply::ok(out)
+}
+
+/// A role's `remote_cluster` entries: Elasticsearch's privileges for remote clusters only
+/// (`monitor_enrich`, `monitor_stats`), each entry naming its clusters.
+fn check_remote_cluster(name: &str, r: &Value) -> EsResult<()> {
+    let fail = |why: String| EsError::parse(format!("failed to parse remote_cluster for role [{name}]. {why}"));
+    for e in r.as_array().into_iter().flatten() {
+        let privileges: Vec<String> = match e.get("privileges") {
+            Some(Value::Arr(a)) => a.iter().map(Value::to_es_string).collect(),
+            Some(Value::Str(s)) => vec![s.clone()],
+            _ => Vec::new(),
+        };
+        if !privileges.iter().all(|p| matches!(p.to_ascii_lowercase().as_str(), "monitor_enrich" | "monitor_stats")) {
+            return Err(fail(format!("[monitor_enrich, monitor_stats] are the only values allowed for [privileges] within [remote_cluster]. Found [{}]", privileges.join(", "))));
+        }
+        if !privileges.is_empty() && e.get("clusters").is_none_or(Value::is_null) {
+            return Err(fail("[clusters] must be defined when [privileges] are defined ".into()));
+        }
+    }
+    Ok(())
 }
 
 const SUPERUSER_PRIVILEGES: &str = r#"{"cluster":["all"],"global":[],"indices":[{"names":["*"],"privileges":["all"],"allow_restricted_indices":false},{"names":["*"],"privileges":["monitor","read","read_cross_cluster","view_index_metadata"],"allow_restricted_indices":true}],"applications":[{"application":"*","privileges":["*"],"resources":["*"]}],"run_as":["*"],"remote_indices":[{"names":["*"],"privileges":["all"],"allow_restricted_indices":false,"clusters":["*"]},{"names":["*"],"privileges":["monitor","read","read_cross_cluster","view_index_metadata"],"allow_restricted_indices":true,"clusters":["*"]}],"remote_cluster":[{"privileges":["monitor_enrich","monitor_stats"],"clusters":["*"]}]}"#;

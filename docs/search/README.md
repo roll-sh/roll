@@ -288,8 +288,12 @@ Elasticsearch-flavor.
   (`WHERE`, `EVAL`, `KEEP`, `DISSECT`, `MV_EXPAND`, `ENRICH` in `_remote` and `_any` mode,
   `LOOKUP JOIN`...) and its first breaker's own part: `STATS` reduced partially (each group's
   accumulator states: sums with their compensation, HyperLogLog++ sketches, collected values,
-  merged here as one cluster's rows would have been), `SORT ... | LIMIT n` or `LIMIT n`
-  applied there and again on the coordinating cluster. What follows runs on the coordinating
+  merged here as one cluster's rows would have been, over just the columns it reads),
+  `SORT ... | LIMIT n` (with `EVAL`, `KEEP`, `DROP`, `RENAME` between) or `LIMIT n` applied
+  there and again on the coordinating cluster; a `LIMIT` (the implicit one too) also runs in the
+  parts below the commands it commutes with (`ENRICH` in any mode, `EVAL`...), and a part with
+  nothing to bound it stops at what the coordinating cluster's request breaker can hold (a
+  `circuit_breaking_exception`). What follows runs on the coordinating
   cluster over every part's result, and so does a breaker with no part of its own (`INLINE
   STATS`, `FORK`, `ENRICH _coordinator`), over the parts' rows. Every cluster's part reads the
   same columns: the source resolved once across clusters, a field one cluster doesn't map
@@ -305,7 +309,12 @@ Elasticsearch-flavor.
   a remote's ES|QL view is refused (`remote_view_not_supported_exception`). The parts' commands
   are compiled on the coordinating cluster first, so the query's own errors (`Unknown column`)
   are the query's; only a remote that can't be reached or authenticate, or whose indices are
-  missing (or outside the link's access), is skipped. A caller with no `remote_indices` for a
+  missing (or outside the link's access), is skipped. A remote decides what its part may run from
+  the query it parsed, never from what the request says about it: the shapes the coordinating
+  cluster cuts, Elasticsearch's placement rules, and every `ENRICH` it runs checked for
+  `monitor_enrich` and its policy; the coordinating cluster parses each part's text as its
+  cluster will before sending it, and a `METADATA` name outside the metadata fields (a quoted
+  one always is) is Elasticsearch's verification error. A caller with no `remote_indices` for a
   remote is refused (403) on a query over remotes alone, and skips the remote otherwise. `include_ccs_metadata` (or
   `include_execution_metadata`) adds `_clusters`; a skipped cluster makes `is_partial` true; a
   missing remote is `no_such_remote_cluster_exception` (404), and a remote's missing index or any

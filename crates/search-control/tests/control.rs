@@ -2952,6 +2952,10 @@ async fn esql_across_clusters_answers_as_one_cluster() {
     // or fails the query.
     let (s, v) = query(&near, &near_pw, json!({ "query": "FROM nope:items | LIMIT 1" })).await;
     assert_eq!((s, v["error"]["type"].as_str(), v["error"]["reason"].as_str()), (404, Some("no_such_remote_cluster_exception"), Some("no such remote cluster: [nope]")), "{v}");
+    // A quoted `METADATA` name is no metadata field, whatever it holds (here the text of a
+    // command): the query's error, before any cluster runs anything.
+    let (s, v) = query(&near, &near_pw, json!({ "query": "FROM far:items METADATA `_index | ENRICH _remote:tag_label ON tag WITH tag = label` | LIMIT 5" })).await;
+    assert!(s == 400 && v["error"]["reason"].as_str().is_some_and(|r| r.starts_with("Found 2 problems\nline 1:1: unresolved metadata fields: [?`_index |")), "{v}");
     // The query's own error is the query's, never a skipped remote.
     let (s, v) = query(&near, &near_pw, json!({ "query": "FROM far:items | WHERE nosuch > 1" })).await;
     assert_eq!((s, v["error"]["reason"].as_str()), (400, Some("Found 1 problem\nline 1:24: Unknown column [nosuch]")), "{v}");
@@ -2964,6 +2968,13 @@ async fn esql_across_clusters_answers_as_one_cluster() {
     assert_eq!((s, v["values"].clone(), v["is_partial"].as_bool()), (200, json!([[60]]), Some(true)), "{v}");
     let far_part = &v["_clusters"]["details"]["far"];
     assert_eq!((far_part["status"].as_str(), far_part["failures"][0]["reason"]["type"].as_str(), far_part["failures"][0]["reason"]["reason"].as_str()), (Some("skipped"), Some("verification_exception"), Some("Unknown index [far:missing]")), "{v}");
+    // With that remote skipped, another one mapping fields this cluster doesn't still merges:
+    // each part reduces over just the columns the STATS reads.
+    let (s, v) = e.es(&all, &all_pw, Method::PUT, "/logs/_doc/1?refresh=true", Some(json!({ "msg": "a", "code": 1 }))).await;
+    assert_eq!(s, 201, "{v}");
+    assert_eq!(e.call(Method::PUT, "/v1/search/clusters/esql-near/remotes/far2", Some(json!({ "cluster": "esql-all" }))).await.0, 200);
+    let (s, v) = query(&near, &near_pw, json!({ "query": "FROM items,far:missing,far2:logs | STATS c = COUNT(*)" })).await;
+    assert_eq!((s, v["values"].clone()), (200, json!([[61]])), "{v}");
     assert_eq!(e.es(&near, &near_pw, Method::PUT, "/_cluster/settings", Some(json!({ "persistent": { "cluster.remote.far.skip_unavailable": false } }))).await.0, 200);
     let (s, v) = query(&near, &near_pw, json!({ "query": "FROM items,far:missing | LIMIT 1" })).await;
     assert_eq!((s, v["error"]["reason"].as_str()), (400, Some("Unknown index [far:missing]")), "{v}");
@@ -2992,6 +3003,12 @@ async fn esql_across_clusters_answers_as_one_cluster() {
         let (s, v) = query(&near, &near_pw, json!({ "query": q })).await;
         assert_eq!((s, v["error"]["reason"].as_str()), (400, Some(reason)), "{q}: {v}");
     }
+
+    // The implicit limit runs in the parts wherever it commutes: 1,000 of the remote's 3,000
+    // rows, read there, for the ENRICH that runs here.
+    let (s, v) = query(&near, &near_pw, json!({ "query": "FROM far:many | EVAL tag = \"a\" | ENRICH _coordinator:tag_label | KEEP k, label" })).await;
+    assert_eq!((s, v["values"].as_array().map(Vec::len), v["values"][0][1].as_str()), (200, Some(1000), Some("N-a")), "{}", v["error"]);
+    assert!(v["documents_found"].as_i64().is_some_and(|d| d <= 1000), "{}", v["documents_found"]);
 
     // `STATS` merges each cluster's partial states: 3,000 remote rows wouldn't fit the request
     // breaker this cluster holds remote answers on, the remote's states do.
@@ -3048,6 +3065,9 @@ async fn esql_across_clusters_reads_as_the_link_allows() {
     let reason = v["error"]["reason"].as_str().unwrap_or_default();
     assert!(s == 403 && reason.starts_with("action [indices:data/read/esql/resolve_fields] towards remote cluster [far] is unauthorized for user [local]"), "{v}");
 
+    // `remote_cluster` grants only Elasticsearch's remote cluster privileges.
+    let (s, v) = e.es(&near, &near_pw, Method::PUT, "/_security/role/bad", Some(json!({ "remote_cluster": [{ "clusters": ["far"], "privileges": ["all"] }] }))).await;
+    assert_eq!((s, v["error"]["reason"].as_str()), (400, Some("failed to parse remote_cluster for role [bad]. [monitor_enrich, monitor_stats] are the only values allowed for [privileges] within [remote_cluster]. Found [all]")), "{v}");
     // A remote's ENRICH needs `monitor_enrich` there (`remote_cluster`), whatever the key's own.
     ccs_policy(&e, &far, &far_pw, "tag_label", "F").await;
     let enrich = json!({ "query": "FROM far:items | ENRICH _remote:tag_label | KEEP n, label | SORT n | LIMIT 1" });
