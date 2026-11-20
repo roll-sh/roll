@@ -789,6 +789,12 @@ previews are listed once those products are on.
 | `search_delete_document` | Delete a document. | `DELETE /v1/search/clusters/{cluster}/indices/{index}/docs/{doc}` |
 | `secrets_list_environments` | A project's secret environments. | `GET /v1/secrets/projects/{project}/environments` |
 | `secrets_list` | Secret names and metadata in an environment (never values). | `GET /v1/secrets/projects/{project}/environments/{env}/secrets` |
+| `secrets_get` | One secret's metadata: type, version, link, tags, who changed it (never its value). | `GET /v1/secrets/projects/{project}/environments/{env}/secrets/{name}` |
+| `secrets_grid` | Every key in every environment: same, different or missing (by fingerprint), required. | `GET /v1/secrets/projects/{project}/grid` |
+| `secrets_imports` | What an environment's folder imports from. | `GET /v1/secrets/projects/{project}/environments/{env}/imports` |
+| `secrets_exports` | Which projects a folder is shared with. | `GET /v1/secrets/projects/{project}/environments/{env}/exports` |
+| `secrets_shared` | Folders other projects share with this one. | `GET /v1/secrets/projects/{project}/shared` |
+| `secrets_list_shares` | A project's one-off share links: views left, expiry, opened (never the link). | `GET /v1/secrets/projects/{project}/shares` |
 | `secrets_reveal` | Read a secret's value. | `GET /v1/secrets/projects/{project}/environments/{env}/secrets/{name}/value` |
 | `secrets_set` | Create or change a secret's value. | `PUT /v1/secrets/projects/{project}/environments/{env}/secrets/{name}` |
 | `secrets_import` | A .env file (or JSON) into an environment as one change; a change request on a protected one. | `POST /v1/secrets/projects/{project}/environments/{env}/import` |
