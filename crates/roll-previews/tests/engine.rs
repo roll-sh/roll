@@ -1159,6 +1159,13 @@ async fn a_signed_in_person_sees_only_their_own_projects_previews() {
     // Their own project's: there.
     let mine = e.ws.create("usr_b", "mine", "", None).unwrap();
     assert_eq!(call(other, format!("/v1/previews/projects/{}/settings", mine.id)).await.0, 200);
+    // A create is made in the project roll-access decided it on (`X-Roll-Project`), never in another
+    // the body names.
+    let req = axum::http::Request::post("/v1/previews")
+        .header("x-roll-project", mine.id.as_str())
+        .body(axum::body::Body::from(json!({ "project": e.project, "repo": "acme/web", "branch": "main" }).to_string()))
+        .unwrap();
+    assert_eq!(roll_previews::api::router(e.engine.clone()).oneshot(req).await.unwrap().status().as_u16(), 400);
     // A token (no signed-in person) and an admin see it.
     assert_eq!(call(None, format!("/v1/previews/{}", p.id)).await.0, 200);
     assert_eq!(call(Some(("usr_c", true)), format!("/v1/previews/{}", p.id)).await.0, 200);
