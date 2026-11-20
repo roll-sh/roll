@@ -5232,7 +5232,8 @@ members, the first hour, and the other products' credential inputs. Ranked:
    and resources have homes, and v1 covers workspace and secrets. It waits on the user's decisions D1–D9
    (role names, viewers seeing values, developers' defaults, admins and production, invites, homes,
    removed members' tokens, operator projects, admin accounts); the doc is written with option (a) of each.
-   v1 is building on option (a) (`feature/roll-members`, on #445), as the watchdog passed the decisions to the user.
+   v1 is #501 (on #445; option (a) of every decision, each one constant in `roll-auth/src/roles.rs`),
+   gated green with the demoted-maker fix; an independent security review is running before it lands.
 5. **Token defaults** (P13, S):
    - the CLI gives every environment, `reveal` and no expiry; the dashboard pre-picks production and 90
      days;
