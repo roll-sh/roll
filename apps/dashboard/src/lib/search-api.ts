@@ -9,6 +9,7 @@
 import { apiHeaders, call, onApiStatus, ROLL_API } from "./roll-api";
 import { withSession } from "./code-token";
 import { analyticsQuery, type AnalyticsRange, type SearchAnalytics } from "./search-analytics";
+import type { SuggestionsStatus } from "./search-suggestions";
 import type { MetricsRange, SearchMetrics, SearchSlowLog } from "./search-performance";
 import type { AuditPage } from "./search-audit";
 import type { LinkBody, RemoteLink } from "./search-remotes";
@@ -252,6 +253,9 @@ export const searchApi = {
   metrics: (id: string, range: MetricsRange) => call<SearchMetrics>("GET", `${cl(id)}/metrics?range=${range}`),
   slowlog: (id: string) => call<SearchSlowLog>("GET", `${cl(id)}/slowlog`),
   analytics: (id: string, index: string | null, range: AnalyticsRange) => call<SearchAnalytics>("GET", `${cl(id)}/analytics?${analyticsQuery(index, range)}`),
+  /** An index's query suggestions: settings, last build, heaviest suggestions (never wakes the cluster). */
+  suggestions: (id: string, index: string) => call<SuggestionsStatus>("GET", `${cl(id)}/indices/${encodeURIComponent(index)}/suggestions`),
+  rebuildSuggestions: (id: string, index: string) => call<SuggestionsStatus>("POST", `${cl(id)}/indices/${encodeURIComponent(index)}/suggestions/rebuild`, {}),
   createKey: (id: string, name: string, access: KeyAccess, expiresInS?: number) =>
     call<NewSearchKey>("POST", `${cl(id)}/keys`, { name, access, expires_in_s: expiresInS }),
   revokeKey: (id: string, key: string) => call<null>("DELETE", `${cl(id)}/keys/${encodeURIComponent(key)}`),

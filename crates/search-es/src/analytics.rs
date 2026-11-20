@@ -145,6 +145,12 @@ impl TopQueries {
         self.trim();
     }
 
+    /// Adds `s` to `q`'s counts, then keeps the `cap` most searched.
+    pub fn add(&mut self, q: &str, s: &QueryStats) {
+        self.map.entry(q.into()).or_default().add(s);
+        self.trim();
+    }
+
     fn trim(&mut self) {
         if self.map.len() <= self.cap {
             return;
