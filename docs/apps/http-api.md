@@ -69,7 +69,7 @@ route as. "deploy*" means `deploy` when `{env}` is `production`, else `write`.
 | `PUT /v1/apps/projects/{project}/limits` | `{ alert_usd: number \| null, hard_usd: number \| null }` | `SpendLimits` (this month's alert and cap are decided again within 30 s) | admin (the hard limit pauses the whole project) |
 | `GET /v1/apps/events?after=&limit=` | | `{ events: Event[], next }`: what happened to services, in order, after a cursor | read |
 | `GET /v1/apps/services/{id}/changes` | | server-sent events: `ready`, then a `changed` (data `{}`) whenever a deploy moves, an instance wakes, sleeps or crashes, or someone changes the service; the page reads it again (on the owner, in memory; it carries nothing itself) | read |
-| `PUT /v1/apps/services/{id}/registry` | `{ username, password, server? }` | `Service` (a private registry's login for an image source; sealed, never returned) | write |
+| `PUT /v1/apps/services/{id}/registry` | `{ username, password, server? }`, or for an image on ECR `{ kind: "ecr", access_key_id, secret_access_key, region? }` (region defaults to the registry's; another is a 400) | `Service` (a private registry's login for an image source; sealed, never returned; an ECR key is exchanged for ECR's 12-hour token at a pull, user `AWS`, kept until it has an hour left and then fetched again for what runs) | write |
 | `DELETE /v1/apps/services/{id}/registry` | | `Service` | write |
 | `PUT /v1/apps/services/{id}/git-login` | `{ username, password }` (a deploy token, app password or access token as `password`; one line each), or `{ username, secret }` (the name of the project's secret that holds it, read from its production secrets at each fetch: a rotated token just works, nothing is kept here) | `Service` (a private Git repository's login for a Git URL source, bound to the URL's host: sent only there as Basic auth, dropped when the source moves to another repository; sealed, never returned) | write |
 | `DELETE /v1/apps/services/{id}/git-login` | | `Service` | write |
@@ -142,7 +142,7 @@ route as. "deploy*" means `deploy` when `{env}` is `production`, else `write`.
 | `POST /v1/apps/services/{id}/environments/{env}/shell/sessions/{sh}/resize` | `{ cols, rows }` | 204 | admin (all of a shell session is) |
 | `DELETE /v1/apps/services/{id}/environments/{env}/shell/sessions/{sh}` | | 204 | admin (what closes an admin's shell is admin) |
 | `GET /v1/apps/services/{id}/environments/{env}/jobs` | | `Job[]`, newest first | read |
-| `POST /v1/apps/services/{id}/environments/{env}/jobs` | `{ command, timeout_s?, tasks? }` (tasks 1–100: that many containers, ten at a time, each with `ROLL_TASK_INDEX` and `ROLL_TASK_COUNT`; the job fails on the first task that does) | 202 `Job` (with `tasks`) | deploy* |
+| `POST /v1/apps/services/{id}/environments/{env}/jobs` | `{ command, timeout_s?, tasks?, retries?, parallelism? }` (tasks 1–100: that many containers, `parallelism` at a time (1–100, default ten or fewer tasks), each with `ROLL_TASK_INDEX` and `ROLL_TASK_COUNT`; `retries` 0–5: a failed or timed-out task tried again in a fresh container with `ROLL_TASK_ATTEMPT`, as a cron run's retries wait, never after a cancel; the job fails on the first task that does in the end) | 202 `Job` | deploy* |
 | `GET /v1/apps/services/{id}/environments/{env}/jobs/{job}` | | `Job` | read |
 | `GET /v1/apps/services/{id}/environments/{env}/jobs/{job}/logs?follow=&tail=` | | `LogLine[]` or SSE (ends with the job, then `end`) | reveal (a job's output can be the variables) |
 | `POST /v1/apps/services/{id}/environments/{env}/jobs/{job}/cancel` | | `Job` | deploy* |
@@ -252,7 +252,7 @@ type Run = {
    *  share reaches error_pct (1–100, default 5) of 20+ requests, and beats the old one's, rolls
    *  back. Web services only; refused with a volume. manual: each step, once it passes, holds
    *  its split until a person says (`…/deploys/{dep}/rollout`), still judged while it waits. */
-  rollout: { steps: number[]; step_s: number; error_pct: number; manual?: boolean; slo_burn?: number /* with run.slo: a step fails when the new deployment spends its budget this many times as fast as it lasts (1–1000, default 14.4) */; p95_pct?: number /* a step fails when the new deployment's p95 response time is more than this many percent above the old one's, with 20 requests on each side (1–1000, off unless set) */ };
+  rollout: { steps: number[]; step_s: number; error_pct: number; manual?: boolean; slo_burn?: number /* with run.slo: a step fails when the new deployment spends its budget this many times as fast as it lasts (1–1000, default 14.4) */; p95_pct?: number /* a step fails when the new deployment's p95 response time is more than this many percent above the old one's, with 20 requests on each side (1–1000, off unless set) */; overlap?: false /* the old instances stop (draining for drain_s) before the new ones start, so two never run at once (a bot, a scheduler); a web service's requests wait for the new one; no steps with it */ };
   /** The app speaks HTTP/2 without TLS (a gRPC server): the proxy and health checks use h2c,
    *  `te: trailers` passes, trailers come back. A WebSocket upgrade stays HTTP/1.1. Default false. */
   h2c?: boolean;
@@ -334,7 +334,7 @@ type Service = {
   source: Source;
   build: Build;
   run: Run;
-  registry: { server: string; username: string } | null; // a private registry's login (never the password)
+  registry: { server: string; username: string; kind?: "ecr"; region?: string } | null; // a private registry's login (never the password; an ECR login's username is its access key's id)
   git_login: { host: string; username: string; secret?: string } | null; // a private Git repository's login (never the password; `secret`: the project secret it's read from)
   github: { installation: number; repo: string } | null; // connected to roll's GitHub App (`PUT …/github`)
   links: { kind: LinkKind; ref: string }[]; // what it links (no variables): the canvas draws them
@@ -559,7 +559,7 @@ type DeployCommits = {
   complete: boolean;         // `since` was reached (false: more than 50, or not in its history: a rollback, another branch)
 };
 
-type NewDeploy = { revision?: string; image?: string; message?: string; no_traffic?: boolean; no_cache?: boolean /* build from scratch (400 with an image): no cached layer, base images pulled again, the service's cache mounts empty from then on; an upload says it with `X-Roll-No-Cache: 1` */; /* during a freeze, the header X-Roll-Override: 1 (admin; audited): a body `override` is a 400 */ closed?: boolean /* true: 409 unless the environment is built closed (egress `roll` on a node that closes it: its own network, no secret value); a node that predates the field answers 400, so the request fails closed (roll previews sends it for a fork's head) */ };
+type NewDeploy = { revision?: string /* a commit, or a branch or tag by name (deployed once: the environment keeps following its branch); a repo service's: a full or short sha or a branch */; image?: string; message?: string; no_traffic?: boolean; no_cache?: boolean /* build from scratch (400 with an image): no cached layer, base images pulled again, the service's cache mounts empty from then on; an upload says it with `X-Roll-No-Cache: 1` */; /* during a freeze, the header X-Roll-Override: 1 (admin; audited): a body `override` is a 400 */ closed?: boolean /* true: 409 unless the environment is built closed (egress `roll` on a node that closes it: its own network, no secret value); a node that predates the field answers 400, so the request fails closed (roll previews sends it for a fork's head) */ };
 
 type Deployment = {
   id: string;
@@ -744,7 +744,7 @@ type RunStatus = "running" | "succeeded" | "failed" | "skipped" | "timed_out" | 
 type CronRun = { id: string; deployment: string; status: RunStatus; exit_code: number | null; started_at: number; finished_at: number | null; attempt: number /* which try of its due time: 1, then up to run.retries more after a failure */ };
 /** A one-off command in a fresh container of the active deployment: its variables and project
  *  network, no port, no volume. timeout_s 1–86400 (default 3600). */
-type Job = { id: string; deployment: string; command: string; status: RunStatus; exit_code: number | null; started_at: number; finished_at: number | null };
+type Job = { id: string; deployment: string; command: string; tasks: number; retries?: number /* tries after a task's failure */; parallelism: number /* tasks at once */; status: RunStatus; exit_code: number | null; started_at: number; finished_at: number | null };
 
 type Domain = {
   hostname: string;

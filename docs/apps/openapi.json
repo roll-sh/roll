@@ -2825,7 +2825,7 @@
         "x-roll-action": "read"
       },
       "post": {
-        "description": "Answers 202 `Job` (with `tasks`).",
+        "description": "Answers 202 `Job`.",
         "operationId": "postServicesIdEnvironmentsEnvJobs",
         "parameters": [
           {
@@ -2853,11 +2853,11 @@
               }
             }
           },
-          "description": "`{ command, timeout_s?, tasks? }` (tasks 1–100: that many containers, ten at a time, each with `ROLL_TASK_INDEX` and `ROLL_TASK_COUNT`; the job fails on the first task that does)"
+          "description": "`{ command, timeout_s?, tasks?, retries?, parallelism? }` (tasks 1–100: that many containers, `parallelism` at a time (1–100, default ten or fewer tasks), each with `ROLL_TASK_INDEX` and `ROLL_TASK_COUNT`; `retries` 0–5: a failed or timed-out task tried again in a fresh container with `ROLL_TASK_ATTEMPT`, as a cron run's retries wait, never after a cancel; the job fails on the first task that does in the end)"
         },
         "responses": {
           "202": {
-            "description": "202 `Job` (with `tasks`)"
+            "description": "202 `Job`"
           },
           "4XX": {
             "$ref": "#/components/responses/Error"
@@ -4754,7 +4754,7 @@
         "x-roll-action": "write"
       },
       "put": {
-        "description": "Answers `Service` (a private registry's login for an image source; sealed, never returned).",
+        "description": "Answers `Service` (a private registry's login for an image source; sealed, never returned; an ECR key is exchanged for ECR's 12-hour token at a pull, user `AWS`, kept until it has an hour left and then fetched again for what runs).",
         "operationId": "putServicesIdRegistry",
         "parameters": [
           {
@@ -4774,11 +4774,11 @@
               }
             }
           },
-          "description": "`{ username, password, server? }`"
+          "description": "`{ username, password, server? }`, or for an image on ECR `{ kind: \"ecr\", access_key_id, secret_access_key, region? }` (region defaults to the registry's; another is a 400)"
         },
         "responses": {
           "200": {
-            "description": "`Service` (a private registry's login for an image source; sealed, never returned)"
+            "description": "`Service` (a private registry's login for an image source; sealed, never returned; an ECR key is exchanged for ECR's 12-hour token at a pull, user `AWS`, kept until it has an hour left and then fetched again for what runs)"
           },
           "4XX": {
             "$ref": "#/components/responses/Error"
