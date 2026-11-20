@@ -876,6 +876,7 @@ previews are listed once those products are on.
 | `apps_metrics` | CPU, memory and requests of an environment, and each instance's own last hour (`by_instance`). | `GET /v1/apps/services/{service}/environments/{env}/metrics` |
 | `apps_plan` | How roll would build and run a repo, before making a service (a dry run). | `POST /v1/apps/plan` |
 | `apps_errors` | An environment's errors, grouped, the most frequent first. | `GET /v1/apps/services/{service}/environments/{env}/errors` |
+| `apps_set_error_state` | Resolve, mute or reopen an error group (a resolved one seen again reopens as a regression). | `PATCH /v1/apps/services/{service}/environments/{env}/errors/{fingerprint}` |
 | `apps_traces` | Recent traces (root span, duration, failures); `min_ms` keeps the slow ones. | `GET /v1/apps/services/{service}/environments/{env}/traces` |
 | `apps_get_trace` | One trace's spans, in start order. | `GET /v1/apps/services/{service}/environments/{env}/traces/{trace}` |
 | `apps_app_metrics` | The app's own OpenTelemetry metrics, as series. | `GET /v1/apps/services/{service}/environments/{env}/app-metrics` |
