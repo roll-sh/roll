@@ -54,6 +54,9 @@ pub struct P {
 pub enum Hint {
     Auto,
     Destructive,
+    /// It removes or replaces only what can be put back (a resource off a canvas, a deleted
+    /// cluster brought back): never destructive, though its route is a `DELETE` or its name says so.
+    Undoable,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -127,6 +130,11 @@ impl Tool {
     }
 
     /// Whether any grant may call it (an `AnyGrant` route).
+    /// Which area of its product's toolset this tool is in (`?toolsets=apps.observe`).
+    pub fn area(&self) -> Area {
+        if self.product == "apps" { apps_area(self.method, self.path) } else { Area::Every }
+    }
+
     pub fn open(&self) -> bool {
         PREPARED.get(self.name).map_or_else(|| self.find_open(), |p| p.open)
     }
@@ -194,7 +202,11 @@ impl Tool {
         // Read-only changes nothing and makes nothing: a reveal that's a POST (a presigned PUT URL,
         // a share link) makes something someone can use.
         let read_only = !actions.is_empty() && (actions.iter().all(|a| *a == Action::Read) || (self.method == "GET" && actions.iter().all(|a| matches!(a, Action::Read | Action::Reveal))));
-        let destructive = self.hint == Hint::Destructive || actions.iter().any(|a| matches!(a, Action::Delete | Action::Deploy));
+        // A `DELETE` removes something whatever the catalogue calls its action (a drain, a lease,
+        // a link are writes or admin there), unless the tool says it can be put back.
+        let destructive = self.hint == Hint::Destructive
+            || actions.iter().any(|a| matches!(a, Action::Delete | Action::Deploy))
+            || (self.method == "DELETE" && self.hint != Hint::Undoable);
         let idempotent = read_only || self.method == "PUT" || self.method == "DELETE";
         json!({
             "name": self.name,
@@ -299,6 +311,46 @@ impl Tool {
     }
 }
 
+/// The areas a product's toolset splits into, as GitHub's server splits its own: a client with a
+/// tool limit (Windsurf 100, Cursor about 40) takes the area it works in. Only apps so far: alone it
+/// is 89 tools, at Windsurf's limit with the access tools.
+pub const AREAS: &[(&str, &[&str])] = &[("apps", &["observe", "deploy", "configure", "project"])];
+
+/// Where a tool sits in its product's areas.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Area {
+    /// The product has no areas, or this is a lookup every area needs (a service, an environment).
+    Every,
+    One(&'static str),
+    /// A route the table below doesn't place: a test fails until it does.
+    Unplaced,
+}
+
+/// An apps tool's area, from its route: what an agent does with it (watch, ship, set up, run the
+/// project).
+fn apps_area(method: &str, path: &str) -> Area {
+    let Some(rest) = path.strip_prefix("/v1/apps") else { return Area::Unplaced };
+    let parts: Vec<&str> = rest.split('/').filter(|s| !s.is_empty() && !s.starts_with('{')).collect();
+    let read = method == "GET";
+    let area = match parts.as_slice() {
+        // Finding a service and its environments: every area starts there.
+        [] | ["services"] | ["services", "environments"] if read => return Area::Every,
+        ["projects", "services"] if read => return Area::Every,
+        ["services"] | ["services", "environments"] | ["projects", "services"] => "configure",
+        ["services", "environments", s, ..] => match *s {
+            "analytics" | "app-metrics" | "errors" | "logs" | "metrics" | "routes" | "slo" | "traces" | "usage" | "vitals" => "observe",
+            "deploys" | "promote" | "redeploy" | "rollback" | "pending" | "diff" | "jobs" | "runs" | "restart" | "sleep" | "wake" | "instances" | "cache" => "deploy",
+            "variables" | "domains" | "forms" | "volume" => "configure",
+            _ => return Area::Unplaced,
+        },
+        ["services", "activity"] | ["events"] => "observe",
+        ["services", "links"] | ["services", "restore"] | ["import"] | ["plan"] => "configure",
+        ["projects", "drains" | "notifications" | "limits" | "status-page" | "preview-domain" | "export", ..] => "project",
+        _ => return Area::Unplaced,
+    };
+    Area::One(area)
+}
+
 const fn req(name: &'static str, desc: &'static str) -> P {
     P { name, ty: Ty::Str, at: At::Path, required: true, desc }
 }
@@ -367,6 +419,11 @@ impl Tool {
     }
     const fn destructive(mut self) -> Tool {
         self.hint = Hint::Destructive;
+        self
+    }
+    /// It removes or replaces only what can be put back ([`Hint::Undoable`]).
+    const fn undoable(mut self) -> Tool {
+        self.hint = Hint::Undoable;
         self
     }
     const fn until(mut self, f: fn(&Value) -> bool) -> Tool {
@@ -532,7 +589,7 @@ static TOOLS: &[Tool] = &[
         "/v1/workspace/projects/{id}/resources/{kind}/{ref}",
         &[WS, req("kind", "postgres, redis, stream, bucket, nosql or repo"), req("ref", "The resource's id (owner/name for a repo)"), breq("x", Ty::Num, "Canvas x"), breq("y", Ty::Num, "Canvas y")],
     ),
-    t("workspace_remove_resource", "Remove a resource from a project", "Take a resource off a project's canvas (the resource itself stays).", "workspace", "DELETE", "/v1/workspace/projects/{id}/resources/{kind}/{ref}", &[WS, req("kind", "Resource kind"), req("ref", "The resource's id")]),
+    t("workspace_remove_resource", "Remove a resource from a project", "Take a resource off a project's canvas (the resource itself stays).", "workspace", "DELETE", "/v1/workspace/projects/{id}/resources/{kind}/{ref}", &[WS, req("kind", "Resource kind"), req("ref", "The resource's id")]).undoable(),
     // ── Postgres ──
     t("postgres_list_projects", "List Postgres projects", "Postgres projects with their branches and endpoints.", "postgres", "GET", "/v1/projects", &[]),
     t("postgres_get_project", "Get a Postgres project", "A Postgres project with its branches and endpoints (connection strings need reveal).", "postgres", "GET", "/v1/projects/{project}", &[PROJECT]),
@@ -615,7 +672,7 @@ static TOOLS: &[Tool] = &[
     t("storage_presign", "Presign a URL", "A URL anyone can use to get (or put) an object until it expires.", "storage", "POST", "/v1/storage/buckets/{bucket}/presign", &[BUCKET, breq("key", Ty::Str, "Object key"), b("method", Ty::Str, "GET or PUT"), b("expires_s", Ty::Int, "Seconds valid")]),
     t("storage_branch_bucket", "Branch a bucket", "A copy-on-write branch of a bucket (objects shared, not copied).", "storage", "POST", "/v1/storage/buckets/{bucket}/branches", &[BUCKET, breq("name", Ty::Str, "Branch bucket name")]),
     t("storage_list_trash", "Deleted objects", "Objects in a bucket's trash, with when each was deleted (they can be restored until it's emptied).", "storage", "GET", "/v1/storage/buckets/{bucket}/trash", &[BUCKET, q("prefix", Ty::Str, "Key prefix"), q("limit", Ty::Int, "At most (default 200)"), q("cursor", Ty::Str, "From a previous page")]),
-    t("storage_restore_object", "Restore a deleted object", "Bring an object back from the trash (key and deleted_at from storage_list_trash).", "storage", "POST", "/v1/storage/buckets/{bucket}/trash/restore", &[BUCKET, breq("key", Ty::Str, "Object key"), breq("deleted_at", Ty::Int, "When it was deleted, as listed")]),
+    t("storage_restore_object", "Restore a deleted object", "Bring an object back from the trash (key and deleted_at from storage_list_trash).", "storage", "POST", "/v1/storage/buckets/{bucket}/trash/restore", &[BUCKET, breq("key", Ty::Str, "Object key"), breq("deleted_at", Ty::Int, "When it was deleted, as listed")]).undoable(),
     t("storage_usage", "Storage usage", "A bucket's usage.", "storage", "GET", "/v1/storage/buckets/{bucket}/usage", &[BUCKET, DAYS]),
     t("storage_usage_all", "Storage usage, every bucket", "Storage and requests across every bucket.", "storage", "GET", "/v1/storage/usage", &[DAYS]),
     t("storage_list_accounts", "List storage accounts", "Storage's accounts (AWS-style, 12-digit ids): name, alias, and which is the default (creating one is the operator's).", "storage", "GET", "/v1/storage/accounts", &[]),
@@ -848,7 +905,7 @@ static TOOLS: &[Tool] = &[
     t("search_branch_cluster", "Branch a search cluster", "A copy-on-write branch of a cluster, now or at a time within its history.", "search", "POST", "/v1/search/clusters/{cluster}/branches", &[req("cluster", "Cluster id or name"), breq("name", Ty::Str, "Branch name"), b("at", Ty::Int, "Unix seconds")]),
     t("search_update_cluster", "Update a search cluster", "Change a cluster's settings: idle_timeout_s (0: always loaded), max_in_flight, max_body_mb at once; flavor or destructive_requires_name put it to sleep to reload once no request runs; ip_allowlist replaces the networks its endpoint answers (up to 64 CIDRs, each a string or {cidr, description}; [] answers everyone; this API isn't filtered by it).", "search", "PATCH", "/v1/search/clusters/{cluster}", &[req("cluster", "Cluster id or name"), b("idle_timeout_s", Ty::Int, "Seconds idle before it sleeps (0: never)"), b("max_in_flight", Ty::Int, "Requests at once"), b("max_body_mb", Ty::Int, "Largest request body"), b("destructive_requires_name", Ty::Bool, "Refuse wildcard deletes"), b("flavor", Ty::Str, "elasticsearch or opensearch"), b("ip_allowlist", Ty::Arr, "CIDRs its endpoint answers (strings or {cidr, description})")]),
     t("search_delete_cluster", "Delete a search cluster", "Delete a cluster and its indices (its branches keep working). It's kept for the deployment's restore window (7 days by default) and search_restore_cluster brings it back until then.", "search", "DELETE", "/v1/search/clusters/{cluster}", &[req("cluster", "Cluster id or name")]),
-    t("search_restore_cluster", "Restore a deleted search cluster", "Bring a deleted cluster back as it was (data, snapshots, settings, password, API keys) within its restore window, by its id (search_list_clusters with deleted=true). Its name, or name if that's taken.", "search", "POST", "/v1/search/clusters/{cluster}/restore", &[req("cluster", "The deleted cluster's id"), b("name", Ty::Str, "Another name, if its own is taken")]),
+    t("search_restore_cluster", "Restore a deleted search cluster", "Bring a deleted cluster back as it was (data, snapshots, settings, password, API keys) within its restore window, by its id (search_list_clusters with deleted=true). Its name, or name if that's taken.", "search", "POST", "/v1/search/clusters/{cluster}/restore", &[req("cluster", "The deleted cluster's id"), b("name", Ty::Str, "Another name, if its own is taken")]).undoable(),
     t("search_cluster_metrics", "Search cluster metrics", "A cluster's request rate, latency (p50, p95, p99), and 2xx/4xx/5xx/429 answers by kind of request, over range 1h (default), 24h or 14d.", "search", "GET", "/v1/search/clusters/{cluster}/metrics", &[req("cluster", "Cluster id or name"), q("range", Ty::Str, "1h, 24h or 14d")]),
     t("search_slowlog", "Search slow log", "A cluster's slowest recent requests: what ran, on which index, and how long it took.", "search", "GET", "/v1/search/clusters/{cluster}/slowlog", &[req("cluster", "Cluster id or name")]),
     t("search_audit", "Search audit log", "A cluster's security audit log, newest first: failed logins, access denials and changes to users, roles, role mappings and API keys (granted access and successful logins too when the cluster records them), in Elasticsearch's or OpenSearch's event names (authentication_failed, access_denied, security_config_change, …). Never a secret or a request body.", "search", "GET", "/v1/search/clusters/{cluster}/audit", &[req("cluster", "Cluster id or name"), q("from", Ty::Int, "From (Unix ms, inclusive)"), q("to", Ty::Int, "To (Unix ms, exclusive)"), q("event", Ty::Str, "Event names or categories, comma-separated"), q("size", Ty::Int, "Entries (default 100)")]),
@@ -891,6 +948,12 @@ static TOOLS: &[Tool] = &[
     // ── secrets (roll secrets) ──
     t("secrets_list_environments", "List environments", "A project's secret environments.", "secrets", "GET", "/v1/secrets/projects/{project}/environments", &[SECRET_PROJECT]),
     t("secrets_list", "List secrets", "Secret names and metadata in an environment (never values).", "secrets", "GET", "/v1/secrets/projects/{project}/environments/{env}/secrets", &[SECRET_PROJECT, ENV, q("path", Ty::Str, "Folder, e.g. /api")]),
+    t("secrets_get", "Get a secret's metadata", "One secret's metadata in an environment: its type (shared or a person's own), version, link, tags, comment, where it comes from (its own, imported, a base), what it references and who changed it last (never its value: secrets_reveal reads that).", "secrets", "GET", "/v1/secrets/projects/{project}/environments/{env}/secrets/{name}", &[SECRET_PROJECT, ENV, req("name", "Secret name"), q("path", Ty::Str, "Folder"), q("type", Ty::Str, "shared (default) or personal")]),
+    t("secrets_grid", "Every key in every environment", "A project's keys across all its environments at once: for each key whether it's the same, different or missing between them (by fingerprint, never values), and whether it's required. Is it set everywhere, and does production differ from staging?", "secrets", "GET", "/v1/secrets/projects/{project}/grid", &[SECRET_PROJECT, q("path", Ty::Str, "Folder")]),
+    t("secrets_imports", "What an environment imports", "The environments (and other projects' shared folders) an environment's folder reads keys from: where its values come from besides its own.", "secrets", "GET", "/v1/secrets/projects/{project}/environments/{env}/imports", &[SECRET_PROJECT, ENV, q("path", Ty::Str, "Folder")]),
+    t("secrets_exports", "Who imports a folder", "The other projects a folder of this environment is shared with, and who shared it when: where its values go besides here.", "secrets", "GET", "/v1/secrets/projects/{project}/environments/{env}/exports", &[SECRET_PROJECT, ENV, q("path", Ty::Str, "Folder")]),
+    t("secrets_shared", "Folders shared with a project", "The folders other projects share with this one, which its environments can import.", "secrets", "GET", "/v1/secrets/projects/{project}/shared", &[SECRET_PROJECT]),
+    t("secrets_list_shares", "A project's share links", "Its one-off share links, newest first: note, views left, who made it and when, when it expires and whether it was opened (never the link or its value). Open ones are values out of roll until they expire.", "secrets", "GET", "/v1/secrets/projects/{project}/shares", &[SECRET_PROJECT]),
     t("secrets_reveal", "Read a secret's value", "Read a secret's value. A key tagged sensitive is never returned to anyone (403): only running services get it, so don't retry or look for it another way.", "secrets", "GET", "/v1/secrets/projects/{project}/environments/{env}/secrets/{name}/value", &[SECRET_PROJECT, ENV, req("name", "Secret name"), q("path", Ty::Str, "Folder")]),
     t("secrets_set", "Set a secret", "Create or change a secret's value. Give if_version (the version you read) so a change someone made meanwhile isn't overwritten: then it's a 409 stale, and you read it again.", "secrets", "PUT", "/v1/secrets/projects/{project}/environments/{env}/secrets/{name}", &[SECRET_PROJECT, ENV, req("name", "Secret name"), breq("value", Ty::Str, "The value"), q("path", Ty::Str, "Folder"), b("if_version", Ty::Int, "Only if it's still this version (0: only if it doesn't exist)")]),
     t("secrets_import", "Import a .env file", "Write a .env file's keys (or JSON: {\"KEY\": \"value\"} or [{key, value, comment?}]) into an environment as one change: only new keys unless overwrite, and replace makes the folder match the file (its other own keys are deleted). On a protected environment it opens a change request instead (request: true asks for one anywhere).", "secrets", "POST", "/v1/secrets/projects/{project}/environments/{env}/import", &[SECRET_PROJECT, ENV, b("dotenv", Ty::Str, "A .env file's text"), b("json", Ty::Obj, "Or the keys as JSON"), b("path", Ty::Str, "Folder (default /)"), b("overwrite", Ty::Bool, "Replace keys that exist"), b("replace", Ty::Bool, "Also delete the folder's keys the file lacks"), b("message", Ty::Str, "Why, for the change's history"), b("request", Ty::Bool, "Open a change request instead of writing"), b("if_seq", Ty::Int, "Only if the environment's last change is still this one")]).destructive(),
@@ -924,7 +987,7 @@ static TOOLS: &[Tool] = &[
     t("secrets_suggestions", "Suggested links", "Links roll suggests for a project's resources (a database, a bucket…): which keys each would fill and where, for secrets_link.", "secrets", "GET", "/v1/secrets/projects/{project}/suggestions", &[SECRET_PROJECT]),
     t("secrets_versions", "A secret's versions", "A secret's history, newest first (fingerprints, who and when; never values).", "secrets", "GET", "/v1/secrets/projects/{project}/environments/{env}/secrets/{name}/versions", &[SECRET_PROJECT, ENV, req("name", "Secret name"), q("path", Ty::Str, "Folder")]),
     t("secrets_compare", "Compare environments", "Which keys differ between two environments (missing, or a different value by fingerprint; never values).", "secrets", "GET", "/v1/secrets/projects/{project}/compare", &[SECRET_PROJECT, qreq("from", "Environment"), qreq("to", "Environment"), q("path", Ty::Str, "Folder")]),
-    t("secrets_rotate", "Rotate a secret", "Make a new value for a secret and switch to it: a generated one, or a managed link's (a database user's password, a cloud key) made where it lives.", "secrets", "POST", "/v1/secrets/projects/{project}/environments/{env}/secrets/{name}/rotate", &[SECRET_PROJECT, ENV, req("name", "Secret name"), q("path", Ty::Str, "Folder")]).open_world(),
+    t("secrets_rotate", "Rotate a secret", "Make a new value for a secret and switch to it: a generated one, or a managed link's (a database user's password, a cloud key) made where it lives.", "secrets", "POST", "/v1/secrets/projects/{project}/environments/{env}/secrets/{name}/rotate", &[SECRET_PROJECT, ENV, req("name", "Secret name"), q("path", Ty::Str, "Folder")]).open_world().destructive(),
     t("secrets_promote", "Promote secrets", "Copy an environment's secrets into this one (all, or some keys). Into a protected environment it opens a change request for a person instead.", "secrets", "POST", "/v1/secrets/projects/{project}/environments/{env}/promote", &[SECRET_PROJECT, ENV, qreq("from", "The environment to copy from"), b("keys", Ty::Arr, "Only these keys"), b("path", Ty::Str, "Folder"), b("message", Ty::Str, "Why")]),
     t("secrets_list_requests", "Change requests", "An environment's change requests (proposed changes waiting on review).", "secrets", "GET", "/v1/secrets/projects/{project}/environments/{env}/requests", &[SECRET_PROJECT, ENV, q("state", Ty::Str, "open, applied or closed")]),
     t("secrets_propose", "Propose a change", "Propose changes to an environment for a person to review and apply: ops [{op: set, key, value?, if_version?} or {op: delete, key, if_version?}]; if_version keeps each op from applying over a change made meanwhile. The way to change a protected environment.", "secrets", "POST", "/v1/secrets/projects/{project}/environments/{env}/requests", &[SECRET_PROJECT, ENV, breq("ops", Ty::Arr, "[{op: set|delete, key, value?, comment?, if_version?}]"), b("message", Ty::Str, "Why"), b("path", Ty::Str, "Folder")]),
@@ -999,6 +1062,8 @@ static TOOLS: &[Tool] = &[
         bnull("routes", Ty::Arr, "[{path, service}] (at most 20): a path (a prefix ends in *) another service of the project answers, by name; clear it for none"),
         bnull("egress", Ty::Any, "{mode: roll|open, hosts?}: roll lets its code reach roll and only these hosts (at most 20, *. for subdomains), from the next deploy; clear it for open"),
         b("vitals", Ty::Bool, "Measure its pages' Web Vitals in visitors' browsers (read them with apps_vitals)"),
+        bnull("config", Ty::Obj, "Runtime config its instances read at ROLL_CONFIG_URL (edge functions: context.config) without a deploy: at most 200 keys, 64 KiB; the first one needs a deploy to give them the address. Clear it for none"),
+        bnull("freeze", Ty::Obj, "A deploy freeze: {until? (unix ms), windows?: [{from: \"fri 17:00\", to}], timezone?, reason?}, on until cleared when it has neither until nor windows. Setting or clearing one is an admin's call (clearing it would get past it)"),
         b("traces", Ty::Bool, "Send its OpenTelemetry traces and metrics to roll (OTEL_EXPORTER_OTLP_* from the next deploy)"),
         b("redeploy_on_secrets", Ty::Bool, "Redeploy (the same image, new values) when the project's roll secrets change"),
         b("pages", Ty::Obj, "{error?, maintenance?}: its own HTML for roll's error and maintenance pages (a page set to null puts roll's back)"),
@@ -1135,6 +1200,7 @@ static TOOLS: &[Tool] = &[
     t("apps_vitals", "Web Vitals", "What visitors' browsers measured on an environment's pages (with vitals on): LCP, INP, CLS, FCP and TTFB p75s rated good, needs-improvement or poor, overall and for the 20 routes with the most page loads.", "apps", "GET", "/v1/apps/services/{service}/environments/{env}/vitals", &[SERVICE, ENV, q("minutes", Ty::Int, "How far back, 60-10080 (default 1440)")]),
     t("apps_route_stats", "Route stats", "An environment's routes from its access log over the last minutes (5-60, default 60): requests, 5xx and 4xx errors, p50/p95/max latency per route (ids folded as :id), the busiest, most failing and slowest 50 of each. Start here when a service is slow or failing.", "apps", "GET", "/v1/apps/services/{service}/environments/{env}/routes", &[SERVICE, ENV, q("minutes", Ty::Int, "How far back, 5-60 (default 60)")]),
     t("apps_errors", "Errors: why a service is failing", "An environment's errors over the last minutes (5-10080, default 1440), grouped (the same error once, with its count, first and last seen and a sample), the most frequent first, at most 50. Start here when a service is failing or erroring.", "apps", "GET", "/v1/apps/services/{service}/environments/{env}/errors", &[SERVICE, ENV, q("minutes", Ty::Int, "How far back, 5-10080 (default 1440)")]),
+    t("apps_set_error_state", "Resolve, mute or reopen an error", "Triage an error group (its fingerprint from apps_errors): resolved goes quiet until it's seen again, which reopens it as a regression naming the deploy it came back in; muted stays quiet; open reopens it.", "apps", "PATCH", "/v1/apps/services/{service}/environments/{env}/errors/{fingerprint}", &[SERVICE, ENV, req("fingerprint", "The error group's fingerprint"), breq("state", Ty::Str, "open, resolved or muted")]),
     t("apps_traces", "Traces of slow requests", "An environment's recent traces (traces on), newest first, at most 100: each one's root span, service, duration, span count and whether any span failed; min_ms keeps the slow ones. apps_get_trace has one's spans.", "apps", "GET", "/v1/apps/services/{service}/environments/{env}/traces", &[SERVICE, ENV, q("minutes", Ty::Int, "How far back (default 60)"), q("min_ms", Ty::Int, "Only traces at least this slow")]),
     t("apps_get_trace", "Get a trace", "One trace by its id (from apps_traces): its spans in start order, from the last week.", "apps", "GET", "/v1/apps/services/{service}/environments/{env}/traces/{trace}", &[SERVICE, ENV, req("trace", "Trace id")]),
     t("apps_app_metrics", "App metrics", "What the app's OpenTelemetry SDK sent as metrics (traces on) over the last minutes (default 60): each series (a name and its attributes, the busiest 50) as at most 60 points.", "apps", "GET", "/v1/apps/services/{service}/environments/{env}/app-metrics", &[SERVICE, ENV, q("minutes", Ty::Int, "How far back (default 60)")]),
@@ -1170,9 +1236,9 @@ static TOOLS: &[Tool] = &[
         "apps",
         "POST",
         "/v1/apps/projects/{project}/drains",
-        &[req("project", "Workspace project"), breq("url", Ty::Str, "https URL on a public host"), b("sources", Ty::Arr, "runtime (default), http, build"), b("environments", Ty::Arr, "Only these environments"), b("services", Ty::Arr, "Only these services"), b("previews", Ty::Bool, "Previews' logs too"), b("headers", Ty::Obj, "Headers sent with each batch")],
+        &[req("project", "Workspace project"), breq("url", Ty::Str, "https URL on a public host"), b("sources", Ty::Arr, "runtime (default), http, build, audit (who changed what), traces, metrics"), b("format", Ty::Str, "ndjson (default, signed batches), otlp (an OTLP/HTTP collector's /v1/logs, traces and metrics beside it) or syslog (a syslog+tls:// URL, no headers)"), b("environments", Ty::Arr, "Only these environments"), b("services", Ty::Arr, "Only these services"), b("previews", Ty::Bool, "Previews' logs too"), b("headers", Ty::Obj, "Headers sent with each batch")],
     ).open_world(),
-    t("apps_update_drain", "Change a log drain", "Change what a drain sends or its headers: given ones replace (a new URL is a new drain).", "apps", "PATCH", "/v1/apps/projects/{project}/drains/{did}", &[req("project", "Workspace project"), req("did", "Drain id"), b("sources", Ty::Arr, "Sources"), b("environments", Ty::Arr, "Environments"), b("services", Ty::Arr, "Services"), b("previews", Ty::Bool, "Previews' logs too"), b("headers", Ty::Obj, "Headers (all of them)")]).open_world(),
+    t("apps_update_drain", "Change a log drain", "Change what a drain sends or its headers: given ones replace (a new URL is a new drain).", "apps", "PATCH", "/v1/apps/projects/{project}/drains/{did}", &[req("project", "Workspace project"), req("did", "Drain id"), b("sources", Ty::Arr, "runtime (default), http, build, audit (who changed what), traces, metrics"), b("environments", Ty::Arr, "Environments"), b("services", Ty::Arr, "Services"), b("previews", Ty::Bool, "Previews' logs too"), b("headers", Ty::Obj, "Headers (all of them)")]).open_world(),
     t("apps_delete_drain", "Delete a log drain", "Stop sending a project's logs there.", "apps", "DELETE", "/v1/apps/projects/{project}/drains/{did}", &[req("project", "Workspace project"), req("did", "Drain id")]),
     t("apps_test_drain", "Test a log drain", "Send one signed test line now (not retried): whether it arrived.", "apps", "POST", "/v1/apps/projects/{project}/drains/{did}/test", &[req("project", "Workspace project"), req("did", "Drain id")]).open_world(),
     t("apps_pending", "What the next deploy changes", "Before deploying: which variables (names, never values), run settings and project secrets the next deploy changes against what's live.", "apps", "GET", "/v1/apps/services/{service}/environments/{env}/pending", &[SERVICE, ENV]),
@@ -1318,6 +1384,27 @@ mod tests {
         assert_eq!(def("apps_deploy")["annotations"]["destructiveHint"], true);
         // Taking a status page down deletes its incidents too: a write the catalogue calls write.
         assert_eq!(def("apps_remove_status_page")["annotations"]["destructiveHint"], true);
+        // Every apps tool has an area (or is a lookup every area lists), and each area is a fraction of the whole.
+        let apps: Vec<&Tool> = all().iter().filter(|t| t.product == "apps").collect();
+        let unplaced: Vec<&str> = apps.iter().filter(|t| t.area() == Area::Unplaced).map(|t| t.name).collect();
+        assert!(unplaced.is_empty(), "apps tools with no area (add their route to apps_area): {unplaced:?}");
+        for area in AREAS[0].1 {
+            let n = apps.iter().filter(|t| matches!(t.area(), Area::Every) || t.area() == Area::One(area)).count();
+            assert!(n > 5 && n < 45, "apps.{area}: {n} tools");
+        }
+        assert_eq!(all().iter().find(|t| t.name == "apps_logs").unwrap().area(), Area::One("observe"));
+        assert_eq!(all().iter().find(|t| t.name == "apps_list_services").unwrap().area(), Area::Every);
+        // A tool that removes, revokes or replaces something says so (clients ask a person before a
+        // destructive call), unless it's marked undoable: the review that found five revoke tools
+        // unmarked is why this is a test, not a habit.
+        let words = ["delete", "remove", "revoke", "purge", "unlink", "restore", "reset", "rotate", "truncate", "drop", "wipe", "cut_off", "end_lease"];
+        let unmarked: Vec<&str> = all()
+            .iter()
+            .filter(|t| (t.method == "DELETE" || words.iter().any(|w| t.name.contains(w))) && def(t.name)["annotations"]["destructiveHint"] != true && t.hint != Hint::Undoable)
+            .map(|t| t.name)
+            .collect();
+        assert!(unmarked.is_empty(), "removes or replaces something but isn't destructive (mark it .destructive() or .undoable()): {unmarked:?}");
+        assert_eq!(def("workspace_remove_resource")["annotations"]["destructiveHint"], false);
         // Revoking a credential can't be undone: clients that ask before destructive calls ask.
         for n in ["storage_revoke_key", "streams_revoke_key", "search_revoke_key", "search_unlink_remote", "previews_delete_hook"] {
             assert_eq!(def(n)["annotations"]["destructiveHint"], true, "{n}");
