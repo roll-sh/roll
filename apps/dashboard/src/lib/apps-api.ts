@@ -128,7 +128,7 @@ export interface Run {
   log_metrics?: { name: string; pattern: string }[];
   /** A gradual rollout: the new deployment takes each percent of `steps` for `step_s`, rolled
    *  back by a 5xx share of `error_pct` or more (worse than the old one); no steps: at once. */
-  rollout?: { steps: number[]; step_s: number; error_pct: number; /** Each step waits for a person once it passes. */ manual?: boolean; /** With run.slo: a step fails past this burn rate (default 14.4). */ slo_burn?: number; /** A step fails when the new deployment's p95 is this many percent above the old one's. */ p95_pct?: number };
+  rollout?: { steps: number[]; step_s: number; error_pct: number; /** Each step waits for a person once it passes. */ manual?: boolean; /** With run.slo: a step fails past this burn rate (default 14.4). */ slo_burn?: number; /** A step fails when the new deployment's p95 is this many percent above the old one's. */ p95_pct?: number; /** false: the old instances stop before the new ones start (two never run at once). */ overlap?: boolean };
   /** The app speaks HTTP/2 without TLS (a gRPC server). */
   h2c?: boolean;
   /** false: no public URL, only the project's private network (absent: public). */
@@ -1318,6 +1318,10 @@ export interface Job {
   command: string;
   /** Containers it ran, each with ROLL_TASK_INDEX and ROLL_TASK_COUNT. */
   tasks?: number;
+  /** Tries after a task's failure (0–5), each with ROLL_TASK_ATTEMPT. */
+  retries?: number;
+  /** Tasks running at once. */
+  parallelism?: number;
   status: RunStatus;
   exit_code: number | null;
   started_at: number;
@@ -1535,7 +1539,7 @@ export const appsApi = {
   run: (id: string, e: string, r: string) => call<CronRun>("GET", `${env(id, e)}/runs/${encodeURIComponent(r)}`),
   cancelRun: (id: string, e: string, r: string) => call<CronRun>("POST", `${env(id, e)}/runs/${encodeURIComponent(r)}/cancel`),
   jobs: (id: string, e: string) => call<Job[]>("GET", `${env(id, e)}/jobs`),
-  startJob: (id: string, e: string, body: { command: string; timeout_s?: number; tasks?: number }) => call<Job>("POST", `${env(id, e)}/jobs`, body),
+  startJob: (id: string, e: string, body: { command: string; timeout_s?: number; tasks?: number; retries?: number; parallelism?: number }) => call<Job>("POST", `${env(id, e)}/jobs`, body),
   job: (id: string, e: string, j: string) => call<Job>("GET", `${env(id, e)}/jobs/${encodeURIComponent(j)}`),
   cancelJob: (id: string, e: string, j: string) => call<Job>("POST", `${env(id, e)}/jobs/${encodeURIComponent(j)}/cancel`),
 

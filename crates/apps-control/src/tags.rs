@@ -271,11 +271,7 @@ impl Apps {
         let Some(have) = live.image.as_deref().and_then(digest).map(str::to_string) else { return Ok(None) };
         self.check_registry(image).await.map_err(|e| crate::Error::BadRequest(e.to_string()))?;
         let sid = service.to_string();
-        let login = self
-            .db(move |s| s.registry_login(&sid))
-            .await?
-            .filter(|(r, _)| crate::model::registry_key(&r.server) == crate::model::image_registry(image))
-            .map(|(r, password)| crate::runtime::RegistryLogin { server: r.server, username: r.username, password });
+        let login = self.pull_login(&sid, image).await?;
         let now = self.deps.runtime.remote_digest(image, login.as_ref()).await.map_err(|e| crate::Error::BadRequest(format!("{e:#}")))?;
         let Some(now) = digest(&now).map(str::to_string) else { return Ok(None) };
         // Only a move past what was last acted on: a rollback (or a hook's other tag) isn't

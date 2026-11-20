@@ -121,7 +121,7 @@
         },
         "rollout": {
           "type": "object",
-          "description": "A gradual rollout: steps (percents), step_s, error_pct."
+          "description": "A gradual rollout: steps (percents), step_s, error_pct; overlap: false stops the old instances before the new ones start (two never run at once)."
         },
         "h2c": {
           "type": "boolean",
