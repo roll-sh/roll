@@ -629,6 +629,10 @@ async fn run_with(mut args: Args) -> anyhow::Result<()> {
     apps_secrets.set(secrets.clone(), workspace.clone());
     storage_secrets.set(secrets.clone());
     let _ = secrets_envs.0.set(secrets.clone());
+    // Previews' rules name roll secrets' keys only where their writer may reveal them.
+    if let Some(e) = &previews_engine {
+        let _ = e.reveal.set(std::sync::Arc::new(previews::SecretsReveal(secrets.clone())));
+    }
     if let Some(c) = &code {
         secrets.set_code_refs(std::sync::Arc::new(secrets::CodeRefs(c.code.clone())));
     }

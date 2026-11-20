@@ -292,7 +292,7 @@ fn lex(src: &str) -> EsResult<Vec<Lexed>> {
 /// Parses a KQL query: `None` for an empty one (match everything).
 pub fn parse(src: &str) -> EsResult<Option<Node>> {
     let toks = lex(src)?;
-    let mut p = Parser { src: src.chars().collect(), toks, pos: 0, nested: 0 };
+    let mut p = Parser { src: src.chars().collect(), toks, pos: 0, nested: 0, depth: 0 };
     if p.peek() == &Tok::Eof {
         return Ok(None);
     }
@@ -309,9 +309,26 @@ struct Parser {
     pos: usize,
     /// Inside `path: { … }`, where values need a field.
     nested: usize,
+    /// Groups, `NOT`s and nested queries around the token being parsed ([`Parser::nest`]).
+    depth: usize,
 }
 
+/// Parsing and building the query recurse once per group, `NOT` or nested query: a stack
+/// overflow aborts the whole node, so their nesting is bounded (roll's own limit).
+const MAX_DEPTH: usize = 300;
+
 impl Parser {
+    /// Runs `f` one nesting level deeper (on a fresh stack segment when this one runs low).
+    fn nest<R>(&mut self, f: impl FnOnce(&mut Self) -> EsResult<R>) -> EsResult<R> {
+        if self.depth >= MAX_DEPTH {
+            return Err(err(self.toks[self.pos].start + 1, format!("the query nests deeper than {MAX_DEPTH} levels")));
+        }
+        self.depth += 1;
+        let r = crate::stack::maybe_grow(|| f(self));
+        self.depth -= 1;
+        r
+    }
+
     fn peek(&self) -> &Tok {
         &self.toks[self.pos].tok
     }
@@ -366,11 +383,11 @@ impl Parser {
         match self.peek().clone() {
             Tok::Not => {
                 self.bump();
-                Ok(Node::Not(Box::new(self.simple()?)))
+                Ok(Node::Not(Box::new(self.nest(Self::simple)?)))
             }
             Tok::LParen => {
                 self.bump();
-                let n = self.or_query()?;
+                let n = self.nest(Self::or_query)?;
                 self.expect(Tok::RParen, ")")?;
                 Ok(n)
             }
@@ -413,7 +430,7 @@ impl Parser {
             Tok::LBrace => {
                 self.bump();
                 self.nested += 1;
-                let query = self.or_query()?;
+                let query = self.nest(Self::or_query)?;
                 self.nested -= 1;
                 self.expect(Tok::RBrace, "}")?;
                 Ok(Node::Nested { path: field, query: Box::new(query) })
@@ -454,11 +471,11 @@ impl Parser {
         match self.peek() {
             Tok::Not => {
                 self.bump();
-                Ok(ValueExpr::Not(Box::new(self.value_unary()?)))
+                Ok(ValueExpr::Not(Box::new(self.nest(Self::value_unary)?)))
             }
             Tok::LParen => {
                 self.bump();
-                let v = self.value_or()?;
+                let v = self.nest(Self::value_or)?;
                 self.expect(Tok::RParen, ")")?;
                 Ok(v)
             }

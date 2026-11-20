@@ -940,7 +940,7 @@ async fn mask_suggestions(AxState(e): S, Path(project): Path<String>, grant: Opt
     e.mask_suggestions(&project, may_read).await.map(Json)
 }
 
-async fn put_settings(AxState(e): S, Path(project): Path<String>, b: Bytes) -> crate::Result<Json<crate::Settings>> {
+async fn put_settings(AxState(e): S, Path(project): Path<String>, ext: axum::http::Extensions, b: Bytes) -> crate::Result<Json<crate::Settings>> {
     let patch: Value = body(&b)?;
     let (p, check) = (project.clone(), patch.clone());
     let (old, new) = blocking(e.clone(), move |e| {
@@ -951,9 +951,44 @@ async fn put_settings(AxState(e): S, Path(project): Path<String>, b: Bytes) -> c
     })
     .await?;
     e.check_masks(&old, &new).await?;
+    // A reference to an environment other than the one the previews follow routes its values into
+    // code whoever pushes a branch controls: a new or changed one needs its writer's reveal there.
+    let who = crate::ports::Asker::of(&ext);
+    let may_reveal = |env: &str, folder: &str| e.reveal.get().is_some_and(|r| r.may_reveal(&who, &project, env, folder));
+    // So does a new base: every preview's code then reads that environment.
+    let base = &new.secrets.base;
+    if *base != old.secrets.base && !may_reveal(base, "/") {
+        return Err(Error::Forbidden(format!("secrets.base: following {base} needs reveal on {base} in roll secrets")));
+    }
+    // A reference to the base needed no reveal when the base was the old one: moved, it's checked
+    // as new.
+    let place = |reference: &str| match e.reveal.get() {
+        Some(r) => r.place(reference).map_err(Error::BadRequest),
+        None => Err(Error::BadRequest("roll:// references need roll secrets on this node".into())),
+    };
+    let mut before = crate::settings::references(&old);
+    if *base != old.secrets.base {
+        before.retain(|(_, _, reference)| place(reference).is_ok_and(|(env, _)| env != old.secrets.base));
+    }
+    for (scope, name, reference) in crate::settings::references(&new).into_iter().filter(|r| !before.contains(r)) {
+        let (env, folder) = place(&reference).map_err(|err| Error::BadRequest(format!("{scope}: {name}: {err}")))?;
+        if env == *base {
+            continue;
+        }
+        if !may_reveal(&env, &folder) {
+            return Err(Error::Forbidden(format!("{scope}: {name}: naming {env}'s keys needs reveal on {env} in roll secrets")));
+        }
+    }
+    let by = who.principal();
     let s = blocking(e.clone(), move |e| {
-        let s = e.store.settings(&project)?.patched(&patch)?;
+        // What's written is what was checked: rules another request changed since are its own.
+        let current = e.store.settings(&project)?;
+        if current != old {
+            return Err(Error::Conflict("the project's preview rules changed while these were checked: try again".into()));
+        }
+        let s = current.patched(&patch)?;
         let s = e.store.put_settings(&project, &s)?;
+        e.store.set_env_refs(&project, &crate::settings::references(&s), &by)?;
         // Every preview of the project converges on the new rules (modes, masks, variables,
         // access): nothing waits for its next push.
         reconverge(e, &project)?;

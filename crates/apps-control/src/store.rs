@@ -505,6 +505,8 @@ pub struct EnvRow {
     pub freeze: Option<crate::freeze::Freeze>,
     /// When it's paused by the clock ([`crate::freeze::PauseSchedule`]).
     pub pause_schedule: Option<crate::freeze::PauseSchedule>,
+    /// HTML of its own the proxy puts in every page ([`crate::model::Snippet`]).
+    pub snippets: Vec<crate::model::Snippet>,
     /// Paused (Render's Suspend): nothing of it runs, wakes, deploys or is scheduled until it's
     /// resumed.
     pub paused: bool,
@@ -633,7 +635,7 @@ fn name_taken(name: &str, deleted: Option<i64>) -> String {
         Some(_) => format!("a deleted service named {name} holds the name: restore it, or delete it again to delete it for good"),
     }
 }
-const ENV_COLS: &str = "service, name, branch, ephemeral, active, slug, port, created_at, wait_for_ci, run, hook_hash, follow_tag, tag_seen, feedback, maintenance, allow_ips, rate_limit, tcp_port, firewall, pages, redeploy_on_secrets, secrets_seen, headers, paused, held_by, egress, vitals, routes, report, checks, heartbeats, split, freeze, mirror, pause_schedule";
+const ENV_COLS: &str = "service, name, branch, ephemeral, active, slug, port, created_at, wait_for_ci, run, hook_hash, follow_tag, tag_seen, feedback, maintenance, allow_ips, rate_limit, tcp_port, firewall, pages, redeploy_on_secrets, secrets_seen, headers, paused, held_by, egress, vitals, routes, report, checks, heartbeats, split, freeze, mirror, pause_schedule, snippets";
 /// A deployment [`Store::prune_deployments`] pruned, with its image when nothing else names it.
 pub struct Pruned {
     pub id: String,
@@ -719,6 +721,7 @@ fn env_row(r: &code_sql::Row<'_>) -> code_sql::Result<EnvRow> {
         freeze: r.get::<_, Option<String>>(32)?.and_then(|j| serde_json::from_str(&j).ok()),
         mirror: r.get::<_, Option<String>>(33)?.and_then(|j| serde_json::from_str(&j).ok()),
         pause_schedule: r.get::<_, Option<String>>(34)?.and_then(|j| serde_json::from_str(&j).ok()),
+        snippets: r.get::<_, Option<String>>(35)?.and_then(|j| serde_json::from_str(&j).ok()).unwrap_or_default(),
     })
 }
 
@@ -871,6 +874,7 @@ impl Store {
         db.add_column("environments", "freeze", "TEXT")?;
         db.add_column("environments", "mirror", "TEXT")?;
         db.add_column("environments", "pause_schedule", "TEXT")?;
+        db.add_column("environments", "snippets", "TEXT")?;
         // Drains made before their filters sent every environment's runtime output: still so.
         db.add_column("log_drains", "sources", "TEXT")?;
         db.add_column("log_drains", "environments", "TEXT")?;
@@ -1082,7 +1086,7 @@ impl Store {
                     None => None,
                 };
                 c.execute(
-                    &format!("INSERT INTO environments ({ENV_COLS}) VALUES (?, ?, ?, ?, NULL, ?, ?, ?, 0, '{{}}', NULL, 0, NULL, 0, NULL, NULL, NULL, NULL, NULL, NULL, 0, NULL, NULL, 0, NULL, NULL, 0, NULL, 1, NULL, NULL, NULL, NULL, NULL, NULL)"),
+                    &format!("INSERT INTO environments ({ENV_COLS}) VALUES (?, ?, ?, ?, NULL, ?, ?, ?, 0, '{{}}', NULL, 0, NULL, 0, NULL, NULL, NULL, NULL, NULL, NULL, 0, NULL, NULL, 0, NULL, NULL, 0, NULL, 1, NULL, NULL, NULL, NULL, NULL, NULL, NULL)"),
                     params![service, env, branch.flatten(), ephemeral.unwrap_or(false) as i64, slug, port, now],
                 )?;
             }
@@ -1643,7 +1647,8 @@ impl Store {
             {
                 return Ok(None);
             }
-            c.execute("INSERT INTO status_incidents (id, project, title, state, started_at, resolved_at, auto_key, updates) VALUES (?, ?, ?, ?, ?, NULL, ?, ?)", params![id, project, title, state, at, auto_key, updates])?;
+            let resolved = (state == "resolved").then_some(at);
+            c.execute("INSERT INTO status_incidents (id, project, title, state, started_at, resolved_at, auto_key, updates) VALUES (?, ?, ?, ?, ?, ?, ?, ?)", params![id, project, title, state, at, resolved, auto_key, updates])?;
             Ok(Some(id.clone()))
         })
     }
@@ -1651,14 +1656,15 @@ impl Store {
     /// An update on an incident (`resolved` closes it); by its id, or the open one of `auto_key`.
     pub fn update_incident(&self, project: &str, id: Option<&str>, auto_key: Option<&str>, state: &str, text: &str, at: i64) -> Result<bool> {
         self.db.write(|c| {
-            let row: Option<(String, String)> = match (id, auto_key) {
-                (Some(i), _) => c.query_row("SELECT id, updates FROM status_incidents WHERE project = ? AND id = ?", params![project, i], |r| Ok((r.get(0)?, r.get(1)?))).optional()?,
-                (None, Some(k)) => c.query_row("SELECT id, updates FROM status_incidents WHERE project = ? AND auto_key = ? AND resolved_at IS NULL", params![project, k], |r| Ok((r.get(0)?, r.get(1)?))).optional()?,
+            let row: Option<(String, String, bool)> = match (id, auto_key) {
+                (Some(i), _) => c.query_row("SELECT id, updates, resolved_at IS NULL FROM status_incidents WHERE project = ? AND id = ?", params![project, i], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?))).optional()?,
+                (None, Some(k)) => c.query_row("SELECT id, updates, resolved_at IS NULL FROM status_incidents WHERE project = ? AND auto_key = ? AND resolved_at IS NULL", params![project, k], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?))).optional()?,
                 _ => None,
             };
-            let Some((iid, updates)) = row else { return Ok(false) };
+            let Some((iid, updates, open)) = row else { return Ok(false) };
             let mut list: Vec<serde_json::Value> = serde_json::from_str(&updates).unwrap_or_default();
-            if list.len() >= 100 {
+            // An open incident can always be resolved, however many updates it has.
+            if list.len() >= 100 && !(open && state == "resolved") {
                 return Err(Error::Conflict("an incident takes at most 100 updates".into()));
             }
             list.push(serde_json::json!({ "at": at, "state": state, "text": text }));
@@ -1680,25 +1686,47 @@ impl Store {
         )?)
     }
 
+    /// The page and its incidents, together.
     pub fn delete_status_page(&self, project: &str) -> Result<()> {
-        match self.db.execute("DELETE FROM status_pages WHERE project = ?", [project])? {
-            0 => Err(Error::NotFound(format!("{project} has no status page"))),
-            _ => Ok(()),
-        }
+        self.db.write(|c| {
+            if c.execute("DELETE FROM status_pages WHERE project = ?", [project])? == 0 {
+                return Err(Error::NotFound(format!("{project} has no status page")));
+            }
+            c.execute("DELETE FROM status_incidents WHERE project = ?", [project])?;
+            Ok(())
+        })
     }
 
-    /// One more check run or ping (`ok`), or failure or miss, on `day` (days since 1970).
-    pub fn status_day_add(&self, key: &str, day: i64, ok: bool) -> Result<()> {
+    /// Every project's open incidents that a check or heartbeat opened: (project, its key).
+    pub fn open_auto_incidents(&self) -> Result<Vec<(String, String)>> {
+        Ok(self.db.query("SELECT project, auto_key FROM status_incidents WHERE resolved_at IS NULL AND auto_key IS NOT NULL", (), |r| Ok((r.get(0)?, r.get(1)?)))?)
+    }
+
+    /// One more check run or ping (`ok`), or failure or miss, on `day` (days since 1970), and
+    /// what it is now (`up`: a check is down only after its failures in a row, not one try):
+    /// what it was before, when that changed. Once a day, days and resolved incidents past
+    /// [`crate::status_page::DAYS`] go.
+    pub fn status_day_add(&self, key: &str, day: i64, ok: bool, up: bool) -> Result<Option<Option<String>>> {
         let (g, b) = if ok { (1, 0) } else { (0, 1) };
-        self.db.execute(
-            "INSERT INTO status_days (key, day, ok, bad) VALUES (?, ?, ?, ?) ON CONFLICT (key, day) DO UPDATE SET ok = status_days.ok + excluded.ok, bad = status_days.bad + excluded.bad",
-            params![key, day, g, b],
-        )?;
-        self.db.execute("INSERT INTO state (key, value) VALUES (?, ?) ON CONFLICT (key) DO UPDATE SET value = excluded.value", params![format!("status-last:{key}"), if ok { "up" } else { "down" }])?;
-        if day % 7 == 0 {
+        let (last_key, now) = (format!("status-last:{key}"), if up { "up" } else { "down" });
+        let changed = self.db.write(|c| {
+            c.execute(
+                "INSERT INTO status_days (key, day, ok, bad) VALUES (?, ?, ?, ?) ON CONFLICT (key, day) DO UPDATE SET ok = status_days.ok + excluded.ok, bad = status_days.bad + excluded.bad",
+                params![key, day, g, b],
+            )?;
+            let was: Option<String> = c.query_row("SELECT value FROM state WHERE key = ?", [&last_key], |r| r.get(0)).optional()?;
+            if was.as_deref() == Some(now) {
+                return Ok(None);
+            }
+            c.execute("INSERT INTO state (key, value) VALUES (?, ?) ON CONFLICT (key) DO UPDATE SET value = excluded.value", params![last_key, now])?;
+            Ok::<_, Error>(Some(was))
+        })?;
+        // The first count of a day prunes (one node's: the claim of the day).
+        if self.db.execute("INSERT INTO state (key, value) VALUES ('status-pruned', ?) ON CONFLICT (key) DO UPDATE SET value = excluded.value WHERE state.value <> excluded.value", [day.to_string()])? > 0 {
             self.db.execute("DELETE FROM status_days WHERE day < ?", [day - crate::status_page::DAYS])?;
+            self.db.execute("DELETE FROM status_incidents WHERE resolved_at < ?", [(day - crate::status_page::DAYS) * 86_400_000])?;
         }
-        Ok(())
+        Ok(changed)
     }
 
     pub fn status_days(&self, key: &str, since_day: i64) -> Result<Vec<(i64, i64, i64)>> {
@@ -2728,6 +2756,12 @@ impl Store {
     pub fn set_pause_schedule(&self, service: &str, env: &str, p: Option<&crate::freeze::PauseSchedule>) -> Result<()> {
         let j = p.map(|p| serde_json::to_string(p).expect("a schedule serializes"));
         self.db.execute("UPDATE environments SET pause_schedule = ? WHERE service = ? AND name = ?", params![j, service, env])?;
+        Ok(())
+    }
+
+    pub fn set_snippets(&self, service: &str, env: &str, snippets: &[crate::model::Snippet]) -> Result<()> {
+        let j = (!snippets.is_empty()).then(|| serde_json::to_string(snippets).expect("snippets serialize"));
+        self.db.execute("UPDATE environments SET snippets = ? WHERE service = ? AND name = ?", params![j, service, env])?;
         Ok(())
     }
 

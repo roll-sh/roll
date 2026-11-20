@@ -82,6 +82,8 @@ pub fn router(control: Arc<Control>) -> Router {
         .route("/v1/search/clusters/{id}/indices/{index}/docs/{doc}", get(doc_get).put(doc_put).delete(doc_delete))
         .route("/v1/search/clusters/{id}/indices/{index}/bulk", post(index_bulk))
         .route("/v1/search/clusters/{id}/indices/{index}/delete_by_query", post(index_delete_by_query))
+        .route("/v1/search/clusters/{id}/indices/{index}/suggestions", get(suggestions))
+        .route("/v1/search/clusters/{id}/indices/{index}/suggestions/rebuild", post(rebuild_suggestions))
         // Calls about one cluster: the caller's own, then on its owner.
         .layer(axum::middleware::from_fn_with_state(control.clone(), per_cluster))
         // The dashboard calls it from the browser, like the other control planes.
@@ -705,6 +707,18 @@ struct AnalyticsQuery {
 async fn analytics(State(c): State<AppState>, Path(id): Path<String>, Query(q): Query<AnalyticsQuery>) -> ApiResult<Value> {
     let index = q.index.as_deref().filter(|i| !i.is_empty());
     Ok(Json(c.analytics(&id, index, q.range.as_deref().unwrap_or("24h")).await?))
+}
+
+/// An index's query suggestions: settings, last build, heaviest suggestions (`crate::suggestions`).
+async fn suggestions(State(c): State<AppState>, Path((id, index)): Path<(String, String)>) -> ApiResult<Value> {
+    index_segment(&index, false)?;
+    Ok(Json(c.suggestions(&id, &index).await?))
+}
+
+/// Rebuilds an index's suggestions index now.
+async fn rebuild_suggestions(State(c): State<AppState>, Path((id, index)): Path<(String, String)>) -> ApiResult<Value> {
+    index_segment(&index, false)?;
+    Ok(Json(Box::pin(c.rebuild_suggestions(&id, &index)).await?))
 }
 
 #[cfg(test)]

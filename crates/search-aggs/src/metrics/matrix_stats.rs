@@ -163,7 +163,7 @@ fn hash_map_order<S: AsRef<str>>(names: &[S], initial: Option<usize>) -> Vec<usi
 
 /// `RunningStats`: the mergeable state. Every map of the Java class has the same keys, kept
 /// here as parallel vectors in the maps' insertion order.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
 pub struct RunningStats {
     pub doc_count: i64,
     /// Field names in the insertion order of the stats maps.
@@ -296,7 +296,7 @@ impl RunningStats {
 }
 
 /// `MatrixStatsResults`: the final statistics (`compute()` applied) and correlations.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
 pub struct MatrixResults {
     pub stats: RunningStats,
     /// `correlation[row][col]` laid out like [`RunningStats::cov`].
@@ -346,7 +346,7 @@ impl MatrixResults {
 }
 
 /// `InternalMatrixStats`.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct MatrixStats {
     pub name: Arc<str>,
     pub stats: Option<RunningStats>,

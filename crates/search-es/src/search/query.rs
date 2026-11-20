@@ -59,8 +59,46 @@ pub struct QueryCtx<'a> {
     pub unmapped: RefCell<Option<String>>,
     /// `percolate` queries met (matched slots, the percolated documents' index).
     pub percolate: RefCell<Vec<Arc<super::percolate::Percolated>>>,
-    /// The reader's document and field level security (inner hits fetch through it).
-    pub security: Option<crate::xpack::security::dls::ReadSecurity>,
+    /// Whose reads the query's lookups of other documents make (inner hits fetch through it).
+    pub security: Reader,
+}
+
+/// The reader a query reads other documents for (a `percolate` or `indexed_shape` document):
+/// given to every [`QueryCtx`], so none can read around a reader's document and field level
+/// security by not saying whose query it is.
+#[derive(Clone, Debug)]
+pub enum Reader {
+    /// Not a reader's query (stored percolator queries, ES|QL's plans): lookups are refused.
+    Unset,
+    /// A reader no document or field level security restricts (a superuser, the cluster's own).
+    Unrestricted,
+    Restricted(crate::xpack::security::dls::ReadSecurity),
+}
+
+impl Reader {
+    pub fn of(security: Option<crate::xpack::security::dls::ReadSecurity>) -> Reader {
+        match security {
+            Some(s) => Reader::Restricted(s),
+            None => Reader::Unrestricted,
+        }
+    }
+
+    /// The restrictions to read under; an error for [`Reader::Unset`].
+    pub fn read_as(&self) -> EsResult<Option<&crate::xpack::security::dls::ReadSecurity>> {
+        match self {
+            Reader::Unset => Err(EsError::illegal_argument("this query can't read other documents")),
+            Reader::Unrestricted => Ok(None),
+            Reader::Restricted(s) => Ok(Some(s)),
+        }
+    }
+
+    /// The restrictions a fetch (inner hits) applies: [`Reader::Unset`] fetches as no one.
+    pub fn restricted(&self) -> Option<crate::xpack::security::dls::ReadSecurity> {
+        match self {
+            Reader::Restricted(s) => Some(s.clone()),
+            _ => None,
+        }
+    }
 }
 
 /// An `inner_hits` request found in the query tree.
@@ -152,7 +190,7 @@ pub fn qse(ctx: &QueryCtx, reason: impl Into<String>) -> EsError {
 }
 
 impl<'a> QueryCtx<'a> {
-    pub fn new(cluster: &'a Cluster, st: &'a ClusterState, idx: &'a IndexMeta, table: &'a Arc<FieldTable>, searcher: &'a Searcher, now_ms: i64) -> QueryCtx<'a> {
+    pub fn new(cluster: &'a Cluster, st: &'a ClusterState, idx: &'a IndexMeta, table: &'a Arc<FieldTable>, searcher: &'a Searcher, now_ms: i64, security: Reader) -> QueryCtx<'a> {
         let allow = st.metadata.cluster_setting("search.allow_expensive_queries").is_none_or(|v| v != "false");
         QueryCtx {
             cluster,
@@ -174,26 +212,7 @@ impl<'a> QueryCtx<'a> {
             strict_unmapped: std::cell::Cell::new(false),
             unmapped: RefCell::new(None),
             percolate: RefCell::new(Vec::new()),
-            security: None,
-        }
-    }
-
-    /// Whether the reader's document level security hides document `id` of `idx` (a terms
-    /// lookup's, an indexed shape's, a `more_like_this` item's, a percolated document): those
-    /// documents are read as the user, as Elasticsearch's lookups run with the caller's
-    /// permissions, so one the reader can't see is missing (and can't be probed for).
-    pub fn reader_hides(&self, idx: &Arc<IndexMeta>, engine: &Arc<crate::engine::IndexEngine>, shard: &Arc<crate::engine::ShardEngine>, id: &str) -> EsResult<bool> {
-        let Some(sec) = &self.security else { return Ok(false) };
-        let Some(q) = sec.documents(self.cluster, crate::xpack::security::dls::READ, &idx.name)? else { return Ok(false) };
-        Ok(!super::matches_doc(self.cluster, self.st, idx, engine, shard, id, &q)?)
-    }
-
-    /// Such a document's source as the reader may see it: fields its field level security hides
-    /// are left out.
-    pub fn reader_source(&self, idx: &IndexMeta, source: Value) -> Value {
-        match self.security.as_ref().and_then(|s| s.fields(crate::xpack::security::dls::READ, &idx.name)) {
-            Some(f) => f.filter_source(source),
-            None => source,
+            security,
         }
     }
 

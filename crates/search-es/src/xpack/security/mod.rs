@@ -792,6 +792,13 @@ fn authorize_action(ctx: &Ctx) -> EsResult<Option<String>> {
             }
             Err(denied(p, &action, None))
         }
+        // A search on a point in time names no index: it reads the point in time's, which the
+        // caller must be allowed to search (Elasticsearch authorizes it against them).
+        Scope::Index if ctx.api.name() == "search" && pit_of(ctx).is_some() => {
+            // `SearchRequest.validate` runs first: a point in time names its own indices.
+            crate::search::check_pit_without_indices(ctx, true)?;
+            authorize_pit(ctx, p, &eff, &action, &pit_of(ctx).unwrap_or_default())
+        }
         Scope::Index if NARROWED.contains(&ctx.api.name()) => narrow(ctx, p, &eff, &action),
         // Composite requests: their items are authorized as they run (`authorize_writes`,
         // `authorize_gets`, each search of an msearch).
@@ -1085,6 +1092,41 @@ fn check_all(ctx: &Ctx, p: &Principal, eff: &Effective, action: &str, exprs: Vec
 /// names given explicitly must be authorized, unless `ignore_unavailable` drops the ones that
 /// aren't (`IndexAbstractionResolver`). `-*` (no index) when nothing is left, as
 /// Elasticsearch's resolver does.
+/// An `_msearch` item on point in time `id`, authorized as `_search` authorizes one
+/// ([`authorize_pit`]): its indices are the point in time's, never narrowed to the caller's.
+pub fn authorize_search_pit(ctx: &Ctx, id: &str) -> EsResult<()> {
+    const SEARCH: &str = "indices:data/read/search";
+    let Some(p) = ctx.principal.get().filter(|p| !p.is_superuser()) else { return Ok(()) };
+    let eff = effective(&file_roles(ctx.cluster), &ctx.state(), p);
+    authorize_pit(ctx, p, &eff, SEARCH, id).map(|_| ())
+}
+
+/// The point in time a search body names.
+fn pit_of(ctx: &Ctx) -> Option<String> {
+    ctx.body().ok().flatten()?.pointer(&["pit", "id"]).map(Value::to_es_string)
+}
+
+/// A search on point in time `id`: allowed when the caller may search every index it holds, on
+/// every search (a role that lost an index loses it here too). One over linked clusters is
+/// checked here for its local part; each remote part is authorized on its own cluster with the
+/// caller's `remote_indices`. An id that names nothing of the caller's is the search's own 404.
+fn authorize_pit(ctx: &Ctx, p: &Principal, eff: &Effective, action: &str, id: &str) -> EsResult<Option<String>> {
+    let owner = crate::search::contexts::owner_of(ctx);
+    let local = if crate::remote::contexts::is_ccs(id) {
+        match ctx.cluster.ccs_contexts.local_pit(id, &owner) {
+            Some(local) => local,
+            None => return Ok(None),
+        }
+    } else {
+        id.to_string()
+    };
+    let Some(mut names) = ctx.cluster.contexts.with(&local, &owner, None, |c| c.targets.iter().map(|t| t.idx.name.clone()).collect::<Vec<String>>()) else { return Ok(None) };
+    names.sort();
+    names.dedup();
+    let denied_on: Vec<String> = names.into_iter().filter(|n| !eff.allows_index(action, n)).collect();
+    if denied_on.is_empty() { Ok(None) } else { Err(denied(p, action, Some(&denied_on))) }
+}
+
 fn narrow(ctx: &Ctx, p: &Principal, eff: &Effective, action: &str) -> EsResult<Option<String>> {
     use crate::meta::resolve::IndicesOptions;
     let defaults = narrow_defaults(ctx.api.name());

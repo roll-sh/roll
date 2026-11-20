@@ -9,8 +9,10 @@
 import { apiHeaders, call, onApiStatus, ROLL_API } from "./roll-api";
 import { withSession } from "./code-token";
 import { analyticsQuery, type AnalyticsRange, type SearchAnalytics } from "./search-analytics";
+import type { SuggestionsStatus } from "./search-suggestions";
 import type { MetricsRange, SearchMetrics, SearchSlowLog } from "./search-performance";
 import type { AuditPage } from "./search-audit";
+import type { LinkBody, RemoteLink } from "./search-remotes";
 
 export type Flavor = "elasticsearch" | "opensearch";
 
@@ -300,12 +302,21 @@ export const searchApi = {
   metrics: (id: string, range: MetricsRange) => call<SearchMetrics>("GET", `${cl(id)}/metrics?range=${range}`),
   slowlog: (id: string) => call<SearchSlowLog>("GET", `${cl(id)}/slowlog`),
   analytics: (id: string, index: string | null, range: AnalyticsRange) => call<SearchAnalytics>("GET", `${cl(id)}/analytics?${analyticsQuery(index, range)}`),
+  /** An index's query suggestions: settings, last build, heaviest suggestions (never wakes the cluster). */
+  suggestions: (id: string, index: string) => call<SuggestionsStatus>("GET", `${cl(id)}/indices/${encodeURIComponent(index)}/suggestions`),
+  rebuildSuggestions: (id: string, index: string) => call<SuggestionsStatus>("POST", `${cl(id)}/indices/${encodeURIComponent(index)}/suggestions/rebuild`, {}),
   createKey: (id: string, name: string, access: KeyAccess, expiresInS?: number) =>
     call<NewSearchKey>("POST", `${cl(id)}/keys`, { name, access, expires_in_s: expiresInS }),
   revokeKey: (id: string, key: string) => call<null>("DELETE", `${cl(id)}/keys/${encodeURIComponent(key)}`),
   browserKeys: (id: string) => call<{ keys: BrowserKey[] }>("GET", `${cl(id)}/browser-keys`),
   createBrowserKey: (id: string, k: BrowserKeyRequest) => call<NewBrowserKey>("POST", `${cl(id)}/browser-keys`, k),
   revokeBrowserKey: (id: string, key: string) => call<null>("DELETE", `${cl(id)}/browser-keys/${encodeURIComponent(key)}`),
+  /** The remote clusters roll holds credentials for (never wakes the cluster, never the key). */
+  remotes: (id: string) => call<{ remotes: RemoteLink[] }>("GET", `${cl(id)}/remotes`),
+  /** Links another of the person's clusters as remote `alias` (roll makes its cross-cluster key). */
+  linkRemote: (id: string, alias: string, body: LinkBody) => call<unknown>("PUT", `${cl(id)}/remotes/${encodeURIComponent(alias)}`, body),
+  /** Unlinks it: its settings and credentials go, a key roll made is revoked. */
+  unlinkRemote: (id: string, alias: string) => call<null>("DELETE", `${cl(id)}/remotes/${encodeURIComponent(alias)}`),
   /** The endpoints whose key comes from a roll secret, and the projects whose secrets may key one. */
   inferenceSecrets: (id: string) => call<InferenceSecrets>("GET", `${cl(id)}/inference/secrets`),
   /** An endpoint keyed by a roll secret: `config` is the `_inference` body without `api_key`. */

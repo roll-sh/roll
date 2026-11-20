@@ -132,6 +132,8 @@ mod tests {
             tcp: true,
             rollback_on_crash: true,
             rebuild_on_base: true,
+            skew_protection: true,
+            queue_s: Some(5),
             schedules: vec![crate::model::Scheduled { name: "a".into(), schedule: "@daily".into(), command: "x".into(), path: None, timezone: None, timeout_s: None }],
             sidecars: vec![crate::model::Sidecar { name: "a".into(), image: "x".into(), command: None, env: Default::default(), variables: vec![], cpu: 0.25, memory_mb: 128 }],
             block_on: Some(crate::model::Severity::Critical),

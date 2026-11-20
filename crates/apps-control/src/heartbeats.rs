@@ -99,9 +99,11 @@ impl Apps {
             })
             .await
             .unwrap_or(false);
-        self.status_count(crate::status_page::heartbeat_key(service, env, &name), true).await;
+        let was_down = self.status_count(crate::status_page::heartbeat_key(service, env, &name), true, true).await;
+        if was_missed || was_down {
+            self.status_incident(service, crate::status_page::heartbeat_key(service, env, &name), false).await;
+        }
         if was_missed {
-            self.status_incident(service, crate::status_page::heartbeat_key(service, env, &name), name.clone(), false).await;
             let (sid, e, data) = (service.to_string(), env.to_string(), json!({ "alert": "heartbeat.missed", "heartbeat": name }));
             self.logs.sink(format!("env:{service}/{env}"), crate::logs::Stream::System).line(format!("heartbeat {name} pinged again"));
             if let Err(err) = self.db(move |s| s.add_event("alert.resolved", &sid, &e, None, &data)).await {
@@ -132,8 +134,8 @@ impl Apps {
                         .ok()
                         .flatten();
                     if let Some(last) = missed {
-                        self.status_count(crate::status_page::heartbeat_key(&svc.id, &e.name, &h.name), false).await;
-                        self.status_incident(&svc.id, crate::status_page::heartbeat_key(&svc.id, &e.name, &h.name), format!("heartbeat {}", h.name), true).await;
+                        self.status_count(crate::status_page::heartbeat_key(&svc.id, &e.name, &h.name), false, false).await;
+                        self.status_incident(&svc.id, crate::status_page::heartbeat_key(&svc.id, &e.name, &h.name), true).await;
                         let data = json!({ "heartbeat": h.name, "last_ping_at": last, "every_s": h.every_s });
                         self.logs.sink(format!("env:{}/{}", svc.id, e.name), crate::logs::Stream::System).line(format!("heartbeat {} missed", h.name));
                         let (sid, en) = (svc.id.clone(), e.name.clone());

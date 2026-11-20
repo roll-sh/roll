@@ -1067,22 +1067,19 @@ pub fn terms_lookup(ctx: &QueryCtx, l: &crate::query::term_level::TermsLookup) -
             let engine = ctx.cluster.engine.index(ctx.cluster, st, &idx)?;
             let shard = engine.shard(crate::meta::routing::shard_for(&idx, &l.id, l.routing.as_deref()));
             let t = std::time::Instant::now();
-            let mut doc = shard.shard.get(l.id.as_bytes(), true).map_err(index_err)?;
-            if doc.is_some() && ctx.reader_hides(&idx, &engine, shard, &l.id)? {
-                doc = None;
-            }
+            // Read as the request's reader may read it (`TermsQueryBuilder.fetch` runs as the
+            // user): a document its document level security hides is missing, fields its field
+            // level security hides are left out.
+            let doc = super::lookup_source(ctx, &idx, &l.id, l.routing.as_deref())?;
             // The lookup is a real get (`TermsQueryBuilder.fetch`): the shard's get stats count it.
             let c = &shard.counters;
             c.get_total.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             c.get_time_nanos.fetch_add(t.elapsed().as_nanos() as u64, std::sync::atomic::Ordering::Relaxed);
             let counter = if doc.is_some() { &c.get_exists } else { &c.get_missing };
             counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            let source = match doc.as_ref().and_then(|d| crate::fetch::source_bytes(&d.fields)) {
-                Some(src) => match ctx.reader_source(&idx, crate::fetch::parse_source(src)?) {
-                    Value::Obj(m) => Some(std::sync::Arc::new(m)),
-                    _ => None,
-                },
-                None => None,
+            let source = match doc.and_then(|(_, src)| src) {
+                Some(Value::Obj(m)) => Some(std::sync::Arc::new(m)),
+                _ => None,
             };
             if let Some(m) = cache.as_mut() {
                 m.insert(key, source.clone());

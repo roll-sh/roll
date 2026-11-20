@@ -36,6 +36,7 @@ import { PerformanceTab } from "./performance";
 import { Playground } from "./playground";
 import { PipelinesTab } from "./pipelines";
 import { RelevanceTab } from "./relevance";
+import { Remotes } from "./remotes";
 import { SnapshotsTab } from "./snapshots";
 import { CredentialsOnce, SearchStateDot, settingsOf, SettingsFields, stateLabel, useAction, useSearchClusters, type Run } from "./shared";
 
@@ -1039,6 +1040,8 @@ function SettingsTab({
       <BrowserSearch cluster={cluster} busy={busy} run={run} />
 
       <ApiKeys cluster={cluster} />
+
+      <Remotes cluster={cluster} />
 
       <AuditLog cluster={cluster} />
 
