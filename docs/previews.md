@@ -2162,15 +2162,17 @@ Ranked by what a person notices first. Done so far:
   runtime runs, printable schema lines, budget alerts that can't be lost or silenced, followed
   logs that say when lines were missed and stop with a hidden tab).
 
-1. **Regressions against main as a check, and required to land, in review** (#484, #489):
-   `roll/regressions` from slower routes and new errors, a `regressions` blocker with
-   `required`, accepted by someone other than the author at a head.
+1. **Regressions against main as a check, and required to land, in review** (#484, #489, #490;
+   reviewed, its findings fixed): `roll/regressions` from slower routes and new errors at each
+   head, a `regressions` blocker with `required`, accepted by someone other than the author who can
+   write to the repo, and `became: regressions` once a head for automations.
 2. **References a person chooses** (after roll secrets' #407, `bind_ref`/`resolve_as`): a
    preview's own variables take `roll://` too, and the rules' references (who wrote each is kept,
    `env_refs`) move to bindings, so a writer who loses reveal stops theirs.
-3. **Regressions in the project's chat** (roll code's chat ops, `crates/code-chat`): a change whose
-   preview regresses against main says so in the channel its automation binds, with the counts
-   and a link to accept, as a failing check does.
+3. **The author as an account, not a name**: a GitHub pull request's author is its login and a
+   roll person is their handle, so an author whose two names differ isn't recognised as the author
+   by the accepts. Compare roll accounts (the person's linked GitHub login, roll accounts' GitHub
+   sign-in) wherever an author is told apart (visual, regressions, roll code's approvals).
 4. **In review**: a protected base's change request in the keep-in-secrets button (#482).
 5. **Cheap Postgres branches on ext4: overlay volumes over a frozen base** (pg-control; measured
    2026-11-17): 0.97 s against 3.5 s for a 1.4 GB copy, but a write copies the whole table file.
