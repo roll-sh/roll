@@ -12,6 +12,14 @@
 //! A block's buffer is in memory the cache keeps (`arena`): a piece of a shard's chunks, which
 //! the next insert reuses whichever thread freed it. A shard's arena maps no more than the
 //! shard may hold; at that limit a miss's buffer is made by evicting (`BlockCache::buffer`).
+//!
+//! A bulk read (`storage::bulk_read`: a sequential or parallel scan) fills a cache with room. In
+//! a full one its blocks go through a small ring per shard, as PostgreSQL's bulk-read strategy
+//! puts a big scan's pages in a ring of shared buffers: a scan's block stays in the cache while
+//! the ring holds it, where any reader finds it, and the scan's next block takes the place of
+//! its oldest one when nobody else read that one. A ring block somebody else read stays in the
+//! cache under CLOCK. (Dropping a full cache's bulk blocks at once, TPC-H q21 at 256 MB read
+//! every lineitem block twice a run: its scan, then its EXISTS probes of the same orders.)
 
 mod arena;
 
@@ -21,6 +29,7 @@ use arena::Arena;
 use parking_lot::RwLock;
 // (foldhash: a lookup per block read, SipHash was a fifth of it.)
 use hashbrown::HashMap;
+use std::collections::VecDeque;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
@@ -30,6 +39,8 @@ const SHARDS: usize = 16;
 /// Blocks a miss evicts at most to make room for its buffer in a full arena (else its buffer
 /// is the heap's).
 const EVICT_FOR_ROOM: usize = 16;
+/// A shard's ring for bulk reads in a full cache: this part of what the shard holds.
+const RING_SHARE: usize = 64;
 
 /// The size the server's allocator (mimalloc) gives an allocation of `n` bytes: 8, then
 /// 16-byte steps up to 64, one of four steps between powers of two up to 64 kB, past it whole
@@ -49,22 +60,53 @@ struct Entry {
     referenced: AtomicBool,
 }
 
+type Key = (u64, u32);
+
 #[derive(Default)]
 struct Shard {
-    map: HashMap<(u64, u32), Entry>,
-    clock: Vec<(u64, u32)>,
+    map: HashMap<Key, Entry>,
+    clock: Vec<Key>,
     hand: usize,
     bytes: usize,
+    /// Bulk reads' blocks in a full cache, oldest first (not in `clock`): `ring_bytes` of them.
+    ring: VecDeque<Key>,
+    ring_bytes: usize,
+    /// Evicted since it last had room: a bulk read's block goes into the ring.
+    full: bool,
 }
 
 impl Shard {
     /// Its blocks' bytes and its tables'.
     fn held(&self) -> usize {
-        self.bytes + self.map.allocation_size() + self.clock.capacity() * std::mem::size_of::<(u64, u32)>()
+        self.bytes
+            + self.map.allocation_size()
+            + (self.clock.capacity() + self.ring.capacity()) * std::mem::size_of::<Key>()
+    }
+
+    /// Evict one block for a bulk read: its ring's oldest block that nobody else read, when the
+    /// ring holds `ring_max` bytes or more (one somebody read leaves the ring for the clock, its
+    /// bit set); else as any read (CLOCK). False when it holds none.
+    fn evict_for_bulk(&mut self, ring_max: usize) -> bool {
+        while self.ring_bytes >= ring_max
+            && let Some(key) = self.ring.pop_front()
+        {
+            let size = self.map[&key].size;
+            self.ring_bytes -= size;
+            if self.map[&key].referenced.load(Ordering::Relaxed) {
+                self.clock.push(key);
+            } else {
+                self.map.remove(&key);
+                self.bytes -= size;
+                self.full = true;
+                return true;
+            }
+        }
+        self.evict_one()
     }
 
     /// Evict one block: the first one not referenced from the hand on, clearing the referenced
-    /// ones' bits on the way (CLOCK). False when it holds none.
+    /// ones' bits on the way (CLOCK); the ring's oldest when the clock holds none. False when it
+    /// holds none.
     fn evict_one(&mut self) -> bool {
         while !self.clock.is_empty() {
             let i = self.hand % self.clock.len();
@@ -74,19 +116,24 @@ impl Shard {
             {
                 e.referenced.store(false, Ordering::Relaxed);
             } else {
-                if let Some(e) = self.map.remove(&key) {
-                    self.bytes -= e.size;
-                }
                 // (The newest block moves into the slot: the hand goes past it, as CLOCK puts a
                 // new block behind the hand. Left on it, the hand evicted each insert's block at
                 // the next, and the cache kept only its oldest blocks.)
+                if let Some(e) = self.map.remove(&key) {
+                    self.bytes -= e.size;
+                }
                 self.clock.swap_remove(i);
                 self.hand = i + 1;
+                self.full = true;
                 return true;
             }
             self.hand = i + 1;
         }
-        false
+        let Some(key) = self.ring.pop_front() else { return false };
+        let e = self.map.remove(&key).unwrap();
+        self.ring_bytes -= e.size;
+        self.bytes -= e.size;
+        true
     }
 }
 
@@ -95,6 +142,8 @@ pub struct BlockCache {
     /// Each shard's blocks' buffers.
     arenas: Vec<Arc<Arena>>,
     capacity_per_shard: usize,
+    /// A shard's ring for bulk reads holds this much at most.
+    ring_max: usize,
     next_id: AtomicU64,
 }
 
@@ -105,6 +154,7 @@ impl BlockCache {
             shards: (0..SHARDS).map(|_| RwLock::new(Shard::default())).collect(),
             arenas: (0..SHARDS).map(|_| Arena::new(capacity_per_shard)).collect(),
             capacity_per_shard,
+            ring_max: capacity_per_shard / RING_SHARE,
             next_id: AtomicU64::new(1),
         })
     }
@@ -123,25 +173,18 @@ impl BlockCache {
 
     /// A buffer of `len` bytes for block `block` of `file`, which is going into the cache, in
     /// its shard's arena. Where the arena is at its limit with no free piece that fits, it
-    /// evicts (CLOCK) until one does, but not when `!evict` (a bulk read's block, which takes
-    /// only room the cache has: then None also when the shard has no room). None: the buffer
-    /// is the heap's.
-    pub(crate) fn buffer(&self, file: u64, block: u32, len: usize, evict: bool) -> Option<Buf> {
+    /// evicts until one does: CLOCK, or for a bulk read's block (`bulk`) the ring first
+    /// (`Shard::evict_for_bulk`). None: the buffer is the heap's.
+    pub(crate) fn buffer(&self, file: u64, block: u32, len: usize, bulk: bool) -> Option<Buf> {
         let k = Self::shard_of(file, block);
         let a = &self.arenas[k];
-        let n = a.piece_bytes(len)?;
-        if !evict && self.shards[k].read().held() + n > self.capacity_per_shard {
-            return None;
-        }
+        a.piece_bytes(len)?;
         if let Some(b) = a.take(len) {
             return Some(b);
         }
-        if !evict {
-            return None;
-        }
         let mut s = self.shards[k].write();
         for _ in 0..EVICT_FOR_ROOM {
-            if !s.evict_one() {
+            if !(if bulk { s.evict_for_bulk(self.ring_max) } else { s.evict_one() }) {
                 break;
             }
             if let Some(b) = a.take(len) {
@@ -179,14 +222,18 @@ impl BlockCache {
         s.bytes += size;
     }
 
-    /// `insert`, when the block fits without evicting anything (a bulk read's block,
-    /// `storage::bulk_read`: a big scan fills a cache with room, never pushes out what is in
-    /// it).
-    pub fn insert_if_room(&self, file: u64, block: u32, b: CachedBlock, size: usize) {
+    /// `insert` for a bulk read's block (`storage::bulk_read`): a cache with room takes it as
+    /// any block; a full one in its shard's ring, where it takes the place of the ring's oldest
+    /// block (`Shard::evict_for_bulk`), so a big scan pushes out of the cache only the blocks
+    /// another reader read while the ring held them.
+    pub fn insert_bulk(&self, file: u64, block: u32, b: CachedBlock, size: usize) {
         let mut s = self.shard(file, block).write();
-        if s.held() + size > self.capacity_per_shard || s.map.contains_key(&(file, block)) {
+        if s.map.contains_key(&(file, block)) {
             return;
         }
+        let tables = s.held() - s.bytes;
+        let ring = s.full || s.bytes + tables + size > self.capacity_per_shard;
+        while s.bytes + tables + size > self.capacity_per_shard && s.evict_for_bulk(self.ring_max) {}
         s.map.insert(
             (file, block),
             Entry {
@@ -195,7 +242,12 @@ impl BlockCache {
                 referenced: AtomicBool::new(false),
             },
         );
-        s.clock.push((file, block));
+        if ring {
+            s.ring.push_back((file, block));
+            s.ring_bytes += size;
+        } else {
+            s.clock.push((file, block));
+        }
         s.bytes += size;
     }
 
@@ -206,6 +258,9 @@ impl BlockCache {
             if !s.map.keys().any(|(f, _)| *f == file) {
                 continue;
             }
+            let ring_freed: usize = s.ring.iter().filter(|(f, _)| *f == file).map(|k| s.map[k].size).sum();
+            s.ring_bytes -= ring_freed;
+            s.ring.retain(|(f, _)| *f != file);
             let mut freed = 0;
             s.map.retain(|(f, _), e| {
                 if *f == file {
@@ -220,6 +275,8 @@ impl BlockCache {
             // (A shard left empty gives its tables back: an empty cache holds nothing.)
             if s.map.is_empty() {
                 *s = Shard::default();
+            } else if s.held() * 2 <= self.capacity_per_shard {
+                s.full = false;
             }
         }
     }
@@ -231,6 +288,11 @@ impl BlockCache {
 
     pub fn used_bytes(&self) -> usize {
         self.shards.iter().map(|s| s.read().held()).sum()
+    }
+    /// Whether it holds block `block` of `file` (without marking it read).
+    #[cfg(test)]
+    pub(crate) fn contains(&self, file: u64, block: u32) -> bool {
+        self.shard(file, block).read().map.contains_key(&(file, block))
     }
 }
 

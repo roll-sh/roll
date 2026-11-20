@@ -373,11 +373,11 @@ pub(crate) fn in_read_once() -> bool {
     ONCE.with(|b| b.get())
 }
 
-/// Run `f` as a bulk read: a block it reads from a file goes into the block cache only
-/// where the cache has room (`BlockCache::insert_if_room`), evicting nothing; once the
-/// cache is full, a bulk read's blocks are used and dropped. PostgreSQL reads a big
-/// table's sequential scan through a small ring of buffers for the same reason: one pass
-/// over it would otherwise evict every other relation's pages.
+/// Run `f` as a bulk read: a block it reads from a file goes into the block cache where the
+/// cache has room; once the cache is full, through a small ring of blocks per shard
+/// (`BlockCache::insert_bulk`), reused for the scan's next blocks unless another reader read
+/// them. PostgreSQL reads a big table's sequential scan through a small ring of buffers for
+/// the same reason: one pass over it would otherwise evict every other relation's pages.
 pub fn bulk_read<R>(f: impl FnOnce() -> R) -> R {
     struct Back(bool);
     impl Drop for Back {

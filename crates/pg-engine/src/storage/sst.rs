@@ -2715,10 +2715,10 @@ impl SstReader {
             return Ok(b);
         }
         let fill = fill && !super::in_read_once();
-        // (A bulk read's block takes only room the cache has free: it evicts nothing.)
+        // (A bulk read's block goes through a ring in a full cache: `BlockCache::insert_bulk`.)
         let bulk = fill && super::in_bulk_read();
         // (A block going into the cache has its buffer in the cache's own memory, `cache::Buf`.)
-        let buf = |n: usize| self.cache.buffer(self.cache_id, i as u32, n, !bulk);
+        let buf = |n: usize| self.cache.buffer(self.cache_id, i as u32, n, bulk);
         let dead = self.dead.as_ref().and_then(|d| d.block(i));
         let block = self.raw_block_in(i, (fill && dead.is_none()).then_some(&buf as &dyn Fn(usize) -> Option<Buf>))?;
         let mut block = match dead {
@@ -2736,7 +2736,7 @@ impl SstReader {
         let block = Arc::new(block);
         let size = block.mem_bytes();
         if bulk {
-            self.cache.insert_if_room(self.cache_id, i as u32, block.clone(), size);
+            self.cache.insert_bulk(self.cache_id, i as u32, block.clone(), size);
         } else {
             self.cache.insert(self.cache_id, i as u32, block.clone(), size);
         }
@@ -3004,6 +3004,49 @@ mod tests {
                 assert_eq!(ix.find(k), i);
             }
         }
+    }
+
+    /// A full cache's bulk read goes through a ring (`BlockCache::insert_bulk`): the block it
+    /// just read is in the cache for another reader, a block another reader read there stays,
+    /// and the scan leaves no more of its blocks than the ring holds and pushes out nothing that
+    /// was read twice.
+    #[test]
+    fn bulk_reads_go_through_a_ring() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache = BlockCache::new(16 << 20);
+        let file = |id: u64, table: u8, n: u32| {
+            let mut w = SstWriter::create(dir.path(), id, true).unwrap();
+            for i in 0..n {
+                let mut k = vec![0, 0, 0x40, table, 0, 0, 0, 0];
+                k.extend_from_slice(&i.to_be_bytes());
+                k.extend_from_slice(&(!5u64).to_be_bytes());
+                w.add(&k, Some(&[i as u8; 1000][..])).unwrap();
+            }
+            SstReader::open(dir.path(), w.finish().unwrap(), cache.clone()).unwrap()
+        };
+        // (About 25 MB each in the cache, which holds 16.)
+        let (hot, fill, big) = (file(1, 1, 1000), file(2, 2, 24_000), file(3, 3, 24_000));
+        let cached = |r: &SstReader| (0..r.block_count()).filter(|&i| r.cache.contains(r.cache_id, i as u32)).collect::<Vec<_>>();
+        crate::storage::bulk_read(|| (0..fill.block_count()).for_each(|i| drop(fill.block(i).unwrap())));
+        assert!(cached(&fill).len() > fill.block_count() / 2);
+        for _ in 0..2 {
+            (0..hot.block_count()).for_each(|i| drop(hot.block(i).unwrap()));
+        }
+        let read = big.block_count() / 2;
+        crate::storage::bulk_read(|| {
+            for i in 0..big.block_count() {
+                drop(big.block(i).unwrap());
+                if i == read {
+                    assert!(big.cache.contains(big.cache_id, i as u32));
+                    drop(big.cache.get(big.cache_id, i as u32).unwrap());
+                }
+            }
+        });
+        assert_eq!(cached(&hot).len(), hot.block_count());
+        // (The rings, about 30 blocks here, and what room evictions left: not the 16 MB the scan
+        // would fill.)
+        let left = cached(&big);
+        assert!(left.contains(&read) && left.len() < big.block_count() / 20, "{} of {}", left.len(), big.block_count());
     }
 
     /// A file of index entries alone has no bloom filter (every key passes); one with rows
