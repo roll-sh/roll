@@ -1648,8 +1648,8 @@ impl Builder for DockerBuilder {
     }
 
     async fn scan(&self, image: &str, service: &str, log: &LogSink) -> anyhow::Result<Option<super::Scanned>> {
-        let found = self.scanner.scan(image, service, |n| log.line(n)).await?;
-        Ok(Some(super::Scanned { scanner: super::scan::SCANNER.to_string(), found }))
+        let (found, sbom) = self.scanner.scan(image, service, |n| log.line(n)).await?;
+        Ok(Some(super::Scanned { scanner: super::scan::SCANNER.to_string(), found, sbom }))
     }
 
     async fn load(&self, archive: &std::path::Path, tag: &str, log: &LogSink) -> anyhow::Result<String> {

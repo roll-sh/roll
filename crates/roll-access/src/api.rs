@@ -296,6 +296,9 @@ struct Check {
     path: String,
     #[serde(default)]
     body: Option<Value>,
+    /// Request headers that decide it, as the gate reads them (apps' `x-roll-override`).
+    #[serde(default)]
+    headers: std::collections::BTreeMap<String, String>,
     /// Whose decision (the operator only; a grant checks itself).
     #[serde(default)]
     token: Option<String>,
@@ -329,7 +332,13 @@ async fn check(State(a): S, ext: Extensions, Json(c): Json<Check>) -> crate::Res
         .await
         .map_err(|e| Error::Internal(e.to_string()))?;
     // Decided as the gate decides: the copy a body asks for, and "ask for anything else".
-    let mut action = row.action(&method, &params, c.body.as_ref());
+    let mut headers = axum::http::HeaderMap::new();
+    for (k, v) in &c.headers {
+        if let (Ok(k), Ok(v)) = (axum::http::HeaderName::try_from(k.as_str()), axum::http::HeaderValue::from_str(v)) {
+            headers.insert(k, v);
+        }
+    }
+    let mut action = row.action_with(&method, &params, c.body.as_ref(), &headers);
     let mut outcome = if matches!(row.target, catalog::Tgt::AnyGrant) { Outcome::Allow } else { scope.outcome(&target, action) };
     if let Some((copied, _, _)) = crate::evaluate::copy_outcome(&a, row, &params, &target, (c.body.as_ref(), uri.query()), &scope).await
         && crate::evaluate::rank(copied) < crate::evaluate::rank(outcome)

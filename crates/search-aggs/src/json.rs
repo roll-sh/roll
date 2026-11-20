@@ -12,8 +12,8 @@
 
 use std::fmt::Write as _;
 
-/// A JSON value.
-#[derive(Clone, Debug, PartialEq)]
+/// A JSON value. Decoding it from [`crate::wire`] counts its nesting ([`crate::wire::Nested`]).
+#[derive(Clone, Debug, PartialEq, serde::Serialize)]
 pub enum Json {
     Null,
     Bool(bool),
@@ -26,6 +26,37 @@ pub enum Json {
     Str(String),
     Arr(Vec<Json>),
     Obj(Vec<(String, Json)>),
+}
+
+/// [`Json`] as decoded: the same variants, its children decoded through [`Json`]'s own guard.
+#[derive(serde::Deserialize)]
+enum JsonDe {
+    Null,
+    Bool(bool),
+    Int(i64),
+    UInt(u64),
+    Float(f64),
+    Float32(f32),
+    Str(String),
+    Arr(Vec<Json>),
+    Obj(Vec<(String, Json)>),
+}
+
+impl<'de> serde::Deserialize<'de> for Json {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> std::result::Result<Self, D::Error> {
+        let _level = crate::wire::Nested::enter::<D::Error>()?;
+        Ok(match JsonDe::deserialize(d)? {
+            JsonDe::Null => Json::Null,
+            JsonDe::Bool(b) => Json::Bool(b),
+            JsonDe::Int(i) => Json::Int(i),
+            JsonDe::UInt(u) => Json::UInt(u),
+            JsonDe::Float(f) => Json::Float(f),
+            JsonDe::Float32(f) => Json::Float32(f),
+            JsonDe::Str(s) => Json::Str(s),
+            JsonDe::Arr(a) => Json::Arr(a),
+            JsonDe::Obj(o) => Json::Obj(o),
+        })
+    }
 }
 
 impl Json {

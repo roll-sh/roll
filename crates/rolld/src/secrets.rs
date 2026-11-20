@@ -545,6 +545,8 @@ pub fn link_provider(api: &Api, kind: &str) -> Option<Arc<dyn LinkProvider>> {
         "bucket" => Some(Arc::new(Bucket(api.clone()))),
         "stream" => Some(Arc::new(Stream(api.clone()))),
         "nosql" => Some(Arc::new(Nosql(api.clone()))),
+        // A vhost user of the link's own (`AMQP_URL`), never the vhost's admin.
+        "queue" => Some(Arc::new(Queue(api.clone()))),
         // A data-only key of the cluster's own (`ELASTICSEARCH_API_KEY`, or an OpenSearch-flavor
         // cluster's internal user), never its password.
         "search" => Some(Arc::new(Search(api.clone(), Default::default()))),
@@ -1306,6 +1308,25 @@ impl apps_control::integrations::SecretSource for ForApps {
 
     /// apps' `…/variables/values` shows secrets' values: only to whoever may reveal `env` by roll
     /// secrets' own rules (a token's scope, a person's own projects, protected environments).
+    /// A variable's `roll://` reference to its own environment (apps refuses another's), read as
+    /// the service through `resolve_for`: the project is the one whose canvas holds the service
+    /// and stands for it, and the read is audited as `apps:service:<id>`. An untrusted preview
+    /// reads as an untrusted copy (no protected environment, no sensitive key).
+    async fn resolve_ref(&self, project: &str, env: &str, service: &str, reference: &str) -> anyhow::Result<String> {
+        let (secrets, _) = self.0.get().cloned().ok_or_else(|| anyhow::anyhow!("roll secrets is starting: deploy again in a moment"))?;
+        let (project, env, service, reference) = (project.to_string(), env.to_string(), service.to_string(), reference.to_string());
+        tokio::task::spawn_blocking(move || {
+            let caller = roll_secrets::Caller::consumer(&format!("app:{service}"));
+            let untrusted = matches!(secrets.environment(&project, &env, &caller), Ok(e) if e.kind == roll_secrets::EnvironmentKind::Ephemeral && !e.trusted);
+            let mut r = roll_secrets::ResourceRef::new(roll_workspace::Kind::Service, &service);
+            if untrusted {
+                r = r.untrusted();
+            }
+            secrets.resolve_for(&r, &reference).map(|v| v.value.expose().to_string()).map_err(|e| anyhow::anyhow!("{e}"))
+        })
+        .await?
+    }
+
     /// The environment's digest (versions and keyed fingerprints, nothing decrypted): apps keeps
     /// it with each live deployment and says when the secrets changed since. None for a project
     /// or environment roll secrets doesn't have.
@@ -1864,7 +1885,7 @@ mod tests {
         let set = axum::http::Request::post(format!("/v1/secrets/projects/{project}/environments/production/changes")).header("content-type", "application/json").body(axum::body::Body::from(ops.to_string())).unwrap();
         assert!(roll_secrets::router(secrets.clone()).oneshot(set).await.unwrap().status().is_success());
         let apps = super::ForApps::default();
-        apps.set(secrets.clone(), ws);
+        apps.set(secrets.clone(), ws.clone());
         let got = apps.resolve(&project, "production", "svc_web").await.unwrap();
         assert_eq!(got.iter().map(|v| (v.name.as_str(), v.value.as_str(), v.linked, v.sensitive)).collect::<Vec<_>>(), [("DB_URL", "postgres://db/shop", false, false), ("PAYMENTS_KEY", "sk_live_x", false, true)]);
         assert!(apps.resolve(&project, "pr-9", "svc_web").await.unwrap().is_empty());
@@ -1889,6 +1910,14 @@ mod tests {
         assert!(roll_secrets::router(secrets.clone()).oneshot(set).await.unwrap().status().is_success());
         assert_ne!(apps.digest(&project, "production").await.unwrap(), Some(before));
         assert_eq!(apps.digest(&project, "pr-9").await.unwrap(), None);
+        // A variable's roll:// reference, read as the service (resolve_for): only once a project
+        // that stands for it holds it on its canvas.
+        let reference = "roll://production/DB_URL";
+        assert!(apps.resolve_ref(&project, "production", "svc_web", reference).await.is_err(), "on no canvas");
+        ws.place(roll_workspace::Scope::All, &project, roll_workspace::Kind::Service, "svc_web", 0.0, 0.0).unwrap();
+        assert_eq!(apps.resolve_ref(&project, "production", "svc_web", reference).await.unwrap(), "postgres://db/shop2");
+        let audit = secrets.audit(&project, roll_secrets::AuditFilter::default(), &roll_secrets::Caller::operator()).unwrap();
+        assert!(audit.iter().any(|a| a.actor.contains("apps:service:svc_web")), "{audit:?}");
     }
 
     /// A decoy key's token, used where it was planted: roll-access refuses it and roll secrets

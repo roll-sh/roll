@@ -1248,6 +1248,10 @@ pub async fn run(api: &Api, as_json: bool, cmd: Preview) -> anyhow::Result<()> {
                 }
                 for g in groups {
                     println!("{:>5}x  {:>8}  {:<12} {}", g["count"], ago(g["last_seen"].as_i64().unwrap_or(0) / 1000), s(&g["service"]), s(&g["title"]));
+                    // Its request's trace: `roll preview traces --trace <id>` opens it.
+                    if let Some(t) = g["trace"].as_str() {
+                        println!("{:>17}trace {t}", "");
+                    }
                 }
                 return Ok(());
             }
@@ -1266,6 +1270,10 @@ pub async fn run(api: &Api, as_json: bool, cmd: Preview) -> anyhow::Result<()> {
                         let main = r["main_p50_ms"].as_u64().map_or_else(|| "main —".to_string(), |m| format!("main {m} ms"));
                         let mark = if r["slower"].as_bool() == Some(true) { "slower" } else { "" };
                         println!("{:>5}x  p50 {:>6} ms  p95 {:>6} ms  {:<14} {:<6} {}", r["count"], r["p50_ms"], r["p95_ms"], main, mark, s(&r["name"]));
+                        // An N+1: the statement a trace of it runs most.
+                        if let Some(q) = r["repeated"]["statement"].as_str() {
+                            println!("{:>8}N+1: {}x {q}", "", r["repeated"]["count"]);
+                        }
                     }
                     return Ok(());
                 }

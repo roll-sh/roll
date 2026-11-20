@@ -131,6 +131,13 @@ pub trait SecretSource: Send + Sync {
         self.digest(project, env).await
     }
 
+    /// A variable's `roll://ENV[/folder…]/KEY` value (`env`'s own) for `service`: read as the
+    /// service each deploy (roll secrets' `resolve_for`, audited as it), never kept. An error
+    /// fails the deploy (a preview's is left out). By default there's nothing to read it from.
+    async fn resolve_ref(&self, _project: &str, _env: &str, _service: &str, reference: &str) -> anyhow::Result<String> {
+        anyhow::bail!("{reference}: no roll secrets here to read it from")
+    }
+
     /// The project's `env` made in the store if it's missing (an apps environment named
     /// something roll secrets doesn't start with, `qa`), so its secrets have somewhere to go.
     /// Idempotent; never called for a preview's (previews make those, with their base).
