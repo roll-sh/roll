@@ -24,7 +24,7 @@
 //!
 //! A build reads both; it refuses a file (and a manifest) of a format past `FORMAT`.
 
-use super::cache::{BlockCache, CachedBlock};
+use super::cache::{BlockCache, Buf, CachedBlock};
 use crate::error::{Result, internal};
 use bytes::Bytes;
 use std::fs::File;
@@ -1080,6 +1080,10 @@ pub struct Block {
     /// Entries between restarts: 1 << `rlog` (`RLOG` but in a format 2 block that says
     /// otherwise).
     rlog: u8,
+    /// Whether `data` is a piece of the block cache's arena (`cache::Buf`), not the heap's.
+    pooled: bool,
+    /// The bytes `data`'s allocations hold (`held_by`).
+    held: u32,
 }
 
 const F_TS: usize = 1;
@@ -1991,13 +1995,32 @@ fn entries_n<const N: usize>(s: &mut [ZipSide; N], bound: Option<&[u8]>, f: &mut
 
 impl Block {
 
-    /// The bytes it holds (what the block cache counts): its buffer, the `Arc` it is cached
-    /// in, and the header `Bytes` makes of a buffer once it is cloned (a range read's values),
-    /// each at the allocator's size for it.
+    /// The bytes it holds (what the block cache counts): its buffer's (`held`) and the `Arc`
+    /// it is cached in, at the allocator's size.
     pub fn mem_bytes(&self) -> usize {
-        use super::cache::alloc_bytes;
         let arc = 2 * std::mem::size_of::<usize>() + std::mem::size_of::<Block>();
-        alloc_bytes(self.data.len()) + alloc_bytes(arc) + alloc_bytes(3 * std::mem::size_of::<usize>())
+        self.held as usize + super::cache::alloc_bytes(arc)
+    }
+
+    /// What a buffer of `len` bytes holds: its piece of the cache's arena and the owner
+    /// `Bytes` keeps of it (`buf`), else the heap's allocation and the header `Bytes` makes of
+    /// it once it is cloned (a range read's values), each at the allocator's size.
+    fn held_by(len: usize, buf: Option<&Buf>) -> u32 {
+        use super::cache::alloc_bytes;
+        (match buf {
+            Some(b) => b.piece + Buf::owner_bytes(),
+            None => alloc_bytes(len) + alloc_bytes(3 * std::mem::size_of::<usize>()),
+        }) as u32
+    }
+
+    /// The block with its buffer copied into `buf` (of its length), a piece of the cache's
+    /// arena.
+    fn moved_to(mut self, mut buf: Buf) -> Block {
+        buf.as_mut().copy_from_slice(&self.data);
+        self.held = Block::held_by(buf.as_ref().len(), Some(&buf));
+        self.pooled = true;
+        self.data = buf.freeze();
+        self
     }
 
     /// Every entry with its key whole, for readers that go backwards or read a block once.
@@ -2032,8 +2055,9 @@ impl Block {
 
     /// A format 2 block as it was decompressed (`SstWriter::body2`): its entries and values
     /// are the compact form already, the restarts read from its end, the last key from the
-    /// file's block index.
-    fn load(raw: &[u8], last_key: &[u8]) -> Result<Block> {
+    /// file's block index. Its buffer is `into`'s of its length when that gives one (the
+    /// cache's arena, for a block going into the cache).
+    fn load(raw: &[u8], last_key: &[u8], into: Option<&dyn Fn(usize) -> Option<Buf>>) -> Result<Block> {
         let bad = || internal("bad sst block");
         let n = raw.len();
         let t = raw.get(n.checked_sub(TRAILER).ok_or_else(bad)?..).ok_or_else(bad)?;
@@ -2056,20 +2080,37 @@ impl Block {
         }
         // (The body as the file holds it up to its trailer, then the last key, in an allocation
         // of its own size: the entries, values and restart arrays are where `data` has them.)
-        let mut data = Vec::with_capacity(data_len + nr * 12 + last_key.len());
-        data.extend_from_slice(&raw[..data_len + nr * 12]);
-        let lk = data.len() as u32;
-        data.extend_from_slice(last_key);
+        let lk = data_len + nr * 12;
+        let total = lk + last_key.len();
+        let buf = into.and_then(|f| f(total));
+        let held = Block::held_by(total, buf.as_ref());
+        let pooled = buf.is_some();
+        let data = match buf {
+            Some(mut b) => {
+                let d = b.as_mut();
+                d[..lk].copy_from_slice(&raw[..lk]);
+                d[lk..].copy_from_slice(last_key);
+                b.freeze()
+            }
+            None => {
+                let mut data = Vec::with_capacity(total);
+                data.extend_from_slice(&raw[..lk]);
+                data.extend_from_slice(last_key);
+                Bytes::from(data)
+            }
+        };
         Ok(Block {
-            data: Bytes::from(data),
+            data,
             rs: data_len as u32,
             nr: nr as u32,
-            lk,
+            lk: lk as u32,
             common,
             len,
             ts,
             derived,
             rlog,
+            pooled,
+            held,
         })
     }
 
@@ -2192,6 +2233,7 @@ impl Block {
         }
         let (data, rs, lk) = Block::assemble(data, &restarts, &rvals, &key);
         Ok(Block {
+            held: Block::held_by(data.len(), None),
             data,
             rs,
             nr: restarts.len() as u32,
@@ -2201,6 +2243,7 @@ impl Block {
             ts: ts.unwrap_or([0xFF; 8]),
             derived,
             rlog,
+            pooled: false,
         })
     }
 }
@@ -2671,19 +2714,31 @@ impl SstReader {
         if let Some(b) = self.cache.get(self.cache_id, i as u32) {
             return Ok(b);
         }
-        let block = self.raw_block(i)?;
-        let block = Arc::new(match self.dead.as_ref().and_then(|d| d.block(i)) {
+        let fill = fill && !super::in_read_once();
+        // (A bulk read's block takes only room the cache has free: it evicts nothing.)
+        let bulk = fill && super::in_bulk_read();
+        // (A block going into the cache has its buffer in the cache's own memory, `cache::Buf`.)
+        let buf = |n: usize| self.cache.buffer(self.cache_id, i as u32, n, !bulk);
+        let dead = self.dead.as_ref().and_then(|d| d.block(i));
+        let block = self.raw_block_in(i, (fill && dead.is_none()).then_some(&buf as &dyn Fn(usize) -> Option<Buf>))?;
+        let mut block = match dead {
             Some(dead) => block.without(dead),
             None => block,
-        });
-        if fill && !super::in_read_once() {
-            let size = block.mem_bytes();
-            // (A bulk read's block takes only room the cache has free: it evicts nothing.)
-            if super::in_bulk_read() {
-                self.cache.insert_if_room(self.cache_id, i as u32, block.clone(), size);
-            } else {
-                self.cache.insert(self.cache_id, i as u32, block.clone(), size);
-            }
+        };
+        if !fill {
+            return Ok(Arc::new(block));
+        }
+        if !block.pooled
+            && let Some(b) = buf(block.data.len())
+        {
+            block = block.moved_to(b);
+        }
+        let block = Arc::new(block);
+        let size = block.mem_bytes();
+        if bulk {
+            self.cache.insert_if_room(self.cache_id, i as u32, block.clone(), size);
+        } else {
+            self.cache.insert(self.cache_id, i as u32, block.clone(), size);
         }
         Ok(block)
     }
@@ -2691,9 +2746,14 @@ impl SstReader {
     /// Block `i` as the file holds it, its dead entries too (they are in their places: what
     /// `DeadSet` counts), read from the file without the cache.
     pub fn raw_block(&self, i: usize) -> Result<Block> {
+        self.raw_block_in(i, None)
+    }
+
+    /// `raw_block`, its buffer `into`'s when that gives one (`Block::load`).
+    fn raw_block_in(&self, i: usize, into: Option<&dyn Fn(usize) -> Option<Buf>>) -> Result<Block> {
         self.with_body(i, |raw| match self.meta.commit_ts {
             _ if self.v2 => {
-                let mut b = Block::load(raw, self.index.key(i))?;
+                let mut b = Block::load(raw, self.index.key(i), into.filter(|_| self.retag.is_none()))?;
                 // (A linked run of format 2: one version for every key, the block's, which
                 // is the commit's.)
                 if let Some(ts) = self.meta.commit_ts {
