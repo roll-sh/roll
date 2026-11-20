@@ -500,6 +500,13 @@ async fn runtime_config_changes_without_a_deploy() {
     let new = body["vars"]["ROLL_CONFIG_URL"].as_str().unwrap().trim_start_matches("http://127.0.0.1:7070").to_string();
     assert_ne!(new, path);
     assert_eq!((read(new.clone(), None).await.0, read(path, None).await.0), (StatusCode::OK, StatusCode::NOT_FOUND));
+    // Its token is apps' own kind of roll secret, checksummed; found leaked, it's rotated and a
+    // redeploy hands out the next.
+    let secret = new.rsplit('/').next().unwrap().to_string();
+    assert!(secret.starts_with("rlr_") && roll_auth::credentials::checksum_ok(&secret), "{secret}");
+    let before = call(&w.api, "GET", &base, None).await.1["config_rotated_at"].clone();
+    assert!(w.apps.revoke_leaked_address(&secret).unwrap().ends_with("runtime config address"));
+    assert_ne!(call(&w.api, "GET", &base, None).await.1["config_rotated_at"], before, "rotated");
     // A deleted service's (kept for a restore) answers nothing.
     assert_eq!(call(&w.api, "DELETE", &format!("/v1/apps/services/{id}"), None).await.0, StatusCode::NO_CONTENT);
     assert_eq!(read(new, None).await.0, StatusCode::NOT_FOUND);
@@ -3119,7 +3126,7 @@ async fn a_one_off_job_runs_the_live_image_to_its_exit_and_can_be_canceled() {
     assert!(text.iter().any(|t| t.starts_with("the job: failed (try 1 of 3); again in")) && text.contains(&"the job: succeeded (try 3)"), "{text:?}");
     let (_, no) = call(&w.api, "POST", &format!("{base}/jobs"), Some(flaky(1))).await;
     assert_eq!(ended(no["id"].as_str().unwrap().to_string()).await["status"], "failed");
-    for bad in [json!({"command": "x", "retries": 6}), json!({"command": "x", "parallelism": 0})] {
+    for bad in [json!({"command": "x", "retries": 6}), json!({"command": "x", "parallelism": 0}), json!({"command": "x", "parallelism": 11})] {
         assert_eq!(call(&w.api, "POST", &format!("{base}/jobs"), Some(bad)).await.0, StatusCode::BAD_REQUEST);
     }
     // One that doesn't end by itself is canceled, and its container goes.
@@ -4932,8 +4939,9 @@ async fn a_replaced_instance_finishes_its_requests_within_drain_s() {
 }
 
 /// A variable that's a `roll://` reference to its own environment's secret is read as the
-/// service at each deploy and sealed; another environment's or a project's is refused when it's
-/// set, and one that doesn't resolve fails the deploy.
+/// service at each deploy and sealed; another environment's is bound to whoever sets it (roll
+/// secrets' maker references: refused unless they may reveal it) and read as them; a project's is
+/// refused, and one that doesn't resolve fails the deploy.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_roll_reference_variable_reads_its_environments_secret() {
     struct Refs;
@@ -4952,24 +4960,44 @@ async fn a_roll_reference_variable_reads_its_environments_secret() {
                 r => anyhow::bail!("no such key: {r}"),
             }
         }
+        async fn bind_ref(&self, _: apps_control::integrations::Asker<'_>, _: &str, service: &str, reference: &str) -> anyhow::Result<String> {
+            assert!(service.starts_with("svc_"));
+            match reference {
+                "roll://staging/API" => Ok("usr_ada".into()),
+                r => anyhow::bail!("you may not reveal {r}"),
+            }
+        }
+        async fn resolve_as(&self, _: &str, env: &str, _: &str, reference: &str, maker: &str) -> anyhow::Result<String> {
+            assert_eq!((env, reference, maker), ("production", "roll://staging/API", "usr_ada"));
+            Ok("https://staging-api".into())
+        }
+        async fn digest_as(&self, _: &str, _: &str, _: &str, _: &str, _: &str) -> anyhow::Result<String> {
+            Ok(format!("v{}", STAGING.load(Ordering::SeqCst)))
+        }
     }
+    // The version of staging's folder the bound reference reads.
+    static STAGING: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
     let w = world_full(|_| {}, false, |d| d.secrets = Arc::new(Refs)).await;
     let (svc, _) = image_service(&w, "api", json!({"port": 80})).await;
     let id = svc["id"].as_str().unwrap().to_string();
     let base = format!("/v1/apps/services/{id}/environments/production");
     let vars_path = format!("{base}/variables");
     let set = |vars: Value| call(&w.api, "PATCH", &vars_path, Some(json!({ "set": vars })));
-    assert_eq!(set(json!({"X": "roll://staging/KEY"})).await.0, StatusCode::BAD_REQUEST, "another environment's");
+    assert_eq!(set(json!({"X": "roll://staging/KEY"})).await.0, StatusCode::FORBIDDEN, "another environment's its setter may not reveal");
     assert_eq!(set(json!({"X": "roll://acme@production/KEY"})).await.0, StatusCode::BAD_REQUEST, "a project's");
     assert_eq!(set(json!({"X": " roll://staging/KEY"})).await.0, StatusCode::BAD_REQUEST, "read as a reference once trimmed: written exactly or refused");
     assert_eq!(set(json!({"X": "ROLL://production/db/URL"})).await.0, StatusCode::BAD_REQUEST, "or lowercased");
     assert_eq!(set(json!({"X": "roll://production/services/svc_other/KEY"})).await.0, StatusCode::BAD_REQUEST, "another service's own folder");
-    assert!(set(json!({"DATABASE_URL": "roll://production/db/URL", "FAKE_ECHO": "DATABASE_URL"})).await.0.is_success());
+    assert!(set(json!({"DATABASE_URL": "roll://production/db/URL", "STAGING_API": "roll://staging/API", "FAKE_ECHO": "DATABASE_URL,STAGING_API"})).await.0.is_success());
     let (_, d) = call(&w.api, "POST", &format!("{base}/redeploy"), Some(json!({}))).await;
     let d = settled(&w, &id, "production", d["id"].as_str().unwrap()).await;
     assert_eq!(d["status"], "active", "{d}");
     let (_, body) = visit_deployment(&w, &host(&svc["environments"][0]["url"]), d["id"].as_str().unwrap()).await;
-    assert_eq!(body["vars"]["DATABASE_URL"], "postgres://from-secrets", "{body}");
+    assert_eq!((&body["vars"]["DATABASE_URL"], &body["vars"]["STAGING_API"]), (&json!("postgres://from-secrets"), &json!("https://staging-api")), "{body}");
+    // A change in the bound reference's folder reads as needing a deploy.
+    assert_eq!(call(&w.api, "GET", &base, None).await.1["needs_deploy"], false);
+    STAGING.store(2, Ordering::SeqCst);
+    assert_eq!(call(&w.api, "GET", &base, None).await.1["needs_deploy"], true, "staging's folder moved");
     let (_, vars) = call(&w.api, "GET", &format!("{base}/variables"), None).await;
     assert!(!vars.to_string().contains("postgres://from-secrets"), "never shown: {vars}");
     // One that doesn't resolve: the deploy fails, saying which.
@@ -6745,6 +6773,15 @@ async fn a_git_login_reads_its_token_from_roll_secrets() {
             assert_eq!(env, "production");
             Ok(vec![apps_control::integrations::SecretVar { name: "GIT_TOKEN".into(), value: TOKEN.lock().clone(), linked: false, sensitive: true, plain: false }])
         }
+        async fn bind_ref_runtime(&self, _: apps_control::integrations::Asker<'_>, _: &str, _: &str, reference: &str, runtime_env: &str) -> anyhow::Result<String> {
+            assert_eq!(runtime_env, "production");
+            anyhow::ensure!(reference == "roll://production/git/TOKEN", "you may not reveal {reference}");
+            Ok("usr_ada@runtime:production".into())
+        }
+        async fn resolve_as(&self, _: &str, env: &str, _: &str, reference: &str, maker: &str) -> anyhow::Result<String> {
+            assert_eq!((env, reference, maker), ("production", "roll://production/git/TOKEN", "usr_ada@runtime:production"));
+            Ok(TOKEN.lock().clone())
+        }
     }
     *TOKEN.lock() = "tok-1".into();
     let w = world_full(|_| {}, false, |d| d.secrets = Arc::new(Tokens)).await;
@@ -6768,6 +6805,16 @@ async fn a_git_login_reads_its_token_from_roll_secrets() {
     *git.login.lock() = Some(("deploy".into(), "tok-2".into()));
     *TOKEN.lock() = "tok-2".into();
     let deploys = format!("/v1/apps/services/{id}/environments/production/deploys");
+    let (st, d) = call(&w.api, "POST", &deploys, Some(json!({}))).await;
+    assert_eq!(st, StatusCode::ACCEPTED, "{d}");
+    assert_eq!(settled(&w, &id, "production", d["id"].as_str().unwrap()).await["status"], "active");
+    // A reference into roll secrets, bound to whoever sets it and read as them at each fetch;
+    // one they may not reveal, or another environment's, is refused when it's set.
+    assert_eq!(call(&w.api, "PUT", &login, Some(json!({"username": "deploy", "secret": "roll://production/git/OTHER"}))).await.0, StatusCode::FORBIDDEN);
+    assert_eq!(call(&w.api, "PUT", &login, Some(json!({"username": "deploy", "secret": "roll://staging/git/TOKEN"}))).await.0, StatusCode::BAD_REQUEST);
+    assert!(call(&w.api, "PUT", &login, Some(json!({"username": "deploy", "secret": "roll://production/git/TOKEN"}))).await.0.is_success());
+    *git.login.lock() = Some(("deploy".into(), "tok-3".into()));
+    *TOKEN.lock() = "tok-3".into();
     let (st, d) = call(&w.api, "POST", &deploys, Some(json!({}))).await;
     assert_eq!(st, StatusCode::ACCEPTED, "{d}");
     assert_eq!(settled(&w, &id, "production", d["id"].as_str().unwrap()).await["status"], "active");
@@ -7407,12 +7454,12 @@ async fn an_instance_reads_its_oidc_token_for_an_allowed_audience() {
     // nothing at once and a redeploy hands the instances a new one.
     let secret = path.rsplit('/').next().unwrap().to_string();
     assert!(secret.starts_with("rlr_") && roll_auth::credentials::checksum_ok(&secret), "{secret}");
-    assert!(w.apps.revoke_leaked_oidc(&secret).is_some());
+    assert!(w.apps.revoke_leaked_address(&secret).is_some());
     assert_eq!(get(path.clone()).await.0, StatusCode::NOT_FOUND);
     let mut fresh = String::new();
     for _ in 0..200 {
         let (_, ds) = call(&w.api, "GET", &format!("{base}/deploys"), None).await;
-        if let Some(d) = ds.as_array().unwrap().iter().find(|d| d["message"] == "a new OIDC address (the last one leaked)" && d["status"] == "active") {
+        if let Some(d) = ds.as_array().unwrap().iter().find(|d| d["trigger"] == "rollback" && d["status"] == "active") {
             let (_, b) = visit_deployment(&w, &host(&svc["environments"][0]["url"]), d["id"].as_str().unwrap()).await;
             fresh = b["vars"]["ROLL_OIDC_URL"].as_str().unwrap_or_default().trim_start_matches("http://127.0.0.1:7070").to_string();
             break;

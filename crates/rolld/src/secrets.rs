@@ -1439,6 +1439,69 @@ impl apps_control::integrations::SecretSource for ForApps {
         .await?
     }
 
+    /// A variable's reference into another environment, bound to whoever writes it
+    /// (`Secrets::bind_ref`: they may reveal it for the service now): the maker to keep.
+    async fn bind_ref(&self, who: apps_control::integrations::Asker<'_>, project: &str, service: &str, reference: &str) -> anyhow::Result<String> {
+        let (secrets, _) = self.0.get().cloned().ok_or_else(|| anyhow::anyhow!("roll secrets is starting: try again in a moment"))?;
+        let caller = secrets.caller_of(who.operator, who.user, who.grant).map_err(|e| anyhow::anyhow!("{e}"))?;
+        let (service, reference, _project) = (service.to_string(), reference.to_string(), project.to_string());
+        tokio::task::spawn_blocking(move || {
+            let r = roll_secrets::ResourceRef::new(roll_workspace::Kind::Service, &service);
+            let maker = secrets.bind_ref(&r, &reference, &caller).map_err(|e| anyhow::anyhow!("{e}"))?;
+            Ok(serde_json::to_value(&maker)?.as_str().unwrap_or_default().to_string())
+        })
+        .await?
+    }
+
+    /// A Git login's reference, bound as the service's runtime read in `runtime_env`
+    /// (`Secrets::bind_ref_runtime`; the gate asked for deploy on the service).
+    async fn bind_ref_runtime(&self, who: apps_control::integrations::Asker<'_>, _project: &str, service: &str, reference: &str, runtime_env: &str) -> anyhow::Result<String> {
+        let (secrets, _) = self.0.get().cloned().ok_or_else(|| anyhow::anyhow!("roll secrets is starting: try again in a moment"))?;
+        let caller = secrets.caller_of(who.operator, who.user, who.grant).map_err(|e| anyhow::anyhow!("{e}"))?;
+        let (service, reference, runtime_env) = (service.to_string(), reference.to_string(), runtime_env.to_string());
+        tokio::task::spawn_blocking(move || {
+            let r = roll_secrets::ResourceRef::new(roll_workspace::Kind::Service, &service);
+            let maker = secrets.bind_ref_runtime(&r, &reference, &caller, &runtime_env).map_err(|e| anyhow::anyhow!("{e}"))?;
+            Ok(serde_json::to_value(&maker)?.as_str().unwrap_or_default().to_string())
+        })
+        .await?
+    }
+
+    /// The digest of the folder a bound reference reads, as its maker may now.
+    async fn digest_as(&self, project: &str, env: &str, service: &str, reference: &str, maker: &str) -> anyhow::Result<String> {
+        let (secrets, _) = self.0.get().cloned().ok_or_else(|| anyhow::anyhow!("roll secrets is starting"))?;
+        let (project, env, service, reference) = (project.to_string(), env.to_string(), service.to_string(), reference.to_string());
+        let maker: roll_secrets::Maker = serde_json::from_value(serde_json::Value::String(maker.to_string()))?;
+        tokio::task::spawn_blocking(move || {
+            let caller = roll_secrets::Caller::consumer(&format!("app:{service}"));
+            let untrusted = matches!(secrets.environment(&project, &env, &caller), Ok(e) if e.kind == roll_secrets::EnvironmentKind::Ephemeral && !e.trusted);
+            let mut r = roll_secrets::ResourceRef::new(roll_workspace::Kind::Service, &service);
+            if untrusted {
+                r = r.untrusted();
+            }
+            secrets.digest_as(&r, &reference, &maker).map_err(|e| anyhow::anyhow!("{e}"))
+        })
+        .await?
+    }
+
+    /// That reference's value for the service in `env`, read as its maker may now (untrusted in an
+    /// untrusted preview, as `resolve_ref`).
+    async fn resolve_as(&self, project: &str, env: &str, service: &str, reference: &str, maker: &str) -> anyhow::Result<String> {
+        let (secrets, _) = self.0.get().cloned().ok_or_else(|| anyhow::anyhow!("roll secrets is starting: deploy again in a moment"))?;
+        let (project, env, service, reference) = (project.to_string(), env.to_string(), service.to_string(), reference.to_string());
+        let maker: roll_secrets::Maker = serde_json::from_value(serde_json::Value::String(maker.to_string()))?;
+        tokio::task::spawn_blocking(move || {
+            let caller = roll_secrets::Caller::consumer(&format!("app:{service}"));
+            let untrusted = matches!(secrets.environment(&project, &env, &caller), Ok(e) if e.kind == roll_secrets::EnvironmentKind::Ephemeral && !e.trusted);
+            let mut r = roll_secrets::ResourceRef::new(roll_workspace::Kind::Service, &service);
+            if untrusted {
+                r = r.untrusted();
+            }
+            secrets.resolve_as(&r, &reference, &maker).map(|v| v.value.expose().to_string()).map_err(|e| anyhow::anyhow!("{e}"))
+        })
+        .await?
+    }
+
     async fn may_reveal(&self, who: apps_control::integrations::Asker<'_>, project: &str, env: &str) -> bool {
         let Some((secrets, _)) = self.0.get().cloned() else { return false };
         match secrets.caller_of(who.operator, who.user, who.grant) {

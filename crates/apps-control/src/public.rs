@@ -154,7 +154,8 @@ pub const CONFIG: &str = "/_roll/config/";
 async fn runtime_config(apps: Arc<Apps>, req: Request) -> Response {
     let parts: Vec<String> = req.uri().path()[CONFIG.len()..].split('/').map(|s| percent_encoding::percent_decode_str(s).decode_utf8_lossy().into_owned()).collect();
     let [id, env, token] = parts.as_slice() else { return (StatusCode::NOT_FOUND, "").into_response() };
-    if req.method() != axum::http::Method::GET || !id.starts_with("svc_") || !token.starts_with("rlc_") {
+    // `rlr_` (apps' own secrets), or `rlc_` from before them (still on running instances).
+    if req.method() != axum::http::Method::GET || !id.starts_with("svc_") || !(token.starts_with("rlr_") || token.starts_with("rlc_")) {
         return (StatusCode::NOT_FOUND, "").into_response();
     }
     // A deleted service's (kept for a restore) answers nothing, whatever its token.
