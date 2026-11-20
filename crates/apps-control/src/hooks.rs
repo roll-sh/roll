@@ -38,8 +38,9 @@ impl Apps {
         Some(format!("{}'s {} deploy hook", row.service, row.name))
     }
 
-    /// A leaked instance address (`rlr_`, found wherever roll's secrets are), and a redeploy that
-    /// hands the environment's instances a new one: an OIDC address reads nothing from now on (it
+    /// A leaked instance address (`rlr_`, found wherever roll's secrets are), and the live
+    /// deployment again (a rollback to itself: its own image and settings, never frozen, nothing
+    /// staged since going live but variables) to hand the environment's instances a new one: an OIDC address reads nothing from now on (it
     /// mints the service's cloud tokens; until the redeploy is live they get none), a trace token
     /// takes nothing (a new one is made), a runtime config address is rotated (the old one reads
     /// until the redeploy is live). What was revoked, if it was live.
@@ -60,8 +61,16 @@ impl Apps {
         if let Ok(rt) = tokio::runtime::Handle::try_current() {
             let (this, s, e) = (self.clone(), service.clone(), env.clone());
             rt.spawn(async move {
-                if let Err(err) = this.redeploy(&s, &e, json!({ "message": format!("a new {what} (the last one leaked)") }), Some("roll".into()), None).await {
-                    tracing::warn!(service = %s, env = %e, error = %err, "apps: redeploying after a leaked address");
+                let log = this.logs.sink(format!("env:{s}/{e}"), crate::logs::Stream::System);
+                let (sid, en) = (s.clone(), e.clone());
+                let active = this.db(move |st| st.environment(&sid, &en)).await.ok().and_then(|r| r.active);
+                let done = match active {
+                    Some(a) => this.rollback(&s, &e, &a, Some("roll".into()), true, false).await.map(|_| ()),
+                    None => Ok(()),
+                };
+                match done {
+                    Ok(()) => log.line(format!("a leaked {what} was revoked: the live deployment again, with a new one")),
+                    Err(err) => log.line(format!("a leaked {what} was revoked; deploy to hand the instances a new one ({err})")),
                 }
             });
         }

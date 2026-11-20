@@ -164,6 +164,11 @@ pub trait SecretSource: Send + Sync {
     async fn bind_ref_runtime(&self, _who: Asker<'_>, _project: &str, _service: &str, _reference: &str, _runtime_env: &str) -> anyhow::Result<String> {
         anyhow::bail!("roll secrets isn't on this node")
     }
+    /// The digest of the folder a bound reference reads, as `maker` may now (no value, not
+    /// audited): what marks the environment as needing a deploy when it changes.
+    async fn digest_as(&self, _project: &str, _env: &str, _service: &str, _reference: &str, _maker: &str) -> anyhow::Result<String> {
+        anyhow::bail!("roll secrets isn't on this node")
+    }
     /// `reference`'s value for `service` deployed in `env`, read as `maker` may now (each read
     /// checks again that they can sign in, reach the project and reveal the folder).
     async fn resolve_as(&self, _project: &str, _env: &str, _service: &str, _reference: &str, _maker: &str) -> anyhow::Result<String> {

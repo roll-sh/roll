@@ -2158,7 +2158,8 @@ impl EnvLive {
             && let Some(i) = insts.iter().filter(|i| matches!(i.phase(), Phase::Running(_)) && i.in_flight() == 0).min_by_key(|i| *i.last_used.lock())
             && self.claim_idle(i).is_some()
         {
-            let _ = self.runtime.stop(&i.name, Duration::from_secs(10)).await;
+            // SIGTERM, then the service's own drain to flush what it holds (`drain_s`).
+            let _ = self.runtime.stop(&i.name, self.drain_of(run)).await;
             *i.phase.lock() = Phase::Created;
             awake -= 1;
             *self.over_since.lock() = None;
@@ -2181,7 +2182,7 @@ impl EnvLive {
                 Phase::Running(addr) if awake > run.min_instances => {
                     if idle >= sleep_after || (!self.runtime.can_suspend() && idle >= suspend_after.max(sleep_after)) {
                         if self.claim_idle(i).is_some() {
-                            let _ = self.runtime.stop(&i.name, Duration::from_secs(10)).await;
+                            let _ = self.runtime.stop(&i.name, self.drain_of(run)).await;
                             *i.phase.lock() = Phase::Created;
                             awake -= 1;
                         }
@@ -2191,7 +2192,7 @@ impl EnvLive {
                     }
                 }
                 Phase::Suspended(_) if idle >= sleep_after && awake > run.min_instances && self.claim_idle(i).is_some() => {
-                    let _ = self.runtime.stop(&i.name, Duration::from_secs(10)).await;
+                    let _ = self.runtime.stop(&i.name, self.drain_of(run)).await;
                     *i.phase.lock() = Phase::Created;
                     awake -= 1;
                 }
