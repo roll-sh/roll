@@ -4,6 +4,7 @@ import { matchesTerms, splitFilter } from "@/lib/log-where";
 import type { WorkspaceProject } from "@/lib/workspace-api";
 import { btn, input, panel } from "../ui";
 import { clock, lineTone } from "./shared";
+import { usePageVisible } from "./live";
 
 /** Lines kept on screen, newest last. */
 const KEEP = 2000;
@@ -34,7 +35,10 @@ export function ProjectLogs({ project }: { project: WorkspaceProject }) {
   const following = useMemo(() => (services ?? []).filter((s) => s.environments.some((e) => e.name === envName)), [services, envName]);
   const ids = following.map((s) => s.id).join(",");
 
+  // A tab nobody sees follows nothing; shown again, it reads the newest lines afresh.
+  const visible = usePageVisible();
   useEffect(() => {
+    if (!visible) return;
     setLines([]);
     const stops = following.map((s) =>
       followLog(
@@ -59,7 +63,7 @@ export function ProjectLogs({ project }: { project: WorkspaceProject }) {
     );
     return () => stops.forEach((stop) => stop());
     // Restarted when the set of services or the environment changes, not on every poll.
-  }, [ids, envName]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [ids, envName, visible]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const split = useMemo(() => splitFilter(filter), [filter]);
   const shown = useMemo(() => {
