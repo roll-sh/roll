@@ -246,11 +246,18 @@ impl<'a> Jwt<'a> {
         claims.iter().find(|(key, want)| !self.matches(key, want)).map(|(key, _)| key.as_str())
     }
 
-    /// Whether the claim `key` names (see [`claim`]) matches `pattern`: a string by
-    /// [`wildcard`], a number or a boolean by its JSON text (`true`, `42`), an array when any of
-    /// its first [`MAX_CLAIM_ELEMENTS`] elements does (one level: an array in an array, an
-    /// object or null never matches). A missing claim never matches.
+    /// Whether the claim `key` names (see [`claim`]) matches `pattern`.
+    ///
+    /// A plain name (`ref`) matches only a string claim by [`wildcard`], exactly as rules did
+    /// before pointers: a rule made then never starts matching a list or a number it used to
+    /// refuse. A pointer (`/groups`) opts into more: a string by [`wildcard`], a number or a
+    /// boolean by its JSON text (`true`, `42`), an array when any of its first
+    /// [`MAX_CLAIM_ELEMENTS`] elements does (one level: an array in an array, an object or null
+    /// never matches). A missing claim never matches.
     pub fn matches(&self, key: &str, pattern: &str) -> bool {
+        if !key.starts_with('/') {
+            return self.str(key).is_some_and(|s| wildcard(pattern, s));
+        }
         let one = |v: &Json| match v {
             Json::String(s) => wildcard(pattern, s),
             Json::Number(_) | Json::Bool(_) => wildcard(pattern, &v.to_string()),
@@ -588,9 +595,12 @@ mod tests {
             "ref": "refs/heads/main", "a/b": { "c~d": "x" }, "run_attempt": 2, "email_verified": true, "nested": [["deployer"]],
         }));
         // A nested array (Keycloak's), a top-level one (Entra's groups, GitLab's groups_direct),
-        // a plain name as before, and numbers and booleans by their JSON text.
+        // a plain name as before, and, by pointer, numbers and booleans by their JSON text.
         assert_eq!(t.unmatched(&rules(&[("/realm_access/roles", "deployer"), ("/groups", "team-*"), ("ref", "refs/heads/*")])), None);
-        assert!(t.matches("groups", "ops") && t.matches("/run_attempt", "2") && t.matches("email_verified", "true") && t.matches("/groups/1", "team-web"));
+        assert!(t.matches("/groups", "ops") && t.matches("/run_attempt", "2") && t.matches("/email_verified", "true") && t.matches("/groups/1", "team-web"));
+        // A plain name matches only a string, as rules made before pointers did: one on a claim a
+        // token sends as a list or a number doesn't start letting it in.
+        assert!(!t.matches("groups", "ops") && !t.matches("run_attempt", "2") && !t.matches("email_verified", "true"));
         // No match: a role it doesn't have, a missing claim, an object, an array in an array.
         assert_eq!(t.unmatched(&rules(&[("/groups", "ops"), ("/realm_access/roles", "admin")])), Some("/realm_access/roles"));
         assert!(!t.matches("/realm_access/missing", "*") && !t.matches("/realm_access", "*") && !t.matches("/nested", "deployer"));

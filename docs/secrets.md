@@ -4063,9 +4063,12 @@ minutes.
   into nested claims: `{"/realm_access/roles": "deployer"}` for Keycloak's realm roles,
   `{"/groups": "team-*"}` for Entra ID's `groups` or `roles`, `{"/groups_direct": "acme/ops"}` for
   GitLab's. In a pointer `~1` stands for `/` and `~0` for `~`, and a decimal segment indexes an
-  array (`/groups/0`). An array claim matches when any of its first 256 elements does (one level:
-  an array inside an array never matches). Numbers and booleans match their JSON text (`2`,
-  `true`); an object, `null` or a missing claim never matches. A pointer has at most 8 segments,
+  array (`/groups/0`). Through a pointer, an array claim matches when any of its first 256
+  elements does (one level: an array inside an array never matches), and numbers and booleans
+  match their JSON text (`2`, `true`). A plain name matches only a string claim, as rules made
+  before pointers did, so an existing rule never starts matching a list or a number it used to
+  refuse: write `/groups`, not `groups`, to match a list. An object, `null` or a missing claim
+  never matches. A pointer has at most 8 segments,
   none empty, and can't start at `iss`, `aud`, `sub`, `exp`, `nbf` or `iat`. Claims only narrow
   the subject: a shared issuer's subject still names one tenant, whatever the claims say. The rules
   are `roll_oidc::check_identity` and `Jwt::unmatched`, which roll-access's trusted machine clients
