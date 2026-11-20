@@ -17467,3 +17467,65 @@ clippy (16 warnings, none new), tests 417 passed in 18 binaries, the same 417 wi
 
 Left in the GIN group: GiST / SP-GiST costs of box and tsvector operators (gistcostestimate's
 details), `a <@ '{3,4,5}'`'s row estimate (arraycontsel for `<@`, 10 against PostgreSQL's 6).
+
+### Round 1, second candidate (`cand/a273-2`, on top of the first)
+
+- **rangesel / multirangesel** (`sql/costs/rangesel.rs`): a range or multirange column against a
+  constant from its bounds histogram (`<`, `<=`, `>`, `>=`, `<<`, `>>`, `&<`, `&>`, `&&`, `@>` of an
+  element) and its length histogram (`@>`, `<@`), with the empty fraction, a constant empty range,
+  commuted operators (`&<` / `&>` have no commutator: 0.01 as PostgreSQL's operator 0) and a
+  multirange constant's span. Before, these operators had their fixed defaults. multirangesel
+  doesn't read the length histogram for a multirange `<@` a range (its list leaves out
+  OID_RANGE_MULTIRANGE_CONTAINED_OP), so every length fraction is 1 there; the engine does the same.
+- **Arrays of varlena elements padded after each element** (`relsize::datum_bytes`,
+  `sizing::array_bytes`), as construct_md_array pads them: `'{a}'::text[]` is 29 bytes stored (was
+  26), so pg_column_size, pg_stats.avg_width and the heap pages of tables with `text[]` /
+  `varchar[]` columns are PostgreSQL's (arrays.sql's `array_op_test` rows are 185 wide, were 184).
+- ANALYZE's range length is 1.0 for a range type without subtype_diff (compute_range_stats), was 0.
+- **Estimates evaluate built-in immutable or stable calls of constants** (`Est::constant`, with
+  the planner's context): `a @@ to_tsquery('345&qwerty')` is estimated from the tsvector's
+  statistics as estimate_expression_value lets tsmatchsel do (it was rows 1); tsmatchsel of a value
+  known only when run is DEFAULT_TS_MATCH_SEL (it was 0).
+- Golden `a273_estimates`.
+
+Regression files' EXPLAINs, both candidates on `289212e3d`: 300 more of the 17,654 match than on
+the base, none newly differ (2,479 differ: catalogs 989, errors 43, cost 655, width 239, rows 220,
+extra-node 121, display 117, other shapes 38, sort-agg 24, join-order 22, scan 8, join-method 3).
+(Two catalog plans differed in one run because probes had left a database in that engine; both
+match on a fresh one.) TPC-H: base against new on SF 0.05 (`~/.cache/a273/tpchplans.sh`), 22 of
+22 plans identical, costs x1.000. Verification: quick-check with `QC_CHECKED=1` on `2be7e3a83`:
+build, clippy (16 warnings, none new), tests 418 passed in 18 binaries, the same 418 with
+`--profile verify-checked`, regress 51,148 / 51,150 with 0 newly differing, isolation 1,647 /
+1,648, pg_dump 14,609 passed. (An earlier quick-check failed clippy, identical `if` arms in
+rangesel.rs, and then golden `gpl_n_append_misc`, the dropped change below.)
+
+Dropped: **a Result over an inheritance tree's Append** computing the query's values without
+VERBOSE (PostgreSQL shows it; the engine only under VERBOSE): 14 more regress plans matched, but
+`paths.rs` `minmax_aggs` chooses between the MIN / MAX InitPlans and the plain aggregation by
+`explain::estimate`, so the change moved that choice: golden `gpl_n_append_misc`'s
+`min(1 - id)` over an inheritance tree became a plain Aggregate. Patch:
+`~/.cache/a273/patches/inheritance-result-over-append.patch`. Taking it needs the minmax costing
+to see the same Result PostgreSQL's create_minmaxagg_path costs (its Limit over a Result over the
+Merge Append), not only EXPLAIN's display.
+
+Found, not fixed:
+- **Hash join bucket size of a `char` key from a join's nullable side** (planner costing, so plan
+  choice): `create table a (code char primary key); create table b (a char not null, num int not
+  null, primary key (a, num)); create table c (name char primary key, a char); explain select *
+  from c left join a on c.a = a.code left join b on a.code = b.a;` costs the top Hash Right Join
+  117.34..813.29 (PostgreSQL 117.34..172.09): the bucket size of `a.code` is the 0.1 default where
+  PostgreSQL takes a.code's unique index (1 / 2048). The same with `int` columns matches, as does a
+  join of `c` and `a` alone. Start at `JoinSearch::join_var` / `joins::bucket_stats`.
+- **Join removal of a left join to a grouped subquery** (`... left join (select count(1) as cnt,
+  b.a from b group by b.a) b_grp on a.code = b_grp.a` with nothing of `b_grp` read):
+  PostgreSQL removes it (rel_is_distinct_for through the GROUP BY), the engine keeps it.
+- **EXPLAIN's row count of a three-way equijoin** (`c join (a join b on a.code = b.a) on c.a =
+  a.code`, int columns, empty tables): 25,538 shown against 2,003; the plan and its cost are
+  PostgreSQL's (the planner used 2,003), EXPLAIN's own join estimate takes another pair of the
+  equivalence class (b.a = c.a, 1/200) where PostgreSQL's takes a.code (unique, 1/2,550).
+- Other groups, largest first: one-row Result costs (102: SQL functions PostgreSQL inlines to
+  constants, hashed IN lists' startup, coercions' costs), GiST / SP-GiST box and tsvector scan
+  costs (85), Seq Scan costs (69, spread: tablespaces, generated columns, inet), Seq Scan widths
+  (69: columns read through views and functions), geometric operators' row estimates (10 of 58),
+  user aggregates' transition costs (shared transition states, SQL transition functions: 24 in
+  aggregates.sql), Function Scan rows of set-returning SQL functions (46).
