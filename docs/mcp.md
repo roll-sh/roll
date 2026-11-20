@@ -882,6 +882,9 @@ previews are listed once those products are on.
 | `secrets_rotate` | A new value for a secret, switched to: a generated one, or a managed link's, made where it lives. | `POST …/environments/{env}/secrets/{name}/rotate` |
 | `secrets_promote` | Copy another environment's secrets in (a change request into a protected one). | `POST …/environments/{env}/promote` |
 | `secrets_list_requests` | An environment's change requests. | `GET …/environments/{env}/requests` |
+| `secrets_request_value` | A link where a person pastes a value the agent doesn't have, sealed in their browser into the folder, never through the conversation (one answer and a day by default; it answers an `rlq_` token, and a link when roll knows the dashboard's address; either goes only to the person it's for). | `POST /v1/secrets/projects/{project}/environments/{env}/value-requests` |
+| `secrets_list_value_requests` | A project's value requests and their state (open, answered, expired, cancelled; never a value). | `GET /v1/secrets/projects/{project}/value-requests` |
+| `secrets_cancel_value_request` | Close a value request's link. | `DELETE /v1/secrets/projects/{project}/value-requests/{id}` |
 | `secrets_get_request` | One change request: what it changes, reviews, whether approvals are met. | `GET /v1/secrets/projects/{project}/environments/{env}/requests/{id}` |
 | `secrets_apply_request` | Apply an approved change request (never with bypass). | `POST /v1/secrets/projects/{project}/environments/{env}/requests/{id}/apply` |
 | `secrets_close_request` | Withdraw a change request. | `POST /v1/secrets/projects/{project}/environments/{env}/requests/{id}/close` |

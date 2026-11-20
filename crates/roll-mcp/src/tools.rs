@@ -389,6 +389,12 @@ const fn t(name: &'static str, title: &'static str, description: &'static str, p
     Tool { name, title, description, product, method, path, params, fixed: None, wrap: None, hint: Hint::Auto, until: None, outside: &[], published: false, open_world: false, bodiless: false }
 }
 
+/// A value request takes one answer and lasts a day unless asked otherwise: the link is a way to
+/// write those keys (the API's own default is a week).
+fn value_request_defaults() -> Value {
+    json!({ "ttl_minutes": 1440, "answers": 1 })
+}
+
 /// A tasks run that's over (`completed`, `failed` or `canceled`).
 fn run_over(v: &Value) -> bool {
     matches!(v["status"].as_str(), Some("completed" | "failed" | "canceled"))
@@ -1053,6 +1059,9 @@ static TOOLS: &[Tool] = &[
         "/v1/secrets/projects/{project}/environments/{env}/secrets/{name}/versions/{v}/value",
         &[SECRET_PROJECT, ENV, req("name", "Secret name"), req_int("v", "Version number"), q("path", Ty::Str, "Folder")],
     ),
+    t("secrets_request_value", "Ask a person for an API key or other secret value", "When you need a value you don't have (a vendor's API key, a webhook secret), don't ask for it in the chat: this answers a link where the person pastes it, sealed in their browser and written straight into the folder, so it never passes through the conversation. The link is set when roll knows the dashboard's address; the token (rlq_…) always comes back, and the page is <dashboard>/request/<token>. Give the link or token only to the person it's for, in a message to them: whoever opens it first can send values for these keys, and roll refuses to write either where others read (a repo, an issue, a comment). By default it takes one answer and expires in a day. An answer lands as a change by request:<id> on behalf of whoever asked (a change request in a protected environment), so it can be seen and rolled back. Follow it with secrets_list_value_requests.", "secrets", "POST", "/v1/secrets/projects/{project}/environments/{env}/value-requests", &[SECRET_PROJECT, ENV, q("path", Ty::Str, "Folder, e.g. /api (the root when left out)"), breq("keys", Ty::Arr, "1-20 key names to ask for"), b("note", Ty::Str, "What it's for, shown on the page (never the project or who asked)"), b("ttl_minutes", Ty::Int, "Minutes until it expires (5-43200; default 1440, a day)"), b("answers", Ty::Int, "How many times it may be answered (1-10; default 1)")]).fixed(value_request_defaults),
+    t("secrets_list_value_requests", "List secret value requests", "A project's value requests, newest first: keys, folder, whether each is open, answered, expired or cancelled, and what an answer became (a change or a change request). Never a value.", "secrets", "GET", "/v1/secrets/projects/{project}/value-requests", &[SECRET_PROJECT]),
+    t("secrets_cancel_value_request", "Cancel a secret value request", "Close a value request so its link stops working (whoever asked, or an admin of the folder).", "secrets", "DELETE", "/v1/secrets/projects/{project}/value-requests/{id}", &[SECRET_PROJECT, req("id", "Value request id")]),
     t("secrets_renew_lease", "Renew a lease", "Push a dynamic credential's expiry out, as a long-running consumer does instead of restarting.", "secrets", "POST", "/v1/secrets/projects/{project}/leases/{id}/renew", &[SECRET_PROJECT, req("id", "Lease id"), b("ttl_minutes", Ty::Int, "Minutes from now")]),
     t("secrets_reach", "Who reaches a secret", "Which tokens and identities reach an environment's folder or key, whether code nobody vetted can, where it flows (syncs, shares, imports) and who read it in 30 days: names only. Who has to rotate what after a leak (the project admin's).", "secrets", "GET", "/v1/secrets/projects/{project}/environments/{env}/reach", &[SECRET_PROJECT, ENV, q("path", Ty::Str, "Folder"), q("key", Ty::Str, "One key")]),
     t("secrets_folder_policies", "Folder approval policies", "An environment's approval policies per folder: who must approve a change there.", "secrets", "GET", "/v1/secrets/projects/{project}/environments/{env}/folder-policies", &[SECRET_PROJECT, ENV, q("path", Ty::Str, "Folder")]),
@@ -1545,6 +1554,13 @@ mod tests {
         for n in ["postgres_explain", "postgres_slow_queries", "postgres_advisors", "postgres_list_extensions"] {
             assert_eq!(def(n)["annotations"]["readOnlyHint"], true, "{n}");
         }
+        // A value request's link writes those keys: one answer and a day unless the agent asks for more.
+        let ask = all().iter().find(|t| t.name == "secrets_request_value").unwrap();
+        let r = ask.request(&json!({ "project": "prj_a", "env": "production", "path": "/api", "keys": ["STRIPE_KEY"] })).unwrap();
+        assert_eq!(r.uri, "/v1/secrets/projects/prj_a/environments/production/value-requests?path=%2Fapi");
+        assert!(matches!(r.body, Built::Json(ref b) if b["ttl_minutes"] == 1440 && b["answers"] == 1 && b["keys"][0] == "STRIPE_KEY"));
+        let r = ask.request(&json!({ "project": "prj_a", "env": "production", "keys": ["A"], "answers": 3 })).unwrap();
+        assert!(matches!(r.body, Built::Json(ref b) if b["answers"] == 3 && b["ttl_minutes"] == 1440));
         // Skipping a protected environment's approvals is a person's: an agent applies only what's approved.
         assert!(all().iter().find(|t| t.name == "secrets_apply_request").unwrap().request(&json!({ "project": "prj_a", "env": "production", "id": "req_a", "bypass": true })).is_err());
         // A field is cleared only when `clear` names it: a null is left out (a client that fills

@@ -334,6 +334,7 @@ mod finds {
             ("roll back secrets", "secrets_rollback"),
             ("which secrets nobody reads", "secrets_insights"),
             ("was the secrets audit log tampered with", "secrets_verify_audit"),
+            ("ask a person for an api key", "secrets_request_value"),
             ("who changed this secret and when", "secrets_audit"),
             ("one-time code", "secrets_totp"),
             ("vulnerabilities in my image", "apps_deploy_vulnerabilities"),
