@@ -269,7 +269,10 @@ pub struct RegressionsAccepted {
 impl RegressionsAccepted {
     /// The regressions a record shows, as an acceptance names them.
     pub fn of(routes: Option<&SlowerRoutes>, errors: Option<&NewErrors>) -> Vec<String> {
-        let mut what: Vec<String> = routes.iter().flat_map(|s| s.routes.iter().map(|r| format!("route:{}", r.name))).chain(errors.iter().flat_map(|n| n.errors.iter().map(|e| format!("error:{}:{}", e.service, e.title)))).collect();
+        let mut what: Vec<String> = routes
+            .iter()
+            .flat_map(|s| s.routes.iter().flat_map(|r| std::iter::once(format!("route:{}", r.name)).chain(r.budget_ms.map(|b| format!("budget:{}:{b}", r.name)))))
+            .chain(errors.iter().flat_map(|n| n.errors.iter().map(|e| format!("error:{}:{}", e.service, e.title)))).collect();
         what.sort();
         what.dedup();
         what

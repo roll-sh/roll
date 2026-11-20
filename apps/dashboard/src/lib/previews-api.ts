@@ -240,14 +240,18 @@ export interface SpeedBudget {
   routes?: Record<string, number>;
 }
 
-/** `GET /orders 300` lines → `{ "GET /orders": 300 }`: a route, then its p50 budget in ms. */
-export function parseRouteBudgets(text: string): Record<string, number> {
-  const out: Record<string, number> = {};
-  for (const line of text.split("\n")) {
-    const m = line.trim().match(/^(.+?)\s+(\d+)\s*(?:ms)?$/);
-    if (m) out[m[1].trim()] = Number(m[2]);
+/** `GET /orders 300` lines → `{ "GET /orders": 300 }` (in name order, as the server keeps them):
+ * a route, then its p50 budget in ms. `bad`: the lines that aren't one, to say so. */
+export function parseRouteBudgets(text: string): { routes: Record<string, number>; bad: string[] } {
+  const found: [string, number][] = [];
+  const bad: string[] = [];
+  for (const line of text.split("\n").map((l) => l.trim()).filter(Boolean)) {
+    const m = line.match(/^(.+?)\s+(\d+)\s*(?:ms)?$/);
+    if (m) found.push([m[1].trim(), Number(m[2])]);
+    else bad.push(line);
   }
-  return out;
+  found.sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0));
+  return { routes: Object.fromEntries(found), bad };
 }
 
 export const routeBudgetLines = (routes: Record<string, number> | undefined) =>

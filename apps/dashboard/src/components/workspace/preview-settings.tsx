@@ -172,7 +172,7 @@ function Form({
       widths: words(widths).map(Number),
       openapi: openapi.trim() || null,
       endpoints: words(endpoints),
-      budget: { ...(s.github.budget ?? { load_ms: 0, bytes: 0 }), routes: parseRouteBudgets(routeBudgets) },
+      budget: { ...(s.github.budget ?? { load_ms: 0, bytes: 0 }), routes: parseRouteBudgets(routeBudgets).routes },
       states: parseStates(states),
       hide: hide
         .split("\n")
@@ -189,6 +189,11 @@ function Form({
   const prod = isProduction(s.secrets.base);
 
   const save = async () => {
+    const unread = parseRouteBudgets(routeBudgets).bad;
+    if (unread.length) {
+      setError(`Route budgets: a line is a route then its milliseconds (GET /orders 300); not ${unread.map((l) => `"${l}"`).join(", ")}`);
+      return;
+    }
     setBusy(true);
     setError(null);
     try {

@@ -1265,8 +1265,11 @@ Route budgets (Lighthouse CI's budgets beside its comparisons): a project's
 `github.budget.routes` (`{"GET /orders": 300}`, the rules dialog's "Route budgets", at most 50,
 each 1 to 600000 ms) holds a route (a trace's root span name) to a p50 of its own over the last
 hour's traces (5 traces at least). A route over it joins the record's `slower_routes` with its
-`budget_ms`, whether or not main's preview is slower or there at all, so it counts wherever
-slower routes count: the verdict strip (danger), the change page, the pull request's comment
+`budget_ms`, whether or not main's preview is slower or there at all (a route over it stays over
+until it's back under 90% of it, at that head, so one at its line doesn't flip every round), so it
+counts wherever slower routes count, and with no comparison with main needed (`roll/regressions`
+fails and the blocker waits on it alone, and it can be accepted; an acceptance names each budget, so
+a changed budget asks again): the verdict strip (danger), the change page, the pull request's comment
 ("budget 300 ms"), `roll/regressions` and, required, the blocker; `…/routes` rows carry `budget_ms`
 and `over_budget`, and the sheet's route table says each budget. `a_route_slower_than_mains_reaches_the_record_and_the_report`.
 

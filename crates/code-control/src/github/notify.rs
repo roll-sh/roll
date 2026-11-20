@@ -459,7 +459,10 @@ fn regressions_status(e: &crate::model::PreviewEnvironment) -> Option<(&'static 
     e.regressions.as_ref()?;
     // Nothing is said clean before it was compared at this head (main's preview asleep elsewhere,
     // or the first read still to come).
-    if !e.regressions_compared {
+    // A route over its budget fails without main's preview; anything else waits for the comparison.
+    // (Accepted, it's back to waiting for the comparison: nothing is said clean before it.)
+    let over_budget = e.slower_routes.as_ref().is_some_and(|s| s.routes.iter().any(|x| x.budget_ms.is_some()));
+    if !e.regressions_compared && !(over_budget && e.regressions_accepted_by.is_none()) {
         return Some(("pending", "Comparing with main's preview (a few minutes after the preview is ready)".into()));
     }
     let routes = e.slower_routes.as_ref().map_or(0, |s| s.routes.len());
@@ -934,6 +937,9 @@ fn routes_line(s: &crate::model::PreviewSlowerRoutes, branch: &str) -> String {
             // Where its time went: the span that grew most against the branch's.
             let why = x.grew.as_ref().map(|(s, ms, main)| format!(", `{}` {ms} ms ({branch} {main} ms)", span(s))).unwrap_or_default();
             let budget = x.budget_ms.map(|b| format!(", budget {b} ms")).unwrap_or_default();
+            if x.main_p50_ms == 0 {
+                return format!("`{}` {} ms ({}{why})", span(&x.name), x.p50_ms, budget.trim_start_matches(", "));
+            }
             format!("`{}` {} ms ({branch} {} ms{budget}{why})", span(&x.name), x.p50_ms, x.main_p50_ms)
         })
         .collect();
@@ -1226,6 +1232,12 @@ mod preview_tests {
         assert_eq!(regressions_status(&timed), None, "no rule, no status");
         timed.regressions = Some("check".into());
         assert_eq!(regressions_status(&timed).map(|s| s.0), Some("pending"), "not compared at this head yet");
+        // Over a budget fails without main's preview, said without a main time it hasn't got.
+        let budgeted = crate::model::PreviewSlowerRoutes { branch: "main".into(), routes: vec![crate::model::PreviewSlowerRoute { name: "GET /new".into(), p50_ms: 400, main_p50_ms: 0, grew: None, budget_ms: Some(300) }] };
+        let mut over = timed.clone();
+        over.slower_routes = Some(budgeted.clone());
+        assert_eq!(regressions_status(&over).map(|s| s.0), Some("failure"), "over budget without a comparison");
+        assert_eq!(routes_line(&budgeted, "main"), "Routes slower than on `main`'s preview or over their budget (the median of the last hour's traces): `GET /new` 400 ms (budget 300 ms).\n\n");
         timed.regressions_compared = true;
         assert_eq!(regressions_status(&timed), Some(("failure", "1 route slower than main".into())));
         timed.regressions_accepted_by = Some("ada".into());

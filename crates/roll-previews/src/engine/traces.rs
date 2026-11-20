@@ -519,7 +519,18 @@ impl Engine {
                 }
                 None => ("main".to_string(), None, compare_routes(&mine, &[])),
             };
-            let over = |c: &RouteCompared| budget.get(&c.name).map(|b| u64::from(*b)).filter(|b| c.count >= MIN_SAMPLES && c.p50 > *b);
+            // Over a budget at this head stays over until clearly under it (90%): a route at its line
+            // doesn't flip the status (and the blocker) every round.
+            let before: Option<crate::SlowerRoutes> = self.store.runtime_fact::<crate::SlowerRoutes>(&r.id, "slower_routes").ok().flatten().filter(|f| f.head == r.head);
+            let masked_now = self.routes_masked.lock().get(&r.id).cloned().unwrap_or_default();
+            let was_over: std::collections::HashSet<String> = before
+                .iter()
+                .flat_map(|f| f.routes.iter().filter(|x| x.budget_ms.is_some()).map(|x| x.name.clone()))
+                .flat_map(|shown| masked_now.iter().filter(move |(_, m)| **m == shown).map(|(raw, _)| raw.clone()))
+                .collect();
+            let over = |c: &RouteCompared| {
+                budget.get(&c.name).map(|b| u64::from(*b)).filter(|b| c.count >= MIN_SAMPLES && (c.p50 > *b || (was_over.contains(&c.name) && c.p50 * 10 > b * 9)))
+            };
             let mut slower: Vec<(RouteCompared, Option<u64>)> = compared
                 .into_iter()
                 .filter_map(|c| {
@@ -561,7 +572,7 @@ impl Engine {
             }
         };
         let names = |f: &Option<crate::SlowerRoutes>| {
-            let mut n: Vec<String> = f.iter().flat_map(|s| s.routes.iter().map(|x| x.name.clone())).collect();
+            let mut n: Vec<String> = f.iter().flat_map(|s| s.routes.iter().map(|x| format!("{}\0{:?}", x.name, x.budget_ms))).collect();
             n.sort();
             n
         };

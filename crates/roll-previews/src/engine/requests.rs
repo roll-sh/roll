@@ -540,7 +540,9 @@ impl Engine {
         // Something compared at this head to accept: what it is goes with the acceptance.
         let view = self.store.view(r.clone())?;
         let what = crate::RegressionsAccepted::of(view.slower_routes.as_ref(), view.new_errors.as_ref());
-        if !view.regressions_compared || what.is_empty() {
+        // Routes over their budget need no comparison with main to be accepted.
+        let only_budgets = view.new_errors.is_none() && view.slower_routes.as_ref().is_some_and(|s| s.routes.iter().all(|x| x.budget_ms.is_some()));
+        if (!view.regressions_compared && !only_budgets) || what.is_empty() {
             return Err(Error::Conflict("nothing to accept: it has no regressions against main's preview at this push (or isn't compared yet)".into()));
         }
         let at = self.store.now_ms()?;

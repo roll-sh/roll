@@ -678,7 +678,7 @@ fn merge(into: &mut Value, patch: &Value) {
                 match a.get_mut(k) {
                     // `resources`, `env`, `env_for` and `masking` are maps: a patch replaces them
                     // whole, so a key can be removed.
-                    Some(slot) if v.is_object() && !matches!(k.as_str(), "resources" | "env" | "env_for" | "masking") => merge(slot, v),
+                    Some(slot) if v.is_object() && !matches!(k.as_str(), "resources" | "env" | "env_for" | "masking" | "routes") => merge(slot, v),
                     _ => {
                         a.insert(k.clone(), v.clone());
                     }
@@ -740,6 +740,10 @@ mod tests {
         let two = Settings::default().patched(&json!({ "env_for": { "feat/*": { "A": "1", "B": "2" } } })).unwrap();
         let one = two.patched(&json!({ "env_for": { "feat/*": { "A": "1" } } })).unwrap();
         assert_eq!(one.env_for["feat/*"].len(), 1);
+        // Route budgets too: a route taken out of them goes.
+        let two = Settings::default().patched(&json!({ "github": { "budget": { "routes": { "GET /a": 300, "GET /b": 200 } } } })).unwrap();
+        let one = two.patched(&json!({ "github": { "budget": { "routes": { "GET /b": 200 } } } })).unwrap();
+        assert_eq!(one.github.budget.routes.keys().collect::<Vec<_>>(), ["GET /b"]);
         let r = Settings::default().patched(&json!({ "resources": { "redis:rdb_1": "skip", "nosql:n1": "schema" } })).unwrap();
         assert_eq!(r.mode_of(Kind::Redis, "rdb_1"), None);
         assert_eq!(r.mode_of(Kind::Nosql, "n1"), Some(Mode::Schema));
