@@ -21,7 +21,6 @@ GET /v1/apps/services/{id}/environments/{env}/files                          int
 PUT /v1/apps/services/{id}/environments/{env}/files                          interactive (a shell, files, a forward): an admin's, live
 DELETE /v1/apps/services/{id}/environments/{env}/hook                        answers or sets a credential (a deploy hook's secret)
 POST /v1/apps/services/{id}/environments/{env}/hook                          answers or sets a credential (a deploy hook's secret)
-GET /v1/apps/services/{id}/environments/{env}/push                           no tool yet: apps_push_status maps it once it lands (apps' push status)
 GET /v1/apps/services/{id}/environments/{env}/shell                          interactive (a shell, files, a forward): an admin's, live
 POST /v1/apps/services/{id}/environments/{env}/shell/sessions                interactive (a shell, files, a forward): an admin's, live
 DELETE /v1/apps/services/{id}/environments/{env}/shell/sessions/{sh}         interactive (a shell, files, a forward): an admin's, live
@@ -48,7 +47,6 @@ DELETE /v1/previews/projects/{project}/bypass                                ans
 GET /v1/previews/projects/{project}/bypass                                   answers or sets a credential
 POST /v1/previews/projects/{project}/bypass                                  answers or sets a credential
 POST /v1/previews/projects/{project}/hooks                                   answers or sets a credential (a deploy hook's secret)
-PUT /v1/previews/projects/{project}/settings                                 no tool yet: a project's preview rules
 POST /v1/previews/{id}/approve                                               a person's call (approving, accepting, cutting off)
 PUT /v1/previews/{id}/env                                                    answers or sets a credential (a preview's env is reveal)
 GET /v1/previews/{id}/errors/count                                           the dashboard's (a row's count; previews_errors has the groups)
@@ -128,12 +126,10 @@ PUT /v1/secrets/projects/{project}/environments/{env}/folder-policies        a p
 PUT /v1/secrets/projects/{project}/environments/{env}/policy                 a person's call: an environment's protection and approvers
 DELETE /v1/secrets/projects/{project}/environments/{env}/reach/cut-off       a person's call (approving, accepting, cutting off)
 POST /v1/secrets/projects/{project}/environments/{env}/reach/cut-off         a person's call (approving, accepting, cutting off)
-GET /v1/secrets/projects/{project}/environments/{env}/requests/{id}          no tool yet: a value request (with #277's tools)
-POST /v1/secrets/projects/{project}/environments/{env}/requests/{id}/apply   no tool yet: a value request (with #277's tools)
-POST /v1/secrets/projects/{project}/environments/{env}/requests/{id}/close   no tool yet: a value request (with #277's tools)
 POST /v1/secrets/projects/{project}/environments/{env}/requests/{id}/review  a person's call (reviewing what someone sent)
 GET /v1/secrets/projects/{project}/environments/{env}/requests/{id}/values   answers or sets a credential (a request's values)
 POST /v1/secrets/projects/{project}/environments/{env}/resolve               answers or sets a credential (resolved values)
+POST /v1/secrets/projects/{project}/environments/{env}/value-requests        no tool yet: value requests (roll MCP adds the tools after batch 5)
 POST /v1/secrets/projects/{project}/environments/{env}/secrets/{name}/purge  a person's call (a secret's history gone for good)
 POST /v1/secrets/projects/{project}/gateways                                 an outside integration's setup: an admin's, with its credentials
 DELETE /v1/secrets/projects/{project}/gateways/{id}                          an outside integration's setup: an admin's, with its credentials
@@ -171,6 +167,8 @@ POST /v1/secrets/projects/{project}/syncs/{id}/run                           an 
 DELETE /v1/secrets/projects/{project}/transit/{name}                         a person's call: every ciphertext of the key stops opening
 GET /v1/secrets/projects/{project}/unstored/{fingerprint}                    no tool yet: a found credential's kind, place and liveness, never its value (#487)
 POST /v1/secrets/projects/{project}/validity                                 a person's call: it contacts outside providers (#487)
+GET /v1/secrets/projects/{project}/value-requests                            no tool yet: value requests (roll MCP adds the tools after batch 5)
+DELETE /v1/secrets/projects/{project}/value-requests/{id}                    no tool yet: value requests (roll MCP adds the tools after batch 5)
 GET /v1/secrets/whoami                                                       the operator's (health, migrations, process control)
 * /v1/storage/accounts/{id}                                                  an outside integration's setup: an admin's, with its credentials
 GET /v1/storage/api                                                          the dashboard's (the developer API's settings)

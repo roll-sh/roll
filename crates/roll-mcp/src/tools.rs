@@ -341,7 +341,7 @@ fn apps_area(method: &str, path: &str) -> Area {
         ["projects", "services"] if read => return Area::Every,
         ["services"] | ["services", "environments"] | ["projects", "services"] => "configure",
         ["services", "environments", s, ..] => match *s {
-            "analytics" | "app-metrics" | "errors" | "logs" | "metrics" | "routes" | "slo" | "traces" | "usage" | "vitals" => "observe",
+            "analytics" | "app-metrics" | "errors" | "logs" | "metrics" | "routes" | "slo" | "traces" | "usage" | "vitals" | "push" => "observe",
             "deploys" | "promote" | "redeploy" | "rollback" | "pending" | "diff" | "jobs" | "runs" | "restart" | "sleep" | "wake" | "instances" | "cache" => "deploy",
             "variables" | "domains" | "forms" | "volume" | "config" => "configure",
             _ => return Area::Unplaced,
@@ -1030,6 +1030,9 @@ static TOOLS: &[Tool] = &[
     t("secrets_rotate", "Rotate a secret", "Make a new value for a secret and switch to it: a generated one, or a managed link's (a database user's password, a cloud key) made where it lives.", "secrets", "POST", "/v1/secrets/projects/{project}/environments/{env}/secrets/{name}/rotate", &[SECRET_PROJECT, ENV, req("name", "Secret name"), q("path", Ty::Str, "Folder")]).open_world().destructive(),
     t("secrets_promote", "Promote secrets", "Copy an environment's secrets into this one (all, or some keys). Into a protected environment it opens a change request for a person instead.", "secrets", "POST", "/v1/secrets/projects/{project}/environments/{env}/promote", &[SECRET_PROJECT, ENV, qreq("from", "The environment to copy from"), b("keys", Ty::Arr, "Only these keys"), b("path", Ty::Str, "Folder"), b("message", Ty::Str, "Why")]),
     t("secrets_list_requests", "Change requests", "An environment's change requests (proposed changes waiting on review).", "secrets", "GET", "/v1/secrets/projects/{project}/environments/{env}/requests", &[SECRET_PROJECT, ENV, q("state", Ty::Str, "open, applied or closed")]),
+    t("secrets_get_request", "Get a change request", "One change request on a protected environment: what it changes (keys, fingerprints, never values), who asked, its reviews and whether its approvals are met.", "secrets", "GET", "/v1/secrets/projects/{project}/environments/{env}/requests/{id}", &[SECRET_PROJECT, ENV, req("id", "Request id")]),
+    t("secrets_apply_request", "Apply an approved change request", "Apply a change request whose approvals are met, as one change. Applying one that isn't approved (bypass) is a person's: not here.", "secrets", "POST", "/v1/secrets/projects/{project}/environments/{env}/requests/{id}/apply", &[SECRET_PROJECT, ENV, req("id", "Request id")]),
+    t("secrets_close_request", "Close a change request", "Withdraw a change request without applying it.", "secrets", "POST", "/v1/secrets/projects/{project}/environments/{env}/requests/{id}/close", &[SECRET_PROJECT, ENV, req("id", "Request id")]),
     t("secrets_propose", "Propose a change", "Propose changes to an environment for a person to review and apply: ops [{op: set, key, value?, if_version?} or {op: delete, key, if_version?}]; if_version keeps each op from applying over a change made meanwhile. The way to change a protected environment.", "secrets", "POST", "/v1/secrets/projects/{project}/environments/{env}/requests", &[SECRET_PROJECT, ENV, breq("ops", Ty::Arr, "[{op: set|delete, key, value?, comment?, if_version?}]"), b("message", Ty::Str, "Why"), b("path", Ty::Str, "Folder")]),
     t("secrets_transit_encrypt", "Encrypt with a key", "Encrypt with one of a project's encryption keys; the key never leaves roll. plaintext is base64. Returns ciphertext (roll:v<n>:…) to store.", "secrets", "POST", "/v1/secrets/projects/{project}/transit/{name}/encrypt", &[SECRET_PROJECT, req("name", "Encryption key name"), breq("plaintext", Ty::Str, "Base64"), b("context", Ty::Str, "Base64 context, if the key derives per context")]),
     t("secrets_transit_decrypt", "Decrypt with a key", "Decrypt a ciphertext (roll:v<n>:…, or vault:v<n>:… for a key brought from Vault). Returns plaintext as base64. Audited.", "secrets", "POST", "/v1/secrets/projects/{project}/transit/{name}/decrypt", &[SECRET_PROJECT, req("name", "Encryption key name"), breq("ciphertext", Ty::Str, "roll:v<n>:…"), b("context", Ty::Str, "Base64 context")]),
@@ -1240,6 +1243,7 @@ static TOOLS: &[Tool] = &[
     t("apps_vitals", "Web Vitals", "What visitors' browsers measured on an environment's pages (with vitals on): LCP, INP, CLS, FCP and TTFB p75s rated good, needs-improvement or poor, overall and for the 20 routes with the most page loads.", "apps", "GET", "/v1/apps/services/{service}/environments/{env}/vitals", &[SERVICE, ENV, q("minutes", Ty::Int, "How far back, 60-10080 (default 1440)")]),
     t("apps_route_stats", "Route stats", "An environment's routes from its access log over the last minutes (5-60, default 60): requests, 5xx and 4xx errors, p50/p95/max latency per route (ids folded as :id), the busiest, most failing and slowest 50 of each. Start here when a service is slow or failing.", "apps", "GET", "/v1/apps/services/{service}/environments/{env}/routes", &[SERVICE, ENV, q("minutes", Ty::Int, "How far back, 5-60 (default 60)")]),
     t("apps_errors", "Errors: why a service is failing", "An environment's errors over the last minutes (5-10080, default 1440), grouped (the same error once, with its count, first and last seen and a sample), the most frequent first, at most 50. Start here when a service is failing or erroring.", "apps", "GET", "/v1/apps/services/{service}/environments/{env}/errors", &[SERVICE, ENV, q("minutes", Ty::Int, "How far back, 5-10080 (default 1440)")]),
+    t("apps_push_status", "Stream push status", "An environment's run.push rules as they stand: each one's lag (records not yet delivered), delivered and dead-lettered counts, the last delivery, and failing_since and last_error when it's failing, or why nothing is delivered (off). Why a pushed stream is behind.", "apps", "GET", "/v1/apps/services/{service}/environments/{env}/push", &[SERVICE, ENV]),
     t("apps_set_error_state", "Resolve, mute or reopen an error", "Triage an error group (its fingerprint from apps_errors): resolved goes quiet until it's seen again, which reopens it as a regression naming the deploy it came back in; muted stays quiet; open reopens it.", "apps", "PATCH", "/v1/apps/services/{service}/environments/{env}/errors/{fingerprint}", &[SERVICE, ENV, req("fingerprint", "The error group's fingerprint"), breq("state", Ty::Str, "open, resolved or muted")]),
     t("apps_rotate_config", "Rotate the runtime config's address", "Give an environment's runtime config a new read token (a leaked ROLL_CONFIG_URL): the old address reads until a deploy made after the rotation is live, so redeploy to finish it. 409 while the last rotation's old address still reads.", "apps", "POST", "/v1/apps/services/{service}/environments/{env}/config/rotate", &[SERVICE, ENV]).destructive(),
     t("apps_traces", "Traces of slow requests", "An environment's recent traces (traces on), newest first, at most 100: each one's root span, service, duration, span count and whether any span failed; min_ms keeps the slow ones. apps_get_trace has one's spans.", "apps", "GET", "/v1/apps/services/{service}/environments/{env}/traces", &[SERVICE, ENV, q("minutes", Ty::Int, "How far back (default 60)"), q("min_ms", Ty::Int, "Only traces at least this slow")]),
@@ -1373,7 +1377,36 @@ static TOOLS: &[Tool] = &[
     t("previews_screenshot", "Screenshot a preview", "A preview's page as an image the agent can look at; diff against the base or the previous deploy, another page, or the phone view.", "previews", "GET", "/v1/previews/{id}/screenshot", &[req("id", "Preview id"), q("diff", Ty::Str, "base or previous: highlight what changed"), q("page", Ty::Str, "Path of the page (default /)"), q("view", Ty::Str, "phone for a phone-sized view")]),
     t("previews_share", "Share a preview", "A link for someone outside the team to open a preview for some hours (its token is in this answer only; anyone with the link gets in).", "previews", "POST", "/v1/previews/{id}/shares", &[req("id", "Preview id"), breq("hours", Ty::Int, "How long the link works")]),
     t("previews_revoke_share", "Revoke a share link", "Stop a preview's share link at once (who it's shared with: previews_list_shares).", "previews", "DELETE", "/v1/previews/{id}/shares/{share}", &[req("id", "Preview id"), req("share", "Share id")]),
-    t("previews_settings", "Preview settings", "A project's preview rules: which branches get one, how long they live, private or not, budgets (changing them is the project admin's).", "previews", "GET", "/v1/previews/projects/{project}/settings", &[req("project", "Workspace project")]),
+    t("previews_settings", "Preview settings", "A project's preview rules: which branches get one, how long they live, private or not, budgets (previews_set_rules changes the operational ones; an admin's).", "previews", "GET", "/v1/previews/projects/{project}/settings", &[req("project", "Workspace project")]),
+    t(
+        "previews_set_rules",
+        "Change a project's preview rules",
+        "Change how a project's previews are made and kept (a field left out stays): which changes get one (branches, drafts, manual, paths, ignore_paths, skip_authors), how each resource is branched (resources, data), how long they live and sleep, their budgets, and what reaches GitHub. Who can open them (access), production secrets, egress, variables, masking, the visual review's gate and the seed, release and teardown jobs are a person's, in the dashboard: not here.",
+        "previews",
+        "PUT",
+        "/v1/previews/projects/{project}/settings",
+        &[
+            req("project", "Workspace project"),
+            b("enabled", Ty::Bool, "Previews on for the project"),
+            b("branches", Ty::Arr, "Globs on a change's branch that get one ([\"*\"])"),
+            b("drafts", Ty::Bool, "Previews for draft changes too"),
+            b("manual", Ty::Bool, "Only changes whose title asks ([preview])"),
+            b("paths", Ty::Arr, "What a change must touch (gitignore-style; [] is anything)"),
+            b("ignore_paths", Ty::Arr, "Touching only these doesn't count"),
+            b("skip_authors", Ty::Arr, "Globs on who opened it (\"*[bot]\"): no preview unless asked"),
+            b("resources", Ty::Obj, "\"<kind>:<ref>\" → branch, schema or skip"),
+            b("data", Ty::Str, "The default: branch (with data) or schema"),
+            b("reset_every_hours", Ty::Int, "Reset to fresh data every so often (0: never)"),
+            b("sleep_after_s", Ty::Int, "Sleep after this long idle"),
+            b("ttl_hours", Ty::Int, "Delete after this long"),
+            b("max_previews", Ty::Int, "At most this many at once"),
+            b("max_bytes", Ty::Int, "At most this much branched data"),
+            b("max_usd_month", Ty::Num, "New previews wait once the month's cost reaches it (0: no cap)"),
+            b("github", Ty::Obj, "What reaches a pull request: {comment, status, deployment, screenshot, pages, …}"),
+            b("feedback", Ty::Bool, "A feedback button on its pages for people who came in through roll"),
+            b("warm", Ty::Bool, "Wake the services as soon as a new head is deployed"),
+        ],
+    ),
     t("previews_visitors", "Who opened a preview", "The last 8 people signed in to roll who opened a preview (team access), by handle, latest first. Share links and the CI bypass aren't people and aren't listed.", "previews", "GET", "/v1/previews/{id}/visitors", &[req("id", "Preview id")]),
     t("previews_list_hooks", "A project's deploy hooks", "The hooks that start a preview from outside (CI): name, branches, when made and last fired; never their secrets.", "previews", "GET", "/v1/previews/projects/{project}/hooks", &[req("project", "Workspace project")]),
     t("previews_delete_hook", "Delete a deploy hook", "Delete one of a project's preview deploy hooks: its URL stops working.", "previews", "DELETE", "/v1/previews/projects/{project}/hooks/{hook}", &[req("project", "Workspace project"), req("hook", "Hook id")]).destructive(),
@@ -1475,6 +1508,14 @@ mod tests {
             .collect();
         assert!(unmarked.is_empty(), "removes or replaces something but isn't destructive (mark it .destructive() or .undoable()): {unmarked:?}");
         assert_eq!(def("workspace_remove_resource")["annotations"]["destructiveHint"], false);
+        // A project's preview rules from an agent are only the operational ones: who may open the
+        // previews, production secrets, egress, variables, masking, the visual review's gate and the
+        // jobs (which run with the preview's secrets) stay a person's, so the closed schema refuses them.
+        let rules = all().iter().find(|t| t.name == "previews_set_rules").unwrap();
+        for field in ["access", "secrets", "egress", "egress_hosts", "egress_forks", "env", "env_for", "masking", "visual_review", "seed", "release", "teardown"] {
+            assert!(rules.request(&json!({ "project": "prj_a", field: "x" })).is_err(), "previews_set_rules takes {field}");
+        }
+        assert!(rules.request(&json!({ "project": "prj_a", "ttl_hours": 24 })).is_ok());
         // Revoking a credential can't be undone: clients that ask before destructive calls ask.
         for n in ["storage_revoke_key", "streams_revoke_key", "search_revoke_key", "search_unlink_remote", "previews_delete_hook"] {
             assert_eq!(def(n)["annotations"]["destructiveHint"], true, "{n}");
@@ -1504,6 +1545,8 @@ mod tests {
         for n in ["postgres_explain", "postgres_slow_queries", "postgres_advisors", "postgres_list_extensions"] {
             assert_eq!(def(n)["annotations"]["readOnlyHint"], true, "{n}");
         }
+        // Skipping a protected environment's approvals is a person's: an agent applies only what's approved.
+        assert!(all().iter().find(|t| t.name == "secrets_apply_request").unwrap().request(&json!({ "project": "prj_a", "env": "production", "id": "req_a", "bypass": true })).is_err());
         // A field is cleared only when `clear` names it: a null is left out (a client that fills
         // unused fields with null changes nothing), and only a field that can be is.
         let domain = all().iter().find(|t| t.name == "apps_update_domain").unwrap();
