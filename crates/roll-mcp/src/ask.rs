@@ -37,7 +37,7 @@ pub fn source(product: &str, param: &str) -> Option<Source> {
         ("queues", "vhost") => Some(Source { tool: "queues_list_vhosts", args: |_| json!({}), fields: &["name"] }),
         ("queues", "queue") => Some(Source { tool: "queues_list_queues", args: |a| json!({ "vhost": a["vhost"] }), fields: &["name"] }),
         // roll code's (fronted from `code_control::mcp`): a repo as `owner/name`, an owner of one.
-        ("code" | "workspace", "repo") => Some(Source { tool: "code_list_repos", args: |_| json!({}), fields: &["full_name"] }),
+        ("code", "repo") => Some(Source { tool: "code_list_repos", args: |_| json!({}), fields: &["full_name"] }),
         ("code" | "agents", "owner") => Some(Source { tool: "code_list_repos", args: |_| json!({}), fields: &["owner"] }),
         _ => None,
     }
@@ -60,7 +60,7 @@ pub fn fill(args: &mut Value, responses: &Value) -> Result<(), String> {
         let Some(param) = key.strip_prefix(KEY_PREFIX) else { continue };
         match (r["action"].as_str(), r["content"]["value"].as_str()) {
             (Some("accept"), Some(v)) if is_choice(v) => args[param] = json!(v),
-            (Some("accept"), _) => return Err(format!("the {param} chosen isn't an id (letters, digits, _ . -; at most 64)")),
+            (Some("accept"), _) => return Err(format!("the {param} chosen isn't an id (letters, digits, _ . -; at most 64) or a repo's owner/name")),
             _ => return Err(format!("no {param} was chosen, so nothing ran")),
         }
     }

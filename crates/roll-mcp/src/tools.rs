@@ -13,8 +13,9 @@ pub enum At {
     Path,
     Query,
     Body,
-    /// A body field where `null` means none (clears it), sent as `null` when the caller says so:
-    /// left out, the route keeps what it has.
+    /// A body field the route clears with `null`: sent as `null` only when the call's `clear` names
+    /// it (a `null` argument is left out, as any other: some clients fill every unused field with
+    /// one). Left out, the route keeps what it has.
     BodyOrNull,
     Header(&'static str),
     /// The request's whole body, as text.
@@ -171,16 +172,18 @@ impl Tool {
                 Ty::Num => "number",
                 Ty::Any => "",
             };
-            let schema = match (ty, p.at) {
-                ("", _) => json!({ "description": p.desc }),
-                // A client that checks arguments against the schema sends the null through.
-                (ty, At::BodyOrNull) => json!({ "type": [ty, "null"], "description": p.desc }),
-                (ty, _) => json!({ "type": ty, "description": p.desc }),
-            };
+            let schema = if ty.is_empty() { json!({ "description": p.desc }) } else { json!({ "type": ty, "description": p.desc }) };
             props.insert(p.name.into(), schema);
             if p.required {
                 required.push(p.name);
             }
+        }
+        let clearable: Vec<&str> = self.params.iter().filter(|p| p.at == At::BodyOrNull).map(|p| p.name).collect();
+        if !clearable.is_empty() {
+            props.insert(
+                "clear".into(),
+                json!({ "type": "array", "items": { "type": "string", "enum": clearable }, "description": "Fields to set to none (each says what none is); a field left out, or null, stays as it is" }),
+            );
         }
         props.insert(
             "approval".into(),
@@ -206,8 +209,9 @@ impl Tool {
     /// The request this call makes.
     pub fn request(&self, args: &Value) -> Result<Request, String> {
         let obj = args.as_object().cloned().unwrap_or_default();
+        let clearable = self.params.iter().any(|p| p.at == At::BodyOrNull);
         for k in obj.keys() {
-            if k != "approval" && !self.params.iter().any(|p| p.name == k) {
+            if k != "approval" && !(k == "clear" && clearable) && !self.params.iter().any(|p| p.name == k) {
                 return Err(format!("{}: unknown argument {k:?}", self.name));
             }
         }
@@ -219,11 +223,6 @@ impl Tool {
         let mut raw: Option<(Vec<u8>, &'static str)> = None;
         let mut headers = Vec::new();
         for p in self.params {
-            if p.at == At::BodyOrNull && obj.get(p.name).is_some_and(Value::is_null) {
-                body[p.name] = Value::Null;
-                body_used = true;
-                continue;
-            }
             let Some(v) = obj.get(p.name).filter(|v| !v.is_null()) else {
                 if p.required {
                     return Err(format!("{} is required", p.name));
@@ -275,6 +274,22 @@ impl Tool {
         }
         let q = query.finish();
         let uri = if has_query { format!("{path}?{q}") } else { path };
+        // `clear`: the fields to set to none, sent as null. Only by name: a client that fills every
+        // field it doesn't use with null changes nothing.
+        if let Some(names) = obj.get("clear").filter(|v| !v.is_null()) {
+            let names = names.as_array().ok_or_else(|| format!("{}: clear is a list of field names", self.name))?;
+            for n in names {
+                let n = n.as_str().unwrap_or_default();
+                if !self.params.iter().any(|p| p.name == n && p.at == At::BodyOrNull) {
+                    return Err(format!("{}: {n:?} can't be cleared", self.name));
+                }
+                if obj.get(n).is_some_and(|v| !v.is_null()) {
+                    return Err(format!("{}: {n} is both set and cleared", self.name));
+                }
+                body[n] = Value::Null;
+                body_used = true;
+            }
+        }
         let body = match raw {
             Some((b, ct)) => Built::Raw(b, ct),
             None if body_used || matches!(self.method, "POST" | "PUT" | "PATCH") => Built::Json(body),
@@ -297,7 +312,7 @@ const fn q(name: &'static str, ty: Ty, desc: &'static str) -> P {
 const fn b(name: &'static str, ty: Ty, desc: &'static str) -> P {
     P { name, ty, at: At::Body, required: false, desc }
 }
-/// A body field the caller may set to `null` to clear (`At::BodyOrNull`).
+/// A body field a call can clear by naming it in `clear` (`At::BodyOrNull`).
 const fn bnull(name: &'static str, ty: Ty, desc: &'static str) -> P {
     P { name, ty, at: At::BodyOrNull, required: false, desc }
 }
@@ -690,7 +705,7 @@ static TOOLS: &[Tool] = &[
             b("history_retention", Ty::Int, "Seconds of history for restores"),
             b("read_only", Ty::Bool, "Refuse writes (a safe branch to debug on)"),
             b("masking", Ty::Obj, "Masking policy, replaced whole: {\"ks.table.column\": \"mask_inner(1, 1)\"}"),
-            bnull("expires_at", Ty::Int, "Unix seconds it's deleted at (null: never)"),
+            bnull("expires_at", Ty::Int, "Unix seconds it's deleted at (clear it: never)"),
         ],
     ),
     t("nosql_activity", "NoSQL activity", "What a database is doing now: connected clients, slow queries, warnings and metrics.", "nosql", "GET", "/v1/nosql/databases/{database}/activity", &[NOSQL]),
@@ -735,7 +750,7 @@ static TOOLS: &[Tool] = &[
         "tasks",
         "POST",
         "/v1/tasks/publish",
-        &[b("url", Ty::Str, "Destination URL"), b("topic", Ty::Str, "Or a topic"), b("queue", Ty::Str, "Or a queue"), b("body", Ty::Str, "Body"), bnull("headers", Ty::Obj, "Headers"), b("delay", Ty::Str, "e.g. 10s, 5m"), b("retries", Ty::Int, "Retries")],
+        &[b("url", Ty::Str, "Destination URL"), b("topic", Ty::Str, "Or a topic"), b("queue", Ty::Str, "Or a queue"), b("body", Ty::Str, "Body"), b("headers", Ty::Obj, "Headers"), b("delay", Ty::Str, "e.g. 10s, 5m"), b("retries", Ty::Int, "Retries")],
     ).open_world(),
     t("tasks_list_messages", "List task messages", "Messages by state, queue or topic.", "tasks", "GET", "/v1/tasks/messages", &[q("state", Ty::Str, "pending, delivered, failed…"), q("queue", Ty::Str, "Queue"), q("limit", Ty::Int, "At most")]),
     t("tasks_get_message", "Get a task message", "A message and its delivery attempts.", "tasks", "GET", "/v1/tasks/messages/{id}", &[req("id", "Message id (msg_…)")]),
@@ -765,7 +780,7 @@ static TOOLS: &[Tool] = &[
         "tasks",
         "PUT",
         "/v1/tasks/queues/{name}",
-        &[req("name", "Queue"), b("parallelism", Ty::Int, "Deliveries at once (0: no limit)"), bnull("rate", Ty::Any, "e.g. \"10/s\" or {\"limit\": 10, \"period\": \"1m\"}; null for no limit"), b("retries", Ty::Int, "Retries per message"), b("timeout", Ty::Str, "Per delivery, e.g. 30s"), b("partitions", Ty::Int, "Ordered partitions")],
+        &[req("name", "Queue"), b("parallelism", Ty::Int, "Deliveries at once (0: no limit)"), bnull("rate", Ty::Any, "e.g. \"10/s\" or {\"limit\": 10, \"period\": \"1m\"}; clear it for no limit"), b("retries", Ty::Int, "Retries per message"), b("timeout", Ty::Str, "Per delivery, e.g. 30s"), b("partitions", Ty::Int, "Ordered partitions")],
     ),
     t("tasks_pause_queue", "Pause a task queue", "Hold a queue's deliveries; messages keep arriving.", "tasks", "POST", "/v1/tasks/queues/{name}/pause", &[req("name", "Queue")]),
     t("tasks_resume_queue", "Resume a task queue", "Deliver a paused queue's messages again.", "tasks", "POST", "/v1/tasks/queues/{name}/resume", &[req("name", "Queue")]),
@@ -970,13 +985,13 @@ static TOOLS: &[Tool] = &[
         b("allow_ips", Ty::Arr, "Only these addresses get in: [cidr or {cidr, description}]"),
         b("rate_limit", Ty::Obj, "{per_minute, burst?}: requests a client address may make"),
         b("firewall", Ty::Arr, "[{action: allow|deny|limit|challenge, path?, methods?, user_agent?, per_minute?, burst?}], first match wins; limit holds a client to per_minute (1-100000) on what it matches; challenge lets in a browser that passed a proof of work this hour (GET only)"),
-        bnull("routes", Ty::Arr, "[{path, service}] (at most 20): a path (a prefix ends in *) another service of the project answers, by name, or null for none"),
-        bnull("egress", Ty::Any, "{mode: roll|open, hosts?}: roll lets its code reach roll and only these hosts (at most 20, *. for subdomains), from the next deploy; null is open"),
+        bnull("routes", Ty::Arr, "[{path, service}] (at most 20): a path (a prefix ends in *) another service of the project answers, by name; clear it for none"),
+        bnull("egress", Ty::Any, "{mode: roll|open, hosts?}: roll lets its code reach roll and only these hosts (at most 20, *. for subdomains), from the next deploy; clear it for open"),
         b("vitals", Ty::Bool, "Measure its pages' Web Vitals in visitors' browsers (read them with apps_vitals)"),
         b("traces", Ty::Bool, "Send its OpenTelemetry traces and metrics to roll (OTEL_EXPORTER_OTLP_* from the next deploy)"),
         b("redeploy_on_secrets", Ty::Bool, "Redeploy (the same image, new values) when the project's roll secrets change"),
-        bnull("pages", Ty::Obj, "{error?, maintenance?}: its own HTML for roll's error and maintenance pages (null puts roll's back)"),
-        bnull("headers", Ty::Any, "Response header rules: [{path?, set: {name: value}, replace?}] (at most 20), or null for none"),
+        b("pages", Ty::Obj, "{error?, maintenance?}: its own HTML for roll's error and maintenance pages (a page set to null puts roll's back)"),
+        bnull("headers", Ty::Any, "Response header rules: [{path?, set: {name: value}, replace?}] (at most 20); clear it for none"),
         b("paused", Ty::Bool, "Pause it (no deploys on push, nothing running) or resume it"),
         // A rollback holds deploys (apps #26): false lets pushes and hooks deploy again.
         b("held", Ty::Bool, "false: resume deploys a rollback held (held_after shows since when)"),
@@ -1119,7 +1134,7 @@ static TOOLS: &[Tool] = &[
     t("apps_cancel_cron_run", "Cancel a cron run", "Stop a running cron run (production is a \"deploy\" action).", "apps", "POST", "/v1/apps/services/{service}/environments/{env}/runs/{run}/cancel", &[SERVICE, ENV, req("run", "Run id")]),
     t("apps_run_cron", "Run a cron now", "Run a cron service's job now (in production this is a deploy action).", "apps", "POST", "/v1/apps/services/{service}/environments/{env}/runs", &[SERVICE, ENV]),
     t("apps_limits", "Spend limits", "A project's apps spend limits and how much of them is used.", "apps", "GET", "/v1/apps/projects/{project}/limits", &[req("project", "Workspace project")]),
-    t("apps_set_limits", "Set spend limits", "A project's monthly apps spend: alert_usd notifies, hard_usd pauses the whole project once reached (null: none). An admin's call.", "apps", "PUT", "/v1/apps/projects/{project}/limits", &[req("project", "Workspace project"), bnull("alert_usd", Ty::Num, "Notify past this many dollars a month (null or left out: no alert)"), bnull("hard_usd", Ty::Num, "Pause the project past this (null or left out: no cap)")]),
+    t("apps_set_limits", "Set spend limits", "A project's monthly apps spend: alert_usd notifies, hard_usd pauses the whole project once reached (null: none). An admin's call.", "apps", "PUT", "/v1/apps/projects/{project}/limits", &[req("project", "Workspace project"), bnull("alert_usd", Ty::Num, "Notify past this many dollars a month (left out or cleared: no alert; both are set each time)"), bnull("hard_usd", Ty::Num, "Pause the project past this (left out or cleared: no cap; both are set each time)")]),
     t("apps_overview", "roll apps here", "What roll apps runs here: its domain, runtime, prices, and every service with its environments' state.", "apps", "GET", "/v1/apps", &[]),
     t("apps_list_project_services", "List a project's services", "The services in one workspace project.", "apps", "GET", "/v1/apps/projects/{project}/services", &[req("project", "Workspace project")]),
     t("apps_list_notifications", "List notifications", "Where a project's deploy, crash and preview events are sent (webhook, Slack, Discord, email; the URL's host only).", "apps", "GET", "/v1/apps/projects/{project}/notifications", &[req("project", "Workspace project")]),
@@ -1144,9 +1159,9 @@ static TOOLS: &[Tool] = &[
         "apps",
         "POST",
         "/v1/apps/projects/{project}/drains",
-        &[req("project", "Workspace project"), breq("url", Ty::Str, "https URL on a public host"), b("sources", Ty::Arr, "runtime (default), http, build"), b("environments", Ty::Arr, "Only these environments"), b("services", Ty::Arr, "Only these services"), b("previews", Ty::Bool, "Previews' logs too"), bnull("headers", Ty::Obj, "Headers sent with each batch")],
+        &[req("project", "Workspace project"), breq("url", Ty::Str, "https URL on a public host"), b("sources", Ty::Arr, "runtime (default), http, build"), b("environments", Ty::Arr, "Only these environments"), b("services", Ty::Arr, "Only these services"), b("previews", Ty::Bool, "Previews' logs too"), b("headers", Ty::Obj, "Headers sent with each batch")],
     ).open_world(),
-    t("apps_update_drain", "Change a log drain", "Change what a drain sends or its headers: given ones replace (a new URL is a new drain).", "apps", "PATCH", "/v1/apps/projects/{project}/drains/{did}", &[req("project", "Workspace project"), req("did", "Drain id"), b("sources", Ty::Arr, "Sources"), b("environments", Ty::Arr, "Environments"), b("services", Ty::Arr, "Services"), b("previews", Ty::Bool, "Previews' logs too"), bnull("headers", Ty::Obj, "Headers (all of them)")]).open_world(),
+    t("apps_update_drain", "Change a log drain", "Change what a drain sends or its headers: given ones replace (a new URL is a new drain).", "apps", "PATCH", "/v1/apps/projects/{project}/drains/{did}", &[req("project", "Workspace project"), req("did", "Drain id"), b("sources", Ty::Arr, "Sources"), b("environments", Ty::Arr, "Environments"), b("services", Ty::Arr, "Services"), b("previews", Ty::Bool, "Previews' logs too"), b("headers", Ty::Obj, "Headers (all of them)")]).open_world(),
     t("apps_delete_drain", "Delete a log drain", "Stop sending a project's logs there.", "apps", "DELETE", "/v1/apps/projects/{project}/drains/{did}", &[req("project", "Workspace project"), req("did", "Drain id")]),
     t("apps_test_drain", "Test a log drain", "Send one signed test line now (not retried): whether it arrived.", "apps", "POST", "/v1/apps/projects/{project}/drains/{did}/test", &[req("project", "Workspace project"), req("did", "Drain id")]).open_world(),
     t("apps_pending", "What the next deploy changes", "Before deploying: which variables (names, never values), run settings and project secrets the next deploy changes against what's live.", "apps", "GET", "/v1/apps/services/{service}/environments/{env}/pending", &[SERVICE, ENV]),
@@ -1180,7 +1195,7 @@ static TOOLS: &[Tool] = &[
     t("apps_list_domains", "List domains", "An environment's domains.", "apps", "GET", "/v1/apps/services/{service}/environments/{env}/domains", &[SERVICE, ENV]),
     t("apps_add_domain", "Add a domain", "Point a domain at an environment.", "apps", "POST", "/v1/apps/services/{service}/environments/{env}/domains", &[SERVICE, ENV, breq("hostname", Ty::Str, "Host name")]),
     t("apps_remove_domain", "Remove a domain", "Remove a domain.", "apps", "DELETE", "/v1/apps/services/{service}/environments/{env}/domains/{host}", &[SERVICE, ENV, req("host", "Host name")]),
-    t("apps_update_domain", "Change a domain", "Redirect a domain to another hostname of the same environment (redirect_to; null serves the app again; no loops or chains), or serve another of the app's ports on it (port; null the main one). A field left out stays.", "apps", "PATCH", "/v1/apps/services/{service}/environments/{env}/domains/{host}", &[SERVICE, ENV, req("host", "Host name"), bnull("redirect_to", Ty::Str, "Another hostname of this environment to redirect to (null: serve the app)"), bnull("port", Ty::Int, "Another of the app's ports (null: the main one)")]),
+    t("apps_update_domain", "Change a domain", "Redirect a domain to another hostname of the same environment (redirect_to; null serves the app again; no loops or chains), or serve another of the app's ports on it (port; null the main one). A field left out stays.", "apps", "PATCH", "/v1/apps/services/{service}/environments/{env}/domains/{host}", &[SERVICE, ENV, req("host", "Host name"), bnull("redirect_to", Ty::Str, "Another hostname of this environment to redirect to (clear it: serve the app)"), bnull("port", Ty::Int, "Another of the app's ports (clear it: the main one)")]),
     t("apps_preview_domain", "A project's preview domain", "The wildcard a project's preview environments answer under (each by its preview_host), with its DNS state and TLS; 404 when it has none.", "apps", "GET", "/v1/apps/projects/{project}/preview-domain", &[req("project", "Workspace project")]),
     t("apps_set_preview_domain", "Set a project's preview domain", "Give a project's preview environments a wildcard of its own (*.preview.example.com; a new one replaces it): answers the DNS record to add, then apps_verify_preview_domain.", "apps", "POST", "/v1/apps/projects/{project}/preview-domain", &[req("project", "Workspace project"), breq("hostname", Ty::Str, "A wildcard, *.preview.example.com")]),
     t("apps_verify_preview_domain", "Check a preview domain", "Check a project's preview domain's DNS now: active once it checks out, else pending with what DNS answered.", "apps", "POST", "/v1/apps/projects/{project}/preview-domain/verify", &[req("project", "Workspace project")]),
@@ -1241,7 +1256,7 @@ static TOOLS: &[Tool] = &[
     t("previews_settings", "Preview settings", "A project's preview rules: which branches get one, how long they live, private or not, budgets (changing them is the project admin's).", "previews", "GET", "/v1/previews/projects/{project}/settings", &[req("project", "Workspace project")]),
     t("previews_visitors", "Who opened a preview", "The last 8 people signed in to roll who opened a preview (team access), by handle, latest first. Share links and the CI bypass aren't people and aren't listed.", "previews", "GET", "/v1/previews/{id}/visitors", &[req("id", "Preview id")]),
     t("previews_list_hooks", "A project's deploy hooks", "The hooks that start a preview from outside (CI): name, branches, when made and last fired; never their secrets.", "previews", "GET", "/v1/previews/projects/{project}/hooks", &[req("project", "Workspace project")]),
-    t("previews_delete_hook", "Delete a deploy hook", "Delete one of a project's preview deploy hooks: its URL stops working.", "previews", "DELETE", "/v1/previews/projects/{project}/hooks/{hook}", &[req("project", "Workspace project"), req("hook", "Hook id")]),
+    t("previews_delete_hook", "Delete a deploy hook", "Delete one of a project's preview deploy hooks: its URL stops working.", "previews", "DELETE", "/v1/previews/projects/{project}/hooks/{hook}", &[req("project", "Workspace project"), req("hook", "Hook id")]).destructive(),
     t("previews_delete", "Delete a preview", "Tear a preview down with its branches.", "previews", "DELETE", "/v1/previews/{id}", &[req("id", "Preview id")]),
 ];
 
@@ -1314,15 +1329,18 @@ mod tests {
         for n in ["postgres_explain", "postgres_slow_queries", "postgres_advisors", "postgres_list_extensions"] {
             assert_eq!(def(n)["annotations"]["readOnlyHint"], true, "{n}");
         }
-        // A field whose null means none: null goes as null (it clears), left out it's not sent (it stays).
+        // A field is cleared only when `clear` names it: a null is left out (a client that fills
+        // unused fields with null changes nothing), and only a field that can be is.
         let domain = all().iter().find(|t| t.name == "apps_update_domain").unwrap();
-        assert_eq!(def("apps_update_domain")["inputSchema"]["properties"]["redirect_to"]["type"], json!(["string", "null"]));
+        assert_eq!(def("apps_update_domain")["inputSchema"]["properties"]["clear"]["items"]["enum"], json!(["redirect_to", "port"]));
         let body = |args: Value| match domain.request(&args).unwrap().body { Built::Json(b) => b, _ => Value::Null };
         let at = json!({ "service": "svc_a", "env": "production", "host": "a.example.com" });
         let with = |k: &str, v: Value| { let mut a = at.clone(); a[k] = v; a };
-        assert_eq!(body(with("redirect_to", Value::Null)), json!({ "redirect_to": null }));
-        assert_eq!(body(with("port", json!(8080))), json!({ "port": 8080 }));
-        assert!(body(at.clone()).get("redirect_to").is_none());
+        assert_eq!(body(json!({ "service": "svc_a", "env": "production", "host": "a.example.com", "port": 8080, "redirect_to": null })), json!({ "port": 8080 }));
+        assert_eq!(body(with("clear", json!(["redirect_to"]))), json!({ "redirect_to": null }));
+        assert!(domain.request(&with("clear", json!(["host"]))).is_err());
+        let drain = all().iter().find(|t| t.name == "apps_update_drain").unwrap();
+        assert!(drain.request(&json!({ "project": "prj_a", "did": "d", "clear": ["headers"] })).is_err(), "a drain's headers are never cleared by a null");
         // What a site's visitors write (a form's fields, and the field names a form.submitted event
         // carries) is withheld in lockdown wherever an answer holds it.
         for n in ["apps_form_submissions", "apps_events", "apps_activity"] {
