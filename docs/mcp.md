@@ -370,10 +370,16 @@ roll implements the MCP authorization spec (2025-06-18 and 2025-11-25) with OAut
     its tools (9 to 18). That run found two interop bugs, both fixed: the ack must carry the
     subscription id too (the SDK matches the ack by it), and the SDK sends `notifications/cancelled`
     without `Mcp-Method` (a notification may leave it out; one present must still match).
-  - **Asking for a missing id** (`roll_mcp::ask`): a call without an id it requires (a project, a
-    Postgres project, an apps service or environment), from a client that declared form
-    elicitation, answers `input_required` with a form whose choices are what the connection may
-    read (the same list tool completions use, through the gate, never asking a person). The
+  - **Asking for a missing id** (`roll_mcp::ask`): a call without an id it requires, from a
+    client that declared form elicitation, answers `input_required` with a form whose choices are
+    what the connection may read (the list tool's answer, through the gate, never asking a
+    person; completions use the same ones). Every id a tool lists has choices: a workspace or
+    Postgres project, a branch, an apps service or environment, a secrets environment, a preview,
+    a token, a bucket, a stream or topic, a NoSQL or Redis database, a search cluster or index, a
+    vhost or queue. `pnpm test:mcp-sweep` checks each against a live rolld: the form must offer
+    the fixture's id, so a list answer of another shape can't offer nothing unnoticed, and a new
+    kind of id fails it until it has choices or a reason not to (`NO_CHOICES`: a repo's
+    `owner/name`, tasks' `id`, which names four things). The
     retry's `inputResponses` fills the id in, and the call runs as if the client had sent it, so
     the gate decides it as usual and there's no `requestState` to trust. A declined form stops the
     call; a value that isn't an id is refused. Other clients get the call's own answer. Checked

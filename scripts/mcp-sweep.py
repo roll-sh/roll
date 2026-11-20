@@ -282,6 +282,75 @@ for l in leaks:
 if reader and shown == 0:
     leaks.append("no tool showed even the operator a known credential: the check sees nothing (are the fixtures' secrets collected?)")
 fails += [f"leak {l}" for l in leaks]
+
+# Choices: a tool called without an id it needs, by a client that fills in forms (2026-07-28 with
+# form elicitation), answers a form whose choices are what the connection may read
+# (`roll_mcp::ask`). For every kind of id the fixtures made, the form must offer the fixture's,
+# or the kind is below with why it has none: a list answer of another shape offers nothing
+# without failing anything, and a new kind of id with no choices fails here until it has some.
+NO_CHOICES = {("postgres", "endpoint"): "an endpoint sits inside its branch, not in a list",
+              ("code", "repo"): "a repo's owner/name isn't an id a form offers", ("workspace", "repo"): "as code's",
+              ("code", "owner"): "no tool lists owners", ("agents", "owner"): "as code's",
+              ("tasks", "id"): "it names a message, run, schedule or function by tool"}
+def form_call(name, args):
+    global n
+    n += 1
+    meta = {"io.modelcontextprotocol/protocolVersion": "2026-07-28", "io.modelcontextprotocol/clientInfo": {"name": "sweep", "version": "1"},
+            "io.modelcontextprotocol/clientCapabilities": {"elicitation": {"form": {}}}}
+    body = {"jsonrpc": "2.0", "id": n, "method": "tools/call", "params": {"name": name, "arguments": args, "_meta": meta}}
+    req = urllib.request.Request(f"{api}/v1/mcp", data=json.dumps(body).encode(), headers={"authorization": f"Bearer {tok}", "content-type": "application/json",
+                                 "accept": "application/json", "mcp-protocol-version": "2026-07-28", "mcp-method": "tools/call", "mcp-name": name})
+    with urllib.request.urlopen(req, timeout=60) as r:
+        return json.load(r)
+offered, no_form = 0, []
+for (prod, param), value in sorted(seen.items()):
+    if (prod, param) in NO_CHOICES:
+        continue
+    tool = next((t for t in reads if t.get("_meta", {}).get("roll/product") == prod and param in t["inputSchema"].get("required", [])
+                 and all((prod, a) in seen for a in t["inputSchema"]["required"])), None)
+    if tool is None:
+        continue
+    args = {a: seen[(prod, a)] for a in tool["inputSchema"]["required"] if a != param}
+    r = form_call(tool["name"], args).get("result", {})
+    field = (r.get("inputRequests", {}).get(f"missing:{param}", {}).get("params", {}).get("requestedSchema", {}).get("properties", {}).get("value", {}))
+    if r.get("resultType") != "input_required" or not field:
+        no_form.append(f"{prod} {param} ({tool['name']} answered {r.get('resultType')}: {json.dumps(r.get('structuredContent'))[:120]})")
+    elif value not in field.get("enum", [value] if "description" in field else []):
+        no_form.append(f"{prod} {param} ({tool['name']}'s form offers {json.dumps(field.get('enum'))[:160]}, not the fixture's {value})")
+    else:
+        offered += 1
+        if "-v" in sys.argv:
+            print(f"choices: {prod} {param} from {tool['name']}: {json.dumps(field.get('enum'))[:160]}")
+print(f"choices: {offered} kinds of id offered as a form's choices, {len(NO_CHOICES)} with none by design, {len(no_form)} missing")
+fails += [f"choices {c}" for c in no_form]
+
+# The rest of what a client reads: every prompt (its arguments from the fixtures), every resource
+# listed, a project's page, every skill. An error is a failure: they're all read-only.
+surface = []
+PROMPT_ARGS = {"project": seen.get(("workspace", "id")), "service": seen.get(("apps", "service")), "env": "production", "branch": seen.get(("postgres", "branch"))}
+for p in rpc("prompts/list", {}).get("result", {}).get("prompts", []):
+    args = {a["name"]: (seen.get(("postgres", "project")) if a["name"] == "project" and "Postgres" in a.get("description", "") else PROMPT_ARGS.get(a["name"]) or "sweep")
+            for a in p.get("arguments", [])}
+    surface.append((f"prompt {p['name']}", rpc("prompts/get", {"name": p["name"], "arguments": args})))
+    # Each argument a fixture made completes to it (the others as context, as a client sends them).
+    for a in p.get("arguments", []):
+        want = args[a["name"]]
+        if a["name"] not in PROMPT_ARGS or want in (None, "sweep"):
+            continue
+        r = rpc("completion/complete", {"ref": {"type": "ref/prompt", "name": p["name"]}, "argument": {"name": a["name"], "value": ""},
+                                        "context": {"arguments": {k: v for k, v in args.items() if k != a["name"]}}})
+        got = r.get("result", {}).get("completion", {}).get("values", [])
+        surface.append((f"completion {p['name']} {a['name']}", r if want in got else {"error": f"offers {got[:5]}, not the fixture's {want}"}))
+uris = [r["uri"] for r in rpc("resources/list", {}).get("result", {}).get("resources", [])]
+if seen.get(("workspace", "id")):
+    uris.append(f"roll://projects/{seen[('workspace', 'id')]}")
+for uri in uris:
+    surface.append((f"resource {uri}", rpc("resources/read", {"uri": uri})))
+for sk in rpc("skills/list", {}).get("result", {}).get("skills", []):
+    surface.append((f"skill {sk.get('uri') or sk.get('name')}", rpc("skills/get", {"uri": sk.get("uri", "")})))
+bad = [f"{what}: {json.dumps(r.get('error'))[:200]}" for what, r in surface if "error" in r]
+print(f"surfaces: {len(surface)} prompts, completions, resources and skills read, {len(bad)} failed")
+fails += bad
 if "--writes" in sys.argv:
     def fake(name, schema, prod):
         if (prod, name) in seen:
