@@ -158,9 +158,18 @@ pub fn hash64_2(b: &[u8]) -> u64 {
         h = (h ^ u64::from_le_bytes(*w)).wrapping_mul(K).rotate_left(31);
     }
     if !r.is_empty() {
-        let mut t = [0u8; 8];
-        t[..r.len()].copy_from_slice(r);
-        h = (h ^ u64::from_le_bytes(t)).wrapping_mul(K).rotate_left(31);
+        // (The last 1-7 bytes zero-padded, as a word: from the key's last 8 bytes, shifted, when
+        // it has 8. Copying them into a padded buffer was a call to memcpy and a store the
+        // word's load waited on, for every key a file's filter or a point read hashes.)
+        let t = match b.len().checked_sub(8) {
+            Some(at) => u64::from_le_bytes(b[at..].try_into().unwrap()) >> (64 - 8 * r.len()),
+            None => {
+                let mut t = [0u8; 8];
+                t[..r.len()].copy_from_slice(r);
+                u64::from_le_bytes(t)
+            }
+        };
+        h = (h ^ t).wrapping_mul(K).rotate_left(31);
     }
     h ^= h >> 33;
     h = h.wrapping_mul(0xff51_afd7_ed55_8ccd);
@@ -3126,6 +3135,27 @@ mod tests {
         }
         let n = seen.len() as u32;
         assert!(n > 16_000, "{n}");
+        // (The value files' filters were written with: the last bytes zero-padded in a buffer.)
+        let padded = |b: &[u8]| {
+            const K: u64 = 0x9E37_79B9_7F4A_7C15;
+            let mut h = (b.len() as u64).wrapping_mul(K);
+            for w in b.chunks(8) {
+                let mut t = [0u8; 8];
+                t[..w.len()].copy_from_slice(w);
+                h = (h ^ u64::from_le_bytes(t)).wrapping_mul(K).rotate_left(31);
+            }
+            h ^= h >> 33;
+            h = h.wrapping_mul(0xff51_afd7_ed55_8ccd);
+            h ^= h >> 33;
+            h = h.wrapping_mul(0xc4ce_b9fe_1a85_ec53);
+            h ^ (h >> 33)
+        };
+        for len in 0..40 {
+            for _ in 0..50 {
+                let k: Vec<u8> = (0..len).map(|_| next() as u8).collect();
+                assert_eq!(hash64_2(&k), padded(&k), "{k:?}");
+            }
+        }
         assert!(ones.iter().all(|&c| c > n * 2 / 5 && c < n * 3 / 5), "{ones:?}");
     }
 

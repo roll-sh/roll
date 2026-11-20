@@ -559,11 +559,13 @@ fn hex_float(t: &str) -> Option<(f64, bool)> {
 
 fn parse_float(s: &str, tname: &str) -> Result<f64> {
     // (The common case: digits with a point, an optional minus, no exponent; finite and,
-    // with a nonzero digit, not rounded to zero.)
+    // with a nonzero digit, not rounded to zero. The bytes checked without stopping at the
+    // first other one, a loop the compiler does 16 bytes at a time: a COPY's 19-digit value
+    // -128 instructions, a 5-digit one +3.)
     let b = s.as_bytes();
     if b.len() <= 24
         && b.first().is_some_and(|c| c.is_ascii_digit() || *c == b'-')
-        && b.iter().all(|c| c.is_ascii_digit() || *c == b'.' || *c == b'-')
+        && b.iter().fold(true, |plain, c| plain & (c.is_ascii_digit() || *c == b'.' || *c == b'-'))
         && let Ok(v) = s.parse::<f64>()
         && v.is_finite()
         && (v != 0.0 || !b.iter().any(|c| (b'1'..=b'9').contains(c)))

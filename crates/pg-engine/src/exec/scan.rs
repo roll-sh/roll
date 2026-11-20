@@ -127,7 +127,10 @@ pub fn encode_table_row_at(row: &[Value], xid: u64, tid: Option<(u32, u16)>) -> 
 pub fn with_tid(bytes: &[u8], tid: (u32, u16)) -> Result<Vec<u8>> {
     let (xid, _, rest) = split_header_tid(bytes)?;
     let ext = crate::storage::toast::has_external(bytes);
-    let mut out = vec![if ext { ROW_HEADER_TID_EXT } else { ROW_HEADER_TID }];
+    // (Its size at once: the tag, three varints of at most 10 bytes, the rest. Grown push by
+    // push it was reallocated twice a row, a COPY's modelled rows stamped with their TIDs.)
+    let mut out = Vec::with_capacity(31 + rest.len());
+    out.push(if ext { ROW_HEADER_TID_EXT } else { ROW_HEADER_TID });
     crate::storage::sst::put_varint(&mut out, xid);
     crate::storage::sst::put_varint(&mut out, tid.0 as u64);
     crate::storage::sst::put_varint(&mut out, tid.1 as u64);

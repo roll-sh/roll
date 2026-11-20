@@ -1099,8 +1099,9 @@ fn note_compression_len(t: &Table, row: &[Value], key: Option<&[u8]>, ctx: &Exec
         .enumerate()
         .filter_map(|(i, v)| compressed_with(v).map(|m| (i, value_sig(v), m)))
         .collect();
-    let xid = ctx.txn.borrow_mut().cur_xid();
-    let at = || -> RowId { (xid, key.map(Arc::from)) };
+    // (The transaction's id only for a value recorded: a row of plain values, the usual one,
+    // records none.)
+    let at = || -> RowId { (ctx.txn.borrow_mut().cur_xid(), key.map(Arc::from)) };
     let db = ctx.sess.db.instance;
     if !copied.is_empty() {
         mark_tracked(db, t.oid);
