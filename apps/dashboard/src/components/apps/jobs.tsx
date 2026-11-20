@@ -294,6 +294,7 @@ function ScheduledRuns({ service, env, runner }: { service: string; env: string;
     if (!open) return;
     const buffer: LogLine[] = [];
     setLines([]);
+    let pending = false;
     return followLog(
       { run: { service, env, run: open } },
       {
@@ -305,7 +306,14 @@ function ScheduledRuns({ service, env, runner }: { service: string; env: string;
         onLine: (l) => {
           buffer.push(l);
           if (buffer.length > MAX_LINES) buffer.splice(0, buffer.length - MAX_LINES);
-          setLines(buffer.slice());
+          // One render per frame however fast the lines come (a copy a line was a copy of it all).
+          if (!pending) {
+            pending = true;
+            requestAnimationFrame(() => {
+              pending = false;
+              setLines(buffer.slice());
+            });
+          }
         },
       },
     );

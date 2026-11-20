@@ -862,7 +862,7 @@ impl Apps {
         // safe side, never that nothing did): the secrets' digest, the environment's own
         // variables (what a rollback to it restores, kept with its switch to live) and the hash
         // of everything it reads.
-        let secrets_digest = self.deps.secrets.digest(&svc.project, &env.name).await.ok().flatten();
+        let secrets_digest = self.secrets_digest_of(&svc, &env.name).await;
         let (sid, e, did) = (svc.id.clone(), env.name.clone(), d.id.clone());
         let snapshot = self.db(move |s| s.seal_snapshot(&did, &sid, &e)).await?;
         let vars_hash = {
@@ -2469,7 +2469,7 @@ impl Apps {
         let Ok(services) = self.db(|s| s.services(None)).await else { return };
         self.schedules_pass(&services, now).await;
         self.push_pass(&services).await;
-        self.ecr_refresh_pass().await;
+        self.ecr_refresh_pass(&services).await;
         self.checks_pass(&services, now).await;
         self.heartbeats_pass(&services, now).await;
         self.rescan_pass(&services, now).await;

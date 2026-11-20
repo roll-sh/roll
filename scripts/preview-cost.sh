@@ -274,7 +274,11 @@ FOLLOWED=$(python3 -c 'import sys,urllib.parse as u; e=dict(l.split("=",1) for l
 echo "$APP_ENV" | grep -qx 'PAYMENTS_KEY=sk_test_from_staging_42' || { echo "roll://staging/PAYMENTS_TEST_KEY should be staging's value: $(echo "$APP_ENV" | grep '^PAYMENTS_KEY=' | cut -c1-40)"; exit 1; }
 echo "$APP_ENV" | grep -qxF 'GREETING=hello ${USER}' || { echo "a plain value's \${ should stay as it is: $(echo "$APP_ENV" | grep '^GREETING=')"; exit 1; }
 [ "$(curl -s -o /dev/null -w '%{http_code}' -X PUT "http://$API/v1/previews/projects/$PRJ/settings" -H 'content-type: application/json' -d '{"env":{"X":"roll://other@staging/KEY"}}')" = 400 ] || { echo "a reference into another project should be refused"; exit 1; }
-[ "$(curl -s -o /dev/null -w '%{http_code}' -X PUT "http://$API/v1/previews/$PV/env" -H 'content-type: application/json' -d '{"vars":{"X":"roll://staging/PAYMENTS_TEST_KEY"}}')" = 400 ] || { echo "a preview's own variable can't be a reference yet"; exit 1; }
+# A preview's own variable may be a reference too (its setter's reveal: the operator's here); a
+# look-alike is refused, never kept as text.
+[ "$(curl -s -o /dev/null -w '%{http_code}' -X PUT "http://$API/v1/previews/$PV/env" -H 'content-type: application/json' -d '{"vars":{"X":" roll://staging/PAYMENTS_TEST_KEY"}}')" = 400 ] || { echo "a look-alike reference should be refused"; exit 1; }
+[ "$(curl -s -o /dev/null -w '%{http_code}' -X PUT "http://$API/v1/previews/$PV/env" -H 'content-type: application/json' -d '{"vars":{"X":"roll://staging/PAYMENTS_TEST_KEY"}}')" = 200 ] || { echo "a preview's own variable should take a reference its setter may reveal"; exit 1; }
+[ "$(curl -s -o /dev/null -w '%{http_code}' -X PUT "http://$API/v1/previews/$PV/env" -H 'content-type: application/json' -d '{"vars":{"X":null}}')" = 200 ] || { echo "removing it should work"; exit 1; }
 case "$APP_DB" in postgres://br_*) ;; *) echo "the service's DATABASE_URL should be the branch's own role, not ${APP_DB%%@*}…"; exit 1;; esac
 # Its mail goes to roll's catcher, signed in as the preview, never to the provider production
 # uses: the key is gone, and what it sends is caught and listed (sent here as its service would).
