@@ -300,13 +300,6 @@ pub trait Workloads: Send + Sync {
         let _ = (id, why);
         Ok(())
     }
-    /// What a roll token found in code is (validity checks, validity.rs): roll-access looks it up
-    /// by its hash, never using it, and says live, gone or decoy. `None` for a roll secret it
-    /// can't say about without using it (another product's, a refresh token). Blocking.
-    fn token_status(&self, secret: &crate::Value) -> crate::Result<Option<crate::validity::TokenStatus>> {
-        let _ = secret;
-        Ok(None)
-    }
     /// A decoy token (docs/secrets.md, "Decoys"; roll-access's decoys): it looks as `rule` says and
     /// allows nothing, and roll-access tells roll secrets of each use
     /// ([`crate::Secrets::decoy_used`]). Owned by `owner` (`None`: the operator), who's mailed

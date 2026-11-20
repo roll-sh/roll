@@ -1477,23 +1477,6 @@ impl roll_secrets::Workloads for Workloads {
         }
     }
 
-    /// A token's secret or an OAuth access token (`rlt_`, `rlo_`), by its hash: a read, never a
-    /// use (nothing is marked used, no decoy goes off). Other roll secrets (refresh tokens, other
-    /// products') aren't said about.
-    fn token_status(&self, secret: &roll_secrets::Value) -> roll_secrets::Result<Option<roll_secrets::validity::TokenStatus>> {
-        use roll_secrets::validity::TokenStatus;
-        let s = secret.expose();
-        if !(s.starts_with("rlt_") || s.starts_with("rlo_")) || !roll_access::checksum_ok(s) {
-            return Ok(None);
-        }
-        let g = self.0.store.by_secret(s).map_err(|e| Error::Internal(format!("looking a token up: {e}")))?;
-        Ok(Some(match g {
-            Some(g) if g.decoy => TokenStatus::Decoy,
-            Some(_) => TokenStatus::Live,
-            None => TokenStatus::Gone,
-        }))
-    }
-
     fn revoke_decoy(&self, id: &str) -> roll_secrets::Result<()> {
         self.0.revoke_decoy(id, "its decoy key was changed or deleted").map(|_| ()).map_err(|e| Error::Internal(format!("revoking a decoy token: {e}")))
     }

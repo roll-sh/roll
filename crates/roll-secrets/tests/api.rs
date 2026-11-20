@@ -1070,19 +1070,6 @@ impl roll_secrets::Workloads for Gate {
     fn revoke_decoy(&self, id: &str) -> roll_secrets::Result<()> {
         self.revoke(id)
     }
-    /// By the secret, as roll-access's hash lookup: live, a decoy, or gone.
-    fn token_status(&self, secret: &Secret) -> roll_secrets::Result<Option<roll_secrets::validity::TokenStatus>> {
-        use roll_secrets::validity::TokenStatus;
-        if !secret.expose().starts_with("rlt_") {
-            return Ok(None);
-        }
-        let decoys = self.decoys.lock().unwrap().clone();
-        Ok(Some(match self.tokens.lock().unwrap().get(secret.expose()) {
-            Some(g) if decoys.contains(&*g.id) => TokenStatus::Decoy,
-            Some(_) => TokenStatus::Live,
-            None => TokenStatus::Gone,
-        }))
-    }
     /// As `POST /v1/access/tokens`: its owner is whoever's request it is. As roll-access's
     /// `create_grant`, extensions that name no one (no operator marker, person or grant) are
     /// refused, even on an open server.
@@ -1982,10 +1969,16 @@ async fn validity_checks_ask_each_provider_once_and_only_when_an_admin_turned_th
     assert_eq!(r(5).1, Some("T0ROLLFIX"));
     assert_eq!((r(8).0, v["results"][8]["why"].as_str()), ("unknown", Some("roll can't check this kind of credential")));
     assert_eq!(v["results"][9], v["results"][0], "a repeat is the first one's answer");
-    // roll's own tokens are looked up, never used; a decoy reads as one roll doesn't look up.
-    assert_eq!([r(10).0, r(12).0], ["live", "invalid"]);
-    assert_eq!(r(11).0, "unknown", "a found decoy is never reported live");
-    assert!(!v["results"][11].to_string().contains("decoy"));
+    // Every roll token gets one answer, never looked up: a real one and a decoy read the same,
+    // byte for byte, but for their fingerprints.
+    let same = |i: usize| {
+        let mut a = v["results"][i].clone();
+        a.as_object_mut().unwrap().remove("fingerprint");
+        serde_json::to_vec(&a).unwrap()
+    };
+    assert_eq!((r(10), v["results"][10]["why"].as_str()), (("unknown", None, None), Some("a roll token: roll revokes it when it lands")));
+    assert_eq!(same(10), same(11), "a real token and a decoy are told apart");
+    assert_eq!(same(10), same(12));
     // One request per credential a provider was asked about, to its own host, carrying only the
     // credential: none to STS.
     let sent = asked();
@@ -2001,10 +1994,12 @@ async fn validity_checks_ask_each_provider_once_and_only_when_an_admin_turned_th
     let fp = v["results"][0]["fingerprint"].as_str().unwrap();
     let kept = api.ok(Method::GET, &format!("/unstored/{fp}"), None).await;
     assert_eq!((kept["result"].as_str(), kept["kind"].as_str()), (Some("live"), Some("a GitHub token")));
-    // Each check is audited with kind, fingerprint and result, never the value; the decoy and the
-    // AWS key asked nobody, so they have none.
+    // Each check is audited with kind, fingerprint and result, never the value; roll's tokens and
+    // the AWS key asked nobody, so they have none, and nothing is kept for them.
     let audit = api.ok(Method::GET, "/audit?action=secrets.validity", None).await;
-    assert_eq!(audit.as_array().unwrap().len(), 9, "{audit}");
+    assert_eq!(audit.as_array().unwrap().len(), 7, "{audit}");
+    let (s, _) = api.call(Method::GET, &format!("/unstored/{}", v["results"][11]["fingerprint"].as_str().unwrap()), None).await;
+    assert_eq!(s, StatusCode::NOT_FOUND, "the decoy isn't kept");
     let text = api.ok(Method::GET, "/audit", None).await.to_string() + &v.to_string();
     assert!(text.contains(fp) && text.contains("a GitHub token") && text.contains("live"));
     for value in [&c.github_live, &c.aws_id, &c.aws_secret, &c.stripe, &c.slack, &c.openai, &c.anthropic, &roll_live, &roll_decoy] {

@@ -9,10 +9,10 @@
 //!   account. Only an operator turns live AWS checks on ([`Settings::aws_live`]), and even then a
 //!   key whose account is a known canary's ([`Canaries`]: a bundled list plus the operator's) is
 //!   never tried. The operator's list can also name any credential by fingerprint.
-//! - **roll's own tokens aren't tried either.** An `rlt_` or `rlo_` is looked up by its hash in
-//!   roll-access ([`crate::Workloads::token_status`]), which says live or revoked without using it.
-//!   A decoy (docs/secrets.md, "Decoys") is never reported: finding one is the decoy working, so its
-//!   answer is the one any roll secret roll can't look up gets, and nothing is kept or audited.
+//! - **roll's own tokens aren't tried or looked up.** Every roll-prefixed credential (`rlt_`,
+//!   `rlo_`, every other roll prefix, decoys included) gets one answer: `unknown`, "a roll token:
+//!   roll revokes it when it lands" (roll-access's `revoke_leaked` does, on landing). So nothing
+//!   tells a decoy (docs/secrets.md, "Decoys") from a real token, and nothing is kept or audited.
 //! - **Fixed hosts.** The other kinds have one request each to one host of their provider, built
 //!   here from constants: GitHub's `GET /user`, Stripe's `GET /v1/balance`, Slack's `auth.test`,
 //!   OpenAI's and Anthropic's models lists (read-only, free), and with live AWS checks on, STS's
@@ -24,8 +24,8 @@
 //!   for an hour), and a project gets at most [`PER_HOUR`] checks an hour. A check is claimed in a
 //!   write first (`claimed_at`), so two callers or two nodes never ask twice; the request goes out
 //!   after that write and its answer is stored, with its `secrets.validity` audit row (kind,
-//!   fingerprint, result), in another. A roll token's lookup is kept and audited the same way (an
-//!   hour, outside the rate limit); an AWS account read offline asks nobody and isn't kept.
+//!   fingerprint, result), in another. An AWS account read offline and a roll token's answer ask
+//!   nobody and aren't kept.
 //! - **Never the value.** A credential is a [`Value`] (redacted, zeroized) from the request to the
 //!   provider; it isn't stored, logged, audited or put in an error. Only its fingerprint
 //!   (`roll_auth::credentials::fingerprint`, what the notice and the scan already show) and the
@@ -119,16 +119,6 @@ impl Canaries {
     }
 }
 
-/// What a roll token found in code is, as roll-access says without using it.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum TokenStatus {
-    Live,
-    /// Revoked, expired, or never roll's.
-    Gone,
-    /// One of roll's decoys: never reported.
-    Decoy,
-}
-
 /// What the provider said.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -212,7 +202,7 @@ enum Checker {
     Slack,
     OpenAi,
     Anthropic,
-    /// roll's own tokens: looked up, never used.
+    /// roll's own tokens: never tried or looked up.
     Roll,
 }
 
@@ -261,7 +251,7 @@ fn ask(deliver: &dyn Deliver, checker: Checker, secret: &Value, pair: Option<&Va
     let bearer = Value::new(format!("Bearer {}", secret.expose()));
     let json_accept = Value::new("application/json");
     let (method, url, headers, body): Call = match checker {
-        Checker::Roll => return unknown("roll's own tokens are looked up, never tried"),
+        Checker::Roll => return unknown(ROLL_TOKEN),
         Checker::Aws => {
             let Some(pair) = pair else { return unknown("no secret access key next to it to sign with") };
             let (auth, date) = sigv4_get_caller_identity(secret.expose(), pair.expose(), now);
@@ -340,23 +330,19 @@ fn sigv4_get_caller_identity(key_id: &str, secret: &str, now: time::OffsetDateTi
     (Value::new(format!("AWS4-HMAC-SHA256 Credential={key_id}/{scope}, SignedHeaders={signed}, Signature={sig}")), amz)
 }
 
-/// Why a roll secret has no answer: the same words for a decoy and for what roll-access can't look
-/// up without using it, so the answer never says which keys are decoys.
-const NOT_LOOKED_UP: &str = "roll doesn't look this roll secret up";
+/// Every roll-prefixed credential's answer, decoys' too: nothing tells them apart.
+const ROLL_TOKEN: &str = "a roll token: roll revokes it when it lands";
 
-/// How long an answer counts: a day, an hour for `unknown` ones and for roll's own tokens (a
-/// revoke there should show soon).
-fn ttl(kind: &str, result: Validity) -> i64 {
-    if result == Validity::Unknown || kind == "a roll token" { UNKNOWN_TTL_MS } else { TTL_MS }
+/// How long an answer counts: a day, an hour for `unknown` ones.
+fn ttl(result: Validity) -> i64 {
+    if result == Validity::Unknown { UNKNOWN_TTL_MS } else { TTL_MS }
 }
 
 /// What to do about one credential, decided before anything is claimed.
 enum Plan {
     /// Answered now and not kept: nobody was asked (not checkable, an AWS account read offline, a
-    /// canary, a decoy).
+    /// canary, a roll token).
     Now(Checked),
-    /// Answered here without asking a provider (a roll token's lookup): kept and audited.
-    Here(Answer),
     /// Asked of its provider, once claimed.
     Ask,
 }
@@ -432,8 +418,8 @@ impl Secrets {
             .collect();
         let now = self.db.now_ms()?;
         let mut out: Vec<Option<Checked>> = vec![None; probes.len()];
-        // The ones to claim, once per fingerprint, with what was found here for them.
-        let mut claim_for: Vec<(usize, Option<Answer>)> = Vec::new();
+        // The ones to ask their providers about, once per fingerprint.
+        let mut ask_for: Vec<usize> = Vec::new();
         let mut seen: HashMap<&str, usize> = HashMap::new();
         for (i, (fp, kind)) in found.iter().enumerate() {
             if seen.contains_key(fp.as_str()) {
@@ -442,13 +428,12 @@ impl Secrets {
             seen.insert(fp, i);
             match self.plan(fp, kind, &probes[i], now) {
                 Plan::Now(c) => out[i] = Some(c),
-                Plan::Here(a) => claim_for.push((i, Some(a))),
-                Plan::Ask => claim_for.push((i, None)),
+                Plan::Ask => ask_for.push(i),
             }
         }
-        let claims = self.claim(project, &claim_for.iter().map(|(i, here)| (found[*i].0.as_str(), found[*i].1, here.is_none())).collect::<Vec<_>>(), now)?;
+        let claims = self.claim(project, &ask_for.iter().map(|&i| (found[i].0.as_str(), found[i].1)).collect::<Vec<_>>(), now)?;
         let mut waiting = Vec::new();
-        for ((i, here), claim) in claim_for.into_iter().zip(claims) {
+        for (i, claim) in ask_for.into_iter().zip(claims) {
             let (fp, kind) = (&found[i].0, found[i].1);
             out[i] = match claim {
                 Claim::Kept(c) => Some(c),
@@ -458,19 +443,12 @@ impl Secrets {
                     None
                 }
                 Claim::Mine => {
-                    let asked = here.is_none();
-                    let (result, account, why) = match here {
-                        Some(a) => a,
-                        None => {
-                            let deliver = self.deliver.as_deref().expect("planned with one");
-                            let checker = Checker::of(kind).expect("planned for a kind roll checks");
-                            // Outside any transaction: the claim's write is done.
-                            ask(deliver, checker, &probes[i].value, probes[i].pair.as_ref(), time::OffsetDateTime::now_utc())
-                        }
-                    };
+                    let deliver = self.deliver.as_deref().expect("planned with one");
+                    let checker = Checker::of(kind).expect("planned for a kind roll checks");
+                    // Outside any transaction: the claim's write is done.
+                    let (result, account, why) = ask(deliver, checker, &probes[i].value, probes[i].pair.as_ref(), time::OffsetDateTime::now_utc());
                     let at = self.db.now_ms()?;
-                    let how = if asked { "with its provider" } else { "without using it" };
-                    let summary = format!("checked {kind} {fp} {how}: {}{}", result.as_str(), account.as_ref().map(|a| format!(" (account {a})")).unwrap_or_default());
+                    let summary = format!("checked {kind} {fp} with its provider: {}{}", result.as_str(), account.as_ref().map(|a| format!(" (account {a})")).unwrap_or_default());
                     self.db.write(|c| {
                         c.execute("UPDATE validity SET result = ?, account = ?, checked_at = ?, why = ? WHERE project_id = ? AND fingerprint = ?", params![result.as_str(), account, at, why, project, fp])?;
                         audit::record(c, self.keys()?, project, caller, "secrets.validity", None, None, &[], &summary, at)
@@ -511,17 +489,9 @@ impl Secrets {
             return now_unknown(None, "a canary the operator listed: never tried");
         }
         match checker {
-            Checker::Roll => {
-                let status = self.workloads.as_ref().map(|w| w.token_status(&probe.value));
-                match status {
-                    Some(Ok(Some(TokenStatus::Live))) => Plan::Here((Validity::Live, None, None)),
-                    Some(Ok(Some(TokenStatus::Gone))) => Plan::Here((Validity::Invalid, None, None)),
-                    // A decoy reads as any roll secret roll can't look up: nothing says it's one.
-                    Some(Ok(Some(TokenStatus::Decoy) | None)) => now_unknown(None, NOT_LOOKED_UP),
-                    Some(Err(_)) => now_unknown(None, "roll-access didn't answer"),
-                    None => now_unknown(None, NOT_LOOKED_UP),
-                }
-            }
+            // One answer for every roll token, decoys too: nothing tells them apart, and a leaked
+            // one is revoked when it lands anyway.
+            Checker::Roll => now_unknown(None, ROLL_TOKEN),
             Checker::Aws => {
                 let id = probe.value.expose();
                 let account = roll_auth::credentials::aws_account(id);
@@ -552,14 +522,14 @@ impl Secrets {
     /// Claim each credential's check in one write: a fresh answer is kept, a recent claim is
     /// another caller's, and past [`PER_HOUR`] claims this hour nothing more is asked. Only touches
     /// the database (the closure may run again).
-    fn claim(&self, project: &str, items: &[(&str, &str, bool)], now: i64) -> Result<Vec<Claim>> {
+    fn claim(&self, project: &str, items: &[(&str, &str)], now: i64) -> Result<Vec<Claim>> {
         if items.is_empty() {
             return Ok(Vec::new());
         }
         self.db.write(|c| {
             let mut used: i64 = c.query_row("SELECT COUNT(*) FROM validity WHERE project_id = ? AND claimed_at > ?", params![project, now - 3_600_000], |r| r.get(0))?;
             let mut out = Vec::with_capacity(items.len());
-            for &(fp, kind, counts) in items {
+            for &(fp, kind) in items {
                 let row = c
                     .query_row("SELECT result, account, checked_at, claimed_at, why FROM validity WHERE project_id = ? AND fingerprint = ?", params![project, fp], |r| {
                         Ok((r.get::<_, Option<String>>(0)?, r.get::<_, Option<String>>(1)?, r.get::<_, Option<i64>>(2)?, r.get::<_, i64>(3)?, r.get::<_, Option<String>>(4)?))
@@ -567,7 +537,7 @@ impl Secrets {
                     .optional()?;
                 if let Some((result, account, checked_at, claimed_at, why)) = row {
                     if let (Some(result), Some(at)) = (result.as_deref().map(Validity::parse), checked_at) {
-                        if now - at < ttl(kind, result) {
+                        if now - at < ttl(result) {
                             out.push(Claim::Kept(Checked::answered(fp.to_string(), kind, result, account, at, why)));
                             continue;
                         }
@@ -576,17 +546,15 @@ impl Secrets {
                         continue;
                     }
                 }
-                // A lookup here (counts: false) asks no provider: outside the limit, and its claim
-                // (claimed_at 0) isn't counted.
-                if counts && used >= PER_HOUR {
+                if used >= PER_HOUR {
                     out.push(Claim::Limited);
                     continue;
                 }
-                used += counts as i64;
+                used += 1;
                 c.execute(
                     "INSERT INTO validity (project_id, fingerprint, kind, result, account, checked_at, claimed_at) VALUES (?, ?, ?, NULL, NULL, NULL, ?)
                      ON CONFLICT (project_id, fingerprint) DO UPDATE SET kind = excluded.kind, result = NULL, account = NULL, checked_at = NULL, why = NULL, claimed_at = excluded.claimed_at",
-                    params![project, fp, kind, if counts { now } else { 0 }],
+                    params![project, fp, kind, now],
                 )?;
                 out.push(Claim::Mine);
             }

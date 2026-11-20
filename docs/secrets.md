@@ -2968,7 +2968,7 @@ on`, or Validity checks in the project's environments settings), audited as `val
   | Slack token | `POST https://slack.com/api/auth.test` | the team id |
   | OpenAI API key | `GET https://api.openai.com/v1/models` | |
   | Anthropic API key | `GET https://api.anthropic.com/v1/models` | |
-  | roll's own tokens (`rlt_`, `rlo_`) | looked up by hash in roll-access, never used | |
+  | roll's own tokens (every roll prefix) | neither tried nor looked up: one answer for all | |
 
   - **AWS isn't tried by default.** `sts:GetCallerIdentity` is exactly what AWS canary tokens
     (canarytokens.org's, GitGuardian's) alert on. An access key id carries its account: after the
@@ -2985,13 +2985,11 @@ on`, or Validity checks in the project's environments settings), audited as `val
     know. The operator adds their own with `ROLL_SECRETS_VALIDITY_CANARIES` (`aws:123456789012`,
     any provider's `provider:account`, or a credential by fingerprint, `sha256:…`; commas or spaces
     between). A canary's answer is `unknown`, saying so.
-  - **roll's own tokens** are never tried: roll-access looks a token's secret or OAuth access token
-    up by its hash, a read that marks nothing used, and answers live or invalid. A decoy
-    ("Decoys") is never reported: finding one is the decoy working. It gets the answer any roll
-    secret roll doesn't look up gets (`unknown`, "roll doesn't look this roll secret up"), so
-    nothing says which keys are decoys, and nothing is kept or audited for it. Other roll secrets
-    (refresh tokens, other products') aren't looked up. A roll token pushed to roll code is revoked
-    when it lands anyway (roll-access's `revoke_leaked`).
+  - **roll's own tokens** are neither tried nor looked up. Every roll-prefixed credential (`rlt_`,
+    `rlo_` and every other roll prefix, decoys included) gets one answer: `unknown`, "a roll token:
+    roll revokes it when it lands". A roll token pushed to roll code is revoked when it lands
+    anyway (roll-access's `revoke_leaked`), so a lookup would add nothing. And with one answer for
+    all, nothing tells a decoy ("Decoys") from a real token. Nothing is kept or audited for them.
 
   Google API keys, private keys and database URLs aren't checked.
 - **The answer** is `live` (accepted), `invalid` (refused: revoked, deleted or never real) or
@@ -3007,8 +3005,7 @@ on`, or Validity checks in the project's environments settings), audited as `val
   gets at most 100 checks an hour. A check is claimed in a write first, so two callers or two nodes
   never ask twice; the request goes out after that write, outside any transaction, and the answer
   is stored with its `secrets.validity` audit row (kind, fingerprint, result and account) in
-  another. A roll token's lookup is kept and audited the same way, for an hour and outside the
-  rate limit. An AWS account read offline asks nobody and isn't kept. The value is never stored,
+  another. An AWS account read offline and a roll token's answer ask nobody and aren't kept. The value is never stored,
   logged, audited or put in an error.
 - **Where it shows.** On a change, roll code asks in background work after it finds the
   credentials (only those kinds, only on the repo's own changes, never a fork's, which would make
@@ -3028,8 +3025,8 @@ on`, or Validity checks in the project's environments settings), audited as `val
 - **Tests.** Fake providers only:
   - `validity_checks_ask_each_provider_once_and_only_when_an_admin_turned_them_on`
     (`tests/api.rs`): off asks nobody; only an admin turns it on; live, invalid and a redirect's
-    unknown; an AWS key's account read with no request; roll tokens live and revoked; a found
-    decoy never live, kept or audited; one request each, carrying only the credential; the cache;
+    unknown; an AWS key's account read with no request; every roll token, a decoy too, with one
+    answer, byte for byte but for its fingerprint; a found decoy neither kept nor audited; one request each, carrying only the credential; the cache;
     the audit rows without a value.
   - `an_aws_key_is_tried_only_when_the_operator_allows_and_a_canary_never`: with live AWS on, a
     canary account's key and an operator-listed fingerprint ask nobody, and an allowed key is signed
