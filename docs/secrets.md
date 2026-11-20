@@ -5133,7 +5133,8 @@ is still level with or ahead of the category. The gaps are at the new features' 
    - `covers`/`leaf` helpers and a five-step proxy contract.
 
    After placeholders lands, it implements `BoundHosts` and ends the CAs with the consumer.
-4. **Validity checks without tripping canaries** (M; fixing the design in `feature/roll-secrets-validity`):
+4. **Validity checks without tripping canaries** (M; #487, gated green: AWS accounts read offline, canary
+   accounts never tried, live AWS only by operator opt-in; roll tokens all answer alike):
    - AWS: the account read from the key id offline, known canary accounts skipped, a live call only by
      opt-in;
    - roll's own tokens are looked up, never used, and decoys aren't findings.
