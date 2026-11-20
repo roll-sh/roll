@@ -2608,3 +2608,38 @@ async fn a_session_is_its_roles_and_a_removal_revokes_what_it_confines() {
         assert!(actions.contains(&a), "{a}: {log}");
     }
 }
+
+/// The security review's finding 1: a person's token can claim `admin` on every resource of a
+/// product they don't reach, so its rules never let them put someone else's resource on their
+/// canvas or make their project its home (which would hand its credentials to their secrets). Only
+/// what `Owners` says is theirs, or what's at home in the project already, moves.
+#[tokio::test]
+async fn a_persons_grant_never_homes_or_places_someone_elses_resource() {
+    let d = Daemon::new(0);
+    d.people.add("usr_mal", "mal");
+    let (s, p) = d.as_user("usr_mal", Method::POST, "/v1/workspace/projects", Some(json!({ "name": "mine" }))).await;
+    assert_eq!(s, StatusCode::CREATED, "{p}");
+    let id = p["id"].as_str().unwrap().to_string();
+    let (s, t) = d.as_user("usr_mal", Method::POST, "/v1/access/tokens", Some(json!({ "name": "wide", "rules": [{ "product": "*", "resources": "*", "actions": { "read": "allow", "write": "allow", "admin": "allow" } }] }))).await;
+    assert_eq!(s, StatusCode::CREATED, "{t}");
+    let token = t["token"].as_str().unwrap().to_string();
+    // Someone's Postgres project (a kind homes keep) and someone's bucket.
+    for (kind, r#ref) in [("postgres", "prj_theirs"), ("bucket", "acme-prod")] {
+        let place = format!("/v1/workspace/projects/{id}/resources/{kind}/{ref}");
+        let home = format!("/v1/workspace/projects/{id}/homes/{kind}/{ref}");
+        assert_eq!(d.call(&token, Method::PUT, &place, Some(json!({ "x": 0, "y": 0 }))).await.0, StatusCode::FORBIDDEN, "{kind}: placed by a token");
+        assert_eq!(d.call(&token, Method::PUT, &home, None).await.0, StatusCode::FORBIDDEN, "{kind}: homed by a token");
+        assert_eq!(d.as_user("usr_mal", Method::PUT, &place, Some(json!({ "x": 0, "y": 0 }))).await.0, StatusCode::FORBIDDEN, "{kind}: placed by the session");
+        assert_eq!(d.as_user("usr_mal", Method::PUT, &home, None).await.0, StatusCode::FORBIDDEN, "{kind}: homed by the session");
+    }
+    let kind = roll_workspace::Kind::Postgres;
+    assert_eq!(d.workspace.home_of(kind, "prj_theirs").unwrap(), None);
+    let mine = d.workspace.get(roll_workspace::Scope::All, &id).unwrap();
+    assert!(mine.resources.is_empty() && !d.workspace.trusts(&mine, kind, "prj_theirs"));
+    // The operator homes a Postgres project there (it was made through it, say): then it moves on
+    // that canvas, and still nowhere else.
+    assert_eq!(d.call(OPERATOR, Method::PUT, &format!("/v1/workspace/projects/{id}/homes/postgres/prj_theirs"), None).await.0, StatusCode::OK);
+    assert_eq!(d.as_user("usr_mal", Method::PUT, &format!("/v1/workspace/projects/{id}/resources/postgres/prj_theirs"), Some(json!({ "x": 1, "y": 1 }))).await.0, StatusCode::OK);
+    // A bucket's name can be made again by someone else: it gets no home at all.
+    assert_eq!(d.call(OPERATOR, Method::PUT, &format!("/v1/workspace/projects/{id}/homes/bucket/acme-prod"), None).await.0, StatusCode::BAD_REQUEST);
+}

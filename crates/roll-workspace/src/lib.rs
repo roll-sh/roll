@@ -165,8 +165,15 @@ pub type OnDelete = Box<dyn Fn(&str) + Send + Sync>;
 /// from the products' own records (a repo under the person's roll code owner), and an admin's
 /// projects stand for anything. Looked up on every use; a failed lookup is a no.
 pub trait Owners: Send + Sync {
-    /// Whether a project `user` (`usr_…`) owns may stand for `kind ref` on its canvas.
+    /// Whether a project `user` (`usr_…`) made may stand for `kind ref` on its canvas (an admin's:
+    /// anything, as the operator's).
     fn trusts(&self, user: &str, kind: Kind, r#ref: &str) -> bool;
+    /// Whether `kind ref` is `user`'s own (their repo, their cluster), whatever their account is:
+    /// what an owner adds to a project they didn't make, and what a person may place or home. An
+    /// admin account is no wider here (docs/members.md, "The canvas rule").
+    fn owns(&self, user: &str, kind: Kind, r#ref: &str) -> bool {
+        self.trusts(user, kind, r#ref)
+    }
 }
 
 /// The workspace store.
@@ -346,13 +353,13 @@ impl Workspace {
     /// says is one of its owners'; the operator's projects stand for their canvas. The one check
     /// every consumer asks: never decide this from canvas membership alone.
     pub fn trusts(&self, project: &Project, kind: Kind, r#ref: &str) -> bool {
-        project.owner.is_empty() || self.trusted_by_members(&project.id, kind, r#ref)
+        project.owner.is_empty() || self.trusted_by_members(&project.id, &project.owner, kind, r#ref)
     }
 
     /// Whether [`Owners`] says `kind ref` is `user`'s own (their repo, their search cluster): what a
-    /// person may put on a canvas they manage.
+    /// person may put on a canvas, or make a project the home of.
     pub fn owned_by(&self, user: &str, kind: Kind, r#ref: &str) -> bool {
-        self.owners.get().is_some_and(|o| o.trusts(user, kind, r#ref))
+        self.owners.get().is_some_and(|o| o.owns(user, kind, r#ref))
     }
 
     /// Run `f` after each project is deleted, outside the transaction.

@@ -68,9 +68,12 @@ impl Engine {
         }
     }
 
-    /// The ids of the workspace projects `owner` (a signed-in person) is a member of.
+    /// The ids of the workspace projects `owner` (a signed-in person) owns: previews aren't a
+    /// member product yet (docs/members.md, "Phasing": v1.1), and their routes reach shells,
+    /// files and branches' credentials, so only a project's owners have them until previews
+    /// decide by role.
     pub fn projects_of(&self, owner: &str) -> Result<std::collections::HashSet<String>> {
-        Ok(self.workspace.list(roll_workspace::Scope::Member(owner))?.into_iter().map(|p| p.id).collect())
+        Ok(self.workspace.list(roll_workspace::Scope::Member(owner))?.into_iter().filter(|p| p.role.is_some_and(|r| r.as_str() == "owner")).map(|p| p.id).collect())
     }
 
     /// A workspace project, or a 404.

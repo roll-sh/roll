@@ -124,18 +124,24 @@ impl Secrets {
         let now = self.db.now_ms()?;
         // The environment's URL as it is now (sealed: a chat's incoming webhook URL is a credential);
         // none any more, and the notice is dropped.
-        type Due = (String, String, String, Option<Vec<u8>>, String, i64);
+        type Due = (String, String, String, Option<Vec<u8>>, String, i64, Option<String>);
         let due: Vec<Due> = self.db.read(|c| {
             c.query(
-                "SELECT n.id, n.project_id, n.env_id, e.notify_url, n.body, n.attempts FROM notices n LEFT JOIN environments e ON e.id = n.env_id
+                "SELECT n.id, n.project_id, n.env_id, e.notify_url, n.body, n.attempts, e.notify_by FROM notices n LEFT JOIN environments e ON e.id = n.env_id
                  WHERE n.sent_at IS NULL AND n.next_at <= ? AND n.attempts < ? LIMIT 50",
                 params![now, ATTEMPTS],
-                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?)),
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?, r.get(6)?)),
             )
         })?;
         let (mut sent, mut failed) = (0, 0);
-        for (id, project, env_id, sealed, body, attempts) in due {
-            let Some(sealed) = sealed else {
+        for (id, project, env_id, sealed, body, attempts, by) in due {
+            // Announced only while whoever set the URL may still manage the project (set before
+            // members recorded who: as it was).
+            let maker_ok = match &by {
+                Some(by) => self.maker_reaches(by, &[(crate::access::Action::Admin, crate::access::Scope::whole(&project))])?,
+                None => true,
+            };
+            let Some(sealed) = sealed.filter(|_| maker_ok) else {
                 self.db.write(|c| c.execute("DELETE FROM notices WHERE id = ?", [&id]))?;
                 continue;
             };

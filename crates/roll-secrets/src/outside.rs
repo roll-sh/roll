@@ -328,6 +328,10 @@ impl LinkProvider for Provider {
         &[("username", Mode::Managed), ("password", Mode::Managed)]
     }
 
+    fn maker(&self, r#ref: &str) -> Option<(String, String)> {
+        self.db.read(|c| c.query_row("SELECT project_id, created_by FROM outside_dbs WHERE id = ?", [r#ref], |r| Ok((r.get(0)?, r.get(1)?))).optional()).ok().flatten()
+    }
+
     fn name(&self, r#ref: &str) -> Option<String> {
         self.db.read(|c| c.query_row("SELECT name FROM outside_dbs WHERE id = ?", [r#ref], |r| r.get::<_, String>(0)).optional()).ok().flatten()
     }

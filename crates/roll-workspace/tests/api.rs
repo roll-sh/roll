@@ -249,7 +249,7 @@ async fn members_are_invited_changed_and_removed() {
     let (s, inv) = api.call_as(Some("usr_ada"), Method::POST, &at("/invites"), Some(json!({ "email": "Bob@Example.com", "role": "developer" }))).await;
     assert_eq!((s, inv["email"].as_str(), inv["role"].as_str()), (StatusCode::CREATED, Some("bob@example.com"), Some("developer")), "{inv}");
     let url = inv["url"].as_str().unwrap();
-    assert!(url.starts_with("https://roll.example/dashboard/invites?token=pit_"), "{url}");
+    assert!(url.starts_with("https://roll.example/dashboard/invites?token=rlv_") && roll_auth::credentials::checksum_ok(url.split("token=").nth(1).unwrap()), "{url}");
     let token = url.split("token=").nth(1).unwrap().to_string();
     let (_, list) = api.call_as(Some("usr_ada"), Method::GET, &at("/invites"), None).await;
     assert_eq!(list.as_array().unwrap().len(), 1);
@@ -344,4 +344,26 @@ fn makers_become_owners() {
     let m = ws.memberships_of("usr_ada").unwrap();
     assert_eq!((m.len(), m[0].project.as_str(), m[0].role), (1, "prj_mine", roll_auth::roles::Role::Owner));
     assert_eq!(ws.owners_of("prj_ops").unwrap(), Vec::<String>::new(), "the operator's projects get no members");
+}
+
+/// The security review's finding 5: a home is kept only for an id a product never gives out
+/// again, and goes when the product deletes the resource, so nothing made later under the same
+/// ref inherits a project's trust.
+#[tokio::test]
+async fn homes_are_kept_only_for_ids_never_given_out_again() {
+    let api = Api::new();
+    let (_, p) = api.call_as(Some("usr_ada"), Method::POST, "/v1/workspace/projects", Some(json!({ "name": "pay" }))).await;
+    let id = p["id"].as_str().unwrap().to_string();
+    let (s, _) = api.call(Method::PUT, &format!("/v1/workspace/projects/{id}/homes/redis/rdb_1"), None).await;
+    assert_eq!(s, StatusCode::OK);
+    let project = api.ws.get(roll_workspace::Scope::All, &id).unwrap();
+    assert!(api.ws.trusts(&project, roll_workspace::Kind::Redis, "rdb_1"));
+    // Deleted by its product: the home goes, so a new `rdb_1` (were one ever made) is a stranger.
+    api.ws.forget_resource(roll_workspace::Kind::Redis, "rdb_1").unwrap();
+    assert_eq!(api.ws.home_of(roll_workspace::Kind::Redis, "rdb_1").unwrap(), None);
+    assert!(!api.ws.trusts(&project, roll_workspace::Kind::Redis, "rdb_1"));
+    // A bucket goes by a name someone else can make again: no home, by anyone.
+    let (s, e) = api.call(Method::PUT, &format!("/v1/workspace/projects/{id}/homes/bucket/acme-prod"), None).await;
+    assert_eq!(s, StatusCode::BAD_REQUEST, "{e}");
+    assert!(!api.ws.trusts(&project, roll_workspace::Kind::Bucket, "acme-prod"));
 }

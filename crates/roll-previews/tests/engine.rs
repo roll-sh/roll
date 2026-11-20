@@ -1159,6 +1159,22 @@ async fn a_signed_in_person_sees_only_their_own_projects_previews() {
     // Their own project's: there.
     let mine = e.ws.create("usr_b", "mine", "", None).unwrap();
     assert_eq!(call(other, format!("/v1/previews/projects/{}/settings", mine.id)).await.0, 200);
+    // A member who isn't an owner (a viewer here) gets none of it: previews aren't a member
+    // product yet, and they reach shells, files and branches' credentials (docs/members.md).
+    struct Addresses;
+    impl roll_workspace::People for Addresses {
+        fn person(&self, user: &str) -> Option<roll_workspace::Person> {
+            let h = user.strip_prefix("usr_")?;
+            Some(roll_workspace::Person { handle: h.into(), email: Some(format!("{h}@example.com")) })
+        }
+    }
+    e.ws.set_people(std::sync::Arc::new(Addresses));
+    let (_, url) = e.ws.invite(&roll_workspace::Actor::operator(), &e.project, "v@example.com", "viewer", None).unwrap();
+    e.ws.accept("usr_v", url.split("token=").nth(1).unwrap(), None).unwrap();
+    let viewer = Some(("usr_v", false));
+    assert_eq!(call(viewer, format!("/v1/previews/{}", p.id)).await.0, 404);
+    assert_eq!(call(viewer, format!("/v1/previews/{}/connect", p.id)).await.0, 404, "a viewer never gets the branches' credentials");
+    assert_eq!(call(viewer, format!("/v1/previews/{}/env", p.id)).await.0, 404);
     // A token (no signed-in person) and an admin see it.
     assert_eq!(call(None, format!("/v1/previews/{}", p.id)).await.0, 200);
     assert_eq!(call(Some(("usr_c", true)), format!("/v1/previews/{}", p.id)).await.0, 200);

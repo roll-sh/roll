@@ -252,6 +252,10 @@ impl LinkProvider for Provider {
         self.vendor(r#ref).map(|v| v.fields()).unwrap_or_else(|| FIELDS.to_vec())
     }
 
+    fn maker(&self, r#ref: &str) -> Option<(String, String)> {
+        self.db.read(|c| c.query_row("SELECT project_id, created_by FROM saas_rotators WHERE id = ?", [r#ref], |r| Ok((r.get(0)?, r.get(1)?))).optional()).ok().flatten()
+    }
+
     fn name(&self, r#ref: &str) -> Option<String> {
         self.db.read(|c| c.query_row("SELECT name FROM saas_rotators WHERE id = ?", [r#ref], |r| r.get::<_, String>(0)).optional()).ok().flatten()
     }

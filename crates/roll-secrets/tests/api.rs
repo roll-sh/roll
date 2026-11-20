@@ -4888,3 +4888,25 @@ async fn a_demoted_members_backup_gateway_identity_and_sync_stop_or_narrow() {
     sweep().await;
     assert_eq!(api.sync.pushes.lock().unwrap().len(), pushed, "her sync stopped");
 }
+
+/// The security review's finding 4: a rotator (a URL outside roll that chooses a key's value)
+/// works only while whoever registered it may still manage the project. Removed, their rotator
+/// stops choosing values at once.
+#[tokio::test]
+async fn a_removed_admins_rotator_stops_choosing_values() {
+    let api = Api::new().await;
+    let p = api.project.clone();
+    let (_, inv) = api.call(Method::POST, &format!("/v1/workspace/projects/{p}/invites"), Some(json!({ "email": "cat@example.com", "role": "admin" }))).await;
+    let token = inv["url"].as_str().unwrap().split("token=").nth(1).unwrap().to_string();
+    assert_eq!(api.signed_in("cat", false, Method::POST, &format!("/v1/workspace/invites/{token}/accept"), None).await.0, StatusCode::OK);
+    let (s, r) = api.signed_in("cat", false, Method::POST, &format!("/v1/secrets/projects/{p}/rotators"), Some(json!({ "name": "stripe", "url": "https://rotator.example/stripe" }))).await;
+    assert_eq!(s, StatusCode::CREATED, "{r}");
+    let link = json!({ "kind": "rotator", "ref": r["id"], "field": "value", "mode": "managed" });
+    api.ok(Method::PUT, "/environments/production/secrets/STRIPE_KEY", Some(json!({ "link": link }))).await;
+    assert_eq!(api.values("production", "/").await["values"]["STRIPE_KEY"], "vendor-key-1");
+
+    assert_eq!(api.call(Method::DELETE, &format!("/v1/workspace/projects/{p}/members/usr_cat"), None).await.0, StatusCode::NO_CONTENT);
+    let (s, e) = api.call(Method::POST, "/environments/production/secrets/STRIPE_KEY/rotate", None).await;
+    assert!(!s.is_success() && e.to_string().contains("usr_cat"), "{s} {e}");
+    assert_eq!(api.values("production", "/").await["values"]["STRIPE_KEY"], "vendor-key-1", "the old value stands");
+}

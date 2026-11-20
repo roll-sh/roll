@@ -459,6 +459,13 @@ pub fn open(args: &crate::Args, home: &Path, workspace: Arc<roll_workspace::Work
     tell_decoys(&access, secrets.clone());
     // ACME's http-01 and dns-01 checks: public addresses only, as webhooks.
     secrets.set_acme_checks(Arc::new(acme::Checks::new(allow_private)));
+    // A member removed, demoted or gone (docs/members.md): their shared folders, one-time shares
+    // and leases end once they no longer hold what those need.
+    let s = secrets.clone();
+    workspace.on_event(Box::new(move |e| match (e.action.as_str(), &e.subject) {
+        ("member.remove" | "member.leave" | "member.role", Some(user)) => s.member_changed(&e.project, user).map_err(|e| e.to_string()),
+        _ => Ok(()),
+    }));
     // A deleted project's secrets go with it.
     let s = secrets.clone();
     workspace.on_delete(Box::new(move |id| {
@@ -1215,12 +1222,18 @@ impl roll_workspace::People for People {
 impl roll_workspace::Owners for People {
     fn trusts(&self, user: &str, kind: roll_workspace::Kind, r#ref: &str) -> bool {
         let Ok(Some(p)) = roll_secrets::People::person(self, user) else { return false };
-        p.admin
-            || match kind {
-                roll_workspace::Kind::Repo => roll_secrets::access::owns_repo(p.code_owner.as_deref(), r#ref),
-                roll_workspace::Kind::Search => self.search.as_ref().is_some_and(|s| matches!(s.store.owner_of(r#ref), Ok(Some(Some(o))) if o == user)),
-                _ => false,
-            }
+        p.admin || self.owns(user, kind, r#ref)
+    }
+
+    /// Theirs whatever their account is: an admin account added as an owner of someone else's
+    /// project adds only what's its own (docs/members.md, "The canvas rule").
+    fn owns(&self, user: &str, kind: roll_workspace::Kind, r#ref: &str) -> bool {
+        let Ok(Some(p)) = roll_secrets::People::person(self, user) else { return false };
+        match kind {
+            roll_workspace::Kind::Repo => roll_secrets::access::owns_repo(p.code_owner.as_deref(), r#ref),
+            roll_workspace::Kind::Search => self.search.as_ref().is_some_and(|s| matches!(s.store.owner_of(r#ref), Ok(Some(Some(o))) if o == user)),
+            _ => false,
+        }
     }
 }
 
