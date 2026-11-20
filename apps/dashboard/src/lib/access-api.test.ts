@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { installLink, accessRequest, approversText, parseApprovers, deciderName, describeApprovalRule, gateProgress, rememberable, proposedRule, approvableTogether, byConcern, catalogFor, denyRedirect, draftOf, expiringSoon, grantMatches, mcpConfig, parseAuthorize, githubIdentity, githubStep, presetFor, presetRules, publicJwk, rulesOf, trustedLabel, statusOf, toolsetCost, waitsForAdmin, withToolsets, type Approval, type Preset, idpFromForm, tieForAgents, untieForAgents } from "./access-api";
+import { installLink, accessRequest, approversText, parseApprovers, deciderName, describeApprovalRule, gateProgress, rememberable, proposedRule, approvableTogether, byConcern, catalogFor, denyRedirect, draftOf, expiringSoon, grantMatches, mcpConfig, parseAuthorize, githubIdentity, githubStep, presetFor, presetRules, publicJwk, rulesOf, trustedLabel, statusOf, toolsetCost, pickArea, waitsForAdmin, withToolsets, type Approval, type Preset, idpFromForm, tieForAgents, untieForAgents } from "./access-api";
 
 const presets: Preset[] = [
   { id: "read-only", name: "Read only", description: "", rules: [{ product: "*", resources: "*", actions: { read: "allow" } }] },
@@ -114,6 +114,14 @@ describe("toolsets", () => {
     expect(toolsetCost(costs, ["redis"], false, search)).toEqual({ tools: 8, tokens: 1300 });
     expect(toolsetCost(costs, [], true, search)).toEqual({ tools: 5, tokens: 840 });
     expect(withToolsets("https://api.roll.sh/v1/mcp", [], { search: true, lockdown: true })).toBe("https://api.roll.sh/v1/mcp?tools=search&lockdown=1");
+    // A product's areas: one replaces the whole product, the last one off brings it back.
+    expect(pickArea(["apps", "redis"], "apps", "observe")).toEqual(["redis", "apps.observe"]);
+    expect(pickArea(["redis", "apps.observe"], "apps", "deploy")).toEqual(["redis", "apps.observe", "apps.deploy"]);
+    expect(pickArea(["apps.observe"], "apps", "observe")).toEqual(["apps"]);
+    expect(pickArea(["apps.observe", "apps.deploy"], "apps", null)).toEqual(["apps"]);
+    const areas = [{ toolset: "apps.observe", tools: 19, read_only: 15, context_tokens: 2900 }];
+    expect(toolsetCost(costs, ["apps.observe"], false, undefined, areas)).toEqual({ tools: 24, tokens: 3300 });
+    expect(withToolsets("https://api.roll.sh/v1/mcp", ["apps.observe", "redis"])).toBe("https://api.roll.sh/v1/mcp?toolsets=apps.observe,redis");
   });
 });
 

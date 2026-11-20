@@ -919,7 +919,7 @@ async fn every_event_is_the_same_on_the_stream_and_in_webhooks() {
     assert_eq!(keys(&got["status"]), sorted(vec!["context", "state", "target_url", "description", "creator", "created_at", "updated_at"]));
     assert_eq!((got["status"]["context"].as_str(), got["status"]["state"].as_str()), (Some("ci/x"), Some("pending")));
 
-    // preview = {change, preview: Preview | null, became?: ["ready" | "visual_change"]}
+    // preview = {change, preview: Preview | null, became?: ["ready" | "failed" | "visual_change" | "regressions"]}
     a.ok("POST", &format!("/v1/code/changes/{id}/preview"), None).await;
     let got = ev.next("preview").await;
     assert_eq!(keys(&got), ["became", "change", "preview"]);
@@ -936,6 +936,18 @@ async fn every_event_is_the_same_on_the_stream_and_in_webhooks() {
     for (state, head, became) in [("creating", "cs_1", None), ("ready", "cs_1", Some(json!(["ready"]))), ("sleeping", "cs_1", None), ("ready", "cs_1", None), ("updating", "cs_2", None), ("ready", "cs_2", Some(json!(["ready"]))), ("failed", "cs_3", Some(json!(["failed"])))] {
         a.code.report_environment(&id, Some(&at(state, head))).unwrap();
         assert_eq!(ev.next("preview").await.get("became").cloned(), became, "{state} at {head}");
+    }
+    // Regressed against main's preview: once a push too (more of them at the same head isn't new).
+    let regressed = |head: &str, total: u64| -> code_control::model::Preview {
+        serde_json::from_value(json!({ "state": "running", "url": null, "postgres": null, "redis": null, "error": null, "created_at": 1,
+            "environment": { "id": "pv_1", "slug": "s", "state": "ready", "services": [], "resources": [], "sleeping_usd_month": 0.0, "active_usd_hour": 0.0, "head": head,
+                "new_errors": { "branch": "main", "total": total, "errors": [] } } }))
+        .unwrap()
+    };
+    // Gone and back at that head (main's preview asleep, then awake): not said again.
+    for (head, total, became) in [("cs_4", 1, Some(json!(["ready", "regressions"]))), ("cs_4", 2, None), ("cs_4", 0, None), ("cs_4", 3, None)] {
+        a.code.report_environment(&id, Some(&regressed(head, total))).unwrap();
+        assert_eq!(ev.next("preview").await.get("became").cloned(), became, "{total} at {head}");
     }
     a.ok("DELETE", &format!("/v1/code/changes/{id}/preview"), None).await;
     assert_eq!(ev.next("preview").await, json!({ "change": id, "preview": null }));

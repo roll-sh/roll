@@ -292,6 +292,9 @@ impl Pool {
             Isolation::ReadCommitted => "BEGIN ISOLATION LEVEL READ COMMITTED",
         };
         let (mut conflicts, mut drops) = (0, 0);
+        // What attempts that lost claimed (`Conn::claim`): the next one holds their locks from
+        // before its snapshot.
+        let mut claimed: Vec<i64> = Vec::new();
         loop {
             let lease = match self.lease(&mut drops) {
                 Some(l) => l?,
@@ -299,6 +302,7 @@ impl Pool {
             };
             let c = lease.conn();
             c.reset_flags();
+            c.read_committed.set(iso == Isolation::ReadCommitted);
             let again = |c: &PgConn, conflicts: &mut u32, drops: &mut u32| -> bool {
                 if c.broken.get() {
                     *drops += 1;
@@ -310,6 +314,21 @@ impl Pool {
                     false
                 }
             };
+            if !claimed.is_empty() {
+                // Released when the lease ends (or with the session, if it broke).
+                *c.held.borrow_mut() = claimed.clone();
+                let lock: String = claimed.iter().map(|k| format!("SELECT pg_advisory_lock({k});")).collect();
+                if let Err(e) = wait(c.client.batch_execute(&lock)) {
+                    let e = c.note(e);
+                    if again(c, &mut conflicts, &mut drops) {
+                        let broken = c.broken.get();
+                        drop(lease);
+                        pause(broken, drops, conflicts);
+                        continue;
+                    }
+                    return Err(e.into());
+                }
+            }
             // The transaction's id comes back with BEGIN (one round trip), so if the connection
             // drops during COMMIT we can ask whether it committed.
             let xid = match wait(c.client.simple_query(&format!("{begin}; SELECT pg_current_xact_id()::text"))) {
@@ -330,6 +349,12 @@ impl Pool {
             };
             c.in_tx.set(true);
             let out = f(c);
+            for k in c.claims.borrow_mut().drain(..) {
+                if !claimed.contains(&k) {
+                    claimed.push(k);
+                }
+            }
+            claimed.sort_unstable();
             let out = match out {
                 Ok(v) if c.failed.borrow().is_some() => {
                     // A statement failed and `f` carried on: Postgres has aborted the transaction,
@@ -535,13 +560,15 @@ async fn listen_loop(config: tokio_postgres::Config, tls: Option<MakeRustlsConne
 }
 
 fn schema_lock_key(schema: &str) -> i64 {
-    // FNV-1a: stable across builds and nodes.
-    let mut h: u64 = 0xcbf29ce484222325;
-    for b in b"roll-code-schema:".iter().chain(schema.as_bytes()) {
-        h ^= *b as u64;
-        h = h.wrapping_mul(0x100000001b3);
-    }
-    h as i64
+    fnv1a(fnv1a(FNV_OFFSET, b"roll-code-schema:"), schema.as_bytes()) as i64
+}
+
+/// FNV-1a, 64-bit: advisory lock keys, stable across builds and nodes (unlike `Hash`). Hashing
+/// in parts gives what hashing them joined would.
+const FNV_OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
+
+fn fnv1a(seed: u64, bytes: &[u8]) -> u64 {
+    bytes.iter().fold(seed, |h, b| (h ^ u64::from(*b)).wrapping_mul(0x0000_0100_0000_01b3))
 }
 
 fn pause(broken: bool, drops: u32, conflicts: u32) {
@@ -587,7 +614,7 @@ impl PoolInner {
             client.batch_execute(&setup).await?;
             Ok::<_, tokio_postgres::Error>(client)
         })?;
-        Ok(PgConn::new(client, generation))
+        Ok(PgConn::new(client, generation, &self.schema))
     }
 }
 
@@ -611,6 +638,15 @@ impl Lease<'_> {
 impl Drop for Lease<'_> {
     fn drop(&mut self) {
         let Some(c) = self.conn.take() else { return };
+        // Claims held for a write: given back before anyone else gets the connection. A
+        // connection that can't is closed, which gives them back too.
+        let held = std::mem::take(&mut *c.held.borrow_mut());
+        if !held.is_empty() && !c.broken.get() && !c.in_tx.get() {
+            let unlock: String = held.iter().map(|k| format!("SELECT pg_advisory_unlock({k});")).collect();
+            if wait(c.client.batch_execute(&unlock)).is_err() {
+                c.broken.set(true);
+            }
+        }
         let mut st = self.pool.state.lock();
         // A connection still in a transaction (a panic in the closure) is dropped: the server
         // rolls it back.
@@ -639,10 +675,19 @@ pub(crate) struct PgConn {
     in_tx: Cell<bool>,
     /// The first statement that failed in the current transaction.
     failed: RefCell<Option<String>>,
+    /// What [`PgConn::claim`] hashes keys with: the schema's, so two schemas' claims (or a claim
+    /// and a schema's migration lock) never meet.
+    salt: u64,
+    /// The current write is read committed (claims lock at once).
+    read_committed: Cell<bool>,
+    /// Keys the current serializable attempt claimed.
+    claims: RefCell<Vec<i64>>,
+    /// Session advisory locks this write holds (taken before its BEGIN).
+    held: RefCell<Vec<i64>>,
 }
 
 impl PgConn {
-    fn new(client: Client, generation: u64) -> PgConn {
+    fn new(client: Client, generation: u64, schema: &str) -> PgConn {
         PgConn {
             client,
             generation,
@@ -651,7 +696,25 @@ impl PgConn {
             conflict: Cell::new(false),
             in_tx: Cell::new(false),
             failed: RefCell::new(None),
+            salt: fnv1a(fnv1a(fnv1a(FNV_OFFSET, b"roll-code-claim:"), schema.as_bytes()), b"\0"),
+            read_committed: Cell::new(false),
+            claims: RefCell::new(Vec::new()),
+            held: RefCell::new(Vec::new()),
         }
+    }
+
+    /// `Conn::claim`: a read-committed write takes the key's lock now; a serializable one notes
+    /// it, and if it loses a conflict its next attempt holds the lock from before its BEGIN.
+    pub(crate) fn claim(&self, key: &str) -> Result<()> {
+        let k = fnv1a(self.salt, key.as_bytes()) as i64;
+        if self.held.borrow().contains(&k) {
+            return Ok(());
+        }
+        if self.read_committed.get() {
+            return self.batch(&format!("SELECT pg_advisory_xact_lock({k})"));
+        }
+        self.claims.borrow_mut().push(k);
+        Ok(())
     }
 
     fn reset_flags(&self) {
@@ -953,5 +1016,7 @@ mod tests {
     fn schema_lock_keys_are_stable() {
         assert_eq!(schema_lock_key("code"), schema_lock_key("code"));
         assert_ne!(schema_lock_key("code"), schema_lock_key("code2"));
+        // What every earlier version took: nodes of two versions migrating one schema share it.
+        assert_eq!(schema_lock_key("code"), 0x05dc_1c59_a245_5cdb);
     }
 }

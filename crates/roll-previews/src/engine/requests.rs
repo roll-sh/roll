@@ -17,6 +17,11 @@ pub fn error_span(minutes: i64) -> i64 {
 /// The least time between two rebuilds by one deploy hook (ms).
 pub const HOOK_EVERY: i64 = 60_000;
 
+/// `text` with each of `words` (a preview's own names) as `*`.
+pub fn without_words(text: &str, words: &[String]) -> String {
+    words.iter().fold(text.to_string(), |t, w| t.replace(w.as_str(), "*"))
+}
+
 impl Engine {
     // ── what the API asks for ──
 
@@ -461,8 +466,11 @@ impl Engine {
     /// `page` only, or all of them; a new head needs its own. The change and its pull request
     /// say so at once.
     /// `person`: not a token's; only a person (or the operator) accepts a required one.
-    /// `behind`: the signed-in person a token acts for, checked against the author as `by` is.
-    pub async fn accept_visual(&self, id: &str, by: &str, behind: Option<&str>, person: bool, seen: Option<&str>, page: Option<&str>) -> Result<Preview> {
+    /// `aliases`: every name the person goes by (their handle, their linked GitHub logins; the person a token acts for), each checked against the author as `by` is.
+    /// `writer`: as [`Engine::accept_regressions`]' (a signed-in person's code owner must be the
+    /// repo's; GitHub's Accept checks its own writers).
+    #[allow(clippy::too_many_arguments)]
+    pub async fn accept_visual(&self, id: &str, by: &str, aliases: &[String], person: bool, writer: Option<Option<&str>>, seen: Option<&str>, page: Option<&str>) -> Result<Preview> {
         let r = self.store.row(id)?;
         if r.change_id.is_none() {
             return Err(Error::BadRequest("only a change's preview has a visual review".into()));
@@ -470,12 +478,20 @@ impl Engine {
         if !person && self.store.settings(&r.project_id)?.visual_review == crate::settings::VisualReviewRule::Required {
             return Err(Error::Forbidden("a required visual review is accepted by a person, in roll, not by a token".into()));
         }
-        // Not by the change's own author, as approvals aren't (and as GitHub's button isn't).
-        if let Some(change) = &r.change_id
-            && let Ok(Some(c)) = self.source.change(change).await
-            && [Some(by), behind].into_iter().flatten().any(|who| who.eq_ignore_ascii_case(&c.author) || who.eq_ignore_ascii_case(c.author.trim_start_matches('@')))
-        {
+        // Not by the change's own author, as approvals aren't (and as GitHub's button isn't): its
+        // author read for sure (an error refuses, it doesn't pass), and known.
+        let change = r.change_id.as_deref().unwrap_or_default();
+        let c = self.source.change(change).await.map_err(|e| Error::Internal(format!("reading the change's author: {e}")))?.ok_or_else(|| Error::NotFound(format!("no change {change}")))?;
+        if c.author.is_empty() || c.author == "github" {
+            return Err(Error::Conflict("the change's author isn't known, so nobody can be told apart from them".into()));
+        }
+        if std::iter::once(by).chain(aliases.iter().map(String::as_str)).any(|who| who.eq_ignore_ascii_case(&c.author) || who.eq_ignore_ascii_case(c.author.trim_start_matches('@'))) {
             return Err(Error::Forbidden("the change's own author can't accept its visual change: someone else looks at it".into()));
+        }
+        if let Some(owner) = writer
+            && owner != Some(c.owner_id.as_str())
+        {
+            return Err(Error::Forbidden(format!("accepting {}'s visual change needs write access to it in roll code", r.repo)));
         }
         let head = self.store.accept_visual(id, by, seen, page)?.ok_or_else(|| Error::Conflict("the preview has no screenshot to accept yet".into()))?;
         let what = match page {
@@ -484,6 +500,53 @@ impl Engine {
             Some(p) => format!("{p} looks"),
         };
         self.store.log(id, &format!("{by} accepted how {what} at {}", short(&head)))?;
+        self.report(r.clone()).await;
+        self.store.view(self.store.row(id)?)
+    }
+
+    /// Someone accepts a change's regressions against main's preview at its head (`seen`: the head
+    /// they looked at; a newer one is a 409), as a visual change is accepted: not by its own author,
+    /// and a required rule's only by a person.
+    /// `writer`: a signed-in person's own roll code owner (`Some(None)`: they have none yet), who
+    /// must be the repo's (roll code's write); `None` for the operator, an admin or a token, which
+    /// the permissions catalog decides.
+    pub async fn accept_regressions(&self, id: &str, by: &str, aliases: &[String], person: bool, writer: Option<Option<&str>>, seen: Option<&str>) -> Result<Preview> {
+        let r = self.store.row(id)?;
+        if r.change_id.is_none() {
+            return Err(Error::BadRequest("only a change's preview has regressions against main".into()));
+        }
+        if !person && self.store.settings(&r.project_id)?.regressions == crate::settings::RegressionsRule::Required {
+            return Err(Error::Forbidden("required regressions are accepted by a person, in roll, not by a token".into()));
+        }
+        // Its author, read for sure (an error refuses, it doesn't pass), and known.
+        let change = r.change_id.as_deref().unwrap_or_default();
+        let c = self.source.change(change).await.map_err(|e| Error::Internal(format!("reading the change's author: {e}")))?.ok_or_else(|| Error::NotFound(format!("no change {change}")))?;
+        if c.author.is_empty() || c.author == "github" {
+            return Err(Error::Conflict("the change's author isn't known, so nobody can be told apart from them".into()));
+        }
+        if std::iter::once(by).chain(aliases.iter().map(String::as_str)).any(|who| who.eq_ignore_ascii_case(&c.author) || who.eq_ignore_ascii_case(c.author.trim_start_matches('@'))) {
+            return Err(Error::Forbidden("the change's own author can't accept its regressions: someone else looks at them".into()));
+        }
+        // Roll code's bar for a landing decision: someone who can write to the change's repo.
+        if let Some(owner) = writer
+            && owner != Some(c.owner_id.as_str())
+        {
+            return Err(Error::Forbidden(format!("accepting {}'s regressions needs write access to it in roll code", c.repo)));
+        }
+        if seen.is_some_and(|s| s != r.head) {
+            return Err(Error::Conflict(format!("a newer push came in (at {}): look at it first", short(&r.head))));
+        }
+        // Something compared at this head to accept: what it is goes with the acceptance.
+        let view = self.store.view(r.clone())?;
+        let what = crate::RegressionsAccepted::of(view.slower_routes.as_ref(), view.new_errors.as_ref());
+        // Routes over their budget need no comparison with main to be accepted.
+        let only_budgets = view.new_errors.is_none() && view.slower_routes.as_ref().is_some_and(|s| s.routes.iter().all(|x| x.budget_ms.is_some()));
+        if (!view.regressions_compared && !only_budgets) || what.is_empty() {
+            return Err(Error::Conflict("nothing to accept: it has no regressions against main's preview at this push (or isn't compared yet)".into()));
+        }
+        let at = self.store.now_ms()?;
+        self.store.set_runtime_fact(id, "regressions_accepted", Some(&crate::RegressionsAccepted { head: r.head.clone(), by: by.to_string(), at, person, what, errors_total: view.new_errors.as_ref().map_or(0, |n| n.total) }))?;
+        self.store.log(id, &format!("{by} accepted its regressions against main at {}", short(&r.head)))?;
         self.report(r.clone()).await;
         self.store.view(self.store.row(id)?)
     }
@@ -532,6 +595,11 @@ impl Engine {
             }
             if v.as_ref().is_some_and(|v| v.len() > MAX_VAR_BYTES) {
                 return Err(Error::BadRequest(format!("{k}: at most {MAX_VAR_BYTES} bytes")));
+            }
+            // A person's own reference into roll secrets waits for its maker-checked binding
+            // (roll secrets' `bind_ref`); the project's rules (`env`, `env_for`) take one now.
+            if v.as_deref().is_some_and(|v| v.trim_start().to_ascii_lowercase().starts_with("roll://")) {
+                return Err(Error::BadRequest(format!("{k}: a preview's own variable can't be a roll:// reference yet; put it in the project's env rules")));
             }
         }
         // Masked from now on, before its services (or roll apps) are given it.
@@ -683,10 +751,131 @@ impl Engine {
                 g.sample = crate::mask_cut(&g.sample, values);
                 g.fingerprint = self.error_fingerprint(id, &g.service, &g.fingerprint);
             }
+            // A group whose newest sample names a trace the preview keeps opens it.
+            // (Only when a sample names something like one: reading them asks roll apps too.)
+            let named = groups.iter().any(|g| super::traces::trace_ids_in(&g.sample).next().is_some());
+            let kept: std::collections::HashSet<String> = if named { self.trace_rows(id, super::traces::KEEP_MS / 60_000).await?.into_iter().map(|t| t.trace).collect() } else { Default::default() };
+            if !kept.is_empty() {
+                for g in &mut groups {
+                    g.trace = super::traces::trace_ids_in(&g.sample).find(|t| kept.contains(t));
+                }
+            }
         }
         let mut read = self.errors_read.lock();
         read.retain(|_, (at, _)| now - *at < ERRORS_FOR);
         read.insert(key, (now, groups.clone()));
+        Ok(groups)
+    }
+
+    /// The previews this node holds that run (a change's or a branch's): their error groups of
+    /// the last hour that main's preview doesn't have (by service and fingerprint, unkeyed), kept
+    /// on the record (the verdict strip, the change page, a count in the pull request's comment),
+    /// the most frequent first. Main's are read once a round, and only where they can be: main's
+    /// preview running (`Ready`) on this node; otherwise nothing is said rather than everything.
+    /// A preview's values are read to mask titles only when its set moved; a change reports it
+    /// again.
+    pub async fn read_new_errors(&self) {
+        use futures::StreamExt;
+        let Ok(rows) = self.store.rows(None) else { return };
+        let mut bases: HashMap<(String, String), Option<crate::store::Row>> = HashMap::new();
+        let mut mains: HashMap<String, Option<Vec<crate::ErrorGroup>>> = HashMap::new();
+        let mut work = Vec::new();
+        for r in rows.into_iter().filter(|r| r.desired == Desired::Active && r.state == crate::State::Ready && (r.change_id.is_some() || r.branch.is_some())) {
+            if !self.holds(&r.id).await {
+                continue;
+            }
+            let key = (r.project_id.clone(), r.repo.clone());
+            if !bases.contains_key(&key) {
+                let base = self.main_of(&r.project_id, &r.repo).await.ok().flatten();
+                bases.insert(key.clone(), base);
+            }
+            let main = match bases[&key].clone().filter(|b| b.id != r.id) {
+                Some(b) => {
+                    if !mains.contains_key(&b.id) {
+                        // Asleep, its logs are still there to read (a frozen or stopped container's).
+                        let read = if matches!(b.state, crate::State::Ready | crate::State::Sleeping) && self.holds(&b.id).await { self.raw_errors(&b.id).await.ok() } else { None };
+                        mains.insert(b.id.clone(), read);
+                    }
+                    mains[&b.id].clone().map(|groups| (b, groups))
+                }
+                None => None,
+            };
+            work.push((r, main));
+        }
+        let kept: std::collections::HashSet<String> = work.iter().map(|(r, _)| r.id.clone()).collect();
+        futures::stream::iter(work).for_each_concurrent(4, |(r, main)| self.new_errors_of(r, main)).await;
+        self.new_errors_seen.lock().retain(|id, _| kept.contains(id));
+    }
+
+    /// One preview's new errors against main's groups (`None`: nothing of main's to compare with).
+    async fn new_errors_of(&self, r: crate::store::Row, main: Option<(crate::store::Row, Vec<crate::ErrorGroup>)>) {
+        let kept = match main {
+            None => {
+                self.new_errors_seen.lock().remove(&r.id);
+                None
+            }
+            Some((base, main)) => {
+                let Ok(mine) = self.raw_errors(&r.id).await else { return };
+                // Compared at this head (what a required rule waits for); the change's says so.
+                if self.store.set_runtime_fact(&r.id, "compared_errors", Some(&r.head)).unwrap_or(false) {
+                    self.report(r.clone()).await;
+                }
+                let theirs: std::collections::HashSet<(&str, &str)> = main.iter().map(|g| (g.service.as_str(), g.fingerprint.as_str())).collect();
+                // The same error says each preview's own names (its id, its branches, its hosts):
+                // with those taken out, a title main's has too isn't new either.
+                let (my_words, main_words) = (self.own_words(&r.id), self.own_words(&base.id));
+                let their_titles: std::collections::HashSet<(&str, String)> = main.iter().map(|g| (g.service.as_str(), without_words(&g.title, &main_words))).collect();
+                let mut new: Vec<&crate::ErrorGroup> = mine
+                    .iter()
+                    .filter(|g| !theirs.contains(&(g.service.as_str(), g.fingerprint.as_str())) && !their_titles.contains(&(g.service.as_str(), without_words(&g.title, &my_words))))
+                    .collect();
+                new.sort_by(|a, b| b.count.cmp(&a.count).then(b.last_seen.cmp(&a.last_seen)));
+                let total = new.len();
+                new.truncate(crate::NewErrors::MAX);
+                let seen: Vec<String> = new.iter().map(|g| format!("{}\0{}", g.service, g.fingerprint)).chain([total.to_string(), r.head.clone()]).collect();
+                if self.new_errors_seen.lock().get(&r.id) == Some(&seen) {
+                    return;
+                }
+                let kept = if total == 0 {
+                    None
+                } else {
+                    let Ok(values) = super::ErrorMasks::new(self, &r.id).values().await.map(<[String]>::to_vec) else { return };
+                    // A title was cut (at 300) before it was masked: shown only to 120, short of
+                    // where a cut could have split a value.
+                    let errors = new.iter().map(|g| crate::NewError { service: g.service.clone(), title: crate::mask_cut(&g.title, &values).chars().take(120).collect() }).collect();
+                    Some(crate::NewErrors { branch: base.branch.clone().unwrap_or_else(|| "main".into()), total, errors, head: r.head.clone() })
+                };
+                self.new_errors_seen.lock().insert(r.id.clone(), seen);
+                kept
+            }
+        };
+        if self.store.set_runtime_fact(&r.id, "new_errors", kept.as_ref()).unwrap_or(false) {
+            self.report(r).await;
+        }
+    }
+
+    /// What differs between two previews' output for the same error: a preview's id and slug, its
+    /// branches' refs and its services' hosts (each of 4 characters or more), longest first.
+    fn own_words(&self, id: &str) -> Vec<String> {
+        let mut words = vec![id.to_string()];
+        if let Ok(r) = self.store.row(id) {
+            words.push(r.slug);
+        }
+        words.extend(self.store.resources(id).unwrap_or_default().into_iter().filter_map(|x| x.r#ref));
+        words.extend(self.store.services(id).unwrap_or_default().into_iter().map(|s| s.host));
+        words.retain(|w| w.len() >= 4);
+        words.sort_by_key(|w| std::cmp::Reverse(w.len()));
+        words.dedup();
+        words
+    }
+
+    /// Its services' error groups of the last hour as the backends group them: fingerprints
+    /// unkeyed (to compare with another preview's), titles unmasked (never shown as they are).
+    async fn raw_errors(&self, id: &str) -> Result<Vec<crate::ErrorGroup>> {
+        let mut groups = Vec::new();
+        for s in self.store.services(id)? {
+            groups.extend(self.apps.errors(id, &s.name, 60, None).await?.into_iter().map(|g| crate::ErrorGroup { service: s.name.clone(), ..g }));
+        }
         Ok(groups)
     }
 

@@ -13,6 +13,7 @@
 //!   record of how it was made, and a metered usage row.
 
 pub mod api;
+mod ask;
 mod index;
 mod run;
 pub mod store;
@@ -27,6 +28,8 @@ use code_review::settings::ReviewerSettings;
 use code_review::{Mode, commands};
 use serde_json::{Value, json};
 use std::sync::Arc;
+
+pub use ask::{ModelAnswer, ModelAsk};
 use std::sync::atomic::{AtomicBool, Ordering};
 
 pub use code_review::pricing;
@@ -605,7 +608,8 @@ impl Code {
         let add = |v: &mut Value, k: &str, x: f64| v[k] = json!(v[k].as_f64().unwrap_or(0.0) + x);
         let inc = |v: &mut Value, k: &str, x: u64| v[k] = json!(v[k].as_u64().unwrap_or(0) + x);
         for u in &rows {
-            inc(&mut totals, if u.kind == "chat" { "chats" } else { "reviews" }, 1);
+            // Other products' questions (`explain`) are priced and counted as chats.
+            inc(&mut totals, if u.kind == "review" { "reviews" } else { "chats" }, 1);
             add(&mut totals, "price_usd", u.price_usd);
             add(&mut totals, "list_usd", u.list_usd);
             add(&mut totals, "provider_cost_usd", u.provider_cost_usd.unwrap_or(0.0));

@@ -228,6 +228,21 @@ CREATE TABLE IF NOT EXISTS bypass (
     hash TEXT NOT NULL,
     created_at INTEGER NOT NULL
 );
+CREATE TABLE IF NOT EXISTS runtime_facts (
+    preview_id TEXT NOT NULL,
+    kind TEXT NOT NULL,
+    json TEXT NOT NULL,
+    PRIMARY KEY (preview_id, kind)
+);
+CREATE TABLE IF NOT EXISTS env_refs (
+    project_id TEXT NOT NULL,
+    scope TEXT NOT NULL,
+    name TEXT NOT NULL,
+    reference TEXT NOT NULL,
+    by TEXT NOT NULL,
+    at INTEGER NOT NULL,
+    PRIMARY KEY (project_id, scope, name)
+);
 CREATE TABLE IF NOT EXISTS git_reports (
     preview_id TEXT PRIMARY KEY,
     status TEXT,
@@ -564,10 +579,18 @@ pub struct Store {
     signing: std::sync::OnceLock<Vec<u8>>,
     db: Db,
     rates: Rates,
+    /// Seals a preview's own variables (rolld: with `ROLL_SECRET_KEY`); unset, they're kept as
+    /// written, and read either way.
+    pub sealer: std::sync::OnceLock<std::sync::Arc<dyn crate::ports::Sealer>>,
 }
 
 const COLUMNS: &str = "id, project_id, slug, repo, change_id, branch, number, title, github_pr, head, trusted, desired, state, error, attempts, \
      next_at, asleep, reset_requested, last_reset_at, last_active_at, expires_at, created_by, created_at, updated_at, generation, runs";
+
+/// What a preview's sealed variables are bound to.
+fn vars_aad(id: &str) -> String {
+    format!("preview-vars:{id}")
+}
 
 fn row(r: &code_sql::Row<'_>) -> code_sql::Result<Row> {
     let desired: String = r.get(11)?;
@@ -743,7 +766,7 @@ impl Store {
         if !db.has_column("shares", "opened_day")? {
             db.add_column("shares", "opened_day", "INTEGER")?;
         }
-        Ok(Store { db, rates: Rates::default(), signing: std::sync::OnceLock::new() })
+        Ok(Store { db, rates: Rates::default(), signing: std::sync::OnceLock::new(), sealer: std::sync::OnceLock::new() })
     }
 
     pub fn now_ms(&self) -> Result<i64> {
@@ -849,6 +872,30 @@ impl Store {
     pub fn set_service_config(&self, id: &str, name: &str, config: &str) -> Result<()> {
         self.db.write(|c| {
             c.execute("UPDATE services SET config = ? WHERE preview_id = ? AND name = ?", params![config, id, name])?;
+            Ok::<_, Error>(())
+        })
+    }
+
+    /// Each of a project's rules' references with who wrote it: `(name, reference, by)`.
+    pub fn env_ref_writers(&self, project: &str) -> Result<Vec<(String, String, String)>> {
+        Ok(self.db.read(|c| c.query("SELECT name, reference, by FROM env_refs WHERE project_id = ?", [project], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?))))?)
+    }
+
+    /// Who wrote each of a project's rules' references (`(scope, name, reference)`): one kept as
+    /// it was keeps its writer, a new or changed one is `by`'s, one gone goes.
+    pub fn set_env_refs(&self, project: &str, refs: &[(String, String, String)], by: &str) -> Result<()> {
+        let now = self.now_ms()?;
+        self.db.write(|c| {
+            let kept: Vec<(String, String, String)> = c.query("SELECT scope, name, reference FROM env_refs WHERE project_id = ?", [project], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?;
+            for k in kept.iter().filter(|k| !refs.contains(k)) {
+                c.execute("DELETE FROM env_refs WHERE project_id = ? AND scope = ? AND name = ?", params![project, k.0, k.1])?;
+            }
+            for (scope, name, reference) in refs.iter().filter(|r| !kept.contains(r)) {
+                c.execute(
+                    "INSERT INTO env_refs (project_id, scope, name, reference, by, at) VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT (project_id, scope, name) DO UPDATE SET reference = excluded.reference, by = excluded.by, at = excluded.at",
+                    params![project, scope, name, reference, by, now],
+                )?;
+            }
             Ok::<_, Error>(())
         })
     }
@@ -1022,7 +1069,7 @@ impl Store {
     /// Remove a preview's rows (after its branches and services are gone).
     pub fn remove(&self, id: &str) -> Result<()> {
         self.db.write(|c| {
-            for t in ["resources", "services", "pinned", "shares", "visit_tickets", "visit_sessions", "visits", "activity", "screenshots", "page_shots", "visual_page_accepts", "mail", "resolved_notes", "base_history", "leases", "note_crops", "git_pulls", "git_reports", "previews"] {
+            for t in ["resources", "services", "pinned", "shares", "visit_tickets", "visit_sessions", "visits", "activity", "screenshots", "page_shots", "visual_page_accepts", "mail", "resolved_notes", "base_history", "leases", "note_crops", "git_pulls", "git_reports", "runtime_facts", "previews"] {
                 let col = if t == "previews" { "id" } else { "preview_id" };
                 c.execute(&format!("DELETE FROM {t} WHERE {col} = ?"), [id])?;
             }
@@ -1234,7 +1281,21 @@ impl Store {
     /// The preview's own variables (`PUT …/env`), over the project's `env`.
     pub fn vars(&self, id: &str) -> Result<std::collections::BTreeMap<String, String>> {
         let raw: Option<String> = self.db.read(|c| c.query_row("SELECT vars FROM previews WHERE id = ?", [id], |r| r.get(0)).optional())?.flatten();
-        Ok(raw.and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default())
+        self.open_vars(id, raw)
+    }
+
+    /// A preview's own variables as kept: sealed (`v1:…`, bound to its id) or, from before a key
+    /// or without one, plain JSON. Sealed without this node having the key is an error, never an
+    /// empty map: its services would start without them.
+    fn open_vars(&self, id: &str, raw: Option<String>) -> Result<std::collections::BTreeMap<String, String>> {
+        let Some(raw) = raw else { return Ok(Default::default()) };
+        let json = if raw.starts_with("v1:") {
+            let sealer = self.sealer.get().ok_or_else(|| Error::Internal(format!("{id}'s variables are sealed with ROLL_SECRET_KEY, which this node doesn't have")))?;
+            sealer.open(&vars_aad(id), &raw).ok_or_else(|| Error::Internal(format!("{id}'s variables don't open with this ROLL_SECRET_KEY")))?
+        } else {
+            raw
+        };
+        Ok(serde_json::from_str(&json).unwrap_or_default())
     }
 
     /// Change the preview's own variables in one write (`f` may run again; it only edits the map).
@@ -1242,9 +1303,13 @@ impl Store {
         self.db.write(|c| {
             let raw: Option<Option<String>> = c.query_row("SELECT vars FROM previews WHERE id = ?", [id], |r| r.get(0)).optional()?;
             let Some(raw) = raw else { return Err(Error::NotFound(format!("no preview {id}"))) };
-            let mut vars: std::collections::BTreeMap<String, String> = raw.and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default();
+            let mut vars = self.open_vars(id, raw)?;
             f(&mut vars)?;
-            let raw = (!vars.is_empty()).then(|| serde_json::to_string(&vars).unwrap_or_default());
+            // Sealed whenever this node can (the plain JSON of an older write goes at this one).
+            let raw = (!vars.is_empty()).then(|| serde_json::to_string(&vars).unwrap_or_default()).map(|json| match self.sealer.get() {
+                Some(s) => s.seal(&vars_aad(id), &json),
+                None => json,
+            });
             c.execute("UPDATE previews SET vars = ? WHERE id = ?", params![raw, id])?;
             Ok(vars)
         })
@@ -2354,6 +2419,29 @@ impl Store {
 
     /// What was last posted on a Git URL service's repository for a preview: the status (its sha,
     /// state and description, as one string), the pull request comment's id and its body's hash.
+    /// What its holder last read of a preview's running code against main's preview (`kind`:
+    /// `slower_routes`), kept so any node shows it.
+    pub fn runtime_fact<T: serde::de::DeserializeOwned>(&self, id: &str, kind: &str) -> Result<Option<T>> {
+        let json: Option<String> = self.db.read(|c| c.query_row("SELECT json FROM runtime_facts WHERE preview_id = ? AND kind = ?", [id, kind], |r| r.get(0)).optional())?;
+        Ok(json.and_then(|j| serde_json::from_str(&j).ok()))
+    }
+
+    /// Keep what its holder read (`None`: nothing to say); whether that changed what was kept.
+    pub fn set_runtime_fact<T: serde::Serialize>(&self, id: &str, kind: &str, fact: Option<&T>) -> Result<bool> {
+        let json = fact.map(serde_json::to_string).transpose().map_err(|e| Error::Internal(e.to_string()))?;
+        self.db.write(|c| {
+            let was: Option<String> = c.query_row("SELECT json FROM runtime_facts WHERE preview_id = ? AND kind = ?", [id, kind], |r| r.get(0)).optional()?;
+            if was == json {
+                return Ok::<_, Error>(false);
+            }
+            match &json {
+                Some(j) => c.execute("INSERT INTO runtime_facts (preview_id, kind, json) VALUES (?1, ?2, ?3) ON CONFLICT (preview_id, kind) DO UPDATE SET json = excluded.json", params![id, kind, j])?,
+                None => c.execute("DELETE FROM runtime_facts WHERE preview_id = ? AND kind = ?", [id, kind])?,
+            };
+            Ok(true)
+        })
+    }
+
     pub fn git_report(&self, id: &str) -> Result<(Option<String>, Option<i64>, Option<String>)> {
         Ok(self.db.read(|c| c.query_row("SELECT status, comment_id, comment_hash FROM git_reports WHERE preview_id = ?", [id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?))).optional())?.unwrap_or((None, None, None)))
     }
@@ -2679,6 +2767,25 @@ impl Store {
         let first_unstable = page_health.as_ref().is_some_and(|h| h.unstable);
         let visual_review = self.visual_review(&r, settings.visual_review, settings.github.visual_threshold, base_change.as_ref(), &pages, first_unstable, f.head)?;
         let page_speed = f.speed.map(|now| crate::PageSpeedView { now, before: f.prev_speed });
+        // What the holder read against main's, for this head only (a push reads it again), and
+        // whether it compared at this head at all (errors; routes too with traces).
+        let new_errors = self.runtime_fact::<crate::NewErrors>(&r.id, "new_errors")?.filter(|f| f.head == r.head);
+        let slower_routes = if settings.traces { self.runtime_fact::<crate::SlowerRoutes>(&r.id, "slower_routes")?.filter(|f| f.head == r.head) } else { None };
+        let compared_at = |kind: &str| -> Result<bool> { Ok(self.runtime_fact::<String>(&r.id, kind)?.as_deref() == Some(r.head.as_str())) };
+        let regressions_compared = compared_at("compared_errors")? && (!settings.traces || compared_at("compared_routes")?);
+        let regressions = match settings.regressions {
+            crate::settings::RegressionsRule::Off => None,
+            crate::settings::RegressionsRule::Check => Some("check".to_string()),
+            crate::settings::RegressionsRule::Required => Some("required".to_string()),
+        };
+        // An acceptance counts at its head, for what it accepted (more at that head asks again), and
+        // for a required rule only a person's.
+        let showing = crate::RegressionsAccepted::of(slower_routes.as_ref(), new_errors.as_ref());
+        let errors_total = new_errors.as_ref().map_or(0, |n| n.total);
+        let regressions_accepted = self
+            .runtime_fact::<crate::RegressionsAccepted>(&r.id, "regressions_accepted")?
+            .filter(|a| a.head == r.head && errors_total <= a.errors_total && showing.iter().all(|w| a.what.contains(w)))
+            .filter(|a| a.person || settings.regressions != crate::settings::RegressionsRule::Required);
         let screenshot_link = screenshot_at.map(|at| self.link_at(&r.id, at, None)).transpose()?;
         let diff_link = match screenshot_at.filter(|_| base_differs) {
             Some(at) => Some(self.link_at(&r.id, at, Some("diff=base"))?),
@@ -2738,6 +2845,11 @@ impl Store {
             pages,
             visual_review,
             page_links,
+            slower_routes,
+            new_errors,
+            regressions,
+            regressions_accepted,
+            regressions_compared,
             page_speed,
             page_health,
             page_a11y,
@@ -2934,6 +3046,45 @@ mod tests {
     }
 
     use super::*;
+
+    /// A preview's own variables are sealed at rest when the node has a key, bound to the
+    /// preview: the column holds no value, another preview's copy doesn't open, and plain ones
+    /// from before still read (sealed at their next write).
+    #[test]
+    fn a_previews_own_variables_are_sealed_at_rest_to_it() {
+        struct Rot;
+        impl crate::ports::Sealer for Rot {
+            fn seal(&self, aad: &str, plain: &str) -> String {
+                format!("v1:{aad}|{}", plain.chars().rev().collect::<String>())
+            }
+            fn open(&self, aad: &str, sealed: &str) -> Option<String> {
+                sealed.strip_prefix(&format!("v1:{aad}|")).map(|s| s.chars().rev().collect())
+            }
+        }
+        let (_dir, store) = store();
+        let (a, _) = store.create(&new("chg_va")).unwrap();
+        let (b, _) = store.create(&new("chg_vb")).unwrap();
+        let raw = |id: &str| store.db.read(|c| c.query_row("SELECT vars FROM previews WHERE id = ?", [id], |r| r.get::<_, Option<String>>(0))).unwrap().unwrap_or_default();
+        store.update_vars(&a.id, |v| {
+            v.insert("STRIPE_KEY".into(), "sk_test_51Hx9".into());
+            Ok(())
+        })
+        .unwrap();
+        assert!(raw(&a.id).contains("sk_test_51Hx9"), "no key: kept as written");
+        let _ = store.sealer.set(std::sync::Arc::new(Rot));
+        assert_eq!(store.vars(&a.id).unwrap()["STRIPE_KEY"], "sk_test_51Hx9", "a plain one from before still reads");
+        store.update_vars(&a.id, |v| {
+            v.insert("MODE".into(), "test".into());
+            Ok(())
+        })
+        .unwrap();
+        assert!(raw(&a.id).starts_with("v1:") && !raw(&a.id).contains("sk_test_51Hx9"), "sealed at its next write");
+        assert_eq!(store.vars(&a.id).unwrap().len(), 2);
+        // Copied onto another preview's row, it doesn't open there.
+        let sealed = raw(&a.id);
+        store.db.write(|c| c.execute("UPDATE previews SET vars = ? WHERE id = ?", params![sealed, b.id]).map(drop)).unwrap();
+        assert!(store.vars(&b.id).is_err());
+    }
 
     fn store() -> (tempfile::TempDir, Store) {
         let dir = tempfile::tempdir().unwrap();

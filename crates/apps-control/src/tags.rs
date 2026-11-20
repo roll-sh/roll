@@ -147,6 +147,11 @@ impl Apps {
         if pending.iter().any(|d| d.environment == env.name) {
             return SecretsCheck::Busy;
         }
+        // Frozen: not seen yet, so the first pass after the freeze redeploys (a person can now,
+        // with `override`).
+        if env.freeze.as_ref().is_some_and(|f| f.on(code_sql::now_ms())) {
+            return SecretsCheck::Nothing;
+        }
         let (sid, e, n) = (svc.id.clone(), env.name.clone(), now.clone());
         let _ = self.db(move |s| s.set_secrets_seen(&sid, &e, &n)).await;
         // No digest kept with the live one (before it was kept): this one is where it starts.
@@ -213,8 +218,10 @@ impl Apps {
                         })
                         .await;
                     let run = svc.for_env(&env).map(|s| s.run).unwrap_or_else(|_| svc.run.clone());
-                    if run.rebuild_on_base && dep.revision.is_some() {
-                        let body = json!({ "revision": dep.revision, "no_cache": true, "message": format!("its base image {image} was updated") });
+                    // Held as a push is (a freeze, a person's hold): built to ready, or not at all.
+                    let hold = crate::deploy::hold_of(&svc, &env);
+                    if run.rebuild_on_base && dep.revision.is_some() && !matches!(hold, crate::deploy::Held::Skip(_)) {
+                        let body = hold.body(json!({ "revision": dep.revision, "no_cache": true, "message": format!("its base image {image} was updated") }));
                         let key = format!("base:{active}:{now}");
                         match self.deploy(&svc.id, &env.name, body, By { trigger: Trigger::Settings, actor: Some("base image watch".into()) }, None, Some(&key)).await {
                             Ok(d) => started.push(d.id),
@@ -264,11 +271,7 @@ impl Apps {
         let Some(have) = live.image.as_deref().and_then(digest).map(str::to_string) else { return Ok(None) };
         self.check_registry(image).await.map_err(|e| crate::Error::BadRequest(e.to_string()))?;
         let sid = service.to_string();
-        let login = self
-            .db(move |s| s.registry_login(&sid))
-            .await?
-            .filter(|(r, _)| crate::model::registry_key(&r.server) == crate::model::image_registry(image))
-            .map(|(r, password)| crate::runtime::RegistryLogin { server: r.server, username: r.username, password });
+        let login = self.pull_login(&sid, image).await?;
         let now = self.deps.runtime.remote_digest(image, login.as_ref()).await.map_err(|e| crate::Error::BadRequest(format!("{e:#}")))?;
         let Some(now) = digest(&now).map(str::to_string) else { return Ok(None) };
         // Only a move past what was last acted on: a rollback (or a hook's other tag) isn't

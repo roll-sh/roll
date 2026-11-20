@@ -139,11 +139,15 @@ const PROMPTS: &[Prompt] = &[
              would drop, in plain words. For each one that roams, call access_token_networks and name the networks \
              it was used from, so I can tell whether one is unexpected. Say which tokens to revoke (unused) and \
              which need an expiry. If you also have secrets_findings or previews_mask_suggestions, add the secrets \
-             that need fixing and the personal data previews don't mask yet; with storage_list_keys, the S3 access \
+             that need fixing and the personal data previews don't mask yet; with secrets_verify_audit, each \
+             project whose secrets audit log doesn't hold (its first break), and each whose log has digests on a \
+             pulled signing key that nothing later vouches for (pulled with countersigned null: say from when to \
+             when); legacy digests are only a note; with storage_list_keys, the S3 access \
              keys that are admin over every bucket or unused for 90 days. Then what's open to the internet, with \
              whichever of these you have: buckets that are public (storage_list_buckets), search clusters with no \
              IP allowlist (search_list_clusters), and previews shared outside the team (previews_list, then \
-             previews_list_shares for who and until when), and the live deploys whose images have critical or \
+             previews_list_shares for who and until when), secrets' one-off share links still open (secrets_list_shares), a project's public status page (apps_status_page: \
+             what it shows), and the live deploys whose images have critical or \
              high vulnerabilities with a fix (apps_deploy_vulnerabilities with severity high). Change nothing \
              yourself: applying a \
              tighten, revoking or limiting a token is for me or the operator, on the token's page or with roll \
@@ -166,7 +170,9 @@ const PROMPTS: &[Prompt] = &[
                  knows (a crash loop, a spend cap, maintenance, a failed deploy with its error_detail). Then \
                  apps_activity with all for the timeline (deploys, failures, crash loops, alerts), and apps_route_stats \
                  for which routes fail or slowed (5xx, p95). Call apps_list_deploys to see what changed and when (apps_deploy_commits for what the newest deploy brought); apps_deploy_logs \
-                 for the newest deploy if it failed; apps_logs with http and a status of 500 for the failing \
+                 for the newest deploy if it failed (and, if you have it, apps_explain_deploy: the repo owner's model \
+                 reads its error and logs, and its answer is kept); apps_errors for the errors grouped, newest \
+                 regressions first; apps_logs with http and a status of 500 for the failing \
                  requests, and without http for errors; apps_metrics for CPU and memory. Tell me the most likely \
                  cause with the evidence. If the newest deploy caused it, offer apps_rollback_previous; it puts back \
                  that deploy's variables too, and in production it may ask a person first. Don't roll back without \
@@ -202,6 +208,7 @@ pub fn source(prompt: &str, arg: &str) -> Option<Source> {
         "project" => Some(workspace_projects()),
         "service" => Some(Source { tool: "apps_list_services", args: |_| json!({}), fields: &["id"] }),
         "env" => Some(Source { tool: "apps_list_environments", args: |ctx| json!({ "service": ctx["service"] }), fields: &["name"] }),
+        "branch" => crate::ask::source("postgres", "branch"),
         _ => None,
     }
 }
@@ -219,7 +226,7 @@ pub fn values(answer: &Value, fields: &[&str], typed: &str) -> (Vec<String>, boo
     for item in items {
         for f in fields {
             if let Some(v) = item.get(*f).and_then(Value::as_str)
-                && is_id(v)
+                && is_choice(v)
                 && v.to_lowercase().starts_with(&typed)
                 && !out.iter().any(|o| o == v)
             {
@@ -243,6 +250,12 @@ fn clean(v: Option<&Value>) -> String {
 /// and a prompt's text is the person's own message to the agent.
 pub(crate) fn is_id(s: &str) -> bool {
     !s.is_empty() && s.len() <= 64 && s.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '.' | '-'))
+}
+
+/// What a form or a completion may offer: an id, or a repo's `owner/name` (each part an id, and
+/// neither only dots, so it names nothing above).
+pub(crate) fn is_choice(s: &str) -> bool {
+    is_id(s) || s.split_once('/').is_some_and(|(o, n)| [o, n].iter().all(|p| is_id(p) && !p.chars().all(|c| c == '.')))
 }
 
 fn offered<'a>(tools: &'a [String]) -> impl Iterator<Item = &'static Prompt> + 'a {

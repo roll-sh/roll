@@ -31,7 +31,7 @@ use crate::xparser::{Field, Token, Tokens, XParser, java_parse_double};
 pub const DEFAULT_PERCENTS: [f64; 7] = [1.0, 5.0, 25.0, 50.0, 75.0, 95.0, 99.0];
 
 /// `PercentilesConfig`.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum Method {
     TDigest { compression: f64, high_accuracy: bool },
     Hdr { digits: u32 },
@@ -174,7 +174,7 @@ pub fn parse(p: &mut XParser<'_>, ranks: bool, name: &str) -> Result<Percentiles
 }
 
 /// One bucket's state.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub enum PctState {
     TDigest(TDigest),
     Hdr(DoubleHistogram),
@@ -266,7 +266,7 @@ fn clamp_rank(r: f64) -> f64 {
 }
 
 /// Which result family.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum PctKind {
     TDigest,
     Hdr,
@@ -274,7 +274,7 @@ pub enum PctKind {
 
 /// `InternalTDigestPercentiles`, `InternalTDigestPercentileRanks`, `InternalHDRPercentiles`,
 /// `InternalHDRPercentileRanks`.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct Percentiles {
     pub kind: PctKind,
     pub ranks: bool,
