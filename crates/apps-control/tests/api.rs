@@ -488,9 +488,20 @@ async fn runtime_config_changes_without_a_deploy() {
     call(&w.api, "PUT", &base, Some(json!({"config": null}))).await;
     let (st, v) = read(path.clone(), None).await;
     assert_eq!((st, &v["config"], &v["version"]), (StatusCode::OK, &Value::Null, &json!(3)), "{v}");
+    // Rotated (a leaked address): the old one still reads while the instances started with it
+    // run, and only the new one once a deploy made after the rotation is live.
+    let (st, e) = call(&w.api, "POST", &format!("{base}/config/rotate"), None).await;
+    assert!(st == StatusCode::OK && e["config_rotated_at"].is_i64(), "{e}");
+    assert_eq!(read(path.clone(), None).await.0, StatusCode::OK, "its instances still run with it");
+    let (_, d) = call(&w.api, "POST", &format!("{base}/redeploy"), Some(json!({}))).await;
+    let d = settled(&w, &id, "production", d["id"].as_str().unwrap()).await;
+    let (_, body) = visit_deployment(&w, &host(&svc["environments"][0]["url"]), d["id"].as_str().unwrap()).await;
+    let new = body["vars"]["ROLL_CONFIG_URL"].as_str().unwrap().trim_start_matches("http://127.0.0.1:7070").to_string();
+    assert_ne!(new, path);
+    assert_eq!((read(new.clone(), None).await.0, read(path, None).await.0), (StatusCode::OK, StatusCode::NOT_FOUND));
     // A deleted service's (kept for a restore) answers nothing.
     assert_eq!(call(&w.api, "DELETE", &format!("/v1/apps/services/{id}"), None).await.0, StatusCode::NO_CONTENT);
-    assert_eq!(read(path, None).await.0, StatusCode::NOT_FOUND);
+    assert_eq!(read(new, None).await.0, StatusCode::NOT_FOUND);
 }
 
 /// Snippets (Netlify's snippet injection): an environment's own HTML before `</head>` and

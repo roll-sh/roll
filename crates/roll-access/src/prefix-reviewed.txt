@@ -28,6 +28,7 @@ GET /v1/apps/services/{id}/environments/{env}/runs/{run}/logs
 POST /v1/apps/services/{id}/environments/{env}/runs/{run}/cancel
 POST /v1/apps/services/{id}/environments/{env}/instances/{name}/restart
 GET /v1/apps/services/{id}/environments/{env}/logs
+POST /v1/apps/services/{id}/environments/{env}/config/rotate
 GET /v1/apps/services/{id}/environments/{env}/metrics
 POST /v1/apps/services/{id}/environments/{env}/restart
 POST /v1/apps/services/{id}/environments/{env}/cache/purge

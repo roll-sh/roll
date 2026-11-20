@@ -95,6 +95,7 @@ pub fn router(apps: Arc<Apps>) -> Router {
         .route(&format!("{env}/rollback"), post(rollback_previous))
         .route(&format!("{env}/deploys/{{dep}}/cancel"), post(cancel))
         .route(&format!("{env}/redeploy"), post(redeploy))
+        .route(&format!("{env}/config/rotate"), post(rotate_config))
         .route(&format!("{env}/promote"), post(promote))
         .route(&format!("{env}/hook"), post(put_hook).delete(delete_hook))
         .route(&format!("{env}/volume/backups"), get(backups).post(backup_volume))
@@ -709,6 +710,15 @@ async fn environments(State(apps): S, Path(id): Path<String>) -> R {
 }
 
 async fn get_env(State(apps): S, Path((id, env)): Path<(String, String)>) -> R {
+    ok(apps.environment(&id, &env).await?)
+}
+
+/// A new `ROLL_CONFIG_URL` token; the old one reads until a deploy made after it is live.
+async fn rotate_config(State(apps): S, Path((id, env)): Path<(String, String)>, ext: Extensions) -> R {
+    apps.environment(&id, &env).await?;
+    let (sid, e) = (id.clone(), env.clone());
+    apps.db(move |s| s.rotate_runtime_config(&sid, &e)).await?.ok_or_else(|| Error::NotFound(format!("{env} has no runtime config")))?;
+    apps.audit("config.rotated", &id, &env, actor(&ext), json!({})).await;
     ok(apps.environment(&id, &env).await?)
 }
 
