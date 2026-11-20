@@ -500,6 +500,13 @@ async fn runtime_config_changes_without_a_deploy() {
     let new = body["vars"]["ROLL_CONFIG_URL"].as_str().unwrap().trim_start_matches("http://127.0.0.1:7070").to_string();
     assert_ne!(new, path);
     assert_eq!((read(new.clone(), None).await.0, read(path, None).await.0), (StatusCode::OK, StatusCode::NOT_FOUND));
+    // Its token is apps' own kind of roll secret, checksummed; found leaked, it's rotated and a
+    // redeploy hands out the next.
+    let secret = new.rsplit('/').next().unwrap().to_string();
+    assert!(secret.starts_with("rlr_") && roll_auth::credentials::checksum_ok(&secret), "{secret}");
+    let before = call(&w.api, "GET", &base, None).await.1["config_rotated_at"].clone();
+    assert!(w.apps.revoke_leaked_address(&secret).unwrap().ends_with("runtime config address"));
+    assert_ne!(call(&w.api, "GET", &base, None).await.1["config_rotated_at"], before, "rotated");
     // A deleted service's (kept for a restore) answers nothing.
     assert_eq!(call(&w.api, "DELETE", &format!("/v1/apps/services/{id}"), None).await.0, StatusCode::NO_CONTENT);
     assert_eq!(read(new, None).await.0, StatusCode::NOT_FOUND);
@@ -7438,7 +7445,7 @@ async fn an_instance_reads_its_oidc_token_for_an_allowed_audience() {
     // nothing at once and a redeploy hands the instances a new one.
     let secret = path.rsplit('/').next().unwrap().to_string();
     assert!(secret.starts_with("rlr_") && roll_auth::credentials::checksum_ok(&secret), "{secret}");
-    assert!(w.apps.revoke_leaked_oidc(&secret).is_some());
+    assert!(w.apps.revoke_leaked_address(&secret).is_some());
     assert_eq!(get(path.clone()).await.0, StatusCode::NOT_FOUND);
     let mut fresh = String::new();
     for _ in 0..200 {

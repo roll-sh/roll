@@ -860,6 +860,10 @@ impl Store {
         // An ECR login's kind and region (`basic` logins have neither).
         db.add_column("registry_auth", "kind", "TEXT")?;
         db.add_column("registry_auth", "region", "TEXT")?;
+        // Instance addresses' tokens' SHA-256 (apps' `rlr_` secrets), to find one by a leaked
+        // copy (`Apps::revoke_leaked_address`); older `rlc_`/`rlx_` tokens have none.
+        db.add_column("runtime_config", "hash", "TEXT")?;
+        db.add_column("trace_ingest", "hash", "TEXT")?;
         // Runtime config's token before its last rotation (sealed), and when that was.
         db.add_column("runtime_config", "previous", "TEXT")?;
         db.add_column("runtime_config", "rotated_at", "INTEGER")?;
@@ -2398,9 +2402,27 @@ impl Store {
 
     /// The environment's trace token, made once (`traces: true`).
     pub fn ensure_trace_token(&self, service: &str, env: &str) -> Result<()> {
-        let sealed = self.sealer.seal(&format!("trace:{service}:{env}"), &format!("rlx_{}", random(32)));
-        self.db.execute("INSERT INTO trace_ingest (service, env, sealed) VALUES (?, ?, ?) ON CONFLICT (service, env) DO NOTHING", params![service, env, sealed])?;
+        let token = roll_auth::credentials::new_secret("rlr_");
+        let (sealed, hash) = (self.sealer.seal(&format!("trace:{service}:{env}"), &token), crate::public::token_hash(&token));
+        self.db.execute("INSERT INTO trace_ingest (service, env, sealed, hash) VALUES (?, ?, ?, ?) ON CONFLICT (service, env) DO NOTHING", params![service, env, sealed, hash])?;
         Ok(())
+    }
+
+    /// A new trace token for the environment whose token hashes to `hash` (a leaked one): the old
+    /// one takes nothing from now on. Which environment, if any.
+    pub fn replace_trace_token_by_hash(&self, hash: &str) -> Result<Option<(String, String)>> {
+        let row: Option<(String, String)> = self.db.query_row("SELECT service, env FROM trace_ingest WHERE hash = ?", [hash], |r| Ok((r.get(0)?, r.get(1)?))).optional()?;
+        if let Some((s, e)) = &row {
+            let token = roll_auth::credentials::new_secret("rlr_");
+            let (sealed, h) = (self.sealer.seal(&format!("trace:{s}:{e}"), &token), crate::public::token_hash(&token));
+            self.db.execute("UPDATE trace_ingest SET sealed = ?, hash = ? WHERE service = ? AND env = ?", params![sealed, h, s, e])?;
+        }
+        Ok(row)
+    }
+
+    /// The environment whose runtime config token hashes to `hash`, if any.
+    pub fn runtime_config_by_hash(&self, hash: &str) -> Result<Option<(String, String)>> {
+        Ok(self.db.query_row("SELECT service, env FROM runtime_config WHERE hash = ?", [hash], |r| Ok((r.get(0)?, r.get(1)?))).optional()?)
     }
 
     /// An error seen at `at` in `deployment`: new to the environment, back after it was
@@ -2495,11 +2517,12 @@ impl Store {
     /// and its token made once and kept, so running instances keep reading the same address
     /// (it goes only with the environment).
     pub fn set_runtime_config(&self, service: &str, env: &str, config: Option<&serde_json::Value>) -> Result<Option<i64>> {
-        let (j, sealed) = (config.map(|c| c.to_string()), self.sealer.seal(&format!("config:{service}:{env}"), &format!("rlc_{}", random(32))));
+        let token = roll_auth::credentials::new_secret("rlr_");
+        let (j, sealed, hash) = (config.map(|c| c.to_string()), self.sealer.seal(&format!("config:{service}:{env}"), &token), crate::public::token_hash(&token));
         self.db.write(|c| {
             c.execute(
-                "INSERT INTO runtime_config (service, env, config, version, sealed) VALUES (?, ?, ?, 1, ?) ON CONFLICT (service, env) DO UPDATE SET config = excluded.config, version = runtime_config.version + 1",
-                params![service, env, j, sealed],
+                "INSERT INTO runtime_config (service, env, config, version, sealed, hash) VALUES (?, ?, ?, 1, ?, ?) ON CONFLICT (service, env) DO UPDATE SET config = excluded.config, version = runtime_config.version + 1",
+                params![service, env, j, sealed, hash],
             )?;
             Ok::<_, Error>(c.query_row("SELECT version FROM runtime_config WHERE service = ? AND env = ?", params![service, env], |r| r.get(0)).optional()?)
         })
@@ -2556,8 +2579,9 @@ impl Store {
     /// kept for [`Store::runtime_config_tokens`]. When it was (none: it has no config).
     pub fn rotate_runtime_config(&self, service: &str, env: &str) -> Result<Option<i64>> {
         let now = self.now()?;
-        let sealed = self.sealer.seal(&format!("config:{service}:{env}"), &format!("rlc_{}", random(32)));
-        let n = self.db.execute("UPDATE runtime_config SET previous = sealed, sealed = ?, rotated_at = ? WHERE service = ? AND env = ?", params![sealed, now, service, env])?;
+        let token = roll_auth::credentials::new_secret("rlr_");
+        let (sealed, hash) = (self.sealer.seal(&format!("config:{service}:{env}"), &token), crate::public::token_hash(&token));
+        let n = self.db.execute("UPDATE runtime_config SET previous = sealed, sealed = ?, hash = ?, rotated_at = ? WHERE service = ? AND env = ?", params![sealed, hash, now, service, env])?;
         Ok((n > 0).then_some(now))
     }
 
