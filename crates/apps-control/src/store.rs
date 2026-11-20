@@ -88,6 +88,14 @@ CREATE TABLE IF NOT EXISTS trace_ingest (
     sealed TEXT NOT NULL,
     PRIMARY KEY (service, env)
 ) WITHOUT ROWID;
+CREATE TABLE IF NOT EXISTS runtime_config (
+    service TEXT NOT NULL,
+    env TEXT NOT NULL,
+    config TEXT,
+    version INTEGER NOT NULL,
+    sealed TEXT NOT NULL,
+    PRIMARY KEY (service, env)
+) WITHOUT ROWID;
 CREATE TABLE IF NOT EXISTS github_events (
     id TEXT PRIMARY KEY,
     service TEXT NOT NULL,
@@ -875,6 +883,11 @@ impl Store {
         db.add_column("environments", "mirror", "TEXT")?;
         db.add_column("environments", "pause_schedule", "TEXT")?;
         db.add_column("environments", "snippets", "TEXT")?;
+        // An error group's lifecycle (`errors::Lifecycle`): resolved or muted (open when NULL),
+        // since when, and the deployment it was first seen in.
+        db.add_column("error_groups", "state", "TEXT")?;
+        db.add_column("error_groups", "resolved_at", "INTEGER")?;
+        db.add_column("error_groups", "first_deployment", "TEXT")?;
         // Drains made before their filters sent every environment's runtime output: still so.
         db.add_column("log_drains", "sources", "TEXT")?;
         db.add_column("log_drains", "environments", "TEXT")?;
@@ -987,7 +1000,7 @@ impl Store {
             c.execute("DELETE FROM deploy_steps WHERE deployment IN (SELECT id FROM deployments WHERE service = ?)", [id])?;
             c.execute("DELETE FROM state WHERE key LIKE ?", [format!("%:{id}/%")])?;
             c.execute("DELETE FROM status_days WHERE key LIKE ?", [format!("%:{id}/%")])?;
-            for t in ["environments", "deployments", "deploy_keys", "fences", "env_access", "registry_auth", "git_auth", "git_github", "github_events", "trace_ingest", "visit_tickets", "visit_sessions", "variable_files", "error_groups", "variables", "links", "domains", "preview_hosts", "runs", "jobs", "metrics", "usage", "form_submissions", "deploy_scans"] {
+            for t in ["environments", "deployments", "deploy_keys", "fences", "env_access", "registry_auth", "git_auth", "git_github", "github_events", "trace_ingest", "runtime_config", "visit_tickets", "visit_sessions", "variable_files", "error_groups", "variables", "links", "domains", "preview_hosts", "runs", "jobs", "metrics", "usage", "form_submissions", "deploy_scans"] {
                 c.execute(&format!("DELETE FROM {t} WHERE service = ?"), [id])?;
             }
             match c.execute("DELETE FROM services WHERE id = ?", [id])? {
@@ -1103,7 +1116,7 @@ impl Store {
             if n == 0 {
                 return Err(Error::NotFound(format!("service {service} has no environment {env}")));
             }
-            for t in ["variables", "variable_files", "error_groups", "domains", "preview_hosts", "runs", "jobs", "metrics", "deploy_keys", "env_access", "trace_ingest", "visit_tickets", "visit_sessions", "form_submissions"] {
+            for t in ["variables", "variable_files", "error_groups", "domains", "preview_hosts", "runs", "jobs", "metrics", "deploy_keys", "env_access", "trace_ingest", "runtime_config", "visit_tickets", "visit_sessions", "form_submissions"] {
                 c.execute(&format!("DELETE FROM {t} WHERE service = ? AND env = ?"), [service, env])?;
             }
             // Its schedules', challenge's and base images' state goes with it.
@@ -2321,14 +2334,57 @@ impl Store {
         Ok(())
     }
 
-    /// An error seen: whether it's the first time the environment has had it.
-    pub fn remember_error(&self, service: &str, env: &str, fingerprint: &str, name: &str, at: i64) -> Result<bool> {
-        // At most 1,000 kept an environment: past that, nothing more is new.
-        let n: i64 = self.db.query_row("SELECT COUNT(*) FROM error_groups WHERE service = ? AND env = ?", params![service, env], |r| r.get(0))?;
-        if n >= 1000 {
-            return Ok(false);
-        }
-        Ok(self.db.execute("INSERT INTO error_groups (service, env, fingerprint, name, first_seen) VALUES (?, ?, ?, ?, ?) ON CONFLICT (service, env, fingerprint) DO NOTHING", params![service, env, fingerprint, name, at])? > 0)
+    /// An error seen at `at` in `deployment`: new to the environment, back after it was
+    /// resolved (open again), or neither (known, or muted: never said).
+    pub fn remember_error(&self, service: &str, env: &str, fingerprint: &str, name: &str, at: i64, deployment: Option<&str>) -> Result<crate::errors::Seen> {
+        use crate::errors::Seen;
+        self.db.write(|c| {
+            let row: Option<(Option<String>, Option<i64>)> = c.query_row("SELECT state, resolved_at FROM error_groups WHERE service = ? AND env = ? AND fingerprint = ?", params![service, env, fingerprint], |r| Ok((r.get(0)?, r.get(1)?))).optional()?;
+            match row {
+                // At most 1,000 kept an environment: past that, nothing more is new.
+                None => {
+                    let n: i64 = c.query_row("SELECT COUNT(*) FROM error_groups WHERE service = ? AND env = ?", params![service, env], |r| r.get(0))?;
+                    if n >= 1000 {
+                        return Ok(Seen::Known);
+                    }
+                    c.execute("INSERT INTO error_groups (service, env, fingerprint, name, first_seen, first_deployment) VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT (service, env, fingerprint) DO NOTHING", params![service, env, fingerprint, name, at, deployment])?;
+                    Ok(Seen::New)
+                }
+                Some((Some(s), Some(r))) if s == "resolved" && at > r => {
+                    c.execute("UPDATE error_groups SET state = NULL, resolved_at = NULL WHERE service = ? AND env = ? AND fingerprint = ?", params![service, env, fingerprint])?;
+                    Ok(Seen::Regressed)
+                }
+                _ => Ok(Seen::Known),
+            }
+        })
+    }
+
+    /// An error group resolved, muted or open again; false when the environment never had it.
+    pub fn set_error_state(&self, service: &str, env: &str, fingerprint: &str, state: crate::errors::Lifecycle, at: i64) -> Result<bool> {
+        use crate::errors::Lifecycle;
+        let (s, r) = match state {
+            Lifecycle::Open => (None, None),
+            Lifecycle::Resolved => (Some("resolved"), Some(at)),
+            Lifecycle::Muted => (Some("muted"), None),
+        };
+        Ok(self.db.execute("UPDATE error_groups SET state = ?, resolved_at = ? WHERE service = ? AND env = ? AND fingerprint = ?", params![s, r, service, env, fingerprint])? > 0)
+    }
+
+    /// Each kept error group's state and first deployment, by fingerprint.
+    pub fn error_states(&self, service: &str, env: &str) -> Result<HashMap<String, (crate::errors::Lifecycle, Option<String>)>> {
+        use crate::errors::Lifecycle;
+        let rows: Vec<(String, Option<String>, Option<String>)> = self.db.query("SELECT fingerprint, state, first_deployment FROM error_groups WHERE service = ? AND env = ?", params![service, env], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?;
+        Ok(rows
+            .into_iter()
+            .map(|(f, s, d)| {
+                let s = match s.as_deref() {
+                    Some("resolved") => Lifecycle::Resolved,
+                    Some("muted") => Lifecycle::Muted,
+                    _ => Lifecycle::Open,
+                };
+                (f, (s, d))
+            })
+            .collect())
     }
 
     /// The environment's variables kept as files: name → path.
@@ -2362,6 +2418,40 @@ impl Store {
     pub fn trace_token(&self, service: &str, env: &str) -> Result<Option<String>> {
         let sealed: Option<String> = self.db.query_row("SELECT sealed FROM trace_ingest WHERE service = ? AND env = ?", params![service, env], |r| r.get(0)).optional()?;
         sealed.map(|s| self.sealer.open(&format!("trace:{service}:{env}"), &s)).transpose()
+    }
+
+    // ── runtime config ──
+
+    /// An environment's runtime config set, or (none) emptied: its version one more either way,
+    /// and its token made once and kept, so running instances keep reading the same address
+    /// (it goes only with the environment).
+    pub fn set_runtime_config(&self, service: &str, env: &str, config: Option<&serde_json::Value>) -> Result<Option<i64>> {
+        let (j, sealed) = (config.map(|c| c.to_string()), self.sealer.seal(&format!("config:{service}:{env}"), &format!("rlc_{}", random(32))));
+        self.db.write(|c| {
+            c.execute(
+                "INSERT INTO runtime_config (service, env, config, version, sealed) VALUES (?, ?, ?, 1, ?) ON CONFLICT (service, env) DO UPDATE SET config = excluded.config, version = runtime_config.version + 1",
+                params![service, env, j, sealed],
+            )?;
+            Ok::<_, Error>(c.query_row("SELECT version FROM runtime_config WHERE service = ? AND env = ?", params![service, env], |r| r.get(0)).optional()?)
+        })
+    }
+
+    /// The environment's runtime config (null when emptied) and its version (none: it never had
+    /// one).
+    pub fn runtime_config(&self, service: &str, env: &str) -> Result<Option<(serde_json::Value, i64)>> {
+        let row: Option<(Option<String>, i64)> = self.db.query_row("SELECT config, version FROM runtime_config WHERE service = ? AND env = ?", params![service, env], |r| Ok((r.get(0)?, r.get(1)?))).optional()?;
+        Ok(row.map(|(c, v)| (c.and_then(|c| serde_json::from_str(&c).ok()).unwrap_or(serde_json::Value::Null), v)))
+    }
+
+    /// Only its version: what a long poll compares.
+    pub fn runtime_config_version(&self, service: &str, env: &str) -> Result<Option<i64>> {
+        Ok(self.db.query_row("SELECT version FROM runtime_config WHERE service = ? AND env = ?", params![service, env], |r| r.get(0)).optional()?)
+    }
+
+    /// Its runtime config's read token, opened (none: no config).
+    pub fn runtime_config_token(&self, service: &str, env: &str) -> Result<Option<String>> {
+        let sealed: Option<String> = self.db.query_row("SELECT sealed FROM runtime_config WHERE service = ? AND env = ?", params![service, env], |r| r.get(0)).optional()?;
+        sealed.map(|s| self.sealer.open(&format!("config:{service}:{env}"), &s)).transpose()
     }
 
     // ── roll's GitHub App on a Git URL service ──
@@ -3032,10 +3122,11 @@ impl Store {
     }
 
     /// Whether any drain asks for request lines and for build lines (the log tap's gate).
-    pub fn drain_sources_wanted(&self) -> Result<(bool, bool)> {
+    /// Whether some drain takes requests, builds, traces, metrics.
+    pub fn drain_sources_wanted(&self) -> Result<(bool, bool, bool, bool)> {
         let all: Vec<Option<String>> = self.db.query("SELECT sources FROM log_drains", (), |r| r.get(0))?;
         let has = |k: &str| all.iter().flatten().any(|j| serde_json::from_str::<Vec<String>>(j).is_ok_and(|v| v.iter().any(|s| s == k)));
-        Ok((has("http"), has("build")))
+        Ok((has("http"), has("build"), has("traces"), has("metrics")))
     }
 
     /// A project's drains with their URLs, secrets and headers opened, to send to.

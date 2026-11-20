@@ -203,6 +203,21 @@ http.createServer(async (req, res) => {
 const EDGE_SERVER: &str = r#"const fns = JSON.parse(await Deno.readTextFile('/roll/edge.json'));
 const loaded = new Map();
 globalThis.Netlify = { env: { get: (k) => Deno.env.get(k), has: (k) => Deno.env.has(k), toObject: () => Deno.env.toObject() } };
+// The site's runtime config (ROLL_CONFIG_URL), kept current by a long poll: `context.config`, and
+// `Roll.config()` for middleware.
+let config = {};
+globalThis.Roll = { config: () => config };
+const configUrl = Deno.env.get('ROLL_CONFIG_URL');
+if (configUrl) (async () => {
+  let tag = null;
+  for (;;) {
+    try {
+      const r = await fetch(tag ? `${configUrl}?wait=25` : configUrl, { headers: tag ? { 'if-none-match': tag } : {} });
+      if (r.status === 200) { tag = r.headers.get('etag'); config = (await r.json()).config ?? {}; }
+      else if (r.status !== 304) await new Promise((s) => setTimeout(s, 5000));
+    } catch { await new Promise((s) => setTimeout(s, 5000)); }
+  }
+})();
 const load = (f) => { if (!loaded.has(f.name)) loaded.set(f.name, import('file:///app/' + f.file)); return loaded.get(f.name); };
 function cookies(req, out) {
   const jar = new Map();
@@ -246,7 +261,7 @@ Deno.serve({ hostname: '127.0.0.1', port: Number(Deno.env.get('ROLL_EDGE_PORT') 
     if (f.kind === 'netlify') {
       const ip = (headers.get('x-forwarded-for') ?? '').split(',')[0].trim();
       const country = headers.get('cf-ipcountry');
-      const context = { next, ip, requestId: headers.get('x-request-id') ?? crypto.randomUUID(), geo: country ? { country: { code: country } } : {}, cookies: cookies(request, set), params: {}, site: {}, deploy: {}, json: (o, i) => Response.json(o, i), rewrite: (to) => next(new Request(new URL(to, request.url), request)), waitUntil: () => {} };
+      const context = { next, config, ip, requestId: headers.get('x-request-id') ?? crypto.randomUUID(), geo: country ? { country: { code: country } } : {}, cookies: cookies(request, set), params: {}, site: {}, deploy: {}, json: (o, i) => Response.json(o, i), rewrite: (to) => next(new Request(new URL(to, request.url), request)), waitUntil: () => {} };
       res = (await fn(request, context)) ?? (await next());
     } else {
       res = await fn(request, { waitUntil: () => {} });

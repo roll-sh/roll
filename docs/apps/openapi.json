@@ -235,7 +235,7 @@
               }
             }
           },
-          "description": "`{ url, format?, sources?, environments?, services?, previews?, headers? }` (https, a public host, or `syslog+tls://host:port` for `format: \"syslog\"`, which takes no headers; `sources` some of `runtime` (default), `http`, `build`, `audit`; services by name or id; `headers` `{name: value}`, at most 10, sealed, never roll's own or `content-type`)"
+          "description": "`{ url, format?, sources?, environments?, services?, previews?, headers? }` (https, a public host, or `syslog+tls://host:port` for `format: \"syslog\"`, which takes no headers; `sources` some of `runtime` (default), `http`, `build`, `audit`, `traces`, `metrics`; services by name or id; `headers` `{name: value}`, at most 10, sealed, never roll's own or `content-type`)"
         },
         "responses": {
           "201": {
@@ -2315,6 +2315,61 @@
           "services"
         ],
         "x-roll-action": "read"
+      }
+    },
+    "/v1/apps/services/{id}/environments/{env}/errors/{fingerprint}": {
+      "patch": {
+        "description": "Answers `{ fingerprint, state }`; 404 for one the environment never had.",
+        "operationId": "patchServicesIdEnvironmentsEnvErrorsFingerprint",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "env",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "fingerprint",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object"
+              }
+            }
+          },
+          "description": "`{ state: \"open\" | \"resolved\" | \"muted\" }`"
+        },
+        "responses": {
+          "200": {
+            "description": "`{ fingerprint, state }`; 404 for one the environment never had"
+          },
+          "4XX": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "summary": "Update error",
+        "tags": [
+          "services"
+        ],
+        "x-roll-action": "write"
       }
     },
     "/v1/apps/services/{id}/environments/{env}/files": {

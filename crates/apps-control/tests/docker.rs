@@ -454,8 +454,12 @@ async fn a_sites_edge_functions_run_on_deno() {
         ("index.html", "<h1>site</h1>"),
         ("netlify/edge-functions/hi.ts", "export default (req: Request) => new Response(`hi from ${typeof Deno}`);\nexport const config = { path: '/hi' };\n"),
         ("netlify/edge-functions/shout.ts", "export default async (req: Request, ctx: any) => new Response((await (await ctx.next()).text()).toUpperCase(), { headers: { 'x-edge': '1' } });\nexport const config = { path: ['/', '/index.html'] };\n"),
+        ("netlify/edge-functions/flag.ts", "export default (req: Request, ctx: any) => new Response(String(ctx.config.banner));\nexport const config = { path: '/flag' };\n"),
     ];
     let (site, host) = deploy_tree(&w, "edgy", &files).await;
+    // The site's runtime config: its functions read it as `context.config`.
+    let site_env = format!("/v1/apps/services/{site}/environments/production");
+    assert_eq!(call(&w.api, "PUT", &site_env, Some(json!({"config": {"banner": "sale"}})), "application/json", None).await.0, StatusCode::OK);
     let (fns, _) = deploy_tree_with(&w, "edgy-fn", &files, json!({"builder": "functions"})).await;
     let fetch = |path: &'static str| {
         let req = Request::get(path).header("host", host.as_str()).body(Body::empty()).unwrap();
@@ -470,6 +474,25 @@ async fn a_sites_edge_functions_run_on_deno() {
     let got = fetch("/").await;
     let (_, log) = call(&w.api, "GET", &format!("/v1/apps/services/{fns}/environments/production/logs?tail=40"), None, "application/json", None).await;
     assert_eq!(got, (StatusCode::OK, "<H1>SITE</H1>".to_string()), "next() read the site's own file: {log}");
+    // Its config, and a change to it without a deploy (the server's long poll has it at once).
+    let mut flag = (StatusCode::NOT_FOUND, String::new());
+    for _ in 0..100 {
+        flag = fetch("/flag").await;
+        if flag.1 == "sale" {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert_eq!(flag, (StatusCode::OK, "sale".to_string()));
+    call(&w.api, "PUT", &site_env, Some(json!({"config": {"banner": "gone"}})), "application/json", None).await;
+    for _ in 0..100 {
+        flag = fetch("/flag").await;
+        if flag.1 == "gone" {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert_eq!(flag, (StatusCode::OK, "gone".to_string()), "no deploy");
     for id in [&site, &fns] {
         assert_eq!(delete_for_good(&w.api, id).await.0, StatusCode::NO_CONTENT);
     }
@@ -618,6 +641,80 @@ async fn deploy_container(w: &World, name: &str) -> (String, String) {
     }
     let (_, env) = call(&w.api, "GET", &format!("/v1/apps/services/{id}/environments/production"), None, "application/json", None).await;
     (id, env["url"].as_str().unwrap().trim_start_matches("http://").split(':').next().unwrap().to_string())
+}
+
+/// An instant rollback on real Docker (Heroku's, Railway's): back to v1 its image runs again, no
+/// build; once v2 is pruned past what's kept, a rollback to it says to deploy its revision again.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_rollback_runs_the_old_image_and_a_pruned_one_is_refused() {
+    let Some(w) = docker_world_with(None, |c| {
+        c.keep_deployments = 1;
+        c.keep_recent = Duration::ZERO;
+    })
+    .await
+    else {
+        return;
+    };
+    let (id, host) = deploy_container(&w, "rb").await;
+    let base = format!("/v1/apps/services/{id}/environments/production");
+    let body = |public: axum::Router, host: String| async move {
+        let resp = public.oneshot(Request::get("/").header("host", host).body(Body::empty()).unwrap()).await.unwrap();
+        String::from_utf8_lossy(&resp.into_body().collect().await.unwrap().to_bytes()).into_owned()
+    };
+    let settle = |dep: String| {
+        let api = w.api.clone();
+        let base = base.clone();
+        async move {
+            for _ in 0..1200 {
+                let (_, x) = call(&api, "GET", &format!("{base}/deploys/{dep}"), None, "application/json", None).await;
+                if x["status"] == "active" {
+                    return x;
+                }
+                assert!(!["failed", "canceled"].contains(&x["status"].as_str().unwrap_or("")), "{x}");
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+            panic!("{dep} never went live");
+        }
+    };
+    let (_, env) = call(&w.api, "GET", &base, None, "application/json", None).await;
+    let v1 = env["active"]["id"].as_str().unwrap().to_string();
+    let (_, d1) = call(&w.api, "GET", &format!("{base}/deploys/{v1}"), None, "application/json", None).await;
+    assert!(body(w.public.clone(), host.clone()).await.contains("cold"));
+    // v2: another tree, built.
+    let tree = tempfile::tempdir().unwrap();
+    std::fs::write(tree.path().join("index.html"), "<h1>two</h1>").unwrap();
+    let mut bundle = Vec::new();
+    roll_fetch::pack(&mut bundle, &Default::default(), Some(tree.path()), roll_fetch::Limits::default()).unwrap();
+    let (_, d) = call(&w.api, "POST", &format!("{base}/deploys"), None, "application/gzip", Some(bundle)).await;
+    let v2 = d["id"].as_str().unwrap().to_string();
+    settle(v2.clone()).await;
+    let mut seen = String::new();
+    for _ in 0..50 {
+        seen = body(w.public.clone(), host.clone()).await;
+        if seen.contains("two") {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert!(seen.contains("two"), "{seen}");
+    // Back to v1: its image, no build.
+    let (st, r) = call(&w.api, "POST", &format!("{base}/deploys/{v1}/rollback"), Some(json!({})), "application/json", None).await;
+    assert_eq!(st, StatusCode::ACCEPTED, "{r}");
+    let r = settle(r["id"].as_str().unwrap().to_string()).await;
+    assert_eq!((&r["image"], &r["trigger"]), (&d1["image"], &json!("rollback")), "{r}");
+    for _ in 0..50 {
+        seen = body(w.public.clone(), host.clone()).await;
+        if seen.contains("cold") {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert!(seen.contains("cold"), "v1 answers again: {seen}");
+    // Pruned past what's kept: v2's image is gone, and a rollback to it says what to do.
+    w.apps.prune().await;
+    let (st, v) = call(&w.api, "POST", &format!("{base}/deploys/{v2}/rollback"), Some(json!({})), "application/json", None).await;
+    assert!(st == StatusCode::CONFLICT && v.to_string().contains("deploy its revision again"), "{st} {v}");
+    assert_eq!(delete_for_good(&w.api, &id).await.0, StatusCode::NO_CONTENT);
 }
 
 /// A deploy under steady traffic answers every request (zero downtime, as Railway's and Render's

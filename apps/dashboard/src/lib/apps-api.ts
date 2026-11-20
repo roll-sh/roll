@@ -80,6 +80,8 @@ export interface Run {
   drain_s?: number;
   /** A web service also scales on CPU: another instance while they average over this percent for a minute (10–100). */
   cpu_target?: number;
+  /** A web service also scaled on its answers' p95 (50–60,000 ms). */
+  latency_target_ms?: number;
   /** And on memory: another while they average over this percent of their memory for a minute (10–100). */
   memory_target?: number;
   suspend_after_s: number;
@@ -556,6 +558,8 @@ export interface EnvironmentPut {
   mirror?: { environment: string; percent: number } | null;
   /** Its own HTML in every page: before `</head>` or `</body>` (at most 5, each up to 16 KiB); null: none. */
   snippets?: Snippet[] | null;
+  /** Runtime config its instances read at `ROLL_CONFIG_URL` without a deploy (at most 200 keys, 64 KiB); null: none. */
+  config?: Record<string, unknown> | null;
   /** Its split test: `percent` of visitors (1–99) served by `environment`, or null to end it. */
   split?: { environment: string; percent: number } | null;
   /** Its heartbeats (at most 10), or null for none; one kept by name keeps its URL. */
@@ -687,6 +691,9 @@ export interface Environment extends EnvironmentSummary {
   /** Where a share of its GET and HEAD requests is copied, answers dropped. */
   mirror?: { environment: string; percent: number };
   snippets?: Snippet[];
+  /** Its runtime config, and the version its instances read. */
+  config?: Record<string, unknown>;
+  config_version?: number;
   freeze?: Freeze;
   /** Its freeze is on now: automatic deploys build to ready, a person's deploy needs the `X-Roll-Override: 1` header (admin). */
   frozen?: boolean;
@@ -943,6 +950,10 @@ export interface ErrorGroup {
   instances: number;
   /** The newest one, whole (at most 8 KiB). */
   sample: string;
+  /** Open; resolved (said again, `error.regressed`, if it comes back); muted (never said). */
+  state?: "open" | "resolved" | "muted";
+  /** The deployment it was first seen in. */
+  first_deployment?: string | null;
 }
 
 /** One series of the app's own metrics (OpenTelemetry, traces on): a name and its attributes. */
@@ -1131,6 +1142,7 @@ export type NotifyEvent =
   | "alert.capacity"
   | "alert.log"
   | "error.new"
+  | "error.regressed"
   | "cron.failed"
   | "job.failed"
   | "domain.active"
@@ -1164,7 +1176,7 @@ export interface AppEvent {
 }
 
 /** A project's log drain: where its services' runtime output is POSTed (NDJSON). */
-export type DrainSource = "runtime" | "http" | "build" | "audit";
+export type DrainSource = "runtime" | "http" | "build" | "audit" | "traces" | "metrics";
 
 export interface DrainSettings {
   sources?: DrainSource[];
@@ -1460,6 +1472,7 @@ export const appsApi = {
   routes: (id: string, e: string, minutes = 60) => call<RouteStats>("GET", `${env(id, e)}/routes${qs({ minutes })}`),
   analytics: (id: string, e: string, minutes = 1440) => call<Analytics>("GET", `${env(id, e)}/analytics${qs({ minutes })}`),
   vitals: (id: string, e: string, minutes = 1440) => call<Vitals>("GET", `${env(id, e)}/vitals${qs({ minutes })}`),
+  setErrorState: (id: string, e: string, fingerprint: string, state: "open" | "resolved" | "muted") => call<{ fingerprint: string; state: string }>("PATCH", `${env(id, e)}/errors/${encodeURIComponent(fingerprint)}`, { state }),
   errors: (id: string, e: string, minutes = 1440) => call<{ minutes: number; groups: ErrorGroup[]; scanned: number; cut: boolean }>("GET", `${env(id, e)}/errors${qs({ minutes })}`),
   appMetrics: (id: string, e: string, minutes = 60) => call<AppMetrics>("GET", `${env(id, e)}/app-metrics${qs({ minutes })}`),
   traces: (id: string, e: string, minutes = 60) => call<{ minutes: number; traces: TraceSummary[]; cut: boolean }>("GET", `${env(id, e)}/traces${qs({ minutes })}`),
