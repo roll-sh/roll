@@ -606,6 +606,7 @@ static TOOLS: &[Tool] = &[
     ),
     t("postgres_delete_branch", "Delete a branch", "Delete a branch and its compute.", "postgres", "DELETE", "/v1/projects/{project}/branches/{branch}", &[PROJECT, BRANCH]),
     t("postgres_branch_history", "Branch history", "The range a branch can be restored to or branched from.", "postgres", "GET", "/v1/projects/{project}/branches/{branch}/history", &[PROJECT, BRANCH]),
+    t("postgres_create_replica", "Add a read replica", "A read-only endpoint on a branch that follows its primary, for reads (analytics, a read-heavy service) without touching the primary. Its connection string is a credential (shown only to a caller that may reveal).", "postgres", "POST", "/v1/projects/{project}/branches/{branch}/replicas", &[PROJECT, BRANCH]),
     t("postgres_restore_branch", "Restore a branch", "Rewind a branch in place to a past point (the current state is kept as a branch).", "postgres", "POST", "/v1/projects/{project}/branches/{branch}/restore", &[PROJECT, BRANCH, b("at", Ty::Str, "Point in time (RFC 3339)"), b("lsn", Ty::Str, "Or an LSN")]),
     t("postgres_reset_branch", "Reset a branch", "Put a branch back to its parent's current state, in place: the same endpoint and connection string, its own changes gone (schema_only: then empty every table).", "postgres", "POST", "/v1/projects/{project}/branches/{branch}/reset", &[PROJECT, BRANCH, b("schema_only", Ty::Bool, "Keep only the structure")]),
     t("postgres_get_endpoint", "Get an endpoint", "An endpoint's compute: state (running, suspended), size limits and suspend timeout (connection strings need reveal).", "postgres", "GET", "/v1/endpoints/{endpoint}", &[ENDPOINT]),
@@ -627,6 +628,9 @@ static TOOLS: &[Tool] = &[
     // ── Redis ──
     t("redis_list_databases", "List Redis databases", "Serverless Redis databases.", "redis", "GET", "/v1/redis/databases", &[]),
     t("redis_get_database", "Get a Redis database", "A Redis database's settings and connection (credentials need reveal).", "redis", "GET", "/v1/redis/databases/{database}", &[REDIS]),
+    t("redis_overview", "roll Redis here", "What roll Redis offers here: its version, region, defaults, endpoints (RESP, HTTP, TLS), storage and pricing.", "redis", "GET", "/v1/redis", &[]),
+    t("redis_create_replica", "Add a read replica", "A read replica of a Redis database: its own address that follows the primary, for reads. Its password is a credential (shown only to a caller that may reveal).", "redis", "POST", "/v1/redis/databases/{database}/replicas", &[REDIS]),
+    t("redis_delete_replica", "Remove a read replica", "Remove one of a database's read replicas: its address stops answering.", "redis", "DELETE", "/v1/redis/replicas/{replica}", &[req("replica", "Replica id")]),
     t("redis_create_database", "Create a Redis database", "A new serverless Redis database.", "redis", "POST", "/v1/redis/databases", &[breq("name", Ty::Str, "Database name"), b("max_memory_mb", Ty::Int, "Memory limit"), b("eviction_policy", Ty::Str, "Eviction policy"), IN_PROJECT]),
     t("redis_delete_database", "Delete a Redis database", "Delete a database and its data. Irreversible.", "redis", "DELETE", "/v1/redis/databases/{database}", &[REDIS]),
     t("redis_create_branch", "Branch a Redis database", "A fork of a database's data, now or at a point in time.", "redis", "POST", "/v1/redis/databases/{database}/branches", &[REDIS, breq("name", Ty::Str, "Branch name"), b("at", Ty::Int, "Unix seconds")]),
@@ -676,11 +680,15 @@ static TOOLS: &[Tool] = &[
     t("storage_usage", "Storage usage", "A bucket's usage.", "storage", "GET", "/v1/storage/buckets/{bucket}/usage", &[BUCKET, DAYS]),
     t("storage_usage_all", "Storage usage, every bucket", "Storage and requests across every bucket.", "storage", "GET", "/v1/storage/usage", &[DAYS]),
     t("storage_list_accounts", "List storage accounts", "Storage's accounts (AWS-style, 12-digit ids): name, alias, and which is the default (creating one is the operator's).", "storage", "GET", "/v1/storage/accounts", &[]),
+    t("storage_overview", "roll storage here", "What roll storage offers here: the S3 endpoint and region, and the account's ids.", "storage", "GET", "/v1/storage", &[]),
+    t("storage_get_account", "Get a storage account", "One storage account: its name, email, ids (12-digit and canonical) and whether it's the default.", "storage", "GET", "/v1/storage/accounts/{id}", &[req("id", "Account id (12 digits)")]),
     t("storage_list_keys", "List S3 access keys", "An account's access keys: id, name, permission, the buckets it's limited to, the IAM user it belongs to and when it was last used (never a secret).", "storage", "GET", "/v1/storage/keys", &[q("account", Ty::Str, "Account id (12 digits; the default account when left out)")]),
     t("storage_revoke_key", "Revoke an S3 access key", "Revoke an S3 access key at once (an unused or too-wide one, from storage_list_keys). Making one answers its secret, so it has no tool.", "storage", "DELETE", "/v1/storage/keys/{id}", &[req("id", "Access key id"), q("account", Ty::Str, "Account id (12 digits; the default account when left out)")]).destructive(),
     t("storage_list_roles", "List IAM roles", "An account's IAM roles: ARN, trust, permissions policy and session length. Use it when an assumed role is refused.", "storage", "GET", "/v1/storage/roles", &[q("account", Ty::Str, "Account id (12 digits; the default account when left out)")]),
     t("storage_get_role", "Get an IAM role", "One IAM role: its ARN, trust, permissions policy and session length.", "storage", "GET", "/v1/storage/roles/{name}", &[req("name", "Role name"), q("account", Ty::Str, "Account id (12 digits; the default account when left out)")]),
+    t("storage_revoke_role_sessions", "Revoke a role's sessions", "Deny every session issued for a role until now (AWS's AWSRevokeOlderSessions): leaked temporary credentials stop working at once; new sessions still can be made.", "storage", "POST", "/v1/storage/roles/{name}/revoke", &[req("name", "Role name"), q("account", Ty::Str, "Account id (12 digits; the default account when left out)")]).destructive(),
     t("storage_list_replication_targets", "List replication targets", "Buckets outside roll that replication copies to: endpoint, region, access key id, buckets (never the secret; adding one is admin).", "storage", "GET", "/v1/storage/replication-targets", &[]),
+    t("storage_get_replication_target", "Get a replication target", "One replication target outside roll: its endpoint, bucket, region and access key id (never its secret).", "storage", "GET", "/v1/storage/replication-targets/{name}", &[req("name", "Target name"), q("account", Ty::Str, "Account id (12 digits; the default account when left out)")]),
     t(
         "storage_update_bucket",
         "Change a bucket",
@@ -702,6 +710,7 @@ static TOOLS: &[Tool] = &[
     t("storage_delete_objects", "Delete objects", "Delete these keys, or every object under a prefix (to the trash).", "storage", "POST", "/v1/storage/buckets/{bucket}/delete", &[BUCKET, b("keys", Ty::Arr, "Keys"), b("prefix", Ty::Str, "Or everything under this prefix")]).destructive(),
     // ── streams ──
     t("streams_list", "List streams", "Kafka-compatible streams.", "streams", "GET", "/v1/streams", &[]),
+    t("streams_overview", "roll streams here", "What roll streams offers here: the Kafka bootstrap address, the SASL mechanisms and security protocol, the default stream, storage and pricing.", "streams", "GET", "/v1/kafka", &[]),
     t("streams_get", "Get a stream", "A stream's bootstrap address, topics and throughput.", "streams", "GET", "/v1/streams/{stream}", &[STREAM]),
     t("streams_create", "Create a stream", "A new stream (its first API key needs reveal to see).", "streams", "POST", "/v1/streams", &[breq("name", Ty::Str, "Stream name"), b("settings", Ty::Obj, "Settings"), IN_PROJECT]),
     t("streams_delete", "Delete a stream", "Delete a stream with its topics and data. Irreversible.", "streams", "DELETE", "/v1/streams/{stream}", &[STREAM]),
@@ -739,6 +748,7 @@ static TOOLS: &[Tool] = &[
     t("streams_delete_group", "Delete a consumer group", "Delete a group and its committed offsets (refused while it has members).", "streams", "DELETE", "/v1/streams/{stream}/groups/{group}", &[STREAM, req("group", "Consumer group")]).destructive(),
     // ── NoSQL ──
     t("nosql_list_databases", "List NoSQL databases", "ScyllaDB/Cassandra-compatible databases.", "nosql", "GET", "/v1/nosql/databases", &[]),
+    t("nosql_overview", "roll NoSQL here", "What roll NoSQL offers here: the dialects (ScyllaDB, Cassandra) and their versions, and the CQL and other endpoints.", "nosql", "GET", "/v1/nosql", &[]),
     t("nosql_get_database", "Get a NoSQL database", "A database's settings and endpoints (credentials need reveal).", "nosql", "GET", "/v1/nosql/databases/{database}", &[NOSQL]),
     t("nosql_create_database", "Create a NoSQL database", "A new database.", "nosql", "POST", "/v1/nosql/databases", &[breq("name", Ty::Str, "Database name"), b("dialect", Ty::Str, "scylla or cassandra"), IN_PROJECT]),
     t("nosql_delete_database", "Delete a NoSQL database", "Delete a database and its data. Irreversible.", "nosql", "DELETE", "/v1/nosql/databases/{database}", &[NOSQL]),
@@ -774,6 +784,8 @@ static TOOLS: &[Tool] = &[
     t("queues_list_vhosts", "List virtual hosts", "RabbitMQ-compatible virtual hosts.", "queues", "GET", "/v1/queues/vhosts", &[]),
     t("queues_create_vhost", "Create a virtual host", "A new virtual host.", "queues", "POST", "/v1/queues/vhosts", &[breq("name", Ty::Str, "Name"), b("description", Ty::Str, "Description"), IN_PROJECT]),
     t("queues_delete_vhost", "Delete a virtual host", "Delete a virtual host and everything in it.", "queues", "DELETE", "/v1/queues/vhosts/{vhost}", &[VHOST]),
+    t("queues_suspend_vhost", "Suspend a virtual host", "Scale a virtual host to zero now: its queues keep their messages, and a client connecting wakes it.", "queues", "POST", "/v1/queues/vhosts/{vhost}/suspend", &[VHOST]),
+    t("queues_wake_vhost", "Wake a virtual host", "Start a suspended virtual host now, before a client connects.", "queues", "POST", "/v1/queues/vhosts/{vhost}/wake", &[VHOST]),
     t("queues_list_queues", "List queues", "A virtual host's queues with message counts.", "queues", "GET", "/v1/queues/vhosts/{vhost}/queues", &[VHOST]),
     t("queues_declare_queue", "Declare a queue", "Create a queue.", "queues", "POST", "/v1/queues/vhosts/{vhost}/queues", &[VHOST, breq("name", Ty::Str, "Queue name"), b("type", Ty::Str, "classic, quorum or stream"), b("durable", Ty::Bool, "Durable")]),
     t("queues_delete_queue", "Delete a queue", "Delete a queue and its messages.", "queues", "DELETE", "/v1/queues/vhosts/{vhost}/queues/{queue}", &[VHOST, QUEUE]),
@@ -831,7 +843,9 @@ static TOOLS: &[Tool] = &[
     t("tasks_rerun", "Rerun a run", "Run a function again with the same input as a past run.", "tasks", "POST", "/v1/tasks/runs/{id}/rerun", &[req("id", "Run id")]).open_world(),
     t("tasks_list_functions", "List functions", "Durable functions: their triggers and URLs.", "tasks", "GET", "/v1/tasks/functions", &[]),
     t("tasks_list_apps", "List synced apps", "The apps whose functions tasks runs: each one's URL, functions, SDK and when it last synced. Use it when a function is missing or stale.", "tasks", "GET", "/v1/tasks/apps", &[]),
+    t("tasks_delete_app", "Remove a synced app", "Stop syncing an app whose functions tasks runs (tasks_list_apps): its functions are no longer run from it.", "tasks", "DELETE", "/v1/tasks/apps/{id}", &[req("id", "App id")]),
     t("tasks_list_api_keys", "List tasks API keys", "Tasks' API keys: name, prefix, when made and last used (never the key itself).", "tasks", "GET", "/v1/tasks/api-keys", &[]),
+    t("tasks_delete_api_key", "Revoke an API key", "Revoke one of tasks' API keys at once: clients using it are refused. Making one answers its secret, so it has no tool.", "tasks", "DELETE", "/v1/tasks/api-keys/{id}", &[req("id", "API key id")]),
     t("tasks_list_queues", "List task queues", "Queues with their parallelism, rate and backlog.", "tasks", "GET", "/v1/tasks/queues", &[]),
     t("tasks_stats", "Tasks stats", "Nodes, queue stats, dead letters, schedules and functions.", "tasks", "GET", "/v1/tasks/stats", &[]),
     t("tasks_list_dead_letters", "List dead letters", "Messages that ran out of retries, newest first.", "tasks", "GET", "/v1/tasks/dlq", &[q("queue", Ty::Str, "Only this queue's"), q("topic", Ty::Str, "Only this topic's"), q("cursor", Ty::Str, "From a page's cursor"), q("limit", Ty::Int, "At most")]),
@@ -1421,7 +1435,8 @@ mod tests {
         assert!(undecided.is_empty(), "catalogued routes with no MCP tool and no reason: map each in tools.rs, or add `METHOD route  why` to crates/roll-mcp/src/no-tool.txt:\n{}", undecided.join("\n"));
         // A line may name a route an open PR is about to add (declared ahead, so its gate passes);
         // one whose route has a tool now is wrong.
-        let stale: Vec<String> = listed.iter().filter(|(m, r)| covered(m, r)).map(|(m, r)| format!("{m} {r}")).collect();
+        // A `*` line speaks for the methods with no tool, so a tool on its path doesn't make it stale.
+        let stale: Vec<String> = listed.iter().filter(|(m, r)| *m != "*" && covered(m, r)).map(|(m, r)| format!("{m} {r}")).collect();
         assert!(stale.is_empty(), "no-tool.txt lines for routes that have a tool now: remove them:\n{}", stale.join("\n"));
         // A tool that removes, revokes or replaces something says so (clients ask a person before a
         // destructive call), unless it's marked undoable: the review that found five revoke tools
