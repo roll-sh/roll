@@ -402,8 +402,14 @@ impl Runtime for Fake {
             let names: Vec<&str> = sc.vars.iter().map(|(k, _)| k.as_str()).collect();
             log.renamed(&super::sidecar_name(name, &sc.name)).line(format!("sidecar {} running {} with {}", sc.name, sc.image, names.join(",")));
         }
-        // A job: `FAKE_EXIT`, or a command `exit <code>` (a pre-deploy command, a cron run).
-        let exit = spec.command.as_deref().and_then(|c| c.strip_prefix("exit ")).and_then(|c| c.trim().parse::<i32>().ok());
+        // A job: `FAKE_EXIT`, or a command `exit <code>` (a pre-deploy command, a cron run);
+        // `exit <code> until try <n>` exits 0 from its `ROLL_TASK_ATTEMPT` n on (a flaky task).
+        let exit = spec.command.as_deref().and_then(|c| c.strip_prefix("exit ")).and_then(|c| {
+            let (code, until) = c.split_once(" until try ").map_or((c, None), |(a, n)| (a, n.trim().parse::<u32>().ok()));
+            let attempt = var(&spec, "ROLL_TASK_ATTEMPT").and_then(|a| a.parse::<u32>().ok()).unwrap_or(1);
+            let code = code.trim().parse::<i32>().ok()?;
+            Some(if until.is_some_and(|n| attempt >= n) { 0 } else { code })
+        });
         if let Some(code) = exit.or_else(|| var(&spec, "FAKE_EXIT").and_then(|c| c.parse::<i32>().ok())) {
             // A job's task says which it is.
             log.line(match var(&spec, "ROLL_TASK_INDEX") {

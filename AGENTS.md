@@ -392,6 +392,16 @@ The product should feel alive: dots react to the cursor and the marks "think". E
     database transaction; a write closure only touches the database.
   - Read-then-writes are one `code_sql` write (SQLite or the system database's `secrets` schema,
     shared by every node); background work claims each item in a write before acting on it.
+  - Another product holding a `roll://` reference: decide "is this a reference" only with
+    `roll_secrets::Reference::parse` (exact: ` roll://…` or `ROLL://…` is an error, never plain
+    text). A reference the operator wrote resolves through `Secrets::resolve_for`/`digest_for`; one
+    a person chose is bound with `bind_ref` (or `bind_ref_runtime`, the resource's own environment,
+    after the product's deploy check), its `Maker` stored where no tenant can write it, and read
+    with `resolve_as`/`digest_as`, which re-check the maker every time. Never resolve a
+    person's reference as the resource's runtime.
+  - roll's issuer (`Secrets::issue`) signs other products' workload tokens (apps' instances): never
+    for an untrusted preview environment; cloud trusts are written on the exact environment, never
+    `*`. Audit digests have a key of their own. Both rotate on a schedule and with `--now --retire`.
   - Tests: flows in `crates/roll-secrets/tests/api.rs` (also on Postgres with
     `ROLL_CODE_TEST_DATABASE`), two nodes in `tests/nodes.rs`, the CLI (`roll run --watch` too) in
     `crates/roll-cli/tests/secrets.rs`, rolld's link providers against its own products in

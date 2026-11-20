@@ -554,7 +554,7 @@ export function ServicePage({ id, env: envParam, tab: tabParam }: { id: string; 
           {(service.source.kind === "repo" || service.source.kind === "git") && (
             <label className="flex flex-col gap-1 text-[12px] text-muted">
               Revision
-              <input value={rev} onChange={(e) => setRev(e.target.value)} placeholder="the branch's head" spellCheck={false} className={`${input} w-56 font-mono text-[12px]`} />
+              <input value={rev} onChange={(e) => setRev(e.target.value)} placeholder="the branch's head; or a branch, tag or commit" spellCheck={false} className={`${input} w-56 font-mono text-[12px]`} />
             </label>
           )}
           {service.source.kind === "image" && (
@@ -703,7 +703,7 @@ export function ServicePage({ id, env: envParam, tab: tabParam }: { id: string; 
         ) : tab === "logs" ? (
           <RuntimeLogs service={service.id} env={envName} onGroup={() => go({ tab: "metrics" })} />
         ) : tab === "metrics" ? (
-          <MetricsTab service={service.id} env={envName} memoryMb={service.run.memory_mb} maxInstances={service.run.max_instances} cpus={service.run.cpu} />
+          <MetricsTab service={service.id} env={envName} memoryMb={service.run.memory_mb} maxInstances={service.run.max_instances} cpus={service.run.cpu} latencyTarget={service.run.latency_target_ms} />
         ) : tab === "variables" ? (
           <VariablesTab service={service.id} project={service.project} env={env!} envs={service.environments.map((e) => e.name).filter((n) => n !== env!.name)} runner={runner} onRedeploy={redeploy} />
         ) : tab === "jobs" ? (

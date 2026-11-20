@@ -14,6 +14,7 @@
 //!
 //! [secrets]
 //! unstored_credentials = "block" # a credential roll secrets doesn't hold blocks (default: "warn")
+//! project = "shop"               # the `roll` CLI's suggestion for teammates (roll-cli secrets/repo.rs)
 //! ```
 //!
 //! code-preview validates the whole file (strictly) and calls [`parse`] for these tables. The
@@ -70,6 +71,9 @@ pub struct Settings {
     pub secrets: SecretsSettings,
     /// `.roll/secrets-allow` at the same head.
     pub secrets_allow: roll_auth::credentials::Allow,
+    /// The roll secrets environment (`development`, `staging:/api`) the first check that has one
+    /// names: where "Store in roll" suggests putting a credential a change adds.
+    pub secrets_environment: Option<String>,
     /// Names of the `[checks.*]` tables.
     pub declared_checks: Vec<String>,
     /// Why `roll.toml` couldn't be read (the defaults apply meanwhile).
@@ -104,6 +108,17 @@ pub struct RawMain {
 #[serde(deny_unknown_fields)]
 pub struct RawSecrets {
     unstored_credentials: Option<String>,
+    /// roll secrets' suggestion for teammates, which the `roll` CLI reads and checks itself
+    /// (`roll-cli/src/secrets/repo.rs`, which ignores and names what it can't use): allowed here,
+    /// never read, so a table that holds both is no error.
+    #[serde(rename = "project")]
+    _project: Option<toml::Value>,
+    #[serde(rename = "environment")]
+    _environment: Option<toml::Value>,
+    #[serde(rename = "path")]
+    _path: Option<toml::Value>,
+    #[serde(rename = "branches")]
+    _branches: Option<toml::Value>,
 }
 
 /// The landing settings in a `roll.toml`. Other tables are ignored here (code-preview checks
@@ -119,7 +134,8 @@ pub fn parse(text: &str) -> Result<Settings, String> {
     };
     let main = raw.main.map(main).unwrap_or_default();
     let secrets = raw.secrets.map(secrets).transpose()?.unwrap_or_default();
-    Ok(Settings { queue, main, secrets, declared_checks: raw.checks.keys().cloned().collect(), ..Settings::default() })
+    let secrets_environment = raw.checks.values().find_map(|c| c.get("secrets")?.as_str().map(str::to_string));
+    Ok(Settings { queue, main, secrets, secrets_environment, declared_checks: raw.checks.keys().cloned().collect(), ..Settings::default() })
 }
 
 /// Validate `[queue]` (code-preview's strict parser hands it here).

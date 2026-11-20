@@ -283,11 +283,24 @@ pub struct Access {
 }
 
 /// A private registry's login for a service's image (`PUT …/registry`); the password is sealed
-/// and never returned.
+/// and never returned. An ECR login (`kind: "ecr"`) is an access key (its id as `username`) that
+/// each pull exchanges for ECR's 12-hour token in `region`.
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct Registry {
     pub server: String,
     pub username: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub kind: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub region: Option<String>,
+}
+
+/// An ECR registry host (`<account>.dkr.ecr.<region>.amazonaws.com`): its region.
+pub fn ecr_region(host: &str) -> Option<&str> {
+    let rest = host.strip_suffix(".amazonaws.com")?;
+    let (account, region) = rest.split_once(".dkr.ecr.")?;
+    let ok = account.len() == 12 && account.bytes().all(|b| b.is_ascii_digit()) && !region.is_empty() && region.len() <= 32 && region.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-');
+    ok.then_some(region)
 }
 
 /// A private Git repository's login for a Git URL service (`PUT …/git-login`): sent only to
@@ -603,6 +616,11 @@ pub struct Run {
     /// this many ms for a window, another instance, as `cpu_target` adds one (50–60,000).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub latency_target_ms: Option<u32>,
+    /// Audiences its instances may ask roll's OIDC issuer for (Vercel's OIDC federation): each
+    /// instance reads a token from `ROLL_OIDC_URL` (`?aud=`, the first by default) that clouds'
+    /// federation and roll secrets' workload logins trust, so the app holds no key. At most five.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub oidc_audiences: Vec<String>,
     /// Commands on a schedule, each a job of the live deployment at its due times (Heroku
     /// Scheduler, Vercel crons): any service's, without a cron service of its own.
     #[serde(skip_serializing_if = "Vec::is_empty")]
@@ -903,6 +921,10 @@ pub struct Push {
     /// How long one POST may take: 1–600 s (default 30).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub timeout_s: Option<u32>,
+    /// Records POSTed at once, each from its own partitions (1–32, default 4): order holds
+    /// within a partition, and a busy topic scales the service out.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_in_flight: Option<u32>,
 }
 
 impl Push {
@@ -1010,11 +1032,16 @@ pub struct Rollout {
     /// above the old one's (Flagger's request duration check); off unless set.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub p95_pct: Option<u32>,
+    /// `false`: the old instances stop (draining for `drain_s`) before the new ones start, so
+    /// two never run at once (Fly's `immediate`, Heroku's workers): a bot, a scheduler, a
+    /// consumer that must be alone. A web service's requests wait for the new one meanwhile.
+    #[serde(skip_serializing_if = "is_true")]
+    pub overlap: bool,
 }
 
 impl Default for Rollout {
     fn default() -> Self {
-        Rollout { steps: Vec::new(), step_s: 120, error_pct: 5, manual: false, slo_burn: None, p95_pct: None }
+        Rollout { steps: Vec::new(), step_s: 120, error_pct: 5, manual: false, slo_burn: None, p95_pct: None, overlap: true }
     }
 }
 
@@ -1108,6 +1135,7 @@ impl Default for Run {
             skew_protection: false,
             queue_s: None,
             latency_target_ms: None,
+            oidc_audiences: Vec::new(),
             schedules: Vec::new(),
             push: Vec::new(),
             sidecars: Vec::new(),
@@ -1182,6 +1210,9 @@ impl Run {
             }
             if p.timeout_s.is_some_and(|t| !(1..=600).contains(&t)) {
                 return bad("push's timeout_s is 1–600");
+            }
+            if p.max_in_flight.is_some_and(|n| !(1..=32).contains(&n)) {
+                return bad("push's max_in_flight is 1–32");
             }
             if self.push[..i].iter().any(|o| o.stream == p.stream && o.group == p.group && o.topic == p.topic) {
                 return bad("push has one rule per stream, topic and group");
@@ -1262,6 +1293,9 @@ impl Run {
         }
         if self.latency_target_ms.is_some_and(|t| !(50..=60_000).contains(&t)) {
             return bad("latency_target_ms is 50–60,000");
+        }
+        if self.oidc_audiences.len() > 5 || self.oidc_audiences.iter().enumerate().any(|(i, a)| a.is_empty() || a.len() > 256 || !a.bytes().all(|b| b.is_ascii_graphic()) || self.oidc_audiences[..i].contains(a)) {
+            return bad("oidc_audiences is up to five distinct audiences, 1–256 printable characters each (sts.amazonaws.com, a GCP pool provider, roll)");
         }
         let r = &self.rollout;
         if r.steps.len() > 5 || r.steps.iter().any(|s| !(1..=99).contains(s)) || r.steps.windows(2).any(|w| w[0] >= w[1]) {
@@ -1408,6 +1442,9 @@ impl Run {
         if self.kind != RunType::Web {
             // Only requests can be split: a worker or a cron run switches at once.
             self.rollout.steps.clear();
+        }
+        if !self.rollout.overlap && !self.rollout.steps.is_empty() {
+            return bad("rollout: without overlap nothing runs beside the new deployment, so it can't take a share of requests (no steps)");
         }
         match self.kind {
             RunType::Cron => {
@@ -2787,6 +2824,12 @@ pub struct Job {
     pub command: String,
     /// Containers it runs, each with `ROLL_TASK_INDEX` and `ROLL_TASK_COUNT` (Cloud Run Jobs').
     pub tasks: u32,
+    /// Tries after a task's failure (Cloud Run Jobs' `--max-retries`): 0–5, each in a fresh
+    /// container with `ROLL_TASK_ATTEMPT`.
+    #[serde(skip_serializing_if = "is_zero")]
+    pub retries: u32,
+    /// Tasks running at once (Cloud Run Jobs' `--parallelism`): 1–100.
+    pub parallelism: u32,
     pub status: RunStatus,
     pub exit_code: Option<i32>,
     pub started_at: i64,
@@ -2965,4 +3008,8 @@ mod fix_tests {
         assert!(f("the build failed (docker build exited with 1)", Some("npm ci can only install packages when your package.json and package-lock.json are in sync")).contains("package-lock.json"));
         assert_eq!(super::fix_for("a reason nobody wrote down", None), None);
     }
+}
+
+fn is_zero(n: &u32) -> bool {
+    *n == 0
 }

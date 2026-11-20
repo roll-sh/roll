@@ -31,6 +31,10 @@ const BATCH: usize = 100;
 const CONSUMER: &str = "roll-apps-";
 /// The longest wait between tries.
 const MAX_BACKOFF: Duration = Duration::from_secs(60);
+/// How long a loop works on what one read handed it: under the 60 s lease rolld reads with
+/// (`RollResources::read_group`), so a record refused past it is read again from the committed
+/// offset by a fresh consumer, never after a sibling took the partition and delivered past it.
+const HOLD: Duration = Duration::from_secs(45);
 /// What of an answer's body is read (and dropped) before the next.
 const ANSWER_BYTES: usize = 64 * 1024;
 
@@ -41,8 +45,51 @@ pub struct Pushers {
     running: parking_lot::Mutex<HashMap<String, (String, tokio::task::AbortHandle)>>,
     /// Rules said to be off (said once, until they're on again).
     off: parking_lot::Mutex<std::collections::HashSet<String>>,
-    /// Rule key → the consumer its loop reads as, left when the next loop starts.
+    /// Loop key → the consumer it reads as, left when the next loop starts.
     consumers: parking_lot::Mutex<HashMap<String, String>>,
+    /// Rule key → how its deliveries have gone since this node began them.
+    stats: parking_lot::Mutex<HashMap<String, Stats>>,
+}
+
+/// How a rule's deliveries have gone on this node (`GET …/environments/{env}/push`).
+#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize)]
+pub struct Stats {
+    /// Records its app took (a 2xx).
+    pub delivered: u64,
+    /// Records sent to the dead-letter topic.
+    pub dead_lettered: u64,
+    /// When its app last took one (unix ms).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_delivered_at: Option<i64>,
+    /// Since when a record has been refused, while one is (unix ms), and why.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub failing_since: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_error: Option<String>,
+}
+
+/// One rule as it stands: its setting, how far its group is behind, and how its deliveries go.
+#[derive(Clone, Debug, serde::Serialize)]
+pub struct PushState {
+    #[serde(flatten)]
+    pub rule: Push,
+    /// Records its group hasn't committed, every partition.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub lag: Option<u64>,
+    /// Why nothing is delivered (a stream not on the project, the environment paused or not
+    /// deployed).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub off: Option<String>,
+    #[serde(flatten)]
+    pub stats: Stats,
+}
+
+/// Loops a rule runs at once by default (`max_in_flight`).
+pub const IN_FLIGHT: u32 = 4;
+
+/// A rule's key: the service, environment, stream, topic and group.
+fn rule_key(service: &str, env: &str, rule: &Push) -> String {
+    format!("{service}/{env}/{}/{}/{}", rule.stream, rule.topic, rule.group)
 }
 
 impl Drop for Pushers {
@@ -147,7 +194,7 @@ impl Apps {
                     None => continue,
                 };
                 for rule in run.push.iter().filter(|p| p.environment() == e.name) {
-                    let key = format!("{}/{}/{}/{}/{}", svc.id, e.name, rule.stream, rule.topic, rule.group);
+                    let key = rule_key(&svc.id, &e.name, rule);
                     let log = || self.logs.sink(format!("env:{}/{}", svc.id, e.name), Stream::System);
                     if let Err(why) = self.stream_followable(&svc.project, &rule.stream) {
                         if self.pushers.off.lock().insert(key.clone()) {
@@ -162,7 +209,12 @@ impl Apps {
                         use sha2::Digest;
                         hex::encode(sha2::Sha256::digest(format!("{}|{host}|{}", serde_json::to_string(rule).unwrap_or_default(), secret.as_deref().unwrap_or_default())))
                     };
-                    wanted.insert(key, Wanted { digest, rule: rule.clone(), service: svc.id.clone(), env: e.name.clone(), host, secret: secret.clone() });
+                    // A consumer a loop: the broker gives each a fair share of the partitions, so a
+                    // record that's refused holds only its own partition's.
+                    for i in 0..rule.max_in_flight.unwrap_or(IN_FLIGHT) {
+                        let w = Wanted { digest: digest.clone(), rule: rule.clone(), service: svc.id.clone(), env: e.name.clone(), host: host.clone(), secret: secret.clone() };
+                        wanted.insert(format!("{key}#{i}"), w);
+                    }
                 }
             }
         }
@@ -191,14 +243,20 @@ impl Apps {
         let resources = self.deps.resources.clone();
         let timeout = Duration::from_secs(rule.timeout_s.unwrap_or(30) as u64);
         let mut read_failures = 0u32;
+        let stats = rule_key(&service, &env, &rule);
+        let note = |f: &dyn Fn(&mut Stats)| f(self.pushers.stats.lock().entry(stats.clone()).or_default());
         // A consumer of its own, the last loop's left (its partitions free at once, unless a read
         // of it is still out: then they wait out its lease).
         let mut consumer = self.new_consumer(&key, &rule).await;
-        loop {
+        // A record's tries so far, kept when its batch is read again (its dead letter still
+        // comes after `max_attempts`).
+        let mut tries: HashMap<(i32, i64), u32> = HashMap::new();
+        'read: loop {
             // Another node took the service: it delivers from here (this loop stops at its pass).
             if !self.owns(&service) {
                 return;
             }
+            let read_at = std::time::Instant::now();
             let records = match resources.read_group(&rule.stream, &rule.topic, &rule.group, &consumer, WAIT_MS, BATCH).await {
                 Ok(r) => {
                     read_failures = 0;
@@ -216,7 +274,7 @@ impl Apps {
                 }
             };
             for r in records {
-                let mut attempt = 1;
+                let mut attempt = tries.remove(&(r.partition, r.offset)).unwrap_or(1);
                 loop {
                     if !self.owns(&service) {
                         return;
@@ -237,8 +295,20 @@ impl Apps {
                     };
                     let Some(why) = why else {
                         self.commit_push(&rule, &consumer, &r, &log).await;
+                        let now = code_sql::now_ms();
+                        note(&|s| {
+                            s.delivered += 1;
+                            s.last_delivered_at = Some(now);
+                            s.failing_since = None;
+                            s.last_error = None;
+                        });
                         break;
                     };
+                    let now = code_sql::now_ms();
+                    note(&|s| {
+                        s.failing_since.get_or_insert(now);
+                        s.last_error = Some(format!("offset {} of partition {}: {why}", r.offset, r.partition));
+                    });
                     if let Some(dl) = rule.dead_letter.as_deref().filter(|_| attempt >= rule.max_attempts.unwrap_or(5)) {
                         let mut dead = r.clone();
                         dead.headers.push(("x-roll-error".into(), format!("{} {why} after {attempt} tries", rule.path).into_bytes()));
@@ -247,12 +317,24 @@ impl Apps {
                             Ok(()) => {
                                 log.line(format!("push {}: offset {} of partition {} {why} {attempt} times; sent to {dl}", rule.topic, r.offset, r.partition));
                                 self.commit_push(&rule, &consumer, &r, &log).await;
+                                note(&|s| {
+                                    s.dead_lettered += 1;
+                                    s.failing_since = None;
+                                });
                                 break;
                             }
                             Err(e) => log.line(format!("push {}: sending offset {} to {dl}: {e:#}", rule.topic, r.offset)),
                         }
                     }
                     let wait = backoff(attempt);
+                    // Its lease would lapse before the next try: let the batch go and read it again
+                    // (this record first) as a fresh consumer.
+                    if read_at.elapsed() + wait >= HOLD {
+                        tries.insert((r.partition, r.offset), attempt + 1);
+                        tokio::time::sleep(wait).await;
+                        consumer = self.new_consumer(&key, &rule).await;
+                        continue 'read;
+                    }
                     // Said on the first failure and then each minute's worth, not every try.
                     if attempt == 1 || wait == MAX_BACKOFF {
                         log.line(format!("push {}: {} {why} for offset {} of partition {}; trying again in {} s", rule.topic, rule.path, r.offset, r.partition, wait.as_secs()));
@@ -262,6 +344,32 @@ impl Apps {
                 }
             }
         }
+    }
+
+    /// `GET …/environments/{env}/push`: the environment's rules (`run.push`) as they stand, read on
+    /// the service's owner (where its loops run): each group's lag and how deliveries have gone
+    /// since that node began them.
+    pub async fn push_states(self: &Arc<Self>, service: &str, env: &str) -> crate::Result<Vec<PushState>> {
+        let e = self.environment(service, env).await?;
+        let sid = service.to_string();
+        let svc = self.db(move |s| s.service(&sid)).await?;
+        let run = self.lives.lock().get(&crate::env_key(service, env)).and_then(|l| l.template()).map(|t| t.run.clone()).unwrap_or(svc.run.clone());
+        let mut out = Vec::new();
+        for rule in run.push.into_iter().filter(|p| p.environment() == env) {
+            let off = if let Err(why) = self.stream_followable(&svc.project, &rule.stream) {
+                Some(why)
+            } else if e.summary.active.is_none() {
+                Some("nothing is deployed here yet".into())
+            } else if e.paused {
+                Some("the environment is paused".into())
+            } else {
+                None
+            };
+            let lag = if off.is_none() { self.deps.resources.backlog(&rule.stream, &rule.group).await.ok() } else { None };
+            let stats = self.pushers.stats.lock().get(&rule_key(service, env, &rule)).cloned().unwrap_or_default();
+            out.push(PushState { rule, lag, off, stats });
+        }
+        Ok(out)
     }
 
     /// A new consumer for `key`'s loop; the one before it leaves the group.
@@ -302,7 +410,7 @@ mod tests {
 
     #[test]
     fn a_record_is_a_cloudevent_with_its_value() {
-        let rule = Push { stream: "st_aaaaaaaaaaaa".into(), topic: "orders".into(), group: "g".into(), path: "/events".into(), environment: None, dead_letter: None, max_attempts: None, timeout_s: None };
+        let rule = Push { stream: "st_aaaaaaaaaaaa".into(), topic: "orders".into(), group: "g".into(), path: "/events".into(), environment: None, dead_letter: None, max_attempts: None, timeout_s: None, max_in_flight: None };
         let headers = vec![("content-type".into(), b"application/json".to_vec()), ("trace id".into(), b"x".to_vec()), ("tenant".into(), b"acme".to_vec()), ("id".into(), b"forged".to_vec())];
         let r = StreamRecord { partition: 2, offset: 41, timestamp: 7, key: Some(b"k1".to_vec()), value: Some(b"{\"id\":1}".to_vec()), headers };
         let req = request(&rule, "web.roll.test", &r, 3, Some("s3cret")).unwrap();

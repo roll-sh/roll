@@ -63,6 +63,21 @@ export interface Push {
   dead_letter?: string;
   max_attempts?: number;
   timeout_s?: number;
+  /** Records POSTed at once, each from its own partitions (1–32, default 4). */
+  max_in_flight?: number;
+}
+
+/** A push rule as it stands (`…/environments/{env}/push`), on the service's owner since it began delivering. */
+export interface PushState extends Push {
+  /** Records its group hasn't committed, every partition. */
+  lag?: number;
+  /** Why nothing is delivered. */
+  off?: string;
+  delivered: number;
+  dead_lettered: number;
+  last_delivered_at?: number;
+  failing_since?: number;
+  last_error?: string;
 }
 
 export interface Run {
@@ -96,6 +111,8 @@ export interface Run {
   cpu_target?: number;
   /** A web service also scaled on its answers' p95 (50–60,000 ms). */
   latency_target_ms?: number;
+  /** Audiences its instances may ask roll's OIDC issuer for, at ROLL_OIDC_URL (`?aud=`, the first by default). */
+  oidc_audiences?: string[];
   /** And on memory: another while they average over this percent of their memory for a minute (10–100). */
   memory_target?: number;
   suspend_after_s: number;
@@ -113,7 +130,7 @@ export interface Run {
   log_metrics?: { name: string; pattern: string }[];
   /** A gradual rollout: the new deployment takes each percent of `steps` for `step_s`, rolled
    *  back by a 5xx share of `error_pct` or more (worse than the old one); no steps: at once. */
-  rollout?: { steps: number[]; step_s: number; error_pct: number; /** Each step waits for a person once it passes. */ manual?: boolean; /** With run.slo: a step fails past this burn rate (default 14.4). */ slo_burn?: number; /** A step fails when the new deployment's p95 is this many percent above the old one's. */ p95_pct?: number };
+  rollout?: { steps: number[]; step_s: number; error_pct: number; /** Each step waits for a person once it passes. */ manual?: boolean; /** With run.slo: a step fails past this burn rate (default 14.4). */ slo_burn?: number; /** A step fails when the new deployment's p95 is this many percent above the old one's. */ p95_pct?: number; /** false: the old instances stop before the new ones start (two never run at once). */ overlap?: boolean };
   /** The app speaks HTTP/2 without TLS (a gRPC server). */
   h2c?: boolean;
   /** false: no public URL, only the project's private network (absent: public). */
@@ -1303,6 +1320,10 @@ export interface Job {
   command: string;
   /** Containers it ran, each with ROLL_TASK_INDEX and ROLL_TASK_COUNT. */
   tasks?: number;
+  /** Tries after a task's failure (0–5), each with ROLL_TASK_ATTEMPT. */
+  retries?: number;
+  /** Tasks running at once. */
+  parallelism?: number;
   status: RunStatus;
   exit_code: number | null;
   started_at: number;
@@ -1418,6 +1439,7 @@ export const appsApi = {
   rollbackPrevious: (id: string, e: string) => call<Deployment>("POST", `${env(id, e)}/rollback`),
   /** The live image again with the current variables and settings: no build, same revision. */
   redeploy: (id: string, e: string, body: { message?: string } = {}) => call<Deployment>("POST", `${env(id, e)}/redeploy`, body),
+  pushStates: (id: string, e: string) => call<PushState[]>("GET", `${env(id, e)}/push`),
   /** A new `ROLL_CONFIG_URL` token (a leaked address): the old one reads until a deploy made after it is live. */
   rotateConfig: (id: string, e: string) => call<Environment>("POST", `${env(id, e)}/config/rotate`),
   /** `expect`: the deployment of `from` that was looked at; a 409 when `from` runs another now. */
@@ -1519,7 +1541,7 @@ export const appsApi = {
   run: (id: string, e: string, r: string) => call<CronRun>("GET", `${env(id, e)}/runs/${encodeURIComponent(r)}`),
   cancelRun: (id: string, e: string, r: string) => call<CronRun>("POST", `${env(id, e)}/runs/${encodeURIComponent(r)}/cancel`),
   jobs: (id: string, e: string) => call<Job[]>("GET", `${env(id, e)}/jobs`),
-  startJob: (id: string, e: string, body: { command: string; timeout_s?: number; tasks?: number }) => call<Job>("POST", `${env(id, e)}/jobs`, body),
+  startJob: (id: string, e: string, body: { command: string; timeout_s?: number; tasks?: number; retries?: number; parallelism?: number }) => call<Job>("POST", `${env(id, e)}/jobs`, body),
   job: (id: string, e: string, j: string) => call<Job>("GET", `${env(id, e)}/jobs/${encodeURIComponent(j)}`),
   cancelJob: (id: string, e: string, j: string) => call<Job>("POST", `${env(id, e)}/jobs/${encodeURIComponent(j)}/cancel`),
 
@@ -1570,15 +1592,42 @@ export interface AccessLine {
   by?: "allow_list" | "firewall" | "rate_limit" | "private" | "maintenance" | "wake" | "capped" | "paused" | "not_deployed" | "moving" | "unavailable";
 }
 
-/** Follows a service's changes (`…/changes`): `onChange` for each tick, `onOpen` as the stream comes and goes. */
-export function followChanges(service: string, opts: { onChange: () => void; onOpen?: (open: boolean) => void }): () => void {
-  return streamSse(`${ROLL_API}/v1/apps/services/${encodeURIComponent(service)}/changes`, {
-    headers: operatorHeaders,
-    onOpen: opts.onOpen,
-    onEvent: (e) => {
-      if (e.event === "changed") opts.onChange();
-    },
-  });
+type ChangeFollower = { onChange: () => void; onOpen?: (open: boolean) => void };
+
+/** One `…/changes` stream a service, shared by everything on the page that follows it. */
+const changeStreams = new Map<string, { followers: Set<ChangeFollower>; open: boolean; stop: () => void }>();
+
+/** Follows a service's changes (`…/changes`): `onChange` for each tick, `onOpen` as the stream comes and goes. Followers of one service share
+ *  one stream, which closes when the last stops. */
+export function followChanges(service: string, opts: ChangeFollower): () => void {
+  let s = changeStreams.get(service);
+  if (!s) {
+    const followers = new Set<ChangeFollower>();
+    const shared = { followers, open: false, stop: () => {} };
+    shared.stop = streamSse(`${ROLL_API}/v1/apps/services/${encodeURIComponent(service)}/changes`, {
+      headers: operatorHeaders,
+      onOpen: (open) => {
+        shared.open = open;
+        for (const f of [...followers]) f.onOpen?.(open);
+      },
+      onEvent: (e) => {
+        if (e.event === "changed") for (const f of [...followers]) f.onChange();
+      },
+    });
+    changeStreams.set(service, shared);
+    s = shared;
+  }
+  const follower = { ...opts };
+  s.followers.add(follower);
+  if (s.open) follower.onOpen?.(true);
+  const mine = s;
+  return () => {
+    mine.followers.delete(follower);
+    if (mine.followers.size === 0 && changeStreams.get(service) === mine) {
+      changeStreams.delete(service);
+      mine.stop();
+    }
+  };
 }
 
 export function followLog(

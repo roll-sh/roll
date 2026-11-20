@@ -2,7 +2,7 @@ import { BellRing, Send, Trash2 } from "lucide-react";
 import { useCallback, useEffect, useState } from "react";
 import { appsApi, type NotifyDelivery, type NotifyEvent, type NotifyTarget } from "@/lib/apps-api";
 import { btn, CopyButton, input, Panel, primary, useCopy } from "../ui";
-import { since, type Runner } from "./shared";
+import { since, SureButton, type Runner } from "./shared";
 
 const EVENTS: { value: NotifyEvent; label: string }[] = [
   { value: "deploy.failed", label: "Deploy failed" },
@@ -68,7 +68,19 @@ export function NotificationsPanel({ project, projectName, runner }: { project: 
   // The target whose events are being changed (in place: its URL and secret stay).
   const [editing, setEditing] = useState<string | null>(null);
   const { copied, copy } = useCopy();
-  const load = useCallback(() => appsApi.notifyTargets(project).then(setTargets, () => setTargets([])), [project]);
+  // A read that failed says so (an empty list would read as "nothing set").
+  const [failed, setFailed] = useState<string | null>(null);
+  const load = useCallback(
+    () =>
+      appsApi.notifyTargets(project).then(
+        (t) => {
+          setTargets(t);
+          setFailed(null);
+        },
+        (e: unknown) => setFailed(e instanceof Error ? e.message : String(e)),
+      ),
+    [project],
+  );
   useEffect(() => {
     void load();
   }, [load]);
@@ -88,6 +100,7 @@ export function NotificationsPanel({ project, projectName, runner }: { project: 
 
   return (
     <Panel title={`Notifications for ${projectName}`} aside={<span className="text-[12px] text-muted">the project's services</span>}>
+      {failed && <p className="border-b border-line px-5 py-3 text-[12.5px] text-danger">Its targets couldn't be read: {failed}</p>}
       {targets && targets.length > 0 && (
         <ul className="divide-y divide-line border-b border-line">
           {targets.map((t) => (
@@ -112,9 +125,9 @@ export function NotificationsPanel({ project, projectName, runner }: { project: 
                   <button type="button" className={btn} onClick={() => setOpen(open === t.id ? null : t.id)}>
                     Deliveries
                   </button>
-                  <button type="button" className={btn} aria-label="Remove" disabled={runner.busy !== null} onClick={() => void runner.run("remove", () => appsApi.removeNotifyTarget(project, t.id)).then(load)}>
+                  <SureButton className={btn} label="Remove" sure="Sure? Remove" disabled={runner.busy !== null} onSure={() => void runner.run("remove", () => appsApi.removeNotifyTarget(project, t.id)).then(load)}>
                     <Trash2 className="size-3.5" />
-                  </button>
+                  </SureButton>
                 </span>
               </div>
               {editing === t.id && (

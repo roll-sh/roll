@@ -144,6 +144,36 @@ pub trait SecretSource: Send + Sync {
     async fn ensure(&self, _project: &str, _env: &str) -> anyhow::Result<()> {
         Ok(())
     }
+    /// A token of roll's OIDC issuer for one instance of `service` in `env` (`sub =
+    /// roll-apps:<project>:<service>:<env>`), for `aud`, living `ttl` (an hour at most): what
+    /// clouds' federation and roll secrets' workload logins trust (docs/secrets.md, "roll's tokens
+    /// for other products"). An error when the project doesn't stand for the service. None: no
+    /// issuer here.
+    async fn issue(&self, _project: &str, _service: &str, _env: &str, _aud: &str, _ttl: std::time::Duration) -> anyhow::Result<Option<String>> {
+        Ok(None)
+    }
+    /// Bind `reference` (a `roll://` of another environment) to `who`, who writes it into
+    /// `service`'s variables: refused unless they may reveal it there now. What to keep beside it
+    /// (roll secrets' maker: who chose it, never a credential).
+    async fn bind_ref(&self, _who: Asker<'_>, _project: &str, _service: &str, _reference: &str) -> anyhow::Result<String> {
+        anyhow::bail!("roll secrets isn't on this node")
+    }
+    /// [`SecretSource::bind_ref`] for a reference the service's runtime reads in `runtime_env` (a Git
+    /// login's token): a sensitive key there is allowed. The caller's `deploy` on the service is
+    /// the gate's (roll-access: a Git login naming a secret is deploy).
+    async fn bind_ref_runtime(&self, _who: Asker<'_>, _project: &str, _service: &str, _reference: &str, _runtime_env: &str) -> anyhow::Result<String> {
+        anyhow::bail!("roll secrets isn't on this node")
+    }
+    /// The digest of the folder a bound reference reads, as `maker` may now (no value, not
+    /// audited): what marks the environment as needing a deploy when it changes.
+    async fn digest_as(&self, _project: &str, _env: &str, _service: &str, _reference: &str, _maker: &str) -> anyhow::Result<String> {
+        anyhow::bail!("roll secrets isn't on this node")
+    }
+    /// `reference`'s value for `service` deployed in `env`, read as `maker` may now (each read
+    /// checks again that they can sign in, reach the project and reveal the folder).
+    async fn resolve_as(&self, _project: &str, _env: &str, _service: &str, _reference: &str, _maker: &str) -> anyhow::Result<String> {
+        anyhow::bail!("roll secrets isn't on this node")
+    }
 }
 
 /// What's been said about a preview's page (roll previews' notes: docs/previews.md, "Feedback on

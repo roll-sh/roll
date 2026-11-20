@@ -88,6 +88,24 @@ CREATE TABLE IF NOT EXISTS trace_ingest (
     sealed TEXT NOT NULL,
     PRIMARY KEY (service, env)
 ) WITHOUT ROWID;
+-- Who chose a variable's roll:// reference into another environment (roll secrets' maker): each
+-- deploy reads it as them.
+CREATE TABLE IF NOT EXISTS variable_makers (
+    service TEXT NOT NULL,
+    env TEXT NOT NULL,
+    name TEXT NOT NULL,
+    maker TEXT NOT NULL,
+    PRIMARY KEY (service, env, name)
+) WITHOUT ROWID;
+-- Where an environment's instances read roll's OIDC tokens: its URL's token, sealed.
+CREATE TABLE IF NOT EXISTS oidc_access (
+    service TEXT NOT NULL,
+    env TEXT NOT NULL,
+    sealed TEXT NOT NULL,
+    -- Its SHA-256, to find it by a leaked copy (`Apps::revoke_leaked_oidc`).
+    hash TEXT NOT NULL,
+    PRIMARY KEY (service, env)
+) WITHOUT ROWID;
 CREATE TABLE IF NOT EXISTS runtime_config (
     service TEXT NOT NULL,
     env TEXT NOT NULL,
@@ -821,6 +839,8 @@ impl Store {
         db.add_column("domains", "tls", "TEXT NOT NULL DEFAULT 'pending'")?;
         // A Git login's password read from one of the project's secrets, by name (none: sealed here).
         db.add_column("git_auth", "secret", "TEXT")?;
+        // A `roll://` secret's maker (roll secrets' runtime binding: who chose it).
+        db.add_column("git_auth", "secret_maker", "TEXT")?;
         db.add_column("domains", "tls_error", "TEXT")?;
         db.add_column("domains", "verified_at", "INTEGER")?;
         db.add_column("env_access", "bypass_hash", "TEXT")?;
@@ -837,6 +857,13 @@ impl Store {
         db.add_column("deployments", "build_key", "TEXT")?;
         // A failed deployment's explanation from a model (`explain::Explanation` as JSON).
         db.add_column("deployments", "explanation", "TEXT")?;
+        // An ECR login's kind and region (`basic` logins have neither).
+        db.add_column("registry_auth", "kind", "TEXT")?;
+        db.add_column("registry_auth", "region", "TEXT")?;
+        // Instance addresses' tokens' SHA-256 (apps' `rlr_` secrets), to find one by a leaked
+        // copy (`Apps::revoke_leaked_address`); older `rlc_`/`rlx_` tokens have none.
+        db.add_column("runtime_config", "hash", "TEXT")?;
+        db.add_column("trace_ingest", "hash", "TEXT")?;
         // Runtime config's token before its last rotation (sealed), and when that was.
         db.add_column("runtime_config", "previous", "TEXT")?;
         db.add_column("runtime_config", "rotated_at", "INTEGER")?;
@@ -865,6 +892,8 @@ impl Store {
         db.add_column("environments", "allow_ips", "TEXT")?;
         db.add_column("environments", "rate_limit", "TEXT")?;
         db.add_column("jobs", "tasks", "INTEGER NOT NULL DEFAULT 1")?;
+        db.add_column("jobs", "retries", "INTEGER NOT NULL DEFAULT 0")?;
+        db.add_column("jobs", "parallelism", "INTEGER NOT NULL DEFAULT 10")?;
         db.add_column("environments", "tcp_port", "INTEGER")?;
         db.add_column("environments", "firewall", "TEXT")?;
         db.add_column("environments", "headers", "TEXT")?;
@@ -1005,7 +1034,7 @@ impl Store {
             c.execute("DELETE FROM deploy_steps WHERE deployment IN (SELECT id FROM deployments WHERE service = ?)", [id])?;
             c.execute("DELETE FROM state WHERE key LIKE ?", [format!("%:{id}/%")])?;
             c.execute("DELETE FROM status_days WHERE key LIKE ?", [format!("%:{id}/%")])?;
-            for t in ["environments", "deployments", "deploy_keys", "fences", "env_access", "registry_auth", "git_auth", "git_github", "github_events", "trace_ingest", "runtime_config", "visit_tickets", "visit_sessions", "variable_files", "error_groups", "variables", "links", "domains", "preview_hosts", "runs", "jobs", "metrics", "usage", "form_submissions", "deploy_scans"] {
+            for t in ["environments", "deployments", "deploy_keys", "fences", "env_access", "registry_auth", "git_auth", "git_github", "github_events", "trace_ingest", "runtime_config", "oidc_access", "variable_makers", "visit_tickets", "visit_sessions", "variable_files", "error_groups", "variables", "links", "domains", "preview_hosts", "runs", "jobs", "metrics", "usage", "form_submissions", "deploy_scans"] {
                 c.execute(&format!("DELETE FROM {t} WHERE service = ?"), [id])?;
             }
             match c.execute("DELETE FROM services WHERE id = ?", [id])? {
@@ -1121,7 +1150,7 @@ impl Store {
             if n == 0 {
                 return Err(Error::NotFound(format!("service {service} has no environment {env}")));
             }
-            for t in ["variables", "variable_files", "error_groups", "domains", "preview_hosts", "runs", "jobs", "metrics", "deploy_keys", "env_access", "trace_ingest", "runtime_config", "visit_tickets", "visit_sessions", "form_submissions"] {
+            for t in ["variables", "variable_files", "error_groups", "domains", "preview_hosts", "runs", "jobs", "metrics", "deploy_keys", "env_access", "trace_ingest", "runtime_config", "oidc_access", "variable_makers", "visit_tickets", "visit_sessions", "form_submissions"] {
                 c.execute(&format!("DELETE FROM {t} WHERE service = ? AND env = ?"), [service, env])?;
             }
             // Its schedules', challenge's and base images' state goes with it.
@@ -1923,8 +1952,20 @@ impl Store {
     /// Set, then unset, then seal (`seal`: names set here or kept). A sealed variable a new
     /// value replaces stays sealed: nothing unseals one.
     pub fn change_variables(&self, service: &str, env: &str, set: &BTreeMap<String, String>, unset: &[String], seal: &BTreeSet<String>) -> Result<()> {
+        self.change_variables_made(service, env, set, unset, seal, &BTreeMap::new())
+    }
+
+    /// [`Store::change_variables`], with the makers of `set`'s references into other environments
+    /// (a variable set without one has none from now on).
+    pub fn change_variables_made(&self, service: &str, env: &str, set: &BTreeMap<String, String>, unset: &[String], seal: &BTreeSet<String>, makers: &BTreeMap<String, String>) -> Result<()> {
         let sealed: Vec<(String, String)> = set.iter().map(|(k, v)| (k.clone(), self.sealer.seal(&Self::aad(service, env, k), v))).collect();
         self.db.write(|c| {
+            for n in unset.iter().chain(set.keys()) {
+                c.execute("DELETE FROM variable_makers WHERE service = ? AND env = ? AND name = ?", [service, env, n])?;
+            }
+            for (n, m) in makers {
+                c.execute("INSERT INTO variable_makers (service, env, name, maker) VALUES (?, ?, ?, ?)", [service, env, n, m])?;
+            }
             for n in unset {
                 c.execute("DELETE FROM variables WHERE service = ? AND env = ? AND name = ?", [service, env, n])?;
             }
@@ -1939,6 +1980,11 @@ impl Store {
             }
             Ok(())
         })
+    }
+
+    /// Who chose each of an environment's references into another environment, by variable.
+    pub fn variable_makers(&self, service: &str, env: &str) -> Result<BTreeMap<String, String>> {
+        Ok(self.db.query("SELECT name, maker FROM variable_makers WHERE service = ? AND env = ?", [service, env], |r| Ok((r.get(0)?, r.get(1)?)))?.into_iter().collect())
     }
 
     // ── links ──
@@ -2289,11 +2335,13 @@ impl Store {
 
     // ── private registries ──
 
-    pub fn set_registry(&self, service: &str, server: &str, username: &str, password: &str) -> Result<()> {
+    /// A login (`region`: an ECR access key's, `username` its id and `password` its secret).
+    pub fn set_registry(&self, service: &str, server: &str, username: &str, password: &str, region: Option<&str>) -> Result<()> {
         let sealed = self.sealer.seal(&format!("registry:{service}"), password);
+        let kind = region.map(|_| "ecr");
         self.db.execute(
-            "INSERT INTO registry_auth (service, server, username, sealed) VALUES (?, ?, ?, ?) ON CONFLICT (service) DO UPDATE SET server = excluded.server, username = excluded.username, sealed = excluded.sealed",
-            params![service, server, username, sealed],
+            "INSERT INTO registry_auth (service, server, username, sealed, kind, region) VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT (service) DO UPDATE SET server = excluded.server, username = excluded.username, sealed = excluded.sealed, kind = excluded.kind, region = excluded.region",
+            params![service, server, username, sealed, kind, region],
         )?;
         Ok(())
     }
@@ -2305,25 +2353,33 @@ impl Store {
 
     /// The login, without the password.
     pub fn registry(&self, service: &str) -> Result<Option<Registry>> {
-        Ok(self.db.query_row("SELECT server, username FROM registry_auth WHERE service = ?", [service], |r| Ok(Registry { server: r.get(0)?, username: r.get(1)? })).optional()?)
+        Ok(self.db.query_row("SELECT server, username, kind, region FROM registry_auth WHERE service = ?", [service], |r| Ok(Registry { server: r.get(0)?, username: r.get(1)?, kind: r.get(2)?, region: r.get(3)? })).optional()?)
     }
 
     /// The login with its password opened, for a pull.
     pub fn registry_login(&self, service: &str) -> Result<Option<(Registry, String)>> {
-        let row: Option<(String, String, String)> = self.db.query_row("SELECT server, username, sealed FROM registry_auth WHERE service = ?", [service], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?))).optional()?;
-        row.map(|(server, username, sealed)| Ok((Registry { server, username }, self.sealer.open(&format!("registry:{service}"), &sealed)?))).transpose()
+        type Row = (String, String, String, Option<String>, Option<String>);
+        let row: Option<Row> = self.db.query_row("SELECT server, username, sealed, kind, region FROM registry_auth WHERE service = ?", [service], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?))).optional()?;
+        row.map(|(server, username, sealed, kind, region)| Ok((Registry { server, username, kind, region }, self.sealer.open(&format!("registry:{service}"), &sealed)?))).transpose()
     }
 
     // ── private Git repositories ──
 
     /// A login: its password sealed here, or read from the project's secret `secret` at each use.
-    pub fn set_git_login(&self, service: &str, host: &str, username: &str, password: &str, secret: Option<&str>) -> Result<()> {
+    /// A login: its password sealed, or a project secret (`secret`: a key's name in production, or
+    /// a `roll://` reference with its `maker`).
+    pub fn set_git_login(&self, service: &str, host: &str, username: &str, password: &str, secret: Option<&str>, maker: Option<&str>) -> Result<()> {
         let sealed = self.sealer.seal(&format!("git:{service}"), password);
         self.db.execute(
-            "INSERT INTO git_auth (service, host, username, sealed, secret) VALUES (?, ?, ?, ?, ?) ON CONFLICT (service) DO UPDATE SET host = excluded.host, username = excluded.username, sealed = excluded.sealed, secret = excluded.secret",
-            params![service, host, username, sealed, secret],
+            "INSERT INTO git_auth (service, host, username, sealed, secret, secret_maker) VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT (service) DO UPDATE SET host = excluded.host, username = excluded.username, sealed = excluded.sealed, secret = excluded.secret, secret_maker = excluded.secret_maker",
+            params![service, host, username, sealed, secret, maker],
         )?;
         Ok(())
+    }
+
+    /// A Git login's `roll://` secret's maker.
+    pub fn git_login_maker(&self, service: &str) -> Result<Option<String>> {
+        Ok(self.db.query_row("SELECT secret_maker FROM git_auth WHERE service = ?", [service], |r| r.get::<_, Option<String>>(0)).optional()?.flatten())
     }
 
     pub fn delete_git_login(&self, service: &str) -> Result<()> {
@@ -2346,9 +2402,27 @@ impl Store {
 
     /// The environment's trace token, made once (`traces: true`).
     pub fn ensure_trace_token(&self, service: &str, env: &str) -> Result<()> {
-        let sealed = self.sealer.seal(&format!("trace:{service}:{env}"), &format!("rlx_{}", random(32)));
-        self.db.execute("INSERT INTO trace_ingest (service, env, sealed) VALUES (?, ?, ?) ON CONFLICT (service, env) DO NOTHING", params![service, env, sealed])?;
+        let token = roll_auth::credentials::new_secret("rlr_");
+        let (sealed, hash) = (self.sealer.seal(&format!("trace:{service}:{env}"), &token), crate::public::token_hash(&token));
+        self.db.execute("INSERT INTO trace_ingest (service, env, sealed, hash) VALUES (?, ?, ?, ?) ON CONFLICT (service, env) DO NOTHING", params![service, env, sealed, hash])?;
         Ok(())
+    }
+
+    /// A new trace token for the environment whose token hashes to `hash` (a leaked one): the old
+    /// one takes nothing from now on. Which environment, if any.
+    pub fn replace_trace_token_by_hash(&self, hash: &str) -> Result<Option<(String, String)>> {
+        let row: Option<(String, String)> = self.db.query_row("SELECT service, env FROM trace_ingest WHERE hash = ?", [hash], |r| Ok((r.get(0)?, r.get(1)?))).optional()?;
+        if let Some((s, e)) = &row {
+            let token = roll_auth::credentials::new_secret("rlr_");
+            let (sealed, h) = (self.sealer.seal(&format!("trace:{s}:{e}"), &token), crate::public::token_hash(&token));
+            self.db.execute("UPDATE trace_ingest SET sealed = ?, hash = ? WHERE service = ? AND env = ?", params![sealed, h, s, e])?;
+        }
+        Ok(row)
+    }
+
+    /// The environment whose runtime config token hashes to `hash`, if any.
+    pub fn runtime_config_by_hash(&self, hash: &str) -> Result<Option<(String, String)>> {
+        Ok(self.db.query_row("SELECT service, env FROM runtime_config WHERE hash = ?", [hash], |r| Ok((r.get(0)?, r.get(1)?))).optional()?)
     }
 
     /// An error seen at `at` in `deployment`: new to the environment, back after it was
@@ -2443,11 +2517,12 @@ impl Store {
     /// and its token made once and kept, so running instances keep reading the same address
     /// (it goes only with the environment).
     pub fn set_runtime_config(&self, service: &str, env: &str, config: Option<&serde_json::Value>) -> Result<Option<i64>> {
-        let (j, sealed) = (config.map(|c| c.to_string()), self.sealer.seal(&format!("config:{service}:{env}"), &format!("rlc_{}", random(32))));
+        let token = roll_auth::credentials::new_secret("rlr_");
+        let (j, sealed, hash) = (config.map(|c| c.to_string()), self.sealer.seal(&format!("config:{service}:{env}"), &token), crate::public::token_hash(&token));
         self.db.write(|c| {
             c.execute(
-                "INSERT INTO runtime_config (service, env, config, version, sealed) VALUES (?, ?, ?, 1, ?) ON CONFLICT (service, env) DO UPDATE SET config = excluded.config, version = runtime_config.version + 1",
-                params![service, env, j, sealed],
+                "INSERT INTO runtime_config (service, env, config, version, sealed, hash) VALUES (?, ?, ?, 1, ?, ?) ON CONFLICT (service, env) DO UPDATE SET config = excluded.config, version = runtime_config.version + 1",
+                params![service, env, j, sealed, hash],
             )?;
             Ok::<_, Error>(c.query_row("SELECT version FROM runtime_config WHERE service = ? AND env = ?", params![service, env], |r| r.get(0)).optional()?)
         })
@@ -2471,12 +2546,42 @@ impl Store {
         sealed.map(|s| self.sealer.open(&format!("config:{service}:{env}"), &s)).transpose()
     }
 
+    /// The token of the URL an environment's instances read OIDC tokens from, made once and
+    /// kept (it goes only with the environment).
+    pub fn oidc_token(&self, service: &str, env: &str) -> Result<String> {
+        // Apps' own prefix, checksummed (`roll_auth::credentials::SECRET_PREFIXES`): scanners
+        // know it, and a leaked one comes back to `Apps::revoke_leaked_oidc`.
+        let token = roll_auth::credentials::new_secret("rlr_");
+        let sealed = self.sealer.seal(&format!("oidc:{service}:{env}"), &token);
+        let hash = crate::public::token_hash(&token);
+        self.db.execute("INSERT INTO oidc_access (service, env, sealed, hash) VALUES (?, ?, ?, ?) ON CONFLICT (service, env) DO NOTHING", params![service, env, sealed, hash])?;
+        let kept: String = self.db.query_row("SELECT sealed FROM oidc_access WHERE service = ? AND env = ?", params![service, env], |r| r.get(0))?;
+        self.sealer.open(&format!("oidc:{service}:{env}"), &kept)
+    }
+
+    /// The environment whose OIDC address a token is, by its hash; its row gone (the address
+    /// reads nothing from now on; the next deploy makes a new one).
+    pub fn drop_oidc_by_hash(&self, hash: &str) -> Result<Option<(String, String)>> {
+        let row: Option<(String, String)> = self.db.query_row("SELECT service, env FROM oidc_access WHERE hash = ?", [hash], |r| Ok((r.get(0)?, r.get(1)?))).optional()?;
+        if let Some((s, e)) = &row {
+            self.db.execute("DELETE FROM oidc_access WHERE service = ? AND env = ?", params![s, e])?;
+        }
+        Ok(row)
+    }
+
+    /// That token, when the environment has one (none: never asked for).
+    pub fn oidc_token_of(&self, service: &str, env: &str) -> Result<Option<String>> {
+        let kept: Option<String> = self.db.query_row("SELECT sealed FROM oidc_access WHERE service = ? AND env = ?", params![service, env], |r| r.get(0)).optional()?;
+        kept.map(|k| self.sealer.open(&format!("oidc:{service}:{env}"), &k)).transpose()
+    }
+
     /// A new read token for its runtime config (a leaked `ROLL_CONFIG_URL`); the one before is
     /// kept for [`Store::runtime_config_tokens`]. When it was (none: it has no config).
     pub fn rotate_runtime_config(&self, service: &str, env: &str) -> Result<Option<i64>> {
         let now = self.now()?;
-        let sealed = self.sealer.seal(&format!("config:{service}:{env}"), &format!("rlc_{}", random(32)));
-        let n = self.db.execute("UPDATE runtime_config SET previous = sealed, sealed = ?, rotated_at = ? WHERE service = ? AND env = ?", params![sealed, now, service, env])?;
+        let token = roll_auth::credentials::new_secret("rlr_");
+        let (sealed, hash) = (self.sealer.seal(&format!("config:{service}:{env}"), &token), crate::public::token_hash(&token));
+        let n = self.db.execute("UPDATE runtime_config SET previous = sealed, sealed = ?, hash = ?, rotated_at = ? WHERE service = ? AND env = ?", params![sealed, hash, now, service, env])?;
         Ok((n > 0).then_some(now))
     }
 
@@ -2646,14 +2751,15 @@ impl Store {
 
     // ── jobs ──
 
-    pub fn add_job(&self, service: &str, env: &str, deployment: &str, command: &str, tasks: u32) -> Result<Job> {
+    #[allow(clippy::too_many_arguments)]
+    pub fn add_job(&self, service: &str, env: &str, deployment: &str, command: &str, tasks: u32, retries: u32, parallelism: u32) -> Result<Job> {
         let id = new_id("job");
         let now = self.now()?;
         self.db.execute(
-            "INSERT INTO jobs (id, service, env, deployment, command, status, exit_code, started_at, finished_at, tasks) VALUES (?, ?, ?, ?, ?, 'running', NULL, ?, NULL, ?)",
-            params![id, service, env, deployment, command, now, tasks as i64],
+            "INSERT INTO jobs (id, service, env, deployment, command, status, exit_code, started_at, finished_at, tasks, retries, parallelism) VALUES (?, ?, ?, ?, ?, 'running', NULL, ?, NULL, ?, ?, ?)",
+            params![id, service, env, deployment, command, now, tasks as i64, retries as i64, parallelism as i64],
         )?;
-        Ok(Job { id, deployment: deployment.into(), command: command.into(), tasks, status: RunStatus::Running, exit_code: None, started_at: now, finished_at: None })
+        Ok(Job { id, deployment: deployment.into(), command: command.into(), tasks, retries, parallelism, status: RunStatus::Running, exit_code: None, started_at: now, finished_at: None })
     }
 
     /// A job ends, if it's still running (a takeover may have failed it first): a failure is its
@@ -3396,7 +3502,7 @@ fn target_row(r: &code_sql::Row<'_>) -> code_sql::Result<NotifyTarget> {
     })
 }
 
-const JOB_COLS: &str = "id, deployment, command, status, exit_code, started_at, finished_at, tasks";
+const JOB_COLS: &str = "id, deployment, command, status, exit_code, started_at, finished_at, tasks, retries, parallelism";
 
 fn job_row(r: &code_sql::Row<'_>) -> code_sql::Result<Job> {
     Ok(Job {
@@ -3408,6 +3514,8 @@ fn job_row(r: &code_sql::Row<'_>) -> code_sql::Result<Job> {
         started_at: r.get(5)?,
         finished_at: r.get(6)?,
         tasks: r.get::<_, i64>(7)? as u32,
+        retries: r.get::<_, i64>(8)? as u32,
+        parallelism: r.get::<_, i64>(9)? as u32,
     })
 }
 

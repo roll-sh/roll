@@ -347,6 +347,8 @@ pub const OPERATOR_ONLY: &[(&str, &str)] = &[
     ("/v1/access/audit/sinks", "where the audit log is sent is the operator's choice"),
     ("/v1/access/audit/sinks/{id}", "where the audit log is sent is the operator's choice"),
     ("/v1/access/audit/sinks/{id}/retry", "where the audit log is sent is the operator's choice"),
+    ("/v1/secrets/issuer/rotate", "roll's OIDC issuer key signs for every project: rotating it is the operator's"),
+    ("/v1/secrets/audit/key/rotate", "the audit log's digest key signs every project's digests: rotating or pulling it is the operator's"),
     ("/v1/previews/{id}/visit", "a browser session in a team-access preview is a signed-in person's (rolld's gate sees their session), never a token's"),
     ("/v1/apps/services/{id}/environments/{env}/visit", "a browser session in a sign-in-gated environment is a signed-in person's (rolld's gate sees their session), never a token's"),
     ("/v1/apps/services/{id}/github", "roll's GitHub App installations span tenants: connecting a service to one (its tokens fetch any repository the installation sees) is the operator's, as connecting a repo is roll code's admin token's"),
@@ -979,6 +981,9 @@ static ROWS: &[Row] = &[
     row("POST", "/v1/projects/{id}/branches/{branch}/backup", "postgres", W, one(PG, "postgres-project")),
     row("POST", "/v1/projects/{id}/branches/{branch}/evict", "postgres", W, one(PG, "postgres-project")),
     row("POST", "/v1/projects/{id}/branches/{branch}/replicas", "postgres", W, one(PG, "postgres-project")).reveals(PG_SECRETS),
+    // Decoy roles (roll secrets' Postgres decoys): the proxy refuses their logins; no password.
+    row("POST", "/v1/projects/{id}/decoy-roles", "postgres", W, one(PG, "postgres-project")),
+    row("DELETE", "/v1/projects/{id}/decoy-roles/{role}", "postgres", W, one(PG, "postgres-project")),
     row("GET", "/v1/projects/{id}/usage", "postgres", R, one(PG, "postgres-project")),
     row("GET", "/v1/endpoints/{id}", "postgres", R, one(PG, "endpoint")).reveals(PG_SECRETS),
     row("PATCH", "/v1/endpoints/{id}", "postgres", W, one(PG, "endpoint")),
@@ -1404,6 +1409,12 @@ static ROWS: &[Row] = &[
     row("POST", "/v1/secrets/projects/{project}/environments/{env}/reach/cut-off", "secrets", ADMIN, one(&["project"], "project")),
     row("DELETE", "/v1/secrets/projects/{project}/environments/{env}/reach/cut-off", "secrets", ADMIN, one(&["project"], "project")),
     row("POST", "/v1/secrets/projects/{project}/shares", "secrets", REVEAL, one(&["project"], "project")),
+    // A secret request asks someone outside roll for a folder's values: its answer is written as
+    // the asker, so asking is a write there; the list shows names only; cancelling is the asker's
+    // (or the folder admin's: the product checks).
+    row("POST", "/v1/secrets/projects/{project}/environments/{env}/value-requests", "secrets", W, one(&["project"], "project")).env(EnvFrom::Param("env")).path_query("path"),
+    row("GET", "/v1/secrets/projects/{project}/value-requests", "secrets", R, one(&["project"], "project")),
+    row("DELETE", "/v1/secrets/projects/{project}/value-requests/{id}", "secrets", W, one(&["project"], "project")),
     // Purging a secret's history can't be undone.
     row("POST", "/v1/secrets/projects/{project}/environments/{env}/secrets/{name}/purge", "secrets", ADMIN, one(&["project"], "project")).env(EnvFrom::Param("env")).path_query("path"),
     // A change request's current and proposed values, for its approvers.
@@ -1485,6 +1496,9 @@ static ROWS: &[Row] = &[
     row("POST", "/v1/apps/services/{id}/environments/{env}/deploys", "apps", Act::ProductionIf("env"), one(PG, "service")).env(EnvFrom::Param("env")).admin_if("x-roll-override"),
     row("POST", "/v1/apps/services/{id}/environments/{env}/redeploy", "apps", Act::ProductionIf("env"), one(PG, "service")).env(EnvFrom::Param("env")).admin_if("x-roll-override"),
     row("POST", "/v1/apps/services/{id}/environments/{env}/promote", "apps", Act::ProductionIf("env"), one(PG, "service")).env(EnvFrom::Param("env")).admin_if("x-roll-override"),
+    // "Why did it fail?": reads a deploy's logs and keeps the repo owner's model's answer (metered
+    // on their usage), in any environment: write, never production's deploy.
+    row("POST", "/v1/apps/services/{id}/environments/{env}/deploys/{dep}/explain", "apps", W, one(PG, "service")).env(EnvFrom::Param("env")),
     row("POST", "/v1/apps/services/{id}/environments/{env}/deploys/{dep}/rollback", "apps", Act::ProductionIf("env"), one(PG, "service")).env(EnvFrom::Param("env")).admin_if("x-roll-override"),
     // An error group resolved, muted or open again: the team's triage, a write in any environment.
     row("PATCH", "/v1/apps/services/{id}/environments/{env}/errors/{fingerprint}", "apps", W, one(PG, "service")).env(EnvFrom::Param("env")),
@@ -1629,6 +1643,11 @@ static ROWS: &[Row] = &[
     row("PATCH", "/v1/code/changes/{id}/enqueue", "code", DEPLOY, one(PG, "change")),
     // Running a fork's code with the repo's data is the repo's owner's call.
     row("POST", "/v1/code/changes/{id}/approve-run", "code", ADMIN, one(PG, "change")),
+    // "Store in roll": a change's credential into roll secrets. A writer's (roll secrets then asks
+    // the same grant for `write` in the folder); the target lists the project's environments, so
+    // it's a writer's too.
+    row("GET", "/v1/code/changes/{id}/unstored/{fingerprint}", "code", W, one(PG, "change")),
+    row("POST", "/v1/code/changes/{id}/unstored/{fingerprint}/store", "code", W, one(PG, "change")),
     row("*", "/v1/code/threads/{id}", "code", M, one(PG, "thread")),
     row("*", "/v1/code/threads/{id}/", "code", M, one(PG, "thread")),
     row("*", "/v1/code/work/{id}", "code", M, one(PG, "work")),

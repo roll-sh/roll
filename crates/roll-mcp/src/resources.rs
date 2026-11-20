@@ -69,7 +69,8 @@ pub fn templates(tools: &[String]) -> Value {
 pub fn code_file_of(uri: &str) -> Option<(String, String)> {
     let (owner, rest) = uri.strip_prefix(CODE_PREFIX)?.split_once('/')?;
     let (repo, path) = rest.split_once('/')?;
-    if !crate::prompts::is_id(owner) || !crate::prompts::is_id(repo) || path.len() > 1024 {
+    let named = |s: &str| crate::prompts::is_id(s) && !s.chars().all(|c| c == '.');
+    if !named(owner) || !named(repo) || path.len() > 1024 {
         return None;
     }
     let mut segments = Vec::new();

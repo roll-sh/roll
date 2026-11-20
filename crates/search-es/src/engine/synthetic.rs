@@ -30,6 +30,7 @@ use crate::document::FieldValue;
 use crate::json::{Map, Number, Value};
 use crate::mapping::{Dynamic, FieldMapper, Mapper, Mapping, MappingCtx, ObjectMapper};
 use std::collections::{BTreeMap, HashMap, HashSet};
+use search_codec::vectors::multi::MultiElement;
 
 /// `synthetic_source_keep`: what an object or field keeps verbatim.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -183,6 +184,13 @@ fn normalize_vector(info: &FieldInfo, v: &mut Value) {
         *v = Value::Obj(features.into_iter().collect());
         return;
     }
+    // Each of a document's vectors prints as its element type holds it.
+    if let Some((element, dims)) = info.rank_layout() {
+        if let Value::Arr(vectors) = v {
+            vectors.iter_mut().for_each(|x| normalize_rank_vector(element, dims, x));
+        }
+        return;
+    }
     // A base64 (or hex) encoded vector reads back as the values it encodes.
     if let (Value::Str(s), Some(spec)) = (&*v, info.vector) {
         match crate::search::knn::decode_query_vector(s, spec.element, spec.dims as usize) {
@@ -199,6 +207,35 @@ fn normalize_vector(info: &FieldInfo, v: &mut Value) {
         Value::Num(n) => *v = float_value(n.as_f64() as f32),
         Value::Arr(a) => a.iter_mut().for_each(|x| normalize_vector(info, x)),
         _ => {}
+    }
+}
+
+/// One `rank_vectors` vector as Elasticsearch prints it from its doc values: a hex or base64
+/// string decoded, `float` values as floats, `bfloat16` ones rounded, `byte` and `bit` values as
+/// integers.
+fn normalize_rank_vector(element: MultiElement, dims: u32, v: &mut Value) {
+    if let Value::Str(s) = &*v {
+        let codec = match element {
+            MultiElement::Byte => search_codec::VectorElement::Byte,
+            MultiElement::Bit => search_codec::VectorElement::Bit,
+            MultiElement::Float32 | MultiElement::BFloat16 => search_codec::VectorElement::Float32,
+        };
+        *v = match crate::search::knn::decode_query_vector(s, codec, dims as usize) {
+            Ok(crate::query::specialized::VectorData::Floats(f)) => Value::Arr(f.into_iter().map(|x| Value::from(x as f64)).collect()),
+            Ok(crate::query::specialized::VectorData::Bytes(b)) => Value::Arr(b.into_iter().map(|x| Value::from(x as i64)).collect()),
+            _ => return,
+        };
+    }
+    let Value::Arr(a) = v else { return };
+    for x in a.iter_mut() {
+        if let Value::Num(n) = x {
+            let f = n.as_f64();
+            *x = match element {
+                MultiElement::Float32 => float_value(f as f32),
+                MultiElement::BFloat16 => float_value(super::source_vectors::bfloat16(f as f32)),
+                MultiElement::Byte | MultiElement::Bit => Value::from(f as i64),
+            };
+        }
     }
 }
 
