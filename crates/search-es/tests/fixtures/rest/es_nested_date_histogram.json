@@ -1,0 +1,637 @@
+{
+ "description": "A date_histogram right under a top-level nested aggregation: under match_all it is counted from the points tree of the nested field on segments without deletions, a field outside the path (a root field, a deeper nested one) has no values there, and other queries and deletions collect doc by doc.",
+ "steps": [
+  {
+   "req": "PUT /esm-nested-histo",
+   "body": {
+    "settings": {
+     "number_of_shards": 1,
+     "number_of_replicas": 0
+    },
+    "mappings": {
+     "properties": {
+      "tag": {
+       "type": "keyword"
+      },
+      "created": {
+       "type": "date"
+      },
+      "answers": {
+       "type": "nested",
+       "properties": {
+        "user": {
+         "type": "keyword"
+        },
+        "date": {
+         "type": "date"
+        },
+        "comments": {
+         "type": "nested",
+         "properties": {
+          "date": {
+           "type": "date"
+          }
+         }
+        }
+       }
+      }
+     }
+    }
+   },
+   "status": 200,
+   "response": {
+    "acknowledged": true,
+    "shards_acknowledged": true,
+    "index": "esm-nested-histo"
+   },
+   "response_headers": {
+    "content-type": "application/json"
+   }
+  },
+  {
+   "req": "POST /esm-nested-histo/_bulk?refresh=true",
+   "raw": "{\"index\": {\"_id\": \"1\"}}\n{\"tag\": \"a\", \"created\": \"2020-01-03\", \"answers\": [{\"user\": \"x\", \"date\": \"2020-01-05\"}, {\"user\": \"y\", \"date\": \"2020-03-01T10:00:00Z\"}]}\n{\"index\": {\"_id\": \"2\"}}\n{\"tag\": \"b\", \"created\": \"2020-02-10\"}\n{\"index\": {\"_id\": \"3\"}}\n{\"tag\": \"a\", \"created\": \"2020-02-11\", \"answers\": [{\"user\": \"z\"}, {\"user\": \"x\", \"date\": \"2020-02-29T23:59:59.999Z\", \"comments\": [{\"date\": \"2021-07-01\"}, {\"date\": \"2021-08-01\"}]}]}\n",
+   "headers": {
+    "content-type": "application/x-ndjson"
+   },
+   "mask": [
+    "took",
+    "items"
+   ],
+   "status": 200,
+   "response": {
+    "errors": false,
+    "took": 0,
+    "items": [
+     {
+      "index": {
+       "_index": "esm-nested-histo",
+       "_id": "1",
+       "_version": 1,
+       "result": "created",
+       "forced_refresh": true,
+       "_shards": {
+        "total": 1,
+        "successful": 1,
+        "failed": 0
+       },
+       "_seq_no": 0,
+       "_primary_term": 1,
+       "status": 201
+      }
+     },
+     {
+      "index": {
+       "_index": "esm-nested-histo",
+       "_id": "2",
+       "_version": 1,
+       "result": "created",
+       "forced_refresh": true,
+       "_shards": {
+        "total": 1,
+        "successful": 1,
+        "failed": 0
+       },
+       "_seq_no": 1,
+       "_primary_term": 1,
+       "status": 201
+      }
+     },
+     {
+      "index": {
+       "_index": "esm-nested-histo",
+       "_id": "3",
+       "_version": 1,
+       "result": "created",
+       "forced_refresh": true,
+       "_shards": {
+        "total": 1,
+        "successful": 1,
+        "failed": 0
+       },
+       "_seq_no": 2,
+       "_primary_term": 1,
+       "status": 201
+      }
+     }
+    ]
+   },
+   "response_headers": {
+    "content-type": "application/json"
+   }
+  },
+  {
+   "req": "POST /esm-nested-histo/_bulk?refresh=true",
+   "raw": "{\"index\": {\"_id\": \"4\"}}\n{\"tag\": \"b\", \"created\": \"2020-04-01\", \"answers\": {\"user\": \"y\", \"date\": \"2020-04-30\"}}\n{\"index\": {\"_id\": \"5\"}}\n{\"tag\": \"c\", \"created\": \"2020-05-01\", \"answers\": [{\"user\": \"x\", \"date\": \"2020-01-31\"}, {\"user\": \"z\", \"date\": \"2020-05-02\"}, {\"user\": \"y\", \"date\": \"2020-05-03\"}]}\n",
+   "headers": {
+    "content-type": "application/x-ndjson"
+   },
+   "mask": [
+    "took",
+    "items"
+   ],
+   "status": 200,
+   "response": {
+    "errors": false,
+    "took": 200,
+    "items": [
+     {
+      "index": {
+       "_index": "esm-nested-histo",
+       "_id": "4",
+       "_version": 1,
+       "result": "created",
+       "forced_refresh": true,
+       "_shards": {
+        "total": 1,
+        "successful": 1,
+        "failed": 0
+       },
+       "_seq_no": 3,
+       "_primary_term": 1,
+       "status": 201
+      }
+     },
+     {
+      "index": {
+       "_index": "esm-nested-histo",
+       "_id": "5",
+       "_version": 1,
+       "result": "created",
+       "forced_refresh": true,
+       "_shards": {
+        "total": 1,
+        "successful": 1,
+        "failed": 0
+       },
+       "_seq_no": 4,
+       "_primary_term": 1,
+       "status": 201
+      }
+     }
+    ]
+   },
+   "response_headers": {
+    "content-type": "application/json"
+   }
+  },
+  {
+   "req": "POST /esm-nested-histo/_search",
+   "body": {
+    "size": 0,
+    "aggs": {
+     "answers": {
+      "nested": {
+       "path": "answers"
+      },
+      "aggs": {
+       "months": {
+        "date_histogram": {
+         "field": "answers.date",
+         "calendar_interval": "month"
+        }
+       }
+      }
+     }
+    }
+   },
+   "mask": [
+    "took"
+   ],
+   "status": 200,
+   "response": {
+    "took": 15,
+    "timed_out": false,
+    "_shards": {
+     "total": 1,
+     "successful": 1,
+     "skipped": 0,
+     "failed": 0
+    },
+    "hits": {
+     "total": {
+      "value": 5,
+      "relation": "eq"
+     },
+     "max_score": null,
+     "hits": []
+    },
+    "aggregations": {
+     "answers": {
+      "doc_count": 8,
+      "months": {
+       "buckets": [
+        {
+         "key_as_string": "2020-01-01T00:00:00.000Z",
+         "key": 1577836800000,
+         "doc_count": 2
+        },
+        {
+         "key_as_string": "2020-02-01T00:00:00.000Z",
+         "key": 1580515200000,
+         "doc_count": 1
+        },
+        {
+         "key_as_string": "2020-03-01T00:00:00.000Z",
+         "key": 1583020800000,
+         "doc_count": 1
+        },
+        {
+         "key_as_string": "2020-04-01T00:00:00.000Z",
+         "key": 1585699200000,
+         "doc_count": 1
+        },
+        {
+         "key_as_string": "2020-05-01T00:00:00.000Z",
+         "key": 1588291200000,
+         "doc_count": 2
+        }
+       ]
+      }
+     }
+    }
+   },
+   "response_headers": {
+    "content-type": "application/json"
+   }
+  },
+  {
+   "req": "POST /esm-nested-histo/_search",
+   "body": {
+    "size": 0,
+    "aggs": {
+     "answers": {
+      "nested": {
+       "path": "answers"
+      },
+      "aggs": {
+       "months": {
+        "date_histogram": {
+         "field": "answers.date",
+         "calendar_interval": "month",
+         "min_doc_count": 0
+        }
+       }
+      }
+     }
+    },
+    "query": {
+     "match_all": {}
+    }
+   },
+   "mask": [
+    "took"
+   ],
+   "status": 200,
+   "response": {
+    "took": 6,
+    "timed_out": false,
+    "_shards": {
+     "total": 1,
+     "successful": 1,
+     "skipped": 0,
+     "failed": 0
+    },
+    "hits": {
+     "total": {
+      "value": 5,
+      "relation": "eq"
+     },
+     "max_score": null,
+     "hits": []
+    },
+    "aggregations": {
+     "answers": {
+      "doc_count": 8,
+      "months": {
+       "buckets": [
+        {
+         "key_as_string": "2020-01-01T00:00:00.000Z",
+         "key": 1577836800000,
+         "doc_count": 2
+        },
+        {
+         "key_as_string": "2020-02-01T00:00:00.000Z",
+         "key": 1580515200000,
+         "doc_count": 1
+        },
+        {
+         "key_as_string": "2020-03-01T00:00:00.000Z",
+         "key": 1583020800000,
+         "doc_count": 1
+        },
+        {
+         "key_as_string": "2020-04-01T00:00:00.000Z",
+         "key": 1585699200000,
+         "doc_count": 1
+        },
+        {
+         "key_as_string": "2020-05-01T00:00:00.000Z",
+         "key": 1588291200000,
+         "doc_count": 2
+        }
+       ]
+      }
+     }
+    }
+   },
+   "response_headers": {
+    "content-type": "application/json"
+   }
+  },
+  {
+   "req": "POST /esm-nested-histo/_search",
+   "body": {
+    "size": 0,
+    "aggs": {
+     "answers": {
+      "nested": {
+       "path": "answers"
+      },
+      "aggs": {
+       "months": {
+        "date_histogram": {
+         "field": "answers.comments.date",
+         "calendar_interval": "month"
+        }
+       }
+      }
+     }
+    }
+   },
+   "mask": [
+    "took"
+   ],
+   "status": 200,
+   "response": {
+    "took": 7,
+    "timed_out": false,
+    "_shards": {
+     "total": 1,
+     "successful": 1,
+     "skipped": 0,
+     "failed": 0
+    },
+    "hits": {
+     "total": {
+      "value": 5,
+      "relation": "eq"
+     },
+     "max_score": null,
+     "hits": []
+    },
+    "aggregations": {
+     "answers": {
+      "doc_count": 8,
+      "months": {
+       "buckets": []
+      }
+     }
+    }
+   },
+   "response_headers": {
+    "content-type": "application/json"
+   }
+  },
+  {
+   "req": "POST /esm-nested-histo/_search",
+   "body": {
+    "size": 0,
+    "aggs": {
+     "answers": {
+      "nested": {
+       "path": "answers"
+      },
+      "aggs": {
+       "months": {
+        "date_histogram": {
+         "field": "created",
+         "calendar_interval": "month"
+        }
+       }
+      }
+     }
+    }
+   },
+   "mask": [
+    "took"
+   ],
+   "status": 200,
+   "response": {
+    "took": 9,
+    "timed_out": false,
+    "_shards": {
+     "total": 1,
+     "successful": 1,
+     "skipped": 0,
+     "failed": 0
+    },
+    "hits": {
+     "total": {
+      "value": 5,
+      "relation": "eq"
+     },
+     "max_score": null,
+     "hits": []
+    },
+    "aggregations": {
+     "answers": {
+      "doc_count": 8,
+      "months": {
+       "buckets": []
+      }
+     }
+    }
+   },
+   "response_headers": {
+    "content-type": "application/json"
+   }
+  },
+  {
+   "req": "POST /esm-nested-histo/_search",
+   "body": {
+    "size": 0,
+    "aggs": {
+     "answers": {
+      "nested": {
+       "path": "answers"
+      },
+      "aggs": {
+       "months": {
+        "date_histogram": {
+         "field": "answers.date",
+         "calendar_interval": "month"
+        }
+       }
+      }
+     }
+    },
+    "query": {
+     "term": {
+      "tag": "a"
+     }
+    }
+   },
+   "mask": [
+    "took"
+   ],
+   "status": 200,
+   "response": {
+    "took": 6,
+    "timed_out": false,
+    "_shards": {
+     "total": 1,
+     "successful": 1,
+     "skipped": 0,
+     "failed": 0
+    },
+    "hits": {
+     "total": {
+      "value": 2,
+      "relation": "eq"
+     },
+     "max_score": null,
+     "hits": []
+    },
+    "aggregations": {
+     "answers": {
+      "doc_count": 4,
+      "months": {
+       "buckets": [
+        {
+         "key_as_string": "2020-01-01T00:00:00.000Z",
+         "key": 1577836800000,
+         "doc_count": 1
+        },
+        {
+         "key_as_string": "2020-02-01T00:00:00.000Z",
+         "key": 1580515200000,
+         "doc_count": 1
+        },
+        {
+         "key_as_string": "2020-03-01T00:00:00.000Z",
+         "key": 1583020800000,
+         "doc_count": 1
+        }
+       ]
+      }
+     }
+    }
+   },
+   "response_headers": {
+    "content-type": "application/json"
+   }
+  },
+  {
+   "req": "DELETE /esm-nested-histo/_doc/5?refresh=true",
+   "mask": [
+    "_seq_no",
+    "_primary_term",
+    "_version"
+   ],
+   "status": 200,
+   "response": {
+    "_index": "esm-nested-histo",
+    "_id": "5",
+    "_version": 2,
+    "result": "deleted",
+    "forced_refresh": true,
+    "_shards": {
+     "total": 1,
+     "successful": 1,
+     "failed": 0
+    },
+    "_seq_no": 5,
+    "_primary_term": 1
+   },
+   "response_headers": {
+    "content-type": "application/json"
+   }
+  },
+  {
+   "req": "POST /esm-nested-histo/_search",
+   "body": {
+    "size": 0,
+    "aggs": {
+     "answers": {
+      "nested": {
+       "path": "answers"
+      },
+      "aggs": {
+       "months": {
+        "date_histogram": {
+         "field": "answers.date",
+         "calendar_interval": "month"
+        }
+       }
+      }
+     }
+    }
+   },
+   "mask": [
+    "took"
+   ],
+   "status": 200,
+   "response": {
+    "took": 15,
+    "timed_out": false,
+    "_shards": {
+     "total": 1,
+     "successful": 1,
+     "skipped": 0,
+     "failed": 0
+    },
+    "hits": {
+     "total": {
+      "value": 4,
+      "relation": "eq"
+     },
+     "max_score": null,
+     "hits": []
+    },
+    "aggregations": {
+     "answers": {
+      "doc_count": 5,
+      "months": {
+       "buckets": [
+        {
+         "key_as_string": "2020-01-01T00:00:00.000Z",
+         "key": 1577836800000,
+         "doc_count": 1
+        },
+        {
+         "key_as_string": "2020-02-01T00:00:00.000Z",
+         "key": 1580515200000,
+         "doc_count": 1
+        },
+        {
+         "key_as_string": "2020-03-01T00:00:00.000Z",
+         "key": 1583020800000,
+         "doc_count": 1
+        },
+        {
+         "key_as_string": "2020-04-01T00:00:00.000Z",
+         "key": 1585699200000,
+         "doc_count": 1
+        }
+       ]
+      }
+     }
+    }
+   },
+   "response_headers": {
+    "content-type": "application/json"
+   }
+  },
+  {
+   "req": "DELETE /esm-nested-histo",
+   "status": 200,
+   "response": {
+    "acknowledged": true
+   },
+   "response_headers": {
+    "content-type": "application/json"
+   }
+  }
+ ]
+}
