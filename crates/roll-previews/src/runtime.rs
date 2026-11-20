@@ -728,6 +728,22 @@ impl Runtime {
         Ok(addr)
     }
 
+    /// An earlier push its preview no longer keeps, by the host it had (under roll's preview
+    /// domain): who it was and the current service's URL, for a page saying so.
+    pub fn gone_for_host(&self, host: &str) -> Option<crate::store::GonePush> {
+        let host = host.rsplit_once(':').filter(|(_, p)| p.bytes().all(|b| b.is_ascii_digit())).map_or(host, |(h, _)| h);
+        let host = host.trim_end_matches('.').to_ascii_lowercase();
+        if let Some(label) = host.strip_suffix(&self.cfg.domain).and_then(|h| h.strip_suffix('.')) {
+            return self.store.gone_push(label).ok().flatten().filter(|_| !label.is_empty() && !label.contains('.'));
+        }
+        // Under a project's own preview domain: only that project's previews' pushes.
+        let (label, base) = host.split_once('.')?;
+        if label.is_empty() || !self.domain_bases().contains(base) {
+            return None;
+        }
+        self.store.gone_domain_push(label, base).ok().flatten()
+    }
+
     /// The preview and service a request's host names, if it's a preview host.
     pub fn service_for_host(&self, host: &str) -> Option<(String, String)> {
         let host = host.rsplit_once(':').filter(|(_, p)| p.bytes().all(|b| b.is_ascii_digit())).map_or(host, |(h, _)| h);
@@ -1999,8 +2015,28 @@ fn page_shots<'a>(asked: &[&String], said: &str, pngs: impl Iterator<Item = &'a 
 pub async fn route(State(rt): State<Arc<Runtime>>, req: Request, next: Next) -> Response {
     match named(&rt, &req) {
         Some((preview, service)) => serve_named(rt, preview, service, req).await,
-        None => next.run(req).await,
+        None => match gone(&rt, &req) {
+            Some(page) => page,
+            None => next.run(req).await,
+        },
     }
+}
+
+/// An earlier push its preview no longer keeps: a page saying so (410), with the way to the
+/// current one, rather than a 404 that reads as a broken preview. It names no more than the link
+/// did (the service and its push), and the current link is the preview's own, behind its gate.
+fn gone(rt: &Runtime, req: &Request) -> Option<Response> {
+    let host = req.headers().get(header::HOST).and_then(|h| h.to_str().ok()).map(str::to_string).or_else(|| req.uri().host().map(str::to_string))?;
+    let crate::store::GonePush { service, revision, current_url: current, .. } = rt.gone_for_host(&host)?;
+    let short: String = revision.strip_prefix("cs_").unwrap_or(&revision).chars().take(10).collect();
+    let now = current.map_or_else(|| "<p>The preview no longer runs this service.</p>".to_string(), |u| format!("<p><a href=\"{}\">Open the latest push</a>.</p>", escape(&u)));
+    let mut r = roll_page(
+        StatusCode::GONE,
+        "This push isn't kept any more",
+        &format!("<p>This link was <code>{}</code> at an earlier push (<code>{}</code>). A preview keeps the last {} pushes of each service; this one was replaced since.</p>{now}", escape(&service), escape(&short), crate::store::PINNED_KEEP),
+    );
+    r.headers_mut().insert(header::HeaderName::from_static("x-robots-tag"), header::HeaderValue::from_static("noindex"));
+    Some(r)
 }
 
 /// A request roll apps' ingress hands on (a name under a project's own preview domain that no
@@ -2008,7 +2044,7 @@ pub async fn route(State(rt): State<Arc<Runtime>>, req: Request, next: Next) -> 
 pub async fn serve_host(rt: Arc<Runtime>, req: Request) -> Response {
     match named(&rt, &req) {
         Some((preview, service)) => serve_named(rt, preview, service, req).await,
-        None => (StatusCode::NOT_FOUND, "no such preview").into_response(),
+        None => gone(&rt, &req).unwrap_or_else(|| (StatusCode::NOT_FOUND, "no such preview").into_response()),
     }
 }
 
