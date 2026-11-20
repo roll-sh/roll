@@ -309,11 +309,13 @@ impl Engine {
         out.truncate(100);
         // Names, services (its SDK's resource) and repeated statements are its code's words: masked
         // as its logs are.
-        let words: Vec<String> = out.iter().flat_map(|o| [o.name.clone(), o.service.clone()]).chain(out.iter().filter_map(|o| o.repeated.as_ref().map(|r| r.statement.clone()))).collect();
+        // Its id too: the code chose it (a hex secret sent as one shows as `***`, and opens nothing).
+        let words: Vec<String> = out.iter().flat_map(|o| [o.name.clone(), o.service.clone(), o.trace.clone()]).chain(out.iter().filter_map(|o| o.repeated.as_ref().map(|r| r.statement.clone()))).collect();
         let mut masked = self.masked(id, words).await?.into_iter();
         for o in out.iter_mut() {
             o.name = masked.next().unwrap_or_default();
             o.service = masked.next().unwrap_or_default();
+            o.trace = masked.next().unwrap_or_default();
         }
         for r in out.iter_mut().filter_map(|o| o.repeated.as_mut()) {
             r.statement = masked.next().unwrap_or_default();
@@ -581,6 +583,10 @@ impl Engine {
             // Its code chose all of it: the name, the service (its SDK's resource) and each attribute.
             s.name = code_preview::runner::mask(&s.name, &values);
             s.service = code_preview::runner::mask(&s.service, &values);
+            // Its ids are the code's choice too.
+            for x in [&mut s.span, &mut s.parent] {
+                *x = code_preview::runner::mask(x, &values);
+            }
             for (k, v) in &mut s.attrs {
                 *k = code_preview::runner::mask(k, &values);
                 *v = code_preview::runner::mask(v, &values);

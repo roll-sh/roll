@@ -1244,7 +1244,8 @@ an `IN` list as one) and masked as its names are. The trace list and the route t
 a route's worst trace) tag it N+1, an opened trace says what it runs, and `roll preview traces
 --routes` prints it under the route. `a_statement_run_many_times_in_a_trace_is_said_by_its_shape`.
 Read back masked as
-its logs are: a span's name and attributes are its code's words. The intake reads OTLP with roll
+its logs are: a span's name, service, attributes and ids are its code's words (the OTLP reader
+refuses ids that aren't 32 or 16 hex characters; a secret's value sent as one shows as `***`). The intake reads OTLP with roll
 apps' reader (`apps_control::otlp::spans_of_request`). A roll apps service's traces are roll apps'
 own: with the project's `traces` the preview's `pv-` environment gets roll apps' `traces: true` (its
 own OpenTelemetry variables and intake), and the preview's list and trace reads take them from roll

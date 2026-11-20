@@ -484,6 +484,7 @@ async fn a_previews_traces_are_kept_by_its_token_and_read_masked() {
     use roll_previews::engine::traces::Span;
     let e = env(json!({ "enabled": true, "traces": true }));
     e.secrets.values.lock().push(("STRIPE_KEY".into(), "sk_test_51Hx9".into()));
+    e.secrets.values.lock().push(("SIGNING_KEY".into(), "0f1e2d3c4b5a69788796a5b4c3d2e1f0".into()));
     e.code.open(change("chg_tr", 17));
     e.engine.pass().await.unwrap();
     let p = e.engine.store.row_by_change("chg_tr").unwrap().unwrap();
@@ -536,6 +537,11 @@ async fn a_previews_traces_are_kept_by_its_token_and_read_masked() {
     let got = e.engine.errors(&p.id, 60).await.unwrap();
     let trace_of = |title: &str| got.iter().find(|g| g.title == title).and_then(|g| g.trace.clone());
     assert_eq!((trace_of("kept"), trace_of("not kept")), (Some(kept), None), "{got:?}");
+    // A secret's value sent as a trace id (the code chose it) shows as `***` too.
+    let hex = "0f1e2d3c4b5a69788796a5b4c3d2e1f0";
+    e.engine.keep_spans(&p.id, &token, vec![Span { trace: hex.into(), ..span("0000000000000003", "", "GET /x", false, vec![]) }]).unwrap();
+    let list = e.engine.traces(&p.id, 60).await.unwrap().to_string();
+    assert!(!list.contains(hex) && list.contains("\"trace\":\"***\""), "{list}");
 }
 
 /// A route clearly slower than on main's preview (from both previews' traces) goes on the change's
