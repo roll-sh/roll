@@ -1635,7 +1635,8 @@ type Settings = {
     click counts for someone who can write to the repo, by GitHub's permission API, and isn't the
     change's author) ("Differs from main by 8.0%: accept it
     in roll"), and success once someone has (the sheet's Accept, `roll preview accept`, `POST
-    …/visual/accept`; "Accepted by ada"), or when the pages look the same. An acceptance is of one
+    …/visual/accept`, by a signed-in person who can write to the change's repo in roll code or an
+    admin; "Accepted by ada"), or when the pages look the same. An acceptance is of one
     screenshot's head, the one the person looked at (`head`): a newer screenshot coming in
     meanwhile makes it a 409, and GitHub's button counts only on the check run of the push the
     review is about. The comment says it too ("**Visual review:** its pages differ from `main` by

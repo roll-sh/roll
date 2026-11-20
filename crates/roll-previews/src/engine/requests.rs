@@ -467,7 +467,10 @@ impl Engine {
     /// say so at once.
     /// `person`: not a token's; only a person (or the operator) accepts a required one.
     /// `behind`: the signed-in person a token acts for, checked against the author as `by` is.
-    pub async fn accept_visual(&self, id: &str, by: &str, behind: Option<&str>, person: bool, seen: Option<&str>, page: Option<&str>) -> Result<Preview> {
+    /// `writer`: as [`Engine::accept_regressions`]' (a signed-in person's code owner must be the
+    /// repo's; GitHub's Accept checks its own writers).
+    #[allow(clippy::too_many_arguments)]
+    pub async fn accept_visual(&self, id: &str, by: &str, behind: Option<&str>, person: bool, writer: Option<Option<&str>>, seen: Option<&str>, page: Option<&str>) -> Result<Preview> {
         let r = self.store.row(id)?;
         if r.change_id.is_none() {
             return Err(Error::BadRequest("only a change's preview has a visual review".into()));
@@ -481,6 +484,15 @@ impl Engine {
             && [Some(by), behind].into_iter().flatten().any(|who| who.eq_ignore_ascii_case(&c.author) || who.eq_ignore_ascii_case(c.author.trim_start_matches('@')))
         {
             return Err(Error::Forbidden("the change's own author can't accept its visual change: someone else looks at it".into()));
+        }
+        if let Some(owner) = writer {
+            let c = match &r.change_id {
+                Some(change) => self.source.change(change).await.map_err(|e| Error::Internal(format!("reading the change: {e}")))?,
+                None => None,
+            };
+            if c.as_ref().is_none_or(|c| owner != Some(c.owner_id.as_str())) {
+                return Err(Error::Forbidden(format!("accepting {}'s visual change needs write access to it in roll code", r.repo)));
+            }
         }
         let head = self.store.accept_visual(id, by, seen, page)?.ok_or_else(|| Error::Conflict("the preview has no screenshot to accept yet".into()))?;
         let what = match page {
