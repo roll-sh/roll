@@ -640,8 +640,9 @@ async fn handle_inner(cluster: &Cluster, req: &EsRequest, admitted: Option<Admit
                 };
                 match admission {
                     Ok(admission) => {
-                        // Not boxed: the handler's future is (`crate::api::dispatch`).
-                        let r = crate::xpack::security::in_workflow(&ctx, dispatch_off_reactor(&ctx)).await;
+                        // Not boxed: the handler's future is (`crate::api::dispatch`). Its internal
+                        // calls run in its workflow and as its API for a browser key's allowlist.
+                        let r = crate::xpack::security::in_workflow(&ctx, crate::xpack::security::browser::in_request(&ctx, dispatch_off_reactor(&ctx))).await;
                         drop(admission);
                         r
                     }

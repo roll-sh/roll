@@ -683,7 +683,7 @@ pub fn get_one(ctx: &Ctx, idx: &Arc<IndexMeta>, id: &str, args: &GetArgs) -> EsR
     // Document level security: a document the reader may not see is not found.
     if let Some(sec) = crate::xpack::security::dls::ReadSecurity::of(ctx)
         && let Some(q) = sec.documents(ctx.cluster, crate::xpack::security::dls::READ, &idx.name)?
-        && !crate::search::matches_doc(ctx.cluster, &st, idx, &engine, shard, id, &q)?
+        && !crate::search::matches_doc(ctx.cluster, &st, idx, &engine, shard, id, &q, args.realtime)?
     {
         return Ok(None);
     }

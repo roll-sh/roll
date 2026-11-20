@@ -518,7 +518,7 @@ pub fn date_factory() -> search_aggs::wire::DateFactory {
 pub fn reduce(cluster: &Cluster, st: &ClusterState, req: &AggRequest, parts: Vec<search_aggs::Aggs>, typed_keys: bool, browser: Option<crate::xpack::security::browser::Policy>) -> EsResult<Value> {
     let max_buckets = st.metadata.cluster_setting("search.max_buckets").and_then(|v| v.parse::<usize>().ok()).unwrap_or(65536);
     // A browser key's `max_buckets` under the cluster's, and no painless in its pipelines.
-    let max_buckets = browser.map_or(max_buckets, |p| p.max_buckets.min(max_buckets));
+    let max_buckets = browser.as_ref().map_or(max_buckets, |p| p.max_buckets.min(max_buckets));
     let host: Arc<dyn search_aggs::ScriptHost> = Arc::new(super::agg_scripts::Host::new(cluster, None, 0, String::new()).denying(browser.is_some_and(|p| !p.allow_scripts)));
     let opts = search_aggs::ReduceOptions { final_reduce: true, max_buckets, scripts: Some(host), budget: Some(cluster.breakers.request(cluster, st)), ..Default::default() };
     let out = search_aggs::reduce(parts, req, &opts).map_err(|e| reduce_failure(agg_error(e)))?;
@@ -832,7 +832,7 @@ impl FieldLookup for Lookup<'_> {
         };
         let Some(af) = &self.alias_filter else { return root };
         let ctx = QueryCtx::new(self.cluster, self.st, &self.idx, &self.table, &self.searcher, self.now, crate::search::query::Reader::of(self.security.clone()));
-        match ctx.to_filter(af) {
+        match ctx.owner_filter(af) {
             Ok(f) => Arc::new(search_index::query::BooleanQuery::new().add(search_index::query::Occur::Filter, f).add(search_index::query::Occur::Filter, root)),
             Err(_) => root,
         }

@@ -59,7 +59,7 @@ pub struct NewBrowserKey {
 }
 
 /// A browser key's request limits; every field optional.
-#[derive(Clone, Copy, Debug, Default, Deserialize, serde::Serialize)]
+#[derive(Clone, Debug, Default, Deserialize, serde::Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct Limits {
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -70,6 +70,15 @@ pub struct Limits {
     pub max_buckets: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_items: Option<u64>,
+    /// Distinct texts one request may embed (4).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_inference: Option<u64>,
+    /// The most documents a `text_similarity_reranker` reranks (100).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_rerank_window: Option<u64>,
+    /// Inference endpoints besides those of the indices' `semantic_text` fields (a reranker's).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub inference_endpoints: Option<Vec<String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub allow_scripts: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -144,10 +153,22 @@ fn reach(k: &NewBrowserKey) -> Result<Value> {
     if k.expires_in_s.is_some_and(|s| s <= 0) {
         return Err(ControlError::Invalid("expires_in_s must be positive".into()));
     }
-    let l = k.limits.unwrap_or_default();
+    let l = k.limits.clone().unwrap_or_default();
     let within = |v: Option<u64>, max: u64| v.is_none_or(|n| (1..=max).contains(&n));
-    if !within(l.max_concurrent, 64) || !within(l.max_result_window, 10_000) || !within(l.max_buckets, 65_536) || !within(l.max_items, 1_000) {
-        return Err(ControlError::Invalid("limits: max_concurrent 1-64, max_result_window 1-10000, max_buckets 1-65536, max_items 1-1000".into()));
+    if !within(l.max_concurrent, 64)
+        || !within(l.max_result_window, 10_000)
+        || !within(l.max_buckets, 65_536)
+        || !within(l.max_items, 1_000)
+        || !within(l.max_inference, 64)
+        || !within(l.max_rerank_window, 1_000)
+    {
+        return Err(ControlError::Invalid(
+            "limits: max_concurrent 1-64, max_result_window 1-10000, max_buckets 1-65536, max_items 1-1000, max_inference 1-64, max_rerank_window 1-1000".into(),
+        ));
+    }
+    let endpoints = l.inference_endpoints.as_deref().unwrap_or_default();
+    if endpoints.len() > 16 || endpoints.iter().any(|e| e.is_empty() || e.len() > 255 || e.contains([',', ' ', '"', '\\', '/', '?', '#', '*'])) {
+        return Err(ControlError::Invalid("limits: inference_endpoints, at most 16 inference endpoint ids".into()));
     }
     let mut out = json!({ "rate_limit": { "per_minute": per_minute, "per_ip_per_minute": per_ip } });
     if k.limits.is_some() {

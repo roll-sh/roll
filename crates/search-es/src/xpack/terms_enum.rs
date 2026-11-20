@@ -15,6 +15,10 @@
 //! Under document and field level security an index takes part only when the reader sees the
 //! field and every document of it (`TransportTermsEnumAction.canAccess`): enumerating a
 //! dictionary can't tell which documents a term came from.
+//!
+//! `timeout` (1s) holds during the walk, as Elasticsearch's shards check it between terms: past
+//! it the terms found so far come back with `complete: false`. A browser key's `size` is at
+//! most its `max_result_window` (Elasticsearch caps no one).
 
 use crate::error::{EsError, EsResult};
 use crate::json::Value;
@@ -111,9 +115,24 @@ struct Matcher<'a> {
     /// The encoded `search_after` (exclusive), without the key prefix.
     after: Option<Vec<u8>>,
     size: usize,
+    /// When the request's `timeout` is up; set in `timed_out` once a walk saw it pass.
+    deadline: std::time::Instant,
+    timed_out: &'a std::sync::atomic::AtomicBool,
 }
 
+/// How many terms a walk reads between looks at the clock.
+const CLOCK_EVERY: u32 = 1024;
+
 impl Matcher<'_> {
+    /// Whether the request's `timeout` is up (checked every [`CLOCK_EVERY`] terms read).
+    fn expired(&self, read: &mut u32) -> bool {
+        *read += 1;
+        if *read % CLOCK_EVERY == 0 && std::time::Instant::now() >= self.deadline {
+            self.timed_out.store(true, std::sync::atomic::Ordering::Relaxed);
+        }
+        self.timed_out.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
     /// The term's text if it matches (the bytes after the key prefix).
     fn text(&self, kind: TermKind, rest: &[u8]) -> Option<String> {
         let text = match kind {
@@ -138,6 +157,7 @@ impl Matcher<'_> {
     fn segment(&self, reader: &search_codec::reader::SegmentReader, d: &Dict, out: &mut Vec<Found>) {
         use std::ops::Bound;
         let mut found = 0;
+        let mut read = 0;
         if d.doc_values {
             let Some(dv) = reader.sorted_set(d.number) else { return };
             let start = match &self.after {
@@ -149,6 +169,9 @@ impl Matcher<'_> {
             };
             let mut buf = Vec::new();
             for ord in start..dv.value_count() {
+                if self.expired(&mut read) {
+                    break;
+                }
                 buf.clear();
                 dv.lookup_ord(ord, &mut buf);
                 if self.past(d.kind, &buf) {
@@ -180,6 +203,9 @@ impl Matcher<'_> {
         }
         let mut it = terms.range(if inclusive { Bound::Included(&lower[..]) } else { Bound::Excluded(&lower[..]) }, Bound::Unbounded);
         while let Some(t) = it.next() {
+            if self.expired(&mut read) {
+                break;
+            }
             let Some(rest) = t.strip_prefix(&d.key_prefix[..]) else { break };
             if self.past(d.kind, rest) {
                 break;
@@ -266,6 +292,9 @@ fn enumerate(
         let m = Matcher { after, ..*m };
         let searcher = t.searcher()?;
         for seg in searcher.segments() {
+            if m.timed_out.load(std::sync::atomic::Ordering::Relaxed) {
+                break;
+            }
             m.segment(&seg.reader, &dict, &mut out);
         }
     }
@@ -330,6 +359,11 @@ pub async fn terms_enum(ctx: &Ctx<'_>) -> EsResult<Reply> {
     // The shards collect until they hold `size` terms, checked after adding one: a size of 0
     // or less returns the first term.
     let size = body.get("size").and_then(Value::as_i64).unwrap_or(10).max(1);
+    if let Some(p) = crate::xpack::security::browser::policy(ctx)
+        && size > p.max_result_window
+    {
+        return Err(crate::xpack::security::browser::refused(format!("a [_terms_enum] [size] over [{}] (the key's max_result_window)", p.max_result_window)));
+    }
     let ci = body.get("case_insensitive").and_then(Value::as_bool).unwrap_or(false);
     let after = body.get("search_after").map(Value::to_es_string);
     let index = ctx.path_param("index").unwrap_or("_all").to_string();
@@ -366,7 +400,9 @@ pub async fn terms_enum(ctx: &Ctx<'_>) -> EsResult<Reply> {
     }
     let started = std::time::Instant::now();
     let security = crate::xpack::security::dls::ReadSecurity::of(ctx);
-    let m = Matcher { prefix: &prefix, ci, after_text: after.as_deref(), after: None, size: size as usize };
+    let timed_out = std::sync::atomic::AtomicBool::new(false);
+    let deadline = started + std::time::Duration::from_millis(timeout_ms.max(0) as u64);
+    let m = Matcher { prefix: &prefix, ci, after_text: after.as_deref(), after: None, size: size as usize, deadline, timed_out: &timed_out };
     let (mut out, by_aggregation) = enumerate(ctx.cluster, security.as_ref(), &targets, &field, &m)?;
     if !by_aggregation.is_empty() {
         out.extend(aggregated(ctx, &by_aggregation.join(","), &field, &prefix, ci, after.as_deref(), size).await?.into_iter().map(|t| (t.clone().into_bytes(), t)));
@@ -374,7 +410,7 @@ pub async fn terms_enum(ctx: &Ctx<'_>) -> EsResult<Reply> {
     out.sort_unstable_by(|a, b| a.0.cmp(&b.0));
     out.dedup_by(|a, b| a.0 == b.0);
     out.truncate(size as usize);
-    let complete = (started.elapsed().as_millis() as i64) < timeout_ms;
+    let complete = !timed_out.load(std::sync::atomic::Ordering::Relaxed) && (started.elapsed().as_millis() as i64) < timeout_ms;
     Reply::ok(obj! { "_shards" => shards(total_shards), "terms" => Value::Arr(out.into_iter().map(|(_, t)| Value::from(t)).collect()), "complete" => complete })
 }
 
@@ -421,14 +457,16 @@ mod tests {
         assert!(!has_prefix("k", "kk", true));
         assert_eq!(ip_text(&ip_bytes("10.0.5.1").unwrap()), "10.0.5.1");
         assert_eq!(ip_text(&ip_bytes("2001:db8::1").unwrap()), "2001:db8::1");
-        let m = Matcher { prefix: "k01", ci: false, after_text: None, after: None, size: 3 };
+        let never = std::sync::atomic::AtomicBool::new(false);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+        let m = Matcher { prefix: "k01", ci: false, after_text: None, after: None, size: 3, deadline, timed_out: &never };
         assert!(m.past(TermKind::Raw, b"k02"));
         assert!(!m.past(TermKind::Raw, b"k011"));
         assert!(!m.past(TermKind::Raw, b"a"));
         // Version prefixes apply to the decoded text, so they never end a scan.
         assert!(!m.past(TermKind::Version, b"zzz"));
         let enc = search_aggs::version_string::encode("1.11000.0").unwrap();
-        let v = Matcher { prefix: "1.1100", ci: false, after_text: None, after: None, size: 3 };
+        let v = Matcher { prefix: "1.1100", ci: false, after_text: None, after: None, size: 3, deadline, timed_out: &never };
         assert_eq!(v.text(TermKind::Version, &enc).as_deref(), Some("1.11000.0"));
     }
 }

@@ -45,6 +45,10 @@ struct Inner {
     browser: Option<super::browser::Policy>,
     /// What the request may still fetch (hits, `top_hits`, inner hits) under the policy.
     fetch_left: std::sync::atomic::AtomicI64,
+    /// The distinct texts the request may still embed under the policy.
+    inference_left: std::sync::atomic::AtomicI64,
+    /// The searches collapse's `inner_hits` may still expand under the policy.
+    sub_searches_left: std::sync::atomic::AtomicI64,
 }
 
 impl std::fmt::Debug for ReadSecurity {
@@ -226,8 +230,20 @@ impl ReadSecurity {
         }
         let st = ctx.state();
         let aliases = st.metadata.indices.values().filter(|i| !i.aliases.is_empty()).map(|i| (i.name.clone(), i.aliases.keys().cloned().collect())).collect();
-        let fetch_left = std::sync::atomic::AtomicI64::new(browser.map_or(i64::MAX, |b| b.max_result_window));
-        Some(ReadSecurity(Arc::new(Inner { eff, aliases, user: user_params(p), salt: super::opensearch::masking_salt(ctx.cluster), browser, fetch_left })))
+        let left = |n: fn(&super::browser::Policy) -> i64| std::sync::atomic::AtomicI64::new(browser.as_ref().map_or(i64::MAX, n));
+        let fetch_left = left(|b| b.max_result_window);
+        let inference_left = left(|b| b.max_inference);
+        let sub_searches_left = left(|_| super::browser::MAX_SUB_SEARCHES);
+        Some(ReadSecurity(Arc::new(Inner {
+            eff,
+            aliases,
+            user: user_params(p),
+            salt: super::opensearch::masking_salt(ctx.cluster),
+            browser,
+            fetch_left,
+            inference_left,
+            sub_searches_left,
+        })))
     }
 
     /// The browser key policy its reads run under (`None`: not a browser key).
@@ -246,6 +262,35 @@ impl ReadSecurity {
             )));
         }
         Ok(())
+    }
+
+    /// Takes `n` distinct texts from what the request may embed (a browser key's
+    /// `max_inference`, shared by every query and `_msearch` item): past it, 400.
+    pub fn spend_inference(&self, n: usize) -> EsResult<()> {
+        let Some(b) = &self.0.browser else { return Ok(()) };
+        let n = n as i64;
+        if self.0.inference_left.fetch_sub(n, std::sync::atomic::Ordering::Relaxed) < n {
+            return Err(super::browser::refused(format!(
+                "embedding more than [{}] distinct texts in one request (the key's max_inference)",
+                b.max_inference
+            )));
+        }
+        Ok(())
+    }
+
+    /// Takes one search collapse's `inner_hits` expands: at most
+    /// [`super::browser::MAX_SUB_SEARCHES`] a request, each one document of the fetch budget.
+    pub fn spend_sub_search(&self) -> EsResult<()> {
+        if self.0.browser.is_none() {
+            return Ok(());
+        }
+        if self.0.sub_searches_left.fetch_sub(1, std::sync::atomic::Ordering::Relaxed) <= 0 {
+            return Err(super::browser::refused(format!(
+                "expanding more than [{}] collapsed groups' inner hits in one request (inner hits definitions times page hits)",
+                super::browser::MAX_SUB_SEARCHES
+            )));
+        }
+        self.spend_fetch()
     }
 
     /// Refuses `what` (painless, `explain`) when a browser key's policy doesn't allow it.

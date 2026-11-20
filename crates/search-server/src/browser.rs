@@ -19,8 +19,8 @@
 //! changes nothing), so a drained address keeps its debt.
 //!
 //! **Concurrency.** Browser requests running at once are capped per key (`max_concurrent`,
-//! default 4) and per cluster (a quarter of the cluster's `max_in_flight`, at least 4), so the
-//! owner's own clients always have permits left.
+//! default 4) and per cluster (a quarter of the cluster's `max_in_flight`, at least 4 but never
+//! more than half), so the owner's own clients always have permits left.
 
 use parking_lot::Mutex;
 use std::collections::HashMap;

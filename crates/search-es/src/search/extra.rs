@@ -510,14 +510,15 @@ fn knn_query(ctx: &QueryCtx, k: &crate::query::specialized::Knn) -> EsResult<Que
     };
     // The alias filter is one more pre-filter (`KnnVectorQueryBuilder` gets it from the
     // `SearchExecutionContext`).
-    let mut filters: Vec<&Query> = k.filter.iter().collect();
+    // The alias filter is the owner's: a browser key's policy doesn't hold it.
+    let mut filters: Vec<(&Query, bool)> = k.filter.iter().map(|f| (f, false)).collect();
     if let Some(af) = &ctx.alias_filter {
-        filters.push(af);
+        filters.push((af, true));
     }
     if !filters.is_empty() {
         let mut b = search_index::query::BooleanQuery::new();
-        for x in filters {
-            let mut fq = ctx.to_filter(x)?;
+        for (x, owners) in filters {
+            let mut fq = if owners { ctx.owner_filter(x)? } else { ctx.to_filter(x)? };
             // Nested vectors: a filter that may match parents is a filter over parents, joined
             // to their children (`KnnVectorQueryBuilder.doToQuery`).
             if let Some(np) = &f.nested_path

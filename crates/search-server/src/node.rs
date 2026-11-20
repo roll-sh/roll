@@ -752,6 +752,13 @@ impl search_es::xpack::security::browser::ItemCharge for Charger {
             l.browser.refund(key_id, client, limit, 1);
         })
     }
+
+    fn refund(&self, key_id: &str, client: Option<std::net::IpAddr>) {
+        let Some(l) = self.node.upgrade().and_then(|node| node.get_loaded(&self.name)) else { return };
+        if let Some(limit) = key_limit(&l, key_id) {
+            l.browser.refund(key_id, client, limit, 1);
+        }
+    }
 }
 
 /// The `http.cors.*` node settings a cluster shows for its spec (none with CORS off).

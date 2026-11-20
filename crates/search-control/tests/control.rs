@@ -1002,41 +1002,59 @@ async fn stored_results_belong_to_their_opener() {
     assert_eq!(console("GET", &format!("/_query/async/{esql}"), Value::Null).await["status"], 200);
 }
 
-/// A browser key's refusals happen where the engine has the request parsed: a query type it
-/// may not run anywhere in the request (`?q=` builds a `query_string`), painless in any form,
-/// `explain` at any level, a window past its `max_result_window` however `size` is written,
-/// and APIs that hold state or read term statistics.
+/// A browser key's refusals happen where the engine has the request parsed or runs it: a query
+/// type it may not run anywhere in the request (`?q=` builds a `query_string`, `percolate`),
+/// painless in any form, `explain` at any level (collapse's expansions too), inference past its
+/// `max_inference`, a window past its `max_result_window` however `size` is written (a
+/// `_terms_enum`'s too), and APIs that hold state or read term statistics. Each answers why.
 #[tokio::test]
 async fn a_browser_key_only_searches() {
     let e = env().await;
     let key = filtered_key(&e).await;
+    // A `semantic_text` field: its endpoint is one the key may embed with.
+    let r = e.post("/v1/search/clusters/shop/request", json!({"method": "PUT", "path": "/products/_mapping", "body": {"properties": {"body": {"type": "semantic_text"}}}})).await;
+    assert_eq!(r["status"], 200, "{r}");
     let terms = |sub: Value| json!({"size": 0, "aggs": {"c": {"terms": {"field": "color.keyword"}, "aggs": {"t": sub}}}});
+    let five_texts: Vec<Value> = (0..5).map(|i| json!({"sparse_vector": {"field": "body", "inference_id": ".elser-2-elasticsearch", "query": format!("text {i}")}})).collect();
+    // Why each is refused: the browser policy, `search.allow_expensive_queries: false`'s own
+    // refusal, or the key's window.
+    let (browser, expensive, window) = ("isn't available to a browser key", "'search.allow_expensive_queries' is set to false", "for a browser key");
+    let post = reqwest::Method::POST;
     let refused = [
-        (reqwest::Method::POST, "/products/_search?q=title:sh*", None),
-        (reqwest::Method::POST, "/products/_search", Some(json!({"query": {"bool": {"filter": [{"wildcard": {"title": "s*"}}]}}}))),
-        (reqwest::Method::POST, "/products/_search", Some(json!({"size": 0, "aggs": {"suggest": {"filter": {"regexp": {"title": "s.*"}}}}}))),
-        (reqwest::Method::POST, "/products/_search", Some(json!({"query": {"intervals": {"title": {"prefix": {"prefix": "sh"}}}}}))),
-        (reqwest::Method::POST, "/products/_search", Some(json!({"script_fields": {"x": {"script": "1"}}}))),
-        (reqwest::Method::POST, "/products/_search", Some(json!({"query": {"script_score": {"query": {"match_all": {}}, "script": {"source": "1"}}}}))),
-        (reqwest::Method::POST, "/products/_search", Some(json!({"sort": {"_script": {"type": "number", "script": "1"}}}))),
-        (reqwest::Method::POST, "/products/_search", Some(json!({"runtime_mappings": {"r": {"type": "long", "script": "emit(1)"}}}))),
-        (reqwest::Method::POST, "/products/_search", Some(terms(json!({"sum": {"script": "1"}})))),
-        (reqwest::Method::POST, "/products/_search", Some(terms(json!({"top_hits": {"explain": true}})))),
-        (reqwest::Method::POST, "/products/_search?explain=true", Some(json!({}))),
-        (reqwest::Method::POST, "/products/_search", Some(json!({"size": "5000"}))),
-        (reqwest::Method::POST, "/products/_search?size=600", Some(json!({"from": 500}))),
-        (reqwest::Method::POST, "/products/_search?scroll=1m", Some(json!({}))),
-        (reqwest::Method::POST, "/products/_pit?keep_alive=1m", None),
-        (reqwest::Method::POST, "/products/_async_search?keep_on_completion=true", Some(json!({}))),
-        (reqwest::Method::GET, "/products/_termvectors/1", None),
-        (reqwest::Method::POST, "/products/_explain/1", Some(json!({"query": {"match_all": {}}}))),
+        (post.clone(), "/products/_search?q=title:sh*", None, browser),
+        (post.clone(), "/products/_search", Some(json!({"query": {"bool": {"filter": [{"wildcard": {"title": "s*"}}]}}})), expensive),
+        (post.clone(), "/products/_search", Some(json!({"size": 0, "aggs": {"suggest": {"filter": {"regexp": {"title": "s.*"}}}}})), expensive),
+        (post.clone(), "/products/_search", Some(json!({"query": {"intervals": {"title": {"prefix": {"prefix": "sh"}}}}})), expensive),
+        (post.clone(), "/products/_search", Some(json!({"query": {"percolate": {"field": "q", "document": {"title": "shoes"}}}})), expensive),
+        (post.clone(), "/products/_search", Some(json!({"script_fields": {"x": {"script": "1"}}})), browser),
+        (post.clone(), "/products/_search", Some(json!({"query": {"script_score": {"query": {"match_all": {}}, "script": {"source": "1"}}}})), browser),
+        (post.clone(), "/products/_search", Some(json!({"sort": {"_script": {"type": "number", "script": "1"}}})), browser),
+        (post.clone(), "/products/_search", Some(json!({"runtime_mappings": {"r": {"type": "long", "script": "emit(1)"}}})), browser),
+        (post.clone(), "/products/_search", Some(terms(json!({"sum": {"script": "1"}}))), browser),
+        (post.clone(), "/products/_search", Some(terms(json!({"top_hits": {"explain": true}}))), browser),
+        (post.clone(), "/products/_search", Some(json!({"collapse": {"field": "color.keyword", "inner_hits": {"name": "x", "explain": true}}})), browser),
+        (post.clone(), "/products/_search", Some(json!({"query": {"bool": {"should": five_texts}}})), "embedding more than [4] distinct texts"),
+        (post.clone(), "/products/_search?explain=true", Some(json!({})), browser),
+        (post.clone(), "/products/_search", Some(json!({"size": "5000"})), window),
+        (post.clone(), "/products/_search?size=600", Some(json!({"from": 500})), window),
+        (post.clone(), "/products/_terms_enum", Some(json!({"field": "color.keyword", "size": 1001})), browser),
+        (post.clone(), "/products/_search?scroll=1m", Some(json!({})), browser),
+        (post.clone(), "/products/_pit?keep_alive=1m", None, browser),
+        (post.clone(), "/products/_async_search?keep_on_completion=true", Some(json!({})), browser),
+        (reqwest::Method::GET, "/products/_termvectors/1", None, browser),
+        (post.clone(), "/products/_explain/1", Some(json!({"query": {"match_all": {}}})), browser),
     ];
-    for (m, p, b) in refused {
+    for (m, p, b, why) in refused {
         let (s, v) = as_key(&e, &key, m.clone(), p, b.clone()).await;
-        assert!((400..500).contains(&s) && s != 429, "{m} {p} {b:?}: {s} {v}");
+        assert!((400..500).contains(&s) && s != 429 && v.to_string().contains(why), "{m} {p} {b:?}: {s} {v}");
     }
-    let (s, v) = as_key(&e, &key, reqwest::Method::POST, "/products/_search", Some(json!({"query": {"match": {"title": {"query": "shose", "fuzziness": "AUTO"}}}}))).await;
+    let (s, v) = as_key(&e, &key, post.clone(), "/products/_search", Some(json!({"query": {"match": {"title": {"query": "shose", "fuzziness": "AUTO"}}}}))).await;
     assert_eq!((s, total(&v)), (200, 1), "search-as-you-type still works: {v}");
+    // `_terms_enum` works for a key that reads every document (its internal `_field_caps` call
+    // runs as the key).
+    let open = e.post("/v1/search/clusters/shop/browser-keys", json!({"name": "open", "indices": ["products"]})).await["api_key"].as_str().unwrap().to_string();
+    let (s, v) = as_key(&e, &open, post, "/products/_terms_enum", Some(json!({"field": "color.keyword", "string": "r"}))).await;
+    assert_eq!((s, &v["terms"]), (200, &json!(["red"])), "{v}");
 }
 
 /// One fetch budget per request: hits, and `top_hits` in every bucket, together within the

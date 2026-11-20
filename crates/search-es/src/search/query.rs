@@ -36,8 +36,11 @@ pub struct QueryCtx<'a> {
     pub nested: RefCell<Option<String>>,
     /// Named queries (`_name`), for `matched_queries`.
     pub named: RefCell<Vec<(String, QueryRef)>>,
-    /// `search.allow_expensive_queries`.
+    /// `search.allow_expensive_queries` (a browser key's policy aside: [`Self::allows_expensive`]).
     pub allow_expensive: bool,
+    /// Converting the owner's own filter (an alias filter, a role's document query, a browser
+    /// key's `filter`): a browser key's policy doesn't hold it ([`Self::owner_filter`]).
+    pub owner: std::cell::Cell<bool>,
     /// Inner hits definitions met while converting (`nested`, `has_child`, `has_parent`).
     pub inner_hits: RefCell<Vec<InnerHitsDef>>,
     /// The shard id within the index (random_score salting).
@@ -199,10 +202,7 @@ pub fn qse(ctx: &QueryCtx, reason: impl Into<String>) -> EsError {
 
 impl<'a> QueryCtx<'a> {
     pub fn new(cluster: &'a Cluster, st: &'a ClusterState, idx: &'a IndexMeta, table: &'a Arc<FieldTable>, searcher: &'a Searcher, now_ms: i64, security: Reader) -> QueryCtx<'a> {
-        // A browser key's queries run as `search.allow_expensive_queries: false` unless the key
-        // allows them ([`crate::xpack::security::browser`]).
-        let allow = st.metadata.cluster_setting("search.allow_expensive_queries").is_none_or(|v| v != "false")
-            && security.browser().is_none_or(|p| p.allow_expensive_queries);
+        let allow = st.metadata.cluster_setting("search.allow_expensive_queries").is_none_or(|v| v != "false");
         QueryCtx {
             cluster,
             st,
@@ -213,6 +213,7 @@ impl<'a> QueryCtx<'a> {
             nested: RefCell::new(None),
             named: RefCell::new(Vec::new()),
             allow_expensive: allow,
+            owner: std::cell::Cell::new(false),
             inner_hits: RefCell::new(Vec::new()),
             shard: 0,
             warnings: RefCell::new(Vec::new()),
@@ -258,7 +259,7 @@ impl<'a> QueryCtx<'a> {
 
     /// A query over runtime field values (`AbstractScriptFieldQuery`, constant scoring).
     pub(crate) fn runtime_query(&self, f: Arc<super::runtime::RtField>, pred: super::runtime::Predicate) -> EsResult<QueryRef> {
-        if !self.allow_expensive {
+        if !self.allows_expensive() {
             return Err(EsError::new(400, "exception", "queries cannot be executed against runtime fields while [search.allow_expensive_queries] is set to [false]."));
         }
         self.no_scripts()?;
@@ -361,17 +362,39 @@ impl<'a> QueryCtx<'a> {
         self.expensive(what)
     }
 
+    /// The browser key policy the query being converted is held to: the reader's, except in
+    /// the owner's own filters.
+    pub fn browser(&self) -> Option<&crate::xpack::security::browser::Policy> {
+        self.security.browser().filter(|_| !self.owner.get())
+    }
+
+    /// Whether expensive queries may run: `search.allow_expensive_queries`, and a browser key's
+    /// queries only when the key allows them ([`crate::xpack::security::browser`]).
+    pub fn allows_expensive(&self) -> bool {
+        self.allow_expensive && self.browser().is_none_or(|p| p.allow_expensive_queries)
+    }
+
+    /// Converts the owner's own filter (an alias filter, with the reader's document level
+    /// security query in it) as a filter: the cluster's settings hold it, a browser key's policy
+    /// doesn't (the filter is the owner's, as an Algolia secured key's filters are).
+    pub fn owner_filter(&self, q: &Query) -> EsResult<QueryRef> {
+        let was = self.owner.replace(true);
+        let r = self.to_filter(q);
+        self.owner.set(was);
+        r
+    }
+
     /// Refuses painless for a browser key that doesn't allow scripts: called wherever a query,
     /// sort, highlighter or runtime field compiles one.
     pub fn no_scripts(&self) -> EsResult<()> {
-        match &self.security {
-            Reader::Restricted(s) => s.refuse_for_browser(crate::xpack::security::browser::Banned::Scripts),
+        match self.browser() {
+            Some(p) if !p.allows(crate::xpack::security::browser::Banned::Scripts) => Err(crate::xpack::security::browser::refused(crate::xpack::security::browser::Banned::Scripts.describe())),
             _ => Ok(()),
         }
     }
 
     fn expensive(&self, what: &str) -> EsResult<()> {
-        if !self.allow_expensive {
+        if !self.allows_expensive() {
             return Err(EsError::new(
                 400,
                 "exception",
@@ -456,7 +479,7 @@ impl<'a> QueryCtx<'a> {
             Q::CombinedFields(c) => text::combined_fields(self, c),
             Q::QueryString(qs) => {
                 // Its syntax reaches wildcards, regexps and fuzziness (`?q=` builds one).
-                if self.security.browser().is_some_and(|p| !p.allow_expensive_queries) {
+                if self.browser().is_some_and(|p| !p.allow_expensive_queries) {
                     return Err(crate::xpack::security::browser::refused("a [query_string] query (`q` too)"));
                 }
                 super::query_string::query_string(self, qs)
@@ -973,7 +996,7 @@ impl<'a> QueryCtx<'a> {
                     return Err(not_searchable(&f));
                 }
                 let walks_terms = || {
-                    if self.allow_expensive {
+                    if self.allows_expensive() {
                         return Ok(());
                     }
                     Err(EsError::new(
@@ -1152,7 +1175,7 @@ impl<'a> QueryCtx<'a> {
 
     fn nested_query(&self, n: &crate::query::joining::Nested) -> EsResult<QueryRef> {
         // `NestedQueryBuilder.doToQuery`: block joins are expensive.
-        if !self.allow_expensive {
+        if !self.allows_expensive() {
             return Err(EsError::new(400, "exception", "[joining] queries cannot be executed when 'search.allow_expensive_queries' is set to false."));
         }
         let Some(o) = self.table.objects.get(&n.path).cloned() else {

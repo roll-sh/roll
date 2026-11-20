@@ -33,7 +33,7 @@ pub struct JoinInner {
 }
 
 fn expensive_check(ctx: &QueryCtx) -> EsResult<()> {
-    if !ctx.allow_expensive {
+    if !ctx.allows_expensive() {
         return Err(EsError::new(400, "exception", "[joining] queries cannot be executed when 'search.allow_expensive_queries' is set to false."));
     }
     Ok(())

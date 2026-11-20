@@ -13,7 +13,10 @@
 //! query is one such clause per configuration, each limited to its indices by `_index`.
 //!
 //! Inference runs with the cluster's authority: like Elasticsearch, which calls the inference
-//! action under its own origin, a reader needs only its read privileges on the indices.
+//! action under its own origin, a reader needs only its read privileges on the indices. A
+//! browser key ([`crate::xpack::security::browser`]) embeds only with the endpoints its target
+//! indices' `semantic_text` fields search with (or those its owner lists), at most its
+//! `max_inference` distinct texts a request, each charged to its rate limits before the call.
 
 use super::TaskType;
 use super::semantic::{ModelSettings, embeddings_path, chunks_path};
@@ -97,12 +100,30 @@ fn visit(q: &Query, f: &mut dyn FnMut(&Query)) {
 /// Rewrites every node needing inference in place.
 pub async fn rewrite(ctx: &Ctx<'_>, q: &mut Query, targets: &Targets, size: Option<i64>) -> EsResult<()> {
     // Collect the (endpoint, text) pairs first, embed each once, then rewrite.
-    let mut texts: Vec<(String, String)> = Vec::new();
+    let mut texts: Vec<Wanted> = Vec::new();
     collect(ctx, q, targets, &mut texts)?;
+    let mut distinct: Vec<Wanted> = Vec::new();
+    for t in texts {
+        if !distinct.iter().any(|d| d.id == t.id && d.text == t.text) {
+            distinct.push(t);
+        }
+    }
+    admit(ctx, targets, &distinct)?;
     let mut embedded: Vec<((String, String), super::results::Results)> = Vec::new();
-    for (id, text) in texts {
-        if embedded.iter().any(|(k, _)| k.0 == id && k.1 == text) {
-            continue;
+    for Wanted { id, text, what, field } in distinct {
+        // A `semantic_text` field's endpoint whose task no longer matches the field's model
+        // settings: the error its results would give, without the call.
+        if let Some(field) = &field
+            && let Some(ep) = super::endpoint(ctx.cluster, &ctx.state(), &id)
+            && !what.served_by(ep.task)
+        {
+            let name = |sparse: bool| if sparse { "text_expansion_result" } else { "text_embedding_result" };
+            let got = match ep.task {
+                TaskType::SparseEmbedding => name(true),
+                TaskType::TextEmbedding | TaskType::Embedding => name(false),
+                _ => "inference_result",
+            };
+            return Err(EsError::illegal_argument(format!("Field [{field}] expected query inference results to be of type [{}], got [{got}].", name(what == super::Use::Sparse))));
         }
         // A `sparse_vector` query's `inference_id` may name a trained model instead.
         if super::endpoint(ctx.cluster, &ctx.state(), &id).is_none()
@@ -113,10 +134,32 @@ pub async fn rewrite(ctx: &Ctx<'_>, q: &mut Query, targets: &Targets, size: Opti
         }
         let mut req = super::Request::new(vec![text.clone()], std::time::Duration::from_secs(30));
         req.input_type = Some("internal_search".into());
-        let (_, r) = super::run(ctx.cluster, &id, &req).await?;
+        let (_, r) = super::run(ctx.cluster, &id, what, &req).await?;
         embedded.push(((id, text), r));
     }
     apply(q, targets, &embedded, size)
+}
+
+/// A browser key's embeddings, before any call: only the endpoints its target indices'
+/// `semantic_text` fields search with, or those its `limits.inference_endpoints` name (an
+/// explicit `inference_id` or `model_id` otherwise is refused), at most its `max_inference`
+/// distinct texts a request (every query and `_msearch` item together), each one item of its
+/// rate limits.
+fn admit(ctx: &Ctx, targets: &Targets, distinct: &[Wanted]) -> EsResult<()> {
+    use crate::xpack::security::browser;
+    let Some(sec) = crate::xpack::security::dls::ReadSecurity::of(ctx) else { return Ok(()) };
+    let Some(p) = sec.browser() else { return Ok(()) };
+    if distinct.is_empty() {
+        return Ok(());
+    }
+    let fields: Vec<String> = targets.iter().flat_map(|(_, i)| super::semantic::fields(&i.mapping).into_iter().map(|(_, f)| super::semantic::search_inference_id(f))).collect();
+    if let Some(Wanted { id, .. }) = distinct.iter().find(|w| !fields.contains(&w.id) && !p.inference_endpoints.contains(&w.id)) {
+        return Err(browser::refused(format!(
+            "inference endpoint [{id}] (a browser key embeds only with its indices' semantic_text fields' endpoints and those its limits.inference_endpoints name)"
+        )));
+    }
+    sec.spend_inference(distinct.len())?;
+    browser::charge_work(ctx, "inference", distinct.len() as u64)
 }
 
 fn node(q: &Query) -> Option<(Kind, &str, String, Option<&str>)> {
@@ -133,7 +176,16 @@ fn node(q: &Query) -> Option<(Kind, &str, String, Option<&str>)> {
     }
 }
 
-fn collect(ctx: &Ctx, q: &Query, targets: &Targets, out: &mut Vec<(String, String)>) -> EsResult<()> {
+/// One text a query wants embedded: by which endpoint, for what, and for which `semantic_text`
+/// field (`None`: an explicit `inference_id` or `model_id`).
+struct Wanted {
+    id: String,
+    text: String,
+    what: super::Use,
+    field: Option<String>,
+}
+
+fn collect(ctx: &Ctx, q: &Query, targets: &Targets, out: &mut Vec<Wanted>) -> EsResult<()> {
     let st = ctx.state();
     let mut err = None;
     visit(q, &mut |q| {
@@ -141,7 +193,8 @@ fn collect(ctx: &Ctx, q: &Query, targets: &Targets, out: &mut Vec<(String, Strin
         if let Some(id) = explicit {
             // A `knn` builder's `model_id` may name a trained model instead (ML's path).
             if kind == Kind::Sparse || super::endpoint(ctx.cluster, &st, id).is_some() {
-                out.push((id.to_string(), text.clone()));
+                let what = if kind == Kind::Sparse { super::Use::Sparse } else { super::Use::Dense };
+                out.push(Wanted { id: id.to_string(), text: text.clone(), what, field: None });
             }
             if kind == Kind::Sparse {
                 return;
@@ -150,8 +203,9 @@ fn collect(ctx: &Ctx, q: &Query, targets: &Targets, out: &mut Vec<(String, Strin
         for (name, idx) in targets {
             match config(idx, field) {
                 FieldConfig::Semantic { inference_id, settings } => {
-                    if settings.is_some() {
-                        out.push((inference_id, text.clone()));
+                    if let Some(s) = settings {
+                        let what = if s.task == TaskType::SparseEmbedding { super::Use::Sparse } else { super::Use::Dense };
+                        out.push(Wanted { id: inference_id, text: text.clone(), what, field: Some(field.to_string()) });
                     }
                 }
                 FieldConfig::Other(ty) if kind == Kind::Semantic => {

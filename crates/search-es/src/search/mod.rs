@@ -121,7 +121,7 @@ pub struct Target {
 impl SearchRequest {
     /// The browser key policy the request runs under ([`crate::xpack::security::browser`]).
     pub fn browser(&self) -> Option<crate::xpack::security::browser::Policy> {
-        self.security.as_ref().and_then(|s| s.browser().copied())
+        self.security.as_ref().and_then(|s| s.browser().cloned())
     }
 }
 
@@ -819,7 +819,9 @@ fn shard_query_main(qctx: &QueryCtx, t: &Target, main: QueryRef) -> EsResult<Que
     // `DefaultSearchContext.buildFilteredQuery`: the non-nested filter first, and only where
     // the query (and the alias filter) might match nested documents.
     let alias = match &t.alias_filter {
-        Some(af) => Some(qctx.to_filter(af)?),
+        // The owner's (with the reader's document level security): a browser key's policy
+        // doesn't hold it.
+        Some(af) => Some(qctx.owner_filter(af)?),
         None => None,
     };
     let mut filters: Vec<QueryRef> = Vec::new();
@@ -2500,6 +2502,11 @@ fn execute_after_can_match(cluster: &Cluster, req: &SearchRequest, targets: &[Ta
 }
 
 fn execute_targets(cluster: &Cluster, req: &SearchRequest, targets: &[Target]) -> EsResult<SearchOutcome> {
+    // Every search a browser key's request runs (collapse's expansions, retrievers' children,
+    // the top-level one again) is held to its policy here, whoever built its source.
+    if let Some(p) = req.browser() {
+        crate::xpack::security::browser::check_parsed(&p, &req.source, req.scroll.is_some())?;
+    }
     if let Some(f) = &req.source.fusion {
         return fusion::execute(cluster, req, targets, f);
     }
@@ -3713,6 +3720,10 @@ fn collapse_inner_hits(cluster: &Cluster, req: &SearchRequest, c: &crate::search
         let Some(name) = spec.get("name").and_then(Value::as_str) else {
             return Err(EsError::illegal_argument("[inner_hits] must have a [name] when used in [collapse]"));
         };
+        // A browser key's request pays for each expansion, `size: 0` ones too.
+        if let Some(s) = &req.security {
+            s.spend_sub_search()?;
+        }
         let mut sub = req.clone();
         sub.scroll = None;
         // The group's documents among everything the compound retriever matches.
@@ -4065,7 +4076,7 @@ pub async fn search(ctx: &Ctx<'_>) -> EsResult<Reply> {
     // Retrievers that need inference: a top-level `text_similarity_reranker` reranks the page
     // after the search, and `rrf`/`linear`'s simplified `query`/`fields` form expands against
     // the targets' mappings.
-    let reranker = crate::xpack::inference::rerank::take(&mut body)?;
+    let reranker = crate::xpack::inference::rerank::take(ctx, &mut body)?;
     if let Some(b) = body.as_mut()
         && crate::xpack::inference::retrievers::uses_simplified(b)
     {
@@ -4751,9 +4762,15 @@ fn doc_allowed(cluster: &Cluster, st: &ClusterState, idx: &Arc<IndexMeta>, table
     Ok(searcher.explain(&query, doc).map_err(crate::engine::convert::index_error)?.is_match())
 }
 
-pub fn matches_doc(cluster: &Cluster, st: &ClusterState, idx: &Arc<IndexMeta>, engine: &Arc<IndexEngine>, shard: &Arc<ShardEngine>, id: &str, q: &crate::query::Query) -> EsResult<bool> {
-    shard.refresh()?;
-    let searcher = shard.searcher();
+/// Whether document `id` as a get read it (`realtime`: through the realtime get's reader, which
+/// holds what is written but not yet refreshed, without refreshing the shard) matches `q`, the
+/// owner's document level security query.
+#[allow(clippy::too_many_arguments)]
+pub fn matches_doc(cluster: &Cluster, st: &ClusterState, idx: &Arc<IndexMeta>, engine: &Arc<IndexEngine>, shard: &Arc<ShardEngine>, id: &str, q: &crate::query::Query, realtime: bool) -> EsResult<bool> {
+    let searcher = match realtime {
+        true => shard.shard.realtime_searcher(id.as_bytes()).map_err(crate::engine::convert::index_error)?,
+        false => shard.searcher(),
+    };
     let Some(doc) = find_doc(&searcher, id) else { return Ok(false) };
     let table = engine.table();
     let qctx = QueryCtx::new(cluster, st, idx, &table, &searcher, crate::time::now_millis(), crate::search::query::Reader::Unrestricted);

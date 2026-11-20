@@ -271,35 +271,62 @@ applications). A web page calls a cluster directly, with no backend of its own i
     `_terms_enum`, a search application's `_search`, and the root and `_security/_authenticate`
     that clients call first. Any other API is a 400 naming why: no scrolls, points in time or
     stored async searches (they hold state on the cluster), no term vectors or `_explain`, no
-    SQL, ES|QL or EQL, no search templates.
+    SQL, ES|QL or EQL, no search templates. The internal calls an allowed API makes for the key
+    (`_terms_enum` reads `_field_caps`) pass as that API; a client can't mark its own.
   - *Queries*: every query the request builds (the query, `post_filter`, aggregations' filters,
     highlight and rescore queries, inner hits, collapse, a search application's rendered
-    template) runs as Elasticsearch's `search.allow_expensive_queries: false` unless
-    `limits.allow_expensive_queries`: no `regexp`, `wildcard`, `prefix` or `fuzzy` queries,
-    joining queries (`nested`, `has_child`, `has_parent`), ranges on `text` or `keyword`, or
-    queries on runtime fields; and no `query_string` (so no `?q=`), intervals' `prefix`,
-    `wildcard`, `regexp` or `fuzzy` rules, or `span_multi` over them. A `match` with
-    `fuzziness`, `match_phrase_prefix`, `match_bool_prefix`, `multi_match` (`bool_prefix`
-    included), `simple_query_string`, `search_as_you_type` fields and the completion suggester
-    stay: that's search-as-you-type. A search application's template a browser key runs is held
-    to the same list: write it with those (Elastic's default template uses `query_string`, so a
-    browser key can't run it).
+    template), unless `limits.allow_expensive_queries`, gets the refusals of Elasticsearch's
+    `search.allow_expensive_queries: false`: no `regexp`, `wildcard`, `prefix` (without
+    `index_prefixes`) or `fuzzy` queries, joining queries (`nested`, `has_child`, `has_parent`),
+    `percolate`, ranges on `text` or `keyword`, script queries, or queries on runtime fields.
+    roll adds its own: no `query_string` (so no `?q=`: its syntax reaches regexps, wildcards and
+    fuzziness), intervals' `prefix`, `wildcard`, `regexp` or `fuzzy` rules, or `span_multi`
+    over them. Elasticsearch's setting leaves alone what search-as-you-type needs, and so does a
+    browser key: a `match` with `fuzziness` and `match_phrase_prefix`, `match_bool_prefix` and
+    `multi_match` (`bool_prefix` included), whose expansions stop at `max_expansions` (50);
+    `simple_query_string` (its `*` and `~` operators included); `search_as_you_type` fields and
+    the completion suggester. A search application's template a browser key runs is held to the
+    same list: write it with those (Elastic's default template uses `query_string`, so a browser
+    key can't run it). The owner's own filters (the key's `filter`, an alias's filter) aren't
+    held to the list: they're the owner's, as an Algolia secured key's filters are.
   - *Painless*: none compiles for the key unless `limits.allow_scripts`: script queries and
     scores, `script_fields`, `runtime_mappings` and the mapping's runtime fields, scripted sorts,
     aggregations and pipelines, highlighters over runtime fields.
-  - *The search source*, URL and body merged, every `_msearch` item included: no `explain` (at
-    any level: `top_hits` and inner hits too) or `profile`, no `pit` or scroll; `from + size` at
-    most `limits.max_result_window` (1,000).
+  - *The search source*, URL and body merged, every `_msearch` item included, and again for
+    every search the request runs (collapse's `inner_hits` expansions, retrievers' children): no
+    `explain` (at any level: `top_hits` and inner hits too) or `profile`, no `pit` or scroll;
+    `from + size` at most `limits.max_result_window` (1,000).
   - *One fetch budget per request*: every document the request fetches (hits, `top_hits` in
     every bucket, inner hits; an `_msearch`'s items share it) counts against
-    `limits.max_result_window`, past it 400; aggregations stop at `limits.max_buckets` (1,000).
+    `limits.max_result_window`, past it 400; so does each search collapse's `inner_hits` expand
+    (one per definition per page hit, `size: 0` ones too), at most 100 a request; aggregations
+    stop at `limits.max_buckets` (1,000). `significant_text` re-analyzes the `_source` of every
+    document it collects (every match, as in Elasticsearch, which suggests a `sampler` above
+    it), and no limit above bounds that: a browser key's `significant_text` over a broad query
+    costs that much text analysis per request, so the page's queries should put it under a
+    `sampler`.
+  - *Inference* (queries on `semantic_text` fields, `semantic`, `sparse_vector` and `knn` that
+    embed a text, `text_similarity_reranker`): a browser key embeds only with the endpoints its
+    target indices' `semantic_text` fields search with, plus those `limits.inference_endpoints`
+    names; an explicit `inference_id` or `model_id` naming any other is a 400. At most
+    `limits.max_inference` (4) distinct texts a request (every query and `_msearch` item
+    together, a reranker counting one), each charged one item to the rate limits (below) before
+    its call. A reranker needs its endpoint in `inference_endpoints` and a `rank_window_size` of
+    at most `limits.max_rerank_window` (100), and is charged one item per 10 documents of its
+    window. For every caller, an endpoint whose task type can't serve the query (a
+    `text_embedding` one named by `sparse_vector`) is refused before the call.
+  - *`_terms_enum`*: `size` at most `limits.max_result_window` (Elasticsearch caps no one);
+    its `timeout` holds during the walk for everyone, as in Elasticsearch, past it the terms
+    found so far with `complete: false`. An index whose documents the key's `filter` restricts
+    takes no part (as for any reader with document level security).
   - *Items*: an `_msearch`'s searches and an `_mget`'s documents, as the engine parsed them
     (whatever the URL, `?source=` or body format), are charged to the key's rate limits before
     they run (below); more than `limits.max_items` (100) is a 429.
 
   The owner widens them in `limits` when making the key (`max_concurrent` 1-64,
-  `max_result_window` up to 10,000, `max_buckets` up to 65,536, `max_items` up to 1,000, the two
-  `allow_` switches); the list shows them.
+  `max_result_window` up to 10,000, `max_buckets` up to 65,536, `max_items` up to 1,000,
+  `max_inference` up to 64, `max_rerank_window` up to 1,000, `inference_endpoints` up to 16
+  ids, the two `allow_` switches); the list shows them.
 - *Term statistics aren't filtered* (as in Elasticsearch): a filter (document level security)
   hides documents from searches and gets, and exact counts, but `_score` (idf, average field
   lengths), term vectors' `term_statistics` and `_explain` come from every document of the
@@ -312,8 +339,8 @@ applications). A web page calls a cluster directly, with no backend of its own i
   visitors, and the per-address one keeps a single visitor from using it up. Per cluster,
   `browser_per_minute` (`PATCH`; `null`: 6,000) is a ceiling every browser key draws from. The
   cluster's owner node charges each request a browser key authenticates one token per item it
-  holds (an `_msearch` of 50 searches, an `_mget` of 50 documents: 50) to every bucket, all or
-  none: the cluster's, the key's, and the key's per client address at three widths (the address,
+  holds (an `_msearch` of 50 searches, an `_mget` of 50 documents: 50; inference above adds its
+  items) to every bucket, all or none: the cluster's, the key's, and the key's per client address at three widths (the address,
   an IPv6 /64 counting as one; its /56 at 4 times and its /48 at 16 times the per-address limit;
   IPv4 /32, /24 and /16), the wider two never past a quarter of the key's or the cluster's limit,
   so one network can't take more than a quarter of either. An empty bucket answers 429 `es_rejected_execution_exception` (as Elasticsearch
@@ -490,7 +517,7 @@ origins (browser search), once they're on main.
 | POST | `/v1/search/clusters/{id}/keys` | a new API key of the cluster `{name, expires_in_s?, access?}` (`access`: `admin`, the default, or `data`: a link's role, data, templates, pipelines and lifecycle policies without security) → `{id, name, access, api_key, url, expires_at?}` (`access`: the access the key was made with): `api_key` is `base64(<key id>@<cluster>:<key>)` for `Authorization: ApiKey …`, in this answer only (roll secrets' managed links use it instead of sharing the password); on an OpenSearch-flavor cluster (whose clients sign in with a user) the key is an internal user of its own: `{id, name, access, username, password, url, expires_at?}` without `api_key`, `username` being `<user>@<cluster>`, refused once `expires_in_s` passes |
 | DELETE | `/v1/search/clusters/{id}/keys/{key}` | revoke it (204; 404 when it's gone). On a deleted cluster (by its id) the revoke is kept and applied by its restore (204) |
 | GET | `/v1/search/clusters/{id}/browser-keys` | `{keys}`: the browser keys that still work, newest first, each `{id, name, indices or application, filter?, rate_limit, created_at, expires_at}` (no secret). Wakes the cluster |
-| POST | `/v1/search/clusters/{id}/browser-keys` | a key a web page ships (above) `{name, indices or application, filter?, expires_in_s?, rate_limit?: {per_minute?, per_ip_per_minute?}, limits?: {max_concurrent?, max_result_window?, max_buckets?, max_items?, allow_scripts?, allow_expensive_queries?}}` → the same fields plus `api_key` (once) and `url`. 400 on an OpenSearch-flavor cluster; 409 past 20 browser keys |
+| POST | `/v1/search/clusters/{id}/browser-keys` | a key a web page ships (above) `{name, indices or application, filter?, expires_in_s?, rate_limit?: {per_minute?, per_ip_per_minute?}, limits?: {max_concurrent?, max_result_window?, max_buckets?, max_items?, max_inference?, max_rerank_window?, inference_endpoints?, allow_scripts?, allow_expensive_queries?}}` → the same fields plus `api_key` (once) and `url`. 400 on an OpenSearch-flavor cluster; 409 past 20 browser keys |
 | DELETE | `/v1/search/clusters/{id}/browser-keys/{key}` | revoke a browser key (204; 404 for any other key of the cluster; on a deleted cluster, a browser key of it is kept for the restore, which revokes it: 202) |
 | GET | `/v1/search/clusters/{id}/remotes` | the remote clusters it holds credentials for: `{remotes: [{alias, cluster, cluster_id, key_id, minted, created_at, connected}]}` (never the key) |
 | PUT | `/v1/search/clusters/{id}/remotes/{alias}` | link another cluster of the same owner as remote `alias` (above): `{cluster, skip_unavailable?, access?}` or `{cluster, skip_unavailable?, api_key}` → `{alias, cluster, cluster_id, mode, proxy_address, key_id, minted, skip_unavailable?}`; 404 for a cluster the caller can't link to, missing or not. `admin` on both clusters for roll-access |

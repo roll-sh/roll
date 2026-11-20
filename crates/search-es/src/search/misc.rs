@@ -563,7 +563,7 @@ fn termvectors_one(ctx: &Ctx, index: &str, id: Option<&str>, doc: Option<&Value>
             if got.is_some()
                 && let Some(sec) = crate::xpack::security::dls::ReadSecurity::of(ctx)
                 && let Some(q) = sec.documents(ctx.cluster, crate::xpack::security::dls::READ, &idx.name)?
-                && !crate::search::matches_doc(ctx.cluster, &st, &idx, &engine, &shard, id, &q)?
+                && !crate::search::matches_doc(ctx.cluster, &st, &idx, &engine, &shard, id, &q, realtime)?
             {
                 got = None;
             }
