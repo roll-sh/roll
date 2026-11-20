@@ -40,20 +40,23 @@ config with your address filled in.
 
 ### Toolsets
 
-Every product's tools are about 310 (roll's own and roll code's: ~200 KB, ~25k tokens of what a
-model reads), before an agent does anything. Building that list takes 6.5 ms at p50 and 15.5 ms at
+Every product's tools are about 430 (roll's own and roll code's: ~300 KB, ~47k tokens of what a
+model reads; `pnpm test:mcp-sweep` prints the count and size, `GET /v1/mcp/toolsets` each
+product's), before an agent does anything. Apps is the largest (89 tools, ~12k tokens), then
+secrets (64, ~8k); measured on main 2026-11-20. Building that list takes 6.5 ms at p50 and 15.5 ms at
 p99 in release (`tools_list_cost`, an ignored test: linear in the tools, 3.2 ms for 149), and a
 client keeps it for a minute (`ttlMs`). Connect to `/v1/mcp?toolsets=postgres,code` (or send `X-MCP-Toolsets: postgres,code`) to
 list only those products' tools, as GitHub's MCP server does; the access tools (approvals,
-`access_check`) are always listed. On a four-product node, Redis alone is 12 tools, ~2.4k tokens
-instead of ~16k. An unknown name is `400`, naming the toolsets there are. The dashboard's connect
+`access_check`) are always listed. Redis alone is 10 tools and the access tools 11, ~2.2k
+tokens instead of ~47k. An unknown name is `400`, naming the toolsets there are. The dashboard's connect
 panel picks them. A toolset only narrows the list: the token's rules decide every call as before,
 and OAuth's resource is the server whatever the toolsets (checked with the TypeScript SDK).
 
 Clients cap how many tools they take. VS Code refuses a chat request with more than 128 tools, its
 own built-in ones included ("Cannot have more than 128 tools per request"); Windsurf takes 100;
 Cursor is reported to drop tools past about 40. Claude Code defers a long list behind its own tool
-search. So with every product on, VS Code, Windsurf and Cursor need toolsets: the connect panel
+search. So with every product on, VS Code, Windsurf and Cursor need toolsets, and apps alone with the
+access tools is 100, Windsurf's limit, so past it search mode is the way in: the connect panel
 adds up a choice (`GET /v1/mcp/toolsets`: each product's tools, read-only tools and context cost,
 to a caller) and warns past the picked client's limit.
 
@@ -62,9 +65,9 @@ that use them.
 
 ### Search mode
 
-With every product on, a node lists about 240 tools (~25k tokens), past VS Code's limit and far
-past Cursor's. `/v1/mcp?tools=search` (or `X-MCP-Tools: search`) lists the access tools plus three
-tools instead, about 1k tokens whatever runs. This is the pattern of Cloudflare's code mode and
+With every product on, a node lists about 430 tools (~47k tokens), past VS Code's,
+Windsurf's and Cursor's limits. `/v1/mcp?tools=search` (or `X-MCP-Tools: search`) lists the access tools plus three
+tools instead, about 1.8k tokens whatever runs (the three are ~500). This is the pattern of Cloudflare's code mode and
 GitHub's dynamic toolsets, applied to a stateless server:
 
 | Tool | What it does |
