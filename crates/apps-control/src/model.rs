@@ -616,6 +616,11 @@ pub struct Run {
     /// this many ms for a window, another instance, as `cpu_target` adds one (50–60,000).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub latency_target_ms: Option<u32>,
+    /// Audiences its instances may ask roll's OIDC issuer for (Vercel's OIDC federation): each
+    /// instance reads a token from `ROLL_OIDC_URL` (`?aud=`, the first by default) that clouds'
+    /// federation and roll secrets' workload logins trust, so the app holds no key. At most five.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub oidc_audiences: Vec<String>,
     /// Commands on a schedule, each a job of the live deployment at its due times (Heroku
     /// Scheduler, Vercel crons): any service's, without a cron service of its own.
     #[serde(skip_serializing_if = "Vec::is_empty")]
@@ -1130,6 +1135,7 @@ impl Default for Run {
             skew_protection: false,
             queue_s: None,
             latency_target_ms: None,
+            oidc_audiences: Vec::new(),
             schedules: Vec::new(),
             push: Vec::new(),
             sidecars: Vec::new(),
@@ -1287,6 +1293,9 @@ impl Run {
         }
         if self.latency_target_ms.is_some_and(|t| !(50..=60_000).contains(&t)) {
             return bad("latency_target_ms is 50–60,000");
+        }
+        if self.oidc_audiences.len() > 5 || self.oidc_audiences.iter().enumerate().any(|(i, a)| a.is_empty() || a.len() > 256 || !a.bytes().all(|b| b.is_ascii_graphic()) || self.oidc_audiences[..i].contains(a)) {
+            return bad("oidc_audiences is up to five distinct audiences, 1–256 printable characters each (sts.amazonaws.com, a GCP pool provider, roll)");
         }
         let r = &self.rollout;
         if r.steps.len() > 5 || r.steps.iter().any(|s| !(1..=99).contains(s)) || r.steps.windows(2).any(|w| w[0] >= w[1]) {

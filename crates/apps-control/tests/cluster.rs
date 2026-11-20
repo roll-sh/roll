@@ -7,7 +7,7 @@
 //! owner (the forward lands on the owner's internal API, which hands it to the public router),
 //! and so is an API call through either node.
 
-use apps_control::integrations::{NoResources, NoSecrets, NoTls, StaticDns};
+use apps_control::integrations::{NoResources, NoSecrets, NoTls, Resources, StaticDns, StreamRecord};
 use apps_control::runtime::fake::Fake;
 use apps_control::store::{Sealer, Store};
 use apps_control::{Apps, AppsConfig, Deps};
@@ -46,6 +46,8 @@ struct Fleet {
     members: roll_cluster::MemoryStore,
     /// One runtime for every node (Fargate, one host's Docker): what a dead node ran keeps running.
     shared: Option<Arc<Fake>>,
+    /// The data products every node reaches (one roll stream for push), else none.
+    resources: Option<Arc<dyn Resources>>,
     _dir: tempfile::TempDir,
 }
 
@@ -62,7 +64,7 @@ async fn fleet_on(n: usize, shared: Option<Arc<Fake>>) -> Fleet {
     let project = ws.create("", "acme", "", None).unwrap().id;
     let db = code_sql::Db::open_sqlite(&dir.path().join("apps.db"), code_sql::SqliteOptions { readers: 2, cache_kib: 1024 }).unwrap();
     let members = roll_cluster::MemoryStore::new();
-    let mut f = Fleet { nodes: Vec::new(), project, ws, db, members, shared, _dir: dir };
+    let mut f = Fleet { nodes: Vec::new(), project, ws, db, members, shared, resources: None, _dir: dir };
     for i in 0..n {
         f.join(&format!("n{i}")).await;
     }
@@ -89,7 +91,7 @@ impl Fleet {
             builder: fake.clone(),
             sources: None,
             secrets: Arc::new(NoSecrets),
-            resources: Arc::new(NoResources),
+            resources: self.resources.clone().unwrap_or_else(|| Arc::new(NoResources)),
             resolver: Arc::new(StaticDns::default()),
             tls: Arc::new(NoTls),
             // One object store for every node (a site's files, logs): what a takeover reads.
@@ -593,4 +595,115 @@ async fn a_handoff_on_a_shared_runtime_keeps_the_instances() {
     let req = Request::builder().uri("/").header("host", svcs.iter().find(|(s, _)| s == id).unwrap().1.as_str()).body(Body::empty()).unwrap();
     assert_eq!(f.nodes[1].public.clone().oneshot(req).await.unwrap().status(), StatusCode::OK);
     assert_eq!(Fake::count(&shared.counts.creates), made, "the new owner still has its instance");
+}
+
+/// One roll stream every node reads, as the broker's group leases do: a partition held by a
+/// consumer that read within the last moment, committed offsets shared.
+#[derive(Default)]
+struct SharedStream {
+    records: parking_lot::Mutex<Vec<StreamRecord>>,
+    committed: parking_lot::Mutex<std::collections::HashMap<i32, i64>>,
+    /// Partition → (consumer, when it last read).
+    held: parking_lot::Mutex<std::collections::HashMap<i32, (String, std::time::Instant)>>,
+}
+
+#[async_trait::async_trait]
+impl Resources for SharedStream {
+    async fn link_vars(&self, kind: apps_control::model::LinkKind, _ref: &str) -> anyhow::Result<Vec<(String, String)>> {
+        anyhow::bail!("no {}", kind.as_str())
+    }
+    async fn read_group(&self, _stream: &str, _topic: &str, _group: &str, consumer: &str, _wait_ms: u64, limit: usize) -> anyhow::Result<Vec<StreamRecord>> {
+        let next: Vec<StreamRecord> = {
+            let committed = self.committed.lock();
+            let mut held = self.held.lock();
+            let now = std::time::Instant::now();
+            let mut mine = |p: i32| {
+                let h = held.entry(p).or_insert_with(|| (consumer.to_string(), now));
+                // A consumer that stopped reading lets its partitions go (the broker's lease).
+                if h.0 != consumer && now.duration_since(h.1) > Duration::from_millis(300) {
+                    *h = (consumer.to_string(), now);
+                }
+                if h.0 == consumer {
+                    h.1 = now;
+                }
+                h.0 == consumer
+            };
+            self.records.lock().iter().filter(|r| r.offset >= committed.get(&r.partition).copied().unwrap_or(0) && mine(r.partition)).take(limit).cloned().collect()
+        };
+        if next.is_empty() {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        Ok(next)
+    }
+    async fn commit(&self, _stream: &str, _topic: &str, _group: &str, _consumer: &str, partition: i32, offset: i64) -> anyhow::Result<()> {
+        let mut c = self.committed.lock();
+        let e = c.entry(partition).or_default();
+        *e = (*e).max(offset);
+        Ok(())
+    }
+}
+
+/// `run.push` across a takeover: the owner delivers, dies, and records that come after reach the
+/// app only from the node that took the service over (the dead node's loops end with its lease),
+/// every one committed.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_pushed_stream_is_delivered_by_the_node_that_takes_the_service_over() {
+    let stream = Arc::new(SharedStream::default());
+    let record = |offset: i64| StreamRecord { partition: 0, offset, timestamp: 1, value: Some(format!("r{offset}").into_bytes()), ..Default::default() };
+    stream.records.lock().extend((0..3).map(record));
+    let mut f = fleet_on(0, None).await;
+    f.resources = Some(stream.clone());
+    f.join("n0").await;
+    f.join("n1").await;
+    f.ws.place(roll_workspace::Scope::All, &f.project, roll_workspace::Kind::Stream, "st_ag2345678abc", 0.0, 0.0).unwrap();
+    let via = &f.nodes[0];
+    let push = json!([{ "stream": "st_ag2345678abc", "topic": "orders", "group": "web", "path": "/events", "max_in_flight": 1 }]);
+    let (st, svc) = call(&via.api, "POST", "/v1/apps/services", Some(json!({ "project": f.project, "name": "web", "source": {"kind": "image", "image": "nginx:1.27"}, "run": {"port": 80, "push": push} }))).await;
+    assert_eq!(st, StatusCode::CREATED, "{svc}");
+    let id = svc["id"].as_str().unwrap().to_string();
+    let dep = svc["environments"][0]["latest"]["id"].as_str().unwrap().to_string();
+    for _ in 0..1000 {
+        if call(&via.api, "GET", &format!("/v1/apps/services/{id}/environments/production/deploys/{dep}"), None).await.1["status"] == "active" {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    let key = apps_control::lease_key(&id);
+    let committed = |n: i64| stream.committed.lock().get(&0).copied().unwrap_or(0) >= n;
+    for _ in 0..400 {
+        for n in &f.nodes {
+            n.apps.cron_pass(code_sql::now_ms()).await;
+        }
+        if committed(3) {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    if !committed(3) {
+        let logs: Vec<String> = f.nodes.iter().flat_map(|n| n.apps.logs.follow(&format!("env:{id}/production"), 50).0.into_iter().map(|l| l.text)).collect();
+        let env = call(&via.api, "GET", &format!("/v1/apps/services/{id}/environments/production"), None).await.1;
+        panic!("the owner delivered nothing: {:?}\nlog {logs:?}\nenv active {} latest {}", stream.committed.lock(), env["active"], env["latest"]["status"]);
+    }
+    let owner = f.nodes.iter().position(|n| n.apps.deps.cluster.owns(&key)).unwrap();
+    let dead = f.nodes.remove(owner);
+    dead.server.abort();
+    dead.apps.deps.cluster.fault_kill();
+    stream.records.lock().extend((3..6).map(record));
+    let left = &f.nodes[0];
+    for _ in 0..600 {
+        left.apps.cron_pass(code_sql::now_ms()).await;
+        if committed(6) {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    assert!(left.apps.deps.cluster.owns(&key) && committed(6), "taken over and delivered: {:?}", stream.committed.lock());
+    let got = |n: &Node| n.apps.logs.follow(&format!("env:{id}/production"), 500).0.into_iter().map(|l| l.text).filter(|t| t.starts_with("got event")).collect::<Vec<_>>();
+    let (theirs, mine) = (got(&dead), got(left));
+    for o in 3..6 {
+        let want = format!("got event orders/0/{o} ");
+        assert!(mine.iter().any(|t| t.starts_with(&want)), "{want}: {mine:?}");
+        assert!(!theirs.iter().any(|t| t.starts_with(&want)), "the dead node delivered {want}: {theirs:?}");
+    }
+    drop(dead);
 }

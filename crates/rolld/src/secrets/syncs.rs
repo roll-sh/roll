@@ -730,6 +730,24 @@ mod tests {
         let logs: Json = serde_json::from_str(datadog).unwrap();
         assert_eq!((key.as_str(), logs[0]["message"].as_str(), logs[1]["ddtags"].as_str()), ("dd-key", Some("set A"), Some("project:prj_a,action:secrets.export")));
     }
+    /// A vendor's or a validity check's request (`request`) never follows a redirect: the 3xx
+    /// comes back, and the credential goes nowhere else.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_redirect_is_answered_never_followed() {
+        let followed = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let f = followed.clone();
+        let app = axum::Router::new()
+            .route("/user", axum::routing::get(|| async { (axum::http::StatusCode::FOUND, [("location", "/elsewhere")], "") }))
+            .route("/elsewhere", axum::routing::get(move || async move { f.store(true, std::sync::atomic::Ordering::SeqCst); "got it" }));
+        let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/user", l.local_addr().unwrap());
+        tokio::spawn(async move { axum::serve(l, app).await.unwrap() });
+        let d = super::AuditDeliver::new(true, super::super::Api::default());
+        let token = roll_secrets::Value::new("Bearer not-a-real-token");
+        let (status, _) = tokio::task::spawn_blocking(move || d.request("GET", &url, &[("authorization", &token)], None, 1024)).await.unwrap().unwrap();
+        assert_eq!(status, 302);
+        assert!(!followed.load(std::sync::atomic::Ordering::SeqCst), "the redirect was followed");
+    }
 }
 
 /// A cluster's own CA (`request_trusting`).

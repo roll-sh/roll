@@ -212,6 +212,15 @@ impl Apps {
                 return Err(Error::Conflict("it was explained less than a minute ago".into()));
             }
         }
+        // A try that failed waits out the minute too.
+        let now = code_sql::now_ms();
+        {
+            let mut failed = self.explain_failed.lock();
+            failed.retain(|_, at| now - *at < AGAIN_MS);
+            if failed.contains_key(dep) {
+                return Err(Error::Conflict("explaining it failed less than a minute ago: ask again in a moment".into()));
+            }
+        }
         // One question a deployment at a time: two clicks are one charge.
         let flight = format!("explain:{dep}");
         if !self.calling.lock().insert(flight.clone()) {
@@ -236,8 +245,17 @@ impl Apps {
             None => Vec::new(),
         };
         let (user, left) = case(&d, &row.name, &row.source, &build, &run);
-        let (answer, model) = explainer.ask(repo, SYSTEM, &user, &schema()).await?.ok_or_else(|| Error::Unavailable("the model gave no answer; try again".into()))?;
-        let e = read(&answer, &model, code_sql::now_ms(), left).ok_or_else(|| Error::Unavailable("the model's answer wasn't one; try again".into()))?;
+        let asked = async {
+            let (answer, model) = explainer.ask(repo, SYSTEM, &user, &schema()).await?.ok_or_else(|| Error::Unavailable("the model gave no answer; try again in a minute".into()))?;
+            read(&answer, &model, code_sql::now_ms(), left).ok_or_else(|| Error::Unavailable("the model's answer wasn't one; try again in a minute".into()))
+        };
+        let e = match asked.await {
+            Ok(e) => e,
+            Err(err) => {
+                self.explain_failed.lock().insert(dep.to_string(), code_sql::now_ms());
+                return Err(err);
+            }
+        };
         let (id, kept) = (dep.to_string(), e.clone());
         self.db(move |s| s.set_explanation(&id, &kept)).await?;
         Ok(e)

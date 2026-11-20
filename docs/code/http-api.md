@@ -189,7 +189,9 @@ Blocker   = {kind: "state" | "draft" | "untrusted" | "checks" | "needs_approval"
                    /* more may come: show unknown kinds by message */,
              message,
              key?: string, environments?: string[] /* secret_leak, secret_missing: the roll secrets key and where */,
-             path?: string, line?: number, fingerprint?: string /* secret_unstored: where (1-based line) and what .roll/secrets-allow names to keep it */}
+             path?: string, line?: number, fingerprint?: string /* secret_unstored: where (1-based line) and what .roll/secrets-allow names to keep it */,
+             validity?: {fingerprint, result: "live" | "invalid" | "unknown", account?: string, checked_at?: number, rotator?: "aws-iam" | "github-app"}
+               /* secret_unstored, with the project's roll secrets validity checks on: whether it works, as its provider answered (a live one is listed first); docs/secrets.md "Is it live?" */}
 QueueInfo = {id /* qe_… */, position: number | null /* 1-based while queued; null once it left */,
              lane: "urgent" | "normal", state: EntryState, error: string | null /* why it was ejected: one line */,
              output: string | null /* the failing checks' log tail behind `error`, "<check>:\n<tail>" per check */,

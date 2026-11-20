@@ -1027,7 +1027,8 @@ key is only flagged: it doesn't stop `roll run`, a deploy or a check.
 notice a day with its health findings (see Health): expired, missing, exposed, expiring and stale
 keys, worst first, each with its detail (`findings`), up to 10 per kind in the text, and a link to
 the Health view. Weak values aren't in it (that says something about a value, and a channel's
-readers needn't be ones who may reveal it), nor unread ones. Stale needs a `max_age_days`; live
+readers needn't be ones who may reveal it), nor unread ones; `decoy_used` is only for a URL a
+session or the operator set, and a decoy is stale as any key is (see Decoys). Stale needs a `max_age_days`; live
 and dynamic links never count as stale (they change on their own), managed ones do. The same
 outbox and retries as approval notices carry it; two nodes never both send it, since the day is
 claimed in the same write that queues the notice, and an environment with nothing to say is
@@ -1083,8 +1084,8 @@ is one click.
 
 `GET …/health` (`roll secrets health`, the dashboard's Health view) is every finding above in
 every standard environment and folder at once, worst first, so none waits on someone opening the
-right folder: `decoy_used` (a decoy key's credential was used; only the project's admins see it, see
-Decoys), `expired`, `rotation_failing` (a managed key's scheduled rotation fails: the
+right folder: `decoy_used` (a decoy key's credential was used; only the project's admins see it, signed in or
+the operator, see Decoys), `expired`, `rotation_failing` (a managed key's scheduled rotation fails: the
 database, vendor, product or rotator refused or didn't answer; the detail says why, the old
 credential keeps working, and the sweeper tries again; cleared by the next rotation that works),
 `revoke_failing` (a credential roll retired, or a lease that ended, that it couldn't revoke yet: it
@@ -3129,6 +3130,93 @@ AWS access keys, GitHub, Slack, Stripe live, Google, Anthropic and OpenAI keys, 
   Until the author changes the code, the change adds a value roll secrets now holds, so it reads as
   a `secret_leak` on its next head.
 
+#### Is it live? (validity checks)
+
+A found credential may already be revoked, or may be the key production runs on. As GitGuardian's
+validity checks do, roll secrets can ask the credential's provider whether it still works, so a
+live one is handled first. It contacts the provider, so it's off until a project's admin turns it
+on (`PATCH /v1/secrets/projects/{project} {validity_checks: "on"}`, `roll secrets validity-checks
+on`, or Validity checks in the project's environments settings), audited as `validity.checks`.
+
+- **What's checked.** Nothing that would trip a canary. For each kind:
+
+  | Kind | How | Account it names |
+  | --- | --- | --- |
+  | AWS access key | read offline from the key id, never tried (below) | the AWS account |
+  | GitHub token | `GET https://api.github.com/user` | the login |
+  | Stripe live key | `GET https://api.stripe.com/v1/balance` | |
+  | Slack token | `POST https://slack.com/api/auth.test` | the team id |
+  | OpenAI API key | `GET https://api.openai.com/v1/models` | |
+  | Anthropic API key | `GET https://api.anthropic.com/v1/models` | |
+  | roll's own tokens (every roll prefix) | neither tried nor looked up: one answer for all | |
+
+  - **AWS isn't tried by default.** `sts:GetCallerIdentity` is exactly what AWS canary tokens
+    (canarytokens.org's, GitGuardian's) alert on. An access key id carries its account: after the
+    `AKIA`/`ASIA` prefix it's base32, and bits 1–40 of its first 6 bytes are the account number
+    (`credentials::aws_account`; ids whose fifth character is `I` or `J` predate that and say
+    nothing). So the answer is `unknown` with that account, and nobody is asked. An operator who
+    wants AWS keys tried sets `ROLL_SECRETS_VALIDITY_AWS_LIVE=on`. rolld then signs a
+    `GetCallerIdentity` to `https://sts.amazonaws.com/` with the found pair: the secret access key
+    next to the key id, which is the nearest 40-character base64 word within 5 lines
+    (`credentials::aws_secret_near`). It never sends one for an `ASIA…` session key, a key with no
+    pair, or a canary's.
+  - **Canaries.** A key whose account is one canarytokens.org's AWS tokens (and their look-alikes)
+    are issued from is never tried. That's a bundled list of the accounts public secret scanners
+    know. The operator adds their own with `ROLL_SECRETS_VALIDITY_CANARIES` (`aws:123456789012`,
+    any provider's `provider:account`, or a credential by fingerprint, `sha256:…`; commas or spaces
+    between). A canary's answer is `unknown`, saying so.
+  - **roll's own tokens** are neither tried nor looked up. Every roll-prefixed credential (`rlt_`,
+    `rlo_` and every other roll prefix, decoys included) gets one answer: `unknown`, "a roll token:
+    roll revokes it when it lands". A roll token pushed to roll code is revoked when it lands
+    anyway (roll-access's `revoke_leaked`), so a lookup would add nothing. And with one answer for
+    all, nothing tells a decoy ("Decoys") from a real token. Nothing is kept or audited for them.
+
+  Google API keys, private keys and database URLs aren't checked.
+- **The answer** is `live` (accepted), `invalid` (refused: revoked, deleted or never real) or
+  `unknown` (not tried, a canary, a redirect, a rate limit, or an answer that says neither; `why`
+  says which), plus the account id where it's known. A Stripe restricted key that isn't allowed to
+  read the balance (403) still authenticated, so it's live. With live AWS checks on, a key id whose
+  found secret doesn't sign for it (`SignatureDoesNotMatch`) is unknown, not invalid.
+- **The rules.** Hosts are fixed in `crates/roll-secrets/src/validity.rs`, never configured. The
+  request goes through rolld's guarded client (public addresses only, no redirects, a 15-second
+  timeout, at most 64 KiB of the answer read) and carries the credential and the headers its API
+  needs (`Accept`, Anthropic's `anthropic-version`), nothing else. Each credential is checked once
+  per fingerprint: the answer is kept a day (an `unknown` one an hour), per project, and a project
+  gets at most 100 checks an hour. A check is claimed in a write first, so two callers or two nodes
+  never ask twice; the request goes out after that write, outside any transaction, and the answer
+  is stored with its `secrets.validity` audit row (kind, fingerprint, result and account) in
+  another. An AWS account read offline and a roll token's answer ask nobody and aren't kept. The value is never stored,
+  logged, audited or put in an error.
+- **Where it shows.** On a change, roll code asks in background work after it finds the
+  credentials (only those kinds, only on the repo's own changes, never a fork's, which would make
+  the notice an oracle for anyone's key; only when one of the projects with the repo on its canvas
+  that may reach it has the checks on), and the `secret_unstored` notice says what came back once it has:
+  a live one ranks first and reads `adds what looks like an AWS access key at deploy.py:2 (live: its
+  provider accepted it, account 123456789012), which roll secrets doesn't hold: rotate it, then
+  store it as …`; a refused one says `(revoked or invalid, its provider said)`. The notice carries
+  `validity: {fingerprint, result, account?, checked_at?, rotator?}`, and the change page marks a
+  live one. An AWS key's notice names its account: `(account 123456789012, not tried)`.
+  `GET …/unstored/{fingerprint}` answers the kept result, and `roll secrets scan` prints it
+  (below).
+- **Rotating it.** When the credential is live and roll has a rotator for its kind, the answer's
+  `rotator` names it and the change page links to where it's set up: `aws-iam` (roll secrets
+  rotating an IAM user's keys, "AWS" above; only with live AWS checks on) and `github-app` (a project's GitHub App tokens instead
+  of a personal token, "GitHub App tokens"). Nothing is rotated for you.
+- **Tests.** Fake providers only:
+  - `validity_checks_ask_each_provider_once_and_only_when_an_admin_turned_them_on`
+    (`tests/api.rs`): off asks nobody; only an admin turns it on; live, invalid and a redirect's
+    unknown; an AWS key's account read with no request; every roll token, a decoy too, with one
+    answer, byte for byte but for its fingerprint; a found decoy neither kept nor audited; one request each, carrying only the credential; the cache;
+    the audit rows without a value.
+  - `an_aws_key_is_tried_only_when_the_operator_allows_and_a_canary_never`: with live AWS on, a
+    canary account's key and an operator-listed fingerprint ask nobody, and an allowed key is signed
+    with its pair.
+  - `a_credential_that_still_works_ranks_first_and_says_live` (roll code's notice).
+  - `a_redirect_is_answered_never_followed` (rolld's guarded client).
+  - Unit tests: the key id's account, SigV4 and pairing.
+
+  No test calls a real provider.
+
 #### Keys a change starts reading
 
 The same pass over the lines a change adds also picks out the environment variables they read, by
@@ -3167,7 +3255,12 @@ otherwise it would confirm guesses at values the caller can't read. Each scan is
 It also lists credentials the project doesn't hold ("Credentials roll doesn't hold" above: the same
 detectors, placeholder rule and `.roll/secrets-allow`, read from the working tree's top), as
 `file:line  an AWS access key, not in roll secrets: roll secrets scan --store AWS_KEY=deploy.ts:2
-[sha256:…]` (`--json`: `{file, line, unstored: true, kind, fingerprint, suggested_key}`). A plain
+[sha256:…]` (`--json`: `{file, line, unstored: true, kind, fingerprint, suggested_key, validity?}`).
+When the project has validity checks on ("Is it live?" above), the scan asks about the kinds a
+provider can check (`POST …/validity`; nothing is sent while they're off) and a live one is listed
+first: `config.ts:4  a GitHub token LIVE, account octocat; rotate it (or use a GitHub App's
+short-lived tokens: roll secrets github-apps add), not in roll secrets: …`; a refused one says
+`(revoked or invalid)`, an AWS key `(account 123456789012, not tried)`. A plain
 scan only reports them; `--staged` refuses the commit unless `--allow-unstored`. To move one in:
 
 ```
@@ -4360,17 +4453,44 @@ a decoy credential:
 
 The key is an ordinary change (as a `PUT` of the key makes), so it reads, resolves, exports and
 syncs like any other key. Only the project's admins (`admin` over the whole project) see that it's
-a decoy:
-- the `decoy` on `Secret` in the folder's list (the dashboard's "decoy" badge, and "used N×" in
-  red once it's been used);
-- `decoy_used` in health;
-- its rows in the audit log (`secrets.decoy` when it's planted, `secrets.alert.decoy_used` on each
-  alert).
+a decoy, and only in a signed-in session (the dashboard) or with the operator token:
+- the `decoy` on `Secret` in the folder's list and on the key: who planted it and when
+  (`created_by`, `created_at`), and its uses (the dashboard's "decoy" badge, which says who planted
+  it, and "used N×" in red once it's been used);
+- `decoy_used` in health (and decoys left out of `stale` and `unread` there);
+- its `secrets.alert.decoy_used` rows in the audit log, one per alert, in listings, exports and the
+  audit sinks such a caller made;
+- its `decoy_used` notices, at a notify URL such a caller set.
 
-Everyone else gets the same answers as for any key, without those fields and rows. Nothing marks it
-in the grid, reach or a sync's target: syncing a decoy into CI, or exporting it into an old config,
-is the point. In a protected environment it lands without a change request. It changes no value
-anyone has, and only an admin (who could lift the protection) may plant one.
+Planting writes no audit row of its own: the change's only row is the key's ordinary
+`secrets.write`, as any new key's is, and the `decoy` on `Secret` is the record of who planted it.
+(Plants from before this wrote a `secrets.decoy` row; it's treated as an alert row is.)
+
+Every token gets the same answers as for any key, an admin's too: `rlt_` and `rlo_` grants (so an
+agent on roll MCP), workload identities' logins and roll's own in-process consumers. A
+prompt-injected agent, or whoever holds a leaked admin token, can't tell the decoys and skip them,
+which is who a decoy is for. `Caller::sees_decoys` is the one check. Their audit listings and
+exports leave the alert rows out, and sinks a token made never get them. The hash chain covers
+every field of a row, so redacting a row would fail `audit verify` as surely as leaving it out; an
+export without those rows has a gap at each, as any filtered export does (verify the log with `GET
+…/audit/verify`, or offline with an operator's or a session's export). Such a gap only says some
+decoy was used at some time, never which key: with no plant row, nothing in a token's view sits
+next to a decoy's own write. Nothing marks a decoy in the grid, reach or a sync's target: syncing a
+decoy into CI, or exporting it into an old config, is the point.
+
+A notify URL remembers whether a session or the operator set it (`notify_set_by_session`, set by
+`PUT …/policy`; a URL from before is counted as theirs only when every policy change the audit log
+still holds for its environment was). A URL a token set gets every other notice but never a decoy's:
+neither the alert nor `decoy_used` in the daily notice, and a decoy notice queued before a token
+replaced the URL is dropped. The audit row and the Health finding still record the use. The daily
+notice lists a decoy as `stale` as it would any key, whoever set the URL, so a channel can't tell
+the decoys by which old keys are missing.
+
+Planting one (`POST …/decoys`) takes a session or the operator token too: a token that planted one
+could tell it from the rest. In a protected environment it lands without a change request. It
+changes no value anyone has, and only an admin (who could lift the protection) may plant one.
+Ordinary writes still end a decoy by rights alone (deleting the key or giving it a value), and say
+nothing about it.
 
 **What to plant where.** Put it somewhere only an intruder reads, under a name a real credential
 would have (`LEGACY_DEPLOY_TOKEN`, `ROLL_ADMIN_TOKEN`). For example:
@@ -4385,8 +4505,8 @@ One decoy per place tells you which place leaked.
 decoy:
 - an audit row (`secrets.alert.decoy_used`, by `roll:decoys`, with the source address), which the
   environment's Activity shows under Alerts and audit sinks carry to a SIEM;
-- a notice to the environment's notify URL, if it has one (the same outbox and retries as read
-  alerts);
+- a notice to the environment's notify URL, if a session or the operator set it (the same outbox
+  and retries as read alerts);
 - `decoy_used` first in health, until the decoy ends.
 
 Each names the key, the environment, the folder, when and the address it came from, and the route
@@ -4416,7 +4536,7 @@ minutes.
   (`aud`, default this server's URL from the CLI and the dashboard, so a token minted for one roll
   server isn't good at another), a `subject` (`sub`, or a pattern of it where `*` stands for
   any run of characters), up to ten other `claims` that must match (`ref`, `environment`,
-  `repository_owner_id`…), and the scope of what a login gets: environments, folders and actions
+  `repository_owner_id`…; see "Claims" below), and the scope of what a login gets: environments, folders and actions
   like a token's (never more than its creator has) for `ttl_minutes`, 5–60 (default 15).
 - **Shared issuers.** GitHub Actions, GitLab.com, Terraform Cloud, Buildkite and Google sign for
   every tenant they host, so an identity of theirs must name one tenant literally in its subject
@@ -4431,6 +4551,22 @@ minutes.
   refused. Key fetches are one at a time per issuer, and a failed one isn't retried for 30 s.
   Logins are capped at 120 a minute per identity and 240 per client address (429 `rate_limited`),
   counted per node before any work.
+- **Claims.** Each of an identity's `claims` maps a claim to a value or a pattern with `*` (the
+  subject's rules: `*` is any run of characters, nothing else is special, never `**` recursion).
+  The key is a top-level claim's name (`ref`), or a JSON pointer (RFC 6901, starting with `/`)
+  into nested claims: `{"/realm_access/roles": "deployer"}` for Keycloak's realm roles,
+  `{"/groups": "team-*"}` for Entra ID's `groups` or `roles`, `{"/groups_direct": "acme/ops"}` for
+  GitLab's. In a pointer `~1` stands for `/` and `~0` for `~`, and a decimal segment indexes an
+  array (`/groups/0`). Through a pointer, an array claim matches when any of its first 256
+  elements does (one level: an array inside an array never matches), and numbers and booleans
+  match their JSON text (`2`, `true`). A plain name matches only a string claim, as rules made
+  before pointers did, so an existing rule never starts matching a list or a number it used to
+  refuse: write `/groups`, not `groups`, to match a list. An object, `null` or a missing claim
+  never matches. A pointer has at most 8 segments,
+  none empty, and can't start at `iss`, `aud`, `sub`, `exp`, `nbf` or `iat`. Claims only narrow
+  the subject: a shared issuer's subject still names one tenant, whatever the claims say. The rules
+  are `roll_oidc::check_identity` and `Jwt::unmatched`, which roll-access's trusted machine clients
+  use too.
 - **Pinned keys, for an issuer roll can't reach.** A cluster signs its service accounts' tokens as
   `https://kubernetes.default.svc.cluster.local` (k3s, kind, kubeadm, a private EKS endpoint), an
   issuer roll can't and shouldn't fetch. An identity can carry the issuer's public keys instead
@@ -4860,7 +4996,8 @@ with signed digests, so such a change shows:
   A row that fails is logged by kid (never the key) and ignored, so a database writer who adds a key
   of their own gets neither a digest nor a cloud to accept their signature.
 - **Offline.** `roll secrets audit verify -p prj_… --file audit.jsonl --jwks keys.json` checks an
-  export (`audit --format jsonl`, unfiltered: a filtered one has gaps) on the machine it runs on.
+  export (`audit --format jsonl`, unfiltered: a filtered one has gaps, and so has a token's where a
+  decoy's rows were, see Decoys) on the machine it runs on.
   `--jwks` is required: the digest JWKS as saved earlier from `/v1/secrets/audit/jwks` and kept
   apart from roll, since keys fetched from the server being checked would vouch for themselves.
   Save it once, and again after each rotation of the digest key (an emergency's names the pulled
@@ -4897,8 +5034,8 @@ isn't in the workspace is 404.
 | --- | --- | --- |
 | `GET /v1/secrets/health` | | `{ok, key: "env"\|"kms"\|"file"\|"shares"\|"missing", resealed: "all"\|number\|null, customer_managed, issuer_pulled: {kid, pulled_at, detail}[], links: string[], syncs: string[]}` (`links`, `syncs`: the kinds registered; `issuer_pulled`: issuer keys an emergency rotation pulled in the last 30 days) |
 | `GET`, `POST /v1/secrets/unseal` | `{share}` (`POST`) | `{sealed, have?, need?, error?}`: a sealed node's progress (public; see "Starting sealed"); 429 with `Retry-After` past the limits |
-| `GET` | | `{project, environments: Environment[], previews: number, history_days: number \| null}` |
-| `PATCH` | `{history_days}` | `{history_days}` (`admin`) |
+| `GET` | | `{project, environments: Environment[], previews: number, history_days: number \| null, validity_checks: "on" \| "off"}` |
+| `PATCH` | `{history_days?, validity_checks?: "on" \| "off"}` | what changed, as given (`admin`; validity checks audited as `validity.checks`) |
 | `GET /grid?path=` | | `Grid` |
 | `GET /environments` | | `Environment[]` in order |
 | `POST /environments` | `NewEnvironment` | 201 `Environment` |
@@ -4931,7 +5068,7 @@ isn't in the workspace is 404.
 | `PUT /environments/{env}/secrets/{key}?path=` | `SetSecret` | `Written`; 409 `stale` when `if_version` isn't the key's version |
 | `DELETE /environments/{env}/secrets/{key}?path=&type=&if_version=` | | `Written`; 409 `stale` when `if_version` isn't the key's version |
 | `GET /environments/{env}/secrets/{key}/value?path=&resolve=` | | `{value, problems}` |
-| `POST /environments/{env}/decoys` | `NewDecoy` | 201 `Secret` (admin; a new key, never its value; 409 `exists` when the key is there; "Decoys") |
+| `POST /environments/{env}/decoys` | `NewDecoy` | 201 `Secret` (admin, signed in or the operator; 403 for any token; a new key, never its value; 409 `exists` when the key is there; "Decoys") |
 | `GET /environments/{env}/secrets/{key}/totp?path=` | | `{code, expires_at, period}` (`reveal`; a key that isn't a TOTP key is a 400; audited as `secrets.totp`, without the code) |
 | `GET /environments/{env}/secrets/{key}/versions?path=&type=` | | `Version[]` newest first |
 | `GET /environments/{env}/secrets/{key}/versions/{v}/value?path=&type=` | | `{value}` |
@@ -4995,6 +5132,8 @@ isn't in the workspace is 404.
 | `GET /v1/secrets/findings` | | `{project, project_name, findings: Finding[]}[]`: every project's findings the caller may read, projects with none left out |
 | `GET /health?code=` | | `Finding[]`, worst first: every standard environment's findings the caller may read (`read` on the project) |
 | `POST /leaks` | `{candidates: string[]}` (at most 20,000); header `X-Roll-Guard: 1` from a credential guard (roll MCP's check of what a tool call would write), audited as `secrets.guard` instead of `secrets.scan`; rolld keeps the header only on a request roll MCP's guard tool makes in process, and removes anyone else's | `{index, key, environment, path}[]`: candidates that are values the caller may reveal (`read` on the project) |
+| `POST /validity` | `{credentials: {value, pair?}[]}` (at most 200; `pair`: an AWS access key id's secret access key) | `{validity_checks: "on" \| "off", results: Checked[]}`, one per credential in order (`write` on the project); while checks are off, `results` is empty and nothing is asked. `Checked` is `{fingerprint, kind, result: "live" \| "invalid" \| "unknown", account?, checked_at?, why?, rotator?: "aws-iam" \| "github-app"}` ("Is it live?") |
+| `GET /unstored/{fingerprint}` | | `Checked`: a credential's last check (`read`; 404 when it hasn't been checked) |
 | `GET /kms` | | `{key: string \| null}`: the customer-managed key wrapping the project's data key (admin) |
 | `PUT /kms` | `{key}` (a KMS key's ARN) | `{key}` after encrypting and decrypting with it (admin; 400 when roll can't use it) |
 | `DELETE /kms` | | `{key: null}`: the data key sealed by roll's deployment key alone again (admin) |
@@ -5133,7 +5272,7 @@ type Secret = {
   updated_at: number; updated_by: string;
   source: { kind: "own" } | { kind: "import"; environment: string; path: string } | { kind: "base"; environment: string };
   overridden: boolean; // a personal value of the caller replaces it
-  decoy?: Decoy; // only for the project's admins ("Decoys"); absent for everyone else, as on any key
+  decoy?: Decoy; // only for the project's admins, signed in or the operator ("Decoys"); absent for everyone else, tokens too, as on any key
 };
 type Decoy = { kind: "rlt" | "postgres"; created_at: number; created_by: string; uses: number; used_at: number | null; used_ip: string | null };
 type NewDecoy = { key: string; kind: "rlt"; path?: string } | { key: string; kind: "postgres"; resource: string; path?: string };
@@ -5177,7 +5316,7 @@ type LinkTarget = { kind: string; ref: string; name: string; fields: { field: st
 type Lease = { id: string; environment: string; path: string; key: string; kind: "dynamic" | "retired"; link: Link | null; consumer: string; issued_at: number; expires_at: number; revoked_at: number | null };
 type Identity = { id: string; name: string; kind: "oidc" | "aws"; arn?: string; server_id?: string; issuer: string; audience: string; subject: string; claims: Record<string, string>; environments: string[] | null; paths: string[] | null; actions: Action[]; ttl_minutes: number; created_at: number; created_by: string; last_used_at: number | null; last_subject: string | null; allowed_ips: string[] | null; pinned_keys?: number; gateway?: string }; // gateway: it logs that gateway in (no environments, paths or actions)
 type Gateway = { id: string; name: string; token_id?: string; created_at: number; created_by: string; status: { online: boolean; node?: string; version?: string; allow: string[]; connected_at?: number; last_seen_at?: number } };
-type NewIdentity = { name: string; environments?: string[]; paths?: string[]; actions: Action[]; ttl_minutes?: number; allowed_ips?: string[]; gateway?: string } & ({ kind?: "oidc"; issuer: string; audience: string; subject: string; claims?: Record<string, string>; jwks?: string } | { kind: "aws"; arn: string });
+type NewIdentity = { name: string; environments?: string[]; paths?: string[]; actions: Action[]; ttl_minutes?: number; allowed_ips?: string[]; gateway?: string } & ({ kind?: "oidc"; issuer: string; audience: string; subject: string; claims?: Record<string, string>; jwks?: string } | { kind: "aws"; arn: string }); // claims: a name or a JSON pointer ("/realm_access/roles") → a value or a * pattern (workload identities, "Claims")
 type Token = { id: string; name: string; environments: string[] | null; paths: string[] | null; actions: Action[]; expires_at: number | null; created_at: number; created_by: string; last_used_at: number | null; prefix: string; allowed_ips: string[] | null };
 type NewToken = { name: string; environments?: string[]; paths?: string[]; actions: Action[]; expires_at?: number; ttl_days?: number; allowed_ips?: string[] };
 type Action = "read" | "reveal" | "write" | "delete" | "admin";
@@ -5230,6 +5369,8 @@ syncs(id PK, project_id, env_id, path, kind, target, keys, prefix, secret BLOB, 
 value_requests(id PK, project_id, env_id, path, keys, note, public_key, seal_key BLOB, answers_left,
       created_by, created_at, expires_at, answered_at, cancelled_at, outcome)
       -- seal_key: the request's X25519 secret key, sealed with the data key; NULL once it closes
+validity(project_id, fingerprint, kind, result, account, checked_at, why, claimed_at,
+      PRIMARY KEY (project_id, fingerprint))  -- validity checks' answers; result NULL while claimed
 intercept_cas(id PK, consumer, serial, hosts, projects, issued_at, expires_at, revoked_at,
       revoked_why)  -- interception CAs (never their keys); gone a day after they expire
 ```
@@ -5321,6 +5462,48 @@ still covers 304s, and a product changing its own password.
 
 Every lookup by key inside a request is a hash map (a grid of ~11k keys over 5 environments took
 3.07 s before that, 0.43 s after, on a debug build).
+
+### Large changes
+
+An `.env` import, a move-in (`roll secrets import …`) or a promote of a big folder is one change
+of thousands of keys. A change used to cost five statements per key, each its own round trip:
+the key's row, a deleted key's old id, the new row, its folders, its version. On Postgres that was
+about 1.2 ms per key, and only about 1.6 s of a 9,900-key change's 11 s was the server executing
+statements (`pg_stat_statements`); the rest was waiting on round trips. Now `write::apply` reads
+every key's row and old id in lookups of up to 512 keys per folder, works out each key's version as
+before (the value sealed with the project's data key, bound to its project, id and version), then
+writes all the rows in one `execute_pipeline` inside the same transaction. On Postgres each
+statement carries up to 128 rows (2,432 parameters; the limit is 65,535), so the whole change is
+one round trip. An existing key's row is updated in place (`ON CONFLICT (id) DO UPDATE`). The
+audit chain still gets the one row per change it got before.
+
+SQLite runs in process, so a statement costs it no round trip. A statement that writes several rows
+inside a transaction needs a statement journal, which goes to a temporary file past 64 KiB, so
+SQLite keeps one row per statement. A first version wrote 128 rows per statement there too: its CPU
+time stayed the same, but its system time went from 0.06–0.10 s to 0.25–0.40 s for the bench's two
+changes, and the 9,900-key rewrite took about twice as long.
+
+`cargo run -p roll-secrets --release --example bench -- big 1000,9900` measures this. It writes one
+change of new keys into a fresh project, then one change of new values for all of them, and on
+Postgres with `pg_stat_statements` loaded it also counts the statements. Measured on 2026-11-20 on
+ai-server (release, Postgres 18 in Docker with `max_connections=500`): two alternated pairs under
+load averages of 20 to 26. Before is main at `d04cc26d4`, which already has #281 and #475. Each
+cell gives both runs.
+
+| one change of | SQLite before | SQLite after | Postgres before | Postgres after | Postgres statements |
+| --- | --- | --- | --- | --- | --- |
+| 1,000 new keys | 45, 23 ms | 42, 19 ms | 1.28, 1.20 s | 146, 161 ms | 5,029 → 62 |
+| 1,000 new values | 39, 35 ms | 39, 40 ms | 1.06, 0.97 s | 129, 121 ms | 4,022 → 58 |
+| 9,900 new keys | 304, 314 ms | 260, 195 ms | 12.0, 10.9 s | 1.15, 1.09 s | 49,529 → 236 |
+| 9,900 new values | 336, 236 ms | 419, 257 ms | 9.9, 9.9 s | 1.18, 1.02 s | 39,622 → 285 |
+
+On SQLite the two builds are within each other's noise: over three more alternated runs of the
+9,900-key bench, user CPU was 0.55–0.64 s and system 0.05–0.11 s for both. On Postgres, what's left
+is mostly the server inserting rows: the 77 inserts into `secrets` (four indexes) take 0.51–0.66 s
+of server time, and those into `versions` 0.23–0.31 s.
+`a_change_of_thousands_of_keys_keeps_every_version_and_the_audit_chain` (`tests/api.rs`) covers a
+3,000-key import and a change that rewrites, deletes and adds a thousand keys each, on both
+databases.
 
 ## Next
 

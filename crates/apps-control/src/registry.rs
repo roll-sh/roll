@@ -164,21 +164,26 @@ impl crate::Apps {
         Ok(Some(RegistryLogin { server: r.server, username: "AWS".into(), password: token }))
     }
 
-    /// ECR tokens with less than an hour left, fetched again and handed to what runs with them
-    /// (wakes and new instances pull with the new one). The reaper's pass.
-    pub(crate) async fn ecr_refresh_pass(self: &Arc<Self>) {
+    /// ECR logins of the services this node owns, given a token whenever the one kept has less than
+    /// an hour left or there is none (after a restart or a takeover: the node that had it is
+    /// gone), and handed to what runs with them (wakes, new instances, Fargate's copy). The
+    /// reaper's pass.
+    pub(crate) async fn ecr_refresh_pass(self: &Arc<Self>, services: &[crate::store::ServiceRow]) {
         let now = code_sql::now_ms();
-        let due: Vec<String> = self.ecr_tokens.lock().iter().filter(|(_, (_, until))| *until - now <= 3600 * 1000).map(|(s, _)| s.clone()).collect();
-        for service in due {
-            let sid = service.clone();
-            let Ok(svc) = self.db(move |s| s.service(&sid)).await else {
-                self.ecr_tokens.lock().remove(&service);
-                continue;
-            };
+        for svc in services.iter().filter(|s| self.owns(&s.id)) {
             let crate::model::Source::Image { image } = &svc.source else { continue };
-            match self.pull_login(&service, image).await {
-                Ok(login) => self.registry_changed(&service, login.as_ref()).await,
-                Err(e) => tracing::warn!(service, error = %e, "apps: refreshing an ECR login"),
+            let fresh = self.ecr_tokens.lock().get(&svc.id).is_some_and(|(_, until)| *until - now > 3600 * 1000);
+            if fresh {
+                continue;
+            }
+            let sid = svc.id.clone();
+            let ecr = self.db(move |s| s.registry(&sid)).await.ok().flatten().is_some_and(|r| r.kind.as_deref() == Some("ecr"));
+            if !ecr {
+                continue;
+            }
+            match self.pull_login(&svc.id, image).await {
+                Ok(login) => self.registry_changed(&svc.id, login.as_ref()).await,
+                Err(e) => tracing::warn!(service = %svc.id, error = %e, "apps: refreshing an ECR login"),
             }
         }
     }
