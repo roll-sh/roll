@@ -243,30 +243,46 @@ Elasticsearch-flavor.
   internal user on the remote with a search-only role, issued and sealed as links' keys are).
   Until then a search naming `alias:index` on them is refused (400), loopback remotes included,
   where OpenSearch searches a loopback.
-- **Left**: ES|QL `FROM <alias>:<index>`; suggesters over several clusters.
+- **ES|QL** (`search-es` `xpack/esql/ccs.rs`): `FROM <alias>:<index>` (`*:logs-*`,
+  `local,remote:idx`) answers as one cluster holding all the data would, as Elasticsearch 9.5.5
+  answers it. Each cluster runs its **part**: the source, the commands that work row by row
+  (`WHERE`, `EVAL`, `KEEP`, `DISSECT`, `MV_EXPAND`, `ENRICH` in `_remote` and `_any` mode,
+  `LOOKUP JOIN`...) and its first breaker's own part: `STATS` reduced partially (each group's
+  accumulator states: sums with their compensation, HyperLogLog++ sketches, collected values,
+  merged here as one cluster's rows would have been), `SORT ... | LIMIT n` or `LIMIT n`
+  applied there and again on the coordinating cluster. What follows runs on the coordinating
+  cluster over every part's result, and so does a breaker with no part of its own (`INLINE
+  STATS`, `FORK`, `ENRICH _coordinator`), over the parts' rows. Every cluster's part reads the
+  same columns: the source resolved once across clusters, a field one cluster doesn't map
+  reading null there. `METADATA _index` names remote indices `alias:index`, `ENRICH _remote`
+  uses each cluster's own policy, `_coordinator` the local one, `_any` each cluster's own before
+  the first breaker and the local one after it; `ENRICH _remote` after `STATS` or
+  `ENRICH _coordinator`, and `LOOKUP JOIN` after `STATS` or `LIMIT`, are refused with
+  Elasticsearch's errors, and so is a policy missing on a cluster that needs it (`cannot find
+  enrich policy [p] on clusters [_local, far]`). `include_ccs_metadata` (or
+  `include_execution_metadata`) adds `_clusters`; a skipped cluster makes `is_partial` true; a
+  missing remote is `no_such_remote_cluster_exception` (404), and a remote's missing index or any
+  failure of its part skips it (`skip_unavailable`) or fails the query. `_query/async` answers
+  the same. A remote's part is the query's own text with its `FROM` naming that cluster's indices
+  and the commands it doesn't run blanked, so the positions in its errors are the query's; it
+  runs as a `_query` on the remote's owner through the link (`x-roll-esql-part`, honored only
+  for a link's own request), authorized there exactly as a `_search` part is: the key's access,
+  its document and field level security included, intersected with the caller's
+  `remote_indices`. Its answer (typed rows, or `STATS` states) is held on the request breaker
+  before it's parsed and decoded with one level of multi-values, every row exactly as wide as its
+  columns and sketches checked (`Hll::from_parts`), never sized from a count it sent. Queries
+  whose commands aren't the text's (`FORK` branches, subqueries, views, `TS`, `PROMQL`) read a
+  remote's rows through cross-cluster search on the coordinating cluster, without `_clusters`.
+- **Left**: suggesters over several clusters.
 
 `crates/search-control/tests/control.rs` `cross_cluster_search_between_a_persons_own_clusters`,
-`a_sleeping_remote_wakes_and_a_gone_one_is_skipped`, `aggregations_across_clusters_equal_one_clusters`
-and `scroll_and_point_in_time_across_clusters`, and `tests/cluster.rs`
+`a_sleeping_remote_wakes_and_a_gone_one_is_skipped`, `aggregations_across_clusters_equal_one_clusters`,
+`scroll_and_point_in_time_across_clusters`, `esql_across_clusters_answers_as_one_cluster` and
+`esql_across_clusters_reads_as_the_link_allows`, and `tests/cluster.rs`
 `a_remote_on_another_node_is_searched_through_the_signed_forward` and
 `a_scroll_over_clusters_on_two_nodes_pages_through_either_front` cover it. The dashboard lists a
 cluster's remotes in its Settings (alias, cluster, `skip_unavailable`, state), and links or
 unlinks one of the person's own clusters (`components/search/remotes.tsx`).
-
-ES|QL `FROM <alias>:<index>` isn't across clusters yet, because roll's ES|QL can't push a part to
-a remote cheaply. The closest it has is `FROM` with subqueries (`Cmd::Union`), which runs whole
-queries on this cluster. Elasticsearch sends each remote the plan up to its first pipeline
-breaker. roll would need:
-
-1. a union branch that runs on a remote over the link, with the internal call switching off the
-   implicit `LIMIT 1000`;
-2. typed tables between clusters (`ip`, `version`, `unsigned_long`, geo and date-nanos columns
-   kept);
-3. `STATS` split into partial and final phases, so that a breaker's input doesn't cross
-   clusters row by row;
-4. `METADATA _index` named `alias:index`;
-5. `ENRICH` and `LOOKUP JOIN` with Elasticsearch's remote modes;
-6. the response's `_clusters` (`include_ccs_metadata`).
 
 **Terraform** (Elastic Cloud's `ec_deployment` and `elasticstack` providers, AWS's
 `aws_opensearch_domain`). roll's provider (`sdk/terraform-provider-roll`, its README has the
@@ -753,8 +769,9 @@ nyc_taxis with Elasticsearch's merges flowing (#340).
    `skip_unavailable`, `_resolve/*`, `_field_caps` and `_msearch` as Elasticsearch 9.5.5 answers).
    In progress (stacked on #347): every aggregation merged from each remote's partial state
    with one final reduce, `scroll` and point in time across clusters, the dashboard's Remote
-   clusters panel, OpenSearch 3.9's `cluster.remote.*` answers. Left: ES|QL
-   `FROM <alias>:<index>`; linking OpenSearch-flavor clusters (no `cross_cluster` keys there:
+   clusters panel, OpenSearch 3.9's `cluster.remote.*` answers, ES|QL `FROM <alias>:<index>`
+   (each cluster's part up to its first breaker, `STATS` merged from partial states,
+   `ENRICH`'s remote modes, `_clusters`). Left: linking OpenSearch-flavor clusters (no `cross_cluster` keys there:
    it needs a credential model and a review of its own).
 7. **The Rally losses left by the full rerun** (Round 10, vectors, #268: Elasticsearch 9.1+ runs no merge while less than ~93.5 GB of disk is free, and this host was 91-98% full, so Round 9's Elasticsearch races were held on vectors and noaa (4 of 6); the harness now sets `indices.merge.disk.check_interval=0`. With merges flowing, the force-merged vector losses are gone and dense_vector `100-1000_multiple_segments` (2.30x) was the one loss with ranges apart; Round 12 makes it a tie (0.97, 6.13 against 6.35 ms; 0.83 at equal foreign load): each segment now searches a beam sized to its share of the shard, as Lucene 10.5 does, −33% instructions per query, recall unchanged. Round 11, noaa and nyc_taxis rerun with merges flowing at `769dd6744` (#340): Round 9's noaa claims held (every range-field query ahead in median, all ties; `conjunction_big_range_big_term` 7.4 against 12.2 ms, faster in 6 of 6 rounds; indexing 0.75, ahead in 6 of 6), and nyc_taxis wasn't held at all (its 0-merge races are Elasticsearch's merge policy). What changed: nyc_taxis `distance_amount_agg` leads by less (46 against 78 ms, 0.59; Round 9's 118 was load), its `range` now leads (0.88), and Elasticsearch now indexes nyc_taxis faster in median (1.03 docs/s, bulk p50 1.04, ties)) (docs/benchmarks/search.md: Round 8, every Rally
    track against Elasticsearch 9.5.5 and OpenSearch 3.9 at `83fac5982`; Round 9, the four tracks

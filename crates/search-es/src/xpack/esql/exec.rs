@@ -53,6 +53,12 @@ pub struct Stats {
     /// Columns of conflicting types from a union source (a subquery or view) that nothing read
     /// yet: the error each is if a command above reads it.
     pub conflicts: Vec<(String, EsError)>,
+    /// A cross-cluster part's `STATS` states ([`super::ccs::Mode::Stats`]).
+    pub partial: Option<super::ccs::Partial>,
+    /// The clusters a query over remote clusters ran on (`_clusters`).
+    pub clusters: Option<Vec<super::ccs::ClusterInfo>>,
+    /// The `FROM` expressions (`_clusters.details.(local).indices`).
+    pub sources: Option<String>,
 }
 
 /// Aggregates query approximation estimates (`SET approximation`), which get its confidence
@@ -113,9 +119,9 @@ pub struct Resources {
     /// field-caps request asks for just those.
     suggest: std::sync::OnceLock<(Option<std::collections::HashSet<String>>, std::collections::HashSet<String>)>,
     /// `SET column_metadata=true`: the `_meta` of `BUCKET` groups, by output name.
-    col_meta: parking_lot::Mutex<Vec<(String, Value)>>,
+    pub(super) col_meta: parking_lot::Mutex<Vec<(String, Value)>>,
     /// The last `STATS`'s approximable aggregates ([`Stats::approx`]).
-    approx: parking_lot::Mutex<Vec<String>>,
+    pub(super) approx: parking_lot::Mutex<Vec<String>>,
 }
 
 /// The `_meta.bucket` Elasticsearch reports for a `BUCKET` group: the numeric interval, or
@@ -259,6 +265,11 @@ pub(crate) fn es_type_name(t: &str) -> &str {
 fn verification(src: &str, at: usize, msg: &str) -> EsError {
     let (l, c) = super::parser::location(src, at);
     EsError::new(400, "verification_exception", format!("Found 1 problem\nline {l}:{c}: {msg}"))
+}
+
+/// [`verification`] for the cross-cluster planner.
+pub(super) fn verification_at(src: &str, at: usize, msg: &str) -> EsError {
+    verification(src, at, msg)
 }
 
 /// A compiled expression over a table's columns.
@@ -1915,7 +1926,7 @@ fn is_row_wise(c: &Cmd) -> bool {
 /// its first group, colliding groups chained through `next`. Keys are hashed and compared
 /// straight from the row's values (as [`GroupKey`] would compare them), so a row of an
 /// existing group allocates nothing.
-struct Grouper {
+pub(super) struct Grouper {
     keys: Vec<(CE, DataType, String)>,
     outputs: Vec<(CE, DataType, String)>,
     specs: Vec<AggSpec>,
@@ -2003,7 +2014,7 @@ fn mv_duplicate(p: &V, x: &V) -> bool {
 }
 
 impl Grouper {
-    fn new(src: &Src<'_>, aggs: &[super::parser::Named], by: &[super::parser::Named], cols: &[Col]) -> EsResult<Grouper> {
+    pub(super) fn new(src: &Src<'_>, aggs: &[super::parser::Named], by: &[super::parser::Named], cols: &[Col]) -> EsResult<Grouper> {
         let mut keys = Vec::new();
         for n in by {
             let (c, t) = match &n.expr.kind {
@@ -2167,7 +2178,31 @@ impl Grouper {
         Ok(())
     }
 
-    fn finish(mut self, w: &mut Warnings) -> EsResult<Table> {
+    /// The groups' keys and states, in creation order: a cross-cluster part's `STATS`.
+    fn into_groups(self) -> Vec<(Vec<V>, Vec<Acc>)> {
+        self.groups.into_iter().map(|g| (g.key, g.accs)).collect()
+    }
+
+    /// Merges another cluster's group (`key`, `accs` as [`Grouper::into_groups`] gave them) into
+    /// this one's: its states must be the ones this grouper's aggregations make.
+    pub(super) fn merge_group(&mut self, key: &[V], accs: Vec<Acc>) -> Result<(), String> {
+        if key.len() != self.keys.len() || accs.len() != self.specs.len() {
+            return Err("a group of another shape".into());
+        }
+        for (s, a) in self.specs.iter().zip(&accs) {
+            if std::mem::discriminant(&Acc::for_spec(&s.func, s.arg_ty, &s.extra)) != std::mem::discriminant(a) {
+                return Err(format!("a state of another kind for [{}]", s.func));
+            }
+        }
+        let refs: Vec<&V> = key.iter().collect();
+        let g = self.group_of(&refs);
+        for ((s, have), a) in self.specs.iter().zip(self.groups[g].accs.iter_mut()).zip(accs) {
+            have.merge(&s.func, a).map_err(str::to_string)?;
+        }
+        Ok(())
+    }
+
+    pub(super) fn finish(mut self, w: &mut Warnings) -> EsResult<Table> {
         let mut cols: Vec<Col> = self.outputs.iter().map(|(_, t, n)| Col { name: n.clone(), ty: *t }).collect();
         for (_, t, n) in &self.keys {
             cols.retain(|c| c.name != *n);
@@ -2611,7 +2646,8 @@ fn top_from_source(cluster: &Cluster, src: &Src<'_>, s: &Source, prefix: &[Cmd],
         let cmp = |a: &[V], b: &[V]| spec.cmp(a, b);
         super::columnar::scan_top(cluster, plan, query, now, stats, super::columnar::TopSel { n, read, key: &mut key, cmp: &cmp })?
     };
-    let Some(rows) = rows else { return Ok(None) };
+    let Some(mut rows) = rows else { return Ok(None) };
+    s.prefix_index(&mut rows);
     let (p, _) = build_pipeline(src, &prefix[nw..], s.cols.clone())?;
     Ok(Some(p.run(rows, w)?))
 }
@@ -2654,6 +2690,91 @@ struct Source {
     /// The same, with the indices mapping each as `flattened` (`None`: every index). Below such
     /// a field, in those indices, there is no column: its keys read as null.
     flattened_in: Vec<(String, Option<Vec<String>>)>,
+    /// A remote cluster's part: the alias its `_index` values are named with (`alias:index`).
+    index_prefix: Option<String>,
+}
+
+impl Source {
+    /// A cross-cluster part's source: every cluster's fields (`schema`, in its order and types;
+    /// one this cluster doesn't map reads null), then its own others, then the metadata.
+    fn align_to(&mut self, schema: &[(String, DataType)]) {
+        if schema.is_empty() {
+            return;
+        }
+        let nf = self.fields.len();
+        let meta: Vec<Col> = self.cols[nf..].iter().filter(|c| c.name != "<no-fields>").cloned().collect();
+        let mut cols: Vec<Col> = schema.iter().map(|(n, t)| Col { name: n.clone(), ty: *t }).collect();
+        let mut fields: Vec<String> = schema.iter().map(|(n, _)| n.clone()).collect();
+        for (i, f) in self.fields.iter().enumerate() {
+            if !fields.contains(f) {
+                cols.push(self.cols[i].clone());
+                fields.push(f.clone());
+            }
+        }
+        cols.extend(meta);
+        self.cols = cols;
+        self.fields = fields;
+    }
+
+    /// Names a remote part's `_index` values `alias:index`, as the coordinating cluster shows them.
+    fn prefix_index(&self, rows: &mut [Vec<V>]) {
+        let Some(alias) = &self.index_prefix else { return };
+        let Some(m) = self.metadata.iter().position(|m| m == "_index") else { return };
+        let at = self.fields.len() + m;
+        for r in rows {
+            if let Some(V::Str(i)) = r.get_mut(at)
+                && !i.contains(':')
+            {
+                *i = format!("{alias}:{i}");
+            }
+        }
+    }
+}
+
+/// The type of metadata field `m` (`None`: not one ES|QL reads).
+fn metadata_type(m: &str) -> Option<DataType> {
+    Some(match m {
+        "_id" | "_index" | "_ignored" | "_index_mode" => DataType::Keyword,
+        "_version" => DataType::Long,
+        "_source" => DataType::Source,
+        "_score" => DataType::Double,
+        "_tsid" => DataType::Tsid,
+        _ => return None,
+    })
+}
+
+/// Every cluster's source fields for a query over remote clusters: one resolution of all of
+/// `sources` (field capabilities across clusters), else of the local ones alone (a remote's
+/// missing index fails that remote's part, not the query), else none.
+pub(super) async fn source_schema(cluster: &Cluster, text: &str, sources: &[String], local: &[String], at: usize) -> EsResult<Vec<Col>> {
+    let fields = |s: Source| -> Vec<Col> { s.cols.into_iter().take(s.fields.len()).collect() };
+    match resolve_source(cluster, text, sources, &[], at).await {
+        Ok(s) => Ok(fields(s)),
+        Err(_) if !local.is_empty() => Ok(fields(resolve_source(cluster, text, local, &[], at).await?)),
+        Err(_) => Ok(Vec::new()),
+    }
+}
+
+/// The columns a part's row-by-row `prefix` makes over `schema` and `metadata` (for an answer
+/// no part gave).
+pub(super) fn part_columns(src: &Src<'_>, schema: &[Col], metadata: &[String], prefix: &[Cmd]) -> EsResult<Vec<Col>> {
+    if schema.is_empty() && metadata.is_empty() {
+        return Ok(vec![Col { name: "<no-fields>".into(), ty: DataType::Null }]);
+    }
+    let mut cols = schema.to_vec();
+    cols.extend(metadata.iter().filter_map(|m| metadata_type(m).map(|ty| Col { name: m.clone(), ty })));
+    Ok(build_pipeline(src, prefix, cols)?.1)
+}
+
+/// Every cluster's rows in one table: a column whose types differ between clusters is
+/// unsupported (it reads null), as a union type no conversion resolves.
+pub(super) fn union_parts(parts: Vec<Table>, original: &mut Vec<(String, Vec<String>)>) -> EsResult<Table> {
+    union_tables(parts, &|name, _, _, _| EsError::illegal_state(format!("column [{name}] differs between clusters")), &|_, _| true, original)
+}
+
+/// A cross-cluster query's local part ([`super::ccs::run`]).
+pub(super) fn execute_part<'a>(cluster: &'a Cluster, q: Query, filter: Option<Value>, w: &'a mut Warnings) -> QueryRun<'a> {
+    Box::pin(execute_plain(cluster, q, filter, w, &[]))
 }
 
 async fn resolve_source(cluster: &Cluster, src: &str, sources: &[String], metadata: &[String], at: usize) -> EsResult<Source> {
@@ -2676,16 +2797,16 @@ async fn resolve_source(cluster: &Cluster, src: &str, sources: &[String], metada
             }
             let exists = st.metadata.indices.contains_key(s.as_str()) || st.metadata.indices.values().any(|i| i.aliases.contains_key(s.as_str())) || st.metadata.data_streams.contains_key(s.as_str());
             if !exists {
-                return Err(EsError::index_not_found(s));
+                return Err(EsError::index_not_found(&part_named(s)));
             }
         }
     }
     if caps.get("indices").and_then(Value::as_array).is_none_or(|a| a.is_empty()) {
         // Patterns that match nothing are an empty result with no columns.
         if sources.iter().all(|s| s.contains('*')) {
-            return Ok(Source { index, cols: vec![Col { name: "<no-fields>".into(), ty: DataType::Null }], fields: Vec::new(), metadata: Vec::new(), needed: None, ft: Vec::new(), load: Vec::new(), source_order: Default::default(), floats: Default::default(), constants: Default::default(), indices: Vec::new(), original_types: Vec::new(), unions: HashMap::new(), unsupported: HashMap::new(), flattened: Vec::new(), flattened_in: Vec::new(), dimensions: Default::default(), ts_meta: TsMeta::default() });
+            return Ok(Source { index, cols: vec![Col { name: "<no-fields>".into(), ty: DataType::Null }], fields: Vec::new(), metadata: Vec::new(), needed: None, ft: Vec::new(), load: Vec::new(), source_order: Default::default(), floats: Default::default(), constants: Default::default(), indices: Vec::new(), original_types: Vec::new(), unions: HashMap::new(), unsupported: HashMap::new(), flattened: Vec::new(), flattened_in: Vec::new(), dimensions: Default::default(), ts_meta: TsMeta::default(), index_prefix: None });
         }
-        return Err(verification_plain(&format!("Unknown index [{index}]")));
+        return Err(verification_plain(&format!("Unknown index [{}]", sources.iter().map(|s| part_named(s)).collect::<Vec<_>>().join(","))));
     }
     let _ = (src, at);
     let indices: Vec<String> = caps.get("indices").and_then(Value::as_array).map(|a| a.iter().map(Value::to_es_string).collect()).unwrap_or_default();
@@ -2800,14 +2921,7 @@ async fn resolve_source(cluster: &Cluster, src: &str, sources: &[String], metada
     }
     let fields = cols.iter().map(|c| c.name.clone()).collect();
     for m in metadata {
-        let ty = match m.as_str() {
-            "_id" | "_index" | "_ignored" | "_index_mode" => DataType::Keyword,
-            "_version" => DataType::Long,
-            "_source" => DataType::Source,
-            "_score" => DataType::Double,
-            "_tsid" => DataType::Tsid,
-            other => return Err(verification(src, at, &format!("unsupported metadata field [{other}]"))),
-        };
+        let Some(ty) = metadata_type(m) else { return Err(verification(src, at, &format!("unsupported metadata field [{m}]"))) };
         cols.push(Col { name: m.clone(), ty });
     }
     let flattened_in: Vec<(String, Option<Vec<String>>)> = match caps.get("fields") {
@@ -2847,7 +2961,15 @@ async fn resolve_source(cluster: &Cluster, src: &str, sources: &[String], metada
     // A client that may read only some indices reads the ones its field caps resolved to (its
     // wildcards expanded to authorized indices only), never the expression again.
     let index = if internal::caller().is_some() { indices.join(",") } else { index };
-    Ok(Source { index, cols, fields, metadata: metadata.to_vec(), needed: None, ft: Vec::new(), load: Vec::new(), source_order, floats, constants, indices, original_types, unions, unsupported, flattened, flattened_in, dimensions, ts_meta })
+    Ok(Source { index, cols, fields, metadata: metadata.to_vec(), needed: None, ft: Vec::new(), load: Vec::new(), source_order, floats, constants, indices, original_types, unions, unsupported, flattened, flattened_in, dimensions, ts_meta, index_prefix: None })
+}
+
+/// An index as a remote part's coordinating cluster names it (`alias:index`).
+fn part_named(s: &str) -> String {
+    match super::ccs::part().and_then(|p| p.alias.clone()) {
+        Some(a) => format!("{a}:{s}"),
+        None => s.to_string(),
+    }
 }
 
 /// Whether `s` may be read straight from the shards ([`super::columnar`]): not when the client
@@ -3162,9 +3284,13 @@ async fn scan(cluster: &Cluster, s: &Source, query: Option<Value>, limit: Option
     // Doc values straight from the shards when every needed column has them.
     if s.load.is_empty() && (!s.fields.is_empty() || !s.metadata.is_empty()) {
         let now = crate::time::now_millis();
+        let mut named = |mut rows: Vec<Vec<V>>| {
+            s.prefix_index(&mut rows);
+            sink(rows)
+        };
         if direct_read(s)
             && let Some(plan) = super::columnar::plan(cluster, &s.index, &s.cols, &s.fields, &s.metadata, s.needed.as_ref(), s.ft.len(), now)
-            && super::columnar::scan(cluster, plan, query.as_ref(), limit, now, stats, &mut sink)?
+            && super::columnar::scan(cluster, plan, query.as_ref(), limit, now, stats, &mut named)?
         {
             return Ok(());
         }
@@ -3301,6 +3427,7 @@ async fn scan(cluster: &Cluster, s: &Source, query: Option<Value>, limit: Option
         }
         stats.documents_found += rows.len() as i64;
         seen += rows.len();
+        s.prefix_index(&mut rows);
         let more = sink(rows)?;
         if !more || limit.is_some_and(|l| seen >= l) {
             break;
@@ -3682,7 +3809,7 @@ async fn execute_inner(cluster: &Cluster, q: Query, filter: Option<Value>, w: &m
     // An implicit `LIMIT 1000` ends every query without a limit; Elasticsearch doesn't warn of
     // it after a time series aggregation (`TS ... | STATS`, `PROMQL`).
     let ts_stats = matches!(q.cmds.first(), Some(Cmd::Ts { .. })) && q.cmds.iter().any(|c| matches!(c, Cmd::Stats { .. }));
-    if !has_limit(&q.cmds) && !q.sql && !ts_stats {
+    if !has_limit(&q.cmds) && !q.sql && !ts_stats && super::ccs::part().is_none() {
         w.add(format!("No limit defined, adding default limit of [{DEFAULT_LIMIT}]"));
     }
     check_forks(&q.src, &q.cmds)?;
@@ -3885,8 +4012,10 @@ fn run_query<'a>(cluster: &'a Cluster, mut q: Query, filter: Option<Value>, w: &
     Box::pin(async move {
         if matches!(q.cmds.first(), Some(Cmd::Ts { .. })) {
             ts_rewrite(&q.src, &mut q.cmds)?;
+            q.spans.clear();
         }
-        if top && !q.cmds.iter().any(|c| matches!(c, Cmd::Limit(_))) {
+        // A cross-cluster part ends where it was cut; the coordinating cluster limits.
+        if top && super::ccs::part().is_none() && !q.cmds.iter().any(|c| matches!(c, Cmd::Limit(_))) {
             q.cmds.push(Cmd::Limit(DEFAULT_LIMIT));
         }
         let fork = q.cmds.iter().position(|c| matches!(c, Cmd::Fork { .. }));
@@ -3908,7 +4037,7 @@ fn run_query<'a>(cluster: &'a Cluster, mut q: Query, filter: Option<Value>, w: &
                 }
                 let tag = Expr::new(ExprKind::Lit(V::Str(format!("fork{}", i + 1))), at, at);
                 cmds.push(Cmd::Eval(vec![super::parser::Named { name: "_fork".into(), expr: tag }]));
-                let bq = Query { src: q.src.clone(), cmds, sql: q.sql, locale: q.locale.clone(), settings: q.settings.clone() };
+                let bq = Query { src: q.src.clone(), cmds, sql: q.sql, locale: q.locale.clone(), settings: q.settings.clone(), spans: Vec::new() };
                 let (t, s) = run_query(cluster, bq, filter.clone(), w, false, &refs).await?;
                 merge_stats(&mut stats, s);
                 parts.push(t);
@@ -3943,7 +4072,7 @@ fn run_query<'a>(cluster: &'a Cluster, mut q: Query, filter: Option<Value>, w: &
             let carry: Vec<Cmd> = if pass.is_empty() { Vec::new() } else { vec![Cmd::Keep(pass.into_iter().map(|n| (n, 0)).collect())] };
             let mut parts = Vec::with_capacity(branches.len());
             for b in &branches {
-                let bq = Query { src: b.src.to_string(), cmds: b.cmds.clone(), sql: q.sql, locale: q.locale.clone(), settings: q.settings.clone() };
+                let bq = Query { src: b.src.to_string(), cmds: b.cmds.clone(), sql: q.sql, locale: q.locale.clone(), settings: q.settings.clone(), spans: Vec::new() };
                 let (t, mut s) = run_query(cluster, bq, filter.clone(), w, false, &carry).await?;
                 // A view's own conflicts are located in the view.
                 if let Some(v) = &b.view {
@@ -4010,6 +4139,25 @@ fn run_query<'a>(cluster: &'a Cluster, mut q: Query, filter: Option<Value>, w: &
 
 /// Runs a query with no `FORK` and no union source.
 async fn execute_plain(cluster: &Cluster, q: Query, filter: Option<Value>, w: &mut Warnings, outer: &[Cmd]) -> EsResult<(Table, Stats)> {
+    if let Some(Cmd::From { sources, .. }) = q.cmds.first()
+        && sources.iter().any(|s| crate::remote::split_expression(s.trim_start_matches('-')).is_some())
+    {
+        super::ccs::check_aliases(&cluster.state(), sources)?;
+        // Linked remotes: each cluster runs its part ([`super::ccs`]).
+        if let Some(c) = super::ccs::current()
+            && super::ccs::part().is_none()
+            && outer.is_empty()
+            && let Some(out) = super::ccs::run(cluster, &c, &q, filter.clone(), w).await?
+        {
+            return Ok(out);
+        }
+    }
+    let part = super::ccs::part();
+    if let Some(p) = &part
+        && p.alias.is_some()
+    {
+        super::ccs::check_part_policies(cluster, p)?;
+    }
     let text = q.src.clone();
     let res = load_resources(cluster, &text, &q.cmds).await?;
     let tz = q.settings.time_zone.as_deref().and_then(|z| crate::time::Zone::parse(z).ok()).filter(|z| *z != crate::time::Zone::UTC);
@@ -4077,6 +4225,10 @@ async fn execute_plain(cluster: &Cluster, q: Query, filter: Option<Value>, w: &m
         }
         Cmd::From { at, .. } => {
             let mut source = resolved.take().expect("resolved above");
+            if let Some(p) = &part {
+                source.align_to(&p.schema);
+                source.index_prefix = p.alias.clone();
+            }
             if q.settings.unmapped == Unmapped::Load && !source.flattened.is_empty() {
                 check_flattened_load(&src, &source, &ref_cmds, *at)?;
             }
@@ -4142,6 +4294,9 @@ async fn execute_plain(cluster: &Cluster, q: Query, filter: Option<Value>, w: &m
             source.ft = ft;
             source.needed = needed_columns(&cmds, &source.cols);
             stats.indices = Some(source.indices.clone());
+            if let Cmd::From { sources, .. } = &first {
+                stats.sources = Some(sources.join(","));
+            }
             stats.original_types = source.original_types.clone();
             let _ = src.res.unions.set(source.unions.clone());
             let _ = src.res.unsupported.set(source.unsupported.clone());
@@ -4151,7 +4306,7 @@ async fn execute_plain(cluster: &Cluster, q: Query, filter: Option<Value>, w: &m
             let _ = src.res.suggest.set((source.needed.clone(), source.cols.iter().map(|c| c.name.clone()).collect()));
             let (pipe, out_cols) = build_pipeline(&src, prefix, source.cols.clone())?;
             // Fields loaded from `_source` aren't indexed: they never narrow the scan.
-            let push_cols: Vec<Col> = source.cols.iter().map(|c| if source.load.contains(&c.name) || source.constants.contains(&c.name) || (source.metadata.contains(&c.name) && !matches!(c.name.as_str(), "_index" | "_id")) { Col { name: c.name.clone(), ty: DataType::Unsupported } } else { c.clone() }).collect();
+            let push_cols: Vec<Col> = source.cols.iter().map(|c| if source.load.contains(&c.name) || source.constants.contains(&c.name) || (source.metadata.contains(&c.name) && !matches!(c.name.as_str(), "_index" | "_id")) || (c.name == "_index" && source.index_prefix.is_some()) { Col { name: c.name.clone(), ty: DataType::Unsupported } } else { c.clone() }).collect();
             let pushed = prefix.first().and_then(|c| if let Cmd::Where(e) = c { pushdown(e, &push_cols, &source.ft) } else { None });
             let pushed = match (pushed, ignored_query) {
                 (Some(a), Some(b)) => Some(obj! { "bool" => obj! { "filter" => crate::arr![a, b] } }),
@@ -4171,6 +4326,11 @@ async fn execute_plain(cluster: &Cluster, q: Query, filter: Option<Value>, w: &m
                         Ok(true)
                     })
                     .await?;
+                    // A part's `STATS` answers its states, for the coordinating cluster's reduce.
+                    if part.as_ref().is_some_and(|p| p.mode == super::ccs::Mode::Stats) && rest.len() == 1 {
+                        stats.partial = Some(super::ccs::Partial { input: out_cols.clone(), groups: g.into_groups() });
+                        return Ok((Table { cols: out_cols, rows: Vec::new() }, stats));
+                    }
                     let t = g.finish(w)?;
                     return finish(cluster, &src, t, &rest[1..], w, stats).await;
                 }
@@ -4237,7 +4397,7 @@ fn keeps_one_row_per_doc(prefix: &[Cmd]) -> bool {
 }
 
 /// Loads the enrich tables and lookup indices `cmds` read.
-async fn load_resources(cluster: &Cluster, text: &str, cmds: &[Cmd]) -> EsResult<Resources> {
+pub(super) async fn load_resources(cluster: &Cluster, text: &str, cmds: &[Cmd]) -> EsResult<Resources> {
     let mut res = Resources::default();
     let mut warmed = false;
     for c in cmds {
@@ -4381,7 +4541,7 @@ fn ts_info(src: &Src<'_>, t: &Table, ts: bool) -> Table {
     Table { cols, rows }
 }
 
-fn run_rest(src: &Src<'_>, mut t: Table, cmds: &[Cmd], w: &mut Warnings) -> EsResult<Table> {
+pub(super) fn run_rest(src: &Src<'_>, mut t: Table, cmds: &[Cmd], w: &mut Warnings) -> EsResult<Table> {
     for cmd in cmds {
         match cmd {
             Cmd::Stats { aggs, by } => {

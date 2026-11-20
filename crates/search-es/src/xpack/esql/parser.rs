@@ -403,6 +403,18 @@ pub struct Query {
     pub locale: Option<String>,
     /// The `SET name = value;` statements before the source command.
     pub settings: Settings,
+    /// Where each of `cmds` is in `src`, as parsed (empty once the commands no longer are the
+    /// text's: a rewritten `TS`, `PROMQL`, a branch). Cross-cluster parts are cut from them.
+    pub spans: Vec<Span>,
+}
+
+/// A top-level command's place in the query text: its `|` (none for the source command) and
+/// its first and past-last bytes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Span {
+    pub pipe: Option<usize>,
+    pub start: usize,
+    pub end: usize,
 }
 
 /// How references to fields no index maps resolve (`SET unmapped_fields`).
@@ -702,8 +714,14 @@ impl<'a> P<'a> {
                         continue;
                     }
                     let t = self.bump();
-                    match t.tok {
-                        Tok::Ident(s) | Tok::Quoted(s) | Tok::Str(s) => {
+                    let first = match &t.tok {
+                        Tok::Ident(s) | Tok::Quoted(s) | Tok::Str(s) => Some(s.clone()),
+                        // `*`, and a cluster pattern (`*:logs-*`).
+                        Tok::Op("*") => Some("*".to_string()),
+                        _ => None,
+                    };
+                    match first {
+                        Some(s) => {
                             // Index patterns may contain `-`, `:` and `*`; glue adjacent pieces.
                             let mut s = s;
                             while matches!(self.peek().tok, Tok::Op("-") | Tok::Op(":") | Tok::Op("*")) && self.peek().start == self.toks[self.i - 1].end {
@@ -718,8 +736,7 @@ impl<'a> P<'a> {
                             }
                             sources.push(s);
                         }
-                        Tok::Op("*") => sources.push("*".into()),
-                        _ => return Err(parse_error(self.src, t.start, &format!("mismatched input '{}' expecting {{QUOTED_STRING, '(', UNQUOTED_SOURCE}}", self.token_text(&t)))),
+                        None => return Err(parse_error(self.src, t.start, &format!("mismatched input '{}' expecting {{QUOTED_STRING, '(', UNQUOTED_SOURCE}}", self.token_text(&t)))),
                     }
                     if !self.eat_op(",") {
                         break;
@@ -1546,6 +1563,7 @@ pub fn parse_with(src: &str, all: &[(Option<String>, Param)]) -> EsResult<Query>
         let mut q = parse_tokens(&masked, all)?;
         q.src = src.to_string();
         q.cmds.splice(0..1, cmds);
+        q.spans.clear();
         if q.settings.unmapped == Unmapped::Default {
             q.settings.unmapped = Unmapped::Nullify;
         }
@@ -1638,7 +1656,9 @@ fn parse_tokens(src: &str, all: &[(Option<String>, Param)]) -> EsResult<Query> {
         let t = p.peek().clone();
         return Err(parse_error(src, t.start, &format!("extraneous input '<EOF>' expecting {SOURCE}")));
     }
+    let first_at = p.peek().start;
     let mut cmds = vec![p.command()?];
+    let mut spans = vec![Span { pipe: None, start: first_at, end: p.toks[p.i.saturating_sub(1)].end }];
     if !matches!(cmds[0], Cmd::From { .. } | Cmd::Ts { .. } | Cmd::Row(_) | Cmd::Show(_) | Cmd::Union { .. }) {
         return Err(parse_error(src, 0, "mismatched input expecting {'from', 'row', 'show'}"));
     }
@@ -1646,8 +1666,10 @@ fn parse_tokens(src: &str, all: &[(Option<String>, Param)]) -> EsResult<Query> {
         match p.peek().tok {
             Tok::Eof => break,
             Tok::Pipe => {
-                p.bump();
+                let pipe = p.bump().start;
+                let start = p.peek().start;
                 cmds.push(p.processing()?);
+                spans.push(Span { pipe: Some(pipe), start, end: p.toks[p.i - 1].end });
             }
             // A `;` after an expression: ANTLR's expectations there.
             Tok::Op(";") if matches!(cmds.last(), Some(Cmd::Row(_) | Cmd::Eval(_))) => {
@@ -1662,7 +1684,7 @@ fn parse_tokens(src: &str, all: &[(Option<String>, Param)]) -> EsResult<Query> {
     for (at, name, value) in &sets {
         settings.apply(src, *at, name, value)?;
     }
-    Ok(Query { src: src.to_string(), cmds, sql: false, locale: None, settings })
+    Ok(Query { src: src.to_string(), cmds, sql: false, locale: None, settings, spans })
 }
 
 /// Whether a `SET` statement came before the current token.

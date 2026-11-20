@@ -1572,7 +1572,20 @@ the rest are skipped by the tests' own prerequisites.
   hits. A remote that fails a later scroll page while it may not be skipped
   (`skip_unavailable: false`) fails that page, and the hits the clusters after it sent for that
   page are lost to the scroll (Elasticsearch fails the shards' parts alike). Not across clusters
-  yet: suggesters and ES|QL `FROM <alias>:<index>`.
+  yet: suggesters.
+- ES|QL across clusters (README.md, "Cross-cluster search") differs from Elasticsearch 9.5.5
+  where roll plans per cluster rather than sending one physical plan: a field mapped with
+  different types on different clusters is unsupported (null) in every cluster's part, where
+  Elasticsearch resolves the union type and its conversion functions across clusters;
+  `SORT ... | EVAL ... | LIMIT n` (commands between the two) is sorted on the coordinating
+  cluster over every part's rows (same answer, more rows sent); `FORK`, subqueries, views,
+  `TS` and `PROMQL` over remote indices read the remotes' rows through cross-cluster search on
+  the coordinating cluster (no `_clusters`, and `ENRICH` there uses the local policies). A
+  remote that can't be reached while it may not be skipped fails the query with roll's own
+  `connect_transport_exception` reason (502, as Elasticsearch's status). A policy a remote lacks
+  is reported once that remote's part answered (it fails before reading anything), not before
+  any part starts. `_clusters.details.*._shards` counts each part's indices' primary shards,
+  and a remote's `took` is its part's.
 - OpenSearch-flavor clusters' `cluster.remote.*` and `_remote/info` follow OpenSearch 3.9
   (`skip_unavailable` defaults to `false`, a seed or proxy address must be `host:port`, no
   `cluster_credentials`), but a search naming `alias:index` on them is refused (400), loopback

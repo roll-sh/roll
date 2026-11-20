@@ -391,21 +391,28 @@ pub fn spawn(links: Arc<dyn Links>, local: String, r: &Remote, target: String, r
     })
 }
 
-/// [`spawn`] for the request's principal: refused here, as Elasticsearch's querying cluster
-/// refuses it, when none of its `remote_indices` privileges names the remote.
+/// Why the request's principal may not reach remote `r`, as Elasticsearch's querying cluster
+/// refuses it: none of its `remote_indices` privileges names the remote.
+pub fn refusal(ctx: &Ctx, r: &Remote) -> Option<EsError> {
+    let p = crate::xpack::security::principal(ctx);
+    if p.is_superuser() || !remote_roles(ctx, &r.alias).iter().any(|set| set.as_object().is_none_or(|m| m.values().all(|d| d.get("indices").and_then(Value::as_array).is_none_or(|a| a.is_empty())))) {
+        return None;
+    }
+    Some(EsError::security(
+        403,
+        format!(
+            "action [{}] towards remote cluster [{}] is unauthorized for {} because no remote indices privileges apply for the target cluster",
+            crate::xpack::security::privileges::action_of(ctx.api.name()).1,
+            r.alias,
+            crate::xpack::security::who(p)
+        ),
+    ))
+}
+
+/// [`spawn`] for the request's principal, unless [`refusal`] refuses it.
 pub fn leg(ctx: &Ctx, r: &Remote, target: String, req: EsRequest) -> tokio::task::JoinHandle<Answer> {
     let links = ctx.cluster.config.links.clone().expect("a link has links");
-    let p = crate::xpack::security::principal(ctx);
-    if !p.is_superuser() && remote_roles(ctx, &r.alias).iter().any(|set| set.as_object().is_none_or(|m| m.values().all(|d| d.get("indices").and_then(Value::as_array).is_none_or(|a| a.is_empty())))) {
-        let e = EsError::security(
-            403,
-            format!(
-                "action [{}] towards remote cluster [{}] is unauthorized for {} because no remote indices privileges apply for the target cluster",
-                crate::xpack::security::privileges::action_of(ctx.api.name()).1,
-                r.alias,
-                crate::xpack::security::who(p)
-            ),
-        );
+    if let Some(e) = refusal(ctx, r) {
         return tokio::spawn(async move { Answer::Failed(e) });
     }
     spawn(links, local_ref(ctx.cluster).to_string(), r, target, req, wait(ctx.cluster))

@@ -2727,6 +2727,172 @@ async fn aggregations_across_clusters_equal_one_clusters() {
     assert!(v.get("__roll_partial_aggs").is_none() && v["aggregations"]["a"]["value"].is_number(), "{v}");
 }
 
+/// An ES|QL query's answer, for comparing clusters: its columns and values, remote index names
+/// (`far:items`) as local ones.
+fn esql_answer(v: &Value) -> Value {
+    ccs_local_names(&json!({ "columns": v["columns"], "values": v["values"] }))
+}
+
+/// Creates enrich policy `name` (`tag` to `label`) over a cluster's `tags`, labelled `prefix-tag`.
+async fn ccs_policy(e: &Env, user: &str, pw: &str, name: &str, prefix: &str) {
+    use reqwest::Method;
+    for t in ["a", "b", "c", "d"] {
+        let (s, v) = e.es(user, pw, Method::PUT, &format!("/tags/_doc/{t}?refresh=true"), Some(json!({ "tag": t, "label": format!("{prefix}-{t}") }))).await;
+        assert!(s < 300, "{v}");
+    }
+    let (s, v) = e.es(user, pw, Method::PUT, &format!("/_enrich/policy/{name}"), Some(json!({ "match": { "indices": "tags", "match_field": "tag", "enrich_fields": ["label"] } }))).await;
+    assert_eq!(s, 200, "{v}");
+    let (s, v) = e.es(user, pw, Method::POST, &format!("/_enrich/policy/{name}/_execute"), None).await;
+    assert_eq!(s, 200, "{v}");
+}
+
+/// ES|QL over linked clusters (`FROM items,far:items`) answers what one cluster holding all the
+/// data answers, as Elasticsearch 9.5.5 does: each cluster runs the query up to its first
+/// breaker and `STATS` states merge exactly; `_index` names remote indices `far:items`;
+/// `_clusters` with `include_ccs_metadata` (`_query/async` too); a missing remote is a 404 and
+/// a missing remote index skips that cluster (`skip_unavailable`) or fails the query; `ENRICH`
+/// runs with each cluster's policy in `_remote` mode, the coordinator's in `_coordinator` mode,
+/// and where it lands in `_any` mode, refused after `STATS` and when a cluster lacks the policy.
+#[tokio::test]
+async fn esql_across_clusters_answers_as_one_cluster() {
+    use reqwest::Method;
+    let e = env().await;
+    let (all, all_pw) = creds(&e.post("/v1/search/clusters", json!({ "name": "esql-all" })).await);
+    let (near, near_pw) = creds(&e.post("/v1/search/clusters", json!({ "name": "esql-near" })).await);
+    let (far, far_pw) = creds(&e.post("/v1/search/clusters", json!({ "name": "esql-far" })).await);
+    ccs_items(&e, &all, &all_pw, 0..90).await;
+    ccs_items(&e, &near, &near_pw, (0..90).filter(|i| i % 3 != 0)).await;
+    ccs_items(&e, &far, &far_pw, (0..90).filter(|i| i % 3 == 0)).await;
+    let (s, v) = e.call(Method::PUT, "/v1/search/clusters/esql-near/remotes/far", Some(json!({ "cluster": "esql-far" }))).await;
+    assert_eq!(s, 200, "{v}");
+    let query = |user: &str, pw: &str, body: Value| {
+        let (user, pw) = (user.to_string(), pw.to_string());
+        let e = &e;
+        async move { e.es(&user, &pw, Method::POST, "/_query", Some(body)).await }
+    };
+
+    // Partial `STATS`, `SORT | LIMIT`, `LIMIT` and the commands after the breaker: one cluster's
+    // answers.
+    for tail in [
+        "| STATS c = COUNT(*), s = SUM(n), a = AVG(price), cd = COUNT_DISTINCT(w), lo = MIN(at), hi = MAX(price), med = MEDIAN(n), p90 = PERCENTILE(price, 90), ws = MV_SORT(VALUES(w)) BY tag | SORT tag",
+        "| STATS c = COUNT(*), s = SUM(price) | EVAL mean = s / c",
+        "| WHERE n > 40 | STATS c = COUNT(*) BY b = BUCKET(at, 1 month) | SORT b",
+        "| EVAL x = n % 5 | STATS c = COUNT(*) BY x, tag | SORT x, tag | LIMIT 5",
+        "| SORT price DESC, n | LIMIT 7 | KEEP n, price, tag",
+        "| WHERE tag == \"b\" | EVAL d = n * 2 | SORT d | LIMIT 4 | KEEP d, tag",
+        "| INLINE STATS m = MAX(n) BY tag | WHERE n == m | KEEP n, tag | SORT n",
+    ] {
+        let (s, one) = query(&all, &all_pw, json!({ "query": format!("FROM items {tail}") })).await;
+        assert_eq!(s, 200, "{one}");
+        let (s, two) = query(&near, &near_pw, json!({ "query": format!("FROM items,far:items {tail}") })).await;
+        assert_eq!(s, 200, "{tail}: {two}");
+        assert_eq!(esql_answer(&two), esql_answer(&one), "{tail}");
+        assert!(two.get("_clusters").is_none(), "only with include_ccs_metadata: {two}");
+    }
+    // `*:items` is every remote's, not the local cluster's.
+    let (_, only) = query(&near, &near_pw, json!({ "query": "FROM *:items | STATS c = COUNT(*), s = SUM(n)" })).await;
+    let (_, one) = query(&all, &all_pw, json!({ "query": "FROM items | WHERE n % 3 == 0 | STATS c = COUNT(*), s = SUM(n)" })).await;
+    assert_eq!(esql_answer(&only), esql_answer(&one), "{only}");
+
+    // `_index` names the cluster; `_clusters` reports every cluster's part.
+    let (s, v) = query(&near, &near_pw, json!({ "query": "FROM items,far:items METADATA _index | WHERE n < 4 | KEEP n, _index | SORT n", "include_ccs_metadata": true })).await;
+    assert_eq!(s, 200, "{v}");
+    assert_eq!(v["values"], json!([[0, "far:items"], [1, "items"], [2, "items"], [3, "far:items"]]), "{v}");
+    let c = &v["_clusters"];
+    assert_eq!((c["total"].as_i64(), c["successful"].as_i64(), c["skipped"].as_i64(), v["is_partial"].as_bool()), (Some(2), Some(2), Some(0), Some(false)), "{v}");
+    for name in ["(local)", "far"] {
+        let d = &c["details"][name];
+        assert_eq!((d["status"].as_str(), d["indices"].as_str(), d["_shards"]["total"].as_i64(), d["_shards"]["successful"].as_i64()), (Some("successful"), Some("items"), Some(2), Some(2)), "{name}: {v}");
+    }
+    // `_query/async` answers the same.
+    let (s, a) = e.es(&near, &near_pw, Method::POST, "/_query/async", Some(json!({ "query": "FROM items,far:items | STATS c = COUNT(*)", "include_ccs_metadata": true, "keep_on_completion": true }))).await;
+    assert_eq!((s, a["values"].clone(), a["_clusters"]["successful"].as_i64()), (200, json!([[90]]), Some(2)), "{a}");
+    let (_, got) = e.es(&near, &near_pw, Method::GET, &format!("/_query/async/{}", a["id"].as_str().unwrap()), None).await;
+    assert_eq!((got["values"].clone(), got["_clusters"]["total"].as_i64()), (json!([[90]]), Some(2)), "{got}");
+
+    // A remote that isn't configured is a 404; a remote's missing index skips it (the default)
+    // or fails the query.
+    let (s, v) = query(&near, &near_pw, json!({ "query": "FROM nope:items | LIMIT 1" })).await;
+    assert_eq!((s, v["error"]["type"].as_str(), v["error"]["reason"].as_str()), (404, Some("no_such_remote_cluster_exception"), Some("no such remote cluster: [nope]")), "{v}");
+    let (s, v) = query(&near, &near_pw, json!({ "query": "FROM items,far:missing | STATS c = COUNT(*)", "include_ccs_metadata": true })).await;
+    assert_eq!((s, v["values"].clone(), v["is_partial"].as_bool()), (200, json!([[60]]), Some(true)), "{v}");
+    let far_part = &v["_clusters"]["details"]["far"];
+    assert_eq!((far_part["status"].as_str(), far_part["failures"][0]["reason"]["type"].as_str(), far_part["failures"][0]["reason"]["reason"].as_str()), (Some("skipped"), Some("verification_exception"), Some("Unknown index [far:missing]")), "{v}");
+    assert_eq!(e.es(&near, &near_pw, Method::PUT, "/_cluster/settings", Some(json!({ "persistent": { "cluster.remote.far.skip_unavailable": false } }))).await.0, 200);
+    let (s, v) = query(&near, &near_pw, json!({ "query": "FROM items,far:missing | LIMIT 1" })).await;
+    assert_eq!((s, v["error"]["reason"].as_str()), (400, Some("Unknown index [far:missing]")), "{v}");
+
+    // ENRICH: each cluster's own policy (`_remote`, `_any` before a breaker), the coordinator's
+    // (`_coordinator`, `_any` after one).
+    ccs_policy(&e, &near, &near_pw, "tag_label", "N").await;
+    ccs_policy(&e, &far, &far_pw, "tag_label", "F").await;
+    ccs_policy(&e, &near, &near_pw, "only_near", "N").await;
+    for (q, want) in [
+        ("FROM items,far:items | WHERE n < 2 | ENRICH _remote:tag_label | KEEP n, label | SORT n", json!([[0, "F-a"], [1, "N-b"]])),
+        ("FROM items,far:items | WHERE n < 2 | ENRICH tag_label | KEEP n, label | SORT n", json!([[0, "F-a"], [1, "N-b"]])),
+        ("FROM items,far:items | WHERE n < 2 | ENRICH _coordinator:tag_label | KEEP n, label | SORT n", json!([[0, "N-a"], [1, "N-b"]])),
+        ("FROM items,far:items | SORT n | LIMIT 2 | ENRICH _remote:tag_label | KEEP n, label", json!([[0, "F-a"], [1, "N-b"]])),
+        ("FROM items,far:items | SORT n | LIMIT 2 | ENRICH tag_label | KEEP n, label", json!([[0, "N-a"], [1, "N-b"]])),
+    ] {
+        let (s, v) = query(&near, &near_pw, json!({ "query": q })).await;
+        assert_eq!((s, v["values"].clone()), (200, want), "{q}: {v}");
+    }
+    for (q, reason) in [
+        ("FROM items,far:items | STATS c=COUNT(*) BY tag | ENRICH _remote:tag_label | SORT tag", "Found 1 problem\nline 1:50: ENRICH with remote policy can't be executed after [STATS c=COUNT(*) BY tag]@1:24"),
+        ("FROM items,far:items | ENRICH only_near | LIMIT 1", "Found 1 problem\nline 1:31: cannot find enrich policy [only_near] on clusters [far]"),
+    ] {
+        let (s, v) = query(&near, &near_pw, json!({ "query": q })).await;
+        assert_eq!((s, v["error"]["reason"].as_str()), (400, Some(reason)), "{q}: {v}");
+    }
+}
+
+/// ES|QL's part on a linked remote reads as the link allows, as `_search` across clusters does:
+/// the `cross_cluster` key's access (its document and field level security included)
+/// intersected with the caller's `remote_indices`; a caller without them for the remote is
+/// refused, and a client can't ask a cluster for a part's internal answer.
+#[tokio::test]
+async fn esql_across_clusters_reads_as_the_link_allows() {
+    use reqwest::Method;
+    let e = env().await;
+    let (near, near_pw) = creds(&e.post("/v1/search/clusters", json!({ "name": "esql-sec-near" })).await);
+    let (far, far_pw) = creds(&e.post("/v1/search/clusters", json!({ "name": "esql-sec-far" })).await);
+    ccs_items(&e, &far, &far_pw, 0..20).await;
+    let (s, v) = e.es(&far, &far_pw, Method::PUT, "/secret/_doc/1?refresh=true", Some(json!({ "n": 1 }))).await;
+    assert_eq!(s, 201, "{v}");
+    let access = json!({ "search": [{ "names": ["items"], "query": { "term": { "tag": "a" } }, "field_security": { "grant": ["n", "tag"] } }] });
+    let (s, v) = e.call(Method::PUT, "/v1/search/clusters/esql-sec-near/remotes/far", Some(json!({ "cluster": "esql-sec-far", "access": access }))).await;
+    assert_eq!(s, 200, "{v}");
+
+    // Only the key's documents (tag `a`: 0, 4, 8, 12, 16) and fields.
+    let (s, v) = e.es(&near, &near_pw, Method::POST, "/_query", Some(json!({ "query": "FROM far:items | STATS c = COUNT(*), s = SUM(n)" }))).await;
+    assert_eq!((s, v["values"].clone()), (200, json!([[5, 40]])), "{v}");
+    let (s, v) = e.es(&near, &near_pw, Method::POST, "/_query", Some(json!({ "query": "FROM far:items | SORT n | LIMIT 2" }))).await;
+    let names: Vec<&str> = v["columns"].as_array().map(|c| c.iter().filter_map(|c| c["name"].as_str()).collect()).unwrap_or_default();
+    assert_eq!((s, names, v["values"].clone()), (200, vec!["n", "tag"], json!([[0, "a"], [4, "a"]])), "{v}");
+    let (s, v) = e.es(&near, &near_pw, Method::POST, "/_query", Some(json!({ "query": "FROM far:secret | LIMIT 1", "include_ccs_metadata": true }))).await;
+    assert_eq!((s, v["_clusters"]["details"]["far"]["status"].as_str()), (200, Some("skipped")), "{v}");
+
+    // A user reaches the remote only through `remote_indices` naming it.
+    let reader = json!({ "indices": [{ "names": ["*"], "privileges": ["read"] }], "remote_indices": [{ "clusters": ["far"], "names": ["items"], "privileges": ["read"] }] });
+    assert_eq!(e.es(&near, &near_pw, Method::PUT, "/_security/role/reader", Some(reader)).await.0, 200);
+    assert_eq!(e.es(&near, &near_pw, Method::PUT, "/_security/role/local_only", Some(json!({ "indices": [{ "names": ["*"], "privileges": ["read"] }] }))).await.0, 200);
+    for (user, role) in [("reader", "reader"), ("local", "local_only")] {
+        assert_eq!(e.es(&near, &near_pw, Method::PUT, &format!("/_security/user/{user}"), Some(json!({ "password": "pass-word-1", "roles": [role] }))).await.0, 200);
+    }
+    let body = json!({ "query": "FROM far:items | STATS c = COUNT(*)", "include_ccs_metadata": true });
+    let (s, v) = e.es(&format!("reader@{near}"), "pass-word-1", Method::POST, "/_query", Some(body.clone())).await;
+    assert_eq!((s, v["values"].clone()), (200, json!([[5]])), "{v}");
+    let (s, v) = e.es(&format!("local@{near}"), "pass-word-1", Method::POST, "/_query", Some(body)).await;
+    let d = &v["_clusters"]["details"]["far"];
+    assert_eq!((s, d["status"].as_str(), d["failures"][0]["reason"]["type"].as_str()), (200, Some("skipped"), Some("security_exception")), "{v}");
+
+    // A part's answer is a link's only: a client asking gets an ordinary one.
+    let part = r#"{"mode":"rows","schema":[],"policies":[]}"#;
+    let r = e.http.post(format!("{}/_query", e.es)).basic_auth(&far, Some(&far_pw)).header("x-roll-esql-part", part).json(&json!({ "query": "FROM items | STATS c = COUNT(*)" })).send().await.unwrap();
+    let v: Value = r.json().await.unwrap();
+    assert!(v.get("__roll_esql_part").is_none() && v["values"] == json!([[20]]), "{v}");
+}
+
 /// Scrolls and points in time over linked clusters: one opaque id holds each cluster's own
 /// scroll or point in time, pages go through every document once and in order (aggregations on
 /// the first page), `search_after` pages a point in time exactly, clearing and closing fan out
