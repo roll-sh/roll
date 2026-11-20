@@ -86,6 +86,9 @@ pub struct Tool {
     /// It makes roll reach outside it, to an address the caller chose (a task's URL, a webhook, a log
     /// drain, a Git URL or image, a vendor's API): MCP's `openWorldHint`, so a client can say so.
     pub open_world: bool,
+    /// Sends no body when no body field is given, for a route that reads a missing body one way
+    /// and `{}` another (a transit key's rotate: no body is roll's own new material).
+    pub bodiless: bool,
 }
 
 pub enum Built {
@@ -304,7 +307,7 @@ impl Tool {
         }
         let body = match raw {
             Some((b, ct)) => Built::Raw(b, ct),
-            None if body_used || matches!(self.method, "POST" | "PUT" | "PATCH") => Built::Json(body),
+            None if body_used || (!self.bodiless && matches!(self.method, "POST" | "PUT" | "PATCH")) => Built::Json(body),
             None => Built::None,
         };
         Ok(Request { uri, headers, body })
@@ -383,7 +386,7 @@ const OVERRIDE: P = P { name: "override", ty: Ty::Bool, at: At::Header("x-roll-o
 const IN_PROJECT: P = P { name: "workspace_project", ty: Ty::Str, at: At::Header("x-roll-project"), required: false, desc: "Workspace project (prj_…) to put the new resource in" };
 
 const fn t(name: &'static str, title: &'static str, description: &'static str, product: &'static str, method: &'static str, path: &'static str, params: &'static [P]) -> Tool {
-    Tool { name, title, description, product, method, path, params, fixed: None, wrap: None, hint: Hint::Auto, until: None, outside: &[], published: false, open_world: false }
+    Tool { name, title, description, product, method, path, params, fixed: None, wrap: None, hint: Hint::Auto, until: None, outside: &[], published: false, open_world: false, bodiless: false }
 }
 
 /// A tasks run that's over (`completed`, `failed` or `canceled`).
@@ -434,6 +437,12 @@ impl Tool {
         self.published = true;
         self
     }
+    /// No body unless a body field is given ([`Tool::bodiless`]).
+    const fn bodiless(mut self) -> Tool {
+        self.bodiless = true;
+        self
+    }
+
     const fn open_world(mut self) -> Tool {
         self.open_world = true;
         self
@@ -961,6 +970,23 @@ static TOOLS: &[Tool] = &[
     t("search_delete_document", "Delete a document", "Delete a document.", "search", "DELETE", "/v1/search/clusters/{cluster}/indices/{index}/docs/{doc}", &[req("cluster", "Cluster"), req("index", "Index"), req("doc", "Document id")]),
     // ── secrets (roll secrets) ──
     t("secrets_list_environments", "List environments", "A project's secret environments.", "secrets", "GET", "/v1/secrets/projects/{project}/environments", &[SECRET_PROJECT]),
+    t("secrets_project", "A project's secrets at a glance", "A project's environments (with their kind, base, protection and expiry), how many are previews', and how long old versions are kept.", "secrets", "GET", "/v1/secrets/projects/{project}", &[SECRET_PROJECT]),
+    t("secrets_get_environment", "Get an environment", "One environment's settings: slug, name, kind (standard or ephemeral), base, labels, protection, approvals, expiry and max age.", "secrets", "GET", "/v1/secrets/projects/{project}/environments/{env}", &[SECRET_PROJECT, ENV]),
+    t("secrets_ensure_environment", "Make or update an environment", "Make an environment if it isn't there, or check it matches (409 mismatch; replace: true changes it): standard, or ephemeral with a base it overlays and an expiry (a preview's or a CI run's). Protection and approvers are a person's (secrets' policy), not set here.", "secrets", "PUT", "/v1/secrets/projects/{project}/environments/{env}", &[SECRET_PROJECT, ENV, b("name", Ty::Str, "Display name"), b("kind", Ty::Str, "standard (default) or ephemeral"), b("base", Ty::Str, "Ephemeral: the environment it overlays"), b("labels", Ty::Obj, "Labels, {key: value}"), b("expires_at", Ty::Int, "Ephemeral: unix ms it's deleted at"), b("ttl_minutes", Ty::Int, "Ephemeral: or minutes from now"), b("trusted", Ty::Bool, "Ephemeral: may read a protected base (admin on it)"), b("replace", Ty::Bool, "Change an existing one to match")]),
+    t("secrets_update_environment", "Rename or set an environment's expiry", "Change an environment's slug, name, expiry or max age (how old a value may get before it's flagged). A field left out stays.", "secrets", "PATCH", "/v1/secrets/projects/{project}/environments/{env}", &[SECRET_PROJECT, ENV, b("slug", Ty::Str, "New slug"), b("name", Ty::Str, "New display name"), bnull("expires_at", Ty::Int, "Unix ms it's deleted at (clear it: never)"), bnull("max_age_days", Ty::Int, "Days a value may get old (clear it: no limit)")]),
+    t("secrets_delete_environment", "Delete an environment", "Delete an environment and every secret in it.", "secrets", "DELETE", "/v1/secrets/projects/{project}/environments/{env}", &[SECRET_PROJECT, ENV]),
+    t("secrets_delete_ephemeral_environments", "Delete ephemeral environments by label", "Delete every ephemeral environment with a label (a finished CI run's, a closed preview's): standard ones are never touched.", "secrets", "DELETE", "/v1/secrets/projects/{project}/environments", &[SECRET_PROJECT, qreq("label", "key=value")]),
+    t("secrets_order_environments", "Order environments", "The order environments are shown and promoted in.", "secrets", "PUT", "/v1/secrets/projects/{project}/environments/order", &[SECRET_PROJECT, breq("order", Ty::Arr, "Every environment's slug, in order")]),
+    t("secrets_create_folder", "Make a folder", "A folder in an environment (/api, /api/stripe) to group keys.", "secrets", "POST", "/v1/secrets/projects/{project}/environments/{env}/folders", &[SECRET_PROJECT, ENV, breq("path", Ty::Str, "Folder path, e.g. /api")]),
+    t("secrets_delete_folder", "Delete a folder", "Delete a folder and every key in it (a change in the history).", "secrets", "DELETE", "/v1/secrets/projects/{project}/environments/{env}/folders", &[SECRET_PROJECT, ENV, qreq("path", "Folder path")]),
+    t("secrets_set_imports", "Set an environment's imports", "Which environments (or other projects' shared folders) a folder of this environment reads keys from, replacing the list: [{environment, path, project?}]. Each needs read on what it imports.", "secrets", "PUT", "/v1/secrets/projects/{project}/environments/{env}/imports", &[SECRET_PROJECT, ENV, q("path", Ty::Str, "Folder"), P { name: "imports", ty: Ty::Arr, at: At::RawJson, required: true, desc: "[{environment, path, project?}]" }]),
+    t("secrets_set_required", "Set the keys every environment needs", "The keys every standard environment of a project must define, replacing the list: [{key, path, comment, type?, pattern?, owner?, password?}] (password: how a generated value is made).", "secrets", "PUT", "/v1/secrets/projects/{project}/required", &[SECRET_PROJECT, P { name: "required", ty: Ty::Arr, at: At::RawJson, required: true, desc: "[{key, path, comment, type?, pattern?, owner?, password?}]" }]),
+    t("secrets_apply_changes", "Change several keys at once", "Set and delete several keys of a folder in one change (one entry in the history): ops [{op: set, key, value?, comment?, tags?, link?, if_version?} | {op: delete, key, if_version?}]. if_seq refuses it when the environment changed since. Into a protected environment it opens a request instead.", "secrets", "POST", "/v1/secrets/projects/{project}/environments/{env}/changes", &[SECRET_PROJECT, ENV, b("path", Ty::Str, "Folder"), b("message", Ty::Str, "Why"), breq("ops", Ty::Arr, "The set and delete operations"), b("if_seq", Ty::Int, "Only if the environment's last change is this")]),
+    t("secrets_revoke_share", "Revoke a share link", "Revoke one of a project's one-off share links at once (secrets_list_shares lists them): it opens nothing after.", "secrets", "DELETE", "/v1/secrets/projects/{project}/shares/{id}", &[SECRET_PROJECT, req("id", "Share id")]),
+    t("secrets_create_transit_key", "Make a transit key", "A key roll keeps to encrypt and sign for an app (secrets_transit_encrypt, secrets_transit_sign and the like), whose material never leaves roll. Bringing your own material is a person's (no tool).", "secrets", "POST", "/v1/secrets/projects/{project}/transit", &[SECRET_PROJECT, breq("name", Ty::Str, "Key name")]),
+    t("secrets_rotate_transit_key", "Rotate a transit key", "A new version of a transit key, made by roll: new ciphertexts use it, old ones still decrypt until min_decrypt_version moves past them.", "secrets", "POST", "/v1/secrets/projects/{project}/transit/{name}/rotate", &[SECRET_PROJECT, req("name", "Key name")]).undoable().bodiless(),
+    t("secrets_update_transit_key", "Set a transit key's oldest version", "Stop older versions of a transit key from decrypting: min_decrypt_version is the oldest that still does (ciphertexts made with older ones stop opening).", "secrets", "PATCH", "/v1/secrets/projects/{project}/transit/{name}", &[SECRET_PROJECT, req("name", "Key name"), breq("min_decrypt_version", Ty::Int, "The oldest version that still decrypts")]).destructive(),
+    t("secrets_backup_schedule", "A project's backup schedule", "Where and how often a project's values are saved as a sealed copy (to a recipient key, in one of its buckets): bucket, every_hours, keep, next and last run, last error. Setting or stopping it is a person's.", "secrets", "GET", "/v1/secrets/projects/{project}/backup/schedule", &[SECRET_PROJECT]),
     t("secrets_list", "List secrets", "Secret names and metadata in an environment (never values).", "secrets", "GET", "/v1/secrets/projects/{project}/environments/{env}/secrets", &[SECRET_PROJECT, ENV, q("path", Ty::Str, "Folder, e.g. /api")]),
     t("secrets_get", "Get a secret's metadata", "One secret's metadata in an environment: its type (shared or a person's own), version, link, tags, comment, where it comes from (its own, imported, a base), what it references and who changed it last (never its value: secrets_reveal reads that).", "secrets", "GET", "/v1/secrets/projects/{project}/environments/{env}/secrets/{name}", &[SECRET_PROJECT, ENV, req("name", "Secret name"), q("path", Ty::Str, "Folder"), q("type", Ty::Str, "shared (default) or personal")]),
     t("secrets_grid", "Every key in every environment", "A project's keys across all its environments at once: for each key whether it's the same, different or missing between them (by fingerprint, never values), and whether it's required. Is it set everywhere, and does production differ from staging?", "secrets", "GET", "/v1/secrets/projects/{project}/grid", &[SECRET_PROJECT, q("path", Ty::Str, "Folder")]),

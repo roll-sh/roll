@@ -95,8 +95,7 @@ POST /v1/search/clusters/{id}/request                                        the
 POST /v1/search/clusters/{id}/unload                                         the operator's (health, migrations, process control)
 GET /v1/secrets/gateways/{id}/connect                                        interactive (a shell, files, a forward): an admin's, live
 GET /v1/secrets/health                                                       the operator's (health, migrations, process control)
-GET /v1/secrets/projects/{project}                                           no tool yet: a project's secrets settings
-PATCH /v1/secrets/projects/{project}                                         no tool yet: a project's secrets settings
+PATCH /v1/secrets/projects/{project}                                         a person's call: how long old versions are kept (shortening it deletes history)
 POST /v1/secrets/projects/{project}/atlas-projects                           an outside integration's setup: an admin's, with its credentials
 DELETE /v1/secrets/projects/{project}/atlas-projects/{id}                    an outside integration's setup: an admin's, with its credentials
 * /v1/secrets/projects/{project}/audit/sinks                                 an outside integration's setup: an admin's, with its credentials
@@ -107,10 +106,9 @@ PATCH /v1/secrets/projects/{project}/aws-roles/{id}                          an 
 POST /v1/secrets/projects/{project}/aws-users                                an outside integration's setup: an admin's, with its credentials
 DELETE /v1/secrets/projects/{project}/aws-users/{id}                         an outside integration's setup: an admin's, with its credentials
 PATCH /v1/secrets/projects/{project}/aws-users/{id}                          an outside integration's setup: an admin's, with its credentials
-POST /v1/secrets/projects/{project}/backup                                   no tool yet: a project's backup now
-DELETE /v1/secrets/projects/{project}/backup/schedule                        no tool yet: a project's backup schedule
-GET /v1/secrets/projects/{project}/backup/schedule                           no tool yet: a project's backup schedule
-PUT /v1/secrets/projects/{project}/backup/schedule                           no tool yet: a project's backup schedule
+POST /v1/secrets/projects/{project}/backup                                   a person's call: it seals every value to a recipient key the caller picks
+DELETE /v1/secrets/projects/{project}/backup/schedule                        a person's call: stopping a project's backups
+PUT /v1/secrets/projects/{project}/backup/schedule                           a person's call: it seals every value to a recipient key the caller picks
 POST /v1/secrets/projects/{project}/cas                                      an outside integration's setup: an admin's, with its credentials
 DELETE /v1/secrets/projects/{project}/cas/{id}                               an outside integration's setup: an admin's, with its credentials
 PATCH /v1/secrets/projects/{project}/cas/{id}/acme                           an outside integration's setup: an admin's, with its credentials
@@ -122,22 +120,12 @@ POST /v1/secrets/projects/{project}/cloud-accounts                           an 
 DELETE /v1/secrets/projects/{project}/cloud-accounts/{id}                    an outside integration's setup: an admin's, with its credentials
 POST /v1/secrets/projects/{project}/directories                              an outside integration's setup: an admin's, with its credentials
 DELETE /v1/secrets/projects/{project}/directories/{id}                       an outside integration's setup: an admin's, with its credentials
-DELETE /v1/secrets/projects/{project}/environments                           no tool yet: deleting environments
-PUT /v1/secrets/projects/{project}/environments/order                        no tool yet: the environments' order
-DELETE /v1/secrets/projects/{project}/environments/{env}                     no tool yet: deleting an environment (destructive)
-GET /v1/secrets/projects/{project}/environments/{env}                        no tool yet: one environment's settings
-PATCH /v1/secrets/projects/{project}/environments/{env}                      no tool yet: one environment's settings
-PUT /v1/secrets/projects/{project}/environments/{env}                        no tool yet: making an environment
-POST /v1/secrets/projects/{project}/environments/{env}/changes               no tool yet: a change of several keys at once
 POST /v1/secrets/projects/{project}/environments/{env}/decoys                a person's call (decoys are planted by a person, #392)
 GET /v1/secrets/projects/{project}/environments/{env}/digest                 roll run --watch's change signal
-PUT /v1/secrets/projects/{project}/environments/{env}/exports                no tool yet: sharing a folder with other projects
-DELETE /v1/secrets/projects/{project}/environments/{env}/folder-policies     no tool yet: a folder's policy
-PUT /v1/secrets/projects/{project}/environments/{env}/folder-policies        no tool yet: a folder's policy
-DELETE /v1/secrets/projects/{project}/environments/{env}/folders             no tool yet: deleting a folder
-POST /v1/secrets/projects/{project}/environments/{env}/folders               no tool yet: making a folder
-PUT /v1/secrets/projects/{project}/environments/{env}/imports                no tool yet: an environment's imports
-PUT /v1/secrets/projects/{project}/environments/{env}/policy                 no tool yet: an environment's policy
+PUT /v1/secrets/projects/{project}/environments/{env}/exports                a person's call: sharing a folder with other projects grants them its values
+DELETE /v1/secrets/projects/{project}/environments/{env}/folder-policies     a person's call: a folder's approvals
+PUT /v1/secrets/projects/{project}/environments/{env}/folder-policies        a person's call: a folder's approvals
+PUT /v1/secrets/projects/{project}/environments/{env}/policy                 a person's call: an environment's protection and approvers
 DELETE /v1/secrets/projects/{project}/environments/{env}/reach/cut-off       a person's call (approving, accepting, cutting off)
 POST /v1/secrets/projects/{project}/environments/{env}/reach/cut-off         a person's call (approving, accepting, cutting off)
 GET /v1/secrets/projects/{project}/environments/{env}/requests/{id}          no tool yet: a value request (with #277's tools)
@@ -162,7 +150,6 @@ POST /v1/secrets/projects/{project}/outside-databases                        an 
 DELETE /v1/secrets/projects/{project}/outside-databases/{id}                 an outside integration's setup: an admin's, with its credentials
 PATCH /v1/secrets/projects/{project}/outside-databases/{id}                  an outside integration's setup: an admin's, with its credentials
 POST /v1/secrets/projects/{project}/outside-databases/{id}/rotate-admin      an outside integration's setup: an admin's, with its credentials
-PUT /v1/secrets/projects/{project}/required                                  no tool yet: the keys every environment needs
 POST /v1/secrets/projects/{project}/restore                                  a person's call (a project's secrets put back from a backup)
 POST /v1/secrets/projects/{project}/rotators                                 an outside integration's setup: an admin's, with its credentials
 DELETE /v1/secrets/projects/{project}/rotators/{id}                          an outside integration's setup: an admin's, with its credentials
@@ -171,7 +158,6 @@ POST /v1/secrets/projects/{project}/rotators/{id}/rotate-secret              an 
 POST /v1/secrets/projects/{project}/saas                                     an outside integration's setup: an admin's, with its credentials
 DELETE /v1/secrets/projects/{project}/saas/{id}                              an outside integration's setup: an admin's, with its credentials
 POST /v1/secrets/projects/{project}/shares                                   answers or sets a credential
-DELETE /v1/secrets/projects/{project}/shares/{id}                            no tool yet: revoking a share link (destructive)
 POST /v1/secrets/projects/{project}/snowflake-accounts                       an outside integration's setup: an admin's, with its credentials
 DELETE /v1/secrets/projects/{project}/snowflake-accounts/{id}                an outside integration's setup: an admin's, with its credentials
 POST /v1/secrets/projects/{project}/ssh-cas                                  an outside integration's setup: an admin's, with its credentials
@@ -182,10 +168,7 @@ POST /v1/secrets/projects/{project}/syncs/preview                            an 
 DELETE /v1/secrets/projects/{project}/syncs/{id}                             an outside integration's setup: an admin's, with its credentials
 PATCH /v1/secrets/projects/{project}/syncs/{id}                              an outside integration's setup: an admin's, with its credentials
 POST /v1/secrets/projects/{project}/syncs/{id}/run                           an outside integration's setup: an admin's, with its credentials
-POST /v1/secrets/projects/{project}/transit                                  no tool yet: a transit key
-DELETE /v1/secrets/projects/{project}/transit/{name}                         no tool yet: deleting a transit key (destructive)
-PATCH /v1/secrets/projects/{project}/transit/{name}                          no tool yet: a transit key's settings
-POST /v1/secrets/projects/{project}/transit/{name}/rotate                    no tool yet: rotating a transit key
+DELETE /v1/secrets/projects/{project}/transit/{name}                         a person's call: every ciphertext of the key stops opening
 GET /v1/secrets/projects/{project}/unstored/{fingerprint}                    no tool yet: a found credential's kind, place and liveness, never its value (#487)
 POST /v1/secrets/projects/{project}/validity                                 a person's call: it contacts outside providers (#487)
 GET /v1/secrets/whoami                                                       the operator's (health, migrations, process control)

@@ -822,6 +822,23 @@ previews are listed once those products are on.
 | `search_index_document` | Create or replace a document. | `PUT /v1/search/clusters/{cluster}/indices/{index}/docs/{doc}` |
 | `search_delete_document` | Delete a document. | `DELETE /v1/search/clusters/{cluster}/indices/{index}/docs/{doc}` |
 | `secrets_list_environments` | A project's secret environments. | `GET /v1/secrets/projects/{project}/environments` |
+| `secrets_project` | A project's environments, previews and history window. | `GET /v1/secrets/projects/{project}` |
+| `secrets_get_environment` | One environment's settings. | `GET /v1/secrets/projects/{project}/environments/{env}` |
+| `secrets_ensure_environment` | Make an environment, or check it matches (`replace` changes it). | `PUT /v1/secrets/projects/{project}/environments/{env}` |
+| `secrets_update_environment` | Rename an environment, or set its expiry or max age. | `PATCH /v1/secrets/projects/{project}/environments/{env}` |
+| `secrets_delete_environment` | Delete an environment and its secrets. | `DELETE /v1/secrets/projects/{project}/environments/{env}` |
+| `secrets_delete_ephemeral_environments` | Delete ephemeral environments with a label. | `DELETE /v1/secrets/projects/{project}/environments` |
+| `secrets_order_environments` | The environments' order. | `PUT /v1/secrets/projects/{project}/environments/order` |
+| `secrets_create_folder` | Make a folder. | `POST /v1/secrets/projects/{project}/environments/{env}/folders` |
+| `secrets_delete_folder` | Delete a folder and its keys. | `DELETE /v1/secrets/projects/{project}/environments/{env}/folders` |
+| `secrets_set_imports` | What a folder imports from, replacing the list. | `PUT /v1/secrets/projects/{project}/environments/{env}/imports` |
+| `secrets_set_required` | The keys every environment needs, replacing the list. | `PUT /v1/secrets/projects/{project}/required` |
+| `secrets_apply_changes` | Set and delete several keys in one change. | `POST /v1/secrets/projects/{project}/environments/{env}/changes` |
+| `secrets_revoke_share` | Revoke a one-off share link. | `DELETE /v1/secrets/projects/{project}/shares/{id}` |
+| `secrets_create_transit_key` | Make a transit key (roll's own material). | `POST /v1/secrets/projects/{project}/transit` |
+| `secrets_rotate_transit_key` | A new version of a transit key. | `POST /v1/secrets/projects/{project}/transit/{name}/rotate` |
+| `secrets_update_transit_key` | The oldest version that still decrypts. | `PATCH /v1/secrets/projects/{project}/transit/{name}` |
+| `secrets_backup_schedule` | Where and how often a project is backed up (never set here). | `GET /v1/secrets/projects/{project}/backup/schedule` |
 | `secrets_list` | Secret names and metadata in an environment (never values). | `GET /v1/secrets/projects/{project}/environments/{env}/secrets` |
 | `secrets_get` | One secret's metadata: type, version, link, tags, who changed it (never its value). | `GET /v1/secrets/projects/{project}/environments/{env}/secrets/{name}` |
 | `secrets_grid` | Every key in every environment: same, different or missing (by fingerprint), required. | `GET /v1/secrets/projects/{project}/grid` |
