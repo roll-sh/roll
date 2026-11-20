@@ -14,6 +14,9 @@ pub const MODERN: &str = "2026-07-28";
 pub const HEADER_MISMATCH: i64 = -32020;
 /// A protocol version this server doesn't speak.
 pub const UNSUPPORTED_VERSION: i64 = -32022;
+/// "Resource not found" before this revision; Invalid Params (-32602) in it.
+const RESOURCE_NOT_FOUND_LEGACY: i64 = -32002;
+const INVALID_PARAMS: i64 = -32602;
 const VERSION: &str = "io.modelcontextprotocol/protocolVersion";
 pub(crate) const CAPABILITIES: &str = "io.modelcontextprotocol/clientCapabilities";
 const CLIENT_INFO: &str = "io.modelcontextprotocol/clientInfo";
@@ -108,6 +111,11 @@ pub fn check(h: &HeaderMap, msg: &Value, legacy: &[&str]) -> Result<(), (StatusC
 /// names the server; a list says how long it may be kept, for this caller only (a token's tools are
 /// its own). A method the revision doesn't have is answered 404 by the caller.
 pub fn finish(method: &str, mut resp: Value) -> Value {
+    // A resource that isn't there is Invalid Params since this revision (SEP-2164); the handshake
+    // revisions keep their -32002.
+    if method == "resources/read" && resp["error"]["code"] == RESOURCE_NOT_FOUND_LEGACY {
+        resp["error"]["code"] = json!(INVALID_PARAMS);
+    }
     let Some(result) = resp.get_mut("result").and_then(Value::as_object_mut) else { return resp };
     result.entry("resultType").or_insert_with(|| json!("complete"));
     let meta = result.entry("_meta").or_insert_with(|| json!({}));
