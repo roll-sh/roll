@@ -5239,7 +5239,14 @@ members, the first hour, and the other products' credential inputs. Ranked:
    (role names, viewers seeing values, developers' defaults, admins and production, invites, homes,
    removed members' tokens, operator projects, admin accounts); the doc is written with option (a) of each.
    v1 is #501 (on #445; option (a) of every decision, each one constant in `roll-auth/src/roles.rs`),
-   gated green with the demoted-maker fix; an independent security review is running before it lands.
+   gated green with the demoted-maker fix. The security review said don't merge yet. Its findings,
+   being fixed:
+   - critical: a person's wide token could make anyone's resource its project's home and link its
+     credentials;
+   - high: any member, a viewer too, got previews' full powers, a shell included;
+   - medium: a removed maker kept previews' team access, made things such as rotators acted on after
+     removal, and homes outlived their resource;
+   - low: invites and admin accounts as owners.
 5. **Token defaults** (P13, S):
    - the CLI gives every environment, `reveal` and no expiry; the dashboard pre-picks production and 90
      days;
