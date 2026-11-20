@@ -453,9 +453,11 @@ Built: memberships, invites (mailed when the address has an account), roles, cha
 removal and leaving, the last owner, the migration, the session grant through the evaluator for
 workspace and secrets, `unprotected` rules and a developer's `environments`, homes for creates and
 `trusts` over owners and homes, D7's revocation and the audit rows (through the `member_events`
-outbox), approvals by role and counted as applied, a removed member's tokens, syncs, identities and
-bound references stopping (`maker_reaches`), the Members tab and the Invites page, the CLI, the four
-MCP tools.
+outbox), approvals by role and counted as applied, what a member made running at their rights now
+(`maker_reaches` takes the action and scope each made thing uses: a backup schedule needs `admin`
+and `reveal` on the whole project, a gateway or an ACME binding `admin`, an identity's login every
+action of its rule; so a removal or a demotion stops or narrows them at once), the Members tab and
+the Invites page, the CLI, the four MCP tools.
 
 Not yet:
 - secrets' `on_member_removed` hook (revoking dynamic leases a person holds, ending one-time shares

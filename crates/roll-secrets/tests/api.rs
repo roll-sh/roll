@@ -4800,3 +4800,91 @@ async fn a_removed_members_token_sync_and_identity_stop() {
     let (s, e) = api.call(Method::POST, "/v1/secrets/login", Some(login)).await;
     assert!(!s.is_success(), "his identity's logins are refused: {s} {e}");
 }
+
+/// docs/members.md: what a member made runs at their rights as they are now. Demoted from admin to
+/// developer, their backup schedule and gateway stop (they're an admin's) while their identity and
+/// sync narrow to a developer's reach; demoted to viewer, the identity's logins and the sync stop
+/// too.
+#[tokio::test]
+async fn a_demoted_members_backup_gateway_identity_and_sync_stop_or_narrow() {
+    let api = Api::new().await;
+    let p = api.project.clone();
+    let (s, inv) = api.call(Method::POST, &format!("/v1/workspace/projects/{p}/invites"), Some(json!({ "email": "cat@example.com", "role": "admin" }))).await;
+    assert_eq!(s, StatusCode::CREATED, "{inv}");
+    let token = inv["url"].as_str().unwrap().split("token=").nth(1).unwrap().to_string();
+    assert_eq!(api.signed_in("cat", false, Method::POST, &format!("/v1/workspace/invites/{token}/accept"), None).await.0, StatusCode::OK);
+    let as_cat = |method: Method, rest: &str, body: Option<Value>| {
+        let path = format!("/v1/secrets/projects/{p}{rest}");
+        let api = &api;
+        async move { api.signed_in("cat", false, method, &path, body).await }
+    };
+    api.ok(Method::PUT, &format!("/v1/workspace/projects/{p}/resources/bucket/assets"), Some(json!({ "x": 0, "y": 0 }))).await;
+    api.set("staging", "API_KEY", "staging-key").await;
+    api.set("development", "PLATFORM_TOKEN", "tok_1").await;
+
+    // As an admin she sets up a backup schedule, an identity, a sync and a gateway.
+    let schedule = json!({ "bucket": "assets", "recipient": roll_secrets::crypto::public_key(&[7u8; 32]), "every_hours": 24, "keep": 5 });
+    let (s, e) = as_cat(Method::PUT, "/backup/schedule", Some(schedule)).await;
+    assert!(s.is_success(), "{e}");
+    let issuer = Issuer::new();
+    *api.sent.1.lock().unwrap() = Some(issuer.jwks());
+    let identity = json!({ "name": "deploy", "issuer": ISSUER, "audience": "roll", "subject": "repo:acme/web:ref:refs/heads/main", "environments": ["staging"], "actions": ["read", "reveal"], "ttl_minutes": 10 });
+    let (s, i) = as_cat(Method::POST, "/identities", Some(identity)).await;
+    assert_eq!(s, StatusCode::CREATED, "{i}");
+    let (s, e) = as_cat(Method::POST, "/syncs", Some(json!({ "environment": "development", "kind": "fake", "target": { "name": "x", "token_key": "PLATFORM_TOKEN" } }))).await;
+    assert_eq!(s, StatusCode::CREATED, "{e}");
+    let (s, made) = as_cat(Method::POST, "/gateways", Some(json!({ "name": "vpc" }))).await;
+    assert_eq!(s, StatusCode::CREATED, "{made}");
+    let gw = made["gateway"]["id"].as_str().unwrap().to_string();
+    let gw_grant = api.gate.tokens.lock().unwrap().get(made["token"].as_str().unwrap()).cloned().unwrap();
+
+    let backups = || api.sent.4.lock().unwrap().keys().filter(|(b, k)| b == "assets" && k.starts_with(&format!("roll-secrets/backups/{p}/"))).count();
+    let sweep = || {
+        let (s, db, p) = (api.secrets.clone(), api.db.clone(), p.clone());
+        async move {
+            // Every schedule due now, whatever ran before.
+            db.write(move |c| c.execute("UPDATE backup_schedules SET next_at = 0 WHERE project_id = ?", [p.as_str()])).unwrap();
+            tokio::task::spawn_blocking(move || s.sweep().unwrap()).await.unwrap();
+        }
+    };
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() as i64;
+    let jwt = issuer.sign(json!({ "iss": ISSUER, "aud": "roll", "sub": "repo:acme/web:ref:refs/heads/main", "exp": now + 300, "iat": now }));
+    let login = || api.call(Method::POST, "/v1/secrets/login", Some(json!({ "identity": i["id"], "token": jwt })));
+    let change = |v: &'static str| api.ok(Method::PUT, "/environments/development/secrets/A", Some(json!({ "value": v })));
+
+    change("1").await;
+    sweep().await;
+    let (pushed, made_backups) = (api.sync.pushes.lock().unwrap().len(), backups());
+    assert!(pushed >= 1 && made_backups == 1, "{pushed} {made_backups}");
+    assert_eq!(login().await.0, StatusCode::OK);
+    assert!(api.secrets.gateway_link(&gw, false, None, Some(&gw_grant)).is_ok());
+
+    // A developer: what's an admin's stops; the identity and the sync narrow to her reach now.
+    let demote = |role: &'static str| {
+        let (api, path) = (&api, format!("/v1/workspace/projects/{p}/members/usr_cat"));
+        async move { api.call(Method::PATCH, &path, Some(json!({ "role": role }))).await }
+    };
+    assert_eq!(demote("developer").await.0, StatusCode::OK);
+    change("2").await;
+    sweep().await;
+    assert_eq!(backups(), made_backups, "her backup schedule stopped");
+    let schedule = api.ok(Method::GET, "/backup/schedule", None).await;
+    assert!(schedule["last_error"].as_str().is_some_and(|e| e.contains("usr_cat")), "{schedule}");
+    assert!(api.secrets.gateway_link(&gw, false, None, Some(&gw_grant)).is_err(), "her gateway stopped");
+    let (s, l) = login().await;
+    assert_eq!(s, StatusCode::OK, "staging reveal is a developer's: {l}");
+    let narrowed = l["token"].as_str().unwrap().to_string();
+    assert_eq!(api.req(Method::GET, "/environments/staging/values", None, Some(&narrowed)).await.0, StatusCode::OK);
+    assert!(api.sync.pushes.lock().unwrap().len() > pushed, "development is a developer's");
+
+    // A viewer: no values anywhere, so the identity doesn't log in, the token it gave reaches
+    // nothing it can't, and the sync stops.
+    assert_eq!(demote("viewer").await.0, StatusCode::OK);
+    assert_eq!(api.req(Method::GET, "/environments/staging/values", None, Some(&narrowed)).await.0, StatusCode::FORBIDDEN, "a login's token acts within its maker now");
+    let (s, e) = login().await;
+    assert!(!s.is_success(), "{s} {e}");
+    let pushed = api.sync.pushes.lock().unwrap().len();
+    change("3").await;
+    sweep().await;
+    assert_eq!(api.sync.pushes.lock().unwrap().len(), pushed, "her sync stopped");
+}

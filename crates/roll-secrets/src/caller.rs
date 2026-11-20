@@ -188,17 +188,23 @@ impl Secrets {
         self.workspace.get(roll_workspace::Scope::All, project).is_ok_and(|p| self.workspace.trusts(&p, roll_workspace::Kind::Repo, repo))
     }
 
-    /// Whether what `by` made (an identity, a sync, a bound reference) may still act on `project`:
+    /// Whether what `by` made (an identity, a backup schedule, a gateway, an ACME binding) may still
+    /// do each of `needs` (the action and the scope the made thing exercises, nothing broader):
     /// walked back to whoever made the first link of the chain. A person must still be able to sign
-    /// in and still reach the project (an admin, or a member now: their session's grant reads it);
-    /// the operator always. Removing someone from the project stops what they made at once.
-    pub(crate) fn maker_reaches(&self, by: &str, project: &str) -> Result<bool> {
+    /// in and their session's grant must allow every one of them now (an admin account always, the
+    /// operator always). Asked on every use, so removing or demoting someone stops what they made,
+    /// or narrows it, at once.
+    pub(crate) fn maker_reaches(&self, by: &str, needs: &[(Action, Scope<'_>)]) -> Result<bool> {
         match self.maker(by)? {
             Maker::Gone => Ok(false),
             Maker::Operator => Ok(true),
             Maker::Person(user) => {
                 let Some(p) = self.person(&user)? else { return Ok(false) };
-                Ok(p.admin || crate::access::Grants::allows(&self.session_grants(&user), Action::Read, &Scope::project(project)))
+                if p.admin {
+                    return Ok(true);
+                }
+                let session = self.session_grants(&user);
+                Ok(!needs.is_empty() && needs.iter().all(|(a, at)| crate::access::Grants::allows(&session, *a, at)))
             }
         }
     }

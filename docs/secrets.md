@@ -3841,11 +3841,21 @@ A person's own token reaches only what its rules and their session's grant now b
 (`Within`): removing them from the project stops it there at once, and roll-access revokes their
 tokens confined to the project (D7).
 
-What a person made acts later only while they can sign in and still reach its project (an admin
-then, or a member now: their session's grant reads it): their tokens, any token one of those made,
-their identities' logins, their syncs and references bound to them (`maker_reaches`). rolld asks
-roll-accounts and roll-access on every use; a lookup that fails is an error, not a disabled
-account. A sync a person made pushes as them, as they are then.
+What a person made acts later only at their rights as they are now (`maker_reaches`, asked on
+every use with the action and scope the made thing exercises, nothing broader; an admin account
+and the operator always pass):
+
+- a scheduled backup runs while its maker may still `admin` and `reveal` the whole project;
+- a gateway and an ACME external account binding work while their maker is still the project's
+  admin;
+- a workload identity logs in only while its maker's session allows every action of its rule in
+  each of its environments and folders, and the token it gets runs within that session too (it's
+  the maker's, so `Within` caps it on each request);
+- their tokens and any token one of those made act within their session (`Within`); a sync pushes
+  as them (`person_caller`).
+
+So removing or demoting a member stops or narrows what they made at once. rolld asks roll-accounts
+and roll-access on every use; a lookup that fails is an error, not a disabled account.
 
 Anyone may put any resource on their own canvas, so a project reaches a resource only where the
 workspace trusts it to (`Workspace::trusts`, docs/workspace.md "What a canvas stands for"): the
