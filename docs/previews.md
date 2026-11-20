@@ -2239,13 +2239,16 @@ Ranked by what a person notices first. Done so far:
    link naming a head (`?head=`) that the preview has moved past answers a page saying so, with
    that head's screenshot and the way to the current one, and the pull request comment's links
    name their head.
-4. **References a person chooses, in review** (#537, on roll secrets' #407): a rule's reference
-   to another environment reaches a preview only while its writer still may (`digest_as` at every
-   converge, as them). Next for it: a preview's own variables taking `roll://`, bound to whoever
-   sets them.
+4. **A preview's own variables take `roll://` too** (on roll secrets' #407, as #537 did for the
+   rules): `PUT …/{id}/env` binds a reference to whoever sets it (their reveal there, kept as its
+   writer), and every converge reads it as them, as the rules' references.
 5. **Cheap Postgres branches on ext4: overlay volumes over a frozen base** (pg-control; measured
    2026-11-17): 0.97 s against 3.5 s for a 1.4 GB copy, but a write copies the whole table file.
 6. **Watch: pg-control's recovery to a time seconds old** (unowned).
+
+Landed 2026-11-20 evening (main ed1868373, gated green with both live checks): a rule's reference
+to another environment reaches a preview only while its writer still may (#537: roll secrets'
+`digest_as` as them at every converge; left out otherwise, said in the activity).
 
 Landed in previews' lock turn 13 of 2026-11-20 (main c256b2f0d, exactly its gated tree): route
 budgets (#512: a route held to a p50 of its own, failing `roll/regressions` and blocking without
