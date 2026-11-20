@@ -288,8 +288,10 @@ fails += [f"leak {l}" for l in leaks]
 # (`roll_mcp::ask`). For every kind of id the fixtures made, the form must offer the fixture's,
 # or the kind is below with why it has none: a list answer of another shape offers nothing
 # without failing anything, and a new kind of id with no choices fails here until it has some.
-NO_CHOICES = {("postgres", "endpoint"): "an endpoint sits inside its branch, not in a list",
-              ("tasks", "id"): "it names a message, run, schedule or function by tool"}
+NO_CHOICES = {("postgres", "endpoint"): "an endpoint sits inside its branch, and no tool lists every project's"}
+# Where a name means different things by tool, the one the fixture's id is: tasks' `id` is a
+# message's in the fixture (a run's, a schedule's… by their own tools' routes).
+CHOICE_TOOL = {("tasks", "id"): "tasks_get_message"}
 def form_call(name, args):
     global n
     n += 1
@@ -305,7 +307,7 @@ for (prod, param), value in sorted(seen.items()):
     if (prod, param) in NO_CHOICES:
         continue
     tool = next((t for t in reads if t.get("_meta", {}).get("roll/product") == prod and param in t["inputSchema"].get("required", [])
-                 and all((prod, a) in seen for a in t["inputSchema"]["required"])), None)
+                 and all((prod, a) in seen for a in t["inputSchema"]["required"]) and t["name"] == CHOICE_TOOL.get((prod, param), t["name"])), None)
     if tool is None:
         continue
     args = {a: seen[(prod, a)] for a in tool["inputSchema"]["required"] if a != param}
