@@ -573,9 +573,9 @@ commands:
 Every catalogued route of a product here is a tool's, or a line in `crates/roll-mcp/src/no-tool.txt`
 with why it has none: it answers or sets a credential, it's a person's call, the operator's, the
 dashboard's, interactive, the data plane, an outside integration's setup, or `no tool yet` (a gap
-to close). A test fails on a route with neither, and on a line whose route has a tool or is gone,
-so a product's new route can't go without a decision (as `prefix-reviewed.txt` does for the
-catalogue).
+to close). A test fails on a route with neither, and on a line whose route has a tool now, so a
+product's new route can't go without a decision (as `prefix-reviewed.txt` does for the
+catalogue). A line may name a route an open PR is about to add, so that PR lands green.
 
 Arguments are checked against each tool's JSON Schema (closed: unknown arguments are refused).
 Every tool also takes `approval` (see [Approvals](#approvals)). Creating tools take

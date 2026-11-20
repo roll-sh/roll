@@ -1414,10 +1414,13 @@ mod tests {
         };
         let mut routes: Vec<(&str, &str)> = catalog::rows().iter().filter(|r| !r.route.ends_with('/') && products.contains(r.product)).map(|r| (r.method, r.route)).collect();
         routes.extend(catalog::prefix_reviewed_routes().filter(|(m, r)| product_of(m, r).is_some_and(|p| products.contains(p))));
-        let undecided: Vec<String> = routes.iter().filter(|(m, r)| !covered(m, r) && !listed.contains(&(*m, *r))).map(|(m, r)| format!("{m} {r}")).collect();
+        let is_listed = |m: &str, r: &str| listed.iter().any(|(lm, lr)| *lm == m && norm(lr) == norm(r));
+        let undecided: Vec<String> = routes.iter().filter(|(m, r)| !covered(m, r) && !is_listed(m, r)).map(|(m, r)| format!("{m} {r}")).collect();
         assert!(undecided.is_empty(), "catalogued routes with no MCP tool and no reason: map each in tools.rs, or add `METHOD route  why` to crates/roll-mcp/src/no-tool.txt:\n{}", undecided.join("\n"));
-        let stale: Vec<String> = listed.iter().filter(|(m, r)| covered(m, r) || !routes.contains(&(*m, *r))).map(|(m, r)| format!("{m} {r}")).collect();
-        assert!(stale.is_empty(), "no-tool.txt lines for routes that now have a tool or aren't catalogued: remove them:\n{}", stale.join("\n"));
+        // A line may name a route an open PR is about to add (declared ahead, so its gate passes);
+        // one whose route has a tool now is wrong.
+        let stale: Vec<String> = listed.iter().filter(|(m, r)| covered(m, r)).map(|(m, r)| format!("{m} {r}")).collect();
+        assert!(stale.is_empty(), "no-tool.txt lines for routes that have a tool now: remove them:\n{}", stale.join("\n"));
         // A tool that removes, revokes or replaces something says so (clients ask a person before a
         // destructive call), unless it's marked undoable: the review that found five revoke tools
         // unmarked is why this is a test, not a habit.
