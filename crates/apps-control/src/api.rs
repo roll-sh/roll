@@ -89,6 +89,7 @@ pub fn router(apps: Arc<Apps>) -> Router {
         .route(&format!("{env}/deploys/{{dep}}/commits"), get(deploy_commits))
         .route(&format!("{env}/deploys/{{dep}}/vulnerabilities"), get(deploy_vulnerabilities))
         .route(&format!("{env}/deploys/{{dep}}/sbom"), get(deploy_sbom))
+        .route(&format!("{env}/deploys/{{dep}}/explain"), post(explain_deploy))
         .route(&format!("{env}/deploys/{{dep}}/rollback"), post(rollback))
         .route(&format!("{env}/deploys/{{dep}}/rollout"), post(rollout_action))
         .route(&format!("{env}/rollback"), post(rollback_previous))
@@ -785,6 +786,16 @@ async fn deploy_commits(State(apps): S, Path((id, env, dep)): Path<(String, Stri
 #[derive(Deserialize)]
 struct VulnQuery {
     severity: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct ExplainQuery {
+    again: Option<String>,
+}
+
+/// A failed deployment explained by the repo owner's model (kept; `?again=1` asks anew).
+async fn explain_deploy(State(apps): S, Path((id, env, dep)): Path<(String, String, String)>, Query(q): Query<ExplainQuery>) -> R {
+    ok(apps.explain(&id, &env, &dep, truthy(&q.again)).await?)
 }
 
 async fn deploy_sbom(State(apps): S, Path((id, env, dep)): Path<(String, String, String)>) -> R {

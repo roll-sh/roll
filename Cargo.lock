@@ -291,6 +291,7 @@ dependencies = [
  "chrono",
  "chrono-tz",
  "code-git",
+ "code-review",
  "code-sql",
  "crc32fast",
  "croner",

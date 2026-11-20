@@ -173,6 +173,25 @@ impl apps_control::integrations::GitHubApp for CodeGitHub {
     }
 }
 
+/// roll code's model providers as roll apps' explainer: the repo's owner's provider (their own
+/// key, else the server's within their cap), metered on their account as `explain`.
+struct CodeExplainer(Arc<code_control::Code>);
+
+#[async_trait]
+impl apps_control::integrations::Explainer for CodeExplainer {
+    async fn ask(&self, repo: &str, system: &str, user: &str, schema: &serde_json::Value) -> apps_control::Result<Option<(serde_json::Value, String)>> {
+        use apps_control::Error as E;
+        let ask = code_control::ai::ModelAsk { kind: "explain", system: system.into(), user: user.into(), schema: schema.clone(), schema_name: "explanation" };
+        match self.0.ask_model(repo, &ask).await {
+            Ok(a) => Ok(a.json.map(|j| (j, a.model))),
+            Err(code_control::Error::Unprocessable(m) | code_control::Error::NotFound(m)) => Err(E::Conflict(m)),
+            Err(code_control::Error::Moved(to)) => Err(E::Conflict(format!("the repository moved to {to}: point the service at it"))),
+            Err(code_control::Error::Unavailable(m)) => Err(E::Unavailable(m)),
+            Err(e) => Err(E::Internal(e.to_string())),
+        }
+    }
+}
+
 /// roll code as roll apps' source of trees and landings.
 #[derive(Clone)]
 struct CodeSources(Arc<code_control::Code>);
@@ -669,6 +688,7 @@ pub async fn start(
     let apps = Apps::new(cfg, store, deps);
     if let Some(c) = code {
         apps.set_github_app(Arc::new(CodeGitHub(c.clone())));
+        apps.set_explainer(Arc::new(CodeExplainer(c.clone())));
         // The App's verified pushes and pull requests reach the services connected to them
         // (queued here, run on each service's owner).
         let a = apps.clone();
