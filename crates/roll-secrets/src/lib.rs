@@ -46,6 +46,8 @@ pub mod names;
 pub mod transit;
 pub mod ocsp;
 pub mod pki;
+pub mod placeholders;
+pub mod proxy;
 pub mod ssh;
 pub mod clouds;
 pub mod issuer;
@@ -424,6 +426,8 @@ pub struct Secrets {
     digests: read::Digests,
     /// ACME's challenge checks and nonce key (acme.rs).
     acme: acme::State,
+    /// Placeholders' swaps counted between audit rows (placeholders.rs).
+    uses: placeholders::Uses,
 }
 
 impl std::fmt::Debug for Secrets {
@@ -508,6 +512,7 @@ impl Secrets {
         db.ensure_schema(notices::SCHEMA)?;
         db.ensure_schema(alerts::SCHEMA)?;
         db.ensure_schema(decoys::SCHEMA)?;
+        db.ensure_schema(placeholders::SCHEMA)?;
         db.ensure_schema(rotators::SCHEMA)?;
         db.ensure_schema(saas::SCHEMA)?;
         db.ensure_schema(transit::SCHEMA)?;
@@ -603,7 +608,7 @@ impl Secrets {
         if let (Some(github), Ok(keys)) = (&opts.github, &opts.keyring) {
             links.register(Arc::new(github_app::Provider { db: db.clone(), keys: keys.clone(), unwrap: unwrap.clone(), github: github.clone() }));
         }
-        Ok(Secrets { db, keys: opts.keyring, key_source: opts.key_source, workspace, links, syncs: opts.syncs, deliver: opts.deliver, grants: opts.grants, people: opts.people, workloads: opts.workloads, gateway_links: opts.gateways, unwrap: unwrap.clone(), open: opts.open, trust_forwarded_for: opts.trust_forwarded_for, web_url: opts.web_url, outside: opts.outside, directory: opts.directory, github: opts.github, oidc: Default::default(), logins: Default::default(), reads_per_minute: read::READS_PER_MINUTE.into(), code_refs: Default::default(), sts: opts.sts.clone(), clouds: opts.clouds, public_api, aws_server_id: Default::default(), crls, live_fps: Default::default(), issuer_keys: Default::default(), digests: Default::default(), counters: Default::default(), acme: Default::default() })
+        Ok(Secrets { db, keys: opts.keyring, key_source: opts.key_source, workspace, links, syncs: opts.syncs, deliver: opts.deliver, grants: opts.grants, people: opts.people, workloads: opts.workloads, gateway_links: opts.gateways, unwrap: unwrap.clone(), open: opts.open, trust_forwarded_for: opts.trust_forwarded_for, web_url: opts.web_url, outside: opts.outside, directory: opts.directory, github: opts.github, oidc: Default::default(), logins: Default::default(), reads_per_minute: read::READS_PER_MINUTE.into(), code_refs: Default::default(), sts: opts.sts.clone(), clouds: opts.clouds, public_api, aws_server_id: Default::default(), crls, live_fps: Default::default(), issuer_keys: Default::default(), digests: Default::default(), counters: Default::default(), acme: Default::default(), uses: Default::default() })
     }
 
     pub fn links(&self) -> &Links {
@@ -705,7 +710,7 @@ impl Secrets {
         let failed = self.revoke_managed(self.managed_where("project_id = ?", project));
         let now = self.db.now_ms()?;
         self.db.write(|c| {
-            for t in ["secrets", "versions", "changes", "requests", "audit", "required", "shares", "syncs", "audit_sinks", "notices", "identities", "identity_logins", "transit_keys"] {
+            for t in ["secrets", "versions", "changes", "requests", "audit", "required", "shares", "syncs", "audit_sinks", "notices", "identities", "identity_logins", "transit_keys", "placeholders", "key_hosts"] {
                 c.execute(&format!("DELETE FROM {t} WHERE project_id = ?"), [project])?;
             }
             c.execute("DELETE FROM leases WHERE project_id = ? AND revoked_at IS NOT NULL", [project])?;

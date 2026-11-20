@@ -58,6 +58,7 @@ pub fn router(s: Arc<Secrets>) -> Router {
         .route(&format!("{K}/versions/{{version}}/value"), get(version_value))
         .route(&format!("{K}/rotate"), post(rotate))
         .route(&format!("{K}/purge"), post(purge))
+        .route(&format!("{K}/hosts"), put(set_hosts).delete(clear_hosts))
         .route(&format!("{E}/values"), get(values))
         .route(&format!("{E}/digest"), get(digest))
         .route(&format!("{E}/insights"), get(insights))
@@ -80,6 +81,8 @@ pub fn router(s: Arc<Secrets>) -> Router {
         .route(&format!("{P}/leases"), get(leases))
         .route(&format!("{P}/leases/{{id}}"), axum::routing::delete(revoke_lease))
         .route(&format!("{P}/leases/{{id}}/renew"), post(renew_lease))
+        .route(&format!("{P}/placeholders"), get(placeholders).delete(end_consumer))
+        .route(&format!("{P}/placeholders/{{id}}"), axum::routing::delete(revoke_placeholder))
         .route(&format!("{P}/identities"), get(identities).post(create_identity))
         .route(&format!("{P}/identities/{{id}}"), axum::routing::delete(delete_identity).patch(update_identity))
         .route(&format!("{P}/identities/{{id}}/jwks"), axum::routing::put(set_identity_keys))
@@ -784,6 +787,13 @@ struct ResolveBody {
     /// `true`: `<KEY>_CODE` beside each TOTP key, the one-time code when the values were read.
     #[serde(default)]
     codes: bool,
+    /// `true`: each key bound to hosts is a placeholder (`rlph_…`) that roll's egress proxy swaps
+    /// for the value, for those hosts only (docs/secrets.md, "Using a key without seeing it").
+    #[serde(default)]
+    placeholders: bool,
+    /// How long those placeholders live (default a day, at most 30 days).
+    #[serde(default)]
+    placeholder_minutes: Option<u64>,
 }
 
 fn yes() -> bool {
@@ -800,10 +810,13 @@ async fn resolve(State(s): S, Who(c): Who, Path((project, env)): Path<(String, S
     }
     let path = r.path.unwrap_or_else(|| "/".into());
     let (p, e, cons) = (project.clone(), env.clone(), consumer.clone());
-    let (untrusted, dynamic, codes) = (r.untrusted, r.dynamic, r.codes);
+    let (untrusted, dynamic, codes, placeholders, minutes) = (r.untrusted, r.dynamic, r.codes, r.placeholders, r.placeholder_minutes);
+    if minutes.is_some() && !placeholders {
+        return Err(Error::BadRequest("placeholder_minutes goes with placeholders: true".into()));
+    }
     let v = blocking(s, move |s| {
         let c = if untrusted { s.untrusted(&p, &c)? } else { c };
-        let mut v = s.values_for(&p, &e, &path, true, Some(&cons), dynamic, &c)?;
+        let mut v = if placeholders { s.values_with_placeholders(&p, &e, &path, &cons, dynamic, minutes, &c)? } else { s.values_for(&p, &e, &path, true, Some(&cons), dynamic, &c)? };
         if codes {
             s.add_codes(&p, &path, &mut v)?;
         }
@@ -816,7 +829,7 @@ async fn resolve(State(s): S, Who(c): Who, Path((project, env)): Path<(String, S
             let plain = zeroize::Zeroizing::new(serde_json::to_vec(&v.values).expect("JSON"));
             let context = format!("roll-secrets:{project}:{env}:{consumer}");
             let sealed = crate::crypto::seal_to(&to, &context, &plain).map_err(|e| Error::BadRequest(e.to_string()))?;
-            ok(json!({ "sealed": sealed, "context": context, "problems": v.problems, "leases": v.leases, "dynamic": v.dynamic, "linked": v.linked, "followed": v.followed }))
+            ok(json!({ "sealed": sealed, "context": context, "problems": v.problems, "leases": v.leases, "dynamic": v.dynamic, "linked": v.linked, "followed": v.followed, "placeholders": v.placeholders }))
         }
     };
     Ok(secret_response(out))
@@ -1012,6 +1025,32 @@ struct RenewBody {
 async fn renew_lease(State(s): S, Who(c): Who, Path((project, id)): Path<(String, String)>, b: Bytes) -> crate::Result<Response> {
     let r: RenewBody = if b.is_empty() { RenewBody::default() } else { body(&b)? };
     Ok(ok(blocking(s, move |s| s.renew_lease(&project, &id, r.ttl_minutes, &c)).await?))
+}
+
+/// `{hosts, header?, query?}`: bind a key to hosts (an admin's).
+async fn set_hosts(State(s): S, Who(c): Who, Path((project, env, key)): Path<(String, String, String)>, Query(q): Q, b: Bytes) -> crate::Result<Response> {
+    let hosts: crate::placeholders::Hosts = body(&b)?;
+    Ok(ok(blocking(s, move |s| s.set_hosts(&project, &env, &path_of(&q), &key, hosts, &c)).await?))
+}
+
+async fn clear_hosts(State(s): S, Who(c): Who, Path((project, env, key)): Path<(String, String, String)>, Query(q): Q) -> crate::Result<StatusCode> {
+    blocking(s, move |s| s.clear_hosts(&project, &env, &path_of(&q), &key, &c)).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn placeholders(State(s): S, Who(c): Who, Path(project): Path<String>) -> crate::Result<Response> {
+    Ok(ok(blocking(s, move |s| s.placeholders(&project, &c)).await?))
+}
+
+/// `?consumer=`: end every placeholder of a consumer (a sandbox that stopped).
+async fn end_consumer(State(s): S, Who(c): Who, Path(project): Path<String>, Query(q): Q) -> crate::Result<Response> {
+    let consumer = q.get("consumer").cloned().ok_or_else(|| Error::BadRequest("ending placeholders takes ?consumer=".into()))?;
+    Ok(ok(json!({ "ended": blocking(s, move |s| s.end_consumer_in(&project, &consumer, &c)).await? })))
+}
+
+async fn revoke_placeholder(State(s): S, Who(c): Who, Path((project, id)): Path<(String, String)>) -> crate::Result<StatusCode> {
+    blocking(s, move |s| s.revoke_placeholder(&project, &id, &c)).await?;
+    Ok(StatusCode::NO_CONTENT)
 }
 
 async fn revoke_lease(State(s): S, Who(c): Who, Path((project, id)): Path<(String, String)>) -> crate::Result<StatusCode> {

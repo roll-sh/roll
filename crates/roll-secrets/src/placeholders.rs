@@ -1,0 +1,642 @@
+//! Using a key without seeing it (docs/secrets.md, "Using a key without seeing it"): a key bound
+//! to hosts ([`Hosts`]) reaches a consumer that asks for placeholders as `rlph_…`, which roll's
+//! egress proxies swap for the value ([`Secrets::substitute`], through [`crate::proxy`]) only in
+//! requests to those hosts.
+//!
+//! A placeholder is random (never derived from the value), stored only as its SHA-256, and bound to
+//! (project, environment, folder, key, consumer, who asked, expiry). Every swap checks it all
+//! again: nothing here is cached but the audit's once-a-minute counts ([`Uses`]).
+
+use crate::access::{Action, Caller, Scope};
+use crate::consumers::ResourceRef;
+use crate::links::Mode;
+use crate::proxy::{PREFIX, Place, Position, Refusal};
+use crate::{Error, Result, Secrets, Value, envs, json, names};
+use code_sql::{OptionalExtension, params};
+use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
+
+pub(crate) const SCHEMA: &str = "
+CREATE TABLE IF NOT EXISTS key_hosts (
+    secret_id TEXT PRIMARY KEY,
+    project_id TEXT NOT NULL,
+    binding TEXT NOT NULL,
+    set_by TEXT NOT NULL,
+    set_at INTEGER NOT NULL
+) WITHOUT ROWID;
+CREATE INDEX IF NOT EXISTS key_hosts_project ON key_hosts (project_id);
+CREATE TABLE IF NOT EXISTS placeholders (
+    id TEXT PRIMARY KEY,
+    hash TEXT NOT NULL UNIQUE,
+    project_id TEXT NOT NULL,
+    env_id TEXT NOT NULL,
+    path TEXT NOT NULL,
+    key TEXT NOT NULL,
+    consumer TEXT NOT NULL,
+    issued_by TEXT NOT NULL,
+    resource TEXT,
+    untrusted INTEGER NOT NULL,
+    issued_at INTEGER NOT NULL,
+    expires_at INTEGER NOT NULL,
+    revoked_at INTEGER
+) WITHOUT ROWID;
+CREATE INDEX IF NOT EXISTS placeholders_consumer ON placeholders (consumer, revoked_at);
+CREATE INDEX IF NOT EXISTS placeholders_project ON placeholders (project_id, issued_at);
+CREATE INDEX IF NOT EXISTS placeholders_expiry ON placeholders (expires_at);
+";
+
+/// How long a placeholder lives unless the resolve says (minutes), and at most.
+const DEFAULT_MINUTES: u64 = 24 * 60;
+const MAX_MINUTES: u64 = 30 * 24 * 60;
+const MINUTE: i64 = 60_000;
+const DAY: i64 = 86_400_000;
+/// (placeholder, host) pairs counted between audit rows, before all are written at once.
+const USES_MAX: usize = 10_000;
+
+/// Where a key's value may go: its hosts, and optionally the one header or query parameter that
+/// carries it. Set by an admin (`PUT …/secrets/{key}/hosts`).
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct Hosts {
+    /// Hostnames (`api.stripe.com`) or one-label wildcards (`*.stripe.com`).
+    pub hosts: Vec<String>,
+    /// `Authorization: Bearer {}`: only that header, written exactly so.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub header: Option<String>,
+    /// `api_key`: only as that query parameter's whole value.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub query: Option<String>,
+}
+
+impl Hosts {
+    /// The binding as stored: lower-cased hosts, each checked, and at most one placement.
+    pub fn checked(mut self) -> Result<Hosts> {
+        let bad = Error::BadRequest;
+        if self.hosts.is_empty() || self.hosts.len() > 16 {
+            return Err(bad("hosts: 1 to 16 of them".into()));
+        }
+        for h in self.hosts.iter_mut() {
+            *h = h.trim().to_ascii_lowercase();
+            host_pattern(h).map_err(|why| bad(format!("hosts: {why}")))?;
+        }
+        self.hosts.sort();
+        self.hosts.dedup();
+        if self.header.is_some() && self.query.is_some() {
+            return Err(bad("a header or a query parameter carries the key, not both".into()));
+        }
+        if let Some(h) = &self.header {
+            template(h).map_err(bad)?;
+        }
+        if let Some(q) = &self.query
+            && (q.is_empty() || q.len() > 64 || !q.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-' | b'.' | b'~')))
+        {
+            return Err(bad("query: a parameter name, 1 to 64 of A-Z, a-z, 0-9, _ - . ~".into()));
+        }
+        Ok(self)
+    }
+
+    /// Whether `host` (as the proxy connects to it, port and final dot allowed) is one of these.
+    pub fn allows(&self, host: &str) -> bool {
+        normalize_host(host).is_some_and(|h| self.hosts.iter().any(|p| host_matches(p, &h)))
+    }
+
+    /// Whether `placeholder` sits where the binding says the key goes.
+    fn place(&self, placeholder: &str, at: &Position<'_>) -> std::result::Result<(), String> {
+        match (&self.header, &self.query) {
+            (Some(t), _) => {
+                let (name, before, after) = template(t).map_err(|_| "the key's header template doesn't parse".to_string())?;
+                let ok = at.place == Place::Header && at.name.eq_ignore_ascii_case(&name) && at.value.strip_prefix(before.as_str()).and_then(|r| r.strip_suffix(after.as_str())) == Some(placeholder);
+                if ok { Ok(()) } else { Err(format!("the key goes only in its header, as {t}")) }
+            }
+            (None, Some(q)) => {
+                if at.place == Place::Query && at.name == q && at.value == placeholder { Ok(()) } else { Err(format!("the key goes only in the query, as {q}")) }
+            }
+            (None, None) => {
+                if at.place == Place::Header { Ok(()) } else { Err("the key goes only in a header".into()) }
+            }
+        }
+    }
+
+    fn describe(&self) -> String {
+        let place = match (&self.header, &self.query) {
+            (Some(h), _) => format!(" (header {h})"),
+            (None, Some(q)) => format!(" (query {q})"),
+            _ => String::new(),
+        };
+        format!("{}{place}", self.hosts.join(", "))
+    }
+}
+
+fn label(l: &str) -> bool {
+    !l.is_empty() && l.len() <= 63 && l.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-') && !l.starts_with('-') && !l.ends_with('-')
+}
+
+/// A host a key may be bound to: a name of two labels or more, or `*.` and one (one label).
+fn host_pattern(p: &str) -> std::result::Result<(), String> {
+    let name = p.strip_prefix("*.").unwrap_or(p);
+    let labels: Vec<&str> = name.split('.').collect();
+    if p.len() > 253 || labels.len() < 2 || !labels.iter().all(|l| label(l)) {
+        return Err(format!("{p} isn't a hostname of two labels or more (a wildcard is only *. and one label, as *.stripe.com)"));
+    }
+    if labels.last().is_some_and(|l| l.bytes().all(|b| b.is_ascii_digit())) {
+        return Err(format!("{p} is an address: name a host"));
+    }
+    Ok(())
+}
+
+/// The request's host as patterns are matched: lower case, no port, no final dot. `None` for an
+/// IPv6 literal or anything that isn't a name.
+fn normalize_host(h: &str) -> Option<String> {
+    let mut h = h.trim().to_ascii_lowercase();
+    if let Some((name, port)) = h.rsplit_once(':')
+        && !port.is_empty()
+        && port.bytes().all(|b| b.is_ascii_digit())
+        && !name.contains(':')
+    {
+        h = name.to_string();
+    }
+    let h = h.strip_suffix('.').unwrap_or(&h).to_string();
+    (h.split('.').count() >= 2 && h.split('.').all(label)).then_some(h)
+}
+
+fn host_matches(pattern: &str, host: &str) -> bool {
+    match pattern.strip_prefix("*.") {
+        Some(rest) => host.split_once('.').is_some_and(|(first, r)| !first.is_empty() && r == rest),
+        None => pattern == host,
+    }
+}
+
+/// `Name: before{}after` as (name, before, after).
+fn template(t: &str) -> std::result::Result<(String, String, String), String> {
+    let bad = || format!("header: a template such as \"Authorization: Bearer {{}}\" or \"X-Api-Key: {{}}\", not {t:?}");
+    let (name, value) = t.split_once(':').ok_or_else(bad)?;
+    let name = name.trim();
+    let value = value.trim_start();
+    let tchar = |b: u8| b.is_ascii_alphanumeric() || b"!#$%&'*+-.^_`|~".contains(&b);
+    if t.len() > 256 || name.is_empty() || !name.bytes().all(tchar) || value.matches("{}").count() != 1 || value.bytes().any(|b| b.is_ascii_control()) {
+        return Err(bad());
+    }
+    if ["host", "content-length", "transfer-encoding", "connection"].contains(&name.to_ascii_lowercase().as_str()) {
+        return Err(format!("header: {name} can't carry a key"));
+    }
+    let (before, after) = value.split_once("{}").ok_or_else(bad)?;
+    Ok((name.to_string(), before.to_string(), after.to_string()))
+}
+
+/// A placeholder a resolve answered (`placeholders` in `Values`): never the placeholder itself.
+#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
+pub struct Placeholder {
+    pub key: String,
+    /// Its record (`phd_…`).
+    pub id: String,
+    pub hosts: Vec<String>,
+    pub expires_at: i64,
+}
+
+/// A placeholder's record (`GET …/placeholders`).
+#[derive(Clone, Debug, Serialize)]
+pub struct PlaceholderRecord {
+    pub id: String,
+    pub environment: String,
+    pub path: String,
+    pub key: String,
+    pub consumer: String,
+    pub issued_by: String,
+    pub issued_at: i64,
+    pub expires_at: i64,
+    pub revoked_at: Option<i64>,
+}
+
+/// Who a resolve issues placeholders for.
+pub(crate) struct Issue<'a> {
+    pub consumer: &'a str,
+    pub issued_by: &'a str,
+    pub resource: Option<&'a ResourceRef>,
+    pub untrusted: bool,
+    pub minutes: Option<u64>,
+}
+
+fn hash(token: &str) -> String {
+    use sha2::Digest;
+    sha2::Sha256::digest(token.as_bytes()).iter().map(|b| format!("{b:02x}")).collect()
+}
+
+/// A host as an error or an audit row may say it: printable and short.
+fn shown(host: &str) -> String {
+    host.chars().filter(|c| !c.is_control()).take(255).collect()
+}
+
+/// Swaps counted since each (placeholder, host, refused) pair's last audit row, so a busy one
+/// writes a row a minute.
+#[derive(Default)]
+pub(crate) struct Uses(std::sync::Mutex<HashMap<(String, String, bool), Use>>);
+
+#[derive(Clone)]
+struct Use {
+    project: String,
+    env: String,
+    path: String,
+    key: String,
+    consumer: String,
+    pending: u64,
+    logged_at: i64,
+}
+
+/// A placeholder's row, as a swap checks it.
+struct Row {
+    id: String,
+    project: String,
+    env_id: String,
+    path: String,
+    key: String,
+    consumer: String,
+    issued_by: String,
+    resource: Option<String>,
+    untrusted: bool,
+    expires_at: i64,
+    revoked_at: Option<i64>,
+}
+
+impl Secrets {
+    /// The project's bindings, by secret id.
+    pub(crate) fn bindings(&self, project: &str) -> Result<HashMap<String, Hosts>> {
+        let rows = self.db.read(|c| c.query("SELECT secret_id, binding FROM key_hosts WHERE project_id = ?", [project], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))))?;
+        Ok(rows.into_iter().filter_map(|(id, b)| serde_json::from_str(&b).ok().map(|b| (id, b))).collect())
+    }
+
+    pub(crate) fn binding(&self, secret_id: &str) -> Result<Option<Hosts>> {
+        let b: Option<String> = self.db.read(|c| c.query_row("SELECT binding FROM key_hosts WHERE secret_id = ?", [secret_id], |r| r.get(0)).optional())?;
+        Ok(b.and_then(|b| serde_json::from_str(&b).ok()))
+    }
+
+    /// Bind shared key `key` of `slug`'s own folder `path` to `hosts`: an admin's, audited.
+    pub fn set_hosts(&self, project: &str, slug: &str, path: &str, key: &str, hosts: Hosts, caller: &Caller) -> Result<Hosts> {
+        let path = names::path(path)?;
+        caller.need(Action::Admin, &Scope::at(project, slug, &path))?;
+        self.project(project)?;
+        let hosts = hosts.checked()?;
+        let now = self.db.now_ms()?;
+        self.db.write(|c| {
+            let env = envs::by_slug(c, project, slug)?;
+            let row: Option<(String, Option<String>)> = c.query_row("SELECT id, link FROM secrets WHERE env_id = ? AND path = ? AND key = ? AND owner = ''", params![env.id, path, key], |r| Ok((r.get(0)?, r.get(1)?))).optional()?;
+            let Some((id, link)) = row else {
+                return Err(Error::NotFound(format!("no shared secret {key} in {slug}:{path} (hosts bind a key of the environment's own folder)")));
+            };
+            if link.as_deref().and_then(|l| serde_json::from_str::<crate::Link>(l).ok()).is_some_and(|l| l.mode == Mode::Dynamic) {
+                return Err(Error::BadRequest(format!("{key} is a dynamic credential: a placeholder can't stand for a lease issued per read")));
+            }
+            c.execute(
+                "INSERT INTO key_hosts (secret_id, project_id, binding, set_by, set_at) VALUES (?, ?, ?, ?, ?) ON CONFLICT (secret_id) DO UPDATE SET binding = excluded.binding, set_by = excluded.set_by, set_at = excluded.set_at",
+                params![id, project, json(&hosts), caller.principal, now],
+            )?;
+            Ok::<_, Error>(())
+        })?;
+        self.audit_now(project, caller, "secrets.hosts", Some(slug), Some(&path), &[key.to_string()], &format!("bound {key} to {}", hosts.describe()));
+        Ok(hosts)
+    }
+
+    /// Take `key`'s binding off: its placeholders stop working at their next use.
+    pub fn clear_hosts(&self, project: &str, slug: &str, path: &str, key: &str, caller: &Caller) -> Result<()> {
+        let path = names::path(path)?;
+        caller.need(Action::Admin, &Scope::at(project, slug, &path))?;
+        self.project(project)?;
+        let gone = self.db.write(|c| {
+            let env = envs::by_slug(c, project, slug)?;
+            Ok::<_, Error>(c.execute("DELETE FROM key_hosts WHERE secret_id IN (SELECT id FROM secrets WHERE env_id = ? AND path = ? AND key = ? AND owner = '')", params![env.id, path, key])?)
+        })?;
+        if gone == 0 {
+            return Err(Error::NotFound(format!("{key} in {slug}:{path} isn't bound to hosts")));
+        }
+        self.audit_now(project, caller, "secrets.hosts", Some(slug), Some(&path), &[key.to_string()], &format!("unbound {key} from its hosts"));
+        Ok(())
+    }
+
+    /// Placeholders for `keys` (key and binding) of `env_id`'s folder `path`, in one write: each
+    /// returned beside its record.
+    pub(crate) fn issue_placeholders(&self, project: &str, env_id: &str, path: &str, keys: &[(String, Hosts)], how: &Issue<'_>) -> Result<Vec<(Value, Placeholder)>> {
+        if keys.is_empty() {
+            return Ok(vec![]);
+        }
+        let minutes = how.minutes.unwrap_or(DEFAULT_MINUTES);
+        if minutes == 0 || minutes > MAX_MINUTES {
+            return Err(Error::BadRequest(format!("placeholder_minutes: 1 to {MAX_MINUTES}")));
+        }
+        let now = self.db.now_ms()?;
+        let expires_at = now + minutes as i64 * MINUTE;
+        let resource = how.resource.map(|r| serde_json::json!({ "kind": r.kind.as_str(), "ref": r.r#ref }).to_string());
+        let out: Vec<(Value, Placeholder)> = keys
+            .iter()
+            .map(|(key, b)| (Value::new(roll_auth::credentials::new_secret(PREFIX)), Placeholder { key: key.clone(), id: names::new_id("phd", 16), hosts: b.hosts.clone(), expires_at }))
+            .collect();
+        self.db.write(|c| {
+            for (token, p) in &out {
+                c.execute(
+                    "INSERT INTO placeholders (id, hash, project_id, env_id, path, key, consumer, issued_by, resource, untrusted, issued_at, expires_at, revoked_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)",
+                    params![p.id, hash(token.expose()), project, env_id, path, p.key, how.consumer, how.issued_by, resource, how.untrusted as i64, now, expires_at],
+                )?;
+            }
+            Ok::<_, Error>(())
+        })?;
+        Ok(out)
+    }
+
+    fn placeholder_row(&self, token: &str) -> Result<Option<Row>> {
+        let h = hash(token);
+        Ok(self.db.read(|c| {
+            c.query_row(
+                "SELECT id, project_id, env_id, path, key, consumer, issued_by, resource, untrusted, expires_at, revoked_at FROM placeholders WHERE hash = ?",
+                [&h],
+                |r| Ok(Row { id: r.get(0)?, project: r.get(1)?, env_id: r.get(2)?, path: r.get(3)?, key: r.get(4)?, consumer: r.get(5)?, issued_by: r.get(6)?, resource: r.get(7)?, untrusted: r.get::<_, i64>(8)? != 0, expires_at: r.get(9)?, revoked_at: r.get(10)? }),
+            )
+            .optional()
+        })?)
+    }
+
+    /// Who reads for a placeholder now: the resource it was issued for, if its project still
+    /// stands for it, or whoever asked, as roll-access and the accounts answer now.
+    fn placeholder_reader(&self, row: &Row) -> std::result::Result<Caller, Refusal> {
+        let no = |m: &str| Refusal::NotAllowed(m.to_string());
+        if let Some(r) = &row.resource {
+            let r: serde_json::Value = serde_json::from_str(r).map_err(|_| Refusal::Failed("a placeholder's resource isn't JSON".into()))?;
+            let kind = roll_workspace::Kind::parse(r["kind"].as_str().unwrap_or_default()).map_err(|_| no("its resource's kind is gone"))?;
+            let mut resource = ResourceRef::new(kind, r["ref"].as_str().unwrap_or_default());
+            if row.untrusted {
+                resource = resource.untrusted();
+            }
+            return match self.project_for(&resource, Some(&row.project)) {
+                Ok(p) if p == row.project => Ok(Caller::consumer(&resource.consumer())),
+                _ => Err(no("the resource it was issued for isn't one its project stands for any more")),
+            };
+        }
+        let by = row.issued_by.as_str();
+        let failed = |e: Error| Refusal::Failed(e.to_string());
+        if by == "operator" {
+            return Ok(Caller::operator());
+        }
+        if let Some(id) = by.strip_prefix("token:") {
+            let g = self.grants.as_ref().and_then(|g| g.grant(id)).ok_or_else(|| no("the token that asked for it is gone"))?;
+            return Ok(Caller::token(id, self.grant_grants(&g).map_err(failed)?));
+        }
+        if crate::access::is_person(by) {
+            let p = self.person(by).map_err(failed)?.ok_or_else(|| no("the person who asked for it can't sign in any more"))?;
+            return self.person_caller(by, p.admin).map_err(failed);
+        }
+        if by.starts_with("identity:") {
+            return Err(no("a workload identity's login doesn't take placeholders"));
+        }
+        // An in-process consumer (a preview, a sandbox): what roll runs for the project.
+        Ok(Caller::consumer(by))
+    }
+
+    /// `placeholder`'s value for a request to `host`, with the placeholder `at` there: refused
+    /// unless it's live, whoever asked for it still may, and the key is still bound to `host` and
+    /// goes `at` there. A wrong host is an alert. Audited once a minute per (placeholder, host).
+    /// Blocking: in process only, for roll's egress proxies (`proxy::filter`).
+    pub fn substitute(&self, placeholder: &str, host: &str, at: Position<'_>) -> std::result::Result<Value, Refusal> {
+        let failed = |e: Error| Refusal::Failed(e.to_string());
+        if !placeholder.starts_with(PREFIX) || !roll_auth::credentials::checksum_ok(placeholder) {
+            return Err(Refusal::Unknown);
+        }
+        let row = self.placeholder_row(placeholder).map_err(failed)?.ok_or(Refusal::Unknown)?;
+        let now = self.db.now_ms().map_err(|e| failed(e.into()))?;
+        if row.revoked_at.is_some() {
+            return Err(Refusal::Revoked);
+        }
+        if row.expires_at <= now {
+            return Err(Refusal::Expired);
+        }
+        let slug: Option<String> = self.db.read(|c| c.query_row("SELECT slug FROM environments WHERE id = ? AND project_id = ?", [&row.env_id, &row.project], |r| r.get(0)).optional()).map_err(|e| failed(e.into()))?;
+        let slug = slug.ok_or_else(|| Refusal::NotAllowed("its environment is gone".into()))?;
+        let (project, path, key) = (row.project.as_str(), row.path.as_str(), row.key.as_str());
+        let reader = self.placeholder_reader(&row)?;
+        let reader = if row.untrusted { self.untrusted(project, &reader).map_err(failed)?.not_runtime() } else { reader };
+        let mut reader = self.caller_for(project, &slug, &reader).map_err(failed)?;
+        if !reader.allows(Action::Reveal, &Scope::at(project, &slug, path)) {
+            return Err(Refusal::NotAllowed(format!("{slug} is protected, or whoever asked for the placeholder may no longer read it")));
+        }
+        let entries = match self.view(project, &slug, path, &reader, false, Action::Reveal) {
+            Ok(e) => e,
+            Err(Error::Frozen(m)) => return Err(Refusal::NotAllowed(m)),
+            Err(Error::NotFound(m)) => return Err(Refusal::NotAllowed(m)),
+            Err(e) => return Err(failed(e)),
+        };
+        let e = entries.into_iter().find(|e| e.row.key == key).ok_or_else(|| Refusal::Unusable(format!("{key} isn't set in {slug}:{path} any more")))?;
+        let hosts = self.binding(&e.row.id).map_err(failed)?.ok_or_else(|| Refusal::Unusable(format!("{key} isn't bound to hosts any more")))?;
+        if !hosts.allows(host) {
+            self.note_use(&row, &slug, host, true, now);
+            return Err(Refusal::WrongHost(shown(host)));
+        }
+        hosts.place(placeholder, &at).map_err(Refusal::WrongPlace)?;
+        if e.row.link.as_ref().is_some_and(|l| l.mode == Mode::Dynamic) {
+            return Err(Refusal::Unusable(format!("{key} is a dynamic credential now")));
+        }
+        // roll's proxy is the runtime that uses it: a sensitive key's value reaches it, and only it.
+        reader.runtime = true;
+        let dek = self.project(project).map_err(failed)?;
+        let mut r = crate::read::Resolver::new(self, project, &slug, &dek, &reader, true, &row.consumer).map_err(failed)?;
+        r.no_dynamic = true;
+        let (value, problem) = r.entry(&e);
+        r.finish(&slug).map_err(failed)?;
+        if let Some(p) = problem {
+            return Err(Refusal::Unusable(format!("{key} doesn't resolve: {p}")));
+        }
+        self.note_use(&row, &slug, host, false, now);
+        Ok(value)
+    }
+
+    /// Count a swap (or a refusal for a wrong host), writing its row when the pair's last is a
+    /// minute old.
+    fn note_use(&self, row: &Row, env: &str, host: &str, refused: bool, now: i64) {
+        let host = normalize_host(host).unwrap_or_else(|| shown(host));
+        let k = (row.id.clone(), host, refused);
+        let mut due = vec![];
+        {
+            let mut uses = self.uses.0.lock().unwrap_or_else(|e| e.into_inner());
+            if uses.len() >= USES_MAX && !uses.contains_key(&k) {
+                for (k, u) in uses.iter_mut().filter(|(_, u)| u.pending > 0) {
+                    due.push((k.clone(), u.clone()));
+                    u.pending = 0;
+                }
+                uses.clear();
+            }
+            let u = uses.entry(k.clone()).or_insert_with(|| Use { project: row.project.clone(), env: env.to_string(), path: row.path.clone(), key: row.key.clone(), consumer: row.consumer.clone(), pending: 0, logged_at: i64::MIN });
+            u.pending += 1;
+            if now.saturating_sub(u.logged_at) >= MINUTE {
+                due.push((k, u.clone()));
+                u.pending = 0;
+                u.logged_at = now;
+            }
+        }
+        for (k, u) in due {
+            self.write_use(&k, &u, now);
+        }
+    }
+
+    fn write_use(&self, (id, host, refused): &(String, String, bool), u: &Use, now: i64) {
+        let times = if u.pending == 1 { "once".to_string() } else { format!("{} times", u.pending) };
+        if !refused {
+            let summary = format!("substituted {} for {host} {times} for {} ({id})", u.key, u.consumer);
+            self.audit_now(&u.project, &Caller::consumer(&u.consumer), "secrets.substitute", Some(&u.env), Some(&u.path), std::slice::from_ref(&u.key), &summary);
+            return;
+        }
+        tracing::warn!(project = %u.project, env = %u.env, key = %u.key, consumer = %u.consumer, placeholder = %id, %host, "a placeholder was sent to a host its key isn't bound to");
+        let text = format!("placeholder {id} of {}, issued to {}, was sent to {host} ({times}), which {} isn't bound to: likely an exfiltration attempt", u.key, u.consumer, u.key);
+        let alert = serde_json::json!({ "kind": "placeholder_host", "placeholder": id, "consumer": u.consumer, "host": host, "count": u.pending });
+        let res = self.keys().and_then(|mac| {
+            self.db.write(|c| {
+                crate::audit::record(c, mac, &u.project, &Caller::consumer("roll:placeholders"), "secrets.alert", Some(&u.env), Some(&u.path), std::slice::from_ref(&u.key), &text, now)?;
+                self.queue_alert(c, &u.project, &u.env, &text, alert.clone(), now, now)?;
+                Ok::<_, Error>(())
+            })
+        });
+        if let Err(e) = res {
+            tracing::error!(project = %u.project, "recording a placeholder's alert failed: {e}");
+        }
+    }
+
+    /// Write the counts a quiet pair left (the sweeper), and forget pairs idle for a minute.
+    pub(crate) fn flush_uses(&self) -> Result<()> {
+        let now = self.db.now_ms()?;
+        let due: Vec<_> = {
+            let mut uses = self.uses.0.lock().unwrap_or_else(|e| e.into_inner());
+            let mut due = vec![];
+            for (k, u) in uses.iter_mut() {
+                if u.pending > 0 && now.saturating_sub(u.logged_at) >= MINUTE {
+                    due.push((k.clone(), u.clone()));
+                    u.pending = 0;
+                    u.logged_at = now;
+                }
+            }
+            uses.retain(|_, u| u.pending > 0 || now.saturating_sub(u.logged_at) < MINUTE);
+            due
+        };
+        for (k, u) in due {
+            self.write_use(&k, &u, now);
+        }
+        Ok(())
+    }
+
+    /// End every live placeholder issued to `consumer` (a sandbox stopped, a preview torn down).
+    /// Answers how many ended.
+    pub fn end_consumer(&self, consumer: &str) -> Result<usize> {
+        self.end_placeholders("consumer = ?", consumer, None)
+    }
+
+    /// End the placeholders matching `cond` (one `?`, `arg`) and, with `caller`, only those of its
+    /// project it may delete; each project's audited.
+    fn end_placeholders(&self, cond: &str, arg: &str, caller: Option<(&str, &Caller)>) -> Result<usize> {
+        let now = self.db.now_ms()?;
+        let ended: Vec<(String, String)> = self.db.write(|c| {
+            let rows: Vec<(String, String, String, String, String)> = c.query(
+                &format!("SELECT p.id, p.project_id, COALESCE(e.slug, ''), p.path, p.consumer FROM placeholders p LEFT JOIN environments e ON e.id = p.env_id WHERE p.revoked_at IS NULL AND p.{cond}"),
+                [arg],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
+            )?;
+            let mut out = vec![];
+            for (id, project, env, path, consumer) in rows {
+                if let Some((p, who)) = caller
+                    && (project != p || !who.allows(Action::Delete, &Scope::at(&project, &env, &path)))
+                {
+                    continue;
+                }
+                c.execute("UPDATE placeholders SET revoked_at = ? WHERE id = ? AND revoked_at IS NULL", params![now, id])?;
+                out.push((project, consumer));
+            }
+            Ok::<_, Error>(out)
+        })?;
+        let mut by_project: std::collections::BTreeMap<(String, String), usize> = Default::default();
+        for key in &ended {
+            *by_project.entry(key.clone()).or_default() += 1;
+        }
+        let actor = caller.map_or_else(|| Caller::consumer("roll:placeholders"), |(_, c)| c.clone());
+        for ((project, consumer), n) in by_project {
+            self.audit_now(&project, &actor, "secrets.placeholders.end", None, None, &[], &format!("ended {} of {consumer}", crate::write::plural(n, "placeholder")));
+        }
+        Ok(ended.len())
+    }
+
+    /// The project's placeholders the caller may read, newest first (never the placeholder).
+    pub fn placeholders(&self, project: &str, caller: &Caller) -> Result<Vec<PlaceholderRecord>> {
+        caller.need(Action::Read, &Scope::project(project))?;
+        self.project(project)?;
+        let rows = self.db.read(|c| {
+            c.query(
+                "SELECT p.id, e.slug, p.path, p.key, p.consumer, p.issued_by, p.issued_at, p.expires_at, p.revoked_at FROM placeholders p JOIN environments e ON e.id = p.env_id WHERE p.project_id = ? ORDER BY p.issued_at DESC, p.id LIMIT 1000",
+                [project],
+                |r| Ok(PlaceholderRecord { id: r.get(0)?, environment: r.get(1)?, path: r.get(2)?, key: r.get(3)?, consumer: r.get(4)?, issued_by: r.get(5)?, issued_at: r.get(6)?, expires_at: r.get(7)?, revoked_at: r.get(8)? }),
+            )
+        })?;
+        Ok(rows.into_iter().filter(|p| caller.allows(Action::Read, &Scope::at(project, &p.environment, &p.path))).collect())
+    }
+
+    /// End placeholder `id` now: whoever may delete in its folder.
+    pub fn revoke_placeholder(&self, project: &str, id: &str, caller: &Caller) -> Result<()> {
+        let p = self.placeholders(project, caller)?.into_iter().find(|p| p.id == id).ok_or_else(|| Error::NotFound(format!("no placeholder {id}")))?;
+        caller.need(Action::Delete, &Scope::at(project, &p.environment, &p.path))?;
+        if p.revoked_at.is_none() && self.end_placeholders("id = ?", id, Some((project, caller)))? > 0 {
+            Ok(())
+        } else {
+            Err(Error::Conflict("conflict", format!("{id} is already revoked")))
+        }
+    }
+
+    /// End the project's live placeholders of `consumer` that the caller may delete.
+    pub fn end_consumer_in(&self, project: &str, consumer: &str, caller: &Caller) -> Result<usize> {
+        caller.need(Action::Read, &Scope::project(project))?;
+        self.project(project)?;
+        self.end_placeholders("consumer = ?", consumer, Some((project, caller)))
+    }
+
+    /// A leaked placeholder (found in a pushed file, by GitHub's secret scanning): revoked, and
+    /// what it was. `None`: it wasn't live.
+    pub fn revoke_leaked_placeholder(&self, token: &str, why: &str) -> Option<String> {
+        let row = self.placeholder_row(token).ok().flatten().filter(|r| r.revoked_at.is_none())?;
+        let now = self.db.now_ms().ok()?;
+        let n = self.db.write(|c| c.execute("UPDATE placeholders SET revoked_at = ? WHERE id = ? AND revoked_at IS NULL", params![now, row.id])).ok()?;
+        if n == 0 {
+            return None;
+        }
+        let why: String = why.chars().filter(|c| !c.is_control()).take(200).collect();
+        self.audit_now(&row.project, &Caller::consumer("roll:leaks"), "secrets.placeholders.end", None, Some(&row.path), std::slice::from_ref(&row.key), &format!("revoked leaked placeholder {} of {} for {}: {why}", row.id, row.key, row.consumer));
+        Some(format!("roll secrets placeholder {} of {}", row.id, row.key))
+    }
+
+    /// The sweeper's part: quiet pairs' counts, and placeholders a day past their end.
+    pub(crate) fn sweep_placeholders(&self) -> Result<()> {
+        self.flush_uses()?;
+        let now = self.db.now_ms()?;
+        self.db.write(|c| {
+            c.execute("DELETE FROM placeholders WHERE expires_at < ? OR revoked_at < ?", params![now - DAY, now - DAY])?;
+            c.execute("DELETE FROM key_hosts WHERE NOT EXISTS (SELECT 1 FROM secrets s WHERE s.id = key_hosts.secret_id)", ())?;
+            Ok::<_, Error>(())
+        })
+    }
+}
+
+/// roll's egress proxies swap through this, in process ([`crate::proxy::filter`]).
+impl crate::proxy::Substitute for Secrets {
+    fn substitute(&self, placeholder: &str, host: &str, at: Position<'_>) -> std::result::Result<Value, Refusal> {
+        Secrets::substitute(self, placeholder, host, at)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn hosts_are_names_or_one_label_wildcards() {
+        let h = |hosts: &[&str]| Hosts { hosts: hosts.iter().map(|s| s.to_string()).collect(), header: None, query: None }.checked();
+        let b = h(&["API.Stripe.com", "*.stripe.com"]).unwrap();
+        assert!(b.allows("api.stripe.com") && b.allows("files.stripe.com:443") && b.allows("API.STRIPE.COM."));
+        assert!(!b.allows("stripe.com") && !b.allows("a.b.stripe.com") && !b.allows("api.stripe.com.evil.example") && !b.allows("[::1]:443"));
+        for bad in [&["*"][..], &["*.com"], &["com"], &["10.0.0.1"], &["api.stripe.com:443"], &["*.*.stripe.com"], &["a_b.example.com"], &[]] {
+            assert!(h(bad).is_err(), "{bad:?}");
+        }
+        let both = Hosts { hosts: vec!["api.stripe.com".into()], header: Some("X-Api-Key: {}".into()), query: Some("key".into()) };
+        assert!(both.checked().is_err());
+        for bad in ["Authorization Bearer {}", "Host: {}", "X-Key: {} {}", "X-Key: none", "Bad Name: {}"] {
+            assert!(Hosts { hosts: vec!["api.stripe.com".into()], header: Some(bad.into()), query: None }.checked().is_err(), "{bad}");
+        }
+    }
+}

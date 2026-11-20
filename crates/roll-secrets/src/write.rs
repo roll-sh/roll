@@ -311,6 +311,8 @@ pub(crate) fn apply(c: &Conn<'_>, dek: &Dek, mac: &crate::Keyring, env: &EnvRow,
                     params![cur.id, cur.version + 1, seq, project, env.id, item.path, item.key, item.owner, cur.comment, json(&cur.tags), cur.link.as_ref().map(json), now, caller.principal, cur.expires_at],
                 )?;
                 c.execute("DELETE FROM secrets WHERE id = ?", [&cur.id])?;
+                // Its hosts go with it: set again, a key is bound again only by an admin.
+                c.execute("DELETE FROM key_hosts WHERE secret_id = ?", [&cur.id])?;
                 // A decoy ends with its key (its token is revoked after the write: `end_decoys`).
                 c.execute("UPDATE decoys SET ended_at = ? WHERE secret_id = ? AND ended_at IS NULL", params![now, cur.id])?;
                 if let (Some(l), Some(id)) = (&cur.link, credential_id(&cur.link_state)) {

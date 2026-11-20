@@ -629,6 +629,11 @@ async fn run_with(mut args: Args) -> anyhow::Result<()> {
     apps_secrets.set(secrets.clone(), workspace.clone());
     storage_secrets.set(secrets.clone());
     let _ = secrets_envs.0.set(secrets.clone());
+    // roll secrets' placeholders found leaked (`rlph_`) stop working, like tokens.
+    {
+        let secrets = secrets.clone();
+        access.on_leaked("rlph_", move |secret, why| secrets.revoke_leaked_placeholder(secret, why));
+    }
     if let Some(c) = &code {
         secrets.set_code_refs(std::sync::Arc::new(secrets::CodeRefs(c.code.clone())));
     }

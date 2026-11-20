@@ -259,6 +259,9 @@ DELETE /v1/secrets/projects/{project}/identities/{id}
 PATCH /v1/secrets/projects/{project}/identities/{id}
 GET /v1/secrets/projects/{project}/leases
 DELETE /v1/secrets/projects/{project}/leases/{id}
+GET /v1/secrets/projects/{project}/placeholders
+DELETE /v1/secrets/projects/{project}/placeholders
+DELETE /v1/secrets/projects/{project}/placeholders/{id}
 GET /v1/secrets/projects/{project}/links
 GET /v1/secrets/projects/{project}/required
 GET /v1/secrets/projects/{project}/shared

@@ -35,11 +35,12 @@ pub struct ResourceRef {
     pub kind: Kind,
     pub r#ref: String,
     untrusted: bool,
+    placeholders: bool,
 }
 
 impl ResourceRef {
     pub fn new(kind: Kind, r#ref: impl Into<String>) -> ResourceRef {
-        ResourceRef { kind, r#ref: r#ref.into(), untrusted: false }
+        ResourceRef { kind, r#ref: r#ref.into(), untrusted: false, placeholders: false }
     }
 
     /// The same resource as a copy nobody vetted (a branch, a clone, anything whose code or data
@@ -52,6 +53,18 @@ impl ResourceRef {
 
     pub fn is_untrusted(&self) -> bool {
         self.untrusted
+    }
+
+    /// A resource whose requests go out through roll's egress proxy: a key bound to hosts
+    /// resolves as a placeholder the proxy swaps (docs/secrets.md, "Using a key without seeing
+    /// it"), sensitive or not, so the resource never holds its value.
+    pub fn with_placeholders(mut self) -> ResourceRef {
+        self.placeholders = true;
+        self
+    }
+
+    pub fn wants_placeholders(&self) -> bool {
+        self.placeholders
     }
 
     /// Who it is in the audit log: `storage:bucket:<ref>`, `search:search:<ref>`, …, with
@@ -73,7 +86,11 @@ impl ResourceRef {
 /// A resolved reference. `value` redacts itself and is wiped on drop.
 #[derive(Clone, Debug)]
 pub struct Resolved {
+    /// The value, or for a key bound to hosts that a resource asked placeholders for, the
+    /// placeholder (`rlph_…`) its proxy swaps.
     pub value: Value,
+    /// The placeholder's record, when `value` is one.
+    pub placeholder: Option<crate::placeholders::Placeholder>,
     /// The version of the key read.
     pub version: i64,
     /// When the value stops working outside roll, if the key says (ms).
@@ -150,7 +167,7 @@ impl Secrets {
     pub fn resolve_for(&self, resource: &ResourceRef, reference: &str) -> Result<Resolved, Refusal> {
         let r = Reference::required(reference)?;
         let project = self.project_for(resource, r.project.as_deref())?;
-        self.resolve_one(&project, &r.env, &r.path, &r.key, &Caller::consumer(&resource.consumer()), resource.untrusted)
+        self.resolve_one(&project, &r.env, &r.path, &r.key, &Caller::consumer(&resource.consumer()), resource.untrusted, resource)
     }
 
     /// The digest of the folder `reference` reads, under the same rules (no value, not audited):
@@ -159,7 +176,7 @@ impl Secrets {
     pub fn digest_for(&self, resource: &ResourceRef, reference: &str) -> Result<String, Refusal> {
         let r = Reference::required(reference)?;
         let project = self.project_for(resource, r.project.as_deref())?;
-        let (reader, _) = self.consumer_entry(&project, &r.env, &r.path, &r.key, &Caller::consumer(&resource.consumer()), resource.untrusted)?;
+        let (reader, _, _) = self.consumer_entry(&project, &r.env, &r.path, &r.key, &Caller::consumer(&resource.consumer()), resource.untrusted, resource.placeholders)?;
         match self.digest(&project, &r.env, &r.path, &reader) {
             Err(Error::NotFound(m)) => Err(Refusal::NoSuchKey(m)),
             d => Ok(d?),
@@ -167,7 +184,7 @@ impl Secrets {
     }
 
     /// The one project whose canvas holds `resource` and stands for it (and is `named`, if given).
-    fn project_for(&self, resource: &ResourceRef, named: Option<&str>) -> Result<String, Refusal> {
+    pub(crate) fn project_for(&self, resource: &ResourceRef, named: Option<&str>) -> Result<String, Refusal> {
         let who = resource.consumer();
         let ws = |e: roll_workspace::Error| Error::Internal(e.to_string());
         let ids = self.workspace.projects_of(resource.kind.as_str(), &resource.r#ref).map_err(ws)?;

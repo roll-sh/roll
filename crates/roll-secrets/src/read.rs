@@ -131,6 +131,10 @@ pub struct Secret {
     /// everyone else, as on any other key.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub decoy: Option<crate::Decoy>,
+    /// The hosts its value may be sent to through a placeholder (docs/secrets.md, "Using a key
+    /// without seeing it").
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub hosts: Option<crate::placeholders::Hosts>,
 }
 
 #[derive(Debug, Serialize, Clone, PartialEq)]
@@ -164,6 +168,10 @@ pub struct Values {
     /// `values` (no value of the parent's leaves roll secrets), for roll previews to set from its
     /// branch by `field`.
     pub followed: Vec<Followed>,
+    /// Keys bound to hosts, answered as placeholders (`rlph_…` in `values`) for a resolve that
+    /// asked for them: roll's egress proxy swaps each for the value, for those hosts only.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub placeholders: Vec<crate::placeholders::Placeholder>,
 }
 
 /// A key left out because it links a resource the environment's preview branched.
@@ -661,11 +669,18 @@ impl Secrets {
             expires_at: e.row.expires_at,
             weak: if reveal { e.row.weak } else { None },
             decoy: None,
+            hosts: None,
         }
     }
 
     /// The project's admins see which of `list` are decoys.
     fn mark_decoys(&self, project: &str, list: &mut [Secret], caller: &Caller) -> Result<()> {
+        if !list.is_empty() {
+            let bound = self.bindings(project)?;
+            for s in list.iter_mut() {
+                s.hosts = bound.get(&s.id).cloned();
+            }
+        }
         if list.is_empty() || !self.sees_decoys(project, caller) {
             return Ok(());
         }
@@ -741,7 +756,10 @@ impl Secrets {
     /// previews resolve as (`Secrets::untrusted`, not a runtime), narrowed again for an untrusted
     /// ephemeral environment (`caller_for`). What only a protected environment holds is refused as
     /// protected, a sensitive key for a reader that isn't a runtime, and a dynamic credential.
-    pub(crate) fn consumer_entry(&self, project: &str, slug: &str, path: &str, key: &str, caller: &Caller, untrusted: bool) -> std::result::Result<(Caller, Entry), crate::consumers::Refusal> {
+    /// With `placeholders`, a key bound to hosts is answered with its binding, sensitive or not:
+    /// the resolve then gives a placeholder.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn consumer_entry(&self, project: &str, slug: &str, path: &str, key: &str, caller: &Caller, untrusted: bool, placeholders: bool) -> std::result::Result<(Caller, Entry, Option<crate::placeholders::Hosts>), crate::consumers::Refusal> {
         use crate::consumers::Refusal;
         let missing = |e: Error| match e {
             Error::NotFound(m) => Refusal::NoSuchKey(m),
@@ -763,22 +781,33 @@ impl Secrets {
                 Refusal::NoSuchKey(format!("no secret {key} in {slug}:{path}"))
             });
         };
-        if names::sensitive(&e.row.tags) && !narrowed.runtime {
+        let dynamic = e.row.link.as_ref().is_some_and(|l| l.mode == Mode::Dynamic);
+        let bound = if placeholders && !dynamic { self.binding(&e.row.id)? } else { None };
+        if bound.is_none() && names::sensitive(&e.row.tags) && !narrowed.runtime {
             return Err(Refusal::Unusable(format!("{key} is sensitive, and {why}: only a trusted runtime reads it")));
         }
-        if e.row.link.as_ref().is_some_and(|l| l.mode == Mode::Dynamic) {
+        if dynamic {
             return Err(Refusal::Unusable(format!("{key} is a dynamic credential, which ends with its lease: link it as managed or live for another product")));
         }
-        Ok((narrowed, e))
+        Ok((narrowed, e, bound))
     }
 
     /// One key's value for another roll product, read as [`Secrets::consumer_entry`] decides:
     /// audited as `secrets.resolve` by `caller` (the resource asking), no dynamic credential.
-    pub(crate) fn resolve_one(&self, project: &str, slug: &str, path: &str, key: &str, caller: &Caller, untrusted: bool) -> std::result::Result<crate::consumers::Resolved, crate::consumers::Refusal> {
+    /// A key bound to hosts, for a resource that asks for placeholders, is answered as one.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn resolve_one(&self, project: &str, slug: &str, path: &str, key: &str, caller: &Caller, untrusted: bool, resource: &crate::consumers::ResourceRef) -> std::result::Result<crate::consumers::Resolved, crate::consumers::Refusal> {
         use crate::consumers::{Refusal, Resolved};
-        let (narrowed, e) = self.consumer_entry(project, slug, path, key, caller, untrusted)?;
-        let dek = self.project(project)?;
+        let (narrowed, e, bound) = self.consumer_entry(project, slug, path, key, caller, untrusted, resource.wants_placeholders())?;
         let consumer = &caller.principal;
+        if let Some(b) = bound {
+            let env_id = self.db.read(|c| envs::by_slug(c, project, slug))?.id;
+            let how = crate::placeholders::Issue { consumer, issued_by: consumer, resource: Some(resource), untrusted, minutes: None };
+            let (token, p) = self.issue_placeholders(project, &env_id, path, &[(key.to_string(), b)], &how)?.pop().ok_or_else(|| Refusal::Failed(Error::Internal("no placeholder was issued".into())))?;
+            self.audit_now(project, &narrowed, "secrets.resolve", Some(slug), Some(path), &[key.to_string()], &format!("resolved {key} for {consumer} as a placeholder"));
+            return Ok(Resolved { value: token, version: e.row.version, expires_at: e.row.expires_at, placeholder: Some(p) });
+        }
+        let dek = self.project(project)?;
         let mut r = Resolver::new(self, project, slug, &dek, &narrowed, true, consumer)?;
         r.no_dynamic = true;
         let (value, problem) = r.entry(&e);
@@ -787,7 +816,7 @@ impl Secrets {
             return Err(Refusal::Unusable(format!("{key} doesn't resolve: {p}")));
         }
         self.audit_now(project, &narrowed, "secrets.resolve", Some(slug), Some(path), &[key.to_string()], &format!("resolved {key} for {consumer}"));
-        Ok(Resolved { value, version: e.row.version, expires_at: e.row.expires_at })
+        Ok(Resolved { value, version: e.row.version, expires_at: e.row.expires_at, placeholder: None })
     }
 
     /// Every effective value of a folder (`…/values`, `roll run`, an app's start). Audited as
@@ -801,6 +830,23 @@ impl Secrets {
     /// issuing a fresh credential each read.
     #[allow(clippy::too_many_arguments)]
     pub fn values_for(&self, project: &str, slug: &str, path: &str, resolve: bool, consumer: Option<&str>, dynamic: bool, caller: &Caller) -> Result<Values> {
+        self.values_inner(project, slug, path, resolve, consumer, dynamic, None, caller)
+    }
+
+    /// [`Secrets::values_for`] (resolved) for `consumer`, with every key bound to hosts answered
+    /// as a placeholder that lives `minutes` (default a day): docs/secrets.md, "Using a key
+    /// without seeing it". A sensitive key bound to hosts reaches any reader this way, since only
+    /// roll's proxy ever holds its value.
+    #[allow(clippy::too_many_arguments)]
+    pub fn values_with_placeholders(&self, project: &str, slug: &str, path: &str, consumer: &str, dynamic: bool, minutes: Option<u64>, caller: &Caller) -> Result<Values> {
+        if caller.principal.starts_with("identity:") {
+            return Err(Error::BadRequest("a workload identity's login can't take placeholders: they'd outlive its token".into()));
+        }
+        self.values_inner(project, slug, path, true, Some(consumer), dynamic, Some(minutes), caller)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn values_inner(&self, project: &str, slug: &str, path: &str, resolve: bool, consumer: Option<&str>, dynamic: bool, ph: Option<Option<u64>>, caller: &Caller) -> Result<Values> {
         let path = names::path(path)?;
         caller.need(Action::Reveal, &Scope::at(project, slug, &path))?;
         self.read_quota(caller)?;
@@ -824,11 +870,21 @@ impl Secrets {
         // Set, but not in this answer (withheld, or dynamic under `dynamic=false`): not missing.
         let mut left_out = vec![];
         let mut followed = vec![];
+        let bound = match ph {
+            Some(_) => self.bindings(project)?,
+            None => HashMap::new(),
+        };
+        let mut to_issue = vec![];
         for e in &entries {
             // First: nothing of the parent's is read, issued or decrypted for it.
             if let Some(l) = r.followed(e) {
                 followed.push(Followed { name: e.row.key.clone(), kind: l.kind, parent: l.r#ref, field: l.field });
                 left_out.push(e.row.key.clone());
+                continue;
+            }
+            // Bound to hosts: a placeholder, sensitive or not, and nothing decrypted here.
+            if let Some(b) = bound.get(&e.row.id).filter(|_| e.row.link.as_ref().is_none_or(|l| l.mode != Mode::Dynamic)) {
+                to_issue.push((e.row.key.clone(), b.clone()));
                 continue;
             }
             if names::sensitive(&e.row.tags) && !caller.runtime {
@@ -850,6 +906,15 @@ impl Secrets {
             values.insert(e.row.key.clone(), v);
         }
         let leases = r.finish(slug)?;
+        let mut placeholders = vec![];
+        if !to_issue.is_empty() {
+            let env_id = self.db.read(|c| envs::by_slug(c, project, slug))?.id;
+            let how = crate::placeholders::Issue { consumer: &who, issued_by: &caller.principal, resource: None, untrusted: caller.grants.untrusted(), minutes: ph.flatten() };
+            for (token, p) in self.issue_placeholders(project, &env_id, &path, &to_issue, &how)? {
+                values.insert(p.key.clone(), token);
+                placeholders.push(p);
+            }
+        }
         let have: Vec<String> = values.keys().cloned().chain(left_out).collect();
         for m in self.missing_required(project, &path, &have)? {
             problems.push(Problem { key: m.key, problem: format!("required, but {slug} doesn't set it") });
@@ -860,8 +925,9 @@ impl Secrets {
         }
         let action = if consumer.is_some() { "secrets.resolve" } else { "secrets.export" };
         let keys: Vec<String> = values.keys().cloned().collect();
+        let as_placeholders = if placeholders.is_empty() { String::new() } else { format!(", {} as placeholders", placeholders.len()) };
         let summary = match consumer {
-            Some(c) => format!("resolved {} for {c}{}", crate::write::plural(keys.len(), "value"), lease_note(&leases)),
+            Some(c) => format!("resolved {} for {c}{as_placeholders}{}", crate::write::plural(keys.len(), "value"), lease_note(&leases)),
             None => format!("exported {}{}", crate::write::plural(keys.len(), "value"), lease_note(&leases)),
         };
         self.audit_now(project, caller, action, Some(slug), Some(&path), &keys, &summary);
@@ -869,7 +935,7 @@ impl Secrets {
         let dynamic = entries.iter().filter(ours).filter(|e| e.row.link.as_ref().is_some_and(|l| l.mode == Mode::Dynamic)).map(|e| e.row.key.clone()).collect();
         let linked = entries.iter().filter(ours).filter(|e| e.row.link.is_some()).map(|e| e.row.key.clone()).collect();
         let plain = entries.iter().filter(ours).filter(|e| e.row.link.as_ref().is_some_and(|l| self.plain_field(l))).map(|e| e.row.key.clone()).collect();
-        Ok(Values { values, problems, leases, dynamic, linked, plain, withheld, sensitive, followed })
+        Ok(Values { values, problems, leases, dynamic, linked, plain, withheld, sensitive, followed, placeholders })
     }
 
     /// A folder's own values as they were after change `seq` (or at time `at`): what was stored
@@ -936,7 +1002,7 @@ impl Secrets {
         }
         let keys: Vec<String> = values.keys().cloned().collect();
         self.audit_now(project, caller, "secrets.export", Some(slug), Some(&path), &keys, &format!("exported {} as of change #{seq}", crate::write::plural(keys.len(), "value")));
-        Ok((seq, Values { values, problems, leases: vec![], dynamic: vec![], linked, plain, withheld, sensitive: vec![], followed }))
+        Ok((seq, Values { values, problems, leases: vec![], dynamic: vec![], linked, plain, withheld, sensitive: vec![], followed, placeholders: vec![] }))
     }
 
     /// What moves when the project's values may have: its change counter and its resources'
