@@ -2104,9 +2104,9 @@ cloud trusts roll's token for one project the way it trusts GitHub Actions' toke
   public routes read only public halves. After a deployment-key rotation it's resealed like
   projects' keys (health's `resealed` counts it). The signing key itself rotates too (below,
   "Rotating the issuer's key"), and roll's other products get tokens of their own from it (below,
-  "roll's tokens for other products"). One key signs all three: clouds' tokens, apps' tokens and
-  the audit log's digests. A separate key for the digests is planned (not built yet), so pulling a
-  leaked signing key won't touch what checks the log.
+  "roll's tokens for other products"). It signs clouds' and apps' tokens, never the audit log's
+  digests: those have a key of their own ("Tamper evidence", "The digest key"), so a leak of one
+  forges nothing the other signs, and pulling one touches nothing the other vouches for.
 - **GCP**: a workload identity pool provider for roll's issuer whose attribute condition pins
   `assertion.sub == "roll-secrets:<project>"`, and a service account that lets that principal
   impersonate it (`roles/iam.workloadIdentityUser`). For an app's instances, pin the whole
@@ -2183,10 +2183,11 @@ sweeper:
 - **The old key stays until its tokens expire.** From then on the new key signs. The one it
   replaced stays in the JWKS for two hours more (`issuer::RETIRE_AFTER_MS`: the longest token, an
   hour, and an hour's margin), then leaves it (`retired_at`) and never signs again.
-- **Retired keys still check digests.** The audit log's digests are signed with the same key, so
-  a retired key stays (sealed, as before) and `GET …/audit/verify` still checks the digests it
-  signed. For `audit verify --file`, keep the JWKS saved before each rotation's old key retired
-  (save it again when a new key appears, as below).
+- **Retired keys still check legacy digests.** Before the digest key, the issuer key signed the
+  audit log's digests. A retired key stays (sealed, as before), and the digest JWKS's `legacy`
+  carries the public halves of the issuer keys that were roll's when the digest key was first made,
+  so `audit verify` (and `--file`, with the digest JWKS alone) still checks the digests they signed.
+  A key made since never counts: it never signed a digest.
 - **Only roll's keys.** As before, only a row whose sealed private key opens with the deployment
   key and matches its public half signs, is published, or holds a rotation back.
 - **Now.** `POST /v1/secrets/issuer/rotate` (the operator's; `roll secrets issuer rotate`) starts
@@ -2200,9 +2201,11 @@ sweeper:
   two days' notice: a cloud that cached the JWKS refuses the new key's tokens until it fetches
   again (Azure: up to a day). `GET /v1/secrets/health`'s `issuer_pulled` names each key pulled in
   the last 30 days (`{kid, pulled_at, detail}`), and a cloud trust or verifier that pinned it
-  rather than reading the JWKS must be given the new key. The digests it signed still check (the
-  chain's head is MACed under `ROLL_SECRET_KEY` as well); the separate digest key above is what
-  will keep them apart.
+  rather than reading the JWKS must be given the new key. No digest rests on it: since the digest
+  key it signs none, and in the same write it leaves the digest keys' `legacy` list, so the legacy
+  digests it signed before vouch for nothing again. Each is covered by the next digest under the
+  digest key (signed within the hour of the upgrade), so `audit verify` stays `ok`; it lists the
+  pulled kid in `pulled`, `countersigned` by that digest.
 - **Audited.** Each operator's rotation, either kind, is an `issuer.rotate` row (actor
   `operator`) in every project's audit log: the key signs for all of them.
 ### Kubernetes service-account tokens
@@ -4715,8 +4718,8 @@ with signed digests, so such a change shows:
   After a deployment-key rotation the previous key's MACs still pass, and the hourly digests remake
   every head's with the current one.
 - **Digests.** Every hour, the sweeper appends an `audit.digest` row (actor `roll:audit`) to each
-  project's chain, moved or not. Its `digest` is a JWS (RS256, `typ` `roll-audit-digest`) signed
-  with roll's OIDC issuer key: `{project, seq, hash, last_at, at, start}`, the row before it and
+  project's chain, moved or not. Its `digest` is a JWS (EdDSA, `typ` `roll-audit-digest`) signed
+  with roll's digest key (below): `{project, seq, hash, last_at, at, start}`, the row before it and
   where the log starts. The digest is claimed per project in its own write, so two nodes don't sign
   one twice. Sinks get digests like any other row, so a SIEM or a locked bucket holds roll's
   signatures outside the database: recomputing every hash after an edit no longer matches what
@@ -4735,24 +4738,74 @@ with signed digests, so such a change shows:
   far a valid digest vouches for them (`through`, `signed_at`), and the first thing that doesn't
   hold (`broken: {seq, reason, detail}`): `edited` (a row doesn't match its hash), `missing` (a
   gap), `rewritten` (the chain isn't what a digest signed), `signature` (a digest no key of roll's
-  signed), `truncated` (rows gone from the end; the head still counts them), `cut` (rows gone from
+  signed, or an issuer key's after the chain's first digest-key digest), `pulled` (a digest on a
+  pulled key that no later good digest covers: below), `truncated` (rows gone from the end; the
+  head still counts them), `cut` (rows gone from
   the start other than by retention), `unchained` (a row added outside the chain), `head` (the
   head doesn't carry roll's MAC), `stale` (the newest digest is over two hours old: the signer
   stopped, or rows after it were cut and the head put back from a copy) or `gap` (a digest roll
   signed after such a span). The dashboard's audit log
   shows "Verified through #N" or the break. `roll secrets audit verify [--since TIME]` asks the
-  same.
-- **Whose keys.** A row in `oidc_keys` is roll's only when its sealed private key opens with the
-  deployment key and is the private half of the row's `n` and `e`. Only those sign, check digests
-  and are published in the JWKS (which GCP, Azure and AWS trust too). A row that fails is logged
-  by kid (never the key) and ignored, so a database writer who adds a key of their own gets
-  neither a digest nor a cloud to accept their signature.
+  same. Two more fields say what the digests rest on: `legacy: {signer: "issuer key", digests,
+  through}` (digests from before the digest key, which count) and `pulled: [{kid, pulled_at,
+  digests, first, last, countersigned}]` (digests on pulled keys, which don't); both are left out
+  when there are none.
+- **The digest key.** Digests have a key of their own, as CloudTrail's digest files do, never
+  roll's issuer key (which clouds and apps' tokens trust): a leak of either forges nothing the other
+  signs. Ed25519 (JWS `EdDSA`): only roll's code checks a digest (the server and `audit verify`),
+  so nothing needs RS256 as Azure does; the keys are small and quick to make, signatures are
+  deterministic, and a digest key can't pass for an issuer key or the other way round (each kind is
+  checked with its own algorithm only). A row in `audit_keys` holds the private key sealed under a
+  data key of its own (sealed with `ROLL_SECRET_KEY`), with its kid and its `legacy` list as
+  associated data, and is roll's only when that opens and is the private half of the row's `x`.
+  Health's `resealed` counts digest keys after a deployment-key rotation, as it does projects'.
+  Its public halves are `GET /v1/secrets/audit/jwks` (public: `keys`, every digest key but pulled
+  ones, retired included, as their digests stay in the log; `legacy`, the issuer keys whose digests
+  still count; `pulled: [{kid, pulled_at}]`). It's made at startup, before the issuer's key.
+- **Its rotation.** Every 90 days (`ROLL_SECRETS_AUDIT_KEY_ROTATE_DAYS`, at least 1) the sweeper
+  makes a new key that signs at once (nothing caches the digest JWKS the way clouds cache the
+  issuer's), and the old one retires: it signs no more and stays published. `POST
+  /v1/secrets/audit/key/rotate` (`roll secrets audit key rotate`; the operator's) rotates now.
+  Save the digest JWKS again after any rotation.
+- **Pulled digest keys.** For a key that may have leaked, `{"now": true, "retire": "<kid>"}`
+  (`roll secrets audit key rotate --now --retire KID`; the operator's, both or neither; a kid that
+  isn't one of roll's, or was pulled already, is a 404) makes a new key that signs at once and pulls
+  `<kid>` in the same write: its private half is wiped (so no database edit makes it roll's again)
+  and it moves to the JWKS's `pulled`. Every project's head is made due, and the rotation signs
+  every chain under the new key before it answers (`{kid, pulled, signed}`). Each is an
+  `audit.key.rotate` row (actor `operator`) in every project's log, either kind of rotation. Then:
+  a digest on a pulled key never vouches for anything itself, whatever time it claims (an attacker
+  chooses that too). It's reported in `pulled`; the chain walks through it, and the next digest
+  under a good key covers it (its hash runs through every row before it, and roll signs it only
+  over a head carrying its MAC), which is `countersigned`. One no later good digest covers is a
+  `pulled` break: the log from there on needs the next good digest, or a sink's copy, to be
+  trusted. An export taken before the rotation is such a log: export it again.
+- **What a leaked digest key can do.** Sign any digest, for any project, rows and start. Against
+  the server, nothing more: rows it rewrote change the chain's last hash, and the head that would
+  have to match carries a MAC under `ROLL_SECRET_KEY`, so `verify` says `rewritten` or `head`
+  whatever digests it signs. Against an export checked offline (no head, no MAC), it can forge a
+  whole log that verifies, until it's pulled; after, every digest it signed is refused unless a
+  digest under a later key covers it, which only roll can sign. It forges no cloud's or app's
+  token, and pulling it touches no cloud trust. A saved digest JWKS from before the pull still
+  trusts the key: save it again after an emergency.
+- **Legacy digests.** Digests an older roll signed with its issuer key (RS256) keep verifying,
+  marked `legacy: issuer key`, against the issuer keys in the digest JWKS's `legacy` (or an issuer
+  JWKS saved before the upgrade: `--jwks` again), and only before the chain's first digest under
+  the digest key: from the first hour after the upgrade, new digests use the digest key, and the
+  issuer key never signs one again. A pulled issuer key's legacy digests are treated as a pulled
+  digest key's.
+- **Whose keys.** A row in `oidc_keys` or `audit_keys` is roll's only when its sealed private key
+  opens with the deployment key and is the private half of the row's public key. Only those sign,
+  check digests and are published (the issuer's in its JWKS, which GCP, Azure and AWS trust too).
+  A row that fails is logged by kid (never the key) and ignored, so a database writer who adds a key
+  of their own gets neither a digest nor a cloud to accept their signature.
 - **Offline.** `roll secrets audit verify -p prj_… --file audit.jsonl --jwks keys.json` checks an
   export (`audit --format jsonl`, unfiltered: a filtered one has gaps) on the machine it runs on.
-  `--jwks` is required: roll's public keys as saved earlier from `/v1/secrets/oidc/jwks` (served
-  whether or not clouds are set up) and kept apart from roll, since keys fetched from the server
-  being checked would vouch for themselves. Save it once, and again only after a key you expected
-  is added (each key rotation adds one). A file whose digests name another project than `-p`, or more than one, is refused (a
+  `--jwks` is required: the digest JWKS as saved earlier from `/v1/secrets/audit/jwks` and kept
+  apart from roll, since keys fetched from the server being checked would vouch for themselves.
+  Save it once, and again after each rotation of the digest key (an emergency's names the pulled
+  key). It carries the legacy issuer keys too; an issuer JWKS saved before the upgrade can be given
+  as a second `--jwks` (its keys count only where the digest JWKS names them). A file whose digests name another project than `-p`, or more than one, is refused (a A file whose digests name another project than `-p`, or more than one, is refused (a
   `prj_…` id needs no server; a name is looked up). An export of the newest 10,000 rows starts
   checking at its first digest, and a row without a `seq` after the chain began is `unchained`.
   Staleness isn't checked offline: an export is a copy from some time.
@@ -4769,7 +4822,8 @@ with signed digests, so such a change shows:
   after it (digests included) can be cut and the copy put back before then, and roll signs on
   without a trace in the database. Only a copy held outside it catches that: a sink (a SIEM, a
   locked bucket) that already received the digests the copy lacks, or a saved `--jwks` file for a
-  key roll never made.
+  key roll never made. Someone holding a digest key but not `ROLL_SECRET_KEY` is above ("What a
+  leaked digest key can do").
 
 
 ## HTTP API
@@ -4874,7 +4928,7 @@ isn't in the workspace is 404.
 | `DELETE /value-requests/{id}` | | 204 (whoever asked, or an admin of the folder) |
 | `GET /v1/secrets/value-requests/{token}` (public) | | `{id, note, keys, expires_at, public_key}`; 404 for anything but a live token; 410 `gone` once answered, expired or cancelled |
 | `POST /v1/secrets/value-requests/{token}/answer` (public) | `{values: Record<string, Sealed>}` | 204; 410 `gone`; 429 past 5 a minute per request or 10 per address |
-| `GET /audit/verify?since=` | | `AuditVerification`: the chain walked from its start (or the last digest before `since`) and the first break |
+| `GET /audit/verify?since=` | | `AuditVerification`: the chain walked from its start (or the last digest before `since`) and the first break; `legacy` (digests the issuer key signed before the digest key) and `pulled` (digests on pulled keys, and the good digest covering each) when there are any |
 | `GET /audit/sinks` | | `Sink[]` (`admin`) |
 | `POST /audit/sinks` | `{url, from_start?, format?, token?}` (an HTTPS endpoint, or on the canvas `bucket:<name>`, `search:<cluster>/<index>` or `stream:<id>/<topic>`; `format` `splunk`, `datadog` or `bearer` takes an HTTPS endpoint and its `token`, sealed) | 201 `Sink & {secret}` (shown once; a `Sink` names its `format`, never its token) |
 | `DELETE /audit/sinks/{id}` | | 204 |
@@ -4929,8 +4983,10 @@ isn't in the workspace is 404.
 | `POST /github-apps` | `{name, app_id, installation_id, private_key, repositories, permissions, api_base?}` | 201 `GitHubApp` (`admin`; gets and revokes a token first: 400 with GitHub's reason) |
 | `DELETE /github-apps/{id}` | | 204; 409 while a key links to it or a lease holds a token (`admin`) |
 | `GET /v1/secrets/oidc/.well-known/openid-configuration` | | roll's issuer's discovery document (public) |
-| `GET /v1/secrets/oidc/jwks` | | roll's issuer's public keys (public; they verify the audit log's digests, so served without clouds too): the key signing, the next one before it signs, the one it replaced until that one's tokens expire |
-| `POST /v1/secrets/issuer/rotate` | `{now?, retire?}` | `{kid, signs_from, pulled}` (the operator's): the next issuer key, published now, signing two days later; the one already waiting, if any. `{now: true, retire: kid}` (both or neither): a new key signs now and `kid` leaves the JWKS at once (`pulled`); 404 for a kid not in it |
+| `GET /v1/secrets/oidc/jwks` | | roll's issuer's public keys (public; served without clouds too, for the audit log's legacy digests): the key signing, the next one before it signs, the one it replaced until that one's tokens expire |
+| `POST /v1/secrets/issuer/rotate` | `{now?, retire?}` | `{kid, signs_from, pulled}` (the operator's): the next issuer key, published now, signing two days later; the one already waiting, if any. `{now: true, retire: kid}` (both or neither): a new key signs now and `kid` leaves the JWKS at once (`pulled`), and the digest keys' `legacy` list; 404 for a kid not in it |
+| `GET /v1/secrets/audit/jwks` | | `{keys, legacy, pulled}` (public): the audit log's digest keys (Ed25519 JWKs, retired ones too, never pulled ones), the issuer keys whose legacy digests count (RSA JWKs), and `[{kid, pulled_at}]` for keys pulled in an emergency, either kind. What `audit verify --file` takes |
+| `POST /v1/secrets/audit/key/rotate` | `{now?, retire?}` | `{kid, pulled, signed}` (the operator's): a new digest key signs now and the previous one retires. `{now: true, retire: kid}` (both or neither): `kid` is pulled too, and every project's chain is signed under the new key before the answer (`signed`, how many); 404 for a kid not roll's or pulled already |
 | `GET /cas` | | `Ca[]` (`read` on the project; certificates, never keys) |
 | `POST /cas` | `{name, domains, allow_ip?, max_days?}` | 201 `Ca` (`admin`) |
 | `DELETE /cas/{id}` | | 204; 409 while a key links to it (`admin`) |
@@ -5074,7 +5130,7 @@ type Sync = {
 type NewSync = { environment: string; path?: string; kind: string; target: Record<string, unknown>; keys?: string[]; prefix?: string };
 type SyncKind = { kind: string; label: string; values: boolean; signed: boolean; fields: { name: string; label: string; required: boolean; placeholder: string }[] };
 type AuditEntry = { id: number; seq?: number; hash?: string; at: number; actor: string; action: string; environment: string | null; path: string | null; keys: string[]; summary: string; ip: string | null; approval?: Approval; digest?: string };
-type AuditVerification = { ok: boolean; from: number | null; through: number | null; signed_at: number | null; head: number | null; rows: number; digests: number; unchained: number; broken: { seq?: number; reason: string; detail: string } | null };
+type AuditVerification = { ok: boolean; from: number | null; through: number | null; signed_at: number | null; head: number | null; rows: number; digests: number; unchained: number; broken: { seq?: number; reason: string; detail: string } | null; legacy?: { signer: "issuer key"; digests: number; through: number }; pulled?: { kid: string; pulled_at: number; digests: number; first: number; last: number; countersigned: number | null }[] }; // digests: the ones that vouch (digest key and legacy); pulled: digests on pulled keys, countersigned by the next good digest's own row, or null (a `pulled` break)
 // The approval that let the request through roll-access's gate (docs/permissions.md, "What a
 // product is told about an approval"): an `ask` approved (no `until`), or a rule an approval
 // remembered for a while (`until`: when it lapses). CSV exports carry `approval` and `approved_by`
@@ -5105,6 +5161,9 @@ identities(id PK, project_id, name, issuer, audience, subject, claims, environme
 audit(id INTEGER PK, project_id, at, actor, action, env_id, path, keys, summary, ip, approval,
       seq, hash, digest)  -- UNIQUE (project_id, seq); digest: an audit.digest row's JWS
 audit_heads(project_id PK, seq, hash, at, digest_seq, digest_at, start_seq, mac)  -- mac: HMAC under ROLL_SECRET_KEY
+audit_keys(kid PK, sealed_dek, private BLOB, x, legacy, created_at, retired_at, pulled_at)
+      -- the digest key (Ed25519): private sealed with kid + legacy as AAD, wiped when pulled;
+      -- legacy: issuer kids whose RS256 digests from before it count
 syncs(id PK, project_id, env_id, path, kind, target, keys, prefix, secret BLOB, status, error,
       last_digest, state, last_synced_at, running_until, retry_at, checked_at, created_at, created_by)
       -- secret: the sealed signing secret; state: {name: stamp} of what was pushed (no values)

@@ -31,6 +31,7 @@ pub mod rotators;
 pub mod saas;
 mod strength;
 mod audit;
+pub mod audit_key;
 pub use roll_secrets_chain as chain;
 pub mod backup;
 pub mod crypto;
@@ -432,6 +433,10 @@ pub struct Secrets {
     issuer_keys: issuer::Checked,
     /// Days between the issuer key's scheduled rotations (issuer.rs).
     issuer_rotate_days: std::sync::atomic::AtomicU32,
+    /// Which audit digest key rows are roll's, as last checked (audit_key.rs).
+    audit_keys: audit_key::Checked,
+    /// Days between the digest key's scheduled rotations (audit_key.rs).
+    audit_rotate_days: std::sync::atomic::AtomicU32,
     /// Folders' digests as last computed, each with the database state it came from (read.rs).
     digests: read::Digests,
     /// ACME's challenge checks and nonce key (acme.rs).
@@ -542,6 +547,7 @@ impl Secrets {
         // How a role trusts roll (aws.rs): absent is the ExternalId, as before there were two.
         db.add_column("aws_roles", "trust", "TEXT")?;
         db.ensure_schema(issuer::SCHEMA)?;
+        db.ensure_schema(audit_key::SCHEMA)?;
         // The issuer key's rotation (issuer.rs): when a key signs from, and when it left the JWKS.
         db.add_column("oidc_keys", "signs_from", "INTEGER")?;
         db.add_column("oidc_keys", "retired_at", "INTEGER")?;
@@ -574,6 +580,12 @@ impl Secrets {
             };
             links.register(Arc::new(aws::Provider { db: db.clone(), sts: sts.clone(), issuing }));
             links.register(Arc::new(iam::Provider { db: db.clone(), sts: sts.clone() }));
+        }
+        let (audit_keys, issuer_keys) = (audit_key::Checked::default(), issuer::Checked::default());
+        // The audit log's digest key first: a deployment's first issuer key then never counts as
+        // one that signed digests before it (audit_key.rs, `legacy`).
+        if let Ok(keys) = &opts.keyring {
+            audit_key::ensure_key(&db, keys, &audit_keys, &issuer_keys)?;
         }
         if let (Some(c), Ok(keys)) = (&opts.clouds, &opts.keyring) {
             // The issuer's key exists before anyone asks for its public half.
@@ -627,7 +639,7 @@ impl Secrets {
         if let (Some(github), Ok(keys)) = (&opts.github, &opts.keyring) {
             links.register(Arc::new(github_app::Provider { db: db.clone(), keys: keys.clone(), unwrap: unwrap.clone(), github: github.clone() }));
         }
-        Ok(Secrets { db, keys: opts.keyring, key_source: opts.key_source, workspace, links, syncs: opts.syncs, deliver: opts.deliver, grants: opts.grants, people: opts.people, workloads: opts.workloads, gateway_links: opts.gateways, unwrap: unwrap.clone(), open: opts.open, trust_forwarded_for: opts.trust_forwarded_for, web_url: opts.web_url, outside: opts.outside, directory: opts.directory, github: opts.github, oidc: Default::default(), logins: Default::default(), answers: Default::default(), reads_per_minute: read::READS_PER_MINUTE.into(), code_refs: Default::default(), sts: opts.sts.clone(), clouds: opts.clouds, public_api, aws_server_id: Default::default(), crls, live_fps: Default::default(), issuer_keys: Default::default(), issuer_rotate_days: issuer::ROTATE_DAYS.into(), digests: Default::default(), counters: Default::default(), acme: Default::default(), recorder: Default::default() })
+        Ok(Secrets { db, keys: opts.keyring, key_source: opts.key_source, workspace, links, syncs: opts.syncs, deliver: opts.deliver, grants: opts.grants, people: opts.people, workloads: opts.workloads, gateway_links: opts.gateways, unwrap: unwrap.clone(), open: opts.open, trust_forwarded_for: opts.trust_forwarded_for, web_url: opts.web_url, outside: opts.outside, directory: opts.directory, github: opts.github, oidc: Default::default(), logins: Default::default(), answers: Default::default(), reads_per_minute: read::READS_PER_MINUTE.into(), code_refs: Default::default(), sts: opts.sts.clone(), clouds: opts.clouds, public_api, aws_server_id: Default::default(), crls, live_fps: Default::default(), issuer_keys: Default::default(), issuer_rotate_days: issuer::ROTATE_DAYS.into(), audit_keys: Default::default(), audit_rotate_days: audit_key::ROTATE_DAYS.into(), digests: Default::default(), counters: Default::default(), acme: Default::default(), recorder: Default::default() })
     }
 
     pub fn links(&self) -> &Links {
@@ -709,9 +721,10 @@ impl Secrets {
                         None => keys.open_dek(p, d).map(|(_, r)| r.is_some()).unwrap_or(true),
                     })
                     .count();
-                // The issuer's signing key is sealed with the deployment key too: resealed here, and
-                // the previous key isn't "done with" while one still needs it.
-                let issuer_old = if self.clouds.is_some() { issuer::reseal(&self.db, keys)? } else { 0 };
+                // The issuer's signing key and the audit log's digest keys are sealed with the
+                // deployment key too: resealed here, and the previous key isn't "done with" while one
+                // still needs it.
+                let issuer_old = if self.clouds.is_some() { issuer::reseal(&self.db, keys)? } else { 0 } + audit_key::reseal(&self.db, keys)?;
                 if old == 0 && issuer_old == 0 { serde_json::json!("all") } else { serde_json::json!(rows.len() - old) }
             }
             Err(_) => serde_json::Value::Null,

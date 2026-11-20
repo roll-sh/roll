@@ -2133,26 +2133,24 @@ async fn an_old_head_put_back_over_cut_rows_leaves_a_gap_that_verify_reports_fro
 #[tokio::test]
 async fn a_signing_key_added_to_the_database_vouches_for_no_digest_and_isnt_published() {
     use base64::Engine as _;
+    use ring::signature::KeyPair as _;
     use roll_secrets::chain;
-    use rsa::pkcs8::EncodePrivateKey;
-    use rsa::traits::PublicKeyParts;
     let api = Api::new().await;
     api.set("production", "A", "v").await;
     api.set("production", "B", "v").await;
-    let s = api.secrets.clone();
-    assert_eq!(tokio::task::spawn_blocking(move || s.sweep_audit_chain(i64::MAX / 2).unwrap()).await.unwrap(), 1);
+    sweep_chain(&api).await;
 
-    // A database writer adds a key of their own, older than roll's so roll's still signs...
+    // A database writer adds a digest key of their own, older than roll's so roll's still signs...
     let b64 = |b: &[u8]| base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(b);
-    let theirs = rsa::RsaPrivateKey::new(&mut rand::thread_rng(), 2048).unwrap();
-    let (n, e) = (b64(&theirs.n().to_bytes_be()), b64(&theirs.e().to_bytes_be()));
-    api.db.write(|c| c.execute("INSERT INTO oidc_keys (kid, sealed_dek, private, n, e, created_at) VALUES ('k_theirs', 'v1:AAAA', ?, ?, ?, 0)", code_sql::params![vec![0u8], n, e])).unwrap();
+    let der = ring::signature::Ed25519KeyPair::generate_pkcs8(&ring::rand::SystemRandom::new()).unwrap();
+    let pair = ring::signature::Ed25519KeyPair::from_pkcs8(der.as_ref()).unwrap();
+    let x = b64(pair.public_key().as_ref());
+    api.db.write(|c| c.execute("INSERT INTO audit_keys (kid, sealed_dek, private, x, legacy, created_at) VALUES ('ak_theirs', 'v1:AAAA', ?, ?, '', 0)", code_sql::params![vec![0u8], x])).unwrap();
     // ...edits row #1, recomputes every hash after it and signs the digest again with that key.
     let p = api.project.clone();
     let mut rows: Vec<roll_secrets::AuditEntry> = serde_json::from_value(api.ok(Method::GET, "/audit", None).await).unwrap();
     rows.sort_by_key(|r| r.seq);
     let signed = rows.iter().find(|r| r.action == chain::DIGEST).and_then(|r| r.seq);
-    let pair = ring::signature::RsaKeyPair::from_pkcs8(theirs.to_pkcs8_der().unwrap().as_bytes()).unwrap();
     let mut prev = String::new();
     for r in &mut rows {
         if r.seq == Some(1) {
@@ -2160,7 +2158,7 @@ async fn a_signing_key_added_to_the_database_vouches_for_no_digest_and_isnt_publ
         }
         if r.action == chain::DIGEST {
             let d = chain::Digest { project: p.clone(), seq: r.seq.unwrap() - 1, hash: prev.clone(), last_at: r.at, at: r.at, start: 1, gap: None };
-            r.digest = Some(chain::sign("k_theirs", &pair, &d).unwrap());
+            r.digest = Some(chain::sign("ak_theirs", &pair, &d));
         }
         prev = chain::link(&prev, &p, r);
         let (seq, hash, digest) = (r.seq.unwrap(), prev.clone(), r.digest.clone());
@@ -2169,11 +2167,141 @@ async fn a_signing_key_added_to_the_database_vouches_for_no_digest_and_isnt_publ
     }
     let v = api.ok(Method::GET, "/audit/verify", None).await;
     assert_eq!((v["ok"].as_bool(), v["broken"]["seq"].as_i64(), v["broken"]["reason"].as_str()), (Some(false), signed, Some("signature")), "{v}");
-    // Nor does a cloud see it: the JWKS has roll's key alone.
+    // Nor is it published: the digest JWKS has roll's key alone.
+    let jwks = api.ok(Method::GET, "/v1/secrets/audit/jwks", None).await;
+    assert!(kids(&jwks).len() == 1 && kids(&jwks)[0] != "ak_theirs", "{jwks}");
+}
+
+/// Sign every chain that's due (the sweeper's hourly digests).
+async fn sweep_chain(api: &Api) -> usize {
     let s = api.secrets.clone();
-    let jwks = tokio::task::spawn_blocking(move || s.oidc_jwks().unwrap()).await.unwrap();
-    let kids: Vec<&str> = jwks["keys"].as_array().unwrap().iter().map(|k| k["kid"].as_str().unwrap()).collect();
-    assert!(kids.len() == 1 && kids[0] != "k_theirs", "{jwks}");
+    tokio::task::spawn_blocking(move || s.sweep_audit_chain(i64::MAX / 2).unwrap()).await.unwrap()
+}
+
+/// The kids of a JWKS's `keys`.
+fn kids(jwks: &Value) -> Vec<String> {
+    jwks["keys"].as_array().unwrap().iter().map(|k| k["kid"].as_str().unwrap().to_string()).collect()
+}
+
+/// A JWS's header.
+fn jws_header(jws: &str) -> Value {
+    use base64::Engine as _;
+    serde_json::from_slice(&base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(jws.split('.').next().unwrap()).unwrap()).unwrap()
+}
+
+/// The project's whole log, as an export has it, walked with nothing but `jwks` (as `audit verify
+/// --file` does).
+async fn verify_offline(api: &Api, jwks: &[Value]) -> roll_secrets::Verification {
+    let mut rows: Vec<roll_secrets::AuditEntry> = serde_json::from_value(api.ok(Method::GET, "/audit?limit=10000", None).await).unwrap();
+    rows.sort_by_key(|r| r.seq);
+    walk_offline(&api.project, &rows, jwks)
+}
+
+fn walk_offline(project: &str, rows: &[roll_secrets::AuditEntry], jwks: &[Value]) -> roll_secrets::Verification {
+    let keys = roll_secrets::chain::Keys::from_jwks(jwks);
+    let mut walk = roll_secrets::chain::Walk::new(project, false);
+    for r in rows {
+        if !walk.push(r, &keys) {
+            break;
+        }
+    }
+    walk.finish()
+}
+
+/// Digests are signed by a key of their own (EdDSA), never the issuer's, and an export checks
+/// against the digest JWKS saved earlier; the issuer's JWKS vouches for none of them.
+#[tokio::test]
+async fn new_digests_carry_the_digest_keys_kid_and_verify_offline_against_its_saved_jwks() {
+    let api = Api::new().await;
+    api.set("production", "A", "v").await;
+    assert_eq!(sweep_chain(&api).await, 1);
+    let rows = api.ok(Method::GET, "/audit", None).await;
+    let digest = rows.as_array().unwrap().iter().find(|r| r["action"] == "audit.digest").unwrap()["digest"].as_str().unwrap().to_string();
+    let header = jws_header(&digest);
+    let saved = api.ok(Method::GET, "/v1/secrets/audit/jwks", None).await;
+    let issuer = api.ok(Method::GET, "/v1/secrets/oidc/jwks", None).await;
+    assert_eq!((header["alg"].as_str(), header["kid"].as_str().map(String::from)), (Some("EdDSA"), kids(&saved).first().cloned()), "{header} {saved}");
+    assert!(saved["keys"][0]["kty"] == "OKP" && !kids(&issuer).contains(&kids(&saved)[0]), "the digest key is no issuer key: {issuer}");
+    let v = api.ok(Method::GET, "/audit/verify", None).await;
+    assert_eq!((v["ok"].as_bool(), v["through"].as_i64(), v.get("legacy"), v.get("pulled")), (Some(true), Some(1), None, None), "{v}");
+    api.set("production", "B", "v").await;
+    let offline = verify_offline(&api, &[saved]).await;
+    assert!(offline.ok && offline.through == Some(1) && offline.head == Some(3), "{offline:?}");
+    let issuers_only = verify_offline(&api, &[issuer]).await;
+    assert_eq!(issuers_only.broken.map(|b| b.reason).as_deref(), Some("signature"));
+}
+
+/// A digest key that may have leaked is pulled: it vouches for nothing again, every log is signed
+/// under the new key at once (which covers the pulled key's digests), an export taken before that
+/// fails offline, and a database writer can't trust it back.
+#[tokio::test]
+async fn after_an_emergency_rotation_of_the_digest_key_its_digests_are_reported_and_need_a_later_good_digest() {
+    let api = Api::new().await;
+    api.set("production", "A", "v").await;
+    sweep_chain(&api).await;
+    let old = kids(&api.ok(Method::GET, "/v1/secrets/audit/jwks", None).await)[0].clone();
+    let mut before: Vec<roll_secrets::AuditEntry> = serde_json::from_value(api.ok(Method::GET, "/audit", None).await).unwrap();
+    before.sort_by_key(|r| r.seq);
+    let rotate = "/v1/secrets/audit/key/rotate";
+    for (body, status) in [(json!({ "now": true }), StatusCode::BAD_REQUEST), (json!({ "now": true, "retire": "ak_nope" }), StatusCode::NOT_FOUND)] {
+        assert_eq!(api.call(Method::POST, rotate, Some(body)).await.0, status);
+    }
+    let r = api.ok(Method::POST, rotate, Some(json!({ "now": true, "retire": old }))).await;
+    let new = r["kid"].as_str().unwrap().to_string();
+    assert!(new != old && r["signed"] == 1, "every log signed under the new key at once: {r}");
+    let jwks = api.ok(Method::GET, "/v1/secrets/audit/jwks", None).await;
+    assert_eq!((kids(&jwks), jwks["pulled"][0]["kid"].as_str()), (vec![new.clone()], Some(old.as_str())), "{jwks}");
+    // Online: the pulled key's digest is reported, covered by the next one under the new key.
+    let v = api.ok(Method::GET, "/audit/verify", None).await;
+    let p = &v["pulled"][0];
+    assert_eq!((v["ok"].as_bool(), p["kid"].as_str(), p["digests"].as_i64(), p["countersigned"].as_i64()), (Some(true), Some(old.as_str()), Some(1), v["through"].as_i64().map(|t| t + 1)), "{v}");
+    let audit = api.ok(Method::GET, "/audit", None).await;
+    assert!(audit.as_array().unwrap().iter().any(|a| a["action"] == "audit.key.rotate" && a["actor"] == "operator"), "{audit}");
+    // Offline: an export from before the rotation has no later good digest, so it doesn't verify.
+    let stale = walk_offline(&api.project, &before, std::slice::from_ref(&jwks));
+    assert_eq!(stale.broken.map(|b| b.reason).as_deref(), Some("pulled"), "{:?}", stale.pulled);
+    assert!(verify_offline(&api, &[jwks]).await.ok);
+    // Its private half is gone, so un-pulling the row in the database makes it nobody's key.
+    let o = old.clone();
+    api.db.write(move |c| c.execute("UPDATE audit_keys SET pulled_at = NULL, retired_at = NULL WHERE kid = ?", [o.as_str()])).unwrap();
+    let v = api.ok(Method::GET, "/audit/verify", None).await;
+    assert_eq!((v["ok"].as_bool(), v["broken"]["reason"].as_str()), (Some(false), Some("signature")), "{v}");
+}
+
+/// Digests an older roll signed with the issuer key still verify, marked legacy, against the
+/// digest JWKS alone; the issuer key signs no digest after the digest key's first, and pulling the
+/// issuer key leaves the log verified.
+#[tokio::test]
+async fn legacy_digests_still_verify_and_the_issuers_emergency_rotation_leaves_digests_alone() {
+    let api = Api::new().await;
+    // Before the upgrade: no digest key, and the issuer key signed the digests.
+    api.db.write(|c| c.execute("DELETE FROM audit_keys", ())).unwrap();
+    api.set("production", "A", "v").await;
+    let s = api.secrets.clone();
+    assert_eq!(tokio::task::spawn_blocking(move || s.sweep_audit_chain_as_before_the_digest_key(i64::MAX / 2).unwrap()).await.unwrap(), 1);
+    let issuer = kids(&api.ok(Method::GET, "/v1/secrets/oidc/jwks", None).await)[0].clone();
+    // The upgrade: the next digest is the digest key's, from the first hour.
+    api.db.write(|c| c.execute("UPDATE audit_heads SET digest_at = 0", ())).unwrap();
+    api.set("production", "B", "v").await;
+    assert_eq!(sweep_chain(&api).await, 1);
+    let jwks = api.ok(Method::GET, "/v1/secrets/audit/jwks", None).await;
+    assert_eq!(jwks["legacy"][0]["kid"].as_str(), Some(issuer.as_str()), "{jwks}");
+    let v = api.ok(Method::GET, "/audit/verify", None).await;
+    assert_eq!((v["ok"].as_bool(), v["digests"].as_i64(), v["legacy"].clone()), (Some(true), Some(2), json!({ "signer": "issuer key", "digests": 1, "through": 1 })), "{v}");
+    assert!(verify_offline(&api, &[jwks]).await.ok, "the digest JWKS carries the legacy keys");
+
+    // Pulling the issuer key changes nothing the log rests on: its digest is covered by the next.
+    let through = v["through"].clone();
+    api.ok(Method::POST, "/v1/secrets/issuer/rotate", Some(json!({ "now": true, "retire": issuer }))).await;
+    let v = api.ok(Method::GET, "/audit/verify", None).await;
+    assert_eq!((v["ok"].as_bool(), v["through"].clone(), v["pulled"][0]["kid"].as_str(), v["pulled"][0]["countersigned"].as_i64()), (Some(true), through, Some(issuer.as_str()), Some(4)), "{v}");
+
+    // The issuer key signing now (made since the digest key) vouches for no digest.
+    api.db.write(|c| c.execute("UPDATE audit_heads SET digest_at = 0", ())).unwrap();
+    let s = api.secrets.clone();
+    tokio::task::spawn_blocking(move || s.sweep_audit_chain_as_before_the_digest_key(i64::MAX / 2).unwrap()).await.unwrap();
+    let v = api.ok(Method::GET, "/audit/verify", None).await;
+    assert_eq!((v["ok"].as_bool(), v["broken"]["reason"].as_str()), (Some(false), Some("signature")), "{v}");
 }
 
 #[tokio::test]
@@ -5100,7 +5228,6 @@ async fn the_issuers_key_rotates_published_a_day_before_it_signs_and_retires_aft
         let s = api.secrets.clone();
         async move { tokio::task::spawn_blocking(move || s.sweep().unwrap()).await.unwrap() }
     };
-    let kids = |jwks: &Value| jwks["keys"].as_array().unwrap().iter().map(|k| k["kid"].as_str().unwrap().to_string()).collect::<Vec<_>>();
     let old_token = issue().await;
     let jwks = api.ok(Method::GET, "/v1/secrets/oidc/jwks", None).await;
     let old = roll_token(&jwks, &old_token).0["kid"].as_str().unwrap().to_string();
@@ -5135,7 +5262,7 @@ async fn the_issuers_key_rotates_published_a_day_before_it_signs_and_retires_aft
     assert!(roll_token(&jwks, &old_token).2, "an old token verifies until it expires");
     sweep().await;
     assert_eq!(kids(&api.ok(Method::GET, "/v1/secrets/oidc/jwks", None).await).len(), 2);
-    // Once the old key's last token has expired, it leaves the JWKS; the digests it signed still verify.
+    // Once the old key's last token has expired, it leaves the JWKS; the log still verifies.
     at(&next, now - RETIRE_AFTER_MS - 1000);
     sweep().await;
     assert_eq!(kids(&api.ok(Method::GET, "/v1/secrets/oidc/jwks", None).await), [next.as_str()]);
@@ -5153,7 +5280,6 @@ async fn an_emergency_rotation_signs_with_a_new_key_now_and_pulls_the_old_one() 
         async move { tokio::task::spawn_blocking(move || s.issue(app(&p, "svc_web", "production"), "roll", std::time::Duration::from_secs(3600)).unwrap()).await.unwrap() }
     };
     let jwks = || api.ok(Method::GET, "/v1/secrets/oidc/jwks", None);
-    let kids = |jwks: &Value| jwks["keys"].as_array().unwrap().iter().map(|k| k["kid"].as_str().unwrap().to_string()).collect::<Vec<_>>();
     let old_token = issue().await;
     let old = roll_token(&jwks().await, &old_token).0["kid"].as_str().unwrap().to_string();
     // Half an emergency is refused, and so is a key that isn't in the JWKS.

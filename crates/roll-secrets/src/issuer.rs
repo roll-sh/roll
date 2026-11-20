@@ -15,12 +15,12 @@
 //!   default): the next key is published [`PUBLISH_AHEAD_MS`] before it starts signing (clouds
 //!   cache JWKS), and the one it replaces leaves the JWKS [`RETIRE_AFTER_MS`] after that, once its
 //!   last token has expired. A retired key never signs again, but stays (sealed) to check the
-//!   audit log's digests it signed. An emergency ([`rotate_now`], the operator's) skips the notice:
-//!   a new key signs at once and a named one leaves the JWKS in the same write.
+//!   audit log's legacy digests it signed. An emergency ([`rotate_now`], the operator's) skips the
+//!   notice: a new key signs at once and a named one leaves the JWKS in the same write.
 //! - Apps' tokens are only for an environment the project has that isn't an untrusted preview
 //!   (`Secrets::issue`): fork code never gets roll's word.
-//! - The same key signs the audit log's digests (roll-secrets-chain), so the JWKS is served even on a server
-//!   without a public URL for the issuer: it's what an export is verified with offline.
+//! - It signs no audit digest: those have a key of their own (audit_key.rs). Digests it signed
+//!   before that key existed still check, as legacy, against the keys the digest JWKS names.
 //! - Only a row whose sealed private key opens with the deployment key, and whose public half is
 //!   that key's, is roll's ([`open_row`]): it alone signs, is published and checks digests. A
 //!   database writer without `ROLL_SECRET_KEY` can add a row but can't make one that passes.
@@ -233,7 +233,8 @@ fn signing_key(db: &Db, keys: &Keyring) -> Result<(String, zeroize::Zeroizing<Ve
     Ok((row.kid, der))
 }
 
-/// The key that signs now, to sign the audit log's digests with: (kid, key).
+/// The key that signs now: (kid, key). Digests were signed with it before the digest key (the
+/// legacy path's tests write such digests: `Secrets::sweep_audit_chain_as_before_the_digest_key`).
 pub(crate) fn signer(db: &Db, keys: &Keyring) -> Result<(String, ring::signature::RsaKeyPair)> {
     let (kid, der) = signing_key(db, keys)?;
     let pair = ring::signature::RsaKeyPair::from_pkcs8(&der).map_err(|e| Error::Internal(format!("the issuer's key: {e}")))?;
@@ -288,15 +289,19 @@ fn jwk(r: &KeyRow) -> Json {
     json!({ "kty": "RSA", "use": "sig", "alg": "RS256", "kid": r.kid, "n": r.n, "e": r.e })
 }
 
-/// roll's keys' public halves by kid, to check digests with: retired keys too, as digests they
-/// signed stay in the log.
-pub(crate) fn public_keys(db: &Db, keys: &Keyring, checked: &Checked) -> Result<std::collections::HashMap<String, crate::chain::PublicKey>> {
-    let all = json!({ "keys": trusted(db, keys, checked)?.iter().map(jwk).collect::<Vec<_>>() });
-    Ok(crate::chain::PublicKey::from_jwks(&all).into_iter().collect())
+/// roll's keys' public halves, retired ones too: the audit log's legacy digests they signed stay in
+/// the log (audit_key.rs names which count).
+pub(crate) fn trusted_jwks(db: &Db, keys: &Keyring, checked: &Checked) -> Result<Vec<Json>> {
+    Ok(trusted(db, keys, checked)?.iter().map(jwk).collect())
+}
+
+/// Every key pulled in an emergency: (kid, pulled_at).
+pub(crate) fn pulled_all(db: &Db) -> Result<Vec<(String, i64)>> {
+    Ok(db.read(|c| c.query("SELECT kid, pulled_at FROM oidc_keys WHERE pulled_at IS NOT NULL ORDER BY pulled_at, kid", (), |r| Ok((r.get(0)?, r.get(1)?))))?)
 }
 
 /// roll's live keys' public halves (the one signing, the next before it signs, the one it replaced
-/// until that one's tokens have expired), so a token or a digest from any node verifies.
+/// until that one's tokens have expired), so a token from any node verifies.
 pub(crate) fn jwks(db: &Db, keys: &Keyring, checked: &Checked) -> Result<Json> {
     let live: Vec<Json> = trusted(db, keys, checked)?.iter().filter(|r| r.retired_at.is_none()).map(jwk).collect();
     Ok(json!({ "keys": live }))
@@ -522,8 +527,10 @@ impl crate::Secrets {
     /// published at once and signs from [`PUBLISH_AHEAD_MS`] later, as a scheduled one; a key
     /// already waiting is answered instead. With `pull` (an emergency, `{"now": true, "retire":
     /// kid}`), [`rotate_now`]: a new key signs at once and `pull` leaves the JWKS now (health's
-    /// `issuer_pulled` says so for 30 days). Either is an `issuer.rotate` row in every project's
-    /// audit log: the key signs each one's digests, cloud tokens and apps' tokens.
+    /// `issuer_pulled` says so for 30 days), and in the same write off the digest keys' legacy list
+    /// (audit_key.rs): digests it signed before the digest key vouch for nothing again. Either is an
+    /// `issuer.rotate` row in every project's audit log: the key signs cloud and apps' tokens for
+    /// all of them.
     pub fn rotate_issuer(&self, pull: Option<&str>, caller: &crate::Caller) -> Result<Json> {
         if !caller.grants.everything() || caller.principal != "operator" {
             return Err(Error::Forbidden("roll's issuer key is the operator's".into()));
@@ -536,7 +543,10 @@ impl crate::Secrets {
             Ok(())
         };
         let (kid, signs_from) = match pull {
-            Some(pull) => rotate_now(&self.db, keys, &self.issuer_keys, pull, |c, kid, now| audit(c, &format!("an emergency rotation of roll's issuer key: {kid} signs now, and {pull} left the JWKS (tokens it signed no longer verify)"), now))?,
+            Some(pull) => rotate_now(&self.db, keys, &self.issuer_keys, pull, |c, kid, now| {
+                crate::audit_key::drop_legacy(c, keys, pull)?;
+                audit(c, &format!("an emergency rotation of roll's issuer key: {kid} signs now, and {pull} left the JWKS (tokens it signed no longer verify)"), now)
+            })?,
             None => {
                 let (kid, signs_from) = rotate(&self.db, keys, &self.issuer_keys, self.issuer_rotate_ms(), true)?.ok_or_else(|| Error::Internal("no key to rotate".into()))?;
                 let now = self.db.now_ms()?;

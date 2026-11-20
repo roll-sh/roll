@@ -557,7 +557,7 @@ async fn an_exported_audit_log_verifies_offline_with_saved_keys_for_its_own_proj
     let export = ok(&api, &[], &["secrets", "-p", "shop", "audit", "--format", "jsonl", "--limit", "10000"], None).await;
     let files = tempfile::tempdir().unwrap();
     let (log, keys) = (files.path().join("audit.jsonl"), files.path().join("jwks.json"));
-    std::fs::write(&keys, secrets.oidc_jwks().unwrap().to_string()).unwrap();
+    std::fs::write(&keys, secrets.audit_jwks().unwrap().to_string()).unwrap();
     std::fs::write(&log, &export).unwrap();
     // Nothing but the file, the keys and the project's id: the API isn't there.
     let offline = "http://127.0.0.1:9";

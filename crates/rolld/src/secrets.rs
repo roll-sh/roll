@@ -457,6 +457,13 @@ pub fn open(args: &crate::Args, home: &Path, workspace: Arc<roll_workspace::Work
             Err(_) => tracing::warn!("ROLL_SECRETS_OIDC_ROTATE_DAYS isn't a number of days: rotating every {}", roll_secrets::issuer::ROTATE_DAYS),
         }
     }
+    // And the audit log's digest key (90 days unless set).
+    if let Ok(days) = std::env::var("ROLL_SECRETS_AUDIT_KEY_ROTATE_DAYS") {
+        match days.trim().parse::<u32>() {
+            Ok(d) => secrets.set_audit_key_rotation_days(d),
+            Err(_) => tracing::warn!("ROLL_SECRETS_AUDIT_KEY_ROTATE_DAYS isn't a number of days: rotating every {}", roll_secrets::audit_key::ROTATE_DAYS),
+        }
+    }
     // What AWS identities' signed requests name (X-Roll-Server-ID): ROLL_SECRETS_AWS_SERVER_ID, or
     // the configured public URL. Never the host and port made up above, which two deployments can
     // share: unset, roll-secrets derives one from the deployment key.

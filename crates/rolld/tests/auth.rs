@@ -388,6 +388,7 @@ async fn every_control_plane_route_needs_the_operator_token() {
         ("/v1/secrets/ocsp/{id}", "a CA's OCSP responder: public, as any OCSP"),
         ("/v1/secrets/acme/{ca}", "ACME on a CA: the account key's JWS and its External Account Binding are the credential"),
         ("/v1/secrets/oidc", "roll's OIDC issuer: public keys and discovery, fetched anonymously by clouds"),
+        ("/v1/secrets/audit/jwks", "the audit log's digest keys: public, as an export is checked against them offline"),
     ];
     let unscoped: Vec<_> = scoped
         .lock()
