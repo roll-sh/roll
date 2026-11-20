@@ -486,6 +486,8 @@ pub trait Builder: Send + Sync {
 pub struct Scanned {
     pub scanner: String,
     pub found: Vec<crate::model::Vulnerability>,
+    /// Its CycloneDX SBOM (JSON), when the scanner makes one.
+    pub sbom: Option<Vec<u8>>,
 }
 
 /// A free TCP port on loopback (to publish an instance's port on).

@@ -284,6 +284,12 @@ impl Apps {
                         ("runtime", s.to_string(), e.to_string())
                     } else if let Some((s, e)) = key.strip_prefix("http:").and_then(|k| k.split_once('/')) {
                         ("http", s.to_string(), e.to_string())
+                    } else if let Some((s, e)) = key.strip_prefix("audit:").and_then(|k| k.split_once('/')) {
+                        // A deleted service's own entry (`audit.deleted`) is read deleted.
+                        let sid = s.to_string();
+                        let found = self.db(move |st| st.service_any(&sid)).await.ok().map(|(s, _)| (s.project, s.name));
+                        services.insert(s.to_string(), (Instant::now(), found));
+                        ("audit", s.to_string(), e.to_string())
                     } else if let Some(dep) = key.strip_prefix("build:") {
                         if !builds.contains_key(dep) {
                             if builds.len() > 1000 {

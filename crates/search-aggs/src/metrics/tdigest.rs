@@ -111,7 +111,7 @@ fn dist_quantile(q: f64, v: &[f64]) -> f64 {
 }
 
 /// `SortingDigest`: every sample, sorted on demand.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
 pub struct SortingDigest {
     values: Vec<f64>,
     sorted: bool,
@@ -144,7 +144,7 @@ impl SortingDigest {
 }
 
 /// `MergingDigest` (`K_2`, weight limit, alternating sort, two-level compression).
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct MergingDigest {
     merge_count: u64,
     public_compression: f64,
@@ -599,7 +599,7 @@ pub fn opensearch_quantile(centroids: &[(f64, u64)], total: f64, min: f64, max: 
 }
 
 /// `java.util.Random` (48-bit LCG), for the AVL tree digest.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 struct JavaRandom {
     seed: u64,
 }
@@ -637,7 +637,7 @@ impl JavaRandom {
 
 /// `AVLTreeDigest`, with the tree as a sorted array (same order: equal means insert after
 /// existing ones, in-place updates when the order allows).
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct AvlTreeDigest {
     compression: f64,
     means: Vec<f64>,
@@ -695,8 +695,8 @@ impl AvlTreeDigest {
         let mut start = first;
         let mut min_distance = f64::MAX;
         let mut last_neighbor = self.means.len();
-        for nb in first..self.means.len() {
-            let z = (self.means[nb] - x).abs();
+        for (nb, &mean) in self.means.iter().enumerate().skip(first) {
+            let z = (mean - x).abs();
             if z < min_distance {
                 start = nb;
                 min_distance = z;
@@ -860,7 +860,7 @@ impl AvlTreeDigest {
 }
 
 /// `HybridDigest`: sorted samples, switching to a merging digest at `round(compression) * 20`.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct HybridDigest {
     compression: f64,
     /// `Math.round(compression) * 20` in Java `long` arithmetic: it wraps negative for huge
@@ -926,7 +926,7 @@ impl HybridDigest {
 }
 
 /// `TDigestState`: the digest behind a percentiles state.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub enum TDigest {
     Hybrid(HybridDigest),
     Avl(Box<AvlTreeDigest>),
