@@ -603,7 +603,10 @@ async fn an_error_mains_preview_doesnt_have_reaches_the_record_and_the_report() 
     e.apps.errors.lock().insert(format!("{}/{web}", base.id), vec![group("old", "a flaky upstream", 3), group("own-main", &own(&base.id), 2)]);
     e.apps.errors.lock().insert(format!("{}/{web}", p.id), vec![group("old", "a flaky upstream", 4), group("rare", "RangeError", 1), group("new", "Stripe rejected sk_test_51Hx9", 9), group("own-mine", &own(&p.id), 2)]);
     e.engine.read_new_errors().await;
-    let n = e.engine.store.preview(&p.id).unwrap().new_errors.expect("new against main's");
+    let seen = e.engine.store.preview(&p.id).unwrap();
+    assert!(seen.regressions_compared, "compared at its head");
+    let n = seen.new_errors.expect("new against main's");
+    assert_eq!(n.head, p.head, "read at its head");
     assert_eq!((n.branch.as_str(), n.total, n.errors.iter().map(|x| x.title.as_str()).collect::<Vec<_>>()), ("main", 2, vec!["Stripe rejected ***", "RangeError"]));
     assert_eq!(e.code.last_report("chg_ne").new_errors, Some(n), "reported again with it");
     // Fixed (gone from its output): it goes.

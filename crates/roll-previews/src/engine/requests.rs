@@ -734,7 +734,8 @@ impl Engine {
             let main = match bases[&key].clone().filter(|b| b.id != r.id) {
                 Some(b) => {
                     if !mains.contains_key(&b.id) {
-                        let read = if b.state == crate::State::Ready && self.holds(&b.id).await { self.raw_errors(&b.id).await.ok() } else { None };
+                        // Asleep, its logs are still there to read (a frozen or stopped container's).
+                        let read = if matches!(b.state, crate::State::Ready | crate::State::Sleeping) && self.holds(&b.id).await { self.raw_errors(&b.id).await.ok() } else { None };
                         mains.insert(b.id.clone(), read);
                     }
                     mains[&b.id].clone().map(|groups| (b, groups))
@@ -757,6 +758,10 @@ impl Engine {
             }
             Some((base, main)) => {
                 let Ok(mine) = self.raw_errors(&r.id).await else { return };
+                // Compared at this head (what a required rule waits for); the change's says so.
+                if self.store.set_runtime_fact(&r.id, "compared_errors", Some(&r.head)).unwrap_or(false) {
+                    self.report(r.clone()).await;
+                }
                 let theirs: std::collections::HashSet<(&str, &str)> = main.iter().map(|g| (g.service.as_str(), g.fingerprint.as_str())).collect();
                 // The same error says each preview's own names (its id, its branches, its hosts):
                 // with those taken out, a title main's has too isn't new either.
@@ -769,7 +774,7 @@ impl Engine {
                 new.sort_by(|a, b| b.count.cmp(&a.count).then(b.last_seen.cmp(&a.last_seen)));
                 let total = new.len();
                 new.truncate(crate::NewErrors::MAX);
-                let seen: Vec<String> = new.iter().map(|g| format!("{}\0{}", g.service, g.fingerprint)).chain([total.to_string()]).collect();
+                let seen: Vec<String> = new.iter().map(|g| format!("{}\0{}", g.service, g.fingerprint)).chain([total.to_string(), r.head.clone()]).collect();
                 if self.new_errors_seen.lock().get(&r.id) == Some(&seen) {
                     return;
                 }
@@ -780,7 +785,7 @@ impl Engine {
                     // A title was cut (at 300) before it was masked: shown only to 120, short of
                     // where a cut could have split a value.
                     let errors = new.iter().map(|g| crate::NewError { service: g.service.clone(), title: crate::mask_cut(&g.title, &values).chars().take(120).collect() }).collect();
-                    Some(crate::NewErrors { branch: base.branch.clone().unwrap_or_else(|| "main".into()), total, errors })
+                    Some(crate::NewErrors { branch: base.branch.clone().unwrap_or_else(|| "main".into()), total, errors, head: r.head.clone() })
                 };
                 self.new_errors_seen.lock().insert(r.id.clone(), seen);
                 kept

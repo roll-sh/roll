@@ -1243,8 +1243,11 @@ apps service's traces have no spans here, so its routes say no reason.
 
 Regressions as a check (Lighthouse CI's budgets, Sentry's regression gates): with the project's
 `regressions: "check"` (the rules dialog's "Regressions against main"), a change's head gets the
-`roll/regressions` commit status, failing while its preview has routes slower than main's or
-errors main's doesn't have ("1 route slower, 2 new errors against main": counts only, a status is
+`roll/regressions` commit status, `pending` until the holder has compared it with main's preview at
+that head (errors, and routes when the project keeps traces; main's preview asleep still
+compares, held elsewhere doesn't), then failing while its preview has routes slower than main's or
+errors main's doesn't have (each read is bound to the head it was read at, so a push never shows
+the head before's) ("1 route slower, 2 new errors against main": counts only, a status is
 public) and passing once they're gone. Branch protection can require it. A `required` rule that
 keeps it from landing in roll, with an accept as the visual review has, comes next.
 

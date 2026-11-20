@@ -176,6 +176,7 @@ impl CodeSource {
                     title: a.title,
                     seo: a.seo.as_ref().map(|s| s.problems().into_iter().map(String::from).collect()).unwrap_or_default(),
                 }),
+                regressions_compared: p.regressions_compared,
                 slower_routes: p.slower_routes.as_ref().map(|s| code_control::model::PreviewSlowerRoutes {
                     branch: s.branch.clone(),
                     routes: s.routes.iter().map(|x| code_control::model::PreviewSlowerRoute { name: x.name.clone(), p50_ms: x.p50_ms, main_p50_ms: x.main_p50_ms, grew: x.grew.as_ref().map(|g| (g.span.clone(), g.ms, g.main_ms)) }).collect(),
