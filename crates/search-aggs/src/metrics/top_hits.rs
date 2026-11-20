@@ -132,7 +132,7 @@ fn check_script_fields(p: &mut XParser<'_>) -> Result<()> {
 }
 
 /// One hit of a result.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct TopHit {
     pub key: SortKey,
     pub score: f32,
@@ -141,7 +141,7 @@ pub struct TopHit {
 }
 
 /// `InternalTopHits`.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct TopHits {
     pub from: u32,
     pub size: u32,

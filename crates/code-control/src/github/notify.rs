@@ -897,8 +897,10 @@ fn routes_line(s: &crate::model::PreviewSlowerRoutes, branch: &str) -> String {
         .routes
         .iter()
         .map(|x| {
-            let name: String = x.name.chars().map(|c| if c == '`' || c.is_control() { '\'' } else { c }).take(80).collect();
-            format!("`{name}` {} ms ({branch} {} ms)", x.p50_ms, x.main_p50_ms)
+            let span = |s: &str| -> String { s.chars().map(|c| if c == '`' || c.is_control() { '\'' } else { c }).take(80).collect() };
+            // Where its time went: the span that grew most against the branch's.
+            let why = x.grew.as_ref().map(|(s, ms, main)| format!(", `{}` {ms} ms ({branch} {main} ms)", span(s))).unwrap_or_default();
+            format!("`{}` {} ms ({branch} {} ms{why})", span(&x.name), x.p50_ms, x.main_p50_ms)
         })
         .collect();
     format!("Routes slower than on `{branch}`'s preview (the median of the last hour's traces): {}.\n\n", each.join("; "))
@@ -1178,10 +1180,10 @@ mod preview_tests {
         assert!(page_checks(&timed).unwrap().contains("loads in 1.2 s, 300 ms slower than main</summary>"));
         // Routes slower than main's preview's: in the summary, and named where nothing in a name
         // can close its code span.
-        timed.slower_routes = Some(crate::model::PreviewSlowerRoutes { branch: "main".into(), routes: vec![crate::model::PreviewSlowerRoute { name: "GET /a`b\n".into(), p50_ms: 420, main_p50_ms: 120 }] });
+        timed.slower_routes = Some(crate::model::PreviewSlowerRoutes { branch: "main".into(), routes: vec![crate::model::PreviewSlowerRoute { name: "GET /a`b\n".into(), p50_ms: 420, main_p50_ms: 120, grew: Some(("SELECT items".into(), 300, 0)) }] });
         let checks = page_checks(&timed).unwrap();
         assert!(checks.contains("1 route slower than main"), "{checks}");
-        assert!(checks.contains("`GET /a'b'` 420 ms (main 120 ms)"), "{checks}");
+        assert!(checks.contains("`GET /a'b'` 420 ms (main 120 ms, `SELECT items` 300 ms (main 0 ms))"), "{checks}");
         timed.slower_routes = None;
         // New errors against main's preview: counted in the summary and by service, never their lines.
         timed.new_errors = Some(crate::model::PreviewNewErrors { branch: "main".into(), total: 7, errors: vec![crate::model::PreviewNewError { service: "web".into(), title: "TypeError: x`y".into() }] });

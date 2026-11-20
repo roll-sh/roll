@@ -186,7 +186,7 @@ impl Aggregator for ScriptedMetricAgg {
 
 /// `InternalScriptedMetric`: the shard results (one per shard until the final reduce, which
 /// leaves the reduce script's single result).
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct ScriptedMetric {
     pub values: Vec<Json>,
     /// The reduce script, its params merged with the agg-level params.

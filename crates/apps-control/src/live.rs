@@ -384,6 +384,8 @@ pub struct Gate {
     pub split: Option<crate::model::Split>,
     /// Where a share of its bodiless requests is copied.
     pub mirror: Option<crate::model::Split>,
+    /// Its snippets, joined: before `</head>`, before `</body>`.
+    pub snippets: Option<(bytes::Bytes, bytes::Bytes)>,
 }
 
 /// A rate-limit bucket: which (0 the environment's, 1 + i firewall rule i's) and whose.
