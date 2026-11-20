@@ -121,6 +121,69 @@ impl ImageRef {
     }
 }
 
+/// A token for an ECR registry, from GetAuthorizationToken with the service's own access key:
+/// the password `docker login` takes (its user is `AWS`) and when it expires (unix ms).
+/// `endpoint`: the operator's override (tests); else the region's own API.
+pub async fn ecr_token(access_key_id: &str, secret: &str, region: &str, endpoint: Option<&str>) -> anyhow::Result<(String, i64)> {
+    use aws_sdk_ecr::config::{BehaviorVersion, Credentials, Region};
+    use base64::Engine;
+    let creds = Credentials::new(access_key_id, secret, None, None, "roll-apps-registry");
+    let mut b = aws_sdk_ecr::Config::builder().behavior_version(BehaviorVersion::latest()).region(Region::new(region.to_string())).credentials_provider(creds);
+    if let Some(e) = endpoint {
+        b = b.endpoint_url(e);
+    }
+    let out = aws_sdk_ecr::Client::from_conf(b.build()).get_authorization_token().send().await.map_err(|e| anyhow::anyhow!("ECR refused the access key: {}", aws_sdk_ecr::error::DisplayErrorContext(e)))?;
+    let d = out.authorization_data().first().context("ECR answered no token")?;
+    let token = d.authorization_token().context("ECR answered no token")?;
+    let decoded = base64::engine::general_purpose::STANDARD.decode(token).context("ECR's token isn't base64")?;
+    let text = String::from_utf8(decoded).context("ECR's token isn't text")?;
+    let password = text.strip_prefix("AWS:").context("ECR's token isn't AWS:<password>")?.to_string();
+    let expires = d.expires_at().map(|t| t.secs() * 1000).unwrap_or_else(|| code_sql::now_ms() + 12 * 3600 * 1000);
+    Ok((password, expires))
+}
+
+impl crate::Apps {
+    /// The login a pull of `image` for `service` uses: none unless the service has one for the
+    /// registry `image` is pulled from; an ECR login's token, fetched again when it has less
+    /// than an hour left.
+    pub(crate) async fn pull_login(self: &Arc<Self>, service: &str, image: &str) -> crate::Result<Option<RegistryLogin>> {
+        let sid = service.to_string();
+        let Some((r, secret)) = self.db(move |s| s.registry_login(&sid)).await?.filter(|(r, _)| crate::model::registry_key(&r.server) == crate::model::image_registry(image)) else {
+            return Ok(None);
+        };
+        let Some(region) = r.region.as_deref().filter(|_| r.kind.as_deref() == Some("ecr")) else {
+            return Ok(Some(RegistryLogin { server: r.server, username: r.username, password: secret }));
+        };
+        let now = code_sql::now_ms();
+        if let Some((token, until)) = self.ecr_tokens.lock().get(service).cloned().filter(|(_, until)| *until - now > 3600 * 1000) {
+            let _ = until;
+            return Ok(Some(RegistryLogin { server: r.server, username: "AWS".into(), password: token }));
+        }
+        let (token, until) = ecr_token(&r.username, &secret, region, self.cfg.ecr_endpoint.as_deref()).await.map_err(|e| crate::Error::BadRequest(format!("{e:#}")))?;
+        self.ecr_tokens.lock().insert(service.to_string(), (token.clone(), until));
+        Ok(Some(RegistryLogin { server: r.server, username: "AWS".into(), password: token }))
+    }
+
+    /// ECR tokens with less than an hour left, fetched again and handed to what runs with them
+    /// (wakes and new instances pull with the new one). The reaper's pass.
+    pub(crate) async fn ecr_refresh_pass(self: &Arc<Self>) {
+        let now = code_sql::now_ms();
+        let due: Vec<String> = self.ecr_tokens.lock().iter().filter(|(_, (_, until))| *until - now <= 3600 * 1000).map(|(s, _)| s.clone()).collect();
+        for service in due {
+            let sid = service.clone();
+            let Ok(svc) = self.db(move |s| s.service(&sid)).await else {
+                self.ecr_tokens.lock().remove(&service);
+                continue;
+            };
+            let crate::model::Source::Image { image } = &svc.source else { continue };
+            match self.pull_login(&service, image).await {
+                Ok(login) => self.registry_changed(&service, login.as_ref()).await,
+                Err(e) => tracing::warn!(service, error = %e, "apps: refreshing an ECR login"),
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

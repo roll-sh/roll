@@ -1,4 +1,4 @@
-import { Clock, Copy, Dices, Download, Folder, FolderPlus, History, Import as ImportIcon, Link2, Lock, MoreHorizontal, Pencil, Plus, RotateCw, Search, Send, ShieldAlert, Trash2, Upload, User, Users } from "lucide-react";
+import { Clock, Copy, Dices, Download, Folder, FolderPlus, History, Import as ImportIcon, Inbox, Link2, Lock, MoreHorizontal, Pencil, Plus, RotateCw, Search, Send, ShieldAlert, Trash2, Upload, User, Users } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Link } from "@/components/link";
 import { canRotate, needsApproval, SECRET_KEY, TAG, type Batch, type Environment, type ExportFormat, type Import, type KeyInsight, type Op, type Secret, type SecretType } from "@/lib/secrets-api";
@@ -17,6 +17,7 @@ import { ReachDialog } from "./reach-dialog";
 import { EsoDialog } from "./eso-dialog";
 import { ImportsPanel } from "./imports";
 import { RefInput, useRefSource, useRefWarnings, type RefSource } from "./ref-input";
+import { RequestDialog, type RequestTarget } from "./request-dialog";
 import { ShareDialog, type ShareSource } from "./share-dialog";
 import { Activity } from "./activity";
 import { BulkBar } from "./bulk";
@@ -50,6 +51,7 @@ export function EnvView({ env }: { env: Environment }) {
   const [decoying, setDecoying] = useState(false);
   const [drawer, setDrawer] = useState<Drawer | null>(null);
   const [sharing, setSharing] = useState<ShareSource | null>(null);
+  const [asking, setAsking] = useState<RequestTarget | null>(null);
   /** Selected rows (`key:type`), and the last one clicked, for shift-click ranges. */
   const [selected, setSelected] = useState<Set<string>>(() => new Set());
   const anchor = useRef<string | null>(null);
@@ -238,6 +240,13 @@ export function EnvView({ env }: { env: Environment }) {
                 <ImportIcon className="size-3" /> Imports
                 {!!imports.data?.length && <span className="font-mono text-[10px] text-subtle">{imports.data.length}</span>}
               </button>
+              <button
+                onClick={() => setAsking({ env: env.slug, path, needsApproval: env.protected })}
+                className="inline-flex h-6 items-center gap-1 rounded-md px-1.5 text-[11.5px] text-muted transition-colors hover:bg-fg/[0.05] hover:text-fg"
+                title="Ask someone outside roll to send this folder's values in"
+              >
+                <Inbox className="size-3" /> Request a value…
+              </button>
               <NewFolder path={path} onCreate={(np) => api.createFolder(env.slug, np).then(() => go({ env: env.slug, path: np }), (e) => setError(errorText(e)))} />
               <span className="ml-auto" />
               {insights.data && (unreadCount > 0 || unread) && (
@@ -317,6 +326,7 @@ export function EnvView({ env }: { env: Environment }) {
             )}
             {list.data && secrets.length === 0 && !adding ? (
               <Teach
+                login
                 title={path === "/" ? `${env.name} has no secrets yet` : `${path} is empty in ${env.name}`}
                 cli={[`roll secrets set -p ${project.name} -e ${env.slug} KEY=value`, `roll run -p ${project.name} --env ${env.slug} -- <cmd>`]}
                 install
@@ -389,6 +399,7 @@ export function EnvView({ env }: { env: Environment }) {
       <EsoDialog open={pulling} onClose={() => setPulling(false)} env={env} path={path} />
       <ImportDialog open={importing} onClose={() => setImporting(false)} env={env} path={path} current={secrets} onImported={(text, w) => (setNote({ text, warnings: w }), refresh(), open.reload())} />
       <ShareDialog source={sharing} onClose={() => setSharing(null)} onShared={() => {}} />
+      <RequestDialog target={asking} onClose={() => setAsking(null)} />
       <LinkDialog open={linking} onClose={() => setLinking(false)} env={env} path={path} taken={keys} onWrite={write} />
       <DecoyDialog open={decoying} onClose={() => setDecoying(false)} env={env} path={path} taken={keys} onPlanted={(s) => (setNote({ text: `Planted decoy ${s.key}`, warnings: [] }), refresh())} />
     </div>
@@ -886,7 +897,7 @@ function DecoyMark({ decoy }: { decoy: NonNullable<Secret["decoy"]> }) {
   const used = decoy.uses > 0;
   const title = used
     ? `A decoy, used ${decoy.uses === 1 ? "once" : `${decoy.uses} times`}${decoy.used_at ? `, last ${ago(decoy.used_at)}` : ""}${decoy.used_ip ? ` from ${decoy.used_ip}` : ""}. Whoever used it found it where it was planted: cut them off and rotate what sits beside it.`
-    : "A decoy: its value is a roll token that opens nothing, and any use raises an alert. Only admins see this mark.";
+    : `A decoy: its value is ${decoy.kind === "postgres" ? "a database login that never logs in" : "a roll token that opens nothing"}, and any use raises an alert. Only admins see this mark.`;
   return (
     <span className={`shrink-0 rounded border px-1 font-mono text-[10px] ${used ? "border-danger/40 text-danger" : "border-accent/40 text-accent"}`} title={title}>
       {used ? `decoy · used ${decoy.uses}×` : "decoy"}

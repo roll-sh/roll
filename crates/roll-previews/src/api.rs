@@ -25,6 +25,7 @@ pub fn router(engine: Arc<Engine>) -> Router {
         .route("/v1/previews/{id}/refresh", post(refresh))
         .route("/v1/previews/{id}/keep", post(keep))
         .route("/v1/previews/{id}/visual/accept", post(accept_visual))
+        .route("/v1/previews/{id}/regressions/accept", post(accept_regressions))
         .route("/v1/previews/{id}/approve", post(approve))
         .route("/v1/previews/{id}/visit", post(visit))
         .route("/v1/previews/{id}/env", get(vars).put(put_vars))
@@ -184,6 +185,18 @@ impl IntoResponse for Error {
     }
 }
 
+/// Every name a signed-in person goes by (their handle, their linked GitHub logins), as a change's
+/// author may be written with either. Read for sure: an error refuses.
+async fn aliases_of(e: &Arc<Engine>, who: Option<&roll_auth::SignedIn>) -> crate::Result<Vec<String>> {
+    let Some(u) = who else { return Ok(Vec::new()) };
+    let (handle, user) = (u.handle.clone(), u.user.clone());
+    let others = match e.visitors.get().cloned() {
+        Some(v) => tokio::task::spawn_blocking(move || v.names_of(&user)).await.map_err(|err| Error::Internal(err.to_string()))?.map_err(|err| Error::Internal(format!("reading who you are on GitHub: {err}")))?,
+        None => Vec::new(),
+    };
+    Ok(std::iter::once(handle).chain(others).collect())
+}
+
 /// Run `f` off the async runtime: the store blocks on its database.
 async fn blocking<T: Send + 'static>(e: Arc<Engine>, f: impl FnOnce(&Engine) -> crate::Result<T> + Send + 'static) -> crate::Result<T> {
     tokio::task::spawn_blocking(move || f(&e)).await.map_err(|e| Error::Internal(e.to_string()))?
@@ -308,13 +321,42 @@ async fn accept_visual(AxState(e): S, Path(id): Path<String>, who: Option<axum::
     check_id(&id)?;
     let AcceptBody { head: seen, path } = if b.is_empty() { AcceptBody::default() } else { body::<AcceptBody>(&b)? };
     // The person behind a token too: their own token doesn't let an author accept their change.
-    let behind = who.as_ref().map(|u| u.handle.clone());
+    let aliases = aliases_of(&e, who.as_ref().map(|u| &u.0)).await?;
+    // A signed-in person who can write to the change's repo in roll code (an admin can).
+    let writer = who.as_ref().filter(|u| grant.is_none() && !u.admin).map(|u| u.code_owner.clone());
     let (by, person) = match (who, grant) {
         (Some(axum::Extension(u)), None) => (u.handle, true),
         (_, Some(axum::Extension(g))) => (format!("token:{}", g.name), false),
         (None, None) => ("operator".into(), true),
     };
-    e.accept_visual(&id, &by, behind.as_deref(), person, seen.as_deref(), path.as_deref()).await.map(Json)
+    // A person signed in to roll, not the operator's token, as for regressions.
+    let person = person && by != "operator";
+    e.accept_visual(&id, &by, &aliases, person, writer.as_ref().map(|o| o.as_deref()), seen.as_deref(), path.as_deref()).await.map(Json)
+}
+
+#[derive(Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+struct AcceptRegressionsBody {
+    /// The head that was looked at: refused (409) when a newer push came in.
+    head: Option<String>,
+}
+
+async fn accept_regressions(AxState(e): S, Path(id): Path<String>, who: Option<axum::Extension<roll_auth::SignedIn>>, grant: Option<axum::Extension<roll_auth::Grant>>, b: Bytes) -> crate::Result<Json<Preview>> {
+    check_id(&id)?;
+    let AcceptRegressionsBody { head: seen } = if b.is_empty() { AcceptRegressionsBody::default() } else { body::<AcceptRegressionsBody>(&b)? };
+    // As the visual review's: the person behind a token too.
+    let aliases = aliases_of(&e, who.as_ref().map(|u| &u.0)).await?;
+    let signed = who.as_ref().filter(|_| grant.is_none()).map(|axum::Extension(u)| u.clone());
+    let (by, person) = match (who, grant) {
+        (Some(axum::Extension(u)), None) => (u.handle, true),
+        (_, Some(axum::Extension(g))) => (format!("token:{}", g.name), false),
+        (None, None) => ("operator".into(), true),
+    };
+    // A person signed in to roll, not the operator's token (a CI job may hold it), who can write to
+    // the change's repo (an admin can).
+    let person = person && by != "operator";
+    let writer = signed.filter(|u| !u.admin).map(|u| u.code_owner);
+    e.accept_regressions(&id, &by, &aliases, person, writer.as_ref().map(|o| o.as_deref()), seen.as_deref()).await.map(Json)
 }
 
 #[derive(Deserialize)]
