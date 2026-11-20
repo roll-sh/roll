@@ -440,6 +440,13 @@ fn deploy_over(v: &Value) -> bool {
     matches!(v["status"].as_str(), Some("active" | "ready" | "failed" | "canceled" | "superseded" | "removed" | "inactive"))
 }
 
+/// A preview that's done changing (roll previews' `ready`, `sleeping`, `failed`, `deleting`), or
+/// waits on a person (`awaiting_approval`: a fork's change runs only after `approve-run`); `queued`,
+/// `creating` and `updating` aren't.
+fn preview_settled(v: &Value) -> bool {
+    matches!(v["state"].as_str(), Some("ready" | "sleeping" | "failed" | "deleting" | "awaiting_approval"))
+}
+
 /// A job that ended (roll apps' `succeeded`, `failed`, `skipped`, `timed_out`, `canceled`):
 /// anything but `running`.
 fn job_over(v: &Value) -> bool {
@@ -1379,6 +1386,16 @@ static TOOLS: &[Tool] = &[
         &[req("id", "Preview id")],
     ),
     t(
+        "previews_wait",
+        "Wait for a preview to be ready",
+        "A preview once it's ready (its url and share_url), failed (its error), sleeping, going away, or waiting on a person (awaiting_approval: a fork's change runs only after a writer's approve-run). A client that runs MCP tasks gets a task that waits as long as it takes; otherwise this answers the state now (call again to keep waiting).",
+        "previews",
+        "GET",
+        "/v1/previews/{id}",
+        &[req("id", "Preview id (from previews_create or previews_list)")],
+    )
+    .until(preview_settled),
+    t(
         "previews_create",
         "Create a preview",
         "A preview environment for a change or a branch: the project's resources branched, its services deployed.",
@@ -1565,6 +1582,9 @@ mod tests {
         // keys it isn't given), and a batch that can delete keys says so.
         assert!(all().iter().find(|t| t.name == "secrets_ensure_environment").unwrap().request(&json!({ "project": "prj_a", "env": "staging", "replace": true })).is_err());
         assert_eq!(def("secrets_apply_changes")["annotations"]["destructiveHint"], true);
+        // Waiting on a preview stops where it settles or needs a person, never while it's still being made.
+        let settled = all().iter().find(|t| t.name == "previews_wait").unwrap().until.unwrap();
+        assert!(["ready", "failed", "awaiting_approval"].iter().all(|s| settled(&json!({ "state": s }))) && !settled(&json!({ "state": "creating" })));
         // Revoking a credential can't be undone: clients that ask before destructive calls ask.
         for n in ["storage_revoke_key", "streams_revoke_key", "search_revoke_key", "search_unlink_remote", "previews_delete_hook"] {
             assert_eq!(def(n)["annotations"]["destructiveHint"], true, "{n}");
