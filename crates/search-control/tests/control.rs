@@ -2076,6 +2076,8 @@ async fn a_branch_runs_none_of_its_parents_jobs() {
     let watch = json!({
         "trigger": {"schedule": {"interval": "1s"}},
         "input": {"simple": {}},
+        // Every execution sends: no 5s default throttle between them.
+        "throttle_period": "0s",
         "actions": {"hook": {"webhook": {"method": "post", "scheme": "http", "host": "127.0.0.1", "port": hook_port, "path": "/hook", "body": "fired"}}},
     });
     let calls = [
