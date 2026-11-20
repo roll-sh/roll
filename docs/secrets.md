@@ -5126,6 +5126,7 @@ is still level with or ahead of the category. The gaps are at the new features' 
 3. **A proxy that can swap** (L; waits on previews, apps and agents): apps' egress is `CONNECT`
    tunnels and never sees headers. roll secrets' half: a short-lived interception CA per consumer from
    the project's PKI, name-constrained to the bound hosts. Previews first (the strictest egress).
+   roll secrets' half is building: `feature/roll-secrets-intercept-ca`.
 4. **Validity checks without tripping canaries** (M; fixing the design in `feature/roll-secrets-validity`):
    - AWS: the account read from the key id offline, known canary accounts skipped, a live call only by
      opt-in;
