@@ -69,7 +69,7 @@ route as. "deploy*" means `deploy` when `{env}` is `production`, else `write`.
 | `PUT /v1/apps/projects/{project}/limits` | `{ alert_usd: number \| null, hard_usd: number \| null }` | `SpendLimits` (this month's alert and cap are decided again within 30 s) | admin (the hard limit pauses the whole project) |
 | `GET /v1/apps/events?after=&limit=` | | `{ events: Event[], next }`: what happened to services, in order, after a cursor | read |
 | `GET /v1/apps/services/{id}/changes` | | server-sent events: `ready`, then a `changed` (data `{}`) whenever a deploy moves, an instance wakes, sleeps or crashes, or someone changes the service; the page reads it again (on the owner, in memory; it carries nothing itself) | read |
-| `PUT /v1/apps/services/{id}/registry` | `{ username, password, server? }` | `Service` (a private registry's login for an image source; sealed, never returned) | write |
+| `PUT /v1/apps/services/{id}/registry` | `{ username, password, server? }`, or for an image on ECR `{ kind: "ecr", access_key_id, secret_access_key, region? }` (region defaults to the registry's; another is a 400) | `Service` (a private registry's login for an image source; sealed, never returned; an ECR key is exchanged for ECR's 12-hour token at a pull, user `AWS`, kept until it has an hour left and then fetched again for what runs) | write |
 | `DELETE /v1/apps/services/{id}/registry` | | `Service` | write |
 | `PUT /v1/apps/services/{id}/git-login` | `{ username, password }` (a deploy token, app password or access token as `password`; one line each), or `{ username, secret }` (the name of the project's secret that holds it, read from its production secrets at each fetch: a rotated token just works, nothing is kept here) | `Service` (a private Git repository's login for a Git URL source, bound to the URL's host: sent only there as Basic auth, dropped when the source moves to another repository; sealed, never returned) | write |
 | `DELETE /v1/apps/services/{id}/git-login` | | `Service` | write |
@@ -334,7 +334,7 @@ type Service = {
   source: Source;
   build: Build;
   run: Run;
-  registry: { server: string; username: string } | null; // a private registry's login (never the password)
+  registry: { server: string; username: string; kind?: "ecr"; region?: string } | null; // a private registry's login (never the password; an ECR login's username is its access key's id)
   git_login: { host: string; username: string; secret?: string } | null; // a private Git repository's login (never the password; `secret`: the project secret it's read from)
   github: { installation: number; repo: string } | null; // connected to roll's GitHub App (`PUT …/github`)
   links: { kind: LinkKind; ref: string }[]; // what it links (no variables): the canvas draws them

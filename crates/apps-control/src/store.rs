@@ -837,6 +837,9 @@ impl Store {
         db.add_column("deployments", "build_key", "TEXT")?;
         // A failed deployment's explanation from a model (`explain::Explanation` as JSON).
         db.add_column("deployments", "explanation", "TEXT")?;
+        // An ECR login's kind and region (`basic` logins have neither).
+        db.add_column("registry_auth", "kind", "TEXT")?;
+        db.add_column("registry_auth", "region", "TEXT")?;
         // Runtime config's token before its last rotation (sealed), and when that was.
         db.add_column("runtime_config", "previous", "TEXT")?;
         db.add_column("runtime_config", "rotated_at", "INTEGER")?;
@@ -2291,11 +2294,13 @@ impl Store {
 
     // ── private registries ──
 
-    pub fn set_registry(&self, service: &str, server: &str, username: &str, password: &str) -> Result<()> {
+    /// A login (`region`: an ECR access key's, `username` its id and `password` its secret).
+    pub fn set_registry(&self, service: &str, server: &str, username: &str, password: &str, region: Option<&str>) -> Result<()> {
         let sealed = self.sealer.seal(&format!("registry:{service}"), password);
+        let kind = region.map(|_| "ecr");
         self.db.execute(
-            "INSERT INTO registry_auth (service, server, username, sealed) VALUES (?, ?, ?, ?) ON CONFLICT (service) DO UPDATE SET server = excluded.server, username = excluded.username, sealed = excluded.sealed",
-            params![service, server, username, sealed],
+            "INSERT INTO registry_auth (service, server, username, sealed, kind, region) VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT (service) DO UPDATE SET server = excluded.server, username = excluded.username, sealed = excluded.sealed, kind = excluded.kind, region = excluded.region",
+            params![service, server, username, sealed, kind, region],
         )?;
         Ok(())
     }
@@ -2307,13 +2312,14 @@ impl Store {
 
     /// The login, without the password.
     pub fn registry(&self, service: &str) -> Result<Option<Registry>> {
-        Ok(self.db.query_row("SELECT server, username FROM registry_auth WHERE service = ?", [service], |r| Ok(Registry { server: r.get(0)?, username: r.get(1)? })).optional()?)
+        Ok(self.db.query_row("SELECT server, username, kind, region FROM registry_auth WHERE service = ?", [service], |r| Ok(Registry { server: r.get(0)?, username: r.get(1)?, kind: r.get(2)?, region: r.get(3)? })).optional()?)
     }
 
     /// The login with its password opened, for a pull.
     pub fn registry_login(&self, service: &str) -> Result<Option<(Registry, String)>> {
-        let row: Option<(String, String, String)> = self.db.query_row("SELECT server, username, sealed FROM registry_auth WHERE service = ?", [service], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?))).optional()?;
-        row.map(|(server, username, sealed)| Ok((Registry { server, username }, self.sealer.open(&format!("registry:{service}"), &sealed)?))).transpose()
+        type Row = (String, String, String, Option<String>, Option<String>);
+        let row: Option<Row> = self.db.query_row("SELECT server, username, sealed, kind, region FROM registry_auth WHERE service = ?", [service], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?))).optional()?;
+        row.map(|(server, username, sealed, kind, region)| Ok((Registry { server, username, kind, region }, self.sealer.open(&format!("registry:{service}"), &sealed)?))).transpose()
     }
 
     // ── private Git repositories ──
