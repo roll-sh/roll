@@ -5138,7 +5138,8 @@ is still level with or ahead of the category. The gaps are at the new features' 
    #494 (CI green): the install line, a no-such-project page with ways out (shared with the canvas),
    links from empty states, Try again on load errors. After #430 (one conflict in `ui.tsx`).
 6. **Workload identities match nested and list claims** (S; #499, gated green: JSON-pointer keys in
-   `claims`, lists match on any element, one shared `roll_oidc::check_identity`):
+   `claims`, lists match on any element through a pointer only (a plain name stays string-only, so
+   nothing made before widens), one shared `roll_oidc::check_identity`):
    `roll-oidc`'s `Jwt::str` reads top-level strings only, so Keycloak's `realm_access.roles` and
    Entra's `groups` can't be matched. Doppler and Vault both take JSON pointers and lists.
 7. **Big changes on Postgres** (performance, M): 9,900 keys in one change took 11.7 s against 0.5 s on
@@ -5146,7 +5147,7 @@ is still level with or ahead of the category. The gaps are at the new features' 
    Building: `perf/secrets-batch-writes` (measured first; lands only on a measured win).
 8. **Test gaps** (S):
    - demotion, not removal, stopping syncs, #407 bindings, placeholders and schedules;
-   - #357's "one node rotates" with two nodes;
+   - #357's "one node rotates" with two nodes (building: `test/secrets-issuer-two-nodes`, on #357);
    - placeholders' wildcard and alert limits.
 9. **Integration:** previews to embed `proxy::filter` first; MCP's `secrets_audit` (#479); apps' #474
    and search's #361 resolve as the runtime until #407 lands (known).
