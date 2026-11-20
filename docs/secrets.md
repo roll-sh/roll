@@ -5134,11 +5134,14 @@ is still level with or ahead of the category. The gaps are at the new features' 
    staging-only token, and step 2 assumed a project the CLI couldn't make (both fixed here). Still to do:
    - the empty states lack the install line (`lib/install-line.ts`);
    - `secrets-page.tsx:63`'s "no such project" has no link anywhere.
+
+   Building: `feature/roll-secrets-first-hour-2`.
 6. **Workload identities match nested and list claims** (S; building `feature/roll-oidc-claims`):
    `roll-oidc`'s `Jwt::str` reads top-level strings only, so Keycloak's `realm_access.roles` and
    Entra's `groups` can't be matched. Doppler and Vault both take JSON pointers and lists.
 7. **Big changes on Postgres** (performance, M): 9,900 keys in one change took 11.7 s against 0.5 s on
    SQLite, about one round trip per row. Batch the rows in `write.rs` and add the case to `bench`.
+   Building: `perf/secrets-batch-writes` (measured first; lands only on a measured win).
 8. **Test gaps** (S):
    - demotion, not removal, stopping syncs, #407 bindings, placeholders and schedules;
    - #357's "one node rotates" with two nodes;
