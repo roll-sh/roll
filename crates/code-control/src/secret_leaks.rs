@@ -333,6 +333,8 @@ impl Code {
                     (Some("live"), Some(a)) => format!(" (live: its provider accepted it, account {a})"),
                     (Some("live"), None) => " (live: its provider accepted it)".to_string(),
                     (Some("invalid"), _) => " (revoked or invalid, its provider said)".to_string(),
+                    // An AWS key's account, read from the key id: it isn't tried.
+                    (Some("unknown"), Some(a)) => format!(" (account {a}, not tried)"),
                     _ => String::new(),
                 };
                 let rotate = if result == Some("live") { "rotate it, then " } else { "" };

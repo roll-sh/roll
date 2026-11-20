@@ -534,8 +534,9 @@ pub enum Secrets {
     /// How long old values are kept: a number of days, or `forever`.
     Retention { days: String },
     /// Whether credentials found in code (`roll secrets scan`, roll code's notices) are checked
-    /// with their providers (AWS, GitHub, Stripe, Slack, OpenAI, Anthropic): `on` or `off`. An
-    /// admin's; it contacts each credential's provider.
+    /// with their providers (GitHub, Stripe, Slack, OpenAI, Anthropic; roll's own tokens looked
+    /// up; an AWS key's account read from its id): `on` or `off`. An admin's; it contacts each
+    /// credential's provider.
     ValidityChecks {
         #[arg(value_parser = ["on", "off"])]
         state: String,
@@ -2038,6 +2039,8 @@ pub async fn run(api: &Api, json_out: bool, args: AtArgs, cmd: Secrets) -> anyho
                             format!(" LIVE{account}{rotate}")
                         }
                         Some(v) if v["result"] == "invalid" => " (revoked or invalid)".to_string(),
+                        // An AWS key's account, read from the key id: it isn't tried.
+                        Some(v) if v["account"].is_string() => format!(" (account {}, not tried)", v["account"].as_str().unwrap_or_default()),
                         _ => String::new(),
                     };
                     println!("{file}:{}  {}{said}, not in roll secrets: roll secrets scan --store {}={file}:{}  [{}]", cred.line, cred.kind, cred.key, cred.line, cred.fingerprint);

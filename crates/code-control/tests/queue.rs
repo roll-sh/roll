@@ -694,8 +694,9 @@ async fn a_credential_roll_secrets_doesnt_hold_is_a_notice_or_by_roll_toml_a_blo
     assert!(unstored(&v, "blockers").len() == 1 && !v.to_string().contains(&aws), "{v}");
 }
 
-/// roll secrets holding nothing, with validity checks on: an AWS access key id signed with its
-/// secret works (account 123456789012), anything else is refused. Keeps what it was asked about.
+/// roll secrets holding nothing, with validity checks on: the live fixture GitHub token works
+/// (login roll-fixture), an AWS key's account is read from its id without trying it, anything else
+/// is refused. Keeps what it was asked about.
 #[derive(Default)]
 struct CheckingSecrets(std::sync::Mutex<Vec<(String, Option<String>)>>);
 
@@ -714,14 +715,15 @@ impl code_control::SecretEnv for CheckingSecrets {
         self.0.lock().unwrap().extend(found.iter().cloned());
         Ok(found
             .into_iter()
-            .map(|(value, pair)| {
-                let live = value.starts_with("AKIA") && pair.is_some();
+            .map(|(value, _)| {
+                let live = value.contains("RollFixtureLive");
+                let aws = roll_auth::credentials::aws_account(&value);
                 code_control::model::CredentialValidity {
                     fingerprint: roll_auth::credentials::fingerprint(&value),
-                    result: if live { "live" } else { "invalid" }.into(),
-                    account: live.then(|| "123456789012".into()),
+                    result: if live { "live" } else if aws.is_some() { "unknown" } else { "invalid" }.into(),
+                    account: if live { Some("roll-fixture".into()) } else { aws },
                     checked_at: Some(std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as i64),
-                    rotator: live.then(|| "aws-iam".into()),
+                    rotator: live.then(|| "github-app".into()),
                 }
             })
             .collect())
@@ -731,8 +733,10 @@ impl code_control::SecretEnv for CheckingSecrets {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_credential_that_still_works_ranks_first_and_says_live() {
     // Built from pieces: push protection scans this repo.
-    let (aws, secret, gh) = (["AKIA", "ROLLFIXTURE", "23456"].concat(), ["rollFixture", "SecretKey", "0123456789", "abcdefghij"].concat(), ["ghp_", "RollFixtureDeadToken", "0123456789abcdef"].concat());
-    let files = json!({ "deploy.py": { "content": format!("token = \"{gh}\"\naws_access_key_id = \"{aws}\"\naws_secret_access_key = \"{secret}\"\n") } });
+    let (aws, secret) = (["AKIA", "ROLLFIXTURE", "23456"].concat(), ["rollFixture", "SecretKey", "0123456789", "abcdefghij"].concat());
+    let (dead, live) = (["ghp_", "RollFixtureDeadToken", "0123456789abcdef"].concat(), ["ghp_", "RollFixtureLiveToken", "0123456789abcdef"].concat());
+    let account = roll_auth::credentials::aws_account(&aws).unwrap();
+    let files = json!({ "deploy.py": { "content": format!("old = \"{dead}\"\naws_access_key_id = \"{aws}\"\naws_secret_access_key = \"{secret}\"\ntoken = \"{live}\"\n") } });
     let a = queue_app("", Arc::new(QueueRunner::default())).await;
     let checking = Arc::new(CheckingSecrets::default());
     a.code.set_secret_env(checking.clone());
@@ -742,17 +746,18 @@ async fn a_credential_that_still_works_ranks_first_and_says_live() {
     for _ in 0..100 {
         let v = a.ok("GET", &format!("/v1/code/changes/{}", id(&c)), None).await;
         notices = v["notices"].clone();
-        if notices.as_array().is_some_and(|n| n.iter().filter(|b| b["validity"].is_object()).count() == 2) {
+        if notices.as_array().is_some_and(|n| n.iter().filter(|b| b["validity"].is_object()).count() == 3) {
             break;
         }
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
     }
-    assert_eq!(notices[0]["message"], "adds what looks like an AWS access key at deploy.py:2 (live: its provider accepted it, account 123456789012), which roll secrets doesn't hold: rotate it, then store it as AWS_ACCESS_KEY_ID (roll secrets scan --store AWS_ACCESS_KEY_ID=deploy.py:2) and read it with os.environ[\"AWS_ACCESS_KEY_ID\"], or allow it in .roll/secrets-allow", "{notices}");
-    assert_eq!((notices[0]["validity"]["result"].as_str(), notices[0]["validity"]["rotator"].as_str()), (Some("live"), Some("aws-iam")));
+    assert_eq!(notices[0]["message"], "adds what looks like a GitHub token at deploy.py:4 (live: its provider accepted it, account roll-fixture), which roll secrets doesn't hold: rotate it, then store it as GITHUB_TOKEN (roll secrets scan --store GITHUB_TOKEN=deploy.py:4) and read it with os.environ[\"GITHUB_TOKEN\"], or allow it in .roll/secrets-allow", "{notices}");
+    assert_eq!((notices[0]["validity"]["result"].as_str(), notices[0]["validity"]["rotator"].as_str()), (Some("live"), Some("github-app")));
     assert!(notices[1]["message"].as_str().unwrap().starts_with("adds what looks like a GitHub token at deploy.py:1 (revoked or invalid, its provider said)"), "{notices}");
+    assert!(notices[2]["message"].as_str().unwrap().starts_with(&format!("adds what looks like an AWS access key at deploy.py:2 (account {account}, not tried)")), "{notices}");
     // The key id went with the secret next to it, and no value is in what the change shows.
     assert!(checking.0.lock().unwrap().contains(&(aws.clone(), Some(secret.clone()))));
-    assert!(![&aws, &secret, &gh].iter().any(|v| notices.to_string().contains(v.as_str())));
+    assert!(![&aws, &secret, &dead, &live].iter().any(|v| notices.to_string().contains(v.as_str())));
 }
 
 /// roll secrets that can't answer: every lookup fails.

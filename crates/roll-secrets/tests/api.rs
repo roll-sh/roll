@@ -983,6 +983,20 @@ struct Gate {
 }
 
 impl Gate {
+    /// A checksummed token's secret, as roll-access makes them (a decoy, with `decoy`): what
+    /// scanners find.
+    fn checksummed(&self, decoy: bool) -> String {
+        let (short, id) = self.grant("found", roll_secrets::access::rule("p", None, None, &[roll_secrets::Action::Read]), None);
+        let secret = roll_auth::credentials::new_secret("rlt_");
+        let mut tokens = self.tokens.lock().unwrap();
+        let g = tokens.remove(&short).expect("just made");
+        tokens.insert(secret.clone(), g);
+        if decoy {
+            self.decoys.lock().unwrap().insert(id);
+        }
+        secret
+    }
+
     /// A grant's secret and id.
     fn grant(&self, name: &str, rule: roll_auth::scope::Rule, user: Option<&str>) -> (String, String) {
         let mut tokens = self.tokens.lock().unwrap();
@@ -1055,6 +1069,19 @@ impl roll_secrets::Workloads for Gate {
     }
     fn revoke_decoy(&self, id: &str) -> roll_secrets::Result<()> {
         self.revoke(id)
+    }
+    /// By the secret, as roll-access's hash lookup: live, a decoy, or gone.
+    fn token_status(&self, secret: &Secret) -> roll_secrets::Result<Option<roll_secrets::validity::TokenStatus>> {
+        use roll_secrets::validity::TokenStatus;
+        if !secret.expose().starts_with("rlt_") {
+            return Ok(None);
+        }
+        let decoys = self.decoys.lock().unwrap().clone();
+        Ok(Some(match self.tokens.lock().unwrap().get(secret.expose()) {
+            Some(g) if decoys.contains(&*g.id) => TokenStatus::Decoy,
+            Some(_) => TokenStatus::Live,
+            None => TokenStatus::Gone,
+        }))
     }
     /// As `POST /v1/access/tokens`: its owner is whoever's request it is. As roll-access's
     /// `create_grant`, extensions that name no one (no operator marker, person or grant) are
@@ -1924,10 +1951,12 @@ async fn a_stored_value_is_found_by_fingerprint_and_short_values_never_are() {
 async fn validity_checks_ask_each_provider_once_and_only_when_an_admin_turned_them_on() {
     let api = Api::new().await;
     let c = creds();
+    let (roll_live, roll_decoy, roll_gone) = (api.gate.checksummed(false), api.gate.checksummed(true), roll_auth::credentials::new_secret("rlt_"));
     let probe = |v: &str| json!({ "value": v });
     let body = json!({ "credentials": [
         probe(&c.github_live), probe(&c.github_dead), probe(&c.github_moved), { "value": c.aws_id, "pair": c.aws_secret },
         probe(&c.stripe), probe(&c.slack), probe(&c.openai), probe(&c.anthropic), probe("not a credential at all"), probe(&c.github_live),
+        probe(&roll_live), probe(&roll_decoy), probe(&roll_gone),
     ] });
     let asked = || api.sent.9.0.lock().unwrap().clone();
     // Off by default: nothing is asked.
@@ -1946,36 +1975,73 @@ async fn validity_checks_ask_each_provider_once_and_only_when_an_admin_turned_th
     assert_eq!(r(0), ("live", Some("roll-fixture"), Some("github-app")));
     assert_eq!(r(1), ("invalid", None, None));
     assert_eq!(r(2), ("unknown", None, None), "a redirect isn't followed, so nothing is known");
-    assert_eq!(r(3), ("live", Some("123456789012"), Some("aws-iam")), "signed with the pair next to it");
+    // An AWS key isn't tried (STS is what canaries alert on): its account is read from its id.
+    let account = roll_auth::credentials::aws_account(&c.aws_id).unwrap();
+    assert_eq!(r(3), ("unknown", Some(account.as_str()), None));
     assert_eq!([r(4).0, r(5).0, r(6).0, r(7).0], ["live"; 4]);
     assert_eq!(r(5).1, Some("T0ROLLFIX"));
     assert_eq!((r(8).0, v["results"][8]["why"].as_str()), ("unknown", Some("roll can't check this kind of credential")));
     assert_eq!(v["results"][9], v["results"][0], "a repeat is the first one's answer");
-    // One request per credential, to its provider's own host, carrying only the credential.
+    // roll's own tokens are looked up, never used; a decoy reads as one roll doesn't look up.
+    assert_eq!([r(10).0, r(12).0], ["live", "invalid"]);
+    assert_eq!(r(11).0, "unknown", "a found decoy is never reported live");
+    assert!(!v["results"][11].to_string().contains("decoy"));
+    // One request per credential a provider was asked about, to its own host, carrying only the
+    // credential: none to STS.
     let sent = asked();
-    assert_eq!(sent.len(), 8, "{sent:?}");
+    assert_eq!(sent.len(), 7, "{sent:?}");
     for (url, headers) in &sent {
-        let allowed: &[&str] = match url.as_str() {
-            "https://sts.amazonaws.com/" => &["authorization", "x-amz-date"],
-            "https://api.anthropic.com/v1/models" => &["x-api-key", "anthropic-version"],
-            _ => &["authorization", "accept"],
-        };
+        assert_ne!(url, "https://sts.amazonaws.com/");
+        let allowed: &[&str] = if url == "https://api.anthropic.com/v1/models" { &["x-api-key", "anthropic-version"] } else { &["authorization", "accept"] };
         assert!(headers.iter().all(|h| allowed.contains(&h.as_str())), "{url}: {headers:?}");
     }
     // Kept: asking again asks nobody, and the answer is there by fingerprint.
     api.ok(Method::POST, "/validity", Some(body)).await;
-    assert_eq!(asked().len(), 8);
+    assert_eq!(asked().len(), 7);
     let fp = v["results"][0]["fingerprint"].as_str().unwrap();
     let kept = api.ok(Method::GET, &format!("/unstored/{fp}"), None).await;
     assert_eq!((kept["result"].as_str(), kept["kind"].as_str()), (Some("live"), Some("a GitHub token")));
-    // Each check is audited with kind, fingerprint and result, never the value.
+    // Each check is audited with kind, fingerprint and result, never the value; the decoy and the
+    // AWS key asked nobody, so they have none.
     let audit = api.ok(Method::GET, "/audit?action=secrets.validity", None).await;
-    assert_eq!(audit.as_array().unwrap().len(), 8, "{audit}");
+    assert_eq!(audit.as_array().unwrap().len(), 9, "{audit}");
     let text = api.ok(Method::GET, "/audit", None).await.to_string() + &v.to_string();
     assert!(text.contains(fp) && text.contains("a GitHub token") && text.contains("live"));
-    for value in [&c.github_live, &c.aws_id, &c.aws_secret, &c.stripe, &c.slack, &c.openai, &c.anthropic] {
+    for value in [&c.github_live, &c.aws_id, &c.aws_secret, &c.stripe, &c.slack, &c.openai, &c.anthropic, &roll_live, &roll_decoy] {
         assert!(!text.contains(value.as_str()), "a value got out");
     }
+    assert!(!audit.to_string().contains(v["results"][11]["fingerprint"].as_str().unwrap()), "the decoy");
+}
+
+#[tokio::test]
+async fn an_aws_key_is_tried_only_when_the_operator_allows_and_a_canary_never() {
+    let api = Api::new().await;
+    let c = creds();
+    api.ok(Method::PATCH, "", Some(json!({ "validity_checks": "on" }))).await;
+    // A canarytokens.org account's key, with a secret next to it.
+    let canary = fake_aws_key_id(52_310_077_262);
+    let body = json!({ "credentials": [{ "value": canary, "pair": c.aws_secret }, { "value": c.aws_id, "pair": c.aws_secret }, { "value": c.github_live }] });
+    let operator = roll_secrets::validity::Canaries::parse(&format!("github:someone, {}", roll_auth::credentials::fingerprint(&c.github_live))).unwrap();
+    api.secrets.set_validity_settings(roll_secrets::validity::Settings { aws_live: true, canaries: operator });
+    let v = api.ok(Method::POST, "/validity", Some(body)).await;
+    let r = |i: usize| (v["results"][i]["result"].as_str().unwrap(), v["results"][i]["account"].as_str());
+    assert_eq!(r(0), ("unknown", Some("052310077262")));
+    assert!(v["results"][0]["why"].as_str().unwrap().contains("canary"));
+    assert_eq!(r(1), ("live", Some("123456789012")), "signed with the pair next to it");
+    assert_eq!(r(2).0, "unknown", "a fingerprint the operator listed is never tried");
+    // Only the allowed AWS key reached STS, and nothing reached GitHub.
+    let sent: Vec<String> = api.sent.9.0.lock().unwrap().iter().map(|(u, _)| u.clone()).collect();
+    assert_eq!(sent, ["https://sts.amazonaws.com/"]);
+    assert!(roll_secrets::validity::Canaries::parse("aws").is_err() && roll_secrets::validity::Canaries::parse("sha256:short").is_err());
+}
+
+/// An AWS key id carrying `account` (the encoding `aws_account` reads), built here: no real key's
+/// shape is in the repo.
+fn fake_aws_key_id(account: u64) -> String {
+    const ALPHABET: &[u8; 32] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZ234567";
+    let bits = (account << 7) << 2;
+    let head: String = (0..10).rev().map(|i| ALPHABET[((bits >> (i * 5)) & 31) as usize] as char).collect();
+    format!("AKIA{head}ROLLFX")
 }
 
 #[tokio::test]

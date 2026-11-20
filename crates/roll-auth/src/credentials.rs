@@ -248,9 +248,32 @@ fn kind_of(w: &str) -> Option<&'static str> {
     None
 }
 
-/// The kinds whose providers roll secrets' validity checks can ask whether one works (AWS, GitHub,
-/// Stripe, Slack, OpenAI, Anthropic): what callers send it, and nothing else.
-pub const VERIFIABLE: [&str; 6] = ["an AWS access key", "a GitHub token", "a Stripe live key", "a Slack token", "an OpenAI API key", "an Anthropic API key"];
+/// The kinds roll secrets' validity checks can say something about (AWS: its account, read
+/// offline; GitHub, Stripe, Slack, OpenAI, Anthropic: their providers; roll's own tokens: looked up
+/// by hash): what callers send it, and nothing else.
+pub const VERIFIABLE: [&str; 7] = ["an AWS access key", "a GitHub token", "a Stripe live key", "a Slack token", "an OpenAI API key", "an Anthropic API key", ROLL];
+
+/// The AWS account an access key id (`AKIA…`, `ASIA…`) belongs to, read from the id itself with no
+/// request: after the 4-character prefix the id is base32 (RFC 4648), and bits 1–40 of its first
+/// 6 bytes are the account number (Tal Be'ery's note on AWS key ids, "A short note on AWS KEY
+/// ID"). Ids whose fifth character is `I` or `J` predate that encoding and say nothing: `None`.
+pub fn aws_account(key_id: &str) -> Option<String> {
+    const ALPHABET: &[u8; 32] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZ234567";
+    let rest = key_id.strip_prefix("AKIA").or_else(|| key_id.strip_prefix("ASIA"))?;
+    if rest.len() != 16 || rest.starts_with(['I', 'J']) {
+        return None;
+    }
+    let mut bits: u64 = 0;
+    for b in rest.bytes().take(10) {
+        bits = (bits << 5) | ALPHABET.iter().position(|a| *a == b)? as u64;
+    }
+    if !rest.bytes().all(|b| ALPHABET.contains(&b)) {
+        return None;
+    }
+    // 10 characters are 50 bits: the first 48 are the 6 bytes.
+    let z = bits >> 2;
+    Some(format!("{:012}", (z & 0x7fff_ffff_ff80) >> 7))
+}
 
 /// How many lines either side of an AWS access key id [`aws_secret_near`] looks.
 const AWS_PAIR_LINES: usize = 5;
@@ -605,6 +628,26 @@ mod unstored_tests {
         let real_looking = ["AKIA", "ROLLFIXTURE", "23456"].concat();
         assert!(find_all(&real_looking).len() == 1 && !placeholder(&real_looking));
         assert!(!placeholder(&format!("{live}51Hx9Q2aB7cD3eF5gH8jK")));
+    }
+
+    /// An AWS key id carrying `account` (the encoding [`aws_account`] reads), built here: no real
+    /// key's shape is in the repo.
+    pub(crate) fn fake_aws_key_id(account: u64) -> String {
+        const ALPHABET: &[u8; 32] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZ234567";
+        let bits = (account << 7) << 2;
+        let head: String = (0..10).rev().map(|i| ALPHABET[((bits >> (i * 5)) & 31) as usize] as char).collect();
+        format!("AKIA{head}ROLLFX")
+    }
+
+    #[test]
+    fn an_aws_key_ids_account_is_read_from_the_id() {
+        let id = fake_aws_key_id(123_456_789_012);
+        assert_eq!(find_all(&id).first().map(|m| m.kind), Some("an AWS access key"));
+        assert_eq!(aws_account(&id).as_deref(), Some("123456789012"));
+        assert_eq!(aws_account(&fake_aws_key_id(52_310_077_262)).as_deref(), Some("052310077262"), "zero-padded to 12 digits");
+        // Old ids (AKIAI…, AKIAJ…) don't carry it; nor does anything else.
+        assert_eq!(aws_account("AKIAIOSFODNN7EXAMPLE"), None);
+        assert_eq!(aws_account("AKIA0123"), None);
     }
 
     #[test]

@@ -2958,28 +2958,48 @@ live one is handled first. It contacts the provider, so it's off until a project
 on (`PATCH /v1/secrets/projects/{project} {validity_checks: "on"}`, `roll secrets validity-checks
 on`, or Validity checks in the project's environments settings), audited as `validity.checks`.
 
-- **What's checked.** The kinds a provider can be asked about, each with one read-only request
-  that costs nothing, to the provider's own host:
+- **What's checked.** Nothing that would trip a canary. For each kind:
 
-  | Kind | Request | Account it names |
+  | Kind | How | Account it names |
   | --- | --- | --- |
-  | AWS access key | `sts:GetCallerIdentity` to `https://sts.amazonaws.com/`, SigV4-signed with the found pair | the AWS account |
+  | AWS access key | read offline from the key id, never tried (below) | the AWS account |
   | GitHub token | `GET https://api.github.com/user` | the login |
   | Stripe live key | `GET https://api.stripe.com/v1/balance` | |
   | Slack token | `POST https://slack.com/api/auth.test` | the team id |
   | OpenAI API key | `GET https://api.openai.com/v1/models` | |
   | Anthropic API key | `GET https://api.anthropic.com/v1/models` | |
+  | roll's own tokens (`rlt_`, `rlo_`) | looked up by hash in roll-access, never used | |
 
-  An AWS access key id is paired with the secret access key next to it (the nearest 40-character
-  base64 word within 5 lines, `credentials::aws_secret_near`); without one, or for a session's
-  `ASIA…` key (it needs its token), nothing is sent. Google API keys, private keys, database URLs
-  and roll's own tokens aren't checked.
-- **The answer** is `live` (the provider accepted it), `invalid` (refused: revoked, deleted or never
-  real) or `unknown` (not asked, a redirect, a rate limit, an answer that says neither; `why` says
-  which), plus the provider's account id where the answer gives one. A Stripe restricted key the
-  balance read isn't allowed for (403) still authenticated, so it's live; an AWS key id whose found
-  secret doesn't sign for it (`SignatureDoesNotMatch`) is unknown, not invalid.
-- **The rules.** Hosts are fixed in `crates/roll-secrets/src/validity.rs`, never configured; the
+  - **AWS isn't tried by default.** `sts:GetCallerIdentity` is exactly what AWS canary tokens
+    (canarytokens.org's, GitGuardian's) alert on. An access key id carries its account: after the
+    `AKIA`/`ASIA` prefix it's base32, and bits 1–40 of its first 6 bytes are the account number
+    (`credentials::aws_account`; ids whose fifth character is `I` or `J` predate that and say
+    nothing). So the answer is `unknown` with that account, and nobody is asked. An operator who
+    wants AWS keys tried sets `ROLL_SECRETS_VALIDITY_AWS_LIVE=on`. rolld then signs a
+    `GetCallerIdentity` to `https://sts.amazonaws.com/` with the found pair: the secret access key
+    next to the key id, which is the nearest 40-character base64 word within 5 lines
+    (`credentials::aws_secret_near`). It never sends one for an `ASIA…` session key, a key with no
+    pair, or a canary's.
+  - **Canaries.** A key whose account is one canarytokens.org's AWS tokens (and their look-alikes)
+    are issued from is never tried. That's a bundled list of the accounts public secret scanners
+    know. The operator adds their own with `ROLL_SECRETS_VALIDITY_CANARIES` (`aws:123456789012`,
+    any provider's `provider:account`, or a credential by fingerprint, `sha256:…`; commas or spaces
+    between). A canary's answer is `unknown`, saying so.
+  - **roll's own tokens** are never tried: roll-access looks a token's secret or OAuth access token
+    up by its hash, a read that marks nothing used, and answers live or invalid. A decoy
+    ("Decoys") is never reported: finding one is the decoy working. It gets the answer any roll
+    secret roll doesn't look up gets (`unknown`, "roll doesn't look this roll secret up"), so
+    nothing says which keys are decoys, and nothing is kept or audited for it. Other roll secrets
+    (refresh tokens, other products') aren't looked up. A roll token pushed to roll code is revoked
+    when it lands anyway (roll-access's `revoke_leaked`).
+
+  Google API keys, private keys and database URLs aren't checked.
+- **The answer** is `live` (accepted), `invalid` (refused: revoked, deleted or never real) or
+  `unknown` (not tried, a canary, a redirect, a rate limit, or an answer that says neither; `why`
+  says which), plus the account id where it's known. A Stripe restricted key that isn't allowed to
+  read the balance (403) still authenticated, so it's live. With live AWS checks on, a key id whose
+  found secret doesn't sign for it (`SignatureDoesNotMatch`) is unknown, not invalid.
+- **The rules.** Hosts are fixed in `crates/roll-secrets/src/validity.rs`, never configured. The
   request goes through rolld's guarded client (public addresses only, no redirects, a 15-second
   timeout, at most 64 KiB of the answer read) and carries the credential and the headers its API
   needs (`Accept`, Anthropic's `anthropic-version`), nothing else. Each credential is checked once
@@ -2987,7 +3007,9 @@ on`, or Validity checks in the project's environments settings), audited as `val
   gets at most 100 checks an hour. A check is claimed in a write first, so two callers or two nodes
   never ask twice; the request goes out after that write, outside any transaction, and the answer
   is stored with its `secrets.validity` audit row (kind, fingerprint, result and account) in
-  another. The value is never stored, logged, audited or put in an error.
+  another. A roll token's lookup is kept and audited the same way, for an hour and outside the
+  rate limit. An AWS account read offline asks nobody and isn't kept. The value is never stored,
+  logged, audited or put in an error.
 - **Where it shows.** On a change, roll code asks in background work after it finds the
   credentials (only those kinds, only on the repo's own changes, never a fork's, which would make
   the notice an oracle for anyone's key; only when one of the projects with the repo on its canvas
@@ -2996,18 +3018,27 @@ on`, or Validity checks in the project's environments settings), audited as `val
   provider accepted it, account 123456789012), which roll secrets doesn't hold: rotate it, then
   store it as …`; a refused one says `(revoked or invalid, its provider said)`. The notice carries
   `validity: {fingerprint, result, account?, checked_at?, rotator?}`, and the change page marks a
-  live one. `GET …/unstored/{fingerprint}` answers the kept result, and `roll secrets scan` prints
-  it (below).
+  live one. An AWS key's notice names its account: `(account 123456789012, not tried)`.
+  `GET …/unstored/{fingerprint}` answers the kept result, and `roll secrets scan` prints it
+  (below).
 - **Rotating it.** When the credential is live and roll has a rotator for its kind, the answer's
   `rotator` names it and the change page links to where it's set up: `aws-iam` (roll secrets
-  rotating an IAM user's keys, "AWS" above) and `github-app` (a project's GitHub App tokens instead
+  rotating an IAM user's keys, "AWS" above; only with live AWS checks on) and `github-app` (a project's GitHub App tokens instead
   of a personal token, "GitHub App tokens"). Nothing is rotated for you.
-- **Tests.** Fake providers only: `validity_checks_ask_each_provider_once_and_only_when_an_admin_turned_them_on`
-  (`tests/api.rs`: off asks nobody, only an admin turns it on, live, invalid and a redirect's
-  unknown, the pair, one request each carrying only the credential, the cache, the audit rows
-  without a value), `a_credential_that_still_works_ranks_first_and_says_live` (roll code's
-  notice), `a_redirect_is_answered_never_followed` (rolld's guarded client) and the SigV4 and pairing
-  unit tests. No test calls a real provider.
+- **Tests.** Fake providers only:
+  - `validity_checks_ask_each_provider_once_and_only_when_an_admin_turned_them_on`
+    (`tests/api.rs`): off asks nobody; only an admin turns it on; live, invalid and a redirect's
+    unknown; an AWS key's account read with no request; roll tokens live and revoked; a found
+    decoy never live, kept or audited; one request each, carrying only the credential; the cache;
+    the audit rows without a value.
+  - `an_aws_key_is_tried_only_when_the_operator_allows_and_a_canary_never`: with live AWS on, a
+    canary account's key and an operator-listed fingerprint ask nobody, and an allowed key is signed
+    with its pair.
+  - `a_credential_that_still_works_ranks_first_and_says_live` (roll code's notice).
+  - `a_redirect_is_answered_never_followed` (rolld's guarded client).
+  - Unit tests: the key id's account, SigV4 and pairing.
+
+  No test calls a real provider.
 
 #### Keys a change starts reading
 
@@ -3050,8 +3081,9 @@ detectors, placeholder rule and `.roll/secrets-allow`, read from the working tre
 [sha256:…]` (`--json`: `{file, line, unstored: true, kind, fingerprint, suggested_key, validity?}`).
 When the project has validity checks on ("Is it live?" above), the scan asks about the kinds a
 provider can check (`POST …/validity`; nothing is sent while they're off) and a live one is listed
-first: `deploy.ts:2  an AWS access key LIVE, account 123456789012; rotate it (roll can: roll secrets
-aws-users add), not in roll secrets: …`; a refused one says `(revoked or invalid)`. A plain
+first: `config.ts:4  a GitHub token LIVE, account octocat; rotate it (or use a GitHub App's
+short-lived tokens: roll secrets github-apps add), not in roll secrets: …`; a refused one says
+`(revoked or invalid)`, an AWS key `(account 123456789012, not tried)`. A plain
 scan only reports them; `--staged` refuses the commit unless `--allow-unstored`. To move one in:
 
 ```

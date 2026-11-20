@@ -456,6 +456,15 @@ pub fn open(args: &crate::Args, home: &Path, workspace: Arc<roll_workspace::Work
     if let Some(id) = std::env::var("ROLL_SECRETS_AWS_SERVER_ID").ok().filter(|v| !v.trim().is_empty()).or_else(|| args.code_public_url.clone()) {
         secrets.set_aws_server_id(id);
     }
+    // Validity checks (docs/secrets.md, "Is it live?"): AWS keys are tried only when the operator
+    // says so, and never a canary's.
+    let aws_live = match std::env::var("ROLL_SECRETS_VALIDITY_AWS_LIVE").unwrap_or_default().trim() {
+        "" | "0" | "false" | "off" => false,
+        "1" | "true" | "on" => true,
+        v => anyhow::bail!("ROLL_SECRETS_VALIDITY_AWS_LIVE is on or off, not {v:?}"),
+    };
+    let canaries = roll_secrets::validity::Canaries::parse(&std::env::var("ROLL_SECRETS_VALIDITY_CANARIES").unwrap_or_default()).map_err(|e| anyhow::anyhow!("ROLL_SECRETS_VALIDITY_CANARIES: {e}"))?;
+    secrets.set_validity_settings(roll_secrets::validity::Settings { aws_live, canaries });
     tell_decoys(&access, secrets.clone());
     // ACME's http-01 and dns-01 checks: public addresses only, as webhooks.
     secrets.set_acme_checks(Arc::new(acme::Checks::new(allow_private)));
@@ -1445,6 +1454,23 @@ impl roll_secrets::Workloads for Workloads {
             Err(roll_access::Error::Conflict(m) | roll_access::Error::TooMany(m)) => Err(Error::TooMany(m)),
             Err(e) => Err(Error::Internal(format!("minting a decoy token: {e}"))),
         }
+    }
+
+    /// A token's secret or an OAuth access token (`rlt_`, `rlo_`), by its hash: a read, never a
+    /// use (nothing is marked used, no decoy goes off). Other roll secrets (refresh tokens, other
+    /// products') aren't said about.
+    fn token_status(&self, secret: &roll_secrets::Value) -> roll_secrets::Result<Option<roll_secrets::validity::TokenStatus>> {
+        use roll_secrets::validity::TokenStatus;
+        let s = secret.expose();
+        if !(s.starts_with("rlt_") || s.starts_with("rlo_")) || !roll_access::checksum_ok(s) {
+            return Ok(None);
+        }
+        let g = self.0.store.by_secret(s).map_err(|e| Error::Internal(format!("looking a token up: {e}")))?;
+        Ok(Some(match g {
+            Some(g) if g.decoy => TokenStatus::Decoy,
+            Some(_) => TokenStatus::Live,
+            None => TokenStatus::Gone,
+        }))
     }
 
     fn revoke_decoy(&self, id: &str) -> roll_secrets::Result<()> {

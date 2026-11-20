@@ -3,18 +3,29 @@
 //! provider that issued it. Off unless a project's admin turns `validity_checks` on, because it
 //! contacts the provider.
 //!
-//! - **Fixed hosts.** Each kind `roll_auth::credentials` recognises that roll can check has one
-//!   request to one host of its provider, built here from constants: STS's `GetCallerIdentity`
-//!   signed with the found pair, GitHub's `GET /user`, Stripe's `GET /v1/balance`, Slack's
-//!   `auth.test`, OpenAI's and Anthropic's models lists (read-only, free). Nothing chooses the URL;
-//!   requests go through rolld's guarded client ([`Deliver::request`]: HTTPS to public addresses,
-//!   no redirects, a timeout, the answer bounded). The request carries the credential and the
-//!   headers the API needs to read it, nothing else.
+//! - **Nothing trips a canary.** An AWS key is never tried by default: `GetCallerIdentity` is what
+//!   canary tokens (canarytokens.org's, GitGuardian's) alert on. Its account is read from the key
+//!   id offline (`roll_auth::credentials::aws_account`) and the answer is `unknown` with that
+//!   account. Only an operator turns live AWS checks on ([`Settings::aws_live`]), and even then a
+//!   key whose account is a known canary's ([`Canaries`]: a bundled list plus the operator's) is
+//!   never tried. The operator's list can also name any credential by fingerprint.
+//! - **roll's own tokens aren't tried either.** An `rlt_` or `rlo_` is looked up by its hash in
+//!   roll-access ([`crate::Workloads::token_status`]), which says live or revoked without using it.
+//!   A decoy (docs/secrets.md, "Decoys") is never reported: finding one is the decoy working, so its
+//!   answer is the one any roll secret roll can't look up gets, and nothing is kept or audited.
+//! - **Fixed hosts.** The other kinds have one request each to one host of their provider, built
+//!   here from constants: GitHub's `GET /user`, Stripe's `GET /v1/balance`, Slack's `auth.test`,
+//!   OpenAI's and Anthropic's models lists (read-only, free), and with live AWS checks on, STS's
+//!   `GetCallerIdentity` signed with the found pair. Nothing chooses the URL; requests go through
+//!   rolld's guarded client ([`Deliver::request`]: HTTPS to public addresses, no redirects, a
+//!   timeout, the answer bounded). The request carries the credential and the headers the API
+//!   needs to read it, nothing else.
 //! - **Once per credential.** Results are kept per (project, fingerprint) for a day (an `unknown`
 //!   for an hour), and a project gets at most [`PER_HOUR`] checks an hour. A check is claimed in a
 //!   write first (`claimed_at`), so two callers or two nodes never ask twice; the request goes out
 //!   after that write and its answer is stored, with its `secrets.validity` audit row (kind,
-//!   fingerprint, result), in another.
+//!   fingerprint, result), in another. A roll token's lookup is kept and audited the same way (an
+//!   hour, outside the rate limit); an AWS account read offline asks nobody and isn't kept.
 //! - **Never the value.** A credential is a [`Value`] (redacted, zeroized) from the request to the
 //!   provider; it isn't stored, logged, audited or put in an error. Only its fingerprint
 //!   (`roll_auth::credentials::fingerprint`, what the notice and the scan already show) and the
@@ -55,6 +66,68 @@ pub const MAX_PROBES: usize = 200;
 const ANSWER_MAX: usize = 64 * 1024;
 /// How long a caller waits for another's check of the same credential.
 const WAIT_MS: u64 = 20_000;
+
+/// The operator's validity settings (rolld: `ROLL_SECRETS_VALIDITY_AWS_LIVE`,
+/// `ROLL_SECRETS_VALIDITY_CANARIES`).
+#[derive(Clone, Debug, Default)]
+pub struct Settings {
+    /// Try AWS keys with STS (`GetCallerIdentity`). Off: an AWS key's account is read from its id
+    /// and nothing is sent, since that call is what AWS canary tokens alert on.
+    pub aws_live: bool,
+    /// Credentials never tried, beyond the bundled AWS canary accounts.
+    pub canaries: Canaries,
+}
+
+/// AWS accounts canarytokens.org's AWS tokens and their look-alikes are issued from, as public
+/// secret scanners list them: a key of one of these is a canary, and trying it would set it off.
+const AWS_CANARY_ACCOUNTS: [&str; 26] = [
+    "052310077262", "171436882533", "534261010715", "595918472158", "717712589309", "819147034852", "992382622183", "730335385048", "266735846894", "893192397702",
+    "044858866125", "251535659677", "344043088457", "351906852752", "390477818340", "426127672474", "427150556519", "439872796651", "445142720921", "465867158099",
+    "637958123769", "693412236332", "732624840810", "735421457923", "959235150393", "982842642351",
+];
+
+/// Credentials that are someone's canary: never tried. Any provider's accounts
+/// (`aws:123456789012`, `github:<login>`; checked wherever the account is known before asking) and
+/// any credential by its fingerprint (`sha256:…`, as the notice and the scan show it).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Canaries {
+    pub accounts: std::collections::BTreeSet<(String, String)>,
+    pub fingerprints: std::collections::BTreeSet<String>,
+}
+
+impl Canaries {
+    /// `aws:123456789012, sha256:3f7c0a9e1b2d4c6e8f0a1b2c, …` (commas or whitespace between).
+    pub fn parse(spec: &str) -> std::result::Result<Canaries, String> {
+        let mut c = Canaries::default();
+        for entry in spec.split(|ch: char| ch == ',' || ch.is_whitespace()).filter(|e| !e.is_empty()) {
+            match entry.split_once(':') {
+                Some(("sha256", hex)) if hex.len() == 24 && hex.bytes().all(|b| b.is_ascii_hexdigit()) => {
+                    c.fingerprints.insert(format!("sha256:{}", hex.to_ascii_lowercase()));
+                }
+                Some((provider, account)) if !provider.is_empty() && !account.is_empty() && provider != "sha256" && provider.bytes().all(|b| b.is_ascii_lowercase()) => {
+                    c.accounts.insert((provider.to_string(), account.to_string()));
+                }
+                _ => return Err(format!("{entry}: a canary is provider:account (aws:123456789012) or a fingerprint (sha256: and 24 hex digits)")),
+            }
+        }
+        Ok(c)
+    }
+
+    /// Whether `provider`'s `account` is a canary's (the bundled AWS list, or the operator's).
+    pub fn account(&self, provider: &str, account: &str) -> bool {
+        (provider == "aws" && AWS_CANARY_ACCOUNTS.contains(&account)) || self.accounts.contains(&(provider.to_string(), account.to_string()))
+    }
+}
+
+/// What a roll token found in code is, as roll-access says without using it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TokenStatus {
+    Live,
+    /// Revoked, expired, or never roll's.
+    Gone,
+    /// One of roll's decoys: never reported.
+    Decoy,
+}
 
 /// What the provider said.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -139,6 +212,8 @@ enum Checker {
     Slack,
     OpenAi,
     Anthropic,
+    /// roll's own tokens: looked up, never used.
+    Roll,
 }
 
 impl Checker {
@@ -151,6 +226,7 @@ impl Checker {
             "a Slack token" => Checker::Slack,
             "an OpenAI API key" => Checker::OpenAi,
             "an Anthropic API key" => Checker::Anthropic,
+            "a roll token" => Checker::Roll,
             _ => return None,
         })
     }
@@ -185,6 +261,7 @@ fn ask(deliver: &dyn Deliver, checker: Checker, secret: &Value, pair: Option<&Va
     let bearer = Value::new(format!("Bearer {}", secret.expose()));
     let json_accept = Value::new("application/json");
     let (method, url, headers, body): Call = match checker {
+        Checker::Roll => return unknown("roll's own tokens are looked up, never tried"),
         Checker::Aws => {
             let Some(pair) = pair else { return unknown("no secret access key next to it to sign with") };
             let (auth, date) = sigv4_get_caller_identity(secret.expose(), pair.expose(), now);
@@ -263,6 +340,27 @@ fn sigv4_get_caller_identity(key_id: &str, secret: &str, now: time::OffsetDateTi
     (Value::new(format!("AWS4-HMAC-SHA256 Credential={key_id}/{scope}, SignedHeaders={signed}, Signature={sig}")), amz)
 }
 
+/// Why a roll secret has no answer: the same words for a decoy and for what roll-access can't look
+/// up without using it, so the answer never says which keys are decoys.
+const NOT_LOOKED_UP: &str = "roll doesn't look this roll secret up";
+
+/// How long an answer counts: a day, an hour for `unknown` ones and for roll's own tokens (a
+/// revoke there should show soon).
+fn ttl(kind: &str, result: Validity) -> i64 {
+    if result == Validity::Unknown || kind == "a roll token" { UNKNOWN_TTL_MS } else { TTL_MS }
+}
+
+/// What to do about one credential, decided before anything is claimed.
+enum Plan {
+    /// Answered now and not kept: nobody was asked (not checkable, an AWS account read offline, a
+    /// canary, a decoy).
+    Now(Checked),
+    /// Answered here without asking a provider (a roll token's lookup): kept and audited.
+    Here(Answer),
+    /// Asked of its provider, once claimed.
+    Ask,
+}
+
 /// What a claim found for one credential.
 enum Claim {
     /// A fresh answer is kept.
@@ -332,31 +430,25 @@ impl Secrets {
                 (roll_auth::credentials::fingerprint(v), kind)
             })
             .collect();
+        let now = self.db.now_ms()?;
         let mut out: Vec<Option<Checked>> = vec![None; probes.len()];
-        // The ones to ask about, once per fingerprint.
-        let mut ask_for: Vec<usize> = Vec::new();
+        // The ones to claim, once per fingerprint, with what was found here for them.
+        let mut claim_for: Vec<(usize, Option<Answer>)> = Vec::new();
         let mut seen: HashMap<&str, usize> = HashMap::new();
         for (i, (fp, kind)) in found.iter().enumerate() {
-            let why = match Checker::of(kind) {
-                None => Some("roll can't check this kind of credential"),
-                Some(Checker::Aws) if probes[i].value.expose().starts_with("ASIA") => Some("a session's key needs its session token"),
-                Some(Checker::Aws) if probes[i].pair.is_none() => Some("no secret access key next to it to sign with"),
-                Some(_) if self.deliver.is_none() => Some("calling out isn't on this server"),
-                Some(_) => None,
-            };
-            match why {
-                Some(why) => out[i] = Some(Checked::unknown(fp.clone(), kind, why)),
-                None if seen.contains_key(fp.as_str()) => {}
-                None => {
-                    seen.insert(fp, i);
-                    ask_for.push(i);
-                }
+            if seen.contains_key(fp.as_str()) {
+                continue;
+            }
+            seen.insert(fp, i);
+            match self.plan(fp, kind, &probes[i], now) {
+                Plan::Now(c) => out[i] = Some(c),
+                Plan::Here(a) => claim_for.push((i, Some(a))),
+                Plan::Ask => claim_for.push((i, None)),
             }
         }
-        let now = self.db.now_ms()?;
-        let claims = self.claim(project, &ask_for.iter().map(|&i| (found[i].0.as_str(), found[i].1)).collect::<Vec<_>>(), now)?;
+        let claims = self.claim(project, &claim_for.iter().map(|(i, here)| (found[*i].0.as_str(), found[*i].1, here.is_none())).collect::<Vec<_>>(), now)?;
         let mut waiting = Vec::new();
-        for (&i, claim) in ask_for.iter().zip(claims) {
+        for ((i, here), claim) in claim_for.into_iter().zip(claims) {
             let (fp, kind) = (&found[i].0, found[i].1);
             out[i] = match claim {
                 Claim::Kept(c) => Some(c),
@@ -366,12 +458,19 @@ impl Secrets {
                     None
                 }
                 Claim::Mine => {
-                    let deliver = self.deliver.as_deref().expect("checked above");
-                    let checker = Checker::of(kind).expect("checked above");
-                    // Outside any transaction: the claim's write is done.
-                    let (result, account, why) = ask(deliver, checker, &probes[i].value, probes[i].pair.as_ref(), time::OffsetDateTime::now_utc());
+                    let asked = here.is_none();
+                    let (result, account, why) = match here {
+                        Some(a) => a,
+                        None => {
+                            let deliver = self.deliver.as_deref().expect("planned with one");
+                            let checker = Checker::of(kind).expect("planned for a kind roll checks");
+                            // Outside any transaction: the claim's write is done.
+                            ask(deliver, checker, &probes[i].value, probes[i].pair.as_ref(), time::OffsetDateTime::now_utc())
+                        }
+                    };
                     let at = self.db.now_ms()?;
-                    let summary = format!("checked {kind} {fp} with its provider: {}{}", result.as_str(), account.as_ref().map(|a| format!(" (account {a})")).unwrap_or_default());
+                    let how = if asked { "with its provider" } else { "without using it" };
+                    let summary = format!("checked {kind} {fp} {how}: {}{}", result.as_str(), account.as_ref().map(|a| format!(" (account {a})")).unwrap_or_default());
                     self.db.write(|c| {
                         c.execute("UPDATE validity SET result = ?, account = ?, checked_at = ?, why = ? WHERE project_id = ? AND fingerprint = ?", params![result.as_str(), account, at, why, project, fp])?;
                         audit::record(c, self.keys()?, project, caller, "secrets.validity", None, None, &[], &summary, at)
@@ -403,17 +502,64 @@ impl Secrets {
         Ok(Some(out.into_iter().zip(firsts).map(|(c, first)| c.or(first).expect("every credential answered")).collect()))
     }
 
+    /// What to do about one credential (see [`Plan`]): only reads, no provider is asked.
+    fn plan(&self, fp: &str, kind: &str, probe: &Probe, now: i64) -> Plan {
+        let settings = self.validity.read().unwrap_or_else(|e| e.into_inner()).clone();
+        let now_unknown = |account: Option<String>, why: &str| Plan::Now(Checked::answered(fp.to_string(), kind, Validity::Unknown, account, now, Some(why.into())));
+        let Some(checker) = Checker::of(kind) else { return Plan::Now(Checked::unknown(fp.to_string(), kind, "roll can't check this kind of credential")) };
+        if settings.canaries.fingerprints.contains(fp) {
+            return now_unknown(None, "a canary the operator listed: never tried");
+        }
+        match checker {
+            Checker::Roll => {
+                let status = self.workloads.as_ref().map(|w| w.token_status(&probe.value));
+                match status {
+                    Some(Ok(Some(TokenStatus::Live))) => Plan::Here((Validity::Live, None, None)),
+                    Some(Ok(Some(TokenStatus::Gone))) => Plan::Here((Validity::Invalid, None, None)),
+                    // A decoy reads as any roll secret roll can't look up: nothing says it's one.
+                    Some(Ok(Some(TokenStatus::Decoy) | None)) => now_unknown(None, NOT_LOOKED_UP),
+                    Some(Err(_)) => now_unknown(None, "roll-access didn't answer"),
+                    None => now_unknown(None, NOT_LOOKED_UP),
+                }
+            }
+            Checker::Aws => {
+                let id = probe.value.expose();
+                let account = roll_auth::credentials::aws_account(id);
+                if account.as_deref().is_some_and(|a| settings.canaries.account("aws", a)) {
+                    now_unknown(account, "a known canary token's account: never tried")
+                } else if !settings.aws_live {
+                    now_unknown(account, "AWS keys aren't tried (that call is what AWS canary tokens alert on): the account is read from the key id")
+                } else if id.starts_with("ASIA") {
+                    now_unknown(account, "a session's key needs its session token")
+                } else if probe.pair.is_none() {
+                    now_unknown(account, "no secret access key next to it to sign with")
+                } else if self.deliver.is_none() {
+                    now_unknown(account, "calling out isn't on this server")
+                } else {
+                    Plan::Ask
+                }
+            }
+            _ if self.deliver.is_none() => now_unknown(None, "calling out isn't on this server"),
+            _ => Plan::Ask,
+        }
+    }
+
+    /// The operator's validity settings: whether AWS keys are tried, and the canaries.
+    pub fn set_validity_settings(&self, s: Settings) {
+        *self.validity.write().unwrap_or_else(|e| e.into_inner()) = s;
+    }
+
     /// Claim each credential's check in one write: a fresh answer is kept, a recent claim is
     /// another caller's, and past [`PER_HOUR`] claims this hour nothing more is asked. Only touches
     /// the database (the closure may run again).
-    fn claim(&self, project: &str, items: &[(&str, &str)], now: i64) -> Result<Vec<Claim>> {
+    fn claim(&self, project: &str, items: &[(&str, &str, bool)], now: i64) -> Result<Vec<Claim>> {
         if items.is_empty() {
             return Ok(Vec::new());
         }
         self.db.write(|c| {
             let mut used: i64 = c.query_row("SELECT COUNT(*) FROM validity WHERE project_id = ? AND claimed_at > ?", params![project, now - 3_600_000], |r| r.get(0))?;
             let mut out = Vec::with_capacity(items.len());
-            for &(fp, kind) in items {
+            for &(fp, kind, counts) in items {
                 let row = c
                     .query_row("SELECT result, account, checked_at, claimed_at, why FROM validity WHERE project_id = ? AND fingerprint = ?", params![project, fp], |r| {
                         Ok((r.get::<_, Option<String>>(0)?, r.get::<_, Option<String>>(1)?, r.get::<_, Option<i64>>(2)?, r.get::<_, i64>(3)?, r.get::<_, Option<String>>(4)?))
@@ -421,8 +567,7 @@ impl Secrets {
                     .optional()?;
                 if let Some((result, account, checked_at, claimed_at, why)) = row {
                     if let (Some(result), Some(at)) = (result.as_deref().map(Validity::parse), checked_at) {
-                        let ttl = if result == Validity::Unknown { UNKNOWN_TTL_MS } else { TTL_MS };
-                        if now - at < ttl {
+                        if now - at < ttl(kind, result) {
                             out.push(Claim::Kept(Checked::answered(fp.to_string(), kind, result, account, at, why)));
                             continue;
                         }
@@ -431,15 +576,17 @@ impl Secrets {
                         continue;
                     }
                 }
-                if used >= PER_HOUR {
+                // A lookup here (counts: false) asks no provider: outside the limit, and its claim
+                // (claimed_at 0) isn't counted.
+                if counts && used >= PER_HOUR {
                     out.push(Claim::Limited);
                     continue;
                 }
-                used += 1;
+                used += counts as i64;
                 c.execute(
                     "INSERT INTO validity (project_id, fingerprint, kind, result, account, checked_at, claimed_at) VALUES (?, ?, ?, NULL, NULL, NULL, ?)
                      ON CONFLICT (project_id, fingerprint) DO UPDATE SET kind = excluded.kind, result = NULL, account = NULL, checked_at = NULL, why = NULL, claimed_at = excluded.claimed_at",
-                    params![project, fp, kind, now],
+                    params![project, fp, kind, if counts { now } else { 0 }],
                 )?;
                 out.push(Claim::Mine);
             }
