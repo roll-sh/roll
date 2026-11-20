@@ -927,11 +927,12 @@ impl Secrets {
     /// (`if_version`: the key moved since it was read, so the change is refused as `stale`).
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn commit_with(&self, project: &str, env_slug: &str, items: Vec<Item>, expect: &[(usize, i64)], kind: &str, message: &str, if_seq: Option<i64>, force: bool, caller: &Caller) -> Result<Applied> {
-        self.commit_then(project, env_slug, items, expect, kind, message, if_seq, force, caller, &|_, _, _| Ok(()))
+        self.commit_then(project, env_slug, items, expect, kind, message, if_seq, force, caller, &|_, _, _, _| Ok(()))
     }
 
     /// [`Self::commit_with`], running `then` in the change's own transaction after it's applied
-    /// (a decoy's mark). Inside the write: only the database.
+    /// (a decoy's mark; a secret request's answer, claimed there so the answer and its change
+    /// happen together or not at all). Inside the write, which may retry: only the database.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn commit_then(
         &self,
@@ -944,7 +945,7 @@ impl Secrets {
         if_seq: Option<i64>,
         force: bool,
         caller: &Caller,
-        then: &dyn Fn(&Conn<'_>, &EnvRow, i64) -> Result<()>,
+        then: &dyn Fn(&Conn<'_>, &EnvRow, &Change, i64) -> Result<()>,
     ) -> Result<Applied> {
         let warnings = self.warnings(project, env_slug, &items, caller);
         // A rollback restores what was there, typed or not.
@@ -974,7 +975,7 @@ impl Secrets {
                 return Err(Error::Conflict("stale", format!("{} changed after #{s}", env.slug)));
             }
             let applied = apply(c, &dek, self.keys()?, &env, &prepared.items, kind, message, caller, now)?;
-            then(c, &env, now)?;
+            then(c, &env, &applied.0, now)?;
             Ok(applied)
         });
         match res {

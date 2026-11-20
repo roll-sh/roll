@@ -4,15 +4,18 @@
 //!
 //! An `rlt` decoy is a roll-access decoy token ([`crate::Workloads::mint_decoy`]): roll-access
 //! answers its use as it answers an unknown token, tells its owner and the admins, and tells roll
-//! secrets ([`Secrets::decoy_used`]). Changing or deleting the key ends the decoy: the write marks
-//! it ended in its own transaction, and its token is revoked after the write
-//! ([`Secrets::end_decoys`]; the sweeper retries what fails).
+//! secrets ([`Secrets::decoy_used`]). A `postgres` decoy is a role of the database's
+//! ([`crate::LinkProvider::plant_decoy`]): roll Postgres' proxy refuses its logins as Postgres
+//! refuses a wrong password, without waking a compute, and tells roll secrets the same way.
+//! Changing or deleting the key ends the decoy: the write marks it ended in its own transaction,
+//! and its token or role goes after the write ([`Secrets::end_decoys`]; the sweeper retries what
+//! fails).
 
 use crate::access::{Action, Caller, Scope};
-use crate::caller::Maker;
+use crate::caller::Origin;
 use crate::envs;
 use crate::write::{Item, ItemAction, SecretType, current};
-use crate::{Error, Result, Secret, Secrets, Value, audit, names};
+use crate::{Error, Planted, Result, Secret, Secrets, Value, audit, names};
 use code_sql::{OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -56,10 +59,14 @@ pub(crate) const ADMIN_ACTIONS: [&str; 2] = ["secrets.decoy", "secrets.alert.dec
 #[serde(deny_unknown_fields)]
 pub struct NewDecoy {
     pub key: String,
-    /// `rlt`: a roll-access token. (`postgres` and `aws` aren't here yet.)
+    /// `rlt`: a roll-access token; `postgres`: a role of `resource`, a roll Postgres database.
+    /// (`aws` isn't here.)
     pub kind: String,
     #[serde(default)]
     pub path: Option<String>,
+    /// The database a `postgres` decoy's role is made in (on the project's canvas).
+    #[serde(default)]
+    pub resource: Option<String>,
 }
 
 /// That a key is a decoy, on [`Secret::decoy`] for the project's admins only.
@@ -98,13 +105,13 @@ impl Secrets {
         caller.need(Action::Admin, &Scope::whole(project))?;
         let path = names::path(n.path.as_deref().unwrap_or("/"))?;
         names::key(&n.key)?;
-        match n.kind.as_str() {
-            "rlt" => {}
-            "postgres" => return Err(Error::BadRequest("postgres decoys aren't here yet (roll Postgres doesn't report a role's logins): use rlt".into())),
-            "aws" => return Err(Error::BadRequest("aws decoys aren't here: they need an AWS account and CloudTrail. Use rlt".into())),
-            other => return Err(Error::BadRequest(format!("kind is rlt, not {other:?}"))),
+        match (n.kind.as_str(), &n.resource) {
+            ("rlt", None) | ("postgres", Some(_)) => {}
+            ("rlt", Some(_)) => return Err(Error::BadRequest("an rlt decoy has no resource".into())),
+            ("postgres", None) => return Err(Error::BadRequest("a postgres decoy names its database: resource".into())),
+            ("aws", _) => return Err(Error::BadRequest("aws decoys aren't here: they need an AWS account and CloudTrail. Use rlt or postgres".into())),
+            (other, _) => return Err(Error::BadRequest(format!("kind is rlt or postgres, not {other:?}"))),
         }
-        let workloads = self.workloads.clone().ok_or_else(|| Error::BadRequest("decoys aren't on this server".into()))?;
         self.project(project)?;
         let exists = self.db.read(|c| {
             let e = envs::by_slug(c, project, env)?;
@@ -115,39 +122,54 @@ impl Secrets {
         }
         // Whose it is: they're mailed when it's used, as the admins are.
         let owner = match self.maker(&caller.principal)? {
-            Maker::Person(u) => Some(u),
-            Maker::Operator => None,
-            Maker::Gone => return Err(Error::Forbidden("whoever made this token can't make decoys any more".into())),
+            Origin::Person(u) => Some(u),
+            Origin::Operator => None,
+            Origin::Gone => return Err(Error::Forbidden("whoever made this token can't make decoys any more".into())),
         };
-        let name: String = format!("secrets decoy {} in {env}", n.key).chars().take(64).collect();
-        let rule = crate::access::rule(project, Some(vec![env.to_string()]), Some(vec![path.clone()]), &[Action::Read, Action::Reveal]);
-        let minted = workloads.mint_decoy(&name, rule, owner.as_deref())?;
-        let item = Item { path: path.clone(), key: n.key.clone(), owner: String::new(), action: ItemAction::set_value(Value::new(minted.secret)) };
-        let (key, kind, grant, by) = (n.key.clone(), n.kind.clone(), minted.id.clone(), caller.principal.clone());
+        let planted = match &n.resource {
+            None => {
+                let workloads = self.workloads.clone().ok_or_else(|| Error::BadRequest("decoys aren't on this server".into()))?;
+                let name: String = format!("secrets decoy {} in {env}", n.key).chars().take(64).collect();
+                let rule = crate::access::rule(project, Some(vec![env.to_string()]), Some(vec![path.clone()]), &[Action::Read, Action::Reveal]);
+                let minted = workloads.mint_decoy(&name, rule, owner.as_deref())?;
+                Planted { value: Value::new(minted.secret), handle: minted.id }
+            }
+            // A database the project may reach, as a link's.
+            Some(db) => {
+                if !self.members(project)?.contains(&(n.kind.clone(), db.clone())) {
+                    return Err(Error::BadRequest(self.not_linkable(project, &n.kind, db)));
+                }
+                self.links.get(&n.kind)?.plant_decoy(db)?
+            }
+        };
+        let item = Item { path: path.clone(), key: n.key.clone(), owner: String::new(), action: ItemAction::set_value(planted.value) };
+        let (key, kind, handle, by) = (n.key.clone(), n.kind.clone(), planted.handle, caller.principal.clone());
         // `if_version` 0: only while the key doesn't exist. The decoy's row in the change's own
         // transaction: never a decoy key without its mark.
-        let written = self.commit_then(project, env, vec![item], &[(0, 0)], "write", "", None, true, caller, &|c, e, now| {
+        let written = self.commit_then(project, env, vec![item], &[(0, 0)], "write", "", None, true, caller, &|c, e, _, now| {
             let id = current(c, &e.id, &path, &key, "")?.ok_or_else(|| Error::Internal(format!("{key} wasn't written")))?.id;
             c.execute(
                 "INSERT INTO decoys (id, project_id, env_id, secret_id, path, key, kind, ref, created_by, created_at, uses) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)",
-                params![names::new_id("dcy", 16), project, e.id, id, path, key, kind, grant, by, now],
+                params![names::new_id("dcy", 16), project, e.id, id, path, key, kind, handle, by, now],
             )?;
             audit::record(c, self.keys()?, project, caller, "secrets.decoy", Some(&e.slug), Some(&path), std::slice::from_ref(&key), &format!("planted decoy {key} ({kind})"), now)
         });
         if let Err(e) = written {
-            if let Err(r) = workloads.revoke_decoy(&minted.id) {
-                tracing::warn!(grant = %minted.id, "revoking a decoy whose key wasn't written failed: {r}");
+            if let Err(r) = self.remove_decoy(&n.kind, &handle) {
+                tracing::warn!(kind = %n.kind, "removing a decoy whose key wasn't written failed: {r}");
             }
             return Err(e);
         }
         self.secret(project, env, &path, &n.key, Some(SecretType::Shared), caller)
     }
 
-    /// Roll-access says decoy token `grant` was used, from `ip`, calling `route`. If it's a decoy
-    /// key's, the use is counted and, once an hour per decoy, `decoy_used` is raised: an audit row
-    /// (the environment's activity, audit sinks) and a notice to the environment's notify URL.
-    /// Names, the address and the route, never a value. Whether it was a decoy key's.
-    pub fn decoy_used(&self, grant: &str, ip: Option<&str>, route: &str) -> Result<bool> {
+    /// A decoy credential of `kind` was used, from `ip`, calling `route`: roll-access's decoy token
+    /// `handle` (`rlt`), or the role a product's [`crate::LinkProvider::plant_decoy`] named
+    /// `handle`. If it's a decoy key's, the use is counted and, once an hour per decoy,
+    /// `decoy_used` is raised: an audit row (the environment's activity, audit sinks) and a notice
+    /// to the environment's notify URL. Names, the address and the route, never a value. Whether
+    /// it was a decoy key's.
+    pub fn decoy_used(&self, kind: &str, handle: &str, ip: Option<&str>, route: &str) -> Result<bool> {
         let now = self.db.now_ms()?;
         let ip: Option<String> = ip.map(|i| i.chars().filter(|c| !c.is_control()).take(64).collect());
         let route: String = route.chars().filter(|c| !c.is_control()).take(200).collect();
@@ -156,8 +178,8 @@ impl Secrets {
             type Row = (String, String, String, String, String, Option<i64>);
             let row: Option<Row> = c
                 .query_row(
-                    "SELECT d.id, d.project_id, d.env_id, d.path, d.key, d.alerted_at FROM decoys d JOIN projects p ON p.project_id = d.project_id WHERE d.kind = 'rlt' AND d.ref = ? AND p.forgotten_at IS NULL",
-                    [grant],
+                    "SELECT d.id, d.project_id, d.env_id, d.path, d.key, d.alerted_at FROM decoys d JOIN projects p ON p.project_id = d.project_id WHERE d.kind = ? AND d.ref = ? AND p.forgotten_at IS NULL",
+                    [kind, handle],
                     |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?)),
                 )
                 .optional()?;
@@ -191,21 +213,20 @@ impl Secrets {
         })
     }
 
-    /// Revoke the tokens of decoys whose keys were changed or deleted (outside the write that
-    /// ended them: roll-access is another store). Keys gone another way (their environment or
-    /// folder deleted, the project forgotten) end here too. Returns how many were revoked.
+    /// Revoke the tokens, or drop the roles, of decoys whose keys were changed or deleted
+    /// (outside the write that ended them: they're another store's). Keys gone another way (their
+    /// environment or folder deleted, the project forgotten) end here too. Returns how many went.
     pub(crate) fn end_decoys(&self) -> Result<usize> {
         let now = self.db.now_ms()?;
-        let due: Vec<(String, String)> = self.db.write(|c| {
+        let due: Vec<(String, String, String)> = self.db.write(|c| {
             c.execute("UPDATE decoys SET ended_at = ? WHERE ended_at IS NULL AND NOT EXISTS (SELECT 1 FROM secrets s WHERE s.id = decoys.secret_id)", [now])?;
             // A forgotten project's, once revoked, go.
             c.execute("DELETE FROM decoys WHERE revoked_at IS NOT NULL AND NOT EXISTS (SELECT 1 FROM projects p WHERE p.project_id = decoys.project_id AND p.forgotten_at IS NULL)", ())?;
-            c.query("SELECT id, ref FROM decoys WHERE revoked_at IS NULL AND ended_at IS NOT NULL ORDER BY ended_at LIMIT 100", (), |r| Ok((r.get(0)?, r.get(1)?)))
+            c.query("SELECT id, kind, ref FROM decoys WHERE revoked_at IS NULL AND ended_at IS NOT NULL ORDER BY ended_at LIMIT 100", (), |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
         })?;
-        let Some(workloads) = self.workloads.clone() else { return Ok(0) };
         let mut revoked = 0;
-        for (id, grant) in due {
-            let res = workloads.revoke_decoy(&grant);
+        for (id, kind, handle) in due {
+            let res = self.remove_decoy(&kind, &handle);
             let now = self.db.now_ms()?;
             match res {
                 Ok(()) => {
@@ -213,13 +234,24 @@ impl Secrets {
                     self.db.write(|c| c.execute("UPDATE decoys SET revoked_at = ?, revoke_error = NULL WHERE id = ?", params![now, id]))?;
                 }
                 Err(e) => {
-                    tracing::warn!(decoy = %id, grant = %grant, "revoking an ended decoy's token failed: {e}");
+                    tracing::warn!(decoy = %id, %kind, handle = %handle, "removing an ended decoy failed: {e}");
                     let why: String = e.to_string().chars().take(300).collect();
                     self.db.write(|c| c.execute("UPDATE decoys SET revoke_error = ? WHERE id = ?", params![why, id]))?;
                 }
             }
         }
         Ok(revoked)
+    }
+
+    /// End one decoy at its product: roll-access's token, or what a link provider planted.
+    fn remove_decoy(&self, kind: &str, handle: &str) -> Result<()> {
+        match kind {
+            "rlt" => match &self.workloads {
+                Some(w) => w.revoke_decoy(handle),
+                None => Err(Error::Unavailable("decoys aren't on this server".into())),
+            },
+            _ => self.links.get(kind)?.remove_decoy(handle),
+        }
     }
 
     /// The project's live decoys by secret id, for its admins' listings.

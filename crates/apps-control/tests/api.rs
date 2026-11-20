@@ -441,6 +441,70 @@ async fn traces_sent_by_instances_read_back() {
 /// Web Vitals: turned on, an environment's pages carry roll's tag and its script is served from
 /// its own host; the browser's beacons are kept checked (a route, bounded numbers) and read back
 /// as p75s rated by web.dev's thresholds, overall and by route; turned off, nothing is tagged.
+/// Runtime config (Vercel's Edge Config): an environment's values, read by its instances at
+/// `ROLL_CONFIG_URL` (a token URL, sealed) and changed without a deploy; a long poll waits for the
+/// next version; a wrong token reads nothing.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn runtime_config_changes_without_a_deploy() {
+    let w = world().await;
+    let (svc, _) = image_service(&w, "web", json!({"port": 80})).await;
+    let id = svc["id"].as_str().unwrap().to_string();
+    let base = format!("/v1/apps/services/{id}/environments/production");
+    assert_eq!(call(&w.api, "PUT", &base, Some(json!({"config": {"bad key": 1}}))).await.0, StatusCode::BAD_REQUEST);
+    let (st, e) = call(&w.api, "PUT", &base, Some(json!({"config": {"new_checkout": true, "banner": "Sale"}}))).await;
+    assert_eq!((st, &e["config"]["banner"], &e["config_version"]), (StatusCode::OK, &json!("Sale"), &json!(1)), "{e}");
+    // A deploy gives its instances the address (once; never again for a change).
+    call(&w.api, "PATCH", &format!("{base}/variables"), Some(json!({"set": {"FAKE_ECHO": "ROLL_CONFIG_URL"}}))).await;
+    let (_, d) = call(&w.api, "POST", &format!("{base}/redeploy"), Some(json!({}))).await;
+    let d = settled(&w, &id, "production", d["id"].as_str().unwrap()).await;
+    let (_, body) = visit_deployment(&w, &host(&svc["environments"][0]["url"]), d["id"].as_str().unwrap()).await;
+    let url = body["vars"]["ROLL_CONFIG_URL"].as_str().unwrap_or_else(|| panic!("{body}")).to_string();
+    assert!(!call(&w.api, "GET", &format!("{base}/variables"), None).await.1.to_string().contains(&url), "sealed");
+    let path = url.trim_start_matches("http://127.0.0.1:7070").to_string();
+    let read = |path: String, etag: Option<&'static str>| {
+        let public = w.public.clone();
+        async move {
+            let mut b = Request::builder().uri(path);
+            if let Some(t) = etag {
+                b = b.header("if-none-match", t);
+            }
+            let resp = public.oneshot(b.body(Body::empty()).unwrap()).await.unwrap();
+            let st = resp.status();
+            (st, serde_json::from_slice::<Value>(&resp.into_body().collect().await.unwrap().to_bytes()).unwrap_or(Value::Null))
+        }
+    };
+    let (st, v) = read(path.clone(), None).await;
+    assert_eq!((st, &v["config"]["new_checkout"], &v["version"]), (StatusCode::OK, &json!(true), &json!(1)), "{v}");
+    assert_eq!(read(path.clone(), Some("\"1\"")).await.0, StatusCode::NOT_MODIFIED, "nothing new");
+    // A change, no deploy: a long poll at version 1 gets version 2.
+    let waiting = tokio::spawn(read(format!("{path}?wait=10"), Some("\"1\"")));
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    call(&w.api, "PUT", &base, Some(json!({"config": {"new_checkout": false}}))).await;
+    let (st, v) = waiting.await.unwrap();
+    assert_eq!((st, &v["config"]["new_checkout"], &v["version"]), (StatusCode::OK, &json!(false), &json!(2)), "{v}");
+    let wrong = format!("{}xx", path);
+    assert_eq!(read(wrong, None).await.0, StatusCode::NOT_FOUND);
+    // Emptied, the same address answers (running instances keep it), with nothing in it.
+    call(&w.api, "PUT", &base, Some(json!({"config": null}))).await;
+    let (st, v) = read(path.clone(), None).await;
+    assert_eq!((st, &v["config"], &v["version"]), (StatusCode::OK, &Value::Null, &json!(3)), "{v}");
+    // Rotated (a leaked address): the old one still reads while the instances started with it
+    // run, and only the new one once a deploy made after the rotation is live.
+    let (st, e) = call(&w.api, "POST", &format!("{base}/config/rotate"), None).await;
+    assert!(st == StatusCode::OK && e["config_rotated_at"].is_i64(), "{e}");
+    assert_eq!(read(path.clone(), None).await.0, StatusCode::OK, "its instances still run with it");
+    assert_eq!(call(&w.api, "POST", &format!("{base}/config/rotate"), None).await.0, StatusCode::CONFLICT, "not twice before a deploy");
+    let (_, d) = call(&w.api, "POST", &format!("{base}/redeploy"), Some(json!({}))).await;
+    let d = settled(&w, &id, "production", d["id"].as_str().unwrap()).await;
+    let (_, body) = visit_deployment(&w, &host(&svc["environments"][0]["url"]), d["id"].as_str().unwrap()).await;
+    let new = body["vars"]["ROLL_CONFIG_URL"].as_str().unwrap().trim_start_matches("http://127.0.0.1:7070").to_string();
+    assert_ne!(new, path);
+    assert_eq!((read(new.clone(), None).await.0, read(path, None).await.0), (StatusCode::OK, StatusCode::NOT_FOUND));
+    // A deleted service's (kept for a restore) answers nothing.
+    assert_eq!(call(&w.api, "DELETE", &format!("/v1/apps/services/{id}"), None).await.0, StatusCode::NO_CONTENT);
+    assert_eq!(read(new, None).await.0, StatusCode::NOT_FOUND);
+}
+
 /// Snippets (Netlify's snippet injection): an environment's own HTML before `</head>` and
 /// before `</body>` of every page, never in what isn't one; bounded.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -450,8 +514,9 @@ async fn an_environments_snippets_go_in_every_page() {
     let id = svc["id"].as_str().unwrap().to_string();
     let h = host(&svc["environments"][0]["url"]);
     let env = format!("/v1/apps/services/{id}/environments/production");
+    // As a browser asks: compressed if it may be, and revalidating what it has.
     let get = |path: &str, accept: &str| {
-        let r = Request::builder().uri(path).header("host", h.clone()).header("accept", accept).body(Body::empty()).unwrap();
+        let r = Request::builder().uri(path).header("host", h.clone()).header("accept", accept).header("accept-encoding", "gzip, br").header("if-none-match", "\"old\"").body(Body::empty()).unwrap();
         let public = w.public.clone();
         async move { String::from_utf8(public.oneshot(r).await.unwrap().into_body().collect().await.unwrap().to_bytes().to_vec()).unwrap() }
     };
@@ -666,6 +731,32 @@ async fn a_new_error_is_an_event_once() {
     }
     w.apps.note_new_errors(&live).await;
     assert_eq!(news().await.len(), 2);
+    // Its lifecycle (Cloud Run Error Reporting's): resolved, it's said again when it comes back;
+    // muted, never.
+    let errors = format!("/v1/apps/services/{id}/environments/production/errors");
+    let fp = first[0]["data"]["fingerprint"].as_str().unwrap().to_string();
+    let (st, v) = call(&w.api, "PATCH", &format!("{errors}/{fp}"), Some(json!({"state": "resolved"}))).await;
+    assert_eq!((st, &v["state"]), (StatusCode::OK, &json!("resolved")), "{v}");
+    assert_eq!(call(&w.api, "PATCH", &format!("{errors}/nope"), Some(json!({"state": "muted"}))).await.0, StatusCode::NOT_FOUND);
+    let regressed = || async {
+        call(&w.api, "GET", "/v1/apps/events?after=0", None).await.1["events"].as_array().unwrap().iter().filter(|e| e["kind"] == "error.regressed").cloned().collect::<Vec<_>>()
+    };
+    tokio::time::sleep(Duration::from_millis(5)).await;
+    for l in trace("ValueError") {
+        log.line(l);
+    }
+    w.apps.note_new_errors(&live).await;
+    assert_eq!(regressed().await.len(), 1, "back after it was resolved");
+    let (_, listed) = call(&w.api, "GET", &format!("{errors}?minutes=60"), None).await;
+    let g = listed["groups"].as_array().unwrap().iter().find(|g| g["fingerprint"] == fp.as_str()).cloned().unwrap();
+    assert_eq!((&g["state"], &g["first_deployment"]), (&json!("open"), &json!("dep_x")), "{g}");
+    call(&w.api, "PATCH", &format!("{errors}/{fp}"), Some(json!({"state": "muted"}))).await;
+    tokio::time::sleep(Duration::from_millis(5)).await;
+    for l in trace("ValueError") {
+        log.line(l);
+    }
+    w.apps.note_new_errors(&live).await;
+    assert_eq!(regressed().await.len(), 1, "muted: never said");
 }
 
 /// Secret files (Render's): a variable kept as a file is out of the instance's environment and
@@ -2626,7 +2717,15 @@ async fn a_custom_domain_reaches_another_port_of_the_app() {
     assert_eq!(visit(&w, h, "/").await.0, StatusCode::BAD_GATEWAY);
     let (_, r) = call(&w.api, "POST", &format!("{env}/redeploy"), Some(json!({}))).await;
     settled(&w, &id, "production", r["id"].as_str().unwrap()).await;
-    let (st, body) = visit(&w, h, "/").await;
+    // Its instances take requests a moment after the switch (as `visit_deployment` waits).
+    let (mut st, mut body) = visit(&w, h, "/").await;
+    for _ in 0..200 {
+        if st == StatusCode::OK {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        (st, body) = visit(&w, h, "/").await;
+    }
     assert_eq!((st, &body["port"]), (StatusCode::OK, &json!(9000)), "{body}");
     let (st, body) = visit(&w, &host(&svc["environments"][0]["url"]), "/").await;
     assert_eq!((st, &body["port"]), (StatusCode::OK, &json!(8080)), "the service's own name: {body}");
@@ -2936,6 +3035,12 @@ async fn roll_up_deploys_an_uploaded_tree_and_cron_runs_on_demand() {
     assert_eq!(call(&w.api, "GET", &format!("{base}/runs/{rid}"), None).await.1["status"], "succeeded");
     let out = get_until(&w.api, &format!("{base}/runs/{rid}/logs"), |l| l.as_array().is_some_and(|a| !a.is_empty())).await;
     assert!(out.as_array().unwrap().iter().all(|l| l["text"] == "job ran"), "{out}");
+    // Followed after it ended: its lines, then `end`, then the stream closes (a follower stops
+    // rather than taking the close for a drop and reading it all again).
+    let req = Request::builder().uri(format!("{base}/runs/{rid}/logs?follow=1")).body(Body::empty()).unwrap();
+    let body = tokio::time::timeout(Duration::from_secs(5), w.api.clone().oneshot(req).await.unwrap().into_body().collect()).await.expect("it closes").unwrap().to_bytes();
+    let body = String::from_utf8_lossy(&body);
+    assert!(body.contains("job ran") && body.trim_end().ends_with("event: end\ndata: end"), "{body}");
     assert_eq!(call(&w.api, "POST", &format!("{base}/runs/{rid}/cancel"), None).await.0, StatusCode::CONFLICT, "only a running one");
     // A run that fails is an event (notified by default), with its exit code.
     call(&w.api, "PATCH", &format!("{base}/variables"), Some(json!({"set": {"FAKE_EXIT": "3"}}))).await;
@@ -2967,7 +3072,7 @@ async fn roll_up_deploys_an_uploaded_tree_and_cron_runs_on_demand() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_one_off_job_runs_the_live_image_to_its_exit_and_can_be_canceled() {
-    let w = world().await;
+    let w = world_with(|c| c.cron_retry_after = Duration::from_millis(20)).await;
     let (svc, d) = image_service(&w, "api", json!({"port": 80})).await;
     let id = svc["id"].as_str().unwrap().to_string();
     let base = format!("/v1/apps/services/{id}/environments/production");
@@ -2998,10 +3103,24 @@ async fn a_one_off_job_runs_the_live_image_to_its_exit_and_can_be_canceled() {
     assert_eq!(call(&w.api, "POST", &format!("{base}/jobs"), Some(json!({"command": "exit 0", "tasks": 101}))).await.0, StatusCode::BAD_REQUEST);
     let (_, t) = call(&w.api, "POST", &format!("{base}/jobs"), Some(json!({"command": "exit 0", "tasks": 3}))).await;
     let t = ended(t["id"].as_str().unwrap().to_string()).await;
-    assert_eq!((t["status"].as_str(), t["tasks"].as_u64()), (Some("succeeded"), Some(3)), "{t}");
+    assert_eq!((t["status"].as_str(), t["tasks"].as_u64(), t["parallelism"].as_u64()), (Some("succeeded"), Some(3), Some(3)), "{t}");
     let (_, log) = call(&w.api, "GET", &format!("{base}/jobs/{}/logs", t["id"].as_str().unwrap()), None).await;
     for i in 0..3 {
         assert!(log.as_array().unwrap().iter().any(|l| l["text"] == format!("job ran as task {i} of 3")), "task {i}: {log}");
+    }
+    // A failed task tried again (Cloud Run Jobs' `--max-retries`), each try told which it is:
+    // a flaky one that passes on its third try succeeds with two retries, fails with one.
+    let flaky = |retries: u32| json!({"command": "exit 3 until try 3", "retries": retries, "parallelism": 1});
+    let (_, ok) = call(&w.api, "POST", &format!("{base}/jobs"), Some(flaky(2))).await;
+    let ok = ended(ok["id"].as_str().unwrap().to_string()).await;
+    assert_eq!((ok["status"].as_str(), ok["retries"].as_u64()), (Some("succeeded"), Some(2)), "{ok}");
+    let (_, log) = call(&w.api, "GET", &format!("{base}/jobs/{}/logs", ok["id"].as_str().unwrap()), None).await;
+    let text: Vec<&str> = log.as_array().unwrap().iter().filter_map(|l| l["text"].as_str()).collect();
+    assert!(text.iter().any(|t| t.starts_with("the job: failed (try 1 of 3); again in")) && text.contains(&"the job: succeeded (try 3)"), "{text:?}");
+    let (_, no) = call(&w.api, "POST", &format!("{base}/jobs"), Some(flaky(1))).await;
+    assert_eq!(ended(no["id"].as_str().unwrap().to_string()).await["status"], "failed");
+    for bad in [json!({"command": "x", "retries": 6}), json!({"command": "x", "parallelism": 0})] {
+        assert_eq!(call(&w.api, "POST", &format!("{base}/jobs"), Some(bad)).await.0, StatusCode::BAD_REQUEST);
     }
     // One that doesn't end by itself is canceled, and its container goes.
     let (_, long) = call(&w.api, "POST", &format!("{base}/jobs"), Some(json!({"command": "sleep 3600"}))).await;
@@ -3011,7 +3130,7 @@ async fn a_one_off_job_runs_the_live_image_to_its_exit_and_can_be_canceled() {
     assert_eq!(ended(lid.clone()).await["status"], "canceled");
     assert_eq!(call(&w.api, "POST", &format!("{base}/jobs/{lid}/cancel"), None).await.0, StatusCode::CONFLICT);
     assert_eq!(w.fake.instances(&id).len(), instances, "no job's container is left");
-    assert_eq!(call(&w.api, "GET", &format!("{base}/jobs"), None).await.1.as_array().unwrap().len(), 4);
+    assert_eq!(call(&w.api, "GET", &format!("{base}/jobs"), None).await.1.as_array().unwrap().len(), 6);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -3222,6 +3341,56 @@ async fn a_previews_runtime_lines_reach_only_drains_that_take_previews() {
 
 /// A drain in another format: syslog (RFC 5424, octet-counted, as Papertrail takes it) and OTLP
 /// logs (a collector's `/v1/logs`), each with the runtime output.
+/// Telemetry drains (Vercel's, Heroku's): an OTLP drain that takes `traces` and `metrics` gets
+/// the environment's spans at `…/v1/traces` and its points at `…/v1/metrics`, beside its logs'.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_otlp_drain_gets_traces_and_metrics_too() {
+    let w = world().await;
+    let got: Arc<parking_lot::Mutex<Vec<(String, Value)>>> = Default::default();
+    let g = got.clone();
+    let app = axum::Router::new().route("/{*path}", axum::routing::post(move |axum::extract::Path(path): axum::extract::Path<String>, b: bytes::Bytes| {
+        let g = g.clone();
+        async move {
+            g.lock().push((path, serde_json::from_slice(&b).unwrap_or(Value::Null)));
+            StatusCode::OK
+        }
+    }));
+    let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let at = l.local_addr().unwrap();
+    tokio::spawn(axum::serve(l, app).into_future());
+    let (st, d) = call(&w.api, "POST", &format!("/v1/apps/projects/{}/drains", w.project), Some(json!({"url": format!("http://{at}/v1/logs"), "format": "otlp", "sources": ["traces", "metrics"]}))).await;
+    assert_eq!(st, StatusCode::CREATED, "{d}");
+    let (svc, _) = image_service(&w, "api", json!({"port": 80})).await;
+    let id = svc["id"].as_str().unwrap().to_string();
+    call(&w.api, "PUT", &format!("/v1/apps/services/{id}/environments/production"), Some(json!({"traces": true}))).await;
+    let token = w.apps.store.trace_token(&id, "production").unwrap().unwrap();
+    let post = |signal: &str, body: Value| {
+        let req = Request::builder().method("POST").uri(format!("/_roll/otlp/{id}/production/{token}/v1/{signal}")).header("host", "anything.example").header("content-type", "application/json").body(Body::from(body.to_string())).unwrap();
+        let public = w.public.clone();
+        async move { public.oneshot(req).await.unwrap().status() }
+    };
+    let now = (code_sql::now_ms() as u64 * 1_000_000).to_string();
+    let spans = json!({ "resourceSpans": [{ "scopeSpans": [{ "spans": [{ "traceId": "a1".repeat(16), "spanId": "b2".repeat(8), "name": "GET /items", "startTimeUnixNano": now, "endTimeUnixNano": now }] }] }] });
+    let points = json!({ "resourceMetrics": [{ "scopeMetrics": [{ "metrics": [{ "name": "queue_depth", "gauge": { "dataPoints": [{ "timeUnixNano": now, "asDouble": 7.0 }] } }] }] }] });
+    // The drainer reads its drains' sources at start: a moment for the tap to open.
+    let mut seen = (false, false);
+    for _ in 0..100 {
+        assert_eq!(post("traces", spans.clone()).await, StatusCode::OK);
+        assert_eq!(post("metrics", points.clone()).await, StatusCode::OK);
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        let all = got.lock().clone();
+        seen = (
+            all.iter().any(|(p, v)| p == "v1/traces" && v.to_string().contains("GET /items") && v.to_string().contains("\"service.name\"")),
+            all.iter().any(|(p, v)| p == "v1/metrics" && v["resourceMetrics"][0]["scopeMetrics"][0]["metrics"][0]["gauge"]["dataPoints"][0]["asDouble"] == 7.0),
+        );
+        if seen == (true, true) {
+            break;
+        }
+    }
+    assert_eq!(seen, (true, true), "{:?}", got.lock());
+    assert!(!got.lock().iter().any(|(p, _)| p == "v1/logs"), "no logs asked for");
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_log_drain_speaks_syslog_or_otlp() {
     use tokio::io::AsyncReadExt;
@@ -3607,7 +3776,7 @@ async fn a_failed_deploy_is_sent_to_the_projects_targets_signed_and_retried() {
     let (st, hook) = call(&w.api, "POST", &base, Some(json!({"url": format!("http://{ok_at}/hook")}))).await;
     assert_eq!(st, StatusCode::CREATED, "{hook}");
     let secret = hook["secret"].as_str().unwrap().to_string();
-    assert_eq!(hook["events"], json!(["check.down", "heartbeat.missed", "alert.slo", "deploy.failed", "rollout.waiting", "deploy.ready", "error.new", "crash_loop", "spend.alert", "spend.limit", "alert.memory", "alert.errors", "alert.latency", "alert.capacity", "alert.log", "cron.failed", "domain.expiring", "domain.expired", "domain.tls_failed", "volume.backup_failed", "volume.full"]), "the default events");
+    assert_eq!(hook["events"], json!(["check.down", "heartbeat.missed", "alert.slo", "deploy.failed", "rollout.waiting", "deploy.ready", "error.new", "error.regressed", "crash_loop", "spend.alert", "spend.limit", "alert.memory", "alert.errors", "alert.latency", "alert.capacity", "alert.log", "cron.failed", "domain.expiring", "domain.expired", "domain.tls_failed", "volume.backup_failed", "volume.full"]), "the default events");
     let (_, down) = call(&w.api, "POST", &base, Some(json!({"kind": "webhook", "url": format!("http://{bad_at}/x"), "events": ["deploy.failed"]}))).await;
     let (_, list) = call(&w.api, "GET", &base, None).await;
     assert!(!list.to_string().contains(&secret) && !list.to_string().contains("/hook"), "neither the secret nor the URL comes back: {list}");
@@ -4794,6 +4963,7 @@ async fn a_roll_reference_variable_reads_its_environments_secret() {
     assert_eq!(set(json!({"X": "roll://acme@production/KEY"})).await.0, StatusCode::BAD_REQUEST, "a project's");
     assert_eq!(set(json!({"X": " roll://staging/KEY"})).await.0, StatusCode::BAD_REQUEST, "read as a reference once trimmed: written exactly or refused");
     assert_eq!(set(json!({"X": "ROLL://production/db/URL"})).await.0, StatusCode::BAD_REQUEST, "or lowercased");
+    assert_eq!(set(json!({"X": "roll://production/services/svc_other/KEY"})).await.0, StatusCode::BAD_REQUEST, "another service's own folder");
     assert!(set(json!({"DATABASE_URL": "roll://production/db/URL", "FAKE_ECHO": "DATABASE_URL"})).await.0.is_success());
     let (_, d) = call(&w.api, "POST", &format!("{base}/redeploy"), Some(json!({}))).await;
     let d = settled(&w, &id, "production", d["id"].as_str().unwrap()).await;
@@ -4954,6 +5124,33 @@ async fn an_allow_list_lets_only_its_networks_in() {
     assert_eq!(from(None).await, StatusCode::FORBIDDEN, "no address: no entry");
     call(&w.api, "PUT", &base, Some(json!({"allow_ips": null}))).await;
     assert_eq!(from(Some("198.51.100.1:5000")).await, StatusCode::OK);
+}
+
+/// `run.latency_target_ms` (Heroku's response-time autoscaling): a web service whose answers'
+/// p95 stays over the target for a window gets another instance; out of range is a 400.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_web_service_scales_on_its_latency() {
+    let w = world_with(|c| c.live.cpu_window = Duration::from_millis(400)).await;
+    let (st, svc) = call(&w.api, "POST", "/v1/apps/services", Some(json!({ "project": w.project, "name": "slow", "source": {"kind": "image", "image": "nginx:1.27"}, "run": {"port": 80, "min_instances": 1, "max_instances": 3, "latency_target_ms": 50}, "variables": {"FAKE_SLOW_MS": "150"} }))).await;
+    assert_eq!(st, StatusCode::CREATED, "{svc}");
+    let id = svc["id"].as_str().unwrap().to_string();
+    settled(&w, &id, "production", svc["environments"][0]["latest"]["id"].as_str().unwrap()).await;
+    assert_eq!(call(&w.api, "PATCH", &format!("/v1/apps/services/{id}"), Some(json!({"run": {"latency_target_ms": 10}}))).await.0, StatusCode::BAD_REQUEST);
+    let h = host(&svc["environments"][0]["url"]);
+    let live = w.apps.live(&id, "production");
+    let running = || w.fake.instances(&id).into_iter().filter(|(_, _, st)| *st == FakeState::Running).count();
+    let mut scaled = false;
+    for _ in 0..60 {
+        futures::future::join_all((0..8).map(|_| visit(&w, &h, "/"))).await;
+        live.tick().await;
+        if running() >= 2 {
+            scaled = true;
+            break;
+        }
+    }
+    let (_, log) = call(&w.api, "GET", &format!("/v1/apps/services/{id}/environments/production/logs?tail=50"), None).await;
+    assert!(scaled, "a second instance for its p95: {log}");
+    assert!(log.to_string().contains("scaled out: p95 at"), "{log}");
 }
 
 /// `run.cpu_target` and `run.memory_target`: a web service whose instances stay over the target
@@ -6170,6 +6367,14 @@ async fn a_public_git_url_deploys_its_branch_and_follows_new_commits() {
     assert!(st == StatusCode::OK && v["ignored"].as_str().unwrap().contains("no environment follows it"), "{v}");
     assert_eq!(call(&w.api, "POST", &hook, Some(json!({ "zen": "Keep it logically awesome.", "hook_id": 1 }))).await.1["ignored"], "pong");
     assert_eq!(settled(&w, &id, "production", d3["id"].as_str().unwrap()).await["status"], "active");
+    // Another branch deployed once by its name (Render's manual deploy): its head, said in the
+    // message; a name the repository hasn't is a 400.
+    git.branches.lock().insert("feature-x".into(), second.parse().unwrap());
+    let deploys = format!("/v1/apps/services/{id}/environments/production/deploys");
+    let (st, d) = call(&w.api, "POST", &deploys, Some(json!({ "revision": "feature-x" }))).await;
+    assert!(st == StatusCode::ACCEPTED && d["revision"] == second.as_str() && d["message"].as_str().unwrap().starts_with("branch feature-x at "), "{d}");
+    assert_eq!(settled(&w, &id, "production", d["id"].as_str().unwrap()).await["status"], "active");
+    assert_eq!(call(&w.api, "POST", &deploys, Some(json!({ "revision": "nope" }))).await.0, StatusCode::BAD_REQUEST);
     // What a repository sends that isn't a branch push deploys nothing: a tag, another event,
     // a body that isn't a push. GitHub's default form encoding is read as its JSON is.
     let raw = |ct: &'static str, event: Option<&'static str>, body: String| {
@@ -6884,4 +7089,258 @@ async fn an_uploaded_image_deploys_without_its_names() {
     assert!(d["image"].as_str().unwrap().starts_with("roll-apps-"), "{d}");
     let loaded = w.fake.loaded.lock().last().cloned().unwrap();
     assert!(!loaded.contains("nginx") && loaded.contains("blobs/sha256/l"), "{loaded}");
+}
+
+/// A model that answers as one would, and keeps what it was asked: (repo, case).
+#[derive(Default)]
+struct FakeModel(parking_lot::Mutex<Vec<(String, String)>>);
+
+#[async_trait::async_trait]
+impl apps_control::integrations::Explainer for FakeModel {
+    async fn ask(&self, repo: &str, _system: &str, user: &str, _schema: &Value) -> apps_control::Result<Option<(Value, String)>> {
+        self.0.lock().push((repo.into(), user.into()));
+        let answer = json!({ "summary": "It never passed its health check.", "cause": "Every request answered 500.", "steps": ["Unset FAKE_UNHEALTHY", "", "Deploy again"], "confidence": "sure", "extra": 1 });
+        Ok(Some((answer, "claude-test".into())))
+    }
+}
+
+/// "Why did it fail?": a failed deployment's error, plan and logs go to its repo owner's model
+/// once, and the answer is kept, checked and bounded (`?again=1` asks anew); a server with no
+/// model and a deployment that didn't fail say so.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_failed_deploy_is_explained_once_by_its_repo_owners_model() {
+    let w = world().await;
+    let body = json!({ "project": w.project, "name": "site", "source": {"kind": "repo", "repo": "acme/site"}, "run": {"min_instances": 1, "health_path": "/healthz", "health_timeout_s": 1}, "variables": {"FAKE_UNHEALTHY": "1"} });
+    let (st, svc) = call(&w.api, "POST", "/v1/apps/services", Some(body)).await;
+    assert_eq!(st, StatusCode::CREATED, "{svc}");
+    let id = svc["id"].as_str().unwrap();
+    let dep = svc["environments"][0]["latest"]["id"].as_str().unwrap();
+    let d = settled(&w, id, "production", dep).await;
+    assert_eq!(d["status"], "failed", "{d}");
+    let url = format!("/v1/apps/services/{id}/environments/production/deploys/{dep}/explain");
+    let (st, e) = call(&w.api, "POST", &url, None).await;
+    assert_eq!(st, StatusCode::CONFLICT, "no model on this server: {e}");
+    let model = Arc::new(FakeModel::default());
+    w.apps.set_explainer(model.clone());
+    let (st, e) = call(&w.api, "POST", &url, None).await;
+    assert_eq!(st, StatusCode::OK, "{e}");
+    assert_eq!((e["summary"].as_str(), e["steps"].as_array().map(Vec::len), e["confidence"].as_str(), e["model"].as_str()), (Some("It never passed its health check."), Some(2), Some("low"), Some("claude-test")), "{e}");
+    assert!(e.get("extra").is_none(), "{e}");
+    {
+        let asked = model.0.lock();
+        let (repo, case) = &asked[0];
+        assert_eq!(repo, "acme/site");
+        assert!(case.contains(d["error"].as_str().unwrap()) && case.contains("# Plan") && case.contains("provider: node"), "{case}");
+    }
+    // Kept: asking again reads it back, until `again`.
+    assert_eq!(call(&w.api, "POST", &url, None).await.1, e);
+    assert_eq!(model.0.lock().len(), 1);
+    // Asked anew at most once a minute (each answer is charged to the repo's owner).
+    assert_eq!(call(&w.api, "POST", &format!("{url}?again=1"), None).await.0, StatusCode::CONFLICT);
+    assert_eq!(model.0.lock().len(), 1);
+    // A deployment that didn't fail isn't explained.
+    let (img, live) = image_service(&w, "api", json!({"port": 80})).await;
+    let url = format!("/v1/apps/services/{}/environments/production/deploys/{}/explain", img["id"].as_str().unwrap(), live["id"].as_str().unwrap());
+    assert_eq!(call(&w.api, "POST", &url, None).await.0, StatusCode::CONFLICT);
+}
+
+/// A roll stream in memory: what `run.push` reads, commits and dead-letters.
+#[derive(Default)]
+struct FakeStream {
+    records: Mutex<Vec<(String, apps_control::integrations::StreamRecord)>>,
+    /// (topic, partition) → the next offset to deliver.
+    committed: Mutex<std::collections::HashMap<(String, i32), i64>>,
+    produced: Mutex<Vec<(String, apps_control::integrations::StreamRecord)>>,
+    /// (topic, partition) → the consumer that holds it, as the broker leases partitions.
+    held: Mutex<std::collections::HashMap<(String, i32), String>>,
+}
+
+#[async_trait]
+impl apps_control::integrations::Resources for FakeStream {
+    async fn link_vars(&self, kind: apps_control::model::LinkKind, _ref: &str) -> anyhow::Result<Vec<(String, String)>> {
+        anyhow::bail!("no {}", kind.as_str())
+    }
+    async fn read_group(&self, stream: &str, topic: &str, _group: &str, consumer: &str, _wait_ms: u64, limit: usize) -> anyhow::Result<Vec<apps_control::integrations::StreamRecord>> {
+        anyhow::ensure!(stream == "st_ag2345678abc", "no stream {stream}");
+        let next: Vec<_> = {
+            let committed = self.committed.lock();
+            let records = self.records.lock();
+            let mut held = self.held.lock();
+            let mine = |p: i32, held: &mut std::collections::HashMap<(String, i32), String>| held.entry((topic.to_string(), p)).or_insert_with(|| consumer.to_string()) == consumer;
+            records.iter().filter(|(t, r)| t == topic && r.offset >= committed.get(&(t.clone(), r.partition)).copied().unwrap_or(0) && mine(r.partition, &mut held)).take(limit).map(|(_, r)| r.clone()).collect()
+        };
+        if next.is_empty() {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        Ok(next)
+    }
+    async fn commit(&self, _stream: &str, topic: &str, _group: &str, _consumer: &str, partition: i32, offset: i64) -> anyhow::Result<()> {
+        self.committed.lock().insert((topic.to_string(), partition), offset);
+        Ok(())
+    }
+    async fn produce(&self, _stream: &str, topic: &str, record: &apps_control::integrations::StreamRecord) -> anyhow::Result<()> {
+        self.produced.lock().push((topic.to_string(), record.clone()));
+        Ok(())
+    }
+    async fn leave(&self, _stream: &str, _group: &str, consumer: &str) -> anyhow::Result<()> {
+        self.held.lock().retain(|_, c| c != consumer);
+        Ok(())
+    }
+    async fn backlog(&self, _stream: &str, _group: &str) -> anyhow::Result<u64> {
+        let committed = self.committed.lock();
+        Ok(self.records.lock().iter().filter(|(t, r)| r.offset >= committed.get(&(t.clone(), r.partition)).copied().unwrap_or(0)).count() as u64)
+    }
+}
+
+/// `run.push` (Cloud Run's Pub/Sub push): a stream's records are POSTed to a web service's path
+/// and the group's offset moves on each 2xx; a record its path keeps refusing goes to the
+/// dead-letter topic after `max_attempts`; nothing is read from a stream that isn't on the
+/// service's project; and push is a web service's.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_stream_is_pushed_to_a_web_service() {
+    let stream = Arc::new(FakeStream::default());
+    let rec = |offset: i64, value: &str| apps_control::integrations::StreamRecord { partition: 0, offset, timestamp: 1, key: None, value: Some(value.as_bytes().to_vec()), headers: vec![] };
+    stream.records.lock().extend([("orders".to_string(), rec(0, "a")), ("orders".to_string(), rec(1, "b")), ("poison".to_string(), rec(0, "x"))]);
+    let s2 = stream.clone();
+    let w = world_full(|_| {}, false, move |d| d.resources = s2).await;
+    let push = json!([
+        {"stream": "st_ag2345678abc", "topic": "orders", "group": "web", "path": "/events"},
+        {"stream": "st_ag2345678abc", "topic": "poison", "group": "web", "path": "/bad/x", "dead_letter": "dead", "max_attempts": 2}
+    ]);
+    let body = json!({ "project": w.project, "name": "web", "source": {"kind": "image", "image": "nginx:1.27"}, "run": {"port": 80, "push": push}, "variables": {"FAKE_MISSING": "/bad"} });
+    let (st, svc) = call(&w.api, "POST", "/v1/apps/services", Some(body)).await;
+    assert_eq!(st, StatusCode::CREATED, "{svc}");
+    let id = svc["id"].as_str().unwrap().to_string();
+    assert_eq!(settled(&w, &id, "production", svc["environments"][0]["latest"]["id"].as_str().unwrap()).await["status"], "active");
+    // Not on its project: off, and said why.
+    w.apps.cron_pass(code_sql::now_ms()).await;
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert!(stream.committed.lock().is_empty());
+    let (_, log) = call(&w.api, "GET", &format!("/v1/apps/services/{id}/environments/production/logs"), None).await;
+    assert!(log.as_array().unwrap().iter().any(|l| l["text"].as_str().unwrap().contains("isn't on this service's project")), "{log}");
+    let ws = w.apps.deps.workspace.clone().unwrap();
+    ws.place(roll_workspace::Scope::All, &w.project, roll_workspace::Kind::Stream, "st_ag2345678abc", 0.0, 0.0).unwrap();
+    let done = || {
+        let c = stream.committed.lock();
+        c.get(&("orders".into(), 0)) == Some(&2) && c.get(&("poison".into(), 0)) == Some(&1)
+    };
+    for _ in 0..200 {
+        w.apps.cron_pass(code_sql::now_ms()).await;
+        if done() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert!(done(), "{:?}", stream.committed.lock());
+    // What the app got: each record as a CloudEvent, the refused one tried twice.
+    let (_, log) = call(&w.api, "GET", &format!("/v1/apps/services/{id}/environments/production/logs"), None).await;
+    let got: Vec<&str> = log.as_array().unwrap().iter().filter_map(|l| l["text"].as_str()).filter(|t| t.starts_with("got event")).collect();
+    for want in ["got event orders/0/0 (try 1, sh.roll.stream.record)", "got event orders/0/1 (try 1, ", "got event poison/0/0 (try 2, "] {
+        assert!(got.iter().any(|g| g.starts_with(want)), "{want}: {got:?}");
+    }
+    assert_eq!(got.iter().filter(|g| g.starts_with("got event orders/0/0 ")).count(), 1, "several loops a rule, never one record twice: {got:?}");
+    // As they stand: nothing behind, what went where.
+    let (_, states) = call(&w.api, "GET", &format!("/v1/apps/services/{id}/environments/production/push"), None).await;
+    let by = |t: &str| states.as_array().unwrap().iter().find(|s| s["topic"] == t).cloned().unwrap_or_else(|| panic!("{states}"));
+    assert_eq!((by("orders")["delivered"].as_u64(), by("orders")["lag"].as_u64(), by("poison")["dead_lettered"].as_u64()), (Some(2), Some(0), Some(1)), "{states}");
+    let produced = stream.produced.lock().clone();
+    assert_eq!(produced.len(), 1, "{produced:?}");
+    let (topic, dead) = &produced[0];
+    assert_eq!((topic.as_str(), dead.value.as_deref()), ("dead", Some(&b"x"[..])));
+    assert!(dead.headers.iter().any(|(k, v)| k == "x-roll-error" && String::from_utf8_lossy(v).contains("answered 404 after 2 tries")), "{dead:?}");
+    // Push is a web service's.
+    let worker = json!({ "project": w.project, "name": "jobs", "source": {"kind": "image", "image": "nginx:1.27"}, "run": {"type": "worker", "push": [push[0].clone()]} });
+    assert_eq!(call(&w.api, "POST", "/v1/apps/services", Some(worker)).await.0, StatusCode::BAD_REQUEST);
+}
+
+/// A worker that must run alone (`rollout.overlap: false`, Fly's `immediate`, Heroku's workers):
+/// a deploy stops the old instance before the new one starts, so two never run at once (with
+/// overlap, the default, they do for a moment); without overlap there are no gradual steps.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_worker_without_overlap_never_runs_twice() {
+    let w = world().await;
+    let peak_of = |run: Value| {
+        let w = &w;
+        async move {
+            let (svc, d1) = image_service(w, if run["rollout"]["overlap"] == false { "alone" } else { "pair" }, run).await;
+            assert_eq!(d1["status"], "active", "{d1}");
+            let id = svc["id"].as_str().unwrap().to_string();
+            let (fake, sid, stop) = (w.fake.clone(), id.clone(), Arc::new(std::sync::atomic::AtomicBool::new(false)));
+            let stop2 = stop.clone();
+            let sampler = tokio::spawn(async move {
+                let mut peak = 0;
+                while !stop2.load(Ordering::SeqCst) {
+                    peak = peak.max(fake.instances(&sid).iter().filter(|(_, _, st)| *st == FakeState::Running).count());
+                    tokio::time::sleep(Duration::from_millis(1)).await;
+                }
+                peak
+            });
+            let (_, d2) = call(&w.api, "POST", &format!("/v1/apps/services/{id}/environments/production/redeploy"), Some(json!({}))).await;
+            assert_eq!(settled(w, &id, "production", d2["id"].as_str().unwrap()).await["status"], "active");
+            stop.store(true, Ordering::SeqCst);
+            (id, sampler.await.unwrap())
+        }
+    };
+    let (id, alone) = peak_of(json!({"type": "worker", "min_instances": 1, "rollout": {"overlap": false}})).await;
+    assert_eq!(alone, 1, "never two at once");
+    let (_, svc) = call(&w.api, "GET", &format!("/v1/apps/services/{id}"), None).await;
+    assert_eq!(svc["run"]["rollout"]["overlap"], false, "{svc}");
+    let (_, pair) = peak_of(json!({"type": "worker", "min_instances": 1})).await;
+    assert_eq!(pair, 2, "the default overlaps");
+    let steps = json!({ "project": w.project, "name": "web", "source": {"kind": "image", "image": "nginx:1.27"}, "run": {"port": 80, "rollout": {"overlap": false, "steps": [10]}} });
+    assert_eq!(call(&w.api, "POST", "/v1/apps/services", Some(steps)).await.0, StatusCode::BAD_REQUEST);
+}
+
+/// A private ECR image (Render's ECR credentials, Cloud Run's Artifact Registry): the service's
+/// access key, sealed, is exchanged at a pull for ECR's token (user `AWS`), kept until it nears
+/// its expiry; a key for another registry or region is refused.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_ecr_image_pulls_with_a_token_from_its_access_key() {
+    use base64::Engine;
+    // ECR's GetAuthorizationToken, as the AWS SDK asks it: what was asked is kept.
+    let asked: Arc<Mutex<Vec<String>>> = Arc::default();
+    let a2 = asked.clone();
+    let ecr = axum::Router::new().fallback(move |headers: axum::http::HeaderMap| {
+        let asked = a2.clone();
+        async move {
+            let target = headers.get("x-amz-target").and_then(|v| v.to_str().ok()).unwrap_or("").to_string();
+            let auth = headers.get("authorization").and_then(|v| v.to_str().ok()).unwrap_or("").to_string();
+            asked.lock().push(format!("{target} {auth}"));
+            let token = base64::engine::general_purpose::STANDARD.encode("AWS:ecr-token-1");
+            let expires = (code_sql::now_ms() / 1000 + 12 * 3600) as f64;
+            ([("content-type", "application/x-amz-json-1.1")], json!({ "authorizationData": [{ "authorizationToken": token, "expiresAt": expires, "proxyEndpoint": "https://123456789012.dkr.ecr.eu-west-1.amazonaws.com" }] }).to_string())
+        }
+    });
+    let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let endpoint = format!("http://{}", l.local_addr().unwrap());
+    tokio::spawn(async move { axum::serve(l, ecr).await.unwrap() });
+    let w = world_with(move |c| c.ecr_endpoint = Some(endpoint)).await;
+    let image = "123456789012.dkr.ecr.eu-west-1.amazonaws.com/api:1";
+    let (st, svc) = call(&w.api, "POST", "/v1/apps/services", Some(json!({ "project": w.project, "name": "api", "source": {"kind": "image", "image": image}, "run": {"port": 80} }))).await;
+    assert_eq!(st, StatusCode::CREATED, "{svc}");
+    let id = svc["id"].as_str().unwrap().to_string();
+    settled(&w, &id, "production", svc["environments"][0]["latest"]["id"].as_str().unwrap()).await;
+    let reg = format!("/v1/apps/services/{id}/registry");
+    let key = json!({"kind": "ecr", "access_key_id": "AKIAEXAMPLEKEY12345", "secret_access_key": "ecr-secret-key"});
+    let (st, s) = call(&w.api, "PUT", &reg, Some(key.clone())).await;
+    assert_eq!(st, StatusCode::OK, "{s}");
+    assert_eq!(s["registry"], json!({"server": "123456789012.dkr.ecr.eu-west-1.amazonaws.com", "username": "AKIAEXAMPLEKEY12345", "kind": "ecr", "region": "eu-west-1"}));
+    assert!(!s.to_string().contains("ecr-secret-key"));
+    {
+        let asked = asked.lock();
+        assert!(asked[0].starts_with("AmazonEC2ContainerRegistry_V20150921.GetAuthorizationToken AWS4-HMAC-SHA256 Credential=AKIAEXAMPLEKEY12345/") && asked[0].contains("/eu-west-1/ecr/"), "{asked:?}");
+    }
+    // A deploy pulls as ECR's user, with the token kept (no second exchange).
+    let (_, d) = call(&w.api, "POST", &format!("/v1/apps/services/{id}/environments/production/deploys"), Some(json!({}))).await;
+    assert_eq!(settled(&w, &id, "production", d["id"].as_str().unwrap()).await["status"], "active");
+    assert_eq!(w.fake.pulled_as.lock().as_deref(), Some("AWS"));
+    assert_eq!(asked.lock().len(), 1, "the token is kept until it nears its expiry");
+    let raw = std::fs::read(w.apps.cfg.home.join("apps.db")).unwrap();
+    assert!(!raw.windows(14).any(|x| x == b"ecr-secret-key"));
+    // Another region than the registry's, or an image that isn't on ECR, is refused.
+    let mut other = key.clone();
+    other["region"] = json!("us-east-1");
+    assert_eq!(call(&w.api, "PUT", &reg, Some(other)).await.0, StatusCode::BAD_REQUEST);
+    let (_, hub) = call(&w.api, "POST", "/v1/apps/services", Some(json!({ "project": w.project, "name": "hub", "source": {"kind": "image", "image": "nginx:1.27"}, "run": {"port": 80} }))).await;
+    assert_eq!(call(&w.api, "PUT", &format!("/v1/apps/services/{}/registry", hub["id"].as_str().unwrap()), Some(key)).await.0, StatusCode::BAD_REQUEST);
 }

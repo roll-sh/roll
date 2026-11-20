@@ -6,7 +6,7 @@
 //! answer, `FAKE_SLOW_MS` delays every answer (requests pile up; one still waiting when the instance
 //! stops answers 502, as a killed process's would; `/sleep/<ms>` is one such request), `FAKE_MISSING=<prefix>` answers
 //! 404 for paths under it, `FAKE_CACHE=<value>` answers with it as `Cache-Control` (and `Cache-Tag: <the path's first
-//! segment>, all`), and counts
+//! segment>, all`), logs a pushed record's `ce-id` (`got event <id> (try <n>, <type>)`), and counts
 //! the requests it answers at `/count`, `FAKE_EXIT=<code>` makes it a
 //! job that exits with that code (cron runs, workers). The fake builder fails a build whose tree
 //! has a file `FAIL_BUILD`, and takes as many milliseconds as a file `SLOW_BUILD` says.
@@ -263,9 +263,14 @@ async fn serve(spec: InstanceSpec, listener: tokio::net::TcpListener, log: LogSi
     log.line(format!("listening on {}", spec.port.unwrap_or(0)));
     let (name, dep, kill, port) = (spec.name.clone(), spec.deployment.clone(), killed.clone(), spec.port);
     let app = axum::Router::new().fallback(move |req: Request| {
-        let (name, dep, echo, sick, missing, killed, cache, answered) = (name.clone(), dep.clone(), echo.clone(), sick.clone(), missing.clone(), kill.clone(), cache.clone(), answered.clone());
+        let (name, dep, echo, sick, missing, killed, cache, answered, out) = (name.clone(), dep.clone(), echo.clone(), sick.clone(), missing.clone(), kill.clone(), cache.clone(), answered.clone(), log.clone());
         async move {
             use axum::response::IntoResponse;
+            // A pushed record (a CloudEvent): said in its output, as an app would log it.
+            if let Some(id) = req.headers().get("ce-id").and_then(|v| v.to_str().ok()) {
+                let attempt = req.headers().get("ce-rollattempt").and_then(|v| v.to_str().ok()).unwrap_or("");
+                out.line(format!("got event {id} (try {attempt}, {})", req.headers().get("ce-type").and_then(|v| v.to_str().ok()).unwrap_or("")));
+            }
             // A Prometheus endpoint, as a client library serves one.
             if req.uri().path() == "/metrics" {
                 let n = answered.load(std::sync::atomic::Ordering::SeqCst);
@@ -397,8 +402,14 @@ impl Runtime for Fake {
             let names: Vec<&str> = sc.vars.iter().map(|(k, _)| k.as_str()).collect();
             log.renamed(&super::sidecar_name(name, &sc.name)).line(format!("sidecar {} running {} with {}", sc.name, sc.image, names.join(",")));
         }
-        // A job: `FAKE_EXIT`, or a command `exit <code>` (a pre-deploy command, a cron run).
-        let exit = spec.command.as_deref().and_then(|c| c.strip_prefix("exit ")).and_then(|c| c.trim().parse::<i32>().ok());
+        // A job: `FAKE_EXIT`, or a command `exit <code>` (a pre-deploy command, a cron run);
+        // `exit <code> until try <n>` exits 0 from its `ROLL_TASK_ATTEMPT` n on (a flaky task).
+        let exit = spec.command.as_deref().and_then(|c| c.strip_prefix("exit ")).and_then(|c| {
+            let (code, until) = c.split_once(" until try ").map_or((c, None), |(a, n)| (a, n.trim().parse::<u32>().ok()));
+            let attempt = var(&spec, "ROLL_TASK_ATTEMPT").and_then(|a| a.parse::<u32>().ok()).unwrap_or(1);
+            let code = code.trim().parse::<i32>().ok()?;
+            Some(if until.is_some_and(|n| attempt >= n) { 0 } else { code })
+        });
         if let Some(code) = exit.or_else(|| var(&spec, "FAKE_EXIT").and_then(|c| c.parse::<i32>().ok())) {
             // A job's task says which it is.
             log.line(match var(&spec, "ROLL_TASK_INDEX") {
