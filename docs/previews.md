@@ -425,8 +425,9 @@ behind the `Apps` trait:
   (`STRIPE_SECRET_KEY`, `GITHUB_TOKEN`: the same rule as roll apps' sealed-by-default names) and
   whose value isn't a reference: one click writes the value to the base environment under that
   name (roll secrets' own write, so its rules and audit apply) and puts `roll://BASE/NAME` in
-  the rule, saved with the rest. The value then lives in roll secrets only. A protected base takes
-  the write as a change request: the rule keeps its value and says so until it's approved.
+  the rule, saved with the rest. The value then lives in roll secrets only. A protected base refuses
+  the write (`approval_required`): the button opens a change request with it instead (as roll
+  secrets' Find does), and the rule keeps its value and says so until it's approved.
   Only the rules' own references (checked when saved) go to roll secrets as references, as their
   own input to rolld's ensure; every other value previews write, a preview's own variables and
   anything stored before included, is plain text: its `${` is escaped, so it's never a reference

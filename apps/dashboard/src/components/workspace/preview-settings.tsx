@@ -3,7 +3,7 @@ import { useEffect, useState, type ReactNode } from "react";
 import { isProduction, previewsApi, unmaskedNote, type MaskSuggestion, type MaskSuggestions, type PageState, type PreviewBypass, type PreviewHook, type PreviewJob, type PreviewSettings, type ResourceRule, type SettingsPatch } from "@/lib/previews-api";
 import { ROLL_API } from "@/lib/roll-api";
 import { keepable } from "@/lib/secret-names";
-import { secretsApi } from "@/lib/secrets-api";
+import { needsApproval, secretsApi } from "@/lib/secrets-api";
 import type { PlacedResource } from "@/lib/workspace-api";
 import { KIND_LABEL, resourceKey } from "@/lib/workspace-resources";
 import { Dialog } from "../agents/ui/dialog";
@@ -113,10 +113,14 @@ function Form({
     setKeeping(i);
     setKept(null);
     try {
-      const w = await secretsApi(projectId).set(base, key, { value, message: "kept from the preview rules" });
-      // A protected base takes it as a change request: until it's approved the key isn't there, so
-      // the rule keeps its value (a reference now would resolve to nothing).
-      if (!w.secret) {
+      const api = secretsApi(projectId);
+      try {
+        await api.set(base, key, { value, message: "kept from the preview rules" });
+      } catch (e) {
+        // A protected base takes a change request (as roll secrets' own Find opens one): until it's
+        // approved the key isn't there, so the rule keeps its value (a reference would read nothing).
+        if (!needsApproval(e)) throw e;
+        await api.openRequest(base, { path: "/", message: "kept from the preview rules", ops: [{ op: "set", key, value }] });
         setKept(`${base} is protected: a change request for ${key} waits for approval in roll secrets. Use roll://${base}/${key} here once it's approved.`);
         return;
       }
