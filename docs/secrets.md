@@ -5152,6 +5152,12 @@ is still level with or ahead of the category. The gaps are at the new features' 
 9. **Integration:** previews to embed `proxy::filter` first; MCP's `secrets_audit` (#479); apps' #474
    and search's #361 resolve as the runtime until #407 lands (known).
 
+10. **Decoys only to a signed-in session or the operator** (security, S; building
+    `fix/secrets-decoys-session-only`): roll MCP found an admin's agent, or a leaked admin token, could
+    read `Secret.decoy` and skip the decoys, which defeats the tripwire for exactly who it's meant to
+    catch. Every token caller gets answers identical to a normal key's (list, get, Health, audit), and
+    planting a decoy needs a session or the operator.
+
 Batch 5 conflicts with main again after #475 (#357, #465, #277, #432); it's being re-levelled.
 
 **Ranked, 2026-11-19 20:45** (the thirty-second review's list as it stands, plus what today's
