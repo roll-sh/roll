@@ -70,10 +70,10 @@ impl Entries {
 
     /// By each key's first 16 bytes past the index's prefix, then the keys themselves where
     /// those tie. (Eight bytes tied for an integer column's keys a few hundred apart, and every
-    /// tie read two keys at random places in `data`.)
+    /// tie read two keys at random places in `data`.) A byte at a time (`radix_sort_by`).
     fn sort(&mut self) {
         let mut ents = std::mem::take(&mut self.ents);
-        ents.sort_unstable_by(|a, b| a.0.cmp(&b.0).then_with(|| self.key(*a).cmp(self.key(*b))));
+        crate::sort::radix_sort_by(&mut ents, |e| e.0, |a, b| a.0.cmp(&b.0).then_with(|| self.key(*a).cmp(self.key(*b))));
         self.ents = ents;
     }
 }
@@ -232,7 +232,7 @@ impl Plan<'_> {
         }
         g.entries.sort();
         // (Each participant's keys sorted here, merged by the leader: `btree_pages_sorted`.)
-        g.keys.sort_unstable();
+        super::vacuum::sort_measure_keys(&mut g.keys);
         Ok(g)
     }
 }

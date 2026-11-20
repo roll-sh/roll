@@ -2457,7 +2457,7 @@ impl TxnState {
                     let k = (e.0 + e.1) as usize;
                     (&data[e.0 as usize..k], [&data[k..k + e.2 as usize], &[][..]])
                 });
-                runs.write_fresh(&mut items, self.write_cid, ts)?;
+                runs.write_fresh(&mut items, self.write_cid, ts, false)?;
                 SINK_RUNS.fetch_add(1, Ordering::Relaxed);
             }
             s.ents.clear();
@@ -2608,7 +2608,7 @@ impl TxnState {
         let dir = self.db.store.spill_dir().join(self.id.to_string());
         let r = Self::runs_in(&mut self.runs, dir, &self.rdels, self.db.store.compress());
         let mut items = entries.map(|(k, tail)| (k, [table, &k[k.len() - tail..]]));
-        r.write_fresh(&mut items, cid, ts)?;
+        r.write_fresh(&mut items, cid, ts, true)?;
         self.wrote = true;
         self.cur_xid();
         Ok(())
@@ -4644,7 +4644,7 @@ fn sort_by_key_after<T>(items: &mut Vec<T>, skip: usize, key: impl Fn(&T) -> &[u
     for end in ends {
         let g = &mut order[from..end];
         if !g.is_sorted_by_key(|o| o.0) {
-            g.sort_unstable_by_key(|o| o.0);
+            crate::sort::radix_sort_by(g, |o| [o.0[0], o.0[1]], |a, b| a.0.cmp(&b.0));
         }
         from = end;
     }

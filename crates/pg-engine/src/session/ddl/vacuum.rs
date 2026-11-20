@@ -2161,10 +2161,7 @@ pub(super) fn btree_pages_est(
     types: &[DataType],
     keys: &mut Vec<MeasureKey>,
 ) -> (i32, crate::exec::sizing::btest::BtEst) {
-    // (By the first 8 bytes, then the key, then the size: the keys' order, the prefix
-    // compared without reading the key. Unstable: entries equal as (key, size) are
-    // interchangeable.)
-    keys.sort_unstable();
+    sort_measure_keys(keys);
     let n = keys.len();
     btree_pages_sorted(bix, types, std::mem::take(keys).into_iter(), n)
 }
@@ -2228,6 +2225,13 @@ impl Ddl<'_, '_> {
 /// microcode assist of about 80 ns each, an eighth of a CREATE INDEX. Two words and a `u32`,
 /// not a `u128` and a `usize`: 40 bytes a key, not 48, which a big build holds a million of.)
 pub(super) type MeasureKey = ([u64; 2], Option<Box<[u8]>>, u32);
+
+/// Measure keys in their order: by the first 16 bytes, then the key, then the size (the
+/// keys' order, the prefix compared without reading the key), a byte of the prefix at a time
+/// (`radix_sort_by`). Unstable: keys equal as (key, size) are interchangeable.
+pub(super) fn sort_measure_keys(keys: &mut [MeasureKey]) {
+    crate::sort::radix_sort_by(keys, |k| k.0, |a, b| a.cmp(b));
+}
 
 /// The measure's key of the index tuple of `size` bytes with sort key `sort` (`key_bytes`).
 pub(super) fn measure_key(sort: &[u8], size: usize) -> MeasureKey {

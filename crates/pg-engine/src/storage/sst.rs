@@ -487,6 +487,8 @@ pub struct SstWriter {
     tagged: bool,
     /// Deletions added (`SstMeta::deletes`).
     deletes: u64,
+    /// One index's entries (`index_run`): not hashed, and no filter made.
+    index_run: bool,
     /// Compress its blocks with a zstd dictionary of about `.0` bytes trained from its first
     /// `.1` bytes of blocks (`set_dict`): the blocks before it are held back (`held`: body,
     /// last key, entries) until it is made.
@@ -597,6 +599,13 @@ impl SstWriter {
         self.dict = None;
     }
 
+    /// A run of one index's entries (`Txn::put_index_run`): a file of index entries alone gets
+    /// no bloom filter (`finish`), so they aren't hashed for one as they come. (A row added
+    /// anyway leaves the file without a filter, which every key passes.)
+    pub fn index_run(&mut self) {
+        self.index_run = true;
+    }
+
     /// Size the bloom filter for about `n` user keys now (a big ingested commit's: 8 bytes
     /// a key less to hold until the end).
     pub fn expect_keys(&mut self, n: usize) {
@@ -649,6 +658,7 @@ impl SstWriter {
             bloom: None,
             tagged: false,
             deletes: 0,
+            index_run: false,
             dict: (v2 && codec == Codec::Zstd).then_some((DICT_BYTES, DICT_SAMPLE)),
             held: Vec::new(),
             held_bytes: 0,
@@ -702,15 +712,17 @@ impl SstWriter {
         let ts = key_ts(key);
         self.min_ts = self.min_ts.min(ts);
         self.max_ts = self.max_ts.max(ts);
-        let h = if self.v2 { hash64_2(user_key(key)) } else { hash64(user_key(key)) };
         let index = index_entry(user_key(key));
         self.rows |= !index;
-        if self.last_user_hash != Some(h) {
-            match &mut self.bloom {
-                Some((b, m)) => bloom_set(b, *m, h),
-                None => self.hashes.push(h),
+        if !self.index_run {
+            let h = if self.v2 { hash64_2(user_key(key)) } else { hash64(user_key(key)) };
+            if self.last_user_hash != Some(h) {
+                match &mut self.bloom {
+                    Some((b, m)) => bloom_set(b, *m, h),
+                    None => self.hashes.push(h),
+                }
+                self.last_user_hash = Some(h);
             }
-            self.last_user_hash = Some(h);
         }
         let target = match self.block_target {
             Some(t) => t,
@@ -938,7 +950,7 @@ impl SstWriter {
             // (Index entries are scanned, not read by key: no filter, so no time building one
             // and no memory holding it. An empty filter passes every key, in builds before
             // this one too.)
-            _ if !self.rows => Vec::new(),
+            _ if !self.rows || self.index_run => Vec::new(),
             Some((b, _)) => b,
             None => {
                 let nbits = (self.hashes.len() * BLOOM_BITS_PER_KEY).max(64);

@@ -122,14 +122,18 @@ impl Runs {
     /// `write` of fresh writes (`Txn::put_fresh`) given as slices in key order, each key
     /// once, all of command `cid` at journal place `ts`: a linkable run, encoded straight
     /// from the slices (a bulk load's sink, `Txn::flush_sink`; a parallel index build's
-    /// entries). Each value comes in two parts, put end to end.
-    pub fn write_fresh<'a>(&mut self, items: &mut dyn Iterator<Item = (&'a [u8], [&'a [u8]; 2])>, cid: u32, ts: u64) -> Result<()> {
+    /// entries, `index`: one index's, `SstWriter::index_run`). Each value comes in two parts,
+    /// put end to end.
+    pub fn write_fresh<'a>(&mut self, items: &mut dyn Iterator<Item = (&'a [u8], [&'a [u8]; 2])>, cid: u32, ts: u64, index: bool) -> Result<()> {
         crate::storage::durable::create_dir_all(&self.dir)?;
         let id = self.next_id;
         self.next_id += 1;
         // (The store's compression policy: a linked run may go straight to L1. Format 2, the
         // values plain: the run's reads here put its tag back, `SstReader::retagged`.)
         let mut w = SstWriter::create_run(&self.dir, id, self.compress)?;
+        if index {
+            w.index_run();
+        }
         let mut val = Vec::new();
         let mut segs: Vec<(Vec<u8>, Vec<u8>)> = Vec::new();
         let mut seg: Option<(&[u8], &[u8])> = None;
