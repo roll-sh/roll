@@ -132,7 +132,11 @@ mod tests {
             tcp: true,
             rollback_on_crash: true,
             rebuild_on_base: true,
+            skew_protection: true,
+            queue_s: Some(5),
+            latency_target_ms: Some(300),
             schedules: vec![crate::model::Scheduled { name: "a".into(), schedule: "@daily".into(), command: "x".into(), path: None, timezone: None, timeout_s: None }],
+            push: vec![crate::model::Push { stream: "st_aaaaaaaaaaaa".into(), topic: "t".into(), group: "g".into(), path: "/e".into(), environment: None, dead_letter: None, max_attempts: None, timeout_s: None, max_in_flight: None }],
             sidecars: vec![crate::model::Sidecar { name: "a".into(), image: "x".into(), command: None, env: Default::default(), variables: vec![], cpu: 0.25, memory_mb: 128 }],
             block_on: Some(crate::model::Severity::Critical),
             slo: Some(crate::model::Slo { objective: 99.9, latency_ms: None, window_days: 28 }),
@@ -140,12 +144,12 @@ mod tests {
             log_metrics: vec![crate::model::LogMetric { name: "payments_failed".into(), pattern: "payment failed".into() }],
             schedule_scale: vec![crate::model::ScaleWindow { windows: vec![crate::freeze::Window { from: "mon 08:00".into(), to: "fri 18:00".into() }], timezone: None, min_instances: 2 }],
         };
-        let keys: std::collections::BTreeSet<String> = serde_json::to_value(&all).unwrap().as_object().unwrap().keys().filter(|k| *k != "volume").cloned().collect();
+        let keys: std::collections::BTreeSet<String> = serde_json::to_value(&all).unwrap().as_object().unwrap().keys().filter(|k| *k != "volume" && *k != "push").cloned().collect();
         let file: std::collections::BTreeSet<String> = apps_build::app::RUN_KEYS.iter().map(|k| k.to_string()).collect();
         assert_eq!(keys, file);
         // The editors' schema gives each the type it serializes as.
         let schema: serde_json::Value = serde_json::from_str(include_str!("../../../docs/apps/roll.schema.json")).unwrap();
-        for (k, v) in serde_json::to_value(&all).unwrap().as_object().unwrap().iter().filter(|(k, _)| *k != "volume") {
+        for (k, v) in serde_json::to_value(&all).unwrap().as_object().unwrap().iter().filter(|(k, _)| *k != "volume" && *k != "push") {
             let kind = match v {
                 serde_json::Value::Bool(_) => "boolean",
                 serde_json::Value::Number(n) if n.is_f64() => "number",

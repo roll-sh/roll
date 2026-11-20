@@ -1,8 +1,8 @@
 //! Deploy freezes (GitLab's deploy freeze periods, a change window; docs/apps/README.md, "Deploy
 //! freezes"): an environment's `freeze: {until?, windows?, timezone?, reason?}` holds its
 //! automatic deploys while it's on (pushes, tags, hooks and the Git watch build to `ready`, as a
-//! person's hold does) and refuses a person's deploy, redeploy or promotion unless it says
-//! `override: true` (written in the deployment's message and the audit log). A rollback is never
+//! person's hold does) and refuses a person's deploy, redeploy or promotion unless it carries
+//! the header `X-Roll-Override: 1`, an admin's call (written in the deployment's message and the audit log). A rollback is never
 //! frozen: it's the way out. On until `until` (unix ms), or in any of its weekly `windows`
 //! (`{from: "fri 17:00", to: "mon 09:00"}` in its time zone), or always when it names neither.
 
@@ -29,6 +29,33 @@ pub struct Freeze {
 pub struct Window {
     pub from: String,
     pub to: String,
+}
+
+/// When an environment is paused by the clock ([`crate::Apps::pause_pass`]): a staging site off
+/// at night and over the weekend, as Railway's app sleeping and a scheduled scale to zero save.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PauseSchedule {
+    pub windows: Vec<Window>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timezone: Option<String>,
+}
+
+impl PauseSchedule {
+    fn as_freeze(&self) -> Freeze {
+        Freeze { until: None, windows: self.windows.clone(), timezone: self.timezone.clone(), reason: String::new() }
+    }
+
+    pub fn check(&self) -> Result<()> {
+        if self.windows.is_empty() {
+            return Err(Error::BadRequest("pause_schedule: at least one window".into()));
+        }
+        self.as_freeze().check().map_err(|e| Error::BadRequest(e.to_string().replace("freeze:", "pause_schedule:")))
+    }
+
+    pub fn on(&self, now: i64) -> bool {
+        !self.windows.is_empty() && self.as_freeze().on(now)
+    }
 }
 
 const DAYS: [&str; 7] = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"];

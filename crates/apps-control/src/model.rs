@@ -223,7 +223,7 @@ pub struct LogDrain {
 pub const DRAIN_FORMATS: [&str; 3] = ["ndjson", "otlp", "syslog"];
 
 /// What a drain can be sent.
-pub const DRAIN_SOURCES: [&str; 3] = ["runtime", "http", "build"];
+pub const DRAIN_SOURCES: [&str; 6] = ["runtime", "http", "build", "audit", "traces", "metrics"];
 
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct NotifyTarget {
@@ -283,11 +283,24 @@ pub struct Access {
 }
 
 /// A private registry's login for a service's image (`PUT …/registry`); the password is sealed
-/// and never returned.
+/// and never returned. An ECR login (`kind: "ecr"`) is an access key (its id as `username`) that
+/// each pull exchanges for ECR's 12-hour token in `region`.
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct Registry {
     pub server: String,
     pub username: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub kind: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub region: Option<String>,
+}
+
+/// An ECR registry host (`<account>.dkr.ecr.<region>.amazonaws.com`): its region.
+pub fn ecr_region(host: &str) -> Option<&str> {
+    let rest = host.strip_suffix(".amazonaws.com")?;
+    let (account, region) = rest.split_once(".dkr.ecr.")?;
+    let ok = account.len() == 12 && account.bytes().all(|b| b.is_ascii_digit()) && !region.is_empty() && region.len() <= 32 && region.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-');
+    ok.then_some(region)
 }
 
 /// A private Git repository's login for a Git URL service (`PUT …/git-login`): sent only to
@@ -590,10 +603,27 @@ pub struct Run {
     /// patches). Without it the environment only says so (`base_updated`).
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub rebuild_on_base: bool,
+    /// A web service's page loaded before a deploy keeps talking to the deployment that served
+    /// it, for a day (Vercel's skew protection; [`crate::skew`]).
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub skew_protection: bool,
+    /// A web service's hard limit (Cloud Run's, Fly's `hard_limit`): with every instance at its
+    /// `concurrency` and `max_instances` of them, a request waits up to this long (1–60 s) for a
+    /// slot, then gets a 429. Without it the least busy instance takes it past its concurrency.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub queue_s: Option<u32>,
+    /// A web service scaled on its answers' p95 too (Heroku's response-time autoscaling): over
+    /// this many ms for a window, another instance, as `cpu_target` adds one (50–60,000).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub latency_target_ms: Option<u32>,
     /// Commands on a schedule, each a job of the live deployment at its due times (Heroku
     /// Scheduler, Vercel crons): any service's, without a cron service of its own.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub schedules: Vec<Scheduled>,
+    /// A roll stream's records POSTed to a web service's path as they arrive (Cloud Run's
+    /// Pub/Sub push): a group's offset committed on each 2xx (`crate::push`). At most four.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub push: Vec<Push>,
     /// Containers beside each instance (Cloud Run's sidecars, Fly's multi-container machines):
     /// in its network namespace (they reach each other on localhost), started after it, frozen,
     /// stopped and removed with it. A web service's or a worker's; at most four.
@@ -861,6 +891,53 @@ pub struct Scheduled {
     pub timeout_s: Option<u32>,
 }
 
+/// One of `run.push`: a topic of a roll stream delivered to a path of one environment, a record
+/// a POST, each partition in order, the group's offset committed on a 2xx (at least once).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Push {
+    /// The stream, by its id (`st_…`), on the service's own project.
+    pub stream: String,
+    pub topic: String,
+    /// The consumer group whose committed offsets say what was delivered.
+    pub group: String,
+    /// Where each record is POSTed: an absolute path, like `/events`.
+    pub path: String,
+    /// The environment that gets them (default `production`): one, so two never split a group.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub environment: Option<String>,
+    /// A topic of the same stream a record goes to after `max_attempts` failed tries, so its
+    /// partition moves on; without one a record is tried until it's taken.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dead_letter: Option<String>,
+    /// 1–100 (default 5), with `dead_letter`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_attempts: Option<u32>,
+    /// How long one POST may take: 1–600 s (default 30).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timeout_s: Option<u32>,
+    /// Records POSTed at once, each from its own partitions (1–32, default 4): order holds
+    /// within a partition, and a busy topic scales the service out.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_in_flight: Option<u32>,
+}
+
+impl Push {
+    pub fn environment(&self) -> &str {
+        self.environment.as_deref().unwrap_or(PRODUCTION)
+    }
+}
+
+/// A topic or group name as Kafka takes one.
+fn kafka_name(s: &str) -> bool {
+    !s.is_empty() && s.len() <= 249 && s != "." && s != ".." && s.bytes().all(|b| b.is_ascii_alphanumeric() || b"._-".contains(&b))
+}
+
+/// A stream's id (`st_` and 12 of a-z, 0-9): never a name.
+pub fn stream_id(s: &str) -> bool {
+    s.strip_prefix("st_").is_some_and(|r| r.len() == 12 && r.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit()))
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Restart {
@@ -946,11 +1023,20 @@ pub struct Rollout {
     /// times as fast as it lasts (Argo Rollouts' analysis); default 14.4, the fast burn alert's.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub slo_burn: Option<f64>,
+    /// A step fails when the new deployment's p95 response time is more than this many percent
+    /// above the old one's (Flagger's request duration check); off unless set.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub p95_pct: Option<u32>,
+    /// `false`: the old instances stop (draining for `drain_s`) before the new ones start, so
+    /// two never run at once (Fly's `immediate`, Heroku's workers): a bot, a scheduler, a
+    /// consumer that must be alone. A web service's requests wait for the new one meanwhile.
+    #[serde(skip_serializing_if = "is_true")]
+    pub overlap: bool,
 }
 
 impl Default for Rollout {
     fn default() -> Self {
-        Rollout { steps: Vec::new(), step_s: 120, error_pct: 5, manual: false, slo_burn: None }
+        Rollout { steps: Vec::new(), step_s: 120, error_pct: 5, manual: false, slo_burn: None, p95_pct: None, overlap: true }
     }
 }
 
@@ -1041,7 +1127,11 @@ impl Default for Run {
             tcp: false,
             rollback_on_crash: false,
             rebuild_on_base: false,
+            skew_protection: false,
+            queue_s: None,
+            latency_target_ms: None,
             schedules: Vec::new(),
+            push: Vec::new(),
             sidecars: Vec::new(),
             block_on: None,
             slo: None,
@@ -1088,6 +1178,38 @@ impl Run {
             }
             if sc.timeout_s.is_some_and(|t| !(1..=86_400).contains(&t)) {
                 return bad("schedules' timeout_s is 1–86400");
+            }
+        }
+        if !self.push.is_empty() && (self.kind != RunType::Web || self.tcp) {
+            return bad("push is a web service's (each record is an HTTP POST)");
+        }
+        if self.push.len() > 4 {
+            return bad("push is at most four");
+        }
+        for (i, p) in self.push.iter().enumerate() {
+            if !stream_id(&p.stream) || !kafka_name(&p.topic) || !kafka_name(&p.group) {
+                return bad("push is [{ stream: a stream's id (st_…), topic, group: a-z, A-Z, 0-9, . _ -, path }]");
+            }
+            if !p.path.starts_with('/') || p.path.len() > 2000 || !p.path.bytes().all(|b| b.is_ascii_graphic()) {
+                return bad("push's path is an absolute path, like /events");
+            }
+            if let Some(e) = &p.environment {
+                check_name("push's environment", e)?;
+            }
+            if p.dead_letter.as_deref().is_some_and(|d| !kafka_name(d) || d == p.topic) {
+                return bad("push's dead_letter is another topic of the stream");
+            }
+            if p.max_attempts.is_some_and(|m| p.dead_letter.is_none() || !(1..=100).contains(&m)) {
+                return bad("push's max_attempts is 1–100, with a dead_letter");
+            }
+            if p.timeout_s.is_some_and(|t| !(1..=600).contains(&t)) {
+                return bad("push's timeout_s is 1–600");
+            }
+            if p.max_in_flight.is_some_and(|n| !(1..=32).contains(&n)) {
+                return bad("push's max_in_flight is 1–32");
+            }
+            if self.push[..i].iter().any(|o| o.stream == p.stream && o.group == p.group && o.topic == p.topic) {
+                return bad("push has one rule per stream, topic and group");
             }
         }
         if !self.sidecars.is_empty() && !matches!(self.kind, RunType::Web | RunType::Worker) {
@@ -1160,6 +1282,12 @@ impl Run {
                 return bad("a sidecar's cpu is 0.1–2, its memory_mb 64–4096");
             }
         }
+        if self.queue_s.is_some_and(|q| !(1..=60).contains(&q)) {
+            return bad("queue_s is 1–60 seconds");
+        }
+        if self.latency_target_ms.is_some_and(|t| !(50..=60_000).contains(&t)) {
+            return bad("latency_target_ms is 50–60,000");
+        }
         let r = &self.rollout;
         if r.steps.len() > 5 || r.steps.iter().any(|s| !(1..=99).contains(s)) || r.steps.windows(2).any(|w| w[0] >= w[1]) {
             return bad("rollout.steps is up to five increasing percents, 1–99");
@@ -1169,6 +1297,9 @@ impl Run {
         }
         if r.slo_burn.is_some_and(|b| !(1.0..=1000.0).contains(&b)) {
             return bad("rollout.slo_burn is 1–1000");
+        }
+        if r.p95_pct.is_some_and(|p| !(1..=1000).contains(&p)) {
+            return bad("rollout.p95_pct is 1–1000");
         }
         if !(1..=100).contains(&r.error_pct) {
             return bad("rollout.error_pct is 1–100");
@@ -1190,9 +1321,7 @@ impl Run {
             }
         } else if let Some(sc) = &self.scale {
             // A stream by its id (`st_…`), never a name; a group as Kafka names one.
-            let stream_ok = sc.stream.strip_prefix("st_").is_some_and(|r| r.len() == 12 && r.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit()));
-            let group_ok = !sc.group.is_empty() && sc.group.len() <= 249 && sc.group != "." && sc.group != ".." && sc.group.bytes().all(|b| b.is_ascii_alphanumeric() || b"._-".contains(&b));
-            if !stream_ok || !group_ok || !(1..=1_000_000_000).contains(&sc.per_instance) {
+            if !stream_id(&sc.stream) || !kafka_name(&sc.group) || !(1..=1_000_000_000).contains(&sc.per_instance) {
                 return bad("scale is { stream: a stream's id (st_…), group: a-z, A-Z, 0-9, . _ -, per_instance: 1–1e9 }");
             }
         }
@@ -1304,6 +1433,9 @@ impl Run {
         if self.kind != RunType::Web {
             // Only requests can be split: a worker or a cron run switches at once.
             self.rollout.steps.clear();
+        }
+        if !self.rollout.overlap && !self.rollout.steps.is_empty() {
+            return bad("rollout: without overlap nothing runs beside the new deployment, so it can't take a share of requests (no steps)");
         }
         match self.kind {
             RunType::Cron => {
@@ -1545,9 +1677,25 @@ pub struct Environment {
     /// Its split test: a share of its visitors served by another environment.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub split: Option<Split>,
+    /// When it's paused by the clock (`pause_schedule`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pause_schedule: Option<crate::freeze::PauseSchedule>,
     /// Where a share of its requests is copied, their answers dropped (`mirror`).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub mirror: Option<Split>,
+    /// HTML of its own in every page (Netlify's snippet injection).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub snippets: Vec<Snippet>,
+    /// Its runtime config (Vercel's Edge Config): values its instances read at `ROLL_CONFIG_URL`
+    /// without a deploy, and the version they're at.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub config: Option<serde_json::Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub config_version: Option<i64>,
+    /// When its token was last rotated (`…/config/rotate`): the address before it reads until a
+    /// deploy made after it is live.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub config_rotated_at: Option<i64>,
     /// Its deploy freeze, and whether it's on now ([`crate::freeze`]).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub freeze: Option<crate::freeze::Freeze>,
@@ -1821,6 +1969,33 @@ pub struct Route {
     pub path: String,
     /// The other service, by its name in the project.
     pub service: String,
+}
+
+/// HTML of an environment's own in every page the proxy answers (Netlify's snippet injection):
+/// an analytics or chat tag without a code change. Only the owner's text, in a 200 HTML page.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Snippet {
+    pub at: SnippetAt,
+    pub html: String,
+}
+
+/// Where a snippet goes in each page: before `</head>`, or before `</body>`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SnippetAt {
+    Head,
+    BodyEnd,
+}
+
+impl Snippet {
+    /// At most five, each 1 byte to 16 KiB of text.
+    pub fn check(all: &[Snippet]) -> Result<()> {
+        if all.len() > 5 || all.iter().any(|s| s.html.trim().is_empty() || s.html.len() > 16 << 10 || s.html.contains('\0')) {
+            return Err(Error::BadRequest("snippets are at most 5 of {at: head | body_end, html: 1 byte to 16 KiB}".into()));
+        }
+        Ok(())
+    }
 }
 
 /// An environment's split test (Netlify's split testing): `percent` of its visitors, each kept
@@ -2515,6 +2690,35 @@ pub struct Link {
     pub vars: Vec<String>,
 }
 
+/// The environment a `roll://ENV[/folder…]/KEY` value names (roll secrets' references; its
+/// own syntax is checked where it resolves): None when it isn't one; an error when it's
+/// malformed, or names a project (a service's references are its own project's).
+pub fn secret_ref_env(v: &str) -> Option<Result<String>> {
+    let bad = |m: &str| Some(Err(Error::BadRequest(m.into())));
+    // What roll secrets' parser would take for one (it trims) is one; only its exact form is
+    // accepted, so no check here or elsewhere reads it differently.
+    if !v.trim().to_ascii_lowercase().starts_with("roll://") {
+        return None;
+    }
+    let Some(rest) = v.strip_prefix("roll://").filter(|_| v.trim() == v) else {
+        return bad("a roll:// reference is written exactly: roll://ENV/KEY, lowercase, with nothing around it");
+    };
+    if rest.contains('@') {
+        return bad("a service's roll:// reference names its own project's secrets: roll://ENV/KEY, without a project");
+    }
+    match rest.split_once('/') {
+        Some((env, key)) if !env.is_empty() && !key.is_empty() && !key.ends_with('/') => Some(Ok(env.to_string())),
+        _ => bad("a roll:// reference is roll://ENV/KEY or roll://ENV/folder/KEY"),
+    }
+}
+
+/// Whether a `roll://` reference's folder may be read by `service`: one under `/services/<id>`
+/// (where "Move to roll secrets" keeps a service's own) only by that service.
+pub fn secret_ref_folder_ok(v: &str, service: &str) -> bool {
+    let parts: Vec<&str> = v.strip_prefix("roll://").unwrap_or(v).split('/').collect();
+    !(parts.len() >= 4 && parts[1] == "services" && parts[2] != service)
+}
+
 /// An environment variable's name: `[A-Za-z_][A-Za-z0-9_]*`, at most 128 characters.
 pub fn check_var_name(n: &str) -> Result<()> {
     let mut b = n.bytes();
@@ -2611,6 +2815,12 @@ pub struct Job {
     pub command: String,
     /// Containers it runs, each with `ROLL_TASK_INDEX` and `ROLL_TASK_COUNT` (Cloud Run Jobs').
     pub tasks: u32,
+    /// Tries after a task's failure (Cloud Run Jobs' `--max-retries`): 0–5, each in a fresh
+    /// container with `ROLL_TASK_ATTEMPT`.
+    #[serde(skip_serializing_if = "is_zero")]
+    pub retries: u32,
+    /// Tasks running at once (Cloud Run Jobs' `--parallelism`): 1–100.
+    pub parallelism: u32,
     pub status: RunStatus,
     pub exit_code: Option<i32>,
     pub started_at: i64,
@@ -2789,4 +2999,8 @@ mod fix_tests {
         assert!(f("the build failed (docker build exited with 1)", Some("npm ci can only install packages when your package.json and package-lock.json are in sync")).contains("package-lock.json"));
         assert_eq!(super::fix_for("a reason nobody wrote down", None), None);
     }
+}
+
+fn is_zero(n: &u32) -> bool {
+    *n == 0
 }

@@ -301,7 +301,12 @@ The product should feel alive: dots react to the cursor and the marks "think". E
     product (Postgres runs `read_only` SQL as a role that can only read), not by parsing.
   - roll's MCP server is `crates/roll-mcp` (`/v1/mcp`): a tool is one route (`tools.rs`), called
     through the gated router, its hints from the catalogue; list it in docs/mcp.md (a test checks).
-    Never call a service directly from a tool.
+    Never call a service directly from a tool. After adding or changing tools, or a product's routes
+    or owner routing, run `pnpm test:mcp-sweep`: every tool called through `/v1/mcp` against a fresh
+    rolld, so a path, query or body the product rejects, or an id it routes on differently, fails.
+    A new route of a product with MCP tools gets a tool, or a line in
+    `crates/roll-mcp/src/no-tool.txt` saying why not (a credential, a person's call, the
+    operator's…; `no tool yet` for a gap): roll-mcp's tests fail on a route with neither.
 - **Projects (the dashboard's workspace):** `crates/roll-workspace` stores projects and where each
   product resource sits on its canvas (docs/workspace.md); the resources themselves stay in their
   products. The dashboard reads it through `lib/workspace-api.ts` (change both together), joins it

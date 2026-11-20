@@ -267,10 +267,17 @@ impl FilterRewrite {
     /// by doc, and so is a profiled request: its profile reports the collection Elasticsearch
     /// does without the rewrite (roll doesn't render `FromDateRange`'s delegate debug).
     pub fn counting(ctx: &BindCtx<'_>, vs: &BoundVs, buckets: DateBuckets, has_sub: bool) -> Option<FilterRewrite> {
+        // Right under a top-level `nested` aggregation of a `match_all`, the docs collected are
+        // every doc of the nested path (each sits before its root, and every root matches), so
+        // a field of that path (no deeper one) has its points on exactly those docs.
+        let nested = ctx.matches_every_root()
+            && ctx.parents == ["nested"]
+            && ctx.nested_path.is_some()
+            && vs.field.as_ref().is_some_and(|f| f.nested_path == ctx.nested_path);
         let ok = !has_sub
             && ctx.profiler.is_none()
             && !ctx.terminate_after
-            && ctx.parents.is_empty()
+            && (ctx.parents.is_empty() || nested)
             && ctx.cardinality.is_one()
             && !ctx.time_series_request
             && vs.script.is_none()
@@ -287,7 +294,7 @@ impl FilterRewrite {
         let mut fr = FilterRewrite::new(ctx, field, Encoding::Long, Source::Date(buckets), false, usize::MAX, false);
         fr.doc_count_field = ctx.doc_count_field;
         let bounds = shard_bounds(ctx.searcher, field);
-        let shard = if ctx.matches_all {
+        let shard = if ctx.matches_all || nested {
             Some(bounds)
         } else {
             match ctx.query.as_ref().map(unwrap) {

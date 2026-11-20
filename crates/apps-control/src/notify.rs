@@ -18,12 +18,13 @@ use std::sync::Arc;
 use std::time::Duration;
 
 /// What a target can ask for; a new one gets the two that need someone.
-pub const EVENTS: [&str; 27] = [
+pub const EVENTS: [&str; 29] = [
     "deploy.failed",
     "deploy.base_updated",
     "rollout.waiting",
     "deploy.ready",
     "error.new",
+    "error.regressed",
     "crash_loop",
     "deploy.active",
     "spend.alert",
@@ -46,8 +47,10 @@ pub const EVENTS: [&str; 27] = [
     "heartbeat.missed",
     "deploy.vulnerable",
     "alert.slo",
+    // Every `audit.*` entry (who changed what), for a SIEM's webhook; never an on-call page.
+    "audit",
 ];
-const DEFAULT_EVENTS: [&str; 21] = ["check.down", "heartbeat.missed", "alert.slo", "deploy.failed", "rollout.waiting", "deploy.ready", "error.new", "crash_loop", "spend.alert", "spend.limit", "alert.memory", "alert.errors", "alert.latency", "alert.capacity", "alert.log", "cron.failed", "domain.expiring", "domain.expired", "domain.tls_failed", "volume.backup_failed", "volume.full"];
+const DEFAULT_EVENTS: [&str; 22] = ["check.down", "heartbeat.missed", "alert.slo", "deploy.failed", "rollout.waiting", "deploy.ready", "error.new", "error.regressed", "crash_loop", "spend.alert", "spend.limit", "alert.memory", "alert.errors", "alert.latency", "alert.capacity", "alert.log", "cron.failed", "domain.expiring", "domain.expired", "domain.tls_failed", "volume.backup_failed", "volume.full"];
 /// Whether a target with `events` hears an event: its own kind, or for a resolution, the alert's
 /// (whoever heard an alert hears it clear; there's nothing else to ask for).
 fn wants(events: &[String], kind: &str, data: &Value, oncall: bool) -> bool {
@@ -55,6 +58,7 @@ fn wants(events: &[String], kind: &str, data: &Value, oncall: bool) -> bool {
         "alert.resolved" => data["alert"].as_str().is_some_and(|a| events.iter().any(|e| e == a)),
         // An on-call target that pages on failed deploys hears the next good one: it closes them.
         "deploy.active" if oncall => events.iter().any(|e| e == "deploy.failed" || e == "deploy.active"),
+        k if k.starts_with("audit.") => !oncall && events.iter().any(|e| e == "audit"),
         k => events.iter().any(|e| e == k),
     }
 }
@@ -317,8 +321,9 @@ impl Apps {
             let p = match e.data["project"].as_str().filter(|_| e.service.is_empty()) {
                 Some(p) => p.to_string(),
                 None => {
-                    let sid = e.service.clone();
-                    let Ok(svc) = self.db(move |s| s.service(&sid)).await else { continue };
+                    // A deleted service's own entry (`audit.deleted`) is still its project's.
+                    let (sid, audit) = (e.service.clone(), e.kind.starts_with("audit."));
+                    let Ok(svc) = self.db(move |s| if audit { s.service_any(&sid).map(|(s, _)| s) } else { s.service(&sid) }).await else { continue };
                     svc.project
                 }
             };
@@ -385,7 +390,7 @@ impl Apps {
     /// An event for a person: a title and a line.
     async fn describe(self: &Arc<Self>, e: &Event) -> (String, String) {
         let sid = e.service.clone();
-        let name = self.db(move |s| s.service(&sid)).await.map(|s| s.name).unwrap_or_else(|_| e.service.clone());
+        let name = self.db(move |s| s.service_any(&sid)).await.map(|(s, _)| s.name).unwrap_or_else(|_| e.service.clone());
         let what = format!("{name} in {}", e.environment);
         let rev = e.data["revision"].as_str().map(|r| format!(" ({})", &r[..r.len().min(8)])).unwrap_or_default();
         // Who asked for the deploy, when someone did.
@@ -405,6 +410,14 @@ impl Apps {
         };
         let rev = format!("{rev}{by}");
         match e.kind.as_str() {
+            k if k.starts_with("audit.") => {
+                let what = if e.environment.is_empty() { name.clone() } else { what };
+                let who = e.data["actor"].as_str().unwrap_or("someone");
+                let mut fields = e.data.as_object().cloned().unwrap_or_default();
+                fields.remove("actor");
+                let said = if fields.is_empty() { String::new() } else { format!(" {}", Value::Object(fields)) };
+                (format!("{what}: {}", &k[6..]), format!("{who} did {}{said}.", &k[6..]))
+            }
             "deploy.failed" => (format!("{what}: deploy failed"), format!("The deploy{rev} failed: {}. The live deployment keeps serving.", e.data["error"].as_str().unwrap_or("no reason given"))),
             "deploy.active" => (format!("{what}: deployed"), format!("A new deployment{rev} is live.")),
             "rollout.waiting" => (
@@ -459,6 +472,7 @@ impl Apps {
                 format!("Its fields: {}. The service's Forms panel shows what was sent.", e.data["fields"].as_array().map(|f| f.iter().filter_map(Value::as_str).collect::<Vec<_>>().join(", ")).filter(|f| !f.is_empty()).unwrap_or_else(|| "none".into())),
             ),
             "error.new" => (format!("{what}: a new error, {}", e.data["name"].as_str().unwrap_or("an error")), "Its log has an error it hasn't had before. The Metrics tab's Errors shows it whole, with how often it happens.".to_string()),
+            "error.regressed" => (format!("{what}: {} is back", e.data["name"].as_str().unwrap_or("an error")), format!("An error marked resolved is in its log again{rev}. The Metrics tab's Errors shows it; resolve it again once it's fixed, or mute it.")),
             "alert.log" => (format!("{what}: its log says {}", e.data["pattern"]), format!("{} lines in five minutes matched (the alert is at {}).", e.data["count"], e.data["threshold"])),
             "volume.full" => (format!("{what}: its volume is {}% full", e.data["pct"]), format!("It holds {:.1} GB of its {} GB: give it more room (`roll apps set --volume`) or delete what it doesn't need before it fills up.", e.data["used_bytes"].as_f64().unwrap_or(0.0) / 1_073_741_824.0, e.data["size_gb"])),
             "volume.backup_failed" => (format!("{what}: volume backup failed"), format!("The daily backup of its volume failed: {}. The last one that worked is still there.", e.data["error"].as_str().unwrap_or("no reason given"))),
@@ -541,7 +555,7 @@ impl Apps {
             "discord" => json!({ "content": format!("**{title}**\n{text}{}", link.as_ref().map(|l| format!("\n{l}")).unwrap_or_default()), "allowed_mentions": { "parse": [] } }),
             // An Adaptive Card (what Teams' Workflows take): its text is never a mention.
             "teams" => {
-                let body = [json!({ "type": "TextBlock", "text": title, "weight": "Bolder", "wrap": true }), json!({ "type": "TextBlock", "text": text, "wrap": true })];
+                let body = [json!({ "type": "TextBlock", "text": teams_escape(title), "weight": "Bolder", "wrap": true }), json!({ "type": "TextBlock", "text": teams_escape(text), "wrap": true })];
                 let actions = link.as_ref().map(|l| vec![json!({ "type": "Action.OpenUrl", "title": "Open in roll", "url": l })]).unwrap_or_default();
                 json!({ "type": "message", "attachments": [{ "contentType": "application/vnd.microsoft.card.adaptive", "content": { "$schema": "http://adaptivecards.io/schemas/adaptive-card.json", "type": "AdaptiveCard", "version": "1.4", "body": body, "actions": actions } }] })
             }
@@ -656,8 +670,28 @@ fn slack_escape(s: &str) -> String {
     s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;")
 }
 
+/// An Adaptive Card's text renders Markdown links (`[Approve](https://…)`): a commit author's
+/// name or an error can't make one (a zero-width space between `]` and `(`; nothing shows).
+fn teams_escape(s: &str) -> String {
+    s.replace("](", "]\u{200B}(")
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn audit_entries_go_to_who_asks_and_never_page() {
+        let ev = |e: &[&str]| e.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        let data = serde_json::json!({});
+        assert!(super::wants(&ev(&["audit"]), "audit.variables", &data, false));
+        assert!(!super::wants(&ev(&["audit"]), "audit.variables", &data, true), "never an on-call page");
+        assert!(!super::wants(&super::DEFAULT_EVENTS.map(String::from), "audit.variables", &data, false), "not by default");
+    }
+
+    #[test]
+    fn a_teams_card_can_not_link() {
+        assert!(!super::teams_escape("[Approve](https://evil)").contains("]("));
+    }
+
     #[test]
     fn slack_text_can_not_mention_or_link() {
         assert_eq!(super::slack_escape("<!channel> <https://evil|Approve> & co"), "&lt;!channel&gt; &lt;https://evil|Approve&gt; &amp; co");

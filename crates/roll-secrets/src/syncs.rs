@@ -495,7 +495,15 @@ impl Secrets {
         caller.need(Action::Read, &Scope::project(project))?;
         self.project(project)?;
         let r = self.sync_row(project, id)?;
-        caller.need(Action::Admin, &Scope::at(project, &r.info.environment, &r.info.path))?;
+        let scope = Scope::at(project, &r.info.environment, &r.info.path);
+        // Resuming what a cut-off paused is the incident's admin's call (the sync's maker may be
+        // who it was cut off from). Otherwise pausing or resuming needs what running the kind
+        // does (`reveal` for a product's kind, as making, running or deleting one does), or admin.
+        if !change.paused && r.info.paused_why.is_some() {
+            caller.need(Action::Admin, &scope)?;
+        } else if !caller.allows(Action::Admin, &scope) {
+            caller.need(self.sync_needs(&r.info.kind), &scope)?;
+        }
         let now = self.db.now_ms()?;
         self.db.write(|c| {
             let what = match change.paused {

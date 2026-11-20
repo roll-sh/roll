@@ -1139,6 +1139,23 @@ impl ObjectMapper {
                 if parts.is_empty() {
                     return Err(EsError::illegal_argument("field name cannot contain only dots"));
                 }
+                // Past [`MAX_DOTTED_PARENTS`] its parent objects can't pass the depth limit, and
+                // building, validating and dropping them all walk the chain: the first ones over
+                // the limit are enough for the validation to refuse it as it refuses the whole
+                // name.
+                if parts.len() > MAX_DOTTED_PARENTS {
+                    let keep = ctx.depth_limit.max(0) as usize + 1;
+                    if keep >= MAX_DOTTED_PARENTS {
+                        return Err(EsError::illegal_argument(format!(
+                            "Limit of mapping depth [{}] has been exceeded due to object field [{}]",
+                            ctx.depth_limit,
+                            parts[..MAX_DOTTED_PARENTS].join(".")
+                        )));
+                    }
+                    let leaf = parts[parts.len() - 1];
+                    parts.truncate(keep);
+                    parts.push(leaf);
+                }
                 let leaf = parts[parts.len() - 1].to_string();
                 validate_field_name(&leaf)?;
                 for p in &parts[..parts.len() - 1] {
@@ -1338,6 +1355,21 @@ fn parse_subobjects(v: &Value) -> Result<bool, EsError> {
         Value::Str(s) if s.eq_ignore_ascii_case("false") => Ok(false),
         other => Err(EsError::parse(format!("unknown subobjects value: {}", other.to_es_string()))),
     }
+}
+
+/// Parts of a dotted field name that become objects in full. Far past any depth limit
+/// (`index.mapping.depth.limit`, 20) yet shallow enough for every walk over the mapping.
+const MAX_DOTTED_PARENTS: usize = 100;
+
+/// A document field name with more parts than [`MAX_DOTTED_PARENTS`]: each part is an object
+/// level that resolving and mapping the name walk through all prefixes of, so it is refused
+/// before either starts (roll's own). The message names the start of the field.
+pub(crate) fn too_many_parts(name: &str) -> Option<String> {
+    if name.bytes().filter(|&b| b == b'.').count() < MAX_DOTTED_PARENTS {
+        return None;
+    }
+    let shown = &name[..name.char_indices().nth(64).map_or(name.len(), |(i, _)| i)];
+    Some(format!("field name [{shown}...] has more than {MAX_DOTTED_PARENTS} parts"))
 }
 
 fn validate_field_name(name: &str) -> Result<(), EsError> {

@@ -42,7 +42,7 @@ pub(super) const PART: u64 = 8 << 20;
 const GCS_MAX_CHUNK: i64 = 5 << 40;
 const AZURE_MAX_CHUNK: i64 = 2_684_354_550_000;
 /// `container`'s default.
-const AZURE_CONTAINER: &str = "elasticsearch-snapshots";
+pub(crate) const AZURE_CONTAINER: &str = "elasticsearch-snapshots";
 
 pub(super) fn secret_names(ty: &str) -> &'static [&'static str] {
     match ty {

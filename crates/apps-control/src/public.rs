@@ -25,6 +25,10 @@ pub fn router(apps: Arc<Apps>) -> axum::Router {
             if req.uri().path().starts_with(OTLP) {
                 return otlp(apps, req).await;
             }
+            // An environment's runtime config, read by its instances with its token.
+            if req.uri().path().starts_with(CONFIG) {
+                return runtime_config(apps, req).await;
+            }
             // An edge function's `context.next()` ([`crate::edge`]): signed, any host.
             if req.uri().path().starts_with(crate::edge::NEXT) {
                 return crate::edge::next(apps, req).await;
@@ -75,6 +79,73 @@ struct TargetPort(u16);
 /// Where instances send traces: `/_roll/otlp/{service}/{env}/{token}/v1/traces`, any host.
 pub const OTLP: &str = "/_roll/otlp/";
 
+/// Where an environment's instances read its runtime config (`ROLL_CONFIG_URL`):
+/// `/_roll/config/<service>/<env>/<token>`.
+pub const CONFIG: &str = "/_roll/config/";
+
+/// `GET …/_roll/config/<service>/<env>/<token>[?wait=S]`: `{version, config}` with the version as
+/// its ETag; `If-None-Match` the version it has answers 304, or with `wait` (at most 25 s) waits
+/// for the next version first. Read from the store, so any node answers; a wrong token or none
+/// is a 404, as a path that isn't one.
+async fn runtime_config(apps: Arc<Apps>, req: Request) -> Response {
+    let parts: Vec<String> = req.uri().path()[CONFIG.len()..].split('/').map(|s| percent_encoding::percent_decode_str(s).decode_utf8_lossy().into_owned()).collect();
+    let [id, env, token] = parts.as_slice() else { return (StatusCode::NOT_FOUND, "").into_response() };
+    if req.method() != axum::http::Method::GET || !id.starts_with("svc_") || !token.starts_with("rlc_") {
+        return (StatusCode::NOT_FOUND, "").into_response();
+    }
+    // A deleted service's (kept for a restore) answers nothing, whatever its token.
+    let (sid, e, t) = (id.clone(), env.clone(), token.clone());
+    let reads = move |s: &crate::store::Store| Ok(s.service(&sid).is_ok() && s.runtime_config_tokens(&sid, &e)?.is_some_and(|(now, before)| same(&now, &t) || before.is_some_and(|b| same(&b, &t))));
+    if !apps.db(reads).await.unwrap_or(false) {
+        return (StatusCode::NOT_FOUND, "").into_response();
+    }
+    let has = req.headers().get(header::IF_NONE_MATCH).and_then(|v| v.to_str().ok()).map(|v| v.trim_start_matches("W/").trim_matches('"').to_string());
+    let wait = req.uri().query().and_then(|q| url::form_urlencoded::parse(q.as_bytes()).find(|(k, _)| k == "wait")).and_then(|(_, v)| v.parse::<u64>().ok()).unwrap_or(0).min(25);
+    // At most CONFIG_WAITERS long polls an environment on a node; past that, an answer at once.
+    let key = crate::env_key(id, env);
+    let waiting = wait > 0 && {
+        let mut w = apps.config_waiters.lock();
+        let n = w.entry(key.clone()).or_default();
+        (*n < CONFIG_WAITERS).then(|| *n += 1).is_some()
+    };
+    let _left = Waiting(waiting.then(|| (apps.clone(), key)));
+    let until = Instant::now() + std::time::Duration::from_secs(if waiting { wait } else { 0 });
+    loop {
+        let (sid, e) = (id.clone(), env.clone());
+        let Ok(Some(version)) = apps.db(move |s| s.runtime_config_version(&sid, &e)).await else { return (StatusCode::NOT_FOUND, "").into_response() };
+        let tag = format!("\"{version}\"");
+        if has.as_deref() != Some(version.to_string().as_str()) {
+            let (sid, e) = (id.clone(), env.clone());
+            let Ok(Some((config, version))) = apps.db(move |s| s.runtime_config(&sid, &e)).await else { return (StatusCode::NOT_FOUND, "").into_response() };
+            return (StatusCode::OK, [(header::ETAG, format!("\"{version}\"")), (header::CACHE_CONTROL, "no-store".to_string())], axum::Json(serde_json::json!({ "version": version, "config": config }))).into_response();
+        }
+        if Instant::now() >= until {
+            return (StatusCode::NOT_MODIFIED, [(header::ETAG, tag)]).into_response();
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+    }
+}
+
+/// Long polls of one environment's runtime config a node holds at once.
+const CONFIG_WAITERS: usize = 64;
+
+/// A long poll's place, given back when it answers.
+struct Waiting(Option<(Arc<Apps>, String)>);
+
+impl Drop for Waiting {
+    fn drop(&mut self) {
+        if let Some((apps, key)) = self.0.take() {
+            let mut w = apps.config_waiters.lock();
+            if let Some(n) = w.get_mut(&key) {
+                *n = n.saturating_sub(1);
+                if *n == 0 {
+                    w.remove(&key);
+                }
+            }
+        }
+    }
+}
+
 /// OTLP/HTTP from an environment's instances, on the service's owner: the token in the path is
 /// the credential (anything else is the same 404). Answered as OTLP expects: an empty export
 /// response.
@@ -122,7 +193,7 @@ pub fn port_router(apps: Arc<Apps>, service: String, env: String) -> axum::Route
 /// roll's own request headers, off a visitor's request where it comes in: from here on, one is
 /// roll's ([`VIA_SITE`] lets a rewrite past its target's access check).
 fn strip_ours(req: &mut Request) {
-    for h in [VIA_SITE, VIA_EDGE, TARGET, ORIGINAL] {
+    for h in [VIA_SITE, VIA_EDGE, MIRROR, TARGET, ORIGINAL] {
         req.headers_mut().remove(h);
     }
 }
@@ -400,6 +471,15 @@ async fn proxy_external(apps: &Arc<Apps>, live: &Arc<crate::live::EnvLive>, serv
 /// Marks a request a site's rewrite sent on (roll's own: `x-roll-*` never reaches an app, and a
 /// visitor's is taken off where it came in, [`strip_ours`]).
 const VIA_SITE: &str = "x-roll-via-site";
+
+/// Marks a mirrored copy (roll's own, as [`VIA_SITE`] is): its target serves it, but it's no
+/// visitor's page view and no answer a rollout judges.
+const MIRROR: &str = "x-roll-mirror";
+
+/// Copies in flight on a node at most; past it, a copy isn't made (a slow or sleeping target
+/// never holds more).
+const MIRRORS_IN_FLIGHT: usize = 64;
+static MIRRORS: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(MIRRORS_IN_FLIGHT);
 
 /// Marks an edge function's `context.next()` ([`crate::edge`]): the site's files answer, no edge
 /// function again (roll's own, as [`VIA_SITE`] is).
@@ -1161,7 +1241,7 @@ fn strip_roll_headers(h: &mut axum::http::HeaderMap) {
 
 /// The waking proxy on the owner: an instance (woken if need be), the request forwarded, the
 /// answer metered.
-async fn proxy(apps: Arc<Apps>, service: &str, env: &str, deployment: Option<&str>, req: Request) -> Response {
+pub(crate) async fn proxy(apps: Arc<Apps>, service: &str, env: &str, deployment: Option<&str>, req: Request) -> Response {
     let (began, seen) = (Instant::now(), Seen::of(&req));
     let path = crate::model::normal_path(&seen.path);
     let r = proxy_inner(apps.clone(), service, env, deployment, req).await;
@@ -1351,10 +1431,15 @@ async fn proxy_inner(apps: Arc<Apps>, service: &str, env: &str, deployment: Opti
         let Ok(body) = axum::body::to_bytes(req.into_body(), crate::track::MAX_BODY).await else { return StatusCode::PAYLOAD_TOO_LARGE.into_response() };
         return apps.event_beacon(service, env, &body, country).into_response();
     }
-    let feedback = Tags { feedback: target.is_some() && page_load, vitals: gate.vitals && page_load };
-    if feedback.feedback || feedback.vitals {
+    let feedback = Tags { feedback: target.is_some() && page_load, vitals: gate.vitals && page_load, snippets: gate.snippets.clone().filter(|_| page_load) };
+    if feedback.feedback || feedback.vitals || feedback.snippets.is_some() {
         // The page as the app wrote it, so the tag can go in as it streams.
         req.headers_mut().insert(header::ACCEPT_ENCODING, HeaderValue::from_static("identity"));
+    }
+    if feedback.snippets.is_some() {
+        // Never a 304 for a page with snippets: one kept from before a snippet changed would
+        // keep the old one (its bytes aren't the file's, nor its ETag).
+        req.headers_mut().remove(header::IF_NONE_MATCH);
     }
     let live = match apps.load_live(service, env).await {
         Ok(l) => l,
@@ -1372,6 +1457,18 @@ async fn proxy_inner(apps: Arc<Apps>, service: &str, env: &str, deployment: Opti
     if live.paused() {
         return by("paused", page(StatusCode::SERVICE_UNAVAILABLE, "Paused", "This service is paused. Its owner can resume it."));
     }
+    // Skew protection (`run.skew_protection`): what a page loaded before a deploy asks for,
+    // naming its deployment, goes to that one (past every gate above, as its own URL would).
+    let skewed = match (deployment, live.template()) {
+        (None, Some(t)) if !ours && t.run.skew_protection => {
+            let asked = crate::skew::asked(&req);
+            apps.skew_target(service, env, &t, asked).await
+        }
+        _ => None,
+    };
+    let deployment = deployment.or(skewed.as_deref());
+    // A page load gets the deployment that answers it in a cookie (below).
+    let skew_cookie = deployment.is_none() && live.template().is_some_and(|t| t.run.skew_protection) && crate::skew::navigation(&req);
     // A static site's rewrite to one of the project's services, before its own cookies (a
     // gradual rollout's bucket, affinity) are read: they're the target's to read too.
     if !rewritten {
@@ -1419,13 +1516,16 @@ async fn proxy_inner(apps: Arc<Apps>, service: &str, env: &str, deployment: Opti
         for (k, v) in req.headers() {
             copy = copy.header(k, v);
         }
-        if let Ok(mut copy) = copy.body(Body::empty()) {
+        copy = copy.header(MIRROR, "1");
+        if let (Ok(mut copy), Ok(permit)) = (copy.body(Body::empty()), MIRRORS.try_acquire()) {
             if let Some(c) = roll_cluster::client_addr(&req) {
                 copy.extensions_mut().insert(roll_cluster::ClientAddr(c));
             }
             let (apps, service, target) = (apps.clone(), service.to_string(), m.environment.clone());
+            permit.forget();
             tokio::spawn(async move {
                 let _ = tokio::time::timeout(std::time::Duration::from_secs(30), split_to(apps, &service, &target, copy)).await;
+                MIRRORS.add_permits(1);
             });
         }
     }
@@ -1548,6 +1648,7 @@ async fn proxy_inner(apps: Arc<Apps>, service: &str, env: &str, deployment: Opti
         Err(WakeError::NoDeployment) => return by("not_deployed", page(StatusCode::NOT_FOUND, "Not deployed yet", "This service has no deployment in this environment yet.")),
         Err(WakeError::NotWeb) => return by("not_deployed", page(StatusCode::NOT_FOUND, "Not a web service", "This service is a worker or a cron job: it doesn't answer HTTP.")),
         Err(WakeError::Busy) => return by("wake", retry_soon(page(StatusCode::SERVICE_UNAVAILABLE, "Busy starting", "Too many requests are waiting for this service to start. Try again in a moment."))),
+        Err(WakeError::Full(_)) => return by("full", retry_soon(page(StatusCode::TOO_MANY_REQUESTS, "Busy", "Every instance of this service is busy. Try again in a moment."))),
         Err(WakeError::Capped) => return by("capped", page(StatusCode::PAYMENT_REQUIRED, "Paused", "This project reached its spending limit for the month. Its owner can raise the limit to bring it back.")),
         Err(WakeError::Paused) => return by("paused", page(StatusCode::SERVICE_UNAVAILABLE, "Paused", "This service is paused. Its owner can resume it.")),
         Err(e) => {
@@ -1559,6 +1660,7 @@ async fn proxy_inner(apps: Arc<Apps>, service: &str, env: &str, deployment: Opti
     // the proxy's own span in the request's trace (the wait, a wake, the answer).
     let span = gate.traces.then(|| ProxySpan::start(&apps, service, env, req.headers()));
     let access = Access { log: apps.logs.sink(format!("http:{service}/{env}"), crate::logs::Stream::Http), seen: Seen::of(&req), span, deployment: Default::default() };
+    let mirrored = req.headers().contains_key(MIRROR);
     // A custom domain sent to another of the app's ports: that port's address on the same
     // instance (published from the deploy after the domain's port was set; until then, a 502).
     if let Some(TargetPort(p)) = req.extensions().get::<TargetPort>().copied() {
@@ -1611,6 +1713,11 @@ async fn proxy_inner(apps: Arc<Apps>, service: &str, env: &str, deployment: Opti
     if let Some(c) = client.and_then(|c| HeaderValue::from_str(&c).ok()) {
         h.insert(HeaderName::from_static("x-forwarded-for"), c);
     }
+    // When roll took the request (Heroku's, unix ms): the app's APM reads the time it queued.
+    let took = code_sql::now_ms() - began.elapsed().as_millis() as i64;
+    if let Ok(v) = HeaderValue::from_str(&took.to_string()) {
+        h.insert(HeaderName::from_static("x-request-start"), v);
+    }
     if !h.contains_key("x-request-id")
         && let Ok(v) = HeaderValue::from_str(&crate::model::random(16))
     {
@@ -1636,7 +1743,9 @@ async fn proxy_inner(apps: Arc<Apps>, service: &str, env: &str, deployment: Opti
         Some(t) => match tokio::time::timeout(t, send).await {
             Ok(r) => r,
             Err(_) => {
-                live.answered(&lease.inst, 504);
+                if !mirrored {
+                    live.answered(&lease.inst, 504, None);
+                }
                 live.meter.lock().request(code_sql::now_ms(), began.elapsed().as_secs_f64() * 1000.0, 504, 0);
                 access.write(504, began, 0, &instance, &request_id, cold, waited_ms);
                 return page(StatusCode::GATEWAY_TIMEOUT, "Timed out", &format!("The service didn't answer within its {} s.", t.as_secs()));
@@ -1676,7 +1785,9 @@ async fn proxy_inner(apps: Arc<Apps>, service: &str, env: &str, deployment: Opti
                         Some(t) => match tokio::time::timeout(t, send).await {
                             Ok(r) => r,
                             Err(_) => {
-                                live.answered(&lease.inst, 504);
+                                if !mirrored {
+                                    live.answered(&lease.inst, 504, None);
+                                }
                                 live.meter.lock().request(code_sql::now_ms(), began.elapsed().as_secs_f64() * 1000.0, 504, 0);
                                 access.write(504, began, 0, &instance, &request_id, cold, waited_ms);
                                 return page(StatusCode::GATEWAY_TIMEOUT, "Timed out", &format!("The service didn't answer within its {} s.", t.as_secs()));
@@ -1699,13 +1810,17 @@ async fn proxy_inner(apps: Arc<Apps>, service: &str, env: &str, deployment: Opti
             // Nothing listens any more (killed, out of memory): the next request starts a
             // fresh instance.
             live.connect_failed(&lease.inst);
-            live.answered(&lease.inst, 503);
+            if !mirrored {
+                live.answered(&lease.inst, 503, None);
+            }
             live.meter.lock().request(code_sql::now_ms(), began.elapsed().as_secs_f64() * 1000.0, 503, 0);
             access.write(503, began, 0, &instance, &request_id, cold, waited_ms);
             return retry_soon(page(StatusCode::SERVICE_UNAVAILABLE, "Restarting", "The instance stopped; the next request starts it again."));
         }
         Err(e) => {
-            live.answered(&lease.inst, 502);
+            if !mirrored {
+                live.answered(&lease.inst, 502, None);
+            }
             live.meter.lock().request(code_sql::now_ms(), began.elapsed().as_secs_f64() * 1000.0, 502, 0);
             access.write(502, began, 0, &instance, &request_id, cold, waited_ms);
             // What went wrong is the owner's to read (the environment's log), not a visitor's.
@@ -1778,13 +1893,16 @@ async fn proxy_inner(apps: Arc<Apps>, service: &str, env: &str, deployment: Opti
             resp.headers_mut().append(header::SET_COOKIE, c);
         }
     }
+    if skew_cookie && let Some(c) = crate::skew::cookie(&lease.inst.deployment, apps.cfg.scheme == "https") {
+        resp.headers_mut().append(header::SET_COOKIE, c);
+    }
     // Count the bytes out, and keep the instance leased until the body is sent.
     let counted = Arc::new(AtomicU64::new(0));
     let (parts, body) = resp.into_parts();
     let c = counted.clone();
     // Every frame goes through as it came, trailers too (gRPC's status is one); the lease, the
     // meter's request and the access line go when the body does.
-    let done = Done { live: live.clone(), began, status, counted, access: Some((access, instance, request_id, cold, waited_ms)), lease };
+    let done = Done { live: live.clone(), began, status, counted, access: Some((access, instance, request_id, cold, waited_ms)), lease, mirrored, headers_ms: began.elapsed().as_secs_f64() * 1000.0 };
     let frames = http_body_util::BodyStream::new(body).map(move |frame| {
         let _until_sent = &done;
         if let Ok(f) = &frame
@@ -1818,14 +1936,20 @@ fn refresh_cached(apps: Arc<Apps>, service: String, env: String, req: Request, h
     })
 }
 
-/// roll's own scripts a page gets: the feedback button (a preview's link visitors), Web Vitals.
-#[derive(Clone, Copy)]
+/// What a page gets put in: the environment's snippets, and roll's own scripts (the feedback
+/// button for a preview's link visitors, Web Vitals).
+#[derive(Clone)]
 struct Tags {
     feedback: bool,
     vitals: bool,
+    snippets: Option<(bytes::Bytes, bytes::Bytes)>,
 }
 
 fn with_feedback(t: Tags, r: Response) -> Response {
+    let r = match &t.snippets {
+        Some((head, body)) => crate::feedback::snippets(r, head, body),
+        None => r,
+    };
     let r = if t.feedback { crate::feedback::add(r) } else { r };
     if t.vitals { crate::feedback::tag(r, crate::vitals::TAG, false) } else { r }
 }
@@ -1839,12 +1963,19 @@ struct Done {
     /// Its access line: where it goes, the instance, the request id, a cold start's wait.
     access: Option<(Access, String, String, bool, u64)>,
     lease: crate::live::Lease,
+    /// A mirrored copy ([`MIRROR`]): served and metered, never judged by a rollout.
+    mirrored: bool,
+    /// How long its answer's headers took: what a rollout judges (a stream's body is the app's
+    /// pace, or a slow client's).
+    headers_ms: f64,
 }
 
 impl Drop for Done {
     fn drop(&mut self) {
         let bytes = self.counted.load(Ordering::Relaxed);
-        self.live.answered(&self.lease.inst, self.status);
+        if !self.mirrored {
+            self.live.answered(&self.lease.inst, self.status, Some(self.headers_ms));
+        }
         self.live.meter.lock().request(code_sql::now_ms(), self.began.elapsed().as_secs_f64() * 1000.0, self.status, bytes);
         if let Some((a, instance, id, cold, waited)) = self.access.take() {
             a.write(self.status, self.began, bytes, &instance, &id, cold, waited);
@@ -2009,8 +2140,9 @@ impl Seen {
             ua: text(header::USER_AGENT, 256),
             host: text(header::HOST, 255),
             page: req.method() == axum::http::Method::GET
-                // A cache refresh is roll's own request, not a visitor's page view.
+                // A cache refresh is roll's own request, not a visitor's page view; nor a mirrored copy.
                 && req.extensions().get::<crate::resp_cache::Refresh>().is_none()
+                && !req.headers().contains_key(MIRROR)
                 && match req.headers().get("sec-fetch-dest").and_then(|v| v.to_str().ok()) {
                     Some(dest) => dest.eq_ignore_ascii_case("document"),
                     None => req.headers().get(header::ACCEPT).and_then(|v| v.to_str().ok()).is_some_and(|a| a.contains("text/html")),

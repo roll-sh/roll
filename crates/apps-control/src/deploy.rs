@@ -141,13 +141,18 @@ impl Apps {
                 (Some(rev.sha), None, trigger)
             }
             (Source::Git { url, .. }, false, None) => {
-                let sha = match &revision {
-                    Some(r) if r.len() == 40 && r.bytes().all(|b| b.is_ascii_hexdigit()) => r.to_ascii_lowercase(),
-                    Some(_) => return Err(Error::BadRequest("revision is a full commit id (40 hex digits) for a Git URL".into())),
-                    None => crate::git_source::head(&self.git_remote(service, url).await, row.branch.as_deref()).await.map_err(|e| Error::BadRequest(format!("{url}: {e:#}")))?.0,
+                // A full commit, or a branch or tag by name (deployed once: the environment
+                // keeps following its own branch).
+                let (sha, named) = match &revision {
+                    Some(r) if r.len() == 40 && r.bytes().all(|b| b.is_ascii_hexdigit()) => (r.to_ascii_lowercase(), None),
+                    Some(r) => {
+                        let (sha, kind) = crate::git_source::named(&self.git_remote(service, url).await, r).await.map_err(|e| Error::BadRequest(format!("{url}: {e:#}")))?;
+                        (sha, Some(format!("{kind} {r}")))
+                    }
+                    None => (crate::git_source::head(&self.git_remote(service, url).await, row.branch.as_deref()).await.map_err(|e| Error::BadRequest(format!("{url}: {e:#}")))?.0, None),
                 };
                 if message.is_empty() {
-                    message = format!("{} at {}", row.branch.as_deref().unwrap_or("HEAD"), &sha[..12]);
+                    message = format!("{} at {}", named.unwrap_or_else(|| row.branch.clone().unwrap_or_else(|| "HEAD".into())), &sha[..12]);
                 }
                 (Some(sha), None, trigger)
             }
@@ -357,10 +362,15 @@ impl Apps {
     /// `keep_variables`: run its image with the variables as they are; else (the default) its
     /// variables come back as they were when it was live (Heroku's and Railway's rollbacks), the
     /// change in the audit trail. A deployment that never went live has none kept.
-    pub async fn rollback(self: &Arc<Self>, service: &str, env: &str, dep: &str, actor: Option<String>, keep_variables: bool) -> Result<Deployment> {
+    /// Back to what was live is never frozen; putting a build live that never was (one held at
+    /// `ready`) is a deploy, so a freeze refuses it without `over`.
+    pub async fn rollback(self: &Arc<Self>, service: &str, env: &str, dep: &str, actor: Option<String>, keep_variables: bool, over: bool) -> Result<Deployment> {
         self.refuse_capped(service)?;
         self.refuse_paused(service, env).await?;
         let old = self.deployment(service, env, dep).await?;
+        if old.status == DeployStatus::Ready {
+            self.refuse_frozen(service, env, over, actor.clone()).await?;
+        }
         let Some(image) = old.image.clone() else { return Err(Error::Conflict(format!("{dep} never built an image, so there's nothing to roll back to"))) };
         if old.pruned_at.is_some() {
             return Err(Error::Conflict(format!("{dep} is older than what's kept to roll back to and its image was cleaned up; deploy its revision again")));
@@ -459,7 +469,7 @@ impl Apps {
             .max_by_key(|d| d.created_at)
             .ok_or_else(|| Error::Conflict(format!("{env} has no earlier deployment to roll back to")))?;
         let id = target.id.clone();
-        self.rollback(service, env, &id, actor, keep_variables).await
+        self.rollback(service, env, &id, actor, keep_variables, false).await
     }
 
     pub async fn cancel(self: &Arc<Self>, service: &str, env: &str, dep: &str) -> Result<Deployment> {
@@ -772,11 +782,7 @@ impl Apps {
                 let sid = svc.id.clone();
                 self.check_registry(img).await?;
                 // The login goes only to the registry it's for, whatever the image names now.
-                let login = self
-                    .db(move |s| s.registry_login(&sid))
-                    .await?
-                    .filter(|(r, _)| crate::model::registry_key(&r.server) == crate::model::image_registry(img))
-                    .map(|(r, password)| crate::runtime::RegistryLogin { server: r.server, username: r.username, password });
+                let login = self.pull_login(&sid, img).await?;
                 let pinned = self.deps.runtime.pull(img, log, login.as_ref()).await?;
                 log.line(format!("pinned {pinned}"));
                 // A preview's defaults (an image service has no roll.toml), frozen with it.
@@ -861,6 +867,7 @@ impl Apps {
         let snapshot = self.db(move |s| s.seal_snapshot(&did, &sid, &e)).await?;
         let vars_hash = {
             let r = self.resolve_vars(&svc, &env, &dep.id).await?;
+            r.check_refs()?;
             fingerprint(&r.vars_for_hash(), &svc)
         };
         let tpl = Arc::new(self.template(&svc, &env, &dep).await?);
@@ -1042,11 +1049,9 @@ impl Apps {
                     } else {
                         continue;
                     };
-                    into.requests += s.requests;
-                    into.errors += s.errors;
-                    into.crashes += s.crashes;
+                    into.add(&s);
                 }
-                if let Some(why) = judge(new, old, r.error_pct, tpl.run.slo.as_ref().map(|s| (s, r.slo_burn.unwrap_or(crate::model::Rollout::SLO_BURN)))) {
+                if let Some(why) = judge(new, old, r.error_pct, tpl.run.slo.as_ref().map(|s| (s, r.slo_burn.unwrap_or(crate::model::Rollout::SLO_BURN))), r.p95_pct) {
                     sys.line(format!("canary: rolled back at {share}%: {why}"));
                     anyhow::bail!("rolled back at {share}% of requests: {why}");
                 }
@@ -1087,11 +1092,9 @@ impl Apps {
                     } else {
                         continue;
                     };
-                    into.requests += s.requests;
-                    into.errors += s.errors;
-                    into.crashes += s.crashes;
+                    into.add(&s);
                 }
-                if let Some(why) = judge(new, old, r.error_pct, tpl.run.slo.as_ref().map(|s| (s, r.slo_burn.unwrap_or(crate::model::Rollout::SLO_BURN)))) {
+                if let Some(why) = judge(new, old, r.error_pct, tpl.run.slo.as_ref().map(|s| (s, r.slo_burn.unwrap_or(crate::model::Rollout::SLO_BURN))), r.p95_pct) {
                     sys.line(format!("canary: rolled back at {share}% while held: {why}"));
                     anyhow::bail!("rolled back at {share}% of requests: {why}");
                 }
@@ -1301,6 +1304,7 @@ impl Apps {
         let (sid, e) = (svc.id.clone(), d.environment.clone());
         let env_row = self.db(move |s| s.environment(&sid, &e)).await?;
         let resolved = self.resolve_vars(svc, &env_row, &d.id).await?;
+        resolved.check_refs()?;
         // Its secret values never reach the build's log, whatever a step prints.
         self.logs.redact(&format!("build:{}", d.id), &d.id, resolved.secret_values());
         let closed_vars = env_row.egress.closed().then(|| resolved.without_secrets());
@@ -1517,6 +1521,7 @@ impl Apps {
         let mut probe = svc.clone();
         probe.run.port = run.port;
         let resolved = self.resolve_vars(&probe, env, &dep.id).await?;
+        resolved.check_refs()?;
         // Its secret values never reach any of the environment's logs, whoever prints them: its
         // output, its requests' paths, its spans and its metrics.
         let secrets = resolved.secret_values();
@@ -1565,11 +1570,7 @@ impl Apps {
         // registry it's for gets it.
         let registry = match &svc.source {
             Source::Image { .. } => {
-                let sid = svc.id.clone();
-                self.db(move |s| s.registry_login(&sid))
-                    .await?
-                    .filter(|(r, _)| crate::model::registry_key(&r.server) == crate::model::image_registry(&image))
-                    .map(|(r, password)| crate::runtime::RegistryLogin { server: r.server, username: r.username, password })
+                self.pull_login(&svc.id, &image).await?
             }
             _ => None,
         };
@@ -2467,9 +2468,16 @@ impl Apps {
     pub async fn cron_pass(self: &Arc<Self>, now: i64) {
         let Ok(services) = self.db(|s| s.services(None)).await else { return };
         self.schedules_pass(&services, now).await;
+        self.push_pass(&services).await;
+        self.ecr_refresh_pass().await;
         self.checks_pass(&services, now).await;
         self.heartbeats_pass(&services, now).await;
         self.rescan_pass(&services, now).await;
+        self.pause_pass(&services, now).await;
+        if now - self.status_swept.load(std::sync::atomic::Ordering::Relaxed) >= 60_000 {
+            self.status_swept.store(now, std::sync::atomic::Ordering::Relaxed);
+            self.status_sweep(&services).await;
+        }
         for svc in services.into_iter().filter(|s| s.run.kind == RunType::Cron && self.owns(&s.id) && !self.capped(&s.id)) {
             let Some(schedule) = svc.run.schedule.as_deref().and_then(|s| crate::cron::Schedule::parse(s, svc.run.timezone.as_deref()).ok()) else { continue };
             let sid = svc.id.clone();
@@ -2752,7 +2760,16 @@ impl Apps {
 /// Whether a canary step fails: the new deployment answered `error_pct` or more of at least
 /// [`Rollout::MIN_REQUESTS`] requests with a 5xx, and more often than the old one (an outage
 /// both share, a database down, isn't the new code's fault).
-fn judge(new: crate::live::Served, old: crate::live::Served, error_pct: u8, slo: Option<(&crate::model::Slo, f64)>) -> Option<String> {
+fn judge(new: crate::live::Served, old: crate::live::Served, error_pct: u8, slo: Option<(&crate::model::Slo, f64)>, p95_pct: Option<u32>) -> Option<String> {
+    // Slower than the old one by more than it allows (Flagger's request duration), each side
+    // with enough answers timed.
+    if let (Some(pct), Some(n), Some(o)) = (p95_pct, new.p95_ms(), old.p95_ms())
+        && new.requests >= crate::model::Rollout::MIN_REQUESTS
+        && old.requests >= crate::model::Rollout::MIN_REQUESTS
+        && n > o * (1.0 + pct as f64 / 100.0)
+    {
+        return Some(format!("its p95 was about {n:.0} ms, the old deployment's {o:.0} ms (the step allows {pct}% worse)"));
+    }
     // Crashes no request saw (a failed health check, a process that exits).
     if new.crashes >= 2 && new.crashes > old.crashes {
         return Some(format!("its instances crashed {} times (the old deployment's {})", new.crashes, old.crashes));
@@ -2897,11 +2914,25 @@ mod judge_tests {
         let served = |requests: u64, errors: u64| Served { requests, errors, ..Default::default() };
         let slo = crate::model::Slo { objective: 99.0, latency_ms: None, window_days: 28 };
         // 3% of 100 is under the 5% rule, but 3× the 99% objective's budget: past a 2× step.
-        assert_eq!(judge(served(100, 3), served(100, 0), 5, None), None);
-        assert!(judge(served(100, 3), served(100, 0), 5, Some((&slo, 2.0))).unwrap().contains("3.0× as fast"));
-        assert_eq!(judge(served(100, 3), served(100, 0), 5, Some((&slo, 14.4))), None, "under the default burn");
-        assert_eq!(judge(served(100, 3), served(100, 5), 5, Some((&slo, 2.0))), None, "the old one is worse");
-        assert_eq!(judge(served(10, 3), served(100, 0), 5, Some((&slo, 2.0))), None, "too few requests to say");
+        assert_eq!(judge(served(100, 3), served(100, 0), 5, None, None), None);
+        assert!(judge(served(100, 3), served(100, 0), 5, Some((&slo, 2.0)), None).unwrap().contains("3.0× as fast"));
+        assert_eq!(judge(served(100, 3), served(100, 0), 5, Some((&slo, 14.4)), None), None, "under the default burn");
+        assert_eq!(judge(served(100, 3), served(100, 5), 5, Some((&slo, 2.0)), None), None, "the old one is worse");
+        assert_eq!(judge(served(10, 3), served(100, 0), 5, Some((&slo, 2.0)), None), None, "too few requests to say");
+    }
+
+    #[test]
+    fn a_step_much_slower_than_the_old_deployment_fails() {
+        let timed = |ms: f64| {
+            let mut s = Served { requests: 100, ..Default::default() };
+            for _ in 0..100 {
+                s.took(ms);
+            }
+            s
+        };
+        assert!(judge(timed(400.0), timed(100.0), 5, None, Some(50)).unwrap().contains("p95"));
+        assert_eq!(judge(timed(120.0), timed(100.0), 5, None, Some(50)), None, "within 50%");
+        assert_eq!(judge(timed(400.0), timed(100.0), 5, None, None), None, "off unless asked");
     }
 }
 

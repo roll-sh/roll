@@ -861,7 +861,7 @@ impl<T: Copy + Default> DvBatch<T> {
 }
 
 /// Decodes a raw doc value of a numeric field to a double.
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum Decode {
     Long,
     /// `date_nanos`: aggregations see epoch millis (Elasticsearch's `toMilliSeconds`).

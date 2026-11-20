@@ -940,7 +940,12 @@ fn levenshtein(a: &str, b: &str) -> usize {
     prev[b.len()]
 }
 
+/// Recurses once per level of `e` (bounded by the parser's expression depth).
 pub fn compile(e: &Expr, sc: &Scope<'_>) -> EsResult<Typed> {
+    crate::stack::maybe_grow(|| compile_at(e, sc))
+}
+
+fn compile_at(e: &Expr, sc: &Scope<'_>) -> EsResult<Typed> {
     Ok(match &e.kind {
         E::Lit(v, t) => Typed { c: C::Lit(v.clone()), ty: *t },
         E::Field(p) => sc.field(p, e.pos, &sc.s.src)?,
@@ -1083,7 +1088,12 @@ pub fn arith_type(op: Op, a: Ty, b: Ty, legacy: bool) -> Ty {
     }
 }
 
+/// Recurses once per level of `c` (bounded by the parser's expression depth).
 pub fn eval(c: &C, row: &[Val]) -> EsResult<Val> {
+    crate::stack::maybe_grow(|| eval_at(c, row))
+}
+
+fn eval_at(c: &C, row: &[Val]) -> EsResult<Val> {
     Ok(match c {
         C::Lit(v) => v.clone(),
         C::Col(i) => row[*i].clone(),

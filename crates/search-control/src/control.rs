@@ -121,8 +121,8 @@ pub struct SearchConfig {
     pub defaults: Defaults,
     pub pricing: Pricing,
     /// Seals the secrets clusters store (watch passwords, connector and Fleet secrets, `s3`
-    /// repository credentials) under the deployment's key (rolld: `ROLL_SECRET_KEY`); `None`:
-    /// stored as given.
+    /// repository credentials) and clusters' own passwords in the catalog under the deployment's
+    /// key (rolld: `ROLL_SECRET_KEY`); `None`: stored as given.
     pub sealer: Option<Arc<search_es::seal::Sealer>>,
     /// The name every cluster's default snapshot repository has (`found-snapshots`, as on
     /// Elastic Cloud): an `s3` repository on roll's own object storage, so `_snapshot` and
@@ -350,6 +350,9 @@ pub fn spec_for(c: &SearchCluster) -> ClusterSpec {
     spec.destructive_requires_name = c.destructive_requires_name;
     spec.ip_allowlist = allowlist_of(&c.ip_allowlist);
     spec.catalog_id = Some(c.id.clone());
+    // Only until its first load has marked what it inherited: a branch made before marking
+    // existed, or one already marked, runs its jobs as its own.
+    spec.branch_of = c.parent_id.clone().filter(|_| c.inherit_pending);
     spec
 }
 
@@ -428,10 +431,17 @@ const OS_KEY_PREFIX: &str = "roll-key-";
 
 /// A link's credential ([`Control::mint_link`]): its variables (unprefixed) and what revoking
 /// it takes.
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct LinkCredential {
     pub vars: Vec<(String, String)>,
     pub kept: String,
+}
+
+impl std::fmt::Debug for LinkCredential {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let vars: Vec<_> = self.vars.iter().map(|(k, _)| (k.as_str(), "<redacted>")).collect();
+        f.debug_struct("LinkCredential").field("vars", &vars).field("kept", &self.kept).finish()
+    }
 }
 
 /// `spec` with a secret nobody knows.
@@ -506,7 +516,10 @@ pub struct Control {
     pub data: search_store::Store,
     pub meter: Arc<Meter>,
     /// Wakes in progress and clusters being deleted ([`crate::wake`]).
-    wakes: Arc<Wakes>,
+    pub(crate) wakes: Arc<Wakes>,
+    /// One query suggestions build at a time per index (`crate::suggestions`), by cluster id and
+    /// index.
+    pub(crate) suggest_locks: Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
     /// Serializes changes of a cluster's description with applying it to the node, so the node
     /// never ends up with an older one than the catalog's.
     specs: tokio::sync::Mutex<()>,
@@ -545,6 +558,9 @@ impl Control {
             (None, Some(url)) => Arc::new(Store::postgres(url, code_sql::PgOptions { max_connections: cfg.catalog_connections.max(1), ..Default::default() })?),
             (None, None) => Arc::new(Store::open(&cfg.home.join("search.db"))?),
         };
+        if let Some(s) = &cfg.sealer {
+            store.seal_passwords(s.clone());
+        }
         let scfg = StoreConfig {
             node: cfg.node_name.clone(),
             wal: WalConfig { sync_objects: cfg.sync_objects, ..WalConfig::default() },
@@ -589,6 +605,7 @@ impl Control {
             data,
             meter,
             wakes,
+            suggest_locks: Mutex::new(HashMap::new()),
             specs: tokio::sync::Mutex::new(()),
             reloads: Mutex::new(HashSet::new()),
             reloader: AtomicBool::new(false),
@@ -671,6 +688,7 @@ impl Control {
                     }
                     Err(e) => tracing::warn!(error = %e, "listing search clusters with due jobs failed"),
                 }
+                c.wake_for_suggestions().await;
             }
         });
     }
@@ -689,6 +707,12 @@ impl Control {
             tracing::info!(cluster = c.name, error = %e, "waking a search cluster for its due jobs failed");
             self.note_wake_at(&c.name, Some(crate::meter::now_ms() + 60_000)).await;
         }
+    }
+
+    /// Whether this node is the one to wake sleeping cluster `name` for its background work:
+    /// always on a single node; on a fleet, the node its lease is placed on.
+    pub(crate) fn wakes_here(&self, name: &str) -> bool {
+        self.cluster_leases().is_none_or(|l| l.cluster().preferred(&crate::cluster::key(name)).is_some_and(|n| n.id == l.cluster().node_id()))
     }
 
     /// The fleet's leases, when this node is in one ([`Control::join`]).
@@ -832,6 +856,7 @@ impl Control {
             owner: None,
             restored_at: None,
             ip_allowlist: Vec::new(),
+            inherit_pending: false,
         }
     }
 
@@ -914,6 +939,8 @@ impl Control {
                 password_rotated_at: None,
                 parent_id: Some(p.id.clone()),
                 parent_at: Some(at.unwrap_or(now).min(now)),
+                // Its first load marks what it inherits (`search_es::branch`).
+                inherit_pending: true,
                 ..p.clone()
             },
             o,
@@ -2056,6 +2083,8 @@ impl Control {
                 self.meter.mark_dirty(&name);
             }
         }
+        // After the analytics above are in the catalog.
+        Box::pin(self.run_suggestions()).await;
         Ok(())
     }
 
@@ -2261,6 +2290,7 @@ mod tests {
             owner: None,
             restored_at: None,
             ip_allowlist: vec![IpRule { cidr: "203.0.113.0/24".into(), description: None }],
+            inherit_pending: false,
         };
         let s = spec_for(&c);
         assert!(s.ip_allowlist.contains("::ffff:203.0.113.9".parse().unwrap()) && !s.ip_allowlist.is_open());

@@ -157,6 +157,11 @@ struct Args {
     /// people in its data. A port that's taken leaves it off, and previews' mail fails.
     #[arg(long, env = "ROLL_PREVIEWS_SMTP", default_value = "0.0.0.0:2525")]
     previews_smtp: std::net::SocketAddr,
+    /// How often (seconds) previews are compared with main's preview (routes from their traces,
+    /// errors from their output); unset, every minute for routes and five for errors. Tests set
+    /// it low.
+    #[arg(long, env = "ROLL_PREVIEWS_COMPARE_EVERY")]
+    previews_compare_every: Option<u64>,
     /// roll code checks running at once from this node (each in its own container or Fargate
     /// task; `ROLL_CODE_RUNNER`, see `isolation.rs`).
     #[arg(long, env = "ROLL_CODE_RUNNER_CONCURRENCY", default_value_t = 2)]
@@ -623,6 +628,9 @@ async fn run_with(mut args: Args) -> anyhow::Result<()> {
     // Gateways into private networks: their links follow leases on the node's cluster.
     let gateways = secrets::gateway::Gateways::new(cluster.clone(), access.clone() as std::sync::Arc<dyn roll_auth::Grants>, args.code_webhook_allow_private.unwrap_or(!auth.enforcing()));
     let secrets = secrets::open(&args, &home, workspace.clone(), !auth.enforcing(), products_api.clone(), access.clone(), people, gateways.clone())?;
+    if let Some(p) = &postgres {
+        secrets::tell_postgres_decoys(&p.control, secrets.clone());
+    }
     // Its counters and gauges, a line a minute beside the cluster's (JSON logs only).
     let _secrets_metrics = logs::SecretsMetrics::start(cluster.node_id().to_string(), secrets.clone());
     code_secrets.set(secrets.clone(), workspace.clone());
@@ -633,8 +641,17 @@ async fn run_with(mut args: Args) -> anyhow::Result<()> {
         s.control.set_secrets(std::sync::Arc::new(secrets::ForSearch(secrets.clone())));
     }
     let _ = secrets_envs.0.set(secrets.clone());
+    // Previews' rules name roll secrets' keys only where their writer may reveal them.
+    if let Some(e) = &previews_engine {
+        let _ = e.reveal.set(std::sync::Arc::new(previews::SecretsReveal(secrets.clone())));
+    }
     if let Some(c) = &code {
         secrets.set_code_refs(std::sync::Arc::new(secrets::CodeRefs(c.code.clone())));
+    }
+    // Secret requests' answer tokens found leaked (`rlq_`) cancel their requests.
+    {
+        let secrets = secrets.clone();
+        access.on_leaked("rlq_", move |token, why| secrets.cancel_leaked_value_request(token, why));
     }
     router = router.merge(roll_secrets::router(secrets.clone()).layer(axum::middleware::map_request(secrets::guard_header))).merge(gateways.router());
     // A node that isn't (or no longer is) sealed answers the unseal with nothing to give.

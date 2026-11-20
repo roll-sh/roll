@@ -66,10 +66,25 @@ impl roll_mcp::ToolSet for Fronted {
         vec![
             json!({ "name": "code_echo", "description": "A review comment", "inputSchema": { "type": "object", "properties": {} }, "annotations": { "readOnlyHint": true }, "_meta": { "roll/product": "workspace" } }),
             json!({ "name": "code_list_work", "description": "Work items", "inputSchema": { "type": "object", "properties": {} }, "annotations": { "readOnlyHint": true }, "_meta": { "roll/product": "workspace" } }),
+            json!({ "name": "code_read_file", "description": "A file", "inputSchema": { "type": "object", "properties": { "repo": {}, "path": {} } }, "annotations": { "readOnlyHint": true }, "_meta": { "roll/product": "workspace" } }),
+            json!({ "name": "code_list_repos", "description": "Repos", "inputSchema": { "type": "object", "properties": { "owner": {} } }, "annotations": { "readOnlyHint": true }, "_meta": { "roll/product": "workspace" } }),
         ]
     }
 
-    fn call(&self, _: Router, _: axum::http::HeaderMap, _: axum::http::Extensions, name: String, _: Value) -> std::pin::Pin<Box<dyn std::future::Future<Output = Value> + Send>> {
+    fn call(&self, _: Router, _: axum::http::HeaderMap, _: axum::http::Extensions, name: String, args: Value) -> std::pin::Pin<Box<dyn std::future::Future<Output = Value> + Send>> {
+        if name == "code_read_file" {
+            let found = args["repo"] == "acme/api" && args["path"] == "src/main.rs";
+            return Box::pin(async move {
+                if found {
+                    json!({ "content": [{ "type": "text", "text": "fn main() {}\n" }], "structuredContent": { "path": "src/main.rs", "binary": false, "truncated": false, "content": "fn main() {}\n" }, "isError": false })
+                } else {
+                    json!({ "content": [{ "type": "text", "text": "not found: no such file" }], "structuredContent": { "http_status": 404, "error": "not found" }, "isError": true })
+                }
+            });
+        }
+        if name == "code_list_repos" {
+            return Box::pin(async move { json!({ "content": [{ "type": "text", "text": "acme/api" }], "structuredContent": { "items": [{ "full_name": "acme/api", "owner": "acme", "name": "api" }] }, "isError": false }) });
+        }
         if name == "code_list_work" {
             // A GitHub issue anyone could open, and one a writer opened; the text block is the set's own.
             let items = json!({ "items": [
@@ -184,6 +199,12 @@ async fn tools_follow_the_tokens_rules() {
     assert!(some.contains(&"workspace_list_projects".into()) && some.contains(&"access_wait_approval".into()) && !some.iter().any(|n| n.starts_with("postgres_")), "{some:?}");
     let (s, _, _) = d.http(OPERATOR, Method::POST, "/v1/mcp?toolsets=nope", Some(json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/list" }))).await;
     assert_eq!(s, StatusCode::BAD_REQUEST);
+    // A product's area (apps': observe, deploy, configure, project) is a toolset too; one it doesn't have is refused.
+    for (toolset, ok) in [("apps.observe,workspace", true), ("apps.nope", false), ("postgres.observe", false)] {
+        let (s, _, _) = d.http(OPERATOR, Method::POST, &format!("/v1/mcp?toolsets={toolset}"), Some(json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/list" }))).await;
+        assert_eq!(s == StatusCode::OK, ok, "{toolset}: {s}");
+    }
+    assert!(costs["areas"].as_array().unwrap().iter().any(|a| a["toolset"] == "apps.observe"), "{costs}");
     // Read-only (GitHub's read-only mode): only read-only tools are listed and run, even for the operator.
     let (_, _, ro) = d.http(OPERATOR, Method::POST, "/v1/mcp?readonly=1", Some(json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/list" }))).await;
     let ro = names(&ro["result"]);
@@ -720,6 +741,17 @@ async fn prompt_arguments_complete_from_what_it_may_read() {
     assert_eq!(sneaky["error"]["code"], -32002, "an id that isn't one reaches no route: {sneaky}");
     let ids = d.rpc(OPERATOR, "completion/complete", json!({ "ref": { "type": "ref/resource", "uri": "roll://projects/{project}" }, "argument": { "name": "project", "value": "" } })).await;
     assert_eq!(ids["completion"]["values"].as_array().unwrap().len(), 3, "{ids}");
+    // A roll code file (GitHub's repository contents): listed with code_read_file, read through it,
+    // its owner completed; a path that climbs or hides a slash names nothing.
+    assert_eq!(templates["resourceTemplates"][1]["uriTemplate"], "roll://code/{owner}/{repo}/{+path}", "{templates}");
+    let file = d.rpc(OPERATOR, "resources/read", json!({ "uri": "roll://code/acme/api/src/main.rs" })).await;
+    assert_eq!(file["contents"][0]["text"], "fn main() {}\n", "{file}");
+    for bad in ["roll://code/acme/api/src/../../x", "roll://code/acme/api/a%2Fb", "roll://code/acme/api/missing.rs"] {
+        let out = d.http(OPERATOR, Method::POST, "/v1/mcp", Some(json!({ "jsonrpc": "2.0", "id": 9, "method": "resources/read", "params": { "uri": bad } }))).await.2;
+        assert_eq!(out["error"]["code"], -32002, "{bad}: {out}");
+    }
+    let owners = d.rpc(OPERATOR, "completion/complete", json!({ "ref": { "type": "ref/resource", "uri": "roll://code/{owner}/{repo}/{+path}" }, "argument": { "name": "owner", "value": "" } })).await;
+    assert_eq!(owners["completion"]["values"], json!(["acme"]), "{owners}");
     // A prompt this connection isn't offered: -32602.
     let reader = d.token(json!([{ "product": "postgres", "resources": "*", "actions": { "read": "allow" } }])).await;
     let none = d.http(&reader, Method::POST, "/v1/mcp", Some(json!({ "jsonrpc": "2.0", "id": 1, "method": "completion/complete", "params": ask("") }))).await.2;
@@ -840,6 +872,9 @@ async fn credentials_are_kept_out_of_what_agents_write() {
     assert!(!refused.to_string().contains(&gh), "never the value");
     let (_, _, projects) = d.http(OPERATOR, Method::GET, "/v1/workspace/projects", None).await;
     assert_eq!(projects.as_array().map(Vec::len), Some(0), "nothing was sent");
+    // What a tool publishes (a status page's incident) is held to the same rule, whatever its product.
+    let public = d.tool(OPERATOR, "apps_create_incident", json!({ "project": "prj_x", "title": "Login is down", "text": format!("rotating {gh}") })).await;
+    assert_eq!((public["isError"].as_bool(), public["structuredContent"]["kind"].as_str()), (Some(true), Some("a GitHub token")), "{public}");
     // roll's own token, checksummed, anywhere but roll secrets.
     let leaked = d.tool(&agent, "postgres_delete_project", json!({ "project": agent })).await;
     assert_eq!(leaked["structuredContent"]["kind"], "a roll token", "{leaked}");

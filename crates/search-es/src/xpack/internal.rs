@@ -149,11 +149,17 @@ pub fn acting_principal(req: &EsRequest) -> Option<crate::xpack::security::Princ
 impl Caller {
     /// The client of `ctx`, unless it may read everything anyway.
     pub fn of(ctx: &crate::rest::Ctx<'_>) -> Option<Caller> {
-        use crate::xpack::security::{AUTHENTICATED_HEADER, INDEX_SCOPE_HEADER, RUN_AS_HEADER};
-        let p = ctx.principal.get()?;
-        if p.is_superuser() {
+        if ctx.principal.get()?.is_superuser() {
             return None;
         }
+        Caller::client(ctx)
+    }
+
+    /// The client of `ctx`, a superuser too: for calls whose result belongs to whoever sent
+    /// them (a point in time or scroll is bound to its opener).
+    pub fn client(ctx: &crate::rest::Ctx<'_>) -> Option<Caller> {
+        use crate::xpack::security::{AUTHENTICATED_HEADER, INDEX_SCOPE_HEADER, RUN_AS_HEADER};
+        ctx.principal.get()?;
         // The headers that made it this principal: the node's authentication (narrowed to some
         // indices on a per-index route) or the client's credentials, and its run-as user.
         // A linked remote cluster's request keeps its remote access too (only roll's own calls
