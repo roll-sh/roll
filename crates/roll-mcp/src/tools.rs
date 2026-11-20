@@ -1394,6 +1394,30 @@ mod tests {
         }
         assert_eq!(all().iter().find(|t| t.name == "apps_logs").unwrap().area(), Area::One("observe"));
         assert_eq!(all().iter().find(|t| t.name == "apps_list_services").unwrap().area(), Area::Every);
+        // Every catalogued route of a product with tools here is a tool's, or in no-tool.txt with
+        // why (`no tool yet` for a gap): a new route can't go without a decision, as
+        // prefix-reviewed.txt does for the catalogue. roll code's and agents' have their own map.
+        let norm = |p: &str| p.split('/').map(|s| if s.starts_with('{') { "{}" } else { s }).collect::<Vec<_>>().join("/").trim_end_matches('/').to_string();
+        let products: std::collections::BTreeSet<&str> = all().iter().map(|t| t.product).collect();
+        let covered = |method: &str, route: &str| all().iter().any(|t| (method == "*" || t.method == method) && norm(t.path) == norm(route));
+        let listed: Vec<(&str, &str)> = include_str!("no-tool.txt")
+            .lines()
+            .filter(|l| !l.starts_with('#') && !l.trim().is_empty())
+            .filter_map(|l| {
+                let mut w = l.split_whitespace();
+                Some((w.next()?, w.next()?))
+            })
+            .collect();
+        let product_of = |method: &str, route: &str| {
+            let sample = route.split('/').map(|s| if s.starts_with('{') { "x" } else { s }).collect::<Vec<_>>().join("/");
+            catalog::by_path(if method == "*" { "GET" } else { method }, &sample).map(|f| f.row.product)
+        };
+        let mut routes: Vec<(&str, &str)> = catalog::rows().iter().filter(|r| !r.route.ends_with('/') && products.contains(r.product)).map(|r| (r.method, r.route)).collect();
+        routes.extend(catalog::prefix_reviewed_routes().filter(|(m, r)| product_of(m, r).is_some_and(|p| products.contains(p))));
+        let undecided: Vec<String> = routes.iter().filter(|(m, r)| !covered(m, r) && !listed.contains(&(*m, *r))).map(|(m, r)| format!("{m} {r}")).collect();
+        assert!(undecided.is_empty(), "catalogued routes with no MCP tool and no reason: map each in tools.rs, or add `METHOD route  why` to crates/roll-mcp/src/no-tool.txt:\n{}", undecided.join("\n"));
+        let stale: Vec<String> = listed.iter().filter(|(m, r)| covered(m, r) || !routes.contains(&(*m, *r))).map(|(m, r)| format!("{m} {r}")).collect();
+        assert!(stale.is_empty(), "no-tool.txt lines for routes that now have a tool or aren't catalogued: remove them:\n{}", stale.join("\n"));
         // A tool that removes, revokes or replaces something says so (clients ask a person before a
         // destructive call), unless it's marked undoable: the review that found five revoke tools
         // unmarked is why this is a test, not a habit.

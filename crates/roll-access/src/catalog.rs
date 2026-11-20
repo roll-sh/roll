@@ -526,6 +526,11 @@ pub fn prefix_reviewed(method: &str, route: &str) -> bool {
     include_str!("prefix-reviewed.txt").lines().map(str::trim).any(|l| l.split_once(' ').is_some_and(|(m, r)| m == method && r == route))
 }
 
+/// Every route a prefix row decides that was looked at, as `(method, route)`.
+pub fn prefix_reviewed_routes() -> impl Iterator<Item = (&'static str, &'static str)> {
+    include_str!("prefix-reviewed.txt").lines().map(str::trim).filter_map(|l| l.split_once(' '))
+}
+
 /// A route listed for a nest (`/v1/storage`, `/v1/storage/`): its rows are matched by path.
 fn is_nest(route: &str) -> bool {
     NESTS.iter().any(|n| route == *n || route.starts_with(&format!("{n}/")))
