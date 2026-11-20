@@ -352,8 +352,13 @@ for p in rpc("prompts/list", {}).get("result", {}).get("prompts", []):
 uris = [r["uri"] for r in rpc("resources/list", {}).get("result", {}).get("resources", [])]
 if seen.get(("workspace", "id")):
     uris.append(f"roll://projects/{seen[('workspace', 'id')]}")
+if repo_made:
+    uris.append("roll://code/sweep/app/README.md")  # a roll code file, read through code_read_file
 for uri in uris:
-    surface.append((f"resource {uri}", rpc("resources/read", {"uri": uri})))
+    r = rpc("resources/read", {"uri": uri})
+    if uri.startswith("roll://code/") and "error" not in r and "sweep" not in json.dumps(r.get("result", {})):
+        r = {"error": f"a code file's resource doesn't hold the file: {json.dumps(r)[:200]}"}
+    surface.append((f"resource {uri}", r))
 for sk in rpc("skills/list", {}).get("result", {}).get("skills", []):
     surface.append((f"skill {sk.get('uri') or sk.get('name')}", rpc("skills/get", {"uri": sk.get("uri", "")})))
 bad = [f"{what}: {json.dumps(r.get('error'))[:200]}" for what, r in surface if "error" in r]
