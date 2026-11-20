@@ -27,7 +27,15 @@ def rpc(method, params, token=None):
         return json.load(r)
 
 
-tools = rpc("tools/list", {})["result"]["tools"]
+listed = rpc("tools/list", {})["result"]
+tools = listed["tools"]
+# What a client takes in before it does anything (docs/mcp.md, "Toolsets"): the tools and their size.
+print(f"tools/list: {len(tools)} tools, {len(json.dumps(listed)) // 1024} KB")
+if "-v" in sys.argv:
+    with urllib.request.urlopen(urllib.request.Request(f"{api}/v1/mcp/toolsets", headers={"authorization": f"Bearer {tok}"}), timeout=30) as r:
+        costs = json.load(r)
+        print("toolsets:", json.dumps(costs["products"])[:1500])
+        print("areas:", ", ".join(f"{a['toolset']} {a['tools']} tools ~{a['context_tokens']} tokens" for a in costs.get("areas", [])))
 reads = [t for t in tools if t.get("annotations", {}).get("readOnlyHint") and (only is None or t["name"] == only)]
 FAIL_WORDS = ("unknown argument", "is required", "can't be empty", "no route", "method not allowed", "invalid type", "missing field", "unknown field",
               "Invalid URL: Cannot parse")  # a path segment of a type the route doesn't take
@@ -288,8 +296,10 @@ fails += [f"leak {l}" for l in leaks]
 # (`roll_mcp::ask`). For every kind of id the fixtures made, the form must offer the fixture's,
 # or the kind is below with why it has none: a list answer of another shape offers nothing
 # without failing anything, and a new kind of id with no choices fails here until it has some.
-NO_CHOICES = {("postgres", "endpoint"): "an endpoint sits inside its branch, not in a list",
-              ("tasks", "id"): "it names a message, run, schedule or function by tool"}
+NO_CHOICES = {("postgres", "endpoint"): "an endpoint sits inside its branch, and no tool lists every project's"}
+# Where a name means different things by tool, the one the fixture's id is: tasks' `id` is a
+# message's in the fixture (a run's, a schedule's… by their own tools' routes).
+CHOICE_TOOL = {("tasks", "id"): "tasks_get_message"}
 def form_call(name, args):
     global n
     n += 1
@@ -305,7 +315,7 @@ for (prod, param), value in sorted(seen.items()):
     if (prod, param) in NO_CHOICES:
         continue
     tool = next((t for t in reads if t.get("_meta", {}).get("roll/product") == prod and param in t["inputSchema"].get("required", [])
-                 and all((prod, a) in seen for a in t["inputSchema"]["required"])), None)
+                 and all((prod, a) in seen for a in t["inputSchema"]["required"]) and t["name"] == CHOICE_TOOL.get((prod, param), t["name"])), None)
     if tool is None:
         continue
     args = {a: seen[(prod, a)] for a in tool["inputSchema"]["required"] if a != param}
@@ -342,8 +352,13 @@ for p in rpc("prompts/list", {}).get("result", {}).get("prompts", []):
 uris = [r["uri"] for r in rpc("resources/list", {}).get("result", {}).get("resources", [])]
 if seen.get(("workspace", "id")):
     uris.append(f"roll://projects/{seen[('workspace', 'id')]}")
+if repo_made:
+    uris.append("roll://code/sweep/app/README.md")  # a roll code file, read through code_read_file
 for uri in uris:
-    surface.append((f"resource {uri}", rpc("resources/read", {"uri": uri})))
+    r = rpc("resources/read", {"uri": uri})
+    if uri.startswith("roll://code/") and "error" not in r and "sweep" not in json.dumps(r.get("result", {})):
+        r = {"error": f"a code file's resource doesn't hold the file: {json.dumps(r)[:200]}"}
+    surface.append((f"resource {uri}", r))
 for sk in rpc("skills/list", {}).get("result", {}).get("skills", []):
     surface.append((f"skill {sk.get('uri') or sk.get('name')}", rpc("skills/get", {"uri": sk.get("uri", "")})))
 bad = [f"{what}: {json.dumps(r.get('error'))[:200]}" for what, r in surface if "error" in r]
@@ -354,8 +369,6 @@ if "--writes" in sys.argv:
         if (prod, name) in seen:
             return seen[(prod, name)]
         ty = schema.get("type")
-        if isinstance(ty, list):  # a field that takes null to clear: fake its other type
-            ty = next((t for t in ty if t != "null"), None)
         if ty == "integer" or ty == "number":
             return 1
         if ty == "boolean":

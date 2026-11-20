@@ -13,6 +13,7 @@
 //! one AWS account ([`crate::aws_identity`]).
 
 use crate::access::{Action, Caller, Scope};
+use crate::issuer::Subject;
 use crate::oidc::{Jwt, wildcard};
 use crate::{Error, Result, Secrets, audit, from_json, json, names};
 use code_sql::{OptionalExtension, params};
@@ -276,7 +277,7 @@ impl Secrets {
                 if n.arn.is_some() {
                     return Err(bad("arn is an AWS identity's (kind: aws)"));
                 }
-                self.oidc_identity(n.issuer.unwrap_or_default(), n.audience.unwrap_or_default(), n.subject.unwrap_or_default(), &n.claims, n.jwks)?
+                self.oidc_identity(project, n.issuer.unwrap_or_default(), n.audience.unwrap_or_default(), n.subject.unwrap_or_default(), &n.claims, n.jwks)?
             }
         };
         let gateway = self.check_gateway(project, n.gateway)?;
@@ -289,7 +290,7 @@ impl Secrets {
         self.project(project)?;
         let now = self.db.now_ms()?;
         let kind = n.kind;
-        let i = Identity { id: names::new_id("idn", 12), name, kind, arn: (kind == IdentityKind::Aws).then(|| subject.clone()), server_id: None, issuer, audience, subject, claims: n.claims, environments, paths, actions, ttl_minutes: ttl, created_at: now, created_by: caller.principal.clone(), last_used_at: None, last_subject: None, allowed_ips: crate::caller::allowed(n.allowed_ips)?, pinned_keys, gateway, disabled_at: None, disabled_why: None };
+        let i = Identity { id: names::new_id("idn", 12), name, kind, arn: (kind == IdentityKind::Aws).then(|| subject.clone()), server_id: None, issuer, audience, subject, claims: n.claims, environments, paths, actions, ttl_minutes: ttl, created_at: now, created_by: self.maker_of(caller)?, last_used_at: None, last_subject: None, allowed_ips: crate::caller::allowed(n.allowed_ips)?, pinned_keys, gateway, disabled_at: None, disabled_why: None };
         self.db.write(|c| {
             let count: i64 = c.query_row("SELECT COUNT(*) FROM identities WHERE project_id = ?", [project], |r| r.get(0))?;
             if count >= IDENTITIES_MAX {
@@ -313,10 +314,14 @@ impl Secrets {
     }
 
     /// An OIDC identity's issuer, audience, subject, pinned keys and how many, checked.
-    fn oidc_identity(&self, issuer: String, audience: String, subject: String, claims: &BTreeMap<String, String>, jwks: Option<String>) -> Result<Checked> {
+    fn oidc_identity(&self, project: &str, issuer: String, audience: String, subject: String, claims: &BTreeMap<String, String>, jwks: Option<String>) -> Result<Checked> {
         let issuer = issuer.trim().trim_end_matches('/').to_string();
         let jwks = jwks.map(|d| d.trim().to_string()).filter(|d| !d.is_empty());
+        let ours = self.is_rolls_issuer(&issuer);
         let pinned_keys = match &jwks {
+            // roll's own tokens are checked against roll's keys, in process.
+            Some(_) if ours => return Err(bad("roll's own issuer needs no keys: its tokens are checked against roll's")),
+            None if ours => None,
             // Never fetched: the issuer is only the `iss` a token must carry.
             Some(doc) => {
                 if issuer.is_empty() || issuer.len() > 512 {
@@ -341,6 +346,10 @@ impl Secrets {
         // Shared issuers' rule, then the claim rules (roll-oidc's, as roll-access's trusted
         // clients have them).
         roll_oidc::check_identity(&issuer, &subject, claims).map_err(bad)?;
+        // roll signs for every project: an identity of its names one apps environment of this one.
+        if ours && Subject::parse(&subject).is_none_or(|s| s.project() != project) {
+            return Err(bad(format!("an identity for roll's own issuer names one environment of a service of this project: roll-apps:{project}:<service>:<environment>")));
+        }
         Ok((issuer, audience, subject, jwks, pinned_keys))
     }
 
@@ -357,6 +366,7 @@ impl Secrets {
         let jwks = jwks.trim();
         let n = crate::oidc::pinned_keys(jwks).map_err(bad)?;
         self.project(project)?;
+        let by = self.maker_of(caller)?;
         let now = self.db.now_ms()?;
         let (identity, live) = self.db.write(|c| {
             let found: Option<(String, Option<String>)> = c.query_row("SELECT name, kind FROM identities WHERE id = ? AND project_id = ?", [id, project], |r| Ok((r.get(0)?, r.get(1)?))).optional()?;
@@ -364,7 +374,7 @@ impl Secrets {
             if kind.as_deref() == Some("aws") {
                 return Err(bad(format!("{name} is an AWS identity: STS checks its logins, it pins no keys")));
             }
-            c.execute("UPDATE identities SET jwks = ?, created_by = ? WHERE id = ?", params![jwks, caller.principal, id])?;
+            c.execute("UPDATE identities SET jwks = ?, created_by = ? WHERE id = ?", params![jwks, by, id])?;
             let live: Vec<String> = c.query("SELECT grant_id FROM identity_logins WHERE identity = ? AND expires_at > ?", params![id, now], |r| r.get(0))?;
             let revoked = live.len();
             audit::record(c, self.keys()?, project, caller, "identity.keys", None, None, &[], &format!("identity {name} now pins {n} key{} ({revoked} live token{} revoked)", if n == 1 { "" } else { "s" }, if revoked == 1 { "" } else { "s" }), now)?;
@@ -479,8 +489,19 @@ impl Secrets {
         let sub = match (i.kind, proof) {
             (IdentityKind::Oidc, Proof::Oidc(token)) => {
                 let jwt = Jwt::parse(&token)?;
-                let via = self.deliver.as_deref().map(crate::oidc::Via);
-                self.oidc.verify(via.as_ref().map(|v| v as &dyn roll_oidc::Fetch), jwks.as_deref(), &jwt, &i.issuer, &i.audience, now / 1000)?;
+                if self.is_rolls_issuer(&i.issuer) {
+                    // roll's own keys, in process: its JWKS is never fetched over HTTP.
+                    let doc = crate::issuer::jwks(&self.db, self.keys()?, &self.issuer_keys)?.to_string();
+                    self.oidc.verify(None, Some(&doc), &jwt, &i.issuer, &i.audience, now / 1000)?;
+                    // The token, and the identity, are this project's: never another's subject.
+                    let named = |sub: Option<&str>| sub.and_then(Subject::parse).is_some_and(|s| s.project() == project);
+                    if !named(jwt.str("sub")) || !named(Some(&i.subject)) || jwt.str("project") != Some(project.as_str()) {
+                        return Err(Error::Forbidden(format!("roll's token isn't for identity {}'s project", i.name)));
+                    }
+                } else {
+                    let via = self.deliver.as_deref().map(crate::oidc::Via);
+                    self.oidc.verify(via.as_ref().map(|v| v as &dyn roll_oidc::Fetch), jwks.as_deref(), &jwt, &i.issuer, &i.audience, now / 1000)?;
+                }
                 let sub = jwt.str("sub").unwrap_or_default().to_string();
                 if !wildcard(&i.subject, &sub) {
                     return Err(Error::Forbidden(format!("{sub} doesn't match identity {}'s subject", i.name)));
@@ -505,9 +526,9 @@ impl Secrets {
         };
         // Owned by the person behind whoever made it (a person's token is that person).
         let owner = match self.maker(&i.created_by)? {
-            crate::caller::Maker::Person(user) => Some(user),
-            crate::caller::Maker::Operator => None,
-            crate::caller::Maker::Gone => return Err(denied()),
+            crate::caller::Origin::Person(user) => Some(user),
+            crate::caller::Origin::Operator => None,
+            crate::caller::Origin::Gone => return Err(denied()),
         };
         let m = workloads.mint(&i.name, rule, i.allowed_ips.clone(), i.ttl_minutes as u32, owner.as_deref())?;
         let mut caller = Caller::acting(format!("identity:{}", i.id), std::sync::Arc::new(crate::access::Everything));
@@ -555,6 +576,11 @@ impl Secrets {
             return Err(Error::Unauthorized("this signed request has already logged in: sign a new one".into()));
         }
         Ok(caller.arn)
+    }
+
+    /// Whether `issuer` is roll's own (`<public URL>/v1/secrets/oidc`).
+    fn is_rolls_issuer(&self, issuer: &str) -> bool {
+        self.clouds.as_ref().is_some_and(|c| c.issuer.trim_end_matches('/') == issuer)
     }
 
     /// The identity a workload token came from, when it did: requests made with it are the

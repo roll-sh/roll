@@ -943,8 +943,10 @@ export const CLIENT_NAMES: Record<McpClient, string> = {
 
 /** One product's tools as `GET /v1/mcp/toolsets` counts them (the whole list, no narrowing). */
 export type ToolsetCost = { product: string; tools: number; read_only: number; context_tokens: number };
-/** Every product's costs, and search mode's own tools (`?tools=search`: find, run read-only, run). */
-export type ToolsetCosts = { products: ToolsetCost[]; search?: Omit<ToolsetCost, "product"> };
+/** One area of a product's toolset (`apps.observe`): its own tools and the lookups every area lists. */
+export type ToolsetArea = { toolset: string; tools: number; read_only: number; context_tokens: number };
+/** Every product's costs, each area's, and search mode's own tools (`?tools=search`: find, run read-only, run). */
+export type ToolsetCosts = { products: ToolsetCost[]; areas?: ToolsetArea[]; search?: Omit<ToolsetCost, "product"> };
 
 /**
  * Tools a client can take in one request. VS Code: 128, its own built-in tools included (its
@@ -959,15 +961,39 @@ export const CLIENT_TOOL_LIMIT: Partial<Record<McpClient, { tools: number; note:
  * What a choice of toolsets lists (none picked: every product; the access tools always). In search
  * mode (`search` given) the products' tools are behind search mode's own instead.
  */
-export function toolsetCost(costs: ToolsetCost[], picked: string[], readonly: boolean, search?: Omit<ToolsetCost, "product">): { tools: number; tokens: number } {
+export function toolsetCost(costs: ToolsetCost[], picked: string[], readonly: boolean, search?: Omit<ToolsetCost, "product">, areas: ToolsetArea[] = []): { tools: number; tokens: number } {
   const listed = [
     ...costs.filter((c) => c.product === "access" || (!search && (picked.length === 0 || picked.includes(c.product)))),
+    // A picked area (`apps.observe`) by its own cost. Two of one product's areas each count the
+    // lookups they share: a little over, never under, for a client's limit.
+    ...(search ? [] : areas.filter((a) => picked.includes(a.toolset)).map((a) => ({ ...a, product: a.toolset }))),
     ...(search ? [{ product: "search mode", ...search }] : []),
   ];
   const tools = listed.reduce((n, c) => n + (readonly ? c.read_only : c.tools), 0);
   // Read-only lists fewer tools: their share of the product's cost, near enough.
   const tokens = listed.reduce((n, c) => n + (readonly && c.tools ? Math.round((c.context_tokens * c.read_only) / c.tools) : c.context_tokens), 0);
   return { tools, tokens };
+}
+
+/** A product's areas in the costs (`apps` → observe, deploy, …), in the server's order. */
+export function areasOf(costs: ToolsetCosts, product: string): string[] {
+  return (costs.areas ?? []).map((a) => a.toolset).filter((t) => t.startsWith(`${product}.`)).map((t) => t.slice(product.length + 1));
+}
+
+/** Whether a product, or any of its areas, is picked. */
+export const productPicked = (picked: string[], product: string) => picked.some((p) => p === product || p.startsWith(`${product}.`));
+
+/**
+ * Picking an area of a product (`null`: the whole product). An area replaces the whole product;
+ * un-picking its last area brings the whole product back, so a product that's on lists something.
+ */
+export function pickArea(picked: string[], product: string, area: string | null): string[] {
+  const others = picked.filter((p) => p !== product && !p.startsWith(`${product}.`));
+  if (area === null) return [...others, product];
+  const id = `${product}.${area}`;
+  const areas = picked.filter((p) => p.startsWith(`${product}.`));
+  const next = areas.includes(id) ? areas.filter((a) => a !== id) : [...areas, id];
+  return next.length ? [...others, ...next] : [...others, product];
 }
 
 /** The MCP server's address for an API base. */

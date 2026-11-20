@@ -1,7 +1,7 @@
 import { Trash2 } from "lucide-react";
 import { useReducedMotion } from "@roll/brand";
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
-import { appsApi, SERVICE_NAME, type Build, type Environment, type Prices, type Reset, type Run, type Service, type ServicePatch, type Source } from "@/lib/apps-api";
+import { appsApi, SERVICE_NAME, type Build, type Environment, type Prices, type PushState, type Reset, type Run, type Service, type ServicePatch, type Source } from "@/lib/apps-api";
 import { Field, Segmented } from "../redis/shared";
 import { btn, Confirm, danger, input, Panel, panel, primary } from "../ui";
 import { Link } from "@/components/link";
@@ -10,7 +10,7 @@ import { DuplicatePanel } from "./duplicate";
 import { EnvironmentPanel, InstancesPanel } from "./environment";
 import { resourceKey } from "@/lib/workspace-resources";
 import { useWorkspace } from "@/lib/workspace-store";
-import { CPU, MEMORY, mb, type Runner } from "./shared";
+import { CPU, MEMORY, mb, since, type Runner } from "./shared";
 import { SidecarsPanel } from "./sidecars";
 import { ChecksPanel } from "./checks";
 import { HeartbeatsPanel } from "./heartbeats";
@@ -60,6 +60,7 @@ interface Form {
   healthCommand: string;
   drain: string;
   cpuTarget: string;
+  latencyTarget: string;
   memoryTarget: string;
   alertMemory: string;
   alertErrors: string;
@@ -78,6 +79,8 @@ interface Form {
   rolloutStep: string;
   rolloutErrors: string;
   rolloutManual: boolean;
+  /** The new instances start beside the old ones (false: the old ones stop first). */
+  rolloutOverlap: boolean;
   h2c: boolean;
   public: boolean;
   restart: "always" | "on_failure" | "never";
@@ -92,6 +95,12 @@ interface Form {
   scaleGroup: string;
   scaleMetric: string;
   scalePer: string;
+  /** The first of `run.push` (the rest are kept as they are). */
+  pushStream: string;
+  pushTopic: string;
+  pushGroup: string;
+  pushPath: string;
+  pushDead: string;
   suspendAfter: string;
   sleepAfter: string;
   volumeMount: string;
@@ -142,6 +151,7 @@ export function formOf(s: Service): Form {
     healthCommand: str(s.run.health_command),
     drain: str(s.run.drain_s),
     cpuTarget: str(s.run.cpu_target),
+    latencyTarget: str(s.run.latency_target_ms),
     memoryTarget: str(s.run.memory_target),
     alertMemory: str(s.run.alerts?.memory_pct),
     alertErrors: str(s.run.alerts?.error_pct),
@@ -159,6 +169,7 @@ export function formOf(s: Service): Form {
     rolloutStep: str(s.run.rollout?.step_s),
     rolloutErrors: str(s.run.rollout?.error_pct),
     rolloutManual: !!s.run.rollout?.manual,
+    rolloutOverlap: s.run.rollout?.overlap !== false,
     h2c: !!s.run.h2c,
     public: s.run.public !== false,
     restart: s.run.restart ?? "always",
@@ -173,6 +184,11 @@ export function formOf(s: Service): Form {
     scaleGroup: s.run.scale?.group ?? "",
     scaleMetric: s.run.scale?.metric ?? "",
     scalePer: str(s.run.scale?.per_instance),
+    pushStream: s.run.push?.[0]?.stream ?? "",
+    pushTopic: s.run.push?.[0]?.topic ?? "",
+    pushGroup: s.run.push?.[0]?.group ?? "",
+    pushPath: s.run.push?.[0]?.path ?? "",
+    pushDead: s.run.push?.[0]?.dead_letter ?? "",
     suspendAfter: str(s.run.suspend_after_s),
     sleepAfter: str(s.run.sleep_after_s),
     volumeMount: s.run.volume?.mount ?? "",
@@ -240,6 +256,7 @@ export function patchOf(s: Service, f: Form): ServicePatch {
   if (f.healthCommand !== before.healthCommand) run.health_command = text(f.healthCommand);
   if (f.drain !== before.drain) run.drain_s = num(f.drain);
   if (f.cpuTarget !== before.cpuTarget) run.cpu_target = num(f.cpuTarget);
+  if (f.latencyTarget !== before.latencyTarget) run.latency_target_ms = num(f.latencyTarget);
   if (f.memoryTarget !== before.memoryTarget) run.memory_target = num(f.memoryTarget);
   if (f.alertMemory !== before.alertMemory || f.alertErrors !== before.alertErrors || f.alertP95 !== before.alertP95 || f.alertCapacity !== before.alertCapacity || f.alertLog !== before.alertLog || f.alertLogCount !== before.alertLogCount)
     run.alerts = {
@@ -255,8 +272,16 @@ export function patchOf(s: Service, f: Form): ServicePatch {
     run.metrics = f.metricsPath.trim() ? { path: f.metricsPath.trim(), ...(num(f.metricsPort) ? { port: Number(f.metricsPort) } : {}) } : null;
   if (f.sloObjective !== before.sloObjective || f.sloLatency !== before.sloLatency || f.sloWindow !== before.sloWindow)
     run.slo = f.sloObjective.trim() ? { objective: Number(f.sloObjective), ...(num(f.sloLatency) ? { latency_ms: Number(f.sloLatency) } : {}), ...(num(f.sloWindow) ? { window_days: Number(f.sloWindow) } : {}) } : null;
-  if (f.rolloutSteps !== before.rolloutSteps || f.rolloutStep !== before.rolloutStep || f.rolloutErrors !== before.rolloutErrors || f.rolloutManual !== before.rolloutManual)
-    run.rollout = { steps: rolloutSteps(f.rolloutSteps) ?? [], step_s: Number(f.rolloutStep) || 120, error_pct: Number(f.rolloutErrors) || 5, ...(f.rolloutManual ? { manual: true } : {}), ...(s.run.rollout?.slo_burn ? { slo_burn: s.run.rollout.slo_burn } : {}), ...(s.run.rollout?.p95_pct ? { p95_pct: s.run.rollout.p95_pct } : {}) };
+  if (f.rolloutSteps !== before.rolloutSteps || f.rolloutStep !== before.rolloutStep || f.rolloutErrors !== before.rolloutErrors || f.rolloutManual !== before.rolloutManual || f.rolloutOverlap !== before.rolloutOverlap)
+    run.rollout = {
+      steps: f.rolloutOverlap ? (rolloutSteps(f.rolloutSteps) ?? []) : [],
+      step_s: Number(f.rolloutStep) || 120,
+      error_pct: Number(f.rolloutErrors) || 5,
+      ...(f.rolloutManual ? { manual: true } : {}),
+      ...(s.run.rollout?.slo_burn ? { slo_burn: s.run.rollout.slo_burn } : {}),
+      ...(s.run.rollout?.p95_pct ? { p95_pct: s.run.rollout.p95_pct } : {}),
+      ...(f.rolloutOverlap ? {} : { overlap: false }),
+    };
   if (f.h2c !== before.h2c) run.h2c = f.h2c ? true : null;
   if (f.public !== before.public) run.public = f.public ? null : false;
   if (f.affinity !== before.affinity) run.affinity = f.affinity ? true : null;
@@ -272,6 +297,13 @@ export function patchOf(s: Service, f: Form): ServicePatch {
   if (f.scaleStream !== before.scaleStream || f.scaleGroup !== before.scaleGroup || f.scalePer !== before.scalePer || f.scaleMetric !== before.scaleMetric) {
     const per = f.scalePer.trim() ? { per_instance: Number(f.scalePer) } : {};
     run.scale = f.scaleMetric.trim() ? { metric: f.scaleMetric.trim(), ...per } : f.scaleStream && f.scaleGroup.trim() ? { stream: f.scaleStream, group: f.scaleGroup.trim(), ...per } : null;
+  }
+  if (f.pushStream !== before.pushStream || f.pushTopic !== before.pushTopic || f.pushGroup !== before.pushGroup || f.pushPath !== before.pushPath || f.pushDead !== before.pushDead) {
+    const [first, ...rest] = s.run.push ?? [];
+    const rule = f.pushStream ? { ...first, stream: f.pushStream, topic: f.pushTopic.trim(), group: f.pushGroup.trim(), path: f.pushPath.trim(), dead_letter: f.pushDead.trim() || undefined } : null;
+    if (rule && !rule.dead_letter) delete rule.max_attempts;
+    const all = rule ? [rule, ...rest] : rest;
+    run.push = all.length ? all : null;
   }
   if (f.suspendAfter !== before.suspendAfter) run.suspend_after_s = num(f.suspendAfter);
   if (f.sleepAfter !== before.sleepAfter) run.sleep_after_s = num(f.sleepAfter);
@@ -296,7 +328,7 @@ export function logMetrics(text: string): { name: string; pattern: string }[] {
     });
 }
 
-const NUMERIC: (keyof Form)[] = ["scalePer", "port", "timeout", "retries", "min", "max", "concurrency", "queue", "healthTimeout", "healthEvery", "healthFailures", "drain", "cpuTarget", "memoryTarget", "suspendAfter", "sleepAfter", "volumeSize", "backupEvery", "backupKeep", "alertMemory", "alertErrors", "alertP95", "sloObjective", "sloLatency", "sloWindow", "metricsPort", "alertCapacity", "alertLogCount", "rolloutStep", "rolloutErrors", "restartTries"];
+const NUMERIC: (keyof Form)[] = ["scalePer", "port", "timeout", "retries", "min", "max", "concurrency", "queue", "healthTimeout", "healthEvery", "healthFailures", "drain", "cpuTarget", "latencyTarget", "memoryTarget", "suspendAfter", "sleepAfter", "volumeSize", "backupEvery", "backupKeep", "alertMemory", "alertErrors", "alertP95", "sloObjective", "sloLatency", "sloWindow", "metricsPort", "alertCapacity", "alertLogCount", "rolloutStep", "rolloutErrors", "restartTries"];
 
 /** A rollout's steps as typed (`10, 50`): increasing percents 1–99, at most five; null when they aren't. */
 export function rolloutSteps(v: string): number[] | null {
@@ -575,6 +607,9 @@ export function SettingsTab({
                   <Field label="CPU target (%)" hint="another instance while they average over it for a minute; empty: requests only">
                     {t("cpuTarget", "70")}
                   </Field>
+                  <Field label="p95 target (ms)" hint="another instance while a window's p95 is over it; empty: not on latency">
+                    {t("latencyTarget", "300")}
+                  </Field>
                   <Field label="Memory target (%)" hint="of each instance's memory, the same way; empty: not on memory">
                     {t("memoryTarget", "80")}
                   </Field>
@@ -584,6 +619,26 @@ export function SettingsTab({
                   <Field label="Sleep after (s)" hint="idle; stopped costs nothing">
                     {t("sleepAfter", "600")}
                   </Field>
+                  <Field label="Push a stream" hint={streams.length ? "each record POSTed to a path; the group's offset moves on a 2xx" : "a stream on this project can push its records here"}>
+                    <select value={form.pushStream} onChange={(e) => set("pushStream", e.target.value)} className={`${input} w-full`} disabled={!streams.length && !form.pushStream}>
+                      <option value="">No</option>
+                      {streams.map((s) => (
+                        <option key={s.ref} value={s.ref}>
+                          {s.name}
+                        </option>
+                      ))}
+                    </select>
+                  </Field>
+                  {form.pushStream && (
+                    <>
+                      <Field label="Topic">{t("pushTopic", "orders")}</Field>
+                      <Field label="Consumer group">{t("pushGroup", "web")}</Field>
+                      <Field label="Path" hint="POSTed in production">{t("pushPath", "/events")}</Field>
+                      <Field label="Dead-letter topic" hint="after 5 failed tries; none: tried until taken">{t("pushDead", "orders-dead")}</Field>
+                    </>
+                  )}
+                  {(service.run.push?.length ?? 0) > 1 && <p className="col-span-full text-[12px] text-subtle">And {(service.run.push?.length ?? 1) - 1} more set through the API, kept as they are.</p>}
+                  {(service.run.push?.length ?? 0) > 0 && <PushStatus service={service.id} envs={[...new Set((service.run.push ?? []).map((p) => p.environment ?? "production"))]} />}
                 </>
               )}
               {form.type === "worker" && (
@@ -764,11 +819,19 @@ export function SettingsTab({
                 {t("drain", "30")}
               </Field>
               {!form.volumeMount.trim() && (
+                <Field label="During a deploy" hint={form.rolloutOverlap ? "the new instances start beside the old ones: no gap" : "the old ones stop first, so two never run at once (a bot, a scheduler)"}>
+                  <select value={form.rolloutOverlap ? "overlap" : "alone"} onChange={(e) => set("rolloutOverlap", e.target.value === "overlap")} className={`${input} w-full`}>
+                    <option value="overlap">New beside old</option>
+                    <option value="alone">Old stops first</option>
+                  </select>
+                </Field>
+              )}
+              {!form.volumeMount.trim() && form.rolloutOverlap && (
                 <Field label="Gradual rollout (%)" hint={rolloutSteps(form.rolloutSteps) ? "shares of requests a new deployment takes in turn; empty: at once" : "increasing percents, 1–99, up to five"}>
                   {t("rolloutSteps", "10, 50")}
                 </Field>
               )}
-              {!form.volumeMount.trim() && form.rolloutSteps.trim() && (
+              {!form.volumeMount.trim() && form.rolloutOverlap && form.rolloutSteps.trim() && (
                 <>
                   <Field label="Each step (s)">{t("rolloutStep", "120")}</Field>
                   <Field label="Roll back at 5xx (%)" hint="of its requests in a step, and more than the old one">
@@ -1142,5 +1205,43 @@ function RegistryLogin({ service, runner }: { service: Service; runner: Runner }
         </form>
       )}
     </div>
+  );
+}
+
+/** Each push rule as it stands on the service's owner: how far behind, delivered, failing. */
+function PushStatus({ service, envs }: { service: string; envs: string[] }) {
+  const [states, setStates] = useState<PushState[] | null>(null);
+  const key = envs.join(",");
+  useEffect(() => {
+    let live = true;
+    const load = () => Promise.all(envs.map((e) => appsApi.pushStates(service, e).catch(() => [] as PushState[]))).then((all) => live && setStates(all.flat()));
+    void load();
+    const t = setInterval(load, 15000);
+    return () => {
+      live = false;
+      clearInterval(t);
+    };
+  }, [service, key]); // eslint-disable-line react-hooks/exhaustive-deps
+  if (!states?.length) return null;
+  const now = Date.now();
+  return (
+    <ul className="col-span-full space-y-1 text-[12px]" aria-label="Pushes">
+      {states.map((s) => (
+        <li key={`${s.stream}/${s.topic}/${s.group}`} className="text-muted">
+          <span className="font-mono text-fg">{s.topic}</span> → <span className="font-mono">{s.path}</span>
+          {s.off ? (
+            <span className="text-subtle"> · off: {s.off}</span>
+          ) : (
+            <>
+              {s.lag != null && <span> · {s.lag.toLocaleString()} behind</span>}
+              <span> · {s.delivered.toLocaleString()} delivered</span>
+              {s.last_delivered_at && <span> {since(s.last_delivered_at, now)}</span>}
+              {s.dead_lettered > 0 && <span> · {s.dead_lettered.toLocaleString()} dead-lettered</span>}
+              {s.failing_since && <span className="text-danger"> · failing since {since(s.failing_since, now)}: {s.last_error}</span>}
+            </>
+          )}
+        </li>
+      ))}
+    </ul>
   );
 }

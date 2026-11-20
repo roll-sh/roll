@@ -1974,6 +1974,25 @@ async fn a_link_needs_reveal_on_what_it_links() {
         { "product": "streams", "resources": [{ "id": "st_9" }], "actions": { "read": "allow" } },
     ]), json!({})).await;
     assert_eq!(d.call(&reader, Method::PATCH, "/v1/apps/services/svc_a", Some(scale)).await.0, StatusCode::OK);
+    // A stream pushed to a web service: read on it (apps consumes it for the service), and write
+    // with a dead-letter topic (apps appends to it).
+    let push = |dead: bool| {
+        let mut rule = json!({ "stream": "st_9", "topic": "orders", "group": "web", "path": "/events" });
+        if dead {
+            rule["dead_letter"] = json!("orders-dead");
+        }
+        json!({ "run": { "push": [rule] } })
+    };
+    let (s, e) = d.call(&apps, Method::PATCH, "/v1/apps/services/svc_a", Some(push(false))).await;
+    assert_eq!((s, e["needs"]["product"].as_str(), e["needs"]["action"].as_str()), (StatusCode::FORBIDDEN, Some("streams"), Some("read")), "{e}");
+    // (A setting that changes what production does, `push` is deploy-level, not `write`.)
+    let (pusher, _) = d.token(json!([
+        { "product": "apps", "resources": "*", "actions": { "write": "allow", "deploy": "allow" } },
+        { "product": "streams", "resources": [{ "id": "st_9" }], "actions": { "read": "allow" } },
+    ]), json!({})).await;
+    assert_eq!(d.call(&pusher, Method::PATCH, "/v1/apps/services/svc_a", Some(push(false))).await.0, StatusCode::OK);
+    let (s, e) = d.call(&pusher, Method::PATCH, "/v1/apps/services/svc_a", Some(push(true))).await;
+    assert_eq!((s, e["needs"]["action"].as_str()), (StatusCode::FORBIDDEN, Some("write")), "{e}");
     // A roll code repo apps reads for the caller (a service built from it, a plan of it): read on
     // that repo too, so no apps grant reaches a repo's code, head or stack by itself.
     let from_repo = json!({ "project": "p", "name": "api", "source": { "kind": "repo", "repo": "acme/secret" } });

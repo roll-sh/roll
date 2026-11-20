@@ -400,9 +400,13 @@ async fn cleanup_generated(env: &Env<'_>, name: Option<&str>) -> Outcome {
     }
 }
 
-/// `CleanupSnapshotStep`: deletes the snapshot the execution state names, if it exists.
+/// `CleanupSnapshotStep`: deletes the snapshot the execution state names, if it exists. On a
+/// branch, one in a repository inherited from the parent is the parent's: it stays.
 async fn cleanup_snapshot(env: &Env<'_>, e: &Exec) -> Outcome {
     let (Some(repo), Some(snap)) = (e.snapshot_repository.as_deref(), e.snapshot_name.as_deref()) else { return Outcome::Next };
+    if crate::branch::inherited_repository(env.cluster, &env.cluster.state(), repo) {
+        return Outcome::Next;
+    }
     match env.call("DELETE", &format!("/_snapshot/{}/{}", enc(repo), enc(snap)), None).await {
         Ok(_) => Outcome::Next,
         Err(err) if matches!(err.get("type").and_then(Value::as_str), Some("snapshot_missing_exception" | "repository_missing_exception")) => Outcome::Next,
@@ -692,7 +696,9 @@ mod tests {
             ok(&c, "POST", "/metrics-d/_doc?refresh=true", &format!(r#"{{"@timestamp":"{ts}","host":"{host}","cpu":{cpu}}}"#)).await;
         }
         let first = c.state().metadata.data_streams["metrics-d"].indices[0].clone();
-        settle(&c, now).await;
+        // ILM runs once the index exists: at `now` (taken before the documents created it) the
+        // index would be younger than zero and stay in `new`.
+        settle(&c, crate::time::now_millis()).await;
         let v = explain(&c, &first).await;
         assert_eq!(step(&v), "warm/downsample/check-ts-end-time-passed", "{v}");
         let end = super::super::ilm_run::next_due(&c.state()).expect("the end time is due");
@@ -749,6 +755,50 @@ mod tests {
         assert_eq!(call(&c, "GET", &format!("/_snapshot/repo/{snapshot}"), "").await.0, 404, "the delete phase deletes the snapshot");
         assert_eq!(history(&c, "restored-ss-000001").await.last().map(String::as_str), Some("delete/delete/complete"));
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// On a branch, the delete phase of an index whose snapshot is in a repository the branch
+    /// inherited deletes the index and leaves the snapshot, which is the parent's.
+    #[tokio::test]
+    async fn a_branch_leaves_an_inherited_snapshot_to_its_parent() {
+        use crate::meta::snapshots::{Repository, RepositoryData, Snapshot};
+        let mut cfg = ClusterConfig::new("b");
+        cfg.branch_of = Some("parent".into());
+        let c = Arc::new(Cluster::open(cfg, Arc::new(MemoryStore::new())).await.unwrap());
+        // The branch's copy of its parent's state: a bucket repository holding one snapshot.
+        let mut s = crate::meta::settings::Settings::new();
+        s.set("bucket", "backups");
+        s.set("base_path", "prod");
+        let repo = Repository::new("s3", s);
+        let snap = Snapshot::from_stored(&crate::obj! { "name" => "base", "uuid" => "u1", "indices" => Value::from(vec!["logs".to_string()]) }).unwrap();
+        c.update(move |st| {
+            let data = RepositoryData { uuid: "r1".into(), generation: 1, snapshots: vec![Arc::new(snap)] };
+            st.metadata.repository_data.insert(repo.location_key(), Arc::new(data));
+            st.metadata.repositories.insert("backup".into(), Arc::new(repo));
+            Ok(())
+        })
+        .await
+        .unwrap();
+        crate::branch::mark_inherited(&c).await.unwrap();
+        ok(&c, "PUT", "/_ilm/policy/p", r#"{"policy":{"phases":{"delete":{"min_age":"1d","actions":{"delete":{}}}}}}"#).await;
+        ok(&c, "PUT", "/logs", r#"{"settings":{"index.lifecycle.name":"p"}}"#).await;
+        let now = crate::time::now_millis();
+        settle(&c, now).await;
+        // As the parent's searchable_snapshot action left it.
+        c.update(|st| {
+            if let Some(Value::Obj(e)) = super::super::store::family_mut(st, super::super::ilm_run::STATE).get_mut("logs") {
+                e.insert("snapshot_repository".into(), "backup".into());
+                e.insert("snapshot_name".into(), "base".into());
+            }
+            Ok(())
+        })
+        .await
+        .unwrap();
+        settle(&c, now + DAY + 60_000).await;
+        assert!(!c.state().metadata.indices.contains_key("logs"), "{}", explain(&c, "logs").await);
+        let st = c.state();
+        let key = st.metadata.repositories["backup"].location_key();
+        assert!(st.metadata.repository_data[&key].find("base").is_some(), "the parent's snapshot stays");
     }
 
     /// `indices.lifecycle.history_index_enabled: false` writes no history; a failure is
