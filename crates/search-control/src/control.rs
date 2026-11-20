@@ -347,6 +347,9 @@ pub fn spec_for(c: &SearchCluster) -> ClusterSpec {
     spec.destructive_requires_name = c.destructive_requires_name;
     spec.ip_allowlist = allowlist_of(&c.ip_allowlist);
     spec.catalog_id = Some(c.id.clone());
+    // Only until its first load has marked what it inherited: a branch made before marking
+    // existed, or one already marked, runs its jobs as its own.
+    spec.branch_of = c.parent_id.clone().filter(|_| c.inherit_pending);
     spec
 }
 
@@ -838,6 +841,7 @@ impl Control {
             owner: None,
             restored_at: None,
             ip_allowlist: Vec::new(),
+            inherit_pending: false,
         }
     }
 
@@ -920,6 +924,8 @@ impl Control {
                 password_rotated_at: None,
                 parent_id: Some(p.id.clone()),
                 parent_at: Some(at.unwrap_or(now).min(now)),
+                // Its first load marks what it inherits (`search_es::branch`).
+                inherit_pending: true,
                 ..p.clone()
             },
             o,
@@ -2215,6 +2221,7 @@ mod tests {
             owner: None,
             restored_at: None,
             ip_allowlist: vec![IpRule { cidr: "203.0.113.0/24".into(), description: None }],
+            inherit_pending: false,
         };
         let s = spec_for(&c);
         assert!(s.ip_allowlist.contains("::ffff:203.0.113.9".parse().unwrap()) && !s.ip_allowlist.is_open());

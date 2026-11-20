@@ -103,6 +103,11 @@ pub struct SearchCluster {
     /// Who may reach its data plane (Elastic Cloud's traffic filters): canonical CIDRs, each with
     /// an optional description; empty: anyone. Branches start with their parent's.
     pub ip_allowlist: Vec<IpRule>,
+    /// A new branch whose node hasn't yet marked what it inherited from its parent
+    /// (`search_es::branch`): set when the branch is made, cleared once a load marked it.
+    /// Branches made before marking existed never have it, so their own jobs are left alone.
+    #[serde(skip)]
+    pub inherit_pending: bool,
 }
 
 impl std::fmt::Debug for SearchCluster {
@@ -335,10 +340,10 @@ CREATE INDEX IF NOT EXISTS search_suggestions_due ON search_suggestions (due_at)
 "#;
 
 const COLS: &str = "id, name, region, flavor, password, idle_timeout_s, max_in_flight, max_body_mb, destructive_requires_name, \
-                    parent_id, parent_at, created_at, password_rotated_at, indices, docs, stored_bytes, owner, ip_allowlist";
+                    parent_id, parent_at, created_at, password_rotated_at, indices, docs, stored_bytes, owner, ip_allowlist, inherit_pending";
 /// What lookups read: [`COLS`] and where the cluster is loaded.
 const READ_COLS: &str = "id, name, region, flavor, password, idle_timeout_s, max_in_flight, max_body_mb, destructive_requires_name, \
-                         parent_id, parent_at, created_at, password_rotated_at, indices, docs, stored_bytes, owner, loaded_on, own_bytes, wake_at, restored_at, ip_allowlist";
+                         parent_id, parent_at, created_at, password_rotated_at, indices, docs, stored_bytes, owner, loaded_on, own_bytes, wake_at, restored_at, ip_allowlist, inherit_pending";
 /// What deleted clusters' reads add to [`READ_COLS`].
 const DELETED_COLS: &str = "deleted_name, deleted_at, purge_at, stored_as, name";
 
@@ -367,15 +372,16 @@ fn row(r: &Row) -> code_sql::Result<SearchCluster> {
         restored_at: r.get(20)?,
         // Unreadable, the cluster can't be looked up (and so can't be reached), never opened up.
         ip_allowlist: serde_json::from_str(&r.get::<_, String>(21)?).map_err(|e| code_sql::Error::Conversion(format!("ip_allowlist: {e}")))?,
+        inherit_pending: r.get(22)?,
     })
 }
 
 fn deleted_row(r: &Row) -> code_sql::Result<DeletedCluster> {
     let mut c = row(r)?;
-    c.name = r.get(22)?;
+    c.name = r.get(23)?;
     c.loaded_on = None;
     c.wake_at = None;
-    Ok(DeletedCluster { cluster: c, deleted_at: r.get(23)?, purge_at: r.get(24)?, stored_as: r.get(25)?, reserved: r.get(26)? })
+    Ok(DeletedCluster { cluster: c, deleted_at: r.get(24)?, purge_at: r.get(25)?, stored_as: r.get(26)?, reserved: r.get(27)? })
 }
 
 /// What the catalog keeps of an index's query suggestions (`crate::suggestions`): its settings
@@ -481,6 +487,8 @@ impl Store {
         db.add_column("search_clusters", "owner", "TEXT")?;
         // Clusters made before allowlists are open, as they were.
         db.add_column("search_clusters", "ip_allowlist", "TEXT NOT NULL DEFAULT '[]'")?;
+        // Branches made before marking aren't marked (`SearchCluster::inherit_pending`).
+        db.add_column("search_clusters", "inherit_pending", "INTEGER NOT NULL DEFAULT 0")?;
         db.ensure_schema("CREATE INDEX IF NOT EXISTS search_clusters_owner ON search_clusters (owner, created_at)")?;
         // Deleted clusters kept for restoring.
         db.add_column("search_clusters", "deleted_at", "INTEGER")?;
@@ -562,7 +570,7 @@ impl Store {
                 return Ok(Inserted::Over(over));
             }
             x.execute(
-                &format!("INSERT INTO search_clusters ({COLS}) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)"),
+                &format!("INSERT INTO search_clusters ({COLS}) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19)"),
                 params![
                     c.id,
                     c.name,
@@ -581,7 +589,8 @@ impl Store {
                     c.docs,
                     c.stored_bytes,
                     c.owner,
-                    allowlist_json(&c.ip_allowlist)
+                    allowlist_json(&c.ip_allowlist),
+                    c.inherit_pending
                 ],
             )
             .map(|_| Inserted::Yes)
@@ -697,6 +706,12 @@ impl Store {
             Some(n) => x.execute("UPDATE search_clusters SET loaded_on = ?2 WHERE name = ?1", params![name, n]),
             None => x.execute("UPDATE search_clusters SET loaded_on = NULL WHERE name = ?1 AND loaded_on = ?2", params![name, me]),
         })?;
+        Ok(())
+    }
+
+    /// Sets or clears [`SearchCluster::inherit_pending`].
+    pub async fn set_inherit_pending(&self, name: &str, pending: bool) -> anyhow::Result<()> {
+        self.db.write(|x| x.execute("UPDATE search_clusters SET inherit_pending = ?2 WHERE name = ?1", params![name, pending]))?;
         Ok(())
     }
 
@@ -1305,6 +1320,7 @@ mod tests {
             owner: None,
             restored_at: None,
             ip_allowlist: Vec::new(),
+            inherit_pending: false,
         }
     }
 
