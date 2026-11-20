@@ -3035,6 +3035,12 @@ async fn roll_up_deploys_an_uploaded_tree_and_cron_runs_on_demand() {
     assert_eq!(call(&w.api, "GET", &format!("{base}/runs/{rid}"), None).await.1["status"], "succeeded");
     let out = get_until(&w.api, &format!("{base}/runs/{rid}/logs"), |l| l.as_array().is_some_and(|a| !a.is_empty())).await;
     assert!(out.as_array().unwrap().iter().all(|l| l["text"] == "job ran"), "{out}");
+    // Followed after it ended: its lines, then `end`, then the stream closes (a follower stops
+    // rather than taking the close for a drop and reading it all again).
+    let req = Request::builder().uri(format!("{base}/runs/{rid}/logs?follow=1")).body(Body::empty()).unwrap();
+    let body = tokio::time::timeout(Duration::from_secs(5), w.api.clone().oneshot(req).await.unwrap().into_body().collect()).await.expect("it closes").unwrap().to_bytes();
+    let body = String::from_utf8_lossy(&body);
+    assert!(body.contains("job ran") && body.trim_end().ends_with("event: end\ndata: end"), "{body}");
     assert_eq!(call(&w.api, "POST", &format!("{base}/runs/{rid}/cancel"), None).await.0, StatusCode::CONFLICT, "only a running one");
     // A run that fails is an event (notified by default), with its exit code.
     call(&w.api, "PATCH", &format!("{base}/variables"), Some(json!({"set": {"FAKE_EXIT": "3"}}))).await;
