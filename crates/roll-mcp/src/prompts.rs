@@ -222,7 +222,7 @@ pub fn values(answer: &Value, fields: &[&str], typed: &str) -> (Vec<String>, boo
     for item in items {
         for f in fields {
             if let Some(v) = item.get(*f).and_then(Value::as_str)
-                && is_id(v)
+                && is_choice(v)
                 && v.to_lowercase().starts_with(&typed)
                 && !out.iter().any(|o| o == v)
             {
@@ -246,6 +246,12 @@ fn clean(v: Option<&Value>) -> String {
 /// and a prompt's text is the person's own message to the agent.
 pub(crate) fn is_id(s: &str) -> bool {
     !s.is_empty() && s.len() <= 64 && s.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '.' | '-'))
+}
+
+/// What a form or a completion may offer: an id, or a repo's `owner/name` (each part an id, and
+/// neither only dots, so it names nothing above).
+pub(crate) fn is_choice(s: &str) -> bool {
+    is_id(s) || s.split_once('/').is_some_and(|(o, n)| [o, n].iter().all(|p| is_id(p) && !p.chars().all(|c| c == '.')))
 }
 
 fn offered<'a>(tools: &'a [String]) -> impl Iterator<Item = &'static Prompt> + 'a {
