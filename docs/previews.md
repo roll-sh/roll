@@ -2174,6 +2174,11 @@ Ranked by what a person notices first. Done so far:
    the accepts tell a person from the change's author by every name they go by (their roll handle
    and each linked GitHub login). Next for it: roll code's own approvals the same way.
 4. **In review**: a protected base's change request in the keep-in-secrets button (#482).
+5. **Previews on the session grant with project members** (roll secrets' members v1.1, after its
+   #501): a project's people get roles (viewer, developer, admin, owner); previews' routes decide
+   through roll-access's session grant as workspace and secrets do: a viewer reads a preview's
+   status, a developer and up gets shells, files, connect and deploy hooks. Until then previews
+   stay the project owner's (and admins').
 5. **Cheap Postgres branches on ext4: overlay volumes over a frozen base** (pg-control; measured
    2026-11-17): 0.97 s against 3.5 s for a 1.4 GB copy, but a write copies the whole table file.
 6. **Watch: pg-control's recovery to a time seconds old** (unowned).
