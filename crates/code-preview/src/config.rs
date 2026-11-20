@@ -20,6 +20,10 @@
 //!
 //! [main]
 //! auto_revert = true
+//!
+//! [secrets]              # roll code's landing rule for credentials (code_control::settings)
+//! unstored_credentials = "block"
+//! project = "shop"       # where teammates' roll secrets are: the `roll` CLI reads it
 //! ```
 //!
 //! Parsing is strict (unknown keys are errors), and every error names the key at fault, because
@@ -193,7 +197,9 @@ struct RawFile {
     preview: Option<RawPreview>,
     queue: Option<RawQueue>,
     main: Option<RawMain>,
-    /// roll code's landing settings for credentials (`code_control::settings::secrets`).
+    /// roll code's landing settings for credentials (`code_control::settings::secrets`), and roll
+    /// secrets' suggestion for teammates (project, environment, path, branches), which the `roll`
+    /// CLI reads (`roll-cli/src/secrets/repo.rs`).
     secrets: Option<RawSecrets>,
     /// roll apps' section (`apps_control::config`): read there; here only its
     /// `previews.screenshots`, roll previews'.
@@ -527,6 +533,17 @@ mod tests {
             let err = RollToml::parse(text).expect_err(text);
             assert!(err.contains(needle), "{text:?}: {err:?} should mention {needle:?}");
         }
+    }
+
+    /// One `[secrets]` table holds roll code's landing rule and the CLI's suggestion: both parsers
+    /// take it, and roll code's rule still reads.
+    #[test]
+    fn the_secrets_table_holds_the_landing_rule_and_the_suggestion() {
+        let text = "[secrets]\nunstored_credentials = \"block\"\nproject = \"shop\"\nenvironment = \"development\"\npath = \"/api\"\nbranches = { \"release/*\" = \"staging\" }\n";
+        RollToml::parse(text).unwrap();
+        let s = code_control::settings::parse(text).unwrap();
+        assert_eq!(s.secrets.unstored_credentials, code_control::settings::Unstored::Block);
+        assert!(RollToml::parse("[secrets]\nprojects = \"shop\"\n").unwrap_err().contains("projects"));
     }
 
     #[test]

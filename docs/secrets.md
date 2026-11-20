@@ -49,6 +49,20 @@ Everything below works the same from the dashboard (a project's **Secrets**) and
    ```
    roll secrets setup -p shop -e development
    ```
+
+   A repo can carry this for its teammates in `roll.toml` (never a URL, a token or a value):
+
+   ```toml
+   [secrets]
+   project = "shop"
+   environment = "development"
+   branches = { "release/*" = "staging" }
+   ```
+
+   It's only a suggestion: a teammate runs `roll secrets setup` once, sees the table and approves it
+   (`--approve` in a script), and a changed table asks again. It never chooses a protected
+   environment, even approved: that takes `-e`, `ROLL_ENV` or your own setup. With no flags and no
+   table, `setup` in a terminal lists the projects and environments you can see.
 3. **Add values**, one by one or from a `.env` file (one change, which you can roll back):
 
    ```
@@ -2572,6 +2586,7 @@ roll secrets import  .env [--overwrite]                         # one change (.e
 roll secrets edit                                               # the folder in $EDITOR, one change
 roll secrets set     KEY --generate 48                          # a random value made locally
 roll secrets health                                            # every finding, every environment, worst first
+roll secrets setup   [-p P -e ENV --path /] | --approve | --show | --clear   # this directory's project (alone: approve roll.toml's, or pick)
 roll secrets doctor                                            # this machine's setup, checked
 roll secrets check   [.env.example] [--strict]                # keys a template names that the environment lacks
 roll secrets scan    [PATH…] | --staged [--allow-unstored]    # this project's values and credentials it doesn't hold: where, never what
@@ -2618,10 +2633,36 @@ roll completions bash|zsh|fish|powershell
   `~/.config/roll/secrets.json` (never the repo), so `roll run -- npm start` needs no flags there
   (`--show`, `--clear`). A project of that name that doesn't exist is made first, through the
   workspace's `POST /v1/workspace/projects` as whoever the CLI is signed in as: after a yes in a
-  terminal (`Create project "shop"? [y/N]`), or with `--create` in a script. Then `development` and `/`. A scoped token (`ROLL_TOKEN`) implies its
-  project.
+  terminal (`Create project "shop"? [y/N]`), or with `--create` in a script. Then the repo's
+  suggestion, then `development` and `/`. A scoped token (`ROLL_TOKEN`) implies its project. In a
+  terminal with no `-p`, `setup` lists the projects the login can see, then the chosen one's
+  environments (protected ones marked), and remembers the pick.
+- **The repo's suggestion** (Doppler's `doppler.yaml`, Infisical's `.infisical.yaml`, with
+  direnv's `allow`): `[secrets]` in the nearest `roll.toml` walking up from the current directory
+  may hold `project`, `environment`, `path`, and `branches`, a table of branch glob to environment
+  matched against the checked-out branch with roll code's glob table (`*` within a segment, `**`
+  any segments, the whole name: `release/*` matches `release/1.2`; the longest matching pattern
+  wins, else `environment`). It sits beside roll code's `unstored_credentials`. Any other key, and
+  anything that looks like an API URL, a token or a value, is named and ignored: a repository never
+  chooses where a token goes.
+  - It's used only once the person has approved that exact table for that directory: `roll secrets
+    setup` with no flags shows it and asks in a terminal, `roll secrets setup --approve` approves it
+    in a script. The approval keeps the directory and a SHA-256 of the table as used in
+    `secrets.json` under `approved` (`{"<dir>": {"sha256": …, "at": …, "table": {…}}}`, beside the
+    directories' own setups), so a changed table asks again and says what it was. Until then every
+    command prints what the repo suggests and how to approve it, and uses nothing from it.
+  - A protected environment is never taken from it, even approved (a cloned repo can't route
+    production values to the code it ships): `roll run` asks the environment's answer, which says
+    whether it's `protected` (or `trusted` to read a protected base), and refuses, naming `-e`,
+    `ROLL_ENV` and `roll secrets setup -e` instead. The check is made on every use, so a later
+    `envs protect` applies at once, and an outage refuses rather than guesses.
+  - Precedence, per value: flags, then the variables, then the person's own setup, then the
+    approved table, then `development` and `/`. The table speaks for the project it names: given
+    another project, none of it applies.
 - `roll secrets doctor` checks that setup in one go, each line ok or FAIL: who the token is (and
-  the project it's bound to), the directory's project and environment and how many keys it can
+  the project it's bound to), the directory's project, environment and folder and where each came
+  from (a flag, a variable, your setup, `roll.toml` and the branch pattern, the default), whether
+  the repo's table is approved (and what it left out), and how many keys it can
   read there, anything there that needs fixing now (expired, missing, exposed or in-the-browser keys, from health),
   the keys a `.env.example` names that it lacks, whether a local `.env` still matches (the diff
   above, by fingerprint), and whether staged files hold any of
