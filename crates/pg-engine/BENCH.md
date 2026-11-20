@@ -285,26 +285,55 @@ The current checked measurements compare release engine builds and PostgreSQL 18
 the wire. Older rounds below are historical records, with their original methods and
 limits. Their results have not been reverified on the current source.
 
-## Bulk writes, round 19: sorts a byte at a time (2026-11-20, agent 271)
+## Bulk writes, round 19: sorts a byte at a time, four per-row costs (2026-11-20, agent 271)
 
 HANDOFF "Bulk writes, round 19" has what changed. Lane C, the 1M-row bulk script with joined
 windows (agent 246's `bulkx.sh` with `JOIN=1`, copied to `~/.cache/a271/bench`), plain dist builds
-(`tools/dist.sh`) of **b0**, origin's `68e5a2ebd`, and **n4**, b0 with the round's two commits (the
-second, `cand/a271-2`, reaches neither index build); **n1**, b0 with the sorts without the in-order
-check and a float parsing change only COPY reaches. G user instructions of the server's cgroup;
-every counter ran 100% of its window. Each pair held lane C through `tools/lane.sh` alone.
-**Foreign load was over 1.0 core in every run** (wall-weighted 1.2-3.6 cores); the instruction
-counts repeat within 0.1% regardless. Rows equal in every run.
+(`tools/dist.sh`) of **b0**, origin's `68e5a2ebd`, and **n4**, both commits (`cand/a271-2`'s code).
+Between them while the change was built: **n1** the sorts without the in-order check and the float
+path's first form, **n2** n1 with the in-order check and the hash, **n3** n2 with `with_tid` and
+the float path's second form. G user instructions of the server's cgroup; every counter ran 100%
+of its window. Each pair held lane C through `tools/lane.sh` alone. **Foreign load was over 1.0
+core in every run** (wall-weighted 1.2-3.6 cores: other agents' builds and runs, host load
+30-80); the instruction counts repeat within 0.1% regardless. Rows equal in every run (count and
+sums of every column of both tables).
+
+### b0 against n4 (3 alternating pairs, % per pair)
 
 | step | b0 | n4 | % per pair |
 |---|---|---|---|
+| COPY in | 9.472 | 9.111 | -3.8 x3 |
 | CREATE INDEX | 5.205 | 4.403 | -15.4 x3 |
 | CREATE UNIQUE INDEX | 3.469 | 3.375 | -2.8 / -2.7 / -2.7 |
-| VACUUM, ANALYZE | 1.726, 0.472 | 1.726, 0.472 | +0.0 x3 |
+| COPY out | 3.089 | 3.089 | +0.0 x3 |
+| INSERT … SELECT | 6.628 | 6.590 | -0.5 / -0.8 / -0.5 |
+| UPDATE half | 12.032 | 11.997 | +0.2 / -0.3 / -0.3 |
+| DELETE a quarter, with its compaction | 8.263 | 8.188 | -0.9 x3 |
+| VACUUM, ANALYZE, `count(*), sum(c)` | 1.726, 0.472, 0.368 | 1.726, 0.472, 0.368 | +0.0 x3 |
+| Seq Scan count(*), sum(a); count(*), sum(a) | 0.179, 0.333 | 0.179, 0.333 | +0.0 x3 |
+| **all steps** | 50.73 | 49.33 | -2.7 / -2.8 / -2.8 |
 
-b0 against n1 (one pair): CREATE INDEX -13.5%, CREATE UNIQUE INDEX +5.0% (its entries come in
-order, which n1's sort didn't check; n4's does), DELETE with its compaction -0.6%. Bytes written
-the same; VmHWM b0 283-284, n4 280-283 MB.
+Bytes written the same (618.3 MB over three runs each; DELETE 54.0 MB). Peak memory: VmHWM b0
+283-284, n4 280-283 MB; cgroup peak b0 332-392, n4 377-391 MB.
+
+### By build (medians, G; one or two runs of n1-n3)
+
+| step | b0 | n1 | n2 | n3 | n4 |
+|---|---|---|---|---|---|
+| COPY in | 9.472 | 9.355 | 9.341 | 9.173 | 9.111 |
+| CREATE INDEX | 5.205 | 4.502 | 4.489 | 4.489 | 4.403 |
+| CREATE UNIQUE INDEX | 3.469 | 3.645 | 3.461 | 3.462 | 3.375 |
+| INSERT … SELECT | 6.627 | 6.630 | 6.616 | 6.617 | 6.590 |
+| DELETE a quarter, with its compaction | 8.263 | 8.210 | 8.188 | 8.188 | 8.189 |
+| **all steps** | 50.73 | 50.04 | 49.81 | 49.62 | 49.33 |
+
+n1's CREATE UNIQUE INDEX +5.0%: its entries come in order, which the radix sort didn't check
+(n2 does). ANALYZE reads 0.472 or 0.476 G on any of these builds (n2 read both).
+
+### Against the numbers that stand (agent 260's same-day runs, 2026-11-19)
+
+PostgreSQL 18.6 52.33, pgrust 44.92: n4 49.33 is 0.943x PostgreSQL, 1.098x pgrust (b0 50.73 today,
+agent 260's d3 50.70). Not re-run on PostgreSQL or pgrust.
 
 ## Bulk writes, round 18: the merging scan (2026-11-19, agent 260)
 

@@ -10625,10 +10625,12 @@ and confirm on PGO:
 Agent 218's short-transaction stack (ten steps, `wip/a218`) was gated this way and landed: BENCH
 "Profile-guided build", part 2.
 
-## Bulk writes, round 19: sorts a byte at a time (agent 271)
+## Bulk writes, round 19: sorts a byte at a time, four per-row costs (agent 271)
 
 BENCH.md "Bulk writes, round 19" has the measurements (lane C, the 1M-row bulk script with joined
-windows, plain dist builds). `cand/a271`: one code commit on origin's `68e5a2ebd`. No format change.
+windows, plain dist builds). `cand/a271`: one code commit on origin's `68e5a2ebd` (the sorts);
+`cand/a271-2`: one code commit on it (four per-row costs; independent code, stacked for the docs).
+No format change: the same files, the same bloom bits.
 
 **Where the four steps went** (b0 = `68e5a2ebd`, instruction samples of each joined window; the
 shares lean towards slow instructions, as samples skid past them):
@@ -10673,15 +10675,35 @@ filter (`finish`), but `add` hashed every key for one anyway and kept the hashes
 A row key added to such a run (none is) would leave the file without a filter, which every key
 passes: no read is wrong either way.
 
-Results (BENCH "Bulk writes, round 19"; plain dist, G user instructions): CREATE INDEX 5.205 ->
-4.403 (-15.4% in each of three pairs; the sorts -13.8%, the unhashed run -1.9%), CREATE UNIQUE
-INDEX 3.469 -> 3.375 (-2.7%, the unhashed run), DELETE with its compaction -0.6% (the deleted
-keys' sort; one pair), every other step this commit reaches level. (Measured as builds with the
-round's other commit too, which reaches neither index build: BENCH has each build.) Rows equal in
-every run; bytes written the same; VmHWM b0 283-284, n4 280-283 MB. Foreign load was over 1.0 core
-in every run (1.2-3.6 cores wall-weighted): the instruction counts repeat within 0.1% regardless.
+**Four per-row costs** (`cand/a271-2`):
+- `hash64_2` (format 2's filter hash) read a key's last 1-7 bytes by copying them into a padded
+  buffer: a call to memcpy and a load waiting on its store, for every key a file's filter or a
+  point read hashes. Now the last 8 bytes shifted when the key has 8; the same value (the sst
+  test checks it against the padded form for every length 0-39).
+- The float fast path (`parse_float`) checked its bytes with `all()`, which stops at the first
+  other byte and so runs a byte at a time; a fold without the early exit is done 16 bytes at a
+  time. Standalone, a million calls: a 19-digit value (the bulk table's) 525 -> 397 instructions,
+  a 5-digit one 286 -> 289. (A first form that also counted the nonzero digits in the same loop
+  was 525 -> 412 and 286 -> 299: replaced.)
+- `with_tid` (the TID stamped into a COPY's modelled rows, and a table rewrite's) grew its output
+  from `vec![tag]`: two reallocations a row. Sized at once now.
+- `note_compression_len` took the transaction's id (`cur_xid`, a `RefCell` borrow) for every row;
+  only a recorded method needs it, and a row of plain values records none.
 
-Not gated on the PGO build: the commit adds or removes no inline attribute and splits no hot
+Results (BENCH "Bulk writes, round 19"; plain dist, b0 against n4, both commits, three alternating
+pairs, G user instructions): all steps 50.73 -> 49.33 (-2.7 / -2.8 / -2.8%); CREATE INDEX 5.205
+-> 4.403 (-15.4% each pair; the sorts -13.8%, the unhashed run -1.9%), CREATE UNIQUE INDEX 3.469
+-> 3.375 (-2.7%, the unhashed run), COPY in 9.472 -> 9.111 (-3.8% each pair; by build: the float
+path's first form -1.2%, its second form and `with_tid` -1.8%, the id -0.7%), INSERT ... SELECT -0.5 to
+-0.8%, DELETE with its compaction 8.263 -> 8.188 (-0.9% each pair; the deleted keys' sort -0.6%,
+the hash -0.3%), UPDATE +0.2 / -0.3 / -0.3%, every other step level. Against the numbers that
+stand (agent 260's same-day runs): 0.943x PostgreSQL's 52.33, 1.098x pgrust's 44.92. Rows equal in
+every run; bytes written the same (618.3 MB over three runs each); VmHWM b0 283-284, n4 280-283 MB.
+Foreign load was over 1.0 core in every run (1.2-3.6 cores wall-weighted, host load 30-80): the
+instruction counts repeat within 0.1% regardless, cycles don't. ANALYZE reads 0.472 or 0.476 G on
+one build (n2 read both): not a change.
+
+Not gated on the PGO build: neither commit adds or removes an inline attribute or splits a hot
 function; the sorts replace one call with another, once per build.
 
 **Considered, not built:**
@@ -10692,17 +10714,17 @@ function; the sorts replace one call with another, once per build.
 - Faster zstd settings for a statement's runs: the bytes written must not grow (agent 260's
   note on negative levels; agent 257's on match parameters).
 
-**Left (G user instructions, against PostgreSQL 18.6's):**
-1. DELETE with its compaction 8.21 against 1.67: the compaction's rewrite of the table with the
+**Left (G user instructions, n4 against PostgreSQL 18.6's):**
+1. DELETE with its compaction 8.19 against 1.67: the compaction's rewrite of the table with the
    UPDATE's versions (zstd with the dictionary is a third of it), the deferred deletions
    (`SstWriter::add` per tombstone, ~0.5 G), decoding the deleted rows.
-2. COPY in 9.47 against 6.48 (pgrust 4.97): the size model's per-row calls (`untracked_write`,
+2. COPY in 9.11 against 6.48 (pgrust 4.97): the size model's per-row calls (`untracked_write`,
    `ensure`'s lock and lookup every row of a table past the model, `row_len`, `datum_bytes`), the
    first 400,000 rows modelled and stamped with TIDs, parsing, zstd of the runs.
 3. CREATE INDEX 4.40 against 3.13: the table's blocks decompressed (15%), the run's zstd,
    `stored_tuple_len` (6%; agent 260's kept-measure patch needs it much cheaper), the leader's
    merge of the participants' entries (5%), the radix sorts (now ~8% of samples).
-4. INSERT ... SELECT 6.63 against 4.31: zstd of the runs (17%), the size model, decoding and
+4. INSERT ... SELECT 6.59 against 4.31: zstd of the runs (17%), the size model, decoding and
    encoding every row.
 
 ## Bulk writes, round 18: the merging scan merges interleaved blocks in one loop (agent 260)
