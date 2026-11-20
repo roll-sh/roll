@@ -1,6 +1,6 @@
 import { AlertTriangle, KeyRound, Plus, X } from "lucide-react";
 import { useEffect, useState, type ReactNode } from "react";
-import { isProduction, previewsApi, unmaskedNote, type MaskSuggestion, type MaskSuggestions, type PageState, type PreviewBypass, type PreviewHook, type PreviewJob, type PreviewSettings, type ResourceRule, type SettingsPatch } from "@/lib/previews-api";
+import { isProduction, parseRouteBudgets, previewsApi, routeBudgetLines, unmaskedNote, type MaskSuggestion, type MaskSuggestions, type PageState, type PreviewBypass, type PreviewHook, type PreviewJob, type PreviewSettings, type ResourceRule, type SettingsPatch } from "@/lib/previews-api";
 import { ROLL_API } from "@/lib/roll-api";
 import { keepable } from "@/lib/secret-names";
 import { needsApproval, secretsApi } from "@/lib/secrets-api";
@@ -101,6 +101,7 @@ function Form({
   const [widths, setWidths] = useState((saved.github.widths ?? []).join(", "));
   const [openapi, setOpenapi] = useState(saved.github.openapi ?? "");
   const [endpoints, setEndpoints] = useState((saved.github.endpoints ?? []).join(", "));
+  const [routeBudgets, setRouteBudgets] = useState(routeBudgetLines(saved.github.budget?.routes));
   // Selectors can hold commas: one per line.
   const [hide, setHide] = useState((saved.github.hide ?? []).join("\n"));
   const [states, setStates] = useState(saved.github.states?.length ? JSON.stringify(saved.github.states, null, 2) : "");
@@ -156,7 +157,7 @@ function Form({
     );
   };
 
-  useEffect(() => setError(null), [s, branches, paths, ignorePaths, skipAuthors, pages, widths, openapi, endpoints, states, hide, env, perBranch]);
+  useEffect(() => setError(null), [s, branches, paths, ignorePaths, skipAuthors, pages, widths, openapi, endpoints, routeBudgets, states, hide, env, perBranch]);
 
   const next: PreviewSettings = {
     ...s,
@@ -171,6 +172,7 @@ function Form({
       widths: words(widths).map(Number),
       openapi: openapi.trim() || null,
       endpoints: words(endpoints),
+      budget: { ...(s.github.budget ?? { load_ms: 0, bytes: 0 }), routes: parseRouteBudgets(routeBudgets).routes },
       states: parseStates(states),
       hide: hide
         .split("\n")
@@ -187,6 +189,11 @@ function Form({
   const prod = isProduction(s.secrets.base);
 
   const save = async () => {
+    const unread = parseRouteBudgets(routeBudgets).bad;
+    if (unread.length) {
+      setError(`Route budgets: a line is a route then its milliseconds (GET /orders 300); not ${unread.map((l) => `"${l}"`).join(", ")}`);
+      return;
+    }
     setBusy(true);
     setError(null);
     try {
@@ -546,6 +553,16 @@ function Form({
             />
           </Field>
         )}
+        <Field label="Route budgets" note="A route (a trace's root span name) and its p50 in ms, one a line: over it, a route counts as a regression whatever main's does (needs traces).">
+          <textarea
+            value={routeBudgets}
+            onChange={(e) => setRouteBudgets(e.target.value)}
+            placeholder={"GET /orders 300\nPOST /checkout 800"}
+            rows={3}
+            className={`${field} w-full py-1.5 font-mono text-[12px]`}
+            spellCheck={false}
+          />
+        </Field>
         <Field
           group
           label="Regressions against main"
