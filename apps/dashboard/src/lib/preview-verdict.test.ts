@@ -28,4 +28,9 @@ describe("verdict", () => {
       ["visual", "1 page moves by itself", "note"],
     ]);
   });
+
+  it("says a route over its budget as a danger", () => {
+    const p = { ...base, slower_routes: { branch: "main", routes: [{ name: "GET /new", count: 9, p50_ms: 400, main_p50_ms: 0, budget_ms: 300 }] } } as unknown as Preview;
+    expect(verdict(p).map((v) => [v.target, v.text, v.tone])).toEqual([["routes", "1 route slower than main or over budget", "danger"]]);
+  });
 });

@@ -1261,6 +1261,14 @@ status passes with who did ("Accepted by ada: …"), and a new push asks again. 
 waits while the change's preview isn't compared at the change's own head. `an_error_mains_preview_doesnt_have_reaches_the_record_and_the_report`
 (accepting), `code-control/tests/queue.rs` (the blocker).
 
+Route budgets (Lighthouse CI's budgets beside its comparisons): a project's
+`github.budget.routes` (`{"GET /orders": 300}`, the rules dialog's "Route budgets", at most 50,
+each 1 to 600000 ms) holds a route (a trace's root span name) to a p50 of its own over the last
+hour's traces (5 traces at least). A route over it joins the record's `slower_routes` with its
+`budget_ms`, whether or not main's preview is slower or there at all, so it counts wherever
+slower routes count: the verdict strip (danger), the change page, the pull request's comment
+("budget 300 ms"), `roll/regressions` and, required, the blocker. `a_route_slower_than_mains_reaches_the_record_and_the_report`.
+
 Repeated queries (Sentry's N+1 detection): a trace whose spans run one database statement
 (`db.statement`, or the newer `db.query.text`) ten times or more says it as `repeated`
 (`{statement, count}`), the statement's shape with its literals taken out (`SELECT … WHERE id = ?`,

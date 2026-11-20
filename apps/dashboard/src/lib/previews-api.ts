@@ -158,7 +158,7 @@ export interface Preview {
   regressions_accepted?: { head: string; by: string; at: number } | null;
   /** Its error groups main's preview doesn't have, as its holder last read them. */
   new_errors?: { branch: string; total: number; errors: { service: string; title: string }[] } | null;
-  slower_routes?: { branch: string; routes: { name: string; count: number; p50_ms: number; main_p50_ms: number; grew?: GrewSpan | null }[] } | null;
+  slower_routes?: { branch: string; routes: { name: string; count: number; p50_ms: number; main_p50_ms: number; grew?: GrewSpan | null; /** Its budget, when it's over it. */ budget_ms?: number | null }[] } | null;
   /** Earlier pushes of the change's services, still reachable on the same data (newest first). */
   earlier?: { service: string; revision: string; url: string; share_url: string | null; at: number }[];
   /** When its screenshot was taken (`screenshot` below), if it has one. */
@@ -236,7 +236,24 @@ export interface SpeedBudget {
   lcp_ms?: number;
   /** Cumulative layout shift ("good": up to 0.1). */
   cls?: number;
+  /** Routes held to a time of their own: a trace's root span name (`GET /orders`) → its p50 in ms. */
+  routes?: Record<string, number>;
 }
+
+/** `GET /orders 300` lines → `{ "GET /orders": 300 }`: a route, then its p50 budget in ms. */
+export function parseRouteBudgets(text: string): Record<string, number> {
+  const out: Record<string, number> = {};
+  for (const line of text.split("\n")) {
+    const m = line.trim().match(/^(.+?)\s+(\d+)\s*(?:ms)?$/);
+    if (m) out[m[1].trim()] = Number(m[2]);
+  }
+  return out;
+}
+
+export const routeBudgetLines = (routes: Record<string, number> | undefined) =>
+  Object.entries(routes ?? {})
+    .map(([name, ms]) => `${name} ${ms}`)
+    .join("\n");
 
 /** A page's load, as the browser that took its screenshot timed it. */
 export interface PageSpeed {

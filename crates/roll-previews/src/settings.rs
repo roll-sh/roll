@@ -297,7 +297,14 @@ pub struct Budget {
     pub lcp_ms: u32,
     /// Cumulative layout shift ("good" is up to 0.1).
     pub cls: f64,
+    /// Routes held to a time of their own (a trace's root span name → its p50 in ms, over the
+    /// last hour's traces): over it, a route counts as a regression whatever main's does.
+    #[serde(skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub routes: std::collections::BTreeMap<String, u32>,
 }
+
+/// The most routes a project budgets.
+pub const MAX_ROUTE_BUDGETS: usize = 50;
 
 pub const MAX_HIDE: usize = 20;
 
@@ -616,6 +623,9 @@ impl Settings {
         let b = &self.github.budget;
         if b.load_ms > 600_000 || b.bytes > 10 << 30 || b.lcp_ms > 600_000 || !(0.0..=100.0).contains(&b.cls) {
             return bad("github.budget: load_ms and lcp_ms up to 600000, bytes up to 10 GiB, cls from 0 to 100".into());
+        }
+        if b.routes.len() > MAX_ROUTE_BUDGETS || b.routes.iter().any(|(name, ms)| name.trim().is_empty() || name.len() > 200 || name.chars().any(char::is_control) || *ms == 0 || *ms > 600_000) {
+            return bad(format!("github.budget.routes: up to {MAX_ROUTE_BUDGETS} routes (a trace's root span name, as GET /orders), each 1 to 600000 ms"));
         }
         let pages = &self.github.pages;
         if pages.len() > MAX_PAGES || pages.iter().any(|p| page_entry(p).is_none() || p == "/") || pages.iter().enumerate().any(|(i, p)| pages[..i].contains(p)) {

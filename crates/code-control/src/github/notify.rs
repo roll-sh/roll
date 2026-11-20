@@ -470,6 +470,7 @@ fn regressions_status(e: &crate::model::PreviewEnvironment) -> Option<(&'static 
     Some(match (routes, errors) {
         (0, 0) => ("success", format!("No route slower and no new error against {branch}")),
         (r, e) if by.is_some() => ("success", format!("Accepted by {}: {} slower, {} against {branch}", by.unwrap_or_default(), count(r, "route", "routes"), count(e, "new error", "new errors"))),
+        (r, 0) if e.slower_routes.as_ref().is_some_and(|s| s.routes.iter().any(|x| x.budget_ms.is_some())) => ("failure", format!("{} slower than {branch} or over budget", count(r, "route", "routes"))),
         (r, 0) => ("failure", format!("{} slower than {branch}", count(r, "route", "routes"))),
         (0, e) => ("failure", format!("{} against {branch}", count(e, "new error", "new errors"))),
         (r, e) => ("failure", format!("{} slower, {} against {branch}", count(r, "route", "routes"), count(e, "new error", "new errors"))),
@@ -642,7 +643,8 @@ fn page_checks(e: &crate::model::PreviewEnvironment) -> Option<String> {
     }
     if let Some(s) = e.slower_routes.as_ref().filter(|s| !s.routes.is_empty()) {
         let branch = branch_name(&s.branch);
-        summary.push(format!("{} slower than {branch}", plural(s.routes.len() as u64, "route", "routes")));
+        let budgeted = s.routes.iter().any(|x| x.budget_ms.is_some());
+        summary.push(format!("{} slower than {branch}{}", plural(s.routes.len() as u64, "route", "routes"), if budgeted { " or over budget" } else { "" }));
         details.push_str(&routes_line(s, &branch));
     }
     if let Some(n) = e.new_errors.as_ref().filter(|n| n.total > 0) {
@@ -931,10 +933,12 @@ fn routes_line(s: &crate::model::PreviewSlowerRoutes, branch: &str) -> String {
             let span = |s: &str| -> String { s.chars().map(|c| if c == '`' || c.is_control() { '\'' } else { c }).take(80).collect() };
             // Where its time went: the span that grew most against the branch's.
             let why = x.grew.as_ref().map(|(s, ms, main)| format!(", `{}` {ms} ms ({branch} {main} ms)", span(s))).unwrap_or_default();
-            format!("`{}` {} ms ({branch} {} ms{why})", span(&x.name), x.p50_ms, x.main_p50_ms)
+            let budget = x.budget_ms.map(|b| format!(", budget {b} ms")).unwrap_or_default();
+            format!("`{}` {} ms ({branch} {} ms{budget}{why})", span(&x.name), x.p50_ms, x.main_p50_ms)
         })
         .collect();
-    format!("Routes slower than on `{branch}`'s preview (the median of the last hour's traces): {}.\n\n", each.join("; "))
+    let what = if s.routes.iter().any(|x| x.budget_ms.is_some()) { format!("Routes slower than on `{branch}`'s preview or over their budget") } else { format!("Routes slower than on `{branch}`'s preview") };
+    format!("{what} (the median of the last hour's traces): {}.\n\n", each.join("; "))
 }
 
 /// The endpoints' times against the branch's (`github.endpoints`): each path the project named,
@@ -1214,7 +1218,7 @@ mod preview_tests {
         assert!(page_checks(&timed).unwrap().contains("loads in 1.2 s, 300 ms slower than main</summary>"));
         // Routes slower than main's preview's: in the summary, and named where nothing in a name
         // can close its code span.
-        timed.slower_routes = Some(crate::model::PreviewSlowerRoutes { branch: "main".into(), routes: vec![crate::model::PreviewSlowerRoute { name: "GET /a`b\n".into(), p50_ms: 420, main_p50_ms: 120, grew: Some(("SELECT items".into(), 300, 0)) }] });
+        timed.slower_routes = Some(crate::model::PreviewSlowerRoutes { branch: "main".into(), routes: vec![crate::model::PreviewSlowerRoute { name: "GET /a`b\n".into(), p50_ms: 420, main_p50_ms: 120, grew: Some(("SELECT items".into(), 300, 0)), budget_ms: None }] });
         let checks = page_checks(&timed).unwrap();
         assert!(checks.contains("1 route slower than main"), "{checks}");
         assert!(checks.contains("`GET /a'b'` 420 ms (main 120 ms, `SELECT items` 300 ms (main 0 ms))"), "{checks}");

@@ -211,6 +211,9 @@ pub struct SlowerRoute {
     /// the time went. `None` when no span of it did (or main's spans aren't on this node).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub grew: Option<GrewSpan>,
+    /// The project's budget for it (`github.budget.routes`), when its p50 is over it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub budget_ms: Option<u64>,
 }
 
 /// A span name's median time in one route's traces (each trace's spans of that name summed: an

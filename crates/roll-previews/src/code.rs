@@ -181,7 +181,7 @@ impl CodeSource {
                 regressions_compared: p.regressions_compared,
                 slower_routes: p.slower_routes.as_ref().map(|s| code_control::model::PreviewSlowerRoutes {
                     branch: s.branch.clone(),
-                    routes: s.routes.iter().map(|x| code_control::model::PreviewSlowerRoute { name: x.name.clone(), p50_ms: x.p50_ms, main_p50_ms: x.main_p50_ms, grew: x.grew.as_ref().map(|g| (g.span.clone(), g.ms, g.main_ms)) }).collect(),
+                    routes: s.routes.iter().map(|x| code_control::model::PreviewSlowerRoute { name: x.name.clone(), p50_ms: x.p50_ms, main_p50_ms: x.main_p50_ms, grew: x.grew.as_ref().map(|g| (g.span.clone(), g.ms, g.main_ms)), budget_ms: x.budget_ms }).collect(),
                 }),
                 new_errors: p.new_errors.as_ref().map(|n| code_control::model::PreviewNewErrors {
                     branch: n.branch.clone(),
