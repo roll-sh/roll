@@ -356,6 +356,10 @@ pub trait Resources: Send + Sync {
     async fn commit(&self, _stream: &str, _topic: &str, _group: &str, _consumer: &str, _partition: i32, _offset: i64) -> anyhow::Result<()> {
         anyhow::bail!("roll streams isn't on this node")
     }
+    /// `consumer` leaves `group`: its partitions are free for another at once.
+    async fn leave(&self, _stream: &str, _group: &str, _consumer: &str) -> anyhow::Result<()> {
+        Ok(())
+    }
     /// Append a record to `topic` (a push's dead letters).
     async fn produce(&self, _stream: &str, _topic: &str, _record: &StreamRecord) -> anyhow::Result<()> {
         anyhow::bail!("roll streams isn't on this node")

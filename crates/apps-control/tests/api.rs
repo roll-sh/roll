@@ -493,6 +493,7 @@ async fn runtime_config_changes_without_a_deploy() {
     let (st, e) = call(&w.api, "POST", &format!("{base}/config/rotate"), None).await;
     assert!(st == StatusCode::OK && e["config_rotated_at"].is_i64(), "{e}");
     assert_eq!(read(path.clone(), None).await.0, StatusCode::OK, "its instances still run with it");
+    assert_eq!(call(&w.api, "POST", &format!("{base}/config/rotate"), None).await.0, StatusCode::CONFLICT, "not twice before a deploy");
     let (_, d) = call(&w.api, "POST", &format!("{base}/redeploy"), Some(json!({}))).await;
     let d = settled(&w, &id, "production", d["id"].as_str().unwrap()).await;
     let (_, body) = visit_deployment(&w, &host(&svc["environments"][0]["url"]), d["id"].as_str().unwrap()).await;
@@ -7106,8 +7107,9 @@ async fn a_failed_deploy_is_explained_once_by_its_repo_owners_model() {
     // Kept: asking again reads it back, until `again`.
     assert_eq!(call(&w.api, "POST", &url, None).await.1, e);
     assert_eq!(model.0.lock().len(), 1);
-    assert_eq!(call(&w.api, "POST", &format!("{url}?again=1"), None).await.0, StatusCode::OK);
-    assert_eq!(model.0.lock().len(), 2);
+    // Asked anew at most once a minute (each answer is charged to the repo's owner).
+    assert_eq!(call(&w.api, "POST", &format!("{url}?again=1"), None).await.0, StatusCode::CONFLICT);
+    assert_eq!(model.0.lock().len(), 1);
     // A deployment that didn't fail isn't explained.
     let (img, live) = image_service(&w, "api", json!({"port": 80})).await;
     let url = format!("/v1/apps/services/{}/environments/production/deploys/{}/explain", img["id"].as_str().unwrap(), live["id"].as_str().unwrap());
@@ -7190,6 +7192,12 @@ async fn a_stream_is_pushed_to_a_web_service() {
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
     assert!(done(), "{:?}", stream.committed.lock());
+    // What the app got: each record as a CloudEvent, the refused one tried twice.
+    let (_, log) = call(&w.api, "GET", &format!("/v1/apps/services/{id}/environments/production/logs"), None).await;
+    let got: Vec<&str> = log.as_array().unwrap().iter().filter_map(|l| l["text"].as_str()).filter(|t| t.starts_with("got event")).collect();
+    for want in ["got event orders/0/0 (try 1, sh.roll.stream.record)", "got event orders/0/1 (try 1, ", "got event poison/0/0 (try 2, "] {
+        assert!(got.iter().any(|g| g.starts_with(want)), "{want}: {got:?}");
+    }
     let produced = stream.produced.lock().clone();
     assert_eq!(produced.len(), 1, "{produced:?}");
     let (topic, dead) = &produced[0];

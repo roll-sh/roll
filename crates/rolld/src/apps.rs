@@ -476,7 +476,7 @@ impl Resources for RollResources {
         let (base, token, http) = &self.api;
         let enc = |s: &str| urlencoding::encode(s).into_owned();
         let url = format!(
-            "{base}/v1/streams/{}/topics/{}/records?group={}&consumer={}&commit=manual&lease_ms=300000&encoding=base64&wait_ms={wait_ms}&limit={limit}",
+            "{base}/v1/streams/{}/topics/{}/records?group={}&consumer={}&commit=manual&lease_ms=60000&encoding=base64&wait_ms={wait_ms}&limit={limit}",
             enc(stream),
             enc(topic),
             enc(group),
@@ -515,6 +515,18 @@ impl Resources for RollResources {
         }
         let resp = req.send().await?;
         anyhow::ensure!(resp.status().is_success(), "the stream answered {}", resp.status());
+        Ok(())
+    }
+
+    async fn leave(&self, stream: &str, group: &str, consumer: &str) -> anyhow::Result<()> {
+        let (base, token, http) = &self.api;
+        let enc = |s: &str| urlencoding::encode(s).into_owned();
+        let mut req = http.delete(format!("{base}/v1/streams/{}/groups/{}/consumers/{}", enc(stream), enc(group), enc(consumer)));
+        if let Some(t) = token {
+            req = req.bearer_auth(t);
+        }
+        let resp = req.send().await?;
+        anyhow::ensure!(resp.status().is_success() || resp.status() == reqwest::StatusCode::NOT_FOUND, "the stream answered {}", resp.status());
         Ok(())
     }
 

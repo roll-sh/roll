@@ -21,6 +21,18 @@ const LINE_CHARS: usize = 400;
 /// What the logs may hold in the prompt in all.
 const LOG_BYTES: usize = 24 * 1024;
 
+/// How soon `again` may ask anew.
+const AGAIN_MS: i64 = 60_000;
+
+/// Takes a key out of a set when dropped (a question that ended, however it ended).
+struct Landed<'a>(&'a parking_lot::Mutex<std::collections::HashSet<String>>, String);
+
+impl Drop for Landed<'_> {
+    fn drop(&mut self) {
+        self.0.lock().remove(&self.1);
+    }
+}
+
 /// The model's reading of a failure, as it's kept and shown.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Explanation {
@@ -191,9 +203,21 @@ impl Apps {
             return Err(Error::Conflict(format!("{dep} didn't fail: only a failed deployment is explained")));
         }
         let id = dep.to_string();
-        if !again && let Some(kept) = self.db(move |s| s.explanation(&id)).await? {
-            return Ok(kept);
+        if let Some(kept) = self.db(move |s| s.explanation(&id)).await? {
+            if !again {
+                return Ok(kept);
+            }
+            // Each answer is charged to the repo's owner: at most one a minute.
+            if code_sql::now_ms() - kept.at < AGAIN_MS {
+                return Err(Error::Conflict("it was explained less than a minute ago".into()));
+            }
         }
+        // One question a deployment at a time: two clicks are one charge.
+        let flight = format!("explain:{dep}");
+        if !self.calling.lock().insert(flight.clone()) {
+            return Err(Error::Conflict("it's being explained now: ask again in a moment".into()));
+        }
+        let _done = Landed(&self.calling, flight);
         let svc = service.to_string();
         let row = self.db(move |s| s.service(&svc)).await?;
         let Source::Repo { repo, .. } = &row.source else {
