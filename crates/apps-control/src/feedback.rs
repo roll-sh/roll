@@ -24,26 +24,28 @@ const SCRIPT: &str = include_str!("../assets/feedback.js");
 /// Adds the tag to a page as it streams: before the first `</body>` (matched across chunks, in
 /// any case), or at the end of a page without one. Memory stays one chunk.
 struct Tagger {
-    tag: &'static [u8],
+    tag: Bytes,
+    /// Put before this tag (any case).
+    close: &'static [u8],
+    /// A page without it gets the tag at its end anyway (`</body>`), or not at all (`</head>`).
+    at_end: bool,
     held: Vec<u8>,
     done: bool,
 }
 
 impl Tagger {
-    const CLOSE: &'static [u8] = b"</body>";
-
     fn push(&mut self, chunk: &[u8]) -> Vec<u8> {
         if self.done {
             return chunk.to_vec();
         }
         let mut buf = std::mem::take(&mut self.held);
         buf.extend_from_slice(chunk);
-        if let Some(at) = buf.windows(Self::CLOSE.len()).position(|w| w.eq_ignore_ascii_case(Self::CLOSE)) {
+        if let Some(at) = buf.windows(self.close.len()).position(|w| w.eq_ignore_ascii_case(self.close)) {
             self.done = true;
             buf.splice(at..at, self.tag.iter().copied());
             return buf;
         }
-        let keep = (Self::CLOSE.len() - 1).min(buf.len());
+        let keep = (self.close.len() - 1).min(buf.len());
         self.held = buf.split_off(buf.len() - keep);
         buf
     }
@@ -52,7 +54,9 @@ impl Tagger {
         let mut rest = std::mem::take(&mut self.held);
         if !self.done {
             self.done = true;
-            rest.extend_from_slice(self.tag);
+            if self.at_end {
+                rest.extend_from_slice(&self.tag);
+            }
         }
         rest
     }
@@ -69,6 +73,17 @@ pub fn add(resp: Response) -> Response {
 /// `personal`: the page is this visitor's now (no shared cache keeps it); otherwise every visitor
 /// gets the same bytes, so its caching stays the app's (its ETag made weak: the bytes changed).
 pub fn tag(resp: Response, tag: &'static [u8], personal: bool) -> Response {
+    inject(resp, Bytes::from_static(tag), b"</body>", true, personal)
+}
+
+/// An environment's own snippets ([`crate::model::Snippet`]): `head` before `</head>` (a page
+/// without one gets none), `body` before `</body>`; every visitor gets the same bytes.
+pub fn snippets(resp: Response, head: &Bytes, body: &Bytes) -> Response {
+    let resp = if head.is_empty() { resp } else { inject(resp, head.clone(), b"</head>", false, false) };
+    if body.is_empty() { resp } else { inject(resp, body.clone(), b"</body>", true, false) }
+}
+
+fn inject(resp: Response, tag: Bytes, close: &'static [u8], at_end: bool, personal: bool) -> Response {
     let html = resp.headers().get(header::CONTENT_TYPE).and_then(|v| v.to_str().ok()).is_some_and(|t| t.trim_start().to_ascii_lowercase().starts_with("text/html"));
     let plain = resp.headers().get(header::CONTENT_ENCODING).and_then(|v| v.to_str().ok()).is_none_or(|e| e.eq_ignore_ascii_case("identity"));
     if resp.status() != StatusCode::OK || !html || !plain {
@@ -87,7 +102,7 @@ pub fn tag(resp: Response, tag: &'static [u8], personal: bool) -> Response {
     {
         parts.headers.insert(header::ETAG, v);
     }
-    let stream = futures::stream::unfold((body.into_data_stream(), Tagger { tag, held: Vec::new(), done: false }, false), |(mut s, mut t, ended)| async move {
+    let stream = futures::stream::unfold((body.into_data_stream(), Tagger { tag, close, at_end, held: Vec::new(), done: false }, false), |(mut s, mut t, ended)| async move {
         if ended {
             return None;
         }
@@ -132,10 +147,15 @@ pub fn script(target: &str) -> Response {
 mod tests {
     #[test]
     fn the_tag_goes_before_the_body_closes_even_across_chunks() {
-        let mut t = super::Tagger { tag: super::TAG, held: Vec::new(), done: false };
+        let mut t = super::Tagger { tag: bytes::Bytes::from_static(super::TAG), close: b"</body>", at_end: true, held: Vec::new(), done: false };
         let mut out = t.push(b"<p>hi</p></BO");
         out.extend(t.push(b"DY></html>"));
         out.extend(t.finish());
         assert_eq!(String::from_utf8(out).unwrap(), r#"<p>hi</p><script src="/__roll/feedback.js" defer></script></BODY></html>"#);
+        // A head snippet on a page with no head: nothing added.
+        let mut t = super::Tagger { tag: bytes::Bytes::from_static(b"<script>x</script>"), close: b"</head>", at_end: false, held: Vec::new(), done: false };
+        let mut out = t.push(b"<p>no head</p>");
+        out.extend(t.finish());
+        assert_eq!(out, b"<p>no head</p>");
     }
 }

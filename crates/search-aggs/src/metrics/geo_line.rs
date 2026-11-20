@@ -459,7 +459,7 @@ impl IntroSortable for PathSorter<'_> {
 }
 
 /// `InternalGeoLine`.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct GeoLine {
     /// `encodedLon << 32 | encodedLat` per point, in sort order.
     pub line: Vec<i64>,
