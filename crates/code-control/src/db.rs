@@ -897,7 +897,7 @@ impl Db {
             // waking isn't new either).
             let old: Option<Preview> = old.as_deref().and_then(|o| serde_json::from_str(o).ok());
             let mut became: Vec<&str> = Vec::new();
-            for (what, at) in [("ready", Preview::up_at as fn(&Preview) -> Option<&str>), ("failed", Preview::failed_at), ("visual_change", Preview::visual_change_at)] {
+            for (what, at) in [("ready", Preview::up_at as fn(&Preview) -> Option<&str>), ("failed", Preview::failed_at), ("visual_change", Preview::visual_change_at), ("regressions", Preview::regressions_at)] {
                 if let Some(head) = preview.and_then(at)
                     && old.as_ref().and_then(at) != Some(head)
                 {
