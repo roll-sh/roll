@@ -1254,12 +1254,26 @@ public) and passing once they're gone or accepted. `regressions: "required"` als
 landing in roll (a `regressions` blocker in `Code::blockers`) until then. Someone other than the
 change's author accepts them at its head (`POST …/regressions/accept`, the sheet's "Accept them";
 a required rule's by a person signed in to roll, never a token or the operator's token; the
-author is read for sure, and an unknown one refuses; a signed-in person must also be able to write
+author is read for sure, and an unknown one refuses; the person is told apart from the author by
+every name they go by, their roll handle and each linked GitHub login (roll accounts, which
+follow a GitHub rename at the next sign-in or link; names that can't be read refuse, 500); a signed-in person must also be able to write
 to the change's repo in roll code, roll code's bar for a landing decision, as GitHub's Accept is): the acceptance names what it accepted, so
 anything new at the same head asks again, and nothing (or nothing compared yet) is a 409. The
 status passes with who did ("Accepted by ada: …"), and a new push asks again. The blocker also
 waits while the change's preview isn't compared at the change's own head. `an_error_mains_preview_doesnt_have_reaches_the_record_and_the_report`
 (accepting), `code-control/tests/queue.rs` (the blocker).
+
+Route budgets (Lighthouse CI's budgets beside its comparisons): a project's
+`github.budget.routes` (`{"GET /orders": 300}`, the rules dialog's "Route budgets", at most 50,
+each 1 to 600000 ms) holds a route (a trace's root span name) to a p50 of its own over the last
+hour's traces (5 traces at least). A route over it joins the record's `slower_routes` with its
+`budget_ms`, whether or not main's preview is slower or there at all (a route over it stays over
+until it's back under 90% of it, at that head, so one at its line doesn't flip every round), so it
+counts wherever slower routes count, and with no comparison with main needed (`roll/regressions`
+fails and the blocker waits on it alone, and it can be accepted; an acceptance names each budget, so
+a changed budget asks again): the verdict strip (danger), the change page, the pull request's comment
+("budget 300 ms"), `roll/regressions` and, required, the blocker; `…/routes` rows carry `budget_ms`
+and `over_budget`, and the sheet's route table says each budget. `a_route_slower_than_mains_reaches_the_record_and_the_report`.
 
 Repeated queries (Sentry's N+1 detection): a trace whose spans run one database statement
 (`db.statement`, or the newer `db.query.text`) ten times or more says it as `repeated`
@@ -1417,7 +1431,7 @@ and admins see every project.
 | `GET /v1/previews/{id}/connect` | | `{branches: [{kind, parent, vars}]}`: each data branch's connection as its services get it, the branch's own credentials (a Postgres branch's role, never the parent's or a superuser's), read from the products each time; 409 while it's being deleted |
 | `GET /v1/previews/{id}/qr.png` | `service?` | The preview's link with its access (`share_url`, or that service's) as a QR code PNG, to open on a phone; `Cache-Control: no-store` (it carries the token); 404 with no link yet |
 | `POST /v1/previews/{id}/regressions/accept` | `{head?}` (the push looked at; a newer one is a 409) | `Preview`: its regressions against main accepted at its head (`regressions_accepted`), the change reported again. Not by the change's author; a `required` rule's only by a person (403 for a token). 400 for a branch's preview. Admin on the preview's project |
-| `POST /v1/previews/{id}/visual/accept` | `{head?, path?}` (the screenshot's looked at, `visual_review.head`; `path`: that page only, `""` the first, else every page) | `Preview`: how a change's pages look at its latest screenshot is accepted (`visual_review`, `roll/visual`); 404 for a page it has no screenshot of; 409 with no screenshot yet, 400 for a branch's preview, 403 from the change's author or from a token when the review is required, 409 when `head` isn't the latest screenshot's (a newer one came in) |
+| `POST /v1/previews/{id}/visual/accept` | `{head?, path?}` (the screenshot's looked at, `visual_review.head`; `path`: that page only, `""` the first, else every page) | `Preview`: how a change's pages look at its latest screenshot is accepted (`visual_review`, `roll/visual`); 404 for a page it has no screenshot of; 409 with no screenshot yet, 400 for a branch's preview, 403 from the change's author (under any name they go by) or from a token or the operator's token when the review is required, 409 when the change's author isn't known or `head` isn't the latest screenshot's (a newer one came in) |
 | `GET /v1/previews/{id}/logs?service=&lines=` | | `{service, lines: string[]}`, masked: every value the preview got from roll secrets, the project's `env` and the preview's own variables, and its branches' credentials (a password, key or token, a URL's password) are `***`, as checks' output is (each line of 6 characters or more). A preview's code, a fork's too, can print what it was given, and anyone who reads the preview reads its logs. 409 when what they must hide can't be read. A seed's, release's or teardown's output (the preview's error, a teardown's in the pull request's comment), what its page said in a screenshot run (its errors and failed requests, broken links, words, markup and API operations: the comment's "What went wrong") and the hosts its egress proxy refused (a name is its code's to choose) are masked the same way (a picture can't be: a page that renders a secret shows it). Masking matches values as written, so code that prints a secret encoded (base64, hex) gets it through, as with every log masker (GitHub Actions' too). It hides what a preview shows, not what its code sends: with egress open (the default) its code reaches the internet, DNS included. Under "Roll only" it can't: the preview's network is `--internal`, where Docker's embedded DNS doesn't forward outside names (SERVFAIL; checked on Docker 29.9) and no resolver is reachable, and the egress proxy checks a name against `egress_hosts` before it resolves it, so `<secret>.attacker.example` is never looked up; on roll apps, every variable previews sets in the `pv-` environment is sealed, so apps' own logs hide it and its API never returns it (`…/connect` and `…/env` reveal them) |
 | `GET /v1/previews/{id}/logs?service=&lines=&follow=1` | | `text/event-stream`: `event: service` (its name), then one event per line, the last `lines` first and then as they come; a line the service wrote on stderr is `event: stderr` (a stdout one the default event; `roll preview logs -f` writes them to its own stderr and stdout). `docker logs -f` for `roll.toml` services; for others the tail is read every 2 s (2,000 lines wide after the first read) and only new lines are sent, with a line saying so when some were missed. Runs on the preview's holder; the stream ends when the client goes |
 | `POST /v1/previews/{id}/shell/sessions` | `{ service?, cols?, rows? }` (the preview's first service without one; 120×32) | 201 `{ id }`: a login shell (bash where the image has it, else sh) in the running `roll.toml` service's container, started or thawed if it sleeps (up to 60 s), kept awake while the shell is open, its opener in the activity ("ana opened a shell in web"). At most 4 a preview (409); a roll apps service's is 409 (its own shell is on its `pv-` environment in roll apps). Runs on the preview's holder. A terminal isn't masked: it's an admin's, as roll apps' shells are, and reaches what the service does (the preview's branches and variables, never a parent's) |
@@ -1430,7 +1444,7 @@ and admins see every project.
 | `POST /v1/previews/{id}/otlp/{token}/v1/traces` | OTLP/HTTP traces: protobuf or JSON (`Content-Type`), gzip or not, at most 8 MiB | `{"partialSuccess": {}}`; 404 for anything but the preview's own token (derived from its id with the store's key, as its SMTP password is). Public in rolld's gate: the token in the path is the credential. A service gets it as `OTEL_EXPORTER_OTLP_ENDPOINT` when the project's `traces` is on. Spans are kept on the preview's holder, in memory: its newest 20,000, for 6 hours |
 | `GET /v1/previews/{id}/traces?minutes=` | | `{ minutes, traces: [{ trace, name, service, start_ms, ms, spans, error }] }`: its recent traces (5 to 360 minutes, 60 by default), newest first, at most 100, the root span's name masked as logs are |
 | `GET /v1/previews/{id}/traces/{trace}` | | `{ trace, spans }`: one trace's spans, oldest first, names and attributes masked |
-| `GET /v1/previews/{id}/routes?minutes=` | | `{ minutes, main, routes: [{ name, count, p50_ms, p95_ms, main_p50_ms, main_count, slower }] }`: each route's time from its traces (a trace's root span's name, as an SDK names a request by its route), against the same route on main's preview (the repo's default branch's, else the project's baseline; `main` its id), the slower ones first: `slower` with at least 5 traces on both sides and a p50 half again main's and 100 ms more. Names masked |
+| `GET /v1/previews/{id}/routes?minutes=` | | `{ minutes, main, routes: [{ name, count, p50_ms, p95_ms, main_p50_ms, main_count, slower, repeated?, grew?, budget_ms, over_budget }] }`: each route's time from its traces (a trace's root span's name, as an SDK names a request by its route), against the same route on main's preview (the repo's default branch's, else the project's baseline; `main` its id), the slower ones first: `slower` with at least 5 traces on both sides and a p50 half again main's and 100 ms more. Names masked |
 | `PUT /v1/previews/{id}/files?service=&path=` | a tar, at most 100 MiB | `{ service, path }`: its files written under the directory `path`, said in the activity. Admin |
 | `GET /v1/previews/{id}/requests` | | `{requests: [{at, service, method, path, status, ms}]}`: its latest 200 requests through roll's runtime, newest first (Vercel's request log): never the query, which can carry a token, and the path masked as its logs are (a path is its code's to choose); `ms` until the answer's headers. Kept in memory on the preview's holder (runs there) and gone with its last service; a roll apps instance's requests are roll apps' own. The sheet's Requests tab, errors at a glance; `roll preview requests <id> [--errors]` |
 | `GET /v1/previews/{id}/metrics` | | `{services: [{service, cpu, memory_bytes, memory_mb}]}`: what its running services use right now (Render's and Railway's metrics): cores of CPU and resident memory, against the memory each runs with. It comes from `docker stats` for roll's runtime. For roll apps' instances it's their last finished minute (`…/environments/pv-…/metrics`), with memory per instance. A sleeping service isn't listed. 404 for no such preview. It runs on the preview's holder, and is read again at most every 10 s, however many sheets ask. The sheet shows it on each running service, read every 15 s while it's open |
@@ -2164,18 +2178,17 @@ Ranked by what a person notices first. Done so far:
   runtime runs, printable schema lines, budget alerts that can't be lost or silenced, followed
   logs that say when lines were missed and stop with a hidden tab).
 
-1. **Regressions against main as a check, and required to land, in review** (#484, #489, #490;
-   reviewed, its findings fixed): `roll/regressions` from slower routes and new errors at each
-   head, a `regressions` blocker with `required`, accepted by someone other than the author who can
-   write to the repo, and `became: regressions` once a head for automations.
-2. **References a person chooses** (after roll secrets' #407, `bind_ref`/`resolve_as`): a
-   preview's own variables take `roll://` too, and the rules' references (who wrote each is kept,
-   `env_refs`) move to bindings, so a writer who loses reveal stops theirs.
-3. **The author as an account, not a name**: a GitHub pull request's author is its login and a
-   roll person is their handle, so an author whose two names differ isn't recognised as the author
-   by the accepts. Compare roll accounts (the person's linked GitHub login, roll accounts' GitHub
-   sign-in) wherever an author is told apart (visual, regressions, roll code's approvals).
-4. **In review**: a protected base's change request in the keep-in-secrets button (#482).
+1. **Route budgets** (Lighthouse CI's budgets, beside its comparisons): a project's
+   `github.budget.routes` (`{"GET /orders": 300}`, p50 in ms) holds a route to a time of its own,
+   not only to main's; a route over its budget counts in `roll/regressions` and the record (with
+   main's time when there is one), so a slow new route fails too.
+2. **The author as an account, not a name, in review** (#507): the accepts tell a person from the
+   change's author by every name they go by (their roll handle and each linked GitHub login).
+3. **Previews on the session grant with project members** (roll secrets' members v1.1, after its
+   #501): viewers read a preview's status, developers and up get shells, files, connect and
+   deploy hooks; until then previews stay the project owner's (and admins').
+4. **References a person chooses** (after roll secrets' #407, `bind_ref`/`resolve_as`): a
+   preview's own variables take `roll://` too, and the rules' references move to bindings.
 5. **Cheap Postgres branches on ext4: overlay volumes over a frozen base** (pg-control; measured
    2026-11-17): 0.97 s against 3.5 s for a 1.4 GB copy, but a write copies the whole table file.
 6. **Watch: pg-control's recovery to a time seconds old** (unowned).

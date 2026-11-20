@@ -994,10 +994,24 @@ function ConfigRow({ service, env, runner, busy }: { service: string; env: Envir
           <p className="text-[13px] font-medium">Runtime config{env.config_version ? <span className="ml-2 font-mono text-[11.5px] text-subtle">v{env.config_version}</span> : null}</p>
           <p className="mt-1 text-[12px] text-muted">Values its instances read at <code className="font-mono">$ROLL_CONFIG_URL</code> while they run (a flag, a banner): a change needs no deploy.</p>
         </div>
-        <button className={btn} disabled={busy || text === shown || bad !== null} onClick={save}>
-          Save config
-        </button>
+        <div className="flex gap-2">
+          {env.config_version != null && (
+            <SureButton
+              className={btn}
+              disabled={busy}
+              sure="Sure? Redeploy to finish"
+              onSure={() => void runner.run("config-rotate", () => appsApi.rotateConfig(service, env.name))}
+              title="A new address, if the old one leaked: the old one keeps working until a deploy made after this is live"
+            >
+              Rotate address
+            </SureButton>
+          )}
+          <button className={btn} disabled={busy || text === shown || bad !== null} onClick={save}>
+            Save config
+          </button>
+        </div>
       </div>
+      {env.config_rotated_at != null && <p className="text-[11.5px] text-subtle">Address rotated {since(env.config_rotated_at, Date.now())}: the one before works until a deploy made after that is live.</p>}
       <textarea value={text} onChange={(e) => setText(e.target.value)} rows={4} aria-label="Runtime config (JSON)" placeholder='{ "new_checkout": true }' className={`${input} w-full font-mono text-[12px]`} spellCheck={false} />
       {bad && <p className="text-[12px] text-danger">{bad}</p>}
     </div>
