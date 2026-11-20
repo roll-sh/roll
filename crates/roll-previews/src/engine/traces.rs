@@ -196,10 +196,6 @@ pub struct RouteCompared {
 }
 
 pub const MIN_SAMPLES: usize = 5;
-/// How often the holder reads its previews' slower routes onto their records.
-pub const ROUTES_EVERY: std::time::Duration = std::time::Duration::from_secs(60);
-/// How often the holder reads its previews' errors against main's (each a read of their logs).
-pub const NEW_ERRORS_EVERY: std::time::Duration = std::time::Duration::from_secs(300);
 pub const SLOWER_MS: u64 = 100;
 
 /// Each of the preview's routes with main's same one; the slower ones first.
@@ -426,11 +422,11 @@ impl Engine {
 
     /// The previews this node holds, while their project keeps traces: their routes slower than
     /// main's kept on the record (the verdict strip, the pull request's comment), read at most
-    /// once a [`ROUTES_EVERY`]; a change reports the preview again.
+    /// once a `Config::routes_every`; a change reports the preview again.
     pub(super) fn tend_routes(self: &std::sync::Arc<Self>) {
         {
             let mut last = self.routes_read.lock();
-            if last.is_some_and(|at| at.elapsed() < ROUTES_EVERY) {
+            if last.is_some_and(|at| at.elapsed() < self.cfg.routes_every) {
                 return;
             }
             *last = Some(std::time::Instant::now());
@@ -445,7 +441,7 @@ impl Engine {
             // Errors against main's every few minutes (each a read of their logs).
             let due = {
                 let mut last = me.new_errors_read.lock();
-                let due = last.is_none_or(|at| at.elapsed() >= NEW_ERRORS_EVERY);
+                let due = last.is_none_or(|at| at.elapsed() >= me.cfg.new_errors_every);
                 if due {
                     *last = Some(std::time::Instant::now());
                 }
@@ -458,7 +454,7 @@ impl Engine {
         });
     }
 
-    /// What `tend_routes` does each [`ROUTES_EVERY`], now: main's routes read once for every
+    /// What `tend_routes` does each `Config::routes_every`, now: main's routes read once for every
     /// preview compared with it, and only where its spans are (its holder: elsewhere nothing is
     /// said rather than everything); then the previews', a few at a time.
     pub async fn read_slower_routes(&self) {
