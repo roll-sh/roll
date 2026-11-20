@@ -175,6 +175,7 @@ pub(super) fn plan(
     let st = cluster.state();
     let req = crate::search::SearchRequest {
         slowlog: Default::default(),
+        partial_aggs: false,
         indices: crate::meta::resolve::split_expressions(index),
         opts: crate::meta::resolve::IndicesOptions { ignore_unavailable: true, ..crate::meta::resolve::IndicesOptions::STRICT_EXPAND_OPEN_FORBID_CLOSED },
         source: crate::search_source::SearchSource::default(),
@@ -497,7 +498,7 @@ fn prepare(cluster: &Cluster, targets: Vec<(Target, Arc<Vec<ColSpec>>)>, query: 
         let searcher = t.searcher().ok()?;
         let table = t.table();
         let q = {
-            let qctx = crate::search::query::QueryCtx::new(cluster, &st, &t.idx, &table, &searcher, now_ms);
+            let qctx = crate::search::query::QueryCtx::new(cluster, &st, &t.idx, &table, &searcher, now_ms, crate::search::query::Reader::Unset);
             let src = crate::search_source::SearchSource { query: parsed.clone(), ..Default::default() };
             crate::search::shard_query(&qctx, &t, &src).ok()?
         };

@@ -325,6 +325,13 @@ CREATE TABLE IF NOT EXISTS search_analytics (
   cluster_id TEXT NOT NULL, idx TEXT NOT NULL, res INTEGER NOT NULL, slot INTEGER NOT NULL, at INTEGER NOT NULL, data TEXT NOT NULL,
   PRIMARY KEY (cluster_id, idx, res, slot)
 );
+CREATE TABLE IF NOT EXISTS search_suggestions (
+  cluster_id TEXT NOT NULL, idx TEXT NOT NULL, config TEXT NOT NULL, due_at INTEGER NOT NULL,
+  attempted_at INTEGER, built_at INTEGER, built_index TEXT, count INTEGER NOT NULL DEFAULT 0, took_ms INTEGER NOT NULL DEFAULT 0,
+  digest TEXT, error TEXT, sample TEXT NOT NULL DEFAULT '[]',
+  PRIMARY KEY (cluster_id, idx)
+);
+CREATE INDEX IF NOT EXISTS search_suggestions_due ON search_suggestions (due_at);
 "#;
 
 const COLS: &str = "id, name, region, flavor, password, idle_timeout_s, max_in_flight, max_body_mb, destructive_requires_name, \
@@ -369,6 +376,51 @@ fn deleted_row(r: &Row) -> code_sql::Result<DeletedCluster> {
     c.loaded_on = None;
     c.wake_at = None;
     Ok(DeletedCluster { cluster: c, deleted_at: r.get(23)?, purge_at: r.get(24)?, stored_as: r.get(25)?, reserved: r.get(26)? })
+}
+
+/// What the catalog keeps of an index's query suggestions (`crate::suggestions`): its settings
+/// as of the last look, when it's next due, and its last build.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct SuggestionsRow {
+    pub index: String,
+    /// `search_es::query_suggestions::Config::to_json`.
+    pub config: String,
+    /// Milliseconds.
+    pub due_at: i64,
+    pub attempted_at: Option<i64>,
+    pub built_at: Option<i64>,
+    /// The concrete index the alias points at.
+    pub built_index: Option<String>,
+    pub count: i64,
+    pub took_ms: i64,
+    pub digest: Option<String>,
+    /// Why the last attempt failed.
+    pub error: Option<String>,
+    /// The heaviest suggestions of the last build, as JSON (what the dashboard shows without
+    /// waking the cluster).
+    pub sample: String,
+}
+
+const SUGGESTION_COLS: &str = "idx, config, due_at, attempted_at, built_at, built_index, count, took_ms, digest, error, sample";
+
+fn suggestions_row(r: &Row) -> code_sql::Result<SuggestionsRow> {
+    suggestions_row_at(r, 0)
+}
+
+fn suggestions_row_at(r: &Row, o: usize) -> code_sql::Result<SuggestionsRow> {
+    Ok(SuggestionsRow {
+        index: r.get(o)?,
+        config: r.get(o + 1)?,
+        due_at: r.get(o + 2)?,
+        attempted_at: r.get(o + 3)?,
+        built_at: r.get(o + 4)?,
+        built_index: r.get(o + 5)?,
+        count: r.get(o + 6)?,
+        took_ms: r.get(o + 7)?,
+        digest: r.get(o + 8)?,
+        error: r.get(o + 9)?,
+        sample: r.get(o + 10)?,
+    })
 }
 
 /// One-minute buckets a cluster keeps: 24 hours.
@@ -801,6 +853,7 @@ impl Store {
             x.execute("DELETE FROM search_metrics WHERE cluster_id = ?1", params![id])?;
             x.execute("DELETE FROM search_slowlog WHERE cluster_id = ?1", params![id])?;
             x.execute("DELETE FROM search_analytics WHERE cluster_id = ?1", params![id])?;
+            x.execute("DELETE FROM search_suggestions WHERE cluster_id = ?1", params![id])?;
             Ok(true)
         })?)
     }
@@ -864,6 +917,7 @@ impl Store {
             x.execute("DELETE FROM search_metrics WHERE cluster_id = ?1", params![id])?;
             x.execute("DELETE FROM search_slowlog WHERE cluster_id = ?1", params![id])?;
             x.execute("DELETE FROM search_analytics WHERE cluster_id = ?1", params![id])?;
+            x.execute("DELETE FROM search_suggestions WHERE cluster_id = ?1", params![id])?;
             x.execute("DELETE FROM search_storage WHERE cluster_id = ?1", params![id])?;
             x.execute("DELETE FROM search_remotes WHERE cluster_id = ?1", params![id])?;
             x.execute("DELETE FROM search_revokes WHERE cluster_id = ?1", params![id])
@@ -916,13 +970,18 @@ impl Store {
             return Ok(());
         }
         self.db.write(|x| {
+            // A suggestions row holds query text too (its sample): it goes with the analytics.
             for i in cleared {
                 x.execute("DELETE FROM search_analytics WHERE cluster_id = ?1 AND idx = ?2", params![id, i])?;
+                x.execute("DELETE FROM search_suggestions WHERE cluster_id = ?1 AND idx = ?2", params![id, i])?;
             }
             if let Some(on) = enabled {
-                let kept: Vec<String> = x.query("SELECT DISTINCT idx FROM search_analytics WHERE cluster_id = ?1", params![id], |r| r.get(0))?;
+                let mut kept: Vec<String> = x.query("SELECT DISTINCT idx FROM search_analytics WHERE cluster_id = ?1", params![id], |r| r.get(0))?;
+                let suggested: Vec<String> = x.query("SELECT idx FROM search_suggestions WHERE cluster_id = ?1", params![id], |r| r.get(0))?;
+                kept.extend(suggested);
                 for i in kept.iter().filter(|i| !on.contains(i)) {
                     x.execute("DELETE FROM search_analytics WHERE cluster_id = ?1 AND idx = ?2", params![id, i])?;
+                    x.execute("DELETE FROM search_suggestions WHERE cluster_id = ?1 AND idx = ?2", params![id, i])?;
                 }
             }
             for (idx, hour, bucket) in hours {
@@ -970,6 +1029,66 @@ impl Store {
     /// The indices a cluster keeps analytics of.
     pub async fn analytics_indices(&self, id: &str) -> anyhow::Result<Vec<String>> {
         Ok(self.db.read(|x| x.query("SELECT DISTINCT idx FROM search_analytics WHERE cluster_id = ?1 ORDER BY idx", params![id], |r| r.get(0)))?)
+    }
+
+    /// A cluster's query suggestion rows (`crate::suggestions`), by index.
+    pub async fn suggestions(&self, id: &str) -> anyhow::Result<Vec<SuggestionsRow>> {
+        let sql = format!("SELECT {SUGGESTION_COLS} FROM search_suggestions WHERE cluster_id = ?1 ORDER BY idx");
+        Ok(self.db.read(|x| x.query(&sql, params![id], suggestions_row))?)
+    }
+
+    /// Index `idx`'s query suggestion row.
+    pub async fn suggestion(&self, id: &str, idx: &str) -> anyhow::Result<Option<SuggestionsRow>> {
+        let sql = format!("SELECT {SUGGESTION_COLS} FROM search_suggestions WHERE cluster_id = ?1 AND idx = ?2");
+        Ok(self.db.read(|x| x.query_row(&sql, params![id, idx], suggestions_row).optional())?)
+    }
+
+    /// Writes a query suggestion row whole.
+    pub async fn put_suggestion(&self, id: &str, r: &SuggestionsRow) -> anyhow::Result<()> {
+        self.db.write(|x| {
+            x.execute(
+                "INSERT INTO search_suggestions (cluster_id, idx, config, due_at, attempted_at, built_at, built_index, count, took_ms, digest, error, sample)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
+                 ON CONFLICT (cluster_id, idx) DO UPDATE SET config = excluded.config, due_at = excluded.due_at, attempted_at = excluded.attempted_at,
+                   built_at = excluded.built_at, built_index = excluded.built_index, count = excluded.count, took_ms = excluded.took_ms,
+                   digest = excluded.digest, error = excluded.error, sample = excluded.sample",
+                params![id, r.index, r.config, r.due_at, r.attempted_at, r.built_at, r.built_index, r.count, r.took_ms, r.digest, r.error, r.sample],
+            )
+        })?;
+        Ok(())
+    }
+
+    /// Forgets index `idx`'s query suggestions (turned off, or the index is gone).
+    pub async fn delete_suggestion(&self, id: &str, idx: &str) -> anyhow::Result<()> {
+        self.db.write(|x| x.execute("DELETE FROM search_suggestions WHERE cluster_id = ?1 AND idx = ?2", params![id, idx]))?;
+        Ok(())
+    }
+
+    /// Sets when index `idx`'s suggestions are next due (ms), and when they were last looked
+    /// at when `attempted_at` is given (a check that found nothing to change).
+    pub async fn set_suggestion_due(&self, id: &str, idx: &str, due_at: i64, attempted_at: Option<i64>) -> anyhow::Result<()> {
+        self.db.write(|x| {
+            x.execute(
+                "UPDATE search_suggestions SET due_at = ?3, attempted_at = COALESCE(?4, attempted_at) WHERE cluster_id = ?1 AND idx = ?2",
+                params![id, idx, due_at, attempted_at],
+            )
+        })?;
+        Ok(())
+    }
+
+    /// Suggestion rows of live clusters due by `now_ms`, soonest first: (cluster id, row).
+    pub async fn due_suggestions(&self, now_ms: i64) -> anyhow::Result<Vec<(String, SuggestionsRow)>> {
+        let cols: String = SUGGESTION_COLS.split(", ").map(|c| format!("s.{c}")).collect::<Vec<_>>().join(", ");
+        let sql = format!(
+            "SELECT s.cluster_id, {cols} FROM search_suggestions s JOIN search_clusters c ON c.id = s.cluster_id
+             WHERE c.deleting = 0 AND c.deleted_at IS NULL AND s.due_at <= ?1 ORDER BY s.due_at LIMIT 100"
+        );
+        Ok(self.db.read(|x| {
+            x.query(&sql, params![now_ms], |r| {
+                let id: String = r.get(0)?;
+                Ok((id, suggestions_row_at(r, 1)?))
+            })
+        })?)
     }
 
     /// The latest figures metering saw. A change of `stored_bytes` is logged at `at` for the

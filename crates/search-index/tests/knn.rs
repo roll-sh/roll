@@ -248,3 +248,47 @@ fn per_segment_knn_keeps_k_hits_per_segment() {
     let scores: Vec<f32> = per.iter().map(|x| x.1).collect();
     assert_eq!(scores, vec![1.0, 1.0 / 5.0, 1.0 / 17.0]);
 }
+
+/// Over several segments each searches a beam sized to its share of the shard; a small segment
+/// holding every nearest neighbour still returns them all (its whole beam makes the shard's best
+/// `num_candidates`, so it is searched again with the full beam).
+#[test]
+fn small_segment_holding_the_neighbours_returns_them_all() {
+    let schema = Schema::new()
+        .with_field(FieldSchema::new(V, "v").with_vectors(VectorSpec {
+            dims: DIMS as u32,
+            element: VectorElement::Float32,
+            similarity: VectorSimilarity::DotProduct,
+            hnsw: Some(HnswParams::default()),
+            quantization: VectorQuantization::None,
+        }))
+        .unwrap();
+    let shard = Shard::open(ShardConfig { merge_threads: 0, ..Default::default() }, schema, Vec::new()).unwrap();
+    let mut rng = StdRng::seed_from_u64(9);
+    let center = unit(&mut rng);
+    let mut vecs = Vec::new();
+    let add = |v: Vec<f32>, vecs: &mut Vec<Vec<f32>>| {
+        let bytes: Vec<u8> = v.iter().flat_map(|x| x.to_le_bytes()).collect();
+        let doc = IndexableDoc::new(format!("{}", vecs.len()).into_bytes()).field(IndexableField::Vector { field: V, value: bytes.into() });
+        shard.index(IndexOp::new(doc)).unwrap();
+        vecs.push(v);
+    };
+    for _ in 0..3000 {
+        add(unit(&mut rng), &mut vecs);
+    }
+    shard.refresh().unwrap();
+    for _ in 0..80 {
+        let v: Vec<f32> = center.iter().map(|x| x + rng.gen_range(-0.05f32..0.05)).collect();
+        let n = v.iter().map(|x| x * x).sum::<f32>().sqrt();
+        add(v.into_iter().map(|x| x / n).collect(), &mut vecs);
+    }
+    shard.refresh().unwrap();
+    let s = shard.searcher();
+    assert_eq!(s.segments().len(), 2);
+    let mut exact: Vec<(u32, f32)> = vecs.iter().enumerate().map(|(i, v)| (i as u32, dot_score(&center, v))).collect();
+    exact.sort_by(|a, b| b.1.total_cmp(&a.1).then(a.0.cmp(&b.0)));
+    let want: Vec<u32> = exact.iter().take(60).map(|x| x.0).collect();
+    assert!(want.iter().all(|&d| d >= 3000));
+    let (found, _) = recall(&s, KnnQuery::new(V, QueryVector::Float(center.clone()), 60, 100), &want);
+    assert_eq!(found, 60);
+}

@@ -132,11 +132,16 @@ mod tests {
             tcp: true,
             rollback_on_crash: true,
             rebuild_on_base: true,
+            skew_protection: true,
+            queue_s: Some(5),
+            latency_target_ms: Some(300),
             schedules: vec![crate::model::Scheduled { name: "a".into(), schedule: "@daily".into(), command: "x".into(), path: None, timezone: None, timeout_s: None }],
             sidecars: vec![crate::model::Sidecar { name: "a".into(), image: "x".into(), command: None, env: Default::default(), variables: vec![], cpu: 0.25, memory_mb: 128 }],
             block_on: Some(crate::model::Severity::Critical),
             slo: Some(crate::model::Slo { objective: 99.9, latency_ms: None, window_days: 28 }),
             metrics: Some(crate::model::Scrape { port: Some(9091), path: "/metrics".into() }),
+            log_metrics: vec![crate::model::LogMetric { name: "payments_failed".into(), pattern: "payment failed".into() }],
+            schedule_scale: vec![crate::model::ScaleWindow { windows: vec![crate::freeze::Window { from: "mon 08:00".into(), to: "fri 18:00".into() }], timezone: None, min_instances: 2 }],
         };
         let keys: std::collections::BTreeSet<String> = serde_json::to_value(&all).unwrap().as_object().unwrap().keys().filter(|k| *k != "volume").cloned().collect();
         let file: std::collections::BTreeSet<String> = apps_build::app::RUN_KEYS.iter().map(|k| k.to_string()).collect();
