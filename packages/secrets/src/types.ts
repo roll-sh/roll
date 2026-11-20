@@ -53,7 +53,22 @@ export type NewEnvironment = {
   branches?: Branch[];
 };
 /** `history_days`: how long old values are kept (null: for good). */
-export type Overview = { project: string; environments: Environment[]; previews: number; history_days: number | null };
+/** `validity_checks`: whether credentials found in code are checked with their providers (docs/secrets.md, "Is it live?"). */
+export type Overview = { project: string; environments: Environment[]; previews: number; history_days: number | null; validity_checks: "on" | "off" };
+/** A credential to check: a found value and, for an AWS access key id, the secret access key next to it. */
+export type ValidityProbe = { value: string; pair?: string | null };
+/** What a credential's provider said: never its value. `invalid` is revoked, deleted or never real. */
+export type CheckedCredential = {
+  fingerprint: string;
+  kind: string;
+  result: "live" | "invalid" | "unknown";
+  account?: string;
+  checked_at?: number;
+  /** Why it's `unknown`. */
+  why?: string;
+  /** A live one's kind has a roll rotator: roll secrets' AWS IAM users, or a project's GitHub App tokens. */
+  rotator?: "aws-iam" | "github-app";
+};
 export type Folder = { path: string; name: string; secrets: number; folders: number };
 /** `project`: a folder another project shares with this one (it exported it). */
 export type Import = { project?: string; environment: string; path: string };

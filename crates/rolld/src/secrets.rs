@@ -470,6 +470,15 @@ pub fn open(args: &crate::Args, home: &Path, workspace: Arc<roll_workspace::Work
     if let Some(id) = std::env::var("ROLL_SECRETS_AWS_SERVER_ID").ok().filter(|v| !v.trim().is_empty()).or_else(|| args.code_public_url.clone()) {
         secrets.set_aws_server_id(id);
     }
+    // Validity checks (docs/secrets.md, "Is it live?"): AWS keys are tried only when the operator
+    // says so, and never a canary's.
+    let aws_live = match std::env::var("ROLL_SECRETS_VALIDITY_AWS_LIVE").unwrap_or_default().trim() {
+        "" | "0" | "false" | "off" => false,
+        "1" | "true" | "on" => true,
+        v => anyhow::bail!("ROLL_SECRETS_VALIDITY_AWS_LIVE is on or off, not {v:?}"),
+    };
+    let canaries = roll_secrets::validity::Canaries::parse(&std::env::var("ROLL_SECRETS_VALIDITY_CANARIES").unwrap_or_default()).map_err(|e| anyhow::anyhow!("ROLL_SECRETS_VALIDITY_CANARIES: {e}"))?;
+    secrets.set_validity_settings(roll_secrets::validity::Settings { aws_live, canaries });
     tell_decoys(&access, secrets.clone());
     // ACME's http-01 and dns-01 checks: public addresses only, as webhooks.
     secrets.set_acme_checks(Arc::new(acme::Checks::new(allow_private)));
@@ -1756,6 +1765,30 @@ impl code_control::SecretEnv for ForCode {
         let p = named.iter().find(|p| has_repo(p)).cloned().ok_or_else(|| anyhow::anyhow!("project {project} has none of {owner}'s repos on its canvas"))?;
         let (by, values) = self.resolve(p.id, environment, consumer, Some(asker)).await?;
         Ok(code_control::Revealed { by, values })
+    }
+
+    /// The first project with the repo on its canvas that may reach it and has validity checks on
+    /// asks (and keeps, and audits, as `roll:code`); none: nothing is asked.
+    async fn validity(&self, repo: &str, found: Vec<(String, Option<String>)>) -> anyhow::Result<Vec<code_control::model::CredentialValidity>> {
+        let (secrets, ws) = self.0.get().cloned().ok_or_else(|| anyhow::anyhow!("roll secrets is starting"))?;
+        let r = repo.to_string();
+        tokio::task::spawn_blocking(move || {
+            let projects = ws.projects_of(roll_workspace::Kind::Repo.as_str(), &r)?;
+            let Some(p) = projects.into_iter().find(|p| secrets.counts_for_repo(p, &r) && secrets.validity_checks(p).unwrap_or(false)) else { return Ok(Vec::new()) };
+            let probes = found.into_iter().map(|(value, pair)| roll_secrets::validity::Probe { value: roll_secrets::Value::new(value), pair: pair.map(roll_secrets::Value::new) }).collect();
+            let checked = secrets.check_validity(&p, probes, &roll_secrets::Caller::consumer("roll:code"))?.unwrap_or_default();
+            Ok(checked
+                .into_iter()
+                .map(|c| code_control::model::CredentialValidity {
+                    fingerprint: c.fingerprint,
+                    result: c.result.as_str().to_string(),
+                    account: c.account,
+                    checked_at: c.checked_at,
+                    rotator: c.rotator.map(str::to_string),
+                })
+                .collect())
+        })
+        .await?
     }
 
     async fn leaks(&self, repo: &str, candidates: Vec<String>) -> anyhow::Result<Vec<(usize, String, String, String)>> {
