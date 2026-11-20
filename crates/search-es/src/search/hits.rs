@@ -137,6 +137,24 @@ pub fn doc_values(seg: &SegmentContext, local: u32, f: &FieldInfo, format: Optio
                 out.push(v);
             }
         }
+        // One value: the document's vectors, each an array (floats, or the byte values of
+        // `byte` and `bit` vectors).
+        Kind::RankVectors => {
+            if let Some(raw) = r.binary(n).and_then(|b| b.get(local))
+                && let Some(v) = f.rank_vectors(raw)
+                && !v.is_empty()
+            {
+                let per = v.values_per_vector();
+                let vectors = if v.element().is_float() {
+                    let mut x = Vec::new();
+                    v.floats_into(&mut x);
+                    x.chunks(per).map(|c| Value::Arr(c.iter().map(|x| crate::query::xparser::float_value(*x)).collect())).collect()
+                } else {
+                    v.bytes().chunks(per).map(|c| Value::Arr(c.iter().map(|b| Value::from(*b as i8 as i64)).collect())).collect()
+                };
+                out.push(Value::Arr(vectors));
+            }
+        }
         Kind::Binary => {
             if let Some(dv) = r.binary(n)
                 && let Some(b) = dv.get(local)

@@ -21,6 +21,7 @@ use crate::json::Value;
 use bytes::Bytes;
 use search_codec::points::encode;
 use search_codec::stored::OwnedStoredValue;
+use search_codec::vectors::multi::MultiElement;
 use search_index::doc::{DocValue, IndexableDoc, IndexableField, PreToken, StoredField};
 use std::sync::Arc;
 
@@ -448,6 +449,26 @@ impl<'t> Writer<'t> {
             (FieldValue::ByteVector(v), _) => {
                 let b: Vec<u8> = v.iter().map(|x| *x as u8).collect();
                 self.vector(d, &f, b);
+            }
+            (FieldValue::RankVectors { width, floats, bytes }, _) => {
+                if d.fields.iter().any(|x| matches!(x, IndexableField::DocValue { field, .. } if *field == f.number)) {
+                    return Err(EsError::illegal_argument(format!(
+                        "Field [{}] of type [rank_vectors] doesn't support indexing multiple values for the same field in the same document",
+                        f.name
+                    )));
+                }
+                // Written only once `dims` is in the mapping, and only vectors of that width.
+                if let Some((element, dims)) = f.rank_layout()
+                    && *width == if element == MultiElement::Bit { dims as usize / 8 } else { dims as usize }
+                {
+                    let mut b = Vec::new();
+                    if element.is_float() {
+                        search_codec::vectors::multi::encode_floats(element, floats, &mut b);
+                    } else {
+                        b.extend(bytes.iter().map(|x| *x as u8));
+                    }
+                    d.fields.push(IndexableField::DocValue { field: f.number, value: DocValue::Binary(b.into()) });
+                }
             }
             (FieldValue::Feature(v), _) => {
                 let mut v = *v;

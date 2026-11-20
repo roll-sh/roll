@@ -412,8 +412,32 @@ fn dims_differ(a: usize, b: usize) -> Thrown {
     es_iae(format!("vector dimensions differ: {a}!={b}"), &[])
 }
 
+/// Multiply-adds (or byte operations) a MaxSim does between polls of the search's control.
+const POLL_OPS: usize = 1 << 20;
+
+/// Counts a MaxSim's work and polls [`crate::Host::check_cancelled`] (the search's timeout and
+/// cancellation) every [`POLL_OPS`] of it. A document can hold any number of vectors and a
+/// query as many as its body does, so one document's score costs query vectors × document
+/// vectors × dimensions: the poll lets a single document's score stop at the request's
+/// deadline, where the per-document loop around it can't.
+struct Meter<'a> {
+    ops: usize,
+    poll: &'a mut dyn FnMut() -> Result<(), Thrown>,
+}
+
+impl Meter<'_> {
+    fn add(&mut self, ops: usize) -> Result<(), Thrown> {
+        self.ops = self.ops.saturating_add(ops);
+        if self.ops >= POLL_OPS {
+            self.ops = 0;
+            (self.poll)()?;
+        }
+        Ok(())
+    }
+}
+
 /// One document's MaxSim.
-fn score_doc(f: &MaxSimFn, dv: &DocValues) -> Result<f64, Thrown> {
+fn score_doc(f: &MaxSimFn, dv: &DocValues, meter: &mut Meter<'_>) -> Result<f64, Thrown> {
     let count = dv.vector_count;
     let element = dv.element;
     let bytes_el = matches!(element, VectorElement::Byte | VectorElement::Bit);
@@ -428,6 +452,7 @@ fn score_doc(f: &MaxSimFn, dv: &DocValues) -> Result<f64, Thrown> {
                     m = fmax(m, super::vecmath::dot(qi, d));
                 }
                 sum += m;
+                meter.add(count * qi.len().max(w))?;
             }
         }
         (Query::Floats(q), VectorElement::Bit) => {
@@ -437,6 +462,7 @@ fn score_doc(f: &MaxSimFn, dv: &DocValues) -> Result<f64, Thrown> {
                     m = fmax(m, ip_float_bit(qi, d));
                 }
                 sum += m;
+                meter.add(count * qi.len().max(w))?;
             }
         }
         (Query::Bytes(q), VectorElement::Byte) if !f.hamming => {
@@ -450,6 +476,7 @@ fn score_doc(f: &MaxSimFn, dv: &DocValues) -> Result<f64, Thrown> {
                     m = fmax(m, s as f32);
                 }
                 sum += m;
+                meter.add(count * qi.len().max(w))?;
             }
         }
         (Query::Bytes(q), VectorElement::Bit) if !f.hamming => {
@@ -466,6 +493,7 @@ fn score_doc(f: &MaxSimFn, dv: &DocValues) -> Result<f64, Thrown> {
                     m = fmax(m, s);
                 }
                 sum += m;
+                meter.add(count * qi.len().max(w))?;
             }
         }
         (Query::Bytes(q), VectorElement::Byte | VectorElement::Bit) => {
@@ -480,6 +508,7 @@ fn score_doc(f: &MaxSimFn, dv: &DocValues) -> Result<f64, Thrown> {
                     m = fmax(m, (bits - x) / bits);
                 }
                 sum += m;
+                meter.add(count * qi.len().max(w))?;
             }
         }
         (Query::Floats(_), VectorElement::Byte) => {
@@ -500,7 +529,11 @@ fn score(vm: &mut Vm, a: &[Value], hamming: bool) -> VR {
     }
     let mut buf = std::mem::take(&mut vm.st.vec_buf);
     let out = match vm.host.doc_values(&f.field, &mut buf) {
-        Ok(true) if buf.kind == DocKind::RankVectors && buf.vector_count > 0 => score_doc(&f, &buf),
+        Ok(true) if buf.kind == DocKind::RankVectors && buf.vector_count > 0 => {
+            let host = &mut vm.host;
+            let mut poll = || host.check_cancelled().map_err(crate::vm::cancelled_error);
+            score_doc(&f, &buf, &mut Meter { ops: 0, poll: &mut poll })
+        }
         Ok(_) => Err(missing()),
         Err(e) => Err(super::doc::host_error(e)),
     };
@@ -519,6 +552,34 @@ pub fn s_max_sim_inv_hamming(vm: &mut Vm, a: &mut [Value]) -> VR {
 mod tests {
     use super::*;
 
+    fn never() -> Result<(), Thrown> {
+        Ok(())
+    }
+
+    fn free() -> Meter<'static> {
+        Meter { ops: 0, poll: Box::leak(Box::new(never)) }
+    }
+
+    /// A score whose work passes the poll interval polls the search's control, and a failed
+    /// poll (the request's deadline) stops it.
+    #[test]
+    fn max_sim_polls_the_search_control() {
+        let dims = 64;
+        let count = 4096;
+        let doc = dv(VectorElement::Float, &vec![0.5; dims * count], &[], count);
+        let f = MaxSimFn { field: Rc::from("v"), query: Query::Floats(vec![vec![1.0; dims]; 32]), hamming: false };
+        let mut polls = 0;
+        let mut poll = || {
+            polls += 1;
+            Ok(())
+        };
+        assert_eq!(score_doc(&f, &doc, &mut Meter { ops: 0, poll: &mut poll }).unwrap(), 32.0 * 32.0);
+        // 32 query vectors × 4096 × 64 = 8M multiply-adds: one poll per 1M
+        assert_eq!(polls, 8);
+        let mut stop = || Err(crate::vm::ise("time exceeded"));
+        assert!(score_doc(&f, &doc, &mut Meter { ops: 0, poll: &mut stop }).is_err());
+    }
+
     fn dv(element: VectorElement, f: &[f32], b: &[i8], count: usize) -> DocValues {
         let mut d = DocValues::default();
         d.clear(DocKind::RankVectors);
@@ -534,13 +595,13 @@ mod tests {
         let doc = dv(VectorElement::Float, &[1.0, 0.0, 0.0, 1.0, 0.5, 0.5], &[], 3);
         let f = MaxSimFn { field: Rc::from("v"), query: Query::Floats(vec![vec![1.0, 0.0], vec![0.0, 2.0]]), hamming: false };
         // best of [1, 0, 0.5] + best of [0, 2, 1]
-        assert_eq!(score_doc(&f, &doc).unwrap(), 3.0);
+        assert_eq!(score_doc(&f, &doc, &mut free()).unwrap(), 3.0);
         let doc = dv(VectorElement::Byte, &[], &[1, 2, -3, 4], 2);
         let f = MaxSimFn { field: Rc::from("v"), query: Query::Bytes(vec![vec![1, 1]]), hamming: false };
-        assert_eq!(score_doc(&f, &doc).unwrap(), 3.0);
+        assert_eq!(score_doc(&f, &doc, &mut free()).unwrap(), 3.0);
         let f = MaxSimFn { field: Rc::from("v"), query: Query::Bytes(vec![vec![1, 2]]), hamming: true };
         // identical first vector: no differing bits
-        assert_eq!(score_doc(&f, &doc).unwrap(), 1.0);
+        assert_eq!(score_doc(&f, &doc, &mut free()).unwrap(), 1.0);
         let r = RankVec::from_doc(&doc).unwrap();
         assert_eq!((r.dims(), r.count), (2, 2));
         assert_eq!(&*r.magnitudes, &[(5f64).sqrt() as f32, 5.0]);
@@ -551,8 +612,8 @@ mod tests {
         let doc = dv(VectorElement::Bit, &[], &[0x80u8 as i8, 0x01], 1);
         let q: Vec<f32> = (1..=16).map(|x| x as f32).collect();
         let f = MaxSimFn { field: Rc::from("v"), query: Query::Floats(vec![q]), hamming: false };
-        assert_eq!(score_doc(&f, &doc).unwrap(), 17.0);
+        assert_eq!(score_doc(&f, &doc, &mut free()).unwrap(), 17.0);
         let f = MaxSimFn { field: Rc::from("v"), query: Query::Bytes(vec![vec![-1, -1]]), hamming: false };
-        assert_eq!(score_doc(&f, &doc).unwrap(), 2.0);
+        assert_eq!(score_doc(&f, &doc, &mut free()).unwrap(), 2.0);
     }
 }

@@ -844,9 +844,6 @@ fn unknown_type(ty: &str, field: &str, ctx: &MappingCtx) -> EsError {
     if ctx.opensearch() {
         return EsError::mapper_parsing(format!("No handler for type [{ty}] declared on field [{field}]"));
     }
-    if let Some(why) = types::unsupported(ty) {
-        return EsError::mapper_parsing(format!("The mapper type [{ty}] declared on field [{field}] is not supported: {why}."));
-    }
     EsError::mapper_parsing(format!(
         "The mapper type [{ty}] declared on field [{field}] does not exist. It might have been created within a future version or requires a plugin to be installed. Check the documentation."
     ))

@@ -37,6 +37,9 @@ pub enum FieldValue {
     Range { from: Value, to: Value, include_from: bool, include_to: bool },
     DenseVector(Vec<f32>),
     ByteVector(Vec<i8>),
+    /// `rank_vectors`: a document's vectors back to back, `width` values each (bytes for `bit`
+    /// vectors), in `floats` (`float`, `bfloat16`) or `bytes` (`byte`, `bit`).
+    RankVectors { width: usize, floats: Vec<f32>, bytes: Vec<i8> },
     /// `sparse_vector` and `rank_features`: token weights.
     Features(Vec<(String, f32)>),
     /// `rank_feature`.
@@ -715,6 +718,7 @@ fn parse_non_null(w: &mut Cx<'_, '_>, f: &FieldMapper, full: &str, ctx: &Mapping
             Vec::new()
         }
         "dense_vector" => parse_dense_vector(w, f, full, ctx)?,
+        "rank_vectors" => parse_rank_vectors(w, f, full, ctx)?,
         "knn_vector" => parse_knn_vector(w, f, full, ctx)?,
         "rank_feature" => {
             let v = w.p.float_value()?;
@@ -1685,7 +1689,58 @@ fn parse_knn_vector(w: &mut Cx<'_, '_>, f: &FieldMapper, full: &str, ctx: &Mappi
     }
 }
 
+/// `RankVectorsFieldMapper.parse`: an array of vectors, each parsed as a `dense_vector` of the
+/// same element type (numbers, or hex and base64 strings). Without `dims` every vector must
+/// have the first one's length, which becomes the mapping's (`write::set_vector_dims`).
+fn parse_rank_vectors(w: &mut Cx<'_, '_>, f: &FieldMapper, full: &str, ctx: &MappingCtx) -> Result<Vec<FieldValue>, ValueError> {
+    if w.p.token() != Token::StartArray {
+        return Err(EsError::illegal_argument(format!("Field [{full}] of type [rank_vectors] cannot be indexed with a single value")).into());
+    }
+    let bit = f.effective("element_type", ctx).as_str() == Some("bit");
+    let dims = param_i64(f, "dims", ctx);
+    let (mut floats, mut bytes): (Vec<f32>, Vec<i8>) = (Vec::new(), Vec::new());
+    let mut width: Option<usize> = None;
+    while let Some(t) = w.p.next_token() {
+        if t == Token::EndArray {
+            break;
+        }
+        // Each value is one vector, appended as it's read: the buffers grow with the bytes the
+        // document actually holds.
+        let n = match parse_dense_vector(w, f, full, ctx)?.pop() {
+            Some(FieldValue::DenseVector(v)) => {
+                floats.extend_from_slice(&v);
+                v.len()
+            }
+            Some(FieldValue::ByteVector(v)) => {
+                bytes.extend_from_slice(&v);
+                v.len()
+            }
+            _ => 0,
+        };
+        match width {
+            None => width = Some(n),
+            Some(w0) if w0 != n => {
+                return Err(match dims {
+                    Some(d) => EsError::illegal_argument(format!(
+                        "The [rank_vectors] field [{full}] in doc [{}] has a different number of dimensions [{}] than defined in the mapping [{d}]",
+                        w.desc,
+                        if bit { n * 8 } else { n }
+                    )),
+                    None => EsError::illegal_argument(format!("Field [{full}] of type [rank_vectors] cannot be indexed with vectors of different dimensions")),
+                }
+                .into());
+            }
+            _ => {}
+        }
+    }
+    match width {
+        Some(width) if width > 0 => Ok(vec![FieldValue::RankVectors { width, floats, bytes }]),
+        _ => Ok(Vec::new()),
+    }
+}
+
 fn parse_dense_vector(w: &mut Cx<'_, '_>, f: &FieldMapper, _full: &str, ctx: &MappingCtx) -> Result<Vec<FieldValue>, ValueError> {
+    let ty = f.ty;
     let dims = param_i64(f, "dims", ctx);
     let element = f.effective("element_type", ctx).as_str().unwrap_or("float").to_string();
     let full = f.name.clone();
@@ -1693,7 +1748,7 @@ fn parse_dense_vector(w: &mut Cx<'_, '_>, f: &FieldMapper, _full: &str, ctx: &Ma
     let parsing = |msg: String| ValueError::plain(EsError::new(400, "parsing_exception", format!("Failed to parse object: {msg}")));
     let dims_err = |n: usize, d: i64| {
         ValueError::plain(EsError::illegal_argument(format!(
-            "The [dense_vector] field [{full}] in doc [{desc}] has a different number of dimensions [{n}] than defined in the mapping [{d}]"
+            "The [{ty}] field [{full}] in doc [{desc}] has a different number of dimensions [{n}] than defined in the mapping [{d}]"
         )))
     };
     match w.p.token() {
@@ -1723,7 +1778,7 @@ fn parse_dense_vector(w: &mut Cx<'_, '_>, f: &FieldMapper, _full: &str, ctx: &Ma
                             && ((floats.len() + 1) * if bit { 8 } else { 1 }) as i64 > d
                         {
                             return Err(ValueError::plain(EsError::illegal_argument(format!(
-                                "The [dense_vector] field [{full}] in doc [{desc}] has more dimensions than defined in the mapping [{d}]"
+                                "The [{ty}] field [{full}] in doc [{desc}] has more dimensions than defined in the mapping [{d}]"
                             ))));
                         }
                         floats.push(v);
