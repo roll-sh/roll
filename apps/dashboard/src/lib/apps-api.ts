@@ -51,6 +51,20 @@ export interface Build {
 
 export type ServiceType = "web" | "worker" | "cron";
 
+/** One of `run.push`: a topic of a stream (`st_…`, on the project) delivered to one environment's path. */
+export interface Push {
+  stream: string;
+  topic: string;
+  group: string;
+  path: string;
+  /** Default production. */
+  environment?: string;
+  /** A topic of the same stream a record goes to after `max_attempts` (default 5) failed tries. */
+  dead_letter?: string;
+  max_attempts?: number;
+  timeout_s?: number;
+}
+
 export interface Run {
   type: ServiceType;
   port?: number;
@@ -126,6 +140,8 @@ export interface Run {
   scale?: { stream?: string; group?: string; metric?: string; sum?: boolean; per_instance?: number };
   /** Commands on a schedule, each a job of the live deployment at its due times (Heroku Scheduler); at most 20. */
   schedules?: Scheduled[];
+  /** A web service's: a roll stream's records POSTed to `path` as they arrive, the group's offset committed on a 2xx (Cloud Run's Pub/Sub push); at most 4. */
+  push?: Push[];
   /** Containers beside each instance, in its network namespace (a web service's or a worker's); at most 4. */
   sidecars?: Sidecar[];
 }

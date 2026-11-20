@@ -7102,3 +7102,89 @@ async fn a_failed_deploy_is_explained_once_by_its_repo_owners_model() {
     let url = format!("/v1/apps/services/{}/environments/production/deploys/{}/explain", img["id"].as_str().unwrap(), live["id"].as_str().unwrap());
     assert_eq!(call(&w.api, "POST", &url, None).await.0, StatusCode::CONFLICT);
 }
+
+/// A roll stream in memory: what `run.push` reads, commits and dead-letters.
+#[derive(Default)]
+struct FakeStream {
+    records: Mutex<Vec<(String, apps_control::integrations::StreamRecord)>>,
+    /// (topic, partition) → the next offset to deliver.
+    committed: Mutex<std::collections::HashMap<(String, i32), i64>>,
+    produced: Mutex<Vec<(String, apps_control::integrations::StreamRecord)>>,
+}
+
+#[async_trait]
+impl apps_control::integrations::Resources for FakeStream {
+    async fn link_vars(&self, kind: apps_control::model::LinkKind, _ref: &str) -> anyhow::Result<Vec<(String, String)>> {
+        anyhow::bail!("no {}", kind.as_str())
+    }
+    async fn read_group(&self, stream: &str, topic: &str, _group: &str, _consumer: &str, _wait_ms: u64, limit: usize) -> anyhow::Result<Vec<apps_control::integrations::StreamRecord>> {
+        anyhow::ensure!(stream == "st_ag2345678abc", "no stream {stream}");
+        let next: Vec<_> = {
+            let committed = self.committed.lock();
+            let records = self.records.lock();
+            records.iter().filter(|(t, r)| t == topic && r.offset >= committed.get(&(t.clone(), r.partition)).copied().unwrap_or(0)).take(limit).map(|(_, r)| r.clone()).collect()
+        };
+        if next.is_empty() {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        Ok(next)
+    }
+    async fn commit(&self, _stream: &str, topic: &str, _group: &str, _consumer: &str, partition: i32, offset: i64) -> anyhow::Result<()> {
+        self.committed.lock().insert((topic.to_string(), partition), offset);
+        Ok(())
+    }
+    async fn produce(&self, _stream: &str, topic: &str, record: &apps_control::integrations::StreamRecord) -> anyhow::Result<()> {
+        self.produced.lock().push((topic.to_string(), record.clone()));
+        Ok(())
+    }
+}
+
+/// `run.push` (Cloud Run's Pub/Sub push): a stream's records are POSTed to a web service's path
+/// and the group's offset moves on each 2xx; a record its path keeps refusing goes to the
+/// dead-letter topic after `max_attempts`; nothing is read from a stream that isn't on the
+/// service's project; and push is a web service's.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_stream_is_pushed_to_a_web_service() {
+    let stream = Arc::new(FakeStream::default());
+    let rec = |offset: i64, value: &str| apps_control::integrations::StreamRecord { partition: 0, offset, timestamp: 1, key: None, value: Some(value.as_bytes().to_vec()), headers: vec![] };
+    stream.records.lock().extend([("orders".to_string(), rec(0, "a")), ("orders".to_string(), rec(1, "b")), ("poison".to_string(), rec(0, "x"))]);
+    let s2 = stream.clone();
+    let w = world_full(|_| {}, false, move |d| d.resources = s2).await;
+    let push = json!([
+        {"stream": "st_ag2345678abc", "topic": "orders", "group": "web", "path": "/events"},
+        {"stream": "st_ag2345678abc", "topic": "poison", "group": "web", "path": "/bad/x", "dead_letter": "dead", "max_attempts": 2}
+    ]);
+    let body = json!({ "project": w.project, "name": "web", "source": {"kind": "image", "image": "nginx:1.27"}, "run": {"port": 80, "push": push}, "variables": {"FAKE_MISSING": "/bad"} });
+    let (st, svc) = call(&w.api, "POST", "/v1/apps/services", Some(body)).await;
+    assert_eq!(st, StatusCode::CREATED, "{svc}");
+    let id = svc["id"].as_str().unwrap().to_string();
+    assert_eq!(settled(&w, &id, "production", svc["environments"][0]["latest"]["id"].as_str().unwrap()).await["status"], "active");
+    // Not on its project: off, and said why.
+    w.apps.cron_pass(code_sql::now_ms()).await;
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert!(stream.committed.lock().is_empty());
+    let (_, log) = call(&w.api, "GET", &format!("/v1/apps/services/{id}/environments/production/logs"), None).await;
+    assert!(log.as_array().unwrap().iter().any(|l| l["text"].as_str().unwrap().contains("isn't on this service's project")), "{log}");
+    let ws = w.apps.deps.workspace.clone().unwrap();
+    ws.place(roll_workspace::Scope::All, &w.project, roll_workspace::Kind::Stream, "st_ag2345678abc", 0.0, 0.0).unwrap();
+    let done = || {
+        let c = stream.committed.lock();
+        c.get(&("orders".into(), 0)) == Some(&2) && c.get(&("poison".into(), 0)) == Some(&1)
+    };
+    for _ in 0..200 {
+        w.apps.cron_pass(code_sql::now_ms()).await;
+        if done() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert!(done(), "{:?}", stream.committed.lock());
+    let produced = stream.produced.lock().clone();
+    assert_eq!(produced.len(), 1, "{produced:?}");
+    let (topic, dead) = &produced[0];
+    assert_eq!((topic.as_str(), dead.value.as_deref()), ("dead", Some(&b"x"[..])));
+    assert!(dead.headers.iter().any(|(k, v)| k == "x-roll-error" && String::from_utf8_lossy(v).contains("answered 404 after 2 tries")), "{dead:?}");
+    // Push is a web service's.
+    let worker = json!({ "project": w.project, "name": "jobs", "source": {"kind": "image", "image": "nginx:1.27"}, "run": {"type": "worker", "push": [push[0].clone()]} });
+    assert_eq!(call(&w.api, "POST", "/v1/apps/services", Some(worker)).await.0, StatusCode::BAD_REQUEST);
+}

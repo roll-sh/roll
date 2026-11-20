@@ -48,6 +48,7 @@ pub mod net;
 pub mod notify;
 pub mod otlp;
 pub mod public;
+pub mod push;
 pub mod resp_cache;
 pub mod runtime;
 pub mod shell;
@@ -260,6 +261,7 @@ pub struct Apps {
     /// Email to projects' owners (`notify`), once rolld has accounts.
     mail: std::sync::OnceLock<Arc<dyn integrations::Mailbox>>,
     explainer: std::sync::OnceLock<Arc<dyn integrations::Explainer>>,
+    pushers: push::Pushers,
     /// Who may still open a project's environments ([`Apps::set_visitors`]).
     pub(crate) visitors: std::sync::OnceLock<Arc<dyn integrations::Visitors>>,
     /// Log drains whose batch came back (the drainer sends the next).
@@ -572,6 +574,7 @@ impl Apps {
             github: std::sync::OnceLock::new(),
             mail: std::sync::OnceLock::new(),
             explainer: std::sync::OnceLock::new(),
+            pushers: push::Pushers::default(),
             visitors: std::sync::OnceLock::new(),
             drain_done: Arc::new(Mutex::new(Vec::new())),
             drains_dirty: Mutex::new(Default::default()),

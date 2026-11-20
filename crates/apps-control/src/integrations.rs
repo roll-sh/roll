@@ -346,6 +346,32 @@ pub trait Resources: Send + Sync {
     async fn backlog(&self, _stream: &str, _group: &str) -> anyhow::Result<u64> {
         anyhow::bail!("roll streams isn't on this node")
     }
+    /// The next records of `topic` for `group`'s `consumer` (a server-managed group, offsets
+    /// committed by [`Resources::commit`] only), waiting up to `wait_ms` for one: what
+    /// `run.push` delivers. Each partition's records in order.
+    async fn read_group(&self, _stream: &str, _topic: &str, _group: &str, _consumer: &str, _wait_ms: u64, _limit: usize) -> anyhow::Result<Vec<StreamRecord>> {
+        anyhow::bail!("roll streams isn't on this node")
+    }
+    /// Commit `group`'s offset on a partition: `offset` is the next record to deliver.
+    async fn commit(&self, _stream: &str, _topic: &str, _group: &str, _consumer: &str, _partition: i32, _offset: i64) -> anyhow::Result<()> {
+        anyhow::bail!("roll streams isn't on this node")
+    }
+    /// Append a record to `topic` (a push's dead letters).
+    async fn produce(&self, _stream: &str, _topic: &str, _record: &StreamRecord) -> anyhow::Result<()> {
+        anyhow::bail!("roll streams isn't on this node")
+    }
+}
+
+/// One record of a roll stream, as `run.push` delivers it.
+#[derive(Clone, Debug, PartialEq, Eq, Default)]
+pub struct StreamRecord {
+    pub partition: i32,
+    pub offset: i64,
+    /// Unix ms.
+    pub timestamp: i64,
+    pub key: Option<Vec<u8>>,
+    pub value: Option<Vec<u8>>,
+    pub headers: Vec<(String, Vec<u8>)>,
 }
 
 /// Credentials a link made for itself: its variables, and what revoking them needs.
