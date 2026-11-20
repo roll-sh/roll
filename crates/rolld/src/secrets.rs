@@ -12,7 +12,7 @@
 use axum::body::Body;
 use axum::http::{Method, Request};
 use http_body_util::BodyExt;
-use roll_secrets::links::{Field, Issued, Link, LinkProvider, Links, Mode};
+use roll_secrets::links::{Field, Issued, Link, LinkProvider, Links, Mode, Planted};
 use roll_secrets::{Error, KeySource, Keyring, Secrets, Value};
 use serde_json::{Value as Json, json};
 use std::collections::BTreeMap;
@@ -500,11 +500,31 @@ fn tell_decoys(access: &roll_access::Access, secrets: Arc<Secrets>) {
         let (s, used) = (secrets.clone(), used.clone());
         let Ok(rt) = tokio::runtime::Handle::try_current() else { return };
         rt.spawn_blocking(move || {
-            if let Err(e) = s.decoy_used(&used.grant, used.ip.as_deref(), &used.route) {
+            if let Err(e) = s.decoy_used("rlt", &used.grant, used.ip.as_deref(), &used.route) {
                 tracing::warn!(grant = %used.grant, "raising a decoy key's alert failed: {e}");
             }
         });
     });
+}
+
+/// A decoy role's login, refused by roll Postgres' proxy: roll secrets raises `decoy_used` on its
+/// key (off the login's task: it writes). The address and the endpoint, never the role's name.
+pub fn tell_postgres_decoys(control: &pg_control::Control, secrets: Arc<Secrets>) {
+    control.on_decoy_login(move |login| {
+        let (s, login) = (secrets.clone(), login.clone());
+        let Ok(rt) = tokio::runtime::Handle::try_current() else { return };
+        rt.spawn_blocking(move || {
+            let (ip, route) = (login.peer.map(|p| p.to_string()), format!("Postgres endpoint {}", login.endpoint_id));
+            if let Err(e) = s.decoy_used("postgres", &decoy_handle(&login.project_id, &login.role), ip.as_deref(), &route) {
+                tracing::warn!(endpoint = %login.endpoint_id, "raising a decoy role's alert failed: {e}");
+            }
+        });
+    });
+}
+
+/// How roll secrets names a Postgres decoy role: what it's planted as and what its logins report.
+fn decoy_handle(project: &str, role: &str) -> String {
+    format!("{project}/{role}")
 }
 
 /// roll's OIDC issuer for GCP and Azure (roll-secrets' issuer.rs): where clouds reach rolld.
@@ -673,8 +693,24 @@ impl LinkProvider for Postgres {
         ]);
         Ok(Issued { parts, handle: json!({ "role": role, "endpoint": endpoint }) })
     }
-    /// Ends the role's sessions and drops it. What it made (tables from a migration) is given to
-    /// `roll` first, so revoking a credential never drops data.
+    /// A decoy role (docs/secrets.md, "Decoys"): named and passworded as `issue`'s roles are, in
+    /// the root branch's connection string. roll Postgres keeps no password for it: the proxy
+    /// refuses every login, as a wrong password, and reports it ([`tell_postgres_decoys`]).
+    fn plant_decoy(&self, r#ref: &str) -> roll_secrets::Result<Planted> {
+        let p = self.0.call(Method::GET, &format!("/v1/projects/{}", enc(r#ref)), None)?;
+        let root = p["branches"].as_array().into_iter().flatten().find(|b| b["parent_id"].is_null());
+        let uri = root.and_then(|b| b["connection_uri"].as_str()).ok_or_else(|| Error::Link(format!("postgres {ref} has no endpoint")))?;
+        let mut url = url::Url::parse(uri).map_err(|_| Error::Link("the branch's URL doesn't parse".into()))?;
+        let role = format!("roll_{}", random(12));
+        self.0.call(Method::POST, &format!("/v1/projects/{}/decoy-roles", enc(r#ref)), Some(json!({ "role": role })))?;
+        let _ = url.set_username(&role);
+        let _ = url.set_password(Some(&random(32)));
+        Ok(Planted { value: Value::new(url.to_string()), handle: decoy_handle(r#ref, &role) })
+    }
+    fn remove_decoy(&self, handle: &str) -> roll_secrets::Result<()> {
+        let (project, role) = handle.split_once('/').ok_or_else(|| Error::Internal("a postgres decoy's handle is project/role".into()))?;
+        self.0.delete_gone(&format!("/v1/projects/{}/decoy-roles/{}", enc(project), enc(role)))
+    }
     /// A renewed lease: the role's `VALID UNTIL` follows (with the same 5 minutes of slack).
     fn renew(&self, _: &str, h: &Json, until: i64) -> roll_secrets::Result<()> {
         let (Some(role), Some(endpoint)) = (h["role"].as_str(), h["endpoint"].as_str()) else { return Ok(()) };

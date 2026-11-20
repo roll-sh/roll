@@ -1082,7 +1082,7 @@ is one click.
 
 `GET …/health` (`roll secrets health`, the dashboard's Health view) is every finding above in
 every standard environment and folder at once, worst first, so none waits on someone opening the
-right folder: `decoy_used` (a decoy key's token was used; only the project's admins see it, see
+right folder: `decoy_used` (a decoy key's credential was used; only the project's admins see it, see
 Decoys), `expired`, `rotation_failing` (a managed key's scheduled rotation fails: the
 database, vendor, product or rotator refused or didn't answer; the detail says why, the old
 credential keeps working, and the sweeper tries again; cleared by the next rotation that works),
@@ -4144,8 +4144,9 @@ on Postgres. The audit is read once per project and filtered in memory (it was a
 
 A decoy key (a honeytoken, as GitGuardian's are) is a credential made to be found. It's stored
 where an intruder would look, and any use of it raises an alert. `POST …/environments/{env}/decoys
-{key, kind, path?}` (`roll secrets decoy add KEY --kind rlt [--path /ci]`, the folder's menu
-"Add a decoy…") makes a new key whose value is a decoy credential:
+{key, kind, path?, resource?}` (`roll secrets decoy add KEY --kind rlt [--path /ci]`, `--kind
+postgres --resource <database>`, the folder's menu "Add a decoy…") makes a new key whose value is
+a decoy credential:
 
 - **`rlt`**: a roll token that roll-access made as a decoy (docs/permissions.md, "Decoy tokens").
   It allows nothing, whatever its rules say. Any use is refused as an unknown token is, so whoever
@@ -4153,9 +4154,35 @@ where an intruder would look, and any use of it raises an alert. `POST …/envir
   mails the decoy's owner (whoever planted it) and the admins, and tells roll secrets
   (`Access::on_decoy`). roll secrets keeps no token store: rolld mints the decoy through
   `Workloads::mint_decoy`.
-- `postgres` and `aws` aren't here yet. A Postgres decoy needs roll Postgres to report a role's
-  login attempts, which its proxy doesn't do: it relays the SCRAM exchange to the database
-  untouched. An AWS decoy needs an AWS account and CloudTrail.
+- **`postgres`**: a connection string for a role of `resource`, a roll Postgres database the
+  project may link (on its canvas, as a link's). It's the root branch's connection string with a
+  role and password shaped like the ones links issue (`roll_` and 12 letters and digits, 32
+  characters). The role can never log in, and roll keeps no password for it: the password exists
+  only as the key's value.
+  - rolld's postgres `LinkProvider` asks roll Postgres for the role through a typed route,
+    `POST /v1/projects/{id}/decoy-roles {role}` (`DELETE …/decoy-roles/{role}` drops it). roll
+    Postgres makes it `NOLOGIN`, with no password, on the root branch (refused if the name exists),
+    and keeps it in `decoy_roles (project_id, role)` with a random SCRAM salt of its own.
+  - Its proxy checks every login's role against that table after the endpoint resolves and
+    before it wakes a compute: one statement over three primary keys (7 µs in a debug build under
+    load, against 88 ms for the whole login). A decoy's login is answered by the proxy itself, on every endpoint of the database
+    (branches and replicas too), and never wakes a compute.
+  - The answer is Postgres' own, byte for byte: the SCRAM exchange as Postgres runs it for a
+    role that doesn't exist (the role's own stable salt, a 24-character server nonce, 4096
+    iterations), then `FATAL 28P01 password authentication failed for user "…"` with Postgres'
+    source file, line and routine for the endpoint's major version (16, 17, 18). Every malformed
+    message a prober can send gets the error Postgres would give (`pg-proxy/src/decoy.rs` ports
+    `CheckSASLAuth`, `scram_exchange` and its parsers, and `NegotiateProtocolVersion`). Once the
+    proxy has seen the endpoint's compute refuse a wrong password, it answers with those exact
+    bytes (its language and line). It answers as late as the compute would: as long as the
+    endpoint's last start when it's suspended, plus the time a running compute takes to answer.
+    `pg-control/tests/e2e.rs` compares each path with a compute's answers to a missing role.
+  - Each login is told to rolld (`Control::on_decoy_login`: the endpoint, the client's address
+    from the PROXY header, the time), which hands it to `Secrets::decoy_used` as `on_decoy` does
+    for tokens. The alert names the endpoint, never the role.
+  - Someone who can read the database's catalog (its owner) can see the role is `NOLOGIN`; the
+    decoy is for whoever can't.
+- `aws` isn't here: an AWS decoy needs an AWS account and CloudTrail.
 
 The key is an ordinary change (as a `PUT` of the key makes), so it reads, resolves, exports and
 syncs like any other key. Only the project's admins (`admin` over the whole project) see that it's
@@ -4200,8 +4227,8 @@ it called. It never names a value.
 
 **Ending.** Changing a decoy key's value, linking it, or deleting it (its folder, its environment or
 its project too) ends the decoy. The write marks it ended in its own transaction, and its token is
-revoked right after, outside the transaction (roll-access is another store). The sweeper retries a
-revoke that fails. A copy promoted or rolled back into another key holds a token that stops working
+revoked (or its role dropped from the database and from the proxy's table) right after, outside the
+transaction (roll-access and roll Postgres are other stores). The sweeper retries what fails. A copy promoted or rolled back into another key holds a token that stops working
 once the decoy ends.
 
 ### Workload identities (OIDC)
@@ -4876,8 +4903,8 @@ type Secret = {
   overridden: boolean; // a personal value of the caller replaces it
   decoy?: Decoy; // only for the project's admins ("Decoys"); absent for everyone else, as on any key
 };
-type Decoy = { kind: "rlt"; created_at: number; created_by: string; uses: number; used_at: number | null; used_ip: string | null };
-type NewDecoy = { key: string; kind: "rlt"; path?: string };
+type Decoy = { kind: "rlt" | "postgres"; created_at: number; created_by: string; uses: number; used_at: number | null; used_ip: string | null };
+type NewDecoy = { key: string; kind: "rlt"; path?: string } | { key: string; kind: "postgres"; resource: string; path?: string };
 type SetSecret = { value?: string; comment?: string; tags?: string[]; type?: "shared" | "personal"; link?: Link | null; message?: string; expires_at?: number | null; if_version?: number };
 type Op =
   | { op: "set"; key: string; value?: string; comment?: string; tags?: string[]; type?: "shared" | "personal"; link?: Link | null; if_version?: number }

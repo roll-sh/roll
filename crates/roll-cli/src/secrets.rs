@@ -1567,9 +1567,13 @@ pub enum DecoyCmd {
     /// credential. It reads like any other key; any use of it raises `decoy_used`.
     Add {
         key: String,
-        /// What the value is: `rlt`, a roll token that allows nothing.
+        /// What the value is: `rlt`, a roll token that allows nothing; `postgres`, a connection
+        /// string for a role of `--resource` that can't log in.
         #[arg(long, default_value = "rlt")]
         kind: String,
+        /// The roll Postgres database a `postgres` decoy's role is made in.
+        #[arg(long)]
+        resource: Option<String>,
     },
 }
 
@@ -3454,8 +3458,12 @@ pub async fn run(api: &Api, json_out: bool, args: AtArgs, cmd: Secrets) -> anyho
                 println!("Deleted {id}");
             }
         },
-        Secrets::Decoy(DecoyCmd::Add { key, kind }) => {
-            let v = c.call(Method::POST, &format!("{env}/decoys"), Some(json!({ "key": key, "kind": kind, "path": c.at.path }))).await?;
+        Secrets::Decoy(DecoyCmd::Add { key, kind, resource }) => {
+            let mut body = json!({ "key": key, "kind": kind, "path": c.at.path });
+            if let Some(r) = resource {
+                body["resource"] = json!(r);
+            }
+            let v = c.call(Method::POST, &format!("{env}/decoys"), Some(body)).await?;
             if json_out {
                 return print(&v);
             }

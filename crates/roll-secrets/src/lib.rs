@@ -83,7 +83,7 @@ pub use chain::Verification;
 pub use consumers::{Maker, Reference, Refusal, Resolved, ResourceRef};
 pub use envs::{Branch, EnvChange, Ensure, Ensured, Environment, Folder, Import, Kind as EnvironmentKind, NewEnvironment, Policy};
 pub use leaks::Leak;
-pub use links::{Link, LinkProvider, Links, Mode};
+pub use links::{Link, LinkProvider, Links, Mode, Planted};
 pub use metrics::Metrics;
 pub use read::{Followed, Grid, Problem, Secret, Source, Values, Version};
 pub use requests::{Request, RequestValue, Review, Verdict};
