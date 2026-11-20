@@ -592,8 +592,10 @@ async fn an_error_mains_preview_doesnt_have_reaches_the_record_and_the_report() 
     let p = e.engine.store.row_by_change("chg_ne").unwrap().unwrap();
     let web = e.engine.store.services(&p.id).unwrap().into_iter().next().unwrap().name;
     let group = |f: &str, title: &str, count: u64| roll_previews::ErrorGroup { fingerprint: f.into(), kind: "line".into(), title: title.into(), count, first_seen: 1, last_seen: 2, sample: title.into(), ..Default::default() };
-    e.apps.errors.lock().insert(format!("{}/{web}", base.id), vec![group("old", "a flaky upstream", 3)]);
-    e.apps.errors.lock().insert(format!("{}/{web}", p.id), vec![group("old", "a flaky upstream", 4), group("rare", "RangeError", 1), group("new", "Stripe rejected sk_test_51Hx9", 9)]);
+    // One main's has too under another fingerprint, its line naming each preview's own id: not new.
+    let own = |id: &str| format!("lost the connection for {id}");
+    e.apps.errors.lock().insert(format!("{}/{web}", base.id), vec![group("old", "a flaky upstream", 3), group("own-main", &own(&base.id), 2)]);
+    e.apps.errors.lock().insert(format!("{}/{web}", p.id), vec![group("old", "a flaky upstream", 4), group("rare", "RangeError", 1), group("new", "Stripe rejected sk_test_51Hx9", 9), group("own-mine", &own(&p.id), 2)]);
     e.engine.read_new_errors().await;
     let n = e.engine.store.preview(&p.id).unwrap().new_errors.expect("new against main's");
     assert_eq!((n.branch.as_str(), n.total, n.errors.iter().map(|x| x.title.as_str()).collect::<Vec<_>>()), ("main", 2, vec!["Stripe rejected ***", "RangeError"]));
