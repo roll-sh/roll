@@ -126,9 +126,6 @@ PUT /v1/secrets/projects/{project}/environments/{env}/folder-policies        a p
 PUT /v1/secrets/projects/{project}/environments/{env}/policy                 a person's call: an environment's protection and approvers
 DELETE /v1/secrets/projects/{project}/environments/{env}/reach/cut-off       a person's call (approving, accepting, cutting off)
 POST /v1/secrets/projects/{project}/environments/{env}/reach/cut-off         a person's call (approving, accepting, cutting off)
-GET /v1/secrets/projects/{project}/environments/{env}/requests/{id}          no tool yet: a value request (with #277's tools)
-POST /v1/secrets/projects/{project}/environments/{env}/requests/{id}/apply   no tool yet: a value request (with #277's tools)
-POST /v1/secrets/projects/{project}/environments/{env}/requests/{id}/close   no tool yet: a value request (with #277's tools)
 POST /v1/secrets/projects/{project}/environments/{env}/requests/{id}/review  a person's call (reviewing what someone sent)
 GET /v1/secrets/projects/{project}/environments/{env}/requests/{id}/values   answers or sets a credential (a request's values)
 POST /v1/secrets/projects/{project}/environments/{env}/resolve               answers or sets a credential (resolved values)
