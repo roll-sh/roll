@@ -280,9 +280,9 @@ impl Builder {
     fn finish(mut self) -> Automaton {
         let mut a = Automaton::new();
         let n = self.accept.len();
-        for s in 0..n {
+        for (s, &accept) in self.accept.iter().enumerate() {
             a.create_state();
-            a.set_accept(s as i32, self.accept[s]);
+            a.set_accept(s as i32, accept);
         }
         self.trans.sort_by_key(|&(s, d, min, max)| (s, min, max, d));
         for &(s, d, min, max) in &self.trans {

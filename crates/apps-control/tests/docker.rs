@@ -338,7 +338,7 @@ async fn a_static_sites_files_answer_without_a_container() {
         scan = call(&w.api, "GET", &deps, None, "application/json", None).await.1[0]["vulnerabilities"].clone();
         tokio::time::sleep(Duration::from_millis(200)).await;
     }
-    assert!(scan["scanner"] == "trivy 0.76.1" && scan["error"].is_null(), "{scan}");
+    assert!(scan["scanner"] == "trivy 0.76.1" && scan["error"].is_null() && scan["sbom"] == true, "{scan}");
     eprintln!("MEASURED image scan beside the rollout: done {} ms after it went live (the first downloads the database)", began.elapsed().as_millis());
     assert_eq!(delete_for_good(&w.api, &id).await.0, StatusCode::NO_CONTENT);
     let _ = apps_control::runtime::docker::docker(&["network", "rm", &apps_control::network_name(&w.project, "production")]).await;
@@ -437,6 +437,44 @@ async fn a_static_sites_functions_build_and_answer() {
     assert_eq!(fetch("/api/ping?n=7").await, (StatusCode::OK, r#"{"pong":"7"}"#.to_string()));
     assert_eq!(fetch("/api/web").await, (StatusCode::OK, "typed".to_string()));
     assert_eq!(fetch("/api/nope").await.0, StatusCode::NOT_FOUND);
+}
+
+/// A site's edge functions on Deno (Netlify's): one answers its own path, one wraps the site's
+/// answer through `context.next()`, which comes back to the apps listener signed (as instances
+/// reach it for traces) and answers the site's files.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_sites_edge_functions_run_on_deno() {
+    // The apps listener, where `next()` comes back: served for real (instances reach it).
+    let listener = tokio::net::TcpListener::bind("0.0.0.0:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let Some(w) = docker_world_with(None, |c| c.otlp_base = Some(format!("http://127.0.0.1:{port}"))).await else { return };
+    let app = w.public.clone();
+    tokio::spawn(async move { axum::serve(listener, app.into_make_service()).await });
+    let files = [
+        ("index.html", "<h1>site</h1>"),
+        ("netlify/edge-functions/hi.ts", "export default (req: Request) => new Response(`hi from ${typeof Deno}`);\nexport const config = { path: '/hi' };\n"),
+        ("netlify/edge-functions/shout.ts", "export default async (req: Request, ctx: any) => new Response((await (await ctx.next()).text()).toUpperCase(), { headers: { 'x-edge': '1' } });\nexport const config = { path: ['/', '/index.html'] };\n"),
+    ];
+    let (site, host) = deploy_tree(&w, "edgy", &files).await;
+    let (fns, _) = deploy_tree_with(&w, "edgy-fn", &files, json!({"builder": "functions"})).await;
+    let fetch = |path: &'static str| {
+        let req = Request::get(path).header("host", host.as_str()).body(Body::empty()).unwrap();
+        let public = w.public.clone();
+        async move {
+            let resp = public.oneshot(req).await.unwrap();
+            let st = resp.status();
+            (st, String::from_utf8(resp.into_body().collect().await.unwrap().to_bytes().to_vec()).unwrap())
+        }
+    };
+    assert_eq!(fetch("/hi").await, (StatusCode::OK, "hi from object".to_string()));
+    let got = fetch("/").await;
+    let (_, log) = call(&w.api, "GET", &format!("/v1/apps/services/{fns}/environments/production/logs?tail=40"), None, "application/json", None).await;
+    assert_eq!(got, (StatusCode::OK, "<H1>SITE</H1>".to_string()), "next() read the site's own file: {log}");
+    for id in [&site, &fns] {
+        assert_eq!(delete_for_good(&w.api, id).await.0, StatusCode::NO_CONTENT);
+    }
+    let _ = apps_control::runtime::docker::docker(&["network", "rm", &apps_control::network_name(&w.project, "production")]).await;
+    w.apps.shutdown().await;
 }
 
 /// What the generated Dockerfiles of Node, Python and Go make actually builds and answers, and a
@@ -580,6 +618,45 @@ async fn deploy_container(w: &World, name: &str) -> (String, String) {
     }
     let (_, env) = call(&w.api, "GET", &format!("/v1/apps/services/{id}/environments/production"), None, "application/json", None).await;
     (id, env["url"].as_str().unwrap().trim_start_matches("http://").split(':').next().unwrap().to_string())
+}
+
+/// A deploy under steady traffic answers every request (zero downtime, as Railway's and Render's
+/// deploys promise): the new instance takes requests only once its health check passes, and the
+/// old one finishes what it has before it goes.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_deploy_under_traffic_answers_every_request() {
+    let Some(w) = docker_world().await else { return };
+    let (id, host) = deploy_container(&w, "steady").await;
+    assert_eq!(get(&w.public, &host).await.0, StatusCode::OK);
+    let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let (public, h, s) = (w.public.clone(), host.clone(), stop.clone());
+    let traffic = tokio::spawn(async move {
+        let mut seen = Vec::new();
+        while !s.load(std::sync::atomic::Ordering::SeqCst) {
+            seen.push(get(&public, &h).await.0);
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        seen
+    });
+    let base = format!("/v1/apps/services/{id}/environments/production");
+    let (st, d) = call(&w.api, "POST", &format!("{base}/redeploy"), Some(json!({})), "application/json", None).await;
+    assert_eq!(st, StatusCode::ACCEPTED, "{d}");
+    let dep = d["id"].as_str().unwrap().to_string();
+    for _ in 0..1200 {
+        let (_, x) = call(&w.api, "GET", &format!("{base}/deploys/{dep}"), None, "application/json", None).await;
+        if x["status"] == "active" {
+            break;
+        }
+        assert!(!["failed", "canceled"].contains(&x["status"].as_str().unwrap_or("")), "{x}");
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    // Past the switch while the old instance drains.
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    stop.store(true, std::sync::atomic::Ordering::SeqCst);
+    let seen = traffic.await.unwrap();
+    let bad: Vec<&StatusCode> = seen.iter().filter(|s| **s != StatusCode::OK).collect();
+    assert!(seen.len() >= 20 && bad.is_empty(), "{} requests through the deploy, {} not answered 200: {bad:?}", seen.len(), bad.len());
+    assert_eq!(delete_for_good(&w.api, &id).await.0, StatusCode::NO_CONTENT);
 }
 
 /// Another service of the project reaches a sleeping one by name: stopped, the waker in its

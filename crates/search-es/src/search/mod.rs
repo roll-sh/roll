@@ -98,6 +98,9 @@ pub struct SearchRequest {
     pub security: Option<crate::xpack::security::dls::ReadSecurity>,
     /// What its slow log entries say about it (its body, `X-Opaque-Id`).
     pub slowlog: crate::slowlog::Origin,
+    /// A linked cluster's part of a cross-cluster search: the aggregations stop at a partial
+    /// reduce ([`SearchOutcome::partial_aggs`]) for the coordinating cluster's final one.
+    pub partial_aggs: bool,
 }
 
 /// One shard to search.
@@ -204,6 +207,9 @@ pub struct SearchOutcome {
     pub clusters: Option<Value>,
     /// `num_reduce_phases` of a search over linked remote clusters (printed unless 1).
     pub reduce_phases: Option<usize>,
+    /// The partially reduced aggregations of a [`SearchRequest::partial_aggs`] search (its
+    /// `aggs` stay `None`).
+    pub partial_aggs: Option<search_aggs::Aggs>,
 }
 
 fn list(s: &str) -> Vec<String> {
@@ -366,6 +372,7 @@ pub fn parse_request(ctx: &Ctx, body: Option<&Value>, raw: Option<&[u8]>) -> EsR
         security: crate::xpack::security::dls::ReadSecurity::of(ctx),
         now_ms: ctx.now_ms,
         slowlog: crate::slowlog::Origin::of(&ctx.request.body, raw, ctx.request.header("x-opaque-id")),
+        partial_aggs: false,
     })
 }
 
@@ -2754,6 +2761,7 @@ fn execute_targets(cluster: &Cluster, req: &SearchRequest, targets: &[Target]) -
             ranked,
             clusters: None,
             reduce_phases: None,
+            partial_aggs: None,
         });
     }
     let opts = FetchOpts {
@@ -2922,6 +2930,7 @@ fn execute_targets(cluster: &Cluster, req: &SearchRequest, targets: &[Target]) -
             }
         }
     }
+    let mut partial_aggs = None;
     let aggs_out = match &agg_req {
         Some(a) => {
             // Reduced in shard request order (`QueryPhaseResultConsumer` sorts by shard index):
@@ -2929,6 +2938,21 @@ fn execute_targets(cluster: &Cluster, req: &SearchRequest, targets: &[Target]) -
             let mut order: Vec<usize> = (0..results.len()).collect();
             order.sort_by_key(|&i| request_index[results[i].target]);
             let parts: Vec<search_aggs::Aggs> = order.iter().filter_map(|&i| results[i].aggs.take()).collect();
+            if req.partial_aggs {
+                // A linked cluster's part: reduced partially, its top hits fetched here (the
+                // coordinating cluster can't reach these shards).
+                let mut out = aggs::reduce_partial(cluster, &st, a, parts).map_err(|e| with_query_failures(e, &cluster.node.id, targets, &failures))?;
+                out.visit_top_hits_mut(&mut |t: &mut search_aggs::internal::TopHits| -> EsResult<()> {
+                    for h in t.hits.iter_mut() {
+                        let mut v = aggs::from_json(&h.json);
+                        finish_top_hits(cluster, &st, req, targets, &results, &mut v)?;
+                        h.json = aggs::to_json(&v);
+                    }
+                    Ok(())
+                })?;
+                partial_aggs = Some(out);
+                None
+            } else {
             let mut out = aggs::reduce(cluster, &st, a, parts, req.typed_keys).map_err(|e| with_query_failures(e, &cluster.node.id, targets, &failures))?;
             finish_top_hits(cluster, &st, req, targets, &results, &mut out)?;
             if let Some(raw) = &src.aggs
@@ -2937,6 +2961,7 @@ fn execute_targets(cluster: &Cluster, req: &SearchRequest, targets: &[Target]) -
                 aggs::render_tsid_keys(raw, &mut out, req.typed_keys);
             }
             Some(out)
+            }
         }
         None => None,
     };
@@ -3037,6 +3062,7 @@ fn execute_targets(cluster: &Cluster, req: &SearchRequest, targets: &[Target]) -
         ranked,
         clusters: None,
         reduce_phases: None,
+        partial_aggs,
     })
 }
 
@@ -3589,6 +3615,7 @@ fn lookup_fields_of_hit(cluster: &Cluster, src: &SearchSource, table: &Arc<crate
             };
             let req = SearchRequest {
                 slowlog: Default::default(),
+                partial_aggs: false,
                 indices: vec![target_index.clone()],
                 opts: IndicesOptions::STRICT_EXPAND_OPEN,
                 source: SearchSource::parse(&body, None)?,
@@ -3979,8 +4006,11 @@ pub(crate) fn analytics_record(ctx: &Ctx, watch: Option<Watch>, req: &SearchRequ
 
 pub async fn search(ctx: &Ctx<'_>) -> EsResult<Reply> {
     let mut body = ctx.body()?;
+    check_pit_without_indices(ctx, body.as_ref().is_some_and(|b| b.get("pit").is_some()))?;
     // A search naming remote clusters keeps the body it was sent for the linked ones.
-    let original = ctx.param("index").is_some_and(|i| i.contains(':')).then(|| body.clone()).flatten();
+    // So does one on a point in time over linked clusters.
+    let ccs_pit = body.as_ref().and_then(|b| b.pointer(&["pit", "id"])).and_then(Value::as_str).is_some_and(crate::remote::contexts::is_ccs);
+    let original = (ccs_pit || ctx.param("index").is_some_and(|i| i.contains(':'))).then(|| body.clone()).flatten();
     let watch = analytics_watch(ctx, body.as_ref());
     // OpenSearch: the search pipeline the request names, defines inline or its index defaults to.
     let pipeline = if ctx.cluster.dialect == crate::cluster::Dialect::OpenSearch {
@@ -4004,6 +4034,8 @@ pub async fn search(ctx: &Ctx<'_>) -> EsResult<Reply> {
         crate::xpack::inference::retrievers::expand(&targets, b)?;
     }
     let mut req = parse_request(ctx, body.as_ref(), ctx.raw_json())?;
+    // A linked cluster's part of a cross-cluster search: aggregations partially reduced.
+    req.partial_aggs = req.source.aggs.is_some() && crate::remote::links::wants_partial(ctx);
     // Queries that need inference (`semantic`, and others on `semantic_text` fields).
     crate::xpack::inference::query::rewrite_request(ctx, &mut req).await?;
     crate::xpack::entsearch::query_rules::check_rulesets(ctx, body.as_ref())?;
@@ -4028,6 +4060,9 @@ pub async fn search(ctx: &Ctx<'_>) -> EsResult<Reply> {
         let mut out = crate::json::raw::with_enabled(raw, || run(ctx, req.clone()))?;
         analytics_record(ctx, watch, &req, &out);
         let mut v = render_take(&mut out, &req);
+        if let Some(p) = out.partial_aggs.take() {
+            crate::remote::links::attach_partial(&mut v, &p)?;
+        }
         if let Some(rr) = &reranker {
             crate::xpack::inference::rerank::apply(ctx, rr, &mut v).await?;
         }
@@ -4051,9 +4086,38 @@ pub async fn search(ctx: &Ctx<'_>) -> EsResult<Reply> {
     Reply::ok(v)
 }
 
+/// The final reduce of a cross-cluster search's partially reduced aggregations (each
+/// cluster's part, in cluster order), rendered; `None` without aggregations or parts.
+pub(crate) fn reduce_clusters(ctx: &Ctx, req: &SearchRequest, parts: Vec<search_aggs::Aggs>) -> EsResult<Option<Value>> {
+    let Some(a) = req.source.aggs.as_ref().filter(|_| !parts.is_empty()) else { return Ok(None) };
+    let agg_req = aggs::parse(a, req.source.aggs_raw.as_deref().map(|r| (r, a)))?;
+    let st = ctx.state();
+    let mut out = aggs::reduce(ctx.cluster, &st, &agg_req, parts, req.typed_keys)?;
+    // Every part's top hits were fetched on its cluster: only `rest_total_hits_as_int` is left.
+    finish_top_hits(ctx.cluster, &st, req, &[], &[], &mut out)?;
+    if aggs::mentions_tsid(a) {
+        aggs::render_tsid_keys(a, &mut out, req.typed_keys);
+    }
+    Ok(Some(out))
+}
+
+/// `SearchRequest.validate`: a search on a point in time names no index (its indices are the
+/// point in time's). Checked before anything reads the request's indices (`has_pit`: the body
+/// names one; else read from it).
+pub(crate) fn check_pit_without_indices(ctx: &Ctx, has_pit: bool) -> EsResult<()> {
+    if ctx.param("index").is_none() || !(has_pit || ctx.body().ok().flatten().is_some_and(|b| b.get("pit").is_some())) {
+        return Ok(());
+    }
+    let msg = match ctx.cluster.dialect {
+        crate::cluster::Dialect::OpenSearch => "[indices] cannot be used with point in time",
+        crate::cluster::Dialect::Elasticsearch => "[indices] cannot be used with point in time. Do not specify any index with point in time.",
+    };
+    Err(EsError::action_request_validation(&[msg.into()]))
+}
+
 /// `SearchRequest.rewrite`: a sorted point-in-time search gets a `_shard_doc` tiebreaker when
 /// its sort doesn't end with one, unless `search_after` was given without a value for it.
-fn add_pit_tiebreaker(src: &mut SearchSource) {
+pub(crate) fn add_pit_tiebreaker(src: &mut SearchSource) {
     if src.sort.is_empty() || src.search_after.as_ref().is_some_and(|a| a.len() != src.sort.len() + 1) {
         return;
     }
@@ -4370,8 +4434,13 @@ pub async fn msearch(ctx: &Ctx<'_>) -> EsResult<Reply> {
     let mut held = (ctx.cluster.dialect != crate::cluster::Dialect::OpenSearch)
         .then(|| crate::breaker::Reservation::new(ctx.cluster.breakers.request(ctx.cluster, &ctx.state())));
     for ((mut req, body), watch) in reqs.into_iter().zip(watches) {
-        // Each search is authorized as a search request of its own.
-        let r = match crate::xpack::security::authorize_search(ctx, &req.indices, &req.opts) {
+        // Each search is authorized as a search request of its own: one on a point in time
+        // against the point in time's indices (its own stay empty, or `run` refuses them).
+        let authorized = match &req.source.pit {
+            Some(pit) => crate::xpack::security::authorize_search_pit(ctx, &pit.id).map(|()| None),
+            None => crate::xpack::security::authorize_search(ctx, &req.indices, &req.opts),
+        };
+        let r = match authorized {
             Ok(narrowed) => {
                 if let Some(n) = narrowed {
                     req.indices = n;

@@ -279,7 +279,7 @@ async fn serve(spec: InstanceSpec, listener: tokio::net::TcpListener, log: LogSi
                 return (axum::http::StatusCode::NOT_FOUND, axum::Json(serde_json::json!({ "path": req.uri().path() }))).into_response();
             }
             if req.uri().path() == "/page" {
-                return ([(axum::http::header::CONTENT_TYPE, "text/html")], format!("<html><body><h1>{dep}</h1></body></html>")).into_response();
+                return ([(axum::http::header::CONTENT_TYPE, "text/html")], format!("<html><head><title>{dep}</title></head><body><h1>{dep}</h1></body></html>")).into_response();
             }
             // As a gRPC server answers: data, then its status in a trailer.
             if req.uri().path() == "/trailers" {
@@ -303,7 +303,10 @@ async fn serve(spec: InstanceSpec, listener: tokio::net::TcpListener, log: LogSi
             let version = format!("{:?}", req.version());
             let te = req.headers().get("te").and_then(|h| h.to_str().ok()).unwrap_or("").to_string();
             let traceparent = req.headers().get("traceparent").and_then(|h| h.to_str().ok()).unwrap_or("").to_string();
-            let mut r = (status, axum::Json(serde_json::json!({ "instance": name, "deployment": dep, "port": port, "path": req.uri().path(), "vars": vars, "forwarded_host": host, "cookie": cookie, "version": version, "te": te, "traceparent": traceparent }))).into_response();
+            let request_start = req.headers().get("x-request-start").and_then(|h| h.to_str().ok()).unwrap_or("").to_string();
+            // What roll hands an edge function (`crate::edge`).
+            let edge: serde_json::Map<String, serde_json::Value> = ["x-edge-path", "x-edge-next"].iter().filter_map(|h| Some((h.to_string(), req.headers().get(*h)?.to_str().ok()?.into()))).collect();
+            let mut r = (status, axum::Json(serde_json::json!({ "instance": name, "deployment": dep, "port": port, "path": req.uri().path(), "vars": vars, "forwarded_host": host, "cookie": cookie, "version": version, "te": te, "traceparent": traceparent, "edge": edge, "request_start": request_start }))).into_response();
             if let Some(c) = cache {
                 r.headers_mut().insert(axum::http::header::CACHE_CONTROL, c);
                 let seg = req.uri().path().trim_start_matches('/').split('/').next().unwrap_or("").to_string();
@@ -729,7 +732,8 @@ impl Builder for Fake {
         let Some(found) = self.scan_findings.lock().clone() else { return Ok(None) };
         self.scans.fetch_add(1, Ordering::SeqCst);
         log.line(format!("scanned {image}"));
-        Ok(Some(super::Scanned { scanner: "fake".into(), found }))
+        let sbom = Some(serde_json::to_vec(&serde_json::json!({ "bomFormat": "CycloneDX", "specVersion": "1.7", "components": [{ "type": "operating-system", "name": "fake" }] })).expect("JSON"));
+        Ok(Some(super::Scanned { scanner: "fake".into(), found, sbom }))
     }
 
     async fn build(&self, job: &BuildJob, log: &LogSink, cancel: tokio_util::sync::CancellationToken) -> anyhow::Result<String> {

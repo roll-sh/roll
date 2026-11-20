@@ -223,7 +223,7 @@ pub struct LogDrain {
 pub const DRAIN_FORMATS: [&str; 3] = ["ndjson", "otlp", "syslog"];
 
 /// What a drain can be sent.
-pub const DRAIN_SOURCES: [&str; 3] = ["runtime", "http", "build"];
+pub const DRAIN_SOURCES: [&str; 4] = ["runtime", "http", "build", "audit"];
 
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct NotifyTarget {
@@ -278,6 +278,8 @@ pub struct Access {
     pub token_hash: Option<String>,
     pub bypass_hash: Option<String>,
     pub signed_in: bool,
+    /// Its password's argon2id hash ([`crate::password`]), never returned.
+    pub password_hash: Option<String>,
 }
 
 /// A private registry's login for a service's image (`PUT …/registry`); the password is sealed
@@ -523,6 +525,14 @@ pub struct Run {
     /// `[metrics]`) and shown on Metrics with what an OpenTelemetry SDK sends.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub metrics: Option<Scrape>,
+    /// Floors by the clock (AWS's scheduled actions, Azure's autoscale profiles): in any of a
+    /// rule's weekly windows its `min_instances` is the floor, when higher.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub schedule_scale: Vec<ScaleWindow>,
+    /// Counts of its log lines (Cloud Logging's log-based metrics): each minute, the lines of its
+    /// output matching `pattern` (any case) as a gauge named `name`, on Metrics and for `scale`.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub log_metrics: Vec<LogMetric>,
     /// How a new deployment takes over: at once, or a share of requests at a time.
     pub rollout: Rollout,
     /// The app speaks HTTP/2 without TLS (h2c, prior knowledge), as a gRPC server does: the
@@ -580,6 +590,15 @@ pub struct Run {
     /// patches). Without it the environment only says so (`base_updated`).
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub rebuild_on_base: bool,
+    /// A web service's page loaded before a deploy keeps talking to the deployment that served
+    /// it, for a day (Vercel's skew protection; [`crate::skew`]).
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub skew_protection: bool,
+    /// A web service's hard limit (Cloud Run's, Fly's `hard_limit`): with every instance at its
+    /// `concurrency` and `max_instances` of them, a request waits up to this long (1–60 s) for a
+    /// slot, then gets a 429. Without it the least busy instance takes it past its concurrency.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub queue_s: Option<u32>,
     /// Commands on a schedule, each a job of the live deployment at its due times (Heroku
     /// Scheduler, Vercel crons): any service's, without a cron service of its own.
     #[serde(skip_serializing_if = "Vec::is_empty")]
@@ -594,6 +613,40 @@ pub struct Run {
     /// the rollout, not beside it. A rollback is never held. Changing it is a deploy.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub block_on: Option<Severity>,
+}
+
+/// A count of matching log lines a minute ([`Run::log_metrics`]).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LogMetric {
+    pub name: String,
+    pub pattern: String,
+}
+
+/// A floor for some hours of the week ([`Run::schedule_scale`]).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ScaleWindow {
+    pub windows: Vec<crate::freeze::Window>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timezone: Option<String>,
+    pub min_instances: u32,
+}
+
+impl ScaleWindow {
+    fn on(&self, now: i64) -> bool {
+        crate::freeze::Freeze { until: None, windows: self.windows.clone(), timezone: self.timezone.clone(), reason: String::new() }.on(now)
+    }
+}
+
+impl Run {
+    /// These settings with the floor its schedule asks for at `now` (the reaper's view).
+    pub fn at(&self, now: i64) -> Run {
+        let floor = self.schedule_scale.iter().filter(|w| w.on(now)).map(|w| w.min_instances).max().unwrap_or(0);
+        let mut r = self.clone();
+        r.min_instances = r.min_instances.max(floor.min(r.max_instances));
+        r
+    }
 }
 
 /// Where an app's Prometheus endpoint is ([`crate::prom`]): its port (the app's own by default)
@@ -690,6 +743,9 @@ pub struct ScanSummary {
     /// Why the scan didn't finish (the counts are then zero and mean nothing).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+    /// Its SBOM is kept (`…/deploys/{dep}/sbom`).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub sbom: bool,
 }
 
 impl ScanSummary {
@@ -846,12 +902,20 @@ fn is_true(b: &bool) -> bool {
 }
 
 /// What a worker scales on: `group`'s lag on `stream` (a roll stream in the service's project),
-/// one instance per `per_instance` messages behind.
+/// or `metric`, a gauge of its own (its Prometheus endpoint's or its OpenTelemetry SDK's: a
+/// queue's depth, jobs in flight; the largest any series of it says, or their `sum`): one
+/// instance per `per_instance` of it.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Scale {
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     pub stream: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     pub group: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub metric: String,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub sum: bool,
     #[serde(default = "Scale::default_per_instance")]
     pub per_instance: u64,
 }
@@ -887,12 +951,24 @@ pub struct Rollout {
     /// for errors meanwhile.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub manual: bool,
+    /// With `run.slo`: a step fails when the new deployment spends its error budget this many
+    /// times as fast as it lasts (Argo Rollouts' analysis); default 14.4, the fast burn alert's.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub slo_burn: Option<f64>,
+    /// A step fails when the new deployment's p95 response time is more than this many percent
+    /// above the old one's (Flagger's request duration check); off unless set.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub p95_pct: Option<u32>,
 }
 
 impl Default for Rollout {
     fn default() -> Self {
-        Rollout { steps: Vec::new(), step_s: 120, error_pct: 5, manual: false }
+        Rollout { steps: Vec::new(), step_s: 120, error_pct: 5, manual: false, slo_burn: None, p95_pct: None }
     }
+}
+
+impl Rollout {
+    pub const SLO_BURN: f64 = 14.4;
 }
 
 /// What a person says to a rollout that waits for them.
@@ -978,11 +1054,15 @@ impl Default for Run {
             tcp: false,
             rollback_on_crash: false,
             rebuild_on_base: false,
+            skew_protection: false,
+            queue_s: None,
             schedules: Vec::new(),
             sidecars: Vec::new(),
             block_on: None,
             slo: None,
             metrics: None,
+            schedule_scale: Vec::new(),
+            log_metrics: Vec::new(),
         }
     }
 }
@@ -1033,6 +1113,24 @@ impl Run {
         {
             return bad("slo is {objective: 90–99.999, latency_ms?: 1–60000, window_days?: 1–60}");
         }
+        if self.log_metrics.len() > 10 {
+            return bad("log_metrics is at most 10");
+        }
+        for (i, m) in self.log_metrics.iter().enumerate() {
+            let name_ok = !m.name.is_empty() && m.name.len() <= 100 && m.name.bytes().enumerate().all(|(j, b)| b.is_ascii_alphabetic() || b == b'_' || (j > 0 && (b.is_ascii_digit() || b == b'.')));
+            if !name_ok || m.pattern.is_empty() || m.pattern.chars().count() > 200 || self.log_metrics[..i].iter().any(|o| o.name == m.name) {
+                return bad("log_metrics are {name: a metric's name (unique), pattern: 1–200 characters}");
+            }
+        }
+        if self.schedule_scale.len() > 10 {
+            return bad("schedule_scale is at most 10 rules");
+        }
+        for w in &self.schedule_scale {
+            if w.windows.is_empty() || w.min_instances > self.max_instances.max(1) {
+                return bad("schedule_scale's rules are {windows: [{from, to}], timezone?, min_instances: up to max_instances}");
+            }
+            crate::freeze::Freeze { until: None, windows: w.windows.clone(), timezone: w.timezone.clone(), reason: String::new() }.check().map_err(|e| Error::BadRequest(format!("run.schedule_scale: {e}")))?;
+        }
         if let Some(m) = &self.metrics {
             if !matches!(self.kind, RunType::Web | RunType::Worker) {
                 return bad("metrics is a web service's or a worker's (it's read from its running instances)");
@@ -1077,12 +1175,21 @@ impl Run {
                 return bad("a sidecar's cpu is 0.1–2, its memory_mb 64–4096");
             }
         }
+        if self.queue_s.is_some_and(|q| !(1..=60).contains(&q)) {
+            return bad("queue_s is 1–60 seconds");
+        }
         let r = &self.rollout;
         if r.steps.len() > 5 || r.steps.iter().any(|s| !(1..=99).contains(s)) || r.steps.windows(2).any(|w| w[0] >= w[1]) {
             return bad("rollout.steps is up to five increasing percents, 1–99");
         }
         if !(1..=3600).contains(&r.step_s) {
             return bad("rollout.step_s is 1–3600");
+        }
+        if r.slo_burn.is_some_and(|b| !(1.0..=1000.0).contains(&b)) {
+            return bad("rollout.slo_burn is 1–1000");
+        }
+        if r.p95_pct.is_some_and(|p| !(1..=1000).contains(&p)) {
+            return bad("rollout.p95_pct is 1–1000");
         }
         if !(1..=100).contains(&r.error_pct) {
             return bad("rollout.error_pct is 1–100");
@@ -1092,7 +1199,17 @@ impl Run {
             // backlog (dropped, so a worker can become a web service).
             self.scale = None;
         }
-        if let Some(sc) = &self.scale {
+        if let Some(sc) = self.scale.as_ref().filter(|s| !s.metric.is_empty()) {
+            // The app's own gauge, by its name (Prometheus' rules); read from running instances,
+            // so at least one runs.
+            let name_ok = sc.metric.len() <= 200 && sc.metric.bytes().enumerate().all(|(i, b)| b.is_ascii_alphabetic() || b == b'_' || b == b':' || (i > 0 && (b.is_ascii_digit() || b == b'.')));
+            if !name_ok || !sc.stream.is_empty() || !sc.group.is_empty() || !(1..=1_000_000_000).contains(&sc.per_instance) {
+                return bad("scale is { metric: a gauge's name, sum?: bool, per_instance: 1–1e9 }, or a stream's group");
+            }
+            if self.min_instances == 0 {
+                return bad("scaling on a metric needs min_instances of at least 1: a stopped worker reports nothing");
+            }
+        } else if let Some(sc) = &self.scale {
             // A stream by its id (`st_…`), never a name; a group as Kafka names one.
             let stream_ok = sc.stream.strip_prefix("st_").is_some_and(|r| r.len() == 12 && r.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit()));
             let group_ok = !sc.group.is_empty() && sc.group.len() <= 249 && sc.group != "." && sc.group != ".." && sc.group.bytes().all(|b| b.is_ascii_alphanumeric() || b"._-".contains(&b));
@@ -1364,6 +1481,9 @@ pub struct Environment {
     /// People signed in to roll who may open the project get in (`access.signed_in`).
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub signed_in: bool,
+    /// Visitors may type its password (`access.password`; never returned).
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub password: bool,
     /// A cron service's next scheduled run (unix ms), once it has a deployment.
     pub next_run_at: Option<i64>,
     /// Its schedules (`run.schedules`) as they stand: the next due time and the job each last
@@ -1443,6 +1563,23 @@ pub struct Environment {
     /// Only in the PUT's answer that added them: each new heartbeat's ping URL, its token in it.
     #[serde(skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     pub heartbeat_urls: std::collections::BTreeMap<String, String>,
+    /// Its split test: a share of its visitors served by another environment.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub split: Option<Split>,
+    /// When it's paused by the clock (`pause_schedule`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pause_schedule: Option<crate::freeze::PauseSchedule>,
+    /// Where a share of its requests is copied, their answers dropped (`mirror`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mirror: Option<Split>,
+    /// HTML of its own in every page (Netlify's snippet injection).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub snippets: Vec<Snippet>,
+    /// Its deploy freeze, and whether it's on now ([`crate::freeze`]).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub freeze: Option<crate::freeze::Freeze>,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub frozen: bool,
     /// What its code may reach: anything (`open`), or roll and the listed hosts (`roll`).
     pub egress: Egress,
     /// Hosts its egress proxy refused lately (its code tried them; they aren't listed).
@@ -1711,6 +1848,51 @@ pub struct Route {
     pub path: String,
     /// The other service, by its name in the project.
     pub service: String,
+}
+
+/// HTML of an environment's own in every page the proxy answers (Netlify's snippet injection):
+/// an analytics or chat tag without a code change. Only the owner's text, in a 200 HTML page.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Snippet {
+    pub at: SnippetAt,
+    pub html: String,
+}
+
+/// Where a snippet goes in each page: before `</head>`, or before `</body>`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SnippetAt {
+    Head,
+    BodyEnd,
+}
+
+impl Snippet {
+    /// At most five, each 1 byte to 16 KiB of text.
+    pub fn check(all: &[Snippet]) -> Result<()> {
+        if all.len() > 5 || all.iter().any(|s| s.html.trim().is_empty() || s.html.len() > 16 << 10 || s.html.contains('\0')) {
+            return Err(Error::BadRequest("snippets are at most 5 of {at: head | body_end, html: 1 byte to 16 KiB}".into()));
+        }
+        Ok(())
+    }
+}
+
+/// An environment's split test (Netlify's split testing): `percent` of its visitors, each kept
+/// by their bucket cookie, are served by the same service's `environment`, past that
+/// environment's gates as a route's are (this one's let them in).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Split {
+    pub environment: String,
+    pub percent: u8,
+}
+
+impl Split {
+    /// Whether a visitor's bucket (0–99) is in the split's share: the top of the range, so a
+    /// gradual rollout's (the bottom) and a split's overlap only past 100 together.
+    pub fn takes(&self, bucket: u8) -> bool {
+        bucket >= 100 - self.percent.min(100)
+    }
 }
 
 /// The most routes an environment has.
@@ -2385,6 +2567,28 @@ pub struct Link {
     pub r#ref: String,
     pub prefix: String,
     pub vars: Vec<String>,
+}
+
+/// The environment a `roll://ENV[/folder…]/KEY` value names (roll secrets' references; its
+/// own syntax is checked where it resolves): None when it isn't one; an error when it's
+/// malformed, or names a project (a service's references are its own project's).
+pub fn secret_ref_env(v: &str) -> Option<Result<String>> {
+    let bad = |m: &str| Some(Err(Error::BadRequest(m.into())));
+    // What roll secrets' parser would take for one (it trims) is one; only its exact form is
+    // accepted, so no check here or elsewhere reads it differently.
+    if !v.trim().to_ascii_lowercase().starts_with("roll://") {
+        return None;
+    }
+    let Some(rest) = v.strip_prefix("roll://").filter(|_| v.trim() == v) else {
+        return bad("a roll:// reference is written exactly: roll://ENV/KEY, lowercase, with nothing around it");
+    };
+    if rest.contains('@') {
+        return bad("a service's roll:// reference names its own project's secrets: roll://ENV/KEY, without a project");
+    }
+    match rest.split_once('/') {
+        Some((env, key)) if !env.is_empty() && !key.is_empty() && !key.ends_with('/') => Some(Ok(env.to_string())),
+        _ => bad("a roll:// reference is roll://ENV/KEY or roll://ENV/folder/KEY"),
+    }
 }
 
 /// An environment variable's name: `[A-Za-z_][A-Za-z0-9_]*`, at most 128 characters.

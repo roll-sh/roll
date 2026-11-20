@@ -270,6 +270,16 @@ function worst(s: ScanSummary) {
 
 const SEVERITY_TONE: Record<Vulnerability["severity"], string> = { critical: "text-danger", high: "text-fg", medium: "text-muted", low: "text-subtle", unknown: "text-subtle" };
 
+/** Its image's SBOM (CycloneDX JSON), saved as a file. */
+async function downloadSbom(service: string, env: string, dep: string) {
+  const body = await appsApi.sbom(service, env, dep);
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(new Blob([JSON.stringify(body, null, 2)], { type: "application/vnd.cyclonedx+json" }));
+  a.download = `${dep}.cdx.json`;
+  a.click();
+  URL.revokeObjectURL(a.href);
+}
+
 /** Its image's known vulnerabilities (Cloud Run's Artifact Analysis), read once opened. */
 function Vulnerabilities({ service, env, d }: { service: string; env: string; d: Deployment }) {
   const s = d.vulnerabilities;
@@ -283,6 +293,11 @@ function Vulnerabilities({ service, env, d }: { service: string; env: string; d:
       <summary className="cursor-pointer text-muted">
         {total} known {total === 1 ? "vulnerability" : "vulnerabilities"}
         {s.critical + s.high > 0 && <span className={s.critical ? "text-danger" : ""}> ({worst(s)})</span>}, {s.fixable} with a fix · {s.scanner}, {since(s.scanned_at, Date.now())}
+        {s.sbom && (
+          <button type="button" className="ml-2 text-accent hover:underline" onClick={(e) => { e.preventDefault(); void downloadSbom(service, env, d.id); }}>
+            SBOM
+          </button>
+        )}
       </summary>
       {items === null ? (
         <p className="mt-1.5 shimmer text-subtle">Reading…</p>
@@ -336,7 +351,7 @@ function RunFunctions({ service, env, dirs }: { service: string; env: string; di
   return (
     <div className="mt-3 flex flex-wrap items-center gap-3 border-t border-line pt-3 text-[12px]">
       <span className="min-w-0 flex-1 text-muted">
-        {state.done ?? state.error ?? `Its ${dirs.join(" and ")} don't run on a static site: a service of them, with their paths routed to it, does.`}
+        {state.done ?? state.error ?? `Its ${dirs.map((d) => (d === "edge" ? "edge functions" : d)).join(" and ")} don't run on a static site: a service of them, with their paths sent to it, does.`}
       </span>
       {!state.done && (
         <button
@@ -346,7 +361,7 @@ function RunFunctions({ service, env, dirs }: { service: string; env: string; di
           onClick={() => {
             setState({ busy: true });
             runFunctions(service, env, dirs).then(
-              (s) => setState({ busy: false, done: `${s.name} runs them; ${dirs.map((d) => FUNCTION_ROUTES[d]).join(" and ")} go to it once it's deployed.` }),
+              (s) => setState({ busy: false, done: `${s.name} runs them; ${dirs.map((d) => FUNCTION_ROUTES[d] ?? "its edge functions' paths").join(" and ")} go to it once it's deployed.` }),
               (e: unknown) => setState({ busy: false, error: e instanceof Error ? e.message : String(e) }),
             );
           }}

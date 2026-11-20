@@ -435,7 +435,13 @@ impl Engine {
         let expires_at = self.store.now_ms()? + SECRETS_ENV_MARGIN_MS;
         // What it branched: roll secrets resolves nothing of those parents' (`followed`).
         let branched: Vec<(Kind, String)> = self.store.resources(&r.id)?.into_iter().map(|x| (x.kind, x.parent)).collect();
-        self.secrets.ensure(&r.project_id, &env_name(&r.id), &s.secrets.base, &vars, trusted, expires_at, &branched).await.map_err(|e| anyhow::anyhow!("secrets: {e:#}"))?;
+        // The project's rules' references (checked when saved), where nothing overrode them, go to
+        // roll secrets as references; everything else, whatever it looks like, as plain text.
+        let own = self.store.vars(&r.id)?;
+        let rule_refs: Vec<(String, String)> = project_env(&s, r.branch.as_deref()).into_iter().filter(|(k, v)| crate::settings::is_reference(v) && !own.contains_key(k)).collect();
+        let refs: Vec<(String, String)> = vars.iter().filter(|kv| rule_refs.contains(kv)).cloned().collect();
+        vars.retain(|kv| !refs.contains(kv));
+        self.secrets.ensure(&r.project_id, &env_name(&r.id), &s.secrets.base, &vars, &refs, trusted, expires_at, &branched).await.map_err(|e| anyhow::anyhow!("secrets: {e:#}"))?;
         // Its logs' masks follow what it's given now: these values at once (roll apps' instances
         // get them without a start here), roll secrets' read again at the next logs read.
         let own: Vec<(String, String)> = project_env(&s, r.branch.as_deref()).into_iter().chain(self.store.vars(&r.id)?).collect();
@@ -541,6 +547,9 @@ impl Engine {
             let fingerprint = config_fingerprint(&vars, (access_token.is_some() || signed_in) && on_apps, bypass.as_deref().filter(|_| on_apps), trusted, feedback && on_apps)
                 + if signed_in && on_apps { "s" } else { "" }
                 + &if s.egress_for(r.trusted) == crate::settings::EgressRule::Roll { format!("e{}", s.egress_hosts.join(",")) } else { String::new() }
+                // Traces: a runtime service takes the OpenTelemetry variables when it starts;
+                // roll apps' environment turns its own on and redeploys.
+                + if s.traces { "o" } else { "" }
                 + &rebuilt;
             let was = self.store.service_config(&r.id, &spec.name)?;
             let config_moved = was.as_deref() != Some(fingerprint.as_str());
@@ -588,6 +597,7 @@ impl Engine {
                     egress: s.egress_for(r.trusted),
                     egress_hosts: s.egress_hosts.clone(),
                     rebuild: fresh.then_some(rebuilds),
+                    traces: s.traces,
                 };
                 self.store.set_service(&r.id, &spec.name, ServiceState::Deploying, None, None)?;
                 to_deploy.push((t, fingerprint, rev.clone(), repo == r.repo));
@@ -1026,7 +1036,8 @@ impl Engine {
         let own: Vec<(String, String)> = project_env(s, r.branch.as_deref()).into_iter().chain(self.store.vars(&r.id)?).collect();
         let hide = super::masks::secret_values(&env, &plain, &own, vars);
         self.add_masks(&r.id, hide.clone());
-        for (k, v) in vars {
+        // A reference is resolved in `env` already (roll secrets'): never set as its text.
+        for (k, v) in vars.iter().filter(|(_, v)| !crate::settings::is_reference(v)) {
             set(&mut env, k, v.clone());
         }
         set(&mut env, "ROLL_PREVIEW", r.id.clone());
@@ -1190,8 +1201,9 @@ impl Engine {
             }
             self.store.set_ran_head(&r.id, None)?;
         }
-        // Its shells end with it.
+        // Its shells end with it, and its traces go.
         self.close_shells_of(&r.id);
+        self.forget_traces(&r.id);
         for p in self.store.pinned(&r.id)? {
             let name = format!("{}@{}", p.service, p.revision);
             self.apps.remove(&r.id, &name).await.map_err(|e| anyhow::anyhow!("removing {name}: {e:#}"))?;

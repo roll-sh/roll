@@ -379,7 +379,7 @@ impl Aggregator for CartesianAgg {
 }
 
 /// `InternalCartesianBounds`.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct CartesianBounds {
     pub top: f64,
     pub bottom: f64,
@@ -454,7 +454,7 @@ impl Internal for CartesianBounds {
 }
 
 /// `InternalCartesianCentroid`.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct CartesianCentroid {
     /// `(x, y)`; `None` with no points.
     pub centroid: Option<(f64, f64)>,

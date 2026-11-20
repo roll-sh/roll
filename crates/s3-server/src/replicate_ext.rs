@@ -45,8 +45,18 @@
 //! `SourceSelectionCriteria` `SseKmsEncryptedObjects` (encrypted on the target with the
 //! destination's `ReplicaKmsKeyID`, else the target's default); SSE-C versions can't (roll never
 //! keeps a customer key) and fail.
+//!
+//! **Credentials by reference.** A target's access key id and secret may be `roll://` references
+//! to roll secrets (`s3_store::targets`). Each one is resolved through [`TargetCredentials`]
+//! (rolld's, in process) for the source bucket, the workspace resource asking: roll secrets reads
+//! it only for a bucket its project's canvas holds and stands for, and audits the read as
+//! `storage:bucket:<name>`. The client is built from what resolved and kept per target and source
+//! bucket while the references' digests stay the same (polled, nothing read); a rotation in roll
+//! moves them, and the next replication resolves again and builds a new client. A reference that
+//! doesn't resolve is retried with the row kept (never dropped) and logged with why, never a value.
 
 use crate::replication::{REPLICA_MODIFIED, REPLICA_SYNC, REPLICA_VERSION};
+use futures::future::BoxFuture;
 use aws_sdk_s3::Client;
 use aws_sdk_s3::config::http::HttpRequest;
 use aws_sdk_s3::config::{BehaviorVersion, Credentials, Region};
@@ -99,11 +109,26 @@ pub struct RuleMetrics {
     pub(crate) period_failed: u64,
 }
 
+/// The values behind replication targets' `roll://` references, for a source bucket (rolld
+/// installs roll secrets' with [`Notifier::set_target_credentials`](crate::Notifier::set_target_credentials)).
+pub trait TargetCredentials: Send + Sync {
+    /// `reference`'s value for `bucket`, read (and audited) now. `Err` says why, never with a value.
+    fn resolve<'a>(&'a self, bucket: &'a str, reference: &'a str) -> BoxFuture<'a, Result<s3_store::Secret, String>>;
+    /// A digest that moves when the value would, read without the value (cheap enough to ask
+    /// before each use).
+    fn digest<'a>(&'a self, bucket: &'a str, reference: &'a str) -> BoxFuture<'a, Result<String, String>>;
+}
+
+/// A cached client: the target's `updated_at`, and its references' digests.
+type CachedClient = (i64, Vec<String>, Client);
+
 /// Target clients and replication metrics, one per [`Notifier`](crate::Notifier).
 pub(crate) struct External {
     store: Arc<Store>,
-    /// By target name, with the target's `updated_at` (a changed target gets a new client).
-    clients: tokio::sync::Mutex<HashMap<String, (i64, Client)>>,
+    /// By target name and, for a target with references, source bucket (a changed target or a
+    /// moved digest gets a new client).
+    clients: tokio::sync::Mutex<HashMap<(String, String), CachedClient>>,
+    pub(crate) credentials: std::sync::RwLock<Option<Arc<dyn TargetCredentials>>>,
     /// By (source bucket id, rule id).
     metrics: Mutex<HashMap<(String, String), RuleMetrics>>,
     pub(crate) part_size: AtomicU64,
@@ -322,6 +347,7 @@ impl External {
         Self {
             store,
             clients: Default::default(),
+            credentials: Default::default(),
             metrics: Default::default(),
             part_size: AtomicU64::new(16 << 20),
             multipart_threshold: AtomicU64::new(64 << 20),
@@ -365,16 +391,52 @@ impl External {
         m.iter_mut().map(|(k, l)| (k.clone(), (l.period_max_ms.take(), std::mem::take(&mut l.period_failed)))).collect()
     }
 
-    /// A client for a target (cached until the target changes).
-    pub(crate) async fn client(&self, t: &ReplicationTarget) -> Client {
-        let mut clients = self.clients.lock().await;
-        if let Some((at, c)) = clients.get(&t.name)
-            && *at == t.updated_at
-        {
-            return c.clone();
+    /// A client for a target, replicating `bucket` (cached until the target changes, or its
+    /// references' digests move). `Err`: a reference didn't resolve.
+    pub(crate) async fn client(&self, t: &ReplicationTarget, bucket: &str) -> Result<Client, String> {
+        let r = self.client_for(t, bucket).await;
+        if let Err(why) = &r {
+            tracing::warn!(target_name = t.name, bucket, error = why, "a replication target's roll:// reference didn't resolve; replication waits for it");
         }
-        let mut b = match (&t.access_key_id, &t.secret) {
-            (Some(k), Some(s)) => aws_sdk_s3::Config::builder().behavior_version(BehaviorVersion::latest()).credentials_provider(Credentials::new(k, s.expose(), None, None, "roll-replication-target")),
+        r
+    }
+
+    async fn client_for(&self, t: &ReplicationTarget, bucket: &str) -> Result<Client, String> {
+        let refs = t.references();
+        // Only references naming their project by id (as stored targets' are): never one the
+        // bucket replicating would pick a project for.
+        if let Some(r) = refs.iter().find(|r| s3_store::targets::reference_project(r).is_none()) {
+            return Err(format!("{r} names no project: a replication target's reference is roll://prj_…@ENV/KEY"));
+        }
+        let source = if refs.is_empty() { None } else { Some(self.credentials.read().unwrap().clone().ok_or("roll secrets isn't connected to storage on this node")?) };
+        let mut digests = Vec::new();
+        if let Some(src) = &source {
+            for r in &refs {
+                digests.push(src.digest(bucket, r).await?);
+            }
+        }
+        let key = (t.name.clone(), if refs.is_empty() { String::new() } else { bucket.to_string() });
+        let mut clients = self.clients.lock().await;
+        if let Some((at, d, c)) = clients.get(&key)
+            && *at == t.updated_at
+            && *d == digests
+        {
+            return Ok(c.clone());
+        }
+        let resolved = match (&source, &t.access_key_id) {
+            (Some(src), Some(k)) => {
+                let id = if s3_store::targets::is_reference(k) { src.resolve(bucket, k).await?.expose().to_string() } else { k.clone() };
+                let secret = match (&t.secret_ref, &t.secret) {
+                    (Some(r), _) => src.resolve(bucket, r).await?,
+                    (None, Some(s)) => s.clone(),
+                    (None, None) => return Err(format!("the replication target {} has an access key id but no secret", t.name)),
+                };
+                Some((id, secret))
+            }
+            _ => t.access_key_id.clone().zip(t.secret.clone()),
+        };
+        let mut b = match &resolved {
+            Some((k, s)) => aws_sdk_s3::Config::builder().behavior_version(BehaviorVersion::latest()).credentials_provider(Credentials::new(k, s.expose(), None, None, "roll-replication-target")),
             _ => aws_sdk_s3::config::Builder::from(&aws_config::defaults(BehaviorVersion::latest()).load().await),
         };
         b = b.region(Region::new(t.region.clone())).force_path_style(t.path_style);
@@ -382,16 +444,19 @@ impl External {
             b = b.endpoint_url(e);
         }
         let c = Client::from_conf(b.build());
-        clients.insert(t.name.clone(), (t.updated_at, c.clone()));
-        c
+        clients.insert(key, (t.updated_at, digests, c.clone()));
+        Ok(c)
     }
 
     /// A replication rule may name `bucket` on target `name`: the target exists and the bucket
     /// has versioning enabled there (as S3 requires of a destination), and Object Lock when
     /// the source has it (`object_lock`: its retention and legal holds replicate).
-    pub(crate) async fn check_destination(&self, name: &str, bucket: &str, object_lock: bool) -> Result<(), String> {
+    /// `source` is the bucket replicating (whose project's secrets a reference reads).
+    pub(crate) async fn check_destination(&self, name: &str, bucket: &str, object_lock: bool, source: &str) -> Result<(), String> {
         let t = self.store.replication_target(name).map_err(|e| e.to_string())?.ok_or_else(|| format!("no replication target {name}"))?;
-        let client = self.client(&t).await;
+        // Why it didn't resolve (protected, no such key, another project) is in the warn log only:
+        // told to whoever sets a bucket's replication, it would say which keys exist where.
+        let client = self.client(&t, source).await.map_err(|_| format!("the replication target {name}'s credentials don't resolve for {source}"))?;
         let out = client.get_bucket_versioning().bucket(bucket).send().await.map_err(|e| format!("Destination bucket {bucket} on the replication target {name} can't be checked: {}", aws_sdk_s3::error::DisplayErrorContext(e)))?;
         if out.status() != Some(&aws_sdk_s3::types::BucketVersioningStatus::Enabled) {
             return Err(format!("Destination bucket must have versioning enabled: {bucket} on the replication target {name}"));
@@ -427,7 +492,7 @@ impl External {
     /// Put the version on the target. `Ok(None)`: out of scope after all (SSE-KMS without
     /// `SseKmsEncryptedObjects`); `Ok(Some(version id))`: the version the target made of it.
     async fn copy(&self, t: &ReplicationTarget, src: &ReplicaSource) -> Result<Option<Option<String>>, Fail> {
-        let client = self.client(t).await;
+        let client = self.client(t, &src.bucket.name).await.map_err(|why| Fail::Retry(format!("the replication target {}'s credentials: {why}", t.name)))?;
         let bucket = &src.task.destination;
         let key = &src.meta.key;
         if src.task.metadata {

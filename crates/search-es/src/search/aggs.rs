@@ -489,6 +489,31 @@ pub fn check_metric_scripts(st: &ClusterState, aggs: &Map) -> EsResult<()> {
     walk(aggs, &inline, &stored)
 }
 
+/// A partial reduce (`final_reduce: false`): every bucket and the mergeable state kept, for a
+/// cross-cluster search's coordinating cluster ([`search_aggs::wire`]).
+pub fn reduce_partial(cluster: &Cluster, st: &ClusterState, req: &AggRequest, parts: Vec<search_aggs::Aggs>) -> EsResult<search_aggs::Aggs> {
+    let opts = search_aggs::ReduceOptions { final_reduce: false, budget: Some(cluster.breakers.request(cluster, st)), ..Default::default() };
+    search_aggs::reduce(parts, req, &opts).map_err(|e| reduce_failure(agg_error(e)))
+}
+
+/// Rebuilds the date formats of results from another cluster ([`search_aggs::wire::decode`]):
+/// in a field's locale when one came with them, else as aggregations here print and parse.
+pub fn date_factory() -> search_aggs::wire::DateFactory {
+    Arc::new(|pattern: &str, locale: Option<&str>| -> search_aggs::Result<Arc<dyn search_aggs::DateFormatter>> {
+        if let Some(l) = locale
+            && let l @ crate::time::DateLocale::Cldr(_) = crate::time::DateLocale::parse(l)
+            && let Ok(f) = crate::time::DateFormatter::new(pattern)
+        {
+            return Ok(Arc::new(LocaleDates { pattern: pattern.to_string(), fmt: f.with_locale(l) }));
+        }
+        let printer = search_aggs::format::builtin_date_formatter(pattern)?;
+        Ok(match crate::time::DateFormatter::new(pattern) {
+            Ok(parser) => Arc::new(EsDates { printer, parser }),
+            Err(_) => printer,
+        })
+    })
+}
+
 /// The final reduce, rendered.
 pub fn reduce(cluster: &Cluster, st: &ClusterState, req: &AggRequest, parts: Vec<search_aggs::Aggs>, typed_keys: bool) -> EsResult<Value> {
     let max_buckets = st.metadata.cluster_setting("search.max_buckets").and_then(|v| v.parse::<usize>().ok()).unwrap_or(65536);
@@ -1003,6 +1028,13 @@ struct LocaleDates {
 impl search_aggs::DateFormatter for LocaleDates {
     fn pattern(&self) -> &str {
         &self.pattern
+    }
+
+    fn locale(&self) -> Option<&str> {
+        match self.fmt.locale {
+            crate::time::DateLocale::Cldr(tag) => Some(tag),
+            _ => None,
+        }
     }
 
     fn format(&self, millis: i64, nanos: u32, zone: &search_aggs::TimeZone) -> String {

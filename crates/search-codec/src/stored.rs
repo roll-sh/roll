@@ -266,6 +266,16 @@ impl StoredOptions {
     pub fn best_compression() -> StoredOptions {
         StoredOptions { level: 6, chunk_bytes: 16 * 1024, ..StoredOptions::default() }
     }
+
+    /// `best_compression` for a segment written from the indexing buffer: the same chunks and
+    /// dictionary at zstd level 1. Such a segment is small and soon merged, and merges write
+    /// level 6, so the segments an index keeps are as small as before. Level 6 searches for
+    /// matches lazily, about 5x level 1's work: on Rally's nyc_taxis documents (16 KiB chunks, a
+    /// 16 KiB dictionary) level 1 is 7% larger at a fifth of the CPU, and level 6's buffer
+    /// writes were a quarter of the server's instructions during a bulk load.
+    pub fn best_compression_buffer() -> StoredOptions {
+        StoredOptions { level: 1, ..StoredOptions::best_compression() }
+    }
 }
 
 /// Default uncompressed bytes per chunk. Reading a document decompresses its whole chunk, so a

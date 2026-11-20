@@ -18,6 +18,7 @@ pub mod backups;
 pub mod hooks;
 pub mod tags;
 pub mod sites;
+pub mod skew;
 pub mod site_rules;
 pub mod tunnel;
 pub mod tcp;
@@ -57,6 +58,10 @@ pub mod vitals;
 pub mod heartbeats;
 pub mod slo;
 pub mod prom;
+pub mod edge;
+pub mod password;
+pub mod freeze;
+pub mod status_page;
 pub mod vulns;
 pub mod checks;
 pub mod forms;
@@ -263,6 +268,10 @@ pub struct Apps {
     /// its end of the channel until it starts.
     pub(crate) preview_lines: tokio::sync::mpsc::Sender<drains::PreviewBatch>,
     pub(crate) preview_lines_rx: Mutex<Option<tokio::sync::mpsc::Receiver<drains::PreviewBatch>>>,
+    /// Status pages' rows and incidents as last read ([`status_page::serve`]).
+    pub(crate) status_cache: status_page::StatusCache,
+    /// When this node last swept status pages' stale incidents (unix ms).
+    status_swept: std::sync::atomic::AtomicI64,
     /// Private environments' token hashes, by environment, as the owner last read or set them.
     access: Mutex<HashMap<String, Option<Access>>>,
     /// Bumped by every change to the access cache: a cold read caches what it read only if
@@ -319,6 +328,8 @@ pub struct Apps {
     sites: Mutex<HashMap<String, Arc<sites::Site>>>,
     /// Per environment, for the live site's key: its earlier static deployments' site keys.
     earlier_sites: Mutex<HashMap<String, sites::EarlierSites>>,
+    /// Each environment's deployments a request may name ([`skew`]), by its live one.
+    pub(crate) skew: Mutex<HashMap<String, skew::Earlier>>,
     /// `(service, name)` → the id of the service of that name in its project, as of when.
     service_names: Mutex<HashMap<(String, String), NameLookup>>,
     /// A site being loaded, per key: one load at a time (the rest wait for it).
@@ -334,6 +345,12 @@ pub struct Apps {
     /// proxy; and which environments' last scrape failed (said once).
     pub(crate) scrape_client: reqwest::Client,
     pub(crate) scrape_errors: Mutex<std::collections::HashSet<String>>,
+    /// The key edge functions' `next` addresses are signed with ([`edge`]), once read; and which
+    /// edge functions were said not to run (once each).
+    pub(crate) edge_key: Mutex<Option<Vec<u8>>>,
+    pub(crate) edge_noted: Mutex<std::collections::HashSet<String>>,
+    /// Password tries per environment and client, in the last ten minutes ([`password`]).
+    pub(crate) password_tries: Mutex<HashMap<password::Client, (i64, u32)>>,
     /// Shells open over HTTP (the dashboard's terminal), by id.
     sessions: Mutex<HashMap<String, Arc<shell::Session>>>,
     /// WebSocket shells open per environment (`env_key`), counted with the HTTP sessions.
@@ -444,12 +461,21 @@ pub type HostTarget = (String, String, Option<String>, Option<u16>);
 /// Another service's values a reference may read, and which of them are sealed.
 type ServiceValues = (HashMap<String, String>, BTreeSet<String>);
 
+/// An environment's snippets joined for the proxy: before `</head>`, before `</body>`.
+fn snippets_of(all: &[model::Snippet]) -> Option<(bytes::Bytes, bytes::Bytes)> {
+    let join = |at: model::SnippetAt| bytes::Bytes::from(all.iter().filter(|s| s.at == at).map(|s| s.html.as_str()).collect::<String>());
+    (!all.is_empty()).then(|| (join(model::SnippetAt::Head), join(model::SnippetAt::BodyEnd)))
+}
+
 pub struct ResolvedVars {
     pub vars: Vec<(String, String)>,
     pub sources: HashMap<String, &'static str>,
     /// References that named nothing ([`refs`]), as `VAR: service.NAME`: empty, and the deploy
     /// says so.
     pub unresolved: Vec<String>,
+    /// `roll://` references that didn't resolve, as `VAR (roll://…): why`: left out, and a deploy
+    /// fails on them ([`ResolvedVars::check_refs`]); a listing just shows them unresolved.
+    pub refused: Vec<String>,
     /// Never shown again: the environment's own sealed variables, and references that read one.
     pub sealed: BTreeSet<String>,
     /// Those roll secrets gave (a secret is one whatever its name or tag), and of them those it
@@ -457,6 +483,16 @@ pub struct ResolvedVars {
     /// which logs may show but for a URL's password.
     pub from_secrets: BTreeSet<String>,
     pub plain_secrets: BTreeSet<String>,
+}
+
+impl ResolvedVars {
+    /// A deploy's check: every `roll://` reference resolved.
+    pub fn check_refs(&self) -> Result<()> {
+        match self.refused.first() {
+            Some(r) => Err(Error::Conflict(format!("{r} didn't resolve{}", if self.refused.len() > 1 { format!(" (and {} more)", self.refused.len() - 1) } else { String::new() }))),
+            None => Ok(()),
+        }
+    }
 }
 
 impl ResolvedVars {
@@ -533,6 +569,8 @@ impl Apps {
             drains_dirty: Mutex::new(Default::default()),
             preview_lines,
             preview_lines_rx: Mutex::new(Some(preview_lines_rx)),
+            status_cache: Default::default(),
+            status_swept: std::sync::atomic::AtomicI64::new(0),
             access: Mutex::new(HashMap::new()),
             access_gen: std::sync::atomic::AtomicU64::new(0),
             visits: Mutex::new(HashMap::new()),
@@ -559,6 +597,7 @@ impl Apps {
             images: images::ImageCache::default(),
             sites: Mutex::new(HashMap::new()),
             earlier_sites: Mutex::new(HashMap::new()),
+            skew: Mutex::new(HashMap::new()),
             site_loads: Mutex::new(HashMap::new()),
             service_names: Mutex::new(HashMap::new()),
             sessions: Mutex::new(HashMap::new()),
@@ -568,6 +607,9 @@ impl Apps {
             site_proxy_client: net::client(cfg_allow, Duration::from_secs(30)),
             scrape_client: reqwest::Client::builder().redirect(reqwest::redirect::Policy::none()).no_proxy().timeout(Duration::from_secs(10)).build().expect("a client"),
             scrape_errors: Mutex::new(Default::default()),
+            edge_key: Mutex::new(None),
+            edge_noted: Mutex::new(Default::default()),
+            password_tries: Mutex::new(HashMap::new()),
             looping: Mutex::new(std::collections::HashSet::new()),
             client: hyper_util::client::legacy::Client::builder(hyper_util::rt::TokioExecutor::new()).pool_idle_timeout(Duration::from_secs(30)).build_http(),
             client_h2: hyper_util::client::legacy::Client::builder(hyper_util::rt::TokioExecutor::new()).pool_idle_timeout(Duration::from_secs(30)).http2_only(true).build_http(),
@@ -1508,7 +1550,7 @@ impl Apps {
             _ => None,
         };
         let gate = self.access(&r.service, &r.name).await?;
-        let (private, signed_in) = (gate.is_some(), gate.is_some_and(|a| a.signed_in));
+        let (private, signed_in, password) = (gate.is_some(), gate.as_ref().is_some_and(|a| a.signed_in), gate.as_ref().is_some_and(|a| a.password_hash.is_some()));
         let (sid, e) = (r.service.clone(), r.name.clone());
         let waiting_for_ci = self.db(move |s| s.ci_waits()).await?.into_iter().find(|(w, _)| w.service == sid && w.env == e).map(|(w, _)| w.sha);
         Ok(Environment {
@@ -1521,6 +1563,7 @@ impl Apps {
             tcp: r.tcp_port.filter(|_| svc.run.tcp && svc.run.public && !private).map(|p| format!("{}:{p}", self.cfg.tcp_host)),
             private,
             signed_in,
+            password,
             next_run_at,
             schedules: self.schedule_states(&svc, &r).await,
             volume_used: match svc.run.volume {
@@ -1558,6 +1601,12 @@ impl Apps {
             checks: r.checks.clone(),
             heartbeat_states: self.heartbeat_states_of(&r.service, &r.name, &r.heartbeats).await,
             heartbeats: r.heartbeats.clone(),
+            split: r.split.clone(),
+            mirror: r.mirror.clone(),
+            snippets: r.snippets.clone(),
+            pause_schedule: r.pause_schedule.clone(),
+            frozen: r.freeze.as_ref().is_some_and(|f| f.on(code_sql::now_ms())),
+            freeze: r.freeze.clone(),
             heartbeat_urls: Default::default(),
             egress_refused: if r.egress.closed() { self.deps.runtime.egress_refused(&closed_network_name(&svc.project, &r.name), &r.egress.hosts) } else { Vec::new() },
             egress: r.egress.clone(),
@@ -1676,7 +1725,7 @@ impl Apps {
     pub async fn put_environment(self: &Arc<Self>, service: &str, env: &str, body: Value) -> Result<Environment> {
         let o = body.as_object().cloned().unwrap_or_default();
         for k in o.keys() {
-            if !["branch", "ephemeral", "access", "variables_from", "wait_for_ci", "run", "follow_tag", "redeploy_on_secrets", "feedback", "maintenance", "pages", "allow_ips", "rate_limit", "firewall", "headers", "routes", "checks", "heartbeats", "paused", "held", "hostname", "traces", "egress", "vitals", "report", "preview_host"].contains(&k.as_str()) {
+            if !["branch", "ephemeral", "access", "variables_from", "wait_for_ci", "run", "follow_tag", "redeploy_on_secrets", "feedback", "maintenance", "pages", "allow_ips", "rate_limit", "firewall", "headers", "routes", "checks", "heartbeats", "split", "mirror", "snippets", "freeze", "pause_schedule", "paused", "held", "hostname", "traces", "egress", "vitals", "report", "preview_host"].contains(&k.as_str()) {
                 return Err(Error::BadRequest(format!("unknown field {k}")));
             }
         }
@@ -1802,6 +1851,71 @@ impl Apps {
             Some(_) => return Err(Error::BadRequest(format!("routes is at most {} routes, or null", crate::model::MAX_ROUTES))),
         };
         // Uptime checks: unique names, at most MAX_CHECKS.
+        // Paused by the clock: weekly windows, as a freeze's.
+        let pause_schedule = match o.get("pause_schedule") {
+            None => None,
+            Some(Value::Null) => Some(None),
+            Some(v) => {
+                let p: crate::freeze::PauseSchedule = serde_json::from_value(v.clone()).map_err(|e| Error::BadRequest(format!("pause_schedule: {e}")))?;
+                p.check()?;
+                Some(Some(p))
+            }
+        };
+        // Snippets: HTML of its own in every page (null or []: none).
+        let snippets = match o.get("snippets") {
+            None => None,
+            Some(Value::Null) => Some(Vec::new()),
+            Some(v) => {
+                let all: Vec<crate::model::Snippet> = serde_json::from_value(v.clone()).map_err(|e| Error::BadRequest(format!("snippets: {e}")))?;
+                crate::model::Snippet::check(&all)?;
+                Some(all)
+            }
+        };
+        // Traffic mirroring: another environment of this service, as a split names one.
+        let mirror = match o.get("mirror") {
+            None => None,
+            Some(Value::Null) => Some(None),
+            Some(v) => {
+                let m: crate::model::Split = serde_json::from_value(v.clone()).map_err(|e| Error::BadRequest(format!("mirror: {e}")))?;
+                if !(1..=100).contains(&m.percent) || m.environment == env {
+                    return Err(Error::BadRequest("mirror is {environment: another environment, percent: 1–100}".into()));
+                }
+                let (sid, other) = (service.to_string(), m.environment.clone());
+                if self.db(move |s| s.environment(&sid, &other)).await.is_err() {
+                    return Err(Error::BadRequest(format!("mirror: this service has no environment {}", m.environment)));
+                }
+                Some(Some(m))
+            }
+        };
+        // A deploy freeze: on until lifted, until a time, or in weekly windows.
+        let freeze = match o.get("freeze") {
+            None => None,
+            Some(Value::Null) => Some(None),
+            Some(v) => {
+                let f: crate::freeze::Freeze = serde_json::from_value(v.clone()).map_err(|e| Error::BadRequest(format!("freeze: {e}")))?;
+                f.check()?;
+                Some(Some(f))
+            }
+        };
+        // A split test: another deployed-or-not environment of this service, never itself.
+        let split = match o.get("split") {
+            None => None,
+            Some(Value::Null) => Some(None),
+            Some(v) => {
+                let sp: crate::model::Split = serde_json::from_value(v.clone()).map_err(|e| Error::BadRequest(format!("split: {e}")))?;
+                if !(1..=99).contains(&sp.percent) {
+                    return Err(Error::BadRequest("split.percent is 1–99".into()));
+                }
+                if sp.environment == env {
+                    return Err(Error::BadRequest("split.environment is another environment".into()));
+                }
+                let (sid, other) = (service.to_string(), sp.environment.clone());
+                if self.db(move |s| s.environment(&sid, &other)).await.is_err() {
+                    return Err(Error::BadRequest(format!("split: this service has no environment {}", sp.environment)));
+                }
+                Some(Some(sp))
+            }
+        };
         // Heartbeats: kept ones keep their tokens; a new one's token is in this answer, once.
         let heartbeats = match o.get("heartbeats") {
             None => None,
@@ -1854,7 +1968,7 @@ impl Apps {
             None => None,
             Some(Value::Null) => Some(None),
             Some(Value::Object(a)) => {
-                if let Some(k) = a.keys().find(|k| !["token", "bypass_sha256", "signed_in"].contains(&k.as_str())) {
+                if let Some(k) = a.keys().find(|k| !["token", "bypass_sha256", "signed_in", "password"].contains(&k.as_str())) {
                     return Err(Error::BadRequest(format!("access.{k} isn't a field")));
                 }
                 let signed_in = match a.get("signed_in") {
@@ -1862,10 +1976,16 @@ impl Apps {
                     Some(Value::Bool(b)) => *b,
                     Some(_) => return Err(Error::BadRequest("access.signed_in is a boolean".into())),
                 };
+                // A password visitors type (Vercel's password protection): its argon2id hash only.
+                let password = match a.get("password") {
+                    None | Some(Value::Null) => None,
+                    Some(Value::String(p)) if (8..=200).contains(&p.chars().count()) => Some(crate::password::hash(p).await.map_err(Error::Internal)?),
+                    Some(_) => return Err(Error::BadRequest("access.password is 8–200 characters".into())),
+                };
                 let token = match a.get("token") {
-                    None | Some(Value::Null) if signed_in => None,
+                    None | Some(Value::Null) if signed_in || password.is_some() => None,
                     Some(Value::String(t)) if (20..=200).contains(&t.len()) && t.bytes().all(|b| b.is_ascii_alphanumeric() || b"-_".contains(&b)) => Some(t.as_str()),
-                    _ => return Err(Error::BadRequest("access.token is 20–200 of A-Z, a-z, 0-9, - and _ (or access.signed_in is true)".into())),
+                    _ => return Err(Error::BadRequest("access.token is 20–200 of A-Z, a-z, 0-9, - and _ (or access.signed_in is true, or there's a password)".into())),
                 };
                 if signed_in && self.cfg.web_url.is_none() {
                     return Err(Error::Conflict("signing in needs roll's dashboard address on this node (web_url)".into()));
@@ -1875,9 +1995,9 @@ impl Apps {
                     Some(Value::String(h)) if h.len() == 64 && h.bytes().all(|b| b.is_ascii_hexdigit()) => Some(h.to_ascii_lowercase()),
                     Some(_) => return Err(Error::BadRequest("access.bypass_sha256 is a SHA-256 in hex".into())),
                 };
-                Some(Some(Access { token_hash: token.map(crate::public::token_hash), bypass_hash: bypass, signed_in }))
+                Some(Some(Access { token_hash: token.map(crate::public::token_hash), bypass_hash: bypass, signed_in, password_hash: password }))
             }
-            Some(_) => return Err(Error::BadRequest("access is {token?, signed_in?, bypass_sha256?} or null".into())),
+            Some(_) => return Err(Error::BadRequest("access is {token?, signed_in?, password?, bypass_sha256?} or null".into())),
         };
         // A new environment may start with another's variables (cloning staging from production).
         let variables_from = match o.get("variables_from") {
@@ -2007,29 +2127,10 @@ impl Apps {
             Some(_) => return Err(Error::BadRequest("feedback is a boolean".into())),
         }
         if let Some(on) = paused {
-            let (sid, e) = (service.to_string(), env.to_string());
-            self.db(move |s| s.set_paused(&sid, &e, on)).await?;
-            // Resumed: its secrets are watched again (a watch ends itself while it's paused).
-            if !on {
-                self.watch_secrets_of(service).await;
-            }
-            // At once on its owner: what runs stops, and the next tick keeps no floor; resumed,
-            // the next tick (or request) starts what it wants again.
-            let live = self.live(service, env);
-            live.set_paused(on);
-            if on {
-                live.sleep().await;
-                // What runs to its end (a job, a cron run) stops too: nothing of it runs.
-                self.cancel_jobs(service, env);
-                let runs: Vec<String> = self.running_runs.lock().iter().filter(|(_, (s, e))| s == service && e == env).map(|(id, _)| id.clone()).collect();
-                for id in runs {
-                    if let Some(t) = self.cancels.lock().get(&id) {
-                        t.cancel();
-                    }
-                }
-            } else {
-                live.tick().await;
-            }
+            self.set_env_paused(service, env, on).await?;
+            // A person's say holds over the schedule until its window ends ("held").
+            let k = format!("sched-paused:{service}/{env}");
+            let _ = self.db(move |s| s.set_state(&k, "held")).await;
             self.changed(service);
         }
         if let Some(m) = maintenance {
@@ -2067,6 +2168,34 @@ impl Apps {
         if let Some(rules) = headers {
             let (sid, e) = (service.to_string(), env.to_string());
             self.db(move |s| s.set_headers(&sid, &e, &rules)).await?;
+            self.live(service, env).forget_gate();
+            self.changed(service);
+        }
+        if let Some(p) = pause_schedule {
+            let (sid, e) = (service.to_string(), env.to_string());
+            self.db(move |s| s.set_pause_schedule(&sid, &e, p.as_ref())).await?;
+            self.changed(service);
+        }
+        if let Some(all) = snippets {
+            let (sid, e) = (service.to_string(), env.to_string());
+            self.db(move |s| s.set_snippets(&sid, &e, &all)).await?;
+            self.live(service, env).forget_gate();
+            self.changed(service);
+        }
+        if let Some(m) = mirror {
+            let (sid, e) = (service.to_string(), env.to_string());
+            self.db(move |s| s.set_mirror(&sid, &e, m.as_ref())).await?;
+            self.live(service, env).forget_gate();
+            self.changed(service);
+        }
+        if let Some(f) = freeze {
+            let (sid, e) = (service.to_string(), env.to_string());
+            self.db(move |s| s.set_freeze(&sid, &e, f.as_ref())).await?;
+            self.changed(service);
+        }
+        if let Some(sp) = split {
+            let (sid, e) = (service.to_string(), env.to_string());
+            self.db(move |s| s.set_split(&sid, &e, sp.as_ref())).await?;
             self.live(service, env).forget_gate();
             self.changed(service);
         }
@@ -2402,6 +2531,14 @@ impl Apps {
                 trace_endpoint = true;
             }
         }
+        // A site's functions service: where its edge functions' `context.next()` reaches the
+        // site (this listener, as instances reach it; `crate::edge`), set at start so the runtime
+        // makes it reachable.
+        if svc.build.builder == crate::model::Builder::Functions
+            && let Some(base) = &self.cfg.otlp_base
+        {
+            vars.insert("ROLL_EDGE_BASE".into(), (self.deps.runtime.reach(base.trim_end_matches('/')), "roll"));
+        }
         let sid = svc.id.clone();
         let links = self.db(move |s| s.links_minted(&sid)).await?;
         for (kind, r, prefix, minted) in links {
@@ -2449,12 +2586,41 @@ impl Apps {
         for (k, v) in own {
             vars.insert(k, (v, "service"));
         }
+        // `roll://` references to its own environment's secrets, read as the service (audited
+        // there), sealed: a value from roll secrets is shown only as they reveal it. One that
+        // doesn't resolve fails the deploy; a preview's (copied from its base, naming the base's
+        // environment) is left out, as an untrusted preview's secrets are.
+        let mut refused = Vec::new();
+        let refs: Vec<(String, String)> = vars.iter().filter(|(_, (v, s))| *s == "service" && crate::model::secret_ref_env(v).is_some()).map(|(k, (v, _))| (k.clone(), v.clone())).collect();
+        for (k, r) in refs {
+            let read = match crate::model::secret_ref_env(&r) {
+                Some(Ok(e)) if e == env.name => self.deps.secrets.resolve_ref(&svc.project, &env.name, &svc.id, &r).await.map_err(|e| e.to_string()),
+                Some(Ok(e)) => Err(format!("it names the {e} environment's secret, not {}'s", env.name)),
+                Some(Err(e)) => Err(e.to_string()),
+                None => continue,
+            };
+            match read {
+                Ok(v) => {
+                    vars.insert(k.clone(), (v, "secret"));
+                    from_secrets.insert(k.clone());
+                    sealed.insert(k);
+                }
+                Err(why) if env.ephemeral => {
+                    tracing::info!(service = %svc.id, env = %env.name, variable = %k, "apps: a preview's roll:// reference is left out: {why}");
+                    vars.remove(&k);
+                }
+                Err(why) => {
+                    vars.remove(&k);
+                    refused.push(format!("{k} ({r}): {why}"));
+                }
+            }
+        }
         // A sensitive secret is as a sealed variable (unless the service's own takes its name).
         sealed.extend(sensitive.into_iter().filter(|k| vars.get(k).is_some_and(|(_, s)| *s == "secret")));
         // Reference variables, one level deep: against what resolved above, and other services'.
         let unresolved = self.fill_references(svc, &env.name, &mut vars, &mut sealed).await;
         let sources = vars.iter().map(|(k, (_, s))| (k.clone(), *s)).collect();
-        Ok(ResolvedVars { vars: vars.into_iter().map(|(k, (v, _))| (k, v)).collect(), sources, unresolved, sealed, from_secrets, plain_secrets })
+        Ok(ResolvedVars { vars: vars.into_iter().map(|(k, (v, _))| (k, v)).collect(), sources, unresolved, refused, sealed, from_secrets, plain_secrets })
     }
 
     /// Fill the `${{ … }}` in the service's own variables ([`refs`]); what named nothing. A
@@ -2629,6 +2795,15 @@ impl Apps {
                 let v = v.as_str().ok_or_else(|| Error::BadRequest(format!("{k}'s value is a string")))?;
                 if v.len() > 64 << 10 || v.contains('\0') {
                     return Err(Error::BadRequest(format!("{k}'s value is at most 64 KiB, without NUL")));
+                }
+                // A roll secrets reference: its own environment's (another's needs whoever set
+                // it bound to it, roll secrets' maker references: not here yet).
+                match crate::model::secret_ref_env(v) {
+                    Some(Ok(e)) if e != env => {
+                        return Err(Error::BadRequest(format!("{k}: {v} is the {e} environment's secret; a variable's roll:// reference names its own environment (roll://{env}/…)")));
+                    }
+                    Some(Err(e)) => return Err(Error::BadRequest(format!("{k}: {e}"))),
+                    _ => {}
                 }
                 set.insert(k.clone(), v.to_string());
             }
@@ -3200,8 +3375,14 @@ impl Apps {
     pub async fn audit(self: &Arc<Self>, what: &str, service: &str, env: &str, actor: Option<String>, mut data: Value) {
         data["actor"] = json!(actor);
         let (kind, sid, e) = (format!("audit.{what}"), service.to_string(), env.to_string());
+        // To the drains that take `audit` too, as it's written (a SIEM's copy; best effort as
+        // drains are: webhooks follow the event log, durably).
+        let text = json!({ "event": kind, "data": data }).to_string();
         if let Err(err) = self.db(move |s| s.add_event(&kind, &sid, &e, None, &data)).await {
             tracing::warn!(service, error = %err, "apps: an audit entry wasn't written");
+        } else {
+            let line = crate::logs::LogLine { t: code_sql::now_ms(), stream: crate::logs::Stream::System, instance: None, deployment: None, text, level: None, trace: None };
+            self.logs.to_drains(&format!("audit:{service}/{env}"), line);
         }
         self.changed(service);
     }
@@ -3297,7 +3478,7 @@ impl Apps {
             }
             false => None,
         };
-        let g = Arc::new(live::Gate { maintenance: row.maintenance, allow, rate: row.rate_limit, firewall: row.firewall, pages: row.pages, preview: row.ephemeral, headers: row.headers, routes: row.routes, traces, vitals: row.vitals, challenge_key });
+        let g = Arc::new(live::Gate { maintenance: row.maintenance, allow, rate: row.rate_limit, firewall: row.firewall, pages: row.pages, preview: row.ephemeral, headers: row.headers, routes: row.routes, traces, vitals: row.vitals, challenge_key, split: row.split, mirror: row.mirror, snippets: snippets_of(&row.snippets) });
         live.set_gate(g.clone(), seen);
         Ok(g)
     }
@@ -3447,6 +3628,36 @@ impl Apps {
         });
         let burning = crate::slo::burning(&slo, &minutes, now_min).map(|(i, rate, w)| json!({ "indicator": i, "burn_rate": (rate * 10.0).round() / 10.0, "window": w }));
         Ok(json!({ "slo": slo, "availability": show(avail), "latency": latency, "burning": burning }))
+    }
+
+    /// Pause or resume an environment (`PUT … {paused}`, its pause schedule): at once on its
+    /// owner, what runs stops; resumed, the next tick starts what it wants again.
+    pub(crate) async fn set_env_paused(self: &Arc<Self>, service: &str, env: &str, on: bool) -> Result<()> {
+        let (sid, e) = (service.to_string(), env.to_string());
+        self.db(move |s| s.set_paused(&sid, &e, on)).await?;
+        // Resumed: its secrets are watched again (a watch ends itself while it's paused).
+        if !on {
+            self.watch_secrets_of(service).await;
+        }
+        // At once on its owner: what runs stops, and the next tick keeps no floor; resumed,
+        // the next tick (or request) starts what it wants again.
+        let live = self.live(service, env);
+        live.set_paused(on);
+        if on {
+            live.sleep().await;
+            // What runs to its end (a job, a cron run) stops too: nothing of it runs.
+            self.cancel_jobs(service, env);
+            let runs: Vec<String> = self.running_runs.lock().iter().filter(|(_, (s, e))| s == service && e == env).map(|(id, _)| id.clone()).collect();
+            for id in runs {
+                if let Some(t) = self.cancels.lock().get(&id) {
+                    t.cancel();
+                }
+            }
+        } else {
+            live.tick().await;
+        }
+        self.changed(service);
+        Ok(())
     }
 
     /// An environment's metrics over the last `minutes`: a point a minute for up to a week, a
