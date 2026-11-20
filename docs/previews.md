@@ -747,8 +747,10 @@ this: they get no secrets, or all of them.
   answers 403 to a request it refuses (nothing of it is sent), and re-dials the host over TLS
   verified against the system's roots, never the interception CA. The `Host` header is the host
   connected to, whatever the request said. No upgrades (WebSockets) through a bound host.
-- The CA's certificate goes into the preview's containers' trust stores (the system store,
-  `NODE_EXTRA_CA_CERTS`, `REQUESTS_CA_BUNDLE`, `SSL_CERT_FILE`, `CURL_CA_BUNDLE`); its key stays in
+- The CA's certificate is trusted by the preview's services without touching their image's own
+  store (not `update-ca-certificates`: a service runs as whatever user its image says): a copy of
+  the system's bundle plus it, named by `SSL_CERT_FILE`, `REQUESTS_CA_BUNDLE` and
+  `CURL_CA_BUNDLE`, and `NODE_EXTRA_CA_CERTS` naming the CA alone; its key stays in
   rolld's memory. Tearing the preview down ends its consumer (`end_consumer`): its placeholders and
   CAs stop at once.
 - The preview resolves as the rule's writer (`Ask { maker }`, from `env_refs`), so a placeholder
@@ -780,7 +782,14 @@ added to a copy of the system's bundle (Debian's, Red Hat's or Alpine's path, wh
 there), which `SSL_CERT_FILE`, `REQUESTS_CA_BUNDLE` and `CURL_CA_BUNDLE` name, with
 `NODE_EXTRA_CA_CERTS` naming the CA alone: every other host verifies as before (checked in
 Alpine and Debian images). A runtime with a trust store of its own (Java's keystore) doesn't read
-these. Next: rolld's adapter once roll secrets' batch 6 lands, then the live check.
+these. After an independent review: each preview's interception is bounded (16 connections at
+once, a 10 s handshake, 30 s for a request's headers, each host's leaf made once for the CA's
+life, `live` still asked every connection), a connection the host closed is made again (verified
+as the first), the socket is made under the preview's egress turn (two starts make one), only
+the socket's own directory is mounted, read-only (the CA's file stays out), and the activity
+names only connections that swapped or refused something; hop-by-hop headers stay with their hop both ways (the host closing its connection doesn't close the client's). HTTP/1.1 only: a client offering
+nothing but h2 can't connect. Next: rolld's adapter once roll secrets' batch 6 lands, then the
+live check.
 
 ## Safety
 
@@ -2244,9 +2253,9 @@ Ranked by what a person notices first. Done so far:
    and the CLI naming it; a request no role was decided for (past the gate) reaches only what the
    person owns. Members' fix merged in and gated; lands after #501.
 2. **Keys a fork's preview never holds, in progress** (`feature/roll-previews-intercept`; roll
-   secrets' #520 and #517, its batch 6): see "Keys a preview never holds". Built: the
-   TLS-terminating swap (`intercept::serve`). Next: the socket handoff from `egress.js`, the trust
-   stores, rolld's adapter.
+   secrets' #520 and #517, its batch 6): see "Keys a preview never holds". Built: the swap, the
+   handoff, the runtime's socket and the services' trust, bounded per preview after review. Next:
+   rolld's adapter once batch 6 lands, then the live check.
 3. **Previews for the members thread's next products**: once roll apps' and roll search's routes
    become member routes (docs/members.md, v1.1), a preview's roll apps services and search branch
    follow the same roles, checked live against a member's session.

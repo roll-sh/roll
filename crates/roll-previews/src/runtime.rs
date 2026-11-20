@@ -1958,15 +1958,16 @@ impl Runtime {
                 if let Some((_, h)) = self.intercepting.lock().remove(preview) {
                     h.abort();
                 }
-                std::fs::DirBuilder::new().recursive(true).mode(0o700).create(&dir)?;
+                std::fs::DirBuilder::new().recursive(true).mode(0o700).create(dir.join("sock"))?;
                 std::fs::write(dir.join("ca.pem"), &i.ca_pem)?;
-                let sock = dir.join("intercept.sock");
+                let sock = dir.join("sock").join("intercept.sock");
                 let _ = std::fs::remove_file(&sock);
                 let listener = tokio::net::UnixListener::bind(&sock)?;
                 let engine = self.engine.get().cloned();
                 let id = preview.to_string();
                 let done: Arc<dyn Fn(String, anyhow::Result<crate::intercept::Served>) + Send + Sync> = Arc::new(move |host, out| {
                     let line = match out {
+                        Ok(s) if s.blocked.is_empty() && s.swapped == 0 => return,
                         Ok(s) if s.blocked.is_empty() => format!("egress to {host}: {} request(s), {} key(s) swapped in", s.requests, s.swapped),
                         Ok(s) => format!("egress to {host}: {} request(s), {} key(s) swapped in, refused: {}", s.requests, s.swapped, s.blocked.join("; ")),
                         Err(e) => format!("egress to {}: refused: {e:#}", if host.is_empty() { "?" } else { &host }),
@@ -1978,7 +1979,7 @@ impl Runtime {
                 let task = tokio::spawn(crate::intercept::listen(listener, i.interception, crate::intercept::system_upstream(), crate::intercept::public_dial(), done));
                 self.intercepting.lock().insert(preview.to_string(), (covered.clone(), task.abort_handle()));
             }
-            let m = std::fs::metadata(&dir)?;
+            let m = std::fs::metadata(dir.join("sock"))?;
             format!("{}:{}", m.uid(), m.gid())
         };
         Ok(Some((dir, covered, user)))
@@ -1986,12 +1987,13 @@ impl Runtime {
 
     async fn egress_proxy(&self, preview: &str, network: &str, hosts: &[String]) -> anyhow::Result<()> {
         let hosts: Vec<&String> = hosts.iter().filter(|h| crate::settings::egress_host_ok(h)).take(crate::settings::MAX_EGRESS_HOSTS).collect();
+        let turn = self.egress_making.lock().entry(preview.to_string()).or_default().clone();
+        let _turn = turn.lock().await;
+        // Under the turn: two starts at once make one socket and one listener.
         let intercept = self.intercepting(preview).await?;
         let list = serde_json::to_string(&(&hosts, intercept.as_ref().map(|(_, c, _)| c)))?;
         let digest = format!("{:016x}", list.bytes().fold(0xcbf2_9ce4_8422_2325u64, |h, b| (h ^ b as u64).wrapping_mul(0x0100_0000_01b3)));
         let name = egress_name(preview);
-        let turn = self.egress_making.lock().entry(preview.to_string()).or_default().clone();
-        let _turn = turn.lock().await;
         let running = code_preview::docker::docker(&["inspect", "-f", "{{.State.Running}} {{index .Config.Labels \"sh.roll.egress\"}}", &name]).await.ok();
         if running.as_deref() == Some(format!("true {digest}").as_str()) {
             return Ok(());
@@ -2007,7 +2009,7 @@ impl Runtime {
         // Hosts a placeholder's key is bound to go to rolld's socket: mounted, and the proxy runs as
         // the socket's owner (it can't reach it as a root with no capabilities otherwise).
         if let Some((dir, covered, user)) = &intercept {
-            args.extend(["--user".into(), user.clone(), "-v".into(), format!("{}:/roll", dir.display()), "--env".into(), format!("INTERCEPT={covered}")]);
+            args.extend(["--user".into(), user.clone(), "-v".into(), format!("{}:/roll:ro", dir.join("sock").display()), "--env".into(), format!("INTERCEPT={covered}")]);
         }
         args.extend(["--env".into(), format!("HOSTS={}", serde_json::to_string(&hosts)?), "--env".into(), format!("ROLL_EGRESS_JS={EGRESS_JS}"), self.cfg.screenshot_image.clone(), "sh".into(), "-c".into(), r#"node -e "$ROLL_EGRESS_JS""#.into()]);
         let argv: Vec<&str> = args.iter().map(String::as_str).collect();

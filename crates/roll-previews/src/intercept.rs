@@ -18,6 +18,12 @@
 //! Nothing here holds a value or a placeholder past one request, and nothing logs one. Whoever
 //! implements [`Interception`] (rolld, over roll secrets) decides every swap. No upgrades
 //! (WebSockets) through an intercepted host: a bound key goes in a request's headers or query.
+//! HTTP/1.1 only (ALPN `http/1.1`): a client that offers nothing but h2 (gRPC) can't connect.
+//!
+//! A preview's code chooses how often it connects, so each preview is bounded: at most
+//! [`MAX_CONNECTIONS`] at once (more are closed at once), a TLS handshake within
+//! [`HANDSHAKE`], a request's headers within [`HEADERS`], and each host's leaf made once for the
+//! CA's life (only `live` is asked every time).
 
 use std::convert::Infallible;
 use std::sync::Arc;
@@ -45,6 +51,7 @@ pub trait Interception: Send + Sync {
 }
 
 /// A leaf certificate and its key, PEM.
+#[derive(Clone)]
 pub struct Leaf {
     pub cert_pem: String,
     pub key_pem: String,
@@ -133,9 +140,14 @@ pub async fn read_handoff<S: AsyncRead + Unpin>(s: &mut S) -> anyhow::Result<(St
 /// each as [`serve`], until the listener ends. `done` hears each connection's [`Served`] (for the
 /// activity), or why it was refused.
 pub async fn listen(listener: tokio::net::UnixListener, i: Arc<dyn Interception>, upstream: Arc<rustls::ClientConfig>, dial: Dial, done: Arc<dyn Fn(String, anyhow::Result<Served>) + Send + Sync>) {
+    let i: Arc<dyn Interception> = Arc::new(Leaves { inner: i, made: parking_lot::Mutex::new(std::collections::HashMap::new()) });
+    let room = Arc::new(tokio::sync::Semaphore::new(MAX_CONNECTIONS));
     while let Ok((mut s, _)) = listener.accept().await {
+        // Over the bound: closed at once, nothing done for it.
+        let Ok(permit) = room.clone().try_acquire_owned() else { continue };
         let (i, upstream, dial, done) = (i.clone(), upstream.clone(), dial.clone(), done.clone());
         tokio::spawn(async move {
+            let _permit = permit;
             match read_handoff(&mut s).await {
                 Ok((host, port)) => {
                     let out = serve(s, &host, port, i, upstream, dial).await;
@@ -150,6 +162,61 @@ pub async fn listen(listener: tokio::net::UnixListener, i: Arc<dyn Interception>
 /// The most of one connection's refusals kept for the activity.
 const MAX_BLOCKED: usize = 20;
 
+/// The most connections one preview has intercepted at once.
+pub const MAX_CONNECTIONS: usize = 16;
+/// How long a client has for its TLS handshake.
+pub const HANDSHAKE: std::time::Duration = std::time::Duration::from_secs(10);
+/// How long a client has for a request's headers.
+pub const HEADERS: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// Each host's leaf made once (key generation and a signature), for the CA's life: a listener
+/// serves one CA, and a new CA comes with a new listener.
+struct Leaves {
+    inner: Arc<dyn Interception>,
+    made: parking_lot::Mutex<std::collections::HashMap<String, Leaf>>,
+}
+
+impl Interception for Leaves {
+    fn live(&self) -> anyhow::Result<bool> {
+        self.inner.live()
+    }
+    fn covers(&self, host: &str) -> bool {
+        self.inner.covers(host)
+    }
+    fn leaf(&self, host: &str) -> anyhow::Result<Leaf> {
+        if let Some(l) = self.made.lock().get(host) {
+            return Ok(l.clone());
+        }
+        let l = self.inner.leaf(host)?;
+        self.made.lock().insert(host.to_string(), l.clone());
+        Ok(l)
+    }
+    fn filter(&self, req: Outgoing<'_>) -> Result<usize, String> {
+        self.inner.filter(req)
+    }
+}
+
+/// The connection to the host, made again when the host closed it (an idle one).
+struct Upstream {
+    cfg: Arc<rustls::ClientConfig>,
+    dial: Dial,
+    host: String,
+    port: u16,
+    sender: tokio::sync::Mutex<Option<hyper::client::conn::http1::SendRequest<Incoming>>>,
+}
+
+impl Upstream {
+    async fn connect(&self) -> anyhow::Result<hyper::client::conn::http1::SendRequest<Incoming>> {
+        let name = rustls::pki_types::ServerName::try_from(self.host.clone())?;
+        let up = tokio_rustls::TlsConnector::from(self.cfg.clone()).connect(name, (self.dial)(self.host.clone(), self.port).await?).await?;
+        let (sender, conn) = hyper::client::conn::http1::handshake::<_, Incoming>(TokioIo::new(up)).await?;
+        tokio::spawn(async move {
+            let _ = conn.await;
+        });
+        Ok(sender)
+    }
+}
+
 /// Serve one connection from the preview to `host:port` (the `CONNECT` target its egress proxy
 /// passed on), as the module doc says. Ends when either side closes.
 pub async fn serve<S>(client: S, host: &str, port: u16, i: Arc<dyn Interception>, upstream: Arc<rustls::ClientConfig>, dial: Dial) -> anyhow::Result<Served>
@@ -161,14 +228,12 @@ where
     let (i2, h2) = (i.clone(), host.clone());
     let (live, leaf) = tokio::task::spawn_blocking(move || -> anyhow::Result<(bool, Leaf)> { Ok((i2.live()?, i2.leaf(&h2)?)) }).await??;
     anyhow::ensure!(live, "the preview's interception CA has ended");
-    let tls = tokio_rustls::TlsAcceptor::from(server_config(&leaf)?).accept(client).await?;
-    let name = rustls::pki_types::ServerName::try_from(host.clone())?;
-    let up = tokio_rustls::TlsConnector::from(upstream).connect(name, dial(host.clone(), port).await?).await?;
-    let (sender, conn) = hyper::client::conn::http1::handshake::<_, Incoming>(TokioIo::new(up)).await?;
-    tokio::spawn(async move {
-        let _ = conn.await;
-    });
-    let sender = Arc::new(tokio::sync::Mutex::new(sender));
+    let tls = tokio::time::timeout(HANDSHAKE, tokio_rustls::TlsAcceptor::from(server_config(&leaf)?).accept(client)).await.map_err(|_| anyhow::anyhow!("the client's TLS handshake took too long"))??;
+    let up = Upstream { cfg: upstream, dial, host: host.clone(), port, sender: tokio::sync::Mutex::new(None) };
+    // The first connection at once: a host the roots don't vouch for gets nothing.
+    let first = up.connect().await?;
+    *up.sender.lock().await = Some(first);
+    let sender = Arc::new(up);
     let served = Arc::new(parking_lot::Mutex::new(Served::default()));
     let authority = if port == 443 { host.clone() } else { format!("{host}:{port}") };
     let svc = {
@@ -179,7 +244,7 @@ where
         })
     };
     // A client that just goes away ends the connection with an error: what it sent is counted.
-    let _ = hyper::server::conn::http1::Builder::new().serve_connection(TokioIo::new(tls), svc).await;
+    let _ = hyper::server::conn::http1::Builder::new().timer(hyper_util::rt::TokioTimer::new()).header_read_timeout(HEADERS).serve_connection(TokioIo::new(tls), svc).await;
     let out = served.lock().clone();
     Ok(out)
 }
@@ -196,7 +261,7 @@ fn said(status: StatusCode, why: &str) -> Response<Body> {
 /// Headers that are this hop's, not the request's.
 const HOP: &[&str] = &["connection", "proxy-connection", "keep-alive", "proxy-authorization", "te", "trailer", "upgrade"];
 
-async fn one(req: Request<Incoming>, i: Arc<dyn Interception>, host: String, authority: String, sender: Arc<tokio::sync::Mutex<hyper::client::conn::http1::SendRequest<Incoming>>>, served: Arc<parking_lot::Mutex<Served>>) -> Response<Body> {
+async fn one(req: Request<Incoming>, i: Arc<dyn Interception>, host: String, authority: String, up: Arc<Upstream>, served: Arc<parking_lot::Mutex<Served>>) -> Response<Body> {
     served.lock().requests += 1;
     let block = |why: String| {
         let mut s = served.lock();
@@ -252,12 +317,28 @@ async fn one(req: Request<Incoming>, i: Arc<dyn Interception>, host: String, aut
     parts.uri = uri;
     parts.headers = map;
     parts.version = hyper::Version::HTTP_11;
-    let mut s = sender.lock().await;
-    if s.ready().await.is_err() {
-        return said(StatusCode::BAD_GATEWAY, "the connection to the host closed");
+    let mut slot = up.sender.lock().await;
+    let ready = match slot.as_mut() {
+        Some(s) => s.ready().await.is_ok(),
+        None => false,
+    };
+    // The host closed it (an idle connection it timed out): a new one, verified as the first.
+    if !ready {
+        match up.connect().await {
+            Ok(s) => *slot = Some(s),
+            Err(e) => return said(StatusCode::BAD_GATEWAY, &format!("the host: {e}")),
+        }
     }
+    let s = slot.as_mut().expect("connected above");
     match s.send_request(Request::from_parts(parts, body)).await {
-        Ok(resp) => resp.map(BodyExt::boxed),
+        Ok(mut resp) => {
+            // Its hop's own headers stay with it: the host closing its connection doesn't close the
+            // client's.
+            for h in HOP {
+                resp.headers_mut().remove(*h);
+            }
+            resp.map(BodyExt::boxed)
+        }
         Err(e) => said(StatusCode::BAD_GATEWAY, &format!("the host: {e}")),
     }
 }
@@ -344,7 +425,12 @@ mod tests {
                         hits.fetch_add(1, Ordering::SeqCst);
                         let auth = req.headers().get("authorization").and_then(|v| v.to_str().ok()).unwrap_or_default().to_string();
                         let host = req.headers().get("host").and_then(|v| v.to_str().ok()).unwrap_or_default().to_string();
-                        async move { Ok::<_, Infallible>(Response::new(Full::new(Bytes::from(format!("real={} host={host} q={}", auth == "Bearer sk_real", req.uri().query().unwrap_or_default()))))) }
+                        // It closes each connection after answering (as an idle timeout would).
+                        async move {
+                            let mut r = Response::new(Full::new(Bytes::from(format!("real={} host={host} q={}", auth == "Bearer sk_real", req.uri().query().unwrap_or_default()))));
+                            r.headers_mut().insert(hyper::header::CONNECTION, hyper::header::HeaderValue::from_static("close"));
+                            Ok::<_, Infallible>(r)
+                        }
                     });
                     let _ = hyper::server::conn::http1::Builder::new().serve_connection(TokioIo::new(tls), svc).await;
                 });
@@ -416,9 +502,12 @@ mod tests {
         // A placeholder that doesn't swap: refused here, nothing reaches the host.
         let (status, body) = get(&mut s, "Bearer rlph_bad").await;
         assert_eq!((status, body.contains("not a live placeholder"), hits.load(Ordering::SeqCst)), (403, true, 1));
+        // The host closed its side after answering: the next request gets a new connection to it.
+        assert_eq!(get(&mut s, "Bearer rlph_good").await.0, 200);
+        assert_eq!(hits.load(Ordering::SeqCst), 2);
         drop(s);
         let (host, out) = tokio::time::timeout(std::time::Duration::from_secs(10), served).await.expect("the connection ends").unwrap();
-        assert_eq!((host.as_str(), out), ("api.example.test", Ok(Served { requests: 2, swapped: 1, blocked: vec!["not a live placeholder".into()] })));
+        assert_eq!((host.as_str(), out), ("api.example.test", Ok(Served { requests: 3, swapped: 2, blocked: vec!["not a live placeholder".into()] })));
 
         // A host the CA doesn't cover, or a CA that ended: nothing is terminated or dialled.
         for (host, live) in [("evil.test", true), ("api.example.test", false)] {
@@ -426,7 +515,7 @@ mod tests {
             let (_mine, theirs) = tokio::io::duplex(1024);
             assert!(serve(theirs, host, 443, i, upstream_config(roots(&real_pem)), dial_to(addr)).await.is_err(), "{host} live={live}");
         }
-        assert_eq!(hits.load(Ordering::SeqCst), 1);
+        assert_eq!(hits.load(Ordering::SeqCst), 2);
 
         // Upstream is verified for real: a host the roots don't vouch for gets no request (the
         // preview can't point the proxy at a server of its own).
@@ -439,6 +528,6 @@ mod tests {
         });
         let out = tokio::time::timeout(std::time::Duration::from_secs(10), served).await.expect("serve ends");
         assert!(out.unwrap().is_err());
-        assert_eq!(hits.load(Ordering::SeqCst), 1);
+        assert_eq!(hits.load(Ordering::SeqCst), 2);
     }
 }
