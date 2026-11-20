@@ -14,7 +14,7 @@ use std::sync::Arc;
 
 /// Lines one read looks at, groups an answer lists, frames a fingerprint takes, and a sample's size.
 const MAX_LINES: usize = 100_000;
-const MAX_GROUPS: usize = 50;
+pub const MAX_GROUPS: usize = 50;
 const FRAMES: usize = 3;
 const MAX_SAMPLE: usize = 8 << 10;
 /// The most lines one trace joins.
@@ -22,7 +22,8 @@ pub(crate) const MAX_TRACE_LINES: usize = 200;
 /// New errors said (`error.new`) an environment a pass, at most.
 const NEW_PER_PASS: usize = 5;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "lowercase")]
 pub enum Kind {
     Python,
     Java,
@@ -33,7 +34,7 @@ pub enum Kind {
 }
 
 impl Kind {
-    fn name(self) -> &'static str {
+    pub fn name(self) -> &'static str {
         match self {
             Kind::Python => "python",
             Kind::Java => "java",
@@ -164,9 +165,11 @@ pub struct Occurrence {
     pub text: String,
     pub at: i64,
     pub instance: Option<String>,
+    /// The deployment whose instance wrote it.
+    pub deployment: Option<String>,
 }
 
-fn occurrence(kind: Kind, lines: &[&str], at: i64, instance: Option<String>) -> Occurrence {
+fn occurrence(kind: Kind, lines: &[&str], at: i64, instance: Option<String>, deployment: Option<String>) -> Occurrence {
     use sha2::{Digest, Sha256};
     let (key, title) = if kind == Kind::Line {
         let m = message(lines[0]);
@@ -188,7 +191,7 @@ fn occurrence(kind: Kind, lines: &[&str], at: i64, instance: Option<String>) -> 
         }
         text.truncate(cut);
     }
-    Occurrence { kind, fingerprint, title, text, at, instance }
+    Occurrence { kind, fingerprint, title, text, at, instance, deployment }
 }
 
 /// The errors in an environment's lines (oldest first): each instance's and stream's traces
@@ -203,7 +206,7 @@ pub fn occurrences(lines: &[LogLine]) -> Vec<Occurrence> {
     let close = |o: Open, out: &mut Vec<Occurrence>| {
         let first = &lines[o.lines[0]];
         let texts: Vec<&str> = o.lines.iter().map(|i| lines[*i].text.as_str()).collect();
-        out.push(occurrence(o.kind, &texts, first.t, first.instance.clone()));
+        out.push(occurrence(o.kind, &texts, first.t, first.instance.clone(), first.deployment.clone()));
     };
     for (i, l) in lines.iter().enumerate() {
         if !matches!(l.stream, Stream::Stdout | Stream::Stderr) {
@@ -229,7 +232,7 @@ pub fn occurrences(lines: &[LogLine]) -> Vec<Occurrence> {
         if let Some(kind) = starts(&l.text) {
             open.insert(key, Open { kind, lines: vec![i] });
         } else if l.level.is_some_and(|lv| lv >= Level::Error) {
-            out.push(occurrence(Kind::Line, &[l.text.as_str()], l.t, l.instance.clone()));
+            out.push(occurrence(Kind::Line, &[l.text.as_str()], l.t, l.instance.clone(), l.deployment.clone()));
         }
     }
     let mut rest: Vec<Open> = open.into_values().collect();
@@ -255,7 +258,84 @@ pub fn name_of(o: &Occurrence) -> String {
     if name.is_empty() { "an error".into() } else { name }
 }
 
+/// The occurrences of one error: how many, first and last seen (ms), on which instances, and the
+/// newest one whole (its title the group's). Serialized as `GET …/errors` answers one (roll
+/// previews reads it so).
+#[derive(Debug, serde::Serialize)]
+pub struct Group {
+    pub fingerprint: String,
+    pub kind: Kind,
+    pub title: String,
+    pub count: usize,
+    #[serde(rename = "first_seen")]
+    pub first: i64,
+    #[serde(rename = "last_seen")]
+    pub last: i64,
+    /// Answered as how many.
+    #[serde(serialize_with = "how_many")]
+    pub instances: BTreeSet<String>,
+    pub sample: String,
+}
+
+fn how_many<S: serde::Serializer>(v: &BTreeSet<String>, s: S) -> std::result::Result<S::Ok, S::Error> {
+    s.serialize_u64(v.len() as u64)
+}
+
+/// The errors in some lines (oldest first), grouped by fingerprint: the most frequent first (an
+/// answer lists the first [`MAX_GROUPS`]).
+pub fn groups(lines: &[LogLine]) -> Vec<Group> {
+    let mut groups: HashMap<String, Group> = HashMap::new();
+    for o in occurrences(lines) {
+        let g = groups.entry(o.fingerprint.clone()).or_insert_with(|| Group { fingerprint: o.fingerprint.clone(), kind: o.kind, title: o.title.clone(), count: 0, first: o.at, last: o.at, instances: BTreeSet::new(), sample: String::new() });
+        g.count += 1;
+        g.first = g.first.min(o.at);
+        if o.at >= g.last {
+            g.last = o.at;
+            g.sample = o.text;
+            g.title = o.title;
+        }
+        if let Some(i) = o.instance {
+            g.instances.insert(i);
+        }
+    }
+    let mut list: Vec<Group> = groups.into_values().collect();
+    list.sort_by(|a, b| b.count.cmp(&a.count).then(b.last.cmp(&a.last)));
+    list
+}
+
+/// What an error seen means ([`crate::store::Store::remember_error`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Seen {
+    /// The environment never had it: `error.new`.
+    New,
+    /// It was resolved, and it's back: open again, `error.regressed`.
+    Regressed,
+    /// Known (open, or muted): nothing said.
+    Known,
+}
+
+/// An error group's state (Cloud Run Error Reporting's): open; resolved (said again if it comes
+/// back after); muted (never said again).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Lifecycle {
+    Open,
+    Resolved,
+    Muted,
+}
+
 impl Apps {
+    /// `PATCH …/environments/{env}/errors/{fingerprint} {state}`: resolved, muted or open again.
+    pub async fn set_error_state(self: &Arc<Self>, service: &str, env: &str, fingerprint: &str, body: Value) -> Result<Value> {
+        self.service_env(service, env).await?;
+        let state: Lifecycle = body.get("state").cloned().and_then(|s| serde_json::from_value(s).ok()).ok_or_else(|| crate::Error::BadRequest("state is open, resolved or muted".into()))?;
+        let (sid, e, f) = (service.to_string(), env.to_string(), fingerprint.to_string());
+        if !self.db(move |s| s.set_error_state(&sid, &e, &f, state, code_sql::now_ms())).await? {
+            return Err(crate::Error::NotFound(format!("{env} never had the error {fingerprint}")));
+        }
+        Ok(json!({ "fingerprint": fingerprint, "state": state }))
+    }
+
     /// New errors in an environment's log since it was last looked at (the alerts' pass, each
     /// minute on the owner): a fingerprint it has never had is an `error.new` event, once ever
     /// (kept in `error_groups`, so a restart doesn't say it again). The event names the error's
@@ -279,14 +359,17 @@ impl Apps {
                 continue;
             }
             let name = name_of(&o);
-            let (sid, e, f, n, at) = (l.service.clone(), l.env.clone(), o.fingerprint.clone(), name.clone(), o.at);
-            if !self.db(move |s| s.remember_error(&sid, &e, &f, &n, at)).await.unwrap_or(false) {
-                continue;
-            }
-            let (sid, e, dep) = (l.service.clone(), l.env.clone(), l.template().map(|t| t.deployment.clone()));
+            let dep = o.deployment.clone().or_else(|| l.template().map(|t| t.deployment.clone()));
+            let (sid, e, f, n, at, d) = (l.service.clone(), l.env.clone(), o.fingerprint.clone(), name.clone(), o.at, dep.clone());
+            let kind = match self.db(move |s| s.remember_error(&sid, &e, &f, &n, at, d.as_deref())).await {
+                Ok(Seen::New) => "error.new",
+                Ok(Seen::Regressed) => "error.regressed",
+                _ => continue,
+            };
+            let (sid, e) = (l.service.clone(), l.env.clone());
             let data = json!({ "fingerprint": o.fingerprint, "kind": o.kind.name(), "name": name });
-            let _ = self.db(move |s| s.add_event("error.new", &sid, &e, dep.as_deref(), &data)).await;
-            l.log.stream(Stream::System).line(format!("a new error: {name} ({})", o.fingerprint));
+            let _ = self.db(move |s| s.add_event(kind, &sid, &e, dep.as_deref(), &data)).await;
+            l.log.stream(Stream::System).line(if kind == "error.new" { format!("a new error: {name} ({})", o.fingerprint) } else { format!("an error resolved before is back: {name} ({})", o.fingerprint) });
             told += 1;
         }
         if more > 0 {
@@ -303,36 +386,20 @@ impl Apps {
         // Oldest first, as a trace was written.
         let (lines, cut) = self.logs.read(&format!("env:{service}/{env}"), |l| matches!(l.stream, Stream::Stdout | Stream::Stderr), Some(since), None, MAX_LINES).await;
         let scanned = lines.len();
-        struct Group {
-            kind: Kind,
-            title: String,
-            count: usize,
-            first: i64,
-            last: i64,
-            instances: BTreeSet<String>,
-            sample: String,
-        }
-        let mut groups: HashMap<String, Group> = HashMap::new();
-        for o in occurrences(&lines) {
-            let g = groups.entry(o.fingerprint.clone()).or_insert_with(|| Group { kind: o.kind, title: o.title.clone(), count: 0, first: o.at, last: o.at, instances: BTreeSet::new(), sample: String::new() });
-            g.count += 1;
-            g.first = g.first.min(o.at);
-            // The newest one is the sample, and its title the group's.
-            if o.at >= g.last {
-                g.last = o.at;
-                g.sample = o.text;
-                g.title = o.title;
-            }
-            if let Some(i) = o.instance {
-                g.instances.insert(i);
-            }
-        }
-        let mut list: Vec<(String, Group)> = groups.into_iter().collect();
-        list.sort_by(|a, b| b.1.count.cmp(&a.1.count).then(b.1.last.cmp(&a.1.last)));
-        list.truncate(MAX_GROUPS);
-        let groups: Vec<Value> = list
-            .into_iter()
-            .map(|(f, g)| json!({ "fingerprint": f, "kind": g.kind.name(), "title": g.title, "count": g.count, "first_seen": g.first, "last_seen": g.last, "instances": g.instances.len(), "sample": g.sample }))
+        let mut groups = groups(&lines);
+        groups.truncate(MAX_GROUPS);
+        // Each with its state and the deployment it was first seen in, as kept.
+        let (sid, e) = (service.to_string(), env.to_string());
+        let states = self.db(move |s| s.error_states(&sid, &e)).await.unwrap_or_default();
+        let groups: Vec<Value> = groups
+            .iter()
+            .map(|g| {
+                let mut v = json!(g);
+                let (state, first) = states.get(&g.fingerprint).cloned().unwrap_or((Lifecycle::Open, None));
+                v["state"] = json!(state);
+                v["first_deployment"] = json!(first);
+                v
+            })
             .collect();
         Ok(json!({ "minutes": minutes, "groups": groups, "scanned": scanned, "cut": cut || scanned >= MAX_LINES }))
     }

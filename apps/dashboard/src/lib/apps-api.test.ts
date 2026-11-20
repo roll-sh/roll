@@ -1,5 +1,5 @@
-import { describe, expect, it } from "vitest";
-import { deployChange, describePending, formatFirewall, formatHeaders, parseEnv, parseFirewall, parseHeaders, stepDurations, toEnv, type DeployStatus, type EnvironmentSummary, type InstanceState, type Service } from "./apps-api";
+import { describe, expect, it, vi } from "vitest";
+import { deployChange, describePending, followLog, formatFirewall, formatHeaders, parseEnv, parseFirewall, parseHeaders, stepDurations, toEnv, type DeployStatus, type EnvironmentSummary, type InstanceState, type Service } from "./apps-api";
 import { service } from "./workspace-resources";
 
 const svc = (env: Partial<EnvironmentSummary>, id = "svc_a"): Service => ({
@@ -13,7 +13,7 @@ const svc = (env: Partial<EnvironmentSummary>, id = "svc_a"): Service => ({
   git_login: null,
   github: null,
   created_at: 1,
-  environments: [{ name: "production", state: "running", url: "https://web-shop.up.roll.site", active: null, latest: null, ...env }],
+  environments: [{ name: "production", state: "running", url: "https://web-shop.up.roll.site", active: null, latest: null, needs_deploy: false, ephemeral: false, ...env }],
 });
 
 const latest = (status: DeployStatus, id = "dep_1") => ({ latest: { id, status } });
@@ -90,12 +90,14 @@ describe("a deployment's steps", () => {
 
 describe("firewall rules as typed", () => {
   it("read one a line and come back the same", () => {
-    const text = "allow /admin/health\ndeny /admin/*\ndeny method=DELETE,PUT\n# a note\ndeny ua=Bad Bot/2";
+    const text = "allow /admin/health\ndeny /admin/*\ndeny method=DELETE,PUT\n# a note\ndeny ip=203.0.113.0/24,2001:db8::/32\ndeny /api/* header=X-Bot query=debug:1\ndeny ua=Bad Bot/2";
     const rules = parseFirewall(text);
     expect(rules).toEqual([
       { action: "allow", path: "/admin/health" },
       { action: "deny", path: "/admin/*" },
       { action: "deny", methods: ["DELETE", "PUT"] },
+      { action: "deny", ips: ["203.0.113.0/24", "2001:db8::/32"] },
+      { action: "deny", path: "/api/*", query: { name: "debug", contains: "1" }, header: { name: "X-Bot" } },
       { action: "deny", user_agent: "Bad Bot/2" },
     ]);
     expect(formatFirewall(rules)).toBe(text.replace("# a note\n", ""));
@@ -120,5 +122,21 @@ describe("response headers", () => {
       { path: "/api/*", set: { "Content-Type": "application/problem+json" }, replace: true },
     ]);
     expect(parseHeaders(formatHeaders(rules))).toEqual(rules);
+  });
+});
+
+describe("following a log", () => {
+  it("stops at a finished log's end instead of reading it all again", async () => {
+    const enc = new TextEncoder();
+    const fetchFn = vi.fn(async () => new Response(new ReadableStream({ start(c) { c.enqueue(enc.encode('data: {"t":1,"stream":"stdout","text":"done"}\n\nevent: end\ndata: end\n\n')); c.close(); } })));
+    vi.stubGlobal("fetch", fetchFn);
+    const lines: string[] = [];
+    let ended = false;
+    followLog({ job: { service: "svc_1", env: "production", job: "job_1" } }, { onLine: (l) => lines.push(l.text), onReset: () => {}, onEnd: () => (ended = true) });
+    await vi.waitFor(() => expect(ended).toBe(true));
+    await new Promise((r) => setTimeout(r, 700));
+    expect(lines).toEqual(["done"]);
+    expect(fetchFn).toHaveBeenCalledTimes(1);
+    vi.unstubAllGlobals();
   });
 });

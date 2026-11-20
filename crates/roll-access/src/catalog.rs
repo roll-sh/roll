@@ -81,6 +81,12 @@ pub struct Row {
     /// Other resources whose credentials the request hands to this one (apps' links put a
     /// database's address and password in a service's variables): it also needs `reveal` on each.
     pub lends: Option<Lend>,
+    /// A request header that makes it `admin` when it's `1` (apps' `X-Roll-Override`: going past
+    /// a deploy freeze the team set is a person's call, never a deploy token's).
+    pub admin_if: Option<&'static str>,
+    /// A JSON body field whose presence makes it `admin` (apps' `freeze`: setting or lifting a
+    /// freeze is the same call as going past one).
+    pub admin_if_field: Option<&'static str>,
 }
 
 /// Where a request names other resources it hands to this one ([`Row::lends`]).
@@ -112,6 +118,20 @@ fn apps_scale(b: &Value) -> Vec<Lent> {
     b.pointer("/run/scale/stream").and_then(Value::as_str).map(|s| Lent { kind: "stream".into(), r#ref: s.into(), action: Action::Read }).into_iter().collect()
 }
 
+/// A web service's `run.push`: apps reads each stream for it as a consumer group (read on it), and
+/// appends a record its app keeps refusing to a dead-letter topic there (write, for a rule with
+/// one).
+fn apps_push(b: &Value) -> Vec<Lent> {
+    let rules = b.pointer("/run/push").and_then(Value::as_array).into_iter().flatten();
+    rules
+        .filter_map(|r| {
+            let s = r.get("stream").and_then(Value::as_str)?;
+            let action = if r.get("dead_letter").is_some_and(|d| !d.is_null()) { Action::Write } else { Action::Read };
+            Some(Lent { kind: "stream".into(), r#ref: s.into(), action })
+        })
+        .collect()
+}
+
 /// A roll code repo the body names, which apps reads for the caller (`repo` for a plan or an import,
 /// `source.repo` for a service built from one): read on it, so a token can't learn a repo's stack,
 /// head or roll.toml, or build and run its code, without being allowed to read it.
@@ -120,17 +140,19 @@ fn apps_repo(b: &Value) -> Vec<Lent> {
     b.get("repo").and_then(Value::as_str).or(from_source).map(|r| Lent { kind: "repo".into(), r#ref: r.into(), action: Action::Read }).into_iter().collect()
 }
 
-/// A new service: its links, its scaling stream and the repo it's built from.
+/// A new service: its links, its scaling and pushed streams and the repo it's built from.
 fn apps_create_lends(b: &Value) -> Vec<Lent> {
     let mut out = apps_links(b);
     out.extend(apps_scale(b));
+    out.extend(apps_push(b));
     out.extend(apps_repo(b));
     out
 }
 
-/// A service's settings: its scaling stream and, when its source changes, the repo.
+/// A service's settings: its scaling and pushed streams and, when its source changes, the repo.
 fn apps_patch_lends(b: &Value) -> Vec<Lent> {
     let mut out = apps_scale(b);
+    out.extend(apps_push(b));
     out.extend(apps_repo(b));
     out
 }
@@ -139,6 +161,12 @@ fn apps_patch_lends(b: &Value) -> Vec<Lent> {
 /// copies the parent's indices, so it needs what branching there does, `write` on the parent.
 fn search_parent(b: &Value) -> Vec<Lent> {
     b.get("parent").and_then(Value::as_str).map(|p| Lent { kind: "search".into(), r#ref: p.into(), action: Action::Write }).into_iter().collect()
+}
+
+/// A search cluster linked as another's remote (`cluster`): roll issues a cross-cluster API key
+/// of it, so the link needs `admin` on it too, as making its keys does.
+fn search_remote(b: &Value) -> Vec<Lent> {
+    b.get("cluster").and_then(Value::as_str).map(|p| Lent { kind: "search".into(), r#ref: p.into(), action: Action::Admin }).into_iter().collect()
 }
 
 /// What an apps link's kind is, as a rule names it: its product and the resource kind its ids are.
@@ -175,7 +203,7 @@ pub type Sources = Vec<(String, Option<String>)>;
 
 impl Row {
     pub fn needs_body(&self) -> bool {
-        matches!(self.act, Act::Body(_) | Act::Raw(_)) || matches!(self.copies_from, Some(CopyFrom::Body(_) | CopyFrom::Each(_))) || matches!(self.lends, Some(Lend::Each(_)))
+        self.admin_if_field.is_some() || matches!(self.act, Act::Body(_) | Act::Raw(_)) || matches!(self.copies_from, Some(CopyFrom::Body(_) | CopyFrom::Each(_))) || matches!(self.lends, Some(Lend::Each(_)))
     }
 
     pub fn action(&self, method: &str, params: &[(String, String)], body: Option<&Value>) -> Action {
@@ -199,7 +227,7 @@ impl Row {
 }
 
 const fn row(method: &'static str, route: &'static str, product: &'static str, act: Act, target: Tgt) -> Row {
-    Row { method, route, product, act, target, env: EnvFrom::None, path_query: None, reveals: &[], copies_from: None, index: None, lends: None, filters_itself: false, filters_index: false }
+    Row { method, route, product, act, target, env: EnvFrom::None, path_query: None, reveals: &[], copies_from: None, index: None, lends: None, filters_itself: false, filters_index: false, admin_if: None, admin_if_field: None }
 }
 
 const R: Act = Act::Is(Action::Read);
@@ -236,6 +264,23 @@ impl Row {
     const fn path_query(mut self, q: &'static str) -> Row {
         self.path_query = Some(q);
         self
+    }
+    const fn admin_if(mut self, header: &'static str) -> Row {
+        self.admin_if = Some(header);
+        self
+    }
+    const fn admin_if_field(mut self, field: &'static str) -> Row {
+        self.admin_if_field = Some(field);
+        self
+    }
+
+    /// The action with the request's headers: `admin` when [`Row::admin_if`]'s is `1`.
+    pub fn action_with(&self, method: &str, params: &[(String, String)], body: Option<&Value>, headers: &axum::http::HeaderMap) -> Action {
+        match (self.admin_if, self.admin_if_field) {
+            (Some(h), _) if headers.get(h).is_some_and(|v| v == "1") => Action::Admin,
+            (_, Some(f)) if body.and_then(|b| b.get(f)).is_some() => Action::Admin,
+            _ => self.action(method, params, body),
+        }
     }
     /// A route that keeps only what the caller's `Grant` allows in each answer (secrets' health
     /// and leaks): a rule limited to some environments or folders matches it too.
@@ -302,6 +347,9 @@ pub const OPERATOR_ONLY: &[(&str, &str)] = &[
     ("/v1/access/audit/sinks", "where the audit log is sent is the operator's choice"),
     ("/v1/access/audit/sinks/{id}", "where the audit log is sent is the operator's choice"),
     ("/v1/access/audit/sinks/{id}/retry", "where the audit log is sent is the operator's choice"),
+    ("/v1/secrets/issuer/rotate", "roll's OIDC issuer key signs for every project: rotating it is the operator's"),
+    ("/v1/secrets/audit/key/rotate", "the audit log's digest key signs every project's digests: rotating or pulling it is the operator's"),
+    ("/v1/previews/{id}/visit", "a browser session in a team-access preview is a signed-in person's (rolld's gate sees their session), never a token's"),
     ("/v1/apps/services/{id}/environments/{env}/visit", "a browser session in a sign-in-gated environment is a signed-in person's (rolld's gate sees their session), never a token's"),
     ("/v1/apps/services/{id}/github", "roll's GitHub App installations span tenants: connecting a service to one (its tokens fetch any repository the installation sees) is the operator's, as connecting a repo is roll code's admin token's"),
 ];
@@ -496,6 +544,11 @@ pub fn prefix_reviewed(method: &str, route: &str) -> bool {
     include_str!("prefix-reviewed.txt").lines().map(str::trim).any(|l| l.split_once(' ').is_some_and(|(m, r)| m == method && r == route))
 }
 
+/// Every route a prefix row decides that was looked at, as `(method, route)`.
+pub fn prefix_reviewed_routes() -> impl Iterator<Item = (&'static str, &'static str)> {
+    include_str!("prefix-reviewed.txt").lines().map(str::trim).filter_map(|l| l.split_once(' '))
+}
+
 /// A route listed for a nest (`/v1/storage`, `/v1/storage/`): its rows are matched by path.
 fn is_nest(route: &str) -> bool {
     NESTS.iter().any(|n| route == *n || route.starts_with(&format!("{n}/")))
@@ -556,7 +609,7 @@ pub fn view(r: &Row) -> RowView {
     let action = match r.act {
         Act::Is(a) => a.as_str().to_string(),
         Act::ByMethod => "by method".into(),
-        Act::ProductionIf(p) => format!("deploy when {{{p}}} is production, else write"),
+        Act::ProductionIf(p) => format!("deploy when {{{p}}} is production, else write{}", r.admin_if.map(|h| format!("; admin with {h}: 1")).unwrap_or_default()),
         Act::Body(_) | Act::Raw(_) => "from the body".into(),
         Act::GitPush => "deploy onto the default branch, delete for a deleted ref, else write".into(),
     };
@@ -737,11 +790,19 @@ fn secrets_import_sources(b: &Value) -> Sources {
         .collect()
 }
 
+/// A service's Git login: `deploy` when it names a project secret (`secret`): the service's
+/// fetches then send that production secret to its source's host, which only someone who may
+/// change what production runs gets to decide; `write` for a password the caller gives itself.
+fn apps_git_login_action(b: &Value) -> Action {
+    if b.get("secret").is_some() { Action::Deploy } else { Action::Write }
+}
+
 /// A new apps notification: a webhook (the default) answers its signing secret once, so `reveal`;
 /// a Slack, Discord or email one (the project's owner) answers none, so `write`.
 fn apps_notification_action(b: &Value) -> Action {
     match b["kind"].as_str() {
-        Some("slack" | "discord" | "email") => Action::Write,
+        // Nothing comes back from these (an on-call key was the caller's to begin with).
+        Some("slack" | "discord" | "teams" | "googlechat" | "email" | "pagerduty" | "opsgenie") => Action::Write,
         _ => Action::Reveal,
     }
 }
@@ -758,10 +819,12 @@ fn apps_create_action(b: &Value) -> Action {
 /// in its instances, and `rollback_on_crash`, which has roll
 /// put an older deployment live by itself), and so does any key apps adds later until it's listed
 /// here: a new setting is never a quiet way into production.
-const APPS_WRITE_RUN: [&str; 21] = [
+const APPS_WRITE_RUN: [&str; 27] = [
     "min_instances",
     "max_instances",
     "concurrency",
+    "queue_s",
+    "latency_target_ms",
     "cpu",
     "memory_mb",
     "health_path",
@@ -771,6 +834,10 @@ const APPS_WRITE_RUN: [&str; 21] = [
     "suspend_after_s",
     "sleep_after_s",
     "alerts",
+    "slo",
+    "metrics",
+    "schedule_scale",
+    "log_metrics",
     "rollout",
     "scale",
     "drain_s",
@@ -1128,6 +1195,13 @@ static ROWS: &[Row] = &[
     // An API key: its secret is in the answer.
     row("POST", "/v1/search/clusters/{id}/keys", "search", REVEAL, one(PG, "cluster")),
     row("DELETE", "/v1/search/clusters/{id}/keys/{key}", "search", ADMIN, one(PG, "cluster")),
+    row("GET", "/v1/search/clusters/{id}/remotes", "search", R, one(PG, "cluster")),
+    row("PUT", "/v1/search/clusters/{id}/remotes/{alias}", "search", ADMIN, one(PG, "cluster")).lends(Lend::Each(search_remote)),
+    row("DELETE", "/v1/search/clusters/{id}/remotes/{alias}", "search", ADMIN, one(PG, "cluster")),
+    // Inference endpoints keyed by a project's secret: making one changes the cluster as the
+    // console does; roll secrets checks `reveal` on the secret itself, as the caller.
+    row("GET", "/v1/search/clusters/{id}/inference/secrets", "search", R, one(PG, "cluster")),
+    row("POST", "/v1/search/clusters/{id}/inference/secrets", "search", ADMIN, one(PG, "cluster")),
     // Request metrics and the slow logs (queries' and documents' sources, cut): reads of the
     // cluster's data.
     row("GET", "/v1/search/clusters/{id}/metrics", "search", R, one(PG, "cluster")),
@@ -1148,6 +1222,10 @@ static ROWS: &[Row] = &[
     row("POST", "/v1/search/clusters/{id}/indices/{index}/delete_by_query", "search", D, one(PG, "cluster")).index("index"),
     // A bulk can delete as well as index: its action lines decide.
     row("POST", "/v1/search/clusters/{id}/indices/{index}/bulk", "search", Act::Raw(bulk_action), one(PG, "cluster")).index("index"),
+    // Query suggestions built from the index's search analytics: reading them (aggregated query
+    // text, like the analytics) and rebuilding its suggestions index now (a write of the cluster).
+    row("GET", "/v1/search/clusters/{id}/indices/{index}/suggestions", "search", R, one(PG, "cluster")).index("index"),
+    row("POST", "/v1/search/clusters/{id}/indices/{index}/suggestions/rebuild", "search", W, one(PG, "cluster")).index("index"),
     // ── secrets (feature/roll-secrets, docs/secrets.md) ──
     // The caller and its grant's project (`roll run`), and health: any grant.
     row("GET", "/v1/secrets/whoami", "secrets", R, Tgt::AnyGrant),
@@ -1236,6 +1314,13 @@ static ROWS: &[Row] = &[
     row("GET", "/v1/secrets/projects/{project}/cas/{id}/certificates", "secrets", R, one(&["project"], "project")),
     row("POST", "/v1/secrets/projects/{project}/cas/{id}/revoke", "secrets", W, one(&["project"], "project")),
     row("DELETE", "/v1/secrets/projects/{project}/cas/{id}", "secrets", ADMIN, one(&["project"], "project")),
+    // ACME on a CA: its directory, pre-authorization and External Account Bindings. A binding's
+    // HMAC key is answered once, to who may also reveal; making, revoking and pre-authorizing are
+    // the project admin's (an account acts with its binding's names).
+    row("GET", "/v1/secrets/projects/{project}/cas/{id}/acme", "secrets", R, one(&["project"], "project")),
+    row("PATCH", "/v1/secrets/projects/{project}/cas/{id}/acme", "secrets", ADMIN, one(&["project"], "project")),
+    row("POST", "/v1/secrets/projects/{project}/cas/{id}/acme/eab", "secrets", ADMIN, one(&["project"], "project")).reveals(&["hmac_key"]),
+    row("DELETE", "/v1/secrets/projects/{project}/cas/{id}/acme/eab/{eab}", "secrets", ADMIN, one(&["project"], "project")),
     row("GET", "/v1/secrets/projects/{project}/ssh-cas", "secrets", R, one(&["project"], "project")),
     row("POST", "/v1/secrets/projects/{project}/ssh-cas", "secrets", ADMIN, one(&["project"], "project")),
     row("POST", "/v1/secrets/projects/{project}/ssh-cas/{id}/sign-host", "secrets", ADMIN, one(&["project"], "project")),
@@ -1250,6 +1335,26 @@ static ROWS: &[Row] = &[
     row("GET", "/v1/secrets/projects/{project}/outside-databases", "secrets", R, one(&["project"], "project")),
     row("POST", "/v1/secrets/projects/{project}/outside-databases", "secrets", ADMIN, one(&["project"], "project")),
     row("DELETE", "/v1/secrets/projects/{project}/outside-databases/{id}", "secrets", ADMIN, one(&["project"], "project")),
+    // LDAP and Active Directory: listing never shows the bind password; registering takes one.
+    row("GET", "/v1/secrets/projects/{project}/directories", "secrets", R, one(&["project"], "project")),
+    row("POST", "/v1/secrets/projects/{project}/directories", "secrets", ADMIN, one(&["project"], "project")),
+    row("DELETE", "/v1/secrets/projects/{project}/directories/{id}", "secrets", ADMIN, one(&["project"], "project")),
+    // Snowflake accounts: listing never shows the admin's private key; registering takes one.
+    row("GET", "/v1/secrets/projects/{project}/snowflake-accounts", "secrets", R, one(&["project"], "project")),
+    row("POST", "/v1/secrets/projects/{project}/snowflake-accounts", "secrets", ADMIN, one(&["project"], "project")),
+    row("DELETE", "/v1/secrets/projects/{project}/snowflake-accounts/{id}", "secrets", ADMIN, one(&["project"], "project")),
+    // MongoDB Atlas projects: listing shows the service account's client id, never its secret;
+    // registering takes one.
+    row("GET", "/v1/secrets/projects/{project}/atlas-projects", "secrets", R, one(&["project"], "project")),
+    row("POST", "/v1/secrets/projects/{project}/atlas-projects", "secrets", ADMIN, one(&["project"], "project")),
+    row("DELETE", "/v1/secrets/projects/{project}/atlas-projects/{id}", "secrets", ADMIN, one(&["project"], "project")),
+    // Gateways into private networks (docs/secrets.md, "Gateways"): records are the project's;
+    // a gateway's own link is write on the gateway by its id, which only its token's rule names
+    // (a project-wide rule doesn't reach it).
+    row("GET", "/v1/secrets/projects/{project}/gateways", "secrets", R, one(&["project"], "project")),
+    row("POST", "/v1/secrets/projects/{project}/gateways", "secrets", ADMIN, one(&["project"], "project")).reveals(&["token"]),
+    row("DELETE", "/v1/secrets/projects/{project}/gateways/{id}", "secrets", ADMIN, one(&["project"], "project")),
+    row("GET", "/v1/secrets/gateways/{id}/connect", "secrets", W, one(&["id"], "gateway")),
     row("PATCH", "/v1/secrets/projects/{project}/outside-databases/{id}", "secrets", ADMIN, one(&["project"], "project")),
     row("POST", "/v1/secrets/projects/{project}/outside-databases/{id}/rotate-admin", "secrets", ADMIN, one(&["project"], "project")),
     row("GET", "/v1/secrets/projects/{project}/kubernetes", "secrets", R, one(&["project"], "project")),
@@ -1277,6 +1382,8 @@ static ROWS: &[Row] = &[
     row("*", "/v1/secrets/projects/{project}/syncs", "secrets", ADMIN, one(&["project"], "project")).reveals(&["signing_secret"]),
     row("GET", "/v1/secrets/projects/{project}/syncs", "secrets", R, one(&["project"], "project")),
     row("*", "/v1/secrets/projects/{project}/syncs/", "secrets", ADMIN, one(&["project"], "project")),
+    // Checking the audit log's chain answers where it breaks, never what a row says.
+    row("GET", "/v1/secrets/projects/{project}/audit/verify", "secrets", R, one(&["project"], "project")),
     row("*", "/v1/secrets/projects/{project}/audit/sinks", "secrets", ADMIN, one(&["project"], "project")).reveals(&["secret"]),
     row("*", "/v1/secrets/projects/{project}/audit/sinks/", "secrets", ADMIN, one(&["project"], "project")),
     row("PUT", "/v1/secrets/projects/{project}/required", "secrets", ADMIN, one(&["project"], "project")),
@@ -1293,7 +1400,17 @@ static ROWS: &[Row] = &[
     row("PUT", "/v1/secrets/projects/{project}/environments/{env}/exports", "secrets", ADMIN, one(&["project"], "project")).env(EnvFrom::Param("env")),
     // Who and what can read a folder: the project's credentials, as the tokens list (a project admin's).
     row("GET", "/v1/secrets/projects/{project}/environments/{env}/reach", "secrets", ADMIN, one(&["project"], "project")),
+    // An incident's cut-off revokes the project's credentials that reach a folder, and its freeze
+    // locks readers out until an admin lifts it: both the project admin's, as reach is.
+    row("POST", "/v1/secrets/projects/{project}/environments/{env}/reach/cut-off", "secrets", ADMIN, one(&["project"], "project")),
+    row("DELETE", "/v1/secrets/projects/{project}/environments/{env}/reach/cut-off", "secrets", ADMIN, one(&["project"], "project")),
     row("POST", "/v1/secrets/projects/{project}/shares", "secrets", REVEAL, one(&["project"], "project")),
+    // A secret request asks someone outside roll for a folder's values: its answer is written as
+    // the asker, so asking is a write there; the list shows names only; cancelling is the asker's
+    // (or the folder admin's: the product checks).
+    row("POST", "/v1/secrets/projects/{project}/environments/{env}/value-requests", "secrets", W, one(&["project"], "project")).env(EnvFrom::Param("env")).path_query("path"),
+    row("GET", "/v1/secrets/projects/{project}/value-requests", "secrets", R, one(&["project"], "project")),
+    row("DELETE", "/v1/secrets/projects/{project}/value-requests/{id}", "secrets", W, one(&["project"], "project")),
     // Purging a secret's history can't be undone.
     row("POST", "/v1/secrets/projects/{project}/environments/{env}/secrets/{name}/purge", "secrets", ADMIN, one(&["project"], "project")).env(EnvFrom::Param("env")).path_query("path"),
     // A change request's current and proposed values, for its approvers.
@@ -1327,6 +1444,19 @@ static ROWS: &[Row] = &[
     // runtime output elsewhere and its signing secret comes back once: reveal. The URL is never
     // answered (only its host).
     row("GET", "/v1/apps/projects/{project}/drains", "apps", R, one(&["project"], "project")),
+    // The project's preview domain: which names its preview environments answer under.
+    // A public page of the project's checks and heartbeats (names and up or down only).
+    row("GET", "/v1/apps/projects/{project}/status-page", "apps", R, one(&["project"], "project")),
+    // Publishing makes the project's service names public: a person's call (MCP's review).
+    row("PUT", "/v1/apps/projects/{project}/status-page", "apps", ADMIN, one(&["project"], "project")),
+    row("DELETE", "/v1/apps/projects/{project}/status-page", "apps", W, one(&["project"], "project")),
+    row("GET", "/v1/apps/projects/{project}/status-page/incidents", "apps", R, one(&["project"], "project")),
+    row("POST", "/v1/apps/projects/{project}/status-page/incidents", "apps", W, one(&["project"], "project")),
+    row("POST", "/v1/apps/projects/{project}/status-page/incidents/{iid}/updates", "apps", W, one(&["project"], "project")),
+    row("GET", "/v1/apps/projects/{project}/preview-domain", "apps", R, one(&["project"], "project")),
+    row("POST", "/v1/apps/projects/{project}/preview-domain", "apps", W, one(&["project"], "project")),
+    row("DELETE", "/v1/apps/projects/{project}/preview-domain", "apps", D, one(&["project"], "project")),
+    row("POST", "/v1/apps/projects/{project}/preview-domain/verify", "apps", W, one(&["project"], "project")),
     // Its services as roll.toml: settings and variables' names, never a value.
     row("POST", "/v1/apps/projects/{project}/export", "apps", R, one(&["project"], "project")),
     row("POST", "/v1/apps/projects/{project}/drains", "apps", REVEAL, one(&["project"], "project")),
@@ -1338,23 +1468,33 @@ static ROWS: &[Row] = &[
     row("PUT", "/v1/apps/services/{id}/registry", "apps", W, one(PG, "service")),
     row("DELETE", "/v1/apps/services/{id}/registry", "apps", W, one(PG, "service")),
     // A private Git repository's login (never answered back), as a registry's.
-    row("PUT", "/v1/apps/services/{id}/git-login", "apps", W, one(PG, "service")),
+    row("PUT", "/v1/apps/services/{id}/git-login", "apps", Act::Body(apps_git_login_action), one(PG, "service")),
     row("DELETE", "/v1/apps/services/{id}/git-login", "apps", W, one(PG, "service")),
     // A link puts the linked resource's address and password in the service's variables, where
     // its code reads them: reveal on that resource too.
     row("PUT", "/v1/apps/services/{id}/links/{kind}/{ref}", "apps", W, one(PG, "service")).lends(Lend::Path("kind", "ref")),
     row("DELETE", "/v1/apps/services/{id}/links/{kind}/{ref}", "apps", W, one(PG, "service")),
     row("*", "/v1/apps/services/{id}", "apps", M, one(PG, "service")),
-    // A worker scaled on a stream group's lag has apps read that stream for it: read there too.
+    // A worker scaled on a stream group's lag has apps read that stream for it, and a web service's
+    // pushes consume one (and dead-letter into it): read there too, write with a dead letter.
     row("PATCH", "/v1/apps/services/{id}", "apps", Act::Body(apps_patch_action), one(PG, "service")).lends(Lend::Each(apps_patch_lends)),
     row("*", "/v1/apps/services/{id}/", "apps", M, one(PG, "service")),
     // A restore puts a deleted service's deployments live again, production's too: a deploy.
     row("POST", "/v1/apps/services/{id}/restore", "apps", DEPLOY, one(PG, "service")).env(EnvFrom::Fixed("production")),
     // `variables_from` copies another environment's values into this one: reveal there too.
-    row("*", "/v1/apps/services/{id}/environments/{env}", "apps", Act::ProductionIf("env"), one(PG, "service")).env(EnvFrom::Param("env")).copies_from(CopyFrom::Body("variables_from")),
+    // A new heartbeat's ping URL (its token) is in the PUT's answer, once: a credential.
+    // Setting or lifting a deploy freeze is admin (lifting one would get past it).
+    row("*", "/v1/apps/services/{id}/environments/{env}", "apps", Act::ProductionIf("env"), one(PG, "service")).env(EnvFrom::Param("env")).admin_if_field("freeze").copies_from(CopyFrom::Body("variables_from")).reveals(&["heartbeat_urls"]),
     row("GET", "/v1/apps/services/{id}/environments/{env}", "apps", R, one(PG, "service")).env(EnvFrom::Param("env")),
     row("DELETE", "/v1/apps/services/{id}/environments/{env}", "apps", D, one(PG, "service")).env(EnvFrom::Param("env")),
     row("GET", "/v1/apps/services/{id}/environments/{env}/", "apps", R, one(PG, "service")).env(EnvFrom::Param("env")),
+    // A person's deploy past a freeze (`X-Roll-Override: 1`) is admin; otherwise as any deploy.
+    row("POST", "/v1/apps/services/{id}/environments/{env}/deploys", "apps", Act::ProductionIf("env"), one(PG, "service")).env(EnvFrom::Param("env")).admin_if("x-roll-override"),
+    row("POST", "/v1/apps/services/{id}/environments/{env}/redeploy", "apps", Act::ProductionIf("env"), one(PG, "service")).env(EnvFrom::Param("env")).admin_if("x-roll-override"),
+    row("POST", "/v1/apps/services/{id}/environments/{env}/promote", "apps", Act::ProductionIf("env"), one(PG, "service")).env(EnvFrom::Param("env")).admin_if("x-roll-override"),
+    row("POST", "/v1/apps/services/{id}/environments/{env}/deploys/{dep}/rollback", "apps", Act::ProductionIf("env"), one(PG, "service")).env(EnvFrom::Param("env")).admin_if("x-roll-override"),
+    // An error group resolved, muted or open again: the team's triage, a write in any environment.
+    row("PATCH", "/v1/apps/services/{id}/environments/{env}/errors/{fingerprint}", "apps", W, one(PG, "service")).env(EnvFrom::Param("env")),
     row("POST", "/v1/apps/services/{id}/environments/{env}/", "apps", Act::ProductionIf("env"), one(PG, "service")).env(EnvFrom::Param("env")),
     row("PUT", "/v1/apps/services/{id}/environments/{env}/", "apps", Act::ProductionIf("env"), one(PG, "service")).env(EnvFrom::Param("env")),
     row("PATCH", "/v1/apps/services/{id}/environments/{env}/", "apps", Act::ProductionIf("env"), one(PG, "service")).env(EnvFrom::Param("env")),
@@ -1363,7 +1503,9 @@ static ROWS: &[Row] = &[
     // A volume's backups: making one changes nothing the app sees (write, production too);
     // restoring one replaces the volume's files (delete, as restoring over a branch is).
     row("POST", "/v1/apps/services/{id}/environments/{env}/volume/backups", "apps", W, one(PG, "service")).env(EnvFrom::Param("env")),
-    row("POST", "/v1/apps/services/{id}/environments/{env}/volume/backups/{bid}/restore", "apps", D, one(PG, "service")).env(EnvFrom::Param("env")),
+    // `from` restores another environment's backup here (its files are that environment's data):
+    // reveal there too.
+    row("POST", "/v1/apps/services/{id}/environments/{env}/volume/backups/{bid}/restore", "apps", D, one(PG, "service")).env(EnvFrom::Param("env")).copies_from(CopyFrom::Body("from")),
     // A shell runs any command where the service runs, with its variables (`env` prints them all):
     // admin in every environment, as an agent's shell is: its WebSocket, and all of a session
     // (opening, keys, screen, resizing, closing: what may close an admin's shell is admin too).
@@ -1396,6 +1538,10 @@ static ROWS: &[Row] = &[
     row("POST", "/v1/apps/import", "apps", R, Tgt::AnyGrant).lends(Lend::Each(apps_repo)),
     row("GET", "/v1/apps/projects/{project}/services", "apps", R, one(&["project"], "project")),
     row("GET", "/v1/apps/services/{id}/environments/{env}/variables/values", "apps", REVEAL, one(PG, "service")).env(EnvFrom::Param("env")),
+    // A static site's forms: what people sent through them is theirs to see only with reveal.
+    row("GET", "/v1/apps/services/{id}/environments/{env}/forms", "apps", R, one(PG, "service")).env(EnvFrom::Param("env")),
+    row("GET", "/v1/apps/services/{id}/environments/{env}/forms/{form}/submissions", "apps", REVEAL, one(PG, "service")).env(EnvFrom::Param("env")),
+    row("DELETE", "/v1/apps/services/{id}/environments/{env}/forms/{form}/submissions/{sub}", "apps", D, one(PG, "service")).env(EnvFrom::Param("env")),
     // `copy_from` copies another environment's values into this one: reveal there too.
     row("PATCH", "/v1/apps/services/{id}/environments/{env}/variables", "apps", Act::ProductionIf("env"), one(PG, "service")).env(EnvFrom::Param("env")).copies_from(CopyFrom::Body("copy_from")),
     // What the next deploy changes: names of variables and settings, never a value.
@@ -1435,6 +1581,20 @@ static ROWS: &[Row] = &[
     // Each data branch's connection as the preview's services get it (the branches' own
     // credentials, never a parent's; previews-next): reveal, as the preview's env is.
     row("GET", "/v1/previews/{id}/connect", "previews", REVEAL, one(PG, "preview")).env(EnvFrom::Fixed("preview")),
+    // A shell in a preview's running service runs anything with its variables and branches, as
+    // roll apps' shells do: admin, every route of it (what closes an admin's shell is admin).
+    row("POST", "/v1/previews/{id}/shell/sessions", "previews", ADMIN, one(PG, "preview")).env(EnvFrom::Fixed("preview")),
+    row("GET", "/v1/previews/{id}/shell/sessions/{sh}/screen", "previews", ADMIN, one(PG, "preview")).env(EnvFrom::Fixed("preview")),
+    row("POST", "/v1/previews/{id}/shell/sessions/{sh}/keys", "previews", ADMIN, one(PG, "preview")).env(EnvFrom::Fixed("preview")),
+    row("POST", "/v1/previews/{id}/shell/sessions/{sh}/resize", "previews", ADMIN, one(PG, "preview")).env(EnvFrom::Fixed("preview")),
+    row("DELETE", "/v1/previews/{id}/shell/sessions/{sh}", "previews", ADMIN, one(PG, "preview")).env(EnvFrom::Fixed("preview")),
+    // Files in a preview's service (`roll preview cp`): read, anything it keeps (its variables
+    // too); written, anything it runs next: admin, as the shell is.
+    row("GET", "/v1/previews/{id}/files", "previews", ADMIN, one(PG, "preview")).env(EnvFrom::Fixed("preview")),
+    // A port of a preview's service on a laptop (`roll preview forward`): any port it listens on,
+    // past its access: admin, as roll apps' tunnel is.
+    row("GET", "/v1/previews/{id}/forward", "previews", ADMIN, one(PG, "preview")).env(EnvFrom::Fixed("preview")),
+    row("PUT", "/v1/previews/{id}/files", "previews", ADMIN, one(PG, "preview")).env(EnvFrom::Fixed("preview")),
     // The mail a preview's services sent, caught and never delivered (previews-next): it can hold
     // copies of production's people, so reveal, as the preview's env is.
     row("GET", "/v1/previews/{id}/mail", "previews", REVEAL, one(PG, "preview")).env(EnvFrom::Fixed("preview")),
@@ -1442,6 +1602,7 @@ static ROWS: &[Row] = &[
     // Accepting a visual change is a person's call (with `visual_review = "required"` previews
     // refuses tokens anyway): admin, so a write token can't wave its own diff through.
     row("POST", "/v1/previews/{id}/visual/accept", "previews", ADMIN, one(PG, "preview")).env(EnvFrom::Fixed("preview")),
+    row("POST", "/v1/previews/{id}/regressions/accept", "previews", ADMIN, one(PG, "preview")).env(EnvFrom::Fixed("preview")),
     // Letting a fork's pull request run with the project's data (a Git URL service's preview,
     // roll code's `approve-run`): a person's call, as accepting a visual change is.
     row("POST", "/v1/previews/{id}/approve", "previews", ADMIN, one(PG, "preview")).env(EnvFrom::Fixed("preview")),
@@ -1475,6 +1636,11 @@ static ROWS: &[Row] = &[
     row("PATCH", "/v1/code/changes/{id}/enqueue", "code", DEPLOY, one(PG, "change")),
     // Running a fork's code with the repo's data is the repo's owner's call.
     row("POST", "/v1/code/changes/{id}/approve-run", "code", ADMIN, one(PG, "change")),
+    // "Store in roll": a change's credential into roll secrets. A writer's (roll secrets then asks
+    // the same grant for `write` in the folder); the target lists the project's environments, so
+    // it's a writer's too.
+    row("GET", "/v1/code/changes/{id}/unstored/{fingerprint}", "code", W, one(PG, "change")),
+    row("POST", "/v1/code/changes/{id}/unstored/{fingerprint}/store", "code", W, one(PG, "change")),
     row("*", "/v1/code/threads/{id}", "code", M, one(PG, "thread")),
     row("*", "/v1/code/threads/{id}/", "code", M, one(PG, "thread")),
     row("*", "/v1/code/work/{id}", "code", M, one(PG, "work")),
@@ -1656,9 +1822,23 @@ mod tests {
         assert_eq!(bulk_action(b"{\"index\":{}}\n{\"t\":1}\n{\"delete\":{\"_id\":\"2\"}}\n"), Action::Delete);
         assert_eq!(bulk_action(b"{\"update\":{\"_id\":\"3\"}}\n{\"script\":{\"source\":\"ctx.op = 'delete'\"}}\n"), Action::Delete);
         assert_eq!(apps_notification_action(&serde_json::json!({ "url": "https://example.com/h" })), Action::Reveal);
+        assert_eq!(apps_git_login_action(&serde_json::json!({ "username": "x", "secret": "GIT_TOKEN" })), Action::Deploy, "a project secret sent to the source's host");
+        assert_eq!(apps_git_login_action(&serde_json::json!({ "username": "x", "password": "p" })), Action::Write);
         assert_eq!(apps_notification_action(&serde_json::json!({ "kind": "slack", "url": "https://hooks.slack.com/x" })), Action::Write);
         let dep = find("POST", "/v1/apps/services/{id}/environments/{env}/deploys", "x").unwrap();
         assert_eq!(dep.row.action("POST", &[("env".into(), "production".into())], None), Action::Deploy);
+        // Past a deploy freeze: a person's call (admin), never a deploy token's.
+        let mut over = axum::http::HeaderMap::new();
+        over.insert("x-roll-override", axum::http::HeaderValue::from_static("1"));
+        for route in ["deploys", "redeploy", "promote", "deploys/{dep}/rollback"] {
+            let f = find("POST", &format!("/v1/apps/services/{{id}}/environments/{{env}}/{route}"), "x").unwrap();
+            assert_eq!(f.row.action_with("POST", &[("env".into(), "staging".into())], None, &over), Action::Admin, "{route}");
+        }
+        // Lifting a freeze would get past it: admin too, any environment.
+        let env = find("PUT", "/v1/apps/services/{id}/environments/{env}", "x").unwrap();
+        let none = axum::http::HeaderMap::new();
+        assert_eq!(env.row.action_with("PUT", &[("env".into(), "staging".into())], Some(&serde_json::json!({ "freeze": null })), &none), Action::Admin);
+        assert_eq!(env.row.action_with("PUT", &[("env".into(), "staging".into())], Some(&serde_json::json!({ "vitals": true })), &none), Action::Write);
         assert_eq!(dep.row.action("POST", &[("env".into(), "staging".into())], None), Action::Write);
         assert_eq!(sql_action(&serde_json::json!({ "sql": "select 1", "read_only": true })), Action::Read);
         assert_eq!(sql_action(&serde_json::json!({ "sql": "select 1" })), Action::Write);
@@ -1673,6 +1853,7 @@ mod tests {
         let reveals = |m: &str, p: &str| by_path(m, p).unwrap().row.reveals;
         assert!(reveals("GET", "/v1/previews/projects/prj_1/settings").contains(&"env"));
         assert!(reveals("GET", "/v1/tasks/messages/msg_1").contains(&"headers") && reveals("GET", "/v1/tasks/schedules").contains(&"headers"));
+        assert!(reveals("PUT", "/v1/apps/services/svc_1/environments/production").contains(&"heartbeat_urls"), "a heartbeat's ping URL is shown once, to who may reveal");
         assert_eq!(by_path("GET", "/v1/code/agents/acme/shares").unwrap().row.action("GET", &[], None), Action::Reveal);
         // Connecting a GitHub repository, landing over the rules, and dropping a stream's
         // records aren't the plain write or deploy their routes otherwise are.

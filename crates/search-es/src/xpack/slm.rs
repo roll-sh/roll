@@ -102,8 +102,12 @@ fn str_of<'a>(v: &'a Value, k: &str) -> &'a str {
 }
 
 /// When a policy runs next: the first scheduled time after its last change, its last run and
-/// the last start, whichever is latest.
+/// the last start, whichever is latest. Never for a policy a branch inherited
+/// ([`crate::branch`]).
 fn policy_next(st: &ClusterState, rec: &Value) -> Option<i64> {
+    if crate::branch::paused_policy(rec) {
+        return None;
+    }
     let sched = schedule_of(str_of(policy_body(rec), "schedule"))?;
     let modified = num(rec, "modified_date").unwrap_or(0);
     let reference = modified.max(num(rec, "last_run").unwrap_or(0)).max(started_at(st));
@@ -172,11 +176,13 @@ impl Retention {
     }
 }
 
-/// Policies with a retention, with their repositories.
+/// Policies with a retention, with their repositories (not those a branch inherited: their
+/// snapshots are the parent's).
 fn retained(st: &ClusterState) -> Vec<(String, String, Retention, i64)> {
     st.metadata
         .xpack
         .iter(POLICIES)
+        .filter(|(_, rec)| !crate::branch::paused_policy(rec))
         .filter_map(|(id, rec)| {
             let p = policy_body(rec);
             Retention::of(p).map(|r| (id.clone(), str_of(p, "repository").to_string(), r, num(rec, "modified_date").unwrap_or(0)))
@@ -250,6 +256,9 @@ fn bump_policy(stats: &mut Map, id: &str, k: &str, by: i64) {
 /// (`None`: the policy is gone).
 async fn execute(cluster: &Cluster, id: &str, now: i64, scheduled: bool) -> Option<String> {
     let rec = cluster.state().metadata.xpack.get(POLICIES, id).cloned()?;
+    if crate::branch::paused_policy(&rec) {
+        return None;
+    }
     let p = policy_body(&rec).clone();
     let owner = rec.pointer(&["_roll", "user"]).and_then(internal::principal_of);
     let repo = str_of(&p, "repository").to_string();
@@ -444,6 +453,9 @@ pub(crate) enum Since {
     NoPolicy,
     /// No successful snapshot started at or after the time asked about.
     NotYet,
+    /// As [`Since::NotYet`], and the policy is one a branch inherited: it won't run until the
+    /// branch puts it again ([`crate::branch`]).
+    Paused,
     /// The last successful snapshot doesn't include the index.
     Without,
     Taken,
@@ -453,7 +465,9 @@ pub(crate) enum Since {
 /// `index`.
 pub(crate) fn snapshot_since(st: &ClusterState, id: &str, index: &str, since: i64) -> Since {
     let Some(rec) = st.metadata.xpack.get(POLICIES, id) else { return Since::NoPolicy };
-    let Some(last) = rec.get("last_success").filter(|l| num(l, "start_time").is_some_and(|t| t >= since)) else { return Since::NotYet };
+    let Some(last) = rec.get("last_success").filter(|l| num(l, "start_time").is_some_and(|t| t >= since)) else {
+        return if crate::branch::paused_policy(rec) { Since::Paused } else { Since::NotYet };
+    };
     let name = str_of(last, "snapshot_name");
     let repo = str_of(policy_body(rec), "repository");
     let included = st
@@ -665,7 +679,9 @@ pub async fn put_lifecycle(ctx: &Ctx<'_>) -> EsResult<Reply> {
             check_interval(st, str_of(&parsed, "schedule"), now)?;
             // An update keeps the policy's history (`SnapshotLifecyclePolicyMetadata.builder(old)`).
             let mut rec = match st.metadata.xpack.get(POLICIES, &id) {
-                Some(old) if old.get("policy") == Some(&parsed) => return Ok(()),
+                // The same policy again changes nothing, unless it's one a branch inherited:
+                // putting it makes it the branch's own.
+                Some(old) if old.get("policy") == Some(&parsed) && !crate::branch::paused_policy(old) => return Ok(()),
                 Some(Value::Obj(old)) => {
                     let mut r = old.clone();
                     let v = old.get("version").and_then(Value::as_i64).unwrap_or(0) + 1;
@@ -694,9 +710,12 @@ pub async fn put_lifecycle(ctx: &Ctx<'_>) -> EsResult<Reply> {
     Reply::acknowledged()
 }
 
+/// `XContentBuilder.timeField`: the readable form is `strict_date_optional_time`, milliseconds
+/// always (`2026-11-19T01:30:00.000Z`), not `Instant.toString()`'s.
 fn time_field(m: &mut Map, raw: &str, readable: &str, ms: i64, human: bool) {
     if human {
-        m.insert(readable.into(), Value::from(crate::time::java_instant_string(ms)));
+        let text = crate::time::DateFormatter::new("strict_date_optional_time").map(|f| f.format_millis(ms)).unwrap_or_else(|_| crate::time::java_instant_string(ms));
+        m.insert(readable.into(), Value::from(text));
     }
     m.insert(raw.into(), Value::from(ms));
 }
@@ -741,7 +760,8 @@ fn item(ctx: &Ctx, st: &ClusterState, id: &str, rec: &Value) -> Value {
             m.insert(k.into(), invocation(v, human));
         }
     }
-    if let Some(next) = schedule_of(str_of(policy_body(rec), "schedule")).and_then(|s| next_after(&s, modified, ctx.now_ms.max(modified))) {
+    let next = schedule_of(str_of(policy_body(rec), "schedule")).filter(|_| !crate::branch::paused_policy(rec)).and_then(|s| next_after(&s, modified, ctx.now_ms.max(modified)));
+    if let Some(next) = next {
         time_field(&mut m, "next_execution_millis", "next_execution", next, human);
     }
     m.insert("stats".into(), policy_stats(st, id));
@@ -792,6 +812,10 @@ pub async fn delete_lifecycle(ctx: &Ctx<'_>) -> EsResult<Reply> {
 pub async fn execute_lifecycle(ctx: &Ctx<'_>) -> EsResult<Reply> {
     ctx.validate_timeouts()?;
     let id = ctx.path_param("policy_id").unwrap_or_default().to_string();
+    // A policy a branch inherited would snapshot as the parent's user: put it again first.
+    if ctx.state().metadata.xpack.get(POLICIES, &id).is_some_and(crate::branch::paused_policy) {
+        return Err(EsError::new(409, "illegal_state_exception", format!("snapshot lifecycle policy [{id}]: {}", crate::branch::SLM_PAUSED)));
+    }
     match execute(ctx.cluster, &id, ctx.now_ms, false).await {
         Some(name) => Reply::ok(obj! { "snapshot_name" => name }),
         None => Err(EsError::illegal_argument(format!("no such snapshot lifecycle policy [{id}]"))),
@@ -1009,6 +1033,9 @@ mod tests {
         // A schedule far ahead ends the runs; retention keeps the newest two.
         let (s, v) = call(&c, "PUT", "/_slm/policy/p", r#"{"schedule":"0 0 0 1 1 ? 2099","name":"<s-{now/d}>","repository":"repo","retention":{"max_count":2}}"#).await;
         assert_eq!(s, 200, "{v}");
+        // Readable times are `XContentBuilder.timeField`'s: milliseconds even when they're zero.
+        let (_, v) = call(&c, "GET", "/_slm/policy/p?human", "").await;
+        assert_eq!(v.pointer(&["p", "next_execution"]).and_then(Value::as_str), Some("2099-01-01T00:00:00.000Z"), "{v}");
         let taken = policy_snapshots(&c);
         let (s, v) = call(&c, "POST", "/_slm/_execute_retention", "").await;
         assert_eq!(s, 200, "{v}");

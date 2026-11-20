@@ -82,6 +82,19 @@ pub struct ApiKeyAuth {
     pub role_descriptors: Value,
     pub limited_by: Value,
     pub cross_cluster: bool,
+    /// A linked remote cluster's request (`cross_cluster` key, [`api_keys::authenticate_link`]):
+    /// who it was sent for.
+    pub remote: Option<Box<RemoteUser>>,
+}
+
+/// The user a linked remote cluster's request was sent for.
+#[derive(Clone, Debug, PartialEq)]
+pub struct RemoteUser {
+    /// The role descriptor sets of the user's `remote_indices` privileges for the remote, each
+    /// limiting the key's access further.
+    pub roles: Vec<Value>,
+    /// How errors name the user (`user [u] with assigned roles [r]`).
+    pub who: String,
 }
 
 /// An authenticated user.
@@ -129,6 +142,7 @@ impl Principal {
                 role_descriptors: obj! { "index_scope" => obj! { "cluster" => Value::Arr(Vec::new()), "indices" => Value::Arr(vec![obj! { "names" => Value::Arr(names), "privileges" => Value::Arr(vec![Value::from("all")]) }]) } },
                 limited_by,
                 cross_cluster: false,
+                remote: None,
             })),
             ..Principal::owner()
         }
@@ -232,6 +246,17 @@ pub fn unauthorized_credentials(detail: impl Into<String>) -> EsError {
 /// Authenticates the request and records its principal.
 pub fn authenticate(ctx: &Ctx) -> EsResult<()> {
     let req = ctx.request;
+    // A linked remote cluster's request: the node keeps the header only on roll's own calls.
+    if let Some(access) = req.header(crate::remote::links::REMOTE_ACCESS_HEADER) {
+        let key = req.header("authorization").and_then(|h| {
+            let h = h.trim();
+            let (scheme, value) = h.split_once(' ')?;
+            scheme.eq_ignore_ascii_case("apikey").then(|| value.trim())
+        });
+        let Some(key) = key else { return Err(unauthorized("a remote cluster's request needs its cross-cluster API key")) };
+        let _ = ctx.principal.set(api_keys::authenticate_link(ctx.cluster, key, access)?);
+        return Ok(());
+    }
     let p = if req.header(AUTHENTICATED_HEADER).is_some() {
         req.header(INDEX_SCOPE_HEADER).map(Principal::owner_scoped)
     } else {
@@ -352,11 +377,24 @@ pub fn authenticate_native(cluster: &Cluster, header: &str) -> Option<Principal>
     None
 }
 
+/// [`authenticate_native`] for a linked remote cluster's request (`access`: its remote access
+/// header): a `cross_cluster` key of this cluster only.
+pub fn authenticate_native_link(cluster: &Cluster, header: &str, access: &str) -> Option<Principal> {
+    let (scheme, value) = header.trim().split_once(' ')?;
+    if !scheme.eq_ignore_ascii_case("apikey") {
+        return None;
+    }
+    api_keys::authenticate_link(cluster, value.trim(), access).ok()
+}
+
 /// The permissions a principal's roles grant (an API key's: its own descriptors, limited by
 /// its owner's).
 pub struct Effective {
     pub own: Vec<Permission>,
     pub limited_by: Option<Vec<Permission>>,
+    /// Further sets that each limit what's allowed (a linked remote's request: the user's
+    /// `remote_indices` descriptors, beyond the key's own and the first set in `limited_by`).
+    pub also: Vec<Vec<Permission>>,
     /// Backing indices by name, with their data streams: a backing index is authorized by
     /// what its data stream is (`IndicesPermission`'s `IndexResource`). Failure store indices
     /// are not: they need the failure store's own privileges.
@@ -366,10 +404,11 @@ pub struct Effective {
 impl Effective {
     fn allows(&self, f: impl Fn(&Permission) -> bool) -> bool {
         let own = self.own.iter().any(&f);
-        match &self.limited_by {
+        let limited = match &self.limited_by {
             Some(l) => own && l.iter().any(&f),
             None => own,
-        }
+        };
+        limited && self.also.iter().all(|set| set.iter().any(&f))
     }
 
     pub fn allows_cluster(&self, action: &str) -> bool {
@@ -483,7 +522,16 @@ fn permissions_of_descriptors(d: &Value) -> Vec<Permission> {
 
 /// The effective permissions of a principal.
 pub fn effective(file: &FileRoles, st: &crate::meta::ClusterState, p: &Principal) -> Effective {
+    let mut also = Vec::new();
     let (own, limited_by) = match &p.kind {
+        AuthKind::ApiKey(a) if a.remote.is_some() => {
+            // A linked remote's request: the key's access, limited by every set it was sent
+            // with (none: nothing).
+            let mut sets = a.remote.iter().flat_map(|r| r.roles.iter()).map(permissions_of_descriptors);
+            let first = sets.next().unwrap_or_default();
+            also.extend(sets);
+            (permissions_of_descriptors(&a.role_descriptors), Some(first))
+        }
         AuthKind::ApiKey(a) => {
             let (role_descriptors, limited_by) = (&a.role_descriptors, &a.limited_by);
             let limited = permissions_of_descriptors(limited_by);
@@ -501,7 +549,7 @@ pub fn effective(file: &FileRoles, st: &crate::meta::ClusterState, p: &Principal
         _ => (permissions_of_roles(file, st, &p.roles), None),
     };
     let parents = st.metadata.data_streams.values().flat_map(|d| d.indices.iter().map(|i| (i.clone(), d.name.clone()))).collect();
-    Effective { own, limited_by, parents }
+    Effective { own, limited_by, also, parents }
 }
 
 /// Read APIs whose wildcard index expressions Elasticsearch expands to the indices the user
@@ -697,6 +745,13 @@ fn authorize_action(ctx: &Ctx) -> EsResult<Option<String>> {
             }
             Err(denied(p, &action, None))
         }
+        // A search on a point in time names no index: it reads the point in time's, which the
+        // caller must be allowed to search (Elasticsearch authorizes it against them).
+        Scope::Index if ctx.api.name() == "search" && pit_of(ctx).is_some() => {
+            // `SearchRequest.validate` runs first: a point in time names its own indices.
+            crate::search::check_pit_without_indices(ctx, true)?;
+            authorize_pit(ctx, p, &eff, &action, &pit_of(ctx).unwrap_or_default())
+        }
         Scope::Index if NARROWED.contains(&ctx.api.name()) => narrow(ctx, p, &eff, &action),
         // Composite requests: their items are authorized as they run (`authorize_writes`,
         // `authorize_gets`, each search of an msearch).
@@ -840,7 +895,7 @@ pub fn check_mapping_update(ctx: &Ctx, idx: &crate::meta::IndexMeta) -> EsResult
         }
         let restricted = privileges::is_restricted(name);
         if eff.allows(|perm| perm.allows_index(AUTO_PUT, name, restricted) || bwc(perm, name, restricted).is_some()) {
-            let grant = eff.own.iter().chain(eff.limited_by.iter().flatten()).find_map(|perm| (!perm.allows_index(AUTO_PUT, name, restricted)).then(|| bwc(perm, name, restricted)).flatten());
+            let grant = eff.own.iter().chain(eff.limited_by.iter().flatten()).chain(eff.also.iter().flatten()).find_map(|perm| (!perm.allows_index(AUTO_PUT, name, restricted)).then(|| bwc(perm, name, restricted)).flatten());
             if let Some(g) = grant {
                 ctx.warn(format!(
                     "the index privilege [{}] allowed the update mapping action [{AUTO_PUT}] on index [{name}], this privilege will not permit mapping updates in the next major release - users who require access to update mappings must be granted explicit privileges",
@@ -990,6 +1045,41 @@ fn check_all(ctx: &Ctx, p: &Principal, eff: &Effective, action: &str, exprs: Vec
 /// names given explicitly must be authorized, unless `ignore_unavailable` drops the ones that
 /// aren't (`IndexAbstractionResolver`). `-*` (no index) when nothing is left, as
 /// Elasticsearch's resolver does.
+/// An `_msearch` item on point in time `id`, authorized as `_search` authorizes one
+/// ([`authorize_pit`]): its indices are the point in time's, never narrowed to the caller's.
+pub fn authorize_search_pit(ctx: &Ctx, id: &str) -> EsResult<()> {
+    const SEARCH: &str = "indices:data/read/search";
+    let Some(p) = ctx.principal.get().filter(|p| !p.is_superuser()) else { return Ok(()) };
+    let eff = effective(&file_roles(ctx.cluster), &ctx.state(), p);
+    authorize_pit(ctx, p, &eff, SEARCH, id).map(|_| ())
+}
+
+/// The point in time a search body names.
+fn pit_of(ctx: &Ctx) -> Option<String> {
+    ctx.body().ok().flatten()?.pointer(&["pit", "id"]).map(Value::to_es_string)
+}
+
+/// A search on point in time `id`: allowed when the caller may search every index it holds, on
+/// every search (a role that lost an index loses it here too). One over linked clusters is
+/// checked here for its local part; each remote part is authorized on its own cluster with the
+/// caller's `remote_indices`. An id that names nothing of the caller's is the search's own 404.
+fn authorize_pit(ctx: &Ctx, p: &Principal, eff: &Effective, action: &str, id: &str) -> EsResult<Option<String>> {
+    let owner = crate::search::contexts::owner_of(ctx);
+    let local = if crate::remote::contexts::is_ccs(id) {
+        match ctx.cluster.ccs_contexts.local_pit(id, &owner) {
+            Some(local) => local,
+            None => return Ok(None),
+        }
+    } else {
+        id.to_string()
+    };
+    let Some(mut names) = ctx.cluster.contexts.with(&local, &owner, None, |c| c.targets.iter().map(|t| t.idx.name.clone()).collect::<Vec<String>>()) else { return Ok(None) };
+    names.sort();
+    names.dedup();
+    let denied_on: Vec<String> = names.into_iter().filter(|n| !eff.allows_index(action, n)).collect();
+    if denied_on.is_empty() { Ok(None) } else { Err(denied(p, action, Some(&denied_on))) }
+}
+
 fn narrow(ctx: &Ctx, p: &Principal, eff: &Effective, action: &str) -> EsResult<Option<String>> {
     use crate::meta::resolve::IndicesOptions;
     let defaults = narrow_defaults(ctx.api.name());
@@ -1005,7 +1095,7 @@ fn narrow_exprs(
     p: &Principal,
     eff: &Effective,
     action: &str,
-    mut exprs: Vec<String>,
+    exprs: Vec<String>,
     opts: &crate::meta::resolve::IndicesOptions,
     ignore_unavailable: bool,
 ) -> EsResult<Option<Vec<String>>> {
@@ -1013,6 +1103,16 @@ fn narrow_exprs(
     // reads they make for their client (`internal::as_caller`) skip missing indices, never
     // ones the client may not read.
     let ignore_unavailable = ignore_unavailable && crate::xpack::internal::caller().is_none();
+    // Linked remote clusters' expressions are authorized there, with the principal's
+    // `remote_indices` privileges (`crate::remote::links`).
+    let (linked, mut exprs): (Vec<String>, Vec<String>) = exprs.into_iter().partition(|e| crate::remote::links::names_link(ctx, e));
+    if exprs.is_empty() && !linked.is_empty() {
+        return Ok(None);
+    }
+    let with_linked = |mut v: Vec<String>| {
+        v.extend(linked.iter().cloned());
+        v
+    };
     let wildcard = |e: &str| e.contains('*') || e == "_all";
     if !exprs.is_empty() && !exprs.iter().any(|e| wildcard(e)) {
         let mut names: Vec<String> = exprs.iter().map(|e| e.trim_start_matches('-').to_string()).collect();
@@ -1053,7 +1153,7 @@ fn narrow_exprs(
     if !denied_on.is_empty() {
         return Err(denied(p, action, Some(&denied_on)));
     }
-    Ok(Some(if out.is_empty() { vec!["-*".to_string()] } else { out }))
+    Ok(Some(with_linked(if out.is_empty() { vec!["-*".to_string()] } else { out })))
 }
 
 /// The `indices:admin/aliases` check of an alias the request creates on `indices` for its
@@ -1141,7 +1241,13 @@ fn denied(p: &Principal, action: &str, indices: Option<&[String]>) -> EsError {
     if let Some(id) = p.os() {
         return opensearch::denied(p, id, action);
     }
-    let who = who(p);
+    // A linked remote cluster's request: Elasticsearch names the user it was sent for and the key.
+    let (towards, who) = match &p.kind {
+        AuthKind::ApiKey(a) if a.remote.is_some() => {
+            (" towards remote cluster", format!("{} authenticated by API key id [{}] of user [{}]", a.remote.as_ref().map_or("", |r| r.who.as_str()), a.id, p.username))
+        }
+        _ => ("", who(p)),
+    };
     let on = indices.map(|i| format!(" on indices [{}]", i.join(","))).unwrap_or_default();
     let by = privileges::granted_by(action, indices.is_none());
     let grant = if by.is_empty() {
@@ -1149,7 +1255,7 @@ fn denied(p: &Principal, action: &str, indices: Option<&[String]>) -> EsError {
     } else {
         format!(", this action is granted by the {} privileges [{}]", if indices.is_none() { "cluster" } else { "index" }, by.join(","))
     };
-    EsError::security(403, format!("action [{action}] is unauthorized for {who}{on}{grant}"))
+    EsError::security(403, format!("action [{action}]{towards} is unauthorized for {who}{on}{grant}"))
 }
 
 /// The indices a request names, for audit entries: [`request_indices`] for APIs that target

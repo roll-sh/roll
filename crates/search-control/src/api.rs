@@ -68,6 +68,8 @@ pub fn router(control: Arc<Control>) -> Router {
         .route("/v1/search/clusters/{id}/analytics", get(analytics))
         .route("/v1/search/clusters/{id}/keys", post(create_key))
         .route("/v1/search/clusters/{id}/keys/{key}", axum::routing::delete(delete_key))
+        .route("/v1/search/clusters/{id}/remotes", get(remotes))
+        .route("/v1/search/clusters/{id}/remotes/{alias}", axum::routing::put(link_remote).delete(unlink_remote))
         .route("/v1/search/clusters/{id}/indices/{index}", get(index_get).put(index_create).delete(index_delete))
         .route("/v1/search/clusters/{id}/indices/{index}/mapping", axum::routing::put(index_mapping).get(index_mapping_get))
         .route("/v1/search/clusters/{id}/indices/{index}/settings", get(index_settings))
@@ -78,6 +80,8 @@ pub fn router(control: Arc<Control>) -> Router {
         .route("/v1/search/clusters/{id}/indices/{index}/docs/{doc}", get(doc_get).put(doc_put).delete(doc_delete))
         .route("/v1/search/clusters/{id}/indices/{index}/bulk", post(index_bulk))
         .route("/v1/search/clusters/{id}/indices/{index}/delete_by_query", post(index_delete_by_query))
+        .route("/v1/search/clusters/{id}/indices/{index}/suggestions", get(suggestions))
+        .route("/v1/search/clusters/{id}/indices/{index}/suggestions/rebuild", post(rebuild_suggestions))
         // Calls about one cluster: the caller's own, then on its owner.
         .layer(axum::middleware::from_fn_with_state(control.clone(), per_cluster))
         // The dashboard calls it from the browser, like the other control planes.
@@ -599,6 +603,37 @@ async fn delete_key(State(c): State<AppState>, Path((id, key)): Path<(String, St
     Ok(StatusCode::NO_CONTENT)
 }
 
+/// The remote clusters a cluster holds credentials for (never the credentials).
+async fn remotes(State(c): State<AppState>, Path(id): Path<String>) -> ApiResult<Value> {
+    Ok(Json(json!({ "remotes": c.remotes(&id).await? })))
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct LinkRemote {
+    /// The remote cluster: another of the caller's own (id or name).
+    cluster: String,
+    skip_unavailable: Option<bool>,
+    /// What the cross-cluster API key roll makes may search (Elasticsearch's `access`).
+    access: Option<Value>,
+    /// A cross-cluster API key the caller made on the remote instead (its `encoded` value).
+    api_key: Option<String>,
+}
+
+/// Links a cluster to another of the same owner as its remote `alias` (cross-cluster search).
+/// A remote the caller can't see, or another person's, answers 404 as a missing one does.
+async fn link_remote(State(c): State<AppState>, caller: Caller, Path((id, alias)): Path<(String, String)>, Json(b): Json<LinkRemote>) -> ApiResult<Value> {
+    if b.access.is_some() && b.api_key.is_some() {
+        return Err(ControlError::Invalid("give access (roll makes the key) or api_key (yours), not both".into()));
+    }
+    Ok(Json(c.link_remote(&id, &alias, &b.cluster, b.skip_unavailable, b.access, b.api_key.as_deref(), |t| caller.sees(t)).await?))
+}
+
+async fn unlink_remote(State(c): State<AppState>, Path((id, alias)): Path<(String, String)>) -> Result<StatusCode, ControlError> {
+    c.unlink_remote(&id, &alias).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
 #[derive(Deserialize)]
 struct UsageQuery {
     days: Option<i64>,
@@ -654,6 +689,18 @@ struct AnalyticsQuery {
 async fn analytics(State(c): State<AppState>, Path(id): Path<String>, Query(q): Query<AnalyticsQuery>) -> ApiResult<Value> {
     let index = q.index.as_deref().filter(|i| !i.is_empty());
     Ok(Json(c.analytics(&id, index, q.range.as_deref().unwrap_or("24h")).await?))
+}
+
+/// An index's query suggestions: settings, last build, heaviest suggestions (`crate::suggestions`).
+async fn suggestions(State(c): State<AppState>, Path((id, index)): Path<(String, String)>) -> ApiResult<Value> {
+    index_segment(&index, false)?;
+    Ok(Json(c.suggestions(&id, &index).await?))
+}
+
+/// Rebuilds an index's suggestions index now.
+async fn rebuild_suggestions(State(c): State<AppState>, Path((id, index)): Path<(String, String)>) -> ApiResult<Value> {
+    index_segment(&index, false)?;
+    Ok(Json(Box::pin(c.rebuild_suggestions(&id, &index)).await?))
 }
 
 #[cfg(test)]

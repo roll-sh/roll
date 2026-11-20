@@ -2,13 +2,82 @@
 //! read-then-write is one transaction, so racing writers never lose a change or share a number.
 //! On SQLite by default; `ROLL_CODE_TEST_DATABASE=postgres://…` runs it on Postgres.
 
-use roll_secrets::{Batch, Caller, Keyring, Op, Options, Secrets};
+use roll_secrets::access::Grants;
+use roll_secrets::clouds::{CloudTokens, Clouds};
+use roll_secrets::links::{Field, Link, LinkProvider, Links, Mode};
+use roll_secrets::{Action, Batch, Caller, Import, Keyring, Op, Options, Scope, Secrets};
 use std::sync::Arc;
 
 fn node(dir: &std::path::Path, ws: Arc<roll_workspace::Workspace>) -> Arc<Secrets> {
-    let db = code_sql::Db::open_or_test(&code_sql::Target::Sqlite(dir.join("secrets.db")), "secrets").unwrap();
-    let opts = Options { keyring: Ok(Keyring::new(&"k".repeat(32), None).unwrap()), key_source: roll_secrets::KeySource::Env, links: Default::default(), syncs: Default::default(), open: true, trust_forwarded_for: false, web_url: None, deliver: None, grants: None, people: None, kms: None, sts: None, outside: None, github: None, clouds: None, workloads: None };
-    Arc::new(Secrets::new(db, ws, opts).unwrap())
+    node_with(dir, ws, Default::default(), None)
+}
+
+fn secrets_db(dir: &std::path::Path) -> code_sql::Db {
+    code_sql::Db::open_or_test(&code_sql::Target::Sqlite(dir.join("secrets.db")), "secrets").unwrap()
+}
+
+fn node_with(dir: &std::path::Path, ws: Arc<roll_workspace::Workspace>, links: Links, clouds: Option<Clouds>) -> Arc<Secrets> {
+    let opts = Options { keyring: Ok(Keyring::new(&"k".repeat(32), None).unwrap()), key_source: roll_secrets::KeySource::Env, links, syncs: Default::default(), open: true, trust_forwarded_for: false, web_url: None, deliver: None, grants: None, people: None, kms: None, sts: None, outside: None, directory: None, github: None, clouds, workloads: None, gateways: None };
+    Arc::new(Secrets::new(secrets_db(dir), ws, opts).unwrap())
+}
+
+/// A node with roll's issuer on (rolld has a public URL); no cloud is ever asked for a token.
+fn issuing_node(dir: &std::path::Path, ws: Arc<roll_workspace::Workspace>) -> Arc<Secrets> {
+    node_with(dir, ws, Default::default(), Some(Clouds { issuer: "https://roll.test/v1/secrets/oidc".into(), tokens: Arc::new(NoClouds) }))
+}
+
+struct NoClouds;
+
+impl CloudTokens for NoClouds {
+    fn gcp(&self, _: &str, _: &str, _: &roll_secrets::Value, _: u32) -> Result<(roll_secrets::Value, i64), String> {
+        Err("no clouds here".into())
+    }
+    fn azure(&self, _: &str, _: &str, _: &str, _: &roll_secrets::Value) -> Result<(roll_secrets::Value, i64), String> {
+        Err("no clouds here".into())
+    }
+}
+
+/// A token's kid, and whether that kid's key in `jwks` signed it.
+fn checked(jwks: &serde_json::Value, token: &str) -> (String, bool) {
+    use base64::Engine;
+    let b64 = |s: &str| base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(s).unwrap();
+    let parts: Vec<&str> = token.split('.').collect();
+    let header: serde_json::Value = serde_json::from_slice(&b64(parts[0])).unwrap();
+    let signed = jwks["keys"].as_array().unwrap().iter().filter(|k| k["kid"] == header["kid"]).any(|k| {
+        let public = ring::signature::RsaPublicKeyComponents { n: b64(k["n"].as_str().unwrap()), e: b64(k["e"].as_str().unwrap()) };
+        public.verify(&ring::signature::RSA_PKCS1_2048_8192_SHA256, format!("{}.{}", parts[0], parts[1]).as_bytes(), &b64(parts[2])).is_ok()
+    });
+    (header["kid"].as_str().unwrap().to_string(), signed)
+}
+
+fn kids(jwks: &serde_json::Value) -> Vec<String> {
+    jwks["keys"].as_array().unwrap().iter().map(|k| k["kid"].as_str().unwrap().to_string()).collect()
+}
+
+/// A bucket whose URL carries a password that only changes when roll rotates it.
+#[derive(Debug, Default)]
+struct Bucket(std::sync::Mutex<u32>);
+
+impl LinkProvider for Bucket {
+    fn kind(&self) -> &str {
+        "bucket"
+    }
+    fn fields(&self) -> &[Field] {
+        &[Field { field: "url", label: "URL", modes: &[Mode::Live], secret: true, suggest: "BUCKET_URL", credential: None }]
+    }
+    fn read(&self, r#ref: &str, _: &str, _: &Link) -> roll_secrets::Result<roll_secrets::Value> {
+        Ok(roll_secrets::Value::new(format!("s3://{ref}?pw={}", self.0.lock().unwrap())))
+    }
+}
+
+/// Everything but reading one environment.
+#[derive(Debug)]
+struct AllBut(&'static str);
+
+impl Grants for AllBut {
+    fn allows(&self, _: Action, at: &Scope<'_>) -> bool {
+        at.env != Some(self.0)
+    }
 }
 
 fn set(key: &str, value: &str) -> Op {
@@ -24,7 +93,8 @@ fn two_nodes_racing_on_one_environment_lose_no_change_and_share_no_number() {
     let (a, b) = (node(dir.path(), ws.clone()), node(dir.path(), ws));
 
     // Both nodes touch the project first at once: one data key and one set of environments.
-    // Each writes 20 changes to one key and one key of its own.
+    // Each writes 20 changes to one key and one key of its own, while four readers on each read
+    // values ten times (each read audited, the readers' rows written together).
     let writers: Vec<_> = [("a", a.clone()), ("b", b.clone())]
         .into_iter()
         .map(|(name, s)| {
@@ -38,7 +108,25 @@ fn two_nodes_racing_on_one_environment_lose_no_change_and_share_no_number() {
             })
         })
         .collect();
-    for w in writers {
+    let readers: Vec<_> = [a.clone(), b.clone()]
+        .into_iter()
+        .flat_map(|s| std::iter::repeat_n(s, 4))
+        .map(|s| {
+            let project = project.clone();
+            std::thread::spawn(move || {
+                // Until the writers' first touch makes the environments, there's nothing to read.
+                let mut read = 0;
+                while read < 10 {
+                    match s.values(&project, "production", "/", true, None, &Caller::operator()) {
+                        Ok(_) => read += 1,
+                        Err(roll_secrets::Error::NotFound(_)) => std::thread::yield_now(),
+                        Err(e) => panic!("{e}"),
+                    }
+                }
+            })
+        })
+        .collect();
+    for w in writers.into_iter().chain(readers) {
         w.join().unwrap();
     }
 
@@ -56,4 +144,171 @@ fn two_nodes_racing_on_one_environment_lose_no_change_and_share_no_number() {
     let show = |v: &roll_secrets::Values| v.values.iter().map(|(k, x)| format!("{k}={}", x.expose())).collect::<Vec<_>>();
     assert_eq!(show(&va), show(&vb));
     assert_eq!((va.values["ONLY_A"].expose(), va.values["ONLY_B"].expose()), ("19", "19"));
+    // Their audit rows form one chain: every number once, each row after the one before it, and
+    // a row for every read.
+    let chain = b.verify_audit(&project, Default::default(), &caller).unwrap();
+    assert!(chain.ok && chain.from == Some(1) && chain.rows >= 122, "{chain:?}");
+    let reads = a.audit(&project, roll_secrets::AuditFilter { action: Some("secrets.export".into()), limit: Some(1000), ..Default::default() }, &caller).unwrap();
+    assert_eq!(reads.len(), 82);
+}
+
+#[test]
+fn a_digest_one_node_keeps_moves_at_once_with_what_another_node_changes() {
+    let dir = tempfile::tempdir().unwrap();
+    let ws_db = code_sql::Db::open_or_test(&code_sql::Target::Sqlite(dir.path().join("workspace.db")), "workspace").unwrap();
+    let ws = Arc::new(roll_workspace::Workspace::new(ws_db).unwrap());
+    let project = ws.create("", "shop", "", None).unwrap().id;
+    ws.place(roll_workspace::Scope::All, &project, roll_workspace::Kind::Bucket, "assets", 0.0, 0.0).unwrap();
+    let bucket = Arc::new(Bucket::default());
+    let mut links = Links::default();
+    links.register(bucket.clone());
+    let (a, b) = (node_with(dir.path(), ws.clone(), links.clone(), None), node_with(dir.path(), ws, links, None));
+    let op = Caller::operator();
+    let write = |s: &Secrets, env: &str, ops: Vec<Op>| drop(s.batch(&project, env, Batch { path: None, message: None, ops, if_seq: None }, &op).unwrap());
+    let live = Op::Set { key: "BUCKET_URL".into(), value: None, comment: None, tags: None, kind: None, link: Some(Some(Link { kind: "bucket".into(), r#ref: "assets".into(), field: "url".into(), mode: Mode::Live, options: Default::default() })), path: None, expires_at: None, if_version: None };
+    write(&b, "production", vec![set("API", "1"), live]);
+    write(&b, "staging", vec![set("SHARED", "x")]);
+    let digest = |c: &Caller| a.digest(&project, "production", "/", c).unwrap();
+    let mut last = digest(&op);
+    assert_eq!(digest(&op), last, "unchanged, the same");
+    let moved = |why: &str, last: &mut String| {
+        let now = digest(&op);
+        assert_ne!(&now, last, "{why} moves it");
+        *last = now;
+    };
+    write(&b, "production", vec![set("API", "2")]);
+    moved("a write on another node", &mut last);
+    b.set_imports(&project, "production", "/", vec![Import { environment: "staging".into(), path: "/".into(), project: None }], &op).unwrap();
+    moved("an import", &mut last);
+    write(&b, "staging", vec![set("SHARED", "y")]);
+    moved("a write to what it imports", &mut last);
+    // roll rotating the bucket's credential on the other node, though this node read the
+    // product's answer a moment ago (and would keep it for seconds).
+    *bucket.0.lock().unwrap() += 1;
+    b.source_changed("bucket", "assets").unwrap();
+    moved("a rotation", &mut last);
+    // The same caller, now unable to read staging, doesn't get the digest it had.
+    let mut narrowed = Caller::operator();
+    narrowed.grants = Arc::new(AllBut("staging"));
+    assert_ne!(digest(&narrowed), last, "what the caller may read is part of it");
+    assert_eq!(digest(&op), last);
+}
+
+#[test]
+fn two_nodes_rotating_the_issuers_key_publish_one_key_and_never_sign_with_a_pulled_one() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    let dir = tempfile::tempdir().unwrap();
+    let ws_db = code_sql::Db::open_or_test(&code_sql::Target::Sqlite(dir.path().join("workspace.db")), "workspace").unwrap();
+    let ws = Arc::new(roll_workspace::Workspace::new(ws_db).unwrap());
+    let project = ws.create("", "shop", "", None).unwrap().id;
+    let (a, b) = (issuing_node(dir.path(), ws.clone()), issuing_node(dir.path(), ws));
+    // The test's own handle on the nodes' database: there's no clock to move, so a key's time is
+    // moved instead (`signs_from`, on the database's clock).
+    let db = secrets_db(dir.path());
+    a.batch(&project, "production", Batch { path: None, message: None, ops: vec![set("A", "1")], if_seq: None }, &Caller::operator()).unwrap();
+    let sign = |s: &Secrets| s.issue(roll_secrets::Subject::App { project: project.clone(), service: "svc_web".into(), env: "production".into() }, "roll", std::time::Duration::from_secs(600)).unwrap();
+    // (kid, signs_from, retired_at), oldest first.
+    let keys = || -> Vec<(String, i64, Option<i64>)> { db.read(|c| c.query("SELECT kid, COALESCE(signs_from, created_at), retired_at FROM oidc_keys ORDER BY created_at, kid", (), |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))).unwrap() };
+    let at = |kid: &str, signs_from: i64| assert_eq!(db.write(|c| c.execute("UPDATE oidc_keys SET signs_from = ? WHERE kid = ?", code_sql::params![signs_from, kid])).unwrap(), 1);
+    let jwks = a.oidc_jwks().unwrap();
+    let mut signing = checked(&jwks, &sign(&b)).0;
+    assert_eq!(keys().len(), 1, "both nodes started on one key");
+
+    // A scheduled rotation comes due (90 days less the two the next key is published ahead), and
+    // both nodes sweep at once, twice each, while both keep signing. Three times over.
+    for round in 1..=3 {
+        at(&signing, db.now_ms().unwrap() - 88 * 86_400_000 - 1000);
+        let before = keys();
+        let start = std::sync::Barrier::new(4);
+        let racing = AtomicBool::new(true);
+        let tokens: Vec<String> = std::thread::scope(|t| {
+            let sweepers: Vec<_> = [&a, &b, &a, &b]
+                .into_iter()
+                .map(|s| {
+                    let start = &start;
+                    t.spawn(move || {
+                        start.wait();
+                        s.sweep().unwrap();
+                    })
+                })
+                .collect();
+            let signers: Vec<_> = [&a, &b]
+                .into_iter()
+                .map(|s| {
+                    let (racing, sign) = (&racing, &sign);
+                    t.spawn(move || {
+                        let mut tokens = vec![sign(s)];
+                        while racing.load(Ordering::SeqCst) {
+                            tokens.push(sign(s));
+                        }
+                        tokens
+                    })
+                })
+                .collect();
+            for s in sweepers {
+                s.join().unwrap();
+            }
+            racing.store(false, Ordering::SeqCst);
+            signers.into_iter().flat_map(|s| s.join().unwrap()).collect()
+        });
+        let after = keys();
+        let new: Vec<&(String, i64, Option<i64>)> = after.iter().filter(|k| !before.iter().any(|b| b.0 == k.0)).collect();
+        assert_eq!(new.len(), 1, "round {round}: one key published, not one per node or sweep: {after:?}");
+        let now = db.now_ms().unwrap();
+        assert!(new[0].1 > now && new[0].2.is_none(), "round {round}: the new key waits to sign: {after:?}");
+        assert_eq!(after.iter().filter(|k| k.2.is_none() && k.1 > now).count(), 1, "round {round}: one key waiting");
+        let (ja, jb) = (a.oidc_jwks().unwrap(), b.oidc_jwks().unwrap());
+        assert_eq!(ja, jb, "round {round}: both nodes publish the same keys");
+        assert!(kids(&ja).contains(&new[0].0), "round {round}: the next key is published before it signs");
+        // Every token from either node during the race came from the one key signing before it.
+        for token in &tokens {
+            assert_eq!(checked(&ja, token), (signing.clone(), true), "round {round}: {} tokens", tokens.len());
+        }
+        // Its time comes: both nodes sign with it, and only it.
+        let next = new[0].0.clone();
+        at(&next, db.now_ms().unwrap() - 1000);
+        let jwks = b.oidc_jwks().unwrap();
+        for (node, s) in [("a", &a), ("b", &b)] {
+            assert_eq!(checked(&jwks, &sign(s)), (next.clone(), true), "round {round}: node {node} signs with the new key");
+        }
+        signing = next;
+    }
+
+    // An emergency on A pulls the signing key while B keeps signing. Before each token, B looks at
+    // the database: once A's write has committed, B's next tokens are never the pulled key's.
+    let pulled = signing;
+    let count = keys().len();
+    let committed = || db.read(|c| c.query_row("SELECT pulled_at FROM oidc_keys WHERE kid = ?", [pulled.as_str()], |r| r.get::<_, Option<i64>>(0))).unwrap().is_some();
+    let b_signing = std::sync::Barrier::new(2);
+    let (during, after, rotated) = std::thread::scope(|t| {
+        let signer = t.spawn(|| {
+            let (mut during, mut after) = (vec![sign(&b)], vec![]);
+            b_signing.wait();
+            while after.len() < 20 {
+                if committed() {
+                    after.push(sign(&b));
+                } else {
+                    during.push(sign(&b));
+                }
+            }
+            (during, after)
+        });
+        b_signing.wait();
+        let rotated = a.rotate_issuer(Some(&pulled), &Caller::operator()).unwrap();
+        let (during, after) = signer.join().unwrap();
+        (during, after, rotated)
+    });
+    let new = rotated["kid"].as_str().unwrap().to_string();
+    assert_ne!(new, pulled);
+    assert_eq!(keys().len(), count + 1, "one new key");
+    let jwks = b.oidc_jwks().unwrap();
+    assert_eq!(jwks, a.oidc_jwks().unwrap());
+    assert!(!kids(&jwks).contains(&pulled) && kids(&jwks).contains(&new), "{jwks}");
+    // B signed with the pulled key while A was rotating, and never after A's write committed: each
+    // later token is the new key's and verifies against the published JWKS.
+    assert_eq!(checked(&jwks, &during[0]), (pulled.clone(), false), "B was signing (with the pulled key) when A started");
+    for token in &after {
+        assert_eq!(checked(&jwks, token), (new.clone(), true), "{} tokens during, {} after", during.len(), after.len());
+    }
+    assert_eq!(checked(&jwks, &sign(&a)), (new.clone(), true));
 }

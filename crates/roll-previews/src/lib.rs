@@ -26,6 +26,7 @@ pub mod runtime;
 pub mod schema;
 pub mod settings;
 pub mod store;
+pub mod visit;
 pub mod visual;
 
 pub use engine::Engine;
@@ -184,6 +185,100 @@ impl State {
     }
 }
 
+/// A preview's routes slower than the same routes on main's preview (`branch`), the slowest
+/// against main first, at most [`SlowerRoutes::MAX`].
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct SlowerRoutes {
+    pub branch: String,
+    pub routes: Vec<SlowerRoute>,
+    /// The head it was read at: shown only for that head (a push reads it again).
+    #[serde(default)]
+    pub head: String,
+}
+
+impl SlowerRoutes {
+    pub const MAX: usize = 5;
+}
+
+/// One route (a trace's root span's name, masked) with its p50 and main's, over the last hour.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct SlowerRoute {
+    pub name: String,
+    pub count: usize,
+    pub p50_ms: u64,
+    pub main_p50_ms: u64,
+    /// The span inside it whose time grew most against main's (Sentry's span comparison): where
+    /// the time went. `None` when no span of it did (or main's spans aren't on this node).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub grew: Option<GrewSpan>,
+    /// The project's budget for it (`github.budget.routes`), when its p50 is over it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub budget_ms: Option<u64>,
+}
+
+/// A span name's median time in one route's traces (each trace's spans of that name summed: an
+/// N+1's 24 queries are one), here and on main's preview (0: main's has none of it).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GrewSpan {
+    pub span: String,
+    pub ms: u64,
+    pub main_ms: u64,
+}
+
+/// A preview's error groups that main's preview (`branch`) doesn't have: how many, and the most
+/// frequent few by service and title (masked).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct NewErrors {
+    pub branch: String,
+    pub total: usize,
+    pub errors: Vec<NewError>,
+    /// The head it was read at: shown only for that head (a push reads it again).
+    #[serde(default)]
+    pub head: String,
+}
+
+impl NewErrors {
+    pub const MAX: usize = 5;
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct NewError {
+    pub service: String,
+    pub title: String,
+}
+
+/// Someone accepted a preview's regressions against main at one head.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct RegressionsAccepted {
+    pub head: String,
+    pub by: String,
+    pub at: i64,
+    /// A person signed in to roll accepted them (not a token or the operator): a `required`
+    /// rule counts only theirs.
+    #[serde(default)]
+    pub person: bool,
+    /// What was accepted (each slower route, `route:<name>`, and new error, `error:<service>:<title>`):
+    /// anything else at the same head asks again.
+    #[serde(default)]
+    pub what: Vec<String>,
+    /// How many new errors there were (the record names the most frequent few): more asks again.
+    #[serde(default)]
+    pub errors_total: usize,
+}
+
+impl RegressionsAccepted {
+    /// The regressions a record shows, as an acceptance names them.
+    pub fn of(routes: Option<&SlowerRoutes>, errors: Option<&NewErrors>) -> Vec<String> {
+        let mut what: Vec<String> = routes
+            .iter()
+            .flat_map(|s| s.routes.iter().flat_map(|r| std::iter::once(format!("route:{}", r.name)).chain(r.budget_ms.map(|b| format!("budget:{}:{b}", r.name)))))
+            .chain(errors.iter().flat_map(|n| n.errors.iter().map(|e| format!("error:{}:{}", e.service, e.title)))).collect();
+        what.sort();
+        what.dedup();
+        what
+    }
+}
+
 /// A preview as the API shows it (docs/previews.md, "HTTP contract").
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct Preview {
@@ -265,6 +360,24 @@ pub struct Preview {
     pub page_a11y: Option<PageA11y>,
     /// Its first page's own links that are broken, of those checked (with the screenshot).
     pub page_links: Option<PageLinks>,
+    /// Its traces' routes clearly slower than main's preview's same routes (`…/routes`), as its
+    /// holder last read them (about once a minute, while the project keeps traces).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub slower_routes: Option<SlowerRoutes>,
+    /// Its error groups main's preview doesn't have, as its holder last read them (every few
+    /// minutes: Sentry's new issues in a release).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub new_errors: Option<NewErrors>,
+    /// The project's rule for regressions against main's (`check`, `required`), when it has one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub regressions: Option<String>,
+    /// Who accepted its regressions at its head (`POST …/regressions/accept`); a new head asks again.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub regressions_accepted: Option<RegressionsAccepted>,
+    /// Whether it was compared with main's preview at its head (errors, and routes when the
+    /// project keeps traces): until then nothing above says "no regressions".
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub regressions_compared: bool,
     /// The screenshot's signed link (`(expiry, signature)`), for roll code's summary; never in
     /// API answers.
     #[serde(skip)]
@@ -556,6 +669,59 @@ pub struct ServiceMetrics {
     pub cpu: f64,
     pub memory_bytes: u64,
     pub memory_mb: i64,
+}
+
+/// One error in a preview's service's output, grouped (roll apps' Errors, Sentry's issues): a
+/// stack trace joined from its lines, or an error line, by its fingerprint (its type and first
+/// frames, with what varies taken out). How many, first and last seen (ms), and the newest one
+/// whole. Title and sample are masked as its logs are.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, serde::Deserialize)]
+pub struct ErrorGroup {
+    #[serde(default)]
+    pub service: String,
+    pub fingerprint: String,
+    pub kind: String,
+    pub title: String,
+    pub count: u64,
+    pub first_seen: i64,
+    pub last_seen: i64,
+    pub sample: String,
+    /// The trace its newest sample names, when the preview keeps that trace (most OpenTelemetry
+    /// SDKs log the request's trace id with its error): its spans are one click from it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trace: Option<String>,
+}
+
+/// `text` with every secret value replaced by `***` (`code_preview::runner::mask`), and then, on
+/// each line, a value's start (6 characters or more) left at the line's end replaced too: text
+/// cut before it was masked (roll apps cuts a log line at 16 KiB, an error's title at 300
+/// characters and its sample at 8 KiB) can end inside a value, which masking whole can't find.
+pub fn mask_cut(text: &str, values: &[String]) -> String {
+    let masked = code_preview::runner::mask(text, values);
+    let starts: Vec<&[u8]> = values.iter().flat_map(|v| v.lines()).filter(|l| l.trim().len() >= 6).map(str::as_bytes).collect();
+    if starts.is_empty() {
+        return masked;
+    }
+    masked
+        .split('\n')
+        .map(|line| {
+            let b = line.as_bytes();
+            // The earliest place a value's start runs to the line's end: what's after it goes.
+            let cut = starts
+                .iter()
+                .filter_map(|v| {
+                    let from = b.len().saturating_sub(v.len() - 1);
+                    (from..b.len().saturating_sub(5)).find(|&i| b[i] == v[0] && v.starts_with(&b[i..]))
+                })
+                .min();
+            // A value starts on a character's first byte, so `i` is one of the line's boundaries.
+            match cut {
+                Some(i) => format!("{}***", &line[..i]),
+                None => line.to_string(),
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 /// `docker stats --no-stream --format '{{.CPUPerc}}|{{.MemUsage}}'` (`1.23%|84.2MiB / 256MiB`):
@@ -1062,6 +1228,14 @@ impl ResourceState {
     }
 }
 
+/// Someone signed in to roll who opened a team-access preview ([`Store::visitors`]): their
+/// handle, and when they were last in it (ms, as of their session's last recheck).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct Visitor {
+    pub who: String,
+    pub last_at: i64,
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct Activity {
     pub at: i64,
@@ -1104,6 +1278,18 @@ pub fn label_part(s: &str, max: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A value a cut splits (its start left at the end of a line, or of the text) never shows;
+    /// whole ones are masked anywhere, and text that only looks a little like one is kept.
+    #[test]
+    fn a_value_cut_in_two_never_shows_its_start() {
+        let values = ["sk_test_51Hx9abc".to_string(), "line-one\nline-two".to_string()];
+        let cut = format!("{}sk_test_5", "x".repeat(20));
+        assert_eq!(mask_cut(&cut, &values), format!("{}***", "x".repeat(20)));
+        assert_eq!(mask_cut("key sk_test_51Hx9abc ok\nthen sk_te\nline-tw", &values), "key *** ok\nthen sk_te\n***");
+        assert_eq!(mask_cut("é sk_test_51H", &values), "é ***", "cut on a character's boundary");
+        assert_eq!(mask_cut("nothing secret", &values), "nothing secret");
+    }
 
     #[test]
     fn docker_stats_read_as_cores_and_bytes() {

@@ -394,7 +394,7 @@ impl Secrets {
                     return Err(Error::Forbidden("only roll previews changes an environment's branches".into()));
                 }
                 c.execute("UPDATE environments SET branches = ? WHERE id = ?", params![json(list), env.id])?;
-                audit::record(c, project, caller, "environment.ensure", Some(slug), None, &[], &format!("{slug} leaves links to {} to roll previews", crate::write::plural(list.len(), "branched resource")), now)
+                audit::record(c, self.keys()?, project, caller, "environment.ensure", Some(slug), None, &[], &format!("{slug} leaves links to {} to roll previews", crate::write::plural(list.len(), "branched resource")), now)
             })?;
         }
         let expires_at = match (e.expires_at, e.ttl_minutes) {
@@ -424,7 +424,7 @@ impl Secrets {
                 if let Some(n) = &e.name {
                     c.execute("UPDATE environments SET name = ? WHERE id = ?", params![n, env.id])?;
                 }
-                audit::record(c, project, caller, "environment.ensure", Some(slug), None, &[], &format!("brought {slug}'s settings up to date"), now)
+                audit::record(c, self.keys()?, project, caller, "environment.ensure", Some(slug), None, &[], &format!("brought {slug}'s settings up to date"), now)
             })?;
         }
         let mut ops = e.secrets;
@@ -536,9 +536,9 @@ impl Secrets {
                 c.execute("UPDATE environments SET branches = ? WHERE id = ?", params![json(&branched), env.id])?;
                 env.branches = branched.clone();
             }
-            audit::record(c, project, caller, "environment.create", Some(&env.slug), None, &[], &format!("created {} environment {}", kind.as_str(), env.slug), now)?;
+            audit::record(c, self.keys()?, project, caller, "environment.create", Some(&env.slug), None, &[], &format!("created {} environment {}", kind.as_str(), env.slug), now)?;
             if !items.is_empty() {
-                crate::write::apply(c, &dek, &env, &items.items, "write", "created with the environment", caller, now)?;
+                crate::write::apply(c, &dek, self.keys()?, &env, &items.items, "write", "created with the environment", caller, now)?;
             }
             one(c, env)
         });
@@ -585,8 +585,8 @@ impl Secrets {
                 }
                 c.execute("UPDATE environments SET slug = ? WHERE id = ?", [new, &env.id])?;
                 env.slug = new.to_string();
-                rewrite_references(c, &dek, project, slug, new, caller, now)?;
-                audit::record(c, project, caller, "environment.rename", Some(new), None, &[], &format!("renamed {slug} to {new}"), now)?;
+                rewrite_references(c, &dek, self.keys()?, project, slug, new, caller, now)?;
+                audit::record(c, self.keys()?, project, caller, "environment.rename", Some(new), None, &[], &format!("renamed {slug} to {new}"), now)?;
             }
             one(c, env)
         })
@@ -608,7 +608,7 @@ impl Secrets {
             for (i, slug) in order.iter().enumerate() {
                 c.execute("UPDATE environments SET position = ? WHERE project_id = ? AND slug = ?", params![i as i64, project, slug])?;
             }
-            audit::record(c, project, caller, "environment.order", None, None, &[], &order.join(" → "), now)?;
+            audit::record(c, self.keys()?, project, caller, "environment.order", None, None, &[], &order.join(" → "), now)?;
             let rows = all(c, project)?;
             view(c, rows)
         })
@@ -647,7 +647,7 @@ impl Secrets {
             }
             c.execute("UPDATE environments SET protected = ?, approvals = ?, approvers = ? WHERE id = ?", params![p.protected as i64, approvals, json(&approvers), env.id])?;
             let summary = if p.protected { format!("protected, {approvals} approval{}", if approvals == 1 { "" } else { "s" }) } else { "unprotected".into() };
-            audit::record(c, project, caller, "environment.policy", Some(slug), None, &[], &summary, now)?;
+            audit::record(c, self.keys()?, project, caller, "environment.policy", Some(slug), None, &[], &summary, now)?;
             let env = by_id(c, &env.id)?;
             one(c, env)
         })
@@ -677,7 +677,7 @@ impl Secrets {
                 }
             }
             drop_env(c, &env)?;
-            audit::record(c, project, caller, "environment.delete", Some(slug), None, &[], &format!("deleted environment {slug}"), now)?;
+            audit::record(c, self.keys()?, project, caller, "environment.delete", Some(slug), None, &[], &format!("deleted environment {slug}"), now)?;
             Ok(())
         });
         if done.is_ok() {
@@ -702,7 +702,7 @@ impl Secrets {
             let now = self.db.now_ms()?;
             self.db.write(|c| {
                 drop_env(c, &e)?;
-                audit::record(c, project, caller, "environment.delete", Some(&e.slug), None, &[], &format!("deleted ephemeral environment {} ({k}={v})", e.slug), now)
+                audit::record(c, self.keys()?, project, caller, "environment.delete", Some(&e.slug), None, &[], &format!("deleted ephemeral environment {} ({k}={v})", e.slug), now)
             })?;
             self.revoke_gone(project, managed);
             deleted.push(e.slug);
@@ -749,7 +749,7 @@ impl Secrets {
                 return Err(Error::Conflict("conflict", format!("{path} exists")));
             }
             ensure_folders(c, &env.id, &path, now)?;
-            audit::record(c, project, caller, "folder.create", Some(slug), Some(&path), &[], &format!("created {path}"), now)?;
+            audit::record(c, self.keys()?, project, caller, "folder.create", Some(slug), Some(&path), &[], &format!("created {path}"), now)?;
             Ok(Folder { name: path.rsplit('/').next().unwrap_or_default().into(), path: path.clone(), secrets: 0, folders: 0 })
         })
     }
@@ -780,13 +780,13 @@ impl Secrets {
             if !folders.contains(&path) {
                 return Err(Error::NotFound(format!("no folder {path}")));
             }
-            let change = if items.is_empty() { None } else { Some(crate::write::apply(c, &dek, &env, &items, "write", &format!("deleted folder {path}"), caller, now)?.0) };
+            let change = if items.is_empty() { None } else { Some(crate::write::apply(c, &dek, self.keys()?, &env, &items, "write", &format!("deleted folder {path}"), caller, now)?.0) };
             for f in folders.iter().filter(|f| under(f)) {
                 c.execute("DELETE FROM folders WHERE env_id = ? AND path = ?", [&env.id, f])?;
                 c.execute("DELETE FROM imports WHERE env_id = ? AND path = ?", [&env.id, f])?;
                 c.execute("DELETE FROM exports WHERE env_id = ? AND path = ?", [&env.id, f])?;
             }
-            audit::record(c, project, caller, "folder.delete", Some(slug), Some(&path), &[], &format!("deleted {path}"), now)?;
+            audit::record(c, self.keys()?, project, caller, "folder.delete", Some(slug), Some(&path), &[], &format!("deleted {path}"), now)?;
             Ok(change)
         })
     }
@@ -853,7 +853,7 @@ impl Secrets {
             }
             ensure_folders(c, &env.id, &path, now)?;
             let summary = list.iter().map(|i| format!("{}{}:{}", i.project.as_ref().map(|p| format!("{p}/")).unwrap_or_default(), i.environment, i.path)).collect::<Vec<_>>().join(", ");
-            audit::record(c, project, caller, "imports.set", Some(slug), Some(&path), &[], &format!("imports: {}", if summary.is_empty() { "none" } else { &summary }), now)?;
+            audit::record(c, self.keys()?, project, caller, "imports.set", Some(slug), Some(&path), &[], &format!("imports: {}", if summary.is_empty() { "none" } else { &summary }), now)?;
             imports_of(c, &env.id, &path)
         })
     }
@@ -888,7 +888,8 @@ fn drop_env(c: &Conn<'_>, env: &EnvRow) -> Result<()> {
 
 /// After a rename from `from` to `to`: every value in the project that references `from` points
 /// at `to`, as one change per environment that had one.
-fn rewrite_references(c: &Conn<'_>, dek: &crate::crypto::Dek, project: &str, from: &str, to: &str, caller: &Caller, now: i64) -> Result<()> {
+#[allow(clippy::too_many_arguments)]
+fn rewrite_references(c: &Conn<'_>, dek: &crate::crypto::Dek, mac: &crate::Keyring, project: &str, from: &str, to: &str, caller: &Caller, now: i64) -> Result<()> {
     let rows = c.query(
         "SELECT id, env_id, path, key, owner, version, value FROM secrets WHERE project_id = ? AND value IS NOT NULL",
         [project],
@@ -903,7 +904,7 @@ fn rewrite_references(c: &Conn<'_>, dek: &crate::crypto::Dek, project: &str, fro
     }
     for (env_id, items) in by_env {
         let env = by_id(c, &env_id)?;
-        crate::write::apply(c, dek, &env, &items, "rename", &format!("references to {from} now point at {to}"), caller, now)?;
+        crate::write::apply(c, dek, mac, &env, &items, "rename", &format!("references to {from} now point at {to}"), caller, now)?;
     }
     Ok(())
 }

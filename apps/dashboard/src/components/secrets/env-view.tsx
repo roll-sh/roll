@@ -1,4 +1,4 @@
-import { Clock, Copy, Dices, Download, Folder, FolderPlus, History, Import as ImportIcon, Link2, Lock, MoreHorizontal, Pencil, Plus, RotateCw, Search, Send, ShieldAlert, Trash2, Upload, User, Users } from "lucide-react";
+import { Clock, Copy, Dices, Download, Folder, FolderPlus, History, Import as ImportIcon, Inbox, Link2, Lock, MoreHorizontal, Pencil, Plus, RotateCw, Search, Send, ShieldAlert, Trash2, Upload, User, Users } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Link } from "@/components/link";
 import { canRotate, needsApproval, SECRET_KEY, TAG, type Batch, type Environment, type ExportFormat, type Import, type KeyInsight, type Op, type Secret, type SecretType } from "@/lib/secrets-api";
@@ -18,6 +18,7 @@ import { ReachDialog } from "./reach-dialog";
 import { EsoDialog } from "./eso-dialog";
 import { ImportsPanel } from "./imports";
 import { RefInput, useRefSource, useRefWarnings, type RefSource } from "./ref-input";
+import { RequestDialog, type RequestTarget } from "./request-dialog";
 import { ShareDialog, type ShareSource } from "./share-dialog";
 import { Activity } from "./activity";
 import { BulkBar } from "./bulk";
@@ -25,7 +26,7 @@ import { LinkDialog } from "./link-dialog";
 import { DecoyDialog } from "./decoy-dialog";
 import { ApprovalOffer, RequestsPanel, type Pending } from "./requests";
 import { secretsHref, useSecrets } from "./secrets-page";
-import { ago, button, Chip, CommentMark, dangerButton, ErrorNote, errorText, ExpiryMark, field, ghost, iconButton, label, LinkChip, PersonalMark, primary, RefMark, Reveal, saveText, TotpCode, sized, SourceMark, Teach, until, useLoad, Warnings } from "./ui";
+import { ago, button, Chip, CommentMark, dangerButton, ErrorNote, errorText, ExpiryMark, field, ghost, iconButton, label, LinkChip, PersonalMark, primary, RefMark, Reveal, saveText, TotpCode, sized, SourceMark, Teach, textareaField, until, useLoad, Warnings } from "./ui";
 
 /** One environment: its folder's secrets (inline edit, reveal, add, delete, overrides), requests and history. */
 export function EnvView({ env }: { env: Environment }) {
@@ -51,6 +52,7 @@ export function EnvView({ env }: { env: Environment }) {
   const [decoying, setDecoying] = useState(false);
   const [drawer, setDrawer] = useState<Drawer | null>(null);
   const [sharing, setSharing] = useState<ShareSource | null>(null);
+  const [asking, setAsking] = useState<RequestTarget | null>(null);
   /** Selected rows (`key:type`), and the last one clicked, for shift-click ranges. */
   const [selected, setSelected] = useState<Set<string>>(() => new Set());
   const anchor = useRef<string | null>(null);
@@ -239,6 +241,13 @@ export function EnvView({ env }: { env: Environment }) {
                 <ImportIcon className="size-3" /> Imports
                 {!!imports.data?.length && <span className="font-mono text-[10px] text-subtle">{imports.data.length}</span>}
               </button>
+              <button
+                onClick={() => setAsking({ env: env.slug, path, needsApproval: env.protected })}
+                className="inline-flex h-6 items-center gap-1 rounded-md px-1.5 text-[11.5px] text-muted transition-colors hover:bg-fg/[0.05] hover:text-fg"
+                title="Ask someone outside roll to send this folder's values in"
+              >
+                <Inbox className="size-3" /> Request a value…
+              </button>
               <NewFolder path={path} onCreate={(np) => api.createFolder(env.slug, np).then(() => go({ env: env.slug, path: np }), (e) => setError(errorText(e)))} />
               <span className="ml-auto" />
               {insights.data && (unreadCount > 0 || unread) && (
@@ -318,6 +327,7 @@ export function EnvView({ env }: { env: Environment }) {
             )}
             {list.data && secrets.length === 0 && !adding ? (
               <Teach
+                login
                 title={path === "/" ? `${env.name} has no secrets yet` : `${path} is empty in ${env.name}`}
                 cli={[`roll secrets set -p ${project.name} -e ${env.slug} KEY=value`, `roll run -p ${project.name} --env ${env.slug} -- <cmd>`]}
               >
@@ -385,10 +395,11 @@ export function EnvView({ env }: { env: Environment }) {
       </div>
 
       <HistoryDrawer env={env} drawer={drawer} onClose={() => setDrawer(null)} onDrawer={setDrawer} onChanged={refresh} />
-      <ReachDialog open={reaching !== null} onClose={() => setReaching(null)} env={env} path={path} keyName={reaching ?? ""} />
+      <ReachDialog open={reaching !== null} onClose={() => setReaching(null)} env={env} path={path} keyName={reaching ?? ""} link={secrets.find((x) => x.key === reaching)?.link} />
       <EsoDialog open={pulling} onClose={() => setPulling(false)} env={env} path={path} />
       <ImportDialog open={importing} onClose={() => setImporting(false)} env={env} path={path} current={secrets} onImported={(text, w) => (setNote({ text, warnings: w }), refresh(), open.reload())} />
       <ShareDialog source={sharing} onClose={() => setSharing(null)} onShared={() => {}} />
+      <RequestDialog target={asking} onClose={() => setAsking(null)} />
       <LinkDialog open={linking} onClose={() => setLinking(false)} env={env} path={path} taken={keys} onWrite={write} />
       <DecoyDialog open={decoying} onClose={() => setDecoying(false)} env={env} path={path} taken={keys} onPlanted={(s) => (setNote({ text: `Planted decoy ${s.key}`, warnings: [] }), refresh())} />
     </div>
@@ -472,7 +483,7 @@ function AddSecret({ path, keys, refs, onAdd, onCancel }: { path: string; keys: 
         </label>
         <div>
           <ValueHead onGenerate={() => setValue(generateValue(48, rule?.password))} />
-          <RefInput aria-label="Value" value={value} onValue={setValue} source={refs} rows={value.includes("\n") ? 4 : 1} placeholder="value, or ${OTHER_KEY}, ${production.KEY}" spellCheck={false} autoComplete="off" className={`${field} h-auto min-h-8 resize-y py-1.5 font-mono`} />
+          <RefInput aria-label="Value" value={value} onValue={setValue} source={refs} rows={value.includes("\n") ? 4 : 1} placeholder="value, or ${OTHER_KEY}, ${production.KEY}" spellCheck={false} autoComplete="off" className={`${textareaField} min-h-8 resize-y font-mono`} />
           {unfit && value && <span className="mt-1 block text-[11px] text-danger">{unfit}</span>}
         </div>
         <label>
@@ -832,7 +843,7 @@ function Editor({
               placeholder={fresh ? "value" : "unchanged: type a new value to replace it"}
               spellCheck={false}
               autoComplete="off"
-              className={`${field} h-auto min-h-8 resize-y py-1.5 font-mono`}
+              className={`${textareaField} min-h-8 resize-y font-mono`}
             />
           )}
           {unfit && <span className="mt-1 block text-[11px] text-danger">{unfit}</span>}

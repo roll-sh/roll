@@ -194,7 +194,7 @@ impl crate::Secrets {
             if c.execute("UPDATE projects SET dek = ? WHERE project_id = ? AND dek = ?", [next.as_str(), project, stored.as_str()])? == 0 {
                 return Err(Error::Conflict("conflict", "the project's data key changed meanwhile: try again".into()));
             }
-            crate::audit::record(c, project, caller, "project.kms", None, None, &[], &summary, now)
+            crate::audit::record(c, self.keys()?, project, caller, "project.kms", None, None, &[], &summary, now)
         })?;
         self.unwrap.forget(&stored);
         Ok(key)

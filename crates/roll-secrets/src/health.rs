@@ -36,6 +36,11 @@ pub enum Issue {
     Public,
     /// A credential easy to guess (shown to whoever may reveal it).
     Weak,
+    /// A sync or a workload identity whose maker is the operator account: made from an admin's
+    /// session before makers were people, so it would act after they're demoted or can't sign
+    /// in. Re-saving it from a person's session binds it to them. `key` is the sync's or the
+    /// identity's id (the identity's `environment` and `path` are empty).
+    OperatorMade,
     /// Its value stops working outside roll within two weeks.
     Expiring,
     /// A certificate a project CA signed for a CSR ends within two weeks (pki.rs). Links' own
@@ -307,6 +312,25 @@ impl Secrets {
                 if caller.allows(Action::Read, &Scope::at(project, &e.slug, &path)) {
                     out.push(Finding { issue, environment: e.slug.clone(), path, key, detail: why, owner: None, decoy: None });
                 }
+            }
+        }
+        // Syncs and identities made as the operator account: an admin's session before it recorded
+        // the person, or the deployment's own token. Nothing tells which, so both are flagged.
+        type Made = Vec<(String, String, String, String)>;
+        let (syncs, identities): (Made, Made) = self.db.read(|c| {
+            Ok::<_, crate::Error>((
+                c.query("SELECT e.slug, s.path, s.id, s.kind FROM syncs s JOIN environments e ON e.id = s.env_id WHERE s.project_id = ? AND s.created_by = 'operator' ORDER BY s.id", [project], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))?,
+                c.query("SELECT '', '/', id, name FROM identities WHERE project_id = ? AND created_by = 'operator' ORDER BY id", [project], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))?,
+            ))
+        })?;
+        for (env, path, id, kind) in syncs {
+            if caller.allows(Action::Read, &Scope::at(project, &env, &path)) {
+                out.push(Finding { issue: Issue::OperatorMade, environment: env, path, key: id, detail: format!("{kind} sync made by the operator account: re-save it (make it again) from a person's session to bind it to them"), owner: None, decoy: None });
+            }
+        }
+        if caller.allows(Action::Read, &Scope::whole(project)) {
+            for (env, path, id, name) in identities {
+                out.push(Finding { issue: Issue::OperatorMade, environment: env, path, key: id, detail: format!("identity {name} made by the operator account: make it again (or set its pinned keys again) from a person's session to bind it to them"), owner: None, decoy: None });
             }
         }
         // Who to ask: the required key's owner, its folder's rule first, else the key's anywhere.

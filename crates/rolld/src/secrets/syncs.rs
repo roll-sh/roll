@@ -1,7 +1,8 @@
 //! The kinds roll secrets' syncs push to (docs/secrets.md, "Syncs"): `github` (Actions secrets
 //! through roll's GitHub App), `webhook` (values sealed to a key of the team's own) and `notify`
 //! (that something changed, no values); `vercel`, `cloudflare` and `aws-ssm` are in
-//! [`platforms`]. roll-secrets knows no platform: each kind is a
+//! [`platforms`]; `search-inference` (roll search's inference endpoints keyed by a secret) is in
+//! [`search`]. roll-secrets knows no platform: each kind is a
 //! [`SyncTarget`] registered here.
 //!
 //! Errors name keys and the target, never a value. URLs a tenant chose are fetched through the
@@ -17,6 +18,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 mod platforms;
+pub(super) mod search;
 
 /// The kinds rolld offers. `allow_private`: webhooks may go to private addresses and plain
 /// `http` (`ROLL_CODE_WEBHOOK_ALLOW_PRIVATE`, local development only).
@@ -28,9 +30,10 @@ pub fn kinds(api: Api, allow_private: bool) -> Syncs {
     };
     let hooks = Hooks::new(allow_private);
     let mut s = Syncs::default();
-    s.register(Arc::new(GitHubSync { api, github }));
+    s.register(Arc::new(GitHubSync { api: api.clone(), github }));
     s.register(Arc::new(Webhook(hooks.clone())));
     s.register(Arc::new(Notify(hooks)));
+    s.register(Arc::new(search::InferenceKeys(api)));
     let http = platforms::Http::new();
     s.register(Arc::new(platforms::Vercel(http.clone())));
     s.register(Arc::new(platforms::Cloudflare(http.clone())));
@@ -515,6 +518,32 @@ impl roll_secrets::Deliver for AuditDeliver {
     /// An OIDC issuer's documents: the same guards, a 2xx only, at most `limit` bytes.
     fn get(&self, url: &str, limit: usize) -> Result<Vec<u8>> {
         self.0.get_bounded(url, limit)
+    }
+
+    /// An AWS identity's signed `GetCallerIdentity`, sent on to STS: the URL is rebuilt from a
+    /// host roll_secrets checked (checked again here), never the client's; any status comes back
+    /// with at most `limit` bytes of the answer.
+    fn sts(&self, host: &str, headers: &[(String, String)], body: &str, limit: usize) -> Result<(u16, Vec<u8>)> {
+        if !roll_secrets::aws_identity::sts_host(host) {
+            return Err(bad(format!("{host} isn't an STS endpoint")));
+        }
+        let u = self.0.url(&format!("https://{host}/"))?;
+        block_on(async {
+            let mut req = self.0.client.post(u).body(body.to_string());
+            for (k, v) in headers {
+                req = req.header(k.as_str(), v.as_str());
+            }
+            let mut resp = req.send().await.map_err(|e| Error::Link(format!("{host}: {}", e.without_url())))?;
+            let status = resp.status().as_u16();
+            let mut out = Vec::new();
+            while let Some(c) = resp.chunk().await.map_err(|e| Error::Link(format!("{host}: {}", e.without_url())))? {
+                if out.len() + c.len() > limit {
+                    return Err(Error::Link(format!("{host}: an answer over {limit} bytes")));
+                }
+                out.extend_from_slice(&c);
+            }
+            Ok((status, out))
+        })
     }
 }
 

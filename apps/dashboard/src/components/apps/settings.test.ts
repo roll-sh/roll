@@ -25,5 +25,17 @@ describe("the settings form", () => {
       run: { pre_deploy: "pnpm migrate" },
     });
     expect(patchOf(svc, { ...f, watch: " " })).toEqual({ build: { watch: null } });
+    // Log metrics as `name: pattern` lines; a cleared field none.
+    expect(patchOf(svc, { ...f, logMetrics: "payments_failed: payment failed\n\nTimeout" })).toEqual({
+      run: { log_metrics: [{ name: "payments_failed", pattern: "payment failed" }, { name: "timeout", pattern: "Timeout" }] },
+    });
+  });
+
+  it("edits the first stream push and keeps the rest as they are", () => {
+    const second = { stream: "st_bbbbbbbbbbbb", topic: "audit", group: "web", path: "/audit" };
+    const withPush = { ...svc, run: { ...svc.run, push: [{ stream: "st_aaaaaaaaaaaa", topic: "orders", group: "web", path: "/events", dead_letter: "dead", max_attempts: 3 }, second] } };
+    const f = formOf(withPush);
+    expect(patchOf(withPush, { ...f, pushPath: "/orders", pushDead: "" })).toEqual({ run: { push: [{ stream: "st_aaaaaaaaaaaa", topic: "orders", group: "web", path: "/orders", dead_letter: undefined }, second] } });
+    expect(patchOf(withPush, { ...f, pushStream: "" })).toEqual({ run: { push: [second] } });
   });
 });

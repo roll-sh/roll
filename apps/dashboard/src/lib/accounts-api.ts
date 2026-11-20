@@ -19,6 +19,8 @@ export interface User {
   admin: boolean;
   disabled: boolean;
   created_at: number;
+  /** When they last used roll (a sign-in or a session's use); `null`: not since roll began keeping it. */
+  last_active_at?: number | null;
   totp: boolean;
   /** How many passkeys they have (with `totp`: whether they have a second factor). */
   passkeys?: number;
@@ -33,6 +35,22 @@ export interface Session {
   expires_at: number;
   user_agent: string;
   current: boolean;
+  /** How it signed in (absent: sessions from before roll recorded it). */
+  method?: "email" | "github" | "google" | "sso" | "passkey" | null;
+  /** Whether a passkey was used in it: with `sso`, a phishing-resistant session. */
+  passkey?: boolean;
+}
+
+const SIGNED_IN_WITH: Record<string, string> = { email: "an email code", github: "GitHub", google: "Google", sso: "your company's sign-in", passkey: "a passkey" };
+
+/** How a session signed in, in words (`null`: not recorded). */
+export function sessionMethod(s: Pick<Session, "method">): string | null {
+  return s.method ? (SIGNED_IN_WITH[s.method] ?? s.method) : null;
+}
+
+/** Whether a session is phishing-resistant (docs/accounts.md): it used a passkey, or came from SSO. */
+export function phishingResistant(s: Pick<Session, "method" | "passkey">): boolean {
+  return Boolean(s.passkey) || s.method === "sso" || s.method === "passkey";
 }
 
 export interface Invite {
@@ -154,6 +172,61 @@ export function activityText(e: Activity, me: string): string {
   return e.ok ? `${e.action} by ${by}` : `${e.action} by ${by} was refused`;
 }
 
+/** A CSV cell: quoted, and a formula character defused with `'` at its start and after a `;`, tab
+ * or `|` (OWASP's CSV injection advice, as roll's audit export does): names and addresses are
+ * people's own text. */
+function csvCell(v: string): string {
+  let out = "";
+  let start = true;
+  for (const c of v) {
+    if (start && "=+-@\t\r".includes(c)) out += "'";
+    out += c;
+    if (";\t|".includes(c)) start = true;
+    else if (c !== " ") start = false;
+  }
+  return `"${out.replace(/"/g, '""')}"`;
+}
+
+/** People as CSV for a spreadsheet (Okta's and Google Workspace's people export): one row each. */
+export function peopleCsv(list: User[]): string {
+  const iso = (ms?: number | null) => (ms == null ? "" : new Date(ms).toISOString());
+  const head = ["handle", "name", "email", "admin", "turned_off", "authenticator_app", "passkeys", "dormant", "last_active", "created"];
+  const rows = list.map((u) => [u.handle, u.name, u.email, String(u.admin), String(u.disabled), String(u.totp), String(u.passkeys ?? 0), String(dormant(u)), iso(u.last_active_at), iso(u.created_at)]);
+  return [head.join(","), ...rows.map((r) => r.map(csvCell).join(","))].join("\n") + "\n";
+}
+
+/** People's filters in the admin list. */
+export type PeopleFilter = "everyone" | "admins" | "no-second-factor" | "dormant" | "turned-off";
+
+/** The people matching `query` (name, handle or address, any case) and `filter`. */
+export function findPeople<U extends Pick<User, "name" | "handle" | "email" | "admin" | "disabled" | "totp" | "passkeys" | "last_active_at" | "created_at">>(list: U[], query: string, filter: PeopleFilter): U[] {
+  const q = query.trim().toLowerCase();
+  return list.filter((u) => {
+    if (q && ![u.name, u.handle, u.email].some((s) => s.toLowerCase().includes(q))) return false;
+    switch (filter) {
+      case "admins":
+        return u.admin;
+      case "no-second-factor":
+        return !u.disabled && !u.totp && !u.passkeys;
+      case "dormant":
+        return dormant(u);
+      case "turned-off":
+        return u.disabled;
+      default:
+        return true;
+    }
+  });
+}
+
+/** How long without using roll makes someone dormant (GitHub Enterprise's 90 days). */
+export const DORMANT_DAYS = 90;
+
+/** Whether `u` hasn't used roll (a sign-in, a session or one of their tokens) in DORMANT_DAYS. Unknown
+ * activity (`null`: not since roll began keeping it) isn't dormant. */
+export function dormant(u: Pick<User, "last_active_at" | "created_at" | "disabled">, now = Date.now()): boolean {
+  return !u.disabled && u.last_active_at != null && u.last_active_at < now - DORMANT_DAYS * 24 * 3600 * 1000;
+}
+
 /** Which sign-ins this roll offers (`sso`: a company's provider answers for some domains). */
 export type Providers = { email: boolean; github: boolean; google: boolean; sso?: boolean; passkey?: boolean };
 
@@ -177,6 +250,8 @@ export interface AccountPolicy {
   require_second_factor: boolean;
   /** A session unused this many minutes ends (15 to a week; absent: a week). */
   idle_minutes?: number;
+  /** A session ends this many hours after its sign-in, however much it's used (1 to 720; absent: 30 days). */
+  max_session_hours?: number;
   /** Whose sessions must use a passkey (or come from their SSO): phishing-resistant sign-in. */
   phishing_resistant?: "admins" | "everyone";
 }
@@ -267,6 +342,8 @@ export const accountsApi = {
   deleteMe: (confirm: string) => call<null>("DELETE", "/me", { confirm }),
   sessions: () => call<Session[]>("GET", "/me/sessions"),
   revokeSession: (id: string) => call<null>("DELETE", `/me/sessions/${encodeURIComponent(id)}`),
+  /** End every session but this browser's. */
+  endOtherSessions: () => call<{ ended: number }>("DELETE", "/me/sessions"),
   unlink: (provider: Provider | `sso:${string}`) => call<null>("DELETE", `/me/identities/${encodeURIComponent(provider)}`),
   totpBegin: () => call<{ secret: string; otpauth_url: string; qr_png: string }>("POST", "/me/totp"),
   totpConfirm: (code: string) => call<{ recovery_codes: string[] }>("POST", "/me/totp/confirm", { code }),
@@ -297,9 +374,15 @@ export const accountsApi = {
   invites: () => call<Invite[]>("GET", "/invites"),
   invite: (email: string, opts: { admin?: boolean; handle?: string } = {}) => call<Invite & { token: string; url: string }>("POST", "/invites", { email, ...opts }),
   revokeInvite: (id: string) => call<null>("DELETE", `/invites/${encodeURIComponent(id)}`),
+  /** A fresh link for an unused invite (another 7 days, mailed again); the old link stops. */
+  resendInvite: (id: string) => call<Invite & { token: string; url: string }>("POST", `/invites/${encodeURIComponent(id)}/resend`),
   users: () => call<User[]>("GET", "/users"),
   updateUser: (id: string, patch: { admin?: boolean; disabled?: boolean }) => call<User>("PATCH", `/users/${encodeURIComponent(id)}`, patch),
   signOutUser: (id: string) => call<null>("DELETE", `/users/${encodeURIComponent(id)}/sessions`),
+  /** Admins: a person's security log and sessions, and ending one of them. */
+  userActivity: (id: string, before?: number) => call<{ events: Activity[] }>("GET", `/users/${encodeURIComponent(id)}/activity${before ? `?before=${before}` : ""}`),
+  userSessions: (id: string) => call<Session[]>("GET", `/users/${encodeURIComponent(id)}/sessions`),
+  endUserSession: (id: string, session: string) => call<null>("DELETE", `/users/${encodeURIComponent(id)}/sessions/${encodeURIComponent(session)}`),
 
   ssoConnections: () => call<SsoConnection[]>("GET", "/sso"),
   addSso: (c: { name?: string; issuer: string; client_id: string; client_secret: string; domains: string[]; enforce?: boolean; provision?: boolean }) =>

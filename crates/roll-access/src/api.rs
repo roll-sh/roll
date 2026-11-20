@@ -296,6 +296,9 @@ struct Check {
     path: String,
     #[serde(default)]
     body: Option<Value>,
+    /// Request headers that decide it, as the gate reads them (apps' `x-roll-override`).
+    #[serde(default)]
+    headers: std::collections::BTreeMap<String, String>,
     /// Whose decision (the operator only; a grant checks itself).
     #[serde(default)]
     token: Option<String>,
@@ -329,7 +332,13 @@ async fn check(State(a): S, ext: Extensions, Json(c): Json<Check>) -> crate::Res
         .await
         .map_err(|e| Error::Internal(e.to_string()))?;
     // Decided as the gate decides: the copy a body asks for, and "ask for anything else".
-    let mut action = row.action(&method, &params, c.body.as_ref());
+    let mut headers = axum::http::HeaderMap::new();
+    for (k, v) in &c.headers {
+        if let (Ok(k), Ok(v)) = (axum::http::HeaderName::try_from(k.as_str()), axum::http::HeaderValue::from_str(v)) {
+            headers.insert(k, v);
+        }
+    }
+    let mut action = row.action_with(&method, &params, c.body.as_ref(), &headers);
     let mut outcome = if matches!(row.target, catalog::Tgt::AnyGrant) { Outcome::Allow } else { scope.outcome(&target, action) };
     if let Some((copied, _, _)) = crate::evaluate::copy_outcome(&a, row, &params, &target, (c.body.as_ref(), uri.query()), &scope).await
         && crate::evaluate::rank(copied) < crate::evaluate::rank(outcome)
@@ -1000,7 +1009,8 @@ struct Decision {
 #[derive(Deserialize, Default)]
 #[serde(deny_unknown_fields)]
 struct Approve {
-    /// Also allow the same action on the same resource from now on: `1h`, `8h`, `1d` or `always`.
+    /// Also allow the same action on the same resource from now on: `1h`, `8h`, `1d`, `7d`, `30d`
+    /// or `always`.
     remember: Option<String>,
 }
 
@@ -1029,8 +1039,11 @@ async fn remembered(a: &Arc<Access>, id: &str, remember: Option<&str>) -> crate:
         Some("1h") => hours(1),
         Some("8h") => hours(8),
         Some("1d") => hours(24),
+        // A developer's own CLI on their machine (`roll run` in development) wants longer than a day.
+        Some("7d") => hours(7 * 24),
+        Some("30d") => hours(30 * 24),
         Some("always") => Some(None),
-        Some(other) => return Err(Error::BadRequest(format!("remember is 1h, 8h, 1d or always, not {other}"))),
+        Some(other) => return Err(Error::BadRequest(format!("remember is 1h, 8h, 1d, 7d, 30d or always, not {other}"))),
     };
     let Some(until) = until else { return Ok(None) };
     let id2 = id.to_string();

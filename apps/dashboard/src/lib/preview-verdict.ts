@@ -1,7 +1,7 @@
 import { checkSummary, endpointSlower, type Preview } from "./previews-api";
 
 /** A section of the preview's sheet a verdict item jumps to. */
-export type VerdictTarget = "services" | "visual" | "api" | "schema" | "checks" | "endpoints";
+export type VerdictTarget = "services" | "visual" | "api" | "schema" | "checks" | "endpoints" | "routes" | "errors";
 
 export interface VerdictItem {
   target: VerdictTarget;
@@ -25,6 +25,8 @@ export function verdict(p: Preview): VerdictItem[] {
   if (risks) out.push({ target: "schema", text: `${plural(risks, "migration risk")}`, tone: "danger" });
   const added = checkSummary(p).added ?? 0;
   if (added > 0) out.push({ target: "checks", text: `${plural(added, "new problem")} against ${p.base_change?.branch ?? "main"}`, tone: "danger" });
+  const newErrors = p.new_errors?.total ?? 0;
+  if (newErrors) out.push({ target: "errors", text: `${plural(newErrors, "new error")} against ${p.new_errors?.branch}`, tone: "danger" });
   const v = p.visual_review;
   if (v?.state === "changed") {
     // The pages nobody accepted yet (all of them when none says).
@@ -33,6 +35,9 @@ export function verdict(p: Preview): VerdictItem[] {
   }
   const slower = p.base_change?.endpoints?.filter(endpointSlower).length ?? 0;
   if (slower) out.push({ target: "endpoints", text: `${plural(slower, "endpoint")} slower than ${p.base_change?.branch ?? "main"}`, tone: "note" });
+  const routes = p.slower_routes?.routes.length ?? 0;
+  const budgeted = p.slower_routes?.routes.some((r) => r.budget_ms != null) ?? false;
+  if (routes) out.push({ target: "routes", text: `${plural(routes, "route")} slower than ${p.slower_routes?.branch}${budgeted ? " or over budget" : ""}`, tone: budgeted ? "danger" : "note" });
   const moving = v?.pages.filter((x) => x.unstable).length ?? 0;
   if (moving) out.push({ target: "visual", text: `${plural(moving, "page")} ${moving === 1 ? "moves" : "move"} by itself`, tone: "note" });
   return out;

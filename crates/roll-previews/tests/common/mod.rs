@@ -132,6 +132,8 @@ pub struct FakeData {
     pub masks: Mutex<Vec<(String, std::collections::BTreeMap<String, String>)>>,
     /// Branched from history at (Postgres's fake keeps history; the others don't).
     pub at: Mutex<Vec<i64>>,
+    /// What `columns` answers, by parent (`Err`: it sleeps).
+    pub columns: Mutex<std::collections::HashMap<String, Result<Vec<roll_previews::mask::Column>, roll_previews::ports::Asleep>>>,
 }
 
 impl FakeData {
@@ -145,6 +147,7 @@ impl FakeData {
             schema: Mutex::new(None),
             masks: Mutex::new(Vec::new()),
             at: Mutex::new(Vec::new()),
+            columns: Mutex::new(Default::default()),
         })
     }
 }
@@ -179,6 +182,13 @@ impl Brancher for FakeData {
     }
     async fn schema(&self, _parent: &str, _branch: &str) -> anyhow::Result<Option<(Vec<String>, Vec<String>)>> {
         Ok(self.schema.lock().clone())
+    }
+    async fn columns(&self, parent: &str, max: usize) -> anyhow::Result<Vec<roll_previews::mask::Column>> {
+        match self.columns.lock().get(parent) {
+            Some(Err(_)) => Err(roll_previews::ports::Asleep.into()),
+            Some(Ok(c)) => Ok(c.iter().take(max).cloned().collect()),
+            None => Ok(Vec::new()),
+        }
     }
     async fn reset(&self, parent: &str, branch: &str, _kept: Option<&str>, name: &str, mode: Mode) -> anyhow::Result<Branched> {
         self.delete(parent, branch, name).await?;
@@ -229,8 +239,14 @@ pub struct FakeApps {
     pub removed: Mutex<Vec<(String, String)>>,
     /// What each service uses, by name (unset: not running).
     pub metrics: Mutex<HashMap<String, (f64, u64)>>,
+    /// Each service's errors, by name.
+    /// Each service's error groups, by `preview/service` or by service for every preview.
+    pub errors: Mutex<HashMap<String, Vec<roll_previews::ErrorGroup>>>,
     /// What every service's log holds.
     pub log: Mutex<Vec<String>>,
+    /// What a followed log gives, each line with whether it came on stderr (unset: the backend
+    /// can't follow, so the engine reads `log` again and again).
+    pub followed: Mutex<Option<Vec<(bool, String)>>>,
     /// What each seed or release job was run able to reach.
     pub seed_egress: Mutex<Vec<roll_previews::settings::EgressRule>>,
     /// What each service was deployed able to reach.
@@ -252,6 +268,16 @@ pub struct FakeApps {
     pub shot_services: Mutex<Vec<String>>,
     /// The notes each screenshot was asked to crop (a `#missing` selector finds nothing).
     pub crops_asked: Mutex<Vec<String>>,
+    /// Where each drain follower asked to start (`drain_from`'s `since`), and the end the test
+    /// writes the followed container's lines into (`(stderr, "<stamp> <text>")`).
+    pub drain_since: Mutex<Vec<String>>,
+    pub drain_tx: Mutex<Option<tokio::sync::mpsc::Sender<(bool, String)>>>,
+    /// A roll apps backend's own traces (its `pv-` environment's), and their spans; and whether each
+    /// deploy asked for them (the project's `traces`).
+    pub app_traces: Mutex<Vec<(roll_previews::engine::traces::TraceRow, Vec<roll_previews::engine::traces::Span>)>>,
+    pub traces_asked: Mutex<HashMap<(String, String), bool>>,
+    /// Tars written into services, by the directory they were written under.
+    pub files: Mutex<HashMap<String, Vec<u8>>>,
     /// Services the runtime says run on this node, and those put to sleep.
     pub running: Mutex<std::collections::HashSet<(String, String)>>,
     pub slept: Mutex<Vec<(String, String)>>,
@@ -294,6 +320,7 @@ impl Apps for FakeApps {
         self.vars.lock().insert((t.preview.clone(), t.service.clone()), t.vars.clone());
         self.feedback.lock().insert((t.preview.clone(), t.service.clone()), t.feedback);
         self.egress.lock().insert((t.preview.clone(), t.service.clone()), t.egress);
+        self.traces_asked.lock().insert((t.preview.clone(), t.service.clone()), t.traces);
         Ok(None)
     }
     async fn catalog(&self, _project: &str) -> anyhow::Result<Option<Vec<roll_previews::ports::CatalogService>>> {
@@ -327,8 +354,60 @@ impl Apps for FakeApps {
     async fn metrics(&self, _: &str, service: &str) -> Option<(f64, u64)> {
         self.metrics.lock().get(service).copied()
     }
+    async fn errors(&self, preview: &str, service: &str, _: i64, _: Option<&roll_previews::engine::ErrorMasks<'_>>) -> roll_previews::Result<Vec<roll_previews::ErrorGroup>> {
+        // `pv_…/web` (one preview's) over `web` (every preview's).
+        let errors = self.errors.lock();
+        Ok(errors.get(&format!("{preview}/{service}")).or_else(|| errors.get(service)).cloned().unwrap_or_default())
+    }
     async fn logs(&self, _: &str, _: &str, _: usize) -> Vec<String> {
         self.log.lock().clone()
+    }
+    async fn follow(&self, _: &str, _: &str, _: usize) -> Option<tokio::sync::mpsc::Receiver<(bool, String)>> {
+        let lines = self.followed.lock().clone()?;
+        let (tx, rx) = tokio::sync::mpsc::channel(lines.len().max(1));
+        for l in lines {
+            let _ = tx.try_send(l);
+        }
+        Some(rx)
+    }
+    async fn traces(&self, _: &str, _: &str, _: i64) -> Vec<roll_previews::engine::traces::TraceRow> {
+        self.app_traces.lock().iter().map(|(r, _)| r.clone()).collect()
+    }
+    async fn trace(&self, _: &str, _: &str, trace: &str) -> Option<Vec<roll_previews::engine::traces::Span>> {
+        self.app_traces.lock().iter().find(|(r, _)| r.trace == trace).map(|(_, s)| s.clone())
+    }
+    /// What was written under `path` (nothing: an empty stream, as `docker cp` of a missing path).
+    async fn read_files(&self, _: &str, _: &str, path: &str) -> anyhow::Result<Option<roll_previews::ports::FileStream>> {
+        let got = self.files.lock().get(path).cloned().unwrap_or_default();
+        Ok(Some(Box::new(std::io::Cursor::new(got))))
+    }
+    async fn write_files(&self, _: &str, _: &str, dir: &str, tar: bytes::Bytes) -> anyhow::Result<bool> {
+        self.files.lock().insert(dir.to_string(), tar.to_vec());
+        Ok(true)
+    }
+    /// A forwarded port that echoes what it's sent.
+    async fn forward(&self, _: &str, _: &str, _: u16) -> anyhow::Result<Option<Box<dyn roll_previews::ports::ShellIo>>> {
+        let (ours, theirs) = tokio::io::duplex(1 << 16);
+        tokio::spawn(async move {
+            let (mut r, mut w) = tokio::io::split(theirs);
+            let _ = tokio::io::copy(&mut r, &mut w).await;
+        });
+        Ok(Some(Box::new(ours)))
+    }
+    /// A terminal that echoes what it's sent.
+    async fn shell(&self, _: &str, service: &str, _: u16, _: u16) -> anyhow::Result<Option<roll_previews::ports::Shell>> {
+        let (ours, theirs) = tokio::io::duplex(1 << 16);
+        tokio::spawn(async move {
+            let (mut r, mut w) = tokio::io::split(theirs);
+            let _ = tokio::io::copy(&mut r, &mut w).await;
+        });
+        Ok(Some(roll_previews::ports::Shell { id: format!("exec-{service}"), io: Box::new(ours) }))
+    }
+    async fn drain_from(&self, _: &str, _: &str, since: &str) -> Option<tokio::sync::mpsc::Receiver<(bool, String)>> {
+        self.drain_since.lock().push(since.to_string());
+        let (tx, rx) = tokio::sync::mpsc::channel(16);
+        *self.drain_tx.lock() = Some(tx);
+        Some(rx)
     }
     async fn seed(&self, job: &roll_previews::ports::SeedJob) -> anyhow::Result<(i32, String)> {
         let db = job.env.iter().find(|(k, _)| k == "DATABASE_URL").map(|(_, v)| v.clone()).unwrap_or_default();
@@ -374,6 +453,24 @@ impl Apps for FakeApps {
 /// roll secrets as previews see it: every `ensure` (environment, trusted). With `dynamic`, each
 /// A Git URL service's repository: records each status and comment (a comment gets id 77,
 /// edits name it). `connected: false` posts nothing.
+/// A project's log drains: whether they take previews' output (every source), and every line
+/// sent (environment, service, source, line).
+#[derive(Default)]
+pub struct FakeDrains {
+    pub wanted: std::sync::atomic::AtomicBool,
+    pub sent: Mutex<Vec<(String, String, &'static str, roll_previews::ports::DrainLine)>>,
+}
+
+#[async_trait]
+impl roll_previews::ports::Drains for FakeDrains {
+    async fn wanted(&self, _: &str, _: roll_previews::ports::DrainSource) -> bool {
+        self.wanted.load(Ordering::SeqCst)
+    }
+    fn send(&self, _: &str, environment: &str, service: &str, source: roll_previews::ports::DrainSource, lines: Vec<roll_previews::ports::DrainLine>) {
+        self.sent.lock().extend(lines.into_iter().map(|l| (environment.to_string(), service.to_string(), source.as_str(), l)));
+    }
+}
+
 /// A posted status: service, sha, state, description, link.
 pub type PostedStatus = (String, String, String, String, Option<String>);
 
@@ -426,17 +523,20 @@ pub struct FakeSecrets {
     pub own: Mutex<Vec<(String, String)>>,
     /// Values every resolve answers (static secrets).
     pub values: Mutex<Vec<(String, String)>>,
+    /// Why each resolve was asked for (`logs`: values read to mask output).
+    pub reasons: Mutex<Vec<String>>,
 }
 
 #[async_trait]
 impl roll_previews::ports::Secrets for FakeSecrets {
-    async fn ensure(&self, _: &str, env: &str, _: &str, vars: &[(String, String)], trusted: bool, _: i64, branches: &[(Kind, String)]) -> anyhow::Result<()> {
+    async fn ensure(&self, _: &str, env: &str, _: &str, vars: &[(String, String)], _: &[(String, String)], trusted: bool, _: i64, branches: &[(Kind, String)]) -> anyhow::Result<()> {
         self.ensured.lock().push((env.to_string(), trusted));
         *self.branched.lock() = branches.to_vec();
         *self.own.lock() = vars.to_vec();
         Ok(())
     }
-    async fn resolve(&self, _: &str, _: &str, _: bool, dynamic: bool, _: &str) -> anyhow::Result<roll_previews::ports::Resolved> {
+    async fn resolve(&self, _: &str, _: &str, _: bool, dynamic: bool, reason: &str) -> anyhow::Result<roll_previews::ports::Resolved> {
+        self.reasons.lock().push(reason.to_string());
         let followed = self.followed.lock().clone();
         let values = self.values.lock().clone();
         if !dynamic || !self.dynamic.load(Ordering::SeqCst) {
@@ -492,6 +592,7 @@ pub fn change(id: &str, n: i64) -> ChangeInfo {
         approved: false,
         author: "carol".into(),
         github_pr: Some(100 + n),
+        owner_id: "own_acme".into(),
     }
 }
 
@@ -513,7 +614,7 @@ pub fn env(settings: serde_json::Value) -> Env {
     let apps = Arc::new(FakeApps::default());
     let secrets = Arc::new(FakeSecrets::default());
     let engine = Engine::new(
-        Config { domain: "preview.test".into(), ..Config::default() },
+        Config { domain: "preview.test".into(), otlp: Some("127.0.0.1:7070".into()), ..Config::default() },
         store,
         ws.clone(),
         code.clone(),

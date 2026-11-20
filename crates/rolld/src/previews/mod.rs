@@ -21,7 +21,7 @@ mod services;
 pub mod fleet;
 
 pub use data::*;
-pub use secrets::Secrets;
+pub use secrets::{Secrets, SecretsReveal};
 pub use services::{RollApps, Services};
 
 /// Which products run here (an adapter for each).
@@ -43,6 +43,32 @@ pub struct Running {
     pub internal: Option<axum::Router>,
 }
 
+/// Who may open a team-access project's previews: an account that still signs in, through the
+/// roll session that asked for the ticket (signed out, revoked or expired is a no), and is an
+/// admin or owns the project now (a disabled or deleted one, or one whose project went to
+/// someone else, is a no at once). A failed lookup is a no.
+pub struct AccountsVisitors {
+    pub accounts: Arc<roll_accounts::Accounts>,
+    pub workspace: Arc<roll_workspace::Workspace>,
+}
+
+impl roll_previews::ports::Visitors for AccountsVisitors {
+    fn names_of(&self, user: &str) -> anyhow::Result<Vec<String>> {
+        let u = self.accounts.user(user).map_err(|e| anyhow::anyhow!("{e}"))?;
+        Ok(std::iter::once(u.handle).chain(u.identities.into_iter().filter(|i| i.provider == "github").map(|i| i.login)).collect())
+    }
+
+    fn may_open(&self, user: &str, session: &str, project: &str) -> bool {
+        if !self.accounts.session_live(user, session).unwrap_or(false) {
+            return false;
+        }
+        match self.accounts.user(user) {
+            Ok(u) if !u.disabled => u.admin || self.workspace.get(roll_workspace::Scope::All, project).is_ok_and(|p| !p.owner.is_empty() && p.owner == user),
+            _ => false,
+        }
+    }
+}
+
 /// Open the store and start the engine: branches through this node's API, services as
 /// containers through roll code's isolation (Docker or Fargate), roll code's changes as the
 /// source, and roll code's preview backend in front of its own single-container previews.
@@ -56,6 +82,16 @@ pub fn start(
     apps: Option<Arc<apps_control::Apps>>,
 ) -> anyhow::Result<Running> {
     let store = open_store(args, home)?;
+    // A preview's own variables sealed at rest with the deployment key (as roll's reviewer keys
+    // are); without one they're kept as written.
+    if let Some(key) = args.secret_key() {
+        match code_review::secret::Sealer::new(&key) {
+            Ok(s) => {
+                let _ = store.sealer.set(Arc::new(VarsSealer(s)));
+            }
+            Err(e) => tracing::warn!(error = %e, "previews: a preview's own variables aren't sealed"),
+        }
+    }
     let api = Api::new(args.api);
     let mut branchers: Vec<Arc<dyn Brancher>> = Vec::new();
     if on.postgres {
@@ -112,7 +148,13 @@ pub fn start(
     let apps_for_notes = apps.clone();
     let shots: Option<Arc<dyn fleet::Shoot>> = apps.clone().map(|a| Arc::new(services::AppsShots { reach: Arc::new(services::AppsReach(a)), runtime: runtime.clone() }) as Arc<dyn fleet::Shoot>);
     let engine = roll_previews::Engine::new(
-        roll_previews::engine::Config { domain, port: Some(args.api.port()), mail: Some(format!("127.0.0.1:{}", args.previews_smtp.port())), ..Default::default() },
+        {
+            let mut c = roll_previews::engine::Config { domain, port: Some(args.api.port()), mail: Some(format!("127.0.0.1:{}", args.previews_smtp.port())), otlp: Some(format!("127.0.0.1:{}", args.api.port())), ..Default::default() };
+            if let Some(s) = args.previews_compare_every {
+                (c.routes_every, c.new_errors_every) = (std::time::Duration::from_secs(s), std::time::Duration::from_secs(s));
+            }
+            c
+        },
         store.clone(),
         workspace,
         source.clone(),
@@ -124,13 +166,19 @@ pub fn start(
         leader,
     );
     runtime.attach(&engine);
+    // Its services' spans, read as roll apps reads its own.
+    let _ = engine.span_reader.set(Arc::new(services::AppsSpans));
     // roll apps' proxy lists a preview page's notes from the engine (`Engine::notes_for`).
     if let Some(a) = &apps_for_notes {
         a.set_feedback_notes(Arc::new(services::Notes(Arc::downgrade(&engine))));
+        // A project's own preview domain: names apps' ingress doesn't hold go to previews' router.
+        a.set_preview_router(Arc::new(services::DomainRouter(runtime.clone())));
         // Its pushes to branches of a Git URL service: those branches' previews.
         a.set_git_pushes(Arc::new(services::GitPushes(Arc::downgrade(&engine))));
         // And their status and pull request comment, where the code lives (roll's GitHub App).
         let _ = engine.git_report.set(Arc::new(services::GitReport { api: api.clone(), code: code.code.clone() }));
+        // roll.toml services' output to the project's log drains that take previews'.
+        let _ = engine.drains.set(Arc::new(services::AppsDrains { apps: a.clone(), wanted: Default::default() }));
     }
     if clustered {
         let _ = engine.cluster.set(cluster.clone());
@@ -155,6 +203,20 @@ pub fn start(
     tracing::info!("roll previews: on");
     let internal = shots.filter(|_| clustered).map(|s| fleet::internal_router(s, cluster.clone()));
     Ok(Running { engine, runtime, internal })
+}
+
+/// roll's reviewer's sealer (AES-256-GCM under `ROLL_SECRET_KEY`) for a preview's own variables,
+/// bound to the preview (`preview-vars:<id>`).
+struct VarsSealer(code_review::secret::Sealer);
+
+impl roll_previews::ports::Sealer for VarsSealer {
+    fn seal(&self, aad: &str, plain: &str) -> String {
+        self.0.seal(aad, plain)
+    }
+
+    fn open(&self, aad: &str, sealed: &str) -> Option<String> {
+        self.0.open(aad, sealed).ok()
+    }
 }
 
 pub fn open_store(args: &crate::Args, home: &Path) -> anyhow::Result<Arc<Store>> {

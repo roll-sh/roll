@@ -80,6 +80,13 @@ pub struct Config {
     /// Where services reach roll's mail catcher (`host:port` as a client on this node writes it;
     /// containers get it rewritten). `None`: no catcher, and previews' mail fails.
     pub mail: Option<String>,
+    /// Where services reach rolld's API for their OpenTelemetry intake (`host:port` as a client on
+    /// this node writes it; containers get it rewritten). `None`: no traces.
+    pub otlp: Option<String>,
+    /// How often the holder compares its previews with main's: routes from their traces, and
+    /// errors from their output (a read of their logs).
+    pub routes_every: Duration,
+    pub new_errors_every: Duration,
 }
 
 impl Default for Config {
@@ -91,6 +98,9 @@ impl Default for Config {
             interval: Duration::from_secs(15),
             usage_every: Duration::from_secs(300),
             mail: None,
+            otlp: None,
+            routes_every: Duration::from_secs(60),
+            new_errors_every: Duration::from_secs(300),
         }
     }
 }
@@ -136,6 +146,11 @@ impl Counters {
     }
 }
 
+/// A preview's errors by `(id, minutes)`: when read (ms), and what (masked).
+type ErrorsRead = HashMap<(String, i64), (i64, Vec<crate::ErrorGroup>)>;
+/// How many errors a preview's services wrote by `(id, minutes)`: when read (ms), and how many.
+type ErrorCountsRead = HashMap<(String, i64), (i64, u64)>;
+
 pub struct Engine {
     pub cfg: Config,
     pub store: Arc<Store>,
@@ -149,12 +164,54 @@ pub struct Engine {
     kick: Notify,
     /// In a cluster: requests that act on running services go to the reconciler's node.
     pub cluster: std::sync::OnceLock<Arc<roll_cluster::Cluster>>,
+    /// Who may open a project's previews under team access; unset, nobody signs in.
+    pub visitors: std::sync::OnceLock<Arc<dyn crate::ports::Visitors>>,
+
     /// Where a Git URL service's previews are posted (rolld: roll apps' GitHub App connection).
     pub git_report: std::sync::OnceLock<Arc<dyn crate::ports::GitReport>>,
+    /// The projects' log drains (roll apps'); unset, previews' runtime output goes to none.
+    pub drains: std::sync::OnceLock<Arc<dyn crate::ports::Drains>>,
+    /// Forwarded connections open per preview, and when each (preview, person, service, port)
+    /// was last said in the activity (`shell.rs`).
+    forwards: Mutex<HashMap<String, Arc<std::sync::atomic::AtomicUsize>>>,
+    forwards_said: Mutex<HashMap<(String, String, String, u16), i64>>,
+    /// What ends a preview's forwarded connections when it goes, by preview.
+    forwards_end: Mutex<HashMap<String, tokio::sync::watch::Sender<bool>>>,
+    /// Each preview's recent spans (`traces.rs`), and what reads an OTLP request into them
+    /// (rolld: roll apps' reader); unset, the intake answers 404.
+    traces: Mutex<traces::Kept>,
+    /// When `tend_routes` last read the slower routes.
+    routes_read: Mutex<Option<std::time::Instant>>,
+    /// When `read_new_errors` last ran, and what each preview's new errors were then (no values
+    /// are read again for the same).
+    new_errors_read: Mutex<Option<std::time::Instant>>,
+    new_errors_seen: Mutex<HashMap<String, Vec<String>>>,
+    /// A round of `read_slower_routes` runs (off the pass), and each held preview's slower routes'
+    /// names masked so far (raw → masked: its values aren't read again for the same).
+    routes_running: std::sync::atomic::AtomicBool,
+    routes_masked: Mutex<HashMap<String, HashMap<String, String>>>,
+    pub span_reader: std::sync::OnceLock<Arc<dyn crate::ports::SpanReader>>,
+    /// Who may name another environment's keys in the project's rules (rolld: roll secrets);
+    /// unset, a rule's reference to one is refused.
+    pub reveal: std::sync::OnceLock<Arc<dyn crate::ports::Reveal>>,
+    /// Open shells in previews' services (`shell.rs`), by id.
+    shells: Mutex<HashMap<String, Arc<shell::ShellSession>>>,
+    /// Each running service's follower to the drains (`drains.rs`), by preview and service.
+    draining: Mutex<HashMap<(String, String), Arc<drains::Draining>>>,
+    /// When this process started, as Docker's `--since` takes it: a follower's first start.
+    started_stamp: String,
     usage_read: Mutex<HashMap<String, i64>>,
     /// What each preview's services used, read at (ms): `GET …/metrics` reads them again only after
     /// [`METRICS_FOR`], however many sheets poll.
     metrics_read: Mutex<HashMap<String, (i64, Vec<crate::ServiceMetrics>)>>,
+    /// Each preview's errors over a span of minutes, read at (ms): `GET …/errors` reads them again
+    /// only after [`requests::ERRORS_FOR`].
+    errors_read: Mutex<ErrorsRead>,
+    /// The same, counted only (a list's rows): nothing in them is masked, so no values are read.
+    error_counts_read: Mutex<ErrorCountsRead>,
+    /// Keys the fingerprints `GET …/errors` answers (random per process): one is a group's name on
+    /// a sheet, never a hash of what the error said.
+    errors_key: [u8; 32],
     /// Previews whose screenshot a converge asked for; taken after the pass (`pass`).
     shots_wanted: Mutex<std::collections::HashSet<String>>,
     /// Previews with a screenshot task queued or running, and whether it was asked again
@@ -233,9 +290,18 @@ impl Engine {
             leader,
             kick: Notify::new(),
             cluster: std::sync::OnceLock::new(),
+            visitors: std::sync::OnceLock::new(),
+
             git_report: std::sync::OnceLock::new(),
             usage_read: Mutex::new(HashMap::new()),
             metrics_read: Mutex::new(HashMap::new()),
+            errors_read: Mutex::new(HashMap::new()),
+            error_counts_read: Mutex::new(HashMap::new()),
+            errors_key: {
+                let mut k = [0u8; 32];
+                getrandom::fill(&mut k).expect("system randomness");
+                k
+            },
             secrets_told: Mutex::new(HashMap::new()),
             domain_read: Mutex::new(HashMap::new()),
             paths_seen: Mutex::new(HashMap::new()),
@@ -250,6 +316,21 @@ impl Engine {
             warm_wanted: Mutex::new(Vec::new()),
             deploying_since: Mutex::new(HashMap::new()),
             passing: tokio::sync::Mutex::new(()),
+            drains: std::sync::OnceLock::new(),
+            draining: Mutex::new(HashMap::new()),
+            shells: Mutex::new(HashMap::new()),
+            traces: Mutex::new(HashMap::new()),
+            routes_read: Mutex::new(None),
+            new_errors_read: Mutex::new(None),
+            new_errors_seen: Mutex::new(HashMap::new()),
+            routes_running: std::sync::atomic::AtomicBool::new(false),
+            routes_masked: Mutex::new(HashMap::new()),
+            span_reader: std::sync::OnceLock::new(),
+            reveal: std::sync::OnceLock::new(),
+            forwards: Mutex::new(HashMap::new()),
+            forwards_said: Mutex::new(HashMap::new()),
+            forwards_end: Mutex::new(HashMap::new()),
+            started_stamp: drains::now_stamp(),
         })
     }
 
@@ -346,6 +427,8 @@ impl Engine {
         }
         while set.join_next().await.is_some() {}
         self.tend_leases().await;
+        self.tend_drains().await;
+        self.tend_routes();
         self.note_refused_egress().await;
         // Services those converges deployed at a new head, woken so their first visit is warm (a
         // few at a time, off the pass).
@@ -800,8 +883,13 @@ fn short(rev: &str) -> &str {
 
 mod converge;
 mod discover;
+mod drains;
 mod env;
 mod masks;
+pub mod shell;
+pub mod traces;
+pub use masks::ErrorMasks;
+pub use requests::error_span;
 mod requests;
 
 #[cfg(test)]
@@ -829,6 +917,7 @@ mod tests {
             approved: false,
             author: String::new(),
             github_pr: None,
+            owner_id: String::new(),
         };
         assert!(wants(&s, &ch));
         assert!(!wants(&s, &ChangeInfo { branch: Some("fix/x".into()), ..ch.clone() }));

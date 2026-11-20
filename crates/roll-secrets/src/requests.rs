@@ -303,6 +303,13 @@ impl Secrets {
     /// it's based on (applying it later needs the environment unchanged since).
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn open_request_items(&self, project: &str, slug: &str, path: &str, message: String, items: Vec<Item>, expect: &[(usize, i64)], caller: &Caller) -> Result<Request> {
+        self.open_request_hooked(project, slug, path, message, items, expect, caller, &|_, _| Ok(()))
+    }
+
+    /// [`Self::open_request_items`], running `hook` with the request's id in the transaction that
+    /// opens it (it may run again when the write retries: database only).
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn open_request_hooked(&self, project: &str, slug: &str, path: &str, message: String, items: Vec<Item>, expect: &[(usize, i64)], caller: &Caller, hook: &dyn Fn(&Conn<'_>, &str) -> Result<()>) -> Result<Request> {
         let path = path.to_string();
         let members = if items.iter().any(|i| matches!(i.action, ItemAction::Set { link: Some(Some(_)), .. })) { self.members(project)? } else { Default::default() };
         for i in &items {
@@ -353,13 +360,14 @@ impl Secrets {
                 params![id, env.id, path, message, caller.principal, now, base_seq, json(&ops).into_bytes(), json(&diff), project],
             )?;
             let keys: Vec<String> = diff.iter().map(|d| d.key.clone()).collect();
-            audit::record(c, project, caller, "request.open", Some(slug), Some(&path), &keys, &format!("opened {id}: {}", crate::write::summarize(&diff)), now)?;
+            audit::record(c, self.keys()?, project, caller, "request.open", Some(slug), Some(&path), &keys, &format!("opened {id}: {}", crate::write::summarize(&diff)), now)?;
             // The approvers hear about it (delivered by the sweeper, never from here).
             let notify: Option<i64> = c.query_row("SELECT 1 FROM environments WHERE id = ? AND notify_url IS NOT NULL", [&env.id], |r| r.get(0)).optional()?;
             if notify.is_some() {
                 let link = self.web_url.as_ref().map(|w| format!("{}/dashboard/projects/{project}/secrets?env={slug}", w.trim_end_matches('/')));
                 crate::notices::queue(c, project, &env.id, slug, &id, &caller.principal, &message, &keys, link, now)?;
             }
+            hook(c, &id)?;
             view(c, &env, load(c, &env, &id)?)
         })
     }
@@ -417,7 +425,7 @@ impl Secrets {
                 "open"
             };
             c.execute("UPDATE requests SET reviews = ?, state = ? WHERE id = ?", params![json(&reviews), state, id])?;
-            audit::record(c, project, caller, &format!("request.{}", v.verdict), Some(slug), Some(&r.path), &[], &format!("{}d {id}", v.verdict.trim_end_matches('e')), now)?;
+            audit::record(c, self.keys()?, project, caller, &format!("request.{}", v.verdict), Some(slug), Some(&r.path), &[], &format!("{}d {id}", v.verdict.trim_end_matches('e')), now)?;
             view(c, &env, load(c, &env, id)?)
         })
     }
@@ -482,11 +490,11 @@ impl Secrets {
                     return Err(Error::Conflict("stale", format!("{} changed after {id} was opened: open a new request", i.key)));
                 }
             }
-            let (change, diffs) = crate::write::apply(c, &dek, &env, &prepared.items, "request", &message, caller, now)?;
+            let (change, diffs) = crate::write::apply(c, &dek, self.keys()?, &env, &prepared.items, "request", &message, caller, now)?;
             let seq = (!diffs.is_empty()).then_some(change.seq);
             c.execute("UPDATE requests SET state = 'applied', applied_seq = ? WHERE id = ? AND state = ?", params![seq, id, r.state])?;
             if bypass && !met {
-                audit::record(c, project, caller, "approval.bypass", Some(slug), Some(&r.path), &[], &format!("applied {id} without approval"), now)?;
+                audit::record(c, self.keys()?, project, caller, "approval.bypass", Some(slug), Some(&r.path), &[], &format!("applied {id} without approval"), now)?;
             }
             Ok(())
         });
@@ -514,7 +522,7 @@ impl Secrets {
                 return Err(Error::Conflict("conflict", format!("{id} is {}", r.state)));
             }
             c.execute("UPDATE requests SET state = 'closed' WHERE id = ?", [id])?;
-            audit::record(c, project, caller, "request.close", Some(slug), Some(&r.path), &[], &format!("closed {id}"), now)?;
+            audit::record(c, self.keys()?, project, caller, "request.close", Some(slug), Some(&r.path), &[], &format!("closed {id}"), now)?;
             view(c, &env, load(c, &env, id)?)
         })
     }

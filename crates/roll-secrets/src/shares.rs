@@ -31,7 +31,7 @@ CREATE INDEX IF NOT EXISTS shares_expiry ON shares (expires_at);
 ";
 
 /// The largest ciphertext (a 64 KiB value, its nonce and tag, in base64url).
-const CIPHERTEXT_MAX: usize = 90 * 1024;
+pub(crate) const CIPHERTEXT_MAX: usize = 90 * 1024;
 /// Shares a project may have open at once.
 const OPEN_MAX: i64 = 200;
 
@@ -47,6 +47,24 @@ pub struct NewShare {
     pub views: Option<i64>,
     /// 5 minutes to 7 days (default 24 hours).
     pub ttl_minutes: Option<i64>,
+    /// The key the value came from, when it's a stored one (the dashboard's and the CLI's "share
+    /// once" of a key say so): an incident's cut-off of that key or folder expires the share.
+    /// The server can't check the ciphertext holds it; it checks the caller may reveal there.
+    #[serde(default)]
+    pub from: Option<ShareFrom>,
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone)]
+#[serde(deny_unknown_fields)]
+pub struct ShareFrom {
+    pub environment: String,
+    #[serde(default = "root")]
+    pub path: String,
+    pub key: String,
+}
+
+fn root() -> String {
+    "/".into()
 }
 
 #[derive(Debug, Serialize)]
@@ -60,6 +78,9 @@ pub struct Share {
     pub opened_at: Option<i64>,
     /// Whether it can still be opened.
     pub open: bool,
+    /// The key it was made from, when its maker said.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub from: Option<ShareFrom>,
     /// `<dashboard>/share/<id>` when the server knows the dashboard's address (`ROLL_WEB_URL`);
     /// the client appends `#<key>`.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -88,21 +109,33 @@ impl Secrets {
         if !(1..=10).contains(&views) || !(5..=7 * 24 * 60).contains(&ttl) {
             return Err(Error::BadRequest("views is 1–10 and ttl_minutes 5–10080".into()));
         }
+        let from = match n.from {
+            Some(f) => {
+                let path = names::path(&f.path)?;
+                caller.need(Action::Reveal, &Scope::at(project, &f.environment, &path))?;
+                Some(ShareFrom { environment: f.environment, path, key: f.key })
+            }
+            None => None,
+        };
         self.project(project)?;
         let now = self.db.now_ms()?;
         let id = names::new_id("shr", 24);
         self.db.write(|c| {
+            let env_id = match &from {
+                Some(f) => Some(crate::envs::by_slug(c, project, &f.environment)?.id),
+                None => None,
+            };
             let open: i64 = c.query_row("SELECT COUNT(*) FROM shares WHERE project_id = ? AND ciphertext IS NOT NULL AND expires_at > ?", params![project, now], |r| r.get(0))?;
             if open >= OPEN_MAX {
                 return Err(Error::Conflict("conflict", format!("{OPEN_MAX} shares are open: revoke some first")));
             }
             c.execute(
-                "INSERT INTO shares (id, project_id, note, ciphertext, views_left, created_by, created_at, expires_at, opened_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL)",
-                params![id, project, n.note, raw, views, caller.principal, now, now + ttl * 60_000],
+                "INSERT INTO shares (id, project_id, note, ciphertext, views_left, created_by, created_at, expires_at, opened_at, env_id, path, key) VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?)",
+                params![id, project, n.note, raw, views, caller.principal, now, now + ttl * 60_000, env_id, from.as_ref().map(|f| f.path.clone()), from.as_ref().map(|f| f.key.clone())],
             )?;
-            audit::record(c, project, caller, "share.create", None, None, &[], &format!("shared a value ({views} open{}, {ttl} min): {}", if views == 1 { "" } else { "s" }, n.note), now)?;
+            audit::record(c, self.keys()?, project, caller, "share.create", None, None, &[], &format!("shared a value ({views} open{}, {ttl} min): {}", if views == 1 { "" } else { "s" }, n.note), now)?;
             let link = self.web_url.as_ref().map(|w| format!("{}/share/{id}", w.trim_end_matches('/')));
-            Ok(Share { id: id.clone(), note: n.note.clone(), views_left: views, created_by: caller.principal.clone(), created_at: now, expires_at: now + ttl * 60_000, opened_at: None, open: true, link })
+            Ok(Share { id: id.clone(), note: n.note.clone(), views_left: views, created_by: caller.principal.clone(), created_at: now, expires_at: now + ttl * 60_000, opened_at: None, open: true, link, from: from.clone() })
         })
     }
 
@@ -112,10 +145,14 @@ impl Secrets {
         let now = self.db.now_ms()?;
         self.db.read(|c| {
             Ok(c.query(
-                "SELECT id, note, views_left, created_by, created_at, expires_at, opened_at, ciphertext IS NOT NULL FROM shares WHERE project_id = ? ORDER BY created_at DESC LIMIT 200",
+                "SELECT s.id, s.note, s.views_left, s.created_by, s.created_at, s.expires_at, s.opened_at, s.ciphertext IS NOT NULL, e.slug, s.path, s.key FROM shares s LEFT JOIN environments e ON e.id = s.env_id WHERE s.project_id = ? ORDER BY s.created_at DESC LIMIT 200",
                 [project],
                 |r| {
                     let expires_at: i64 = r.get(5)?;
+                    let from = match (r.get::<_, Option<String>>(8)?, r.get::<_, Option<String>>(9)?, r.get::<_, Option<String>>(10)?) {
+                        (Some(environment), Some(path), Some(key)) => Some(ShareFrom { environment, path, key }),
+                        _ => None,
+                    };
                     Ok(Share {
                         id: r.get(0)?,
                         note: r.get(1)?,
@@ -126,6 +163,7 @@ impl Secrets {
                         opened_at: r.get(6)?,
                         open: r.get::<_, i64>(7)? != 0 && expires_at > now,
                         link: None,
+                        from,
                     })
                 },
             )?)
@@ -146,7 +184,7 @@ impl Secrets {
                 return Err(Error::Forbidden("only whoever made a share, or an admin, revokes it".into()));
             }
             c.execute("UPDATE shares SET ciphertext = NULL, views_left = 0 WHERE id = ? AND project_id = ?", [id, project])?;
-            audit::record(c, project, caller, "share.revoke", None, None, &[], &format!("revoked share {}", &id[..12.min(id.len())]), now)
+            audit::record(c, self.keys()?, project, caller, "share.revoke", None, None, &[], &format!("revoked share {}", &id[..12.min(id.len())]), now)
         })
     }
 
@@ -177,8 +215,9 @@ impl Secrets {
             } else {
                 c.execute("UPDATE shares SET views_left = views_left - 1, opened_at = ? WHERE id = ?", params![now, id])?;
             }
-            let opener = Caller { principal: "share-link".into(), grants: std::sync::Arc::new(crate::access::Everything), ip: ip.clone(), runtime: false, approval: None };
-            audit::record(c, &project, &opener, "share.open", None, None, &[], &format!("share {} opened ({} left)", &id[..12.min(id.len())], (left - 1).max(0)), now)?;
+            let mut opener = Caller::acting("share-link".into(), std::sync::Arc::new(crate::access::Everything));
+            opener.ip = ip.clone();
+            audit::record(c, self.keys()?, &project, &opener, "share.open", None, None, &[], &format!("share {} opened ({} left)", &id[..12.min(id.len())], (left - 1).max(0)), now)?;
             Ok(URL_SAFE_NO_PAD.encode(ct))
         })
     }

@@ -336,6 +336,11 @@ async fn backup_branch(
     Path((id, branch)): Path<(String, String)>,
 ) -> ApiResult<crate::store::BaseImage> {
     let branch = c.branch_in(&id, &branch)?;
+    // A base backup reads the branch's running primary: wake it first, as a query does. A branch at
+    // rest (scaled to zero) has no compute running, and the backup failed with Docker's error as a 500.
+    if let Some(ep) = c.store.endpoint_for_branch(&branch.id)? {
+        c.ensure_running(&ep.id).await?;
+    }
     Ok(Json(c.take_base_backup(&branch.id).await?))
 }
 

@@ -2,6 +2,9 @@
 
 use super::*;
 
+/// How long one resource's columns are read for mask suggestions before it's named in `unread`.
+pub const SUGGEST_READ_FOR: std::time::Duration = std::time::Duration::from_secs(10);
+
 impl Engine {
     pub(super) async fn converge_one(&self, r: Row) {
         let id = r.id.clone();
@@ -64,6 +67,72 @@ impl Engine {
             }
         }
         if problems.is_empty() { Ok(()) } else { Err(crate::Error::BadRequest(problems.join("; "))) }
+    }
+
+    /// Columns of the project's data that look like people's data and aren't masked yet
+    /// (`GET …/mask-suggestions`): of every Postgres, NoSQL and search resource on its canvas that
+    /// the project stands for (`Workspace::trusts`) and `may_read` allows (a scoped token's grant
+    /// for that resource), whatever its rule now (the dialog shows them under those on `branch`,
+    /// as the rule being edited says), at most [`crate::mask::SUGGEST_COLUMNS_MAX`] columns read
+    /// each. A resource that isn't read is named in `unread`, with why: it sleeps (reading it
+    /// would wake it), it didn't answer within [`SUGGEST_READ_FOR`], it couldn't be read, or it
+    /// has more columns than are read.
+    pub async fn mask_suggestions(&self, project_id: &str, may_read: impl Fn(Kind, &str) -> bool) -> crate::Result<serde_json::Value> {
+        let max = crate::mask::SUGGEST_COLUMNS_MAX;
+        let project = self.workspace_project(project_id)?;
+        let s = self.store.settings(project_id)?;
+        let resources: Vec<(Kind, String)> = project
+            .resources
+            .iter()
+            .filter(|r| self.workspace.trusts(&project, r.kind, &r.r#ref))
+            .filter_map(|r| Kind::of_workspace(r.kind).map(|k| (k, r.r#ref.clone())))
+            .filter(|(k, parent)| matches!(k, Kind::Postgres | Kind::Nosql | Kind::Search) && may_read(*k, parent))
+            .collect();
+        // `None`: not read in time.
+        let read = futures::future::join_all(resources.iter().map(|(k, parent)| async move {
+            let b = match self.brancher(*k) {
+                Ok(b) => b,
+                Err(e) => return Some(Err(e)),
+            };
+            tokio::time::timeout(SUGGEST_READ_FOR, b.columns(parent, max + 1)).await.ok()
+        }))
+        .await;
+        let (mut suggestions, mut unread) = (Vec::new(), Vec::new());
+        for ((kind, parent), columns) in resources.iter().zip(read) {
+            let key = format!("{}:{parent}", kind.as_str());
+            let why = match columns {
+                Some(Ok(c)) => Ok(c),
+                Some(Err(e)) if e.is::<crate::ports::Asleep>() => Err("asleep: open it to read its columns".to_string()),
+                Some(Err(e)) => {
+                    warn!(resource = %key, error = %format!("{e:#}"), "previews: reading columns for mask suggestions");
+                    Err("its columns couldn't be read".into())
+                }
+                None => Err(format!("its columns weren't read within {} s", SUGGEST_READ_FOR.as_secs())),
+            };
+            let mut columns = match why {
+                Ok(c) => c,
+                Err(why) => {
+                    unread.push(serde_json::json!({ "resource": key, "why": why }));
+                    continue;
+                }
+            };
+            if columns.len() > max {
+                columns.truncate(max);
+                unread.push(serde_json::json!({ "resource": key, "why": format!("only its first {max} columns were read") }));
+            }
+            let masked = s.masking.get(&key);
+            for c in &columns {
+                // Already masked, or a path the settings wouldn't take as a mask.
+                let unnameable = c.path.len() > 200 || (*kind == Kind::Search && c.path.contains(['*', ',', '/', ' ', '\\']));
+                if unnameable || masked.is_some_and(|m| m.contains_key(&c.path)) {
+                    continue;
+                }
+                if let Some(x) = crate::mask::suggest(*kind, c) {
+                    suggestions.push(serde_json::json!({ "resource": key, "path": c.path, "rule": x.rule, "why": x.why }));
+                }
+            }
+        }
+        Ok(serde_json::json!({ "suggestions": suggestions, "unread": unread }))
     }
 
     /// A head nobody approved yet: nothing of it runs (its services sleep) until a writer does.
@@ -354,17 +423,25 @@ impl Engine {
                 vars.push((key, crate::names::follow(kind, &field, own.clone())));
             }
         }
-        let (access_token, bypass) = match self.store.access(&r.id)? {
-            Some(crate::store::Access { token: t, required: true, bypass }) if !t.is_empty() => (Some(t), bypass),
-            _ => (None, None),
-        };
+        // Link access hands the backend the link's token; team access has it let in people
+        // signed in to roll instead. The bypass goes with either.
+        let access = self.store.access(&r.id)?;
+        let access_token = access.as_ref().and_then(|a| a.link_token().map(str::to_string));
+        let signed_in = access.as_ref().is_some_and(|a| a.mode == crate::settings::Access::Team);
+        let bypass = access.and_then(|a| a.bypass).filter(|_| access_token.is_some() || signed_in);
         // Every converge (at least every few minutes, for usage) pushes its expiry out: only a
         // preview nobody converges any more lets it lapse.
         let trusted = s.secrets.allow_production && r.trusted;
         let expires_at = self.store.now_ms()? + SECRETS_ENV_MARGIN_MS;
         // What it branched: roll secrets resolves nothing of those parents' (`followed`).
         let branched: Vec<(Kind, String)> = self.store.resources(&r.id)?.into_iter().map(|x| (x.kind, x.parent)).collect();
-        self.secrets.ensure(&r.project_id, &env_name(&r.id), &s.secrets.base, &vars, trusted, expires_at, &branched).await.map_err(|e| anyhow::anyhow!("secrets: {e:#}"))?;
+        // The project's rules' references (checked when saved), where nothing overrode them, go to
+        // roll secrets as references; everything else, whatever it looks like, as plain text.
+        let own = self.store.vars(&r.id)?;
+        let rule_refs: Vec<(String, String)> = project_env(&s, r.branch.as_deref()).into_iter().filter(|(k, v)| crate::settings::is_reference(v) && !own.contains_key(k)).collect();
+        let refs: Vec<(String, String)> = vars.iter().filter(|kv| rule_refs.contains(kv)).cloned().collect();
+        vars.retain(|kv| !refs.contains(kv));
+        self.secrets.ensure(&r.project_id, &env_name(&r.id), &s.secrets.base, &vars, &refs, trusted, expires_at, &branched).await.map_err(|e| anyhow::anyhow!("secrets: {e:#}"))?;
         // Its logs' masks follow what it's given now: these values at once (roll apps' instances
         // get them without a start here), roll secrets' read again at the next logs read.
         let own: Vec<(String, String)> = project_env(&s, r.branch.as_deref()).into_iter().chain(self.store.vars(&r.id)?).collect();
@@ -467,8 +544,12 @@ impl Engine {
             // The feedback button: the runtime's proxy adds it per request; roll apps at deploy.
             let feedback = s.feedback && r.change_id.is_some() && access_token.is_some();
             // Egress too: a service moves onto (or off) the preview's own network by restarting.
-            let fingerprint = config_fingerprint(&vars, access_token.is_some() && on_apps, bypass.as_deref().filter(|_| on_apps), trusted, feedback && on_apps)
+            let fingerprint = config_fingerprint(&vars, (access_token.is_some() || signed_in) && on_apps, bypass.as_deref().filter(|_| on_apps), trusted, feedback && on_apps)
+                + if signed_in && on_apps { "s" } else { "" }
                 + &if s.egress_for(r.trusted) == crate::settings::EgressRule::Roll { format!("e{}", s.egress_hosts.join(",")) } else { String::new() }
+                // Traces: a runtime service takes the OpenTelemetry variables when it starts;
+                // roll apps' environment turns its own on and redeploys.
+                + if s.traces { "o" } else { "" }
                 + &rebuilt;
             let was = self.store.service_config(&r.id, &spec.name)?;
             let config_moved = was.as_deref() != Some(fingerprint.as_str());
@@ -510,11 +591,13 @@ impl Engine {
                     vars: vars.clone(),
                     branches: branches.clone(),
                     access_token: access_token.clone(),
+                    signed_in,
                     bypass_sha256: bypass.clone(),
                     feedback,
                     egress: s.egress_for(r.trusted),
                     egress_hosts: s.egress_hosts.clone(),
                     rebuild: fresh.then_some(rebuilds),
+                    traces: s.traces,
                 };
                 self.store.set_service(&r.id, &spec.name, ServiceState::Deploying, None, None)?;
                 to_deploy.push((t, fingerprint, rev.clone(), repo == r.repo));
@@ -953,7 +1036,8 @@ impl Engine {
         let own: Vec<(String, String)> = project_env(s, r.branch.as_deref()).into_iter().chain(self.store.vars(&r.id)?).collect();
         let hide = super::masks::secret_values(&env, &plain, &own, vars);
         self.add_masks(&r.id, hide.clone());
-        for (k, v) in vars {
+        // A reference is resolved in `env` already (roll secrets'): never set as its text.
+        for (k, v) in vars.iter().filter(|(_, v)| !crate::settings::is_reference(v)) {
             set(&mut env, k, v.clone());
         }
         set(&mut env, "ROLL_PREVIEW", r.id.clone());
@@ -976,6 +1060,7 @@ impl Engine {
             }
         }
         let (code, tail) = ran.map_err(|e| anyhow::anyhow!("{what}: {}", code_preview::runner::mask(&format!("{e:#}"), &hide)))?;
+        self.drain_job(&r.project_id, &r.id, what, &code_preview::runner::mask(&tail, &hide)).await;
         if code != 0 {
             anyhow::bail!("the {what} command failed with exit code {code}\n\n{}", code_preview::runner::mask(tail.trim_end(), &hide));
         }
@@ -1116,6 +1201,9 @@ impl Engine {
             }
             self.store.set_ran_head(&r.id, None)?;
         }
+        // Its shells end with it, and its traces go.
+        self.close_shells_of(&r.id);
+        self.forget_traces(&r.id);
         for p in self.store.pinned(&r.id)? {
             let name = format!("{}@{}", p.service, p.revision);
             self.apps.remove(&r.id, &name).await.map_err(|e| anyhow::anyhow!("removing {name}: {e:#}"))?;
