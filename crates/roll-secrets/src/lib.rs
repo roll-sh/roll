@@ -73,6 +73,7 @@ pub mod consumers;
 pub mod kms;
 mod write;
 pub mod unseal;
+pub mod validity;
 
 pub use access::{Action, Approval, Caller, Minted, People, Person, Scope, Workloads, PREVIEWS};
 pub use api::router;
@@ -506,6 +507,9 @@ impl Secrets {
         // A deleted project kept only until what it issued is revoked (forget_project).
         db.add_column("projects", "forgotten_at", "INTEGER")?;
         db.ensure_schema(notices::SCHEMA)?;
+        // Validity checks of credentials found in code (validity.rs): a project's switch, the answers.
+        db.ensure_schema(validity::SCHEMA)?;
+        db.add_column("projects", "validity_checks", "INTEGER")?;
         db.ensure_schema(alerts::SCHEMA)?;
         db.ensure_schema(decoys::SCHEMA)?;
         db.ensure_schema(rotators::SCHEMA)?;

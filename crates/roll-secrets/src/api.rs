@@ -91,6 +91,8 @@ pub fn router(s: Arc<Secrets>) -> Router {
         .route(&format!("{P}/audit/sinks"), get(sinks).post(create_sink))
         .route(&format!("{P}/audit/sinks/{{id}}"), axum::routing::delete(delete_sink))
         .route(&format!("{P}/leaks"), post(scan_leaks))
+        .route(&format!("{P}/validity"), post(check_validity))
+        .route(&format!("{P}/unstored/{{fingerprint}}"), get(unstored))
         .route(&format!("{P}/health"), get(project_health))
         .route("/v1/secrets/findings", get(all_health))
         .route(&format!("{P}/rotations"), get(rotations))
@@ -269,25 +271,70 @@ async fn overview(State(s): S, Who(c): Who, Path(project): Path<String>) -> crat
         let envs = s.environments(&project, &c)?;
         let previews = envs.iter().filter(|e| e.kind == crate::envs::Kind::Ephemeral).count();
         let history_days = s.history_days(&project)?;
-        Ok(json!({ "project": project, "environments": envs, "previews": previews, "history_days": history_days }))
+        let validity_checks = if s.validity_checks(&project)? { "on" } else { "off" };
+        Ok(json!({ "project": project, "environments": envs, "previews": previews, "history_days": history_days, "validity_checks": validity_checks }))
     })
     .await?;
     Ok(ok(v))
 }
 
-/// `{history_days}`: how long old values are kept (`null`: for good).
+/// `{history_days?, validity_checks?}`: how long old values are kept (`null`: for good), and
+/// whether credentials found in code are checked with their providers (`"on"` or `"off"`).
 async fn project_settings(State(s): S, Who(c): Who, Path(project): Path<String>, b: Bytes) -> crate::Result<Response> {
     let mut o: serde_json::Map<String, serde_json::Value> = body(&b)?;
     let days = match o.remove("history_days") {
-        Some(serde_json::Value::Null) => None,
-        Some(v) => Some(v.as_i64().ok_or_else(|| Error::BadRequest("history_days is a number of days or null".into()))?),
-        None => return Err(Error::BadRequest("nothing to change: history_days".into())),
+        Some(serde_json::Value::Null) => Some(None),
+        Some(v) => Some(Some(v.as_i64().ok_or_else(|| Error::BadRequest("history_days is a number of days or null".into()))?)),
+        None => None,
+    };
+    let checks = match o.remove("validity_checks") {
+        Some(v) => Some(match v.as_str() {
+            Some("on") => true,
+            Some("off") => false,
+            _ => return Err(Error::BadRequest("validity_checks is \"on\" or \"off\"".into())),
+        }),
+        None => None,
     };
     if let Some(k) = o.keys().next() {
         return Err(Error::BadRequest(format!("unknown field {k}")));
     }
-    let d = blocking(s, move |s| s.set_history_days(&project, days, &c)).await?;
-    Ok(ok(json!({ "history_days": d })))
+    if days.is_none() && checks.is_none() {
+        return Err(Error::BadRequest("nothing to change: history_days, validity_checks".into()));
+    }
+    let v = blocking(s, move |s| {
+        let mut out = serde_json::Map::new();
+        if let Some(days) = days {
+            out.insert("history_days".into(), json!(s.set_history_days(&project, days, &c)?));
+        }
+        if let Some(on) = checks {
+            out.insert("validity_checks".into(), json!(if s.set_validity_checks(&project, on, &c)? { "on" } else { "off" }));
+        }
+        Ok(out)
+    })
+    .await?;
+    Ok(ok(v))
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ValidityBody {
+    credentials: Vec<crate::validity::Probe>,
+}
+
+/// `{credentials: [{value, pair?}]}` → `{validity_checks, results: [Checked]}` (validity.rs):
+/// none asked about while the project's checks are off.
+async fn check_validity(State(s): S, Who(c): Who, Path(project): Path<String>, b: Bytes) -> crate::Result<Response> {
+    let v: ValidityBody = body(&b)?;
+    let found = blocking(s, move |s| s.check_validity(&project, v.credentials, &c)).await?;
+    Ok(ok(match found {
+        Some(results) => json!({ "validity_checks": "on", "results": results }),
+        None => json!({ "validity_checks": "off", "results": [] }),
+    }))
+}
+
+/// What a credential's last check said, by its fingerprint.
+async fn unstored(State(s): S, Who(c): Who, Path((project, fingerprint)): Path<(String, String)>) -> crate::Result<Response> {
+    Ok(ok(blocking(s, move |s| s.validity_of(&project, &fingerprint, &c)).await?))
 }
 
 #[derive(Deserialize, Default)]

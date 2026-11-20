@@ -666,11 +666,34 @@ pub struct Blocker {
     pub line: Option<usize>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fingerprint: Option<String>,
+    /// `secret_unstored`: whether the credential works, as its provider answered, when the
+    /// project's roll secrets validity checks are on (docs/secrets.md, "Is it live?").
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub validity: Option<CredentialValidity>,
+}
+
+/// A credential's validity as its provider answered (roll secrets' validity checks): never its
+/// value.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CredentialValidity {
+    pub fingerprint: String,
+    /// `live`, `invalid` (revoked, deleted or never real) or `unknown`.
+    pub result: String,
+    /// The provider's account it belongs to (an AWS account, a GitHub login, a Slack team).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub account: Option<String>,
+    /// When the provider answered (ms).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub checked_at: Option<i64>,
+    /// A live credential whose kind roll can rotate for you: `aws-iam` (roll secrets' AWS IAM
+    /// users) or `github-app` (a project's GitHub App tokens).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rotator: Option<String>,
 }
 
 impl Blocker {
     pub fn new(kind: &str, message: impl Into<String>) -> Blocker {
-        Blocker { kind: kind.into(), message: message.into(), key: None, environments: Vec::new(), path: None, line: None, fingerprint: None }
+        Blocker { kind: kind.into(), message: message.into(), key: None, environments: Vec::new(), path: None, line: None, fingerprint: None, validity: None }
     }
 
     /// One about roll secrets key `key` in `environments`.

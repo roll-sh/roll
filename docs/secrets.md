@@ -2950,6 +2950,65 @@ AWS access keys, GitHub, Slack, Stripe live, Google, Anthropic and OpenAI keys, 
   reading the value from the change's blob into the project the repo is trusted for) isn't built
   yet: the notice names the CLI command.
 
+#### Is it live? (validity checks)
+
+A found credential may already be revoked, or may be the key production runs on. As GitGuardian's
+validity checks do, roll secrets can ask the credential's provider whether it still works, so a
+live one is handled first. It contacts the provider, so it's off until a project's admin turns it
+on (`PATCH /v1/secrets/projects/{project} {validity_checks: "on"}`, `roll secrets validity-checks
+on`, or Validity checks in the project's environments settings), audited as `validity.checks`.
+
+- **What's checked.** The kinds a provider can be asked about, each with one read-only request
+  that costs nothing, to the provider's own host:
+
+  | Kind | Request | Account it names |
+  | --- | --- | --- |
+  | AWS access key | `sts:GetCallerIdentity` to `https://sts.amazonaws.com/`, SigV4-signed with the found pair | the AWS account |
+  | GitHub token | `GET https://api.github.com/user` | the login |
+  | Stripe live key | `GET https://api.stripe.com/v1/balance` | |
+  | Slack token | `POST https://slack.com/api/auth.test` | the team id |
+  | OpenAI API key | `GET https://api.openai.com/v1/models` | |
+  | Anthropic API key | `GET https://api.anthropic.com/v1/models` | |
+
+  An AWS access key id is paired with the secret access key next to it (the nearest 40-character
+  base64 word within 5 lines, `credentials::aws_secret_near`); without one, or for a session's
+  `ASIA…` key (it needs its token), nothing is sent. Google API keys, private keys, database URLs
+  and roll's own tokens aren't checked.
+- **The answer** is `live` (the provider accepted it), `invalid` (refused: revoked, deleted or never
+  real) or `unknown` (not asked, a redirect, a rate limit, an answer that says neither; `why` says
+  which), plus the provider's account id where the answer gives one. A Stripe restricted key the
+  balance read isn't allowed for (403) still authenticated, so it's live; an AWS key id whose found
+  secret doesn't sign for it (`SignatureDoesNotMatch`) is unknown, not invalid.
+- **The rules.** Hosts are fixed in `crates/roll-secrets/src/validity.rs`, never configured; the
+  request goes through rolld's guarded client (public addresses only, no redirects, a 15-second
+  timeout, at most 64 KiB of the answer read) and carries the credential and the headers its API
+  needs (`Accept`, Anthropic's `anthropic-version`), nothing else. Each credential is checked once
+  per fingerprint: the answer is kept a day (an `unknown` one an hour), per project, and a project
+  gets at most 100 checks an hour. A check is claimed in a write first, so two callers or two nodes
+  never ask twice; the request goes out after that write, outside any transaction, and the answer
+  is stored with its `secrets.validity` audit row (kind, fingerprint, result and account) in
+  another. The value is never stored, logged, audited or put in an error.
+- **Where it shows.** On a change, roll code asks in background work after it finds the
+  credentials (only those kinds, only on the repo's own changes, never a fork's, which would make
+  the notice an oracle for anyone's key; only when one of the projects with the repo on its canvas
+  that may reach it has the checks on), and the `secret_unstored` notice says what came back once it has:
+  a live one ranks first and reads `adds what looks like an AWS access key at deploy.py:2 (live: its
+  provider accepted it, account 123456789012), which roll secrets doesn't hold: rotate it, then
+  store it as …`; a refused one says `(revoked or invalid, its provider said)`. The notice carries
+  `validity: {fingerprint, result, account?, checked_at?, rotator?}`, and the change page marks a
+  live one. `GET …/unstored/{fingerprint}` answers the kept result, and `roll secrets scan` prints
+  it (below).
+- **Rotating it.** When the credential is live and roll has a rotator for its kind, the answer's
+  `rotator` names it and the change page links to where it's set up: `aws-iam` (roll secrets
+  rotating an IAM user's keys, "AWS" above) and `github-app` (a project's GitHub App tokens instead
+  of a personal token, "GitHub App tokens"). Nothing is rotated for you.
+- **Tests.** Fake providers only: `validity_checks_ask_each_provider_once_and_only_when_an_admin_turned_them_on`
+  (`tests/api.rs`: off asks nobody, only an admin turns it on, live, invalid and a redirect's
+  unknown, the pair, one request each carrying only the credential, the cache, the audit rows
+  without a value), `a_credential_that_still_works_ranks_first_and_says_live` (roll code's
+  notice), `a_redirect_is_answered_never_followed` (rolld's guarded client) and the SigV4 and pairing
+  unit tests. No test calls a real provider.
+
 #### Keys a change starts reading
 
 The same pass over the lines a change adds also picks out the environment variables they read, by
@@ -2988,7 +3047,11 @@ otherwise it would confirm guesses at values the caller can't read. Each scan is
 It also lists credentials the project doesn't hold ("Credentials roll doesn't hold" above: the same
 detectors, placeholder rule and `.roll/secrets-allow`, read from the working tree's top), as
 `file:line  an AWS access key, not in roll secrets: roll secrets scan --store AWS_KEY=deploy.ts:2
-[sha256:…]` (`--json`: `{file, line, unstored: true, kind, fingerprint, suggested_key}`). A plain
+[sha256:…]` (`--json`: `{file, line, unstored: true, kind, fingerprint, suggested_key, validity?}`).
+When the project has validity checks on ("Is it live?" above), the scan asks about the kinds a
+provider can check (`POST …/validity`; nothing is sent while they're off) and a live one is listed
+first: `deploy.ts:2  an AWS access key LIVE, account 123456789012; rotate it (roll can: roll secrets
+aws-users add), not in roll secrets: …`; a refused one says `(revoked or invalid)`. A plain
 scan only reports them; `--staged` refuses the commit unless `--allow-unstored`. To move one in:
 
 ```
@@ -4438,8 +4501,8 @@ isn't in the workspace is 404.
 | --- | --- | --- |
 | `GET /v1/secrets/health` | | `{ok, key: "env"\|"kms"\|"file"\|"shares"\|"missing", resealed: "all"\|number\|null, links: string[], syncs: string[]}` (`links`, `syncs`: the kinds registered) |
 | `GET`, `POST /v1/secrets/unseal` | `{share}` (`POST`) | `{sealed, have?, need?, error?}`: a sealed node's progress (public; see "Starting sealed"); 429 with `Retry-After` past the limits |
-| `GET` | | `{project, environments: Environment[], previews: number, history_days: number \| null}` |
-| `PATCH` | `{history_days}` | `{history_days}` (`admin`) |
+| `GET` | | `{project, environments: Environment[], previews: number, history_days: number \| null, validity_checks: "on" \| "off"}` |
+| `PATCH` | `{history_days?, validity_checks?: "on" \| "off"}` | what changed, as given (`admin`; validity checks audited as `validity.checks`) |
 | `GET /grid?path=` | | `Grid` |
 | `GET /environments` | | `Environment[]` in order |
 | `POST /environments` | `NewEnvironment` | 201 `Environment` |
@@ -4531,6 +4594,8 @@ isn't in the workspace is 404.
 | `GET /v1/secrets/findings` | | `{project, project_name, findings: Finding[]}[]`: every project's findings the caller may read, projects with none left out |
 | `GET /health?code=` | | `Finding[]`, worst first: every standard environment's findings the caller may read (`read` on the project) |
 | `POST /leaks` | `{candidates: string[]}` (at most 20,000); header `X-Roll-Guard: 1` from a credential guard (roll MCP's check of what a tool call would write), audited as `secrets.guard` instead of `secrets.scan`; rolld keeps the header only on a request roll MCP's guard tool makes in process, and removes anyone else's | `{index, key, environment, path}[]`: candidates that are values the caller may reveal (`read` on the project) |
+| `POST /validity` | `{credentials: {value, pair?}[]}` (at most 200; `pair`: an AWS access key id's secret access key) | `{validity_checks: "on" \| "off", results: Checked[]}`, one per credential in order (`write` on the project); while checks are off, `results` is empty and nothing is asked. `Checked` is `{fingerprint, kind, result: "live" \| "invalid" \| "unknown", account?, checked_at?, why?, rotator?: "aws-iam" \| "github-app"}` ("Is it live?") |
+| `GET /unstored/{fingerprint}` | | `Checked`: a credential's last check (`read`; 404 when it hasn't been checked) |
 | `GET /kms` | | `{key: string \| null}`: the customer-managed key wrapping the project's data key (admin) |
 | `PUT /kms` | `{key}` (a KMS key's ARN) | `{key}` after encrypting and decrypting with it (admin; 400 when roll can't use it) |
 | `DELETE /kms` | | `{key: null}`: the data key sealed by roll's deployment key alone again (admin) |
@@ -4755,6 +4820,8 @@ audit_heads(project_id PK, seq, hash, at, digest_seq, digest_at, start_seq, mac)
 syncs(id PK, project_id, env_id, path, kind, target, keys, prefix, secret BLOB, status, error,
       last_digest, state, last_synced_at, running_until, retry_at, checked_at, created_at, created_by)
       -- secret: the sealed signing secret; state: {name: stamp} of what was pushed (no values)
+validity(project_id, fingerprint, kind, result, account, checked_at, why, claimed_at,
+      PRIMARY KEY (project_id, fingerprint))  -- validity checks' answers; result NULL while claimed
 ```
 
 `owner` is `''` for a shared secret and the principal for a personal one. A deleted secret keeps its

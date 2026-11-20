@@ -1209,6 +1209,11 @@ static ROWS: &[Row] = &[
     // Which candidates are this project's stored values (`roll secrets scan`): read on the
     // project. Secrets keeps only matches in folders the caller may reveal, so it's no oracle.
     row("POST", "/v1/secrets/projects/{project}/leaks", "secrets", R, one(&["project"], "project")).filters_itself(),
+    // Validity checks (docs/secrets.md, "Is it live?"): asking a credential's provider whether a
+    // credential found in code works is a write (it calls out and is audited, rate-limited per
+    // project); a kept answer by fingerprint (never the value) is a read.
+    row("POST", "/v1/secrets/projects/{project}/validity", "secrets", W, one(&["project"], "project")),
+    row("GET", "/v1/secrets/projects/{project}/unstored/{fingerprint}", "secrets", R, one(&["project"], "project")),
     // Rotators: URLs roll calls to issue and revoke values that live outside roll. Listing shows
     // names and hosts; adding one answers its signing secret once; both changes are admin.
     row("GET", "/v1/secrets/projects/{project}/rotations", "secrets", R, one(&["project"], "project")),

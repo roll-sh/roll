@@ -291,6 +291,20 @@ export interface Blocker {
   path?: string;
   line?: number;
   fingerprint?: string;
+  /** `secret_unstored`: whether it works, as its provider answered (roll secrets' validity checks, when the project has them on). */
+  validity?: CredentialValidity;
+}
+
+/** A credential's validity check (docs/secrets.md, "Is it live?"): never its value. */
+export interface CredentialValidity {
+  fingerprint: string;
+  /** `invalid`: revoked, deleted or never real. */
+  result: "live" | "invalid" | "unknown";
+  /** The provider's account (an AWS account, a GitHub login, a Slack team). */
+  account?: string;
+  checked_at?: number;
+  /** A live one's kind has a roll rotator: roll secrets' AWS IAM users, or a project's GitHub App tokens. */
+  rotator?: "aws-iam" | "github-app";
 }
 
 export type EntryState = "waiting" | "testing" | "bisecting" | "landing" | "ejected" | "landed";

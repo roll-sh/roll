@@ -108,9 +108,73 @@ impl SyncTarget for FakeSync {
 
 /// Audit deliveries, kept instead of sent; an OIDC issuer's keys, served; vendors' APIs; a
 /// Snowflake account's SQL API; MongoDB Atlas's Admin API; and STS, answering AWS identities'
-/// logins with the caller set in `.8`.
+/// logins with the caller set in `.8`; and the providers validity checks ask (`.9`).
 #[derive(Default)]
-struct Sent(Mutex<Vec<Value>>, Mutex<Option<Value>>, std::sync::atomic::AtomicBool, Mutex<Option<(String, String)>>, Mutex<BTreeMap<(String, String), Value>>, Mutex<Vendors>, FakeSnowflake, FakeAtlas, Mutex<FakeStsLogin>);
+struct Sent(Mutex<Vec<Value>>, Mutex<Option<Value>>, std::sync::atomic::AtomicBool, Mutex<Option<(String, String)>>, Mutex<BTreeMap<(String, String), Value>>, Mutex<Vendors>, FakeSnowflake, FakeAtlas, Mutex<FakeStsLogin>, FakeProviders);
+
+/// Fixture credentials for validity checks, built from pieces (push protection scans this repo):
+/// obviously roll's, still each detector's shape. `live` ones work, the rest are refused.
+struct Creds {
+    github_live: String,
+    github_dead: String,
+    github_moved: String,
+    aws_id: String,
+    aws_secret: String,
+    stripe: String,
+    slack: String,
+    openai: String,
+    anthropic: String,
+}
+
+fn creds() -> Creds {
+    let tail = "0123456789abcdef";
+    Creds {
+        github_live: ["ghp_", "RollFixtureLiveToken", tail].concat(),
+        github_dead: ["ghp_", "RollFixtureDeadToken", tail].concat(),
+        github_moved: ["ghp_", "RollFixtureRedirects", tail].concat(),
+        aws_id: ["AKIA", "ROLLFIXTURE", "23456"].concat(),
+        aws_secret: ["rollFixture", "SecretKey", "0123456789", "abcdefghij"].concat(),
+        stripe: ["sk_", "live_", "RollFixtureLive", tail].concat(),
+        slack: ["xoxb-", "1234567890-", "RollFixtureLive"].concat(),
+        openai: ["sk-", "proj-", "RollFixtureLive", tail, "gh"].concat(),
+        anthropic: ["sk-", "ant-", "RollFixtureLive", tail, "gh"].concat(),
+    }
+}
+
+/// The providers validity checks ask, answering as each API does: every request kept (URL and
+/// header names) to show nothing but the credential went.
+#[derive(Default)]
+struct FakeProviders(Mutex<Vec<(String, Vec<String>)>>);
+
+impl FakeProviders {
+    fn answer(&self, method: &str, url: &str, headers: &[(&str, &Secret)]) -> Option<(u16, Value)> {
+        let c = creds();
+        let header = |n: &str| headers.iter().find(|(h, _)| *h == n).map(|(_, v)| v.expose().to_string()).unwrap_or_default();
+        let bearer = |t: &str| header("authorization") == format!("Bearer {t}");
+        let (status, answer) = match (method, url) {
+            ("POST", "https://sts.amazonaws.com/") => {
+                let a = header("authorization");
+                if a.starts_with(&format!("AWS4-HMAC-SHA256 Credential={}/", c.aws_id)) && a.contains("SignedHeaders=content-type;host;x-amz-date, Signature=") && !header("x-amz-date").is_empty() {
+                    (200, Value::String("<GetCallerIdentityResponse><GetCallerIdentityResult><Arn>arn:aws:iam::123456789012:user/ci</Arn><Account>123456789012</Account></GetCallerIdentityResult></GetCallerIdentityResponse>".into()))
+                } else {
+                    (403, Value::String("<ErrorResponse><Error><Code>InvalidClientTokenId</Code></Error></ErrorResponse>".into()))
+                }
+            }
+            ("GET", "https://api.github.com/user") if bearer(&c.github_live) => (200, json!({ "login": "roll-fixture", "id": 1 })),
+            ("GET", "https://api.github.com/user") if bearer(&c.github_moved) => (302, json!({ "location": "https://github.example/elsewhere" })),
+            ("GET", "https://api.github.com/user") => (401, json!({ "message": "Bad credentials" })),
+            ("GET", "https://api.stripe.com/v1/balance") if bearer(&c.stripe) => (200, json!({ "object": "balance" })),
+            ("POST", "https://slack.com/api/auth.test") if bearer(&c.slack) => (200, json!({ "ok": true, "team_id": "T0ROLLFIX" })),
+            ("POST", "https://slack.com/api/auth.test") => (200, json!({ "ok": false, "error": "invalid_auth" })),
+            ("GET", "https://api.openai.com/v1/models") if bearer(&c.openai) => (200, json!({ "data": [] })),
+            ("GET", "https://api.anthropic.com/v1/models") if header("x-api-key") == c.anthropic && header("anthropic-version") == "2023-06-01" => (200, json!({ "data": [] })),
+            ("GET", "https://api.stripe.com/v1/balance" | "https://api.openai.com/v1/models" | "https://api.anthropic.com/v1/models") => (401, json!({ "error": "unauthorized" })),
+            _ => return None,
+        };
+        self.0.lock().unwrap().push((url.to_string(), headers.iter().map(|(h, _)| h.to_string()).collect()));
+        Some((status, answer))
+    }
+}
 
 /// STS as an AWS identity's login meets it: who signed (`None`: the signature doesn't match), and
 /// what was sent to it.
@@ -469,6 +533,13 @@ impl roll_secrets::Deliver for Sent {
     /// SendGrid's and Twilio's key APIs, matched on the URL, each taking only its credential;
     /// Snowflake's SQL API ([`Sent::snowflake`]) and MongoDB Atlas's Admin API ([`FakeAtlas`]) apart.
     fn request(&self, method: &str, url: &str, headers: &[(&str, &Secret)], body: Option<(&str, &Secret)>, _: usize) -> roll_secrets::Result<(u16, zeroize::Zeroizing<Vec<u8>>)> {
+        if let Some((status, answer)) = self.9.answer(method, url, headers) {
+            let bytes = match answer {
+                Value::String(xml) => xml.into_bytes(),
+                v => v.to_string().into_bytes(),
+            };
+            return Ok((status, bytes.into()));
+        }
         if url.starts_with("https://cloud.mongodb.com/") {
             let headers: Vec<(&str, &str)> = headers.iter().map(|(k, v)| (*k, v.expose())).collect();
             let (status, v) = self.7.answer(method, url, &headers, body.map(|(t, b)| (t, b.expose())));
@@ -1847,6 +1918,64 @@ async fn a_stored_value_is_found_by_fingerprint_and_short_values_never_are() {
     let candidates = ["sk_live_51Hx9", "8080", "something-else"].map(String::from);
     let leaks = api.secrets.leaks(&api.project, &candidates).unwrap();
     assert_eq!(leaks, [roll_secrets::Leak { key: "STRIPE_KEY".into(), environment: "production".into(), path: "/".into() }]);
+}
+
+#[tokio::test]
+async fn validity_checks_ask_each_provider_once_and_only_when_an_admin_turned_them_on() {
+    let api = Api::new().await;
+    let c = creds();
+    let probe = |v: &str| json!({ "value": v });
+    let body = json!({ "credentials": [
+        probe(&c.github_live), probe(&c.github_dead), probe(&c.github_moved), { "value": c.aws_id, "pair": c.aws_secret },
+        probe(&c.stripe), probe(&c.slack), probe(&c.openai), probe(&c.anthropic), probe("not a credential at all"), probe(&c.github_live),
+    ] });
+    let asked = || api.sent.9.0.lock().unwrap().clone();
+    // Off by default: nothing is asked.
+    assert_eq!(api.ok(Method::GET, "", None).await["validity_checks"], "off");
+    let v = api.ok(Method::POST, "/validity", Some(body.clone())).await;
+    assert_eq!((v["validity_checks"].as_str(), v["results"].as_array().map(Vec::len)), (Some("off"), Some(0)));
+    assert!(asked().is_empty());
+    // Turning them on is an admin's.
+    let writer = api.token(json!({ "actions": ["read", "write"] }));
+    let (s, _) = api.req(Method::PATCH, "", Some(json!({ "validity_checks": "on" })), Some(&writer)).await;
+    assert_eq!(s, StatusCode::FORBIDDEN);
+    assert_eq!(api.ok(Method::PATCH, "", Some(json!({ "validity_checks": "on" }))).await["validity_checks"], "on");
+
+    let v = api.ok(Method::POST, "/validity", Some(body.clone())).await;
+    let r = |i: usize| (v["results"][i]["result"].as_str().unwrap(), v["results"][i]["account"].as_str(), v["results"][i]["rotator"].as_str());
+    assert_eq!(r(0), ("live", Some("roll-fixture"), Some("github-app")));
+    assert_eq!(r(1), ("invalid", None, None));
+    assert_eq!(r(2), ("unknown", None, None), "a redirect isn't followed, so nothing is known");
+    assert_eq!(r(3), ("live", Some("123456789012"), Some("aws-iam")), "signed with the pair next to it");
+    assert_eq!([r(4).0, r(5).0, r(6).0, r(7).0], ["live"; 4]);
+    assert_eq!(r(5).1, Some("T0ROLLFIX"));
+    assert_eq!((r(8).0, v["results"][8]["why"].as_str()), ("unknown", Some("roll can't check this kind of credential")));
+    assert_eq!(v["results"][9], v["results"][0], "a repeat is the first one's answer");
+    // One request per credential, to its provider's own host, carrying only the credential.
+    let sent = asked();
+    assert_eq!(sent.len(), 8, "{sent:?}");
+    for (url, headers) in &sent {
+        let allowed: &[&str] = match url.as_str() {
+            "https://sts.amazonaws.com/" => &["authorization", "x-amz-date"],
+            "https://api.anthropic.com/v1/models" => &["x-api-key", "anthropic-version"],
+            _ => &["authorization", "accept"],
+        };
+        assert!(headers.iter().all(|h| allowed.contains(&h.as_str())), "{url}: {headers:?}");
+    }
+    // Kept: asking again asks nobody, and the answer is there by fingerprint.
+    api.ok(Method::POST, "/validity", Some(body)).await;
+    assert_eq!(asked().len(), 8);
+    let fp = v["results"][0]["fingerprint"].as_str().unwrap();
+    let kept = api.ok(Method::GET, &format!("/unstored/{fp}"), None).await;
+    assert_eq!((kept["result"].as_str(), kept["kind"].as_str()), (Some("live"), Some("a GitHub token")));
+    // Each check is audited with kind, fingerprint and result, never the value.
+    let audit = api.ok(Method::GET, "/audit?action=secrets.validity", None).await;
+    assert_eq!(audit.as_array().unwrap().len(), 8, "{audit}");
+    let text = api.ok(Method::GET, "/audit", None).await.to_string() + &v.to_string();
+    assert!(text.contains(fp) && text.contains("a GitHub token") && text.contains("live"));
+    for value in [&c.github_live, &c.aws_id, &c.aws_secret, &c.stripe, &c.slack, &c.openai, &c.anthropic] {
+        assert!(!text.contains(value.as_str()), "a value got out");
+    }
 }
 
 #[tokio::test]

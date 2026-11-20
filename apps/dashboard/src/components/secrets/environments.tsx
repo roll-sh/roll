@@ -90,6 +90,7 @@ export function EnvironmentsView() {
       <RequiredKeys onError={setError} />
 
       <Retention onError={setError} />
+      <ValidityChecks onError={setError} />
 
       <Backup />
 
@@ -551,6 +552,40 @@ function Retention({ onError }: { onError: (e: string) => void }) {
       </form>
       <p className="mt-1.5 text-[11.5px] text-muted">
         After that, an old version&apos;s value is destroyed for good: history still shows the change, but it can&apos;t be revealed or rolled back to. A secret&apos;s current value is never removed.
+      </p>
+    </Section>
+  );
+}
+
+/** Whether credentials found in code are checked with their providers (docs/secrets.md, "Is it live?"). */
+function ValidityChecks({ onError }: { onError: (e: string) => void }) {
+  const { api, validityChecks, reloadEnvs } = useSecrets();
+  const [busy, setBusy] = useState(false);
+  const on = validityChecks === "on";
+  return (
+    <Section title="Validity checks" aside={<span className="text-[11.5px] text-subtle">Off by default.</span>}>
+      <label className="flex items-center gap-2 text-[12.5px]">
+        <input
+          type="checkbox"
+          checked={on}
+          disabled={busy}
+          onChange={async () => {
+            setBusy(true);
+            try {
+              await api.setValidityChecks(on ? "off" : "on");
+              reloadEnvs();
+            } catch (e) {
+              onError(errorText(e));
+            } finally {
+              setBusy(false);
+            }
+          }}
+        />
+        Check credentials found in code with their providers
+      </label>
+      <p className="mt-1.5 text-[11.5px] text-muted">
+        A credential roll code or <span className="font-mono">roll secrets scan</span> finds that roll doesn&apos;t hold (AWS, GitHub, Stripe, Slack, OpenAI and Anthropic keys) is
+        sent to its provider&apos;s own API once a day at most, to say whether it&apos;s live. Nothing else is sent, and the value is never kept.
       </p>
     </Section>
   );

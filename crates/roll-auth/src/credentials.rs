@@ -248,6 +248,45 @@ fn kind_of(w: &str) -> Option<&'static str> {
     None
 }
 
+/// The kinds whose providers roll secrets' validity checks can ask whether one works (AWS, GitHub,
+/// Stripe, Slack, OpenAI, Anthropic): what callers send it, and nothing else.
+pub const VERIFIABLE: [&str; 6] = ["an AWS access key", "a GitHub token", "a Stripe live key", "a Slack token", "an OpenAI API key", "an Anthropic API key"];
+
+/// How many lines either side of an AWS access key id [`aws_secret_near`] looks.
+const AWS_PAIR_LINES: usize = 5;
+
+/// The secret access key that goes with an AWS access key id found at `m` in `text`: the nearest
+/// word on the key's line or within 5 lines of it that is 40 characters of base64's alphabet
+/// (`A-Z a-z 0-9 / +`) with a lowercase letter, a capital and a digit, and not AWS's documented
+/// `…EXAMPLEKEY`. What a validity check signs with, as GitGuardian pairs the two; `None` when
+/// there's no such word (the check then says `unknown` without asking AWS).
+pub fn aws_secret_near<'a>(text: &'a str, m: &Match) -> Option<&'a str> {
+    let line_of = |at: usize| text[..at].matches('\n').count();
+    let key_line = line_of(m.start);
+    let secretish = |w: &str| w.len() == 40 && w.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'/' || b == b'+') && w.bytes().any(|b| b.is_ascii_lowercase()) && w.bytes().any(|b| b.is_ascii_uppercase()) && w.bytes().any(|b| b.is_ascii_digit()) && !w.contains("EXAMPLE");
+    let mut best: Option<(usize, &str)> = None;
+    let mut start = 0;
+    for (n, line) in text.split('\n').enumerate() {
+        let here = start;
+        start += line.len() + 1;
+        if n + AWS_PAIR_LINES < key_line || n > key_line + AWS_PAIR_LINES {
+            continue;
+        }
+        let mut at = 0;
+        for w in line.split(|c: char| !(c.is_ascii_alphanumeric() || c == '/' || c == '+')) {
+            let w_start = here + at;
+            at += w.len() + 1;
+            if secretish(w) && !(m.start..m.end).contains(&w_start) {
+                let d = n.abs_diff(key_line);
+                if best.is_none_or(|(bd, _)| d < bd) {
+                    best = Some((d, w));
+                }
+            }
+        }
+    }
+    best.map(|(_, w)| w)
+}
+
 /// The prefixes the detectors know a credential by: what [`placeholder`] looks past.
 const KNOWN_PREFIXES: &[&str] = &[
     "github_pat_", "sk_live_", "rk_live_", "sk-proj-", "sk-ant-", "ghp_", "gho_", "ghu_", "ghs_", "ghr_", "xoxb-", "xoxp-", "xoxa-", "xoxr-", "xoxs-", "AKIA", "ASIA", "AIza", "rlt_", "rlo_", "rlf_", "rlc_", "rlk_", "rlp_",
@@ -566,6 +605,21 @@ mod unstored_tests {
         let real_looking = ["AKIA", "ROLLFIXTURE", "23456"].concat();
         assert!(find_all(&real_looking).len() == 1 && !placeholder(&real_looking));
         assert!(!placeholder(&format!("{live}51Hx9Q2aB7cD3eF5gH8jK")));
+    }
+
+    #[test]
+    fn an_aws_key_id_is_paired_with_the_secret_near_it() {
+        // Built from pieces: push protection scans the repo.
+        let id = ["AKIA", "ROLLFIXTURE", "23456"].concat();
+        let secret = ["rollFixture", "SecretKey", "0123456789", "abcdefghij"].concat();
+        let text = format!("[default]\naws_access_key_id = {id}\nregion = us-east-1\naws_secret_access_key = {secret}\n");
+        let m = find_all(&text).into_iter().find(|m| m.kind == "an AWS access key").unwrap();
+        assert_eq!(aws_secret_near(&text, &m), Some(secret.as_str()));
+        // AWS's documented secret, or nothing near enough: no pair.
+        let docs = format!("{id}\nwJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY\n");
+        assert_eq!(aws_secret_near(&docs, &find_all(&docs)[0]), None);
+        let far = format!("{id}{}{secret}\n", "\n".repeat(8));
+        assert_eq!(aws_secret_near(&far, &find_all(&far)[0]), None);
     }
 
     #[test]

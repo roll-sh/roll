@@ -1558,6 +1558,30 @@ impl code_control::SecretEnv for ForCode {
         self.resolve(p.id, environment, consumer).await
     }
 
+    /// The first project with the repo on its canvas that may reach it and has validity checks on
+    /// asks (and keeps, and audits, as `roll:code`); none: nothing is asked.
+    async fn validity(&self, repo: &str, found: Vec<(String, Option<String>)>) -> anyhow::Result<Vec<code_control::model::CredentialValidity>> {
+        let (secrets, ws) = self.0.get().cloned().ok_or_else(|| anyhow::anyhow!("roll secrets is starting"))?;
+        let r = repo.to_string();
+        tokio::task::spawn_blocking(move || {
+            let projects = ws.projects_of(roll_workspace::Kind::Repo.as_str(), &r)?;
+            let Some(p) = projects.into_iter().find(|p| secrets.counts_for_repo(p, &r) && secrets.validity_checks(p).unwrap_or(false)) else { return Ok(Vec::new()) };
+            let probes = found.into_iter().map(|(value, pair)| roll_secrets::validity::Probe { value: roll_secrets::Value::new(value), pair: pair.map(roll_secrets::Value::new) }).collect();
+            let checked = secrets.check_validity(&p, probes, &roll_secrets::Caller::consumer("roll:code"))?.unwrap_or_default();
+            Ok(checked
+                .into_iter()
+                .map(|c| code_control::model::CredentialValidity {
+                    fingerprint: c.fingerprint,
+                    result: c.result.as_str().to_string(),
+                    account: c.account,
+                    checked_at: c.checked_at,
+                    rotator: c.rotator.map(str::to_string),
+                })
+                .collect())
+        })
+        .await?
+    }
+
     async fn leaks(&self, repo: &str, candidates: Vec<String>) -> anyhow::Result<Vec<(usize, String, String, String)>> {
         let (secrets, ws) = self.0.get().cloned().ok_or_else(|| anyhow::anyhow!("roll secrets is starting"))?;
         let r = repo.to_string();
