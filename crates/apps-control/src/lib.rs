@@ -806,7 +806,7 @@ impl Apps {
         }
         self.ensure_environment(&row, PRODUCTION, Some(branch.as_deref()), Some(false), &pname).await?;
         if let Some(set) = variables {
-            self.change_variables(&row.id, PRODUCTION, json!({ "set": set, "seal": sealed })).await?;
+            self.change_variables(&row.id, PRODUCTION, json!({ "set": set, "seal": sealed }), None).await?;
         }
         for (kind, r, body) in links {
             // A link that doesn't check out makes no service: nothing to clean up by hand.
@@ -816,7 +816,7 @@ impl Apps {
             }
         }
         if let Some((g, _)) = git_login
-            && let Err(e) = self.put_git_login(&row.id, g).await
+            && let Err(e) = self.put_git_login(&row.id, g, None).await
         {
             let _ = self.purge_service(&row.id).await;
             return Err(e);
@@ -960,7 +960,8 @@ impl Apps {
     /// `PUT …/git-login`: the login a Git URL service's private repository is fetched with (a
     /// deploy token, app password or access token as `password`), sent only to the source URL's
     /// host. The URL itself stays without credentials.
-    pub async fn put_git_login(self: &Arc<Self>, service: &str, body: Value) -> Result<Service> {
+    /// `who`: who sets it (a `roll://` secret is bound to them).
+    pub async fn put_git_login(self: &Arc<Self>, service: &str, body: Value, who: Option<crate::integrations::Asker<'_>>) -> Result<Service> {
         let o = body.as_object().cloned().unwrap_or_default();
         if let Some(k) = o.keys().find(|k| !["username", "password", "secret"].contains(&k.as_str())) {
             return Err(Error::BadRequest(format!("unknown field {k}")));
@@ -977,8 +978,11 @@ impl Apps {
         let (password, secret) = match (o.contains_key("password"), o.contains_key("secret")) {
             (true, false) => (text("password", 4096)?, None),
             (false, true) => {
-                let name = text("secret", 128)?;
-                check_var_name(&name)?;
+                let name = text("secret", 512)?;
+                // A key's name in production's root, or a reference (`roll://production/git/TOKEN`).
+                if crate::model::secret_ref_env(&name).is_none() {
+                    check_var_name(&name)?;
+                }
                 (String::new(), Some(name))
             }
             _ => return Err(Error::BadRequest("a Git login takes a password, or the secret that holds it (not both)".into())),
@@ -987,8 +991,21 @@ impl Apps {
         let svc = self.db(move |s| s.service(&sid)).await?;
         let Source::Git { url, .. } = &svc.source else { return Err(Error::Conflict("only a Git URL source fetches with a login".into())) };
         let host = git_host(url).ok_or_else(|| Error::BadRequest("the source URL has no host".into()))?;
+        // A reference is bound to whoever sets it as production's runtime read (roll secrets'
+        // `bind_ref_runtime`: the gate already asked for deploy), read as them at each fetch.
+        let maker = match secret.as_deref().map(|s| (s, crate::model::secret_ref_env(s))) {
+            Some((r, Some(Ok(e)))) => {
+                if e != PRODUCTION {
+                    return Err(Error::BadRequest(format!("a Git login's reference names production's secret (roll://production/…), not {e}'s: fetches are the service's, whatever environment deploys")));
+                }
+                let Some(who) = who else { return Err(Error::BadRequest("a Git login's roll:// secret is set through the API, by a person who may reveal it".into())) };
+                Some(self.deps.secrets.bind_ref_runtime(who, &svc.project, service, r, PRODUCTION).await.map_err(|why| Error::Forbidden(format!("{r}: {why:#}")))?)
+            }
+            Some((_, Some(Err(e)))) => return Err(e),
+            _ => None,
+        };
         let sid = service.to_string();
-        self.db(move |s| s.set_git_login(&sid, &host, &username, &password, secret.as_deref())).await?;
+        self.db(move |s| s.set_git_login(&sid, &host, &username, &password, secret.as_deref(), maker.as_deref())).await?;
         self.service(service).await
     }
 
@@ -1146,6 +1163,23 @@ impl Apps {
         let login = self.db(move |s| s.git_login_secret(&sid)).await.ok().flatten().filter(|(l, _)| Some(&l.host) == git_host(url).as_ref());
         let login = match login {
             // Read from the project's production secrets (what the service runs with), each use.
+            // A reference: read as whoever chose it may now.
+            Some((l, _)) if l.secret.as_deref().is_some_and(|s| s.starts_with("roll://")) => {
+                let r = l.secret.clone().expect("matched");
+                let sid = service.to_string();
+                let found = self.db(move |s| Ok((s.service(&sid)?.project, s.git_login_maker(&sid)?))).await.ok();
+                let read = match found {
+                    Some((project, Some(maker))) => self.deps.secrets.resolve_as(&project, PRODUCTION, service, &r, &maker).await.map_err(|e| format!("{e:#}")),
+                    _ => Err("nobody is bound to it: set it again".to_string()),
+                };
+                match read {
+                    Ok(v) => Some((l.username, v)),
+                    Err(why) => {
+                        tracing::warn!(service, reference = %r, "apps: a Git login's reference didn't resolve ({why}); fetching without it");
+                        None
+                    }
+                }
+            }
             Some((l, _)) if l.secret.is_some() => {
                 let key = l.secret.clone().expect("matched");
                 let sid = service.to_string();
@@ -2715,6 +2749,8 @@ impl Apps {
         let mut refused = Vec::new();
         let refs: Vec<(String, String)> = vars.iter().filter(|(_, (v, s))| *s == "service" && crate::model::secret_ref_env(v).is_some()).map(|(k, (v, _))| (k.clone(), v.clone())).collect();
         let mut ref_texts = BTreeMap::new();
+        let (sid, e) = (svc.id.clone(), env.name.clone());
+        let makers = if refs.is_empty() { BTreeMap::new() } else { self.db(move |s| s.variable_makers(&sid, &e)).await? };
         for (k, r) in refs {
             ref_texts.insert(k.clone(), r.clone());
             if !read_refs {
@@ -2732,7 +2768,11 @@ impl Apps {
             let read = match crate::model::secret_ref_env(&r) {
                 Some(Ok(e)) if e == env.name && !crate::model::secret_ref_folder_ok(&r, &svc.id) => Err("it names another service's folder".to_string()),
                 Some(Ok(e)) if e == env.name => self.deps.secrets.resolve_ref(&svc.project, &env.name, &svc.id, &r).await.map_err(|e| e.to_string()),
-                Some(Ok(e)) => Err(format!("it names the {e} environment's secret, not {}'s", env.name)),
+                // Another environment's: as whoever chose it may read it now.
+                Some(Ok(e)) => match makers.get(&k) {
+                    Some(maker) => self.deps.secrets.resolve_as(&svc.project, &env.name, &svc.id, &r, maker).await.map_err(|e| format!("{e:#}")),
+                    None => Err(format!("it names the {e} environment's secret and nobody is bound to it: set it again")),
+                },
                 Some(Err(e)) => Err(e.to_string()),
                 None => continue,
             };
@@ -2922,8 +2962,11 @@ impl Apps {
         Ok(json!({ "vars": vars }))
     }
 
-    pub async fn change_variables(self: &Arc<Self>, service: &str, env: &str, body: Value) -> Result<Value> {
-        self.service_env(service, env).await?;
+    /// `who`: whoever writes them (a reference into another environment is bound to them, roll
+    /// secrets' maker references; none, as a template's creation, refuses one).
+    pub async fn change_variables(self: &Arc<Self>, service: &str, env: &str, body: Value, who: Option<crate::integrations::Asker<'_>>) -> Result<Value> {
+        let (svc_row, _) = self.service_env(service, env).await?;
+        let mut makers: BTreeMap<String, String> = BTreeMap::new();
         let o = body.as_object().ok_or_else(|| Error::BadRequest("the body is {set?, unset?}".into()))?;
         let mut set = BTreeMap::new();
         if let Some(s) = o.get("set") {
@@ -2933,14 +2976,19 @@ impl Apps {
                 if v.len() > 64 << 10 || v.contains('\0') {
                     return Err(Error::BadRequest(format!("{k}'s value is at most 64 KiB, without NUL")));
                 }
-                // A roll secrets reference: its own environment's (another's needs whoever set
-                // it bound to it, roll secrets' maker references: not here yet).
+                // A roll secrets reference: its own environment's is read as the service's runtime;
+                // another environment's is bound to whoever sets it (roll secrets' maker
+                // references): refused unless they may reveal it now, read as them at each deploy.
                 match crate::model::secret_ref_env(v) {
-                    Some(Ok(e)) if e != env => {
-                        return Err(Error::BadRequest(format!("{k}: {v} is the {e} environment's secret; a variable's roll:// reference names its own environment (roll://{env}/…)")));
-                    }
                     Some(Ok(_)) if !crate::model::secret_ref_folder_ok(v, service) => {
                         return Err(Error::BadRequest(format!("{k}: {v} is another service's folder (/services/<id> is each service's own)")));
+                    }
+                    Some(Ok(e)) if e != env => {
+                        let Some(who) = who else {
+                            return Err(Error::BadRequest(format!("{k}: {v} is the {e} environment's secret: set it through the API, as a person who may reveal it")));
+                        };
+                        let maker = self.deps.secrets.bind_ref(who, &svc_row.project, service, v).await.map_err(|why| Error::Forbidden(format!("{k}: {v}: {why:#}")))?;
+                        makers.insert(k.clone(), maker);
                     }
                     Some(Err(e)) => return Err(Error::BadRequest(format!("{k}: {e}"))),
                     _ => {}
@@ -3002,7 +3050,7 @@ impl Apps {
             return Err(Error::BadRequest("two variables can't be the same file".into()));
         }
         let (sid, e, gone) = (service.to_string(), env.to_string(), unset.clone());
-        self.db(move |s| s.change_variables(&sid, &e, &set, &unset, &seal)).await?;
+        self.db(move |s| s.change_variables_made(&sid, &e, &set, &unset, &seal, &makers)).await?;
         // Unset ones' files go with them.
         for (n, p) in files.into_iter().chain(gone.into_iter().map(|n| (n, None))) {
             let (sid, e) = (service.to_string(), env.to_string());

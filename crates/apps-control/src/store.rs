@@ -88,6 +88,15 @@ CREATE TABLE IF NOT EXISTS trace_ingest (
     sealed TEXT NOT NULL,
     PRIMARY KEY (service, env)
 ) WITHOUT ROWID;
+-- Who chose a variable's roll:// reference into another environment (roll secrets' maker): each
+-- deploy reads it as them.
+CREATE TABLE IF NOT EXISTS variable_makers (
+    service TEXT NOT NULL,
+    env TEXT NOT NULL,
+    name TEXT NOT NULL,
+    maker TEXT NOT NULL,
+    PRIMARY KEY (service, env, name)
+) WITHOUT ROWID;
 -- Where an environment's instances read roll's OIDC tokens: its URL's token, sealed.
 CREATE TABLE IF NOT EXISTS oidc_access (
     service TEXT NOT NULL,
@@ -830,6 +839,8 @@ impl Store {
         db.add_column("domains", "tls", "TEXT NOT NULL DEFAULT 'pending'")?;
         // A Git login's password read from one of the project's secrets, by name (none: sealed here).
         db.add_column("git_auth", "secret", "TEXT")?;
+        // A `roll://` secret's maker (roll secrets' runtime binding: who chose it).
+        db.add_column("git_auth", "secret_maker", "TEXT")?;
         db.add_column("domains", "tls_error", "TEXT")?;
         db.add_column("domains", "verified_at", "INTEGER")?;
         db.add_column("env_access", "bypass_hash", "TEXT")?;
@@ -1019,7 +1030,7 @@ impl Store {
             c.execute("DELETE FROM deploy_steps WHERE deployment IN (SELECT id FROM deployments WHERE service = ?)", [id])?;
             c.execute("DELETE FROM state WHERE key LIKE ?", [format!("%:{id}/%")])?;
             c.execute("DELETE FROM status_days WHERE key LIKE ?", [format!("%:{id}/%")])?;
-            for t in ["environments", "deployments", "deploy_keys", "fences", "env_access", "registry_auth", "git_auth", "git_github", "github_events", "trace_ingest", "runtime_config", "oidc_access", "visit_tickets", "visit_sessions", "variable_files", "error_groups", "variables", "links", "domains", "preview_hosts", "runs", "jobs", "metrics", "usage", "form_submissions", "deploy_scans"] {
+            for t in ["environments", "deployments", "deploy_keys", "fences", "env_access", "registry_auth", "git_auth", "git_github", "github_events", "trace_ingest", "runtime_config", "oidc_access", "variable_makers", "visit_tickets", "visit_sessions", "variable_files", "error_groups", "variables", "links", "domains", "preview_hosts", "runs", "jobs", "metrics", "usage", "form_submissions", "deploy_scans"] {
                 c.execute(&format!("DELETE FROM {t} WHERE service = ?"), [id])?;
             }
             match c.execute("DELETE FROM services WHERE id = ?", [id])? {
@@ -1135,7 +1146,7 @@ impl Store {
             if n == 0 {
                 return Err(Error::NotFound(format!("service {service} has no environment {env}")));
             }
-            for t in ["variables", "variable_files", "error_groups", "domains", "preview_hosts", "runs", "jobs", "metrics", "deploy_keys", "env_access", "trace_ingest", "runtime_config", "oidc_access", "visit_tickets", "visit_sessions", "form_submissions"] {
+            for t in ["variables", "variable_files", "error_groups", "domains", "preview_hosts", "runs", "jobs", "metrics", "deploy_keys", "env_access", "trace_ingest", "runtime_config", "oidc_access", "variable_makers", "visit_tickets", "visit_sessions", "form_submissions"] {
                 c.execute(&format!("DELETE FROM {t} WHERE service = ? AND env = ?"), [service, env])?;
             }
             // Its schedules', challenge's and base images' state goes with it.
@@ -1937,8 +1948,20 @@ impl Store {
     /// Set, then unset, then seal (`seal`: names set here or kept). A sealed variable a new
     /// value replaces stays sealed: nothing unseals one.
     pub fn change_variables(&self, service: &str, env: &str, set: &BTreeMap<String, String>, unset: &[String], seal: &BTreeSet<String>) -> Result<()> {
+        self.change_variables_made(service, env, set, unset, seal, &BTreeMap::new())
+    }
+
+    /// [`Store::change_variables`], with the makers of `set`'s references into other environments
+    /// (a variable set without one has none from now on).
+    pub fn change_variables_made(&self, service: &str, env: &str, set: &BTreeMap<String, String>, unset: &[String], seal: &BTreeSet<String>, makers: &BTreeMap<String, String>) -> Result<()> {
         let sealed: Vec<(String, String)> = set.iter().map(|(k, v)| (k.clone(), self.sealer.seal(&Self::aad(service, env, k), v))).collect();
         self.db.write(|c| {
+            for n in unset.iter().chain(set.keys()) {
+                c.execute("DELETE FROM variable_makers WHERE service = ? AND env = ? AND name = ?", [service, env, n])?;
+            }
+            for (n, m) in makers {
+                c.execute("INSERT INTO variable_makers (service, env, name, maker) VALUES (?, ?, ?, ?)", [service, env, n, m])?;
+            }
             for n in unset {
                 c.execute("DELETE FROM variables WHERE service = ? AND env = ? AND name = ?", [service, env, n])?;
             }
@@ -1953,6 +1976,11 @@ impl Store {
             }
             Ok(())
         })
+    }
+
+    /// Who chose each of an environment's references into another environment, by variable.
+    pub fn variable_makers(&self, service: &str, env: &str) -> Result<BTreeMap<String, String>> {
+        Ok(self.db.query("SELECT name, maker FROM variable_makers WHERE service = ? AND env = ?", [service, env], |r| Ok((r.get(0)?, r.get(1)?)))?.into_iter().collect())
     }
 
     // ── links ──
@@ -2334,13 +2362,20 @@ impl Store {
     // ── private Git repositories ──
 
     /// A login: its password sealed here, or read from the project's secret `secret` at each use.
-    pub fn set_git_login(&self, service: &str, host: &str, username: &str, password: &str, secret: Option<&str>) -> Result<()> {
+    /// A login: its password sealed, or a project secret (`secret`: a key's name in production, or
+    /// a `roll://` reference with its `maker`).
+    pub fn set_git_login(&self, service: &str, host: &str, username: &str, password: &str, secret: Option<&str>, maker: Option<&str>) -> Result<()> {
         let sealed = self.sealer.seal(&format!("git:{service}"), password);
         self.db.execute(
-            "INSERT INTO git_auth (service, host, username, sealed, secret) VALUES (?, ?, ?, ?, ?) ON CONFLICT (service) DO UPDATE SET host = excluded.host, username = excluded.username, sealed = excluded.sealed, secret = excluded.secret",
-            params![service, host, username, sealed, secret],
+            "INSERT INTO git_auth (service, host, username, sealed, secret, secret_maker) VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT (service) DO UPDATE SET host = excluded.host, username = excluded.username, sealed = excluded.sealed, secret = excluded.secret, secret_maker = excluded.secret_maker",
+            params![service, host, username, sealed, secret, maker],
         )?;
         Ok(())
+    }
+
+    /// A Git login's `roll://` secret's maker.
+    pub fn git_login_maker(&self, service: &str) -> Result<Option<String>> {
+        Ok(self.db.query_row("SELECT secret_maker FROM git_auth WHERE service = ?", [service], |r| r.get::<_, Option<String>>(0)).optional()?.flatten())
     }
 
     pub fn delete_git_login(&self, service: &str) -> Result<()> {
