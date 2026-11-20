@@ -242,21 +242,22 @@ async fn a_visual_change_waits_for_someone_to_accept_it_at_each_head() {
     shoot("cs_1b", 255, 255);
     assert_eq!(review().map(|v| (v.state, v.percent)), Some((VisualState::Changed, 100.0)));
     assert_eq!(waiting(), Some(vec!["".to_string(), "/pricing".to_string()]));
-    assert!(e.engine.accept_visual(&base.id, "ada", None, true, None, None).await.is_err(), "only a change's");
+    assert!(e.engine.accept_visual(&base.id, "ada", &[], true, None, None, None).await.is_err(), "only a change's");
     // Not by its own author.
-    let err = e.engine.accept_visual(&chg.id, "carol", None, true, Some("cs_1b"), None).await.unwrap_err();
+    let err = e.engine.accept_visual(&chg.id, "carol", &[], true, None, Some("cs_1b"), None).await.unwrap_err();
     assert!(err.to_string().contains("own author"), "{err}");
-    let err = e.engine.accept_visual(&chg.id, "token:ci", Some("carol"), false, Some("cs_1b"), None).await.unwrap_err();
+    let err = e.engine.accept_visual(&chg.id, "token:ci", &["carol".into()], false, None, Some("cs_1b"), None).await.unwrap_err();
     assert!(err.to_string().contains("own author"), "nor with their own token: {err}");
     // What was seen: an older screenshot's head is refused, this one's accepted.
-    let err = e.engine.accept_visual(&chg.id, "ada", None, true, Some("cs_1a"), None).await.unwrap_err();
+    let err = e.engine.accept_visual(&chg.id, "ada", &[], true, None, Some("cs_1a"), None).await.unwrap_err();
     assert!(err.to_string().contains("a newer screenshot came in"), "{err}");
     // One page at a time: the change waits until every changed page is accepted.
-    let p = e.engine.accept_visual(&chg.id, "ada", None, true, Some("cs_1b"), Some("/pricing")).await.unwrap();
+    assert!(matches!(e.engine.accept_visual(&chg.id, "bob", &[], true, Some(Some("own_bob")), Some("cs_1b"), None).await, Err(roll_previews::Error::Forbidden(_))), "no write on its repo");
+    let p = e.engine.accept_visual(&chg.id, "ada", &[], true, Some(Some("own_acme")), Some("cs_1b"), Some("/pricing")).await.unwrap();
     assert_eq!(p.visual_review.map(|v| v.state), Some(VisualState::Changed));
     assert_eq!(waiting(), Some(vec!["".to_string()]));
-    assert!(e.engine.accept_visual(&chg.id, "ada", None, true, Some("cs_1b"), Some("/nowhere")).await.is_err(), "a page it has no screenshot of");
-    let p = e.engine.accept_visual(&chg.id, "ada", None, true, Some("cs_1b"), Some("")).await.unwrap();
+    assert!(e.engine.accept_visual(&chg.id, "ada", &[], true, None, Some("cs_1b"), Some("/nowhere")).await.is_err(), "a page it has no screenshot of");
+    let p = e.engine.accept_visual(&chg.id, "ada", &[], true, None, Some("cs_1b"), Some("")).await.unwrap();
     assert_eq!(p.visual_review.map(|v| (v.state, v.by)), Some((VisualState::Accepted, Some("ada".into()))));
     assert_eq!(e.code.last_report("chg_1").visual_review.map(|v| v.state), Some(VisualState::Accepted), "the change is told at once");
     // A push that changes nothing visible keeps it.
@@ -269,7 +270,7 @@ async fn a_visual_change_waits_for_someone_to_accept_it_at_each_head() {
     assert_eq!(review().map(|v| v.state), Some(VisualState::Changed));
     assert_eq!(waiting(), Some(vec!["/pricing".to_string()]));
     // Accept with no page: every page there.
-    e.engine.accept_visual(&chg.id, "ada", None, true, Some("cs_1d"), None).await.unwrap();
+    e.engine.accept_visual(&chg.id, "ada", &[], true, None, Some("cs_1d"), None).await.unwrap();
     assert_eq!(review().map(|v| v.state), Some(VisualState::Accepted));
     // Under the project's threshold a page counts as unchanged (a clock `hide` can't name).
     let mut one_pixel = image::RgbaImage::from_pixel(4, 4, image::Rgba([255, 255, 255, 255]));
@@ -484,6 +485,7 @@ async fn a_previews_traces_are_kept_by_its_token_and_read_masked() {
     use roll_previews::engine::traces::Span;
     let e = env(json!({ "enabled": true, "traces": true }));
     e.secrets.values.lock().push(("STRIPE_KEY".into(), "sk_test_51Hx9".into()));
+    e.secrets.values.lock().push(("SIGNING_KEY".into(), "0f1e2d3c4b5a69788796a5b4c3d2e1f0".into()));
     e.code.open(change("chg_tr", 17));
     e.engine.pass().await.unwrap();
     let p = e.engine.store.row_by_change("chg_tr").unwrap().unwrap();
@@ -536,6 +538,11 @@ async fn a_previews_traces_are_kept_by_its_token_and_read_masked() {
     let got = e.engine.errors(&p.id, 60).await.unwrap();
     let trace_of = |title: &str| got.iter().find(|g| g.title == title).and_then(|g| g.trace.clone());
     assert_eq!((trace_of("kept"), trace_of("not kept")), (Some(kept), None), "{got:?}");
+    // A secret's value sent as a trace id (the code chose it) shows as `***` too.
+    let hex = "0f1e2d3c4b5a69788796a5b4c3d2e1f0";
+    e.engine.keep_spans(&p.id, &token, vec![Span { trace: hex.into(), ..span("0000000000000003", "", "GET /x", false, vec![]) }]).unwrap();
+    let list = e.engine.traces(&p.id, 60).await.unwrap().to_string();
+    assert!(!list.contains(hex) && list.contains("\"trace\":\"***\""), "{list}");
 }
 
 /// A route clearly slower than on main's preview (from both previews' traces) goes on the change's
@@ -553,17 +560,34 @@ async fn a_route_slower_than_mains_reaches_the_record_and_the_report() {
     let base = e.engine.store.rows(Some(&e.project)).unwrap().into_iter().find(|r| r.is_baseline()).expect("main's preview");
     let p = e.engine.store.row_by_change("chg_sr").unwrap().unwrap();
     let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos() as u64;
-    let keep = |id: &str, n: u64, ms: u64| {
-        let spans = (0..n).map(|i| Span { trace: format!("{:016x}{i:016x}", ms), span: "0000000000000001".into(), parent: String::new(), name: "GET /orders".into(), service: "web".into(), start: now - ms * 1_000_000, end: now, error: false, attrs: vec![] }).collect();
+    // Each request a root span and its query, the query the time that grew.
+    let keep = |id: &str, n: u64, ms: u64, query_ms: u64| {
+        let spans = (0..n)
+            .flat_map(|i| {
+                let trace = format!("{:016x}{i:016x}", ms);
+                [
+                    Span { trace: trace.clone(), span: "0000000000000001".into(), parent: String::new(), name: "GET /orders".into(), service: "web".into(), start: now - ms * 1_000_000, end: now, error: false, attrs: vec![] },
+                    Span { trace, span: "0000000000000002".into(), parent: "0000000000000001".into(), name: "SELECT orders".into(), service: "web".into(), start: now - query_ms * 1_000_000, end: now, error: false, attrs: vec![] },
+                ]
+            })
+            .collect();
         e.engine.keep_spans(id, &e.engine.store.trace_token(id).unwrap(), spans).unwrap();
     };
-    keep(&base.id, 5, 100);
-    keep(&p.id, 5, 400);
+    keep(&base.id, 5, 100, 50);
+    keep(&p.id, 5, 400, 330);
     e.engine.read_slower_routes().await;
     let s = e.engine.store.preview(&p.id).unwrap().slower_routes.expect("slower than main's");
     assert_eq!((s.branch.as_str(), s.routes.len(), s.routes[0].name.as_str(), s.routes[0].p50_ms, s.routes[0].main_p50_ms), ("main", 1, "GET /orders", 400, 100));
+    assert_eq!(s.routes[0].grew, Some(roll_previews::GrewSpan { span: "SELECT orders".into(), ms: 330, main_ms: 50 }), "where its time went");
     assert_eq!(e.code.last_report("chg_sr").slower_routes, Some(s), "reported again with it");
     assert!(e.engine.store.preview(&base.id).unwrap().slower_routes.is_none(), "main isn't slower than itself");
+    // A route with a budget of its own is over it whatever main's does (main's own, here).
+    let mut st = e.engine.store.settings(&e.project).unwrap();
+    st.github.budget.routes.insert("GET /orders".into(), 80);
+    e.engine.store.put_settings(&e.project, &st).unwrap();
+    e.engine.read_slower_routes().await;
+    let s = e.engine.store.preview(&base.id).unwrap().slower_routes.expect("main's over its budget");
+    assert_eq!((s.routes[0].name.as_str(), s.routes[0].p50_ms, s.routes[0].budget_ms), ("GET /orders", 100, Some(80)));
 }
 
 /// An error group main's preview doesn't have goes on the change's record (masked, the most
@@ -582,12 +606,33 @@ async fn an_error_mains_preview_doesnt_have_reaches_the_record_and_the_report() 
     let p = e.engine.store.row_by_change("chg_ne").unwrap().unwrap();
     let web = e.engine.store.services(&p.id).unwrap().into_iter().next().unwrap().name;
     let group = |f: &str, title: &str, count: u64| roll_previews::ErrorGroup { fingerprint: f.into(), kind: "line".into(), title: title.into(), count, first_seen: 1, last_seen: 2, sample: title.into(), ..Default::default() };
-    e.apps.errors.lock().insert(format!("{}/{web}", base.id), vec![group("old", "a flaky upstream", 3)]);
-    e.apps.errors.lock().insert(format!("{}/{web}", p.id), vec![group("old", "a flaky upstream", 4), group("rare", "RangeError", 1), group("new", "Stripe rejected sk_test_51Hx9", 9)]);
+    // One main's has too under another fingerprint, its line naming each preview's own id: not new.
+    let own = |id: &str| format!("lost the connection for {id}");
+    e.apps.errors.lock().insert(format!("{}/{web}", base.id), vec![group("old", "a flaky upstream", 3), group("own-main", &own(&base.id), 2)]);
+    e.apps.errors.lock().insert(format!("{}/{web}", p.id), vec![group("old", "a flaky upstream", 4), group("rare", "RangeError", 1), group("new", "Stripe rejected sk_test_51Hx9", 9), group("own-mine", &own(&p.id), 2)]);
     e.engine.read_new_errors().await;
-    let n = e.engine.store.preview(&p.id).unwrap().new_errors.expect("new against main's");
+    let seen = e.engine.store.preview(&p.id).unwrap();
+    assert!(seen.regressions_compared, "compared at its head");
+    let n = seen.new_errors.expect("new against main's");
+    assert_eq!(n.head, p.head, "read at its head");
     assert_eq!((n.branch.as_str(), n.total, n.errors.iter().map(|x| x.title.as_str()).collect::<Vec<_>>()), ("main", 2, vec!["Stripe rejected ***", "RangeError"]));
     assert_eq!(e.code.last_report("chg_ne").new_errors, Some(n), "reported again with it");
+    // Required, someone other than its author accepts them at its head (a person, not a token).
+    let mut s = e.engine.store.settings(&e.project).unwrap();
+    s.regressions = roll_previews::settings::RegressionsRule::Required;
+    e.engine.store.put_settings(&e.project, &s).unwrap();
+    assert!(matches!(e.engine.accept_regressions(&p.id, "carol", &[], true, None, None).await, Err(roll_previews::Error::Forbidden(_))), "not its author");
+    // Nor under another of their names (their roll handle, the change carrying their GitHub login).
+    assert!(matches!(e.engine.accept_regressions(&p.id, "carol-roll", &["carol-roll".into(), "carol".into()], true, None, None).await, Err(roll_previews::Error::Forbidden(_))), "their linked login");
+    assert!(matches!(e.engine.accept_regressions(&p.id, "token:ci", &[], false, None, None).await, Err(roll_previews::Error::Forbidden(_))), "not a token");
+    assert!(matches!(e.engine.accept_regressions(&p.id, "ada", &[], true, None, Some("cs_old")).await, Err(roll_previews::Error::Conflict(_))), "a newer push");
+    assert!(matches!(e.engine.accept_regressions(&p.id, "bob", &[], true, Some(Some("own_bob")), Some(&p.head)).await, Err(roll_previews::Error::Forbidden(_))), "no write on its repo");
+    let accepted = e.engine.accept_regressions(&p.id, "ada", &[], true, Some(Some("own_acme")), Some(&p.head)).await.unwrap();
+    assert_eq!((accepted.regressions.as_deref(), accepted.regressions_accepted.map(|a| a.by)), (Some("required"), Some("ada".to_string())));
+    // A new one at the same head isn't covered by it: accepted again or not at all.
+    e.apps.errors.lock().get_mut(&format!("{}/{web}", p.id)).unwrap().push(group("later", "TimeoutError", 1));
+    e.engine.read_new_errors().await;
+    assert!(e.engine.store.preview(&p.id).unwrap().regressions_accepted.is_none(), "more than was accepted");
     // Fixed (gone from its output): it goes.
     e.apps.errors.lock().insert(format!("{}/{web}", p.id), vec![group("old", "a flaky upstream", 5)]);
     e.engine.read_new_errors().await;

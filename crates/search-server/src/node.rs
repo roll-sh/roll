@@ -1189,6 +1189,7 @@ impl Node {
         cfg.sealer = self.cfg.sealer.clone();
         cfg.links = self.cfg.links.clone();
         cfg.catalog_id = spec.catalog_id.clone();
+        cfg.branch_of = spec.branch_of.clone();
         // Snapshot contents are durable only with object storage behind the cluster.
         cfg.default_repository = self.cfg.default_repository.clone().filter(|_| data_store.is_some());
         cfg.file_service_tokens = self.reads_file_service_tokens(&spec.name);
@@ -1200,6 +1201,8 @@ impl Node {
             // stays the same across wakes (clients and monitoring key on it). Once per cluster.
             cluster.update(|_| Ok(())).await.map_err(|e| anyhow::anyhow!("saving the new cluster's state: {}", e.reason()))?;
         }
+        // Before any job can run: a branch's inherited jobs must not act as its parent's.
+        Box::pin(search_es::branch::mark_inherited(&cluster)).await.map_err(|e| anyhow::anyhow!("marking what the branch inherited: {}", e.reason()))?;
         let mut stats = persist::RecoveryStats::default();
         let data = match data_store {
             Some(ds) => {

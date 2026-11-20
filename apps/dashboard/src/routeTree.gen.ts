@@ -21,6 +21,7 @@ import { Route as DashboardStreamsRouteImport } from './routes/dashboard/streams
 import { Route as DashboardTasksRouteImport } from './routes/dashboard/tasks'
 import { Route as OauthAuthorizeRouteImport } from './routes/oauth/authorize'
 import { Route as OauthDeviceRouteImport } from './routes/oauth/device'
+import { Route as RequestTokenRouteImport } from './routes/request/$token'
 import { Route as ShareIdRouteImport } from './routes/share/$id'
 import { Route as OwnerRepoIndexRouteImport } from './routes/$owner/$repo/index'
 import { Route as OwnerRepoGitReceivePackRouteImport } from './routes/$owner/$repo/git-receive-pack'
@@ -65,6 +66,7 @@ import { Route as AgentsSIdOpengraphImageRouteImport } from './routes/agents/s/$
 import { Route as DashboardAccessTokensIdRouteImport } from './routes/dashboard/access/tokens.$id'
 import { Route as DashboardCodeOwnerIndexRouteImport } from './routes/dashboard/code/$owner/index'
 import { Route as DashboardProjectsIdLogsRouteImport } from './routes/dashboard/projects/$id/logs'
+import { Route as DashboardProjectsIdMetricsRouteImport } from './routes/dashboard/projects/$id/metrics'
 import { Route as DashboardProjectsIdPreviewsRouteImport } from './routes/dashboard/projects/$id/previews'
 import { Route as DashboardProjectsIdSecretsRouteImport } from './routes/dashboard/projects/$id_/secrets'
 import { Route as DashboardQueuesQueuesIndexRouteImport } from './routes/dashboard/queues/queues/index'
@@ -137,6 +139,11 @@ const OauthAuthorizeRoute = OauthAuthorizeRouteImport.update({
 const OauthDeviceRoute = OauthDeviceRouteImport.update({
   id: '/oauth/device',
   path: '/oauth/device',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const RequestTokenRoute = RequestTokenRouteImport.update({
+  id: '/request/$token',
+  path: '/request/$token',
   getParentRoute: () => rootRouteImport,
 } as any)
 const ShareIdRoute = ShareIdRouteImport.update({
@@ -362,6 +369,12 @@ const DashboardProjectsIdLogsRoute = DashboardProjectsIdLogsRouteImport.update({
   path: '/logs',
   getParentRoute: () => DashboardProjectsIdRoute,
 } as any)
+const DashboardProjectsIdMetricsRoute =
+  DashboardProjectsIdMetricsRouteImport.update({
+    id: '/metrics',
+    path: '/metrics',
+    getParentRoute: () => DashboardProjectsIdRoute,
+  } as any)
 const DashboardProjectsIdPreviewsRoute =
   DashboardProjectsIdPreviewsRouteImport.update({
     id: '/previews',
@@ -450,6 +463,7 @@ export interface FileRoutesByFullPath {
   '/dashboard/tasks': typeof DashboardTasksRoute
   '/oauth/authorize': typeof OauthAuthorizeRoute
   '/oauth/device': typeof OauthDeviceRoute
+  '/request/$token': typeof RequestTokenRoute
   '/share/$id': typeof ShareIdRoute
   '/$owner/': typeof OwnerIndexRoute
   '/dashboard/': typeof DashboardIndexRoute
@@ -493,6 +507,7 @@ export interface FileRoutesByFullPath {
   '/agents/s/$id/opengraph-image': typeof AgentsSIdOpengraphImageRoute
   '/dashboard/access/tokens/$id': typeof DashboardAccessTokensIdRoute
   '/dashboard/projects/$id/logs': typeof DashboardProjectsIdLogsRoute
+  '/dashboard/projects/$id/metrics': typeof DashboardProjectsIdMetricsRoute
   '/dashboard/projects/$id/previews': typeof DashboardProjectsIdPreviewsRoute
   '/dashboard/projects/$id/secrets': typeof DashboardProjectsIdSecretsRoute
   '/dashboard/storage/-/accounts': typeof DashboardStorageChar91Char93AccountsRoute
@@ -520,6 +535,7 @@ export interface FileRoutesByTo {
   '/dashboard/tasks': typeof DashboardTasksRoute
   '/oauth/authorize': typeof OauthAuthorizeRoute
   '/oauth/device': typeof OauthDeviceRoute
+  '/request/$token': typeof RequestTokenRoute
   '/share/$id': typeof ShareIdRoute
   '/$owner': typeof OwnerIndexRoute
   '/dashboard': typeof DashboardIndexRoute
@@ -563,6 +579,7 @@ export interface FileRoutesByTo {
   '/agents/s/$id/opengraph-image': typeof AgentsSIdOpengraphImageRoute
   '/dashboard/access/tokens/$id': typeof DashboardAccessTokensIdRoute
   '/dashboard/projects/$id/logs': typeof DashboardProjectsIdLogsRoute
+  '/dashboard/projects/$id/metrics': typeof DashboardProjectsIdMetricsRoute
   '/dashboard/projects/$id/previews': typeof DashboardProjectsIdPreviewsRoute
   '/dashboard/projects/$id/secrets': typeof DashboardProjectsIdSecretsRoute
   '/dashboard/storage/-/accounts': typeof DashboardStorageChar91Char93AccountsRoute
@@ -592,6 +609,7 @@ export interface FileRoutesById {
   '/dashboard/tasks': typeof DashboardTasksRoute
   '/oauth/authorize': typeof OauthAuthorizeRoute
   '/oauth/device': typeof OauthDeviceRoute
+  '/request/$token': typeof RequestTokenRoute
   '/share/$id': typeof ShareIdRoute
   '/$owner/': typeof OwnerIndexRoute
   '/dashboard/': typeof DashboardIndexRoute
@@ -635,6 +653,7 @@ export interface FileRoutesById {
   '/agents/s/$id/opengraph-image': typeof AgentsSIdOpengraphImageRoute
   '/dashboard/access/tokens/$id': typeof DashboardAccessTokensIdRoute
   '/dashboard/projects/$id/logs': typeof DashboardProjectsIdLogsRoute
+  '/dashboard/projects/$id/metrics': typeof DashboardProjectsIdMetricsRoute
   '/dashboard/projects/$id/previews': typeof DashboardProjectsIdPreviewsRoute
   '/dashboard/projects/$id_/secrets': typeof DashboardProjectsIdSecretsRoute
   '/dashboard/storage/-/accounts': typeof DashboardStorageChar91Char93AccountsRoute
@@ -665,6 +684,7 @@ export interface FileRouteTypes {
     | '/dashboard/tasks'
     | '/oauth/authorize'
     | '/oauth/device'
+    | '/request/$token'
     | '/share/$id'
     | '/$owner/'
     | '/dashboard/'
@@ -708,6 +728,7 @@ export interface FileRouteTypes {
     | '/agents/s/$id/opengraph-image'
     | '/dashboard/access/tokens/$id'
     | '/dashboard/projects/$id/logs'
+    | '/dashboard/projects/$id/metrics'
     | '/dashboard/projects/$id/previews'
     | '/dashboard/projects/$id/secrets'
     | '/dashboard/storage/-/accounts'
@@ -735,6 +756,7 @@ export interface FileRouteTypes {
     | '/dashboard/tasks'
     | '/oauth/authorize'
     | '/oauth/device'
+    | '/request/$token'
     | '/share/$id'
     | '/$owner'
     | '/dashboard'
@@ -778,6 +800,7 @@ export interface FileRouteTypes {
     | '/agents/s/$id/opengraph-image'
     | '/dashboard/access/tokens/$id'
     | '/dashboard/projects/$id/logs'
+    | '/dashboard/projects/$id/metrics'
     | '/dashboard/projects/$id/previews'
     | '/dashboard/projects/$id/secrets'
     | '/dashboard/storage/-/accounts'
@@ -806,6 +829,7 @@ export interface FileRouteTypes {
     | '/dashboard/tasks'
     | '/oauth/authorize'
     | '/oauth/device'
+    | '/request/$token'
     | '/share/$id'
     | '/$owner/'
     | '/dashboard/'
@@ -849,6 +873,7 @@ export interface FileRouteTypes {
     | '/agents/s/$id/opengraph-image'
     | '/dashboard/access/tokens/$id'
     | '/dashboard/projects/$id/logs'
+    | '/dashboard/projects/$id/metrics'
     | '/dashboard/projects/$id/previews'
     | '/dashboard/projects/$id_/secrets'
     | '/dashboard/storage/-/accounts'
@@ -878,6 +903,7 @@ export interface RootRouteChildren {
   DashboardTasksRoute: typeof DashboardTasksRoute
   OauthAuthorizeRoute: typeof OauthAuthorizeRoute
   OauthDeviceRoute: typeof OauthDeviceRoute
+  RequestTokenRoute: typeof RequestTokenRoute
   ShareIdRoute: typeof ShareIdRoute
   OwnerIndexRoute: typeof OwnerIndexRoute
   DashboardIndexRoute: typeof DashboardIndexRoute
@@ -1009,6 +1035,13 @@ declare module '@tanstack/react-router' {
       path: '/oauth/device'
       fullPath: '/oauth/device'
       preLoaderRoute: typeof OauthDeviceRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/request/$token': {
+      id: '/request/$token'
+      path: '/request/$token'
+      fullPath: '/request/$token'
+      preLoaderRoute: typeof RequestTokenRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/share/$id': {
@@ -1319,6 +1352,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof DashboardProjectsIdLogsRouteImport
       parentRoute: typeof DashboardProjectsIdRoute
     }
+    '/dashboard/projects/$id/metrics': {
+      id: '/dashboard/projects/$id/metrics'
+      path: '/metrics'
+      fullPath: '/dashboard/projects/$id/metrics'
+      preLoaderRoute: typeof DashboardProjectsIdMetricsRouteImport
+      parentRoute: typeof DashboardProjectsIdRoute
+    }
     '/dashboard/projects/$id/previews': {
       id: '/dashboard/projects/$id/previews'
       path: '/previews'
@@ -1449,11 +1489,13 @@ const OwnerRepoRouteRouteWithChildren = OwnerRepoRouteRoute._addFileChildren(
 
 interface DashboardProjectsIdRouteChildren {
   DashboardProjectsIdLogsRoute: typeof DashboardProjectsIdLogsRoute
+  DashboardProjectsIdMetricsRoute: typeof DashboardProjectsIdMetricsRoute
   DashboardProjectsIdPreviewsRoute: typeof DashboardProjectsIdPreviewsRoute
 }
 
 const DashboardProjectsIdRouteChildren: DashboardProjectsIdRouteChildren = {
   DashboardProjectsIdLogsRoute: DashboardProjectsIdLogsRoute,
+  DashboardProjectsIdMetricsRoute: DashboardProjectsIdMetricsRoute,
   DashboardProjectsIdPreviewsRoute: DashboardProjectsIdPreviewsRoute,
 }
 
@@ -1471,6 +1513,7 @@ const rootRouteChildren: RootRouteChildren = {
   DashboardTasksRoute: DashboardTasksRoute,
   OauthAuthorizeRoute: OauthAuthorizeRoute,
   OauthDeviceRoute: OauthDeviceRoute,
+  RequestTokenRoute: RequestTokenRoute,
   ShareIdRoute: ShareIdRoute,
   OwnerIndexRoute: OwnerIndexRoute,
   DashboardIndexRoute: DashboardIndexRoute,

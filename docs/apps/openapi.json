@@ -235,7 +235,7 @@
               }
             }
           },
-          "description": "`{ url, format?, sources?, environments?, services?, previews?, headers? }` (https, a public host, or `syslog+tls://host:port` for `format: \"syslog\"`, which takes no headers; `sources` some of `runtime` (default), `http`, `build`, `audit`; services by name or id; `headers` `{name: value}`, at most 10, sealed, never roll's own or `content-type`)"
+          "description": "`{ url, format?, sources?, environments?, services?, previews?, headers? }` (https, a public host, or `syslog+tls://host:port` for `format: \"syslog\"`, which takes no headers; `sources` some of `runtime` (default), `http`, `build`, `audit`, `traces`, `metrics`; services by name or id; `headers` `{name: value}`, at most 10, sealed, never roll's own or `content-type`)"
         },
         "responses": {
           "201": {
@@ -1556,6 +1556,43 @@
         "x-roll-action": "deploy*"
       }
     },
+    "/v1/apps/services/{id}/environments/{env}/config/rotate": {
+      "post": {
+        "description": "Answers `Environment`: its runtime config gets a new read token (a leaked `ROLL_CONFIG_URL`); the old address reads until a deployment made after the rotation is live (of the service, or of its site's functions service), so a redeploy finishes it; audited as `audit.config.rotated`. 404 when it has no runtime config; 409 while the last rotation's old address still reads (redeploy first).",
+        "operationId": "postServicesIdEnvironmentsEnvConfigRotate",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "env",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "`Environment`: its runtime config gets a new read token (a leaked `ROLL_CONFIG_URL`); the old address reads until a deployment made after the rotation is live (of the service, or of its site's functions service), so a redeploy finishes it; audited as `audit.config.rotated`. 404 when it has no runtime config; 409 while the last rotation's old address still reads (redeploy first)"
+          },
+          "4XX": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "summary": "Rotate environment",
+        "tags": [
+          "services"
+        ],
+        "x-roll-action": "write"
+      }
+    },
     "/v1/apps/services/{id}/environments/{env}/deploys": {
       "get": {
         "description": "Answers `Deployment[]`, newest first, 100 at most; `before` (unix ms, the last one's `created_at`): the next page.",
@@ -1773,9 +1810,54 @@
         "x-roll-action": "read"
       }
     },
+    "/v1/apps/services/{id}/environments/{env}/deploys/{dep}/explain": {
+      "post": {
+        "description": "Answers `Explanation`: why a failed deployment failed, read from its error, plan, steps and the newest lines of its build log and output (masked as they're written) by the model of the owner of the service's roll code repo (their own provider, else the server's within their cap; metered on their roll code usage as `explain`). Kept with the deployment and answered again without a model call, unless `again=1` (at most once a minute; one question a deployment at a time). 409 when it didn't fail, it was asked anew less than a minute ago or is being asked now, the service doesn't deploy from a roll code repo, the server has no model, or the owner has none or is past their cap; 503 when the model gave no answer.",
+        "operationId": "postServicesIdEnvironmentsEnvDeploysDepExplain",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "env",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "dep",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "`Explanation`: why a failed deployment failed, read from its error, plan, steps and the newest lines of its build log and output (masked as they're written) by the model of the owner of the service's roll code repo (their own provider, else the server's within their cap; metered on their roll code usage as `explain`). Kept with the deployment and answered again without a model call, unless `again=1` (at most once a minute; one question a deployment at a time). 409 when it didn't fail, it was asked anew less than a minute ago or is being asked now, the service doesn't deploy from a roll code repo, the server has no model, or the owner has none or is past their cap; 503 when the model gave no answer"
+          },
+          "4XX": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "summary": "Explain deploy",
+        "tags": [
+          "services"
+        ],
+        "x-roll-action": "write"
+      }
+    },
     "/v1/apps/services/{id}/environments/{env}/deploys/{dep}/logs": {
       "get": {
-        "description": "Answers `LogLine[]` or SSE.",
+        "description": "Answers `LogLine[]` or SSE (ends with the deploy: an `end` event, then the stream closes, so a follower stops instead of reading it again; a job's and a run's log end the same way).",
         "operationId": "getServicesIdEnvironmentsEnvDeploysDepLogs",
         "parameters": [
           {
@@ -1805,7 +1887,7 @@
         ],
         "responses": {
           "200": {
-            "description": "`LogLine[]` or SSE"
+            "description": "`LogLine[]` or SSE (ends with the deploy: an `end` event, then the stream closes, so a follower stops instead of reading it again; a job's and a run's log end the same way)"
           },
           "4XX": {
             "$ref": "#/components/responses/Error"
@@ -2317,6 +2399,61 @@
         "x-roll-action": "read"
       }
     },
+    "/v1/apps/services/{id}/environments/{env}/errors/{fingerprint}": {
+      "patch": {
+        "description": "Answers `{ fingerprint, state }`; 404 for one the environment never had.",
+        "operationId": "patchServicesIdEnvironmentsEnvErrorsFingerprint",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "env",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "fingerprint",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object"
+              }
+            }
+          },
+          "description": "`{ state: \"open\" | \"resolved\" | \"muted\" }`"
+        },
+        "responses": {
+          "200": {
+            "description": "`{ fingerprint, state }`; 404 for one the environment never had"
+          },
+          "4XX": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "summary": "Update error",
+        "tags": [
+          "services"
+        ],
+        "x-roll-action": "write"
+      }
+    },
     "/v1/apps/services/{id}/environments/{env}/files": {
       "get": {
         "description": "Answers `application/x-tar`: what's at the absolute `path` in the instance (a shell's, or `instance`), `X-Roll-Instance` naming it; 400 for a relative path, 409 when the runtime couldn't copy.",
@@ -2688,7 +2825,7 @@
         "x-roll-action": "read"
       },
       "post": {
-        "description": "Answers 202 `Job` (with `tasks`).",
+        "description": "Answers 202 `Job`.",
         "operationId": "postServicesIdEnvironmentsEnvJobs",
         "parameters": [
           {
@@ -2716,11 +2853,11 @@
               }
             }
           },
-          "description": "`{ command, timeout_s?, tasks? }` (tasks 1–100: that many containers, ten at a time, each with `ROLL_TASK_INDEX` and `ROLL_TASK_COUNT`; the job fails on the first task that does)"
+          "description": "`{ command, timeout_s?, tasks?, retries?, parallelism? }` (tasks 1–100: that many containers, `parallelism` at a time (1–100, default ten or fewer tasks), each with `ROLL_TASK_INDEX` and `ROLL_TASK_COUNT`; `retries` 0–5: a failed or timed-out task tried again in a fresh container with `ROLL_TASK_ATTEMPT`, as a cron run's retries wait, never after a cancel; the job fails on the first task that does in the end)"
         },
         "responses": {
           "202": {
-            "description": "202 `Job` (with `tasks`)"
+            "description": "202 `Job`"
           },
           "4XX": {
             "$ref": "#/components/responses/Error"
@@ -2825,7 +2962,7 @@
     },
     "/v1/apps/services/{id}/environments/{env}/jobs/{job}/logs": {
       "get": {
-        "description": "Answers `LogLine[]` or SSE (ends with the job).",
+        "description": "Answers `LogLine[]` or SSE (ends with the job, then `end`).",
         "operationId": "getServicesIdEnvironmentsEnvJobsJobLogs",
         "parameters": [
           {
@@ -2855,7 +2992,7 @@
         ],
         "responses": {
           "200": {
-            "description": "`LogLine[]` or SSE (ends with the job)"
+            "description": "`LogLine[]` or SSE (ends with the job, then `end`)"
           },
           "4XX": {
             "$ref": "#/components/responses/Error"
@@ -3024,6 +3161,43 @@
           "services"
         ],
         "x-roll-action": "deploy*; admin with `X-Roll-Override: 1`"
+      }
+    },
+    "/v1/apps/services/{id}/environments/{env}/push": {
+      "get": {
+        "description": "Answers `PushState[]`: the environment's `run.push` rules as they stand, read on the service's owner: each group's `lag` (records not committed, every partition), `delivered`, `dead_lettered`, `last_delivered_at`, `failing_since` and `last_error` since that node began delivering, and `off` (why nothing is delivered).",
+        "operationId": "getServicesIdEnvironmentsEnvPush",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "env",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "`PushState[]`: the environment's `run.push` rules as they stand, read on the service's owner: each group's `lag` (records not committed, every partition), `delivered`, `dead_lettered`, `last_delivered_at`, `failing_since` and `last_error` since that node began delivering, and `off` (why nothing is delivered)"
+          },
+          "4XX": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "summary": "Get push",
+        "tags": [
+          "services"
+        ],
+        "x-roll-action": "read"
       }
     },
     "/v1/apps/services/{id}/environments/{env}/redeploy": {
@@ -3358,7 +3532,7 @@
     },
     "/v1/apps/services/{id}/environments/{env}/runs/{run}/logs": {
       "get": {
-        "description": "Answers `LogLine[]` or SSE (ends with the run): its container's lines (named by the run's id).",
+        "description": "Answers `LogLine[]` or SSE (ends with the run, then `end`): its container's lines (named by the run's id).",
         "operationId": "getServicesIdEnvironmentsEnvRunsRunLogs",
         "parameters": [
           {
@@ -3388,7 +3562,7 @@
         ],
         "responses": {
           "200": {
-            "description": "`LogLine[]` or SSE (ends with the run): its container's lines (named by the run's id)"
+            "description": "`LogLine[]` or SSE (ends with the run, then `end`): its container's lines (named by the run's id)"
           },
           "4XX": {
             "$ref": "#/components/responses/Error"
@@ -4580,7 +4754,7 @@
         "x-roll-action": "write"
       },
       "put": {
-        "description": "Answers `Service` (a private registry's login for an image source; sealed, never returned).",
+        "description": "Answers `Service` (a private registry's login for an image source; sealed, never returned; an ECR key is exchanged for ECR's 12-hour token at a pull, user `AWS`, kept until it has an hour left and then fetched again for what runs).",
         "operationId": "putServicesIdRegistry",
         "parameters": [
           {
@@ -4600,11 +4774,11 @@
               }
             }
           },
-          "description": "`{ username, password, server? }`"
+          "description": "`{ username, password, server? }`, or for an image on ECR `{ kind: \"ecr\", access_key_id, secret_access_key, region? }` (region defaults to the registry's; another is a 400)"
         },
         "responses": {
           "200": {
-            "description": "`Service` (a private registry's login for an image source; sealed, never returned)"
+            "description": "`Service` (a private registry's login for an image source; sealed, never returned; an ECR key is exchanged for ECR's 12-hour token at a pull, user `AWS`, kept until it has an hour left and then fetched again for what runs)"
           },
           "4XX": {
             "$ref": "#/components/responses/Error"

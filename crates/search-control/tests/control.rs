@@ -334,6 +334,22 @@ async fn lifecycle() {
 /// Signed-in people's own clusters (docs/accounts.md, "Phase 2"): each person lists and reaches
 /// only theirs (another's is a 404, as if it didn't exist), what they create and branch is theirs,
 /// a branch keeps its parent's owner whoever cuts it, and admins and the operator see everything.
+/// With the deployment's key, passwords are sealed in the catalog and still authenticate: a
+/// cluster's, its branch's (sealed under its own id) and a rotated one.
+#[tokio::test]
+async fn sealed_passwords_authenticate() {
+    let e = env_with(|c| c.sealer = search_control::Sealer::from_secret("0123456789abcdef0123456789abcdef")).await;
+    let c = e.post("/v1/search/clusters", json!({"name": "app"})).await;
+    let id = c["id"].as_str().unwrap().to_string();
+    let (user, pw) = creds(&c);
+    assert_eq!(e.es(&user, &pw, reqwest::Method::GET, "/", None).await.0, 200);
+    let (bu, bp) = creds(&e.post(&format!("/v1/search/clusters/{id}/branches"), json!({"name": "app-dev"})).await);
+    assert_eq!(e.es(&bu, &bp, reqwest::Method::GET, "/", None).await.0, 200);
+    let (_, rotated) = creds(&e.post(&format!("/v1/search/clusters/{id}/password"), json!({})).await);
+    assert_eq!(e.es(&user, &rotated, reqwest::Method::GET, "/", None).await.0, 200);
+    assert_eq!(e.es(&user, &pw, reqwest::Method::GET, "/", None).await.0, 401);
+}
+
 #[tokio::test]
 async fn people_see_only_their_own_clusters() {
     use reqwest::Method;
@@ -2417,6 +2433,120 @@ async fn an_s3_repository_moves_indices_between_clusters() {
     assert!(bucket.keys("prod/roll/indices/stray/").is_empty());
 }
 
+/// A branch inherits its parent's bucket repository, SLM policy and watch, but runs none of
+/// them as the parent: the repository is read-only there (restores work, snapshots don't), the
+/// policy and its retention don't run, and the watch is inactive, so every trigger reaches the
+/// webhook once.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_branch_runs_none_of_its_parents_jobs() {
+    use reqwest::Method;
+    let (endpoint, bucket) = MockBucket::start().await;
+    let hooks = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let hook_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let hook_port = hook_listener.local_addr().unwrap().port();
+    let counter = hooks.clone();
+    let router = axum::Router::new().fallback(move || {
+        counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        async { "ok" }
+    });
+    tokio::spawn(async move { axum::serve(hook_listener, router).await });
+    let e = env_with(|c| {
+        c.node_settings.push((search_control::S3_ALLOW_PRIVATE.into(), "true".into()));
+        c.node_settings.push((search_es::xpack::watcher::http::ALLOW_PRIVATE.into(), "true".into()));
+    })
+    .await;
+    let c = e.post("/v1/search/clusters", json!({"name": "prod"})).await;
+    let id = c["id"].as_str().unwrap().to_string();
+    let (u, p) = creds(&c);
+    let repo = json!({"type": "s3", "settings": {"bucket": "backups", "base_path": "prod", "endpoint": endpoint, "path_style_access": true}});
+    let watch = json!({
+        "trigger": {"schedule": {"interval": "1s"}},
+        "input": {"simple": {}},
+        // Every execution sends: no 5s default throttle between them.
+        "throttle_period": "0s",
+        "actions": {"hook": {"webhook": {"method": "post", "scheme": "http", "host": "127.0.0.1", "port": hook_port, "path": "/hook", "body": "fired"}}},
+    });
+    let calls = [
+        (Method::PUT, "/docs/_doc/1?refresh=true", json!({"a": 1})),
+        (Method::PUT, "/_snapshot/backup", repo),
+        (Method::PUT, "/_snapshot/backup/base?wait_for_completion=true", json!({"indices": "docs", "metadata": {"policy": "nightly"}})),
+        (Method::PUT, "/_cluster/settings", json!({"persistent": {"slm.minimum_interval": "0s"}})),
+        // The parent's SLM is stopped, so only a branch could run the policy.
+        (Method::POST, "/_slm/stop", Value::Null),
+        (Method::PUT, "/_slm/policy/nightly", json!({"schedule": "1s", "name": "<nightly-{now/d}>", "repository": "backup", "retention": {"expire_after": "1ms"}})),
+        (Method::PUT, "/_watcher/watch/ping", watch),
+    ];
+    for (m, uri, body) in calls {
+        let (s, v) = e.es(&u, &p, m, uri, Some(body).filter(|b| !b.is_null())).await;
+        assert!(s < 300, "{uri}: {v}");
+    }
+    let objects = bucket.keys("prod/");
+    let b = e.post(&format!("/v1/search/clusters/{id}/branches"), json!({"name": "prod-dev"})).await;
+    let (bu, bp) = creds(&b);
+
+    // The repository lists the parent's snapshots and restores them, and refuses writes.
+    let (s, v) = e.es(&bu, &bp, Method::GET, "/_snapshot/backup", None).await;
+    assert_eq!((s, &v["backup"]["settings"]["readonly"]), (200, &json!("true")), "{v}");
+    let (s, v) = e.es(&bu, &bp, Method::POST, "/_snapshot/backup/base/_restore?wait_for_completion=true", Some(json!({"rename_pattern": "docs", "rename_replacement": "restored"}))).await;
+    assert_eq!(s, 200, "{v}");
+    assert_eq!(e.es(&bu, &bp, Method::GET, "/restored/_count", None).await.1["count"], 1);
+    let (s, v) = e.es(&bu, &bp, Method::PUT, "/_snapshot/backup/mine?wait_for_completion=true", Some(json!({"indices": "docs"}))).await;
+    assert_eq!((s, v["error"]["type"].as_str()), (400, Some("illegal_argument_exception")), "{v}");
+    let (s, v) = e.es(&bu, &bp, Method::DELETE, "/_snapshot/backup/base", None).await;
+    assert_eq!(s, 500, "{v}");
+    let (s, v) = e.es(&bu, &bp, Method::PUT, "/_snapshot/backup/base/_clone/copy", Some(json!({"indices": "docs"}))).await;
+    assert_eq!((s, v["error"]["type"].as_str()), (500, Some("repository_exception")), "{v}");
+    // Another spelling of the parent's place is the parent's too.
+    let again = json!({"type": "s3", "settings": {"bucket": "backups", "base_path": "prod/", "endpoint": endpoint, "path_style_access": true}});
+    let (s, v) = e.es(&bu, &bp, Method::PUT, "/_snapshot/mine", Some(again)).await;
+    assert_eq!(s, 200, "{v}");
+    let (s, v) = e.es(&bu, &bp, Method::PUT, "/_snapshot/mine/mine?wait_for_completion=true", Some(json!({"indices": "docs"}))).await;
+    assert_eq!((s, v["error"]["type"].as_str()), (400, Some("illegal_argument_exception")), "{v}");
+
+    // SLM running on the branch neither runs the inherited policy nor applies its retention.
+    let (s, v) = e.es(&bu, &bp, Method::POST, "/_slm/start", None).await;
+    assert_eq!(s, 200, "{v}");
+    tokio::time::sleep(Duration::from_millis(2500)).await;
+    let (s, v) = e.es(&bu, &bp, Method::POST, "/_slm/_execute_retention", None).await;
+    assert_eq!(s, 200, "{v}");
+    let (_, v) = e.es(&bu, &bp, Method::GET, "/_slm/policy/nightly", None).await;
+    let policy = &v["nightly"];
+    assert!(policy["last_failure"]["details"].as_str().unwrap_or_default().contains("inherited from the parent"), "{v}");
+    assert!(policy.get("next_execution_millis").is_none(), "{v}");
+    assert_eq!((&policy["stats"]["snapshots_taken"], &policy["stats"]["snapshots_failed"], &policy["stats"]["snapshot_deletion_failures"]), (&json!(0), &json!(0), &json!(0)), "{v}");
+    let (s, v) = e.es(&bu, &bp, Method::PUT, "/_slm/policy/nightly/_execute", None).await;
+    assert_eq!((s, v["error"]["type"].as_str()), (409, Some("illegal_state_exception")), "{v}");
+    // Marked once: later loads don't mark again.
+    assert!(!e.control.store.by_name("prod-dev").await.unwrap().unwrap().inherit_pending);
+
+    // The watch came inactive: the webhook gets one call per execution of the parent's.
+    let (_, v) = e.es(&bu, &bp, Method::GET, "/_watcher/watch/ping", None).await;
+    assert_eq!(v["status"]["state"]["active"], false, "{v}");
+    let (s, v) = e.es(&u, &p, Method::PUT, "/_watcher/watch/ping/_deactivate", None).await;
+    assert_eq!(s, 200, "{v}");
+    tokio::time::sleep(Duration::from_millis(1500)).await;
+    e.es(&u, &p, Method::POST, "/.watcher-history-*/_refresh?expand_wildcards=all", None).await;
+    let (_, v) = e.es(&u, &p, Method::GET, "/.watcher-history-*/_count?expand_wildcards=all", None).await;
+    let executions = v["count"].as_u64().unwrap() as usize;
+    assert!(executions >= 2, "{v}");
+    assert_eq!(hooks.load(std::sync::atomic::Ordering::SeqCst), executions);
+
+    // The parent's snapshots and bucket are as they were.
+    let (_, v) = e.es(&u, &p, Method::GET, "/_snapshot/backup/_all", None).await;
+    let names: Vec<&str> = v["snapshots"].as_array().unwrap().iter().filter_map(|s| s["snapshot"].as_str()).collect();
+    assert_eq!(names, ["base"], "{v}");
+    assert_eq!(bucket.keys("prod/"), objects);
+
+    // A branch made before marking existed (no pending mark) keeps its jobs as its own.
+    let old = e.post(&format!("/v1/search/clusters/{id}/branches"), json!({"name": "prod-old"})).await;
+    e.control.store.set_inherit_pending("prod-old", false).await.unwrap();
+    let (ou, op) = creds(&old);
+    let (_, v) = e.es(&ou, &op, Method::GET, "/_snapshot/backup", None).await;
+    assert_eq!(v["backup"]["settings"]["readonly"], Value::Null, "{v}");
+    let (_, v) = e.es(&ou, &op, Method::GET, "/_slm/policy/nightly", None).await;
+    assert!(v["nightly"]["next_execution_millis"].is_i64() && v["nightly"].get("last_failure").is_none(), "{v}");
+}
+
 #[path = "control/cloud_repositories.rs"]
 mod cloud_repositories;
 
@@ -3431,13 +3561,17 @@ async fn query_suggestions_from_search_analytics() {
         tokio::spawn(async move {
             let http = reqwest::Client::new();
             let mut seen = 0;
-            while !stop.load(std::sync::atomic::Ordering::Relaxed) {
+            // At least one search, even when the rebuild returns before this task first runs.
+            loop {
                 let r = http.post(&url).basic_auth(&user, Some(&pw)).json(&json!({"size": 0, "query": {"match_all": {}}})).send().await.unwrap();
                 assert_eq!(r.status().as_u16(), 200);
                 let v: Value = r.json().await.unwrap();
                 let n = v["hits"]["total"]["value"].as_u64().unwrap();
                 assert!(n == 2 || n == 3, "a reader saw {n} suggestions: {v}");
                 seen += 1;
+                if stop.load(std::sync::atomic::Ordering::Relaxed) {
+                    break;
+                }
             }
             seen
         })
