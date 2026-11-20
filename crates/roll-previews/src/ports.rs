@@ -528,6 +528,20 @@ pub trait Reveal: Send + Sync {
     fn place(&self, reference: &str) -> std::result::Result<(String, String), String>;
 }
 
+/// A preview's interception (docs/previews.md, "Keys a preview never holds"): the hosts its
+/// placeholders' keys are bound to, the CA its containers trust for them, and what serves them.
+pub struct Intercepted {
+    pub hosts: Vec<String>,
+    pub ca_pem: String,
+    pub interception: std::sync::Arc<dyn crate::intercept::Interception>,
+}
+
+/// Whether a preview holds placeholders to swap (rolld: roll secrets' interception CA for its
+/// consumer). `None`: nothing to intercept, and its egress is as it was. May block.
+pub trait Intercepts: Send + Sync {
+    fn of(&self, preview: &str) -> anyhow::Result<Option<Intercepted>>;
+}
+
 /// Seals a preview's own variables at rest (rolld: AES-256-GCM under `ROLL_SECRET_KEY`), each
 /// bound to its `aad` (the preview's id), so a value copied to another row doesn't open.
 pub trait Sealer: Send + Sync {

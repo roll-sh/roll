@@ -391,8 +391,25 @@ mod tests {
         let addr = upstream(&real_ca, hits.clone()).await;
         let i: Arc<dyn Interception> = Arc::new(Fake { issuer: preview_ca, live: true });
 
+        // In through the preview's socket, as its egress proxy hands a connection over.
+        let dir = tempfile::tempdir().unwrap();
+        let listener = tokio::net::UnixListener::bind(dir.path().join("intercept.sock")).unwrap();
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        let tx = parking_lot::Mutex::new(Some(tx));
+        let done: Arc<dyn Fn(String, anyhow::Result<Served>) + Send + Sync> = Arc::new(move |host, out| {
+            if let Some(tx) = tx.lock().take() {
+                let _ = tx.send((host, out.map_err(|e| e.to_string())));
+            }
+        });
+        tokio::spawn(listen(listener, i.clone(), upstream_config(roots(&real_pem)), dial_to(addr), done));
+        let mut sock = tokio::net::UnixStream::connect(dir.path().join("intercept.sock")).await.unwrap();
+        tokio::io::AsyncWriteExt::write_all(&mut sock, b"api.example.test:443\n").await.unwrap();
         let (mine, theirs) = tokio::io::duplex(64 << 10);
-        let served = tokio::spawn(serve(theirs, "api.example.test", 443, i.clone(), upstream_config(roots(&real_pem)), dial_to(addr)));
+        tokio::spawn(async move {
+            let (mut a, mut b) = (theirs, sock);
+            let _ = tokio::io::copy_bidirectional(&mut a, &mut b).await;
+        });
+        let served = tokio::spawn(async move { rx.await.unwrap() });
         let mut s = client(&preview_pem, mine).await;
         // Swapped on the way out, the host's own name sent whatever the request said.
         assert_eq!(get(&mut s, "Bearer rlph_good").await, (200, "real=true host=api.example.test q=limit=1".into()));
@@ -400,8 +417,8 @@ mod tests {
         let (status, body) = get(&mut s, "Bearer rlph_bad").await;
         assert_eq!((status, body.contains("not a live placeholder"), hits.load(Ordering::SeqCst)), (403, true, 1));
         drop(s);
-        let out = served.await.unwrap().unwrap();
-        assert_eq!(out, Served { requests: 2, swapped: 1, blocked: vec!["not a live placeholder".into()] });
+        let (host, out) = tokio::time::timeout(std::time::Duration::from_secs(10), served).await.expect("the connection ends").unwrap();
+        assert_eq!((host.as_str(), out), ("api.example.test", Ok(Served { requests: 2, swapped: 1, blocked: vec!["not a live placeholder".into()] })));
 
         // A host the CA doesn't cover, or a CA that ended: nothing is terminated or dialled.
         for (host, live) in [("evil.test", true), ("api.example.test", false)] {

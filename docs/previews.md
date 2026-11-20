@@ -766,8 +766,16 @@ terminated, an upstream the real roots don't vouch for gets nothing); `egress.js
 `host:port` then the client's bytes; plain HTTP to one is refused, a key goes over TLS only;
 unset, nothing changes) and rolld's side of the socket (`intercept::listen`, `read_handoff`,
 bounded and refusing anything but a name and a port; `public_dial`, public addresses only).
-Next: the runtime mounting the socket and starting the listener, the trust stores, then rolld's
-adapter once roll secrets' batch 6 lands.
+The runtime serves it too (`ports::Intercepts`, set by rolld once it can answer; unset, and with
+no `intercept_dir`, nothing changes): a preview with an interception gets
+`<intercept_dir>/<preview>/` (0700, its CA's `ca.pem` and `intercept.sock`), the listener on it,
+and its egress container running as the directory's owner with it mounted at `/roll` and
+`INTERCEPT` set; each connection's swaps and refusals go in the activity ("egress to
+api.stripe.com: 3 request(s), 3 key(s) swapped in"), never a value. A dead listener's socket is
+made again in place (a running container keeps its mount); a change of hosts makes the egress
+container again; dropping the proxy ends the listener and the directory. The test's first
+connection goes through a real socket. Next: the CA in the service containers' trust stores,
+rolld's adapter once roll secrets' batch 6 lands, then the live check.
 
 ## Safety
 
