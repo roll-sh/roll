@@ -21,14 +21,16 @@ const MAX_PER_ENV: usize = 5;
 const MAX_PER_NODE: usize = 50;
 /// Job containers a node runs at once (a job's tasks each take one).
 pub const MAX_CONTAINERS: usize = 50;
-/// A job's tasks at most, and how many of them run at once.
+/// A job's tasks at most, how many of them run at once unless it says, and its tries after a
+/// task's failure at most.
 const MAX_TASKS: u64 = 100;
-const PARALLEL: usize = 10;
+const PARALLEL: u32 = 10;
+const MAX_RETRIES: u64 = 5;
 
 impl Apps {
     pub async fn start_job(self: &Arc<Self>, service: &str, env: &str, body: Value) -> Result<Job> {
         let o = body.as_object().cloned().unwrap_or_default();
-        if let Some(k) = o.keys().find(|k| !["command", "timeout_s", "tasks"].contains(&k.as_str())) {
+        if let Some(k) = o.keys().find(|k| !["command", "timeout_s", "tasks", "retries", "parallelism"].contains(&k.as_str())) {
             return Err(Error::BadRequest(format!("unknown field {k}")));
         }
         let command = o.get("command").and_then(Value::as_str).map(str::trim).unwrap_or("");
@@ -42,6 +44,14 @@ impl Apps {
         let tasks = match o.get("tasks") {
             None | Some(Value::Null) => 1,
             Some(v) => v.as_u64().filter(|t| (1..=MAX_TASKS).contains(t)).ok_or_else(|| Error::BadRequest(format!("tasks is 1–{MAX_TASKS}")))? as u32,
+        };
+        let retries = match o.get("retries") {
+            None | Some(Value::Null) => 0,
+            Some(v) => v.as_u64().filter(|r| *r <= MAX_RETRIES).ok_or_else(|| Error::BadRequest(format!("retries is 0–{MAX_RETRIES}")))? as u32,
+        };
+        let parallelism = match o.get("parallelism") {
+            None | Some(Value::Null) => PARALLEL.min(tasks),
+            Some(v) => v.as_u64().filter(|p| (1..=MAX_TASKS).contains(p)).ok_or_else(|| Error::BadRequest(format!("parallelism is 1–{MAX_TASKS}")))? as u32,
         };
         if self.capped(service) {
             return Err(Error::Conflict("this project reached its spending limit for the month".into()));
@@ -63,7 +73,7 @@ impl Apps {
             running.insert(hold.clone(), key.clone());
         }
         let (sid, e, dep, cmd) = (service.to_string(), env.to_string(), tpl.deployment.clone(), command.to_string());
-        let made = self.db(move |s| s.add_job(&sid, &e, &dep, &cmd, tasks)).await;
+        let made = self.db(move |s| s.add_job(&sid, &e, &dep, &cmd, tasks, retries, parallelism)).await;
         let job = {
             let mut running = self.running_jobs.lock();
             running.remove(&hold);
@@ -79,31 +89,50 @@ impl Apps {
         let (this, id, cmd) = (self.clone(), job.id.clone(), command.to_string());
         let sid = service.to_string();
         tokio::spawn(async move {
-            // Its tasks, at most PARALLEL at once, each told which it is.
+            // Its tasks, `parallelism` at once, each told which it is and which try; a failed or
+            // timed-out task tried again up to `retries` times, never after a cancel.
             let outcomes: Vec<(RunStatus, Option<i32>)> = futures::stream::iter(0..tasks)
                 .map(|n| {
-                    let (live, cmd, log, cancel, slots) = (live.clone(), cmd.clone(), log.clone(), cancel.clone(), this.job_slots.clone());
+                    let (live, cmd, log, cancel, slots, retry_after) = (live.clone(), cmd.clone(), log.clone(), cancel.clone(), this.job_slots.clone(), this.cfg.cron_retry_after);
                     async move {
-                        let Ok(_slot) = slots.acquire_owned().await else { return (RunStatus::Failed, None) };
-                        let vars = [("ROLL_TASK_INDEX".to_string(), n.to_string()), ("ROLL_TASK_COUNT".to_string(), tasks.to_string())];
-                        let ran = live.run_to_exit(Some(&cmd), &vars, Duration::from_secs(timeout), Some(log.clone()), cancel, None).await;
-                        let outcome = match ran {
-                            Ok(e) if e.canceled => (RunStatus::Canceled, None),
-                            Ok(e) if e.timed_out => (RunStatus::TimedOut, None),
-                            Ok(e) if e.code == Some(0) => (RunStatus::Succeeded, Some(0)),
-                            Ok(e) => (RunStatus::Failed, e.code),
-                            Err(err) => {
-                                log.stream(Stream::System).line(format!("the job didn't start: {err:#}"));
-                                (RunStatus::Failed, None)
+                        let mut attempt = 1;
+                        loop {
+                            let outcome = {
+                                let Ok(_slot) = slots.clone().acquire_owned().await else { return (RunStatus::Failed, None) };
+                                let vars = [("ROLL_TASK_INDEX".to_string(), n.to_string()), ("ROLL_TASK_COUNT".to_string(), tasks.to_string()), ("ROLL_TASK_ATTEMPT".to_string(), attempt.to_string())];
+                                let ran = live.run_to_exit(Some(&cmd), &vars, Duration::from_secs(timeout), Some(log.clone()), cancel.clone(), None).await;
+                                match ran {
+                                    Ok(e) if e.canceled => (RunStatus::Canceled, None),
+                                    Ok(e) if e.timed_out => (RunStatus::TimedOut, None),
+                                    Ok(e) if e.code == Some(0) => (RunStatus::Succeeded, Some(0)),
+                                    Ok(e) => (RunStatus::Failed, e.code),
+                                    Err(err) => {
+                                        log.stream(Stream::System).line(format!("the job didn't start: {err:#}"));
+                                        (RunStatus::Failed, None)
+                                    }
+                                }
+                            };
+                            let task = if tasks > 1 { format!("task {n}") } else { "the job".to_string() };
+                            let again = matches!(outcome.0, RunStatus::Failed | RunStatus::TimedOut) && attempt <= retries && !cancel.is_cancelled();
+                            if !again {
+                                if tasks > 1 || attempt > 1 {
+                                    log.stream(Stream::System).line(format!("{task}: {} (try {attempt})", outcome.0.as_str()));
+                                }
+                                return outcome;
                             }
-                        };
-                        if tasks > 1 {
-                            log.stream(Stream::System).line(format!("task {n}: {}", outcome.0.as_str()));
+                            // As a cron run's retries wait (30 s, doubling, ten minutes at most), its
+                            // container slot let go meanwhile.
+                            let wait = retry_after.saturating_mul(1 << (attempt - 1).min(10)).min(Duration::from_secs(600));
+                            log.stream(Stream::System).line(format!("{task}: {} (try {attempt} of {}); again in {} s", outcome.0.as_str(), retries + 1, wait.as_secs()));
+                            tokio::select! {
+                                _ = tokio::time::sleep(wait) => {}
+                                _ = cancel.cancelled() => return (RunStatus::Canceled, None),
+                            }
+                            attempt += 1;
                         }
-                        outcome
                     }
                 })
-                .buffer_unordered(PARALLEL)
+                .buffer_unordered(parallelism as usize)
                 .collect()
                 .await;
             // The job: canceled, else timed out, else the first failure, else done.

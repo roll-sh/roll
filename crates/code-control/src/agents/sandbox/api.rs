@@ -49,6 +49,7 @@ pub fn sandbox_json(s: &SandboxRow) -> Value {
         "created_at": s.created_at,
         "updated_at": s.updated_at,
         "last_active_at": s.last_active_at,
+        "secrets_by": s.secrets_by,
     })
 }
 
@@ -102,7 +103,7 @@ async fn list(State(code): S, caller: Caller, Path(owner): Path<String>) -> Resu
 
 /// `POST …/sandboxes {name?, size?, env?, secrets?}`: a machine and its sandbox, created in the background
 /// (`status: creating` until the backend runs it).
-async fn create(State(code): S, caller: Caller, Path(owner): Path<String>, Body(b): Body) -> Result<(StatusCode, Json<Value>)> {
+async fn create(State(code): S, caller: Caller, ext: axum::http::Extensions, Path(owner): Path<String>, Body(b): Body) -> Result<(StatusCode, Json<Value>)> {
     let o = manageable(&code, &caller, &owner)?;
     let name = machine_name(b.get("name"), "sandbox")?;
     let cfg = &code.config.sandboxes;
@@ -118,15 +119,21 @@ async fn create(State(code): S, caller: Caller, Path(owner): Path<String>, Body(
     let sealer = code.ai.sealer.as_ref().ok_or_else(|| Error::Unprocessable("sandboxes need ROLL_SECRET_KEY on the server".into()))?;
     let (id, machine_id, token) = (crate::new_id("sbx"), crate::new_id("mch"), new_machine_token());
     // `secrets: {project, environment}`: an environment of a project with one of the owner's
-    // repos on its canvas (docs/secrets.md), under the env given explicitly.
+    // repos on its canvas (docs/secrets.md), under the env given explicitly. Managing the owner
+    // isn't enough: the caller must be able to reveal the environment themselves.
+    let mut secrets_by = None;
     if let Some(sec) = b.get("secrets").filter(|v| !v.is_null()) {
         let field = |k: &str| sec.get(k).and_then(Value::as_str).filter(|s| !s.is_empty());
         let (Some(project), Some(environment)) = (field("project"), field("environment")) else {
             return Err(Error::Invalid("secrets is {project, environment}".into()));
         };
         let source = code.secret_env.get().ok_or_else(|| Error::Unavailable("roll secrets isn't on this server".into()))?;
-        let values = source.for_owner(&o.name, project, environment, &format!("sandbox:{id}")).await.map_err(|e| Error::Invalid(format!("secrets: {e}")))?;
-        let as_json: serde_json::Map<String, Value> = values.into_iter().map(|(k, v)| (k, Value::String(v))).collect();
+        let revealed = source.for_owner(&o.name, project, environment, &format!("sandbox:{id}"), crate::Asker::on(&ext)).await.map_err(|e| match e.downcast::<crate::Refused>() {
+            Ok(r) => Error::Forbidden(format!("secrets: {r}")),
+            Err(e) => Error::Invalid(format!("secrets: {e}")),
+        })?;
+        secrets_by = Some(revealed.by);
+        let as_json: serde_json::Map<String, Value> = revealed.values.into_iter().map(|(k, v)| (k, Value::String(v))).collect();
         let values = parse_env(Some(&Value::Object(as_json))).map_err(|e| Error::Invalid(format!("the secrets of {environment} can't all go in a sandbox: {e}")))?;
         for (k, v) in values {
             env.entry(k).or_insert(v);
@@ -153,6 +160,7 @@ async fn create(State(code): S, caller: Caller, Path(owner): Path<String>, Body(
         token_hash: &hash_token(&token),
         sealed: &sealed,
         max: cfg.max_per_owner,
+        secrets_by: secrets_by.as_deref(),
     };
     let (s, m) = match store::create(code.db.sql(), &new)? {
         Created::Ok(s, m) => (s, m),

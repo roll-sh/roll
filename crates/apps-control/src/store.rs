@@ -835,6 +835,14 @@ impl Store {
         db.add_column("deployments", "retired_at", "INTEGER")?;
         db.add_column("deployments", "error_detail", "TEXT")?;
         db.add_column("deployments", "build_key", "TEXT")?;
+        // A failed deployment's explanation from a model (`explain::Explanation` as JSON).
+        db.add_column("deployments", "explanation", "TEXT")?;
+        // An ECR login's kind and region (`basic` logins have neither).
+        db.add_column("registry_auth", "kind", "TEXT")?;
+        db.add_column("registry_auth", "region", "TEXT")?;
+        // Runtime config's token before its last rotation (sealed), and when that was.
+        db.add_column("runtime_config", "previous", "TEXT")?;
+        db.add_column("runtime_config", "rotated_at", "INTEGER")?;
         // A deleted service is kept this long (`DELETED_KEPT_MS`), stopped, until it's restored
         // or the prune sweep deletes it for good.
         db.add_column("services", "deleted_at", "INTEGER")?;
@@ -860,6 +868,8 @@ impl Store {
         db.add_column("environments", "allow_ips", "TEXT")?;
         db.add_column("environments", "rate_limit", "TEXT")?;
         db.add_column("jobs", "tasks", "INTEGER NOT NULL DEFAULT 1")?;
+        db.add_column("jobs", "retries", "INTEGER NOT NULL DEFAULT 0")?;
+        db.add_column("jobs", "parallelism", "INTEGER NOT NULL DEFAULT 10")?;
         db.add_column("environments", "tcp_port", "INTEGER")?;
         db.add_column("environments", "firewall", "TEXT")?;
         db.add_column("environments", "headers", "TEXT")?;
@@ -1773,6 +1783,18 @@ impl Store {
         rows.into_iter().map(|(d, s)| Ok((d, json(&s)?))).collect()
     }
 
+    /// A failed deployment's explanation, once one was asked.
+    pub fn explanation(&self, deployment: &str) -> Result<Option<crate::explain::Explanation>> {
+        let row: Option<Option<String>> = self.db.query_row("SELECT explanation FROM deployments WHERE id = ?", [deployment], |r| r.get(0)).optional()?;
+        Ok(row.flatten().and_then(|s| serde_json::from_str(&s).ok()))
+    }
+
+    pub fn set_explanation(&self, deployment: &str, e: &crate::explain::Explanation) -> Result<()> {
+        let body = serde_json::to_string(e).map_err(|e| Error::Internal(e.to_string()))?;
+        self.db.execute("UPDATE deployments SET explanation = ? WHERE id = ?", params![body, deployment])?;
+        Ok(())
+    }
+
     pub fn set_secrets_digest(&self, deployment: &str, digest: &str) -> Result<()> {
         self.db.execute("INSERT INTO deploy_secrets (deployment, digest) VALUES (?, ?) ON CONFLICT (deployment) DO UPDATE SET digest = excluded.digest", params![deployment, digest])?;
         Ok(())
@@ -2272,11 +2294,13 @@ impl Store {
 
     // ── private registries ──
 
-    pub fn set_registry(&self, service: &str, server: &str, username: &str, password: &str) -> Result<()> {
+    /// A login (`region`: an ECR access key's, `username` its id and `password` its secret).
+    pub fn set_registry(&self, service: &str, server: &str, username: &str, password: &str, region: Option<&str>) -> Result<()> {
         let sealed = self.sealer.seal(&format!("registry:{service}"), password);
+        let kind = region.map(|_| "ecr");
         self.db.execute(
-            "INSERT INTO registry_auth (service, server, username, sealed) VALUES (?, ?, ?, ?) ON CONFLICT (service) DO UPDATE SET server = excluded.server, username = excluded.username, sealed = excluded.sealed",
-            params![service, server, username, sealed],
+            "INSERT INTO registry_auth (service, server, username, sealed, kind, region) VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT (service) DO UPDATE SET server = excluded.server, username = excluded.username, sealed = excluded.sealed, kind = excluded.kind, region = excluded.region",
+            params![service, server, username, sealed, kind, region],
         )?;
         Ok(())
     }
@@ -2288,13 +2312,14 @@ impl Store {
 
     /// The login, without the password.
     pub fn registry(&self, service: &str) -> Result<Option<Registry>> {
-        Ok(self.db.query_row("SELECT server, username FROM registry_auth WHERE service = ?", [service], |r| Ok(Registry { server: r.get(0)?, username: r.get(1)? })).optional()?)
+        Ok(self.db.query_row("SELECT server, username, kind, region FROM registry_auth WHERE service = ?", [service], |r| Ok(Registry { server: r.get(0)?, username: r.get(1)?, kind: r.get(2)?, region: r.get(3)? })).optional()?)
     }
 
     /// The login with its password opened, for a pull.
     pub fn registry_login(&self, service: &str) -> Result<Option<(Registry, String)>> {
-        let row: Option<(String, String, String)> = self.db.query_row("SELECT server, username, sealed FROM registry_auth WHERE service = ?", [service], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?))).optional()?;
-        row.map(|(server, username, sealed)| Ok((Registry { server, username }, self.sealer.open(&format!("registry:{service}"), &sealed)?))).transpose()
+        type Row = (String, String, String, Option<String>, Option<String>);
+        let row: Option<Row> = self.db.query_row("SELECT server, username, sealed, kind, region FROM registry_auth WHERE service = ?", [service], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?))).optional()?;
+        row.map(|(server, username, sealed, kind, region)| Ok((Registry { server, username, kind, region }, self.sealer.open(&format!("registry:{service}"), &sealed)?))).transpose()
     }
 
     // ── private Git repositories ──
@@ -2454,6 +2479,39 @@ impl Store {
         sealed.map(|s| self.sealer.open(&format!("config:{service}:{env}"), &s)).transpose()
     }
 
+    /// A new read token for its runtime config (a leaked `ROLL_CONFIG_URL`); the one before is
+    /// kept for [`Store::runtime_config_tokens`]. When it was (none: it has no config).
+    pub fn rotate_runtime_config(&self, service: &str, env: &str) -> Result<Option<i64>> {
+        let now = self.now()?;
+        let sealed = self.sealer.seal(&format!("config:{service}:{env}"), &format!("rlc_{}", random(32)));
+        let n = self.db.execute("UPDATE runtime_config SET previous = sealed, sealed = ?, rotated_at = ? WHERE service = ? AND env = ?", params![sealed, now, service, env])?;
+        Ok((n > 0).then_some(now))
+    }
+
+    /// When its runtime config's token was last rotated.
+    pub fn runtime_config_rotated(&self, service: &str, env: &str) -> Result<Option<i64>> {
+        Ok(self.db.query_row("SELECT rotated_at FROM runtime_config WHERE service = ? AND env = ?", params![service, env], |r| r.get::<_, Option<i64>>(0)).optional()?.flatten())
+    }
+
+    /// The tokens that read its runtime config: the current one, and the one before the last
+    /// rotation while instances started with it may run: while the environment's live
+    /// deployment of the service, or of its site's functions service, was made before the
+    /// rotation (a deploy after it gives them the new address).
+    pub fn runtime_config_tokens(&self, service: &str, env: &str) -> Result<Option<(String, Option<String>)>> {
+        let row: Option<(String, Option<String>, Option<i64>)> = self.db.query_row("SELECT sealed, previous, rotated_at FROM runtime_config WHERE service = ? AND env = ?", params![service, env], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?))).optional()?;
+        let Some((sealed, previous, rotated)) = row else { return Ok(None) };
+        let open = |s: &str| self.sealer.open(&format!("config:{service}:{env}"), s);
+        let current = open(&sealed)?;
+        let (Some(previous), Some(at)) = (previous, rotated) else { return Ok(Some((current, None))) };
+        let svc = self.service(service)?;
+        let fn_name: String = format!("{}-fn", svc.name).chars().take(40).collect();
+        let functions = self.services(Some(&svc.project))?.into_iter().find(|s| s.name == fn_name && s.build.builder == crate::model::Builder::Functions).map(|s| s.id);
+        let live_before = [Some(service.to_string()), functions].into_iter().flatten().any(|id| {
+            self.environment(&id, env).ok().and_then(|e| e.active).and_then(|a| self.deployment(&a).ok()).is_some_and(|d| d.created_at < at)
+        });
+        Ok(Some((current, live_before.then(|| open(&previous)).transpose()?)))
+    }
+
     // ── roll's GitHub App on a Git URL service ──
 
     pub fn set_git_github(&self, service: &str, installation: u64, repo: &str) -> Result<()> {
@@ -2596,14 +2654,15 @@ impl Store {
 
     // ── jobs ──
 
-    pub fn add_job(&self, service: &str, env: &str, deployment: &str, command: &str, tasks: u32) -> Result<Job> {
+    #[allow(clippy::too_many_arguments)]
+    pub fn add_job(&self, service: &str, env: &str, deployment: &str, command: &str, tasks: u32, retries: u32, parallelism: u32) -> Result<Job> {
         let id = new_id("job");
         let now = self.now()?;
         self.db.execute(
-            "INSERT INTO jobs (id, service, env, deployment, command, status, exit_code, started_at, finished_at, tasks) VALUES (?, ?, ?, ?, ?, 'running', NULL, ?, NULL, ?)",
-            params![id, service, env, deployment, command, now, tasks as i64],
+            "INSERT INTO jobs (id, service, env, deployment, command, status, exit_code, started_at, finished_at, tasks, retries, parallelism) VALUES (?, ?, ?, ?, ?, 'running', NULL, ?, NULL, ?, ?, ?)",
+            params![id, service, env, deployment, command, now, tasks as i64, retries as i64, parallelism as i64],
         )?;
-        Ok(Job { id, deployment: deployment.into(), command: command.into(), tasks, status: RunStatus::Running, exit_code: None, started_at: now, finished_at: None })
+        Ok(Job { id, deployment: deployment.into(), command: command.into(), tasks, retries, parallelism, status: RunStatus::Running, exit_code: None, started_at: now, finished_at: None })
     }
 
     /// A job ends, if it's still running (a takeover may have failed it first): a failure is its
@@ -3346,7 +3405,7 @@ fn target_row(r: &code_sql::Row<'_>) -> code_sql::Result<NotifyTarget> {
     })
 }
 
-const JOB_COLS: &str = "id, deployment, command, status, exit_code, started_at, finished_at, tasks";
+const JOB_COLS: &str = "id, deployment, command, status, exit_code, started_at, finished_at, tasks, retries, parallelism";
 
 fn job_row(r: &code_sql::Row<'_>) -> code_sql::Result<Job> {
     Ok(Job {
@@ -3358,6 +3417,8 @@ fn job_row(r: &code_sql::Row<'_>) -> code_sql::Result<Job> {
         started_at: r.get(5)?,
         finished_at: r.get(6)?,
         tasks: r.get::<_, i64>(7)? as u32,
+        retries: r.get::<_, i64>(8)? as u32,
+        parallelism: r.get::<_, i64>(9)? as u32,
     })
 }
 
