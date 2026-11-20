@@ -70,6 +70,137 @@ over rounds with the min–max spread; trust a difference only where the spreads
   request (sum of the process's threads' `schedstat` run time) of two binaries loaded with the
   same data and measured interleaved.
 
+## Round 13: nested and http_logs rerun, nested date histograms from the points tree (2026-11-19)
+
+The Rally losses left in `docs/search/README.md` (Next, the Rally item) were on two tracks:
+nested `nested-date-histo` 1.17x, the nested bulk p50 1.16x and nested
+`randomized-sorted-term-queries` (fixed by #125, not rerun since), and http_logs'
+`sort-size-desc-after-force-merge-1-seg` 1.12x and `scroll` 1.03x (both against OpenSearch,
+Round 8). This round reruns both tracks at origin/main `8a328a7d2`, explains what still loses, and
+fixes `nested-date-histo`. Raw outputs, the harness and the scripts are in
+`~/.cache/rsearch/round13/` on the machine that ran them (`out/` the rerun, `out-final/` the
+fix, `nested/` and `httplogs/` the off-lane counts).
+
+**Harness.** Round 11's (`bench-search-rerun.sh`, its per-race cgroup CPU, document counts and
+merge totals), lane b only (server CPUs `10,11,28,29`, Rally on `12,13,30,31`, under the lane's
+lock), 4 GiB each, 3 rounds alternating roll and Elasticsearch 9.5.5 with the order rotating.
+nested ran with `RALLY_DOCS=2000000` (5,608,974 Lucene documents). http_logs ran the same 4,948,746
+documents as Round 8's `ingest_percentage:2`, without decompressing the 33 GB corpus:
+Rally's 8 bulk clients each index their slice of `documents-181998` and the first 280,000 documents of
+their slice of `documents-191998`, then stop at 2% of their bulks. A script (`http_logs_subset.py`)
+streams those documents into two files and points the track at them. Every race of both engines
+ended with all 4,948,746 documents. OpenSearch 3.9 raced http_logs 3 more times right after,
+since Round 8's two http_logs losses were against it. Rally's error rate was 0 for every task of every race (OpenSearch's
+`terms_enum`, an API it doesn't have, excepted).
+
+**Load.** The 1-minute load was 23-84. Foreign load on the lane's server CPUs, in % of the 4
+CPUs, per race:
+
+| track | roll | Elasticsearch | OpenSearch |
+|---|---|---|---|
+| nested, rerun | 39, 45, 37 | 39, 49, 41 | |
+| nested, with the fix | 44, 53, 34 | 31, 55, 50 | |
+| http_logs | 37, 47, 54 | 52, 45, 52 | 41, 53, 37 |
+
+**The rerun** (`8a328a7d2`), p50 ms or docs/s, median (min-max):
+
+| track | task | roll | Elasticsearch | OpenSearch | roll / best other | Round 8-9 |
+|---|---|---:|---:|---:|---:|---:|
+| nested | `nested-date-histo` | 293.2 (262.7-309.0) | 227.3 (216.9-263.4) | | 1.29 (tie) | 1.17 (tie) |
+| nested | `randomized-sorted-term-queries` | 4.05 (3.93-4.20) | 15.02 (14.78-22.81) | | 0.27 | 1.23 against OpenSearch's 10.21 |
+| nested | `index-append`, p50 | 439.6 (429.4-446.1) | 375.3 (359.0-401.6) | | 1.17 | 1.16 (tie) |
+| nested | `index-append`, docs/s | 41,980 (41,665-42,195) | 38,349 (17,222-40,179) | | 0.91 | 0.92 (tie) |
+| http_logs | `scroll` | 465.3 (459.8-473.7) | 471.3 (448.5-552.6) | 424.9 (414.6-463.1) | 1.09 (tie) | 1.03 (tie) |
+| http_logs | `sort-size-desc-after-force-merge-1-seg` | 6.27 (5.87-6.74) | 8.56 (8.30-9.05) | 6.10 (5.97-7.00) | 1.03 (tie) | 1.12 (tie) |
+| http_logs | `index-append`, docs/s | 140,109 (114,988-143,037) | 96,152 (55,394-113,734) | 54,451 (51,142-88,983) | 0.69 | |
+
+Every other nested task leads Elasticsearch (0.54-0.84). Every other http_logs task leads or ties the
+better of the two (0.19-0.98), except `200s-in-range`: 7.28 against OpenSearch's 6.98 ms, 1.04 (tie;
+Round 8 0.76, roll 6.45). The nested sorted query now leads: #125 holds under Rally. It
+wasn't raced against OpenSearch again, as its 4.05 ms is under half of OpenSearch's Round 9 10.21.
+
+**Why each one stood.**
+
+- **`nested-date-histo`** is a `nested` aggregation on `answers` with a monthly `date_histogram`
+  on `answers.date` under `match_all`: 3,608,974 nested documents into 93 buckets. Counted off-lane
+  (`perf stat`, 30 queries on the 12 segments the load left): 1,623.8M instructions and 224-310
+  ms of CPU per query, about 450 instructions per nested document. The profile: 36% in the date
+  histogram's collect loop, 22% in the nested aggregator walking each parent's children one
+  `next_set_bit` at a time, 16% in batch doc-value decoding, 9% in pushing each child to the
+  sub-aggregations, 12% in counting. Elasticsearch does the same per-document work (its
+  `NestedAggregator` walks the parent bit set the same way) but spreads a shard's segments over
+  threads. roll searches a shard on one thread. Tuning the per-document loops bought 28% (below).
+  Counting from the points tree removes the per-document work.
+- **The nested bulk p50** is not a throughput loss. Elasticsearch's bulk latency is bimodal:
+  p50 359-402 ms, p99 2,812-4,208 ms. roll's is 0.82-1.03 s at p99. roll indexed more documents
+  per second in every round (mean 41.7-42.5k against 16.0-40.0k), so its mean service time is
+  lower (0.48 s against 0.52 s at 4 clients), on 483-512 s of server CPU per race against
+  Elasticsearch's 605-675.
+- **http_logs `scroll`** (25 pages of 1,000 on `match_all`) is a tie in which roll does less work. Off-lane on the
+  same CPUs and data, roll spends 280 ms of server CPU per scroll (614M instructions), OpenSearch
+  484-499 ms. roll's profile: 33% in the query phase (top-docs collection 13%, sorting each
+  shard's 1,000-hit queue 9%, merging the shards' hits 6%), about 37% rendering the hits (JSON
+  writing, the per-hit response map with its SipHash keys, zstd, the allocator). Pages
+  continue from each shard's last hit (`ScrollCursor`) and fetch on several threads. The rest of
+  Rally's 18.6 ms per page is Rally parsing 212 KB pages (both engines return the same size).
+  The ranges touch (roll 459.8-473.7, OpenSearch 414.6-463.1).
+- **`sort-size-desc-after-force-merge-1-seg`** is a tie against OpenSearch (1.03), and roll is
+  ahead of Elasticsearch (0.73).
+
+**The fix: `nested { date_histogram }` from the points tree.** Under a query that matches every
+root document, a top-level `nested` aggregation collects every document of its path: each
+nested document sits before its root, and every root matches. A field of that path (no
+deeper one) has its points on exactly those documents. So on a segment with no deletions, no
+`_doc_count` values and one point per document, the histogram's buckets are range counts on the
+field's points tree, the same `FilterRewrite::counting` a top-level `date_histogram` already
+used. The `nested` bucket's count is its path's bit set's cardinality, and the segment is never
+iterated. Two more things this needed:
+
+- In an index with nested objects the shard query is `bool { must: match_all, filter: root
+  docs }` (`DefaultSearchContext.buildFilteredQuery`), so `matches_all` was false, and roll's
+  top-level points shortcuts never fired on nested indices. `BindCtx::matches_every_root`
+  recognises that shape. Only this path uses it, so the other shortcuts are unchanged.
+- A sub-aggregation that took a segment from its statistics is no longer handed that
+  segment's documents (`Subs::flush`), as the top-level collector already did.
+
+Elasticsearch has no such path: its `date_histogram` rewrite to a filter-by-filter `range` is
+top-level only. Where the shortcut doesn't apply (any other query, deletions, a sub-aggregation
+under the histogram), the collected path got cheaper too. The nested aggregator now reads each
+parent's children a word of the bit set at a time and pushes a batch's children together. The
+date histogram's single-valued loop tries the previous document's bucket before searching the
+rounding points.
+
+Instructions per query (`perf stat` off-lane, 30 queries; the A/B binary had the three parts
+behind a run-time switch, so code placement was the same for every column):
+
+| query | base `8a328a7d2` | A/B binary, all off (same-code control) | child walk + date loop | + points tree | this branch, no switch |
+|---|---:|---:|---:|---:|---:|
+| `nested-date-histo` | 1,623.8M | 1,661.6M | 1,191.8M | 21.1M | 21.1M |
+| the same under `match` on a random `tag` (collected) | 66.1M | | | | 52.1M |
+
+CPU per `nested-date-histo` query went from 224-326 ms to 4.4-5.0 ms. Responses are identical to
+the base's for `nested-date-histo`, the `match` variant (100 queries) and the other nested tasks
+(`sorted`, inner hits, `nested`: 100 each). `es_nested_date_histogram.json` (a REST fixture
+captured from Elasticsearch 9.5.5) covers the counted path, a deleted document, a root field and
+a deeper nested field under the `nested` aggregation, and a filtered query.
+
+**Rally with the fix** (this branch, same harness, 3 alternating rounds):
+
+| task | roll, rerun | roll, with the fix | Elasticsearch | roll / Elasticsearch |
+|---|---:|---:|---:|---:|
+| `nested-date-histo` | 293.2 (262.7-309.0) | 9.29 (8.87-12.66) | 324.5 (289.3-343.9) | 1.29 (tie) → 0.03 |
+| `randomized-sorted-term-queries` | 4.05 (3.93-4.20) | 4.09 (3.70-4.28) | 18.77 (18.77-23.18) | 0.22 |
+| `index-append`, docs/s | 41,980 (41,665-42,195) | 40,062 (31,901-42,296) | 37,661 (25,780-51,891) | 0.94 (tie) |
+| `index-append`, p50 | 439.6 (429.4-446.1) | 448.7 (433.1-575.2) | 364.5 (289.1-417.5) | 1.23 (p99 roll 0.83-1.05 s, Elasticsearch 2.09-3.70 s) |
+
+The other nested tasks moved within their ranges. Server CPU per nested race went from 483-512 s
+to 309-331 s (Elasticsearch 586-679), and a roll race from 313-331 s to 222-247 s.
+
+**Where roll still loses** on these tracks: nowhere with the ranges apart. The nested bulk p50
+is a latency-shape difference: roll has the lower mean, the lower tail and the higher docs/s.
+http_logs `scroll` (1.09 against OpenSearch) and `sort-size-desc-after-force-merge-1-seg` (1.03)
+are ties.
+
 ## Round 12: knn beams sized to each segment (2026-11-19)
 
 Round 10's one loss with the ranges apart was dense_vector `knn-search-100-1000_multiple_segments`:

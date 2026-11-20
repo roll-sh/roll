@@ -287,6 +287,18 @@ without naming either. With no key they are stored as given, as Elasticsearch do
 Elasticsearch does without cluster state encryption. Users' passwords are hashes and API keys
 are kept as hashes, never sealed.
 
+A cluster's own admin password, which roll's control plane keeps in its catalog
+(`search_clusters.password`), is sealed in the same way and bound to its row: the associated
+data is `search_cluster_password:<cluster id>`. It is opened only as the row is read, to give
+the node the cluster's credentials and to return the password once, on create and on
+rotation. A branch or a rotation seals a password under its own row's id; a restore keeps
+the cluster's id and so its seal. A row written in the clear (before the deployment had a key)
+is sealed and rewritten the first time it's read. A sealed password that the node can't open
+fails that read: the error names the cluster, but neither the value nor the key. With no
+`ROLL_SECRET_KEY` (local development), passwords are stored as given, like every secret that
+search keeps. `Debug` output of a cluster, a node's credentials and a presented
+`Authorization` header prints `<redacted>` in place of the secret.
+
 ## Client addresses and IP allowlists
 
 A cluster can have an IP allowlist (`ip_allowlist`: at most 64 CIDRs, IPv4 or IPv6, each with an

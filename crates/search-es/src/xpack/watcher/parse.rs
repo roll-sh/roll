@@ -130,8 +130,25 @@ fn normalize_search(v: &Value) -> EsResult<Value> {
     Ok(Value::Obj(out))
 }
 
+/// `chain` inputs and transforms nested in one another. Running a watch recurses once per level
+/// on the request's stack (or the scheduler's), and a stack overflow aborts the whole node:
+/// roll's own limit.
+const MAX_CHAIN_DEPTH: usize = 16;
+
+fn chain_depth(depth: usize) -> EsResult<()> {
+    if depth > MAX_CHAIN_DEPTH {
+        return Err(parse_err(format!("chains nest deeper than {MAX_CHAIN_DEPTH} levels")));
+    }
+    Ok(())
+}
+
 /// An input: `{type: body}`.
 pub fn normalize_input(cluster: &Cluster, watch_id: &str, input: &Value, previous: Option<&Value>) -> EsResult<Value> {
+    input_at(cluster, watch_id, input, previous, 0)
+}
+
+fn input_at(cluster: &Cluster, watch_id: &str, input: &Value, previous: Option<&Value>, depth: usize) -> EsResult<Value> {
+    chain_depth(depth)?;
     let Some((ty, body)) = input.as_object().and_then(|m| m.iter().next()) else { return Ok(obj! { "none" => obj! {} }) };
     let body = match ty.as_str() {
         "none" => obj! {},
@@ -155,11 +172,11 @@ pub fn normalize_input(cluster: &Cluster, watch_id: &str, input: &Value, previou
             for (i, step) in body.get("inputs").and_then(Value::as_array).into_iter().flatten().enumerate() {
                 let Some((name, inp)) = step.as_object().and_then(|m| m.iter().next()) else { continue };
                 let prev = previous.and_then(|p| p.pointer(&["chain", "inputs"])).and_then(Value::as_array).and_then(|a| a.get(i)).and_then(|s| s.get(name));
-                inputs.push(obj! { name.clone() => normalize_input(cluster, watch_id, inp, prev)? });
+                inputs.push(obj! { name.clone() => input_at(cluster, watch_id, inp, prev, depth + 1)? });
             }
             obj! { "inputs" => Value::Arr(inputs) }
         }
-        "transform" => normalize_transform(cluster, body)?,
+        "transform" => transform_at(cluster, body, depth + 1)?,
         other => return Err(parse_err(format!("could not parse input for watch [{watch_id}]. unknown input type [{other}]"))),
     };
     Ok(obj! { ty.clone() => body })
@@ -181,6 +198,11 @@ pub fn normalize_condition(cluster: &Cluster, watch_id: &str, cond: &Value) -> E
 
 /// A transform (`search`, `script` or `chain`).
 pub fn normalize_transform(cluster: &Cluster, t: &Value) -> EsResult<Value> {
+    transform_at(cluster, t, 0)
+}
+
+fn transform_at(cluster: &Cluster, t: &Value, depth: usize) -> EsResult<Value> {
+    chain_depth(depth)?;
     let Some((ty, body)) = t.as_object().and_then(|m| m.iter().next()) else { return Err(parse_err("could not parse transform. expected an object")) };
     let body = match ty.as_str() {
         "search" => normalize_search(body)?,
@@ -194,7 +216,7 @@ pub fn normalize_transform(cluster: &Cluster, t: &Value) -> EsResult<Value> {
                 Value::Arr(a) => a.clone(),
                 other => other.get("transforms").and_then(Value::as_array).cloned().unwrap_or_default(),
             };
-            Value::Arr(list.iter().map(|x| normalize_transform(cluster, x)).collect::<EsResult<_>>()?)
+            Value::Arr(list.iter().map(|x| transform_at(cluster, x, depth + 1)).collect::<EsResult<_>>()?)
         }
         other => return Err(parse_err(format!("could not parse transform. unknown transform type [{other}]"))),
     };
