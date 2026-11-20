@@ -441,6 +441,12 @@ function Empty({ repos, onBranch }: { repos: string[]; onBranch: () => void }) {
         )}
       </p>
       {repos.length > 0 && (
+        <p className="mt-2 max-w-[440px] text-[11.5px] text-subtle">
+          Its services are the project's roll apps services, or a repo's <span className="font-mono">roll.toml</span> <span className="font-mono">[preview]</span>. A repo with a
+          Compose file becomes roll apps services with New service → A file.
+        </p>
+      )}
+      {repos.length > 0 && (
         <button onClick={onBranch} className={`${btn} mt-4`}>
           <GitBranch className="size-3.5" strokeWidth={1.5} />
           Preview a branch

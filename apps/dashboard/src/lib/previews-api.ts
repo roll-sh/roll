@@ -154,7 +154,7 @@ export interface Preview {
   /** Its routes (from its traces) clearly slower than main's preview's, as its holder last read them. */
   /** Its error groups main's preview doesn't have, as its holder last read them. */
   new_errors?: { branch: string; total: number; errors: { service: string; title: string }[] } | null;
-  slower_routes?: { branch: string; routes: { name: string; count: number; p50_ms: number; main_p50_ms: number }[] } | null;
+  slower_routes?: { branch: string; routes: { name: string; count: number; p50_ms: number; main_p50_ms: number; grew?: GrewSpan | null }[] } | null;
   /** Earlier pushes of the change's services, still reachable on the same data (newest first). */
   earlier?: { service: string; revision: string; url: string; share_url: string | null; at: number }[];
   /** When its screenshot was taken (`screenshot` below), if it has one. */
@@ -606,11 +606,13 @@ export type ErrorGroup = { service: string; fingerprint: string; kind: string; t
 export type ServiceMetrics = { service: string; cpu: number; memory_bytes: number; memory_mb: number };
 
 /** One of a preview's recent traces: its root span's name and service, when (ms), how long, how many spans, whether any failed. */
+/** The span inside a slower route whose time grew most against main's preview's: where the time went. */
+export type GrewSpan = { span: string; ms: number; main_ms: number };
 /** A database statement a trace runs many times (an N+1), its literals taken out. */
 export type Repeated = { statement: string; count: number };
 export type TraceSummary = { trace: string; name: string; service: string; start_ms: number; ms: number; spans: number; error: boolean; repeated?: Repeated | null };
 /** A route's time from a preview's traces (a root span's name): how many, p50 and p95 (ms), main's preview's p50 for it, and whether it's clearly slower. */
-export type RouteTime = { name: string; count: number; p50_ms: number; p95_ms: number; main_p50_ms: number | null; main_count: number; slower: boolean; repeated?: Repeated | null };
+export type RouteTime = { name: string; count: number; p50_ms: number; p95_ms: number; main_p50_ms: number | null; main_count: number; slower: boolean; repeated?: Repeated | null; grew?: GrewSpan | null };
 /** A span of a trace (times in Unix nanoseconds), its attributes as name/value pairs. */
 export type TraceSpan = { trace: string; span: string; parent?: string; name: string; service?: string; start: number; end: number; error?: boolean; attrs?: [string, string][] };
 

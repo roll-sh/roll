@@ -1,7 +1,9 @@
-import { AlertTriangle, Plus, X } from "lucide-react";
+import { AlertTriangle, KeyRound, Plus, X } from "lucide-react";
 import { useEffect, useState, type ReactNode } from "react";
 import { isProduction, previewsApi, unmaskedNote, type MaskSuggestion, type MaskSuggestions, type PageState, type PreviewBypass, type PreviewHook, type PreviewJob, type PreviewSettings, type ResourceRule, type SettingsPatch } from "@/lib/previews-api";
 import { ROLL_API } from "@/lib/roll-api";
+import { keepable } from "@/lib/secret-names";
+import { secretsApi } from "@/lib/secrets-api";
 import type { PlacedResource } from "@/lib/workspace-api";
 import { KIND_LABEL, resourceKey } from "@/lib/workspace-resources";
 import { Dialog } from "../agents/ui/dialog";
@@ -103,6 +105,23 @@ function Form({
   const [hide, setHide] = useState((saved.github.hide ?? []).join("\n"));
   const [states, setStates] = useState(saved.github.states?.length ? JSON.stringify(saved.github.states, null, 2) : "");
   const [env, setEnv] = useState<[string, string][]>(Object.entries(saved.env));
+  // A variable being kept in roll secrets (its row), and what keeping it said.
+  const [keeping, setKeeping] = useState<number | null>(null);
+  const [kept, setKept] = useState<string | null>(null);
+  const keepInSecrets = async (i: number, key: string, value: string) => {
+    const base = s.secrets.base;
+    setKeeping(i);
+    setKept(null);
+    try {
+      await secretsApi(projectId).set(base, key, { value, message: "kept from the preview rules" });
+      setEnv((rows) => rows.map((x, j) => (j === i ? [x[0], `roll://${base}/${key}`] : x)));
+      setKept(`${key} is in roll secrets (${base}); Save to use it from there.`);
+    } catch (e) {
+      setError(`Keeping ${key} in roll secrets: ${errorText(e)}`);
+    } finally {
+      setKeeping(null);
+    }
+  };
   // `env_for` as rows of (branch glob, name, value).
   const [perBranch, setPerBranch] = useState<[string, string, string][]>(Object.entries(saved.env_for ?? {}).flatMap(([g, vars]) => Object.entries(vars).map(([k, v]) => [g, k, v] as [string, string, string])));
   const [busy, setBusy] = useState(false);
@@ -359,12 +378,26 @@ function Form({
                 />
                 <input
                   aria-label="Value"
-                  placeholder="value"
+                  placeholder="value or roll://ENV/KEY"
                   value={v}
                   onChange={(e) => setEnv(env.map((x, j) => (j === i ? [x[0], e.target.value] : x)))}
                   className={`${field} h-8 min-w-0 flex-1 font-mono text-[12px]`}
                   spellCheck={false}
                 />
+                {/* A credential pasted here would sit in the rules as text: offered a key in the
+                    base environment instead, the rule becoming its reference. */}
+                {keepable(k, v) && (
+                  <button
+                    type="button"
+                    aria-label={`Keep ${k} in roll secrets`}
+                    title={`Keep it in roll secrets (${s.secrets.base}), and use roll://${s.secrets.base}/${k} here`}
+                    disabled={keeping === i}
+                    onClick={() => void keepInSecrets(i, k.trim(), v)}
+                    className="grid size-8 shrink-0 place-items-center rounded-md text-accent hover:bg-white/[0.05] disabled:opacity-50"
+                  >
+                    <KeyRound className="size-3.5" strokeWidth={1.5} />
+                  </button>
+                )}
                 <button type="button" aria-label="Remove" onClick={() => setEnv(env.filter((_, j) => j !== i))} className="grid size-8 shrink-0 place-items-center rounded-md text-muted hover:bg-white/[0.05] hover:text-fg">
                   <X className="size-3.5" />
                 </button>
@@ -373,6 +406,7 @@ function Form({
             <button type="button" onClick={() => setEnv([...env, ["", ""]])} className="flex h-7 items-center gap-1 rounded-md px-1.5 text-[12px] text-muted hover:bg-white/[0.05] hover:text-fg">
               <Plus className="size-3.5" /> Add a variable
             </button>
+            {kept && <p className="text-[11.5px] text-muted">{kept}</p>}
           </div>
         </Field>
         <Field group label="Per branch" note="For previews of branches a glob matches (feat/payments-*), over the variables above.">
