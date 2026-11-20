@@ -10625,6 +10625,86 @@ and confirm on PGO:
 Agent 218's short-transaction stack (ten steps, `wip/a218`) was gated this way and landed: BENCH
 "Profile-guided build", part 2.
 
+## Bulk writes, round 19: sorts a byte at a time (agent 271)
+
+BENCH.md "Bulk writes, round 19" has the measurements (lane C, the 1M-row bulk script with joined
+windows, plain dist builds). `cand/a271`: one code commit on origin's `68e5a2ebd`. No format change.
+
+**Where the four steps went** (b0 = `68e5a2ebd`, instruction samples of each joined window; the
+shares lean towards slow instructions, as samples skid past them):
+- DELETE with its compaction, 8.26 G: the statement 53%, the compaction 47%. The statement: its
+  deferred deletions 14% of the step (`put_entry_deletes`: `SstWriter::add` 6%, the sort and the
+  keys' copies 4%, the filter 1%), decoding and filtering the rows it deletes 12% (`emit`), each
+  row's index keys 5% (`delete_index_entries`), locks 4%, the merging scan 7%. The compaction:
+  zstd with the file's dictionary 18% of the step, its merge (`zip_entries` and the per-entry
+  closure) 8%, `SstWriter::add` 3%, decompression 4%.
+- COPY in, 9.47 G: parsing 25% (`parse_copy_data`; floats 7%, integers 3%), the size model 18%
+  (`inserted_with`: `untracked_write` 4%, `note_compression_len` 4%, `datum_bytes` 4%, `ensure`
+  2%) and the first 400,000 rows' model 9% (`CopyLoad::model`: `with_tid` 3%), the runs 15%
+  (zstd 10%), `InsertNode::next` and `plain_row` themselves 10%, the row's encoding 5%.
+- INSERT ... SELECT, 6.63 G: the runs 26% (zstd 17%), the size model 18% (`Heap::insert` 6%),
+  decoding the source rows 10%, encoding 5%.
+- CREATE INDEX, 5.21 G: two comparison sorts 16% (the measure's keys 9%, the entries 7%),
+  decompressing the table's blocks 15%, the index's run 26% (zstd 9%), `stored_tuple_len` 6%, the
+  leader's merge of the participants' entries 5%.
+
+**Sorts a byte at a time** (`cand/a271`; `sort::radix_sort_by`). A parallel index build sorted
+each participant's entries (`parbuild::Entries::sort`) and its measure keys (`MeasureKey`) with
+`sort_unstable`: about 20 comparisons and moves an element at a million, 370-500 instructions an
+element (a standalone harness of the measure's 40-byte keys: 506 at 333,000, 412 at 30,000, 275
+at 1,000). Now an MSD radix sort in place (American flag sort) on the 16-byte prefix both already
+carry as two big-endian words: the leading bytes all elements share are passed over (one pass
+ORing each key with the first), each byte that still splits a slice costs a counting pass and a
+swap per element, slices of 64 or fewer and elements equal in all 16 bytes go to the comparison
+(the full key, the size), and input already in order is left after one pass (a unique index on a
+serial column: its entries come in the table's order, which pdqsort's pattern check also found;
+without this check CREATE UNIQUE INDEX read +5.0% in the first pair). 151 instructions an element
+at 333,000, 150 at 30,000, 106 at 1,000 (the same harness). The same sort serves the serial
+measure (`vacuum::btree_pages_est`, `sort_measure_keys`) and a deferring DELETE's deleted keys
+(`txn::sort_by_key_after`, the groups not already in order: the DELETE's `bulk_a` entries). The
+order is the comparison's (`sort.rs`' test against `sort` with shared leading bytes, ties past
+the key and duplicates, 0 to 200,000 elements); only equal elements may come out in another
+order, and those are interchangeable (the measure's equal keys and sizes; the entries' keys are
+unique).
+
+**A run of one index's entries isn't hashed** (`SstWriter::index_run`, from
+`Txn::put_index_run` through `Runs::write_fresh`): a file of index entries alone gets no bloom
+filter (`finish`), but `add` hashed every key for one anyway and kept the hashes until `finish`.
+A row key added to such a run (none is) would leave the file without a filter, which every key
+passes: no read is wrong either way.
+
+Results (BENCH "Bulk writes, round 19"; plain dist, G user instructions): CREATE INDEX 5.205 ->
+4.403 (-15.4% in each of three pairs; the sorts -13.8%, the unhashed run -1.9%), CREATE UNIQUE
+INDEX 3.469 -> 3.375 (-2.7%, the unhashed run), DELETE with its compaction -0.6% (the deleted
+keys' sort; one pair), every other step this commit reaches level. (Measured as builds with the
+round's other commit too, which reaches neither index build: BENCH has each build.) Rows equal in
+every run; bytes written the same; VmHWM b0 283-284, n4 280-283 MB. Foreign load was over 1.0 core
+in every run (1.2-3.6 cores wall-weighted): the instruction counts repeat within 0.1% regardless.
+
+Not gated on the PGO build: the commit adds or removes no inline attribute and splits no hot
+function; the sorts replace one call with another, once per build.
+
+**Considered, not built:**
+- Leaving index entries out of a mixed file's bloom filter (the DELETE's runs: 500,000 of their
+  750,000 keys): readers never ask a filter about an index entry (`index_entry`'s note), but the
+  callers of `Txn::get` and the point readers are too many to check that nothing ever does, and a
+  filter that answers no for a key the file holds loses rows. About 1% of the DELETE.
+- Faster zstd settings for a statement's runs: the bytes written must not grow (agent 260's
+  note on negative levels; agent 257's on match parameters).
+
+**Left (G user instructions, against PostgreSQL 18.6's):**
+1. DELETE with its compaction 8.21 against 1.67: the compaction's rewrite of the table with the
+   UPDATE's versions (zstd with the dictionary is a third of it), the deferred deletions
+   (`SstWriter::add` per tombstone, ~0.5 G), decoding the deleted rows.
+2. COPY in 9.47 against 6.48 (pgrust 4.97): the size model's per-row calls (`untracked_write`,
+   `ensure`'s lock and lookup every row of a table past the model, `row_len`, `datum_bytes`), the
+   first 400,000 rows modelled and stamped with TIDs, parsing, zstd of the runs.
+3. CREATE INDEX 4.40 against 3.13: the table's blocks decompressed (15%), the run's zstd,
+   `stored_tuple_len` (6%; agent 260's kept-measure patch needs it much cheaper), the leader's
+   merge of the participants' entries (5%), the radix sorts (now ~8% of samples).
+4. INSERT ... SELECT 6.63 against 4.31: zstd of the runs (17%), the size model, decoding and
+   encoding every row.
+
 ## Bulk writes, round 18: the merging scan merges interleaved blocks in one loop (agent 260)
 
 BENCH.md "Bulk writes, round 18" has the measurements (lane C, the 1M-row bulk script with joined

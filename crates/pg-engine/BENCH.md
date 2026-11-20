@@ -285,6 +285,27 @@ The current checked measurements compare release engine builds and PostgreSQL 18
 the wire. Older rounds below are historical records, with their original methods and
 limits. Their results have not been reverified on the current source.
 
+## Bulk writes, round 19: sorts a byte at a time (2026-11-20, agent 271)
+
+HANDOFF "Bulk writes, round 19" has what changed. Lane C, the 1M-row bulk script with joined
+windows (agent 246's `bulkx.sh` with `JOIN=1`, copied to `~/.cache/a271/bench`), plain dist builds
+(`tools/dist.sh`) of **b0**, origin's `68e5a2ebd`, and **n4**, b0 with the round's two commits (the
+second, `cand/a271-2`, reaches neither index build); **n1**, b0 with the sorts without the in-order
+check and a float parsing change only COPY reaches. G user instructions of the server's cgroup;
+every counter ran 100% of its window. Each pair held lane C through `tools/lane.sh` alone.
+**Foreign load was over 1.0 core in every run** (wall-weighted 1.2-3.6 cores); the instruction
+counts repeat within 0.1% regardless. Rows equal in every run.
+
+| step | b0 | n4 | % per pair |
+|---|---|---|---|
+| CREATE INDEX | 5.205 | 4.403 | -15.4 x3 |
+| CREATE UNIQUE INDEX | 3.469 | 3.375 | -2.8 / -2.7 / -2.7 |
+| VACUUM, ANALYZE | 1.726, 0.472 | 1.726, 0.472 | +0.0 x3 |
+
+b0 against n1 (one pair): CREATE INDEX -13.5%, CREATE UNIQUE INDEX +5.0% (its entries come in
+order, which n1's sort didn't check; n4's does), DELETE with its compaction -0.6%. Bytes written
+the same; VmHWM b0 283-284, n4 280-283 MB.
+
 ## Bulk writes, round 18: the merging scan (2026-11-19, agent 260)
 
 HANDOFF "Bulk writes, round 18" has what changed. Lane C, the 1M-row bulk script with joined
