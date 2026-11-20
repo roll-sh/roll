@@ -532,10 +532,11 @@ decided by the gate, and a connection is offered only the prompts whose tools it
 ids (letters, digits, `_`, `.`, `-`, at most 64), quoted in the message: anyone can name a project,
 and a prompt's text is the person's own message to the agent.
 
-A prompt's `project`, `service` and `env` complete as the person types (`completion/complete`): the
-values come from the list tool the connection would call (`workspace_list_projects`; a Postgres
-project's from `postgres_list_projects`;
-`apps_list_services`, `apps_list_environments` for the `service` already given), through the gate
+A prompt's arguments complete as the person types (`completion/complete`): the values come from
+the list tool the connection would call (`workspace_list_projects`; a Postgres project's from
+`postgres_list_projects`; `apps_list_services`, `apps_list_environments` for the `service` already
+given; `previews_list`; `queues_list_vhosts`, `queues_list_queues`; `streams_list`,
+`streams_list_groups` for the `stream` already given), through the gate
 with the caller's token, so a suggestion is only what it may read, and each is an audited read.
 Only ids are offered (what tools take). A completion never asks a person: a list that would ask
 is refused at once (`would_ask`), so typing opens no approval. A prompt the connection isn't offered
@@ -551,6 +552,10 @@ is `-32602`.
 | `tune_slow_query` | `project` | A slow query made faster on a branch first (Neon's query tuning): its plan, an index tried on a copy, both plans compared, main only when you say so. | `postgres_get_project`, `postgres_slow_queries`, `postgres_explain`, `postgres_create_branch`, `postgres_execute`, `postgres_delete_branch` |
 | `security_checkup` | | Which tokens need attention, most serious first: a narrower rule set for each over-broad one, where roaming ones were used from, which to revoke or give an expiry; adds secrets' findings, a project's secrets audit log that doesn't hold (`secrets_verify_audit`), unmasked personal data, over-broad or unused S3 keys, public buckets, search clusters with no IP allowlist, previews shared outside the team and live images with high or critical vulnerabilities when the connection has those tools. Changes nothing. | `access_checkup`, `access_tighten_token`, `access_token_networks` |
 | `debug_failing_service` | `service`, `env` | Why an environment is failing (what roll already flags in its `attention`, the whole timeline, deploys, deploy logs, failing requests and routes, metrics), then a fix or a rollback it asks about first. | `apps_get_environment`, `apps_activity`, `apps_route_stats`, `apps_list_deploys`, `apps_deploy_logs`, `apps_logs`, `apps_metrics` |
+| `review_preview` | `preview` | Whether a change's preview is ready to land: why it failed or waits for `approve-run`, its schema changes (a dropped column, a `NOT NULL` with no default), new errors, routes slower than main's preview, its pages against the base (screenshots it looks at), people's notes. Changes nothing without asking. | `previews_wait`, `previews_get`, `previews_logs`, `previews_errors`, `previews_routes`, `previews_screenshot`, `previews_list_notes` |
+| `clear_task_backlog` | | Why roll tasks' messages pile up or fail: a paused or limited queue, dead letters and each delivery's error grouped by cause, then a retry it asks about first (with how many). | `tasks_stats`, `tasks_list_queues`, `tasks_get_queue`, `tasks_list_dead_letters`, `tasks_get_message` |
+| `drain_queue` | `vhost`, `queue` | Why a queue backs up: no consumers, consumers that don't acknowledge (and which connection), rates, and why its dead-letter queue's messages died; a replay it asks about first, never a purge. | `queues_get_queue`, `queues_queue_rates`, `queues_list_channels`, `queues_peek`, `queues_list_bindings` |
+| `find_consumer_lag` | `stream`, `group` | Why a consumer group falls behind: lag per partition, members against partitions, throughput, and the record a stuck partition stops at; a reset (which skips records) it asks about first. | `streams_get_group`, `streams_get_topic`, `streams_usage`, `streams_read` |
 
 ### As skills
 
