@@ -37,7 +37,7 @@ pub fn source(product: &str, param: &str) -> Option<Source> {
         ("queues", "vhost") => Some(Source { tool: "queues_list_vhosts", args: |_| json!({}), fields: &["name"] }),
         ("queues", "queue") => Some(Source { tool: "queues_list_queues", args: |a| json!({ "vhost": a["vhost"] }), fields: &["name"] }),
         // roll code's (fronted from `code_control::mcp`): a repo as `owner/name`, an owner of one.
-        ("code" | "workspace", "repo") => Some(Source { tool: "code_list_repos", args: |_| json!({}), fields: &["full_name"] }),
+        ("code", "repo") => Some(Source { tool: "code_list_repos", args: |_| json!({}), fields: &["full_name"] }),
         ("code" | "agents", "owner") => Some(Source { tool: "code_list_repos", args: |_| json!({}), fields: &["owner"] }),
         _ => None,
     }
@@ -49,8 +49,28 @@ pub fn missing(def: &Value, args: &Value) -> Option<(String, Source)> {
     let product = def["_meta"]["roll/product"].as_str()?;
     def["inputSchema"]["required"].as_array()?.iter().filter_map(Value::as_str).find_map(|p| {
         let blank = args.get(p).is_none_or(|v| v.is_null() || v.as_str().is_some_and(str::is_empty));
-        if blank { source(product, p).map(|s| (p.to_string(), s)) } else { None }
+        if blank { source_at(product, p, def["_meta"]["roll/route"].as_str().unwrap_or("")).map(|s| (p.to_string(), s)) } else { None }
     })
+}
+
+/// As [`source`], for a tool whose route (`GET /v1/tasks/runs/{id}`) says what an ambiguous name
+/// is: tasks' `id` is a message, a run, a schedule, a function, an event or a dead letter by the
+/// path's segment before it.
+fn source_at(product: &str, param: &str, route: &str) -> Option<Source> {
+    if (product, param) != ("tasks", "id") {
+        return source(product, param);
+    }
+    let kind = route.split_once("/v1/tasks/")?.1.split_once("/{id}")?.0;
+    let tool = match kind {
+        "messages" => "tasks_list_messages",
+        "runs" => "tasks_list_runs",
+        "schedules" => "tasks_list_schedules",
+        "functions" => "tasks_list_functions",
+        "events" => "tasks_list_events",
+        "dlq" => "tasks_list_dead_letters",
+        _ => return None,
+    };
+    Some(Source { tool, args: |_| json!({}), fields: &["id"] })
 }
 
 /// The person's choices from a retry's `inputResponses`, into `args`: an accepted id fills its
@@ -60,7 +80,7 @@ pub fn fill(args: &mut Value, responses: &Value) -> Result<(), String> {
         let Some(param) = key.strip_prefix(KEY_PREFIX) else { continue };
         match (r["action"].as_str(), r["content"]["value"].as_str()) {
             (Some("accept"), Some(v)) if is_choice(v) => args[param] = json!(v),
-            (Some("accept"), _) => return Err(format!("the {param} chosen isn't an id (letters, digits, _ . -; at most 64)")),
+            (Some("accept"), _) => return Err(format!("the {param} chosen isn't an id (letters, digits, _ . -; at most 64) or a repo's owner/name")),
             _ => return Err(format!("no {param} was chosen, so nothing ran")),
         }
     }
@@ -115,5 +135,8 @@ mod tests {
         assert_eq!(missed("postgres_get_project", json!({})), Some(("project".into(), "postgres_list_projects")));
         assert!(missed("postgres_get_project", json!({ "project": "prj_a1" })).is_none());
         assert_eq!(missed("workspace_get_project", json!({})), Some(("id".into(), "workspace_list_projects")));
+        // Tasks' `id` is what its route names.
+        assert_eq!(missed("tasks_cancel_run", json!({})), Some(("id".into(), "tasks_list_runs")));
+        assert_eq!(missed("tasks_retry_message", json!({})), Some(("id".into(), "tasks_list_messages")));
     }
 }

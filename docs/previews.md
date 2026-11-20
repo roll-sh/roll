@@ -425,7 +425,9 @@ behind the `Apps` trait:
   (`STRIPE_SECRET_KEY`, `GITHUB_TOKEN`: the same rule as roll apps' sealed-by-default names) and
   whose value isn't a reference: one click writes the value to the base environment under that
   name (roll secrets' own write, so its rules and audit apply) and puts `roll://BASE/NAME` in
-  the rule, saved with the rest. The value then lives in roll secrets only.
+  the rule, saved with the rest. The value then lives in roll secrets only. A protected base refuses
+  the write (`approval_required`): the button opens a change request with it instead (as roll
+  secrets' Find does), and the rule keeps its value and says so until it's approved.
   Only the rules' own references (checked when saved) go to roll secrets as references, as their
   own input to rolld's ensure; every other value previews write, a preview's own variables and
   anything stored before included, is plain text: its `${` is escaped, so it's never a reference
@@ -1241,6 +1243,24 @@ running beside the change's, with `ROLL_PREVIEWS_COMPARE_EVERY=5`). Only spans t
 apps service's traces have no spans here, so its routes say no reason.
 `a_slower_routes_time_is_put_on_the_span_that_grew`.
 
+Regressions as a check (Lighthouse CI's budgets, Sentry's regression gates): with the project's
+`regressions: "check"` (the rules dialog's "Regressions against main"), a change's head gets the
+`roll/regressions` commit status, `pending` until the holder has compared it with main's preview at
+that head (errors, and routes when the project keeps traces; main's preview asleep still
+compares, held elsewhere doesn't), then failing while its preview has routes slower than main's or
+errors main's doesn't have (each read is bound to the head it was read at, so a push never shows
+the head before's) ("1 route slower, 2 new errors against main": counts only, a status is
+public) and passing once they're gone or accepted. `regressions: "required"` also keeps it from
+landing in roll (a `regressions` blocker in `Code::blockers`) until then. Someone other than the
+change's author accepts them at its head (`POST …/regressions/accept`, the sheet's "Accept them";
+a required rule's by a person signed in to roll, never a token or the operator's token; the
+author is read for sure, and an unknown one refuses; a signed-in person must also be able to write
+to the change's repo in roll code, roll code's bar for a landing decision, as GitHub's Accept is): the acceptance names what it accepted, so
+anything new at the same head asks again, and nothing (or nothing compared yet) is a 409. The
+status passes with who did ("Accepted by ada: …"), and a new push asks again. The blocker also
+waits while the change's preview isn't compared at the change's own head. `an_error_mains_preview_doesnt_have_reaches_the_record_and_the_report`
+(accepting), `code-control/tests/queue.rs` (the blocker).
+
 Repeated queries (Sentry's N+1 detection): a trace whose spans run one database statement
 (`db.statement`, or the newer `db.query.text`) ten times or more says it as `repeated`
 (`{statement, count}`), the statement's shape with its literals taken out (`SELECT … WHERE id = ?`,
@@ -1396,6 +1416,7 @@ and admins see every project.
 | `GET /v1/previews/{id}/mail/{mail}` | | One caught message as sent, as `text/plain` (never rendered) |
 | `GET /v1/previews/{id}/connect` | | `{branches: [{kind, parent, vars}]}`: each data branch's connection as its services get it, the branch's own credentials (a Postgres branch's role, never the parent's or a superuser's), read from the products each time; 409 while it's being deleted |
 | `GET /v1/previews/{id}/qr.png` | `service?` | The preview's link with its access (`share_url`, or that service's) as a QR code PNG, to open on a phone; `Cache-Control: no-store` (it carries the token); 404 with no link yet |
+| `POST /v1/previews/{id}/regressions/accept` | `{head?}` (the push looked at; a newer one is a 409) | `Preview`: its regressions against main accepted at its head (`regressions_accepted`), the change reported again. Not by the change's author; a `required` rule's only by a person (403 for a token). 400 for a branch's preview. Admin on the preview's project |
 | `POST /v1/previews/{id}/visual/accept` | `{head?, path?}` (the screenshot's looked at, `visual_review.head`; `path`: that page only, `""` the first, else every page) | `Preview`: how a change's pages look at its latest screenshot is accepted (`visual_review`, `roll/visual`); 404 for a page it has no screenshot of; 409 with no screenshot yet, 400 for a branch's preview, 403 from the change's author or from a token when the review is required, 409 when `head` isn't the latest screenshot's (a newer one came in) |
 | `GET /v1/previews/{id}/logs?service=&lines=` | | `{service, lines: string[]}`, masked: every value the preview got from roll secrets, the project's `env` and the preview's own variables, and its branches' credentials (a password, key or token, a URL's password) are `***`, as checks' output is (each line of 6 characters or more). A preview's code, a fork's too, can print what it was given, and anyone who reads the preview reads its logs. 409 when what they must hide can't be read. A seed's, release's or teardown's output (the preview's error, a teardown's in the pull request's comment), what its page said in a screenshot run (its errors and failed requests, broken links, words, markup and API operations: the comment's "What went wrong") and the hosts its egress proxy refused (a name is its code's to choose) are masked the same way (a picture can't be: a page that renders a secret shows it). Masking matches values as written, so code that prints a secret encoded (base64, hex) gets it through, as with every log masker (GitHub Actions' too). It hides what a preview shows, not what its code sends: with egress open (the default) its code reaches the internet, DNS included. Under "Roll only" it can't: the preview's network is `--internal`, where Docker's embedded DNS doesn't forward outside names (SERVFAIL; checked on Docker 29.9) and no resolver is reachable, and the egress proxy checks a name against `egress_hosts` before it resolves it, so `<secret>.attacker.example` is never looked up; on roll apps, every variable previews sets in the `pv-` environment is sealed, so apps' own logs hide it and its API never returns it (`…/connect` and `…/env` reveal them) |
 | `GET /v1/previews/{id}/logs?service=&lines=&follow=1` | | `text/event-stream`: `event: service` (its name), then one event per line, the last `lines` first and then as they come; a line the service wrote on stderr is `event: stderr` (a stdout one the default event; `roll preview logs -f` writes them to its own stderr and stdout). `docker logs -f` for `roll.toml` services; for others the tail is read every 2 s (2,000 lines wide after the first read) and only new lines are sent, with a line saying so when some were missed. Runs on the preview's holder; the stream ends when the client goes |
@@ -1616,7 +1637,8 @@ type Settings = {
     click counts for someone who can write to the repo, by GitHub's permission API, and isn't the
     change's author) ("Differs from main by 8.0%: accept it
     in roll"), and success once someone has (the sheet's Accept, `roll preview accept`, `POST
-    …/visual/accept`; "Accepted by ada"), or when the pages look the same. An acceptance is of one
+    …/visual/accept`, by a signed-in person who can write to the change's repo in roll code or an
+    admin; "Accepted by ada"), or when the pages look the same. An acceptance is of one
     screenshot's head, the one the person looked at (`head`): a newer screenshot coming in
     meanwhile makes it a 409, and GitHub's button counts only on the check run of the push the
     review is about. The comment says it too ("**Visual review:** its pages differ from `main` by
@@ -2142,19 +2164,18 @@ Ranked by what a person notices first. Done so far:
   runtime runs, printable schema lines, budget alerts that can't be lost or silenced, followed
   logs that say when lines were missed and stop with a hidden tab).
 
-1. **References a person chooses** (after roll secrets' #407, `bind_ref`/`resolve_as`): a
+1. **Regressions against main as a check, and required to land, in review** (#484, #489, #490;
+   reviewed, its findings fixed): `roll/regressions` from slower routes and new errors at each
+   head, a `regressions` blocker with `required`, accepted by someone other than the author who can
+   write to the repo, and `became: regressions` once a head for automations.
+2. **References a person chooses** (after roll secrets' #407, `bind_ref`/`resolve_as`): a
    preview's own variables take `roll://` too, and the rules' references (who wrote each is kept,
    `env_refs`) move to bindings, so a writer who loses reveal stops theirs.
-2. **A trace's ids masked like its words**: a span's name, service and attributes are masked,
-   but its trace and span ids are the code's choice too (a fork could send a hex secret as one);
-   refuse ids that aren't 32/16 hex characters at the intake, and mask the rest as the words are.
-3. **A preview of a repo with only a Compose file**: say in the sheet and the docs that roll apps'
-   Compose import (`roll apps import-compose`, New service's "A file") makes its services, whose
-   previews then come with the project's (roll apps' `pv-` environments), rather than a second
-   Compose reader in previews.
-4. **In review**: where a slower route's time went (#459), the comparison with main checked live
-   end to end with the strip shot on it (#464), new errors that see past each preview's own names
-   (#460), keeping a pasted credential in roll secrets from the rules dialog (#461).
+3. **The author as an account, not a name**: a GitHub pull request's author is its login and a
+   roll person is their handle, so an author whose two names differ isn't recognised as the author
+   by the accepts. Compare roll accounts (the person's linked GitHub login, roll accounts' GitHub
+   sign-in) wherever an author is told apart (visual, regressions, roll code's approvals).
+4. **In review**: a protected base's change request in the keep-in-secrets button (#482).
 5. **Cheap Postgres branches on ext4: overlay volumes over a frozen base** (pg-control; measured
    2026-11-17): 0.97 s against 3.5 s for a 1.4 GB copy, but a write copies the whole table file.
 6. **Watch: pg-control's recovery to a time seconds old** (unowned).

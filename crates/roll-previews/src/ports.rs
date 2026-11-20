@@ -150,6 +150,9 @@ pub struct ChangeInfo {
     /// Who opened it (roll code's `author`): not the one to accept its visual change.
     pub author: String,
     pub github_pr: Option<i64>,
+    /// Its repo's roll code owner (`own_…`): who may write to it (roll code's bar for a landing
+    /// decision, as accepting regressions is).
+    pub owner_id: String,
 }
 
 impl ChangeInfo {

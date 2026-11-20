@@ -362,7 +362,19 @@ function Budget({ r }: { r: SloReport }) {
   );
 }
 
-function Errors({ groups }: { groups: ErrorGroup[] }) {
+function Errors({ groups, service, env }: { groups: ErrorGroup[]; service: string; env: string }) {
+  // Each group's state as set here, over what the read said.
+  const [states, setStates] = useState<Record<string, ErrorGroup["state"]>>({});
+  const [failed, setFailed] = useState<string | null>(null);
+  const set = async (g: ErrorGroup, state: "open" | "resolved" | "muted") => {
+    try {
+      setFailed(null);
+      await appsApi.setErrorState(service, env, g.fingerprint, state);
+      setStates((s) => ({ ...s, [g.fingerprint]: state }));
+    } catch (e) {
+      setFailed(e instanceof Error ? e.message : String(e));
+    }
+  };
   return (
     <section className={`${panel} overflow-hidden`} aria-label="Errors">
       <div className="border-b border-line px-4 py-2.5">
@@ -380,13 +392,38 @@ function Errors({ groups }: { groups: ErrorGroup[] }) {
                 <span className="text-[11px] text-subtle">
                   {g.kind === "line" ? "line" : `${g.kind} trace`} · {since(g.last_seen)}
                   {g.instances > 1 ? ` · ${g.instances} instances` : ""}
+                  {g.first_deployment ? ` · since ${g.first_deployment}` : ""}
                 </span>
+                {(() => {
+                  const state = states[g.fingerprint] ?? g.state ?? "open";
+                  return (
+                    <span className="flex items-center gap-1.5 text-[11px]">
+                      {state !== "open" && <span className="rounded border border-line-2 px-1.5 text-subtle">{state}</span>}
+                      {state !== "resolved" && (
+                        <button type="button" className="text-muted hover:text-fg" onClick={(e) => (e.preventDefault(), void set(g, "resolved"))} title="Said again if it comes back">
+                          Resolve
+                        </button>
+                      )}
+                      {state !== "muted" && (
+                        <button type="button" className="text-muted hover:text-fg" onClick={(e) => (e.preventDefault(), void set(g, "muted"))} title="Never said again">
+                          Mute
+                        </button>
+                      )}
+                      {state !== "open" && (
+                        <button type="button" className="text-muted hover:text-fg" onClick={(e) => (e.preventDefault(), void set(g, "open"))}>
+                          Reopen
+                        </button>
+                      )}
+                    </span>
+                  );
+                })()}
               </summary>
               <pre className="mt-2 max-h-72 overflow-auto rounded-md border border-line bg-bg p-3 font-mono text-[11px] leading-relaxed text-muted">{g.sample}</pre>
             </details>
           </li>
         ))}
       </ul>
+      {failed && <p className="border-t border-line px-4 py-2 text-[12px] text-danger">{failed}</p>}
     </section>
   );
 }
@@ -849,7 +886,7 @@ export function MetricsTab({
       {routes && <Routes stats={routes} />}
       {routes && <Splits stats={routes} />}
       {(raw?.by_instance?.length ?? 0) > 0 && <Instances rows={raw!.by_instance!} cpus={cpus} memoryMb={memoryMb} />}
-      {errorGroups.length > 0 && <Errors groups={errorGroups} />}
+      {errorGroups.length > 0 && <Errors groups={errorGroups} service={service} env={env} />}
       {speed && speed.samples > 0 && <Speed v={speed} />}
       {appMetrics && appMetrics.series.length > 0 && <AppMetricsPanel m={appMetrics} />}
       {visitors && visitors.page_views > 0 && <Visitors a={visitors} />}

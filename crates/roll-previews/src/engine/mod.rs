@@ -917,6 +917,7 @@ mod tests {
             approved: false,
             author: String::new(),
             github_pr: None,
+            owner_id: String::new(),
         };
         assert!(wants(&s, &ch));
         assert!(!wants(&s, &ChangeInfo { branch: Some("fix/x".into()), ..ch.clone() }));
