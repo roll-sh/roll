@@ -198,6 +198,34 @@ pub struct ClusterOptions {
     /// Who may reach the data plane: CIDRs or addresses, each a string or `{cidr, description?}`
     /// (at most [`search_server::allow::MAX_ENTRIES`]); `[]` opens the cluster to anyone again.
     pub ip_allowlist: Option<Vec<IpRuleInput>>,
+    /// The cluster's `reindex.remote.whitelist`: `host:port` patterns (`*` matches any run of
+    /// characters) reindex from remote may read, at most [`MAX_WHITELIST`]; `[]`: none.
+    pub reindex_whitelist: Option<Vec<String>>,
+}
+
+/// The most patterns a cluster's reindex whitelist holds.
+pub const MAX_WHITELIST: usize = 64;
+
+/// A reindex whitelist as given, checked: `host:port` patterns of letters, digits, `.`, `-`,
+/// `_`, `*` and an IPv6 literal's brackets and colons, each at most 260 characters.
+pub fn whitelist_patterns(given: Vec<String>) -> Result<Vec<String>> {
+    if given.len() > MAX_WHITELIST {
+        return Err(ControlError::Invalid(format!("reindex_whitelist: at most {MAX_WHITELIST} entries")));
+    }
+    let mut out: Vec<String> = Vec::with_capacity(given.len());
+    for g in given {
+        let p = g.trim().to_ascii_lowercase();
+        let ok = p.len() <= 260
+            && p.rsplit_once(':').is_some_and(|(h, port)| !h.is_empty() && !port.is_empty() && (port == "*" || port.parse::<u16>().is_ok()))
+            && p.chars().all(|c| c.is_ascii_alphanumeric() || ".-_*:[]".contains(c));
+        if !ok {
+            return Err(ControlError::Invalid(format!("reindex_whitelist: [{}] isn't a host:port pattern", g.chars().take(80).collect::<String>())));
+        }
+        if !out.contains(&p) {
+            out.push(p);
+        }
+    }
+    Ok(out)
 }
 
 /// An allowlist entry as given (roll apps' `allow_ips` take the same).
@@ -346,6 +374,7 @@ pub fn spec_for(c: &SearchCluster) -> ClusterSpec {
     spec.max_body_bytes = Some((c.max_body_mb.max(1) as usize) << 20);
     spec.destructive_requires_name = c.destructive_requires_name;
     spec.ip_allowlist = allowlist_of(&c.ip_allowlist);
+    spec.reindex_whitelist = (!c.reindex_whitelist.is_empty()).then(|| c.reindex_whitelist.clone());
     spec.catalog_id = Some(c.id.clone());
     spec
 }
@@ -761,6 +790,9 @@ impl Control {
         if let Some(v) = o.ip_allowlist {
             c.ip_allowlist = ip_rules(v)?;
         }
+        if let Some(v) = o.reindex_whitelist {
+            c.reindex_whitelist = whitelist_patterns(v)?;
+        }
         if let Some(v) = o.flavor {
             c.flavor = v.to_ascii_lowercase();
         }
@@ -828,6 +860,7 @@ impl Control {
             owner: None,
             restored_at: None,
             ip_allowlist: Vec::new(),
+            reindex_whitelist: Vec::new(),
         }
     }
 
@@ -2205,9 +2238,11 @@ mod tests {
             owner: None,
             restored_at: None,
             ip_allowlist: vec![IpRule { cidr: "203.0.113.0/24".into(), description: None }],
+            reindex_whitelist: vec!["es.example.com:443".into()],
         };
         let s = spec_for(&c);
         assert!(s.ip_allowlist.contains("::ffff:203.0.113.9".parse().unwrap()) && !s.ip_allowlist.is_open());
+        assert_eq!(s.reindex_whitelist, Some(vec!["es.example.com:443".to_string()]));
         assert_eq!(s.name, "app");
         assert_eq!(s.dialect, Dialect::OpenSearch);
         assert_eq!(s.credentials.len(), 1);

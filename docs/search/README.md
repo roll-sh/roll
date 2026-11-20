@@ -279,45 +279,80 @@ Elasticsearch refuses it for a remote. A remote of 7.10 or later is read through
 with `search_after`, an older one (and OpenSearch) with a scroll, one page held at a time and
 written before the next is read; the search context is released however the run ends.
 
-The remote is a URL a tenant chose, so every request goes through the guarded client: names
-resolve to public addresses only (`roll_net::PublicOnly`), private literals and `localhost` are
-refused (rolld's `--search-reindex-allow-private`, `ROLL_SEARCH_REINDEX_ALLOW_PRIVATE`, lifts
-both, for local development), no redirect is followed, no proxy is used, each answer is read to
-at most 100 MiB (`roll.reindex.remote.buffer_limit`) and charged to the request breaker, and
-reads time out. Public hosts need no node allowlist; an operator's `reindex.remote.whitelist`
-still narrows them, as in Elasticsearch, and `reindex.remote.blocklist` refuses. HTTPS is verified
-against the platform's roots (plus `reindex.ssl.certificate_authorities`: rolld's
-`--search-reindex-ca`, `ROLL_SEARCH_REINDEX_CA`, for a remote with a private CA). The remote's answers
-are untrusted input. Credentials never leave the client but on the wire: a task's description
-names the host alone (`reindex from [scheme=https host=… port=…][logs] to [logs]`, as
-Elasticsearch prints it), and anything quoted from the remote (an error body, a transport
-failure) has the password, the `Authorization` value and every header value replaced by
-`::es_redacted::`. The dashboard's console keeps no `Authorization` header in its history.
+A remote must be in the cluster's `reindex.remote.whitelist`, as in Elasticsearch: refused
+unless whitelisted. It's a per-cluster setting the cluster's owner sets through roll's API
+(`PATCH /v1/search/clusters/{id}` `{"reindex_whitelist": ["es.example.com:443"]}`, `host:port`
+patterns with `*`, at most 64), as Elastic Cloud's user settings set it; roll's migration adds
+exactly the host it was given. A node setting of the same name applies to clusters without
+their own (`search-dev --yaml-test-cluster` sets `127.0.0.1:*`).
+
+The remote is a URL a tenant chose, so every request goes through the guarded client, and the
+node's operator rules apply on top of the whitelist: names resolve to public addresses only
+(`roll_net::PublicOnly`), private literals and `localhost` are refused (rolld's
+`--search-reindex-allow-private`, `ROLL_SEARCH_REINDEX_ALLOW_PRIVATE`, lifts both, for local
+development), `reindex.remote.blocklist` refuses what it matches (rolld adds its own endpoints:
+its public host and its clusters' domain), no redirect is followed and no proxy is used. HTTPS is
+verified against the platform's roots (plus `reindex.ssl.certificate_authorities`: rolld's
+`--search-reindex-ca`, `ROLL_SEARCH_REINDEX_CA`, for a remote with a private CA).
+
+What one tenant can make a node spend is bounded by the operator, never by the tenant: at most 2
+remote reindex tasks per cluster and 4 per node run at once (`roll.reindex.remote.max_per_cluster`,
+`roll.reindex.remote.max_per_node`; past them a 429 `es_rejected_execution_exception`); each
+answer is read to at most 16 MiB (`roll.reindex.remote.buffer_limit`; past it Elasticsearch's
+"Remote responded with a chunk that was too large. Use a smaller batch size.") and charged three
+times over (the raw bytes, the parsed documents, their re-serialized sources) to a node-wide
+budget (`roll.reindex.remote.memory`, 256 MiB) while it's held; a scroll or point-in-time id is
+kept up to 4 KiB; each read times out, a request's whole exchange stops at 10 minutes, and a task
+stops after 24 hours (`--search-reindex-max-duration`, `ROLL_SEARCH_REINDEX_MAX_DURATION`; it ends
+with a `canceled` reason that says so). A cluster with a running task isn't unloaded to make
+room in memory, and a cluster unloaded on purpose (deleted, handed over, put to sleep) cancels its
+tasks first, so `_tasks` says what happened; a task lost with its node (a crash) is reported by
+the dashboard as stopped, its copy partial.
+
+The remote's answers are untrusted input. Credentials never leave the client but on the wire: a
+task's description names the host alone (`reindex from [scheme=https host=… port=…][logs] to
+[logs]`, as Elasticsearch prints it); an error never quotes what the remote answered to a request
+that carried credentials (it gives the status and Elasticsearch's error shape, without the body,
+since a remote could echo a credential in any encoding); and a transport failure has the password,
+the `Authorization` value and every header value replaced by `::es_redacted::`. The dashboard's
+console keeps no `Authorization` header in its history.
+
+A warning for whoever runs the remote: allowlisting roll's egress addresses in a firewall opens it
+to every roll tenant whose cluster whitelists that host, not to one tenant. Require credentials
+on the remote (an API key per migration), and remove the key when the migration is done.
 
 The dashboard's Indices tab has **Migrate**: the remote's URL and an API key (it needs the
 `monitor` cluster privilege and `read` and `view_index_metadata` on the indices) or a user and
 password, sent to roll and never shown back. roll lists the remote's open indices with documents,
-size and aliases (hidden and system indices aside; data streams named but not copied yet). For
+size and aliases, marking the aliases roll already has (hidden and system indices aside; data
+streams named but not copied yet). For
 each picked index roll creates the copy (its own name unless roll has one) with the remote's
-mappings, settings and aliases, dropping the settings it doesn't take and saying why: those the
+mappings, settings and aliases (an alias roll already has is never joined: it's listed with the
+dropped settings, "alias exists on roll"), dropping the settings it doesn't take and saying why: those the
 remote's cluster set (uuid, creation date, versions), shard allocation, blocks (they'd stop the
 copy), lifecycle policies (not copied), storage, a pipeline roll doesn't have, and any setting
 roll's index creation refuses (its error names it). Then it starts the reindex task, which the
 panel follows through `_tasks` with cancel; a copy under another name can take the remote's name
-as an alias when it's done. Copies keep running if the panel closes.
+as an alias when it's done. Copies keep running if the panel closes. A copy that failed, was
+cancelled or was lost (`_tasks` answers 404: the cluster restarted or moved) is shown as stopped,
+its copy partial, with a button that deletes the partial index so it can be copied again.
 
 | method | path | |
 | ------ | ---- | - |
-| POST | `/v1/search/clusters/{id}/migrate/inspect` | `{source: {host, api_key? \| username?, password?}}` → `{remote: {host, version, distribution, cluster_name}, indices: [{index, health, status, docs, size_bytes, primary_size_bytes, primaries, replicas, aliases, exists}], data_streams}`; a remote's refusal is a 400 naming it (`the remote cluster: status_exception: …`), never echoing a credential. `write` for roll-access |
-| POST | `/v1/search/clusters/{id}/migrate` | `{source, indices: [{index, dest?}], requests_per_second?, size?}` (at most 100 indices) → `{indices: [{index, dest, task, dropped: [{setting, value, reason}], aliases} \| {index, dest, error}]}`: each index's copy created and its `wait_for_completion=false` reindex started; one index's failure doesn't stop the others; an index roll already has is refused, not overwritten. `write` for roll-access |
+| POST | `/v1/search/clusters/{id}/migrate/inspect` | `{source: {host, api_key? \| username?, password?}}` → `{remote: {host, version, distribution, cluster_name}, indices: [{index, health, status, docs, size_bytes, primary_size_bytes, primaries, replicas, aliases, aliases_on_roll, exists}], data_streams}` within 60s; a remote's refusal is a 400 naming it (`the remote cluster: status_exception: …`), never echoing a credential. The operator's rules apply, not the cluster's whitelist. `write` for roll-access |
+| POST | `/v1/search/clusters/{id}/migrate` | `{source, indices: [{index, dest?}], requests_per_second?, size?}` (at most 100 indices) → `{indices: [{index, dest, task, dropped: [{setting, value, reason}], aliases} \| {index, dest, error}]}`: each index's copy created and its `wait_for_completion=false` reindex started, within 60s (indices not reached by then say so); the host is added to the cluster's `reindex_whitelist`; one index's failure doesn't stop the others; an index roll already has is refused, not overwritten, and an alias roll already has is dropped (`aliases.<name>`). `write` for roll-access |
 
-`crates/search-es/tests/reindex_remote.rs` covers the guard against a hostile mock remote (a
-redirect not followed, an oversized page refused, private hosts refused without the flag, echoed
-credentials kept out of errors and tasks) and, with `ROLL_REINDEX_ES` set, a real Elasticsearch
-9.5.5 over HTTPS (a query, an API key, a wrong password answering exactly as Elasticsearch's own
-reindex does, a cancelled task, every point in time released). `crates/search-control/tests/
-control.rs` `migrating_from_another_cluster` runs the routes' flow; the dashboard's logic is in
-`apps/dashboard/src/lib/search-migrate.ts` (tested beside it).
+`crates/search-es/tests/reindex_remote.rs` covers the guard against a hostile mock remote (only
+whitelisted hosts read; a redirect not followed; an oversized page refused, with and without a
+`Content-Length`, the node's budget back to zero after; private hosts refused without the flag,
+also behind a name that resolves to one; a third task of a cluster refused with a 429 until one
+ends; a remote's answer never quoted once credentials were sent, whatever encoding it echoes them
+in) and, with `ROLL_REINDEX_ES` set, a real Elasticsearch 9.5.5 over HTTPS (a query, an API key,
+a wrong password answering in Elasticsearch's own shape, a cancelled task, every point in time
+released). `crates/search-control/tests/control.rs` `migrating_from_another_cluster` runs the
+routes' flow (an alias roll has left alone, the whitelist gaining exactly the remote's host,
+another host refused); the dashboard's logic is in `apps/dashboard/src/lib/search-migrate.ts`
+(tested beside it, a lost task included).
 
 Phase 2, Algolia (planned, not built): an import that reads an Algolia application through its
 REST API with an admin key the caller gives once (the same guarded client and sealing rules):
@@ -355,7 +390,7 @@ origins (browser search), once they're on main.
 | GET | `/v1/search/clusters` | list (a person: their own); `?deleted=true`: recently deleted clusters kept for restoring, newest first, with `deleted_at` and `purge_at` (Unix seconds), the name each had and its last figures (`stored_bytes` is still billed) |
 | POST | `/v1/search/clusters` | create `{name, flavor?, parent?, at?, idle_timeout_s?, max_in_flight?, max_body_mb?, destructive_requires_name?}`; answers with `url`, `username`, `password` (once) and `id` — the shape `search-yaml run --cluster-hook` expects; `owner` is the signed-in person who isn't an admin, and a branch's is its parent's |
 | GET | `/v1/search/clusters/{id or name}` | settings, `status` (`loaded` with live index count and requests in flight, and live `docs` once every index is open, or `asleep` with `wakes_at`, unix seconds, when a background job is due to wake it), last metered `indices`/`docs`/`stored_bytes` and `own_bytes` (what a branch references that its parent's latest commit points don't; all of `stored_bytes` for a cluster that isn't a branch), `url`, `branches` |
-| PATCH | `/v1/search/clusters/{id}` | `flavor`, `idle_timeout_s` (0: always loaded), `max_in_flight`, `max_body_mb`, `destructive_requires_name`, `ip_allowlist` (below); the idle timeout, body limit, `max_in_flight` and allowlist apply at once (also to a cluster that is waking up); a new flavor or `destructive_requires_name` needs a reload: the cluster is put to sleep now, or as soon as no request runs (always-on clusters included), and keeps its current ones until then |
+| PATCH | `/v1/search/clusters/{id}` | `flavor`, `idle_timeout_s` (0: always loaded), `max_in_flight`, `max_body_mb`, `destructive_requires_name`, `ip_allowlist` (below), `reindex_whitelist` (`host:port` patterns reindex from remote may read, "Migrating into roll"); the idle timeout, body limit, `max_in_flight` and allowlist apply at once (also to a cluster that is waking up); a new flavor or `destructive_requires_name` needs a reload: the cluster is put to sleep now, or as soon as no request runs (always-on clusters included), and keeps its current ones until then |
 | DELETE | `/v1/search/clusters/{id}` | waits for running requests and for a wake in progress (which is locked out and unloaded, never left serving); the cluster leaves the list, its REST endpoint answers as for a missing cluster and its name is free at once, but its storage is kept for `--search-deleted-retention-days` (7) and billed as storage, for `restore` (0 days: removed at once); branches keep working |
 | POST | `/v1/search/clusters/{id}/restore` | a deleted cluster (by its id) back as it was within its window: data, snapshots, settings, owner, password and API keys; under its own name, else 409 and `{"name": "…"}` restores it under another (the new name is its Basic auth user, API key id suffix and host label; the password stays). Scoped like every per-cluster route (owner, admins, the operator); 404 once purged |
 | GET, POST | `/v1/search/clusters/{id}/branches` | list; branch `{name, at?}` (`at`: Unix seconds within `--search-history`) |

@@ -1561,18 +1561,28 @@ the rest are skipped by the tests' own prerequisites.
   `search_after` from 7.10 on (`_shard_doc` from 7.12), a scroll before that and for OpenSearch
   (whose version numbers read as old Elasticsearch ones), one page in memory at a time, over HTTP
   or HTTPS (the platform's roots plus `reindex.ssl.certificate_authorities`, with
-  `reindex.ssl.verification_mode`). Differences, because the remote is a URL a tenant chose
-  (README.md, "Migrating into roll"): names resolve to public addresses only and private
-  literals and `localhost` are refused unless the node sets
-  `roll.reindex.remote.allow_private_hosts` (rolld's `--search-reindex-allow-private`); no
-  redirect is followed (its status comes back as the `status_exception`); each answer is read to
-  at most `roll.reindex.remote.buffer_limit` (100 MiB, Elasticsearch's REST client's buffer) and
-  charged to the request breaker; a request's whole exchange is capped at 10 minutes, whatever
-  `socket_timeout` (which bounds each read) says; an HTTPS remote's default `connect_timeout` is
-  5s rather than 1s (it covers the TLS handshake too). Unset, `reindex.remote.whitelist` lets
-  any public host through (Elasticsearch refuses every remote); set, it narrows as in
-  Elasticsearch (an empty value refuses every remote), and `reindex.remote.blocklist` refuses what
-  it matches. A credential the remote echoes back is replaced by `::es_redacted::` in errors.
+  `reindex.ssl.verification_mode`). A remote must be in `reindex.remote.whitelist`, as in
+  Elasticsearch (unset or empty refuses every remote); on roll it's the cluster's own setting
+  (README.md, "Migrating into roll"), the node setting otherwise. Differences, because the remote
+  is a URL a tenant chose and a node serves many tenants:
+  - names resolve to public addresses only, and private literals and `localhost` are refused,
+    unless the node sets `roll.reindex.remote.allow_private_hosts` (rolld's
+    `--search-reindex-allow-private`); `reindex.remote.blocklist` also holds rolld's own
+    endpoints;
+  - no redirect is followed (its status comes back as the `status_exception`);
+  - each answer is read to at most `roll.reindex.remote.buffer_limit`, 16 MiB rather than the
+    REST client's 100 MiB (past it, Elasticsearch's own error), and charged to a node-wide budget
+    rather than the request breaker; a scroll or point-in-time id is kept up to 4 KiB;
+  - at most 2 tasks per cluster and 4 per node run at once (a 429
+    `es_rejected_execution_exception` past them), and a task stops after
+    `roll.reindex.remote.max_duration` (24h; its `canceled` reason says so);
+  - a request's whole exchange is capped at 10 minutes, whatever `socket_timeout` (which bounds
+    each read) says; an HTTPS remote's default `connect_timeout` is 5s rather than 1s (it covers
+    the TLS handshake too);
+  - an error never quotes the remote's answer to a request that carried credentials: the
+    `status_exception`'s reason and its `response_exception` cause say the answer isn't shown
+    (Elasticsearch puts the body there, `body=…`); status, types and the status line are as
+    Elasticsearch's.
   `search-dev --yaml-test-cluster` sets the whitelist to `127.0.0.1:*` and allows private hosts.
 - Segment generations in `_segments` / `_cat/segments` number the current segments.
 - Remote clusters (`cluster.remote.<alias>.*`) reach another roll search cluster of the same

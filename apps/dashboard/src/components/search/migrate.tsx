@@ -1,7 +1,7 @@
 import { ArrowRight, CloudDownload, X } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { formatBytes } from "@/lib/roll-api";
-import { esJson, formatCount, type SearchCluster } from "@/lib/search-api";
+import { esJson, formatCount, indexPath, searchApi, type SearchCluster } from "@/lib/search-api";
 import {
   aliasBody,
   aliasOffer,
@@ -9,15 +9,17 @@ import {
   destProblem,
   displayHost,
   droppedByReason,
+  LOST,
   migrateApi,
+  partial,
   sourceFrom,
   sourceProblem,
+  taskPoll,
   taskProgress,
   type AuthKind,
   type MigrateInspect,
   type MigrateStarted,
   type SourceForm,
-  type TaskBody,
   type TaskProgress,
 } from "@/lib/search-migrate";
 import { Field, Segmented } from "../redis/shared";
@@ -57,6 +59,8 @@ export function MigratePanel({ cluster, existing, onClose, onChanged }: { cluste
   const [started, setStarted] = useState<MigrateStarted[] | null>(null);
   const [progress, setProgress] = useState<Record<string, TaskProgress>>({});
   const [aliases, setAliases] = useState<Record<string, AliasState>>({});
+  /** Partial copies being deleted (`true`) or deleted (`"done"`), or why the delete failed. */
+  const [removed, setRemoved] = useState<Record<string, true | "done" | string>>({});
   const taken = useMemo(() => new Set(existing), [existing]);
   const reported = useRef(false);
 
@@ -116,7 +120,7 @@ export function MigratePanel({ cluster, existing, onClose, onChanged }: { cluste
   };
 
   // Follow the tasks until each has ended.
-  const running = (started ?? []).filter((s) => s.task && !["done", "failed", "cancelled"].includes(progress[s.task]?.state ?? "running"));
+  const running = (started ?? []).filter((s) => s.task && (progress[s.task]?.state ?? "running") === "running");
   const runningKey = running.map((s) => s.task).join(",");
   useEffect(() => {
     if (!runningKey) return;
@@ -124,8 +128,10 @@ export function MigratePanel({ cluster, existing, onClose, onChanged }: { cluste
     const tick = async () => {
       for (const task of runningKey.split(",")) {
         try {
-          const t = await esJson<TaskBody>(cluster.id, "GET", `/_tasks/${encodeURIComponent(task)}`);
-          if (!stop) setProgress((p) => ({ ...p, [task]: taskProgress(t) }));
+          const r = await searchApi.request(cluster.id, "GET", `/_tasks/${encodeURIComponent(task)}`);
+          const poll = taskPoll(r.status, r.body);
+          if (stop || poll.kind === "retry") continue;
+          setProgress((p) => ({ ...p, [task]: poll.kind === "lost" ? LOST : taskProgress(poll.body) }));
         } catch {
           // A blip: the next tick asks again.
         }
@@ -168,10 +174,22 @@ export function MigratePanel({ cluster, existing, onClose, onChanged }: { cluste
     }
   };
 
+  const removePartial = async (dest: string) => {
+    setRemoved((x) => ({ ...x, [dest]: true }));
+    try {
+      await esJson(cluster.id, "DELETE", indexPath(dest));
+      setRemoved((x) => ({ ...x, [dest]: "done" }));
+      onChanged();
+    } catch (e) {
+      setRemoved((x) => ({ ...x, [dest]: e instanceof Error ? e.message : String(e) }));
+    }
+  };
+
   const restart = () => {
     setStarted(null);
     setProgress({});
     setAliases({});
+    setRemoved({});
     setRemote(null);
     reported.current = false;
   };
@@ -294,7 +312,16 @@ export function MigratePanel({ cluster, existing, onClose, onChanged }: { cluste
                           </td>
                           <td className="px-3 py-1.5 text-right font-mono tabular-nums">{formatCount(i.docs)}</td>
                           <td className="px-3 py-1.5 text-right font-mono tabular-nums">{formatBytes(i.size_bytes)}</td>
-                          <td className="hidden max-w-40 truncate px-3 py-1.5 font-mono text-subtle sm:table-cell">{i.aliases.join(", ") || "—"}</td>
+                          <td className="hidden max-w-48 truncate px-3 py-1.5 font-mono text-subtle sm:table-cell" title={i.aliases_on_roll.length ? "Aliases roll has already aren't copied" : undefined}>
+                            {i.aliases.length === 0
+                              ? "—"
+                              : i.aliases.map((a, n) => (
+                                  <span key={a}>
+                                    {n > 0 && ", "}
+                                    {i.aliases_on_roll.includes(a) ? <span className="line-through">{a}</span> : a}
+                                  </span>
+                                ))}
+                          </td>
                           <td className="px-3 py-1.5">
                             <input
                               value={p?.dest ?? ""}
@@ -312,6 +339,11 @@ export function MigratePanel({ cluster, existing, onClose, onChanged }: { cluste
                   </tbody>
                 </table>
               </div>
+            )}
+            {chosen.some((i) => i.aliases_on_roll.length > 0) && (
+              <p className="text-[12px] text-subtle">
+                Aliases roll has already (struck through) aren&apos;t copied: the copy never joins what they point at.
+              </p>
             )}
             {remote.data_streams.length > 0 && (
               <p className="text-[12px] text-subtle">
@@ -363,8 +395,8 @@ export function MigratePanel({ cluster, existing, onClose, onChanged }: { cluste
                       <span className="truncate">{s.dest}</span>
                     </p>
                     <span className="flex items-center gap-2">
-                      <span className={`text-[12px] ${state === "failed" ? "text-danger" : state === "done" ? "text-fg" : state === "running" ? "text-accent" : "text-subtle"}`}>
-                        {state === "running" ? <span className="shimmer">Copying</span> : state === "done" ? "Done" : state === "cancelled" ? "Stopped" : "Failed"}
+                      <span className={`text-[12px] ${state === "failed" || state === "lost" ? "text-danger" : state === "done" ? "text-fg" : state === "running" ? "text-accent" : "text-subtle"}`}>
+                        {state === "running" ? <span className="shimmer">Copying</span> : state === "done" ? "Done" : state === "cancelled" || state === "lost" ? "Stopped" : "Failed"}
                       </span>
                       {state === "running" && s.task && (
                         <button onClick={() => cancel(s.task!)} className={btn}>
@@ -387,6 +419,23 @@ export function MigratePanel({ cluster, existing, onClose, onChanged }: { cluste
                     </>
                   )}
                   {(s.error || pr?.error) && <p className="break-words font-mono text-[11px] text-danger">{s.error ?? pr?.error}</p>}
+                  {s.task && partial(state) && (
+                    <div className="flex flex-wrap items-center gap-2 text-[12px]">
+                      {removed[s.dest] === "done" ? (
+                        <span className="text-muted">
+                          <span className="font-mono text-fg">{s.dest}</span> deleted. Copy it again with Migrate more.
+                        </span>
+                      ) : (
+                        <>
+                          <span className="text-muted">The copy holds what was written before it stopped.</span>
+                          <button onClick={() => removePartial(s.dest)} disabled={removed[s.dest] === true} className={btn}>
+                            Delete the partial copy
+                          </button>
+                        </>
+                      )}
+                      {typeof removed[s.dest] === "string" && removed[s.dest] !== "done" && <span className="w-full text-danger">{removed[s.dest] as string}</span>}
+                    </div>
+                  )}
                   {groups.length > 0 && (
                     <details className="text-[12px]">
                       <summary className="cursor-pointer text-subtle transition hover:text-fg">

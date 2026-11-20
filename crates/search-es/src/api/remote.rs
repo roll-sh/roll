@@ -14,23 +14,32 @@
 //! Pages are read one at a time and written before the next is fetched, so a migration of any
 //! size holds one page in memory.
 //!
+//! A remote must match `reindex.remote.whitelist`, as in Elasticsearch: refused unless
+//! whitelisted (an empty or unset whitelist refuses every remote). The whitelist is the
+//! cluster's own ([`crate::Cluster::reindex_whitelist`], which roll's API sets as Elastic Cloud's
+//! user settings set it, and which roll's migration adds its host to), else the node setting.
+//! The node's operator rules apply on top: `reindex.remote.blocklist` refuses what it matches.
+//!
 //! The remote is a URL a tenant chose, so roll's rule for those applies (AGENTS.md): names
 //! resolve to public addresses only ([`roll_net::PublicOnly`]), private IP literals and
 //! `localhost` are refused ([`roll_net::literal_private_host`]), no redirect is followed, no
-//! proxy is used, and every answer is read to at most the buffer limit ([`BUFFER_LIMIT`],
-//! Elasticsearch's 100 MiB unless set) and charged to the request breaker while it's held. The
-//! node setting [`ALLOW_PRIVATE`] lifts the address check (local development, tests).
+//! proxy is used, each read times out and a request's whole exchange is capped at 10 minutes. The
+//! node setting [`ALLOW_PRIVATE`] lifts the address check (local development, tests). HTTPS is
+//! verified against the platform's roots plus `reindex.ssl.certificate_authorities` (PEM files),
+//! with `reindex.ssl.verification_mode` (`full`, `certificate`, `none`).
 //!
-//! `reindex.remote.whitelist` narrows the remotes further, as in Elasticsearch, when the node
-//! sets it (an empty value refuses every remote); unset, any public host may be read (a hosted
-//! roll has no operator to ask). `reindex.remote.blocklist` refuses what it matches either way.
-//! HTTPS is verified against the platform's roots plus `reindex.ssl.certificate_authorities`
-//! (PEM files), with `reindex.ssl.verification_mode` (`full`, `certificate`, `none`).
+//! What a node spends on it is bounded by its operator, never by a tenant ([`RemoteNode`]): at
+//! most [`MAX_PER_CLUSTER`] tasks per cluster and [`MAX_PER_NODE`] per node run at once (more get
+//! a 429), every answer is read to at most [`BUFFER_LIMIT`] (16 MiB) and charged, three times
+//! over for the parsed documents and their re-serialized sources, to a node-wide budget
+//! ([`MEMORY`]) while it's held, a scroll or point-in-time id is at most [`MAX_ID_BYTES`], and a
+//! task runs at most [`MAX_DURATION`] (24 hours).
 //!
 //! Credentials (`password`, `headers`) never leave this module except on the wire to the remote:
-//! [`Remote`]'s `Debug` and the task description leave them out, and every error that quotes
-//! the remote (its body, a transport failure) has them replaced by `::es_redacted::` first, in
-//! case a hostile remote echoes them.
+//! [`Remote`]'s `Debug` and the task description leave them out. An error never quotes what a
+//! remote answered to a request that carried credentials (a hostile remote could echo them in a
+//! form no scrub recognizes): it gives the status alone. Transport failures have the credentials
+//! replaced by `::es_redacted::`.
 
 use super::by_query_request::{ByScroll, Remote};
 use crate::breaker::Reservation;
@@ -40,6 +49,7 @@ use crate::obj;
 use bytes::Bytes;
 use search_aggs::memory::MemoryBudget;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 /// Lets reindex from remote reach private addresses (loopback, private ranges, `localhost`).
@@ -51,8 +61,22 @@ pub const WHITELIST: &str = "reindex.remote.whitelist";
 pub const BLOCKLIST: &str = "reindex.remote.blocklist";
 pub const SSL_CERTIFICATE_AUTHORITIES: &str = "reindex.ssl.certificate_authorities";
 pub const SSL_VERIFICATION_MODE: &str = "reindex.ssl.verification_mode";
+/// Remote reindex tasks one cluster may run at once (2 unless set).
+pub const MAX_PER_CLUSTER: &str = "roll.reindex.remote.max_per_cluster";
+/// Remote reindex tasks one node may run at once, across its clusters (4 unless set).
+pub const MAX_PER_NODE: &str = "roll.reindex.remote.max_per_node";
+/// Bytes a node's remote answers may hold at once, across its clusters (256mb unless set).
+pub const MEMORY: &str = "roll.reindex.remote.memory";
+/// How long one remote reindex task may run (24h unless set).
+pub const MAX_DURATION: &str = "roll.reindex.remote.max_duration";
+/// The longest scroll or point-in-time id kept from a remote.
+pub const MAX_ID_BYTES: usize = 4096;
 
-const DEFAULT_BUFFER_LIMIT: u64 = 100 * 1024 * 1024;
+const DEFAULT_BUFFER_LIMIT: u64 = 16 * 1024 * 1024;
+const DEFAULT_MEMORY: u64 = 256 * 1024 * 1024;
+const DEFAULT_MAX_DURATION: Duration = Duration::from_secs(24 * 3600);
+/// An answer costs its raw bytes, its parsed documents and their re-serialized sources.
+const CHARGE_FACTOR: u64 = 3;
 /// `RemoteParseContext.REMOTE_RESPONSE_BREAKER_LABEL`.
 const BREAKER_LABEL: &str = "reindex_remote_response";
 /// `cluster.reindex.pit.keep_alive`'s default.
@@ -65,6 +89,79 @@ const RETRY_INITIAL_MS: u64 = 500;
 const MAX_RETRIES: u32 = 11;
 /// What replaces a credential in anything quoted from the remote.
 const REDACTED: &str = "::es_redacted::";
+
+/// What reindex from remote may use on one node, across every cluster it serves: the tasks it
+/// runs at once, the memory their answers hold and how long a task runs. Read from the node's
+/// settings when the node starts; no tenant setting changes it.
+pub struct RemoteNode {
+    running: AtomicUsize,
+    max_per_node: usize,
+    max_per_cluster: usize,
+    /// What the node's remote answers hold ([`MEMORY`]).
+    pub budget: Arc<MemoryBudget>,
+    pub max_duration: Duration,
+}
+
+impl std::fmt::Debug for RemoteNode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RemoteNode")
+            .field("running", &self.running.load(Ordering::Relaxed))
+            .field("max_per_node", &self.max_per_node)
+            .field("max_per_cluster", &self.max_per_cluster)
+            .field("memory", &self.budget.limit())
+            .finish_non_exhaustive()
+    }
+}
+
+impl RemoteNode {
+    /// The node's limits from its settings.
+    pub fn from_settings(settings: &[(String, String)]) -> Arc<RemoteNode> {
+        let get = |k: &str| settings.iter().rev().find(|(n, _)| n == k).map(|(_, v)| v.as_str());
+        let count = |k: &str, d: usize| get(k).and_then(|v| v.trim().parse::<usize>().ok()).unwrap_or(d);
+        let memory = get(MEMORY).and_then(|v| crate::units::ByteSize::parse(v, MEMORY).ok()).map_or(DEFAULT_MEMORY, |b| b.0.max(1) as u64);
+        let max_duration = get(MAX_DURATION)
+            .and_then(|v| crate::units::TimeValue::parse(v, MAX_DURATION).ok())
+            .map_or(DEFAULT_MAX_DURATION, |t| Duration::from_millis(t.as_millis().max(1) as u64));
+        Arc::new(RemoteNode { running: AtomicUsize::new(0), max_per_node: count(MAX_PER_NODE, 4), max_per_cluster: count(MAX_PER_CLUSTER, 2), budget: MemoryBudget::new(memory), max_duration })
+    }
+
+    /// A slot for one remote reindex task of the cluster whose running count is `cluster`, or
+    /// a 429 when the cluster or the node runs as many as it may.
+    pub fn acquire(self: &Arc<Self>, cluster: &Arc<AtomicUsize>) -> EsResult<RemoteSlot> {
+        let take = |c: &AtomicUsize, max: usize| c.try_update(Ordering::SeqCst, Ordering::SeqCst, |n| (n < max).then_some(n + 1)).is_ok();
+        if !take(cluster, self.max_per_cluster) {
+            return Err(rejected(format!("the cluster runs [{}] reindex from remote tasks, the most it may run at once", self.max_per_cluster)));
+        }
+        if !take(&self.running, self.max_per_node) {
+            cluster.fetch_sub(1, Ordering::SeqCst);
+            return Err(rejected(format!("the node runs [{}] reindex from remote tasks, the most it may run at once", self.max_per_node)));
+        }
+        Ok(RemoteSlot { node: self.clone(), cluster: cluster.clone() })
+    }
+}
+
+fn rejected(why: String) -> EsError {
+    EsError::new(429, "es_rejected_execution_exception", format!("rejected execution of reindex from remote: {why}"))
+}
+
+/// One running remote reindex task's place in [`RemoteNode`]'s counts, given back when dropped.
+pub struct RemoteSlot {
+    node: Arc<RemoteNode>,
+    cluster: Arc<AtomicUsize>,
+}
+
+impl std::fmt::Debug for RemoteSlot {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("RemoteSlot")
+    }
+}
+
+impl Drop for RemoteSlot {
+    fn drop(&mut self) {
+        self.node.running.fetch_sub(1, Ordering::SeqCst);
+        self.cluster.fetch_sub(1, Ordering::SeqCst);
+    }
+}
 
 /// One document read from the remote cluster.
 pub struct RemoteDoc {
@@ -127,9 +224,22 @@ impl Rules {
         })
     }
 
-    /// The node's rules ([`Rules::of`] over its node settings).
+    /// The rules for `cluster`: its node's settings, with the cluster's own whitelist when it
+    /// has one ([`crate::Cluster::reindex_whitelist`]).
     pub fn of_cluster(cluster: &crate::Cluster) -> EsResult<Rules> {
-        Rules::of(|k| cluster.config.node_setting(k))
+        let mut rules = Rules::of(|k| cluster.config.node_setting(k))?;
+        if let Some(w) = cluster.reindex_whitelist.read().clone() {
+            rules.whitelist = Some(w);
+        }
+        Ok(rules)
+    }
+
+    /// Without the whitelist check: roll's migration lists a remote's indices with the
+    /// credentials its owner gave before any task reads from it. The operator's rules (the
+    /// blocklist, private addresses) still apply.
+    pub fn without_whitelist(mut self) -> Rules {
+        self.whitelist = Some(vec!["*".into()]);
+        self
     }
 
     /// `ReindexValidator.checkRemoteWhitelist`, then roll's address rule.
@@ -139,17 +249,14 @@ impl Rules {
         }
         let target = format!("{}:{}", r.host, r.port);
         let matches = |list: &[String]| list.iter().any(|p| crate::xcontent::filter::glob_match(p, &target));
-        let blocked = matches(&self.blocklist);
-        match &self.whitelist {
-            Some(w) if !matches(w) || blocked => {
-                return Err(EsError::illegal_argument(if self.blocklist.is_empty() {
-                    format!("[{target}] not whitelisted in {WHITELIST}")
-                } else {
-                    format!("[{target}] either not whitelisted in {WHITELIST} or blocked in {BLOCKLIST}")
-                }));
-            }
-            None if blocked => return Err(EsError::illegal_argument(format!("[{target}] blocked in {BLOCKLIST}"))),
-            _ => {}
+        // `ReindexValidator.checkRemoteWhitelist`: unset or empty, every remote is refused.
+        let allowed = self.whitelist.as_deref().is_some_and(matches) && !matches(&self.blocklist);
+        if !allowed {
+            return Err(EsError::illegal_argument(if self.blocklist.is_empty() {
+                format!("[{target}] not whitelisted in {WHITELIST}")
+            } else {
+                format!("[{target}] either not whitelisted in {WHITELIST} or blocked in {BLOCKLIST}")
+            }));
         }
         if !self.allow_private {
             let url = reqwest::Url::parse(&format!("{}://{target}/", r.scheme)).map_err(|_| EsError::illegal_argument(format!("[host] [{target}] is not a valid host")))?;
@@ -218,6 +325,8 @@ pub struct Client {
     /// Values that must never appear in what roll prints: the password, the `Authorization`
     /// it makes, and every header value (whole and its longer words).
     secrets: Vec<String>,
+    /// The requests carry credentials: no error quotes what the remote answered.
+    credentials: bool,
     limit: u64,
     budget: Option<Arc<MemoryBudget>>,
 }
@@ -263,14 +372,15 @@ impl Client {
         if let Some(p) = &r.password {
             secrets.push(p.clone());
         }
-        secrets.retain(|s| s.len() >= 3);
+        let credentials = r.username.is_some() || r.password.is_some() || !r.headers.is_empty();
+        secrets.retain(|s| !s.is_empty());
         // Longest first, so a value containing another is replaced whole.
         secrets.sort_by_key(|s| std::cmp::Reverse(s.len()));
         secrets.dedup();
         let mut b = reqwest::Client::builder()
             .connect_timeout(connect)
-            .read_timeout(socket_timeout)
-            .timeout(MAX_EXCHANGE.max(socket_timeout))
+            .read_timeout(socket_timeout.min(MAX_EXCHANGE))
+            .timeout(MAX_EXCHANGE)
             .redirect(reqwest::redirect::Policy::none())
             .no_proxy()
             .http1_only()
@@ -290,7 +400,7 @@ impl Client {
         let http = b.build().map_err(|e| EsError::illegal_state(format!("building the remote client failed: {}", innermost(&e))))?;
         let prefix = r.path_prefix.as_deref().unwrap_or("").trim_end_matches('/');
         let host = format!("{}://{}:{}", r.scheme, r.host, r.port);
-        Ok(Client { base: format!("{host}{prefix}"), host, http, socket_timeout, secrets, limit: rules.buffer_limit, budget })
+        Ok(Client { base: format!("{host}{prefix}"), host, http, socket_timeout: socket_timeout.min(MAX_EXCHANGE), secrets, credentials, limit: rules.buffer_limit, budget })
     }
 
     /// `s` with every credential replaced.
@@ -347,7 +457,7 @@ impl Client {
                 return Err(too_large(n, self.limit));
             }
             if let Some(h) = held.as_mut() {
-                h.add(chunk.len() as u64, BREAKER_LABEL)?;
+                h.add(chunk.len() as u64 * CHARGE_FACTOR, BREAKER_LABEL)?;
             }
             bytes.extend_from_slice(&chunk);
         }
@@ -355,8 +465,13 @@ impl Client {
     }
 
     /// `wrapExceptionToPreserveStatus`: the remote's answer as the reason, its status kept.
+    /// After a request that carried credentials, the answer is left out (its status stays).
     fn status_error(&self, method: &reqwest::Method, path_query: &str, b: &Body) -> EsError {
-        let text = self.scrub(&String::from_utf8_lossy(&b.bytes));
+        let text = if self.credentials {
+            format!("[the remote's answer isn't shown: the request carried credentials; {} bytes]", b.bytes.len())
+        } else {
+            self.scrub(&String::from_utf8_lossy(&b.bytes))
+        };
         let code = reqwest::StatusCode::from_u16(b.status).ok();
         let reason = code.and_then(|c| c.canonical_reason());
         let no_body = matches!(b.status, 100..=199 | 204 | 304);
@@ -391,7 +506,10 @@ impl Client {
                 // Any JSON: `_cat` answers an array; callers check the shape they need.
                 Ok(Some(v)) => Ok((v, b.held)),
                 Ok(None) => Err(not_elasticsearch(None)),
-                Err(e) => Err(not_elasticsearch(Some(EsError::java(500, "x_content_parse_exception", self.scrub(&e.to_string()))))),
+                Err(e) => {
+                    let detail = if self.credentials { "the answer isn't valid JSON".to_string() } else { self.scrub(&e.to_string()) };
+                    Err(not_elasticsearch(Some(EsError::java(500, "x_content_parse_exception", detail))))
+                }
             };
         }
     }
@@ -401,7 +519,7 @@ impl Client {
         let (v, _) = self.json(reqwest::Method::GET, "/", None, retries).await?;
         let number = v.pointer(&["version", "number"]).and_then(Value::as_str).ok_or_else(|| not_elasticsearch(None))?.to_string();
         let version = Version::parse(&number).ok_or_else(|| not_elasticsearch(None))?;
-        let s = |p: &[&str]| v.pointer(p).and_then(Value::as_str).map(|s| self.scrub(s));
+        let s = |p: &[&str]| v.pointer(p).and_then(Value::as_str).map(|s| self.scrub(s).chars().take(256).collect::<String>());
         Ok(RemoteInfo { version, number, distribution: s(&["version", "distribution"]), cluster_name: s(&["cluster_name"]) })
     }
 
@@ -525,7 +643,7 @@ impl RemoteSource {
             let path = format!("/{}_pit?{partial}keep_alive=15m", s.indices);
             let (v, _) = s.client.json(reqwest::Method::POST, &path, None, &mut s.retries).await?;
             let id = v.get("id").and_then(Value::as_str).ok_or_else(|| EsError::illegal_state("open point-in-time response must contain [id] field"))?;
-            s.cursor = Cursor::Pit { id: id.to_string(), after: None };
+            s.cursor = Cursor::Pit { id: bounded_id(id, "point in time")?, after: None };
         }
         Ok(s)
     }
@@ -592,7 +710,7 @@ impl RemoteSource {
         match &mut self.cursor {
             Cursor::Pit { id, after } => {
                 if let Some(p) = v.get("pit_id").and_then(Value::as_str) {
-                    *id = p.to_string();
+                    *id = bounded_id(p, "point in time")?;
                 }
                 *after = v.pointer(&["hits", "hits"]).and_then(Value::as_array).and_then(|h| h.last()).and_then(|h| h.get("sort")).cloned();
                 if after.is_none() && !docs.is_empty() {
@@ -601,7 +719,7 @@ impl RemoteSource {
             }
             Cursor::Scroll(id) => {
                 if let Some(s) = v.get("_scroll_id").and_then(Value::as_str) {
-                    *id = Some(s.to_string());
+                    *id = Some(bounded_id(s, "scroll")?);
                 }
             }
         }
@@ -655,6 +773,14 @@ impl RemoteSource {
     }
 }
 
+/// A scroll or point-in-time id the remote gave, kept only up to [`MAX_ID_BYTES`].
+fn bounded_id(id: &str, what: &str) -> EsResult<String> {
+    if id.len() > MAX_ID_BYTES {
+        return Err(EsError::illegal_argument(format!("the remote's {what} id is [{}] bytes, longer than the [{MAX_ID_BYTES}] roll keeps", id.len())));
+    }
+    Ok(id.to_string())
+}
+
 /// `hits.total`: a number, or `{"value": n}` (7.0 and later).
 fn total_hits(v: &Value) -> Option<u64> {
     let n = match v.pointer(&["hits", "total"])? {
@@ -699,14 +825,17 @@ mod tests {
     }
 
     #[test]
-    fn public_hosts_without_a_whitelist_private_ones_with_the_flag() {
-        let r = rules(&[]);
+    fn whitelisted_hosts_only_private_ones_with_the_flag() {
+        // Unset, as in Elasticsearch: every remote is refused.
+        assert_eq!(rules(&[]).check(&remote("search.example.com", 443)).unwrap_err().reason(), "[search.example.com:443] not whitelisted in reindex.remote.whitelist");
+        let r = rules(&[(WHITELIST, "*:*")]);
         assert!(r.check(&remote("search.example.com", 443)).is_ok());
+        assert!(rules(&[]).without_whitelist().check(&remote("search.example.com", 443)).is_ok());
         for h in ["127.0.0.1", "10.1.2.3", "localhost", "[::1]", "169.254.169.254"] {
             let e = r.check(&remote(h, 9200)).unwrap_err();
             assert!(e.reason().contains("is a private address"), "{h}: {}", e.reason());
         }
-        assert!(rules(&[(ALLOW_PRIVATE, "true")]).check(&remote("127.0.0.1", 9200)).is_ok());
+        assert!(rules(&[(WHITELIST, "*:*"), (ALLOW_PRIVATE, "true")]).check(&remote("127.0.0.1", 9200)).is_ok());
         let mut ftp = remote("example.com", 21);
         ftp.scheme = "ftp".into();
         assert!(r.check(&ftp).is_err());
@@ -719,12 +848,29 @@ mod tests {
         r.username = Some("elastic".into());
         r.password = Some("hunter2-secret".into());
         r.headers = vec![("Authorization".into(), "ApiKey c2VjcmV0LWtleS12YWx1ZQ==".into())];
-        let c = Client::new(&rules(&[]), &r, None).unwrap();
+        let c = Client::new(&rules(&[(WHITELIST, "*:*")]), &r, None).unwrap();
         let echoed = "got ApiKey c2VjcmV0LWtleS12YWx1ZQ== and hunter2-secret";
         let s = c.scrub(echoed);
         assert!(!s.contains("hunter2") && !s.contains("c2VjcmV0"), "{s}");
         let dbg = format!("{r:?}");
         assert!(!dbg.contains("hunter2") && !dbg.contains("c2VjcmV0"), "{dbg}");
+    }
+
+    #[test]
+    fn tasks_per_cluster_and_per_node_are_capped() {
+        let node = RemoteNode::from_settings(&[]);
+        let (a, b) = (Arc::new(AtomicUsize::new(0)), Arc::new(AtomicUsize::new(0)));
+        let held = [node.acquire(&a).unwrap(), node.acquire(&a).unwrap()];
+        let e = node.acquire(&a).unwrap_err();
+        assert_eq!((e.status, e.reason()), (429, "rejected execution of reindex from remote: the cluster runs [2] reindex from remote tasks, the most it may run at once"));
+        let more = [node.acquire(&b).unwrap(), node.acquire(&b).unwrap()];
+        let c = Arc::new(AtomicUsize::new(0));
+        assert!(node.acquire(&c).unwrap_err().reason().contains("the node runs [4]"));
+        assert_eq!(c.load(Ordering::SeqCst), 0, "a refusal holds nothing");
+        drop(held);
+        assert!(node.acquire(&a).is_ok());
+        drop(more);
+        assert_eq!(node.running.load(Ordering::SeqCst), 0);
     }
 
     #[test]

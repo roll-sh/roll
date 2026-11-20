@@ -1,7 +1,7 @@
 // Tests of the dashboard's migration from Elasticsearch or OpenSearch (vitest).
 import assert from "node:assert/strict";
 import { test } from "vitest";
-import { aliasOffer, defaultDest, destProblem, displayHost, droppedByReason, sourceFrom, sourceProblem, taskProgress, type SourceForm } from "./search-migrate";
+import { aliasOffer, defaultDest, destProblem, displayHost, droppedByReason, partial, sourceFrom, sourceProblem, taskPoll, taskProgress, type SourceForm } from "./search-migrate";
 
 const form = (f: Partial<SourceForm>): SourceForm => ({ host: "https://es.example:9243", auth: "api_key", apiKey: "", username: "", password: "", ...f });
 
@@ -60,4 +60,15 @@ test("an alias is offered under the remote's name when the copy got another one"
       { reason: "a block would stop the copy", settings: ["index.blocks.write"] },
     ],
   );
+});
+
+test("a task _tasks no longer knows is lost, and its partial copy can go", () => {
+  assert.deepEqual(taskPoll(404, '{"error":{"type":"resource_not_found_exception"}}'), { kind: "lost" });
+  assert.deepEqual(taskPoll(502, "bad gateway"), { kind: "retry" });
+  assert.deepEqual(taskPoll(200, "not json"), { kind: "retry" });
+  const p = taskPoll(200, '{"completed":false,"task":{"status":{"total":10,"created":4}}}');
+  assert.equal(p.kind, "task");
+  if (p.kind === "task") assert.equal(taskProgress(p.body).copied, 4);
+  assert.ok(partial("lost") && partial("failed") && partial("cancelled"));
+  assert.ok(!partial("done") && !partial("running"));
 });

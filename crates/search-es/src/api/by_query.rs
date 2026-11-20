@@ -404,6 +404,9 @@ pub struct Live {
     children: parking_lot::Mutex<Vec<Arc<Live>>>,
     /// The task's (and its parent's) cancellation flags.
     cancelled: Vec<Arc<std::sync::atomic::AtomicBool>>,
+    /// A reindex from remote's place in the node's limits, held until the run ends, wherever it
+    /// runs (the request, or its background run).
+    slot: parking_lot::Mutex<Option<super::remote::RemoteSlot>>,
 }
 
 /// A slice's share of a rate.
@@ -422,6 +425,7 @@ impl Live {
             throttled_until: parking_lot::Mutex::new(None),
             children: parking_lot::Mutex::new(Vec::new()),
             cancelled,
+            slot: parking_lot::Mutex::new(None),
         })
     }
 
@@ -445,6 +449,11 @@ impl Live {
 
     fn is_cancelled(&self) -> bool {
         self.cancelled.iter().any(|c| c.load(std::sync::atomic::Ordering::Relaxed))
+    }
+
+    /// Gives back the run's [`super::remote::RemoteSlot`], if it holds one.
+    fn release_slot(&self) {
+        self.slot.lock().take();
     }
 
     /// Wakes whatever the task (and its slices) waits on, so a cancel takes effect now, not
@@ -584,7 +593,7 @@ type SliceRun = (Status, Vec<String>);
 /// The background run re-dispatches the request on a spawned task holding the cluster; it
 /// finds its registered task through [`BACKGROUND`]. Clusters without a background handle
 /// ([`crate::Cluster::enable_background_tasks`]) run the task before answering.
-async fn run_as_task<'c, F, Fut>(ctx: &'c Ctx<'c>, kind: Kind, rps: f64, action: &str, description: String, f: F) -> EsResult<Reply>
+async fn run_as_task<'c, F, Fut>(ctx: &'c Ctx<'c>, kind: Kind, rps: f64, slot: Option<super::remote::RemoteSlot>, action: &str, description: String, f: F) -> EsResult<Reply>
 where
     F: FnOnce(u64, Arc<Live>) -> Fut,
     Fut: std::future::Future<Output = EsResult<SliceRun>>,
@@ -597,6 +606,8 @@ where
         tasks.set_live(id, live.clone());
         live
     };
+    // Handed to the first run's state; its background run (if any) finds it there.
+    let mut slot = slot;
     let finish = |live: &Arc<Live>, r: EsResult<SliceRun>, started: std::time::Instant| -> EsResult<(Status, u16)> {
         let (mut s, _) = r?;
         s.requests_per_second = live.rate();
@@ -612,6 +623,7 @@ where
             let guard = tasks.adopt(id);
             let live = tasks.get(id).and_then(|t| t.live).unwrap_or_else(|| new_live(id));
             let r = f(id, live.clone()).await;
+            live.release_slot();
             let outcome = finish(&live, r, started).map(|(s, _)| s.response(kind, started.elapsed().as_millis() as u64, true));
             // Stored in `.tasks` before the task ends: whoever waited for it finds the document.
             tasks.record(&guard, outcome);
@@ -623,6 +635,7 @@ where
         let guard = tasks.register(action, &description, None, headers);
         let id = guard.id;
         let live = new_live(id);
+        *live.slot.lock() = slot.take();
         if let Some(cluster) = ctx.cluster.handle() {
             let id = guard.detach();
             let req = ctx.request.clone();
@@ -630,6 +643,7 @@ where
             return Reply::ok(obj! { "task" => format!("{}:{id}", ctx.cluster.node.id) });
         }
         let r = f(id, live.clone()).await;
+        live.release_slot();
         let outcome = finish(&live, r, started).map(|(s, _)| s.response(kind, started.elapsed().as_millis() as u64, true));
         tasks.record(&guard, outcome);
         let persisted = super::tasks::persist_result(ctx, id).await;
@@ -640,7 +654,9 @@ where
     let started = std::time::Instant::now();
     let guard = tasks.register(action, &description, None, headers);
     let live = new_live(guard.id);
+    *live.slot.lock() = slot.take();
     let r = f(guard.id, live.clone()).await;
+    live.release_slot();
     let (s, code) = finish(&live, r, started)?;
     drop(guard);
     Ok(Reply::Body(code, s.response(kind, started.elapsed().as_millis() as u64, false)))
@@ -653,7 +669,10 @@ fn background(cluster: Arc<crate::Cluster>, req: crate::rest::EsRequest, id: u64
         let _ = crate::rest::handle(&cluster, req).await;
         // A run that failed before reaching its task (the request no longer valid) still
         // ends it.
-        if cluster.tasks.get(id).is_some() {
+        if let Some(t) = cluster.tasks.get(id) {
+            if let Some(l) = &t.live {
+                l.release_slot();
+            }
             let g = cluster.tasks.adopt(id);
             cluster.tasks.finish(g, Err(EsError::illegal_state("the background run of the task ended early")));
         }
@@ -898,18 +917,39 @@ fn description(kind: Kind, indices: &[String], dest: Option<&str>) -> String {
     }
 }
 
-/// Runs `f` until it ends, or `None` once the task is cancelled (checked when woken by
-/// [`Live::wake`], and every 250ms besides): a remote that's slow to answer doesn't hold a
-/// cancelled task.
-async fn until_cancelled<F: std::future::Future>(live: &Live, f: F) -> Option<F::Output> {
+/// Why a remote run stopped before its source ran out.
+enum Stop {
+    /// `_tasks/<id>/_cancel`, or the node unloading the cluster.
+    Cancelled,
+    /// It ran past [`super::remote::MAX_DURATION`].
+    Deadline,
+}
+
+impl Stop {
+    /// The task's `canceled` reason (`BulkByScrollTask.Status.reasonCancelled`).
+    fn reason(&self, max: std::time::Duration) -> String {
+        match self {
+            Stop::Cancelled => "by user request".into(),
+            Stop::Deadline => format!("ran longer than [{}] allows ({}s)", super::remote::MAX_DURATION, max.as_secs()),
+        }
+    }
+}
+
+/// Runs `f` until it ends, or stops once the task is cancelled (checked when woken by
+/// [`Live::wake`], and every 250ms besides) or `deadline` passes: a remote that's slow to answer
+/// doesn't hold a cancelled task, nor any task forever.
+async fn until_stopped<F: std::future::Future>(live: &Live, deadline: tokio::time::Instant, f: F) -> Result<F::Output, Stop> {
     tokio::pin!(f);
     loop {
         if live.is_cancelled() {
-            return None;
+            return Err(Stop::Cancelled);
+        }
+        if tokio::time::Instant::now() >= deadline {
+            return Err(Stop::Deadline);
         }
         let woken = live.changed.notified();
         tokio::select! {
-            r = &mut f => return Some(r),
+            r = &mut f => return Ok(r),
             _ = woken => {}
             _ = tokio::time::sleep(std::time::Duration::from_millis(250)) => {}
         }
@@ -918,13 +958,20 @@ async fn until_cancelled<F: std::future::Future>(live: &Live, f: F) -> Option<F:
 
 /// A reindex whose source is a remote cluster ([`super::remote`]): one page at a time, each
 /// written before the next is fetched, throttled between pages like a local scroll; the
-/// remote's search context is released however the run ends.
+/// remote's search context is released however the run ends. Its answers are charged to the
+/// node's budget ([`super::remote::RemoteNode`]), and it stops after the node's longest run.
 async fn reindex_remote(ctx: &Ctx<'_>, plan: &ReindexPlan, req: &super::by_query_request::ByScroll, remote: &super::by_query_request::Remote, max_docs: Option<u64>, live: &Arc<Live>) -> EsResult<SliceRun> {
     let rules = super::remote::Rules::of_cluster(ctx.cluster)?;
-    let client = super::remote::Client::new(&rules, remote, Some(ctx.cluster.breakers.request(ctx.cluster, &ctx.state())))?;
-    let mut src = match until_cancelled(live, super::remote::RemoteSource::open(client, req, remote, max_docs)).await {
-        None => return Ok((cancelled_before_start(live), Vec::new())),
-        Some(r) => r?,
+    let node = ctx.cluster.remote.clone();
+    let deadline = tokio::time::Instant::now() + node.max_duration;
+    let client = super::remote::Client::new(&rules, remote, Some(node.budget.clone()))?;
+    let mut src = match until_stopped(live, deadline, super::remote::RemoteSource::open(client, req, remote, max_docs)).await {
+        Err(Stop::Cancelled) => return Ok((cancelled_before_start(live), Vec::new())),
+        Err(stop) => {
+            let s = Status { canceled: Some(stop.reason(node.max_duration)), ..Default::default() };
+            return Ok((s, Vec::new()));
+        }
+        Ok(r) => r?,
     };
     let mut s = Status::default();
     let mut touched = Vec::new();
@@ -932,19 +979,23 @@ async fn reindex_remote(ctx: &Ctx<'_>, plan: &ReindexPlan, req: &super::by_query
     let mut read = 0u64;
     let run: EsResult<()> = async {
         loop {
-            if !throttle.wait().await {
-                s.canceled = Some("by user request".into());
-                // The task shows why it stopped (`BulkByScrollTask.Status.reasonCancelled`).
-                publish(live, &s, &throttle);
-                return Ok(());
-            }
-            let page = match until_cancelled(live, src.next()).await {
-                None => {
-                    s.canceled = Some("by user request".into());
+            let waited = match tokio::time::timeout_at(deadline, throttle.wait()).await {
+                Ok(true) => None,
+                Ok(false) => Some(Stop::Cancelled),
+                Err(_) => Some(Stop::Deadline),
+            };
+            let page = match waited {
+                None => until_stopped(live, deadline, src.next()).await,
+                Some(stop) => Err(stop),
+            };
+            let page = match page {
+                Err(stop) => {
+                    s.canceled = Some(stop.reason(node.max_duration));
+                    // The task shows why it stopped (`BulkByScrollTask.Status.reasonCancelled`).
                     publish(live, &s, &throttle);
                     return Ok(());
                 }
-                Some(p) => p?,
+                Ok(p) => p?,
             };
             s.search_retries = src.retries;
             if let Some(t) = page.total {
@@ -977,7 +1028,8 @@ async fn reindex_remote(ctx: &Ctx<'_>, plan: &ReindexPlan, req: &super::by_query
         }
     }
     .await;
-    src.close().await;
+    // Best effort and brief: a remote that doesn't answer keeps its context until it expires.
+    let _ = tokio::time::timeout(std::time::Duration::from_secs(30), src.close()).await;
     run?;
     s.throttled_millis = throttle.millis();
     Ok((s, touched))
@@ -1041,7 +1093,7 @@ pub async fn delete_by_query(ctx: &Ctx<'_>) -> EsResult<Reply> {
     let action = "indices:data/write/delete/byquery";
     let desc = description(Kind::Delete, &indices, None);
     let d2 = desc.clone();
-    run_as_task(ctx, Kind::Delete, opts.rps, action, desc, |task, live| async move {
+    run_as_task(ctx, Kind::Delete, opts.rps, None, action, desc, |task, live| async move {
         let one = |slice: Option<(u32, u32)>, max_docs: Option<u64>, live: Arc<Live>| {
             let (indices, query, routing) = (&indices, &query, &routing);
             async move {
@@ -1127,7 +1179,7 @@ pub async fn update_by_query(ctx: &Ctx<'_>) -> EsResult<Reply> {
     let action = "indices:data/write/update/byquery";
     let desc = description(Kind::Update, &indices, None);
     let d2 = desc.clone();
-    run_as_task(ctx, Kind::Update, opts.rps, action, desc, |task, live| async move {
+    run_as_task(ctx, Kind::Update, opts.rps, None, action, desc, |task, live| async move {
         let st = ctx.state();
         let bound = match &script {
             Some(sc) => Some(ctx.cluster.scripts.compile(&st, sc, Context::UpdateByQuery)?),
@@ -1417,6 +1469,12 @@ pub async fn reindex(ctx: &Ctx<'_>) -> EsResult<Reply> {
     if let Some(r) = &req.remote {
         super::remote::Rules::of_cluster(ctx.cluster)?.check(r)?;
     }
+    // A place in the node's limits, taken by the request (a 429 past them); its background run
+    // finds it in the task's state.
+    let slot = match &req.remote {
+        Some(_) if BACKGROUND.try_with(|_| ()).is_err() => Some(ctx.cluster.remote.acquire(&ctx.cluster.remote_running)?),
+        _ => None,
+    };
     let remote = req.remote.clone();
     let remote_req = remote.is_some().then(|| req.clone());
     // `ReindexValidator.initialValidation`: a destination that can't be auto-created, or one of
@@ -1449,7 +1507,7 @@ pub async fn reindex(ctx: &Ctx<'_>) -> EsResult<Reply> {
         desc = format!("reindex from [{}][{}] to [{dest_index}]", r.describe(), src_indices.join(", "));
     }
     let d2 = desc.clone();
-    run_as_task(ctx, Kind::Reindex, opts.rps, action, desc, |task, live| async move {
+    run_as_task(ctx, Kind::Reindex, opts.rps, slot, action, desc, |task, live| async move {
         let st = ctx.state();
         let plan = ReindexPlan {
             bound: match &script {

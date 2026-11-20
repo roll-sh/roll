@@ -28,6 +28,9 @@ use serde_json::{json, Map, Value};
 
 /// The most indices one `migrate` call starts.
 pub const MAX_INDICES: usize = 100;
+/// How long one `inspect` or `migrate` call may take, all its requests to the remote included:
+/// `migrate` starts the copies (tasks) and returns, it never waits for one.
+pub const DEADLINE: std::time::Duration = std::time::Duration::from_secs(60);
 /// Index creations tried per index while dropping the settings roll refuses.
 const MAX_ATTEMPTS: usize = 32;
 
@@ -178,9 +181,27 @@ impl Control {
         Rules::of(|k| settings.iter().rev().find(|(n, _)| n == k).map(|(_, v)| v.as_str())).map_err(|e| ControlError::Internal(anyhow::anyhow!("reindex from remote settings: {}", e.reason())))
     }
 
+    /// A client for the remote under the operator's rules (the blocklist, private addresses;
+    /// not the cluster's whitelist, which a listing doesn't need and `migrate` extends), its
+    /// answers charged to the node's reindex budget.
     fn remote_client(&self, s: &Source) -> Result<Client> {
         let r = remote_of(s)?;
-        Client::new(&self.remote_rules()?, &r, None).map_err(|e| ControlError::Invalid(e.reason().to_string()))
+        Client::new(&self.remote_rules()?.without_whitelist(), &r, Some(self.node.reindex().budget.clone())).map_err(|e| ControlError::Invalid(e.reason().to_string()))
+    }
+
+    /// Every index and alias name cluster `c` has (an alias of the remote's by one of these
+    /// names isn't copied: the copy would join what's there).
+    async fn roll_names(&self, c: &SearchCluster) -> Result<std::collections::HashSet<String>> {
+        let (status, v) = self.call_json(c, "GET", "/_alias?expand_wildcards=all", None).await;
+        if status != 200 {
+            return Err(ControlError::Internal(anyhow::anyhow!("listing cluster {}'s aliases failed ({status})", c.name)));
+        }
+        let mut names = std::collections::HashSet::new();
+        for (index, def) in v.as_object().into_iter().flatten() {
+            names.insert(index.clone());
+            names.extend(def["aliases"].as_object().into_iter().flatten().map(|(a, _)| a.clone()));
+        }
+        Ok(names)
     }
 
     /// One request on cluster `c` as its owner: status and parsed body.
@@ -194,9 +215,16 @@ impl Control {
         (resp.status, serde_json::from_slice(&resp.body).unwrap_or(Value::Null))
     }
 
-    /// Lists the remote's open indices with their documents, size and aliases, and whether an
-    /// index of the same name exists on cluster `id`.
+    /// Lists the remote's open indices with their documents, size and aliases, whether an
+    /// index of the same name exists on cluster `id`, and which of its aliases do (those aren't
+    /// copied). Within [`DEADLINE`].
     pub async fn migrate_inspect(&self, id: &str, s: &Source) -> Result<Value> {
+        tokio::time::timeout(DEADLINE, Box::pin(self.inspect_within(id, s)))
+            .await
+            .map_err(|_| ControlError::Invalid(format!("the remote cluster didn't answer within {}s", DEADLINE.as_secs())))?
+    }
+
+    async fn inspect_within(&self, id: &str, s: &Source) -> Result<Value> {
         let c = self.get(id).await?;
         let host = normalize_host(&s.host)?;
         let client = self.remote_client(s)?;
@@ -209,7 +237,7 @@ impl Control {
             Ok(v) => v.pointer(&["data_streams"]).and_then(search_es::json::Value::as_array).map(|a| a.iter().filter_map(|d| d.get("name").and_then(search_es::json::Value::as_str).map(str::to_string)).collect()).unwrap_or_default(),
             Err(_) => Vec::new(),
         };
-        let existing: std::collections::HashSet<String> = self.indices(&c.id).await?.iter().filter_map(|r| r["index"].as_str().map(str::to_string)).collect();
+        let existing = self.roll_names(&c).await?;
         let cat = to_serde(&cat);
         let mut rows: Vec<Value> = cat
             .as_array()
@@ -222,6 +250,7 @@ impl Control {
                     return None;
                 }
                 let names: Vec<String> = aliases[&index]["aliases"].as_object().map(|m| m.keys().cloned().collect()).unwrap_or_default();
+                let on_roll: Vec<&String> = names.iter().filter(|a| existing.contains(*a)).collect();
                 Some(json!({
                     "index": index,
                     "health": r["health"],
@@ -232,6 +261,7 @@ impl Control {
                     "primaries": num(&r["pri"]),
                     "replicas": num(&r["rep"]),
                     "aliases": names,
+                    "aliases_on_roll": on_roll,
                     "exists": existing.contains(&index),
                 }))
             })
@@ -267,26 +297,52 @@ impl Control {
         if req.size.is_some_and(|n| n == 0 || n > 10_000) {
             return Err(ControlError::Invalid("size must be between 1 and 10000".into()));
         }
+        let deadline = tokio::time::Instant::now() + DEADLINE;
         let remote = remote_json(&req.source)?;
         let client = self.remote_client(&req.source)?;
+        let c = self.whitelist_host(c, &remote_of(&req.source)?).await?;
+        let mut names = self.roll_names(&c).await?;
         let mut out = Vec::new();
         for p in &req.indices {
             let dest = p.dest.clone().filter(|d| !d.trim().is_empty()).unwrap_or_else(|| p.index.clone());
             let mut row = json!({ "index": p.index, "dest": dest });
-            match self.migrate_one(&c, &client, &remote, p, &dest, req).await {
-                Ok(done) => {
+            let one = Box::pin(self.migrate_one(&c, &client, &remote, p, &dest, req, &mut names));
+            match tokio::time::timeout_at(deadline, one).await {
+                Ok(Ok(done)) => {
                     if let Value::Object(m) = done {
                         row.as_object_mut().expect("an object").extend(m);
                     }
                 }
-                Err(e) => row["error"] = json!(e),
+                Ok(Err(e)) => row["error"] = json!(e),
+                Err(_) => row["error"] = json!(format!("not started: the request ran past {}s (start it again)", DEADLINE.as_secs())),
             }
             out.push(row);
         }
         Ok(json!({ "indices": out }))
     }
 
-    async fn migrate_one(&self, c: &SearchCluster, client: &Client, remote: &Value, p: &Pick, dest: &str, req: &MigrateRequest) -> std::result::Result<Value, String> {
+    /// Adds `r`'s `host:port` to cluster `c`'s reindex whitelist (exactly that host), as the
+    /// tasks the migration starts need it.
+    async fn whitelist_host(&self, c: SearchCluster, r: &Remote) -> Result<SearchCluster> {
+        let pattern = format!("{}:{}", r.host, r.port).to_ascii_lowercase();
+        if c.reindex_whitelist.contains(&pattern) {
+            return Ok(c);
+        }
+        if c.reindex_whitelist.len() >= crate::control::MAX_WHITELIST {
+            return Err(ControlError::Conflict(format!(
+                "cluster {}'s reindex_whitelist is full ({} entries): remove one with PATCH /v1/search/clusters/{{id}}",
+                c.name,
+                crate::control::MAX_WHITELIST
+            )));
+        }
+        let mut list = c.reindex_whitelist.clone();
+        list.push(pattern);
+        let o = crate::control::ClusterOptions { reindex_whitelist: Some(list), ..Default::default() };
+        self.update(&c.id, o, crate::store::Caps::NONE).await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn migrate_one(&self, c: &SearchCluster, client: &Client, remote: &Value, p: &Pick, dest: &str, req: &MigrateRequest, names: &mut std::collections::HashSet<String>) -> std::result::Result<Value, String> {
         if p.index.is_empty() || p.index.contains(['*', ',', '/']) || p.index.starts_with('_') {
             return Err(format!("[{}] isn't one index", p.index));
         }
@@ -306,8 +362,17 @@ impl Control {
         if mappings.as_object().is_some_and(|m| m.len() == 1 && m.values().all(|t| t.get("properties").is_some()) && !m.contains_key("properties") && !m.contains_key("dynamic")) {
             return Err("the index has a mapping type (Elasticsearch 6 or older): reindex it on the remote into a typeless index first".into());
         }
-        let mut aliases = def["aliases"].clone();
         let (mut settings, mut dropped) = filter_settings(def["settings"].as_object().cloned().unwrap_or_default());
+        // An alias roll already has would take the copy in with whatever it points at (mixed
+        // searches, writes refused or moved): never joined.
+        let mut aliases = Value::Object(Map::new());
+        for (name, a) in def["aliases"].as_object().into_iter().flatten() {
+            if names.contains(name) {
+                dropped.push(json!({ "setting": format!("aliases.{name}"), "value": a, "reason": "alias exists on roll: the copy isn't added to it" }));
+            } else {
+                aliases[name] = a.clone();
+            }
+        }
         // A pipeline the index names must exist on roll, or every document would fail.
         for key in ["index.default_pipeline", "index.final_pipeline"] {
             let Some(name) = settings.get(key).and_then(Value::as_str).map(str::to_string) else { continue };
@@ -344,6 +409,9 @@ impl Control {
         if !created {
             return Err(format!("creating index [{dest}] failed: too many settings refused"));
         }
+        // The next indices of this request see the copy and its aliases as roll's own.
+        names.insert(dest.to_string());
+        names.extend(aliases.as_object().into_iter().flatten().map(|(a, _)| a.clone()));
         let mut source = json!({ "remote": remote, "index": p.index });
         if let Some(n) = req.size {
             source["size"] = json!(n);

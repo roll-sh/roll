@@ -27,6 +27,9 @@ export interface RemoteIndex {
   primaries: number | null;
   replicas: number | null;
   aliases: string[];
+  /** Its aliases that roll has already (as an alias or an index): not copied, so the copy never
+   * joins what they point at. */
+  aliases_on_roll: string[];
   /** An index of this name exists on the roll cluster already. */
   exists: boolean;
 }
@@ -155,7 +158,9 @@ interface TaskCounts {
   canceled?: string;
 }
 
-export type TaskState = "running" | "done" | "failed" | "cancelled";
+/** `lost`: `_tasks` doesn't know the task any more (the cluster restarted or moved while it
+ * ran), so the copy stopped part way. */
+export type TaskState = "running" | "done" | "failed" | "cancelled" | "lost";
 
 export interface TaskProgress {
   state: TaskState;
@@ -192,6 +197,28 @@ export function taskProgress(t: TaskBody): TaskProgress {
   } else if (t.task?.cancelled) state = "cancelled";
   const fraction = state === "done" ? 1 : total > 0 ? Math.min(1, copied / total) : null;
   return { state, copied, total, fraction, error, failures };
+}
+
+/** What one poll of `GET _tasks/<id>` says: the task's progress; that it's gone (404: the
+ * cluster restarted or moved, and the task with it); or nothing to go on (try again). */
+export type TaskPoll = { kind: "task"; body: TaskBody } | { kind: "lost" } | { kind: "retry" };
+
+export function taskPoll(status: number, body: string): TaskPoll {
+  if (status === 404) return { kind: "lost" };
+  if (status !== 200) return { kind: "retry" };
+  try {
+    return { kind: "task", body: JSON.parse(body) as TaskBody };
+  } catch {
+    return { kind: "retry" };
+  }
+}
+
+/** A task `_tasks` lost: its copy holds what was written before. */
+export const LOST: TaskProgress = { state: "lost", copied: 0, total: 0, fraction: null, error: "Stopped: the cluster restarted or moved while the copy ran, so the copy is partial.", failures: 0 };
+
+/** Whether a copy in `state` holds a partial index someone may want to delete. */
+export function partial(state: TaskState): boolean {
+  return state === "failed" || state === "cancelled" || state === "lost";
 }
 
 /**

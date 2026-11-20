@@ -84,6 +84,9 @@ pub struct ClusterSpec {
     pub ip_allowlist: crate::allow::IpAllowlist,
     /// Its id in the control plane's catalog, when it has one (`search_es::ClusterConfig::catalog_id`).
     pub catalog_id: Option<String>,
+    /// The cluster's own `reindex.remote.whitelist` (`host:port` patterns); `None`: the node
+    /// setting's ([`search_es::Cluster::reindex_whitelist`]).
+    pub reindex_whitelist: Option<Vec<String>>,
 }
 
 impl ClusterSpec {
@@ -101,6 +104,7 @@ impl ClusterSpec {
             max_resident_bytes: None,
             ip_allowlist: Default::default(),
             catalog_id: None,
+            reindex_whitelist: None,
         }
     }
 

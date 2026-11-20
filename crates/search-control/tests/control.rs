@@ -2989,7 +2989,9 @@ async fn an_alias_pattern_over_a_link_and_a_loopback_is_authorized_locally() {
 /// node, reached by its REST address as an outside cluster would be): the remote's indices are
 /// listed through roll, the picked one's mappings, settings and aliases copied with what roll
 /// doesn't take dropped and said why, its documents reindexed by a task the console follows;
-/// the remote's password is in no answer, error or task.
+/// the remote's password is in no answer, error or task. An alias roll already has is never
+/// joined, and the cluster's reindex whitelist gains exactly the remote's host (nothing else is
+/// readable).
 #[tokio::test]
 async fn migrating_from_another_cluster() {
     use reqwest::Method;
@@ -2999,7 +3001,7 @@ async fn migrating_from_another_cluster() {
     let index = json!({
         "settings": { "number_of_shards": 2, "refresh_interval": "5s", "routing": { "allocation": { "include": { "_tier_preference": "data_hot" } } } },
         "mappings": { "properties": { "name": { "type": "text" }, "sku": { "type": "keyword" }, "price": { "type": "double" } } },
-        "aliases": { "catalog": {} },
+        "aliases": { "catalog": {}, "shop": { "is_write_index": true } },
     });
     let (s, v) = e.es(&old, &old_pw, Method::PUT, "/products", Some(index)).await;
     assert_eq!(s, 200, "{v}");
@@ -3011,6 +3013,9 @@ async fn migrating_from_another_cluster() {
     let (s, v) = e.es(&old, &old_pw, Method::PUT, "/products/_settings", Some(json!({ "index.blocks.write": true }))).await;
     assert_eq!(s, 200, "{v}");
     let source = json!({ "host": e.es, "username": old, "password": old_pw });
+    // On roll, `shop` already names another index's alias.
+    let (_, made) = e.call(Method::POST, "/v1/search/clusters/new/request", Some(json!({ "method": "PUT", "path": "/other", "body": { "aliases": { "shop": {} } } }))).await;
+    assert_eq!(made["status"], 200, "{made}");
 
     // A wrong password: the remote's 401, never the password.
     let (s, v) = e.call(Method::POST, "/v1/search/clusters/new/migrate/inspect", Some(json!({ "source": { "host": e.es, "username": old, "password": "wrong-pass-123" } }))).await;
@@ -3019,18 +3024,26 @@ async fn migrating_from_another_cluster() {
 
     let listed = e.post("/v1/search/clusters/new/migrate/inspect", json!({ "source": source })).await;
     let row = listed["indices"].as_array().unwrap().iter().find(|r| r["index"] == "products").cloned().unwrap_or_default();
-    assert_eq!((row["docs"].as_i64(), row["aliases"].clone(), row["exists"].as_bool()), (Some(3), json!(["catalog"]), Some(false)), "{listed}");
+    let mut aliases: Vec<&str> = row["aliases"].as_array().unwrap().iter().filter_map(Value::as_str).collect();
+    aliases.sort();
+    assert_eq!((row["docs"].as_i64(), aliases, row["aliases_on_roll"].clone(), row["exists"].as_bool()), (Some(3), vec!["catalog", "shop"], json!(["shop"]), Some(false)), "{listed}");
     assert!(listed["remote"]["version"].as_str().is_some() && !listed.to_string().contains(&old_pw), "{listed}");
 
     let started = e.post("/v1/search/clusters/new/migrate", json!({ "source": source, "indices": [{ "index": "products" }], "size": 2 })).await;
     let r = &started["indices"][0];
     let task = r["task"].as_str().unwrap_or_else(|| panic!("{started}")).to_string();
     let dropped: Vec<&str> = r["dropped"].as_array().unwrap().iter().filter_map(|d| d["setting"].as_str()).collect();
-    for s in ["index.uuid", "index.creation_date", "index.blocks.write", "index.routing.allocation.include._tier_preference"] {
+    for s in ["index.uuid", "index.creation_date", "index.blocks.write", "index.routing.allocation.include._tier_preference", "aliases.shop"] {
         assert!(dropped.contains(&s), "{s} dropped: {started}");
     }
     assert_eq!(r["aliases"], json!(["catalog"]), "{started}");
     assert!(!started.to_string().contains(&old_pw), "{started}");
+    // The cluster may now read exactly that host, and no other.
+    let port = e.es.rsplit(':').next().unwrap();
+    assert_eq!(e.get("/v1/search/clusters/new").await["reindex_whitelist"], json!([format!("127.0.0.1:{port}")]));
+    let other = json!({ "source": { "remote": { "host": "http://127.0.0.1:1" }, "index": "products" }, "dest": { "index": "x" } });
+    let (_, refused) = e.call(Method::POST, "/v1/search/clusters/new/request", Some(json!({ "method": "POST", "path": "/_reindex", "body": other }))).await;
+    assert_eq!(body(&refused)["error"]["reason"], "[127.0.0.1:1] not whitelisted in reindex.remote.whitelist", "{refused}");
 
     // The console follows the task to its end; nothing it shows holds the password.
     let (_, done) = e.call(Method::POST, "/v1/search/clusters/new/request", Some(json!({ "method": "GET", "path": format!("/_tasks/{task}?wait_for_completion=true&timeout=30s") }))).await;
@@ -3048,6 +3061,9 @@ async fn migrating_from_another_cluster() {
     let settings = body(&settings);
     assert_eq!(settings["products"]["settings"]["index.number_of_shards"], "2", "{settings}");
     assert!(settings["products"]["settings"]["index.blocks.write"].is_null(), "{settings}");
+    // `shop` still names `other` alone.
+    let (_, shop) = e.call(Method::POST, "/v1/search/clusters/new/request", Some(json!({ "method": "GET", "path": "/_alias/shop" }))).await;
+    assert_eq!(index_names(&body(&shop)), ["other"], "{shop}");
 
     // Again: the index is there now, so it isn't overwritten.
     let again = e.post("/v1/search/clusters/new/migrate", json!({ "source": source, "indices": [{ "index": "products" }] })).await;

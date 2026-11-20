@@ -210,6 +210,21 @@ pub async fn get(ctx: &Ctx<'_>) -> EsResult<Reply> {
     }
 }
 
+/// Cancels every cancellable running task of `cluster` (the node unloads it: a task's work
+/// would be lost with it, so it ends now as cancelled rather than vanish). How many it cancelled.
+pub fn cancel_all(cluster: &crate::Cluster) -> usize {
+    let mut n = 0;
+    for t in cluster.tasks.list().into_iter().filter(|t| t.cancellable) {
+        if !t.cancelled.swap(true, std::sync::atomic::Ordering::Relaxed) {
+            n += 1;
+        }
+        if let Some(l) = &t.live {
+            l.wake();
+        }
+    }
+    n
+}
+
 /// `POST _tasks[/<task_id>]/_cancel`.
 pub fn cancel(ctx: &Ctx) -> EsResult<Reply> {
     let actions: Vec<String> = ctx.list_param("actions").unwrap_or_default();

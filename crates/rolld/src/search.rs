@@ -112,6 +112,10 @@ pub struct SearchArgs {
     /// cluster with a private CA.
     #[arg(long = "search-reindex-ca", env = "ROLL_SEARCH_REINDEX_CA")]
     pub search_reindex_ca: Option<String>,
+    /// How long one reindex from remote task may run before it stops (an Elasticsearch time
+    /// value: `24h`, `90m`), so a remote that answers slowly forever can't hold a task.
+    #[arg(long = "search-reindex-max-duration", env = "ROLL_SEARCH_REINDEX_MAX_DURATION", default_value = "24h")]
+    pub search_reindex_max_duration: String,
     /// Search clusters a signed-in person may own, branches included (0: no cap). The operator
     /// and admins aren't capped.
     #[arg(long = "search-max-clusters-per-person", env = "ROLL_SEARCH_MAX_CLUSTERS_PER_PERSON", default_value_t = 50)]
@@ -193,6 +197,8 @@ impl Search {
         if let Some(ca) = args.search_reindex_ca.as_deref().filter(|c| !c.trim().is_empty()) {
             cfg.node_settings.push(("reindex.ssl.certificate_authorities".to_string(), ca.to_string()));
         }
+        search_control::check_time_value(&args.search_reindex_max_duration, "--search-reindex-max-duration")?;
+        cfg.node_settings.push((search_control::REINDEX_MAX_DURATION.to_string(), args.search_reindex_max_duration.clone()));
         // Watch passwords, connector and Fleet secrets are sealed in cluster state under the
         // deployment's key; without one they're stored as given (as on Elasticsearch).
         cfg.sealer = secret_key.and_then(search_control::Sealer::from_secret);
@@ -200,6 +206,18 @@ impl Search {
         if let Some(p) = public {
             p.search(&mut cfg);
         }
+        // Reindex from remote never reads this node's own endpoints: a tenant's whitelist naming
+        // them would read other tenants' clusters through roll (fleet nodes' addresses are
+        // private, refused unless private hosts are allowed).
+        let mut blocked = vec![format!("{}:*", public_host.to_ascii_lowercase())];
+        if let Some(d) = &cfg.domain {
+            blocked.push(format!("{d}:*"));
+            blocked.push(format!("*.{d}:*"));
+        }
+        if let Some(h) = cfg.public_url.as_deref().and_then(|u| reqwest::Url::parse(u).ok()).and_then(|u| u.host_str().map(str::to_string)) {
+            blocked.push(format!("{h}:*"));
+        }
+        cfg.node_settings.push(("reindex.remote.blocklist".to_string(), blocked.join(",")));
         let client = search_server::ClientAddresses::new(args.search_client_ip_header.as_deref(), args.search_trusted_proxies.as_deref())?;
         let mut opts = search_server::ListenOptions { proxy_protocol: args.search_proxy_protocol, client, ..Default::default() };
         if let (Some(c), Some(k)) = (&args.search_tls_cert, &args.search_tls_key) {
