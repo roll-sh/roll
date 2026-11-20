@@ -118,6 +118,20 @@ fn apps_scale(b: &Value) -> Vec<Lent> {
     b.pointer("/run/scale/stream").and_then(Value::as_str).map(|s| Lent { kind: "stream".into(), r#ref: s.into(), action: Action::Read }).into_iter().collect()
 }
 
+/// A web service's `run.push`: apps reads each stream for it as a consumer group (read on it), and
+/// appends a record its app keeps refusing to a dead-letter topic there (write, for a rule with
+/// one).
+fn apps_push(b: &Value) -> Vec<Lent> {
+    let rules = b.pointer("/run/push").and_then(Value::as_array).into_iter().flatten();
+    rules
+        .filter_map(|r| {
+            let s = r.get("stream").and_then(Value::as_str)?;
+            let action = if r.get("dead_letter").is_some_and(|d| !d.is_null()) { Action::Write } else { Action::Read };
+            Some(Lent { kind: "stream".into(), r#ref: s.into(), action })
+        })
+        .collect()
+}
+
 /// A roll code repo the body names, which apps reads for the caller (`repo` for a plan or an import,
 /// `source.repo` for a service built from one): read on it, so a token can't learn a repo's stack,
 /// head or roll.toml, or build and run its code, without being allowed to read it.
@@ -126,17 +140,19 @@ fn apps_repo(b: &Value) -> Vec<Lent> {
     b.get("repo").and_then(Value::as_str).or(from_source).map(|r| Lent { kind: "repo".into(), r#ref: r.into(), action: Action::Read }).into_iter().collect()
 }
 
-/// A new service: its links, its scaling stream and the repo it's built from.
+/// A new service: its links, its scaling and pushed streams and the repo it's built from.
 fn apps_create_lends(b: &Value) -> Vec<Lent> {
     let mut out = apps_links(b);
     out.extend(apps_scale(b));
+    out.extend(apps_push(b));
     out.extend(apps_repo(b));
     out
 }
 
-/// A service's settings: its scaling stream and, when its source changes, the repo.
+/// A service's settings: its scaling and pushed streams and, when its source changes, the repo.
 fn apps_patch_lends(b: &Value) -> Vec<Lent> {
     let mut out = apps_scale(b);
+    out.extend(apps_push(b));
     out.extend(apps_repo(b));
     out
 }
@@ -1443,7 +1459,8 @@ static ROWS: &[Row] = &[
     row("PUT", "/v1/apps/services/{id}/links/{kind}/{ref}", "apps", W, one(PG, "service")).lends(Lend::Path("kind", "ref")),
     row("DELETE", "/v1/apps/services/{id}/links/{kind}/{ref}", "apps", W, one(PG, "service")),
     row("*", "/v1/apps/services/{id}", "apps", M, one(PG, "service")),
-    // A worker scaled on a stream group's lag has apps read that stream for it: read there too.
+    // A worker scaled on a stream group's lag has apps read that stream for it, and a web service's
+    // pushes consume one (and dead-letter into it): read there too, write with a dead letter.
     row("PATCH", "/v1/apps/services/{id}", "apps", Act::Body(apps_patch_action), one(PG, "service")).lends(Lend::Each(apps_patch_lends)),
     row("*", "/v1/apps/services/{id}/", "apps", M, one(PG, "service")),
     // A restore puts a deleted service's deployments live again, production's too: a deploy.
