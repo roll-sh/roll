@@ -75,6 +75,7 @@ impl CodeSource {
             approved: c.run_approved,
             author: c.author.clone(),
             github_pr: c.github_pr.map(|n| n as i64),
+            owner_id: repo.owner_id.clone(),
         }
     }
 

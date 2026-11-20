@@ -1252,7 +1252,8 @@ public) and passing once they're gone or accepted. `regressions: "required"` als
 landing in roll (a `regressions` blocker in `Code::blockers`) until then. Someone other than the
 change's author accepts them at its head (`POST …/regressions/accept`, the sheet's "Accept them";
 a required rule's by a person signed in to roll, never a token or the operator's token; the
-author is read for sure, and an unknown one refuses): the acceptance names what it accepted, so
+author is read for sure, and an unknown one refuses; a signed-in person must also be able to write
+to the change's repo in roll code, roll code's bar for a landing decision, as GitHub's Accept is): the acceptance names what it accepted, so
 anything new at the same head asks again, and nothing (or nothing compared yet) is a 409. The
 status passes with who did ("Accepted by ada: …"), and a new push asks again. The blocker also
 waits while the change's preview isn't compared at the change's own head. `an_error_mains_preview_doesnt_have_reaches_the_record_and_the_report`

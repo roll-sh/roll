@@ -330,14 +330,17 @@ async fn accept_regressions(AxState(e): S, Path(id): Path<String>, who: Option<a
     let AcceptRegressionsBody { head: seen } = if b.is_empty() { AcceptRegressionsBody::default() } else { body::<AcceptRegressionsBody>(&b)? };
     // As the visual review's: the person behind a token too.
     let behind = who.as_ref().map(|u| u.handle.clone());
+    let signed = who.as_ref().filter(|_| grant.is_none()).map(|axum::Extension(u)| u.clone());
     let (by, person) = match (who, grant) {
         (Some(axum::Extension(u)), None) => (u.handle, true),
         (_, Some(axum::Extension(g))) => (format!("token:{}", g.name), false),
         (None, None) => ("operator".into(), true),
     };
-    // A person signed in to roll, not the operator's token (a CI job may hold it).
+    // A person signed in to roll, not the operator's token (a CI job may hold it), who can write to
+    // the change's repo (an admin can).
     let person = person && by != "operator";
-    e.accept_regressions(&id, &by, behind.as_deref(), person, seen.as_deref()).await.map(Json)
+    let writer = signed.filter(|u| !u.admin).map(|u| u.code_owner);
+    e.accept_regressions(&id, &by, behind.as_deref(), person, writer.as_ref().map(|o| o.as_deref()), seen.as_deref()).await.map(Json)
 }
 
 #[derive(Deserialize)]

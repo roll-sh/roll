@@ -613,10 +613,11 @@ async fn an_error_mains_preview_doesnt_have_reaches_the_record_and_the_report() 
     let mut s = e.engine.store.settings(&e.project).unwrap();
     s.regressions = roll_previews::settings::RegressionsRule::Required;
     e.engine.store.put_settings(&e.project, &s).unwrap();
-    assert!(matches!(e.engine.accept_regressions(&p.id, "carol", None, true, None).await, Err(roll_previews::Error::Forbidden(_))), "not its author");
-    assert!(matches!(e.engine.accept_regressions(&p.id, "token:ci", None, false, None).await, Err(roll_previews::Error::Forbidden(_))), "not a token");
-    assert!(matches!(e.engine.accept_regressions(&p.id, "ada", None, true, Some("cs_old")).await, Err(roll_previews::Error::Conflict(_))), "a newer push");
-    let accepted = e.engine.accept_regressions(&p.id, "ada", None, true, Some(&p.head)).await.unwrap();
+    assert!(matches!(e.engine.accept_regressions(&p.id, "carol", None, true, None, None).await, Err(roll_previews::Error::Forbidden(_))), "not its author");
+    assert!(matches!(e.engine.accept_regressions(&p.id, "token:ci", None, false, None, None).await, Err(roll_previews::Error::Forbidden(_))), "not a token");
+    assert!(matches!(e.engine.accept_regressions(&p.id, "ada", None, true, None, Some("cs_old")).await, Err(roll_previews::Error::Conflict(_))), "a newer push");
+    assert!(matches!(e.engine.accept_regressions(&p.id, "bob", None, true, Some(Some("own_bob")), Some(&p.head)).await, Err(roll_previews::Error::Forbidden(_))), "no write on its repo");
+    let accepted = e.engine.accept_regressions(&p.id, "ada", None, true, Some(Some("own_acme")), Some(&p.head)).await.unwrap();
     assert_eq!((accepted.regressions.as_deref(), accepted.regressions_accepted.map(|a| a.by)), (Some("required"), Some("ada".to_string())));
     // A new one at the same head isn't covered by it: accepted again or not at all.
     e.apps.errors.lock().get_mut(&format!("{}/{web}", p.id)).unwrap().push(group("later", "TimeoutError", 1));

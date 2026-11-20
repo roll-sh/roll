@@ -496,7 +496,10 @@ impl Engine {
     /// Someone accepts a change's regressions against main's preview at its head (`seen`: the head
     /// they looked at; a newer one is a 409), as a visual change is accepted: not by its own author,
     /// and a required rule's only by a person.
-    pub async fn accept_regressions(&self, id: &str, by: &str, behind: Option<&str>, person: bool, seen: Option<&str>) -> Result<Preview> {
+    /// `writer`: a signed-in person's own roll code owner (`Some(None)`: they have none yet), who
+    /// must be the repo's (roll code's write); `None` for the operator, an admin or a token, which
+    /// the permissions catalog decides.
+    pub async fn accept_regressions(&self, id: &str, by: &str, behind: Option<&str>, person: bool, writer: Option<Option<&str>>, seen: Option<&str>) -> Result<Preview> {
         let r = self.store.row(id)?;
         if r.change_id.is_none() {
             return Err(Error::BadRequest("only a change's preview has regressions against main".into()));
@@ -512,6 +515,12 @@ impl Engine {
         }
         if [Some(by), behind].into_iter().flatten().any(|who| who.eq_ignore_ascii_case(&c.author) || who.eq_ignore_ascii_case(c.author.trim_start_matches('@'))) {
             return Err(Error::Forbidden("the change's own author can't accept its regressions: someone else looks at them".into()));
+        }
+        // Roll code's bar for a landing decision: someone who can write to the change's repo.
+        if let Some(owner) = writer
+            && owner != Some(c.owner_id.as_str())
+        {
+            return Err(Error::Forbidden(format!("accepting {}'s regressions needs write access to it in roll code", c.repo)));
         }
         if seen.is_some_and(|s| s != r.head) {
             return Err(Error::Conflict(format!("a newer push came in (at {}): look at it first", short(&r.head))));
