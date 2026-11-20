@@ -723,6 +723,47 @@ services, and the proxy goes with the preview's last service. Live: github.com r
 it, example.com refused and said in the activity, and a listed `169.254.169.254.nip.io` refused
 as a private address.
 
+### Keys a preview never holds (in progress)
+
+A fork's preview runs code nobody in the project wrote, so roll secrets never gives it a
+sensitive value. With roll secrets' host bindings (#520) it can still call an outside API with a
+key: its environment gets an `rlph_` placeholder where the key would be, and only roll's egress
+proxy swaps it for the value, only in a request to a host the key is bound to (Infisical's Agent
+Vault, Akeyless's SecretlessAI). Neither Vercel's, Netlify's nor Render's fork previews can do
+this: they get no secrets, or all of them.
+
+- `egress_hosts` decides first. A key's bound hosts never open egress by themselves: a fork's
+  preview reaches a bound host only when the project lists it too (agreed with roll secrets), and
+  the preview's status names a key bound to a host its egress doesn't allow, so a call that fails
+  says why.
+- For a host the preview's interception CA (#517) covers, `egress.js` hands the client's
+  connection to rolld over a unix socket in the preview's own directory, mounted into the egress
+  container (containers can't reach the host's TCP ports on ai-server, and no port is opened).
+  Every other allowed host is tunnelled untouched, as now.
+- rolld serves it with `roll_previews::intercept::serve`: it checks the CA is live (on every
+  connection), terminates TLS with a certificate for exactly that host, runs each HTTP/1.1
+  request's headers and query through roll secrets' filter (`proxy::filter` →
+  `Secrets::substitute`, which checks the placeholder, the host, the place and its maker again),
+  answers 403 to a request it refuses (nothing of it is sent), and re-dials the host over TLS
+  verified against the system's roots, never the interception CA. The `Host` header is the host
+  connected to, whatever the request said. No upgrades (WebSockets) through a bound host.
+- The CA's certificate goes into the preview's containers' trust stores (the system store,
+  `NODE_EXTRA_CA_CERTS`, `REQUESTS_CA_BUNDLE`, `SSL_CERT_FILE`, `CURL_CA_BUNDLE`); its key stays in
+  rolld's memory. Tearing the preview down ends its consumer (`end_consumer`): its placeholders and
+  CAs stop at once.
+- The preview resolves as the rule's writer (`Ask { maker }`, from `env_refs`), so a placeholder
+  works only while that person still may reveal the key.
+- Limits: a host that echoes a request's headers back (an echo service) would show the key to the
+  preview; the binding is an admin's choice of a host that doesn't. Swapped requests and refusals
+  are counted in the preview's activity, never their values or placeholders.
+
+Built so far: `intercept::serve` and its port (`intercept::Interception`), tested with a fake CA,
+a fake filter and a TLS host of its own
+(`intercept::tests::a_placeholder_becomes_its_key_only_on_the_way_to_its_host`: swapped only on the
+way out, a refused placeholder never reaches the host, an uncovered host or an ended CA is never
+terminated, an upstream the real roots don't vouch for gets nothing). Next: the socket and
+`egress.js`'s handoff, the trust stores, then rolld's adapter once roll secrets' batch 6 lands.
+
 ## Safety
 
 - **Forks.** A change with `trusted: false` (a PR from a fork) gets a preview only for a head a
@@ -2180,23 +2221,24 @@ Ranked by what a person notices first. Done so far:
 
 1. **Previews on members, in review** (#524, stacked on roll's members #501): a member's role
    decides each previews route by roll-access's catalogue (viewer reads, developer reveals and
-   writes, admin opens shells and manages the rules); roll-access learns a preview's project, so a
-   token confined to a project reaches its previews too. Left on it once #501's owner-only fix is
-   pushed: any member passes previews' own check, and team access opens to any member.
-2. **Keys a fork's preview never holds** (roll secrets' #520 placeholders and #517 interception
-   CA, after its batch 6): a fork's preview resolves as the rule's writer and gets `rlph_`
-   placeholders for keys bound to hosts; the egress proxy terminates TLS only for hosts the
-   preview's CA covers, swaps placeholders in headers and query for the host it dialled
-   (`roll_secrets::proxy::filter`), re-dials with real verification, checks the CA is live on
-   every connection, and ends the consumer with the preview. `egress_hosts` still decides first:
-   a key's hosts never open egress by themselves, and the preview's status says when a key is
-   bound to a host its egress doesn't allow. What GitHub's and Vercel's fork previews can't do:
-   run a fork's code against a real API without handing it the key.
-3. **References a person chooses** (after roll secrets' #407, `bind_ref`/`resolve_as`): a
+   writes, admin opens shells and manages the rules); team access by role (reveal: developer in
+   `preview`, admin, owner); a create only in the project roll-access decided it on, the dashboard
+   and the CLI naming it. Left: members' owner-only fix merged in, then any member passes
+   previews' own check.
+2. **Keys a fork's preview never holds, in progress** (`feature/roll-previews-intercept`; roll
+   secrets' #520 and #517, its batch 6): see "Keys a preview never holds". Built: the
+   TLS-terminating swap (`intercept::serve`). Next: the socket handoff from `egress.js`, the trust
+   stores, rolld's adapter.
+3. **A link to one push** (Vercel's per-commit URLs): a preview follows its change's head, so a
+   link a reviewer shared shows whatever came after. Keeping every head running isn't cheap; a
+   link naming a head (`?head=`) that the preview has moved past answers a page saying so, with
+   that head's screenshot and the way to the current one, and the pull request comment's links
+   name their head.
+4. **References a person chooses** (after roll secrets' #407, `bind_ref`/`resolve_as`): a
    preview's own variables take `roll://` too, and the rules' references move to bindings.
-4. **Cheap Postgres branches on ext4: overlay volumes over a frozen base** (pg-control; measured
+5. **Cheap Postgres branches on ext4: overlay volumes over a frozen base** (pg-control; measured
    2026-11-17): 0.97 s against 3.5 s for a 1.4 GB copy, but a write copies the whole table file.
-5. **Watch: pg-control's recovery to a time seconds old** (unowned).
+6. **Watch: pg-control's recovery to a time seconds old** (unowned).
 
 Landed in previews' lock turn 13 of 2026-11-20 (main c256b2f0d, exactly its gated tree): route
 budgets (#512: a route held to a p50 of its own, failing `roll/regressions` and blocking without
