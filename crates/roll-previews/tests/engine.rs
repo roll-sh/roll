@@ -1353,6 +1353,23 @@ async fn a_rules_reference_to_another_environment_needs_its_writers_reveal_there
     e.engine.store.update(&p.id, |row| row.next_at = 0).unwrap();
     e.engine.pass().await.unwrap();
     assert!(e.secrets.refs.lock().iter().any(|(k, _)| k == "K"));
+
+    // A preview's own variable may be one too: its setter's reveal there, read as them.
+    let signed = |user: &str| roll_auth::SignedIn { user: user.into(), handle: user.into(), admin: false, code_owner: None, session: "ses_1".into() };
+    let (b, c) = (signed("usr_b"), signed("usr_c"));
+    let own = |v: &str| std::collections::BTreeMap::from([("OWN".to_string(), Some(v.to_string()))]);
+    let by = |u| roll_previews::ports::Asker { operator: false, user: Some(u), grant: None };
+    assert!(matches!(e.engine.set_vars_as(&p.id, own("roll://staging/payments/OWN"), &by(&c)).await, Err(roll_previews::Error::Forbidden(_))), "no reveal there");
+    e.engine.set_vars_as(&p.id, own("roll://staging/payments/OWN"), &by(&b)).await.unwrap();
+    e.engine.pass().await.unwrap();
+    assert!(e.secrets.refs.lock().iter().any(|(k, _)| k == "OWN"), "{:?}", e.secrets.refs.lock());
+    // Saving the rules keeps it its setter's; a setter who can't now leaves it out.
+    e.engine.store.set_env_refs(&e.project, &roll_previews::settings::references(&st), "usr_b").unwrap();
+    assert!(e.engine.store.env_ref_writers(&e.project).unwrap().iter().any(|(scope, name, _, by)| *scope == format!("preview:{}", p.id) && name == "OWN" && by == "usr_b"));
+    e.engine.store.set_var_ref(&e.project, &p.id, "OWN", Some(("roll://staging/payments/OWN", "usr_gone"))).unwrap();
+    e.engine.store.update(&p.id, |row| row.next_at = 0).unwrap();
+    e.engine.pass().await.unwrap();
+    assert!(!e.secrets.refs.lock().iter().any(|(k, _)| k == "OWN"));
 }
 
 /// A variable set while a deploy is still going, then removed, is removed from the backend too:

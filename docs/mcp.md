@@ -110,7 +110,7 @@ the connect panel has a checkbox for it.
 Clients that can't take the whole list get search mode to start with: the connect panel turns it
 on when the picked client's limit is passed (VS Code, Cursor), and `roll mcp config vscode` or
 `cursor` writes `?tools=search` (`--all-tools` for the whole list; `--toolsets`, `--readonly` and
-`--lockdown` set the rest of the mode). The server itself doesn't switch on `clientInfo`: the
+`--lockdown` set the rest of the mode; `--toolsets apps.observe,postgres` takes products and areas, and a product roll doesn't have is refused before a config is written). The server itself doesn't switch on `clientInfo`: the
 2026-07-28 revision makes it optional and asks servers not to change behaviour on it. A
 `claude mcp add` line quotes a URL with a mode, so its `&` doesn't end the command.
 
