@@ -157,6 +157,11 @@ struct Args {
     /// people in its data. A port that's taken leaves it off, and previews' mail fails.
     #[arg(long, env = "ROLL_PREVIEWS_SMTP", default_value = "0.0.0.0:2525")]
     previews_smtp: std::net::SocketAddr,
+    /// How often (seconds) previews are compared with main's preview (routes from their traces,
+    /// errors from their output); unset, every minute for routes and five for errors. Tests set
+    /// it low.
+    #[arg(long, env = "ROLL_PREVIEWS_COMPARE_EVERY")]
+    previews_compare_every: Option<u64>,
     /// roll code checks running at once from this node (each in its own container or Fargate
     /// task; `ROLL_CODE_RUNNER`, see `isolation.rs`).
     #[arg(long, env = "ROLL_CODE_RUNNER_CONCURRENCY", default_value_t = 2)]
@@ -633,6 +638,10 @@ async fn run_with(mut args: Args) -> anyhow::Result<()> {
     {
         let secrets = secrets.clone();
         access.on_leaked("rlph_", move |secret, why| secrets.revoke_leaked_placeholder(secret, why));
+    }
+    // Previews' rules name roll secrets' keys only where their writer may reveal them.
+    if let Some(e) = &previews_engine {
+        let _ = e.reveal.set(std::sync::Arc::new(previews::SecretsReveal(secrets.clone())));
     }
     if let Some(c) = &code {
         secrets.set_code_refs(std::sync::Arc::new(secrets::CodeRefs(c.code.clone())));

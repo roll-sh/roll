@@ -357,10 +357,15 @@ impl Apps {
     /// `keep_variables`: run its image with the variables as they are; else (the default) its
     /// variables come back as they were when it was live (Heroku's and Railway's rollbacks), the
     /// change in the audit trail. A deployment that never went live has none kept.
-    pub async fn rollback(self: &Arc<Self>, service: &str, env: &str, dep: &str, actor: Option<String>, keep_variables: bool) -> Result<Deployment> {
+    /// Back to what was live is never frozen; putting a build live that never was (one held at
+    /// `ready`) is a deploy, so a freeze refuses it without `over`.
+    pub async fn rollback(self: &Arc<Self>, service: &str, env: &str, dep: &str, actor: Option<String>, keep_variables: bool, over: bool) -> Result<Deployment> {
         self.refuse_capped(service)?;
         self.refuse_paused(service, env).await?;
         let old = self.deployment(service, env, dep).await?;
+        if old.status == DeployStatus::Ready {
+            self.refuse_frozen(service, env, over, actor.clone()).await?;
+        }
         let Some(image) = old.image.clone() else { return Err(Error::Conflict(format!("{dep} never built an image, so there's nothing to roll back to"))) };
         if old.pruned_at.is_some() {
             return Err(Error::Conflict(format!("{dep} is older than what's kept to roll back to and its image was cleaned up; deploy its revision again")));
@@ -459,7 +464,7 @@ impl Apps {
             .max_by_key(|d| d.created_at)
             .ok_or_else(|| Error::Conflict(format!("{env} has no earlier deployment to roll back to")))?;
         let id = target.id.clone();
-        self.rollback(service, env, &id, actor, keep_variables).await
+        self.rollback(service, env, &id, actor, keep_variables, false).await
     }
 
     pub async fn cancel(self: &Arc<Self>, service: &str, env: &str, dep: &str) -> Result<Deployment> {
@@ -861,6 +866,7 @@ impl Apps {
         let snapshot = self.db(move |s| s.seal_snapshot(&did, &sid, &e)).await?;
         let vars_hash = {
             let r = self.resolve_vars(&svc, &env, &dep.id).await?;
+            r.check_refs()?;
             fingerprint(&r.vars_for_hash(), &svc)
         };
         let tpl = Arc::new(self.template(&svc, &env, &dep).await?);
@@ -1297,6 +1303,7 @@ impl Apps {
         let (sid, e) = (svc.id.clone(), d.environment.clone());
         let env_row = self.db(move |s| s.environment(&sid, &e)).await?;
         let resolved = self.resolve_vars(svc, &env_row, &d.id).await?;
+        resolved.check_refs()?;
         // Its secret values never reach the build's log, whatever a step prints.
         self.logs.redact(&format!("build:{}", d.id), &d.id, resolved.secret_values());
         let closed_vars = env_row.egress.closed().then(|| resolved.without_secrets());
@@ -1513,6 +1520,7 @@ impl Apps {
         let mut probe = svc.clone();
         probe.run.port = run.port;
         let resolved = self.resolve_vars(&probe, env, &dep.id).await?;
+        resolved.check_refs()?;
         // Its secret values never reach any of the environment's logs, whoever prints them: its
         // output, its requests' paths, its spans and its metrics.
         let secrets = resolved.secret_values();
@@ -2467,6 +2475,10 @@ impl Apps {
         self.heartbeats_pass(&services, now).await;
         self.rescan_pass(&services, now).await;
         self.pause_pass(&services, now).await;
+        if now - self.status_swept.load(std::sync::atomic::Ordering::Relaxed) >= 60_000 {
+            self.status_swept.store(now, std::sync::atomic::Ordering::Relaxed);
+            self.status_sweep(&services).await;
+        }
         for svc in services.into_iter().filter(|s| s.run.kind == RunType::Cron && self.owns(&s.id) && !self.capped(&s.id)) {
             let Some(schedule) = svc.run.schedule.as_deref().and_then(|s| crate::cron::Schedule::parse(s, svc.run.timezone.as_deref()).ok()) else { continue };
             let sid = svc.id.clone();

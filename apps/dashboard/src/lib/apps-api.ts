@@ -93,6 +93,8 @@ export interface Run {
   slo?: Slo;
   /** Its own Prometheus endpoint, scraped every 15 s on each running instance (port: the app's own by default). */
   metrics?: { port?: number; path?: string };
+  /** Counts of its own log lines as gauges (Cloud Logging's log-based metrics): each minute, the lines holding `pattern` (any case). At most ten. */
+  log_metrics?: { name: string; pattern: string }[];
   /** A gradual rollout: the new deployment takes each percent of `steps` for `step_s`, rolled
    *  back by a 5xx share of `error_pct` or more (worse than the old one); no steps: at once. */
   rollout?: { steps: number[]; step_s: number; error_pct: number; /** Each step waits for a person once it passes. */ manual?: boolean; /** With run.slo: a step fails past this burn rate (default 14.4). */ slo_burn?: number; /** A step fails when the new deployment's p95 is this many percent above the old one's. */ p95_pct?: number };
@@ -111,6 +113,10 @@ export interface Run {
   rollback_on_crash?: boolean;
   /** Build the same revision again, without the cache, when one of its base images moves. */
   rebuild_on_base?: boolean;
+  /** A web service's page loaded before a deploy keeps talking to the deployment that served it, for a day (`x-deployment-id`, `?dpl=`, or the `__roll_dpl` cookie). */
+  skew_protection?: boolean;
+  /** At max_instances with every instance at its concurrency, a request waits this long (1–60 s) for a slot, then gets a 429; unset, the least busy takes it past its concurrency. */
+  queue_s?: number;
   /** A deploy whose image has a known vulnerability this severe or worse fails before it goes live (a rollback never does). */
   block_on?: Exclude<Severity, "unknown">;
   /** A worker follows `group`'s lag on `stream` (a roll stream of its project): one instance per `per_instance` behind. */
@@ -542,12 +548,16 @@ export interface EnvironmentPut {
   routes?: RouteRule[] | null;
   /** Its uptime checks (at most 5), or null for none. */
   checks?: UptimeCheck[] | null;
-  /** Its deploy freeze: on until lifted (null), until `until`, or in weekly `windows`; a person's deploy then needs `override: true`. */
+  /** Its deploy freeze: on until lifted (null), until `until`, or in weekly `windows`; a person's deploy then needs the header `X-Roll-Override: 1` (admin). */
   freeze?: Freeze | null;
   /** Paused by the clock: as a window starts it's paused, as it ends resumed; null removes it. */
   pause_schedule?: { windows: { from: string; to: string }[]; timezone?: string } | null;
   /** Traffic mirroring: copies of `percent` of GET and HEAD requests to `environment`, answers dropped; null ends it. */
   mirror?: { environment: string; percent: number } | null;
+  /** Its own HTML in every page: before `</head>` or `</body>` (at most 5, each up to 16 KiB); null: none. */
+  snippets?: Snippet[] | null;
+  /** Runtime config its instances read at `ROLL_CONFIG_URL` without a deploy (at most 200 keys, 64 KiB); null: none. */
+  config?: Record<string, unknown> | null;
   /** Its split test: `percent` of visitors (1–99) served by `environment`, or null to end it. */
   split?: { environment: string; percent: number } | null;
   /** Its heartbeats (at most 10), or null for none; one kept by name keeps its URL. */
@@ -678,8 +688,12 @@ export interface Environment extends EnvironmentSummary {
   pause_schedule?: { windows: { from: string; to: string }[]; timezone?: string };
   /** Where a share of its GET and HEAD requests is copied, answers dropped. */
   mirror?: { environment: string; percent: number };
+  snippets?: Snippet[];
+  /** Its runtime config, and the version its instances read. */
+  config?: Record<string, unknown>;
+  config_version?: number;
   freeze?: Freeze;
-  /** Its freeze is on now: automatic deploys build to ready, a person's deploy needs override. */
+  /** Its freeze is on now: automatic deploys build to ready, a person's deploy needs the `X-Roll-Override: 1` header (admin). */
   frozen?: boolean;
   /** Its split test: a share of its visitors, kept by their bucket cookie, served by another environment. */
   split?: { environment: string; percent: number };
@@ -934,6 +948,10 @@ export interface ErrorGroup {
   instances: number;
   /** The newest one, whole (at most 8 KiB). */
   sample: string;
+  /** Open; resolved (said again, `error.regressed`, if it comes back); muted (never said). */
+  state?: "open" | "resolved" | "muted";
+  /** The deployment it was first seen in. */
+  first_deployment?: string | null;
 }
 
 /** One series of the app's own metrics (OpenTelemetry, traces on): a name and its attributes. */
@@ -1122,6 +1140,7 @@ export type NotifyEvent =
   | "alert.capacity"
   | "alert.log"
   | "error.new"
+  | "error.regressed"
   | "cron.failed"
   | "job.failed"
   | "domain.active"
@@ -1133,7 +1152,15 @@ export type NotifyEvent =
   | "check.down"
   | "heartbeat.missed"
   | "deploy.vulnerable"
-  | "alert.slo";
+  | "alert.slo"
+  /** Every `audit.*` entry: who changed what (never paged). */
+  | "audit";
+
+/** HTML of an environment's own the proxy puts in every page (Netlify's snippet injection). */
+export interface Snippet {
+  at: "head" | "body_end";
+  html: string;
+}
 
 /** An entry of the event log (`GET /v1/apps/events`, a service's `…/activity`). */
 export interface AppEvent {
@@ -1147,7 +1174,7 @@ export interface AppEvent {
 }
 
 /** A project's log drain: where its services' runtime output is POSTed (NDJSON). */
-export type DrainSource = "runtime" | "http" | "build";
+export type DrainSource = "runtime" | "http" | "build" | "audit" | "traces" | "metrics";
 
 export interface DrainSettings {
   sources?: DrainSource[];
@@ -1408,6 +1435,26 @@ export const appsApi = {
     if (!res.ok) throw new Error(data?.error ?? `${res.status} ${res.statusText}`.trim());
     return { lines: data as LogLine[], truncated: res.headers.get("x-roll-search-truncated") === "1" };
   },
+  /** What's at `path` (absolute) in a running instance, as a tar (`GET …/files`, admin); the instance answering is `X-Roll-Instance`. */
+  downloadFiles: async (id: string, e: string, path: string, instance?: string): Promise<{ tar: Blob; instance: string | null }> => {
+    const res = await fetch(`${ROLL_API}${env(id, e)}/files${qs({ path, instance })}`, withSession({ headers: apiHeaders(), cache: "no-store" }));
+    onApiStatus(res.status);
+    if (!res.ok) {
+      const data = await res.json().catch(() => null);
+      throw new Error(data?.error ?? `${res.status} ${res.statusText}`.trim());
+    }
+    return { tar: await res.blob(), instance: res.headers.get("x-roll-instance") };
+  },
+  /** A tar written under the directory `path` in a running instance (`PUT …/files`, admin: what's written runs next). */
+  uploadFiles: async (id: string, e: string, path: string, tar: Blob, instance?: string): Promise<{ instance: string; path: string }> => {
+    const res = await fetch(`${ROLL_API}${env(id, e)}/files${qs({ path, instance })}`, withSession({ method: "PUT", headers: { ...apiHeaders(), "content-type": "application/x-tar" }, body: tar }));
+    onApiStatus(res.status);
+    const data = await res.json().catch(() => null);
+    if (!res.ok) throw new Error(data?.error ?? `${res.status} ${res.statusText}`.trim());
+    return data as { instance: string; path: string };
+  },
+  /** Drops kept answers (`POST …/cache/purge`): some paths (a trailing `*` a prefix), some tags, or (neither) all of them. */
+  purgeCache: (id: string, e: string, body: { paths?: string[]; tags?: string[] }) => call<{ purged: number }>("POST", `${env(id, e)}/cache/purge`, body),
   /** A folder's bundle (`lib/bundle.ts`, what `roll up` sends) deployed to an upload service. */
   uploadDeploy: async (id: string, e: string, body: Blob, message?: string): Promise<Deployment> => {
     const headers: Record<string, string> = { ...apiHeaders(), "content-type": "application/gzip" };
@@ -1423,6 +1470,7 @@ export const appsApi = {
   routes: (id: string, e: string, minutes = 60) => call<RouteStats>("GET", `${env(id, e)}/routes${qs({ minutes })}`),
   analytics: (id: string, e: string, minutes = 1440) => call<Analytics>("GET", `${env(id, e)}/analytics${qs({ minutes })}`),
   vitals: (id: string, e: string, minutes = 1440) => call<Vitals>("GET", `${env(id, e)}/vitals${qs({ minutes })}`),
+  setErrorState: (id: string, e: string, fingerprint: string, state: "open" | "resolved" | "muted") => call<{ fingerprint: string; state: string }>("PATCH", `${env(id, e)}/errors/${encodeURIComponent(fingerprint)}`, { state }),
   errors: (id: string, e: string, minutes = 1440) => call<{ minutes: number; groups: ErrorGroup[]; scanned: number; cut: boolean }>("GET", `${env(id, e)}/errors${qs({ minutes })}`),
   appMetrics: (id: string, e: string, minutes = 60) => call<AppMetrics>("GET", `${env(id, e)}/app-metrics${qs({ minutes })}`),
   traces: (id: string, e: string, minutes = 60) => call<{ minutes: number; traces: TraceSummary[]; cut: boolean }>("GET", `${env(id, e)}/traces${qs({ minutes })}`),

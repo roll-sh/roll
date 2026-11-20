@@ -117,6 +117,7 @@ pub fn router(apps: Arc<Apps>) -> Router {
         .route(&format!("{env}/vitals"), get(vitals))
         .route(&format!("{env}/app-metrics"), get(app_metrics))
         .route(&format!("{env}/errors"), get(errors))
+        .route(&format!("{env}/errors/{{fingerprint}}"), axum::routing::patch(error_state))
         .route(&format!("{env}/forms"), get(forms))
         .route(&format!("{env}/forms/{{form}}/submissions"), get(form_submissions))
         .route(&format!("{env}/forms/{{form}}/submissions/{{sub}}"), axum::routing::delete(delete_form_submission))
@@ -735,6 +736,21 @@ async fn deploys(State(apps): S, Path((id, env)): Path<(String, String)>, Query(
     ok(apps.deployments(&id, &env, q.before).await?)
 }
 
+/// A person's deploy past a freeze: `X-Roll-Override: 1`, which roll-access makes `admin`
+/// (a deploy token can't go past a freeze the team set). The body's `override` is refused, so
+/// no caller says it where the gate doesn't read.
+fn with_override(mut b: Value, headers: &HeaderMap) -> crate::Result<Value> {
+    if b.get("override").is_some() {
+        return Err(Error::BadRequest("a freeze's override is the header X-Roll-Override: 1 (admin), not a body field".into()));
+    }
+    if headers.get("x-roll-override").is_some_and(|v| v == "1")
+        && let Some(o) = b.as_object_mut()
+    {
+        o.insert("override".into(), Value::Bool(true));
+    }
+    Ok(b)
+}
+
 /// JSON (`NewDeploy`), or a gzipped tar of the tree (`roll up`).
 async fn create_deploy(State(apps): S, Path((id, env)): Path<(String, String)>, ext: Extensions, headers: HeaderMap, b: Bytes) -> R {
     let actor = actor(&ext);
@@ -743,18 +759,20 @@ async fn create_deploy(State(apps): S, Path((id, env)): Path<(String, String)>, 
         Some(v) => Some(v.to_str().map_err(|_| Error::BadRequest("Idempotency-Key is printable ASCII".into()))?),
         None => None,
     };
+    // A freeze's override is always the header (roll-access makes it admin); never the body.
+    let over = headers.get("x-roll-override").is_some_and(|v| v == "1");
     let d = if ct.starts_with("application/gzip") || ct.starts_with("application/x-gzip") {
         // Percent-encoded UTF-8 (a commit subject isn't ASCII): `roll up` sends it so.
         let message = headers.get("x-roll-message").and_then(|v| v.to_str().ok()).map(|m| percent_encoding::percent_decode_str(m).decode_utf8_lossy().into_owned()).unwrap_or_default();
         let revision = headers.get("x-roll-revision").and_then(|v| v.to_str().ok()).filter(|r| (7..=64).contains(&r.len()) && r.bytes().all(|b| b.is_ascii_hexdigit()));
         let no_cache = headers.get("x-roll-no-cache").is_some_and(|v| v == "1");
-        apps.deploy(&id, &env, json!({ "message": message, "revision": revision, "no_cache": no_cache }), By { trigger: Trigger::Upload, actor }, Some(b), key).await?
+        apps.deploy(&id, &env, json!({ "message": message, "revision": revision, "no_cache": no_cache, "override": over }), By { trigger: Trigger::Upload, actor }, Some(b), key).await?
     } else if ct.starts_with("application/x-docker-image") {
         // An image built elsewhere (`docker save`'s archive, `roll apps deploy --image-file`).
         let message = headers.get("x-roll-message").and_then(|v| v.to_str().ok()).map(|m| percent_encoding::percent_decode_str(m).decode_utf8_lossy().into_owned()).unwrap_or_default();
-        apps.deploy(&id, &env, json!({ "message": message, "image_upload": true }), By { trigger: Trigger::Upload, actor }, Some(b), key).await?
+        apps.deploy(&id, &env, json!({ "message": message, "image_upload": true, "override": over }), By { trigger: Trigger::Upload, actor }, Some(b), key).await?
     } else {
-        apps.deploy(&id, &env, body(&b)?, By { trigger: Trigger::Manual, actor }, None, key).await?
+        apps.deploy(&id, &env, with_override(body(&b)?, &headers)?, By { trigger: Trigger::Manual, actor }, None, key).await?
     };
     apps.lift_hold(&id, &env).await;
     Ok((StatusCode::ACCEPTED, Json(d)).into_response())
@@ -1027,7 +1045,7 @@ async fn redeploy(State(apps): S, Path((id, env)): Path<(String, String)>, ext: 
         Some(v) => Some(v.to_str().map_err(|_| Error::BadRequest("Idempotency-Key is printable ASCII".into()))?),
         None => None,
     };
-    let d = apps.redeploy(&id, &env, if b.is_empty() { Value::Null } else { body(&b)? }, actor(&ext), key).await?;
+    let d = apps.redeploy(&id, &env, with_override(if b.is_empty() { json!({}) } else { body(&b)? }, &headers)?, actor(&ext), key).await?;
     apps.lift_hold(&id, &env).await;
     Ok((StatusCode::ACCEPTED, Json(d)).into_response())
 }
@@ -1125,15 +1143,16 @@ async fn run_hook(State(apps): S, Path((id, env, token)): Path<(String, String, 
     Ok((StatusCode::ACCEPTED, Json(d)).into_response())
 }
 
-async fn promote(State(apps): S, Path((id, env)): Path<(String, String)>, ext: Extensions, b: Bytes) -> R {
-    let d = apps.promote(&id, &env, body(&b)?, actor(&ext)).await?;
+async fn promote(State(apps): S, Path((id, env)): Path<(String, String)>, ext: Extensions, headers: HeaderMap, b: Bytes) -> R {
+    let d = apps.promote(&id, &env, with_override(body(&b)?, &headers)?, actor(&ext)).await?;
     apps.lift_hold(&id, &env).await;
     Ok((StatusCode::ACCEPTED, Json(d)).into_response())
 }
 
-async fn rollback(State(apps): S, Path((id, env, dep)): Path<(String, String, String)>, ext: Extensions, b: Bytes) -> R {
-    let keep = body(&b)?.get("keep_variables").and_then(Value::as_bool).unwrap_or(false);
-    let d = apps.rollback(&id, &env, &dep, actor(&ext), keep).await?;
+async fn rollback(State(apps): S, Path((id, env, dep)): Path<(String, String, String)>, ext: Extensions, headers: HeaderMap, b: Bytes) -> R {
+    let o = with_override(body(&b)?, &headers)?;
+    let (keep, over) = (o.get("keep_variables").and_then(Value::as_bool).unwrap_or(false), o.get("override").and_then(Value::as_bool).unwrap_or(false));
+    let d = apps.rollback(&id, &env, &dep, actor(&ext), keep, over).await?;
     Ok((StatusCode::ACCEPTED, Json(d)).into_response())
 }
 
@@ -1281,6 +1300,13 @@ async fn traces(State(apps): S, Path((id, env)): Path<(String, String)>, Query(q
 #[derive(Deserialize)]
 struct VitalsQuery {
     minutes: Option<i64>,
+}
+
+async fn error_state(State(apps): S, Path((id, env, fp)): Path<(String, String, String)>, ext: Extensions, b: Bytes) -> R {
+    let body = body(&b)?;
+    let out = apps.set_error_state(&id, &env, &fp, body.clone()).await?;
+    apps.audit("error.state", &id, &env, actor(&ext), json!({ "fingerprint": fp, "state": out["state"] })).await;
+    ok(out)
 }
 
 async fn errors(State(apps): S, Path((id, env)): Path<(String, String)>, Query(q): Query<VitalsQuery>) -> R {
