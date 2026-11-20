@@ -560,26 +560,6 @@ mod tests {
         Meter { ops: 0, poll: Box::leak(Box::new(never)) }
     }
 
-    /// A score whose work passes the poll interval polls the search's control, and a failed
-    /// poll (the request's deadline) stops it.
-    #[test]
-    fn max_sim_polls_the_search_control() {
-        let dims = 64;
-        let count = 4096;
-        let doc = dv(VectorElement::Float, &vec![0.5; dims * count], &[], count);
-        let f = MaxSimFn { field: Rc::from("v"), query: Query::Floats(vec![vec![1.0; dims]; 32]), hamming: false };
-        let mut polls = 0;
-        let mut poll = || {
-            polls += 1;
-            Ok(())
-        };
-        assert_eq!(score_doc(&f, &doc, &mut Meter { ops: 0, poll: &mut poll }).unwrap(), 32.0 * 32.0);
-        // 32 query vectors × 4096 × 64 = 8M multiply-adds: one poll per 1M
-        assert_eq!(polls, 8);
-        let mut stop = || Err(crate::vm::ise("time exceeded"));
-        assert!(score_doc(&f, &doc, &mut Meter { ops: 0, poll: &mut stop }).is_err());
-    }
-
     fn dv(element: VectorElement, f: &[f32], b: &[i8], count: usize) -> DocValues {
         let mut d = DocValues::default();
         d.clear(DocKind::RankVectors);

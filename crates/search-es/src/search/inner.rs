@@ -25,13 +25,27 @@ fn path_of(seg: &search_index::SegmentContext, d: u32, path: &str) -> bool {
 
 /// The `inner_hits` object of one hit.
 /// `parent_id` is the hit's `_id` (its nested hits print it).
-pub fn render(qctx: &super::query::QueryCtx, t: &Target, r: &ShardResult, parent: u32, parent_id: &str, source: Option<&Value>, total_as_int: bool) -> EsResult<Value> {
+/// `show_vectors`: the request's own `_source` sets `exclude_vectors: false` (Elasticsearch cuts
+/// nested hits out of the root source as the request fetched it, so an inner hit's own
+/// `exclude_vectors` changes nothing).
+#[allow(clippy::too_many_arguments)]
+pub fn render(qctx: &super::query::QueryCtx, t: &Target, r: &ShardResult, parent: u32, parent_id: &str, source: Option<&Value>, show_vectors: bool, total_as_int: bool) -> EsResult<Value> {
     // Nested hits' sources are cut out of their root's: under field level security, of the
-    // fields the reader may see.
-    let visible = match (source, &qctx.table.source_filter) {
+    // fields the reader may see, and without the vectors the root leaves out.
+    let mut visible = match (source, &qctx.table.source_filter) {
         (Some(s), Some(_)) => Some(qctx.table.visible_source(s.clone())),
         _ => None,
     };
+    if qctx.table.has_vectors
+        && t.idx.settings.get("index.mapping.exclude_source_vectors") != Some("false")
+        && let Some(s) = visible.take().or_else(|| source.cloned())
+    {
+        let mut s = s;
+        if let Value::Obj(m) = &mut s {
+            crate::engine::synthetic::vectors(qctx.table, "", m, !show_vectors);
+        }
+        visible = Some(s);
+    }
     let source = visible.as_ref().or(source);
     let mut out = Map::new();
     for def in &r.inner_hits {

@@ -1051,6 +1051,11 @@ fn is_time_exceeded(e: &EsError) -> bool {
     e.kind == "time_exceeded_exception"
 }
 
+/// The request's `_source` shows every vector (`exclude_vectors: false`).
+fn shows_vectors(req: &SearchRequest) -> bool {
+    req.source.source.as_ref().is_some_and(|s| s.exclude_vectors == Some(false))
+}
+
 /// When the query phase of `req` stops collecting (`QueryPhase.getTimeoutCheck`): the
 /// request's `timeout`, else `search.default_search_timeout`; never for a scroll or for
 /// `-1` (`NO_TIMEOUT`). Elasticsearch counts whole milliseconds and times out once the clock
@@ -3292,7 +3297,7 @@ fn render_hit(cluster: &Cluster, st: &ClusterState, req: &SearchRequest, t: &Tar
         let stored = r.searcher.stored(h.doc).map_err(crate::engine::convert::index_error)?;
         let source = crate::fetch::source_bytes(&stored).map(crate::fetch::parse_source).transpose()?;
         let qctx = QueryCtx::new(cluster, st, &t.idx, &table, &r.searcher, req.now_ms, t.reader());
-        let mut ih = inner::render(&qctx, t, r, h.doc, &hits::stored_id(&stored).unwrap_or_default(), source.as_ref(), req.total_as_int)?;
+        let mut ih = inner::render(&qctx, t, r, h.doc, &hits::stored_id(&stored).unwrap_or_default(), source.as_ref(), shows_vectors(req), req.total_as_int)?;
         // `stored_fields: _none_` reaches nested inner hits (their sub-context reads the
         // search's stored fields context): they print no `_id` either.
         if req.source.stored_fields.as_ref().is_some_and(|sf| sf.fields.is_none())
@@ -3484,7 +3489,7 @@ fn complete_top_hit(cluster: &Cluster, st: &ClusterState, req: &SearchRequest, t
         let stored = r.searcher.stored(doc).map_err(crate::engine::convert::index_error)?;
         let source = crate::fetch::source_bytes(&stored).map(crate::fetch::parse_source).transpose()?;
         let qctx = QueryCtx::new(cluster, st, &t.idx, &table, &r.searcher, req.now_ms, t.reader());
-        m.insert("inner_hits".into(), inner::render(&qctx, t, r, doc, &hits::stored_id(&stored).unwrap_or_default(), source.as_ref(), req.total_as_int)?);
+        m.insert("inner_hits".into(), inner::render(&qctx, t, r, doc, &hits::stored_id(&stored).unwrap_or_default(), source.as_ref(), shows_vectors(req), req.total_as_int)?);
     }
     Ok(())
 }
@@ -4657,7 +4662,7 @@ fn complete_completion_options(cluster: &Cluster, st: &ClusterState, req: &Searc
                     script_fields_of_hit(cluster, st, t, &table, &r.searcher, doc, score, &src.script_fields, m)?;
                 }
                 if !r.inner_hits.is_empty() {
-                    m.insert("inner_hits".into(), inner::render(&qctx, t, r, doc, &hits::stored_id(&stored).unwrap_or_default(), source.as_ref(), req.total_as_int)?);
+                    m.insert("inner_hits".into(), inner::render(&qctx, t, r, doc, &hits::stored_id(&stored).unwrap_or_default(), source.as_ref(), shows_vectors(req), req.total_as_int)?);
                 }
             }
         }

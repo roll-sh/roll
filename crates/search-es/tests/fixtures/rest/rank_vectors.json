@@ -1,0 +1,676 @@
+{
+  "description": "rank_vectors: non-finite float vectors refused (dense_vector too), dims bounds and empty first vectors, element types printed as stored through a partial update, and nested inner hits hiding vectors unless the request shows them. Steps that patch several vectors back into one object don't pin key order: Elasticsearch's changes with each JVM start.",
+  "steps": [
+    {
+      "req": "PUT /esm-rv",
+      "body": {
+        "mappings": {
+          "properties": {
+            "r": {
+              "type": "rank_vectors",
+              "dims": 2
+            },
+            "bf": {
+              "type": "rank_vectors",
+              "dims": 2,
+              "element_type": "bfloat16"
+            },
+            "rby": {
+              "type": "rank_vectors",
+              "dims": 2,
+              "element_type": "byte"
+            },
+            "rb": {
+              "type": "rank_vectors",
+              "dims": 16,
+              "element_type": "bit"
+            },
+            "rd": {
+              "type": "rank_vectors"
+            },
+            "d": {
+              "type": "dense_vector",
+              "dims": 2
+            },
+            "nested": {
+              "type": "nested",
+              "properties": {
+                "p": {
+                  "type": "keyword"
+                },
+                "rv": {
+                  "type": "rank_vectors",
+                  "dims": 2
+                },
+                "dv": {
+                  "type": "dense_vector",
+                  "dims": 2
+                }
+              }
+            }
+          }
+        }
+      },
+      "status": 200,
+      "response": {
+        "acknowledged": true,
+        "shards_acknowledged": true,
+        "index": "esm-rv"
+      },
+      "response_headers": {
+        "content-type": "application/json"
+      }
+    },
+    {
+      "req": "PUT /esm-rv-big",
+      "body": {
+        "mappings": {
+          "properties": {
+            "v": {
+              "type": "rank_vectors",
+              "dims": 4097
+            }
+          }
+        }
+      },
+      "status": 400,
+      "response": {
+        "error": {
+          "root_cause": [
+            {
+              "type": "mapper_parsing_exception",
+              "reason": "The number of dimensions should be in the range [1, 4096] but was [4097]"
+            }
+          ],
+          "type": "mapper_parsing_exception",
+          "reason": "Failed to parse mapping: The number of dimensions should be in the range [1, 4096] but was [4097]",
+          "caused_by": {
+            "type": "mapper_parsing_exception",
+            "reason": "The number of dimensions should be in the range [1, 4096] but was [4097]"
+          }
+        },
+        "status": 400
+      },
+      "response_headers": {
+        "content-type": "application/json"
+      }
+    },
+    {
+      "req": "PUT /esm-rv/_doc/inf",
+      "body": {
+        "r": [
+          [
+            1e+39,
+            1
+          ]
+        ]
+      },
+      "status": 400,
+      "response": {
+        "error": {
+          "root_cause": [
+            {
+              "type": "document_parsing_exception",
+              "reason": "[1:16] failed to parse: element_type [float] vectors do not support infinite values but found [Infinity] at dim [0]; Preview of invalid vector: [Infinity, 1.0]"
+            }
+          ],
+          "type": "document_parsing_exception",
+          "reason": "[1:16] failed to parse: element_type [float] vectors do not support infinite values but found [Infinity] at dim [0]; Preview of invalid vector: [Infinity, 1.0]",
+          "caused_by": {
+            "type": "illegal_argument_exception",
+            "reason": "element_type [float] vectors do not support infinite values but found [Infinity] at dim [0]; Preview of invalid vector: [Infinity, 1.0]"
+          }
+        },
+        "status": 400
+      },
+      "response_headers": {
+        "content-type": "application/json"
+      }
+    },
+    {
+      "req": "PUT /esm-rv/_doc/dinf",
+      "body": {
+        "d": [
+          1e+39,
+          1
+        ]
+      },
+      "status": 400,
+      "response": {
+        "error": {
+          "root_cause": [
+            {
+              "type": "document_parsing_exception",
+              "reason": "[1:15] failed to parse: element_type [float] vectors do not support infinite values but found [Infinity] at dim [0]; Preview of invalid vector: [Infinity, 1.0]"
+            }
+          ],
+          "type": "document_parsing_exception",
+          "reason": "[1:15] failed to parse: element_type [float] vectors do not support infinite values but found [Infinity] at dim [0]; Preview of invalid vector: [Infinity, 1.0]",
+          "caused_by": {
+            "type": "illegal_argument_exception",
+            "reason": "element_type [float] vectors do not support infinite values but found [Infinity] at dim [0]; Preview of invalid vector: [Infinity, 1.0]"
+          }
+        },
+        "status": 400
+      },
+      "response_headers": {
+        "content-type": "application/json"
+      }
+    },
+    {
+      "req": "PUT /esm-rv/_doc/b64inf",
+      "body": {
+        "r": [
+          "P4AAAH+AAAA="
+        ]
+      },
+      "status": 400,
+      "response": {
+        "error": {
+          "root_cause": [
+            {
+              "type": "document_parsing_exception",
+              "reason": "[1:7] failed to parse: element_type [float] vectors do not support infinite values but found [Infinity] at dim [1]; Preview of invalid vector: [1.0, Infinity]"
+            }
+          ],
+          "type": "document_parsing_exception",
+          "reason": "[1:7] failed to parse: element_type [float] vectors do not support infinite values but found [Infinity] at dim [1]; Preview of invalid vector: [1.0, Infinity]",
+          "caused_by": {
+            "type": "illegal_argument_exception",
+            "reason": "element_type [float] vectors do not support infinite values but found [Infinity] at dim [1]; Preview of invalid vector: [1.0, Infinity]"
+          }
+        },
+        "status": 400
+      },
+      "response_headers": {
+        "content-type": "application/json"
+      }
+    },
+    {
+      "req": "PUT /esm-rv/_doc/bfinf",
+      "body": {
+        "bf": [
+          [
+            -1e+39,
+            1
+          ]
+        ]
+      },
+      "status": 400,
+      "response": {
+        "error": {
+          "root_cause": [
+            {
+              "type": "document_parsing_exception",
+              "reason": "[1:18] failed to parse: element_type [bfloat16] vectors do not support infinite values but found [-Infinity] at dim [0]; Preview of invalid vector: [-Infinity, 1.0]"
+            }
+          ],
+          "type": "document_parsing_exception",
+          "reason": "[1:18] failed to parse: element_type [bfloat16] vectors do not support infinite values but found [-Infinity] at dim [0]; Preview of invalid vector: [-Infinity, 1.0]",
+          "caused_by": {
+            "type": "illegal_argument_exception",
+            "reason": "element_type [bfloat16] vectors do not support infinite values but found [-Infinity] at dim [0]; Preview of invalid vector: [-Infinity, 1.0]"
+          }
+        },
+        "status": 400
+      },
+      "response_headers": {
+        "content-type": "application/json"
+      }
+    },
+    {
+      "req": "PUT /esm-rv/_doc/empty",
+      "body": {
+        "rd": [
+          []
+        ]
+      },
+      "status": 400,
+      "response": {
+        "error": {
+          "root_cause": [
+            {
+              "type": "mapper_parsing_exception",
+              "reason": "The number of dimensions should be in the range [1, 4096] but was [0]"
+            }
+          ],
+          "type": "mapper_parsing_exception",
+          "reason": "The number of dimensions should be in the range [1, 4096] but was [0]"
+        },
+        "status": 400
+      },
+      "response_headers": {
+        "content-type": "application/json"
+      }
+    },
+    {
+      "req": "PUT /esm-rv/_doc/none",
+      "body": {
+        "rd": []
+      },
+      "status": 400,
+      "response": {
+        "error": {
+          "root_cause": [
+            {
+              "type": "mapper_parsing_exception",
+              "reason": "The number of dimensions should be in the range [1, 4096] but was [-1]"
+            }
+          ],
+          "type": "mapper_parsing_exception",
+          "reason": "The number of dimensions should be in the range [1, 4096] but was [-1]"
+        },
+        "status": 400
+      },
+      "response_headers": {
+        "content-type": "application/json"
+      }
+    },
+    {
+      "req": "PUT /esm-rv/_doc/mixed",
+      "body": {
+        "rd": [
+          [
+            1,
+            2
+          ],
+          [
+            1
+          ]
+        ]
+      },
+      "status": 400,
+      "response": {
+        "error": {
+          "root_cause": [
+            {
+              "type": "document_parsing_exception",
+              "reason": "[1:16] failed to parse: Field [rd] of type [rank_vectors] cannot be indexed with vectors of different dimensions"
+            }
+          ],
+          "type": "document_parsing_exception",
+          "reason": "[1:16] failed to parse: Field [rd] of type [rank_vectors] cannot be indexed with vectors of different dimensions",
+          "caused_by": {
+            "type": "illegal_argument_exception",
+            "reason": "Field [rd] of type [rank_vectors] cannot be indexed with vectors of different dimensions"
+          }
+        },
+        "status": 400
+      },
+      "response_headers": {
+        "content-type": "application/json"
+      }
+    },
+    {
+      "req": "PUT /esm-rv/_doc/single",
+      "body": {
+        "r": 5
+      },
+      "status": 400,
+      "response": {
+        "error": {
+          "root_cause": [
+            {
+              "type": "document_parsing_exception",
+              "reason": "[1:6] failed to parse: Field [r] of type [rank_vectors] cannot be indexed with a single value"
+            }
+          ],
+          "type": "document_parsing_exception",
+          "reason": "[1:6] failed to parse: Field [r] of type [rank_vectors] cannot be indexed with a single value",
+          "caused_by": {
+            "type": "illegal_argument_exception",
+            "reason": "Field [r] of type [rank_vectors] cannot be indexed with a single value"
+          }
+        },
+        "status": 400
+      },
+      "response_headers": {
+        "content-type": "application/json"
+      }
+    },
+    {
+      "req": "PUT /esm-rv/_doc/bithex",
+      "body": {
+        "rb": [
+          "0102ff"
+        ]
+      },
+      "status": 400,
+      "response": {
+        "error": {
+          "root_cause": [
+            {
+              "type": "document_parsing_exception",
+              "reason": "[1:8] failed to parse: The [rank_vectors] field [rb] in doc [document with id 'bithex'] has a different number of dimensions [24] than defined in the mapping [16]"
+            }
+          ],
+          "type": "document_parsing_exception",
+          "reason": "[1:8] failed to parse: The [rank_vectors] field [rb] in doc [document with id 'bithex'] has a different number of dimensions [24] than defined in the mapping [16]",
+          "caused_by": {
+            "type": "illegal_argument_exception",
+            "reason": "The [rank_vectors] field [rb] in doc [document with id 'bithex'] has a different number of dimensions [24] than defined in the mapping [16]"
+          }
+        },
+        "status": 400
+      },
+      "response_headers": {
+        "content-type": "application/json"
+      }
+    },
+    {
+      "req": "PUT /esm-rv/_doc/1?refresh=true",
+      "body": {
+        "rby": [
+          [
+            1,
+            -3
+          ]
+        ],
+        "bf": [
+          [
+            300.33,
+            -0.5
+          ]
+        ],
+        "rb": [
+          "0102"
+        ],
+        "nested": [
+          {
+            "p": "a",
+            "rv": [
+              [
+                1,
+                2
+              ]
+            ],
+            "dv": [
+              1,
+              2
+            ]
+          },
+          {
+            "p": "b",
+            "rv": [
+              [
+                3,
+                4
+              ]
+            ],
+            "dv": [
+              3,
+              4
+            ]
+          }
+        ]
+      },
+      "status": 201,
+      "response": {
+        "_index": "esm-rv",
+        "_id": "1",
+        "_version": 1,
+        "result": "created",
+        "forced_refresh": true,
+        "_shards": {
+          "total": 2,
+          "successful": 1,
+          "failed": 0
+        },
+        "_seq_no": 0,
+        "_primary_term": 1
+      },
+      "response_headers": {
+        "content-type": "application/json"
+      }
+    },
+    {
+      "req": "POST /esm-rv/_update/1?refresh=true&filter_path=get._source",
+      "body": {
+        "doc": {
+          "x": 1
+        },
+        "_source": true
+      },
+      "status": 200,
+      "response": {
+        "get": {
+          "_source": {
+            "nested": [
+              {
+                "p": "a",
+                "dv": [
+                  1.0,
+                  2.0
+                ],
+                "rv": [
+                  [
+                    1.0,
+                    2.0
+                  ]
+                ]
+              },
+              {
+                "p": "b",
+                "dv": [
+                  3.0,
+                  4.0
+                ],
+                "rv": [
+                  [
+                    3.0,
+                    4.0
+                  ]
+                ]
+              }
+            ],
+            "rby": [
+              [
+                1,
+                -3
+              ]
+            ],
+            "bf": [
+              [
+                300.0,
+                -0.5
+              ]
+            ],
+            "rb": [
+              [
+                1,
+                2
+              ]
+            ],
+            "x": 1
+          }
+        }
+      },
+      "response_headers": {
+        "content-type": "application/json"
+      },
+      "unordered": true
+    },
+    {
+      "req": "GET /esm-rv/_doc/1?_source_exclude_vectors=false&filter_path=_source",
+      "status": 200,
+      "response": {
+        "_source": {
+          "nested": [
+            {
+              "p": "a",
+              "dv": [
+                1.0,
+                2.0
+              ],
+              "rv": [
+                [
+                  1.0,
+                  2.0
+                ]
+              ]
+            },
+            {
+              "p": "b",
+              "dv": [
+                3.0,
+                4.0
+              ],
+              "rv": [
+                [
+                  3.0,
+                  4.0
+                ]
+              ]
+            }
+          ],
+          "x": 1,
+          "rb": [
+            [
+              1,
+              2
+            ]
+          ],
+          "bf": [
+            [
+              300.0,
+              -0.5
+            ]
+          ],
+          "rby": [
+            [
+              1,
+              -3
+            ]
+          ]
+        }
+      },
+      "response_headers": {
+        "content-type": "application/json"
+      },
+      "unordered": true
+    },
+    {
+      "req": "POST /esm-rv/_search?filter_path=hits.hits._source,hits.hits.inner_hits.nested.hits.hits._source",
+      "body": {
+        "query": {
+          "nested": {
+            "path": "nested",
+            "query": {
+              "match_all": {}
+            },
+            "inner_hits": {}
+          }
+        }
+      },
+      "status": 200,
+      "response": {
+        "hits": {
+          "hits": [
+            {
+              "_source": {
+                "nested": [
+                  {
+                    "p": "a"
+                  },
+                  {
+                    "p": "b"
+                  }
+                ],
+                "x": 1
+              },
+              "inner_hits": {
+                "nested": {
+                  "hits": {
+                    "hits": [
+                      {
+                        "_source": {
+                          "p": "a"
+                        }
+                      },
+                      {
+                        "_source": {
+                          "p": "b"
+                        }
+                      }
+                    ]
+                  }
+                }
+              }
+            }
+          ]
+        }
+      },
+      "response_headers": {
+        "content-type": "application/json"
+      }
+    },
+    {
+      "req": "POST /esm-rv/_search?filter_path=hits.hits.inner_hits.nested.hits.hits._source",
+      "body": {
+        "query": {
+          "nested": {
+            "path": "nested",
+            "query": {
+              "match_all": {}
+            },
+            "inner_hits": {}
+          }
+        },
+        "_source": {
+          "exclude_vectors": false
+        }
+      },
+      "status": 200,
+      "response": {
+        "hits": {
+          "hits": [
+            {
+              "inner_hits": {
+                "nested": {
+                  "hits": {
+                    "hits": [
+                      {
+                        "_source": {
+                          "p": "a",
+                          "dv": [
+                            1.0,
+                            2.0
+                          ],
+                          "rv": [
+                            [
+                              1.0,
+                              2.0
+                            ]
+                          ]
+                        }
+                      },
+                      {
+                        "_source": {
+                          "p": "b",
+                          "dv": [
+                            3.0,
+                            4.0
+                          ],
+                          "rv": [
+                            [
+                              3.0,
+                              4.0
+                            ]
+                          ]
+                        }
+                      }
+                    ]
+                  }
+                }
+              }
+            }
+          ]
+        }
+      },
+      "response_headers": {
+        "content-type": "application/json"
+      },
+      "unordered": true
+    }
+  ]
+}

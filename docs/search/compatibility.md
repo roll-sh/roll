@@ -351,8 +351,10 @@ the discovery/store plugins.
 vectors flat in one binary doc value (`search_codec::vectors::multi`: no header, the count is the
 value's length over the vector width), `maxSimDotProduct` and `maxSimInvHamming` in
 `script_score`, `doc[...]` / `field(...)` vectors and magnitudes, `docvalue_fields`, `fields`, and
-the vectors left out of `_source` (inside `nested` too) unless `exclude_vectors: false` or the
-includes name them. roll keeps them in the stored `_source` and hides them on read, where
+the vectors left out of `_source` (inside `nested` too, and in nested inner hits) unless
+`exclude_vectors: false` or the includes name them, printed as their element type keeps them
+(`byte` and `bit` as integers, `bfloat16` rounded). Infinite float values are refused at index
+time, for `dense_vector` too, with Elasticsearch's message. roll keeps them in the stored `_source` and hides them on read, where
 Elasticsearch strips them and patches them back from the doc values. A MaxSim costs query vectors ×
 document vectors × dimensions for one document, so it polls the search's control (the request's
 `timeout` or `search.default_search_timeout`, and task cancellation) every 2^20 multiply-adds: a

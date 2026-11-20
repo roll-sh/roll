@@ -40,10 +40,11 @@ impl MultiElement {
     }
 }
 
-/// A float rounded to `bfloat16` (nearest even), as its 16 bits.
+/// A float rounded to `bfloat16` (nearest even), as its 16 bits. Java's int arithmetic: the
+/// sum wraps for the bit patterns of negative NaNs.
 pub fn bfloat16_bits(x: f32) -> u16 {
     let b = x.to_bits();
-    ((b + 0x7fff + ((b >> 16) & 1)) >> 16) as u16
+    (b.wrapping_add(0x7fff).wrapping_add((b >> 16) & 1) >> 16) as u16
 }
 
 /// Appends float vectors (`values`, vector after vector) in `element`'s encoding.

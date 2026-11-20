@@ -457,18 +457,23 @@ impl<'t> Writer<'t> {
                         f.name
                     )));
                 }
-                // Written only once `dims` is in the mapping, and only vectors of that width.
-                if let Some((element, dims)) = f.rank_layout()
-                    && *width == if element == MultiElement::Bit { dims as usize / 8 } else { dims as usize }
-                {
-                    let mut b = Vec::new();
-                    if element.is_float() {
-                        search_codec::vectors::multi::encode_floats(element, floats, &mut b);
-                    } else {
-                        b.extend(bytes.iter().map(|x| *x as u8));
-                    }
-                    d.fields.push(IndexableField::DocValue { field: f.number, value: DocValue::Binary(b.into()) });
+                // The parser checked the vectors against the mapping's `dims` (and the write
+                // path set them first): a vector of another width here is a bug, never data.
+                let Some((element, dims)) = f.rank_layout() else {
+                    return Err(EsError::illegal_state(format!("rank_vectors field [{}] has no dims", f.name)));
+                };
+                let per = if element == MultiElement::Bit { dims as usize / 8 } else { dims as usize };
+                let values = if element.is_float() { floats.len() } else { bytes.len() };
+                if per == 0 || *width != per || values % per != 0 {
+                    return Err(EsError::illegal_state(format!("rank_vectors field [{}] got vectors of width [{width}], its mapping has [{per}]", f.name)));
                 }
+                let mut b = Vec::new();
+                if element.is_float() {
+                    search_codec::vectors::multi::encode_floats(element, floats, &mut b);
+                } else {
+                    b.extend(bytes.iter().map(|x| *x as u8));
+                }
+                d.fields.push(IndexableField::DocValue { field: f.number, value: DocValue::Binary(b.into()) });
             }
             (FieldValue::Feature(v), _) => {
                 let mut v = *v;

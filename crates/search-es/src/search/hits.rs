@@ -189,10 +189,7 @@ fn dense_vector_value(seg: &SegmentContext, local: u32, f: &FieldInfo, format: O
         _ => "float".into(),
     });
     let floats = || raw.as_chunks::<4>().0.iter().map(|c| f32::from_le_bytes(*c)).collect::<Vec<f32>>();
-    let bf16 = |x: f32| -> u16 {
-        let b = x.to_bits();
-        ((b + 0x7fff + ((b >> 16) & 1)) >> 16) as u16
-    };
+    let bf16 = search_codec::vectors::multi::bfloat16_bits;
     match format {
         None | Some("array") => Ok(Some(Value::Arr(match element.as_str() {
             "byte" | "bit" => raw.iter().map(|b| Value::from(*b as i8 as i64)).collect(),
