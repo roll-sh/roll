@@ -6,9 +6,13 @@
 //!
 //! Postgres runs its computes in Docker, so it's linked only with `ROLL_SECRETS_DOCKER=1`
 //! (`pnpm test:secrets --docker`) and skipped otherwise.
+//!
+//! And a sealed start (`ROLL_SECRET_KEY_SEALED`): nothing that needs the deployment key runs until
+//! its shares unseal the node.
 
 use serde_json::{Value, json};
 use std::process::{Child, Command, Stdio};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 const TOKEN: &str = "secrets-links-test-operator-token-0123456789";
@@ -28,8 +32,10 @@ fn free_port() -> u16 {
 
 struct Rolld {
     child: Child,
-    home: tempfile::TempDir,
+    home: Arc<tempfile::TempDir>,
     api: String,
+    /// roll search's HTTP address.
+    search: String,
     http: reqwest::Client,
     docker: bool,
 }
@@ -60,12 +66,16 @@ impl Rolld {
     /// rolld with `products` on free loopback ports and an operator token (so the products' own
     /// credentials, not the operator's, decide their data planes).
     async fn start(products: &str, docker: bool) -> Rolld {
-        let home = tempfile::tempdir().unwrap();
+        Rolld::start_in(Arc::new(tempfile::tempdir().unwrap()), products, docker, &[], "/v1/info").await
+    }
+
+    /// [`Rolld::start`] in `home` with `env` set, started once `ready` answers a success.
+    async fn start_in(home: Arc<tempfile::TempDir>, products: &str, docker: bool, env: &[(&str, &str)], ready: &str) -> Rolld {
         let local = |p: u16| format!("127.0.0.1:{p}");
         let api = free_port();
         let mut cmd = Command::new(env!("CARGO_BIN_EXE_rolld"));
         cmd.env_clear().env("RUST_LOG", "warn").env("ROLL_HOME", home.path()).env("ROLL_API", local(api)).env("ROLL_PROXY", local(free_port()));
-        cmd.env("ROLL_ADMIN_TOKEN", TOKEN).env("ROLL_PRODUCTS", products);
+        cmd.env("ROLL_ADMIN_TOKEN", TOKEN).env("ROLL_PRODUCTS", products).envs(env.iter().copied());
         // Without Docker, nothing on PATH: no product may need it.
         if docker {
             cmd.env("PATH", std::env::var("PATH").unwrap_or_default());
@@ -84,24 +94,30 @@ impl Rolld {
             "ROLL_NOSQL_CQL_SHARD_AWARE",
             "ROLL_NOSQL_ALTERNATOR",
             "ROLL_NOSQL_REST",
-            "ROLL_SEARCH_HTTP",
         ] {
             cmd.env(var, local(free_port()));
         }
+        let search = local(free_port());
+        cmd.env("ROLL_SEARCH_HTTP", &search);
         let child = cmd.stdout(Stdio::null()).spawn().expect("rolld starts");
-        let mut r = Rolld { child, home, api: format!("http://127.0.0.1:{api}"), http: reqwest::Client::new(), docker };
+        let mut r = Rolld { child, home, api: format!("http://127.0.0.1:{api}"), search, http: reqwest::Client::new(), docker };
+        r.wait_for(ready).await;
+        r
+    }
+
+    /// Until `path` answers a success.
+    async fn wait_for(&mut self, path: &str) {
         let started = Instant::now();
         loop {
-            if let Ok(a) = r.http.get(format!("{}/v1/info", r.api)).bearer_auth(TOKEN).send().await
+            if let Ok(a) = self.http.get(format!("{}{path}", self.api)).bearer_auth(TOKEN).send().await
                 && a.status().is_success()
             {
                 break;
             }
-            assert!(started.elapsed() < Duration::from_secs(60), "rolld didn't answer");
-            assert!(r.child.try_wait().unwrap().is_none(), "rolld exited");
+            assert!(started.elapsed() < Duration::from_secs(60), "rolld didn't answer {path}");
+            assert!(self.child.try_wait().unwrap().is_none(), "rolld exited");
             tokio::time::sleep(Duration::from_millis(100)).await;
         }
-        r
     }
 
     /// A route as the operator; anything but a success fails the test.
@@ -327,5 +343,58 @@ async fn pg_connects(url: &str, patience: Duration) -> bool {
             return false;
         }
         tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+}
+
+/// A sealed start inside rolld (docs/secrets.md, "Starting sealed"): until a threshold of the
+/// deployment key's shares unseal it, values aren't read, roll search (which seals its clusters'
+/// secrets with the key) doesn't start, and roll secrets' sweeper (expiries, leases, rotations)
+/// doesn't run; once they do, every one of them works with the key the shares gave.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_sealed_rolld_runs_nothing_that_needs_the_key_until_its_shares_unseal_it() {
+    const KEY: &str = "fake-deployment-key-for-the-sealed-rolld-test-00000";
+    let home = Arc::new(tempfile::tempdir().unwrap());
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as i64;
+    // First with the key itself: a value, and a preview's environment that expires tomorrow.
+    let r = Rolld::start_in(home.clone(), "search", false, &[("ROLL_SECRET_KEY", KEY)], "/v1/info").await;
+    let project = Project::new(&r).await.id;
+    let envs = format!("/v1/secrets/projects/{project}/environments");
+    r.post(&format!("{envs}/production/changes"), json!({ "ops": [{ "op": "set", "key": "FAKE_API_KEY", "value": "fake-value-0001" }] })).await;
+    r.post(&envs, json!({ "slug": "pr-1", "kind": "ephemeral", "base": "staging", "expires_at": now + 86_400_000 })).await;
+    drop(r);
+    // Its expiry passes while the node is down: the sweeper's first pass deletes it.
+    let db = home.path().join("secrets.db");
+    let expiry = || rusqlite::Connection::open(&db).unwrap().query_row("SELECT expires_at FROM environments WHERE slug = 'pr-1'", [], |r| r.get::<_, i64>(0)).ok();
+    rusqlite::Connection::open(&db).unwrap().execute("UPDATE environments SET expires_at = 1 WHERE slug = 'pr-1'", []).unwrap();
+
+    let shares = roll_keyshares::split(KEY.as_bytes(), 3, 2).unwrap();
+    let set = roll_keyshares::Share::parse(1, &shares[0]).unwrap().set;
+    let sealed = format!("{}:2", set.iter().map(|b| format!("{b:02x}")).collect::<String>());
+    let mut r = Rolld::start_in(home.clone(), "search", false, &[("ROLL_SECRET_KEY_SEALED", &sealed)], "/v1/secrets/unseal").await;
+    let values = format!("{}{envs}/production/values?path=/", r.api);
+    let refused = || async {
+        let a = r.http.get(&values).bearer_auth(TOKEN).send().await.unwrap();
+        (a.status().as_u16(), a.json::<Value>().await.unwrap()["sealed"].clone())
+    };
+    let unseal = |share: String| {
+        let req = r.http.post(format!("{}/v1/secrets/unseal", r.api)).json(&json!({ "share": share }));
+        async move { req.send().await.unwrap().json::<Value>().await.unwrap() }
+    };
+    assert_eq!(refused().await, (503, json!(true)));
+    assert!(tokio::net::TcpStream::connect(&r.search).await.is_err(), "roll search started sealed");
+    // Long enough for the sweeper's first pass, which runs as roll secrets starts.
+    tokio::time::sleep(Duration::from_secs(3)).await;
+    assert_eq!(expiry(), Some(1), "the sweeper ran sealed");
+    assert_eq!(unseal(shares[0].clone()).await, json!({ "sealed": true, "have": 1, "need": 2 }));
+    assert_eq!(refused().await, (503, json!(true)), "one share of two unsealed it");
+
+    assert_eq!(unseal(shares[2].clone()).await, json!({ "sealed": false, "have": 2, "need": 2 }));
+    r.wait_for("/v1/info").await;
+    assert_eq!(Project { rolld: &r, id: project.clone() }.value("FAKE_API_KEY").await, "fake-value-0001");
+    assert!(tokio::net::TcpStream::connect(&r.search).await.is_ok(), "roll search didn't start once unsealed");
+    let started = Instant::now();
+    while expiry().is_some() {
+        assert!(started.elapsed() < Duration::from_secs(30), "the sweeper didn't run once unsealed");
+        tokio::time::sleep(Duration::from_millis(200)).await;
     }
 }

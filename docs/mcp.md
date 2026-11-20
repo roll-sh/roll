@@ -40,20 +40,23 @@ config with your address filled in.
 
 ### Toolsets
 
-Every product's tools are about 310 (roll's own and roll code's: ~200 KB, ~25k tokens of what a
-model reads), before an agent does anything. Building that list takes 6.5 ms at p50 and 15.5 ms at
+Every product's tools are about 430 (roll's own and roll code's: ~300 KB, ~47k tokens of what a
+model reads; `pnpm test:mcp-sweep` prints the count and size, `GET /v1/mcp/toolsets` each
+product's), before an agent does anything. Apps is the largest (89 tools, ~12k tokens), then
+secrets (64, ~8k); measured on main 2026-11-20. Building that list takes 6.5 ms at p50 and 15.5 ms at
 p99 in release (`tools_list_cost`, an ignored test: linear in the tools, 3.2 ms for 149), and a
 client keeps it for a minute (`ttlMs`). Connect to `/v1/mcp?toolsets=postgres,code` (or send `X-MCP-Toolsets: postgres,code`) to
 list only those products' tools, as GitHub's MCP server does; the access tools (approvals,
-`access_check`) are always listed. On a four-product node, Redis alone is 12 tools, ~2.4k tokens
-instead of ~16k. An unknown name is `400`, naming the toolsets there are. The dashboard's connect
+`access_check`) are always listed. Redis alone is 10 tools and the access tools 11, ~2.2k
+tokens instead of ~47k. An unknown name is `400`, naming the toolsets there are. The dashboard's connect
 panel picks them. A toolset only narrows the list: the token's rules decide every call as before,
 and OAuth's resource is the server whatever the toolsets (checked with the TypeScript SDK).
 
 Clients cap how many tools they take. VS Code refuses a chat request with more than 128 tools, its
 own built-in ones included ("Cannot have more than 128 tools per request"); Windsurf takes 100;
 Cursor is reported to drop tools past about 40. Claude Code defers a long list behind its own tool
-search. So with every product on, VS Code, Windsurf and Cursor need toolsets: the connect panel
+search. So with every product on, VS Code, Windsurf and Cursor need toolsets, and apps alone with the
+access tools is 100, Windsurf's limit, so past it search mode is the way in: the connect panel
 adds up a choice (`GET /v1/mcp/toolsets`: each product's tools, read-only tools and context cost,
 to a caller) and warns past the picked client's limit.
 
@@ -62,9 +65,9 @@ that use them.
 
 ### Search mode
 
-With every product on, a node lists about 240 tools (~25k tokens), past VS Code's limit and far
-past Cursor's. `/v1/mcp?tools=search` (or `X-MCP-Tools: search`) lists the access tools plus three
-tools instead, about 1k tokens whatever runs. This is the pattern of Cloudflare's code mode and
+With every product on, a node lists about 430 tools (~47k tokens), past VS Code's,
+Windsurf's and Cursor's limits. `/v1/mcp?tools=search` (or `X-MCP-Tools: search`) lists the access tools plus three
+tools instead, about 1.8k tokens whatever runs (the three are ~500). This is the pattern of Cloudflare's code mode and
 GitHub's dynamic toolsets, applied to a stateless server:
 
 | Tool | What it does |
@@ -624,6 +627,7 @@ previews are listed once those products are on.
 | `storage_usage_all` | Storage and requests across every bucket. | `GET /v1/storage/usage` |
 | `storage_list_accounts` | Storage's accounts (12-digit ids): name, alias, the default. | `GET /v1/storage/accounts` |
 | `storage_list_keys` | An account's access keys: permission, buckets, IAM user, last use (never a secret). | `GET /v1/storage/keys` |
+| `storage_revoke_key` | Revoke an S3 access key at once. | `DELETE /v1/storage/keys/{id}` |
 | `storage_list_roles` | An account's IAM roles: ARN, trust, permissions policy, session length. | `GET /v1/storage/roles` |
 | `storage_get_role` | One IAM role. | `GET /v1/storage/roles/{name}` |
 | `storage_list_replication_targets` | Buckets outside roll that replication copies to (never the secret). | `GET /v1/storage/replication-targets` |
@@ -645,6 +649,7 @@ previews are listed once those products are on.
 | `streams_branch` | A stream branched, records shared (its key's secret: reveal). | `POST /v1/streams/{s}/branches` |
 | `streams_usage` | A stream's usage and throughput. | `GET /v1/streams/{stream}/usage` |
 | `streams_list_keys` | The SASL users a stream's clients sign in as (never a password). | `GET /v1/streams/{stream}/keys` |
+| `streams_revoke_key` | Revoke a stream's SASL user at once. | `DELETE /v1/streams/{stream}/keys/{username}` |
 | `streams_update` | Change some of a stream's settings (as streams_get shows them: retention, throughput limits…); the rest stay. | `PATCH /v1/streams/{stream}` |
 | `streams_update_topic` | Grow a topic's partitions or change its configs, online. | `PATCH /v1/streams/{stream}/topics/{topic}` |
 | `streams_delete_group` | Delete a group and its committed offsets (refused while it has members). | `DELETE /v1/streams/{stream}/groups/{group}` |
@@ -674,6 +679,11 @@ previews are listed once those products are on.
 | `queues_queue_rates` | One queue's rates and depth over the last minutes (`queues_rates` is the broker's). | `GET /v1/queues/vhosts/{vhost}/queues/{queue}/rates` |
 | `queues_list_exchanges` | A virtual host's exchanges. | `GET /v1/queues/vhosts/{vhost}/exchanges` |
 | `queues_list_bindings` | Which exchange routes to which queue by which key. | `GET /v1/queues/vhosts/{vhost}/bindings` |
+| `queues_declare_exchange` | Make an exchange (idempotent; amq.* reserved). | `POST /v1/queues/vhosts/{vhost}/exchanges` |
+| `queues_delete_exchange` | Delete an exchange and its bindings. | `DELETE /v1/queues/vhosts/{vhost}/exchanges/{exchange}` |
+| `queues_bind` | Route an exchange's messages to a queue or exchange by a key. | `POST /v1/queues/vhosts/{vhost}/bindings` |
+| `queues_unbind` | Remove a binding. | `DELETE /v1/queues/vhosts/{vhost}/bindings` |
+| `queues_replay` | Publish a queue's messages again (a dead-letter queue's, back where they came from). | `POST /v1/queues/vhosts/{vhost}/queues/{queue}/replay` |
 | `queues_peek` | Messages in a queue, without consuming them. | `GET /v1/queues/vhosts/{vhost}/queues/{queue}/messages` |
 | `queues_publish` | Publish to an exchange with a routing key. | `POST /v1/queues/vhosts/{vhost}/publish` |
 | `queues_list_connections` | Open client connections: who, from where, and their channels. | `GET /v1/queues/connections` |
@@ -735,6 +745,9 @@ previews are listed once those products are on.
 | `search_create_cluster` | A new cluster, or a branch of one (its password once, to tokens that may reveal). | `POST /v1/search/clusters` |
 | `search_list_branches` | A cluster's branches. | `GET /v1/search/clusters/{id}/branches` |
 | `search_list_remotes` | The clusters this one searches across: alias, cluster, key id, whether it connects (never the key). | `GET /v1/search/clusters/{id}/remotes` |
+| `search_overview` | What roll search offers here: versions, endpoint, defaults, pricing. | `GET /v1/search` |
+| `search_unlink_remote` | Unlink a remote cluster (its credentials go; a key roll made is revoked). | `DELETE /v1/search/clusters/{cluster}/remotes/{alias}` |
+| `search_revoke_key` | Revoke a cluster API key at once. | `DELETE /v1/search/clusters/{cluster}/keys/{key}` |
 | `search_list_inference_secrets` | Inference endpoints keyed by a roll secret, and what each follows (never the value). | `GET /v1/search/clusters/{id}/inference/secrets` |
 | `search_branch_cluster` | A copy-on-write branch of a cluster. | `POST /v1/search/clusters/{cluster}/branches` |
 | `search_update_cluster` | A cluster's idle timeout, request limits, flavor, IP allowlist (admin). | `PATCH /v1/search/clusters/{id}` |
@@ -792,6 +805,7 @@ previews are listed once those products are on.
 | `secrets_get_change` | One change: what it did to each key (fingerprints, never values). | `GET /v1/secrets/projects/{project}/environments/{env}/changes/{seq}` |
 | `secrets_insights` | Each key's version, last change and read, reads in 30 days, staleness. | `GET /v1/secrets/projects/{project}/environments/{env}/insights` |
 | `secrets_verify_audit` | Whether a project's secrets audit chain holds: rows walked, how far signed digests vouch, the first break. | `GET /v1/secrets/projects/{project}/audit/verify` |
+| `secrets_audit` | A project's secrets audit log, newest first: who read or changed what (never a value), by env, key, actor or action. | `GET /v1/secrets/projects/{project}/audit` |
 | `secrets_required` | The keys every standard environment must define. | `GET /v1/secrets/projects/{project}/required` |
 | `secrets_folders` | An environment's folders. | `GET /v1/secrets/projects/{project}/environments/{env}/folders` |
 | `secrets_suggestions` | Links roll suggests for a project's resources. | `GET /v1/secrets/projects/{project}/suggestions` |
@@ -886,6 +900,8 @@ previews are listed once those products are on.
 | `apps_cancel_cron_run` | Stop a running cron run (production: deploy). | `POST /v1/apps/services/{id}/environments/{env}/runs/{run}/cancel` |
 | `apps_run_cron` | Run a cron job now (deploy in production). | `POST …/environments/{env}/runs` |
 | `apps_limits` | A project's apps spend limits. | `GET /v1/apps/projects/{project}/limits` |
+| `apps_set_limits` | Set a project's monthly apps alert and hard cap (the cap pauses the project; admin). | `PUT /v1/apps/projects/{project}/limits` |
+| `apps_overview` | What roll apps runs here: domain, runtime, prices, every service. | `GET /v1/apps` |
 | `apps_list_project_services` | The services in one workspace project. | `GET /v1/apps/projects/{project}/services` |
 | `apps_list_notifications` | Where a project's deploy, crash and preview events are sent (webhook, Slack, Discord, email; the URL's host only). | `GET /v1/apps/projects/{project}/notifications` |
 | `apps_add_notification` | Notify a webhook, Slack, Discord or an email address of a project's events (the URL is stored sealed and never shown again). | `POST /v1/apps/projects/{project}/notifications` |
@@ -903,6 +919,7 @@ previews are listed once those products are on.
 | `apps_deploy_vulnerabilities` | Known vulnerabilities in a deploy's image, most severe first (`severity` keeps that or worse), with the scan's counts. | `GET /v1/apps/services/{id}/environments/{env}/deploys/{dep}/vulnerabilities` |
 | `apps_deploy_sbom` | A deploy's image as a CycloneDX SBOM (every package and version). | `GET /v1/apps/services/{id}/environments/{env}/deploys/{dep}/sbom` |
 | `apps_status_page` | A project's public status page: title, URL, what it shows. | `GET /v1/apps/projects/{project}/status-page` |
+| `apps_remove_status_page` | Take a project's public status page down (making or changing one is a person's: admin, no tool). | `DELETE /v1/apps/projects/{project}/status-page` |
 | `apps_list_incidents` | Its incidents: the last 90 days' and the open ones, with updates. | `GET /v1/apps/projects/{project}/status-page/incidents` |
 | `apps_create_incident` | Post an incident on the public page (published text: the credential guard refuses credentials as where people read). | `POST /v1/apps/projects/{project}/status-page/incidents` |
 | `apps_update_incident` | Add a public update to an incident (`resolved` closes it). | `POST /v1/apps/projects/{project}/status-page/incidents/{iid}/updates` |
@@ -916,6 +933,11 @@ previews are listed once those products are on.
 | `apps_list_domains` | An environment's domains. | `GET /v1/apps/services/{service}/environments/{env}/domains` |
 | `apps_add_domain` | Point a domain at an environment. | `POST /v1/apps/services/{service}/environments/{env}/domains` |
 | `apps_remove_domain` | Remove a domain. | `DELETE /v1/apps/services/{service}/environments/{env}/domains/{host}` |
+| `apps_update_domain` | Redirect a domain to another hostname of the environment, or serve another port on it. | `PATCH /v1/apps/services/{service}/environments/{env}/domains/{host}` |
+| `apps_preview_domain` | A project's preview domain: the wildcard its preview environments answer under. | `GET /v1/apps/projects/{project}/preview-domain` |
+| `apps_set_preview_domain` | Give a project's previews a wildcard of its own (answers the DNS record). | `POST /v1/apps/projects/{project}/preview-domain` |
+| `apps_verify_preview_domain` | Check a preview domain's DNS now. | `POST /v1/apps/projects/{project}/preview-domain/verify` |
+| `apps_remove_preview_domain` | Remove a project's preview domain. | `DELETE /v1/apps/projects/{project}/preview-domain` |
 | `previews_list` | Preview environments. | `GET /v1/previews` |
 | `previews_get` | A preview with its branched resources and its schema changes. | `GET /v1/previews/{id}` |
 | `previews_create` | A preview environment for a change or a branch: the project's resources branched, its services deployed. | `POST /v1/previews` |
@@ -934,6 +956,9 @@ previews are listed once those products are on.
 | `previews_share` | A link for someone outside the team, for some hours (reveal: its token is in the answer). | `POST /v1/previews/{id}/shares` |
 | `previews_revoke_share` | Stop a preview's share link at once. | `DELETE /v1/previews/{id}/shares/{share}` |
 | `previews_settings` | A project's preview rules (changing them is admin, in the dashboard). | `GET /v1/previews/projects/{project}/settings` |
+| `previews_visitors` | The last people signed in to roll who opened a preview. | `GET /v1/previews/{id}/visitors` |
+| `previews_list_hooks` | A project's preview deploy hooks (never their secrets). | `GET /v1/previews/projects/{project}/hooks` |
+| `previews_delete_hook` | Delete a preview deploy hook. | `DELETE /v1/previews/projects/{project}/hooks/{hook}` |
 | `previews_list_shares` | Who a preview is shared with outside the team (never the links' tokens). | `GET /v1/previews/{id}/shares` |
 | `previews_env` | A preview's own variables, with their values (reveal). | `GET /v1/previews/{id}/env` |
 | `previews_connect` | Each data branch's connection as the preview's services get it (the branches' own credentials; reveal). | `GET /v1/previews/{id}/connect` |
