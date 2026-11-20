@@ -5094,6 +5094,33 @@ async fn an_allow_list_lets_only_its_networks_in() {
     assert_eq!(from(Some("198.51.100.1:5000")).await, StatusCode::OK);
 }
 
+/// `run.latency_target_ms` (Heroku's response-time autoscaling): a web service whose answers'
+/// p95 stays over the target for a window gets another instance; out of range is a 400.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_web_service_scales_on_its_latency() {
+    let w = world_with(|c| c.live.cpu_window = Duration::from_millis(400)).await;
+    let (st, svc) = call(&w.api, "POST", "/v1/apps/services", Some(json!({ "project": w.project, "name": "slow", "source": {"kind": "image", "image": "nginx:1.27"}, "run": {"port": 80, "min_instances": 1, "max_instances": 3, "latency_target_ms": 50}, "variables": {"FAKE_SLOW_MS": "150"} }))).await;
+    assert_eq!(st, StatusCode::CREATED, "{svc}");
+    let id = svc["id"].as_str().unwrap().to_string();
+    settled(&w, &id, "production", svc["environments"][0]["latest"]["id"].as_str().unwrap()).await;
+    assert_eq!(call(&w.api, "PATCH", &format!("/v1/apps/services/{id}"), Some(json!({"run": {"latency_target_ms": 10}}))).await.0, StatusCode::BAD_REQUEST);
+    let h = host(&svc["environments"][0]["url"]);
+    let live = w.apps.live(&id, "production");
+    let running = || w.fake.instances(&id).into_iter().filter(|(_, _, st)| *st == FakeState::Running).count();
+    let mut scaled = false;
+    for _ in 0..60 {
+        futures::future::join_all((0..8).map(|_| visit(&w, &h, "/"))).await;
+        live.tick().await;
+        if running() >= 2 {
+            scaled = true;
+            break;
+        }
+    }
+    let (_, log) = call(&w.api, "GET", &format!("/v1/apps/services/{id}/environments/production/logs?tail=50"), None).await;
+    assert!(scaled, "a second instance for its p95: {log}");
+    assert!(log.to_string().contains("scaled out: p95 at"), "{log}");
+}
+
 /// `run.cpu_target` and `run.memory_target`: a web service whose instances stay over the target
 /// for the window gets another (one at a time), and goes back down once they'd be under it.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

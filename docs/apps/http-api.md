@@ -269,6 +269,7 @@ type Run = {
    *  to max_instances), and fewer stay once they'd be under it. 10–100; unset, requests only.
    *  Only what the runtime measures counts (Docker's cgroup; not Fargate, which bills by size). */
   cpu_target?: number;
+  latency_target_ms?: number; /* 50–60,000: a web service also scaled on its answers' p95 (another instance while a window's p95 is over it) */
   /** And on memory (Render's target memory): the same, against the percent of each instance's
    *  `memory_mb` in use. 10–100; unset, not on memory. With both, whichever asks for more
    *  instances decides. Docker only, as cpu_target. */
