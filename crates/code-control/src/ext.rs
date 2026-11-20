@@ -8,6 +8,9 @@ use crate::model::{Change, Check, Preview, RepoRow};
 use async_trait::async_trait;
 use std::path::Path;
 
+/// What `@roll preview …` asks of a change's preview.
+pub use code_review::commands::PreviewAction;
+
 /// Creates and tears down a change's preview.
 #[async_trait]
 pub trait PreviewBackend: Send + Sync {
@@ -19,6 +22,12 @@ pub trait PreviewBackend: Send + Sync {
     /// came in. Backends without one can't.
     async fn accept_visual(&self, _change: &Change, _by: &str, _head: &str) -> anyhow::Result<()> {
         anyhow::bail!("this preview backend has no visual review")
+    }
+    /// `by` (someone who can write to the change's repo: the caller checked) asks `action` of the
+    /// change's preview (`@roll preview …`): what was done, said for the answer. Backends without
+    /// one can't.
+    async fn act(&self, _change: &Change, _action: PreviewAction, _by: &str) -> anyhow::Result<String> {
+        anyhow::bail!("this change's previews can't be acted on from a comment")
     }
 }
 
