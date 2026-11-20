@@ -1025,6 +1025,7 @@ previews are listed once those products are on.
 | `apps_remove_preview_domain` | Remove a project's preview domain. | `DELETE /v1/apps/projects/{project}/preview-domain` |
 | `previews_list` | Preview environments. | `GET /v1/previews` |
 | `previews_get` | A preview with its branched resources and its schema changes. | `GET /v1/previews/{id}` |
+| `previews_wait` | A preview once it's ready, failed, sleeping or waiting on a person (a task waits as long as it takes). | `GET /v1/previews/{id}` |
 | `previews_create` | A preview environment for a change or a branch: the project's resources branched, its services deployed. | `POST /v1/previews` |
 | `previews_refresh` | Redeploy a preview now. | `POST /v1/previews/{id}/refresh` |
 | `previews_errors` | A preview's errors, grouped (masked as logs are). | `GET /v1/previews/{id}/errors` |
