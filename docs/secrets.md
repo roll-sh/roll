@@ -5137,7 +5137,8 @@ is still level with or ahead of the category. The gaps are at the new features' 
 
    #494 (CI green): the install line, a no-such-project page with ways out (shared with the canvas),
    links from empty states, Try again on load errors. After #430 (one conflict in `ui.tsx`).
-6. **Workload identities match nested and list claims** (S; building `feature/roll-oidc-claims`):
+6. **Workload identities match nested and list claims** (S; #499, gated green: JSON-pointer keys in
+   `claims`, lists match on any element, one shared `roll_oidc::check_identity`):
    `roll-oidc`'s `Jwt::str` reads top-level strings only, so Keycloak's `realm_access.roles` and
    Entra's `groups` can't be matched. Doppler and Vault both take JSON pointers and lists.
 7. **Big changes on Postgres** (performance, M): 9,900 keys in one change took 11.7 s against 0.5 s on
