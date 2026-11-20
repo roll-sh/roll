@@ -948,6 +948,10 @@ export interface ErrorGroup {
   instances: number;
   /** The newest one, whole (at most 8 KiB). */
   sample: string;
+  /** Open; resolved (said again, `error.regressed`, if it comes back); muted (never said). */
+  state?: "open" | "resolved" | "muted";
+  /** The deployment it was first seen in. */
+  first_deployment?: string | null;
 }
 
 /** One series of the app's own metrics (OpenTelemetry, traces on): a name and its attributes. */
@@ -1136,6 +1140,7 @@ export type NotifyEvent =
   | "alert.capacity"
   | "alert.log"
   | "error.new"
+  | "error.regressed"
   | "cron.failed"
   | "job.failed"
   | "domain.active"
@@ -1465,6 +1470,7 @@ export const appsApi = {
   routes: (id: string, e: string, minutes = 60) => call<RouteStats>("GET", `${env(id, e)}/routes${qs({ minutes })}`),
   analytics: (id: string, e: string, minutes = 1440) => call<Analytics>("GET", `${env(id, e)}/analytics${qs({ minutes })}`),
   vitals: (id: string, e: string, minutes = 1440) => call<Vitals>("GET", `${env(id, e)}/vitals${qs({ minutes })}`),
+  setErrorState: (id: string, e: string, fingerprint: string, state: "open" | "resolved" | "muted") => call<{ fingerprint: string; state: string }>("PATCH", `${env(id, e)}/errors/${encodeURIComponent(fingerprint)}`, { state }),
   errors: (id: string, e: string, minutes = 1440) => call<{ minutes: number; groups: ErrorGroup[]; scanned: number; cut: boolean }>("GET", `${env(id, e)}/errors${qs({ minutes })}`),
   appMetrics: (id: string, e: string, minutes = 60) => call<AppMetrics>("GET", `${env(id, e)}/app-metrics${qs({ minutes })}`),
   traces: (id: string, e: string, minutes = 60) => call<{ minutes: number; traces: TraceSummary[]; cut: boolean }>("GET", `${env(id, e)}/traces${qs({ minutes })}`),

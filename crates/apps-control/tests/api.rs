@@ -719,6 +719,32 @@ async fn a_new_error_is_an_event_once() {
     }
     w.apps.note_new_errors(&live).await;
     assert_eq!(news().await.len(), 2);
+    // Its lifecycle (Cloud Run Error Reporting's): resolved, it's said again when it comes back;
+    // muted, never.
+    let errors = format!("/v1/apps/services/{id}/environments/production/errors");
+    let fp = first[0]["data"]["fingerprint"].as_str().unwrap().to_string();
+    let (st, v) = call(&w.api, "PATCH", &format!("{errors}/{fp}"), Some(json!({"state": "resolved"}))).await;
+    assert_eq!((st, &v["state"]), (StatusCode::OK, &json!("resolved")), "{v}");
+    assert_eq!(call(&w.api, "PATCH", &format!("{errors}/nope"), Some(json!({"state": "muted"}))).await.0, StatusCode::NOT_FOUND);
+    let regressed = || async {
+        call(&w.api, "GET", "/v1/apps/events?after=0", None).await.1["events"].as_array().unwrap().iter().filter(|e| e["kind"] == "error.regressed").cloned().collect::<Vec<_>>()
+    };
+    tokio::time::sleep(Duration::from_millis(5)).await;
+    for l in trace("ValueError") {
+        log.line(l);
+    }
+    w.apps.note_new_errors(&live).await;
+    assert_eq!(regressed().await.len(), 1, "back after it was resolved");
+    let (_, listed) = call(&w.api, "GET", &format!("{errors}?minutes=60"), None).await;
+    let g = listed["groups"].as_array().unwrap().iter().find(|g| g["fingerprint"] == fp.as_str()).cloned().unwrap();
+    assert_eq!((&g["state"], &g["first_deployment"]), (&json!("open"), &json!("dep_x")), "{g}");
+    call(&w.api, "PATCH", &format!("{errors}/{fp}"), Some(json!({"state": "muted"}))).await;
+    tokio::time::sleep(Duration::from_millis(5)).await;
+    for l in trace("ValueError") {
+        log.line(l);
+    }
+    w.apps.note_new_errors(&live).await;
+    assert_eq!(regressed().await.len(), 1, "muted: never said");
 }
 
 /// Secret files (Render's): a variable kept as a file is out of the instance's environment and
@@ -3718,7 +3744,7 @@ async fn a_failed_deploy_is_sent_to_the_projects_targets_signed_and_retried() {
     let (st, hook) = call(&w.api, "POST", &base, Some(json!({"url": format!("http://{ok_at}/hook")}))).await;
     assert_eq!(st, StatusCode::CREATED, "{hook}");
     let secret = hook["secret"].as_str().unwrap().to_string();
-    assert_eq!(hook["events"], json!(["check.down", "heartbeat.missed", "alert.slo", "deploy.failed", "rollout.waiting", "deploy.ready", "error.new", "crash_loop", "spend.alert", "spend.limit", "alert.memory", "alert.errors", "alert.latency", "alert.capacity", "alert.log", "cron.failed", "domain.expiring", "domain.expired", "domain.tls_failed", "volume.backup_failed", "volume.full"]), "the default events");
+    assert_eq!(hook["events"], json!(["check.down", "heartbeat.missed", "alert.slo", "deploy.failed", "rollout.waiting", "deploy.ready", "error.new", "error.regressed", "crash_loop", "spend.alert", "spend.limit", "alert.memory", "alert.errors", "alert.latency", "alert.capacity", "alert.log", "cron.failed", "domain.expiring", "domain.expired", "domain.tls_failed", "volume.backup_failed", "volume.full"]), "the default events");
     let (_, down) = call(&w.api, "POST", &base, Some(json!({"kind": "webhook", "url": format!("http://{bad_at}/x"), "events": ["deploy.failed"]}))).await;
     let (_, list) = call(&w.api, "GET", &base, None).await;
     assert!(!list.to_string().contains(&secret) && !list.to_string().contains("/hook"), "neither the secret nor the URL comes back: {list}");

@@ -1459,6 +1459,8 @@ static ROWS: &[Row] = &[
     row("POST", "/v1/apps/services/{id}/environments/{env}/redeploy", "apps", Act::ProductionIf("env"), one(PG, "service")).env(EnvFrom::Param("env")).admin_if("x-roll-override"),
     row("POST", "/v1/apps/services/{id}/environments/{env}/promote", "apps", Act::ProductionIf("env"), one(PG, "service")).env(EnvFrom::Param("env")).admin_if("x-roll-override"),
     row("POST", "/v1/apps/services/{id}/environments/{env}/deploys/{dep}/rollback", "apps", Act::ProductionIf("env"), one(PG, "service")).env(EnvFrom::Param("env")).admin_if("x-roll-override"),
+    // An error group resolved, muted or open again: the team's triage, a write in any environment.
+    row("PATCH", "/v1/apps/services/{id}/environments/{env}/errors/{fingerprint}", "apps", W, one(PG, "service")).env(EnvFrom::Param("env")),
     row("POST", "/v1/apps/services/{id}/environments/{env}/", "apps", Act::ProductionIf("env"), one(PG, "service")).env(EnvFrom::Param("env")),
     row("PUT", "/v1/apps/services/{id}/environments/{env}/", "apps", Act::ProductionIf("env"), one(PG, "service")).env(EnvFrom::Param("env")),
     row("PATCH", "/v1/apps/services/{id}/environments/{env}/", "apps", Act::ProductionIf("env"), one(PG, "service")).env(EnvFrom::Param("env")),
