@@ -289,8 +289,6 @@ fails += [f"leak {l}" for l in leaks]
 # or the kind is below with why it has none: a list answer of another shape offers nothing
 # without failing anything, and a new kind of id with no choices fails here until it has some.
 NO_CHOICES = {("postgres", "endpoint"): "an endpoint sits inside its branch, not in a list",
-              ("code", "repo"): "a repo's owner/name isn't an id a form offers", ("workspace", "repo"): "as code's",
-              ("code", "owner"): "no tool lists owners", ("agents", "owner"): "as code's",
               ("tasks", "id"): "it names a message, run, schedule or function by tool"}
 def form_call(name, args):
     global n
@@ -356,6 +354,8 @@ if "--writes" in sys.argv:
         if (prod, name) in seen:
             return seen[(prod, name)]
         ty = schema.get("type")
+        if isinstance(ty, list):  # a field that takes null to clear: fake its other type
+            ty = next((t for t in ty if t != "null"), None)
         if ty == "integer" or ty == "number":
             return 1
         if ty == "boolean":

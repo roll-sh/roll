@@ -318,7 +318,11 @@ behind the `Apps` trait:
     those.
   - Deleting the preview deletes the environments.
 - **`roll.toml` containers**, when the project has no roll apps services. The services are the
-  project's repos whose `roll.toml` has a `[preview]` section, named after the repo
+  project's repos whose `roll.toml` has a `[preview]` section, named after the repo. A repo with
+  a Compose file and no `roll.toml` gets its services from roll apps' Compose import (`roll apps
+  import-compose`, New service's "A file"; docs/apps/README.md), whose services then come into
+  each preview through their `pv-` environments: previews read no Compose file themselves, so the
+  two never disagree about one (the Previews tab's empty state says so)
   (`[preview] name = "api"` overrides that). Each runs in the container `roll.toml` describes,
   through code-preview's `Isolation`: Docker here, a Fargate task on the fleet.
   - With `[[preview.states]]` (a name, a page and steps, as `github.states`), `pages =
@@ -417,6 +421,11 @@ behind the `Apps` trait:
   reference only once trimmed or lowercased (` roll://…`) is refused. Who wrote each reference
   is kept, not yet checked again later: a writer who loses reveal leaves their reference working
   until roll secrets' `bind_ref` binds it to them (its #407).
+  The rules dialog offers a key in roll secrets for a variable whose name reads as a secret
+  (`STRIPE_SECRET_KEY`, `GITHUB_TOKEN`: the same rule as roll apps' sealed-by-default names) and
+  whose value isn't a reference: one click writes the value to the base environment under that
+  name (roll secrets' own write, so its rules and audit apply) and puts `roll://BASE/NAME` in
+  the rule, saved with the rest. The value then lives in roll secrets only.
   Only the rules' own references (checked when saved) go to roll secrets as references, as their
   own input to rolld's ensure; every other value previews write, a preview's own variables and
   anything stored before included, is plain text: its `${` is escaped, so it's never a reference
@@ -1239,7 +1248,8 @@ an `IN` list as one) and masked as its names are. The trace list and the route t
 a route's worst trace) tag it N+1, an opened trace says what it runs, and `roll preview traces
 --routes` prints it under the route. `a_statement_run_many_times_in_a_trace_is_said_by_its_shape`.
 Read back masked as
-its logs are: a span's name and attributes are its code's words. The intake reads OTLP with roll
+its logs are: a span's name, service, attributes and ids are its code's words (the OTLP reader
+refuses ids that aren't 32 or 16 hex characters; a secret's value sent as one shows as `***`). The intake reads OTLP with roll
 apps' reader (`apps_control::otlp::spans_of_request`). A roll apps service's traces are roll apps'
 own: with the project's `traces` the preview's `pv-` environment gets roll apps' `traces: true` (its
 own OpenTelemetry variables and intake), and the preview's list and trace reads take them from roll

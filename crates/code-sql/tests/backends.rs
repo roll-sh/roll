@@ -375,6 +375,43 @@ fn read_committed_writes_still_compare_and_swap() {
     }
 }
 
+/// A hot row that read-committed writers claim and update without a pause, and a serializable
+/// write that reads it, takes a while, then updates it: it loses at first, then runs holding the
+/// claim, so it commits on its second attempt rather than running out of retries.
+#[test]
+fn a_serializable_write_that_loses_to_claimers_runs_next_holding_the_claim() {
+    let Some(_) = pg_url() else { return };
+    let dir = tempfile::tempdir().unwrap();
+    let db = Db::open_or_test(&Target::Sqlite(dir.path().join("t.db")), "claim").unwrap();
+    db.ensure_schema(SCHEMA).unwrap();
+    db.execute("INSERT INTO kv (k, v) VALUES ('head', 0)", ()).unwrap();
+    let (stop, attempts) = (std::sync::atomic::AtomicBool::new(false), AtomicUsize::new(0));
+    std::thread::scope(|s| {
+        for _ in 0..4 {
+            s.spawn(|| {
+                while !stop.load(Ordering::Relaxed) {
+                    db.write_with(Isolation::ReadCommitted, |c| {
+                        c.claim("head")?;
+                        c.execute("UPDATE kv SET v = v + 1 WHERE k = 'head'", ())
+                    })
+                    .unwrap();
+                }
+            });
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        db.write(|c| {
+            attempts.fetch_add(1, Ordering::SeqCst);
+            let v: i64 = c.query_row("SELECT v FROM kv WHERE k = 'head'", (), |r| r.get(0))?;
+            std::thread::sleep(std::time::Duration::from_millis(20));
+            c.claim("head")?;
+            c.execute("UPDATE kv SET flag = ? WHERE k = 'head'", [v])
+        })
+        .unwrap();
+        stop.store(true, Ordering::Relaxed);
+    });
+    assert!(attempts.load(Ordering::SeqCst) <= 2, "{} attempts", attempts.load(Ordering::SeqCst));
+}
+
 /// Connections killed every 100 ms under concurrent writes: every write that returned Ok
 /// happened exactly once, and with the server up none fails or ends up unknown.
 #[test]
