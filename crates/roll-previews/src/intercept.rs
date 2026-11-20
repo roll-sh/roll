@@ -87,6 +87,66 @@ pub fn system_upstream() -> Arc<rustls::ClientConfig> {
     upstream_config(roots)
 }
 
+/// [`Dial`] as rolld dials: the host resolved here, and only a public address connected to (roll-net's
+/// `private_ip`), so a bound name pointed at the host, the fleet or the cloud's metadata reaches
+/// nothing.
+pub fn public_dial() -> Dial {
+    Arc::new(|host: String, port: u16| {
+        Box::pin(async move {
+            let addrs = tokio::net::lookup_host((host.as_str(), port)).await?;
+            let mut last = std::io::Error::new(std::io::ErrorKind::PermissionDenied, format!("{host} has no public address"));
+            for a in addrs.filter(|a| !roll_net::private_ip(a.ip())) {
+                match tokio::net::TcpStream::connect(a).await {
+                    Ok(s) => return Ok(s),
+                    Err(e) => last = e,
+                }
+            }
+            Err(last)
+        })
+    })
+}
+
+/// The longest handoff line `egress.js` sends (`host:port\n`).
+const HANDOFF_MAX: usize = 300;
+
+/// What a preview's egress proxy hands over on its socket: the `CONNECT` target, as `host:port\n`,
+/// then the client's bytes. Bounded; anything else is refused.
+pub async fn read_handoff<S: AsyncRead + Unpin>(s: &mut S) -> anyhow::Result<(String, u16)> {
+    use tokio::io::AsyncReadExt;
+    let mut line = Vec::with_capacity(64);
+    let mut b = [0u8; 1];
+    loop {
+        anyhow::ensure!(s.read(&mut b).await? == 1, "the handoff ended early");
+        if b[0] == b'\n' {
+            break;
+        }
+        line.push(b[0]);
+        anyhow::ensure!(line.len() <= HANDOFF_MAX, "a handoff line too long");
+    }
+    let line = String::from_utf8(line)?;
+    let (host, port) = line.rsplit_once(':').ok_or_else(|| anyhow::anyhow!("a handoff without a port"))?;
+    anyhow::ensure!(!host.is_empty() && host.bytes().all(|c| c.is_ascii_alphanumeric() || c == b'.' || c == b'-'), "a handoff's host isn't a name");
+    Ok((host.to_string(), port.parse()?))
+}
+
+/// Serve one preview's handoffs on `listener` (its socket, mounted into its egress container),
+/// each as [`serve`], until the listener ends. `done` hears each connection's [`Served`] (for the
+/// activity), or why it was refused.
+pub async fn listen(listener: tokio::net::UnixListener, i: Arc<dyn Interception>, upstream: Arc<rustls::ClientConfig>, dial: Dial, done: Arc<dyn Fn(String, anyhow::Result<Served>) + Send + Sync>) {
+    while let Ok((mut s, _)) = listener.accept().await {
+        let (i, upstream, dial, done) = (i.clone(), upstream.clone(), dial.clone(), done.clone());
+        tokio::spawn(async move {
+            match read_handoff(&mut s).await {
+                Ok((host, port)) => {
+                    let out = serve(s, &host, port, i, upstream, dial).await;
+                    done(host, out);
+                }
+                Err(e) => done(String::new(), Err(e)),
+            }
+        });
+    }
+}
+
 /// The most of one connection's refusals kept for the activity.
 const MAX_BLOCKED: usize = 20;
 
@@ -311,6 +371,16 @@ mod tests {
         let resp = s.send_request(req).await.unwrap();
         let status = resp.status().as_u16();
         (status, String::from_utf8(resp.into_body().collect().await.unwrap().to_bytes().to_vec()).unwrap())
+    }
+
+    #[tokio::test]
+    async fn a_handoff_names_one_host_and_port_and_nothing_more() {
+        let read = |b: &'static [u8]| async move { read_handoff(&mut &b[..]).await.map_err(|e| e.to_string()) };
+        assert_eq!(read(b"api.example.test:443\nrest").await, Ok(("api.example.test".into(), 443)));
+        for bad in [&b"api.example.test\n"[..], b"a b:443\n", b":443\n", b"api.example.test:443"] {
+            assert!(read(bad).await.is_err(), "{:?}", String::from_utf8_lossy(bad));
+        }
+        assert!(read(Box::leak(vec![b'a'; 400].into_boxed_slice())).await.is_err(), "bounded");
     }
 
     #[tokio::test]

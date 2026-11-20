@@ -761,8 +761,13 @@ Built so far: `intercept::serve` and its port (`intercept::Interception`), teste
 a fake filter and a TLS host of its own
 (`intercept::tests::a_placeholder_becomes_its_key_only_on_the_way_to_its_host`: swapped only on the
 way out, a refused placeholder never reaches the host, an uncovered host or an ended CA is never
-terminated, an upstream the real roots don't vouch for gets nothing). Next: the socket and
-`egress.js`'s handoff, the trust stores, then rolld's adapter once roll secrets' batch 6 lands.
+terminated, an upstream the real roots don't vouch for gets nothing); `egress.js`'s handoff
+(`INTERCEPT`: a CONNECT to a covered host, once allowed, goes to `/roll/intercept.sock` as
+`host:port` then the client's bytes; plain HTTP to one is refused, a key goes over TLS only;
+unset, nothing changes) and rolld's side of the socket (`intercept::listen`, `read_handoff`,
+bounded and refusing anything but a name and a port; `public_dial`, public addresses only).
+Next: the runtime mounting the socket and starting the listener, the trust stores, then rolld's
+adapter once roll secrets' batch 6 lands.
 
 ## Safety
 

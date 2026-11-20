@@ -7230,6 +7230,7 @@ dependencies = [
  "rcgen",
  "roll-auth",
  "roll-cluster",
+ "roll-net",
  "roll-workspace",
  "rustls-native-certs",
  "rustls-pemfile",
