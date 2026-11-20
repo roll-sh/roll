@@ -4356,7 +4356,7 @@ minutes.
   (`aud`, default this server's URL from the CLI and the dashboard, so a token minted for one roll
   server isn't good at another), a `subject` (`sub`, or a pattern of it where `*` stands for
   any run of characters), up to ten other `claims` that must match (`ref`, `environment`,
-  `repository_owner_id`…), and the scope of what a login gets: environments, folders and actions
+  `repository_owner_id`…; see "Claims" below), and the scope of what a login gets: environments, folders and actions
   like a token's (never more than its creator has) for `ttl_minutes`, 5–60 (default 15).
 - **Shared issuers.** GitHub Actions, GitLab.com, Terraform Cloud, Buildkite and Google sign for
   every tenant they host, so an identity of theirs must name one tenant literally in its subject
@@ -4371,6 +4371,22 @@ minutes.
   refused. Key fetches are one at a time per issuer, and a failed one isn't retried for 30 s.
   Logins are capped at 120 a minute per identity and 240 per client address (429 `rate_limited`),
   counted per node before any work.
+- **Claims.** Each of an identity's `claims` maps a claim to a value or a pattern with `*` (the
+  subject's rules: `*` is any run of characters, nothing else is special, never `**` recursion).
+  The key is a top-level claim's name (`ref`), or a JSON pointer (RFC 6901, starting with `/`)
+  into nested claims: `{"/realm_access/roles": "deployer"}` for Keycloak's realm roles,
+  `{"/groups": "team-*"}` for Entra ID's `groups` or `roles`, `{"/groups_direct": "acme/ops"}` for
+  GitLab's. In a pointer `~1` stands for `/` and `~0` for `~`, and a decimal segment indexes an
+  array (`/groups/0`). Through a pointer, an array claim matches when any of its first 256
+  elements does (one level: an array inside an array never matches), and numbers and booleans
+  match their JSON text (`2`, `true`). A plain name matches only a string claim, as rules made
+  before pointers did, so an existing rule never starts matching a list or a number it used to
+  refuse: write `/groups`, not `groups`, to match a list. An object, `null` or a missing claim
+  never matches. A pointer has at most 8 segments,
+  none empty, and can't start at `iss`, `aud`, `sub`, `exp`, `nbf` or `iat`. Claims only narrow
+  the subject: a shared issuer's subject still names one tenant, whatever the claims say. The rules
+  are `roll_oidc::check_identity` and `Jwt::unmatched`, which roll-access's trusted machine clients
+  use too.
 - **Pinned keys, for an issuer roll can't reach.** A cluster signs its service accounts' tokens as
   `https://kubernetes.default.svc.cluster.local` (k3s, kind, kubeadm, a private EKS endpoint), an
   issuer roll can't and shouldn't fetch. An identity can carry the issuer's public keys instead
@@ -5117,7 +5133,7 @@ type LinkTarget = { kind: string; ref: string; name: string; fields: { field: st
 type Lease = { id: string; environment: string; path: string; key: string; kind: "dynamic" | "retired"; link: Link | null; consumer: string; issued_at: number; expires_at: number; revoked_at: number | null };
 type Identity = { id: string; name: string; kind: "oidc" | "aws"; arn?: string; server_id?: string; issuer: string; audience: string; subject: string; claims: Record<string, string>; environments: string[] | null; paths: string[] | null; actions: Action[]; ttl_minutes: number; created_at: number; created_by: string; last_used_at: number | null; last_subject: string | null; allowed_ips: string[] | null; pinned_keys?: number; gateway?: string }; // gateway: it logs that gateway in (no environments, paths or actions)
 type Gateway = { id: string; name: string; token_id?: string; created_at: number; created_by: string; status: { online: boolean; node?: string; version?: string; allow: string[]; connected_at?: number; last_seen_at?: number } };
-type NewIdentity = { name: string; environments?: string[]; paths?: string[]; actions: Action[]; ttl_minutes?: number; allowed_ips?: string[]; gateway?: string } & ({ kind?: "oidc"; issuer: string; audience: string; subject: string; claims?: Record<string, string>; jwks?: string } | { kind: "aws"; arn: string });
+type NewIdentity = { name: string; environments?: string[]; paths?: string[]; actions: Action[]; ttl_minutes?: number; allowed_ips?: string[]; gateway?: string } & ({ kind?: "oidc"; issuer: string; audience: string; subject: string; claims?: Record<string, string>; jwks?: string } | { kind: "aws"; arn: string }); // claims: a name or a JSON pointer ("/realm_access/roles") → a value or a * pattern (workload identities, "Claims")
 type Token = { id: string; name: string; environments: string[] | null; paths: string[] | null; actions: Action[]; expires_at: number | null; created_at: number; created_by: string; last_used_at: number | null; prefix: string; allowed_ips: string[] | null };
 type NewToken = { name: string; environments?: string[]; paths?: string[]; actions: Action[]; expires_at?: number; ttl_days?: number; allowed_ips?: string[] };
 type Action = "read" | "reveal" | "write" | "delete" | "admin";
