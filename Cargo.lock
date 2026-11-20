@@ -1939,6 +1939,8 @@ dependencies = [
  "roll-auth",
  "roll-cluster",
  "roll-net",
+ "roll-secrets",
+ "roll-workspace",
  "rsa",
  "serde",
  "serde_json",
