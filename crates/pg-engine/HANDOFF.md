@@ -10625,6 +10625,113 @@ and confirm on PGO:
 Agent 218's short-transaction stack (ten steps, `wip/a218`) was gated this way and landed: BENCH
 "Profile-guided build", part 2.
 
+## Bulk writes, round 20: bulk DELETE, its merges and its compaction (agent 275)
+
+BENCH.md "Bulk writes, round 20" has the measurements (lane C, the 1M-row bulk script with joined
+windows, plain dist builds). `cand/a275`: two code commits on origin's `515ff3b04` and this
+section. No format change: the same files, blocks, filters and dead-entry sets.
+
+**Where the DELETE's 8.19 G went** (b0, instruction samples of the joined window; a sampled profile
+under load loses a share of the samples, so only shares within one profile count): the statement
+54%, the compaction 46%. The statement: the scan and its filter 25% (`zip_rows`' merge of the
+table with the UPDATE's versions 7%, `emit` 13%), the deferred deletions 13% (`SstWriter::add` 4.4,
+the bloom filter 2.2, the sort and the keys' copies), each row's index keys 5%, row locks 4%. The
+compaction: zstd compression with the file's dictionary 18.7% of the step
+(`ZSTD_compressBlock_fast_dictMatchState` 9.6), the merge (`zip_entries`, the per-entry closure,
+`SstWriter::add`, the output's filter) 13%, marking the two index files about 5%, decompression
+3.4%. libc's memcpy / memcmp / bcmp were 9.8% of the step (compaction 5.0, statement 4.8), called
+for keys of 17 to 30 bytes: `zip_rows` 2.2%, the closure 1.5%, `put_entry_deletes` 1.2%,
+`SstWriter::add` 1.3%, the cursors' `Block::read` / `seek` and `mark_dead`'s loop the rest.
+
+**The brief's three questions, for this pattern:**
+- *A dead-entry set or a key range instead of a tombstone per row*: not without a new format. A
+  dead-entry set marks entries dead for every snapshot (it is written only for entries below the
+  GC horizon); a DELETE's rows must stay readable by snapshots older than it until the horizon
+  passes, which only a versioned deletion says (the tombstone and its commit's ts). A range
+  deletion (`rdel`) is versioned but a range: `id % 4 = 1` isn't one, and the index entries are
+  scattered over both indexes anyway. A "dead as of ts" set would be a format the current head
+  refuses. The tombstones themselves are ~1.0 G of the statement (writing them, sorted, with their
+  filter); the compaction drops them, and marks the index files instead of writing them again.
+- *Blocks no deleted row touches, or wholly deleted*: in this script every block of the table holds
+  some of the UPDATE's new versions (every other row) and a deleted row (every fourth), so every
+  block is written again whatever the compaction does with untouched ones; the index files are
+  marked, not written. A block-copy path wouldn't change this script (agent 247's note); not built.
+- *The trigger*: right for this pattern. `deletions_due` fires at the DELETE's commit (750,000
+  deletions, over an eighth of the entries under them) and the compaction folds the UPDATE's
+  500,000 versions into the same rewrite of the table: compacting them in the UPDATE's window only
+  moves that cost (the table would then be marked at the DELETE, but written once either way), and
+  later leaves every scan merging three sources.
+
+**Merges compare keys without libc calls** (first commit, `sst.rs`, `storage/mod.rs`, `txn`):
+- `cmp_words` (the zips' comparison of their sides' keys, held in fixed 56-byte buffers) compared
+  the last 1-7 bytes of a key as a slice, a call to memcmp at every comparison of keys whose length
+  isn't a multiple of 8: a row key is 17 bytes (25 with its version), so `zip_rows` made four or
+  five calls a row. Now the word they start, the bytes past the key's end shifted out (both
+  buffers are 56 bytes, so the word is in them).
+- The zips' `bound` is copied once into a word buffer (`ZipBound`) and compared by words; `zip_rows`
+  takes the decided key as its whole buffer (a fixed copy, read only up to its length).
+- The compaction's closure compares its current user key, and the next file left in place, by the
+  words that start and end them (`short_eq`, `short_cmp`: two overlapping 16- or 8-byte words for 8
+  to 32 bytes, slices otherwise), and keeps the part prefix as a word.
+- A deferring DELETE's keys: the sort's 24-byte prefixes (`sort_by_key_after`) and the run's
+  versioned keys (`Runs::write_deletes`) by fixed overlapping copies.
+- Tests: `common_prefix_and_hash64_2` checks `short_eq`, `short_cmp`, `cmp_words` (bytes past a key's
+  end random) and `ZipBound` against the slices' own comparisons for 20,000 key pairs.
+
+**A compaction reads an L0 file of deletions alone only where it can delete something** (second
+commit, `Store::compact_within`, `mark_dead`, `DeadSet`):
+- The DELETE's run holds its rows' deletions and then its index entries'. The index files were
+  marked, but the run was merged (it has keys in the table, which is written again), so the
+  compaction read and dropped its 500,000 index entry deletions one by one through the general
+  merge. An L0 file whose entries are all deletions at or before the horizon is now read only from
+  the first to the last user key of the files written again and the other L0 files merged
+  (`reach`). Outside, its entries are dropped on every branch of the closure (discarded, a range
+  deletion, an older version, or a tombstone at the bottom level) and delete nothing merged: only
+  such files have entries there, so a key's versions are all skipped together.
+- `mark_dead` finds a deleted key's block from the block it read last when that block's last key
+  isn't below the key (they come in order), not by a search of the block index for each; it
+  compares keys by `short_eq`; a `DeadSet` being made adds to and reads its last block directly.
+
+Results (BENCH "Bulk writes, round 20"; plain dist, three alternating pairs each, G user
+instructions): DELETE with its compaction 8.190 -> 7.731 (-5.6% in every pair; the first commit
+-1.9% as measured with the dropped writer change below, the second -4.1%); CREATE UNIQUE INDEX
+3.371 -> 3.376 (+0.15 to +0.18%, not explained: neither commit touches its path that I found);
+every other step level. The whole script once each: 50.35 -> 49.90 (-0.9%), rows equal, bytes
+written 206.1 MB both, the data directory after it 32 MB both, VmHWM 284 / 283 MB. In process (a
+verify build): three scans of the table over the UPDATE's versions 2.014 -> 1.650 G (-18.1%), the
+compaction 5.411 -> 4.856 G (-10.3%). Foreign load was 2.5-5.4 cores in every pair (other agents);
+the instruction counts repeat within 0.03% regardless, cycles don't.
+
+Not gated on the PGO build: `zip_rows`, `zip_entries` and `compact_within` keep their boundaries
+and attributes; the new `#[inline(always)]` helpers replace inline slice operations inside them.
+
+Verification: `tools/quick-check.sh` with `QC_CHECKED=1` on `191013219` (both commits on
+`515ff3b04`): Clippy 16 warnings, none new in a changed file; 382 tests in 19 binaries, again built
+`--profile verify-checked`; crash_random seeds 1-3 x 2, power_cut_at_every_point; regress 51,148 /
+51,150, 0 newly differing; isolation 1,647 / 1,648; pg_dump_tap 14,609 passed.
+
+**Measured and dropped: a writer's last key held in place** (`~/.cache/a275/patches/dropped-writer-
+heldkey.reverse.patch`). `SstWriter::prev_key` and the compaction's current user key in a 32-byte
+buffer set by fixed overlapping copies (`HeldKey`), and the writer's key tail by `extend_short`:
+DELETE another -0.4% and COPY in -0.24%, but CREATE INDEX +0.36% and CREATE UNIQUE INDEX +0.4% in
+every pair; in process an index build's run writer +3.1% (CREATE INDEX's order: 3-byte key tails
+went through `extend_short`'s byte loop) and +2.3%. Without it the run writer counts the same as
+b0's to the instruction. (Verify builds leave a fixed-size `copy_from_slice` out of line, so the
+in-process harness overstates fixed copies there; dist inlines them.)
+
+**Left (G user instructions, n3 against PostgreSQL 18.6's 1.67 for DELETE):**
+1. The compaction's rewrite of the table with the UPDATE's versions: zstd with the dictionary is
+   now about 20% of the step (agent 257 measured the copy and load dictionary modes, `minMatch`,
+   `targetLength` and `hashLog`: none without more bytes); the merge and the writer ~12%; the
+   output's and the run's bloom filters ~4.7% (mostly cache-missing stores).
+2. The statement's scan and filter (`emit`, `StoredCmps::passes`: exec), `zip_rows` (now ~6% of
+   the step, no calls), the deferred deletions (`SstWriter::add` per tombstone, its filter, the
+   sort), row locks (2%).
+3. The general cursor path still calls libc for its keys (`Block::read`'s key and derived value,
+   `Block::seek`, `seek_on`, `Merge::min`): about 3.5% of the compaction thread here, and on every
+   read path; worth the same treatment with a scan and TPC-H gate.
+4. CREATE UNIQUE INDEX's +0.15% (above).
+
 ## Bulk writes, round 19: sorts a byte at a time, four per-row costs (agent 271)
 
 BENCH.md "Bulk writes, round 19" has the measurements (lane C, the 1M-row bulk script with joined

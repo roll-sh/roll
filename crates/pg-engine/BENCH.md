@@ -285,6 +285,63 @@ The current checked measurements compare release engine builds and PostgreSQL 18
 the wire. Older rounds below are historical records, with their original methods and
 limits. Their results have not been reverified on the current source.
 
+## Bulk writes, round 20: bulk DELETE, its merges and its compaction (2026-11-21, agent 275)
+
+HANDOFF "Bulk writes, round 20" has what changed. Lane C, the 1M-row bulk script with joined
+windows (agent 246's `bulkx.sh` with `JOIN=1`, copied to `~/.cache/a275/bench`), plain dist builds
+(`tools/dist.sh`) of **b0**, origin's `515ff3b04`, and **n3**, both commits of `cand/a275` (built
+as the same code but one doc comment). Between them: **n1** the first commit with the writer's
+key in place and `extend_short` (dropped, below), **n2** n1 with the second commit. The pairs ran
+the steps up to DELETE only (`del.steps`: COPY in, both indexes, UPDATE, DELETE), each pair one
+`tools/lane.sh` hold; the whole script once per arm. G user instructions of the server's cgroup;
+every counter ran 100% of its window. **Foreign load was over 1.0 core in every run** (2.5-5.4
+cores: other agents' builds and runs); the instruction counts repeat within 0.03% regardless.
+Rows equal in every run (count and sums of every column); DELETE wrote 54.0 MB in every run.
+
+### b0 against n3 (3 alternating pairs, % per pair)
+
+| step | b0 | n3 | % per pair |
+|---|---|---|---|
+| COPY in | 9.111 | 9.110 | -0.0 x3 |
+| CREATE INDEX | 4.404 | 4.404 | +0.0 x3 |
+| CREATE UNIQUE INDEX | 3.371 | 3.376 | +0.2 / +0.2 / +0.2 |
+| UPDATE half | 12.012 | 12.022 | +0.1 / +0.1 / -0.0 (b0 12.006-12.024) |
+| DELETE a quarter, with its compaction | 8.190 | 7.731 | -5.6 x3 |
+
+### By build (DELETE a quarter, with its compaction; 3 pairs each)
+
+| pair | old | new | % per pair |
+|---|---|---|---|
+| b0 / n1 | 8.190 | 8.032 | -1.9 x3 |
+| n1 / n2 | 8.030 | 7.700 | -4.1 x3 |
+| b0 / n3 | 8.190 | 7.731 | -5.6 x3 |
+
+n1 and n2 also moved COPY in -0.24% and CREATE INDEX +0.36%, CREATE UNIQUE INDEX +0.4% in every
+pair (the writer's changes, dropped in n3).
+
+### The whole script (one run each, the same hold)
+
+| step | b0 | n3 |
+|---|---|---|
+| DELETE a quarter, with its compaction | 8.192 | 7.732 |
+| CREATE UNIQUE INDEX | 3.361 | 3.376 |
+| every other step | within 0.03%, ANALYZE 0.472 / 0.476 (both values on one build, round 19) |
+| **all steps** (14) | 50.35 | 49.90 (-0.9%) |
+
+Bytes written 206.1 MB both; data directory after the script 32 MB both; VmHWM 284 / 283 MB, cgroup
+peak 355 / 339 MB. Against the numbers that stand (agent 260's same-day runs, 2026-11-19; round
+19's twelve steps): DELETE 7.73 against PostgreSQL's 1.67. Not re-run on PostgreSQL or pgrust.
+
+### In process (verify build, `perf stat` between the harness's enable and disable)
+
+`~/.cache/a275/patches/a275_harness.rs` (not committed): a 1M-row table with two indexes compacted
+into L1, every other row's new version in an L0 file. Three full scans of the table through
+`fill_batch` (two sources): b0 2.014 G, n3 1.650 G (-18.1%). Every fourth row and its two index
+entries deleted in another L0 file, then the compaction: b0 5.411 G, n3 4.856 G (-10.3%; the table
+written again, both index files marked, the same files and dead counts). An index build's run
+writer, 1M entries in CREATE INDEX's order and in id order: b0 973.6 / 1068.7 M, n2 1003.6 /
+1093.6 M, n3 973.6 / 1068.7 M.
+
 ## Bulk writes, round 19: sorts a byte at a time, four per-row costs (2026-11-20, agent 271)
 
 HANDOFF "Bulk writes, round 19" has what changed. Lane C, the 1M-row bulk script with joined
