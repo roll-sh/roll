@@ -198,6 +198,11 @@ fn column_arg(cat: &Catalog, rel: u32, v: &Value) -> Result<Option<i32>> {
         v.columns.iter().map(|c| (c.0.clone(), false)).collect()
     } else if let Some(st) = sys {
         st.columns().iter().map(|c| (c.0.clone(), false)).collect()
+    } else if let Some(ix) = cat.indexes.get(&rel)
+        && let Some(t) = cat.index_table(ix.table)
+    {
+        // An index's columns (pg_attribute's: its keys' and INCLUDE columns' names).
+        crate::catalog::system::index_att_names(&t, ix).into_iter().map(|n| (n, false)).collect()
     } else {
         Vec::new()
     };
@@ -578,6 +583,11 @@ fn acldefault(a: &[Value], c: &FnCtx) -> Result<Value> {
         Value::Char(b) => Some(*b as char),
         v => str_of(v).chars().next(),
     };
+    // A column's default ACL grants nothing (acldefault's OBJECT_COLUMN): an empty one, as
+    // information_schema.column_privileges reads it.
+    if letter == Some('c') {
+        return Ok(Value::Array(Arc::new(crate::types::array::ArrayValue::from_vec(DataType::Aclitem, Vec::new()))));
+    }
     let kind = letter
         .and_then(ObjKind::from_letter)
         .ok_or_else(|| {

@@ -352,7 +352,12 @@ impl<'a> Inner<'a> {
 /// row's, whose columns nothing above reads, NULL) without a call each: `Value`'s drop is
 /// out of line, a call and a jump on its variant for every value of a row of 30 to 50.
 pub fn drop_row(mut r: Row) {
-    for v in r.drain(..) {
+    truncate_row(&mut r, 0);
+}
+
+/// `r` cut to its first `at` values, the rest dropped as `drop_row` drops them.
+pub fn truncate_row(r: &mut Vec<Value>, at: usize) {
+    for v in r.drain(at..) {
         match v {
             Value::Null
             | Value::Bool(_)
@@ -394,6 +399,28 @@ pub fn joined_from(mut l: Row, r: Inner, keep: Option<&[bool]>) -> Row {
             l.extend((0..r.width()).map(|i| match r.get(i) {
                 Some(v) if kept(n + i) => v.clone(),
                 _ => Value::Null,
+            }));
+        }
+    }
+    l
+}
+
+/// `joined_from` of an inner row its caller is done with: `r`'s values moved, not copied.
+pub fn joined_from_taken(mut l: Row, r: &mut [Value], keep: Option<&[bool]>) -> Row {
+    let n = l.len();
+    l.reserve(r.len());
+    match keep {
+        None => l.extend(r.iter_mut().map(|v| std::mem::replace(v, Value::Null))),
+        Some(k) => {
+            let kept = |i: usize| k.get(i).copied().unwrap_or(false);
+            for (i, v) in l.iter_mut().enumerate() {
+                if !kept(i) && !v.is_null() {
+                    *v = Value::Null;
+                }
+            }
+            l.extend(r.iter_mut().enumerate().map(|(i, v)| match kept(n + i) {
+                true => std::mem::replace(v, Value::Null),
+                false => Value::Null,
             }));
         }
     }
@@ -607,7 +634,8 @@ const LOOKUP_BATCH: usize = 64;
 #[derive(Default)]
 pub struct Scratch {
     matches: Vec<Vec<u32>>,
-    rows: Vec<Vec<Row>>,
+    /// A lookup stage's inner rows, end to end (`Lookup::width` values a row).
+    rows: Vec<Vec<Value>>,
     held: Vec<Vec<Row>>,
     got: Vec<Vec<super::lookup::Got>>,
     key: Vec<Value>,
@@ -679,7 +707,7 @@ pub fn run_stages(stages: &[Arc<Stage>], from: usize, row: Row, s: &mut Scratch,
                     drain_from(stages, from + 1, s, emit);
                     emit(Joined::Row(row), from as u8)
                 }
-                true => lk.emit(row, &rows, from + 1 < stages.len(), &mut |j| onward(stages, from, j, s, emit)),
+                true => lk.emit(row, &mut rows, from + 1 < stages.len(), &mut |j| onward(stages, from, j, s, emit)),
             }
             s.rows[from] = rows;
         }
@@ -715,7 +743,7 @@ fn lookup_batch(stages: &[Arc<Stage>], from: usize, s: &mut Scratch, emit: &mut 
                 drain_from(stages, from + 1, s, emit);
                 emit(Joined::Row(l), from as u8)
             }
-            super::lookup::Got::Rows(a, b) => lk.emit(l, &rows[a as usize..b as usize], from + 1 < stages.len(), &mut |j| onward(stages, from, j, s, emit)),
+            super::lookup::Got::Rows(a, b) => lk.emit(l, &mut rows[a as usize..b as usize], from + 1 < stages.len(), &mut |j| onward(stages, from, j, s, emit)),
         }
     }
     s.held[from] = ls;

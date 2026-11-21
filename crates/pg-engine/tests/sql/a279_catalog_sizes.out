@@ -1,0 +1,61 @@
+> create role a279r1
+-- CREATE ROLE
+
+> create role a279r2
+-- CREATE ROLE
+
+> explain select rolname from pg_authid where rolname like 'a279%'
+QUERY PLAN:text
+Seq Scan on pg_authid  (cost=0.00..1.21 rows=1 width=64)
+  Filter: (rolname ~~ 'a279%'::text)
+-- EXPLAIN
+
+> create table a279s (a int)
+-- CREATE TABLE
+
+> create function a279tf() returns trigger language plpgsql as $$ begin return new; end $$
+-- CREATE FUNCTION
+
+> create trigger a279s1 before insert on a279s for each row execute function a279tf()
+-- CREATE TRIGGER
+
+> create trigger a279s2 before insert on a279s for each row execute function a279tf()
+-- CREATE TRIGGER
+
+> explain select tgname from pg_trigger where tgname like 'a279s%'
+QUERY PLAN:text
+Seq Scan on pg_trigger  (cost=0.00..1.29 rows=1 width=64)
+  Filter: (tgname ~~ 'a279s%'::text)
+-- EXPLAIN
+
+> create type a279e as enum ('a', 'b', 'c')
+-- CREATE TYPE
+
+> explain select count(*) from pg_enum where enumlabel = 'b'
+QUERY PLAN:text
+Aggregate  (cost=1.98..1.99 rows=1 width=8)
+  ->  Seq Scan on pg_enum  (cost=0.00..1.98 rows=1 width=0)
+        Filter: (enumlabel = 'b'::name)
+-- EXPLAIN
+
+> explain select oid from pg_class where oid = 1259
+QUERY PLAN:text
+Index Only Scan using pg_class_oid_index on pg_class  (cost=0.27..4.29 rows=1 width=4)
+  Index Cond: (oid = '1259'::oid)
+-- EXPLAIN
+
+> analyze pg_trigger
+-- ANALYZE
+
+> explain select tgname from pg_trigger where tgname like 'a279s%'
+QUERY PLAN:text
+Seq Scan on pg_trigger  (cost=0.00..1.02 rows=2 width=64)
+  Filter: (tgname ~~ 'a279s%'::text)
+-- EXPLAIN
+
+> drop role a279r1
+-- DROP ROLE
+
+> drop role a279r2
+-- DROP ROLE
+

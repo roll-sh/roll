@@ -1,0 +1,86 @@
+> create domain a279d as int not null default 1 check (value > 0)
+-- CREATE DOMAIN
+
+> create table a279n (id int primary key, qty int check (qty >= 0), note text, amount numeric(12, 2) check (amount >= 0))
+-- CREATE TABLE
+
+> create index a279n_lower on a279n (lower(note)) where qty > 0
+-- CREATE INDEX
+
+> create index a279n_two on a279n ((qty + 1), upper(note))
+-- CREATE INDEX
+
+> create function a279f() returns trigger language plpgsql as $$ begin return new; end $$
+-- CREATE FUNCTION
+
+> create trigger a279tr before update on a279n for each row when (new.qty > 0) execute function a279f()
+-- CREATE TRIGGER
+
+> create function a279g(a int, b int default 1, c text default 'x') returns int language sql as $$ select a + b $$
+-- CREATE FUNCTION
+
+> select conname, contype, conbin from pg_constraint where conrelid = 'a279n'::regclass and contype = 'c' order by 1
+conname:name | contype:char | conbin:194
+a279n_amount_check | c | {OPEXPR :opno 1757 :opfuncid 1721 :opresulttype 16 :opretset false :opcollid 0 :inputcollid 0 :args ({VAR :varno 1 :varattno 4 :vartype 1700 :vartypmod 786438 :varcollid 0 :varnullingrels (b) :varlevelsup 0 :varreturningtype 0 :varnosyn 1 :varattnosyn 4 :location -1} {FUNCEXPR :funcid 1740 :funcresulttype 1700 :funcretset false :funcvariadic false :funcformat 2 :funccollid 0 :inputcollid 0 :args ({CONST :consttype 23 :consttypmod -1 :constcollid 0 :constlen 4 :constbyval true :constisnull false :location -1 :constvalue 4 [ 0 0 0 0 0 0 0 0 ]}) :location -1}) :location -1}
+a279n_qty_check | c | {OPEXPR :opno 525 :opfuncid 150 :opresulttype 16 :opretset false :opcollid 0 :inputcollid 0 :args ({VAR :varno 1 :varattno 2 :vartype 23 :vartypmod -1 :varcollid 0 :varnullingrels (b) :varlevelsup 0 :varreturningtype 0 :varnosyn 1 :varattnosyn 2 :location -1} {CONST :consttype 23 :consttypmod -1 :constcollid 0 :constlen 4 :constbyval true :constisnull false :location -1 :constvalue 4 [ 0 0 0 0 0 0 0 0 ]}) :location -1}
+-- SELECT 2
+
+> select conname, contype, conbin is null from pg_constraint where contypid = 'a279d'::regtype order by 1
+conname:name | contype:char | ?column?:bool
+a279d_check | c | f
+a279d_not_null | n | t
+-- SELECT 2
+
+> select conname, conbin from pg_constraint where contypid = 'a279d'::regtype and contype = 'c'
+conname:name | conbin:194
+a279d_check | {OPEXPR :opno 521 :opfuncid 147 :opresulttype 16 :opretset false :opcollid 0 :inputcollid 0 :args ({COERCETODOMAINVALUE :typeId 23 :typeMod -1 :collation 0 :location -1} {CONST :consttype 23 :consttypmod -1 :constcollid 0 :constlen 4 :constbyval true :constisnull false :location -1 :constvalue 4 [ 0 0 0 0 0 0 0 0 ]}) :location -1}
+-- SELECT 1
+
+> select indexrelid::regclass, indexprs, indpred from pg_index where indrelid = 'a279n'::regclass and (indexprs is not null or indpred is not null) order by 1
+indexrelid:regclass | indexprs:194 | indpred:194
+a279n_lower | ({FUNCEXPR :funcid 870 :funcresulttype 25 :funcretset false :funcvariadic false :funcformat 0 :funccollid 100 :inputcollid 100 :args ({VAR :varno 1 :varattno 3 :vartype 25 :vartypmod -1 :varcollid 100 :varnullingrels (b) :varlevelsup 0 :varreturningtype 0 :varnosyn 1 :varattnosyn 3 :location -1}) :location -1}) | {OPEXPR :opno 521 :opfuncid 147 :opresulttype 16 :opretset false :opcollid 0 :inputcollid 0 :args ({VAR :varno 1 :varattno 2 :vartype 23 :vartypmod -1 :varcollid 0 :varnullingrels (b) :varlevelsup 0 :varreturningtype 0 :varnosyn 1 :varattnosyn 2 :location -1} {CONST :consttype 23 :consttypmod -1 :constcollid 0 :constlen 4 :constbyval true :constisnull false :location -1 :constvalue 4 [ 0 0 0 0 0 0 0 0 ]}) :location -1}
+a279n_two | ({OPEXPR :opno 551 :opfuncid 177 :opresulttype 23 :opretset false :opcollid 0 :inputcollid 0 :args ({VAR :varno 1 :varattno 2 :vartype 23 :vartypmod -1 :varcollid 0 :varnullingrels (b) :varlevelsup 0 :varreturningtype 0 :varnosyn 1 :varattnosyn 2 :location -1} {CONST :consttype 23 :consttypmod -1 :constcollid 0 :constlen 4 :constbyval true :constisnull false :location -1 :constvalue 4 [ 1 0 0 0 0 0 0 0 ]}) :location -1} {FUNCEXPR :funcid 871 :funcresulttype 25 :funcretset false :funcvariadic false :funcformat 0 :funccollid 100 :inputcollid 100 :args ({VAR :varno 1 :varattno 3 :vartype 25 :vartypmod -1 :varcollid 100 :varnullingrels (b) :varlevelsup 0 :varreturningtype 0 :varnosyn 1 :varattnosyn 3 :location -1}) :location -1}) | NULL
+-- SELECT 2
+
+> select tgname, tgqual from pg_trigger where tgname = 'a279tr'
+tgname:name | tgqual:194
+a279tr | {OPEXPR :opno 521 :opfuncid 147 :opresulttype 16 :opretset false :opcollid 0 :inputcollid 0 :args ({VAR :varno 2 :varattno 2 :vartype 23 :vartypmod -1 :varcollid 0 :varnullingrels (b) :varlevelsup 0 :varreturningtype 0 :varnosyn 2 :varattnosyn 2 :location -1} {CONST :consttype 23 :consttypmod -1 :constcollid 0 :constlen 4 :constbyval true :constisnull false :location -1 :constvalue 4 [ 0 0 0 0 0 0 0 0 ]}) :location -1}
+-- SELECT 1
+
+> select typname, typdefaultbin, typdefault from pg_type where typname = 'a279d'
+typname:name | typdefaultbin:194 | typdefault:text
+a279d | {CONST :consttype 23 :consttypmod -1 :constcollid 0 :constlen 4 :constbyval true :constisnull false :location -1 :constvalue 4 [ 1 0 0 0 0 0 0 0 ]} | 1
+-- SELECT 1
+
+> select proname, proargdefaults from pg_proc where proname = 'a279g'
+proname:name | proargdefaults:194
+a279g | ({CONST :consttype 23 :consttypmod -1 :constcollid 0 :constlen 4 :constbyval true :constisnull false :location -1 :constvalue 4 [ 1 0 0 0 0 0 0 0 ]} {CONST :consttype 25 :consttypmod -1 :constcollid 100 :constlen -1 :constbyval false :constisnull false :location -1 :constvalue 5 [ 20 0 0 0 120 ]})
+-- SELECT 1
+
+> select conname, pg_get_expr(conbin, conrelid) from pg_constraint where conrelid = 'a279n'::regclass and contype = 'c' order by 1
+conname:name | pg_get_expr:text
+a279n_amount_check | (amount >= (0)::numeric)
+a279n_qty_check | (qty >= 0)
+-- SELECT 2
+
+> select indexrelid::regclass, pg_get_expr(indexprs, indrelid), pg_get_expr(indpred, indrelid, true) from pg_index where indrelid = 'a279n'::regclass and (indexprs is not null or indpred is not null) order by 1
+indexrelid:regclass | pg_get_expr:text | pg_get_expr:text
+a279n_lower | lower(note) | qty > 0
+a279n_two | (qty + 1), upper(note) | NULL
+-- SELECT 2
+
+> select pg_get_expr(proargdefaults, 0) from pg_proc where proname = 'a279g'
+pg_get_expr:text
+1, 'x'::text
+-- SELECT 1
+
+> select pg_get_expr(typdefaultbin, 0) from pg_type where typname = 'a279d'
+pg_get_expr:text
+1
+-- SELECT 1
+
+> select pg_get_constraintdef(oid) from pg_constraint where contypid = 'a279d'::regtype and contype = 'c'
+pg_get_constraintdef:text
+CHECK ((VALUE > 0))
+-- SELECT 1
+

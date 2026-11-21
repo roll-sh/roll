@@ -190,7 +190,7 @@ fn distinct_for(ctx: &ExecCtx, p: &Plan, keys: &[Cand], base: bool) -> bool {
             let t = super::syscat::sys_table(*table);
             super::syscat::stand_in_indexes(&t).unwrap_or(&[]).iter().filter(|ix| ix.unique).any(|ix| {
                 ix.columns.iter().all(|c| match c.key {
-                    IndexKey::Column(k) => keys.iter().any(|(e, _)| matches!(bare(e), Expr::Col(j, _) if *j == k)),
+                    crate::catalog::IndexKey::Column(k) => keys.iter().any(|(e, _)| matches!(bare(e), Expr::Col(j, _) if *j == k)),
                     _ => false,
                 })
             })

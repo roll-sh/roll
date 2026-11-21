@@ -876,9 +876,9 @@ fn hash_gin_brin_sizes_past_the_model() {
     }
 }
 
-/// INSERT … SELECT of a table's rows into a table past the model copies their stored values
-/// (`dml::StoredInsert`): the same rows, counts and size estimate as the decoded path takes
-/// (a filtered source); rows it can't copy so (a long value, one stored before a column was
+/// INSERT … SELECT of a table's rows into a table, modelled or past the model, copies their
+/// stored values (`dml::StoredInsert`): the same rows, counts, ctids and size estimate as the
+/// decoded path takes (a filtered source); rows it can't copy so (a long value, one stored before a column was
 /// added) go in decoded, and a NULL for a NOT NULL column fails as it does.
 #[test]
 fn insert_select_from_stored_rows() {
@@ -904,12 +904,15 @@ ALTER TABLE dnn ALTER COLUMN a SET NOT NULL",
         let before = STORED_INSERTS.load(Ordering::Relaxed);
         run(&mut s, "BEGIN;\nINSERT INTO dst SELECT * FROM src");
         let copied = STORED_INSERTS.load(Ordering::Relaxed) - before;
-        assert!(copied > 2000 && copied < 3000, "{copied} rows copied as stored");
+        assert!(copied > 2900 && copied < 3000, "{copied} rows copied as stored");
         assert_eq!(rows(&mut s, "SELECT n_tup_ins FROM pg_stat_xact_user_tables WHERE relname = 'dst'"), ["[Int8(3000)]"]);
         run(&mut s, "COMMIT;\nINSERT INTO dst2 SELECT * FROM src WHERE id > 0");
         let all = |s: &mut Session, t: &str| rows(s, &format!("SELECT * FROM {t} ORDER BY id"));
         assert_eq!(all(&mut s, "dst"), all(&mut s, "src"));
         assert_eq!(all(&mut s, "dst2"), all(&mut s, "src"));
+        // (The rows the model placed, stored with their TIDs either way, and those past it.)
+        let ctids = |s: &mut Session, t: &str| rows(s, &format!("SELECT ctid, id FROM {t} ORDER BY id"));
+        assert_eq!(ctids(&mut s, "dst"), ctids(&mut s, "dst2"));
         run(&mut s, "INSERT INTO dst3 SELECT * FROM src2");
         assert_eq!(all(&mut s, "dst3"), all(&mut s, "src2"));
         assert_eq!(

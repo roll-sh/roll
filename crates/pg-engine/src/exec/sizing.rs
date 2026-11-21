@@ -771,9 +771,14 @@ fn option(opts: &[String], name: &str) -> Option<String> {
 /// A table's fillfactor (percent). (Read per row a load writes: `option`'s value without
 /// its copy.)
 pub fn heap_fillfactor(t: &Table) -> usize {
+    // (Each row past the model asks: another option is passed over by its first bytes, not
+    // split and trimmed.)
     t.options
         .iter()
         .find_map(|o| {
+            if !o.trim_start().as_bytes().get(..10).is_some_and(|k| k.eq_ignore_ascii_case(b"fillfactor")) {
+                return None;
+            }
             let (k, v) = o.split_once('=')?;
             k.trim().eq_ignore_ascii_case("fillfactor").then(|| v.trim().trim_matches('\''))
         })
@@ -1042,16 +1047,21 @@ pub fn note_read(t: u32, xmin: u64, key: Option<&[u8]>, row: &[Value]) {
     }
 }
 
-/// The table, column and row version `v` was read from, when it is a stored datum carried
-/// along unchanged.
-fn read_from(v: &Value) -> Option<(u32, usize, RowId)> {
-    // (Only values of `READ_MIN..READ_MAX` bytes are noted: another can't be one of them.)
+/// Whether `v` can be a datum `note_read` noted: only values of `READ_MIN..READ_MAX` bytes
+/// are.
+fn may_be_read(v: &Value) -> bool {
     let len = match v {
         Value::Text(s) | Value::Json(s) => s.len(),
         Value::Bytea(b) => b.len(),
-        _ => return None,
+        _ => return false,
     };
-    if !(READ_MIN..READ_MAX).contains(&len) {
+    (READ_MIN..READ_MAX).contains(&len)
+}
+
+/// The table, column and row version `v` was read from, when it is a stored datum carried
+/// along unchanged.
+fn read_from(v: &Value) -> Option<(u32, usize, RowId)> {
+    if !may_be_read(v) {
         return None;
     }
     READ.with(|q| {
@@ -1093,10 +1103,12 @@ pub fn note_compression(t: &Table, row: &[Value], key: Option<&[u8]>, ctx: &Exec
 /// `note_compression`, given the row's tuple length (`row_len`) when known.
 fn note_compression_len(t: &Table, row: &[Value], key: Option<&[u8]>, ctx: &ExecCtx, len: Option<usize>) {
     let n = row.len().min(t.columns.len());
-    // A compressed datum copied here stays compressed, as it was.
+    // A compressed datum copied here stays compressed, as it was. (Only a value `read_from`
+    // can name is looked up: a row of numbers and short strings makes no call.)
     let copied: Vec<(usize, u64, char)> = row[..n]
         .iter()
         .enumerate()
+        .filter(|(_, v)| may_be_read(v))
         .filter_map(|(i, v)| compressed_with(v).map(|m| (i, value_sig(v), m)))
         .collect();
     // (The transaction's id only for a value recorded: a row of plain values, the usual one,
@@ -1250,9 +1262,34 @@ fn row_len(t: &Table, row: &[Value], text: &dyn Fn(&Value, &DataType) -> String)
     let has_null = t.columns[..n].iter().zip(row).any(|(c, v)| !stored(c, v));
     let mut off = relsize::tuple_header(n, has_null);
     for (c, v) in t.columns[..n].iter().zip(row) {
-        if stored(c, v) {
-            off += relsize::datum_bytes(off, v, &c.ty, text);
+        if !stored(c, v) {
+            continue;
         }
+        // (The common kinds sized here, as `datum_bytes` sizes them: a fixed-size type's typlen
+        // and typalign from one match, aligned by a mask; an ASCII text value's bytes are its
+        // payload. No call and no division a value.)
+        let (len, al) = match (&c.ty, v) {
+            (DataType::Bool, _) => (1, 1),
+            (DataType::Int2, _) => (2, 2),
+            (DataType::Int4 | DataType::Float4 | DataType::Date | DataType::Oid, _) => (4, 4),
+            (DataType::Int8 | DataType::Float8 | DataType::Timestamp(_) | DataType::Timestamptz(_), _) => (8, 8),
+            (DataType::Text | DataType::Varchar(_), Value::Text(s)) if s.is_ascii() => {
+                let add = match s.len() {
+                    p if p < 127 => p + 1,
+                    p => ((off + 3) & !3) + p + 4 - off,
+                };
+                debug_assert_eq!(add, relsize::datum_bytes(off, v, &c.ty, text));
+                off += add;
+                continue;
+            }
+            _ => {
+                off += relsize::datum_bytes(off, v, &c.ty, text);
+                continue;
+            }
+        };
+        let next = ((off + al - 1) & !(al - 1)) + len;
+        debug_assert_eq!(next - off, relsize::datum_bytes(off, v, &c.ty, text));
+        off = next;
     }
     off
 }
@@ -2412,6 +2449,101 @@ pub fn inserted_stored(t: &Table, len: usize, ctx: &ExecCtx) -> Option<bool> {
     let r = e.placed(None, tid, t.has_rowid());
     estkeep::touched(&ctx.sess.db, e);
     Some(r)
+}
+
+/// What `inserted_stored_modelled` did with a row.
+pub enum StoredPlace {
+    /// Placed in the model: its TID (None: as `inserted_with` leaves a row whose table's heap
+    /// went just then, stored without one).
+    Modelled(Option<Tid>),
+    /// The table is past the model's size: nothing placed, for the caller to place the row
+    /// in the estimate (`inserted_stored`).
+    Estimated,
+}
+
+/// `inserted_with` of a row going in as stored (an INSERT … SELECT's, `StoredInsert`) into
+/// table `t` without indexes, whose tuple length `len` (`stored_tuple_len`) is at most
+/// `TOAST_THRESHOLD`: placed as `inserted_with` places such a row, with no value out of line
+/// and no index or GiST entry. (`note_compression_len` records nothing for it: its values come
+/// from a table that never stored one compressed or out of line, `Node::each_stored`, so none
+/// was read from a compressed datum, and the tuple is too short to compress.)
+pub fn inserted_stored_modelled(t: &Table, key: &[u8], len: usize, ctx: &ExecCtx) -> Result<StoredPlace> {
+    debug_assert!(len <= TOAST_THRESHOLD);
+    if !ensure(t, &[], ctx)? {
+        return Ok(StoredPlace::Estimated);
+    }
+    let txn = ctx.txn.borrow().id;
+    let db = &ctx.sess.db;
+    // (A COPY's multi-insert buffer on this thread for the table: the row waits in it.)
+    if with_batch((db.instance, t.oid, txn), |b| {
+        b.rows.push(Pending { key: key.to_vec(), len, exts: Vec::new(), entries: Vec::new(), gist: Vec::new() });
+    })
+    .is_some()
+    {
+        return Ok(StoredPlace::Modelled(None));
+    }
+    let xid = ctx.txn.borrow_mut().cur_xid();
+    let cid = ctx.txn.borrow_mut().output_cid();
+    let xids = db.xids();
+    let v = vis_of(xids, t, ctx);
+    let big;
+    let tid = {
+        let mut rf = db.relfiles.of(t.oid).write();
+        let RelFiles { heaps, btrees, bulk, .. } = &mut *rf;
+        if !heaps.contains_key(&t.oid) {
+            return Ok(StoredPlace::Modelled(None));
+        }
+        let b = bulk.get_mut(&(t.oid, txn));
+        // (As `inserted_with`: the rows of a load deferring its model wait for its end.)
+        if let Some(Bulk { defer: Some(d), mode, .. }) = b
+            && d.deferring()
+        {
+            if d.batches.is_empty() {
+                d.batches.push(Vec::new());
+            }
+            d.batches[0].push(Pending {
+                key: key.to_vec(),
+                len,
+                exts: Vec::new(),
+                entries: Vec::new(),
+                gist: Vec::new(),
+            });
+            d.rows += 1;
+            (d.xid, d.cid) = (xid, cid);
+            let Some(heap) = heaps.get_mut(&t.oid) else {
+                return Ok(StoredPlace::Modelled(None));
+            };
+            if heap.versions() + d.rows <= max_versions() {
+                return Ok(StoredPlace::Modelled(None));
+            }
+            let (est, entries) = past_model(heap, btrees, d, mode);
+            drop(rf);
+            untrack(db, t, Some(est));
+            est_inserted(db, t.oid, entries);
+            return Ok(StoredPlace::Modelled(None));
+        }
+        let mut single = InsertMode::single();
+        let mode = match b {
+            Some(b) => {
+                if let Some(d) = &mut b.defer {
+                    d.modelled += 1;
+                }
+                &mut b.mode
+            }
+            None => &mut single,
+        };
+        let Some(heap) = heaps.get_mut(&t.oid) else {
+            return Ok(StoredPlace::Modelled(None));
+        };
+        let tid = heap.insert(key, len, xid, cid, mode);
+        heap.settle_left(&v);
+        big = heap.versions() > max_versions();
+        tid
+    };
+    if big {
+        untrack(db, t, None);
+    }
+    Ok(StoredPlace::Modelled(Some(tid)))
 }
 
 /// The row `inserted_stored` took, which began a run of the heap order's places, went in

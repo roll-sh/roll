@@ -1483,20 +1483,58 @@ fn sys_attr(relid: u32, num: usize) -> Option<(bool, u32, i64)> {
     all.get(&(relid, num)).copied()
 }
 
-/// The definitions of the system views computed by running Postgres's own query (with
-/// information_schema's domains as their base types): (schema, name) → query.
+/// The definitions of the system views whose rows are computed by running Postgres's own
+/// query: (schema, name) → query. `sys_views.tsv`'s (information_schema's domains as their base
+/// types), and every other information_schema view generated as a relation (`expanded_view`
+/// None) but those `split_view` names: PostgreSQL's definition, whose rows the engine's own
+/// generators didn't match (built-in routines' and types' privileges, ...).
 fn sql_views() -> &'static std::collections::HashMap<(&'static str, &'static str), String> {
     static DEFS: OnceLock<std::collections::HashMap<(&'static str, &'static str), String>> =
         OnceLock::new();
     DEFS.get_or_init(|| {
-        include_str!("sys_views.tsv")
+        let mut defs: std::collections::HashMap<(&'static str, &'static str), String> = include_str!("sys_views.tsv")
             .lines()
             .filter_map(|l| {
                 let mut f = l.splitn(3, '\t');
                 Some(((f.next()?, f.next()?), copy_field(f.next()?)?))
             })
-            .collect()
+            .collect();
+        for d in system_view_defs() {
+            let Some(t) = SysTable::by_oid(d.oid).filter(|t| t.is_view() && !view_expanded(*t) && split_view(*t).is_none()) else { continue };
+            let schema = if t.schema() == INFORMATION_SCHEMA_OID { "information_schema" } else { "pg_catalog" };
+            if schema == "information_schema" || matches!(t.name(), "pg_indexes" | "pg_tables") {
+                defs.entry((schema, t.name())).or_insert_with(|| d.def.trim().trim_end_matches(';').to_string());
+            }
+        }
+        defs
     })
+}
+
+/// Whether system view `t` is planned from its definition (`expanded_view`): one that reads at
+/// most two relations (its other inputs set-returning functions: pg_locks, pg_cursors,
+/// pg_roles, pg_views, ...). One joining more catalogs (information_schema's, pg_indexes,
+/// pg_stats) is a relation of its own, its rows generated once per catalog version and kept
+/// (`rows_cacheable`): planning its definition for every query cost 10 to 100 times what
+/// reading the kept rows does (information_schema.columns of one table: 72.8 M user
+/// instructions against 0.67 M).
+fn view_expanded(t: SysTable) -> bool {
+    static EXPANDED: OnceLock<std::collections::HashSet<u32>> = OnceLock::new();
+    EXPANDED
+        .get_or_init(|| {
+            system_view_defs()
+                .iter()
+                .filter(|d| {
+                    let Ok(mut node) = crate::sql::binder::ast::parse_stmt(&d.def) else { return false };
+                    let mut rels = 0;
+                    crate::sql::nodewalk::node(&mut node, &mut |n| {
+                        rels += matches!(n.node, Some(pg_query::NodeEnum::RangeVar(_))) as usize
+                    });
+                    rels <= 2
+                })
+                .map(|d| d.oid)
+                .collect()
+        })
+        .contains(&t.oid())
 }
 
 /// A system view a query plans from its definition, as PostgreSQL's rewriter expands every
@@ -1510,7 +1548,7 @@ pub fn expanded_view(table: SysTable) -> Option<Arc<super::ViewDef>> {
         system_view_defs()
             .iter()
             .filter_map(|d| {
-                let t = SysTable::by_oid(d.oid).filter(|t| t.is_view())?;
+                let t = SysTable::by_oid(d.oid).filter(|t| t.is_view() && view_expanded(*t))?;
                 let options = match t.name() {
                     "pg_stats" | "pg_stats_ext" | "pg_stats_ext_exprs" => vec!["security_barrier=true".to_string()],
                     _ => Vec::new(),
@@ -1585,10 +1623,76 @@ pub fn system_view_def(oid: u32) -> Option<&'static SysViewDef> {
     system_view_defs().iter().find(|d| d.oid == oid)
 }
 
+/// The system views whose rows are two parts (`system_part_rows`, then the engine's own
+/// generator's of the user's objects), and their column naming each row's schema: what ORMs
+/// and migration tools read again and again, before and after each DDL statement.
+fn split_view(table: SysTable) -> Option<&'static str> {
+    use SysTable::*;
+    Some(match table {
+        IsTables | IsColumns | IsTableConstraints | IsKeyColumnUsage | IsConstraintColumnUsage => "table_schema",
+        IsCheckConstraints => "constraint_schema",
+        PgTables | PgIndexes => "schemaname",
+        _ => return None,
+    })
+}
+
+/// A split view's rows of pg_catalog's and information_schema's objects: PostgreSQL's
+/// definition run over them once and kept for the database, the role, its memberships and
+/// the system objects' privileges (what they read that DDL of the user's objects doesn't
+/// change). Running the definition over every relation after each DDL statement cost 30 to
+/// 1,000 times what generating the user's rows does (information_schema.columns: ~617 M
+/// user instructions against ~0.6 M).
+fn system_part_rows(table: SysTable, col: &str, ctx: &ExecCtx) -> Result<Arc<Vec<Row>>> {
+    use std::hash::{Hash, Hasher};
+    type Key = (String, u32, u64, u32);
+    static KEPT: OnceLock<parking_lot::Mutex<std::collections::HashMap<Key, Arc<Vec<Row>>>>> = OnceLock::new();
+    let cat = ctx.catalog();
+    let me = ctx.current_user();
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    for a in cat.acls.iter().filter(|a| a.oid < super::FIRST_USER_OID) {
+        format!("{a:?}").hash(&mut h);
+    }
+    cat.roles_of(me, false, ctx.db_owner()).hash(&mut h);
+    cat.is_superuser(me).hash(&mut h);
+    let key = (ctx.sess.database.clone(), me, h.finish(), table.oid());
+    let kept = KEPT.get_or_init(Default::default);
+    if let Some(r) = kept.lock().get(&key) {
+        return Ok(r.clone());
+    }
+    let def = system_view_def(table.oid()).ok_or_else(|| crate::error::internal("no system view definition"))?;
+    let sql = format!(
+        "SELECT * FROM ({}) v WHERE v.{col} IN ('pg_catalog', 'information_schema')",
+        def.def.trim().trim_end_matches(';')
+    );
+    let rows = Arc::new(sql_view_rows(table, &sql, ctx)?);
+    let mut k = kept.lock();
+    if k.len() >= 64 {
+        k.clear();
+    }
+    k.insert(key, rows.clone());
+    Ok(rows)
+}
+
+thread_local! {
+    /// Generating information_schema.tables' or columns' rows: a foreign table's wrapper that
+    /// fails (pg_relation_is_updatable, pg_column_is_updatable) doesn't fail the generation;
+    /// its error is raised where a query reads that row's column (`deferred_errors`).
+    static DEFER_UPDATABLE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Whether `DEFER_UPDATABLE` is set (`sql_view_rows` of tables or columns).
+pub fn updatable_errors_deferred() -> bool {
+    DEFER_UPDATABLE.with(|d| d.get())
+}
+
 /// The rows of a view `sql_views` defines, as its columns' types.
 fn sql_view_rows(table: SysTable, sql: &str, ctx: &ExecCtx) -> Result<Vec<Row>> {
     let cols = table.columns();
-    let (rows, out) = crate::plpgsql::system_query(ctx, sql)?;
+    let defer = matches!(table, SysTable::IsTables | SysTable::IsColumns);
+    let saved = DEFER_UPDATABLE.with(|d| d.replace(defer));
+    let r = crate::plpgsql::system_query(ctx, sql);
+    DEFER_UPDATABLE.with(|d| d.set(saved));
+    let (rows, out) = r?;
     let fmt = ctx.fmt();
     rows.into_iter()
         .map(|row| {
@@ -1718,8 +1822,9 @@ impl Drop for GenerateClaim<'_> {
 const SYS_ROWS_CACHED: usize = 32;
 
 /// The catalogs whose rows are a function of the catalog, the roles, the search path and
-/// the settings alone (no data, statistics, locks, other databases or large objects): what
-/// psql's `\d` and ORMs' introspection read again and again.
+/// the settings alone (no data, activity statistics, locks, other databases or large
+/// objects; the planner's statistics are the catalog's): what psql's `\d` and ORMs'
+/// introspection read again and again.
 pub fn rows_cacheable(table: SysTable) -> bool {
     use SysTable::*;
     matches!(
@@ -1738,6 +1843,8 @@ pub fn rows_cacheable(table: SysTable) -> bool {
             | IsReferentialConstraints
             | IsCheckConstraints
             | IsConstraintColumnUsage
+            // (Statistics are the catalog's too, `Catalog::colstats`, ANALYZE a new version.)
+            | PgStats
     ) || is_sql_view(table)
 }
 
@@ -1751,7 +1858,10 @@ fn is_sql_view(table: SysTable) -> bool {
     VIEWS
         .get_or_init(|| {
             SysTable::all()
-                .filter(|t| t.schema() == INFORMATION_SCHEMA_OID && sql_views().contains_key(&("information_schema", t.name())))
+                .filter(|t| {
+                    (t.schema() == INFORMATION_SCHEMA_OID && sql_views().contains_key(&("information_schema", t.name())))
+                        || split_view(*t).is_some()
+                })
                 .map(|t| t.oid())
                 .collect()
         })
@@ -2985,6 +3095,12 @@ fn generate_raw(table: SysTable, ctx: &ExecCtx, only: Option<u32>, out: &mut Out
     if let Some(sql) = sql_views().get(&(schema, table.name())) {
         out.set(sql_view_rows(table, sql, ctx)?);
         return Ok(());
+    }
+    // (A split view: the system objects' rows, then the generator's of the user's below.)
+    if let Some(col) = split_view(table)
+        && only.is_none()
+    {
+        out.extend(system_part_rows(table, col, ctx)?.iter().cloned());
     }
     let cat = ctx.catalog();
     let cat = &*cat;
@@ -4903,8 +5019,13 @@ fn generate_raw(table: SysTable, ctx: &ExecCtx, only: Option<u32>, out: &mut Out
         PgDbRoleSetting => {
             let dbs = ctx.sess.cluster.databases();
             for e in &cat.role_settings {
+                // (A database the cluster doesn't have: no row, rather than one that reads
+                // as the role's own setting, setdatabase 0.)
                 let db = match &e.database {
-                    Some(n) => dbs.iter().find(|d| &d.1 == n).map_or(0, |d| d.0),
+                    Some(n) => match dbs.iter().find(|d| &d.1 == n) {
+                        Some(d) => d.0,
+                        None => continue,
+                    },
                     None => 0,
                 };
                 out.push(vec![
@@ -5963,18 +6084,7 @@ fn generate_raw(table: SysTable, ctx: &ExecCtx, only: Option<u32>, out: &mut Out
                     b(t.rls),
                 ]);
             }
-            for st in SysTable::all().filter(|s| !s.is_view()) {
-                out.push(vec![
-                    nm("pg_catalog"),
-                    nm(st.name()),
-                    nm(role_name(OWNER)),
-                    N,
-                    b(false),
-                    b(false),
-                    b(false),
-                    b(false),
-                ]);
-            }
+            // (pg_catalog's and information_schema's: `system_part_rows`.)
         }
         PgViews => {
             // Postgres's own views (in schemas still there).
@@ -6075,6 +6185,8 @@ fn generate_raw(table: SysTable, ctx: &ExecCtx, only: Option<u32>, out: &mut Out
                 } else {
                     "BASE TABLE"
                 };
+                // (A typed table, CREATE TABLE ... OF: its type.)
+                let of = (t.of_type != 0).then(|| cat.user_type_name(t.of_type)).flatten();
                 out.push(vec![
                     nm(&dbname),
                     nm(cat.schema_name(t.schema)),
@@ -6082,11 +6194,11 @@ fn generate_raw(table: SysTable, ctx: &ExecCtx, only: Option<u32>, out: &mut Out
                     nm(kind),
                     N,
                     N,
-                    N,
-                    N,
-                    N,
+                    of.map_or(N, |_| nm(&dbname)),
+                    of.map_or(N, |(s, _, _)| nm(cat.schema_name(s))),
+                    of.map_or(N, |(_, n, _)| nm(n)),
                     yn(t.foreign.is_none()),
-                    yn(false),
+                    yn(of.is_some()),
                     N,
                 ]);
             }
@@ -6107,27 +6219,12 @@ fn generate_raw(table: SysTable, ctx: &ExecCtx, only: Option<u32>, out: &mut Out
                     N,
                 ]);
             }
-            for st in SysTable::all().filter(|s| only.is_none_or(|o| s.oid() == o)) {
-                let kind = if st.is_view() { "VIEW" } else { "BASE TABLE" };
-                out.push(vec![
-                    nm(&dbname),
-                    nm(cat.schema_name(st.schema())),
-                    nm(st.name()),
-                    nm(kind),
-                    N,
-                    N,
-                    N,
-                    N,
-                    N,
-                    yn(!st.is_view()),
-                    yn(false),
-                    N,
-                ]);
-            }
+            // (pg_catalog's and information_schema's: `system_part_rows`.)
         }
         IsColumns => {
+            // (A foreign table's columns updatable as it is insertable, `IsTables`.)
             let mut rels: Vec<(u32, u32, String, bool)> = pick(&cat.tables, only)
-                .map(|t| (t.oid, t.schema, t.name.clone(), true))
+                .map(|t| (t.oid, t.schema, t.name.clone(), t.foreign.is_none()))
                 .collect();
             // (relkind r, v, f, p: no materialized view's.)
             rels.extend(
@@ -6135,10 +6232,7 @@ fn generate_raw(table: SysTable, ctx: &ExecCtx, only: Option<u32>, out: &mut Out
                     .filter(|v| !v.materialized)
                     .map(|v| (v.oid, v.schema, v.name.clone(), false)),
             );
-            rels.extend(
-                (SysTable::all().filter(|s| only.is_none_or(|o| s.oid() == o)))
-                    .map(|s| (s.oid(), s.schema(), s.name().to_string(), false)),
-            );
+            // (pg_catalog's and information_schema's: `system_part_rows`.)
             for (oid, schema, name, is_table) in rels {
                 // Views: pg_column_is_updatable.
                 let updatable = cat
@@ -6147,11 +6241,18 @@ fn generate_raw(table: SysTable, ctx: &ExecCtx, only: Option<u32>, out: &mut Out
                     .map(|v| crate::sql::binder::views::view_updatability(ctx, v, false).1)
                     .unwrap_or_default();
                 let mut pos = 0;
-                for (_, cname, ty, col) in rel_columns(cat, oid, ctx) {
+                for (i, cname, ty, col) in rel_columns(cat, oid, ctx) {
                     if col.as_ref().is_some_and(|c| c.dropped) {
                         continue;
                     }
                     pos += 1;
+                    // (A view's column: the collation its query derives, attcollation.)
+                    let col = col.or_else(|| {
+                        let coll = cat.views.get(&oid)?.collations.get(i - 1).cloned().flatten()?;
+                        let mut c = super::Column::new(cname.clone(), ty.clone());
+                        c.collation = Some(coll);
+                        Some(c)
+                    });
                     let shown = |d: &String| {
                         cat.tables
                             .get(&oid)
@@ -6445,7 +6546,8 @@ fn generate_raw(table: SysTable, ctx: &ExecCtx, only: Option<u32>, out: &mut Out
                     ]);
                 }
             }
-            for d in cat.domains.values() {
+            // (information_schema's own domains: `system_part_rows`.)
+            for d in cat.domains.values().filter(|d| d.schema != INFORMATION_SCHEMA_OID) {
                 // (pg_get_constraintdef's expression; the NOT NULL `VALUE IS NOT NULL`.)
                 if d.not_null {
                     out.push(vec![
@@ -7777,6 +7879,36 @@ pub(crate) fn shown_default(ctx: &ExecCtx, t: &Arc<Table>, d: &str, ty: &DataTyp
 }
 
 #[allow(clippy::too_many_arguments)]
+/// An interval column's fields (`_pg_interval_type`: intervaltypmodout's), None for all.
+fn interval_fields(ty: &DataType) -> Option<&'static str> {
+    let DataType::Interval(m) = ty else { return None };
+    if *m < 0 {
+        return None;
+    }
+    const MONTH: i32 = 1 << 1;
+    const YEAR: i32 = 1 << 2;
+    const DAY: i32 = 1 << 3;
+    const HOUR: i32 = 1 << 10;
+    const MINUTE: i32 = 1 << 11;
+    const SECOND: i32 = 1 << 12;
+    Some(match (*m >> 16) & 0x7FFF {
+        YEAR => "YEAR",
+        MONTH => "MONTH",
+        DAY => "DAY",
+        HOUR => "HOUR",
+        MINUTE => "MINUTE",
+        SECOND => "SECOND",
+        r if r == YEAR | MONTH => "YEAR TO MONTH",
+        r if r == DAY | HOUR => "DAY TO HOUR",
+        r if r == DAY | HOUR | MINUTE => "DAY TO MINUTE",
+        r if r == DAY | HOUR | MINUTE | SECOND => "DAY TO SECOND",
+        r if r == HOUR | MINUTE => "HOUR TO MINUTE",
+        r if r == HOUR | MINUTE | SECOND => "HOUR TO SECOND",
+        r if r == MINUTE | SECOND => "MINUTE TO SECOND",
+        _ => return None,
+    })
+}
+
 fn info_column(
     cat: &Catalog,
     db: &str,
@@ -7857,6 +7989,12 @@ fn info_column(
                         .map_or_else(|| "pg_catalog".to_string(), |s| cat.schema_name(s).to_string()),
                     t.typname(),
                 ),
+                // A type of the user's (a range type): its schema.
+                b if type_oid(cat, b) >= super::FIRST_USER_OID
+                    && let Some((s, _, _)) = cat.user_type_name(type_oid(cat, b)) =>
+                {
+                    (cat.schema_name(s).to_string(), t.typname())
+                }
                 // A made base type (an extension's citext, hstore): its schema.
                 b => match cat.base_types.values().find(|d| d.oid() == type_oid(cat, b)) {
                     Some(d) => (cat.schema_name(d.ty.schema).to_string(), t.typname()),
@@ -7925,7 +8063,7 @@ fn info_column(
         radix,
         scale,
         dt_prec,
-        N,
+        interval_fields(ty).map_or(N, nm),
         N,
         N,
         N,

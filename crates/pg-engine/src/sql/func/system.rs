@@ -2020,9 +2020,18 @@ fn tree_source(ctx: &ExecCtx, cat: &Catalog, rel: Option<&Arc<crate::catalog::Ta
     use crate::sql::nodetree::{StoredTree, default_exprs_tree, policy_expr_tree, table_expr_tree, trigger_when_tree};
     let Some(rel) = rel else {
         for d in cat.domains.values() {
-            for (_, check) in &d.checks {
-                if crate::sql::nodetree::domain_check_tree(ctx, &d.base, check).as_deref() == Some(tree) {
-                    return Some(check.clone());
+            for (name, check) in &d.checks {
+                // (information_schema's: PostgreSQL's tree, as the catalog's own rows hold it.)
+                let initdb = || {
+                    crate::catalog::static_rows::rows(crate::catalog::system::SysTable::PgConstraint).iter().any(|r| {
+                        matches!(r.get(1), Some(Value::Text(n)) if **n == **name)
+                            && matches!(r.last(), Some(Value::Text(t)) if **t == *tree)
+                    })
+                };
+                if crate::sql::nodetree::domain_check_tree(ctx, &d.base, check).as_deref() == Some(tree)
+                    || d.oid < crate::catalog::FIRST_USER_OID && initdb()
+                {
+                    return Some(crate::sql::ruleutils::domain_check(ctx, &d.base, check, false).unwrap_or_else(|| check.clone()));
                 }
             }
             if let Some(def) = &d.default
@@ -2767,6 +2776,10 @@ fn relation_updatability(c: &FnCtx, oid: u32, triggers: bool) -> Result<(i32, Ve
             && let Some(e) = cat.fdw_routine_error(t)
             && e.code == code::OBJECT_NOT_IN_PREREQUISITE_STATE
         {
+            // (Generating information_schema's rows: raised where they are read.)
+            if crate::catalog::system::updatable_errors_deferred() {
+                return Ok((0, vec![false; t.columns.len()]));
+            }
             return Err(e);
         }
         return Ok((28, vec![true; t.columns.len()]));

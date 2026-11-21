@@ -14,9 +14,9 @@
 //! the executor's thread as the stage ends (`flush`).
 
 use super::Row;
-use super::kernel::{K, compile};
+use super::kernel::{K, StoredCmps, compile};
 use super::parscan::Decode;
-use super::pipe::Joined;
+use super::pipe::{Joined, truncate_row};
 use crate::sql::expr::Expr;
 use crate::sql::plan::{Access, JoinKind, Plan, ScanPlan};
 use crate::storage::Store;
@@ -46,7 +46,7 @@ const CACHE_KEYS: usize = 1 << 16;
 /// snapshot (a cache only saves reading them again: the counts are the scans').
 #[derive(Default)]
 pub struct LookupScratch {
-    cache: std::collections::HashMap<Vec<u8>, std::rc::Rc<Vec<Row>>>,
+    cache: std::collections::HashMap<Vec<u8>, std::rc::Rc<Vec<Value>>>,
     loops: u64,
     fetched: u64,
     /// The worker's reader of the rows' keys, kept from lookup to lookup: the blocks the
@@ -64,7 +64,7 @@ pub struct LookupScratch {
 }
 
 /// A batch's outer row, as `Lookup::batch` found it: left to the executor's thread, or its
-/// inner rows (a range of the batch's rows).
+/// inner rows (a range of the batch's values: `Lookup::width` a row).
 #[derive(Clone, Copy)]
 pub enum Got {
     Left,
@@ -84,6 +84,8 @@ struct BatchBufs {
     espans: Vec<(u32, u32)>,
     /// The batch's distinct row keys (spans of `ekeys`), ascending: the multi-get's.
     sorted: Vec<(u32, u32)>,
+    /// Per entry (of `espans`), its row key's place in `sorted`.
+    slot: Vec<u32>,
 }
 
 /// One outer row of a batch: its index key, how it is read, and its entries.
@@ -109,6 +111,18 @@ enum How {
     Alone,
 }
 
+/// What `Lookup::add` did with a stored row.
+enum Add {
+    /// Appended: it passed.
+    Kept,
+    /// Turned away by the filter or the join condition.
+    Out,
+    /// A kernel left something to `eval`.
+    Left,
+    /// It didn't decode.
+    Bad,
+}
+
 /// One nested loop's inner index scans.
 pub struct Lookup {
     store: Arc<Store>,
@@ -119,6 +133,14 @@ pub struct Lookup {
     /// FIRST, its key collation), and the char(n) width a bpchar value is padded to.
     keys: Vec<(K, bool, bool, Option<KeyColl>, Option<usize>)>,
     decode: Decode,
+    /// The inner rows' width (the table's columns), and the columns decoded: up to `last`,
+    /// those `need` marks (`decode`'s).
+    width: usize,
+    last: usize,
+    /// The inner scan's filter's comparisons with constants over the stored values
+    /// (`StoredCmps`): a row they turn away isn't decoded; one they pass skips `filter` when
+    /// they are the whole of it (true).
+    stored: Option<(StoredCmps, bool)>,
     /// The inner scan's filter and the join condition, over the joined row's two sides.
     filter: Option<K>,
     cond: Option<K>,
@@ -216,6 +238,29 @@ impl Lookup {
         let Some((store, ts)) = ctx.txn.borrow().store_reader(&snap) else {
             return Ok(None);
         };
+        let width = s.table.columns.len();
+        if width == 0 {
+            return Ok(None);
+        }
+        // (The filter over the inner row alone: constants and its own columns.)
+        // (The filter's first conjuncts over the inner row alone, its columns and constants:
+        // an inner scan's filter holds the join's equalities over the outer row too, `^1#k`.
+        // Only the first ones: a row they turn away is one whose filter stops there, as
+        // ExecQual stops at its first false qual, before a later one that may raise an error.)
+        let stored = s.filter.as_ref().and_then(|f| {
+            let parts: Vec<&Expr> = match f {
+                Expr::And(a) => a.iter().collect(),
+                e => vec![e],
+            };
+            let mut ks: Vec<K> = parts.iter().map_while(|e| compile(e)).collect();
+            let whole = ks.len() == parts.len();
+            let k = match ks.len() {
+                0 => return None,
+                1 => ks.pop()?,
+                _ => K::And(ks),
+            };
+            StoredCmps::of(&k).map(|c| (c, whole))
+        });
         // (Equal index keys' rows in the model's heap order: only a unique index's single
         // row, or a table not modelled, whose entries are in storage order.)
         let modelled = super::sizing::heap_modelled_or_kept(&s.table, ctx);
@@ -247,11 +292,15 @@ impl Lookup {
             n.resize(s.table.columns.len(), false);
             Some(Arc::from(n))
         })();
+        let last = need.as_deref().map_or(width, |n: &[bool]| n.iter().rposition(|&x| x).map_or(0, |i| i + 1));
         Ok(Some(Lookup {
             store,
             ts,
             prefix: index_prefix(s.table.oid, ix.id),
             keys,
+            width,
+            last,
+            stored,
             decode: Decode {
                 need,
                 late: None,
@@ -286,11 +335,12 @@ impl Lookup {
     }
 
     /// The inner rows outer row `l` joins (its index entries' rows passing the scan's
-    /// filter and the join condition), in the serial join's order, into `out`. False:
-    /// something is left to `eval` or failed (the row goes to the executor's thread, which
-    /// runs it as the serial join does). `sc`: the worker's counts and cache.
-    pub fn rows(&self, l: &[Value], out: &mut Vec<Row>, sc: &mut LookupScratch) -> bool {
-        super::pipe::clear_rows(out);
+    /// filter and the join condition), in the serial join's order, into `out` (`width`
+    /// values a row). False: something is left to `eval` or failed (the row goes to the
+    /// executor's thread, which runs it as the serial join does). `sc`: the worker's counts
+    /// and cache.
+    pub fn rows(&self, l: &[Value], out: &mut Vec<Value>, sc: &mut LookupScratch) -> bool {
+        truncate_row(out, 0);
         let mut start = self.prefix.clone();
         for (k, desc, nulls_first, coll, pad) in &self.keys {
             let Some(v) = k.run(l) else { return false };
@@ -325,7 +375,7 @@ impl Lookup {
         };
         sc.loops += 1;
         let mut read = 0u64;
-        for r in found.iter() {
+        for r in found.chunks_exact(self.width) {
             read += 1;
             let view = Joined::Pair { l, r: super::pipe::Inner::plain(r), keep: None };
             let mut pass = true;
@@ -337,13 +387,13 @@ impl Lookup {
                         break;
                     }
                     None => {
-                        sc.fetched += found.len() as u64;
+                        sc.fetched += (found.len() / self.width) as u64;
                         return false;
                     }
                 }
             }
             if pass {
-                out.push(r.clone());
+                out.extend_from_slice(r);
                 if first {
                     break;
                 }
@@ -364,20 +414,113 @@ impl Lookup {
         row_at(&self.store, self.ts, d, reader)
     }
 
-    /// The rows of the index entries under key `start`, in index order (None: a read
-    /// failed, or a row didn't decode).
-    fn fetch(&self, start: &[u8], sc: &mut LookupScratch) -> Option<Vec<Row>> {
+    /// Stored row `bytes` appended to `out` as `Decode::row` makes it: the table's columns,
+    /// those not needed NULL (Err: it didn't decode; nothing appended).
+    fn decode_into(&self, bytes: &[u8], out: &mut Vec<Value>) -> crate::error::Result<()> {
+        use crate::storage::row::{decode_value, skip_value_fast};
+        let data = super::scan::row_data(bytes)?;
+        let base = out.len();
+        out.reserve(self.width);
+        let r = (|| {
+            let mut pos = 0;
+            let n = crate::storage::sst::get_varint(data, &mut pos)? as usize;
+            let walk = self.last.min(n);
+            match self.decode.need.as_deref() {
+                Some(need) => {
+                    for &want in &need[..walk] {
+                        if want {
+                            out.push(decode_value(data, &mut pos)?);
+                        } else {
+                            skip_value_fast(data, &mut pos)?;
+                            out.push(Value::Null);
+                        }
+                    }
+                }
+                None => {
+                    for _ in 0..walk {
+                        out.push(decode_value(data, &mut pos)?);
+                    }
+                }
+            }
+            // (The columns past the walk NULL; one added since the row was stored, and
+            // needed, its value.)
+            let stored = n.min(self.width);
+            for _ in walk..stored {
+                out.push(Value::Null);
+            }
+            for i in stored..self.width {
+                let needed = self.decode.need.as_deref().is_none_or(|nd| nd[i]);
+                out.push(match &self.decode.missing[i] {
+                    Some(v) if needed => v.clone(),
+                    _ => Value::Null,
+                });
+            }
+            Ok(())
+        })();
+        if r.is_err() {
+            truncate_row(out, base);
+        }
+        r
+    }
+
+    /// Stored row `bytes` appended to `out` (`decode_into`) when it passes the inner scan's
+    /// filter and the join condition with outer row `l`: over the stored values first
+    /// (`stored`: a row turned away there isn't decoded; a row stored without a header too,
+    /// as a bulk load writes them), else over the row.
+    fn add(&self, l: &[Value], bytes: &[u8], out: &mut Vec<Value>) -> Add {
+        let mut checked = false;
+        if let Some((c, whole)) = &self.stored
+            && !crate::storage::toast::has_external(bytes)
+            && let Some(pass) = super::scan::row_data(bytes).ok().and_then(|d| c.passes(d))
+        {
+            if !pass {
+                return Add::Out;
+            }
+            checked = *whole;
+        }
+        let base = out.len();
+        if self.decode_into(bytes, out).is_err() {
+            return Add::Bad;
+        }
+        let got = {
+            let view = Joined::Pair { l, r: super::pipe::Inner::plain(&out[base..]), keep: None };
+            let filter = if checked { None } else { self.filter.as_ref() };
+            let mut got = Add::Kept;
+            for k in [filter, self.cond.as_ref()].into_iter().flatten() {
+                match k.passes(&view) {
+                    Some(true) => {}
+                    Some(false) => {
+                        got = Add::Out;
+                        break;
+                    }
+                    None => {
+                        got = Add::Left;
+                        break;
+                    }
+                }
+            }
+            got
+        };
+        if !matches!(got, Add::Kept) {
+            truncate_row(out, base);
+        }
+        got
+    }
+
+    /// The rows of the index entries under key `start`, in index order, `width` values a
+    /// row (None: a read failed, or a row didn't decode).
+    fn fetch(&self, start: &[u8], sc: &mut LookupScratch) -> Option<Vec<Value>> {
         self.entries(start, sc)?;
         let dkeys = std::mem::take(&mut sc.dkeys);
         let out = (|| {
+            let mut rows = Vec::new();
             if dkeys.len() <= 1 {
-                return match dkeys.first() {
-                    None => Some(Vec::new()),
-                    Some(d) => Some(match self.get(d, &mut sc.reader)? {
-                        Some(b) => vec![self.decode.row(d, &b).ok()?],
-                        None => Vec::new(),
-                    }),
-                };
+                if let Some(d) = dkeys.first()
+                    && let Some(b) = self.get(d, &mut sc.reader)?
+                {
+                    self.decode_into(&b, &mut rows).ok()?;
+                }
+                return Some(rows);
             }
             // (Fetched in key order; the rows then taken in the entries' order.)
             let mut sorted: Vec<&[u8]> = dkeys.iter().map(Vec::as_slice).collect();
@@ -389,10 +532,10 @@ impl Lookup {
                     found.push((k, b));
                 }
             }
-            let mut rows = Vec::with_capacity(dkeys.len());
+            rows.reserve(dkeys.len() * self.width);
             for d in &dkeys {
                 if let Ok(i) = found.binary_search_by(|(k, _)| (*k).cmp(d.as_slice())) {
-                    rows.push(self.decode.row(d, &found[i].1).ok()?);
+                    self.decode_into(&found[i].1, &mut rows).ok()?;
                 }
             }
             Some(rows)
@@ -403,7 +546,7 @@ impl Lookup {
 
     /// `rows` of a semi or anti join: the index entries' rows fetched one at a time in
     /// index order up to the first that passes the filter and the join condition.
-    fn first_row(&self, l: &[Value], start: &[u8], out: &mut Vec<Row>, sc: &mut LookupScratch) -> bool {
+    fn first_row(&self, l: &[Value], start: &[u8], out: &mut Vec<Value>, sc: &mut LookupScratch) -> bool {
         if self.entries(start, sc).is_none() {
             return false;
         }
@@ -412,33 +555,25 @@ impl Lookup {
             let mut read = 0u64;
             for (n, d) in dkeys.iter().enumerate() {
                 let Some(b) = self.get(d, &mut sc.reader)? else { continue };
-                let row = self.decode.row(d, &b).ok()?;
-                read += 1;
-                let view = Joined::Pair { l, r: super::pipe::Inner::plain(&row), keep: None };
-                let mut pass = true;
-                for k in [&self.filter, &self.cond].into_iter().flatten() {
-                    match k.passes(&view) {
-                        Some(true) => {}
-                        Some(false) => {
-                            pass = false;
-                            break;
-                        }
-                        None => {
-                            // (Left to the executor's thread: every visible row counted,
-                            // as a whole fetch counts them.)
-                            for d in &dkeys[n + 1..] {
-                                if let Some(Some(_)) = self.get(d, &mut sc.reader) {
-                                    read += 1;
-                                }
-                            }
-                            sc.fetched += read;
-                            return Some(false);
-                        }
+                match self.add(l, &b, out) {
+                    Add::Kept => {
+                        read += 1;
+                        break;
                     }
-                }
-                if pass {
-                    out.push(row);
-                    break;
+                    Add::Out => read += 1,
+                    Add::Bad => return None,
+                    Add::Left => {
+                        // (Left to the executor's thread: every visible row counted, as a
+                        // whole fetch counts them.)
+                        read += 1;
+                        for d in &dkeys[n + 1..] {
+                            if let Some(Some(_)) = self.get(d, &mut sc.reader) {
+                                read += 1;
+                            }
+                        }
+                        sc.fetched += read;
+                        return Some(false);
+                    }
                 }
             }
             sc.fetched += read;
@@ -468,11 +603,11 @@ impl Lookup {
     /// (`PointReader::get_sorted`: the cache misses of different outer rows' rows overlap,
     /// where one outer row's rows, adjacent, have few to overlap), and each outer row's rows
     /// taken in its entries' order, filtered and counted as `rows` does.
-    pub fn batch(&self, ls: &[Row], got: &mut Vec<Got>, out: &mut Vec<Row>, sc: &mut LookupScratch) {
+    pub fn batch(&self, ls: &[Row], got: &mut Vec<Got>, out: &mut Vec<Value>, sc: &mut LookupScratch) {
         got.clear();
-        super::pipe::clear_rows(out);
+        truncate_row(out, 0);
         let mut b = std::mem::take(&mut sc.batch);
-        let BatchBufs { starts, wants, order, ekeys, espans, sorted } = &mut b;
+        let BatchBufs { starts, wants, order, ekeys, espans, sorted, slot } = &mut b;
         starts.clear();
         wants.clear();
         order.clear();
@@ -520,25 +655,24 @@ impl Lookup {
         // Every entry's row, by one multi-get.
         let mut rows: Vec<Option<bytes::Bytes>> = Vec::new();
         if ok && !espans.is_empty() {
-            sorted.extend_from_slice(espans);
-            ok = self.multi_get(ekeys, sorted, &mut rows, sc);
+            ok = self.multi_get(ekeys, espans, order, sorted, slot, &mut rows, sc);
         }
         // Each outer row's rows, in turn.
         let mut one = Vec::new();
         for (l, w) in ls.iter().zip(wants.iter()) {
-            let n = out.len() as u32;
+            let n = out.len();
             let mut how = w.how;
             if how == How::Batch {
-                match ok.then(|| self.take(l, ekeys, espans, sorted, &rows, w, out, sc)).flatten() {
-                    Some(true) => got.push(Got::Rows(n, out.len() as u32)),
+                match ok.then(|| self.take(l, &rows, slot, w, out, sc)).flatten() {
+                    Some(true) => got.push(Got::Rows(n as u32, out.len() as u32)),
                     Some(false) => {
-                        out.truncate(n as usize);
+                        truncate_row(out, n);
                         got.push(Got::Left);
                     }
                     // (A unique key's entry whose row the snapshot doesn't see, or a read
                     // that failed: read as `rows` reads it.)
                     None => {
-                        out.truncate(n as usize);
+                        truncate_row(out, n);
                         how = How::Alone;
                     }
                 }
@@ -549,12 +683,12 @@ impl Lookup {
                 How::Null => {
                     // (An equality with NULL finds nothing: the scan still counts.)
                     sc.loops += 1;
-                    got.push(Got::Rows(n, n));
+                    got.push(Got::Rows(n as u32, n as u32));
                 }
                 How::Alone => match self.rows(l, &mut one, sc) {
                     true => {
                         out.append(&mut one);
-                        got.push(Got::Rows(n, out.len() as u32));
+                        got.push(Got::Rows(n as u32, out.len() as u32));
                     }
                     false => got.push(Got::Left),
                 },
@@ -563,12 +697,33 @@ impl Lookup {
         sc.batch = b;
     }
 
-    /// The rows of the row keys `sorted` names (spans of `ekeys`; sorted and deduplicated
-    /// here) into `rows`, by one multi-get through the worker's reader. False: a read failed.
-    fn multi_get(&self, ekeys: &[u8], sorted: &mut Vec<(u32, u32)>, rows: &mut Vec<Option<bytes::Bytes>>, sc: &mut LookupScratch) -> bool {
+    /// The rows of the entries' row keys (`espans`, spans of `ekeys`) into `rows`, by one
+    /// multi-get through the worker's reader of the distinct keys ascending (`sorted`; each
+    /// entry's place there into `slot`; `order` a buffer). False: a read failed.
+    #[allow(clippy::too_many_arguments)]
+    fn multi_get(
+        &self,
+        ekeys: &[u8],
+        espans: &[(u32, u32)],
+        order: &mut Vec<u32>,
+        sorted: &mut Vec<(u32, u32)>,
+        slot: &mut Vec<u32>,
+        rows: &mut Vec<Option<bytes::Bytes>>,
+        sc: &mut LookupScratch,
+    ) -> bool {
         let span = |s: &(u32, u32)| &ekeys[s.0 as usize..s.1 as usize];
-        sorted.sort_unstable_by(|x, y| span(x).cmp(span(y)));
-        sorted.dedup_by(|x, y| span(x) == span(y));
+        order.clear();
+        order.extend(0..espans.len() as u32);
+        order.sort_unstable_by(|&x, &y| span(&espans[x as usize]).cmp(span(&espans[y as usize])));
+        slot.clear();
+        slot.resize(espans.len(), 0);
+        for &e in order.iter() {
+            let s = espans[e as usize];
+            if sorted.last().is_none_or(|l| span(l) != span(&s)) {
+                sorted.push(s);
+            }
+            slot[e as usize] = sorted.len() as u32 - 1;
+        }
         let keys: Vec<&[u8]> = sorted.iter().map(span).collect();
         let r = sc.reader.get_or_insert_with(|| self.store.point_reader(self.ts, false));
         match r.get_sorted(&keys, true) {
@@ -580,59 +735,31 @@ impl Lookup {
         }
     }
 
-    /// `batch`'s rows for outer row `l` (`w`) from the multi-get's `rows` (of the `sorted`
-    /// keys), filtered and counted as `rows` does, into `out`. Some(false): left to the
+    /// `batch`'s rows for outer row `l` (`w`) from the multi-get's `rows` (each entry's at
+    /// its `slot`), filtered and counted as `rows` does, into `out`. Some(false): left to the
     /// executor's thread; None (nothing counted): a unique key's entry whose row the snapshot
     /// doesn't see.
-    #[allow(clippy::too_many_arguments)]
-    fn take(
-        &self,
-        l: &[Value],
-        ekeys: &[u8],
-        espans: &[(u32, u32)],
-        sorted: &[(u32, u32)],
-        rows: &[Option<bytes::Bytes>],
-        w: &Want,
-        out: &mut Vec<Row>,
-        sc: &mut LookupScratch,
-    ) -> Option<bool> {
-        let span = |s: &(u32, u32)| &ekeys[s.0 as usize..s.1 as usize];
-        let ents = &espans[w.ents.0 as usize..w.ents.1 as usize];
-        let row_of = |e: &(u32, u32)| -> Option<&bytes::Bytes> {
-            let d = span(e);
-            let j = sorted.binary_search_by(|s| span(s).cmp(d)).ok()?;
-            rows[j].as_ref()
-        };
+    fn take(&self, l: &[Value], rows: &[Option<bytes::Bytes>], slot: &[u32], w: &Want, out: &mut Vec<Value>, sc: &mut LookupScratch) -> Option<bool> {
+        let ents = w.ents.0 as usize..w.ents.1 as usize;
+        let row_of = |e: usize| rows[slot[e] as usize].as_ref();
         let mut read = 0u64;
-        for e in ents {
+        for e in ents.clone() {
             let Some(v) = row_of(e) else {
                 if w.probed {
                     return None;
                 }
                 continue;
             };
-            let Ok(row) = self.decode.row(span(e), v) else { return Some(false) };
-            read += 1;
-            let view = Joined::Pair { l, r: super::pipe::Inner::plain(&row), keep: None };
-            let mut pass = true;
-            for k in [&self.filter, &self.cond].into_iter().flatten() {
-                match k.passes(&view) {
-                    Some(true) => {}
-                    Some(false) => {
-                        pass = false;
-                        break;
-                    }
-                    None => {
-                        // (Left to the executor's thread: every visible row counted, as
-                        // `rows` counts them.)
-                        sc.loops += 1;
-                        sc.fetched += ents.iter().filter(|e| row_of(e).is_some()).count() as u64;
-                        return Some(false);
-                    }
+            match self.add(l, v, out) {
+                Add::Kept | Add::Out => read += 1,
+                Add::Bad => return Some(false),
+                Add::Left => {
+                    // (Left to the executor's thread: every visible row counted, as
+                    // `rows` counts them.)
+                    sc.loops += 1;
+                    sc.fetched += ents.filter(|&e| row_of(e).is_some()).count() as u64;
+                    return Some(false);
                 }
-            }
-            if pass {
-                out.push(row);
             }
         }
         sc.loops += 1;
@@ -646,9 +773,10 @@ impl Lookup {
         self.fetched.fetch_add(std::mem::take(&mut sc.fetched), Ordering::Relaxed);
     }
 
-    /// The join's rows for outer row `l` and its inner `rows`, in order, to `f` (`own_last`:
-    /// `Probe::emit`'s).
-    pub fn emit(&self, l: Row, rows: &[Row], own_last: bool, f: &mut dyn FnMut(Joined)) {
+    /// The join's rows for outer row `l` and its inner `rows` (`width` values a row), in
+    /// order, to `f` (`own_last`: `Probe::emit`'s; the last row's values are moved into the
+    /// joined row, not copied).
+    pub fn emit(&self, l: Row, rows: &mut [Value], own_last: bool, f: &mut dyn FnMut(Joined)) {
         match self.kind {
             JoinKind::Semi if !rows.is_empty() => f(Joined::Row(l)),
             JoinKind::Anti if rows.is_empty() => f(Joined::Row(l)),
@@ -659,17 +787,20 @@ impl Lookup {
                 f(Joined::Row(o));
             }
             _ => {
-                let Some((last, rest)) = rows.split_last().filter(|_| own_last) else {
-                    for r in rows {
-                        f(Joined::Pair { l: &l, r: super::pipe::Inner::plain(r), keep: self.keep.as_deref() });
+                let keep = self.keep.as_deref();
+                let last = rows.len().saturating_sub(self.width);
+                if !own_last || rows.is_empty() {
+                    for r in rows.chunks_exact(self.width) {
+                        f(Joined::Pair { l: &l, r: super::pipe::Inner::plain(r), keep });
                     }
                     super::pipe::drop_row(l);
                     return;
-                };
-                for r in rest {
-                    f(Joined::Pair { l: &l, r: super::pipe::Inner::plain(r), keep: self.keep.as_deref() });
                 }
-                f(Joined::Row(super::pipe::joined_from(l, super::pipe::Inner::plain(last), self.keep.as_deref())));
+                let (rest, last) = rows.split_at_mut(last);
+                for r in rest.chunks_exact(self.width) {
+                    f(Joined::Pair { l: &l, r: super::pipe::Inner::plain(r), keep });
+                }
+                f(Joined::Row(super::pipe::joined_from_taken(l, last, keep)));
             }
         }
     }

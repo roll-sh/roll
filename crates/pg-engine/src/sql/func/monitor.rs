@@ -1163,9 +1163,15 @@ pub fn register(r: &mut Registry) {
     }
     // Server files, shared memory and replication state: nothing to show.
     r.from_pg(3329, None, Some(file_settings));
-    for oid in [6399, 4100] {
-        r.from_pg(oid, None, Some(no_rows));
-    }
+    r.from_pg(6399, None, Some(no_rows));
+    // (Built without libnuma: pg_get_shmem_allocations_numa fails, as pg_shmem_allocations_numa
+    // reads it.)
+    r.from_pg(4100, None, Some(|_, _| {
+        Err(crate::error::Error::new(
+            crate::error::code::FEATURE_NOT_SUPPORTED,
+            "libnuma initialization failed or NUMA is not supported on this platform",
+        ))
+    }));
     r.from_pg(5052, None, Some(shmem_allocations));
     r.from_pg(3400, None, Some(pg_config));
     r.from_pg(2282, None, Some(memory_contexts));

@@ -5043,8 +5043,7 @@ impl Binder<'_, '_> {
                         // level is planned with the query's, its relations in the query's join
                         // search under the query's quals.
                         let node = ast::parse_stmt(&v.query).ok();
-                        let simple = std::env::var_os("ROLL_A279_VIEW_DEFER").is_some()
-                            && !self.deparse
+                        let simple = !self.deparse
                             && !self.unplanned
                             && self.deps.is_none()
                             && self.refs.is_none()

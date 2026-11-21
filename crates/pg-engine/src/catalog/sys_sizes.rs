@@ -282,3 +282,49 @@ pub fn sys_size(oid: u32) -> Option<(u32, u32, u32)> {
         .ok()
         .map(|i| (SYS_SIZES[i].1, SYS_SIZES[i].2, SYS_SIZES[i].3))
 }
+
+/// The rows each catalog initdb filled holds before its heap grows a page: initdb's rows plus,
+/// for each page's free space (pg_freespace after initdb's VACUUM), the rows of the catalog's
+/// average footprint that fit there. Generated from the reference server: (oid, rows).
+pub static SYS_CAPACITY: &[(u32, u32)] = &[
+    (1213, 70), // pg_tablespace
+    (1247, 645), // pg_type
+    (1249, 3183), // pg_attribute
+    (1255, 3511), // pg_proc
+    (1259, 537), // pg_class
+    (1260, 64), // pg_authid
+    (1261, 145), // pg_auth_members
+    (1262, 19), // pg_database
+    (2396, 78), // pg_shdescription
+    (2600, 238), // pg_aggregate
+    (2601, 73), // pg_am
+    (2602, 951), // pg_amop
+    (2603, 784), // pg_amproc
+    (2605, 313), // pg_cast
+    (2606, 226), // pg_constraint
+    (2607, 130), // pg_conversion
+    (2608, 1764), // pg_depend
+    (2609, 5410), // pg_description
+    (2610, 180), // pg_index
+    (2612, 62), // pg_language
+    (2615, 55), // pg_namespace
+    (2616, 195), // pg_opclass
+    (2617, 812), // pg_operator
+    (2618, 147), // pg_rewrite
+    (2619, 427), // pg_statistic
+    (2753, 150), // pg_opfamily
+    (3079, 60), // pg_extension
+    (3394, 258), // pg_init_privs
+    (3456, 932), // pg_collation
+    (3541, 125), // pg_range
+    (3600, 56), // pg_ts_dict
+    (3601, 60), // pg_ts_parser
+    (3602, 74), // pg_ts_config
+    (3603, 739), // pg_ts_config_map
+    (3764, 73), // pg_ts_template
+];
+
+/// The rows catalog `oid`'s initdb pages hold before it grows (`SYS_CAPACITY`).
+pub fn sys_capacity(oid: u32) -> Option<u32> {
+    SYS_CAPACITY.iter().find(|r| r.0 == oid).map(|r| r.1)
+}

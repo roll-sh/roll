@@ -184,13 +184,24 @@ impl Runs {
         self.next_id += 1;
         let mut w = SstWriter::create_run(&self.dir, id, false)?;
         let mut segs: Vec<(Vec<u8>, Vec<u8>)> = Vec::new();
-        // (Each key with its version made in one buffer: no allocation per key.)
+        // (Each key with its version made in one buffer: no allocation per key. A key of 16 to
+        // 32 bytes, a row's or an index entry's, by fixed copies: not a call to memcpy each.)
         let (mut key, version) = (Vec::new(), (!ts).to_be_bytes());
+        let mut short = [0u8; 40];
         for k in keys {
-            key.clear();
-            key.extend_from_slice(&k);
-            key.extend_from_slice(&version);
-            if let Err(err) = w.add(&key, None) {
+            let n = k.len();
+            let key: &[u8] = if (16..=32).contains(&n) {
+                short[..16].copy_from_slice(&k[..16]);
+                short[n - 16..n].copy_from_slice(&k[n - 16..]);
+                short[n..n + 8].copy_from_slice(&version);
+                &short[..n + 8]
+            } else {
+                key.clear();
+                key.extend_from_slice(&k);
+                key.extend_from_slice(&version);
+                &key
+            };
+            if let Err(err) = w.add(key, None) {
                 w.abandon();
                 return Err(err);
             }

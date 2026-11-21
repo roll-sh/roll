@@ -285,6 +285,111 @@ The current checked measurements compare release engine builds and PostgreSQL 18
 the wire. Older rounds below are historical records, with their original methods and
 limits. Their results have not been reverified on the current source.
 
+## Bulk writes, round 21: the size model's per-row costs, INSERT … SELECT's modelled rows as stored (2026-11-21, agent 281)
+
+HANDOFF "Bulk writes, round 21" has what changed. Lane C, the 1M-row bulk script with joined
+windows (agent 246's `bulkx.sh` with `JOIN=1`, copied to `~/.cache/a281/bench`), plain dist builds
+(`tools/dist.sh`) of **b1**, origin's `1c0a79d67`, and **n2**, both commits of `cand/a281` (built
+from `fda2c783c`, the same trees). Earlier, on origin's `059fb33d8`: **b0** and **n1**, the first
+commit on it. The whole script in every run, each pair one `tools/lane.sh` hold. G user
+instructions of the server's cgroup; every counter ran 100% of its window. **Foreign load was over
+1.0 core in every run** (3.5-3.8 cores, wall-weighted: other agents' work on lane C's CPUs); the
+instruction counts repeat within 0.01% regardless. Rows equal in every run (count and sums of every
+column of both tables).
+
+### b1 against n2 (2 alternating pairs, % per pair)
+
+| step | b1 | n2 | % per pair |
+|---|---|---|---|
+| COPY in | 9.111 | 8.737 | -4.1 / -4.1 |
+| CREATE INDEX | 4.404 | 4.394 | -0.2 / -0.2 |
+| CREATE UNIQUE INDEX | 3.365 | 3.373 | +0.4 / +0.1 (b1 alone 3.357-3.372) |
+| COPY out | 3.089 | 3.089 | +0.0 / +0.0 |
+| INSERT … SELECT | 6.590 | 5.108 | -22.5 / -22.5 |
+| UPDATE half | 12.006 | 11.726 | -2.3 / -2.3 |
+| DELETE a quarter, with its compaction | 7.733 | 7.693 | -0.5 / -0.5 |
+| VACUUM | 1.726 | 1.718 | -0.5 / -0.5 |
+| ANALYZE | 0.474 | 0.476 | +0.0 / +0.8 (0.472-0.476 on one build, round 19) |
+| count_after and the four scans | | | within ±0.6%, the same values on both |
+| **all steps** (12) | 48.87 | 46.69 | -4.5 / -4.5 |
+
+Bytes written per step the same (COPY in 33.7 MB, INSERT … SELECT 35.8 MB, UPDATE 63.5 MB);
+VmHWM b1 284 / 285, n2 283 / 284 MB; cgroup peak 348-387 MB on both. Cycles (a reading only under
+that load): COPY in 6.8-7.5 -> 7.0 G, INSERT … SELECT 4.3-4.5 -> 3.3 G.
+
+### b0 against n1 (the first commit alone, on `059fb33d8`; one pair)
+
+COPY in 9.111 -> 8.737 (-4.1%), INSERT … SELECT 6.590 -> 6.285 (-4.6%), UPDATE 12.005 -> 11.723
+(-2.3%), DELETE -0.5%, VACUUM -0.5%, CREATE INDEX -0.3%, CREATE UNIQUE INDEX +0.1%; all steps 49.34
+-> 48.32 (-2.1%). Rows equal; VmHWM 278 / 281 MB.
+
+### n2 against n3 (the dropped batched placement of COPY's rows past the model; 2 pairs)
+
+COPY in 8.737 -> 8.688 (-0.6 / -0.6%), UPDATE 11.726 -> 11.745 (+0.2 / +0.2%), INSERT … SELECT
+5.108 -> 5.117 (-0.0 / +0.4%), CREATE UNIQUE INDEX -0.8 / -0.2%, every other step level; all steps
+46.69 -> 46.66 (-0.1 / -0.0%). Rows equal; VmHWM 266-281 MB on both. Foreign load 3.4-3.7 cores.
+
+Against the numbers that stand (agent 260's same-day runs, 2026-11-19): all steps 46.69 against
+PostgreSQL's 52.33 (0.892x) and pgrust's 44.92 (1.039x); INSERT … SELECT 5.11 against PostgreSQL's
+4.31; COPY in 8.74 against PostgreSQL's 6.48 and pgrust's 4.97. Not re-run on PostgreSQL or pgrust.
+
+## Bulk writes, round 20: bulk DELETE, its merges and its compaction (2026-11-21, agent 275)
+
+HANDOFF "Bulk writes, round 20" has what changed. Lane C, the 1M-row bulk script with joined
+windows (agent 246's `bulkx.sh` with `JOIN=1`, copied to `~/.cache/a275/bench`), plain dist builds
+(`tools/dist.sh`) of **b0**, origin's `515ff3b04`, and **n3**, both commits of `cand/a275` (built
+as the same code but one doc comment). Between them: **n1** the first commit with the writer's
+key in place and `extend_short` (dropped, below), **n2** n1 with the second commit. The pairs ran
+the steps up to DELETE only (`del.steps`: COPY in, both indexes, UPDATE, DELETE), each pair one
+`tools/lane.sh` hold; the whole script once per arm. G user instructions of the server's cgroup;
+every counter ran 100% of its window. **Foreign load was over 1.0 core in every run** (2.5-5.4
+cores: other agents' builds and runs); the instruction counts repeat within 0.03% regardless.
+Rows equal in every run (count and sums of every column); DELETE wrote 54.0 MB in every run.
+
+### b0 against n3 (3 alternating pairs, % per pair)
+
+| step | b0 | n3 | % per pair |
+|---|---|---|---|
+| COPY in | 9.111 | 9.110 | -0.0 x3 |
+| CREATE INDEX | 4.404 | 4.404 | +0.0 x3 |
+| CREATE UNIQUE INDEX | 3.371 | 3.376 | +0.2 / +0.2 / +0.2 |
+| UPDATE half | 12.012 | 12.022 | +0.1 / +0.1 / -0.0 (b0 12.006-12.024) |
+| DELETE a quarter, with its compaction | 8.190 | 7.731 | -5.6 x3 |
+
+### By build (DELETE a quarter, with its compaction; 3 pairs each)
+
+| pair | old | new | % per pair |
+|---|---|---|---|
+| b0 / n1 | 8.190 | 8.032 | -1.9 x3 |
+| n1 / n2 | 8.030 | 7.700 | -4.1 x3 |
+| b0 / n3 | 8.190 | 7.731 | -5.6 x3 |
+
+n1 and n2 also moved COPY in -0.24% and CREATE INDEX +0.36%, CREATE UNIQUE INDEX +0.4% in every
+pair (the writer's changes, dropped in n3).
+
+### The whole script (one run each, the same hold)
+
+| step | b0 | n3 |
+|---|---|---|
+| DELETE a quarter, with its compaction | 8.192 | 7.732 |
+| CREATE UNIQUE INDEX | 3.361 | 3.376 |
+| every other step | within 0.03%, ANALYZE 0.472 / 0.476 (both values on one build, round 19) |
+| **all steps** (14) | 50.35 | 49.90 (-0.9%) |
+
+Bytes written 206.1 MB both; data directory after the script 32 MB both; VmHWM 284 / 283 MB, cgroup
+peak 355 / 339 MB. Against the numbers that stand (agent 260's same-day runs, 2026-11-19; round
+19's twelve steps): DELETE 7.73 against PostgreSQL's 1.67. Not re-run on PostgreSQL or pgrust.
+
+### In process (verify build, `perf stat` between the harness's enable and disable)
+
+`~/.cache/a275/patches/a275_harness.rs` (not committed): a 1M-row table with two indexes compacted
+into L1, every other row's new version in an L0 file. Three full scans of the table through
+`fill_batch` (two sources): b0 2.014 G, n3 1.650 G (-18.1%). Every fourth row and its two index
+entries deleted in another L0 file, then the compaction: b0 5.411 G, n3 4.856 G (-10.3%; the table
+written again, both index files marked, the same files and dead counts). An index build's run
+writer, 1M entries in CREATE INDEX's order and in id order: b0 973.6 / 1068.7 M, n2 1003.6 /
+1093.6 M, n3 973.6 / 1068.7 M.
+
 ## Bulk writes, round 19: sorts a byte at a time, four per-row costs (2026-11-20, agent 271)
 
 HANDOFF "Bulk writes, round 19" has what changed. Lane C, the 1M-row bulk script with joined
@@ -424,6 +529,63 @@ Foreign load 1.5-3.3 cores in every pass.
 | 3 | 62,756 | 58,902 | 48,186 / 47,792 (-0.8%) | 1.07 FLAG |
 
 Lane A held 3.7-5.2 foreign cores (other agents' runs) through all three: every pair flagged.
+
+## Analytic CPU, round 9 (2026-11-21, agent 276)
+
+HANDOFF "Analytic CPU, round 9" has what changed. Lane C (the engine in a container on CPUs
+14,15,32,33, `--memory 8g`; the client on 16,17,34,35), TPC-H SF1, a 2 GB cache,
+`max_parallel_workers_per_gather=2`, `max_parallel_workers=8`. Harness: agent 272's copied to
+`~/.cache/a276/tpch/` (`pair.sh`), each pair in its own `tools/lane.sh c` hold. Plain dist builds
+(`tools/dist.sh`): **b0** origin's `515ff3b04`; **n4** cand/a276 (`c1e41622c`); earlier versions of
+its commits: **n1** the first commit's first version (its stored filter reaching none of these
+queries), **n3** with the second commit and the stored filter's header fix (still not reaching
+them). The lane was never quiet (foreign cores per arm below; lane.sh's 2.5-7.0): gates are
+decided on user instructions. No PGO build and no three-server table this round (round 6's
+PostgreSQL 159.3 G and pgrust 90.4 G stand).
+
+### The changes, gated (user instructions a run, G, and % per pair)
+
+**First commit's first version (n1 against b0, 3 pairs)**
+
+| query | b0 | n1 | instructions % per pair | cycles % per pair |
+|---|---|---|---|---|
+| q03 | 5.838 | 5.487 | -6.00 / -5.91 / -5.63 | -11.8 / -1.6 / -5.0 |
+| q05 | 3.655 | 3.510 | -3.95 / -3.94 / -3.80 | -4.8 / +3.0 / -11.2 |
+| q07 | 5.100 | 4.750 | -6.87 / -6.84 / -6.52 | -7.6 / -3.0 / -11.2 |
+| q08 | 1.752 | 1.707 | -2.56 / -2.53 / -2.56 | -7.0 / -6.4 / -14.0 |
+| q09 | 10.693 | 10.198 | -4.62 / -4.56 / -4.56 | -16.3 / -13.9 / -9.1 |
+| q21 | 8.191 | 8.087 | -1.26 / -1.98 / -0.43 | -2.7 / -13.9 / -14.1 |
+| q02 | 2.762 | 2.762 | -0.01 / -0.01 / +0.01 | -3.2 / -21.5 / -13.0 |
+
+foreign cores per arm: b0 1.07 1.66 2.23; n1 0.60 1.76 1.72.
+
+**The stored filter reaching the lookups (n4 against n3, 2 pairs)**
+
+| query | n3 | n4 | instructions % per pair | cycles % per pair |
+|---|---|---|---|---|
+| q03 | 5.451 | 4.596 | -15.69 / -15.32 | -11.6 / -15.5 |
+| q07 | 4.719 | 4.329 | -8.25 / -7.80 | -3.3 / -3.7 |
+| q08 | 1.701 | 1.682 | -1.12 / -1.06 | -3.1 / -8.8 |
+| q05 | 3.495 | 3.489 | -0.16 / +0.09 | +0.4 / +0.4 |
+| q09 | 10.154 | 10.151 | -0.03 / +0.02 | -2.4 / -9.9 |
+| q12 | 6.216 | 6.216 | +0.00 / -0.01 | -0.1 / -7.8 |
+| q21 | 8.151 | 8.065 | -1.06 / +0.93 | +1.9 / -9.9 |
+
+foreign cores per arm: n3 2.96 2.57; n4 2.74 1.89.
+
+### The 22, base against cand/a276 (b0 against n4, one pair, plain dist)
+
+106.59 -> 103.71 G user instructions (-2.70%): q03 -21.03% (5.830 -> 4.604 G), q07 -14.85 (5.091 ->
+4.335), q09 -5.05 (10.692 -> 10.152), q05 -4.45, q08 -3.92, q19 -1.28, q21 -1.21, q04 -1.07, q22
++0.61, q16 +0.23, the rest within +-0.11. VmHWM 1,687 -> 1,688 MB. Foreign cores b0 2.56, n4 2.54.
+All 22 result hashes PostgreSQL's.
+
+### NOPs among the instructions (item 3)
+
+Share of `instructions:u` samples on NOP instructions (the engine's process, `-c 50021`, 3 runs a
+query; `~/.cache/a276/nopshare.py`): q16 b0 2.53% (567 / 22,420), n4 2.73% (676 / 24,804); q22 b0
+3.25% (203 / 6,253), n4 3.06% (224 / 7,309). The rest of the branch padding is prefixes, which
+don't count.
 
 ## Analytic CPU, round 8 (2026-11-20, agent 272)
 

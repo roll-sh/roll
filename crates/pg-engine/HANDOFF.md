@@ -10625,6 +10625,214 @@ and confirm on PGO:
 Agent 218's short-transaction stack (ten steps, `wip/a218`) was gated this way and landed: BENCH
 "Profile-guided build", part 2.
 
+## Bulk writes, round 21: the size model's per-row costs, INSERT … SELECT's modelled rows as stored (agent 281)
+
+BENCH.md "Bulk writes, round 21" has the measurements (lane C, the 1M-row bulk script with joined
+windows, plain dist builds). `cand/a281-2`: two code commits on origin's `1c0a79d67` and this
+section (`cand/a281` with the dropped item's note added; the same code). No format change: the
+same rows, TIDs, files and sizes.
+
+**Where COPY in and INSERT … SELECT went** (b0 = `059fb33d8`, instruction samples of each joined
+window; shares within one profile only, as samples are lost under load):
+- COPY in, 9.11 G: parsing 23% (`parse_value_ex` 13%: floats 5%, integers 3.6%), the row's put and
+  the runs 26% (zstd 13%), the size model 25%: `inserted_with` 17.5% (`untracked_write` 4.4% with
+  `heap_fillfactor` 1.0% of it, `relsize::datum_bytes` through `row_len` 4.0%, `note_compression_len`
+  3.2% of which `compressed_with` 2.4%, `ensure` 2.0%) and the first 400,000 rows' model
+  (`CopyLoad::model`) 7.6% (`multi_place_cid` 1.5%, `with_tid` 1.3%, the key map 1.1%, the held
+  rows' puts 1.1%).
+- INSERT … SELECT, 6.59 G: the first 400,000 rows (the table is modelled until then) went in
+  decoded through `plain_row` (27% of the step: decoding, `inserted_with` 15%, the heap model's
+  insert 5%, encoding), the 600,000 past the model as stored (`StoredInsert`: `inserted_stored`
+  3.2%, `stored_tuple_len` 2.3%, after a first pass over the values that read each one again).
+  Then the runs (zstd 18%), the source's scan and decompression (12%).
+
+**Four per-row costs** (first commit; `exec/sizing.rs`, `storage/row.rs`, `exec/dml.rs`):
+- `row_len` (the tuple length of every inserted row and every UPDATE's new version, modelled or
+  not) sized each value through `relsize::datum_bytes`: a call, `type_layout`'s match, a call to
+  `varlena_payload` for text, alignment by a division. Now a fixed-size type's typlen and typalign
+  come from one match and are aligned by a mask, and an ASCII text or varchar value's payload is its
+  length; anything else goes through `datum_bytes` as before. Debug builds assert both arms against
+  `datum_bytes` for every row.
+- `note_compression_len` called `compressed_with` (a call, then `read_from`'s test) for every
+  value; it now tests the value first (`may_be_read`: text, json or bytea of `READ_MIN..READ_MAX`
+  bytes, the only values `note_read` notes), the same test `read_from` makes.
+- `heap_fillfactor`, asked for every row past the model, split and trimmed every reloption
+  (`autovacuum_enabled=off` here); an option whose first non-space bytes aren't "fillfactor" is
+  passed over first.
+- `StoredInsert::insert` read every value once to check it (a NULL in a NOT NULL column, an
+  encoding of 128 bytes or more) and again to size it (`stored_tuple_len`). One pass now:
+  `stored_tuple_len_with` hands each value's column, tag and encoded bytes to a check;
+  `stored_tuple_len` is it with a check that accepts all.
+
+**INSERT … SELECT's stored rows into a modelled table** (second commit; `sizing::
+inserted_stored_modelled`, `StoredInsert`). A plain INSERT … SELECT whose source hands out a
+table's stored rows (`Node::each_stored`) into a table without indexes copied them as stored only
+once the target was past the model; while modelled, each row was decoded, checked, encoded again
+and placed by `inserted_with`. Now the modelled rows go in as stored too: their length from
+`stored_tuple_len_with`, placed in the heap model as `inserted_with` places a row without
+out-of-line values, index or GiST entries (the COPY batch and deferring-load branches kept, the
+heap model's insert, `settle_left`, the untrack past the model's size), stored once with the TID
+it gives (`ROW_HEADER_TID`). `note_compression_len` has nothing to record for these rows:
+`each_stored` refuses a source table that ever stored a value compressed or out of line
+(`sizing::tracked`), so no value was read from a compressed datum, and a tuple of at most
+`TOAST_THRESHOLD` bytes isn't compressed. The row that finds the table gone past the model (the
+row after the one that crossed it) goes in the estimate as before (`inserted_stored`,
+`stored_run_key`). The rowid is taken before the placement, as `plain_row` takes it; no row given
+a rowid falls back to the decoded path. Test: `big_tables::insert_select_from_stored_rows` now
+also compares the stored copy's ctids with the decoded copy's (a filtered source), the first 500
+rows modelled and the rest past the model, and counts over 2,900 of its 3,000 rows copied as
+stored.
+
+Results (BENCH "Bulk writes, round 21"; plain dist, b1 = `1c0a79d67` against n2 = both commits on
+it, two alternating pairs, G user instructions): INSERT … SELECT 6.590 -> 5.108 (-22.5% in both
+pairs; PostgreSQL 18.6's 4.31), COPY in 9.111 -> 8.737 (-4.1% both; the first commit alone gave
+the same -4.1% on b0), UPDATE half 12.006 -> 11.726 (-2.3% both: `row_len` of each new version),
+DELETE with its compaction -0.5%, VACUUM -0.5%, CREATE INDEX -0.2%; CREATE UNIQUE INDEX +0.4 /
++0.1% against b1's own 3.357-3.372 spread (n2 3.371-3.375); every other step level. All steps 48.87
+-> 46.69 (-4.5%). Rows equal in every run, bytes written per step the same (COPY 33.7 MB, INSERT …
+SELECT 35.8 MB, UPDATE 63.5 MB), VmHWM 283-285 MB on both. Against the numbers that stand (agent
+260's, 2026-11-19): 0.892x PostgreSQL's 52.33, 1.039x pgrust's 44.92. Foreign load was 3.6-3.8 cores in every
+run (lane C's CPUs shared with other agents' work); the instruction counts repeat within 0.01%
+regardless. Cycles move with them (INSERT … SELECT 4.3-4.5 -> 3.3 G) but under that load are a
+reading only.
+
+Not gated on the PGO build: no inline attribute added or removed; `inserted_with` and
+`untracked_write` keep their bodies and boundaries; `stored_tuple_len` became a wrapper of the
+generic `stored_tuple_len_with` (CREATE INDEX and VACUUM, which call it, read -0.2% and -0.5%).
+
+Verification: `tools/quick-check.sh` with `QC_CHECKED=1` on ``fda2c783c` (both commits on `1c0a79d67`; the pushed commits have the same trees, their messages rewritten)`: Clippy 16 warnings, none new in a changed file; 447 tests in 27 binaries, again built `--profile verify-checked`; crash_random seeds 1-3 x 2, power_cut_at_every_point; regress 51,148 / 51,150, 0 newly differing; isolation 1,647 / 1,648; pg_dump_tap 14,609 passed. Before it,
+`big_tables` under `verify-checked` (22 passed).
+
+**Measured and dropped: COPY's rows past the model placed with their batch**
+(`~/.cache/a281/patches/dropped-copy-past-model-batched.patch`, on `cand/a281`). The 600,000 rows
+of the script's COPY past the model each took `ensure`'s read lock and `untracked_write`'s write
+lock to go in the estimate; they waited in the multi-insert batch instead (`Batch::past`, set the
+first time `ensure` says the table is past the model) and went in with it (`CopyLoad::place_past`:
+one lock a batch, the same `add_in`, `placed` and btree entries in order). Two plain dist pairs
+against n2: COPY in 8.737 -> 8.688 G (-0.6% both), UPDATE +0.2% both (code it doesn't touch),
+INSERT … SELECT -0.0 / +0.4%, all steps -0.1 / -0.0%. About 0.03 G on the script, where the profile
+put 6% of COPY in those two functions: the samples land on the instruction after the locks' atomic
+operations, which are slow but few. It would also have changed what a failed COPY leaves in the
+estimate (its unflushed buffer's rows no longer placed, as PostgreSQL's never reach the heap: the
+modelled path already discards them). Not worth the code; dropped.
+
+**Left (G user instructions, n2 against PostgreSQL 18.6's):**
+1. COPY in 8.74 against 6.48: parsing (~23%: the float parser 5%, the integers, a `Vec` and an
+   `Arc<str>` a row), the put and runs (~26%), the first 400,000 rows' model (7%: the key map,
+   `multi_place_cid`, `with_tid` and the held rows' second put). The rows past the model
+   (`untracked_write` 4.1%, `ensure` 2.2% of the samples) cost far fewer instructions than their
+   share says (below).
+2. INSERT … SELECT 5.11 against 4.31: the runs' zstd and the put (~37%), the heap model's insert
+   for the first 400,000 rows (`Heap::insert` ~8%: `get_buffer`'s lookup, the key map, line
+   pointers; ~1,000 instructions a row), the source's scan.
+
+## Bulk writes, round 20: bulk DELETE, its merges and its compaction (agent 275)
+
+BENCH.md "Bulk writes, round 20" has the measurements (lane C, the 1M-row bulk script with joined
+windows, plain dist builds). `cand/a275`: two code commits on origin's `515ff3b04` and this
+section. No format change: the same files, blocks, filters and dead-entry sets.
+
+**Where the DELETE's 8.19 G went** (b0, instruction samples of the joined window; a sampled profile
+under load loses a share of the samples, so only shares within one profile count): the statement
+54%, the compaction 46%. The statement: the scan and its filter 25% (`zip_rows`' merge of the
+table with the UPDATE's versions 7%, `emit` 13%), the deferred deletions 13% (`SstWriter::add` 4.4,
+the bloom filter 2.2, the sort and the keys' copies), each row's index keys 5%, row locks 4%. The
+compaction: zstd compression with the file's dictionary 18.7% of the step
+(`ZSTD_compressBlock_fast_dictMatchState` 9.6), the merge (`zip_entries`, the per-entry closure,
+`SstWriter::add`, the output's filter) 13%, marking the two index files about 5%, decompression
+3.4%. libc's memcpy / memcmp / bcmp were 9.8% of the step (compaction 5.0, statement 4.8), called
+for keys of 17 to 30 bytes: `zip_rows` 2.2%, the closure 1.5%, `put_entry_deletes` 1.2%,
+`SstWriter::add` 1.3%, the cursors' `Block::read` / `seek` and `mark_dead`'s loop the rest.
+
+**The brief's three questions, for this pattern:**
+- *A dead-entry set or a key range instead of a tombstone per row*: not without a new format. A
+  dead-entry set marks entries dead for every snapshot (it is written only for entries below the
+  GC horizon); a DELETE's rows must stay readable by snapshots older than it until the horizon
+  passes, which only a versioned deletion says (the tombstone and its commit's ts). A range
+  deletion (`rdel`) is versioned but a range: `id % 4 = 1` isn't one, and the index entries are
+  scattered over both indexes anyway. A "dead as of ts" set would be a format the current head
+  refuses. The tombstones themselves are ~1.0 G of the statement (writing them, sorted, with their
+  filter); the compaction drops them, and marks the index files instead of writing them again.
+- *Blocks no deleted row touches, or wholly deleted*: in this script every block of the table holds
+  some of the UPDATE's new versions (every other row) and a deleted row (every fourth), so every
+  block is written again whatever the compaction does with untouched ones; the index files are
+  marked, not written. A block-copy path wouldn't change this script (agent 247's note); not built.
+- *The trigger*: right for this pattern. `deletions_due` fires at the DELETE's commit (750,000
+  deletions, over an eighth of the entries under them) and the compaction folds the UPDATE's
+  500,000 versions into the same rewrite of the table: compacting them in the UPDATE's window only
+  moves that cost (the table would then be marked at the DELETE, but written once either way), and
+  later leaves every scan merging three sources.
+
+**Merges compare keys without libc calls** (first commit, `sst.rs`, `storage/mod.rs`, `txn`):
+- `cmp_words` (the zips' comparison of their sides' keys, held in fixed 56-byte buffers) compared
+  the last 1-7 bytes of a key as a slice, a call to memcmp at every comparison of keys whose length
+  isn't a multiple of 8: a row key is 17 bytes (25 with its version), so `zip_rows` made four or
+  five calls a row. Now the word they start, the bytes past the key's end shifted out (both
+  buffers are 56 bytes, so the word is in them).
+- The zips' `bound` is copied once into a word buffer (`ZipBound`) and compared by words; `zip_rows`
+  takes the decided key as its whole buffer (a fixed copy, read only up to its length).
+- The compaction's closure compares its current user key, and the next file left in place, by the
+  words that start and end them (`short_eq`, `short_cmp`: two overlapping 16- or 8-byte words for 8
+  to 32 bytes, slices otherwise), and keeps the part prefix as a word.
+- A deferring DELETE's keys: the sort's 24-byte prefixes (`sort_by_key_after`) and the run's
+  versioned keys (`Runs::write_deletes`) by fixed overlapping copies.
+- Tests: `common_prefix_and_hash64_2` checks `short_eq`, `short_cmp`, `cmp_words` (bytes past a key's
+  end random) and `ZipBound` against the slices' own comparisons for 20,000 key pairs.
+
+**A compaction reads an L0 file of deletions alone only where it can delete something** (second
+commit, `Store::compact_within`, `mark_dead`, `DeadSet`):
+- The DELETE's run holds its rows' deletions and then its index entries'. The index files were
+  marked, but the run was merged (it has keys in the table, which is written again), so the
+  compaction read and dropped its 500,000 index entry deletions one by one through the general
+  merge. An L0 file whose entries are all deletions at or before the horizon is now read only from
+  the first to the last user key of the files written again and the other L0 files merged
+  (`reach`). Outside, its entries are dropped on every branch of the closure (discarded, a range
+  deletion, an older version, or a tombstone at the bottom level) and delete nothing merged: only
+  such files have entries there, so a key's versions are all skipped together.
+- `mark_dead` finds a deleted key's block from the block it read last when that block's last key
+  isn't below the key (they come in order), not by a search of the block index for each; it
+  compares keys by `short_eq`; a `DeadSet` being made adds to and reads its last block directly.
+
+Results (BENCH "Bulk writes, round 20"; plain dist, three alternating pairs each, G user
+instructions): DELETE with its compaction 8.190 -> 7.731 (-5.6% in every pair; the first commit
+-1.9% as measured with the dropped writer change below, the second -4.1%); CREATE UNIQUE INDEX
+3.371 -> 3.376 (+0.15 to +0.18%, not explained: neither commit touches its path that I found);
+every other step level. The whole script once each: 50.35 -> 49.90 (-0.9%), rows equal, bytes
+written 206.1 MB both, the data directory after it 32 MB both, VmHWM 284 / 283 MB. In process (a
+verify build): three scans of the table over the UPDATE's versions 2.014 -> 1.650 G (-18.1%), the
+compaction 5.411 -> 4.856 G (-10.3%). Foreign load was 2.5-5.4 cores in every pair (other agents);
+the instruction counts repeat within 0.03% regardless, cycles don't.
+
+Not gated on the PGO build: `zip_rows`, `zip_entries` and `compact_within` keep their boundaries
+and attributes; the new `#[inline(always)]` helpers replace inline slice operations inside them.
+
+Verification: `tools/quick-check.sh` with `QC_CHECKED=1` on `191013219` (both commits on
+`515ff3b04`): Clippy 16 warnings, none new in a changed file; 382 tests in 19 binaries, again built
+`--profile verify-checked`; crash_random seeds 1-3 x 2, power_cut_at_every_point; regress 51,148 /
+51,150, 0 newly differing; isolation 1,647 / 1,648; pg_dump_tap 14,609 passed.
+
+**Measured and dropped: a writer's last key held in place** (`~/.cache/a275/patches/dropped-writer-
+heldkey.reverse.patch`). `SstWriter::prev_key` and the compaction's current user key in a 32-byte
+buffer set by fixed overlapping copies (`HeldKey`), and the writer's key tail by `extend_short`:
+DELETE another -0.4% and COPY in -0.24%, but CREATE INDEX +0.36% and CREATE UNIQUE INDEX +0.4% in
+every pair; in process an index build's run writer +3.1% (CREATE INDEX's order: 3-byte key tails
+went through `extend_short`'s byte loop) and +2.3%. Without it the run writer counts the same as
+b0's to the instruction. (Verify builds leave a fixed-size `copy_from_slice` out of line, so the
+in-process harness overstates fixed copies there; dist inlines them.)
+
+**Left (G user instructions, n3 against PostgreSQL 18.6's 1.67 for DELETE):**
+1. The compaction's rewrite of the table with the UPDATE's versions: zstd with the dictionary is
+   now about 20% of the step (agent 257 measured the copy and load dictionary modes, `minMatch`,
+   `targetLength` and `hashLog`: none without more bytes); the merge and the writer ~12%; the
+   output's and the run's bloom filters ~4.7% (mostly cache-missing stores).
+2. The statement's scan and filter (`emit`, `StoredCmps::passes`: exec), `zip_rows` (now ~6% of
+   the step, no calls), the deferred deletions (`SstWriter::add` per tombstone, its filter, the
+   sort), row locks (2%).
+3. The general cursor path still calls libc for its keys (`Block::read`'s key and derived value,
+   `Block::seek`, `seek_on`, `Merge::min`): about 3.5% of the compaction thread here, and on every
+   read path; worth the same treatment with a scan and TPC-H gate.
+4. CREATE UNIQUE INDEX's +0.15% (above).
+
 ## Bulk writes, round 19: sorts a byte at a time, four per-row costs (agent 271)
 
 BENCH.md "Bulk writes, round 19" has the measurements (lane C, the 1M-row bulk script with joined
@@ -11897,6 +12105,88 @@ at open, a compaction): older builds ignore the manifest's `format` and fail on 
   smaller blocks or none compressed for the files point probes read (the pread then copies what
   the probe needs from the OS page cache, as PostgreSQL's 8 kB page), each a format change for
   its own round.
+
+## Analytic CPU, round 9 (agent 276)
+
+TPC-H SF1 on lane C, plain dist builds only (BENCH.md "Analytic CPU, round 9" has the tables).
+Base `515ff3b04`. Harness: agent 272's copied to `~/.cache/a276/tpch/` (`pair.sh`: per arm a fresh
+engine in a container on a copy of the loaded data, a 2 GB cache, a warm-up of the 22, then per
+query 3 runs in one `perf stat -e instructions:u,cycles:u` window over the engine's cgroup, opened
+2.5 s early), ONE pair per `tools/lane.sh c` hold. **Lane C was never quiet** (the pairs' own
+reading 0.6-3.0 foreign cores, lane.sh's 2.5-7.0): the gates are decided on user instructions,
+which repeat within 0.1-0.4% from pair to pair (q21 within 1%: b0 alone read 8.17-8.26 G); cycles
+are in BENCH and mean little. Every pass's result hashes are PostgreSQL's. One candidate,
+`cand/a276` (two code commits and this section).
+
+- **Where `Lookup::batch`'s 13% of q09 is** (`perf record -e instructions:u` of the base; the dist
+  build has no line tables, so the function's hot offsets were mapped to the calls around them
+  with objdump): about 3,500 of its 4,848 samples are the store's multi-get inlined into it
+  (`PointReader::get_sorted`'s block seeks: restart search, entry varints, key copies and
+  compares), ~550 `take` (each entry's binary search, the decode call, the filter), ~250 the index
+  keys. The lookups' own cost was in what they built around that: `decode_row_need_spare` (a Vec
+  an inner row), `joined_from`, `drop_row`, `extend_with`, an allocation and a drop per inner row,
+  and every inner row decoded before its filter.
+- **cand/a276, first commit: a lookup stage's inner rows are made end to end in one buffer**
+  (`Lookup::decode_into`, `Got::Rows` spans of values, `pipe::truncate_row`): no Vec an inner row,
+  each decoded in place (the columns the stage reads, as `Decode::row`; a column added since the
+  row was stored, its default); a small table's kept rows (`LookupScratch::cache`) are copied into
+  it instead of cloned as rows; each entry's row is found by its place among the multi-get's keys
+  (`BatchBufs::slot`, made as the keys are sorted: no binary search an entry); the last inner
+  row's values are moved into the joined row (`pipe::joined_from_taken`), not cloned and dropped.
+  The inner filter's leading conjuncts that are comparisons with constants run over the stored
+  values before the row is decoded (`StoredCmps`; also a row stored without a header, as a bulk
+  load writes them): a row they turn away isn't decoded. Only the leading ones: an inner scan's
+  filter ends with the join's equality over the outer row (`=(#0, ^1#0)`, which stays with the
+  kernel), and a row turned away is one whose quals stop there, as ExecQual stops at the first
+  false one, before a later qual that may raise an error. When they are the whole filter, the
+  kernel's filter isn't run again. `parallel_scan`'s lookup queries gain one with such a filter.
+- **cand/a276, second commit: `StoredCmps` compares dates and timestamps with constants**
+  (`row::peek_dt`): of one type as their numbers (as `cmp_total`), a date with a timestamp as
+  instants (`ops::date_instant`, as `p_dt_*`). That is what TPC-H's lookups filter on: q03's and
+  q07's lineitem by `l_shipdate`, q08's orders by `o_orderdate`. `stored_filters` checks each new
+  filter against itself ANDed with a volatile call (NULLs, infinity, a date past the timestamps'
+  range).
+- **Gates** (user instructions a run, plain dist): the first commit's first version against the
+  base (3 pairs; its stored filter reached none of these queries yet): q07 -6.87 / -6.84 / -6.52%,
+  q03 -6.00 / -5.91 / -5.63, q09 -4.62 / -4.56 / -4.56, q05 -3.95 / -3.94 / -3.80, q08 -2.56 /
+  -2.53 / -2.56, q21 -1.26 / -1.98 / -0.43, q02 (no lookup) -0.01 / -0.01 / +0.01. The stored
+  filter reaching them (the final version against the one before, n3 -> n4, 2 pairs): q03 -15.69 /
+  -15.32%, q07 -8.25 / -7.80, q08 -1.12 / -1.06, q09 / q05 / q12 within +-0.2, q21 -1.06 / +0.93.
+- **The 22, base against cand/a276** (one pair, b0 -> n4): 106.59 -> 103.71 G user instructions
+  (-2.70%): q03 -21.0% (5.83 -> 4.60 G), q07 -14.9 (5.09 -> 4.34), q09 -5.1 (10.69 -> 10.15), q05
+  -4.5, q08 -3.9, q19 -1.3, q21 -1.2, q04 -1.1, q22 +0.6, q16 +0.2, the rest within +-0.1. VmHWM
+  1,687 -> 1,688 MB. All 22 result hashes PostgreSQL's (agent 261's `pg` arm). Against
+  pgrust's 90.4 G (round 6's) 1.15x, from 1.18x.
+- **How the stored filter was found not to run** (it measured as nothing twice): a profile showed
+  `StoredCmps::passes` without a sample; first cause, `scan::row_data_fast` returns None for a
+  row stored without a header (all of TPC-H's, bulk-loaded): the lookup now takes `row_data`.
+  Second, a dev build printing the inner scan's filter (`A276_DEBUG`, not kept) showed
+  `AND[>=(#10, date), <=(#10, date), =(#0, ^1#0)]`: the outer row's equality made the whole filter
+  not compile. Found, not changed: the serial index scans' `filter_kernel` takes `row_data_fast`
+  too, so their rechecks never run over stored values on a bulk-loaded table.
+- **Item 3 (q16 +0.85%, q13 +0.6%, q22 +0.6-1.0% after round 8)**: 272's builds are gone and its
+  before / after commits would take two more builds in a second checkout (one build directory at
+  a time), so not compared directly. What this round measured instead: on these builds NOPs are
+  2.5-3.3% of the user instructions retired (q16, q22: the share of `instructions:u` samples on
+  NOP instructions, sampled from the engine's process at `-c 50021` and mapped to the binary with
+  nm and objdump; `~/.cache/a276/nopshare.py`): the 32-byte branch padding of
+  `tools/dist-flags.sh` is partly NOPs, which count as instructions, so code placement alone
+  moves a query's instruction count by tenths of a percent. This round's q16 +0.23% matches its
+  NOP share going 2.53 -> 2.73% (+-0.11), mostly in `fill_batch_with` (untouched): placement.
+  q22's +0.61% (no lookup, no stored filter in it) isn't explained that way (NOP share 3.25 ->
+  3.06%, +-0.23 at its sample count) and stays open; q22 has risen with unrelated changes in
+  rounds 7, 8 and now 9.
+- **Not done**: item 2 (q10's rows the probe passed made from the batch's columns): the lineitem
+  row path is ~5% of q10's samples (`into_row_passed`, `LazyBuf::read`, `Lazy::decode`,
+  `Built::lookup`), and 2% of the scan's 6M rows pass its probe: decoding the kept columns in the
+  batch costs every row two numerics' decode (why `VPlan::wide` waits for 25% passing), and a
+  path decoding only the passed rows' kept columns from their stored bytes would save at most
+  half of the 5% (~0.1 G). No PGO build (no change here is to inlining or function boundaries).
+  Nothing dropped: no patch under `~/.cache/a276/patches/`.
+- **Left** (largest first): the store's multi-get inside `Lookup::batch` (~70% of its samples:
+  block seeks; a unique index's lookup is a `first_raw` probe of the index, then the row's read);
+  the kernels over the joined rows above the stages (q09's `K::num` / `K::run` over `Joined`,
+  ~7%); the typed walk and `fill_batch_with` of the lineitem scans (q10 26% / 14%); q22's drift.
 
 ## Analytic CPU, round 8 (agent 272)
 
@@ -17674,3 +17964,282 @@ Found, not fixed (repros in `~/.cache/a274/probe`):
   Scan.
 - One-row Result costs: a strict SQL function or operator of a NULL constant folds to NULL in
   PostgreSQL (`test_strict(NULL)`, `33 = any (null::int[])`), the engine charges the call.
+
+## EXPLAIN plans against PostgreSQL 18.6's, round 3 (agent 278, 2026-11-21)
+
+Harness: agent 274's `~/.cache/a274/rx`, copied to `~/.cache/a278/rx` (`run.sh <port> <label>`,
+`cmp.py`, `classify.py`, `lst.py`, `newdiff.py`, `show.py`). PostgreSQL 18.6 ran in `a278-pg`
+(the pinned reference image, autovacuum off). Base `059fb33d8`: 2,452 of 17,654 differ (catalog
+989, errors 43, cost 628, width 239, rows 218, extra-node 121, display 121, other shapes 38,
+sort-agg 23, join-order 21, scan 8, join-method 3). Blocks with `'today'` / `now()` literals
+differ when a run crosses midnight in America/Los_Angeles (timestamp:1-3, timestamptz:1-5):
+not plan changes.
+
+### First candidate (`cand/a278`)
+
+- **An IN / EXISTS sub-select inside a FROM subquery** (subselect:32, :33, :46; 274's find).
+  Two causes. (1) The level above re-planned the subquery's already planned join as a group of
+  its own, the side the semi join unique-ified an opaque leaf (no statistics, still under the
+  Sort the subquery's merge join had put over it): EXPLAIN showed a Hash Join over a Sort.
+  PostgreSQL pulls the subquery up before any join search and plans the semi join once, at
+  the level above. Now `plan_level` first puts the join tree the subquery's level had before
+  planning (`ExecCtx::bound_trees`, as `lift` already does for a FROM subquery that is an item
+  of a join group) in place of the planned join wherever the level reads it only through its
+  select list, grouping, ordering or limit (`paths::pull_up_semi_trees`,
+  `lift::bound_tree`), so the level above plans the semi join itself; not a tree reading a
+  value of an enclosing level (`lift::semi_tree_reads_outer`, `lift`'s own test). The binder
+  now records the clauses it pushes into a planned semi join in `JoinMeta::bound_pushed`, as
+  it did for inner joins only: without them the tree put back lost them (quick-check's
+  golden `a41_semi_pullup` caught it: `exists (select 1 from (select ... where exists (...))
+  s where s.id = a41_a.id)` returned every row, its `s.id = a41_a.id` gone). (2) EXPLAIN took a
+  unique-ified side under a merge join's Sort for an upper DISTINCT (create_distinct_paths),
+  so it read an index in order and showed a Unique without the Sort: create_unique_path
+  sorts or hashes the relation's cheapest path, no input order used. A join side that is a
+  Sort over the Distinct is now a semi join's unique side too (`unique_sides`).
+- **Index collation by identity** (rules:106-110, 274's find). PostgreSQL uses an index
+  column for a clause only when the column's collation is the clause's input collation by
+  OID (IndexCollMatchesExprColl): in a C database an index on `t COLLATE "C"` serves no
+  `t = 'x'` (the default collation), though both compare bytes. The engine compared sort
+  behaviour (`key_order_op`, `KeyColl`). Now each index key has the collation its
+  expression derives (`IndexInfo::key_colls`, `derived_collation`: a COLLATE written in it,
+  else a column's collation other than "default", its declared one or its type's, `name`'s
+  "C"), and a comparison, `= ANY`, a row comparison's pair or an OR arm matches only when the
+  collation its operands derive (a COLLATE written in them, else the key's) is the index
+  column's (its COLLATE, else the key's) (`collation_matches`). A key written with a COLLATE
+  naming the index's collation is the key (`t COLLATE "C" = 'x'` uses the `"C"` index, as a
+  RelabelType to PostgreSQL); before, only under a collation that doesn't sort by bytes.
+  System catalogs' indexes keep the old rule (no key collations recorded: agent 279's area).
+- Golden `a278_semi_coll` (recorded from 18.6).
+
+Regression files' EXPLAINs (full pass, `~/.cache/a278/rx/out-c1`, against `out-base`): 7 more
+match (rules:106, :107, :108, :110; subselect:32, :33, :46), none newly differ (the 8 date
+blocks above aside); 180 blocks changed text, all others catalog OIDs and timestamps.
+TPC-H: base against new on SF 0.05 on one copied data directory (`~/.cache/a278/tpch-one.sh`),
+22 of 22 plans identical in text, costs x1.000.
+Verification: quick-check with `QC_CHECKED=1` on `d72181015` (this commit on `1c0a79d67`):
+build, clippy (16 warnings, none new), tests 146 passed in 10 binaries, the same 146 with
+`--profile verify-checked`, regress 51,148 / 51,150 with 0 newly differing, isolation
+1,647 / 1,648, pg_dump 14,609 passed. (The first quick-check of the candidate failed golden
+`a41_semi_pullup`, the lost clause above.) No performance gate: planning does one walk of a
+level's top nodes for a planned FROM subquery's join when bound trees exist, and a
+collation name compare per index clause on a collatable key; not measured, as a change of
+that size isn't measurable against the lanes' noise.
+
+### Second candidate (`cand/a278-2`, on top of the first: it extends the first's semi join branch in `binder/optimize.rs`)
+
+- **A strict function of a NULL constant is NULL** (alter_table:112, :115; 274's find):
+  evaluate_function replaces a strict call with a constant NULL argument by NULL whatever
+  the function's volatility, before inline_function. The engine did that only for
+  immutable calls over constants; any other became a CASE over the call (a SQL function's
+  0.25 cost). Now `user_call` folds it first (not into a domain, whose constant would lose
+  it).
+- **Derived equalities' operand order** (274's find): generate_base_implied_equalities
+  gives a relation `earlier member = later member` of a class, the members in
+  process_equivalence's order (deconstruct_jointree's: a JOIN's ON clauses, then the WHERE).
+  The join search took the members in its clauses' order there, because the equalities as
+  written (`ec_written`) were recorded only after the items' restrictions were derived:
+  `... join b on a.code = b.a where c.a = b.num` gave `Filter: (num = a)`, PostgreSQL
+  `(a = num)`. `Search::written_pairs` now gives the order to both.
+- **A constant into a second IN** (join:66): a semi join whose left side fixes a column to a
+  constant (a semi join below it took the WHERE's `x.unique1 = 0`) fixes the column it
+  equates on its right, the semi join's clause going, as for the WHERE's constants (one
+  equivalence class); `input_restrictions` reads a semi / anti join's left side (its rows
+  are that side's).
+- **EXPLAIN's groups of a unique path hashed on an expression** (subselect:20; 274's find):
+  estimate_num_groups over the columns the expression reads, each once (a boolean 2, a
+  constant 1), as the planner's `num_groups` counts them; it took an unknown key's default
+  (1,841 rows against 200). The cost per key is unchanged.
+- **Integer literals with a 0b / 0o / 0x prefix past int4** (numerology:5-26; found in the
+  width group): int8 when they fit, as make_const's pg_strtoint64_safe reads them (a sign,
+  either case of the prefix, underscores; a negative magnitude down to int8's minimum).
+  Binary and octal ones, and `-0x8000000000000000`, were numeric: `pg_typeof(0b1000...)`
+  said numeric and EXPLAIN's width was 32.
+- Golden `a278_folds`.
+
+Regression files' EXPLAINs (full pass, `out-c2`, against the first candidate's `out-c1c`): 15
+more match (alter_table:112, :115, join:66, numerology:5, :7, :10, :11, :12, :13, :16, :18,
+:22, :24, :26, subselect:20), none newly differ; join:67 now has PostgreSQL's costs and nodes,
+its two equal-cost semi joins nested the other way round. Both candidates against the base:
+22 more of the 17,654 match, none newly differ (2,438 differ, 8 of them the date blocks).
+TPC-H: base against new on one copied SF 0.05 data directory, 22 of 22 plans identical in
+text, costs x1.000.
+Verification: quick-check with `QC_CHECKED=1` on `64f8c5679` (both candidates on `1c0a79d67`):
+build, clippy (16 warnings, none new), tests 146 passed in 10 binaries, the same 146 with
+`--profile verify-checked`, regress 51,148 / 51,150 with 0 newly differing, isolation
+1,647 / 1,648, pg_dump 14,609 passed. No performance gate: a NULL test per strict user call's
+arguments when bound, one more walk of the written equalities per join group, a prefix test
+per non-decimal literal.
+
+Found, not fixed (repros in `~/.cache/a278/probe`):
+- **Pathkeys by collation identity** (`collord.sql`): the quals now match an index's
+  collation by identity, ORDER BY doesn't: pathkeys compare sort behaviour (`PathKey::coll`,
+  0 for any collation that sorts bytes), so in a C database `order by t` reads an index on
+  `t COLLATE "C"` (PostgreSQL sorts) and `order by t collate "C"` doesn't read it (PostgreSQL
+  does: the COLLATE is a RelabelType, the EC's collation C). Needs the identity in
+  `PathKey` (index_pathkeys, the sort keys' `key_order`, merge keys) and `bare_key` stripping
+  a COLLATE naming it.
+- `IN (select ... from (select distinct on ...) s)` (subselect:39): still the `ANY_subquery`
+  level (274's find, unchanged).
+- Extra Subquery Scans (27, `pg+Subquery Scan`): mostly UNION arms whose outputs need a
+  coercion (`SELECT 1.1 UNION SELECT 2`: PostgreSQL's arm keeps a Subquery Scan computing
+  `(2)::numeric` over a Result of width 4; the engine folds the cast into the Result), and
+  window queries over a sorted subquery (window:27).
+- Group Key casts in a semi join's unique-ification (`Group Key: nt.n` for PostgreSQL's
+  `(nt.n)::double precision`, 274's find, unchanged).
+- Width group: a Result left by a pulled-up one-row FROM (VALUES, FROM-less subquery) has
+  width 0 in PostgreSQL (its values pulled up into the expressions above), the engine shows
+  the columns' (aggregates:4, multirangetypes:432-447, partition_aggregate:3, stats_ext:405).
+- One-row Result costs: an immutable SQL function over a VARIADIC array of constants isn't
+  evaluated (`myleast(10, 1, 20, 33)`: the array is an ARRAY[] expression, not folded to a
+  constant before evaluate_function), SQL/JSON constructors' and `age(timestamp ...)`
+  costs.
+
+## Plans and rows of catalog queries (agent 279, 2026-11-21)
+
+Recorded against a private PostgreSQL 18.6 (`a279-pg`, the pinned image, `--locale=C`,
+autovacuum off as the engine in the harness). Harnesses in `~/.cache/a279`: `rx/` is agent 274's
+regress-EXPLAIN comparison (`run.sh <port> <label>`, `cmp.py`, `classify.py`, `newdiff.py`) plus
+`catcause.py`, which groups the catalog blocks by cause; `probe/viewprobe.sql` runs each system
+view's definition beside the engine's own rows; `replaydiff.py` diffs two runs of the
+pgAdmin / DBeaver replay. My PostgreSQL run against agent 274's: 127 blocks differ, 111 of them
+catalog plans (pg_class's size wanders with its dead row versions from run to run), so compare
+against one run of your own.
+
+### The 989 catalog plans by cause (item 1)
+
+Base `059fb33d8`: 2,455 of the 17,654 regress EXPLAINs differ, 989 over catalogs.
+
+| cause | base | after |
+|---|---:|---:|
+| a system view generated as a relation (pg_locks 50, pg_stats 37, information_schema.views 23 / columns 20 / tables 14, pg_roles 18, pg_indexes 17, pg_prepared_statements 16, pg_cursors 14, ...) | 355 | 0 |
+| cost only (catalog pages, index pages and descent, all-visible fraction) | 313 | 242 |
+| an unfiltered catalog scan's rows (its size: reltuples / relpages) | 116 | 88 |
+| a filtered catalog scan's rows (selectivity over that size) | 107 | 78 |
+| plan shape (join method / order / extra nodes from the above) | 46 | 109 |
+| other relation sets (not a view) | 9 | 91 |
+| scan kind on a catalog | 17 | 24 |
+| detail lines, join rows, widths | 26 | 81 |
+| total | 989 | 713 |
+
+Missing catalog indexes as paths: none; `sys_indexes.tsv` has all 124 of PostgreSQL's. The views'
+blocks now fall into the other rows: their relations are planned, but under the same size model.
+
+### What changed
+
+- **System views are planned from PostgreSQL's definitions** (`catalog/system.rs`
+  `expanded_view`, `binder/select.rs`): a FROM item naming a system view binds the view's
+  pg_get_viewdef text (`data/sys_viewdefs.tsv.zst`) as a view owned by the bootstrap superuser,
+  as the rewriter expands it (pg_stats and pg_stats_ext* with security_barrier, as PostgreSQL has
+  them). Collecting dependencies, deparsing and FOR UPDATE keep the generated relation. Beyond
+  plans, the rows change: the engine's own information_schema relations left out pg_catalog's
+  objects, so on a database of pgAdmin's replay `table_constraints` had 18 rows (PostgreSQL 210),
+  `constraint_column_usage` 19 (282), `key_column_usage` 8 (189), `check_constraints` 15 (97),
+  `views` 2 (147), `routine_privileges` 200 (6,985), `udt_privileges` 34 (460),
+  `usage_privileges` 20 (929), `applicable_roles` 1 (4), and pg_indexes 13 (137); with the
+  definitions each count is PostgreSQL's. `pg_lock_status()`, `pg_cursor()` and
+  `pg_prepared_statement()` (which pg_locks, pg_cursors and pg_prepared_statements read) return
+  the rows those relations had.
+- **A view of a plain SELECT is pulled up** (pull_up_simple_subquery): its level is left
+  unplanned and planned with the query's, so the query's quals reach its relations before the
+  join search. Before, the view's join was planned alone and a WHERE pushed below its Sort
+  afterwards: `select * from v where a = 5` over `ta join tb` was a Merge Join over 2,260 sorted
+  rows with the filter above the Sort, PostgreSQL's a Hash Join over the 11 filtered rows. A view
+  that keeps a query level of its own (aggregates, DISTINCT, set operations, unsafe outputs) is
+  planned as before; FROM subqueries are untouched (agent 278's item).
+- **Join removal through catalogs' unique indexes** (`analyzejoins.rs` `distinct_for`): a
+  view's LEFT JOIN to pg_authid / pg_database / pg_namespace / pg_tablespace / pg_attrdef /
+  pg_db_role_setting on a unique key, nothing of it read, goes as PostgreSQL removes it.
+- **pg_node_tree columns hold nodeToString's text** (`sql/nodetree.rs` `table_expr_tree`,
+  `trigger_when_tree`, `domain_check_tree`, `default_exprs_tree`): pg_constraint.conbin of a
+  table's CHECK (over range-table entry 1) and of a domain's (VALUE a CoerceToDomainValue),
+  pg_index.indexprs (a List) and indpred, pg_trigger.tgqual (OLD entry 1, NEW entry 2),
+  pg_type.typdefaultbin and pg_proc.proargdefaults (each coerced to its type); a domain's NOT
+  NULL constraint has no conbin (it showed ''). `pg_get_expr` maps such a tree back to the
+  expression it was made from (`tree_source`), so every printer prints as before. Where an
+  expression uses something the tree printer doesn't model, the column keeps its SQL text.
+- **Catalog sizes as estimate_rel_size computes them** (`explain.rs` `sys_rel_size`): tuples are
+  the density (reltuples / relpages) times the pages, not the live rows: rows added on initdb's
+  pages leave initdb's reltuples (pg_authid with 21 roles estimates 17, as PostgreSQL). The pages
+  grow only past what initdb's pages hold: `sys_sizes::SYS_CAPACITY`, from pg_freespace after
+  initdb (pg_class holds 537 rows before it grows past its 14 pages, pg_proc 3,511). VACUUM
+  records each catalog's pages, live rows and relallvisible (`catalogs_vacuumed`), as
+  vac_update_relstats does (the regress suite's sanity_check runs a database-wide VACUUM),
+  ANALYZE keeps relallvisible; the planner reads those counts, and an index-only scan of a
+  catalog pays the heap for the pages past relallvisible.
+- `sysdelta::kept` keeps pg_namespace and pg_proc for a later catalog version in which nothing
+  they read changed (a COMMENT), as pg_depend: the expanded information_schema views read them
+  (test `ddl_scaling::more_catalogs_after_ddl_are_spliced_or_kept`).
+
+Goldens `a279_system_views`, `a279_node_trees`, `a279_catalog_sizes` (recorded from 18.6; their
+queries differ on the base build).
+
+### Measured
+
+Regress EXPLAINs (my PostgreSQL run against each engine run, plain dist / verify builds):
+base 989 catalog plans differ, after 713; 300 blocks fixed, 24 newly differing (all catalog
+costs one hundredth apart: a btree descent's `ceil(log2(tuples))` or a page more, where
+PostgreSQL's pg_class / pg_index / pg_constraint had grown by dead row versions the engine
+doesn't model) and 8 date blocks (`'today'` crossed midnight in America/Los_Angeles between the
+runs). Non-catalog blocks unchanged.
+
+pgAdmin 4 / DBeaver replay (`tools/compat/compat.sh run ... metaqueries`, fresh servers, same
+day): 22 of 856 ids differ on the base, 16 after. Fixed: the 7 node-tree ids (DBeaver's
+types, constraints, indexes, procedures and triggers, pgAdmin's trigger properties). New: one
+(`tables/acl.sql@obj`, the order of privileges in an array_agg, below). drizzle-kit
+(`drizzlekit`, same day): 7 of 49 ids differ on the base and after (47 pass, 2 fail on both
+servers: `push::again`, `push::alter-again` fail on PostgreSQL too).
+
+Catalog query time (psql, a81_meta, medians of three, machine load ~80): information_schema
+columns of one table PostgreSQL 17.0 / base 12.4 / after 65.0 ms (second query 4.9 / 27.8 /
+34.6), all columns 9.5 / 86.8 / 56.2, table_constraints of one table 2.5 / 7.9 / 4.5,
+key_column_usage 3.4 / 7.8 / 11.2, routines 7.9 / 12.1 / 33.2, tables of a schema 2.1 / 4.0 /
+10.3, pg_indexes 3.4 / 3.9 / 4.8, pg_stats 4.0 / 54.5 / 22.4. The engine's cached rows of its
+own views are gone; the definitions run over the catalogs' cached rows.
+
+Gate (point selects; tests/clients has no ORM startup query set): plain dist builds of the
+parent `1c0a79d67` and of this commit (`tools/dist.sh`), pgbench `-S -M prepared` at 8 clients
+on lane A, one pair per `tools/lane.sh a` hold (agent 263's `gate/run1.sh`, copied to
+`~/.cache/a279/gate`, perf from an image of my own). No pair counts: lane A carried 6.5 to
+14.2 foreign cores in every run. User instructions per transaction, parent / new: 40,866 /
+40,936 (+0.17%), 40,937 / 42,008 (+2.6%, new first), 40,731 / 40,545 (-0.46%); cycles 98.1k /
+99.7k, 99.3k / 101.7k, 93.1k / 95.4k. A point select's plan reads no system view and no
+catalog; what this adds to it is a test after a relation lookup misses the user catalog. 100
+idle sessions (trust auth, RSS 6 s after connecting, three runs each): parent 47.4 / 47.5 /
+47.8 MB, new 46.7 / 47.3 / 47.8 MB. No PGO gate (no inlining or function boundary on those paths
+changed).
+
+Verification: quick-check with `QC_CHECKED=1` on `eef68f988` (this commit on `1c0a79d67`) and again
+on `a1bf44df2` (rebased on `410808dc3`) and `f338432bc` (rebased on `51ea8f0aa`, agent 278's FROM
+subquery pull-up), the same each time:
+build, clippy (16 warnings, none new in changed files), tests 179 passed in 18 binaries and the
+same with `--profile verify-checked`, regress 51,149 / 51,150 with 0 newly differing, isolation
+1,647 / 1,648, pg_dump 14,609 passed. Earlier runs failed, each fixed in this commit:
+`ddl_scaling::more_catalogs_after_ddl_are_spliced_or_kept` (pg_namespace regenerated after a
+COMMENT: `sysdelta::kept`), goldens `analyze_stats` (has_column_privilege of an index's column
+was NULL, so pg_stats' definition dropped index statistics), `domain_identity` (a domain CHECK
+through pg_get_expr(conbin, 0)), `pg_node_tree_text` (information_schema's text domains collate
+"C"), `privileges` (acldefault('c', ...) is an empty ACL), `roles` (an in-process store's role
+setting for a database it doesn't have showed as the role's own), regress `numa:2`
+(pg_get_shmem_allocations_numa raises libnuma's error); and
+`session_state::catalog_estimates_follow_ddl`, which held the old live-count estimate
+(PostgreSQL keeps 415 for pg_class there), now asserts PostgreSQL's.
+
+### Left
+
+- Plans of the expanded views where the join search differs: information_schema.tables with
+  ORDER BY table_name (PostgreSQL reads pg_class_relname_nsp_index in order through the domain
+  cast, the engine sorts) and with a LIKE (a merge right join where PostgreSQL takes a
+  parameterized nested loop); drizzle-kit's PK / FK listing (three information_schema views
+  joined; PostgreSQL hashes pg_constraint against the UNION's Append) whose row order follows
+  that plan; the pgAdmin ACL queries' array_agg order (an aclexplode subquery PostgreSQL pulls
+  up, the engine keeps as a Subquery Scan, and the side of a hash join).
+- `pg_typeof` of an expanded view's domain column (`information_schema.sql_identifier`) shows
+  the base type: the view's columns are the generated relation's types.
+- Catalogs' dead row versions: pg_class and others grow in PostgreSQL by the versions DDL
+  leaves, which the size model doesn't follow (the 24 newly differing blocks; PostgreSQL itself
+  wanders by 111 blocks between runs).
+- adbin (pg_attrdef) and a non-view rule's ev_action keep SQL text: adbin is what every ORM's
+  pg_get_expr(adbin, adrelid) reads, and mapping each call back costs a tree per default of the
+  relation; it wants a cache from tree to expression first.
+- The replay's stats ids (pg_stat / pg_statio block and tuple counters), names holding oids
+  (pg_toast_N, RI_ConstraintTrigger_c_N) and pg_depend's order.

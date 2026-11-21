@@ -8367,6 +8367,16 @@ impl Binder<'_, '_> {
         if fdef.language == "plpgsql" {
             self.call_collation(&coerced)?;
         }
+        // evaluate_function: a strict call with a NULL constant argument is NULL, whatever
+        // its volatility or other arguments (it would never be called), before any inlining.
+        // (Not of a domain, whose constant would lose it.)
+        if fdef.strict
+            && !self.unplanned
+            && fdef.ret_domain.is_none()
+            && coerced.iter().any(|a| matches!(a, Expr::Const(Value::Null, _)))
+        {
+            return Ok(Expr::Const(Value::Null, ret));
+        }
         let at = self.sql_fn_at(&fdef, &coerced, FnPlace::Scalar);
         let hidden_rtes = self.hidden_rtes;
         // (A body the planner runs (evaluate_function) is planned when it runs: the
@@ -9612,13 +9622,23 @@ pub(crate) fn numeric_const(s: &str) -> Result<Expr> {
             }
             return Ok(Expr::Const(Value::Int8(i), DataType::Int8));
         }
-        if let Some(h) = digits
-            .strip_prefix("0x")
-            .or_else(|| digits.strip_prefix("-0x"))
+        // (pg_strtoint64_safe: a sign, then a 0x / 0o / 0b prefix in either case; the
+        // magnitude read whole, so a negative one reaches int8's minimum.)
+        let (neg, body) = match digits.strip_prefix('-') {
+            Some(b) => (true, b),
+            None => (false, digits.strip_prefix('+').unwrap_or(&digits)),
+        };
+        let prefixed = |lower: &str, upper: &str| body.strip_prefix(lower).or_else(|| body.strip_prefix(upper));
+        let radix = prefixed("0x", "0X")
+            .map(|b| (16, b))
+            .or_else(|| prefixed("0o", "0O").map(|b| (8, b)))
+            .or_else(|| prefixed("0b", "0B").map(|b| (2, b)));
+        if let Some((radix, b)) = radix
+            && !b.starts_with(['+', '-'])
+            && let Ok(m) = u64::from_str_radix(b, radix)
         {
-            let neg = digits.starts_with('-');
-            if let Ok(v) = i64::from_str_radix(h, 16) {
-                let v = if neg { -v } else { v };
+            let v = if neg { 0i64.checked_sub_unsigned(m) } else { i64::try_from(m).ok() };
+            if let Some(v) = v {
                 return Ok(match i32::try_from(v) {
                     Ok(x) => Expr::Const(Value::Int4(x), DataType::Int4),
                     Err(_) => Expr::Const(Value::Int8(v), DataType::Int8),

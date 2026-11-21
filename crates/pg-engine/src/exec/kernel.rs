@@ -246,7 +246,9 @@ fn collated_bytes(def: &crate::sql::func::FuncDef, args: &[Expr]) -> Option<Pure
 /// encoded values in place: the columns walked once, nothing decoded, made or cached.
 /// Numeric columns (`K::NumCmp`) compare as exact numbers (`row::peek_num`), string ones
 /// (`K::Call` of a string comparison that compares bytes: `ops::str_cmp`, `collated_bytes`)
-/// as their stored bytes (`row::peek_text`), bpchar's without trailing spaces. What a row's
+/// as their stored bytes (`row::peek_text`), bpchar's without trailing spaces, dates and
+/// timestamps (`row::peek_dt`) as their numbers or, for a date / timestamp comparison
+/// (`ops::dt_cmp`), as instants. What a row's
 /// values don't decide this way (a column added since it was stored, a number past an
 /// i128, a value stored out of line) is left to the kernel.
 pub struct StoredCmps {
@@ -267,6 +269,13 @@ enum Against {
     /// A string's bytes; bpchar's (trailing spaces not compared) when true, the constant's
     /// trimmed already.
     Text(Box<[u8]>, bool),
+    /// A date or a timestamp of a comparison of two of the same type (`cmp_total`: as its
+    /// number; a stored value of another type is left to the kernel).
+    Date(i32),
+    Ts(i64),
+    /// A date or a timestamp of a date / timestamp comparison (`p_dt_*`: both sides as
+    /// instants, `ops::date_instant`).
+    Instant(i64),
 }
 
 /// Scans that made a `StoredCmps` (tests: which filters run over stored bytes).
@@ -297,15 +306,27 @@ impl StoredCmps {
                 _ => None,
             },
             K::Call { f, args, .. } => {
-                let (test, bp) = crate::sql::func::ops::str_cmp(*f)?;
-                let text = |c: &Value| match c {
-                    Value::Text(s) if bp => Some(Against::Text(crate::types::text::bpchar_trim(s).as_bytes().into(), true)),
-                    Value::Text(s) => Some(Against::Text(s.as_bytes().into(), false)),
-                    _ => None,
+                use crate::sql::func::ops;
+                let against = |c: &Value| -> Option<(fn(std::cmp::Ordering) -> bool, Against)> {
+                    if let Some((test, bp)) = ops::str_cmp(*f) {
+                        return Some((test, match c {
+                            Value::Text(s) if bp => Against::Text(crate::types::text::bpchar_trim(s).as_bytes().into(), true),
+                            Value::Text(s) => Against::Text(s.as_bytes().into(), false),
+                            Value::Date(d) if !bp => Against::Date(*d),
+                            Value::Timestamp(t) if !bp => Against::Ts(*t),
+                            _ => return None,
+                        }));
+                    }
+                    let test = ops::dt_cmp(*f)?;
+                    Some((test, Against::Instant(match c {
+                        Value::Date(d) => ops::date_instant(*d),
+                        Value::Timestamp(t) => *t,
+                        _ => return None,
+                    })))
                 };
                 match &**args {
-                    [K::Col(i), K::Const(c)] => Some(((*i, text(c)?, test, true), None)),
-                    [K::Const(c), K::Col(i)] => Some(((*i, text(c)?, test, false), None)),
+                    [K::Col(i), K::Const(c)] => against(c).map(|(test, a)| ((*i, a, test, true), None)),
+                    [K::Const(c), K::Col(i)] => against(c).map(|(test, a)| ((*i, a, test, false), None)),
                     _ => None,
                 }
             }
@@ -326,7 +347,7 @@ impl StoredCmps {
     /// Whether the stored row's values `data` (after its header) pass (None: leave it to
     /// the kernel).
     pub fn passes(&self, data: &[u8]) -> Option<bool> {
-        use crate::storage::{row::{peek_num, peek_text, skip_value_fast}, sst::get_varint};
+        use crate::storage::{row::{Dt, peek_dt, peek_num, peek_text, skip_value_fast}, sst::get_varint};
         let mut pos = 0;
         let n = get_varint(data, &mut pos).ok()? as usize;
         if n < self.upto {
@@ -369,6 +390,19 @@ impl StoredCmps {
                         x = crate::storage::cols::trim_spaces(x);
                     }
                     x.cmp(y)
+                }
+                Against::Date(_) | Against::Ts(_) | Against::Instant(_) => {
+                    let Some(x) = peek_dt(data, pos)? else {
+                        pass = false;
+                        continue;
+                    };
+                    match (against, x) {
+                        (Against::Date(y), Dt::Date(x)) => x.cmp(y),
+                        (Against::Ts(y), Dt::Ts(x)) => x.cmp(y),
+                        (Against::Instant(y), Dt::Date(x)) => crate::sql::func::ops::date_instant(x).cmp(y),
+                        (Against::Instant(y), Dt::Ts(x)) => x.cmp(y),
+                        _ => return None,
+                    }
                 }
             };
             pass &= test(if *col_first { o } else { o.reverse() });
