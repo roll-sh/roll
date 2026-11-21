@@ -52,7 +52,7 @@ fn long_inputs_are_cut_to_512_tokens() {
     // long run of them still counts as one; a run without spaces is cut by bytes.
     let spaced = format!("a{}b {}", " ".repeat(40_000), words.join(" "));
     assert_eq!(m.tokenize(&spaced).unwrap()[..3], [0, m.tokenize("a").unwrap()[1], m.tokenize("b").unwrap()[1]]);
-    let unspaced = "a".repeat(10_000);
+    let unspaced = "a".repeat(30_000);
     let full = m.tokenize(&unspaced).unwrap();
     assert_eq!(full.len(), MAX_TOKENS);
     assert!(m.cut(&unspaced).len() < unspaced.len());

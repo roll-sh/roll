@@ -363,6 +363,19 @@ opt-level = 3
 [profile.dev.package.s3-image]
 opt-level = 3
 
+# The built-in embedding model (search-embed): unoptimised, its products, tokenizer and kernels
+# make a 1,000-document semantic_text reindex on the tiny test model take minutes.
+[profile.dev.package.search-embed]
+opt-level = 3
+[profile.dev.package.gemm]
+opt-level = 3
+[profile.dev.package.gemm-common]
+opt-level = 3
+[profile.dev.package.gemm-f32]
+opt-level = 3
+[profile.dev.package.tokenizers]
+opt-level = 3
+
 [profile.release]
 lto = "thin"
 codegen-units = 1
