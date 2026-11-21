@@ -5970,6 +5970,28 @@ and webhooks' and review apps' signing secrets sealed. Still open:
   compute of that image (about 2 s per image, never waking a suspended endpoint). Its full gate is
   running.
 
+**State, 2026-11-21 05:10.** The thirty-fourth review's items, where they are:
+- **Item 1** (apps' reveal and shell as the asker) **and item 3** (the sandbox resolving as its copier):
+  `fix/secrets-reveal-as-asker`, gating.
+- **Item 2** (a project delete gets a veto, a 7-day window and a closing digest):
+  `fix/secrets-project-delete-window`, gating.
+- **Item 4** (a placement required, responses scrubbed): the design is below, under "Using a key
+  without seeing it"; `fix/secrets-placeholder-placement-scrub`, building.
+- **Item 5:**
+  - previews: #581, sealing rules, vars and the screenshot key;
+  - search: `fix/search-security-1120` and #318;
+  - roll code: `fix/code-webhooks-sealed-at-rest`, webhook URLs sealed and no clear signing secret
+    without a key.
+- **Batch 6's follow-ups:** #582, gated green. A consumer's CAs end as soon as it loses a host;
+  `maker_unreachable` (403) when a placeholder's or a chosen reference's maker no longer reaches it;
+  a decoy planted from a session mails that person.
+- **The #432 decoy oracle:** #575. Images are pinned, and pre-auth answers are learned per image (and
+  ahead of time at start, so no decoy login waits). Its full gate is running.
+- **Members (#501):** merging main again for batch 7. It lands first; #582 and #575 follow it.
+- **Found while gating:** rolld's test binaries race each other for ports (`free_port` only avoids
+  repeats within one process). Three gates hit it today. Next: rolld listens on port 0 and reports
+  its addresses, so tests never guess.
+
 **Ranked, 2026-11-21 03:40** (the thirty-fourth product review, cold, on main f9bb26c17, against
 Vault/OpenBao, Infisical, Doppler, AWS, 1Password, Akeyless, Bitwarden SM, GitGuardian, Google Secret
 Manager and Azure Key Vault). The store is still level with or ahead of the category, and a cold read
