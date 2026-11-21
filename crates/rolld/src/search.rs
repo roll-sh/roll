@@ -201,7 +201,8 @@ impl Search {
             s => cfg.node_settings.push((search_control::SEARCH_MAX_TIME.to_string(), format!("{s}s"))),
         }
         // Watch passwords, connector and Fleet secrets are sealed in cluster state under the
-        // deployment's key; without one they're stored as given (as on Elasticsearch).
+        // deployment's key. Without one, watch and Fleet secrets are stored as given (as on
+        // Elasticsearch), and a connector roll runs refuses its credentials.
         cfg.sealer = secret_key.and_then(search_control::Sealer::from_secret);
         // Behind the edge, cluster URLs name `<cluster>.search.<region>.<domain>` over HTTPS.
         if let Some(p) = public {
