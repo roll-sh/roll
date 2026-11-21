@@ -1103,6 +1103,12 @@ pub enum AppsCmd {
         target: Target,
         #[arg(long, default_value_t = 30)]
         days: i64,
+        /// The service's whole project this month (or `--month YYYY-MM`), by service and
+        /// environment, most costly first, with this month's projection.
+        #[arg(long, conflicts_with = "days")]
+        by_service: bool,
+        #[arg(long, value_name = "YYYY-MM", requires = "by_service")]
+        month: Option<String>,
     },
     /// Make or change an environment (`--branch` deploys on pushes to it; `--variables-from`
     /// starts a new one with another's variables).
@@ -4337,7 +4343,22 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
             }
             v
         }
-        AppsCmd::Usage { target, days } => {
+        AppsCmd::Usage { target, by_service: true, month, .. } => {
+            let svc = service(api, &target).await?;
+            let q = month.map(|m| format!("?month={}", enc(&m))).unwrap_or_default();
+            let v = api.get(&format!("/v1/apps/projects/{}/usage{q}", enc(&s(&svc["project"])))).await?;
+            if !json_out {
+                for r in v["rows"].as_array().into_iter().flatten() {
+                    let what = if r["deleted"] == true { "deleted services".to_string() } else { format!("{} {}", s(&r["name"]), if r["previews"] == true { "previews".to_string() } else { s(&r["environment"]) }) };
+                    println!("{:>10}  {what}", format!("${:.2}", r["usd"].as_f64().unwrap_or(0.0)));
+                }
+                let projected = v["projected_usd"].as_f64().map(|p| format!(" (≈ ${p:.2} by the month's end)")).unwrap_or_default();
+                println!("{:>10}  in all, {}{projected}", format!("${:.2}", v["total_usd"].as_f64().unwrap_or(0.0)), s(&v["month"]));
+                return Ok(());
+            }
+            v
+        }
+        AppsCmd::Usage { target, days, .. } => {
             let svc = service(api, &target).await?;
             let v = api.get(&format!("{}/usage?days={days}", env_path(&svc, &target.env))).await?;
             if !json_out {

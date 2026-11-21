@@ -33,6 +33,10 @@ pub fn router(apps: Arc<Apps>) -> axum::Router {
             if req.uri().path().starts_with(OIDC) {
                 return oidc_token(apps, req).await;
             }
+            // An instance kept awake for work after its answer, with the same token.
+            if req.uri().path().starts_with(AWAKE) {
+                return hold_awake(apps, req).await;
+            }
             // An edge function's `context.next()` ([`crate::edge`]): signed, any host.
             if req.uri().path().starts_with(crate::edge::NEXT) {
                 return crate::edge::next(apps, req).await;
@@ -82,6 +86,49 @@ struct TargetPort(u16);
 
 /// Where instances send traces: `/_roll/otlp/{service}/{env}/{token}/v1/traces`, any host.
 pub const OTLP: &str = "/_roll/otlp/";
+
+/// Where an environment's instances ask to be kept awake (`ROLL_AWAKE_URL`):
+/// `/_roll/awake/<service>/<env>/<token>`, the token the OIDC address's.
+pub const AWAKE: &str = "/_roll/awake/";
+
+/// `POST …/_roll/awake/<service>/<env>/<token>?instance=<ROLL_INSTANCE>&for=<s>` (Vercel's
+/// `waitUntil`): the instance isn't suspended, put to sleep or scaled in for `for` seconds (1–900,
+/// default 60; a longer hold it has stays), so work after its answer (an email, a webhook, a
+/// telemetry flush) finishes. On the service's owner, where its instances are. `{held_until}`
+/// (unix ms); a wrong token, or an instance that isn't awake, a 404.
+async fn hold_awake(apps: Arc<Apps>, req: Request) -> Response {
+    let parts: Vec<String> = req.uri().path()[AWAKE.len()..].split('/').map(|s| percent_encoding::percent_decode_str(s).decode_utf8_lossy().into_owned()).collect();
+    let [id, env, token] = parts.as_slice() else { return (StatusCode::NOT_FOUND, "").into_response() };
+    if req.method() != axum::http::Method::POST || !id.starts_with("svc_") || !token.starts_with("rlr_") {
+        return (StatusCode::NOT_FOUND, "").into_response();
+    }
+    let (sid, e, t) = (id.clone(), env.clone(), token.clone());
+    let ok = apps.db(move |s| Ok(s.service(&sid).is_ok() && s.oidc_token_of(&sid, &e)?.is_some_and(|k| same(&k, &t)))).await.unwrap_or(false);
+    if !ok {
+        return (StatusCode::NOT_FOUND, "").into_response();
+    }
+    let q: Vec<(String, String)> = req.uri().query().map(|q| url::form_urlencoded::parse(q.as_bytes()).into_owned().collect()).unwrap_or_default();
+    let arg = |k: &str| q.iter().find(|(n, _)| n == k).map(|(_, v)| v.clone());
+    let Some(instance) = arg("instance") else { return (StatusCode::BAD_REQUEST, axum::Json(serde_json::json!({ "error": "instance is the instance's name ($ROLL_INSTANCE)" }))).into_response() };
+    let secs = match arg("for").map(|v| v.parse::<u64>()) {
+        None => 60,
+        Some(Ok(n)) if (1..=900).contains(&n) => n,
+        _ => return (StatusCode::BAD_REQUEST, axum::Json(serde_json::json!({ "error": "for is 1–900 seconds" }))).into_response(),
+    };
+    let (cluster, key, svc, env) = (apps.deps.cluster.clone(), lease_key(id), id.clone(), env.clone());
+    cluster
+        .dispatch(&key, req, |_req, _guard| async move {
+            let Some(live) = apps.lives.lock().get(&crate::env_key(&svc, &env)).cloned() else { return (StatusCode::NOT_FOUND, "").into_response() };
+            match live.hold_awake(&instance, std::time::Duration::from_secs(secs)) {
+                Some(until) => {
+                    let ms = code_sql::now_ms() + until.saturating_duration_since(std::time::Instant::now()).as_millis() as i64;
+                    (StatusCode::OK, axum::Json(serde_json::json!({ "held_until": ms }))).into_response()
+                }
+                None => (StatusCode::NOT_FOUND, axum::Json(serde_json::json!({ "error": format!("{instance} isn't one of {env}'s awake instances") }))).into_response(),
+            }
+        })
+        .await
+}
 
 /// Where an environment's instances read roll's OIDC tokens (`ROLL_OIDC_URL`):
 /// `/_roll/oidc/<service>/<env>/<token>`.

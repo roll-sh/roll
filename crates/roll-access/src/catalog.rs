@@ -1432,6 +1432,7 @@ static ROWS: &[Row] = &[
     // secret comes back once, so making one is reveal (Slack and Discord ones are write).
     // A project's spend limits: at the hard limit the whole project pauses, so setting one is admin.
     row("GET", "/v1/apps/projects/{project}/limits", "apps", R, one(&["project"], "project")),
+    row("GET", "/v1/apps/projects/{project}/usage", "apps", R, one(&["project"], "project")),
     row("PUT", "/v1/apps/projects/{project}/limits", "apps", ADMIN, one(&["project"], "project")),
     row("GET", "/v1/apps/projects/{project}/notifications", "apps", R, one(&["project"], "project")),
     row("POST", "/v1/apps/projects/{project}/notifications", "apps", Act::Body(apps_notification_action), one(&["project"], "project")),
