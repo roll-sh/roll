@@ -771,9 +771,14 @@ fn option(opts: &[String], name: &str) -> Option<String> {
 /// A table's fillfactor (percent). (Read per row a load writes: `option`'s value without
 /// its copy.)
 pub fn heap_fillfactor(t: &Table) -> usize {
+    // (Each row past the model asks: another option is passed over by its first bytes, not
+    // split and trimmed.)
     t.options
         .iter()
         .find_map(|o| {
+            if !o.trim_start().as_bytes().get(..10).is_some_and(|k| k.eq_ignore_ascii_case(b"fillfactor")) {
+                return None;
+            }
             let (k, v) = o.split_once('=')?;
             k.trim().eq_ignore_ascii_case("fillfactor").then(|| v.trim().trim_matches('\''))
         })
@@ -1042,16 +1047,21 @@ pub fn note_read(t: u32, xmin: u64, key: Option<&[u8]>, row: &[Value]) {
     }
 }
 
-/// The table, column and row version `v` was read from, when it is a stored datum carried
-/// along unchanged.
-fn read_from(v: &Value) -> Option<(u32, usize, RowId)> {
-    // (Only values of `READ_MIN..READ_MAX` bytes are noted: another can't be one of them.)
+/// Whether `v` can be a datum `note_read` noted: only values of `READ_MIN..READ_MAX` bytes
+/// are.
+fn may_be_read(v: &Value) -> bool {
     let len = match v {
         Value::Text(s) | Value::Json(s) => s.len(),
         Value::Bytea(b) => b.len(),
-        _ => return None,
+        _ => return false,
     };
-    if !(READ_MIN..READ_MAX).contains(&len) {
+    (READ_MIN..READ_MAX).contains(&len)
+}
+
+/// The table, column and row version `v` was read from, when it is a stored datum carried
+/// along unchanged.
+fn read_from(v: &Value) -> Option<(u32, usize, RowId)> {
+    if !may_be_read(v) {
         return None;
     }
     READ.with(|q| {
@@ -1093,10 +1103,12 @@ pub fn note_compression(t: &Table, row: &[Value], key: Option<&[u8]>, ctx: &Exec
 /// `note_compression`, given the row's tuple length (`row_len`) when known.
 fn note_compression_len(t: &Table, row: &[Value], key: Option<&[u8]>, ctx: &ExecCtx, len: Option<usize>) {
     let n = row.len().min(t.columns.len());
-    // A compressed datum copied here stays compressed, as it was.
+    // A compressed datum copied here stays compressed, as it was. (Only a value `read_from`
+    // can name is looked up: a row of numbers and short strings makes no call.)
     let copied: Vec<(usize, u64, char)> = row[..n]
         .iter()
         .enumerate()
+        .filter(|(_, v)| may_be_read(v))
         .filter_map(|(i, v)| compressed_with(v).map(|m| (i, value_sig(v), m)))
         .collect();
     // (The transaction's id only for a value recorded: a row of plain values, the usual one,
@@ -1250,9 +1262,34 @@ fn row_len(t: &Table, row: &[Value], text: &dyn Fn(&Value, &DataType) -> String)
     let has_null = t.columns[..n].iter().zip(row).any(|(c, v)| !stored(c, v));
     let mut off = relsize::tuple_header(n, has_null);
     for (c, v) in t.columns[..n].iter().zip(row) {
-        if stored(c, v) {
-            off += relsize::datum_bytes(off, v, &c.ty, text);
+        if !stored(c, v) {
+            continue;
         }
+        // (The common kinds sized here, as `datum_bytes` sizes them: a fixed-size type's typlen
+        // and typalign from one match, aligned by a mask; an ASCII text value's bytes are its
+        // payload. No call and no division a value.)
+        let (len, al) = match (&c.ty, v) {
+            (DataType::Bool, _) => (1, 1),
+            (DataType::Int2, _) => (2, 2),
+            (DataType::Int4 | DataType::Float4 | DataType::Date | DataType::Oid, _) => (4, 4),
+            (DataType::Int8 | DataType::Float8 | DataType::Timestamp(_) | DataType::Timestamptz(_), _) => (8, 8),
+            (DataType::Text | DataType::Varchar(_), Value::Text(s)) if s.is_ascii() => {
+                let add = match s.len() {
+                    p if p < 127 => p + 1,
+                    p => ((off + 3) & !3) + p + 4 - off,
+                };
+                debug_assert_eq!(add, relsize::datum_bytes(off, v, &c.ty, text));
+                off += add;
+                continue;
+            }
+            _ => {
+                off += relsize::datum_bytes(off, v, &c.ty, text);
+                continue;
+            }
+        };
+        let next = ((off + al - 1) & !(al - 1)) + len;
+        debug_assert_eq!(next - off, relsize::datum_bytes(off, v, &c.ty, text));
+        off = next;
     }
     off
 }

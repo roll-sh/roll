@@ -781,6 +781,18 @@ pub fn external_at(b: &[u8], col: usize) -> bool {
 /// column, jsonb, tsvectors, fixed-size geometric values and arrays of fixed-size elements;
 /// and rows shorter than `types` (they get columns added since).
 pub fn stored_tuple_len(b: &[u8], types: &[DataType], null: &[bool]) -> Option<usize> {
+    stored_tuple_len_with(b, types, null, |_, _, _| true)
+}
+
+/// `stored_tuple_len`, each value also passed to `check` (its column, tag and encoded bytes,
+/// the tag's included) after it is sized, in order: None when `check` refuses one. (An INSERT
+/// … SELECT's stored rows are checked and sized in one pass: `StoredInsert`.)
+pub fn stored_tuple_len_with(
+    b: &[u8],
+    types: &[DataType],
+    null: &[bool],
+    mut check: impl FnMut(usize, u8, usize) -> bool,
+) -> Option<usize> {
     use crate::catalog::relsize::{datum_len_at, tuple_header};
     let mut pos = 0;
     let n = get_varint(b, &mut pos).ok()? as usize;
@@ -791,8 +803,16 @@ pub fn stored_tuple_len(b: &[u8], types: &[DataType], null: &[bool]) -> Option<u
     // them all by a multiple of MAXALIGN, which leaves every value's alignment as it is.)
     let mut off = tuple_header(types.len(), false);
     let mut has_null = false;
+    // (The value before: its column, tag and start, checked once the next one starts.)
+    let mut last: Option<(usize, u8, usize)> = None;
     for (i, ty) in types.iter().enumerate() {
+        if let Some((c, t, at)) = last
+            && !check(c, t, pos - at)
+        {
+            return None;
+        }
         let t = *b.get(pos)?;
+        last = Some((i, t, pos));
         pos += 1;
         let as_null = null.get(i).copied().unwrap_or(false);
         // (A fixed-size value of the column's own type: its encoded bytes, then its typlen and
@@ -879,6 +899,11 @@ pub fn stored_tuple_len(b: &[u8], types: &[DataType], null: &[bool]) -> Option<u
             true => has_null = true,
             false => off = ((off + al - 1) & !(al - 1)) + len,
         }
+    }
+    if let Some((c, t, at)) = last
+        && !check(c, t, pos - at)
+    {
+        return None;
     }
     if has_null {
         off += tuple_header(types.len(), true) - tuple_header(types.len(), false);

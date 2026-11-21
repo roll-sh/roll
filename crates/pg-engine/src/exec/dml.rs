@@ -3952,7 +3952,6 @@ impl StoredInsert {
     /// might go out of line, a row stored before a column was added, a modelled table), for
     /// the caller to insert decoded.
     fn insert(&self, plan: &InsertPlan, bytes: &[u8], plain_counts: &std::cell::Cell<i64>, ctx: &ExecCtx) -> Result<bool> {
-        use crate::storage::row::{read_stored, StoredValue};
         let t = &plan.rules.table;
         // (A modelled target places each row in its model: decoded.)
         if !self.estimated.get() {
@@ -3966,15 +3965,11 @@ impl StoredInsert {
         if crate::storage::sst::get_varint(data, &mut pos)? as usize != self.types.len() {
             return Ok(false);
         }
-        for &not_null in &self.not_null {
-            let at = pos;
-            let null = matches!(read_stored(data, &mut pos)?, StoredValue::Null);
-            // (`toast::encode` keeps a value whose encoding is under 128 bytes in line.)
-            if (null && not_null) || pos - at >= 128 {
-                return Ok(false);
-            }
-        }
-        let Some(len) = crate::storage::row::stored_tuple_len(data, &self.types, &self.none) else {
+        // (Sized and checked in one pass: no NULL in a NOT NULL column, and `toast::encode`
+        // keeps a value whose encoding is under 128 bytes in line.)
+        let not_null = &self.not_null;
+        let fits = |c: usize, tag: u8, bytes: usize| bytes < 128 && !(tag == crate::storage::row::tag::NULL && not_null[c]);
+        let Some(len) = crate::storage::row::stored_tuple_len_with(data, &self.types, &self.none, fits) else {
             return Ok(false);
         };
         let Some(run) = super::sizing::inserted_stored(t, len, ctx) else {
