@@ -936,7 +936,7 @@ export interface Variables {
    * reference: a reference variable's template (names, never a value). sealed: run with, never
    * shown again (not by `reveal` either); a reference that reads a sealed value is sealed too.
    */
-  vars: { name: string; masked: string; source: VariableSource; reference?: string; sealed?: boolean; /** Kept as a file at this path in its instances (not in their environment). */ file?: string }[];
+  vars: { name: string; masked: string; source: VariableSource; reference?: string; sealed?: boolean; /** Kept as a file at this path in its instances (not in their environment). */ file?: string; /** Only its instances get it, never a build's steps. */ runtime_only?: boolean }[];
 }
 
 export interface LogLine {
@@ -1506,7 +1506,7 @@ export const appsApi = {
   setVariables: (
     id: string,
     e: string,
-    change: { set?: Record<string, string>; unset?: string[]; seal?: string[]; files?: Record<string, string | null>; copy_from?: string; copy?: string[] },
+    change: { set?: Record<string, string>; unset?: string[]; seal?: string[]; files?: Record<string, string | null>; runtime_only?: Record<string, boolean>; copy_from?: string; copy?: string[] },
   ) => call<Variables>("PATCH", `${env(id, e)}/variables`, change),
   diff: (id: string, e: string, from: string) => call<EnvironmentDiff>("GET", `${env(id, e)}/diff${qs({ from })}`),
 

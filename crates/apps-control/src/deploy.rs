@@ -504,7 +504,12 @@ impl Apps {
     /// ([`crate::runtime::Runtime::sweep_build_networks`]). Every ten minutes.
     pub async fn prune(self: &Arc<Self>) {
         let now = code_sql::now_ms();
-        self.deps.runtime.sweep_build_networks().await;
+        // Closed builds' networks nothing runs on, but never those of a project with a closed
+        // environment here (a build may be setting one up).
+        if let Ok((envs, all)) = self.db(|s| Ok((s.all_environments()?, s.services(None)?))).await {
+            let closed: std::collections::HashSet<String> = envs.iter().filter(|e| e.egress.closed()).filter_map(|e| all.iter().find(|s| s.id == e.service).map(|s| s.project.clone())).collect();
+            self.deps.runtime.sweep_build_networks(&closed).await;
+        }
         if let Ok(deleted) = self.db(|s| s.deleted_services(None)).await {
             for (svc, at) in deleted.into_iter().filter(|(_, at)| now - at >= crate::DELETED_KEPT_MS) {
                 let key = lease_key(&svc.id);
@@ -1307,8 +1312,20 @@ impl Apps {
         let env_row = self.db(move |s| s.environment(&sid, &e)).await?;
         let resolved = self.resolve_vars(svc, &env_row, &d.id).await?;
         resolved.check_refs()?;
+        // The environment's remote build cache (Turborepo, Nx), unless its variables name another
+        // (Vercel's, a team's own). Never a closed build's: a fork's code would fill a cache the
+        // trusted builds read.
+        // Nor a deploy without the cache (one that suspects what's in it).
+        let did = d.id.clone();
+        let uncached = self.db(move |s| s.no_cache(&did)).await?;
+        let cache_vars = match env_row.egress.closed() || uncached {
+            true => Vec::new(),
+            false => self.build_cache_vars(&svc.project, &crate::build_cache::scope(&svc.source, &svc.id, &d.environment)).await?.into_iter().filter(|(k, _)| !resolved.vars.iter().any(|(v, _)| v == k || (k.starts_with("TURBO_") && v.starts_with("TURBO_")) || (k.starts_with("NX_SELF_HOSTED") && v.starts_with("NX_SELF_HOSTED")))).collect(),
+        };
         // Its secret values never reach the build's log, whatever a step prints.
-        self.logs.redact(&format!("build:{}", d.id), &d.id, resolved.secret_values());
+        let mut hidden = resolved.secret_values();
+        hidden.extend(cache_vars.iter().filter(|(k, _)| k.ends_with("TOKEN")).map(|(_, v)| v.clone()));
+        self.logs.redact(&format!("build:{}", d.id), &d.id, hidden);
         let closed_vars = env_row.egress.closed().then(|| resolved.without_secrets());
         let mut build_env = resolved.vars;
         // Instances' own addresses (kept awake, roll's OIDC tokens) are the running instances',
@@ -1336,6 +1353,14 @@ impl Apps {
                 log.line(format!("a closed environment builds without its secret values ({} left out; its instances get them)", before - build_env.len()));
             }
         }
+        // What's only for its instances never reaches a step.
+        let (sid, e) = (svc.id.clone(), d.environment.clone());
+        let runtime_only = self.db(move |s| s.runtime_only(&sid, &e)).await?;
+        if !runtime_only.is_empty() {
+            build_env.retain(|(k, _)| !runtime_only.contains(k));
+            log.line(format!("{} variable(s) only for its instances, left out of the build", runtime_only.len()));
+        }
+        build_env.extend(cache_vars);
         // Per deployment (the cache would never hit) or only for the running app.
         build_env.retain(|(k, _)| k != "ROLL_DEPLOYMENT" && k != "PORT");
         // The commit changes every push: out of the hash and the secrets, or no build would hit
@@ -2482,6 +2507,18 @@ impl Apps {
                 for key in crate::logs::env_keys(&svc.id, &e.name) {
                     self.logs.expire(&key, before).await;
                 }
+                // Its jobs' logs, each whole once its job started before then: those started
+                // since the last pass's cutoff (kept, so a node that was down catches up).
+                let mark = format!("job-logs-expired:{}/{}", svc.id, e.name);
+                let (sid, en, m) = (svc.id.clone(), e.name.clone(), mark.clone());
+                let from = self.db(move |s| s.get_state(&m)).await.ok().flatten().and_then(|v| v.parse::<i64>().ok()).unwrap_or(0);
+                if let Ok(ids) = self.db(move |s| s.jobs_started(&sid, &en, from, before)).await {
+                    for id in ids {
+                        self.logs.delete(&format!("job:{id}")).await;
+                    }
+                    let v = before.to_string();
+                    let _ = self.db(move |s| s.set_state(&mark, &v)).await;
+                }
             }
         }
     }
@@ -2498,6 +2535,7 @@ impl Apps {
         if now - self.logs_expired.load(std::sync::atomic::Ordering::Relaxed) >= 3_600_000 {
             self.logs_expired.store(now, std::sync::atomic::Ordering::Relaxed);
             self.expire_logs_pass(&services, now).await;
+            self.build_cache_pass(now).await;
         }
         if now - self.status_swept.load(std::sync::atomic::Ordering::Relaxed) >= 60_000 {
             self.status_swept.store(now, std::sync::atomic::Ordering::Relaxed);

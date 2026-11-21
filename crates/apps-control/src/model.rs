@@ -2783,6 +2783,9 @@ pub struct VarView {
     /// Kept as a file at this path in its instances (not in their environment).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub file: Option<String>,
+    /// Only its instances get it, never a build's steps.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub runtime_only: bool,
 }
 
 /// An environment's own HTML for roll's pages (Heroku's `ERROR_PAGE_URL` and

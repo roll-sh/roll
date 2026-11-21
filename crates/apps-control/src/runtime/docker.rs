@@ -1160,13 +1160,14 @@ impl Runtime for Docker {
         self.remove_network(&name).await;
     }
 
-    async fn sweep_build_networks(&self) {
+    async fn sweep_build_networks(&self, projects: &std::collections::HashSet<String>) {
+        let ours: std::collections::HashSet<String> = projects.iter().map(|p| build_network_name(p)).collect();
         let prefix = format!("{}build-", super::PREFIX);
         let Ok(listed) = docker(&["network", "ls", "--filter", &format!("label={LABEL}.project"), "--format", "{{.Name}}\t{{.CreatedAt}}"]).await else { return };
         let now = chrono::Utc::now();
         for line in listed.lines() {
             let Some((name, created)) = line.split_once('\t') else { continue };
-            if !name.starts_with(&prefix) {
+            if !name.starts_with(&prefix) || ours.contains(name) {
                 continue;
             }
             // `2026-11-20 22:53:33.596282026 +0100 CET`: one made in the last ten minutes may be

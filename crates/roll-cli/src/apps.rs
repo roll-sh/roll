@@ -754,6 +754,13 @@ pub enum AppsCmd {
         /// Put a variable kept as a file back in the environment; repeatable.
         #[arg(long = "not-file", value_name = "NAME")]
         not_file: Vec<String>,
+        /// Only for its instances, never a build's steps (a dependency's install script can't
+        /// read it; Vercel's and Netlify's runtime scope), from the next deploy; repeatable.
+        #[arg(long = "runtime-only", value_name = "NAME")]
+        runtime_only: Vec<String>,
+        /// Give a runtime-only variable to builds again; repeatable.
+        #[arg(long = "build-too", value_name = "NAME")]
+        build_too: Vec<String>,
         /// Put them live now: a redeploy of the live image with the new values (Heroku's
         /// `config:set`), followed until it's live.
         #[arg(long, conflicts_with = "reveal")]
@@ -3620,7 +3627,8 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
             }
             dep
         }
-        AppsCmd::Vars { target, set, unset, mut seal, reveal, from_file, deploy, plain, as_file, not_file } => {
+        AppsCmd::Vars { target, set, unset, mut seal, reveal, from_file, deploy, plain, as_file, not_file, runtime_only, build_too } => {
+            let scopes: serde_json::Map<String, Value> = runtime_only.iter().map(|n| (n.clone(), json!(true))).chain(build_too.iter().map(|n| (n.clone(), json!(false)))).collect();
             let mut files = serde_json::Map::new();
             for f in &as_file {
                 let (n, p) = f.split_once('=').ok_or_else(|| anyhow::anyhow!("--as-file is NAME=/path"))?;
@@ -3640,7 +3648,7 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
                 }
                 m.extend(vars.into_iter().map(|(k, v)| (k, Value::String(v))));
             }
-            if !set.is_empty() || !unset.is_empty() || !m.is_empty() || !seal.is_empty() || !files.is_empty() {
+            if !set.is_empty() || !unset.is_empty() || !m.is_empty() || !seal.is_empty() || !files.is_empty() || !scopes.is_empty() {
                 for kv in set {
                     let (k, v) = kv.split_once('=').ok_or_else(|| anyhow::anyhow!("{kv}: set variables as KEY=value"))?;
                     m.insert(k.to_string(), v.into());
@@ -3653,7 +3661,7 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
                     eprintln!("sealed as secrets (--plain NAME keeps one revealable): {}", auto.join(", "));
                 }
                 seal.extend(auto);
-                api.call(reqwest::Method::PATCH, &base, Some(json!({ "set": m, "unset": unset, "seal": seal, "files": files }))).await?;
+                api.call(reqwest::Method::PATCH, &base, Some(json!({ "set": m, "unset": unset, "seal": seal, "files": files, "runtime_only": scopes }))).await?;
                 if deploy {
                     let dep = api.post(&format!("{}/redeploy", env_path(&svc, &target.env)), json!({})).await?;
                     if !json_out {
@@ -3679,7 +3687,8 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
                 } else {
                     for x in v["vars"].as_array().into_iter().flatten() {
                         let sealed = if x["sealed"] == true { "  sealed" } else { "" };
-                        println!("{:<32} {:<10} {}{sealed}", s(&x["name"]), s(&x["source"]), s(&x["masked"]));
+                        let runtime = if x["runtime_only"] == true { "  runtime only" } else { "" };
+                        println!("{:<32} {:<10} {}{sealed}{runtime}", s(&x["name"]), s(&x["source"]), s(&x["masked"]));
                     }
                 }
                 return Ok(());

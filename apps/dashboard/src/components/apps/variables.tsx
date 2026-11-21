@@ -1,4 +1,4 @@
-import { ClipboardPaste, Copy, Eye, EyeOff, FileText, KeyRound, Link2, Lock, LockOpen, Plus, Rocket, Trash2, Undo2 } from "lucide-react";
+import { ClipboardPaste, Copy, Eye, EyeOff, FileText, KeyRound, Link2, Lock, LockOpen, Plus, Rocket, Server, Trash2, Undo2 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { appsApi, describePending, parseEnv, toEnv, VARIABLE_NAME, type Environment, type Link, type LinkKind, type VariableSource, type Variables } from "@/lib/apps-api";
 import { KIND_LABEL, resourceKey, type ResourceView } from "@/lib/workspace-resources";
@@ -81,6 +81,11 @@ export function VariablesTab({
       setVars(v);
       setFiling(null);
     }
+  };
+  // Only for its instances, never a build's steps: from the next deploy.
+  const runtimeOnly = async (name: string, on: boolean) => {
+    const v = await runner.run("runtime", () => appsApi.setVariables(service, env.name, { runtime_only: { [name]: on } }));
+    if (v) setVars(v);
   };
   const [added, setAdded] = useState<Edit[]>([]);
   const [pasting, setPasting] = useState(false);
@@ -322,6 +327,11 @@ export function VariablesTab({
                       <Lock className="size-3" strokeWidth={1.5} /> sealed
                     </span>
                   )}
+                  {v.runtime_only && (
+                    <span className="inline-flex items-center gap-1 text-[11px] text-subtle" title="Only its instances get it: no build step can read it">
+                      <Server className="size-3" strokeWidth={1.5} /> runtime only
+                    </span>
+                  )}
                   {v.file && (
                     <span className="inline-flex max-w-full items-center gap-1 truncate font-mono text-[11px] text-subtle" title="Kept as a file in its instances, not in their environment">
                       <FileText className="size-3 shrink-0" strokeWidth={1.5} /> {v.file}
@@ -368,6 +378,18 @@ export function VariablesTab({
                     >
                       <KeyRound className="size-3.5" />
                     </SureButton>
+                  )}
+                  {editable && !gone && (
+                    <button
+                      onClick={() => void runtimeOnly(v.name, !v.runtime_only)}
+                      disabled={runner.busy !== null}
+                      className={`p-1 hover:text-fg ${v.runtime_only ? "text-fg" : "text-subtle"}`}
+                      aria-pressed={!!v.runtime_only}
+                      aria-label={`Keep ${v.name} from builds`}
+                      title={v.runtime_only ? "Only its instances get it: click to give it to builds again" : "Only for its instances: no build step (a dependency's install script) can read it"}
+                    >
+                      <Server className="size-3.5" />
+                    </button>
                   )}
                   {editable && !gone && (
                     <button
