@@ -1267,6 +1267,11 @@ static ROWS: &[Row] = &[
     // Which candidates are this project's stored values (`roll secrets scan`): read on the
     // project. Secrets keeps only matches in folders the caller may reveal, so it's no oracle.
     row("POST", "/v1/secrets/projects/{project}/leaks", "secrets", R, one(&["project"], "project")).filters_itself(),
+    // Validity checks (docs/secrets.md, "Is it live?"): asking a credential's provider whether a
+    // credential found in code works is a write (it calls out and is audited, rate-limited per
+    // project); a kept answer by fingerprint (never the value) is a read.
+    row("POST", "/v1/secrets/projects/{project}/validity", "secrets", W, one(&["project"], "project")),
+    row("GET", "/v1/secrets/projects/{project}/unstored/{fingerprint}", "secrets", R, one(&["project"], "project")),
     // Rotators: URLs roll calls to issue and revoke values that live outside roll. Listing shows
     // names and hosts; adding one answers its signing secret once; both changes are admin.
     row("GET", "/v1/secrets/projects/{project}/rotations", "secrets", R, one(&["project"], "project")),
@@ -1415,6 +1420,10 @@ static ROWS: &[Row] = &[
     row("POST", "/v1/secrets/projects/{project}/environments/{env}/value-requests", "secrets", W, one(&["project"], "project")).env(EnvFrom::Param("env")).path_query("path"),
     row("GET", "/v1/secrets/projects/{project}/value-requests", "secrets", R, one(&["project"], "project")),
     row("DELETE", "/v1/secrets/projects/{project}/value-requests/{id}", "secrets", W, one(&["project"], "project")),
+    // Binding a key to hosts decides where its value goes through a placeholder (docs/secrets.md,
+    // "Using a key without seeing it"): the folder's admin, as purge is.
+    row("PUT", "/v1/secrets/projects/{project}/environments/{env}/secrets/{name}/hosts", "secrets", ADMIN, one(&["project"], "project")).env(EnvFrom::Param("env")).path_query("path"),
+    row("DELETE", "/v1/secrets/projects/{project}/environments/{env}/secrets/{name}/hosts", "secrets", ADMIN, one(&["project"], "project")).env(EnvFrom::Param("env")).path_query("path"),
     // Purging a secret's history can't be undone.
     row("POST", "/v1/secrets/projects/{project}/environments/{env}/secrets/{name}/purge", "secrets", ADMIN, one(&["project"], "project")).env(EnvFrom::Param("env")).path_query("path"),
     // A change request's current and proposed values, for its approvers.
@@ -1500,6 +1509,7 @@ static ROWS: &[Row] = &[
     // "Why did it fail?": reads a deploy's logs and keeps the repo owner's model's answer (metered
     // on their usage), in any environment: write, never production's deploy.
     row("POST", "/v1/apps/services/{id}/environments/{env}/deploys/{dep}/explain", "apps", W, one(PG, "service")).env(EnvFrom::Param("env")),
+    row("POST", "/v1/apps/services/{id}/environments/{env}/deploys/{dep}/approve", "apps", Act::ProductionIf("env"), one(PG, "service")).env(EnvFrom::Param("env")),
     row("POST", "/v1/apps/services/{id}/environments/{env}/deploys/{dep}/rollback", "apps", Act::ProductionIf("env"), one(PG, "service")).env(EnvFrom::Param("env")).admin_if("x-roll-override"),
     // An error group resolved, muted or open again: the team's triage, a write in any environment.
     row("PATCH", "/v1/apps/services/{id}/environments/{env}/errors/{fingerprint}", "apps", W, one(PG, "service")).env(EnvFrom::Param("env")),

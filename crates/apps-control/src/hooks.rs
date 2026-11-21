@@ -46,6 +46,13 @@ impl Apps {
     /// until the redeploy is live). What was revoked, if it was live.
     pub fn revoke_leaked_address(self: &Arc<Self>, token: &str) -> Option<String> {
         let hash = crate::public::token_hash(token);
+        // A build cache's: dropped with everything its cache holds (what it wrote could be
+        // anyone's); the next build gets a new one and an empty cache.
+        if let Some(((project, ns), gone)) = self.store.drop_build_cache_token(&hash).ok()? {
+            tracing::warn!(project = %project, cache = %ns, artifacts = gone.len(), "apps: a leaked build cache token was revoked, its cache emptied");
+            self.drop_cache_objects(gone);
+            return Some(format!("{project}'s build cache token ({ns})"));
+        }
         let (service, env, what) = if let Some((s, e)) = self.store.drop_oidc_by_hash(&hash).ok()? {
             self.oidc_tokens.lock().retain(|k, _| !k.starts_with(&format!("{s}/{e}/")));
             (s, e, "OIDC address")
