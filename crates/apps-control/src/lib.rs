@@ -4082,6 +4082,7 @@ impl Apps {
             d.requests += u.requests;
             d.egress_bytes += u.egress_bytes;
             d.build_seconds += u.build_seconds;
+            d.stored_gb_hours += u.stored_gb_hours;
         }
         let p = self.cfg.prices;
         let mut total = 0.0;
@@ -4090,7 +4091,7 @@ impl Apps {
                 let u = by_day.remove(&d).unwrap_or_default();
                 let usd = p.cost(&u);
                 total += usd;
-                json!({ "day": d, "cpu_seconds": u.cpu_seconds, "gb_seconds": u.gb_seconds, "requests": u.requests, "egress_bytes": u.egress_bytes, "build_seconds": u.build_seconds, "usd": usd })
+                json!({ "day": d, "cpu_seconds": u.cpu_seconds, "gb_seconds": u.gb_seconds, "requests": u.requests, "egress_bytes": u.egress_bytes, "build_seconds": u.build_seconds, "stored_gb_hours": u.stored_gb_hours, "usd": usd })
             })
             .collect();
         Ok(json!({ "days": days, "total_usd": total }))

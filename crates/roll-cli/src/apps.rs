@@ -4422,6 +4422,9 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
                 println!("requests {}", total("requests"));
                 println!("egress   {}", crate::bytes(total("egress_bytes")));
                 println!("builds   {:.1} min", total("build_seconds") / 60.0);
+                if total("stored_gb_hours") > 0.0 {
+                    println!("logs     {:.3} GB-h past a week", total("stored_gb_hours"));
+                }
                 println!("cost     ${:.4} over {days} days", v["total_usd"].as_f64().unwrap_or(0.0));
                 return Ok(());
             }
