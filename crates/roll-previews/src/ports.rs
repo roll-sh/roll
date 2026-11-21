@@ -538,6 +538,9 @@ pub trait Reveal: Send + Sync {
 /// A preview's interception (docs/previews.md, "Keys a preview never holds"): the hosts its
 /// placeholders' keys are bound to, the CA its containers trust for them, and what serves them.
 pub struct Intercepted {
+    /// The CA's record: a new one (its bound hosts changed) restarts the preview's services, which
+    /// trust its certificate.
+    pub id: String,
     pub hosts: Vec<String>,
     pub ca_pem: String,
     pub interception: std::sync::Arc<dyn crate::intercept::Interception>,

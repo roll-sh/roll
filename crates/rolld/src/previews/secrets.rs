@@ -82,7 +82,7 @@ impl roll_previews::ports::Intercepts for SecretsIntercepts {
                 Err(e) => anyhow::bail!("{e}"),
             },
         };
-        Ok(Some(roll_previews::ports::Intercepted { hosts: ca.hosts.clone(), ca_pem: ca.cert_pem.clone(), interception: Arc::new(CaInterception { secrets: self.secrets.clone(), ca }) }))
+        Ok(Some(roll_previews::ports::Intercepted { id: ca.id.clone(), hosts: ca.hosts.clone(), ca_pem: ca.cert_pem.clone(), interception: Arc::new(CaInterception { secrets: self.secrets.clone(), ca }) }))
     }
 
     fn end(&self, preview: &str) -> anyhow::Result<()> {
@@ -223,7 +223,9 @@ impl roll_previews::ports::Secrets for Secrets {
             Err(e) if is_404(&e) => Ok(Default::default()),
             // The rules' saver may no longer (lost reveal, can't sign in): what the preview gets
             // without placeholders, and said, never another person's rights.
-            Err(e) if e.downcast_ref::<Refused>().is_some_and(|r| r.status == StatusCode::FORBIDDEN) => {
+            // Only that refusal (`maker_unreachable`): any other 403 is what it says, not hidden by
+            // a retry.
+            Err(e) if e.downcast_ref::<Refused>().is_some_and(|r| r.status == StatusCode::FORBIDDEN && r.code.as_deref() == Some("maker_unreachable")) => {
                 let mut got = self.resolve(project, env, untrusted, dynamic, consumer).await?;
                 got.problems.push(format!("placeholders off: {maker}, who last saved the preview rules, can no longer reveal {env}; a writer saving the rules again turns them back on"));
                 Ok(got)

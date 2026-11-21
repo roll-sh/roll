@@ -1964,10 +1964,12 @@ impl Runtime {
             return Ok(None);
         };
         let covered = serde_json::to_string(&i.hosts)?;
+        // A new CA with the same hosts is a new listener too: the old one's CA has ended.
+        let made = format!("{covered}#{}", i.id);
         let dir = dir.join(preview);
         let user = {
             use std::os::unix::fs::{DirBuilderExt, MetadataExt};
-            let fresh = self.intercepting.lock().get(preview).is_none_or(|(c, h)| *c != covered || h.is_finished());
+            let fresh = self.intercepting.lock().get(preview).is_none_or(|(c, h)| *c != made || h.is_finished());
             if fresh {
                 // The directory stays (a running egress container has it mounted): only its socket
                 // is made again.
@@ -1986,6 +1988,15 @@ impl Runtime {
                         Ok(s) if s.blocked.is_empty() && s.swapped == 0 => return,
                         Ok(s) if s.blocked.is_empty() => format!("egress to {host}: {} request(s), {} key(s) swapped in", s.requests, s.swapped),
                         Ok(s) => format!("egress to {host}: {} request(s), {} key(s) swapped in, refused: {}", s.requests, s.swapped, s.blocked.join("; ")),
+                        // Its CA ended (a key's bound hosts changed): a converge makes the new one
+                        // and restarts the services with it.
+                        Err(e) if format!("{e:#}").contains("interception CA has ended") => {
+                            if let Some(e) = engine.as_ref().and_then(Weak::upgrade) {
+                                let _ = e.store.update(&id, |row| row.next_at = 0);
+                                e.kick();
+                            }
+                            format!("egress to {}: refused: a key's bound hosts changed; restarting with a new interception certificate", if host.is_empty() { "?" } else { &host })
+                        }
                         Err(e) => format!("egress to {}: refused: {e:#}", if host.is_empty() { "?" } else { &host }),
                     };
                     if let Some(e) = engine.as_ref().and_then(Weak::upgrade) {
@@ -1993,7 +2004,7 @@ impl Runtime {
                     }
                 });
                 let task = tokio::spawn(crate::intercept::listen(listener, i.interception, crate::intercept::system_upstream(), crate::intercept::public_dial(), done));
-                self.intercepting.lock().insert(preview.to_string(), (covered.clone(), task.abort_handle()));
+                self.intercepting.lock().insert(preview.to_string(), (made.clone(), task.abort_handle()));
             }
             let m = std::fs::metadata(dir.join("sock"))?;
             format!("{}:{}", m.uid(), m.gid())

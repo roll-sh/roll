@@ -822,7 +822,13 @@ after an hour so newly bound hosts are covered; none while the preview holds no 
 `intercept_ca_live` on every connection, and roll secrets' `proxy::filter` for each request; the
 preview's teardown calls `end_consumer`, ending its placeholders and CAs at once. Each preview's
 socket lives under `<home>/previews/intercept`. `a_roll_only_preview_takes_placeholders_made_by_who_saved_its_rules`.
-Next: the live check end to end (a key bound to a host, a fork's preview, Docker).
+Only roll secrets' `maker_unreachable` refusal falls back without placeholders; any other 403 is
+what it says. A CA that ended (a key's bound hosts shrank: a revoked placeholder, a cleared
+binding, a cut-off) refuses the connection with "a key's bound hosts changed; restarting with a
+new interception certificate" and kicks a converge, which mints the new CA and restarts the
+preview's services (the CA's id is in their deploy fingerprint), since they trust its certificate.
+Next: the live check end to end (a key bound to a host, a fork's preview, Docker), with a local
+development override for a private TLS echo host.
 
 ## Safety
 

@@ -1265,6 +1265,38 @@ async fn a_roll_only_preview_takes_placeholders_made_by_who_saved_its_rules() {
     e.engine.store.set_rules_maker(&e.project, Some("usr_b")).unwrap();
     let _ = e.engine.env(&p.id, "web").await;
     assert_eq!(e.secrets.placeholders.lock().last().cloned(), Some((roll_previews::ports::intercept_consumer(&p.id), "usr_b".to_string())));
+    // Its CA changes (a key's bound hosts did): its services restart, trusting the new one.
+    struct Ca(parking_lot::Mutex<String>);
+    struct Nothing;
+    impl roll_previews::intercept::Interception for Nothing {
+        fn live(&self) -> anyhow::Result<bool> {
+            Ok(true)
+        }
+        fn covers(&self, _: &str) -> bool {
+            false
+        }
+        fn leaf(&self, _: &str) -> anyhow::Result<roll_previews::intercept::Leaf> {
+            anyhow::bail!("none")
+        }
+        fn filter(&self, _: roll_previews::intercept::Outgoing<'_>) -> Result<usize, String> {
+            Ok(0)
+        }
+    }
+    impl roll_previews::ports::Intercepts for Ca {
+        fn of(&self, _: &str) -> anyhow::Result<Option<roll_previews::ports::Intercepted>> {
+            Ok(Some(roll_previews::ports::Intercepted { id: self.0.lock().clone(), hosts: vec!["api.stripe.com".into()], ca_pem: String::new(), interception: Arc::new(Nothing) }))
+        }
+    }
+    let ca = Arc::new(Ca(parking_lot::Mutex::new("ica_1".into())));
+    let _ = e.engine.intercepts.set(ca.clone());
+    e.engine.store.update(&p.id, |row| row.next_at = 0).unwrap();
+    e.engine.pass().await.unwrap();
+    let before = e.engine.store.service_config(&p.id, "web").unwrap();
+    *ca.0.lock() = "ica_2".into();
+    e.engine.store.update(&p.id, |row| row.next_at = 0).unwrap();
+    e.engine.pass().await.unwrap();
+    let after = e.engine.store.service_config(&p.id, "web").unwrap();
+    assert!(before != after && after.as_deref().is_some_and(|c| c.contains("iica_2")), "{before:?} {after:?}");
     // Open egress: nothing would swap them, so none.
     let n = asked();
     let mut st = e.engine.store.settings(&e.project).unwrap();
