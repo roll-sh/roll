@@ -5987,8 +5987,9 @@ and webhooks' and review apps' signing secrets sealed. Still open:
 - **Batch 6's follow-ups:** #582, gated green. A consumer's CAs end as soon as it loses a host;
   `maker_unreachable` (403) when a placeholder's or a chosen reference's maker no longer reaches it;
   a decoy planted from a session mails that person.
-- **The #432 decoy oracle:** #575. Images are pinned, and pre-auth answers are learned per image (and
-  ahead of time at start, so no decoy login waits). Its full gate is running.
+- **The #432 decoy oracle:** fixed, #575 (8e16604f2). Compute images are pinned by digest, and each
+  image's pre-auth answers are learned from a compute of that image, ahead of time at start, so no
+  decoy login waits and none answers with bytes the compute wouldn't.
 - **Members (#501):** merging main again for batch 7. It lands first; #582 and #575 follow it.
 - **Item 8** (placeholders had no consumer on main): done. Previews' #535 (a06876bd1) swaps them in
   `crates/roll-intercept`, shared with apps, and is checked end to end against a TLS echo host
