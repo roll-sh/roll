@@ -573,9 +573,15 @@ async fn clear_webhooks_are_sealed_and_erased_and_none_is_made_without_a_key() {
         a.code.db.audit(&repo_id, "ada", "webhook_create", &json!({ "webhook": "wh_old", "url": hook_url })).unwrap();
         sql.execute(
             "INSERT INTO review_deliveries (id, app_id, event, payload, state, attempts, next_at, last_error, created_at) VALUES ('dl_old', 'wh_old', 'ping', ?, 'failed', 8, 0, ?, 1)",
-            code_sql::params![json!({ "webhook": { "id": "wh_old", "url": hook_url } }).to_string(), format!("error sending request for url ({hook_url})")],
+            code_sql::params![json!({ "event": "ping", "delivery": "dl_old", "webhook": "wh_old", "data": { "webhook": { "id": "wh_old", "url": hook_url } } }).to_string(), format!("error sending request for url ({hook_url})")],
         )
         .unwrap();
+        // Long since in the database file itself, not only its WAL.
+        sql.write_erasing(|_| Ok::<_, code_sql::Error>(())).unwrap();
+        if sql.backend() == code_sql::Backend::Sqlite {
+            let file = std::fs::read(dir.path().join("code").join("control.db")).unwrap();
+            assert!(file.windows(18).any(|w| w == b"fakehooktokenXXXX1"), "the premise: it's in the file");
+        }
         Arc::downgrade(&a.code)
     };
     for _ in 0..500 {
@@ -627,7 +633,7 @@ async fn clear_webhooks_are_sealed_and_erased_and_none_is_made_without_a_key() {
     assert_eq!(g.path, "/hook/T0FAKE/B0FAKE/fakehooktokenXXXX1", "delivered to the whole URL");
     let ts: i64 = g.headers["x-roll-timestamp"].to_str().unwrap().parse().unwrap();
     assert_eq!(g.headers["x-roll-signature-256"].to_str().unwrap(), code_control::review::apps::signature(hook_secret, ts, &g.raw));
-    assert_eq!(g.body["webhook"]["url"], json!(origin), "pings show the scheme and host only");
+    assert_eq!(g.body["data"]["webhook"]["url"], json!(origin), "pings show the scheme and host only");
     assert_eq!(left_in_files(), Vec::<String>::new(), "nor after a ping");
 }
 

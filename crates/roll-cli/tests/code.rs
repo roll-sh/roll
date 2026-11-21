@@ -705,7 +705,9 @@ async fn webhooks_statuses_blame_jobs_and_tokens() {
     let hooks = js(a(&["code", "webhooks", "list", "acme/w"])).await;
     let id = hooks[0]["id"].as_str().unwrap().to_string();
     assert_eq!(hooks[0]["events"], json!(["check", "landed"]));
-    assert!(ok(a(&["code", "webhooks", "list", "acme/w"])).await.contains(&url));
+    // The scheme and host only: the URL itself is kept sealed.
+    let listed = ok(a(&["code", "webhooks", "list", "acme/w"])).await;
+    assert!(listed.contains(url.trim_end_matches("/hook")) && !listed.contains(&url), "{listed}");
     let updated = js(a(&["code", "webhooks", "update", "acme/w", &id, "--pause"])).await;
     assert_eq!(updated["active"], false);
     let updated = js(a(&["code", "webhooks", "update", "acme/w", &id, "--resume", "--event", "*"])).await;
@@ -1117,8 +1119,8 @@ async fn reviewer_webhook_and_thread_edges() {
     assert_eq!((hooks[0]["active"].as_bool(), hooks[0]["events"].clone()), (Some(false), json!(["landed"])), "the default event");
     e.fails(&["code", "webhooks", "create", "acme/api", "http://127.0.0.1:9/h", "--secret", "short"], 1).await;
     e.fails(&["code", "webhooks", "create", "acme/api", "http://127.0.0.1:9/h", "--event", "nope"], 1).await;
-    let v = e.json(&["code", "webhooks", "update", "acme/api", &hid, "--url", "http://127.0.0.1:9/other", "--secret", "another-secret-123456"]).await;
-    assert_eq!(v["url"], "http://127.0.0.1:9/other");
+    let v = e.json(&["code", "webhooks", "update", "acme/api", &hid, "--url", "http://127.0.0.1:10/other", "--secret", "another-secret-123456"]).await;
+    assert_eq!(v["url"], "http://127.0.0.1:10");
     e.fails(&["code", "webhooks", "update", "acme/api", &hid, "--pause", "--resume"], 1).await;
     for args in [vec!["ping", "acme/api", "wh_nope"], vec!["delete", "acme/api", "wh_nope"], vec!["deliveries", "acme/api", "wh_nope"], vec!["redeliver", "acme/api", hid.as_str(), "dl_nope"]] {
         let mut all = vec!["code", "webhooks"];
@@ -1171,8 +1173,8 @@ async fn reviewer_webhook_and_thread_edges() {
     // review apps: --active false, and refusals.
     let app = e.json(&["code", "review-apps", "create", "acme", "bot", "--url", "http://127.0.0.1:9/h"]).await;
     let app_id = app["app"]["id"].as_str().unwrap().to_string();
-    let v = e.json(&["code", "review-apps", "update", &app_id, "--active", "false", "--url", "http://127.0.0.1:9/new", "--repo", "api"]).await;
-    assert_eq!((v["active"].as_bool(), v["webhook_url"].as_str()), (Some(false), Some("http://127.0.0.1:9/new")), "{v}");
+    let v = e.json(&["code", "review-apps", "update", &app_id, "--active", "false", "--url", "http://127.0.0.1:10/new", "--repo", "api"]).await;
+    assert_eq!((v["active"].as_bool(), v["webhook_url"].as_str()), (Some(false), Some("http://127.0.0.1:10")), "{v}");
     e.fails(&["code", "review-apps", "show", "app_nope"], 1).await;
     e.fails(&["code", "review-apps", "create", "acme", "x", "--url", "http://127.0.0.1:9/h", "--event", "bogus"], 1).await;
     e.fails(&["code", "review-apps", "list", "nobody"], 1).await;

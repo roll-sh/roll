@@ -186,7 +186,7 @@ pub(crate) fn seal_at_rest(db: &Db, sealer: Option<&Sealer>) -> Result<usize> {
 }
 
 /// Delivery URLs a server wrote whole into other rows before it wrote only their [`origin`]:
-/// `webhook_create` audit rows (`detail.url`), pings (`payload.webhook.url`) and failed attempts
+/// `webhook_create` audit rows (`detail.url`), pings (`payload.data.webhook.url`) and failed attempts
 /// (reqwest's `… for url (<url>)` in `last_error`). Each row with the text it gets instead.
 #[derive(Default)]
 struct Mentions {
@@ -216,7 +216,7 @@ impl Mentions {
                 |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, Option<String>>(2)?)),
             )?;
             for (id, payload, last_error) in rows {
-                let p = cut_json(&payload, &["webhook", "url"]);
+                let p = cut_json(&payload, &["data", "webhook", "url"]);
                 let e = last_error.as_deref().and_then(cut_reqwest);
                 if p.is_some() || e.is_some() {
                     m.deliveries.push((id, p.unwrap_or(payload), e.or(last_error)));
