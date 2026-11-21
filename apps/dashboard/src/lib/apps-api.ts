@@ -47,6 +47,8 @@ export interface Build {
   packages?: string[];
   /** The longest its build may take, seconds (60–21600, held to the node's own limit); unset: the node's. */
   timeout_s?: number;
+  /** Its builder: small (2 vCPU, 4 GiB; default), medium (4, 8 GiB) or large (8, 16 GiB), minutes metered by size on the fleet. */
+  size?: "small" | "medium" | "large";
 }
 
 export type ServiceType = "web" | "worker" | "cron";
