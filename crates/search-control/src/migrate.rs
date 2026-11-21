@@ -181,6 +181,10 @@ fn remote_error(host: &str, e: search_es::EsError) -> ControlError {
     if e.status == 429 && e.kind == "es_rejected_execution_exception" {
         return ControlError::Busy(e.reason().to_string());
     }
+    // roll's own limits are roll's errors, not the remote's.
+    if e.kind == "circuit_breaking_exception" || e.reason().starts_with("Remote responded with a chunk that was too large") {
+        return ControlError::Invalid(format!("the answer from {host} is larger than roll reads here at once (roll's limit)"));
+    }
     let transport = matches!(&*e.kind, "connect_exception" | "unknown_host_exception" | "s_s_l_handshake_exception" | "socket_timeout_exception" | "i_o_exception");
     if transport {
         return ControlError::Invalid(format!("couldn't reach the remote at {host}"));
@@ -189,19 +193,6 @@ fn remote_error(host: &str, e: search_es::EsError) -> ControlError {
         return ControlError::Invalid(format!("the remote at {host} answered {}: {}", e.status, e.reason()));
     }
     ControlError::Invalid(format!("the remote at {host}: {}: {}", e.kind, e.reason()))
-}
-
-/// `_cat`'s numbers are strings.
-fn num(v: Option<&EsValue>) -> Value {
-    match v {
-        Some(EsValue::Str(s)) => s.parse::<i64>().map(Value::from).unwrap_or(Value::Null),
-        Some(n) => n.as_i64().map(Value::from).unwrap_or(Value::Null),
-        None => Value::Null,
-    }
-}
-
-fn es_str(v: Option<&EsValue>) -> Value {
-    v.and_then(EsValue::as_str).map(Value::from).unwrap_or(Value::Null)
 }
 
 /// A small value of the remote's for an answer (a dropped setting's value, at most 1 KiB of it).
@@ -233,8 +224,18 @@ impl Control {
     /// charged to the node's control budget, quiet errors.
     fn control_client(&self, s: &Source, limit: u64) -> Result<Client> {
         let r = remote_of(s)?;
+        let host = normalize_host(&s.host)?;
         let budget = self.node.reindex().control_budget.clone();
-        Client::new(&self.remote_rules()?.without_whitelist(), &r, Some(budget)).map(|c| c.for_control(limit)).map_err(|e| ControlError::Invalid(e.reason().to_string()))
+        Client::new(&self.remote_rules()?.without_whitelist(), &r, Some(budget)).map(|c| c.for_control(limit)).map_err(|e| {
+            // An address roll refuses (private, denied, blocked) reads like any remote it can't
+            // reach: no oracle for which names lead where.
+            let reason = e.reason();
+            if reason.contains("private address") || reason.contains("may not reach") || reason.contains("blocked in") || reason.contains("not whitelisted") {
+                ControlError::Invalid(format!("couldn't reach the remote at {host}"))
+            } else {
+                ControlError::Invalid(reason.to_string())
+            }
+        })
     }
 
     /// A place in the node's pool of control calls for cluster `c` (429 when it's taken).
@@ -287,10 +288,12 @@ impl Control {
     async fn inspect_within(&self, c: &SearchCluster, s: &Source) -> Result<Value> {
         let host = normalize_host(&s.host)?;
         let client = self.control_client(s, remote::CONTROL_ANSWER_LIMIT)?;
+        // The listing may be long (many indices): read with a larger cap, row by row, no tree.
+        let lister = self.control_client(s, remote::CONTROL_LISTING_LIMIT)?;
         let err = |e| remote_error(&host, e);
         let mut retries = 0;
         let info = client.info(&mut retries).await.map_err(err)?;
-        let cat = client.get("/_cat/indices?format=json&bytes=b&expand_wildcards=open&h=index,health,status,docs.count,store.size,pri.store.size,pri,rep").await.map_err(err)?;
+        let (cat, _held) = lister.get_rows("/_cat/indices?format=json&bytes=b&expand_wildcards=open&h=index,health,status,docs.count,store.size").await.map_err(err)?;
         let aliases = client.get("/_alias").await.ok();
         // Data streams aren't migrated yet; name them so nobody wonders where they went.
         let streams: Vec<String> = match client.get("/_data_stream").await {
@@ -302,27 +305,25 @@ impl Control {
             aliases.as_ref().and_then(|a| a.value.get(index)).and_then(|d| d.get("aliases")).and_then(EsValue::as_object).map(|m| m.keys().cloned().collect()).unwrap_or_default()
         };
         let mut rows: Vec<Value> = cat
-            .value
-            .as_array()
-            .map(|a| a.as_slice())
-            .unwrap_or_default()
             .iter()
             .filter_map(|r| {
-                let index = r.get("index").and_then(EsValue::as_str)?.to_string();
+                let col = |k: &str| r.iter().find(|(n, _)| n == k).and_then(|(_, v)| v.clone());
+                let index = col("index")?;
                 if index.starts_with('.') {
                     return None;
                 }
                 let names = alias_names(&index);
                 let on_roll: Vec<&String> = names.iter().filter(|a| existing.contains(*a)).collect();
+                let n = |k: &str| col(k).and_then(|v| v.parse::<i64>().ok()).map(Value::from).unwrap_or(Value::Null);
                 Some(json!({
                     "index": index,
-                    "health": es_str(r.get("health")),
-                    "status": es_str(r.get("status")),
-                    "docs": num(r.get("docs.count")),
-                    "size_bytes": num(r.get("store.size")),
-                    "primary_size_bytes": num(r.get("pri.store.size")),
-                    "primaries": num(r.get("pri")),
-                    "replicas": num(r.get("rep")),
+                    "health": col("health"),
+                    "status": col("status"),
+                    "docs": n("docs.count"),
+                    "size_bytes": n("store.size"),
+                    "primary_size_bytes": Value::Null,
+                    "primaries": Value::Null,
+                    "replicas": Value::Null,
                     "aliases": names,
                     "aliases_on_roll": on_roll,
                     "exists": existing.contains(&index),
@@ -394,6 +395,18 @@ impl Control {
                     }
                 }
                 Ok(Err(e)) => row["error"] = json!(e),
+                Err(_) if progress.created && progress.task.is_none() => {
+                    // The deadline came while the copy was being started: look its task up.
+                    match tokio::time::timeout(std::time::Duration::from_secs(5), self.running_copy(&c, &dest)).await {
+                        Ok(Some(task)) => progress.task = Some(task),
+                        _ => {
+                            row["error"] = json!(format!(
+                                "the call ran past {}s while the copy was being started: [{dest}] was created, and its copy may be running (see GET _tasks?actions=*reindex&detailed=true)",
+                                DEADLINE.as_secs()
+                            ))
+                        }
+                    }
+                }
                 Err(_) => row["error"] = json!(format!("the call ran past {}s while this index was being set up", DEADLINE.as_secs())),
             }
             // What actually happened, whatever cut it short.
@@ -535,6 +548,8 @@ impl Control {
             let (status, v) = self.call_text(c, "PUT", &format!("/{}", urlencoding::encode(dest)), Some(body)).await;
             if status == 200 {
                 created = true;
+                // Reported even if the call's deadline cuts the rest short.
+                progress.created = true;
                 break;
             }
             let reason = v.pointer("/error/reason").and_then(Value::as_str).unwrap_or("creating the index failed").to_string();
@@ -573,7 +588,10 @@ impl Control {
         let (status, v) = self.call_json(c, "POST", &path, Some(&body)).await;
         if status == 429 {
             // Another copy took the last slot meanwhile: the empty copy goes, the index waits.
-            self.call_json(c, "DELETE", &format!("/{}", urlencoding::encode(dest)), None).await;
+            let (deleted, _) = self.call_json(c, "DELETE", &format!("/{}", urlencoding::encode(dest)), None).await;
+            if deleted != 200 {
+                return Err(format!("[{dest}] was created, but not started (every task slot was taken) and couldn't be removed ({deleted}): delete it, then copy it again"));
+            }
             progress.created = false;
             names.remove(dest);
             return Ok(json!({ "queued": true, "reason": "every task slot was taken meanwhile" }));

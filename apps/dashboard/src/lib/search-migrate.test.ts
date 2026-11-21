@@ -1,7 +1,7 @@
 // Tests of the dashboard's migration from Elasticsearch or OpenSearch (vitest).
 import assert from "node:assert/strict";
 import { test } from "vitest";
-import { aliasOffer, defaultDest, destProblem, displayHost, droppedByReason, mergeStarted, partial, queuedPicks, shouldStartQueued, sourceFrom, sourceProblem, taskPoll, taskProgress, type MigrateStarted, type SourceForm } from "./search-migrate";
+import { aliasOffer, defaultDest, destProblem, displayHost, droppedByReason, mergeStarted, partial, queuedPicks, queueRetryDelay, retryableStart, shouldStartQueued, sourceFrom, sourceProblem, taskPoll, taskProgress, type MigrateStarted, type SourceForm } from "./search-migrate";
 
 const form = (f: Partial<SourceForm>): SourceForm => ({ host: "https://es.example:9243", auth: "api_key", apiKey: "", username: "", password: "", ...f });
 
@@ -89,4 +89,10 @@ test("copies past the free task slots wait, and start as earlier ones end", () =
   assert.deepEqual(merged.map((r) => [r.index, r.task ?? null, !!r.queued]), [["a", "n:1", false], ["b", "n:2", false], ["c", "n:3", false], ["d", null, true]]);
   assert.equal(shouldStartQueued(merged, { "n:1": "done", "n:2": "done", "n:3": "running" }), true);
   assert.equal(shouldStartQueued([{ index: "a", dest: "a", task: "n:1" }], {}), false, "nothing waits");
+});
+
+test("a start of waiting copies that fails is retried, with growing pauses, unless roll refused it", () => {
+  assert.ok(retryableStart(429) && retryableStart(503) && retryableStart(undefined));
+  assert.ok(!retryableStart(400) && !retryableStart(403) && !retryableStart(404));
+  assert.deepEqual([0, 1, 2, 3, 4, 20].map(queueRetryDelay), [5_000, 10_000, 20_000, 40_000, 60_000, 60_000]);
 });

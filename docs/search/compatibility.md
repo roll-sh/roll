@@ -1597,8 +1597,11 @@ the rest are skipped by the tests' own prerequisites.
     REST client's 100 MiB (past it, Elasticsearch's own error), and charged to a node-wide budget
     rather than the request breaker (past it, a 429 `circuit_breaking_exception`); a page's hits
     are scanned, never parsed into a tree; a scroll or point-in-time id is kept up to 4 KiB;
-  - addresses the node denies (`roll.reindex.remote.deny_addresses`: rolld's own) are refused,
-    checked on the address each connection uses;
+  - addresses the node denies (`roll.reindex.remote.deny_addresses` and the names in
+    `roll.reindex.remote.deny_names`: rolld's own) are refused, checked on the address each
+    connection uses; the lists match the host as the client connects to it (percent-decoded,
+    IDNA-mapped); `source.remote.headers` can't set `Host` or a pseudo-header;
+  - a page with more hits than the `size` asked for is refused;
   - at most 2 tasks per cluster and 4 per node run at once (a 429
     `es_rejected_execution_exception` past them), and a task stops after
     `roll.reindex.remote.max_duration` (24h; its `canceled` reason says so);

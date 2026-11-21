@@ -192,8 +192,16 @@ impl<'a> Scan<'a> {
     }
 }
 
+/// How a page's hits are bounded while it's scanned: at most `max_hits` of them (the `size` roll
+/// asked for), each charged `per_hit` bytes to `held` as it's added.
+pub struct HitBudget<'a> {
+    pub max_hits: usize,
+    pub per_hit: u64,
+    pub held: Option<&'a mut crate::breaker::Reservation>,
+}
+
 /// Reads one page of a remote search (`_search`, `_search/scroll`, a point-in-time search).
-pub fn scan(page: &Bytes, max_id: usize) -> EsResult<ScannedPage> {
+pub fn scan(page: &Bytes, max_id: usize, budget: &mut HitBudget<'_>) -> EsResult<ScannedPage> {
     let mut sc = Scan { s: page, pos: 0 };
     let mut out = ScannedPage::default();
     sc.expect(b'{')?;
@@ -226,6 +234,16 @@ pub fn scan(page: &Bytes, max_id: usize) -> EsResult<ScannedPage> {
                             sc.expect(b'[')?;
                             let mut first = true;
                             while sc.element(&mut first)? {
+                                if out.hits.len() >= budget.max_hits {
+                                    return Err(EsError::java(
+                                        500,
+                                        "illegal_state_exception",
+                                        format!("the remote answered with more hits than the [{}] roll asked for", budget.max_hits),
+                                    ));
+                                }
+                                if let Some(h) = budget.held.as_deref_mut() {
+                                    h.add(budget.per_hit, "reindex_remote_response")?;
+                                }
                                 let (hit, sort) = scan_hit(&mut sc, page)?;
                                 out.hits.push(hit);
                                 if sort.is_some() {
@@ -243,6 +261,43 @@ pub fn scan(page: &Bytes, max_id: usize) -> EsResult<ScannedPage> {
                 sc.skip()?;
             }
         }
+    }
+    Ok(out)
+}
+
+/// One row of a `_cat` answer (`format=json`): its columns and their values as text (`None`:
+/// null).
+pub type CatRow = Vec<(String, Option<String>)>;
+
+/// Reads a `_cat` answer in `format=json` (an array of flat objects) without a tree: each row
+/// charged `per_row` bytes to `held` as it's read; a value that's an object or an array is
+/// refused (no `_cat` column holds one).
+pub fn scan_rows(page: &Bytes, held: Option<&mut crate::breaker::Reservation>, per_row: u64) -> EsResult<Vec<CatRow>> {
+    let mut held = held;
+    let mut sc = Scan { s: page, pos: 0 };
+    let mut out = Vec::new();
+    sc.expect(b'[')?;
+    let mut first = true;
+    while sc.element(&mut first)? {
+        if let Some(h) = held.as_deref_mut() {
+            h.add(per_row, "reindex_remote_response")?;
+        }
+        sc.expect(b'{')?;
+        let mut row = Vec::new();
+        let mut first_key = true;
+        while let Some(k) = sc.key(&mut first_key)? {
+            let v = match sc.peek() {
+                Some(b'"') => Some(sc.string(MAX_NAME)?),
+                Some(b'{' | b'[') => return Err(bad("a `_cat` value that isn't a string, a number or null")),
+                _ => {
+                    let (a, b) = sc.skip()?;
+                    let text = std::str::from_utf8(&page[a..b]).map_err(|_| bad("an invalid value"))?;
+                    (text != "null").then(|| text.chars().take(64).collect())
+                }
+            };
+            row.push((k, v));
+        }
+        out.push(row);
     }
     Ok(out)
 }
@@ -293,6 +348,29 @@ fn scan_hit(sc: &mut Scan<'_>, page: &Bytes) -> EsResult<(ScannedHit, Option<Val
 mod tests {
     use super::*;
 
+    fn any() -> HitBudget<'static> {
+        HitBudget { max_hits: usize::MAX, per_hit: 0, held: None }
+    }
+
+    #[test]
+    fn cat_rows_are_read_flat() {
+        let page = Bytes::from_static(br#"[{"index":"a","docs.count":"12","store.size":null},{"index":"b\u00e9","docs.count":3}]"#);
+        let rows = scan_rows(&page, None, 0).unwrap();
+        assert_eq!(rows[0], vec![("index".into(), Some("a".into())), ("docs.count".into(), Some("12".into())), ("store.size".into(), None)]);
+        assert_eq!(rows[1][0].1.as_deref(), Some("b\u{e9}"));
+        assert_eq!(rows[1][1].1.as_deref(), Some("3"));
+        assert!(scan_rows(&Bytes::from_static(br#"[{"index":{"x":1}}]"#), None, 0).is_err());
+    }
+
+    #[test]
+    fn more_hits_than_asked_for_are_refused() {
+        let page = Bytes::from_static(br#"{"hits":{"hits":[{"_index":"a","_id":"1"},{"_index":"a","_id":"2"},{"_index":"a","_id":"3"}]}}"#);
+        let mut b = HitBudget { max_hits: 2, per_hit: 0, held: None };
+        assert_eq!(scan(&page, 4096, &mut b).err().expect("refused").reason(), "the remote answered with more hits than the [2] roll asked for");
+        let mut b = HitBudget { max_hits: 3, per_hit: 0, held: None };
+        assert_eq!(scan(&page, 4096, &mut b).ok().map(|p| p.hits.len()), Some(3));
+    }
+
     #[test]
     fn a_page_is_read_without_building_its_sources() {
         let page = Bytes::from_static(
@@ -300,7 +378,7 @@ mod tests {
               {"_index":"src","_id":"1","_version":3,"_source":{"a":[1,2,{"b":"}]\"x"}]},"sort":[7]},
               {"_index":"src","_id":"2","_routing":"r","_source":null,"fields":{"_routing":["ignored"]},"sort":[9,"z"]}]}}"#,
         );
-        let p = scan(&page, 4096).unwrap();
+        let p = scan(&page, 4096, &mut any()).unwrap();
         assert_eq!((p.pit_id.as_deref(), p.total, p.hits.len(), p.has_hits), (Some("p2"), Some(2), 2, true));
         assert_eq!(p.hits[0].source.as_deref(), Some(&br#"{"a":[1,2,{"b":"}]\"x"}]}"#[..]));
         assert_eq!((p.hits[0].version, p.hits[1].routing.as_deref(), p.hits[1].source.is_none()), (3, Some("r"), true));
@@ -310,16 +388,16 @@ mod tests {
     #[test]
     fn bounds_and_broken_pages() {
         let long = format!(r#"{{"_scroll_id":"{}","hits":{{"hits":[]}}}}"#, "a".repeat(5000));
-        assert!(scan(&Bytes::from(long), 4096).err().expect("refused").reason().contains("longer than the [4096] bytes"));
+        assert!(scan(&Bytes::from(long), 4096, &mut any()).err().expect("refused").reason().contains("longer than the [4096] bytes"));
         for broken in [r#"{"hits":{"hits":[{"_index":"a","_id":"1","_source":{"a":1}"#, r#"{"hits":{"hits":[{"_id":"1"}]}}"#, r#"[1,2]"#] {
-            assert!(scan(&Bytes::from(broken), 4096).is_err(), "{broken}");
+            assert!(scan(&Bytes::from(broken), 4096, &mut any()).is_err(), "{broken}");
         }
         let failed = Bytes::from_static(br#"{"_shards":{"failures":[{"reason":{"reason":"boom"}}]},"hits":{"hits":[]}}"#);
-        assert_eq!(scan(&failed, 4096).unwrap().shard_failures, Some((1, "boom".to_string())));
+        assert_eq!(scan(&failed, 4096, &mut any()).unwrap().shard_failures, Some((1, "boom".to_string())));
         // Deep nesting is stepped over without recursion, up to the parser's limit.
         let deep = format!(r#"{{"hits":{{"hits":[{{"_index":"a","_id":"1","_source":{{"x":{}1{}}}}}]}}}}"#, "[".repeat(900), "]".repeat(900));
-        assert_eq!(scan(&Bytes::from(deep), 4096).unwrap().hits.len(), 1);
+        assert_eq!(scan(&Bytes::from(deep), 4096, &mut any()).unwrap().hits.len(), 1);
         let deeper = format!(r#"{{"hits":{{"hits":[{{"_index":"a","_id":"1","_source":{{"x":{}1{}}}}}]}}}}"#, "[".repeat(1100), "]".repeat(1100));
-        assert!(scan(&Bytes::from(deeper), 4096).is_err());
+        assert!(scan(&Bytes::from(deeper), 4096, &mut any()).is_err());
     }
 }

@@ -232,7 +232,12 @@ impl Search {
         }
         let mut names: Vec<String> = vec![public_host.to_string()];
         names.extend(cfg.domain.clone());
+        // A name under the clusters' wildcard: where `<anything>.<domain>` leads.
+        names.extend(cfg.domain.as_deref().map(|d| format!("roll-reindex-probe.{d}")));
         names.extend(cfg.public_url.as_deref().and_then(|u| reqwest::Url::parse(u).ok()).and_then(|u| u.host_str().map(str::to_string)));
+        // Resolved again on every connection (every 30s at most), so the check follows them.
+        cfg.node_settings.push((search_control::REINDEX_DENY_NAMES.to_string(), names.join(",")));
+        // And their addresses now, for literals (which never reach the resolver).
         for name in names {
             let name = name.trim_start_matches('[').trim_end_matches(']').to_string();
             let addrs: Vec<std::net::IpAddr> = match name.parse::<std::net::IpAddr>() {

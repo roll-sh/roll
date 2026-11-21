@@ -258,6 +258,18 @@ export function shouldStartQueued(rows: MigrateStarted[], states: Record<string,
   return running < atOnce;
 }
 
+/** Whether a failed attempt to start waiting copies is worth repeating: roll was busy (429), a
+ * deadline or server error (5xx), or the network (no status). A refusal (4xx) isn't. */
+export function retryableStart(status: number | undefined): boolean {
+  return status === undefined || status === 429 || status >= 500;
+}
+
+/** How long to wait before asking again to start waiting copies, after `failures` attempts in a
+ * row that failed or started nothing: 5s, doubling, at most a minute. */
+export function queueRetryDelay(failures: number): number {
+  return Math.min(60_000, 5_000 * 2 ** Math.max(0, Math.min(failures, 10)));
+}
+
 /** `rows` with each waiting copy replaced by what a later `migrate` call made of it (matched by
  * index and copy name); the others as they were. */
 export function mergeStarted(rows: MigrateStarted[], results: MigrateStarted[]): MigrateStarted[] {

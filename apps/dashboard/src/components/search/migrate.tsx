@@ -1,6 +1,6 @@
 import { ArrowRight, CloudDownload, X } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
-import { formatBytes } from "@/lib/roll-api";
+import { ApiError, formatBytes } from "@/lib/roll-api";
 import { esJson, formatCount, indexPath, searchApi, type SearchCluster } from "@/lib/search-api";
 import {
   aliasBody,
@@ -14,6 +14,8 @@ import {
   migrateApi,
   partial,
   queuedPicks,
+  queueRetryDelay,
+  retryableStart,
   shouldStartQueued,
   sourceFrom,
   sourceProblem,
@@ -74,6 +76,8 @@ export function MigratePanel({ cluster, existing, onClose, onChanged }: { cluste
   /** Bumped 10s after an attempt that started nothing (the node's slots were all taken), so
    * the waiting copies are asked about again without a busy loop. */
   const [nudge, setNudge] = useState(0);
+  /** Attempts in a row that failed or started nothing (the pause before the next grows). */
+  const failures = useRef(0);
   useEffect(
     () => () => {
       waiting.current = null;
@@ -174,10 +178,21 @@ export function MigratePanel({ cluster, existing, onClose, onChanged }: { cluste
           if (next && !next.some((x) => x.queued)) waiting.current = null;
           return next;
         });
-        if (r.indices.every((x) => x.queued)) setTimeout(() => setNudge((n) => n + 1), 10_000);
+        if (r.indices.every((x) => x.queued)) {
+          setTimeout(() => setNudge((n) => n + 1), queueRetryDelay(failures.current++));
+        } else {
+          failures.current = 0;
+        }
         onChanged();
       } catch (e) {
-        setError(e instanceof Error ? e.message : String(e));
+        const status = e instanceof ApiError ? e.status : undefined;
+        if (retryableStart(status)) {
+          // Busy, a deadline or the network: ask again later rather than stall.
+          setTimeout(() => setNudge((n) => n + 1), queueRetryDelay(failures.current++));
+        } else {
+          waiting.current = null;
+          setError(e instanceof Error ? e.message : String(e));
+        }
       } finally {
         starting.current = false;
       }
@@ -519,7 +534,10 @@ export function MigratePanel({ cluster, existing, onClose, onChanged }: { cluste
               );
             })}
             <div className="flex flex-wrap items-center justify-between gap-3">
-              <p className="text-[12px] text-subtle">Copies run on roll as reindex tasks: closing this panel doesn&apos;t stop them.</p>
+              <p className="text-[12px] text-subtle">
+                Copies run on roll as reindex tasks: closing this panel doesn&apos;t stop them.
+                {started.some((x) => x.queued) && " Copies still waiting start only while this panel stays open."}
+              </p>
               {allEnded && (
                 <button onClick={restart} className={btn}>
                   Migrate more

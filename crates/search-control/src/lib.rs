@@ -36,6 +36,7 @@ pub use search_es::xpack::inference::http::ALLOW_PRIVATE as INFERENCE_ALLOW_PRIV
 pub use search_es::api::remote::ALLOW_PRIVATE as REINDEX_ALLOW_PRIVATE;
 pub use search_es::api::remote::MAX_DURATION as REINDEX_MAX_DURATION;
 pub use search_es::api::remote::DENY_ADDRESSES as REINDEX_DENY_ADDRESSES;
+pub use search_es::api::remote::DENY_NAMES as REINDEX_DENY_NAMES;
 
 /// Whether `n` is an address or network the reindex deny list takes.
 pub fn reindex_deny_net_ok(n: &str) -> bool {

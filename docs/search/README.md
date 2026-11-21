@@ -331,10 +331,15 @@ node's operator rules apply on top of the whitelist: names resolve to public add
 `--search-reindex-allow-private`, `ROLL_SEARCH_REINDEX_ALLOW_PRIVATE`, lifts both, for local
 development), `reindex.remote.blocklist` refuses what it matches (rolld adds its own endpoints:
 its public host and its clusters' domain, matched in lower case without a trailing dot), no
-redirect is followed and no proxy is used. Names alone can't keep a remote off roll, so rolld also
-denies its endpoints by address (`roll.reindex.remote.deny_addresses`: its public addresses, plus
-the fleet's networks given with `--search-reindex-deny`, `ROLL_SEARCH_REINDEX_DENY`), checked on
-the address each connection uses and on literals in any form. HTTPS is
+redirect is followed and no proxy is used. The lists match the host exactly as the client connects
+to it (percent-decoded, IDNA-mapped, lower case, no trailing dot), and `source.remote.headers`
+can't set `Host` or a pseudo-header. Names alone can't keep a remote off roll, so rolld also denies
+its endpoints by address: the names it serves on (its public host, the clusters' domain, a name
+under the domain's wildcard, `public_url`'s host: `roll.reindex.remote.deny_names`) are resolved
+again at most every 30 seconds and checked on the address each connection uses, and the fleet's
+networks given with `--search-reindex-deny` (`ROLL_SEARCH_REINDEX_DENY`, in
+`roll.reindex.remote.deny_addresses`) and those names' addresses at boot are checked on literals in
+any form, IPv4 inside IPv6 (mapped, NAT64, 6to4) included. HTTPS is
 verified against the platform's roots (plus `reindex.ssl.certificate_authorities`: rolld's
 `--search-reindex-ca`, `ROLL_SEARCH_REINDEX_CA`, for a remote with a private CA).
 
@@ -384,8 +389,8 @@ its copy partial, with a button that deletes the partial index so it can be copi
 
 | method | path | |
 | ------ | ---- | - |
-| POST | `/v1/search/clusters/{id}/migrate/inspect` | `{source: {host, api_key? \| username?, password?}}` → `{remote: {host, version, distribution, cluster_name}, indices: [{index, health, status, docs, size_bytes, primary_size_bytes, primaries, replicas, aliases, aliases_on_roll, exists}], data_streams}` within 60s; a remote's refusal is a 400 with its status and `error.type` only (never its body), and every transport failure reads the same (`couldn't reach the remote at <host>`). The operator's rules apply, not the cluster's whitelist. One `inspect` or `migrate` runs per cluster at a time, and 4 per node (429 past them); their answers are capped (1 MiB, an index definition 4 MiB) and drawn from a slice of the node's reindex budget that tasks never use. `write` for roll-access |
-| POST | `/v1/search/clusters/{id}/migrate` | `{source, indices: [{index, dest?}], requests_per_second?, size?}` (at most 100 indices) → `{indices: [{index, dest, task, dropped: [{setting, value, reason}], aliases} \| {index, dest, error}]}`: the remote must answer (`GET /`) before its `host:port` is added to the cluster's `reindex_whitelist` (exactly that host: `normalize_host` refuses anything that isn't a DNS name or an IP literal, so no pattern gets in); then, while a reindex task slot is free, each index's copy is created and its `wait_for_completion=false` reindex started, within 60s; an index past the free slots comes back `{index, dest, queued: true, reason}` with nothing created (the dashboard starts it as earlier copies end); each row says what happened (`created`, `task`), also when the deadline cut it short, and a copy an earlier call already started counts as started; one index's failure doesn't stop the others; an index roll already has is refused, not overwritten, and an alias roll already has is dropped (`aliases.<name>`). `write` for roll-access |
+| POST | `/v1/search/clusters/{id}/migrate/inspect` | `{source: {host, api_key? \| username?, password?}}` → `{remote: {host, version, distribution, cluster_name}, indices: [{index, health, status, docs, size_bytes, primary_size_bytes, primaries, replicas, aliases, aliases_on_roll, exists}], data_streams}` within 60s (`primaries`, `replicas` and `primary_size_bytes` are `null`: the listing asks only for what it shows and reads it row by row, up to about 60,000 indices); a remote's refusal is a 400 with its status and `error.type` only (never its body), and every transport failure reads the same (`couldn't reach the remote at <host>`). The operator's rules apply, not the cluster's whitelist. One `inspect` or `migrate` runs per cluster at a time, and 4 per node (429 past them); their answers are capped (1 MiB, an index definition 4 MiB) and drawn from a slice of the node's reindex budget that tasks never use. `write` for roll-access |
+| POST | `/v1/search/clusters/{id}/migrate` | `{source, indices: [{index, dest?}], requests_per_second?, size?}` (at most 100 indices) → `{indices: [{index, dest, task, dropped: [{setting, value, reason}], aliases} \| {index, dest, error}]}`: the remote must answer (`GET /`) before its `host:port` is added to the cluster's `reindex_whitelist` (exactly that host: `normalize_host` refuses anything that isn't a DNS name or an IP literal, so no pattern gets in); then, while a reindex task slot is free, each index's copy is created and its `wait_for_completion=false` reindex started, within 60s; an index past the free slots comes back `{index, dest, queued: true, reason}` with nothing created (the dashboard starts it as earlier copies end); each row says what happened (`created`, `task`), also when the deadline cut it short, and a copy an earlier call already started counts as started; one index's failure doesn't stop the others; an index roll already has is refused, not overwritten, and an alias roll already has is dropped (`aliases.<name>`). `admin` for roll-access: it changes the cluster's whitelist and starts copies as the cluster's own user |
 
 `crates/search-es/tests/reindex_remote.rs` covers the guard against a hostile mock remote (only
 whitelisted hosts read; a redirect not followed; an oversized page refused, with and without a

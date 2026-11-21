@@ -303,6 +303,28 @@ async fn a_page_is_charged_to_the_nodes_budget() {
     assert_eq!(c.remote.budget.used(), 0);
 }
 
+/// A page holds at most the hits roll asked for (`size`): one with more is refused while it's
+/// read, before more than that is built, and nothing is written.
+#[tokio::test]
+async fn a_page_with_more_hits_than_asked_for_is_refused() {
+    let hit = |i: u32| format!(r#"{{"_index":"src","_id":"{i}","_source":{{"n":{i}}},"sort":[{i}]}}"#);
+    let page = format!(r#"{{"pit_id":"p","hits":{{"total":{{"value":3,"relation":"eq"}},"hits":[{},{},{}]}}}}"#, hit(1), hit(2), hit(3));
+    let (remote, _) = mock(move |m, p, _| match (m, p) {
+        ("GET", "/") => (200, vec![], root()),
+        (_, p) if p.contains("_pit") => (200, vec![], r#"{"id":"p"}"#.into()),
+        _ => (200, vec![], page.clone()),
+    })
+    .await;
+    let c = cluster(LOCAL).await;
+    let body = format!(r#"{{"source":{{"remote":{{"host":"{remote}"}},"index":"src","size":2}},"dest":{{"index":"dst"}}}}"#);
+    let (s, v, text) = call(&c, "POST", "/_reindex", &body).await;
+    assert_eq!(s, 500, "{text}");
+    assert!(text.contains("the remote answered with more hits than the [2] roll asked for"), "{text}");
+    let (_, n, _) = call(&c, "GET", "/dst/_count", "").await;
+    assert_eq!(at(&n, "count").as_i64().unwrap_or(0), 0, "nothing written: {v:?}");
+    assert_eq!(c.remote.budget.used(), 0);
+}
+
 /// Addresses the node denies (its own endpoints) are refused whatever leads there: a literal in
 /// any form, or a name that resolves to one.
 #[tokio::test]

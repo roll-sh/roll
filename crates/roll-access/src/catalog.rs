@@ -1195,10 +1195,13 @@ static ROWS: &[Row] = &[
     // An API key: its secret is in the answer.
     row("POST", "/v1/search/clusters/{id}/keys", "search", REVEAL, one(PG, "cluster")),
     row("DELETE", "/v1/search/clusters/{id}/keys/{key}", "search", ADMIN, one(PG, "cluster")),
-    // A migration reads another Elasticsearch or OpenSearch through roll with credentials the
-    // caller gives (never kept), then creates indices and starts reindex tasks: writes.
+    // A migration's listing reads another Elasticsearch or OpenSearch through roll with
+    // credentials the caller gives (never kept) and changes nothing on roll: a write. The
+    // migration itself adds to the cluster's reindex whitelist (an admin's setting), creates
+    // indices with the remote's settings and aliases and starts reindex tasks as the cluster's
+    // own user (what the console does, an admin's): admin.
     row("POST", "/v1/search/clusters/{id}/migrate/inspect", "search", W, one(PG, "cluster")),
-    row("POST", "/v1/search/clusters/{id}/migrate", "search", W, one(PG, "cluster")),
+    row("POST", "/v1/search/clusters/{id}/migrate", "search", ADMIN, one(PG, "cluster")),
     row("GET", "/v1/search/clusters/{id}/remotes", "search", R, one(PG, "cluster")),
     row("PUT", "/v1/search/clusters/{id}/remotes/{alias}", "search", ADMIN, one(PG, "cluster")).lends(Lend::Each(search_remote)),
     row("DELETE", "/v1/search/clusters/{id}/remotes/{alias}", "search", ADMIN, one(PG, "cluster")),

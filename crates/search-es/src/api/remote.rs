@@ -76,11 +76,20 @@ pub const MAX_ID_BYTES: usize = 4096;
 /// addresses, comma-separated): rolld puts its own public addresses and the operator's fleet
 /// networks here.
 pub const DENY_ADDRESSES: &str = "roll.reindex.remote.deny_addresses";
+/// Names whose addresses reindex from remote never connects to (comma-separated): rolld puts
+/// the names it serves on here. They're resolved again every [`DENY_NAMES_TTL`], so the check
+/// follows the addresses as they change.
+pub const DENY_NAMES: &str = "roll.reindex.remote.deny_names";
+/// How long the addresses of [`DENY_NAMES`] are reused before they're resolved again.
+const DENY_NAMES_TTL: Duration = Duration::from_secs(30);
 /// roll's own calls to a remote (a migration's listing and index definitions) at once per node;
 /// one per cluster.
 pub const MAX_CONTROL_PER_NODE: usize = 4;
 /// The most one answer to a control call may hold.
 pub const CONTROL_ANSWER_LIMIT: u64 = 1024 * 1024;
+/// The most a remote's index listing (`_cat/indices`, scanned without a tree) may hold: about
+/// 60,000 indices.
+pub const CONTROL_LISTING_LIMIT: u64 = 8 * 1024 * 1024;
 /// How long one control call's exchange may take.
 pub const CONTROL_EXCHANGE: Duration = Duration::from_secs(30);
 /// The control calls' slice of [`MEMORY`] (tasks never draw from it, nor they from the tasks').
@@ -244,6 +253,7 @@ pub struct RemoteDoc {
 pub struct Rules {
     allow_private: bool,
     deny: Arc<Vec<Net>>,
+    deny_names: Arc<Vec<String>>,
     whitelist: Option<Vec<String>>,
     blocklist: Vec<String>,
     buffer_limit: u64,
@@ -269,7 +279,7 @@ impl Net {
     pub fn parse(s: &str) -> Option<Net> {
         let (a, p) = s.trim().split_once('/').map_or((s.trim(), None), |(a, p)| (a, Some(p)));
         let addr: IpAddr = a.trim_start_matches('[').trim_end_matches(']').parse().ok()?;
-        let addr = addr.to_canonical();
+        let addr = unwrap_v4(addr);
         let max = if addr.is_ipv4() { 32 } else { 128 };
         let prefix = match p {
             Some(p) => p.parse::<u8>().ok().filter(|p| *p <= max)?,
@@ -279,7 +289,7 @@ impl Net {
     }
 
     pub fn contains(&self, ip: IpAddr) -> bool {
-        let ip = ip.to_canonical();
+        let ip = unwrap_v4(ip);
         let mask = |bits: u32, len: u8| if len == 0 { 0 } else { u128::MAX << (bits - len as u32) };
         match (self.addr, ip) {
             (IpAddr::V4(n), IpAddr::V4(i)) => {
@@ -295,6 +305,28 @@ impl Net {
     }
 }
 
+/// The IPv4 address an IPv6 one carries, if it carries one, as `roll_net::private_ip` reads it:
+/// mapped (`::ffff:a.b.c.d`), NAT64 (`64:ff9b::/96` and the local-use `64:ff9b:1::/48`), 6to4
+/// (`2002::/16`) and IPv4-compatible (`::a.b.c.d`); any other address as it is.
+fn unwrap_v4(ip: IpAddr) -> IpAddr {
+    let IpAddr::V6(v) = ip else { return ip };
+    if let Some(v4) = v.to_ipv4_mapped() {
+        return IpAddr::V4(v4);
+    }
+    let s = v.segments();
+    let embedded = |hi: u16, lo: u16| IpAddr::V4(std::net::Ipv4Addr::new((hi >> 8) as u8, hi as u8, (lo >> 8) as u8, lo as u8));
+    if s[0] == 0x64 && s[1] == 0xff9b && (s[2..6] == [0, 0, 0, 0] || s[2] == 1) {
+        return embedded(s[6], s[7]);
+    }
+    if s[0] == 0x2002 {
+        return embedded(s[1], s[2]);
+    }
+    if s[..6] == [0, 0, 0, 0, 0, 0] && (s[6] != 0 || s[7] > 1) {
+        return embedded(s[6], s[7]);
+    }
+    ip
+}
+
 /// A host as patterns match it: lower case, no trailing dot.
 fn normal_host(h: &str) -> String {
     h.to_ascii_lowercase().trim_end_matches('.').to_string()
@@ -306,15 +338,60 @@ fn normal_host(h: &str) -> String {
 struct Guarded {
     allow_private: bool,
     deny: Arc<Vec<Net>>,
+    deny_names: Arc<Vec<String>>,
+}
+
+/// The public addresses [`DENY_NAMES`] resolved to lately, by the joined names.
+type DenyCache = parking_lot::Mutex<std::collections::HashMap<String, (std::time::Instant, Arc<Vec<IpAddr>>)>>;
+
+fn deny_cache() -> &'static DenyCache {
+    static C: std::sync::OnceLock<DenyCache> = std::sync::OnceLock::new();
+    C.get_or_init(Default::default)
+}
+
+/// What `names` resolved to last (any age), without resolving: for literals, which never reach
+/// the resolver.
+fn cached_denied(names: &[String]) -> Arc<Vec<IpAddr>> {
+    deny_cache().lock().get(&names.join(",")).map(|(_, a)| a.clone()).unwrap_or_default()
+}
+
+/// The public addresses `names` resolve to now (at most [`DENY_NAMES_TTL`] old). Private ones are
+/// refused anyway unless private hosts are allowed, which is local development.
+async fn denied_now(names: &[String]) -> Arc<Vec<IpAddr>> {
+    if names.is_empty() {
+        return Arc::default();
+    }
+    let key = names.join(",");
+    if let Some((at, a)) = deny_cache().lock().get(&key)
+        && at.elapsed() < DENY_NAMES_TTL
+    {
+        return a.clone();
+    }
+    let mut out = Vec::new();
+    for n in names {
+        if let Ok(ip) = n.trim_start_matches('[').trim_end_matches(']').parse::<IpAddr>() {
+            out.extend(Some(unwrap_v4(ip)).filter(|ip| !roll_net::private_ip(*ip)));
+            continue;
+        }
+        if let Ok(Ok(addrs)) = tokio::time::timeout(Duration::from_secs(2), tokio::net::lookup_host((n.as_str(), 0))).await {
+            out.extend(addrs.map(|a| unwrap_v4(a.ip())).filter(|ip| !roll_net::private_ip(*ip)));
+        }
+    }
+    out.sort();
+    out.dedup();
+    let a = Arc::new(out);
+    deny_cache().lock().insert(key, (std::time::Instant::now(), a.clone()));
+    a
 }
 
 impl reqwest::dns::Resolve for Guarded {
     fn resolve(&self, name: reqwest::dns::Name) -> reqwest::dns::Resolving {
         let host = name.as_str().to_string();
-        let (allow_private, deny) = (self.allow_private, self.deny.clone());
+        let (allow_private, deny, deny_names) = (self.allow_private, self.deny.clone(), self.deny_names.clone());
         Box::pin(async move {
             let addrs: Vec<std::net::SocketAddr> = tokio::net::lookup_host((host.as_str(), 0)).await?.collect();
-            let denied = |ip: IpAddr| deny.iter().any(|n| n.contains(ip));
+            let own = denied_now(&deny_names).await;
+            let denied = |ip: IpAddr| deny.iter().any(|n| n.contains(ip)) || own.contains(&unwrap_v4(ip));
             let private = addrs.iter().any(|a| !allow_private && roll_net::private_ip(a.ip()));
             let ok: Vec<std::net::SocketAddr> = addrs.into_iter().filter(|a| (allow_private || !roll_net::private_ip(a.ip())) && !denied(a.ip())).collect();
             if ok.is_empty() {
@@ -358,6 +435,7 @@ impl Rules {
         Ok(Rules {
             allow_private: setting(ALLOW_PRIVATE).is_some_and(|v| v.eq_ignore_ascii_case("true")),
             deny: Arc::new(deny),
+            deny_names: Arc::new(setting(DENY_NAMES).map(list).unwrap_or_default().iter().map(|n| normal_host(n)).collect()),
             whitelist: setting(WHITELIST).map(list),
             blocklist: setting(BLOCKLIST).map(list).unwrap_or_default(),
             buffer_limit,
@@ -389,9 +467,16 @@ impl Rules {
         if !matches!(r.scheme.as_str(), "http" | "https") {
             return Err(EsError::illegal_argument(format!("[host] must use the http or https scheme but was [{}]", r.scheme)));
         }
+        // A header that would name another host than the one connected to.
+        if let Some((k, _)) = r.headers.iter().find(|(k, _)| k.eq_ignore_ascii_case("host") || k.starts_with(':')) {
+            return Err(EsError::illegal_argument(format!("[headers] can't set [{k}]: the remote is the one [host] names")));
+        }
         let target = format!("{}:{}", r.host, r.port);
-        // Names match in lower case without a trailing dot, as they resolve.
-        let normal = format!("{}:{}", normal_host(&r.host), r.port);
+        // The host exactly as the client connects to it (percent-decoded, IDNA-mapped, lower
+        // case, an address in its canonical form), without a trailing dot: what the lists match.
+        let url = reqwest::Url::parse(&format!("{}://{target}/", r.scheme)).map_err(|_| EsError::illegal_argument(format!("[host] [{target}] is not a valid host")))?;
+        let host = url.host_str().map(normal_host).filter(|h| !h.is_empty()).ok_or_else(|| EsError::illegal_argument(format!("[host] [{target}] is not a valid host")))?;
+        let normal = format!("{host}:{}", r.port);
         let matches = |list: &[String]| list.iter().any(|p| crate::xcontent::filter::glob_match(&normal_host(p), &normal));
         // `ReindexValidator.checkRemoteWhitelist`: unset or empty, every remote is refused.
         let allowed = self.whitelist.as_deref().is_some_and(matches) && !matches(&self.blocklist);
@@ -402,13 +487,13 @@ impl Rules {
                 format!("[{target}] either not whitelisted in {WHITELIST} or blocked in {BLOCKLIST}")
             }));
         }
-        let url = reqwest::Url::parse(&format!("{}://{target}/", r.scheme)).map_err(|_| EsError::illegal_argument(format!("[host] [{target}] is not a valid host")))?;
         if !self.allow_private && roll_net::literal_private_host(&url) {
             return Err(EsError::illegal_argument(format!("[{target}] is a private address, which reindex from remote may not connect to unless [{ALLOW_PRIVATE}] is set")));
         }
         // An address written out never reaches the resolver: checked here, in any of its forms.
-        let literal = url.host_str().and_then(|h| h.trim_start_matches('[').trim_end_matches(']').parse::<IpAddr>().ok());
-        if literal.is_some_and(|ip| self.deny.iter().any(|n| n.contains(ip))) {
+        let literal = host.trim_start_matches('[').trim_end_matches(']').parse::<IpAddr>().ok();
+        let own = cached_denied(&self.deny_names);
+        if literal.is_some_and(|ip| self.deny.iter().any(|n| n.contains(ip)) || own.contains(&unwrap_v4(ip))) {
             return Err(EsError::illegal_argument(format!("[{target}] is an address reindex from remote may not reach")));
         }
         Ok(())
@@ -549,7 +634,7 @@ impl Client {
             .http1_only()
             .user_agent(concat!("roll-search/", env!("CARGO_PKG_VERSION"), " (reindex)"))
             .default_headers(headers);
-        b = b.dns_resolver(Arc::new(Guarded { allow_private: rules.allow_private, deny: rules.deny.clone() }));
+        b = b.dns_resolver(Arc::new(Guarded { allow_private: rules.allow_private, deny: rules.deny.clone(), deny_names: rules.deny_names.clone() }));
         if !rules.roots.is_empty() {
             b = b.tls_certs_merge(rules.roots.iter().cloned());
         }
@@ -721,14 +806,16 @@ impl Client {
         }
     }
 
-    /// A page of hits, scanned without a tree ([`super::remote_page`]): its bytes and each hit's
-    /// envelope are charged, and held while the page is.
-    async fn page(&self, method: reqwest::Method, path_query: &str, body: Option<&str>, retries: &mut u64) -> EsResult<(super::remote_page::ScannedPage, Option<Reservation>)> {
+    /// A page of hits, scanned without a tree ([`super::remote_page`]): at most `max_hits` hits
+    /// (the `size` asked for), each charged as it's read; the page's bytes and its hits are held
+    /// while the page is.
+    async fn page(&self, method: reqwest::Method, path_query: &str, body: Option<&str>, max_hits: usize, retries: &mut u64) -> EsResult<(super::remote_page::ScannedPage, Option<Reservation>)> {
         let mut b = self.checked(&method, path_query, body, retries).await?;
-        let page = super::remote_page::scan(&b.bytes, MAX_ID_BYTES).map_err(|e| if e.kind == "illegal_argument_exception" { e } else { not_elasticsearch(Some(e)) })?;
-        if let Some(h) = b.held.as_mut() {
-            h.add(page.hits.len() as u64 * HIT_OVERHEAD, BREAKER_LABEL)?;
-        }
+        let mut budget = super::remote_page::HitBudget { max_hits, per_hit: HIT_OVERHEAD, held: b.held.as_mut() };
+        let page = super::remote_page::scan(&b.bytes, MAX_ID_BYTES, &mut budget).map_err(|e| match &*e.kind {
+            "illegal_argument_exception" | "circuit_breaking_exception" | "illegal_state_exception" => e,
+            _ => not_elasticsearch(Some(e)),
+        })?;
         Ok((page, b.held))
     }
 
@@ -747,6 +834,18 @@ impl Client {
     pub async fn get(&self, path_query: &str) -> EsResult<Charged> {
         let mut retries = 0;
         self.json(reqwest::Method::GET, path_query, None, &mut retries).await
+    }
+
+    /// One `GET` of a `_cat` API in `format=json`, read row by row without a tree
+    /// ([`super::remote_page::scan_rows`]): the answer's bytes and each row charged while held.
+    pub async fn get_rows(&self, path_query: &str) -> EsResult<(Vec<super::remote_page::CatRow>, Option<Reservation>)> {
+        let mut retries = 0;
+        let mut b = self.checked(&reqwest::Method::GET, path_query, None, &mut retries).await?;
+        let rows = super::remote_page::scan_rows(&b.bytes, b.held.as_mut(), HIT_OVERHEAD).map_err(|e| match &*e.kind {
+            "circuit_breaking_exception" => e,
+            _ => not_elasticsearch(Some(e)),
+        })?;
+        Ok((rows, b.held))
     }
 
     /// `scheme://host:port`, as errors name the remote.
@@ -902,7 +1001,7 @@ impl RemoteSource {
                 }
                 body.insert("track_total_hits".into(), Value::from(if first { i32::MAX as i64 } else { -1 }));
                 let path = if self.version >= PARTIAL_SINCE { "/_search?allow_partial_search_results=false" } else { "/_search" };
-                self.client.page(reqwest::Method::POST, path, Some(&Value::Obj(body).to_json()), &mut self.retries).await?
+                self.client.page(reqwest::Method::POST, path, Some(&Value::Obj(body).to_json()), self.size as usize, &mut self.retries).await?
             }
             Cursor::Scroll(None) => {
                 let keep_alive = if self.version < NANOS_SINCE { format!("{}ms", self.keep_alive.as_millis()) } else { self.keep_alive.string_rep() };
@@ -916,7 +1015,7 @@ impl RemoteSource {
                 }
                 q.push_str(&format!("&version={}", self.fetch_version));
                 let body = obj! { "query" => self.query.clone(), "_source" => self.source.clone() };
-                self.client.page(reqwest::Method::POST, &format!("/{}_search{q}", self.indices), Some(&body.to_json()), &mut self.retries).await?
+                self.client.page(reqwest::Method::POST, &format!("/{}_search{q}", self.indices), Some(&body.to_json()), self.size as usize, &mut self.retries).await?
             }
             Cursor::Scroll(Some(id)) => {
                 let keep_alive = if self.version < NANOS_SINCE {
@@ -925,7 +1024,7 @@ impl RemoteSource {
                     format!("{}nanos", (self.keep_alive.as_millis().max(0) as u64).saturating_mul(1_000_000))
                 };
                 let body = obj! { "scroll_id" => id.clone() };
-                self.client.page(reqwest::Method::POST, &format!("/_search/scroll?scroll={keep_alive}"), Some(&body.to_json()), &mut self.retries).await?
+                self.client.page(reqwest::Method::POST, &format!("/_search/scroll?scroll={keep_alive}"), Some(&body.to_json()), self.size as usize, &mut self.retries).await?
             }
         };
         // A page that failed on some shards (`allow_partial_search_results=false` keeps a recent
@@ -1013,6 +1112,32 @@ mod tests {
         let both = rules(&[(WHITELIST, "*:*"), (BLOCKLIST, "bad.example:*")]);
         assert_eq!(both.check(&remote("bad.example", 9200)).unwrap_err().reason(), "[bad.example:9200] either not whitelisted in reindex.remote.whitelist or blocked in reindex.remote.blocklist");
         assert!(both.check(&remote("good.example", 9200)).is_ok());
+    }
+
+    /// The lists match the host the client connects to: percent-encoded, fullwidth and IDNA
+    /// spellings of a blocked name are blocked; a header can't name another host.
+    #[test]
+    fn hosts_match_as_the_client_connects_to_them() {
+        let r = rules(&[(WHITELIST, "*:*"), (BLOCKLIST, "*.search.example.com:*")]);
+        for h in ["victim%2Esearch%2Eexample%2Ecom", "victim\u{FF0E}search\u{FF0E}example\u{FF0E}com", "victim.\u{17F}earch.example.com", "VICTIM.Search.Example.COM.", "victim.search.example.com"] {
+            let e = r.check(&remote(h, 443)).err().map(|e| e.reason().to_string()).unwrap_or_default();
+            assert!(e.ends_with("blocked in reindex.remote.blocklist"), "{h}: {e}");
+        }
+        assert!(r.check(&remote("other.example.com", 443)).is_ok());
+        for k in ["Host", "host", ":authority"] {
+            let mut x = remote("other.example.com", 443);
+            x.headers = vec![(k.into(), "victim.search.example.com".into())];
+            assert!(r.check(&x).err().is_some_and(|e| e.reason().contains("can't set")), "{k}");
+        }
+    }
+
+    #[test]
+    fn ipv4_inside_ipv6_is_denied_as_ipv4() {
+        let n = Net::parse("203.0.113.0/24").unwrap();
+        for ip in ["::ffff:203.0.113.9", "64:ff9b::cb00:7109", "2002:cb00:7109::1", "203.0.113.9"] {
+            assert!(n.contains(ip.parse().unwrap()), "{ip}");
+        }
+        assert!(!n.contains("2001:db8::1".parse().unwrap()));
     }
 
     #[test]
