@@ -855,6 +855,30 @@ export interface ScanSummary {
   sbom?: boolean;
 }
 
+/** One row of a project's month: a service's environment, its previews (`previews`), or deleted services (`deleted`). */
+export interface UsageRow {
+  service: string | null;
+  name: string | null;
+  environment: string | null;
+  previews?: boolean;
+  deleted?: boolean;
+  usd: number;
+  cpu_seconds: number;
+  gb_seconds: number;
+  requests: number;
+  egress_bytes: number;
+  build_seconds: number;
+}
+
+/** A project's month (`…/projects/{project}/usage`). */
+export interface ProjectUsage {
+  month: string;
+  total_usd: number;
+  /** This month at the pace so far (the current month only). */
+  projected_usd: number | null;
+  rows: UsageRow[];
+}
+
 /** Why a failed deployment failed, from the repo owner's model (`…/explain`). The model's words: shown as text. */
 export interface Explanation {
   summary: string;
@@ -990,7 +1014,7 @@ export interface Span {
 /** An environment's errors, grouped from its log: a trace joined from its lines, or an error line. */
 export interface ErrorGroup {
   fingerprint: string;
-  kind: "python" | "java" | "node" | "go" | "line";
+  kind: "python" | "java" | "node" | "go" | "ruby" | "php" | "dotnet" | "rust" | "elixir" | "line";
   title: string;
   count: number;
   first_seen: number;
@@ -1401,6 +1425,8 @@ export const appsApi = {
   deleteFormSubmission: (id: string, e: string, form: string, sub: string) => call<null>("DELETE", `${env(id, e)}/forms/${encodeURIComponent(form)}/submissions/${encodeURIComponent(sub)}`),
   removeDrain: (project: string, id: string) => call<null>("DELETE", `/v1/apps/projects/${enc(project)}/drains/${enc(id)}`),
   limits: (project: string) => call<SpendLimits>("GET", `/v1/apps/projects/${enc(project)}/limits`),
+  /** A month's use by service and environment (this one by default), most costly first. */
+  projectUsage: (project: string, month?: string) => call<ProjectUsage>("GET", `/v1/apps/projects/${enc(project)}/usage${qs({ month })}`),
   setLimits: (project: string, body: { alert_usd: number | null; hard_usd: number | null }) => call<SpendLimits>("PUT", `/v1/apps/projects/${enc(project)}/limits`, body),
   /** PagerDuty takes its integration's `routing_key`, Opsgenie its `api_key` (sealed, never returned), each with a `region`. */
   addNotifyTarget: (project: string, body: { kind: NotifyTarget["kind"]; url?: string; routing_key?: string; api_key?: string; region?: "us" | "eu"; events?: NotifyEvent[]; environments?: string[]; services?: string[]; previews?: boolean }) => call<NotifyTarget>("POST", `/v1/apps/projects/${enc(project)}/notifications`, body),

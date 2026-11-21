@@ -93,6 +93,8 @@ pub struct Inst {
     ports: Mutex<HashMap<u16, SocketAddr>>,
     /// A scrape of its metrics endpoint is out ([`crate::prom`]).
     scraping: AtomicBool,
+    /// Kept awake until then (`ROLL_AWAKE_URL`: work after its answer), whatever its idle time.
+    held_until: Mutex<Option<Instant>>,
 }
 
 /// An instance's last hour by minute ([`EnvLive::by_instance`]).
@@ -156,7 +158,13 @@ impl Inst {
             wanted: Vec::new(),
             ports: Mutex::new(HashMap::new()),
             scraping: AtomicBool::new(false),
+            held_until: Mutex::new(None),
         })
+    }
+
+    /// It's kept awake now (a hold that hasn't ended).
+    pub fn held(&self) -> bool {
+        self.held_until.lock().is_some_and(|t| t > Instant::now())
     }
 
     /// An instance of `tpl`'s deployment, knowing the other ports it publishes.
@@ -638,6 +646,19 @@ impl EnvLive {
         self.insts.lock().clone()
     }
 
+    /// Keep instance `name` awake for `for_` from now (an hour's quarter at most; a longer hold it
+    /// has stays): it's never suspended, put to sleep or scaled in meanwhile. When it ends, or
+    /// `None` when it isn't one of its awake instances.
+    pub fn hold_awake(&self, name: &str, for_: Duration) -> Option<Instant> {
+        let insts = self.insts.lock();
+        let i = insts.iter().find(|i| i.name == name && matches!(i.phase(), Phase::Running(_) | Phase::Suspended(_)))?;
+        let until = Instant::now() + for_.min(Duration::from_secs(15 * 60));
+        let mut h = i.held_until.lock();
+        let until = h.filter(|t| *t > until).unwrap_or(until);
+        *h = Some(until);
+        Some(until)
+    }
+
     /// The deployment a request goes to: a visitor's bucket (0–99, its `roll_bucket` cookie)
     /// below the canary's share goes to the canary, so a visitor stays on one deployment through
     /// a step; without one, the canary's share of requests by turns (37 is coprime with 100, so
@@ -903,7 +924,7 @@ impl EnvLive {
     fn claim_idle(&self, i: &Inst) -> Option<Phase> {
         let _picking = self.insts.lock();
         let mut phase = i.phase.lock();
-        if i.in_flight() > 0 || !matches!(*phase, Phase::Running(_) | Phase::Suspended(_)) {
+        if i.in_flight() > 0 || i.held() || !matches!(*phase, Phase::Running(_) | Phase::Suspended(_)) {
             return None;
         }
         Some(std::mem::replace(&mut *phase, Phase::Stopping))
@@ -2155,7 +2176,7 @@ impl EnvLive {
             }
         };
         if scale_down
-            && let Some(i) = insts.iter().filter(|i| matches!(i.phase(), Phase::Running(_)) && i.in_flight() == 0).min_by_key(|i| *i.last_used.lock())
+            && let Some(i) = insts.iter().filter(|i| matches!(i.phase(), Phase::Running(_)) && i.in_flight() == 0 && !i.held()).min_by_key(|i| *i.last_used.lock())
             && self.claim_idle(i).is_some()
         {
             // SIGTERM, then the service's own drain to flush what it holds (`drain_s`).
@@ -2174,7 +2195,7 @@ impl EnvLive {
                 self.log.stream(Stream::System).line(format!("{} stopped: {why}", i.name));
                 continue;
             }
-            if i.in_flight() > 0 {
+            if i.in_flight() > 0 || i.held() {
                 continue;
             }
             let idle = i.last_used.lock().elapsed();

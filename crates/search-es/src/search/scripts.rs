@@ -12,6 +12,7 @@ use crate::engine::fields::{FieldTable, Kind};
 use crate::error::EsResult;
 use crate::scripting::Bound;
 use search_codec::points::encode;
+use search_codec::vectors::multi::MultiElement;
 use search_index::query::function_score::LeafScoreScript;
 use search_index::query::{FilterScript, LeafFilterScript, ScoreScript};
 use search_index::SegmentContext;
@@ -208,6 +209,7 @@ fn kind_of(k: Kind) -> Option<DocKind> {
         Kind::Ip => DocKind::Ip,
         Kind::Binary => DocKind::Binary,
         Kind::DenseVector => DocKind::DenseVector,
+        Kind::RankVectors => DocKind::RankVectors,
         Kind::AggregateMetric => DocKind::Double,
         _ => return None,
     })
@@ -757,6 +759,28 @@ impl Host for DocHost {
                     if let Some(x) = r.binary(f.number).and_then(|b| b.get(d)) {
                         fill(x, out);
                     }
+                }
+            }
+            // The vectors as the doc value holds them, vector after vector (magnitudes are
+            // computed by the script objects that show them).
+            Kind::RankVectors => {
+                if let Some((element, _)) = f.rank_layout() {
+                    out.element = match element {
+                        MultiElement::Float32 => search_painless::VectorElement::Float,
+                        MultiElement::BFloat16 => search_painless::VectorElement::BFloat16,
+                        MultiElement::Byte => search_painless::VectorElement::Byte,
+                        MultiElement::Bit => search_painless::VectorElement::Bit,
+                    };
+                }
+                if let Some(raw) = r.binary(f.number).and_then(|b| b.get(d))
+                    && let Some(v) = f.rank_vectors(raw)
+                {
+                    if v.element().is_float() {
+                        v.floats_into(&mut out.vector);
+                    } else {
+                        out.vector_bytes.extend(v.bytes().iter().map(|b| *b as i8));
+                    }
+                    out.vector_count = v.len();
                 }
             }
             // Doubles of the metric the field delegates to: its only metric, or

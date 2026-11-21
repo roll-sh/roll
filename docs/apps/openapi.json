@@ -1092,6 +1092,35 @@
         "x-roll-action": "write"
       }
     },
+    "/v1/apps/projects/{project}/usage": {
+      "get": {
+        "description": "Answers `ProjectUsage`: a month's use (`YYYY-MM`, this one by default; 400 for a month to come) by service and environment at roll's prices, each service's previews as one row (`previews: true`), deleted services as one (`deleted: true`), most costly first; this month's projected to its end at the pace so far.",
+        "operationId": "getProjectsProjectUsage",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "project",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "`ProjectUsage`: a month's use (`YYYY-MM`, this one by default; 400 for a month to come) by service and environment at roll's prices, each service's previews as one row (`previews: true`), deleted services as one (`deleted: true`), most costly first; this month's projected to its end at the pace so far"
+          },
+          "4XX": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "summary": "Get usage",
+        "tags": [
+          "projects"
+        ],
+        "x-roll-action": "read"
+      }
+    },
     "/v1/apps/services": {
       "get": {
         "description": "Answers `Service[]`; `deleted=true`: `{id, project, name, deleted_at, purge_at}[]` (unix ms, newest first), the deleted services kept for a restore until `purge_at`, 48 hours after the delete.",
@@ -2364,7 +2393,7 @@
     },
     "/v1/apps/services/{id}/environments/{env}/errors": {
       "get": {
-        "description": "Answers `{ minutes, groups: { fingerprint, kind: \"python\" | \"java\" | \"node\" | \"go\" | \"line\", title, count, first_seen, last_seen, instances, sample }[], scanned, cut }`: the environment's errors from its log (5–10,080 minutes, default 1,440), each instance's stack traces joined from their lines and grouped by their error and first frames (line numbers, addresses and ids taken out), error lines with no trace by their message the same way; the most frequent first, at most 50, `sample` the newest whole (at most 8 KiB); at most the newest 100,000 lines read (`cut`).",
+        "description": "Answers `{ minutes, groups: { fingerprint, kind: \"python\" | \"java\" | \"node\" | \"go\" | \"ruby\" | \"php\" | \"dotnet\" | \"rust\" | \"elixir\" | \"line\", title, count, first_seen, last_seen, instances, sample }[], scanned, cut }`: the environment's errors from its log (5–10,080 minutes, default 1,440), each instance's stack traces joined from their lines and grouped by their error and first frames (line numbers, addresses and ids taken out), error lines with no trace by their message the same way; the most frequent first, at most 50, `sample` the newest whole (at most 8 KiB); at most the newest 100,000 lines read (`cut`).",
         "operationId": "getServicesIdEnvironmentsEnvErrors",
         "parameters": [
           {
@@ -2386,7 +2415,7 @@
         ],
         "responses": {
           "200": {
-            "description": "`{ minutes, groups: { fingerprint, kind: \"python\" | \"java\" | \"node\" | \"go\" | \"line\", title, count, first_seen, last_seen, instances, sample }[], scanned, cut }`: the environment's errors from its log (5–10,080 minutes, default 1,440), each instance's stack traces joined from their lines and grouped by their error and first frames (line numbers, addresses and ids taken out), error lines with no trace by their message the same way; the most frequent first, at most 50, `sample` the newest whole (at most 8 KiB); at most the newest 100,000 lines read (`cut`)"
+            "description": "`{ minutes, groups: { fingerprint, kind: \"python\" | \"java\" | \"node\" | \"go\" | \"ruby\" | \"php\" | \"dotnet\" | \"rust\" | \"elixir\" | \"line\", title, count, first_seen, last_seen, instances, sample }[], scanned, cut }`: the environment's errors from its log (5–10,080 minutes, default 1,440), each instance's stack traces joined from their lines and grouped by their error and first frames (line numbers, addresses and ids taken out), error lines with no trace by their message the same way; the most frequent first, at most 50, `sample` the newest whole (at most 8 KiB); at most the newest 100,000 lines read (`cut`)"
           },
           "4XX": {
             "$ref": "#/components/responses/Error"

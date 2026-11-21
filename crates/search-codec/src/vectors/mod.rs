@@ -39,6 +39,7 @@
 //! graph always search exactly.
 
 pub mod distance;
+pub mod multi;
 pub(crate) mod bbq;
 pub(crate) mod hnsw;
 pub(crate) mod quant;
