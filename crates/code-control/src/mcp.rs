@@ -450,6 +450,8 @@ const ROUTES: &[(&str, &str, &str)] = &[
     ("queue_status", "GET", "/v1/code/repos/{owner}/{repo}/queue"),
     ("enqueue_change", "POST", "/v1/code/changes/{id}/enqueue"),
     ("dequeue_change", "DELETE", "/v1/code/changes/{id}/enqueue"),
+    ("set_change_lane", "PATCH", "/v1/code/changes/{id}/enqueue"),
+    ("update_change", "PATCH", "/v1/code/changes/{id}"),
     ("close_change", "POST", "/v1/code/changes/{id}/close"),
     ("report_check", "POST", "/v1/code/changes/{id}/checks"),
     ("set_commit_status", "POST", "/v1/code/repos/{owner}/{repo}/statuses/{rev}"),
@@ -588,6 +590,14 @@ fn every_tool() -> Vec<Value> {
             false,
         ),
         tool(
+            "update_change",
+            "Update a change",
+            "Change a change's title, description, labels or work item, or mark a draft ready (draft: false). Only what's given changes; marking a queued change draft takes it out of the queue.",
+            json!({ "change": change.clone(), "title": s("New title"), "body": s("New description (markdown)"), "draft": boolean("true: a draft; false: ready for review"), "labels": json!({ "type": "array", "items": { "type": "string" }, "description": "The labels it should have (replaces them; at most 20, 50 characters each)" }), "work_item": s("The work item it does: \"wi_…\" or \"owner/repo#N\" of the change's repo") }),
+            &["change"],
+            false,
+        ),
+        tool(
             "land",
             "Land",
             "Land a change, or edits directly. Returns status landed, queued (merge queue), blocked (with blockers) or conflict (with paths).",
@@ -702,7 +712,15 @@ fn every_tool() -> Vec<Value> {
             &["change"],
             false,
         ),
-        tool("dequeue_change", "Take a change out of the queue", "Take a queued change out of the merge queue: it's open again.", json!({ "change": change }), &["change"], false),
+        tool("dequeue_change", "Take a change out of the queue", "Take a queued change out of the merge queue: it's open again.", json!({ "change": change.clone() }), &["change"], false),
+        tool(
+            "set_change_lane",
+            "Move a queued change's lane",
+            "Move a queued change to the other lane (urgent goes before normal), keeping its place in time. A change that isn't queued is a 409: enqueue_change picks a lane when queuing.",
+            json!({ "change": change.clone(), "lane": json!({ "type": "string", "enum": ["urgent", "normal"] }) }),
+            &["change", "lane"],
+            false,
+        ),
         tool("close_change", "Close a change", "Close a change without landing it. It can't be reopened: make a new change to try again.", json!({ "change": change }), &["change"], false),
         tool(
             "report_check",
@@ -1301,6 +1319,19 @@ async fn run(c: &Call<'_>, name: &str, args: &Value) -> std::result::Result<Outc
         "review" => {
             let id = c.change_id(args).await?;
             pass(c.post(&format!("/v1/code/changes/{}/reviews", seg(&id)), body_of(args, &["change"])).await)
+        }
+        "update_change" => {
+            let id = c.change_id(args).await?;
+            let mut body = body_of(args, &["change"]);
+            // The route takes the item's id; the tool also takes "owner/repo#N".
+            if let Some(w) = opt(args, "work_item").filter(|w| w.contains('#')) {
+                body["work_item"] = json!(c.by_number(&w, "work").await?);
+            }
+            pass(c.api(Method::PATCH, &format!("/v1/code/changes/{}", seg(&id)), Some(body)).await)
+        }
+        "set_change_lane" => {
+            let id = c.change_id(args).await?;
+            pass(c.api(Method::PATCH, &format!("/v1/code/changes/{}/enqueue", seg(&id)), Some(body_of(args, &["change"]))).await)
         }
         "resolve_thread" | "reopen_thread" => {
             let th = str_arg(args, "thread").ok_or_else(|| fail("thread is required (th_…)"))?;

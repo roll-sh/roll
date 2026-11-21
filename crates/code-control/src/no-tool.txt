@@ -51,7 +51,6 @@ PATCH /v1/code/repos/{owner}/{repo}/review-settings                             
 GET /v1/code/repos/{owner}/{repo}/learnings                                     no tool yet: what roll's reviewer keeps in mind for the repo
 POST /v1/code/repos/{owner}/{repo}/learnings                                    no tool yet: tell roll's reviewer something about the repo
 DELETE /v1/code/repos/{owner}/{repo}/learnings/{id}                             no tool yet: forget a reviewer learning
-PATCH /v1/code/changes/{id}/enqueue                                             no tool yet: move a queued change to another lane (enqueue_change picks one when queuing)
 POST /v1/code/changes/{id}/approve-run                                          an admin's: running code from outside the repo with its data is a person's decision
 GET /v1/code/changes/{id}/ai-jobs                                               no tool yet: a change's AI reviews, oldest first (request_ai_review answers its own job)
 POST /v1/code/changes/{id}/preview                                              no tool yet: start a change's preview (roll's previews_wait waits on one)

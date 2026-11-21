@@ -12,14 +12,14 @@ use serde_json::{Value, json};
 const MCP: &str = "/v1/code/mcp";
 
 /// The tools docs/code/mcp.md lists.
-const TOOLS: [&str; 53] = [
+const TOOLS: [&str; 55] = [
     "list_repos", "search_code", "read_file", "list_tree", "log", "blame", "get_changeset", "compare", "create_change", "revise_change", "land", "get_change",
     "list_changes", "claim_work", "heartbeat_work", "release_work", "complete_work", "list_work", "create_work", "comment", "review", "queue_status",
     "request_ai_review", "list_agent_machines", "list_agent_threads", "create_agent_thread", "send_agent_message", "respond_agent_request",
     "interrupt_agent_thread", "publish_agent_thread", "create_agent_project", "claim_agent_work", "list_agent_automations", "save_agent_automation",
     "run_agent_automation", "list_agent_automation_runs", "get_agent_automation_run", "cancel_agent_automation_run", "enqueue_change", "dequeue_change",
     "close_change", "report_check", "set_commit_status", "list_refs", "create_repo", "resolve_thread", "reopen_thread", "apply_suggestion", "request_review",
-    "get_commit_statuses", "get_work", "update_work", "release_agent_work",
+    "get_commit_statuses", "get_work", "update_work", "release_agent_work", "update_change", "set_change_lane",
 ];
 /// The agents tools (not repo-scoped: `agent_tools_drive_a_machine_like_their_routes`,
 /// `agent_tools_work_in_roll_code_like_their_routes` and `automation_tools_map_onto_their_routes`).
@@ -456,6 +456,8 @@ async fn land_outcomes_queued_branches_and_errors() {
     // closed change can't queue.
     let qd = c.tool("enqueue_change", json!({ "change": three["id"], "lane": "urgent" })).await;
     assert_eq!((qd["status"].as_str(), qd["change"]["queue"]["lane"].as_str()), (Some("queued"), Some("urgent")), "{qd}");
+    let moved = c.tool("set_change_lane", json!({ "change": three["id"], "lane": "normal" })).await;
+    assert_eq!(moved["queue"]["lane"], "normal", "{moved}");
     assert_eq!(c.tool("dequeue_change", json!({ "change": three["id"] })).await["state"], "open");
     assert_eq!(c.tool("close_change", json!({ "change": three["id"] })).await["state"], "closed");
     let shut = c.call("enqueue_change", json!({ "change": three["id"] })).await;
@@ -661,6 +663,10 @@ async fn tools_map_onto_their_routes() {
     let upd = c.tool("update_work", json!({ "work": wid, "title": "Add f, renamed", "labels": ["feat", "later"] })).await;
     assert_eq!((upd["title"].as_str(), upd["labels"].as_array().map(Vec::len)), (Some("Add f, renamed"), Some(2)), "{upd}");
     assert_eq!(upd, a.ok("GET", &format!("/v1/code/work/{wid}"), None).await);
+    // A change retitled, labelled and marked ready, as its route then shows.
+    let ready = c.tool("update_change", json!({ "change": id, "title": "Add d and e", "draft": false, "labels": ["api"] })).await;
+    assert_eq!((ready["title"].as_str(), ready["draft"].as_bool(), ready["labels"][0].as_str()), (Some("Add d and e"), Some(false), Some("api")), "{ready}");
+    assert_eq!(ready, a.ok("GET", &format!("/v1/code/changes/{id}"), None).await);
 }
 
 /// Every tool's argument errors: each required argument missing, ill-typed values, and
@@ -889,6 +895,8 @@ async fn every_tool_is_authorized_like_its_route() {
                 ("report_check", json!({ "change": ch, "name": "ci", "status": "success" }), post(format!("/v1/code/changes/{ch}/checks"), json!({ "name": "ci", "status": "success" })), false),
                 ("set_commit_status", json!({ "repo": f.repo, "rev": "main", "state": "success" }), post(format!("{p}/statuses/main"), json!({ "state": "success" })), false),
                 ("get_commit_statuses", json!({ "repo": f.repo, "rev": "main" }), get(format!("{p}/statuses/main")), true),
+                ("update_change", json!({ "change": ch, "title": "x" }), ("PATCH", format!("/v1/code/changes/{ch}"), Some(json!({ "title": "x" }))), false),
+                ("set_change_lane", json!({ "change": ch, "lane": "urgent" }), ("PATCH", format!("/v1/code/changes/{ch}/enqueue"), Some(json!({ "lane": "urgent" }))), false),
                 ("resolve_thread", json!({ "thread": th }), post(format!("/v1/code/threads/{th}/resolve"), json!({})), false),
                 ("reopen_thread", json!({ "thread": th }), post(format!("/v1/code/threads/{th}/unresolve"), json!({})), false),
                 ("apply_suggestion", json!({ "thread": th }), post(format!("/v1/code/threads/{th}/apply"), json!({})), false),

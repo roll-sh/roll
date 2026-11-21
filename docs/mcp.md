@@ -1104,7 +1104,9 @@ waits on a sibling PR reaching main is last.
    review thread resolved, reopened, or its suggestion applied (`resolve_thread`, `reopen_thread`,
    `apply_suggestion`); a review asked for (`request_review`; `get_change` shows a change's
    requests); a revision's statuses (`get_commit_statuses`); one work item read and updated
-   (`get_work`, `update_work`); a thread's work given back (`release_agent_work`). Next batch:
+   (`get_work`, `update_work`); a thread's work given back (`release_agent_work`); a change retitled, labelled or marked ready
+   (`update_change`, GitHub's `update_pull_request`) and moved between queue lanes
+   (`set_change_lane`). Next batch:
    starting and stopping a change's preview, the reviewer's learnings, an automation on or off, a
    failed run retried, its catalogue and dry run, sandboxes read and stopped. Each against its
    route in `code-control/tests/mcp.rs`.

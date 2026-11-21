@@ -54,6 +54,7 @@ Repos are `"owner/repo"`. Changes are `"chg_…"` or `"owner/repo#N"`, and work 
 | `compare` | changesets and file diffs between two revisions | `GET /repos/{r}/compare/{a}...{b}` |
 | `create_change` | open a change from file edits on a base | `POST /repos/{r}/changes` |
 | `revise_change` | a new revision of a change | `POST /changes/{id}/revise` |
+| `update_change` | a change's title, description, labels or work item; mark a draft ready | `PATCH /changes/{id}` |
 | `land` | land a change, or edits directly | `POST /changes/{id}/land`, `POST /repos/{r}/land` |
 | `get_change` | a change with its blockers, checks, review status, threads and review requests | `GET /changes/{id}` + `/review-status` + `/threads` + `/review-requests` |
 | `list_changes` | a repo's changes | `GET /repos/{r}/changes` |
@@ -68,6 +69,7 @@ Repos are `"owner/repo"`. Changes are `"chg_…"` or `"owner/repo#N"`, and work 
 | `request_review` | ask a person, an agent, a review app or roll to review a change (`required` makes it a blocker) | `POST /changes/{id}/review-requests` |
 | `queue_status` | the merge queue | `GET /repos/{r}/queue` |
 | `enqueue_change`, `dequeue_change` | put a change in the merge queue (a lane; blocked is an outcome, as with `land`), or take it out | `POST`/`DELETE /changes/{id}/enqueue` |
+| `set_change_lane` | move a queued change to the other lane, keeping its place in time | `PATCH /changes/{id}/enqueue` |
 | `close_change` | close a change without landing it (it can't be reopened: `destructiveHint`) | `POST /changes/{id}/close` |
 | `report_check` | a check's result on a change, from CI outside roll | `POST /changes/{id}/checks` |
 | `set_commit_status` | a commit status on a revision (GitHub's statuses) | `POST /repos/{r}/statuses/{rev}` |
