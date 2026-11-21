@@ -6681,6 +6681,38 @@ async fn a_git_url_services_submodules_are_built_with_it() {
     }
 }
 
+/// A Git URL service's Git LFS objects (`build.lfs`): asked of its LFS server, checked against the
+/// pointer's sha256 and size, and built in the pointer's place; without it, the pointer stays.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_git_url_services_lfs_objects_are_built_in_place() {
+    use sha2::Digest;
+    let w = world().await;
+    let asset = "binary model weights";
+    let oid = hex::encode(sha2::Sha256::digest(asset.as_bytes()));
+    let pointer = format!("version https://git-lfs.github.com/spec/v1\noid sha256:{oid}\nsize {}\n", asset.len());
+    let git = Arc::new(GitHost::default());
+    git.commit(&[("package.json", r#"{"name":"site","scripts":{"start":"node server.js"}}"#), ("server.js", "x"), ("model.bin", &pointer)]);
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let at = listener.local_addr().unwrap();
+    let (o2, at2) = (oid.clone(), at);
+    let lfs = axum::Router::new()
+        .route("/git/acme/site/info/lfs/objects/batch", axum::routing::post(move || {
+            let (oid, at) = (o2.clone(), at2);
+            async move { axum::Json(json!({ "objects": [{ "oid": oid, "size": 20, "actions": { "download": { "href": format!("http://{at}/lfs/{oid}") } } }] })) }
+        }))
+        .route("/lfs/{oid}", axum::routing::get(move || async move { asset }));
+    let app = code_git::router(git.clone(), code_git::ServerConfig::default()).merge(lfs);
+    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let url = format!("http://{at}/git/acme/site");
+    for (name, on) in [("with", true), ("without", false)] {
+        let (st, svc) = call(&w.api, "POST", "/v1/apps/services", Some(json!({ "project": w.project, "name": name, "source": {"kind": "git", "url": url}, "build": {"lfs": on} }))).await;
+        assert_eq!(st, StatusCode::CREATED, "{svc}");
+        assert_eq!(settled(&w, svc["id"].as_str().unwrap(), "production", svc["environments"][0]["latest"]["id"].as_str().unwrap()).await["status"], "active");
+        let contents = w.fake.build_files.lock().last().cloned().unwrap();
+        assert_eq!(contents.get("model.bin").map(String::as_str), Some(if on { asset } else { pointer.as_str() }), "{name}");
+    }
+}
+
 /// A public Git URL: made on its default branch's head, fetched shallowly and built, and a new
 /// commit there deploys once (`watch_git`); a branch it hasn't is refused when it's made.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -7905,6 +7937,93 @@ async fn a_push_rule_with_oidc_carries_rolls_token() {
     assert_eq!(call(&w.api, "PATCH", &format!("/v1/apps/services/{id}"), Some(bad)).await.0, StatusCode::BAD_REQUEST);
     let bad = json!({"run": {"push": [{"stream": "st_ag2345678abc", "topic": "signed", "group": "web", "path": "/events", "auth": "basic"}]}});
     assert_eq!(call(&w.api, "PATCH", &format!("/v1/apps/services/{id}"), Some(bad)).await.0, StatusCode::BAD_REQUEST);
+}
+
+/// roll secrets as a closed environment sees it: `STRIPE_KEY` bound to `api.stripe.com`, a
+/// placeholder in a closed environment and the value elsewhere, an interception for the project
+/// environment, and its end (what was asked, kept).
+#[derive(Default)]
+struct FakeVault(Mutex<Vec<String>>);
+
+struct FakeInterception;
+
+impl roll_intercept::Interception for FakeInterception {
+    fn live(&self) -> anyhow::Result<bool> {
+        Ok(true)
+    }
+    fn covers(&self, host: &str) -> bool {
+        host == "api.stripe.com"
+    }
+    fn leaf(&self, _host: &str) -> anyhow::Result<roll_intercept::Leaf> {
+        anyhow::bail!("no leaves in the fake")
+    }
+    fn filter(&self, _req: roll_intercept::Outgoing<'_>) -> Result<usize, String> {
+        Ok(0)
+    }
+}
+
+#[async_trait]
+impl apps_control::integrations::SecretSource for FakeVault {
+    fn name(&self) -> &'static str {
+        "fake vault"
+    }
+    async fn resolve(&self, _project: &str, _env: &str, _service: &str) -> anyhow::Result<Vec<apps_control::integrations::SecretVar>> {
+        Ok(vec![apps_control::integrations::SecretVar { name: "STRIPE_KEY".into(), value: "sk_live_real".into(), sensitive: true, linked: false, plain: false }])
+    }
+    async fn resolve_closed(&self, _project: &str, _env: &str, _service: &str, maker: Option<&str>) -> anyhow::Result<apps_control::integrations::ClosedSecrets> {
+        self.0.lock().push(format!("closed by {}", maker.unwrap_or("-")));
+        Ok(apps_control::integrations::ClosedSecrets { vars: vec![apps_control::integrations::SecretVar { name: "STRIPE_KEY".into(), value: "rlph_placeholder".into(), sensitive: false, linked: false, plain: false }], notice: None })
+    }
+    async fn intercept(&self, project: &str, env: &str) -> anyhow::Result<Option<apps_control::integrations::Intercept>> {
+        self.0.lock().push(format!("intercept {project}/{env}"));
+        Ok(Some(apps_control::integrations::Intercept { ca_pem: "-----BEGIN CERTIFICATE-----\nFAKECA\n-----END CERTIFICATE-----".into(), expires_at: code_sql::now_ms() + 86_400_000, interception: Arc::new(FakeInterception) }))
+    }
+    async fn end_intercept(&self, project: &str, env: &str) -> anyhow::Result<()> {
+        self.0.lock().push(format!("end {project}/{env}"));
+        Ok(())
+    }
+}
+
+/// Keys a closed environment uses without seeing them (roll secrets' placeholders): its
+/// instances get the placeholder, never the value, and trust the interception CA (with the host's
+/// roots, the four variables runtimes read), and its egress proxies swap it; an open environment
+/// gets the value; the closed one's deletion ends its placeholders.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_closed_environment_uses_its_keys_without_seeing_them() {
+    let vault = Arc::new(FakeVault::default());
+    let v2 = vault.clone();
+    let w = world_full(|_| {}, false, move |d| d.secrets = v2).await;
+    let (svc, _) = image_service(&w, "api", json!({"port": 80, "min_instances": 1})).await;
+    let id = svc["id"].as_str().unwrap().to_string();
+    let base = format!("/v1/apps/services/{id}/environments");
+    let live_spec = |env: &str| {
+        let insts = w.fake.instances(&id);
+        let tpl = w.apps.live(&id, env).template().unwrap();
+        let name = insts.into_iter().find(|(_, d, s)| *d == tpl.deployment && *s == FakeState::Running).map(|(n, ..)| n).expect("a running instance");
+        w.fake.spec(&name).unwrap()
+    };
+    let open = live_spec("production");
+    assert!(open.vars.iter().any(|(k, v)| k == "STRIPE_KEY" && v == "sk_live_real"), "open: the value");
+    // Closed by Ada: the placeholders are made by her (roll secrets swaps them while she may
+    // reveal there).
+    let mut req = Request::builder().method("PUT").uri(format!("{base}/staging")).header("content-type", "application/json").body(Body::from(json!({"egress": {"mode": "roll", "hosts": ["api.stripe.com"]}}).to_string())).unwrap();
+    req.extensions_mut().insert(roll_auth::SignedIn { user: "usr_ada".into(), handle: "ada".into(), admin: true, code_owner: None, session: "ses_1".into() });
+    assert!(w.api.clone().oneshot(req).await.unwrap().status().is_success());
+    let (_, d) = call(&w.api, "POST", &format!("{base}/staging/deploys"), Some(json!({}))).await;
+    assert_eq!(settled(&w, &id, "staging", d["id"].as_str().unwrap()).await["status"], "active");
+    let closed = live_spec("staging");
+    let var = |k: &str| closed.vars.iter().find(|(n, _)| n == k).map(|(_, v)| v.clone());
+    assert_eq!(var("STRIPE_KEY").as_deref(), Some("rlph_placeholder"), "closed: a placeholder, never the value");
+    assert!(vault.0.lock().contains(&"closed by usr_ada".to_string()), "{:?}", vault.0.lock());
+    assert!(!closed.vars.iter().any(|(_, v)| v.contains("sk_live_real")));
+    for k in ["NODE_EXTRA_CA_CERTS", "SSL_CERT_FILE", "REQUESTS_CA_BUNDLE", "CURL_CA_BUNDLE"] {
+        assert_eq!(var(k).as_deref(), Some(apps_control::deploy::INTERCEPT_CA), "{k}");
+    }
+    assert!(closed.files.iter().any(|(p, c)| p == apps_control::deploy::INTERCEPT_CA && c.contains("FAKECA")), "the CA in its trust bundle");
+    let network = apps_control::closed_network_name(&w.project, "staging");
+    assert_eq!(w.fake.intercepted.lock().get(&network).copied(), Some(true), "its proxies intercept");
+    assert!(call(&w.api, "DELETE", &format!("{base}/staging"), None).await.0.is_success());
+    assert!(vault.0.lock().contains(&format!("end {}/staging", w.project)), "{:?}", vault.0.lock());
 }
 
 /// Work after an answer (Vercel's `waitUntil`): an instance that asks at `ROLL_AWAKE_URL` isn't
