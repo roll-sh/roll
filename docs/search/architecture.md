@@ -480,7 +480,10 @@ allowlist (a preview's branch included); change it like any setting.
   to carry it (a SAS token), never returned by `GET _snapshot` or the cluster state, and never
   logged or put in an error (clients drop URLs from transport errors: a SAS token or a GCS
   upload session is in them). A credential given as an object is refused rather than kept
-  flattened in the settings. GCS access tokens are cached in memory until five minutes before
+  flattened in the settings. A node without `ROLL_SECRET_KEY` refuses a pasted credential (a 400
+  pointing at a `roll://` reference through roll's API, or at the key) rather than keep it in the
+  clear, and a node that gains the key seals what an earlier one kept in the clear as the cluster
+  opens and with its next state change. GCS access tokens are cached in memory until five minutes before
   they expire, keyed by a digest of the account. Without credentials requests are anonymous:
   roll's own credentials are never used for a tenant's bucket. Endpoints, a key file's
   `token_uri` and a GCS session URL (which must be on the endpoint's origin) are URLs the

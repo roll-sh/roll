@@ -495,6 +495,49 @@ async fn a_reused_name_inherits_nothing_of_the_deleted_cluster() {
     }
 }
 
+/// Credentials pasted into a snapshot repository or a remote link are never kept in the clear: a
+/// node without a sealing key refuses them (pointing at a `roll://` reference or the key) and
+/// keeps nothing, and a node with one keeps them only sealed, in the cluster state as saved and in
+/// the catalog.
+#[tokio::test]
+async fn pasted_credentials_are_sealed_or_refused() {
+    use reqwest::Method;
+    let (endpoint, _bucket) = MockBucket::start().await;
+    for sealed in [false, true] {
+        let e = env_with(|c| {
+            c.node_settings.push((search_control::S3_ALLOW_PRIVATE.into(), "true".into()));
+            if sealed {
+                c.sealer = search_control::Sealer::from_secret("0123456789abcdef0123456789abcdef");
+            }
+        })
+        .await;
+        let app = e.post("/v1/search/clusters", json!({ "name": "app" })).await;
+        let (ua, pa) = creds(&app);
+        let (ul, pl) = creds(&e.post("/v1/search/clusters", json!({ "name": "logs" })).await);
+        let repo = json!({ "type": "s3", "settings": {
+            "bucket": "backups", "base_path": "seal", "endpoint": endpoint, "path_style_access": true,
+            "access_key": "AKIDPASTED", "secret_key": "pasted-secret-key",
+        } });
+        let (s, v) = e.es(&ua, &pa, Method::PUT, "/_snapshot/backup?verify=false", Some(repo)).await;
+        let (_, k) = e.es(&ul, &pl, Method::POST, "/_security/cross_cluster/api_key", Some(json!({ "name": "mine", "access": { "search": [{ "names": ["*"] }] } }))).await;
+        let key = k["encoded"].as_str().unwrap_or_else(|| panic!("{k}")).to_string();
+        let (sr, vr) = e.call(Method::PUT, "/v1/search/clusters/app/remotes/logs", Some(json!({ "cluster": "logs", "api_key": key }))).await;
+        if sealed {
+            assert_eq!((s, sr), (200, 200), "{v} {vr}");
+        } else {
+            assert!(s == 400 && v.to_string().contains("roll://"), "{v}");
+            assert!(sr == 400 && vr.to_string().contains("ROLL_SECRET_KEY"), "{vr}");
+        }
+        let state = e.control.node.get_loaded("app").unwrap().cluster.state().to_json().to_json();
+        assert!(!state.contains("pasted-secret-key") && !state.contains("AKIDPASTED"), "sealed={sealed}: a credential in the saved state");
+        assert_eq!(state.contains("::roll_sealed::"), sealed);
+        match e.control.store.remote(app["id"].as_str().unwrap(), "logs").await.unwrap() {
+            Some(r) => assert!(sealed && search_es::seal::is_sealed(&r.credentials) && !r.credentials.contains(&key)),
+            None => assert!(!sealed, "the link is kept"),
+        }
+    }
+}
+
 /// Request bodies in flight are charged to the node's budget too (`max_in_flight_bytes`): two
 /// clusters each within their own budget get 429 once together they pass the node's.
 #[tokio::test]

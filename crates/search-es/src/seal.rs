@@ -8,7 +8,10 @@
 //! another kind's slot. A sealed value is a string, `::roll_sealed::v1:` and the base64 of the
 //! nonce and ciphertext, so it travels through cluster state, snapshots and branches unchanged.
 //!
-//! Without a key (the dev server, tests) values are stored as given, as on Elasticsearch.
+//! Without a key (the dev server, tests) values are stored as given, as on Elasticsearch, except
+//! a snapshot repository's credentials, which such a node refuses (`api::snapshots`: a `roll://`
+//! reference or a key on the node instead); a node that gains a key seals what was kept in the
+//! clear as the cluster opens.
 //! Values are opened only where they are used (a request sent, a secret read back through its
 //! own API); everything that prints them redacts them as before.
 

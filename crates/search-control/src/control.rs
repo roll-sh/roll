@@ -565,6 +565,11 @@ impl Control {
         };
         if let Some(s) = &cfg.sealer {
             store.seal_passwords(s.clone());
+            // Remotes linked before the node had a key: sealed now, or they couldn't be opened.
+            let n = store.seal_remote_credentials(|r| s.seal_text(&crate::remotes::kind(&r.cluster_id, &r.alias, &r.target_id), &r.credentials)).await?;
+            if n > 0 {
+                tracing::info!(remotes = n, "sealed remote credentials stored in the clear");
+            }
         }
         let scfg = StoreConfig {
             node: cfg.node_name.clone(),
