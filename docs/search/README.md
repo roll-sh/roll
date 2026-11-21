@@ -135,6 +135,14 @@ them (`api::Caller`):
 - A person's workspace project stands only for their own clusters (`Workspace::trusts`: rolld's
   `Owners` reads the owner), so previews, roll secrets' links and roll apps' links take only
   those.
+- A snapshot repository's credentials may be roll secrets references (`roll://ENV/KEY`,
+  architecture.md "Snapshots"), but only through roll's API
+  (`PUT /v1/search/clusters/{id}/repositories/{name}`, the cluster's `admin` for roll-access), by a
+  caller roll secrets lets reveal each one (`Caller::allows`), who is kept as their maker. The
+  cluster's own endpoint refuses them (400): its password or an API key with `manage` is no grant to
+  read a project's secrets. Each use re-checks that the maker still may reveal them; only a cluster
+  on a project's canvas that stands for it resolves one, and a branch resolves as an untrusted copy
+  of the cluster it came from (no protected environment, no sensitive key).
 - Nothing in the API is node-wide besides `GET /v1/search`'s figures: node settings and the
   default repository are rolld's flags (`--search-*`), not routes. A cluster's data plane is
   unchanged: the REST port with the cluster's own credentials, which give what any tenant gets.
@@ -353,6 +361,7 @@ origins (browser search), once they're on main.
 | GET | `/v1/search/clusters/{id}/remotes` | the remote clusters it holds credentials for: `{remotes: [{alias, cluster, cluster_id, key_id, minted, created_at, connected}]}` (never the key) |
 | PUT | `/v1/search/clusters/{id}/remotes/{alias}` | link another cluster of the same owner as remote `alias` (above): `{cluster, skip_unavailable?, access?}` or `{cluster, skip_unavailable?, api_key}` → `{alias, cluster, cluster_id, mode, proxy_address, key_id, minted, skip_unavailable?}`; 404 for a cluster the caller can't link to, missing or not. `admin` on both clusters for roll-access |
 | DELETE | `/v1/search/clusters/{id}/remotes/{alias}` | unlink: the remote's settings and credentials go, a key roll made is revoked (204) |
+| PUT | `/v1/search/clusters/{id}/repositories/{name}` | `PUT _snapshot/{name}` (Elasticsearch's body and query: `verify`), the only way a repository's credential settings can be roll secrets references (`roll://ENV/KEY`): the caller must be able to reveal each (403 if not; 400 for a cluster no project stands for or a key that doesn't exist), and is kept as their maker (architecture.md "Snapshots") → the cluster's answer |
 | GET, PUT, DELETE | `/v1/search/clusters/{id}/indices/{index}` | Elasticsearch's `GET`/`PUT`/`DELETE /<index>`: mappings, settings and aliases; create (body: `mappings`, `settings`); delete |
 | GET, PUT | `/v1/search/clusters/{id}/indices/{index}/mapping` | `GET`/`PUT /<index>/_mapping` |
 | GET | `/v1/search/clusters/{id}/indices/{index}/settings` | `GET /<index>/_settings` |

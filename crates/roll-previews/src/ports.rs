@@ -526,6 +526,12 @@ pub trait Reveal: Send + Sync {
     fn may_reveal(&self, who: &Asker<'_>, project: &str, env: &str, folder: &str) -> bool;
     /// A reference's environment and folder as roll secrets reads it, or why it can't be one.
     fn place(&self, reference: &str) -> std::result::Result<(String, String), String>;
+    /// Whether a rule's reference still reads for a preview of `repo` in `project` as `maker`, its
+    /// writer (`operator`, `usr_…` or `token:…`), may now (roll secrets' `digest_as`: they can
+    /// still sign in and reach the project, may still reveal the folder, the key isn't sensitive,
+    /// and an `untrusted` preview reaches no protected environment). Asked at every converge,
+    /// never cached; it may read a database (called off the async workers). Why not, if not.
+    fn still(&self, project: &str, repo: &str, untrusted: bool, reference: &str, maker: &str) -> std::result::Result<(), String>;
 }
 
 /// Seals a preview's own variables at rest (rolld: AES-256-GCM under `ROLL_SECRET_KEY`), each

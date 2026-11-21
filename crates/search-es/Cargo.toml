@@ -39,6 +39,7 @@ libc.workspace = true
 md-5.workspace = true
 memchr.workspace = true
 parking_lot.workspace = true
+zeroize.workspace = true
 # Password hashes of the native realm (`xpack::security`, `{PBKDF2}` format).
 pbkdf2.workspace = true
 rand.workspace = true

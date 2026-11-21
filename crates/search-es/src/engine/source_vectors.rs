@@ -294,9 +294,8 @@ pub fn es_floats(f: &FieldInfo, x: &mut [f32]) {
 }
 
 /// A float rounded to `bfloat16` (nearest even), as a float.
-fn bfloat16(x: f32) -> f32 {
-    let b = x.to_bits();
-    f32::from_bits(((b + 0x7fff + ((b >> 16) & 1)) >> 16) << 16)
+pub(crate) fn bfloat16(x: f32) -> f32 {
+    f32::from_bits((search_codec::vectors::multi::bfloat16_bits(x) as u32) << 16)
 }
 
 #[cfg(test)]

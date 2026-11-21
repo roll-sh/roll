@@ -1011,7 +1011,16 @@ function ConfigRow({ service, env, runner, busy }: { service: string; env: Envir
           </button>
         </div>
       </div>
-      {env.config_rotated_at != null && <p className="text-[11.5px] text-subtle">Address rotated {since(env.config_rotated_at, Date.now())}: the one before works until a deploy made after that is live.</p>}
+      {env.config_rotated_at != null && (
+        <p className="flex flex-wrap items-center gap-2 text-[11.5px] text-subtle">
+          Address rotated {since(env.config_rotated_at, Date.now())}: the one before works until a deploy made after that is live.
+          {env.active && env.active.created_at < env.config_rotated_at && (
+            <button type="button" className="text-accent hover:underline disabled:opacity-50" disabled={busy} onClick={() => void runner.run("redeploy", () => appsApi.redeploy(service, env.name, { message: "the runtime config's new address" }))}>
+              Redeploy now
+            </button>
+          )}
+        </p>
+      )}
       <textarea value={text} onChange={(e) => setText(e.target.value)} rows={4} aria-label="Runtime config (JSON)" placeholder='{ "new_checkout": true }' className={`${input} w-full font-mono text-[12px]`} spellCheck={false} />
       {bad && <p className="text-[12px] text-danger">{bad}</p>}
     </div>

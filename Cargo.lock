@@ -8121,6 +8121,7 @@ dependencies = [
  "reqwest",
  "roll-auth",
  "roll-cluster",
+ "roll-secrets",
  "rsa",
  "rusqlite",
  "search-es",
@@ -8192,6 +8193,7 @@ dependencies = [
  "tokio-postgres-rustls",
  "tokio-rustls 0.26.6",
  "unicode-segmentation",
+ "zeroize",
  "zxcvbn",
 ]
 

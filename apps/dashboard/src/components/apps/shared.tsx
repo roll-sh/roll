@@ -1,5 +1,5 @@
 import { ArrowDown, Pause, Play, Search, X } from "lucide-react";
-import { useEffect, useLayoutEffect, useRef, useState, type ReactNode, useMemo } from "react";
+import { memo, useEffect, useLayoutEffect, useRef, useState, type ReactNode, useMemo } from "react";
 import { deployStatus, instanceStateLabel, instanceTone, type AccessLine, type DeployStatus, type InstanceState, type LogLine, type Tone } from "@/lib/apps-api";
 import { useMarkState } from "../mark-state";
 
@@ -231,6 +231,11 @@ export function LogView({
   const box = useRef<HTMLDivElement>(null);
   const [stuck, setStuck] = useState(true);
   const entries = useMemo(() => logEntries(lines), [lines]);
+  // The newest SHOWN entries, more on asking: a long log isn't thousands of rows in the page.
+  const [pages, setPages] = useState(1);
+  const shown = useMemo(() => entries.slice(-SHOWN * pages), [entries, pages]);
+  const hidden = entries.length - shown.length;
+  const keys = useMemo(() => logKeys(shown.map((e) => e.line)), [shown]);
   useLayoutEffect(() => {
     if (stuck && box.current) box.current.scrollTop = box.current.scrollHeight;
   }, [lines, stuck]);
@@ -249,25 +254,16 @@ export function LogView({
         {lines.length === 0 ? (
           <div className="px-3 text-subtle">{empty}</div>
         ) : (
-          entries.map(({ line: l, more }, i) => (
-            <div key={i} className="flex gap-3 px-3 hover:bg-fg/[0.03]">
-              <span className="shrink-0 text-subtle tabular-nums select-none">{clock(l.t)}</span>
-              {columns && (
-                <span className="w-24 shrink-0 truncate text-subtle select-none" title={l.instance ?? l.stream}>
-                  {l.stream === "stdout" || l.stream === "stderr" ? (l.instance ?? l.stream) : l.stream}
-                </span>
-              )}
-              {l.level && (l.level === "warn" || l.level === "error" || l.level === "fatal") && (
-                <span className={`w-9 shrink-0 select-none uppercase ${l.level === "warn" ? "text-muted" : "text-danger"}`} title={`The app says ${l.level}`}>
-                  {l.level === "fatal" ? "fatal" : l.level === "error" ? "err" : "warn"}
-                </span>
-              )}
-              <span className={`min-w-0 flex-1 [overflow-wrap:anywhere] whitespace-pre-wrap ${lineTone(l)}`}>
-                {l.stream === "http" ? <AccessText text={l.text} onBlock={onBlock} /> : l.text}
-                {more.length > 0 && <TraceMore more={more} onGroup={onGroup} />}
-              </span>
-            </div>
-          ))
+          <>
+            {hidden > 0 && (
+              <button type="button" className="mx-3 mb-1 text-[11px] text-muted hover:text-fg" onClick={() => setPages((p) => p + 1)}>
+                {hidden.toLocaleString()} earlier {hidden === 1 ? "line" : "lines"}: show {Math.min(hidden, SHOWN).toLocaleString()} more
+              </button>
+            )}
+            {shown.map(({ line, more }, i) => (
+              <LogRow key={keys[i]} line={line} more={more} columns={columns} onGroup={onGroup} onBlock={onBlock} />
+            ))}
+          </>
         )}
       </div>
       {!stuck && lines.length > 0 && (
@@ -281,6 +277,46 @@ export function LogView({
     </div>
   );
 }
+
+/** Entries a log view shows before "show more". */
+const SHOWN = 1000;
+
+/** Keys that stay a line's own as lines arrive and old ones fall off the front (a row isn't
+ *  rendered again because others moved): its time, origin and length, numbered among equals. */
+export function logKeys(lines: LogLine[]): string[] {
+  const seen = new Map<string, number>();
+  return lines.map((l) => {
+    const k = `${l.t}|${l.instance ?? ""}|${l.stream}|${l.text.length}`;
+    const n = seen.get(k) ?? 0;
+    seen.set(k, n + 1);
+    return `${k}|${n}`;
+  });
+}
+
+const LogRow = memo(function LogRow({ line: l, more, columns, onGroup, onBlock }: { line: LogLine; more: LogLine[]; columns: boolean; onGroup?: () => void; onBlock?: (ip: string) => Promise<unknown> }) {
+  return (
+    <div className="flex gap-3 px-3 hover:bg-fg/[0.03]">
+      <span className="shrink-0 text-subtle tabular-nums select-none">{clock(l.t)}</span>
+      {columns && (
+        <span className="w-24 shrink-0 truncate text-subtle select-none" title={l.instance ?? l.stream}>
+          {l.stream === "stdout" || l.stream === "stderr" ? (l.instance ?? l.stream) : l.stream}
+        </span>
+      )}
+      {l.level && (l.level === "warn" || l.level === "error" || l.level === "fatal") && (
+        <span className={`w-9 shrink-0 select-none uppercase ${l.level === "warn" ? "text-muted" : "text-danger"}`} title={`The app says ${l.level}`}>
+          {l.level === "fatal" ? "fatal" : l.level === "error" ? "err" : "warn"}
+        </span>
+      )}
+      <span className={`min-w-0 flex-1 [overflow-wrap:anywhere] whitespace-pre-wrap ${lineTone(l)}`}>
+        {l.stream === "http" ? <AccessText text={l.text} onBlock={onBlock} /> : l.text}
+        {more.length > 0 && <TraceMore more={more} onGroup={onGroup} />}
+      </span>
+    </div>
+  );
+},
+// The same line (lines are kept, not copied, as more arrive) with as many continued: the same
+// row. Its entry's array is new on every render, its callbacks the view's.
+(a, b) => a.line === b.line && a.more.length === b.more.length && a.columns === b.columns);
 
 /** The bar over a live log: filter text, pause and follow. */
 export function LogBar({
