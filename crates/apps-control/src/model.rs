@@ -220,7 +220,7 @@ pub struct LogDrain {
 }
 
 /// How a drain's lines can go ([`LogDrain::format`]).
-pub const DRAIN_FORMATS: [&str; 3] = ["ndjson", "otlp", "syslog"];
+pub const DRAIN_FORMATS: [&str; 4] = ["ndjson", "otlp", "syslog", "s3"];
 
 /// What a drain can be sent.
 pub const DRAIN_SOURCES: [&str; 6] = ["runtime", "http", "build", "audit", "traces", "metrics"];
