@@ -767,6 +767,10 @@ this: they get no secrets, or all of them.
   its activity names a key bound to a host its egress doesn't allow ("keys bound to hosts its
   egress doesn't allow (add them to egress_hosts, or calls there fail): STRIPE_KEY →
   api.stripe.com", once until it changes), so a call that fails says why.
+- What it holds is on its record (`intercepted`: each key with the hosts it's bound to, and how
+  many requests through its egress proxy had a key swapped in or were refused; never a value or
+  a placeholder) and the sheet ("Keys it never holds: STRIPE_KEY → api.stripe.com · 12 swapped
+  in, 1 refused").
 - For a host the preview's interception CA (#517) covers, `egress.js` hands the client's
   connection to rolld over a unix socket in the preview's own directory, mounted into the egress
   container (containers can't reach the host's TCP ports on ai-server, and no port is opened).
