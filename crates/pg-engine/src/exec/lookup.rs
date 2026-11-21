@@ -89,6 +89,29 @@ struct BatchBufs {
     sorted: Vec<(u32, u32)>,
     /// Per entry (of `espans`), its row key's place in `sorted`.
     slot: Vec<u32>,
+    /// The keys a sort orders, as words (`span_words`).
+    words: Vec<(u128, u128)>,
+}
+
+/// Each span's (of `bytes`) first and last 16 bytes as numbers, big-endian, into `words` at its
+/// place (of `n`), when the spans all have one length of 16 to 32 bytes: then two of them order
+/// as their words do (past equal first words, the last ones order the bytes after). False:
+/// their lengths differ or are out of that range. (A sort of a batch's keys compared them by a
+/// call to memcmp each time: about 4% of TPC-H q07's and q09's instructions.)
+fn span_words(bytes: &[u8], n: usize, spans: impl Iterator<Item = (usize, (u32, u32))>, words: &mut Vec<(u128, u128)>) -> bool {
+    words.clear();
+    words.resize(n, (0, 0));
+    let mut len = 0;
+    for (i, (a, b)) in spans {
+        let s = &bytes[a as usize..b as usize];
+        if !(16..=32).contains(&s.len()) || (len != 0 && len != s.len()) {
+            return false;
+        }
+        len = s.len();
+        let w = |j: usize| u128::from_be_bytes(s[j..j + 16].try_into().unwrap());
+        words[i] = (w(0), w(len - 16));
+    }
+    true
 }
 
 /// One outer row of a batch: its index key, how it is read, and its entries.
@@ -666,7 +689,7 @@ impl Lookup {
         got.clear();
         truncate_row(out, 0);
         let mut b = std::mem::take(&mut sc.batch);
-        let BatchBufs { starts, wants, order, ekeys, espans, sorted, slot } = &mut b;
+        let BatchBufs { starts, wants, order, ekeys, espans, sorted, slot, words } = &mut b;
         starts.clear();
         wants.clear();
         order.clear();
@@ -695,7 +718,11 @@ impl Lookup {
         // The entries, in key order.
         let span = |s: &(u32, u32)| s.0 as usize..s.1 as usize;
         order.extend((0..wants.len() as u32).filter(|&i| wants[i as usize].how == How::Batch));
-        order.sort_by(|&x, &y| starts[span(&wants[x as usize].key)].cmp(&starts[span(&wants[y as usize].key)]));
+        if span_words(starts, wants.len(), order.iter().map(|&i| (i as usize, wants[i as usize].key)), words) {
+            order.sort_by_key(|&i| words[i as usize]);
+        } else {
+            order.sort_by(|&x, &y| starts[span(&wants[x as usize].key)].cmp(&starts[span(&wants[y as usize].key)]));
+        }
         let mut ok = true;
         for &i in order.iter() {
             let w = &mut wants[i as usize];
@@ -714,7 +741,7 @@ impl Lookup {
         // Every entry's row, by one multi-get.
         let mut rows: Vec<Option<bytes::Bytes>> = Vec::new();
         if ok && !espans.is_empty() {
-            ok = self.multi_get(ekeys, espans, order, sorted, slot, &mut rows, sc);
+            ok = self.multi_get(ekeys, espans, order, sorted, slot, words, &mut rows, sc);
         }
         // Each outer row's rows, in turn.
         let mut one = Vec::new();
@@ -767,21 +794,30 @@ impl Lookup {
         order: &mut Vec<u32>,
         sorted: &mut Vec<(u32, u32)>,
         slot: &mut Vec<u32>,
+        words: &mut Vec<(u128, u128)>,
         rows: &mut Vec<Option<bytes::Bytes>>,
         sc: &mut LookupScratch,
     ) -> bool {
         let span = |s: &(u32, u32)| &ekeys[s.0 as usize..s.1 as usize];
         order.clear();
         order.extend(0..espans.len() as u32);
-        order.sort_unstable_by(|&x, &y| span(&espans[x as usize]).cmp(span(&espans[y as usize])));
+        let by_words = span_words(ekeys, espans.len(), espans.iter().copied().enumerate(), words);
+        if by_words {
+            order.sort_unstable_by_key(|&x| words[x as usize]);
+        } else {
+            order.sort_unstable_by(|&x, &y| span(&espans[x as usize]).cmp(span(&espans[y as usize])));
+        }
         slot.clear();
         slot.resize(espans.len(), 0);
+        let mut last: Option<usize> = None;
         for &e in order.iter() {
-            let s = espans[e as usize];
-            if sorted.last().is_none_or(|l| span(l) != span(&s)) {
-                sorted.push(s);
+            let e = e as usize;
+            let same = last.is_some_and(|l| if by_words { words[l] == words[e] } else { span(&espans[l]) == span(&espans[e]) });
+            if !same {
+                sorted.push(espans[e]);
+                last = Some(e);
             }
-            slot[e as usize] = sorted.len() as u32 - 1;
+            slot[e] = sorted.len() as u32 - 1;
         }
         let keys: Vec<&[u8]> = sorted.iter().map(span).collect();
         let r = sc.reader.get_or_insert_with(|| self.store.point_reader(self.ts, false));
