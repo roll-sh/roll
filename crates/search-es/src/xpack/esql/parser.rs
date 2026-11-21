@@ -387,6 +387,9 @@ pub enum Cmd {
     Union { branches: Vec<Branch>, at: usize },
 }
 
+/// Commands and where each is in the query text.
+type Pipeline = (Vec<Cmd>, Vec<Span>);
+
 /// One input of a [`Cmd::Union`].
 #[derive(Clone, Debug)]
 pub struct Branch {
@@ -678,7 +681,7 @@ impl<'a> P<'a> {
     }
 
     /// The query inside a `FROM` subquery, after its `(`, up to and including its `)`.
-    fn subquery(&mut self) -> EsResult<(Vec<Cmd>, Vec<Span>)> {
+    fn subquery(&mut self) -> EsResult<Pipeline> {
         if self.subqueries >= MAX_NESTED_QUERIES {
             return Err(parse_error(self.src, self.peek().start, &format!("views and subqueries nest deeper than {MAX_NESTED_QUERIES} levels")));
         }
@@ -688,7 +691,7 @@ impl<'a> P<'a> {
         r
     }
 
-    fn subquery_cmds(&mut self) -> EsResult<(Vec<Cmd>, Vec<Span>)> {
+    fn subquery_cmds(&mut self) -> EsResult<Pipeline> {
         let start = self.peek().start;
         let first = self.command()?;
         if !matches!(first, Cmd::From { .. } | Cmd::Ts { .. } | Cmd::Row(_) | Cmd::Show(_) | Cmd::Union { .. }) {
@@ -723,7 +726,7 @@ impl<'a> P<'a> {
         Ok(match up.as_str() {
             "FROM" | "TS" => {
                 let mut sources = Vec::new();
-                let mut subqueries: Vec<((Vec<Cmd>, Vec<Span>), usize)> = Vec::new();
+                let mut subqueries: Vec<(Pipeline, usize)> = Vec::new();
                 loop {
                     if self.is_op("(") {
                         let open = self.bump().start;
