@@ -1,6 +1,7 @@
 //! Filters run over stored rows (`exec::kernel::StoredCmps`: comparisons with constants
 //! over the stored bytes) give what evaluating them gives: string comparisons under C,
-//! bytewise and deterministic collations, bpchar's padding, NULLs, long values, numbers;
+//! bytewise and deterministic collations, bpchar's padding, NULLs, long values, numbers,
+//! dates and timestamps (with each other: as instants);
 //! a table with values stored out of line reads them as before. Each filter is checked
 //! against itself ANDed with a volatile call, which no kernel runs.
 
@@ -22,16 +23,18 @@ fn stored_comparisons_match_evaluation() {
     let mut s = engine_session(store.clone(), "f");
     s.query("SET max_parallel_workers_per_gather = 0").unwrap();
     for t in ["w", "wbig"] {
-        s.query(&format!("CREATE TABLE {t} (a int, e text, v varchar(12), c char(6), n name, m numeric)")).unwrap();
+        s.query(&format!("CREATE TABLE {t} (a int, e text, v varchar(12), c char(6), n name, m numeric, d date, ts timestamp)")).unwrap();
         s.query(&format!(
             "INSERT INTO {t} SELECT i, CASE WHEN i % 13 = 0 THEN NULL WHEN i % 7 = 0 THEN 'X' || (i % 10) \
              WHEN i % 11 = 0 THEN 'é' || (i % 10) ELSE 'x' || (i % 10) END, 'v' || (i % 5), \
-             CASE WHEN i % 3 = 0 THEN 'c' || (i % 4) || ' ' ELSE 'c' || (i % 4) END, 'n' || (i % 6), (i % 9) / 4.0 \
+             CASE WHEN i % 3 = 0 THEN 'c' || (i % 4) || ' ' ELSE 'c' || (i % 4) END, 'n' || (i % 6), (i % 9) / 4.0, \
+             CASE WHEN i % 17 = 0 THEN NULL ELSE date '2000-01-01' + i % 400 END, timestamp '2000-01-01' + (i % 50) * interval '1 hour' \
              FROM generate_series(1, 3000) i"
         ))
         .unwrap();
         s.query(&format!(
-            "INSERT INTO {t} VALUES (3001, repeat('x7', 100), 'v1 ', 'c1', 'n1', 1.25), (3003, 'x7 ', '', '', '', 0)"
+            "INSERT INTO {t} VALUES (3001, repeat('x7', 100), 'v1 ', 'c1', 'n1', 1.25, 'infinity', 'infinity'), \
+             (3003, 'x7 ', '', '', '', 0, '5874897-12-31', '-infinity')"
         ))
         .unwrap();
     }
@@ -89,6 +92,18 @@ fn stored_comparisons_match_evaluation() {
         ("a * 3 < 30", true),
         ("a % 7 = 0 AND e > 'x2'", true),
         ("a % (a - a + 4) = 1", false),
+        // (Dates and timestamps: of one type as their numbers; a date with a timestamp as
+        // instants, a date past the timestamps' range above every finite one.)
+        ("d >= '2000-06-01'", true),
+        ("d < '2000-03-01' AND a > 10", true),
+        ("d = 'infinity'", true),
+        ("'2000-02-01' > d", true),
+        ("d <= timestamp '2000-06-01 12:00'", true),
+        ("d > timestamp '294000-01-01'", true),
+        ("ts > '2000-01-02 10:00'", true),
+        ("ts <= date '2000-01-02'", true),
+        ("ts < 'infinity' AND d IS NOT NULL", false),
+        ("ts < 'infinity' AND d > '1999-12-31'", true),
     ];
     let mut paths = Vec::new();
     for (f, fast) in filters {

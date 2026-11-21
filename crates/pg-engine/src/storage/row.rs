@@ -578,6 +578,25 @@ pub fn peek_num(b: &[u8], pos: usize) -> Option<Option<(i128, u32)>> {
     }))
 }
 
+/// A stored date or timestamp (`peek_dt`).
+#[derive(Clone, Copy)]
+pub enum Dt {
+    Date(i32),
+    Ts(i64),
+}
+
+/// The date or timestamp value at `pos`, in place (Some(None): NULL; None: another value).
+#[inline]
+pub fn peek_dt(b: &[u8], pos: usize) -> Option<Option<Dt>> {
+    let le = |n: usize| b.get(pos + 1..pos + 1 + n);
+    Some(Some(match *b.get(pos)? {
+        tag::NULL => return Some(None),
+        tag::DATE => Dt::Date(i32::from_le_bytes(le(4)?.try_into().ok()?)),
+        tag::TIMESTAMP => Dt::Ts(i64::from_le_bytes(le(8)?.try_into().ok()?)),
+        _ => return None,
+    }))
+}
+
 /// The string value at `pos` as its stored bytes, in place (Some(None): NULL; None: another
 /// value, one stored out of line among them).
 #[inline]
