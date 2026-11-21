@@ -265,6 +265,8 @@ impl Secrets {
         let logins = match own {
             Ok((disabled, logins, expired, unshared, paused, ended)) => {
                 out.placeholders = ended.iter().map(|id| Cut { id: id.clone(), name: reach.placeholders.iter().find(|p| &p.id == id).map(|p| format!("{} for {}", p.key, p.consumer)).unwrap_or_default() }).collect();
+                // Their consumers' interception CAs naming a host they no longer have end.
+                self.hosts_shrank(reach.placeholders.iter().filter(|p| ended.contains(&p.id)).map(|p| p.consumer.as_str()));
                 let name = |list: &[crate::reach::Holder], id: &str| list.iter().find(|h| h.id == id).map(|h| h.name.clone()).unwrap_or_default();
                 out.identities = disabled.iter().map(|id| Cut { id: id.clone(), name: name(&reach.identities, id) }).collect();
                 out.shares = expired.iter().map(|id| Cut { id: id.clone(), name: reach.shares.iter().find(|s| &s.id == id).map(|s| s.note.clone()).unwrap_or_default() }).collect();

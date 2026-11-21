@@ -1700,7 +1700,7 @@ impl search_control::secret_refs::ResourceSecrets for ForSearch {
         tokio::task::spawn_blocking(move || {
             let caller = secrets.caller_of(who.operator, who.user.as_ref(), who.grant.as_ref()).map_err(|e| Refused::Forbidden(e.to_string()))?;
             let maker = secrets.bind_ref(&resource, &reference, &caller).map_err(|e| match e {
-                roll_secrets::Refusal::NotAllowed(_) | roll_secrets::Refusal::NotTrusted(_) | roll_secrets::Refusal::Protected(_) => Refused::Forbidden(e.to_string()),
+                roll_secrets::Refusal::NotAllowed(_) | roll_secrets::Refusal::MakerUnreachable(_) | roll_secrets::Refusal::NotTrusted(_) | roll_secrets::Refusal::Protected(_) => Refused::Forbidden(e.to_string()),
                 e => Refused::Invalid(e.to_string()),
             })?;
             Ok(maker.to_string())
@@ -2012,7 +2012,7 @@ fn for_code(e: Error) -> code_control::Error {
     match e {
         Error::BadRequest(m) => C::Invalid(m),
         Error::Unauthorized(_) => C::Unauthorized,
-        Error::Forbidden(m) => C::Forbidden(m),
+        Error::Forbidden(m) | Error::MakerUnreachable(m) => C::Forbidden(m),
         // "no environment staging" reads "environment staging not found".
         Error::NotFound(m) => C::NotFound(m.strip_prefix("no ").map(str::to_string).unwrap_or(m)),
         Error::Conflict("no_project", m) => C::Unprocessable(m),
