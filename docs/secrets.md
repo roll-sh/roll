@@ -4459,7 +4459,8 @@ a decoy, and only in a signed-in session (the dashboard) or with the operator to
 - the `decoy` on `Secret` in the folder's list and on the key: who planted it and when
   (`created_by`, `created_at`), and its uses (the dashboard's "decoy" badge, which says who planted
   it, and "used N×" in red once it's been used);
-- `decoy_used` in health (and decoys left out of `stale` and `unread` there);
+- `decoy_used` in health, with the same `decoy` on the finding (and decoys left out of `stale` and
+  `unread` there);
 - its `secrets.alert.decoy_used` rows in the audit log, one per alert, in listings, exports and the
   audit sinks such a caller made;
 - its `decoy_used` notices, at a notify URL such a caller set.
@@ -4511,8 +4512,12 @@ decoy:
   and retries as read alerts);
 - `decoy_used` first in health, until the decoy ends.
 
-Each names the key, the environment, the folder, when and the address it came from, and the route
-it called. It never names a value.
+Each names the key, the environment, the folder, when and the address it came from, and what it
+called: the route pattern for an `rlt` (never the path or query), the endpoint for a `postgres`.
+It never names a value. The last use's where stays on the decoy for those who see decoys (an
+admin's session, the operator): `used_at`, `used_ip`, and `used_route` (`rlt`) or `used_endpoint`
+(`postgres`), next to `uses`. The badge's tooltip and the health finding say it ("used 3×, last
+from 203.0.113.7 on ep-abc123, 2m ago").
 
 **What to do.** Someone has read the place the decoy was planted:
 1. Cut off whatever can reach that place (the CI system's tokens, the repository's deploy keys, the
@@ -5276,7 +5281,7 @@ type Secret = {
   overridden: boolean; // a personal value of the caller replaces it
   decoy?: Decoy; // only for the project's admins, signed in or the operator ("Decoys"); absent for everyone else, tokens too, as on any key
 };
-type Decoy = { kind: "rlt" | "postgres"; created_at: number; created_by: string; uses: number; used_at: number | null; used_ip: string | null };
+type Decoy = { kind: "rlt" | "postgres"; created_at: number; created_by: string; uses: number; used_at: number | null; used_ip: string | null; used_route: string | null; used_endpoint: string | null }; // the last use: when, its address, and the route pattern it called (rlt; never a path or query) or the endpoint it tried (postgres)
 type NewDecoy = { key: string; kind: "rlt"; path?: string } | { key: string; kind: "postgres"; resource: string; path?: string };
 type SetSecret = { value?: string; comment?: string; tags?: string[]; type?: "shared" | "personal"; link?: Link | null; message?: string; expires_at?: number | null; if_version?: number };
 type Op =
@@ -5299,7 +5304,7 @@ type Insights = { path: string; max_age_days: number | null; reads_since: number
 type Required = { key: string; path: string; comment: string; type?: "url" | "int" | "port" | "bool" | "json" | "email"; pattern?: string; owner?: string /* who supplies it */; password?: { length: number; classes?: ("lower" | "upper" | "digit" | "symbol")[]; symbols?: string } };
 type Sink = { id: string; url: string; status: "new" | "ok" | "error"; error: string | null; cursor: number; delivered_at: number | null; created_at: number; created_by: string };
 type ProjectFindings = { project: string; project_name: string; findings: Finding[] };
-type Finding = { issue: "decoy_used" | "expired" | "rotation_failing" | "revoke_failing" | "missing" | "exposed" | "public" | "weak" | "operator_made" | "expiring" | "certificate_expiring" | "stale" | "unread" | "unreferenced"; environment: string; path: string; key: string; detail: string; owner?: string };
+type Finding = { issue: "decoy_used" | "expired" | "rotation_failing" | "revoke_failing" | "missing" | "exposed" | "public" | "weak" | "operator_made" | "expiring" | "certificate_expiring" | "stale" | "unread" | "unreferenced"; environment: string; path: string; key: string; detail: string; owner?: string; decoy?: Decoy }; // decoy: on decoy_used only (an admin's session's or the operator's), the key's Decoy
 type Rotation = { environment: string; path: string; keys: string[]; kind: string; ref: string; name: string; rotate_days: number | null; rotate_window: string | null; grace_minutes: number; issued_at: number | null; next_due: number | null; last_error: string | null; failed_at: number | null };
 type Rotator = { id: string; name: string; host: string; created_at: number; created_by: string };
 type SaasRotator = { id: string; name: string; vendor: "sendgrid" | "twilio" | "okta" | "entra" | "auth0"; target: Record<string, unknown>; created_at: number; created_by: string };

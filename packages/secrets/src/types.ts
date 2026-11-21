@@ -102,8 +102,9 @@ export type Secret = {
   /** That it's a decoy (docs/secrets.md, "Decoys"): only for the project's admins. */
   decoy?: Decoy;
 };
-/** A decoy key's mark: what it is, and its uses (each refused). */
-export type Decoy = { kind: "rlt" | "postgres"; created_at: number; created_by: string; uses: number; used_at: number | null; used_ip: string | null };
+/** A decoy key's mark: what it is, and its uses (each refused). The last use's where:
+ * `used_ip`, plus the route pattern it called (`rlt`) or the endpoint it tried (`postgres`). */
+export type Decoy = { kind: "rlt" | "postgres"; created_at: number; created_by: string; uses: number; used_at: number | null; used_ip: string | null; used_route: string | null; used_endpoint: string | null };
 /** `POST …/environments/{env}/decoys`: a new key whose value is a decoy credential (`postgres`: a
  * connection string for a role of `resource`, a roll Postgres database on the project's canvas). */
 export type NewDecoy = { key: string; kind: "rlt"; path?: string } | { key: string; kind: "postgres"; resource: string; path?: string };
@@ -393,7 +394,7 @@ export type AwsRole = { id: string; name: string; role_arn: string; trust: "exte
 /** Where a key is set (`GET /v1/secrets/search?key=`): names and versions, never a value. */
 export type Place = { project: string; project_name: string; environment: string; path: string; key: string; version: number; updated_at: number; linked: boolean };
 /** One thing to fix (`GET …/health`), worst first: where, never a value. */
-export type Finding = { issue: "decoy_used" | "expired" | "rotation_failing" | "revoke_failing" | "missing" | "exposed" | "public" | "weak" | "operator_made" | "expiring" | "certificate_expiring" | "stale" | "unread" | "unreferenced"; environment: string; path: string; key: string; detail: string; owner?: string };
+export type Finding = { issue: "decoy_used" | "expired" | "rotation_failing" | "revoke_failing" | "missing" | "exposed" | "public" | "weak" | "operator_made" | "expiring" | "certificate_expiring" | "stale" | "unread" | "unreferenced"; environment: string; path: string; key: string; detail: string; owner?: string; decoy?: Decoy };
 /** One project's findings (`GET /v1/secrets/findings`). */
 export type ProjectFindings = { project: string; project_name: string; findings: Finding[] };
 /** A URL roll calls to issue and revoke a value that lives outside roll (`rotator` links). */

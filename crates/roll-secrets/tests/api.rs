@@ -4033,7 +4033,8 @@ async fn a_decoy_key_reads_as_any_other_and_its_use_is_alerted() {
 /// Only the project's admins, signed in or the operator, can tell a key is a decoy. To any token,
 /// an admin's too (an agent on roll MCP), it answers as any other key does: listings, the key,
 /// health, the audit log and its export, the sinks and notify URLs the token set, and the daily
-/// reminder. No audit row marks the plant, and no token plants one.
+/// reminder. No audit row marks the plant, and no token plants one. The session sees where it was
+/// last used (the route pattern and the address); nothing else does.
 #[tokio::test]
 async fn only_an_admins_session_can_tell_a_key_is_a_decoy() {
     let api = Api::new().await;
@@ -4050,7 +4051,8 @@ async fn only_an_admins_session_can_tell_a_key_is_a_decoy() {
     api.ok(Method::POST, "/environments/production/decoys", Some(json!({ "key": "BACKUP_DB_TOKEN", "kind": "rlt" }))).await;
     // Used once.
     let (_, value) = api.req(Method::GET, "/environments/production/secrets/BACKUP_DB_TOKEN/value", None, Some(&dev)).await;
-    api.req(Method::GET, "/v1/secrets/whoami", None, value["value"].as_str()).await;
+    let value = value["value"].as_str().unwrap().to_string();
+    api.req(Method::GET, "/v1/secrets/whoami", None, Some(&value)).await;
     for t in [&dev, &admin] {
         assert_eq!(api.req(Method::POST, "/environments/production/decoys", Some(json!({ "key": "OTHER", "kind": "rlt" })), Some(t)).await.0, StatusCode::FORBIDDEN);
         let (_, listed) = api.req(Method::GET, "/environments/production/secrets", None, Some(t)).await;
@@ -4059,7 +4061,7 @@ async fn only_an_admins_session_can_tell_a_key_is_a_decoy() {
         let (_, one) = api.req(Method::GET, "/environments/production/secrets/BACKUP_DB_TOKEN", None, Some(t)).await;
         assert!(one.get("decoy").is_none(), "{one}");
         let (_, health) = api.req(Method::GET, "/health", None, Some(t)).await;
-        assert!(!health.to_string().contains("decoy"), "{health}");
+        assert!(!health.to_string().contains("decoy") && !health.to_string().contains("203.0.113.7"), "{health}");
         let (_, audit) = api.req(Method::GET, "/audit", None, Some(t)).await;
         assert!(!audit.to_string().contains("decoy"), "{audit}");
         let (_, export) = api.req(Method::GET, "/audit?format=jsonl", None, Some(t)).await;
@@ -4077,8 +4079,14 @@ async fn only_an_admins_session_can_tell_a_key_is_a_decoy() {
     let (_, listed) = api.signed_in("root", true, Method::GET, &format!("{base}/environments/production/secrets"), None).await;
     let decoy = listed.as_array().unwrap().iter().find(|s| s["key"] == "BACKUP_DB_TOKEN").unwrap()["decoy"].clone();
     assert_eq!((decoy["uses"].as_i64(), decoy["created_by"].as_str(), decoy["created_at"].is_i64()), (Some(1), Some("operator"), true), "{listed}");
+    assert_eq!((decoy["used_ip"].as_str(), decoy["used_route"].as_str(), decoy["used_endpoint"].as_str(), decoy["used_at"].is_i64()), (Some("203.0.113.7"), Some("/v1/secrets/whoami"), None, true), "{decoy}");
     let (_, health) = api.signed_in("root", true, Method::GET, &format!("{base}/health"), None).await;
     assert_eq!(health[0]["issue"], "decoy_used", "{health}");
+    assert_eq!(health[0]["decoy"], decoy, "{health}");
+    assert!(health[0]["detail"].as_str().unwrap().contains("from 203.0.113.7 calling /v1/secrets/whoami"), "{health}");
+    for told in [listed.to_string(), health.to_string()] {
+        assert!(!told.contains(&value), "{told}");
+    }
     let (_, audit) = api.signed_in("root", true, Method::GET, &format!("{base}/audit"), None).await;
     assert!(audit.to_string().contains("secrets.alert.decoy_used"), "{audit}");
     // Both keys past the limit; a day of sweeps: sinks, notices, the reminder.
@@ -4100,7 +4108,7 @@ async fn only_an_admins_session_can_tell_a_key_is_a_decoy() {
     assert!(theirs.iter().any(|a| a == "secrets.write") && !theirs.iter().any(|a| a.contains("decoy")), "{theirs:?}");
     // The token's channel hears nothing of the decoy, and its reminder calls both keys stale.
     let notices: Vec<&Value> = sent.iter().filter(|b| b.get("sink").is_none()).collect();
-    assert!(!json!(notices).to_string().contains("decoy"), "{notices:?}");
+    assert!(!json!(notices).to_string().contains("decoy") && !json!(notices).to_string().contains("/v1/secrets/whoami"), "{notices:?}");
     let reminder = notices.iter().find(|n| n["findings"].is_array()).unwrap_or_else(|| panic!("{notices:?}"));
     let mut stale: Vec<&str> = reminder["findings"].as_array().unwrap().iter().filter(|f| f["issue"] == "stale").map(|f| f["key"].as_str().unwrap()).collect();
     stale.sort();
@@ -4145,11 +4153,13 @@ async fn a_postgres_decoy_is_a_role_whose_login_is_alerted_and_that_goes_with_it
     // roll Postgres' proxy refused a login as the role and said so (rolld's `tell_postgres_decoys`).
     let s = api.secrets.clone();
     let h = handle.clone();
-    let used = tokio::task::spawn_blocking(move || (s.decoy_used("postgres", &h, Some("198.51.100.23"), "Postgres endpoint ep_fake"), s.decoy_used("rlt", &h, None, "/"))).await.unwrap();
+    let used = tokio::task::spawn_blocking(move || (s.decoy_used("postgres", &h, Some("198.51.100.23"), "ep_fake"), s.decoy_used("rlt", &h, None, "/"))).await.unwrap();
     assert_eq!((used.0.unwrap(), used.1.unwrap()), (true, false), "another kind's handle isn't this decoy");
     let health = api.ok(Method::GET, "/health", None).await;
     assert_eq!((health[0]["issue"].as_str(), health[0]["key"].as_str()), (Some("decoy_used"), Some("LEGACY_DATABASE_URL")), "{health}");
-    assert!(health[0]["detail"].as_str().unwrap().contains("198.51.100.23"), "{health}");
+    assert!(health[0]["detail"].as_str().unwrap().contains("from 198.51.100.23 on Postgres endpoint ep_fake"), "{health}");
+    let d = &health[0]["decoy"];
+    assert_eq!((d["used_endpoint"].as_str(), d["used_route"].as_str(), d["used_ip"].as_str(), d["uses"].as_i64()), (Some("ep_fake"), None, Some("198.51.100.23"), Some(1)), "{health}");
     let logged = api.ok(Method::GET, "/audit?action=secrets.alert", None).await;
     assert_eq!((logged[0]["action"].as_str(), logged[0]["ip"].as_str()), (Some("secrets.alert.decoy_used"), Some("198.51.100.23")), "{logged}");
     assert!(logged[0]["summary"].as_str().unwrap().contains("Postgres endpoint ep_fake"), "{logged}");

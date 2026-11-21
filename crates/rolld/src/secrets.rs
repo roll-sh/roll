@@ -537,8 +537,8 @@ pub fn tell_postgres_decoys(control: &pg_control::Control, secrets: Arc<Secrets>
         let (s, login) = (secrets.clone(), login.clone());
         let Ok(rt) = tokio::runtime::Handle::try_current() else { return };
         rt.spawn_blocking(move || {
-            let (ip, route) = (login.peer.map(|p| p.to_string()), format!("Postgres endpoint {}", login.endpoint_id));
-            if let Err(e) = s.decoy_used("postgres", &decoy_handle(&login.project_id, &login.role), ip.as_deref(), &route) {
+            let ip = login.peer.map(|p| p.to_string());
+            if let Err(e) = s.decoy_used("postgres", &decoy_handle(&login.project_id, &login.role), ip.as_deref(), &login.endpoint_id) {
                 tracing::warn!(endpoint = %login.endpoint_id, "raising a decoy role's alert failed: {e}");
             }
         });
@@ -2339,6 +2339,7 @@ mod tests {
         let first = first.expect("a finding");
         assert_eq!((first.issue, first.key.as_str()), (roll_secrets::health::Issue::DecoyUsed, "OLD_DEPLOY_TOKEN"));
         assert!(first.detail.contains("198.51.100.4"), "{}", first.detail);
+        assert_eq!(first.decoy.as_ref().and_then(|d| d.used_route.as_deref()), Some("/v1/secrets/whoami"));
         assert!(call("DELETE", "/secrets/OLD_DEPLOY_TOKEN", None).await.unwrap().status().is_success());
         assert!(access.store.by_secret(value.expose()).unwrap().is_none());
         assert!(access.store.get(&g.id).unwrap().revoked_at.is_some());
