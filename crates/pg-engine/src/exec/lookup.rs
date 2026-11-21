@@ -61,6 +61,9 @@ pub struct LookupScratch {
     entries: Option<crate::storage::Scan>,
     /// `Lookup::batch`'s buffers.
     batch: BatchBufs,
+    /// A lookup's index key and the end of its range (`rows`), reused.
+    start: Vec<u8>,
+    end: Vec<u8>,
 }
 
 /// A batch's outer row, as `Lookup::batch` found it: left to the executor's thread, or its
@@ -340,8 +343,17 @@ impl Lookup {
     /// executor's thread, which runs it as the serial join does). `sc`: the worker's counts
     /// and cache.
     pub fn rows(&self, l: &[Value], out: &mut Vec<Value>, sc: &mut LookupScratch) -> bool {
+        let mut start = std::mem::take(&mut sc.start);
+        start.clear();
+        start.extend_from_slice(&self.prefix);
+        let r = self.rows_under(l, &mut start, out, sc);
+        sc.start = start;
+        r
+    }
+
+    /// `rows` with the index key `start` (the prefix) made in place.
+    fn rows_under(&self, l: &[Value], start: &mut Vec<u8>, out: &mut Vec<Value>, sc: &mut LookupScratch) -> bool {
         truncate_row(out, 0);
-        let mut start = self.prefix.clone();
         for (k, desc, nulls_first, coll, pad) in &self.keys {
             let Some(v) = k.run(l) else { return false };
             if v.is_null() {
@@ -351,24 +363,24 @@ impl Lookup {
             }
             // (A bpchar probe of a char(n) key, padded as the key is stored.)
             let v = super::scan::padded(v, *pad);
-            encode_index_value(&mut start, &v, *desc, *nulls_first, coll.as_ref());
+            encode_index_value(start, &v, *desc, *nulls_first, coll.as_ref());
         }
         // (A semi or anti join's inner scan stops at its first match, as ExecNestLoop's
         // does: the rows after it aren't fetched.)
         let first = matches!(self.kind, JoinKind::Semi | JoinKind::Anti);
         if first && !self.cache {
-            return self.first_row(l, &start, out, sc);
+            return self.first_row(l, start, out, sc);
         }
-        let found = match sc.cache.get(&start) {
+        let found = match sc.cache.get(start.as_slice()) {
             Some(rows) => rows.clone(),
             None => {
-                let Some(rows) = self.fetch(&start, sc) else { return false };
+                let Some(rows) = self.fetch(start, sc) else { return false };
                 let rows = std::rc::Rc::new(rows);
                 if self.cache {
                     if sc.cache.len() >= CACHE_KEYS {
                         sc.cache.clear();
                     }
-                    sc.cache.insert(start, rows.clone());
+                    sc.cache.insert(start.clone(), rows.clone());
                 }
                 rows
             }
@@ -547,6 +559,9 @@ impl Lookup {
     /// `rows` of a semi or anti join: the index entries' rows fetched one at a time in
     /// index order up to the first that passes the filter and the join condition.
     fn first_row(&self, l: &[Value], start: &[u8], out: &mut Vec<Value>, sc: &mut LookupScratch) -> bool {
+        if !self.unique {
+            return self.first_row_scanned(l, start, out, sc);
+        }
         if self.entries(start, sc).is_none() {
             return false;
         }
@@ -587,6 +602,50 @@ impl Lookup {
             }
             None => false,
         }
+    }
+
+    /// `first_row` of a key not unique: its entries read from the index scan one at a time,
+    /// none past the first whose row passes (no list of the entries' row keys made first).
+    fn first_row_scanned(&self, l: &[Value], start: &[u8], out: &mut Vec<Value>, sc: &mut LookupScratch) -> bool {
+        let LookupScratch { reader, entries, end, fetched, loops, .. } = sc;
+        prefix_end_into(start, end);
+        if !entries.as_mut().is_some_and(|s| s.reseek(start, end, self.ts)) {
+            *entries = Some(self.store.scan(start, end, self.ts));
+        }
+        let it = entries.as_mut().expect("made above");
+        let mut read = 0u64;
+        while let Some(e) = it.next() {
+            let Ok((_, d)) = e else { return false };
+            let Some(b) = self.get(&d, reader) else { return false };
+            let Some(b) = b else { continue };
+            match self.add(l, &b, out) {
+                Add::Kept => {
+                    read += 1;
+                    break;
+                }
+                Add::Out => read += 1,
+                Add::Bad => return false,
+                Add::Left => {
+                    // (Left to the executor's thread: every visible row counted, as a
+                    // whole fetch counts them.)
+                    read += 1;
+                    for e in it.by_ref() {
+                        let Ok((_, d)) = e else { return false };
+                        match self.get(&d, reader) {
+                            Some(Some(_)) => read += 1,
+                            Some(None) => {}
+                            None => return false,
+                        }
+                    }
+                    *fetched += read;
+                    *loops += 1;
+                    return false;
+                }
+            }
+        }
+        *fetched += read;
+        *loops += 1;
+        true
     }
 
     /// Whether outer rows are looked up a batch at a time (`batch`): an inner or left join's
@@ -830,6 +889,20 @@ impl Lookup {
 /// (`Store::first_with`) and taken when its row is visible too; otherwise (no answer in a
 /// few tries, or an entry whose row the snapshot doesn't see) the range is read as a scan,
 /// the entries after it too.
+/// `keys::prefix_end` of `prefix` into `end`.
+fn prefix_end_into(prefix: &[u8], end: &mut Vec<u8>) {
+    end.clear();
+    end.extend_from_slice(prefix);
+    while let Some(last) = end.last_mut() {
+        if *last < 0xFF {
+            *last += 1;
+            return;
+        }
+        end.pop();
+    }
+    end.resize(prefix.len() + 1, 0xFF);
+}
+
 fn entry_keys(store: &Arc<Store>, ts: u64, unique: bool, start: &[u8], sc: &mut LookupScratch) -> Option<()> {
     let end = prefix_end(start);
     sc.dkeys.clear();
