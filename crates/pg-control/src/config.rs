@@ -1,12 +1,27 @@
 use pg_storage::StorageConfig;
 use std::path::PathBuf;
 
+/// The compute images, by major version: exact minors, pinned by their multi-arch index digest.
+/// Moving one is a deliberate change (`pnpm test:pg` checks the decoy against it).
+pub const IMAGES: [(u32, &str); 3] = [
+    (16, "postgres:16.15-alpine@sha256:f4610795587492cd4fb887c2dc3de301b813278bb6f616992061141b5f15ac36"),
+    (17, "postgres:17.11-alpine@sha256:eee6c6e1b0894fa4fe0075eb054af9fd1cf39a35321c2d4110626cfe506411fb"),
+    (18, "postgres:18.7-alpine@sha256:ff64c9e3bdf8e2120107d3559de8db314e8305f7e38c5105903c6295876738ff"),
+];
+
 #[derive(Clone, Debug)]
 pub struct Config {
     /// Root for state (`state.db`), the local data cache and the WAL spool.
     pub home: PathBuf,
-    /// Postgres image template for computes; `{v}` is the major version.
+    /// Postgres image template for computes (`{v}` is the major version); empty: [`IMAGES`].
+    /// A decoy role (roll secrets' Postgres decoys) is answered by the proxy only on an image
+    /// whose answers before a password roll knows (`pg_proxy::decoy::learn`); on any other its
+    /// logins go to Postgres, waking a suspended compute. Use a `tag@sha256:` reference: a tag
+    /// that moves under a suspended endpoint is told apart only at its next start.
     pub image: String,
+    /// Learn each image's answers before a password (decoy roles) at start, from a throwaway
+    /// compute, so no decoy's login waits for them. Off only where that costs too much (tests).
+    pub learn_answers_at_start: bool,
     /// Major version for new projects (16, 17 and 18 are supported).
     pub default_pg_version: u32,
     /// Host and port clients use to reach the proxy (written into connection strings).
@@ -58,7 +73,8 @@ impl Config {
         Self {
             storage: StorageConfig::Local(home.join("objects")),
             home,
-            image: "postgres:{v}-alpine".into(),
+            image: String::new(),
+            learn_answers_at_start: true,
             default_pg_version: 18,
             public_host: "127.0.0.1".into(),
             public_domain: None,
@@ -95,6 +111,9 @@ impl Config {
     }
 
     pub fn image(&self, pg_version: u32) -> String {
+        if self.image.is_empty() {
+            return IMAGES.iter().find(|(v, _)| *v == pg_version).map_or_else(|| format!("postgres:{pg_version}-alpine"), |(_, i)| i.to_string());
+        }
         self.image.replace("{v}", &pg_version.to_string())
     }
 

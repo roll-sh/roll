@@ -675,6 +675,14 @@ async fn decide(access: Arc<Access>, req: Request, next: Next) -> Response {
     if let Some(a) = approved.clone() {
         parts.extensions.insert(a);
     }
+    // A stronger action the product may use here (the row's `capable`): decided at it already
+    // (allowed or approved), or allowed outright. An `ask` for it asks nobody: the product just
+    // does less.
+    if let Some(a) = row.capable
+        && (action == a || scope.outcome(&target, a) == Outcome::Allow)
+    {
+        parts.extensions.insert(roll_auth::Capable(a));
+    }
     parts.extensions.insert(roll_auth::Grant {
         id: ctx.grant.id.as_str().into(),
         name: ctx.grant.name.as_str().into(),

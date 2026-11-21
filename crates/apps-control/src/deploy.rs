@@ -1360,8 +1360,15 @@ impl Apps {
             (Source::Git { url, root }, _) => {
                 let rev = d.revision.as_deref().ok_or_else(|| anyhow::anyhow!("no revision to build"))?;
                 log.line(format!("fetching {url} at {}", &rev[..rev.len().min(12)]));
-                let files = crate::git_source::materialize_with(&self.git_remote(&svc.id, url).await, rev, &tree, svc.build.submodules.unwrap_or(false)).await?;
+                let remote = self.git_remote(&svc.id, url).await;
+                let files = crate::git_source::materialize_with(&remote, rev, &tree, svc.build.submodules.unwrap_or(false)).await?;
                 log.line(format!("fetched {files} files"));
+                if svc.build.lfs.unwrap_or(false) {
+                    let n = crate::git_source::fetch_lfs(&remote, &tree).await?;
+                    if n > 0 {
+                        log.line(format!("fetched {n} Git LFS object(s)"));
+                    }
+                }
                 root.clone()
             }
             (Source::Upload, _) => anyhow::bail!("this service deploys uploads"),
@@ -1678,6 +1685,9 @@ impl Apps {
         if !resolved.unresolved.is_empty() {
             self.logs.sink(format!("env:{}/{}", svc.id, env.name), Stream::System).line(format!("references that name nothing, left empty: {}", resolved.unresolved.join(", ")));
         }
+        for n in &resolved.notices {
+            self.logs.sink(format!("env:{}/{}", svc.id, env.name), Stream::System).line(n.clone());
+        }
         let mut vars = resolved.vars;
         if run.kind != RunType::Web {
             vars.retain(|(k, _)| k != "PORT");
@@ -1710,6 +1720,26 @@ impl Apps {
             for (k, v) in egress_vars(&proxy, &names, &vars) {
                 if !vars.iter().any(|(n, _)| n == &k) {
                     vars.push((k, v));
+                }
+            }
+            // Keys used without being seen (roll secrets' placeholders): its proxies swap them for
+            // the hosts the keys are bound to, and its instances trust the interception CA (with
+            // the host's roots, one file every runtime reads).
+            match self.deps.secrets.intercept(&svc.project, &env.name).await {
+                Ok(Some(i)) => {
+                    self.deps.runtime.set_interception(&network, Some(i.interception.clone()));
+                    files.push((INTERCEPT_CA.to_string(), trust_bundle(&i.ca_pem)));
+                    for k in ["NODE_EXTRA_CA_CERTS", "SSL_CERT_FILE", "REQUESTS_CA_BUNDLE", "CURL_CA_BUNDLE"] {
+                        if !vars.iter().any(|(n, _)| n == k) {
+                            vars.push((k.to_string(), INTERCEPT_CA.to_string()));
+                        }
+                    }
+                    self.intercept_cas.lock().insert(crate::env_key(&svc.id, &env.name), ca_digest(&i.ca_pem));
+                }
+                Ok(None) => self.deps.runtime.set_interception(&network, None),
+                Err(e) => {
+                    self.deps.runtime.set_interception(&network, None);
+                    self.logs.sink(format!("env:{}/{}", svc.id, env.name), Stream::System).line(format!("keys bound to hosts can't be swapped by its proxy now ({e:#}): their placeholders reach no one"));
                 }
             }
         }
@@ -2612,6 +2642,43 @@ impl Apps {
 
     /// Cron: start the runs that are due at `now` in owned cron services (a run still going
     /// when the next is due is skipped). The reaper's pass, every few seconds.
+    /// Closed environments whose instances trust an interception CA roll secrets has moved on from
+    /// (near its end, or ended early: a binding narrowed, a placeholder revoked): their proxies
+    /// take the new one at once; running instances are redeployed (the live image again, rolled)
+    /// to trust it, and a sleeping environment's next start does (its template's bundle swapped),
+    /// with no redeploy. Each minute, on the owner.
+    async fn refresh_intercepts(self: &Arc<Self>, services: &[crate::store::ServiceRow]) {
+        let kept: Vec<(String, String)> = self.intercept_cas.lock().iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+        for (key, trusted) in kept {
+            let Some((sid, env)) = key.split_once('/').map(|(s, e)| (s.to_string(), e.to_string())) else { continue };
+            let Some(svc) = services.iter().find(|s| s.id == sid).filter(|s| self.owns(&s.id)) else { continue };
+            let network = crate::closed_network_name(&svc.project, &env);
+            let log = self.logs.sink(format!("env:{sid}/{env}"), Stream::System);
+            match self.deps.secrets.intercept(&svc.project, &env).await {
+                Ok(Some(i)) if ca_digest(&i.ca_pem) != trusted => {
+                    self.deps.runtime.set_interception(&network, Some(i.interception.clone()));
+                    let live = self.live(&sid, &env);
+                    if live.awake() > 0 {
+                        match self.redeploy(&sid, &env, json!({ "message": "roll's interception CA renewed" }), Some("roll".into()), None).await {
+                            Ok(d) => log.line(format!("the interception CA changed (near its end, or a key's binding moved): redeploying ({}) to trust the next", d.id)),
+                            Err(e) => log.line(format!("the interception CA changed, and the redeploy that hands the instances the next didn't start: {e}")),
+                        }
+                    } else {
+                        live.set_file(INTERCEPT_CA, &trust_bundle(&i.ca_pem));
+                        self.intercept_cas.lock().insert(key.clone(), ca_digest(&i.ca_pem));
+                        log.line("the interception CA changed while it slept: its next start trusts the new one");
+                    }
+                }
+                Ok(None) => {
+                    self.deps.runtime.set_interception(&network, None);
+                    self.intercept_cas.lock().remove(&key);
+                    log.line("no key of its is bound to hosts now: its proxies tunnel everything again");
+                }
+                _ => {}
+            }
+        }
+    }
+
     /// Owned environments' stored logs past their retention (`log_retention_days`, a week by
     /// default and always for a preview) deleted, chunk by chunk.
     /// Logs kept past the first week (30 or 90 days) are metered too: this hour's GB-hour of
@@ -2663,6 +2730,10 @@ impl Apps {
             self.logs_expired.store(now, std::sync::atomic::Ordering::Relaxed);
             self.expire_logs_pass(&services, now).await;
             self.build_cache_pass(&services, now).await;
+        }
+        if now - self.intercepts_checked.load(std::sync::atomic::Ordering::Relaxed) >= 60_000 {
+            self.intercepts_checked.store(now, std::sync::atomic::Ordering::Relaxed);
+            self.refresh_intercepts(&services).await;
         }
         if now - self.status_swept.load(std::sync::atomic::Ordering::Relaxed) >= 60_000 {
             self.status_swept.store(now, std::sync::atomic::Ordering::Relaxed);
@@ -3053,6 +3124,21 @@ fn build_timeout(own: Option<u32>, node: Duration, log: &LogSink) -> Duration {
 /// A closed environment's proxy variables (`proxy` for its listed hosts): `HTTP_PROXY` and
 /// `HTTPS_PROXY` in both cases, and `NO_PROXY` naming what's reached directly: the host, its
 /// links' relays and the project's services (by name and `<name>.<env>.internal`).
+/// Where a closed environment's instances find the interception CA, with the host's roots.
+pub const INTERCEPT_CA: &str = "/etc/roll/intercept-ca.pem";
+
+/// A CA's PEM, as which one instances trust is kept.
+fn ca_digest(pem: &str) -> String {
+    use sha2::Digest;
+    hex::encode(&sha2::Sha256::digest(pem.as_bytes())[..12])
+}
+
+/// The host's roots (the instance's own may be older or missing) and the interception CA.
+fn trust_bundle(ca_pem: &str) -> String {
+    let roots = ["/etc/ssl/certs/ca-certificates.crt", "/etc/pki/tls/certs/ca-bundle.crt", "/etc/ssl/cert.pem"].iter().find_map(|p| std::fs::read_to_string(p).ok()).unwrap_or_default();
+    format!("{}\n{}\n", roots.trim_end(), ca_pem.trim())
+}
+
 fn egress_vars(proxy: &str, services: &[String], vars: &[(String, String)]) -> Vec<(String, String)> {
     let mut direct: Vec<String> = ["localhost", "127.0.0.1", "::1", "host.docker.internal", ".internal"].map(str::to_string).to_vec();
     direct.extend(services.iter().cloned());
