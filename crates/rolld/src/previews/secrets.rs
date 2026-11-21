@@ -82,36 +82,12 @@ impl roll_previews::ports::Intercepts for SecretsIntercepts {
                 Err(e) => anyhow::bail!("{e}"),
             },
         };
-        Ok(Some(roll_previews::ports::Intercepted { id: ca.id.clone(), hosts: ca.hosts.clone(), ca_pem: ca.cert_pem.clone(), interception: Arc::new(CaInterception { secrets: self.secrets.clone(), ca }) }))
+        Ok(Some(roll_previews::ports::Intercepted { id: ca.id.clone(), hosts: ca.hosts.clone(), ca_pem: ca.cert_pem.clone(), interception: Arc::new(crate::intercept::CaInterception::new(self.secrets.clone(), ca)) }))
     }
 
     fn end(&self, preview: &str) -> anyhow::Result<()> {
         self.cas.lock().unwrap_or_else(|e| e.into_inner()).remove(preview);
         self.secrets.end_consumer(&roll_previews::ports::intercept_consumer(preview)).map(|_| ()).map_err(|e| anyhow::anyhow!("{e}"))
-    }
-}
-
-/// One CA's interception: live as roll secrets says (asked every connection), its leaves, and
-/// roll secrets' filter against the host connected to.
-struct CaInterception {
-    secrets: Arc<roll_secrets::Secrets>,
-    ca: roll_secrets::intercept::InterceptCa,
-}
-
-impl roll_previews::intercept::Interception for CaInterception {
-    fn live(&self) -> anyhow::Result<bool> {
-        self.secrets.intercept_ca_live(&self.ca.id).map_err(|e| anyhow::anyhow!("{e}"))
-    }
-    fn covers(&self, host: &str) -> bool {
-        self.ca.covers(host)
-    }
-    fn leaf(&self, host: &str) -> anyhow::Result<roll_previews::intercept::Leaf> {
-        let l = self.ca.leaf(host).map_err(|e| anyhow::anyhow!("{e}"))?;
-        Ok(roll_previews::intercept::Leaf { cert_pem: l.cert_pem, key_pem: l.key.expose().to_string() })
-    }
-    fn filter(&self, req: roll_previews::intercept::Outgoing<'_>) -> Result<usize, String> {
-        let mut out = roll_secrets::proxy::Outgoing { host: req.host, path: req.path, headers: req.headers, query: req.query };
-        roll_secrets::proxy::filter(&mut out, &*self.secrets, &roll_secrets::proxy::Limits::default()).map_err(|b| b.to_string())
     }
 }
 

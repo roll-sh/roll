@@ -775,11 +775,15 @@ this: they get no secrets, or all of them.
   CAs stop at once.
 - The preview resolves as the rule's writer (`Ask { maker }`, from `env_refs`), so a placeholder
   works only while that person still may reveal the key.
-- Limits: a host that echoes a request's headers back (an echo service) would show the key to the
-  preview; the binding is an admin's choice of a host that doesn't. Swapped requests and refusals
+- Limits: a host that echoes a request's headers back (an echo service) hands the key back in its
+  response; roll secrets' response scrub (its #579: the request swapped into is sent with
+  `Accept-Encoding: identity`, and a response that echoes it is stopped with a 502 and the
+  placeholder ended) closes that, and goes into `roll-intercept` when it lands. Swapped requests and refusals
   are counted in the preview's activity, never their values or placeholders.
 
-Built so far: `intercept::serve` and its port (`intercept::Interception`), tested with a fake CA,
+The intercepting step is its own crate, `crates/roll-intercept` (product-neutral: roll apps'
+closed environments use it too), with roll secrets as its `Interception` in rolld's
+`src/intercept.rs` (`CaInterception`). Built so far: `intercept::serve` and its port (`intercept::Interception`), tested with a fake CA,
 a fake filter and a TLS host of its own
 (`intercept::tests::a_placeholder_becomes_its_key_only_on_the_way_to_its_host`: swapped only on the
 way out, a refused placeholder never reaches the host, an uncovered host or an ended CA is never

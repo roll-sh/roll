@@ -1,5 +1,8 @@
-//! Keys a preview's code never holds, on their way out (docs/previews.md, "Keys a preview never
-//! holds"; roll secrets' docs/secrets.md, "Using a key without seeing it: the proxy's contract").
+//! A TLS-intercepting egress step for code that holds roll secrets' placeholders instead of keys
+//! (docs/secrets.md, "Using a key without seeing it: the proxy's contract"). Product-neutral:
+//! roll previews' egress proxy hands it connections (docs/previews.md, "Keys a preview never
+//! holds"), and roll apps' closed environments can do the same. What decides each swap is an
+//! [`Interception`] (rolld's, over roll secrets).
 //!
 //! A fork's preview gets `rlph_` placeholders where the values of keys bound to hosts would be.
 //! Its egress proxy (`egress.js`) still decides first whether a host may be reached at all
@@ -270,7 +273,7 @@ where
 type Body = BoxBody<Bytes, hyper::Error>;
 
 fn said(status: StatusCode, why: &str) -> Response<Body> {
-    let mut r = Response::new(Full::new(Bytes::from(format!("roll previews' egress didn't send this request: {why}\n"))).map_err(|never| match never {}).boxed());
+    let mut r = Response::new(Full::new(Bytes::from(format!("roll's egress didn't send this request: {why}\n"))).map_err(|never| match never {}).boxed());
     *r.status_mut() = status;
     r.headers_mut().insert(hyper::header::CONTENT_TYPE, hyper::header::HeaderValue::from_static("text/plain; charset=utf-8"));
     r

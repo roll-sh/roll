@@ -7157,6 +7157,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "roll-intercept"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "bytes",
+ "futures",
+ "http-body-util",
+ "hyper 1.12.0",
+ "hyper-util",
+ "parking_lot",
+ "rcgen",
+ "roll-net",
+ "rustls-native-certs",
+ "rustls-pemfile",
+ "tempfile",
+ "tokio",
+ "tokio-rustls 0.26.6",
+]
+
+[[package]]
 name = "roll-keyshares"
 version = "0.1.0"
 dependencies = [
@@ -7224,27 +7244,22 @@ dependencies = [
  "getrandom 0.4.3",
  "hex",
  "hmac 0.12.1",
- "http-body-util",
  "humantime",
  "hyper 1.12.0",
  "hyper-util",
  "image",
  "parking_lot",
  "percent-encoding",
- "rcgen",
  "roll-auth",
  "roll-cluster",
- "roll-net",
+ "roll-intercept",
  "roll-workspace",
- "rustls-native-certs",
- "rustls-pemfile",
  "serde",
  "serde_json",
  "sha2 0.10.9",
  "tempfile",
  "thiserror",
  "tokio",
- "tokio-rustls 0.26.6",
  "tower",
  "tracing",
  "url",
@@ -7407,6 +7422,7 @@ dependencies = [
  "roll-cluster",
  "roll-edge",
  "roll-gateway",
+ "roll-intercept",
  "roll-keyshares",
  "roll-mcp",
  "roll-net",

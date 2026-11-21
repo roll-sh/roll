@@ -23,6 +23,7 @@ mod edge;
 mod isolation;
 mod logs;
 mod nosql;
+mod intercept;
 mod previews;
 mod products;
 mod queues;
