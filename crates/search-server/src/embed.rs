@@ -13,7 +13,9 @@
 //!   behind a shared slot ([`State::load`]). Callers wait on it with their own timeouts, and a
 //!   caller that gives up neither cancels nor restarts it, so a loop of `timeout=1ms` calls
 //!   starts one load, not one each. The load's memory (about twice the weights at its peak)
-//!   counts while it runs.
+//!   counts from when it starts reading the weights. A load that fails is remembered with a
+//!   growing backoff (30 s, doubling to 10 minutes): until it ends, calls answer the failure at
+//!   once instead of downloading or loading again.
 //! - **Loaded lazily**, on the first input, and **dropped** after [`EmbedConfig::idle_unload`]
 //!   with nothing queued, running or loading: an idle node holds no model.
 //! - **Workers**: [`EmbedConfig::workers`] threads (a third of the CPUs by default), optionally
@@ -25,7 +27,9 @@
 //!   [`EmbedConfig::job_tokens`] tokens (estimated from bytes). A free worker takes the next
 //!   owner's next cluster's next job: owners take turns, and each owner's clusters take turns
 //!   among themselves, so one person's 50 clusters get one turn per round like another person's
-//!   one.
+//!   one; clusters without an owner (the operator's) share one turn. Within a cluster, searches
+//!   go before ingest, so a query never waits behind its own cluster's bulk. A caller that goes
+//!   away (the client disconnected, an outer timeout) cancels its jobs not yet started.
 //! - **Caps**: [`EmbedConfig::max_inputs`] inputs per call (400); per cluster
 //!   [`EmbedConfig::queue_inputs`] inputs and [`EmbedConfig::queue_bytes`] bytes queued; node-wide
 //!   [`EmbedConfig::node_queue_bytes`] bytes and [`EmbedConfig::node_queue_tokens`] tokens queued.
@@ -38,7 +42,7 @@
 //!   which the control plane bills as inference CPU.
 
 use parking_lot::{Condvar, Mutex};
-use search_es::xpack::inference::local::{EmbedError, Embedder, Tenant};
+use search_es::xpack::inference::local::{EmbedError, Embedder, InputKind, Tenant};
 use std::collections::{HashMap, VecDeque};
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::{Path, PathBuf};
@@ -225,7 +229,7 @@ fn tokens_of(prefix: &str, text: &str) -> usize {
 struct Job {
     owner: Arc<str>,
     cluster: Arc<str>,
-    prefix: &'static str,
+    kind: InputKind,
     texts: Vec<String>,
     tokens: usize,
     bytes: usize,
@@ -257,19 +261,76 @@ impl Queued {
 
 type LoadSlot = tokio::sync::watch::Receiver<Option<Result<(), String>>>;
 
+/// A cluster's queued jobs: searches first, then everything else.
+#[derive(Default)]
+struct ClusterQueue {
+    search: VecDeque<Job>,
+    rest: VecDeque<Job>,
+}
+
+impl ClusterQueue {
+    fn is_empty(&self) -> bool {
+        self.search.is_empty() && self.rest.is_empty()
+    }
+
+    fn push(&mut self, job: Job) {
+        if job.kind == InputKind::Search { self.search.push_back(job) } else { self.rest.push_back(job) }
+    }
+
+    fn pop_front(&mut self) -> Option<Job> {
+        self.search.pop_front().or_else(|| self.rest.pop_front())
+    }
+}
+
+/// A load that failed: what callers are told until `until`, and the backoff that set it.
+struct Failure {
+    reason: &'static str,
+    until: Instant,
+    backoff: Duration,
+}
+
+/// The first backoff after a failed load, and the longest.
+const FIRST_BACKOFF: Duration = Duration::from_secs(30);
+const MAX_BACKOFF: Duration = Duration::from_secs(600);
+
+/// Why a load failed: what callers are told (no path, URL or digest: they're the operator's),
+/// and the detail logged.
+struct LoadFailure {
+    reason: &'static str,
+    detail: String,
+}
+
+impl LoadFailure {
+    fn new(reason: &'static str, detail: impl Into<String>) -> LoadFailure {
+        LoadFailure { reason, detail: detail.into() }
+    }
+}
+
+/// Cancels a call's queued jobs when the call goes away, whether it finished, failed or was
+/// dropped (its client disconnected): workers skip them.
+struct CancelOnDrop(Arc<AtomicBool>);
+
+impl Drop for CancelOnDrop {
+    fn drop(&mut self) {
+        self.0.store(true, Ordering::SeqCst);
+    }
+}
+
 #[derive(Default)]
 struct State {
     model: Option<Arc<dyn Model>>,
     /// The load in progress: it answers `Some(result)` when done.
     load: Option<LoadSlot>,
-    /// Memory the load in progress may reach.
+    /// Memory the load in progress may reach (once it reads the weights).
     load_bytes: u64,
+    /// The last load's failure, while its backoff lasts.
+    failure: Option<Failure>,
     /// Owners with queued jobs in turn order; each owner's clusters with queued jobs in turn
     /// order; each cluster's jobs. A cluster is in its owner's turns exactly while it has jobs,
     /// and an owner in `owners` exactly while it has such clusters.
     owners: VecDeque<Arc<str>>,
     clusters: HashMap<Arc<str>, VecDeque<Arc<str>>>,
-    queues: HashMap<Arc<str>, VecDeque<Job>>,
+    queues: HashMap<Arc<str>, ClusterQueue>,
     queued: HashMap<Arc<str>, Queued>,
     node: Queued,
     /// Jobs running, and the memory they hold.
@@ -434,6 +495,14 @@ impl EmbedPool {
                     st.last_used = Some(Instant::now());
                     return Ok(m);
                 }
+                if st.load.is_none()
+                    && let Some(f) = &st.failure
+                {
+                    let left = f.until.saturating_duration_since(Instant::now());
+                    if !left.is_zero() {
+                        return Err(EmbedError::Failed(format!("{}; it's tried again in {}s", f.reason, left.as_secs().max(1))));
+                    }
+                }
                 match &st.load {
                     Some(slot) => slot.clone(),
                     None => self.start_load(&mut st),
@@ -441,10 +510,7 @@ impl EmbedPool {
             };
             let done = until(deadline, async { slot.wait_for(Option::is_some).await.map(|r| r.clone()) }).await.ok_or(EmbedError::TimedOut(timeout))?;
             match done {
-                Ok(Some(Err(e))) => {
-                    tracing::warn!(error = %e, "the embedding model isn't available");
-                    return Err(EmbedError::Failed("its weights couldn't be loaded on this node".into()));
-                }
+                Ok(Some(Err(reason))) => return Err(EmbedError::Failed(reason)),
                 Ok(_) => continue,
                 Err(_) => {
                     // The load task ended without answering: clear its slot so the next caller
@@ -464,9 +530,6 @@ impl EmbedPool {
     fn start_load(&self, st: &mut State) -> LoadSlot {
         let (tx, slot) = tokio::sync::watch::channel(None);
         st.load = Some(slot.clone());
-        // The weights read once, then copied out into the model (the file's pages and the
-        // model's arrays alive together), and the tokenizer.
-        st.load_bytes = 2 * self.cfg.files.iter().map(|f| f.size).sum::<u64>();
         let (shared, cfg) = (self.shared.clone(), self.cfg.clone());
         tokio::spawn(async move {
             let started = Instant::now();
@@ -480,9 +543,15 @@ impl EmbedPool {
                         tracing::info!(bytes = m.bytes(), ms = started.elapsed().as_millis() as u64, "embedding model loaded");
                         st.model = Some(m);
                         st.last_used = Some(Instant::now());
+                        st.failure = None;
                         Ok(())
                     }
-                    Err(e) => Err(e),
+                    Err(e) => {
+                        let backoff = st.failure.as_ref().map_or(FIRST_BACKOFF, |f| (f.backoff * 2).min(MAX_BACKOFF));
+                        tracing::warn!(error = %e.detail, backoff_s = backoff.as_secs(), "loading the embedding model failed");
+                        st.failure = Some(Failure { reason: e.reason, until: Instant::now() + backoff, backoff });
+                        Err(format!("{}; it's tried again in {}s", e.reason, backoff.as_secs()))
+                    }
                 }
             };
             shared.work.notify_all();
@@ -512,7 +581,8 @@ impl EmbedPool {
     }
 
     /// Embeds `texts` for `tenant`; see [`Embedder::embed`].
-    pub async fn embed_for(&self, tenant: Tenant<'_>, prefix: &'static str, texts: Vec<String>, timeout: Duration) -> Result<Vec<Vec<f32>>, EmbedError> {
+    pub async fn embed_for(&self, tenant: Tenant<'_>, kind: InputKind, texts: Vec<String>, timeout: Duration) -> Result<Vec<Vec<f32>>, EmbedError> {
+        let prefix = kind.prefix();
         if self.cfg.source == ModelSource::Off {
             return Err(EmbedError::Off);
         }
@@ -536,6 +606,12 @@ impl EmbedPool {
             }
             let bytes: usize = cut.iter().map(String::len).sum();
             let tokens: usize = cut.iter().map(|t| tokens_of(prefix, t)).sum();
+            // Workers first: a call nobody could serve fails now, not after its deadline (with
+            // no deadline, never). The next call tries to start them again.
+            self.start_workers(&mut st);
+            if st.workers == 0 {
+                return Err(EmbedError::Failed("no embedding worker could be started on this node".into()));
+            }
             let mine = st.queued.get(&cluster).copied().unwrap_or_default();
             if mine.inputs + cut.len() > self.cfg.queue_inputs
                 || mine.bytes + bytes > self.cfg.queue_bytes
@@ -552,7 +628,7 @@ impl EmbedPool {
                 st.push(Job {
                     owner: owner.clone(),
                     cluster: cluster.clone(),
-                    prefix,
+                    kind,
                     texts: std::mem::take(job),
                     tokens: std::mem::take(job_tokens),
                     bytes: std::mem::take(job_bytes),
@@ -572,9 +648,10 @@ impl EmbedPool {
             }
             flush(&mut job, &mut job_tokens, &mut job_bytes, &mut st);
             st.last_used = Some(Instant::now());
-            self.start_workers(&mut st);
             break waits;
         };
+        // From here, the call going away (done, failed or dropped) skips its jobs not started.
+        let _cancel = CancelOnDrop(cancelled.clone());
         drop(texts);
         self.shared.work.notify_all();
         let all = async {
@@ -592,12 +669,9 @@ impl EmbedPool {
             }
             Ok(out)
         };
-        let r = until(deadline, all).await.unwrap_or(Err(EmbedError::TimedOut(timeout)));
-        if r.is_err() {
-            // Jobs not started yet are skipped; running ones finish (and are metered).
-            cancelled.store(true, Ordering::SeqCst);
-        }
-        r
+        // On a timeout the guard skips the jobs not started; running ones finish (and are
+        // metered).
+        until(deadline, all).await.unwrap_or(Err(EmbedError::TimedOut(timeout)))
     }
 }
 
@@ -609,7 +683,7 @@ fn work(shared: &Shared, idle: Duration) {
             let mut st = shared.state.lock();
             loop {
                 if let Some(job) = st.pop() {
-                    if job.cancelled.load(Ordering::SeqCst) {
+                    if job.cancelled.load(Ordering::SeqCst) || job.done.is_closed() {
                         continue;
                     }
                     let Some(m) = st.model.clone() else {
@@ -630,7 +704,7 @@ fn work(shared: &Shared, idle: Duration) {
             }
         };
         let before = thread_cpu();
-        let result = match catch_unwind(AssertUnwindSafe(|| model.embed(job.prefix, &job.texts))) {
+        let result = match catch_unwind(AssertUnwindSafe(|| model.embed(job.kind.prefix(), &job.texts))) {
             Ok(r) => r,
             Err(_) => {
                 tracing::error!(cluster = &*job.cluster, "an embedding job panicked");
@@ -656,27 +730,35 @@ impl Embedder for EmbedPool {
         self.cfg.source != ModelSource::Off
     }
 
-    async fn embed(&self, tenant: Tenant<'_>, prefix: &'static str, texts: Vec<String>, timeout: Duration) -> Result<Vec<Vec<f32>>, EmbedError> {
-        self.embed_for(tenant, prefix, texts, timeout).await
+    async fn embed(&self, tenant: Tenant<'_>, kind: InputKind, texts: Vec<String>, timeout: Duration) -> Result<Vec<Vec<f32>>, EmbedError> {
+        self.embed_for(tenant, kind, texts, timeout).await
     }
 }
 
 /// Fetches what's missing, checks the rest once per process (refetching a cached file whose
-/// digest is wrong), and loads the model.
-async fn load(shared: &Arc<Shared>, cfg: &EmbedConfig) -> Result<Arc<dyn Model>, String> {
+/// digest is wrong), and loads the model, counting its memory from when it reads the weights.
+async fn load(shared: &Arc<Shared>, cfg: &EmbedConfig) -> Result<Arc<dyn Model>, LoadFailure> {
     let dir = weights_dir(shared, cfg).await?;
+    // The weights read once, then copied out into the model (the file's pages and the model's
+    // arrays alive together), and the tokenizer.
+    shared.state.lock().load_bytes = 2 * cfg.files.iter().map(|f| f.size).sum::<u64>();
     let loader = cfg.loader.0.clone();
-    tokio::task::spawn_blocking(move || loader(&dir)).await.map_err(|e| format!("loading the model panicked: {e}"))?
+    match tokio::task::spawn_blocking(move || loader(&dir)).await {
+        Ok(Ok(m)) => Ok(m),
+        Ok(Err(e)) => Err(LoadFailure::new("the model couldn't be loaded on this node", e)),
+        Err(e) => Err(LoadFailure::new("the model couldn't be loaded on this node", format!("loading the model panicked: {e}"))),
+    }
 }
 
-async fn weights_dir(shared: &Arc<Shared>, cfg: &EmbedConfig) -> Result<PathBuf, String> {
+async fn weights_dir(shared: &Arc<Shared>, cfg: &EmbedConfig) -> Result<PathBuf, LoadFailure> {
+    const DOWNLOAD: &str = "the model's files couldn't be downloaded on this node";
     let (dir, base) = match &cfg.source {
-        ModelSource::Off => return Err("the model is off".into()),
+        ModelSource::Off => return Err(LoadFailure::new("the model is off on this node", "off")),
         ModelSource::Dir(d) => (d.clone(), None),
         ModelSource::Fetch { base } => (cfg.cache_dir.join("multilingual-e5-small").join(search_embed::REVISION), Some(base.as_str())),
     };
     let mut fetched = match base {
-        Some(base) => fetch(base, &dir, &cfg.files, cfg.fetch_read_timeout).await?,
+        Some(base) => fetch(base, &dir, &cfg.files, cfg.fetch_read_timeout).await.map_err(|e| LoadFailure::new(DOWNLOAD, e))?,
         None => Vec::new(),
     };
     if cfg.unchecked || shared.verified.lock().contains(&dir) {
@@ -685,34 +767,80 @@ async fn weights_dir(shared: &Arc<Shared>, cfg: &EmbedConfig) -> Result<PathBuf,
     // Files just fetched were checked as they were written.
     let to_check: Vec<ModelFile> = cfg.files.iter().filter(|f| !fetched.contains(&f.name)).cloned().collect();
     let d = dir.clone();
-    let bad = tokio::task::spawn_blocking(move || mismatched(&d, &to_check)).await.map_err(|e| e.to_string())??;
+    let bad = match tokio::task::spawn_blocking(move || mismatched(&d, &to_check)).await {
+        Ok(Ok(bad)) => bad,
+        Ok(Err(e)) => return Err(LoadFailure::new("the model's files couldn't be read on this node", e)),
+        Err(e) => return Err(LoadFailure::new("the model's files couldn't be read on this node", e.to_string())),
+    };
     if !bad.is_empty() {
+        let names: Vec<&str> = bad.iter().map(|(n, _)| n.as_str()).collect();
         let Some(base) = base else {
-            return Err(format!("{} in {} don't match their pinned SHA-256 digests", bad.join(", "), dir.display()));
+            return Err(LoadFailure::new(
+                "the model's files don't match their pinned digests on this node",
+                format!("{} in {} don't match their pinned SHA-256 digests", names.join(", "), dir.display()),
+            ));
         };
-        for name in &bad {
-            tracing::warn!(file = name, dir = %dir.display(), "a cached model file doesn't match its pinned digest: fetching it again");
-            let _ = tokio::fs::remove_file(dir.join(name)).await;
+        for (name, checked) in &bad {
+            // Only the file that was checked: another process sharing the cache may have
+            // replaced it with a good copy meanwhile.
+            let path = dir.join(name);
+            if checked.is_some() && stamp(&path) == *checked {
+                tracing::warn!(file = name, dir = %dir.display(), "a cached model file doesn't match its pinned digest: fetching it again");
+                let _ = tokio::fs::remove_file(&path).await;
+            }
         }
-        fetched.extend(fetch(base, &dir, &cfg.files, cfg.fetch_read_timeout).await?);
+        fetched.extend(fetch(base, &dir, &cfg.files, cfg.fetch_read_timeout).await.map_err(|e| LoadFailure::new(DOWNLOAD, e))?);
+        // A file another process put in place meanwhile is checked again on the next load.
+        let d = dir.clone();
+        let again: Vec<ModelFile> = cfg.files.iter().filter(|f| !fetched.contains(&f.name)).cloned().collect();
+        let still = tokio::task::spawn_blocking(move || mismatched(&d, &again)).await.map_err(|e| LoadFailure::new(DOWNLOAD, e.to_string()))?.map_err(|e| LoadFailure::new(DOWNLOAD, e))?;
+        if !still.is_empty() {
+            return Err(LoadFailure::new(DOWNLOAD, format!("{} in {} still don't match their digests", still.iter().map(|(n, _)| n.as_str()).collect::<Vec<_>>().join(", "), dir.display())));
+        }
     }
     shared.verified.lock().push(dir.clone());
     Ok(dir)
+}
+
+/// What identifies one version of a file: its inode, size and modification time.
+type Stamp = Option<(u64, u64, i64, i64)>;
+
+fn stamp(path: &Path) -> Stamp {
+    use std::os::unix::fs::MetadataExt;
+    let m = std::fs::metadata(path).ok()?;
+    Some((m.ino(), m.len(), m.mtime(), m.mtime_nsec()))
+}
+
+/// Removes download parts (`<file>.part.<pid>.<n>`) in `dir` older than an hour, whichever
+/// process left them (one that died mid-download).
+async fn sweep_parts(dir: &Path) {
+    let Ok(mut entries) = tokio::fs::read_dir(dir).await else { return };
+    while let Ok(Some(e)) = entries.next_entry().await {
+        if !e.file_name().to_string_lossy().contains(".part.") {
+            continue;
+        }
+        let old = e.metadata().await.ok().and_then(|m| m.modified().ok()).and_then(|t| t.elapsed().ok()).is_some_and(|age| age > Duration::from_secs(3600));
+        if old {
+            let _ = tokio::fs::remove_file(e.path()).await;
+        }
+    }
 }
 
 fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
-/// The names of `files` in `dir` whose digest isn't the pinned one (or that can't be read).
-fn mismatched(dir: &Path, files: &[ModelFile]) -> Result<Vec<String>, String> {
+/// The names of `files` in `dir` whose digest isn't the pinned one (or that can't be read),
+/// each with the stamp of the version that was checked (`None`: missing).
+fn mismatched(dir: &Path, files: &[ModelFile]) -> Result<Vec<(String, Stamp)>, String> {
     use sha2::Digest;
     use std::io::Read;
     let mut bad = Vec::new();
     for f in files {
         let path = dir.join(&f.name);
+        let checked = stamp(&path);
         let Ok(mut file) = std::fs::File::open(&path) else {
-            bad.push(f.name.clone());
+            bad.push((f.name.clone(), None));
             continue;
         };
         let mut h = sha2::Sha256::new();
@@ -725,7 +853,7 @@ fn mismatched(dir: &Path, files: &[ModelFile]) -> Result<Vec<String>, String> {
             h.update(&buf[..n]);
         }
         if hex(&h.finalize()) != f.sha256 {
-            bad.push(f.name.clone());
+            bad.push((f.name.clone(), checked));
         }
     }
     Ok(bad)
@@ -733,7 +861,9 @@ fn mismatched(dir: &Path, files: &[ModelFile]) -> Result<Vec<String>, String> {
 
 /// Downloads the files missing from `dir` from `base`: each into a file of its own
 /// (`<name>.part.<pid>.<n>`), checked for size and SHA-256 as it's written, then renamed into
-/// place. A connection that stalls for `read_timeout` fails. Returns the names fetched.
+/// place (a part whose rename fails is removed). Parts older than an hour, left by a process
+/// that died mid-download, are removed first. A connection that stalls for `read_timeout`
+/// fails. Returns the names fetched.
 async fn fetch(base: &str, dir: &Path, files: &[ModelFile], read_timeout: Duration) -> Result<Vec<String>, String> {
     use sha2::Digest;
     use tokio::io::AsyncWriteExt;
@@ -743,6 +873,7 @@ async fn fetch(base: &str, dir: &Path, files: &[ModelFile], read_timeout: Durati
         return Ok(Vec::new());
     }
     tokio::fs::create_dir_all(dir).await.map_err(|e| format!("{}: {e}", dir.display()))?;
+    sweep_parts(dir).await;
     let client = reqwest::Client::builder().connect_timeout(Duration::from_secs(30)).read_timeout(read_timeout).build().map_err(|e| e.to_string())?;
     let mut fetched = Vec::new();
     for f in missing {
@@ -775,7 +906,10 @@ async fn fetch(base: &str, dir: &Path, files: &[ModelFile], read_timeout: Durati
             let _ = tokio::fs::remove_file(&part).await;
             return Err(e);
         }
-        tokio::fs::rename(&part, &path).await.map_err(|e| format!("{}: {e}", path.display()))?;
+        if let Err(e) = tokio::fs::rename(&part, &path).await {
+            let _ = tokio::fs::remove_file(&part).await;
+            return Err(format!("{}: {e}", path.display()));
+        }
         fetched.push(f.name.clone());
     }
     Ok(fetched)
@@ -835,7 +969,7 @@ mod tests {
         }
     }
 
-    fn pool(fake: Arc<Fake>, loads: Arc<AtomicUsize>, load_ms: u64) -> Arc<EmbedPool> {
+    fn pool_with(load: impl Fn() -> Result<Arc<dyn Model>, String> + Send + Sync + 'static) -> Arc<EmbedPool> {
         let dir = std::env::temp_dir();
         let mut cfg = EmbedConfig::new(ModelSource::Dir(dir.clone()), dir);
         cfg.unchecked = true;
@@ -843,12 +977,63 @@ mod tests {
         cfg.job_tokens = 1;
         // Unchecked; its size is what a load in progress counts.
         cfg.files = vec![ModelFile { name: "weights".into(), sha256: String::new(), size: 500 }];
-        cfg.loader = Loader(Arc::new(move |_: &Path| {
+        cfg.loader = Loader(Arc::new(move |_: &Path| load()));
+        EmbedPool::new(cfg)
+    }
+
+    fn pool(fake: Arc<Fake>, loads: Arc<AtomicUsize>, load_ms: u64) -> Arc<EmbedPool> {
+        pool_with(move || {
             loads.fetch_add(1, Ordering::SeqCst);
             std::thread::sleep(Duration::from_millis(load_ms));
             Ok(fake.clone() as Arc<dyn Model>)
-        }));
-        EmbedPool::new(cfg)
+        })
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_failed_load_is_answered_from_its_backoff_without_loading_again() {
+        let loads = Arc::new(AtomicUsize::new(0));
+        let l = loads.clone();
+        let p = pool_with(move || {
+            l.fetch_add(1, Ordering::SeqCst);
+            Err("no such file".into())
+        });
+        for _ in 0..2 {
+            let e = p.embed_for(tenant("o", "c"), InputKind::Other, vec!["x".into()], Duration::from_secs(10)).await.unwrap_err();
+            let EmbedError::Failed(m) = e else { panic!("{e:?}") };
+            assert!(m.starts_with("the model couldn't be loaded on this node; it's tried again in "), "{m}");
+        }
+        assert_eq!(loads.load(Ordering::SeqCst), 1);
+        // Nothing is counted for a load that isn't running.
+        assert_eq!(p.resident_bytes(), 0);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn searches_go_before_their_clusters_ingest_and_dropped_calls_are_skipped() {
+        let fake = Arc::new(Fake::default());
+        let p = pool(fake.clone(), Arc::new(AtomicUsize::new(0)), 0);
+        let call = |kind: InputKind, texts: &[&str]| {
+            let (p, texts) = (p.clone(), texts.iter().map(|t| t.to_string()).collect::<Vec<_>>());
+            tokio::spawn(async move { p.embed_for(tenant("o", "c"), kind, texts, Duration::from_secs(30)).await })
+        };
+        let first = call(InputKind::Ingest, &["block"]);
+        while !fake.started.load(Ordering::SeqCst) {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        let bulk = call(InputKind::Ingest, &["i1", "i2", "i3"]);
+        queued(&p, 3).await;
+        // A caller that goes away: its jobs are skipped.
+        let gone = call(InputKind::Ingest, &["gone"]);
+        queued(&p, 4).await;
+        gone.abort();
+        let _ = gone.await;
+        let query = call(InputKind::Search, &["q"]);
+        queued(&p, 5).await;
+        *fake.gate.lock() = true;
+        fake.opened.notify_all();
+        for h in [first, bulk, query] {
+            h.await.unwrap().unwrap();
+        }
+        assert_eq!(*fake.seen.lock(), ["block", "q", "i1", "i2", "i3"]);
     }
 
     fn tenant<'a>(owner: &'a str, cluster: &'a str) -> Tenant<'a> {
@@ -862,7 +1047,7 @@ mod tests {
         let calls: Vec<_> = (0..20)
             .map(|i| {
                 let p = p.clone();
-                tokio::spawn(async move { p.embed_for(tenant("o", &format!("c{i}")), "", vec!["x".into()], Duration::from_millis(1)).await })
+                tokio::spawn(async move { p.embed_for(tenant("o", &format!("c{i}")), InputKind::Other, vec!["x".into()], Duration::from_millis(1)).await })
             })
             .collect();
         for c in calls {
@@ -870,7 +1055,7 @@ mod tests {
         }
         // The load they started goes on, and counts while it does (twice the files' size).
         assert!(p.resident_bytes() == 1000 || p.loaded());
-        let v = p.embed_for(tenant("o", "c"), "", vec!["x".into()], Duration::from_secs(10)).await.unwrap();
+        let v = p.embed_for(tenant("o", "c"), InputKind::Other, vec!["x".into()], Duration::from_secs(10)).await.unwrap();
         assert_eq!(v.len(), 1);
         assert_eq!(loads.load(Ordering::SeqCst), 1);
     }
@@ -891,7 +1076,7 @@ mod tests {
         let p = pool(fake.clone(), Arc::new(AtomicUsize::new(0)), 0);
         let call = |owner: &'static str, cluster: &'static str, texts: &[&str]| {
             let (p, texts) = (p.clone(), texts.iter().map(|t| t.to_string()).collect::<Vec<_>>());
-            tokio::spawn(async move { p.embed_for(tenant(owner, cluster), "", texts, Duration::from_secs(30)).await })
+            tokio::spawn(async move { p.embed_for(tenant(owner, cluster), InputKind::Other, texts, Duration::from_secs(30)).await })
         };
         // The one worker is held on a job of owner x while the others queue.
         let first = call("x", "x0", &["block"]);
@@ -916,9 +1101,9 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_job_that_panics_answers_an_internal_error_and_the_worker_goes_on() {
         let p = pool(Arc::new(Fake::default()), Arc::new(AtomicUsize::new(0)), 0);
-        let e = p.embed_for(tenant("o", "c"), "", vec!["panic".into()], Duration::from_secs(10)).await.unwrap_err();
+        let e = p.embed_for(tenant("o", "c"), InputKind::Other, vec!["panic".into()], Duration::from_secs(10)).await.unwrap_err();
         assert_eq!(e, EmbedError::Failed(PANICKED.into()));
-        assert_eq!(p.embed_for(tenant("o", "c"), "", vec!["fine".into()], Duration::from_secs(10)).await.unwrap().len(), 1);
+        assert_eq!(p.embed_for(tenant("o", "c"), InputKind::Other, vec!["fine".into()], Duration::from_secs(10)).await.unwrap().len(), 1);
         assert_eq!(p.workers(), 1);
         // Nothing left counted as running or queued.
         assert_eq!(p.resident_bytes(), 1000);
@@ -983,7 +1168,7 @@ mod tests {
         cfg.workers = 1;
         cfg.files = files.clone();
         let p = EmbedPool::new(cfg);
-        let v = p.embed_for(tenant("o", "c"), "query: ", vec!["hello".into()], Duration::from_secs(30)).await.unwrap();
+        let v = p.embed_for(tenant("o", "c"), InputKind::Search, vec!["hello".into()], Duration::from_secs(30)).await.unwrap();
         assert_eq!(v[0].len(), search_embed::tiny::HIDDEN);
         let hits = hits.lock().clone();
         assert_eq!((hits.get(search_embed::WEIGHTS), hits.get(search_embed::TOKENIZER)), (Some(&1), None), "{hits:?}");

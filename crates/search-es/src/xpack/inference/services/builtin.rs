@@ -122,13 +122,14 @@ pub async fn infer(cluster: &Cluster, ep: &Endpoint, req: &Request) -> EsResult<
     };
     // `prefix_strings`: documents (`ingest`, and what `semantic_text` embeds at ingest) get the
     // passage prefix, queries the query prefix, any other input type none (captured).
-    let prefix = match req.input_type.as_deref().map(str::to_ascii_lowercase).as_deref() {
-        Some("ingest" | "internal_ingest") => PASSAGE,
-        Some("search" | "internal_search") => QUERY,
-        _ => "",
+    use super::super::local::InputKind;
+    let kind = match req.input_type.as_deref().map(str::to_ascii_lowercase).as_deref() {
+        Some("ingest" | "internal_ingest") => InputKind::Ingest,
+        Some("search" | "internal_search") => InputKind::Search,
+        _ => InputKind::Other,
     };
     let tenant = super::super::local::Tenant { cluster: &cluster.config.name, owner: cluster.config.owner.as_deref() };
-    let vectors = embedder.embed(tenant, prefix, req.input.clone(), req.timeout).await.map_err(|e| e.to_es())?;
+    let vectors = embedder.embed(tenant, kind, req.input.clone(), req.timeout).await.map_err(|e| e.to_es())?;
     if vectors.len() != req.input.len() {
         return Err(EsError::java(500, "illegal_state_exception", format!("The model returned [{}] embeddings for [{}] inputs", vectors.len(), req.input.len())));
     }

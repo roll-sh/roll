@@ -541,7 +541,8 @@ pub async fn infer_documents(cluster: &crate::cluster::Cluster, docs: &[(&Mappin
             let lives: Vec<Vec<&Input>> = wave.iter().map(|batch| batch.iter().filter(|i| out[needs[i.need].doc].is_ok()).collect()).collect();
             // No deadline, as Elasticsearch's bulk inference filter calls with
             // `TimeValue.MAX_VALUE`: remote services are still held to the node's
-            // `roll.inference.max_timeout`, and the client going away cancels.
+            // `roll.inference.max_timeout`. A request dropped while it waits (the client gone)
+            // drops these calls, and the node's pool skips their jobs not yet started.
             let calls = lives.iter().map(|live| async move {
                 if live.is_empty() {
                     return None;

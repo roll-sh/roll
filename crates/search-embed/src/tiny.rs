@@ -35,8 +35,12 @@ fn tokenizer_json() -> serde_json::Value {
         "truncation": null,
         "padding": null,
         "added_tokens": added,
+        // A deleted control character and a zero-width space turned into a space, as the real
+        // model's `nmt_nfkc` charsmap does with them.
         "normalizer": { "type": "Sequence", "normalizers": [
             { "type": "Lowercase" },
+            { "type": "Replace", "pattern": { "String": "\u{1}" }, "content": "" },
+            { "type": "Replace", "pattern": { "String": "\u{200b}" }, "content": " " },
             { "type": "Replace", "pattern": { "Regex": " {2,}" }, "content": " " }
         ] },
         "pre_tokenizer": { "type": "Metaspace", "replacement": "▁", "add_prefix_space": true },

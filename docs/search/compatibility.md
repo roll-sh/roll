@@ -1295,11 +1295,18 @@ an ML node on Linux x86-64 deploying both of the model's builds:
 
 On a node serving many tenants: one pool per node (`--search-embed-workers`, a third of the CPUs
 by default, `--search-embed-cpus` to pin them). Each input is cut to the start its 512 tokens
-come from (at most 96 KiB: four times 512 times the longest vocabulary piece, whitespace runs
-shortened), so a long input is truncated as Elasticsearch truncates it, never refused, and
-costs bounded time and memory whatever its spacing. Inputs queue in jobs of about 1,024
+come from: characters the tokenizer's normaliser deletes (C0 and C1 controls, read from the
+normaliser at load) are skipped, runs of whitespace and of characters it turns into spaces
+(zero-width spaces, U+FEFF, no-break and ideographic spaces) are shortened to 16, then at most
+96 KiB (four times 512 times the longest vocabulary piece) are kept. So a long input is
+truncated as Elasticsearch truncates it, never refused, costs bounded time and memory whatever
+its spacing, and a long run of invisible characters before the text still embeds the text
+(agreement cases below). Inputs queue in jobs of about 1,024
 estimated tokens, and turns go by owner first, then by cluster within an owner, so one person's
-many clusters get the turns one cluster of another person gets. Caps, past which a call gets
+many clusters get the turns one cluster of another person gets (clusters with no owner, the
+operator's, share one turn), and within a cluster searches go before ingest, so a query doesn't
+wait behind its own cluster's bulk (Elasticsearch has one queue). A caller that goes away (the
+client disconnected) cancels its inputs not yet started. Caps, past which a call gets
 429 `es_rejected_execution_exception` whole: per cluster `--search-embed-queue` inputs (4,096)
 and `--search-embed-queue-mb` (64 MiB) queued; per node `--search-embed-node-queue-mb` (512
 MiB) and about a million estimated tokens queued; 2,048 inputs per call (400). The model, a load
@@ -1310,8 +1317,13 @@ search) or a browser key started it (the browser keys of #358 will cap inference
 The weights are the operator's: fetched once per node from the pinned revision (or a mirror,
 `--search-embed-url`), each download into a file of its own checked for size and SHA-256 as it's
 written, a cached file whose digest is wrong fetched again; or read from `--search-embed-dir` on
-air-gapped nodes; never from a URL a tenant chooses. One task fetches, checks and loads; callers
-wait for it with their own timeouts, and one that gives up doesn't stop or restart it. Loaded on
+air-gapped nodes; never from a URL a tenant chooses. Download parts a dead process left are
+removed after an hour, and a corrupt cached file is removed only if it's still the copy that was
+checked (the cache may be shared). One task fetches, checks and loads; callers wait for it with
+their own timeouts, and one that gives up doesn't stop or restart it. A load that fails is
+answered from a backoff (30 s, doubling to 10 minutes) with its reason, not tried again by every
+call; a load counts its memory from when it reads the weights, not while it downloads. A call
+when no worker can be started fails at once. Loaded on
 first use, dropped after `--search-embed-idle` seconds with nothing queued or running. A job
 that panics answers 500 (`an internal error`) and its worker carries on.
 `--search-embed-model off` turns it off (the endpoint then answers as without ML nodes).

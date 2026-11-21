@@ -24,6 +24,23 @@ fn cosine(a: &[f32], b: &[f64]) -> f64 {
     dot / (a.iter().map(|x| f64::from(*x).powi(2)).sum::<f64>().sqrt() * b.iter().map(|y| y * y).sum::<f64>().sqrt())
 }
 
+/// A case's text: given, or generated from its `text_spec` (long inputs past the 96 KiB cut).
+fn text_of(c: &serde_json::Value) -> String {
+    if let Some(t) = c["text"].as_str() {
+        return t.to_string();
+    }
+    let spec = &c["text_spec"];
+    if let Some(p) = spec["paragraphs"].as_str() {
+        let until = spec["until_bytes"].as_u64().unwrap() as usize;
+        let mut words: Vec<String> = Vec::new();
+        while words.join(" ").len() < until {
+            words.push(format!("Paragraph {}: {p}", words.len()));
+        }
+        return words.join(" ");
+    }
+    format!("{}{}", spec["repeat"].as_str().unwrap().repeat(spec["times"].as_u64().unwrap() as usize), spec["then"].as_str().unwrap())
+}
+
 fn floats(v: &serde_json::Value) -> Vec<f64> {
     v.as_array().unwrap().iter().map(|x| x.as_f64().unwrap()).collect()
 }
@@ -37,7 +54,7 @@ fn agreement(m: &E5, cases: &[serde_json::Value], key: &str) -> (f64, f64, Strin
             Some("search") => QUERY,
             _ => "",
         };
-        let input = format!("{prefix}{}", c["text"].as_str().unwrap());
+        let input = format!("{prefix}{}", text_of(c));
         let cos = cosine(&m.embed(&[&input]).unwrap()[0], &floats(&c[key]));
         let name = format!("{} ({}, {} tokens)", c["name"].as_str().unwrap(), c["input_type"].as_str().unwrap_or("none"), m.tokenize(&input).unwrap().len());
         println!("{key} {cos:.6} {name}");

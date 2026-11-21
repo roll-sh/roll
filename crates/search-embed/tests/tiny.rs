@@ -57,6 +57,13 @@ fn long_inputs_are_cut_to_512_tokens() {
     assert_eq!(full.len(), MAX_TOKENS);
     assert!(m.cut(&unspaced).len() < unspaced.len());
     assert_eq!(m.tokenize(&"a".repeat(2 << 20)).unwrap(), full);
+    // Long inputs of every shape give the tokens of the whole text: words throughout, and long
+    // runs of what the normaliser deletes or turns into spaces before the words.
+    let article = words[..600].join(" ");
+    for text in [words.join(" ").repeat(10), format!("{}{article}", "\u{200b}".repeat(33_000)), format!("{}{article}", "\u{1}".repeat(40_000))] {
+        assert!(text.len() > m.cut_bytes());
+        assert_eq!(m.tokenize(&text).unwrap(), m.tokenize_uncut(&text).unwrap(), "{:?}…", text.chars().take(8).collect::<String>());
+    }
     // The prefix goes before the cut text, and costs no copy of the text.
     assert_eq!(m.tokenize_prefixed("query: ", "a b").unwrap(), m.tokenize("query: a b").unwrap());
 }

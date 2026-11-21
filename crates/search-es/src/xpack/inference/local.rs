@@ -49,11 +49,33 @@ pub trait Embedder: Send + Sync {
     /// Whether the model can run on this node (not turned off). An endpoint of a model the node
     /// can't run answers as Elasticsearch without ML nodes does.
     fn available(&self) -> bool;
-    /// Embeds `prefix` before each of `texts` for `tenant`, each to 384 unit-length floats, in
+    /// Embeds `texts` for `tenant`, each with `kind`'s prefix, to 384 unit-length floats, in
     /// order, waiting at most `timeout` in the queue and running ([`super::NO_DEADLINE`]: no
     /// deadline, as Elasticsearch's bulk inference filter waits). Each input is cut to the
-    /// start its 512 tokens come from before it queues.
-    async fn embed(&self, tenant: Tenant<'_>, prefix: &'static str, texts: Vec<String>, timeout: Duration) -> Result<Vec<Vec<f32>>, EmbedError>;
+    /// start its 512 tokens come from before it queues; searches go before a cluster's ingest.
+    async fn embed(&self, tenant: Tenant<'_>, kind: InputKind, texts: Vec<String>, timeout: Duration) -> Result<Vec<Vec<f32>>, EmbedError>;
+}
+
+/// What the inputs are, from the request's `input_type`: it picks the model's prefix
+/// (`prefix_strings`), and searches are served before the same cluster's ingest.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum InputKind {
+    /// Documents (`ingest`, and what `semantic_text` embeds at ingest): `passage: `.
+    Ingest,
+    /// Queries (`search`, and `semantic_text`'s queries): `query: `.
+    Search,
+    /// Any other input type, or none: no prefix.
+    Other,
+}
+
+impl InputKind {
+    pub fn prefix(self) -> &'static str {
+        match self {
+            InputKind::Ingest => super::services::builtin::PASSAGE,
+            InputKind::Search => super::services::builtin::QUERY,
+            InputKind::Other => "",
+        }
+    }
 }
 
 /// Whose inputs these are: the cluster (its name on the node, what its CPU is metered to) and

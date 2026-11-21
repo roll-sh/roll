@@ -7,7 +7,7 @@
 //! `tests/agreement.rs`.
 
 use search_es::json::{Value, parse};
-use search_es::xpack::inference::local::{EmbedError, Embedder, Tenant};
+use search_es::xpack::inference::local::{EmbedError, Embedder, InputKind, Tenant};
 use search_es::{Cluster, ClusterConfig, EsRequest, MemoryStore};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -15,6 +15,8 @@ use std::time::Duration;
 #[derive(Default)]
 struct Fake {
     sent: Mutex<Vec<String>>,
+    /// Each call's inputs and timeout.
+    calls: Mutex<Vec<(usize, Duration)>>,
 }
 
 #[async_trait::async_trait]
@@ -23,8 +25,9 @@ impl Embedder for Fake {
         true
     }
 
-    async fn embed(&self, _tenant: Tenant<'_>, prefix: &'static str, texts: Vec<String>, timeout: Duration) -> Result<Vec<Vec<f32>>, EmbedError> {
-        let texts: Vec<String> = texts.iter().map(|t| format!("{prefix}{t}")).collect();
+    async fn embed(&self, _tenant: Tenant<'_>, kind: InputKind, texts: Vec<String>, timeout: Duration) -> Result<Vec<Vec<f32>>, EmbedError> {
+        self.calls.lock().unwrap().push((texts.len(), timeout));
+        let texts: Vec<String> = texts.iter().map(|t| format!("{}{t}", kind.prefix())).collect();
         if texts.iter().any(|t| t.contains("<queue full>")) {
             return Err(EmbedError::QueueFull);
         }
@@ -123,4 +126,26 @@ async fn without_the_model_e5_answers_as_a_cluster_without_ml_nodes() {
     let list = search_es::handle(&c, EsRequest::new("GET", "/_inference/.multilingual-e5-small-elasticsearch")).await.body_json();
     let ep = &list.get("endpoints").and_then(Value::as_array).unwrap()[0];
     assert_eq!(ep.pointer(&["service_settings", "model_id"]).and_then(Value::as_str), Some(".multilingual-e5-small"));
+}
+
+#[tokio::test]
+async fn semantic_text_sends_the_node_model_batches_of_ten_with_no_deadline() {
+    let fake = Arc::new(Fake::default());
+    let mut cfg = ClusterConfig::new("c");
+    cfg.embedder = Some(fake.clone());
+    let c = Cluster::open(cfg, Arc::new(MemoryStore::new())).await.unwrap();
+    let mapping = r#"{"mappings":{"properties":{"body":{"type":"semantic_text","inference_id":".multilingual-e5-small-elasticsearch"}}}}"#;
+    assert_eq!(search_es::handle(&c, EsRequest::json("PUT", "/docs", mapping.to_string())).await.status, 200);
+    let bulk: String = (0..25).map(|i| format!("{{\"index\":{{\"_id\":\"{i}\"}}}}\n{{\"body\":\"document {i}\"}}\n")).collect();
+    let mut req = EsRequest::new("POST", "/docs/_bulk?refresh=true");
+    req.body = bulk.into_bytes().into();
+    req.headers.push(("content-type".into(), "application/x-ndjson".into()));
+    let resp = search_es::handle(&c, req).await;
+    assert_eq!(resp.body_json().get("errors").and_then(Value::as_bool), Some(false), "{}", String::from_utf8_lossy(&resp.body));
+    // `EMBEDDING_MAX_BATCH_SIZE` inputs per call, and the deadline Elasticsearch's bulk filter
+    // gives them (`TimeValue.MAX_VALUE`).
+    let mut sizes: Vec<usize> = fake.calls.lock().unwrap().iter().map(|(n, _)| *n).collect();
+    sizes.sort_unstable();
+    assert_eq!(sizes, [5, 10, 10]);
+    assert!(fake.calls.lock().unwrap().iter().all(|(_, t)| *t == search_es::xpack::inference::NO_DEADLINE));
 }

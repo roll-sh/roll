@@ -78,6 +78,51 @@ pub struct E5 {
     /// Bytes of input that can hold [`MAX_TOKENS`] tokens: four times 512 times the longest
     /// vocabulary piece ([`E5::cut`]).
     cut_bytes: usize,
+    /// What the tokenizer's normaliser does to single characters, for the cut.
+    classes: Classes,
+}
+
+/// The characters of the Basic Multilingual Plane the tokenizer's normaliser deletes (C0 and C1
+/// controls in `nmt_nfkc`), and those it turns into a space (zero-width and other spaces, which
+/// then collapse with their neighbours), read from the normaliser itself at load. Outside the
+/// BMP nothing maps to either in the shipped normaliser (checked), so those are left as they are.
+#[derive(Clone)]
+pub struct Classes {
+    deleted: Box<[u64; 1024]>,
+    spaces: Box<[u64; 1024]>,
+}
+
+impl Classes {
+    /// No character deleted, only Unicode whitespace as space (no normaliser).
+    pub fn none() -> Classes {
+        Classes { deleted: Box::new([0; 1024]), spaces: Box::new([0; 1024]) }
+    }
+
+    /// The classes `normalize` gives each BMP character.
+    pub fn from_normalizer(normalize: impl Fn(&str) -> Option<String>) -> Classes {
+        let mut c = Classes::none();
+        for cp in 0u32..0x10000 {
+            let Some(ch) = char::from_u32(cp) else { continue };
+            let s = ch.to_string();
+            match normalize(&s) {
+                Some(n) if n.is_empty() => c.deleted[cp as usize / 64] |= 1 << (cp % 64),
+                Some(n) if n != s && n.chars().all(|x| x == ' ') => c.spaces[cp as usize / 64] |= 1 << (cp % 64),
+                _ => {}
+            }
+        }
+        c
+    }
+
+    fn deleted(&self, c: char) -> bool {
+        let cp = c as usize;
+        cp < 0x10000 && self.deleted[cp / 64] & (1 << (cp % 64)) != 0
+    }
+
+    /// Whitespace, or a character the normaliser turns into a space.
+    fn space(&self, c: char) -> bool {
+        let cp = c as usize;
+        c.is_whitespace() || (cp < 0x10000 && self.spaces[cp / 64] & (1 << (cp % 64)) != 0)
+    }
 }
 
 impl std::fmt::Debug for E5 {
@@ -115,7 +160,14 @@ impl E5 {
         let bytes = model.bytes() + 2 * tokenizer_size;
         let longest = tokenizer.get_vocab(true).keys().map(|p| p.trim_start_matches('\u{2581}').len()).max().unwrap_or(1).max(1);
         let cut_bytes = (4 * MAX_TOKENS * longest).max(4096);
-        Ok(E5 { tokenizer, model, bytes, cut_bytes })
+        let classes = match tokenizer.get_normalizer() {
+            Some(n) => Classes::from_normalizer(|s| {
+                let mut ns = tokenizers::NormalizedString::from(s);
+                tokenizers::Normalizer::normalize(n, &mut ns).ok().map(|_| ns.get().to_string())
+            }),
+            None => Classes::none(),
+        };
+        Ok(E5 { tokenizer, model, bytes, cut_bytes, classes })
     }
 
     /// Bytes the loaded model holds (weights, and an estimate of the tokenizer's tables).
@@ -128,7 +180,7 @@ impl E5 {
     /// gives the same 512 tokens as tokenizing the whole text, in bounded time and memory,
     /// whatever the input (a megabyte without a space included).
     pub fn cut<'a>(&self, text: &'a str) -> std::borrow::Cow<'a, str> {
-        cut_text(text, self.cut_bytes)
+        cut_text(text, self.cut_bytes, &self.classes)
     }
 
     /// Bytes [`E5::cut`] keeps at most.
@@ -155,6 +207,13 @@ impl E5 {
         let cut = self.cut(text);
         let input = if prefix.is_empty() { cut } else { std::borrow::Cow::Owned(format!("{prefix}{cut}")) };
         Ok(truncate(self.encode(input.trim_end())?))
+    }
+
+    /// The token ids of the whole of `text`, uncut (trailing whitespace dropped): what
+    /// [`E5::tokenize`] must equal, for checks. Its cost grows with the text.
+    pub fn tokenize_uncut(&self, text: &str) -> Result<Vec<u32>> {
+        let classes = &self.classes;
+        Ok(truncate(self.encode(text.trim_end_matches(|c| classes.space(c) || classes.deleted(c)))?))
     }
 
     fn encode(&self, text: &str) -> Result<Vec<u32>> {
@@ -233,16 +292,24 @@ fn f16_to_f32(h: u16) -> f32 {
     f32::from_bits(bits)
 }
 
-/// `text` without trailing whitespace, whitespace runs longer than [`WHITESPACE_RUN`]
-/// shortened to it, cut to at most `limit` bytes at a character boundary. Borrowed when nothing
-/// was shortened.
-pub fn cut_text(text: &str, limit: usize) -> std::borrow::Cow<'_, str> {
-    let text = text.trim_end();
+/// The start of `text` its first [`MAX_TOKENS`] tokens come from: characters the normaliser
+/// deletes skipped (they'd vanish anyway), runs of whitespace and of characters it turns into
+/// spaces shortened to [`WHITESPACE_RUN`] (they'd collapse to one space anyway), trailing ones
+/// dropped, then at most `limit` bytes, cut at a character boundary. Each byte kept then
+/// normalises to text that holds at least a quarter of a token's bytes, so `limit` (four times
+/// 512 times the longest piece) holds the 512 tokens. Borrowed when nothing was left out.
+pub fn cut_text<'a>(text: &'a str, limit: usize, classes: &Classes) -> std::borrow::Cow<'a, str> {
+    let text = text.trim_end_matches(|c| classes.space(c) || classes.deleted(c));
     let mut out: Option<String> = None;
     let (mut run, mut kept) = (0usize, 0usize);
     for (i, c) in text.char_indices() {
-        run = if c.is_whitespace() { run + 1 } else { 0 };
-        if run > WHITESPACE_RUN {
+        let skip = if classes.deleted(c) {
+            true
+        } else {
+            run = if classes.space(c) { run + 1 } else { 0 };
+            run > WHITESPACE_RUN
+        };
+        if skip {
             out.get_or_insert_with(|| text[..i].to_string());
             continue;
         }
@@ -288,13 +355,26 @@ mod tests {
 
     #[test]
     fn cuts_are_bounded_and_borrow_when_they_can() {
-        assert!(matches!(cut_text("short text  ", 100), std::borrow::Cow::Borrowed("short text")));
-        assert_eq!(cut_text("abcdef", 4), "abcd");
+        let none = Classes::none();
+        assert!(matches!(cut_text("short text  ", 100, &none), std::borrow::Cow::Borrowed("short text")));
+        assert_eq!(cut_text("abcdef", 4, &none), "abcd");
         // A character is never split.
-        assert_eq!(cut_text("ééé", 5), "éé");
+        assert_eq!(cut_text("ééé", 5, &none), "éé");
         let spaced = format!("a{}b", " ".repeat(1000));
-        assert_eq!(cut_text(&spaced, 100), format!("a{}b", " ".repeat(WHITESPACE_RUN)));
-        assert_eq!(cut_text(&"x".repeat(1 << 20), 4096).len(), 4096);
+        assert_eq!(cut_text(&spaced, 100, &none), format!("a{}b", " ".repeat(WHITESPACE_RUN)));
+        assert_eq!(cut_text(&"x".repeat(1 << 20), 4096, &none).len(), 4096);
+        // What the normaliser deletes costs nothing; what it turns into spaces runs like spaces.
+        let nfkc = Classes::from_normalizer(|s| {
+            Some(match s {
+                "\u{1}" => String::new(),
+                "\u{200b}" => " ".to_string(),
+                other => other.to_string(),
+            })
+        });
+        let deleted = format!("{}article", "\u{1}".repeat(40_000));
+        assert_eq!(cut_text(&deleted, 100, &nfkc), "article");
+        let zero_width = format!("{}article\u{200b}", "\u{200b}".repeat(33_000));
+        assert_eq!(cut_text(&zero_width, 100, &nfkc), format!("{}article", "\u{200b}".repeat(WHITESPACE_RUN)));
     }
 
     #[test]

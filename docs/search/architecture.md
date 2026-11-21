@@ -277,12 +277,15 @@ request-rate and in-flight byte budgets so one tenant can't starve the node.
 The embedding model is the node's, shared by its clusters (`search_server::embed`): a bounded
 pool of workers (a third of the CPUs by default, optionally pinned); inputs cut to the bounded
 start their 512 tokens come from and queued per cluster in jobs of about 1,024 tokens; turns by
-owner first (the catalog's owner, in `ClusterSpec::owner`), then by cluster; queue caps per
+owner first (the catalog's owner, in `ClusterSpec::owner`; clusters with no owner, the
+operator's, share one turn), then by cluster, and within a cluster searches before ingest; a
+caller that goes away cancels its jobs not yet started; queue caps per
 cluster (inputs, bytes) and per node (bytes, tokens) answered with Elasticsearch's 429
 (`es_rejected_execution_exception`); a cap on inputs per call; the model, a load in progress, the
 queued inputs and the running jobs counted against the node's memory budget; and each job's
 thread CPU time metered to its cluster. One detached task fetches, checks and loads the model
-however many callers wait or give up. The weights come only from the operator (a pinned URL or
+however many callers wait or give up, and a failed load is answered from a backoff (30 s,
+doubling to 10 minutes) instead of being tried again by every call. The weights come only from the operator (a pinned URL or
 a directory), checked by SHA-256.
 
 APIs built on other APIs (EQL, ES|QL, SQL, PPL, graph, vector tiles, `terms_enum`, transforms'
