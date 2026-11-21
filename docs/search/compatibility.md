@@ -33,7 +33,7 @@ Reproduce the YAML numbers with `scripts/search-yaml-suites.sh roll` (set `ROLL_
   `-kuromoji`, `-nori`, `-smartcn` and `-icu` plugins added; `logsdb` and runtime fields rerun on
   2026-11-17). 46 suites pass every test
   Elasticsearch passes. What's left, largest first: x-pack
-  `platinum` (1,065 of 1,412; machine learning is most of it), plugins roll doesn't ship
+  `platinum` (1,080 of 1,412; machine learning is most of it), plugins roll doesn't ship
   (`mapper-annotated-text`, `-murmur3` and `-size`, `ingest-attachment`, `ingest-otel`, `prometheus`), `apm-data`'s templates and
   pipelines (1 of 26), cross-cluster replication (none),
   `mapper-unsigned-long` (33 of 34: a `terms` aggregation across `long` and `unsigned_long`
@@ -267,7 +267,7 @@ the discovery/store plugins.
 | `watcher` | `x-pack/plugin/watcher:mustache,painless,watcher` | plain | 92 | 89 | 89 | 89 | 0 |
 | `watcher-security` | `x-pack/plugin/watcher:security` | security | 9 | 9 | 9 | 9 | 0 |
 | `wildcard` | `x-pack/plugin/wildcard` | plain | 9 | 9 | 9 | 9 | 0 |
-| `platinum` | `rest-resources platinum:-esql,downsample,downsample-with-security,entsearch,eql,mustache,painless,transform,watcher` | security | 1728 | 1412 | 1065 | 1065 | 347 |
+| `platinum` | `rest-resources platinum:-esql,downsample,downsample-with-security,entsearch,eql,mustache,painless,transform,watcher` | security | 1728 | 1412 | 1080 | 1080 | 332 |
 | `esql` | `rest-resources platinum:esql` | plain | 619 | 549 | 549 | 549 | 0 |
 | `analysis-icu` | `plugins/analysis-icu` | plugins | 13 | 13 | 13 | 13 | 0 |
 | `analysis-kuromoji` | `plugins/analysis-kuromoji` | plugins | 7 | 7 | 7 | 7 | 0 |
@@ -323,7 +323,7 @@ the discovery/store plugins.
 <!-- test-search: watcher >= 89 -->
 <!-- test-search: watcher-security >= 9 -->
 <!-- test-search: wildcard >= 9 -->
-<!-- test-search: platinum >= 1065 -->
+<!-- test-search: platinum >= 1080 -->
 <!-- test-search: inference >= 161 -->
 <!-- test-search: esql >= 549 -->
 <!-- test-search: analysis-phonetic >= 5 -->
@@ -337,7 +337,7 @@ the discovery/store plugins.
 `platinum` by directory (roll / Elasticsearch passes): `ml` 349/618, `analytics` 113/114, `spatial`
 92/105, `security` 100/101, `rollup` 52/52, `exponential_histogram` 44/44, `vector-tile` 34/34,
 `api_key` 32/32, `aggregate-metrics` 26/28, `inference` 22/23, `search.vectors` 22/23, `wildcard`
-22/22, `terms_enum` 20/20, `rank_vectors` 0/15, `users` 15/15, `constant_keyword` 13/13,
+22/22, `terms_enum` 20/20, `rank_vectors` 15/15, `users` 15/15, `constant_keyword` 13/13,
 `counted_keyword` 8/11, `data_streams` 11/11, `migrate` 0/11, `change_password` 8/8, `roles` 8/8,
 `text_structure` 5/8, `enrich` 6/7, `privileges` 7/7, `profiling` 0/7, `token` 6/6, `versionfield`
 6/6, `async_search` 4/5, `redact` 5/5, `sql` 5/5, `user_profile` 5/5, `authenticate` 4/4, `logsdb`
@@ -345,6 +345,22 @@ the discovery/store plugins.
 `searchable_snapshots` 1/3, `snapshot` 1/3, `logging` 0/2, `migration` 2/2, `service_accounts` 2/2,
 `set_security_user` 2/2, `xpack` 0/2, `deprecation` 0/1, `graph` 1/1, `health` 0/1,
 `vectordb_document` 0/1, `voting_only_node` 1/1.
+
+`rank_vectors` (multi-vector fields for late-interaction reranking) is built: `element_type`
+`float` / `bfloat16` / `byte` / `bit`, `dims` from the mapping or the first document, each document's
+vectors flat in one binary doc value (`search_codec::vectors::multi`: no header, the count is the
+value's length over the vector width), `maxSimDotProduct` and `maxSimInvHamming` in
+`script_score`, `doc[...]` / `field(...)` vectors and magnitudes, `docvalue_fields`, `fields`, and
+the vectors left out of `_source` (inside `nested` too, and in nested inner hits) unless
+`exclude_vectors: false` or the includes name them, printed as their element type keeps them
+(`byte` and `bit` as integers, `bfloat16` rounded). Infinite float values are refused at index
+time, for `dense_vector` too, with Elasticsearch's message. roll keeps them in the stored `_source` and hides them on read, where
+Elasticsearch strips them and patches them back from the doc values. A MaxSim costs query vectors ×
+document vectors × dimensions for one document, so it polls the search's control (the request's
+`timeout` or `search.default_search_timeout`, and task cancellation) every 2^20 multiply-adds: a
+document with many vectors stops at the request's deadline instead of holding a search thread.
+Not built: a synthetic `_source` from the doc values (synthetic indices keep the vectors as sent)
+and `rank_vectors` in ES|QL.
 
 Largest gaps by suite (from the roll reports, `target/search-yaml/extended/roll-<suite>.json`):
 not implemented at all: the plugin mappers (`annotated_text`,

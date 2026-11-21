@@ -92,7 +92,7 @@ GitHub's dynamic toolsets, applied to a stateless server:
 
 | Tool | What it does |
 | --- | --- |
-| `roll_find_tools` | Searches the tools this connection may use by what the agent wants to do (`query`, optional `product`, `limit` up to 25) and answers each match's name, description, input schema and which run tool takes it. With no query, it answers every tool's name and title. Words count by how rare they are among the tools, more in a name than a title than a description, and of two names holding the query, the one it covers more of comes first (`apps_deploy` before `apps_cancel_deploy`). `search::finds` holds 30 everyday queries, across every product, to their tool. |
+| `roll_find_tools` | Searches the tools this connection may use by what the agent wants to do (`query`, optional `product`, `limit` up to 25) and answers each match's name, description, input schema and which run tool takes it. With no query, it answers every tool's name and title. Words count by how rare they are among the tools, more in a name than a title than a description, and of two names holding the query, the one it covers more of comes first (`apps_deploy` before `apps_cancel_deploy`); a title that holds every word of the query counts double ("run a function now" is `tasks_invoke`, not `tasks_cancel_function_runs`). Question words (why, are, does) and plurals (`queries` is `query`) don't change a match. `search::finds` holds 73 everyday queries, across every product, to their tool. |
 | `roll_run_read` | Runs a read-only tool: `{"tool": …, "arguments": {…}}`. It refuses one that changes things. |
 | `roll_run` | Runs any tool the connection has. |
 
@@ -532,10 +532,11 @@ decided by the gate, and a connection is offered only the prompts whose tools it
 ids (letters, digits, `_`, `.`, `-`, at most 64), quoted in the message: anyone can name a project,
 and a prompt's text is the person's own message to the agent.
 
-A prompt's `project`, `service` and `env` complete as the person types (`completion/complete`): the
-values come from the list tool the connection would call (`workspace_list_projects`; a Postgres
-project's from `postgres_list_projects`;
-`apps_list_services`, `apps_list_environments` for the `service` already given), through the gate
+A prompt's arguments complete as the person types (`completion/complete`): the values come from
+the list tool the connection would call (`workspace_list_projects`; a Postgres project's from
+`postgres_list_projects`; `apps_list_services`, `apps_list_environments` for the `service` already
+given; `previews_list`; `queues_list_vhosts`, `queues_list_queues`; `streams_list`,
+`streams_list_groups` for the `stream` already given), through the gate
 with the caller's token, so a suggestion is only what it may read, and each is an audited read.
 Only ids are offered (what tools take). A completion never asks a person: a list that would ask
 is refused at once (`would_ask`), so typing opens no approval. A prompt the connection isn't offered
@@ -551,6 +552,11 @@ is `-32602`.
 | `tune_slow_query` | `project` | A slow query made faster on a branch first (Neon's query tuning): its plan, an index tried on a copy, both plans compared, main only when you say so. | `postgres_get_project`, `postgres_slow_queries`, `postgres_explain`, `postgres_create_branch`, `postgres_execute`, `postgres_delete_branch` |
 | `security_checkup` | | Which tokens need attention, most serious first: a narrower rule set for each over-broad one, where roaming ones were used from, which to revoke or give an expiry; adds secrets' findings, a project's secrets audit log that doesn't hold (`secrets_verify_audit`), unmasked personal data, over-broad or unused S3 keys, public buckets, search clusters with no IP allowlist, previews shared outside the team and live images with high or critical vulnerabilities when the connection has those tools. Changes nothing. | `access_checkup`, `access_tighten_token`, `access_token_networks` |
 | `debug_failing_service` | `service`, `env` | Why an environment is failing (what roll already flags in its `attention`, the whole timeline, deploys, deploy logs, failing requests and routes, metrics), then a fix or a rollback it asks about first. | `apps_get_environment`, `apps_activity`, `apps_route_stats`, `apps_list_deploys`, `apps_deploy_logs`, `apps_logs`, `apps_metrics` |
+| `review_preview` | `preview` | Whether a change's preview is ready to land: why it failed or waits for `approve-run`, its schema changes (a dropped column, a `NOT NULL` with no default), new errors, routes slower than main's preview, its pages against the base (screenshots it looks at), people's notes. Changes nothing without asking. | `previews_wait`, `previews_get`, `previews_logs`, `previews_errors`, `previews_routes`, `previews_screenshot`, `previews_list_notes` |
+| `clear_task_backlog` | | Why roll tasks' messages pile up or fail: a paused or limited queue, dead letters and each delivery's error grouped by cause, then a retry it asks about first (with how many). | `tasks_stats`, `tasks_list_queues`, `tasks_get_queue`, `tasks_list_dead_letters`, `tasks_get_message` |
+| `drain_queue` | `vhost`, `queue` | Why a queue backs up: no consumers, consumers that don't acknowledge (and which connection), rates, and why its dead-letter queue's messages died; a replay it asks about first, never a purge. | `queues_get_queue`, `queues_queue_rates`, `queues_list_channels`, `queues_peek`, `queues_list_bindings` |
+| `find_consumer_lag` | `stream`, `group` | Why a consumer group falls behind: lag per partition, members against partitions, throughput, and the record a stuck partition stops at; a reset (which skips records) it asks about first. | `streams_get_group`, `streams_get_topic`, `streams_usage`, `streams_read` |
+| `review_costs` | `project` | Where a project's money goes this month (apps by service, projected; previews against their budget and rules; the canvas's databases, buckets, streams and clusters when the connection has their tools), against last month and its limits, with what would cost less for the top three. Changes nothing without asking. | `apps_project_usage`, `apps_limits`, `previews_usage`, `previews_settings` |
 
 ### As skills
 
@@ -985,6 +991,7 @@ previews are listed once those products are on.
 | `apps_cancel_cron_run` | Stop a running cron run (production: deploy). | `POST /v1/apps/services/{id}/environments/{env}/runs/{run}/cancel` |
 | `apps_run_cron` | Run a cron job now (deploy in production). | `POST …/environments/{env}/runs` |
 | `apps_limits` | A project's apps spend limits. | `GET /v1/apps/projects/{project}/limits` |
+| `apps_project_usage` | A month's apps cost by service and environment (previews and deleted services as a row each), most costly first, this month's projected. | `GET /v1/apps/projects/{project}/usage` |
 | `apps_set_limits` | Set a project's monthly apps alert and hard cap (the cap pauses the project; admin). | `PUT /v1/apps/projects/{project}/limits` |
 | `apps_overview` | What roll apps runs here: domain, runtime, prices, every service. | `GET /v1/apps` |
 | `apps_list_project_services` | The services in one workspace project. | `GET /v1/apps/projects/{project}/services` |
@@ -1066,9 +1073,13 @@ previews are listed once those products are on.
 Ranked; the top item is in progress. A watchdog reads this list. Unblocked work comes first; what
 waits on a sibling PR reaching main is last.
 
-1. **Next, ranked (now):** what each client takes, said only as documented: VS Code's 128, Cursor's
-   about 40; Windsurf's 100 no longer appears in its docs (now Devin's desktop app's), so roll stops
-   citing it (`feature/roll-mcp-client-limits`, this PR). Then, as each lands: search's browser keys
+1. **Next, ranked (now):** landed 2026-11-20/21: `previews_wait` (#555), 2026-07-28's
+   resource-not-found code (#556; the rest of that revision's changelog and deprecations were
+   already in: discover, listen, `resultType`, `ttlMs`, `Mcp-Name`, the renumbered errors, `iss`,
+   client ID metadata documents beside dynamic registration), and workflows for previews, tasks,
+   queues and streams (`review_preview`, `clear_task_backlog`, `drain_queue`,
+   `find_consumer_lag`; #560), search mode's ranking (#561: 73 everyday queries), and apps'
+   month by service as `apps_project_usage` once apps #562 landed (this PR). Then, as each lands: search's browser keys
    (#358: list and revoke as tools, making one stays a credential), secrets' found-credential view
    (#487's `unstored`) and placeholders (#520: the list as a read, the revokes destructive; binding a
    key to hosts stays a person's), project members (#501's own tools; its other routes are
@@ -1081,7 +1092,11 @@ waits on a sibling PR reaching main is last.
    owners (they fail only under load and pass alone): code-control's
    `automations::concurrency_cancel_and_retry` and
    `agents_code::roll_code_projects_with_auto_pull_follow_their_default_branch`. Waiting on roll code: a removed person's
-   repositories handed to someone else. Not doing: "remember this browser"; a preset that reveals
+   repositories handed to someone else. Later: a docs search tool (Supabase, Vercel, Neon,
+   Cloudflare and Stripe have one) once roll has user documentation to search (`docs/` is design
+   notes and contracts, not that); tasks' tools in areas once it nears ~60 (47 now); a call's
+   `_meta.traceparent` (SEP-414) carried into the routed request once rolld's API traces (apps'
+   and previews' traffic do). Not doing: "remember this browser"; a preset that reveals
    development's values without asking (#354); a connection-level `?project=` (only a token's
    rules bound a project; a default that some tools can't honour would look like a boundary).
 2. **Landed 2026-11-20, evening (main 32352f2fc, ci green):** secrets' toolset in areas (#538);

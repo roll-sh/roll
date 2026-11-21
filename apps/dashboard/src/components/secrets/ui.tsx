@@ -6,6 +6,7 @@ import { ROLL_API } from "@/lib/roll-api";
 import type { AuditEntry, Cell, Link, Problem, Secret, Totp } from "@/lib/secrets-api";
 import { KIND_ICON } from "../workspace/kind";
 import type { ResourceKind } from "@/lib/workspace-api";
+import { useInstallLine } from "@/lib/install-line";
 
 /** The Secrets surface's controls, on the dashboard frame's tokens (docs/code/agents-design.md). */
 export const button =
@@ -90,7 +91,6 @@ export function Warnings({ items, className = "" }: { items: string[]; className
   );
 }
 
-/** An empty state that teaches: what goes here, and the CLI way to do it. */
 const still = () => () => {};
 
 /**
@@ -103,10 +103,14 @@ function useCliLogin(): string[] {
   return api ? [`roll login ${api}`] : [];
 }
 
-/** `login`: the CLI lines start by signing in to this roll. */
-export function Teach({ title, children, cli, login = false }: { title: string; children: ReactNode; cli?: string[]; login?: boolean }) {
+/**
+ * An empty state that teaches: what goes here, and the CLI way to do it. The CLI lines start with
+ * how to install roll (`install`), then signing in to this roll (`login`).
+ */
+export function Teach({ title, children, cli, install = false, login = false }: { title: string; children: ReactNode; cli?: string[]; install?: boolean; login?: boolean }) {
+  const installLine = useInstallLine();
   const signIn = useCliLogin();
-  if (cli && login) cli = [...signIn, ...cli];
+  if (cli) cli = [...(install ? [installLine] : []), ...(login ? signIn : []), ...cli];
   return (
     <div className="rise mx-auto w-full max-w-[520px] px-4 py-14 text-center">
       <h2 className="text-[18px] font-semibold tracking-[-0.045em]">{title}</h2>

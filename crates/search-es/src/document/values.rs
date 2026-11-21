@@ -37,6 +37,9 @@ pub enum FieldValue {
     Range { from: Value, to: Value, include_from: bool, include_to: bool },
     DenseVector(Vec<f32>),
     ByteVector(Vec<i8>),
+    /// `rank_vectors`: a document's vectors back to back, `width` values each (bytes for `bit`
+    /// vectors), in `floats` (`float`, `bfloat16`) or `bytes` (`byte`, `bit`).
+    RankVectors { width: usize, floats: Vec<f32>, bytes: Vec<i8> },
     /// `sparse_vector` and `rank_features`: token weights.
     Features(Vec<(String, f32)>),
     /// `rank_feature`.
@@ -715,6 +718,7 @@ fn parse_non_null(w: &mut Cx<'_, '_>, f: &FieldMapper, full: &str, ctx: &Mapping
             Vec::new()
         }
         "dense_vector" => parse_dense_vector(w, f, full, ctx)?,
+        "rank_vectors" => parse_rank_vectors(w, f, full, ctx)?,
         "knn_vector" => parse_knn_vector(w, f, full, ctx)?,
         "rank_feature" => {
             let v = w.p.float_value()?;
@@ -1685,7 +1689,93 @@ fn parse_knn_vector(w: &mut Cx<'_, '_>, f: &FieldMapper, full: &str, ctx: &Mappi
     }
 }
 
+/// `RankVectorsFieldMapper.parse`: an array of vectors, each parsed as a `dense_vector` of the
+/// same element type (numbers, or hex and base64 strings). Without `dims` every vector must
+/// have the first one's length, which becomes the mapping's (`write::set_vector_dims`).
+fn parse_rank_vectors(w: &mut Cx<'_, '_>, f: &FieldMapper, full: &str, ctx: &MappingCtx) -> Result<Vec<FieldValue>, ValueError> {
+    if w.p.token() != Token::StartArray {
+        return Err(ValueError::plain(EsError::illegal_argument(format!("Field [{full}] of type [rank_vectors] cannot be indexed with a single value"))));
+    }
+    let bit = f.effective("element_type", ctx).as_str() == Some("bit");
+    let dims = param_i64(f, "dims", ctx);
+    let (mut floats, mut bytes): (Vec<f32>, Vec<i8>) = (Vec::new(), Vec::new());
+    let mut width: Option<usize> = None;
+    while let Some(t) = w.p.next_token() {
+        if t == Token::EndArray {
+            break;
+        }
+        // Each value is one vector, appended as it's read: the buffers grow with the bytes the
+        // document actually holds.
+        let n = match parse_dense_vector(w, f, full, ctx)?.pop() {
+            Some(FieldValue::DenseVector(v)) => {
+                floats.extend_from_slice(&v);
+                v.len()
+            }
+            Some(FieldValue::ByteVector(v)) => {
+                bytes.extend_from_slice(&v);
+                v.len()
+            }
+            _ => 0,
+        };
+        match width {
+            None => width = Some(n),
+            Some(w0) if w0 != n => {
+                return Err(ValueError::plain(match dims {
+                    Some(d) => EsError::illegal_argument(format!(
+                        "The [rank_vectors] field [{full}] in doc [{}] has a different number of dimensions [{}] than defined in the mapping [{d}]",
+                        w.desc,
+                        if bit { n * 8 } else { n }
+                    )),
+                    None => EsError::illegal_argument(format!("Field [{full}] of type [rank_vectors] cannot be indexed with vectors of different dimensions")),
+                }));
+            }
+            _ => {}
+        }
+    }
+    match (width, dims) {
+        (Some(width), _) if width > 0 => Ok(vec![FieldValue::RankVectors { width, floats, bytes }]),
+        // The dims a first document implies must be valid ones: `[]` implies -1, empty vectors 0
+        // (Elasticsearch's dimension check, unwrapped).
+        (_, None) => {
+            let n = width.map_or(-1, |w| (w * if bit { 8 } else { 1 }) as i64);
+            let (min, max) = if bit { (8, 32768) } else { (1, 4096) };
+            Err(ValueError::none(EsError::mapper_parsing(format!("The number of dimensions should be in the range [{min}, {max}] but was [{n}]"))))
+        }
+        _ => Ok(Vec::new()),
+    }
+}
+
+/// `Element.checkNanAndInfinite` of a float vector, then its squared magnitude (summed in float,
+/// in order: `float` and `bfloat16` alike, before rounding), with `appendErrorElements`' preview.
+/// Values whose square overflows (from about 1.8e19) are refused, so nothing stored rounds to an
+/// infinite `bfloat16` either.
+fn check_finite(element: &str, v: &[f32]) -> Result<(), ValueError> {
+    let java = crate::json::write::java_float;
+    let mut msg = match v.iter().enumerate().find(|(_, x)| !x.is_finite()) {
+        Some((i, x)) if x.is_nan() => format!("element_type [{element}] vectors do not support NaN values but found [NaN] at dim [{i}];"),
+        Some((i, x)) => format!("element_type [{element}] vectors do not support infinite values but found [{}] at dim [{i}];", java(*x)),
+        None => {
+            let mut sq = 0f32;
+            for x in v {
+                sq += x * x;
+            }
+            if sq.is_finite() {
+                return Ok(());
+            }
+            "NaN or Infinite magnitude detected, this usually means the vector values are too extreme to fit within a float.".to_string()
+        }
+    };
+    msg.push_str(" Preview of invalid vector: [");
+    msg.push_str(&v.iter().take(5).map(|x| java(*x)).collect::<Vec<_>>().join(", "));
+    if v.len() >= 5 {
+        msg.push_str(", ...");
+    }
+    msg.push(']');
+    Err(ValueError::plain(EsError::illegal_argument(msg)))
+}
+
 fn parse_dense_vector(w: &mut Cx<'_, '_>, f: &FieldMapper, _full: &str, ctx: &MappingCtx) -> Result<Vec<FieldValue>, ValueError> {
+    let ty = f.ty;
     let dims = param_i64(f, "dims", ctx);
     let element = f.effective("element_type", ctx).as_str().unwrap_or("float").to_string();
     let full = f.name.clone();
@@ -1693,7 +1783,7 @@ fn parse_dense_vector(w: &mut Cx<'_, '_>, f: &FieldMapper, _full: &str, ctx: &Ma
     let parsing = |msg: String| ValueError::plain(EsError::new(400, "parsing_exception", format!("Failed to parse object: {msg}")));
     let dims_err = |n: usize, d: i64| {
         ValueError::plain(EsError::illegal_argument(format!(
-            "The [dense_vector] field [{full}] in doc [{desc}] has a different number of dimensions [{n}] than defined in the mapping [{d}]"
+            "The [{ty}] field [{full}] in doc [{desc}] has a different number of dimensions [{n}] than defined in the mapping [{d}]"
         )))
     };
     match w.p.token() {
@@ -1723,7 +1813,7 @@ fn parse_dense_vector(w: &mut Cx<'_, '_>, f: &FieldMapper, _full: &str, ctx: &Ma
                             && ((floats.len() + 1) * if bit { 8 } else { 1 }) as i64 > d
                         {
                             return Err(ValueError::plain(EsError::illegal_argument(format!(
-                                "The [dense_vector] field [{full}] in doc [{desc}] has more dimensions than defined in the mapping [{d}]"
+                                "The [{ty}] field [{full}] in doc [{desc}] has more dimensions than defined in the mapping [{d}]"
                             ))));
                         }
                         floats.push(v);
@@ -1741,7 +1831,10 @@ fn parse_dense_vector(w: &mut Cx<'_, '_>, f: &FieldMapper, _full: &str, ctx: &Ma
             if byte {
                 Ok(vec![FieldValue::ByteVector(floats.into_iter().map(|v| v as i8).collect())])
             } else {
-                Ok(vec![FieldValue::DenseVector(floats.into_iter().map(|x| x as f32).collect())])
+                // Doubles past a float's range read as infinite, as Jackson's `floatValue` does.
+                let v: Vec<f32> = floats.into_iter().map(|x| x as f32).collect();
+                check_finite(&element, &v)?;
+                Ok(vec![FieldValue::DenseVector(v)])
             }
         }
         Token::String => {
@@ -1789,11 +1882,12 @@ fn parse_dense_vector(w: &mut Cx<'_, '_>, f: &FieldMapper, _full: &str, ctx: &Ma
                 )));
             }
             // Two bytes per dimension: big-endian bfloat16 (the high half of a float32).
-            let floats = if decoded.len() == d * 2 && d * 2 != d * 4 {
+            let floats: Vec<f32> = if decoded.len() == d * 2 && d * 2 != d * 4 {
                 decoded.as_chunks::<2>().0.iter().map(|c| f32::from_bits((u16::from_be_bytes(*c) as u32) << 16)).collect()
             } else {
                 decoded.as_chunks::<4>().0.iter().map(|c| f32::from_be_bytes([c[0], c[1], c[2], c[3]])).collect()
             };
+            check_finite(&element, &floats)?;
             Ok(vec![FieldValue::DenseVector(floats)])
         }
         t => Err(parsing(format!("expecting token of type [START_ARRAY] but found [{t}]"))),

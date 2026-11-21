@@ -21,7 +21,7 @@
 //! issuer roll can't reach (a cluster's own, `https://kubernetes.default.svc`) works.
 
 use serde_json::{Map, Value as Json};
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -240,6 +240,36 @@ impl<'a> Jwt<'a> {
         self.claims.get(name).and_then(Json::as_str)
     }
 
+    /// The first of an identity's `claims` (name or pointer → pattern) the token doesn't match,
+    /// if any. See [`claim`] for what a key names and what a value matches.
+    pub fn unmatched<'c>(&self, claims: &'c BTreeMap<String, String>) -> Option<&'c str> {
+        claims.iter().find(|(key, want)| !self.matches(key, want)).map(|(key, _)| key.as_str())
+    }
+
+    /// Whether the claim `key` names (see [`claim`]) matches `pattern`.
+    ///
+    /// A plain name (`ref`) matches only a string claim by [`wildcard`], exactly as rules did
+    /// before pointers: a rule made then never starts matching a list or a number it used to
+    /// refuse. A pointer (`/groups`) opts into more: a string by [`wildcard`], a number or a
+    /// boolean by its JSON text (`true`, `42`), an array when any of its first
+    /// [`MAX_CLAIM_ELEMENTS`] elements does (one level: an array in an array, an object or null
+    /// never matches). A missing claim never matches.
+    pub fn matches(&self, key: &str, pattern: &str) -> bool {
+        if !key.starts_with('/') {
+            return self.str(key).is_some_and(|s| wildcard(pattern, s));
+        }
+        let one = |v: &Json| match v {
+            Json::String(s) => wildcard(pattern, s),
+            Json::Number(_) | Json::Bool(_) => wildcard(pattern, &v.to_string()),
+            _ => false,
+        };
+        match claim(&self.claims, key) {
+            Some(Json::Array(a)) => a.iter().take(MAX_CLAIM_ELEMENTS).any(one),
+            Some(v) => one(v),
+            None => false,
+        }
+    }
+
     fn time(&self, name: &str) -> Result<Option<i64>> {
         match self.claims.get(name) {
             None => Ok(None),
@@ -385,6 +415,91 @@ pub fn pinned_keys(doc: &str) -> std::result::Result<usize, String> {
     Ok(n)
 }
 
+/// The most claim rules one identity has.
+pub const MAX_CLAIMS: usize = 10;
+/// The most segments a claim's JSON pointer has.
+pub const MAX_POINTER_DEPTH: usize = 8;
+/// The most elements of an array claim a rule looks at; later ones never match.
+pub const MAX_CLAIM_ELEMENTS: usize = 256;
+/// Checked by [`Keys::verify`] or the identity's own fields; never a claim rule.
+const RESERVED: [&str; 6] = ["iss", "aud", "sub", "exp", "nbf", "iat"];
+
+/// The value a claim rule's key names in a token's claims. A key starting with `/` is a JSON
+/// pointer (RFC 6901: `~1` is `/`, `~0` is `~`) into nested objects, with a decimal index for an
+/// array element (`/realm_access/roles`, `/groups/0`); any other key is a top-level claim's name,
+/// as it always was. Walks at most [`MAX_POINTER_DEPTH`] segments; a malformed pointer names
+/// nothing.
+pub fn claim<'j>(claims: &'j Map<String, Json>, key: &str) -> Option<&'j Json> {
+    let Some(pointer) = key.strip_prefix('/') else { return claims.get(key) };
+    let mut segments = pointer.split('/');
+    let mut at = claims.get(&unescape(segments.next()?)?)?;
+    for (n, segment) in segments.enumerate() {
+        if n + 1 >= MAX_POINTER_DEPTH {
+            return None;
+        }
+        let segment = unescape(segment)?;
+        at = match at {
+            Json::Object(m) => m.get(&segment)?,
+            Json::Array(a) => a.get(index(&segment)?)?,
+            _ => return None,
+        };
+    }
+    Some(at)
+}
+
+/// A pointer segment with its escapes undone; None for a `~` not followed by `0` or `1`.
+fn unescape(segment: &str) -> Option<String> {
+    let mut out = String::with_capacity(segment.len());
+    let mut chars = segment.chars();
+    while let Some(c) = chars.next() {
+        out.push(match c {
+            '~' => match chars.next()? {
+                '0' => '~',
+                '1' => '/',
+                _ => return None,
+            },
+            c => c,
+        });
+    }
+    Some(out)
+}
+
+/// RFC 6901's array index: `0`, or digits without a leading zero.
+fn index(segment: &str) -> Option<usize> {
+    let digits = !segment.is_empty() && segment.bytes().all(|b| b.is_ascii_digit());
+    (digits && (segment == "0" || !segment.starts_with('0'))).then(|| segment.parse().ok()).flatten()
+}
+
+/// An identity's subject and claim rules, checked when it's made: the shared-issuer rule first
+/// ([`open_to_others`], never optional: a claim rule narrows a subject, it never stands in for
+/// one), then the rules themselves. Roll secrets' identities and roll-access's trusted machine
+/// clients both call this, so their rules are one. The error is the caller's message to show.
+pub fn check_identity(issuer: &str, subject: &str, claims: &BTreeMap<String, String>) -> std::result::Result<(), String> {
+    if let Some(shape) = open_to_others(issuer, subject) {
+        return Err(format!("{issuer} signs for everyone: the subject names one of its tenants, {shape}"));
+    }
+    let usage = || format!("claims are at most {MAX_CLAIMS} other claims (not iss, aud, sub or the times), each a name or a JSON pointer (/realm_access/roles, at most {MAX_POINTER_DEPTH} segments) to a value or a pattern");
+    if claims.len() > MAX_CLAIMS {
+        return Err(usage());
+    }
+    for (key, want) in claims {
+        let first = match key.strip_prefix('/') {
+            Some(pointer) => {
+                let segments: Vec<&str> = pointer.split('/').collect();
+                if segments.len() > MAX_POINTER_DEPTH || segments.iter().any(|s| s.is_empty() || unescape(s).is_none()) {
+                    return Err(format!("{key}: {}", usage()));
+                }
+                unescape(segments[0]).unwrap_or_default()
+            }
+            None => key.clone(),
+        };
+        if key.is_empty() || key.len() > 256 || want.is_empty() || want.len() > 256 || RESERVED.contains(&first.as_str()) {
+            return Err(usage());
+        }
+    }
+    Ok(())
+}
+
 /// Attempts per key in a sliding minute (in memory, per node: a cap on work, not an audit).
 #[derive(Default)]
 pub struct Window {
@@ -436,7 +551,21 @@ pub fn wildcard(pattern: &str, text: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{Window, open_to_others, wildcard};
+    use super::{Jwt, MAX_CLAIM_ELEMENTS, Window, check_identity, open_to_others, wildcard};
+    use serde_json::{Value as Json, json};
+    use std::collections::BTreeMap;
+
+    /// A token with `claims` (unsigned: matching never looks at the signature).
+    fn jwt(claims: Json) -> Jwt<'static> {
+        use base64::Engine;
+        let b64 = |v: Json| base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(v.to_string());
+        let token = format!("{}.{}.c2ln", b64(json!({ "alg": "ES256" })), b64(claims));
+        Jwt::parse(Box::leak(token.into_boxed_str())).unwrap()
+    }
+
+    fn rules(pairs: &[(&str, &str)]) -> BTreeMap<String, String> {
+        pairs.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect()
+    }
 
     #[test]
     fn a_window_counts_each_key_apart() {
@@ -457,6 +586,57 @@ mod tests {
         assert!(open_to_others(ado, "p://acme/shop/*").is_some() && open_to_others(ado, "p://acme/shop").is_some() && open_to_others(ado, "repo:acme/web:*").is_some());
         let entra = "https://login.microsoftonline.com/00000000-0000-0000-0000-00000000c0d2/v2.0";
         assert!(open_to_others(entra, "/eid1/c/pub/t/dGVzdA/a/dGVzdA/sc/org-1/sc-1").is_none() && open_to_others(entra, "/eid1/*").is_some());
+    }
+
+    #[test]
+    fn claim_rules_reach_nested_and_list_claims() {
+        let t = jwt(json!({
+            "sub": "svc", "realm_access": { "roles": ["viewer", "deployer"] }, "groups": ["ops", "team-web"],
+            "ref": "refs/heads/main", "a/b": { "c~d": "x" }, "run_attempt": 2, "email_verified": true, "nested": [["deployer"]],
+        }));
+        // A nested array (Keycloak's), a top-level one (Entra's groups, GitLab's groups_direct),
+        // a plain name as before, and, by pointer, numbers and booleans by their JSON text.
+        assert_eq!(t.unmatched(&rules(&[("/realm_access/roles", "deployer"), ("/groups", "team-*"), ("ref", "refs/heads/*")])), None);
+        assert!(t.matches("/groups", "ops") && t.matches("/run_attempt", "2") && t.matches("/email_verified", "true") && t.matches("/groups/1", "team-web"));
+        // A plain name matches only a string, as rules made before pointers did: one on a claim a
+        // token sends as a list or a number doesn't start letting it in.
+        assert!(!t.matches("groups", "ops") && !t.matches("run_attempt", "2") && !t.matches("email_verified", "true"));
+        // No match: a role it doesn't have, a missing claim, an object, an array in an array.
+        assert_eq!(t.unmatched(&rules(&[("/groups", "ops"), ("/realm_access/roles", "admin")])), Some("/realm_access/roles"));
+        assert!(!t.matches("/realm_access/missing", "*") && !t.matches("/realm_access", "*") && !t.matches("/nested", "deployer"));
+        assert!(!t.matches("/groups/01", "team-web") && !t.matches("/ref/0", "*"), "no leading zeros; a string has no elements");
+        // Escapes: ~1 is /, ~0 is ~; anything else after ~ names nothing.
+        assert!(t.matches("/a~1b/c~0d", "x") && !t.matches("/a/b/c~d", "x") && !t.matches("/a~2b/c~0d", "x"));
+    }
+
+    #[test]
+    fn claim_rules_are_bounded() {
+        // Depth: eight segments walk, a ninth doesn't (and isn't accepted when made).
+        let deep = |n: usize| (0..n).fold(json!("x"), |v, _| json!({ "k": v }));
+        let t = jwt(json!({ "d": deep(7), "many": (0..MAX_CLAIM_ELEMENTS + 1).map(|i| i.to_string()).collect::<Vec<_>>() }));
+        assert!(t.matches(&format!("/d{}", "/k".repeat(7)), "x"));
+        let t9 = jwt(json!({ "d": deep(8) }));
+        assert!(!t9.matches(&format!("/d{}", "/k".repeat(8)), "x"));
+        let issuer = "https://sso.example.com/realms/acme";
+        assert!(check_identity(issuer, "svc", &rules(&[(&format!("/d{}", "/k".repeat(7)), "x")])).is_ok());
+        assert!(check_identity(issuer, "svc", &rules(&[(&format!("/d{}", "/k".repeat(8)), "x")])).is_err());
+        // Length: only the first 256 elements are looked at.
+        assert!(t.matches("/many", "255") && !t.matches("/many", "256"));
+        // Count, empty segments, bad escapes and the claims the token's checks own.
+        let eleven: Vec<(String, String)> = (0..11).map(|i| (format!("c{i}"), "x".into())).collect();
+        assert!(check_identity(issuer, "svc", &eleven.into_iter().collect()).is_err());
+        for key in ["/a//b", "/a~2", "/", "/sub", "aud", "/exp/x"] {
+            assert!(check_identity(issuer, "svc", &rules(&[(key, "x")])).is_err(), "{key}");
+        }
+    }
+
+    #[test]
+    fn claim_rules_never_stand_in_for_a_shared_issuers_subject() {
+        let gh = "https://token.actions.githubusercontent.com";
+        let narrowing = rules(&[("/repository_owner", "acme"), ("repository", "acme/web")]);
+        assert!(check_identity(gh, "repo:*", &narrowing).is_err() && check_identity(gh, "*", &narrowing).is_err());
+        assert!(check_identity("https://gitlab.com", "project_path:*", &rules(&[("/groups_direct", "acme")])).is_err());
+        assert!(check_identity(gh, "repo:acme/web:*", &narrowing).is_ok());
     }
 
     #[test]

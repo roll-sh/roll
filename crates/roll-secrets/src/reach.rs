@@ -30,6 +30,10 @@ pub struct Reach {
     /// Live dynamic credentials issued for its keys (or the key): their holders keep them until
     /// they end.
     pub leases: Vec<LeaseReach>,
+    /// Live placeholders of its keys (or the key), wherever they were resolved (here, a folder
+    /// importing it, an environment based on it): roll's proxies swap them for the value
+    /// (docs/secrets.md, "Using a key without seeing it").
+    pub placeholders: Vec<PlaceholderReach>,
     /// Open one-time shares made from its keys (or the key), as their makers said (`from`).
     pub shares: Vec<ShareReach>,
     /// Open one-time shares of the project that don't say where their value came from: they may
@@ -57,6 +61,19 @@ pub struct LeaseReach {
     pub key: String,
     pub consumer: String,
     pub issued_at: i64,
+    pub expires_at: i64,
+}
+
+#[derive(Debug, Serialize)]
+pub struct PlaceholderReach {
+    pub id: String,
+    pub key: String,
+    /// The consumer it was issued to (`project prj_…` for another project's).
+    pub consumer: String,
+    /// Who made the consumer, for an in-process one.
+    pub maker: Option<String>,
+    /// Where it was resolved: `env:/path`, or `project prj_…`.
+    pub through: String,
     pub expires_at: i64,
 }
 
@@ -172,8 +189,8 @@ impl Secrets {
         // shared with) and environments based on it (previews). Reads are recorded where they
         // happen, so each of those is looked at too.
         type Source = (String, String, String);
-        type Held = (Vec<LeaseReach>, Vec<ShareReach>, usize, Option<crate::cutoff::Freeze>);
-        let (env, sources, reads, truncated, (leases, shares, unattributed_shares, frozen)) = self.db.read(|c| {
+        type Held = (Vec<LeaseReach>, Vec<PlaceholderReach>, Vec<ShareReach>, usize, Option<crate::cutoff::Freeze>);
+        let (env, sources, reads, truncated, (leases, placeholders, shares, unattributed_shares, frozen)) = self.db.read(|c| {
             let env = envs::by_slug(c, project, slug)?;
             // What it handed out that's still out: dynamic credentials not yet revoked (one past
             // its end still works until the sweeper revokes it), and shares not yet used up.
@@ -186,6 +203,25 @@ impl Secrets {
                 .into_iter()
                 .filter(|l| key.is_none_or(|k| l.key == k))
                 .collect();
+            // Placeholders of its keys, by the secret they stand for: wherever they were resolved.
+            let placeholders: Vec<PlaceholderReach> = c
+                .query(
+                    "SELECT p.id, s.key, p.consumer, p.maker, p.project_id, COALESCE(e.slug, ''), p.path, p.expires_at FROM placeholders p JOIN secrets s ON s.id = p.secret_id
+                     LEFT JOIN environments e ON e.id = p.env_id WHERE s.env_id = ? AND s.path = ? AND p.revoked_at IS NULL AND p.expires_at > ? ORDER BY p.issued_at, p.id",
+                    params![env.id, path, now],
+                    |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?, r.get::<_, Option<String>>(3)?, r.get::<_, String>(4)?, r.get::<_, String>(5)?, r.get::<_, String>(6)?, r.get::<_, i64>(7)?)),
+                )?
+                .into_iter()
+                .filter(|p| key.is_none_or(|k| p.1 == k))
+                .map(|(id, key, consumer, maker, of, slug, at, expires_at)| {
+                    // Another project's consumers are its own: named by the project.
+                    if of == project {
+                        PlaceholderReach { id, key, consumer, maker, through: format!("{slug}:{at}"), expires_at }
+                    } else {
+                        PlaceholderReach { id, key, consumer: format!("project {of}"), maker: None, through: format!("project {of}"), expires_at }
+                    }
+                })
+                .collect();
             let shares: Vec<ShareReach> = c
                 .query(
                     "SELECT id, note, key, created_by, expires_at FROM shares WHERE env_id = ? AND path = ? AND ciphertext IS NOT NULL AND expires_at > ? ORDER BY created_at, id",
@@ -197,7 +233,7 @@ impl Secrets {
                 .collect();
             let unattributed: i64 = c.query_row("SELECT COUNT(*) FROM shares WHERE project_id = ? AND env_id IS NULL AND ciphertext IS NOT NULL AND expires_at > ?", params![project, now], |r| r.get(0))?;
             let frozen = crate::cutoff::freeze_of(c, &env.id, &path)?;
-            let held: Held = (leases, shares, unattributed as usize, frozen);
+            let held: Held = (leases, placeholders, shares, unattributed as usize, frozen);
             // As reads resolve them: an importer's importers, an environment based on one, and so
             // on, up to SOURCE_DEPTH steps and SOURCES_MAX folders. A read crosses into another
             // project once, from this project's folder to the one it's shared with (while it's
@@ -298,6 +334,6 @@ impl Secrets {
         }
         let mut readers: Vec<Reader> = readers.into_values().collect();
         readers.sort_by_key(|r| std::cmp::Reverse(r.last_at));
-        Ok(Reach { environment: slug.to_string(), path, key: key.map(String::from), protected: env.protected, untrusted: !env.protected, tokens, identities, syncs, leases, shares, unattributed_shares, projects, imported_by, truncated, readers, uncounted: UNCOUNTED, frozen })
+        Ok(Reach { environment: slug.to_string(), path, key: key.map(String::from), protected: env.protected, untrusted: !env.protected, tokens, identities, syncs, leases, placeholders, shares, unattributed_shares, projects, imported_by, truncated, readers, uncounted: UNCOUNTED, frozen })
     }
 }
