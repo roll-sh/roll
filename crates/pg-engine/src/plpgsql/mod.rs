@@ -5299,16 +5299,19 @@ pub fn system_query(ctx: &ExecCtx, sql: &str) -> Result<(Vec<Row>, Vec<OutCol>)>
     let Some(node) = stmts.into_iter().next().and_then(|s| s.stmt) else {
         return Err(crate::error::internal("empty system view"));
     };
+    // (Its names resolved under pg_catalog alone; run under the session's path, as the
+    // view runs in a query: pg_get_triggerdef and the other printers qualify by it.)
     let mut child = ctx.child(&[]);
     child.search_path = ["pg_catalog".to_string()].into();
+    let run = ctx.child(&[]);
     let r = (|| {
         let mut b = Binder::new(&child, Vec::new());
         let bq = b.bind_statement(&node)?;
-        Ok((collect(&bq.plan, &child, None)?, bq.cols.to_vec()))
+        Ok((collect(&bq.plan, &run, None)?, bq.cols.to_vec()))
     })();
-    ctx.notices
-        .borrow_mut()
-        .extend(child.notices.borrow_mut().drain(..));
+    for c in [&child, &run] {
+        ctx.notices.borrow_mut().extend(c.notices.borrow_mut().drain(..));
+    }
     r
 }
 

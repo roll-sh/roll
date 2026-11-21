@@ -2020,8 +2020,17 @@ fn tree_source(ctx: &ExecCtx, cat: &Catalog, rel: Option<&Arc<crate::catalog::Ta
     use crate::sql::nodetree::{StoredTree, default_exprs_tree, policy_expr_tree, table_expr_tree, trigger_when_tree};
     let Some(rel) = rel else {
         for d in cat.domains.values() {
-            for (_, check) in &d.checks {
-                if crate::sql::nodetree::domain_check_tree(ctx, &d.base, check).as_deref() == Some(tree) {
+            for (name, check) in &d.checks {
+                // (information_schema's: PostgreSQL's tree, as the catalog's own rows hold it.)
+                let initdb = || {
+                    crate::catalog::static_rows::rows(crate::catalog::system::SysTable::PgConstraint).iter().any(|r| {
+                        matches!(r.get(1), Some(Value::Text(n)) if **n == **name)
+                            && matches!(r.last(), Some(Value::Text(t)) if **t == *tree)
+                    })
+                };
+                if crate::sql::nodetree::domain_check_tree(ctx, &d.base, check).as_deref() == Some(tree)
+                    || d.oid < crate::catalog::FIRST_USER_OID && initdb()
+                {
                     return Some(crate::sql::ruleutils::domain_check(ctx, &d.base, check, false).unwrap_or_else(|| check.clone()));
                 }
             }
