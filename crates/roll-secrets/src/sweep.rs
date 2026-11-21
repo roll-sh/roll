@@ -509,6 +509,10 @@ impl Secrets {
         if let Err(e) = self.sweep_intercept_cas() {
             tracing::warn!("sweeping interception CAs failed: {e}");
         }
+        // Placeholders' quiet counts, and their rows a day past their end.
+        if let Err(e) = self.sweep_placeholders() {
+            tracing::warn!("sweeping placeholders failed: {e}");
+        }
         if let Err(e) = self.end_decoys() {
             tracing::warn!("revoking ended decoys failed: {e}");
         }

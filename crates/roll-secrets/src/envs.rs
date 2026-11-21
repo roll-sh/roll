@@ -879,7 +879,9 @@ pub(crate) fn ensure_folders(c: &Conn<'_>, env_id: &str, path: &str, now: i64) -
 }
 
 fn drop_env(c: &Conn<'_>, env: &EnvRow) -> Result<()> {
-    for t in ["secrets", "versions", "requests", "leases", "folders", "imports", "exports", "folder_policies"] {
+    // Its keys' hosts and its placeholders (a preview's, torn down with it) end with it.
+    c.execute("DELETE FROM key_hosts WHERE secret_id IN (SELECT id FROM secrets WHERE env_id = ?)", [&env.id])?;
+    for t in ["secrets", "versions", "requests", "leases", "folders", "imports", "exports", "folder_policies", "placeholders"] {
         c.execute(&format!("DELETE FROM {t} WHERE env_id = ?"), [&env.id])?;
     }
     c.execute("DELETE FROM imports WHERE from_env_id = ?", [&env.id])?;

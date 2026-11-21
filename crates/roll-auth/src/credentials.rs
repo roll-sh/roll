@@ -8,7 +8,7 @@
 //! message) is refused before it's sent, naming where in its arguments and what kind, never the
 //! value. A prompt-injected agent's way of leaking a secret is writing it somewhere it's read.
 //!
-//! roll's own credentials (`rlt_`, `rlo_`, `rlf_`, `rlc_`, `rlk_`, `rlp_`, `rlb_`, each with a checksum, so no
+//! roll's own credentials (`rlt_`, `rlo_`, `rlf_`, `rlc_`, `rlk_`, `rlp_`, `rlb_`, `rlph_`, each with a checksum, so no
 //! false positives) are refused in any product but roll secrets, where keeping one is the point.
 //! Other well-known formats (AWS, GitHub, Slack, Stripe, Google, Anthropic, OpenAI, PEM private
 //! keys), a database URL carrying its password, and a roll secret's share link (its key rides in the
@@ -19,10 +19,12 @@ use serde_json::Value;
 
 /// The secrets roll makes that scanners look for: grants' (`rlt_`, `rlo_`, `rlf_`), machine
 /// clients' (`rlc_`), and other products' made the same way: apps' deploy hooks (`rlk_`), SSO
-/// connections' SCIM tokens (`rlp_`, roll-accounts), previews' deploy hooks (`rlb_`, a rebuild) and
-/// apps' instance addresses (`rlr_`: where an environment's instances read roll's OIDC tokens).
-/// (`rlh_` is roll code's automations' inbound webhook secrets: another shape, not ours.)
-pub const SECRET_PREFIXES: [&str; 9] = ["rlt_", "rlo_", "rlf_", "rlc_", "rlk_", "rlp_", "rlb_", "rlq_", "rlr_"];
+/// connections' SCIM tokens (`rlp_`, roll-accounts), previews' deploy hooks (`rlb_`, a rebuild),
+/// apps' instance addresses (`rlr_`: where an environment's instances read roll's OIDC tokens),
+/// roll secrets' request answers (`rlq_`) and placeholders (`rlph_`: what a sandbox holds instead
+/// of a key, swapped by roll's egress proxy). (`rlh_` is roll code's automations' inbound webhook
+/// secrets: another shape, not ours.)
+pub const SECRET_PREFIXES: [&str; 10] = ["rlt_", "rlo_", "rlf_", "rlc_", "rlk_", "rlp_", "rlb_", "rlq_", "rlr_", "rlph_"];
 
 /// A secret: `prefix`, 34 random characters of lowercase base32 (170 bits) and 6 of checksum, so a
 /// scanner can tell a real roll token from look-alike text without asking roll ([`checksum_ok`],

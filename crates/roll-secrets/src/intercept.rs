@@ -13,8 +13,8 @@
 //!   reserved `invalid` domain. A stolen key mints nothing a client trusting it would accept for
 //!   another name.
 //! - **Hosts come from the bindings**, never from the proxy: [`BoundHosts`] answers, per project, the
-//!   hosts of the keys the consumer holds live placeholders for. Placeholders' branch implements it
-//!   over its `placeholders` and `key_hosts` tables, and its `end_consumer` calls
+//!   hosts of the keys the consumer holds live placeholders for. [`Secrets`] answers it from
+//!   placeholders' `placeholders` and `key_hosts` tables, and [`Secrets::end_consumer`] calls
 //!   [`Secrets::end_intercept_cas`].
 //! - **Short-lived**: [`DEFAULT_TTL`] and at most [`MAX_TTL`]. Each call mints a new key and
 //!   certificate; one ends at its expiry or with its consumer (a revocation row), and the proxy
@@ -54,8 +54,8 @@ const MAX_HOSTS: usize = 256;
 
 /// Where an interception CA's hosts come from: by project, the hosts of the keys `consumer` holds
 /// live placeholders for, as bound (`api.stripe.com`, or `*.stripe.com` for a wildcard binding).
-/// The proxy never chooses them. rolld sets it once ([`Secrets::set_bound_hosts`]); placeholders'
-/// branch answers it from its own tables.
+/// The proxy never chooses them. [`Secrets`] answers it from placeholders' tables
+/// (placeholders.rs); [`Secrets::set_bound_hosts`] can set another source once.
 pub trait BoundHosts: Send + Sync {
     fn bound_hosts(&self, consumer: &str) -> Result<BTreeMap<String, BTreeSet<String>>>;
 }
@@ -134,8 +134,7 @@ fn checked(h: &str) -> std::result::Result<(), String> {
     if labels.last().is_some_and(|l| l.bytes().all(|b| b.is_ascii_digit())) {
         return Err(format!("{h} is an address"));
     }
-    // TODO: placeholders' branch has the Public Suffix List check; use it once it's on main.
-    if wild && crate::ssh::PUBLIC_SUFFIXES.contains(&name) {
+    if wild && crate::placeholders::public_suffix(name) {
         return Err(format!("{h} covers a public suffix"));
     }
     Ok(())
@@ -216,7 +215,8 @@ fn when(ms: i64) -> String {
 }
 
 impl Secrets {
-    /// Where interception CAs' hosts come from (rolld, once). `false` when one was already set.
+    /// Another source of interception CAs' hosts than placeholders' own bindings (once). `false`
+    /// when one was already set.
     pub fn set_bound_hosts(&self, source: std::sync::Arc<dyn BoundHosts>) -> bool {
         self.bound_hosts.set(source).is_ok()
     }
@@ -228,8 +228,10 @@ impl Secrets {
         if consumer.is_empty() || consumer.len() > 256 || consumer.chars().any(char::is_control) {
             return Err(Error::BadRequest("a consumer is 1 to 256 printable characters".into()));
         }
-        let source = self.bound_hosts.get().ok_or_else(|| Error::Unavailable("no host bindings on this server: interception CAs need placeholders".into()))?;
-        let mut by_project = source.bound_hosts(consumer)?;
+        let mut by_project = match self.bound_hosts.get() {
+            Some(source) => source.bound_hosts(consumer)?,
+            None => BoundHosts::bound_hosts(self, consumer)?,
+        };
         let mut all = BTreeSet::new();
         for hosts in by_project.values_mut() {
             *hosts = std::mem::take(hosts).into_iter().map(|h| h.trim().to_ascii_lowercase()).collect();
@@ -278,7 +280,7 @@ impl Secrets {
 
     /// Ends every live interception CA of `consumer` (its sandbox stopped, its preview torn down),
     /// with a revocation row and `why`; the proxy drops them at its next [`Secrets::intercept_ca_live`].
-    /// Placeholders' `end_consumer` calls it. How many ended.
+    /// [`Secrets::end_consumer`] calls it. How many ended.
     pub fn end_intercept_cas(&self, consumer: &str, why: &str) -> Result<usize> {
         let now = self.db.now_ms()?;
         let caller = Caller::consumer(consumer);
