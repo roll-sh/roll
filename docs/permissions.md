@@ -165,7 +165,9 @@ endpoint for an hour's access token, rather than holding a long-lived token in a
       secret. The audience defaults to roll's API. `subject` is the token's `sub` or a pattern with
       `*`. A shared issuer (GitHub Actions, GitLab.com, Terraform Cloud, Buildkite, Google) must
       name one tenant literally (`repo:acme/web:…`), or anyone's job could sign in, and that rule is
-      never optional. `claims` are up to ten others that must match (`repository_owner_id`, `ref`).
+      never optional. `claims` are up to ten others that must match (`repository_owner_id`, `ref`),
+      each a name or a JSON pointer to a nested or list claim (`/realm_access/roles`), with the
+      same syntax as roll secrets' workload identities (docs/secrets.md, "Claims").
       `jwks` pins the issuer's keys for one roll can't reach.
     - **Signing in:** RFC 7523's grant,
       `grant_type=urn:ietf:params:oauth:grant-type:jwt-bearer&client_id=mcl_…&assertion=<the OIDC token>`.
@@ -870,6 +872,9 @@ type AuditEvent = {
   strings and headers are not.
 - Arguments are redacted before they're stored: any field named like a password, secret, token,
   key, credential or value has its value replaced with `"[redacted]"`, and strings are cut at 2 KiB.
+  Names that only end in "key" are kept where they aren't secrets (a partition, sort, object or
+  primary key, and roll queues' AMQP `routing_key`); a `routing_key` anywhere else is a credential
+  (PagerDuty's integration key on an apps notification) and is redacted.
 - The log is kept for 90 days (`ROLL_ACCESS_AUDIT_DAYS`; older rows are deleted 5,000 at a time,
   so a large prune never holds the database's write lock) and read through `/v1/access/audit`,
   filtered by grant, product, decision and time.

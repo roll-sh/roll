@@ -122,11 +122,12 @@ pub struct Remote<'a> {
     client: Client,
     pub url: &'a str,
     auth: Option<code_git::Credentials>,
+    allow_private: bool,
 }
 
 impl<'a> Remote<'a> {
     pub fn new(allow_private: bool, url: &'a str, login: Option<(String, String)>) -> Self {
-        Remote { client: client(allow_private), url, auth: login.map(|(username, password)| code_git::Credentials { username, password, vouched: false }) }
+        Remote { client: client(allow_private), url, auth: login.map(|(username, password)| code_git::Credentials { username, password, vouched: false }), allow_private }
     }
 
     /// The login it fetches with (a username and a token), if it has one.
@@ -184,11 +185,77 @@ pub async fn named(r: &Remote<'_>, name: &str) -> anyhow::Result<(String, &'stat
 
 /// The tree at `sha`, fetched shallowly and written into `dir` (empty). How many files.
 pub async fn materialize(r: &Remote<'_>, sha: &str, dir: &Path) -> anyhow::Result<usize> {
-    let oid: ObjectId = sha.parse().map_err(|_| anyhow::anyhow!("{sha} isn't a commit id"))?;
-    let fetched = r.fetch(&FetchArgs { wants: vec![oid], haves: Vec::new(), depth: Some(1), filter: None }).await?;
-    let objects: HashMap<ObjectId, Object> = fetched.objects.into_iter().map(|o| (o.id, o)).collect();
-    let dir = dir.to_path_buf();
-    tokio::task::spawn_blocking(move || write_commit(&objects, oid, &dir)).await?
+    materialize_with(r, sha, dir, false).await
+}
+
+/// With `submodules` (`build.submodules`): each submodule `.gitmodules` names is fetched at the
+/// commit its gitlink pins and written at its path, from its own URL (public-only, as a service's
+/// own; relative URLs against this repository's), with this repository's login only on the same
+/// host, two levels deep at most and [`MAX_SUBMODULES`] in all.
+pub async fn materialize_with(r: &Remote<'_>, sha: &str, dir: &Path, submodules: bool) -> anyhow::Result<usize> {
+    let mut budget = MAX_SUBMODULES;
+    materialize_at(r, sha, dir, submodules.then_some(2), &mut budget).await
+}
+
+/// The most submodules one tree brings in, every level counted.
+pub const MAX_SUBMODULES: usize = 32;
+
+fn materialize_at<'a>(r: &'a Remote<'_>, sha: &'a str, dir: &'a Path, levels: Option<u8>, budget: &'a mut usize) -> std::pin::Pin<Box<dyn std::future::Future<Output = anyhow::Result<usize>> + Send + 'a>> {
+    Box::pin(async move {
+        let oid: ObjectId = sha.parse().map_err(|_| anyhow::anyhow!("{sha} isn't a commit id"))?;
+        let fetched = r.fetch(&FetchArgs { wants: vec![oid], haves: Vec::new(), depth: Some(1), filter: None }).await?;
+        let objects: HashMap<ObjectId, Object> = fetched.objects.into_iter().map(|o| (o.id, o)).collect();
+        let d = dir.to_path_buf();
+        let (mut files, links) = tokio::task::spawn_blocking(move || write_commit_links(&objects, oid, &d)).await??;
+        let Some(levels) = levels.filter(|l| *l > 0 && !links.is_empty()) else { return Ok(files) };
+        // `.gitmodules` as written (a regular file, never a link: the tree's own rules).
+        let gm = dir.join(".gitmodules");
+        let text = match std::fs::symlink_metadata(&gm) {
+            Ok(m) if m.is_file() && m.len() <= 64 << 10 => std::fs::read_to_string(&gm).unwrap_or_default(),
+            _ => String::new(),
+        };
+        let urls = gitmodules(&text);
+        let base = url::Url::parse(r.url)?;
+        for (path, commit) in links {
+            anyhow::ensure!(*budget > 0, "more than {MAX_SUBMODULES} submodules");
+            *budget -= 1;
+            let Some(raw) = urls.iter().find(|(p, _)| *p == path).map(|(_, u)| u.as_str()) else { anyhow::bail!("submodule {path} isn't in .gitmodules") };
+            let url = base.join(raw.trim()).map_err(|e| anyhow::anyhow!("submodule {path}: {e}"))?.to_string();
+            check_url(&url, r.allow_private).map_err(|e| anyhow::anyhow!("submodule {path}: {}", e.trim_start_matches("source.url: ")))?;
+            let same_host = url::Url::parse(&url).ok().and_then(|u| u.host_str().map(str::to_string)) == base.host_str().map(str::to_string);
+            let login = r.auth.as_ref().filter(|_| same_host).map(|c| (c.username.clone(), c.password.clone()));
+            let sub = Remote::new(r.allow_private, &url, login);
+            let at = dir.join(&path);
+            std::fs::create_dir(&at).map_err(|e| anyhow::anyhow!("submodule {path}: {e}"))?;
+            files += materialize_at(&sub, &commit.to_string(), &at, Some(levels - 1), budget).await.map_err(|e| anyhow::anyhow!("submodule {path}: {e:#}"))?;
+            anyhow::ensure!(files <= MAX_FILES, "more than {MAX_FILES} files");
+        }
+        Ok(files)
+    })
+}
+
+/// `.gitmodules`' `path` and `url` of each `[submodule "…"]`.
+fn gitmodules(text: &str) -> Vec<(String, String)> {
+    let mut out = Vec::new();
+    let (mut path, mut url) = (None::<String>, None::<String>);
+    let mut flush = |path: &mut Option<String>, url: &mut Option<String>| {
+        if let (Some(p), Some(u)) = (path.take(), url.take()) {
+            out.push((p.trim_matches('/').to_string(), u));
+        }
+    };
+    for line in text.lines().map(str::trim) {
+        if line.starts_with('[') {
+            flush(&mut path, &mut url);
+        } else if let Some((k, v)) = line.split_once('=') {
+            match k.trim() {
+                "path" => path = Some(v.trim().to_string()),
+                "url" => url = Some(v.trim().to_string()),
+                _ => {}
+            }
+        }
+    }
+    flush(&mut path, &mut url);
+    out
 }
 
 /// A fetch that leaves objects out with a filter, or, from a server that takes no filters (some
@@ -303,18 +370,23 @@ pub async fn read_file(r: &Remote<'_>, sha: &str, path: &str) -> anyhow::Result<
 
 /// A commit's tree written into `dir`.
 pub fn write_commit(objects: &HashMap<ObjectId, Object>, commit: ObjectId, dir: &Path) -> anyhow::Result<usize> {
+    write_commit_links(objects, commit, dir).map(|(n, _)| n)
+}
+
+/// A commit's tree written into `dir`, and its gitlinks (a submodule's path and pinned commit).
+fn write_commit_links(objects: &HashMap<ObjectId, Object>, commit: ObjectId, dir: &Path) -> anyhow::Result<(usize, Vec<(String, ObjectId)>)> {
     let c = objects.get(&commit).filter(|o| o.kind == Kind::Commit).ok_or_else(|| anyhow::anyhow!("the fetch didn't bring commit {commit}"))?;
     let info = parse_commit(&c.data).map_err(|e| anyhow::anyhow!("{e}"))?;
-    let mut files = 0;
-    write_tree(objects, info.tree, dir, 0, &mut files)?;
-    Ok(files)
+    let (mut files, mut links) = (0, Vec::new());
+    write_tree(objects, info.tree, dir, "", 0, &mut files, &mut links)?;
+    Ok((files, links))
 }
 
 /// A tree written with the hostile-tree rules: a name is one path segment (never `.`, `..`,
-/// `.git` or one with a `/`), nothing is written over (a repeated name fails), symlinks and
-/// submodules aren't followed (left out: a link out of the tree would build from the host),
-/// and the files and depth are bounded.
-fn write_tree(objects: &HashMap<ObjectId, Object>, tree: ObjectId, dir: &Path, depth: usize, files: &mut usize) -> anyhow::Result<()> {
+/// `.git` or one with a `/`), nothing is written over (a repeated name fails), symlinks aren't
+/// followed (left out: a link out of the tree would build from the host), submodules are only
+/// collected (`materialize_with` fetches them when asked), and the files and depth are bounded.
+fn write_tree(objects: &HashMap<ObjectId, Object>, tree: ObjectId, dir: &Path, at: &str, depth: usize, files: &mut usize, links: &mut Vec<(String, ObjectId)>) -> anyhow::Result<()> {
     anyhow::ensure!(depth < MAX_DEPTH, "the tree nests deeper than {MAX_DEPTH}");
     let t = objects.get(&tree).filter(|o| o.kind == Kind::Tree).ok_or_else(|| anyhow::anyhow!("the fetch didn't bring tree {tree}"))?;
     for e in tree_entries(&t.data) {
@@ -325,7 +397,7 @@ fn write_tree(objects: &HashMap<ObjectId, Object>, tree: ObjectId, dir: &Path, d
         match e.mode {
             mode::TREE => {
                 std::fs::create_dir(&path).map_err(|err| anyhow::anyhow!("{name}: {err}"))?;
-                write_tree(objects, e.oid, &path, depth + 1, files)?;
+                write_tree(objects, e.oid, &path, &format!("{at}{name}/"), depth + 1, files, links)?;
             }
             mode::REGULAR | mode::EXECUTABLE => {
                 let blob = objects.get(&e.oid).filter(|o| o.kind == Kind::Blob).ok_or_else(|| anyhow::anyhow!("the fetch didn't bring {name}"))?;
@@ -341,7 +413,9 @@ fn write_tree(objects: &HashMap<ObjectId, Object>, tree: ObjectId, dir: &Path, d
                     .map_err(|err| anyhow::anyhow!("{name}: {err}"))?;
                 f.write_all(&blob.data)?;
             }
-            // Symlinks and submodules: not followed.
+            // A submodule: its path and pinned commit, for `materialize_with` to fetch if asked.
+            mode::GITLINK => links.push((format!("{at}{name}"), e.oid)),
+            // Symlinks: not followed.
             _ => {}
         }
     }

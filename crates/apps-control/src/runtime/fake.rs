@@ -83,6 +83,10 @@ pub struct Fake {
     pub build_vars: Mutex<Vec<Vec<String>>>,
     /// Each build's closed network, in order (none: the default one).
     pub build_networks: Mutex<Vec<Option<String>>>,
+    /// Each build's CPUs and memory (`build.size`), in order.
+    pub build_sizes: Mutex<Vec<(f64, u32)>>,
+    /// Each build's context's files (paths under it), in order.
+    pub build_trees: Mutex<Vec<Vec<String>>>,
     /// The manifests of the image archives it loaded.
     pub loaded: Mutex<Vec<String>>,
     /// Images removed ([`Builder::remove_image`]).
@@ -770,6 +774,20 @@ impl Builder for Fake {
         self.built.lock().push((job.no_cache, dockerfile));
         self.build_vars.lock().push(job.env.iter().map(|(k, _)| k.clone()).collect());
         self.build_networks.lock().push(job.egress.as_ref().map(|e| e.network.clone()));
+        self.build_sizes.lock().push((job.cpu, job.memory_mb));
+        let mut seen = Vec::new();
+        let mut stack = vec![job.context.clone()];
+        while let Some(d) = stack.pop() {
+            for e in std::fs::read_dir(&d).into_iter().flatten().flatten().take(1000) {
+                let p = e.path();
+                if p.is_dir() {
+                    stack.push(p);
+                } else if let Ok(rel) = p.strip_prefix(&job.context) {
+                    seen.push(rel.to_string_lossy().into_owned());
+                }
+            }
+        }
+        self.build_trees.lock().push(seen);
         log.line("#2 DONE");
         Ok(job.tag.clone())
     }

@@ -63,16 +63,17 @@ impl Apps {
                 p.requests += u.requests;
                 p.egress_bytes += u.egress_bytes;
                 p.build_seconds += u.build_seconds;
+                p.stored_gb_hours += u.stored_gb_hours;
                 continue;
             }
-            out.push(json!({ "service": sid, "name": name, "environment": env, "usd": round(prices.cost(&u)), "cpu_seconds": u.cpu_seconds, "gb_seconds": u.gb_seconds, "requests": u.requests, "egress_bytes": u.egress_bytes, "build_seconds": u.build_seconds }));
+            out.push(json!({ "service": sid, "name": name, "environment": env, "usd": round(prices.cost(&u)), "cpu_seconds": u.cpu_seconds, "gb_seconds": u.gb_seconds, "requests": u.requests, "egress_bytes": u.egress_bytes, "build_seconds": u.build_seconds, "stored_gb_hours": u.stored_gb_hours }));
         }
         for ((sid, name), u) in previews {
-            out.push(json!({ "service": sid, "name": name, "environment": null, "previews": true, "usd": round(prices.cost(&u)), "cpu_seconds": u.cpu_seconds, "gb_seconds": u.gb_seconds, "requests": u.requests, "egress_bytes": u.egress_bytes, "build_seconds": u.build_seconds }));
+            out.push(json!({ "service": sid, "name": name, "environment": null, "previews": true, "usd": round(prices.cost(&u)), "cpu_seconds": u.cpu_seconds, "gb_seconds": u.gb_seconds, "requests": u.requests, "egress_bytes": u.egress_bytes, "build_seconds": u.build_seconds, "stored_gb_hours": u.stored_gb_hours }));
         }
         let gone_usd = prices.cost(&gone);
         if gone_usd > 0.0 {
-            out.push(json!({ "service": null, "name": null, "environment": null, "deleted": true, "usd": round(gone_usd), "cpu_seconds": gone.cpu_seconds, "gb_seconds": gone.gb_seconds, "requests": gone.requests, "egress_bytes": gone.egress_bytes, "build_seconds": gone.build_seconds }));
+            out.push(json!({ "service": null, "name": null, "environment": null, "deleted": true, "usd": round(gone_usd), "cpu_seconds": gone.cpu_seconds, "gb_seconds": gone.gb_seconds, "requests": gone.requests, "egress_bytes": gone.egress_bytes, "build_seconds": gone.build_seconds, "stored_gb_hours": gone.stored_gb_hours }));
         }
         out.sort_by(|a, b| b["usd"].as_f64().unwrap_or(0.0).total_cmp(&a["usd"].as_f64().unwrap_or(0.0)));
         let total: f64 = out.iter().map(|r| r["usd"].as_f64().unwrap_or(0.0)).sum();

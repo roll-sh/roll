@@ -34,8 +34,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 pub use code_review::pricing;
 
-/// The operator's provider (`ROLL_REVIEW_PROVIDER` …).
-#[derive(Clone, Debug)]
+/// The operator's provider (`ROLL_REVIEW_PROVIDER` …). `Debug` never shows the key.
+#[derive(Clone)]
 pub struct Hosted {
     /// `anthropic` or `openai_compatible`.
     pub provider: String,
@@ -45,7 +45,8 @@ pub struct Hosted {
     pub secondary_model: Option<String>,
 }
 
-#[derive(Clone, Debug)]
+/// `Debug` never shows `secret_key`.
+#[derive(Clone)]
 pub struct AiConfig {
     pub hosted: Option<Hosted>,
     /// Seals owners' own keys (`ROLL_SECRET_KEY`); without it bring-your-own-key is refused.
@@ -65,6 +66,37 @@ pub struct AiConfig {
     /// How long a running job's spend reservation lasts without being renewed (it's renewed
     /// every third of that): how soon a dead node's holds stop counting against caps.
     pub reservation_ttl_ms: i64,
+}
+
+impl std::fmt::Debug for Hosted {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let Hosted { provider, api_key: _, base_url, model, secondary_model } = self;
+        f.debug_struct("Hosted")
+            .field("provider", provider)
+            .field("api_key", &crate::REDACTED)
+            .field("base_url", base_url)
+            .field("model", model)
+            .field("secondary_model", secondary_model)
+            .finish()
+    }
+}
+
+impl std::fmt::Debug for AiConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let AiConfig { hosted, secret_key, concurrency, rates, model_rates, anthropic_url, retry, retry_ms, index, reservation_ttl_ms } = self;
+        f.debug_struct("AiConfig")
+            .field("hosted", hosted)
+            .field("secret_key", &secret_key.as_ref().map(|_| crate::REDACTED))
+            .field("concurrency", concurrency)
+            .field("rates", rates)
+            .field("model_rates", model_rates)
+            .field("anthropic_url", anthropic_url)
+            .field("retry", retry)
+            .field("retry_ms", retry_ms)
+            .field("index", index)
+            .field("reservation_ttl_ms", reservation_ttl_ms)
+            .finish()
+    }
 }
 
 impl Default for AiConfig {
@@ -759,9 +791,19 @@ impl Code {
                 self.db.insert_learning(&id, &r.id, None, &text, "command", &by.display(), th.map(|t| t.id.as_str()))?;
                 format!("Got it — I'll remember for future reviews: _{}_", text.trim())
             }
-            // Async (a call to the preview backend): run where the comment is read, in a pull
-            // request's conversation.
-            Preview(_) => "`@roll preview …` works in the pull request's conversation.".into(),
+            // A call to the preview backend (async): done in the background, answered in the
+            // thread when it's done. A pull request's conversation runs it where it's read.
+            Preview(action) => {
+                let (Some(th), Some(me)) = (th, self.me.upgrade()) else { return Ok(Some("`@roll preview …` works in a thread or the pull request's conversation.".into())) };
+                let (r, c, th, by) = (r.clone(), c.clone(), th.clone(), by.display());
+                tokio::spawn(async move {
+                    let reply = crate::github::commands::preview_command(&me, &c, action, &by).await;
+                    if let Err(e) = me.roll_reply(&r, &c, &th, &reply) {
+                        tracing::warn!(change = %c.id, error = %e, "@roll preview's answer");
+                    }
+                });
+                return Ok(None);
+            }
             Explain | Fix | Ask(_) => {
                 let Some(th) = th else {
                     return Ok(Some("`@roll explain`, `@roll fix` and questions work in an inline comment on the lines you mean.".into()));
@@ -890,9 +932,16 @@ mod tests {
     #[test]
     fn config_from_env() {
         let env = |pairs: &'static [(&'static str, &'static str)]| move |k: &str| pairs.iter().find(|(a, _)| *a == k).map(|(_, v)| v.to_string());
-        let c = AiConfig::from_lookup(env(&[("ANTHROPIC_API_KEY", "sk-1"), ("ROLL_REVIEW_MODEL", "claude-sonnet-5-5"), ("ROLL_REVIEW_CONCURRENCY", "4")]));
+        let c = AiConfig::from_lookup(env(&[
+            ("ANTHROPIC_API_KEY", "sk-1-hosted-key"),
+            ("ROLL_SECRET_KEY", "server-secret-key-0123456789abcdef"),
+            ("ROLL_REVIEW_MODEL", "claude-sonnet-5-5"),
+            ("ROLL_REVIEW_CONCURRENCY", "4"),
+        ]));
+        let shown = format!("{c:?}");
+        assert!(!shown.contains("hosted-key") && !shown.contains("server-secret") && shown.contains("claude-sonnet-5-5"), "{shown}");
         let h = c.hosted.unwrap();
-        assert_eq!((h.provider.as_str(), h.api_key.as_str(), h.model.as_deref()), ("anthropic", "sk-1", Some("claude-sonnet-5-5")));
+        assert_eq!((h.provider.as_str(), h.api_key.as_str(), h.model.as_deref()), ("anthropic", "sk-1-hosted-key", Some("claude-sonnet-5-5")));
         assert_eq!(c.concurrency, 4);
         let o = AiConfig::from_lookup(env(&[
             ("ROLL_REVIEW_PROVIDER", "openai_compatible"),

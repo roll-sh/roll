@@ -23,6 +23,7 @@ mod edge;
 mod isolation;
 mod logs;
 mod nosql;
+mod intercept;
 mod previews;
 mod products;
 mod queues;
@@ -641,9 +642,20 @@ async fn run_with(mut args: Args) -> anyhow::Result<()> {
         s.control.set_secrets(std::sync::Arc::new(secrets::ForSearch(secrets.clone())));
     }
     let _ = secrets_envs.0.set(secrets.clone());
+    // roll secrets' placeholders found leaked (`rlph_`) stop working, like tokens.
+    {
+        let secrets = secrets.clone();
+        access.on_leaked("rlph_", move |secret, why| secrets.revoke_leaked_placeholder(secret, why));
+    }
     // Previews' rules name roll secrets' keys only where their writer may reveal them.
     if let Some(e) = &previews_engine {
         let _ = e.reveal.set(std::sync::Arc::new(previews::SecretsReveal(secrets.clone())));
+    }
+    // Keys a fork's preview never holds: its interception CA and the swap, roll secrets'.
+    if let Some((rt, e)) = &preview_hosts {
+        let i = std::sync::Arc::new(previews::SecretsIntercepts::new(secrets.clone()));
+        let _ = e.intercepts.set(i.clone());
+        rt.set_intercepts(i);
     }
     if let Some(c) = &code {
         secrets.set_code_refs(std::sync::Arc::new(secrets::CodeRefs(c.code.clone())));

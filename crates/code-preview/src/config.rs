@@ -134,6 +134,19 @@ pub struct PreviewSpec {
     /// in them (`hide = [".clock"]`), as roll previews' `github.pages` and `github.hide`.
     pub pages: Vec<String>,
     pub hide: Vec<String>,
+    /// The paths whose change rebuilds this service in a preview (`watch = ["web/**"]`,
+    /// gitignore-style, as `paths` reads them): a push touching none of them keeps the build it
+    /// runs (Railway's watch paths, Render's build filters). Empty: every push rebuilds it.
+    pub watch: Vec<String>,
+}
+
+/// The most `watch` patterns a service lists.
+pub const MAX_WATCH: usize = 50;
+
+/// Whether `p` is a `watch` pattern roll keeps: 1 to 200 characters, no control characters, and
+/// no negation (narrow the list instead).
+pub fn watch_pattern_ok(p: &str) -> bool {
+    (1..=200).contains(&p.len()) && !p.starts_with('!') && !p.chars().any(char::is_control)
 }
 
 /// Whether `p` is a page path the screenshot may visit: absolute, on the service's own origin.
@@ -242,6 +255,8 @@ struct RawPreview {
     pages: Vec<String>,
     #[serde(default)]
     hide: Vec<String>,
+    #[serde(default)]
+    watch: Vec<String>,
 }
 
 impl RollToml {
@@ -313,6 +328,9 @@ impl RollToml {
                     return Err(format!("{FILE} {at}: name is 1-20 characters of a-z, 0-9 and -"));
                 }
                 screenshot_rules(at, &p.pages, &p.hide, &p.states)?;
+                if p.watch.len() > MAX_WATCH || !p.watch.iter().all(|w| watch_pattern_ok(w)) {
+                    return Err(format!("{FILE} {at}: watch is at most {MAX_WATCH} path patterns (gitignore-style, no !negation)"));
+                }
                 Some(PreviewSpec {
                     name: p.name,
                     image: image(at, p.image)?,
@@ -332,6 +350,7 @@ impl RollToml {
                     states: p.states,
                     pages: p.pages,
                     hide: p.hide,
+                    watch: p.watch,
                 })
             }
         };
@@ -461,6 +480,7 @@ mod tests {
 
             pages = ["/pricing"]
             hide = [".clock"]
+            watch = ["web/**", "package.json"]
 
             [[preview.states]]
             name = "cart"
@@ -478,6 +498,8 @@ mod tests {
         assert_eq!((p.port, p.postgres.as_deref(), p.redis.as_deref(), p.auto), (3000, Some("prj_abc123"), Some("rdb_def456"), true));
         assert_eq!((p.pages.as_slice(), p.hide.as_slice(), p.states.len()), (&["/pricing".to_string()][..], &[".clock".to_string()][..], 1));
         assert_eq!(p.states[0].steps, [Step::Click("#open-cart".into()), Step::Type("#coupon".into(), "SAVE10".into()), Step::Press("Enter".into()), Step::Wait(300)]);
+        assert_eq!(p.watch, ["web/**", "package.json"]);
+        assert!(super::watch_pattern_ok("web/**") && !super::watch_pattern_ok("!web/**") && !super::watch_pattern_ok(""));
     }
 
     #[test]
