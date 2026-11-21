@@ -473,6 +473,7 @@ async fn sandboxes_need_a_backend_and_a_server_secret() {
     cfg.url = url;
     let a = app_with(|c| {
         c.admin_token = Some(ADMIN.into());
+        c.review.secret_key = None;
         c.sandboxes.backend = Some(BackendConfig::Agent37(cfg));
     });
     a.req("POST", "/v1/code/owners", Some(json!({ "name": "acme", "kind": "org" })), Some(ADMIN)).await;

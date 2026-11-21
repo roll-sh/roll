@@ -3451,6 +3451,321 @@ async fn aggregations_across_clusters_equal_one_clusters() {
     assert!(v.get("__roll_partial_aggs").is_none() && v["aggregations"]["a"]["value"].is_number(), "{v}");
 }
 
+/// An ES|QL query's answer, for comparing clusters: its columns and values, remote index names
+/// (`far:items`) as local ones.
+fn esql_answer(v: &Value) -> Value {
+    ccs_local_names(&json!({ "columns": v["columns"], "values": v["values"] }))
+}
+
+/// Creates enrich policy `name` (`tag` to `label`) over a cluster's `tags`, labelled `prefix-tag`.
+async fn ccs_policy(e: &Env, user: &str, pw: &str, name: &str, prefix: &str) {
+    use reqwest::Method;
+    for t in ["a", "b", "c", "d"] {
+        let (s, v) = e.es(user, pw, Method::PUT, &format!("/tags/_doc/{t}?refresh=true"), Some(json!({ "tag": t, "label": format!("{prefix}-{t}") }))).await;
+        assert!(s < 300, "{v}");
+    }
+    let (s, v) = e.es(user, pw, Method::PUT, &format!("/_enrich/policy/{name}"), Some(json!({ "match": { "indices": "tags", "match_field": "tag", "enrich_fields": ["label"] } }))).await;
+    assert_eq!(s, 200, "{v}");
+    let (s, v) = e.es(user, pw, Method::POST, &format!("/_enrich/policy/{name}/_execute"), None).await;
+    assert_eq!(s, 200, "{v}");
+}
+
+/// ES|QL over linked clusters (`FROM items,far:items`) answers what one cluster holding all the
+/// data answers, as Elasticsearch 9.5.5 does: each cluster runs the query up to its first
+/// breaker and `STATS` states merge exactly; `_index` names remote indices `far:items`;
+/// `_clusters` with `include_ccs_metadata` (`_query/async` too); a missing remote is a 404 and
+/// a missing remote index skips that cluster (`skip_unavailable`) or fails the query; `ENRICH`
+/// runs with each cluster's policy in `_remote` mode, the coordinator's in `_coordinator` mode,
+/// and where it lands in `_any` mode, refused after `STATS` and when a cluster lacks the policy;
+/// the query's own errors and a remote's views are errors, never a skipped remote; and the
+/// remote reduces `STATS` itself (its rows wouldn't fit the breaker its answer is held on).
+#[tokio::test]
+async fn esql_across_clusters_answers_as_one_cluster() {
+    use reqwest::Method;
+    let e = env().await;
+    let (all, all_pw) = creds(&e.post("/v1/search/clusters", json!({ "name": "esql-all" })).await);
+    let (near, near_pw) = creds(&e.post("/v1/search/clusters", json!({ "name": "esql-near" })).await);
+    let (far, far_pw) = creds(&e.post("/v1/search/clusters", json!({ "name": "esql-far" })).await);
+    ccs_items(&e, &all, &all_pw, 0..90).await;
+    ccs_items(&e, &near, &near_pw, (0..90).filter(|i| i % 3 != 0)).await;
+    ccs_items(&e, &far, &far_pw, (0..90).filter(|i| i % 3 == 0)).await;
+    let bulk: String = (0..3000).map(|i| format!("{{\"index\":{{}}}}\n{{\"k\":{}}}\n", i % 7)).collect();
+    let r = e.http.post(format!("{}/many/_bulk?refresh=true", e.es)).basic_auth(&far, Some(&far_pw)).header("content-type", "application/x-ndjson").body(bulk).send().await.unwrap();
+    assert_eq!(r.json::<Value>().await.unwrap()["errors"], false);
+    let (s, v) = e.call(Method::PUT, "/v1/search/clusters/esql-near/remotes/far", Some(json!({ "cluster": "esql-far" }))).await;
+    assert_eq!(s, 200, "{v}");
+    let query = |user: &str, pw: &str, body: Value| {
+        let (user, pw) = (user.to_string(), pw.to_string());
+        let e = &e;
+        async move { e.es(&user, &pw, Method::POST, "/_query", Some(body)).await }
+    };
+
+    // Partial `STATS`, `SORT | LIMIT`, `LIMIT` and the commands after the breaker: one cluster's
+    // answers.
+    for tail in [
+        "| STATS c = COUNT(*), s = SUM(n), a = AVG(price), cd = COUNT_DISTINCT(w), lo = MIN(at), hi = MAX(price), med = MEDIAN(n), p90 = PERCENTILE(price, 90), ws = MV_SORT(VALUES(w)) BY tag | SORT tag",
+        "| STATS c = COUNT(*), s = SUM(price) | EVAL mean = s / c",
+        "| WHERE n > 40 | STATS c = COUNT(*) BY b = BUCKET(at, 1 month) | SORT b",
+        "| EVAL x = n % 5 | STATS c = COUNT(*) BY x, tag | SORT x, tag | LIMIT 5",
+        "| SORT price DESC, n | LIMIT 7 | KEEP n, price, tag",
+        "| WHERE tag == \"b\" | EVAL d = n * 2 | SORT d | LIMIT 4 | KEEP d, tag",
+        "| INLINE STATS m = MAX(n) BY tag | WHERE n == m | KEEP n, tag | SORT n",
+    ] {
+        let (s, one) = query(&all, &all_pw, json!({ "query": format!("FROM items {tail}") })).await;
+        assert_eq!(s, 200, "{one}");
+        let (s, two) = query(&near, &near_pw, json!({ "query": format!("FROM items,far:items {tail}") })).await;
+        assert_eq!(s, 200, "{tail}: {two}");
+        assert_eq!(esql_answer(&two), esql_answer(&one), "{tail}");
+        assert!(two.get("_clusters").is_none(), "only with include_ccs_metadata: {two}");
+    }
+    // `*:items` is every remote's, not the local cluster's.
+    let (_, only) = query(&near, &near_pw, json!({ "query": "FROM *:items | STATS c = COUNT(*), s = SUM(n)" })).await;
+    let (_, one) = query(&all, &all_pw, json!({ "query": "FROM items | WHERE n % 3 == 0 | STATS c = COUNT(*), s = SUM(n)" })).await;
+    assert_eq!(esql_answer(&only), esql_answer(&one), "{only}");
+    // An exclusion of a remote's is that remote's own (`-many` there).
+    let (s, v) = query(&near, &near_pw, json!({ "query": "FROM far:*,-far:many | STATS c = COUNT(*)" })).await;
+    assert_eq!((s, v["values"].clone()), (200, json!([[30]])), "{v}");
+
+    // `_index` names the cluster; `_clusters` reports every cluster's part.
+    let (s, v) = query(&near, &near_pw, json!({ "query": "FROM items,far:items METADATA _index | WHERE n < 4 | KEEP n, _index | SORT n", "include_ccs_metadata": true })).await;
+    assert_eq!(s, 200, "{v}");
+    assert_eq!(v["values"], json!([[0, "far:items"], [1, "items"], [2, "items"], [3, "far:items"]]), "{v}");
+    let c = &v["_clusters"];
+    assert_eq!((c["total"].as_i64(), c["successful"].as_i64(), c["skipped"].as_i64(), v["is_partial"].as_bool()), (Some(2), Some(2), Some(0), Some(false)), "{v}");
+    for name in ["(local)", "far"] {
+        let d = &c["details"][name];
+        assert_eq!((d["status"].as_str(), d["indices"].as_str(), d["_shards"]["total"].as_i64(), d["_shards"]["successful"].as_i64()), (Some("successful"), Some("items"), Some(2), Some(2)), "{name}: {v}");
+    }
+    // `_query/async` answers the same.
+    let (s, a) = e.es(&near, &near_pw, Method::POST, "/_query/async", Some(json!({ "query": "FROM items,far:items | STATS c = COUNT(*)", "include_ccs_metadata": true, "keep_on_completion": true }))).await;
+    assert_eq!((s, a["values"].clone(), a["_clusters"]["successful"].as_i64()), (200, json!([[90]]), Some(2)), "{a}");
+    let (_, got) = e.es(&near, &near_pw, Method::GET, &format!("/_query/async/{}", a["id"].as_str().unwrap()), None).await;
+    assert_eq!((got["values"].clone(), got["_clusters"]["total"].as_i64()), (json!([[90]]), Some(2)), "{got}");
+
+    // A remote that isn't configured is a 404; a remote's missing index skips it (the default)
+    // or fails the query.
+    let (s, v) = query(&near, &near_pw, json!({ "query": "FROM nope:items | LIMIT 1" })).await;
+    assert_eq!((s, v["error"]["type"].as_str(), v["error"]["reason"].as_str()), (404, Some("no_such_remote_cluster_exception"), Some("no such remote cluster: [nope]")), "{v}");
+    // A quoted `METADATA` name is no metadata field, whatever it holds (here the text of a
+    // command): the query's error, before any cluster runs anything.
+    let (s, v) = query(&near, &near_pw, json!({ "query": "FROM far:items METADATA `_index | ENRICH _remote:tag_label ON tag WITH tag = label` | LIMIT 5" })).await;
+    assert!(s == 400 && v["error"]["reason"].as_str().is_some_and(|r| r.starts_with("Found 2 problems\nline 1:1: unresolved metadata fields: [?`_index |")), "{v}");
+    // The query's own error is the query's, never a skipped remote.
+    let (s, v) = query(&near, &near_pw, json!({ "query": "FROM far:items | WHERE nosuch > 1" })).await;
+    assert_eq!((s, v["error"]["reason"].as_str()), (400, Some("Found 1 problem\nline 1:24: Unknown column [nosuch]")), "{v}");
+    // A remote's ES|QL view isn't read across clusters (Elasticsearch's 400).
+    let (s, v) = e.es(&far, &far_pw, Method::PUT, "/_query/view/itemsview", Some(json!({ "query": "FROM items" }))).await;
+    assert_eq!(s, 200, "{v}");
+    let (s, v) = query(&near, &near_pw, json!({ "query": "FROM far:itemsview | STATS c = COUNT(*)" })).await;
+    assert_eq!((s, v["error"]["type"].as_str(), v["error"]["reason"].as_str()), (400, Some("remote_view_not_supported_exception"), Some("ES|QL queries with remote views are not supported. Matched [far:itemsview]. Remove them from the query pattern or exclude them with [far:-itemsview] if matched by a wildcard.")), "{v}");
+    let (s, v) = query(&near, &near_pw, json!({ "query": "FROM items,far:missing | STATS c = COUNT(*)", "include_ccs_metadata": true })).await;
+    assert_eq!((s, v["values"].clone(), v["is_partial"].as_bool()), (200, json!([[60]]), Some(true)), "{v}");
+    let far_part = &v["_clusters"]["details"]["far"];
+    assert_eq!((far_part["status"].as_str(), far_part["failures"][0]["reason"]["type"].as_str(), far_part["failures"][0]["reason"]["reason"].as_str()), (Some("skipped"), Some("verification_exception"), Some("Unknown index [far:missing]")), "{v}");
+    // With that remote skipped, another one mapping fields this cluster doesn't still merges:
+    // each part reduces over just the columns the STATS reads.
+    let (s, v) = e.es(&all, &all_pw, Method::PUT, "/logs/_doc/1?refresh=true", Some(json!({ "msg": "a", "code": 1 }))).await;
+    assert_eq!(s, 201, "{v}");
+    assert_eq!(e.call(Method::PUT, "/v1/search/clusters/esql-near/remotes/far2", Some(json!({ "cluster": "esql-all" }))).await.0, 200);
+    let (s, v) = query(&near, &near_pw, json!({ "query": "FROM items,far:missing,far2:logs | STATS c = COUNT(*), m = MAX(code)" })).await;
+    assert_eq!((s, v["values"].clone()), (200, json!([[61, 1]])), "only far2 maps `code`: {v}");
+    assert_eq!(e.es(&near, &near_pw, Method::PUT, "/_cluster/settings", Some(json!({ "persistent": { "cluster.remote.far.skip_unavailable": false } }))).await.0, 200);
+    let (s, v) = query(&near, &near_pw, json!({ "query": "FROM items,far:missing | LIMIT 1" })).await;
+    assert_eq!((s, v["error"]["reason"].as_str()), (400, Some("Unknown index [far:missing]")), "{v}");
+
+    // ENRICH: each cluster's own policy (`_remote`, `_any` before a breaker), the coordinator's
+    // (`_coordinator`, `_any` after one).
+    ccs_policy(&e, &near, &near_pw, "tag_label", "N").await;
+    ccs_policy(&e, &far, &far_pw, "tag_label", "F").await;
+    ccs_policy(&e, &near, &near_pw, "only_near", "N").await;
+    for (q, want) in [
+        ("FROM items,far:items | WHERE n < 2 | ENRICH _remote:tag_label | KEEP n, label | SORT n", json!([[0, "F-a"], [1, "N-b"]])),
+        ("FROM items,far:items | WHERE n < 2 | ENRICH tag_label | KEEP n, label | SORT n", json!([[0, "F-a"], [1, "N-b"]])),
+        ("FROM items,far:items | WHERE n < 2 | ENRICH _coordinator:tag_label | KEEP n, label | SORT n", json!([[0, "N-a"], [1, "N-b"]])),
+        ("FROM items,far:items | SORT n | LIMIT 2 | ENRICH _remote:tag_label | KEEP n, label", json!([[0, "F-a"], [1, "N-b"]])),
+        ("FROM items,far:items | SORT n | LIMIT 2 | ENRICH tag_label | KEEP n, label", json!([[0, "N-a"], [1, "N-b"]])),
+        // Sorted on the parts' `n`, which the policy then overwrites.
+        ("FROM items,far:items | WHERE n > 0 | SORT n | LIMIT 3 | ENRICH _remote:tag_label WITH n = label | KEEP n", json!([["N-b"], ["N-c"], ["F-d"]])),
+        // Each cluster's policy also after the commands between `SORT` and `LIMIT`.
+        ("FROM items,far:items | SORT n | KEEP n, tag | LIMIT 3 | ENRICH _remote:tag_label | KEEP n, label", json!([[0, "F-a"], [1, "N-b"], [2, "N-c"]])),
+        // After a `FORK` (whose remote rows are read here), `_any` is this cluster's policy.
+        ("FROM far:items | FORK (WHERE n < 4) (WHERE n > 86) | ENRICH tag_label | KEEP n, label | SORT n", json!([[0, "N-a"], [3, "N-d"], [87, "N-d"]])),
+    ] {
+        let (s, v) = query(&near, &near_pw, json!({ "query": q })).await;
+        assert_eq!((s, v["values"].clone()), (200, want), "{q}: {v}");
+    }
+    for (q, reason) in [
+        ("FROM items,far:items | STATS c=COUNT(*) BY tag | ENRICH _remote:tag_label | SORT tag", "Found 1 problem\nline 1:50: ENRICH with remote policy can't be executed after [STATS c=COUNT(*) BY tag]@1:24"),
+        ("FROM items,far:items | ENRICH only_near | LIMIT 1", "Found 1 problem\nline 1:31: cannot find enrich policy [only_near] on clusters [far]"),
+        // Never this cluster's lookup index or policy where Elasticsearch reads each cluster's.
+        ("FROM far:items | ENRICH _coordinator:tag_label | LOOKUP JOIN lk ON tag", "Found 1 problem\nline 1:50: LOOKUP JOIN with remote indices can't be executed after [ENRICH _coordinator:tag_label]@1:18"),
+        ("FROM far:items | INLINE STATS m = MAX(n) | ENRICH _remote:tag_label | KEEP n, m, label", "Found 1 problem\nline 1:44: ENRICH with remote policy can't be executed after [INLINE STATS m = MAX(n)]@1:18"),
+        // A remote missing the policy its `_any` use needs, reported there, not at this cluster's
+        // `_coordinator` use of the same name.
+        ("FROM items,far:items | ENRICH _coordinator:only_near | ENRICH only_near", "Found 1 problem\nline 1:63: cannot find enrich policy [only_near] on clusters [far]"),
+        // Shapes not cut into parts read the remotes' rows here (FORK, subqueries, `SET
+        // unmapped_fields`): Elasticsearch's placement errors, FORK branches included...
+        ("FROM far:items | STATS c = COUNT(*) BY tag | ENRICH _remote:tag_label | FORK (WHERE c > 0) (WHERE c <= 0)", "Found 1 problem\nline 1:46: ENRICH with remote policy can't be executed after [STATS c = COUNT(*) BY tag]@1:18"),
+        ("FROM far:items | FORK (STATS c = COUNT(*) BY tag | ENRICH _remote:tag_label) (WHERE n <= 0)", "Found 1 problem\nline 1:52: ENRICH with remote policy can't be executed after [STATS c = COUNT(*) BY tag]@1:24"),
+    ] {
+        let (s, v) = query(&near, &near_pw, json!({ "query": q })).await;
+        assert_eq!((s, v["error"]["reason"].as_str()), (400, Some(reason)), "{q}: {v}");
+    }
+    // ...and a refusal where Elasticsearch would read each cluster's own policy or lookup index.
+    let why = "roll reads the remote clusters' rows here in a query with FORK, subqueries, views, TS or SET unmapped_fields";
+    for (q, reason) in [
+        ("FROM far:items | LOOKUP JOIN lk ON tag | FORK (WHERE n > 0) (WHERE n <= 0)", format!("Found 1 problem\nline 1:30: LOOKUP JOIN can't use each cluster's own lookup index: {why}")),
+        ("SET unmapped_fields=\"nullify\"; FROM far:items | SORT n | LIMIT 5 | ENRICH _remote:tag_label", format!("Found 1 problem\nline 1:68: ENRICH [_remote:tag_label] can't use each cluster's own policy: {why}")),
+        ("FROM (FROM far:items | ENRICH _remote:tag_label)", format!("Found 1 problem\nline 1:24: ENRICH [_remote:tag_label] can't use each cluster's own policy: {why}")),
+    ] {
+        let (s, v) = query(&near, &near_pw, json!({ "query": q })).await;
+        assert_eq!((s, v["error"]["reason"].as_str()), (400, Some(reason.as_str())), "{q}: {v}");
+    }
+
+    // Clusters' own resources may differ: a policy's enrich fields must be the same everywhere
+    // (Elasticsearch's 400), a lookup index's mappings needn't be (a union type).
+    for (user, pw, label, fields) in [(&near, &near_pw, "N", json!(["label"])), (&far, &far_pw, "F", json!(["label", "extra"]))] {
+        let (s, v) = e.es(user, pw, Method::PUT, "/tags2/_doc/a?refresh=true", Some(json!({ "tag": "a", "label": format!("{label}-a"), "extra": "x" }))).await;
+        assert!(s < 300, "{v}");
+        assert_eq!(e.es(user, pw, Method::PUT, "/_enrich/policy/wide", Some(json!({ "match": { "indices": "tags2", "match_field": "tag", "enrich_fields": fields } }))).await.0, 200);
+        assert_eq!(e.es(user, pw, Method::POST, "/_enrich/policy/wide/_execute", None).await.0, 200);
+        let ty = if label == "N" { "keyword" } else { "text" };
+        let (s, v) = e.es(user, pw, Method::PUT, "/lk", Some(json!({ "settings": { "index.mode": "lookup" }, "mappings": { "properties": { "tag": { "type": "keyword" }, "lab": { "type": ty } } } }))).await;
+        assert_eq!(s, 200, "{v}");
+        assert!(e.es(user, pw, Method::PUT, "/lk/_doc/a?refresh=true", Some(json!({ "tag": "a", "lab": label }))).await.0 < 300);
+    }
+    let (s, v) = query(&near, &near_pw, json!({ "query": "FROM items,far:items | ENRICH wide | LIMIT 1" })).await;
+    assert_eq!((s, v["error"]["reason"].as_str()), (400, Some("Found 1 problem\nline 1:31: enrich policy [wide] has different enrich fields across clusters; these fields are missing in some policies: [extra]")), "{v}");
+    let (s, v) = query(&near, &near_pw, json!({ "query": "FROM items,far:items | LOOKUP JOIN lk ON tag | KEEP n, lab | SORT n | LIMIT 2" })).await;
+    assert_eq!((s, v["columns"][1].clone(), v["values"].clone()), (200, json!({ "name": "lab", "type": "unsupported", "original_types": ["keyword", "text"], "suggested_cast": "keyword" }), json!([[0, null], [1, null]])), "{v}");
+    // Using such a field is Elasticsearch's 400: a lookup field's before any part runs, an
+    // enrich field's (its policy index mapped its own way per cluster) once the parts answer.
+    for (user, pw, label) in [(&near, &near_pw, "N"), (&far, &far_pw, "F")] {
+        let ty = if label == "N" { "keyword" } else { "text" };
+        assert_eq!(e.es(user, pw, Method::PUT, "/tags3", Some(json!({ "mappings": { "properties": { "tag": { "type": "keyword" }, "label": { "type": ty } } } }))).await.0, 200);
+        assert!(e.es(user, pw, Method::PUT, "/tags3/_doc/a?refresh=true", Some(json!({ "tag": "a", "label": format!("{label}-a") }))).await.0 < 300);
+        assert_eq!(e.es(user, pw, Method::PUT, "/_enrich/policy/typed", Some(json!({ "match": { "indices": "tags3", "match_field": "tag", "enrich_fields": ["label"] } }))).await.0, 200);
+        assert_eq!(e.es(user, pw, Method::POST, "/_enrich/policy/typed/_execute", None).await.0, 200);
+    }
+    for (q, reason) in [
+        ("FROM items,far:items | LOOKUP JOIN lk ON tag | SORT lab | LIMIT 2", "Found 1 problem\nline 1:53: Cannot use field [lab] due to ambiguities being mapped as [2] incompatible types: [keyword] in [lk], [text] in [far:lk]"),
+        ("FROM items,far:items | ENRICH typed | SORT label | LIMIT 2", "Found 1 problem\nline 1:44: Cannot use field [label] due to ambiguities being mapped as [2] incompatible types: [keyword] in [typed], [text] in [far:typed]"),
+    ] {
+        let (s, v) = query(&near, &near_pw, json!({ "query": q })).await;
+        assert_eq!((s, v["error"]["reason"].as_str()), (400, Some(reason)), "{q}: {v}");
+    }
+
+    // The implicit limit runs in the parts wherever it commutes: 1,000 of the remote's 3,000
+    // rows, read there, for the ENRICH that runs here.
+    let (s, v) = query(&near, &near_pw, json!({ "query": "FROM far:many | EVAL tag = \"a\" | ENRICH _coordinator:tag_label | KEEP k, label" })).await;
+    assert_eq!((s, v["values"].as_array().map(Vec::len), v["values"][0][1].as_str()), (200, Some(1000), Some("N-a")), "{}", v["error"]);
+    assert!(v["documents_found"].as_i64().is_some_and(|d| d <= 1000), "{}", v["documents_found"]);
+
+    // `STATS` merges each cluster's partial states: 3,000 remote rows wouldn't fit the request
+    // breaker this cluster holds remote answers on, the remote's states do.
+    assert_eq!(e.es(&near, &near_pw, Method::PUT, "/_cluster/settings", Some(json!({ "transient": { "indices.breaker.request.limit": "100kb" } }))).await.0, 200);
+    let (s, v) = query(&near, &near_pw, json!({ "query": "FROM far:many | STATS c = COUNT(*), s = SUM(k), d = COUNT_DISTINCT(k)" })).await;
+    assert_eq!((s, v["values"].clone()), (200, json!([[3000, 8994, 7]])), "{v}");
+    let (s, v) = query(&near, &near_pw, json!({ "query": "FROM far:many | KEEP k | LIMIT 3000" })).await;
+    assert_eq!((s, v["error"]["type"].as_str()), (429, Some("circuit_breaking_exception")), "{v}");
+    // Parts nothing bounds share what the breaker has left: one remote's 429 rows fit, two
+    // remotes' don't, though each sends what one sent alone.
+    let rows = search_es::xpack::esql::ccs::row_bytes(&[search_es::xpack::esql::value::V::Long(0)]) * 429;
+    assert_eq!(e.es(&near, &near_pw, Method::PUT, "/_cluster/settings", Some(json!({ "transient": { "indices.breaker.request.limit": format!("{}b", rows * 3 / 2) } }))).await.0, 200);
+    assert_eq!(e.call(Method::PUT, "/v1/search/clusters/esql-near/remotes/far3", Some(json!({ "cluster": "esql-far" }))).await.0, 200);
+    let (s, v) = query(&near, &near_pw, json!({ "query": "FROM far:many | WHERE k == 0 | INLINE STATS m = MAX(k) | STATS c = COUNT(*)" })).await;
+    assert_eq!((s, v["values"].clone()), (200, json!([[429]])), "{v}");
+    let (s, v) = query(&near, &near_pw, json!({ "query": "FROM far:many,far3:many | WHERE k == 0 | INLINE STATS m = MAX(k) | STATS c = COUNT(*)" })).await;
+    let reason = v["error"]["reason"].as_str().unwrap_or_default();
+    assert!(s == 429 && reason.contains("this cluster's part of the query would answer more than"), "a remote stopped at its share: {v}");
+}
+
+/// ES|QL's part on a linked remote reads as the link allows, as `_search` across clusters does:
+/// the `cross_cluster` key's access (its document and field level security included)
+/// intersected with the caller's `remote_indices` (a field the key hides reads null); a caller
+/// without them for the remote is refused (403), a remote's `ENRICH` needs `monitor_enrich` there
+/// (`remote_cluster`), and a client can't ask a cluster for a part's internal answer.
+#[tokio::test]
+async fn esql_across_clusters_reads_as_the_link_allows() {
+    use reqwest::Method;
+    let e = env().await;
+    let (near, near_pw) = creds(&e.post("/v1/search/clusters", json!({ "name": "esql-sec-near" })).await);
+    let (far, far_pw) = creds(&e.post("/v1/search/clusters", json!({ "name": "esql-sec-far" })).await);
+    ccs_items(&e, &far, &far_pw, 0..20).await;
+    let (s, v) = e.es(&far, &far_pw, Method::PUT, "/secret/_doc/1?refresh=true", Some(json!({ "n": 1 }))).await;
+    assert_eq!(s, 201, "{v}");
+    let access = json!({ "search": [{ "names": ["items"], "query": { "term": { "tag": "a" } }, "field_security": { "grant": ["n", "tag"] } }] });
+    let (s, v) = e.call(Method::PUT, "/v1/search/clusters/esql-sec-near/remotes/far", Some(json!({ "cluster": "esql-sec-far", "access": access }))).await;
+    assert_eq!(s, 200, "{v}");
+
+    // Only the key's documents (tag `a`: 0, 4, 8, 12, 16) and fields.
+    let (s, v) = e.es(&near, &near_pw, Method::POST, "/_query", Some(json!({ "query": "FROM far:items | STATS c = COUNT(*), s = SUM(n)" }))).await;
+    assert_eq!((s, v["values"].clone()), (200, json!([[5, 40]])), "{v}");
+    let (s, v) = e.es(&near, &near_pw, Method::POST, "/_query", Some(json!({ "query": "FROM far:items | SORT n | LIMIT 2" }))).await;
+    let names: Vec<&str> = v["columns"].as_array().map(|c| c.iter().filter_map(|c| c["name"].as_str()).collect()).unwrap_or_default();
+    assert_eq!((s, names, v["values"].clone()), (200, vec!["n", "tag"], json!([[0, "a"], [4, "a"]])), "{v}");
+    // A field this cluster maps that the key hides on the remote reads null there.
+    let (s, v) = e.es(&near, &near_pw, Method::PUT, "/items/_doc/1?refresh=true", Some(json!({ "n": 100, "price": 7.5, "tag": "a" }))).await;
+    assert_eq!(s, 201, "{v}");
+    let (s, v) = e.es(&near, &near_pw, Method::POST, "/_query", Some(json!({ "query": "FROM items,far:items | STATS p = MAX(price), c = COUNT(*)" }))).await;
+    assert_eq!((s, v["values"].clone()), (200, json!([[7.5, 6]])), "{v}");
+    let (s, v) = e.es(&near, &near_pw, Method::POST, "/_query", Some(json!({ "query": "FROM far:secret | LIMIT 1", "include_ccs_metadata": true }))).await;
+    assert_eq!((s, v["_clusters"]["details"]["far"]["status"].as_str()), (200, Some("skipped")), "{v}");
+
+    // A user reaches the remote only through `remote_indices` naming it.
+    let reader = json!({ "indices": [{ "names": ["*"], "privileges": ["read"] }], "remote_indices": [{ "clusters": ["far"], "names": ["items"], "privileges": ["read"] }] });
+    assert_eq!(e.es(&near, &near_pw, Method::PUT, "/_security/role/reader", Some(reader)).await.0, 200);
+    assert_eq!(e.es(&near, &near_pw, Method::PUT, "/_security/role/local_only", Some(json!({ "indices": [{ "names": ["*"], "privileges": ["read"] }] }))).await.0, 200);
+    for (user, role) in [("reader", "reader"), ("local", "local_only")] {
+        assert_eq!(e.es(&near, &near_pw, Method::PUT, &format!("/_security/user/{user}"), Some(json!({ "password": "pass-word-1", "roles": [role] }))).await.0, 200);
+    }
+    let body = json!({ "query": "FROM far:items | STATS c = COUNT(*)", "include_ccs_metadata": true });
+    let (s, v) = e.es(&format!("reader@{near}"), "pass-word-1", Method::POST, "/_query", Some(body.clone())).await;
+    assert_eq!((s, v["values"].clone()), (200, json!([[5]])), "{v}");
+    let (s, v) = e.es(&format!("local@{near}"), "pass-word-1", Method::POST, "/_query", Some(body)).await;
+    let reason = v["error"]["reason"].as_str().unwrap_or_default();
+    assert!(s == 403 && reason.starts_with("action [indices:data/read/esql/resolve_fields] towards remote cluster [far] is unauthorized for user [local]"), "{v}");
+
+    // `remote_cluster` grants only Elasticsearch's remote cluster privileges.
+    let (s, v) = e.es(&near, &near_pw, Method::PUT, "/_security/role/bad", Some(json!({ "remote_cluster": [{ "clusters": ["far"], "privileges": ["all"] }] }))).await;
+    assert_eq!((s, v["error"]["reason"].as_str()), (400, Some("failed to parse remote_cluster for role [bad]. [monitor_enrich, monitor_stats] are the only values allowed for [privileges] within [remote_cluster]. Found [all]")), "{v}");
+    let (s, v) = e.es(&near, &near_pw, Method::PUT, "/_security/role/bad", Some(json!({ "remote_cluster": [{ "clusters": ["far"] }] }))).await;
+    assert_eq!((s, v["error"]["reason"].as_str()), (400, Some("failed to parse remote_cluster for role [bad]. [privileges] must be defined when [clusters] are defined ")), "{v}");
+    // A remote's ENRICH needs `monitor_enrich` there (`remote_cluster`), whatever the key's own.
+    ccs_policy(&e, &far, &far_pw, "tag_label", "F").await;
+    let enrich = json!({ "query": "FROM far:items | ENRICH _remote:tag_label | KEEP n, label | SORT n | LIMIT 1" });
+    let (s, v) = e.es(&format!("reader@{near}"), "pass-word-1", Method::POST, "/_query", Some(enrich.clone())).await;
+    let reason = v["error"]["reason"].as_str().unwrap_or_default();
+    assert!(s == 403 && reason.starts_with("action [cluster:monitor/xpack/enrich/esql/resolve_policy] towards remote cluster is unauthorized for user [reader]"), "{v}");
+    let reader = json!({ "indices": [{ "names": ["*"], "privileges": ["read"] }], "remote_indices": [{ "clusters": ["far"], "names": ["items"], "privileges": ["read"] }], "remote_cluster": [{ "clusters": ["far"], "privileges": ["monitor_enrich"] }] });
+    assert_eq!(e.es(&near, &near_pw, Method::PUT, "/_security/role/reader", Some(reader)).await.0, 200);
+    let (s, v) = e.es(&format!("reader@{near}"), "pass-word-1", Method::POST, "/_query", Some(enrich)).await;
+    assert_eq!((s, v["values"].clone()), (200, json!([[0, "F-a"]])), "{v}");
+
+    // A remote runs only what it parses a part to be: a STATS part whose text is no STATS, or a
+    // part naming no alias, is refused whatever the request says.
+    {
+        let links = e.control.node.cfg.links.clone().unwrap();
+        let near_id = e.get("/v1/search/clusters/esql-sec-near").await["id"].as_str().unwrap().to_string();
+        let roles = json!([{ "r0": { "cluster": [], "indices": [{ "names": ["*"], "privileges": ["read"] }] } }]);
+        for (alias, mode, want) in [(json!("far"), "stats", "an ES|QL part this cluster won't run: its commands aren't a STATS part"), (Value::Null, "rows", "an ES|QL part roll can't read")] {
+            let body = json!({ "query": "FROM \"items\" | LIMIT 5", "__roll_esql_part": { "alias": alias, "mode": mode, "schema": [], "policies": [] } });
+            let mut req = search_es::rest::EsRequest::json("POST", "/_query", body.to_string().into_bytes());
+            req.headers.push(("x-roll-remote-access".into(), json!({ "cluster": "esql-sec-near", "who": "user [t]", "roles": roles }).to_string()));
+            req.headers.push(("x-roll-esql-part".into(), "1".into()));
+            let r = links.send(&near_id, "far", "esql-sec-far", req).await.unwrap();
+            let v: Value = serde_json::from_slice(&r.body).unwrap();
+            assert_eq!((r.status, v["error"]["reason"].as_str()), (400, Some(want)), "{v}");
+        }
+    }
+
+    // A part's answer is a link's only: a client asking gets an ordinary one.
+    let part = r#"{"mode":"rows","schema":[],"policies":[]}"#;
+    let r = e.http.post(format!("{}/_query", e.es)).basic_auth(&far, Some(&far_pw)).header("x-roll-esql-part", part).json(&json!({ "query": "FROM items | STATS c = COUNT(*)" })).send().await.unwrap();
+    let v: Value = r.json().await.unwrap();
+    assert!(v.get("__roll_esql_part").is_none() && v["values"] == json!([[20]]), "{v}");
+}
+
 /// Scrolls and points in time over linked clusters: one opaque id holds each cluster's own
 /// scroll or point in time, pages go through every document once and in order (aggregations on
 /// the first page), `search_after` pages a point in time exactly, clearing and closing fan out

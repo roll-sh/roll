@@ -369,6 +369,10 @@ pub const OPERATOR_ONLY: &[(&str, &str)] = &[
     ("/v1/apps/services/{id}/github", "roll's GitHub App installations span tenants: connecting a service to one (its tokens fetch any repository the installation sees) is the operator's, as connecting a repo is roll code's admin token's"),
 ];
 
+/// What a person's session does for itself, past the member rules (docs/members.md): making a
+/// project, which they then own. Tokens are decided by its row as ever.
+pub const PERSON_OWN: &[(&str, &str)] = &[("POST", "/v1/workspace/projects")];
+
 pub fn rows() -> &'static [Row] {
     ROWS
 }
@@ -446,7 +450,7 @@ pub fn find(method: &str, route: &str, path: &str) -> Option<Found> {
 /// A workspace membership change (`PUT`/`DELETE …/projects/{id}/resources/{kind}/{ref}`): the
 /// product and id of the resource being moved, which the evaluator also checks.
 pub fn placement(row: &Row, params: &[(String, String)]) -> Option<(&'static str, String)> {
-    if row.route != "/v1/workspace/projects/{id}/resources/{kind}/{ref}" {
+    if !matches!(row.route, "/v1/workspace/projects/{id}/resources/{kind}/{ref}" | "/v1/workspace/projects/{id}/homes/{kind}/{ref}") {
         return None;
     }
     let get = |k: &str| params.iter().find(|(n, _)| n == k).map(|(_, v)| v.clone());
@@ -977,6 +981,20 @@ static ROWS: &[Row] = &[
     row("DELETE", "/v1/workspace/projects/{id}", "workspace", D, one(&["id"], "project")),
     row("PUT", "/v1/workspace/projects/{id}/resources/{kind}/{ref}", "workspace", W, one(&["id"], "project")),
     row("DELETE", "/v1/workspace/projects/{id}/resources/{kind}/{ref}", "workspace", W, one(&["id"], "project")),
+    // Members (docs/members.md): seeing who's in a project is a read; managing them is the
+    // project's admin (and a role is given only when the caller's rules cover it). Leaving is any
+    // member's own. A home changes which project stands for a resource: admin on the project, and
+    // admin outright on the resource ([`placement`]).
+    row("GET", "/v1/workspace/projects/{id}/members", "workspace", R, one(&["id"], "project")),
+    row("PATCH", "/v1/workspace/projects/{id}/members/{user}", "workspace", ADMIN, one(&["id"], "project")),
+    row("DELETE", "/v1/workspace/projects/{id}/members/{user}", "workspace", ADMIN, one(&["id"], "project")),
+    row("DELETE", "/v1/workspace/projects/{id}/members/me", "workspace", R, one(&["id"], "project")),
+    row("GET", "/v1/workspace/projects/{id}/invites", "workspace", ADMIN, one(&["id"], "project")),
+    row("POST", "/v1/workspace/projects/{id}/invites", "workspace", ADMIN, one(&["id"], "project")),
+    row("DELETE", "/v1/workspace/projects/{id}/invites/{invite}", "workspace", ADMIN, one(&["id"], "project")),
+    row("PUT", "/v1/workspace/projects/{id}/homes/{kind}/{ref}", "workspace", ADMIN, one(&["id"], "project")),
+    // The built-in roles and their rules: any grant.
+    row("GET", "/v1/workspace/roles", "workspace", R, Tgt::AnyGrant),
     // ── Postgres ──
     row("GET", "/v1/health", "postgres", R, Tgt::AnyGrant),
     row("GET", "/v1/projects", "postgres", R, list("id")).reveals(PG_SECRETS),
