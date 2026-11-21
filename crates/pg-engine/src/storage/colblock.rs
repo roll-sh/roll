@@ -538,23 +538,33 @@ impl ColDir {
             Kind::Bool => out.push(d[at + r]),
             Kind::Num { scale, w } => {
                 let x = sint(d, at + r * w as usize, w);
-                let (b, len) = crate::types::decint::i128_signed_le(x as i128);
+                // (The shortest two's complement form, as `i128_signed_le` finds it.)
+                let len = (64 - (x ^ (x >> 63)).leading_zeros() + 8) as usize / 8;
                 out.push(tag::NUMERIC);
-                put_varint(out, scale as u64);
+                match scale {
+                    0..0x80 => out.push(scale as u8),
+                    _ => put_varint(out, scale as u64),
+                }
                 out.push(len as u8);
-                out.extend_from_slice(&b[..len]);
+                out.extend_from_slice(&x.to_le_bytes()[..len]);
             }
             Kind::Str { tag: t, ow } => {
                 let (a, b) = (uint(d, at + r * ow as usize, ow) as usize, uint(d, at + (r + 1) * ow as usize, ow) as usize);
                 out.push(t);
-                put_varint(out, (b - a) as u64);
+                match b - a {
+                    n @ 0..0x80 => out.push(n as u8),
+                    n => put_varint(out, n as u64),
+                }
                 let x = col.aux as usize;
                 out.extend_from_slice(&d[x + a..x + b]);
             }
             Kind::Dict { tag: t, .. } => {
                 let s = self.dict(d, c, d[at + r]);
                 out.push(t);
-                put_varint(out, s.len() as u64);
+                match s.len() {
+                    n @ 0..0x80 => out.push(n as u8),
+                    n => put_varint(out, n as u64),
+                }
                 out.extend_from_slice(s);
             }
             Kind::Raw { ow } => {
@@ -591,6 +601,8 @@ impl ColDir {
 
     /// Row `r`'s bytes as format 2 stores them, onto `out`.
     pub fn row(&self, d: &[u8], r: usize, out: &mut Vec<u8>) {
+        // (Room for the row's values, each at most 1 + 2 + 8 bytes but strings: grown by those.)
+        out.reserve(24 + 11 * self.cols.len());
         out.push(if self.tid { ROW_HEADER_TID } else { ROW_HEADER });
         put_varint(out, self.xmin.get(d, r));
         if self.tid {
