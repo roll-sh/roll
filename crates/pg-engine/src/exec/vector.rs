@@ -31,8 +31,10 @@ fn word8(x: &[u8]) -> u64 {
 
 /// `VB::StrIn`'s items as lengths and words, when none is longer than 8 bytes (NULL items
 /// left out: they match nothing).
-fn short_items(items: &[Option<Box<[u8]>>]) -> Option<Box<[(usize, u64)]>> {
-    items.iter().flatten().map(|i| (i.len() <= 8).then(|| (i.len(), word8(i)))).collect()
+fn short_items(items: &[Option<Box<[u8]>>]) -> Option<(Box<[(usize, u64)]>, u16)> {
+    let ws: Box<[(usize, u64)]> = items.iter().flatten().map(|i| (i.len() <= 8).then(|| (i.len(), word8(i)))).collect::<Option<_>>()?;
+    let lens = ws.iter().fold(0u16, |m, &(n, _)| m | 1 << n);
+    Some((ws, lens))
 }
 
 /// `substring(x FROM start FOR count)` of a string column (`K::Substr`; `trim`: of a bpchar
@@ -117,8 +119,9 @@ pub enum VB {
     /// start FOR count)`'s (a bpchar column's cast to text first: without trailing spaces),
     /// TPC-H q22's country codes.
     /// `short`: every item 8 bytes or shorter, each as its length and its bytes in a word
-    /// (`word8`): a row's string compared with them without a `memcmp` call each.
-    StrIn { col: usize, items: Vec<Option<Box<[u8]>>>, short: Option<Box<[(usize, u64)]>>, bp: bool, neg: bool, sub: Option<Sub> },
+    /// (`word8`), and the lengths they have (bit n: one of n bytes): a row's string compared
+    /// with them without a `memcmp` call each, and none made a word whose length none has.
+    StrIn { col: usize, items: Vec<Option<Box<[u8]>>>, short: Option<(Box<[(usize, u64)]>, u16)>, bp: bool, neg: bool, sub: Option<Sub> },
     /// `col [NOT] LIKE 'pattern'` of a text column (`K::Like`).
     Like { col: usize, pat: Box<crate::sql::func::string::LikePattern>, neg: bool },
     /// `col = ANY (array)` / `col <> ALL (array)` of exact numbers (None: a NULL item).
@@ -692,7 +695,7 @@ impl VB {
                 let saw_null = items.iter().any(Option::is_none);
                 let (hit, miss) = if *neg { (Tri::F, Tri::T) } else { (Tri::T, Tri::F) };
                 let found = |x: &[u8]| match short {
-                    Some(ws) => x.len() <= 8 && {
+                    Some((ws, lens)) => x.len() <= 8 && (*lens >> x.len()) & 1 != 0 && {
                         let w = word8(x);
                         ws.iter().any(|&(n, iw)| n == x.len() && iw == w)
                     },
