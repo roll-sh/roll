@@ -123,8 +123,8 @@ pub struct NodeConfig {
     pub lease_ttl: Duration,
     /// Memory all loaded clusters together may hold (indexing buffers, in-heap segments,
     /// version maps; [`Usage::resident_bytes`]) and what their requests hold
-    /// ([`Node::request_memory`]), together. Past it in resident memory, the least recently used
-    /// clusters with no request in flight are unloaded, and waking another cluster first makes
+    /// ([`Node::request_memory`]), together. Past it, the least recently used clusters with no
+    /// request in flight are unloaded (requests can't be), and waking another cluster first makes
     /// room; a request that would take residents and requests past it fails with
     /// `circuit_breaking_exception`. `None`: no node budget for loaded clusters, and half of the
     /// host's memory for residents and requests.
@@ -1081,6 +1081,9 @@ impl Node {
         let wake_time = started.elapsed();
         tracing::debug!(cluster = name, ms = wake_time.as_secs_f64() * 1e3, shards = recovery.shards, records = recovery.records, "cluster loaded");
         self.wakes.fetch_add(1, Ordering::Relaxed);
+        // What the newcomer holds resident counts against requests at once (the reaper
+        // recounts every cluster on its next round).
+        self.request_memory.set_held_elsewhere(self.request_memory.held_elsewhere().saturating_add(persist::resident_bytes(&cluster)));
         let loaded = Arc::new(Loaded {
             cluster,
             data,
@@ -1534,6 +1537,12 @@ impl Node {
             self.request_memory.set_held_elsewhere(0);
             return Vec::new();
         }
+        // Kept async results past their keep-alive go (and give their memory back) even on a
+        // cluster nobody calls.
+        let now = search_es::time::now_millis();
+        for l in &loaded {
+            l.cluster.xpack.results.sweep(now);
+        }
         let mut sizes: Vec<(Arc<Loaded>, u64)> = loaded.into_iter().map(|l| {
             let r = persist::resident_bytes(&l.cluster);
             (l, r)
@@ -1553,13 +1562,16 @@ impl Node {
         // One budget: what clusters hold resident leaves the rest to requests.
         self.request_memory.set_held_elsewhere(total);
         let Some(budget) = self.cfg.memory_budget else { return evicted };
-        if total.saturating_add(room) <= budget {
+        // Residents and requests share the budget, and requests can't be evicted: idle clusters
+        // make room for both.
+        let over = |total: u64| total.saturating_add(self.request_memory.used()).saturating_add(room) > budget;
+        if !over(total) {
             return evicted;
         }
         // Clusters holding scrolls or points in time go last.
         sizes.sort_by_key(|(l, _)| (l.pinned(), l.last_used.load(Ordering::SeqCst)));
         for (l, r) in sizes {
-            if total.saturating_add(room) <= budget {
+            if !over(total) {
                 break;
             }
             if l.in_flight() > 0 || !self.may_drop(&l, "memory budget") {

@@ -281,10 +281,11 @@ tenants can't add up past the host. Aggregations (shard collection and reduces, 
 `terms` included, so transforms and rollups too), buffered `_msearch` responses, snapshot
 transfers and ES|QL all charge it; ES|QL charges each page of rows, group table and aggregate
 state, sort buffer, join and lookup table and its result as they grow, from what they allocate,
-and gives each back when it drops (`xpack/esql/memory.rs`); kept async results and
-cross-cluster contexts stay charged while they live. Eviction looks at resident memory only:
-past `--search-memory-mb` in resident bytes, idle clusters unload (unloading frees no request
-memory).
+and gives each back when it drops (`xpack/esql/memory.rs`), and its functions build strings
+and multi-values through one bounded builder (`functions::Built`); kept async results and
+cross-cluster contexts stay charged while they live. Requests can't be evicted, so past
+`--search-memory-mb` in residents plus requests, idle clusters unload to make room for both;
+a wake counts the newcomer's resident memory at once.
 
 APIs built on other APIs (EQL, ES|QL, SQL, PPL, graph, vector tiles, `terms_enum`, transforms'
 preview, rollup search, downsampling, search applications, …) make their inner requests as

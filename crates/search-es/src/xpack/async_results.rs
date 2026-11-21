@@ -11,7 +11,10 @@
 //! through it to the node's budget, [`crate::breaker`]) from when it is stored until it is
 //! removed, expires or is pushed out, so kept results count against the memory requests may
 //! hold. A result that the breaker refuses, or that is larger than the store itself
-//! ([`MAX_BYTES`]), is not stored: the request that would keep it fails.
+//! ([`MAX_BYTES`]), is not stored: the request that would keep it fails. A durable result read
+//! back on a wake that doesn't fit then is never deleted for it: it stays in the index,
+//! deferred, and the first get reads and charges it ([`crate::Cluster::kept_result`]). The
+//! reaper sweeps expired ones ([`Results::sweep`]).
 //!
 //! A durable cluster unloads when idle, which an Elasticsearch node never does, so there the
 //! results also go to the `.async-search` system index, as on Elasticsearch: once
@@ -76,6 +79,9 @@ struct Inner {
     bytes: usize,
     /// What the budget holds for the entries (`bytes`, once [`Results::settle`] ran).
     charged: usize,
+    /// Durable results not read back yet (the budget had no room on the wake): kind and
+    /// expiry. Their stored copies stay.
+    deferred: HashMap<String, (Kind, i64)>,
     /// Note changed ids ([`Results::track_changes`]); in memory nobody would take them.
     track: bool,
     /// Ids put, touched or removed since the last [`Results::take_changes`].
@@ -90,6 +96,11 @@ impl Inner {
                 self.bytes -= e.bytes;
                 self.note(&k);
             }
+        }
+        let dead: Vec<String> = self.deferred.iter().filter(|(_, (_, exp))| *exp <= now).map(|(k, _)| k.clone()).collect();
+        for k in dead {
+            self.deferred.remove(&k);
+            self.note(&k);
         }
     }
 
@@ -238,6 +249,42 @@ impl Results {
         Ok(())
     }
 
+    /// Expires what is past its keep-alive (the reaper's round), giving its memory back.
+    pub fn sweep(&self, now: i64) {
+        let mut g = self.inner.lock();
+        g.expire(now);
+        self.settle(&mut g);
+        self.flag(&g);
+    }
+
+    /// Whether `id` is a durable result of `kind` not read back yet ([`Results::admit`]).
+    pub fn is_deferred(&self, id: &str, kind: Kind, now: i64) -> bool {
+        let mut g = self.inner.lock();
+        g.expire(now);
+        self.settle(&mut g);
+        self.flag(&g);
+        g.deferred.get(id).is_some_and(|(k, _)| *k == kind)
+    }
+
+    /// Reads back a deferred result now that it is asked for: charged and kept (its stored copy
+    /// is unchanged), or refused by the breaker and left deferred.
+    pub fn admit(&self, id: &str, mut entry: Entry, now: i64) -> crate::error::EsResult<Entry> {
+        entry.bytes = entry_bytes(&entry);
+        let mut g = self.inner.lock();
+        g.expire(now);
+        g.make_room(entry.bytes);
+        self.settle(&mut g);
+        if let Some(b) = self.budget.get() {
+            b.reserve(entry.bytes as u64, "<async_result>").map_err(crate::search::aggs::agg_error)?;
+        }
+        g.deferred.remove(id);
+        g.bytes += entry.bytes;
+        g.charged += entry.bytes;
+        g.entries.insert(id.to_string(), entry.clone());
+        self.flag(&g);
+        Ok(entry)
+    }
+
     /// A live result of the given kind.
     pub fn get(&self, id: &str, kind: Kind, now: i64) -> Option<Entry> {
         let mut g = self.inner.lock();
@@ -260,6 +307,12 @@ impl Results {
 
     pub fn remove(&self, id: &str, kind: Kind) -> bool {
         let mut g = self.inner.lock();
+        if g.deferred.get(id).is_some_and(|(k, _)| *k == kind) {
+            g.deferred.remove(id);
+            g.note(id);
+            self.flag(&g);
+            return true;
+        }
         match g.entries.get(id) {
             Some(e) if e.kind == kind => {
                 let e = g.entries.remove(id).expect("present");
@@ -297,7 +350,8 @@ impl Results {
         self.settle(&mut g);
         self.changed.store(false, Ordering::Release);
         let dirty = std::mem::take(&mut g.dirty);
-        let mut out: Vec<(String, Option<Entry>)> = dirty.into_iter().map(|id| { let e = g.entries.get(&id).cloned(); (id, e) }).collect();
+        // A deferred result's stored copy stays as it is (nothing to write, nothing to delete).
+        let mut out: Vec<(String, Option<Entry>)> = dirty.into_iter().filter(|id| !g.deferred.contains_key(id)).map(|id| { let e = g.entries.get(&id).cloned(); (id, e) }).collect();
         out.sort_unstable_by(|a, b| a.0.cmp(&b.0));
         out
     }
@@ -334,12 +388,17 @@ impl Results {
         if let Some(old) = g.entries.remove(&id) {
             g.bytes -= old.bytes;
         }
+        if entry.bytes > MAX_BYTES {
+            // Never fits: its stored copy goes.
+            g.note(&id);
+            self.flag(&g);
+            return;
+        }
         g.make_room(entry.bytes);
         self.settle(&mut g);
-        let charged = entry.bytes <= MAX_BYTES && self.budget.get().is_none_or(|b| b.reserve(entry.bytes as u64, "<async_result>").is_ok());
-        if !charged {
-            // Doesn't fit now: its stored copy goes.
-            g.note(&id);
+        if self.budget.get().is_some_and(|b| b.reserve(entry.bytes as u64, "<async_result>").is_err()) {
+            // No room now: it stays stored, read back when asked for ([`Results::admit`]).
+            g.deferred.insert(id, (entry.kind, entry.expiration_ms));
             self.flag(&g);
             return;
         }
@@ -378,6 +437,30 @@ mod tests {
         assert!(!r.remove("b", Kind::Search));
         assert!(r.remove("b", Kind::Sql));
         assert!(r.is_empty());
+    }
+
+    #[test]
+    fn a_result_restored_without_room_stays_stored_and_comes_back_when_asked() {
+        let budget = search_aggs::memory::MemoryBudget::new(64);
+        let r = Results::default();
+        r.charge_to(budget.clone());
+        r.track_changes();
+        r.restore("a".into(), entry(Kind::Esql, 100), 0);
+        // No room: not in memory, not charged, and its stored copy isn't deleted.
+        assert!(r.get("a", Kind::Esql, 1).is_none());
+        assert!(r.is_deferred("a", Kind::Esql, 1));
+        assert_eq!(budget.used(), 0);
+        assert!(r.take_changes(1).is_empty(), "nothing to write or delete");
+        assert!(r.admit("a", entry(Kind::Esql, 100), 1).is_err(), "still no room");
+        budget.set_limit(1 << 20);
+        let e = r.admit("a", entry(Kind::Esql, 100), 2).unwrap();
+        assert_eq!(e.kind, Kind::Esql);
+        assert!(r.get("a", Kind::Esql, 3).is_some());
+        assert_eq!(budget.used() as usize, e.bytes);
+        // Expired, it goes for good.
+        r.sweep(100);
+        assert_eq!(budget.used(), 0);
+        assert!(r.take_changes(100).iter().any(|(id, e)| id == "a" && e.is_none()));
     }
 
     #[test]

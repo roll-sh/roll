@@ -1,5 +1,5 @@
 {
- "_about": "Elasticsearch 9.5.5 (private node, 1 GB heap): circuit breaker trips. in_flight: network.breaker.inflight_requests.limit=100b, then a 117-byte document and a 98-byte search body; exempt: GET _cluster/health and _nodes/stats under the same limit; parent: indices.breaker.total.limit=1b, GET _cat/health (real usage numbers are the JVM's); stats_default: _nodes/stats/breaker with default settings. esql_values_by: indices.breaker.request.limit=1mb, 10,000 documents {host: h<i%10>, message: \"message number <i> \" + 150 x's} (keywords), then POST _query {\"query\": \"FROM logs | STATS v = VALUES(message) BY host | LIMIT 1\"} (the label in [...] is where Elasticsearch's query crossed the limit, which varies: ords, <reused_arrays>, load blocks). esql_concat_over_1mib / esql_replace_over_1mib: index cc {f: keyword} with one document {f: \"x\"}, POST _query with the queries in each entry ([status, body] and, for REPLACE, its Warning headers but the implicit limit's). (CONCAT/REPLACE with indices.breaker.request.limit=60%)",
+ "_about": "Elasticsearch 9.5.5 (private node, 1 GB heap): circuit breaker trips. in_flight: network.breaker.inflight_requests.limit=100b, then a 117-byte document and a 98-byte search body; exempt: GET _cluster/health and _nodes/stats under the same limit; parent: indices.breaker.total.limit=1b, GET _cat/health (real usage numbers are the JVM's); stats_default: _nodes/stats/breaker with default settings. esql_values_by: indices.breaker.request.limit=1mb, 10,000 documents {host: h<i%10>, message: \"message number <i> \" + 150 x's} (keywords), then POST _query {\"query\": \"FROM logs | STATS v = VALUES(message) BY host | LIMIT 1\"} (the label in [...] is where Elasticsearch's query crossed the limit, which varies: ords, <reused_arrays>, load blocks). esql_concat_over_1mib / esql_replace_over_1mib: index cc {f: keyword} with one document {f: \"x\"}, POST _query with the queries in each entry ([status, body] and, for REPLACE, its Warning headers but the implicit limit's). (CONCAT/REPLACE with indices.breaker.request.limit=60%) esql_replace_empty_pattern: REPLACE of a 1,000,000-byte string with an empty pattern and itself as the replacement (about 10^12 bytes if built), same index. Elasticsearch's MV_CONCAT / MV_ZIP with a 1,000,000-byte delimiter over 100,001 values have no cap there: its breaker refuses them (429); roll caps them at 1 MiB.",
  "stats_default": [
   200,
   {
@@ -219,5 +219,20 @@
    ]
   },
   "FROM cc | EVAL a = REPEAT(f, 600000) | EVAL b = REPLACE(a, \"x\", \"yy\") | KEEP b"
+ ],
+ "esql_replace_empty_pattern": [
+  200,
+  {
+   "values": [
+    [
+     null
+    ]
+   ],
+   "warnings": [
+    "Line 1:50: evaluation of [REPLACE(a, \\\"\\\", a)] failed, treating result as null. Only first 20 failures recorded.",
+    "Line 1:50: java.lang.IllegalArgumentException: Creating strings with more than [1048576] bytes is not supported"
+   ]
+  },
+  "FROM cc | EVAL a = REPEAT(f, 1000000) | EVAL b = REPLACE(a, \"\", a) | KEEP b"
  ]
 }

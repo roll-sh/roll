@@ -1212,7 +1212,7 @@ fn bad_cursor() -> EsError {
 }
 
 fn next_page(ctx: &Ctx, cursor: &str) -> EsResult<Reply> {
-    let Some(e) = ctx.cluster.xpack.results.get(cursor, Kind::SqlCursor, ctx.now_ms) else {
+    let Some(e) = ctx.cluster.kept_result(cursor, Kind::SqlCursor, ctx.now_ms)? else {
         if foreign_cursor(cursor) {
             return Err(bad_cursor());
         }
@@ -1324,7 +1324,7 @@ pub fn get_async(ctx: &Ctx) -> EsResult<Reply> {
     let format = negotiated_format(ctx)?;
     let id = ctx.path_param("id").unwrap_or_default();
     async_results::check_id(id)?;
-    let Some(e) = ctx.cluster.xpack.results.get(id, Kind::Sql, ctx.now_ms) else { return Err(EsError::resource_not_found(id.to_string())) };
+    let Some(e) = ctx.cluster.kept_result(id, Kind::Sql, ctx.now_ms)? else { return Err(EsError::resource_not_found(id.to_string())) };
     if matches!(format, "txt" | "csv" | "tsv") {
         let names: Vec<String> = e.response.get("columns").and_then(Value::as_array).into_iter().flatten().filter_map(|c| c.get("name").map(Value::to_es_string)).collect();
         let rows: Vec<Vec<String>> = e
@@ -1357,7 +1357,7 @@ pub fn get_async(ctx: &Ctx) -> EsResult<Reply> {
 pub fn get_async_status(ctx: &Ctx) -> EsResult<Reply> {
     let id = ctx.path_param("id").unwrap_or_default();
     async_results::check_id(id)?;
-    let Some(e) = ctx.cluster.xpack.results.get(id, Kind::Sql, ctx.now_ms) else { return Err(EsError::resource_not_found(id.to_string())) };
+    let Some(e) = ctx.cluster.kept_result(id, Kind::Sql, ctx.now_ms)? else { return Err(EsError::resource_not_found(id.to_string())) };
     Reply::ok(obj! {
         "id" => id, "is_running" => false, "is_partial" => false, "start_time_in_millis" => e.start_ms,
         "expiration_time_in_millis" => e.expiration_ms, "completion_status" => 200,

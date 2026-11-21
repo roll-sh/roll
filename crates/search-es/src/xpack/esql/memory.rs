@@ -221,6 +221,12 @@ impl Growth {
     pub fn keep(self) -> EsResult<()> {
         self.tally.keep()
     }
+
+    /// The rows' whole charge, settled, for whoever keeps the rows (no walk to measure them).
+    pub fn into_held(mut self) -> EsResult<Held> {
+        self.tally.settle()?;
+        Ok(self.tally.held)
+    }
 }
 
 /// What a value holds outside the row's slot for it.
@@ -249,11 +255,24 @@ pub fn rows_bytes(rows: &Vec<Vec<V>>) -> usize {
 #[inline]
 pub fn acc_heap(a: &Acc) -> usize {
     match a {
-        Acc::Values { seen, out, heap } => out.capacity() * size_of::<V>() + seen.capacity() * (size_of::<super::exec::GroupKey>() + size_of::<u64>()) + heap,
+        Acc::Values { index, chain, out, heap } => out.capacity() * size_of::<V>() + index.capacity() * (size_of::<(u64, u32)>() + 1) + chain.capacity() * size_of::<u32>() + heap,
         Acc::Top { buf, heap, .. } | Acc::Sample { buf, heap, .. } => buf.capacity() * size_of::<V>() + heap,
         Acc::Quantile(d) => size_of::<search_aggs::metrics::tdigest::TDigest>() + d.heap_bytes(),
         Acc::Points(points) => points.capacity() * size_of::<(i64, V)>(),
         Acc::Distinct { hll, .. } => size_of::<search_aggs::metrics::cardinality::Hll>() + hll.heap_bytes(),
+        Acc::MinMax(Some(v)) | Acc::Edge { v: Some(v), .. } => value_heap(v),
+        _ => 0,
+    }
+}
+
+/// What `a`'s result holds outside its slot, from the state, before it is made: the values a
+/// state keeps (`VALUES`, `TOP`, `SAMPLE`, `FIRST`/`LAST`, `MIN`/`MAX`) are handed out as copies;
+/// every other result is a number.
+#[inline]
+pub fn acc_result_heap(a: &Acc) -> usize {
+    match a {
+        Acc::Values { out, heap, .. } => out.len() * size_of::<V>() + heap,
+        Acc::Top { buf, heap, .. } | Acc::Sample { buf, heap, .. } => buf.len() * size_of::<V>() + heap,
         Acc::MinMax(Some(v)) | Acc::Edge { v: Some(v), .. } => value_heap(v),
         _ => 0,
     }

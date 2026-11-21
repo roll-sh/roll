@@ -667,6 +667,42 @@ impl crate::cluster::Cluster {
 
     /// Reads the async results an earlier instance of the cluster wrote
     /// ([`Cluster::sync_async_results`]) back into memory, and notes changes from now on.
+    /// A kept result of `kind`: the one in memory, or a deferred one ([`Results::admit`]) read
+    /// back from [`ASYNC_RESULTS_INDEX`] and charged now; the breaker's 429 when there's still no
+    /// room for it (it stays stored).
+    ///
+    /// [`Results::admit`]: crate::xpack::async_results::Results::admit
+    pub fn kept_result(&self, id: &str, kind: crate::xpack::async_results::Kind, now: i64) -> EsResult<Option<crate::xpack::async_results::Entry>> {
+        let results = &self.xpack.results;
+        if let Some(e) = results.get(id, kind, now) {
+            return Ok(Some(e));
+        }
+        if !results.is_deferred(id, kind, now) {
+            return Ok(None);
+        }
+        let st = self.state();
+        let Some(idx) = st.metadata.indices.get(ASYNC_RESULTS_INDEX) else { return Ok(None) };
+        let Some(engine) = self.engine.loaded(&idx.uuid) else { return Ok(None) };
+        for shard in &engine.shards {
+            let searcher = shard.searcher();
+            for seg in searcher.segments() {
+                for local in 0..seg.max_doc() {
+                    if !seg.is_live(local) {
+                        continue;
+                    }
+                    let stored = searcher.stored(seg.base + local).map_err(convert::index_error)?;
+                    if crate::search::hits::stored_id(&stored).as_deref() != Some(id) {
+                        continue;
+                    }
+                    let Some(source) = crate::fetch::source_bytes(&stored) else { return Ok(None) };
+                    let Some(entry) = crate::fetch::parse_source(source).ok().as_ref().and_then(async_result_entry) else { return Ok(None) };
+                    return results.admit(id, entry, now).map(Some);
+                }
+            }
+        }
+        Ok(None)
+    }
+
     /// Free when there are none (no [`ASYNC_RESULTS_INDEX`]). Returns how many were live.
     pub fn restore_async_results(&self) -> EsResult<usize> {
         let results = &self.xpack.results;

@@ -170,12 +170,13 @@ async fn esql_trips_the_request_breaker_and_gives_its_memory_back() {
     assert_eq!(at(&stats, "nodes.*.breakers.request.estimated_size_in_bytes").as_i64(), Some(0), "{stats:?}");
 }
 
-/// A `-1` request limit on a cluster of a node with `node`'s budget and no maximum on the
-/// tenant's limit (only the node's budget can refuse), with 50,000 distinct keywords in `ids`.
+/// A `-1` request limit on a cluster of a node with `node`'s budget, held to the whole node
+/// (`100%`: the node's fair share and headroom refuse before the cluster's own limit does), with
+/// 50,000 distinct keywords in `ids`.
 async fn ids_cluster(name: &str, node: &Arc<search_es::breaker::MemoryBudget>) -> Cluster {
     let mut cfg = ClusterConfig::new(name);
     cfg.request_memory = Some(node.clone());
-    cfg.node_settings = vec![(search_es::breaker::REQUEST_MAX_LIMIT.to_string(), "-1".to_string())];
+    cfg.node_settings = vec![(search_es::breaker::REQUEST_MAX_LIMIT.to_string(), "100%".to_string())];
     let c = Cluster::open(cfg, Arc::new(MemoryStore::new())).await.unwrap();
     call(&c, "PUT", "/ids", Some(br#"{"mappings":{"properties":{"id":{"type":"keyword"},"cat":{"type":"keyword"}}}}"#)).await;
     let mut bulk = String::new();
@@ -204,8 +205,8 @@ async fn aggregations_are_held_to_the_node_budget_whatever_the_tenant_sets() {
     let c = ids_cluster("agg-node", &node).await;
     let (s, v) = call(&c, "POST", "/ids/_search", Some(TERMS_IDS)).await;
     let cause = parent_refusal(s, &v);
-    // In the cluster's own numbers: at most what the node could have given it.
-    assert!(at(cause, "bytes_limit").as_i64().unwrap() <= 2 << 20, "{v:?}");
+    // In the cluster's own numbers: its own limit, nothing about the node's room.
+    assert_eq!(at(cause, "bytes_limit").as_i64(), Some(2 << 20), "{v:?}");
     let (_, stats) = call(&c, "GET", "/_nodes/stats/breaker?filter_path=nodes.*.breakers", None).await;
     assert_eq!(at(&stats, "nodes.*.breakers.request.estimated_size_in_bytes").as_i64(), Some(0));
     assert_eq!(at(&stats, "nodes.*.breakers.parent.tripped").as_i64(), Some(1));
@@ -252,7 +253,7 @@ async fn one_tenants_kept_results_leave_room_for_anothers_aggregation() {
     // ...and a large one is refused in B's own numbers, never the node's.
     let (s, v) = call(&b, "POST", "/ids/_search", Some(TERMS_IDS)).await;
     let cause = parent_refusal(s, &v);
-    assert!(at(cause, "bytes_limit").as_i64().unwrap() < (4 << 20) / 2, "{v:?}");
+    assert_eq!(at(cause, "bytes_limit").as_i64(), Some(4 << 20), "B's own limit, not the node's free memory: {v:?}");
     // Deleting A's results gives their memory back.
     for id in ids {
         assert_eq!(call(&a, "DELETE", &format!("/_query/async/{id}"), None).await.0, 200);
@@ -284,22 +285,41 @@ async fn esql_builders_stop_at_1mib_like_elasticsearch() {
     let (s, v, warnings) = esql_with_warnings(&c, at(replace, "2").as_str().unwrap()).await;
     assert_eq!(s as i64, at(replace, "0").as_i64().unwrap());
     assert_eq!(at(&v, "values"), at(replace, "1.values"));
-    let es: Vec<String> = match at(replace, "1.warnings") {
-        Value::Arr(a) => a.iter().map(|w| w.as_str().unwrap().to_string()).collect(),
-        _ => Vec::new(),
+    let warnings_of = |captured: &Value| -> Vec<String> {
+        match at(captured, "1.warnings") {
+            Value::Arr(a) => a.iter().map(|w| w.as_str().unwrap().to_string()).collect(),
+            _ => Vec::new(),
+        }
     };
-    assert_eq!(warnings, es);
+    assert_eq!(warnings, warnings_of(replace));
+    // REPLACE stops as it builds: an empty pattern and a 1 MB replacement would be ~10^12 bytes.
+    let empty = all.get("esql_replace_empty_pattern").unwrap();
+    let (s, v, warnings) = esql_with_warnings(&c, at(empty, "2").as_str().unwrap()).await;
+    assert_eq!((s as i64, at(&v, "values")), (at(empty, "0").as_i64().unwrap(), at(empty, "1.values")));
+    assert_eq!(warnings, warnings_of(empty));
+    // A 1 MB delimiter between 20,001 values: refused before anything is built (Elasticsearch's
+    // breaker refuses these; roll's builders stop at 1 MiB).
+    for (f, what) in [("MV_CONCAT(m, d)", "strings"), ("MV_ZIP(m, m, d)", "multi-values")] {
+        let q = format!("FROM cc | EVAL m = SPLIT(REPEAT(CONCAT(f, \",\"), 20000), \",\"), d = REPEAT(f, 1000000) | EVAL b = {f} | KEEP b");
+        let (s, v, warnings) = esql_with_warnings(&c, &q).await;
+        assert_eq!((s, at(&v, "values").to_json()), (200, "[[null]]".to_string()), "{f}: {v:?}");
+        assert!(warnings.iter().any(|w| w.ends_with(&format!("java.lang.IllegalArgumentException: Creating {what} with more than [1048576] bytes is not supported"))), "{f}: {warnings:?}");
+    }
+    let (_, stats) = call(&c, "GET", "/_nodes/stats/breaker?filter_path=nodes.*.breakers.request", None).await;
+    assert_eq!(at(&stats, "nodes.*.breakers.request.estimated_size_in_bytes").as_i64(), Some(0));
 }
 
 #[tokio::test]
 async fn esql_eval_output_is_charged_as_each_row_is_built() {
     let c = esql_logs(None, &[]).await;
     call(&c, "PUT", "/_cluster/settings", Some(br#"{"persistent":{"indices.breaker.request.limit":"1mb"}}"#)).await;
-    // Each row grows to about 1 KiB; one page of them is past the limit, so the breaker refuses
-    // the EVAL itself.
-    let q = br#"{"query":"FROM logs | EVAL a = CONCAT(message, message), b = CONCAT(a, a) | KEEP b | LIMIT 10000"}"#;
+    // Each row grows by about 10 KiB, a page by about 10 MiB: charged row by row, the refusal
+    // comes within one settling step past the limit, never with the whole page at once.
+    let q = br#"{"query":"FROM logs | EVAL a = REPEAT(message, 60) | KEEP a | LIMIT 10000"}"#;
     let (s, v) = call(&c, "POST", "/_query", Some(q)).await;
     assert_eq!((s, at(&v, "error.type").as_str()), (429, Some("circuit_breaking_exception")), "{v:?}");
+    let over = at(&v, "error.bytes_wanted").as_i64().unwrap() - at(&v, "error.bytes_limit").as_i64().unwrap();
+    assert!(over < 256 << 10, "charged per row, not per page: {over} bytes past the limit at once");
     let (_, stats) = call(&c, "GET", "/_nodes/stats/breaker?filter_path=nodes.*.breakers.request", None).await;
     assert_eq!(at(&stats, "nodes.*.breakers.request.estimated_size_in_bytes").as_i64(), Some(0));
 }

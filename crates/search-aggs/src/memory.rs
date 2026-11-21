@@ -98,36 +98,57 @@ impl MemoryBudget {
         self.parent_tripped.load(Ordering::Relaxed)
     }
 
+    /// Adds `bytes` to what this budget holds; the operation that takes it from nothing to
+    /// something counts it active in the parent (so every count is undone by exactly one
+    /// operation: the one that takes it back to nothing).
+    #[inline]
+    fn hold(&self, bytes: u64) -> u64 {
+        let before = self.used.fetch_add(bytes, Ordering::Relaxed);
+        if before == 0
+            && bytes > 0
+            && let Some(p) = &self.parent
+        {
+            p.active.fetch_add(1, Ordering::Relaxed);
+        }
+        before
+    }
+
+    /// Takes `bytes` from what this budget holds; the operation that leaves nothing uncounts it.
+    #[inline]
+    fn unhold(&self, bytes: u64) {
+        let before = self.used.fetch_sub(bytes, Ordering::Relaxed);
+        if before == bytes
+            && bytes > 0
+            && let Some(p) = &self.parent
+        {
+            p.active.fetch_sub(1, Ordering::Relaxed);
+        }
+    }
+
     /// Reserves `bytes` for `label`, here and in the parent, failing like Elasticsearch's
     /// `CircuitBreakingException` when either refuses.
     pub fn reserve(&self, bytes: u64, label: &str) -> Result<()> {
-        let before = self.used.fetch_add(bytes, Ordering::Relaxed);
+        let before = self.hold(bytes);
         let new = before + bytes;
         let limit = self.limit();
         if new.saturating_add(self.held_elsewhere()) > limit {
-            self.used.fetch_sub(bytes, Ordering::Relaxed);
+            self.unhold(bytes);
             self.tripped.fetch_add(1, Ordering::Relaxed);
             return Err(breaking_error(self.name, label, new, limit));
         }
-        if let Some(p) = &self.parent {
-            let starts = before == 0 && bytes > 0;
-            if starts {
-                p.active.fetch_add(1, Ordering::Relaxed);
-            }
-            if let Err(room) = p.admit(before, bytes) {
-                self.used.fetch_sub(bytes, Ordering::Relaxed);
-                if starts {
-                    p.active.fetch_sub(1, Ordering::Relaxed);
-                }
-                self.parent_tripped.fetch_add(1, Ordering::Relaxed);
-                return Err(parent_error(label, before, bytes, before + room));
-            }
+        if let Some(p) = &self.parent
+            && !p.admit(before, bytes)
+        {
+            self.unhold(bytes);
+            self.parent_tripped.fetch_add(1, Ordering::Relaxed);
+            // In the cluster's own numbers only: nothing about the node's room or its tenants.
+            return Err(parent_error(label, before, bytes, limit));
         }
         Ok(())
     }
 
-    /// A child holding `held` asks for `bytes` more: taken, or refused with the room it had.
-    fn admit(&self, held: u64, bytes: u64) -> std::result::Result<(), u64> {
+    /// A child holding `held` asks for `bytes` more.
+    fn admit(&self, held: u64, bytes: u64) -> bool {
         let room = self.limit().saturating_sub(self.held_elsewhere());
         let before = self.used.fetch_add(bytes, Ordering::Relaxed);
         let new = before + bytes;
@@ -135,39 +156,31 @@ impl MemoryBudget {
         let fair = room / self.active.load(Ordering::Relaxed).max(2);
         let headroom = room / 8;
         if new <= room && (held + bytes <= fair || new + headroom <= room) {
-            return Ok(());
+            return true;
         }
         self.used.fetch_sub(bytes, Ordering::Relaxed);
         self.tripped.fetch_add(1, Ordering::Relaxed);
-        let free = room.saturating_sub(before);
-        let by_share = if held < fair { (fair - held).min(free) } else { 0 };
-        Err(by_share.max(free.saturating_sub(headroom)))
+        false
     }
 
     /// Adds `bytes` without checking the limit (`addWithoutBreaking`), here and in the parent.
     pub fn force(&self, bytes: u64) {
-        let before = self.used.fetch_add(bytes, Ordering::Relaxed);
+        self.hold(bytes);
         if let Some(p) = &self.parent {
-            if before == 0 && bytes > 0 {
-                p.active.fetch_add(1, Ordering::Relaxed);
-            }
             p.used.fetch_add(bytes, Ordering::Relaxed);
         }
     }
 
     pub fn release(&self, bytes: u64) {
-        let after = self.used.fetch_sub(bytes, Ordering::Relaxed) - bytes;
         if let Some(p) = &self.parent {
             p.used.fetch_sub(bytes, Ordering::Relaxed);
-            if after == 0 && bytes > 0 {
-                p.active.fetch_sub(1, Ordering::Relaxed);
-            }
         }
+        self.unhold(bytes);
     }
 }
 
 /// The `[parent]` refusal Elasticsearch gives (`HierarchyCircuitBreakerService.checkParentLimit`),
-/// in the child's numbers: it held `held`, wanted `bytes` more, and could have had `limit`.
+/// in the child's numbers: it held `held`, wanted `bytes` more, and its own limit is `limit`.
 pub fn parent_error(label: &str, held: u64, bytes: u64, limit: u64) -> AggError {
     let wanted = held + bytes;
     let sized = |b: u64| format!("{b}/{}", byte_size(b));
@@ -300,7 +313,8 @@ mod tests {
         a.reserve(600, "x").unwrap();
         // Two hold something now: b's share is 500 and the node has 400 left.
         let e = b.reserve(600, "x").unwrap_err();
-        assert!(e.reason.starts_with("[parent] Data too large, data for [x] would be [600/600b], which is larger than the limit of [400/400b], real usage: [0/0b]"), "{}", e.reason);
+        assert!(e.reason.starts_with("[parent] Data too large, data for [x] would be [600/600b], which is larger than the limit of ["), "{}", e.reason);
+        assert!(e.reason.contains("real usage: [0/0b], new bytes reserved: [600/600b]"), "{}", e.reason);
         assert_eq!((a.used(), b.used(), node.used(), b.parent_tripped()), (600, 0, 600, 1), "a refused reservation is held nowhere");
         b.reserve(400, "x").unwrap();
         a.release(600);
@@ -318,5 +332,27 @@ mod tests {
         node.set_held_elsewhere(900);
         assert!(a.reserve(200, "x").is_err());
         assert_eq!(node.used(), 0);
+    }
+
+    #[test]
+    fn concurrent_reservations_leave_nothing_counted() {
+        let node = MemoryBudget::new(10_000);
+        let kids: Vec<_> = (0..4).map(|_| MemoryBudget::with_parent(u64::MAX, Some(node.clone()))).collect();
+        std::thread::scope(|s| {
+            for t in 0..8 {
+                let kid = kids[t % 4].clone();
+                s.spawn(move || {
+                    for i in 0..20_000u64 {
+                        // Some fit, some are refused (by the node, its share or the headroom).
+                        let bytes = 1 + (i * 7919 + t as u64 * 104_729) % 4000;
+                        if kid.reserve(bytes, "x").is_ok() {
+                            kid.release(bytes);
+                        }
+                    }
+                });
+            }
+        });
+        assert_eq!((node.used(), node.active.load(Ordering::Relaxed)), (0, 0));
+        assert!(kids.iter().all(|k| k.used() == 0));
     }
 }

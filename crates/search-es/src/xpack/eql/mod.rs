@@ -254,7 +254,7 @@ pub async fn search(ctx: &Ctx<'_>) -> EsResult<Reply> {
 fn stored(ctx: &Ctx) -> EsResult<(String, Entry)> {
     let id = ctx.path_param("id").unwrap_or_default().to_string();
     async_results::check_id(&id)?;
-    match ctx.cluster.xpack.results.get(&id, Kind::Eql, ctx.now_ms) {
+    match ctx.cluster.kept_result(&id, Kind::Eql, ctx.now_ms)? {
         Some(e) => Ok((id, e)),
         None => Err(EsError::resource_not_found(id)),
     }

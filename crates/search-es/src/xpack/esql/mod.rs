@@ -506,7 +506,12 @@ pub async fn async_query(ctx: &Ctx<'_>) -> EsResult<Reply> {
         Entry { kind: Kind::Esql, response: Value::Obj(out.clone()), start_ms: ctx.now_ms, expiration_ms: ctx.now_ms + req.keep_alive, bytes: 0, extra: Value::Null },
         ctx.now_ms,
     )?;
-    Reply::ok(with_id(&id, false, &out))
+    // The stored copy is the store's (charged there); `out` moves into the reply.
+    let mut m = Map::with_capacity(out.len() + 2);
+    m.insert("id".into(), id.into());
+    m.insert("is_running".into(), false.into());
+    m.extend(out);
+    Reply::ok(Value::Obj(m))
 }
 
 fn not_found(id: &str) -> EsError {
@@ -517,7 +522,7 @@ pub fn async_get(ctx: &Ctx) -> EsResult<Reply> {
     let id = ctx.path_param("id").unwrap_or_default();
     // An id that doesn't decode is a bad request, before any lookup.
     async_results::check_id(id)?;
-    let Some(e) = ctx.cluster.xpack.results.get(id, Kind::Esql, ctx.now_ms) else { return Err(not_found(id)) };
+    let Some(e) = ctx.cluster.kept_result(id, Kind::Esql, ctx.now_ms)? else { return Err(not_found(id)) };
     if let Some(k) = ctx.query("keep_alive") {
         let ms = crate::units::TimeValue::parse(k, "keep_alive")?.as_millis();
         ctx.cluster.xpack.results.touch(id, ctx.now_ms + ms);

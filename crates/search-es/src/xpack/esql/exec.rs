@@ -1975,7 +1975,7 @@ struct Group {
 
 /// The hasher of keys that are already hashes.
 #[derive(Default)]
-struct IdHasher(u64);
+pub(super) struct IdHasher(u64);
 
 impl std::hash::Hasher for IdHasher {
     fn finish(&self) -> u64 {
@@ -2002,7 +2002,7 @@ fn double_key(d: f64) -> u64 {
 
 /// Feeds `v` to `h` as its [`GroupKey`] would hash (ints and longs alike, doubles by their
 /// bits, keywords and ips alike).
-fn hash_key(v: &V, h: &mut impl std::hash::Hasher) {
+pub(super) fn hash_key(v: &V, h: &mut impl std::hash::Hasher) {
     use std::hash::Hash;
     match v {
         V::Null => 0u8.hash(h),
@@ -2021,7 +2021,7 @@ fn hash_key(v: &V, h: &mut impl std::hash::Hasher) {
 }
 
 /// Whether `a` and `b` are the same group key ([`GroupKey`] equality).
-fn same_key(a: &V, b: &V) -> bool {
+pub(super) fn same_key(a: &V, b: &V) -> bool {
     match (a, b) {
         (V::Null, V::Null) => true,
         (V::Bool(x), V::Bool(y)) => x == y,
@@ -2251,6 +2251,9 @@ impl Grouper {
         let mut out = self.held.fresh()?;
         out.add(rows.capacity() * size_of::<Vec<V>>())?;
         for (g, Group { key, accs, .. }) in self.groups.iter().enumerate() {
+            // Charged before the results are made (states that keep values hand out copies) and
+            // the key is cloned into the row.
+            out.add(size_of::<Vec<V>>() + cols.len() * size_of::<V>() + accs.iter().map(memory::acc_result_heap).sum::<usize>() + key.iter().map(memory::value_heap).sum::<usize>())?;
             let results: Vec<V> = self
                 .specs
                 .iter()
@@ -2261,7 +2264,6 @@ impl Grouper {
                     None => a.finish(&s.func, value::agg_type(&s.func, s.arg_ty), &s.extra),
                 })
                 .collect();
-            out.add(size_of::<Vec<V>>() + cols.len() * size_of::<V>() + results.iter().map(memory::value_heap).sum::<usize>() + key.iter().map(memory::value_heap).sum::<usize>())?;
             let mut row = Vec::with_capacity(cols.len());
             for (c, _, n) in &self.outputs {
                 if self.keys.iter().any(|(_, _, kn)| kn == n) {
@@ -4144,6 +4146,8 @@ async fn execute_plain(cluster: &Cluster, q: Query, filter: Option<Value>, w: &m
     // The row-wise prefix runs on every batch.
     let split = cmds.iter().position(|c| !is_row_wise(c)).unwrap_or(cmds.len());
     let (prefix, rest) = cmds.split_at(split);
+    // The charge of a table built by scanning, when the scan kept one (`finish` takes it).
+    let mut charged: Option<memory::Held> = None;
     let mut table = match &first {
         Cmd::Row(list) => {
             let mut cols: Vec<Col> = Vec::new();
@@ -4273,7 +4277,7 @@ async fn execute_plain(cluster: &Cluster, q: Query, filter: Option<Value>, w: &m
                     })
                     .await?;
                     let t = g.finish(w)?;
-                    return finish(cluster, &src, t, &rest[1..], w, stats).await;
+                    return finish(cluster, &src, t, &rest[1..], w, stats, None).await;
                 }
                 Some(Cmd::Sort(_)) if sort_then_limit(rest).is_some() => {
                     let (keys, n, j) = sort_then_limit(rest).expect("matched");
@@ -4292,7 +4296,7 @@ async fn execute_plain(cluster: &Cluster, q: Query, filter: Option<Value>, w: &m
                     let t = Table { cols: out_cols, rows: top.finish() };
                     // The one-row-per-row commands between `SORT` and `LIMIT` run on the `n` rows.
                     let after: Vec<Cmd> = rest[1..j].iter().chain(&rest[j + 1..]).cloned().collect();
-                    return finish(cluster, &src, t, &after, w, stats).await;
+                    return finish(cluster, &src, t, &after, w, stats, None).await;
                 }
                 Some(Cmd::Limit(n)) => {
                     let n = (*n).min(MAX_LIMIT);
@@ -4307,10 +4311,9 @@ async fn execute_plain(cluster: &Cluster, q: Query, filter: Option<Value>, w: &m
                         Ok(rows_out.len() < n)
                     })
                     .await?;
-                    // `finish` charges the table from here on.
-                    drop(held);
+                    // The table's charge goes with it.
                     let t = Table { cols: out_cols, rows: rows_out };
-                    return finish(cluster, &src, t, &rest[1..], w, stats).await;
+                    return finish(cluster, &src, t, &rest[1..], w, stats, Some(held.into_held()?)).await;
                 }
                 _ => {
                     let mut rows_out: Vec<Vec<V>> = Vec::new();
@@ -4321,7 +4324,7 @@ async fn execute_plain(cluster: &Cluster, q: Query, filter: Option<Value>, w: &m
                         Ok(true)
                     })
                     .await?;
-                    drop(held);
+                    charged = Some(held.into_held()?);
                     Table { cols: out_cols, rows: rows_out }
                 }
             }
@@ -4329,7 +4332,7 @@ async fn execute_plain(cluster: &Cluster, q: Query, filter: Option<Value>, w: &m
         _ => return Err(super::parser::parse_error(&src, 0, "mismatched input expecting {'from', 'row', 'show'}")),
     };
     if matches!(first, Cmd::From { .. }) {
-        return finish(cluster, &src, table, rest, w, stats).await;
+        return finish(cluster, &src, table, rest, w, stats, charged).await;
     }
     table = run_rest(&src, table, rest, w)?;
     stats.rows_emitted = table.rows.len() as i64;
@@ -4432,8 +4435,10 @@ async fn load_resources(cluster: &Cluster, text: &str, cmds: &[Cmd], mem: &Memor
     Ok(res)
 }
 
-async fn finish(_cluster: &Cluster, src: &Src<'_>, t: Table, rest: &[Cmd], w: &mut Warnings, mut stats: Stats) -> EsResult<(Table, Stats)> {
-    let t = run_rest(src, t, rest, w)?;
+/// `charged`: the table's charge when its builder kept one (else it is measured).
+#[allow(clippy::too_many_arguments)]
+async fn finish(_cluster: &Cluster, src: &Src<'_>, t: Table, rest: &[Cmd], w: &mut Warnings, mut stats: Stats, charged: Option<memory::Held>) -> EsResult<(Table, Stats)> {
+    let t = run_rest_charged(src, t, charged, rest, w)?;
     stats.rows_emitted = t.rows.len() as i64;
     stats.col_meta.extend(std::mem::take(&mut *src.res.col_meta.lock()));
     stats.approx = std::mem::take(&mut *src.res.approx.lock());
@@ -4495,8 +4500,16 @@ fn ts_info(src: &Src<'_>, t: &Table, ts: bool) -> Table {
 
 /// The table is charged from here until the query ends (it is the query's result, or a part of
 /// it), each command's output as it replaces the input.
-fn run_rest(src: &Src<'_>, mut t: Table, cmds: &[Cmd], w: &mut Warnings) -> EsResult<Table> {
-    let mut held = src.mem.hold(memory::rows_bytes(&t.rows), memory::REUSED_ARRAYS)?;
+fn run_rest(src: &Src<'_>, t: Table, cmds: &[Cmd], w: &mut Warnings) -> EsResult<Table> {
+    run_rest_charged(src, t, None, cmds, w)
+}
+
+/// [`run_rest`] over a table whose charge `charged` already holds (when its builder kept one).
+fn run_rest_charged(src: &Src<'_>, mut t: Table, charged: Option<memory::Held>, cmds: &[Cmd], w: &mut Warnings) -> EsResult<Table> {
+    let mut held = match charged {
+        Some(h) => h,
+        None => src.mem.hold(memory::rows_bytes(&t.rows), memory::REUSED_ARRAYS)?,
+    };
     for cmd in cmds {
         match cmd {
             Cmd::Stats { aggs, by } => {
@@ -4512,17 +4525,15 @@ fn run_rest(src: &Src<'_>, mut t: Table, cmds: &[Cmd], w: &mut Warnings) -> EsRe
                 let stats = g.finish(w)?;
                 let nk = by.len();
                 let na = stats.cols.len() - nk;
+                // The groups' results by key, charged before they are copied out of the stats
+                // rows, and the new rows as they are built.
+                let mut lookup = Tally::new(&src.mem)?;
+                lookup.add(memory::rows_bytes(&stats.rows))?;
                 let mut by_key: HashMap<Vec<GroupKey>, Vec<V>> = HashMap::new();
                 for r in &stats.rows {
+                    lookup.add(size_of::<Vec<GroupKey>>() + nk * size_of::<GroupKey>() + r[na..].iter().map(memory::value_heap).sum::<usize>() + size_of::<Vec<V>>() + na * size_of::<V>() + r[..na].iter().map(memory::value_heap).sum::<usize>())?;
                     by_key.insert(r[na..].iter().map(GroupKey::of).collect(), r[..na].to_vec());
                 }
-                // The groups' results, by key, and the new rows as they are built.
-                let mut lookup = Tally::new(&src.mem)?;
-                for r in &stats.rows {
-                    // A key and the aggregations it maps to, copied out of the stats row.
-                    lookup.add(size_of::<Vec<GroupKey>>() + nk * size_of::<GroupKey>() + r[na..].iter().map(memory::value_heap).sum::<usize>() + size_of::<Vec<V>>() + na * size_of::<V>() + r[..na].iter().map(memory::value_heap).sum::<usize>())?;
-                }
-                lookup.add(memory::rows_bytes(&stats.rows))?;
                 let names: Vec<String> = stats.cols.iter().map(|c| c.name.clone()).collect();
                 let (keep, mut cols) = keep_except(&t.cols, &names);
                 cols.extend(stats.cols.iter().cloned());
@@ -4583,9 +4594,13 @@ fn run_rest(src: &Src<'_>, mut t: Table, cmds: &[Cmd], w: &mut Warnings) -> EsRe
             }
             c if is_row_wise(c) => {
                 let (p, out) = build_pipeline(src, std::slice::from_ref(c), t.cols.clone())?;
-                // What the command builds joins the table's charge as it is built.
+                // What the command builds joins the table's charge as it is built; one that
+                // drops rows or columns gives back what they held.
                 t.rows = p.run_on(std::mem::take(&mut t.rows), w, &mut held)?;
                 t.cols = out;
+                if matches!(c, Cmd::Where(_) | Cmd::Keep(_) | Cmd::Drop(_) | Cmd::Sample(_)) {
+                    held.set(memory::rows_bytes(&t.rows))?;
+                }
                 continue;
             }
             _ => return Err(super::parser::parse_error(src, 0, "mismatched input 'FROM' expecting {'eval', 'keep', 'limit', 'sort', 'stats', 'where'}")),

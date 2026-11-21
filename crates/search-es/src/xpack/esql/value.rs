@@ -1229,9 +1229,10 @@ pub enum Acc {
     Avg { int: i128, float: f64, comp: f64, n: i64 },
     MinMax(Option<V>),
     /// `VALUES`: the distinct values in order of first appearance, deduplicated as they arrive
-    /// (Elasticsearch's hash of the values), so memory follows the distinct values. `heap`: what
-    /// their strings hold, kept and keyed.
-    Values { seen: std::collections::HashSet<super::exec::GroupKey>, out: Vec<V>, heap: usize },
+    /// (Elasticsearch's hash of the values), so memory follows the distinct values: `index` maps
+    /// a value's hash to the first of `out` with it, `chain` links the others (as the `STATS`
+    /// group table does); `heap` is what their strings hold.
+    Values { index: std::collections::HashMap<u64, u32, std::hash::BuildHasherDefault<super::exec::IdHasher>>, chain: Vec<u32>, out: Vec<V>, heap: usize },
     /// `MEDIAN`, `PERCENTILE`, `MEDIAN_ABSOLUTE_DEVIATION`: the t-digest `QuantileStates` builds
     /// (compression 1000, hybrid: exact up to 20,000 values, then merging), fed as values arrive.
     Quantile(Box<TDigest>),
@@ -1263,7 +1264,7 @@ impl Acc {
             "min" | "max" => Acc::MinMax(None),
             "weighted_avg" => Acc::Weighted(0.0, 0.0),
             "present" | "absent" => Acc::Present(0, false),
-            "values" => Acc::Values { seen: Default::default(), out: Vec::new(), heap: 0 },
+            "values" => Acc::Values { index: Default::default(), chain: Vec::new(), out: Vec::new(), heap: 0 },
             "median" | "percentile" | "median_absolute_deviation" => Acc::Quantile(Box::new(TDigest::new(QUANTILE_COMPRESSION, false))),
             "std_dev" | "variance" => Acc::Welford { n: 0, mean: 0.0, m2: 0.0 },
             "top" => Acc::Top { n: None, desc: true, buf: Vec::new(), heap: 0 },
@@ -1363,12 +1364,32 @@ impl Acc {
                     }
                 }
             }
-            Acc::Values { seen, out, heap } => {
+            Acc::Values { index, chain, out, heap } => {
+                use std::hash::Hasher;
                 for x in v.values() {
-                    if seen.insert(super::exec::GroupKey::of(x)) {
-                        *heap += 2 * super::memory::value_heap(x);
-                        out.push(x.clone());
+                    let mut h = std::hash::DefaultHasher::new();
+                    super::exec::hash_key(x, &mut h);
+                    let fresh = out.len() as u32;
+                    let head = *index.entry(h.finish()).or_insert(fresh);
+                    if head != fresh {
+                        let mut at = head;
+                        let known = loop {
+                            if super::exec::same_key(&out[at as usize], x) {
+                                break true;
+                            }
+                            match chain[at as usize] {
+                                u32::MAX => break false,
+                                next => at = next,
+                            }
+                        };
+                        if known {
+                            continue;
+                        }
+                        chain[at as usize] = fresh;
                     }
+                    *heap += super::memory::value_heap(x);
+                    out.push(x.clone());
+                    chain.push(u32::MAX);
                 }
             }
             Acc::Quantile(d) => {

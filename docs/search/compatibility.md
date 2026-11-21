@@ -1161,18 +1161,30 @@ Checked against Elasticsearch 9.5.5 (captures in
   on Elasticsearch, and `data for [...]` names where roll's query was (`<reused_arrays>`, `load
   blocks`; Elasticsearch's varies too: `ords`, `<reused_arrays>`, `load blocks`). The internal
   `_search` reads keep their own accounting.
-- ES|QL's string builders stop at 1 MiB as Elasticsearch 9.5.5's do: `CONCAT` past it fails the
-  query (400 `esql_client_exception`, `concatenating more than [1048576] bytes is not
-  supported`), `REPLACE` past it is null with Elasticsearch's two warnings, `REPEAT` and `SPACE`
-  as before. Elasticsearch charges what its other functions build to the breaker as it builds
-  it; roll holds them to the same 1 MiB instead, null with a warning: `MV_CONCAT`, `MV_APPEND`,
-  `MV_ZIP`, `URL_ENCODE`, `URL_ENCODE_COMPONENT`, `TO_BASE64`, `TO_UPPER`, `TO_LOWER` and
-  `TO_STRING` of a multi-value (`Creating strings with more than [1048576] bytes is not
-  supported`, or `multi-values` for a list).
+- ES|QL's functions build strings and multi-values through one bounded builder that counts
+  each append before making it, so none allocates past its limit. Elasticsearch 9.5.5's own
+  limits apply exactly: `CONCAT` past 1 MiB fails the query (400 `esql_client_exception`,
+  `concatenating more than [1048576] bytes is not supported`), `REPLACE` past 1 MiB is null with
+  Elasticsearch's two warnings (it stops as it builds: an empty pattern with a large replacement
+  never gets far), `REPEAT` and `SPACE` as before. Elasticsearch charges what its other
+  functions build to the breaker as it builds it (a 1 MB delimiter between 100,000 values gets
+  its 429); roll holds them to 1 MiB or their largest input, whichever is larger, null with a
+  warning (`Creating strings with more than [1048576] bytes is not supported`, or
+  `multi-values` for a list): `MV_CONCAT` and `MV_ZIP` (refused before building when the
+  delimiter between each pair already passes), `MV_APPEND`, `MV_UNION`, `SPLIT` (each part
+  counts its value's slot, so at most about 32,000 one-byte parts per MiB), `URL_ENCODE`,
+  `URL_ENCODE_COMPONENT`, `TO_BASE64`, `TO_UPPER`, `TO_LOWER` and `TO_STRING` of a multi-value.
+  The others build no more than one of their inputs (`MV_SLICE`, `MV_SORT`, `MV_DEDUPE`,
+  `MV_INTERSECTION`, `MV_DIFFERENCE`, `LEFT`, `RIGHT`, `SUBSTRING`, the trims, `REVERSE`,
+  `FROM_BASE64`, `URL_DECODE`, `TOP_SNIPPETS`) or a fixed size (hashes, dates, numbers).
+  `MV_DEDUPE`, `MV_CONTAINS` and the set functions use a hash index, not a scan per value.
 - Kept async results (async search, ES|QL, SQL, EQL, SQL cursors) are charged to `request` at
   what they hold in memory until they are deleted, expire or are pushed out, so a client that
-  keeps results can't hold memory the breakers don't see. One the breaker refuses is not kept
-  and the request fails with its 429; one larger than the store (256 MiB) fails with
+  keeps results can't hold memory the breakers don't see; expired ones are swept even on a
+  cluster nobody calls. One the breaker refuses is not kept and the request fails with its 429.
+  A durable cluster's results read back on a wake that finds no room stay stored (never deleted
+  for memory) and are read and charged on their first get (the breaker's 429 while there is
+  still no room). One larger than the store (256 MiB) fails with
   `illegal_argument_exception` (`Can't store an async search response larger than [268435456]
   bytes.`). Async search also enforces `search.max_async_search_response_size` (10mb) on a kept
   response, with Elasticsearch's error. Elasticsearch 9.5.5 applies no such limit to ES|QL.
@@ -1189,8 +1201,9 @@ Checked against Elasticsearch 9.5.5 (captures in
     two) may grow only while an eighth of it stays free, so one busy tenant never takes the last
     of it from the others. A refusal is Elasticsearch's `[parent]` breaker
     (`circuit_breaking_exception`, 429, counted in `parent.tripped`), told in the cluster's own
-    numbers: `bytes_wanted` is what it would hold, `bytes_limit` what it could have had, `real
-    usage` what it held, and `usages` lists `request` only;
+    numbers only: `bytes_wanted` is what it would hold, `bytes_limit` its own effective `request`
+    limit (never the node's free memory or how many tenants share it), `real usage` what it
+    held, and `usages` lists `request` only;
   - its effective limit is `indices.breaker.request.limit` held to an operator maximum
     (`--search-request-memory-max`, node setting `roll.breaker.request.max_limit`: a byte size,
     or a percentage of the node's budget, `25%` by default; `-1` for none). The setting still
