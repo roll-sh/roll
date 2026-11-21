@@ -1250,7 +1250,6 @@ a credential never drops data.
 
 | `search` | `url`, `host`, `port`, `username` | a credential of its own with data access only (no keys or users; `"access": "data"`: a key roll search doesn't say is a data one, whatever else it says or if it says nothing, is deleted and refused), credential `key`: on an Elasticsearch cluster `api_key` (`Authorization: ApiKey …`), on an OpenSearch one an internal user, `user` (`<user>@<cluster>`, which the node routes) and `password`; a link to the field the cluster's flavor doesn't issue is refused when written, and switching a cluster's flavor carries no credential across (link the other fields again); an OpenSearch cluster's fields are offered and suggested under the names its clients read (`OPENSEARCH_URL`, `_HOST`, `_PORT`, `OPENSEARCH_USERNAME`/`_PASSWORD` for its user, `OPENSEARCH_CLUSTER` for the cluster's name); a dynamic one expires by itself 5 minutes after its lease | no (never the cluster's password) |
 
-`search` resources are linkable once roll search's workspace kind lands (`feature/roll-search`).
 roll apps' services have a workspace kind (`service`, `svc_…`); they consume secrets (an app's
 variables, `app:<svc>`) rather than issue credentials, so they have no link provider. Products
 without a link provider yet (tasks) join by registering one. Queues have no owners, so a person's
@@ -3398,6 +3397,37 @@ the binding, issues placeholders, decides each swap and audits it, and ships the
   required and responses are scrubbed (the thirty-fourth review's item 4), give every binding a
   `header` (`Authorization: Bearer {}`). A placeholder inside Basic auth (base64) or a signed request (AWS SigV4) can't be swapped: use a
   bearer header. Bodies are never rewritten.
+- **Planned: a placement is required, and responses are scrubbed** (the thirty-fourth review's
+  item 4).
+  - **Placement.**
+    - A binding names where its placeholder goes: a `header` with a template holding `{}` once
+      (`Authorization: Bearer {}`, `X-Api-Key: {}`), or a `query` parameter.
+    - The dashboard and `roll secrets bind` default to `Authorization: Bearer {}`.
+    - `untrusted: true` needs a placement.
+    - A binding with none stays valid for trusted readers. Health lists it ("a placeholder for
+      STRIPE_KEY may ride in any header"), and an untrusted swap through it is refused
+      (`PlacementRequired`).
+    - The filter swaps only where the binding says. A placeholder anywhere else is `Blocked`, so the
+      code holding it can't pick a header the host echoes.
+  - **The response scrub** (a sixth step of the proxy contract, `roll_secrets::proxy::Scrub`, no
+    I/O).
+    - `filter` returns, with the rewritten request, a `Scrub` holding the forms of the values it
+      swapped into that request: as is, base64 (standard and URL-safe, padded or not) and
+      percent-encoded.
+    - The proxy feeds it the response's headers and then its body in chunks, as they arrive.
+      `Scrub` keeps a window one form-length long across chunks, so a value split between two reads
+      is still found.
+    - The proxy sends `Accept-Encoding: identity` on a request it swapped into. A response that
+      comes back compressed anyway is refused rather than inflated.
+    - On a match, the proxy stops the response: the consumer gets a 502 and none of the remaining
+      bytes. roll secrets records a `secrets.alert` ("api.example.com echoed STRIPE_KEY") and sends
+      the environment's notify URL. The placeholder ends: a host that echoes once will again.
+    - `Scrub` holds the forms in memory only, redacts itself in `Debug` and is wiped on drop. It's
+      bounded by the 16 placeholders and 16 KiB per value the filter already allows. Scanning is one
+      pass per form over the bytes, so a response costs O(length × forms).
+    - What it doesn't cover: a host that transforms the value (hashes it, splits it across fields,
+      encrypts it) before echoing it. Placement is what keeps the code from choosing an echoing
+      header in the first place.
 
 ### Using a key without seeing it: the proxy's contract
 
@@ -5954,6 +5984,34 @@ and webhooks' and review apps' signing secrets sealed. Still open:
 - the #432 decoy-oracle fix: computes pinned by digest, and each image's pre-auth answers learned from a
   compute of that image (about 2 s per image, never waking a suspended endpoint). Its full gate is
   running.
+
+**State, 2026-11-21 05:10.** The thirty-fourth review's items, where they are:
+- **Item 1** (apps' reveal and shell as the asker) **and item 3** (the sandbox resolving as its copier):
+  `fix/secrets-reveal-as-asker`, gating.
+- **Item 2** (a project delete gets a veto, a 7-day window and a closing digest):
+  `fix/secrets-project-delete-window`, gating.
+- **Item 4** (a placement required, responses scrubbed): the design is below, under "Using a key
+  without seeing it"; `fix/secrets-placeholder-placement-scrub`, building.
+- **Item 5:**
+  - previews: done, #581 (4c575f044). The rules' pasted values, a preview's own variables and the
+    screenshot links' key are sealed. Without a key a pasted value is refused, and the signing key
+    lives in memory. An upgraded database keeps nothing in its file or WAL;
+  - search: `fix/search-security-1120` and #318;
+  - roll code: `fix/code-webhooks-sealed-at-rest`, webhook URLs sealed and no clear signing secret
+    without a key.
+- **Batch 6's follow-ups:** #582, gated green. A consumer's CAs end as soon as it loses a host;
+  `maker_unreachable` (403) when a placeholder's or a chosen reference's maker no longer reaches it;
+  a decoy planted from a session mails that person.
+- **The #432 decoy oracle:** fixed, #575 (8e16604f2). Compute images are pinned by digest, and each
+  image's pre-auth answers are learned from a compute of that image, ahead of time at start, so no
+  decoy login waits and none answers with bytes the compute wouldn't.
+- **Members (#501):** merging main again for batch 7. It lands first; #582 and #575 follow it.
+- **Item 8** (placeholders had no consumer on main): done. Previews' #535 (a06876bd1) swaps them in
+  `crates/roll-intercept`, shared with apps, and is checked end to end against a TLS echo host
+  (`scripts/preview-intercept.sh`). The echo step flips to expect a 502 once item 4's scrub lands.
+- **Found while gating:** rolld's test binaries race each other for ports (`free_port` only avoids
+  repeats within one process). Three gates hit it today. Next: rolld listens on port 0 and reports
+  its addresses, so tests never guess.
 
 **Ranked, 2026-11-21 03:40** (the thirty-fourth product review, cold, on main f9bb26c17, against
 Vault/OpenBao, Infisical, Doppler, AWS, 1Password, Akeyless, Bitwarden SM, GitGuardian, Google Secret
