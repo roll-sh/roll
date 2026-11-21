@@ -808,8 +808,9 @@ async fn a_variable_kept_as_a_file_reaches_the_instance_there() {
 
 /// Egress rules: an environment with `egress` `roll` runs on a network with no route out, its
 /// listed hosts through its proxy (the variables HTTP clients read, the project's services
-/// reached directly), what the proxy refused shown; hosts need `roll` and are names; opened
-/// again, the next deploy is back on the project's network.
+/// reached directly), what the proxy refused shown; hosts need `roll` and are names; until a
+/// deploy makes it so, the environment needs one; opened again, the next deploy is back on the
+/// project's network.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn closed_egress_runs_on_its_own_network_with_a_proxy() {
     let w = world().await;
@@ -821,6 +822,7 @@ async fn closed_egress_runs_on_its_own_network_with_a_proxy() {
     }
     let (st, e) = call(&w.api, "PUT", &env, Some(json!({"egress": {"mode": "roll", "hosts": ["API.Stripe.com", "*.sentry.io"]}}))).await;
     assert_eq!((st, &e["egress"]), (StatusCode::OK, &json!({"mode": "roll", "hosts": ["*.sentry.io", "api.stripe.com"]})), "{e}");
+    assert_eq!(call(&w.api, "GET", &env, None).await.1["needs_deploy"], true, "what runs still has the open network");
     // The live deployment's running instance (the one before may still be draining).
     let live = |w: &World, dep: &str| {
         let name = w.fake.instances(&id).into_iter().find(|(_, d, s)| d == dep && *s == apps_control::runtime::fake::FakeState::Running).map(|(n, _, _)| n).expect("a running instance");
@@ -829,6 +831,7 @@ async fn closed_egress_runs_on_its_own_network_with_a_proxy() {
     let (_, r) = call(&w.api, "POST", &format!("{env}/redeploy"), Some(json!({}))).await;
     settled(&w, &id, "production", r["id"].as_str().unwrap()).await;
     let spec = live(&w, r["id"].as_str().unwrap());
+    assert_eq!(call(&w.api, "GET", &env, None).await.1["needs_deploy"], false);
     let closed = apps_control::closed_network_name(&w.project, "production");
     assert_eq!((spec.closed, spec.network.as_deref()), (true, Some(closed.as_str())));
     assert!(w.fake.closed_networks().contains(&closed));
@@ -7471,6 +7474,52 @@ async fn an_instance_reads_its_oidc_token_for_an_allowed_audience() {
     // Too many or empty audiences are refused.
     let (_, s2) = call(&w.api, "PATCH", &format!("/v1/apps/services/{id}"), Some(json!({"run": {"oidc_audiences": ["a", "b", "c", "d", "e", "f"]}}))).await;
     assert!(s2.to_string().contains("oidc_audiences"), "{s2}");
+}
+
+/// Logs past an environment's retention go, chunk by chunk (a week by default; 30 or 90 days
+/// when it says, never for a preview), its output, access log and Vitals alike; a deleted
+/// environment's go with it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn logs_past_their_retention_are_deleted() {
+    let w = world_full(|_| {}, true, |_| {}).await;
+    let (svc, _) = image_service(&w, "api", json!({"port": 80})).await;
+    let id = svc["id"].as_str().unwrap().to_string();
+    let objects = pg_storage::Objects::new(&pg_storage::StorageConfig::Local(w._dir.path().join("objects"))).unwrap();
+    let (day, now) = (86_400_000i64, code_sql::now_ms());
+    let put = |kind: &str, env: &str, at: i64| {
+        let key = format!("apps/logs/{kind}/{id}/{env}/{at:016}-000000.ndjson");
+        let line = json!({"t": at, "stream": "stdout", "instance": null, "deployment": null, "text": "x"}).to_string();
+        let objects = &objects;
+        async move { objects.put(&key, bytes::Bytes::from(line)).await.unwrap() }
+    };
+    let (old, month, recent) = (now - 10 * day, now - 20 * day, now - day);
+    let left = |env: &str| {
+        let (objects, prefix) = (&objects, format!("apps/logs/env/{id}/{env}/"));
+        // The service's own lines (a chunk of today's) aside.
+        let ours = [old, month, recent].map(|t| format!("{t:016}-"));
+        async move { objects.list(&prefix).await.unwrap().into_iter().map(|(k, _)| k.rsplit('/').next().unwrap().to_string()).filter(|n| ours.iter().any(|o| n.starts_with(o))).collect::<Vec<_>>() }
+    };
+    for kind in ["env", "http", "vitals"] {
+        put(kind, "production", old).await;
+        put(kind, "production", recent).await;
+    }
+    // Hourly (the node's own pass at its start was the last).
+    w.apps.cron_pass(now + 3_600_000).await;
+    assert_eq!(left("production").await, vec![format!("{recent:016}-000000.ndjson")], "a week by default");
+    assert_eq!(objects.list(&format!("apps/logs/vitals/{id}/production/")).await.unwrap().len(), 1, "Vitals too");
+    // Kept 30 days: a 20-day-old chunk stays; 14 isn't a choice.
+    let env = format!("/v1/apps/services/{id}/environments/production");
+    assert_eq!(call(&w.api, "PUT", &env, Some(json!({"log_retention_days": 14}))).await.0, StatusCode::BAD_REQUEST);
+    let (st, e) = call(&w.api, "PUT", &env, Some(json!({"log_retention_days": 30}))).await;
+    assert_eq!((st, &e["log_retention_days"]), (StatusCode::OK, &json!(30)), "{e}");
+    put("env", "production", month).await;
+    w.apps.cron_pass(now + 2 * 3_600_000).await;
+    assert_eq!(left("production").await.len(), 2, "kept for its 30 days");
+    // A deleted environment's logs go with it.
+    call(&w.api, "PUT", &format!("/v1/apps/services/{id}/environments/staging"), Some(json!({}))).await;
+    put("env", "staging", recent).await;
+    assert!(call(&w.api, "DELETE", &format!("/v1/apps/services/{id}/environments/staging"), None).await.0.is_success());
+    assert!(left("staging").await.is_empty());
 }
 
 /// Pushes and path schedules with `auth: "oidc"` (Pub/Sub push's and Cloud Scheduler's OIDC

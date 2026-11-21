@@ -500,9 +500,11 @@ impl Apps {
     /// (`keep_deployments`): pruned in the store, then their images (once no deployment names
     /// them), static sites and build logs go; and deleted services kept past
     /// [`crate::DELETED_KEPT_MS`] are deleted for good (by their owner, a node taking the lease
-    /// of one nobody holds). Every ten minutes.
+    /// of one nobody holds); closed builds' networks nothing runs on go too
+    /// ([`crate::runtime::Runtime::sweep_build_networks`]). Every ten minutes.
     pub async fn prune(self: &Arc<Self>) {
         let now = code_sql::now_ms();
+        self.deps.runtime.sweep_build_networks().await;
         if let Ok(deleted) = self.db(|s| s.deleted_services(None)).await {
             for (svc, at) in deleted.into_iter().filter(|(_, at)| now - at >= crate::DELETED_KEPT_MS) {
                 let key = lease_key(&svc.id);
@@ -868,7 +870,7 @@ impl Apps {
         let vars_hash = {
             let r = self.resolve_vars(&svc, &env, &dep.id).await?;
             r.check_refs()?;
-            fingerprint(&r.vars_for_hash(), &svc)
+            fingerprint(&r.vars_for_hash(), &svc, &env.egress)
         };
         let tpl = Arc::new(self.template(&svc, &env, &dep).await?);
         let did = d.id.clone();
@@ -2469,6 +2471,21 @@ impl Apps {
 
     /// Cron: start the runs that are due at `now` in owned cron services (a run still going
     /// when the next is due is skipped). The reaper's pass, every few seconds.
+    /// Owned environments' stored logs past their retention (`log_retention_days`, a week by
+    /// default and always for a preview) deleted, chunk by chunk.
+    async fn expire_logs_pass(self: &Arc<Self>, services: &[crate::store::ServiceRow], now: i64) {
+        let Ok(envs) = self.db(|s| s.all_environments()).await else { return };
+        for svc in services.iter().filter(|s| self.owns(&s.id)) {
+            for e in envs.iter().filter(|e| e.service == svc.id) {
+                let days = if e.ephemeral { crate::logs::KEEP_DAYS } else { e.log_retention_days.unwrap_or(crate::logs::KEEP_DAYS) };
+                let before = now - days as i64 * 86_400_000;
+                for key in crate::logs::env_keys(&svc.id, &e.name) {
+                    self.logs.expire(&key, before).await;
+                }
+            }
+        }
+    }
+
     pub async fn cron_pass(self: &Arc<Self>, now: i64) {
         let Ok(services) = self.db(|s| s.services(None)).await else { return };
         self.schedules_pass(&services, now).await;
@@ -2478,6 +2495,10 @@ impl Apps {
         self.heartbeats_pass(&services, now).await;
         self.rescan_pass(&services, now).await;
         self.pause_pass(&services, now).await;
+        if now - self.logs_expired.load(std::sync::atomic::Ordering::Relaxed) >= 3_600_000 {
+            self.logs_expired.store(now, std::sync::atomic::Ordering::Relaxed);
+            self.expire_logs_pass(&services, now).await;
+        }
         if now - self.status_swept.load(std::sync::atomic::Ordering::Relaxed) >= 60_000 {
             self.status_swept.store(now, std::sync::atomic::Ordering::Relaxed);
             self.status_sweep(&services).await;
