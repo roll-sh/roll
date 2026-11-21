@@ -69,6 +69,7 @@ impl EnvSource for Engine {
         // A protected base (production) reaches a preview only when the project allows it and
         // the change is trusted; a fork's code never gets it.
         let untrusted = !(s.secrets.allow_production && r.trusted);
+        self.refs_still_allowed(&r, &s, !untrusted).await?;
         let (secrets, leases, plain) = self.resolve_secrets(&r, untrusted, true, service).await?;
         self.keep_leases(&r, service, &leases).await?;
         // A reference (`roll://…`) is roll secrets' to resolve (`secrets` has its value): never set as its text.

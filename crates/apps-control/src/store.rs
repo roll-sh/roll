@@ -611,6 +611,9 @@ pub struct MinuteRow {
     pub over_capacity: i64,
 }
 
+/// A service's use in one environment: its id, name, the environment, whether it's a preview.
+pub type ServiceUsage = (String, String, String, bool, UsageAdd);
+
 /// What an hour of an environment used.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct UsageAdd {
@@ -3378,6 +3381,26 @@ impl Store {
     }
 
     /// A project's use since `since_hour`: its services', and what deleted ones used.
+    /// A project's use from `from_hour` until `to_hour` (not included), by service and environment
+    /// (the service's name, and whether the environment is a preview), and what deleted services
+    /// used ([`Store::project_usage`]'s second half).
+    pub fn project_usage_rows(&self, project: &str, from_hour: i64, to_hour: i64) -> Result<(Vec<ServiceUsage>, UsageAdd)> {
+        let rows = self.db.query(
+            "SELECT u.service, s.name, u.env, COALESCE(e.ephemeral, 0), SUM(u.cpu_seconds), SUM(u.gb_seconds), SUM(u.requests), SUM(u.egress_bytes), SUM(u.build_seconds) \
+             FROM usage u JOIN services s ON s.id = u.service LEFT JOIN environments e ON e.service = u.service AND e.name = u.env \
+             WHERE s.project = ? AND u.hour >= ? AND u.hour < ? GROUP BY u.service, s.name, u.env, COALESCE(e.ephemeral, 0) ORDER BY s.name, u.env",
+            params![project, from_hour, to_hour],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get::<_, i64>(3)? != 0, UsageAdd { cpu_seconds: r.get(4)?, gb_seconds: r.get(5)?, requests: r.get(6)?, egress_bytes: r.get(7)?, build_seconds: r.get(8)? })),
+        )?;
+        let gone = self.db.query_row(
+            "SELECT COALESCE(SUM(cpu_seconds), 0), COALESCE(SUM(gb_seconds), 0), COALESCE(SUM(requests), 0), COALESCE(SUM(egress_bytes), 0), COALESCE(SUM(build_seconds), 0) \
+             FROM project_usage WHERE project = ? AND hour >= ? AND hour < ?",
+            params![project, from_hour, to_hour],
+            |r| Ok(UsageAdd { cpu_seconds: r.get(0)?, gb_seconds: r.get(1)?, requests: r.get(2)?, egress_bytes: r.get(3)?, build_seconds: r.get(4)? }),
+        )?;
+        Ok((rows, gone))
+    }
+
     pub fn project_usage(&self, project: &str, since_hour: i64) -> Result<UsageAdd> {
         let row = |r: &code_sql::Row<'_>| Ok(UsageAdd { cpu_seconds: r.get(0)?, gb_seconds: r.get(1)?, requests: r.get(2)?, egress_bytes: r.get(3)?, build_seconds: r.get(4)? });
         let live = self.db.query_row(
