@@ -618,7 +618,7 @@ previews are listed once those products are on.
 | `workspace_list_projects` | Workspace projects, each with the resources on its canvas (kind, ref, position). | `GET /v1/workspace/projects` |
 | `workspace_get_project` | A workspace project and its resources. | `GET /v1/workspace/projects/{id}` |
 | `workspace_create_project` | A new workspace project to group resources. | `POST /v1/workspace/projects` |
-| `workspace_update_project` | Rename a project or change its description. | `PATCH /v1/workspace/projects/{id}` |
+| `workspace_update_project` | Rename a project, or change its description or icon (a monogram, an emoji or a small image, with a colour; `clear: ["icon"]` goes back to the default). | `PATCH /v1/workspace/projects/{id}` |
 | `workspace_delete_project` | Delete a workspace project. Its resources stay; only the grouping goes. | `DELETE /v1/workspace/projects/{id}` |
 | `workspace_place_resource` | Put a resource on a project's canvas (or move it), at x, y. | `PUT /v1/workspace/projects/{id}/resources/{kind}/{ref}` |
 | `workspace_remove_resource` | Take a resource off a project's canvas (the resource itself stays). | `DELETE /v1/workspace/projects/{id}/resources/{kind}/{ref}` |
@@ -945,7 +945,7 @@ previews are listed once those products are on.
 | `apps_deploy` | Deploy a service to an environment: a git revision of its repo, or an image (production deploys are "deploy" actions). `override: true` goes past a deploy freeze, as do `apps_redeploy`'s, `apps_promote`'s and `apps_rollback`'s: sent as `X-Roll-Override: 1`, which roll-access makes `admin` (a deploy token can't) and binds into an approval. | `POST /v1/apps/services/{service}/environments/{env}/deploys` |
 | `apps_list_deploys` | An environment's deploys, newest first. | `GET /v1/apps/services/{service}/environments/{env}/deploys` |
 | `apps_deploy_logs` | A deploy's build and release log. | `GET /v1/apps/services/{service}/environments/{env}/deploys/{deploy}/logs` |
-| `apps_promote` | Deploy another environment's running image into this one. | `POST /v1/apps/services/{service}/environments/{env}/promote` |
+| `apps_promote` | Deploy another environment's running image into this one (`expect`: the deployment you checked, 409 if it moved). | `POST /v1/apps/services/{service}/environments/{env}/promote` |
 | `apps_cancel_deploy` | Stop a deploy that hasn't gone live. | `POST /v1/apps/services/{service}/environments/{env}/deploys/{deploy}/cancel` |
 | `apps_rollout` | Move a manual gradual rollout that waits: advance, all, or abort (deploy). | `POST /v1/apps/services/{service}/environments/{env}/deploys/{deploy}/rollout` |
 | `apps_sleep` | Stop an environment's instances until woken. | `POST /v1/apps/services/{service}/environments/{env}/sleep` |
@@ -955,7 +955,7 @@ previews are listed once those products are on.
 | `apps_purge_cache` | Drop a web service's cached answers: some paths, answers with some cache tags, or everything (production: deploy). | `POST /v1/apps/services/{service}/environments/{env}/cache/purge` |
 | `apps_restart_instance` | Replace one instance, a fresh one answering first (production: deploy). | `POST /v1/apps/services/{id}/environments/{env}/instances/{name}/restart` |
 | `apps_redeploy` | Deploy what's running again with the current settings and variables. | `POST /v1/apps/services/{service}/environments/{env}/redeploy` |
-| `apps_run_job` | Run a one-off command in an environment's image with its variables. | `POST /v1/apps/services/{service}/environments/{env}/jobs` |
+| `apps_run_job` | Run a one-off command in an environment's image with its variables, in up to 100 tasks (`parallelism`, `retries`). | `POST /v1/apps/services/{service}/environments/{env}/jobs` |
 | `apps_job_logs` | A job's output. | `GET /v1/apps/services/{service}/environments/{env}/jobs/{job}/logs` |
 | `apps_list_jobs` | An environment's one-off jobs, newest first. | `GET /v1/apps/services/{service}/environments/{env}/jobs` |
 | `apps_get_job` | One job: status, exit code, timing. | `GET /v1/apps/services/{service}/environments/{env}/jobs/{job}` |
@@ -963,7 +963,7 @@ previews are listed once those products are on.
 | `apps_cancel_job` | Stop a running job (production: deploy). | `POST /v1/apps/services/{service}/environments/{env}/jobs/{job}/cancel` |
 | `apps_events` | What happened to services, in order after a cursor. | `GET /v1/apps/events` |
 | `apps_list_variables` | An environment's variables, values masked. | `GET /v1/apps/services/{service}/environments/{env}/variables` |
-| `apps_set_variables` | Set or unset an environment's variables, or copy some from another (`copy_from` with `copy`; reveal on that environment too). Production is a "deploy" action. | `PATCH /v1/apps/services/{service}/environments/{env}/variables` |
+| `apps_set_variables` | Set or unset an environment's variables, or copy some from another (`copy_from` with `copy`; reveal on that environment too). `seal` hides values for good, `files` keeps some as files in the instances, `runtime_only` keeps some out of builds. Production is a "deploy" action. | `PATCH /v1/apps/services/{service}/environments/{env}/variables` |
 | `apps_diff_environments` | How an environment differs from another: variables missing, extra or different (names only; `differ` needs reveal on both) and settings with the body that matches each. | `GET /v1/apps/services/{service}/environments/{env}/diff` |
 | `apps_metrics` | CPU, memory and requests of an environment, and each instance's own last hour (`by_instance`). | `GET /v1/apps/services/{service}/environments/{env}/metrics` |
 | `apps_plan` | How roll would build and run a repo, before making a service (a dry run). | `POST /v1/apps/plan` |
@@ -986,7 +986,7 @@ previews are listed once those products are on.
 | `apps_verify_domain` | Check a custom domain's DNS now. | `POST /v1/apps/services/{id}/environments/{env}/domains/{host}/verify` |
 | `apps_list_backups` | An environment's volume backups. | `GET /v1/apps/services/{id}/environments/{env}/volume/backups` |
 | `apps_backup_volume` | Back up a volume now. | `POST /v1/apps/services/{id}/environments/{env}/volume/backups` |
-| `apps_restore_backup` | Put a volume back as a backup had it (delete: it replaces the files). | `POST /v1/apps/services/{id}/environments/{env}/volume/backups/{bid}/restore` |
+| `apps_restore_backup` | Put a volume back as a backup had it (delete: it replaces the files); `from` another environment's backup seeds this one (reveal there too). | `POST /v1/apps/services/{id}/environments/{env}/volume/backups/{bid}/restore` |
 | `apps_activity` | Who changed what on a service (never a value). | `GET /v1/apps/services/{service}/activity` |
 | `apps_get_deploy` | One deploy. | `GET …/environments/{env}/deploys/{deploy}` |
 | `apps_wait_deploy` | A deploy once it's live or failed, or built and waiting at `ready` for people's approvals (apps #576; a person approves, never a token): a task that waits as long as it takes for a client that runs tasks, its status now for any other. | `GET …/environments/{env}/deploys/{deploy}` |
@@ -1002,7 +1002,7 @@ previews are listed once those products are on.
 | `apps_overview` | What roll apps runs here: domain, runtime, prices, every service. | `GET /v1/apps` |
 | `apps_list_project_services` | The services in one workspace project. | `GET /v1/apps/projects/{project}/services` |
 | `apps_list_notifications` | Where a project's deploy, crash and preview events are sent (webhook, Slack, Discord, email; the URL's host only). | `GET /v1/apps/projects/{project}/notifications` |
-| `apps_add_notification` | Notify a webhook, Slack, Discord or an email address of a project's events (the URL is stored sealed and never shown again). | `POST /v1/apps/projects/{project}/notifications` |
+| `apps_add_notification` | Notify a webhook, Slack, Discord, the project's owner by email, PagerDuty (`routing_key`) or Opsgenie (`api_key`) of a project's events; URLs and keys are stored sealed and never shown again (and redacted from the audit log, #586). | `POST /v1/apps/projects/{project}/notifications` |
 | `apps_update_notification` | Change which events, environments and services a notification gets: given ones replace. | `PATCH /v1/apps/projects/{project}/notifications/{nid}` |
 | `apps_delete_notification` | Stop sending a project's events there. | `DELETE /v1/apps/projects/{project}/notifications/{nid}` |
 | `apps_test_notification` | Send a test event now (not retried): whether it arrived. | `POST /v1/apps/projects/{project}/notifications/{nid}/test` |
@@ -1261,7 +1261,13 @@ waits on a sibling PR reaching main is last.
    (`roll:add:<product>:<action>…`) for the consent screen to propose, never grant by itself.
    Recheck those issues each pass.
 
-Considered and left out: a docs search tool (Supabase's `search_docs`): roll's docs are design docs (plans, `## Next` lists, test maps), and serving them would hand agents roadmap notes as how roll works; `roll://guide` covers using roll over MCP, until user-facing docs exist; a smaller default toolset (see Toolsets: it would drop tools from connections that use them; search mode is opt-in); a connection narrowed to one project (Supabase's `project_ref`): their
+Considered and left out: `bypass` on `secrets_rollback` and `secrets_apply_request` (an admin
+landing past a protected environment's approvals: a person's, never an agent's); bringing a transit
+key's material (`key` on `secrets_create_transit_key` and `secrets_rotate_transit_key`: a
+credential in a tool's arguments, where roll makes one instead). Both are lines in
+`crates/roll-mcp/src/no-field.txt`: `tools_take_their_routes_body_fields` reads each product's HTTP
+contract (apps, workspace, previews, queues, secrets) and fails on a body field the route's tool
+doesn't take and no line explains, as `no-tool.txt` does for routes. A docs search tool (Supabase's `search_docs`): roll's docs are design docs (plans, `## Next` lists, test maps), and serving them would hand agents roadmap notes as how roll works; `roll://guide` covers using roll over MCP, until user-facing docs exist; a smaller default toolset (see Toolsets: it would drop tools from connections that use them; search mode is opt-in); a connection narrowed to one project (Supabase's `project_ref`): their
 tokens are account-wide; a roll token's rules already name projects, and the builder's presets
 start from one. `outputSchema` per tool: it would double `tools/list` for clients that read
 `structuredContent` as JSON anyway.
