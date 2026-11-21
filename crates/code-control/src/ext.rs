@@ -8,6 +8,9 @@ use crate::model::{Change, Check, Preview, RepoRow};
 use async_trait::async_trait;
 use std::path::Path;
 
+/// What `@roll preview …` asks of a change's preview.
+pub use code_review::commands::PreviewAction;
+
 /// Creates and tears down a change's preview.
 #[async_trait]
 pub trait PreviewBackend: Send + Sync {
@@ -19,6 +22,12 @@ pub trait PreviewBackend: Send + Sync {
     /// came in. Backends without one can't.
     async fn accept_visual(&self, _change: &Change, _by: &str, _head: &str) -> anyhow::Result<()> {
         anyhow::bail!("this preview backend has no visual review")
+    }
+    /// `by` (someone who can write to the change's repo: the caller checked) asks `action` of the
+    /// change's preview (`@roll preview …`): what was done, said for the answer. Backends without
+    /// one can't.
+    async fn act(&self, _change: &Change, _action: PreviewAction, _by: &str) -> anyhow::Result<String> {
+        anyhow::bail!("this change's previews can't be acted on from a comment")
     }
 }
 
@@ -108,6 +117,15 @@ pub trait SecretEnv: Send + Sync {
     async fn store(&self, repo: &str, asker: &SecretsAsker, credential: StoreCredential) -> crate::Result<StoredCredential> {
         let _ = (repo, asker, credential);
         Err(crate::Error::Unprocessable("roll secrets isn't on this server".into()))
+    }
+    /// Whether credentials a change of repo `owner/name` adds work, asked of their providers when
+    /// a project with the repo on its canvas has roll secrets' validity checks on (docs/secrets.md,
+    /// "Is it live?"): (value, the AWS secret access key next to an access key id) in, an answer
+    /// per credential (by fingerprint) out; empty when checks are off. Waits for the answers: call
+    /// it from background work. The values go nowhere but the providers.
+    async fn validity(&self, repo: &str, found: Vec<(String, Option<String>)>) -> anyhow::Result<Vec<crate::model::CredentialValidity>> {
+        let _ = (repo, found);
+        Ok(Vec::new())
     }
 }
 

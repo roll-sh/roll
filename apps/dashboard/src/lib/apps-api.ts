@@ -65,6 +65,8 @@ export interface Push {
   timeout_s?: number;
   /** Records POSTed at once, each from its own partitions (1–32, default 4). */
   max_in_flight?: number;
+  /** `oidc`: each POST carries roll's OIDC token for the service instead of `CRON_SECRET`. */
+  auth?: "oidc";
 }
 
 /** A push rule as it stands (`…/environments/{env}/push`), on the service's owner since it began delivering. */
@@ -109,6 +111,8 @@ export interface Run {
   drain_s?: number;
   /** A web service also scales on CPU: another instance while they average over this percent for a minute (10–100). */
   cpu_target?: number;
+  /** 1–100: an instance over this percent of its CPU counts as busy and isn't put to sleep or scaled in. */
+  busy_cpu?: number;
   /** A web service also scaled on its answers' p95 (50–60,000 ms). */
   latency_target_ms?: number;
   /** Audiences its instances may ask roll's OIDC issuer for, at ROLL_OIDC_URL (`?aud=`, the first by default). */
@@ -189,6 +193,8 @@ export interface Scheduled {
   path?: string;
   timezone?: string;
   timeout_s?: number;
+  /** `oidc`: a path's call carries roll's OIDC token for the service instead of `CRON_SECRET`. */
+  auth?: "oidc";
 }
 
 export type InstanceState = "none" | "stopped" | "suspended" | "waking" | "running" | "crashed" | "deploying";
