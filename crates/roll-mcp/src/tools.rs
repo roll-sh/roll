@@ -1287,7 +1287,7 @@ static TOOLS: &[Tool] = &[
     t(
         "apps_wait_deploy",
         "Wait for a deploy to finish",
-        "A deploy once it's live or failed, with how far each step got. A client that runs MCP tasks gets a task that waits as long as it takes; otherwise this answers the status now (call again to keep waiting).",
+        "A deploy once it's live or failed, with how far each step got, or built and waiting at ready for people to approve it where the environment asks for approvals (approved_by and the count it needs: a person approves it in roll, never a token). A client that runs MCP tasks gets a task that waits as long as it takes; otherwise this answers the status now (call again to keep waiting).",
         "apps",
         "GET",
         "/v1/apps/services/{service}/environments/{env}/deploys/{deploy}",
