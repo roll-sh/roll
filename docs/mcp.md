@@ -990,6 +990,7 @@ previews are listed once those products are on.
 | `apps_cancel_cron_run` | Stop a running cron run (production: deploy). | `POST /v1/apps/services/{id}/environments/{env}/runs/{run}/cancel` |
 | `apps_run_cron` | Run a cron job now (deploy in production). | `POST …/environments/{env}/runs` |
 | `apps_limits` | A project's apps spend limits. | `GET /v1/apps/projects/{project}/limits` |
+| `apps_project_usage` | A month's apps cost by service and environment (previews and deleted services as a row each), most costly first, this month's projected. | `GET /v1/apps/projects/{project}/usage` |
 | `apps_set_limits` | Set a project's monthly apps alert and hard cap (the cap pauses the project; admin). | `PUT /v1/apps/projects/{project}/limits` |
 | `apps_overview` | What roll apps runs here: domain, runtime, prices, every service. | `GET /v1/apps` |
 | `apps_list_project_services` | The services in one workspace project. | `GET /v1/apps/projects/{project}/services` |
@@ -1076,7 +1077,8 @@ waits on a sibling PR reaching main is last.
    already in: discover, listen, `resultType`, `ttlMs`, `Mcp-Name`, the renumbered errors, `iss`,
    client ID metadata documents beside dynamic registration), and workflows for previews, tasks,
    queues and streams (`review_preview`, `clear_task_backlog`, `drain_queue`,
-   `find_consumer_lag`; this PR). Then, as each lands: search's browser keys
+   `find_consumer_lag`; #560), search mode's ranking (#561: 73 everyday queries), and apps'
+   month by service as `apps_project_usage` once apps #562 landed (this PR). Then, as each lands: search's browser keys
    (#358: list and revoke as tools, making one stays a credential), secrets' found-credential view
    (#487's `unstored`) and placeholders (#520: the list as a read, the revokes destructive; binding a
    key to hosts stays a person's), project members (#501's own tools; its other routes are
