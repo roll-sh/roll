@@ -3832,10 +3832,10 @@ mod tests {
         let path = sst_path(dir.path(), 1);
         let mut b = std::fs::read(&path).unwrap();
         let n = b.len();
-        b[n - 16..n - 8].copy_from_slice(&(FORMAT_DICT as u64 + 1).to_le_bytes());
+        b[n - 16..n - 8].copy_from_slice(&(FORMAT_COLS as u64 + 1).to_le_bytes());
         std::fs::write(&path, &b).unwrap();
         let e = SstReader::open(dir.path(), meta.clone(), cache.clone()).err().unwrap();
-        assert!(e.message.contains(&format!("storage format {}, newer than this build reads ({FORMAT_DICT})", FORMAT_DICT + 1)), "{}", e.message);
+        assert!(e.message.contains(&format!("storage format {}, newer than this build reads ({FORMAT_COLS})", FORMAT_COLS + 1)), "{}", e.message);
         // (Format 3 is a store's, never a file's.)
         b[n - 16..n - 8].copy_from_slice(&3u64.to_le_bytes());
         std::fs::write(&path, &b).unwrap();
