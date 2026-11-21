@@ -635,7 +635,7 @@ static TOOLS: &[Tool] = &[
     t("workspace_get_project", "Get a project", "A workspace project and its resources.", "workspace", "GET", "/v1/workspace/projects/{id}", &[WS]),
     t("workspace_create_project", "Create a project", "A new workspace project to group resources.", "workspace", "POST", "/v1/workspace/projects", &[breq("name", Ty::Str, "1-48 of a-z, 0-9 and -"), b("description", Ty::Str, "At most 280 characters")]),
     t("workspace_update_project", "Update a project", "Rename a project or change its description.", "workspace", "PATCH", "/v1/workspace/projects/{id}", &[WS, b("name", Ty::Str, "New name"), b("description", Ty::Str, "New description")]),
-    t("workspace_delete_project", "Delete a project", "Delete a workspace project. Its resources stay; only the grouping goes.", "workspace", "DELETE", "/v1/workspace/projects/{id}", &[WS]),
+    t("workspace_delete_project", "Delete a project", "Delete a workspace project. Its resources stay. A project that holds secrets needs a secrets admin's confirmation in the dashboard.", "workspace", "DELETE", "/v1/workspace/projects/{id}", &[WS]),
     t(
         "workspace_place_resource",
         "Place a resource",

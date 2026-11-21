@@ -47,7 +47,8 @@ export const workspaceApi = {
   /** Changes the fields given; `icon: null` goes back to the default. */
   update: (id: string, patch: { name?: string; description?: string; icon?: WorkspaceIcon | null }) =>
     call<WorkspaceProject>("PATCH", project(id), patch),
-  remove: (id: string) => call<null>("DELETE", project(id)),
+  /** `confirm` repeats the project's name: roll secrets refuses (409 `project_holds_secrets`) without it while the project holds secrets. */
+  remove: (id: string, confirm?: string) => call<null>("DELETE", confirm ? `${project(id)}?confirm=${encodeURIComponent(confirm)}` : project(id)),
   /** Adds the resource, moves it on the canvas, or takes it from another project. */
   place: (id: string, kind: ResourceKind, ref: string, x: number, y: number) =>
     call<PlacedResource>("PUT", resource(id, kind, ref), { x, y }),

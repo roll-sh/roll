@@ -405,6 +405,10 @@ export type AwsUser = { id: string; name: string; role: string; user: string; cr
 /** `trust`: `external_id` (roll's AWS role with the project's ExternalId) or `oidc` (roll's issuer: no AWS credential of roll's). */
 export type AwsRole = { id: string; name: string; role_arn: string; trust: "external_id" | "oidc"; created_at: number; created_by: string };
 /** Where a key is set (`GET /v1/secrets/search?key=`): names and versions, never a value. */
+/** A deleted project in its recovery window (`GET /v1/secrets/deleted`): recoverable until `purge_at`. */
+export type DeletedProject = { project: string; name: string; deleted_at: number; deleted_by: string; purge_at: number };
+/** `POST …/recover`: the project is back; managed links got new credentials (`rotated`), or say which didn't. */
+export type Recovered = { project: string; name: string; recovered_at: number; rotated: number; rotation_failed: string[] };
 export type Place = { project: string; project_name: string; environment: string; path: string; key: string; version: number; updated_at: number; linked: boolean };
 /** One thing to fix (`GET …/health`), worst first: where, never a value. */
 export type Finding = { issue: "decoy_used" | "expired" | "rotation_failing" | "revoke_failing" | "missing" | "exposed" | "public" | "weak" | "operator_made" | "expiring" | "certificate_expiring" | "stale" | "unread" | "unreferenced"; environment: string; path: string; key: string; detail: string; owner?: string; decoy?: Decoy };

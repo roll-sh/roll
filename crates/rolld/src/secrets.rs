@@ -482,17 +482,13 @@ pub fn open(args: &crate::Args, home: &Path, workspace: Arc<roll_workspace::Work
     tell_decoys(&access, secrets.clone());
     // ACME's http-01 and dns-01 checks: public addresses only, as webhooks.
     secrets.set_acme_checks(Arc::new(acme::Checks::new(allow_private)));
-    // A deleted project's secrets go with it.
-    let s = secrets.clone();
-    workspace.on_delete(Box::new(move |id| {
-        let s = s.clone();
-        let id = id.to_string();
-        tokio::task::spawn_blocking(move || {
-            if let Err(e) = s.forget_project(&id) {
-                tracing::error!(project = %id, "forgetting a deleted project's secrets failed: {e}");
-            }
-        });
-    }));
+    // A workspace project that holds secrets goes only when a secrets admin confirms; then its
+    // secrets are kept for a recovery window (1–90 days, 7 unless set), and purged after it.
+    if let Ok(days) = std::env::var("ROLL_SECRETS_DELETE_WINDOW_DAYS") {
+        let days: u32 = days.trim().parse().map_err(|_| anyhow::anyhow!("ROLL_SECRETS_DELETE_WINDOW_DAYS is a number of days (1–{}), not {days:?}", roll_secrets::deleted::WINDOW_DAYS_MAX))?;
+        secrets.set_delete_window_days(days).map_err(|e| anyhow::anyhow!("ROLL_SECRETS_DELETE_WINDOW_DAYS: {e}"))?;
+    }
+    secrets.watch_workspace();
     // Two sweepers: work in roll (expired leases and environments, due rotations, old audit
     // rows), and deliveries outside it (notices, syncs, sinks), so a slow platform holds up neither.
     sweeper(secrets.clone(), "local", Secrets::sweep_local);

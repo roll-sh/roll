@@ -72,7 +72,7 @@ impl Secrets {
         type Due = (String, String, String, Option<i64>, bool);
         let due: Vec<Due> = self.db.read(|c| {
             c.query(
-                "SELECT id, project_id, slug, reminded_at, COALESCE(notify_set_by_session, 0) FROM environments WHERE notify_url IS NOT NULL AND kind = 'standard' AND COALESCE(reminded_at, 0) <= ? LIMIT 100",
+                &format!("SELECT id, project_id, slug, reminded_at, COALESCE(notify_set_by_session, 0) FROM environments WHERE notify_url IS NOT NULL AND kind = 'standard' AND COALESCE(reminded_at, 0) <= ? AND {} LIMIT 100", crate::deleted::live("environments.project_id")),
                 params![now - REMIND_EVERY_MS],
                 |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get::<_, i64>(4)? == 1)),
             )
@@ -134,8 +134,11 @@ impl Secrets {
         type Due = (String, String, String, Option<Vec<u8>>, String, i64, bool);
         let due: Vec<Due> = self.db.read(|c| {
             c.query(
-                "SELECT n.id, n.project_id, n.env_id, e.notify_url, n.body, n.attempts, COALESCE(e.notify_set_by_session, 0) FROM notices n LEFT JOIN environments e ON e.id = n.env_id
-                 WHERE n.sent_at IS NULL AND n.next_at <= ? AND n.attempts < ? LIMIT 50",
+                &format!(
+                    "SELECT n.id, n.project_id, n.env_id, e.notify_url, n.body, n.attempts, COALESCE(e.notify_set_by_session, 0) FROM notices n LEFT JOIN environments e ON e.id = n.env_id
+                     WHERE n.sent_at IS NULL AND n.next_at <= ? AND n.attempts < ? AND {} LIMIT 50",
+                    crate::deleted::live("n.project_id")
+                ),
                 params![now, ATTEMPTS],
                 |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?, r.get::<_, i64>(6)? == 1)),
             )

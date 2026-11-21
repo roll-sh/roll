@@ -52,6 +52,10 @@ impl IntoResponse for Error {
             Error::BadRequest(_) => StatusCode::BAD_REQUEST,
             Error::NotFound(_) => StatusCode::NOT_FOUND,
             Error::Conflict(_) => StatusCode::CONFLICT,
+            Error::Refused(r) => {
+                let status = StatusCode::from_u16(r.status).unwrap_or(StatusCode::CONFLICT);
+                return (status, Json(serde_json::json!({ "error": r.message, "code": r.code }))).into_response();
+            }
             Error::Db(_) | Error::Internal(_) => StatusCode::INTERNAL_SERVER_ERROR,
         };
         (status, Json(serde_json::json!({ "error": self.to_string() }))).into_response()
@@ -121,9 +125,11 @@ async fn update(State(ws): S, who: Who, Path(id): Path<String>, b: Bytes) -> cra
     Ok(Json(blocking(ws, move |ws| ws.update(me.scope(), &id, &change)).await?).into_response())
 }
 
-async fn delete(State(ws): S, who: Who, Path(id): Path<String>) -> crate::Result<StatusCode> {
+/// A product may refuse (roll secrets: `409 project_holds_secrets` until a secrets admin passes
+/// `?confirm=<the project's name or id>`); the request goes to it as it came.
+async fn delete(State(ws): S, who: Who, Path(id): Path<String>, request: axum::http::request::Parts) -> crate::Result<StatusCode> {
     let me = Caller::of(who);
-    blocking(ws, move |ws| ws.delete(me.scope(), &id)).await?;
+    blocking(ws, move |ws| ws.delete(me.scope(), &id, &request)).await?;
     Ok(StatusCode::NO_CONTENT)
 }
 

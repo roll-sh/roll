@@ -139,7 +139,7 @@ impl Secrets {
     pub(crate) fn sweep_backups(&self) -> Result<(usize, usize)> {
         let Some(deliver) = self.deliver.clone() else { return Ok((0, 0)) };
         let now = self.db.now_ms()?;
-        let due: Vec<(String, i64)> = self.db.read(|c| c.query("SELECT project_id, next_at FROM backup_schedules WHERE next_at <= ? ORDER BY next_at LIMIT 10", [now], |r| Ok((r.get(0)?, r.get(1)?))))?;
+        let due: Vec<(String, i64)> = self.db.read(|c| c.query(&format!("SELECT project_id, next_at FROM backup_schedules WHERE next_at <= ? AND {} ORDER BY next_at LIMIT 10", crate::deleted::live("backup_schedules.project_id")), [now], |r| Ok((r.get(0)?, r.get(1)?))))?;
         let (mut made, mut failed) = (0, 0);
         for (project, next_at) in due {
             // Claimed by moving next_at on: another node sees it not due.

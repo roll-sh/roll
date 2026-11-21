@@ -119,12 +119,14 @@ function Form({ project, onDone }: { project: WorkspaceProject; onDone: () => vo
 
       <div className="rounded-xl border border-danger/30 p-3">
         <div className="text-[12.5px] font-medium">Delete this project</div>
-        <p className="mt-0.5 text-[11.5px] text-subtle">Its databases, buckets, streams and repositories stay; only the project and its canvas go.</p>
+        <p className="mt-0.5 text-[11.5px] text-subtle">
+          Its databases, buckets, streams and repositories stay. This project's secrets, their history and encryption keys go too. They can be restored for 7 days.
+        </p>
         <div className="mt-2.5 flex gap-2">
           <input value={confirm} onChange={(e) => setConfirm(e.target.value)} placeholder={project.name} aria-label="Type the project's name to delete it" className={`${field} h-8 flex-1 font-mono text-[12px]`} />
           <button
             disabled={confirm !== project.name || busy}
-            onClick={() => workspace.removeProject(project.id).then(() => navigate({ href: "/dashboard" }), (e) => setError(e instanceof Error ? e.message : String(e)))}
+            onClick={() => workspace.removeProject(project.id, confirm).then(() => navigate({ href: "/dashboard" }), (e) => setError(e instanceof Error ? e.message : String(e)))}
             className="h-8 rounded-lg border border-danger/50 px-3 text-[12px] text-danger transition-colors hover:bg-danger/10 disabled:opacity-40"
           >
             Delete
