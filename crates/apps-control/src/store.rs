@@ -585,6 +585,8 @@ pub struct EnvRow {
     pub log_retention_days: Option<u32>,
     /// Approvals a deployment needs from people other than its author before it goes live.
     pub approvals: u32,
+    /// Its deploy status badge answers (`/_roll/badge/…`), for anyone.
+    pub badge: bool,
     /// Its deploys are reported to the Git host (commit statuses, GitHub Deployments); false:
     /// someone else reports them (roll previews for its `pv-` environments).
     pub report: bool,
@@ -706,7 +708,7 @@ fn name_taken(name: &str, deleted: Option<i64>) -> String {
         Some(_) => format!("a deleted service named {name} holds the name: restore it, or delete it again to delete it for good"),
     }
 }
-const ENV_COLS: &str = "service, name, branch, ephemeral, active, slug, port, created_at, wait_for_ci, run, hook_hash, follow_tag, tag_seen, feedback, maintenance, allow_ips, rate_limit, tcp_port, firewall, pages, redeploy_on_secrets, secrets_seen, headers, paused, held_by, egress, vitals, routes, report, checks, heartbeats, split, freeze, mirror, pause_schedule, snippets, log_retention_days, approvals";
+const ENV_COLS: &str = "service, name, branch, ephemeral, active, slug, port, created_at, wait_for_ci, run, hook_hash, follow_tag, tag_seen, feedback, maintenance, allow_ips, rate_limit, tcp_port, firewall, pages, redeploy_on_secrets, secrets_seen, headers, paused, held_by, egress, vitals, routes, report, checks, heartbeats, split, freeze, mirror, pause_schedule, snippets, log_retention_days, approvals, badge";
 /// A deployment [`Store::prune_deployments`] pruned, with its image when nothing else names it.
 pub struct Pruned {
     pub id: String,
@@ -795,6 +797,7 @@ fn env_row(r: &code_sql::Row<'_>) -> code_sql::Result<EnvRow> {
         snippets: r.get::<_, Option<String>>(35)?.and_then(|j| serde_json::from_str(&j).ok()).unwrap_or_default(),
         log_retention_days: r.get::<_, Option<i64>>(36)?.map(|d| d as u32),
         approvals: r.get::<_, Option<i64>>(37)?.unwrap_or(0) as u32,
+        badge: r.get::<_, i64>(38)? != 0,
     })
 }
 
@@ -953,6 +956,7 @@ impl Store {
         db.add_column("environments", "report", "INTEGER NOT NULL DEFAULT 1")?;
         db.add_column("environments", "log_retention_days", "INTEGER")?;
         db.add_column("environments", "approvals", "INTEGER")?;
+        db.add_column("environments", "badge", "INTEGER NOT NULL DEFAULT 0")?;
         // A custom domain sent to another of the app's ports.
         db.add_column("domains", "port", "INTEGER")?;
         // The roll login (`ses_…`) a ticket and a visit session came from: its end ends them.
@@ -1183,7 +1187,7 @@ impl Store {
                     None => None,
                 };
                 c.execute(
-                    &format!("INSERT INTO environments ({ENV_COLS}) VALUES (?, ?, ?, ?, NULL, ?, ?, ?, 0, '{{}}', NULL, 0, NULL, 0, NULL, NULL, NULL, NULL, NULL, NULL, 0, NULL, NULL, 0, NULL, NULL, 0, NULL, 1, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL)"),
+                    &format!("INSERT INTO environments ({ENV_COLS}) VALUES (?, ?, ?, ?, NULL, ?, ?, ?, 0, '{{}}', NULL, 0, NULL, 0, NULL, NULL, NULL, NULL, NULL, NULL, 0, NULL, NULL, 0, NULL, NULL, 0, NULL, 1, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, 0)"),
                     params![service, env, branch.flatten(), ephemeral.unwrap_or(false) as i64, slug, port, now],
                 )?;
             }
@@ -3260,6 +3264,11 @@ impl Store {
 
     pub fn set_maintenance(&self, service: &str, env: &str, message: Option<&str>) -> Result<()> {
         self.db.execute("UPDATE environments SET maintenance = ? WHERE service = ? AND name = ?", params![message, service, env])?;
+        Ok(())
+    }
+
+    pub fn set_badge(&self, service: &str, env: &str, on: bool) -> Result<()> {
+        self.db.execute("UPDATE environments SET badge = ? WHERE service = ? AND name = ?", params![on as i64, service, env])?;
         Ok(())
     }
 

@@ -4778,6 +4778,31 @@ async fn a_deploy_waits_for_another_persons_approval() {
     assert_eq!(one["approved_by"], json!(["usr_grace"]), "{one}");
 }
 
+/// A status badge (Netlify's): off, a 404; on, an SVG saying the environment is live, cached a
+/// minute; the environment says where it is.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_status_badge_says_what_deploys_stand_at() {
+    let w = world().await;
+    let (svc, _) = image_service(&w, "web", json!({"port": 80})).await;
+    let id = svc["id"].as_str().unwrap().to_string();
+    let path = format!("/_roll/badge/{id}/production.svg");
+    let get = || {
+        let public = w.public.clone();
+        let path = path.clone();
+        async move {
+            let r = public.oneshot(Request::builder().uri(path).body(Body::empty()).unwrap()).await.unwrap();
+            let (st, h) = (r.status(), r.headers().clone());
+            (st, h, String::from_utf8(r.into_body().collect().await.unwrap().to_bytes().to_vec()).unwrap())
+        }
+    };
+    assert_eq!(get().await.0, StatusCode::NOT_FOUND, "off by default");
+    let (_, e) = call(&w.api, "PUT", &format!("/v1/apps/services/{id}/environments/production"), Some(json!({"badge": true}))).await;
+    assert!(e["badge_url"].as_str().is_some_and(|u| u.ends_with(&path)), "{e}");
+    let (st, h, svg) = get().await;
+    assert_eq!((st, h["content-type"].to_str().unwrap()), (StatusCode::OK, "image/svg+xml; charset=utf-8"));
+    assert!(svg.starts_with("<svg") && svg.contains("web production") && svg.contains(">live<"), "{svg}");
+}
+
 /// A bigger build machine (`build.size`): the builder is asked for its CPUs and memory; a size
 /// that isn't one is refused.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
