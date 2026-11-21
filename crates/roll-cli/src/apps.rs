@@ -421,6 +421,11 @@ pub enum AppsCmd {
         /// (50–60000); `0` turns it off.
         #[arg(long, value_name = "MS")]
         latency_target: Option<u32>,
+        /// An audience its instances may ask roll's OIDC issuer for, at `$ROLL_OIDC_URL` (repeat
+        /// for more, at most five; replaces them all; the first is the default); `none` removes
+        /// them.
+        #[arg(long, value_name = "AUDIENCE")]
+        oidc_audience: Vec<String>,
         /// A roll stream's records POSTed to a path as they arrive (repeat for more, at most
         /// four; replaces them all): `<stream>/<topic>/<group>:<path>[,dead_letter=<topic>]
         /// [,max_attempts=N][,max_in_flight=N][,environment=<env>]`; `none` removes them.
@@ -1098,6 +1103,12 @@ pub enum AppsCmd {
         target: Target,
         #[arg(long, default_value_t = 30)]
         days: i64,
+        /// The service's whole project this month (or `--month YYYY-MM`), by service and
+        /// environment, most costly first, with this month's projection.
+        #[arg(long, conflicts_with = "days")]
+        by_service: bool,
+        #[arg(long, value_name = "YYYY-MM", requires = "by_service")]
+        month: Option<String>,
     },
     /// Make or change an environment (`--branch` deploys on pushes to it; `--variables-from`
     /// starts a new one with another's variables).
@@ -2751,7 +2762,7 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
             }
             v
         }
-        AppsCmd::Set { target, name, repo, root, image, upload, builder, dockerfile, stage, install, build_command, build_start, health_timeout, health_every, health_failures, health_command, alert_memory, alert_errors, alert_p95, alert_log, alert_log_count, min, max, cpu, memory, port, start, pre_deploy, health, schedule, timezone, kind, concurrency, suspend_after, sleep_after, timeout, retries, volume, watch, packages, build_timeout, rollout, rollout_step, rollout_errors, rollout_manual, overlap, h2c, scale, public, drain, cpu_target, memory_target, latency_target, push, restart, restart_tries, affinity, tcp, rollback_on_crash, rebuild_on_base, block_on } => {
+        AppsCmd::Set { target, name, repo, root, image, upload, builder, dockerfile, stage, install, build_command, build_start, health_timeout, health_every, health_failures, health_command, alert_memory, alert_errors, alert_p95, alert_log, alert_log_count, min, max, cpu, memory, port, start, pre_deploy, health, schedule, timezone, kind, concurrency, suspend_after, sleep_after, timeout, retries, volume, watch, packages, build_timeout, rollout, rollout_step, rollout_errors, rollout_manual, overlap, h2c, scale, public, drain, cpu_target, memory_target, latency_target, oidc_audience, push, restart, restart_tries, affinity, tcp, rollback_on_crash, rebuild_on_base, block_on } => {
             let svc = service(api, &target).await?;
             // The service's rollout with what was given replaced (the API takes it whole).
             let rollout = if rollout.is_some() || rollout_step.is_some() || rollout_errors.is_some() || rollout_manual.is_some() || overlap.is_some() {
@@ -2897,6 +2908,11 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
                 ("cpu_target", cpu_target.map(|t| if t == 0 { Value::Null } else { Value::from(t) })),
                 ("memory_target", memory_target.map(|t| if t == 0 { Value::Null } else { Value::from(t) })),
                 ("latency_target_ms", latency_target.map(|t| if t == 0 { Value::Null } else { Value::from(t) })),
+                ("oidc_audiences", match oidc_audience.as_slice() {
+                    [] => None,
+                    a if a.iter().any(|x| x == "none") => Some(Value::Null),
+                    a => Some(json!(a)),
+                }),
                 ("push", push_rules(&push)?),
                 ("restart", restart.map(Value::from)),
                 ("restart_tries", restart_tries.map(Value::from)),
@@ -4327,7 +4343,22 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
             }
             v
         }
-        AppsCmd::Usage { target, days } => {
+        AppsCmd::Usage { target, by_service: true, month, .. } => {
+            let svc = service(api, &target).await?;
+            let q = month.map(|m| format!("?month={}", enc(&m))).unwrap_or_default();
+            let v = api.get(&format!("/v1/apps/projects/{}/usage{q}", enc(&s(&svc["project"])))).await?;
+            if !json_out {
+                for r in v["rows"].as_array().into_iter().flatten() {
+                    let what = if r["deleted"] == true { "deleted services".to_string() } else { format!("{} {}", s(&r["name"]), if r["previews"] == true { "previews".to_string() } else { s(&r["environment"]) }) };
+                    println!("{:>10}  {what}", format!("${:.2}", r["usd"].as_f64().unwrap_or(0.0)));
+                }
+                let projected = v["projected_usd"].as_f64().map(|p| format!(" (≈ ${p:.2} by the month's end)")).unwrap_or_default();
+                println!("{:>10}  in all, {}{projected}", format!("${:.2}", v["total_usd"].as_f64().unwrap_or(0.0)), s(&v["month"]));
+                return Ok(());
+            }
+            v
+        }
+        AppsCmd::Usage { target, days, .. } => {
             let svc = service(api, &target).await?;
             let v = api.get(&format!("{}/usage?days={days}", env_path(&svc, &target.env))).await?;
             if !json_out {

@@ -66,6 +66,7 @@ pub fn router(apps: Arc<Apps>) -> Router {
         .route("/v1/apps/services/{id}/changes", get(changes))
         .route("/v1/apps/projects/{project}/notifications", get(targets).post(add_target))
         .route("/v1/apps/projects/{project}/limits", get(limits).put(set_limits))
+        .route("/v1/apps/projects/{project}/usage", get(project_usage))
         .route("/v1/apps/projects/{project}/drains", get(drains).post(add_drain))
         .route("/v1/apps/projects/{project}/export", post(export_project))
         .route("/v1/apps/projects/{project}/status-page", get(status_page).put(put_status_page).delete(delete_status_page))
@@ -579,6 +580,16 @@ async fn delete_drain(State(apps): S, Path((project, id)): Path<(String, String)
     Ok(StatusCode::NO_CONTENT.into_response())
 }
 
+#[derive(Deserialize)]
+struct MonthQuery {
+    month: Option<String>,
+}
+
+/// A month's use by service and environment, with this month's projection.
+async fn project_usage(State(apps): S, Path(project): Path<String>, Query(q): Query<MonthQuery>) -> R {
+    ok(apps.project_usage_view(&project, q.month.as_deref()).await?)
+}
+
 async fn limits(State(apps): S, Path(project): Path<String>) -> R {
     ok(apps.limits(&project).await?)
 }
@@ -671,7 +682,7 @@ async fn changes(State(apps): S, Path(id): Path<String>) -> R {
 }
 
 async fn put_git_login(State(apps): S, Path(id): Path<String>, ext: Extensions, b: Bytes) -> R {
-    let s = apps.put_git_login(&id, body(&b)?).await?;
+    let s = apps.put_git_login(&id, body(&b)?, Some(asker(&ext))).await?;
     apps.audit("git_login.set", &id, "", actor(&ext), json!({ "host": s.git_login.as_ref().map(|l| l.host.clone()) })).await;
     ok(s)
 }
@@ -1295,7 +1306,7 @@ async fn change_variables(State(apps): S, Path((id, env)): Path<(String, String)
         let svc = apps.service(&id).await?;
         apps.check_references(&svc.project, &svc.name, &env, &values, asker(&ext)).await?;
     }
-    let v = apps.change_variables(&id, &env, change.clone()).await?;
+    let v = apps.change_variables(&id, &env, change.clone(), Some(asker(&ext))).await?;
     apps.settings_changed();
     // Names only: a value never reaches the trail.
     let set: Vec<String> = change["set"].as_object().map(|o| o.keys().cloned().collect()).unwrap_or_default();

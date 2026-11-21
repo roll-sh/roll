@@ -862,7 +862,7 @@ impl Apps {
         // safe side, never that nothing did): the secrets' digest, the environment's own
         // variables (what a rollback to it restores, kept with its switch to live) and the hash
         // of everything it reads.
-        let secrets_digest = self.deps.secrets.digest(&svc.project, &env.name).await.ok().flatten();
+        let secrets_digest = self.secrets_digest_of(&svc, &env.name).await;
         let (sid, e, did) = (svc.id.clone(), env.name.clone(), d.id.clone());
         let snapshot = self.db(move |s| s.seal_snapshot(&did, &sid, &e)).await?;
         let vars_hash = {
@@ -1309,6 +1309,10 @@ impl Apps {
         self.logs.redact(&format!("build:{}", d.id), &d.id, resolved.secret_values());
         let closed_vars = env_row.egress.closed().then(|| resolved.without_secrets());
         let mut build_env = resolved.vars;
+        // Instances' own addresses (kept awake, roll's OIDC tokens) are the running instances',
+        // never a build's: a build step can't mint the service's cloud tokens, and services that
+        // build alike share a build.
+        build_env.retain(|(k, _)| !matches!(k.as_str(), "ROLL_AWAKE_URL" | "ROLL_OIDC_URL"));
         // A closed environment builds on a network of its project's own with no route out and no
         // way to the host (`Runtime::build_egress`): its steps reach public hosts only, through
         // roll's proxy (packages, base images), never the node's services, private ranges or its
@@ -2469,7 +2473,7 @@ impl Apps {
         let Ok(services) = self.db(|s| s.services(None)).await else { return };
         self.schedules_pass(&services, now).await;
         self.push_pass(&services).await;
-        self.ecr_refresh_pass().await;
+        self.ecr_refresh_pass(&services).await;
         self.checks_pass(&services, now).await;
         self.heartbeats_pass(&services, now).await;
         self.rescan_pass(&services, now).await;

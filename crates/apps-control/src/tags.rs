@@ -130,7 +130,7 @@ impl Apps {
     /// deployment went live with. It remembers the digest it last acted on, so a redeploy that
     /// failed isn't tried again until they change; one already on its way is left alone.
     async fn check_secrets(self: &Arc<Self>, svc: &ServiceRow, env: &str) -> SecretsCheck {
-        let Ok(Some(now)) = self.deps.secrets.digest(&svc.project, env).await else { return SecretsCheck::Nothing };
+        let Some(now) = self.secrets_digest_of(svc, env).await else { return SecretsCheck::Nothing };
         // Read now, not where the caller started: a long poll's row is from before its wait (an
         // older live deployment, an older digest acted on).
         let (sid, e) = (svc.id.clone(), env.to_string());

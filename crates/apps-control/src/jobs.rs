@@ -21,8 +21,9 @@ const MAX_PER_ENV: usize = 5;
 const MAX_PER_NODE: usize = 50;
 /// Job containers a node runs at once (a job's tasks each take one).
 pub const MAX_CONTAINERS: usize = 50;
-/// A job's tasks at most, how many of them run at once unless it says, and its tries after a
-/// task's failure at most.
+/// A job's tasks at most, how many of them run at once (at most, and unless it says: a node's
+/// job containers are shared by every environment on it), and its tries after a task's failure at
+/// most.
 const MAX_TASKS: u64 = 100;
 const PARALLEL: u32 = 10;
 const MAX_RETRIES: u64 = 5;
@@ -51,7 +52,7 @@ impl Apps {
         };
         let parallelism = match o.get("parallelism") {
             None | Some(Value::Null) => PARALLEL.min(tasks),
-            Some(v) => v.as_u64().filter(|p| (1..=MAX_TASKS).contains(p)).ok_or_else(|| Error::BadRequest(format!("parallelism is 1–{MAX_TASKS}")))? as u32,
+            Some(v) => v.as_u64().filter(|p| (1..=PARALLEL as u64).contains(p)).ok_or_else(|| Error::BadRequest(format!("parallelism is 1–{PARALLEL}")))? as u32,
         };
         if self.capped(service) {
             return Err(Error::Conflict("this project reached its spending limit for the month".into()));
@@ -86,14 +87,14 @@ impl Apps {
         log.stream(Stream::System).line(format!("$ {command}"));
         let cancel = CancellationToken::new();
         self.cancels.lock().insert(job.id.clone(), cancel.clone());
-        let (this, id, cmd) = (self.clone(), job.id.clone(), command.to_string());
+        let (this, id, cmd, job_deployment) = (self.clone(), job.id.clone(), command.to_string(), job.deployment.clone());
         let sid = service.to_string();
         tokio::spawn(async move {
             // Its tasks, `parallelism` at once, each told which it is and which try; a failed or
             // timed-out task tried again up to `retries` times, never after a cancel.
             let outcomes: Vec<(RunStatus, Option<i32>)> = futures::stream::iter(0..tasks)
                 .map(|n| {
-                    let (live, cmd, log, cancel, slots, retry_after) = (live.clone(), cmd.clone(), log.clone(), cancel.clone(), this.job_slots.clone(), this.cfg.cron_retry_after);
+                    let (live, cmd, log, cancel, slots, retry_after, deployment) = (live.clone(), cmd.clone(), log.clone(), cancel.clone(), this.job_slots.clone(), this.cfg.cron_retry_after, job_deployment.clone());
                     async move {
                         let mut attempt = 1;
                         loop {
@@ -113,7 +114,12 @@ impl Apps {
                                 }
                             };
                             let task = if tasks > 1 { format!("task {n}") } else { "the job".to_string() };
-                            let again = matches!(outcome.0, RunStatus::Failed | RunStatus::TimedOut) && attempt <= retries && !cancel.is_cancelled();
+                            // A try runs the job's own deployment: once another is live, no more.
+                            let same = live.template().is_some_and(|t| t.deployment == deployment);
+                            let again = matches!(outcome.0, RunStatus::Failed | RunStatus::TimedOut) && attempt <= retries && !cancel.is_cancelled() && same;
+                            if !same && attempt <= retries && matches!(outcome.0, RunStatus::Failed | RunStatus::TimedOut) {
+                                log.stream(Stream::System).line(format!("{}: not tried again: another deployment went live since the job started", if tasks > 1 { format!("task {n}") } else { "the job".to_string() }));
+                            }
                             if !again {
                                 if tasks > 1 || attempt > 1 {
                                     log.stream(Stream::System).line(format!("{task}: {} (try {attempt})", outcome.0.as_str()));
