@@ -336,7 +336,7 @@ PostgreSQL's 52.33 (0.892x) and pgrust's 44.92 (1.039x); INSERT … SELECT 5.11 
 ## Read path, round 8: block seeks (2026-11-21, agent 277)
 
 HANDOFF "Read path, round 8" has what changed. Plain dist builds (`tools/dist.sh`): **b1** origin's
-`1c0a79d67`; **n2** cand/a277 (`27e8745fb`); **n1** the dropped inline compares (one pair).
+`1c0a79d67`; **n2** cand/a277 (`27e8745fb`); **n1** the dropped inline compares (one pair); **n4** cand/a277-2 (`7f4aea86e`); **n3** n4 with the dropped `seek_on` scan.
 TPC-H: lane C, agent 276's harness copied to `~/.cache/a277/tpch/` (a fresh engine on a copy of SF1
 loaded by this round's first build, a 2 GB cache, a warm-up of the 22, 3 runs a query in one
 `perf stat` window over the engine's cgroup). Point selects and 100-row range reads: agent 255's
@@ -369,6 +369,22 @@ Foreign cores 3.39 / 3.38.
 |---|---|---|---|---|---|
 | point select (lane A) | 39,986 | 39,223 | -1.91 | -2.3 | 1.97 / 2.25 |
 | range read, 100 rows (lane B) | 349,247 | 348,661 | -0.17 | +2.1 | 1.75 / 1.71 |
+
+### cand/a277-2: the lookup's sorts by words (n4 against n2; pairs n2 n4 then n4 n2)
+
+| query | n2 | n4 | instructions % | cycles % |
+|---|---|---|---|---|
+| q03 | 4.473 | 4.462 | -0.26 / -0.53 | +3.9 / +7.1 |
+| q05 | 3.429 | 3.422 | -0.19 / -0.17 | +1.8 / +3.4 |
+| q07 | 4.155 | 4.090 | -1.57 / -1.62 | +1.4 / +0.7 |
+| q08 | 1.609 | 1.590 | -1.17 / -1.10 | -0.6 / -2.4 |
+| q09 | 9.699 | 9.545 | -1.59 / -1.60 | -8.4 / +2.9 |
+
+Foreign cores per arm: n2 2.95 2.89, n4 2.57 2.97. The 22 (one pair, 1 run a query): 102.21 ->
+101.97 G (-0.24%): q09 -1.59%, q07 -1.37, q08 -1.19, q19 -0.64, q14 -0.42, q22 +0.20, q04 +0.17,
+the rest within +-0.13; every hash equal; VmHWM 1,680,904 kB both. Dropped with it: `seek_on`'s
+steps as a scan (n3 = both, against n2, one pair): q03 +0.16%, q05 +0.26, q07 -0.23, q08 -0.95, q09
+-1.29.
 
 ### Dropped: inline compares and copies (n1 against b1, one pair)
 

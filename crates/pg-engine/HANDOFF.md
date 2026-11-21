@@ -13160,7 +13160,8 @@ difftest guard was not run.
 ## Read path, round 8: block seeks without the keys before the one found (agent 277)
 
 BENCH.md "Read path, round 8" has the tables. Base `1c0a79d67` (cand/a275 and cand/a276 landed).
-`cand/a277`: one code commit and this section. No format change.
+`cand/a277`: one code commit and this section; `cand/a277-2`: one code commit on it (the lookup's
+sorts) and its paragraphs here. No format change.
 
 **Where the multi-get's time was** (b0 = cand/a275 + a276's code; `perf record -e instructions:u
 --call-graph lbr` of the engine on lane C, the libc samples attributed to the first engine frame
@@ -13216,10 +13217,37 @@ bounds checks, the length's tie-break) about twice that, and the larger inline b
 `multi_get`, `block_holds` and an L1 `partition_point` out of their callers. Instructions come
 down by comparing less, not by comparing inline.
 
-**Left** (q09 after cand/a277: libc 11.0% of the engine's instructions):
-1. The lookup's two sorts of keys by memcmp, ~3.8% of q09 and q07 (`Lookup::batch`'s `order`,
-   `multi_get`'s): fixed-length keys sorted by words made once (next candidate).
-2. `seek_on`'s steps (each a `read` and a memcmp) under scans' reseeks and held blocks.
+**Kept (`cand/a277-2`, on `cand/a277`): a lookup batch sorts its keys by words made once**
+(`exec::lookup::span_words`). `Lookup::batch` sorts its outer rows' index keys (`order`, stable)
+and `multi_get` its entries' row keys (`sort_unstable`), each comparison a call to memcmp of two
+spans (~3.8% of q07's and q09's instructions with the sorts' own code). When every key of the sort
+has one length of 16 to 32 bytes (a table's row keys, 17; an index's over fixed-width columns),
+each one's first and last 16 bytes are made into two big-endian numbers once, and the sort orders
+by them (past equal first words the last ones order the bytes after; equal words are equal keys),
+as does the multi-get's search for repeated row keys; other lengths sort as before. Gates (plain
+dist, n4 = cand/a277-2 against n2 = cand/a277, 2 pairs): **q09 -1.59 / -1.60%, q07 -1.57 / -1.62,
+q08 -1.17 / -1.10**, q03 -0.26 / -0.53, q05 -0.19 / -0.17; the 22 in one pair 102.21 -> 101.97 G
+(-0.24%; q19 -0.6, q14 -0.4, q22 +0.20, q04 +0.17, the rest within +-0.13), every hash equal.
+q03's cycles read +3.9 / +7.1% in its two pairs (q09's -8.4 / +2.9): the lanes' cycles spread
+that much under 7 foreign cores; not resolved. Point selects and range reads don't go through it
+(not measured). `multi_get` is now a call of its own from `batch` (it was inlined): counted in the
+numbers above.
+
+**Measured and dropped: `seek_on`'s steps as `seek_from`'s scan**
+(`~/.cache/a277/patches/dropped-seek-on-scan.patch`; built with the sorts as n3, against n2, one
+pair: q03 +0.16%, q05 +0.26%, q07 -0.23%, q08 -0.95%, q09 -1.29%, where the sorts alone gave
+-0.26 / -0.19 / -1.57 / -1.17 / -1.59). The profile has `seek_on` +232 / +340 samples and q03 ~800
+more in libc: the entry found makes its key from the sought key's first `shared` bytes (a memcpy)
+before `read` makes the rest, and the four steps rarely pass enough entries to pay for that and the
+first common prefix. A seek_on that keeps the key it holds when the entry found shares no more than
+the first `m` (truncate, no copy) is the version to try.
+
+**Left** (q09 after cand/a277: libc 11.0% of the engine's instructions; the sorts' share went with
+cand/a277-2):
+1. `seek_on`'s steps (each a `read` and a memcmp) under scans' reseeks and held blocks: the
+   version above that keeps the held key.
+2. The key `seek_from` makes for the entry found from the sought key's first `shared` bytes (a
+   memcpy a seek).
 3. `first_raw` (a unique index's probe: `smallest_key` then `newest`, two seeks in the held
    block, keys copied and compared, the found key cloned into a Vec only to be dropped by
    `entry_spans`), `find_block` per key of a new block, `Cursor::head`'s end comparison.
