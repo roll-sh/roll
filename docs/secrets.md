@@ -1213,7 +1213,10 @@ A link is `{kind, ref, field, mode, options}`:
   the project's key and registries (rotators…) can still reach it. A revocation that fails (the
   product or the customer's endpoint is down) stays as a lease that's already due, and the sweeper
   retries it; a deleted project keeps its key and registries (`projects.forgotten_at`) until its
-  last lease is revoked, then they go too. Nothing it issued outlives it unrevoked.
+  last lease is revoked, then they go too. Nothing it issued outlives it unrevoked. Deleting the
+  workspace project erases its secrets, their versions, its encryption keys and its audit chain at
+  once, with no recovery window and no closing digest. A recovery window and a signed closing digest
+  are planned (the thirty-fourth review's item 2).
 
 **Suggested links.** `GET …/suggestions` lists each resource on the project's canvas with the
 standard environments that neither link it nor have its usual keys at `/`, and those keys: the
@@ -3389,8 +3392,11 @@ the binding, issues placeholders, decides each swap and audits it, and ships the
   - it's bounded: 64 KiB of headers, 16 KiB of query, 8 KiB of path, 16 placeholders and 16 KiB
     per value (`Limits`), or the request is refused before anything is asked;
   - its errors say where and why, never the value or the placeholder.
-- **Not covered.** Responses aren't scrubbed: bind hosts that don't echo the key back. A
-  placeholder inside Basic auth (base64) or a signed request (AWS SigV4) can't be swapped: use a
+- **Not covered.** Responses aren't scrubbed. A binding with no `header` or `query` lets the
+  placeholder ride in any request header, and the code holding it picks which, so a bound host that
+  echoes any request header (request ids, debug endpoints) hands the key back. Until a placement is
+  required and responses are scrubbed (the thirty-fourth review's item 4), give every binding a
+  `header` (`Authorization: Bearer {}`). A placeholder inside Basic auth (base64) or a signed request (AWS SigV4) can't be swapped: use a
   bearer header. Bodies are never rewritten.
 
 ### Using a key without seeing it: the proxy's contract
@@ -5889,16 +5895,6 @@ hides every value from roll secrets in its logs unless it's plain connection det
 On main since 2026-11-18: #69–#73, #75–#77 and #147 (batch 1); #132, #136, #144, #165, #166, #173 and
 roll redis's #375 (batch 3, 2026-11-19); #79, #81–#83, #87, #88, #92, #95,
 #97, #102, #105, #110, #113, #117, #121, #124, #128, #145, #169, #194, #212, #213, #227, #229 (batch 2).
-In pull requests to main, each green: #79 with #95,
-#81 (read quotas across the fleet), #82 (metrics), #83 (scheduled backups), #86 (rotation
-windows), #87 (encryption keys by name), #88 (password policies), #92 (SaaS rotators, the
-credential checked at registration), #97 (search keys say `access: data`), #102 (Kubernetes
-service-account tokens), #105 (Java), #110 (.NET with `IConfiguration`), #113 (an AWS Lambda
-extension that logs in with the function's role), #117 (an Ansible collection), #132 (LDAP and
-Active Directory), #136 (Snowflake, on #132), #144 (ACME on project CAs), #145 (Pulumi), #165 (Elasticsearch, OpenSearch, Cassandra and ScyllaDB
-outside roll, on #132), #166 (a gateway into private networks, on #132), #169 (a credential
-guard's scans audited as `secrets.guard`, for roll MCP), #173 (MongoDB Atlas, on #136), #194
-(TOTP keys).
 
 **State, 2026-11-19 18:40.** Batch 4 is on main (ba8cdc422, ci green): #248, #262, #264, #274, #276,
 #279, #284, #329, #365, #370 and #392 in round 1; #303 and #367; #281; #290; then #304, #86 and #394, in
@@ -5937,10 +5933,78 @@ and webhooks' and review apps' signing secrets sealed. Still open:
 - two follow-ups from batch 6 (`fix/secrets-ca-shrink-decoy-mail`): a consumer's interception CA ends
   as soon as its bound hosts shrink (a placeholder revoked, hosts cleared, a cut-off), not only with
   the consumer, and a decoy planted from an admin's session mails that person, not the operator;
-- the thirty-fourth product review, cold, on main;
+- the thirty-fourth product review (ranked below): items 1 and 3 are being fixed together in
+  `fix/secrets-reveal-as-asker`;
 - the #432 decoy-oracle fix: computes pinned by digest, and each image's pre-auth answers learned from a
   compute of that image (about 2 s per image, never waking a suspended endpoint). Its full gate is
   running.
+
+**Ranked, 2026-11-21 03:40** (the thirty-fourth product review, cold, on main f9bb26c17, against
+Vault/OpenBao, Infisical, Doppler, AWS, 1Password, Akeyless, Bitwarden SM, GitGuardian, Google Secret
+Manager and Azure Key Vault). The store is still level with or ahead of the category, and a cold read
+of the newest seams (placeholders, the interception CA, `bind_ref`/`resolve_as`, validity checks)
+found them sound. What's left is at the edges:
+
+1. **roll apps' reveal and shell show other environments' values** (security, high, S–M; fixing in
+   `fix/secrets-reveal-as-asker`):
+   - `…/variables/values`, `…/shell` and the other `check_secret_reveal` routes ask only `Reveal` at
+     `(project, env, "/")` (`rolld/src/secrets.rs` `ForApps::may_reveal`);
+   - what they show is the service's runtime read, which follows bases, imports and
+     `${production.X}`, so a person who may reveal only staging sees production through apps;
+   - members (#501) widen it: they hold reveal on single environments;
+   - the fix: answer as the asker (any `from_secrets` key that doesn't resolve for them is a 403), and
+     a bound `roll://` variable needs reveal on its own folder.
+2. **Deleting a workspace project erases its secrets, history, encryption keys and audit at once**
+   (security and data loss, M):
+   - workspace `delete` is enough: `on_delete` → `forget_project` deletes everything in one write;
+   - no protected-environment confirm, no transit-key name, no recovery window, nothing audited;
+   - the dashboard says "only the project and its canvas go";
+   - AWS waits 7–30 days and Azure keeps deletes 7–90 days;
+   - the fix:
+     - a veto hook (`Workspace::before_delete`): refuse while a protected environment or transit
+       key exists, unless a secrets admin confirms;
+     - a 7-day recovery window, after which a signed closing digest goes to the sinks before the
+       purge;
+     - the delete audited, and the dialog saying what goes.
+3. **The agents sandbox keeps copied values after their copier loses access** (security, S; fixing
+   in `fix/secrets-reveal-as-asker`): #440 checks reveal at copy time, then seals the values and hands
+   them out on every start. The fix: store `{project, environment, by}` and resolve as the maker on
+   each start.
+4. **A placeholder may ride in any header, and responses aren't scrubbed** (security, S; the
+   mechanism is confirmed, an echoing host isn't):
+   - a placement is required (the dashboard and CLI default to `Authorization: Bearer {}`), and
+     untrusted bindings need one;
+   - the proxy contract adds a bounded scrub of the swapped value (plain, base64, URL-encoded), as
+     `roll run`'s masking does.
+5. **Credentials other products keep in the clear, or in the clear when unsealed** (with their
+   threads):
+   - previews' rule variables in `settings.json` and the screenshot-link key;
+   - roll code's webhook URLs, and signing secrets falling back to the clear without
+     `ROLL_SECRET_KEY`;
+   - search's remote, snapshot and connector credentials on a node without a sealer;
+   - each is sealed, and refused rather than stored in the clear.
+6. **People: groups, SCIM groups and time-boxed elevation** (completeness, L; members v1.1, #445's
+   "later"): IdP groups as role holders, SCIM `Groups`, and a person's time-boxed role request through
+   roll-access's approvals with the two-person rule.
+7. **The stampede after a change is unmeasured** (performance, M): the first digest after a write is
+   71–157 ms per polling identity, so a rotation under 1,000 pods could cost 100–250 CPU-seconds in
+   one poll interval. Run the load on SQLite and Postgres. If it spikes, share the first digest per
+   (folder, permission fingerprint) on a node.
+8. **Placeholders have no consumer on main yet** (integration): previews' #535 is first; then apps'
+   egress and the agents sandbox's proxy. Add one end-to-end swap test through the first real proxy,
+   with item 4's scrub.
+9. **A local agent outside Lambda** (UX, S–M): `roll secrets agent`, the Lambda extension's surface as
+   a sidecar (a self-renewing workload login, an SSRF header, conditional reads), as AWS's Workload
+   Credentials Provider does.
+10. **Leaks outside your own repos, and credentials in other vaults** (completeness, L, low): public
+    monitoring and a metadata-only inventory of other clouds' secrets, as GitGuardian does.
+11. **Test gaps:** items 1, 2, 3 and 8 each lack the one test that guards them.
+12. **The root of trust beyond AWS KMS, and FIPS** (L; the user's call, R4/R13).
+
+Checked and sound: apps' git login, `roll://` variables, sealed registry logins, drains and tokens;
+search's #361, #134 and #485; roll MCP's #572 and #573; #455's sealed signing secrets; storage's
+replication `roll://` (while setting a target stays operator-only); placeholders' issue and swap
+re-checking the reader, the maker, the binding, tags and references on every use.
 
 **State, 2026-11-21 02:52.** Batch 6 is on main (802935600, CI green, exactly the gated tree), in three
 rounds:
