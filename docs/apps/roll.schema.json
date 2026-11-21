@@ -117,7 +117,7 @@
         },
         "alerts": {
           "type": "object",
-          "description": "Alert thresholds (memory_pct, error_pct, p95_ms, capacity_pct, log_match, log_count)."
+          "description": "Alert thresholds (memory_pct, error_pct, p95_ms, capacity_pct, cpu_pct, log_match, log_count) and metrics: alerts on the app's own gauges ({ name, above or below, minutes, sum })."
         },
         "rollout": {
           "type": "object",

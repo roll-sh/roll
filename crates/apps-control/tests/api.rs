@@ -2204,6 +2204,57 @@ async fn a_5xx_rate_past_the_alert_is_an_event_once() {
     assert_eq!(resolved[0]["data"]["alert"], "alert.errors");
 }
 
+/// CPU past its alert for five minutes is `alert.cpu`; one of the app's own gauges past its
+/// threshold for its minutes running is `alert.metric` naming it, once, and resolved once it's
+/// back under.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn cpu_and_the_apps_own_gauges_alert() {
+    let w = world().await;
+    let run = json!({"port": 80, "cpu": 0.5, "alerts": {"error_pct": 0, "cpu_pct": 80, "metrics": [{"name": "queue_depth", "above": 3, "minutes": 2}]}});
+    let (svc, _) = image_service(&w, "api", run).await;
+    let id = svc["id"].as_str().unwrap().to_string();
+    let bad = json!({"run": {"alerts": {"metrics": [{"name": "queue_depth", "above": 1, "below": 0}]}}});
+    assert_eq!(call(&w.api, "PATCH", &format!("/v1/apps/services/{id}"), Some(bad)).await.0, StatusCode::BAD_REQUEST, "one threshold");
+    let into = code_sql::now_ms() % 60_000;
+    if into > 50_000 {
+        tokio::time::sleep(Duration::from_millis((60_000 - into + 100) as u64)).await;
+    }
+    // 27 CPU seconds a minute of one instance's 0.5 vCPU: 90%.
+    let minute = |m: i64| apps_control::store::MinuteRow { minute: m, requests: 10, instances: 1, cpu: 27.0, memory_bytes: 64 << 20, ..Default::default() };
+    let live = w.apps.live(&id, "production");
+    let events = || async { call(&w.api, "GET", "/v1/apps/events?after=0", None).await.1["events"].as_array().unwrap().clone() };
+    // Its gauge as its metrics endpoint or OTLP writes it: the newest point of each series counts.
+    let sink = w.apps.logs.sink(format!("metric:{id}/production"), apps_control::logs::Stream::System);
+    let point = |value: f64| json!({"name": "queue_depth", "kind": "gauge", "unit": "", "time": code_sql::now_ms() as u64 * 1_000_000, "value": value, "counter": false, "attrs": []}).to_string();
+    sink.line(point(5.0));
+    for _ in 0..100 {
+        let now = code_sql::now_ms() / 60_000;
+        w.apps.store.put_minutes(&id, "production", &(1..=5).map(|i| minute(now - i)).collect::<Vec<_>>()).unwrap();
+        w.apps.judge_alerts(&live).await;
+        let ev = events().await;
+        if ev.iter().any(|e| e["kind"] == "alert.cpu") && ev.iter().any(|e| e["kind"] == "alert.metric") {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    w.apps.judge_alerts(&live).await;
+    let ev = events().await;
+    let of = |k: &str| ev.iter().filter(|e| e["kind"] == k).cloned().collect::<Vec<_>>();
+    assert_eq!(of("alert.cpu").len(), 1, "{ev:?}");
+    assert_eq!((of("alert.cpu")[0]["data"]["value"].as_f64(), of("alert.cpu")[0]["data"]["threshold"].as_i64()), (Some(90.0), Some(80)));
+    let metric = of("alert.metric");
+    assert_eq!(metric.len(), 1, "{ev:?}");
+    assert_eq!((&metric[0]["data"]["metric"], &metric[0]["data"]["above"], &metric[0]["data"]["value"]), (&json!("queue_depth"), &json!(3.0), &json!(5.0)));
+    // A newer point under the threshold: it clears, said once and naming the gauge.
+    tokio::time::sleep(Duration::from_millis(5)).await;
+    sink.line(point(0.0));
+    w.apps.judge_alerts(&live).await;
+    w.apps.judge_alerts(&live).await;
+    let r: Vec<Value> = events().await.into_iter().filter(|e| e["kind"] == "alert.resolved" && e["data"]["alert"] == "alert.metric").collect();
+    assert_eq!(r.len(), 1, "{r:?}");
+    assert_eq!(r[0]["data"]["metric"], "queue_depth");
+}
+
 /// An objective (Cloud Monitoring's SLOs): its budget over its window on `…/slo`, and a burn
 /// 14.4 times as fast as it lasts over an hour and its last five minutes is `alert.slo` once,
 /// resolved when it slows.
@@ -3939,7 +3990,7 @@ async fn a_failed_deploy_is_sent_to_the_projects_targets_signed_and_retried() {
     let (st, hook) = call(&w.api, "POST", &base, Some(json!({"url": format!("http://{ok_at}/hook")}))).await;
     assert_eq!(st, StatusCode::CREATED, "{hook}");
     let secret = hook["secret"].as_str().unwrap().to_string();
-    assert_eq!(hook["events"], json!(["check.down", "heartbeat.missed", "alert.slo", "deploy.failed", "rollout.waiting", "deploy.ready", "error.new", "error.regressed", "crash_loop", "spend.alert", "spend.limit", "alert.memory", "alert.errors", "alert.latency", "alert.capacity", "alert.log", "cron.failed", "domain.expiring", "domain.expired", "domain.tls_failed", "volume.backup_failed", "volume.full"]), "the default events");
+    assert_eq!(hook["events"], json!(["check.down", "heartbeat.missed", "alert.slo", "deploy.failed", "rollout.waiting", "deploy.ready", "error.new", "error.regressed", "crash_loop", "spend.alert", "spend.limit", "alert.memory", "alert.cpu", "alert.metric", "alert.errors", "alert.latency", "alert.capacity", "alert.log", "cron.failed", "domain.expiring", "domain.expired", "domain.tls_failed", "volume.backup_failed", "volume.full"]), "the default events");
     let (_, down) = call(&w.api, "POST", &base, Some(json!({"kind": "webhook", "url": format!("http://{bad_at}/x"), "events": ["deploy.failed"]}))).await;
     let (_, list) = call(&w.api, "GET", &base, None).await;
     assert!(!list.to_string().contains(&secret) && !list.to_string().contains("/hook"), "neither the secret nor the URL comes back: {list}");

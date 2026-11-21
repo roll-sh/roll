@@ -18,7 +18,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 /// What a target can ask for; a new one gets the two that need someone.
-pub const EVENTS: [&str; 29] = [
+pub const EVENTS: [&str; 31] = [
     "deploy.failed",
     "deploy.base_updated",
     "rollout.waiting",
@@ -30,6 +30,8 @@ pub const EVENTS: [&str; 29] = [
     "spend.alert",
     "spend.limit",
     "alert.memory",
+    "alert.cpu",
+    "alert.metric",
     "alert.errors",
     "alert.latency",
     "alert.capacity",
@@ -50,7 +52,7 @@ pub const EVENTS: [&str; 29] = [
     // Every `audit.*` entry (who changed what), for a SIEM's webhook; never an on-call page.
     "audit",
 ];
-const DEFAULT_EVENTS: [&str; 22] = ["check.down", "heartbeat.missed", "alert.slo", "deploy.failed", "rollout.waiting", "deploy.ready", "error.new", "error.regressed", "crash_loop", "spend.alert", "spend.limit", "alert.memory", "alert.errors", "alert.latency", "alert.capacity", "alert.log", "cron.failed", "domain.expiring", "domain.expired", "domain.tls_failed", "volume.backup_failed", "volume.full"];
+const DEFAULT_EVENTS: [&str; 24] = ["check.down", "heartbeat.missed", "alert.slo", "deploy.failed", "rollout.waiting", "deploy.ready", "error.new", "error.regressed", "crash_loop", "spend.alert", "spend.limit", "alert.memory", "alert.cpu", "alert.metric", "alert.errors", "alert.latency", "alert.capacity", "alert.log", "cron.failed", "domain.expiring", "domain.expired", "domain.tls_failed", "volume.backup_failed", "volume.full"];
 /// Whether a target with `events` hears an event: its own kind, or for a resolution, the alert's
 /// (whoever heard an alert hears it clear; there's nothing else to ask for).
 fn wants(events: &[String], kind: &str, data: &Value, oncall: bool) -> bool {
@@ -446,6 +448,15 @@ impl Apps {
                 }
             }
             "alert.memory" => (format!("{what}: memory"), format!("Its instances used {}% of their {} MB limit for five minutes (the alert is at {}%).", e.data["value"], e.data["limit_mb"], e.data["threshold"])),
+            "alert.cpu" => (format!("{what}: CPU"), format!("Its instances used {}% of their {} vCPU for five minutes (the alert is at {}%). Give them more (`roll apps set --cpu`), or let it scale on CPU (`--cpu-target`).", e.data["value"], e.data["cpu"], e.data["threshold"])),
+            "alert.metric" => {
+                let name = e.data["metric"].as_str().unwrap_or("a metric");
+                let (op, t) = match e.data.get("above") {
+                    Some(t) => ("above", t),
+                    None => ("below", &e.data["below"]),
+                };
+                (format!("{what}: {name} is {op} {t}"), format!("Its {name} was {} ({op} {t}) for {} minutes running.", e.data["value"], e.data["minutes"]))
+            }
             "alert.slo" => (
                 format!("{what}: its error budget is burning"),
                 format!(
@@ -479,6 +490,8 @@ impl Apps {
             "alert.resolved" => {
                 let which = match e.data["alert"].as_str() {
                     Some("alert.memory") => "memory",
+                    Some("alert.cpu") => "CPU",
+                    Some("alert.metric") => e.data["metric"].as_str().unwrap_or("a metric"),
                     Some("alert.errors") => "errors",
                     Some("alert.slo") => "error budget burn",
                     Some("alert.latency") => "latency",
