@@ -1206,21 +1206,41 @@ fn entry_head(b: &[u8], pos: &mut usize) -> Result<(usize, usize, usize)> {
 
 /// `entry_head` of an entry `Block::decode` wrote, inline: a seek reads up to `RESTART`
 /// of them (the call was a tenth of TPC-H q20).
+///
+/// Two-byte numbers (a row's value length) are read inline too, and longer ones by a call that
+/// returns where they end: a call given `pos` itself kept the caller's place in memory, stored
+/// at every byte of the entries a seek reads.
 #[inline(always)]
 fn head(b: &[u8], pos: &mut usize) -> (usize, usize, usize) {
     #[inline(always)]
     fn v(b: &[u8], pos: &mut usize) -> usize {
-        match b[*pos] {
-            x if x < 0x80 => {
-                *pos += 1;
-                x as usize
-            }
-            _ => get_varint_long(b, pos).expect("a checked block") as usize,
+        let x = b[*pos];
+        if x < 0x80 {
+            *pos += 1;
+            return x as usize;
         }
+        let y = b[*pos + 1];
+        if y < 0x80 {
+            *pos += 2;
+            return (x & 0x7f) as usize | (y as usize) << 7;
+        }
+        let (v, n) = varint_at(b, *pos);
+        *pos += n;
+        v
     }
     let shared = v(b, pos);
     let unshared = v(b, pos);
     (shared, unshared, v(b, pos))
+}
+
+/// The number of a checked block's varint at `at` and its length in bytes (`head`'s numbers
+/// of three bytes or more).
+#[cold]
+#[inline(never)]
+fn varint_at(b: &[u8], at: usize) -> (usize, usize) {
+    let mut p = at;
+    let v = get_varint_long(b, &mut p).expect("a checked block");
+    (v as usize, p - at)
 }
 
 /// `a ++ b` compared with `key`.
