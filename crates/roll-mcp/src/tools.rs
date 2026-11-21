@@ -573,12 +573,12 @@ ORDER BY cardinality(pg_blocking_pids(pid)) DESC, xact_start NULLS LAST"# })
 fn health_checks() -> Value {
     json!({ "read_only": true, "sql": r#"SELECT name AS "check", value, status, detail FROM (
   SELECT 1 AS n, 'cache hit rate' AS name, coalesce(round(100.0 * sum(blks_hit) / nullif(sum(blks_hit) + sum(blks_read), 0), 1)::text || '%', 'no reads yet') AS value,
-    CASE WHEN coalesce(100.0 * sum(blks_hit) / nullif(sum(blks_hit) + sum(blks_read), 0), 100) >= 99 THEN 'ok' ELSE 'warn' END AS status,
-    'reads served from memory; under 99% the working set doesn''t fit (a bigger compute, or fewer scans: postgres_slow_queries)' AS detail
+    CASE WHEN sum(blks_hit) + sum(blks_read) < 10000 OR 100.0 * sum(blks_hit) / (sum(blks_hit) + sum(blks_read)) >= 99 THEN 'ok' ELSE 'warn' END AS status,
+    'reads served from memory (judged from 10,000 reads on); under 99% the working set doesn''t fit (a bigger compute, or fewer scans: postgres_slow_queries)' AS detail
   FROM pg_stat_database WHERE datname = current_database()
   UNION ALL
   SELECT 2, 'index hit rate', coalesce(round(100.0 * sum(idx_blks_hit) / nullif(sum(idx_blks_hit) + sum(idx_blks_read), 0), 1)::text || '%', 'no index reads yet'),
-    CASE WHEN coalesce(100.0 * sum(idx_blks_hit) / nullif(sum(idx_blks_hit) + sum(idx_blks_read), 0), 100) >= 99 THEN 'ok' ELSE 'warn' END,
+    CASE WHEN coalesce(sum(idx_blks_hit) + sum(idx_blks_read), 0) < 10000 OR 100.0 * sum(idx_blks_hit) / (sum(idx_blks_hit) + sum(idx_blks_read)) >= 99 THEN 'ok' ELSE 'warn' END,
     'index reads served from memory'
   FROM pg_statio_user_indexes
   UNION ALL
