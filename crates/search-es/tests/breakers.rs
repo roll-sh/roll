@@ -170,13 +170,12 @@ async fn esql_trips_the_request_breaker_and_gives_its_memory_back() {
     assert_eq!(at(&stats, "nodes.*.breakers.request.estimated_size_in_bytes").as_i64(), Some(0), "{stats:?}");
 }
 
-/// A `-1` request limit on a cluster of a node with `node`'s budget, held to the whole node
-/// (`100%`: the node's fair share and headroom refuse before the cluster's own limit does), with
-/// 50,000 distinct keywords in `ids`.
+/// A `-1` request limit on a cluster of a node with `node`'s budget, held to 1gb (far above the
+/// node's budget: only the node can refuse), with 50,000 distinct keywords in `ids`.
 async fn ids_cluster(name: &str, node: &Arc<search_es::breaker::MemoryBudget>) -> Cluster {
     let mut cfg = ClusterConfig::new(name);
     cfg.request_memory = Some(node.clone());
-    cfg.node_settings = vec![(search_es::breaker::REQUEST_MAX_LIMIT.to_string(), "100%".to_string())];
+    cfg.node_settings = vec![(search_es::breaker::REQUEST_MAX_LIMIT.to_string(), "1gb".to_string())];
     let c = Cluster::open(cfg, Arc::new(MemoryStore::new())).await.unwrap();
     call(&c, "PUT", "/ids", Some(br#"{"mappings":{"properties":{"id":{"type":"keyword"},"cat":{"type":"keyword"}}}}"#)).await;
     let mut bulk = String::new();
@@ -206,7 +205,7 @@ async fn aggregations_are_held_to_the_node_budget_whatever_the_tenant_sets() {
     let (s, v) = call(&c, "POST", "/ids/_search", Some(TERMS_IDS)).await;
     let cause = parent_refusal(s, &v);
     // In the cluster's own numbers: its own limit, nothing about the node's room.
-    assert_eq!(at(cause, "bytes_limit").as_i64(), Some(2 << 20), "{v:?}");
+    assert_eq!(at(cause, "bytes_limit").as_i64(), Some(1 << 30), "{v:?}");
     let (_, stats) = call(&c, "GET", "/_nodes/stats/breaker?filter_path=nodes.*.breakers", None).await;
     assert_eq!(at(&stats, "nodes.*.breakers.request.estimated_size_in_bytes").as_i64(), Some(0));
     assert_eq!(at(&stats, "nodes.*.breakers.parent.tripped").as_i64(), Some(1));
@@ -253,7 +252,7 @@ async fn one_tenants_kept_results_leave_room_for_anothers_aggregation() {
     // ...and a large one is refused in B's own numbers, never the node's.
     let (s, v) = call(&b, "POST", "/ids/_search", Some(TERMS_IDS)).await;
     let cause = parent_refusal(s, &v);
-    assert_eq!(at(cause, "bytes_limit").as_i64(), Some(4 << 20), "B's own limit, not the node's free memory: {v:?}");
+    assert_eq!(at(cause, "bytes_limit").as_i64(), Some(1 << 30), "B's own limit, not the node's free memory: {v:?}");
     // Deleting A's results gives their memory back.
     for id in ids {
         assert_eq!(call(&a, "DELETE", &format!("/_query/async/{id}"), None).await.0, 200);

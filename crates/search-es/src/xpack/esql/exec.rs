@@ -1975,7 +1975,7 @@ struct Group {
 
 /// The hasher of keys that are already hashes.
 #[derive(Default)]
-pub(super) struct IdHasher(u64);
+pub struct IdHasher(u64);
 
 impl std::hash::Hasher for IdHasher {
     fn finish(&self) -> u64 {
