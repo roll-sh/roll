@@ -1273,7 +1273,9 @@ impl Apps {
         if let Ok(Some(key)) = self.db(move |s| s.deployment_upload(&id)).await {
             self.drop_upload(&d.id, &key).await;
         }
-        self.live(&svc.id, &d.environment).meter.lock().build(code_sql::now_ms(), began.elapsed().as_secs_f64());
+        // Metered by its builder's size where the builder gives it one.
+        let factor = if self.deps.builder.sizes_builds() { svc.build.size.unwrap_or_default().factor() } else { 1.0 };
+        self.live(&svc.id, &d.environment).meter.lock().build(code_sql::now_ms(), began.elapsed().as_secs_f64() * factor);
         result
     }
 
@@ -1540,14 +1542,22 @@ impl Apps {
         if plan.provider == apps_build::Provider::Dockerfile {
             build_env.extend(commit);
         }
+        // `build.size`: what the builder gives it, where it can (one node's Docker can't).
+        let size = svc.build.size.unwrap_or_default();
+        if size != crate::model::BuildSize::Small {
+            match self.deps.builder.sizes_builds() {
+                true => log.line(format!("a {} builder: {} vCPU, {} GiB", serde_json::to_value(size).ok().and_then(|v| v.as_str().map(str::to_string)).unwrap_or_default(), size.resources().0, size.resources().1 / 1024)),
+                false => log.line("build.size: this node's builds share its BuildKit, unsized (it applies on the fleet's builders)"),
+            }
+        }
         let job = BuildJob {
             service: svc.id.clone(),
             deployment: d.id.clone(),
             context,
             dockerfile,
             tag: format!("roll-apps-{}:{}", svc.id.strip_prefix("svc_").unwrap_or(&svc.id), d.id.strip_prefix("dep_").unwrap_or(&d.id)),
-            cpu: 2.0,
-            memory_mb: 4096,
+            cpu: size.resources().0,
+            memory_mb: size.resources().1,
             timeout: build_timeout(svc.build.timeout_s, self.cfg.build_timeout, log),
             own_dockerfile: plan.provider == apps_build::Provider::Dockerfile,
             env: build_env,
@@ -2568,14 +2578,26 @@ impl Apps {
     /// when the next is due is skipped). The reaper's pass, every few seconds.
     /// Owned environments' stored logs past their retention (`log_retention_days`, a week by
     /// default and always for a preview) deleted, chunk by chunk.
-    async fn expire_logs_pass(self: &Arc<Self>, services: &[crate::store::ServiceRow], now: i64) {
+    /// Logs kept past the first week (30 or 90 days) are metered too, `hours` of what's stored
+    /// past it now (`stored_gb_hours`).
+    async fn expire_logs_pass(self: &Arc<Self>, services: &[crate::store::ServiceRow], now: i64, hours: f64) {
         let Ok(envs) = self.db(|s| s.all_environments()).await else { return };
         for svc in services.iter().filter(|s| self.owns(&s.id)) {
             for e in envs.iter().filter(|e| e.service == svc.id) {
                 let days = if e.ephemeral { crate::logs::KEEP_DAYS } else { e.log_retention_days.unwrap_or(crate::logs::KEEP_DAYS) };
                 let before = now - days as i64 * 86_400_000;
+                let week = now - crate::logs::KEEP_DAYS as i64 * 86_400_000;
+                let mut past_week = 0u64;
                 for key in crate::logs::env_keys(&svc.id, &e.name) {
                     self.logs.expire(&key, before).await;
+                    if days > crate::logs::KEEP_DAYS {
+                        past_week += self.logs.stored_before(&key, week).await;
+                    }
+                }
+                if past_week > 0 {
+                    let u = crate::store::UsageAdd { stored_gb_hours: past_week as f64 / 1e9 * hours, ..Default::default() };
+                    let (sid, en) = (svc.id.clone(), e.name.clone());
+                    let _ = self.db(move |s| s.add_usage(&sid, &en, now / 3_600_000, &u)).await;
                 }
                 // Its jobs' logs, each whole once its job started before then: those started
                 // since the last pass's cutoff (kept, so a node that was down catches up).
@@ -2602,9 +2624,12 @@ impl Apps {
         self.heartbeats_pass(&services, now).await;
         self.rescan_pass(&services, now).await;
         self.pause_pass(&services, now).await;
-        if now - self.logs_expired.load(std::sync::atomic::Ordering::Relaxed) >= 3_600_000 {
+        let last = self.logs_expired.load(std::sync::atomic::Ordering::Relaxed);
+        if now - last >= 3_600_000 {
             self.logs_expired.store(now, std::sync::atomic::Ordering::Relaxed);
-            self.expire_logs_pass(&services, now).await;
+            // The hours since the last pass, as stored logs are metered (a first pass, one).
+            let hours = if last == 0 { 1.0 } else { ((now - last) as f64 / 3_600_000.0).min(2.0) };
+            self.expire_logs_pass(&services, now, hours).await;
             self.build_cache_pass(now).await;
         }
         if now - self.status_swept.load(std::sync::atomic::Ordering::Relaxed) >= 60_000 {

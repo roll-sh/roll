@@ -14,6 +14,8 @@ export interface Prices {
   gb_second: number;
   egress_gb: number;
   build_minute: number;
+  /** A GB-month of logs kept past the first week. */
+  stored_gb_month: number;
 }
 
 export interface Overview {
@@ -47,6 +49,8 @@ export interface Build {
   packages?: string[];
   /** The longest its build may take, seconds (60–21600, held to the node's own limit); unset: the node's. */
   timeout_s?: number;
+  /** Its builder: small (2 vCPU, 4 GiB; default), medium (4, 8 GiB) or large (8, 16 GiB), minutes metered by size on the fleet. */
+  size?: "small" | "medium" | "large";
 }
 
 export type ServiceType = "web" | "worker" | "cron";
@@ -570,6 +574,8 @@ export interface EnvironmentPut {
   log_retention_days?: 7 | 30 | 90 | null;
   /** Approvals a deployment needs before it goes live (0 or null: none). */
   approvals?: number | null;
+  /** A deploy status badge anyone may load. */
+  badge?: boolean;
   /** Its deploys post commit statuses and GitHub Deployments (false: someone else reports them). */
   report?: boolean;
   /** What its code may reach from the next deploy: roll and `hosts` only, or anything. null: open. */
@@ -689,6 +695,8 @@ export interface Environment extends EnvironmentSummary {
   log_retention_days?: number;
   /** People other than a deployment's author who approve it before it goes live (0–3). */
   approvals?: number;
+  /** Its deploy status badge (an SVG for a README), when it has one. */
+  badge_url?: string;
   /** Its deploys are reported to the Git host (commit statuses, GitHub Deployments); false:
    *  someone else reports them (roll previews' `pv-` environments). */
   report?: boolean;
@@ -1191,7 +1199,7 @@ export interface InstanceSeries {
 
 export interface Usage {
   /** `day` is a unix day (days since 1970-01-01, UTC); every day of the window is there. */
-  days: { day: number; cpu_seconds: number; gb_seconds: number; requests: number; egress_bytes: number; build_seconds: number; usd: number }[];
+  days: { day: number; cpu_seconds: number; gb_seconds: number; requests: number; egress_bytes: number; build_seconds: number; stored_gb_hours: number; usd: number }[];
   total_usd: number;
 }
 
@@ -1291,7 +1299,7 @@ export interface LogDrain {
   previews: boolean;
   /** The names of the headers it's sent with; their values are sealed, never shown. */
   headers: string[];
-  /** How its lines go: roll's signed NDJSON, OpenTelemetry logs (OTLP/HTTP JSON), or syslog (RFC 5424 over TLS). */
+  /** How its lines go: roll's signed NDJSON, OpenTelemetry logs (OTLP/HTTP JSON), syslog (RFC 5424 over TLS), or NDJSON objects in an S3 bucket. */
   format: DrainFormat;
   /** Only in the answer that made it. */
   secret?: string;
@@ -1311,7 +1319,7 @@ export interface FormSubmission {
   fields: { name: string; value: string }[];
 }
 
-export type DrainFormat = "ndjson" | "otlp" | "syslog";
+export type DrainFormat = "ndjson" | "otlp" | "syslog" | "s3";
 
 /** A project's monthly spend limits (US dollars at roll's prices, the calendar month in UTC). */
 export interface SpendLimits {
