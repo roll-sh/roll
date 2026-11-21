@@ -14,6 +14,8 @@ export interface Prices {
   gb_second: number;
   egress_gb: number;
   build_minute: number;
+  /** A GB-month of logs kept past the first week. */
+  stored_gb_month: number;
 }
 
 export interface Overview {
@@ -1197,7 +1199,7 @@ export interface InstanceSeries {
 
 export interface Usage {
   /** `day` is a unix day (days since 1970-01-01, UTC); every day of the window is there. */
-  days: { day: number; cpu_seconds: number; gb_seconds: number; requests: number; egress_bytes: number; build_seconds: number; usd: number }[];
+  days: { day: number; cpu_seconds: number; gb_seconds: number; requests: number; egress_bytes: number; build_seconds: number; stored_gb_hours: number; usd: number }[];
   total_usd: number;
 }
 
