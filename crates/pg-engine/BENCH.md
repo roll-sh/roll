@@ -285,6 +285,48 @@ The current checked measurements compare release engine builds and PostgreSQL 18
 the wire. Older rounds below are historical records, with their original methods and
 limits. Their results have not been reverified on the current source.
 
+## Bulk writes, round 21: the size model's per-row costs, INSERT … SELECT's modelled rows as stored (2026-11-21, agent 281)
+
+HANDOFF "Bulk writes, round 21" has what changed. Lane C, the 1M-row bulk script with joined
+windows (agent 246's `bulkx.sh` with `JOIN=1`, copied to `~/.cache/a281/bench`), plain dist builds
+(`tools/dist.sh`) of **b1**, origin's `1c0a79d67`, and **n2**, both commits of `cand/a281` (built
+from `fda2c783c`, the same trees). Earlier, on origin's `059fb33d8`: **b0** and **n1**, the first
+commit on it. The whole script in every run, each pair one `tools/lane.sh` hold. G user
+instructions of the server's cgroup; every counter ran 100% of its window. **Foreign load was over
+1.0 core in every run** (3.5-3.8 cores, wall-weighted: other agents' work on lane C's CPUs); the
+instruction counts repeat within 0.01% regardless. Rows equal in every run (count and sums of every
+column of both tables).
+
+### b1 against n2 (2 alternating pairs, % per pair)
+
+| step | b1 | n2 | % per pair |
+|---|---|---|---|
+| COPY in | 9.111 | 8.737 | -4.1 / -4.1 |
+| CREATE INDEX | 4.404 | 4.394 | -0.2 / -0.2 |
+| CREATE UNIQUE INDEX | 3.365 | 3.373 | +0.4 / +0.1 (b1 alone 3.357-3.372) |
+| COPY out | 3.089 | 3.089 | +0.0 / +0.0 |
+| INSERT … SELECT | 6.590 | 5.108 | -22.5 / -22.5 |
+| UPDATE half | 12.006 | 11.726 | -2.3 / -2.3 |
+| DELETE a quarter, with its compaction | 7.733 | 7.693 | -0.5 / -0.5 |
+| VACUUM | 1.726 | 1.718 | -0.5 / -0.5 |
+| ANALYZE | 0.474 | 0.476 | +0.0 / +0.8 (0.472-0.476 on one build, round 19) |
+| count_after and the four scans | | | within ±0.6%, the same values on both |
+| **all steps** (12) | 48.87 | 46.69 | -4.5 / -4.5 |
+
+Bytes written per step the same (COPY in 33.7 MB, INSERT … SELECT 35.8 MB, UPDATE 63.5 MB);
+VmHWM b1 284 / 285, n2 283 / 284 MB; cgroup peak 348-387 MB on both. Cycles (a reading only under
+that load): COPY in 6.8-7.5 -> 7.0 G, INSERT … SELECT 4.3-4.5 -> 3.3 G.
+
+### b0 against n1 (the first commit alone, on `059fb33d8`; one pair)
+
+COPY in 9.111 -> 8.737 (-4.1%), INSERT … SELECT 6.590 -> 6.285 (-4.6%), UPDATE 12.005 -> 11.723
+(-2.3%), DELETE -0.5%, VACUUM -0.5%, CREATE INDEX -0.3%, CREATE UNIQUE INDEX +0.1%; all steps 49.34
+-> 48.32 (-2.1%). Rows equal; VmHWM 278 / 281 MB.
+
+Against the numbers that stand (agent 260's same-day runs, 2026-11-19): all steps 46.69 against
+PostgreSQL's 52.33 (0.892x) and pgrust's 44.92 (1.039x); INSERT … SELECT 5.11 against PostgreSQL's
+4.31; COPY in 8.74 against PostgreSQL's 6.48 and pgrust's 4.97. Not re-run on PostgreSQL or pgrust.
+
 ## Bulk writes, round 20: bulk DELETE, its merges and its compaction (2026-11-21, agent 275)
 
 HANDOFF "Bulk writes, round 20" has what changed. Lane C, the 1M-row bulk script with joined

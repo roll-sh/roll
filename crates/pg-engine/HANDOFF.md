@@ -10625,6 +10625,92 @@ and confirm on PGO:
 Agent 218's short-transaction stack (ten steps, `wip/a218`) was gated this way and landed: BENCH
 "Profile-guided build", part 2.
 
+## Bulk writes, round 21: the size model's per-row costs, INSERT … SELECT's modelled rows as stored (agent 281)
+
+BENCH.md "Bulk writes, round 21" has the measurements (lane C, the 1M-row bulk script with joined
+windows, plain dist builds). `cand/a281`: two code commits on origin's `1c0a79d67` and this
+section. No format change: the same rows, TIDs, files and sizes.
+
+**Where COPY in and INSERT … SELECT went** (b0 = `059fb33d8`, instruction samples of each joined
+window; shares within one profile only, as samples are lost under load):
+- COPY in, 9.11 G: parsing 23% (`parse_value_ex` 13%: floats 5%, integers 3.6%), the row's put and
+  the runs 26% (zstd 13%), the size model 25%: `inserted_with` 17.5% (`untracked_write` 4.4% with
+  `heap_fillfactor` 1.0% of it, `relsize::datum_bytes` through `row_len` 4.0%, `note_compression_len`
+  3.2% of which `compressed_with` 2.4%, `ensure` 2.0%) and the first 400,000 rows' model
+  (`CopyLoad::model`) 7.6% (`multi_place_cid` 1.5%, `with_tid` 1.3%, the key map 1.1%, the held
+  rows' puts 1.1%).
+- INSERT … SELECT, 6.59 G: the first 400,000 rows (the table is modelled until then) went in
+  decoded through `plain_row` (27% of the step: decoding, `inserted_with` 15%, the heap model's
+  insert 5%, encoding), the 600,000 past the model as stored (`StoredInsert`: `inserted_stored`
+  3.2%, `stored_tuple_len` 2.3%, after a first pass over the values that read each one again).
+  Then the runs (zstd 18%), the source's scan and decompression (12%).
+
+**Four per-row costs** (first commit; `exec/sizing.rs`, `storage/row.rs`, `exec/dml.rs`):
+- `row_len` (the tuple length of every inserted row and every UPDATE's new version, modelled or
+  not) sized each value through `relsize::datum_bytes`: a call, `type_layout`'s match, a call to
+  `varlena_payload` for text, alignment by a division. Now a fixed-size type's typlen and typalign
+  come from one match and are aligned by a mask, and an ASCII text or varchar value's payload is its
+  length; anything else goes through `datum_bytes` as before. Debug builds assert both arms against
+  `datum_bytes` for every row.
+- `note_compression_len` called `compressed_with` (a call, then `read_from`'s test) for every
+  value; it now tests the value first (`may_be_read`: text, json or bytea of `READ_MIN..READ_MAX`
+  bytes, the only values `note_read` notes), the same test `read_from` makes.
+- `heap_fillfactor`, asked for every row past the model, split and trimmed every reloption
+  (`autovacuum_enabled=off` here); an option whose first non-space bytes aren't "fillfactor" is
+  passed over first.
+- `StoredInsert::insert` read every value once to check it (a NULL in a NOT NULL column, an
+  encoding of 128 bytes or more) and again to size it (`stored_tuple_len`). One pass now:
+  `stored_tuple_len_with` hands each value's column, tag and encoded bytes to a check;
+  `stored_tuple_len` is it with a check that accepts all.
+
+**INSERT … SELECT's stored rows into a modelled table** (second commit; `sizing::
+inserted_stored_modelled`, `StoredInsert`). A plain INSERT … SELECT whose source hands out a
+table's stored rows (`Node::each_stored`) into a table without indexes copied them as stored only
+once the target was past the model; while modelled, each row was decoded, checked, encoded again
+and placed by `inserted_with`. Now the modelled rows go in as stored too: their length from
+`stored_tuple_len_with`, placed in the heap model as `inserted_with` places a row without
+out-of-line values, index or GiST entries (the COPY batch and deferring-load branches kept, the
+heap model's insert, `settle_left`, the untrack past the model's size), stored once with the TID
+it gives (`ROW_HEADER_TID`). `note_compression_len` has nothing to record for these rows:
+`each_stored` refuses a source table that ever stored a value compressed or out of line
+(`sizing::tracked`), so no value was read from a compressed datum, and a tuple of at most
+`TOAST_THRESHOLD` bytes isn't compressed. The row that finds the table gone past the model (the
+row after the one that crossed it) goes in the estimate as before (`inserted_stored`,
+`stored_run_key`). The rowid is taken before the placement, as `plain_row` takes it; no row given
+a rowid falls back to the decoded path. Test: `big_tables::insert_select_from_stored_rows` now
+also compares the stored copy's ctids with the decoded copy's (a filtered source), the first 500
+rows modelled and the rest past the model, and counts over 2,900 of its 3,000 rows copied as
+stored.
+
+Results (BENCH "Bulk writes, round 21"; plain dist, b1 = `1c0a79d67` against n2 = both commits on
+it, two alternating pairs, G user instructions): INSERT … SELECT 6.590 -> 5.108 (-22.5% in both
+pairs; PostgreSQL 18.6's 4.31), COPY in 9.111 -> 8.737 (-4.1% both; the first commit alone gave
+the same -4.1% on b0), UPDATE half 12.006 -> 11.726 (-2.3% both: `row_len` of each new version),
+DELETE with its compaction -0.5%, VACUUM -0.5%, CREATE INDEX -0.2%; CREATE UNIQUE INDEX +0.4 /
++0.1% against b1's own 3.357-3.372 spread (n2 3.371-3.375); every other step level. All steps 48.87
+-> 46.69 (-4.5%). Rows equal in every run, bytes written per step the same (COPY 33.7 MB, INSERT …
+SELECT 35.8 MB, UPDATE 63.5 MB), VmHWM 283-285 MB on both. Against the numbers that stand (agent
+260's, 2026-11-19): 0.892x PostgreSQL's 52.33, 1.039x pgrust's 44.92. Foreign load was 3.6-3.8 cores in every
+run (lane C's CPUs shared with other agents' work); the instruction counts repeat within 0.01%
+regardless. Cycles move with them (INSERT … SELECT 4.3-4.5 -> 3.3 G) but under that load are a
+reading only.
+
+Not gated on the PGO build: no inline attribute added or removed; `inserted_with` and
+`untracked_write` keep their bodies and boundaries; `stored_tuple_len` became a wrapper of the
+generic `stored_tuple_len_with` (CREATE INDEX and VACUUM, which call it, read -0.2% and -0.5%).
+
+Verification: `tools/quick-check.sh` with `QC_CHECKED=1` on ``fda2c783c` (both commits on `1c0a79d67`; the pushed commits have the same trees, their messages rewritten)`: Clippy 16 warnings, none new in a changed file; 447 tests in 27 binaries, again built `--profile verify-checked`; crash_random seeds 1-3 x 2, power_cut_at_every_point; regress 51,148 / 51,150, 0 newly differing; isolation 1,647 / 1,648; pg_dump_tap 14,609 passed. Before it,
+`big_tables` under `verify-checked` (22 passed).
+
+**Left (G user instructions, n2 against PostgreSQL 18.6's):**
+1. COPY in 8.74 against 6.48: parsing (~23%: the float parser 5%, the integers, a `Vec` and an
+   `Arc<str>` a row), the put and runs (~26%), the rows past the model (`untracked_write` 4.1%,
+   `ensure` 2.2%: a read lock and a write lock a row; agent 281's next candidate queues them in the
+   multi-insert batch), the first 400,000 rows' model (7%).
+2. INSERT … SELECT 5.11 against 4.31: the runs' zstd and the put (~37%), the heap model's insert
+   for the first 400,000 rows (`Heap::insert` ~8%: `get_buffer`'s lookup, the key map, line
+   pointers; ~1,000 instructions a row), the source's scan.
+
 ## Bulk writes, round 20: bulk DELETE, its merges and its compaction (agent 275)
 
 BENCH.md "Bulk writes, round 20" has the measurements (lane C, the 1M-row bulk script with joined
