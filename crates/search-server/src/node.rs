@@ -322,6 +322,9 @@ pub struct Node {
     hooks: Arc<dyn LifecycleHooks>,
     /// Read on every request, written only by wakes and unloads.
     clusters: parking_lot::RwLock<HashMap<String, Slot>>,
+    /// What reindex from remote may use on this node, shared by every cluster it serves (its
+    /// operator's settings; no tenant's raise it).
+    reindex: Arc<search_es::api::remote::RemoteNode>,
     reaper: AtomicBool,
     /// A loaded cluster has an idle timeout or memory budget of its own: the reaper must run
     /// even when the node has neither. Cleared when the reaper stops (nothing loaded).
@@ -797,6 +800,11 @@ fn release_memory() {
 }
 
 impl Node {
+    /// What reindex from remote may use on this node ([`search_es::api::remote::RemoteNode`]).
+    pub fn reindex(&self) -> &Arc<search_es::api::remote::RemoteNode> {
+        &self.reindex
+    }
+
     /// Whether `cluster` reads the node's `service_tokens` file ([`FILE_SERVICE_TOKEN_CLUSTERS`]).
     fn reads_file_service_tokens(&self, cluster: &str) -> bool {
         self.cfg.default_cluster.is_some()
@@ -818,8 +826,10 @@ impl Node {
             n => n,
         };
         let audit = crate::audit::AuditLogs::new(stores.data(), cfg.audit.clone());
+        let reindex = search_es::api::remote::RemoteNode::from_settings(&cfg.node_settings);
         Arc::new(Node {
             audit,
+            reindex,
             catalog,
             stores,
             fair: (running != usize::MAX).then(|| FairScheduler::new(running)),
@@ -1133,7 +1143,9 @@ impl Node {
         cfg.default_repository = self.cfg.default_repository.clone().filter(|_| data_store.is_some());
         cfg.file_service_tokens = self.reads_file_service_tokens(&spec.name);
         cfg.audit = Some(search_es::xpack::security::audit::AuditLog(self.audit.clone()));
+        cfg.reindex_node = Some(self.reindex.clone());
         let mut cluster = Cluster::open(cfg, store).await?;
+        *cluster.reindex_whitelist.write() = spec.reindex_whitelist.clone();
         cluster.node.id = stable_node_id(&spec.name);
         if cluster.state().version <= 1 {
             // A cluster that never wrote its state got a fresh `cluster_uuid`: keep it, so it
@@ -1247,6 +1259,15 @@ impl Node {
             map.remove(name);
             l
         };
+        // Tasks still running (the cluster was unloaded on purpose: deleted, handed over, put to
+        // sleep) would vanish with it: they end now as cancelled, which `_tasks` reports.
+        let cancelled = search_es::api::tasks::cancel_all(&loaded.cluster);
+        if !cancelled.is_empty() {
+            // They stop between documents; a few seconds at most, so a stuck one can't hold the
+            // unload (its writes find the cluster closed below).
+            let ended = search_es::api::tasks::wait_for(&loaded.cluster, &cancelled, std::time::Duration::from_secs(5)).await;
+            tracing::info!(cluster = name, tasks = cancelled.len(), ended, "cancelled the running tasks of a cluster being unloaded");
+        }
         self.hooks.unloading(&loaded.cluster).await;
         // Failed logins the node refuses while it sleeps are recorded as it last asked.
         self.audit.remember(name, search_es::xpack::security::audit::snapshot(&loaded.cluster));
@@ -1358,6 +1379,9 @@ impl Node {
 
     fn apply_spec(l: &Loaded, spec: ClusterSpec) {
         let cur = l.spec();
+        if cur.reindex_whitelist != spec.reindex_whitelist {
+            *l.cluster.reindex_whitelist.write() = spec.reindex_whitelist.clone();
+        }
         if cur.max_requests_per_second != spec.max_requests_per_second {
             *l.rate.lock() = spec.max_requests_per_second.map(|r| Arc::new(RateLimiter::new(r, r.max(1.0))));
         }
@@ -1547,7 +1571,9 @@ impl Node {
             if total.saturating_add(room) <= budget {
                 break;
             }
-            if l.in_flight() > 0 || !self.may_drop(&l, "memory budget") {
+            // A running task (a reindex from remote, a by-query run in the background) would be
+            // lost with the cluster: it stays.
+            if l.in_flight() > 0 || !l.cluster.tasks.is_empty() || !self.may_drop(&l, "memory budget") {
                 continue;
             }
             if self.unload_with(&l.name, true, Some(&l)).await {

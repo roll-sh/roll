@@ -272,6 +272,8 @@ pub struct Status {
     pub batches: u64,
     pub version_conflicts: u64,
     pub noops: u64,
+    /// Searches sent again after the source rejected them (a remote's 429: `retries.search`).
+    pub search_retries: u64,
     pub failures: Vec<Value>,
     pub failure_status: u16,
     pub requests_per_second: f64,
@@ -314,7 +316,7 @@ impl Status {
         m.insert("batches".into(), Value::from(self.batches as i64));
         m.insert("version_conflicts".into(), Value::from(self.version_conflicts as i64));
         m.insert("noops".into(), Value::from(self.noops as i64));
-        m.insert("retries".into(), obj! { "bulk" => 0, "search" => 0 });
+        m.insert("retries".into(), obj! { "bulk" => 0, "search" => self.search_retries as i64 });
         if human {
             m.insert("throttled".into(), Value::from(crate::units::TimeValue::millis(self.throttled_millis as i64).human()));
         }
@@ -370,6 +372,7 @@ impl Status {
         self.batches += o.batches;
         self.version_conflicts += o.version_conflicts;
         self.noops += o.noops;
+        self.search_retries += o.search_retries;
         self.throttled_millis += o.throttled_millis;
         self.throttled_until_millis = self.throttled_until_millis.max(o.throttled_until_millis);
         self.failures.extend(o.failures.iter().cloned());
@@ -401,6 +404,9 @@ pub struct Live {
     children: parking_lot::Mutex<Vec<Arc<Live>>>,
     /// The task's (and its parent's) cancellation flags.
     cancelled: Vec<Arc<std::sync::atomic::AtomicBool>>,
+    /// A reindex from remote's place in the node's limits, held until the run ends, wherever it
+    /// runs (the request, or its background run).
+    slot: parking_lot::Mutex<Option<super::remote::RemoteSlot>>,
 }
 
 /// A slice's share of a rate.
@@ -419,6 +425,7 @@ impl Live {
             throttled_until: parking_lot::Mutex::new(None),
             children: parking_lot::Mutex::new(Vec::new()),
             cancelled,
+            slot: parking_lot::Mutex::new(None),
         })
     }
 
@@ -442,6 +449,20 @@ impl Live {
 
     fn is_cancelled(&self) -> bool {
         self.cancelled.iter().any(|c| c.load(std::sync::atomic::Ordering::Relaxed))
+    }
+
+    /// Gives back the run's [`super::remote::RemoteSlot`], if it holds one.
+    fn release_slot(&self) {
+        self.slot.lock().take();
+    }
+
+    /// Wakes whatever the task (and its slices) waits on, so a cancel takes effect now, not
+    /// when a throttle's delay or a remote's answer ends.
+    pub fn wake(&self) {
+        for k in self.children.lock().clone() {
+            k.wake();
+        }
+        self.changed.notify_waiters();
     }
 
     /// The current counters (a sliced task: the sum of its slices, each listed).
@@ -483,16 +504,6 @@ struct Throttle {
 impl Throttle {
     fn new(live: Arc<Live>) -> Throttle {
         Throttle { live, last_start: None, last_size: 0, throttled: std::time::Duration::ZERO }
-    }
-
-    /// Waits until a batch of `size` documents may start; `false` when the task was cancelled.
-    /// For documents already in hand (a remote source); a scroll waits before its next fetch.
-    async fn before_batch(&mut self, size: usize) -> bool {
-        let go = self.wait().await;
-        if go {
-            self.start(size);
-        }
-        go
     }
 
     /// Waits out the delay the last batch earned before the next one is fetched
@@ -582,7 +593,7 @@ type SliceRun = (Status, Vec<String>);
 /// The background run re-dispatches the request on a spawned task holding the cluster; it
 /// finds its registered task through [`BACKGROUND`]. Clusters without a background handle
 /// ([`crate::Cluster::enable_background_tasks`]) run the task before answering.
-async fn run_as_task<'c, F, Fut>(ctx: &'c Ctx<'c>, kind: Kind, rps: f64, action: &str, description: String, f: F) -> EsResult<Reply>
+async fn run_as_task<'c, F, Fut>(ctx: &'c Ctx<'c>, kind: Kind, rps: f64, slot: Option<super::remote::RemoteSlot>, action: &str, description: String, f: F) -> EsResult<Reply>
 where
     F: FnOnce(u64, Arc<Live>) -> Fut,
     Fut: std::future::Future<Output = EsResult<SliceRun>>,
@@ -595,6 +606,8 @@ where
         tasks.set_live(id, live.clone());
         live
     };
+    // Handed to the first run's state; its background run (if any) finds it there.
+    let mut slot = slot;
     let finish = |live: &Arc<Live>, r: EsResult<SliceRun>, started: std::time::Instant| -> EsResult<(Status, u16)> {
         let (mut s, _) = r?;
         s.requests_per_second = live.rate();
@@ -610,6 +623,7 @@ where
             let guard = tasks.adopt(id);
             let live = tasks.get(id).and_then(|t| t.live).unwrap_or_else(|| new_live(id));
             let r = f(id, live.clone()).await;
+            live.release_slot();
             let outcome = finish(&live, r, started).map(|(s, _)| s.response(kind, started.elapsed().as_millis() as u64, true));
             // Stored in `.tasks` before the task ends: whoever waited for it finds the document.
             tasks.record(&guard, outcome);
@@ -621,6 +635,7 @@ where
         let guard = tasks.register(action, &description, None, headers);
         let id = guard.id;
         let live = new_live(id);
+        *live.slot.lock() = slot.take();
         if let Some(cluster) = ctx.cluster.handle() {
             let id = guard.detach();
             let req = ctx.request.clone();
@@ -628,6 +643,7 @@ where
             return Reply::ok(obj! { "task" => format!("{}:{id}", ctx.cluster.node.id) });
         }
         let r = f(id, live.clone()).await;
+        live.release_slot();
         let outcome = finish(&live, r, started).map(|(s, _)| s.response(kind, started.elapsed().as_millis() as u64, true));
         tasks.record(&guard, outcome);
         let persisted = super::tasks::persist_result(ctx, id).await;
@@ -638,7 +654,9 @@ where
     let started = std::time::Instant::now();
     let guard = tasks.register(action, &description, None, headers);
     let live = new_live(guard.id);
+    *live.slot.lock() = slot.take();
     let r = f(guard.id, live.clone()).await;
+    live.release_slot();
     let (s, code) = finish(&live, r, started)?;
     drop(guard);
     Ok(Reply::Body(code, s.response(kind, started.elapsed().as_millis() as u64, false)))
@@ -651,7 +669,10 @@ fn background(cluster: Arc<crate::Cluster>, req: crate::rest::EsRequest, id: u64
         let _ = crate::rest::handle(&cluster, req).await;
         // A run that failed before reaching its task (the request no longer valid) still
         // ends it.
-        if cluster.tasks.get(id).is_some() {
+        if let Some(t) = cluster.tasks.get(id) {
+            if let Some(l) = &t.live {
+                l.release_slot();
+            }
             let g = cluster.tasks.adopt(id);
             cluster.tasks.finish(g, Err(EsError::illegal_state("the background run of the task ended early")));
         }
@@ -896,6 +917,132 @@ fn description(kind: Kind, indices: &[String], dest: Option<&str>) -> String {
     }
 }
 
+/// Why a remote run stopped before its source ran out.
+enum Stop {
+    /// `_tasks/<id>/_cancel`, or the node unloading the cluster.
+    Cancelled,
+    /// It ran past [`super::remote::MAX_DURATION`].
+    Deadline,
+}
+
+impl Stop {
+    /// The task's `canceled` reason (`BulkByScrollTask.Status.reasonCancelled`).
+    fn reason(&self, max: std::time::Duration) -> String {
+        match self {
+            Stop::Cancelled => "by user request".into(),
+            Stop::Deadline => format!("ran longer than [{}] allows ({}s)", super::remote::MAX_DURATION, max.as_secs()),
+        }
+    }
+}
+
+/// Runs `f` until it ends, or stops once the task is cancelled (checked when woken by
+/// [`Live::wake`], and every 250ms besides) or `deadline` passes: a remote that's slow to answer
+/// doesn't hold a cancelled task, nor any task forever.
+async fn until_stopped<F: std::future::Future>(live: &Live, deadline: tokio::time::Instant, f: F) -> Result<F::Output, Stop> {
+    tokio::pin!(f);
+    loop {
+        if live.is_cancelled() {
+            return Err(Stop::Cancelled);
+        }
+        if tokio::time::Instant::now() >= deadline {
+            return Err(Stop::Deadline);
+        }
+        let woken = live.changed.notified();
+        tokio::select! {
+            r = &mut f => return Ok(r),
+            _ = woken => {}
+            _ = tokio::time::sleep(std::time::Duration::from_millis(250)) => {}
+        }
+    }
+}
+
+/// A reindex whose source is a remote cluster ([`super::remote`]): one page at a time, each
+/// written before the next is fetched, throttled between pages like a local scroll; the
+/// remote's search context is released however the run ends. Its answers are charged to the
+/// node's budget ([`super::remote::RemoteNode`]), and it stops after the node's longest run.
+async fn reindex_remote(ctx: &Ctx<'_>, plan: &ReindexPlan, req: &super::by_query_request::ByScroll, remote: &super::by_query_request::Remote, max_docs: Option<u64>, live: &Arc<Live>) -> EsResult<SliceRun> {
+    let rules = super::remote::Rules::of_cluster(ctx.cluster)?;
+    let node = ctx.cluster.remote.clone();
+    let deadline = tokio::time::Instant::now() + node.max_duration;
+    rules.check_now(remote).await?;
+    let client = super::remote::Client::new(&rules, remote, Some(node.budget.clone()))?;
+    let mut src = match until_stopped(live, deadline, super::remote::RemoteSource::open(client, req, remote, max_docs)).await {
+        Err(Stop::Cancelled) => return Ok((cancelled_before_start(live), Vec::new())),
+        Err(stop) => {
+            let s = Status { canceled: Some(stop.reason(node.max_duration)), ..Default::default() };
+            return Ok((s, Vec::new()));
+        }
+        Ok(r) => r?,
+    };
+    let mut s = Status::default();
+    let mut touched = Vec::new();
+    let mut throttle = Throttle::new(live.clone());
+    let mut read = 0u64;
+    let run: EsResult<()> = async {
+        loop {
+            let waited = match tokio::time::timeout_at(deadline, throttle.wait()).await {
+                Ok(true) => None,
+                Ok(false) => Some(Stop::Cancelled),
+                Err(_) => Some(Stop::Deadline),
+            };
+            let page = match waited {
+                None => until_stopped(live, deadline, src.next()).await,
+                Some(stop) => Err(stop),
+            };
+            let page = match page {
+                Err(stop) => {
+                    s.canceled = Some(stop.reason(node.max_duration));
+                    // The task shows why it stopped (`BulkByScrollTask.Status.reasonCancelled`).
+                    publish(live, &s, &throttle);
+                    return Ok(());
+                }
+                Ok(p) => p?,
+            };
+            s.search_retries = src.retries;
+            if let Some(t) = page.total {
+                s.total = max_docs.map_or(t, |m| t.min(m));
+            }
+            let mut docs = page.docs;
+            if let Some(m) = max_docs {
+                docs.truncate(m.saturating_sub(read).min(usize::MAX as u64) as usize);
+            }
+            if docs.is_empty() {
+                publish(live, &s, &throttle);
+                return Ok(());
+            }
+            throttle.start(docs.len());
+            s.batches += 1;
+            read += docs.len() as u64;
+            let sds: Vec<SourceDoc> = docs.into_iter().map(|d| SourceDoc { index: d.index, id: d.id, routing: d.routing, version: d.version, source: d.source }).collect();
+            reject_versioned_deletes(ctx, plan, sds.iter())?;
+            let mut stop = false;
+            for sd in &sds {
+                // A cancel (also the node unloading the cluster) stops between documents: nothing
+                // is written into a cluster being unloaded.
+                if live.is_cancelled() {
+                    s.canceled = Some(Stop::Cancelled.reason(node.max_duration));
+                    publish(live, &s, &throttle);
+                    return Ok(());
+                }
+                if let Flow::Stop = reindex_doc(ctx, plan, sd, &mut s, &mut touched).await? {
+                    stop = true;
+                }
+            }
+            publish(live, &s, &throttle);
+            // A batch's failures end the run once the whole batch was sent.
+            if stop || max_docs.is_some_and(|m| read >= m) {
+                return Ok(());
+            }
+        }
+    }
+    .await;
+    // Best effort and brief: a remote that doesn't answer keeps its context until it expires.
+    let _ = tokio::time::timeout(std::time::Duration::from_secs(30), src.close()).await;
+    run?;
+    s.throttled_millis = throttle.millis();
+    Ok((s, touched))
+}
+
 /// The outcome of one write: counted, or stop the slice.
 enum Flow {
     Next,
@@ -954,7 +1101,7 @@ pub async fn delete_by_query(ctx: &Ctx<'_>) -> EsResult<Reply> {
     let action = "indices:data/write/delete/byquery";
     let desc = description(Kind::Delete, &indices, None);
     let d2 = desc.clone();
-    run_as_task(ctx, Kind::Delete, opts.rps, action, desc, |task, live| async move {
+    run_as_task(ctx, Kind::Delete, opts.rps, None, action, desc, |task, live| async move {
         let one = |slice: Option<(u32, u32)>, max_docs: Option<u64>, live: Arc<Live>| {
             let (indices, query, routing) = (&indices, &query, &routing);
             async move {
@@ -1040,7 +1187,7 @@ pub async fn update_by_query(ctx: &Ctx<'_>) -> EsResult<Reply> {
     let action = "indices:data/write/update/byquery";
     let desc = description(Kind::Update, &indices, None);
     let d2 = desc.clone();
-    run_as_task(ctx, Kind::Update, opts.rps, action, desc, |task, live| async move {
+    run_as_task(ctx, Kind::Update, opts.rps, None, action, desc, |task, live| async move {
         let st = ctx.state();
         let bound = match &script {
             Some(sc) => Some(ctx.cluster.scripts.compile(&st, sc, Context::UpdateByQuery)?),
@@ -1328,8 +1475,14 @@ async fn reindex_doc(ctx: &Ctx<'_>, p: &ReindexPlan, d: &SourceDoc, s: &mut Stat
 pub async fn reindex(ctx: &Ctx<'_>) -> EsResult<Reply> {
     let req = super::by_query_request::parse_reindex(ctx)?;
     if let Some(r) = &req.remote {
-        super::remote::check_whitelist(ctx.cluster.config.node_setting("reindex.remote.whitelist"), r)?;
+        super::remote::Rules::of_cluster(ctx.cluster)?.check(r)?;
     }
+    // A place in the node's limits, taken by the request (a 429 past them); its background run
+    // finds it in the task's state.
+    let slot = match &req.remote {
+        Some(_) if BACKGROUND.try_with(|_| ()).is_err() => Some(ctx.cluster.remote.acquire(&ctx.cluster.remote_running)?),
+        _ => None,
+    };
     let remote = req.remote.clone();
     let remote_req = remote.is_some().then(|| req.clone());
     // `ReindexValidator.initialValidation`: a destination that can't be auto-created, or one of
@@ -1356,9 +1509,13 @@ pub async fn reindex(ctx: &Ctx<'_>) -> EsResult<Reply> {
     let script = req.script.clone();
     let slice = req.slice();
     let action = "indices:data/write/reindex";
-    let desc = description(Kind::Reindex, &src_indices, Some(&dest_index));
+    let mut desc = description(Kind::Reindex, &src_indices, Some(&dest_index));
+    if let Some(r) = &remote {
+        // `ReindexRequest.getDescription`: `reindex from [<remote>][<indices>] to [<dest>]`.
+        desc = format!("reindex from [{}][{}] to [{dest_index}]", r.describe(), src_indices.join(", "));
+    }
     let d2 = desc.clone();
-    run_as_task(ctx, Kind::Reindex, opts.rps, action, desc, |task, live| async move {
+    run_as_task(ctx, Kind::Reindex, opts.rps, slot, action, desc, |task, live| async move {
         let st = ctx.state();
         let plan = ReindexPlan {
             bound: match &script {
@@ -1375,36 +1532,9 @@ pub async fn reindex(ctx: &Ctx<'_>) -> EsResult<Reply> {
             proceed: opts.proceed,
         };
         let (s, touched) = match (&remote, &remote_req) {
-            // A remote source is read as one scroll; its documents are written in batches.
-            (Some(r), Some(rq)) => {
-                let (docs, batches) = super::remote::fetch(rq, r, opts.max_docs).await?;
-                let mut s = Status { total: docs.len() as u64, batches, ..Default::default() };
-                let mut touched = Vec::new();
-                let mut throttle = Throttle::new(live.clone());
-                let mut stop = false;
-                for chunk in docs.chunks(batch.max(1) as usize) {
-                    if !throttle.before_batch(chunk.len()).await {
-                        s.canceled = Some("by user request".into());
-                        // The task shows why it stopped (`BulkByScrollTask.Status.reasonCancelled`).
-                        publish(&live, &s, &throttle);
-                        break;
-                    }
-                    let sds: Vec<SourceDoc> = chunk.iter().map(|d| SourceDoc { index: d.index.clone(), id: d.id.clone(), routing: d.routing.clone(), version: d.version, source: d.source.clone() }).collect();
-                    reject_versioned_deletes(ctx, &plan, sds.iter())?;
-                    for sd in &sds {
-                        if let Flow::Stop = reindex_doc(ctx, &plan, sd, &mut s, &mut touched).await? {
-                            stop = true;
-                        }
-                    }
-                    publish(&live, &s, &throttle);
-                    // A batch's failures end the run once the whole batch was sent.
-                    if stop {
-                        break;
-                    }
-                }
-                s.throttled_millis = throttle.millis();
-                (s, touched)
-            }
+            // A remote source is read page by page; boxed, as the request path runs near a debug
+            // build's stack limit.
+            (Some(r), Some(rq)) => Box::pin(reindex_remote(ctx, &plan, rq, r, opts.max_docs, &live)).await?,
             _ => {
                 let one = |slice: Option<(u32, u32)>, max_docs: Option<u64>, live: Arc<Live>| {
                     let (src_indices, query, plan) = (&src_indices, &query, &plan);
