@@ -3272,6 +3272,66 @@ Replace it with process.env.AWS_KEY (roll run puts AWS_KEY in the environment), 
 The value is read from the file, never typed or pasted, and goes in one change to the folder of
 `-e`/`roll secrets setup`; a key that's already there is refused, never overwritten.
 
+### Using a key without seeing it: the proxy's contract
+
+A sandbox or a fork's preview holds `rlph_` placeholders instead of the values of keys bound to
+hosts (feature/roll-secrets-placeholders: host bindings, placeholders, `Secrets::substitute` and
+`roll_secrets::proxy::filter`). Its egress proxy swaps them, and to see a request's headers it has
+to terminate TLS. roll secrets gives it a CA for that, which can vouch for nothing but the hosts
+the consumer's keys are bound to. The proxies are their products' (roll previews, roll apps, the
+agents' sandboxes). Each one does exactly this:
+
+1. **Ask for the CA.** `Secrets::intercept_ca(consumer, ttl)` in process, with the consumer as its
+   placeholders name it (`sandbox:sbx_1`, `apps:service:svc_1 (untrusted)`). There's no HTTP route,
+   and none returns the key. The proxy passes only the consumer: roll secrets reads the hosts from
+   the bindings of the keys that consumer holds live placeholders for (`intercept::BoundHosts`,
+   which placeholders answers from its tables). A consumer with none gets `Error::NotFound`.
+   The answer is `InterceptCa { id, cert_pem, key, hosts, expires_at }`:
+   - The CA is self-signed, one per consumer, made for this call. It isn't signed by the project's
+     CA: the container trusts this one certificate, so its own constraints are all it can vouch
+     for. A project root would make the container trust every certificate the root signs, for every
+     consumer's hosts.
+   - It lives a day (`intercept::DEFAULT_TTL`); `ttl` can shorten it, to 5 minutes at least, and
+     nothing lengthens it (`MAX_TTL`). Asking again mints a new key and certificate. Earlier ones
+     stay valid until they expire, so a container that hasn't reloaded keeps working.
+   - Its name constraints are critical. They permit DNS names for the bound hosts only: an exact
+     binding (`api.stripe.com`) is permitted with its subdomains excluded (`.api.stripe.com`)
+     unless another binding sits under it, and a wildcard binding (`*.stripe.com`) permits the
+     subtree `.stripe.com` and not `stripe.com` itself. Every IP address is excluded, and email
+     addresses are permitted only at the reserved `invalid` domain, so none. A certificate made
+     with the stolen key for any other name fails verification at a client that trusts the CA.
+     X.509 can't say "one label", so the CA's subtree under a wildcard is deeper than the binding;
+     the proxy's own certificates are exact (step 3).
+   - Never `*`, a bare suffix (`*.com`) or a public suffix (`*.co.uk`): such a binding refuses the
+     whole CA, never a narrower one.
+   - `key` is held in the proxy's memory only. It redacts itself in `Debug`, is wiped on drop, and
+     is never stored, logged or sent. A proxy that restarts asks again and reinstalls (step 2).
+   - Audited as `secrets.intercept_ca` in each project the hosts come from: the consumer, that
+     project's hosts and the expiry, never the key.
+2. **Install `cert_pem` in the consumer's trust store** and nothing else: the system store
+   (`/usr/local/share/ca-certificates/` and `update-ca-certificates`), plus `NODE_EXTRA_CA_CERTS`,
+   `REQUESTS_CA_BUNDLE`, `SSL_CERT_FILE` and `CURL_CA_BUNDLE` for runtimes that keep their own.
+   The key never enters the container.
+3. **Terminate TLS only for the bound hosts.** For each connection, take the host the client asked
+   for (SNI, or the `CONNECT` target). If `InterceptCa::covers(host)` is false, forward it as a
+   `CONNECT` tunnel untouched: no termination, no logging of its bytes. If it covers the host, check
+   `Secrets::intercept_ca_live(id)` (never cached: an ended consumer stops the next connection),
+   then serve `InterceptCa::leaf(host)`, a certificate for exactly that name that lives as long as
+   the CA. One label under a wildcard binding, never deeper.
+4. **Filter each request** with `roll_secrets::proxy::filter`, which calls `Secrets::substitute`
+   for every placeholder. Pass the host it terminated TLS for, never the request's `Host` header.
+   Send nothing that the filter refuses.
+5. **Re-dial upstream with real TLS verification**, against the system's roots (never the
+   interception CA, never `insecure`), for the same host, so the consumer can't make the proxy
+   trust a server the consumer controls.
+
+**Ending.** `Secrets::end_intercept_cas(consumer, why)` ends every live CA of the consumer, with a
+revocation row (`revoked_at`, `revoked_why`) and a `secrets.intercept_ca.end` audit row.
+Placeholders' `end_consumer` calls it when the sandbox stops or the preview is torn down. The
+proxy then drops the CA and its leaves at its next `intercept_ca_live`. No CRL is published: a
+trust anchor isn't checked against one, and the CA dies with its container or within a day. Rows
+go a day after they expire.
+
 ### A local copy against the environment
 
 `roll secrets diff --file .env` (`POST …/environments/{env}/diff`) compares a local `.env` or JSON
@@ -5313,6 +5373,8 @@ value_requests(id PK, project_id, env_id, path, keys, note, public_key, seal_key
       -- seal_key: the request's X25519 secret key, sealed with the data key; NULL once it closes
 validity(project_id, fingerprint, kind, result, account, checked_at, why, claimed_at,
       PRIMARY KEY (project_id, fingerprint))  -- validity checks' answers; result NULL while claimed
+intercept_cas(id PK, consumer, serial, hosts, projects, issued_at, expires_at, revoked_at,
+      revoked_why)  -- interception CAs (never their keys); gone a day after they expire
 ```
 
 `owner` is `''` for a shared secret and the principal for a personal one. A deleted secret keeps its

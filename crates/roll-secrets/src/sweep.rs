@@ -506,6 +506,9 @@ impl Secrets {
         self.sweep_retention()?;
         self.sweep_reminders()?;
         self.sweep_alerts()?;
+        if let Err(e) = self.sweep_intercept_cas() {
+            tracing::warn!("sweeping interception CAs failed: {e}");
+        }
         if let Err(e) = self.end_decoys() {
             tracing::warn!("revoking ended decoys failed: {e}");
         }
