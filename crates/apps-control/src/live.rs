@@ -1454,7 +1454,9 @@ impl EnvLive {
         let was_awake = self.awake_count() as u32;
         let n = match run.kind {
             RunType::Cron => 0,
-            // A worker following a backlog starts at what it wants, not back at its floor.
+            // A worker following a backlog starts at what it wants, not back at its floor; one
+            // that scales to zero still starts one, so the deploy sees it boot (it goes once
+            // it's caught up for `scale_down_after`).
             RunType::Worker => run.min_instances.max(1).max(if run.scale.is_some() { self.wanted.load(Ordering::SeqCst) } else { 0 }),
             RunType::Web => was_awake.max(run.min_instances).max(1),
         }
@@ -1740,6 +1742,12 @@ impl EnvLive {
     }
 
     /// A scaling worker's instances for its backlog now.
+    /// Its backlog couldn't be read: unknown until it can, so a worker that may scale to zero
+    /// keeps one meanwhile (what it wanted stays).
+    pub fn forget_backlog(&self) {
+        self.backlog.store(u64::MAX, Ordering::SeqCst);
+    }
+
     pub fn set_wanted(&self, n: u32, backlog: Option<u64>) {
         self.wanted.store(n, Ordering::SeqCst);
         self.backlog.store(backlog.unwrap_or(u64::MAX), Ordering::SeqCst);
@@ -2323,9 +2331,14 @@ impl EnvLive {
     async fn keep_workers(self: &Arc<Self>, tpl: &Arc<Template>) {
         let scheduled = tpl.run.at(code_sql::now_ms());
         let run = &scheduled;
-        // A worker that follows its work runs what its backlog wants; else its floor.
+        // A worker that follows its work runs what its backlog wants; else its floor. One that
+        // may scale to zero keeps one while its backlog can't be read: nothing it can't see
+        // leaves its work undone.
         let target = match &run.scale {
-            Some(_) => self.wanted.load(Ordering::SeqCst).clamp(run.min_instances, run.max_instances.max(run.min_instances)),
+            Some(_) => {
+                let floor = if self.backlog.load(Ordering::SeqCst) == u64::MAX { run.min_instances.max(1) } else { run.min_instances };
+                self.wanted.load(Ordering::SeqCst).clamp(floor, run.max_instances.max(floor))
+            }
             None => run.min_instances,
         };
         let insts = self.instances();

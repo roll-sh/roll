@@ -1600,7 +1600,12 @@ impl Run {
             RunType::Worker => {
                 self.schedule = None;
                 self.timezone = None;
-                self.min_instances = self.min_instances.max(1);
+                // A worker runs at least one, unless it follows a stream's lag: then caught up it
+                // may run none (KEDA's scale to zero), one starting once there's work. A gauge
+                // of its own reports nothing while it's stopped, so that one keeps one.
+                if self.scale.as_ref().is_none_or(|s| !s.metric.is_empty()) {
+                    self.min_instances = self.min_instances.max(1);
+                }
                 self.max_instances = self.max_instances.max(self.min_instances);
             }
             RunType::Web => {
