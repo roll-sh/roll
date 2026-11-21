@@ -1308,6 +1308,37 @@ async fn a_roll_only_preview_takes_placeholders_made_by_who_saved_its_rules() {
     assert_eq!(asked(), n);
 }
 
+/// A push that touches none of what a service watches (`roll.toml` `watch`) keeps the build it
+/// runs, and it still starts at the new head; one that touches its paths rebuilds it.
+#[tokio::test]
+async fn a_push_outside_a_services_watch_paths_keeps_its_build() {
+    use roll_previews::ports::EnvSource;
+    let e = env(json!({ "enabled": true }));
+    *e.code.watch.lock() = vec!["src/**".to_string()];
+    e.code.open(change("chg_wt", 7));
+    e.engine.pass().await.unwrap();
+    e.engine.pass().await.unwrap();
+    let p = e.engine.store.row_by_change("chg_wt").unwrap().unwrap();
+    let running = || e.engine.store.services(&p.id).unwrap().into_iter().find(|x| x.name == "web").and_then(|x| x.revision);
+    assert_eq!(running().as_deref(), Some("cs_7a"));
+    // Docs only: the service keeps cs_7a, the preview is at the new head, and it starts.
+    e.code.between.lock().insert("cs_7a..cs_7b".into(), vec!["docs/guide.md".into()]);
+    e.code.edit("chg_wt", |c| c.head = "cs_7b".into());
+    e.engine.pass().await.unwrap();
+    e.engine.pass().await.unwrap();
+    assert_eq!(running().as_deref(), Some("cs_7a"), "kept");
+    assert_eq!(e.engine.store.row(&p.id).unwrap().head, "cs_7b");
+    assert!(e.engine.store.activity(&p.id).unwrap().iter().any(|a| a.message.starts_with("kept web's build at")));
+    let (t, _) = e.engine.env(&p.id, "web").await.unwrap();
+    assert_eq!(t.revision, "cs_7a");
+    // Its own code: rebuilt at the head.
+    e.code.between.lock().insert("cs_7a..cs_7c".into(), vec!["src/app.js".into()]);
+    e.code.edit("chg_wt", |c| c.head = "cs_7c".into());
+    e.engine.pass().await.unwrap();
+    e.engine.pass().await.unwrap();
+    assert_eq!(running().as_deref(), Some("cs_7c"));
+}
+
 /// A signed-in person sees only their own projects' previews (as the workspace's projects); a
 /// token, the operator and admins see all.
 #[tokio::test]
@@ -1361,7 +1392,8 @@ async fn a_signed_in_person_sees_only_their_own_projects_previews() {
 #[tokio::test]
 async fn a_rules_reference_to_another_environment_needs_its_writers_reveal_there() {
     use tower::ServiceExt;
-    struct StagingOnly;
+    #[derive(Default)]
+    struct StagingOnly(parking_lot::Mutex<Vec<(roll_workspace::Kind, bool)>>);
     impl roll_previews::ports::Reveal for StagingOnly {
         fn may_reveal(&self, who: &roll_previews::ports::Asker<'_>, _: &str, env: &str, folder: &str) -> bool {
             who.user.is_some_and(|u| u.user == "usr_b") && ((env == "staging" && folder == "/payments") || (env == "dev2" && folder == "/"))
@@ -1370,12 +1402,14 @@ async fn a_rules_reference_to_another_environment_needs_its_writers_reveal_there
             let parts: Vec<&str> = reference.strip_prefix("roll://").ok_or("not one")?.split('/').collect();
             Ok((parts[0].to_string(), if parts.len() > 2 { format!("/{}", parts[1..parts.len() - 1].join("/")) } else { "/".into() }))
         }
-        fn still(&self, _: &str, _: (roll_workspace::Kind, &str), _: bool, _: &str, maker: &str) -> Result<(), String> {
+        fn still(&self, _: &str, (kind, _): (roll_workspace::Kind, &str), untrusted: bool, _: &str, maker: &str) -> Result<(), String> {
+            self.0.lock().push((kind, untrusted));
             if maker == "usr_b" { Ok(()) } else { Err(format!("{maker} may not reveal staging:/payments")) }
         }
     }
     let e = env(json!({ "enabled": true }));
-    let _ = e.engine.reveal.set(Arc::new(StagingOnly));
+    let reveal = Arc::new(StagingOnly::default());
+    let _ = e.engine.reveal.set(reveal.clone());
     let mine = e.ws.create("usr_b", "mine", "", None).unwrap();
     let put = |env: serde_json::Value| {
         let router = roll_previews::api::router(e.engine.clone());
@@ -1446,6 +1480,15 @@ async fn a_rules_reference_to_another_environment_needs_its_writers_reveal_there
     assert!(first.contains("converges without it"), "{first}");
     e.engine.pass().await.unwrap();
     assert!(!said(e.engine.env(&p.id, "web").await).contains("converges without it"), "once left out, starts go on");
+    // Read as the preview's repo, untrusted unless the project trusts its changes with production.
+    assert!(reveal.0.lock().iter().all(|(k, u)| *k == roll_workspace::Kind::Repo && *u), "{:?}", reveal.0.lock());
+    let mut st = e.engine.store.settings(&e.project).unwrap();
+    st.secrets.allow_production = true;
+    e.engine.store.put_settings(&e.project, &st).unwrap();
+    reveal.0.lock().clear();
+    e.engine.store.update(&p.id, |row| row.next_at = 0).unwrap();
+    e.engine.pass().await.unwrap();
+    assert!(reveal.0.lock().iter().any(|(_, u)| !*u), "a trusted change's preview is asked as trusted");
 }
 
 /// A variable set while a deploy is still going, then removed, is removed from the backend too:

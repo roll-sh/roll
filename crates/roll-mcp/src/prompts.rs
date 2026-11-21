@@ -453,9 +453,19 @@ mod tests {
         let got = super::get("fix_secrets_health", &json!({ "project": "prj_a" }), &all).unwrap();
         let text = got["messages"][0]["content"]["text"].as_str().unwrap();
         assert!(text.contains("\"prj_a\"") && !text.contains("  "), "{text}");
-        // Every workflow's text joins its lines with one space.
+        // Every workflow's text joins its lines with one space, and every tool it or the guide
+        // names is one roll has (roll code's are another crate's).
         for w in super::workflows(&all) {
             assert!(!w.text.contains("  ") && !w.text.contains('\n'), "{}: {}", w.name, w.text);
+        }
+        let texts: Vec<String> = super::workflows(&all).into_iter().map(|w| w.text).chain([include_str!("guide.md").to_string()]).collect();
+        for text in &texts {
+            for word in text.split(|c: char| !(c.is_ascii_lowercase() || c == '_')) {
+                let Some((product, _)) = word.split_once('_') else { continue };
+                if roll_auth::scope::PRODUCTS.contains(&product) && !matches!(product, "code" | "agents") {
+                    assert!(all.iter().any(|t| t == word), "a workflow or the guide names {word}, which isn't a tool");
+                }
+            }
         }
     }
 }

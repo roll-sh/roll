@@ -353,9 +353,10 @@ fn secrets_area(method: &str, path: &str) -> Area {
         ["projects", "environments"] | ["projects"] => "values",
         ["projects", s, ..] => match *s {
             "grid" | "compare" | "required" | "shared" | "suggestions" | "links" | "value-requests" => "values",
-            "audit" | "health" | "leaks" | "shares" | "rotations" | "backup" => "security",
+            "audit" | "health" | "leaks" | "shares" | "rotations" | "backup" | "unstored" => "security",
             "transit" | "leases" | "cas" | "ssh-cas" | "atlas-projects" | "aws-roles" | "aws-users" | "cloud-accounts" | "directories" | "gateways" | "github-apps"
             | "kubernetes" | "outside-databases" | "rotators" | "saas" | "snowflake-accounts" | "syncs" => "integrations",
+            "placeholders" => "security",
             _ => return Area::Unplaced,
         },
         _ => return Area::Unplaced,
@@ -388,6 +389,8 @@ fn apps_area(method: &str, path: &str) -> Area {
     Area::One(area)
 }
 
+/// A workspace project's icon, as the dashboard shows it.
+const ICON: &str = "{kind: monogram, text?: 1-3 characters} or {kind: emoji, emoji} or {kind: image, url: a data:image/png, jpeg or webp URL, at most 200 KiB}, with color?: slate, violet, purple, pink, rose, teal, cyan or green";
 const fn req(name: &'static str, desc: &'static str) -> P {
     P { name, ty: Ty::Str, at: At::Path, required: true, desc }
 }
@@ -633,8 +636,8 @@ static TOOLS: &[Tool] = &[
     // ── workspace ──
     t("workspace_list_projects", "List projects", "Workspace projects, each with the resources on its canvas (kind, ref, position).", "workspace", "GET", "/v1/workspace/projects", &[]),
     t("workspace_get_project", "Get a project", "A workspace project and its resources.", "workspace", "GET", "/v1/workspace/projects/{id}", &[WS]),
-    t("workspace_create_project", "Create a project", "A new workspace project to group resources.", "workspace", "POST", "/v1/workspace/projects", &[breq("name", Ty::Str, "1-48 of a-z, 0-9 and -"), b("description", Ty::Str, "At most 280 characters")]),
-    t("workspace_update_project", "Update a project", "Rename a project or change its description.", "workspace", "PATCH", "/v1/workspace/projects/{id}", &[WS, b("name", Ty::Str, "New name"), b("description", Ty::Str, "New description")]),
+    t("workspace_create_project", "Create a project", "A new workspace project to group resources.", "workspace", "POST", "/v1/workspace/projects", &[breq("name", Ty::Str, "1-48 of a-z, 0-9 and -"), b("description", Ty::Str, "At most 280 characters"), b("icon", Ty::Obj, ICON)]),
+    t("workspace_update_project", "Update a project", "Rename a project, or change its description or icon.", "workspace", "PATCH", "/v1/workspace/projects/{id}", &[WS, b("name", Ty::Str, "New name"), b("description", Ty::Str, "New description"), bnull("icon", Ty::Obj, ICON)]),
     t("workspace_delete_project", "Delete a project", "Delete a workspace project. Its resources stay; only the grouping goes.", "workspace", "DELETE", "/v1/workspace/projects/{id}", &[WS]),
     t(
         "workspace_place_resource",
@@ -1112,8 +1115,12 @@ static TOOLS: &[Tool] = &[
     t("secrets_list_rotations", "Rotations", "A project's secret rotations: what rotated, when, and what's due.", "secrets", "GET", "/v1/secrets/projects/{project}/rotations", &[req("project", "Workspace project")]),
     t("secrets_ca_certificates", "A CA's certificates", "The certificates a project's CA has issued (public, with their expiry; never a key).", "secrets", "GET", "/v1/secrets/projects/{project}/cas/{ca}/certificates", &[req("project", "Workspace project"), req("ca", "CA id")]),
     t("secrets_get_values", "Reveal an environment's values", "All of an environment's values (a folder's, with path) at once, resolved (references and imports), as one reveal instead of one per key; what can't be resolved is named, never guessed. dynamic=false leaves dynamic keys out instead of minting fresh credentials. Needs reveal.", "secrets", "GET", "/v1/secrets/projects/{project}/environments/{env}/values", &[SECRET_PROJECT, ENV, q("path", Ty::Str, "Folder"), q("dynamic", Ty::Bool, "false: leave dynamic keys out (named in dynamic)")]),
+    t("secrets_list_placeholders", "List placeholders", "The placeholders a project's host-bound keys were handed out as (a sandbox or an agent uses the key without seeing it: the value is swapped in only on the way to the key's hosts), newest first: key, environment, consumer, who issued it, when it expires or was ended. Never the placeholder or the value.", "secrets", "GET", "/v1/secrets/projects/{project}/placeholders", &[SECRET_PROJECT]),
+    t("secrets_end_placeholder", "End a placeholder", "End one placeholder now: its value is no longer swapped in for anyone holding it (409 when it already ended).", "secrets", "DELETE", "/v1/secrets/projects/{project}/placeholders/{id}", &[SECRET_PROJECT, req("id", "Placeholder id (from secrets_list_placeholders)")]),
+    t("secrets_end_consumer_placeholders", "End a consumer's placeholders", "End every live placeholder one consumer (a sandbox, a preview, an agent's run) holds that you may end, at once; answers how many ended.", "secrets", "DELETE", "/v1/secrets/projects/{project}/placeholders", &[SECRET_PROJECT, qreq("consumer", "The consumer, as secrets_list_placeholders names it")]),
     t("secrets_list_leases", "List leases", "A project's live leases on dynamic credentials (a database user, a cloud key made for a reader): who holds each, for what, and when it ends. Never a credential.", "secrets", "GET", "/v1/secrets/projects/{project}/leases", &[SECRET_PROJECT]),
     t("secrets_end_lease", "End a lease", "End a dynamic credential's lease now (the credential is revoked where it lives): yours once you're done with it, or anyone's with more than reveal.", "secrets", "DELETE", "/v1/secrets/projects/{project}/leases/{id}", &[SECRET_PROJECT, req("id", "Lease id")]),
+    t("secrets_credential_check", "Is a key found in code still live?", "A credential found in code that the project doesn't hold (by its fingerprint, from roll code's unstored notice or roll secrets scan): its kind, whether it was live when last checked (live, invalid or unknown), the account it belongs to and the rotator that could replace it. Never its value; 404 when it hasn't been checked.", "secrets", "GET", "/v1/secrets/projects/{project}/unstored/{fingerprint}", &[SECRET_PROJECT, req("fingerprint", "The credential's fingerprint")]),
     t("secrets_health", "Secrets health", "What needs fixing in a project's secrets, by name (never values), in the environments you may read: expired, missing, exposed, weak, expiring, stale or unread ones, rotations or revocations failing, certificates expiring, and values marked public.", "secrets", "GET", "/v1/secrets/projects/{project}/health", &[
         SECRET_PROJECT,
         q("code", Ty::Bool, "Also keys no repository on the project's canvas mentions (needs code read on every one)"),
@@ -1203,7 +1210,7 @@ static TOOLS: &[Tool] = &[
         "apps",
         "POST",
         "/v1/apps/services/{service}/environments/{env}/promote",
-        &[SERVICE, ENV, breq("from", Ty::Str, "The environment to take it from"), b("message", Ty::Str, "Why"), OVERRIDE],
+        &[SERVICE, ENV, breq("from", Ty::Str, "The environment to take it from"), b("message", Ty::Str, "Why"), b("expect", Ty::Str, "The deployment id you expect live in from (409 if it moved: promote what you checked)"), OVERRIDE],
     ),
     t("apps_cancel_deploy", "Cancel a deploy", "Stop a deploy that hasn't gone live.", "apps", "POST", "/v1/apps/services/{service}/environments/{env}/deploys/{deploy}/cancel", &[SERVICE, ENV, req("deploy", "Deploy id")]),
     t(
@@ -1237,7 +1244,7 @@ static TOOLS: &[Tool] = &[
         "apps",
         "POST",
         "/v1/apps/services/{service}/environments/{env}/jobs",
-        &[SERVICE, ENV, breq("command", Ty::Str, "The command line"), b("timeout_s", Ty::Int, "Seconds before it's stopped")],
+        &[SERVICE, ENV, breq("command", Ty::Str, "The command line"), b("timeout_s", Ty::Int, "Seconds before it's stopped"), b("tasks", Ty::Int, "Containers to run it in, 1-100 (each gets ROLL_TASK_INDEX and ROLL_TASK_COUNT)"), b("parallelism", Ty::Int, "Tasks at a time, 1-10"), b("retries", Ty::Int, "Tries again for a failed or timed-out task, 0-5")],
     ),
     t("apps_job_logs", "Job logs", "A job's output (it ends with the job).", "apps", "GET", "/v1/apps/services/{service}/environments/{env}/jobs/{job}/logs", &[SERVICE, ENV, req("job", "Job id"), q("tail", Ty::Int, "Last lines")]),
     t("apps_list_jobs", "List jobs", "An environment's one-off jobs, newest first: command, status, exit code, when.", "apps", "GET", "/v1/apps/services/{service}/environments/{env}/jobs", &[SERVICE, ENV]),
@@ -1258,11 +1265,11 @@ static TOOLS: &[Tool] = &[
     t(
         "apps_set_variables",
         "Set variables",
-        "Set or unset an environment's variables, or copy some from another environment (copy_from with copy: their values, never shown; needs reveal on that environment too). Production is a \"deploy\" action.",
+        "Set or unset an environment's variables, or copy some from another environment (copy_from with copy: their values, never shown; needs reveal on that environment too); seal some, keep some as files, or keep some out of builds. A value roll://ENV[/folder…]/KEY is read from roll secrets at each deploy. Production is a \"deploy\" action.",
         "apps",
         "PATCH",
         "/v1/apps/services/{service}/environments/{env}/variables",
-        &[SERVICE, ENV, b("set", Ty::Obj, "{NAME: value}"), b("unset", Ty::Arr, "Names to remove"), b("copy_from", Ty::Str, "Another environment to copy values from"), b("copy", Ty::Arr, "Names to copy from copy_from")],
+        &[SERVICE, ENV, b("set", Ty::Obj, "{NAME: value}"), b("unset", Ty::Arr, "Names to remove"), b("copy_from", Ty::Str, "Another environment to copy values from"), b("copy", Ty::Arr, "Names to copy from copy_from"), b("seal", Ty::Arr, "Names to seal (set here or already set): their values are never shown again, not even to reveal; nothing unseals"), b("files", Ty::Obj, "{NAME: absolute path, or null to put it back}: kept as a read-only file at that path in its instances from the next deploy, not in their environment (at most 20; not under /proc, /sys or /dev)"), b("runtime_only", Ty::Obj, "{NAME: true}: only its instances get it, never a build's steps, from the next deploy (false: builds get it again)")],
     ),
     t("apps_diff_environments", "Compare environments", "How an environment differs from another (Railway's environment sync): variables missing, extra or with another value (names only; which differ needs reveal on both), and settings with the body that makes each match. Read on both environments.", "apps", "GET", "/v1/apps/services/{service}/environments/{env}/diff", &[SERVICE, ENV, qreq("from", "The environment to compare with")]),
     t("apps_metrics", "Service metrics", "CPU, memory and requests of an environment, and each instance's own last hour (by_instance).", "apps", "GET", "/v1/apps/services/{service}/environments/{env}/metrics", &[SERVICE, ENV, q("minutes", Ty::Int, "Window")]),
@@ -1276,13 +1283,13 @@ static TOOLS: &[Tool] = &[
     t("apps_verify_domain", "Check a domain", "Check a custom domain's DNS now and answer its state (pending, verified) and the record to add.", "apps", "POST", "/v1/apps/services/{service}/environments/{env}/domains/{host}/verify", &[SERVICE, ENV, req("host", "The domain")]),
     t("apps_list_backups", "Volume backups", "An environment's volume backups, newest first (7 kept).", "apps", "GET", "/v1/apps/services/{service}/environments/{env}/volume/backups", &[SERVICE, ENV]),
     t("apps_backup_volume", "Back up a volume", "Back up an environment's volume now.", "apps", "POST", "/v1/apps/services/{service}/environments/{env}/volume/backups", &[SERVICE, ENV]),
-    t("apps_restore_backup", "Restore a volume backup", "Put an environment's volume back as it was in a backup, replacing its files; the environment sleeps meanwhile.", "apps", "POST", "/v1/apps/services/{service}/environments/{env}/volume/backups/{backup}/restore", &[SERVICE, ENV, req("backup", "Backup id")]),
+    t("apps_restore_backup", "Restore a volume backup", "Put an environment's volume back as it was in a backup, replacing its files (what's there now is backed up first); the environment sleeps meanwhile. With from, the backup is another environment's (seeding staging from production; needs reveal there too).", "apps", "POST", "/v1/apps/services/{service}/environments/{env}/volume/backups/{backup}/restore", &[SERVICE, ENV, req("backup", "Backup id"), b("from", Ty::Str, "The environment whose backup it is (default: this one)")]),
     t("apps_activity", "Service activity", "Who changed what on a service, newest first (never a value); with all, its whole timeline: deploys, failures, crash loops, alerts, domains, spend.", "apps", "GET", "/v1/apps/services/{service}/activity", &[SERVICE, q("all", Ty::Bool, "The whole timeline, not only changes")]).outside(&["fields"]),
     t("apps_get_deploy", "Get a deploy", "One deploy: its status, commit, image and when it went live.", "apps", "GET", "/v1/apps/services/{service}/environments/{env}/deploys/{deploy}", &[SERVICE, ENV, req("deploy", "Deploy id")]),
     t(
         "apps_wait_deploy",
         "Wait for a deploy to finish",
-        "A deploy once it's live or failed, with how far each step got. A client that runs MCP tasks gets a task that waits as long as it takes; otherwise this answers the status now (call again to keep waiting).",
+        "A deploy once it's live or failed, with how far each step got, or built and waiting at ready for people to approve it where the environment asks for approvals (approved_by and the count it needs: a person approves it in roll, never a token). A client that runs MCP tasks gets a task that waits as long as it takes; otherwise this answers the status now (call again to keep waiting).",
         "apps",
         "GET",
         "/v1/apps/services/{service}/environments/{env}/deploys/{deploy}",
@@ -1314,11 +1321,11 @@ static TOOLS: &[Tool] = &[
     t(
         "apps_add_notification",
         "Notify Slack, Discord, email or a webhook",
-        "Notify a webhook, Slack, Discord or an email address of a project's events (the URL is stored sealed and never shown again).",
+        "Notify a webhook, Slack, Discord, the project's owner by email, PagerDuty or Opsgenie of a project's events (a URL or key is stored sealed and never shown again).",
         "apps",
         "POST",
         "/v1/apps/projects/{project}/notifications",
-        &[req("project", "Workspace project"), b("kind", Ty::Str, "webhook (default), slack, discord or email"), breq("url", Ty::Str, "Where to send (an address for email)"), b("events", Ty::Arr, "Which events (default: deploys and crashes)"), b("environments", Ty::Arr, "Only these environments"), b("services", Ty::Arr, "Only these services"), b("previews", Ty::Bool, "Previews' events too")],
+        &[req("project", "Workspace project"), b("kind", Ty::Str, "webhook (default), slack, discord, email (to the project's owner), pagerduty or opsgenie"), b("url", Ty::Str, "Where to send, for a webhook, Slack or Discord (email, pagerduty and opsgenie take none)"), b("routing_key", Ty::Str, "pagerduty: its integration's routing key"), b("api_key", Ty::Str, "opsgenie: its API key"), b("region", Ty::Str, "pagerduty or opsgenie: us (default) or eu"), b("events", Ty::Arr, "Which events (default: deploys and crashes)"), b("environments", Ty::Arr, "Only these environments"), b("services", Ty::Arr, "Only these services"), b("previews", Ty::Bool, "Previews' events too")],
     ).open_world(),
     t("apps_update_notification", "Change a notification", "Change which events, environments and services a notification gets: given ones replace.", "apps", "PATCH", "/v1/apps/projects/{project}/notifications/{nid}", &[req("project", "Workspace project"), req("nid", "Notification id"), b("events", Ty::Arr, "Events"), b("environments", Ty::Arr, "Environments"), b("services", Ty::Arr, "Services"), b("previews", Ty::Bool, "Previews' events too")]),
     t("apps_delete_notification", "Delete a notification", "Stop sending a project's events there.", "apps", "DELETE", "/v1/apps/projects/{project}/notifications/{nid}", &[req("project", "Workspace project"), req("nid", "Notification id")]),
@@ -1327,12 +1334,12 @@ static TOOLS: &[Tool] = &[
     t("apps_list_drains", "List log drains", "Where a project's logs are sent (the URL's host only).", "apps", "GET", "/v1/apps/projects/{project}/drains", &[req("project", "Workspace project")]),
     t(
         "apps_add_drain",
-        "Add a log drain",
-        "Send every matching service's logs out of roll to an HTTPS endpoint, signed (its signing secret comes back once).",
+        "Send or archive logs (add a log drain)",
+        "Send every matching service's logs out of roll: to an HTTPS endpoint, signed (its signing secret comes back once), an OTLP collector, syslog over TLS, or archived to an S3 bucket (any S3-compatible endpoint).",
         "apps",
         "POST",
         "/v1/apps/projects/{project}/drains",
-        &[req("project", "Workspace project"), breq("url", Ty::Str, "https URL on a public host"), b("sources", Ty::Arr, "runtime (default), http, build, audit (who changed what), traces, metrics"), b("format", Ty::Str, "ndjson (default, signed batches), otlp (an OTLP/HTTP collector's /v1/logs, traces and metrics beside it) or syslog (a syslog+tls:// URL, no headers)"), b("environments", Ty::Arr, "Only these environments"), b("services", Ty::Arr, "Only these services"), b("previews", Ty::Bool, "Previews' logs too"), b("headers", Ty::Obj, "Headers sent with each batch")],
+        &[req("project", "Workspace project"), breq("url", Ty::Str, "https URL on a public host"), b("sources", Ty::Arr, "runtime (default), http, build, audit (who changed what), traces, metrics"), b("format", Ty::Str, "ndjson (default, signed batches), otlp (an OTLP/HTTP collector's /v1/logs, traces and metrics beside it), syslog (a syslog+tls:// URL, no headers) or s3 (url https://<endpoint>/<bucket>[/<prefix>], headers aws-access-key-id, aws-secret-access-key and optionally aws-region, nothing else)"), b("environments", Ty::Arr, "Only these environments"), b("services", Ty::Arr, "Only these services"), b("previews", Ty::Bool, "Previews' logs too"), b("headers", Ty::Obj, "Headers sent with each batch")],
     ).open_world(),
     t("apps_update_drain", "Change a log drain", "Change what a drain sends or its headers: given ones replace (a new URL is a new drain).", "apps", "PATCH", "/v1/apps/projects/{project}/drains/{did}", &[req("project", "Workspace project"), req("did", "Drain id"), b("sources", Ty::Arr, "runtime (default), http, build, audit (who changed what), traces, metrics"), b("environments", Ty::Arr, "Environments"), b("services", Ty::Arr, "Services"), b("previews", Ty::Bool, "Previews' logs too"), b("headers", Ty::Obj, "Headers (all of them)")]).open_world(),
     t("apps_delete_drain", "Delete a log drain", "Stop sending a project's logs there.", "apps", "DELETE", "/v1/apps/projects/{project}/drains/{did}", &[req("project", "Workspace project"), req("did", "Drain id")]),
@@ -1508,6 +1515,18 @@ mod tests {
                 assert!(t.params.iter().any(|p| p.name == name && p.at == At::Path), "{}: {{{name}}} isn't a path parameter", t.name);
             }
             assert!(t.name.starts_with(t.product), "{} isn't named after {}", t.name, t.product);
+        }
+        // A tool that another's text names ("from secrets_list_placeholders") is one roll has
+        // (`access_denied` is an audit event; roll code's tools are another crate's).
+        for t in all() {
+            let params: Vec<&str> = t.params.iter().map(|p| p.desc).collect();
+            let text = format!("{} {} {}", t.title, t.description, params.join(" "));
+            for word in text.split(|c: char| !(c.is_ascii_lowercase() || c == '_')) {
+                let Some((product, _)) = word.split_once('_') else { continue };
+                if roll_auth::scope::PRODUCTS.contains(&product) && !matches!(product, "code" | "agents") && word != "access_denied" {
+                    assert!(names.contains(word), "{} names {word}, which isn't a tool", t.name);
+                }
+            }
         }
         let def = |n: &str| all().iter().find(|t| t.name == n).unwrap().definition();
         assert_eq!(def("postgres_query")["annotations"]["readOnlyHint"], true);

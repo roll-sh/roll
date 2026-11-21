@@ -1,5 +1,5 @@
 import { HorizonMark } from "@roll/brand";
-import { CircleHelp, ExternalLink, Rocket, RotateCcw, X } from "lucide-react";
+import { Check, CircleHelp, ExternalLink, Rocket, RotateCcw, X } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 import { appsApi, FUNCTION_ROUTES, runFunctions, deploymentUrl, followChanges, followLog, formatMs, isPending, shortSha, stepDurations, TRIGGER_LABEL, type Deployment, type DeployCommits, type Environment, type Explanation, type LogLine, type ScanSummary, type Vulnerability } from "@/lib/apps-api";
 import { btn, panel } from "../ui";
@@ -191,6 +191,16 @@ export function Deployments({
                       >
                         <ExternalLink className="size-3.5" /> Open
                       </a>
+                    )}
+                    {d.status === "ready" && (env.approvals ?? 0) > 0 && (
+                      <button
+                        className={btn}
+                        disabled={runner.busy !== null}
+                        onClick={() => runner.run(`approve:${d.id}`, () => appsApi.approve(service, env.name, d.id))}
+                        title={`Approve putting it live: ${env.name} needs ${env.approvals} approval(s) from people other than who started it, and the last one puts it live`}
+                      >
+                        <Check className="size-3.5" /> Approve
+                      </button>
                     )}
                     {!active && !isPending(d.status) && d.image && !d.pruned_at && d.status !== "removed" && (
                       <SureButton

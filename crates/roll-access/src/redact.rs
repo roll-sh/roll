@@ -13,22 +13,24 @@ const MAX_DEPTH: usize = 8;
 /// Array items and object fields kept at most.
 const MAX_ITEMS: usize = 100;
 
-/// A field name that holds a secret: a password, secret, token, key, credential or value.
-pub fn secret_name(name: &str) -> bool {
+/// A field name that holds a secret: a password, secret, token, key, credential or value. A
+/// `routing_key` is AMQP's (roll queues', where `product` is `queues`) and kept; anywhere else it's
+/// a credential (PagerDuty's integration key on an apps notification).
+pub fn secret_name(name: &str, product: &str) -> bool {
     let n = name.to_ascii_lowercase().replace(['-', '_'], "");
     ["password", "passwd", "secret", "token", "apikey", "accesskey", "privatekey", "credential", "authorization", "cookie", "value", "values", "contentb64", "seal", "dsn", "connectionstring", "uri"]
         .iter()
         .any(|s| n.contains(s))
         || n == "key"
-        || n.ends_with("key") && !matches!(n.as_str(), "partitionkey" | "sortkey" | "routingkey" | "objectkey" | "primarykey")
+        || n.ends_with("key") && !(matches!(n.as_str(), "partitionkey" | "sortkey" | "objectkey" | "primarykey") || (n == "routingkey" && product == "queues"))
 }
 
-/// `v` with secrets replaced and long strings cut.
-pub fn value(v: &Value) -> Value {
-    walk(v, 0)
+/// `v`, a call to `product`, with secrets replaced and long strings cut.
+pub fn value(v: &Value, product: &str) -> Value {
+    walk(v, 0, product)
 }
 
-fn walk(v: &Value, depth: usize) -> Value {
+fn walk(v: &Value, depth: usize, product: &str) -> Value {
     if depth > MAX_DEPTH {
         return Value::String("…".into());
     }
@@ -40,11 +42,11 @@ fn walk(v: &Value, depth: usize) -> Value {
             }
             Value::String(format!("{}… ({} bytes)", &s[..end], s.len()))
         }
-        Value::Array(a) => Value::Array(a.iter().take(MAX_ITEMS).map(|x| walk(x, depth + 1)).collect()),
+        Value::Array(a) => Value::Array(a.iter().take(MAX_ITEMS).map(|x| walk(x, depth + 1, product)).collect()),
         Value::Object(o) => {
             let mut out = Map::new();
             for (k, x) in o.iter().take(MAX_ITEMS) {
-                let kept = if secret_name(k) && !x.is_null() { Value::String(REDACTED.into()) } else { walk(x, depth + 1) };
+                let kept = if secret_name(k, product) && !x.is_null() { Value::String(REDACTED.into()) } else { walk(x, depth + 1, product) };
                 out.insert(k.clone(), kept);
             }
             Value::Object(out)
@@ -54,12 +56,12 @@ fn walk(v: &Value, depth: usize) -> Value {
 }
 
 /// A request body as kept: JSON redacted, anything else only its size.
-pub fn body(_row: &Row, body: &[u8]) -> Value {
+pub fn body(row: &Row, body: &[u8]) -> Value {
     if body.is_empty() {
         return Value::Null;
     }
     match serde_json::from_slice::<Value>(body) {
-        Ok(v) => value(&v),
+        Ok(v) => value(&v, row.product),
         Err(_) => serde_json::json!({ "bytes": body.len() }),
     }
 }
@@ -113,11 +115,13 @@ mod tests {
     fn keeps_what_matters() {
         let v = value(&serde_json::json!({
             "name": "db", "password": "hunter2", "api_key": "k", "routing_key": "rk", "nested": [{ "token": "t", "sql": "x".repeat(5000) }]
-        }));
+        }), "queues");
         assert_eq!(v["name"], "db");
         assert_eq!(v["password"], REDACTED);
         assert_eq!(v["api_key"], REDACTED);
-        assert_eq!(v["routing_key"], "rk");
+        assert_eq!(v["routing_key"], "rk", "AMQP's, in roll queues");
+        // Anywhere else a routing key is a credential: PagerDuty's, on an apps notification.
+        assert_eq!(value(&serde_json::json!({ "kind": "pagerduty", "routing_key": "R0" }), "apps")["routing_key"], REDACTED);
         assert_eq!(v["nested"][0]["token"], REDACTED);
         assert!(v["nested"][0]["sql"].as_str().unwrap().len() < 2200);
         let mut a = serde_json::json!({ "id": "c1", "password": "p", "branches": [{ "password": "q", "connection_uri": "postgres://roll:pw@h:5432/main" }] });

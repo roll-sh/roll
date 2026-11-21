@@ -91,6 +91,7 @@ pub fn router(apps: Arc<Apps>) -> Router {
         .route(&format!("{env}/deploys/{{dep}}/vulnerabilities"), get(deploy_vulnerabilities))
         .route(&format!("{env}/deploys/{{dep}}/sbom"), get(deploy_sbom))
         .route(&format!("{env}/deploys/{{dep}}/explain"), post(explain_deploy))
+        .route(&format!("{env}/deploys/{{dep}}/approve"), post(approve_deploy))
         .route(&format!("{env}/deploys/{{dep}}/rollback"), post(rollback))
         .route(&format!("{env}/deploys/{{dep}}/rollout"), post(rollout_action))
         .route(&format!("{env}/rollback"), post(rollback_previous))
@@ -823,6 +824,13 @@ struct VulnQuery {
 #[derive(Deserialize)]
 struct ExplainQuery {
     again: Option<String>,
+}
+
+/// A deployment waiting at ready approved by a person (never a token: an agent's or a CI's
+/// approval would defeat it); the last approval needed puts it live.
+async fn approve_deploy(State(apps): S, Path((id, env, dep)): Path<(String, String, String)>, ext: Extensions) -> R {
+    let person = roll_auth::Grant::on(&ext).is_none().then(|| actor(&ext)).flatten();
+    ok(apps.approve(&id, &env, &dep, person).await?)
 }
 
 /// A failed deployment explained by the repo owner's model (kept; `?again=1` asks anew).
