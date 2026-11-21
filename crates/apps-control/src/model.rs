@@ -390,10 +390,16 @@ pub struct Build {
     /// Docker builds unsized).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub size: Option<BuildSize>,
-    /// A Git URL service's submodules fetched into the tree (Vercel's, Netlify's, Render's), at
-    /// the commits their gitlinks pin, from public URLs; off, they're left out.
+    /// Submodules fetched into the tree (Vercel's, Netlify's, Render's), at the commits their
+    /// gitlinks pin: a Git URL service's from public URLs; a roll code repo's from public URLs,
+    /// public roll code repos and the private ones `submodule_repos` names. Off, they're left out.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub submodules: Option<bool>,
+    /// The private roll code repos (`owner/name`) a roll code repo's submodules may come from:
+    /// whoever sets it must be able to read each (the catalogue lends read), so a writer to the
+    /// service's repo can't build a repo it can't read into its code by pinning it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub submodule_repos: Option<Vec<String>>,
     /// A Git URL service's Git LFS objects fetched in place of their pointers (Vercel's,
     /// Netlify's), from the repository's LFS server; off, the pointers are built as they are.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -461,6 +467,11 @@ impl Build {
         }
         if self.timeout_s.is_some_and(|t| !(60..=6 * 3600).contains(&t)) {
             return Err(Error::BadRequest("build.timeout_s is 60–21600 seconds".into()));
+        }
+        if let Some(r) = &self.submodule_repos
+            && (r.len() > crate::git_source::MAX_SUBMODULES || r.iter().any(|n| n.len() > 200 || n.split('/').count() != 2 || n.split('/').any(|p| p.is_empty() || p.starts_with('.') || !p.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-' | b'.')))))
+        {
+            return Err(Error::BadRequest(format!("build.submodule_repos is at most {} roll code repos, each owner/name", crate::git_source::MAX_SUBMODULES)));
         }
         Ok(())
     }

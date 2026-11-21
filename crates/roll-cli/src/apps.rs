@@ -382,9 +382,14 @@ pub enum AppsCmd {
         /// (8, 16 GiB), its minutes metered by size on the fleet's builders.
         #[arg(long, value_name = "SIZE", value_parser = ["small", "medium", "large"])]
         build_size: Option<String>,
-        /// A Git URL service's submodules fetched into the tree (`true`), or left out (`false`).
+        /// Submodules fetched into the tree (`true`), or left out (`false`): a Git URL service's,
+        /// or a roll code repo's.
         #[arg(long)]
         submodules: Option<bool>,
+        /// The private roll code repos a roll code repo's submodules may come from (`acme/lib,acme/ui`;
+        /// `none` clears it).
+        #[arg(long, value_name = "REPOS")]
+        submodule_repos: Option<String>,
         /// A Git URL service's Git LFS objects fetched in place of their pointers (`true`).
         #[arg(long)]
         lfs: Option<bool>,
@@ -2807,7 +2812,7 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
             }
             v
         }
-        AppsCmd::Set { target, name, repo, root, image, upload, builder, dockerfile, stage, install, build_command, build_start, health_timeout, health_every, health_failures, health_command, alert_memory, alert_errors, alert_p95, alert_log, alert_log_count, min, max, cpu, memory, port, start, pre_deploy, health, schedule, timezone, kind, concurrency, suspend_after, sleep_after, timeout, retries, volume, watch, packages, build_timeout, build_size, submodules, lfs, rollout, rollout_step, rollout_errors, rollout_manual, overlap, h2c, scale, public, drain, cpu_target, busy_cpu, memory_target, latency_target, oidc_audience, push, restart, restart_tries, affinity, tcp, rollback_on_crash, rebuild_on_base, block_on } => {
+        AppsCmd::Set { target, name, repo, root, image, upload, builder, dockerfile, stage, install, build_command, build_start, health_timeout, health_every, health_failures, health_command, alert_memory, alert_errors, alert_p95, alert_log, alert_log_count, min, max, cpu, memory, port, start, pre_deploy, health, schedule, timezone, kind, concurrency, suspend_after, sleep_after, timeout, retries, volume, watch, packages, build_timeout, build_size, submodules, submodule_repos, lfs, rollout, rollout_step, rollout_errors, rollout_manual, overlap, h2c, scale, public, drain, cpu_target, busy_cpu, memory_target, latency_target, oidc_audience, push, restart, restart_tries, affinity, tcp, rollback_on_crash, rebuild_on_base, block_on } => {
             let svc = service(api, &target).await?;
             // The service's rollout with what was given replaced (the API takes it whole).
             let rollout = if rollout.is_some() || rollout_step.is_some() || rollout_errors.is_some() || rollout_manual.is_some() || overlap.is_some() {
@@ -2879,6 +2884,9 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
             }
             if let Some(on) = submodules {
                 build.insert("submodules".into(), if on { json!(true) } else { Value::Null });
+            }
+            if let Some(r) = &submodule_repos {
+                build.insert("submodule_repos".into(), if r == "none" { Value::Null } else { json!(r.split(',').map(str::trim).filter(|s| !s.is_empty()).collect::<Vec<_>>()) });
             }
             if let Some(on) = lfs {
                 build.insert("lfs".into(), if on { json!(true) } else { Value::Null });

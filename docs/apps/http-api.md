@@ -225,10 +225,17 @@ type Build = {
    *  fleet, its build minutes metered ×1, ×2 or ×4; one node's Docker builds unsized (the build
    *  log says so) and meters ×1. */
   size?: "small" | "medium" | "large";
-  /** A Git URL service's submodules fetched into the tree (default false: left out): each one
-   *  .gitmodules names, at the commit its gitlink pins, from its own public URL (relative ones
-   *  against the repository's), two levels deep and 32 at most. */
+  /** Submodules fetched into the tree (default false: left out): each one .gitmodules names, at
+   *  the commit its gitlink pins (relative URLs against the repository's, as git reads them),
+   *  two levels deep and 32 at most. A Git URL service's come from their own public URLs; a roll
+   *  code repo's from public URLs, public roll code repos (a relative URL, or roll code's Git
+   *  address), and the private roll code repos `submodule_repos` names (any other fails the
+   *  build: "<repo> isn't public; name it in build.submodule_repos"). */
   submodules?: boolean;
+  /** The private roll code repos (`owner/name`, 32 at most) a roll code repo's submodules may
+   *  come from. A token that sets it needs read on each (the catalogue lends it), so a writer to
+   *  the service's repo can't build a repo it can't read by pinning it. */
+  submodule_repos?: string[];
   /** A Git URL service's Git LFS objects in place of their pointers (default false): from the
    *  repository's LFS batch API, checked against each pointer's sha256 and size, 2 GiB in all. */
   lfs?: boolean;

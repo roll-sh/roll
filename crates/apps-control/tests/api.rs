@@ -30,7 +30,14 @@ struct FakeCode {
     statuses: Mutex<Vec<(String, String, String)>>,
     /// What a commit's checks say (CI).
     ci: Mutex<Option<apps_control::integrations::Ci>>,
+    /// `acme/site`'s gitlinks: a path and the commit it pins.
+    links: Mutex<BTreeMap<String, String>>,
+    /// Its other repos: whether each is public, and its files.
+    others: Mutex<BTreeMap<String, OtherRepo>>,
 }
+
+/// Whether a repo is public, and its files.
+type OtherRepo = (bool, BTreeMap<String, String>);
 
 impl FakeCode {
     fn push(&self, sha: &str, message: &str, files: &[(&str, &str)]) {
@@ -64,7 +71,27 @@ impl Sources for FakeCode {
     async fn read_file(&self, _repo: &str, _revision: &str, path: &str) -> anyhow::Result<Option<Vec<u8>>> {
         Ok(self.files.lock().get(path).map(|v| v.as_bytes().to_vec()))
     }
-    async fn materialize(&self, _repo: &str, _revision: &str, dir: &Path) -> anyhow::Result<()> {
+    async fn gitlink(&self, repo: &str, _revision: &str, path: &str) -> anyhow::Result<Option<String>> {
+        Ok(self.links.lock().get(path).filter(|_| repo == "acme/site").cloned())
+    }
+    fn git_base(&self) -> Option<String> {
+        Some("https://code.test/git".into())
+    }
+    async fn public(&self, repo: &str) -> anyhow::Result<bool> {
+        Ok(self.others.lock().get(repo).is_some_and(|(p, _)| *p))
+    }
+    async fn materialize(&self, repo: &str, _revision: &str, dir: &Path) -> anyhow::Result<()> {
+        if repo != "acme/site" {
+            let files = self.others.lock().get(repo).map(|(_, f)| f.clone()).ok_or_else(|| anyhow::anyhow!("no repo {repo}"))?;
+            for (k, v) in files {
+                std::fs::write(dir.join(k), v)?;
+            }
+            return Ok(());
+        }
+        // A gitlink is an empty directory, as roll code writes it.
+        for p in self.links.lock().keys() {
+            std::fs::create_dir_all(dir.join(p))?;
+        }
         for (k, v) in self.files.lock().iter() {
             let p = dir.join(k);
             std::fs::create_dir_all(p.parent().unwrap())?;
@@ -6720,6 +6747,42 @@ async fn a_git_url_services_submodules_are_built_with_it() {
         assert_eq!(d["status"], "active", "{d}");
         let tree = w.fake.build_trees.lock().last().cloned().unwrap();
         assert_eq!(tree.iter().any(|p| p == "lib/lib.js"), on, "{name}: {tree:?}");
+    }
+}
+
+/// A roll code repo's submodules (`build.submodules`): a public roll code repo's and an outside Git
+/// URL's are built with it; a private roll code repo's only once `build.submodule_repos` names it
+/// (the catalogue lends read on each), so a writer can't build in a repo by pinning it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_repos_submodules_come_from_roll_code_and_from_elsewhere() {
+    let w = world().await;
+    let vendor = Arc::new(GitHost::default());
+    let pinned = vendor.commit(&[("v.js", "module.exports = 3")]);
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let at = listener.local_addr().unwrap();
+    tokio::spawn(async move { axum::serve(listener, code_git::router(vendor, code_git::ServerConfig::default())).await.unwrap() });
+    w.code.others.lock().insert("acme/lib".into(), (false, [("lib.js".to_string(), "module.exports = 1".to_string())].into()));
+    w.code.others.lock().insert("oss/ui".into(), (true, [("ui.js".to_string(), "module.exports = 2".to_string())].into()));
+    *w.code.links.lock() = [("lib", "1".repeat(40)), ("ui", "2".repeat(40)), ("vendor", pinned)].into_iter().map(|(k, v)| (k.to_string(), v)).collect();
+    let gitmodules = format!("[submodule \"lib\"]\n\tpath = lib\n\turl = ../lib.git\n[submodule \"ui\"]\n\tpath = ui\n\turl = https://code.test/git/oss/ui.git\n[submodule \"vendor\"]\n\tpath = vendor\n\turl = http://{at}/git/oss/vendor\n");
+    // The repo's tree as it is (no landing: nothing redeploys behind the test).
+    for (k, v) in [("package.json", r#"{"name":"site","scripts":{"start":"node server.js"}}"#), ("server.js", "x"), (".gitmodules", &gitmodules)] {
+        w.code.files.lock().insert(k.to_string(), v.to_string());
+    }
+    let (st, svc) = call(&w.api, "POST", "/v1/apps/services", Some(json!({ "project": w.project, "name": "site", "source": {"kind": "repo", "repo": "acme/site"}, "build": {"submodules": true} }))).await;
+    assert_eq!(st, StatusCode::CREATED, "{svc}");
+    let id = svc["id"].as_str().unwrap().to_string();
+    let d = settled(&w, &id, "production", svc["environments"][0]["latest"]["id"].as_str().unwrap()).await;
+    assert_eq!(d["status"], "failed", "{d}");
+    assert!(d["error"].as_str().unwrap_or_default().contains("acme/lib isn't public"), "{d}");
+    let (st, s) = call(&w.api, "PATCH", &format!("/v1/apps/services/{id}"), Some(json!({ "build": {"submodule_repos": ["acme/lib"]} }))).await;
+    assert_eq!(st, StatusCode::OK, "{s}");
+    let (_, r) = call(&w.api, "POST", &format!("/v1/apps/services/{id}/environments/production/deploys"), Some(json!({}))).await;
+    let d = settled(&w, &id, "production", r["id"].as_str().unwrap_or_else(|| panic!("{r}"))).await;
+    assert_eq!(d["status"], "active", "{d}");
+    let tree = w.fake.build_trees.lock().last().cloned().unwrap();
+    for f in ["lib/lib.js", "ui/ui.js", "vendor/v.js"] {
+        assert!(tree.iter().any(|p| p == f), "{f}: {tree:?}");
     }
 }
 
