@@ -424,6 +424,20 @@ pub struct Intercepted {
     pub swapped: u64,
     #[serde(default)]
     pub refused: u64,
+    /// What roll apps' proxies did for its services there (their `pv-` environments' own
+    /// placeholders, apps' `intercepted`), since those proxies came up.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub on_apps: Option<AppsIntercepted>,
+}
+
+/// roll apps' interception for a preview's `pv-` environments: requests filtered, placeholders
+/// swapped, and the latest refusals' reasons (masked as its logs are; never a value).
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct AppsIntercepted {
+    pub requests: u64,
+    pub swapped: u64,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub refused: Vec<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

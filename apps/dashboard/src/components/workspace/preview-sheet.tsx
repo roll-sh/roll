@@ -180,9 +180,20 @@ export function PreviewSheet({
             {p.intercepted && (
               <p className="mb-3 text-[11.5px] text-muted">
                 Keys it never holds:{" "}
-                {p.intercepted.keys.map((k) => `${k.key} → ${k.hosts.join(", ")}`).join("; ")}
-                {` · ${p.intercepted.swapped} swapped in`}
-                {p.intercepted.refused ? `, ${p.intercepted.refused} refused` : ""}
+                {p.intercepted.keys.length > 0 && (
+                  <>
+                    {p.intercepted.keys.map((k) => `${k.key} → ${k.hosts.join(", ")}`).join("; ")}
+                    {` · ${p.intercepted.swapped} swapped in`}
+                    {p.intercepted.refused ? `, ${p.intercepted.refused} refused` : ""}
+                  </>
+                )}
+                {p.intercepted.on_apps && (
+                  <>
+                    {p.intercepted.keys.length > 0 ? " · " : ""}
+                    {`on roll apps, ${p.intercepted.on_apps.swapped} swapped in`}
+                    {p.intercepted.on_apps.refused?.length ? ` (latest refused: ${p.intercepted.on_apps.refused.join("; ")})` : ""}
+                  </>
+                )}
               </p>
             )}
             <span data-section="services" />

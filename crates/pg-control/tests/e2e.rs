@@ -474,6 +474,9 @@ async fn read_only_sql_cannot_write() {
     seed(&c, 10).await;
     let rows = h.control.query(&db.ep.id, "SELECT count(*) FROM t", SqlAs::ReadOnly).await.unwrap();
     assert_eq!(rows[0].rows[0][0].as_deref(), Some("10"));
+    // It sees what other sessions run (slow-query and health tools read it), not "<insufficient privilege>".
+    let rows = h.control.query(&db.ep.id, "SELECT count(*) FROM pg_stat_activity WHERE query = '<insufficient privilege>'", SqlAs::ReadOnly).await.unwrap();
+    assert_eq!(rows[0].rows[0][0].as_deref(), Some("0"));
     for sql in [
         "INSERT INTO t VALUES (99, 'x')",
         "SET default_transaction_read_only = off; DELETE FROM t",

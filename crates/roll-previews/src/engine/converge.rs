@@ -561,6 +561,8 @@ impl Engine {
             }
             _ => None,
         };
+        // Who a closed preview's keys bound to hosts are used as on roll apps (it resolves them).
+        let maker = if s.egress_for(r.trusted) == crate::settings::EgressRule::Roll { self.store.rules_maker(&r.project_id)? } else { None };
         for (spec, repo, rev, on_apps) in wanted {
             keep.push(spec.name.clone());
             if let Some(path) = &spec.health {
@@ -585,6 +587,7 @@ impl Engine {
                 // roll apps' environment turns its own on and redeploys.
                 + if s.traces { "o" } else { "" }
                 + &ca.as_deref().filter(|_| !on_apps).map(|id| format!("i{id}")).unwrap_or_default()
+                + &maker.as_deref().filter(|_| on_apps).map(|m| format!("m{m}")).unwrap_or_default()
                 + &rebuilt;
             let was = self.store.service_config(&r.id, &spec.name)?;
             let config_moved = was.as_deref() != Some(fingerprint.as_str());
@@ -631,6 +634,7 @@ impl Engine {
                     feedback,
                     egress: s.egress_for(r.trusted),
                     egress_hosts: s.egress_hosts.clone(),
+                    maker: maker.clone(),
                     rebuild: fresh.then_some(rebuilds),
                     traces: s.traces,
                 };

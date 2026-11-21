@@ -897,8 +897,9 @@ fn decoy_name_ok(role: &str) -> bool {
 /// Who SQL on an endpoint runs as ([`Control::query`]).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SqlAs {
-    /// A role made for the query holding only `pg_read_all_data`, in read-only transactions:
-    /// Postgres refuses its writes.
+    /// A role made for the query holding only `pg_read_all_data` and `pg_read_all_stats` (other
+    /// sessions' queries and `pg_stat_statements`' text, which slow-query and health tools read),
+    /// in read-only transactions: Postgres refuses its writes.
     ReadOnly,
     /// A role made for the query that is a member of the roles owning the app's objects (the
     /// database's `roll_owner`, a branch's app role) and holds `pg_read_all_data` and
@@ -943,7 +944,7 @@ async fn run_sql(addr: SocketAddr, password: &str, sql: &str, as_: SqlAs) -> Res
             admin
                 .batch_execute(&format!(
                     "CREATE ROLE {role} LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS CONNECTION LIMIT 1 \
-                     PASSWORD '{pw}' VALID UNTIL '{until}' IN ROLE pg_read_all_data; \
+                     PASSWORD '{pw}' VALID UNTIL '{until}' IN ROLE pg_read_all_data, pg_read_all_stats; \
                      ALTER ROLE {role} SET default_transaction_read_only = on; \
                      ALTER ROLE {role} SET statement_timeout = '60s'"
                 ))
