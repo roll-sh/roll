@@ -241,6 +241,8 @@ pub struct Engine {
     secrets_told: Mutex<HashMap<String, Vec<String>>>,
     /// The rules' references last left out per preview, their writers unable to now (told once).
     refs_told: Mutex<HashMap<String, Vec<String>>>,
+    /// What ends a preview's interception when it's torn down (rolld, over roll secrets).
+    pub intercepts: std::sync::OnceLock<Arc<dyn crate::ports::Intercepts>>,
     /// When each project's own preview domain was last read from roll apps (ms).
     domain_read: Mutex<HashMap<String, i64>>,
     /// The paths a head changes (`repo`, `head`, or `from..head`), for the path filters. Between
@@ -306,6 +308,7 @@ impl Engine {
             },
             secrets_told: Mutex::new(HashMap::new()),
             refs_told: Mutex::new(HashMap::new()),
+            intercepts: std::sync::OnceLock::new(),
             domain_read: Mutex::new(HashMap::new()),
             paths_seen: Mutex::new(HashMap::new()),
             shots_wanted: Mutex::new(std::collections::HashSet::new()),
@@ -593,7 +596,16 @@ impl Engine {
     /// key whose field isn't a credential), which a preview's logs may show.
     pub(super) async fn resolve_secrets(&self, r: &Row, untrusted: bool, dynamic: bool, consumer: &str) -> anyhow::Result<(Vec<(String, String)>, Vec<String>, Vec<String>)> {
         let consumer = format!("preview:{}/{consumer}", env_name(&r.id));
-        let got = self.secrets.resolve(&r.project_id, &env_name(&r.id), untrusted, dynamic, &consumer).await.map_err(|e| anyhow::anyhow!("secrets: {e:#}"))?;
+        // Keys bound to hosts as placeholders, swapped by its egress proxy: only where its egress
+        // goes through that proxy ("Roll only"), and only made by someone (who last saved the
+        // rules). A binding never opens egress: `egress_hosts` still decides first.
+        let s = self.store.settings(&r.project_id)?;
+        let maker = (s.egress_for(r.trusted) == crate::settings::EgressRule::Roll).then(|| self.store.rules_maker(&r.project_id)).transpose()?.flatten();
+        let got = match &maker {
+            Some(m) => self.secrets.resolve_with_placeholders(&r.project_id, &env_name(&r.id), untrusted, dynamic, &crate::ports::intercept_consumer(&r.id), m).await,
+            None => self.secrets.resolve(&r.project_id, &env_name(&r.id), untrusted, dynamic, &consumer).await,
+        }
+        .map_err(|e| anyhow::anyhow!("secrets: {e:#}"))?;
         let mut problems = got.problems.clone();
         problems.sort();
         let new = self.secrets_told.lock().insert(r.id.clone(), problems.clone()).is_none_or(|before| before != problems);
