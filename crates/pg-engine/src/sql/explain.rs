@@ -15833,9 +15833,17 @@ impl Builder<'_, '_> {
         params: &[Expr],
         meta: &super::plan::JoinMeta,
     ) -> Built {
+        // (A side made unique, also under the Sort a merge join put over it: create_unique_path
+        // sorts or hashes its relation's cheapest path, no order of the input used.)
         for side in [left, right] {
-            if matches!(&**side, Plan::Distinct { .. }) {
-                self.unique_sides.insert(addr(side));
+            match &**side {
+                Plan::Distinct { .. } => {
+                    self.unique_sides.insert(addr(side));
+                }
+                Plan::Sort { input, .. } if matches!(&**input, Plan::Distinct { .. }) => {
+                    self.unique_sides.insert(addr(input));
+                }
+                _ => {}
             }
         }
         // (An outer join's nullable sides and clauses: `OUTER_JOIN_SIDE`; the caller restores.)

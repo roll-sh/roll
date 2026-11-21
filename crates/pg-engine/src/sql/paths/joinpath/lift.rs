@@ -183,6 +183,12 @@ fn reads_outer(p: &Plan) -> bool {
     framed || crate::sql::explain::plan_inputs(p).into_iter().any(|c| reads_outer(c))
 }
 
+/// Whether a join tree as bound reads a value of an enclosing level, its semi / anti joins'
+/// correlated restrictions as written (their join clauses now) aside (`flatten_tree`'s test).
+pub(super) fn semi_tree_reads_outer(t: &Plan) -> bool {
+    reads_outer(&semi_written_dropped(t))
+}
+
 /// A FROM subquery over one table scan: its select list and the scan.
 fn subquery_leaf(p: &Plan) -> Option<(&ScanPlan, &Vec<Expr>)> {
     let Plan::Project { input, exprs } = p else {
@@ -272,72 +278,77 @@ fn semi_written_dropped(p: &Plan) -> Plan {
     q
 }
 
+/// A planned FROM subquery's join (under the projections putting its row back in the
+/// tree's order, `BoundTree::glue`) as the join tree its level had before planning
+/// (`ExecCtx::bound_trees`), the clauses pushed into it since over that tree; whether the
+/// tree has semi / anti joins. Trees without them only when `unbind`.
+pub(super) fn bound_tree(p: &Plan, bound: &[crate::sql::paths::BoundTree], unbind: bool) -> Option<(Arc<Plan>, bool)> {
+    let mut glue: Vec<&Vec<Expr>> = Vec::new();
+    let mut join = p;
+    while let Plan::Project { input, exprs } = join {
+        glue.push(exprs);
+        join = input;
+    }
+    let Plan::Join { meta, .. } = join else {
+        return None;
+    };
+    let b = bound.iter().find(|b| meta.bound != 0 && b.id == meta.bound && (b.semi || unbind))?;
+    let glue_ok = glue.len() == b.glue.len()
+        && glue
+            .iter()
+            .zip(&b.glue)
+            .all(|(a, b)| a.len() == b.len() && a.iter().zip(b).all(|(x, y)| x.same_as(y)));
+    if !glue_ok || crate::sql::paths::join_tree_key(p).as_ref() != Some(&b.key) {
+        return None;
+    }
+    if meta.bound_pushed.is_empty() {
+        return Some((b.tree.clone(), b.semi));
+    }
+    // (The clauses pushed into the planned join since: over the tree's row, each column
+    // of the join's one the projections pass through.)
+    let mut row: Vec<Expr> = (0..crate::sql::binder::plan_width(join)).map(|i| Expr::Col(i, DataType::Unknown)).collect();
+    for g in glue.iter().rev() {
+        row = g.iter().map(|e| subst(e, &row)).collect();
+    }
+    let mut preds = Vec::new();
+    for q in &meta.bound_pushed {
+        let mut ok = true;
+        let q = q
+            .clone()
+            .transform(&mut |x| {
+                Ok(match x {
+                    Expr::Col(c, t) => match row.iter().position(|e| matches!(e, Expr::Col(d, _) if *d == c)) {
+                        Some(i) => Expr::Col(i, t),
+                        None => {
+                            ok = false;
+                            Expr::Col(c, t)
+                        }
+                    },
+                    x => x,
+                })
+            })
+            .unwrap();
+        if !ok {
+            return None;
+        }
+        preds.push(q);
+    }
+    let tree = Plan::Filter {
+        input: b.tree.clone(),
+        pred: and_all(preds)?,
+    };
+    Some((Arc::new(tree), b.semi))
+}
+
 /// A FROM subquery (`p`, perhaps under a clause pushed down onto it) with the join tree its
 /// level had before planning in place of the planned one (`ExecCtx::bound_trees`); whether
 /// that tree has semi / anti joins. Trees without them only when `unbind`.
 fn bound_form(p: &Plan, bound: &[crate::sql::paths::BoundTree], unbind: bool) -> Option<(Plan, bool)> {
-    fn tree_of(p: &Plan, bound: &[crate::sql::paths::BoundTree], unbind: bool) -> Option<(Arc<Plan>, bool)> {
-        let mut glue: Vec<&Vec<Expr>> = Vec::new();
-        let mut join = p;
-        while let Plan::Project { input, exprs } = join {
-            glue.push(exprs);
-            join = input;
-        }
-        let Plan::Join { meta, .. } = join else {
-            return None;
-        };
-        let b = bound.iter().find(|b| meta.bound != 0 && b.id == meta.bound && (b.semi || unbind))?;
-        let glue_ok = glue.len() == b.glue.len()
-            && glue
-                .iter()
-                .zip(&b.glue)
-                .all(|(a, b)| a.len() == b.len() && a.iter().zip(b).all(|(x, y)| x.same_as(y)));
-        if !glue_ok || crate::sql::paths::join_tree_key(p).as_ref() != Some(&b.key) {
-            return None;
-        }
-        if meta.bound_pushed.is_empty() {
-            return Some((b.tree.clone(), b.semi));
-        }
-        // (The clauses pushed into the planned join since: over the tree's row, each column
-        // of the join's one the projections pass through.)
-        let mut row: Vec<Expr> = (0..crate::sql::binder::plan_width(join)).map(|i| Expr::Col(i, DataType::Unknown)).collect();
-        for g in glue.iter().rev() {
-            row = g.iter().map(|e| subst(e, &row)).collect();
-        }
-        let mut preds = Vec::new();
-        for q in &meta.bound_pushed {
-            let mut ok = true;
-            let q = q
-                .clone()
-                .transform(&mut |x| {
-                    Ok(match x {
-                        Expr::Col(c, t) => match row.iter().position(|e| matches!(e, Expr::Col(d, _) if *d == c)) {
-                            Some(i) => Expr::Col(i, t),
-                            None => {
-                                ok = false;
-                                Expr::Col(c, t)
-                            }
-                        },
-                        x => x,
-                    })
-                })
-                .unwrap();
-            if !ok {
-                return None;
-            }
-            preds.push(q);
-        }
-        let tree = Plan::Filter {
-            input: b.tree.clone(),
-            pred: and_all(preds)?,
-        };
-        Some((Arc::new(tree), b.semi))
-    }
     fn go(p: &Plan, bound: &[crate::sql::paths::BoundTree], unbind: bool) -> Option<(Plan, bool)> {
         let Plan::Project { input, exprs } = p else {
             return None;
         };
-        let (input, semi) = match tree_of(input, bound, unbind) {
+        let (input, semi) = match bound_tree(input, bound, unbind) {
             Some(tree) => tree,
             None => {
                 let (q, semi) = go(input, bound, unbind)?;

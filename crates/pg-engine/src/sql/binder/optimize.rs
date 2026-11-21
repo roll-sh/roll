@@ -908,6 +908,7 @@ fn add_filter_as(cat: &Catalog, plan: Plan, pred: Expr, index: bool) -> Plan {
             // (A semi join's clauses are equivalence classes: a left column fixed to a
             // constant fixes the right one it equals, and the clause goes.)
             let (mut cond, mut hash, mut right) = (cond, hash, right);
+            let mut meta = meta;
             if kind == JoinKind::Semi && params.is_empty() {
                 let mut rpush = Vec::new();
                 for p in &push {
@@ -973,6 +974,12 @@ fn add_filter_as(cat: &Catalog, plan: Plan, pred: Expr, index: bool) -> Plan {
                     let r = Arc::try_unwrap(right).unwrap_or_else(|a| (*a).clone());
                     right = Arc::new(add_filter(cat, r, Expr::And(rpush)));
                 }
+            }
+            // (A FROM subquery's planned join kept as bound: the clauses go to the tree as
+            // bound too, `JoinMeta::bound_pushed`, over its row, the left side's. The
+            // constants derived for the right side are implied by them and its clause.)
+            if meta.bound != 0 {
+                meta.bound_pushed.extend(push.iter().cloned());
             }
             let mut left = left;
             if !push.is_empty() {

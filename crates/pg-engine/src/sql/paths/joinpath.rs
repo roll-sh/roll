@@ -19,6 +19,21 @@ mod partial;
 pub(super) fn lift_subst(e: &Expr, map: &[Expr]) -> Expr {
     lift::subst(e, map)
 }
+
+/// A planned FROM subquery's join with semi / anti joins, as the join tree its level had
+/// before planning, its scans to plan again (`lift::bound_tree`); not one reading a value of
+/// an enclosing level (as `lift` pulls up none: a correlated sub-select's level stays apart).
+pub(super) fn bound_semi_tree(p: &Plan, bound: &[super::BoundTree]) -> Option<Plan> {
+    match lift::bound_tree(p, bound, false)? {
+        (t, true) if !lift::semi_tree_reads_outer(&t) => Some(lift::unplanned(Arc::unwrap_or_clone(t))),
+        _ => None,
+    }
+}
+
+/// Whether `bound_semi_tree` has a tree for `p`.
+pub(super) fn has_bound_semi_tree(p: &Plan, bound: &[super::BoundTree]) -> bool {
+    matches!(lift::bound_tree(p, bound, false), Some((t, true)) if !lift::semi_tree_reads_outer(&t))
+}
 mod outerjoins;
 mod partitionwise;
 mod partmerge;

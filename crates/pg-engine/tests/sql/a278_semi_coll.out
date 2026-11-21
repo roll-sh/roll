@@ -1,0 +1,111 @@
+> create table a278t (u1 int, u2 int, h int, th int) with (autovacuum_enabled = off)
+-- CREATE TABLE
+
+> insert into a278t select g, (g * 7) % 10000, g % 100, g % 1000 from generate_series(0, 9999) g
+-- INSERT 0 10000
+
+> create unique index a278t_u1 on a278t (u1)
+-- CREATE INDEX
+
+> create index a278t_h on a278t (h)
+-- CREATE INDEX
+
+> create index a278t_th on a278t (th)
+-- CREATE INDEX
+
+> analyze a278t
+-- ANALYZE
+
+> explain select count(*) from (select a.u2 from a278t a where u1 in (select h from a278t b)) ss
+QUERY PLAN:text
+Aggregate  (cost=189.89..189.90 rows=1 width=8)
+  ->  Merge Join  (cost=184.61..189.64 rows=100 width=0)
+        Merge Cond: (a.u1 = b.h)
+        ->  Index Only Scan using a278t_u1 on a278t a  (cost=0.29..328.29 rows=10000 width=4)
+        ->  Sort  (cost=184.32..184.57 rows=100 width=4)
+              Sort Key: b.h
+              ->  HashAggregate  (cost=180.00..181.00 rows=100 width=4)
+                    Group Key: b.h
+                    ->  Seq Scan on a278t b  (cost=0.00..155.00 rows=10000 width=4)
+-- EXPLAIN
+
+> explain select * from (select a.u2 from a278t a where u1 in (select h from a278t b)) ss
+QUERY PLAN:text
+Merge Join  (cost=184.61..189.64 rows=100 width=4)
+  Merge Cond: (a.u1 = b.h)
+  ->  Index Scan using a278t_u1 on a278t a  (cost=0.29..328.29 rows=10000 width=8)
+  ->  Sort  (cost=184.32..184.57 rows=100 width=4)
+        Sort Key: b.h
+        ->  HashAggregate  (cost=180.00..181.00 rows=100 width=4)
+              Group Key: b.h
+              ->  Seq Scan on a278t b  (cost=0.00..155.00 rows=10000 width=4)
+-- EXPLAIN
+
+> explain select u1 from a278t a where u1 in (select h from a278t b)
+QUERY PLAN:text
+Merge Join  (cost=184.61..189.64 rows=100 width=4)
+  Merge Cond: (a.u1 = b.h)
+  ->  Index Only Scan using a278t_u1 on a278t a  (cost=0.29..328.29 rows=10000 width=4)
+  ->  Sort  (cost=184.32..184.57 rows=100 width=4)
+        Sort Key: b.h
+        ->  HashAggregate  (cost=180.00..181.00 rows=100 width=4)
+              Group Key: b.h
+              ->  Seq Scan on a278t b  (cost=0.00..155.00 rows=10000 width=4)
+-- EXPLAIN
+
+> explain select * from (select max(u1) from a278t a where exists (select 1 from a278t b where b.th = a.u2)) ss
+QUERY PLAN:text
+Aggregate  (cost=397.38..397.38 rows=1 width=4)
+  ->  Hash Join  (cost=202.50..394.88 rows=1000 width=4)
+        Hash Cond: (a.u2 = b.th)
+        ->  Seq Scan on a278t a  (cost=0.00..155.00 rows=10000 width=8)
+        ->  Hash  (cost=190.00..190.00 rows=1000 width=4)
+              ->  HashAggregate  (cost=180.00..190.00 rows=1000 width=4)
+                    Group Key: b.th
+                    ->  Seq Scan on a278t b  (cost=0.00..155.00 rows=10000 width=4)
+-- EXPLAIN
+
+> create table a278c (t text, b char(10)) with (autovacuum_enabled = off)
+-- CREATE TABLE
+
+> create index a278c_t on a278c (t collate "C")
+-- CREATE INDEX
+
+> create unique index a278c_b on a278c (b collate "C" bpchar_pattern_ops)
+-- CREATE INDEX
+
+> explain select * from a278c where t = 'x'
+QUERY PLAN:text
+Seq Scan on a278c  (cost=0.00..19.75 rows=4 width=76)
+  Filter: (t = 'x'::text)
+-- EXPLAIN
+
+> explain select * from a278c where t < 'x'
+QUERY PLAN:text
+Seq Scan on a278c  (cost=0.00..19.75 rows=260 width=76)
+  Filter: (t < 'x'::text)
+-- EXPLAIN
+
+> explain select * from a278c where t collate "C" = 'x'
+QUERY PLAN:text
+Bitmap Heap Scan on a278c  (cost=4.18..12.64 rows=4 width=76)
+  Recheck Cond: ((t)::text = 'x'::text)
+  ->  Bitmap Index Scan on a278c_t  (cost=0.00..4.18 rows=4 width=0)
+        Index Cond: ((t)::text = 'x'::text)
+-- EXPLAIN
+
+> explain select * from a278c where t in ('x', 'y')
+QUERY PLAN:text
+Seq Scan on a278c  (cost=0.00..19.75 rows=8 width=76)
+  Filter: (t = ANY ('{x,y}'::text[]))
+-- EXPLAIN
+
+> explain select * from a278c where b = 'h8'
+QUERY PLAN:text
+Seq Scan on a278c  (cost=0.00..19.75 rows=1 width=76)
+  Filter: (b = 'h8'::bpchar)
+-- EXPLAIN
+
+> drop table a278t, a278c
+-- DROP TABLE
+

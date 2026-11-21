@@ -312,6 +312,9 @@ struct IndexInfo {
     /// Per key column, the collation its entries are in the order of (`BoundIndex::colls`;
     /// None: bytes).
     kcolls: Vec<Option<crate::storage::keys::KeyColl>>,
+    /// Per key column: the collation its expression derives (exprCollation, by name; None:
+    /// not collatable), the index's collation when it has no COLLATE.
+    key_colls: Vec<Option<String>>,
     /// A GIN index's metapage statistics (ginGetStats; None: all zero, as a hypothetical
     /// index's).
     gin: Option<crate::catalog::ginsim::GinStats>,
@@ -690,6 +693,7 @@ fn index_infos(ctx: &ExecCtx, t: &Arc<Table>, rel_tuples: f64) -> Vec<IndexInfo>
             fam_ops,
             colls,
             kcolls: b.colls.clone(),
+            key_colls: b.keys.iter().map(|k| derived_collation(t, k)).collect(),
             gin: if am == Am::Gin { crate::exec::sizing::gin_stats(t, b, &bound, ctx) } else { None },
         });
     }
@@ -1001,11 +1005,13 @@ fn match_clause(
     };
     match q {
         Expr::Call(def, args, ty)
-            if args.len() == 2 && ops_ok(def.name) && key_order_op(ii, col, def) =>
+            if args.len() == 2
+                && ops_ok(def.name)
+                && key_order_op(ii, col, def)
+                && collation_matches(ii, col, &[&args[0], &args[1]]) =>
         {
-            // (A COLLATE naming the collation the column's keys are under is a relabeling.)
-            let keyed = def.coll.as_ref().is_some_and(|c| !c.bytewise() || !c.deterministic);
-            let coll_key = |e: &Expr| matches_key(e, key) || (keyed && matches!(key_operand(e), Expr::Collate(x, ..) if matches_key(x, key)));
+            // (A COLLATE naming the index's collation is a relabeling.)
+            let coll_key = |e: &Expr| matches_key(e, key) || matches!(key_operand(e), Expr::Collate(x, ..) if matches_key(x, key));
             let (a, b) = (&args[0], &args[1]);
             if coll_key(a) && scan_const(b) && family(&b.ty()) == kty {
                 return Some(mk(q.clone(), Kind::Op(strat(def.name)), Some(b.clone())));
@@ -1021,7 +1027,11 @@ fn match_clause(
             right,
             op,
             all: false,
-        } if ii.am == Am::Btree && btree_op(op.name) && key_order_op(ii, col, op) => {
+        } if ii.am == Am::Btree
+            && btree_op(op.name)
+            && key_order_op(ii, col, op)
+            && collation_matches(ii, col, &[left, right]) =>
+        {
             let et = right.ty().elem().cloned()?;
             if matches_key(left, key) && scan_const(right) && family(&et) == kty {
                 return Some(mk(q.clone(), Kind::Saop(op.name), Some((**right).clone())));
@@ -1059,7 +1069,7 @@ fn rowcompare_clause(
         return None;
     };
     let ok_op = |c: &Expr| matches!(c, Expr::Call(d, a, _) if a.len() == 2 && key_order_op(ii, col, d) && matches!(d.name, "<" | "<=" | ">" | ">="));
-    if !rc.cmps.iter().all(ok_op) {
+    if !rc.cmps.iter().all(ok_op) || !collation_matches(ii, col, &[ls[0], rs[0]]) {
         return None;
     }
     let (vars, consts) = if var_left { (&ls, &rs) } else { (&rs, &ls) };
@@ -1073,7 +1083,12 @@ fn rowcompare_clause(
             .keys
             .iter()
             .enumerate()
-            .any(|(j, k)| matches_key(v, k) && ii.order.get(j).is_none_or(Option::is_none) && family(&k.ty()) == family(&c.ty()));
+            .any(|(j, k)| {
+                matches_key(v, k)
+                    && ii.order.get(j).is_none_or(Option::is_none)
+                    && family(&k.ty()) == family(&c.ty())
+                    && collation_matches(ii, j, &[v, c])
+            });
         if !hit || !scan_const(c) {
             break;
         }
@@ -1341,7 +1356,7 @@ fn or_to_saop(ii: &IndexInfo, col: usize, qn: usize, arms: &[Expr]) -> Option<IC
         let Expr::Call(def, args, _) = a else {
             return None;
         };
-        if args.len() != 2 || !btree_op(def.name) {
+        if args.len() != 2 || !btree_op(def.name) || !collation_matches(ii, col, &[&args[0], &args[1]]) {
             return None;
         }
         let (k, v, op) = if matches_key(&args[0], key) && !args[1].is_volatile_call() {
@@ -7373,6 +7388,7 @@ fn plan_level_ordered(
 ) -> usize {
     let p = Planner::new(ctx);
     p.group_dirs.replace(dirs);
+    pull_up_semi_trees(ctx, plan);
     sublinkcopy::copy_into_merge(plan);
     p.ref_marks.replace(rowmarks::referenced(plan));
     p.copy_marks.replace(rowmarks::copied(plan));
@@ -7412,6 +7428,43 @@ fn plan_level_ordered(
     }
     crate::ext::postgres_fdw::pushdown::push_level(ctx, plan);
     p.removed.get()
+}
+
+/// pull_up_subqueries of a FROM subquery whose join tree has semi / anti joins
+/// (pull_up_sublinks' IN / EXISTS) above the level's join problem, where no join group's
+/// `lift` takes it in (the level reads only it, under its select list, grouping, ordering):
+/// its level planned it apart, a semi join's side unique-ified becoming a leaf the join
+/// search here can't see into. Postgres pulls the subquery up before any join search and
+/// plans its semi joins once, at this level: the tree as its level had it before planning
+/// goes in place of the planned join.
+fn pull_up_semi_trees(ctx: &ExecCtx, plan: &mut Plan) {
+    fn above_joins(p: &Plan) -> bool {
+        matches!(
+            p,
+            Plan::Project { .. } | Plan::Filter { .. } | Plan::Agg { .. } | Plan::Sort { .. } | Plan::Limit { .. } | Plan::Distinct { .. } | Plan::Window { .. }
+        )
+    }
+    fn found(p: &Plan, bound: &[BoundTree]) -> bool {
+        joinpath::has_bound_semi_tree(p, bound)
+            || above_joins(p) && crate::sql::explain::plan_inputs(p).into_iter().any(|c| found(c, bound))
+    }
+    fn go(p: &mut Plan, bound: &[BoundTree]) {
+        if let Some(t) = joinpath::bound_semi_tree(p, bound) {
+            *p = t;
+            return;
+        }
+        if above_joins(p) {
+            for c in crate::sql::explain::plan_inputs_mut(p) {
+                if found(c, bound) {
+                    go(Arc::make_mut(c), bound);
+                }
+            }
+        }
+    }
+    let bound = ctx.bound_trees.borrow();
+    if !bound.is_empty() && found(plan, &bound) {
+        go(plan, &bound);
+    }
 }
 
 /// The range table indexes of a plan's scans (sorted; None when one isn't known) and its
@@ -7878,6 +7931,56 @@ pub(super) fn bare_key(e: &Expr, coll: u32) -> Expr {
         Expr::Collate(x, ..) if coll != 0 => bare_key(x, coll),
         e => e.clone(),
     }
+}
+
+/// The collation an expression over a table's row derives, by name, as parse_collate.c
+/// assigns it (None: not collatable): a COLLATE written in it, else a column's collation
+/// other than "default" (its declared one, or its type's: `name`'s "C"), else its type's.
+fn derived_collation(t: &Table, e: &Expr) -> Option<String> {
+    let ty = e.ty();
+    if !ty.collatable() {
+        return None;
+    }
+    let mut implicit = None;
+    let written = written_collation(&[e]);
+    e.walk(&mut |x| {
+        if let Expr::Col(j, cty) = x
+            && implicit.is_none()
+            && let Some(c) = t.columns.get(*j).and_then(|c| c.collation.as_deref()).or(cty.default_collation())
+            && c != "default"
+        {
+            implicit = Some(c.to_string());
+        }
+    });
+    Some(written.or(implicit).unwrap_or_else(|| ty.default_collation().unwrap_or("default").to_string()))
+}
+
+/// The first COLLATE written in the operands (an explicit collation, which wins).
+fn written_collation(ops: &[&Expr]) -> Option<String> {
+    let mut out = None;
+    for e in ops {
+        e.walk(&mut |x| {
+            if let Expr::Collate(_, c, l) = x
+                && *l != crate::sql::binder::IMPLICIT_COLLATE
+                && out.is_none()
+            {
+                out = Some(c.clone());
+            }
+        });
+    }
+    out
+}
+
+/// IndexCollMatchesExprColl: a clause on index column `col` is the index's only when the
+/// collation its operands derive (its inputcollid) is the column's collation, by identity:
+/// under the database default, an index on `t COLLATE "C"` serves no `t = 'x'`, though both
+/// compare bytes in a C database. A key that isn't collatable matches any.
+fn collation_matches(ii: &IndexInfo, col: usize, ops: &[&Expr]) -> bool {
+    let Some(Some(derived)) = ii.key_colls.get(col) else {
+        return true;
+    };
+    let index = ii.ix.columns.get(col).and_then(|c| c.collation.as_deref()).unwrap_or(derived);
+    written_collation(ops).as_deref().unwrap_or(derived) == index
 }
 
 /// Whether a comparison is in the order of index column `col`'s keys: under the collation
