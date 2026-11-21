@@ -245,6 +245,12 @@ pub fn location(src: &str, at: usize) -> (usize, usize) {
     (line, col)
 }
 
+/// An `ENRICH` policy as parsed (`_remote:p`, `p`): its mode (`_any` when it names none) and its
+/// name.
+pub fn split_policy(policy: &str) -> (&str, &str) {
+    policy.split_once(':').unwrap_or(("_any", policy))
+}
+
 pub fn parse_error(src: &str, at: usize, msg: &str) -> EsError {
     let (l, c) = location(src, at);
     let e = EsError::new(400, "parsing_exception", format!("line {l}:{c}: {msg}"));
@@ -374,7 +380,8 @@ pub enum Cmd {
     /// time bucket) first, then across series.
     Ts { sources: Vec<String>, metadata: Vec<String>, at: usize },
     /// `FORK (commands) (commands) ...`: each branch runs over the input, tagged `_fork`.
-    Fork { branches: Vec<Vec<Cmd>>, at: usize },
+    /// `spans`: each branch's commands' places in the query text.
+    Fork { branches: Vec<Vec<Cmd>>, spans: Vec<Vec<Span>>, at: usize },
     /// A source that is the union of whole queries: `FROM` with subqueries (`FROM a, (FROM b
     /// | ...)`) or over ES|QL views. `at`: the `FROM`.
     Union { branches: Vec<Branch>, at: usize },
@@ -383,8 +390,10 @@ pub enum Cmd {
 /// One input of a [`Cmd::Union`].
 #[derive(Clone, Debug)]
 pub struct Branch {
-    /// Its commands, a source command first; spans point into `src`.
+    /// Its commands, a source command first.
     pub cmds: Vec<Cmd>,
+    /// Where each of `cmds` is in `src`, as parsed (empty when they aren't the text's).
+    pub spans: Vec<Span>,
     /// The text the spans point into (the query's, or a view's).
     pub src: std::sync::Arc<str>,
     /// The view it expands, if any.
@@ -669,7 +678,7 @@ impl<'a> P<'a> {
     }
 
     /// The query inside a `FROM` subquery, after its `(`, up to and including its `)`.
-    fn subquery(&mut self) -> EsResult<Vec<Cmd>> {
+    fn subquery(&mut self) -> EsResult<(Vec<Cmd>, Vec<Span>)> {
         if self.subqueries >= MAX_NESTED_QUERIES {
             return Err(parse_error(self.src, self.peek().start, &format!("views and subqueries nest deeper than {MAX_NESTED_QUERIES} levels")));
         }
@@ -679,18 +688,29 @@ impl<'a> P<'a> {
         r
     }
 
-    fn subquery_cmds(&mut self) -> EsResult<Vec<Cmd>> {
+    fn subquery_cmds(&mut self) -> EsResult<(Vec<Cmd>, Vec<Span>)> {
+        let start = self.peek().start;
         let first = self.command()?;
         if !matches!(first, Cmd::From { .. } | Cmd::Ts { .. } | Cmd::Row(_) | Cmd::Show(_) | Cmd::Union { .. }) {
             return Err(parse_error(self.src, 0, "mismatched input expecting {'from', 'row', 'show'}"));
         }
         let mut cmds = vec![first];
+        let mut spans = vec![Span { pipe: None, start, end: self.toks[self.i - 1].end }];
         while matches!(self.peek().tok, Tok::Pipe) {
-            self.bump();
-            cmds.push(self.processing()?);
+            let pipe = self.bump().start;
+            let (c, s) = self.spanned(Some(pipe))?;
+            cmds.push(c);
+            spans.push(s);
         }
         self.expect_op(")")?;
-        Ok(cmds)
+        Ok((cmds, spans))
+    }
+
+    /// A processing command and its [`Span`].
+    fn spanned(&mut self, pipe: Option<usize>) -> EsResult<(Cmd, Span)> {
+        let start = self.peek().start;
+        let c = crate::stack::maybe_grow(|| self.processing())?;
+        Ok((c, Span { pipe, start, end: self.toks[self.i - 1].end }))
     }
 
     fn command(&mut self) -> EsResult<Cmd> {
@@ -703,7 +723,7 @@ impl<'a> P<'a> {
         Ok(match up.as_str() {
             "FROM" | "TS" => {
                 let mut sources = Vec::new();
-                let mut subqueries: Vec<(Vec<Cmd>, usize)> = Vec::new();
+                let mut subqueries: Vec<((Vec<Cmd>, Vec<Span>), usize)> = Vec::new();
                 loop {
                     if self.is_op("(") {
                         let open = self.bump().start;
@@ -773,27 +793,31 @@ impl<'a> P<'a> {
                     let text: std::sync::Arc<str> = self.src.into();
                     let mut branches = Vec::new();
                     if !sources.is_empty() {
-                        branches.push(Branch { cmds: vec![Cmd::From { sources, metadata, at: t.start }], src: text.clone(), view: None, at: t.start });
+                        branches.push(Branch { cmds: vec![Cmd::From { sources, metadata, at: t.start }], spans: Vec::new(), src: text.clone(), view: None, at: t.start });
                     }
-                    for (cmds, at) in subqueries {
-                        branches.push(Branch { cmds, src: text.clone(), view: None, at });
+                    for ((cmds, spans), at) in subqueries {
+                        branches.push(Branch { cmds, spans, src: text.clone(), view: None, at });
                     }
                     Cmd::Union { branches, at: t.start }
                 }
             }
             "FORK" => {
-                let mut branches = Vec::new();
+                let (mut branches, mut spans) = (Vec::new(), Vec::new());
                 while self.is_op("(") {
                     self.bump();
                     // A branch may hold another `FORK` (refused once parsed): the pre-scan
                     // bounds how deep.
-                    let mut cmds = vec![crate::stack::maybe_grow(|| self.processing())?];
+                    let (c, s) = self.spanned(None)?;
+                    let (mut cmds, mut at) = (vec![c], vec![s]);
                     while matches!(self.peek().tok, Tok::Pipe) {
-                        self.bump();
-                        cmds.push(crate::stack::maybe_grow(|| self.processing())?);
+                        let pipe = self.bump().start;
+                        let (c, s) = self.spanned(Some(pipe))?;
+                        cmds.push(c);
+                        at.push(s);
                     }
                     self.expect_op(")")?;
                     branches.push(cmds);
+                    spans.push(at);
                 }
                 if branches.is_empty() {
                     return Err(self.mismatch("'('"));
@@ -801,7 +825,7 @@ impl<'a> P<'a> {
                 if branches.len() > 8 {
                     return Err(parse_error(self.src, t.start, "Fork supports up to 8 branches"));
                 }
-                Cmd::Fork { branches, at: t.start }
+                Cmd::Fork { branches, spans, at: t.start }
             }
             "ROW" => Cmd::Row(self.named_list()?),
             "SHOW" => Cmd::Show(self.ident()?.0.to_ascii_uppercase()),
@@ -856,6 +880,16 @@ impl<'a> P<'a> {
                         let m = self.bump();
                         policy.push_str(&self.src[m.start..m.end]);
                     }
+                }
+                // The mode qualifier, in any case, kept lowercase ([`split_policy`]); a quoted
+                // name keeps its backtick in the qualifier, which is then no mode (Elasticsearch).
+                if let Some((q, name)) = policy.split_once(':') {
+                    let q = if matches!(pt.tok, Tok::Quoted(_)) { format!("`{q}") } else { q.to_string() };
+                    let mode = q.to_ascii_lowercase();
+                    if !matches!(mode.as_str(), "_any" | "_coordinator" | "_remote") {
+                        return Err(parse_error(self.src, pt.start, &format!("Unrecognized value [{q}], ENRICH policy qualifier needs to be one of [_ANY, _COORDINATOR, _REMOTE]")));
+                    }
+                    policy = format!("{mode}:{name}");
                 }
                 let on = if self.eat_kw("ON") { Some(self.qualified()?) } else { None };
                 let with = if self.eat_kw("WITH") {

@@ -124,6 +124,24 @@ pub struct Resources {
     pub(super) approx: parking_lot::Mutex<Vec<String>>,
 }
 
+impl Resources {
+    /// Policy `name`'s enrich fields here, with their types, when it's loaded.
+    pub(super) fn enrich_columns(&self, name: &str) -> Option<&[Col]> {
+        self.enrich.get(name).map(|(_, cols)| cols.as_slice())
+    }
+}
+
+/// Enrich policy `name`'s enrich fields on this cluster, in its order.
+pub(super) fn policy_fields(st: &crate::meta::ClusterState, name: &str) -> Option<Vec<String>> {
+    let p = st.metadata.xpack.get(crate::xpack::enrich::POLICIES, name)?;
+    let cfg = p.get("config").and_then(Value::as_object).and_then(|m| m.values().next()).cloned().unwrap_or(Value::Null);
+    Some(match cfg.get("enrich_fields") {
+        Some(Value::Arr(a)) => a.iter().map(Value::to_es_string).collect(),
+        Some(Value::Str(s)) => vec![s.clone()],
+        _ => Vec::new(),
+    })
+}
+
 /// The `_meta.bucket` Elasticsearch reports for a `BUCKET` group: the numeric interval, or
 /// the date rounding's unit and count.
 fn bucket_meta(c: &CE) -> Option<Value> {
@@ -1559,9 +1577,9 @@ fn compile_stage(src: &Src<'_>, cmd: &Cmd, cols: &[Col]) -> EsResult<(Stage, Vec
             (Stage::Grok { field: f, grok: g.clone(), outputs, keep }, out)
         }
         Cmd::Enrich { policy, policy_at, on, with, at: cmd_at } => {
-            let name = policy.rsplit(':').next().unwrap_or(policy);
+            let name = super::parser::split_policy(policy).1;
             let Some((table, fields)) = src.res.enrich.get(name) else {
-                return Err(verification(src, *policy_at, &format!("cannot find enrich policy [{policy}]")));
+                return Err(verification(src, *policy_at, &format!("cannot find enrich policy [{name}]")));
             };
             let (on_name, on_at) = on.clone().unwrap_or_else(|| (table.match_field.clone(), *policy_at));
             let Some(key) = cols.iter().rposition(|c| c.name == on_name) else { return Err(unknown_column(src, on_at, &on_name, cols)) };
@@ -2840,7 +2858,7 @@ pub(super) fn verify_part(src: &Src<'_>, schema: &[Col], metadata: &[String], pa
     cols.extend((0..ft.len()).map(|i| Col { name: format!("{}{i}", super::fulltext::HIDDEN), ty: DataType::Boolean }));
     for c in &cmds {
         let here = match c {
-            Cmd::Enrich { policy, .. } => src.res.enrich.contains_key(policy.rsplit(':').next().unwrap_or(policy)),
+            Cmd::Enrich { policy, .. } => src.res.enrich.contains_key(super::parser::split_policy(policy).1),
             Cmd::LookupJoin { index, .. } => src.res.lookup.contains_key(index),
             _ => true,
         };
@@ -2877,8 +2895,28 @@ pub(super) struct Verified {
 
 /// Every cluster's rows in one table: a column whose types differ between clusters is
 /// unsupported (it reads null), as a union type no conversion resolves.
-pub(super) fn union_parts(parts: Vec<Table>, original: &mut Vec<(String, Vec<String>)>) -> EsResult<Table> {
-    union_tables(parts, &|name, _, _, _| EsError::illegal_state(format!("column [{name}] differs between clusters")), &|_, _| true, original)
+/// `own`: the columns each cluster's own policies or lookup indices give it, a union type
+/// whenever their types differ (strings too, as Elasticsearch merges those mappings).
+pub(super) fn union_parts(parts: Vec<Table>, original: &mut Vec<(String, Vec<String>)>, own: &dyn Fn(&str) -> bool) -> EsResult<Table> {
+    let mut differ: Vec<(String, Vec<String>)> = Vec::new();
+    for c in parts.iter().flat_map(|t| &t.cols).filter(|c| c.ty != DataType::Null && own(&c.name)) {
+        match differ.iter_mut().find(|(n, _)| *n == c.name) {
+            Some((_, types)) if !types.iter().any(|t| t == c.ty.name()) => types.push(c.ty.name().to_string()),
+            Some(_) => {}
+            None => differ.push((c.name.clone(), vec![c.ty.name().to_string()])),
+        }
+    }
+    differ.retain(|(_, types)| types.len() > 1);
+    let mut t = union_tables(parts, &|name, _, _, _| EsError::illegal_state(format!("column [{name}] differs between clusters")), &|_, _| true, original)?;
+    for (name, mut types) in differ {
+        let Some(i) = t.cols.iter().position(|c| c.name == name) else { continue };
+        t.cols[i].ty = DataType::Unsupported;
+        t.rows.iter_mut().for_each(|r| r[i] = V::Null);
+        types.sort();
+        original.retain(|(n, _)| *n != name);
+        original.push((name, types));
+    }
+    Ok(t)
 }
 
 /// A cross-cluster query's local part ([`super::ccs::run`]).
@@ -3655,7 +3693,7 @@ fn expand_source(st: &crate::meta::ClusterState, cmd: &mut Cmd, text: &std::sync
             let mut branches = Vec::new();
             for part in parts {
                 match part {
-                    Part::Indices => branches.push(super::parser::Branch { cmds: vec![Cmd::From { sources: plain.clone(), metadata: metadata.clone(), at: *at }], src: text.clone(), view: None, at: *at }),
+                    Part::Indices => branches.push(super::parser::Branch { cmds: vec![Cmd::From { sources: plain.clone(), metadata: metadata.clone(), at: *at }], spans: Vec::new(), src: text.clone(), view: None, at: *at }),
                     Part::View(v) => {
                         if chain.contains(&v) {
                             return Err(verification_plain(&format!("circular view reference '{v}': {}", chain.join(" -> "))));
@@ -3667,7 +3705,7 @@ fn expand_source(st: &crate::meta::ClusterState, cmd: &mut Cmd, text: &std::sync
                         let body = st.metadata.xpack.get(super::VIEWS, &v).and_then(|x| x.get("query")).map(Value::to_es_string).unwrap_or_default();
                         let vq = super::parser::parse(&body, &[], &[])?;
                         let vtext: std::sync::Arc<str> = body.as_str().into();
-                        let mut cmds = vq.cmds;
+                        let (mut cmds, spans) = (vq.cmds, vq.spans);
                         chain.push(v.clone());
                         if let Some(first) = cmds.first_mut() {
                             expand_source(st, first, &vtext, chain, depth + 1, spliced)?;
@@ -3689,7 +3727,7 @@ fn expand_source(st: &crate::meta::ClusterState, cmd: &mut Cmd, text: &std::sync
                         if !nulls.is_empty() {
                             cmds.push(Cmd::Eval(nulls));
                         }
-                        branches.push(super::parser::Branch { cmds, src: vtext, view: Some(v), at: 0 });
+                        branches.push(super::parser::Branch { cmds, spans, src: vtext, view: Some(v), at: 0 });
                     }
                 }
             }
@@ -3707,7 +3745,7 @@ fn check_forks(text: &str, cmds: &[Cmd]) -> EsResult<()> {
     const MULTIPLE: &str = "Only a single FORK command is supported, but found multiple";
     let mut seen: Vec<usize> = Vec::new();
     for c in cmds {
-        if let Cmd::Fork { branches, at } = c {
+        if let Cmd::Fork { branches, at, .. } = c {
             for b in branches {
                 problems.extend(seen.iter().map(|s| (*s, MULTIPLE)));
                 for inner in b {
@@ -3931,6 +3969,13 @@ async fn execute_inner(cluster: &Cluster, q: Query, filter: Option<Value>, w: &m
         w.add(format!("No limit defined, adding default limit of [{DEFAULT_LIMIT}]"));
     }
     check_forks(&q.src, &q.cmds)?;
+    // Over linked remotes, these shapes aren't cut into parts: their rows are read here.
+    if let Some(c) = super::ccs::current()
+        && super::ccs::part().is_none()
+        && (matches!(q.cmds.first(), Some(Cmd::Union { .. } | Cmd::Ts { .. })) || q.cmds.iter().any(|c| matches!(c, Cmd::Fork { .. })))
+    {
+        c.check_fallback(&q.src, &q.spans, &q.cmds)?;
+    }
     run_query(cluster, q, filter, w, true, &[]).await
 }
 
@@ -4143,7 +4188,7 @@ fn run_query<'a>(cluster: &'a Cluster, mut q: Query, filter: Option<Value>, w: &
         }
         let mut stats = Stats::default();
         let (parts, rest): (Vec<Table>, Vec<Cmd>) = if let Some(f) = fork {
-            let Cmd::Fork { branches, at } = q.cmds[f].clone() else { unreachable!() };
+            let Cmd::Fork { branches, at, .. } = q.cmds[f].clone() else { unreachable!() };
             let rest: Vec<Cmd> = q.cmds[f + 1..].to_vec();
             let refs: Vec<Cmd> = rest.iter().chain(outer).cloned().collect();
             let mut parts = Vec::with_capacity(branches.len());
@@ -4569,20 +4614,11 @@ pub(super) async fn load_resources(cluster: &Cluster, text: &str, cmds: &[Cmd]) 
     for c in cmds {
         match c {
             Cmd::Enrich { policy, .. } => {
-                let name = policy.rsplit(':').next().unwrap_or(policy).to_string();
+                let name = super::parser::split_policy(policy).1.to_string();
                 if res.enrich.contains_key(&name) {
                     continue;
                 }
-                let fields_in_order: Vec<String> = {
-                    let st = cluster.state();
-                    let Some(p) = st.metadata.xpack.get(crate::xpack::enrich::POLICIES, &name) else { continue };
-                    let cfg = p.get("config").and_then(Value::as_object).and_then(|m| m.values().next()).cloned().unwrap_or(Value::Null);
-                    match cfg.get("enrich_fields") {
-                        Some(Value::Arr(a)) => a.iter().map(Value::to_es_string).collect(),
-                        Some(Value::Str(s)) => vec![s.clone()],
-                        _ => Vec::new(),
-                    }
-                };
+                let Some(fields_in_order) = policy_fields(&cluster.state(), &name) else { continue };
                 if !warmed {
                     crate::xpack::enrich::warm(cluster).await;
                     warmed = true;

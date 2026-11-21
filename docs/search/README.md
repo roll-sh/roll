@@ -297,15 +297,18 @@ Elasticsearch-flavor.
   parts below the commands it commutes with (`ENRICH` in any mode, `EVAL`...), and a part with
   nothing to bound it stops at what the coordinating cluster's request breaker can hold (a
   `circuit_breaking_exception`). What follows runs on the coordinating
-  cluster over every part's result, and so does a breaker with no part of its own (`INLINE
-  STATS`, `FORK`, `ENRICH _coordinator`), over the parts' rows. Every cluster's part reads the
+  cluster over every part's result, and so does a breaker with no part of its own (a `SORT`
+  without a `LIMIT` the parts can run, `INLINE STATS`, `ENRICH _coordinator`), over the parts'
+  rows. Every cluster's part reads the
   same columns: the source resolved once across clusters, a field one cluster doesn't map
   reading null there. `METADATA _index` names remote indices `alias:index`, `ENRICH _remote`
   uses each cluster's own policy, `_coordinator` the local one, `_any` each cluster's own before
-  the first breaker and the local one after it; `ENRICH _remote` after `STATS` or
-  `ENRICH _coordinator`, and `LOOKUP JOIN` after `STATS` or `LIMIT`, are refused with
-  Elasticsearch's errors, and so is a policy missing on a cluster that needs it (`cannot find
-  enrich policy [p] on clusters [_local, far]`). A remote's `ENRICH` needs `monitor_enrich` there
+  the first breaker and the local one after it; `ENRICH _remote` after `STATS`, `FORK` or
+  `ENRICH _coordinator`, and `LOOKUP JOIN` after `STATS`, `FORK` or `LIMIT`, are refused with
+  Elasticsearch's errors (naming the command the parts stopped at), and so are a policy missing
+  on a cluster that needs it (`cannot find enrich policy [p] on clusters [_local, far]`) and a
+  policy whose enrich fields differ between clusters; a lookup index's field the clusters map
+  with different types is a union type. The mode (`_REMOTE:p` too) is read in any case. A remote's `ENRICH` needs `monitor_enrich` there
   (`remote_cluster` on the caller's role, carried over the link as the remote's cluster
   privileges; 403 without), after which the remote reads its own policy's index, as
   Elasticsearch's does. An exclusion of a remote's (`-far:x`, `far:-x`) is that remote's own;
@@ -334,9 +337,13 @@ Elasticsearch-flavor.
   column's type, `STATS` states of the kinds and over the columns the coordinating cluster's own
   compilation makes, sketches checked (`Hll::from_parts`), never sized from a count it sent. A
   `STATS` part that can't answer its states fails rather than answering nothing. Remote parts
-  still running when the query ends (an error, a client gone) are aborted. Queries
-  whose commands aren't the text's (`FORK` branches, subqueries, views, `TS`, `PROMQL`) read a
-  remote's rows through cross-cluster search on the coordinating cluster, without `_clusters`.
+  still running when the query ends (an error, a client gone) are aborted. Queries the
+  coordinating cluster doesn't cut into parts (`FORK`, subqueries, views, `TS`, `PROMQL`,
+  `SET unmapped_fields`) read the remotes' rows through cross-cluster search there, without
+  `_clusters`; in them `LOOKUP JOIN`, `ENRICH _remote`, and `ENRICH` in `_any` mode before any
+  `LIMIT`, `STATS`, `FORK` or `ENRICH _coordinator` are refused (Elasticsearch's placement
+  error where it has one, each `FORK` branch checked after the commands before it), never run
+  with the coordinating cluster's own policy or lookup index.
 - **Left**: suggesters over several clusters.
 
 `crates/search-control/tests/control.rs` `cross_cluster_search_between_a_persons_own_clusters`,

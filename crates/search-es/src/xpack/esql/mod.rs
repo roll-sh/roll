@@ -301,10 +301,12 @@ async fn run(ctx: &Ctx<'_>, req: &Request, body: &Value, part: Option<std::sync:
     // A remote's part runs only what it is, as this cluster parses it ([`ccs::admit_part`]): its
     // shape, its `ENRICH`es' `monitor_enrich` here (the `remote_cluster` privilege the link
     // carries) and their policies.
+    let mut enrich = Vec::new();
     let part = match part {
         Some(p) => {
             let parsed = parser::parse_with(&req.query, &req.params)?;
             ccs::admit_part(ctx, &parsed, &p)?;
+            enrich = ccs::enrich_fields(&ctx.state(), &parsed.cmds, &p);
             // A rows part with nothing to bound it answers at most this cluster's own cap when
             // the request names none: never everything it reads.
             let bounded = parsed.cmds.iter().any(|c| matches!(c, parser::Cmd::Limit(_)));
@@ -329,7 +331,7 @@ async fn run(ctx: &Ctx<'_>, req: &Request, body: &Value, part: Option<std::sync:
             return Err(EsError::illegal_state("this cluster's part of the query can't answer STATS partially"));
         }
         let shards = ccs::shards_of(ctx.cluster, stats.indices.as_deref());
-        out.insert(ccs::PART_FIELD.into(), ccs::encode_answer(&table, p.mode, stats.partial.as_ref(), shards));
+        out.insert(ccs::PART_FIELD.into(), ccs::encode_answer(&table, p.mode, stats.partial.as_ref(), shards, &enrich));
         out.shift_remove("columns");
         out.shift_remove("values");
         return Ok((out, table));

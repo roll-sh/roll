@@ -316,6 +316,65 @@ impl Ccs {
         legs.sort_by(|a, b| a.0.remote.alias.cmp(&b.0.remote.alias));
         Some((local, legs))
     }
+
+    /// A query naming linked remotes that [`run`] doesn't cut into parts (`FORK`, subqueries,
+    /// views, `TS`, `SET unmapped_fields`...) reads the remotes' rows here, through cross-cluster
+    /// search. A command reading each cluster's own policy or lookup index would read this
+    /// cluster's there, so it's refused: with Elasticsearch's placement error where it has one
+    /// (each `FORK` branch checked after the commands before it), else roll's. An `ENRICH` in
+    /// `_coordinator` mode, or in `_any` mode after a `LIMIT`, `STATS`, `FORK` or
+    /// `ENRICH _coordinator`, is this cluster's in Elasticsearch too, and runs.
+    pub fn check_fallback(&self, src: &str, spans: &[Span], cmds: &[Cmd]) -> EsResult<()> {
+        if let Some(Cmd::Union { branches, .. }) = cmds.first() {
+            for b in branches {
+                crate::stack::maybe_grow(|| self.check_fallback(&b.src, &b.spans, &b.cmds))?;
+            }
+        }
+        if !self.reads_remote(cmds) {
+            return Ok(());
+        }
+        check_placement(src, spans, cmds)?;
+        for (f, c) in cmds.iter().enumerate() {
+            let Cmd::Fork { branches, spans: at, .. } = c else { continue };
+            for (b, b_spans) in branches.iter().zip(at) {
+                let joined: Vec<Cmd> = cmds[..f].iter().chain(b).cloned().collect();
+                let joined_spans: Vec<Span> = if spans.len() >= f { spans[..f].iter().chain(b_spans).copied().collect() } else { Vec::new() };
+                check_placement(src, &joined_spans, &joined)?;
+                refuse_resources(src, &joined)?;
+            }
+        }
+        refuse_resources(src, cmds)
+    }
+
+    /// Whether the rows `cmds` start from include a linked remote's.
+    fn reads_remote(&self, cmds: &[Cmd]) -> bool {
+        match cmds.first() {
+            Some(Cmd::From { sources, .. } | Cmd::Ts { sources, .. }) => self.split(sources).is_some(),
+            Some(Cmd::Union { branches, .. }) => branches.iter().any(|b| crate::stack::maybe_grow(|| self.reads_remote(&b.cmds))),
+            _ => false,
+        }
+    }
+}
+
+/// Refuses the first command of `cmds`, a pipeline over remote rows read here
+/// ([`Ccs::check_fallback`]), that would read this cluster's policy or lookup index where
+/// Elasticsearch reads each cluster's.
+fn refuse_resources(src: &str, cmds: &[Cmd]) -> EsResult<()> {
+    const WHY: &str = "roll reads the remote clusters' rows here in a query with FORK, subqueries, views, TS or SET unmapped_fields";
+    let mut coordinator = false;
+    for c in cmds.iter().skip(1) {
+        match c {
+            Cmd::Limit(_) | Cmd::Stats { .. } | Cmd::Fork { .. } => coordinator = true,
+            Cmd::Enrich { policy, at, .. } => match enrich_mode(policy) {
+                "_coordinator" => coordinator = true,
+                "_any" if coordinator => {}
+                _ => return Err(super::exec::verification_at(src, *at, &format!("ENRICH [{policy}] can't use each cluster's own policy: {WHY}"))),
+            },
+            Cmd::LookupJoin { index_at, .. } => return Err(super::exec::verification_at(src, *index_at, &format!("LOOKUP JOIN can't use each cluster's own lookup index: {WHY}"))),
+            _ => {}
+        }
+    }
+    Ok(())
 }
 
 /// Runs `f` with `ccs` as the query's remotes.
@@ -453,10 +512,7 @@ fn commutes_with_limit(c: &Cmd) -> bool {
 }
 
 fn enrich_mode(policy: &str) -> &str {
-    match policy.split_once(':') {
-        Some((m, _)) => m,
-        None => "_any",
-    }
+    super::parser::split_policy(policy).0
 }
 
 /// Commands a part runs row by row (each cluster with its own policies and lookup indices).
@@ -574,34 +630,35 @@ pub fn cut(cmds: &[Cmd], parsed: usize) -> Cut {
 /// Commands left to the coordinating cluster that would read its own resources where
 /// Elasticsearch reads each cluster's: an `ENRICH _remote` or `LOOKUP JOIN`, or an `ENRICH` in
 /// `_any` mode before any `LIMIT`, `STATS` or `ENRICH _coordinator` (after one, it's the
-/// coordinator's, as there). Refused, naming the command the parts stopped at; never run here.
+/// coordinator's, as there). Refused with Elasticsearch's error, naming the command the parts
+/// stopped at (a `SORT ... | LIMIT` by its `SORT`, as Elasticsearch names a top-n); never run
+/// here.
 pub fn check_left_here(src: &str, spans: &[Span], cmds: &[Cmd], cut: &Cut) -> EsResult<()> {
-    let first = (1..cmds.len()).find(|k| !cut.part.contains(k));
-    let Some(first) = first else { return Ok(()) };
+    let Some(first) = (1..cmds.len()).find(|k| !cut.part.contains(k)) else { return Ok(()) };
+    let breaker = (1..cmds.len()).find(|&k| !runs_in_parts(&cmds[k])).unwrap_or(first);
+    let after = spans.get(breaker).map(|s| cmd_text(src, s)).unwrap_or_default();
     // A `LIMIT` or `STATS` the parts ran is behind everything left here.
     let mut coordinators = cut.part.iter().any(|&k| matches!(cmds[k], Cmd::Limit(_) | Cmd::Stats { .. }));
     for (k, c) in cmds.iter().enumerate().skip(first) {
         if cut.part.contains(&k) {
             continue;
         }
-        let at = spans.get(first).map(|s| cmd_text(src, s));
         match c {
             Cmd::Limit(_) | Cmd::Stats { .. } => coordinators = true,
             Cmd::Enrich { policy, at: e, .. } => match enrich_mode(policy) {
                 "_coordinator" => coordinators = true,
                 "_any" if coordinators => {}
-                _ => {
-                    let after = at.unwrap_or_default();
+                mode => {
+                    let limit = cmds[breaker..k].iter().position(|c| matches!(c, Cmd::Limit(_))).map(|l| breaker + l);
+                    if mode == "_remote" && limit.is_some_and(|l| cmds[l..k].iter().any(|c| matches!(c, Cmd::MvExpand(..)))) {
+                        return Err(super::exec::verification_at(src, *e, "MV_EXPAND after LIMIT is incompatible with remote ENRICH"));
+                    }
                     return Err(super::exec::verification_at(src, *e, &format!("ENRICH with remote policy can't be executed after {after}")));
                 }
             },
             Cmd::LookupJoin { .. } => {
-                let after = at.unwrap_or_default();
                 let start = spans.get(k).map_or(0, |s| s.start);
                 return Err(super::exec::verification_at(src, start, &format!("LOOKUP JOIN with remote indices can't be executed after {after}")));
-            }
-            Cmd::Fork { branches, .. } if branches.iter().flatten().any(|c| matches!(c, Cmd::LookupJoin { .. }) || matches!(c, Cmd::Enrich { policy, .. } if enrich_mode(policy) != "_coordinator")) => {
-                return Err(EsError::illegal_argument("roll can't run ENRICH or LOOKUP JOIN inside FORK over remote clusters yet"));
             }
             _ => {}
         }
@@ -717,7 +774,7 @@ fn cmd_text(src: &str, s: &Span) -> String {
 }
 
 /// Elasticsearch's checks on where commands that read each cluster's own resources may go in a
-/// query over remote clusters: `ENRICH _remote` not after `STATS`, `INLINE STATS` or
+/// query over remote clusters: `ENRICH _remote` not after `STATS`, `INLINE STATS`, `FORK` or
 /// `ENRICH _coordinator`, `LOOKUP JOIN` not after those, a `LIMIT` or a `SORT`. (Elasticsearch
 /// drops an `INLINE STATS` whose columns nothing reads first; roll refuses it as one that's read.)
 pub fn check_placement(src: &str, spans: &[Span], cmds: &[Cmd]) -> EsResult<()> {
@@ -728,7 +785,7 @@ pub fn check_placement(src: &str, spans: &[Span], cmds: &[Cmd]) -> EsResult<()> 
         let after = |b: Option<usize>| b.and_then(|b| spans.get(b)).map(|s| cmd_text(src, s));
         match c {
             // `LOOKUP JOIN`'s error names the nearest command before it that stops it.
-            Cmd::Stats { .. } | Cmd::InlineStats { .. } => {
+            Cmd::Stats { .. } | Cmd::InlineStats { .. } | Cmd::Fork { .. } => {
                 limited = Some(k);
                 coordinator.get_or_insert(k);
             }
@@ -762,7 +819,10 @@ pub fn check_placement(src: &str, spans: &[Span], cmds: &[Cmd]) -> EsResult<()> 
 fn policies(cmds: &[Cmd]) -> Vec<(String, String, usize)> {
     cmds.iter()
         .filter_map(|c| match c {
-            Cmd::Enrich { policy, policy_at, .. } => Some((policy.rsplit(':').next().unwrap_or(policy).to_string(), enrich_mode(policy).to_string(), *policy_at)),
+            Cmd::Enrich { policy, policy_at, .. } => {
+                let (mode, name) = super::parser::split_policy(policy);
+                Some((name.to_string(), mode.to_string(), *policy_at))
+            }
             _ => None,
         })
         .collect()
@@ -915,11 +975,13 @@ pub fn decode_acc(v: &Value) -> Result<Acc, String> {
     })
 }
 
-/// A part's result as it answers it ([`PART_FIELD`]).
-pub fn encode_answer(table: &Table, mode: Mode, partial: Option<&Partial>, shards: i64) -> Value {
+/// A part's result as it answers it ([`PART_FIELD`]), with the enrich fields of each policy it
+/// checked on this cluster ([`enrich_fields`]).
+pub fn encode_answer(table: &Table, mode: Mode, partial: Option<&Partial>, shards: i64, enrich: &[(String, Vec<String>)]) -> Value {
     let cols = |cols: &[Col]| Value::Arr(cols.iter().map(|c| crate::arr![c.name.clone(), c.ty.name()]).collect());
     let mut m = Map::new();
     m.insert("shards".into(), Value::from(shards));
+    m.insert("enrich".into(), Value::Arr(enrich.iter().map(|(n, f)| crate::arr![n.clone(), Value::Arr(f.iter().cloned().map(Value::Str).collect())]).collect()));
     match mode {
         Mode::Stats => {
             m.insert("columns".into(), cols(partial.map_or(&table.cols, |p| &p.input)));
@@ -943,6 +1005,22 @@ pub struct Answer {
     pub took: i64,
     pub documents_found: i64,
     pub values_loaded: i64,
+    /// Each policy it checked, with its enrich fields there.
+    pub enrich: Vec<(String, Vec<String>)>,
+}
+
+/// The enrich fields on this cluster of each policy a part's commands run or it was told to have
+/// ([`admit_part`] checked them all): its [`Answer::enrich`].
+pub fn enrich_fields(st: &crate::meta::ClusterState, cmds: &[Cmd], part: &Part) -> Vec<(String, Vec<String>)> {
+    let mut out: Vec<(String, Vec<String>)> = Vec::new();
+    for name in policies(cmds).into_iter().map(|(name, _, _)| name).chain(part.policies.iter().cloned()) {
+        if !out.iter().any(|(n, _)| *n == name)
+            && let Some(f) = super::exec::policy_fields(st, &name)
+        {
+            out.push((name, f));
+        }
+    }
+    out
 }
 
 /// Decodes a part's answer (already parsed, its bytes held on the breaker): every row exactly as
@@ -958,6 +1036,11 @@ pub fn decode_answer(v: &Value, mode: Mode) -> Result<Answer, String> {
     }
     let num = |k: &str| v.get(k).and_then(Value::as_i64).unwrap_or(0).max(0);
     let mut out = Answer { shards: p.get("shards").and_then(Value::as_i64).unwrap_or(0).clamp(0, i32::MAX as i64), took: num("took"), documents_found: num("documents_found"), values_loaded: num("values_loaded"), ..Answer::default() };
+    for e in p.get("enrich").and_then(Value::as_array).ok_or("no enrich fields")? {
+        let (Some(name), Some(fields)) = (pair(e, 0).and_then(Value::as_str), pair(e, 1).and_then(Value::as_array)) else { return Err("bad enrich fields".into()) };
+        let fields = fields.iter().map(|f| f.as_str().map(str::to_string)).collect::<Option<Vec<String>>>().ok_or("bad enrich fields")?;
+        out.enrich.push((name.to_string(), fields));
+    }
     match mode {
         Mode::Rows => {
             let mut rows = Vec::new();
@@ -1075,13 +1158,14 @@ pub async fn run(cluster: &crate::cluster::Cluster, ccs: &Ccs, q: &Query, filter
     // Only the query's own text (its commands as parsed, maybe the implicit limit after them),
     // with every cluster's columns its mappings' (`SET unmapped_fields` makes them each part's).
     if q.sql || q.spans.is_empty() || q.spans.len() + 1 < q.cmds.len() || q.settings.unmapped != super::parser::Unmapped::Default {
+        ccs.check_fallback(&q.src, &q.spans, &q.cmds)?;
         return Ok(None);
     }
     let cut = cut(&q.cmds, q.spans.len());
     let remote_sources: Vec<Vec<String>> = legs.iter().map(|(_, e)| e.clone()).collect();
-    let texts: Vec<String> = match remote_sources.iter().map(|s| part_text(&q.src, &q.spans, s, metadata, &cut.part, cut.append_limit)).collect::<Option<Vec<_>>>() {
-        Some(t) => t,
-        None => return Ok(None),
+    let Some(texts) = remote_sources.iter().map(|s| part_text(&q.src, &q.spans, s, metadata, &cut.part, cut.append_limit)).collect::<Option<Vec<String>>>() else {
+        ccs.check_fallback(&q.src, &q.spans, &q.cmds)?;
+        return Ok(None);
     };
     check_placement(&q.src, &q.spans, &q.cmds)?;
     check_left_here(&q.src, &q.spans, &q.cmds, &cut)?;
@@ -1271,14 +1355,43 @@ pub async fn run(cluster: &crate::cluster::Cluster, ccs: &Ccs, q: &Query, filter
                 w.add(msg);
             }
         }
-        match decode_answer(&v, cut.mode).and_then(|a| planned_columns(&a, &cut, &part_cmds, expected_rows.as_deref()).map(|()| a)) {
+        match decode_answer(&v, cut.mode) {
             Ok(a) => outcomes.push((leg.alias.clone(), leg.indices.clone(), Outcome::Done(a))),
-            Err(why) => return Err(EsError::illegal_state(format!("remote cluster [{}] answered a part roll can't read: {why}", leg.alias))),
+            Err(why) => return Err(unreadable(&leg.alias, &why)),
         }
     }
     if let Some((name, at, mut cs)) = missing.into_iter().next() {
         cs.sort_by(|a, b| (a != "_local", a).cmp(&(b != "_local", b)));
         return Err(super::exec::verification_at(&q.src, at, &format!("cannot find enrich policy [{name}] on clusters [{}]", cs.join(", "))));
+    }
+    // A policy's enrich fields are the same on every cluster that runs it, as Elasticsearch
+    // requires; then a part's columns are the ones planned for it, but for the types of what its
+    // cluster's own policies and lookup indices give it.
+    for (name, mode, at) in used.iter().filter(|(_, m, _)| m != "_coordinator") {
+        let mut sets: Vec<Vec<String>> = Vec::new();
+        if (mode == "_any" || !local_sources.is_empty())
+            && let Some(f) = super::exec::policy_fields(&cluster.state(), name)
+        {
+            sets.push(f);
+        }
+        for (alias, _, o) in &outcomes {
+            if let Outcome::Done(a) = o {
+                let Some((_, f)) = a.enrich.iter().find(|(n, _)| n == name) else { return Err(unreadable(alias, &format!("no enrich fields of policy [{name}]"))) };
+                sets.push(f.clone());
+            }
+        }
+        let mut differ: Vec<&str> = sets.iter().flatten().filter(|f| !sets.iter().all(|s| s.contains(*f))).map(String::as_str).collect();
+        differ.sort_unstable();
+        differ.dedup();
+        if !differ.is_empty() {
+            return Err(super::exec::verification_at(&q.src, *at, &format!("enrich policy [{name}] has different enrich fields across clusters; these fields are missing in some policies: [{}]", differ.join(", "))));
+        }
+    }
+    let varies = varies(&part_cmds, &res);
+    for (alias, _, o) in &outcomes {
+        if let Outcome::Done(a) = o {
+            planned_columns(a, &cut, &part_cmds, expected_rows.as_deref(), &varies).map_err(|why| unreadable(alias, &why))?;
+        }
     }
 
     // Merged: the local part first, then the remotes by alias.
@@ -1347,6 +1460,14 @@ pub async fn run(cluster: &crate::cluster::Cluster, ccs: &Ccs, q: &Query, filter
             let mut g = super::exec::Grouper::new(&src, aggs, by, &input)?;
             for p in partials {
                 if p.input.len() != input.len() || p.input.iter().zip(&input).any(|(a, b)| a.name != b.name || a.ty != b.ty) {
+                    // Types its cluster's own policy or lookup index gave it: the query's error.
+                    if let Some((a, b)) = p.input.iter().zip(&input).find(|(a, b)| a.ty != b.ty)
+                        && p.input.len() == input.len()
+                        && p.input.iter().zip(&input).all(|(a, b)| a.name == b.name)
+                        && varies.allows(&a.name)
+                    {
+                        return Err(EsError::new(400, "verification_exception", format!("Column [{}] is [{}] on one cluster and [{}] on another, from their own enrich policies or lookup indices: roll can't merge STATS over it", a.name, b.ty.name(), a.ty.name())));
+                    }
                     return Err(EsError::illegal_state("a cluster answered STATS over other columns than the query's: roll can't merge them"));
                 }
                 held.add((p.groups.len() as u64).saturating_mul(64), "<remote_cluster_response>")?;
@@ -1361,7 +1482,7 @@ pub async fn run(cluster: &crate::cluster::Cluster, ccs: &Ccs, q: &Query, filter
                 Table { cols: empty_cols()?, rows: Vec::new() }
             } else {
                 let mut original = std::mem::take(&mut stats.original_types);
-                let t = super::exec::union_parts(tables, &mut original)?;
+                let t = super::exec::union_parts(tables, &mut original, &|n| varies.allows(n))?;
                 stats.original_types = original;
                 t
             }
@@ -1386,11 +1507,85 @@ fn same_command(a: &Cmd, b: &Cmd) -> bool {
     }
 }
 
+/// What a part's answer may hold other than the columns this cluster compiled for it, because
+/// its commands read its own cluster's policies and lookup indices.
+enum Varies {
+    Nothing,
+    /// These columns' types: an `ENRICH`'s fields (the same on every cluster, checked first) and
+    /// what's computed from them, each cluster's policy index mapping them its own way.
+    Types(std::collections::HashSet<String>),
+    /// Any column: a `LOOKUP JOIN` adds its lookup index's fields as that cluster maps them.
+    Anything,
+}
+
+impl Varies {
+    fn allows(&self, name: &str) -> bool {
+        match self {
+            Varies::Nothing => false,
+            Varies::Types(names) => names.contains(name),
+            Varies::Anything => true,
+        }
+    }
+}
+
+/// Which of a part's columns its cluster's own resources decide ([`Varies`]); `res`: this
+/// cluster's, for the fields of a policy an `ENRICH` adds without `WITH`.
+fn varies(part_cmds: &[Cmd], res: &super::exec::Resources) -> Varies {
+    let mut names = std::collections::HashSet::new();
+    let mut enriched = false;
+    let reads = |e: &super::parser::Expr, names: &std::collections::HashSet<String>| {
+        let mut r = std::collections::HashSet::new();
+        super::exec::refs(e, &mut r);
+        r.iter().any(|n| names.contains(n))
+    };
+    for c in part_cmds {
+        match c {
+            Cmd::LookupJoin { .. } => return Varies::Anything,
+            Cmd::Enrich { policy, with, .. } => {
+                enriched = true;
+                match with {
+                    Some(w) => names.extend(w.iter().map(|(n, ..)| n.clone())),
+                    None => names.extend(res.enrich_columns(super::parser::split_policy(policy).1).unwrap_or_default().iter().map(|c| c.name.clone())),
+                }
+            }
+            Cmd::Eval(list) => {
+                for n in list {
+                    if reads(&n.expr, &names) {
+                        names.insert(n.name.clone());
+                    } else {
+                        names.remove(&n.name);
+                    }
+                }
+            }
+            Cmd::Rename(list) => {
+                for (from, to, _) in list {
+                    if names.remove(from) {
+                        names.insert(to.clone());
+                    } else {
+                        names.remove(to);
+                    }
+                }
+            }
+            Cmd::Sort(keys) => {
+                let carried: Vec<String> = keys.iter().enumerate().filter(|(_, k)| reads(&k.expr, &names)).map(|(k, _)| format!("{SORT_CARRY}{k}")).collect();
+                names.extend(carried);
+            }
+            _ => {}
+        }
+    }
+    if enriched { Varies::Types(names) } else { Varies::Nothing }
+}
+
+/// A remote's part answer roll can't read: hostile, or another version's.
+fn unreadable(alias: &str, why: &str) -> EsError {
+    EsError::illegal_state(format!("remote cluster [{alias}] answered a part roll can't read: {why}"))
+}
+
 /// A rows part's answer has the columns planned for it: exactly `expected` (names and types,
-/// the carried sort keys last) when this cluster compiled the part's commands, the policies'
-/// and lookup indices' columns included; else at least the carried sort keys. Full-text
-/// columns are never answered.
-fn planned_columns(a: &Answer, cut: &Cut, part_cmds: &[Cmd], expected: Option<&[Col]>) -> Result<(), String> {
+/// the carried sort keys last) when this cluster compiled the part's commands, but for the types
+/// [`Varies`] lets its cluster decide (a `LOOKUP JOIN`: any columns); else at least the carried
+/// sort keys. Full-text columns are never answered. Differing types merge as a union type.
+fn planned_columns(a: &Answer, cut: &Cut, part_cmds: &[Cmd], expected: Option<&[Col]>, varies: &Varies) -> Result<(), String> {
     if cut.mode != Mode::Rows {
         return Ok(());
     }
@@ -1398,8 +1593,8 @@ fn planned_columns(a: &Answer, cut: &Cut, part_cmds: &[Cmd], expected: Option<&[
     if cols.iter().any(|c| c.name.starts_with(super::fulltext::HIDDEN)) {
         return Err("a full-text column".into());
     }
-    if let Some(expected) = expected {
-        if cols.len() != expected.len() || cols.iter().zip(expected).any(|(c, e)| c.name != e.name || c.ty != e.ty) {
+    if let Some(expected) = expected.filter(|_| !matches!(varies, Varies::Anything)) {
+        if cols.len() != expected.len() || cols.iter().zip(expected).any(|(c, e)| c.name != e.name || (c.ty != e.ty && !varies.allows(&c.name))) {
             return Err("columns other than the query's".into());
         }
         return Ok(());
@@ -1511,10 +1706,17 @@ mod tests {
             let q = parse(q);
             assert_eq!(check_placement(&q.src, &q.spans, &q.cmds).unwrap_err().reason(), reason);
         }
-        // Whatever escapes the placement rules is refused rather than run here.
-        let q = parse("FROM far:items | INLINE STATS m = MAX(n) | ENRICH p | KEEP n, m, label");
-        let c = cut(&q.cmds, q.spans.len());
-        assert!(check_left_here(&q.src, &q.spans, &q.cmds, &c).is_err());
+        // Whatever escapes the placement rules is refused rather than run here, naming the
+        // command the parts stopped at as Elasticsearch does (a top-n by its `SORT`).
+        for (q, reason) in [
+            ("FROM far:items | INLINE STATS m = MAX(n) | ENRICH p | KEEP n, m, label", "Found 1 problem\nline 1:44: ENRICH with remote policy can't be executed after [INLINE STATS m = MAX(n)]@1:18"),
+            ("FROM far:items | SORT n | LIMIT 5 | WHERE n > 1 | ENRICH _remote:p", "Found 1 problem\nline 1:51: ENRICH with remote policy can't be executed after [SORT n]@1:18"),
+            ("FROM far:items | SORT n | LIMIT 5 | MV_EXPAND tag | ENRICH _remote:p", "Found 1 problem\nline 1:53: MV_EXPAND after LIMIT is incompatible with remote ENRICH"),
+        ] {
+            let q = parse(q);
+            let c = cut(&q.cmds, q.spans.len());
+            assert_eq!(check_left_here(&q.src, &q.spans, &q.cmds, &c).unwrap_err().reason(), reason);
+        }
         let q = parse("FROM far:items | LIMIT 2 | ENRICH p");
         let c = cut(&q.cmds, q.spans.len());
         assert!(check_left_here(&q.src, &q.spans, &q.cmds, &c).is_ok(), "after a LIMIT `_any` is the coordinator's");
@@ -1555,6 +1757,11 @@ mod tests {
         assert_eq!(check_placement(&q.src, &q.spans, &q.cmds).unwrap_err().reason(), "Found 1 problem\nline 1:43: LOOKUP JOIN with remote indices can't be executed after [LIMIT 2]@1:33");
         let q = parse("FROM items,far:items | SORT n | LIMIT 2 | ENRICH _remote:tag_label");
         assert!(check_placement(&q.src, &q.spans, &q.cmds).is_ok());
+        // The mode is read in any case; anything else is Elasticsearch's parse error.
+        let q = parse("FROM items,far:items | ENRICH _REMOTE:tag_label | ENRICH _Coordinator:p");
+        assert!(matches!(&q.cmds[1..], [Cmd::Enrich { policy: a, .. }, Cmd::Enrich { policy: b, .. }] if a == "_remote:tag_label" && b == "_coordinator:p"), "{:?}", q.cmds);
+        let e = super::super::parser::parse("FROM items,far:items | ENRICH foo:p", &[], &[]).unwrap_err();
+        assert_eq!((e.kind.as_ref(), e.reason()), ("parsing_exception", "line 1:31: Unrecognized value [foo], ENRICH policy qualifier needs to be one of [_ANY, _COORDINATOR, _REMOTE]"));
     }
 
     /// Values and states round-trip exactly; a crafted answer (nested multi-values, an unknown
