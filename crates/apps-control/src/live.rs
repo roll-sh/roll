@@ -1859,6 +1859,24 @@ impl EnvLive {
         *self.template.lock() = None;
     }
 
+    /// A file instances made from now on get (`path`, its contents), in place of one there: a
+    /// closed environment's trust bundle when its interception CA changes while it sleeps.
+    pub fn set_file(&self, path: &str, contents: &str) {
+        let with = |t: &Arc<Template>| {
+            let mut t = (**t).clone();
+            t.spec.files.retain(|(p, _)| p != path);
+            t.spec.files.push((path.to_string(), contents.to_string()));
+            Arc::new(t)
+        };
+        let mut tpl = self.template.lock();
+        if let Some(t) = tpl.as_ref() {
+            *tpl = Some(with(t));
+        }
+        if let Some((t, _)) = self.canary.lock().as_mut() {
+            *t = with(t);
+        }
+    }
+
     /// The service's registry login changed (None: it went): instances made from now on use it.
     pub fn set_registry(&self, login: Option<&crate::runtime::RegistryLogin>) {
         let strip = |t: &Arc<Template>| {

@@ -199,6 +199,105 @@ pub async fn materialize_with(r: &Remote<'_>, sha: &str, dir: &Path, submodules:
 
 /// The most submodules one tree brings in, every level counted.
 pub const MAX_SUBMODULES: usize = 32;
+/// What a tree's Git LFS objects add up to at most, and one at most.
+pub const MAX_LFS_BYTES: u64 = 2 << 30;
+pub const MAX_LFS_OBJECT: u64 = 1 << 30;
+/// An LFS pointer's first line, and the most a pointer file is.
+const LFS_POINTER: &str = "version https://git-lfs.github.com/spec/v1";
+const LFS_POINTER_MAX: u64 = 1024;
+
+/// A written tree's Git LFS pointers replaced by their objects (`build.lfs`; Vercel's, Netlify's):
+/// asked of the repository's LFS batch API (`<url>/info/lfs/objects/batch`, with its login),
+/// each downloaded from the address it answers through the public-only client (with only the
+/// headers it gives), checked against the pointer's sha256 and size as it's streamed, and written
+/// in the pointer's place. [`MAX_LFS_BYTES`] in all, [`MAX_LFS_OBJECT`] each. How many.
+pub async fn fetch_lfs(r: &Remote<'_>, dir: &Path) -> anyhow::Result<usize> {
+    let d = dir.to_path_buf();
+    let pointers = tokio::task::spawn_blocking(move || lfs_pointers(&d)).await??;
+    if pointers.is_empty() {
+        return Ok(0);
+    }
+    let total: u64 = pointers.iter().map(|(_, _, size)| size).sum();
+    anyhow::ensure!(total <= MAX_LFS_BYTES, "its LFS objects are {total} bytes, more than {MAX_LFS_BYTES}");
+    let http = crate::net::client(r.allow_private, std::time::Duration::from_secs(600));
+    let batch_url = format!("{}/info/lfs/objects/batch", r.url.trim_end_matches('/'));
+    let mut done = 0;
+    for chunk in pointers.chunks(100) {
+        let objects: Vec<serde_json::Value> = chunk.iter().map(|(_, oid, size)| serde_json::json!({ "oid": oid, "size": size })).collect();
+        let mut req = http.post(&batch_url).header("accept", "application/vnd.git-lfs+json").header("content-type", "application/vnd.git-lfs+json").json(&serde_json::json!({ "operation": "download", "transfers": ["basic"], "objects": objects }));
+        if let Some(c) = &r.auth {
+            req = req.basic_auth(&c.username, Some(&c.password));
+        }
+        let res = req.send().await.map_err(|e| anyhow::anyhow!("LFS batch: {}", e.without_url()))?;
+        anyhow::ensure!(res.status().is_success(), "LFS batch answered {}", res.status());
+        let answer: serde_json::Value = serde_json::from_slice(&crate::net::read_bounded(res, 4 << 20).await)?;
+        for (path, oid, size) in chunk {
+            let o = answer["objects"].as_array().and_then(|a| a.iter().find(|o| o["oid"] == *oid)).ok_or_else(|| anyhow::anyhow!("LFS batch didn't answer {oid}"))?;
+            if let Some(e) = o.get("error") {
+                anyhow::bail!("LFS object {oid}: {}", e["message"].as_str().unwrap_or("refused"));
+            }
+            let href = o.pointer("/actions/download/href").and_then(|h| h.as_str()).ok_or_else(|| anyhow::anyhow!("LFS object {oid} has no download"))?;
+            let u = url::Url::parse(href)?;
+            anyhow::ensure!(u.scheme() == "https" || (r.allow_private && u.scheme() == "http"), "LFS object {oid}: its download isn't https");
+            let mut get = http.get(href);
+            for (k, v) in o.pointer("/actions/download/header").and_then(|h| h.as_object()).into_iter().flatten() {
+                if let Some(v) = v.as_str() {
+                    get = get.header(k.as_str(), v);
+                }
+            }
+            let mut res = get.send().await.map_err(|e| anyhow::anyhow!("LFS object {oid}: {}", e.without_url()))?;
+            anyhow::ensure!(res.status().is_success(), "LFS object {oid}: {}", res.status());
+            // Streamed to a file beside the pointer, checked as it comes, then put in its place.
+            use sha2::Digest;
+            use std::io::Write;
+            let part = path.with_extension("roll-lfs");
+            let mut f = std::fs::OpenOptions::new().write(true).create_new(true).open(&part)?;
+            let (mut h, mut n) = (sha2::Sha256::new(), 0u64);
+            while let Some(c) = res.chunk().await? {
+                n += c.len() as u64;
+                anyhow::ensure!(n <= *size, "LFS object {oid} is longer than its pointer says");
+                h.update(&c);
+                f.write_all(&c)?;
+            }
+            drop(f);
+            if n != *size || hex::encode(h.finalize()) != *oid {
+                let _ = std::fs::remove_file(&part);
+                anyhow::bail!("LFS object {oid} isn't what its pointer names");
+            }
+            std::fs::rename(&part, path)?;
+            done += 1;
+        }
+    }
+    Ok(done)
+}
+
+/// A tree's LFS pointer files (regular files, never links): their path, sha256 and size.
+fn lfs_pointers(dir: &Path) -> anyhow::Result<Vec<(std::path::PathBuf, String, u64)>> {
+    let (mut out, mut stack, mut seen) = (Vec::new(), vec![dir.to_path_buf()], 0usize);
+    while let Some(d) = stack.pop() {
+        for e in std::fs::read_dir(&d)? {
+            let e = e?;
+            seen += 1;
+            anyhow::ensure!(seen <= MAX_FILES, "more than {MAX_FILES} files");
+            let m = std::fs::symlink_metadata(e.path())?;
+            if m.is_dir() {
+                stack.push(e.path());
+            } else if m.is_file() && m.len() <= LFS_POINTER_MAX {
+                let text = std::fs::read_to_string(e.path()).unwrap_or_default();
+                if !text.starts_with(LFS_POINTER) {
+                    continue;
+                }
+                let field = |k: &str| text.lines().find_map(|l| l.strip_prefix(k)).map(str::trim);
+                let (Some(oid), Some(size)) = (field("oid sha256:"), field("size ").and_then(|s| s.parse::<u64>().ok())) else { continue };
+                if oid.len() == 64 && oid.bytes().all(|b| b.is_ascii_hexdigit()) {
+                    anyhow::ensure!(size <= MAX_LFS_OBJECT, "LFS object {oid} is {size} bytes, more than {MAX_LFS_OBJECT}");
+                    out.push((e.path(), oid.to_ascii_lowercase(), size));
+                }
+            }
+        }
+    }
+    Ok(out)
+}
 
 fn materialize_at<'a>(r: &'a Remote<'_>, sha: &'a str, dir: &'a Path, levels: Option<u8>, budget: &'a mut usize) -> std::pin::Pin<Box<dyn std::future::Future<Output = anyhow::Result<usize>> + Send + 'a>> {
     Box::pin(async move {

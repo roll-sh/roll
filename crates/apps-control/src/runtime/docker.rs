@@ -1116,6 +1116,12 @@ impl Runtime for Docker {
         Ok(())
     }
 
+    fn set_interception(&self, network: &str, i: Option<std::sync::Arc<dyn roll_intercept::Interception>>) {
+        if let Some(p) = &self.egress {
+            p.set_interception(network, i);
+        }
+    }
+
     fn closes_egress(&self) -> bool {
         self.egress.is_some()
     }

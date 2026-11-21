@@ -291,6 +291,9 @@ pub trait Runtime: Send + Sync {
     async fn build_egress(&self, _project: &str) -> anyhow::Result<Option<BuildEgress>> {
         Ok(None)
     }
+    /// The interception (roll secrets' placeholders swapped for the hosts its keys are bound to)
+    /// a closed network's egress proxies run for those hosts, or none.
+    fn set_interception(&self, _network: &str, _i: Option<std::sync::Arc<dyn roll_intercept::Interception>>) {}
     /// The project's closed builds' builder and network, once it has no service left.
     async fn remove_build_egress(&self, _project: &str) {}
     /// Closed builds' networks nothing runs on any more (a process that stopped without
