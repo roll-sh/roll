@@ -5108,8 +5108,13 @@ roll MCP adds no cut-off tool: #304 is a person's call, since it can revoke the 
 
 **State, 2026-11-21 03:10.** #455 is on main (f9bb26c17, CI green): roll code's keys out of `Debug`,
 and webhooks' and review apps' signing secrets sealed. Still open:
-- #501 members v1: the final gate on the main-merged tree, past the secrets suites on SQLite and
-  Postgres; then #445 and #501 land as batch 7, ahead of previews' #524;
+- #501 members v1: its last gate merged a main from before batch 6, so it's merging main again and
+  fitting members' scoped `maker_reaches` to #520's placeholders and #513's decoys (only members who
+  manage a project see them). Then #445 and #501 land as batch 7, ahead of previews' #524;
+- two follow-ups from batch 6 (`fix/secrets-ca-shrink-decoy-mail`): a consumer's interception CA ends
+  as soon as its bound hosts shrink (a placeholder revoked, hosts cleared, a cut-off), not only with
+  the consumer, and a decoy planted from an admin's session mails that person, not the operator;
+- the thirty-fourth product review, cold, on main;
 - the #432 decoy-oracle fix: computes pinned by digest, and each image's pre-auth answers learned from a
   compute of that image (about 2 s per image, never waking a suspended endpoint). Its full gate is
   running.
