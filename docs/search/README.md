@@ -947,7 +947,7 @@ deterministic (#396).
    processor): roll serves `completion` and `chat_completion` inference already, but the Playground
    compares retrieval only. Chat over hits with citations, the code for a RAG app, and a chat API
    (OpenSearch's processor shape on OpenSearch-flavor clusters). Design: [rag.md](rag.md).
-12. **The first query in a minute** (the guides are #604, landing; writing them found: an API
+12. **The first query in a minute** (the guides landed in #604; writing them found: an API
    key's `encoded` value works only at the cluster's own host, so clients behind a shared address
    re-encode it as `<id>@<cluster>:<key>`; a `data` key can't post click events, so an app tracking
    clicks needs a second key; a `semantic_text` field with no `inference_id` fails, because its
@@ -958,10 +958,12 @@ deterministic (#396).
    first query with a key made inline and a snippet per language; and user guides per workload (site
    search, e-commerce: facets and typo tolerance; logs; RAG; SaaS tenants: an index per tenant or
    filtered keys), apart from this operator- and internals-facing README.
-13. **A web crawler for site search** (Elastic Open Crawler, Algolia Crawler, DocSearch,
-   Meilisearch's docs-scraper): connectors (#318) sync Postgres and S3; getting a website in is the
-   customer's job. A runner on the owner node like connectors, fetching through `roll_net::PublicOnly`,
-   with sitemaps, robots.txt, extraction rules and a schedule.
+13. **A web crawler for site search** (design in [crawler.md](crawler.md); Elastic Open Crawler,
+   Algolia Crawler, DocSearch, Meilisearch's docs-scraper): connectors (#318) sync Postgres and S3;
+   getting a website in is the customer's job. A native connector roll runs (`roll_web_crawler`,
+   on #318's runner) taking Open Crawler's config, fields and ids, fetching through
+   `roll_net::PublicOnly` with redirects checked hop by hop, robots.txt always honoured, domain
+   verification for more than small crawls, and a purge that a site outage can't empty.
 14. **Semantic search on OpenSearch-flavor clusters** (AWS OpenSearch neural search):
    `neural`, `neural_sparse` and `agentic` are names only (`meta/aliases.rs`); ML Commons
    (`_plugins/_ml/connectors`, `models/_register`) and the `text_embedding`/`ml_inference` processors
