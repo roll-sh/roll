@@ -236,6 +236,12 @@ type Build = {
    *  come from. A token that sets it needs read on each (the catalogue lends it), so a writer to
    *  the service's repo can't build a repo it can't read by pinning it. */
   submodule_repos?: string[];
+  /** The language's OpenTelemetry agent in a generated Dockerfile (default false): Node's
+   *  (`@opentelemetry/auto-instrumentations-node`, by NODE_OPTIONS' --require) and Python's
+   *  (`opentelemetry-distro`, bootstrapped, by PYTHONPATH's sitecustomize), pinned; started only
+   *  while the environment's traces are on, joined to the app's own value; the plan's `otel`
+   *  says which. None in the tree's own Dockerfile or another language (a note says so). */
+  otel?: boolean;
   /** A Git URL service's Git LFS objects in place of their pointers (default false): from the
    *  repository's LFS batch API, checked against each pointer's sha256 and size, 2 GiB in all. */
   lfs?: boolean;
