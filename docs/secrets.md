@@ -6050,8 +6050,8 @@ and webhooks' and review apps' signing secrets sealed. Still open:
     screenshot links' key are sealed. Without a key a pasted value is refused, and the signing key
     lives in memory. An upgraded database keeps nothing in its file or WAL;
   - search: `fix/search-security-1120` and #318;
-  - roll code: `fix/code-webhooks-sealed-at-rest`, webhook URLs sealed and no clear signing secret
-    without a key.
+  - roll code: done, #627 (4af6bb3b5). Webhooks' and review apps' URLs are sealed, nothing is made
+    without `ROLL_SECRET_KEY`, and an upgraded database keeps no clear URL or secret.
 - **Batch 6's follow-ups:** #582, gated green. A consumer's CAs end as soon as it loses a host;
   `maker_unreachable` (403) when a placeholder's or a chosen reference's maker no longer reaches it;
   a decoy planted from a session mails that person.
