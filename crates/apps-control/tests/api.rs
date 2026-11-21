@@ -4495,6 +4495,24 @@ async fn a_worker_follows_its_streams_backlog() {
     let states: Vec<&str> = env["instances"].as_array().unwrap().iter().map(|i| i["state"].as_str().unwrap()).collect();
     assert!(!states.contains(&"crashed"), "{states:?}");
     assert_eq!(Fake::count(&w.fake.counts.starts), starts, "none started again");
+    // A floor of 0 (KEDA's scale to zero): caught up, the last one goes; a backlog starts one.
+    let (st, s) = call(&w.api, "PATCH", &format!("/v1/apps/services/{id}"), Some(json!({"run": {"min_instances": 0}}))).await;
+    assert_eq!((st, &s["run"]["min_instances"]), (StatusCode::OK, &json!(0)), "{s}");
+    let (_, r) = call(&w.api, "POST", &format!("/v1/apps/services/{id}/environments/production/redeploy"), Some(json!({}))).await;
+    assert_eq!(settled(&w, &id, "production", r["id"].as_str().unwrap()).await["status"], "active");
+    for (lag, want) in [(0, 0), (5, 1)] {
+        BACKLOG.store(lag, Ordering::SeqCst);
+        for _ in 0..200 {
+            w.apps.scale_workers().await;
+            live.tick().await;
+            if up(&w) == want {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert_eq!(up(&w), want, "{lag} behind with a floor of 0");
+    }
+    BACKLOG.store(0, Ordering::SeqCst);
     assert_eq!(call(&w.api, "PATCH", &format!("/v1/apps/services/{id}"), Some(json!({"run": {"scale": {"stream": "orders", "group": "g"}}}))).await.0, StatusCode::BAD_REQUEST, "a stream by its id, never a name");
     // Becoming a web service drops it (a web service scales on its requests).
     let (st, s) = call(&w.api, "PATCH", &format!("/v1/apps/services/{id}"), Some(json!({"run": {"type": "web"}}))).await;

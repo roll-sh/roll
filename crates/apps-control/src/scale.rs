@@ -35,7 +35,10 @@ impl Apps {
                         let level = v.max(0.0).ceil() as u64;
                         l.set_wanted(sc.instances(level, run.min_instances, run.max_instances), Some(level));
                     }
-                    Err(why) => l.note_scale(&format!("scale: {why}")),
+                    Err(why) => {
+                        l.forget_backlog();
+                        l.note_scale(&format!("scale: {why}"));
+                    }
                 }
                 continue;
             }
@@ -53,7 +56,10 @@ impl Apps {
                     l.note_scale("");
                     l.set_wanted(sc.instances(lag, run.min_instances, run.max_instances), Some(lag));
                 }
-                Err(e) => l.note_scale(&format!("scale: reading {}'s lag: {e:#}", sc.group)),
+                Err(e) => {
+                    l.forget_backlog();
+                    l.note_scale(&format!("scale: reading {}'s lag: {e:#}", sc.group));
+                }
             }
         }
     }
