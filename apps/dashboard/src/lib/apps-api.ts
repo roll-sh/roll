@@ -572,6 +572,8 @@ export interface EnvironmentPut {
   log_retention_days?: 7 | 30 | 90 | null;
   /** Approvals a deployment needs before it goes live (0 or null: none). */
   approvals?: number | null;
+  /** A deploy status badge anyone may load. */
+  badge?: boolean;
   /** Its deploys post commit statuses and GitHub Deployments (false: someone else reports them). */
   report?: boolean;
   /** What its code may reach from the next deploy: roll and `hosts` only, or anything. null: open. */
@@ -691,6 +693,8 @@ export interface Environment extends EnvironmentSummary {
   log_retention_days?: number;
   /** People other than a deployment's author who approve it before it goes live (0–3). */
   approvals?: number;
+  /** Its deploy status badge (an SVG for a README), when it has one. */
+  badge_url?: string;
   /** Its deploys are reported to the Git host (commit statuses, GitHub Deployments); false:
    *  someone else reports them (roll previews' `pv-` environments). */
   report?: boolean;
