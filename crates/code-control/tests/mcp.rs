@@ -148,6 +148,9 @@ async fn transport_sessions_and_protocol() {
         // What can't be undone asks a person first: a closed change, a preview's data.
         let destructive = ["close_change", "stop_preview"].contains(&t["name"].as_str().unwrap());
         assert_eq!(t["annotations"]["destructiveHint"], destructive, "{}", t["name"]);
+        // A read, or only PUTs and DELETEs: retrying it is safe.
+        let idempotent = read_only || ["dequeue_change", "stop_preview", "release_agent_work"].contains(&t["name"].as_str().unwrap());
+        assert_eq!(t["annotations"]["idempotentHint"], idempotent, "{}", t["name"]);
         if open || ["read_file", "land", "comment"].contains(&t["name"].as_str().unwrap()) {
             assert_eq!(t["annotations"]["openWorldHint"], open, "{}", t["name"]);
         }

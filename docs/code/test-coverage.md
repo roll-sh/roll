@@ -484,7 +484,7 @@ envelope `{event, delivery, webhook, repo{id, full_name, default_branch, visibil
 | a revoked token ends its session (401) and can't start one | `tokens.rs::tokens_are_listed_and_revoked_everywhere_at_once` |
 | all four versions and the default, initialize inside a batch (400), empty batch, client responses and notification-only batches (202), one bad entry in a batch, `resources/list` and `prompts/list`, `tools/call` without arguments or a name, Origin edge cases, `GET` `Allow`, `DELETE` without a session | `mcp.rs::protocol_edges` |
 | a never-valid token: 401 on initialize, and it ends the session it's used on; anonymous callers can't use or end another token's session | `mcp.rs::invalid_tokens_and_foreign_sessions` |
-| `tools/list` is exactly the tools of mcp.md, each with `readOnlyHint`, and `destructiveHint` only where it can't be undone (`close_change`, `stop_preview`) | `mcp.rs::transport_sessions_and_protocol` |
+| `tools/list` is exactly the tools of mcp.md, each with `readOnlyHint`, `destructiveHint` only where it can't be undone (`close_change`, `stop_preview`), and `idempotentHint` on reads and on what only PUTs or DELETEs | `mcp.rs::transport_sessions_and_protocol` |
 | event-stream answers hold one of the caller's stream slots (429 past the limit) | `streams.rs::mcp_event_stream_answers_share_the_callers_slots` |
 
 ## CLI (`roll code`)
