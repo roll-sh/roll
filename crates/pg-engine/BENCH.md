@@ -530,6 +530,71 @@ Foreign load 1.5-3.3 cores in every pass.
 
 Lane A held 3.7-5.2 foreign cores (other agents' runs) through all three: every pair flagged.
 
+## Analytic CPU, round 10 (2026-11-21, agent 280)
+
+HANDOFF "Analytic CPU, round 10" has what changed. Lane C (the engine in a container on CPUs
+14,15,32,33, `--memory 8g`; the client on 16,17,34,35), TPC-H SF1 loaded by the base, a 2 GB cache,
+`max_parallel_workers_per_gather=2`, `max_parallel_workers=8`. Harness: agent 276's copied to
+`~/.cache/a280/tpch/` (`pair.sh`; its `perf stat` window is now `median * (reps + 1) * 2 + 4` s:
+the old `median * 3.5 + 4` closed before a third run that ran slower than the probe run and
+undercounted q21 by 22% once), each pair in its own `tools/lane.sh c` hold. Plain dist builds
+(`tools/dist.sh`): **b1** origin's `1c0a79d67`; **n2** the first three commits; **n3** cand/a280
+(with the fourth). Earlier: **b0** round 9's head before it landed (`059fb33d8` + cand/a276),
+**n1** b0 with the dropped item 1 and the EXTRACT commit. The lane was never quiet (foreign cores
+per arm below): gates decided on user instructions.
+
+### The changes, gated (user instructions a run, G, and % per pair)
+
+**n2 against b1 (3 pairs)**
+
+| query | b1 | n2 | instructions % per pair | cycles % per pair |
+|---|---|---|---|---|
+| q22 | 0.899 | 0.663 | -26.21 / -26.28 / -26.25 | -18.1 / -22.1 / -17.3 |
+| q04 | 2.086 | 1.855 | -11.05 / -11.10 / -11.11 | -8.6 / -2.6 / -10.6 |
+| q21 | 8.071 | 7.368 | -8.68 / -8.80 / -8.67 | -3.6 / -4.4 / -8.6 |
+| q09 | 10.154 | 9.772 | -3.73 / -3.76 / -3.79 | -0.6 / -3.6 / -2.3 |
+| q08 | 1.683 | 1.680 | -0.23 / -0.18 / -0.16 | +4.1 / -2.9 / -2.5 |
+| q07 | 4.336 | 4.333 | -0.07 / +0.04 / -0.18 | +1.1 / -0.9 / -2.5 |
+| q20 | 1.438 | 1.438 | -0.10 / -0.01 / -0.00 | +5.6 / +1.5 / -2.2 |
+| q02 | 2.763 | 2.764 | +0.00 / +0.02 / +0.01 | +4.5 / -4.2 / +0.1 |
+
+foreign cores per arm: b1 2.84 3.19 3.15; n2 2.94 3.15 3.18. (q12, not in these pairs, was +1.01%
+in n2's pass of the 22: the fourth commit's cause.)
+
+**n3 against b1 (2 pairs)**
+
+| query | b1 | n3 | instructions % per pair | cycles % per pair |
+|---|---|---|---|---|
+| q22 | 0.899 | 0.666 | -25.94 / -25.83 | -16.4 / -20.7 |
+| q04 | 2.086 | 1.855 | -11.09 / -11.11 | -8.3 / -12.8 |
+| q21 | 8.076 | 7.381 | -8.55 / -8.65 | -7.0 / -12.5 |
+| q09 | 10.156 | 9.772 | -3.77 / -3.79 | -4.0 / -15.6 |
+| q12 | 6.216 | 6.150 | -1.05 / -1.06 | -3.1 / -10.1 |
+| q02 | 2.763 | 2.764 | +0.00 / +0.01 | -6.2 / -6.9 |
+
+foreign cores per arm: b1 3.38 3.19; n3 3.24 2.29.
+
+**Dropped item 1 (n1 against b0, one pair, with the EXTRACT commit)**: q20 +0.12%, q21 +0.41,
+q02 +0.14, q07 -0.14, q08 -0.07, q09 -2.27 (EXTRACT), q22 +0.50 (the drift, below).
+
+### The 22, base against cand/a280 (b1 against n3, one pair, plain dist)
+
+103.80 -> 102.09 G user instructions (-1.64%): q22 -26.07% (0.898 -> 0.664 G), q04 -11.14 (2.087 ->
+1.855), q21 -9.56 (8.143 -> 7.365), q09 -3.78 (10.155 -> 9.772), q12 -1.06, the rest within +-0.2.
+VmHWM 1,678 -> 1,684 MB. Foreign cores b1 3.30, n3 2.85. All 22 result hashes PostgreSQL's (equal
+to round 9's).
+
+### q22's drift (item 3)
+
+b0 against n1 (no change to q22's path): `perf stat` of the engine, 10 runs: 896.36 -> 901.13 M
+user instructions a run (+0.53%); an idle 4.6 s window 0.19-0.24 M. 200 runs a build, `perf record
+-c 1000003`: 172,869 / 175,848 samples; mimalloc's slow paths 251 -> 1,084 (`_mi_malloc_generic` 78
+-> 325, `mi_find_page` 46 -> 293, `_mi_page_free_collect` 92 -> 278,
+`mi_heap_malloc_zero_aligned_at_generic` 35 -> 188), no other function's share moved past its
+sampling noise. b1 against n3, the same profile: the workers' mimalloc share 8.21% -> 2.37%, slow
+paths 0.68 -> 0.19%; libc `memcmp` 16.8 -> 11.6% (the store's key compares are most of what is
+left).
+
 ## Analytic CPU, round 9 (2026-11-21, agent 276)
 
 HANDOFF "Analytic CPU, round 9" has what changed. Lane C (the engine in a container on CPUs

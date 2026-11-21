@@ -12106,6 +12106,75 @@ at open, a compaction): older builds ignore the manifest's `format` and fail on 
   the probe needs from the OS page cache, as PostgreSQL's 8 kB page), each a format change for
   its own round.
 
+## Analytic CPU, round 10 (agent 280)
+
+TPC-H SF1 on lane C, plain dist builds only (BENCH.md "Analytic CPU, round 10" has the tables).
+Base `1c0a79d67` (cand/a275 and cand/a276 landed); data loaded by the base. Harness: agent 276's
+copied to `~/.cache/a280/tpch/` (`pair.sh`, ONE pair per `tools/lane.sh c` hold). **Lane C was
+never quiet** (2.3-3.4 foreign cores per arm, lane.sh's 6-7.4): gates decided on user
+instructions, which repeated within 0.1% from pair to pair. Every result hash equal to the base's
+(and so PostgreSQL's). One candidate, `cand/a280` (four code commits and this section).
+
+- **q22's drift (item 3) is the allocator, not q22's code.** It reproduced between two builds
+  60 lines apart that touch nothing q22 runs (the dropped item 1 and this round's EXTRACT
+  change against round 9's head: +0.50% in a pair, the exact `perf stat` counts 896.4 -> 901.1 M a run).
+  Not idle time (an idle engine retires 0.2 M user instructions in q22's 4.6 s window) and not
+  NOPs (276). A profile of 200 runs of q22 per build (`-c 1000003`, ~175k samples each,
+  `~/.cache/a280/tpch/q22big.sh`): mimalloc's slow paths (`_mi_malloc_generic`,
+  `mi_find_page`, `_mi_page_free_collect`, `mi_heap_malloc_zero_aligned_at_generic`) 251 ->
+  1,084 samples, +0.47% of the total: the +0.5%. The scan workers allocate a few values per row
+  and free values the other threads allocated; how often a worker's free list runs dry and it
+  goes looking for a page depends on the threads' timing, which any change to the binary moves.
+  So q22 (and the other short, allocation-heavy queries: q16, q13) drift with unrelated changes.
+  Where the workers' allocations came from (`perf record --call-graph lbr`): the NOT EXISTS
+  lookup of orders (`Lookup::first_row`: the index prefix cloned, `prefix_end` made, and every
+  entry's row key copied into a Vec before the first was looked at, ~10 orders a customer), the
+  store's copies of those entries (`Cursor::take`), the index key's encoding. The fix is the
+  third commit below: the workers' mimalloc share of q22 8.21% -> 2.37%, its slow paths 0.68 ->
+  0.19% (of a total 26% smaller).
+- **cand/a280, first commit: EXTRACT of a date's year, month or day with a constant unit** is a
+  kernel call that reads the unit once (`datetime::extract_date_field`, compiled in
+  `kernel::compile`): `p_extract` lowercased the unit into a String and looked it up
+  (`decode_units`' token search) every row: 2.6% of q09 (`EXTRACT(year FROM o_orderdate)`, a
+  group key over the joined rows). Other units and types as before.
+- **Second commit: a batch filter's string IN list / = ANY of items of 8 bytes or fewer** compares
+  each row's string with the items as (length, word) pairs (`VB::StrIn` `short`, `word8`), only
+  for a length some item has: the slice compare was a `memcmp` call an item of the row's length
+  (q22's seven 2-byte country codes: 3.6% of q22 in `memcmp` from `VB::eval`). The first version
+  made every row's word: q12's `l_shipmode IN ('MAIL', 'SHIP')` (most rows of other lengths)
+  +1.01%; with the lengths checked first (the fourth commit) -1.06%.
+- **Third commit: a semi or anti join's lookup of a key not unique reads its entries one at a
+  time and stops at the first whose row passes** (`Lookup::first_row_scanned`), as
+  ExecNestLoop's inner scan stops; statistics counted as before (rows read up to the match; a row
+  left to the executor's thread counts the visible rest). `Lookup::rows` makes the index key and
+  its range's end in buffers the worker keeps (`LookupScratch::start`, `end`), not allocated a
+  lookup (a cached small table's lookups too: q09's supplier).
+- **Gates** (user instructions a run, plain dist, base b1 against the head, 3 pairs then 2 with the
+  fourth commit): q22 -26.21 / -26.28 / -26.25% (0.899 -> 0.663 G), q04 -11.05 / -11.10 /
+  -11.11, q21 -8.68 / -8.80 / -8.67, q09 -3.73 / -3.76 / -3.79, q08 -0.2, q07 / q20 / q02
+  within +-0.2; with the fourth: q12 -1.05 / -1.06, the others the same.
+- **The 22, base against cand/a280** (one pair): 103.80 -> 102.09 G user instructions (-1.64%):
+  q22 -26.1%, q04 -11.1, q21 -9.6, q09 -3.8, q12 -1.1, the rest within +-0.2. VmHWM 1,678 ->
+  1,684 MB. Against pgrust's 90.4 G (round 6's) 1.13x, from 1.15x.
+- **Dropped: item 1** (stored-bytes compares for rows without a header in index and bitmap heap
+  scans' rechecks and filters; patch `~/.cache/a280/patches/0001-*.patch`). Its premise doesn't
+  hold: every table row is written with a header (`exec::toast::encode`, a bulk load's COPY
+  too), so `scan::row_data_fast` already took them; TPC-H's rows carry heap TIDs
+  (`stored_tid` and `split_header_tid` do work on every q20 row). Deciding the filter before the
+  row is made, the patch's other half, measured nothing (q20 +0.12%, q21 +0.41%, one pair). 276's
+  "first cause" of its stored filter not running was only its second (the outer row's equality).
+- **Not done**: item 2 beyond EXTRACT. q09's pairs already reach the aggregation unbuilt
+  (`Joined::Pair` to `Partials::row`); what is left over them is `K::num`'s per-column value to
+  i128 conversions (4.8% of q09) and the intermediate stages' rows (`pipe::joined`,
+  `truncate_row` ~3% each: a stage holds its outer rows as rows for its batch, so not building
+  them means holding (outer, inner span) pairs: a change to pipe.rs and lookup.rs's batch). The
+  displaced-row list a reordered heap's scan works out per statement (`sizing::displaced_inserts`,
+  ~5% of q22 on the leader) could be cached in the heap model, keyed on a change stamp it doesn't
+  have; not worth ~0.05% of the 22 against that risk.
+- **Left** (largest first): the store's key compares (`memcmp` from `Lookup::batch`'s multi-get
+  6.9% of q09, from `Block::seek` / `Cursor::head` ~11% of q22: agent 277's); q09's intermediate
+  stage rows; the typed walk and `fill_batch_with` of the lineitem scans.
+
 ## Analytic CPU, round 9 (agent 276)
 
 TPC-H SF1 on lane C, plain dist builds only (BENCH.md "Analytic CPU, round 9" has the tables).
