@@ -1055,6 +1055,9 @@ mod tests {
         // That node has no sealing key: a password written to it is refused, never stored.
         let refused = call(&fresh, "PUT", "/_connector/z/_configuration", r#"{"values":{"password":"pw-in-the-clear"}}"#).await;
         assert!(refused.pointer(&["error", "reason"]).and_then(Value::as_str).is_some_and(|r| r.contains("ROLL_SECRET_KEY")), "{refused:?}");
+        // Marked not sensitive by the writer: refused all the same.
+        let refused = call(&fresh, "PUT", "/_connector/z/_configuration", r#"{"configuration":{"password":{"label":"p","value":"pw-in-the-clear"}}}"#).await;
+        assert!(refused.pointer(&["error", "reason"]).and_then(Value::as_str).is_some_and(|r| r.contains("ROLL_SECRET_KEY")), "{refused:?}");
         assert!(!fresh.state().metadata.xpack.get(CONNECTORS, "z").unwrap().to_json().contains("pw-in-the-clear"));
 
         // Adopted by a configuration write that gives no password: none is kept.
@@ -1082,6 +1085,11 @@ mod tests {
         assert_eq!(config::Values::open(&a, &stored).ok().and_then(|v| v.text("password")).as_deref(), Some("pw-a"));
         let b = Arc::new(Cluster::open(open("b"), Arc::new(MemoryStore::new())).await.unwrap());
         assert!(config::Values::open(&b, &stored).is_err());
+        // Whoever writes the configuration doesn't decide a password isn't sensitive.
+        call(&a, "PUT", "/_connector/x/_configuration", r#"{"configuration":{"password":{"label":"p","value":"pw-unflagged"}}}"#).await;
+        let shown = call(&a, "GET", "/_connector/x", "").await;
+        assert_eq!(shown.pointer(&["configuration", "password", "value"]).and_then(Value::as_str), Some(config::REDACTED), "{shown:?}");
+        assert!(!a.state().metadata.xpack.get(CONNECTORS, "x").unwrap().to_json().contains("pw-unflagged"));
     }
 
     /// A source's text can't add a line to the `_bulk` body: what isn't exactly one JSON object
@@ -1123,9 +1131,40 @@ mod tests {
         assert!(internal::index_only("content-x".into(), internal::call_ndjson(&c, "POST", "/content-x/_bulk", body)).await.is_err());
         let body = "{\"index\":{\"_index\":\"victim\",\"_id\":\"2\"}}\n{}\n".to_string();
         assert!(internal::index_only("content-x".into(), internal::call_ndjson(&c, "POST", "/content-x/_bulk", body)).await.is_err());
+        // An action line naming anything but `_id` (`pipeline: _none` skips the index's own).
+        let body = "{\"index\":{\"_id\":\"3\",\"pipeline\":\"_none\"}}\n{}\n".to_string();
+        assert!(internal::index_only("content-x".into(), internal::call_ndjson(&c, "POST", "/content-x/_bulk", body)).await.is_err());
         let victim = call(&c, "GET", "/victim/_doc/1", "").await;
         assert_eq!(victim.get("found").and_then(Value::as_bool), Some(true), "{victim:?}");
         assert_eq!(call(&c, "GET", "/victim/_doc/2", "").await.get("found").and_then(Value::as_bool), Some(false));
+
+        // The connector's pipeline can't move a document either, even to an index its data names.
+        call(&c, "PUT", "/_ingest/pipeline/move", r#"{"processors":[{"set":{"field":"_index","value":"{{target}}"}}]}"#).await;
+        let mut counters = Counters::default();
+        let mut sink = Sink {
+            cluster: &c,
+            job: "none".into(),
+            index: "content-x".into(),
+            pipeline: Some("move".into()),
+            rules: rules::Rules::default(),
+            full: false,
+            seen: Vec::new(),
+            counters: &mut counters,
+            docs_per_second: u64::MAX,
+            bytes_per_second: u64::MAX,
+            started: Instant::now(),
+            deadline: Instant::now() + Duration::from_secs(60),
+            max_docs: 100,
+            beat: Instant::now(),
+        };
+        let mut page = sink.new_page();
+        assert!(sink.push_text(&mut page, "mover", "{\"target\":\"elsewhere\"}").is_ok());
+        let _ = sink.send(page).await;
+        assert_eq!((counters.failed, counters.indexed), (1, 0));
+        let elsewhere = call(&c, "GET", "/elsewhere/_doc/mover", "").await;
+        assert_ne!(elsewhere.get("found").and_then(Value::as_bool), Some(true), "{elsewhere:?}");
+        let created = call(&c, "GET", "/elsewhere", "").await;
+        assert_eq!(created.pointer(&["error", "type"]).and_then(Value::as_str), Some("index_not_found_exception"), "the pipeline's target was created: {created:?}");
     }
 
     /// A sync running here whose statement outlasts the stale time isn't due again (the

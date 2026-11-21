@@ -604,8 +604,13 @@ both with Elasticsearch 9.5.5's shapes, validation and state machines
   whose source isn't exactly one JSON object (`metadata.last_failed_document` says which and
   why); more than 100 failures that are also over a tenth of the documents fail the job.
 - **What a sync can write.** Only documents into the connector's own index: its `_bulk` goes
-  to `/{index_name}/_bulk` inside `internal::index_only`, where bulk refuses any `_index` in
-  an action line and any action but `index`, whatever the body holds. A document's text from
+  to `/{index_name}/_bulk` inside `internal::index_only`, where bulk refuses any action but
+  `index` and any action-line key but `_id` (no `_index`, `pipeline`, `routing`, versioning or
+  `dynamic_templates`), whatever the body holds. Each item carries the restriction
+  (`WriteArgs::index_only`, since items run on other threads): a pipeline that would move a
+  document elsewhere (the connector's `pipeline`, the index's default pipeline; a `reroute`, or
+  `set` on `_index`, even to an index a row's data names) fails that document before its new
+  target is resolved, so nothing is created or written there. A document's text from
   a source is checked to be exactly one JSON object (`sync::json_scan::one_object`, a scan, no
   tree) and put on one line (line breaks between tokens become spaces; a string can't hold a
   raw one), so it can't add a line to the body: a server's text can't delete or write
@@ -644,7 +649,8 @@ both with Elasticsearch 9.5.5's shapes, validation and state machines
     life, and notices before the connection is ready, which it keeps until then, are capped at
     256 and 64 KiB per connection. Later notices are dropped as they arrive (their bytes count
     in the window); none reaches the node's logs.
-  - A bucket is listed a page at a time (4 MiB of listing at most) and a page is indexed once
+  - A bucket is listed a page at a time (4 MiB of listing and the keys asked for at most; a
+    listing answering more keys fails) and a page is indexed once
     its body passes 20 MiB; an object over 10 MiB is indexed without its text (Elastic's
     default extraction limit). An object's text can be larger than the object (invalid UTF-8
     becomes replacement characters, and control characters are escaped in JSON), so a page is
@@ -708,9 +714,13 @@ both with Elasticsearch 9.5.5's shapes, validation and state machines
   and S3 goes through `search-es` `s3.rs` (`roll_net::PublicOnly`, private literals refused, no
   redirects, bounded reads). `roll.connectors.allow_private_hosts`
   (`ROLL_SEARCH_CONNECTORS_ALLOW_PRIVATE`) lifts that for local development only.
-- **Credentials.** Fields the schema marks `sensitive` (`password`, `aws_secret_access_key`) of a
-  connector roll runs are sealed when written (`seal.rs`, under `ROLL_SECRET_KEY`), opened only
-  by the sync, and never returned:
+- **Credentials.** Fields roll's schema marks `sensitive` (`password`, `aws_secret_access_key`)
+  of a connector roll runs are sealed when written (`seal.rs`, under `ROLL_SECRET_KEY`), opened
+  only by the sync, and never returned:
+  - The schema decides, not the writer: a configuration that marks such a field
+    `sensitive: false` (or sets a number there) gets the flag put back and its value guarded
+    all the same, and redaction and the sync read the schema too. The sync uses a sensitive
+    value only sealed; one in the clear is refused (`give it again`).
   - A node without `ROLL_SECRET_KEY` has no key to seal with, so it refuses any write that would
     store one (`illegal_argument_exception` naming the field and `ROLL_SECRET_KEY`) instead of
     keeping it in the clear; nothing of that write is stored. Values stored in the clear before

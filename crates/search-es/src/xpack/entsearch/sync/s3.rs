@@ -107,6 +107,8 @@ async fn read_bucket(client: &Client, sink: &mut Sink<'_>, t: &S3Rule, since: Op
             doc.insert("bucket".into(), t.bucket.clone().into());
             doc.insert("filename".into(), o.key.clone().into());
             doc.insert("size_in_bytes".into(), (o.size as i64).into());
+            // The object's text, charged while the document is built and until the page holds it.
+            let mut held = sink.reserve();
             if !fetchable(&o.key) {
                 // Its text can't be read (see [`fetchable`]): indexed by its metadata, and counted.
                 let n = sink.counters.metadata.get("unreadable_object_count").and_then(Value::as_i64).unwrap_or(0);
@@ -119,9 +121,7 @@ async fn read_bucket(client: &Client, sink: &mut Sink<'_>, t: &S3Rule, since: Op
                 match got {
                     Ok(Some(body)) => {
                         sink.read(body.len() as u64);
-                        // The object and its text are charged while the document is built (the
-                        // text is scanned, never a tree: `extract`), then the page holds it.
-                        let mut held = sink.reserve();
+                        // The text is scanned, never a tree (`extract`).
                         let charge = |held: &mut crate::breaker::Reservation, n: usize| held.add(n as u64, "connector object").map_err(|e| Stop::Failed(format!("reading [{}] from bucket [{}] failed: {}", o.key, t.bucket, e.reason())));
                         charge(&mut held, body.len())?;
                         let text = extract::text(kind, &body);
@@ -135,6 +135,7 @@ async fn read_bucket(client: &Client, sink: &mut Sink<'_>, t: &S3Rule, since: Op
                 }
             }
             sink.push_doc(&mut page, &doc_id(&t.bucket, &o.key), doc)?;
+            drop(held);
             // A page holds at most PAGE_BYTES of objects' text.
             if page.bytes() >= PAGE_BYTES {
                 let full = std::mem::replace(&mut page, sink.new_page());

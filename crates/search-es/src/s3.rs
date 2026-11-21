@@ -393,6 +393,10 @@ impl Client {
         let page = read_bounded(r, 4 << 20).await?;
         let bytes = page.len();
         let page = String::from_utf8_lossy(&page);
+        // At most what was asked for: an endpoint can't make a page of many more small entries.
+        if elements(&page, "Contents").nth(max_keys.clamp(1, 1000)).is_some() {
+            return Err(err("TooManyKeys", format!("the listing answered more than the {} keys asked for", max_keys.clamp(1, 1000))));
+        }
         let objects = elements(&page, "Contents")
             .map(|item| {
                 let one = |name: &str| elements(item, name).next().map(xml_unescape).unwrap_or_default();

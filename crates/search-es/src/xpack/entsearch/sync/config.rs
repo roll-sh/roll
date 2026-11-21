@@ -141,6 +141,46 @@ fn sensitive(entry: &Value) -> bool {
     entry.get("sensitive").and_then(Value::as_bool) == Some(true)
 }
 
+/// Whether roll's schema for `service` marks field `k` sensitive.
+fn schema_secret(service: &str, k: &str) -> bool {
+    schema_of(service).iter().any(|d| d.key == k && d.sensitive)
+}
+
+/// The service of a connector roll runs (its schema decides what is sensitive), else `None`.
+fn run_service(c: &Value) -> Option<String> {
+    runs(c).then(|| c.get("service_type").and_then(Value::as_str).unwrap_or_default().to_string())
+}
+
+/// Whether field `k` (`entry`) of a connector is sensitive: for one roll runs (`service`), what
+/// roll's schema says counts whatever flag a client stored; otherwise the stored flag.
+fn secret_field(service: Option<&str>, k: &str, entry: &Value) -> bool {
+    sensitive(entry) || service.is_some_and(|s| schema_secret(s, k))
+}
+
+/// Puts back the `sensitive` flag of every field roll's schema for `service` marks sensitive:
+/// whoever writes a configuration can't decide a password isn't one.
+fn force_flags(m: &mut Map, service: &str) {
+    let Some(Value::Obj(cfg)) = m.get_mut("configuration") else { return };
+    for (k, entry) in cfg.iter_mut() {
+        if schema_secret(service, k)
+            && let Value::Obj(e) = entry
+        {
+            e.insert("sensitive".into(), true.into());
+        }
+    }
+}
+
+/// A sensitive field's value as text (a number or anything else written there counts too):
+/// `None` when empty.
+fn secret_text(entry: &Value) -> Option<String> {
+    match entry.get("value")? {
+        Value::Null => None,
+        Value::Str(s) if s.is_empty() => None,
+        Value::Str(s) => Some(s.clone()),
+        other => Some(other.to_es_string()),
+    }
+}
+
 /// What a connector's sensitive field is sealed as: bound to the cluster (its catalog id), the
 /// connector and the field, so a sealed value moved into another connector's or field's slot, or
 /// carried to another cluster's state (a branch's copy of its parent), doesn't open. A branch
@@ -153,9 +193,10 @@ fn kind_of(cluster: &str, connector: &str, field: &str) -> String {
 /// syncs, when they were stored as given): what an upgrade does once per cluster.
 pub fn seal_in_place(m: &mut Map, cluster: &str, sealer: Option<&crate::seal::Sealer>) {
     let id = m.get("id").and_then(Value::as_str).unwrap_or_default().to_string();
+    let service = run_service(&Value::Obj(m.clone()));
     let Some(Value::Obj(cfg)) = m.get_mut("configuration") else { return };
     for (k, entry) in cfg.iter_mut() {
-        if !sensitive(entry) {
+        if !secret_field(service.as_deref(), k, entry) {
             continue;
         }
         if let Value::Obj(e) = entry
@@ -225,11 +266,12 @@ pub fn protect(m: &mut Map, before: &Map, sealer: Option<&crate::seal::Sealer>, 
         m.insert("status".into(), "needs_configuration".into());
         return Ok(());
     }
+    // What is sensitive is roll's schema's call, never the writer's (a value under a schema
+    // field marked otherwise is guarded all the same, and the flag put back).
+    force_flags(m, &service);
     let started = !ran || adopting.is_some();
     let id = m.get("id").and_then(Value::as_str).unwrap_or_default().to_string();
-    let had_secret = before.get("configuration").and_then(Value::as_object).is_some_and(|c| {
-        c.values().any(|e| sensitive(e) && e.get("value").and_then(Value::as_str).is_some_and(|v| !v.is_empty()))
-    });
+    let had_secret = before.get("configuration").and_then(Value::as_object).is_some_and(|c| c.iter().any(|(k, e)| secret_field(Some(&service), k, e) && secret_text(e).is_some()));
     let retargeted = !started && had_secret && target_fields(&service).iter().any(|f| value_of(m, f) != value_of(before, f));
     let old = before.get("configuration").and_then(Value::as_object).cloned().unwrap_or_default();
     let mut cleared = false;
@@ -239,14 +281,11 @@ pub fn protect(m: &mut Map, before: &Map, sealer: Option<&crate::seal::Sealer>, 
     };
     let Some(Value::Obj(cfg)) = m.get_mut("configuration") else { return Ok(()) };
     for (k, entry) in cfg.iter_mut() {
-        if !sensitive(entry) {
+        if !secret_field(Some(&service), k, entry) {
             continue;
         }
+        let Some(v) = secret_text(entry) else { continue };
         let Value::Obj(e) = entry else { continue };
-        let Some(Value::Str(v)) = e.get("value").cloned() else { continue };
-        if v.is_empty() {
-            continue;
-        }
         if started {
             let given = adopting.is_none_or(|g| g.iter().any(|f| f == k));
             let next = if !given || v == REDACTED || crate::seal::is_sealed(&v) {
@@ -258,7 +297,7 @@ pub fn protect(m: &mut Map, before: &Map, sealer: Option<&crate::seal::Sealer>, 
             e.insert("value".into(), next);
             continue;
         }
-        let stored = old.get(k).filter(|o| sensitive(o)).and_then(|o| o.get("value")).cloned();
+        let stored = old.get(k).filter(|o| secret_field(Some(&service), k, o)).and_then(|o| o.get("value")).cloned();
         let unchanged = v == REDACTED || stored.as_ref().and_then(Value::as_str) == Some(v.as_str());
         let next = if unchanged && retargeted {
             cleared = true;
@@ -306,18 +345,19 @@ pub fn redact_configuration(c: &mut Value) {
 }
 
 fn redact_where(c: &mut Value, hide: impl Fn(&str) -> bool) {
+    let service = run_service(c);
     let Some(Value::Obj(cfg)) = (match c {
         Value::Obj(m) => m.get_mut("configuration"),
         _ => None,
     }) else {
         return;
     };
-    for entry in cfg.values_mut() {
-        let Value::Obj(e) = entry else { continue };
-        let secret = e.get("sensitive").and_then(Value::as_bool) == Some(true);
-        if let Some(Value::Str(v)) = e.get("value")
-            && !v.is_empty()
-            && (crate::seal::is_sealed(v) || (secret && hide(v)))
+    for (k, entry) in cfg.iter_mut() {
+        // For a connector roll runs, roll's schema decides what is sensitive too.
+        let secret = secret_field(service.as_deref(), k, entry);
+        let Some(v) = secret_text(entry) else { continue };
+        if (crate::seal::is_sealed(&v) || (secret && hide(&v)))
+            && let Value::Obj(e) = entry
         {
             e.insert("value".into(), REDACTED.into());
         }
@@ -349,17 +389,23 @@ impl Values {
     pub fn open(cluster: &Cluster, connector: &Value) -> EsResult<Values> {
         let id = connector.get("id").and_then(Value::as_str).unwrap_or_default();
         let me = crate::branch::cluster_id(cluster);
+        let service = run_service(connector);
         let mut values = Map::new();
         let mut secrets = Vec::new();
         for (k, e) in connector.get("configuration").and_then(Value::as_object).into_iter().flatten() {
             let v = e.get("value").cloned().unwrap_or(Value::Null);
-            let v = match (&v, sensitive(e)) {
-                (Value::Str(s), true) if !s.is_empty() => {
-                    let plain = crate::seal::open(cluster, &kind_of(&me, id, k), s)?;
+            let v = match secret_field(service.as_deref(), k, e).then(|| secret_text(e)).flatten() {
+                Some(s) => {
+                    // roll stores a sensitive value only sealed: one in the clear (written past
+                    // the guard, or before it) is never used.
+                    if service.is_some() && !crate::seal::is_sealed(&s) {
+                        return Err(crate::error::EsError::illegal_state(format!("the connector's [{k}] isn't sealed: give it again")));
+                    }
+                    let plain = crate::seal::open(cluster, &kind_of(&me, id, k), &s)?;
                     secrets.push(plain.clone());
                     Value::from(plain)
                 }
-                _ => v,
+                None => v,
             };
             values.insert(k.clone(), v);
         }
