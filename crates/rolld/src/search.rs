@@ -55,9 +55,15 @@ pub struct SearchArgs {
     #[arg(long = "search-cache-bytes", env = "ROLL_SEARCH_CACHE_BYTES", default_value_t = 10 << 30)]
     pub search_cache_bytes: u64,
     /// Memory all loaded clusters may hold together, in MiB (0: no budget). Past it the least
-    /// recently used idle clusters unload.
+    /// recently used idle clusters unload, and requests (aggregations, ES|QL) that would hold
+    /// more fail with `circuit_breaking_exception` (0: half of the host's memory for those).
     #[arg(long = "search-memory-mb", env = "ROLL_SEARCH_MEMORY_MB", default_value_t = 0)]
     pub search_memory_mb: u64,
+    /// The most one cluster's `request` circuit breaker may allow, whatever its
+    /// `indices.breaker.request.limit`: a byte size (`512mb`) or a percentage of the node's memory
+    /// for requests (default `25%`; `-1`: no maximum).
+    #[arg(long = "search-request-memory-max", env = "ROLL_SEARCH_REQUEST_MEMORY_MAX", default_value = "25%")]
+    pub search_request_memory_max: String,
     /// Acknowledge writes once the WAL is in object storage (for nodes with ephemeral disks;
     /// always on in a cluster).
     #[arg(long = "search-sync-objects", env = "ROLL_SEARCH_SYNC_OBJECTS", value_parser = clap::builder::BoolishValueParser::new(), default_value_t = false, num_args = 0..=1, default_missing_value = "true")]
@@ -172,6 +178,7 @@ impl Search {
         cfg.person_caps = search_control::store::Caps { clusters: args.search_max_clusters_per_person.into(), always_on: args.search_max_always_on_per_person.into() };
         cfg.audit.retention = Duration::from_secs(args.search_audit_retention_days.max(1) * 86_400);
         cfg.audit.max_bytes = args.search_audit_max_mb.max(1) << 20;
+        cfg.node_settings.push((search_control::SEARCH_REQUEST_MAX_LIMIT.to_string(), args.search_request_memory_max.trim().to_string()));
         if args.search_repository_allow_private {
             cfg.node_settings.push((search_control::S3_ALLOW_PRIVATE.to_string(), "true".to_string()));
         }

@@ -129,8 +129,9 @@ pub struct ClusterConfig {
     /// `None`: it records none.
     pub audit: Option<crate::xpack::security::audit::AuditLog>,
     /// The node's budget for what requests hold, shared by every cluster on the node and set by
-    /// its operator, never by a tenant: charged along with the cluster's `request` breaker
-    /// ([`crate::breaker::Breakers::node`]). `None`: the `request` breaker alone.
+    /// its operator, never by a tenant: the parent of the cluster's `request` breaker, whose
+    /// limit is held to [`crate::breaker::REQUEST_MAX_LIMIT`] of it ([`crate::breaker::Breakers::node`]).
+    /// `None`: the `request` breaker alone.
     pub request_memory: Option<std::sync::Arc<search_aggs::memory::MemoryBudget>>,
 }
 
@@ -576,7 +577,7 @@ impl Cluster {
         }
         let analytics = crate::analytics::Analytics::default();
         analytics.sync(&state);
-        let breakers = crate::breaker::Breakers::with_node(config.request_memory.clone());
+        let breakers = crate::breaker::Breakers::with_node(config.request_memory.clone(), config.node_setting(crate::breaker::REQUEST_MAX_LIMIT));
         Ok(Cluster {
             analytics,
             changes,

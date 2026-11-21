@@ -6,6 +6,10 @@
 //! its reservation when dropped, so a request that fails or finishes gives everything back.
 //! Reservations are amortized: trackers only call into the budget when a structure's
 //! capacity grows, never per document.
+//!
+//! A budget can have a parent ([`MemoryBudget::with_parent`]): every reservation is taken from
+//! both, and refused when either would go over, so many budgets (one per cluster, each with a
+//! limit its tenant sets) can share one ceiling (the node's) that none of them can raise.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -23,11 +27,22 @@ pub struct MemoryBudget {
     tripped: AtomicU64,
     /// The breaker name in messages (`request`).
     name: &'static str,
+    /// Charged with every reservation of this one (the node's budget).
+    parent: Option<Arc<MemoryBudget>>,
 }
 
 impl MemoryBudget {
     pub fn new(limit: u64) -> Arc<MemoryBudget> {
-        Arc::new(MemoryBudget { limit: AtomicU64::new(limit), used: AtomicU64::new(0), tripped: AtomicU64::new(0), name: "request" })
+        MemoryBudget::with_parent(limit, None)
+    }
+
+    /// A budget whose reservations are also taken from `parent`.
+    pub fn with_parent(limit: u64, parent: Option<Arc<MemoryBudget>>) -> Arc<MemoryBudget> {
+        Arc::new(MemoryBudget { limit: AtomicU64::new(limit), used: AtomicU64::new(0), tripped: AtomicU64::new(0), name: "request", parent })
+    }
+
+    pub fn parent(&self) -> Option<&Arc<MemoryBudget>> {
+        self.parent.as_ref()
     }
 
     pub fn limit(&self) -> u64 {
@@ -48,7 +63,8 @@ impl MemoryBudget {
         self.tripped.load(Ordering::Relaxed)
     }
 
-    /// Reserves `bytes` for `label`, failing like Elasticsearch's `CircuitBreakingException`.
+    /// Reserves `bytes` for `label`, here and in the parent, failing like Elasticsearch's
+    /// `CircuitBreakingException` when either would go over its limit.
     pub fn reserve(&self, bytes: u64, label: &str) -> Result<()> {
         let new = self.used.fetch_add(bytes, Ordering::Relaxed) + bytes;
         let limit = self.limit();
@@ -57,16 +73,29 @@ impl MemoryBudget {
             self.tripped.fetch_add(1, Ordering::Relaxed);
             return Err(breaking_error(self.name, label, new, limit));
         }
+        if let Some(p) = &self.parent
+            && let Err(e) = p.reserve(bytes, label)
+        {
+            self.used.fetch_sub(bytes, Ordering::Relaxed);
+            self.tripped.fetch_add(1, Ordering::Relaxed);
+            return Err(e);
+        }
         Ok(())
     }
 
-    /// Adds `bytes` without checking the limit (`addWithoutBreaking`).
+    /// Adds `bytes` without checking the limit (`addWithoutBreaking`), here and in the parent.
     pub fn force(&self, bytes: u64) {
         self.used.fetch_add(bytes, Ordering::Relaxed);
+        if let Some(p) = &self.parent {
+            p.force(bytes);
+        }
     }
 
     pub fn release(&self, bytes: u64) {
         self.used.fetch_sub(bytes, Ordering::Relaxed);
+        if let Some(p) = &self.parent {
+            p.release(bytes);
+        }
     }
 }
 
@@ -172,5 +201,17 @@ mod tests {
         assert_eq!(byte_size(17_179_869_176), "15.9gb");
         assert_eq!(byte_size(1 << 30), "1gb");
         assert_eq!(byte_size(2047), "1.9kb");
+    }
+
+    #[test]
+    fn a_parent_bounds_its_children() {
+        let node = MemoryBudget::new(1000);
+        let (a, b) = (MemoryBudget::with_parent(u64::MAX, Some(node.clone())), MemoryBudget::with_parent(u64::MAX, Some(node.clone())));
+        a.reserve(600, "x").unwrap();
+        let e = b.reserve(600, "x").unwrap_err();
+        assert!(e.reason.contains("larger than the limit of [1000/"), "{}", e.reason);
+        assert_eq!((a.used(), b.used(), node.used(), b.tripped()), (600, 0, 600, 1), "a refused reservation is held nowhere");
+        a.release(600);
+        assert_eq!(node.used(), 0);
     }
 }
