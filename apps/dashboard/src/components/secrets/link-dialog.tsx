@@ -1,5 +1,6 @@
-import { Cloud, Database, GitBranch, KeyRound, Leaf, Link2, RotateCw, ShieldCheck, Ship, Snowflake, Terminal, Users, type LucideIcon } from "lucide-react";
+import { Cloud, Database, GitBranch, KeyRound, LayoutGrid, Leaf, Link2, RotateCw, ShieldCheck, Ship, Snowflake, Terminal, Users, type LucideIcon } from "lucide-react";
 import { useMemo, useState } from "react";
+import { Link } from "@/components/link";
 import { SECRET_KEY, type Batch, type Environment, type LinkField, type LinkMode, type LinkTarget, type Op } from "@/lib/secrets-api";
 import type { ResourceKind } from "@/lib/workspace-api";
 import { Dialog } from "../agents/ui/dialog";
@@ -214,9 +215,12 @@ function Form({ env, path, taken, onWrite, onClose }: { env: Environment; path: 
   if (!targets.data) return <p className="shimmer py-6 text-center text-[12px]">Loading the project's resources…</p>;
   if (!targets.data.length)
     return (
-      <p className="py-6 text-center text-[12.5px] text-muted">
-        {project.name} has no linkable resources yet. Add a database, a bucket, a stream or a queue to its canvas, then link its credentials here.
-      </p>
+      <div className="py-6 text-center text-[12.5px] text-muted">
+        <p>{project.name} has no linkable resources yet. Add a database, a bucket, a stream or a queue to its canvas, then link its credentials here.</p>
+        <Link href={`/dashboard/projects/${project.id}`} className="mt-3 inline-flex items-center gap-1.5 text-accent hover:underline">
+          <LayoutGrid className="size-3.5" /> Open {project.name}&apos;s canvas
+        </Link>
+      </div>
     );
 
   // Fields of one credential sit together; the rest one by one.
