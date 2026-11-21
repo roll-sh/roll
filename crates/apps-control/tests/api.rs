@@ -1688,6 +1688,26 @@ async fn roll_toml_sets_run_settings_per_environment() {
     assert_eq!(up(&w), 1, "a redeploy keeps what roll.toml set");
 }
 
+/// A static site whose published files hold a secret's value (Netlify's secrets scan): the
+/// deploy fails naming the file and the variable, never the value; a site without one deploys.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_static_site_holding_a_secret_isnt_published() {
+    let w = world().await;
+    w.code.push("f2f2f2f2f2f2", "site", &[("package.json", r#"{"name":"site","scripts":{"build":"vite build"},"devDependencies":{"vite":"5.0.0"}}"#)]);
+    let (_, svc) = call(&w.api, "POST", "/v1/apps/services", Some(json!({ "project": w.project, "name": "site", "source": {"kind": "repo", "repo": "acme/site"} }))).await;
+    let id = svc["id"].as_str().unwrap_or_else(|| panic!("{svc}")).to_string();
+    assert_eq!(settled(&w, &id, "production", svc["environments"][0]["latest"]["id"].as_str().unwrap()).await["status"], "active");
+    let env = format!("/v1/apps/services/{id}/environments/production");
+    call(&w.api, "PATCH", &format!("{env}/variables"), Some(json!({"set": {"STRIPE_SECRET": "sk_live_leaked_9f8e7d"}, "seal": ["STRIPE_SECRET"]}))).await;
+    // A build step wrote it into a published file.
+    *w.fake.site_redirects.lock() = "# sk_live_leaked_9f8e7d\n".into();
+    let (_, d) = call(&w.api, "POST", &format!("{env}/deploys"), Some(json!({"no_cache": true}))).await;
+    let d = settled(&w, &id, "production", d["id"].as_str().unwrap()).await;
+    assert_eq!(d["status"], "failed", "{d}");
+    let why = d["error"].as_str().unwrap_or_default();
+    assert!(why.contains("_redirects") && why.contains("STRIPE_SECRET") && !why.contains("sk_live_leaked"), "{why}");
+}
+
 /// A static site's `_redirects` proxies a path to another site (Netlify's 200 proxies, Vercel's
 /// external rewrites): the visitor's request sent on without roll's own headers and cookies, the
 /// answer back as it came; a rule's condition decides whether it applies.
@@ -4874,6 +4894,28 @@ async fn a_status_badge_says_what_deploys_stand_at() {
     assert!(svg.starts_with("<svg") && svg.contains("web production") && svg.contains(">live<"), "{svg}");
 }
 
+/// A job at its own size (Heroku's `run --size`): its container gets the CPUs and memory it
+/// names, not the service's; a size out of range is refused.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_job_runs_at_its_own_size() {
+    let w = world().await;
+    let (svc, _) = image_service(&w, "api", json!({"port": 80})).await;
+    let id = svc["id"].as_str().unwrap().to_string();
+    let jobs = format!("/v1/apps/services/{id}/environments/production/jobs");
+    assert_eq!(call(&w.api, "POST", &jobs, Some(json!({"command": "true", "cpu": 64}))).await.0, StatusCode::BAD_REQUEST);
+    let (st, j) = call(&w.api, "POST", &jobs, Some(json!({"command": "sleep 1", "cpu": 4, "memory_mb": 8192}))).await;
+    assert!(st.is_success(), "{j}");
+    let mut sized = None;
+    for _ in 0..200 {
+        sized = w.fake.commands_made.lock().iter().find(|(c, ..)| c == "sleep 1").map(|(_, cpu, mb)| (*cpu, *mb));
+        if sized.is_some() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert_eq!(sized, Some((4.0, 8192)));
+}
+
 /// A bigger build machine (`build.size`): the builder is asked for its CPUs and memory; a size
 /// that isn't one is refused.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -8015,6 +8057,23 @@ async fn a_closed_environment_uses_its_keys_without_seeing_them() {
     let var = |k: &str| closed.vars.iter().find(|(n, _)| n == k).map(|(_, v)| v.clone());
     assert_eq!(var("STRIPE_KEY").as_deref(), Some("rlph_placeholder"), "closed: a placeholder, never the value");
     assert!(vault.0.lock().contains(&"closed by usr_ada".to_string()), "{:?}", vault.0.lock());
+    // Naming another maker is the operator's (roll previews' rules' maker), nobody else's.
+    let put = |ext: Option<roll_auth::SignedIn>, operator: bool| {
+        let mut req = Request::builder().method("PUT").uri(format!("{base}/staging")).header("content-type", "application/json").body(Body::from(json!({"egress": {"mode": "roll", "hosts": ["api.stripe.com"]}, "closed_by": "usr_rules"}).to_string())).unwrap();
+        if let Some(u) = ext {
+            req.extensions_mut().insert(u);
+        }
+        if operator {
+            req.extensions_mut().insert(roll_auth::Operator);
+        }
+        let api = w.api.clone();
+        async move { api.oneshot(req).await.unwrap().status() }
+    };
+    assert_eq!(put(Some(roll_auth::SignedIn { user: "usr_ada".into(), handle: "ada".into(), admin: false, code_owner: None, session: "ses_1".into() }), false).await, StatusCode::FORBIDDEN);
+    assert!(put(None, true).await.is_success());
+    let (_, d) = call(&w.api, "POST", &format!("{base}/staging/deploys"), Some(json!({}))).await;
+    settled(&w, &id, "staging", d["id"].as_str().unwrap()).await;
+    assert!(vault.0.lock().contains(&"closed by usr_rules".to_string()), "{:?}", vault.0.lock());
     assert!(!closed.vars.iter().any(|(_, v)| v.contains("sk_live_real")));
     for k in ["NODE_EXTRA_CA_CERTS", "SSL_CERT_FILE", "REQUESTS_CA_BUNDLE", "CURL_CA_BUNDLE"] {
         assert_eq!(var(k).as_deref(), Some(apps_control::deploy::INTERCEPT_CA), "{k}");

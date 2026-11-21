@@ -92,6 +92,8 @@ roll search request app POST /articles/_search '{"query":{"semantic":{"field":"b
 roll search inference list app | test app emb "some text" | delete app emb
 ```
 
+Answers generated from search hits (chat with citations, RAG) are designed in [rag.md](rag.md).
+
 A cluster's name is its identity: the Basic auth user, the host label under `--search-domain`,
 `cluster_name` in `GET /`. Names are DNS labels (lowercase letters, digits, `-`) and can't
 change, except by restoring a deleted cluster under another name when its own was taken. Clients authenticate with Basic auth (`<name>:<password>`, or any user at the cluster's
@@ -942,7 +944,7 @@ deterministic (#396).
    `conversation=true`, Meilisearch `/chats`, OpenSearch's `retrieval_augmented_generation`
    processor): roll serves `completion` and `chat_completion` inference already, but the Playground
    compares retrieval only. Chat over hits with citations, the code for a RAG app, and a chat API
-   (OpenSearch's processor shape on OpenSearch-flavor clusters).
+   (OpenSearch's processor shape on OpenSearch-flavor clusters). Design: [rag.md](rag.md).
 12. **The first query in a minute** (the guides are #604, landing; writing them found: an API
    key's `encoded` value works only at the cluster's own host, so clients behind a shared address
    re-encode it as `<id>@<cluster>:<key>`; a `data` key can't post click events, so an app tracking
