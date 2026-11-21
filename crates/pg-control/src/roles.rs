@@ -72,7 +72,11 @@ DECLARE
   role text := 'roll_owner';
 BEGIN
   IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = role) THEN
-    EXECUTE format('CREATE ROLE %I NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS', role);
+    BEGIN
+      EXECUTE format('CREATE ROLE %I NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS', role);
+    EXCEPTION WHEN duplicate_object OR unique_violation THEN
+      NULL; -- a query beside this one made it first
+    END;
   END IF;
   IF (SELECT r2.rolsuper FROM pg_database d JOIN pg_roles r2 ON r2.oid = d.datdba WHERE d.datname = current_database()) THEN
     EXECUTE format('ALTER DATABASE %I OWNER TO %I', current_database(), role);
