@@ -316,6 +316,25 @@ export function EnvironmentPanel({ service, env, runner, onDeleted }: { service:
 
         {!env.ephemeral && (
           <div className="flex flex-wrap items-center justify-between gap-3 px-5 py-4">
+            <div className="min-w-0">
+              <p className="text-[13px] font-medium">Status badge</p>
+              {env.badge_url ? (
+                <p className="mt-1 flex min-w-0 items-center gap-2 text-[12px] text-muted">
+                  <img src={env.badge_url} alt={`${env.name} deploy status`} className="h-5" />
+                  <CopyButton id="badge" text={`![${env.name}](${env.badge_url})`} copied={copied} onCopy={copy} />
+                </p>
+              ) : (
+                <p className="mt-1 text-[12px] text-muted">An image of what its deploys stand at (live, deploying, failed) for a README; anyone with its URL sees it.</p>
+              )}
+            </div>
+            <button className={btn} disabled={busy} aria-pressed={!!env.badge_url} onClick={() => runner.run("badge", () => appsApi.putEnvironment(service.id, env.name, { badge: !env.badge_url }))}>
+              {env.badge_url ? "Turn off" : "Turn on"}
+            </button>
+          </div>
+        )}
+
+        {!env.ephemeral && (
+          <div className="flex flex-wrap items-center justify-between gap-3 px-5 py-4">
             <div>
               <p className="text-[13px] font-medium">Deploy approvals</p>
               <p className="mt-1 text-[12px] text-muted">

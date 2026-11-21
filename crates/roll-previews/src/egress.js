@@ -64,6 +64,22 @@ const allowed = (host, port) => {
   if (port !== 443 && port !== 80) return false;
   return HOSTS.some((p) => (p.startsWith("*.") ? h.endsWith(p.slice(1)) && h.length > p.length - 1 : h === p));
 };
+// Hosts a key the preview holds a placeholder for is bound to (`INTERCEPT`, its interception CA's;
+// docs/previews.md, "Keys a preview never holds"): a CONNECT to one, once allowed above, goes to
+// rolld over the socket mounted at /roll (`host:port` on a line, then the client's bytes), which
+// swaps the placeholders; everything else is tunnelled as before. One label under a wildcard.
+const COVERED = (() => {
+  try {
+    return JSON.parse(process.env.INTERCEPT || "[]").filter((h) => typeof h === "string").slice(0, 64);
+  } catch {
+    return [];
+  }
+})();
+const SOCK = "/roll/intercept.sock";
+const covered = (host) => {
+  const h = String(host || "").toLowerCase().replace(/\.$/, "");
+  return COVERED.some((p) => (p.startsWith("*.") ? h.endsWith(p.slice(1)) && h.length > p.length - 1 && !h.slice(0, h.length - p.length + 1).includes(".") : h === p));
+};
 // `refused <host>`, and ` private` when the host is listed but resolves only to private addresses.
 const refused = (host, why) => process.stdout.write(`refused ${String(host).slice(0, 253).replace(/[^a-z0-9.*:-]/gi, "?")}${why ? " private" : ""}\n`);
 const server = http.createServer((req, res) => {
@@ -79,6 +95,11 @@ const server = http.createServer((req, res) => {
   if (url.protocol !== "http:" || !allowed(url.hostname, port)) {
     refused(url.hostname);
     res.writeHead(403, { "content-type": "text/plain" }).end("roll previews: this host isn't in the project's egress_hosts\n");
+    return;
+  }
+  // A key bound to this host goes to it over TLS only.
+  if (covered(url.hostname)) {
+    res.writeHead(403, { "content-type": "text/plain" }).end("roll previews: a key is bound to this host: call it over HTTPS\n");
     return;
   }
   publicAddress(url.hostname).then((addr) => {
@@ -102,6 +123,19 @@ server.on("connect", (req, socket, head) => {
   if (!allowed(host, port)) {
     refused(host);
     socket.end("HTTP/1.1 403 Forbidden\r\n\r\n");
+    return;
+  }
+  // rolld resolves and dials it (public addresses only) once it has swapped what it must.
+  if (covered(host)) {
+    const up = net.connect(SOCK, () => {
+      up.write(`${String(host).toLowerCase().replace(/\.$/, "")}:${port}\n`);
+      socket.write("HTTP/1.1 200 Connection Established\r\n\r\n");
+      if (head && head.length) up.write(head);
+      up.pipe(socket);
+      socket.pipe(up);
+    });
+    up.on("error", () => socket.end("HTTP/1.1 502 Bad Gateway\r\n\r\n"));
+    socket.on("error", () => up.destroy());
     return;
   }
   publicAddress(host).then((addr) => {

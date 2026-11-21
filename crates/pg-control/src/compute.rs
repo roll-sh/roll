@@ -242,6 +242,11 @@ impl DockerDriver {
         Ok(line.rsplit(':').next().context("bad port")?.parse()?)
     }
 
+    /// The image a container runs (its id, whatever reference started it).
+    pub async fn image_id(&self, name: &str) -> anyhow::Result<String> {
+        docker(&["inspect", "-f", "{{.Image}}", name]).await
+    }
+
     pub async fn is_running(&self, name: &str) -> bool {
         docker(&["inspect", "-f", "{{.State.Running}}", name]).await.is_ok_and(|s| s == "true")
     }

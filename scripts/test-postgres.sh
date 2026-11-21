@@ -36,8 +36,9 @@ if [[ $unit_only == 0 ]]; then
     echo "postgres: Docker is not running; start it or pass --unit" >&2
     exit 1
   fi
-  for v in 16 17 18; do
-    docker image inspect "postgres:$v-alpine" >/dev/null 2>&1 || docker pull -q "postgres:$v-alpine"
+  # The compute images, pinned in pg-control's config.
+  for image in $(grep -o 'postgres:[0-9.]*-alpine@sha256:[0-9a-f]*' crates/pg-control/src/config.rs); do
+    docker image inspect "$image" >/dev/null 2>&1 || docker pull -q "$image"
   done
   ROLL_E2E=1 cargo test -p pg-control --test e2e -- --test-threads="${ROLL_E2E_THREADS:-4}" ${args[@]+"${args[@]}"}
 fi

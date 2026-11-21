@@ -148,9 +148,6 @@ POST /v1/secrets/projects/{project}/outside-databases                          a
 DELETE /v1/secrets/projects/{project}/outside-databases/{id}                   an outside integration's setup: an admin's, with its credentials
 PATCH /v1/secrets/projects/{project}/outside-databases/{id}                    an outside integration's setup: an admin's, with its credentials
 POST /v1/secrets/projects/{project}/outside-databases/{id}/rotate-admin        an outside integration's setup: an admin's, with its credentials
-DELETE /v1/secrets/projects/{project}/placeholders                             no tool yet: revoking placeholders (#520; checked when it lands)
-GET /v1/secrets/projects/{project}/placeholders                                no tool yet: secrets_list_placeholders maps it once #520 lands (never a placeholder or value)
-DELETE /v1/secrets/projects/{project}/placeholders/{id}                        no tool yet: revoking a placeholder (#520; checked when it lands)
 POST /v1/secrets/projects/{project}/restore                                    a person's call (a project's secrets put back from a backup)
 POST /v1/secrets/projects/{project}/rotators                                   an outside integration's setup: an admin's, with its credentials
 DELETE /v1/secrets/projects/{project}/rotators/{id}                            an outside integration's setup: an admin's, with its credentials

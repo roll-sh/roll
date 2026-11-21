@@ -84,9 +84,13 @@ pub struct Row {
     /// A request header that makes it `admin` when it's `1` (apps' `X-Roll-Override`: going past
     /// a deploy freeze the team set is a person's call, never a deploy token's).
     pub admin_if: Option<&'static str>,
+    /// A stronger action the product may use within this route when the grant allows it (Postgres
+    /// SQL as the database's superuser only for a grant that may `admin` the endpoint): the gate
+    /// asks it quietly, never refusing for it, and says yes with `roll_auth::Capable`.
+    pub capable: Option<Action>,
     /// A JSON body field whose presence makes it `admin` (apps' `freeze`: setting or lifting a
     /// freeze is the same call as going past one).
-    pub admin_if_field: Option<&'static str>,
+    pub admin_if_field: Option<&'static [&'static str]>,
 }
 
 /// Where a request names other resources it hands to this one ([`Row::lends`]).
@@ -130,6 +134,11 @@ fn apps_push(b: &Value) -> Vec<Lent> {
             Some(Lent { kind: "stream".into(), r#ref: s.into(), action })
         })
         .collect()
+}
+
+/// A drain into a roll storage bucket (`bucket`): apps mints a key that writes there for it.
+fn apps_drain_bucket(b: &Value) -> Vec<Lent> {
+    b.get("bucket").and_then(Value::as_str).map(|r| Lent { kind: "bucket".into(), r#ref: r.into(), action: Action::Write }).into_iter().collect()
 }
 
 /// A roll code repo the body names, which apps reads for the caller (`repo` for a plan or an import,
@@ -227,7 +236,7 @@ impl Row {
 }
 
 const fn row(method: &'static str, route: &'static str, product: &'static str, act: Act, target: Tgt) -> Row {
-    Row { method, route, product, act, target, env: EnvFrom::None, path_query: None, reveals: &[], copies_from: None, index: None, lends: None, filters_itself: false, filters_index: false, admin_if: None, admin_if_field: None }
+    Row { method, route, product, act, target, env: EnvFrom::None, path_query: None, reveals: &[], copies_from: None, index: None, lends: None, filters_itself: false, filters_index: false, admin_if: None, admin_if_field: None, capable: None }
 }
 
 const R: Act = Act::Is(Action::Read);
@@ -265,12 +274,16 @@ impl Row {
         self.path_query = Some(q);
         self
     }
+    const fn capable(mut self, a: Action) -> Row {
+        self.capable = Some(a);
+        self
+    }
     const fn admin_if(mut self, header: &'static str) -> Row {
         self.admin_if = Some(header);
         self
     }
-    const fn admin_if_field(mut self, field: &'static str) -> Row {
-        self.admin_if_field = Some(field);
+    const fn admin_if_field(mut self, fields: &'static [&'static str]) -> Row {
+        self.admin_if_field = Some(fields);
         self
     }
 
@@ -278,7 +291,7 @@ impl Row {
     pub fn action_with(&self, method: &str, params: &[(String, String)], body: Option<&Value>, headers: &axum::http::HeaderMap) -> Action {
         match (self.admin_if, self.admin_if_field) {
             (Some(h), _) if headers.get(h).is_some_and(|v| v == "1") => Action::Admin,
-            (_, Some(f)) if body.and_then(|b| b.get(f)).is_some() => Action::Admin,
+            (_, Some(fs)) if fs.iter().any(|f| body.and_then(|b| b.get(f)).is_some()) => Action::Admin,
             _ => self.action(method, params, body),
         }
     }
@@ -990,7 +1003,9 @@ static ROWS: &[Row] = &[
     row("DELETE", "/v1/endpoints/{id}", "postgres", D, one(PG, "endpoint")),
     row("POST", "/v1/endpoints/{id}/start", "postgres", W, one(PG, "endpoint")),
     row("POST", "/v1/endpoints/{id}/suspend", "postgres", W, one(PG, "endpoint")),
-    row("POST", "/v1/endpoints/{id}/query", "postgres", Act::Body(sql_action), one(PG, "endpoint")),
+    // SQL that isn't read-only runs as a role that owns the database's objects but is never the
+    // superuser (pg-control's `SqlAs::Writer`), unless the grant may `admin` the endpoint.
+    row("POST", "/v1/endpoints/{id}/query", "postgres", Act::Body(sql_action), one(PG, "endpoint")).capable(Action::Admin),
     // ── Redis ──
     row("GET", "/v1/redis", "redis", R, Tgt::AnyGrant),
     row("GET", "/v1/redis/databases", "redis", R, list("id")).reveals(REDIS_SECRETS),
@@ -1473,7 +1488,7 @@ static ROWS: &[Row] = &[
     row("POST", "/v1/apps/projects/{project}/preview-domain/verify", "apps", W, one(&["project"], "project")),
     // Its services as roll.toml: settings and variables' names, never a value.
     row("POST", "/v1/apps/projects/{project}/export", "apps", R, one(&["project"], "project")),
-    row("POST", "/v1/apps/projects/{project}/drains", "apps", REVEAL, one(&["project"], "project")),
+    row("POST", "/v1/apps/projects/{project}/drains", "apps", REVEAL, one(&["project"], "project")).lends(Lend::Each(apps_drain_bucket)),
     row("DELETE", "/v1/apps/projects/{project}/drains/{did}", "apps", W, one(&["project"], "project")),
     // An edit can send more out (another source, every environment): reveal, as making one is.
     row("PATCH", "/v1/apps/projects/{project}/drains/{did}", "apps", REVEAL, one(&["project"], "project")),
@@ -1498,7 +1513,7 @@ static ROWS: &[Row] = &[
     // `variables_from` copies another environment's values into this one: reveal there too.
     // A new heartbeat's ping URL (its token) is in the PUT's answer, once: a credential.
     // Setting or lifting a deploy freeze is admin (lifting one would get past it).
-    row("*", "/v1/apps/services/{id}/environments/{env}", "apps", Act::ProductionIf("env"), one(PG, "service")).env(EnvFrom::Param("env")).admin_if_field("freeze").copies_from(CopyFrom::Body("variables_from")).reveals(&["heartbeat_urls"]),
+    row("*", "/v1/apps/services/{id}/environments/{env}", "apps", Act::ProductionIf("env"), one(PG, "service")).env(EnvFrom::Param("env")).admin_if_field(&["freeze", "approvals"]).copies_from(CopyFrom::Body("variables_from")).reveals(&["heartbeat_urls"]),
     row("GET", "/v1/apps/services/{id}/environments/{env}", "apps", R, one(PG, "service")).env(EnvFrom::Param("env")),
     row("DELETE", "/v1/apps/services/{id}/environments/{env}", "apps", D, one(PG, "service")).env(EnvFrom::Param("env")),
     row("GET", "/v1/apps/services/{id}/environments/{env}/", "apps", R, one(PG, "service")).env(EnvFrom::Param("env")),
@@ -1852,14 +1867,18 @@ mod tests {
             let f = find("POST", &format!("/v1/apps/services/{{id}}/environments/{{env}}/{route}"), "x").unwrap();
             assert_eq!(f.row.action_with("POST", &[("env".into(), "staging".into())], None, &over), Action::Admin, "{route}");
         }
-        // Lifting a freeze would get past it: admin too, any environment.
+        // Lifting a freeze would get past it, and so would turning approvals off: admin too, any
+        // environment.
         let env = find("PUT", "/v1/apps/services/{id}/environments/{env}", "x").unwrap();
         let none = axum::http::HeaderMap::new();
         assert_eq!(env.row.action_with("PUT", &[("env".into(), "staging".into())], Some(&serde_json::json!({ "freeze": null })), &none), Action::Admin);
+        assert_eq!(env.row.action_with("PUT", &[("env".into(), "production".into())], Some(&serde_json::json!({ "approvals": 0 })), &none), Action::Admin);
         assert_eq!(env.row.action_with("PUT", &[("env".into(), "staging".into())], Some(&serde_json::json!({ "vitals": true })), &none), Action::Write);
         assert_eq!(dep.row.action("POST", &[("env".into(), "staging".into())], None), Action::Write);
         assert_eq!(sql_action(&serde_json::json!({ "sql": "select 1", "read_only": true })), Action::Read);
         assert_eq!(sql_action(&serde_json::json!({ "sql": "select 1" })), Action::Write);
+        // Without `admin`, pg-control runs it as the database's owner role, never the superuser.
+        assert_eq!(by_path("POST", "/v1/endpoints/ep_x/query").map(|f| f.row.capable), Some(Some(Action::Admin)));
         // A repo apps reads for the caller needs read on it: a plan's, an import's, a source's.
         let repo = |r: &str| vec![Lent { kind: "repo".into(), r#ref: r.into(), action: Action::Read }];
         assert_eq!(apps_repo(&serde_json::json!({ "repo": "acme/web", "revision": "main" })), repo("acme/web"));
