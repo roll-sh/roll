@@ -1,0 +1,9 @@
+# Body fields a product's HTTP contract lists for a route whose tool doesn't take them, with why.
+# `METHOD route field  why`, one per line; the test in tools.rs fails on a field that is neither a
+# tool's argument nor here (map it, or say why not), and on a line whose field a tool takes now.
+POST /v1/secrets/projects/{project}/environments/{env}/rollback bypass           an admin landing past a protected environment's approvals: a person's call
+POST /v1/secrets/projects/{project}/environments/{env}/requests/{id}/apply bypass   an admin landing past a protected environment's approvals: a person's call
+POST /v1/secrets/projects/{project}/transit key                                  key material brought in: a credential in a tool's arguments (roll makes one instead)
+POST /v1/secrets/projects/{project}/transit vault_version                        goes with a brought key (above)
+POST /v1/secrets/projects/{project}/transit/{name}/rotate key                    key material brought in: a credential in a tool's arguments (roll makes one instead)
+POST /v1/secrets/projects/{project}/transit/{name}/rotate vault_version          goes with a brought key (above)

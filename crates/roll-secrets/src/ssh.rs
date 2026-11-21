@@ -259,7 +259,7 @@ impl<'a> Reader<'a> {
 }
 
 /// Public suffixes under which anyone can register a name (the common ones): no CA claims them.
-const PUBLIC_SUFFIXES: &[&str] = &[
+pub(crate) const PUBLIC_SUFFIXES: &[&str] = &[
     "co.uk", "org.uk", "ac.uk", "gov.uk", "com.au", "net.au", "org.au", "co.nz", "co.jp", "ne.jp", "or.jp", "co.kr", "com.br", "com.cn", "com.mx", "co.in", "co.za", "com.tr",
     "com.sg", "com.hk", "com.tw", "github.io", "gitlab.io", "pages.dev", "workers.dev", "vercel.app", "netlify.app", "herokuapp.com", "fly.dev", "onrender.com", "web.app",
     "firebaseapp.com", "azurewebsites.net", "cloudfront.net", "amazonaws.com", "appspot.com", "blogspot.com",

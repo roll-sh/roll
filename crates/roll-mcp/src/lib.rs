@@ -1141,7 +1141,7 @@ async fn call(ctx: &Arc<Ctx>, name: &str, args: Value) -> Option<Value> {
 
 /// [`call`], `quiet` for a completion (an `ask` is refused, never put to a person).
 async fn call_as(ctx: &Arc<Ctx>, name: &str, args: Value, quiet: bool) -> Option<Value> {
-    let redacted = roll_access::redact::value(&args);
+    let redacted = roll_access::redact::value(&args, name.split('_').next().unwrap_or(""));
     let mut ext = Extensions::new();
     // The audit log says a completion was one (a person typing), not the agent listing.
     let tool: Arc<str> = if quiet { format!("completion/complete:{name}").into() } else { name.into() };
@@ -1212,7 +1212,7 @@ async fn call_as(ctx: &Arc<Ctx>, name: &str, args: Value, quiet: bool) -> Option
             decision: "allow".into(),
             approval: None,
             status,
-            args: Some(roll_access::redact::value(&args)),
+            args: Some(roll_access::redact::value(&args, name.split('_').next().unwrap_or(""))),
             ip: ctx.ip.map(|i| i.to_string()),
             duration_ms: started.elapsed().as_millis() as i64,
             client: ctx.client.as_deref().map(str::to_string),

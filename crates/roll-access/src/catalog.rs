@@ -132,6 +132,11 @@ fn apps_push(b: &Value) -> Vec<Lent> {
         .collect()
 }
 
+/// A drain into a roll storage bucket (`bucket`): apps mints a key that writes there for it.
+fn apps_drain_bucket(b: &Value) -> Vec<Lent> {
+    b.get("bucket").and_then(Value::as_str).map(|r| Lent { kind: "bucket".into(), r#ref: r.into(), action: Action::Write }).into_iter().collect()
+}
+
 /// A roll code repo the body names, which apps reads for the caller (`repo` for a plan or an import,
 /// `source.repo` for a service built from one): read on it, so a token can't learn a repo's stack,
 /// head or roll.toml, or build and run its code, without being allowed to read it.
@@ -1200,6 +1205,10 @@ static ROWS: &[Row] = &[
     row("GET", "/v1/search/clusters/{id}/browser-keys", "search", R, one(PG, "cluster")),
     row("POST", "/v1/search/clusters/{id}/browser-keys", "search", REVEAL, one(PG, "cluster")),
     row("DELETE", "/v1/search/clusters/{id}/browser-keys/{key}", "search", ADMIN, one(PG, "cluster")),
+    // A snapshot repository, the only way its credentials can be roll secrets references: it
+    // changes the cluster as the console does; roll secrets checks `reveal` on each reference
+    // itself (search_control::secret_refs).
+    row("PUT", "/v1/search/clusters/{id}/repositories/{name}", "search", ADMIN, one(PG, "cluster")),
     row("GET", "/v1/search/clusters/{id}/remotes", "search", R, one(PG, "cluster")),
     row("PUT", "/v1/search/clusters/{id}/remotes/{alias}", "search", ADMIN, one(PG, "cluster")).lends(Lend::Each(search_remote)),
     row("DELETE", "/v1/search/clusters/{id}/remotes/{alias}", "search", ADMIN, one(PG, "cluster")),
@@ -1268,6 +1277,11 @@ static ROWS: &[Row] = &[
     // Which candidates are this project's stored values (`roll secrets scan`): read on the
     // project. Secrets keeps only matches in folders the caller may reveal, so it's no oracle.
     row("POST", "/v1/secrets/projects/{project}/leaks", "secrets", R, one(&["project"], "project")).filters_itself(),
+    // Validity checks (docs/secrets.md, "Is it live?"): asking a credential's provider whether a
+    // credential found in code works is a write (it calls out and is audited, rate-limited per
+    // project); a kept answer by fingerprint (never the value) is a read.
+    row("POST", "/v1/secrets/projects/{project}/validity", "secrets", W, one(&["project"], "project")),
+    row("GET", "/v1/secrets/projects/{project}/unstored/{fingerprint}", "secrets", R, one(&["project"], "project")),
     // Rotators: URLs roll calls to issue and revoke values that live outside roll. Listing shows
     // names and hosts; adding one answers its signing secret once; both changes are admin.
     row("GET", "/v1/secrets/projects/{project}/rotations", "secrets", R, one(&["project"], "project")),
@@ -1416,6 +1430,10 @@ static ROWS: &[Row] = &[
     row("POST", "/v1/secrets/projects/{project}/environments/{env}/value-requests", "secrets", W, one(&["project"], "project")).env(EnvFrom::Param("env")).path_query("path"),
     row("GET", "/v1/secrets/projects/{project}/value-requests", "secrets", R, one(&["project"], "project")),
     row("DELETE", "/v1/secrets/projects/{project}/value-requests/{id}", "secrets", W, one(&["project"], "project")),
+    // Binding a key to hosts decides where its value goes through a placeholder (docs/secrets.md,
+    // "Using a key without seeing it"): the folder's admin, as purge is.
+    row("PUT", "/v1/secrets/projects/{project}/environments/{env}/secrets/{name}/hosts", "secrets", ADMIN, one(&["project"], "project")).env(EnvFrom::Param("env")).path_query("path"),
+    row("DELETE", "/v1/secrets/projects/{project}/environments/{env}/secrets/{name}/hosts", "secrets", ADMIN, one(&["project"], "project")).env(EnvFrom::Param("env")).path_query("path"),
     // Purging a secret's history can't be undone.
     row("POST", "/v1/secrets/projects/{project}/environments/{env}/secrets/{name}/purge", "secrets", ADMIN, one(&["project"], "project")).env(EnvFrom::Param("env")).path_query("path"),
     // A change request's current and proposed values, for its approvers.
@@ -1437,6 +1455,7 @@ static ROWS: &[Row] = &[
     // secret comes back once, so making one is reveal (Slack and Discord ones are write).
     // A project's spend limits: at the hard limit the whole project pauses, so setting one is admin.
     row("GET", "/v1/apps/projects/{project}/limits", "apps", R, one(&["project"], "project")),
+    row("GET", "/v1/apps/projects/{project}/usage", "apps", R, one(&["project"], "project")),
     row("PUT", "/v1/apps/projects/{project}/limits", "apps", ADMIN, one(&["project"], "project")),
     row("GET", "/v1/apps/projects/{project}/notifications", "apps", R, one(&["project"], "project")),
     row("POST", "/v1/apps/projects/{project}/notifications", "apps", Act::Body(apps_notification_action), one(&["project"], "project")),
@@ -1464,7 +1483,7 @@ static ROWS: &[Row] = &[
     row("POST", "/v1/apps/projects/{project}/preview-domain/verify", "apps", W, one(&["project"], "project")),
     // Its services as roll.toml: settings and variables' names, never a value.
     row("POST", "/v1/apps/projects/{project}/export", "apps", R, one(&["project"], "project")),
-    row("POST", "/v1/apps/projects/{project}/drains", "apps", REVEAL, one(&["project"], "project")),
+    row("POST", "/v1/apps/projects/{project}/drains", "apps", REVEAL, one(&["project"], "project")).lends(Lend::Each(apps_drain_bucket)),
     row("DELETE", "/v1/apps/projects/{project}/drains/{did}", "apps", W, one(&["project"], "project")),
     // An edit can send more out (another source, every environment): reveal, as making one is.
     row("PATCH", "/v1/apps/projects/{project}/drains/{did}", "apps", REVEAL, one(&["project"], "project")),
@@ -1497,6 +1516,10 @@ static ROWS: &[Row] = &[
     row("POST", "/v1/apps/services/{id}/environments/{env}/deploys", "apps", Act::ProductionIf("env"), one(PG, "service")).env(EnvFrom::Param("env")).admin_if("x-roll-override"),
     row("POST", "/v1/apps/services/{id}/environments/{env}/redeploy", "apps", Act::ProductionIf("env"), one(PG, "service")).env(EnvFrom::Param("env")).admin_if("x-roll-override"),
     row("POST", "/v1/apps/services/{id}/environments/{env}/promote", "apps", Act::ProductionIf("env"), one(PG, "service")).env(EnvFrom::Param("env")).admin_if("x-roll-override"),
+    // "Why did it fail?": reads a deploy's logs and keeps the repo owner's model's answer (metered
+    // on their usage), in any environment: write, never production's deploy.
+    row("POST", "/v1/apps/services/{id}/environments/{env}/deploys/{dep}/explain", "apps", W, one(PG, "service")).env(EnvFrom::Param("env")),
+    row("POST", "/v1/apps/services/{id}/environments/{env}/deploys/{dep}/approve", "apps", Act::ProductionIf("env"), one(PG, "service")).env(EnvFrom::Param("env")),
     row("POST", "/v1/apps/services/{id}/environments/{env}/deploys/{dep}/rollback", "apps", Act::ProductionIf("env"), one(PG, "service")).env(EnvFrom::Param("env")).admin_if("x-roll-override"),
     // An error group resolved, muted or open again: the team's triage, a write in any environment.
     row("PATCH", "/v1/apps/services/{id}/environments/{env}/errors/{fingerprint}", "apps", W, one(PG, "service")).env(EnvFrom::Param("env")),

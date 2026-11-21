@@ -122,8 +122,9 @@ except Exception:
     grant = None
 call("search_create_index", {"cluster": "sweep", "index": "sweep-idx"})
 call("streams_create_topic", {"stream": "sweep", "name": "t1"})
+call("streams_reset_group", {"stream": "sweep", "group": "g1", "topic": "t1", "to": "earliest"})  # committed offsets make a group
 call("queues_declare_queue", {"vhost": "sweep", "name": "q1"})
-seen = {("storage", "bucket"): "sweep-bkt", ("streams", "stream"): "sweep", ("streams", "topic"): "t1", ("nosql", "database"): "sweep",
+seen = {("storage", "bucket"): "sweep-bkt", ("streams", "stream"): "sweep", ("streams", "topic"): "t1", ("streams", "group"): "g1", ("nosql", "database"): "sweep",
         ("redis", "database"): "sweep", ("search", "cluster"): "sweep", ("search", "index"): "sweep-idx", ("queues", "vhost"): "sweep",
         ("queues", "queue"): "q1", ("secrets", "env"): "development", ("apps", "env"): "production"}
 if ws:
@@ -335,7 +336,9 @@ fails += [f"choices {c}" for c in no_form]
 # The rest of what a client reads: every prompt (its arguments from the fixtures), every resource
 # listed, a project's page, every skill. An error is a failure: they're all read-only.
 surface = []
-PROMPT_ARGS = {"project": seen.get(("workspace", "id")), "service": seen.get(("apps", "service")), "env": "production", "branch": seen.get(("postgres", "branch"))}
+PROMPT_ARGS = {"project": seen.get(("workspace", "id")), "service": seen.get(("apps", "service")), "env": "production", "branch": seen.get(("postgres", "branch")),
+               "preview": seen.get(("previews", "id")), "vhost": seen.get(("queues", "vhost")), "queue": seen.get(("queues", "queue")),
+               "stream": seen.get(("streams", "stream")), "group": seen.get(("streams", "group"))}
 for p in rpc("prompts/list", {}).get("result", {}).get("prompts", []):
     args = {a["name"]: (seen.get(("postgres", "project")) if a["name"] == "project" and "Postgres" in a.get("description", "") else PROMPT_ARGS.get(a["name"]) or "sweep")
             for a in p.get("arguments", [])}
@@ -380,13 +383,16 @@ if "--writes" in sys.argv:
         if any(w in name for w in ("url", "endpoint", "webhook", "target")):
             return "https://example.invalid/sweep"
         return f"sweep-{name}"
+    # Arguments a tool can't require because only some of another's values need them, which its
+    # default does: a notification's url (a webhook's; email, PagerDuty and Opsgenie take none).
+    REQUIRED_BY_DEFAULT = {"apps_add_notification": ["url"]}
     writes = [t for t in tools if not t.get("annotations", {}).get("readOnlyHint") and "wait" not in t["name"] and (only is None or t["name"] == only)]
     writes.sort(key=lambda t: bool(t.get("annotations", {}).get("destructiveHint")))
     wran, wfails, wslow = 0, [], []
     for t in writes:
         prod = t.get("_meta", {}).get("roll/product", "")
         props = t["inputSchema"].get("properties", {})
-        args = {a: fake(a, props.get(a, {}), prod) for a in t["inputSchema"].get("required", [])}
+        args = {a: fake(a, props.get(a, {}), prod) for a in t["inputSchema"].get("required", []) + REQUIRED_BY_DEFAULT.get(t["name"], [])}
         try:
             res = rpc("tools/call", {"name": t["name"], "arguments": args})
         except Exception as e:

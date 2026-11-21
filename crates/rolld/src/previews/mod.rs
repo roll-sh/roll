@@ -87,7 +87,7 @@ pub fn start(
     if let Some(key) = args.secret_key() {
         match code_review::secret::Sealer::new(&key) {
             Ok(s) => {
-                let _ = store.sealer.set(Arc::new(VarsSealer(s)));
+                store.set_sealer(Arc::new(VarsSealer(s)))?;
             }
             Err(e) => tracing::warn!(error = %e, "previews: a preview's own variables aren't sealed"),
         }

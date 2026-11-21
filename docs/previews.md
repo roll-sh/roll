@@ -127,6 +127,26 @@ idle instances. Only Neon branches cheaply, and only Postgres. roll previews:
   goes). For comparing before and after. A trusted change's only (an approval is for one head),
   `roll.toml` services only (roll apps runs its own), and old code on migrated data can break.
   They're on the sheet, `roll preview show`, the change and the pull request comment.
+  A link to one that's no longer kept says so: its host answers 410 with a page naming the
+  service and the push and linking the service's latest (on roll's preview domain and on a
+  project's own, there only for that project's previews; the latest 30 a preview evicted, gone
+  with the preview), not a 404 that reads as a broken preview.
+- **From the pull request or roll's change** (Bunnyshell's and Uffizzi's comment commands):
+  someone who can write to the repo comments, in the pull request's conversation, an inline
+  review comment or any of the change's threads in roll, `@roll preview redeploy` (build and deploy it again), `reset` (its
+  data branched again from the parents), `wake`, `sleep` or `keep [hours]` (past its TTL, 24 when
+  not said, at most 720); roll answers where it was asked with what it did, and the preview's
+  activity names who asked ("@octo asked for its data reset from the pull request"). Readers and
+  strangers get nothing, as with every `@roll` command (roll code's GitHub permission check).
+- **Watch paths** (Railway's watch paths, Render's per-service build filters): a `roll.toml`
+  service lists the paths whose change rebuilds it (`[preview] watch = ["web/**",
+  "package.json"]`, gitignore-style as `paths` reads them; at most 50, no `!negation`). A push to
+  the change that touches none of them, nor `roll.toml`, keeps the build the service runs: no
+  build, no redeploy, and a start at the new head runs it ("kept web's build at 3f2a…: the push
+  to 9c1d… touched none of what it watches", in the activity). A path list that can't be read, a
+  pattern that doesn't parse, a deploy hook's rebuild or a fork's change (its approval is for one
+  head) rebuilds it as before. Like an earlier push, the kept build runs on data the new head's
+  release may have migrated. Empty (the default): every push rebuilds it.
 - **Warm after a push**: once a new head is deployed, the change's own services are woken (after
   the pass, a few at a time), so the first visit, usually the pull request comment's link,
   doesn't wait for a cold start; they sleep again after `sleep_after` unused. Not a preview
@@ -419,7 +439,11 @@ behind the `Apps` trait:
   sign in, lost the project or its reveal, a revoked token, a key made sensitive since or a
   protected environment for an untrusted preview leaves it out, said once in the preview's
   activity ("references left out (who chose them can't now): K: …"). Saving the rules again as
-  someone who may brings it back. A reference to the base needs none of this, but changing the base needs its writer's
+  someone who may brings it back. A service start asks too: one whose reference lost its writer
+  since the last converge waits for the converge that leaves it out (`refs_still_allowed`), so it
+  never reaches a service in between. A Git URL service's preview is read as that service (its
+  place on the canvas), every other preview as its repo. A deleted preview's own references'
+  setters go with it. A reference to the base needs none of this, but changing the base needs its writer's
   reveal on the new one (every preview's code then reads it). The rules are written only as they
   were checked: another request's change in between is a 409.
   Moving the base checks the references that named the old one as new. A value that reads as a
@@ -728,6 +752,24 @@ its firewall), while container to container always works. Changing the list rest
 services, and the proxy goes with the preview's last service. Live: github.com reached through
 it, example.com refused and said in the activity, and a listed `169.254.169.254.nip.io` refused
 as a private address.
+
+### Credentials at rest
+
+What previews keeps that's a credential is sealed with the deployment key (`ROLL_SECRET_KEY`,
+AES-256-GCM, as roll's reviewer keys are), each bound to its row: a preview's own variables (to
+the preview), the rules' pasted `env`/`env_for` values (to the project, scope and name; a
+`roll://` reference isn't a secret and stays as it is) and the screenshot links' signing key. They
+open inside the store as they're read. With no key, a pasted value is refused (400, naming
+`ROLL_SECRET_KEY`), never written in the clear; the signing key is then this process's own, kept
+in memory only (its links stop at a restart: local development). A database from before is sealed
+the moment the key comes (`Store::set_sealer`), in one write with SQLite's `secure_delete` on and
+the WAL checkpointed and truncated after it, so nothing of the old values stays readable in the
+file, its free pages or its `-wal` (`credentials_are_sealed_at_rest_and_nothing_stays_in_the_file`,
+on an upgraded database). On Postgres (a fleet's control database) the rewrite is an ordinary
+write: the old row versions stay as dead tuples until autovacuum reuses their pages (`VACUUM FULL`
+on `settings`, `previews` and `keys` removes them at once). Either way, backups and WAL archives
+taken before the key came still hold the clear values: rotate or expire them. Roll secrets'
+thirty-fourth review found them in the clear.
 
 ## Safety
 
