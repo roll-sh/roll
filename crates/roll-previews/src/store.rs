@@ -595,6 +595,9 @@ const COLUMNS: &str = "id, project_id, slug, repo, change_id, branch, number, ti
      next_at, asleep, reset_requested, last_reset_at, last_active_at, expires_at, created_by, created_at, updated_at, generation, runs";
 
 /// What a preview's sealed variables are bound to.
+/// What the screenshot links' key is sealed to.
+const SIGNING_AAD: &str = "preview-screenshot-links";
+
 fn vars_aad(id: &str) -> String {
     format!("preview-vars:{id}")
 }
@@ -786,13 +789,87 @@ impl Store {
         let raw: Option<String> = self.db.read(|c| c.query_row("SELECT json FROM settings WHERE project_id = ?", [project], |r| r.get(0)).optional())?;
         // Only checked settings are stored; a row that doesn't parse (an older version's) is the
         // defaults with previews off, never a guess.
-        Ok(raw.and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default())
+        match raw.and_then(|s| serde_json::from_str::<Settings>(&s).ok()) {
+            Some(s) => self.open_rules(project, s),
+            None => Ok(Settings::default()),
+        }
+    }
+
+    /// The rules' variables (`env`, `env_for`) with each pasted value sealed (`v1:…`, bound to
+    /// the project, its scope and its name) or, `open`, opened. A reference isn't a secret and
+    /// stays as it is. Sealing with no key refuses: a pasted value is never written in the clear.
+    fn rules_values(&self, project: &str, mut s: Settings, open: bool) -> Result<Settings> {
+        let aad = |scope: &str, name: &str| format!("preview-rules:{project}:{scope}:{name}");
+        let each = |scope: &str, vars: &mut std::collections::BTreeMap<String, String>| -> Result<()> {
+            for (k, v) in vars.iter_mut() {
+                if crate::settings::is_reference(v) {
+                    continue;
+                }
+                if open {
+                    if v.starts_with("v1:") {
+                        let sealer = self.sealer.get().ok_or_else(|| Error::Internal(format!("{project}'s preview rules hold values sealed with ROLL_SECRET_KEY, which this node doesn't have")))?;
+                        *v = sealer.open(&aad(scope, k), v).ok_or_else(|| Error::Internal(format!("{project}'s preview rule {k} doesn't open with this ROLL_SECRET_KEY")))?;
+                    }
+                } else if !v.starts_with("v1:") {
+                    let sealer = self.sealer.get().ok_or_else(|| Error::BadRequest(format!("{scope}: {k}: a value in the preview rules is kept sealed with ROLL_SECRET_KEY, which this node doesn't have: set it, or name the value in roll secrets (roll://ENV/KEY)")))?;
+                    *v = sealer.seal(&aad(scope, k), v);
+                }
+            }
+            Ok(())
+        };
+        each("env", &mut s.env)?;
+        for (pattern, vars) in s.env_for.iter_mut() {
+            each(&format!("env_for {pattern}"), vars)?;
+        }
+        Ok(s)
+    }
+
+    fn open_rules(&self, project: &str, s: Settings) -> Result<Settings> {
+        self.rules_values(project, s, true)
+    }
+
+    /// The deployment key, from now on: what's kept in the clear from before (the rules' pasted
+    /// values, previews' own variables, the screenshot links' key) is sealed in one write that
+    /// leaves nothing of it in the file (`write_erasing`).
+    pub fn set_sealer(&self, sealer: std::sync::Arc<dyn crate::ports::Sealer>) -> Result<()> {
+        if self.sealer.set(sealer).is_err() {
+            return Ok(());
+        }
+        let settings: Vec<(String, String)> = self.db.read(|c| c.query("SELECT project_id, json FROM settings", (), |r| Ok((r.get(0)?, r.get(1)?))))?;
+        let vars: Vec<(String, String)> = self.db.read(|c| c.query("SELECT id, vars FROM previews WHERE vars IS NOT NULL AND vars NOT LIKE 'v1:%'", (), |r| Ok((r.get(0)?, r.get(1)?))))?;
+        let mut rules = Vec::new();
+        for (project, json) in settings {
+            let Ok(s) = serde_json::from_str::<Settings>(&json) else { continue };
+            let sealed = serde_json::to_string(&self.rules_values(&project, s, false)?).expect("JSON");
+            if sealed != json {
+                rules.push((project, sealed));
+            }
+        }
+        let sealer = self.sealer.get().expect("set above").clone();
+        let vars: Vec<(String, String)> = vars.into_iter().map(|(id, plain)| (id.clone(), sealer.seal(&vars_aad(&id), &plain))).collect();
+        let key: Option<String> = self.db.read(|c| c.query_row("SELECT value FROM keys WHERE name = 'screenshots' AND value NOT LIKE 'v1:%'", (), |r| r.get(0)).optional())?;
+        let key = key.map(|k| sealer.seal(SIGNING_AAD, &k));
+        if rules.is_empty() && vars.is_empty() && key.is_none() {
+            return Ok(());
+        }
+        self.db.write_erasing(|c| {
+            for (project, json) in &rules {
+                c.execute("UPDATE settings SET json = ? WHERE project_id = ?", params![json, project])?;
+            }
+            for (id, sealed) in &vars {
+                c.execute("UPDATE previews SET vars = ? WHERE id = ?", params![sealed, id])?;
+            }
+            if let Some(k) = &key {
+                c.execute("UPDATE keys SET value = ? WHERE name = 'screenshots'", [k.as_str()])?;
+            }
+            Ok::<_, Error>(())
+        })
     }
 
     /// Projects with previews on.
     pub fn enabled_projects(&self) -> Result<Vec<(String, Settings)>> {
         let rows: Vec<(String, String)> = self.db.read(|c| c.query("SELECT project_id, json FROM settings ORDER BY project_id", (), |r| Ok((r.get(0)?, r.get(1)?))))?;
-        Ok(rows.into_iter().filter_map(|(p, j)| serde_json::from_str::<Settings>(&j).ok().filter(|s| s.enabled).map(|s| (p, s))).collect())
+        rows.into_iter().filter_map(|(p, j)| serde_json::from_str::<Settings>(&j).ok().filter(|s| s.enabled).map(|s| (p, s))).map(|(p, s)| Ok((p.clone(), self.open_rules(&p, s)?))).collect()
     }
 
     /// Projects whose stored rules parse and say previews are off (rules that don't parse,
@@ -928,7 +1005,8 @@ impl Store {
 
     pub fn put_settings(&self, project: &str, s: &Settings) -> Result<Settings> {
         s.check()?;
-        let json = serde_json::to_string(s).expect("JSON");
+        // Its pasted values sealed (a reference stays as it is); refused without a key.
+        let json = serde_json::to_string(&self.rules_values(project, s.clone(), false)?).expect("JSON");
         let now = self.now_ms()?;
         self.db.write(|c| {
             let before: Option<String> = c.query_row("SELECT json FROM settings WHERE project_id = ?", [project], |r| r.get(0)).optional()?;
@@ -1333,11 +1411,13 @@ impl Store {
             let Some(raw) = raw else { return Err(Error::NotFound(format!("no preview {id}"))) };
             let mut vars = self.open_vars(id, raw)?;
             f(&mut vars)?;
-            // Sealed whenever this node can (the plain JSON of an older write goes at this one).
-            let raw = (!vars.is_empty()).then(|| serde_json::to_string(&vars).unwrap_or_default()).map(|json| match self.sealer.get() {
-                Some(s) => s.seal(&vars_aad(id), &json),
-                None => json,
-            });
+            // Sealed (the plain JSON of an older write goes at this one); with no key, refused:
+            // never written in the clear.
+            let raw = match (vars.is_empty(), self.sealer.get()) {
+                (true, _) => None,
+                (false, Some(s)) => Some(s.seal(&vars_aad(id), &serde_json::to_string(&vars).unwrap_or_default())),
+                (false, None) => return Err(Error::BadRequest("a preview's own variables are kept sealed with ROLL_SECRET_KEY, which this node doesn't have: set it, or name the value in roll secrets".into())),
+            };
             c.execute("UPDATE previews SET vars = ? WHERE id = ?", params![raw, id])?;
             Ok(vars)
         })
@@ -2038,6 +2118,8 @@ impl Store {
         Ok(raw.and_then(|r| base64::engine::general_purpose::STANDARD.decode(r).ok()))
     }
 
+    /// The screenshot links' key: kept sealed with the deployment key, shared by the fleet; with no
+    /// key, this process's own, never written (its links stop at a restart: local development).
     fn signing_key(&self) -> Result<Vec<u8>> {
         if let Some(k) = self.signing.get() {
             return Ok(k.clone());
@@ -2045,11 +2127,18 @@ impl Store {
         let mut raw = [0u8; 32];
         getrandom::fill(&mut raw).expect("system randomness");
         let fresh = hex::encode(raw);
+        let Some(sealer) = self.sealer.get() else {
+            // A key from before in the clear goes.
+            self.db.write_erasing(|c| c.execute("DELETE FROM keys WHERE name = 'screenshots' AND value NOT LIKE 'v1:%'", ()).map(drop).map_err(Error::from))?;
+            return Ok(self.signing.get_or_init(|| raw.to_vec()).clone());
+        };
+        let sealed = sealer.seal(SIGNING_AAD, &fresh);
         self.db.write(|c| {
-            c.execute("INSERT INTO keys (name, value) VALUES ('screenshots', ?) ON CONFLICT (name) DO NOTHING", [fresh.as_str()])?;
+            c.execute("INSERT INTO keys (name, value) VALUES ('screenshots', ?) ON CONFLICT (name) DO NOTHING", [sealed.as_str()])?;
             Ok::<_, Error>(())
         })?;
         let v: String = self.db.read(|c| c.query_row("SELECT value FROM keys WHERE name = 'screenshots'", (), |r| r.get(0)))?;
+        let v = if v.starts_with("v1:") { sealer.open(SIGNING_AAD, &v).ok_or_else(|| Error::Internal("the screenshot links' key doesn't open with this ROLL_SECRET_KEY".into()))? } else { v };
         let key = hex::decode(v).map_err(|e| Error::Internal(format!("the screenshot key: {e}")))?;
         Ok(self.signing.get_or_init(|| key).clone())
     }
@@ -3118,41 +3207,63 @@ mod tests {
 
     use super::*;
 
-    /// A preview's own variables are sealed at rest when the node has a key, bound to the
-    /// preview: the column holds no value, another preview's copy doesn't open, and plain ones
-    /// from before still read (sealed at their next write).
+    /// What previews keeps that's a credential is sealed at rest with the deployment key, bound to
+    /// its row: a preview's own variables, the rules' pasted values (a reference stays as it is)
+    /// and the screenshot links' key. A database from before, in the clear, is sealed when the key
+    /// comes, and nothing of it stays readable in the file or its `-wal`; with no key, a pasted
+    /// value is refused, never written in the clear.
     #[test]
-    fn a_previews_own_variables_are_sealed_at_rest_to_it() {
-        struct Rot;
-        impl crate::ports::Sealer for Rot {
+    fn credentials_are_sealed_at_rest_and_nothing_stays_in_the_file() {
+        struct Hex;
+        impl crate::ports::Sealer for Hex {
             fn seal(&self, aad: &str, plain: &str) -> String {
-                format!("v1:{aad}|{}", plain.chars().rev().collect::<String>())
+                format!("v1:{}|{}", hex::encode(aad), hex::encode(plain))
             }
             fn open(&self, aad: &str, sealed: &str) -> Option<String> {
-                sealed.strip_prefix(&format!("v1:{aad}|")).map(|s| s.chars().rev().collect())
+                String::from_utf8(hex::decode(sealed.strip_prefix(&format!("v1:{}|", hex::encode(aad)))?).ok()?).ok()
             }
         }
-        let (_dir, store) = store();
+        let (dir, store) = store();
         let (a, _) = store.create(&new("chg_va")).unwrap();
         let (b, _) = store.create(&new("chg_vb")).unwrap();
-        let raw = |id: &str| store.db.read(|c| c.query_row("SELECT vars FROM previews WHERE id = ?", [id], |r| r.get::<_, Option<String>>(0))).unwrap().unwrap_or_default();
-        store.update_vars(&a.id, |v| {
+        // No key: a pasted value is refused (a reference isn't one).
+        let refused = store.update_vars(&a.id, |v| {
             v.insert("STRIPE_KEY".into(), "sk_test_51Hx9".into());
             Ok(())
-        })
-        .unwrap();
-        assert!(raw(&a.id).contains("sk_test_51Hx9"), "no key: kept as written");
-        let _ = store.sealer.set(std::sync::Arc::new(Rot));
-        assert_eq!(store.vars(&a.id).unwrap()["STRIPE_KEY"], "sk_test_51Hx9", "a plain one from before still reads");
-        store.update_vars(&a.id, |v| {
-            v.insert("MODE".into(), "test".into());
-            Ok(())
-        })
-        .unwrap();
-        assert!(raw(&a.id).starts_with("v1:") && !raw(&a.id).contains("sk_test_51Hx9"), "sealed at its next write");
-        assert_eq!(store.vars(&a.id).unwrap().len(), 2);
-        // Copied onto another preview's row, it doesn't open there.
-        let sealed = raw(&a.id);
+        });
+        assert!(matches!(refused, Err(Error::BadRequest(_))));
+        let mut rules = Settings::default();
+        rules.env.insert("TOKEN".into(), "tok_rules_77".into());
+        assert!(matches!(store.put_settings("prj_1", &rules), Err(Error::BadRequest(_))));
+        rules.env.insert("TOKEN".into(), "roll://staging/TOKEN".into());
+        store.put_settings("prj_1", &rules).unwrap();
+        // An upgraded database: what an older version wrote in the clear.
+        let mut old = Settings::default();
+        old.env.insert("TOKEN".into(), "tok_rules_77".into());
+        store
+            .db
+            .write(|c| {
+                c.execute("UPDATE settings SET json = ? WHERE project_id = 'prj_1'", [serde_json::to_string(&old).unwrap()])?;
+                c.execute("UPDATE previews SET vars = ? WHERE id = ?", params![r#"{"STRIPE_KEY":"sk_test_51Hx9"}"#, a.id])?;
+                c.execute("INSERT INTO keys (name, value) VALUES ('screenshots', ?) ON CONFLICT (name) DO UPDATE SET value = excluded.value", ["5c4e7f00aa11bb22"])
+            })
+            .unwrap();
+        // Long since in the database file itself, not only its WAL.
+        store.db.write_erasing(|_| Ok::<_, code_sql::Error>(())).unwrap();
+        assert!(std::fs::read(dir.path().join("p.db")).unwrap().windows(13).any(|w| w == b"sk_test_51Hx9"), "the premise: it's in the file");
+        store.set_sealer(std::sync::Arc::new(Hex)).unwrap();
+        // Read back as written, through the key.
+        assert_eq!(store.vars(&a.id).unwrap()["STRIPE_KEY"], "sk_test_51Hx9");
+        assert_eq!(store.settings("prj_1").unwrap().env["TOKEN"], "tok_rules_77");
+        // Nothing of it in the file, its free pages or its WAL.
+        for f in ["p.db", "p.db-wal"] {
+            let bytes = std::fs::read(dir.path().join(f)).unwrap_or_default();
+            for v in ["sk_test_51Hx9", "tok_rules_77", "5c4e7f00aa11bb22"] {
+                assert!(!bytes.windows(v.len()).any(|w| w == v.as_bytes()), "{v} in {f}");
+            }
+        }
+        // Bound to its row: copied onto another preview, it doesn't open.
+        let sealed: String = store.db.read(|c| c.query_row("SELECT vars FROM previews WHERE id = ?", [a.id.as_str()], |r| r.get(0))).unwrap();
         store.db.write(|c| c.execute("UPDATE previews SET vars = ? WHERE id = ?", params![sealed, b.id]).map(drop)).unwrap();
         assert!(store.vars(&b.id).is_err());
     }

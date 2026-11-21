@@ -753,6 +753,20 @@ services, and the proxy goes with the preview's last service. Live: github.com r
 it, example.com refused and said in the activity, and a listed `169.254.169.254.nip.io` refused
 as a private address.
 
+### Credentials at rest
+
+What previews keeps that's a credential is sealed with the deployment key (`ROLL_SECRET_KEY`,
+AES-256-GCM, as roll's reviewer keys are), each bound to its row: a preview's own variables (to
+the preview), the rules' pasted `env`/`env_for` values (to the project, scope and name; a
+`roll://` reference isn't a secret and stays as it is) and the screenshot links' signing key. They
+open inside the store as they're read. With no key, a pasted value is refused (400, naming
+`ROLL_SECRET_KEY`), never written in the clear; the signing key is then this process's own, kept
+in memory only (its links stop at a restart: local development). A database from before is sealed
+the moment the key comes (`Store::set_sealer`), in one write with SQLite's `secure_delete` on and
+the WAL checkpointed and truncated after it, so nothing of the old values stays readable in the
+file, its free pages or its `-wal` (`credentials_are_sealed_at_rest_and_nothing_stays_in_the_file`,
+on an upgraded database). Roll secrets' thirty-fourth review found them in the clear.
+
 ## Safety
 
 - **Forks.** A change with `trusted: false` (a PR from a fork) gets a preview only for a head a

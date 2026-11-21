@@ -601,6 +601,19 @@ pub fn change(id: &str, n: i64) -> ChangeInfo {
     }
 }
 
+/// A sealer for tests: hex, bound to its associated data (no value shows in the file).
+pub struct HexSealer;
+
+impl roll_previews::ports::Sealer for HexSealer {
+    fn seal(&self, aad: &str, plain: &str) -> String {
+        format!("v1:{}|{}", hex::encode(aad), hex::encode(plain))
+    }
+    fn open(&self, aad: &str, sealed: &str) -> Option<String> {
+        let rest = sealed.strip_prefix(&format!("v1:{}|", hex::encode(aad)))?;
+        String::from_utf8(hex::decode(rest).ok()?).ok()
+    }
+}
+
 pub fn env(settings: serde_json::Value) -> Env {
     let dir = tempfile::tempdir().unwrap();
     let ws = Arc::new(Workspace::open(&code_sql::Target::Sqlite(dir.path().join("ws.db")), Default::default()).unwrap());
@@ -609,6 +622,8 @@ pub fn env(settings: serde_json::Value) -> Env {
         ws.place(roll_workspace::Scope::All, &p.id, kind, r, 0.0, 0.0).unwrap();
     }
     let store = Arc::new(Store::open(&code_sql::Target::Sqlite(dir.path().join("previews.db")), Default::default()).unwrap());
+    // A deployment key, as rolld has one: pasted values are kept sealed.
+    store.set_sealer(Arc::new(HexSealer)).unwrap();
     let s = Settings::default().patched(&settings).unwrap();
     store.put_settings(&p.id, &s).unwrap();
     let code = Arc::new(FakeCode::default());
