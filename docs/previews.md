@@ -827,8 +827,15 @@ what it says. A CA that ended (a key's bound hosts shrank: a revoked placeholder
 binding, a cut-off) refuses the connection with "a key's bound hosts changed; restarting with a
 new interception certificate" and kicks a converge, which mints the new CA and restarts the
 preview's services (the CA's id is in their deploy fingerprint), since they trust its certificate.
-Next: the live check end to end (a key bound to a host, a fork's preview, Docker), with a local
-development override for a private TLS echo host.
+Live: `scripts/preview-intercept.sh` (rolld with `ROLL_PREVIEWS_INTERCEPT_ALLOW_PRIVATE`
+trusting a CA of its own, a TLS echo host `echo.localhost`): a key bound to it, a token saving the
+rules (the maker), a "Roll only" preview. Its service holds `rlph_…`, never the key; a request
+through the preview's socket, as its egress proxy hands one over, reaches the host with the key
+swapped in; a placeholder that isn't live is refused (403); the activity says a key was swapped
+in and never shows it. (The egress proxy only lets ports 443 and 80 through, and 443 isn't the
+script's on a shared machine, so it goes to the socket directly: what `egress.js` would send.)
+Until roll secrets' #582 gives the maker refusal its own code, a maker who can't reveal there
+fails the start with the reason rather than falling back.
 
 ## Safety
 
@@ -2291,7 +2298,7 @@ Ranked by what a person notices first. Done so far:
    `preview`, admin, owner); a create only in the project roll-access decided it on, the dashboard
    and the CLI naming it; a request no role was decided for (past the gate) reaches only what the
    person owns. Members' fix merged in and gated; lands after #501.
-2. **Keys a fork's preview never holds, in progress** (`feature/roll-previews-intercept`; roll
+2. **Keys a fork's preview never holds, in review** (#535, live-checked; roll
    secrets' #520 and #517, its batch 6): see "Keys a preview never holds". Built: the swap, the
    handoff, the runtime's socket and the services' trust, bounded per preview after review. Next:
    the live check end to end.
@@ -2299,18 +2306,14 @@ Ranked by what a person notices first. Done so far:
    pasted values, a preview's own variables and the screenshot links' key sealed with the
    deployment key, refused in the clear without one, an upgraded database sealed with nothing
    left in its file or WAL.
-4. **The live check of keys a fork's preview never holds**: a token saving the rules (the maker),
-   a key bound to a local TLS echo host (`ROLL_PREVIEWS_INTERCEPT_ALLOW_PRIVATE`), a "Roll only"
-   preview whose service calls it: the echo sees the key, the service only the placeholder; a
-   revoked placeholder restarts with a new CA.
-5. **A key bound to a host egress refuses, said**: roll secrets' suggestion; a preview whose
+4. **A key bound to a host egress refuses, said**: roll secrets' suggestion; a preview whose
    placeholders name a host `egress_hosts` doesn't list says so on its status.
-6. **Previews for the members thread's next products**: once roll apps' and roll search's routes
+5. **Previews for the members thread's next products**: once roll apps' and roll search's routes
    become member routes (docs/members.md, v1.1), a preview's roll apps services and search branch
    follow the same roles, checked live against a member's session.
-7. **Cheap Postgres branches on ext4: overlay volumes over a frozen base** (pg-control; measured
+6. **Cheap Postgres branches on ext4: overlay volumes over a frozen base** (pg-control; measured
    2026-11-17): 0.97 s against 3.5 s for a 1.4 GB copy, but a write copies the whole table file.
-8. **Watch: pg-control's recovery to a time seconds old** (unowned).
+7. **Watch: pg-control's recovery to a time seconds old** (unowned).
 
 Landed 2026-11-21 (main c4b6561c9; turn 15): the gone page tested at the edge (#559), the live
 check's leaked build networks fixed (#567), `@roll preview` in any of a change's threads (#568)
