@@ -284,6 +284,25 @@ impl Sources for CodeSources {
         blocking(move || this.0.store.land_log_head()).await
     }
 
+    async fn gitlink(&self, repo: &str, revision: &str, path: &str) -> anyhow::Result<Option<String>> {
+        let (this, repo_s, rev, path) = (self.clone(), repo.to_string(), revision.to_string(), path.to_string());
+        blocking(move || {
+            let r = this.repo(&repo_s)?;
+            let cs = this.0.store.resolve(&r.id, &rev)?.ok_or_else(|| anyhow::anyhow!("no revision {rev}"))?;
+            Ok(this.0.store.entry(&r.id, &cs, &path)?.filter(|e| e.file_mode() == Some(code_store::Mode::Gitlink)).map(|e| e.oid.to_string()))
+        })
+        .await
+    }
+
+    fn git_base(&self) -> Option<String> {
+        Some(self.0.config.git_url.trim_end_matches('/').to_string())
+    }
+
+    async fn public(&self, repo: &str) -> anyhow::Result<bool> {
+        let (this, repo) = (self.clone(), repo.to_string());
+        blocking(move || Ok(this.repo(&repo).is_ok_and(|r| r.visibility == code_control::model::Visibility::Public))).await
+    }
+
     async fn read_file(&self, repo: &str, revision: &str, path: &str) -> anyhow::Result<Option<Vec<u8>>> {
         let (this, repo_s, rev) = (self.clone(), repo.to_string(), revision.to_string());
         let (r, cs) = blocking(move || {
