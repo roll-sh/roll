@@ -53,6 +53,8 @@ export interface Build {
   size?: "small" | "medium" | "large";
   /** A Git URL service's submodules fetched into the tree (default: left out). */
   submodules?: boolean;
+  /** A Git URL service's Git LFS objects in place of their pointers (default: pointers as text). */
+  lfs?: boolean;
 }
 
 export type ServiceType = "web" | "worker" | "cron";

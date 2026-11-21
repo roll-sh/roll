@@ -747,7 +747,7 @@ async fn rotate_config(State(apps): S, Path((id, env)): Path<(String, String)>, 
 
 async fn put_env(State(apps): S, Path((id, env)): Path<(String, String)>, ext: Extensions, b: Bytes) -> R {
     let put = body(&b)?;
-    let e = apps.put_environment(&id, &env, put.clone()).await?;
+    let e = apps.put_environment_by(&id, &env, put.clone(), maker(&ext)).await?;
     apps.settings_changed();
     // The access token is a secret: the trail says it changed, never what it is.
     apps.audit("environment", &id, &env, actor(&ext), json!({ "changed": put.as_object().map(|o| o.keys().cloned().collect::<Vec<_>>()).unwrap_or_default() })).await;
@@ -1098,6 +1098,16 @@ fn person(ext: &Extensions) -> Option<String> {
         return Some(u.user.clone());
     }
     roll_auth::Operator::on(ext).then(|| "operator".to_string())
+}
+
+/// Who makes what a request sets up on someone's behalf (a closed environment's placeholders):
+/// the token itself when one asks (`token:<id>`: revoking or narrowing it stops what it made, as
+/// roll secrets' `maker_reaches` checks), else the signed-in person or the operator.
+fn maker(ext: &Extensions) -> Option<String> {
+    if let Some(g) = roll_auth::Grant::on(ext) {
+        return Some(format!("token:{}", g.id));
+    }
+    person(ext)
 }
 
 fn actor(ext: &Extensions) -> Option<String> {

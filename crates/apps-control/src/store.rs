@@ -600,6 +600,9 @@ pub struct EnvRow {
     pub approvals: u32,
     /// Its deploy status badge answers (`/_roll/badge/…`), for anyone.
     pub badge: bool,
+    /// Who last set its egress (a person, their token's user, the operator): a closed
+    /// environment's placeholders are made by them. None: set before it was kept.
+    pub egress_by: Option<String>,
     /// Its deploys are reported to the Git host (commit statuses, GitHub Deployments); false:
     /// someone else reports them (roll previews for its `pv-` environments).
     pub report: bool,
@@ -724,7 +727,7 @@ fn name_taken(name: &str, deleted: Option<i64>) -> String {
         Some(_) => format!("a deleted service named {name} holds the name: restore it, or delete it again to delete it for good"),
     }
 }
-const ENV_COLS: &str = "service, name, branch, ephemeral, active, slug, port, created_at, wait_for_ci, run, hook_hash, follow_tag, tag_seen, feedback, maintenance, allow_ips, rate_limit, tcp_port, firewall, pages, redeploy_on_secrets, secrets_seen, headers, paused, held_by, egress, vitals, routes, report, checks, heartbeats, split, freeze, mirror, pause_schedule, snippets, log_retention_days, approvals, badge";
+const ENV_COLS: &str = "service, name, branch, ephemeral, active, slug, port, created_at, wait_for_ci, run, hook_hash, follow_tag, tag_seen, feedback, maintenance, allow_ips, rate_limit, tcp_port, firewall, pages, redeploy_on_secrets, secrets_seen, headers, paused, held_by, egress, vitals, routes, report, checks, heartbeats, split, freeze, mirror, pause_schedule, snippets, log_retention_days, approvals, badge, egress_by";
 /// A deployment [`Store::prune_deployments`] pruned, with its image when nothing else names it.
 pub struct Pruned {
     pub id: String,
@@ -814,6 +817,7 @@ fn env_row(r: &code_sql::Row<'_>) -> code_sql::Result<EnvRow> {
         log_retention_days: r.get::<_, Option<i64>>(36)?.map(|d| d as u32),
         approvals: r.get::<_, Option<i64>>(37)?.unwrap_or(0) as u32,
         badge: r.get::<_, i64>(38)? != 0,
+        egress_by: r.get(39)?,
     })
 }
 
@@ -973,6 +977,7 @@ impl Store {
         db.add_column("environments", "log_retention_days", "INTEGER")?;
         db.add_column("environments", "approvals", "INTEGER")?;
         db.add_column("environments", "badge", "INTEGER NOT NULL DEFAULT 0")?;
+        db.add_column("environments", "egress_by", "TEXT")?;
         db.add_column("usage", "stored_gb_hours", "REAL NOT NULL DEFAULT 0")?;
         db.add_column("project_usage", "stored_gb_hours", "REAL NOT NULL DEFAULT 0")?;
         // A custom domain sent to another of the app's ports.
@@ -1206,7 +1211,7 @@ impl Store {
                     None => None,
                 };
                 c.execute(
-                    &format!("INSERT INTO environments ({ENV_COLS}) VALUES (?, ?, ?, ?, NULL, ?, ?, ?, 0, '{{}}', NULL, 0, NULL, 0, NULL, NULL, NULL, NULL, NULL, NULL, 0, NULL, NULL, 0, NULL, NULL, 0, NULL, 1, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, 0)"),
+                    &format!("INSERT INTO environments ({ENV_COLS}) VALUES (?, ?, ?, ?, NULL, ?, ?, ?, 0, '{{}}', NULL, 0, NULL, 0, NULL, NULL, NULL, NULL, NULL, NULL, 0, NULL, NULL, 0, NULL, NULL, 0, NULL, 1, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, 0, NULL)"),
                     params![service, env, branch.flatten(), ephemeral.unwrap_or(false) as i64, slug, port, now],
                 )?;
             }
@@ -3182,9 +3187,10 @@ impl Store {
         Ok(())
     }
 
-    pub fn set_egress(&self, service: &str, env: &str, egress: &crate::model::Egress) -> Result<()> {
+    /// Its egress, and who set it (the person a closed environment's placeholders are made by).
+    pub fn set_egress(&self, service: &str, env: &str, egress: &crate::model::Egress, by: Option<&str>) -> Result<()> {
         let j = egress.closed().then(|| serde_json::to_string(egress).expect("JSON"));
-        self.db.execute("UPDATE environments SET egress = ? WHERE service = ? AND name = ?", params![j, service, env])?;
+        self.db.execute("UPDATE environments SET egress = ?, egress_by = ? WHERE service = ? AND name = ?", params![j, by, service, env])?;
         Ok(())
     }
 

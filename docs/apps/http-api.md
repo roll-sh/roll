@@ -229,6 +229,9 @@ type Build = {
    *  .gitmodules names, at the commit its gitlink pins, from its own public URL (relative ones
    *  against the repository's), two levels deep and 32 at most. */
   submodules?: boolean;
+  /** A Git URL service's Git LFS objects in place of their pointers (default false): from the
+   *  repository's LFS batch API, checked against each pointer's sha256 and size, 2 GiB in all. */
+  lfs?: boolean;
 };
 
 type Run = {
