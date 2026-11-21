@@ -3752,6 +3752,34 @@ impl Scan {
     }
 }
 
+impl Scan {
+    /// `next`'s row, its value lent to `f` (`f`'s answer; None: none left): nothing copied
+    /// out of the block (`next` allocates the row's key and, for a value made from the key
+    /// as an index entry's row key is, its value). A lookup reads its index entries' row keys
+    /// so.
+    pub fn next_value<R>(&mut self, f: impl FnOnce(&[u8]) -> R) -> Option<Result<R>> {
+        if self.rows.is_some() {
+            return self.next().map(|r| r.map(|(_, v)| f(&v)));
+        }
+        let i = match self.position() {
+            Ok(Some(i)) => i,
+            Ok(None) => return None,
+            Err(e) => return Some(Err(e)),
+        };
+        let c = &mut self.merge.sources[i];
+        let (_, v) = c.head().expect("a head entry");
+        let v = v.expect("a value");
+        if self.resolve && toast::has_external(v) {
+            let (mut k, v) = c.take();
+            k.truncate(k.len().saturating_sub(8));
+            return Some(toast::resolve(&self._view, &k, v.expect("a value"), self.ts).map(|v| f(&v)));
+        }
+        let r = f(v);
+        c.advance();
+        Some(Ok(r))
+    }
+}
+
 impl Iterator for Scan {
     type Item = Result<(Vec<u8>, Bytes)>;
 

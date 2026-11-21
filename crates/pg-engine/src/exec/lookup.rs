@@ -637,9 +637,8 @@ impl Lookup {
         }
         let it = entries.as_mut().expect("made above");
         let mut read = 0u64;
-        while let Some(e) = it.next() {
-            let Ok((_, d)) = e else { return false };
-            let Some(b) = self.get(&d, reader) else { return false };
+        while let Some(e) = it.next_value(|d| self.get(d, reader)) {
+            let Ok(Some(b)) = e else { return false };
             let Some(b) = b else { continue };
             match self.add(l, &b, out) {
                 Add::Kept => {
@@ -652,12 +651,11 @@ impl Lookup {
                     // (Left to the executor's thread: every visible row counted, as a
                     // whole fetch counts them.)
                     read += 1;
-                    for e in it.by_ref() {
-                        let Ok((_, d)) = e else { return false };
-                        match self.get(&d, reader) {
-                            Some(Some(_)) => read += 1,
-                            Some(None) => {}
-                            None => return false,
+                    while let Some(e) = it.next_value(|d| self.get(d, reader)) {
+                        match e {
+                            Ok(Some(Some(_))) => read += 1,
+                            Ok(Some(None)) => {}
+                            _ => return false,
                         }
                     }
                     *fetched += read;
@@ -959,8 +957,9 @@ fn entry_keys(store: &Arc<Store>, ts: u64, unique: bool, start: &[u8], sc: &mut 
     if !sc.entries.as_mut().is_some_and(|s| s.reseek(start, &end, ts)) {
         sc.entries = Some(store.scan(start, &end, ts));
     }
-    for e in sc.entries.iter_mut().flatten() {
-        sc.dkeys.push(e.ok()?.1.to_vec());
+    let it = sc.entries.as_mut().expect("made above");
+    while let Some(d) = it.next_value(<[u8]>::to_vec) {
+        sc.dkeys.push(d.ok()?);
     }
     Some(())
 }
@@ -998,8 +997,9 @@ fn entry_spans(
     if !sc.entries.as_mut().is_some_and(|s| s.reseek(start, &end, ts)) {
         sc.entries = Some(store.scan(start, &end, ts));
     }
-    for e in sc.entries.iter_mut().flatten() {
-        push(&e.ok()?.1);
+    let it = sc.entries.as_mut().expect("made above");
+    while let Some(r) = it.next_value(&mut push) {
+        r.ok()?;
     }
     Some(false)
 }
