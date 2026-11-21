@@ -2354,20 +2354,20 @@ Ranked by what a person notices first. Done so far:
    a swapped key is stopped (502) and its placeholder ended; the live check's echo step then
    expects that. And `maker_unreachable` (its #582): the fallback without placeholders takes it.
    roll apps' closed environments get the scrub through the same crate.
-4. **Interception counts from roll apps on the sheet** (after apps adds them per environment):
-   the sheet's "Keys it never holds" line counts swaps and refusals by apps' proxies too.
-5. **Previews for the members thread's next products**: once roll apps' and roll search's routes
+4. **Previews for the members thread's next products**: once roll apps' and roll search's routes
    become member routes (docs/members.md, v1.1), a preview's roll apps services and search branch
    follow the same roles, checked live against a member's session.
-6. **Cheap Postgres branches on ext4: overlay volumes over a frozen base** (pg-control; measured
+5. **Cheap Postgres branches on ext4: overlay volumes over a frozen base** (pg-control; measured
    2026-11-17): 0.97 s against 3.5 s for a 1.4 GB copy, but a write copies the whole table file.
-7. **Watch: pg-control's recovery to a time seconds old** (unowned).
+6. **Watch: pg-control's recovery to a time seconds old** (unowned).
 
 Landed 2026-11-21 midday: a search branch's link holds only its data-only credential (#607,
 roll search's report: never the branch's own login; old links branched again; its data key revoked
 and its password changed before a delete, since roll search's deletes are restorable), the keys a
-preview never holds on its record and sheet (#599), and roll apps' closed environments on
-`roll-intercept` (apps' #603).
+preview never holds on its record and sheet (#599), roll apps' closed environments on
+`roll-intercept` (apps' #603), roll apps' interception counts for a preview's services there on
+its record and sheet (#613), and an erasing write's checkpoint tried again until the WAL is empty
+(#615: a busy checkpoint had left what #581 rewrote sealed in the WAL).
 
 Landed 2026-11-21 morning: credentials sealed at rest (#581: the rules' pasted values, a
 preview's own variables and the screenshot links' key, refused in the clear without a key, an
