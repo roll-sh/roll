@@ -94,6 +94,9 @@ interface Form {
   /** The new instances start beside the old ones (false: the old ones stop first). */
   rolloutOverlap: boolean;
   h2c: boolean;
+  /** With h2c: a gRPC health check, the service's name (empty: the server); off when unchecked. */
+  healthGrpc: boolean;
+  healthGrpcService: string;
   public: boolean;
   restart: "always" | "on_failure" | "never";
   restartTries: string;
@@ -203,6 +206,8 @@ export function formOf(s: Service): Form {
     rolloutManual: !!s.run.rollout?.manual,
     rolloutOverlap: s.run.rollout?.overlap !== false,
     h2c: !!s.run.h2c,
+    healthGrpc: s.run.health_grpc != null,
+    healthGrpcService: s.run.health_grpc ?? "",
     public: s.run.public !== false,
     restart: s.run.restart ?? "always",
     restartTries: str(s.run.restart_tries),
@@ -330,6 +335,7 @@ export function patchOf(s: Service, f: Form): ServicePatch {
       ...(f.rolloutOverlap ? {} : { overlap: false }),
     };
   if (f.h2c !== before.h2c) run.h2c = f.h2c ? true : null;
+  if (f.healthGrpc !== before.healthGrpc || f.healthGrpcService !== before.healthGrpcService) run.health_grpc = f.healthGrpc && f.h2c ? f.healthGrpcService.trim() : null;
   if (f.public !== before.public) run.public = f.public ? null : false;
   if (f.affinity !== before.affinity) run.affinity = f.affinity ? true : null;
   if (f.tcp !== before.tcp) run.tcp = f.tcp ? true : null;
@@ -920,6 +926,19 @@ export function SettingsTab({
                   <option value="h2c">HTTP/2 (h2c)</option>
                 </select>
               </Field>
+              {form.h2c && (
+                <Field label="Health check" hint="gRPC: grpc.health.v1's check must answer SERVING, in place of the health path">
+                  <select value={form.healthGrpc ? "grpc" : "http"} onChange={(e) => set("healthGrpc", e.target.value === "grpc")} className={`${input} w-full`}>
+                    <option value="http">Its health path</option>
+                    <option value="grpc">gRPC health service</option>
+                  </select>
+                </Field>
+              )}
+              {form.h2c && form.healthGrpc && (
+                <Field label="gRPC service checked" hint="its full name; empty: the server as a whole">
+                  {t("healthGrpcService", "acme.Orders")}
+                </Field>
+              )}
               <Field label="HTTP or TCP" hint="TCP: a port of its own per environment, no HTTP names (a game server, MQTT)">
                 <select value={form.tcp ? "tcp" : "http"} onChange={(e) => set("tcp", e.target.value === "tcp")} className={`${input} w-full`}>
                   <option value="http">HTTP</option>

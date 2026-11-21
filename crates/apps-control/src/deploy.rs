@@ -961,10 +961,13 @@ impl Apps {
             // deploy (a container would serve the same file).
             let r = self.resolve_vars(&svc, &env, &dep.id).await?;
             let secrets: Vec<(String, String)> = r.vars.iter().filter(|(k, _)| r.is_secret(k)).cloned().collect();
+            let checks_secrets = !secrets.is_empty();
             match self.export_site_checked(&img, secrets).await {
                 Ok(Some(n)) => log.stream(Stream::System).line(format!("static site: {} KiB of files, served without an instance", n.div_ceil(1024))),
                 Ok(None) => {}
                 Err(e) if e.downcast_ref::<crate::sites::SecretInSite>().is_some() => return Err(e),
+                // Unchecked files aren't served either: a container would serve the same ones.
+                Err(e) if checks_secrets => anyhow::bail!("its files couldn't be checked for its secrets' values ({e:#}), so they aren't served: make the site smaller, or keep secret values out of its environment"),
                 Err(e) => log.stream(Stream::System).line(format!("static site: its files couldn't be exported ({e:#}); a container serves it")),
             }
         }
@@ -1629,6 +1632,7 @@ impl Apps {
             target: svc.build.target.clone().filter(|_| plan.provider == apps_build::Provider::Dockerfile),
             layers,
             egress: build_egress,
+            priority: !ephemeral,
         };
         // The same inputs built before in this project (Railway's skipped builds): the same tree,
         // Dockerfile, target and build variables, and its image still kept. Never with `no_cache`.

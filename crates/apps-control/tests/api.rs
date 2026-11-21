@@ -4376,11 +4376,19 @@ async fn a_deployment_without_traffic_answers_on_its_own_url_until_put_live() {
 }
 
 /// An h2c app (a gRPC server) is spoken HTTP/2 to, with `te: trailers`, and its trailers reach
-/// the client; an HTTP/1 app still gets HTTP/1.1.
+/// the client; an HTTP/1 app still gets HTTP/1.1. With `health_grpc` its health is gRPC's: a
+/// server whose grpc.health.v1 check answers SERVING goes live, one answering NOT_SERVING doesn't.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn an_h2c_app_gets_http2_and_its_trailers_pass() {
     let w = world().await;
-    let (svc, _) = image_service(&w, "grpc", json!({"port": 80, "h2c": true})).await;
+    let (svc, d) = image_service(&w, "grpc", json!({"port": 80, "h2c": true, "health_grpc": ""})).await;
+    assert_eq!(d["status"], "active", "{d}");
+    let sick = json!({ "project": w.project, "name": "sick", "source": {"kind": "image", "image": "nginx:1.27"}, "run": {"port": 80, "h2c": true, "health_grpc": "acme.Orders", "health_timeout_s": 2}, "variables": {"FAKE_UNHEALTHY": "1"} });
+    let (st, s) = call(&w.api, "POST", "/v1/apps/services", Some(sick)).await;
+    assert_eq!(st, StatusCode::CREATED, "{s}");
+    let d = settled(&w, s["id"].as_str().unwrap(), "production", s["environments"][0]["latest"]["id"].as_str().unwrap()).await;
+    assert_eq!(d["status"], "failed", "NOT_SERVING never goes live: {d}");
+    assert_eq!(call(&w.api, "PATCH", &format!("/v1/apps/services/{}", svc["id"].as_str().unwrap()), Some(json!({"run": {"h2c": false}}))).await.0, StatusCode::BAD_REQUEST, "gRPC's health needs h2c");
     let (_, env) = call(&w.api, "GET", &format!("/v1/apps/services/{}/environments/production", svc["id"].as_str().unwrap()), None).await;
     let h = host(&env["url"]);
     let req = Request::builder().uri("/").header("host", &h).header("te", "trailers").body(Body::empty()).unwrap();
@@ -6861,6 +6869,10 @@ async fn a_repos_submodules_come_from_roll_code_and_from_elsewhere() {
     for f in ["lib/lib.js", "ui/ui.js", "vendor/v.js"] {
         assert!(tree.iter().any(|p| p == f), "{f}: {tree:?}");
     }
+    // Allowed for this repo, not for whatever it's built from next.
+    let (st, s) = call(&w.api, "PATCH", &format!("/v1/apps/services/{id}"), Some(json!({ "source": {"kind": "image", "image": "nginx:1.27"} }))).await;
+    assert_eq!(st, StatusCode::OK, "{s}");
+    assert!(s["build"]["submodule_repos"].is_null(), "{s}");
 }
 
 /// roll.toml's edge settings (fly.toml's, vercel.json's): a live deployment's headers, firewall
@@ -8250,6 +8262,13 @@ async fn a_closed_environment_uses_its_keys_without_seeing_them() {
     assert_eq!(put(Some(roll_auth::SignedIn { user: "usr_ada".into(), handle: "ada".into(), admin: false, code_owner: None, session: "ses_1".into() }), false).await, StatusCode::FORBIDDEN);
     // No one at all on a locked daemon (an open one's caller is the operator: `AppsConfig::open`).
     assert_eq!(put(None, false).await, StatusCode::FORBIDDEN);
+    // Nor a token, even one the operator made (it carries the operator marker beside its grant).
+    let scope: roll_auth::scope::Scope = serde_json::from_value(json!([{"product": "apps", "resources": "*", "actions": {"admin": "allow"}}])).unwrap();
+    let grant = roll_auth::Grant { id: "tok_ci".into(), name: "ci".into(), kind: roll_auth::GrantKind::Token, scope: Arc::new(scope), user: None, ask_otherwise: false };
+    let mut req = Request::builder().method("PUT").uri(format!("{base}/staging")).header("content-type", "application/json").body(Body::from(json!({"closed_by": "usr_admin"}).to_string())).unwrap();
+    req.extensions_mut().insert(grant);
+    req.extensions_mut().insert(roll_auth::Operator);
+    assert_eq!(w.api.clone().oneshot(req).await.unwrap().status(), StatusCode::FORBIDDEN, "an operator-made token names no maker");
     assert!(put(None, true).await.is_success());
     let (_, d) = call(&w.api, "POST", &format!("{base}/staging/deploys"), Some(json!({}))).await;
     settled(&w, &id, "staging", d["id"].as_str().unwrap()).await;

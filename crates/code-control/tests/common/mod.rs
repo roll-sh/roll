@@ -30,12 +30,17 @@ pub fn app_with(f: impl FnOnce(&mut Config)) -> App {
     App { code, router, dir }
 }
 
+/// The deployment key (`ROLL_SECRET_KEY`) every test server has unless it says otherwise:
+/// webhooks and review apps are refused without one.
+pub const HARNESS_SECRET_KEY: &str = "test-deployment-key-0123456789abcdef";
+
 /// Open roll code on an existing state directory (what a restarted daemon does).
 pub fn open_in(home: &Path, f: impl FnOnce(&mut Config)) -> Arc<Code> {
     let objects = Objects::new(&StorageConfig::Local(home.join("objects"))).unwrap();
     let mut config = Config::local(home.to_path_buf());
     config.web_url = "https://roll.sh".into();
     config.api_url = "https://api.roll.sh".into();
+    config.review.secret_key = Some(HARNESS_SECRET_KEY.into());
     f(&mut config);
     Code::open(config, objects).unwrap()
 }
