@@ -393,6 +393,8 @@ const LOOKUP_QUERIES: &[&str] = &[
     // Several inner rows per key, in index order; an inner filter; a join condition.
     "SELECT b.id, c.id, c.v FROM big b JOIN big2 c ON c.k = b.g WHERE b.id > 419500",
     "SELECT b.id, c.id FROM big b JOIN big2 c ON c.k = b.id AND c.v LIKE 'a%' WHERE b.id < 3000",
+    // An inner filter of comparisons with constants (over the stored values: `StoredCmps`).
+    "SELECT b.id, c.id, c.v FROM big b JOIN big2 c ON c.k = b.g WHERE b.id > 419000 AND c.id >= 100 AND c.id < 300000 AND c.v > '8'",
     "SELECT b.id, c.id FROM big b JOIN big2 c ON c.k = b.id AND c.id > b.g * 1000 WHERE b.id < 3000",
     // Outer, semi and anti joins (keys that find nothing: big2's k stops at 149999).
     "SELECT b.id, c.id, c.v FROM big b LEFT JOIN big2 c ON c.k = b.id WHERE b.id < 300 OR b.id > 419800",
@@ -472,7 +474,7 @@ fn parallel_lookups_match_serial_inner() {
     };
     // (The statistics compared are the queries' before the one failing: what a parallel
     // scan's workers read past the failing row is counted as Postgres's workers count it.)
-    let (before, after) = (0..9, 9..LOOKUP_QUERIES.len());
+    let (before, after) = (0..10, 10..LOOKUP_QUERIES.len());
     let workers = |s: &mut Session, n: u32| s.query(&format!("SET max_parallel_workers_per_gather = {n}")).unwrap();
     workers(&mut s, 0);
     let rescans = pg_engine::exec::scan::INDEX_RESCANS.load(std::sync::atomic::Ordering::Relaxed);
@@ -503,9 +505,10 @@ fn parallel_lookups_match_serial_inner() {
     let (a, b) = (n(&stat_serial), n(&stat_parallel));
     assert!(!a.is_empty(), "{stat_serial}");
     assert_eq!(b, a.iter().map(|x| 2 * x).collect::<Vec<_>>(), "{stat_serial} {stat_parallel}");
-    assert!(serial[9][0].starts_with("ERROR: integer out of range"), "{:?}", serial[9]);
+    assert!(serial[10][0].starts_with("ERROR: integer out of range"), "{:?}", serial[10]);
     assert!(serial[0].len() > 1000, "{}", serial[0].len());
-    assert!(serial[3].iter().any(|r| r.contains("Null")), "{:?}", &serial[3][..3]);
+    assert!(serial[2].len() > 100, "{}", serial[2].len());
+    assert!(serial[4].iter().any(|r| r.contains("Null")), "{:?}", &serial[4][..3]);
 }
 
 /// A unique index's lookups in the workers (`Lookup::unique`: its one visible entry probed)
