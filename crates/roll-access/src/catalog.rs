@@ -84,6 +84,10 @@ pub struct Row {
     /// A request header that makes it `admin` when it's `1` (apps' `X-Roll-Override`: going past
     /// a deploy freeze the team set is a person's call, never a deploy token's).
     pub admin_if: Option<&'static str>,
+    /// A stronger action the product may use within this route when the grant allows it (Postgres
+    /// SQL as the database's superuser only for a grant that may `admin` the endpoint): the gate
+    /// asks it quietly, never refusing for it, and says yes with `roll_auth::Capable`.
+    pub capable: Option<Action>,
     /// A JSON body field whose presence makes it `admin` (apps' `freeze`: setting or lifting a
     /// freeze is the same call as going past one).
     pub admin_if_field: Option<&'static [&'static str]>,
@@ -232,7 +236,7 @@ impl Row {
 }
 
 const fn row(method: &'static str, route: &'static str, product: &'static str, act: Act, target: Tgt) -> Row {
-    Row { method, route, product, act, target, env: EnvFrom::None, path_query: None, reveals: &[], copies_from: None, index: None, lends: None, filters_itself: false, filters_index: false, admin_if: None, admin_if_field: None }
+    Row { method, route, product, act, target, env: EnvFrom::None, path_query: None, reveals: &[], copies_from: None, index: None, lends: None, filters_itself: false, filters_index: false, admin_if: None, admin_if_field: None, capable: None }
 }
 
 const R: Act = Act::Is(Action::Read);
@@ -268,6 +272,10 @@ impl Row {
     }
     const fn path_query(mut self, q: &'static str) -> Row {
         self.path_query = Some(q);
+        self
+    }
+    const fn capable(mut self, a: Action) -> Row {
+        self.capable = Some(a);
         self
     }
     const fn admin_if(mut self, header: &'static str) -> Row {
@@ -995,7 +1003,9 @@ static ROWS: &[Row] = &[
     row("DELETE", "/v1/endpoints/{id}", "postgres", D, one(PG, "endpoint")),
     row("POST", "/v1/endpoints/{id}/start", "postgres", W, one(PG, "endpoint")),
     row("POST", "/v1/endpoints/{id}/suspend", "postgres", W, one(PG, "endpoint")),
-    row("POST", "/v1/endpoints/{id}/query", "postgres", Act::Body(sql_action), one(PG, "endpoint")),
+    // SQL that isn't read-only runs as a role that owns the database's objects but is never the
+    // superuser (pg-control's `SqlAs::Writer`), unless the grant may `admin` the endpoint.
+    row("POST", "/v1/endpoints/{id}/query", "postgres", Act::Body(sql_action), one(PG, "endpoint")).capable(Action::Admin),
     // ── Redis ──
     row("GET", "/v1/redis", "redis", R, Tgt::AnyGrant),
     row("GET", "/v1/redis/databases", "redis", R, list("id")).reveals(REDIS_SECRETS),
@@ -1867,6 +1877,8 @@ mod tests {
         assert_eq!(dep.row.action("POST", &[("env".into(), "staging".into())], None), Action::Write);
         assert_eq!(sql_action(&serde_json::json!({ "sql": "select 1", "read_only": true })), Action::Read);
         assert_eq!(sql_action(&serde_json::json!({ "sql": "select 1" })), Action::Write);
+        // Without `admin`, pg-control runs it as the database's owner role, never the superuser.
+        assert_eq!(by_path("POST", "/v1/endpoints/ep_x/query").map(|f| f.row.capable), Some(Some(Action::Admin)));
         // A repo apps reads for the caller needs read on it: a plan's, an import's, a source's.
         let repo = |r: &str| vec![Lent { kind: "repo".into(), r#ref: r.into(), action: Action::Read }];
         assert_eq!(apps_repo(&serde_json::json!({ "repo": "acme/web", "revision": "main" })), repo("acme/web"));

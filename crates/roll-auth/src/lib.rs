@@ -157,6 +157,13 @@ impl fmt::Debug for Grant {
     }
 }
 
+/// In a grant's request when the grant also allows a stronger action on the route's resource that
+/// the catalogue row names (`capable`): a product that can do more within one route does it only
+/// with this (Postgres runs SQL as the database's superuser only for a grant that may `admin` it).
+/// The operator's requests carry no grant and need none.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Capable(pub scope::Action);
+
 /// In a grant's request when a person's approval is what let it run: this one request approved
 /// (`until: None`), or a rule an approval allowed for a while (`until`: when that rule lapses). A
 /// product's audit names it ("revealed by token X, approved by Y"). Set only by the gate, on the

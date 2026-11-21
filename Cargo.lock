@@ -5900,6 +5900,7 @@ dependencies = [
  "pg-proxy",
  "pg-storage",
  "reqwest",
+ "roll-auth",
  "roll-edge",
  "rusqlite",
  "serde",
