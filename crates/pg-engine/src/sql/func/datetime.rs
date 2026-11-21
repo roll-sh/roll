@@ -580,6 +580,34 @@ fn p_date_part(x: &Value, y: &Value, _: &crate::types::DataType) -> Result<Value
     part_value_local(text_arg(x), y, false)
 }
 
+/// EXTRACT's pure call (`kernel::compile`) for a constant unit that is a date's year, month or
+/// day: those fields of a finite date computed as `date_part_extract` computes them, the unit
+/// not read again a row; any other value as `p_extract`. None: another call or unit.
+pub fn extract_date_field(imp: super::FnImpl, unit: &str) -> Option<super::ops::PureFn> {
+    if !std::ptr::fn_addr_eq(imp, extract as super::FnImpl) {
+        return None;
+    }
+    match part_units(&lowunits(unit)) {
+        (UNITS, DTK_YEAR) => Some(p_extract_date::<DTK_YEAR>),
+        (UNITS, DTK_MONTH) => Some(p_extract_date::<DTK_MONTH>),
+        (UNITS, DTK_DAY) => Some(p_extract_date::<DTK_DAY>),
+        _ => None,
+    }
+}
+
+fn p_extract_date<const VAL: i32>(x: &Value, y: &Value, ret: &crate::types::DataType) -> Result<Value> {
+    let Value::Date(d) = y else { return p_extract(x, y, ret) };
+    if !dt::date_is_finite(*d) {
+        return p_extract(x, y, ret);
+    }
+    let (year, mon, mday) = j2date(*d + POSTGRES_EPOCH_JDATE);
+    Ok(num_int(match VAL {
+        DTK_YEAR => year_field(DTK_YEAR, year),
+        DTK_MONTH => mon as i64,
+        _ => mday as i64,
+    }))
+}
+
 /// Whether `imp` is EXTRACT and its argument a date: every field of a date is a whole number,
 /// so its numerics are equal only when they look alike (scale 0).
 pub fn extracts_whole(imp: super::FnImpl, arg: &crate::types::DataType) -> bool {

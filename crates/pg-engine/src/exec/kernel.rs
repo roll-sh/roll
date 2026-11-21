@@ -531,6 +531,15 @@ fn compile_node(e: &Expr) -> Option<K> {
         {
             K::Substr(Box::new(compile(&args[0])?), *start as i64, *count as i64)
         }
+        // (EXTRACT of a date's year, month or day: the unit read once, here.)
+        Expr::Call(def, args, ty)
+            if args.len() == 2
+                && pure_call(def, ty).is_some()
+                && let Expr::Const(Value::Text(u), _) = &args[0]
+                && let Some(f) = crate::sql::func::datetime::extract_date_field(def.imp, u) =>
+        {
+            K::Call { f, args: Box::new([compile(&args[0])?, compile(&args[1])?]), strict: def.strict, ret: ty.clone() }
+        }
         Expr::Call(def, args, ty) if args.len() == 2 => K::Call {
             f: pure_call(def, ty).or_else(|| collated_bytes(def, args))?,
             args: Box::new([compile(&args[0])?, compile(&args[1])?]),
