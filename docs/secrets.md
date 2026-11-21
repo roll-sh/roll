@@ -5106,6 +5106,18 @@ The other threads' work that builds on these:
 
 roll MCP adds no cut-off tool: #304 is a person's call, since it can revoke the agent's own token.
 
+**State, 2026-11-21 02:52.** Batch 6 is on main (802935600, CI green, exactly the gated tree), in three
+rounds:
+1. #499 claims, #511 batched writes, #487 validity checks, #513 decoys session-only, #467 decoy dashboard,
+   #494 first hour;
+2. #517 interception CA, #493 decoy where;
+3. #520 placeholders, wired to #517.
+
+Still open:
+- #501 members v1: its final gate on the main-merged tree;
+- #455: cleared, lands in a gap;
+- the #432 decoy-oracle fix: building.
+
 **Found 2026-11-21 02:20: a decoy oracle on main (#432).**
 - **Cause:** computes run the unpinned `postgres:{v}-alpine`, which moved past the 18.6 error text #432
   ported. A real compute now says `L816` where a decoy says `L791`, so a malformed startup packet tells a
