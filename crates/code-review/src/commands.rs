@@ -8,6 +8,8 @@
 //! @roll explain                      explain the thread's finding in more detail
 //! @roll fix                          apply the thread's suggestion (or write one) as a new revision
 //! @roll don't flag <what>            remember it for future reviews (a learning)
+//! @roll preview redeploy|reset|wake|sleep|keep [hours]
+//!                                    act on the change's preview (a pull request's conversation)
 //! @roll <anything else>              a question, answered in the thread
 //! ```
 
@@ -23,7 +25,28 @@ pub enum Command {
     Fix,
     /// "don't flag …", "stop flagging …", "ignore …", "remember …".
     Learn(String),
+    /// `@roll preview …`: something done to the change's preview (`None`: not one it knows, so
+    /// the answer lists them).
+    Preview(Option<PreviewAction>),
     Ask(String),
+}
+
+/// What `@roll preview …` asks of the change's preview.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PreviewAction {
+    /// Build and deploy it again at its head.
+    Redeploy,
+    /// Its data branched again from the parents.
+    Reset,
+    Wake,
+    Sleep,
+    /// Kept past its TTL for these hours (24 when not said).
+    Keep(u32),
+}
+
+impl PreviewAction {
+    /// What each does, for the answer to one it doesn't know.
+    pub const HELP: &'static str = "`@roll preview redeploy` (build and deploy it again), `@roll preview reset` (its data branched again from the parents), `@roll preview wake`, `@roll preview sleep`, `@roll preview keep [hours]` (past its TTL, 24 hours unless said)";
 }
 
 /// The command in a comment, if it mentions `@roll` (not `@rollbar`, not inside code).
@@ -66,6 +89,15 @@ fn command(rest: &str) -> Command {
         ["resolve", ..] => Command::Resolve,
         ["explain", ..] => Command::Explain,
         ["fix", ..] => Command::Fix,
+        ["preview", rest @ ..] => Command::Preview(match rest {
+            ["redeploy" | "rebuild" | "refresh", ..] => Some(PreviewAction::Redeploy),
+            ["reset", ..] => Some(PreviewAction::Reset),
+            ["wake", ..] => Some(PreviewAction::Wake),
+            ["sleep", ..] => Some(PreviewAction::Sleep),
+            ["keep"] => Some(PreviewAction::Keep(24)),
+            ["keep", n, ..] => n.trim_end_matches(['h', '.']).parse().ok().map(PreviewAction::Keep),
+            _ => None,
+        }),
         _ => {
             for p in ["don't flag", "dont flag", "do not flag", "stop flagging", "never flag", "ignore", "remember"] {
                 if let Some(x) = lower.strip_prefix(p) {
@@ -83,6 +115,17 @@ fn command(rest: &str) -> Command {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn preview_commands_name_what_they_do() {
+        let p = |b: &str| parse(b);
+        assert_eq!(p("@roll preview reset"), Some(Command::Preview(Some(PreviewAction::Reset))));
+        assert_eq!(p("@roll preview rebuild please"), Some(Command::Preview(Some(PreviewAction::Redeploy))));
+        assert_eq!(p("@roll preview keep"), Some(Command::Preview(Some(PreviewAction::Keep(24)))));
+        assert_eq!(p("@roll preview keep 72h"), Some(Command::Preview(Some(PreviewAction::Keep(72)))));
+        assert_eq!(p("@roll preview keep forever"), Some(Command::Preview(None)));
+        assert_eq!(p("@roll preview"), Some(Command::Preview(None)));
+    }
     use super::*;
 
     #[test]

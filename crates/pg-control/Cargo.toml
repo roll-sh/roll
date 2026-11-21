@@ -23,6 +23,7 @@ tokio-postgres.workspace = true
 futures.workspace = true
 humantime.workspace = true
 pg-storage.workspace = true
+roll-auth.workspace = true
 tracing.workspace = true
 
 [dev-dependencies]

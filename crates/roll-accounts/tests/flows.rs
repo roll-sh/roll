@@ -1696,6 +1696,19 @@ async fn a_person_deletes_their_own_account() {
     let signed = env.email_sign_in(&mut ada, "ada@example.com", Some(&env.invite("ada@example.com").await)).await.json;
     let (id, handle) = (signed["user"]["id"].as_str().unwrap().to_string(), signed["user"]["handle"].as_str().unwrap().to_string());
 
+    // Other products hear of a deletion from its outbox, until each has acted (docs/members.md:
+    // the workspace removes their memberships). The first try fails here; the next run delivers.
+    let heard = Arc::new(std::sync::Mutex::new((0u32, Vec::<String>::new())));
+    let h = heard.clone();
+    env.accounts.on_deleted(Box::new(move |user| {
+        let mut h = h.lock().unwrap();
+        h.0 += 1;
+        if h.0 == 1 {
+            return Err("the workspace is busy".into());
+        }
+        h.1.push(user.to_string());
+        Ok(())
+    }));
     env.accounts.set_sudo_window(0);
     assert_eq!(delete(&env, &mut ada, &handle).await.json["code"], "reauth_required", "a stolen cookie alone can't");
     env.accounts.set_sudo_window(2 * 60 * 60 * 1000);
@@ -1707,6 +1720,11 @@ async fn a_person_deletes_their_own_account() {
     assert!(gone.headers.get(header::SET_COOKIE).unwrap().to_str().unwrap().contains("Max-Age=0"));
     assert_eq!(env.call(&mut ada, Method::GET, "/v1/accounts/me", None).await.status, StatusCode::UNAUTHORIZED);
     assert!(env.accounts.person(&id).unwrap().is_none(), "its tokens act as nobody");
+    assert!(heard.lock().unwrap().1.is_empty(), "the first try failed, and it's kept");
+    env.accounts.run_deletions();
+    assert_eq!(heard.lock().unwrap().1, [id.as_str()], "delivered once, on the next run");
+    env.accounts.run_deletions();
+    assert_eq!(heard.lock().unwrap().1.len(), 1, "and never again");
     assert!(mails_about(&env.outbox, "ada@example.com", "was deleted", 1).await[0].1.contains(&handle));
     // Gone from the admin's list, and no admin turns it back on.
     let people = env.call(&mut root, Method::GET, "/v1/accounts/users", None).await.json;

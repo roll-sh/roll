@@ -87,13 +87,34 @@ pub(crate) fn gates(c: &Conn<'_>, env: &EnvRow, paths: &[&str]) -> Result<Vec<Ga
     Ok(out)
 }
 
+/// The project's members' roles now (an approver may be named by role: `role:admin`,
+/// `role:owner`, docs/members.md), and, when a request is applied, which reviewers' approvals still
+/// count: a person who was removed or demoted since no longer does. Looked up before the write that
+/// uses it (people's memberships are the workspace's).
+#[derive(Debug, Default)]
+pub(crate) struct Standing {
+    pub(crate) roles: std::collections::HashMap<String, roll_auth::roles::Role>,
+    /// `(reviewer, gate path)` pairs that count now; `None`: every review as recorded.
+    pub(crate) counts: Option<std::collections::HashSet<(String, Option<String>)>>,
+}
+
+/// Whether `who` is one of `gate`'s approvers: named, by role in the project, or anyone at all.
+fn approver(gate: &Gate, who: &str, st: &Standing) -> bool {
+    gate.approvers.is_empty()
+        || gate.approvers.iter().any(|a| match a.strip_prefix("role:").and_then(roll_auth::roles::Role::parse) {
+            Some(role) => st.roles.get(who) == Some(&role),
+            None => a == who,
+        })
+}
+
 /// Approvals from `reviews` that count for `gate`: distinct approvers other than the author, among
 /// the gate's approvers when it names them, whose review counts for this gate (they were admin of
-/// its scope).
-pub(crate) fn counted(gate: &Gate, reviews: &[crate::requests::Review], author: &str) -> i64 {
+/// its scope, and still are when `st` says who counts now).
+pub(crate) fn counted(gate: &Gate, reviews: &[crate::requests::Review], author: &str, st: &Standing) -> i64 {
     let mut by: Vec<&str> = reviews
         .iter()
-        .filter(|r| r.verdict == "approve" && r.by != author && (gate.approvers.is_empty() || gate.approvers.contains(&r.by)) && r.gates.as_ref().is_none_or(|g| g.contains(&gate.path)))
+        .filter(|r| r.verdict == "approve" && r.by != author && approver(gate, &r.by, st) && r.gates.as_ref().is_none_or(|g| g.contains(&gate.path)))
+        .filter(|r| st.counts.as_ref().is_none_or(|c| c.contains(&(r.by.clone(), gate.path.clone()))))
         .map(|r| r.by.as_str())
         .collect();
     by.sort();
@@ -102,13 +123,13 @@ pub(crate) fn counted(gate: &Gate, reviews: &[crate::requests::Review], author: 
 }
 
 /// Every gate has its approvals.
-pub(crate) fn satisfied(gates: &[Gate], reviews: &[crate::requests::Review], author: &str) -> bool {
-    gates.iter().all(|g| counted(g, reviews, author) >= g.approvals)
+pub(crate) fn satisfied(gates: &[Gate], reviews: &[crate::requests::Review], author: &str, st: &Standing) -> bool {
+    gates.iter().all(|g| counted(g, reviews, author, st) >= g.approvals)
 }
 
 /// `who` may review: an approver of some gate (or a gate takes anyone).
-pub(crate) fn may_review(gates: &[Gate], who: &str) -> bool {
-    gates.iter().any(|g| g.approvers.is_empty() || g.approvers.iter().any(|a| a == who))
+pub(crate) fn may_review(gates: &[Gate], who: &str, st: &Standing) -> bool {
+    gates.iter().any(|g| approver(g, who, st))
 }
 
 impl Secrets {

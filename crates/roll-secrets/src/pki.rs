@@ -196,6 +196,10 @@ impl LinkProvider for Provider {
         &[("certificate", Mode::Managed), ("private_key", Mode::Managed), ("ca", Mode::Managed)]
     }
 
+    fn maker(&self, r#ref: &str) -> Option<(String, String)> {
+        self.db.read(|c| c.query_row("SELECT project_id, created_by FROM cas WHERE id = ?", [r#ref], |r| Ok((r.get(0)?, r.get(1)?))).optional()).ok().flatten()
+    }
+
     fn name(&self, r#ref: &str) -> Option<String> {
         self.db.read(|c| c.query_row("SELECT name FROM cas WHERE id = ?", [r#ref], |r| r.get::<_, String>(0)).optional()).ok().flatten()
     }
@@ -343,7 +347,7 @@ pub struct Signed {
 /// 16 random bytes, the top bit clear (a positive serial).
 /// 16 random bytes, positive and with no leading zero byte (DER would drop it, and the serial
 /// clients show wouldn't be the one roll keeps).
-fn serial() -> [u8; 16] {
+pub(crate) fn serial() -> [u8; 16] {
     let mut s = [0u8; 16];
     getrandom::fill(&mut s).expect("system randomness");
     s[0] = (s[0] & 0x7f).max(1);
@@ -485,7 +489,7 @@ impl Secrets {
         let id = names::new_id("ca", 16);
         let sealed = dek.seal(&aad(project, &id), &Value::new(key.serialize_pem()));
         let at = self.db.now_ms()?;
-        let ca = Ca { id: id.clone(), name: n.name, certificate: cert.pem(), policy, created_at: at, created_by: caller.principal.clone() };
+        let ca = Ca { id: id.clone(), name: n.name, certificate: cert.pem(), policy, created_at: at, created_by: caller.made_by().to_string() };
         self.db.write(|c| {
             if c.query_row("SELECT 1 FROM cas WHERE project_id = ? AND name = ?", [project, &ca.name], |_| Ok(())).optional()?.is_some() {
                 return Err(Error::Conflict("exists", format!("a CA named {} exists", ca.name)));

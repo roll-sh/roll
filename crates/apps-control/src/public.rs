@@ -33,6 +33,18 @@ pub fn router(apps: Arc<Apps>) -> axum::Router {
             if req.uri().path().starts_with(OIDC) {
                 return oidc_token(apps, req).await;
             }
+            // An instance kept awake for work after its answer, with the same token.
+            if req.uri().path().starts_with(AWAKE) {
+                return hold_awake(apps, req).await;
+            }
+            // An environment's deploy status badge, where it has one.
+            if req.uri().path().starts_with(BADGE) {
+                return badge(apps, req).await;
+            }
+            // Builds' remote cache (Turborepo, Nx), with their environment's token.
+            if req.uri().path().starts_with(crate::build_cache::PATH) && req.uri().path()[crate::build_cache::PATH.len()..].starts_with('/') {
+                return crate::build_cache::serve(apps, req).await;
+            }
             // An edge function's `context.next()` ([`crate::edge`]): signed, any host.
             if req.uri().path().starts_with(crate::edge::NEXT) {
                 return crate::edge::next(apps, req).await;
@@ -83,6 +95,101 @@ struct TargetPort(u16);
 /// Where instances send traces: `/_roll/otlp/{service}/{env}/{token}/v1/traces`, any host.
 pub const OTLP: &str = "/_roll/otlp/";
 
+/// Where an environment's instances ask to be kept awake (`ROLL_AWAKE_URL`):
+/// `/_roll/awake/<service>/<env>/<token>`, the token the OIDC address's.
+pub const AWAKE: &str = "/_roll/awake/";
+
+/// `POST …/_roll/awake/<service>/<env>/<token>?instance=<ROLL_INSTANCE>&for=<s>` (Vercel's
+/// `waitUntil`): the instance isn't suspended, put to sleep or scaled in for `for` seconds (1–900,
+/// default 60; a longer hold it has stays), so work after its answer (an email, a webhook, a
+/// telemetry flush) finishes. On the service's owner, where its instances are. `{held_until}`
+/// (unix ms); a wrong token, or an instance that isn't awake, a 404.
+async fn hold_awake(apps: Arc<Apps>, req: Request) -> Response {
+    let parts: Vec<String> = req.uri().path()[AWAKE.len()..].split('/').map(|s| percent_encoding::percent_decode_str(s).decode_utf8_lossy().into_owned()).collect();
+    let [id, env, token] = parts.as_slice() else { return (StatusCode::NOT_FOUND, "").into_response() };
+    if req.method() != axum::http::Method::POST || !id.starts_with("svc_") || !token.starts_with("rlr_") {
+        return (StatusCode::NOT_FOUND, "").into_response();
+    }
+    let (sid, e, t) = (id.clone(), env.clone(), token.clone());
+    let ok = apps.db(move |s| Ok(s.service(&sid).is_ok() && s.oidc_token_of(&sid, &e)?.is_some_and(|k| same(&k, &t)))).await.unwrap_or(false);
+    if !ok {
+        return (StatusCode::NOT_FOUND, "").into_response();
+    }
+    let q: Vec<(String, String)> = req.uri().query().map(|q| url::form_urlencoded::parse(q.as_bytes()).into_owned().collect()).unwrap_or_default();
+    let arg = |k: &str| q.iter().find(|(n, _)| n == k).map(|(_, v)| v.clone());
+    let Some(instance) = arg("instance") else { return (StatusCode::BAD_REQUEST, axum::Json(serde_json::json!({ "error": "instance is the instance's name ($ROLL_INSTANCE)" }))).into_response() };
+    let secs = match arg("for").map(|v| v.parse::<u64>()) {
+        None => 60,
+        Some(Ok(n)) if (1..=900).contains(&n) => n,
+        _ => return (StatusCode::BAD_REQUEST, axum::Json(serde_json::json!({ "error": "for is 1–900 seconds" }))).into_response(),
+    };
+    let (cluster, key, svc, env) = (apps.deps.cluster.clone(), lease_key(id), id.clone(), env.clone());
+    cluster
+        .dispatch(&key, req, |_req, _guard| async move {
+            let Some(live) = apps.lives.lock().get(&crate::env_key(&svc, &env)).cloned() else { return (StatusCode::NOT_FOUND, "").into_response() };
+            match live.hold_awake(&instance, std::time::Duration::from_secs(secs)) {
+                Some(until) => {
+                    let ms = code_sql::now_ms() + until.saturating_duration_since(std::time::Instant::now()).as_millis() as i64;
+                    (StatusCode::OK, axum::Json(serde_json::json!({ "held_until": ms }))).into_response()
+                }
+                None => (StatusCode::NOT_FOUND, axum::Json(serde_json::json!({ "error": format!("{instance} isn't one of {env}'s awake instances") }))).into_response(),
+            }
+        })
+        .await
+}
+
+/// An environment's deploy status badge (Netlify's): `/_roll/badge/<service>/<env>.svg`.
+pub const BADGE: &str = "/_roll/badge/";
+
+/// `GET …/_roll/badge/<service>/<env>.svg`: what the environment's deploys stand at, as an SVG
+/// for a README (live, deploying, waiting, failed, paused, not deployed), cached a minute. Only
+/// where its `badge` is on; anything else is a 404, as a path that isn't one.
+async fn badge(apps: Arc<Apps>, req: Request) -> Response {
+    let rest = req.uri().path()[BADGE.len()..].to_string();
+    let Some((id, env)) = rest.strip_suffix(".svg").and_then(|r| r.split_once('/')) else { return (StatusCode::NOT_FOUND, "").into_response() };
+    if req.method() != axum::http::Method::GET || !id.starts_with("svc_") || env.contains('/') {
+        return (StatusCode::NOT_FOUND, "").into_response();
+    }
+    let (sid, e) = (id.to_string(), env.to_string());
+    let found = apps
+        .db(move |s| {
+            let Ok(svc) = s.service(&sid) else { return Ok(None) };
+            let Ok(row) = s.environment(&sid, &e) else { return Ok(None) };
+            if !row.badge {
+                return Ok(None);
+            }
+            let latest = s.deployments(&sid, &e, 1, None)?.into_iter().next();
+            Ok(Some((svc.name, row, latest)))
+        })
+        .await;
+    let Ok(Some((name, row, latest))) = found else { return (StatusCode::NOT_FOUND, "").into_response() };
+    use crate::model::DeployStatus as S;
+    let (said, color) = match (row.paused, latest.as_ref().map(|d| (d.status, row.active.as_deref() == Some(d.id.as_str())))) {
+        (true, _) => ("paused", "#6b7280"),
+        (_, Some((S::Queued | S::Building | S::Deploying, _))) => ("deploying", "#4c8dff"),
+        (_, Some((S::Ready, _))) => ("waiting", "#4c8dff"),
+        (_, Some((S::Failed, _))) => ("failed", "#e5484d"),
+        _ if row.active.is_some() => ("live", "#2fa86b"),
+        _ => ("not deployed", "#6b7280"),
+    };
+    let svg = badge_svg(&format!("{name} {}", row.name), said, color);
+    ([(header::CONTENT_TYPE, "image/svg+xml; charset=utf-8"), (header::CACHE_CONTROL, "public, max-age=60")], svg).into_response()
+}
+
+/// A flat two-part badge, label and status, widths by a rough character measure (Verdana 11).
+fn badge_svg(label: &str, status: &str, color: &str) -> String {
+    let esc = |s: &str| s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;").replace('"', "&quot;");
+    let width = |s: &str| 10 + s.chars().count() as u32 * 7;
+    let (lw, sw) = (width(label), width(status));
+    let (label, status) = (esc(label), esc(status));
+    format!(
+        r##"<svg xmlns="http://www.w3.org/2000/svg" width="{w}" height="20" role="img" aria-label="{label}: {status}"><title>{label}: {status}</title><rect width="{lw}" height="20" fill="#24292e"/><rect x="{lw}" width="{sw}" height="20" fill="{color}"/><g fill="#fff" font-family="Verdana,Geneva,DejaVu Sans,sans-serif" font-size="11" text-anchor="middle"><text x="{lx}" y="14">{label}</text><text x="{sx}" y="14">{status}</text></g></svg>"##,
+        w = lw + sw,
+        lx = lw / 2,
+        sx = lw + sw / 2,
+    )
+}
+
 /// Where an environment's instances read roll's OIDC tokens (`ROLL_OIDC_URL`):
 /// `/_roll/oidc/<service>/<env>/<token>`.
 pub const OIDC: &str = "/_roll/oidc/";
@@ -125,22 +232,40 @@ async fn oidc_token(apps: Arc<Apps>, req: Request) -> Response {
     if !audiences.contains(&aud) {
         return (StatusCode::FORBIDDEN, axum::Json(serde_json::json!({ "error": format!("{aud} isn't one of run.oidc_audiences") }))).into_response();
     }
-    let key = format!("{id}/{env}/{aud}");
-    let now = code_sql::now_ms();
-    let kept = apps.oidc_tokens.lock().get(&key).cloned().filter(|(_, until)| until - now > OIDC_TTL_MS - OIDC_KEEP_MS);
-    let (jwt, until) = match kept {
-        Some(k) => k,
-        None => match apps.deps.secrets.issue(&project, id, env, &aud, std::time::Duration::from_millis(OIDC_TTL_MS as u64)).await {
-            Ok(Some(jwt)) => {
-                let until = now + OIDC_TTL_MS;
-                apps.oidc_tokens.lock().insert(key, (jwt.clone(), until));
-                (jwt, until)
-            }
-            Ok(None) => return (StatusCode::SERVICE_UNAVAILABLE, axum::Json(serde_json::json!({ "error": "roll's OIDC issuer isn't on this deployment (it needs a public URL)" }))).into_response(),
-            Err(e) => return (StatusCode::FORBIDDEN, axum::Json(serde_json::json!({ "error": format!("{e:#}") }))).into_response(),
-        },
+    // An environment's URL is the audience of roll's own pushes and scheduled calls to it: no
+    // instance gets one, or any service could sign a call to another's.
+    if apps.roll_audience(&aud) {
+        return (StatusCode::FORBIDDEN, axum::Json(serde_json::json!({ "error": format!("{aud} is on roll's apps domain: its pushes and scheduled calls are signed for it, and no instance may be") }))).into_response();
+    }
+    let (jwt, until) = match apps.service_token(&project, id, env, &aud).await {
+        Ok(Some(t)) => t,
+        Ok(None) => return (StatusCode::SERVICE_UNAVAILABLE, axum::Json(serde_json::json!({ "error": "roll's OIDC issuer isn't on this deployment (it needs a public URL)" }))).into_response(),
+        Err(e) => return (StatusCode::FORBIDDEN, axum::Json(serde_json::json!({ "error": format!("{e:#}") }))).into_response(),
     };
     (StatusCode::OK, [(header::CACHE_CONTROL, "no-store")], axum::Json(serde_json::json!({ "token": jwt, "expires_at": until }))).into_response()
+}
+
+impl Apps {
+    /// Roll's OIDC token for `service` in `env` (`sub = roll-apps:<project>:<service>:<env>`) for
+    /// `aud`, and when it expires (unix ms): the same one for a minute ([`OIDC_KEEP_MS`]), then signed
+    /// again (so a rotation or a lost trust takes effect). None: no issuer here.
+    /// Whether `aud` names a URL on the apps domain (roll's pushes' and schedules' audiences).
+    pub(crate) fn roll_audience(&self, aud: &str) -> bool {
+        let domain = self.cfg.domain.to_ascii_lowercase();
+        url::Url::parse(aud).ok().and_then(|u| u.host_str().map(str::to_ascii_lowercase)).is_some_and(|h| h == domain || h.ends_with(&format!(".{domain}")))
+    }
+
+    pub(crate) async fn service_token(&self, project: &str, service: &str, env: &str, aud: &str) -> anyhow::Result<Option<(String, i64)>> {
+        let key = format!("{service}/{env}/{aud}");
+        let now = code_sql::now_ms();
+        if let Some(k) = self.oidc_tokens.lock().get(&key).cloned().filter(|(_, until)| until - now > OIDC_TTL_MS - OIDC_KEEP_MS) {
+            return Ok(Some(k));
+        }
+        let Some(jwt) = self.deps.secrets.issue(project, service, env, aud, std::time::Duration::from_millis(OIDC_TTL_MS as u64)).await? else { return Ok(None) };
+        let until = now + OIDC_TTL_MS;
+        self.oidc_tokens.lock().insert(key, (jwt.clone(), until));
+        Ok(Some((jwt, until)))
+    }
 }
 
 /// Where an environment's instances read its runtime config (`ROLL_CONFIG_URL`):
@@ -1327,9 +1452,22 @@ pub(crate) async fn proxy(apps: Arc<Apps>, service: &str, env: &str, deployment:
     // The environment's own headers (HSTS, a CSP): the app's own of the same name win unless the
     // rule replaces them, as a static site's `_headers` do.
     if let Some(g) = &gate {
+        let mut ours = Vec::new();
         for rule in g.headers.iter().filter(|h| h.matches(&path)) {
             for (k, v) in &rule.set {
                 if let (Ok(name), Ok(value)) = (axum::http::HeaderName::from_bytes(k.as_bytes()), HeaderValue::from_str(v))
+                    && (rule.replace || !r.headers().contains_key(&name))
+                {
+                    ours.push(name.clone());
+                    r.headers_mut().insert(name, value);
+                }
+            }
+        }
+        // Then the live deployment's roll.toml headers: never over one the environment set.
+        for rule in g.file_headers.iter().filter(|h| h.matches(&path)) {
+            for (k, v) in &rule.set {
+                if let (Ok(name), Ok(value)) = (axum::http::HeaderName::from_bytes(k.as_bytes()), HeaderValue::from_str(v))
+                    && !ours.contains(&name)
                     && (rule.replace || !r.headers().contains_key(&name))
                 {
                     r.headers_mut().insert(name, value);
@@ -1388,7 +1526,7 @@ async fn proxy_inner(apps: Arc<Apps>, service: &str, env: &str, deployment: Opti
         r.headers_mut().insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
         return by("challenge", r);
     }
-    if !ours && !gate.firewall.is_empty() {
+    if !ours && !(gate.firewall.is_empty() && gate.file_firewall.is_empty()) {
         let path = crate::model::normal_path(req.uri().path());
         let asked = crate::model::Asked { method: req.method().as_str(), path: &path, user_agent: &ua, ip: crate::live::client_ip(client.as_deref()), headers: req.headers(), query: req.uri().query() };
         let verdict = gate.firewall_verdict(&asked);

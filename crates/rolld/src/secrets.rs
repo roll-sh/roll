@@ -470,9 +470,25 @@ pub fn open(args: &crate::Args, home: &Path, workspace: Arc<roll_workspace::Work
     if let Some(id) = std::env::var("ROLL_SECRETS_AWS_SERVER_ID").ok().filter(|v| !v.trim().is_empty()).or_else(|| args.code_public_url.clone()) {
         secrets.set_aws_server_id(id);
     }
+    // Validity checks (docs/secrets.md, "Is it live?"): AWS keys are tried only when the operator
+    // says so, and never a canary's.
+    let aws_live = match std::env::var("ROLL_SECRETS_VALIDITY_AWS_LIVE").unwrap_or_default().trim() {
+        "" | "0" | "false" | "off" => false,
+        "1" | "true" | "on" => true,
+        v => anyhow::bail!("ROLL_SECRETS_VALIDITY_AWS_LIVE is on or off, not {v:?}"),
+    };
+    let canaries = roll_secrets::validity::Canaries::parse(&std::env::var("ROLL_SECRETS_VALIDITY_CANARIES").unwrap_or_default()).map_err(|e| anyhow::anyhow!("ROLL_SECRETS_VALIDITY_CANARIES: {e}"))?;
+    secrets.set_validity_settings(roll_secrets::validity::Settings { aws_live, canaries });
     tell_decoys(&access, secrets.clone());
     // ACME's http-01 and dns-01 checks: public addresses only, as webhooks.
     secrets.set_acme_checks(Arc::new(acme::Checks::new(allow_private)));
+    // A member removed, demoted or gone (docs/members.md): their shared folders, one-time shares
+    // and leases end once they no longer hold what those need.
+    let s = secrets.clone();
+    workspace.on_event(Box::new(move |e| match (e.action.as_str(), &e.subject) {
+        ("member.remove" | "member.leave" | "member.role", Some(user)) => s.member_changed(&e.project, user).map_err(|e| e.to_string()),
+        _ => Ok(()),
+    }));
     // A deleted project's secrets go with it.
     let s = secrets.clone();
     workspace.on_delete(Box::new(move |id| {
@@ -528,8 +544,8 @@ pub fn tell_postgres_decoys(control: &pg_control::Control, secrets: Arc<Secrets>
         let (s, login) = (secrets.clone(), login.clone());
         let Ok(rt) = tokio::runtime::Handle::try_current() else { return };
         rt.spawn_blocking(move || {
-            let (ip, route) = (login.peer.map(|p| p.to_string()), format!("Postgres endpoint {}", login.endpoint_id));
-            if let Err(e) = s.decoy_used("postgres", &decoy_handle(&login.project_id, &login.role), ip.as_deref(), &route) {
+            let ip = login.peer.map(|p| p.to_string());
+            if let Err(e) = s.decoy_used("postgres", &decoy_handle(&login.project_id, &login.role), ip.as_deref(), &login.endpoint_id) {
                 tracing::warn!(endpoint = %login.endpoint_id, "raising a decoy role's alert failed: {e}");
             }
         });
@@ -1239,18 +1255,46 @@ impl roll_secrets::People for People {
     }
 }
 
+/// Who people are for the workspace's members (docs/members.md): their handle and address, while
+/// they can sign in. An invite is mailed only to an address that has an account (roll accounts
+/// mails people, never an address a caller names).
+impl roll_workspace::People for People {
+    fn person(&self, user: &str) -> Option<roll_workspace::Person> {
+        let u = self.accounts.user(user).ok().filter(|u| !u.disabled)?;
+        Some(roll_workspace::Person { handle: u.handle, email: Some(u.email).filter(|e| !e.is_empty()), admin: u.admin })
+    }
+
+    fn mail(&self, email: &str, subject: &str, text: &str) {
+        let Ok(rt) = tokio::runtime::Handle::try_current() else { return };
+        let (accounts, email, subject, text) = (self.accounts.clone(), email.to_string(), subject.to_string(), text.to_string());
+        rt.spawn(async move {
+            if let Ok(Some(p)) = accounts.sessions().person_by_email(&email).await
+                && let Err(e) = accounts.mail_user(&p.user, &subject, &text).await
+            {
+                tracing::warn!(error = %e, "mailing a project invite");
+            }
+        });
+    }
+}
+
 /// What of a person's canvas is theirs: everything for an admin; a repo under their roll code
 /// owner; a search cluster they own; nothing else until each product says who owns its resources.
 /// A failed lookup is a no.
 impl roll_workspace::Owners for People {
     fn trusts(&self, user: &str, kind: roll_workspace::Kind, r#ref: &str) -> bool {
         let Ok(Some(p)) = roll_secrets::People::person(self, user) else { return false };
-        p.admin
-            || match kind {
-                roll_workspace::Kind::Repo => roll_secrets::access::OwnProjects::owns_repo(p.code_owner.as_deref(), r#ref),
-                roll_workspace::Kind::Search => self.search.as_ref().is_some_and(|s| matches!(s.store.owner_of(r#ref), Ok(Some(Some(o))) if o == user)),
-                _ => false,
-            }
+        p.admin || self.owns(user, kind, r#ref)
+    }
+
+    /// Theirs whatever their account is: an admin account added as an owner of someone else's
+    /// project adds only what's its own (docs/members.md, "The canvas rule").
+    fn owns(&self, user: &str, kind: roll_workspace::Kind, r#ref: &str) -> bool {
+        let Ok(Some(p)) = roll_secrets::People::person(self, user) else { return false };
+        match kind {
+            roll_workspace::Kind::Repo => roll_secrets::access::owns_repo(p.code_owner.as_deref(), r#ref),
+            roll_workspace::Kind::Search => self.search.as_ref().is_some_and(|s| matches!(s.store.owner_of(r#ref), Ok(Some(Some(o))) if o == user)),
+            _ => false,
+        }
     }
 }
 
@@ -1287,7 +1331,16 @@ fn changed_source(path: &str) -> Option<(&'static str, String)> {
 /// roll secrets for roll apps' deploys (`apps_control::integrations::SecretSource`), set once the
 /// store is open (it opens after roll apps starts).
 #[derive(Clone, Default)]
-pub struct ForApps(Arc<OnceLock<(Arc<Secrets>, Arc<roll_workspace::Workspace>)>>);
+pub struct ForApps(Arc<OnceLock<(Arc<Secrets>, Arc<roll_workspace::Workspace>)>>, Arc<std::sync::Mutex<std::collections::HashMap<String, roll_secrets::intercept::InterceptCa>>>);
+
+/// A closed environment's placeholders' consumer: one a project environment (its services share
+/// the network and the project's secrets there), so one interception CA covers them.
+fn closed_consumer(project: &str, env: &str) -> String {
+    format!("apps:{project}/{env}")
+}
+
+/// A CA kept no closer than this to its end: a newer one is asked for, and apps redeploys to it.
+const CA_RENEW_MS: i64 = 3 * 3_600_000;
 
 impl ForApps {
     pub fn set(&self, secrets: Arc<Secrets>, workspace: Arc<roll_workspace::Workspace>) {
@@ -1347,6 +1400,107 @@ impl apps_control::integrations::SecretSource for ForApps {
             Ok(v.values.into_iter().map(|(name, value)| apps_control::integrations::SecretVar { linked: linked.contains(&name), sensitive: sensitive.contains(&name), plain: plain.contains(&name), value: value.expose().to_string(), name }).collect())
         })
         .await?
+    }
+
+    /// A closed environment's secrets as [`Self::resolve`] reads them, but every key bound to hosts
+    /// a placeholder for the project environment's consumer ([`closed_consumer`]), made by the
+    /// project's owner (the operator for the operator's projects): it swaps only while they may
+    /// reveal there.
+    async fn resolve_closed(&self, project: &str, env: &str, service: &str, maker: Option<&str>) -> anyhow::Result<apps_control::integrations::ClosedSecrets> {
+        let (secrets, ws) = self.0.get().cloned().ok_or_else(|| anyhow::anyhow!("roll secrets is starting: deploy again in a moment"))?;
+        let (project, env, service, asked) = (project.to_string(), env.to_string(), service.to_string(), maker.map(str::to_string));
+        tokio::task::spawn_blocking(move || {
+            let none = apps_control::integrations::ClosedSecrets::default();
+            let Ok(p) = ws.get(roll_workspace::Scope::All, &project) else { return Ok(none) };
+            if !ws.trusts(&p, roll_workspace::Kind::Service, &service) {
+                return Ok(none);
+            }
+            // Who closed it, else (before that was kept) the project's owner; the operator only
+            // for the operator's own projects, never as the maker of a person's.
+            // Named as no one (`closed_by: null`, roll previews' rules saved by the operator): the
+            // keys bound to hosts are withheld.
+            if asked.as_deref() == Some("") {
+                let v = secrets.values_for(&project, &env, "/", true, Some(&format!("app:{service}")), false, &roll_secrets::Caller::consumer(&format!("app:{service}")))?;
+                let bound: std::collections::HashSet<String> = secrets.secrets(&project, &env, "/", &roll_secrets::Caller::consumer(&format!("app:{service}")))?.into_iter().filter(|s| s.hosts.is_some()).map(|s| s.key).collect();
+                let sensitive: std::collections::HashSet<String> = v.sensitive.into_iter().collect();
+                let vars = v.values.into_iter().filter(|(k, _)| !bound.contains(k)).map(|(name, value)| apps_control::integrations::SecretVar { linked: false, sensitive: sensitive.contains(&name), plain: false, value: value.expose().to_string(), name }).collect();
+                return Ok(apps_control::integrations::ClosedSecrets { vars, notice: Some(format!("keys bound to hosts withheld: no one who may reveal {env} closed it")) });
+            }
+            let maker = match asked {
+                Some(m) if m != "operator" || p.owner.is_empty() => m,
+                _ if p.owner.is_empty() => "operator".to_string(),
+                _ => p.owner.clone(),
+            };
+            let consumer_caller = roll_secrets::Caller::consumer(&format!("app:{service}"));
+            let untrusted = match secrets.environment(&project, &env, &consumer_caller) {
+                Ok(e) => e.kind == roll_secrets::EnvironmentKind::Ephemeral && !e.trusted,
+                Err(roll_secrets::Error::NotFound(_)) => return Ok(none),
+                Err(e) => return Err(e.into()),
+            };
+            // An untrusted preview (a fork's) reads as code nobody vetted: no protected
+            // environment, and placeholders only where a binding opts in.
+            let caller = if untrusted { secrets.untrusted(&project, &consumer_caller)? } else { consumer_caller };
+            let ask = roll_secrets::placeholders::Ask { minutes: None, maker: Some(&maker) };
+            let v = match secrets.values_with_placeholders(&project, &env, "/", &closed_consumer(&project, &env), false, ask, &caller) {
+                Ok(v) => v,
+                // Its maker can't reveal here now: the keys bound to hosts are withheld (never
+                // their values instead), the rest read as they would be, and said.
+                Err(roll_secrets::Error::Forbidden(why)) => {
+                    let bound: std::collections::HashSet<String> = secrets.secrets(&project, &env, "/", &caller)?.into_iter().filter(|s| s.hosts.is_some()).map(|s| s.key).collect();
+                    let v = secrets.values_for(&project, &env, "/", true, Some(&format!("app:{service}")), false, &caller)?;
+                    let sensitive: std::collections::HashSet<String> = v.sensitive.into_iter().collect();
+                    let vars = v.values.into_iter().filter(|(k, _)| !bound.contains(k)).map(|(name, value)| apps_control::integrations::SecretVar { linked: false, sensitive: sensitive.contains(&name), plain: false, value: value.expose().to_string(), name }).collect();
+                    let notice = format!("keys bound to hosts withheld: {maker}, who closed {env}, can no longer reveal it ({why}); whoever may sets its egress again to turn them back on");
+                    return Ok(apps_control::integrations::ClosedSecrets { vars, notice: Some(notice) });
+                }
+                Err(e) => return Err(e.into()),
+            };
+            if untrusted {
+                for p in &v.problems {
+                    tracing::info!(%project, %env, key = %p.key, "apps: a closed preview's secret didn't resolve, so it's left out: {}", p.problem);
+                }
+            } else if let Some(p) = v.problems.first() {
+                anyhow::bail!("{} of {env}'s secrets didn't resolve ({}: {})", v.problems.len(), p.key, p.problem);
+            }
+            let linked: std::collections::HashSet<String> = v.linked.into_iter().collect();
+            let sensitive: std::collections::HashSet<String> = v.sensitive.into_iter().collect();
+            let plain: std::collections::HashSet<String> = v.plain.into_iter().collect();
+            Ok(apps_control::integrations::ClosedSecrets { vars: v.values.into_iter().map(|(name, value)| apps_control::integrations::SecretVar { linked: linked.contains(&name), sensitive: sensitive.contains(&name), plain: plain.contains(&name), value: value.expose().to_string(), name }).collect(), notice: None })
+        })
+        .await?
+    }
+
+    /// The project environment's interception CA (roll secrets' `intercept_ca`), kept while it
+    /// stands and isn't near its end, and roll secrets' filter (rolld's `CaInterception`). None:
+    /// no live placeholder of a key bound to hosts.
+    async fn intercept(&self, project: &str, env: &str) -> anyhow::Result<Option<apps_control::integrations::Intercept>> {
+        let (secrets, _) = self.0.get().cloned().ok_or_else(|| anyhow::anyhow!("roll secrets is starting"))?;
+        let consumer = closed_consumer(project, env);
+        let cache = self.1.clone();
+        tokio::task::spawn_blocking(move || {
+            let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis() as i64).unwrap_or(0);
+            let kept = cache.lock().unwrap_or_else(|p| p.into_inner()).get(&consumer).cloned();
+            let ca = match kept {
+                Some(ca) if ca.expires_at - now > CA_RENEW_MS && secrets.intercept_ca_live(&ca.id).unwrap_or(false) => ca,
+                _ => match secrets.intercept_ca(&consumer, None) {
+                    Ok(ca) => {
+                        cache.lock().unwrap_or_else(|p| p.into_inner()).insert(consumer.clone(), ca.clone());
+                        ca
+                    }
+                    Err(roll_secrets::Error::NotFound(_)) => return Ok(None),
+                    Err(e) => return Err(anyhow::anyhow!("{e}")),
+                },
+            };
+            Ok(Some(apps_control::integrations::Intercept { ca_pem: ca.cert_pem.clone(), expires_at: ca.expires_at, interception: Arc::new(crate::intercept::CaInterception::new(secrets.clone(), ca)) }))
+        })
+        .await?
+    }
+
+    async fn end_intercept(&self, project: &str, env: &str) -> anyhow::Result<()> {
+        let (secrets, _) = self.0.get().cloned().ok_or_else(|| anyhow::anyhow!("roll secrets is starting"))?;
+        let consumer = closed_consumer(project, env);
+        self.1.lock().unwrap_or_else(|p| p.into_inner()).remove(&consumer);
+        tokio::task::spawn_blocking(move || secrets.end_consumer(&consumer).map(|_| ()).map_err(|e| anyhow::anyhow!("{e}"))).await?
     }
 
     /// apps' `…/variables/values` shows secrets' values: only to whoever may reveal `env` by roll
@@ -1537,6 +1691,65 @@ impl s3_server::TargetCredentials for ForStorage {
 
     fn digest<'a>(&'a self, bucket: &'a str, reference: &'a str) -> futures::future::BoxFuture<'a, Result<String, String>> {
         Box::pin(async move { self.run(bucket, reference, |s, r, x| s.digest_for(r, x)).await })
+    }
+}
+
+/// roll secrets for roll search's snapshot repositories (`search_control::secret_refs`): a
+/// repository's `roll://` credentials are bound by the caller who writes them
+/// (`Secrets::bind_ref`, the caller as a request to secrets would be), and read as that maker
+/// (`resolve_as`/`digest_as`, their rights looked up again on every use) for the cluster, the
+/// canvas resource asking (`search:search:<id>` in the audit log; a branch asks as the cluster it
+/// came from, untrusted).
+pub struct ForSearch(pub Arc<Secrets>);
+
+impl ForSearch {
+    fn resource(holder: &search_control::secret_refs::Holder) -> roll_secrets::ResourceRef {
+        let resource = roll_secrets::ResourceRef::new(roll_workspace::Kind::Search, holder.id.clone());
+        if holder.copy { resource.untrusted() } else { resource }
+    }
+
+    /// What a refusal says. A branch learns nothing about which keys a protected environment
+    /// holds: protected and missing read alike.
+    fn refusal(resource: &roll_secrets::ResourceRef, reference: &str, e: roll_secrets::Refusal) -> String {
+        match e {
+            roll_secrets::Refusal::Protected(_) | roll_secrets::Refusal::NoSuchKey(_) if resource.is_untrusted() => format!("not available to a branch: {reference} is protected or doesn't exist"),
+            e => e.to_string(),
+        }
+    }
+
+    /// `f` for the reference, as its stored maker (a string only roll's control plane writes).
+    async fn as_maker<T: Send + 'static>(&self, holder: &search_control::secret_refs::Holder, reference: &str, f: fn(&Secrets, &roll_secrets::ResourceRef, &str, &roll_secrets::Maker) -> Result<T, roll_secrets::Refusal>) -> Result<T, String> {
+        let resource = Self::resource(holder);
+        let maker: roll_secrets::Maker = serde_json::from_value(serde_json::Value::String(holder.maker.clone())).map_err(|_| "nobody roll knows chose it".to_string())?;
+        let (secrets, reference) = (self.0.clone(), reference.to_string());
+        tokio::task::spawn_blocking(move || f(&secrets, &resource, &reference, &maker).map_err(|e| Self::refusal(&resource, &reference, e))).await.map_err(|e| e.to_string())?
+    }
+}
+
+#[async_trait::async_trait]
+impl search_control::secret_refs::ResourceSecrets for ForSearch {
+    async fn may_write(&self, who: &search_control::secret_refs::Who, holder: &search_control::secret_refs::Holder, reference: &str) -> Result<String, search_control::secret_refs::Refused> {
+        use search_control::secret_refs::Refused;
+        let resource = Self::resource(holder);
+        let (secrets, reference, who) = (self.0.clone(), reference.to_string(), who.clone());
+        tokio::task::spawn_blocking(move || {
+            let caller = secrets.caller_of(who.operator, who.user.as_ref(), who.grant.as_ref()).map_err(|e| Refused::Forbidden(e.to_string()))?;
+            let maker = secrets.bind_ref(&resource, &reference, &caller).map_err(|e| match e {
+                roll_secrets::Refusal::NotAllowed(_) | roll_secrets::Refusal::NotTrusted(_) | roll_secrets::Refusal::Protected(_) => Refused::Forbidden(e.to_string()),
+                e => Refused::Invalid(e.to_string()),
+            })?;
+            Ok(maker.to_string())
+        })
+        .await
+        .map_err(|e| Refused::Invalid(e.to_string()))?
+    }
+
+    async fn resolve(&self, holder: &search_control::secret_refs::Holder, reference: &str) -> Result<search_control::secret_refs::Revealed, String> {
+        self.as_maker(holder, reference, |s, r, x, m| s.resolve_as(r, x, m).map(|v| search_control::secret_refs::Revealed::new(v.value.expose()))).await
+    }
+
+    async fn digest(&self, holder: &search_control::secret_refs::Holder, reference: &str) -> Result<String, String> {
+        self.as_maker(holder, reference, |s, r, x, m| s.digest_as(r, x, m)).await
     }
 }
 
@@ -1758,6 +1971,30 @@ impl code_control::SecretEnv for ForCode {
         Ok(code_control::Revealed { by, values })
     }
 
+    /// The first project with the repo on its canvas that may reach it and has validity checks on
+    /// asks (and keeps, and audits, as `roll:code`); none: nothing is asked.
+    async fn validity(&self, repo: &str, found: Vec<(String, Option<String>)>) -> anyhow::Result<Vec<code_control::model::CredentialValidity>> {
+        let (secrets, ws) = self.0.get().cloned().ok_or_else(|| anyhow::anyhow!("roll secrets is starting"))?;
+        let r = repo.to_string();
+        tokio::task::spawn_blocking(move || {
+            let projects = ws.projects_of(roll_workspace::Kind::Repo.as_str(), &r)?;
+            let Some(p) = projects.into_iter().find(|p| secrets.counts_for_repo(p, &r) && secrets.validity_checks(p).unwrap_or(false)) else { return Ok(Vec::new()) };
+            let probes = found.into_iter().map(|(value, pair)| roll_secrets::validity::Probe { value: roll_secrets::Value::new(value), pair: pair.map(roll_secrets::Value::new) }).collect();
+            let checked = secrets.check_validity(&p, probes, &roll_secrets::Caller::consumer("roll:code"))?.unwrap_or_default();
+            Ok(checked
+                .into_iter()
+                .map(|c| code_control::model::CredentialValidity {
+                    fingerprint: c.fingerprint,
+                    result: c.result.as_str().to_string(),
+                    account: c.account,
+                    checked_at: c.checked_at,
+                    rotator: c.rotator.map(str::to_string),
+                })
+                .collect())
+        })
+        .await?
+    }
+
     async fn leaks(&self, repo: &str, candidates: Vec<String>) -> anyhow::Result<Vec<(usize, String, String, String)>> {
         let (secrets, ws) = self.0.get().cloned().ok_or_else(|| anyhow::anyhow!("roll secrets is starting"))?;
         let r = repo.to_string();
@@ -1823,6 +2060,18 @@ fn for_code(e: Error) -> code_control::Error {
 #[cfg(test)]
 mod tests {
     #[test]
+    fn a_search_branch_resolves_as_its_root_untrusted() {
+        let holder = |copy| search_control::secret_refs::Holder { id: "srch_root".into(), copy, maker: "usr_ada".into() };
+        assert_eq!(super::ForSearch::resource(&holder(false)).consumer(), "search:search:srch_root");
+        assert_eq!(super::ForSearch::resource(&holder(true)).consumer(), "search:search:srch_root (untrusted)");
+        // A branch can't tell a protected key from a missing one.
+        let said = |copy, e| super::ForSearch::refusal(&super::ForSearch::resource(&holder(copy)), "roll://production/K", e);
+        let protected = said(true, roll_secrets::Refusal::Protected("production is protected".into()));
+        assert_eq!(protected, said(true, roll_secrets::Refusal::NoSuchKey("K".into())));
+        assert_ne!(said(false, roll_secrets::Refusal::NoSuchKey("K".into())), protected);
+    }
+
+    #[test]
     fn only_roll_mcps_guard_keeps_the_guard_header() {
         let req = || super::Request::builder().uri("/v1/secrets/projects/p/leaks").header("x-roll-guard", "1").body(super::Body::empty()).unwrap();
         assert!(super::keep_guard_header(req()).headers().get("x-roll-guard").is_none(), "a caller's own header is dropped");
@@ -1848,14 +2097,10 @@ mod tests {
         }
     }
 
-    /// roll apps' instance tokens through the real issuer, called as apps calls it
-    /// (`SecretSource::issue(project, service, env, aud, ttl)`): the token's `sub` and
-    /// `environment` name the instance's environment; an untrusted preview gets none. (An
-    /// operator's project stands for every service: `Workspace::trusts`.)
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn an_apps_instance_token_names_its_environment_and_an_untrusted_preview_gets_none() {
-        use apps_control::integrations::SecretSource;
-        use base64::Engine;
+    /// roll secrets with rolld's providers and the operator's project `shop` (`svc_web` on it,
+    /// `production` and an untrusted `pv-7`), as apps' `ForApps` reads it: the dir, the project,
+    /// secrets' router and `ForApps`.
+    async fn apps_secrets() -> (tempfile::TempDir, String, axum::Router, super::ForApps) {
         let dir = tempfile::tempdir().unwrap();
         let ws_db = code_sql::Db::open_or_test(&code_sql::Target::Sqlite(dir.path().join("workspace.db")), "workspace").unwrap();
         let ws = Arc::new(roll_workspace::Workspace::new(ws_db).unwrap());
@@ -1890,11 +2135,46 @@ mod tests {
         }
         let apps = super::ForApps::default();
         apps.set(secrets, ws.clone());
+        (dir, project, router, apps)
+    }
+
+    /// roll apps' instance tokens through the real issuer, called as apps calls it
+    /// (`SecretSource::issue(project, service, env, aud, ttl)`): the token's `sub` and
+    /// `environment` name the instance's environment; an untrusted preview gets none. (An
+    /// operator's project stands for every service: `Workspace::trusts`.)
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn an_apps_instance_token_names_its_environment_and_an_untrusted_preview_gets_none() {
+        use apps_control::integrations::SecretSource;
+        use base64::Engine;
+        let (_dir, project, _router, apps) = apps_secrets().await;
         let hour = std::time::Duration::from_secs(3600);
         let token = apps.issue(&project, "svc_web", "production", "sts.amazonaws.com", hour).await.unwrap().expect("an issuer here");
         let claims: Json = serde_json::from_slice(&base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(token.split('.').nth(1).unwrap()).unwrap()).unwrap();
         assert_eq!((claims["sub"].as_str(), claims["environment"].as_str(), claims["aud"].as_str()), (Some(format!("roll-apps:{project}:svc_web:production").as_str()), Some("production"), Some("sts.amazonaws.com")), "{claims}");
         assert!(apps.issue(&project, "svc_web", "pv-7", "sts.amazonaws.com", hour).await.is_err(), "an untrusted preview gets no token");
+    }
+
+    /// A closed environment's keys through the real roll secrets: a key bound to hosts resolves
+    /// to a placeholder (the project environment's consumer, made by the operator), the
+    /// interception CA covers its host, and ending it leaves no CA.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_closed_apps_environment_gets_placeholders_and_an_interception_ca() {
+        use apps_control::integrations::SecretSource;
+        let (_dir, project, router, apps) = apps_secrets().await;
+        let at = format!("/v1/secrets/projects/{project}/environments/production/secrets/STRIPE_KEY");
+        assert!(send(&router, "PUT", &at, Some(json!({ "value": "sk_test_apps_closed" }))).await.0 < 300);
+        assert!(send(&router, "PUT", &format!("{at}/hosts"), Some(json!({ "hosts": ["api.stripe.com"] }))).await.0 < 300);
+        let open = apps.resolve(&project, "production", "svc_web").await.unwrap();
+        assert_eq!(open.iter().find(|v| v.name == "STRIPE_KEY").map(|v| v.value.as_str()), Some("sk_test_apps_closed"), "open: the value");
+        let closed = apps.resolve_closed(&project, "production", "svc_web", Some("operator")).await.unwrap();
+        let v = closed.vars.iter().find(|v| v.name == "STRIPE_KEY").map(|v| v.value.clone()).unwrap();
+        assert!(v.starts_with("rlph_") && !v.contains("sk_test"), "closed: a placeholder: {v}");
+        let i = apps.intercept(&project, "production").await.unwrap().expect("a CA for its bound host");
+        assert!(i.ca_pem.contains("BEGIN CERTIFICATE") && i.interception.covers("api.stripe.com") && !i.interception.covers("evil.example"));
+        assert!(i.interception.live().unwrap());
+        apps.end_intercept(&project, "production").await.unwrap();
+        assert!(!i.interception.live().unwrap(), "ended with its consumer");
+        assert!(apps.intercept(&project, "production").await.unwrap().is_none(), "no placeholders left, no CA");
     }
 
     /// A search link takes whichever credential the cluster's flavor issues.
@@ -2087,7 +2367,7 @@ mod tests {
         let (user, _) = accounts.email_verify("chal-test", mail.subject.split(' ').next().unwrap()).unwrap();
         let q = Queues::start(Some(super::People { accounts: accounts.clone(), code: None, search: None })).await;
         let mine = q.ws.create(&user, "side-project", "", None).unwrap().id;
-        q.ws.place(roll_workspace::Scope::Owner(&user), &mine, roll_workspace::Kind::Queue, "orders", 0.0, 0.0).unwrap();
+        q.ws.place(roll_workspace::Scope::Member(&user), &mine, roll_workspace::Kind::Queue, "orders", 0.0, 0.0).unwrap();
         let path = format!("/v1/secrets/projects/{mine}/environments/production/secrets/AMQP_URL");
         let (s, e) = send(&roll_secrets::router(q.secrets.clone()), "PUT", &path, Some(queue_link("url", "managed", json!({})))).await;
         assert!(s == 400 && e["error"].as_str().is_some_and(|m| m.starts_with("queue orders is on this project's canvas, but roll can't tell it's yours")), "{s} {e}");
@@ -2150,7 +2430,7 @@ mod tests {
         // token for another project may not.
         let operator = apps_control::integrations::Asker { operator: true, user: None, grant: None };
         assert!(apps.may_reveal(operator, &project, "production").await);
-        let rule = roll_auth::scope::Rule { product: "secrets".into(), resources: roll_auth::scope::Resources::Some(vec![roll_auth::scope::Selector::Project { project: "prj_other".into() }]), environments: None, paths: None, actions: std::collections::BTreeMap::from([(roll_auth::scope::Action::Reveal, roll_auth::scope::Effect::Allow)]) };
+        let rule = roll_auth::scope::Rule { product: "secrets".into(), resources: roll_auth::scope::Resources::Some(vec![roll_auth::scope::Selector::Project { project: "prj_other".into() }]), environments: None, paths: None, unprotected: false, actions: std::collections::BTreeMap::from([(roll_auth::scope::Action::Reveal, roll_auth::scope::Effect::Allow)]) };
         let grant = roll_auth::Grant { user: None, ask_otherwise: false, id: "tok_x".into(), name: "x".into(), kind: roll_auth::GrantKind::Token, scope: Arc::new(roll_auth::scope::Scope(vec![rule])) };
         assert!(!apps.may_reveal(apps_control::integrations::Asker { operator: true, user: None, grant: Some(&grant) }, &project, "production").await);
         // The read is the service's in the audit log.
@@ -2235,6 +2515,7 @@ mod tests {
         let first = first.expect("a finding");
         assert_eq!((first.issue, first.key.as_str()), (roll_secrets::health::Issue::DecoyUsed, "OLD_DEPLOY_TOKEN"));
         assert!(first.detail.contains("198.51.100.4"), "{}", first.detail);
+        assert_eq!(first.decoy.as_ref().and_then(|d| d.used_route.as_deref()), Some("/v1/secrets/whoami"));
         assert!(call("DELETE", "/secrets/OLD_DEPLOY_TOKEN", None).await.unwrap().status().is_success());
         assert!(access.store.by_secret(value.expose()).unwrap().is_none());
         assert!(access.store.get(&g.id).unwrap().revoked_at.is_some());
@@ -2385,7 +2666,7 @@ mod tests {
         let code = super::ForCode::default();
         code.set(secrets.clone(), ws);
         let grant = |id: &str, on: &str| {
-            let rule = roll_auth::scope::Rule { product: "secrets".into(), resources: roll_auth::scope::Resources::Some(vec![roll_auth::scope::Selector::Project { project: on.into() }]), environments: None, paths: None, actions: std::collections::BTreeMap::from([(roll_auth::scope::Action::Reveal, roll_auth::scope::Effect::Allow)]) };
+            let rule = roll_auth::scope::Rule { product: "secrets".into(), resources: roll_auth::scope::Resources::Some(vec![roll_auth::scope::Selector::Project { project: on.into() }]), environments: None, paths: None, unprotected: false, actions: std::collections::BTreeMap::from([(roll_auth::scope::Action::Reveal, roll_auth::scope::Effect::Allow)]) };
             roll_auth::Grant { user: None, ask_otherwise: false, id: id.into(), name: id.into(), kind: roll_auth::GrantKind::Token, scope: Arc::new(roll_auth::scope::Scope(vec![rule])) }
         };
         let refused = |r: anyhow::Result<code_control::Revealed>| r.err().and_then(|e| e.downcast::<code_control::Refused>().ok()).map(|r| r.0);
@@ -2418,6 +2699,9 @@ mod tests {
         struct Nobody;
         impl roll_workspace::Owners for Nobody {
             fn trusts(&self, _: &str, _: roll_workspace::Kind, _: &str) -> bool {
+                false
+            }
+            fn owns(&self, _: &str, _: roll_workspace::Kind, _: &str) -> bool {
                 false
             }
         }

@@ -235,7 +235,7 @@
               }
             }
           },
-          "description": "`{ url, format?, sources?, environments?, services?, previews?, headers? }` (https, a public host, or `syslog+tls://host:port` for `format: \"syslog\"`, which takes no headers; `sources` some of `runtime` (default), `http`, `build`, `audit`, `traces`, `metrics`; services by name or id; `headers` `{name: value}`, at most 10, sealed, never roll's own or `content-type`)"
+          "description": "`{ url, format?, sources?, environments?, services?, previews?, headers? }` or `{ bucket, prefix?, sources?, … }` (a roll storage bucket on the project's canvas, without url, headers or another format: an `s3` drain with a key minted for it, write on the bucket asked of the caller, revoked with the drain; https, a public host, or `syslog+tls://host:port` for `format: \"syslog\"`, which takes no headers; for `format: \"s3\"`, `https://<endpoint>/<bucket>[/<prefix>]` with headers `aws-access-key-id`, `aws-secret-access-key` and optionally `aws-region`, nothing else; `sources` some of `runtime` (default), `http`, `build`, `audit`, `traces`, `metrics`; services by name or id; `headers` `{name: value}`, at most 10, sealed, never roll's own or `content-type`)"
         },
         "responses": {
           "201": {
@@ -1092,6 +1092,35 @@
         "x-roll-action": "write"
       }
     },
+    "/v1/apps/projects/{project}/usage": {
+      "get": {
+        "description": "Answers `ProjectUsage`: a month's use (`YYYY-MM`, this one by default; 400 for a month to come) by service and environment at roll's prices, each service's previews as one row (`previews: true`), deleted services as one (`deleted: true`), most costly first; this month's projected to its end at the pace so far.",
+        "operationId": "getProjectsProjectUsage",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "project",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "`ProjectUsage`: a month's use (`YYYY-MM`, this one by default; 400 for a month to come) by service and environment at roll's prices, each service's previews as one row (`previews: true`), deleted services as one (`deleted: true`), most costly first; this month's projected to its end at the pace so far"
+          },
+          "4XX": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "summary": "Get usage",
+        "tags": [
+          "projects"
+        ],
+        "x-roll-action": "read"
+      }
+    },
     "/v1/apps/services": {
       "get": {
         "description": "Answers `Service[]`; `deleted=true`: `{id, project, name, deleted_at, purge_at}[]` (unix ms, newest first), the deleted services kept for a restore until `purge_at`, 48 hours after the delete.",
@@ -1718,6 +1747,51 @@
           "services"
         ],
         "x-roll-action": "read"
+      }
+    },
+    "/v1/apps/services/{id}/environments/{env}/deploys/{dep}/approve": {
+      "post": {
+        "description": "Answers 200 `{deployment, approved_by, needed, live, waiting?}`: a person's approval (signed in or the operator; a token's is 403) of a deployment waiting at `ready` where the environment asks for `approvals`, never its own author's (403); the one that makes the count puts it live (`live`: the new deployment), unless a freeze still stops it (`waiting` says why); 409 when the environment asks for none or it isn't waiting.",
+        "operationId": "postServicesIdEnvironmentsEnvDeploysDepApprove",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "env",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "dep",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "200 `{deployment, approved_by, needed, live, waiting?}`: a person's approval (signed in or the operator; a token's is 403) of a deployment waiting at `ready` where the environment asks for `approvals`, never its own author's (403); the one that makes the count puts it live (`live`: the new deployment), unless a freeze still stops it (`waiting` says why); 409 when the environment asks for none or it isn't waiting"
+          },
+          "4XX": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "summary": "Approve deploy",
+        "tags": [
+          "services"
+        ],
+        "x-roll-action": "deploy*"
       }
     },
     "/v1/apps/services/{id}/environments/{env}/deploys/{dep}/cancel": {
@@ -2364,7 +2438,7 @@
     },
     "/v1/apps/services/{id}/environments/{env}/errors": {
       "get": {
-        "description": "Answers `{ minutes, groups: { fingerprint, kind: \"python\" | \"java\" | \"node\" | \"go\" | \"line\", title, count, first_seen, last_seen, instances, sample }[], scanned, cut }`: the environment's errors from its log (5–10,080 minutes, default 1,440), each instance's stack traces joined from their lines and grouped by their error and first frames (line numbers, addresses and ids taken out), error lines with no trace by their message the same way; the most frequent first, at most 50, `sample` the newest whole (at most 8 KiB); at most the newest 100,000 lines read (`cut`).",
+        "description": "Answers `{ minutes, groups: { fingerprint, kind: \"python\" | \"java\" | \"node\" | \"go\" | \"ruby\" | \"php\" | \"dotnet\" | \"rust\" | \"elixir\" | \"line\", title, count, first_seen, last_seen, instances, sample }[], scanned, cut }`: the environment's errors from its log (5–10,080 minutes, default 1,440), each instance's stack traces joined from their lines and grouped by their error and first frames (line numbers, addresses and ids taken out), error lines with no trace by their message the same way; the most frequent first, at most 50, `sample` the newest whole (at most 8 KiB); at most the newest 100,000 lines read (`cut`).",
         "operationId": "getServicesIdEnvironmentsEnvErrors",
         "parameters": [
           {
@@ -2386,7 +2460,7 @@
         ],
         "responses": {
           "200": {
-            "description": "`{ minutes, groups: { fingerprint, kind: \"python\" | \"java\" | \"node\" | \"go\" | \"line\", title, count, first_seen, last_seen, instances, sample }[], scanned, cut }`: the environment's errors from its log (5–10,080 minutes, default 1,440), each instance's stack traces joined from their lines and grouped by their error and first frames (line numbers, addresses and ids taken out), error lines with no trace by their message the same way; the most frequent first, at most 50, `sample` the newest whole (at most 8 KiB); at most the newest 100,000 lines read (`cut`)"
+            "description": "`{ minutes, groups: { fingerprint, kind: \"python\" | \"java\" | \"node\" | \"go\" | \"ruby\" | \"php\" | \"dotnet\" | \"rust\" | \"elixir\" | \"line\", title, count, first_seen, last_seen, instances, sample }[], scanned, cut }`: the environment's errors from its log (5–10,080 minutes, default 1,440), each instance's stack traces joined from their lines and grouped by their error and first frames (line numbers, addresses and ids taken out), error lines with no trace by their message the same way; the most frequent first, at most 50, `sample` the newest whole (at most 8 KiB); at most the newest 100,000 lines read (`cut`)"
           },
           "4XX": {
             "$ref": "#/components/responses/Error"
@@ -2853,7 +2927,7 @@
               }
             }
           },
-          "description": "`{ command, timeout_s?, tasks?, retries?, parallelism? }` (tasks 1–100: that many containers, `parallelism` at a time (1–10, default ten or fewer tasks: a node's job containers are shared), each with `ROLL_TASK_INDEX` and `ROLL_TASK_COUNT`; `retries` 0–5: a failed or timed-out task tried again in a fresh container with `ROLL_TASK_ATTEMPT`, as a cron run's retries wait, never after a cancel or once another deployment is live; the job fails on the first task that does in the end)"
+          "description": "`{ command, timeout_s?, tasks?, retries?, parallelism?, cpu?, memory_mb? }` (`cpu` 0.25–8 and `memory_mb` 256–16384: each task's container at that size, metered at it, Heroku's `run --size`; unset, the service's; tasks 1–100: that many containers, `parallelism` at a time (1–10, default ten or fewer tasks: a node's job containers are shared), each with `ROLL_TASK_INDEX` and `ROLL_TASK_COUNT`; `retries` 0–5: a failed or timed-out task tried again in a fresh container with `ROLL_TASK_ATTEMPT`, as a cron run's retries wait, never after a cancel or once another deployment is live; the job fails on the first task that does in the end)"
         },
         "responses": {
           "202": {
@@ -4174,7 +4248,7 @@
               }
             }
           },
-          "description": "`{set?: {[name]: value}, unset?: string[], seal?: string[], files?: {[name]: path | null}, copy_from?: string, copy?: string[]}` (`copy_from` with `copy`: those names' values from another environment's own variables, set here as `set` sets them; 400 for a sealed one or one it lacks; reveal on `copy_from` too. set, then unset, then seal: names set here or already set; 400 for another; nothing unseals, a new value stays sealed. `files`: kept as a file at an absolute path in its instances, not in their environment, from the next deploy (0444; at most 20; not under `/proc`, `/sys` or `/dev`, no `..`; two can't share a path; null puts it back; unsetting a variable drops its file; 400 otherwise; on Fargate the deploy fails for now). A value `roll://ENV[/folder…]/KEY` is read from roll secrets at each deploy: its own environment's as the service, another environment's as whoever set it (bound to them when it's set; a 403 unless they may reveal it for the service now)"
+          "description": "`{set?: {[name]: value}, unset?: string[], seal?: string[], files?: {[name]: path | null}, runtime_only?: {[name]: boolean}, copy_from?: string, copy?: string[]}` (`copy_from` with `copy`: those names' values from another environment's own variables, set here as `set` sets them; 400 for a sealed one or one it lacks; reveal on `copy_from` too. set, then unset, then seal: names set here or already set; 400 for another; nothing unseals, a new value stays sealed. `files`: kept as a file at an absolute path in its instances, not in their environment, from the next deploy (0444; at most 20; not under `/proc`, `/sys` or `/dev`, no `..`; two can't share a path; null puts it back; unsetting a variable drops its file; 400 otherwise; on Fargate the deploy fails for now). `runtime_only`: true gives it to its instances only, never a build's steps (from the next deploy; one of its own variables, else 400); false gives it to builds again; unsetting drops it. A value `roll://ENV[/folder…]/KEY` is read from roll secrets at each deploy: its own environment's as the service, another environment's as whoever set it (bound to them when it's set; a 403 unless they may reveal it for the service now)"
         },
         "responses": {
           "200": {

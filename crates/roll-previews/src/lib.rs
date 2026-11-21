@@ -11,10 +11,21 @@
 //!   idle, until roll apps provides [`ports::Apps`].
 //! - [`api`] serves `/v1/previews`.
 
+/// What a preview of `repo` stands as on its project's canvas: the repo, or a Git URL service's
+/// preview (`git:<service>`) the service (as `discover` checks it still stands).
+pub fn canvas_resource(repo: &str) -> (roll_workspace::Kind, &str) {
+    match repo.strip_prefix("git:") {
+        Some(svc) => (roll_workspace::Kind::Service, svc),
+        None => (roll_workspace::Kind::Repo, repo),
+    }
+}
+
 pub mod api;
 pub mod code;
 pub mod cost;
 pub mod engine;
+/// The intercepting egress step (`roll-intercept`), as previews names it.
+pub use roll_intercept as intercept;
 pub mod glob;
 pub mod ports;
 pub mod mail;
@@ -378,6 +389,10 @@ pub struct Preview {
     /// project keeps traces): until then nothing above says "no regressions".
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub regressions_compared: bool,
+    /// The keys it holds as placeholders, and what its egress proxy swapped or refused for them
+    /// (docs/previews.md, "Keys a preview never holds"). Never a value or a placeholder.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub intercepted: Option<Intercepted>,
     /// The screenshot's signed link (`(expiry, signature)`), for roll code's summary; never in
     /// API answers.
     #[serde(skip)]
@@ -398,6 +413,37 @@ pub struct Preview {
     pub baseline: bool,
     pub created_at: i64,
     pub updated_at: i64,
+}
+
+/// A preview's keys held as placeholders: each named with the hosts it's bound to, and how many
+/// requests through its egress proxy had a key swapped in, or were refused.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct Intercepted {
+    pub keys: Vec<HeldKey>,
+    #[serde(default)]
+    pub swapped: u64,
+    #[serde(default)]
+    pub refused: u64,
+    /// What roll apps' proxies did for its services there (their `pv-` environments' own
+    /// placeholders, apps' `intercepted`), since those proxies came up.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub on_apps: Option<AppsIntercepted>,
+}
+
+/// roll apps' interception for a preview's `pv-` environments: requests filtered, placeholders
+/// swapped, and the latest refusals' reasons (masked as its logs are; never a value).
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct AppsIntercepted {
+    pub requests: u64,
+    pub swapped: u64,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub refused: Vec<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct HeldKey {
+    pub key: String,
+    pub hosts: Vec<String>,
 }
 
 impl Preview {
@@ -1277,6 +1323,12 @@ pub fn label_part(s: &str, max: usize) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_git_url_services_preview_stands_as_the_service() {
+        assert_eq!(super::canvas_resource("acme/web"), (roll_workspace::Kind::Repo, "acme/web"));
+        assert_eq!(super::canvas_resource("git:svc_1"), (roll_workspace::Kind::Service, "svc_1"));
+    }
+
     use super::*;
 
     /// A value a cut splits (its start left at the end of a line, or of the text) never shows;

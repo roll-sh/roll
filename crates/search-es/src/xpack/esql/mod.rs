@@ -561,7 +561,7 @@ pub async fn async_query(ctx: &Ctx<'_>) -> EsResult<Reply> {
     let id = async_results::async_id(&ctx.cluster.node.id);
     ctx.cluster.xpack.results.put(
         id.clone(),
-        Entry { kind: Kind::Esql, response: Value::Obj(out.clone()), start_ms: ctx.now_ms, expiration_ms: ctx.now_ms + req.keep_alive, bytes: 0, extra: Value::Null },
+        Entry { kind: Kind::Esql, response: Value::Obj(out.clone()), start_ms: ctx.now_ms, expiration_ms: ctx.now_ms + req.keep_alive, bytes: 0, extra: Value::Null, owner: crate::xpack::async_results::owner(ctx) },
         ctx.now_ms,
     );
     Reply::ok(with_id(&id, false, &out))
@@ -575,7 +575,7 @@ pub fn async_get(ctx: &Ctx) -> EsResult<Reply> {
     let id = ctx.path_param("id").unwrap_or_default();
     // An id that doesn't decode is a bad request, before any lookup.
     async_results::check_id(id)?;
-    let Some(e) = ctx.cluster.xpack.results.get(id, Kind::Esql, ctx.now_ms) else { return Err(not_found(id)) };
+    let Some(e) = crate::xpack::async_results::get_own(ctx, id, Kind::Esql) else { return Err(not_found(id)) };
     if let Some(k) = ctx.query("keep_alive") {
         let ms = crate::units::TimeValue::parse(k, "keep_alive")?.as_millis();
         ctx.cluster.xpack.results.touch(id, ctx.now_ms + ms);
@@ -591,7 +591,7 @@ pub fn async_stop(ctx: &Ctx) -> EsResult<Reply> {
 pub fn async_delete(ctx: &Ctx) -> EsResult<Reply> {
     let id = ctx.path_param("id").unwrap_or_default();
     async_results::check_id(id)?;
-    if ctx.cluster.xpack.results.remove(id, Kind::Esql) {
+    if crate::xpack::async_results::remove_own(ctx, id, Kind::Esql) {
         Reply::acknowledged()
     } else {
         Err(not_found(id))

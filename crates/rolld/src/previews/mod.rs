@@ -21,7 +21,7 @@ mod services;
 pub mod fleet;
 
 pub use data::*;
-pub use secrets::{Secrets, SecretsReveal};
+pub use secrets::{Secrets, SecretsIntercepts, SecretsReveal};
 pub use services::{RollApps, Services};
 
 /// Which products run here (an adapter for each).
@@ -45,8 +45,8 @@ pub struct Running {
 
 /// Who may open a team-access project's previews: an account that still signs in, through the
 /// roll session that asked for the ticket (signed out, revoked or expired is a no), and is an
-/// admin or owns the project now (a disabled or deleted one, or one whose project went to
-/// someone else, is a no at once). A failed lookup is a no.
+/// admin account or the project's owner or admin now (a disabled or deleted one, or one removed
+/// or demoted, is a no at once). A failed lookup is a no.
 pub struct AccountsVisitors {
     pub accounts: Arc<roll_accounts::Accounts>,
     pub workspace: Arc<roll_workspace::Workspace>,
@@ -63,7 +63,9 @@ impl roll_previews::ports::Visitors for AccountsVisitors {
             return false;
         }
         match self.accounts.user(user) {
-            Ok(u) if !u.disabled => u.admin || self.workspace.get(roll_workspace::Scope::All, project).is_ok_and(|p| !p.owner.is_empty() && p.owner == user),
+            // An owner or admin of the project now (a member removed or demoted is a no at once),
+            // never by who made it.
+            Ok(u) if !u.disabled => u.admin || matches!(self.workspace.role_in(project, user), Ok(Some(roll_auth::roles::Role::Owner | roll_auth::roles::Role::Admin))),
             _ => false,
         }
     }
@@ -72,6 +74,14 @@ impl roll_previews::ports::Visitors for AccountsVisitors {
 /// Open the store and start the engine: branches through this node's API, services as
 /// containers through roll code's isolation (Docker or Fargate), roll code's changes as the
 /// source, and roll code's preview backend in front of its own single-container previews.
+/// `ROLL_PREVIEWS_INTERCEPT_ALLOW_PRIVATE=<root.pem>`: intercepted connections may dial private
+/// addresses and trust that root too. Local development only; said loudly when on.
+fn intercept_private() -> Option<std::path::PathBuf> {
+    let root = std::env::var("ROLL_PREVIEWS_INTERCEPT_ALLOW_PRIVATE").ok().filter(|v| !v.trim().is_empty())?;
+    tracing::warn!(root = %root, "ROLL_PREVIEWS_INTERCEPT_ALLOW_PRIVATE is set: previews' intercepted connections may reach private addresses and trust this root (local development only)");
+    Some(std::path::PathBuf::from(root))
+}
+
 pub fn start(
     args: &crate::Args,
     home: &Path,
@@ -87,7 +97,7 @@ pub fn start(
     if let Some(key) = args.secret_key() {
         match code_review::secret::Sealer::new(&key) {
             Ok(s) => {
-                let _ = store.sealer.set(Arc::new(VarsSealer(s)));
+                store.set_sealer(Arc::new(VarsSealer(s)))?;
             }
             Err(e) => tracing::warn!(error = %e, "previews: a preview's own variables aren't sealed"),
         }
@@ -128,6 +138,10 @@ pub fn start(
             // this many on the node.
             warm_for: std::time::Duration::from_secs(60 * std::env::var("ROLL_PREVIEWS_WARM_MINUTES").ok().and_then(|v| v.parse::<u64>().ok()).unwrap_or(8 * 60).min(24 * 60)),
             warm_max: std::env::var("ROLL_PREVIEWS_WARM_MAX").ok().and_then(|v| v.parse::<usize>().ok()).unwrap_or(32).min(1000),
+            // Each preview's interception socket (keys a fork's preview never holds).
+            intercept_dir: Some(home.join("previews").join("intercept")),
+            // Local development only: a private TLS echo host for the live check.
+            intercept_private: intercept_private(),
             ..Default::default()
         },
         code.isolation.clone(),

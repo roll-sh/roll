@@ -2,6 +2,14 @@
 
 use super::*;
 
+/// A service kept on its earlier build at a head (`roll.toml` `watch`): the head, and the
+/// revision it runs.
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+pub(super) struct KeptBuild {
+    pub head: String,
+    pub revision: String,
+}
+
 /// How long one resource's columns are read for mask suggestions before it's named in `unread`.
 pub const SUGGEST_READ_FOR: std::time::Duration = std::time::Duration::from_secs(10);
 
@@ -296,6 +304,15 @@ impl Engine {
             self.store.drop_resource(&r.id, res.kind, &res.parent)?;
             self.store.log(&r.id, &format!("{}:{} moves to {} mode: branched again", res.kind.as_str(), res.parent, res.mode.as_str()))?;
         }
+        // A search branch whose link was made with the branch's own login (before a preview got
+        // only a data credential): made again, so that login stops working wherever it went.
+        for res in self.store.resources(&r.id)? {
+            if res.kind == Kind::Search && res.kept.as_deref().is_some_and(crate::names::search_link_holds_branch_login) {
+                self.delete_branch(&r.id, &res, &name).await?;
+                self.store.drop_resource(&r.id, res.kind, &res.parent)?;
+                self.store.log(&r.id, &format!("search:{}: its link held the branch's own login: branched again, with a data-only credential", res.parent))?;
+            }
+        }
         for gone in self.store.want_resources(&r.id, &wanted)? {
             self.delete_branch(&r.id, &gone, &name).await?;
             self.store.drop_resource(&r.id, gone.kind, &gone.parent)?;
@@ -504,7 +521,7 @@ impl Engine {
                         },
                         None => String::new(),
                     };
-                    let spec = ServiceSpec { name: c.name.clone(), image: String::new(), run: String::new(), port: 0, memory_mb: c.memory_mb, cpus: 0.0, env: Vec::new(), health: None, states: Vec::new(), pages: Vec::new(), hide: Vec::new() };
+                    let spec = ServiceSpec { name: c.name.clone(), image: String::new(), run: String::new(), port: 0, memory_mb: c.memory_mb, cpus: 0.0, env: Vec::new(), health: None, states: Vec::new(), pages: Vec::new(), hide: Vec::new(), watch: Vec::new() };
                     wanted.push((spec, c.repo.unwrap_or_default(), rev, true));
                 }
             }
@@ -512,7 +529,12 @@ impl Engine {
                 for repo in &repos {
                     let Some(rev) = head_of(repo.clone()).await? else { continue };
                     for spec in self.source.services(repo, &rev).await.map_err(|e| anyhow::anyhow!("reading {repo}'s services: {e:#}"))? {
-                        wanted.push((spec, repo.clone(), rev.clone(), false));
+                        // A push that touched none of what it watches keeps the build it runs.
+                        let rev = match self.kept_build(r, repo, &rev, &spec).await? {
+                            Some(kept) => kept,
+                            None => rev.clone(),
+                        };
+                        wanted.push((spec, repo.clone(), rev, false));
                     }
                 }
             }
@@ -530,6 +552,17 @@ impl Engine {
 
         // The project's own preview domain, when it has one (`Store::set_project_domain`).
         let domain = self.store.project_domain(&r.project_id)?;
+        // Its interception CA, when its egress goes through the proxy: its services trust that
+        // certificate, so a new one (its bound hosts changed) restarts them.
+        let ca = match (s.egress_for(r.trusted) == crate::settings::EgressRule::Roll, self.intercepts.get().cloned()) {
+            (true, Some(i)) => {
+                let id = r.id.clone();
+                tokio::task::spawn_blocking(move || i.of(&id)).await?.map_err(|e| anyhow::anyhow!("its interception: {e:#}"))?.map(|x| x.id)
+            }
+            _ => None,
+        };
+        // Who a closed preview's keys bound to hosts are used as on roll apps (it resolves them).
+        let maker = if s.egress_for(r.trusted) == crate::settings::EgressRule::Roll { self.store.rules_maker(&r.project_id)? } else { None };
         for (spec, repo, rev, on_apps) in wanted {
             keep.push(spec.name.clone());
             if let Some(path) = &spec.health {
@@ -553,6 +586,8 @@ impl Engine {
                 // Traces: a runtime service takes the OpenTelemetry variables when it starts;
                 // roll apps' environment turns its own on and redeploys.
                 + if s.traces { "o" } else { "" }
+                + &ca.as_deref().filter(|_| !on_apps).map(|id| format!("i{id}")).unwrap_or_default()
+                + &maker.as_deref().filter(|_| on_apps).map(|m| format!("m{m}")).unwrap_or_default()
                 + &rebuilt;
             let was = self.store.service_config(&r.id, &spec.name)?;
             let config_moved = was.as_deref() != Some(fingerprint.as_str());
@@ -599,6 +634,7 @@ impl Engine {
                     feedback,
                     egress: s.egress_for(r.trusted),
                     egress_hosts: s.egress_hosts.clone(),
+                    maker: maker.clone(),
                     rebuild: fresh.then_some(rebuilds),
                     traces: s.traces,
                 };
@@ -748,8 +784,38 @@ impl Engine {
     /// `Reveal::still`); the rest are left out, said once in the activity. A reference to the base
     /// reads what the preview reads anyway.
     async fn refs_still_chosen(&self, r: &Row, s: &crate::settings::Settings, trusted: bool, refs: Vec<(String, String)>, own: &[(String, String)]) -> anyhow::Result<Vec<(String, String)>> {
+        let (kept, dropped) = self.check_refs(r, s, trusted, refs, own).await?;
+        let new = self.refs_told.lock().insert(r.id.clone(), dropped.clone()).is_none_or(|before| before != dropped);
+        if new && !dropped.is_empty() {
+            self.store.log(&r.id, &format!("references left out (who chose them can't now): {}", dropped.join("; ")))?;
+        }
+        Ok(kept)
+    }
+
+    /// Whether a start may go on: no reference its preview's environment still holds has lost its
+    /// writer since the last converge (that converge leaves it out; the start waits for it, so a
+    /// writer who lost access never reaches the service through a start in between).
+    pub(super) async fn refs_still_allowed(&self, r: &Row, s: &crate::settings::Settings, trusted: bool) -> anyhow::Result<()> {
+        let own = self.store.vars(&r.id)?;
+        let own_refs: Vec<(String, String)> = own.iter().filter(|(_, v)| crate::settings::is_reference(v)).map(|(k, v)| (k.clone(), v.clone())).collect();
+        let mut refs: Vec<(String, String)> = project_env(s, r.branch.as_deref()).into_iter().filter(|(k, v)| crate::settings::is_reference(v) && !own.contains_key(k)).collect();
+        refs.extend(own_refs.iter().cloned());
+        let (_, dropped) = self.check_refs(r, s, trusted, refs, &own_refs).await?;
+        let told: Vec<String> = self.refs_told.lock().get(&r.id).cloned().unwrap_or_default();
+        let key = |d: &String| d.split_once(": ").map_or(d.clone(), |(k, _)| k.to_string());
+        let told: Vec<String> = told.iter().map(key).collect();
+        if let Some(d) = dropped.iter().find(|d| !told.contains(&key(d))) {
+            self.store.update(&r.id, |row| row.next_at = 0)?;
+            self.kick();
+            anyhow::bail!("a reference's writer can't choose it any more ({d}): the preview converges without it first");
+        }
+        Ok(())
+    }
+
+    /// The references kept and the ones left out (`KEY: why`), each read as its writer.
+    async fn check_refs(&self, r: &Row, s: &crate::settings::Settings, trusted: bool, refs: Vec<(String, String)>, own: &[(String, String)]) -> anyhow::Result<(Vec<(String, String)>, Vec<String>)> {
         if refs.is_empty() {
-            return Ok(refs);
+            return Ok((refs, Vec::new()));
         }
         let Some(reveal) = self.reveal.get().cloned() else { anyhow::bail!("roll:// references need roll secrets on this node") };
         let writers = self.store.env_ref_writers(&r.project_id)?;
@@ -765,7 +831,7 @@ impl Engine {
                     Ok(_) => {
                         let is_own = own.iter().any(|(n, x)| *n == k && *x == v);
                         match writers.iter().find(|(scope, n, reference, _)| *n == k && *reference == v && (*scope == mine) == is_own && (is_own || !scope.starts_with("preview:"))) {
-                            Some((_, _, _, by)) => reveal.still(&project, &repo, !trusted, &v, by).err(),
+                            Some((_, _, _, by)) => reveal.still(&project, crate::canvas_resource(&repo), !trusted, &v, by).err(),
                             None => Some(if is_own { "no setter is kept for it: set it again".into() } else { "no writer is kept for it: save the rules again".into() }),
                         }
                     }
@@ -779,11 +845,38 @@ impl Engine {
             (kept, dropped)
         })
         .await?;
-        let new = self.refs_told.lock().insert(r.id.clone(), dropped.clone()).is_none_or(|before| before != dropped);
-        if new && !dropped.is_empty() {
-            self.store.log(&r.id, &format!("references left out (who chose them can't now): {}", dropped.join("; ")))?;
+        Ok((kept, dropped))
+    }
+
+    /// The build a service of the change's own repo keeps at `head` (`roll.toml` `watch`): the
+    /// revision it runs, when the push since touched none of its watched paths (nor `roll.toml`,
+    /// nor a path that can't be read). Only for a trusted change (a fork's approval is for one
+    /// head) and never on a rebuild. Recorded for that head, so a start of it at the head goes on.
+    async fn kept_build(&self, r: &Row, repo: &str, head: &str, spec: &ServiceSpec) -> anyhow::Result<Option<String>> {
+        use code_control::review::pattern::{any_match, Pattern};
+        let kind = format!("kept:{}", spec.name);
+        if spec.watch.is_empty() || repo != r.repo || !r.trusted || self.store.rebuilds(&r.id)? > 0 {
+            self.store.set_runtime_fact::<KeptBuild>(&r.id, &kind, None)?;
+            return Ok(None);
         }
-        Ok(kept)
+        let Some(running) = self.store.services(&r.id)?.into_iter().find(|x| x.name == spec.name).and_then(|x| x.revision) else { return Ok(None) };
+        if running == head {
+            return Ok(None);
+        }
+        let patterns: Option<Vec<Pattern>> = spec.watch.iter().map(|p| Pattern::new(p)).collect();
+        let keep = match (patterns, self.source.paths_between(repo, &running, head).await?) {
+            (Some(watch), Some(paths)) => paths.iter().all(|p| p != "roll.toml" && !any_match(&watch, p)),
+            _ => false,
+        };
+        if !keep {
+            self.store.set_runtime_fact::<KeptBuild>(&r.id, &kind, None)?;
+            return Ok(None);
+        }
+        let fact = KeptBuild { head: head.to_string(), revision: running.clone() };
+        if self.store.set_runtime_fact(&r.id, &kind, Some(&fact))? {
+            self.store.log(&r.id, &format!("kept {}'s build at {}: the push to {} touched none of what it watches", spec.name, short(&running), short(head)))?;
+        }
+        Ok(Some(running))
     }
 
     /// The first service's screenshot at `r`'s head: `true` when one was kept. Not taken (a
@@ -1217,6 +1310,7 @@ impl Engine {
             anyhow::bail!("refusing to delete {} {branch}: it's the preview's parent", res.kind.as_str());
         }
         self.store.set_resource(id, res.kind, &res.parent, |x| x.state = ResourceState::Deleting)?;
+        self.brancher(res.kind)?.retire(&res.parent, branch, res.kept.as_deref()).await.map_err(|e| anyhow::anyhow!("revoking what the {} branch {branch} handed out: {e:#}", res.kind.as_str()))?;
         self.brancher(res.kind)?.delete(&res.parent, branch, name).await.map_err(|e| anyhow::anyhow!("deleting the {} branch {branch}: {e:#}", res.kind.as_str()))?;
         self.store.log(id, &format!("deleted the {} branch {branch}", res.kind.as_str()))?;
         Ok(())
@@ -1259,6 +1353,11 @@ impl Engine {
             self.store.drop_service(&r.id, &svc.name)?;
         }
         self.secrets.delete(&r.project_id, &env_name(&r.id)).await.map_err(|e| anyhow::anyhow!("secrets: {e:#}"))?;
+        // Its placeholders and interception CAs end with it, not at their expiry.
+        if let Some(i) = self.intercepts.get().cloned() {
+            let id = r.id.clone();
+            tokio::task::spawn_blocking(move || i.end(&id)).await?.map_err(|e| anyhow::anyhow!("ending its interception: {e:#}"))?;
+        }
         let name = branch_name(&r.id);
         for res in self.store.resources(&r.id)? {
             self.delete_branch(&r.id, &res, &name).await?;

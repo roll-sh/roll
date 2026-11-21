@@ -19,6 +19,15 @@ pub const LINE_MAX: usize = 16 << 10;
 /// Bytes a log holds between two flushes (about 10 s); a chattier process's further lines are
 /// counted and dropped, and a line in their place says how many.
 pub const UNFLUSHED_MAX: usize = 8 << 20;
+/// Days an environment's logs are kept unless it says longer (`log_retention_days`).
+pub const KEEP_DAYS: u32 = 7;
+
+/// An environment's stored logs: its output, its access log, its traces and OTLP metrics, its
+/// custom events and its Web Vitals. They're kept and deleted together.
+pub fn env_keys(service: &str, env: &str) -> [String; 6] {
+    ["env", "http", "trace", "metric", "events", "vitals"].map(|k| format!("{k}:{service}/{env}"))
+}
+
 /// What a search reads from stored chunks at most (about 7 days of a busy service's logs are
 /// many times this: it says when it stopped).
 pub const SEARCH_BYTES: usize = 64 << 20;
@@ -508,6 +517,34 @@ impl LogHub {
     pub fn forget(&self, key: &str) {
         self.logs.lock().remove(key);
         self.redactions.lock().remove(key);
+    }
+
+    /// Delete `key`'s stored chunks whose every line is older than `before` (ms): a chunk holds
+    /// one flush's lines (seconds), from its name's first ms; an hour's margin covers a flush
+    /// that waited out an object store's outage. How many went.
+    pub async fn expire(&self, key: &str, before: i64) -> usize {
+        let Some(objects) = &self.objects else { return 0 };
+        let Ok(mut chunks) = objects.list(&prefix(key)).await else { return 0 };
+        chunks.sort();
+        let starts = |chunk: &str| chunk.rsplit('/').next().and_then(|n| n.split('-').next()).and_then(|n| n.parse::<i64>().ok());
+        let mut gone = 0;
+        for (chunk, _) in &chunks {
+            // Chunks are named in order: past the first one that ends after `before`, none do.
+            if starts(chunk).is_none_or(|s| s + 3_600_000 > before) {
+                break;
+            }
+            if objects.delete(chunk).await.is_ok() {
+                gone += 1;
+            }
+        }
+        gone
+    }
+
+    /// The bytes of `key`'s stored chunks that start before `before` (ms).
+    pub async fn stored_before(&self, key: &str, before: i64) -> u64 {
+        let Some(objects) = &self.objects else { return 0 };
+        let starts = |chunk: &str| chunk.rsplit('/').next().and_then(|n| n.split('-').next()).and_then(|n| n.parse::<i64>().ok());
+        objects.list(&prefix(key)).await.unwrap_or_default().into_iter().filter(|(c, _)| starts(c).is_some_and(|s| s < before)).map(|(_, n)| n).sum()
     }
 
     pub async fn delete(&self, key: &str) {

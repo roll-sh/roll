@@ -291,6 +291,20 @@ export interface Blocker {
   path?: string;
   line?: number;
   fingerprint?: string;
+  /** `secret_unstored`: whether it works, as its provider answered (roll secrets' validity checks, when the project has them on). */
+  validity?: CredentialValidity;
+}
+
+/** A credential's validity check (docs/secrets.md, "Is it live?"): never its value. */
+export interface CredentialValidity {
+  fingerprint: string;
+  /** `invalid`: revoked, deleted or never real. */
+  result: "live" | "invalid" | "unknown";
+  /** The provider's account (an AWS account, a GitHub login, a Slack team). */
+  account?: string;
+  checked_at?: number;
+  /** A live one's kind has a roll rotator: roll secrets' AWS IAM users, or a project's GitHub App tokens. */
+  rotator?: "aws-iam" | "github-app";
 }
 
 /** Where a `secret_unstored` notice's credential would be stored ("Store in roll"); never its value. */
@@ -756,6 +770,7 @@ export interface ReviewApp {
   id: string;
   owner: string;
   name: string;
+  /** Scheme and host only (`https://hooks.example.com`): the URL is kept sealed and never returned. */
   webhook_url: string;
   events: string[];
   /** Full names. */
@@ -994,6 +1009,7 @@ export type WebhookEvent = (typeof WEBHOOK_EVENTS)[number];
 
 export interface Webhook {
   id: string;
+  /** Scheme and host only (`https://hooks.example.com`): the URL is kept sealed and never returned. */
   url: string;
   /** Event names, or `["*"]` for all of them. */
   events: string[];

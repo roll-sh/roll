@@ -66,6 +66,7 @@ pub fn router(apps: Arc<Apps>) -> Router {
         .route("/v1/apps/services/{id}/changes", get(changes))
         .route("/v1/apps/projects/{project}/notifications", get(targets).post(add_target))
         .route("/v1/apps/projects/{project}/limits", get(limits).put(set_limits))
+        .route("/v1/apps/projects/{project}/usage", get(project_usage))
         .route("/v1/apps/projects/{project}/drains", get(drains).post(add_drain))
         .route("/v1/apps/projects/{project}/export", post(export_project))
         .route("/v1/apps/projects/{project}/status-page", get(status_page).put(put_status_page).delete(delete_status_page))
@@ -90,6 +91,7 @@ pub fn router(apps: Arc<Apps>) -> Router {
         .route(&format!("{env}/deploys/{{dep}}/vulnerabilities"), get(deploy_vulnerabilities))
         .route(&format!("{env}/deploys/{{dep}}/sbom"), get(deploy_sbom))
         .route(&format!("{env}/deploys/{{dep}}/explain"), post(explain_deploy))
+        .route(&format!("{env}/deploys/{{dep}}/approve"), post(approve_deploy))
         .route(&format!("{env}/deploys/{{dep}}/rollback"), post(rollback))
         .route(&format!("{env}/deploys/{{dep}}/rollout"), post(rollout_action))
         .route(&format!("{env}/rollback"), post(rollback_previous))
@@ -579,6 +581,16 @@ async fn delete_drain(State(apps): S, Path((project, id)): Path<(String, String)
     Ok(StatusCode::NO_CONTENT.into_response())
 }
 
+#[derive(Deserialize)]
+struct MonthQuery {
+    month: Option<String>,
+}
+
+/// A month's use by service and environment, with this month's projection.
+async fn project_usage(State(apps): S, Path(project): Path<String>, Query(q): Query<MonthQuery>) -> R {
+    ok(apps.project_usage_view(&project, q.month.as_deref()).await?)
+}
+
 async fn limits(State(apps): S, Path(project): Path<String>) -> R {
     ok(apps.limits(&project).await?)
 }
@@ -735,7 +747,11 @@ async fn rotate_config(State(apps): S, Path((id, env)): Path<(String, String)>, 
 
 async fn put_env(State(apps): S, Path((id, env)): Path<(String, String)>, ext: Extensions, b: Bytes) -> R {
     let put = body(&b)?;
-    let e = apps.put_environment(&id, &env, put.clone()).await?;
+    // Naming another maker is the operator's (roll previews in process), never anyone else's.
+    if put.get("closed_by").is_some() && (roll_auth::Grant::on(&ext).is_some_and(|g| g.user.is_some()) || ext.get::<roll_auth::SignedIn>().is_some() || !(roll_auth::Operator::on(&ext) || apps.cfg.open)) {
+        return Err(Error::Forbidden("closed_by is the operator's to set (roll previews names its rules' maker)".into()));
+    }
+    let e = apps.put_environment_by(&id, &env, put.clone(), maker(&ext)).await?;
     apps.settings_changed();
     // The access token is a secret: the trail says it changed, never what it is.
     apps.audit("environment", &id, &env, actor(&ext), json!({ "changed": put.as_object().map(|o| o.keys().cloned().collect::<Vec<_>>()).unwrap_or_default() })).await;
@@ -796,6 +812,7 @@ async fn create_deploy(State(apps): S, Path((id, env)): Path<(String, String)>, 
     } else {
         apps.deploy(&id, &env, with_override(body(&b)?, &headers)?, By { trigger: Trigger::Manual, actor }, None, key).await?
     };
+    apps.note_deploy_person(&d.id, person(&ext)).await;
     apps.lift_hold(&id, &env).await;
     Ok((StatusCode::ACCEPTED, Json(d)).into_response())
 }
@@ -812,6 +829,13 @@ struct VulnQuery {
 #[derive(Deserialize)]
 struct ExplainQuery {
     again: Option<String>,
+}
+
+/// A deployment waiting at ready approved by a person (never a token: an agent's or a CI's
+/// approval would defeat it); the last approval needed puts it live.
+async fn approve_deploy(State(apps): S, Path((id, env, dep)): Path<(String, String, String)>, ext: Extensions) -> R {
+    let person = roll_auth::Grant::on(&ext).is_none().then(|| person(&ext)).flatten();
+    ok(apps.approve(&id, &env, &dep, person).await?)
 }
 
 /// A failed deployment explained by the repo owner's model (kept; `?again=1` asks anew).
@@ -1068,6 +1092,28 @@ fn asker(ext: &Extensions) -> crate::integrations::Asker<'_> {
     crate::integrations::Asker { operator: roll_auth::Operator::on(ext), user: ext.get::<roll_auth::SignedIn>(), grant: roll_auth::Grant::on(ext) }
 }
 
+/// The person behind a request: a signed-in user, a user's own token (it acts as them), or the
+/// operator (its token or session). What an approval is checked against.
+fn person(ext: &Extensions) -> Option<String> {
+    if let Some(g) = roll_auth::Grant::on(ext) {
+        return Some(g.user.as_deref().map(str::to_string).unwrap_or_else(|| "operator".into()));
+    }
+    if let Some(u) = ext.get::<roll_auth::SignedIn>() {
+        return Some(u.user.clone());
+    }
+    roll_auth::Operator::on(ext).then(|| "operator".to_string())
+}
+
+/// Who makes what a request sets up on someone's behalf (a closed environment's placeholders):
+/// the token itself when one asks (`token:<id>`: revoking or narrowing it stops what it made, as
+/// roll secrets' `maker_reaches` checks), else the signed-in person or the operator.
+fn maker(ext: &Extensions) -> Option<String> {
+    if let Some(g) = roll_auth::Grant::on(ext) {
+        return Some(format!("token:{}", g.id));
+    }
+    person(ext)
+}
+
 fn actor(ext: &Extensions) -> Option<String> {
     if let Some(g) = roll_auth::Grant::on(ext) {
         return Some(format!("token:{}", g.name));
@@ -1084,6 +1130,7 @@ async fn redeploy(State(apps): S, Path((id, env)): Path<(String, String)>, ext: 
         None => None,
     };
     let d = apps.redeploy(&id, &env, with_override(if b.is_empty() { json!({}) } else { body(&b)? }, &headers)?, actor(&ext), key).await?;
+    apps.note_deploy_person(&d.id, person(&ext)).await;
     apps.lift_hold(&id, &env).await;
     Ok((StatusCode::ACCEPTED, Json(d)).into_response())
 }
@@ -1183,6 +1230,7 @@ async fn run_hook(State(apps): S, Path((id, env, token)): Path<(String, String, 
 
 async fn promote(State(apps): S, Path((id, env)): Path<(String, String)>, ext: Extensions, headers: HeaderMap, b: Bytes) -> R {
     let d = apps.promote(&id, &env, with_override(body(&b)?, &headers)?, actor(&ext)).await?;
+    apps.note_deploy_person(&d.id, person(&ext)).await;
     apps.lift_hold(&id, &env).await;
     Ok((StatusCode::ACCEPTED, Json(d)).into_response())
 }

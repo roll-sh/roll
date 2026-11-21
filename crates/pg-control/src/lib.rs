@@ -14,4 +14,4 @@ pub mod roles;
 pub mod store;
 
 pub use config::Config;
-pub use control::{Control, DecoyLogin, DecoyRole};
+pub use control::{Control, DecoyLogin, DecoyRole, SqlAs};

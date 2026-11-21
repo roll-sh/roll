@@ -56,14 +56,17 @@ export function describe(e: AppEvent): string {
       return `saw a scheduled run fail${where}${d.exit_code != null ? ` (exit ${String(d.exit_code)})` : ""}`;
     case "job.failed":
       return `saw a job fail${where}${d.exit_code != null ? ` (exit ${String(d.exit_code)})` : ""}`;
+    case "alert.metric":
+      return `alerted: ${String(d.metric ?? "a metric")} at ${String(d.value ?? "")} (${d.above != null ? `above ${String(d.above)}` : `below ${String(d.below ?? "")}`} for ${String(d.minutes ?? "")} minutes)${where}`;
     case "alert.memory":
+    case "alert.cpu":
     case "alert.errors":
     case "alert.latency":
     case "alert.capacity":
     case "alert.log": {
       // Each alert's unit: a share of the memory limit, of requests, milliseconds, or lines.
       const unit = e.kind === "alert.latency" ? " ms" : e.kind === "alert.log" ? " lines" : "%";
-      const what = { "alert.memory": "memory", "alert.errors": "5xx answers", "alert.latency": "p95 latency", "alert.capacity": "requests over capacity", "alert.log": `lines matching ${String(d.pattern ?? "")}` }[e.kind];
+      const what = { "alert.memory": "memory", "alert.cpu": "CPU", "alert.errors": "5xx answers", "alert.latency": "p95 latency", "alert.capacity": "requests over capacity", "alert.log": `lines matching ${String(d.pattern ?? "")}` }[e.kind];
       return `alerted: ${what} at ${String(d.value ?? d.count ?? "")}${unit} (the alert is at ${String(d.threshold ?? "")}${unit})${where}`;
     }
     case "deploy.base_updated":

@@ -30,6 +30,61 @@ pub struct Limits {
 }
 
 impl Apps {
+    /// `GET /v1/apps/projects/{project}/usage?month=YYYY-MM` (Railway's usage by service): a
+    /// month's use (this one by default) by service and environment at roll's prices, each
+    /// service's previews as one row, deleted services as one, most costly first; this month's
+    /// projected to its end at the pace so far.
+    pub async fn project_usage_view(self: &Arc<Self>, project: &str, month: Option<&str>) -> Result<Value> {
+        let now = code_sql::now_ms();
+        let (current, current_start) = month_of(now);
+        let (m, start) = match month {
+            None => (current, current_start),
+            Some(s) => {
+                let parsed = s.split_once('-').and_then(|(y, mo)| Some((y.parse::<i32>().ok()?, mo.parse::<u32>().ok()?))).filter(|(y, mo)| (2020..=2100).contains(y) && (1..=12).contains(mo));
+                let Some((y, mo)) = parsed else { return Err(Error::BadRequest("month is YYYY-MM".into())) };
+                let start = Utc.with_ymd_and_hms(y, mo, 1, 0, 0, 0).single().unwrap_or_default().timestamp_millis();
+                (y as i64 * 12 + mo as i64 - 1, start)
+            }
+        };
+        if m > current {
+            return Err(Error::BadRequest("that month hasn't started".into()));
+        }
+        let next = { let (y, mo) = ((m + 1) / 12, (m + 1) % 12 + 1); Utc.with_ymd_and_hms(y as i32, mo as u32, 1, 0, 0, 0).single().unwrap_or_default().timestamp_millis() };
+        let p = project.to_string();
+        let (rows, gone) = self.db(move |s| s.project_usage_rows(&p, start / 3_600_000, next / 3_600_000)).await?;
+        let prices = self.cfg.prices;
+        let mut out: Vec<Value> = Vec::new();
+        let mut previews: std::collections::BTreeMap<(String, String), crate::store::UsageAdd> = Default::default();
+        for (sid, name, env, ephemeral, u) in rows {
+            if ephemeral {
+                let p = previews.entry((sid, name)).or_default();
+                p.cpu_seconds += u.cpu_seconds;
+                p.gb_seconds += u.gb_seconds;
+                p.requests += u.requests;
+                p.egress_bytes += u.egress_bytes;
+                p.build_seconds += u.build_seconds;
+                p.stored_gb_hours += u.stored_gb_hours;
+                continue;
+            }
+            out.push(json!({ "service": sid, "name": name, "environment": env, "usd": round(prices.cost(&u)), "cpu_seconds": u.cpu_seconds, "gb_seconds": u.gb_seconds, "requests": u.requests, "egress_bytes": u.egress_bytes, "build_seconds": u.build_seconds, "stored_gb_hours": u.stored_gb_hours }));
+        }
+        for ((sid, name), u) in previews {
+            out.push(json!({ "service": sid, "name": name, "environment": null, "previews": true, "usd": round(prices.cost(&u)), "cpu_seconds": u.cpu_seconds, "gb_seconds": u.gb_seconds, "requests": u.requests, "egress_bytes": u.egress_bytes, "build_seconds": u.build_seconds, "stored_gb_hours": u.stored_gb_hours }));
+        }
+        let gone_usd = prices.cost(&gone);
+        if gone_usd > 0.0 {
+            out.push(json!({ "service": null, "name": null, "environment": null, "deleted": true, "usd": round(gone_usd), "cpu_seconds": gone.cpu_seconds, "gb_seconds": gone.gb_seconds, "requests": gone.requests, "egress_bytes": gone.egress_bytes, "build_seconds": gone.build_seconds, "stored_gb_hours": gone.stored_gb_hours }));
+        }
+        out.sort_by(|a, b| b["usd"].as_f64().unwrap_or(0.0).total_cmp(&a["usd"].as_f64().unwrap_or(0.0)));
+        let total: f64 = out.iter().map(|r| r["usd"].as_f64().unwrap_or(0.0)).sum();
+        let projected = (m == current).then(|| {
+            let (elapsed, length) = ((now - start).max(1) as f64, (next - start) as f64);
+            round(total * length / elapsed)
+        });
+        let label = format!("{:04}-{:02}", m / 12, m % 12 + 1);
+        Ok(json!({ "month": label, "total_usd": round(total), "projected_usd": projected, "rows": out }))
+    }
+
     /// `GET /v1/apps/projects/{project}/limits`: the limits, this month's spend, whether capped.
     pub async fn limits(self: &Arc<Self>, project: &str) -> Result<Value> {
         let p = project.to_string();

@@ -859,45 +859,39 @@ const CAT_INDICES: &str = "/_cat/indices?h=index&format=json&expand_wildcards=al
 pub struct Search(pub Api);
 
 impl Search {
-    /// `url` with the branch's credentials in it (the password is shown once, so it's kept).
-    fn kept(v: &Value) -> anyhow::Result<String> {
-        let url = s(&v["url"]).ok_or_else(|| anyhow::anyhow!("a search branch without a url"))?;
-        let (user, pass) = (s(&v["username"]).unwrap_or_default(), s(&v["password"]).unwrap_or_default());
-        let with = match url.split_once("://") {
-            Some((scheme, rest)) if !user.is_empty() => format!("{scheme}://{}:{}@{rest}", seg(&user), seg(&pass)),
-            _ => url,
-        };
-        Ok(json!({ "ELASTICSEARCH_URL": with }).to_string())
-    }
-
-    /// [`Self::kept`], plus a data-only credential of the branch, as production's link to the
-    /// cluster gets (roll search's keys route, `access: data`: indices, templates, pipelines,
-    /// lifecycle; no keys or users): `ELASTICSEARCH_API_KEY`, or for an OpenSearch cluster a
-    /// data-only user (`OPENSEARCH_USERNAME`, `OPENSEARCH_PASSWORD`). So code that needs more
-    /// than production's link gives fails in its preview too. It goes with the branch. A build of
-    /// roll search that can't make one leaves the branch's own login (said in the log).
+    /// What the preview's services get for the branch: a data-only credential of it, as
+    /// production's link to the cluster gets (roll search's keys route, `access: data`: indices,
+    /// templates, pipelines, lifecycle; no keys, users or `_security`), never the branch's own
+    /// login (a pull request's code runs here). `ELASTICSEARCH_URL` without a login and
+    /// `ELASTICSEARCH_API_KEY`, or for an OpenSearch cluster its data-only user in the URL (so
+    /// `OPENSEARCH_USERNAME` and the rest are that user's). No data credential, no link: the
+    /// branch fails (and is made again at the next converge), it never falls back to the login.
     async fn kept_with_key(&self, v: &Value, name: &str) -> anyhow::Result<String> {
-        let mut kept: serde_json::Map<String, Value> = serde_json::from_str(&Self::kept(v)?)?;
+        let url = s(&v["url"]).ok_or_else(|| anyhow::anyhow!("a search branch without a url"))?;
         let id = s(&v["id"]).unwrap_or_default();
-        match self.0.post(&format!("/v1/search/clusters/{}/keys", seg(&id)), json!({ "name": format!("roll preview {name}"), "access": "data" })).await {
-            Ok(k) if k["access"].as_str().is_some_and(|a| a != "data") => {
-                // Never kept: revoked at once, as roll secrets does with one.
-                if let Some(key) = s(&k["id"]) {
-                    let _ = self.0.delete(&format!("/v1/search/clusters/{}/keys/{}", seg(&id), seg(&key))).await;
-                }
-                tracing::warn!(branch = %name, "previews: roll search made a {} key, not a data one: revoked, and the branch's own login stays", k["access"]);
+        let k = self
+            .0
+            .post(&format!("/v1/search/clusters/{}/keys", seg(&id)), json!({ "name": format!("roll preview {name}"), "access": "data" }))
+            .await
+            .map_err(|e| anyhow::anyhow!("a data-only credential for the search branch couldn't be made ({e:#}): it doesn't get the branch's own login instead"))?;
+        if k["access"].as_str() != Some("data") {
+            // Never kept: revoked at once, as roll secrets does with one.
+            if let Some(key) = s(&k["id"]) {
+                let _ = self.0.delete(&format!("/v1/search/clusters/{}/keys/{}", seg(&id), seg(&key))).await;
             }
-            Ok(k) => {
-                if let Some(key) = s(&k["api_key"]) {
-                    kept.insert("ELASTICSEARCH_API_KEY".into(), json!(key));
-                } else if let (Some(u), Some(p)) = (s(&k["username"]), s(&k["password"])) {
-                    kept.insert("OPENSEARCH_USERNAME".into(), json!(u));
-                    kept.insert("OPENSEARCH_PASSWORD".into(), json!(p));
-                }
-            }
-            Err(e) => tracing::warn!(branch = %name, error = %e, "previews: a data key for the search branch"),
+            anyhow::bail!("roll search made a {} key for the search branch, not a data one: revoked, and the branch gets no link", k["access"]);
         }
-        Ok(Value::Object(kept).to_string())
+        if let Some(key) = s(&k["api_key"]) {
+            return Ok(json!({ "ELASTICSEARCH_URL": url, "ELASTICSEARCH_API_KEY": key }).to_string());
+        }
+        if let (Some(u), Some(p)) = (s(&k["username"]), s(&k["password"])) {
+            let with = match url.split_once("://") {
+                Some((scheme, rest)) => format!("{scheme}://{}:{}@{rest}", seg(&u), seg(&p)),
+                None => anyhow::bail!("a search branch's url without a scheme"),
+            };
+            return Ok(json!({ "ELASTICSEARCH_URL": with, "OPENSEARCH_USERNAME": u, "OPENSEARCH_PASSWORD": p }).to_string());
+        }
+        anyhow::bail!("roll search's data credential for the search branch holds no key or user")
     }
 }
 
@@ -987,11 +981,31 @@ impl Brancher for Search {
         }
     }
 
-    async fn reset(&self, parent: &str, branch: &str, _kept: Option<&str>, name: &str, mode: Mode) -> anyhow::Result<Branched> {
+    async fn reset(&self, parent: &str, branch: &str, kept: Option<&str>, name: &str, mode: Mode) -> anyhow::Result<Branched> {
+        self.retire(parent, branch, kept).await?;
         self.delete(parent, branch, name).await?;
         self.branch(parent, name, mode).await
     }
 
+    /// roll search keeps a deleted cluster restorable with its keys and password: so first the
+    /// branch's data credential previews handed out is revoked (its id is in what's kept: an API
+    /// key is `base64(<id>@<cluster>:<key>)`, an OpenSearch data user `<id>@<cluster>`).
+    async fn retire(&self, _parent: &str, branch: &str, kept: Option<&str>) -> anyhow::Result<()> {
+        let Some(v) = kept.and_then(|k| serde_json::from_str::<Value>(k).ok()) else { return Ok(()) };
+        let from_key = s(&v["ELASTICSEARCH_API_KEY"]).and_then(|k| {
+            use base64::Engine as _;
+            let raw = String::from_utf8(base64::engine::general_purpose::STANDARD.decode(k).ok()?).ok()?;
+            raw.split_once(':').and_then(|(id, _)| id.rsplit_once('@')).map(|(id, _)| id.to_string())
+        });
+        let from_user = s(&v["OPENSEARCH_USERNAME"]).and_then(|u| u.rsplit_once('@').map(|(id, _)| id.to_string()));
+        match from_key.or(from_user) {
+            Some(key) => self.0.delete(&format!("/v1/search/clusters/{}/keys/{}", seg(branch), seg(&key))).await,
+            None => Ok(()),
+        }
+    }
+
+    /// Its password is changed first: a restored copy then holds no login previews ever handed
+    /// out (links made before 2026-11-21 carried it). No change, no delete (tried again).
     async fn delete(&self, parent: &str, branch: &str, name: &str) -> anyhow::Result<()> {
         let c = match self.0.get(&format!("/v1/search/clusters/{}", seg(branch))).await {
             Ok(c) => c,
@@ -1000,6 +1014,7 @@ impl Brancher for Search {
         };
         let of_parent = c["parent_id"] == parent || c["parent_name"] == parent;
         anyhow::ensure!(c["name"] == name && of_parent && branch != parent, "refusing to delete search cluster {branch}: it isn't {parent}'s branch {name}");
+        self.0.post(&format!("/v1/search/clusters/{}/password", seg(branch)), json!({})).await.map_err(|e| anyhow::anyhow!("changing the search branch's password before it's deleted: {e:#}"))?;
         self.0.delete(&format!("/v1/search/clusters/{}", seg(branch))).await
     }
 
@@ -1089,6 +1104,80 @@ impl Brancher for Search {
 #[cfg(test)]
 mod tests {
     use super::bucket_name;
+
+    /// A preview's search branch gives its services a data-only credential, never the branch's
+    /// own login, and no link at all when roll search can't make one (or makes a wider one,
+    /// revoked at once).
+    #[tokio::test]
+    async fn a_search_branch_gives_only_a_data_credential() {
+        use axum::routing::{delete, get, post};
+        use std::sync::{Arc, Mutex};
+        let answer: Arc<Mutex<(u16, serde_json::Value)>> = Arc::new(Mutex::new((200, serde_json::json!({}))));
+        let revoked: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let (a, r) = (answer.clone(), revoked.clone());
+        let (r2, r3) = (revoked.clone(), revoked.clone());
+        let app = axum::Router::new()
+            .route("/v1/search/clusters/{id}", get(|| async { axum::Json(serde_json::json!({ "id": "srch_b", "name": "pv-x", "parent_id": "srch_p" })) }))
+            .route("/v1/search/clusters/{id}/password", post(move || async move { r2.lock().unwrap().push("password".into()); axum::Json(serde_json::json!({})) }))
+            .route("/v1/search/clusters/{id}", delete(move || async move { r3.lock().unwrap().push("cluster".into()); axum::http::StatusCode::NO_CONTENT }))
+            .route(
+                "/v1/search/clusters/{id}/keys",
+                post(move || {
+                    let a = a.clone();
+                    async move {
+                        let (code, body) = a.lock().unwrap().clone();
+                        (axum::http::StatusCode::from_u16(code).unwrap(), axum::Json(body))
+                    }
+                }),
+            )
+            .route(
+                "/v1/search/clusters/{id}/keys/{key}",
+                delete(move |axum::extract::Path((_, key)): axum::extract::Path<(String, String)>| {
+                    let r = r.clone();
+                    async move {
+                        r.lock().unwrap().push(key);
+                        axum::http::StatusCode::NO_CONTENT
+                    }
+                }),
+            );
+        let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = l.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(l, app).await.unwrap() });
+        let search = super::Search(super::super::Api::new(addr));
+        let branch = serde_json::json!({ "id": "srch_b", "url": "http://search.test:9200", "username": "srch_b", "password": "superuser-secret" });
+        let kept = |s: &str| serde_json::from_str::<serde_json::Value>(s).unwrap();
+        // A data key: the URL without the branch's login, the key beside it.
+        *answer.lock().unwrap() = (200, serde_json::json!({ "id": "key_1", "access": "data", "api_key": "data-key" }));
+        let held = roll_previews::names::search_link_holds_branch_login;
+        let made = search.kept_with_key(&branch, "pv-x").await.unwrap();
+        assert!(!held(&made), "never made again for it");
+        assert_eq!(kept(&made), serde_json::json!({ "ELASTICSEARCH_URL": "http://search.test:9200", "ELASTICSEARCH_API_KEY": "data-key" }));
+        // OpenSearch's data user: that user in the URL, never the branch's.
+        *answer.lock().unwrap() = (200, serde_json::json!({ "id": "key_2", "access": "data", "username": "pv@srch_b", "password": "data-pass" }));
+        let k = search.kept_with_key(&branch, "pv-x").await.unwrap();
+        assert!(k.contains("pv%40srch_b:data-pass@") && !k.contains("superuser-secret") && !held(&k), "{k}");
+        // Links made before (the branch's login in the URL) are: an open preview's branch is
+        // made again, so the login stops working.
+        assert!(held(r#"{"ELASTICSEARCH_URL":"http://srch_b:pw@search.test:9200"}"#));
+        assert!(held(r#"{"ELASTICSEARCH_URL":"http://srch_b:pw@search.test:9200","ELASTICSEARCH_API_KEY":"data-key"}"#));
+        assert!(held(r#"{"ELASTICSEARCH_URL":"http://srch_b:pw@search.test:9200","OPENSEARCH_USERNAME":"pv_data","OPENSEARCH_PASSWORD":"d"}"#));
+        // None made: no link (the branch fails and is made again), never the login.
+        *answer.lock().unwrap() = (500, serde_json::json!({ "error": "keys are off" }));
+        assert!(search.kept_with_key(&branch, "pv-x").await.is_err());
+        // A wider one: revoked at once, and no link.
+        *answer.lock().unwrap() = (200, serde_json::json!({ "id": "key_3", "access": "admin", "api_key": "admin-key" }));
+        assert!(search.kept_with_key(&branch, "pv-x").await.is_err());
+        assert_eq!(revoked.lock().unwrap().clone(), vec!["key_3".to_string()]);
+        // Deleted (or reset): roll search keeps it restorable, so the data key previews handed
+        // out is revoked (by the id in it) and the branch's password changed before the delete.
+        revoked.lock().unwrap().clear();
+        use roll_previews::ports::Brancher as _;
+        let key = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, "key_1@pv-x:secret");
+        search.retire("srch_p", "srch_b", Some(&serde_json::json!({ "ELASTICSEARCH_URL": "http://search.test:9200", "ELASTICSEARCH_API_KEY": key }).to_string())).await.unwrap();
+        search.retire("srch_p", "srch_b", Some(&serde_json::json!({ "OPENSEARCH_USERNAME": "pv@pv-x" }).to_string())).await.unwrap();
+        search.delete("srch_p", "srch_b", "pv-x").await.unwrap();
+        assert_eq!(revoked.lock().unwrap().clone(), ["key_1", "pv", "password", "cluster"].map(String::from).to_vec());
+    }
 
     #[test]
     fn a_search_mapping_becomes_lines() {

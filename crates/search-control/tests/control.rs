@@ -747,6 +747,418 @@ async fn ip_allowlists_turn_addresses_away_before_credentials() {
     assert_eq!(s, 200);
 }
 
+/// Search from the browser: a cluster's allowed origins (validated, kept as browsers send
+/// them, shown as `http.cors.*`, behind the IP allowlist) and browser keys made through
+/// `/browser-keys`: they read through their filter, never write, one limited to a search
+/// application runs only its template (params checked against its dictionary), each is rate
+/// limited with a 429 and `Retry-After` a page can read, and revoking one stops it at once.
+#[tokio::test]
+async fn browsers_search_with_browser_keys() {
+    let e = env_with(|c| c.domain = Some("search.example.test".into())).await;
+    let c = e.post("/v1/search/clusters", json!({"name": "shop"})).await;
+    let path = format!("/v1/search/clusters/{}", c["id"].as_str().unwrap());
+    let (request, keys) = (format!("{path}/request"), format!("{path}/browser-keys"));
+    let console = |method: &str, p: &str, body: Value| e.post(&request, json!({"method": method, "path": p, "body": body}));
+    let bulk = "{\"index\":{\"_index\":\"products\",\"_id\":\"1\"}}\n{\"title\":\"trail shoes\",\"public\":true}\n{\"index\":{\"_index\":\"products\",\"_id\":\"2\"}}\n{\"title\":\"secret shoes\",\"public\":false}\n";
+    assert_eq!(console("POST", "/_bulk?refresh=true", json!(bulk)).await["status"], 200);
+    let app = json!({"indices": ["products"], "template": {
+        "script": {"source": {"query": {"match": {"title": "{{query}}"}}}, "params": {"query": ""}},
+        "dictionary": {"properties": {"query": {"type": "string"}}, "additionalProperties": false}}});
+    let r = console("PUT", "/_application/search_application/shop-search", app).await;
+    assert_eq!(r["status"], 201, "{r}");
+
+    for bad in [json!({"allow_origin": ["shop.example.com"]}), json!({"allow_origin": ["/(/"]}), json!({"allow_origin": ["*"], "allow_methods": ["FETCH"]})] {
+        let (s, v) = e.call(reqwest::Method::PATCH, &path, Some(json!({ "cors": bad }))).await;
+        assert_eq!(s, 400, "{bad}: {v}");
+    }
+    let (s, v) = e.call(reqwest::Method::PATCH, &path, Some(json!({"cors": {"allow_origin": ["HTTPS://Shop.Example.com:443"]}}))).await;
+    assert_eq!(s, 200, "{v}");
+    assert_eq!(v["cors"], json!({"allow_origin": ["https://shop.example.com"]}));
+    let r = console("GET", "/_cluster/settings?include_defaults&flat_settings", Value::Null).await;
+    assert_eq!(body(&r)["defaults"]["http.cors.allow-origin"], "https://shop.example.com", "{r}");
+
+    let made = |k: Value| e.post(&keys, k);
+    let reader = made(json!({"name": "shop page", "indices": ["products"], "filter": {"term": {"public": true}}})).await;
+    let runner = made(json!({"name": "app page", "application": "shop-search", "rate_limit": {"per_minute": 3}})).await;
+    assert_eq!((reader["rate_limit"]["per_minute"].as_u64(), runner["application"].as_str()), (Some(600), Some("shop-search")));
+    let browser = |key: &Value, method: reqwest::Method, p: &str, body: Option<Value>| {
+        let mut r = e
+            .http
+            .request(method, format!("{}{p}", e.es))
+            .header("host", "shop.search.example.test")
+            .header("origin", "https://shop.example.com")
+            .header("authorization", format!("ApiKey {}", key["api_key"].as_str().unwrap()));
+        if let Some(b) = body {
+            r = r.json(&b);
+        }
+        r.send()
+    };
+    let r = browser(&reader, reqwest::Method::POST, "/products/_search", Some(json!({"query": {"match_all": {}}}))).await.unwrap();
+    assert_eq!(r.headers()["access-control-allow-origin"], "https://shop.example.com");
+    assert_eq!(r.headers()["vary"], "origin");
+    let v: Value = r.json().await.unwrap();
+    let titles: Vec<&str> = v["hits"]["hits"].as_array().unwrap().iter().filter_map(|h| h["_source"]["title"].as_str()).collect();
+    assert_eq!(titles, ["trail shoes"], "the filter holds: {v}");
+    let r = browser(&reader, reqwest::Method::PUT, "/products/_doc/3", Some(json!({"title": "x"}))).await.unwrap();
+    assert_eq!(r.status().as_u16(), 403, "a browser key never writes");
+
+    // The application key runs the template, its params checked, and nothing else.
+    let run = |params: Value| browser(&runner, reqwest::Method::POST, "/_application/search_application/shop-search/_search", Some(json!({ "params": params })));
+    let r = run(json!({"query": "shoes"})).await.unwrap();
+    assert_eq!(r.status().as_u16(), 200);
+    assert_eq!(r.json::<Value>().await.unwrap()["hits"]["total"]["value"], 2);
+    assert_eq!(run(json!({"query": 5})).await.unwrap().status().as_u16(), 400, "params are checked against the dictionary");
+    let r = browser(&runner, reqwest::Method::POST, "/products/_search", Some(json!({}))).await.unwrap();
+    assert_eq!(r.status().as_u16(), 403, "only the application's search");
+    // Its fourth request in a minute is over its limit, and the page can read why.
+    let r = run(json!({"query": "shoes"})).await.unwrap();
+    assert_eq!(r.status().as_u16(), 429);
+    assert!(r.headers()["retry-after"].to_str().unwrap().parse::<u64>().unwrap() >= 1);
+    assert_eq!(r.headers()["access-control-allow-origin"], "https://shop.example.com");
+    assert_eq!(r.json::<Value>().await.unwrap()["error"]["type"], "es_rejected_execution_exception");
+
+    let listed = e.get(&keys).await;
+    assert_eq!(listed["keys"].as_array().unwrap().len(), 2, "{listed}");
+    assert!(listed.to_string().find("api_key").is_none(), "secrets aren't listed");
+    // Only browser keys: another key of the cluster isn't this route's to revoke.
+    let other = e.post(&format!("{path}/keys"), json!({"name": "ingest", "access": "data"})).await;
+    let (s, _) = e.call(reqwest::Method::DELETE, &format!("{path}/browser-keys/{}", other["id"].as_str().unwrap()), None).await;
+    assert_eq!(s, 404);
+    // A branch copies the cluster's keys with its security; a browser key works only where it
+    // was made: not on a branch made before its revoke, nor on one cut from a point before it.
+    tokio::time::sleep(std::time::Duration::from_millis(1100)).await;
+    let before_revoke = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() as i64;
+    tokio::time::sleep(std::time::Duration::from_millis(1100)).await;
+    e.post(&format!("{path}/branches"), json!({"name": "shop-staging"})).await;
+    let (s, _) = e.call(reqwest::Method::DELETE, &format!("{path}/browser-keys/{}", reader["id"].as_str().unwrap()), None).await;
+    assert_eq!(s, 204);
+    let r = browser(&reader, reqwest::Method::POST, "/products/_search", Some(json!({}))).await.unwrap();
+    assert_eq!(r.status().as_u16(), 401);
+    // Any key revoked after the point stays revoked on a point-in-time branch: it takes its
+    // parent's security as it is now.
+    let (s, _) = e.call(reqwest::Method::DELETE, &format!("{path}/keys/{}", other["id"].as_str().unwrap()), None).await;
+    assert_eq!(s, 204);
+    e.post(&format!("{path}/branches"), json!({"name": "shop-before", "at": before_revoke})).await;
+    {
+        use base64::Engine;
+        let b64 = base64::engine::general_purpose::STANDARD;
+        let shipped = String::from_utf8(b64.decode(other["api_key"].as_str().unwrap()).unwrap()).unwrap();
+        let on_branch = b64.encode(shipped.replace("@shop:", "@shop-before:"));
+        let r = e.http.get(format!("{}/", e.es)).header("authorization", format!("ApiKey {on_branch}")).send().await.unwrap();
+        assert_eq!(r.status().as_u16(), 401, "a regular key revoked after the point, on the point-in-time branch");
+    }
+    for branch in ["shop-staging", "shop-before"] {
+        use base64::Engine;
+        let b64 = base64::engine::general_purpose::STANDARD;
+        let shipped = String::from_utf8(b64.decode(reader["api_key"].as_str().unwrap()).unwrap()).unwrap();
+        let moved = json!({ "api_key": b64.encode(shipped.replace("@shop:", &format!("@{branch}:"))) });
+        let r = browser(&moved, reqwest::Method::POST, "/products/_search", Some(json!({}))).await.unwrap();
+        assert_eq!(r.status().as_u16(), 401, "the parent's browser key on {branch}");
+        let listed = e.get(&format!("/v1/search/clusters/{branch}/browser-keys")).await;
+        assert_eq!(listed["keys"], json!([]), "a branch lists no browser keys of its parent");
+    }
+
+    // The IP allowlist comes first, preflights included.
+    let (s, _) = e.call(reqwest::Method::PATCH, &path, Some(json!({"ip_allowlist": ["203.0.113.0/24"]}))).await;
+    assert_eq!(s, 200);
+    let r = e
+        .http
+        .request(reqwest::Method::OPTIONS, format!("{}/products/_search", e.es))
+        .header("host", "shop.search.example.test")
+        .header("origin", "https://shop.example.com")
+        .header("access-control-request-method", "POST")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status().as_u16(), 403);
+    assert_eq!(r.text().await.unwrap(), r#"{"ok":false,"message":"Forbidden due to traffic filtering"}"#);
+}
+
+/// A cluster where a browser key's filter (`public: true`) hides document 2 of `products`, and an
+/// index `other` the key can't read: the key, for [`as_key`].
+async fn filtered_key(e: &Env) -> String {
+    let c = e.post("/v1/search/clusters", json!({"name": "shop"})).await;
+    let path = format!("/v1/search/clusters/{}", c["id"].as_str().unwrap());
+    let bulk = "{\"index\":{\"_index\":\"products\",\"_id\":\"1\"}}\n{\"title\":\"trail shoes\",\"public\":true,\"color\":\"red\"}\n\
+                {\"index\":{\"_index\":\"products\",\"_id\":\"2\"}}\n{\"title\":\"secret shoes\",\"public\":false,\"color\":\"red\"}\n\
+                {\"index\":{\"_index\":\"other\",\"_id\":\"1\"}}\n{\"title\":\"other shoes\",\"color\":\"red\"}\n";
+    let r = e.post(&format!("{path}/request"), json!({"method": "POST", "path": "/_bulk?refresh=true", "body": bulk})).await;
+    assert_eq!(r["status"], 200, "{r}");
+    let k = e.post(&format!("{path}/browser-keys"), json!({"name": "page", "indices": ["products"], "filter": {"term": {"public": true}}})).await;
+    k["api_key"].as_str().unwrap().to_string()
+}
+
+/// A request to the cluster with a browser key.
+async fn as_key(e: &Env, key: &str, method: reqwest::Method, p: &str, body: Option<Value>) -> (u16, Value) {
+    let mut r = e.http.request(method, format!("{}{p}", e.es)).header("authorization", format!("ApiKey {key}"));
+    if let Some(b) = body {
+        r = r.json(&b);
+    }
+    let r = r.send().await.unwrap();
+    let s = r.status().as_u16();
+    let t = r.text().await.unwrap();
+    (s, serde_json::from_str(&t).unwrap_or(Value::String(t)))
+}
+
+fn total(v: &Value) -> i64 {
+    v["hits"]["total"]["value"].as_i64().unwrap_or(-1)
+}
+
+/// Suggesters read the terms of every document, and a profile shows the filter: neither runs
+/// for a key whose documents are filtered (Elasticsearch's `DlsFlsRequestValidator`).
+#[tokio::test]
+async fn a_filtered_key_gets_no_suggestions_from_hidden_documents() {
+    let e = env().await;
+    let key = filtered_key(&e).await;
+    let suggest = json!({"size": 0, "suggest": {"s": {"text": "secrat", "term": {"field": "title", "suggest_mode": "always"}}}});
+    let (s, v) = as_key(&e, &key, reqwest::Method::POST, "/products/_search", Some(suggest)).await;
+    assert_eq!(s, 400, "{v}");
+    assert!(v["error"]["reason"].as_str().unwrap().contains("Suggest isn't supported if document level security is enabled"), "{v}");
+    let (s, _) = as_key(&e, &key, reqwest::Method::POST, "/products/_search", Some(json!({"profile": true}))).await;
+    assert_eq!(s, 400);
+}
+
+/// A terms lookup reads its document as the key: one its filter hides is as missing as one that
+/// doesn't exist, and an index it can't read is refused.
+#[tokio::test]
+async fn a_terms_lookup_reads_as_the_filtered_key() {
+    let e = env().await;
+    let key = filtered_key(&e).await;
+    let lookup = |id: &str, index: &str| json!({"query": {"terms": {"color.keyword": {"index": index, "id": id, "path": "color"}}}});
+    for id in ["2", "99"] {
+        let (s, v) = as_key(&e, &key, reqwest::Method::POST, "/products/_search", Some(lookup(id, "products"))).await;
+        assert_eq!((s, total(&v)), (200, 0), "lookup of {id}: {v}");
+    }
+    let (s, v) = as_key(&e, &key, reqwest::Method::POST, "/products/_search", Some(lookup("1", "other"))).await;
+    assert_eq!(s, 403, "{v}");
+}
+
+/// `more_like_this` reads its `like` documents as the key, as a terms lookup does.
+#[tokio::test]
+async fn more_like_this_reads_its_documents_as_the_filtered_key() {
+    let e = env().await;
+    let key = filtered_key(&e).await;
+    let mlt = |id: &str, index: &str| json!({"query": {"more_like_this": {"fields": ["title"], "like": [{"_index": index, "_id": id}], "min_term_freq": 1, "min_doc_freq": 1}}});
+    for id in ["2", "99"] {
+        let (s, v) = as_key(&e, &key, reqwest::Method::POST, "/products/_search", Some(mlt(id, "products"))).await;
+        assert_eq!((s, total(&v)), (200, 0), "like {id}: {v}");
+    }
+    let (s, v) = as_key(&e, &key, reqwest::Method::POST, "/products/_search", Some(mlt("1", "other"))).await;
+    assert_eq!(s, 403, "{v}");
+}
+
+/// A regular API key of cluster `shop` with the browser key's filter (`public: true` on
+/// `products`): document level security for a principal that isn't a browser key.
+async fn filtered_api_key(e: &Env) -> String {
+    use base64::Engine;
+    let r = e
+        .post(
+            "/v1/search/clusters/shop/request",
+            json!({"method": "POST", "path": "/_security/api_key", "body": {"name": "filtered", "role_descriptors": {"r": {"indices": [{"names": ["products"], "privileges": ["read"], "query": {"term": {"public": true}}}]}}}}),
+        )
+        .await;
+    let v = body(&r);
+    base64::engine::general_purpose::STANDARD.encode(format!("{}@shop:{}", v["id"].as_str().unwrap(), v["api_key"].as_str().unwrap()))
+}
+
+/// Term vectors of a document a key's filter hides are "not found", as its get is.
+#[tokio::test]
+async fn term_vectors_of_a_hidden_document_are_not_found() {
+    let e = env().await;
+    filtered_key(&e).await;
+    let key = filtered_api_key(&e).await;
+    let (s, v) = as_key(&e, &key, reqwest::Method::GET, "/products/_termvectors/2", None).await;
+    assert_eq!((s, &v["found"]), (200, &json!(false)), "{v}");
+    let (s, v) = as_key(&e, &key, reqwest::Method::GET, "/products/_termvectors/1", None).await;
+    assert_eq!((s, &v["found"]), (200, &json!(true)), "{v}");
+}
+
+/// A stored result (async search, ES|QL, SQL) is its opener's: anyone else (here another API
+/// key, with the id of the cluster owner's) gets 404 for it, its status and its delete.
+#[tokio::test]
+async fn stored_results_belong_to_their_opener() {
+    let e = env().await;
+    filtered_key(&e).await;
+    let key = e.post("/v1/search/clusters/shop/keys", json!({"name": "another", "access": "data"})).await["api_key"].as_str().unwrap().to_string();
+    let console = |method: &str, p: &str, b: Value| e.post("/v1/search/clusters/shop/request", json!({"method": method, "path": p, "body": b}));
+    let search = body(&console("POST", "/products/_async_search?keep_on_completion=true", json!({"query": {"match_all": {}}})).await)["id"].as_str().unwrap().to_string();
+    let esql = body(&console("POST", "/_query/async", json!({"query": "FROM products | LIMIT 1", "keep_on_completion": true})).await)["id"].as_str().unwrap().to_string();
+    let sql = body(&console("POST", "/_sql?format=json", json!({"query": "SELECT title FROM products", "keep_on_completion": true})).await)["id"].as_str().unwrap().to_string();
+    let theirs = [
+        (reqwest::Method::GET, format!("/_async_search/{search}")),
+        (reqwest::Method::GET, format!("/_async_search/status/{search}")),
+        (reqwest::Method::DELETE, format!("/_async_search/{search}")),
+        (reqwest::Method::GET, format!("/_query/async/{esql}")),
+        (reqwest::Method::DELETE, format!("/_query/async/{esql}")),
+        (reqwest::Method::GET, format!("/_sql/async/{sql}?format=json")),
+        (reqwest::Method::DELETE, format!("/_sql/async/delete/{sql}")),
+    ];
+    for (m, p) in theirs {
+        let (s, v) = as_key(&e, &key, m.clone(), &p, None).await;
+        assert_eq!(s, 404, "{m} {p}: {v}");
+    }
+    let r = console("GET", &format!("/_async_search/{search}"), Value::Null).await;
+    assert_eq!((r["status"].as_i64(), total(&body(&r)["response"])), (Some(200), 2), "{r}");
+    assert_eq!(console("GET", &format!("/_query/async/{esql}"), Value::Null).await["status"], 200);
+}
+
+/// A browser key's refusals happen where the engine has the request parsed or runs it: a query
+/// type it may not run anywhere in the request (`?q=` builds a `query_string`, `percolate`),
+/// painless in any form, `explain` at any level (collapse's expansions too), inference past its
+/// `max_inference`, a window past its `max_result_window` however `size` is written (a
+/// `_terms_enum`'s too), and APIs that hold state or read term statistics. Each answers why.
+#[tokio::test]
+async fn a_browser_key_only_searches() {
+    let e = env().await;
+    let key = filtered_key(&e).await;
+    // A `semantic_text` field: its endpoint is one the key may embed with.
+    let r = e.post("/v1/search/clusters/shop/request", json!({"method": "PUT", "path": "/products/_mapping", "body": {"properties": {"body": {"type": "semantic_text"}}}})).await;
+    assert_eq!(r["status"], 200, "{r}");
+    let terms = |sub: Value| json!({"size": 0, "aggs": {"c": {"terms": {"field": "color.keyword"}, "aggs": {"t": sub}}}});
+    let five_texts: Vec<Value> = (0..5).map(|i| json!({"sparse_vector": {"field": "body", "inference_id": ".elser-2-elasticsearch", "query": format!("text {i}")}})).collect();
+    let expansions: Vec<Value> = (0..101).map(|i| json!({"name": format!("i{i}"), "size": 0})).collect();
+    // Why each is refused: the browser policy, `search.allow_expensive_queries: false`'s own
+    // refusal, or the key's window.
+    let (browser, expensive, window) = ("isn't available to a browser key", "'search.allow_expensive_queries' is set to false", "for a browser key");
+    let post = reqwest::Method::POST;
+    let refused = [
+        (post.clone(), "/products/_search?q=title:sh*", None, browser),
+        (post.clone(), "/products/_search", Some(json!({"query": {"bool": {"filter": [{"wildcard": {"title": "s*"}}]}}})), expensive),
+        (post.clone(), "/products/_search", Some(json!({"size": 0, "aggs": {"suggest": {"filter": {"regexp": {"title": "s.*"}}}}})), expensive),
+        (post.clone(), "/products/_search", Some(json!({"query": {"intervals": {"title": {"prefix": {"prefix": "sh"}}}}})), expensive),
+        (post.clone(), "/products/_search", Some(json!({"query": {"percolate": {"field": "q", "document": {"title": "shoes"}}}})), expensive),
+        (post.clone(), "/products/_search", Some(json!({"script_fields": {"x": {"script": "1"}}})), browser),
+        (post.clone(), "/products/_search", Some(json!({"query": {"script_score": {"query": {"match_all": {}}, "script": {"source": "1"}}}})), browser),
+        (post.clone(), "/products/_search", Some(json!({"sort": {"_script": {"type": "number", "script": "1"}}})), browser),
+        (post.clone(), "/products/_search", Some(json!({"runtime_mappings": {"r": {"type": "long", "script": "emit(1)"}}})), browser),
+        (post.clone(), "/products/_search", Some(terms(json!({"sum": {"script": "1"}}))), browser),
+        (post.clone(), "/products/_search", Some(terms(json!({"top_hits": {"explain": true}}))), browser),
+        (post.clone(), "/products/_search", Some(json!({"collapse": {"field": "color.keyword", "inner_hits": {"name": "x", "explain": true}}})), browser),
+        (post.clone(), "/products/_search", Some(json!({"query": {"bool": {"should": five_texts}}})), "embedding more than [4] distinct texts"),
+        (post.clone(), "/products/_search", Some(json!({"query": {"sparse_vector": {"field": "title", "inference_id": "someone-elses", "query": "shoes"}}})), "inference endpoint [someone-elses]"),
+        (post.clone(), "/products/_search", Some(json!({"collapse": {"field": "color.keyword", "inner_hits": expansions}})), "expanding more than [100]"),
+        (post.clone(), "/products/_search?explain=true", Some(json!({})), browser),
+        (post.clone(), "/products/_search", Some(json!({"size": "5000"})), window),
+        (post.clone(), "/products/_search?size=600", Some(json!({"from": 500})), window),
+        (post.clone(), "/products/_terms_enum", Some(json!({"field": "color.keyword", "size": 1001})), browser),
+        (post.clone(), "/products/_search?scroll=1m", Some(json!({})), browser),
+        (post.clone(), "/products/_pit?keep_alive=1m", None, browser),
+        (post.clone(), "/products/_async_search?keep_on_completion=true", Some(json!({})), browser),
+        (reqwest::Method::GET, "/products/_termvectors/1", None, browser),
+        (post.clone(), "/products/_explain/1", Some(json!({"query": {"match_all": {}}})), browser),
+    ];
+    for (m, p, b, why) in refused {
+        let (s, v) = as_key(&e, &key, m.clone(), p, b.clone()).await;
+        assert!((400..500).contains(&s) && s != 429 && v.to_string().contains(why), "{m} {p} {b:?}: {s} {v}");
+    }
+    let (s, v) = as_key(&e, &key, post.clone(), "/products/_search", Some(json!({"query": {"match": {"title": {"query": "shose", "fuzziness": "AUTO"}}}}))).await;
+    assert_eq!((s, total(&v)), (200, 1), "search-as-you-type still works: {v}");
+    // A reranker the owner allowed still reranks at most `max_rerank_window` documents.
+    let rr = e.post("/v1/search/clusters/shop/browser-keys", json!({"name": "rr", "indices": ["products"], "limits": {"inference_endpoints": [".rerank-v1-elasticsearch"]}})).await["api_key"].as_str().unwrap().to_string();
+    let rerank = json!({"retriever": {"text_similarity_reranker": {"retriever": {"standard": {"query": {"match_all": {}}}}, "field": "title", "inference_text": "shoes", "rank_window_size": 101}}});
+    let (s, v) = as_key(&e, &rr, post.clone(), "/products/_search", Some(rerank)).await;
+    assert!(s == 400 && v.to_string().contains("max_rerank_window"), "{s} {v}");
+    // An `_msearch` whose items each need inference after the key's bucket is empty runs none:
+    // a refused inference charge gives no token back for the next item.
+    let slow = e.post("/v1/search/clusters/shop/browser-keys", json!({"name": "slow", "indices": ["products"], "rate_limit": {"per_minute": 3}})).await["api_key"].as_str().unwrap().to_string();
+    let lines: String = (0..3).map(|i| format!("{{\"index\":\"products\"}}\n{{\"query\":{{\"sparse_vector\":{{\"field\":\"body\",\"inference_id\":\".elser-2-elasticsearch\",\"query\":\"t{i}\"}}}}}}\n")).collect();
+    let r = e.http.post(format!("{}/_msearch", e.es)).header("authorization", format!("ApiKey {slow}")).header("content-type", "application/x-ndjson").body(lines).send().await.unwrap();
+    let v: Value = r.json().await.unwrap();
+    let statuses: Vec<i64> = v["responses"].as_array().unwrap().iter().map(|i| i["status"].as_i64().unwrap_or(200)).collect();
+    assert_eq!(statuses, vec![429, 429, 429], "{v}");
+    // `_terms_enum` works for a key that reads every document (its internal `_field_caps` call
+    // runs as the key).
+    let open = e.post("/v1/search/clusters/shop/browser-keys", json!({"name": "open", "indices": ["products"]})).await["api_key"].as_str().unwrap().to_string();
+    let (s, v) = as_key(&e, &open, post, "/products/_terms_enum", Some(json!({"field": "color.keyword", "string": "r"}))).await;
+    assert_eq!((s, &v["terms"]), (200, &json!(["red"])), "{v}");
+}
+
+/// One fetch budget per request: hits, and `top_hits` in every bucket, together within the
+/// key's `max_result_window`.
+#[tokio::test]
+async fn a_browser_keys_fetches_share_one_budget() {
+    let e = env().await;
+    filtered_key(&e).await;
+    let bulk: String = (0..10).map(|i| format!("{{\"index\":{{\"_index\":\"items\",\"_id\":\"{i}\"}}}}\n{{\"color\":\"{}\"}}\n", if i % 2 == 0 { "red" } else { "blue" })).collect();
+    let r = e.post("/v1/search/clusters/shop/request", json!({"method": "POST", "path": "/_bulk?refresh=true", "body": bulk})).await;
+    assert_eq!(r["status"], 200, "{r}");
+    let key = e.post("/v1/search/clusters/shop/browser-keys", json!({"name": "five", "indices": ["items"], "limits": {"max_result_window": 5}})).await["api_key"].as_str().unwrap().to_string();
+    let search = |size: i64, top: i64| json!({"size": size, "aggs": {"c": {"terms": {"field": "color.keyword"}, "aggs": {"t": {"top_hits": {"size": top}}}}}});
+    let (s, v) = as_key(&e, &key, reqwest::Method::POST, "/items/_search", Some(search(1, 2))).await;
+    assert_eq!(s, 200, "1 hit and 2 buckets of 2: {v}");
+    let (s, v) = as_key(&e, &key, reqwest::Method::POST, "/items/_search", Some(search(3, 3))).await;
+    assert_eq!(s, 400, "3 hits and 2 buckets of 3: {v}");
+}
+
+/// A browser key pays for every item the engine parses (an `_msearch`'s searches however its
+/// lines or URL are written, an `_mget`'s documents however its body is given), each search
+/// checked; more than its `max_items` is a 429, an `_msearch`'s counted from its lines before any
+/// is parsed. A request refused after its body was parsed keeps its admission token as payment.
+/// Browser requests running at once are capped per key and per cluster, below the cluster's own
+/// permits: past either a browser request gets 429 while the owner's clients go on.
+#[tokio::test]
+async fn browser_keys_pay_per_item_and_leave_the_owner_permits() {
+    let e = env().await;
+    filtered_key(&e).await;
+    let k = e.post("/v1/search/clusters/shop/browser-keys", json!({"name": "few", "indices": ["products"], "rate_limit": {"per_minute": 10}})).await;
+    let key = k["api_key"].as_str().unwrap().to_string();
+    let send = |method: reqwest::Method, url: String, body: String| e.http.request(method, url).header("authorization", format!("ApiKey {key}")).header("content-type", "application/x-ndjson").body(body).send();
+    let items = |n: usize| "{\"index\":\"products\"}\n{\"size\":0}\n".repeat(n);
+    // A trailing slash: 7 searches, 7 tokens.
+    assert_eq!(send(reqwest::Method::POST, format!("{}/_msearch/", e.es), items(7)).await.unwrap().status().as_u16(), 200);
+    // An `_mget` given in `?source=`: 4 documents, and 3 tokens left.
+    let url = format!("{}/products/_mget?source={}&source_content_type=application/json", e.es, urlencoding::encode(r#"{"ids":["1","2","3","4"]}"#));
+    let r = send(reqwest::Method::GET, url, String::new()).await.unwrap();
+    assert_eq!(r.status().as_u16(), 429, "3 tokens left can't pay for 4 documents");
+    assert!(r.headers().contains_key("retry-after"));
+    // The refused `_mget` was parsed: its admission stays paid, 2 tokens left. Blank lines are
+    // empty headers: 2 searches, 2 tokens, and nothing left for another request.
+    let blank = "{\"index\":\"products\"}\n{}\n\n{}\n".to_string();
+    assert_eq!(send(reqwest::Method::POST, format!("{}/_msearch", e.es), blank).await.unwrap().status().as_u16(), 200, "2 searches, 2 tokens");
+    assert_eq!(send(reqwest::Method::POST, format!("{}/products/_search", e.es), String::new()).await.unwrap().status().as_u16(), 429, "the refused _mget's admission stayed paid");
+    // Each search is checked, an empty header's too; more than the key's 100 items is a 429.
+    let big = e.post("/v1/search/clusters/shop/browser-keys", json!({"name": "big", "indices": ["products"], "rate_limit": {"per_minute": 10000}})).await["api_key"].as_str().unwrap().to_string();
+    let as_big = |body: String| e.http.post(format!("{}/_msearch", e.es)).header("authorization", format!("ApiKey {big}")).header("content-type", "application/x-ndjson").body(body).send();
+    let explained = "{\"index\":\"products\"}\n{}\n\n{\"explain\":true}\n".to_string();
+    assert_eq!(as_big(explained).await.unwrap().status().as_u16(), 400);
+    // Past 100 searches by its line count, before any line is parsed: an unparseable line after
+    // the cap still gets the item count's 429.
+    let r = as_big(items(101) + "not json\n{\n").await.unwrap();
+    let status = r.status().as_u16();
+    let text = r.text().await.unwrap();
+    assert!(status == 429 && text.contains("max_items"), "{status} {text}");
+
+    // Running at once: a cluster of 8 permits gives browser keys 4. Four browser requests held
+    // (as running requests hold their leases): the next browser request gets 429, the owner's
+    // still runs.
+    let (s, _) = e.call(reqwest::Method::PATCH, "/v1/search/clusters/shop", Some(json!({"max_in_flight": 8}))).await;
+    assert_eq!(s, 200);
+    let wide = e.post("/v1/search/clusters/shop/browser-keys", json!({"name": "wide", "indices": ["products"], "limits": {"max_concurrent": 10}})).await["api_key"].as_str().unwrap().to_string();
+    let mut held = Vec::new();
+    for _ in 0..4 {
+        let mut r = search_es::EsRequest::new("GET", "/");
+        r.headers.push(("authorization".into(), format!("ApiKey {wide}")));
+        let Ok(lease) = e.control.node.enter_from(&r, None, search_server::Origin::Client("203.0.113.9".parse().unwrap())).await else { panic!("not admitted") };
+        held.push(lease);
+    }
+    let (s, _) = as_key(&e, &wide, reqwest::Method::POST, "/products/_search", Some(json!({}))).await;
+    assert_eq!(s, 429, "the cluster's browser permits are taken");
+    let c = e.post("/v1/search/clusters/shop/password", json!({})).await;
+    let (user, pw) = creds(&c);
+    let (s, _) = e.es(&user, &pw, reqwest::Method::POST, "/products/_search", Some(json!({}))).await;
+    assert_eq!(s, 200, "the owner's request isn't held back by browser keys");
+    held.clear();
+    let (s, _) = as_key(&e, &wide, reqwest::Method::POST, "/products/_search", Some(json!({}))).await;
+    assert_eq!(s, 200);
+
+    // At most 20 browser keys a cluster.
+    for i in 4..20 {
+        e.post("/v1/search/clusters/shop/browser-keys", json!({"name": format!("k{i}"), "indices": ["products"]})).await;
+    }
+    let (s, v) = e.call(reqwest::Method::POST, "/v1/search/clusters/shop/browser-keys", Some(json!({"name": "k20", "indices": ["products"]}))).await;
+    assert_eq!(s, 409, "{v}");
+}
+
 #[tokio::test]
 async fn documents() {
     let e = env().await;
@@ -2061,6 +2473,188 @@ async fn an_s3_repository_moves_indices_between_clusters() {
     let (s, v) = e.es(&ua, &pa, reqwest::Method::POST, "/_snapshot/backup/_cleanup", None).await;
     assert_eq!((s, v["results"]["deleted_blobs"].as_i64()), (200, Some(1)), "{v}");
     assert!(bucket.keys("prod/roll/indices/stray/").is_empty());
+}
+
+/// roll secrets as a fake (rolld's is `Secrets::bind_ref`, `resolve_as` and
+/// `digest_as`): keys by reference with a version, the clusters a project's canvas holds, who may
+/// reveal (a person's `usr_…`, or `operator`), and protected references (refused to an untrusted
+/// copy).
+#[derive(Default)]
+struct FakeSecrets {
+    keys: std::sync::Mutex<std::collections::BTreeMap<String, (String, u32)>>,
+    canvas: std::sync::Mutex<Vec<String>>,
+    revealers: std::sync::Mutex<Vec<String>>,
+    protected: Vec<String>,
+    resolves: std::sync::Mutex<Vec<search_control::secret_refs::Holder>>,
+}
+
+impl FakeSecrets {
+    /// What resolving `reference` for `h` answers, `who` (else its maker) asking.
+    fn check(&self, h: &search_control::secret_refs::Holder, who: &str, reference: &str) -> Result<(String, u32), search_control::secret_refs::Refused> {
+        use search_control::secret_refs::Refused;
+        if !self.canvas.lock().unwrap().contains(&h.id) {
+            return Err(Refused::Invalid(format!("no project: search:search:{} isn't on any project's canvas", h.id)));
+        }
+        if !self.revealers.lock().unwrap().iter().any(|r| r == who) {
+            return Err(Refused::Forbidden(format!("not trusted: {who} may not reveal production:/")));
+        }
+        if h.copy && self.protected.iter().any(|p| p == reference) {
+            return Err(Refused::Forbidden("protected: production is protected".into()));
+        }
+        self.keys.lock().unwrap().get(reference).cloned().ok_or_else(|| Refused::Invalid(format!("no such key: {reference}")))
+    }
+
+    fn set(&self, reference: &str, value: &str) {
+        let mut keys = self.keys.lock().unwrap();
+        let version = keys.get(reference).map_or(1, |(_, v)| v + 1);
+        keys.insert(reference.into(), (value.into(), version));
+    }
+}
+
+fn refused(r: search_control::secret_refs::Refused) -> String {
+    match r {
+        search_control::secret_refs::Refused::Forbidden(m) | search_control::secret_refs::Refused::Invalid(m) => m,
+    }
+}
+
+#[async_trait::async_trait]
+impl search_control::secret_refs::ResourceSecrets for FakeSecrets {
+    async fn may_write(&self, who: &search_control::secret_refs::Who, h: &search_control::secret_refs::Holder, reference: &str) -> Result<String, search_control::secret_refs::Refused> {
+        // As roll secrets' `bind_ref`: a signed-in person (an admin too) is themselves; the
+        // operator's token or an open daemon is the operator.
+        let principal = who.user.as_ref().map_or_else(|| "operator".to_string(), |u| u.user.clone());
+        self.check(h, &principal, reference).map(|_| principal)
+    }
+
+    async fn resolve(&self, h: &search_control::secret_refs::Holder, reference: &str) -> Result<search_control::secret_refs::Revealed, String> {
+        let (value, _) = self.check(h, &h.maker, reference).map_err(refused)?;
+        self.resolves.lock().unwrap().push(h.clone());
+        Ok(search_control::secret_refs::Revealed::new(value))
+    }
+
+    async fn digest(&self, h: &search_control::secret_refs::Holder, reference: &str) -> Result<String, String> {
+        self.check(h, &h.maker, reference).map(|(_, v)| format!("v{v}")).map_err(refused)
+    }
+}
+
+/// An `s3` repository's keys as roll secrets references: written only through roll's API by
+/// someone who may reveal them (never through the cluster's endpoint), kept as written, resolved
+/// for the cluster as their maker when its client is built and again only once a rotation moves
+/// the digest; refused to a cluster no project holds, to a branch reaching a protected
+/// environment, once the maker can't reveal them, and once the secret is deleted (the snapshot
+/// fails with why, never anonymously); registering it elsewhere through the endpoint drops them.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_s3_repository_takes_its_keys_from_roll_secrets() {
+    let (endpoint, bucket) = MockBucket::start().await;
+    let e = env_with(|c| c.node_settings.push((search_control::S3_ALLOW_PRIVATE.into(), "true".into()))).await;
+    let made = |name: &str| e.call_as("ada", reqwest::Method::POST, "/v1/search/clusters", Some(json!({"name": name})));
+    let (s, vault) = made("vault").await;
+    assert_eq!(s, 200, "{vault}");
+    let (u, p) = creds(&vault);
+    let id = vault["id"].as_str().unwrap().to_string();
+    let (s, loose) = made("loose").await;
+    assert_eq!(s, 200, "{loose}");
+    let (access, secret) = ("roll://production/AWS_ACCESS_KEY_ID", "roll://production/AWS_SECRET_ACCESS_KEY");
+    let fake = Arc::new(FakeSecrets { protected: vec![access.into(), secret.into()], ..Default::default() });
+    fake.canvas.lock().unwrap().push(id.clone());
+    fake.set(access, "AKIDONE");
+    fake.set(secret, "fake-secret-one");
+    e.control.set_secrets(fake.clone());
+    let repo = json!({"type": "s3", "settings": {"bucket": "backups", "base_path": "refs", "endpoint": endpoint, "path_style_access": true, "access_key": access, "secret_key": secret}});
+    let route = |cluster: &str| format!("/v1/search/clusters/{cluster}/repositories/backup");
+
+    // The cluster's own endpoint (its password: a cluster admin) can't name a reference, not
+    // even saying who wrote it: a client's maker header is dropped, there and through the console.
+    let forged = reqwest::Client::new()
+        .put(format!("{}/_snapshot/backup", e.es))
+        .basic_auth(&u, Some(&p))
+        .header(search_es::secret_refs::MAKER_HEADER, "usr_ada")
+        .json(&repo)
+        .send()
+        .await
+        .unwrap();
+    let (s, v) = (forged.status().as_u16(), forged.json::<Value>().await.unwrap());
+    assert_eq!((s, v["error"]["type"].as_str()), (400, Some("settings_exception")), "{v}");
+    assert!(v["error"]["reason"].as_str().unwrap().contains("roll's API"), "{v}");
+    let console = json!({"method": "PUT", "path": "/_snapshot/backup", "body": repo.clone(), "headers": [[search_es::secret_refs::MAKER_HEADER, "usr_ada"]]});
+    let (s, v) = e.call_as("ada", reqwest::Method::POST, &format!("/v1/search/clusters/{id}/request"), Some(console)).await;
+    assert!(s == 200 && v["status"] == 400 && v["body"].as_str().unwrap().contains("roll's API"), "{v}");
+    // Through roll's API: someone who may not reveal it is refused, and so is a cluster no
+    // project holds.
+    let (s, v) = e.call_as("ada", reqwest::Method::PUT, &route(&id), Some(repo.clone())).await;
+    assert_eq!(s, 403, "{v}");
+    fake.revealers.lock().unwrap().push("usr_ada".into());
+    // Only exactly `roll://…` is a reference (roll secrets' parser): a near miss is refused, never
+    // kept as a value.
+    for near in [" roll://production/KEY", "ROLL://production/KEY"] {
+        let mut bad = repo.clone();
+        bad["settings"]["access_key"] = json!(near);
+        bad["settings"]["secret_key"] = json!(near);
+        let (s, v) = e.call_as("ada", reqwest::Method::PUT, &route(&id), Some(bad)).await;
+        assert!(s == 400 && v.to_string().contains("written like a roll secrets reference"), "{near:?}: {v}");
+    }
+    let (s, v) = e.call_as("ada", reqwest::Method::PUT, &route(loose["id"].as_str().unwrap()), Some(repo.clone())).await;
+    assert!(s == 400 && v.to_string().contains("isn't on any project's canvas"), "{v}");
+
+    // Registered and verified with the resolved keys; the reference shows as written.
+    let (s, v) = e.call_as("ada", reqwest::Method::PUT, &route(&id), Some(repo)).await;
+    assert_eq!(s, 200, "{v}");
+    let (_, v) = e.es(&u, &p, reqwest::Method::GET, "/_snapshot/backup", None).await;
+    assert_eq!(v["backup"]["settings"]["secret_key"], secret, "{v}");
+    let (_, state) = e.es(&u, &p, reqwest::Method::GET, "/_cluster/state/metadata", None).await;
+    assert!(!state.to_string().contains("fake-secret-one"), "a value in the cluster state");
+    e.es(&u, &p, reqwest::Method::PUT, "/docs/_doc/1?refresh=true", Some(json!({"n": 1}))).await;
+    let snapshot = |name: &str| format!("/_snapshot/backup/{name}?wait_for_completion=true");
+    let (s, v) = e.es(&u, &p, reqwest::Method::PUT, &snapshot("one"), Some(json!({"indices": "docs"}))).await;
+    assert_eq!((s, v["snapshot"]["state"].as_str()), (200, Some("SUCCESS")), "{v}");
+    assert_eq!(bucket.signed_by.lock().unwrap().iter().cloned().collect::<Vec<_>>(), ["AKIDONE"]);
+    assert_eq!(fake.resolves.lock().unwrap().len(), 2, "resolved once, then kept while the digests stay");
+    assert!(fake.resolves.lock().unwrap().iter().all(|h| h.maker == "usr_ada" && !h.copy));
+
+    // A rotation moves the digest: the next snapshot signs with the new key.
+    fake.set(access, "AKIDTWO");
+    bucket.signed_by.lock().unwrap().clear();
+    let (s, v) = e.es(&u, &p, reqwest::Method::PUT, &snapshot("two"), Some(json!({"indices": "docs"}))).await;
+    assert_eq!(s, 200, "{v}");
+    assert_eq!(bucket.signed_by.lock().unwrap().iter().cloned().collect::<Vec<_>>(), ["AKIDTWO"]);
+
+    // The maker loses reveal: the next snapshot fails, with why and without the value.
+    fake.revealers.lock().unwrap().clear();
+    let (s, v) = e.es(&u, &p, reqwest::Method::PUT, &snapshot("lost"), Some(json!({"indices": "docs"}))).await;
+    assert_eq!(s, 500, "{v}");
+    assert!(v.to_string().contains("usr_ada may not reveal") && !v.to_string().contains("fake-secret"), "{v}");
+    fake.revealers.lock().unwrap().push("usr_ada".into());
+
+    // The cluster taken off the project's canvas: the next snapshot fails, with why.
+    fake.canvas.lock().unwrap().clear();
+    let (s, v) = e.es(&u, &p, reqwest::Method::PUT, &snapshot("off-canvas"), Some(json!({"indices": "docs"}))).await;
+    assert!(s == 500 && v.to_string().contains("isn't on any project's canvas"), "{v}");
+    fake.canvas.lock().unwrap().push(id.clone());
+
+    // A branch asks as the cluster it came from, untrusted: production is refused, visibly.
+    let (s, branch) = e.call_as("ada", reqwest::Method::POST, &format!("/v1/search/clusters/{id}/branches"), Some(json!({"name": "vault-dev"}))).await;
+    assert_eq!(s, 200, "{branch}");
+    let (bu, bp) = creds(&branch);
+    let (s, v) = e.es(&bu, &bp, reqwest::Method::PUT, &snapshot("from-branch"), Some(json!({"indices": "docs"}))).await;
+    assert_eq!(s, 500, "{v}");
+    assert!(v.to_string().contains("protected") && !v.to_string().contains("fake-secret"), "{v}");
+    assert!(fake.resolves.lock().unwrap().iter().all(|h| !h.copy), "nothing resolved for the branch");
+
+    // The secret deleted: the snapshot fails with why, and nothing reaches the bucket unsigned.
+    fake.keys.lock().unwrap().remove(secret);
+    let before = bucket.keys("").len();
+    let (s, v) = e.es(&u, &p, reqwest::Method::PUT, &snapshot("three"), Some(json!({"indices": "docs"}))).await;
+    assert_eq!(s, 500, "{v}");
+    assert!(v["error"]["reason"].as_str().unwrap().contains("no such key"), "{v}");
+    assert_eq!(bucket.keys("").len(), before);
+
+    // Pointed elsewhere through the endpoint, without the references: they're gone, not carried.
+    let (elsewhere, _) = MockBucket::start().await;
+    let moved = json!({"type": "s3", "settings": {"bucket": "backups", "base_path": "refs", "endpoint": elsewhere, "path_style_access": true}});
+    let (s, v) = e.es(&u, &p, reqwest::Method::PUT, "/_snapshot/backup", Some(moved)).await;
+    assert_eq!(s, 200, "{v}");
+    let (_, v) = e.es(&u, &p, reqwest::Method::GET, "/_snapshot/backup", None).await;
+    assert!(v["backup"]["settings"].get("secret_key").is_none() && v["backup"]["settings"].get("access_key").is_none(), "{v}");
 }
 
 /// A branch inherits its parent's bucket repository, SLM policy and watch, but runs none of
