@@ -132,6 +132,9 @@ pub struct ClusterConfig {
     /// inference service ([`crate::xpack::inference::local`]); `None`: E5 endpoints answer as
     /// on a cluster without ML nodes.
     pub embedder: Option<std::sync::Arc<dyn crate::xpack::inference::local::Embedder>>,
+    /// Who owns the cluster in roll's catalog (`None`: the operator), for the embedding pool's
+    /// turns.
+    pub owner: Option<String>,
 }
 
 impl ClusterConfig {
@@ -152,6 +155,7 @@ impl ClusterConfig {
             file_service_tokens: false,
             audit: None,
             embedder: None,
+            owner: None,
         }
     }
 

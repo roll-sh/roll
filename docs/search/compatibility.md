@@ -1278,15 +1278,36 @@ an ML node on Linux x86-64 deploying both of the model's builds:
   identical to six digits.
 
 On a node serving many tenants: one pool per node (`--search-embed-workers`, a third of the CPUs
-by default, `--search-embed-cpus` to pin them), clusters served in turns (jobs of 8 inputs,
-round-robin across clusters), at most `--search-embed-queue` inputs (4,096) queued per cluster,
-2,048 inputs per call and 1,048,576 characters per input (400 past either), the model's memory
-counted against the node's memory budget, and each cluster billed the CPU time its inputs took.
+by default, `--search-embed-cpus` to pin them). Each input is cut to the start its 512 tokens
+come from (at most 96 KiB: four times 512 times the longest vocabulary piece, whitespace runs
+shortened), so a long input is truncated as Elasticsearch truncates it, never refused, and
+costs bounded time and memory whatever its spacing. Inputs queue in jobs of about 1,024
+estimated tokens, and turns go by owner first, then by cluster within an owner, so one person's
+many clusters get the turns one cluster of another person gets. Caps, past which a call gets
+429 `es_rejected_execution_exception` whole: per cluster `--search-embed-queue` inputs (4,096)
+and `--search-embed-queue-mb` (64 MiB) queued; per node `--search-embed-node-queue-mb` (512
+MiB) and about a million estimated tokens queued; 2,048 inputs per call (400). The model, a load
+in progress (about twice the weights at its peak), the queued inputs and the running jobs count
+against the node's memory budget, and each cluster is billed the CPU time its inputs took: the
+cluster whose request runs the inference, also when a linked cluster's query (cross-cluster
+search) or a browser key started it (the browser keys of #358 will cap inference per request).
 The weights are the operator's: fetched once per node from the pinned revision (or a mirror,
-`--search-embed-url`) and checked by SHA-256, or read from `--search-embed-dir` on air-gapped
-nodes; never from a URL a tenant chooses. Loaded on first use, dropped after
-`--search-embed-idle` seconds without inputs. `--search-embed-model off` turns it off (the
-endpoint then answers as without ML nodes). README, "Run it".
+`--search-embed-url`), each download into a file of its own checked for size and SHA-256 as it's
+written, a cached file whose digest is wrong fetched again; or read from `--search-embed-dir` on
+air-gapped nodes; never from a URL a tenant chooses. One task fetches, checks and loads; callers
+wait for it with their own timeouts, and one that gives up doesn't stop or restart it. Loaded on
+first use, dropped after `--search-embed-idle` seconds with nothing queued or running. A job
+that panics answers 500 (`an internal error`) and its worker carries on.
+`--search-embed-model off` turns it off (the endpoint then answers as without ML nodes).
+README, "Run it".
+
+`semantic_text` sends the node's model batches of 10 inputs (`ElasticsearchInternalService`'s
+`EMBEDDING_MAX_BATCH_SIZE`) with no deadline, as Elasticsearch's `ShardBulkInferenceActionFilter`
+calls with `TimeValue.MAX_VALUE`, so a large bulk or reindex waits its turns instead of timing
+out; the client going away cancels what hasn't started. Elasticsearch runs one batch after
+another so they don't fill its queue; roll keeps up to four of an endpoint's batches in flight,
+since the pool's caps and turns protect it. Remote services keep their batch sizes and the
+node's `roll.inference.max_timeout`.
 
 Differences: on Linux x86-64 Elasticsearch's preconfigured endpoint runs the 8-bit build and
 roll the float build (above): their vectors differ by what Elasticsearch's two builds differ by,
@@ -1325,8 +1346,9 @@ against 12 allocations, documents per second:
 | 8 | 27.9 | 54.8 | 79.3 |
 
 Short inputs cost the same as on Elasticsearch's float build; long ones about 1.7 times as much
-CPU (the attention products and softmax), and a single bulk request keeps at most 7 workers busy
-(jobs of 8 inputs), so bulks embed at about half Elasticsearch's rate. roll's 8-bit build, when
+CPU (the attention products and softmax), and bulks embed at about half Elasticsearch's rate
+(measured before batches of 10 and jobs by tokens: a bulk request then kept at most 7 workers
+busy). roll's 8-bit build, when
 it ships, measured 678 ms per 512-token input and 24.2 and 28.2 documents per second.
 
 YAML: `platinum/inference` 22 of the 23 tests that pass on Elasticsearch (the last needs the

@@ -72,12 +72,19 @@ pub struct Weights {
 
 type Tensors = HashMap<String, Weights>;
 
-fn get<'a>(t: &'a Tensors, name: &str, dims: usize) -> Result<&'a Weights, Error> {
-    let w = t.get(name).ok_or_else(|| Error::Model(format!("the weights have no tensor [{name}]")))?;
-    if w.shape.len() != dims {
-        return Err(Error::Model(format!("tensor [{name}] has shape {:?}", w.shape)));
+/// Takes tensor `name` out of the weights (no copy), checking its shape exactly: a file of the
+/// wrong architecture fails the load instead of panicking later.
+fn take(t: &mut Tensors, name: &str, shape: &[usize]) -> Result<Vec<f32>, Error> {
+    let w = t.remove(name).ok_or_else(|| Error::Model(format!("the weights have no tensor [{name}]")))?;
+    if w.shape != shape || w.values.len() != shape.iter().product::<usize>() {
+        return Err(Error::Model(format!("tensor [{name}] has shape {:?}, expected {shape:?}", w.shape)));
     }
-    Ok(w)
+    Ok(w.values)
+}
+
+/// A tensor's shape, when it is there.
+fn shape_of<'a>(t: &'a Tensors, name: &str) -> Result<&'a [usize], Error> {
+    t.get(name).map(|w| w.shape.as_slice()).ok_or_else(|| Error::Model(format!("the weights have no tensor [{name}]")))
 }
 
 /// `c[m×n] = a[m×k] · b[k×n]`, each given by its row and column strides.
@@ -120,16 +127,13 @@ enum Linear {
 }
 
 impl Linear {
-    fn load(t: &Tensors, name: &str, kind: Kind) -> Result<Linear, Error> {
-        let w = get(t, &format!("{name}.weight"), 2)?;
-        let bias = get(t, &format!("{name}.bias"), 1)?.values.clone();
-        let (out, k) = (w.shape[0], w.shape[1]);
-        if bias.len() != out {
-            return Err(Error::Model(format!("[{name}] has {} biases for {out} outputs", bias.len())));
-        }
+    /// `[out, k]` weights and `[out]` biases.
+    fn load(t: &mut Tensors, name: &str, out: usize, k: usize, kind: Kind) -> Result<Linear, Error> {
+        let weight = take(t, &format!("{name}.weight"), &[out, k])?;
+        let bias = take(t, &format!("{name}.bias"), &[out])?;
         Ok(match kind {
-            Kind::F32 => Linear::F32 { weight: w.values.clone(), bias, k, out },
-            Kind::PerTensor | Kind::PerChannel => Linear::Int8(QLinear::new(&w.values, bias, out, k, kind == Kind::PerChannel)),
+            Kind::F32 => Linear::F32 { weight, bias, k, out },
+            Kind::PerTensor | Kind::PerChannel => Linear::Int8(QLinear::new(&weight, bias, out, k, kind == Kind::PerChannel)),
         })
     }
 
@@ -165,8 +169,8 @@ struct Norm {
 }
 
 impl Norm {
-    fn load(t: &Tensors, name: &str) -> Result<Norm, Error> {
-        Ok(Norm { weight: get(t, &format!("{name}.weight"), 1)?.values.clone(), bias: get(t, &format!("{name}.bias"), 1)?.values.clone() })
+    fn load(t: &mut Tensors, name: &str, hidden: usize) -> Result<Norm, Error> {
+        Ok(Norm { weight: take(t, &format!("{name}.weight"), &[hidden])?, bias: take(t, &format!("{name}.bias"), &[hidden])? })
     }
 
     fn forward(&self, x: &mut [f32]) {
@@ -186,23 +190,22 @@ struct Layer {
 }
 
 impl Layer {
-    fn load(t: &Tensors, i: usize, precision: Precision) -> Result<Layer, Error> {
+    fn load(t: &mut Tensors, i: usize, hidden: usize, inner: usize, precision: Precision) -> Result<Layer, Error> {
         let p = format!("encoder.layer.{i}");
         let (attention, (intermediate, out)) = match precision {
             Precision::F32 => (Kind::F32, (Kind::F32, Kind::F32)),
             // A model with more layers than E5's quantizes the rest like its last.
             Precision::Int8 => (Kind::PerTensor, ELASTIC_X86_FFN[i.min(ELASTIC_X86_FFN.len() - 1)]),
         };
-        let linear = |name: &str, kind: Kind| Linear::load(t, &format!("{p}.{name}"), kind);
         Ok(Layer {
-            query: linear("attention.self.query", attention)?,
-            key: linear("attention.self.key", attention)?,
-            value: linear("attention.self.value", attention)?,
-            attention_out: linear("attention.output.dense", attention)?,
-            attention_norm: Norm::load(t, &format!("{p}.attention.output.LayerNorm"))?,
-            intermediate: linear("intermediate.dense", intermediate)?,
-            out: linear("output.dense", out)?,
-            out_norm: Norm::load(t, &format!("{p}.output.LayerNorm"))?,
+            query: Linear::load(t, &format!("{p}.attention.self.query"), hidden, hidden, attention)?,
+            key: Linear::load(t, &format!("{p}.attention.self.key"), hidden, hidden, attention)?,
+            value: Linear::load(t, &format!("{p}.attention.self.value"), hidden, hidden, attention)?,
+            attention_out: Linear::load(t, &format!("{p}.attention.output.dense"), hidden, hidden, attention)?,
+            attention_norm: Norm::load(t, &format!("{p}.attention.output.LayerNorm"), hidden)?,
+            intermediate: Linear::load(t, &format!("{p}.intermediate.dense"), inner, hidden, intermediate)?,
+            out: Linear::load(t, &format!("{p}.output.dense"), hidden, inner, out)?,
+            out_norm: Norm::load(t, &format!("{p}.output.LayerNorm"), hidden)?,
         })
     }
 
@@ -261,36 +264,43 @@ pub struct Bert {
 }
 
 impl Bert {
-    pub fn new(t: &Tensors, precision: Precision) -> Result<Bert, Error> {
-        let words = get(t, "embeddings.word_embeddings.weight", 2)?;
-        let (vocab, hidden) = (words.shape[0], words.shape[1]);
-        if hidden % HEAD_SIZE != 0 {
+    /// The encoder from the weights, which it takes apart (each tensor moved, not copied, so
+    /// loading holds the weights once). Every tensor's shape is checked against the
+    /// architecture the word embeddings and the first feed-forward layer give.
+    pub fn new(mut t: Tensors, precision: Precision) -> Result<Bert, Error> {
+        let (vocab, hidden) = match shape_of(&t, "embeddings.word_embeddings.weight")? {
+            [v, h] => (*v, *h),
+            other => return Err(Error::Model(format!("tensor [embeddings.word_embeddings.weight] has shape {other:?}"))),
+        };
+        if hidden == 0 || hidden % HEAD_SIZE != 0 {
             return Err(Error::Model(format!("hidden size [{hidden}] isn't a multiple of the head size [{HEAD_SIZE}]")));
         }
-        let positions = get(t, "embeddings.position_embeddings.weight", 2)?;
-        let token_type = get(t, "embeddings.token_type_embeddings.weight", 2)?;
-        if positions.shape[1] != hidden || token_type.shape[1] != hidden {
-            return Err(Error::Model("the embeddings' widths differ".into()));
-        }
+        let max_positions = match shape_of(&t, "embeddings.position_embeddings.weight")? {
+            [p, _] => *p,
+            other => return Err(Error::Model(format!("tensor [embeddings.position_embeddings.weight] has shape {other:?}"))),
+        };
+        let types = match shape_of(&t, "embeddings.token_type_embeddings.weight")? {
+            [n, _] if *n > 0 => *n,
+            other => return Err(Error::Model(format!("tensor [embeddings.token_type_embeddings.weight] has shape {other:?}"))),
+        };
+        let intermediate = match shape_of(&t, "encoder.layer.0.intermediate.dense.bias")? {
+            [i] if *i > 0 => *i,
+            other => return Err(Error::Model(format!("tensor [encoder.layer.0.intermediate.dense.bias] has shape {other:?}"))),
+        };
+        let words = take(&mut t, "embeddings.word_embeddings.weight", &[vocab, hidden])?;
+        let positions = take(&mut t, "embeddings.position_embeddings.weight", &[max_positions, hidden])?;
+        let mut token_type = take(&mut t, "embeddings.token_type_embeddings.weight", &[types, hidden])?;
+        token_type.truncate(hidden);
+        let norm = Norm::load(&mut t, "embeddings.LayerNorm", hidden)?;
         let mut layers = Vec::new();
         while t.contains_key(&format!("encoder.layer.{}.attention.self.query.weight", layers.len())) {
-            layers.push(Layer::load(t, layers.len(), precision)?);
+            let i = layers.len();
+            layers.push(Layer::load(&mut t, i, hidden, intermediate, precision)?);
         }
         if layers.is_empty() {
             return Err(Error::Model("the weights have no encoder layers".into()));
         }
-        let intermediate = get(t, "encoder.layer.0.intermediate.dense.bias", 1)?.shape[0];
-        Ok(Bert {
-            words: words.values.clone(),
-            vocab,
-            positions: positions.values.clone(),
-            max_positions: positions.shape[0],
-            token_type: token_type.values[..hidden].to_vec(),
-            norm: Norm::load(t, "embeddings.LayerNorm")?,
-            layers,
-            hidden,
-            intermediate,
-        })
+        Ok(Bert { words, vocab, positions, max_positions, token_type, norm, layers, hidden, intermediate })
     }
 
     /// Bytes the encoder's weights hold.

@@ -45,8 +45,9 @@ pnpm dev                                # dashboard: /dashboard/search
 | `--search-embed-dir` (`ROLL_SEARCH_EMBED_DIR`)     |                   | read the model's files from this directory instead (air-gapped nodes; same digests) |
 | `--search-embed-workers`, `--search-embed-cpus` (`ROLL_SEARCH_EMBED_WORKERS`, `ROLL_SEARCH_EMBED_CPUS`) | a third of the CPUs, not pinned | the embedding pool's threads, and the CPUs they're pinned to (`0-5,18-23`) |
 | `--search-embed-idle` (`ROLL_SEARCH_EMBED_IDLE`)   | `300`             | seconds without inputs before the model leaves memory |
-| `--search-embed-queue` (`ROLL_SEARCH_EMBED_QUEUE`) | `4096`            | inputs one cluster may have queued; past it a call gets 429 `es_rejected_execution_exception` |
-| `--search-embed-max-inputs`, `--search-embed-max-input-chars` | `2048`, `1048576` | inputs per inference call, characters per input (400 past either) |
+| `--search-embed-queue`, `--search-embed-queue-mb` (`ROLL_SEARCH_EMBED_QUEUE`, `ROLL_SEARCH_EMBED_QUEUE_MB`) | `4096`, `64` | inputs, and MiB of them, one cluster may have queued; past either a call gets 429 `es_rejected_execution_exception` |
+| `--search-embed-node-queue-mb` (`ROLL_SEARCH_EMBED_NODE_QUEUE_MB`) | `512` | MiB of inputs every cluster's queues hold together; past it a call gets 429 |
+| `--search-embed-max-inputs` (`ROLL_SEARCH_EMBED_MAX_INPUTS`) | `2048` | inputs per inference call (400 past it); each input is cut to the start its 512 tokens come from, so its length isn't capped |
 | `--no-search`, `--search-only`                     |                   | shorthands for `ROLL_PRODUCTS` without search, or with only search |
 | `--search-public-url` (`ROLL_SEARCH_PUBLIC_URL`)   |                   | the front clients use (a load balancer): cluster URLs name it |
 
@@ -684,7 +685,9 @@ cluster adds no rows. A deleted cluster kept for restoring keeps its last size i
 storage is billed until it is purged, when its rows go. Inference on the node's embedding pool
 (the E5 endpoint, `semantic_text` with it) is billed by the CPU it took: each job's thread CPU
 time is measured on its worker and handed to the meter with the requests
-(`inference_cpu_seconds`, priced per vCPU-hour as `usd_per_vcpu_hour`). Prices are AWS list prices in `crates/search-control/src/pricing.rs`, each
+(`inference_cpu_seconds`, priced per vCPU-hour as `usd_per_vcpu_hour`), to the cluster whose
+request runs it: a linked cluster's cross-cluster query that embeds on this cluster, or a
+browser key's search, is billed here (the browser keys of #358 will cap inference per request). Prices are AWS list prices in `crates/search-control/src/pricing.rs`, each
 with its source.
 
 ## Tests

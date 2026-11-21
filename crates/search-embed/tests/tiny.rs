@@ -48,8 +48,15 @@ fn long_inputs_are_cut_to_512_tokens() {
     assert_eq!((ids[0], ids[MAX_TOKENS - 1]), (0, 2));
     assert_eq!(ids, m.tokenize(&words[..510].join(" ")).unwrap());
     assert!(close(&m.embed(&[&long]).unwrap()[0], &m.embed(&[&words[..510].join(" ")]).unwrap()[0]));
-    // Past 16 KiB only the start is tokenized, with the same tokens; repeated spaces collapse,
-    // so a long run of them still counts as one.
+    // Only a bounded start is tokenized, with the same tokens: repeated spaces collapse, so a
+    // long run of them still counts as one; a run without spaces is cut by bytes.
     let spaced = format!("a{}b {}", " ".repeat(40_000), words.join(" "));
     assert_eq!(m.tokenize(&spaced).unwrap()[..3], [0, m.tokenize("a").unwrap()[1], m.tokenize("b").unwrap()[1]]);
+    let unspaced = "a".repeat(10_000);
+    let full = m.tokenize(&unspaced).unwrap();
+    assert_eq!(full.len(), MAX_TOKENS);
+    assert!(m.cut(&unspaced).len() < unspaced.len());
+    assert_eq!(m.tokenize(&"a".repeat(2 << 20)).unwrap(), full);
+    // The prefix goes before the cut text, and costs no copy of the text.
+    assert_eq!(m.tokenize_prefixed("query: ", "a b").unwrap(), m.tokenize("query: a b").unwrap());
 }

@@ -140,14 +140,20 @@ pub struct SearchArgs {
     /// Drop the model from memory after this many seconds without inputs.
     #[arg(long = "search-embed-idle", env = "ROLL_SEARCH_EMBED_IDLE", default_value_t = 300)]
     pub search_embed_idle_s: u64,
-    /// Inputs one cluster may have queued for the model; past it a call gets 429.
+    /// Inputs, and MiB of them, one cluster may have queued for the model; past either a call
+    /// gets 429.
     #[arg(long = "search-embed-queue", env = "ROLL_SEARCH_EMBED_QUEUE", default_value_t = 4096)]
     pub search_embed_queue: usize,
-    /// Inputs one inference call may carry, and characters one input may have.
+    #[arg(long = "search-embed-queue-mb", env = "ROLL_SEARCH_EMBED_QUEUE_MB", default_value_t = 64)]
+    pub search_embed_queue_mb: usize,
+    /// MiB of inputs every cluster's queues may hold together on the node; past it a call gets
+    /// 429.
+    #[arg(long = "search-embed-node-queue-mb", env = "ROLL_SEARCH_EMBED_NODE_QUEUE_MB", default_value_t = 512)]
+    pub search_embed_node_queue_mb: usize,
+    /// Inputs one inference call may carry (each input is cut to the start its 512 tokens come
+    /// from, so its length isn't capped).
     #[arg(long = "search-embed-max-inputs", env = "ROLL_SEARCH_EMBED_MAX_INPUTS", default_value_t = 2048)]
     pub search_embed_max_inputs: usize,
-    #[arg(long = "search-embed-max-input-chars", env = "ROLL_SEARCH_EMBED_MAX_INPUT_CHARS", default_value_t = 1 << 20)]
-    pub search_embed_max_input_chars: usize,
     /// Publish Elasticsearch's test cluster features (to run the YAML REST suites against
     /// clusters created through the API). Test deployments only.
     #[arg(long = "search-test-features", env = "ROLL_SEARCH_TEST_FEATURES", value_parser = clap::builder::BoolishValueParser::new(), default_value_t = false, num_args = 0..=1, default_missing_value = "true")]
@@ -172,7 +178,8 @@ fn embed_config(home: &Path, args: &SearchArgs) -> anyhow::Result<Option<search_
     cfg.idle_unload = Duration::from_secs(args.search_embed_idle_s.max(1));
     cfg.queue_inputs = args.search_embed_queue.max(1);
     cfg.max_inputs = args.search_embed_max_inputs.max(1);
-    cfg.max_input_chars = args.search_embed_max_input_chars.max(1);
+    cfg.queue_bytes = args.search_embed_queue_mb.max(1) << 20;
+    cfg.node_queue_bytes = args.search_embed_node_queue_mb.max(1) << 20;
     Ok(Some(cfg))
 }
 

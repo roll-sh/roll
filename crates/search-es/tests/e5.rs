@@ -7,7 +7,7 @@
 //! `tests/agreement.rs`.
 
 use search_es::json::{Value, parse};
-use search_es::xpack::inference::local::{EmbedError, Embedder};
+use search_es::xpack::inference::local::{EmbedError, Embedder, Tenant};
 use search_es::{Cluster, ClusterConfig, EsRequest, MemoryStore};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -23,7 +23,8 @@ impl Embedder for Fake {
         true
     }
 
-    async fn embed(&self, _cluster: &str, texts: Vec<String>, timeout: Duration) -> Result<Vec<Vec<f32>>, EmbedError> {
+    async fn embed(&self, _tenant: Tenant<'_>, prefix: &'static str, texts: Vec<String>, timeout: Duration) -> Result<Vec<Vec<f32>>, EmbedError> {
+        let texts: Vec<String> = texts.iter().map(|t| format!("{prefix}{t}")).collect();
         if texts.iter().any(|t| t.contains("<queue full>")) {
             return Err(EmbedError::QueueFull);
         }

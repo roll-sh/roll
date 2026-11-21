@@ -47,6 +47,10 @@ pub const ENDPOINTS: &str = "inference";
 pub const SECRETS: &str = "inference_secret";
 /// Preconfigured endpoints deleted with `force=true`.
 pub const DELETED_DEFAULTS: &str = "inference.deleted_default";
+/// A deadline that never comes: what roll's own calls pass where Elasticsearch passes
+/// `TimeValue.MAX_VALUE` (the bulk inference filter). Remote calls are still held to the node's
+/// `roll.inference.max_timeout` ([`http::max_timeout`]).
+pub const NO_DEADLINE: Duration = Duration::from_secs(365 * 86_400);
 
 /// What kind of inference an endpoint does.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]

@@ -1130,6 +1130,7 @@ impl Node {
         cfg.embedder = self.cfg.embedder.clone().map(|p| p as Arc<dyn search_es::xpack::inference::local::Embedder>);
         cfg.catalog_id = spec.catalog_id.clone();
         cfg.branch_of = spec.branch_of.clone();
+        cfg.owner = spec.owner.clone();
         // Snapshot contents are durable only with object storage behind the cluster.
         cfg.default_repository = self.cfg.default_repository.clone().filter(|_| data_store.is_some());
         cfg.file_service_tokens = self.reads_file_service_tokens(&spec.name);

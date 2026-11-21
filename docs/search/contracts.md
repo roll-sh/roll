@@ -1223,7 +1223,8 @@ pub struct ClusterConfig { pub name, pub dialect: Dialect /* Elasticsearch|OpenS
                                                           service; None: E5 answers as without ML nodes */ }
 #[async_trait] pub trait xpack::inference::local::Embedder: Send + Sync {
     fn available(&self) -> bool;                                                  // false: turned off (answers as without ML nodes)
-    async fn embed(&self, cluster: &str /* its name on the node */, texts: Vec<String> /* prefixes applied */, timeout: Duration)
+    async fn embed(&self, tenant: Tenant { cluster /* its name on the node */, owner /* catalog owner; None: the operator */ },
+                   prefix: &'static str /* applied at tokenize time */, texts: Vec<String>, timeout: Duration /* NO_DEADLINE: none */)
         -> Result<Vec<Vec<f32>>, EmbedError /* Off | QueueFull (429 es_rejected_execution_exception) | TooLarge (400) | TimedOut (408) | Failed (500) */>;
 }
                           // + fn node_setting(key) -> Option<&str>; fn processors() -> usize

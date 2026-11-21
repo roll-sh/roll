@@ -97,6 +97,9 @@ pub struct ClusterSpec {
     pub catalog_id: Option<String>,
     /// The parent's catalog id when the cluster is a branch (`search_es::ClusterConfig::branch_of`).
     pub branch_of: Option<String>,
+    /// Who owns it in the catalog (`None`: the operator): the embedding pool's turns are by
+    /// owner (`search_es::ClusterConfig::owner`).
+    pub owner: Option<String>,
 }
 
 impl ClusterSpec {
@@ -115,6 +118,7 @@ impl ClusterSpec {
             ip_allowlist: Default::default(),
             catalog_id: None,
             branch_of: None,
+            owner: None,
         }
     }
 

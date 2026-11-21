@@ -3,9 +3,11 @@
 //! `.multilingual-e5-small` deployment answers.
 //!
 //! The pool is the node's, shared by every cluster it serves: inputs queue per cluster and run
-//! in turns, so a cluster past its queue is refused the way an Elasticsearch deployment with a
-//! full queue refuses (429, `es_rejected_execution_exception`), and the CPU each cluster's
-//! inputs took is metered to it.
+//! in turns, by owner first and then by cluster, so a queue past its cap (the cluster's or the
+//! node's) is refused the way an Elasticsearch deployment with a full queue refuses (429,
+//! `es_rejected_execution_exception`), and the CPU each cluster's inputs took is metered to it:
+//! to the cluster that runs the call, also when a linked cluster's query or a browser key
+//! started it.
 
 use crate::error::EsError;
 use async_trait::async_trait;
@@ -17,9 +19,9 @@ pub enum EmbedError {
     /// The operator turned the model off (`--search-embed-model off`): the endpoint answers as
     /// on a cluster without ML nodes.
     Off,
-    /// The cluster's queue is full.
+    /// The cluster's queue, or the node's, is full.
     QueueFull,
-    /// More inputs, or a longer input, than one call may carry (the message says which).
+    /// More inputs than one call may carry.
     TooLarge(String),
     /// Not done within the request's timeout.
     TimedOut(Duration),
@@ -47,9 +49,19 @@ pub trait Embedder: Send + Sync {
     /// Whether the model can run on this node (not turned off). An endpoint of a model the node
     /// can't run answers as Elasticsearch without ML nodes does.
     fn available(&self) -> bool;
-    /// Embeds `texts` (prefixes already applied) for `cluster` (its name on the node), each to 384 unit-length floats, in order, waiting at most
-    /// `timeout` in the queue and running.
-    async fn embed(&self, cluster: &str, texts: Vec<String>, timeout: Duration) -> Result<Vec<Vec<f32>>, EmbedError>;
+    /// Embeds `prefix` before each of `texts` for `tenant`, each to 384 unit-length floats, in
+    /// order, waiting at most `timeout` in the queue and running ([`super::NO_DEADLINE`]: no
+    /// deadline, as Elasticsearch's bulk inference filter waits). Each input is cut to the
+    /// start its 512 tokens come from before it queues.
+    async fn embed(&self, tenant: Tenant<'_>, prefix: &'static str, texts: Vec<String>, timeout: Duration) -> Result<Vec<Vec<f32>>, EmbedError>;
+}
+
+/// Whose inputs these are: the cluster (its name on the node, what its CPU is metered to) and
+/// its owner (turns are taken by owner first; `None`: the operator's).
+#[derive(Clone, Copy, Debug)]
+pub struct Tenant<'a> {
+    pub cluster: &'a str,
+    pub owner: Option<&'a str>,
 }
 
 impl std::fmt::Debug for dyn Embedder {

@@ -275,12 +275,15 @@ domain (`<cluster>.search.<domain>`). Secrets are compared in constant time. Eac
 request-rate and in-flight byte budgets so one tenant can't starve the node.
 
 The embedding model is the node's, shared by its clusters (`search_server::embed`): a bounded
-pool of workers (a third of the CPUs by default, optionally pinned), inputs queued per cluster in
-jobs of 8 and taken round-robin across clusters, a per-cluster queue cap answered with
-Elasticsearch's 429 (`es_rejected_execution_exception`), caps on inputs per call and characters
-per input, its memory counted against the node's memory budget, and each job's thread CPU time
-metered to its cluster. The weights come only from the operator (a pinned URL or a directory),
-checked by SHA-256.
+pool of workers (a third of the CPUs by default, optionally pinned); inputs cut to the bounded
+start their 512 tokens come from and queued per cluster in jobs of about 1,024 tokens; turns by
+owner first (the catalog's owner, in `ClusterSpec::owner`), then by cluster; queue caps per
+cluster (inputs, bytes) and per node (bytes, tokens) answered with Elasticsearch's 429
+(`es_rejected_execution_exception`); a cap on inputs per call; the model, a load in progress, the
+queued inputs and the running jobs counted against the node's memory budget; and each job's
+thread CPU time metered to its cluster. One detached task fetches, checks and loads the model
+however many callers wait or give up. The weights come only from the operator (a pinned URL or
+a directory), checked by SHA-256.
 
 APIs built on other APIs (EQL, ES|QL, SQL, PPL, graph, vector tiles, `terms_enum`, transforms'
 preview, rollup search, downsampling, search applications, …) make their inner requests as

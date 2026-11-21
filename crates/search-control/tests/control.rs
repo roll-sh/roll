@@ -3343,10 +3343,10 @@ async fn suggestions_never_touch_a_name_they_did_not_build() {
 }
 
 /// The node's embedding pool across tenants, on the tiny made-up model (`search_embed::tiny`):
-/// `semantic_text` with the E5 endpoint end to end, clusters served in turns (one cluster's long
-/// call doesn't hold another's short one), each cluster's queue capped with Elasticsearch's 429,
-/// the per-call caps, the CPU each cluster's inputs took metered to it, and the model dropped
-/// once idle.
+/// `semantic_text` with the E5 endpoint end to end, a 1,000-document reindex into it on two
+/// workers, each cluster's queue capped with Elasticsearch's 429, the per-call cap, an input
+/// with no spaces cut instead of refused, the CPU each cluster's inputs took metered to it, and
+/// the model dropped once idle. (The order of turns is `search_server::embed`'s unit tests'.)
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn the_embedding_pool_takes_turns_caps_queues_and_meters_cpu() {
     use search_server::embed::{EmbedConfig, ModelSource};
@@ -3356,10 +3356,9 @@ async fn the_embedding_pool_takes_turns_caps_queues_and_meters_cpu() {
     let e = env_with(move |c| {
         let mut ec = EmbedConfig::new(ModelSource::Dir(dir), c.home.join("models"));
         ec.unchecked = true;
-        ec.workers = 1;
+        ec.workers = 2;
         ec.queue_inputs = 72;
         ec.max_inputs = 100;
-        ec.max_input_chars = 5000;
         ec.idle_unload = Duration::from_secs(2);
         c.embed = Some(ec);
     })
@@ -3387,20 +3386,21 @@ async fn the_embedding_pool_takes_turns_caps_queues_and_meters_cpu() {
     assert_eq!(s, 200, "{v}");
     assert!(v["hits"]["total"]["value"].as_i64().unwrap() >= 10, "{v}");
 
-    // A call of 64 inputs (8 jobs) from a; b's single input is served in its turn, while a's are
-    // still running.
-    let long: Vec<String> = (0..64).map(|i| format!("{i} {}", "z y x w ".repeat(3))).collect();
-    let (es, http, au2, ap2) = (e.es.clone(), e.http.clone(), au.clone(), ap.clone());
-    let a_call = tokio::spawn(async move {
-        let r = http.post(format!("{es}{e5}")).basic_auth(&au2, Some(&ap2)).json(&json!({"input": long})).send().await.unwrap();
-        r.status().as_u16()
-    });
-    tokio::time::sleep(Duration::from_millis(200)).await;
+    // A reindex of 1,000 documents into semantic_text: batches of 10 with no deadline, as
+    // Elasticsearch's bulk filter sends them, however long the queue.
+    let mut bulk = String::new();
+    for i in 0..1000 {
+        bulk.push_str(&format!("{{\"index\":{{\"_id\":\"{i}\"}}}}\n{{\"body\":\"source document {i} on reindexing\"}}\n"));
+    }
+    let r = e.http.post(format!("{}/src/_bulk?refresh=true", e.es)).basic_auth(&au, Some(&ap)).header("content-type", "application/x-ndjson").body(bulk).send().await.unwrap();
+    assert_eq!(r.json::<Value>().await.unwrap()["errors"], false);
+    let (s, v) = e.es(&au, &ap, reqwest::Method::PUT, "/docs2", Some(json!({"mappings": {"properties": {"body": {"type": "semantic_text", "inference_id": ".multilingual-e5-small-elasticsearch"}}}}))).await;
+    assert_eq!(s, 200, "{v}");
+    let (s, v) = e.es(&au, &ap, reqwest::Method::POST, "/_reindex?refresh=true", Some(json!({"source": {"index": "src"}, "dest": {"index": "docs2"}}))).await;
+    assert_eq!((s, v["created"].as_i64(), v["failures"].as_array().map(Vec::len)), (200, Some(1000), Some(0)), "{v}");
     let (s, v) = e.es(&bu, &bp, reqwest::Method::POST, e5, Some(json!({"input": "short"}))).await;
     assert_eq!(s, 200, "{v}");
     assert_eq!(v["text_embedding"][0]["embedding"].as_array().unwrap().len(), 384);
-    assert!(!a_call.is_finished(), "b waited for all of a's inputs");
-    assert_eq!(a_call.await.unwrap(), 200);
     // Past a cluster's queue (72 inputs) a call is refused whole, as a full deployment refuses.
     let many: Vec<String> = (0..73).map(|i| format!("more {i}")).collect();
     let (s, v) = e.es(&au, &ap, reqwest::Method::POST, e5, Some(json!({"input": many}))).await;
@@ -3411,15 +3411,16 @@ async fn the_embedding_pool_takes_turns_caps_queues_and_meters_cpu() {
     let pool = e.control.node.cfg.embedder.clone().unwrap();
     assert!(pool.resident_bytes() > 0);
 
-    // Per-call caps.
+    // The per-call cap; a long input without a space is cut to its first 512 tokens, not
+    // refused.
     let many: Vec<String> = (0..101).map(|i| i.to_string()).collect();
     let (s, v) = e.es(&bu, &bp, reqwest::Method::POST, e5, Some(json!({"input": many}))).await;
     assert_eq!(s, 400, "{v}");
-    let (s, v) = e.es(&bu, &bp, reqwest::Method::POST, e5, Some(json!({"input": "x".repeat(5001)}))).await;
-    assert_eq!(s, 400, "{v}");
+    let (s, v) = e.es(&bu, &bp, reqwest::Method::POST, e5, Some(json!({"input": "x".repeat(300_000)}))).await;
+    assert_eq!(s, 200, "{v}");
 
-    // Each cluster is billed the CPU its inputs took: a's 84 inputs (20 documents, 64 inputs)
-    // more than b's 73 short ones.
+    // Each cluster is billed the CPU its inputs took: a's 1,020 documents more than b's 74 short
+    // inputs.
     e.control.sample().await.unwrap();
     let ua = e.get(&format!("/v1/search/clusters/{a_id}/usage?days=1")).await;
     let ub = e.get(&format!("/v1/search/clusters/{b_id}/usage?days=1")).await;

@@ -53,9 +53,9 @@ pub const FILES: [(&str, &str, u64); 2] = [
     (TOKENIZER, "0b44a9d7b51c3c62626640cda0e2c2f70fdacdc25bbbd68038369d14ebdf4c39", 17_082_730),
 ];
 
-/// Inputs longer than this many bytes are first tokenized from their start only: when that
-/// start already gives more than [`MAX_TOKENS`] tokens, the rest can't change the embedding.
-const PREFIX_BYTES: usize = 16 << 10;
+/// A run of whitespace longer than this is shortened to it before tokenizing: the normalizer
+/// collapses any run to one space, so the tokens are the same.
+const WHITESPACE_RUN: usize = 16;
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -73,8 +73,11 @@ pub type Result<T> = std::result::Result<T, Error>;
 pub struct E5 {
     tokenizer: tokenizers::Tokenizer,
     model: model::Bert,
-    /// Bytes the weights take in memory.
+    /// Bytes the weights and the tokenizer take in memory.
     bytes: u64,
+    /// Bytes of input that can hold [`MAX_TOKENS`] tokens: four times 512 times the longest
+    /// vocabulary piece ([`E5::cut`]).
+    cut_bytes: usize,
 }
 
 impl std::fmt::Debug for E5 {
@@ -93,7 +96,9 @@ impl E5 {
 
     /// [`E5::load`] with the linear layers' precision chosen.
     pub fn load_with(dir: &Path, precision: model::Precision) -> Result<E5> {
-        let mut tokenizer = tokenizers::Tokenizer::from_file(dir.join(TOKENIZER)).map_err(|e| Error::Tokenizer(e.to_string()))?;
+        let tokenizer_file = dir.join(TOKENIZER);
+        let tokenizer_size = std::fs::metadata(&tokenizer_file).map_err(|e| Error::Files(format!("{}: {e}", tokenizer_file.display())))?.len();
+        let mut tokenizer = tokenizers::Tokenizer::from_file(&tokenizer_file).map_err(|e| Error::Tokenizer(e.to_string()))?;
         tokenizer.with_padding(None);
         tokenizer.with_truncation(None).map_err(|e| Error::Tokenizer(e.to_string()))?;
         let path = dir.join(WEIGHTS);
@@ -104,15 +109,31 @@ impl E5 {
         let map = unsafe { memmap2::Mmap::map(&file) }.map_err(|e| Error::Files(format!("{}: {e}", path.display())))?;
         let tensors = read_tensors(&map).map_err(|e| Error::Files(format!("{}: {e}", path.display())))?;
         drop(map);
-        let model = model::Bert::new(&tensors, precision)?;
-        drop(tensors);
-        let bytes = model.bytes();
-        Ok(E5 { tokenizer, model, bytes })
+        let model = model::Bert::new(tensors, precision)?;
+        // The vocabulary twice (piece to id and back) and the lattice tables: about twice the
+        // JSON it was read from (an estimate; the tokenizer doesn't report its size).
+        let bytes = model.bytes() + 2 * tokenizer_size;
+        let longest = tokenizer.get_vocab(true).keys().map(|p| p.trim_start_matches('\u{2581}').len()).max().unwrap_or(1).max(1);
+        let cut_bytes = (4 * MAX_TOKENS * longest).max(4096);
+        Ok(E5 { tokenizer, model, bytes, cut_bytes })
     }
 
-    /// Bytes the loaded model holds.
+    /// Bytes the loaded model holds (weights, and an estimate of the tokenizer's tables).
     pub fn bytes(&self) -> u64 {
         self.bytes
+    }
+
+    /// The start of `text` its first [`MAX_TOKENS`] tokens come from, trailing whitespace
+    /// dropped: at most [`E5::cut_bytes`] bytes, whitespace runs shortened. Tokenizing the cut
+    /// gives the same 512 tokens as tokenizing the whole text, in bounded time and memory,
+    /// whatever the input (a megabyte without a space included).
+    pub fn cut<'a>(&self, text: &'a str) -> std::borrow::Cow<'a, str> {
+        cut_text(text, self.cut_bytes)
+    }
+
+    /// Bytes [`E5::cut`] keeps at most.
+    pub fn cut_bytes(&self) -> usize {
+        self.cut_bytes
     }
 
     /// Memory embedding an input of the longest length takes besides the weights (the hidden
@@ -121,26 +142,19 @@ impl E5 {
         self.model.activation_bytes(MAX_TOKENS.min(self.model.max_positions()).max(1))
     }
 
-    /// `text`'s token ids as the model sees them: `<s>`, at most 510 tokens, `</s>`. Trailing
-    /// whitespace is dropped first, as SentencePiece's `remove_extra_whitespaces` (and
-    /// Elasticsearch's tokenizer) drops it; `tokenizer.json` would give it a token of its own.
+    /// `text`'s token ids as the model sees them: `<s>`, at most 510 tokens, `</s>`.
     pub fn tokenize(&self, text: &str) -> Result<Vec<u32>> {
-        let text = text.trim_end();
-        if text.len() > PREFIX_BYTES {
-            // Cut at whitespace, which the pre-tokenizer splits on: the tokens before the cut are
-            // those of the whole text.
-            let mut end = PREFIX_BYTES;
-            while !text.is_char_boundary(end) {
-                end -= 1;
-            }
-            if let Some(ws) = text[..end].rfind(char::is_whitespace) {
-                let ids = self.encode(&text[..ws])?;
-                if ids.len() > MAX_TOKENS {
-                    return Ok(truncate(ids));
-                }
-            }
-        }
-        Ok(truncate(self.encode(text)?))
+        self.tokenize_prefixed("", text)
+    }
+
+    /// The token ids of `prefix` then `text` ([`E5::cut`] first), without building the
+    /// prefixed copy of a long text. Trailing whitespace is dropped, as SentencePiece's
+    /// `remove_extra_whitespaces` (and Elasticsearch's tokenizer) drops it; `tokenizer.json`
+    /// would give it a token of its own.
+    pub fn tokenize_prefixed(&self, prefix: &str, text: &str) -> Result<Vec<u32>> {
+        let cut = self.cut(text);
+        let input = if prefix.is_empty() { cut } else { std::borrow::Cow::Owned(format!("{prefix}{cut}")) };
+        Ok(truncate(self.encode(input.trim_end())?))
     }
 
     fn encode(&self, text: &str) -> Result<Vec<u32>> {
@@ -150,8 +164,12 @@ impl E5 {
 
     /// Embeddings of `texts`, in order.
     pub fn embed(&self, texts: &[&str]) -> Result<Vec<Vec<f32>>> {
-        let ids: Vec<Vec<u32>> = texts.iter().map(|t| self.tokenize(t)).collect::<Result<_>>()?;
-        self.embed_tokens(&ids)
+        texts.iter().map(|t| self.embed_one(&self.tokenize(t)?)).collect()
+    }
+
+    /// Embeddings of `prefix` before each of `texts`, in order, one input at a time.
+    pub fn embed_prefixed(&self, prefix: &str, texts: &[String]) -> Result<Vec<Vec<f32>>> {
+        texts.iter().map(|t| self.embed_one(&self.tokenize_prefixed(prefix, t)?)).collect()
     }
 
     /// Embeddings of tokenized inputs ([`E5::tokenize`]), in order, each run on its own.
@@ -215,6 +233,37 @@ fn f16_to_f32(h: u16) -> f32 {
     f32::from_bits(bits)
 }
 
+/// `text` without trailing whitespace, whitespace runs longer than [`WHITESPACE_RUN`]
+/// shortened to it, cut to at most `limit` bytes at a character boundary. Borrowed when nothing
+/// was shortened.
+pub fn cut_text(text: &str, limit: usize) -> std::borrow::Cow<'_, str> {
+    let text = text.trim_end();
+    let mut out: Option<String> = None;
+    let (mut run, mut kept) = (0usize, 0usize);
+    for (i, c) in text.char_indices() {
+        run = if c.is_whitespace() { run + 1 } else { 0 };
+        if run > WHITESPACE_RUN {
+            out.get_or_insert_with(|| text[..i].to_string());
+            continue;
+        }
+        let n = c.len_utf8();
+        if kept + n > limit {
+            return match out {
+                Some(o) => std::borrow::Cow::Owned(o),
+                None => std::borrow::Cow::Borrowed(&text[..i]),
+            };
+        }
+        kept += n;
+        if let Some(o) = out.as_mut() {
+            o.push(c);
+        }
+    }
+    match out {
+        Some(o) => std::borrow::Cow::Owned(o),
+        None => std::borrow::Cow::Borrowed(text),
+    }
+}
+
 fn truncate(mut ids: Vec<u32>) -> Vec<u32> {
     if ids.len() > MAX_TOKENS {
         let last = ids[ids.len() - 1];
@@ -235,6 +284,17 @@ mod tests {
         assert_eq!(t.len(), MAX_TOKENS);
         assert_eq!((t[0], t[510], t[511]), (0, 514, 2));
         assert_eq!(truncate(vec![0, 7, 2]), [0, 7, 2]);
+    }
+
+    #[test]
+    fn cuts_are_bounded_and_borrow_when_they_can() {
+        assert!(matches!(cut_text("short text  ", 100), std::borrow::Cow::Borrowed("short text")));
+        assert_eq!(cut_text("abcdef", 4), "abcd");
+        // A character is never split.
+        assert_eq!(cut_text("ééé", 5), "éé");
+        let spaced = format!("a{}b", " ".repeat(1000));
+        assert_eq!(cut_text(&spaced, 100), format!("a{}b", " ".repeat(WHITESPACE_RUN)));
+        assert_eq!(cut_text(&"x".repeat(1 << 20), 4096).len(), 4096);
     }
 
     #[test]
