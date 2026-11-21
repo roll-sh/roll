@@ -567,6 +567,10 @@ async fn a_2026_client_is_served_without_initialize() {
     let (s, h, out) = send(OPERATOR, 2, "tools/list", json!({}), std_headers("tools/list", None)).await;
     assert_eq!((s, out["result"]["cacheScope"].as_str(), out["result"]["ttlMs"].as_u64()), (StatusCode::OK, Some("private"), Some(60_000)), "{out}");
     assert!(!out["result"]["tools"].as_array().unwrap().is_empty() && h.get("mcp-session-id").is_none());
+    // A resource that isn't there is Invalid Params in this revision (SEP-2164; -32002 before it).
+    let uri = "roll://nothing/here";
+    let (_, _, out) = send(OPERATOR, 21, "resources/read", json!({ "uri": uri }), std_headers("resources/read", Some(uri))).await;
+    assert_eq!(out["error"]["code"], -32602, "{out}");
 
     // Headers that don't say what the body says, or a version roll doesn't speak.
     let call = json!({ "name": "postgres_list_projects", "arguments": {} });

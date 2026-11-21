@@ -499,6 +499,45 @@ allowlist (a preview's branch included); change it like any setting.
   redirects, no proxy, bounded reads (`--search-repository-allow-private` for local MinIO,
   fake-gcs-server and Azurite; `scripts/search-repo-emulators.sh` runs the `gcs` and `azure`
   tests against those two in Docker).
+- **Credentials by reference** (`api/snapshots/refs.rs`). Any of those settings may hold a roll
+  secrets reference (`roll://ENV/KEY`) instead. It isn't a secret: it stays in the settings as
+  written (the cluster state, `GET _snapshot` and branches show it), and the value is never
+  stored. Whether a setting is a reference is roll secrets' own parser's to say
+  (`roll_secrets::Reference::parse`, through the cluster's resolver), never a check of search's:
+  exactly `roll://…` is one, and a near miss (a space before or after it, `ROLL://`) is a 400 on
+  both routes, never kept as a value. A node without roll's control plane (a dev node, the YAML
+  clusters) has no resolver and no references: every value there is a value, and a `roll://…`
+  one is sent as that literal string, never resolved.
+  - *Who writes one.* Only roll's control plane:
+    `PUT /v1/search/clusters/{id}/repositories/{name}` (Elasticsearch's body) asks roll secrets
+    whether the caller may choose each reference (`Secrets::bind_ref`, the caller as a
+    request to secrets would be: 403 if not, 400 for a cluster no project stands for or a key that
+    doesn't exist), then registers the repository naming the caller in `x-roll-repository-maker`,
+    kept as the repository's `refs_by`. The node's REST port drops that header from every request
+    but roll's own forwards, and the control plane drops it from what its console relays. On the
+    cluster's endpoint a `PUT _snapshot` naming a reference is a 400 `settings_exception` pointing
+    at roll's API, so its password or a `manage` API key can't send a project's secret to an
+    endpoint of their choosing. Registering the repository again there (another endpoint or
+    bucket) without the references drops them: where credentials go never changes without them
+    being given again.
+  - *Resolving.* search-es only knows the seam (`search_es::secret_refs::SecretRefs`, on the
+    cluster's config, with the cluster's id bound when the node loads it: a name can be reused
+    after a delete); search-control's resolver finds the cluster in the catalog by that id
+    (`secret_refs.rs`) and rolld's `ForSearch` reads the reference as its maker
+    (`Secrets::resolve_as`/`digest_as` with the stored `Maker`: their rights looked up again on
+    every use, so a person who can't sign in or no longer owns the project, a demoted admin or a
+    revoked token stops it; a sensitive key is refused) for workspace resource `search` with the
+    cluster's id. A branch asks
+    as the cluster its line started from, marked untrusted (`ResourceRef::untrusted`): no
+    protected environment, no sensitive key, whoever made the reference. A cluster restored after
+    a delete keeps its id and owner, so it stays trusted. The value is resolved when the
+    repository's client is built; each repository operation (snapshot, restore, verify, cleanup)
+    first asks for the references' digests (which re-checks the maker) and reuses the values it
+    holds in memory while they're the same, so a rotation reaches the next operation. A reference
+    refused later (the secret deleted, the maker's access gone) fails that operation with the
+    reason; it never falls back to anonymous requests or to values held from before, and no error
+    carries a value. Resolved values are wiped when dropped, and unregistering a repository drops
+    them. A branch is told the same thing whether a key is protected or missing.
 
 ## On the fleet (roll cloud)
 

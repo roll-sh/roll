@@ -449,6 +449,11 @@ async fn respond<B: RequestBody>(node: Arc<Node>, req: Request<B>, sni: Option<&
     // says it, never a client.
     use search_es::xpack::security::audit::CLIENT_ADDRESS_HEADER;
     es.headers.retain(|(k, _)| !k.eq_ignore_ascii_case(CLIENT_ADDRESS_HEADER));
+    // Who wrote a repository's roll secrets references: only roll's control plane says it (its
+    // own requests, forwarded signed from another node), never a client.
+    if !matches!(origin, Origin::Internal) {
+        es.headers.retain(|(k, _)| !k.eq_ignore_ascii_case(search_es::secret_refs::MAKER_HEADER));
+    }
     if let Origin::Client(ip) = origin {
         es.headers.push((CLIENT_ADDRESS_HEADER.to_string(), crate::allow::canonical(ip).to_string()));
     }

@@ -527,6 +527,56 @@ async fn landings_while_the_daemon_was_down_are_delivered_after_a_restart() {
     assert_eq!(msgs, vec![json!("before"), json!("burst 0"), json!("burst 1"), json!("burst 2")]);
 }
 
+/// A webhook made on a server without `ROLL_SECRET_KEY` keeps its secret in the clear. Once the
+/// server has the key, opening seals it (once: opening again leaves it as it is), and its
+/// deliveries are still signed with the secret it was given.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn webhooks_made_before_sealing_still_verify() {
+    let rx = receiver().await;
+    let dir = tempfile::tempdir().unwrap();
+    let kept = |code: &code_control::Code, id: &str| -> (String, i64) {
+        code.db.sql().query_row("SELECT secret, secret_sealed FROM repo_webhooks WHERE id = ?", [id], |r| Ok((r.get(0)?, r.get(1)?))).unwrap()
+    };
+    let verify = |g: &Got, secret: &str| {
+        let ts: i64 = g.headers["x-roll-timestamp"].to_str().unwrap().parse().unwrap();
+        assert_eq!(g.headers["x-roll-signature-256"].to_str().unwrap(), code_control::review::apps::signature(secret, ts, &g.raw));
+    };
+    let (id, secret, old) = {
+        let code = common::open_in(dir.path(), |c| c.review_app_retry_ms = 20);
+        let a = App { router: code_control::api::router(code.clone()), code, dir: tempfile::tempdir().unwrap() };
+        a.repo("acme", "api").await;
+        let created = a.ok("POST", &format!("{P}/webhooks"), Some(json!({ "url": rx.url, "events": ["landed"] }))).await;
+        let (id, secret) = (created["webhook"]["id"].as_str().unwrap().to_string(), created["secret"].as_str().unwrap().to_string());
+        verify(&rx.wait("ping", |_| true).await, &secret);
+        assert_eq!(kept(&a.code, &id), (secret.clone(), 0), "in the clear without a key");
+        (id, secret, Arc::downgrade(&a.code))
+    };
+    for _ in 0..500 {
+        if old.upgrade().is_none() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert!(old.upgrade().is_none(), "the old process is gone");
+    let with_key = |c: &mut code_control::Config| {
+        c.review_app_retry_ms = 20;
+        c.review.secret_key = Some("0123456789abcdef0123456789abcdef".into());
+    };
+    let code = common::open_in(dir.path(), with_key);
+    let (sealed, flag) = kept(&code, &id);
+    assert!(flag == 1 && !sealed.contains(&secret), "sealed on open");
+    assert_eq!(kept(&common::open_in(dir.path(), with_key), &id), (sealed, 1), "a second open leaves it alone");
+    let a = App { router: code_control::api::router(code.clone()), code: code.clone(), dir: tempfile::tempdir().unwrap() };
+    let ping = a.ok("POST", &format!("{P}/webhooks/{id}/ping"), None).await;
+    code.start_webhooks();
+    verify(&rx.wait("ping", |g| g.body["delivery"] == ping["id"]).await, &secret);
+    // A webhook made with the key is sealed from the start.
+    let created = a.ok("POST", &format!("{P}/webhooks"), Some(json!({ "url": rx.url, "events": ["landed"] }))).await;
+    let (id2, secret2) = (created["webhook"]["id"].as_str().unwrap(), created["secret"].as_str().unwrap());
+    assert_eq!(kept(&code, id2).1, 1);
+    verify(&rx.wait("ping", |g| g.body["webhook"] == id2).await, secret2);
+}
+
 /// A delivery queued by a process that stopped before sending it goes out once the next process
 /// starts its webhooks, without waiting for an event of its own to wake the delivery worker.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

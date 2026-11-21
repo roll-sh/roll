@@ -6,7 +6,7 @@ import { ActorMark, ApprovalMark, ago, button, Chip, ErrorNote, errorText, sized
 
 type Kind = "all" | "changes" | "reads" | "requests" | "syncs" | "alerts";
 
-/** Read alerts (`secrets.alert`) and a decoy's use (`secrets.alert.decoy_used`, admins only). */
+/** Read alerts (`secrets.alert`) and a decoy's use (`secrets.alert.decoy_used`, admins' sessions only). */
 const isAlert = (action: string) => action === "secrets.alert" || action.startsWith("secrets.alert.");
 
 const KIND_OF = (action: string): Exclude<Kind, "all"> | "other" =>
