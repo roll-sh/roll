@@ -17590,3 +17590,87 @@ Found, not fixed (with repros in `~/.cache/a274/probe`):
 - A derived equality between two columns of one table comes out commuted (`Filter: (num = a)`,
   PostgreSQL `(a = num)`) for `... join b on a.code = b.a where c.a = b.num`, also with plain
   inner joins (the binder's generate_base_implied_equalities placement, `binder/optimize.rs`).
+
+### Second candidate (`cand/a274-2`, on top of the first: it uses `costs::binary_coercible`)
+
+- **Hashed `= ANY (array)`** (`costs::hashed_saop`): PostgreSQL's preprocess_expression marks
+  `x = ANY` (and `x <> ALL`, its negator hashing) over a constant array of 9 or more elements,
+  whose `=` hashes the left operand's type as the elements' (convert_saop_to_hashed_saop), in
+  WHERE clauses and target lists; cost_qual_eval then charges a startup of a hash call per
+  element and per row one hash and one comparison, not half the array's comparisons. The
+  engine charged the linear search: 0.125 per row for a 100-element list where PostgreSQL
+  charges 0.005, enough to move a scan choice. Now `costs::qual_cost` (2 operators),
+  `costs::qual_startup` (added in `quals_cost` and EXPLAIN's `subplan_costs`) and the binder's
+  qual ordering (`order_qual_clauses`' per-tuple cost) do as PostgreSQL does.
+- **NULLIF and IS DISTINCT FROM** cost their `=` (a NullIfExpr / DistinctExpr, as an OpExpr);
+  they cost nothing in `costs::qual_cost`. IS DISTINCT FROM is estimated as 1 - its `=`'s
+  selectivity, IS NOT DISTINCT FROM as the `=` (clause_selectivity_ext), not the 0.5 default;
+  against a NULL constant (the binder's form of a row's composite field's null test) it is the
+  NullTest it stands for, free and estimated by nulltestsel.
+- **Join removal through a `char` key** (`analyzejoins.rs` `bare`): the same RelabelType as the
+  first candidate's; a left join to a subquery grouped on its `char` join key, nothing of it
+  read, is removed, as PostgreSQL removes it (273's find, join.sql:102's case).
+- **A semi join's side unique-ified on an expression can be hashed**: create_unique_path's
+  semi_can_hash needs hashable operators only, but the engine sorted every expression key
+  (its plan builder had no hashed form). The unique path is now a HashAggregate grouping on
+  the expressions over the side's columns (`Plan::Distinct` hashed with `on` expressions, as
+  create_unique_plan's AGG_HASHED plan computes its keys), costed as before. `where f in
+  (select n from nt)` (float8 against numeric) is PostgreSQL's plan and cost; EXPLAIN still
+  shows `Group Key: nt.n` for PostgreSQL's `(nt.n)::double precision`, because the join
+  search's clause operands are the binder's hash-key form (a cross-type `float8 = numeric`),
+  and estimates the groups from the default where PostgreSQL decomposes the expression into
+  its column.
+- **One relation's groups over expressions** (`paths.rs` `num_groups`): as estimate_num_groups
+  counts them, a boolean key 2 values, an index expression its statistics, any other
+  expression its columns (pull_var_clause), each column once, then the per-relation clamp.
+  The engine took the 200 default for a key that wasn't a plain column. Hashing a semi join's
+  expression side (above) made that visible: sublink_joins' `(s.s, s.t) in (select m % 20, n
+  from mid)` hashed the side as 200 groups where PostgreSQL counts `m`'s ~6,000 and keeps the
+  semi join (quick-check's golden caught it).
+- Golden `a274_costs`.
+
+Regression files' EXPLAINs, both candidates (full pass, `~/.cache/a274/rx/out-c7`): 28
+more match than on the base, none newly differ (2,455 differ: catalog 991, errors 43, cost
+629, width 239, rows 218, extra-node 121, display 121, other shapes 38, sort-agg 23, join-order
+21, scan 8, join-method 3). TPC-H: base against new on SF 0.05, 22 of 22 plans identical in
+text, costs x1.000 (its IN lists have 2 to 8 elements). Verification: quick-check with `QC_CHECKED=1` on `3434de60c` (both candidates on
+`515ff3b04`): build, clippy (16 warnings, none new), tests 391 passed in 11 binaries, the same
+391 with `--profile verify-checked`, regress 51,148 / 51,150 with 0 newly differing,
+isolation 1,647 / 1,648, pg_dump 14,609 passed; all 727 golden files pass (golden, shuffled,
+wire). An earlier quick-check of the candidate without the `num_groups` fix failed golden
+`sublink_joins` (above). No performance gate: planning does one
+more walk of each qual for hashed arrays (a few nodes for a point select's `id = $1`); not
+measured, as a change of that size isn't measurable against the lanes' noise.
+
+Found, not fixed (repros in `~/.cache/a274/probe`):
+- **A semi join inside a FROM subquery** (subselect:32, :33, :46; `su4.sql`): the subquery's
+  level is planned first and its join read again by the level above as items of its group; the
+  side the semi join unique-ified comes back as an opaque leaf, which `subquery_grouped_outputs`
+  treats as a DISTINCT subquery (its columns lose their statistics, so the merge join's
+  mergejoinscansel is (0, 1) and costs 539 against PostgreSQL's 189.64), still wrapped in the
+  Sort the subquery's merge join chose (EXPLAIN then shows a Hash Join over a Sort). PostgreSQL
+  pulls the subquery up before any join search and plans the semi join once. Without the
+  wrapper the same query matches.
+- **Index collation identity** (rules:106-110, `coll.sql`): PostgreSQL uses an index only when
+  its key collation is the clause's (IndexCollMatchesExprColl compares OIDs: `"C"` is not
+  `"default"` even in a C database). The engine's `key_order_op` compares the storage order
+  (`KeyColl`, None for bytewise), so an index on `t COLLATE "C"` serves `t = 'x'` and `t <
+  'x'` under the default collation.
+- `IN (select ... from (select distinct on ...) s)` (subselect:39): the engine keeps the
+  `ANY_subquery` level (PostgreSQL pulls it up), so reduce_unique_semijoins never sees `s` is
+  distinct; PostgreSQL's create_unique_path also has a no-op path for a subquery distinct on
+  the keys (query_is_distinct_for).
+- A key's cast in a semi join's unique-ification and its groups: `Group Key: nt.n` for
+  PostgreSQL's `(nt.n)::double precision` (the join search's operands are the binder's
+  cross-type hash-key form); EXPLAIN's HashAggregate rows for an expression key take the
+  default (subselect:20: 1,841 against 200).
+- Constant propagation into a second semi join (join:66): `x.unique1 = 0` reaches the first
+  IN's relations, not the second's.
+- PostgreSQL keeps a Subquery Scan when the relation's target list isn't the subquery's
+  output in order (27 blocks, `pg+Subquery Scan`): the reltarget lists a join clause's Vars
+  before a PlaceHolderVar's (join.sql:102's `b_grp`).
+- GIN bitmap scans with `@@ ANY (array)` (tsearch:62-134): PostgreSQL's bitmap index scan
+  runs a ScalarArrayOp's elements itself; the engine has no such index path, so a disabled Seq
+  Scan.
+- One-row Result costs: a strict SQL function or operator of a NULL constant folds to NULL in
+  PostgreSQL (`test_strict(NULL)`, `33 = any (null::int[])`), the engine charges the call.
