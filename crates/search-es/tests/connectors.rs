@@ -18,8 +18,15 @@ fn env(name: &str) -> Option<String> {
     std::env::var(name).ok().filter(|v| !v.is_empty())
 }
 
+fn slots() -> Arc<search_es::xpack::entsearch::sync::slots::Slots> {
+    use search_es::xpack::entsearch::sync::slots::{NODE_MAX, OWNER_MAX, Slots};
+    Slots::new(NODE_MAX, OWNER_MAX)
+}
+
 async fn cluster(settings: &[(&str, &str)]) -> Arc<Cluster> {
     let mut cfg = ClusterConfig::new("connectors");
+    // Its own slots: the tests' clusters share a name, and the node's pool keys on it.
+    cfg.connector_slots = Some(slots());
     cfg.sealer = search_es::seal::Sealer::from_secret("0123456789abcdef0123456789abcdef-connectors");
     cfg.node_settings.push(("roll.connectors.allow_private_hosts".into(), "true".into()));
     cfg.node_settings.push(("roll.connectors.max_docs_per_second".into(), "100000".into()));
@@ -619,6 +626,7 @@ async fn cancel_stops_a_sync_waiting_on_a_silent_server() {
 async fn a_branch_runs_no_inherited_sync_until_the_connector_is_its_own() {
     let (port, got) = fake_postgres(Fake::Password).await;
     let mut cfg = ClusterConfig::new("branch");
+    cfg.connector_slots = Some(slots());
     cfg.sealer = search_es::seal::Sealer::from_secret("0123456789abcdef0123456789abcdef-connectors");
     cfg.node_settings.push(("roll.connectors.allow_private_hosts".into(), "true".into()));
     cfg.branch_of = Some("parent".into());
