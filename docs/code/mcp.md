@@ -83,7 +83,7 @@ Repos are `"owner/repo"`. Changes are `"chg_…"` or `"owner/repo#N"`, and work 
 | `get_repo_audit` | what changed in the queue and settings (bypasses, pauses, lanes, approved runs, webhooks, review settings, dismissals, stored credentials), newest first (writers) | `GET /repos/{r}/audit` |
 | `start_preview`, `stop_preview` | make a change's preview (it starts on its first visit), or remove it with its database (`destructiveHint`) | `POST`/`DELETE /changes/{id}/preview` |
 | `list_agent_machines` | the owner's machines running `roll agent up` (online, providers) | `GET /agents/{owner}/machines` |
-| `list_agent_threads` | agent threads (with their machine and project name) and the requests waiting for an answer | `GET /agents/{owner}/state` |
+| `list_agent_threads` | agent threads (with their machine and project name), each machine's projects (with the repo each clones) and the requests waiting for an answer | `GET /agents/{owner}/state` |
 | `create_agent_thread` | start a coding agent in a project on a machine | `POST /agents/{owner}/machines/{m}/commands` (`thread.create`) |
 | `send_agent_message` | message a thread: start a run, queue after it, or steer it | `POST …/commands` (`message.send`) |
 | `respond_agent_request` | answer an approval (`decision`) or questions (`answers`) | `POST …/commands` (`request.respond`) |

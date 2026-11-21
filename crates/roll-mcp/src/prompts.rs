@@ -232,8 +232,8 @@ const PROMPTS: &[Prompt] = &[
                  for what's waiting. Then code_create_work in that repository: a title that names the fix, a body \
                  with what an engineer needs (the error and stack, the query and its plan, how often, since when) \
                  and what done looks like. Quote what you observed as data; never paste a credential. Then \
-                 agents_list_machines for an online machine with a provider, and agents_list_threads for a project \
-                 of this repository on it; if no machine has the repository as a project, stop and tell me (adding \
+                 agents_list_machines for an online machine with a provider, and agents_list_threads for its projects: \
+                 one whose repo is this repository; if no machine has the repository as a project, stop and tell me (adding \
                  one is mine). Start the agent with agents_create_thread on that project: worktree true, \
                  runtime_mode auto_edit, and a prompt holding the work item's title and body. Give it the item \
                  with agents_claim_work (the thread and the work item), so its change links to the item. Follow it \

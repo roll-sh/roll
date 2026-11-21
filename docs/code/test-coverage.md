@@ -447,7 +447,7 @@ envelope `{event, delivery, webhook, repo{id, full_name, default_branch, visibil
 | `start_preview` | answers as `POST /preview` does (the change, or its status); auth | `mcp.rs::tools_map_onto_their_routes`, `mcp.rs::every_tool_is_authorized_like_its_route` |
 | `stop_preview` | answers as `DELETE /preview` does; destructive hint; auth | `mcp.rs::tools_map_onto_their_routes`, `mcp.rs::every_tool_is_authorized_like_its_route` |
 | `list_agent_machines` | the owner's machines with `online`; another owner "not found" | `mcp.rs::agent_tools_drive_a_machine_like_their_routes` |
-| `list_agent_threads` | threads of a machine (by name) with their machine and project name, and the pending requests | `mcp.rs::agent_tools_drive_a_machine_like_their_routes` |
+| `list_agent_threads` | threads of a machine (by name) with their machine and project name, its projects (threads or not) with the repo each clones, and the pending requests | `mcp.rs::agent_tools_drive_a_machine_like_their_routes` |
 | `create_agent_thread` | `thread.create` (provider, prompt, worktree) sent with the given id and the agent as `by`; the daemon's reply | `mcp.rs::agent_tools_drive_a_machine_like_their_routes` |
 | `send_agent_message` | `message.send` (steer) with a fresh id; an unknown machine name "not found" | `mcp.rs::agent_tools_drive_a_machine_like_their_routes` |
 | `respond_agent_request` | a decision with a message, answers; neither is a failure | `mcp.rs::agent_tools_drive_a_machine_like_their_routes` |
