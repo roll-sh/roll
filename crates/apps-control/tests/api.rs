@@ -3440,6 +3440,65 @@ async fn an_s3_drain_puts_signed_ndjson_objects() {
     assert!(serde_json::from_slice::<Value>(body.split(|b| *b == b'\n').next().unwrap()).is_ok(), "NDJSON");
 }
 
+/// roll storage as the bucket link's provider sees it: one bucket at `endpoint`, a key minted
+/// per link (what was minted and revoked, kept).
+struct FakeBucket {
+    endpoint: String,
+    seen: Mutex<Vec<String>>,
+}
+
+#[async_trait]
+impl apps_control::integrations::Resources for FakeBucket {
+    async fn link_vars(&self, _kind: apps_control::model::LinkKind, r#ref: &str) -> anyhow::Result<Vec<(String, String)>> {
+        Ok(vec![("S3_BUCKET".into(), r#ref.into()), ("AWS_ENDPOINT_URL".into(), self.endpoint.clone()), ("AWS_REGION".into(), "eu-central-1".into())])
+    }
+    async fn link(&self, _kind: apps_control::model::LinkKind, r#ref: &str, to: &str) -> anyhow::Result<Option<apps_control::integrations::Minted>> {
+        self.seen.lock().push(format!("key {to} {ref}"));
+        Ok(Some(apps_control::integrations::Minted { vars: vec![("AWS_ACCESS_KEY_ID".into(), "AKIAMINTED".into()), ("AWS_SECRET_ACCESS_KEY".into(), "minted-secret".into())], kept: "AKIAMINTED".into() }))
+    }
+    async fn unlink(&self, _kind: apps_control::model::LinkKind, _ref: &str, kept: &str) -> anyhow::Result<()> {
+        self.seen.lock().push(format!("revoked {kept}"));
+        Ok(())
+    }
+}
+
+/// A drain into the project's own roll storage bucket: no keys pasted in, one minted for the
+/// drain (and revoked with it); a bucket that isn't on the project is refused.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_drain_into_the_projects_bucket_has_a_key_of_its_own() {
+    let got: Arc<parking_lot::Mutex<Vec<(String, axum::http::HeaderMap)>>> = Default::default();
+    let g = got.clone();
+    let app = axum::Router::new().fallback(move |uri: axum::http::Uri, h: axum::http::HeaderMap| {
+        let g = g.clone();
+        async move {
+            g.lock().push((uri.path().to_string(), h));
+            StatusCode::OK
+        }
+    });
+    let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let endpoint = format!("http://{}", l.local_addr().unwrap());
+    tokio::spawn(axum::serve(l, app).into_future());
+    let fake = Arc::new(FakeBucket { endpoint, seen: Mutex::new(Vec::new()) });
+    let f2 = fake.clone();
+    let w = world_full(|_| {}, false, move |d| d.resources = f2).await;
+    let base = format!("/v1/apps/projects/{}/drains", w.project);
+    assert_eq!(call(&w.api, "POST", &base, Some(json!({"bucket": "logs"}))).await.0, StatusCode::BAD_REQUEST, "not on the project");
+    let ws = w.apps.deps.workspace.clone().unwrap();
+    ws.place(roll_workspace::Scope::All, &w.project, roll_workspace::Kind::Bucket, "logs", 0.0, 0.0).unwrap();
+    assert_eq!(call(&w.api, "POST", &base, Some(json!({"bucket": "logs", "url": "https://x.example/b"}))).await.0, StatusCode::BAD_REQUEST);
+    let (st, d) = call(&w.api, "POST", &base, Some(json!({"bucket": "logs", "prefix": "apps/web"}))).await;
+    assert_eq!((st, d["format"].as_str()), (StatusCode::CREATED, Some("s3")), "{d}");
+    assert!(!d.to_string().contains("minted-secret"));
+    let id = d["id"].as_str().unwrap().to_string();
+    assert_eq!(call(&w.api, "POST", &format!("{base}/{id}/test"), None).await.1["ok"], true);
+    let (path, h) = got.lock().last().cloned().expect("a PUT");
+    assert!(path.starts_with("/logs/apps/web/"), "{path}");
+    assert!(h["authorization"].to_str().unwrap().starts_with("AWS4-HMAC-SHA256 Credential=AKIAMINTED/") && h["authorization"].to_str().unwrap().contains("/eu-central-1/s3/"));
+    assert_eq!(call(&w.api, "PATCH", &format!("{base}/{id}"), Some(json!({"headers": {"aws-access-key-id": "mine", "aws-secret-access-key": "x"}}))).await.0, StatusCode::BAD_REQUEST, "its key is roll's");
+    assert!(call(&w.api, "DELETE", &format!("{base}/{id}"), None).await.0.is_success());
+    assert_eq!(*fake.seen.lock(), [format!("key drain:{} logs", w.project), "revoked AKIAMINTED".to_string()]);
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_log_drain_speaks_syslog_or_otlp() {
     use tokio::io::AsyncReadExt;
