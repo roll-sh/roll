@@ -1266,8 +1266,10 @@ landing past a protected environment's approvals: a person's, never an agent's);
 key's material (`key` on `secrets_create_transit_key` and `secrets_rotate_transit_key`: a
 credential in a tool's arguments, where roll makes one instead). Both are lines in
 `crates/roll-mcp/src/no-field.txt`: `tools_take_their_routes_body_fields` reads each product's HTTP
-contract (apps, workspace, previews, queues, secrets) and fails on a body field the route's tool
-doesn't take and no line explains, as `no-tool.txt` does for routes. A docs search tool (Supabase's `search_docs`): roll's docs are design docs (plans, `## Next` lists, test maps), and serving them would hand agents roadmap notes as how roll works; `roll://guide` covers using roll over MCP, until user-facing docs exist; a smaller default toolset (see Toolsets: it would drop tools from connections that use them; search mode is opt-in); a connection narrowed to one project (Supabase's `project_ref`): their
+contract (apps, workspace, previews, queues, secrets) and fails on a body field or query parameter
+the route's tool doesn't take and no line explains, as `no-tool.txt` does for routes. Left out by
+it: `follow` (a live stream; a tool answers once), files and exports for people (`format`), a
+cache validator (`digest`), and a protected environment's delete confirmation (`confirm`). A docs search tool (Supabase's `search_docs`): roll's docs are design docs (plans, `## Next` lists, test maps), and serving them would hand agents roadmap notes as how roll works; `roll://guide` covers using roll over MCP, until user-facing docs exist; a smaller default toolset (see Toolsets: it would drop tools from connections that use them; search mode is opt-in); a connection narrowed to one project (Supabase's `project_ref`): their
 tokens are account-wide; a roll token's rules already name projects, and the builder's presets
 start from one. `outputSchema` per tool: it would double `tools/list` for clients that read
 `structuredContent` as JSON anyway.
