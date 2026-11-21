@@ -159,8 +159,16 @@ pub struct DecoyAt {
     /// The SCRAM salt the proxy answers its logins with (base64 of 16 bytes).
     pub salt: String,
     pub pg_version: u32,
-    /// The endpoint's compute is up: a real login wouldn't wait for it.
-    pub running: bool,
+    /// The endpoint's compute is up (on this host port): a real login wouldn't wait for it.
+    pub running: Option<u16>,
+}
+
+/// A compute image's answers as learned: `answers` (JSON of `pg_proxy::decoy::Answers`) `None`
+/// when the decoy can't match it.
+pub struct ComputeAnswers {
+    pub image: String,
+    pub image_id: String,
+    pub answers: Option<String>,
 }
 
 pub struct Store {
@@ -226,6 +234,15 @@ ALTER TABLE branches ADD COLUMN app_password TEXT;
 CREATE TABLE decoy_roles (
   project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE, role TEXT NOT NULL,
   salt TEXT NOT NULL, created_at INTEGER NOT NULL, PRIMARY KEY (project_id, role)
+) WITHOUT ROWID;
+"#,
+    // What each compute image answers before a password is checked (`pg_proxy::decoy::learn`),
+    // for decoy roles; `answers` NULL: the decoy can't say what it says. `image_id` is the image
+    // it was learned from, for a reference that can move.
+    r#"
+CREATE TABLE compute_answers (
+  image TEXT PRIMARY KEY, image_id TEXT NOT NULL, pg_version INTEGER NOT NULL, answers TEXT,
+  learned_at INTEGER NOT NULL
 ) WITHOUT ROWID;
 "#,
 ];
@@ -393,7 +410,7 @@ impl Store {
     pub fn decoy_at(&self, endpoint_id: &str, role: &str) -> anyhow::Result<Option<DecoyAt>> {
         self.with(|c| {
             c.prepare_cached(
-                "SELECT d.project_id, d.salt, p.pg_version, e.state FROM endpoints e \
+                "SELECT d.project_id, d.salt, p.pg_version, e.state, e.host_port FROM endpoints e \
                  JOIN decoy_roles d ON d.project_id = e.project_id AND d.role = ?2 \
                  JOIN projects p ON p.id = e.project_id WHERE e.id = ?1",
             )?
@@ -402,10 +419,34 @@ impl Store {
                     project_id: r.get(0)?,
                     salt: r.get(1)?,
                     pg_version: r.get(2)?,
-                    running: r.get::<_, String>(3)? == EndpointState::Running.as_str(),
+                    running: (r.get::<_, String>(3)? == EndpointState::Running.as_str()).then(|| r.get::<_, Option<u16>>(4)).transpose()?.flatten(),
                 })
             })
             .optional()
+        })
+    }
+
+    // ── compute answers ──
+
+    pub fn compute_answers(&self) -> anyhow::Result<Vec<ComputeAnswers>> {
+        self.with(|c| {
+            let mut s = c.prepare("SELECT image, image_id, answers FROM compute_answers")?;
+            s.query_map([], |r| Ok(ComputeAnswers { image: r.get(0)?, image_id: r.get(1)?, answers: r.get(2)? }))?.collect()
+        })
+    }
+
+    pub fn delete_compute_answers(&self) -> anyhow::Result<()> {
+        self.with(|c| c.execute("DELETE FROM compute_answers", []).map(drop))
+    }
+
+    pub fn put_compute_answers(&self, a: &ComputeAnswers, pg_version: u32) -> anyhow::Result<()> {
+        self.with(|c| {
+            c.execute(
+                "INSERT INTO compute_answers (image, image_id, pg_version, answers, learned_at) VALUES (?1, ?2, ?3, ?4, ?5) \
+                 ON CONFLICT (image) DO UPDATE SET image_id = ?2, pg_version = ?3, answers = ?4, learned_at = ?5",
+                params![a.image, a.image_id, pg_version, a.answers, now()],
+            )
+            .map(drop)
         })
     }
 
