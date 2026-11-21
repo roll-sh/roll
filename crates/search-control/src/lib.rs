@@ -21,6 +21,7 @@ pub mod control;
 pub mod meter;
 pub mod pricing;
 pub mod remotes;
+pub mod secret_refs;
 pub mod store;
 pub mod suggestions;
 mod wake;

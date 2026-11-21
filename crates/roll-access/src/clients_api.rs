@@ -45,9 +45,6 @@ struct OidcIn {
     jwks: Option<String>,
 }
 
-/// At most this many other claims an identity matches.
-const CLAIMS_MAX: usize = 10;
-
 /// A trusted identity checked as roll secrets' workload identities are (roll-oidc's shared-issuer
 /// rule included, never optional), as stored.
 fn check_oidc(a: &Access, o: OidcIn) -> Result<String, Error> {
@@ -66,12 +63,7 @@ fn check_oidc(a: &Access, o: OidcIn) -> Result<String, Error> {
     if subject.is_empty() || subject.len() > 512 || subject.chars().all(|c| c == '*') {
         return Err(bad("subject is the token's sub, or a pattern of it with * (never * alone)".into()));
     }
-    if let Some(shape) = roll_oidc::open_to_others(&issuer, &subject) {
-        return Err(bad(format!("{issuer} signs for everyone: the subject names one of its tenants, {shape}")));
-    }
-    if o.claims.len() > CLAIMS_MAX || o.claims.iter().any(|(k, v)| k.is_empty() || k.len() > 64 || v.is_empty() || v.len() > 256 || ["iss", "aud", "sub", "exp", "nbf", "iat"].contains(&k.as_str())) {
-        return Err(bad(format!("claims are at most {CLAIMS_MAX} other string claims (not iss, aud, sub or the times), each a value or a pattern")));
-    }
+    roll_oidc::check_identity(&issuer, &subject, &o.claims).map_err(bad)?;
     if let Some(doc) = &o.jwks {
         roll_oidc::pinned_keys(doc).map_err(bad)?;
     }

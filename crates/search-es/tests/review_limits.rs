@@ -262,3 +262,24 @@ async fn a_transform_whose_search_hits_the_cap_fails() {
     assert_eq!(at(&v, &["transforms", "0", "checkpointing", "last", "checkpoint"]).as_i64().unwrap_or(0), 0, "{}", v.to_json());
     call(&c, "POST", "/_transform/t/_stop?force=true", "").await;
 }
+
+/// A MaxSim over one document with many vectors (query vectors × document vectors × dims of
+/// work: 268M multiply-adds, seconds in a debug build) stops at the request's `timeout`. There
+/// is only one document, so only the score's own polling of the deadline can stop it; the
+/// search answers with what it has, `timed_out`.
+#[tokio::test]
+async fn max_sim_stops_at_the_request_timeout() {
+    let c = Cluster::in_memory("limits").await;
+    let (status, v) = call(&c, "PUT", "/rv", r#"{"mappings":{"properties":{"v":{"type":"rank_vectors","dims":32}}}}"#).await;
+    assert_eq!(status, 200, "{}", v.to_json());
+    let vectors = |n: usize| format!("[{}]", vec![format!("[{}]", vec!["1"; 32].join(",")); n].join(","));
+    let (status, v) = call(&c, "PUT", "/rv/_doc/1?refresh=true", &format!(r#"{{"v":{}}}"#, vectors(4096))).await;
+    assert_eq!(status, 201, "{}", v.to_json());
+    let query = format!(
+        r#"{{"timeout":"100ms","query":{{"script_score":{{"query":{{"match_all":{{}}}},"script":{{"source":"maxSimDotProduct(params.q, 'v')","params":{{"q":{}}}}}}}}}}}"#,
+        vectors(2048)
+    );
+    let (status, v) = call(&c, "POST", "/rv/_search", &query).await;
+    assert_eq!(status, 200, "{}", v.to_json());
+    assert_eq!(at(&v, &["timed_out"]).as_bool(), Some(true), "{}", v.to_json());
+}

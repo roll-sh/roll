@@ -299,7 +299,7 @@ pub fn check(r: &SignedRequest, server_id: &str, now: i64) -> Result<StsCall> {
 }
 
 /// The element `tag`'s text, when the document has exactly one.
-fn element<'a>(doc: &'a str, tag: &str) -> Option<&'a str> {
+pub(crate) fn element<'a>(doc: &'a str, tag: &str) -> Option<&'a str> {
     let (open, close) = (format!("<{tag}>"), format!("</{tag}>"));
     let start = doc.find(&open)? + open.len();
     let len = doc[start..].find(&close)?;

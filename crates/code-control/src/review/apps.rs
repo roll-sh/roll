@@ -21,6 +21,7 @@
 use super::{Reviewer, ReviewerKind};
 use super::store::{AppRow, DeliveryRow};
 use crate::model::{Owner, RepoRow};
+use crate::signing::Kept;
 use crate::{Caller, Code, Error, Result, hash_token, new_id};
 use hmac::{Hmac, Mac};
 use parking_lot::Mutex;
@@ -229,8 +230,10 @@ impl Code {
             return Err(Error::Unprocessable(format!("at most {MAX_APPS_PER_OWNER} review apps per owner")));
         }
         let t = crate::db::now();
+        let (id, secret) = (new_id("app"), new_secret());
         let a = AppRow {
-            id: new_id("app"),
+            secret: Kept::keep(self.ai.sealer.as_ref(), &id, &secret),
+            id,
             owner_id: o.id.clone(),
             name: name.clone(),
             webhook_url: url.to_string(),
@@ -238,7 +241,6 @@ impl Code {
             repos: self.app_repos(&o, input.get("repos"))?.unwrap_or_default(),
             required: Self::bool_field(input.get("required"), "required")?.unwrap_or(false),
             active: true,
-            secret: new_secret(),
             created_at: t,
             updated_at: t,
         };
@@ -247,7 +249,7 @@ impl Code {
             return Err(Error::Conflict(format!("{} already has a review app called {name}", o.name)));
         }
         self.audit_app(&a, caller, "review_app_create")?;
-        Ok(json!({ "app": self.app_json(&a), "token": token, "secret": a.secret }))
+        Ok(json!({ "app": self.app_json(&a), "token": token, "secret": secret }))
     }
 
     fn audit_app(&self, a: &AppRow, caller: &Caller, action: &str) -> Result<()> {
@@ -318,7 +320,7 @@ impl Code {
     pub fn rotate_app(&self, caller: &Caller, id: &str) -> Result<Value> {
         let a = self.managed_app(caller, id)?;
         let (token, secret) = (new_app_token(), new_secret());
-        self.db.rotate_app(&a.id, &secret, &hash_token(&token))?;
+        self.db.rotate_app(&a.id, &Kept::keep(self.ai.sealer.as_ref(), &a.id, &secret), &hash_token(&token))?;
         self.audit_app(&a, caller, "review_app_rotate")?;
         Ok(json!({ "token": token, "secret": secret }))
     }
@@ -522,7 +524,7 @@ impl Code {
         let attempts = d.attempts + 1;
         // Deliveries go to review apps (`app_…`) and repo webhooks (`wh_…`) alike (GitHub's,
         // `gh_…`, went to `send_github`).
-        let target: std::result::Result<Option<(&str, bool, String, String)>, String> = if d.app_id.starts_with("wh_") {
+        let target: std::result::Result<Option<(&str, bool, String, Kept)>, String> = if d.app_id.starts_with("wh_") {
             self.db.webhook(&d.app_id).map(|h| h.map(|h| ("webhook", h.active, h.url, h.secret))).map_err(|e| e.to_string())
         } else {
             self.db.app(&d.app_id).map(|a| a.map(|a| ("app", a.active, a.webhook_url, a.secret))).map_err(|e| e.to_string())
@@ -537,7 +539,10 @@ impl Code {
             return;
         }
         let result = match target {
-            Ok(Some((_, true, url, secret))) => self.post(client, &url, &secret, &d).await,
+            Ok(Some((_, true, url, secret))) => match secret.open(self.ai.sealer.as_ref(), &d.app_id) {
+                Ok(secret) => self.post(client, &url, &secret, &d).await,
+                Err(e) => Err((None, e, None)),
+            },
             Ok(Some((what, false, ..))) => Err((None, format!("the {what} is disabled"), None)),
             Ok(None) => Err((None, "the app or webhook was deleted".to_string(), None)),
             Err(e) => Err((None, e, None)),

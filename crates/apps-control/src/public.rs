@@ -33,6 +33,14 @@ pub fn router(apps: Arc<Apps>) -> axum::Router {
             if req.uri().path().starts_with(OIDC) {
                 return oidc_token(apps, req).await;
             }
+            // An instance kept awake for work after its answer, with the same token.
+            if req.uri().path().starts_with(AWAKE) {
+                return hold_awake(apps, req).await;
+            }
+            // Builds' remote cache (Turborepo, Nx), with their environment's token.
+            if req.uri().path().starts_with(crate::build_cache::PATH) && req.uri().path()[crate::build_cache::PATH.len()..].starts_with('/') {
+                return crate::build_cache::serve(apps, req).await;
+            }
             // An edge function's `context.next()` ([`crate::edge`]): signed, any host.
             if req.uri().path().starts_with(crate::edge::NEXT) {
                 return crate::edge::next(apps, req).await;
@@ -83,6 +91,49 @@ struct TargetPort(u16);
 /// Where instances send traces: `/_roll/otlp/{service}/{env}/{token}/v1/traces`, any host.
 pub const OTLP: &str = "/_roll/otlp/";
 
+/// Where an environment's instances ask to be kept awake (`ROLL_AWAKE_URL`):
+/// `/_roll/awake/<service>/<env>/<token>`, the token the OIDC address's.
+pub const AWAKE: &str = "/_roll/awake/";
+
+/// `POST …/_roll/awake/<service>/<env>/<token>?instance=<ROLL_INSTANCE>&for=<s>` (Vercel's
+/// `waitUntil`): the instance isn't suspended, put to sleep or scaled in for `for` seconds (1–900,
+/// default 60; a longer hold it has stays), so work after its answer (an email, a webhook, a
+/// telemetry flush) finishes. On the service's owner, where its instances are. `{held_until}`
+/// (unix ms); a wrong token, or an instance that isn't awake, a 404.
+async fn hold_awake(apps: Arc<Apps>, req: Request) -> Response {
+    let parts: Vec<String> = req.uri().path()[AWAKE.len()..].split('/').map(|s| percent_encoding::percent_decode_str(s).decode_utf8_lossy().into_owned()).collect();
+    let [id, env, token] = parts.as_slice() else { return (StatusCode::NOT_FOUND, "").into_response() };
+    if req.method() != axum::http::Method::POST || !id.starts_with("svc_") || !token.starts_with("rlr_") {
+        return (StatusCode::NOT_FOUND, "").into_response();
+    }
+    let (sid, e, t) = (id.clone(), env.clone(), token.clone());
+    let ok = apps.db(move |s| Ok(s.service(&sid).is_ok() && s.oidc_token_of(&sid, &e)?.is_some_and(|k| same(&k, &t)))).await.unwrap_or(false);
+    if !ok {
+        return (StatusCode::NOT_FOUND, "").into_response();
+    }
+    let q: Vec<(String, String)> = req.uri().query().map(|q| url::form_urlencoded::parse(q.as_bytes()).into_owned().collect()).unwrap_or_default();
+    let arg = |k: &str| q.iter().find(|(n, _)| n == k).map(|(_, v)| v.clone());
+    let Some(instance) = arg("instance") else { return (StatusCode::BAD_REQUEST, axum::Json(serde_json::json!({ "error": "instance is the instance's name ($ROLL_INSTANCE)" }))).into_response() };
+    let secs = match arg("for").map(|v| v.parse::<u64>()) {
+        None => 60,
+        Some(Ok(n)) if (1..=900).contains(&n) => n,
+        _ => return (StatusCode::BAD_REQUEST, axum::Json(serde_json::json!({ "error": "for is 1–900 seconds" }))).into_response(),
+    };
+    let (cluster, key, svc, env) = (apps.deps.cluster.clone(), lease_key(id), id.clone(), env.clone());
+    cluster
+        .dispatch(&key, req, |_req, _guard| async move {
+            let Some(live) = apps.lives.lock().get(&crate::env_key(&svc, &env)).cloned() else { return (StatusCode::NOT_FOUND, "").into_response() };
+            match live.hold_awake(&instance, std::time::Duration::from_secs(secs)) {
+                Some(until) => {
+                    let ms = code_sql::now_ms() + until.saturating_duration_since(std::time::Instant::now()).as_millis() as i64;
+                    (StatusCode::OK, axum::Json(serde_json::json!({ "held_until": ms }))).into_response()
+                }
+                None => (StatusCode::NOT_FOUND, axum::Json(serde_json::json!({ "error": format!("{instance} isn't one of {env}'s awake instances") }))).into_response(),
+            }
+        })
+        .await
+}
+
 /// Where an environment's instances read roll's OIDC tokens (`ROLL_OIDC_URL`):
 /// `/_roll/oidc/<service>/<env>/<token>`.
 pub const OIDC: &str = "/_roll/oidc/";
@@ -125,22 +176,40 @@ async fn oidc_token(apps: Arc<Apps>, req: Request) -> Response {
     if !audiences.contains(&aud) {
         return (StatusCode::FORBIDDEN, axum::Json(serde_json::json!({ "error": format!("{aud} isn't one of run.oidc_audiences") }))).into_response();
     }
-    let key = format!("{id}/{env}/{aud}");
-    let now = code_sql::now_ms();
-    let kept = apps.oidc_tokens.lock().get(&key).cloned().filter(|(_, until)| until - now > OIDC_TTL_MS - OIDC_KEEP_MS);
-    let (jwt, until) = match kept {
-        Some(k) => k,
-        None => match apps.deps.secrets.issue(&project, id, env, &aud, std::time::Duration::from_millis(OIDC_TTL_MS as u64)).await {
-            Ok(Some(jwt)) => {
-                let until = now + OIDC_TTL_MS;
-                apps.oidc_tokens.lock().insert(key, (jwt.clone(), until));
-                (jwt, until)
-            }
-            Ok(None) => return (StatusCode::SERVICE_UNAVAILABLE, axum::Json(serde_json::json!({ "error": "roll's OIDC issuer isn't on this deployment (it needs a public URL)" }))).into_response(),
-            Err(e) => return (StatusCode::FORBIDDEN, axum::Json(serde_json::json!({ "error": format!("{e:#}") }))).into_response(),
-        },
+    // An environment's URL is the audience of roll's own pushes and scheduled calls to it: no
+    // instance gets one, or any service could sign a call to another's.
+    if apps.roll_audience(&aud) {
+        return (StatusCode::FORBIDDEN, axum::Json(serde_json::json!({ "error": format!("{aud} is on roll's apps domain: its pushes and scheduled calls are signed for it, and no instance may be") }))).into_response();
+    }
+    let (jwt, until) = match apps.service_token(&project, id, env, &aud).await {
+        Ok(Some(t)) => t,
+        Ok(None) => return (StatusCode::SERVICE_UNAVAILABLE, axum::Json(serde_json::json!({ "error": "roll's OIDC issuer isn't on this deployment (it needs a public URL)" }))).into_response(),
+        Err(e) => return (StatusCode::FORBIDDEN, axum::Json(serde_json::json!({ "error": format!("{e:#}") }))).into_response(),
     };
     (StatusCode::OK, [(header::CACHE_CONTROL, "no-store")], axum::Json(serde_json::json!({ "token": jwt, "expires_at": until }))).into_response()
+}
+
+impl Apps {
+    /// Roll's OIDC token for `service` in `env` (`sub = roll-apps:<project>:<service>:<env>`) for
+    /// `aud`, and when it expires (unix ms): the same one for a minute ([`OIDC_KEEP_MS`]), then signed
+    /// again (so a rotation or a lost trust takes effect). None: no issuer here.
+    /// Whether `aud` names a URL on the apps domain (roll's pushes' and schedules' audiences).
+    pub(crate) fn roll_audience(&self, aud: &str) -> bool {
+        let domain = self.cfg.domain.to_ascii_lowercase();
+        url::Url::parse(aud).ok().and_then(|u| u.host_str().map(str::to_ascii_lowercase)).is_some_and(|h| h == domain || h.ends_with(&format!(".{domain}")))
+    }
+
+    pub(crate) async fn service_token(&self, project: &str, service: &str, env: &str, aud: &str) -> anyhow::Result<Option<(String, i64)>> {
+        let key = format!("{service}/{env}/{aud}");
+        let now = code_sql::now_ms();
+        if let Some(k) = self.oidc_tokens.lock().get(&key).cloned().filter(|(_, until)| until - now > OIDC_TTL_MS - OIDC_KEEP_MS) {
+            return Ok(Some(k));
+        }
+        let Some(jwt) = self.deps.secrets.issue(project, service, env, aud, std::time::Duration::from_millis(OIDC_TTL_MS as u64)).await? else { return Ok(None) };
+        let until = now + OIDC_TTL_MS;
+        self.oidc_tokens.lock().insert(key, (jwt.clone(), until));
+        Ok(Some((jwt, until)))
+    }
 }
 
 /// Where an environment's instances read its runtime config (`ROLL_CONFIG_URL`):
@@ -154,7 +223,8 @@ pub const CONFIG: &str = "/_roll/config/";
 async fn runtime_config(apps: Arc<Apps>, req: Request) -> Response {
     let parts: Vec<String> = req.uri().path()[CONFIG.len()..].split('/').map(|s| percent_encoding::percent_decode_str(s).decode_utf8_lossy().into_owned()).collect();
     let [id, env, token] = parts.as_slice() else { return (StatusCode::NOT_FOUND, "").into_response() };
-    if req.method() != axum::http::Method::GET || !id.starts_with("svc_") || !token.starts_with("rlc_") {
+    // `rlr_` (apps' own secrets), or `rlc_` from before them (still on running instances).
+    if req.method() != axum::http::Method::GET || !id.starts_with("svc_") || !(token.starts_with("rlr_") || token.starts_with("rlc_")) {
         return (StatusCode::NOT_FOUND, "").into_response();
     }
     // A deleted service's (kept for a restore) answers nothing, whatever its token.

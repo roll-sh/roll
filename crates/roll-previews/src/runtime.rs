@@ -733,8 +733,15 @@ impl Runtime {
     pub fn gone_for_host(&self, host: &str) -> Option<crate::store::GonePush> {
         let host = host.rsplit_once(':').filter(|(_, p)| p.bytes().all(|b| b.is_ascii_digit())).map_or(host, |(h, _)| h);
         let host = host.trim_end_matches('.').to_ascii_lowercase();
-        let label = host.strip_suffix(&self.cfg.domain).and_then(|h| h.strip_suffix('.')).filter(|l| !l.is_empty() && !l.contains('.'))?;
-        self.store.gone_push(label).ok().flatten()
+        if let Some(label) = host.strip_suffix(&self.cfg.domain).and_then(|h| h.strip_suffix('.')) {
+            return self.store.gone_push(label).ok().flatten().filter(|_| !label.is_empty() && !label.contains('.'));
+        }
+        // Under a project's own preview domain: only that project's previews' pushes.
+        let (label, base) = host.split_once('.')?;
+        if label.is_empty() || !self.domain_bases().contains(base) {
+            return None;
+        }
+        self.store.gone_domain_push(label, base).ok().flatten()
     }
 
     /// The preview and service a request's host names, if it's a preview host.
@@ -2037,7 +2044,7 @@ fn gone(rt: &Runtime, req: &Request) -> Option<Response> {
 pub async fn serve_host(rt: Arc<Runtime>, req: Request) -> Response {
     match named(&rt, &req) {
         Some((preview, service)) => serve_named(rt, preview, service, req).await,
-        None => (StatusCode::NOT_FOUND, "no such preview").into_response(),
+        None => gone(&rt, &req).unwrap_or_else(|| (StatusCode::NOT_FOUND, "no such preview").into_response()),
     }
 }
 
