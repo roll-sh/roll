@@ -330,6 +330,11 @@ export function CodeChange({ fullName, id }: { fullName: string; id: string }) {
             <Link href={`/dashboard/projects/${project.id}/secrets?${b.environments?.length ? `env=${encodeURIComponent(b.environments[0])}&` : ""}key=${encodeURIComponent(b.key)}`} className="mt-1 inline-block text-[12px] text-accent hover:underline">
               {b.kind === "secret_leak" ? `Rotate ${b.key} in roll secrets` : `Add ${b.key} in roll secrets`}
             </Link>
+          ) : project && b.validity?.result === "live" && b.validity.rotator ? (
+            // A live credential roll can rotate: where its rotation is set up (no new rotation here).
+            <Link href={`/dashboard/projects/${project.id}/secrets?view=syncs`} className="mt-1 inline-block text-[12px] text-accent hover:underline">
+              {b.validity.rotator === "aws-iam" ? "Rotate it: let roll secrets manage this IAM user's keys" : "Rotate it: use a GitHub App's short-lived tokens instead"}
+            </Link>
           ) : null;
         // A credential roll secrets doesn't hold: a writer stores it from the change itself, never
         // from an outsider's (a fork's pull request), whose credential isn't the repo's.
@@ -583,6 +588,9 @@ export function CodeChange({ fullName, id }: { fullName: string; id: string }) {
                     <ul className="space-y-2 px-5 py-4 text-[12.5px] text-muted">
                       {c.notices.map((n) => (
                         <li key={n.message}>
+                          {n.validity?.result === "live" && (
+                            <span className="mr-2 rounded border border-danger/40 px-1.5 py-px font-mono text-[11px] text-danger">live</span>
+                          )}
                           {n.message}
                           {fixIn(n) && <span className="ml-2">{fixIn(n)}</span>}
                           {storeIn(n) && <div className="mt-1.5">{storeIn(n)}</div>}

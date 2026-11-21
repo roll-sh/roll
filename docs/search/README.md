@@ -135,6 +135,14 @@ them (`api::Caller`):
 - A person's workspace project stands only for their own clusters (`Workspace::trusts`: rolld's
   `Owners` reads the owner), so previews, roll secrets' links and roll apps' links take only
   those.
+- A snapshot repository's credentials may be roll secrets references (`roll://ENV/KEY`,
+  architecture.md "Snapshots"), but only through roll's API
+  (`PUT /v1/search/clusters/{id}/repositories/{name}`, the cluster's `admin` for roll-access), by a
+  caller roll secrets lets reveal each one (`Caller::allows`), who is kept as their maker. The
+  cluster's own endpoint refuses them (400): its password or an API key with `manage` is no grant to
+  read a project's secrets. Each use re-checks that the maker still may reveal them; only a cluster
+  on a project's canvas that stands for it resolves one, and a branch resolves as an untrusted copy
+  of the cluster it came from (no protected environment, no sensitive key).
 - Nothing in the API is node-wide besides `GET /v1/search`'s figures: node settings and the
   default repository are rolld's flags (`--search-*`), not routes. A cluster's data plane is
   unchanged: the REST port with the cluster's own credentials, which give what any tenant gets.
@@ -457,6 +465,7 @@ origins (browser search), once they're on main.
 | GET | `/v1/search/clusters/{id}/remotes` | the remote clusters it holds credentials for: `{remotes: [{alias, cluster, cluster_id, key_id, minted, created_at, connected}]}` (never the key) |
 | PUT | `/v1/search/clusters/{id}/remotes/{alias}` | link another cluster of the same owner as remote `alias` (above): `{cluster, skip_unavailable?, access?}` or `{cluster, skip_unavailable?, api_key}` → `{alias, cluster, cluster_id, mode, proxy_address, key_id, minted, skip_unavailable?}`; 404 for a cluster the caller can't link to, missing or not. `admin` on both clusters for roll-access |
 | DELETE | `/v1/search/clusters/{id}/remotes/{alias}` | unlink: the remote's settings and credentials go, a key roll made is revoked (204) |
+| PUT | `/v1/search/clusters/{id}/repositories/{name}` | `PUT _snapshot/{name}` (Elasticsearch's body and query: `verify`), the only way a repository's credential settings can be roll secrets references (`roll://ENV/KEY`): the caller must be able to reveal each (403 if not; 400 for a cluster no project stands for or a key that doesn't exist), and is kept as their maker (architecture.md "Snapshots") → the cluster's answer |
 | POST | `/v1/search/clusters/{id}/migrate/inspect` | list another Elasticsearch or OpenSearch's indices for a migration ("Migrating into roll" above) |
 | POST | `/v1/search/clusters/{id}/migrate` | copy picked indices' definitions and start their reindex tasks (above) |
 | GET, PUT, DELETE | `/v1/search/clusters/{id}/indices/{index}` | Elasticsearch's `GET`/`PUT`/`DELETE /<index>`: mappings, settings and aliases; create (body: `mappings`, `settings`); delete |
@@ -854,8 +863,9 @@ failure (#426); knn beams sized to each segment (#401, Rally's last vector loss 
 nyc_taxis bulk indexing at -28% instructions per document (#417); and #347's expiry test made
 deterministic (#396).
 
-1. **Search from the browser** (built in #358; its second review's
-   cost and shared-state findings are being fixed: per-cluster CORS, browser keys with
+1. **Search from the browser** (built in #358; three reviews found
+   requests the browser pre-check read differently from the engine, so its policy now runs in the
+   engine on the parsed request, with a fourth review next: per-cluster CORS, browser keys with
    rate limits, a Browser search section; Algolia's search-only and secured API keys,
    Typesense's scoped keys, Meilisearch's tenant tokens, Elastic's search applications): a web
    page can't call a roll cluster today. There's no CORS (`http.cors.*` are static settings no
@@ -866,8 +876,9 @@ deterministic (#396).
    Elasticsearch's `_application/search_application/{name}/_search` as the safe surface, and a
    quickstart that works with Elastic's Search UI and InstantSearch through Searchkit. An IP
    allowlist still applies to browsers; the docs say how the two combine.
-2. **Migrating into roll** (built in #485; its security review's fixes (remote reindex
-   behind a per-cluster whitelist as in Elasticsearch, node-level memory and task caps) are gating; Elastic Cloud restores from other deployments, AWS
+2. **Migrating into roll** (built in #485; its second review's fixes (pages charged by
+   what parsing builds, rolld's own endpoints blocked by resolved address, `inspect` bounded, extra
+   indices queued) are gating; Elastic Cloud restores from other deployments, AWS
    OpenSearch Service has migration assistants, Algolia and Typesense import from each other):
    the way in is reindex from remote, and on hosted roll it can't reach anything. It reads plain
    HTTP only (no TLS client) and needs `reindex.remote.whitelist`, a node setting that is empty, so
@@ -878,8 +889,21 @@ deterministic (#396).
    remote cluster's indices, copies mappings, settings and aliases, reindexes with progress
    (`_tasks`), and switches an alias when done. Algolia's export (records, synonyms, rules)
    mapped onto indices, synonym sets and query rules after that.
-3. **A sweep for the bug classes the 2026-11-19 reviews kept finding** (first pass landed in #434; the follow-up, #492, covers the
-   probe's other 15 abort paths). Four
+3. **One memory account per request** (in progress: ES|QL and aggregations against a node budget
+   no tenant setting can raise in #549, Painless per execution, and a node-wide body budget; Elasticsearch charges every request's
+   memory to its circuit breakers, ES|QL's blocks included, and Elastic Cloud's per-deployment
+   limits hold because of it). roll serves many tenants per node, so a request whose memory the
+   breakers don't see is a way for one tenant to stop everyone's searches. Today's reviews found
+   three: remote reindex pages charged 3x their bytes while parsing builds about 80 bytes per value
+   (#485), connector rows parsed into trees (#318), and ES|QL, which charges nothing (`exec.rs`
+   collects rows and columns with no breaker: `STATS` groups, `SORT`, `MV_EXPAND`, `LOOKUP JOIN`
+   and `ENRICH` tables, `VALUES` and `TOP` states). The fix for ES|QL is Elasticsearch's: every
+   page of rows charged to the request breaker as it is built and released when dropped,
+   `circuit_breaking_exception` past the limit, and a node-level limit no tenant setting can
+   raise. Time has its own cap (#530, in review). Rule: charge what a structure costs as it is
+   built, never a multiple of the bytes it came from.
+4. **A sweep for the bug classes the 2026-11-19 reviews kept finding** (first pass landed in #434, the follow-up in #492; what
+   today's reviews still find is resource accounting, item 3). Four
    independent security reviews (connectors #318, cross-cluster search #347 and its gaps #389,
    browser search #358) each found real bugs, in the same few shapes: recursive decoding with no
    depth limit (a stack overflow aborts a shared node), memory held past a request with no breaker
@@ -888,7 +912,7 @@ deterministic (#396).
    authorization path, and secrets or keys a branch inherits from its parent. Only the code those
    reviews read has been checked. Every decoder, cache, context store, credential field and branch
    copy in search gets the same questions, with a test per real finding.
-4. **Cross-cluster search: what's left** (landed in #347, after its security review's fixes: an alias wildcard matching a link and a
+5. **Cross-cluster search: what's left** (ES|QL across clusters is #504, in its third review; landed in #347, after its security review's fixes: an alias wildcard matching a link and a
    loopback remote skipped the local index check, and merges were quadratic and unbounded;
    same owner only,
    checked at link time and on every request, `cross_cluster` keys issued on the remote and kept
@@ -899,7 +923,7 @@ deterministic (#396).
    clusters panel, OpenSearch 3.9's `cluster.remote.*` answers. Left: ES|QL
    `FROM <alias>:<index>`; linking OpenSearch-flavor clusters (no `cross_cluster` keys there:
    it needs a credential model and a review of its own).
-5. **The Rally losses left by the full rerun** (Round 10, vectors, #268: Elasticsearch 9.1+ runs no merge while less than ~93.5 GB of disk is free, and this host was 91-98% full, so Round 9's Elasticsearch races were held on vectors and noaa (4 of 6); the harness now sets `indices.merge.disk.check_interval=0`. With merges flowing, the force-merged vector losses are gone and dense_vector `100-1000_multiple_segments` (2.30x) was the one loss with ranges apart; Round 12 makes it a tie (0.97, 6.13 against 6.35 ms; 0.83 at equal foreign load): each segment now searches a beam sized to its share of the shard, as Lucene 10.5 does, −33% instructions per query, recall unchanged. Round 11, noaa and nyc_taxis rerun with merges flowing at `769dd6744` (#340): Round 9's noaa claims held (every range-field query ahead in median, all ties; `conjunction_big_range_big_term` 7.4 against 12.2 ms, faster in 6 of 6 rounds; indexing 0.75, ahead in 6 of 6), and nyc_taxis wasn't held at all (its 0-merge races are Elasticsearch's merge policy). What changed: nyc_taxis `distance_amount_agg` leads by less (46 against 78 ms, 0.59; Round 9's 118 was load), its `range` now leads (0.88), and Elasticsearch now indexes nyc_taxis faster in median (1.03 docs/s, bulk p50 1.04, ties)) (docs/benchmarks/search.md: Round 8, every Rally
+6. **The Rally losses left by the full rerun** (Round 10, vectors, #268: Elasticsearch 9.1+ runs no merge while less than ~93.5 GB of disk is free, and this host was 91-98% full, so Round 9's Elasticsearch races were held on vectors and noaa (4 of 6); the harness now sets `indices.merge.disk.check_interval=0`. With merges flowing, the force-merged vector losses are gone and dense_vector `100-1000_multiple_segments` (2.30x) was the one loss with ranges apart; Round 12 makes it a tie (0.97, 6.13 against 6.35 ms; 0.83 at equal foreign load): each segment now searches a beam sized to its share of the shard, as Lucene 10.5 does, −33% instructions per query, recall unchanged. Round 11, noaa and nyc_taxis rerun with merges flowing at `769dd6744` (#340): Round 9's noaa claims held (every range-field query ahead in median, all ties; `conjunction_big_range_big_term` 7.4 against 12.2 ms, faster in 6 of 6 rounds; indexing 0.75, ahead in 6 of 6), and nyc_taxis wasn't held at all (its 0-merge races are Elasticsearch's merge policy). What changed: nyc_taxis `distance_amount_agg` leads by less (46 against 78 ms, 0.59; Round 9's 118 was load), its `range` now leads (0.88), and Elasticsearch now indexes nyc_taxis faster in median (1.03 docs/s, bulk p50 1.04, ties)) (docs/benchmarks/search.md: Round 8, every Rally
    track against Elasticsearch 9.5.5 and OpenSearch 3.9 at `83fac5982`; Round 9, the four tracks
    #29 fixed rerun at `c2b47b251`, three alternating rounds each, noaa six; Round 11, noaa and
    nyc_taxis again at `769dd6744`; Round 13, nested and http_logs at `8a328a7d2`). Roll leads most tasks
@@ -960,7 +984,8 @@ deterministic (#396).
    (51.8 against 34.6 µs/doc on the ECS log; its profile has BP reordering at merge time at 14% of
    instructions), BP only for time-series and log indices, the request path's allocations, one
    allocator policy.
-6. **Connectors that sync** (built in #318: `postgresql` full and incremental, `s3`, sync rules,
+7. **Connectors that sync** (built in #318, in its sixth round: branches keep inherited connectors paused, and rows will
+   go into `_bulk` as the JSON text Postgres sends, never parsed into a tree; `postgresql` full and incremental, `s3`, sync rules,
    a Connectors tab; its security review found an HTML panic that stranded a sync, a host change
    that sent the stored Postgres password to the new host, a planted sealed value, unbounded
    Postgres reads and no client timeouts, all being fixed before it merges. Left: linking a person's own roll Postgres or bucket with a
@@ -971,7 +996,8 @@ deterministic (#396).
    like ILM (an idle cluster pays nothing between syncs), with `_connector/_sync_job` rows as
    Elasticsearch keeps them; `postgresql` (full and incremental) and `s3` first, reaching a
    person's own roll Postgres or storage through a link instead of copied credentials.
-7. **Semantic search with no keys** (in progress; Elastic Cloud's `.multilingual-e5-small-elasticsearch`
+8. **Semantic search with no keys** (built in #563, in review: roll's float build of E5 equals
+   Elasticsearch's float deployment, cosine 1.000000 on 64 of 64 cases; Elastic Cloud's `.multilingual-e5-small-elasticsearch`
    and Elastic Inference Service, Typesense's and Meilisearch's built-in embedding models,
    Algolia's NeuralSearch): every `semantic_text` field and `text_embedding` endpoint on roll needs
    the customer's own provider key today, so the first semantic search means an OpenAI or Cohere
@@ -983,7 +1009,7 @@ deterministic (#396).
    the node's cache and checked by digest; an idle cluster still costs nothing. ELSER's weights
    are under Elastic's terms, so `.elser-2-elasticsearch` stays as Elasticsearch answers without
    ML nodes; an open sparse model and a reranker are follow-ups once E5 is measured.
-8. **Snapshots on the fleet.** Landed: the `gcs` and `azure` repository types (#293); and every cluster whose data is in object storage (the fleet
+9. **Snapshots on the fleet.** Landed: the `gcs` and `azure` repository types (#293); and every cluster whose data is in object storage (the fleet
    and a single rolld) has a default repository, `found-snapshots` as on Elastic Cloud
    (`--search-default-repository`), so `_snapshot` and snapshot lifecycle policies work without
    setup; it can't be changed or unregistered, costs an idle cluster nothing (registered in
@@ -995,8 +1021,10 @@ deterministic (#396).
    against a real bucket (it plans and answers without touching one), multipart uploads and a
    `chunk_size` setting (a chunk is ~8 MiB; one object per chunk), the `gcs` and `azure` types,
    `max_snapshot_bytes_per_sec`/`max_restore_bytes_per_sec` throttling of bucket traffic, and
-   credentials from roll secrets instead of the repository's settings. Restoring from a snapshot
-   Elasticsearch wrote: feasible but not built. It means reading Elasticsearch's repository
+   credentials from roll secrets instead of the repository's settings (landed in #361: `roll://ENV/KEY`
+   references, the maker checked again on every use). Restoring from a snapshot Elasticsearch wrote:
+   in progress (read-only foreign repositories, `_source` read from the Lucene stored fields and
+   reindexed). It means reading Elasticsearch's repository
    (`index-N`, `snap-*.dat`, `meta-*.dat`, shard `index-*`/`snap-*.dat`: SMILE inside Lucene
    codec headers, DEFLATE-compressed) and each shard's Lucene files (segment infos, field infos,
    compound files, LZ4/DEFLATE stored fields for `_id`, `_routing`, `_source`, numeric doc values
@@ -1007,7 +1035,7 @@ deterministic (#396).
    the logsdb and time-series default, `_source.enabled: false`) can't come back that way.
    Decided 2026-11-17: not now. A live cluster moves by reindex from remote (item 2: today it
    can't, over HTTPS); build it once tenants ask to move by backup alone.
-9. **Vector search's footprint** (docs/benchmarks/search.md, "Vector search": 1M × 384 against
+10. **Vector search's footprint** (docs/benchmarks/search.md, "Vector search": 1M × 384 against
    Elasticsearch 9.5.5 and OpenSearch 3.9). Roll leads on indexing (4,735 docs/s against 3,585
    and 2,978 at 8 clients), merged `knn` (1.9 ms CPU against 6.1 and 4.9), `rrf` (3.2 against 13.8
    and 8.3), cold start (36 ms to the first `knn` against a ~25-29 s node start) and memory
@@ -1042,7 +1070,7 @@ deterministic (#396).
    one-bit estimates lost recall with narrow beams. Left: a filtered search's beam (a narrow
    one strands the filtered graph search), and the 6% of `100-1000` that zstd spends reading the
    hits' `_id`.
-10. **The dashboard against Elastic Cloud and OpenSearch Dashboards** (landed: Snapshot and Restore
+11. **The dashboard against Elastic Cloud and OpenSearch Dashboards** (landed: Snapshot and Restore
    in #325, Ingest Pipelines in #339, as Kibana's Stack Management has them; left: OpenSearch's
    snapshot policies, `fs` repositories' `path.repo`). Landed: the
    index browser and console on the per-index routes, an API keys panel in Settings, the mapping
@@ -1092,7 +1120,7 @@ deterministic (#396).
    gives it (with `created_date_millis`/`modified_date_millis`) now simulates as Elasticsearch's
    `Pipeline.create` reads it, and `PUT` refuses those dates as a `parse_exception`. Left: an
    OpenSearch-flavor cluster's `_nodes/ingest` lists Elasticsearch's processors, not OpenSearch's.
-11. **Compatibility gaps** from the extended suites (5,083 of the 5,541 Elasticsearch passes, 5,244 in all, 46 suites at 100%; #187),
+12. **Compatibility gaps** from the extended suites (5,083 of the 5,541 Elasticsearch passes, 5,244 in all, 46 suites at 100%; #187),
    largest first. Landed: ent-search's last 5 (a `rule` retriever over `rrf`/`linear`, inference
    inside a rule query's organic, workflow-restricted API keys), ES|QL's last 5 (`TOP_SNIPPETS`,
    `CATEGORIZE`, approximation's columns, `LIMIT n BY`, `unsigned_long` past `i64::MAX`),
@@ -1107,9 +1135,9 @@ deterministic (#396).
    it for in search, and the rest is a product of its own. Left: `_ignored_source`'s storage
    cost (its values are stored twice; measure on a logs corpus); downsample's last one (allocation filtering). In the opensearch dialect, pick
    `auto_date_histogram`'s rounding from the bounds as OpenSearch's rewrite does where it differs
-   from collecting (roll counts with Elasticsearch's choice in both dialects). In progress:
-   `rank_vectors` (multi-vector late-interaction fields: 16 platinum tests).
-12. **Language analysis: what's left.** Every analysis plugin Elastic Cloud ships runs now (42 of 42
+   from collecting (roll counts with Elasticsearch's choice in both dialects). Landed: `rank_vectors`
+   (#496: platinum 1,065 → 1,080).
+13. **Language analysis: what's left.** Every analysis plugin Elastic Cloud ships runs now (42 of 42
    tests). Landed: `analysis-phonetic` (every encoder, Commons Codec's algorithms ported: identical
    codes to Java on 150,000 geonames names), `analysis-stempel` (Polish: Lucene's Egothor stemmer
    and table, identical on 121,000 words) and `analysis-ukrainian` (the Morfologik dictionary
@@ -1140,7 +1168,7 @@ deterministic (#396).
    `Han-Latin`, `Latin-ASCII`: ICU's transliteration rule data and its rule features beyond plain
    conversions), custom collation `rules` and `rule_files` for the tokenizer (both need ICU's rule
    compilers); then smartcn's speed.
-13. **Elasticsearch's lifecycles: what's left.** Landed in #297: ILM's `shrink`, `downsample` and
+14. **Elasticsearch's lifecycles: what's left.** Landed in #297: ILM's `shrink`, `downsample` and
    `searchable_snapshot` with Elasticsearch's step graph, `ilm-history-7`, and the data stream
    lifecycle's rounds; what follows is the state before it, kept for the record. The data stream lifecycle (rollover, retention,
    failure stores, the error store), ILM and snapshot lifecycle management (scheduled snapshots,
@@ -1150,7 +1178,7 @@ deterministic (#396).
    and `downsample` (roll has both APIs; the steps that swap the new index in aren't written),
    `searchable_snapshot`, and the `ilm-history-*` data stream.
    The data stream lifecycle's force merges and downsampling rounds aren't run either.
-14. **Semantic search in roll's surfaces**: the dashboard's Inference tab lists a cluster's
+15. **Semantic search in roll's surfaces**: the dashboard's Inference tab lists a cluster's
    endpoints, creates them (OpenAI or any compatible URL, Cohere, Anthropic; the API key sent
    once, sealed, never shown back), tests them with a sample, deletes them, and opens a
    `semantic_text` quickstart in the console. The index browser's mapping view is a field table
@@ -1162,11 +1190,11 @@ deterministic (#396).
    to the endpoint (`_inference/{task}/{id}/_update`) within seconds; the sync pins where the
    endpoint sends the key, a digest of its settings, and follows the cluster's id through a
    restore under another name (docs/secrets.md, "roll search's inference endpoints"). Left: the
-   same for `s3` snapshot repositories' credentials (item 8); an endpoint whose key follows a
+   same for `s3` snapshot repositories' credentials (item 9); an endpoint whose key follows a
    secret made from the Elasticsearch API (it stays
    as Elasticsearch has it: clients send keys); and MCP tools for the new route (they follow the
    routes; the MCP thread).
-15. **Semantic search** (the largest gap against Elasticsearch 9 and Elastic Cloud after machine
+16. **Semantic search** (the largest gap against Elasticsearch 9 and Elastic Cloud after machine
    learning). Landed in #265: the rest of Elasticsearch 9's inference services (Azure OpenAI, Amazon
    Bedrock, Google Vertex AI and AI Studio, Hugging Face, Mistral, Voyage AI, Jina AI, DeepSeek,
    watsonx, Alibaba Cloud, SageMaker and `custom`), each matched byte for byte against Elasticsearch's
@@ -1181,7 +1209,7 @@ deterministic (#396).
    multi-field, `index_options` validation, the `embedding` task type and `semantic` field type,
    `random_reranker`, rerankers inside compound retrievers (landed 2026-11-14; the rest is low
    priority).
-16. **Integration with the other threads**: on main since #29: previews branch search clusters
+17. **Integration with the other threads**: on main since #29: previews branch search clusters
    (`scripts/preview-cost.sh`: the branch reads the parent's document, its writes stay in it, the
    service gets its `ELASTICSEARCH_URL`, landing deletes it; previews mask search fields), and
    roll secrets' search link asks for `access: "data"` keys and refuses anything else (#97). On
@@ -1199,11 +1227,11 @@ deterministic (#396).
    an OpenSearch user): links made before one are reissued. The fleet test with every product on
    passed (2026-11-13: search 8,077 writes acknowledged and verified, no errors, longest stall
    1.2 s in the rolling restart).
-17. **Fleet takeover after a SIGKILL**: the fleet test's longest search stall (11.1 s at a
+18. **Fleet takeover after a SIGKILL**: the fleet test's longest search stall (11.1 s at a
    SIGKILL) is the shared lease TTL (`ClusterConfig::lease_ttl`, 10 s: redis 10.4, nosql 10.6 in
    the same run) plus ~1 s to load the cluster from S3 and replay its WAL. Search's part is the
    load; the TTL is roll cloud's fleet-wide choice.
-18. **CI**: the merge gate runs `search-codec`'s lib tests (`rust (search)`, 54 s on PR #29 with
+19. **CI**: the merge gate runs `search-codec`'s lib tests (`rust (search)`, 54 s on PR #29 with
    main's cache: under the minute, no room for another crate). (`search-store`'s mass-recovery
    WAL test flaked on a loaded host: a replay counted itself in the shared replay cache only
    after listing, so one could finish and empty it while the others listed; it now counts first.
@@ -1230,7 +1258,11 @@ deterministic (#396).
    take over a second, and the test still lost 1 run in 10 (at host loads 63-81; the old build
    passed 10 of 10 there, but at loads 18-50). The suite's minimum (108) holds on a rerun, and
    that load is much harsher than CI's.
-19. **Security**: a second review of what landed since the first (the `_inference` API, `semantic_text`,
+20. **Security**: a third, whole-product review on 2026-11-20 (main at 21708aef1) found no
+   cross-tenant reach through branches, links or internal calls. Being fixed: Painless memory per
+   execution, aggregation memory across the node (#549), observations keyed by name (a reused
+   cluster name saw the old one's slow log), a node-wide body budget, and the console answering
+   credentials under `admin`. Before it, a second review of what landed since the first (the `_inference` API, `semantic_text`,
    the new retrievers, workflow-restricted keys, service tokens, OpenSearch Security's new
    endpoints, ES|QL's new functions) landed in 7288684b9: `semantic_text` under field level
    security (queries and the semantic highlighter, `copy_to` sources included), an inference key

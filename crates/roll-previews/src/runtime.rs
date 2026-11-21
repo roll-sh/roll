@@ -2257,6 +2257,17 @@ mod tests {
         assert!(get("web-pr1-shop.preview.test:7070").await.ends_with("service saw /hello"), "public previews need no link");
         assert!(get("localhost").await.ends_with("api"));
         assert!(get("nope-pr1-shop.preview.test").await.ends_with("api"), "an unknown label isn't a preview");
+        // An earlier push no longer kept: its host says so (410, the latest linked), however the
+        // Host header writes it (a port, a final dot, capitals); nothing else answers for it.
+        let url = |h: &str| format!("http://{h}.preview.test");
+        let mut evicted = Vec::new();
+        for rev in ["cs_a1", "cs_a2", "cs_a3", "cs_a4"] {
+            evicted.extend(rt.store.pin(&row.id, "web", rev, &url).unwrap());
+        }
+        let short = evicted[0].strip_prefix("web@cs_").unwrap().to_ascii_uppercase();
+        let host: &'static str = Box::leak(format!("WEB-{short}-PR1-SHOP.preview.test.:7070").into_boxed_str());
+        let gone = get(host).await;
+        assert!(gone.starts_with("HTTP/1.1 410") && gone.contains("http://web-pr1-shop.preview.test") && gone.contains("x-robots-tag: noindex"), "{gone}");
     }
 
     /// The tag goes in as the page streams: before `</body>` even when a chunk splits it, at the

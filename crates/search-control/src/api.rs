@@ -41,6 +41,7 @@ impl IntoResponse for ControlError {
             ControlError::Invalid(_) => StatusCode::BAD_REQUEST,
             ControlError::Conflict(_) => StatusCode::CONFLICT,
             ControlError::TooLarge(_) => StatusCode::PAYLOAD_TOO_LARGE,
+            ControlError::Forbidden(_) => StatusCode::FORBIDDEN,
             ControlError::Busy(_) => StatusCode::TOO_MANY_REQUESTS,
             ControlError::Internal(e) => {
                 tracing::warn!(error = %e, "search control error");
@@ -68,6 +69,7 @@ pub fn router(control: Arc<Control>) -> Router {
         .route("/v1/search/clusters/{id}/audit", get(audit))
         .route("/v1/search/clusters/{id}/analytics", get(analytics))
         .route("/v1/search/clusters/{id}/keys", post(create_key))
+        .route("/v1/search/clusters/{id}/repositories/{name}", axum::routing::put(put_repository))
         .route("/v1/search/clusters/{id}/keys/{key}", axum::routing::delete(delete_key))
         .route("/v1/search/clusters/{id}/migrate/inspect", post(migrate_inspect))
         .route("/v1/search/clusters/{id}/migrate", post(migrate))
@@ -589,6 +591,21 @@ macro_rules! doc_route {
 doc_route!(doc_get, "GET", EsBody::None);
 doc_route!(doc_put, "PUT", EsBody::Json);
 doc_route!(doc_delete, "DELETE", EsBody::None);
+
+/// `PUT /v1/search/clusters/{id}/repositories/{name}`: `PUT _snapshot/{name}` (Elasticsearch's
+/// body and query), the only way a repository's credentials can be roll secrets references: the
+/// caller must be able to reveal each, and is kept as their maker ([`crate::secret_refs`]). The
+/// cluster's answer, unchanged.
+async fn put_repository(State(c): State<AppState>, Path((id, name)): Path<(String, String)>, uri: axum::http::Uri, ext: Extensions, body: bytes::Bytes) -> Result<Response, ControlError> {
+    let who = crate::secret_refs::Who::of(&ext);
+    let (status, ct, body) = c.put_repository(&id, &name, uri.query(), body, &who).await?;
+    let mut r = Response::new(Body::from(body));
+    *r.status_mut() = StatusCode::from_u16(status).unwrap_or(StatusCode::BAD_GATEWAY);
+    if let Ok(v) = axum::http::HeaderValue::from_str(&ct) {
+        r.headers_mut().insert(axum::http::header::CONTENT_TYPE, v);
+    }
+    Ok(r)
+}
 
 #[derive(Deserialize)]
 struct NewKey {

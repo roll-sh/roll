@@ -382,7 +382,7 @@ fn apps_area(method: &str, path: &str) -> Area {
         },
         ["services", "activity"] | ["events"] => "observe",
         ["services", "links"] | ["services", "restore"] | ["import"] | ["plan"] => "configure",
-        ["projects", "drains" | "notifications" | "limits" | "status-page" | "preview-domain" | "export", ..] => "project",
+        ["projects", "drains" | "notifications" | "limits" | "usage" | "status-page" | "preview-domain" | "export", ..] => "project",
         _ => return Area::Unplaced,
     };
     Area::One(area)
@@ -1306,6 +1306,7 @@ static TOOLS: &[Tool] = &[
     t("apps_cancel_cron_run", "Cancel a cron run", "Stop a running cron run (production is a \"deploy\" action).", "apps", "POST", "/v1/apps/services/{service}/environments/{env}/runs/{run}/cancel", &[SERVICE, ENV, req("run", "Run id")]),
     t("apps_run_cron", "Run a cron now", "Run a cron service's job now (in production this is a deploy action).", "apps", "POST", "/v1/apps/services/{service}/environments/{env}/runs", &[SERVICE, ENV]),
     t("apps_limits", "Spend limits", "A project's apps spend limits and how much of them is used.", "apps", "GET", "/v1/apps/projects/{project}/limits", &[req("project", "Workspace project")]),
+    t("apps_project_usage", "A project's apps cost by service", "What a project's apps used and cost in a month (YYYY-MM, this one by default) by service and environment at roll's prices, most costly first: CPU and memory time, requests, egress and build time. Each service's previews are one row, deleted services one; this month's total is projected to its end at the pace so far. Which service costs the most starts here.", "apps", "GET", "/v1/apps/projects/{project}/usage", &[req("project", "Workspace project"), q("month", Ty::Str, "YYYY-MM (this month by default; not one to come)")]),
     t("apps_set_limits", "Set spend limits", "A project's monthly apps spend: alert_usd notifies, hard_usd pauses the whole project once reached (null: none). An admin's call.", "apps", "PUT", "/v1/apps/projects/{project}/limits", &[req("project", "Workspace project"), bnull("alert_usd", Ty::Num, "Notify past this many dollars a month (left out or cleared: no alert; both are set each time)"), bnull("hard_usd", Ty::Num, "Pause the project past this (left out or cleared: no cap; both are set each time)")]),
     t("apps_overview", "roll apps here", "What roll apps runs here: its domain, runtime, prices, and every service with its environments' state.", "apps", "GET", "/v1/apps", &[]),
     t("apps_list_project_services", "List a project's services", "The services in one workspace project.", "apps", "GET", "/v1/apps/projects/{project}/services", &[req("project", "Workspace project")]),
