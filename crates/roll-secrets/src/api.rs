@@ -183,6 +183,7 @@ impl IntoResponse for Error {
             Error::Invalid(code, _) => (StatusCode::BAD_REQUEST, Some(*code)),
             Error::Unauthorized(_) => (StatusCode::UNAUTHORIZED, Some("unauthorized")),
             Error::Forbidden(_) => (StatusCode::FORBIDDEN, Some("forbidden")),
+            Error::MakerUnreachable(_) => (StatusCode::FORBIDDEN, Some("maker_unreachable")),
             Error::NotFound(_) => (StatusCode::NOT_FOUND, None),
             Error::Gone(_) => (StatusCode::GONE, Some("gone")),
             Error::Conflict(code, _) => (StatusCode::CONFLICT, Some(*code)),

@@ -563,6 +563,7 @@ pub fn parse_role(name: &str, v: &Value, api_key: bool) -> EsResult<Value> {
         out.insert("remote_indices".into(), r);
     }
     if let Some(r) = remote_cluster {
+        check_remote_cluster(name, &r)?;
         out.insert("remote_cluster".into(), r);
     }
     if let Some(r) = restriction {
@@ -1145,6 +1146,50 @@ pub fn get_user_privileges(ctx: &Ctx) -> EsResult<Reply> {
         }
     }
     Reply::ok(out)
+}
+
+/// A role's `remote_cluster` entries, checked as Elasticsearch parses them: an array of objects,
+/// each with `privileges` and `clusters` arrays of strings, both non-empty, the privileges only
+/// `monitor_enrich` and `monitor_stats`.
+fn check_remote_cluster(name: &str, r: &Value) -> EsResult<()> {
+    let fail = |why: String| EsError::parse(format!("failed to parse remote_cluster for role [{name}]. {why}"));
+    let token = |v: &Value| match v {
+        Value::Obj(_) => "START_OBJECT",
+        Value::Arr(_) => "START_ARRAY",
+        Value::Str(_) => "VALUE_STRING",
+        Value::Num(_) => "VALUE_NUMBER",
+        Value::Bool(_) => "VALUE_BOOLEAN",
+        Value::Null => "VALUE_NULL",
+    };
+    let Value::Arr(entries) = r else {
+        return Err(fail(format!("expected field [remote_cluster] value to be an array, but found [{}] instead", token(r))));
+    };
+    for e in entries {
+        let Value::Obj(m) = e else { return Err(EsError::new(500, "null_pointer_exception", "fieldName cannot be null")) };
+        // Each list is an array of strings, or the whole role fails to parse.
+        let list = |k: &str| -> EsResult<Option<Vec<String>>> {
+            match m.get(k) {
+                None | Some(Value::Null) => Ok(None),
+                Some(Value::Arr(a)) if a.iter().all(|x| matches!(x, Value::Str(_))) => Ok(Some(a.iter().map(Value::to_es_string).collect())),
+                Some(_) => Err(EsError::parse(format!("failed to parse role [{name}]"))),
+            }
+        };
+        let (privileges, clusters) = (list("privileges")?, list("clusters")?);
+        if let Some(p) = &privileges
+            && !p.iter().all(|p| matches!(p.to_ascii_lowercase().as_str(), "monitor_enrich" | "monitor_stats"))
+        {
+            return Err(fail(format!("[monitor_enrich, monitor_stats] are the only values allowed for [privileges] within [remote_cluster]. Found [{}]", p.join(", "))));
+        }
+        match (&privileges, &clusters) {
+            (Some(_), None) => return Err(fail("[clusters] must be defined when [privileges] are defined ".into())),
+            (None, Some(_)) => return Err(fail("[privileges] must be defined when [clusters] are defined ".into())),
+            _ => {}
+        }
+        if privileges.as_ref().is_none_or(Vec::is_empty) || clusters.as_ref().is_none_or(Vec::is_empty) {
+            return Err(EsError::illegal_argument("remote cluster groups must not be null or empty"));
+        }
+    }
+    Ok(())
 }
 
 const SUPERUSER_PRIVILEGES: &str = r#"{"cluster":["all"],"global":[],"indices":[{"names":["*"],"privileges":["all"],"allow_restricted_indices":false},{"names":["*"],"privileges":["monitor","read","read_cross_cluster","view_index_metadata"],"allow_restricted_indices":true}],"applications":[{"application":"*","privileges":["*"],"resources":["*"]}],"run_as":["*"],"remote_indices":[{"names":["*"],"privileges":["all"],"allow_restricted_indices":false,"clusters":["*"]},{"names":["*"],"privileges":["monitor","read","read_cross_cluster","view_index_metadata"],"allow_restricted_indices":true,"clusters":["*"]}],"remote_cluster":[{"privileges":["monitor_enrich","monitor_stats"],"clusters":["*"]}]}"#;

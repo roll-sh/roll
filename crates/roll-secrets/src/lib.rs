@@ -289,6 +289,11 @@ pub enum Error {
     Unauthorized(String),
     #[error("{0}")]
     Forbidden(String),
+    /// 403 `maker_unreachable`: whoever set up placeholders or chose a reference can no longer
+    /// reveal there, or sign in. A product falls back on it (a preview resolves without
+    /// placeholders); any other 403 is `forbidden`.
+    #[error("{0}")]
+    MakerUnreachable(String),
     #[error("{0}")]
     NotFound(String),
     /// 409 with a code: `conflict`, `approval_required`, `stale`, `last_environment`.

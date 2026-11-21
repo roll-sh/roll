@@ -25,6 +25,7 @@ pub struct Products<'a> {
     pub secrets: SecretsEnvs,
     pub apps: Option<Arc<apps_control::Apps>>,
     pub search: Option<Arc<search_control::Control>>,
+    pub previews: Option<Arc<roll_previews::Engine>>,
 }
 
 fn resolvers(p: Products<'_>, workspace: Arc<roll_workspace::Workspace>) -> Resolvers {
@@ -65,6 +66,13 @@ fn resolvers(p: Products<'_>, workspace: Arc<roll_workspace::Workspace>) -> Reso
             let code = code.clone();
             r.by_fn(kind, move |id: &str| code.repo_of(kind, id));
         }
+    }
+    if let Some(previews) = p.previews {
+        // A preview is in its project (it's on no canvas): a member's role there reaches it.
+        r.project_fn("previews", move |id: &str| previews.store.row(id).ok().map(|r| r.project_id));
+        // A preview's own environment is never protected (docs/members.md): a developer's default
+        // reaches it.
+        r.protected_fn("previews", |_, _| Some(false));
     }
     if let Some(apps) = p.apps {
         // A preview's own (ephemeral) environment is what rules call `preview`, so the "previews
