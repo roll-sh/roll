@@ -372,6 +372,10 @@ export interface EndpointTime {
 /** Slower than main's by half again and by more than 20 ms (`EndpointAgainst::slower`). */
 export const endpointSlower = (e: EndpointTime) => e.slower ?? (e.main_ms != null && e.ms * 2 > e.main_ms * 3 && e.ms > e.main_ms + 20);
 
+/** Which row of the screenshot's chooser a page check goes in: a page, a view of the first one (a
+ * width or a browser), or a state (`state:<name>`). */
+export const pageGroup = (path: string): "Pages" | "Views" | "States" => (/^@\d+$/.test(path) || path.startsWith("browser:") ? "Views" : path.startsWith("state:") ? "States" : "Pages");
+
 export const pageLabel = (path: string) =>
   /^@\d+$/.test(path) ? `${path.slice(1)} px` : path === "browser:firefox" ? "Firefox" : path === "browser:webkit" ? "WebKit" : path === "browser:webkit-phone" ? "WebKit, phone" : path || "/";
 
