@@ -49,6 +49,10 @@ const MISSING_POLICY: &str = "roll_missing_enrich_policy";
 /// value decoded from it, whatever few bytes it took to send.
 const PER_ELEMENT: u64 = (std::mem::size_of::<Value>() + std::mem::size_of::<V>() + 16) as u64;
 
+/// The most columns a part's answer may have beyond its schema's: what its cluster's own lookup
+/// indices add.
+const MAX_RESOURCE_COLUMNS: usize = 10_000;
+
 /// The cluster action a remote's `ENRICH` needs (`remote_cluster: monitor_enrich`).
 pub const RESOLVE_POLICY: &str = "cluster:monitor/xpack/enrich/esql/resolve_policy";
 
@@ -1027,10 +1031,16 @@ pub fn enrich_fields(st: &crate::meta::ClusterState, cmds: &[Cmd], part: &Part) 
 /// wide as its columns and every value of its column's type ([`super::value::fits`]), values and
 /// states checked as [`decode_v`] and [`decode_acc`] check them (and a `STATS` part's states
 /// against the coordinating cluster's aggregations, when they merge).
-pub fn decode_answer(v: &Value, mode: Mode) -> Result<Answer, String> {
+/// `max_columns`: the most columns it may have (its schema's, and what its cluster's own lookup
+/// indices may add).
+pub fn decode_answer(v: &Value, mode: Mode, max_columns: usize) -> Result<Answer, String> {
     let p = v.get(PART_FIELD).ok_or("no part in the answer")?;
+    let columns = p.get("columns").and_then(Value::as_array).ok_or("no columns")?;
+    if columns.len() > max_columns {
+        return Err(format!("more than [{max_columns}] columns"));
+    }
     let mut cols = Vec::new();
-    for c in p.get("columns").and_then(Value::as_array).ok_or("no columns")? {
+    for c in columns {
         let (Some(n), Some(t)) = (pair(c, 0).and_then(Value::as_str), pair(c, 1).and_then(Value::as_str).and_then(type_named)) else { return Err("a bad column".into()) };
         cols.push(Col { name: n.to_string(), ty: t });
     }
@@ -1261,6 +1271,34 @@ pub async fn run(cluster: &crate::cluster::Cluster, ccs: &Ccs, q: &Query, filter
         let b = cluster.breakers.request(cluster, &cluster.state());
         b.limit().saturating_sub(b.used()) / legs.len().max(1) as u64
     });
+    // A lookup index's field the clusters map with different types is a union type: its use
+    // after the join is Elasticsearch's 400, before any part runs (`lk`, `far:lk`).
+    for (k, c) in part_cmds.iter().enumerate() {
+        let Cmd::LookupJoin { index, .. } = c else { continue };
+        let mut named: Vec<String> = Vec::new();
+        if !local_sources.is_empty() {
+            named.push(index.clone());
+        }
+        named.extend(legs.iter().filter(|(l, _)| l.refusal.is_none()).map(|(l, _)| format!("{}:{index}", l.remote.alias)));
+        let mut by_field: std::collections::HashMap<String, super::exec::UnionTypes> = std::collections::HashMap::new();
+        for n in &named {
+            // One that doesn't resolve is its part's to report.
+            let Ok(cols) = super::exec::index_fields(cluster, &q.src, n).await else { continue };
+            for col in cols {
+                let types = by_field.entry(col.name).or_default();
+                match types.iter_mut().find(|(t, _)| t == col.ty.name()) {
+                    Some((_, at)) => at.push(n.clone()),
+                    None => types.push((col.ty.name().to_string(), vec![n.clone()])),
+                }
+            }
+        }
+        by_field.retain(|_, types| types.len() > 1);
+        by_field.values_mut().for_each(|types| types.sort_by(|a, b| super::exec::es_type_name(&a.0).cmp(super::exec::es_type_name(&b.0))));
+        let after: Vec<Cmd> = part_cmds[k + 1..].iter().chain(&cut.rest).cloned().collect();
+        if let Some((name, at)) = super::exec::first_use(&after, &by_field) {
+            return Err(super::exec::ambiguous_at(&q.src, at, name, &by_field[name]));
+        }
+    }
     let mut sent: Vec<Leg> = Vec::new();
     let mut refused: Vec<(String, bool, String, EsError)> = Vec::new();
     for ((l, exprs), text) in legs.iter().zip(&texts) {
@@ -1355,7 +1393,7 @@ pub async fn run(cluster: &crate::cluster::Cluster, ccs: &Ccs, q: &Query, filter
                 w.add(msg);
             }
         }
-        match decode_answer(&v, cut.mode) {
+        match decode_answer(&v, cut.mode, schema.len() + metadata.len() + MAX_RESOURCE_COLUMNS) {
             Ok(a) => outcomes.push((leg.alias.clone(), leg.indices.clone(), Outcome::Done(a))),
             Err(why) => return Err(unreadable(&leg.alias, &why)),
         }
@@ -1397,7 +1435,17 @@ pub async fn run(cluster: &crate::cluster::Cluster, ccs: &Ccs, q: &Query, filter
     // Merged: the local part first, then the remotes by alias.
     let mut stats = super::exec::Stats::default();
     let mut infos: Vec<ClusterInfo> = Vec::new();
-    let mut tables: Vec<Table> = Vec::new();
+    // Each part's rows, labelled with where its own resources came from (`lk`, `far:lk`).
+    let resource = part_cmds
+        .iter()
+        .rev()
+        .find_map(|c| match c {
+            Cmd::LookupJoin { index, .. } => Some(index.clone()),
+            Cmd::Enrich { policy, .. } => Some(super::parser::split_policy(policy).1.to_string()),
+            _ => None,
+        })
+        .unwrap_or_default();
+    let mut tables: Vec<(Table, String)> = Vec::new();
     let mut partials: Vec<Partial> = Vec::new();
     if let Some((t, s)) = local {
         infos.push(ClusterInfo { name: "(local)".into(), indices: local_sources.join(","), status: "successful", took: None, shards: shards_of(cluster, s.indices.as_deref()), failures: Vec::new() });
@@ -1409,18 +1457,19 @@ pub async fn run(cluster: &crate::cluster::Cluster, ccs: &Ccs, q: &Query, filter
         stats.col_meta = s.col_meta.clone();
         match s.partial {
             Some(p) => partials.push(p),
-            None => tables.push(t),
+            None => tables.push((t, resource.clone())),
         }
     }
     for (alias, indices, o) in outcomes {
         match o {
             Outcome::Done(a) => {
+                let label = format!("{alias}:{resource}");
                 infos.push(ClusterInfo { name: alias, indices, status: "successful", took: Some(a.took), shards: a.shards, failures: Vec::new() });
                 stats.documents_found = stats.documents_found.saturating_add(a.documents_found);
                 stats.values_loaded = stats.values_loaded.saturating_add(a.values_loaded);
                 match a.partial {
                     Some(p) => partials.push(p),
-                    None => tables.push(a.table),
+                    None => tables.push((a.table, label)),
                 }
             }
             Outcome::Skipped(e) => infos.push(ClusterInfo {
@@ -1482,8 +1531,17 @@ pub async fn run(cluster: &crate::cluster::Cluster, ccs: &Ccs, q: &Query, filter
                 Table { cols: empty_cols()?, rows: Vec::new() }
             } else {
                 let mut original = std::mem::take(&mut stats.original_types);
-                let t = super::exec::union_parts(tables, &mut original, &|n| varies.allows(n))?;
+                let (t, unions) = super::exec::union_parts(tables, &mut original, &|n| varies.allows(n))?;
                 stats.original_types = original;
+                // A sort key the clusters' own resources typed differently can't order the rows.
+                if let Some(Cmd::Sort(keys)) = part_cmds.iter().find(|c| matches!(c, Cmd::Sort(_)))
+                    && let Some((key, u)) = keys.iter().enumerate().find_map(|(k, key)| unions.get(&format!("{SORT_CARRY}{k}")).map(|u| (key, u)))
+                {
+                    let (from, to) = (key.expr.start, key.expr.end);
+                    return Err(super::exec::ambiguous_at(&q.src, from, q.src.get(from..to).unwrap_or_default(), u));
+                }
+                // The commands after the merge may only convert such a column ([`super::exec::Resources::set_unions`]).
+                src.res.set_unions(unions);
                 t
             }
         }
@@ -1796,11 +1854,13 @@ mod tests {
         assert!(decode_v(&crate::arr!["z", 1], true).is_err());
         assert!(decode_acc(&crate::arr!["hll", "keyword", 14, crate::arr![i64::from(u32::MAX - 1)], Value::Null]).is_err());
         let wide = obj! { PART_FIELD => obj! { "columns" => crate::arr![crate::arr!["a", "long"]], "rows" => crate::arr![crate::arr![1, 2]] } };
-        assert!(decode_answer(&wide, Mode::Rows).is_err());
+        assert!(decode_answer(&wide, Mode::Rows, 10).is_err());
         let bad_type = obj! { PART_FIELD => obj! { "columns" => crate::arr![crate::arr!["a", "nope"]], "rows" => crate::arr![] } };
-        assert!(decode_answer(&bad_type, Mode::Rows).is_err());
+        assert!(decode_answer(&bad_type, Mode::Rows, 10).is_err());
         let text_in_long = obj! { PART_FIELD => obj! { "columns" => crate::arr![crate::arr!["a", "long"]], "rows" => crate::arr![crate::arr!["x"]] } };
-        assert!(decode_answer(&text_in_long, Mode::Rows).is_err());
+        assert!(decode_answer(&text_in_long, Mode::Rows, 10).is_err());
+        let one = obj! { PART_FIELD => obj! { "columns" => crate::arr![crate::arr!["a", "long"]], "rows" => crate::arr![], "enrich" => crate::arr![] } };
+        assert!(decode_answer(&one, Mode::Rows, 1).is_ok() && decode_answer(&one, Mode::Rows, 0).is_err(), "at most the columns it may have");
         // Every value's cost is counted before parsing, however small it was to send.
         assert_eq!(json_elements(b"[1,1,1]"), 4);
         assert_eq!(json_elements(br#"["a,b",[]]"#), 4);

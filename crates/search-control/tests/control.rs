@@ -3006,8 +3006,9 @@ async fn esql_across_clusters_answers_as_one_cluster() {
         // Never this cluster's lookup index or policy where Elasticsearch reads each cluster's.
         ("FROM far:items | ENRICH _coordinator:tag_label | LOOKUP JOIN lk ON tag", "Found 1 problem\nline 1:50: LOOKUP JOIN with remote indices can't be executed after [ENRICH _coordinator:tag_label]@1:18"),
         ("FROM far:items | INLINE STATS m = MAX(n) | ENRICH _remote:tag_label | KEEP n, m, label", "Found 1 problem\nline 1:44: ENRICH with remote policy can't be executed after [INLINE STATS m = MAX(n)]@1:18"),
-        // A remote missing the policy its `_remote` use needs, whatever this cluster's `_coordinator` use.
-        ("FROM items,far:items | ENRICH _remote:only_near | EVAL x = 1 | ENRICH _coordinator:only_near | KEEP n, label", "Found 1 problem\nline 1:31: cannot find enrich policy [only_near] on clusters [far]"),
+        // A remote missing the policy its `_any` use needs, reported there, not at this cluster's
+        // `_coordinator` use of the same name.
+        ("FROM items,far:items | ENRICH _coordinator:only_near | ENRICH only_near", "Found 1 problem\nline 1:63: cannot find enrich policy [only_near] on clusters [far]"),
         // Shapes not cut into parts read the remotes' rows here (FORK, subqueries, `SET
         // unmapped_fields`): Elasticsearch's placement errors, FORK branches included...
         ("FROM far:items | STATS c = COUNT(*) BY tag | ENRICH _remote:tag_label | FORK (WHERE c > 0) (WHERE c <= 0)", "Found 1 problem\nline 1:46: ENRICH with remote policy can't be executed after [STATS c = COUNT(*) BY tag]@1:18"),
@@ -3043,6 +3044,22 @@ async fn esql_across_clusters_answers_as_one_cluster() {
     assert_eq!((s, v["error"]["reason"].as_str()), (400, Some("Found 1 problem\nline 1:31: enrich policy [wide] has different enrich fields across clusters; these fields are missing in some policies: [extra]")), "{v}");
     let (s, v) = query(&near, &near_pw, json!({ "query": "FROM items,far:items | LOOKUP JOIN lk ON tag | KEEP n, lab | SORT n | LIMIT 2" })).await;
     assert_eq!((s, v["columns"][1].clone(), v["values"].clone()), (200, json!({ "name": "lab", "type": "unsupported", "original_types": ["keyword", "text"], "suggested_cast": "keyword" }), json!([[0, null], [1, null]])), "{v}");
+    // Using such a field is Elasticsearch's 400: a lookup field's before any part runs, an
+    // enrich field's (its policy index mapped its own way per cluster) once the parts answer.
+    for (user, pw, label) in [(&near, &near_pw, "N"), (&far, &far_pw, "F")] {
+        let ty = if label == "N" { "keyword" } else { "text" };
+        assert_eq!(e.es(user, pw, Method::PUT, "/tags3", Some(json!({ "mappings": { "properties": { "tag": { "type": "keyword" }, "label": { "type": ty } } } }))).await.0, 200);
+        assert!(e.es(user, pw, Method::PUT, "/tags3/_doc/a?refresh=true", Some(json!({ "tag": "a", "label": format!("{label}-a") }))).await.0 < 300);
+        assert_eq!(e.es(user, pw, Method::PUT, "/_enrich/policy/typed", Some(json!({ "match": { "indices": "tags3", "match_field": "tag", "enrich_fields": ["label"] } }))).await.0, 200);
+        assert_eq!(e.es(user, pw, Method::POST, "/_enrich/policy/typed/_execute", None).await.0, 200);
+    }
+    for (q, reason) in [
+        ("FROM items,far:items | LOOKUP JOIN lk ON tag | SORT lab | LIMIT 2", "Found 1 problem\nline 1:53: Cannot use field [lab] due to ambiguities being mapped as [2] incompatible types: [keyword] in [lk], [text] in [far:lk]"),
+        ("FROM items,far:items | ENRICH typed | SORT label | LIMIT 2", "Found 1 problem\nline 1:44: Cannot use field [label] due to ambiguities being mapped as [2] incompatible types: [keyword] in [typed], [text] in [far:typed]"),
+    ] {
+        let (s, v) = query(&near, &near_pw, json!({ "query": q })).await;
+        assert_eq!((s, v["error"]["reason"].as_str()), (400, Some(reason)), "{q}: {v}");
+    }
 
     // The implicit limit runs in the parts wherever it commutes: 1,000 of the remote's 3,000
     // rows, read there, for the ENRICH that runs here.
@@ -3065,7 +3082,8 @@ async fn esql_across_clusters_answers_as_one_cluster() {
     let (s, v) = query(&near, &near_pw, json!({ "query": "FROM far:many | WHERE k == 0 | INLINE STATS m = MAX(k) | STATS c = COUNT(*)" })).await;
     assert_eq!((s, v["values"].clone()), (200, json!([[429]])), "{v}");
     let (s, v) = query(&near, &near_pw, json!({ "query": "FROM far:many,far3:many | WHERE k == 0 | INLINE STATS m = MAX(k) | STATS c = COUNT(*)" })).await;
-    assert_eq!((s, v["error"]["type"].as_str()), (429, Some("circuit_breaking_exception")), "{v}");
+    let reason = v["error"]["reason"].as_str().unwrap_or_default();
+    assert!(s == 429 && reason.contains("this cluster's part of the query would answer more than"), "a remote stopped at its share: {v}");
 }
 
 /// ES|QL's part on a linked remote reads as the link allows, as `_search` across clusters does:

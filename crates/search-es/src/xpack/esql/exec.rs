@@ -84,7 +84,7 @@ pub struct Src<'a> {
 }
 
 /// A union type: each mapping type of a field and the indices that map it.
-type UnionTypes = Vec<(String, Vec<String>)>;
+pub(super) type UnionTypes = Vec<(String, Vec<String>)>;
 
 /// A time series source's metrics as the client's field caps show them: (name, metric type,
 /// field type, unit), sorted by name, and the data streams of its indices (`None`: an index
@@ -129,6 +129,35 @@ impl Resources {
     pub(super) fn enrich_columns(&self, name: &str) -> Option<&[Col]> {
         self.enrich.get(name).map(|(_, cols)| cols.as_slice())
     }
+
+    /// Columns of several types merged from clusters' parts: union types, which only a
+    /// conversion may read ([`Compiler::unusable`]).
+    pub(super) fn set_unions(&self, unions: HashMap<String, UnionTypes>) {
+        let _ = self.unions.set(unions);
+    }
+}
+
+/// Index (or alias, or `alias:index`) `name`'s fields as its cluster maps them.
+pub(super) async fn index_fields(cluster: &Cluster, text: &str, name: &str) -> EsResult<Vec<Col>> {
+    let s = resolve_source(cluster, text, &[name.to_string()], &[], 0).await?;
+    Ok(s.cols.into_iter().take(s.fields.len()).collect())
+}
+
+/// The first reference in `cmds` (other than `KEEP`/`DROP`) to a column of `names` that no
+/// command before it redefined, and where.
+pub(super) fn first_use<'a>(cmds: &[Cmd], names: &'a HashMap<String, UnionTypes>) -> Option<(&'a String, usize)> {
+    let mut gone: std::collections::HashSet<&str> = std::collections::HashSet::new();
+    for c in cmds {
+        if !matches!(c, Cmd::Keep(_) | Cmd::Drop(_))
+            && let Some((name, at)) = ref_positions(std::slice::from_ref(c)).into_iter().find(|(n, _)| !gone.contains(n.as_str()) && names.contains_key(n))
+        {
+            return names.get_key_value(&name).map(|(k, _)| (k, at));
+        }
+        if let Cmd::Eval(list) = c {
+            gone.extend(list.iter().filter_map(|n| names.get_key_value(&n.name).map(|(k, _)| k.as_str())));
+        }
+    }
+    None
 }
 
 /// Enrich policy `name`'s enrich fields on this cluster, in its order.
@@ -262,7 +291,7 @@ fn merge_problems(mut errs: Vec<EsError>) -> EsError {
 /// `Cannot use field [f] due to ambiguities ...` at `at`, `written` as the query writes it.
 /// A leg with no indices is the keyword `SET unmapped_fields="load"` reads from the `_source` of
 /// the indices that don't map the field.
-fn ambiguous_at(src: &str, at: usize, written: &str, types: &[(String, Vec<String>)]) -> EsError {
+pub(super) fn ambiguous_at(src: &str, at: usize, written: &str, types: &[(String, Vec<String>)]) -> EsError {
     let list: Vec<String> = types
         .iter()
         .map(|(t, idx)| match idx.is_empty() {
@@ -2893,30 +2922,34 @@ pub(super) struct Verified {
     pub sort_types: Vec<DataType>,
 }
 
-/// Every cluster's rows in one table: a column whose types differ between clusters is
-/// unsupported (it reads null), as a union type no conversion resolves.
-/// `own`: the columns each cluster's own policies or lookup indices give it, a union type
-/// whenever their types differ (strings too, as Elasticsearch merges those mappings).
-pub(super) fn union_parts(parts: Vec<Table>, original: &mut Vec<(String, Vec<String>)>, own: &dyn Fn(&str) -> bool) -> EsResult<Table> {
-    let mut differ: Vec<(String, Vec<String>)> = Vec::new();
-    for c in parts.iter().flat_map(|t| &t.cols).filter(|c| c.ty != DataType::Null && own(&c.name)) {
-        match differ.iter_mut().find(|(n, _)| *n == c.name) {
-            Some((_, types)) if !types.iter().any(|t| t == c.ty.name()) => types.push(c.ty.name().to_string()),
-            Some(_) => {}
-            None => differ.push((c.name.clone(), vec![c.ty.name().to_string()])),
+/// Every cluster's rows in one table (each part labelled with where its own resources came
+/// from: `lk`, `far:lk`): a column whose types differ between clusters is unsupported (it reads
+/// null), as a union type no conversion resolves. `own`: the columns each cluster's own policies
+/// or lookup indices give it, a union type whenever their types differ (strings too, as
+/// Elasticsearch merges those mappings), returned by name for the commands after the merge.
+pub(super) fn union_parts(parts: Vec<(Table, String)>, original: &mut Vec<(String, Vec<String>)>, own: &dyn Fn(&str) -> bool) -> EsResult<(Table, HashMap<String, UnionTypes>)> {
+    let mut differ: HashMap<String, UnionTypes> = HashMap::new();
+    for (t, label) in &parts {
+        for c in t.cols.iter().filter(|c| c.ty != DataType::Null && own(&c.name)) {
+            let types = differ.entry(c.name.clone()).or_default();
+            match types.iter_mut().find(|(ty, _)| ty == c.ty.name()) {
+                Some((_, at)) => at.push(label.clone()),
+                None => types.push((c.ty.name().to_string(), vec![label.clone()])),
+            }
         }
     }
-    differ.retain(|(_, types)| types.len() > 1);
-    let mut t = union_tables(parts, &|name, _, _, _| EsError::illegal_state(format!("column [{name}] differs between clusters")), &|_, _| true, original)?;
-    for (name, mut types) in differ {
-        let Some(i) = t.cols.iter().position(|c| c.name == name) else { continue };
+    differ.retain(|_, types| types.len() > 1);
+    let tables: Vec<Table> = parts.into_iter().map(|(t, _)| t).collect();
+    let mut t = union_tables(tables, &|name, _, _, _| EsError::illegal_state(format!("column [{name}] differs between clusters")), &|_, _| true, original)?;
+    for (name, types) in &mut differ {
+        types.sort_by(|a, b| es_type_name(&a.0).cmp(es_type_name(&b.0)));
+        let Some(i) = t.cols.iter().position(|c| c.name == *name) else { continue };
         t.cols[i].ty = DataType::Unsupported;
         t.rows.iter_mut().for_each(|r| r[i] = V::Null);
-        types.sort();
-        original.retain(|(n, _)| *n != name);
-        original.push((name, types));
+        original.retain(|(n, _)| n != name);
+        original.push((name.clone(), types.iter().map(|(ty, _)| ty.clone()).collect()));
     }
-    Ok(t)
+    Ok((t, differ))
 }
 
 /// A cross-cluster query's local part ([`super::ccs::run`]).
@@ -3854,11 +3887,12 @@ fn cmd_refs(c: &Cmd, out: &mut std::collections::HashSet<String>) {
 /// error (`conflict(name, existing, new, table)`), unless `union_ok` lets it become a union type.
 fn union_tables(parts: Vec<Table>, conflict: &dyn Fn(&str, DataType, DataType, usize) -> EsError, union_ok: &dyn Fn(&str, usize) -> bool, original: &mut Vec<(String, Vec<String>)>) -> EsResult<Table> {
     let mut cols: Vec<Col> = Vec::new();
+    let mut at: HashMap<String, usize> = HashMap::new();
     let mut maps: Vec<Vec<usize>> = Vec::with_capacity(parts.len());
     for (pi, t) in parts.iter().enumerate() {
         let mut map = Vec::with_capacity(t.cols.len());
         for c in &t.cols {
-            match cols.iter().position(|x| x.name == c.name) {
+            match at.get(&c.name).copied() {
                 Some(i) => {
                     let have = cols[i].ty;
                     if have != c.ty && c.ty != DataType::Null {
@@ -3883,6 +3917,7 @@ fn union_tables(parts: Vec<Table>, conflict: &dyn Fn(&str, DataType, DataType, u
                 }
                 None => {
                     map.push(cols.len());
+                    at.insert(c.name.clone(), cols.len());
                     cols.push(c.clone());
                 }
             }

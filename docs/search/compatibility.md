@@ -1602,10 +1602,12 @@ the rest are skipped by the tests' own prerequisites.
   `SORT | WHERE ... | ENRICH _remote | LIMIT` in each cluster; roll refuses an `ENRICH _remote`
   after a `SORT` whose `LIMIT` a `WHERE` (or another command that isn't `EVAL`, `KEEP`, `DROP`,
   `RENAME` or `ENRICH`) separates it from. A lookup index's field the clusters map with
-  different types is a union type in the answer, as in Elasticsearch, but the part's own
-  commands after the `LOOKUP JOIN` still read it on each cluster (Elasticsearch refuses any
-  use), and a `STATS` over it, or over an enrich field the clusters' policy indices map with
-  different types, is a 400. roll doesn't require the local
+  different types is a union type, as in Elasticsearch: using it after the `LOOKUP JOIN` is
+  Elasticsearch's 400 (`Cannot use field [lab] due to ambiguities ...`) before any part runs.
+  An enrich field the clusters' policy indices map with different types is found once the
+  parts answer: the commands after the merge can't use it (the same 400, and a `STATS` over it
+  in the parts is a 400 too), but the parts' own commands after the `ENRICH` still read it on
+  each cluster, where Elasticsearch refuses any use. roll doesn't require the local
   `monitor_enrich` an ENRICH's policy resolution
   needs in Elasticsearch (the remote's is required, as there). A
   remote that can't be reached while it may not be skipped fails the query with roll's own
