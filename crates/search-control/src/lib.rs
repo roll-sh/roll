@@ -37,3 +37,5 @@ pub use search_es::breaker::REQUEST_MAX_LIMIT as SEARCH_REQUEST_MAX_LIMIT;
 pub use search_es::breaker::request_max_limit;
 /// Node setting that lets inference endpoints reach private addresses (local development, tests).
 pub use search_es::xpack::inference::http::ALLOW_PRIVATE as INFERENCE_ALLOW_PRIVATE;
+/// The node setting capping one search's time (`roll.search.max_time`).
+pub use search_es::search::MAX_TIME as SEARCH_MAX_TIME;
