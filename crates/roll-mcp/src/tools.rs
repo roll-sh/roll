@@ -1263,11 +1263,11 @@ static TOOLS: &[Tool] = &[
     t(
         "apps_set_variables",
         "Set variables",
-        "Set or unset an environment's variables, or copy some from another environment (copy_from with copy: their values, never shown; needs reveal on that environment too). Production is a \"deploy\" action.",
+        "Set or unset an environment's variables, or copy some from another environment (copy_from with copy: their values, never shown; needs reveal on that environment too); seal some, keep some as files, or keep some out of builds. A value roll://ENV[/folder…]/KEY is read from roll secrets at each deploy. Production is a \"deploy\" action.",
         "apps",
         "PATCH",
         "/v1/apps/services/{service}/environments/{env}/variables",
-        &[SERVICE, ENV, b("set", Ty::Obj, "{NAME: value}"), b("unset", Ty::Arr, "Names to remove"), b("copy_from", Ty::Str, "Another environment to copy values from"), b("copy", Ty::Arr, "Names to copy from copy_from")],
+        &[SERVICE, ENV, b("set", Ty::Obj, "{NAME: value}"), b("unset", Ty::Arr, "Names to remove"), b("copy_from", Ty::Str, "Another environment to copy values from"), b("copy", Ty::Arr, "Names to copy from copy_from"), b("seal", Ty::Arr, "Names to seal (set here or already set): their values are never shown again, not even to reveal; nothing unseals"), b("files", Ty::Obj, "{NAME: absolute path, or null to put it back}: kept as a read-only file at that path in its instances from the next deploy, not in their environment (at most 20; not under /proc, /sys or /dev)"), b("runtime_only", Ty::Obj, "{NAME: true}: only its instances get it, never a build's steps, from the next deploy (false: builds get it again)")],
     ),
     t("apps_diff_environments", "Compare environments", "How an environment differs from another (Railway's environment sync): variables missing, extra or with another value (names only; which differ needs reveal on both), and settings with the body that makes each match. Read on both environments.", "apps", "GET", "/v1/apps/services/{service}/environments/{env}/diff", &[SERVICE, ENV, qreq("from", "The environment to compare with")]),
     t("apps_metrics", "Service metrics", "CPU, memory and requests of an environment, and each instance's own last hour (by_instance).", "apps", "GET", "/v1/apps/services/{service}/environments/{env}/metrics", &[SERVICE, ENV, q("minutes", Ty::Int, "Window")]),
@@ -1281,7 +1281,7 @@ static TOOLS: &[Tool] = &[
     t("apps_verify_domain", "Check a domain", "Check a custom domain's DNS now and answer its state (pending, verified) and the record to add.", "apps", "POST", "/v1/apps/services/{service}/environments/{env}/domains/{host}/verify", &[SERVICE, ENV, req("host", "The domain")]),
     t("apps_list_backups", "Volume backups", "An environment's volume backups, newest first (7 kept).", "apps", "GET", "/v1/apps/services/{service}/environments/{env}/volume/backups", &[SERVICE, ENV]),
     t("apps_backup_volume", "Back up a volume", "Back up an environment's volume now.", "apps", "POST", "/v1/apps/services/{service}/environments/{env}/volume/backups", &[SERVICE, ENV]),
-    t("apps_restore_backup", "Restore a volume backup", "Put an environment's volume back as it was in a backup, replacing its files; the environment sleeps meanwhile.", "apps", "POST", "/v1/apps/services/{service}/environments/{env}/volume/backups/{backup}/restore", &[SERVICE, ENV, req("backup", "Backup id")]),
+    t("apps_restore_backup", "Restore a volume backup", "Put an environment's volume back as it was in a backup, replacing its files (what's there now is backed up first); the environment sleeps meanwhile. With from, the backup is another environment's (seeding staging from production; needs reveal there too).", "apps", "POST", "/v1/apps/services/{service}/environments/{env}/volume/backups/{backup}/restore", &[SERVICE, ENV, req("backup", "Backup id"), b("from", Ty::Str, "The environment whose backup it is (default: this one)")]),
     t("apps_activity", "Service activity", "Who changed what on a service, newest first (never a value); with all, its whole timeline: deploys, failures, crash loops, alerts, domains, spend.", "apps", "GET", "/v1/apps/services/{service}/activity", &[SERVICE, q("all", Ty::Bool, "The whole timeline, not only changes")]).outside(&["fields"]),
     t("apps_get_deploy", "Get a deploy", "One deploy: its status, commit, image and when it went live.", "apps", "GET", "/v1/apps/services/{service}/environments/{env}/deploys/{deploy}", &[SERVICE, ENV, req("deploy", "Deploy id")]),
     t(
