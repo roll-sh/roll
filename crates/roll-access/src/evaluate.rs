@@ -678,10 +678,9 @@ async fn decide(access: Arc<Access>, req: Request, next: Next) -> Response {
     // A stronger action the product may use here (the row's `capable`): decided at it already
     // (allowed or approved), or allowed outright. An `ask` for it asks nobody: the product just
     // does less.
-    if let Some(a) = row.capable
-        && (action == a || scope.outcome(&target, a) == Outcome::Allow)
-    {
-        parts.extensions.insert(roll_auth::Capable(a));
+    let capable: Vec<Action> = row.capable.iter().copied().filter(|a| action == *a || scope.outcome(&target, *a) == Outcome::Allow).collect();
+    if !capable.is_empty() {
+        parts.extensions.insert(roll_auth::Capable(capable));
     }
     parts.extensions.insert(roll_auth::Grant {
         id: ctx.grant.id.as_str().into(),

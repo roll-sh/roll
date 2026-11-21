@@ -89,6 +89,8 @@ pub struct Fake {
     pub build_trees: Mutex<Vec<Vec<String>>>,
     /// Each build's small files' contents by path (at most 4 KiB each), in order.
     pub build_files: Mutex<Vec<std::collections::HashMap<String, String>>>,
+    /// Each instance made with its own command (a job, a run): the command, its CPUs and memory.
+    pub commands_made: Mutex<Vec<(String, f64, u32)>>,
     /// Each closed network's interception: whether its egress proxies have one.
     pub intercepted: Mutex<std::collections::HashMap<String, bool>>,
     /// The manifests of the image archives it loaded.
@@ -368,6 +370,10 @@ impl Runtime for Fake {
         self.intercepted.lock().insert(network.to_string(), i.is_some());
     }
 
+    fn intercepted(&self, network: &str) -> Option<super::egress::Intercepted> {
+        self.intercepted.lock().get(network).filter(|on| **on).map(|_| super::egress::Intercepted { requests: 3, swapped: 2, refused: vec!["api.stripe.com: a placeholder in the query".into()] })
+    }
+
     fn name(&self) -> &'static str {
         "fake"
     }
@@ -397,6 +403,9 @@ impl Runtime for Fake {
 
     async fn create(&self, spec: &InstanceSpec) -> anyhow::Result<()> {
         self.counts.creates.fetch_add(1, Ordering::SeqCst);
+        if let Some(c) = &spec.command {
+            self.commands_made.lock().push((c.clone(), spec.cpu, spec.memory_mb));
+        }
         let mut m = self.instances.lock();
         anyhow::ensure!(!m.contains_key(&spec.name), "{} exists", spec.name);
         m.insert(spec.name.clone(), FakeInstance { spec: spec.clone(), state: FakeState::Created, server: None, addr: None, extra: HashMap::new(), reserved: None, exited: watch::channel(None).0, killed: Default::default() });

@@ -38,6 +38,7 @@ pnpm dev                                # dashboard: /dashboard/search
 | `--search-gc-interval`                             | `3600`            | garbage collection of unreferenced objects (0: off; one node per bucket) |
 | `--search-deleted-retention-days` (`ROLL_SEARCH_DELETED_RETENTION_DAYS`) | `7` | days a deleted cluster can be restored, its storage billed meanwhile (0: deleted at once) |
 | `--search-test-features`                           | off               | publish Elasticsearch's test features (YAML suites through `--cluster-hook`; test deployments only) |
+| `--search-max-time` (`ROLL_SEARCH_MAX_TIME`) | `60`, none on an open daemon | seconds one request that searches may run, all its shards and phases together (node setting `roll.search.max_time`; 0: no cap; compatibility.md "Operations") |
 | `--search-max-clusters-per-person` (`ROLL_SEARCH_MAX_CLUSTERS_PER_PERSON`) | `50` | clusters a signed-in person may own, branches included (0: no cap; the operator and admins aren't capped) |
 | `--search-max-always-on-per-person` (`ROLL_SEARCH_MAX_ALWAYS_ON_PER_PERSON`) | `2` | of those, always-on ones (`idle_timeout_s` 0) (0: no cap) |
 | `--search-audit-retention-days` (`ROLL_SEARCH_AUDIT_RETENTION_DAYS`) | `7` | how long each cluster's security audit log keeps its entries |
@@ -91,6 +92,8 @@ roll search request app POST '/articles/_doc?refresh=true' '{"body":"Passwords c
 roll search request app POST /articles/_search '{"query":{"semantic":{"field":"body","query":"forgot my password"}}}'
 roll search inference list app | test app emb "some text" | delete app emb
 ```
+
+Answers generated from search hits (chat with citations, RAG) are designed in [rag.md](rag.md).
 
 A cluster's name is its identity: the Basic auth user, the host label under `--search-domain`,
 `cluster_name` in `GET /`. Names are DNS labels (lowercase letters, digits, `-`) and can't
@@ -942,7 +945,7 @@ deterministic (#396).
    `conversation=true`, Meilisearch `/chats`, OpenSearch's `retrieval_augmented_generation`
    processor): roll serves `completion` and `chat_completion` inference already, but the Playground
    compares retrieval only. Chat over hits with citations, the code for a RAG app, and a chat API
-   (OpenSearch's processor shape on OpenSearch-flavor clusters).
+   (OpenSearch's processor shape on OpenSearch-flavor clusters). Design: [rag.md](rag.md).
 12. **The first query in a minute** (the guides are #604, landing; writing them found: an API
    key's `encoded` value works only at the cluster's own host, so clients behind a shared address
    re-encode it as `<id>@<cluster>:<key>`; a `data` key can't post click events, so an app tracking

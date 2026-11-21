@@ -375,7 +375,9 @@ first, so they can't hide what runs, and anything that makes or changes credenti
   files, however the SQL is written (dynamic SQL in a `DO` block too). The operator's SQL, and a
   grant's that may `admin` the endpoint (the gate's `roll_auth::Capable`, from the row's
   `capable(Admin)`), runs as the superuser. On a read replica, write SQL from such a grant is
-  refused: send it `read_only`.
+  refused: send it `read_only`. Dropping objects (tables, indexes, columns, schemas, functions)
+  needs `delete` on the endpoint: without it the writer is a member of `roll_no_drop`, and an event
+  trigger the superuser owns refuses its drops. Deleting rows is a write.
 - Redis commands: commands that only read are `read`; `FLUSHDB`, `FLUSHALL`, `SWAPDB` and scripts
   (`EVAL`, `FCALL`, `FUNCTION`, `SCRIPT`) are `delete`; the server's own, Redis's `@dangerous`
   category (`ACL`, `CONFIG`, `MONITOR` and `SYNC`, which stream everyone's commands and data,

@@ -944,6 +944,11 @@ pub struct Scheduled {
     /// environment's URL as `aud`), as Cloud Scheduler's does; else `CRON_SECRET`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub auth: Option<String>,
+    /// A command's run at its own size (0.25–8 vCPU, 256–16384 MiB); unset, the service's.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cpu: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub memory_mb: Option<u32>,
 }
 
 /// One of `run.push`: a topic of a roll stream delivered to a path of one environment, a record
@@ -1243,6 +1248,9 @@ impl Run {
             }
             if sc.auth.as_deref().is_some_and(|a| a != "oidc" || sc.path.is_none()) {
                 return bad("a schedule's auth is oidc, on a path's call");
+            }
+            if sc.cpu.is_some_and(|c| !(0.25..=8.0).contains(&c)) || sc.memory_mb.is_some_and(|m| !(256..=16384).contains(&m)) || ((sc.cpu.is_some() || sc.memory_mb.is_some()) && sc.path.is_some()) {
+                return bad("a schedule's cpu (0.25–8) and memory_mb (256–16384) are a command's");
             }
         }
         if !self.push.is_empty() && (self.kind != RunType::Web || self.tcp) {
@@ -1796,6 +1804,15 @@ pub struct Environment {
     /// Hosts its egress proxy refused lately (its code tried them; they aren't listed).
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub egress_refused: Vec<crate::runtime::egress::Refused>,
+    /// Who a closed environment's placeholders are made by (`usr_…`, `token:…`, the operator);
+    /// null, no one (its keys bound to hosts withheld); absent when it's open or it was closed
+    /// before that was kept.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub closed_by: Option<serde_json::Value>,
+    /// A closed environment's interception on its owner (roll secrets' placeholders): requests
+    /// filtered, placeholders swapped, the latest refusals; none until it has done something.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub intercepted: Option<crate::runtime::egress::Intercepted>,
     /// A worker that follows its work: the backlog it last read (null before the first read)
     /// and the instances that wants.
     pub scaling: Option<Scaling>,
