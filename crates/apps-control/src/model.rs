@@ -1661,6 +1661,10 @@ pub struct Environment {
     pub traces: bool,
     /// Its pages measure their Web Vitals for roll (`…/vitals`).
     pub vitals: bool,
+    /// People other than its author who must approve a deployment before it goes live (GitHub
+    /// Environments' required reviewers): 0 (none) to 3; never a preview's.
+    #[serde(skip_serializing_if = "is_zero")]
+    pub approvals: u32,
     /// Days its logs (output, requests, traces, events and Vitals) are kept: 7 (the default),
     /// 30 or 90 (Railway's, Render's longer retention); a preview's are 7.
     pub log_retention_days: u32,
@@ -2503,6 +2507,10 @@ pub struct Deployment {
     /// single deployment's GET; the list leaves them out.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub steps: Vec<Step>,
+    /// Who approved putting it live, where the environment asks for approvals; on a single
+    /// deployment's GET.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub approved_by: Vec<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize)]

@@ -331,6 +331,13 @@ CREATE TABLE IF NOT EXISTS error_groups (
     first_seen INTEGER NOT NULL,
     PRIMARY KEY (service, env, fingerprint)
 ) WITHOUT ROWID;
+-- Who approved putting a deployment live (an environment's `approvals`), one row a person.
+CREATE TABLE IF NOT EXISTS deploy_approvals (
+    deployment TEXT NOT NULL,
+    approver TEXT NOT NULL,
+    at INTEGER NOT NULL,
+    PRIMARY KEY (deployment, approver)
+) WITHOUT ROWID;
 -- Variables only its instances get, never a build's steps (Vercel's and Netlify's scopes).
 CREATE TABLE IF NOT EXISTS variable_runtime_only (
     service TEXT NOT NULL,
@@ -576,6 +583,8 @@ pub struct EnvRow {
     pub vitals: bool,
     /// Days its logs are kept (7, 30 or 90); None: [`crate::logs::KEEP_DAYS`].
     pub log_retention_days: Option<u32>,
+    /// Approvals a deployment needs from people other than its author before it goes live.
+    pub approvals: u32,
     /// Its deploys are reported to the Git host (commit statuses, GitHub Deployments); false:
     /// someone else reports them (roll previews for its `pv-` environments).
     pub report: bool,
@@ -697,7 +706,7 @@ fn name_taken(name: &str, deleted: Option<i64>) -> String {
         Some(_) => format!("a deleted service named {name} holds the name: restore it, or delete it again to delete it for good"),
     }
 }
-const ENV_COLS: &str = "service, name, branch, ephemeral, active, slug, port, created_at, wait_for_ci, run, hook_hash, follow_tag, tag_seen, feedback, maintenance, allow_ips, rate_limit, tcp_port, firewall, pages, redeploy_on_secrets, secrets_seen, headers, paused, held_by, egress, vitals, routes, report, checks, heartbeats, split, freeze, mirror, pause_schedule, snippets, log_retention_days";
+const ENV_COLS: &str = "service, name, branch, ephemeral, active, slug, port, created_at, wait_for_ci, run, hook_hash, follow_tag, tag_seen, feedback, maintenance, allow_ips, rate_limit, tcp_port, firewall, pages, redeploy_on_secrets, secrets_seen, headers, paused, held_by, egress, vitals, routes, report, checks, heartbeats, split, freeze, mirror, pause_schedule, snippets, log_retention_days, approvals";
 /// A deployment [`Store::prune_deployments`] pruned, with its image when nothing else names it.
 pub struct Pruned {
     pub id: String,
@@ -785,6 +794,7 @@ fn env_row(r: &code_sql::Row<'_>) -> code_sql::Result<EnvRow> {
         pause_schedule: r.get::<_, Option<String>>(34)?.and_then(|j| serde_json::from_str(&j).ok()),
         snippets: r.get::<_, Option<String>>(35)?.and_then(|j| serde_json::from_str(&j).ok()).unwrap_or_default(),
         log_retention_days: r.get::<_, Option<i64>>(36)?.map(|d| d as u32),
+        approvals: r.get::<_, Option<i64>>(37)?.unwrap_or(0) as u32,
     })
 }
 
@@ -841,6 +851,7 @@ fn deploy_row(r: &code_sql::Row<'_>) -> code_sql::Result<Deployment> {
         error_detail,
         fix,
         steps: Vec::new(),
+        approved_by: Vec::new(),
     })
 }
 
@@ -941,6 +952,7 @@ impl Store {
         db.add_column("environments", "vitals", "INTEGER NOT NULL DEFAULT 0")?;
         db.add_column("environments", "report", "INTEGER NOT NULL DEFAULT 1")?;
         db.add_column("environments", "log_retention_days", "INTEGER")?;
+        db.add_column("environments", "approvals", "INTEGER")?;
         // A custom domain sent to another of the app's ports.
         db.add_column("domains", "port", "INTEGER")?;
         // The roll login (`ses_…`) a ticket and a visit session came from: its end ends them.
@@ -1171,7 +1183,7 @@ impl Store {
                     None => None,
                 };
                 c.execute(
-                    &format!("INSERT INTO environments ({ENV_COLS}) VALUES (?, ?, ?, ?, NULL, ?, ?, ?, 0, '{{}}', NULL, 0, NULL, 0, NULL, NULL, NULL, NULL, NULL, NULL, 0, NULL, NULL, 0, NULL, NULL, 0, NULL, 1, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL)"),
+                    &format!("INSERT INTO environments ({ENV_COLS}) VALUES (?, ?, ?, ?, NULL, ?, ?, ?, 0, '{{}}', NULL, 0, NULL, 0, NULL, NULL, NULL, NULL, NULL, NULL, 0, NULL, NULL, 0, NULL, NULL, 0, NULL, 1, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL)"),
                     params![service, env, branch.flatten(), ephemeral.unwrap_or(false) as i64, slug, port, now],
                 )?;
             }
@@ -3249,6 +3261,21 @@ impl Store {
     pub fn set_maintenance(&self, service: &str, env: &str, message: Option<&str>) -> Result<()> {
         self.db.execute("UPDATE environments SET maintenance = ? WHERE service = ? AND name = ?", params![message, service, env])?;
         Ok(())
+    }
+
+    pub fn set_approvals(&self, service: &str, env: &str, n: u32) -> Result<()> {
+        self.db.execute("UPDATE environments SET approvals = ? WHERE service = ? AND name = ?", params![(n > 0).then_some(n as i64), service, env])?;
+        Ok(())
+    }
+
+    /// `who` approves `deployment` (again: nothing new). Everyone who has, oldest first.
+    pub fn approve(&self, deployment: &str, who: &str, at: i64) -> Result<Vec<String>> {
+        self.db.execute("INSERT INTO deploy_approvals (deployment, approver, at) VALUES (?, ?, ?) ON CONFLICT DO NOTHING", params![deployment, who, at])?;
+        self.approvals_of(deployment)
+    }
+
+    pub fn approvals_of(&self, deployment: &str) -> Result<Vec<String>> {
+        Ok(self.db.query("SELECT approver FROM deploy_approvals WHERE deployment = ? ORDER BY at, approver", [deployment], |r| r.get(0))?)
     }
 
     pub fn set_log_retention(&self, service: &str, env: &str, days: Option<u32>) -> Result<()> {

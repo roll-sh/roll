@@ -317,6 +317,29 @@ export function EnvironmentPanel({ service, env, runner, onDeleted }: { service:
         {!env.ephemeral && (
           <div className="flex flex-wrap items-center justify-between gap-3 px-5 py-4">
             <div>
+              <p className="text-[13px] font-medium">Deploy approvals</p>
+              <p className="mt-1 text-[12px] text-muted">
+                {env.approvals ? `A deployment waits at ready until ${env.approvals === 1 ? "someone" : `${env.approvals} people`} other than who started it approve${env.approvals === 1 ? "s" : ""}; the last approval puts it live.` : "Anyone who may deploy puts a deployment live. Ask for a second person's approval first."}
+              </p>
+            </div>
+            <select
+              aria-label="Deploy approvals"
+              className={`${input} w-40 text-[12px]`}
+              disabled={busy}
+              value={env.approvals ?? 0}
+              onChange={(e) => runner.run("approvals", () => appsApi.putEnvironment(service.id, env.name, { approvals: Number(e.target.value) || null }))}
+            >
+              <option value={0}>None</option>
+              <option value={1}>1 approval</option>
+              <option value={2}>2 approvals</option>
+              <option value={3}>3 approvals</option>
+            </select>
+          </div>
+        )}
+
+        {!env.ephemeral && (
+          <div className="flex flex-wrap items-center justify-between gap-3 px-5 py-4">
+            <div>
               <p className="text-[13px] font-medium">Log retention</p>
               <p className="mt-1 text-[12px] text-muted">Its output, access log, traces and Vitals are deleted after this long.</p>
             </div>
