@@ -10,7 +10,10 @@
 //! this endpoint's own secrets, never another's or roll's; and the URL and query parameters are
 //! filled only from what the endpoint's manager stored (its secrets and stored parameters), never
 //! from a caller's per-request `task_settings`, so a caller can't send the endpoint's secrets to
-//! a host of its choosing. Errors quote the URL template, never the filled-in URL.
+//! a host of its choosing. Errors quote the URL template, never the filled-in URL. Nor can an
+//! update move them: one that changes a stored parameter the URL or query parameters name must
+//! give `secret_parameters` again ([`moved_parameter`]), as a watch whose host changed must give
+//! its password again.
 //!
 //! Not supported: `response.error_parser` (errors are read the OpenAI way).
 
@@ -202,6 +205,17 @@ pub fn update(cluster: &Cluster, ep: &mut Endpoint, ss: &mut Map) -> EsResult<()
 
 pub fn embedding_details(ep: &mut Endpoint, size: usize) {
     learned(ep, size, "dot_product", ORDER);
+}
+
+/// A stored parameter (`task_settings.parameters`) that decides where the endpoint's secrets go
+/// (the URL or query parameters name it) and that `after` changed from `before`.
+pub fn moved_parameter(before: &Endpoint, after: &Endpoint) -> Option<String> {
+    let mut templates: Vec<&str> = vec![ss_str(after, "url")];
+    if let Some(Value::Arr(pairs)) = after.service_settings.get("query_parameters") {
+        templates.extend(pairs.iter().filter_map(Value::as_array).flatten().filter_map(Value::as_str));
+    }
+    let param = |ep: &Endpoint, name: &str| ep.task_settings.get("parameters").and_then(|p| p.get(name)).cloned();
+    templates.iter().flat_map(|t| t.split("${").skip(1).filter_map(|r| r.split_once('}').map(|(name, _)| name))).find(|name| param(before, name) != param(after, name)).map(str::to_owned)
 }
 
 /// One step of a JSON path: a field or every element.

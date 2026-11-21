@@ -43,6 +43,12 @@ use termhash::TermHash;
 
 /// Longest term Lucene accepts (`IndexWriter.MAX_TERM_LENGTH`).
 pub const MAX_TERM_LENGTH: usize = 32766;
+
+/// The most tokens one field of one document may produce at index time
+/// ([`crate::ShardConfig::max_field_tokens`]'s default). Elasticsearch has no such limit (only
+/// Lucene's per-thread RAM limit, near 2 GB); roll's keeps an `ngram` or `shingle` chain from
+/// turning one body into billions of postings on a shared node.
+pub const MAX_FIELD_TOKENS: usize = 10_000_000;
 /// Largest position (`IndexWriter.MAX_POSITION`).
 pub const MAX_POSITION: i64 = i32::MAX as i64 - 128;
 
@@ -316,6 +322,8 @@ pub struct Buffer {
     pub(crate) max_seq_no: i64,
     /// Field numbers touched by the doc being indexed.
     touched: Vec<u32>,
+    /// The most tokens one field of a document may produce ([`MAX_FIELD_TOKENS`]).
+    pub(crate) max_field_tokens: usize,
     stored_scratch: Vec<u8>,
     tv_scratch: Vec<u8>,
     ram: usize,
@@ -335,6 +343,7 @@ impl Buffer {
             has_nested: false,
             max_seq_no: -1,
             touched: Vec::new(),
+            max_field_tokens: MAX_FIELD_TOKENS,
             stored_scratch: Vec::new(),
             tv_scratch: Vec::new(),
             ram: 0,
@@ -517,6 +526,9 @@ impl Buffer {
             IndexableField::Tokens { field, tokens } => {
                 let number = *field;
                 check_indexed(self.touch(number)?)?;
+                if tokens.len() > self.max_field_tokens {
+                    return Err(too_many_tokens(self.schema.field(number).map_or("", |f| f.name.as_str()), self.max_field_tokens));
+                }
                 let pool = &mut self.pool;
                 let fb = self.fields[number as usize].as_deref_mut().unwrap();
                 for t in tokens {
@@ -603,10 +615,16 @@ impl Buffer {
         let mut err: Option<Error> = None;
         let mut last_abs: i64 = -1;
         let mut any = false;
+        let (max_tokens, mut tokens) = (self.max_field_tokens, 0usize);
         // The field's name goes into Lucene's position errors (`IndexingChain.invertTokenStream`).
         let name = self.schema.field(number).map_or("", |f| f.name.as_str());
         let r = analyzer.try_analyze_field(name, values, &mut |t| {
             if err.is_some() {
+                return;
+            }
+            tokens += 1;
+            if tokens > max_tokens {
+                err = Some(too_many_tokens(name, max_tokens));
                 return;
             }
             any = true;
@@ -819,6 +837,13 @@ fn check_indexed(fb: &FieldBuf) -> Result<()> {
         return Err(Error::illegal(format!("field [{}] is not indexed", fb.schema.name)));
     }
     Ok(())
+}
+
+/// roll's refusal of a field past [`Buffer::max_field_tokens`] (no Elasticsearch counterpart).
+fn too_many_tokens(field: &str, max: usize) -> Error {
+    Error::illegal(format!(
+        "Document field=\"{field}\" produced more than [{max}] tokens, the most one field of a document may produce at index time on roll. Index a smaller document, or analyze the field into fewer tokens (a smaller [max_gram] or [max_shingle_size])"
+    ))
 }
 
 /// `Arrays.toString(byte[30])` of a term prefix (Java signed bytes).

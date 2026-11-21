@@ -454,6 +454,12 @@ first, so they can't hide what runs, and anything that makes or changes credenti
   cluster, a copy of its indices: it also needs `write` on the parent, as
   `POST /v1/search/clusters/{id}/branches` does there, so a token whose rules name one project
   can't branch a cluster outside it.
+- The search console (`POST /v1/search/clusters/{id}/request`, any method and path as the
+  cluster's owner) is `admin`. A console request whose answer can hold a credential (a new API
+  key, cross-cluster or granted, a service account token, an OAuth2, SAML, OIDC or PKI token, an
+  enrollment token, `_connector/_secret/{id}`, `_fleet/secret/{id}`) also needs `reveal` on the
+  cluster, as `POST …/keys` does (`Row::reveals_if`; the path is matched loosely, decoded, whatever
+  the method, so a false match only asks for `reveal` too), and gets the weaker of the two decisions.
 - Agents' machine commands, by `policy::agent_may`'s tiers: diffs and file reads `read`; working
   threads `write`; publishing with `land` `deploy`; a shell, writing files, rolling back, raising a
   thread's runtime or interaction mode, answering an agent's approval, endpoints, the gateway,

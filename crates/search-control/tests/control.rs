@@ -463,6 +463,74 @@ async fn metrics_and_slow_logs() {
     assert_eq!(entries.first().map(|x| &x["log.logger"]), Some(&json!("index.search.slowlog.query")));
 }
 
+/// What a deleted cluster recorded and nobody had handed on yet (slow log, request metrics,
+/// analytics, requests to bill) goes with it: a cluster that takes its name at once starts with
+/// none of it, before and after the next metering pass.
+#[tokio::test]
+async fn a_reused_name_inherits_nothing_of_the_deleted_cluster() {
+    use reqwest::Method;
+    let e = env().await;
+    let old = e.post("/v1/search/clusters", json!({ "name": "shop" })).await;
+    let (user, pw) = creds(&old);
+    let settings = json!({ "settings": { "index.search.slowlog.threshold.query.warn": "0ms", "index.roll.analytics.enabled": true } });
+    assert_eq!(e.es(&user, &pw, Method::PUT, "/orders", Some(settings)).await.0, 200);
+    for _ in 0..3 {
+        assert_eq!(e.es(&user, &pw, Method::POST, "/orders/_search", Some(json!({ "query": { "match": { "card": "4111 1111" } } }))).await.0, 200);
+    }
+    assert!(!e.get("/v1/search/clusters/shop/slowlog").await["entries"].as_array().unwrap().is_empty());
+    assert_eq!(e.call(Method::DELETE, "/v1/search/clusters/shop", None).await.0, 200);
+    let new = e.post("/v1/search/clusters", json!({ "name": "shop" })).await;
+    assert_ne!(new["id"], old["id"]);
+    let id = new["id"].as_str().unwrap().to_string();
+    for pass in ["before the pass", "after it"] {
+        let log = e.get(&format!("/v1/search/clusters/{id}/slowlog")).await;
+        assert_eq!(log["entries"], json!([]), "{pass}: {log}");
+        let m = e.get(&format!("/v1/search/clusters/{id}/metrics?range=1h")).await;
+        assert_eq!(m["totals"]["all"]["requests"].as_u64().unwrap_or(0), 0, "{pass}: {m}");
+        let a = e.get(&format!("/v1/search/clusters/{id}/analytics?range=24h")).await;
+        assert_eq!(a["totals"]["searches"].as_u64(), Some(0), "{pass}: {a}");
+        let u = e.get(&format!("/v1/search/clusters/{id}/usage?days=1")).await;
+        assert_eq!(u["requests"].as_i64().unwrap_or(0), 0, "{pass}: {u}");
+        e.control.sample().await.unwrap();
+    }
+}
+
+/// Request bodies in flight are charged to the node's budget too (`max_in_flight_bytes`): two
+/// clusters each within their own budget get 429 once together they pass the node's.
+#[tokio::test]
+async fn bodies_in_flight_are_held_to_the_node_budget() {
+    use base64::Engine;
+    use tokio::io::AsyncWriteExt;
+    let e = env_with(|c| c.max_in_flight_bytes = Some(1_500_000)).await;
+    let (ua, pa) = creds(&e.post("/v1/search/clusters", json!({ "name": "a", "max_body_mb": 1 })).await);
+    let (ub, pb) = creds(&e.post("/v1/search/clusters", json!({ "name": "b", "max_body_mb": 1 })).await);
+    // a's upload: its headers are in, its 1,000,000 bytes aren't yet.
+    let mut held = tokio::net::TcpStream::connect(e.es.trim_start_matches("http://")).await.unwrap();
+    let auth = base64::engine::general_purpose::STANDARD.encode(format!("{ua}:{pa}"));
+    let head = format!("POST /_bulk HTTP/1.1\r\nhost: x\r\nauthorization: Basic {auth}\r\ncontent-type: application/x-ndjson\r\ncontent-length: 1000000\r\n\r\n");
+    held.write_all(head.as_bytes()).await.unwrap();
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while e.control.node.get_loaded("a").is_none_or(|l| l.bytes_in_flight() == 0) {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("a's body is reserved");
+    let doc = json!({ "pad": "x".repeat(900_000) });
+    let (s, v) = e.es(&ub, &pb, reqwest::Method::PUT, "/i/_doc/1", Some(doc.clone())).await;
+    assert_eq!(s, 429, "{v}");
+    assert!(v.to_string().contains("max_coordinating_and_primary_bytes=1500000"), "names the node's budget: {v}");
+    drop(held);
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while e.control.node.get_loaded("a").is_some_and(|l| l.bytes_in_flight() > 0) {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("a's reservation goes with its connection");
+    assert_eq!(e.es(&ub, &pb, reqwest::Method::PUT, "/i/_doc/1", Some(doc)).await.0, 201);
+}
+
 /// A person's clusters and always-on clusters are capped (`--search-max-*-per-person`); branches
 /// count toward the parent's owner, and the operator and admins aren't held to it.
 #[tokio::test]

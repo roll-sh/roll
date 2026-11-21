@@ -265,7 +265,10 @@ A request finds its cluster by, in order: Basic auth username (`<cluster>` with 
 password, or `<user>@<cluster>`), `Authorization: ApiKey base64(id:secret)` where the id names the
 cluster, `Authorization: Bearer <cluster>_<secret>`, or the TLS SNI/`Host` label under the node's
 domain (`<cluster>.search.<domain>`). Secrets are compared in constant time. Each cluster has
-request-rate and in-flight byte budgets so one tenant can't starve the node.
+request-rate and in-flight byte budgets so one tenant can't starve the node. Every cluster's
+in-flight body bytes are charged to the node's budget too (`--search-max-in-flight-body-mb`,
+4 GiB by default), so one person's many clusters can't hold more bodies than the node allows all
+of them; a body past either budget gets Elasticsearch's indexing-pressure 429.
 
 APIs built on other APIs (EQL, ES|QL, SQL, PPL, graph, vector tiles, `terms_enum`, transforms'
 preview, rollup search, downsampling, search applications, …) make their inner requests as

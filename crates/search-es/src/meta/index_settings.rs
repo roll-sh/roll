@@ -93,6 +93,12 @@ use Dflt::{Computed, List as L, Str as D};
 use Ty::*;
 
 const B: Ty = Bool;
+
+/// The most `index.max_ngram_diff` and `index.max_shingle_diff` may be. Elasticsearch allows up
+/// to `Integer.MAX_VALUE` (defaults 1 and 3); every step of either multiplies the tokens a value
+/// makes, so roll stops at 50 (the token cap per field, `search_index::buffer::MAX_FIELD_TOKENS`,
+/// bounds what's left).
+pub const MAX_GRAM_DIFF: i64 = 50;
 const DUR: &[&str] = &["request", "async", "REQUEST", "ASYNC"];
 
 /// `IndexMode` names, in Elasticsearch's declaration order.
@@ -199,13 +205,13 @@ pub static INDEX_SETTINGS: &[IndexSetting] = &[
     s!("index.max_adjacency_matrix_filters", D("100"), Int(2, i32::MAX as i64), Dynamic),
     s!("index.max_docvalue_fields_search", D("100"), Int(0, i32::MAX as i64), Dynamic),
     s!("index.max_inner_result_window", D("100"), Int(1, i32::MAX as i64), Dynamic),
-    s!("index.max_ngram_diff", D("1"), Int(0, i32::MAX as i64), Dynamic),
+    s!("index.max_ngram_diff", D("1"), Int(0, MAX_GRAM_DIFF), Dynamic),
     s!("index.max_refresh_listeners", D("1000"), Int(0, i32::MAX as i64), Dynamic),
     s!("index.max_regex_length", D("1000"), Int(1, i32::MAX as i64), Dynamic),
     s!("index.max_rescore_window", Computed, Int(1, i32::MAX as i64), Dynamic),
     s!("index.max_result_window", D("10000"), Int(1, i32::MAX as i64), Dynamic),
     s!("index.max_script_fields", D("32"), Int(0, i32::MAX as i64), Dynamic),
-    s!("index.max_shingle_diff", D("3"), Int(0, i32::MAX as i64), Dynamic),
+    s!("index.max_shingle_diff", D("3"), Int(0, MAX_GRAM_DIFF), Dynamic),
     s!("index.max_slices_per_scroll", D("1024"), Int(1, i32::MAX as i64), Dynamic),
     s!("index.max_terms_count", D("65536"), Int(1, i32::MAX as i64), Dynamic),
     s!("index.merge.intra_merge_parallelism_enabled", D("false"), B, Dynamic),
@@ -831,6 +837,9 @@ mod tests {
         assert_eq!(e.caused_by.unwrap().reason(), "For input string: \"x\"");
         let e = validate_user_settings(&st(&[("index.number_of_shards", "1025")]), true).unwrap_err();
         assert_eq!(e.reason(), "Failed to parse value [1025] for setting [index.number_of_shards] must be <= 1024");
+        // roll's bound on the gram diffs (Elasticsearch has none).
+        let e = validate_user_settings(&st(&[("index.max_ngram_diff", "51")]), true).unwrap_err();
+        assert_eq!(e.reason(), "Failed to parse value [51] for setting [index.max_ngram_diff] must be <= 50");
         let e = validate_user_settings(&st(&[("index.foo", "1"), ("index.bar", "2")]), true).unwrap_err();
         assert!(e.reason().starts_with("unknown setting [index.bar]"));
         assert_eq!(e.suppressed().len(), 1);

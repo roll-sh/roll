@@ -113,6 +113,10 @@ pub struct SearchConfig {
     pub stats_interval: Duration,
     /// Memory all loaded clusters may hold together (`None`: no node budget).
     pub memory_budget: Option<u64>,
+    /// Request body bytes all clusters together may have in flight on this node, on top of
+    /// each cluster's own budget (twice its `max_body_mb`); past it, 429 (`None`: no node
+    /// budget).
+    pub max_in_flight_bytes: Option<usize>,
     /// The catalog in a Postgres database every node of a fleet shares (rolld's system
     /// database; `None`: `search.db` under `home`).
     pub catalog: Option<String>,
@@ -169,6 +173,7 @@ impl SearchConfig {
             node_settings: Vec::new(),
             stats_interval: Duration::from_secs(600),
             memory_budget: None,
+            max_in_flight_bytes: None,
             catalog: None,
             catalog_connections: 8,
             defaults: Defaults {
@@ -528,7 +533,7 @@ pub struct Control {
     reloads: Mutex<HashSet<String>>,
     reloader: AtomicBool,
     me: OnceLock<Weak<Control>>,
-    /// When each loaded cluster's figures were last read from storage (ms).
+    /// When each loaded cluster's figures were last read from storage (ms), by catalog id.
     refreshed: Mutex<HashMap<String, i64>>,
     /// The roll-cluster fleet this node serves clusters in ([`Control::join`]).
     leases: OnceLock<Arc<crate::cluster::ClusterLeases>>,
@@ -589,6 +594,7 @@ impl Control {
                 test_features: cfg.test_features,
                 node_settings: cfg.node_settings.clone(),
                 memory_budget: cfg.memory_budget,
+                max_in_flight_bytes: cfg.max_in_flight_bytes,
                 sealer: cfg.sealer.clone(),
                 default_repository: cfg.default_repository.clone(),
                 links: Some(links.clone()),
@@ -920,9 +926,11 @@ impl Control {
     /// parent's segments, nothing is copied. Settings and the owner come from the parent (settings
     /// unless given), and the branch counts toward the owner's `caps`. In a
     /// fleet, call it on the node holding the parent (the API forwards there): a loaded parent
-    /// is committed first, so the branch sees every acknowledged write.
-    pub async fn branch(&self, parent: &str, name: &str, at: Option<i64>, o: ClusterOptions, caps: Caps) -> Result<SearchCluster> {
-        let p = self.get(parent).await?;
+    /// is committed first, so the branch sees every acknowledged write. `parent` is the cluster
+    /// the caller was checked against: it is read again by its id, never its name, so a cluster
+    /// that took the name meanwhile is never branched in its place.
+    pub async fn branch(&self, parent: &SearchCluster, name: &str, at: Option<i64>, o: ClusterOptions, caps: Caps) -> Result<SearchCluster> {
+        let p = self.store.get(&parent.id).await?.ok_or_else(|| ControlError::NotFound(format!("no search cluster {}", parent.id)))?;
         let now = now();
         if let Some(t) = at {
             self.check_window(&p, t, now)?;
@@ -981,7 +989,7 @@ impl Control {
         // The parent's recorded figures may be a metering interval old: read the branch's own
         // from its commit points now, so it shows what it holds at once.
         let mut c = c;
-        match self.refresh_stats(&c.name, now_ms()).await {
+        match self.refresh_stats(&c.id, now_ms()).await {
             Ok(()) => {
                 if let Ok(Some(fresh)) = self.store.get(&c.id).await {
                     (c.indices, c.docs, c.stored_bytes) = (fresh.indices, fresh.docs, fresh.stored_bytes);
@@ -989,7 +997,7 @@ impl Control {
             }
             Err(e) => {
                 tracing::warn!(cluster = c.name, error = %e, "reading a new branch's figures failed");
-                self.meter.mark_dirty(&c.name);
+                self.meter.mark_dirty(&c.id);
             }
         }
         Ok(c)
@@ -1103,11 +1111,11 @@ impl Control {
 
     /// Runs when a cluster has loaded (from the node's load hook): its instance was built from
     /// the description the waking request looked up, which a change may have overtaken.
-    pub(crate) async fn reconcile(self: Arc<Self>, name: String, token: Option<u64>) {
+    pub(crate) async fn reconcile(self: Arc<Self>, name: String, id: String, token: Option<u64>) {
         // The node publishes the instance right after the hook; give up if it unloads first.
         let deadline = Instant::now() + Duration::from_secs(10);
         let mut spins = 0u32;
-        while self.node.get_loaded(&name).is_none() && self.meter.is_loaded(&name) && Instant::now() < deadline {
+        while self.node.get_loaded(&name).is_none() && self.meter.is_loaded(&id) && Instant::now() < deadline {
             if spins < 64 {
                 tokio::task::yield_now().await;
             } else {
@@ -1255,6 +1263,9 @@ impl Control {
         // Its audit entries still waiting are written now; the stored ones go with its storage
         // (or move with its kept copy, and back on a restore).
         self.node.audit.forget(&c.name).await;
+        // So are its requests and observations not handed on yet: they are keyed by its id, so
+        // a cluster that takes the name next never sees them, and nothing bills them now.
+        self.node.forget_cluster(&c.id);
         if self.cfg.deleted_retention.is_zero() {
             self.data.delete_cluster(&c.name).await?;
             // Its remotes' keys roll made go with it (a restorable one keeps them for its restore).
@@ -1269,7 +1280,7 @@ impl Control {
         if let Some(l) = self.cluster_leases() {
             l.cluster().retire(&crate::cluster::key(&c.name));
         }
-        self.refreshed.lock().remove(&c.name);
+        self.refreshed.lock().remove(&c.id);
         self.reloads.lock().remove(&c.name);
         Ok(())
     }
@@ -1398,9 +1409,9 @@ impl Control {
             tracing::warn!(cluster = target, kept = d.stored_as, error = %e, "removing a restored search cluster's kept copy failed");
         }
         let c = self.get(&d.cluster.id).await?;
-        if let Err(e) = self.refresh_stats(&c.name, now_ms()).await {
+        if let Err(e) = self.refresh_stats(&c.id, now_ms()).await {
             tracing::warn!(cluster = c.name, error = %e, "reading a restored search cluster's figures failed");
-            self.meter.mark_dirty(&c.name);
+            self.meter.mark_dirty(&c.id);
         }
         self.open_always_on(&c).await;
         self.get(&c.id).await
@@ -1493,9 +1504,9 @@ impl Control {
         if unloaded {
             // Asleep figures come from the commit points the unload just wrote: record them now
             // rather than at the next metering pass, so the cluster's page is right at once.
-            if let Err(e) = self.refresh_stats(&c.name, now_ms()).await {
+            if let Err(e) = self.refresh_stats(&c.id, now_ms()).await {
                 tracing::warn!(cluster = c.name, error = %e, "refreshing search cluster figures failed");
-                self.meter.mark_dirty(&c.name);
+                self.meter.mark_dirty(&c.id);
             }
         }
         Ok(unloaded)
@@ -2063,24 +2074,25 @@ impl Control {
     /// loaded time and requests, and refreshes the figures of clusters that just loaded or
     /// unloaded, and of loaded ones every `stats_interval`.
     pub async fn sample(&self) -> anyhow::Result<()> {
-        for (name, n) in self.node.take_request_counts() {
-            self.meter.count_requests(&name, n.min(i64::MAX as u64) as i64);
+        // All keyed by catalog id, never by name (see `crate::meter`).
+        for (id, n) in self.node.take_request_counts() {
+            self.meter.count_requests(&id, n.min(i64::MAX as u64) as i64);
         }
-        for (name, o) in self.node.take_observations() {
+        for (id, o) in self.node.take_observations() {
             // Lost if the catalog can't take them now: they are a picture, not a bill.
-            if let Err(e) = self.meter.observe(&name, o).await {
-                tracing::warn!(cluster = name, error = %e, "storing search metrics failed");
+            if let Err(e) = self.meter.observe(&id, o).await {
+                tracing::warn!(cluster = id, error = %e, "storing search metrics failed");
             }
         }
         let at = now_ms();
-        for (name, forced) in self.meter.sample(at).await? {
-            let due = forced || self.refreshed.lock().get(&name).is_none_or(|t| at - t >= self.cfg.stats_interval.as_millis() as i64);
+        for (id, forced) in self.meter.sample(at).await? {
+            let due = forced || self.refreshed.lock().get(&id).is_none_or(|t| at - t >= self.cfg.stats_interval.as_millis() as i64);
             if !due {
                 continue;
             }
-            if let Err(e) = self.refresh_stats(&name, at).await {
-                tracing::warn!(cluster = name, error = %e, "refreshing search cluster figures failed");
-                self.meter.mark_dirty(&name);
+            if let Err(e) = self.refresh_stats(&id, at).await {
+                tracing::warn!(cluster = id, error = %e, "refreshing search cluster figures failed");
+                self.meter.mark_dirty(&id);
             }
         }
         // After the analytics above are in the catalog.
@@ -2110,7 +2122,7 @@ impl Control {
             add(at, &s);
         }
         // Not flushed yet: what the cluster's owner (here) recorded since the last pass.
-        for (minute, s) in self.node.peek_observations(&c.name).minutes {
+        for (minute, s) in self.node.peek_observations(&c.name, &c.id).minutes {
             add(minute.min(i64::MAX as u64 / 60) as i64 * 60, &s);
         }
         let mut total = search_server::metrics::Stats::default();
@@ -2136,7 +2148,7 @@ impl Control {
     /// handed on yet, at most [`search_es::slowlog::MAX_ENTRIES`].
     pub async fn slowlog(&self, id: &str) -> Result<Value> {
         let c = self.get(id).await?;
-        let mut entries: Vec<Value> = self.node.peek_observations(&c.name).slow.iter().rev().map(search_es::slowlog::Entry::to_json).collect();
+        let mut entries: Vec<Value> = self.node.peek_observations(&c.name, &c.id).slow.iter().rev().map(search_es::slowlog::Entry::to_json).collect();
         for row in self.store.slowlog(&c.id).await? {
             if entries.len() >= search_es::slowlog::MAX_ENTRIES {
                 break;
@@ -2148,9 +2160,10 @@ impl Control {
         Ok(json!({ "entries": entries, "max_entries": search_es::slowlog::MAX_ENTRIES }))
     }
 
-    /// Re-reads a cluster's docs and stored bytes from its commit points.
-    pub async fn refresh_stats(&self, name: &str, at_ms: i64) -> anyhow::Result<()> {
-        let Some(c) = self.store.by_name(name).await? else { return Ok(()) };
+    /// Re-reads the docs and stored bytes of the cluster with id `id` from its commit points.
+    pub async fn refresh_stats(&self, id: &str, at_ms: i64) -> anyhow::Result<()> {
+        let Some(c) = self.store.get(id).await? else { return Ok(()) };
+        let name = c.name.as_str();
         let u = self.data.cluster_usage(name).await?;
         let loaded = self.node.get_loaded(name);
         // Loaded with every index open, the engine counts the documents exactly (unflushed
@@ -2162,7 +2175,7 @@ impl Control {
         };
         let indices = match &loaded {
             Some(l) => l.cluster.state().metadata.indices.len() as i64,
-            None => match self.meter.take_indices(name) {
+            None => match self.meter.take_indices(id) {
                 Some(n) => n,
                 // Asleep and not seen loaded (a fresh branch): count the stored state's indices.
                 None => match self.data.read_cluster(name).await? {
@@ -2178,9 +2191,9 @@ impl Control {
         }
         let mut refreshed = self.refreshed.lock();
         if self.node.get_loaded(name).is_some() {
-            refreshed.insert(name.to_string(), at_ms);
+            refreshed.insert(id.to_string(), at_ms);
         } else {
-            refreshed.remove(name);
+            refreshed.remove(id);
         }
         Ok(())
     }

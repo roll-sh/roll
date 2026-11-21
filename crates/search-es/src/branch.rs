@@ -21,6 +21,13 @@
 //! - records the connectors, so syncs that read a source with stored credentials stay paused
 //!   on the branch ([`inherited_connector`]).
 //!
+//! Inference endpoints come with the branch and keep working there, their sealed keys included: a
+//! branch is where people try changes on real data, `semantic_text` fields included. Nothing
+//! that updates the parent's key afterwards (a roll secret's `search-inference` sync names the
+//! parent's id) reaches the branch, so a rotated or deleted key lives on in the branch's copy
+//! until the branch's owner deletes the endpoint or the provider revokes the key (docs/secrets.md,
+//! "roll search's inference endpoints").
+//!
 //! Everything else that runs on a schedule (ILM and ISM, data stream lifecycle, transforms,
 //! rollups) works inside the branch's own indices and keeps running; the steps of theirs that
 //! reach a repository meet the read-only registration, and ILM's cleanup of a snapshot in an

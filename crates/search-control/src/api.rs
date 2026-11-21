@@ -364,7 +364,7 @@ async fn create(State(c): State<AppState>, caller: Caller, method: Method, heade
             if let Some(resp) = forward(&c, &parent.name, method, "/v1/search/clusters", &headers, body.clone()).await {
                 return Ok(resp);
             }
-            c.branch(p, &r.name, r.at, r.opts, caller.caps(&c)).await?
+            c.branch(&parent, &r.name, r.at, r.opts, caller.caps(&c)).await?
         }
         None if r.at.is_some() => return Err(ControlError::Invalid("at needs a parent".into())),
         None => c.create(&r.name, r.opts, caller.owner(), caller.caps(&c)).await?,
@@ -403,7 +403,7 @@ async fn branch(State(c): State<AppState>, caller: Caller, Path(id): Path<String
     if let Some(resp) = forward(&c, &parent.name, method, &format!("/v1/search/clusters/{id}/branches"), &headers, body.clone()).await {
         return Ok(resp);
     }
-    let d = c.branch(&id, &r.name, r.at, r.opts, caller.caps(&c)).await?;
+    let d = c.branch(&parent, &r.name, r.at, r.opts, caller.caps(&c)).await?;
     Ok(Json(view(&c, &caller, d, true).await?).into_response())
 }
 

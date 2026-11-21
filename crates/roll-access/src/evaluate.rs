@@ -500,6 +500,10 @@ async fn decide(access: Arc<Access>, req: Request, next: Next) -> Response {
         catalog::Act::Raw(f) => f(buffered.as_deref().unwrap_or_default()),
         _ => row.action_with(&ctx.method, &params, json_body.as_ref(), &parts.headers),
     }];
+    // An answer holding credentials (search's console asking for an API key): `reveal` too.
+    if row.needs_reveal(json_body.as_ref()) {
+        needs.push(Action::Reveal);
+    }
     // A git push: its ref updates come first; the pack after them streams on untouched.
     let mut git_commands: Option<bytes::Bytes> = None;
     if matches!(row.act, catalog::Act::GitPush) {

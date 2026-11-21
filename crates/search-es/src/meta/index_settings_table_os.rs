@@ -5,7 +5,7 @@
 //! Elasticsearch registry where the key exists in both. Generated; edit by hand only to track a
 //! new OpenSearch version.
 
-use super::index_settings::{Dflt, EnumErr, IndexSetting, Scope, Ty};
+use super::index_settings::{Dflt, EnumErr, IndexSetting, MAX_GRAM_DIFF, Scope, Ty};
 
 use Dflt::{List as L, Str as D};
 use Ty::*;
@@ -111,13 +111,13 @@ pub static OS_INDEX_SETTINGS: &[IndexSetting] = &[
     s!("index.max_adjacency_matrix_filters", D("100"), Int(2, i32::MAX as i64), Dynamic),
     s!("index.max_docvalue_fields_search", D("100"), Int(0, i32::MAX as i64), Dynamic),
     s!("index.max_inner_result_window", D("100"), Int(1, i32::MAX as i64), Dynamic),
-    s!("index.max_ngram_diff", D("1"), Int(0, i32::MAX as i64), Dynamic),
+    s!("index.max_ngram_diff", D("1"), Int(0, MAX_GRAM_DIFF), Dynamic),
     s!("index.max_refresh_listeners", D("1000"), Int(0, i32::MAX as i64), Dynamic),
     s!("index.max_regex_length", D("1000"), Int(1, i32::MAX as i64), Dynamic),
     s!("index.max_rescore_window", Dflt::Computed, Int(1, i32::MAX as i64), Dynamic),
     s!("index.max_result_window", D("10000"), Int(1, i32::MAX as i64), Dynamic),
     s!("index.max_script_fields", D("32"), Int(0, i32::MAX as i64), Dynamic),
-    s!("index.max_shingle_diff", D("3"), Int(0, i32::MAX as i64), Dynamic),
+    s!("index.max_shingle_diff", D("3"), Int(0, MAX_GRAM_DIFF), Dynamic),
     s!("index.max_slices_per_pit", D("1024"), Long(-1, i64::MAX), Dynamic),
     s!("index.max_slices_per_scroll", D("1024"), Int(1, i32::MAX as i64), Dynamic),
     s!("index.max_terms_count", D("65536"), Int(1, i32::MAX as i64), Dynamic),

@@ -47,7 +47,10 @@
 //!   files); past the node's `memory_budget`, the least recently used clusters with nothing in
 //!   flight are unloaded.
 //! - **Metering** ([`Node::take_request_counts`]): requests admitted per cluster since the last
-//!   call, counted per instance and carried over when an instance unloads.
+//!   call, counted per instance and carried over when an instance unloads. Counts and
+//!   observations are keyed by the cluster's catalog id ([`Loaded::id`]), never its name: a
+//!   name freed by a delete may be taken again before the next pass, and what the old cluster
+//!   left goes with it ([`Node::forget_cluster`]), never to the new one.
 //! - **Observability** ([`Node::take_observations`]): each loaded cluster's request metrics
 //!   ([`crate::metrics`]: requests, responses by class, 429 rejections and latency per kind of
 //!   request, by the minute) and its slow log entries (`search_es::slowlog`), handed to whoever
@@ -65,7 +68,7 @@ use crate::allow::Origin;
 use crate::auth::{self, Presented};
 use crate::catalog::{Catalog, ClusterSpec, StoreProvider};
 use crate::lease::Leases;
-use crate::limits::{ByteBudget, FairPermit, FairScheduler, RateLimiter, Reservation};
+use crate::limits::{ByteBudget, FairPermit, FairScheduler, Full, RateLimiter, Reservation};
 use crate::persist::{self, ClusterData, TaskCount, TaskGuard};
 use async_trait::async_trait;
 use parking_lot::Mutex;
@@ -121,6 +124,10 @@ pub struct NodeConfig {
     pub max_running: usize,
     /// Lease time to live, with [`Node::set_leases`].
     pub lease_ttl: Duration,
+    /// Request body bytes all clusters together may have in flight; each cluster's own budget
+    /// (`ClusterSpec::max_in_flight_bytes`) is charged to it too, and a body past it gets 429.
+    /// `None`: no node budget.
+    pub max_in_flight_bytes: Option<usize>,
     /// Memory all loaded clusters together may hold (indexing buffers, in-heap segments,
     /// version maps; [`Usage::resident_bytes`]). Past it, the least recently used clusters with
     /// no request in flight are unloaded, and waking another cluster first makes room.
@@ -165,6 +172,7 @@ impl Default for NodeConfig {
             host_metrics: false,
             max_running: 0,
             lease_ttl: DEFAULT_LEASE_TTL,
+            max_in_flight_bytes: None,
             memory_budget: None,
             unload_memory_only: false,
             snapshot_leftover_grace: search_es::api::snapshots::LEFTOVER_GRACE,
@@ -235,6 +243,12 @@ impl Loaded {
 
     pub fn in_flight(&self) -> usize {
         self.in_flight.load(Ordering::SeqCst)
+    }
+
+    /// What metering and observations key the cluster by: its catalog id
+    /// (`ClusterSpec::catalog_id`), or its name on a node without a catalog.
+    pub fn id(&self) -> &str {
+        self.cluster.config.catalog_id.as_deref().unwrap_or(&self.name)
     }
 
     /// Requests served since the cluster loaded.
@@ -337,9 +351,11 @@ pub struct Node {
     leases: OnceLock<Arc<dyn Leases>>,
     /// Spec updates that arrived while their cluster was loading ([`Node::update_spec`]).
     pending_specs: Mutex<HashMap<String, ClusterSpec>>,
-    /// Requests of unloaded instances not reported yet ([`Node::take_request_counts`]).
+    /// Requests of unloaded instances not reported yet ([`Node::take_request_counts`]), by
+    /// [`Loaded::id`].
     unmetered: Mutex<HashMap<String, u64>>,
-    /// Observations of unloaded instances not handed on yet ([`Node::take_observations`]).
+    /// Observations of unloaded instances not handed on yet ([`Node::take_observations`]), by
+    /// [`Loaded::id`].
     unobserved: Mutex<HashMap<String, Observed>>,
     /// Makes a running reaper re-plan its tick (a cluster with a memory budget loaded).
     reaper_kick: Arc<tokio::sync::Notify>,
@@ -350,6 +366,8 @@ pub struct Node {
     pub unloads: AtomicU64,
     /// Every cluster's security audit log.
     pub audit: Arc<crate::audit::AuditLogs>,
+    /// Request body bytes in flight across clusters (`NodeConfig::max_in_flight_bytes`).
+    body_bytes: Arc<ByteBudget>,
 }
 
 /// Holds a cluster's transition lock; drops the map entry when nobody else wants it.
@@ -426,8 +444,9 @@ impl Lease {
         self.loaded.spec().max_body_bytes.unwrap_or(node.cfg.max_body_bytes)
     }
 
-    /// Reserves `bytes` of the cluster's in-flight body budget (from `Content-Length`, before
-    /// the body is read); 429 like Elasticsearch's indexing pressure past it.
+    /// Reserves `bytes` of the cluster's in-flight body budget, and the node's (from
+    /// `Content-Length`, before the body is read); 429 like Elasticsearch's indexing pressure
+    /// past either.
     pub fn reserve_body(&mut self, req: &EsRequest, bytes: usize) -> Result<(), Rejected> {
         self.reserve_more(req, bytes)
     }
@@ -437,17 +456,17 @@ impl Lease {
     pub fn reserve_more(&mut self, req: &EsRequest, bytes: usize) -> Result<(), Rejected> {
         match self.loaded.bytes.grow(&mut self.bytes, bytes) {
             Ok(()) => Ok(()),
-            Err(used) => Err(self.over_budget(req, used, self.bytes.bytes() + bytes)),
+            Err(full) => Err(self.over_budget(req, full, self.bytes.bytes() + bytes)),
         }
     }
 
-    /// The 429 for a body past the cluster's in-flight byte budget.
-    pub fn over_budget(&self, req: &EsRequest, used: usize, bytes: usize) -> Rejected {
+    /// The 429 for a body past the cluster's or the node's in-flight byte budget (`full`).
+    pub fn over_budget(&self, req: &EsRequest, full: Full, bytes: usize) -> Rejected {
         Self::refused(&self.loaded, req);
+        let Full { used, limit } = full;
         Rejected {
             error: EsError::too_many_requests(format!(
-                "rejected execution of coordinating operation [coordinating_and_primary_bytes={used}, replica_bytes=0, all_bytes={used}, coordinating_operation_bytes={bytes}, max_coordinating_and_primary_bytes={}] for REST request [{} {}]",
-                self.loaded.bytes.limit(),
+                "rejected execution of coordinating operation [coordinating_and_primary_bytes={used}, replica_bytes=0, all_bytes={used}, coordinating_operation_bytes={bytes}, max_coordinating_and_primary_bytes={limit}] for REST request [{} {}]",
                 req.method,
                 req.uri
             )),
@@ -820,6 +839,7 @@ impl Node {
         let audit = crate::audit::AuditLogs::new(stores.data(), cfg.audit.clone());
         Arc::new(Node {
             audit,
+            body_bytes: ByteBudget::new(cfg.max_in_flight_bytes.unwrap_or(usize::MAX)),
             catalog,
             stores,
             fair: (running != usize::MAX).then(|| FairScheduler::new(running)),
@@ -1065,7 +1085,7 @@ impl Node {
         self.hooks.loaded(&cluster).await;
         let permits = spec.max_in_flight.max(1);
         let max_body = spec.max_body_bytes.unwrap_or(self.cfg.max_body_bytes);
-        let bytes = ByteBudget::new(spec.max_in_flight_bytes.unwrap_or(max_body.saturating_mul(2)));
+        let bytes = ByteBudget::within(spec.max_in_flight_bytes.unwrap_or(max_body.saturating_mul(2)), Some(self.body_bytes.clone()));
         let rate = spec.max_requests_per_second.map(|r| Arc::new(RateLimiter::new(r, r.max(1.0))));
         let wake_time = started.elapsed();
         tracing::debug!(cluster = name, ms = wake_time.as_secs_f64() * 1e3, shards = recovery.shards, records = recovery.records, "cluster loaded");
@@ -1288,11 +1308,11 @@ impl Node {
         self.stores.release(name).await;
         let left = loaded.unmetered();
         if left > 0 {
-            *self.unmetered.lock().entry(name.to_string()).or_default() += left;
+            *self.unmetered.lock().entry(loaded.id().to_string()).or_default() += left;
         }
         let seen = Observed::take_from(&loaded);
         if !seen.is_empty() {
-            self.unobserved.lock().entry(name.to_string()).or_default().extend(seen);
+            self.unobserved.lock().entry(loaded.id().to_string()).or_default().extend(seen);
         }
         drop(loaded);
         self.unloads.fetch_add(1, Ordering::Relaxed);
@@ -1457,14 +1477,14 @@ impl Node {
 
     /// Requests served per cluster since the previous call (metering): loaded clusters and
     /// those unloaded meanwhile, each request counted once. Only requests admitted to their
-    /// cluster count (not ones refused by authentication or limits).
+    /// cluster count (not ones refused by authentication or limits). Keyed by [`Loaded::id`].
     pub fn take_request_counts(&self) -> Vec<(String, u64)> {
         let loaded: Vec<Arc<Loaded>> = self.clusters.read().values().filter_map(|s| s.get().cloned()).collect();
         let mut out: HashMap<String, u64> = std::mem::take(&mut *self.unmetered.lock());
         for l in loaded {
             let n = l.unmetered();
             if n > 0 {
-                *out.entry(l.name.to_string()).or_default() += n;
+                *out.entry(l.id().to_string()).or_default() += n;
             }
         }
         let mut v: Vec<(String, u64)> = out.into_iter().collect();
@@ -1473,14 +1493,14 @@ impl Node {
     }
 
     /// Every cluster's request metrics and slow log entries since the previous call (loaded
-    /// clusters and those unloaded meanwhile), each handed on once.
+    /// clusters and those unloaded meanwhile), each handed on once. Keyed by [`Loaded::id`].
     pub fn take_observations(&self) -> Vec<(String, Observed)> {
         let loaded: Vec<Arc<Loaded>> = self.clusters.read().values().filter_map(|s| s.get().cloned()).collect();
         let mut out: HashMap<String, Observed> = std::mem::take(&mut *self.unobserved.lock());
         for l in loaded {
             let seen = Observed::take_from(&l);
             if !seen.is_empty() {
-                out.entry(l.name.to_string()).or_default().extend(seen);
+                out.entry(l.id().to_string()).or_default().extend(seen);
             }
         }
         let mut v: Vec<(String, Observed)> = out.into_iter().collect();
@@ -1488,24 +1508,32 @@ impl Node {
         v
     }
 
-    /// What [`Node::take_observations`] would hand on for `name`, left in place (an API read
-    /// between two metering passes).
-    pub fn peek_observations(&self, name: &str) -> Observed {
+    /// What [`Node::take_observations`] would hand on for the cluster `name` with id `id`
+    /// ([`Loaded::id`]), left in place (an API read between two metering passes). An instance
+    /// loaded under `name` with another id is another cluster, and isn't read.
+    pub fn peek_observations(&self, name: &str, id: &str) -> Observed {
         let mut out = Observed::default();
-        if let Some(o) = self.unobserved.lock().get(name) {
+        if let Some(o) = self.unobserved.lock().get(id) {
             out.minutes.extend(o.minutes.iter().cloned());
             out.slow.extend(o.slow.iter().cloned());
             out.analytics.cleared = o.analytics.cleared.clone();
             out.analytics.enabled = o.analytics.enabled.clone();
             out.analytics.hours = o.analytics.hours.clone();
         }
-        if let Some(l) = self.get_loaded(name) {
+        if let Some(l) = self.get_loaded(name).filter(|l| l.id() == id) {
             let analytics = search_es::analytics::Taken { hours: l.cluster.analytics.peek(), ..Default::default() };
             out.extend(Observed { minutes: l.metrics.peek(), slow: l.cluster.engine.slowlog.peek(), analytics });
             // Loaded here: which indices have analytics on now decides what reads may show.
             out.analytics.enabled = Some(l.cluster.analytics.enabled_names());
         }
         out
+    }
+
+    /// Drops what an unloaded cluster with id `id` ([`Loaded::id`]) left for the next metering
+    /// pass: its requests and observations (it was deleted, so nothing may bill or show them).
+    pub fn forget_cluster(&self, id: &str) {
+        self.unmetered.lock().remove(id);
+        self.unobserved.lock().remove(id);
     }
 
     /// Applies memory budgets: commits clusters over their own `max_resident_bytes` (moving

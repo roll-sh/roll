@@ -502,8 +502,8 @@ async fn respond<B: RequestBody>(node: Arc<Node>, req: Request<B>, sni: Option<&
             match inflate_reserved(&mut lease, body, gz, max).await {
                 Ok(b) => b,
                 Err(Inflate::TooLong) => return Ok(too_large()),
-                Err(Inflate::OverBudget { used, bytes }) => {
-                    let r = lease.over_budget(&es, used, bytes);
+                Err(Inflate::OverBudget { full, bytes }) => {
+                    let r = lease.over_budget(&es, full, bytes);
                     return Ok(closing(to_hyper(search_es::rest::error_response(&r.error, &es, r.dialect), gzip_ok).await));
                 }
                 Err(Inflate::Corrupt(msg)) => return Err(DropConnection(msg)),
@@ -523,9 +523,10 @@ async fn respond<B: RequestBody>(node: Arc<Node>, req: Request<B>, sni: Option<&
 #[derive(Debug)]
 enum Inflate {
     TooLong,
-    /// The inflated body passed the byte budget (`used` in flight, `bytes` this request's).
+    /// The inflated body passed a byte budget (`full`: the cluster's or the node's; `bytes`
+    /// this request's).
     OverBudget {
-        used: usize,
+        full: crate::limits::Full,
         bytes: usize,
     },
     Corrupt(String),
@@ -537,7 +538,7 @@ async fn inflate_reserved(lease: &mut crate::node::Lease, body: Bytes, gz: bool,
     let (mut res, budget) = lease.take_reservation();
     let compressed = body.len();
     let work = move || {
-        let mut grow = |n: usize| budget.grow(&mut res, n).map_err(|used| (used, n));
+        let mut grow = |n: usize| budget.grow(&mut res, n).map_err(|full| (full, n));
         let r = inflate(&body, gz, max, &mut grow);
         drop(body);
         // The compressed copy is gone: its share of the reservation goes back.
@@ -554,9 +555,9 @@ async fn inflate_reserved(lease: &mut crate::node::Lease, body: Bytes, gz: bool,
 }
 
 /// Decompresses a request body, refusing to expand past `max` bytes. `grow` reserves each
-/// step of output (and fails with the bytes in use). A truncated stream yields what inflated
+/// step of output (and fails with the budget that is full). A truncated stream yields what inflated
 /// so far, as Netty's decoder passes it on; anything else that isn't valid is `Corrupt`.
-fn inflate(body: &[u8], gz: bool, max: usize, grow: &mut dyn FnMut(usize) -> Result<(), (usize, usize)>) -> Result<Bytes, Inflate> {
+fn inflate(body: &[u8], gz: bool, max: usize, grow: &mut dyn FnMut(usize) -> Result<(), (crate::limits::Full, usize)>) -> Result<Bytes, Inflate> {
     let mut reader: Box<dyn Read + '_> = if gz {
         Box::new(flate2::read::GzDecoder::new(body))
     } else if body.len() >= 2 && body[0] & 0x0f == 8 && (u16::from(body[0]) << 8 | u16::from(body[1])) % 31 == 0 {
@@ -570,7 +571,7 @@ fn inflate(body: &[u8], gz: bool, max: usize, grow: &mut dyn FnMut(usize) -> Res
     loop {
         // Reserve each step of output before inflating into it.
         let step = INFLATE_STEP.min(max + 1 - out.len());
-        grow(step).map_err(|(used, n)| Inflate::OverBudget { used, bytes: reserved + n })?;
+        grow(step).map_err(|(full, n)| Inflate::OverBudget { full, bytes: reserved + n })?;
         reserved += step;
         match (&mut reader).take(step as u64).read_to_end(&mut out) {
             Ok(n) if n < step => break,
@@ -708,7 +709,7 @@ mod tests {
         assert!(!accepts_gzip(None));
     }
 
-    fn unlimited(_: usize) -> Result<(), (usize, usize)> {
+    fn unlimited(_: usize) -> Result<(), (crate::limits::Full, usize)> {
         Ok(())
     }
 
@@ -791,13 +792,13 @@ mod tests {
         let mut budget = 100_000usize;
         let mut limited = |n: usize| {
             if n > budget {
-                return Err((7, n));
+                return Err((crate::limits::Full { used: 7, limit: 0 }, n));
             }
             budget -= n;
             Ok(())
         };
         match inflate(&z, true, 1 << 20, &mut limited) {
-            Err(Inflate::OverBudget { used: 7, bytes }) => assert_eq!(bytes, 2 * INFLATE_STEP),
+            Err(Inflate::OverBudget { full: crate::limits::Full { used: 7, .. }, bytes }) => assert_eq!(bytes, 2 * INFLATE_STEP),
             other => panic!("{other:?}"),
         }
     }

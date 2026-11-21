@@ -38,6 +38,23 @@ fn err_text(r: search_index::Result<impl std::fmt::Debug>) -> String {
     }
 }
 
+/// One document's field may produce at most `max_field_tokens` tokens, analyzed or given: past
+/// it the document is refused whole, so an `ngram` chain can't turn one body into billions of
+/// postings.
+#[test]
+fn a_field_past_the_token_cap_is_refused() {
+    let s = Shard::open(ShardConfig { merge_threads: 0, max_field_tokens: 5, ..Default::default() }, schema(), Vec::new()).unwrap();
+    let a = search_analysis::Analysis::global().analyzer("standard").unwrap();
+    let text = |id: &str, v: &str| IndexableDoc::new(id.as_bytes().to_vec()).field(IndexableField::Text { field: BODY, analyzer: a.clone(), values: vec![v.to_string()] });
+    let e = err_text(s.index(IndexOp::new(text("x1", "a b c d e f"))));
+    assert!(e.contains("field=\"body\" produced more than [5] tokens"), "{e}");
+    let tokens = (0..6).map(|i| PreToken::new(vec![b'a' + i], 1, i as u32, i as u32 + 1)).collect();
+    assert!(err_text(s.index(IndexOp::new(IndexableDoc::new(b"x2".to_vec()).field(IndexableField::Tokens { field: BODY, tokens })))).contains("more than [5] tokens"));
+    s.index(IndexOp::new(text("ok", "a b c d e"))).unwrap();
+    s.refresh().unwrap();
+    assert_eq!(s.searcher().num_docs(), 1);
+}
+
 #[test]
 fn invalid_documents_are_rejected_and_leave_no_trace() {
     let s = shard_with_docs(50);

@@ -87,6 +87,10 @@ pub struct Row {
     /// A JSON body field whose presence makes it `admin` (apps' `freeze`: setting or lifting a
     /// freeze is the same call as going past one).
     pub admin_if_field: Option<&'static str>,
+    /// Whether the JSON body asks for an answer holding credentials (search's console naming
+    /// `_security/api_key`): then it also needs `reveal` on the same resource, and gets the
+    /// weaker of the two decisions. A body that isn't JSON counts as asking.
+    pub reveals_if: Option<fn(&Value) -> bool>,
 }
 
 /// Where a request names other resources it hands to this one ([`Row::lends`]).
@@ -105,6 +109,28 @@ pub struct Lent {
     pub kind: String,
     pub r#ref: String,
     pub action: Action,
+}
+
+/// Whether a search console request (`{method, path, body?}`) may answer a credential: a new API
+/// key (`_security/api_key`, cross-cluster ones, grants), a service account token, an OAuth2,
+/// SAML, OIDC or PKI token, an enrollment token, a connector's or Fleet's stored secret, or an
+/// OpenSearch on-behalf-of token. Matched loosely, on the path decoded until it stops changing,
+/// with runs of `/` as one, whatever the method, so no spelling of the route gets past: a false
+/// match only asks for `reveal` too. A path that isn't a string asks.
+fn search_console_reveals(b: &Value) -> bool {
+    const CREDENTIALS: &[&str] = &["api_key", "_secret", "_fleet/secret", "credential", "oauth2", "/authenticate", "delegate_pki", "enroll", "onbehalfof", "obotoken"];
+    let Some(path) = b.get("path").and_then(Value::as_str) else { return true };
+    let mut path = path.to_ascii_lowercase();
+    loop {
+        let decoded = percent_encoding::percent_decode_str(&path).decode_utf8_lossy().to_ascii_lowercase();
+        if decoded == path {
+            break;
+        }
+        path = decoded;
+    }
+    let mut path: String = path.split('/').filter(|s| !s.is_empty()).collect::<Vec<_>>().join("/");
+    path.insert(0, '/');
+    CREDENTIALS.iter().any(|c| path.contains(c))
 }
 
 /// Apps' `links: [{kind, ref}]`: each linked resource's credentials go to the service (reveal).
@@ -203,7 +229,7 @@ pub type Sources = Vec<(String, Option<String>)>;
 
 impl Row {
     pub fn needs_body(&self) -> bool {
-        self.admin_if_field.is_some() || matches!(self.act, Act::Body(_) | Act::Raw(_)) || matches!(self.copies_from, Some(CopyFrom::Body(_) | CopyFrom::Each(_))) || matches!(self.lends, Some(Lend::Each(_)))
+        self.admin_if_field.is_some() || self.reveals_if.is_some() || matches!(self.act, Act::Body(_) | Act::Raw(_)) || matches!(self.copies_from, Some(CopyFrom::Body(_) | CopyFrom::Each(_))) || matches!(self.lends, Some(Lend::Each(_)))
     }
 
     pub fn action(&self, method: &str, params: &[(String, String)], body: Option<&Value>) -> Action {
@@ -227,7 +253,7 @@ impl Row {
 }
 
 const fn row(method: &'static str, route: &'static str, product: &'static str, act: Act, target: Tgt) -> Row {
-    Row { method, route, product, act, target, env: EnvFrom::None, path_query: None, reveals: &[], copies_from: None, index: None, lends: None, filters_itself: false, filters_index: false, admin_if: None, admin_if_field: None }
+    Row { method, route, product, act, target, env: EnvFrom::None, path_query: None, reveals: &[], copies_from: None, index: None, lends: None, filters_itself: false, filters_index: false, admin_if: None, admin_if_field: None, reveals_if: None }
 }
 
 const R: Act = Act::Is(Action::Read);
@@ -272,6 +298,15 @@ impl Row {
     const fn admin_if_field(mut self, field: &'static str) -> Row {
         self.admin_if_field = Some(field);
         self
+    }
+    const fn reveals_if(mut self, f: fn(&Value) -> bool) -> Row {
+        self.reveals_if = Some(f);
+        self
+    }
+
+    /// Whether the request also needs `reveal` ([`Row::reveals_if`]).
+    pub fn needs_reveal(&self, body: Option<&Value>) -> bool {
+        self.reveals_if.is_some_and(|f| body.is_none_or(f))
     }
 
     /// The action with the request's headers: `admin` when [`Row::admin_if`]'s is `1`.
@@ -613,6 +648,7 @@ pub fn view(r: &Row) -> RowView {
         Act::Body(_) | Act::Raw(_) => "from the body".into(),
         Act::GitPush => "deploy onto the default branch, delete for a deleted ref, else write".into(),
     };
+    let action = if r.reveals_if.is_some() { format!("{action}; also reveal when it answers credentials") } else { action };
     let target = match r.target {
         Tgt::Param(..) => "one",
         Tgt::List { .. } => "list",
@@ -1191,7 +1227,9 @@ static ROWS: &[Row] = &[
     row("POST", "/v1/search/clusters/{id}/password", "search", REVEAL, one(PG, "cluster")),
     // A deleted cluster back (its id still resolves while it is kept): a write, like a create.
     row("POST", "/v1/search/clusters/{id}/restore", "search", W, one(PG, "cluster")),
-    row("POST", "/v1/search/clusters/{id}/request", "search", ADMIN, one(PG, "cluster")),
+    // Any request as the cluster's owner; one whose answer holds a credential (a new API key, a
+    // connector's or Fleet's secret) is also `reveal`, as `…/keys` is.
+    row("POST", "/v1/search/clusters/{id}/request", "search", ADMIN, one(PG, "cluster")).reveals_if(search_console_reveals),
     // An API key: its secret is in the answer.
     row("POST", "/v1/search/clusters/{id}/keys", "search", REVEAL, one(PG, "cluster")),
     row("DELETE", "/v1/search/clusters/{id}/keys/{key}", "search", ADMIN, one(PG, "cluster")),

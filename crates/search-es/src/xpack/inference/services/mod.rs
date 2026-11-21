@@ -279,6 +279,7 @@ impl Service {
             ep.chunking = Some(Chunking::from_request(Some(&c))?);
         }
         let own_secrets = matches!(self, Service::AzureOpenAi | Service::Bedrock | Service::VertexAi | Service::Custom | Service::Test(_));
+        let secrets_given = ss.contains_key("secret_parameters");
         if !own_secrets && let Some(k) = updated_api_key(cluster, &mut ss)? {
             ep.secrets.insert("api_key".into(), k.into());
         }
@@ -327,6 +328,17 @@ impl Service {
             Service::HuggingFace => huggingface::task_settings(current.task, &mut merged)?,
             _ => merged,
         };
+        // Where the secrets go moved: they go there only when given again (roll's rule; the
+        // update's validation call would send them to the new host at once).
+        if self == Service::Custom
+            && !secrets_given
+            && let Some(name) = custom::moved_parameter(current, &ep)
+        {
+            return Err(EsError::status(
+                400,
+                format!("[task_settings] [parameters] [{name}] decides where the endpoint sends its secrets: give [service_settings] [secret_parameters] again to change it"),
+            ));
+        }
         Ok(ep)
     }
 
