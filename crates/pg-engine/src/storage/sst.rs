@@ -1444,42 +1444,67 @@ impl Block {
     }
 
     /// `seek` of `key` from restart `r`, `restart_for(key)`.
+    ///
+    /// The entries from the restart's on, none of their keys made until the one found: each
+    /// entry's key is the one before's first `shared` bytes and its stored tail, so with `m` the
+    /// bytes the key before shares with `key` (and that key below `key`), an entry sharing more
+    /// than `m` bytes with it is below `key` too, sharing `m`; one sharing at most `m` starts as
+    /// `key` does, and its tail alone is compared with the rest of `key`. (A key made and
+    /// compared for each entry, by calls to memcpy and memcmp, was most of a multi-get's seeks.)
     #[inline(always)]
     pub fn seek_from(&self, r: usize, key: &[u8], pos: &mut BlockPos) {
         if r >= self.nres() {
             pos.i = self.len;
             return;
         }
-        // The keys from the restart's on, the entries' values left alone until the one
-        // found.
-        pos.next = self.restart(r) as u32;
-        pos.vnext = self.rval(r);
-        pos.key.clear();
-        pos.i = r << self.rlog;
-        self.read(pos);
-        if pos.key.as_slice() >= key {
-            return;
-        }
+        use std::cmp::Ordering::*;
         let b = &self.data[..];
         let end = ((r + 1) << self.rlog).min(self.len);
-        let (mut p, mut v) = (pos.next as usize, pos.vnext);
-        for i in pos.i + 1..end {
+        let (mut p, mut v) = (self.restart(r) as u32 as usize, self.rval(r));
+        let mut m = 0;
+        for i in r << self.rlog..end {
             let at = (p, v);
             let (shared, us, vf) = head(b, &mut p);
             let unshared = us >> 2;
-            pos.key.truncate(shared);
-            pos.key.extend_from_slice(&b[p..p + unshared]);
-            if us & F_TS != 0 {
-                pos.key.extend_from_slice(&self.ts);
-            }
-            // (`read` makes this key again from the one it has: their first `shared` bytes
-            // are the same. A whole comparison: a byte loop from the shared prefix on took more
-            // instructions than memcmp saved.)
-            if pos.key.as_slice() >= key {
-                (pos.next, pos.vnext) = (at.0 as u32, at.1);
-                pos.i = i;
-                self.read(pos);
-                return;
+            if shared <= m {
+                // (Its first `shared` bytes are `key`'s: its tail, then the block's version,
+                // against the rest.)
+                let tail = &b[p..p + unshared];
+                let rest = &key[shared.min(key.len())..];
+                let n = common_prefix(tail, rest);
+                let o = if n < tail.len() {
+                    match rest.get(n) {
+                        Some(&k) => tail[n].cmp(&k),
+                        None => Greater,
+                    }
+                } else if us & F_TS != 0 {
+                    let rest = &rest[n..];
+                    let t = common_prefix(&self.ts, rest);
+                    m = shared + n + t;
+                    match (self.ts.get(t), rest.get(t)) {
+                        (Some(x), Some(k)) => x.cmp(k),
+                        (Some(_), None) => Greater,
+                        (None, Some(_)) => Less,
+                        (None, None) => Equal,
+                    }
+                } else if n < rest.len() {
+                    Less
+                } else {
+                    Equal
+                };
+                if o != Less {
+                    // (Made from `key`'s first `shared` bytes, as `read` makes it from the key
+                    // before's.)
+                    pos.key.clear();
+                    pos.key.extend_from_slice(&key[..shared]);
+                    (pos.next, pos.vnext) = (at.0 as u32, at.1);
+                    pos.i = i;
+                    self.read(pos);
+                    return;
+                }
+                if n < tail.len() || us & F_TS == 0 {
+                    m = shared + n;
+                }
             }
             p += unshared;
             if us & F_DERIVED == 0 && vf > 0 {
@@ -3400,7 +3425,12 @@ mod tests {
                 below.pop();
                 let mut above = k.clone();
                 above.push(0);
-                for probe in [below, k.clone(), above] {
+                // (And one below it in its last byte: inside an index entry's version.)
+                let mut less = k.clone();
+                if let Some(x) = less.last_mut() {
+                    *x = x.wrapping_sub(1);
+                }
+                for probe in [below, k.clone(), above, less] {
                     let want = ents.iter().position(|(k, _)| *k >= probe).unwrap_or(ents.len());
                     b.seek(&probe, &mut pos);
                     assert_eq!(pos.index(), want, "{restart} {probe:?}");
