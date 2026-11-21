@@ -19,6 +19,9 @@ pub struct Config {
     /// logins go to Postgres, waking a suspended compute. Use a `tag@sha256:` reference: a tag
     /// that moves under a suspended endpoint is told apart only at its next start.
     pub image: String,
+    /// Learn each image's answers before a password (decoy roles) at start, from a throwaway
+    /// compute, so no decoy's login waits for them. Off only where that costs too much (tests).
+    pub learn_answers_at_start: bool,
     /// Major version for new projects (16, 17 and 18 are supported).
     pub default_pg_version: u32,
     /// Host and port clients use to reach the proxy (written into connection strings).
@@ -71,6 +74,7 @@ impl Config {
             storage: StorageConfig::Local(home.join("objects")),
             home,
             image: String::new(),
+            learn_answers_at_start: true,
             default_pg_version: 18,
             public_host: "127.0.0.1".into(),
             public_domain: None,

@@ -244,6 +244,8 @@ CREATE TABLE compute_answers (
   image TEXT PRIMARY KEY, image_id TEXT NOT NULL, pg_version INTEGER NOT NULL, answers TEXT,
   learned_at INTEGER NOT NULL
 ) WITHOUT ROWID;
+-- Who is learning an image ahead of any login, until when (one node at a time).
+CREATE TABLE compute_answer_claims (image TEXT PRIMARY KEY, holder TEXT NOT NULL, until INTEGER NOT NULL) WITHOUT ROWID;
 "#,
 ];
 
@@ -435,8 +437,41 @@ impl Store {
         })
     }
 
+    pub fn compute_answers_of(&self, image: &str) -> anyhow::Result<Option<ComputeAnswers>> {
+        self.with(|c| {
+            c.query_row("SELECT image, image_id, answers FROM compute_answers WHERE image = ?1", [image], |r| {
+                Ok(ComputeAnswers { image: r.get(0)?, image_id: r.get(1)?, answers: r.get(2)? })
+            })
+            .optional()
+        })
+    }
+
     pub fn delete_compute_answers(&self) -> anyhow::Result<()> {
-        self.with(|c| c.execute("DELETE FROM compute_answers", []).map(drop))
+        self.with(|c| c.execute_batch("DELETE FROM compute_answers; DELETE FROM compute_answer_claims;"))
+    }
+
+    pub fn delete_compute_answers_of(&self, image: &str) -> anyhow::Result<()> {
+        self.with(|c| c.execute("DELETE FROM compute_answers WHERE image = ?1", [image]).map(drop))
+    }
+
+    /// Claim learning `image` for `holder` for `ttl_s`: only while nobody has learned it and no
+    /// other holder's claim is current. Whether it's this holder's now.
+    pub fn claim_compute_answers(&self, image: &str, holder: &str, ttl_s: i64) -> anyhow::Result<bool> {
+        self.with(|c| {
+            let t = now();
+            c.execute(
+                "INSERT INTO compute_answer_claims (image, holder, until) \
+                 SELECT ?1, ?2, ?3 WHERE NOT EXISTS (SELECT 1 FROM compute_answers WHERE image = ?1) \
+                 ON CONFLICT (image) DO UPDATE SET holder = excluded.holder, until = excluded.until \
+                 WHERE compute_answer_claims.until < ?4 OR compute_answer_claims.holder = excluded.holder",
+                params![image, holder, t + ttl_s, t],
+            )
+            .map(|n| n == 1)
+        })
+    }
+
+    pub fn release_compute_answers_claim(&self, image: &str, holder: &str) -> anyhow::Result<()> {
+        self.with(|c| c.execute("DELETE FROM compute_answer_claims WHERE image = ?1 AND holder = ?2", [image, holder]).map(drop))
     }
 
     pub fn put_compute_answers(&self, a: &ComputeAnswers, pg_version: u32) -> anyhow::Result<()> {
@@ -870,6 +905,21 @@ mod tests {
         // Re-opening is a no-op.
         drop(store);
         Store::open(&path).unwrap();
+    }
+
+    #[test]
+    fn one_holder_at_a_time_learns_an_image() {
+        let path = temp_db("claims");
+        let store = Store::open(&path).unwrap();
+        assert!(store.claim_compute_answers("img", "a", 600).unwrap());
+        assert!(!store.claim_compute_answers("img", "b", 600).unwrap());
+        assert!(store.claim_compute_answers("img", "a", 600).unwrap(), "a holder renews its own");
+        store.release_compute_answers_claim("img", "a").unwrap();
+        assert!(store.claim_compute_answers("img", "b", -1).unwrap());
+        assert!(store.claim_compute_answers("img", "a", 600).unwrap(), "an expired claim is taken over");
+        store.put_compute_answers(&ComputeAnswers { image: "img".into(), image_id: "sha256:x".into(), answers: None }, 18).unwrap();
+        store.release_compute_answers_claim("img", "a").unwrap();
+        assert!(!store.claim_compute_answers("img", "b", 600).unwrap(), "learned already");
     }
 
     #[test]

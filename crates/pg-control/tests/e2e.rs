@@ -56,7 +56,12 @@ fn unique(prefix: &str) -> String {
 
 macro_rules! harness {
     () => {
-        match Harness::start().await {
+        harness!(false)
+    };
+    // Whether it learns the compute images' answers at start, as rolld does (three throwaway
+    // computes: only the decoy test needs them).
+    ($learn:expr) => {
+        match Harness::start($learn).await {
             Some(h) => h,
             None => return,
         }
@@ -64,7 +69,7 @@ macro_rules! harness {
 }
 
 impl Harness {
-    async fn start() -> Option<Self> {
+    async fn start(learn_answers_at_start: bool) -> Option<Self> {
         if std::env::var("ROLL_E2E").is_err() {
             eprintln!("skipped: set ROLL_E2E=1 to run (needs Docker)");
             return None;
@@ -79,6 +84,7 @@ impl Harness {
 
         let mut config = Config::local(home.clone());
         config.public_port = proxy_listen.port();
+        config.learn_answers_at_start = learn_answers_at_start;
         config.internal_url = format!("http://host.docker.internal:{api_port}");
         if let Ok(bucket) = std::env::var("ROLL_E2E_S3_BUCKET") {
             config.storage = StorageConfig::S3 {
@@ -920,7 +926,14 @@ async fn transcript(port: u16, endpoint: &str, user: &str, version: i32, extra: 
 /// no compute and each is told once; it's `NOLOGIN` in Postgres too, and dropping it ends it.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_decoy_role_is_refused_as_a_wrong_password_is() {
-    let h = harness!();
+    let h = harness!(true);
+    // Every image's answers are learned at start, before any project or login needs them.
+    wait_for("every compute image's answers, learned at start", Duration::from_secs(300), || async {
+        let learned = h.control.store.compute_answers().unwrap();
+        [16, 17, 18].iter().all(|v| learned.iter().any(|a| a.image == h.control.config.image(*v) && a.answers.is_some()))
+    })
+    .await;
+    assert!(h.control.store.projects().unwrap().is_empty());
     let told: Arc<std::sync::Mutex<Vec<pg_control::DecoyLogin>>> = Arc::default();
     let t = told.clone();
     h.control.on_decoy_login(move |l| t.lock().unwrap().push(l.clone()));

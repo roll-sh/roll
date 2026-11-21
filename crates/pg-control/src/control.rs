@@ -51,6 +51,8 @@ pub struct Control {
     known: Mutex<HashMap<String, Known>>,
     /// Held while an image's answers are learned, by image reference.
     learning: Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
+    /// This process's name in claims on learning an image.
+    holder: String,
 }
 
 /// A compute image's answers as learned from `image_id`: `None` when the decoy can't match them.
@@ -81,6 +83,9 @@ pub struct DecoyRole {
     pub endpoint_id: String,
 }
 
+/// How long a claim on learning an image lasts (a throwaway compute's start and the probes).
+const CLAIM_S: i64 = 600;
+
 /// A compute's start when none was measured on this node yet (a decoy's refusal waits as long).
 const START_DEFAULT: Duration = Duration::from_millis(1500);
 
@@ -105,19 +110,9 @@ impl Control {
             };
         }
         let store = Store::open(&config.home.join("state.db"))?;
-        let mut known = HashMap::new();
-        for a in store.compute_answers()? {
-            // A row this version can't read is learned again.
-            let answers = match a.answers.map(|j| serde_json::from_str::<Answers>(&j)) {
-                Some(Ok(answers)) if answers.complete() => Some(Arc::new(answers)),
-                Some(_) => continue,
-                None => None,
-            };
-            known.insert(a.image, Known { image_id: a.image_id, answers });
-        }
         let driver = DockerDriver::new(&config.home).await?;
         let objects = Objects::new(&config.storage)?;
-        Ok(Arc::new(Self {
+        let control = Arc::new(Self {
             config,
             store,
             driver,
@@ -128,9 +123,17 @@ impl Control {
             backups: Mutex::default(),
             starts: Mutex::default(),
             decoy_listeners: Mutex::default(),
-            known: Mutex::new(known),
+            known: Mutex::default(),
             learning: Mutex::default(),
-        }))
+            holder: new_id("node"),
+        });
+        // No decoy's login should wait for its image's answers: learn them now, in the background.
+        if control.config.learn_answers_at_start {
+            for v in SUPPORTED_VERSIONS {
+                tokio::spawn(control.clone().learn_ahead(control.config.image(v), v));
+            }
+        }
+        Ok(control)
     }
 
     pub(crate) fn lock(&self, endpoint_id: &str) -> Arc<tokio::sync::Mutex<()>> {
@@ -732,13 +735,12 @@ impl Control {
     /// compute started for that alone (a decoy's login never wakes an endpoint). `None`: the
     /// decoy can't answer as it does (or it couldn't be asked).
     async fn answers(&self, image: &str, pg_version: u32, running: Option<(&str, u16)>) -> Option<Arc<Answers>> {
-        if let Some(k) = self.known.lock().unwrap().get(image) {
-            return k.answers.clone();
+        if let Some(answers) = self.cached(image) {
+            return answers;
         }
-        let lock = self.learning.lock().unwrap().entry(image.to_string()).or_default().clone();
-        let _held = lock.lock().await;
-        if let Some(k) = self.known.lock().unwrap().get(image) {
-            return k.answers.clone();
+        let _held = self.learning_lock(image).lock_owned().await;
+        if let Some(answers) = self.cached(image) {
+            return answers;
         }
         let learned = match running {
             Some((endpoint, port)) => match self.driver.image_id(&container_name(endpoint)).await {
@@ -753,6 +755,59 @@ impl Control {
         })
     }
 
+    /// `image`'s answers if they're learned (from this process's copy, else the catalog's).
+    fn cached(&self, image: &str) -> Option<Option<Arc<Answers>>> {
+        if let Some(k) = self.known.lock().unwrap().get(image) {
+            return Some(k.answers.clone());
+        }
+        let row = self.store.compute_answers_of(image).ok()??;
+        let answers = match row.answers.map(|j| serde_json::from_str::<Answers>(&j)) {
+            Some(Ok(answers)) if answers.complete() => Some(Arc::new(answers)),
+            // A row this version can't read is learned again.
+            Some(_) => {
+                let _ = self.store.delete_compute_answers_of(image);
+                return None;
+            }
+            None => None,
+        };
+        self.known.lock().unwrap().insert(image.into(), Known { image_id: row.image_id, answers: answers.clone() });
+        Some(answers)
+    }
+
+    fn learning_lock(&self, image: &str) -> Arc<tokio::sync::Mutex<()>> {
+        self.learning.lock().unwrap().entry(image.to_string()).or_default().clone()
+    }
+
+    /// Learn `image` from a compute of its own unless it's learned already, retrying with a
+    /// backoff: at start, so a decoy's login never waits for it. One node at a time claims it in
+    /// the catalog; another's claim means waiting for its result.
+    async fn learn_ahead(self: Arc<Self>, image: String, pg_version: u32) {
+        let mut wait = Duration::from_secs(5);
+        loop {
+            {
+                let _held = self.learning_lock(&image).lock_owned().await;
+                if self.cached(&image).is_some() {
+                    return;
+                }
+                match self.store.claim_compute_answers(&image, &self.holder, CLAIM_S) {
+                    Ok(true) => {
+                        let started = std::time::Instant::now();
+                        let learned = self.learn_alone(&image, pg_version).await;
+                        let _ = self.store.release_compute_answers_claim(&image, &self.holder);
+                        match learned {
+                            Ok(_) => return info!(image, ms = started.elapsed().as_millis() as u64, "learned a compute image ahead of any login"),
+                            Err(e) => warn!(image, error = %e, retry_s = wait.as_secs(), "learning what a compute image answers failed"),
+                        }
+                    }
+                    Ok(false) => {}
+                    Err(e) => warn!(image, error = %e, "claiming a compute image to learn failed"),
+                }
+            }
+            tokio::time::sleep(wait).await;
+            wait = (wait * 2).min(Duration::from_secs(600));
+        }
+    }
+
     /// Forget every image's answers: each is learned again when it's next needed (as after an
     /// upgrade that moves the pinned images).
     pub fn forget_compute_answers(&self) -> anyhow::Result<()> {
@@ -764,14 +819,13 @@ impl Control {
     /// After `endpoint`'s compute started on `image`: learn what it answers, unless that's known
     /// for the image it runs (a reference by digest can't move; a tag can).
     async fn check_answers(self: Arc<Self>, endpoint: String, image: String, pg_version: u32, port: u16) {
-        if image.contains("@sha256:") && self.known.lock().unwrap().contains_key(&image) {
+        if image.contains("@sha256:") && self.cached(&image).is_some() {
             return;
         }
-        let lock = self.learning.lock().unwrap().entry(image.clone()).or_default().clone();
-        let _held = lock.lock().await;
+        let _held = self.learning_lock(&image).lock_owned().await;
         let learned = async {
             let id = self.driver.image_id(&container_name(&endpoint)).await?;
-            if self.known.lock().unwrap().get(&image).is_some_and(|k| k.image_id == id) {
+            if self.cached(&image).is_some() && self.known.lock().unwrap().get(&image).is_some_and(|k| k.image_id == id) {
                 return Ok(None);
             }
             self.learn_at(&image, &id, pg_version, port).await
