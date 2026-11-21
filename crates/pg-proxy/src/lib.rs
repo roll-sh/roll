@@ -87,7 +87,12 @@ impl<R: Router> Proxy<R> {
     /// [`Proxy::serve`] for a proxy that also serves connections from elsewhere (the edge).
     pub async fn serve_shared(self: Arc<Self>) -> anyhow::Result<()> {
         let listener = TcpListener::bind(self.config.listen).await?;
-        info!(addr = %self.config.listen, "postgres proxy listening");
+        self.serve_listener(listener).await
+    }
+
+    /// [`Proxy::serve_shared`] on a listener already bound.
+    pub async fn serve_listener(self: Arc<Self>, listener: TcpListener) -> anyhow::Result<()> {
+        info!(addr = %listener.local_addr()?, "postgres proxy listening");
         let this = self;
         loop {
             let (socket, peer) = listener.accept().await?;

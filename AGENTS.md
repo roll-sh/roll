@@ -91,6 +91,9 @@ The product should feel alive: dots react to the cursor and the marks "think". E
     `--no-*`/`--*-only` flags are shorthands). A product's new top-level API prefix goes in
     `Product::prefixes`: off products' 404s and the metrics read it. Access lines and EMF metrics
     are `crates/rolld/src/logs.rs`: log route patterns, never a path, query or header.
+    rolld's listeners bind through `src/listen.rs`; its tests start it with every listener on port 0
+    and read the addresses from `--addr-file` (`tests/common`). Never pick a port for rolld and let
+    it go first: another test binary can take it in between.
   - After touching anything Postgres-related, run `pnpm test:pg` (Docker e2e; it skips itself when nothing relevant changed). New Postgres features need an e2e test in `crates/pg-control/tests/e2e.rs`.
 - **Streams (Kafka-compatible):**
   - `crates/stream-log` is the partition log. It holds Kafka record batches v2 in segment files, group-commit fsync (the high watermark is the durable end), idempotent producer state and transactions, plus hooks for tiering. It does no network or object-storage I/O.
