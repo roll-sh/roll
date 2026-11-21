@@ -159,10 +159,13 @@ pub enum Refusal {
     /// another project.
     #[error("not trusted: {0}")]
     NotTrusted(String),
-    /// Whoever chose the reference may not reveal it ([`Secrets::bind_ref`]'s caller, or a
-    /// [`Maker`] since demoted, disabled, revoked or no longer on the project).
+    /// Whoever chose the reference may not reveal it ([`Secrets::bind_ref`]'s caller).
     #[error("not allowed: {0}")]
     NotAllowed(String),
+    /// Whoever chose it (a [`Maker`]) can no longer reveal it, or sign in: demoted, disabled,
+    /// revoked or no longer on the project ([`crate::Error::MakerUnreachable`] over HTTP).
+    #[error("maker unreachable: {0}")]
+    MakerUnreachable(String),
     #[error("no such key: {0}")]
     NoSuchKey(String),
     /// A protected environment, or only reachable through one, for an untrusted reader (an
@@ -289,12 +292,15 @@ impl Secrets {
         let r = Reference::required(reference)?;
         let project = self.project_for(resource, r.project.as_deref())?;
         let (by, runtime_env) = maker.parts();
-        let gone = || Refusal::NotAllowed(format!("{by}, who chose it, can't reach roll secrets any more"));
+        let gone = || Refusal::MakerUnreachable(format!("{by}, who chose it, can no longer reveal {}:{} or can no longer sign in", r.env, r.path));
         let caller = self.maker_caller(by, &resource.consumer()).map_err(|e| match e {
             Error::Forbidden(_) => gone(),
             e => e.into(),
         })?;
-        self.may_reveal_for(&project, &r, &caller)?;
+        self.may_reveal_for(&project, &r, &caller).map_err(|e| match e {
+            Refusal::NotAllowed(_) => gone(),
+            e => e,
+        })?;
         let Some(env) = runtime_env else { return Ok((project, r, caller.not_runtime())) };
         if r.env != env {
             return Err(Refusal::NotAllowed(format!("{by} chose this for {env}'s runtime, not {}'s", r.env)));

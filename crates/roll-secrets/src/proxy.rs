@@ -51,6 +51,10 @@ pub enum Refusal {
     /// Whoever asked for it may no longer, or the environment is protected, frozen or gone.
     #[error("{0}")]
     NotAllowed(String),
+    /// Whoever set it up (the consumer's maker) can no longer reveal there, or sign in
+    /// ([`crate::Error::MakerUnreachable`] over HTTP).
+    #[error("{0}")]
+    MakerUnreachable(String),
     /// The key doesn't resolve, or isn't one a placeholder can stand for any more.
     #[error("{0}")]
     Unusable(String),
