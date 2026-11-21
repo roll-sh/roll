@@ -375,6 +375,7 @@ mod finds {
             ("show me a bucket's files", "storage_list_objects"),
             ("redis memory usage", "redis_usage"),
             ("which service costs the most this month", "apps_project_usage"),
+            ("is the leaked key in my code still live", "secrets_credential_check"),
         ]
         .iter()
         .filter_map(|(q, want)| {

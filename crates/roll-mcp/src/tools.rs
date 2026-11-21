@@ -353,7 +353,7 @@ fn secrets_area(method: &str, path: &str) -> Area {
         ["projects", "environments"] | ["projects"] => "values",
         ["projects", s, ..] => match *s {
             "grid" | "compare" | "required" | "shared" | "suggestions" | "links" | "value-requests" => "values",
-            "audit" | "health" | "leaks" | "shares" | "rotations" | "backup" => "security",
+            "audit" | "health" | "leaks" | "shares" | "rotations" | "backup" | "unstored" => "security",
             "transit" | "leases" | "cas" | "ssh-cas" | "atlas-projects" | "aws-roles" | "aws-users" | "cloud-accounts" | "directories" | "gateways" | "github-apps"
             | "kubernetes" | "outside-databases" | "rotators" | "saas" | "snowflake-accounts" | "syncs" => "integrations",
             _ => return Area::Unplaced,
@@ -1114,6 +1114,7 @@ static TOOLS: &[Tool] = &[
     t("secrets_get_values", "Reveal an environment's values", "All of an environment's values (a folder's, with path) at once, resolved (references and imports), as one reveal instead of one per key; what can't be resolved is named, never guessed. dynamic=false leaves dynamic keys out instead of minting fresh credentials. Needs reveal.", "secrets", "GET", "/v1/secrets/projects/{project}/environments/{env}/values", &[SECRET_PROJECT, ENV, q("path", Ty::Str, "Folder"), q("dynamic", Ty::Bool, "false: leave dynamic keys out (named in dynamic)")]),
     t("secrets_list_leases", "List leases", "A project's live leases on dynamic credentials (a database user, a cloud key made for a reader): who holds each, for what, and when it ends. Never a credential.", "secrets", "GET", "/v1/secrets/projects/{project}/leases", &[SECRET_PROJECT]),
     t("secrets_end_lease", "End a lease", "End a dynamic credential's lease now (the credential is revoked where it lives): yours once you're done with it, or anyone's with more than reveal.", "secrets", "DELETE", "/v1/secrets/projects/{project}/leases/{id}", &[SECRET_PROJECT, req("id", "Lease id")]),
+    t("secrets_credential_check", "Is a key found in code still live?", "A credential found in code that the project doesn't hold (by its fingerprint, from roll code's unstored notice or roll secrets scan): its kind, whether it was live when last checked (live, invalid or unknown), the account it belongs to and the rotator that could replace it. Never its value; 404 when it hasn't been checked.", "secrets", "GET", "/v1/secrets/projects/{project}/unstored/{fingerprint}", &[SECRET_PROJECT, req("fingerprint", "The credential's fingerprint")]),
     t("secrets_health", "Secrets health", "What needs fixing in a project's secrets, by name (never values), in the environments you may read: expired, missing, exposed, weak, expiring, stale or unread ones, rotations or revocations failing, certificates expiring, and values marked public.", "secrets", "GET", "/v1/secrets/projects/{project}/health", &[
         SECRET_PROJECT,
         q("code", Ty::Bool, "Also keys no repository on the project's canvas mentions (needs code read on every one)"),
@@ -1508,6 +1509,18 @@ mod tests {
                 assert!(t.params.iter().any(|p| p.name == name && p.at == At::Path), "{}: {{{name}}} isn't a path parameter", t.name);
             }
             assert!(t.name.starts_with(t.product), "{} isn't named after {}", t.name, t.product);
+        }
+        // A tool that another's text names ("from secrets_list_placeholders") is one roll has
+        // (`access_denied` is an audit event; roll code's tools are another crate's).
+        for t in all() {
+            let params: Vec<&str> = t.params.iter().map(|p| p.desc).collect();
+            let text = format!("{} {} {}", t.title, t.description, params.join(" "));
+            for word in text.split(|c: char| !(c.is_ascii_lowercase() || c == '_')) {
+                let Some((product, _)) = word.split_once('_') else { continue };
+                if roll_auth::scope::PRODUCTS.contains(&product) && !matches!(product, "code" | "agents") && word != "access_denied" {
+                    assert!(names.contains(word), "{} names {word}, which isn't a tool", t.name);
+                }
+            }
         }
         let def = |n: &str| all().iter().find(|t| t.name == n).unwrap().definition();
         assert_eq!(def("postgres_query")["annotations"]["readOnlyHint"], true);
