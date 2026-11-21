@@ -287,7 +287,9 @@ pub fn read(files: &mut dyn Files, commit: &SegmentCommit, si: &SegmentInfo, vec
             wanted.push((Role::Magnitude(k), f));
         }
     }
-    let mut groups: Vec<((String, String), Vec<(Role, u32)>)> = Vec::new();
+    // (dv suffix, file base name) → the fields read from it.
+    type Groups = Vec<((String, String), Vec<(Role, u32)>)>;
+    let mut groups: Groups = Vec::new();
     for (role, f) in &wanted {
         let generation = if f.dv_gen > 0 { f.dv_gen } else { -1 };
         match per_field(name, f, "DocValues", generation) {
@@ -307,7 +309,8 @@ pub fn read(files: &mut dyn Files, commit: &SegmentCommit, si: &SegmentInfo, vec
         }
     }
     // (role, entry, docs bytes, values bytes)
-    let mut numerics: Vec<(Role, NumericEntry, Option<Vec<u8>>, Vec<u8>)> = Vec::new();
+    type Kept = Vec<(Role, NumericEntry, Option<Vec<u8>>, Vec<u8>)>;
+    let mut numerics: Kept = Vec::new();
     for ((suffix, base), members) in &groups {
         let meta = view.small(files, &format!("{base}.dvm"), limits)?;
         let entries = docvalues::read_meta(&meta, &commit.id, suffix, &infos)?;

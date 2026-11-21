@@ -18,7 +18,7 @@ impl Bits {
     /// Every document of `len` live.
     pub fn all(len: u32) -> Bits {
         let mut words = vec![u64::MAX; (len as usize).div_ceil(64)];
-        if len % 64 != 0
+        if !len.is_multiple_of(64)
             && let Some(last) = words.last_mut()
         {
             *last = (1u64 << (len % 64)) - 1;
@@ -69,7 +69,7 @@ pub fn read_live_docs(file: &[u8], id: &Id, generation: i64, max_doc: u32, del_c
         out.push(inp.i64()? as u64);
     }
     // Bits past the last document are never set.
-    if max_doc % 64 != 0
+    if !max_doc.is_multiple_of(64)
         && let Some(last) = out.last_mut()
     {
         *last &= (1u64 << (max_doc % 64)) - 1;

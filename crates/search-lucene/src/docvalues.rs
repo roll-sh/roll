@@ -218,7 +218,7 @@ pub struct Disi<'a> {
 enum Block {
     None,
     Sparse { left: u32 },
-    Dense { word: usize, bits: u64, words: [u64; 1024] },
+    Dense { word: usize, bits: u64, words: Box<[u64; 1024]> },
     All { next: u32 },
 }
 
@@ -248,7 +248,7 @@ impl<'a> Disi<'a> {
                         Block::All { next: 0 }
                     } else {
                         self.inp.skip(self.rank_bytes)?;
-                        let mut words = [0u64; 1024];
+                        let mut words = Box::new([0u64; 1024]);
                         for w in words.iter_mut() {
                             *w = self.inp.i64()? as u64;
                         }

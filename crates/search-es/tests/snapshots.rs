@@ -612,15 +612,16 @@ async fn check_restore(c: &Cluster, dir: &std::path::Path, version: &str, reposi
             assert_eq!(at(h, "_routing"), at(d, "_routing"), "{id}");
             assert_eq!(at(h, "_seq_no"), at(d, "_seq_no"), "{id}");
             assert_eq!(at(h, "_version"), at(d, "_version"), "{id}");
-            assert_eq!(at(h, "_source"), at(d, "_source"), "{version} {index} {id}");
-            // The source Elasticsearch kept, byte for byte (vectors it left out are appended).
+            assert!(same(at(h, "_source"), at(d, "_source")), "{version} {index} {id}: {:?} vs {:?}", at(h, "_source"), at(d, "_source"));
+            // `GET _source` gives what Elasticsearch's gave (roll prints it again: the stored bytes
+            // are compared in search-lucene's tests); vectors it left out show only on request.
             let mut uri = format!("/{target}/_source/{}", urlencode(id));
             if let Some(r) = at(d, "_routing").as_str() {
                 uri.push_str(&format!("?routing={}", urlencode(r)));
             }
             let raw = raw_body(c, &uri).await;
-            let kept = at(d, "source_raw").as_str().unwrap();
-            assert!(raw.starts_with(kept.trim_end_matches('}')), "{version} {index} {id}: {raw} vs {kept}");
+            let kept: Value = parse(at(d, "source_raw").as_str().unwrap().as_bytes()).unwrap().unwrap();
+            assert!(same(&parse(raw.as_bytes()).unwrap().unwrap(), &kept), "{version} {index} {id}: {raw}");
         }
         for (name, count) in at(want, "counts").as_object().unwrap() {
             let q = match name.as_str() {
@@ -645,6 +646,20 @@ async fn check_restore(c: &Cluster, dir: &std::path::Path, version: &str, reposi
         call(c, "DELETE", &format!("/{i}"), None).await;
     }
     call(c, "DELETE", &format!("/_snapshot/{repo}"), None).await;
+}
+
+/// Equal sources, numbers within `float` precision: cosine vectors come back from their
+/// normalized form and magnitude, on roll as on Elasticsearch, each with its own rounding.
+fn same(a: &Value, b: &Value) -> bool {
+    match (a, b) {
+        (Value::Obj(x), Value::Obj(y)) => x.len() == y.len() && x.iter().all(|(k, v)| y.get(k).is_some_and(|w| same(v, w))),
+        (Value::Arr(x), Value::Arr(y)) => x.len() == y.len() && x.iter().zip(y).all(|(v, w)| same(v, w)),
+        (Value::Num(_), Value::Num(_)) => {
+            let (x, y) = (a.as_f64().unwrap(), b.as_f64().unwrap());
+            (x - y).abs() <= 1e-6 * x.abs().max(1.0)
+        }
+        _ => a == b,
+    }
 }
 
 fn urlencode(s: &str) -> String {

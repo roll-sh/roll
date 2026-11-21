@@ -95,6 +95,6 @@ pub fn read_meta(file: &[u8], id: &Id, suffix: &str, fields: &FieldInfos) -> Res
 pub fn decode(entry: &VectorEntry, bytes: &[u8]) -> Vec<f32> {
     match entry.encoding {
         VectorEncoding::Byte => bytes.iter().map(|b| *b as i8 as f32).collect(),
-        VectorEncoding::Float32 => bytes.chunks_exact(4).map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]])).collect(),
+        VectorEncoding::Float32 => bytes.as_chunks::<4>().0.iter().map(|c| f32::from_le_bytes(*c)).collect(),
     }
 }

@@ -95,6 +95,8 @@ fn check(dir: &str, vectors: &[String]) -> Vec<Read> {
         assert_eq!(got.primary_term, w["_primary_term"].as_i64().unwrap());
         assert_eq!(got.routing.as_deref(), w["_routing"].as_str());
         assert_eq!(got.source, w["_source"], "seq_no {seq}: {}", String::from_utf8_lossy(&got.raw));
+        // The bytes Elasticsearch stored, as its `GET _source` gives them.
+        assert_eq!(String::from_utf8_lossy(&got.raw), w["source_raw"].as_str().unwrap(), "seq_no {seq}");
     }
     docs
 }
@@ -109,7 +111,7 @@ fn elasticsearch_9_5_5_lucene_10() {
 fn elasticsearch_8_19_7_zstd() {
     let docs = check("lucene-9.12.2-zstd-0", &[]);
     // 8.x keeps the source as it was sent, vectors and all.
-    assert!(docs.iter().all(|d| d.raw.starts_with(b"{\"title\": ")));
+    assert!(docs.iter().all(|d| d.raw.starts_with(b"{\"title\": ") && d.raw.windows(6).any(|w| w == b"\"vec\":")));
 }
 
 /// [`Dir`] with bytes changed or cut, as a bucket someone else writes can hold them.
