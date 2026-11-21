@@ -87,7 +87,7 @@ BEGIN
 );
 
 /// The roles a writer joins: every role that owns the database or something in the app's schemas,
-/// except a superuser, one that may make roles, databases or replication connections or bypass
+/// except a predefined one, a superuser, one that may make roles, databases or replication connections or bypass
 /// row security, and one that is a member (by any path) of a superuser or of the roles that run
 /// programs or read and write the server's files. Membership in those would pass on more than
 /// ownership.
@@ -100,6 +100,9 @@ pub const OWNERS_SQL: &str = r#"SELECT DISTINCT o.rolname FROM (
 ) x JOIN pg_roles o ON o.oid = x.owner
 WHERE NOT (o.rolsuper OR o.rolcreaterole OR o.rolcreatedb OR o.rolreplication OR o.rolbypassrls)
   AND o.rolname NOT LIKE 'roll\_wr\_%' AND o.rolname NOT LIKE 'roll\_ro\_%'
+  -- Predefined roles take no members (pg_database_owner owns `public`: the database's owner, so
+  -- the writer has it through roll_owner).
+  AND o.rolname NOT LIKE 'pg\_%'
   AND NOT EXISTS (SELECT 1 FROM pg_roles s WHERE (s.rolsuper OR s.rolname IN ('pg_execute_server_program', 'pg_read_server_files', 'pg_write_server_files'))
                   AND s.oid <> o.oid AND pg_has_role(o.oid, s.oid, 'MEMBER'))"#;
 
