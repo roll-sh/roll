@@ -30,6 +30,8 @@ async fn env_with(f: impl FnOnce(&mut Config)) -> Env {
     let dir = tempfile::tempdir().unwrap();
     let objects = Objects::new(&StorageConfig::Local(dir.path().join("objects"))).unwrap();
     let mut config = Config::local(dir.path().join("home"));
+    // Review apps are refused without the deployment key.
+    config.review.secret_key = Some("test-deployment-key-0123456789abcdef".into());
     f(&mut config);
     let code = Code::open(config, objects).unwrap();
     code.start_reviewer();

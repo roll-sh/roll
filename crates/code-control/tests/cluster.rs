@@ -160,6 +160,7 @@ async fn start_node(env: &Env, id: &str, f: &(dyn Fn(&mut Config) + Send + Sync)
     }
     config.cluster_single_host = true;
     config.review.index = false;
+    config.review.secret_key = Some(common::HARNESS_SECRET_KEY.into());
     f(&mut config);
     let objects = Objects::new(&StorageConfig::Local(env.dir.path().join("objects"))).unwrap();
     let code = match &env.db {

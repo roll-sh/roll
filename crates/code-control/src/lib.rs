@@ -12,6 +12,7 @@ pub mod cluster;
 pub mod db;
 pub mod ext;
 pub mod git;
+pub mod kept;
 pub mod leaks;
 pub mod github;
 mod secret_leaks;
@@ -26,7 +27,6 @@ mod revert;
 pub mod review;
 mod service;
 pub mod settings;
-pub mod signing;
 pub mod streams;
 pub mod webhooks;
 
@@ -607,7 +607,7 @@ impl Code {
         let db = db::Db::open(control)?;
         let (events, _) = broadcast::channel(4096);
         let ai = ai::Ai::new(&config);
-        signing::seal_at_rest(&db, ai.sealer.as_ref())?;
+        kept::seal_at_rest(&db, ai.sealer.as_ref())?;
         let git_budget = code_git::ServerConfig {
             memory_budget_bytes: config.git_memory_budget_bytes,
             max_request_memory_bytes: config.git_max_request_memory_bytes,
