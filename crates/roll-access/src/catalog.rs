@@ -1195,6 +1195,10 @@ static ROWS: &[Row] = &[
     // An API key: its secret is in the answer.
     row("POST", "/v1/search/clusters/{id}/keys", "search", REVEAL, one(PG, "cluster")),
     row("DELETE", "/v1/search/clusters/{id}/keys/{key}", "search", ADMIN, one(PG, "cluster")),
+    // A snapshot repository, the only way its credentials can be roll secrets references: it
+    // changes the cluster as the console does; roll secrets checks `reveal` on each reference
+    // itself (search_control::secret_refs).
+    row("PUT", "/v1/search/clusters/{id}/repositories/{name}", "search", ADMIN, one(PG, "cluster")),
     row("GET", "/v1/search/clusters/{id}/remotes", "search", R, one(PG, "cluster")),
     row("PUT", "/v1/search/clusters/{id}/remotes/{alias}", "search", ADMIN, one(PG, "cluster")).lends(Lend::Each(search_remote)),
     row("DELETE", "/v1/search/clusters/{id}/remotes/{alias}", "search", ADMIN, one(PG, "cluster")),
@@ -1432,6 +1436,7 @@ static ROWS: &[Row] = &[
     // secret comes back once, so making one is reveal (Slack and Discord ones are write).
     // A project's spend limits: at the hard limit the whole project pauses, so setting one is admin.
     row("GET", "/v1/apps/projects/{project}/limits", "apps", R, one(&["project"], "project")),
+    row("GET", "/v1/apps/projects/{project}/usage", "apps", R, one(&["project"], "project")),
     row("PUT", "/v1/apps/projects/{project}/limits", "apps", ADMIN, one(&["project"], "project")),
     row("GET", "/v1/apps/projects/{project}/notifications", "apps", R, one(&["project"], "project")),
     row("POST", "/v1/apps/projects/{project}/notifications", "apps", Act::Body(apps_notification_action), one(&["project"], "project")),

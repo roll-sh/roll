@@ -429,7 +429,11 @@ behind the `Apps` trait:
   sign in, lost the project or its reveal, a revoked token, a key made sensitive since or a
   protected environment for an untrusted preview leaves it out, said once in the preview's
   activity ("references left out (who chose them can't now): K: …"). Saving the rules again as
-  someone who may brings it back. A reference to the base needs none of this, but changing the base needs its writer's
+  someone who may brings it back. A service start asks too: one whose reference lost its writer
+  since the last converge waits for the converge that leaves it out (`refs_still_allowed`), so it
+  never reaches a service in between. A Git URL service's preview is read as that service (its
+  place on the canvas), every other preview as its repo. A deleted preview's own references'
+  setters go with it. A reference to the base needs none of this, but changing the base needs its writer's
   reveal on the new one (every preview's code then reads it). The rules are written only as they
   were checked: another request's change in between is a 409.
   Moving the base checks the references that named the old one as new. A value that reads as a

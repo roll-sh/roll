@@ -7472,3 +7472,68 @@ async fn an_instance_reads_its_oidc_token_for_an_allowed_audience() {
     let (_, s2) = call(&w.api, "PATCH", &format!("/v1/apps/services/{id}"), Some(json!({"run": {"oidc_audiences": ["a", "b", "c", "d", "e", "f"]}}))).await;
     assert!(s2.to_string().contains("oidc_audiences"), "{s2}");
 }
+
+/// Work after an answer (Vercel's `waitUntil`): an instance that asks at `ROLL_AWAKE_URL` isn't
+/// put to sleep while the hold lasts, and is once it ends; another instance's name or a wrong
+/// token holds nothing.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_instance_held_awake_isnt_put_to_sleep() {
+    let w = world().await;
+    let (svc, _) = image_service(&w, "web", json!({"port": 80, "suspend_after_s": 0, "sleep_after_s": 1})).await;
+    let id = svc["id"].as_str().unwrap().to_string();
+    let base = format!("/v1/apps/services/{id}/environments/production");
+    call(&w.api, "PATCH", &format!("{base}/variables"), Some(json!({"set": {"FAKE_ECHO": "ROLL_AWAKE_URL,ROLL_INSTANCE"}}))).await;
+    let (_, d) = call(&w.api, "POST", &format!("{base}/redeploy"), Some(json!({}))).await;
+    let d = settled(&w, &id, "production", d["id"].as_str().unwrap()).await;
+    let (_, body) = visit_deployment(&w, &host(&svc["environments"][0]["url"]), d["id"].as_str().unwrap()).await;
+    let url = body["vars"]["ROLL_AWAKE_URL"].as_str().unwrap_or_else(|| panic!("{body}")).trim_start_matches("http://127.0.0.1:7070").to_string();
+    let instance = body["vars"]["ROLL_INSTANCE"].as_str().unwrap().to_string();
+    let post = |p: String| {
+        let public = w.public.clone();
+        async move { public.oneshot(Request::builder().method("POST").uri(p).body(Body::empty()).unwrap()).await.unwrap().status() }
+    };
+    assert_eq!(post(format!("{url}?instance={instance}&for=3")).await, StatusCode::OK);
+    assert_eq!(post(format!("{url}?instance=not-one&for=3")).await, StatusCode::NOT_FOUND);
+    assert_eq!(post(format!("{url}x?instance={instance}")).await, StatusCode::NOT_FOUND);
+    let live = w.apps.live(&id, "production");
+    let running = || w.fake.instances(&id).iter().any(|(n, _, st)| *n == instance && *st == FakeState::Running);
+    // Idle past sleep_after, but held: still running.
+    tokio::time::sleep(Duration::from_millis(1500)).await;
+    live.tick().await;
+    assert!(running(), "held awake");
+    // The hold ends: the next pass puts it to sleep.
+    tokio::time::sleep(Duration::from_millis(2000)).await;
+    for _ in 0..50 {
+        live.tick().await;
+        if !running() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert!(!running(), "asleep once the hold ended");
+}
+
+/// A project's month by service and environment (Railway's usage by service): each row priced,
+/// previews grouped, the most costly first, the total and this month's projection; a month to
+/// come is a 400.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_projects_month_reads_by_service() {
+    let w = world().await;
+    let (a, _) = image_service(&w, "api", json!({"port": 80})).await;
+    let (b, _) = image_service(&w, "web", json!({"port": 80})).await;
+    let hour = code_sql::now_ms() / 3_600_000;
+    let use_of = |cpu: f64| apps_control::store::UsageAdd { cpu_seconds: cpu, gb_seconds: 0.0, requests: 0, egress_bytes: 0, build_seconds: 0.0 };
+    let (ai, bi) = (a["id"].as_str().unwrap().to_string(), b["id"].as_str().unwrap().to_string());
+    w.apps.db(move |s| {
+        s.add_usage(&ai, "production", hour, &use_of(36_000.0))?;
+        s.add_usage(&bi, "production", hour, &use_of(3_600.0))
+    })
+    .await
+    .unwrap();
+    let (st, u) = call(&w.api, "GET", &format!("/v1/apps/projects/{}/usage", w.project), None).await;
+    assert_eq!(st, StatusCode::OK, "{u}");
+    let rows = u["rows"].as_array().unwrap();
+    assert_eq!((rows[0]["name"].as_str(), rows[1]["name"].as_str()), (Some("api"), Some("web")), "the most costly first: {u}");
+    assert!(rows[0]["usd"].as_f64().unwrap() > rows[1]["usd"].as_f64().unwrap() && u["projected_usd"].as_f64().unwrap() >= u["total_usd"].as_f64().unwrap(), "{u}");
+    assert_eq!(call(&w.api, "GET", &format!("/v1/apps/projects/{}/usage?month=2099-01", w.project), None).await.0, StatusCode::BAD_REQUEST);
+}

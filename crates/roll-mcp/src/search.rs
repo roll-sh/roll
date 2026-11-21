@@ -88,12 +88,16 @@ pub fn listed(all: &[Value]) -> Vec<Value> {
     out
 }
 
-/// Lower-case words of `s`, a plural's `s` dropped (`branches` finds `branch`… close enough).
+/// Lower-case words of `s`, a plural's `s` dropped (`branches` finds `branch`, `queries` `query`…
+/// close enough).
 fn words(s: &str) -> Vec<String> {
     s.split(|c: char| !c.is_ascii_alphanumeric())
         .filter(|w| !w.is_empty())
         .map(|w| {
             let w = w.to_ascii_lowercase();
+            if let Some(r) = w.strip_suffix("ies").filter(|r| r.len() > 2) {
+                return format!("{r}y");
+            }
             match w.strip_suffix("es").filter(|r| r.len() > 3 && (r.ends_with("ch") || r.ends_with("sh") || r.ends_with('x'))) {
                 Some(r) => r.to_string(),
                 None => w.strip_suffix('s').filter(|r| r.len() > 2 && !r.ends_with('s')).map_or(w.clone(), str::to_string),
@@ -103,7 +107,7 @@ fn words(s: &str) -> Vec<String> {
 }
 
 /// Words that say nothing about which tool (`a`, `the`, `roll`…).
-const STOP: &[&str] = &["a", "an", "the", "to", "of", "in", "on", "for", "and", "or", "my", "me", "i", "it", "roll", "with", "from", "by", "is", "all", "what", "how", "do"];
+const STOP: &[&str] = &["a", "an", "the", "to", "of", "in", "on", "for", "and", "or", "my", "me", "i", "it", "roll", "with", "from", "by", "is", "all", "what", "how", "do", "why", "are", "was", "does", "did"];
 
 /// A tool's words by field: name, title, description.
 struct Doc<'a> {
@@ -153,6 +157,9 @@ fn rank<'a>(pool: &[&'a Value], query: &[String]) -> Vec<(f64, &'a Value)> {
             // Every word of the query in the name: what was asked for, by name.
             if !query.is_empty() && query.iter().all(|q| d.has(0, q) == 1.0) {
                 s *= 1.5;
+            } else if query.len() > 1 && query.iter().all(|q| d.has(1, q) == 1.0) {
+                // Every word in the title: what the tool is for, said as the person said it.
+                s *= 2.0;
             }
             // Of two names holding the query, the one it covers more of: `apps_deploy` before
             // `apps_cancel_deploy` for "deploy my app".
@@ -349,6 +356,24 @@ mod finds {
             ("post an incident on the status page", "apps_create_incident"),
             ("sbom of my image", "apps_deploy_sbom"),
             ("traces of a preview", "previews_traces"),
+            ("wait until my preview is ready", "previews_wait"),
+            ("why are my tasks failing", "tasks_list_dead_letters"),
+            ("pause a task queue", "tasks_pause_queue"),
+            ("run a function now", "tasks_invoke"),
+            ("schedule a recurring task", "tasks_create_schedule"),
+            ("consumer group lag", "streams_list_groups"),
+            ("read records from a topic", "streams_read"),
+            ("messages piling up in a queue", "queues_get_queue"),
+            ("who is connected to my queue", "queues_list_connections"),
+            ("is my preview slower than main", "previews_routes"),
+            ("screenshot my preview", "previews_screenshot"),
+            ("notes people left on my preview", "previews_list_notes"),
+            ("emails my preview sent", "previews_list_mail"),
+            ("deploy my app", "apps_deploy"),
+            ("wake my database", "postgres_start_endpoint"),
+            ("why is my query slow", "postgres_slow_queries"),
+            ("show me a bucket's files", "storage_list_objects"),
+            ("redis memory usage", "redis_usage"),
         ]
         .iter()
         .filter_map(|(q, want)| {

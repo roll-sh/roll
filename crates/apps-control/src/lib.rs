@@ -2757,6 +2757,15 @@ impl Apps {
         if config_url {
             sealed.insert("ROLL_CONFIG_URL".into());
         }
+        // A web service's instances ask to stay awake for work after an answer (`ROLL_AWAKE_URL`),
+        // with the environment's instance token: sealed, as the OIDC address.
+        if let Some(base) = self.cfg.otlp_base.as_ref().filter(|_| svc.run.kind == crate::model::RunType::Web) {
+            let (sid, e) = (svc.id.clone(), env.name.clone());
+            let token = self.db(move |s| s.oidc_token(&sid, &e)).await?;
+            let url = format!("{}{}{}/{}/{token}", base.trim_end_matches('/'), crate::public::AWAKE, svc.id, env.name);
+            vars.insert("ROLL_AWAKE_URL".into(), (self.deps.runtime.reach(&url), "roll"));
+            sealed.insert("ROLL_AWAKE_URL".into());
+        }
         // Where its instances read roll's OIDC tokens (`run.oidc_audiences`): a token URL on this
         // listener, sealed, as runtime config's; the first audience said too.
         if let (Some(base), Some(first)) = (&self.cfg.otlp_base, svc.run.oidc_audiences.first()) {
@@ -4019,7 +4028,9 @@ impl ResolvedVars {
     fn vars_for_hash(&self) -> Vec<(String, String)> {
         self.vars
             .iter()
-            .filter(|(k, _)| !matches!(k.as_str(), "ROLL_DEPLOYMENT" | "ROLL_GIT_COMMIT" | "ROLL_GIT_BRANCH"))
+            // `ROLL_AWAKE_URL` is roll's own on every web service: its arrival isn't a change of
+            // the service's to deploy (each deployment gets it).
+            .filter(|(k, _)| !matches!(k.as_str(), "ROLL_DEPLOYMENT" | "ROLL_GIT_COMMIT" | "ROLL_GIT_BRANCH" | "ROLL_AWAKE_URL"))
             .map(|(k, v)| (k.clone(), self.ref_texts.get(k).cloned().unwrap_or_else(|| v.clone())))
             .collect()
     }

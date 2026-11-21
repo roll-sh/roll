@@ -8121,6 +8121,7 @@ dependencies = [
  "reqwest",
  "roll-auth",
  "roll-cluster",
+ "roll-secrets",
  "rsa",
  "rusqlite",
  "search-es",
@@ -8185,6 +8186,7 @@ dependencies = [
  "sha2 0.10.9",
  "tokio",
  "unicode-segmentation",
+ "zeroize",
  "zxcvbn",
 ]
 

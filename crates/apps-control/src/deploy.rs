@@ -1309,6 +1309,10 @@ impl Apps {
         self.logs.redact(&format!("build:{}", d.id), &d.id, resolved.secret_values());
         let closed_vars = env_row.egress.closed().then(|| resolved.without_secrets());
         let mut build_env = resolved.vars;
+        // Instances' own addresses (kept awake, roll's OIDC tokens) are the running instances',
+        // never a build's: a build step can't mint the service's cloud tokens, and services that
+        // build alike share a build.
+        build_env.retain(|(k, _)| !matches!(k.as_str(), "ROLL_AWAKE_URL" | "ROLL_OIDC_URL"));
         // A closed environment builds on a network of its project's own with no route out and no
         // way to the host (`Runtime::build_egress`): its steps reach public hosts only, through
         // roll's proxy (packages, base images), never the node's services, private ranges or its
