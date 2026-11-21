@@ -220,7 +220,7 @@ pub struct LogDrain {
 }
 
 /// How a drain's lines can go ([`LogDrain::format`]).
-pub const DRAIN_FORMATS: [&str; 3] = ["ndjson", "otlp", "syslog"];
+pub const DRAIN_FORMATS: [&str; 4] = ["ndjson", "otlp", "syslog", "s3"];
 
 /// What a drain can be sent.
 pub const DRAIN_SOURCES: [&str; 6] = ["runtime", "http", "build", "audit", "traces", "metrics"];
@@ -390,6 +390,14 @@ pub struct Build {
     /// Docker builds unsized).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub size: Option<BuildSize>,
+    /// A Git URL service's submodules fetched into the tree (Vercel's, Netlify's, Render's), at
+    /// the commits their gitlinks pin, from public URLs; off, they're left out.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub submodules: Option<bool>,
+    /// A Git URL service's Git LFS objects fetched in place of their pointers (Vercel's,
+    /// Netlify's), from the repository's LFS server; off, the pointers are built as they are.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub lfs: Option<bool>,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -936,6 +944,11 @@ pub struct Scheduled {
     /// environment's URL as `aud`), as Cloud Scheduler's does; else `CRON_SECRET`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub auth: Option<String>,
+    /// A command's run at its own size (0.25–8 vCPU, 256–16384 MiB); unset, the service's.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cpu: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub memory_mb: Option<u32>,
 }
 
 /// One of `run.push`: a topic of a roll stream delivered to a path of one environment, a record
@@ -1235,6 +1248,9 @@ impl Run {
             }
             if sc.auth.as_deref().is_some_and(|a| a != "oidc" || sc.path.is_none()) {
                 return bad("a schedule's auth is oidc, on a path's call");
+            }
+            if sc.cpu.is_some_and(|c| !(0.25..=8.0).contains(&c)) || sc.memory_mb.is_some_and(|m| !(256..=16384).contains(&m)) || ((sc.cpu.is_some() || sc.memory_mb.is_some()) && sc.path.is_some()) {
+                return bad("a schedule's cpu (0.25–8) and memory_mb (256–16384) are a command's");
             }
         }
         if !self.push.is_empty() && (self.kind != RunType::Web || self.tcp) {
@@ -1692,6 +1708,10 @@ pub struct Environment {
     pub traces: bool,
     /// Its pages measure their Web Vitals for roll (`…/vitals`).
     pub vitals: bool,
+    /// Where its deploy status badge is (Netlify's), when it has one (`badge: true`): an SVG for a
+    /// README, answered to anyone.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub badge_url: Option<String>,
     /// People other than its author who must approve a deployment before it goes live (GitHub
     /// Environments' required reviewers): 0 (none) to 3; never a preview's.
     #[serde(skip_serializing_if = "is_zero")]

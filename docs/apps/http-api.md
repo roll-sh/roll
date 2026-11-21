@@ -61,7 +61,7 @@ route as. "deploy*" means `deploy` when `{env}` is `production`, else `write`.
 | `POST /v1/apps/projects/{project}/notifications/{nid}/test` | | `{ ok, code, error }` (sent now, not retried) | write |
 | `GET /v1/apps/projects/{project}/notifications/{nid}/deliveries` | | `Delivery[]`, newest first (50) | read |
 | `GET /v1/apps/projects/{project}/drains` | | `LogDrain[]` (the URL never returned, only its host) | read |
-| `POST /v1/apps/projects/{project}/drains` | `{ url, format?, sources?, environments?, services?, previews?, headers? }` (https, a public host, or `syslog+tls://host:port` for `format: "syslog"`, which takes no headers; `sources` some of `runtime` (default), `http`, `build`, `audit`, `traces`, `metrics`; services by name or id; `headers` `{name: value}`, at most 10, sealed, never roll's own or `content-type`) | 201 `LogDrain` + `secret` once | reveal (its secret comes back) |
+| `POST /v1/apps/projects/{project}/drains` | `{ url, format?, sources?, environments?, services?, previews?, headers? }` or `{ bucket, prefix?, sources?, … }` (a roll storage bucket on the project's canvas, without url, headers or another format: an `s3` drain with a key minted for it, write on the bucket asked of the caller, revoked with the drain; https, a public host, or `syslog+tls://host:port` for `format: "syslog"`, which takes no headers; for `format: "s3"`, `https://<endpoint>/<bucket>[/<prefix>]` with headers `aws-access-key-id`, `aws-secret-access-key` and optionally `aws-region`, nothing else; `sources` some of `runtime` (default), `http`, `build`, `audit`, `traces`, `metrics`; services by name or id; `headers` `{name: value}`, at most 10, sealed, never roll's own or `content-type`) | 201 `LogDrain` + `secret` once | reveal (its secret comes back) |
 | `PATCH /v1/apps/projects/{project}/drains/{did}` | `{ sources?, environments?, services?, previews?, headers? }` (given ones replace, `headers` all of them; a new URL or format is a new drain) | `LogDrain` | reveal (it can send more out) |
 | `POST /v1/apps/projects/{project}/drains/{did}/test` | | `{ ok, code, error }` (one line sent now, signed and with its headers, not retried; `code` null for syslog) | write |
 | `DELETE /v1/apps/projects/{project}/drains/{did}` | | 204 | write |
@@ -144,7 +144,7 @@ route as. "deploy*" means `deploy` when `{env}` is `production`, else `write`.
 | `POST /v1/apps/services/{id}/environments/{env}/shell/sessions/{sh}/resize` | `{ cols, rows }` | 204 | admin (all of a shell session is) |
 | `DELETE /v1/apps/services/{id}/environments/{env}/shell/sessions/{sh}` | | 204 | admin (what closes an admin's shell is admin) |
 | `GET /v1/apps/services/{id}/environments/{env}/jobs` | | `Job[]`, newest first | read |
-| `POST /v1/apps/services/{id}/environments/{env}/jobs` | `{ command, timeout_s?, tasks?, retries?, parallelism? }` (tasks 1–100: that many containers, `parallelism` at a time (1–10, default ten or fewer tasks: a node's job containers are shared), each with `ROLL_TASK_INDEX` and `ROLL_TASK_COUNT`; `retries` 0–5: a failed or timed-out task tried again in a fresh container with `ROLL_TASK_ATTEMPT`, as a cron run's retries wait, never after a cancel or once another deployment is live; the job fails on the first task that does in the end) | 202 `Job` | deploy* |
+| `POST /v1/apps/services/{id}/environments/{env}/jobs` | `{ command, timeout_s?, tasks?, retries?, parallelism?, cpu?, memory_mb? }` (`cpu` 0.25–8 and `memory_mb` 256–16384: each task's container at that size, metered at it, Heroku's `run --size`; unset, the service's; tasks 1–100: that many containers, `parallelism` at a time (1–10, default ten or fewer tasks: a node's job containers are shared), each with `ROLL_TASK_INDEX` and `ROLL_TASK_COUNT`; `retries` 0–5: a failed or timed-out task tried again in a fresh container with `ROLL_TASK_ATTEMPT`, as a cron run's retries wait, never after a cancel or once another deployment is live; the job fails on the first task that does in the end) | 202 `Job` | deploy* |
 | `GET /v1/apps/services/{id}/environments/{env}/jobs/{job}` | | `Job` | read |
 | `GET /v1/apps/services/{id}/environments/{env}/jobs/{job}/logs?follow=&tail=` | | `LogLine[]` or SSE (ends with the job, then `end`) | reveal (a job's output can be the variables) |
 | `POST /v1/apps/services/{id}/environments/{env}/jobs/{job}/cancel` | | `Job` | deploy* |
@@ -191,7 +191,7 @@ type Overview = {
   prices: Prices;
 };
 
-type Prices = { cpu_second: number; gb_second: number; egress_gb: number; build_minute: number };
+type Prices = { cpu_second: number; gb_second: number; egress_gb: number; build_minute: number; stored_gb_month: number /* what roll stores: logs kept past the first week (an environment's 30 or 90 days) and build caches (shared by the services that build from one), metered hourly as stored_gb_hours */ };
 
 type Source =
   | { kind: "repo"; repo: string /* owner/name in roll code (GitHub repos are mirrored there) */; root?: string }
@@ -225,6 +225,13 @@ type Build = {
    *  fleet, its build minutes metered ×1, ×2 or ×4; one node's Docker builds unsized (the build
    *  log says so) and meters ×1. */
   size?: "small" | "medium" | "large";
+  /** A Git URL service's submodules fetched into the tree (default false: left out): each one
+   *  .gitmodules names, at the commit its gitlink pins, from its own public URL (relative ones
+   *  against the repository's), two levels deep and 32 at most. */
+  submodules?: boolean;
+  /** A Git URL service's Git LFS objects in place of their pointers (default false): from the
+   *  repository's LFS batch API, checked against each pointer's sha256 and size, 2 GiB in all. */
+  lfs?: boolean;
 };
 
 type Run = {
@@ -331,7 +338,7 @@ type Run = {
   log_metrics?: { name: string; pattern: string }[];
   /** Commands on a schedule on any service: each a job of the live deployment at its due times, skipped while its
    *  last job runs; at most 20; name a-z, 0-9 and - (unique, 32 at most), command 1–2000, timeout_s 1–86400. */
-  schedules?: { name: string; schedule: string; command?: string; path?: string /* a web service's path GET'd instead of a command (Vercel's crons): through its own proxy on the owner, past its allow list, firewall, rate limit and access gate, with Authorization: Bearer $CRON_SECRET when the environment has one; a call still out skips the next; a non-2xx/3xx or no answer is cron.failed (data.path, http_status or error); timeout_s default 300 */; timezone?: string; timeout_s?: number; auth?: "oidc" /* a path's call: roll's OIDC token for the service (sub roll-apps:<project>:<service>:<env>, aud the environment's URL) as the bearer instead of CRON_SECRET; none issued is cron.failed */ }[];
+  schedules?: { name: string; schedule: string; command?: string; path?: string /* a web service's path GET'd instead of a command (Vercel's crons): through its own proxy on the owner, past its allow list, firewall, rate limit and access gate, with Authorization: Bearer $CRON_SECRET when the environment has one; a call still out skips the next; a non-2xx/3xx or no answer is cron.failed (data.path, http_status or error); timeout_s default 300 */; timezone?: string; timeout_s?: number; cpu?: number /* a command's run at its own size: 0.25–8 */; memory_mb?: number /* 256–16384 */; auth?: "oidc" /* a path's call: roll's OIDC token for the service (sub roll-apps:<project>:<service>:<env>, aud the environment's URL) as the bearer instead of CRON_SECRET; none issued is cron.failed */ }[];
   push?: { stream: string /* st_…, on the service's own project (the operator's) */; topic: string; group: string; path: string; environment?: string /* default production */; dead_letter?: string /* a topic of the same stream */; max_attempts?: number /* 1–100, default 5, with dead_letter */; timeout_s?: number /* 1–600, default 30 */; max_in_flight?: number /* 1–32, default 4: records POSTed at once, each from its own partitions */; auth?: "oidc" /* roll's OIDC token for the service (sub roll-apps:<project>:<service>:<env>, aud the environment's URL) as the bearer instead of CRON_SECRET; while none is issued nothing is POSTed */ }[]; /* a web service's, at most 4 (Cloud Run's Pub/Sub push), set here only (roll.toml refuses it), needing read on each stream and write with a dead_letter: each record POSTed to path through the environment's own proxy (past its gates, as schedules' calls are) as a CloudEvent in binary mode: its value the body, its content-type header the Content-Type (else application/octet-stream), ce-specversion 1.0, ce-id <topic>/<partition>/<offset>, ce-source /streams/<stream>/topics/<topic>, ce-type sh.roll.stream.record, ce-time, ce-partitionkey (its key, base64), ce-rollpartition, ce-rolloffset, ce-rollattempt, its other headers as ce-<name> (a-z, 0-9, at most 20, never one of those), Authorization: Bearer $CRON_SECRET when the environment has one; the group's offset committed on a 2xx, each partition in order, at least once; a failed POST tried again after 1 s doubling to 60 s, or after max_attempts to dead_letter with x-roll-error and x-roll-source headers */
   sidecars?: { name: string /* a-z, 0-9 and -, at most 20, unique */; image: string /* pinned to its digest with each deployment */; command?: string /* sh -c, instead of the image's own */; env?: { [name: string]: string } /* plain settings, at most 50, shown as they are: never a secret */; variables?: string[] /* the environment's own variables it gets, by name, at most 50 */; cpu?: number /* 0.1–2, default 0.25 */; memory_mb?: number /* 64–4096, default 128 */ }[]; // at most 4, a web service's or a worker's: containers in each instance's network namespace (localhost), started after it, frozen, stopped and removed with it, metered with it; Docker only (the fleet refuses them for now)
 };
@@ -438,7 +445,9 @@ type EnvironmentPut = {
    *  the app's. */
   vitals?: boolean;
   log_retention_days?: 7 | 30 | 90 | null; // how long its logs are kept (null: 7); a preview's stay 7 (400)
-  approvals?: 0 | 1 | 2 | 3 | null; // people other than a deployment's author who approve it (`…/approve`) before it goes live: deploys, redeploys, promotions and automation's build to ready and wait (a service that can't wait beside the live one: 409, or skipped), putting one live without them is a 409 unless an admin's `X-Roll-Override: 1` (audited `approvals.bypassed`); rolling back to what was live needs none; never a preview's (400)
+  closed_by?: string | null; // with egress, the operator's only (roll previews in process; 403 for anyone else): who a closed environment's placeholders are made by (usr_… or token:…); null, no one (its keys bound to hosts withheld); unset, whoever set the egress
+  badge?: boolean; // a deploy status badge at GET /_roll/badge/<service>/<env>.svg on the apps listener, answered to anyone (Netlify's): live, deploying, waiting, failed, paused or not deployed; false: 404
+  approvals?: 0 | 1 | 2 | 3 | null; // admin (as freeze): people other than a deployment's author (the person behind it: their session, their own token, the operator) who approve it (`…/approve`) before it goes live; a waiting build doesn't run (no instance, its own URL 409) until then: deploys, redeploys, promotions and automation's build to ready and wait (a service that can't wait beside the live one: 409, or skipped), putting one live without them is a 409 unless an admin's `X-Roll-Override: 1` (audited `approvals.bypassed`); rolling back to what was live needs none; never a preview's (400)
   report?: boolean; // false: its deploys post no commit status and no GitHub Deployment (someone else reports them: roll previews, for its `pv-` environments)
   preview_host?: string | null; // the one DNS label it answers to under its project's preview domain (`<label>.preview.acme.dev`; roll previews sets it), unique in the project (409); null: none
   follow_tag?: boolean;
@@ -531,6 +540,7 @@ type Environment = EnvironmentSummary & {
   traces: boolean; // its instances send OpenTelemetry traces to roll
   vitals: boolean; // its pages measure their Web Vitals for roll (`…/vitals`)
   approvals?: number; // approvals a deployment needs before it goes live (absent: none)
+  badge_url?: string; // its deploy status badge, when `badge` is on
   log_retention_days: number; // 7 (default), 30 or 90: its logs (output, access log, traces, metrics, events, Vitals) are kept that long, then deleted hourly by the owner; a preview's are 7
   report: boolean; // its deploys are reported to the Git host (default true)
   preview_host?: string; // its label under the project's preview domain
@@ -735,7 +745,7 @@ type LogDrain = {
   services: string[];         // only these services' (ids; empty: every one)
   previews: boolean;          // preview environments' too (a drain made before this field: true), and a preview's services on roll's own runtime (its `pv-` environment, `service` null: never to a drain narrowed to `services`)
   headers: string[];          // the names of the headers it's sent with (values sealed, never returned)
-  format: "ndjson" | "otlp" | "syslog"; // ndjson: signed batches of lines; otlp: an OTLP/HTTP JSON ExportLogsServiceRequest to the URL (a collector's /v1/logs); syslog: RFC 5424 over TLS (RFC 5425's octet counting), no headers
+  format: "ndjson" | "otlp" | "syslog" | "s3"; // ndjson: signed batches of lines; otlp: an OTLP/HTTP JSON ExportLogsServiceRequest to the URL (a collector's /v1/logs); syslog: RFC 5424 over TLS (RFC 5425's octet counting), no headers; s3: an NDJSON object a batch (≤5,000 lines or a minute) at <prefix>/YYYY/MM/DD/HH/<time>-<delivery>.ndjson, PUT signed with SigV4 by its sealed keys
 };
 // A batch's line: { t, source, service, service_name, environment, instance, deployment, stream, text }.
 /** A request through the proxy (`stream: "http"` lines' text, JSON). The path has no query string. */

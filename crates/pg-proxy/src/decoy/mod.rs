@@ -6,14 +6,25 @@
 //! It's Postgres' own SCRAM-SHA-256 exchange (`auth-sasl.c` `CheckSASLAuth`, `auth-scram.c`
 //! `scram_exchange` and the parsers it calls, `pqformat.c` for the message, `auth.c`
 //! `auth_failed`, and `ProcessStartupPacket`'s `NegotiateProtocolVersion`), ported from
-//! PostgreSQL 16.15, 17.11 and 18.6 (the PostgreSQL License) with every error Postgres would send
-//! on the way: the same SQLSTATE, text, detail, and source file, line and routine, by major
-//! version. The role is always refused: no password is checked, so none is ever held here.
+//! PostgreSQL 16, 17 and 18 (the PostgreSQL License) with every error Postgres would send on the
+//! way: the same SQLSTATE, text, detail and hint. The role is always refused: no password is
+//! checked, so none is ever held here.
+//!
+//! Nothing that moves between minor versions is written here: an error's source file, line and
+//! routine, the newest protocol and the wrong password's own words come from [`Answers`], which
+//! [`learn`] takes from the compute's Postgres (once per image) and accepts only once every
+//! probe it sends the compute gets the same bytes from this decoy. An image whose answers aren't
+//! learned has no decoy answers at all: the caller keeps its logins away from here.
 //! `crates/pg-control/tests/e2e.rs` (`a_decoy_role_is_refused_as_a_wrong_password_is`) compares
-//! every path here with a compute's own answers.
+//! every path with a compute's own answers through the proxy.
+
+pub mod learn;
 
 use bytes::{BufMut, BytesMut};
+use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 use std::io;
+use std::sync::Arc;
 use std::time::Duration;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite};
 
@@ -24,15 +35,38 @@ use crate::protocol::write_all;
 pub struct Decoy {
     /// The role's SCRAM salt (base64 of 16 bytes): Postgres answers one role with one salt.
     pub salt: String,
-    /// The endpoint's Postgres major version: its protocol and its errors' source lines.
-    pub pg_version: u32,
     /// How long a real login would wait for the compute to start (zero when it's running).
     pub start: Duration,
+    /// How the endpoint's compute image answers before a password is checked. `None`: roll
+    /// doesn't know it (it didn't answer [`learn`]'s probes as this decoy does), so the login
+    /// goes to Postgres like any other, which refuses the `NOLOGIN` role as a missing one.
+    pub answers: Option<Arc<Answers>>,
 }
 
-/// What the endpoint's compute answered a wrong password with, around the user's name (its
-/// language and source line, whatever they are): a decoy's refusal is the same bytes.
-#[derive(Clone, Debug)]
+/// What one Postgres image says before a password is checked, where the decoy can't know it:
+/// taken from the image's own answers by [`learn`], never written by hand.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Answers {
+    /// `PG_PROTOCOL_LATEST`'s minor (`NegotiateProtocolVersion`).
+    latest_minor: i32,
+    /// Each error's fields after the ones the decoy writes (severity, code, message, detail,
+    /// hint): its source file, line and routine and the terminator, as the compute sent them.
+    tails: BTreeMap<Site, Vec<u8>>,
+    /// A wrong password's refusal, around the user's name.
+    refusal: Refusal,
+}
+
+impl Answers {
+    /// Whether every error the decoy can raise has its tail (what [`learn`] makes always does;
+    /// a stored copy is checked as it's read back).
+    pub fn complete(&self) -> bool {
+        Site::ALL.iter().all(|s| self.tails.contains_key(s))
+    }
+}
+
+/// What the compute answered a wrong password with, around the user's name (its language and
+/// source line, whatever they are): a decoy's refusal is the same bytes.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Refusal {
     pub before: Vec<u8>,
     pub after: Vec<u8>,
@@ -41,7 +75,7 @@ pub struct Refusal {
 impl Refusal {
     /// A compute's ErrorResponse fields (`Message` without its tag and length) if it's a wrong
     /// password's (`28P01`) and names `user` exactly once in its message.
-    pub fn learn(fields: &[u8], user: &str) -> Option<Refusal> {
+    fn learn(fields: &[u8], user: &str) -> Option<Refusal> {
         let mut at = 0;
         let (mut code, mut message) = (None, None);
         while let Some(&tag) = fields.get(at) {
@@ -79,43 +113,76 @@ const RAW_NONCE: usize = 18;
 /// `SCRAM_MAX_KEY_LEN` for SHA-256: a proof is 32 bytes.
 const PROOF_LEN: usize = 32;
 
-/// Where Postgres raises an error: its file, routine, and line in 16.15, 17.11 and 18.6.
-#[derive(Clone, Copy, Debug)]
-struct Site(&'static str, &'static str, [u32; 3]);
-
-const AUTH_FAILED: Site = Site("auth.c", "auth_failed", [331, 329, 317]);
-const EXPECTED_SASL: Site = Site("auth-sasl.c", "CheckSASLAuth", [95, 95, 87]);
-const INVALID_MECH: Site = Site("auth-scram.c", "scram_init", [268, 261, 265]);
-const EMPTY: Site = Site("auth-scram.c", "scram_exchange", [383, 376, 380]);
-const LENGTH: Site = Site("auth-scram.c", "scram_exchange", [388, 381, 385]);
-const NONCE: Site = Site("auth-scram.c", "scram_exchange", [421, 414, 418]);
-const ATTR_EXPECTED: Site = Site("auth-scram.c", "read_attr_value", [742, 735, 749]);
-const ATTR_EQUALS: Site = Site("auth-scram.c", "read_attr_value", [750, 743, 757]);
-const ANY_END: Site = Site("auth-scram.c", "read_any_attr", [855, 848, 862]);
-const ANY_INVALID: Site = Site("auth-scram.c", "read_any_attr", [868, 861, 875]);
-const ANY_EQUALS: Site = Site("auth-scram.c", "read_any_attr", [878, 871, 885]);
-const FIRST_COMMA_N: Site = Site("auth-scram.c", "read_client_first_message", [993, 986, 1000]);
-const FIRST_COMMA_Y: Site = Site("auth-scram.c", "read_client_first_message", [1023, 1016, 1030]);
-const FIRST_CBIND_DATA: Site = Site("auth-scram.c", "read_client_first_message", [1037, 1030, 1044]);
-const FIRST_FLAG: Site = Site("auth-scram.c", "read_client_first_message", [1055, 1048, 1062]);
-const FIRST_AUTHZID: Site = Site("auth-scram.c", "read_client_first_message", [1066, 1059, 1073]);
-const FIRST_ATTR: Site = Site("auth-scram.c", "read_client_first_message", [1070, 1063, 1077]);
-const FIRST_EXT: Site = Site("auth-scram.c", "read_client_first_message", [1087, 1080, 1094]);
-const FIRST_NONCE: Site = Site("auth-scram.c", "read_client_first_message", [1101, 1094, 1108]);
-const FINAL_CBIND: Site = Site("auth-scram.c", "read_client_final_message", [1366, 1359, 1372]);
-const FINAL_PROOF: Site = Site("auth-scram.c", "read_client_final_message", [1384, 1377, 1390]);
-const FINAL_GARBAGE: Site = Site("auth-scram.c", "read_client_final_message", [1392, 1385, 1398]);
-const MSG_RAWSTRING: Site = Site("pqformat.c", "pq_getmsgrawstring", [625, 622, 622]);
-const MSG_COPY: Site = Site("pqformat.c", "pq_copymsgbytes", [534, 531, 531]);
-const MSG_BYTES: Site = Site("pqformat.c", "pq_getmsgbytes", [516, 513, 513]);
-const MSG_END: Site = Site("pqformat.c", "pq_getmsgend", [641, 638, 638]);
-/// `ProcessStartupPacket`: in `postmaster.c` before 17 ([`Site::file`]).
-const REPLICATION: Site = Site("backend_startup.c", "ProcessStartupPacket", [2233, 763, 791]);
+/// Where Postgres raises an error before the password is checked: each is one `ereport`, whose
+/// file, line and routine the image's [`Answers`] hold.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+enum Site {
+    /// `auth-sasl.c` `CheckSASLAuth`.
+    ExpectedSasl,
+    /// `auth-scram.c` `scram_init`.
+    InvalidMech,
+    /// `auth-scram.c` `scram_exchange`.
+    Empty,
+    Length,
+    Nonce,
+    /// `auth-scram.c` `read_attr_value`.
+    AttrExpected,
+    AttrEquals,
+    /// `auth-scram.c` `read_any_attr`.
+    AnyEnd,
+    AnyInvalid,
+    AnyEquals,
+    /// `auth-scram.c` `read_client_first_message`.
+    FirstCommaN,
+    FirstCommaY,
+    FirstCbindData,
+    FirstFlag,
+    FirstAuthzid,
+    FirstAttr,
+    FirstExt,
+    FirstNonce,
+    /// `auth-scram.c` `read_client_final_message`.
+    FinalCbind,
+    FinalProof,
+    FinalGarbage,
+    /// `pqformat.c`.
+    MsgRawstring,
+    MsgCopy,
+    MsgBytes,
+    MsgEnd,
+    /// `ProcessStartupPacket` (`backend_startup.c`, `postmaster.c` before 17).
+    Replication,
+}
 
 impl Site {
-    fn file(self, at: usize) -> &'static str {
-        if self.1 == REPLICATION.1 && at == 0 { "postmaster.c" } else { self.0 }
-    }
+    const ALL: [Site; 26] = [
+        Site::ExpectedSasl,
+        Site::InvalidMech,
+        Site::Empty,
+        Site::Length,
+        Site::Nonce,
+        Site::AttrExpected,
+        Site::AttrEquals,
+        Site::AnyEnd,
+        Site::AnyInvalid,
+        Site::AnyEquals,
+        Site::FirstCommaN,
+        Site::FirstCommaY,
+        Site::FirstCbindData,
+        Site::FirstFlag,
+        Site::FirstAuthzid,
+        Site::FirstAttr,
+        Site::FirstExt,
+        Site::FirstNonce,
+        Site::FinalCbind,
+        Site::FinalProof,
+        Site::FinalGarbage,
+        Site::MsgRawstring,
+        Site::MsgCopy,
+        Site::MsgBytes,
+        Site::MsgEnd,
+        Site::Replication,
+    ];
 }
 
 const PROTOCOL_VIOLATION: &str = "08P01";
@@ -158,14 +225,13 @@ impl From<Box<Fatal>> for End {
 
 /// Answer a decoy role's login on `client`: `version` and `params` as the startup packet had them
 /// (what a compute would have been sent), `user` the role, `warm` how long a compute that's up
-/// takes to answer a startup, `refusal` what this endpoint's compute says to a wrong password.
-pub async fn refuse<S>(client: &mut S, version: i32, params: &[(String, String)], user: &str, decoy: &Decoy, warm: Duration, refusal: Option<&Refusal>) -> io::Result<()>
+/// takes to answer a startup, `answers` what the endpoint's compute image says where it differs.
+pub async fn refuse<S>(client: &mut S, version: i32, params: &[(String, String)], user: &str, decoy: &Decoy, warm: Duration, answers: &Answers) -> io::Result<()>
 where
     S: AsyncRead + AsyncWrite + Unpin + Send,
 {
-    let v = Version::of(decoy.pg_version);
     tokio::time::sleep(decoy.start + warm).await;
-    let answer = match tokio::time::timeout(AUTH_TIMEOUT, exchange(client, version, params, decoy, v)).await {
+    let answer = match tokio::time::timeout(AUTH_TIMEOUT, exchange(client, version, params, &decoy.salt, answers)).await {
         Ok(Ok(end)) => end,
         Ok(Err(e)) if e.kind() == io::ErrorKind::UnexpectedEof => End::Gone,
         Ok(Err(e)) => return Err(e),
@@ -173,39 +239,21 @@ where
     };
     let bytes = match answer {
         End::Gone => return Ok(()),
-        End::Fatal(f) => v.error(&f),
-        End::Refused => match refusal {
-            Some(r) => message(b'E', &[&r.before[..], user.as_bytes(), &r.after[..]].concat()),
-            None => v.error(&fatal(AUTH_FAILED, "28P01", format!("password authentication failed for user \"{user}\""))),
-        },
+        End::Fatal(f) => answers.error(&f),
+        End::Refused => {
+            let r = &answers.refusal;
+            message(b'E', &[&r.before[..], user.as_bytes(), &r.after[..]].concat())
+        }
     };
     // The client may be gone already: Postgres writes into the void too.
     let _ = write_all(client, &bytes).await;
     Ok(())
 }
 
-/// A Postgres major version's protocol and source lines.
-#[derive(Clone, Copy)]
-struct Version {
-    major: u32,
-    /// Index into each site's lines.
-    at: usize,
-}
-
-impl Version {
-    fn of(major: u32) -> Version {
-        Version { major, at: major.clamp(16, 18) as usize - 16 }
-    }
-
-    /// `PG_PROTOCOL_LATEST`'s minor: 3.2 from 18.
-    fn latest_minor(self) -> i32 {
-        if self.major >= 18 { 2 } else { 0 }
-    }
-
-    fn error(self, f: &Fatal) -> BytesMut {
-        let site = f.site;
+impl Answers {
+    /// The ErrorResponse: the fields the decoy knows, then the image's own for that `ereport`.
+    fn error(&self, f: &Fatal) -> BytesMut {
         let mut fields = BytesMut::new();
-        let line = site.2[self.at].to_string();
         let mut put = |tag: u8, value: &str| {
             fields.put_u8(tag);
             fields.put_slice(value.as_bytes());
@@ -221,10 +269,7 @@ impl Version {
         if let Some(h) = f.hint {
             put(b'H', h);
         }
-        put(b'F', site.file(self.at));
-        put(b'L', &line);
-        put(b'R', site.1);
-        fields.put_u8(0);
+        fields.put_slice(self.tails.get(&f.site).map_or(&[0][..], Vec::as_slice));
         message(b'E', &fields)
     }
 }
@@ -245,22 +290,22 @@ fn auth(code: i32, data: &[u8]) -> BytesMut {
     message(b'R', &body)
 }
 
-async fn exchange<S>(client: &mut S, version: i32, params: &[(String, String)], decoy: &Decoy, v: Version) -> io::Result<End>
+async fn exchange<S>(client: &mut S, version: i32, params: &[(String, String)], salt: &str, answers: &Answers) -> io::Result<End>
 where
     S: AsyncRead + AsyncWrite + Unpin + Send,
 {
     // ProcessStartupPacket: a bad `replication` is refused before anything else.
     if let Some((_, value)) = params.iter().find(|(k, value)| k == "replication" && value != "database" && parse_bool(value).is_none()) {
-        let mut f = fatal(REPLICATION, "22023", format!("invalid value for parameter \"replication\": \"{value}\""));
+        let mut f = fatal(Site::Replication, "22023", format!("invalid value for parameter \"replication\": \"{value}\""));
         f.hint = Some("Valid values are: \"false\", 0, \"true\", 1, \"database\".");
         return Ok(f.into());
     }
     let mut out = BytesMut::new();
     let unknown: Vec<&str> = params.iter().filter(|(k, _)| k.starts_with("_pq_.")).map(|(k, _)| k.as_str()).collect();
     let minor = version & 0xffff;
-    if minor > v.latest_minor() || !unknown.is_empty() {
+    if minor > answers.latest_minor || !unknown.is_empty() {
         let mut body = BytesMut::new();
-        body.put_i32((version & !0xffff) | minor.min(v.latest_minor()));
+        body.put_i32((version & !0xffff) | minor.min(answers.latest_minor));
         body.put_i32(unknown.len() as i32);
         for name in unknown {
             body.put_slice(name.as_bytes());
@@ -281,7 +326,7 @@ where
             Err(e) => return Err(e),
         };
         if tag != b'p' {
-            return Ok(fatal(EXPECTED_SASL, PROTOCOL_VIOLATION, format!("expected SASL response, got message type {tag}")).into());
+            return Ok(fatal(Site::ExpectedSasl, PROTOCOL_VIOLATION, format!("expected SASL response, got message type {tag}")).into());
         }
         // pq_getmessage: a bad length or a short read ends the exchange as a failed one.
         let Some(body) = read_body(client).await? else { return Ok(End::Refused) };
@@ -295,10 +340,10 @@ where
             continue;
         };
         if input.is_empty() {
-            return Ok(malformed(EMPTY, "The message is empty.").into());
+            return Ok(malformed(Site::Empty, "The message is empty.").into());
         }
         if input.contains(&0) {
-            return Ok(malformed(LENGTH, "Message length does not match input length.").into());
+            return Ok(malformed(Site::Length, "Message length does not match input length.").into());
         }
         match &salt_sent {
             None => {
@@ -307,7 +352,7 @@ where
                     Err(f) => return Ok(f.into()),
                 };
                 let server_nonce = nonce();
-                let first = format!("r={}{server_nonce},s={},i={ITERATIONS}", String::from_utf8_lossy(client_nonce), decoy.salt);
+                let first = format!("r={}{server_nonce},s={},i={ITERATIONS}", String::from_utf8_lossy(client_nonce), salt);
                 write_all(client, &auth(11, first.as_bytes())).await?;
                 salt_sent = Some((flag, client_nonce.to_vec(), server_nonce));
             }
@@ -317,7 +362,7 @@ where
                     Err(f) => return Ok(f.into()),
                 };
                 if final_nonce != [&client_nonce[..], server_nonce.as_bytes()].concat() {
-                    let mut f = fatal(NONCE, PROTOCOL_VIOLATION, "invalid SCRAM response");
+                    let mut f = fatal(Site::Nonce, PROTOCOL_VIOLATION, "invalid SCRAM response");
                     f.detail = Some("Nonce does not match.".into());
                     return Ok(f.into());
                 }
@@ -332,17 +377,17 @@ fn sasl_input(body: &[u8], initial: bool) -> Result<Option<&[u8]>, Box<Fatal>> {
     let insufficient = |site| fatal(site, PROTOCOL_VIOLATION, "insufficient data left in message");
     let mut m = Msg { buf: body, at: 0 };
     let input = if initial {
-        let mech = m.rawstring().ok_or_else(|| fatal(MSG_RAWSTRING, PROTOCOL_VIOLATION, "invalid string in message"))?;
+        let mech = m.rawstring().ok_or_else(|| fatal(Site::MsgRawstring, PROTOCOL_VIOLATION, "invalid string in message"))?;
         if mech != b"SCRAM-SHA-256" {
-            return Err(fatal(INVALID_MECH, PROTOCOL_VIOLATION, "client selected an invalid SASL authentication mechanism"));
+            return Err(fatal(Site::InvalidMech, PROTOCOL_VIOLATION, "client selected an invalid SASL authentication mechanism"));
         }
-        let len = m.int32().ok_or_else(|| insufficient(MSG_COPY))?;
-        if len == -1 { None } else { Some(m.bytes(len).ok_or_else(|| insufficient(MSG_BYTES))?) }
+        let len = m.int32().ok_or_else(|| insufficient(Site::MsgCopy))?;
+        if len == -1 { None } else { Some(m.bytes(len).ok_or_else(|| insufficient(Site::MsgBytes))?) }
     } else {
         Some(m.rest())
     };
     if m.at != body.len() {
-        return Err(fatal(MSG_END, PROTOCOL_VIOLATION, "invalid message format"));
+        return Err(fatal(Site::MsgEnd, PROTOCOL_VIOLATION, "invalid message format"));
     }
     Ok(input)
 }
@@ -423,10 +468,10 @@ fn shown(c: u8) -> String {
 /// `read_attr_value`: `attr=value` at `p`; the value and where the next attribute starts.
 fn attr_value(input: &[u8], p: usize, attr: u8) -> Result<(&[u8], usize), Box<Fatal>> {
     if at(input, p) != attr {
-        return Err(malformed(ATTR_EXPECTED, format!("Expected attribute \"{}\" but found \"{}\".", attr as char, shown(at(input, p)))));
+        return Err(malformed(Site::AttrExpected, format!("Expected attribute \"{}\" but found \"{}\".", attr as char, shown(at(input, p)))));
     }
     if at(input, p + 1) != b'=' {
-        return Err(malformed(ATTR_EQUALS, format!("Expected character \"=\" for attribute \"{}\".", attr as char)));
+        return Err(malformed(Site::AttrEquals, format!("Expected character \"=\" for attribute \"{}\".", attr as char)));
     }
     Ok(value_from(input, p + 2))
 }
@@ -435,13 +480,13 @@ fn attr_value(input: &[u8], p: usize, attr: u8) -> Result<(&[u8], usize), Box<Fa
 fn any_attr(input: &[u8], p: usize) -> Result<(u8, &[u8], usize), Box<Fatal>> {
     let attr = at(input, p);
     if attr == 0 {
-        return Err(malformed(ANY_END, "Attribute expected, but found end of string."));
+        return Err(malformed(Site::AnyEnd, "Attribute expected, but found end of string."));
     }
     if !attr.is_ascii_alphabetic() {
-        return Err(malformed(ANY_INVALID, format!("Attribute expected, but found invalid character \"{}\".", shown(attr))));
+        return Err(malformed(Site::AnyInvalid, format!("Attribute expected, but found invalid character \"{}\".", shown(attr))));
     }
     if at(input, p + 1) != b'=' {
-        return Err(malformed(ANY_EQUALS, format!("Expected character \"=\" for attribute \"{}\".", attr as char)));
+        return Err(malformed(Site::AnyEquals, format!("Expected character \"=\" for attribute \"{}\".", attr as char)));
     }
     let (value, next) = value_from(input, p + 2);
     Ok((attr, value, next))
@@ -460,28 +505,28 @@ fn client_first(input: &[u8]) -> Result<(u8, &[u8]), Box<Fatal>> {
     match flag {
         b'n' | b'y' => {
             if at(input, p) != b',' {
-                let site = if flag == b'n' { FIRST_COMMA_N } else { FIRST_COMMA_Y };
+                let site = if flag == b'n' { Site::FirstCommaN } else { Site::FirstCommaY };
                 return Err(malformed(site, format!("Comma expected, but found character \"{}\".", shown(at(input, p)))));
             }
             p += 1;
         }
-        b'p' => return Err(malformed(FIRST_CBIND_DATA, "The client selected SCRAM-SHA-256 without channel binding, but the SCRAM message includes channel binding data.")),
-        c => return Err(malformed(FIRST_FLAG, format!("Unexpected channel-binding flag \"{}\".", shown(c)))),
+        b'p' => return Err(malformed(Site::FirstCbindData, "The client selected SCRAM-SHA-256 without channel binding, but the SCRAM message includes channel binding data.")),
+        c => return Err(malformed(Site::FirstFlag, format!("Unexpected channel-binding flag \"{}\".", shown(c)))),
     }
     if at(input, p) == b'a' {
-        return Err(fatal(FIRST_AUTHZID, FEATURE_NOT_SUPPORTED, "client uses authorization identity, but it is not supported"));
+        return Err(fatal(Site::FirstAuthzid, FEATURE_NOT_SUPPORTED, "client uses authorization identity, but it is not supported"));
     }
     if at(input, p) != b',' {
-        return Err(malformed(FIRST_ATTR, format!("Unexpected attribute \"{}\" in client-first-message.", shown(at(input, p)))));
+        return Err(malformed(Site::FirstAttr, format!("Unexpected attribute \"{}\" in client-first-message.", shown(at(input, p)))));
     }
     p += 1;
     if at(input, p) == b'm' {
-        return Err(fatal(FIRST_EXT, FEATURE_NOT_SUPPORTED, "client requires an unsupported SCRAM extension"));
+        return Err(fatal(Site::FirstExt, FEATURE_NOT_SUPPORTED, "client requires an unsupported SCRAM extension"));
     }
     let (_, next) = attr_value(input, p, b'n')?;
     let (nonce, mut p) = attr_value(input, next, b'r')?;
     if !nonce.iter().all(|&c| (0x21..=0x7e).contains(&c) && c != b',') {
-        return Err(fatal(FIRST_NONCE, PROTOCOL_VIOLATION, "non-printable characters in SCRAM nonce"));
+        return Err(fatal(Site::FirstNonce, PROTOCOL_VIOLATION, "non-printable characters in SCRAM nonce"));
     }
     while at(input, p) != 0 {
         p = any_attr(input, p)?.2;
@@ -493,7 +538,7 @@ fn client_first(input: &[u8]) -> Result<(u8, &[u8]), Box<Fatal>> {
 fn client_final(input: &[u8], flag: u8) -> Result<&[u8], Box<Fatal>> {
     let (binding, p) = attr_value(input, 0, b'c')?;
     if !(binding == b"biws" && flag == b'n') && !(binding == b"eSws" && flag == b'y') {
-        return Err(fatal(FINAL_CBIND, PROTOCOL_VIOLATION, "unexpected SCRAM channel-binding attribute in client-final-message"));
+        return Err(fatal(Site::FinalCbind, PROTOCOL_VIOLATION, "unexpected SCRAM channel-binding attribute in client-final-message"));
     }
     let (nonce, mut p) = attr_value(input, p, b'r')?;
     let proof = loop {
@@ -504,10 +549,10 @@ fn client_final(input: &[u8], flag: u8) -> Result<&[u8], Box<Fatal>> {
         }
     };
     if b64_decoded_len(proof) != Some(PROOF_LEN) {
-        return Err(malformed(FINAL_PROOF, "Malformed proof in client-final-message."));
+        return Err(malformed(Site::FinalProof, "Malformed proof in client-final-message."));
     }
     if at(input, p) != 0 {
-        return Err(malformed(FINAL_GARBAGE, "Garbage found at the end of client-final-message."));
+        return Err(malformed(Site::FinalGarbage, "Garbage found at the end of client-final-message."));
     }
     Ok(nonce)
 }
@@ -591,5 +636,59 @@ mod tests {
         // A name the message has twice can't be cut out.
         assert!(Refusal::learn(fields, "a").is_none());
         assert!(Refusal::learn(b"SFATAL\0C08P01\0Mroll_abc\0\0", "roll_abc").is_none());
+    }
+
+    /// A Postgres the decoy has never seen: every error from other source lines and files, a
+    /// newer protocol, and its refusal in another language.
+    fn unseen() -> Answers {
+        Answers {
+            latest_minor: 3,
+            tails: Site::ALL.iter().enumerate().map(|(i, s)| (*s, format!("Fnew{i}.c\0L{}\0Rroutine_{i}\0\0", 4000 + i).into_bytes())).collect(),
+            refusal: Refusal { before: "SFATAL\0VFATAL\0C28P01\0Mauthentification par mot de passe échouée pour l'utilisateur « ".into(), after: " »\0Fauth.c\0L999\0Rauth_failed\0\0".into() },
+        }
+    }
+
+    /// A compute answering as the decoy does from `answers`; `quirk`: except for a bad
+    /// `replication`, which it words its own way.
+    async fn simulated(answers: Answers, quirk: bool) -> std::net::SocketAddr {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            loop {
+                let (mut s, _) = listener.accept().await.unwrap();
+                let answers = answers.clone();
+                tokio::spawn(async move {
+                    let Ok(crate::protocol::Startup::Params { version, params }) = crate::protocol::read_startup(&mut s).await else { return };
+                    let user = params.iter().find(|(k, _)| k == "user").map(|(_, v)| v.clone()).unwrap_or_default();
+                    if quirk && params.iter().any(|(k, v)| k == "replication" && v == "maybe") {
+                        let _ = write_all(&mut s, &message(b'E', b"SFATAL\0VFATAL\0C22023\0Mreplication must be a boolean or database\0Fpostinit.c\0L1\0Rcheck\0\0")).await;
+                        return;
+                    }
+                    let decoy = Decoy { salt: "c2FsdHNhbHRzYWx0c2FsdA==".into(), start: Duration::ZERO, answers: None };
+                    let _ = refuse(&mut s, version, &params, &user, &decoy, Duration::ZERO, &answers).await;
+                });
+            }
+        });
+        addr
+    }
+
+    #[tokio::test]
+    async fn answers_are_learned_from_a_postgres_whose_bytes_are_new() {
+        let addr = simulated(unseen(), false).await;
+        let learned = learn::learn(addr).await.unwrap().expect("learned");
+        assert_eq!(learned, unseen());
+        // The decoy then says what that Postgres says, to every probe.
+        for poke in learn::probes() {
+            let mut s = tokio::net::TcpStream::connect(addr).await.unwrap();
+            let user = "roll_someone";
+            tokio::io::AsyncWriteExt::write_all(&mut s, &learn::startup(poke.0, user, &poke.1)).await.unwrap();
+            let theirs = learn::shape(&learn::transcript(&mut s, poke.2).await, user);
+            assert_eq!(learn::shape(&learn::answer(&learned, user, &poke).await, user), theirs, "{poke:?}");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_postgres_the_decoy_cant_match_has_no_answers() {
+        assert_eq!(learn::learn(simulated(unseen(), true).await).await.unwrap(), None);
     }
 }

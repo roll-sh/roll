@@ -31,7 +31,7 @@ const MAX_RETRIES: u64 = 5;
 impl Apps {
     pub async fn start_job(self: &Arc<Self>, service: &str, env: &str, body: Value) -> Result<Job> {
         let o = body.as_object().cloned().unwrap_or_default();
-        if let Some(k) = o.keys().find(|k| !["command", "timeout_s", "tasks", "retries", "parallelism"].contains(&k.as_str())) {
+        if let Some(k) = o.keys().find(|k| !["command", "timeout_s", "tasks", "retries", "parallelism", "cpu", "memory_mb"].contains(&k.as_str())) {
             return Err(Error::BadRequest(format!("unknown field {k}")));
         }
         let command = o.get("command").and_then(Value::as_str).map(str::trim).unwrap_or("");
@@ -54,6 +54,16 @@ impl Apps {
             None | Some(Value::Null) => PARALLEL.min(tasks),
             Some(v) => v.as_u64().filter(|p| (1..=PARALLEL as u64).contains(p)).ok_or_else(|| Error::BadRequest(format!("parallelism is 1–{PARALLEL}")))? as u32,
         };
+        // Its own size (Heroku's `run --size`, Cloud Run jobs' resources), as a service's ranges;
+        // unset, the service's.
+        let cpu = match o.get("cpu") {
+            None | Some(Value::Null) => None,
+            Some(v) => Some(v.as_f64().filter(|c| (0.25..=8.0).contains(c)).ok_or_else(|| Error::BadRequest("cpu is 0.25–8 vCPU".into()))?),
+        };
+        let memory = match o.get("memory_mb") {
+            None | Some(Value::Null) => None,
+            Some(v) => Some(v.as_u64().filter(|m| (256..=16384).contains(m)).ok_or_else(|| Error::BadRequest("memory_mb is 256–16384".into()))? as u32),
+        };
         if self.capped(service) {
             return Err(Error::Conflict("this project reached its spending limit for the month".into()));
         }
@@ -62,6 +72,7 @@ impl Apps {
             return Err(Error::Conflict("this environment is paused: resume it to run a job".into()));
         }
         let Some(tpl) = live.template() else { return Err(Error::Conflict(format!("nothing is deployed in {env} yet"))) };
+        let size = (cpu.is_some() || memory.is_some()).then(|| (cpu.unwrap_or(tpl.run.cpu), memory.unwrap_or(tpl.run.memory_mb)));
         // The slot is taken under the lock that counts them (a placeholder until the job has an
         // id), so requests at once can't all pass the count.
         let key = crate::env_key(service, env);
@@ -101,7 +112,7 @@ impl Apps {
                             let outcome = {
                                 let Ok(_slot) = slots.clone().acquire_owned().await else { return (RunStatus::Failed, None) };
                                 let vars = [("ROLL_TASK_INDEX".to_string(), n.to_string()), ("ROLL_TASK_COUNT".to_string(), tasks.to_string()), ("ROLL_TASK_ATTEMPT".to_string(), attempt.to_string())];
-                                let ran = live.run_to_exit(Some(&cmd), &vars, Duration::from_secs(timeout), Some(log.clone()), cancel.clone(), None).await;
+                                let ran = live.run_to_exit(Some(&cmd), &vars, Duration::from_secs(timeout), Some(log.clone()), cancel.clone(), None, size).await;
                                 match ran {
                                     Ok(e) if e.canceled => (RunStatus::Canceled, None),
                                     Ok(e) if e.timed_out => (RunStatus::TimedOut, None),

@@ -1859,6 +1859,24 @@ impl EnvLive {
         *self.template.lock() = None;
     }
 
+    /// A file instances made from now on get (`path`, its contents), in place of one there: a
+    /// closed environment's trust bundle when its interception CA changes while it sleeps.
+    pub fn set_file(&self, path: &str, contents: &str) {
+        let with = |t: &Arc<Template>| {
+            let mut t = (**t).clone();
+            t.spec.files.retain(|(p, _)| p != path);
+            t.spec.files.push((path.to_string(), contents.to_string()));
+            Arc::new(t)
+        };
+        let mut tpl = self.template.lock();
+        if let Some(t) = tpl.as_ref() {
+            *tpl = Some(with(t));
+        }
+        if let Some((t, _)) = self.canary.lock().as_mut() {
+            *t = with(t);
+        }
+    }
+
     /// The service's registry login changed (None: it went): instances made from now on use it.
     pub fn set_registry(&self, login: Option<&crate::runtime::RegistryLogin>) {
         let strip = |t: &Arc<Template>| {
@@ -2408,7 +2426,7 @@ impl EnvLive {
 
     /// One cron run: a fresh instance of the active deployment, to its exit or `timeout`.
     pub async fn run_once(self: &Arc<Self>, timeout: Duration) -> anyhow::Result<(String, Option<i32>, bool)> {
-        let e = self.run_to_exit(None, &[], timeout, None, tokio_util::sync::CancellationToken::new(), None).await?;
+        let e = self.run_to_exit(None, &[], timeout, None, tokio_util::sync::CancellationToken::new(), None, None).await?;
         Ok((e.deployment, e.code, e.timed_out))
     }
 
@@ -2416,6 +2434,7 @@ impl EnvLive {
     /// run, or a one-off job (`command` in place of the image's, with no port and no volume,
     /// since the service's own instance may be using it). `made` gets the container's name
     /// before it starts; the container is removed after, whatever happened.
+    #[allow(clippy::too_many_arguments)]
     pub async fn run_to_exit(
         self: &Arc<Self>,
         command: Option<&str>,
@@ -2424,8 +2443,13 @@ impl EnvLive {
         log: Option<LogSink>,
         cancel: tokio_util::sync::CancellationToken,
         name: Option<String>,
+        size: Option<(f64, u32)>,
     ) -> anyhow::Result<Exit> {
         let mut tpl = (*self.template().ok_or_else(|| anyhow::anyhow!("no deployment"))?).clone();
+        // A job's own size (Heroku's `run --size`): its container's, and what it's metered at.
+        if let Some((cpu, mb)) = size {
+            (tpl.spec.cpu, tpl.spec.memory_mb, tpl.run.cpu, tpl.run.memory_mb) = (cpu, mb, cpu, mb);
+        }
         anyhow::ensure!(command.is_some() || tpl.spec.volume.is_none() || !self.held.load(Ordering::SeqCst), "its volume is being restored");
         if let Some(cmd) = command {
             tpl.spec.command = Some(cmd.to_string());

@@ -525,6 +525,10 @@ pub struct FakeSecrets {
     pub own: Mutex<Vec<(String, String)>>,
     /// The references the last ensure sent.
     pub refs: Mutex<Vec<(String, String)>>,
+    /// Resolves that asked for placeholders: (consumer, maker).
+    pub placeholders: Mutex<Vec<(String, String)>>,
+    /// What those resolves answer as placeholders: (key, its bound hosts).
+    pub placeholder_hosts: Mutex<Vec<(String, Vec<String>)>>,
     /// Values every resolve answers (static secrets).
     pub values: Mutex<Vec<(String, String)>>,
     /// Why each resolve was asked for (`logs`: values read to mask output).
@@ -540,6 +544,12 @@ impl roll_previews::ports::Secrets for FakeSecrets {
         *self.own.lock() = vars.to_vec();
         Ok(())
     }
+    async fn resolve_with_placeholders(&self, project: &str, env: &str, untrusted: bool, dynamic: bool, consumer: &str, maker: &str) -> anyhow::Result<roll_previews::ports::Resolved> {
+        self.placeholders.lock().push((consumer.to_string(), maker.to_string()));
+        let mut got = self.resolve(project, env, untrusted, dynamic, consumer).await?;
+        got.placeholders = self.placeholder_hosts.lock().clone();
+        Ok(got)
+    }
     async fn resolve(&self, _: &str, _: &str, _: bool, dynamic: bool, reason: &str) -> anyhow::Result<roll_previews::ports::Resolved> {
         self.reasons.lock().push(reason.to_string());
         let followed = self.followed.lock().clone();
@@ -549,7 +559,7 @@ impl roll_previews::ports::Secrets for FakeSecrets {
         }
         let n = self.issued.fetch_add(1, Ordering::SeqCst) + 1;
         let values = values.into_iter().chain([("DB_PASSWORD".into(), format!("pw-{n}"))]).collect();
-        Ok(roll_previews::ports::Resolved { values, problems: Vec::new(), leases: vec![format!("lease-{n}")], followed, plain: Vec::new() })
+        Ok(roll_previews::ports::Resolved { values, problems: Vec::new(), leases: vec![format!("lease-{n}")], followed, plain: Vec::new(), placeholders: Vec::new() })
     }
     async fn links(&self, _: &str, _: &str) -> anyhow::Result<Vec<(String, Kind, String, String)>> {
         Ok(self.links.lock().clone())
@@ -601,6 +611,19 @@ pub fn change(id: &str, n: i64) -> ChangeInfo {
     }
 }
 
+/// A sealer for tests: hex, bound to its associated data (no value shows in the file).
+pub struct HexSealer;
+
+impl roll_previews::ports::Sealer for HexSealer {
+    fn seal(&self, aad: &str, plain: &str) -> String {
+        format!("v1:{}|{}", hex::encode(aad), hex::encode(plain))
+    }
+    fn open(&self, aad: &str, sealed: &str) -> Option<String> {
+        let rest = sealed.strip_prefix(&format!("v1:{}|", hex::encode(aad)))?;
+        String::from_utf8(hex::decode(rest).ok()?).ok()
+    }
+}
+
 pub fn env(settings: serde_json::Value) -> Env {
     let dir = tempfile::tempdir().unwrap();
     let ws = Arc::new(Workspace::open(&code_sql::Target::Sqlite(dir.path().join("ws.db")), Default::default()).unwrap());
@@ -609,6 +632,8 @@ pub fn env(settings: serde_json::Value) -> Env {
         ws.place(roll_workspace::Scope::All, &p.id, kind, r, 0.0, 0.0).unwrap();
     }
     let store = Arc::new(Store::open(&code_sql::Target::Sqlite(dir.path().join("previews.db")), Default::default()).unwrap());
+    // A deployment key, as rolld has one: pasted values are kept sealed.
+    store.set_sealer(Arc::new(HexSealer)).unwrap();
     let s = Settings::default().patched(&settings).unwrap();
     store.put_settings(&p.id, &s).unwrap();
     let code = Arc::new(FakeCode::default());
