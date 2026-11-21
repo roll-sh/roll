@@ -4607,7 +4607,20 @@ fn sort_by_key_after<T>(items: &mut Vec<T>, skip: usize, key: impl Fn(&T) -> &[u
         let mut b = [0u8; 24];
         let rest = k.get(skip..).unwrap_or(&[]);
         let n = rest.len().min(24);
-        b[..n].copy_from_slice(&rest[..n]);
+        // (By fixed copies, overlapping, the bytes past `n` left zero: a copy of `n` bytes was a
+        // call to memcpy for every key.)
+        match n {
+            24 => b.copy_from_slice(&rest[..24]),
+            16..24 => {
+                b[..16].copy_from_slice(&rest[..16]);
+                b[n - 8..n].copy_from_slice(&rest[n - 8..n]);
+            }
+            8..16 => {
+                b[..8].copy_from_slice(&rest[..8]);
+                b[n - 8..n].copy_from_slice(&rest[n - 8..n]);
+            }
+            _ => b[..n].copy_from_slice(&rest[..n]),
+        }
         let w = |i: usize| u64::from_be_bytes(b[i..i + 8].try_into().unwrap());
         [w(0), w(8), w(16)]
     };

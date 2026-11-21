@@ -127,7 +127,7 @@ enum Marked {
 /// without reading it (`collect_ranges`).
 fn part_ends(w: &SstWriter, part: &[u8], uk: &[u8]) -> bool {
     let next = &uk[..uk.len().min(8)];
-    part != next && (w.approx_size() >= PART_MIN || (key_table(part) == 0) != (key_table(next) == 0))
+    !sst::short_eq(part, next) && (w.approx_size() >= PART_MIN || (key_table(part) == 0) != (key_table(next) == 0))
 }
 
 pub fn mvcc_key(user: &[u8], ts: u64) -> Vec<u8> {
@@ -2254,15 +2254,15 @@ impl Store {
         let mut cur_user: Vec<u8> = Vec::new();
         let mut started = false;
         let mut kept_old = false;
-        // (The first 8 bytes of the last key the writer took: `part_ends`.)
-        let mut part: Vec<u8> = Vec::new();
+        // (The first 8 bytes of the last key the writer took, and how many: `part_ends`.)
+        let mut part = ([0u8; 8], 0usize);
         let mut discarded = self.discard.filter();
         // (Each entry in key order, every version: what is written of it. One body, called
         // through the reference on both paths.)
         let entry: &mut dyn FnMut(&[u8], Option<&[u8]>) -> Result<()> = &mut |k: &[u8], v: Option<&[u8]>| -> Result<()> {
             let uk = user_key(k);
             let ts = key_ts(k);
-            let first_version = !started || cur_user.as_slice() != uk;
+            let first_version = !started || !sst::short_eq(&cur_user, uk);
             if first_version {
                 started = true;
                 cur_user.clear();
@@ -2292,13 +2292,13 @@ impl Store {
             // (Past a file left in place: no key of an input is in its range, so `uk` is past
             // all of it.)
             let mut past_kept = false;
-            while first_version && next_kept < kept.len() && user_key(&kept[next_kept].meta.first_key) < uk {
+            while first_version && next_kept < kept.len() && sst::short_cmp(user_key(&kept[next_kept].meta.first_key), uk).is_lt() {
                 past_kept = true;
                 next_kept += 1;
             }
             if first_version
                 && writer.as_ref().is_some_and(|w| {
-                    past_kept || w.approx_size() >= self.opts.target_file_bytes || part_ends(w, &part, uk)
+                    past_kept || w.approx_size() >= self.opts.target_file_bytes || part_ends(w, &part.0[..part.1], uk)
                 })
             {
                 let w = writer.take().unwrap();
@@ -2308,9 +2308,15 @@ impl Store {
                 writer = Some(self.sst_writer(self.next_id.fetch_add(1, Ordering::Relaxed), true)?);
             }
             writer.as_mut().unwrap().add(k, v)?;
-            if first_version || part.is_empty() {
-                part.clear();
-                part.extend_from_slice(&uk[..uk.len().min(8)]);
+            if first_version || part.1 == 0 {
+                part = match uk.first_chunk::<8>() {
+                    Some(p) => (*p, 8),
+                    None => {
+                        let mut p = [0u8; 8];
+                        p[..uk.len()].copy_from_slice(uk);
+                        (p, uk.len())
+                    }
+                };
             }
             Ok(())
         };

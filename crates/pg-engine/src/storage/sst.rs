@@ -1817,9 +1817,12 @@ impl<'a> ZipSide<'a> {
     }
 }
 
-/// `a`'s first `n` bytes compared with `b`'s, 8 bytes at a time.
+/// `a`'s first `n` bytes compared with `b`'s, 8 bytes at a time: the last 1-7 as the word they
+/// start, the bytes past `n` shifted out. (A slice comparison of them was a call to memcmp at
+/// every comparison of keys whose length isn't a multiple of 8: a row key is 17 bytes.)
 #[inline(always)]
 fn cmp_words(a: &[u8; ZK], b: &[u8; ZK], n: usize) -> std::cmp::Ordering {
+    const { assert!(ZK.is_multiple_of(8)) };
     let n = n.min(ZK);
     let mut i = 0;
     while i + 8 <= n {
@@ -1830,7 +1833,75 @@ fn cmp_words(a: &[u8; ZK], b: &[u8; ZK], n: usize) -> std::cmp::Ordering {
         }
         i += 8;
     }
-    a[i..n].cmp(&b[i..n])
+    if i == n {
+        return std::cmp::Ordering::Equal;
+    }
+    // (`i` is a multiple of 8 below `n`, so `i + 8 <= ZK`.)
+    let shift = 64 - 8 * (n - i) as u32;
+    let x = u64::from_be_bytes(a[i..i + 8].try_into().unwrap()) >> shift;
+    let y = u64::from_be_bytes(b[i..i + 8].try_into().unwrap()) >> shift;
+    x.cmp(&y)
+}
+
+/// `a`'s first `n` bytes compared with `b`'s for `n` in 8..=32, by the words that start and end
+/// them (overlapping: past the first word's equal bytes, the last word orders what follows).
+#[inline(always)]
+fn cmp_ends(a: &[u8], b: &[u8], n: usize) -> std::cmp::Ordering {
+    if n >= 16 {
+        let w = |s: &[u8], i: usize| u128::from_be_bytes(s[i..i + 16].try_into().unwrap());
+        w(a, 0).cmp(&w(b, 0)).then_with(|| w(a, n - 16).cmp(&w(b, n - 16)))
+    } else {
+        let w = |s: &[u8], i: usize| u64::from_be_bytes(s[i..i + 8].try_into().unwrap());
+        w(a, 0).cmp(&w(b, 0)).then_with(|| w(a, n - 8).cmp(&w(b, n - 8)))
+    }
+}
+
+/// `a == b` for the short keys a merge passes from entry to entry (8 to 32 bytes: a row's key
+/// is 17, an index entry's about 22) without a call to bcmp; others as slices.
+#[inline(always)]
+pub(crate) fn short_eq(a: &[u8], b: &[u8]) -> bool {
+    let n = a.len();
+    if n != b.len() {
+        return false;
+    }
+    if (8..=32).contains(&n) { cmp_ends(a, b, n).is_eq() } else { a == b }
+}
+
+/// `a.cmp(b)` for short keys, as `short_eq`.
+#[inline(always)]
+pub(crate) fn short_cmp(a: &[u8], b: &[u8]) -> std::cmp::Ordering {
+    let n = a.len().min(b.len());
+    if (8..=32).contains(&n) { cmp_ends(a, b, n).then(a.len().cmp(&b.len())) } else { a.cmp(b) }
+}
+
+/// A zip's `bound` in a buffer as its sides' keys are, when it fits one: then compared with a
+/// side's key by words (`past`), not by a call to memcmp for every entry.
+struct ZipBound<'a> {
+    b: &'a [u8],
+    w: [u8; ZK],
+}
+
+impl<'a> ZipBound<'a> {
+    fn new(b: &'a [u8]) -> ZipBound<'a> {
+        let mut w = [0u8; ZK];
+        if b.len() <= ZK {
+            w[..b.len()].copy_from_slice(b);
+        }
+        ZipBound { b, w }
+    }
+
+    /// Whether key `k` (its first `klen` bytes) sorts at or past the bound.
+    #[inline(always)]
+    fn past(&self, k: &[u8; ZK], klen: usize) -> bool {
+        let blen = self.b.len();
+        if blen > ZK {
+            return &k[..klen] >= self.b;
+        }
+        match cmp_words(k, &self.w, klen.min(blen)) {
+            std::cmp::Ordering::Equal => klen >= blen,
+            o => o.is_gt(),
+        }
+    }
 }
 
 /// What `zip_rows` did: the rows it pushed, whether it moved either side, and the user key it
@@ -1902,6 +1973,7 @@ fn zip_n<const N: usize>(
 ) -> ([u8; ZK], usize) {
     let mut u = [0u8; ZK];
     let mut ulen = 0;
+    let bound = bound.map(ZipBound::new);
     while z.rows < max {
         let mut m = 0;
         for j in 1..N {
@@ -1910,7 +1982,7 @@ fn zip_n<const N: usize>(
             }
         }
         let x = &mut s[m];
-        if bound.is_some_and(|bd| &x.k[..x.klen] >= bd) {
+        if bound.as_ref().is_some_and(|bd| bd.past(&x.k, x.klen)) {
             break;
         }
         let ver = x.ver();
@@ -1930,7 +2002,9 @@ fn zip_n<const N: usize>(
         }
         z.moved = true;
         z.decided_ts = ver;
-        u[..xl].copy_from_slice(&x.k[..xl]);
+        // (The whole buffer: a fixed copy, not a call to memcpy for `xl` bytes. Only the first
+        // `ulen` bytes are read.)
+        u = x.k;
         ulen = xl;
         // The key's older versions passed: on its own side those sharing the whole user key
         // (stored whole at a restart: compared), on the others the same user key.
@@ -1981,6 +2055,7 @@ pub fn zip_entries(srcs: &mut [(&Block, &mut BlockPos)], bound: Option<&[u8]>, f
 fn entries_n<const N: usize>(s: &mut [ZipSide; N], bound: Option<&[u8]>, f: &mut dyn FnMut(&[u8], Option<&[u8]>) -> Result<()>) -> Result<bool> {
     let mut moved = false;
     let mut dval = [0u8; ZK];
+    let bound = bound.map(ZipBound::new);
     loop {
         let mut m = 0;
         for j in 1..N {
@@ -1989,10 +2064,10 @@ fn entries_n<const N: usize>(s: &mut [ZipSide; N], bound: Option<&[u8]>, f: &mut
             }
         }
         let x = &mut s[m];
-        let k = &x.k[..x.klen];
-        if bound.is_some_and(|bd| k >= bd) {
+        if bound.as_ref().is_some_and(|bd| bd.past(&x.k, x.klen)) {
             break;
         }
+        let k = &x.k[..x.klen];
         let v = match x.vlen {
             TOMBSTONE => None,
             DERIVED => {
@@ -3119,6 +3194,17 @@ mod tests {
             b.extend((0..next() % 5).map(|_| (next() % 3) as u8));
             let want = a.iter().zip(&b).take_while(|(p, q)| p == q).count();
             assert_eq!(common_prefix(&a, &b), want, "{a:?} {b:?}");
+            // The merges' comparisons without calls: as the slices', bytes past a key's end
+            // in its buffer anything.
+            assert_eq!(short_eq(&a, &b), a == b, "{a:?} {b:?}");
+            assert_eq!(short_cmp(&a, &b), a.cmp(&b), "{a:?} {b:?}");
+            let (mut ka, mut kb) = ([0u8; ZK], [0u8; ZK]);
+            ka.iter_mut().chain(kb.iter_mut()).for_each(|x| *x = next() as u8);
+            ka[..a.len()].copy_from_slice(&a);
+            kb[..b.len()].copy_from_slice(&b);
+            let m = a.len().min(b.len());
+            assert_eq!(cmp_words(&ka, &kb, m), a[..m].cmp(&b[..m]), "{a:?} {b:?}");
+            assert_eq!(ZipBound::new(&b).past(&ka, a.len()), a >= b, "{a:?} {b:?}");
         }
         let mut seen = std::collections::HashSet::new();
         let mut ones = [0u32; 64];
