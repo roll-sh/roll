@@ -34,11 +34,13 @@ pub trait Router: Send + Sync + 'static {
     /// Return the address of a running compute for `endpoint`, starting it if suspended.
     fn wake(&self, endpoint: &str) -> impl Future<Output = Result<SocketAddr, RouteError>> + Send;
     /// Whether `user` is a decoy role at `endpoint` (roll secrets' Postgres decoys). Asked on
-    /// every login before [`Router::wake`], so it's one indexed read. A decoy's login is told to
-    /// whoever listens (`peer`: the client), and the proxy refuses it without a compute.
-    fn decoy(&self, endpoint: &str, user: &str, peer: Option<SocketAddr>) -> Option<decoy::Decoy> {
+    /// every login before [`Router::wake`], so it's one indexed read (it may wait, once per
+    /// compute image, while the image's answers are learned). A decoy's login is told to whoever
+    /// listens (`peer`: the client), and the proxy refuses it without a compute when it knows the
+    /// image's [`decoy::Answers`].
+    fn decoy(&self, endpoint: &str, user: &str, peer: Option<SocketAddr>) -> impl Future<Output = Option<decoy::Decoy>> + Send {
         let _ = (endpoint, user, peer);
-        None
+        async { None }
     }
     fn connection_opened(&self, endpoint: &str);
     fn connection_closed(&self, endpoint: &str);
@@ -63,8 +65,6 @@ const WARM_MAX: Duration = Duration::from_millis(250);
 struct Seen {
     /// From asking to wake a running compute to its first answer, smoothed.
     warm: Option<Duration>,
-    /// Its wrong-password error, around the user's name.
-    refusal: Option<decoy::Refusal>,
 }
 
 pub struct Proxy<R: Router> {
@@ -147,15 +147,13 @@ impl<R: Router> Proxy<R> {
 
         // Postgres cuts a longer name to 63 bytes, and no decoy's name is that long.
         let user = params.iter().find(|(k, _)| k == "user").map(|(_, v)| v.as_str()).filter(|u| !u.is_empty() && u.len() < 64);
+        // A decoy whose image's answers roll doesn't know goes to Postgres, told all the same.
         if let Some(user) = user
-            && let Some(d) = self.router.decoy(&endpoint, user, peer)
+            && let Some(d) = self.router.decoy(&endpoint, user, peer).await
+            && let Some(answers) = &d.answers
         {
-            let (warm, refusal) = {
-                let seen = self.seen.lock().unwrap();
-                let s = seen.get(&endpoint);
-                (s.and_then(|s| s.warm).unwrap_or(WARM_DEFAULT), s.and_then(|s| s.refusal.clone()))
-            };
-            decoy::refuse(&mut client, version, &params, user, &d, warm, refusal.as_ref()).await?;
+            let warm = self.seen.lock().unwrap().get(&endpoint).and_then(|s| s.warm).unwrap_or(WARM_DEFAULT);
+            decoy::refuse(&mut client, version, &params, user, &d, warm, answers).await?;
             return Ok(());
         }
 
@@ -187,7 +185,7 @@ impl<R: Router> Proxy<R> {
         self.router.connection_opened(&endpoint);
         let _guard = ConnGuard { router: self.router.as_ref(), endpoint: &endpoint };
         let mut cancel_key = None;
-        let login = Login { endpoint: &endpoint, user, asked };
+        let login = Login { endpoint: &endpoint, asked };
         let result = self.relay(client, backend, addr, &mut cancel_key, login).await;
         if let Some(key) = cancel_key {
             self.cancel_map.lock().unwrap().remove(&key);
@@ -224,9 +222,6 @@ impl<R: Router> Proxy<R> {
                 if std::mem::take(&mut first) {
                     self.saw_answer(&login);
                 }
-                if tag == b'E' {
-                    self.saw_error(&login, &buf[5..]);
-                }
                 if tag == b'K' && buf.len() >= 13 {
                     let pid = i32::from_be_bytes(buf[5..9].try_into().unwrap());
                     let key = (pid, buf[9..].to_vec());
@@ -262,14 +257,7 @@ impl<R: Router> Proxy<R> {
         let mut seen = self.seen.lock().unwrap();
         match seen.get_mut(login.endpoint) {
             Some(s) => s.warm = Some(s.warm.map_or(took, |w| (w * 7 + took) / 8)),
-            None => drop(seen.insert(login.endpoint.to_string(), Seen { warm: Some(took), refusal: None })),
-        }
-    }
-
-    /// A compute refused a login: a wrong password's words, for a decoy's refusal.
-    fn saw_error(&self, login: &Login<'_>, fields: &[u8]) {
-        if let Some(r) = login.user.and_then(|u| decoy::Refusal::learn(fields, u)) {
-            self.seen.lock().unwrap().entry(login.endpoint.to_string()).or_default().refusal = Some(r);
+            None => drop(seen.insert(login.endpoint.to_string(), Seen { warm: Some(took) })),
         }
     }
 
@@ -287,7 +275,6 @@ impl<R: Router> Proxy<R> {
 /// A login the proxy relays.
 struct Login<'a> {
     endpoint: &'a str,
-    user: Option<&'a str>,
     /// When the proxy asked to wake its compute.
     asked: Instant,
 }

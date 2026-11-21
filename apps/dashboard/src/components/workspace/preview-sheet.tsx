@@ -177,6 +177,14 @@ export function PreviewSheet({
             )}
             <VerdictStrip p={p} onTab={setTab} />
             <RegressionsAccept p={p} />
+            {p.intercepted && (
+              <p className="mb-3 text-[11.5px] text-muted">
+                Keys it never holds:{" "}
+                {p.intercepted.keys.map((k) => `${k.key} → ${k.hosts.join(", ")}`).join("; ")}
+                {` · ${p.intercepted.swapped} swapped in`}
+                {p.intercepted.refused ? `, ${p.intercepted.refused} refused` : ""}
+              </p>
+            )}
             <span data-section="services" />
             <Label>Services</Label>
             {p.services.length ? (
