@@ -95,7 +95,7 @@ impl Sqlite {
         })();
         let _ = conn.execute_batch("PRAGMA secure_delete = OFF");
         let v = out?;
-        conn.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |_| Ok(())).map_err(Error::from)?;
+        empty_wal(&conn, std::time::Duration::from_secs(30)).map_err(E::from)?;
         Ok(v)
     }
 
@@ -189,4 +189,46 @@ pub(crate) fn column<T>(r: &rusqlite::Row<'_>, i: usize, f: impl FnOnce(ValueRef
         SqRef::Blob(b) => ValueRef::Blob(b),
     };
     f(v)
+}
+
+/// Copy the whole WAL into the database file and truncate it, so what an erasing write removed
+/// is in neither. A TRUNCATE checkpoint answers busy, rather than failing, when it can't finish:
+/// the background checkpointer holds the checkpoint lock, or a reader is on an older snapshot
+/// past the busy timeout. Tried again until it's done, for at most `within`.
+fn empty_wal(conn: &Connection, within: std::time::Duration) -> Result<()> {
+    let until = std::time::Instant::now() + within;
+    loop {
+        let (busy, log, copied): (i64, i64, i64) = conn.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?;
+        if busy == 0 && log == copied {
+            return Ok(());
+        }
+        if std::time::Instant::now() >= until {
+            return Err(Error::Other(format!("the WAL couldn't be emptied after an erasing write ({copied} of {log} frames copied): a reader held an older snapshot")));
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+}
+
+#[cfg(test)]
+mod erasing_tests {
+    /// A checkpoint that can't finish at once (a reader on an older snapshot) is tried again:
+    /// the WAL ends empty, not with the erased rows still in it.
+    #[test]
+    fn the_wal_is_emptied_even_when_a_checkpoint_is_busy() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("e.db");
+        let w = rusqlite::Connection::open(&path).unwrap();
+        w.execute_batch("PRAGMA journal_mode=WAL; PRAGMA busy_timeout=0; CREATE TABLE t (v TEXT); INSERT INTO t VALUES ('old');").unwrap();
+        let r = rusqlite::Connection::open(&path).unwrap();
+        r.execute_batch("BEGIN").unwrap();
+        let _: String = r.query_row("SELECT v FROM t", [], |x| x.get(0)).unwrap();
+        w.execute_batch("UPDATE t SET v = 'secret'").unwrap();
+        let reader = std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(200));
+            r.execute_batch("COMMIT").unwrap();
+        });
+        super::empty_wal(&w, std::time::Duration::from_secs(10)).unwrap();
+        reader.join().unwrap();
+        assert_eq!(std::fs::metadata(dir.path().join("e.db-wal")).map(|m| m.len()).unwrap_or(0), 0, "the WAL is empty");
+    }
 }
