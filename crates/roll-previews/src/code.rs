@@ -471,6 +471,31 @@ impl PreviewBackend for Backend {
         engine.accept_visual(&row.id, by, &[], true, None, Some(head), None).await.map(|_| ()).map_err(|e| anyhow::anyhow!("{e}"))
     }
 
+    async fn act(&self, change: &code_control::model::Change, action: code_control::ext::PreviewAction, by: &str) -> anyhow::Result<String> {
+        use code_control::ext::PreviewAction::*;
+        let engine = self.engine.get().and_then(Weak::upgrade).ok_or_else(|| anyhow::anyhow!("previews aren't running"))?;
+        let row = engine.store.row_by_change(&change.id)?.ok_or_else(|| anyhow::anyhow!("this change has no preview"))?;
+        let id = row.id.clone();
+        let done = match action {
+            Redeploy => engine.refresh(&id).map(|_| "Redeploying the preview at its head.".to_string()),
+            Reset => engine.reset(&id, Vec::new()).map(|_| "Resetting the preview's data: its branches are made again from their parents.".to_string()),
+            Wake => engine.wake(&id).await.map(|_| "Waking the preview.".to_string()),
+            Sleep => engine.sleep(&id).await.map(|_| "The preview is asleep: its next visit wakes it.".to_string()),
+            Keep(hours) => engine.keep(&id, hours).map(|_| if hours == 0 { "The preview follows its rules' TTL again.".to_string() } else { format!("Keeping the preview {hours} more hours past its TTL.") }),
+        }
+        .map_err(|e| anyhow::anyhow!("{e}"))?;
+        // Who asked, in the preview's activity.
+        let what = match action {
+            Redeploy => "a redeploy".to_string(),
+            Reset => "its data reset".to_string(),
+            Wake => "it woken".to_string(),
+            Sleep => "it asleep".to_string(),
+            Keep(h) => format!("it kept {h} hours"),
+        };
+        let _ = engine.store.log(&id, &format!("{by} asked for {what} from the pull request"));
+        Ok(done)
+    }
+
     async fn delete(&self, repo: &RepoRow, change: &code_control::model::Change) -> anyhow::Result<()> {
         let env = change.preview.as_ref().and_then(|p| p.environment.as_ref());
         match (env, self.engine.get().and_then(Weak::upgrade)) {

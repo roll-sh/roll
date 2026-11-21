@@ -780,6 +780,7 @@ every request.
 | command `@roll review` | "On it"; skipped when nothing changed; resumes a paused change | `reviewer.rs::roll_commands_from_writers_act_and_from_readers_are_ignored` |
 | command `@roll review [mode]` | forced mode | `reviewer.rs::roll_commands_in_threads` |
 | command `@roll full review [mode]` | everything reviewed | `reviewer.rs::roll_commands_from_writers_act_and_from_readers_are_ignored` |
+| command `@roll preview …` (a writer acts on the change's preview from the pull request; a reader can't) | | `github.rs::roll_commands_from_github_comments`, `code-review` `commands::tests::preview_commands_name_what_they_do` |
 | command `@roll pause` / `@roll resume` | | `reviewer.rs::roll_commands_in_threads`, `reviewer.rs::roll_commands_from_writers_act_and_from_readers_are_ignored` |
 | command `@roll resolve` | | `reviewer.rs::roll_commands_in_threads` |
 | command `@roll explain` | metered as a chat | `reviewer.rs::roll_commands_in_threads` |

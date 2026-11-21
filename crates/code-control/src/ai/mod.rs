@@ -759,6 +759,9 @@ impl Code {
                 self.db.insert_learning(&id, &r.id, None, &text, "command", &by.display(), th.map(|t| t.id.as_str()))?;
                 format!("Got it — I'll remember for future reviews: _{}_", text.trim())
             }
+            // Async (a call to the preview backend): run where the comment is read, in a pull
+            // request's conversation.
+            Preview(_) => "`@roll preview …` works in the pull request's conversation.".into(),
             Explain | Fix | Ask(_) => {
                 let Some(th) = th else {
                     return Ok(Some("`@roll explain`, `@roll fix` and questions work in an inline comment on the lines you mean.".into()));
