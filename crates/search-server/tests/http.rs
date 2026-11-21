@@ -299,6 +299,57 @@ async fn tenant_routing_and_auth() {
     assert_eq!(r.status, 404);
 }
 
+/// A cluster's CORS settings (`http.cors.*` with Elasticsearch's semantics): a browser's
+/// preflight, which carries no credentials, is answered from them before authentication and
+/// without waking the cluster; every answer to an allowed origin carries the CORS headers (a 401
+/// included, so a page can read it); an authenticated request from another origin gets an empty
+/// 403, and an unauthenticated one its 401 without CORS headers; a cluster without CORS answers a
+/// preflight like any request.
+#[tokio::test]
+async fn cors_preflights_are_answered_before_authentication() {
+    let t = start(NodeConfig { domain: Some("search.test".into()), ..NodeConfig::default() }, ListenOptions::default()).await;
+    let cors = search_server::cors::Cors::new(&["https://shop.example".into()], None, None, None).unwrap();
+    t.catalog.insert(search_server::ClusterSpec { cors: Some(Arc::new(cors)), ..search_server::ClusterSpec::new("c1").with_password("pw1") });
+    let addr = t.addr;
+    let raw = |text: String| async move {
+        let mut s = TcpStream::connect(addr).await.unwrap();
+        s.write_all(text.as_bytes()).await.unwrap();
+        read_response(&mut s, &mut Vec::new(), false).await
+    };
+    let preflight = |cluster: &str, origin: &str| {
+        format!("OPTIONS /products/_search HTTP/1.1\r\nHost: {cluster}.search.test:9200\r\nOrigin: {origin}\r\nAccess-Control-Request-Method: POST\r\nAccess-Control-Request-Headers: authorization,content-type\r\n\r\n")
+    };
+    let all = |r: &Resp, name: &str| r.headers.iter().filter(|(k, _)| k.eq_ignore_ascii_case(name)).map(|(_, v)| v.clone()).collect::<Vec<_>>();
+    let r = raw(preflight("c1", "https://shop.example")).await;
+    assert_eq!(r.status, 200, "{}", r.text());
+    assert_eq!(r.header("access-control-allow-origin"), Some("https://shop.example"));
+    assert_eq!(r.header("vary"), Some("origin"));
+    assert_eq!(all(&r, "access-control-allow-methods"), ["GET", "POST", "PUT", "DELETE", "OPTIONS", "HEAD"]);
+    assert!(all(&r, "access-control-allow-headers").contains(&"Authorization".to_string()));
+    assert_eq!(r.header("access-control-max-age"), Some("1728000"));
+    assert!(t.node.loaded().is_empty(), "a preflight doesn't wake the cluster");
+    let r = raw(preflight("c1", "https://evil.example")).await;
+    assert_eq!((r.status, r.header("access-control-allow-origin"), r.body.len()), (403, None, 0));
+    // c2 has no CORS: the preflight is an unauthenticated request like any other.
+    let r = raw(preflight("c2", "https://shop.example")).await;
+    assert_eq!((r.status, r.header("access-control-allow-origin")), (401, None));
+
+    let get = |origin: &str, auth: &str| format!("GET / HTTP/1.1\r\nHost: c1.search.test\r\nOrigin: {origin}\r\n{auth}\r\n");
+    let ok = format!("Authorization: {}\r\n", basic("elastic", "pw1"));
+    let wrong = format!("Authorization: {}\r\n", basic("elastic", "nope"));
+    let r = raw(get("https://shop.example", &ok)).await;
+    assert_eq!((r.status, r.header("access-control-allow-origin"), r.header("access-control-expose-headers")), (200, Some("https://shop.example"), Some("X-elastic-product")));
+    let r = raw(get("https://shop.example", &wrong)).await;
+    assert_eq!((r.status, r.header("access-control-allow-origin")), (401, Some("https://shop.example")));
+    let r = raw(get("https://evil.example", &ok)).await;
+    assert_eq!((r.status, r.header("access-control-allow-origin"), r.body.len()), (403, None, 0));
+    let r = raw(get("https://evil.example", &wrong)).await;
+    assert_eq!((r.status, r.header("access-control-allow-origin")), (401, None));
+    // The cluster shows them as Elasticsearch's node settings.
+    let r = raw(format!("GET /_nodes/settings?flat_settings=true HTTP/1.1\r\nHost: c1.search.test\r\n{ok}\r\n")).await;
+    assert!(r.text().contains(r#""http.cors.allow-origin":"https://shop.example""#), "{}", r.text());
+}
+
 #[tokio::test]
 async fn the_nodes_service_token_file_signs_in_only_to_the_clusters_it_names() {
     use base64::Engine;

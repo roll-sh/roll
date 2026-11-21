@@ -14,6 +14,9 @@ use code_sql::{Db, OptionalExtension, params};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
+/// A dropped build cache: its project and cache, and the objects to delete.
+pub type DroppedCache = ((String, String), Vec<String>);
+
 /// How many hours of hourly metrics are kept past the week of minutes (90 days in all).
 pub const HOURS_KEPT: i64 = 83 * 24;
 
@@ -96,6 +99,27 @@ CREATE TABLE IF NOT EXISTS variable_makers (
     name TEXT NOT NULL,
     maker TEXT NOT NULL,
     PRIMARY KEY (service, env, name)
+) WITHOUT ROWID;
+-- A remote build cache (Turborepo, Nx), one a project's environment and source (`ns`,
+-- `build_cache::scope`): its builds' token, sealed, found by its hash on each request; and what it
+-- holds, each artifact's bytes in object storage under a key of its own upload's.
+CREATE TABLE IF NOT EXISTS build_cache_tokens (
+    project TEXT NOT NULL,
+    ns TEXT NOT NULL,
+    sealed TEXT NOT NULL,
+    hash TEXT NOT NULL UNIQUE,
+    PRIMARY KEY (project, ns)
+);
+CREATE TABLE IF NOT EXISTS build_cache_artifacts (
+    project TEXT NOT NULL,
+    ns TEXT NOT NULL,
+    hash TEXT NOT NULL,
+    object TEXT NOT NULL,
+    bytes INTEGER NOT NULL,
+    duration_ms INTEGER,
+    tag TEXT,
+    used_at INTEGER NOT NULL,
+    PRIMARY KEY (project, ns, hash)
 ) WITHOUT ROWID;
 -- Where an environment's instances read roll's OIDC tokens: its URL's token, sealed.
 CREATE TABLE IF NOT EXISTS oidc_access (
@@ -197,6 +221,13 @@ CREATE TABLE IF NOT EXISTS form_submissions (
     fields_sealed TEXT NOT NULL
 ) WITHOUT ROWID;
 CREATE INDEX IF NOT EXISTS form_submissions_by_form ON form_submissions (service, env, form, created_at);
+-- A bucket drain's key, minted by roll storage for it: what to revoke when it goes.
+CREATE TABLE IF NOT EXISTS drain_links (
+    drain TEXT PRIMARY KEY,
+    kind TEXT NOT NULL,
+    ref TEXT NOT NULL,
+    kept TEXT NOT NULL
+);
 CREATE TABLE IF NOT EXISTS log_drains (
     id TEXT PRIMARY KEY,
     project TEXT NOT NULL,
@@ -306,6 +337,32 @@ CREATE TABLE IF NOT EXISTS error_groups (
     name TEXT NOT NULL,
     first_seen INTEGER NOT NULL,
     PRIMARY KEY (service, env, fingerprint)
+) WITHOUT ROWID;
+-- Who started a deployment, as a person (their session's, their own token's, the operator's): what
+-- an approval is compared with.
+-- A deployment's edge settings from its tree's roll.toml (`EdgeFile`, every block), copied to a
+-- promotion or a rollback of it: they travel with the image.
+CREATE TABLE IF NOT EXISTS deploy_edge (
+    deployment TEXT PRIMARY KEY,
+    file TEXT NOT NULL
+) WITHOUT ROWID;
+CREATE TABLE IF NOT EXISTS deploy_people (
+    deployment TEXT PRIMARY KEY,
+    person TEXT NOT NULL
+) WITHOUT ROWID;
+-- Who approved putting a deployment live (an environment's `approvals`), one row a person.
+CREATE TABLE IF NOT EXISTS deploy_approvals (
+    deployment TEXT NOT NULL,
+    approver TEXT NOT NULL,
+    at INTEGER NOT NULL,
+    PRIMARY KEY (deployment, approver)
+) WITHOUT ROWID;
+-- Variables only its instances get, never a build's steps (Vercel's and Netlify's scopes).
+CREATE TABLE IF NOT EXISTS variable_runtime_only (
+    service TEXT NOT NULL,
+    env TEXT NOT NULL,
+    name TEXT NOT NULL,
+    PRIMARY KEY (service, env, name)
 ) WITHOUT ROWID;
 CREATE TABLE IF NOT EXISTS variable_files (
     service TEXT NOT NULL,
@@ -543,6 +600,15 @@ pub struct EnvRow {
     pub egress: crate::model::Egress,
     /// Its pages measure their Web Vitals for roll (a tag the proxy adds).
     pub vitals: bool,
+    /// Days its logs are kept (7, 30 or 90); None: [`crate::logs::KEEP_DAYS`].
+    pub log_retention_days: Option<u32>,
+    /// Approvals a deployment needs from people other than its author before it goes live.
+    pub approvals: u32,
+    /// Its deploy status badge answers (`/_roll/badge/…`), for anyone.
+    pub badge: bool,
+    /// Who last set its egress (a person, their token's user, the operator): a closed
+    /// environment's placeholders are made by them. None: set before it was kept.
+    pub egress_by: Option<String>,
     /// Its deploys are reported to the Git host (commit statuses, GitHub Deployments); false:
     /// someone else reports them (roll previews for its `pv-` environments).
     pub report: bool,
@@ -622,6 +688,9 @@ pub struct UsageAdd {
     pub requests: i64,
     pub egress_bytes: i64,
     pub build_seconds: f64,
+    /// What roll stores for it, in GB-hours: logs past the first week (an environment keeping them
+    /// 30 or 90 days) and its share of its build cache.
+    pub stored_gb_hours: f64,
 }
 
 /// One move of an environment's active deployment ([`Store::switch_active`]): from `from` to
@@ -664,7 +733,7 @@ fn name_taken(name: &str, deleted: Option<i64>) -> String {
         Some(_) => format!("a deleted service named {name} holds the name: restore it, or delete it again to delete it for good"),
     }
 }
-const ENV_COLS: &str = "service, name, branch, ephemeral, active, slug, port, created_at, wait_for_ci, run, hook_hash, follow_tag, tag_seen, feedback, maintenance, allow_ips, rate_limit, tcp_port, firewall, pages, redeploy_on_secrets, secrets_seen, headers, paused, held_by, egress, vitals, routes, report, checks, heartbeats, split, freeze, mirror, pause_schedule, snippets";
+const ENV_COLS: &str = "service, name, branch, ephemeral, active, slug, port, created_at, wait_for_ci, run, hook_hash, follow_tag, tag_seen, feedback, maintenance, allow_ips, rate_limit, tcp_port, firewall, pages, redeploy_on_secrets, secrets_seen, headers, paused, held_by, egress, vitals, routes, report, checks, heartbeats, split, freeze, mirror, pause_schedule, snippets, log_retention_days, approvals, badge, egress_by";
 /// A deployment [`Store::prune_deployments`] pruned, with its image when nothing else names it.
 pub struct Pruned {
     pub id: String,
@@ -751,6 +820,10 @@ fn env_row(r: &code_sql::Row<'_>) -> code_sql::Result<EnvRow> {
         mirror: r.get::<_, Option<String>>(33)?.and_then(|j| serde_json::from_str(&j).ok()),
         pause_schedule: r.get::<_, Option<String>>(34)?.and_then(|j| serde_json::from_str(&j).ok()),
         snippets: r.get::<_, Option<String>>(35)?.and_then(|j| serde_json::from_str(&j).ok()).unwrap_or_default(),
+        log_retention_days: r.get::<_, Option<i64>>(36)?.map(|d| d as u32),
+        approvals: r.get::<_, Option<i64>>(37)?.unwrap_or(0) as u32,
+        badge: r.get::<_, i64>(38)? != 0,
+        egress_by: r.get(39)?,
     })
 }
 
@@ -807,6 +880,7 @@ fn deploy_row(r: &code_sql::Row<'_>) -> code_sql::Result<Deployment> {
         error_detail,
         fix,
         steps: Vec::new(),
+        approved_by: Vec::new(),
     })
 }
 
@@ -906,6 +980,12 @@ impl Store {
         db.add_column("environments", "egress", "TEXT")?;
         db.add_column("environments", "vitals", "INTEGER NOT NULL DEFAULT 0")?;
         db.add_column("environments", "report", "INTEGER NOT NULL DEFAULT 1")?;
+        db.add_column("environments", "log_retention_days", "INTEGER")?;
+        db.add_column("environments", "approvals", "INTEGER")?;
+        db.add_column("environments", "badge", "INTEGER NOT NULL DEFAULT 0")?;
+        db.add_column("environments", "egress_by", "TEXT")?;
+        db.add_column("usage", "stored_gb_hours", "REAL NOT NULL DEFAULT 0")?;
+        db.add_column("project_usage", "stored_gb_hours", "REAL NOT NULL DEFAULT 0")?;
         // A custom domain sent to another of the app's ports.
         db.add_column("domains", "port", "INTEGER")?;
         // The roll login (`ses_…`) a ticket and a visit session came from: its end ends them.
@@ -1026,18 +1106,19 @@ impl Store {
             // What it used stays its project's (spend limits, the month's bill): deleting a
             // service and making another never brings the month's spend down.
             c.execute(
-                "INSERT INTO project_usage (project, hour, cpu_seconds, gb_seconds, requests, egress_bytes, build_seconds) \
-                 SELECT s.project, u.hour, SUM(u.cpu_seconds), SUM(u.gb_seconds), SUM(u.requests), SUM(u.egress_bytes), SUM(u.build_seconds) \
+                "INSERT INTO project_usage (project, hour, cpu_seconds, gb_seconds, requests, egress_bytes, build_seconds, stored_gb_hours) \
+                 SELECT s.project, u.hour, SUM(u.cpu_seconds), SUM(u.gb_seconds), SUM(u.requests), SUM(u.egress_bytes), SUM(u.build_seconds), SUM(u.stored_gb_hours) \
                  FROM usage u JOIN services s ON s.id = u.service WHERE u.service = ? GROUP BY s.project, u.hour \
                  ON CONFLICT (project, hour) DO UPDATE SET cpu_seconds = project_usage.cpu_seconds + excluded.cpu_seconds, \
                  gb_seconds = project_usage.gb_seconds + excluded.gb_seconds, requests = project_usage.requests + excluded.requests, \
-                 egress_bytes = project_usage.egress_bytes + excluded.egress_bytes, build_seconds = project_usage.build_seconds + excluded.build_seconds",
+                 egress_bytes = project_usage.egress_bytes + excluded.egress_bytes, build_seconds = project_usage.build_seconds + excluded.build_seconds, \
+                 stored_gb_hours = project_usage.stored_gb_hours + excluded.stored_gb_hours",
                 [id],
             )?;
             c.execute("DELETE FROM deploy_steps WHERE deployment IN (SELECT id FROM deployments WHERE service = ?)", [id])?;
             c.execute("DELETE FROM state WHERE key LIKE ?", [format!("%:{id}/%")])?;
             c.execute("DELETE FROM status_days WHERE key LIKE ?", [format!("%:{id}/%")])?;
-            for t in ["environments", "deployments", "deploy_keys", "fences", "env_access", "registry_auth", "git_auth", "git_github", "github_events", "trace_ingest", "runtime_config", "oidc_access", "variable_makers", "visit_tickets", "visit_sessions", "variable_files", "error_groups", "variables", "links", "domains", "preview_hosts", "runs", "jobs", "metrics", "usage", "form_submissions", "deploy_scans"] {
+            for t in ["environments", "deployments", "deploy_keys", "fences", "env_access", "registry_auth", "git_auth", "git_github", "github_events", "trace_ingest", "runtime_config", "oidc_access", "variable_makers", "variable_runtime_only", "visit_tickets", "visit_sessions", "variable_files", "error_groups", "variables", "links", "domains", "preview_hosts", "runs", "jobs", "metrics", "usage", "form_submissions", "deploy_scans"] {
                 c.execute(&format!("DELETE FROM {t} WHERE service = ?"), [id])?;
             }
             match c.execute("DELETE FROM services WHERE id = ?", [id])? {
@@ -1136,7 +1217,7 @@ impl Store {
                     None => None,
                 };
                 c.execute(
-                    &format!("INSERT INTO environments ({ENV_COLS}) VALUES (?, ?, ?, ?, NULL, ?, ?, ?, 0, '{{}}', NULL, 0, NULL, 0, NULL, NULL, NULL, NULL, NULL, NULL, 0, NULL, NULL, 0, NULL, NULL, 0, NULL, 1, NULL, NULL, NULL, NULL, NULL, NULL, NULL)"),
+                    &format!("INSERT INTO environments ({ENV_COLS}) VALUES (?, ?, ?, ?, NULL, ?, ?, ?, 0, '{{}}', NULL, 0, NULL, 0, NULL, NULL, NULL, NULL, NULL, NULL, 0, NULL, NULL, 0, NULL, NULL, 0, NULL, 1, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, 0, NULL)"),
                     params![service, env, branch.flatten(), ephemeral.unwrap_or(false) as i64, slug, port, now],
                 )?;
             }
@@ -1153,7 +1234,7 @@ impl Store {
             if n == 0 {
                 return Err(Error::NotFound(format!("service {service} has no environment {env}")));
             }
-            for t in ["variables", "variable_files", "error_groups", "domains", "preview_hosts", "runs", "jobs", "metrics", "deploy_keys", "env_access", "trace_ingest", "runtime_config", "oidc_access", "variable_makers", "visit_tickets", "visit_sessions", "form_submissions"] {
+            for t in ["variables", "variable_files", "error_groups", "domains", "preview_hosts", "runs", "jobs", "metrics", "deploy_keys", "env_access", "trace_ingest", "runtime_config", "oidc_access", "variable_makers", "variable_runtime_only", "visit_tickets", "visit_sessions", "form_submissions"] {
                 c.execute(&format!("DELETE FROM {t} WHERE service = ? AND env = ?"), [service, env])?;
             }
             // Its schedules', challenge's and base images' state goes with it.
@@ -1496,6 +1577,10 @@ impl Store {
             )?;
             if d.no_traffic {
                 c.execute("INSERT INTO deploy_no_traffic (deployment) VALUES (?)", [&id])?;
+            }
+            // A promotion or a rollback runs its source's image: and its tree's edge settings.
+            if let Some(of) = &d.rollback_of {
+                c.execute("INSERT INTO deploy_edge (deployment, file) SELECT ?, file FROM deploy_edge WHERE deployment = ? ON CONFLICT (deployment) DO NOTHING", params![id, of])?;
             }
             if d.no_cache {
                 c.execute("INSERT INTO deploy_no_cache (deployment) VALUES (?)", [&id])?;
@@ -2487,6 +2572,19 @@ impl Store {
     }
 
     /// Kept as a file at `path`, or (none) in the environment again.
+    /// The names only instances get (never a build's steps).
+    pub fn runtime_only(&self, service: &str, env: &str) -> Result<BTreeSet<String>> {
+        Ok(self.db.query("SELECT name FROM variable_runtime_only WHERE service = ? AND env = ?", params![service, env], |r| r.get(0))?.into_iter().collect())
+    }
+
+    pub fn set_runtime_only(&self, service: &str, env: &str, name: &str, on: bool) -> Result<()> {
+        match on {
+            true => self.db.execute("INSERT INTO variable_runtime_only (service, env, name) VALUES (?, ?, ?) ON CONFLICT DO NOTHING", params![service, env, name])?,
+            false => self.db.execute("DELETE FROM variable_runtime_only WHERE service = ? AND env = ? AND name = ?", params![service, env, name])?,
+        };
+        Ok(())
+    }
+
     pub fn set_variable_file(&self, service: &str, env: &str, name: &str, path: Option<&str>) -> Result<()> {
         match path {
             Some(p) => self.db.execute(
@@ -2560,6 +2658,104 @@ impl Store {
         self.db.execute("INSERT INTO oidc_access (service, env, sealed, hash) VALUES (?, ?, ?, ?) ON CONFLICT (service, env) DO NOTHING", params![service, env, sealed, hash])?;
         let kept: String = self.db.query_row("SELECT sealed FROM oidc_access WHERE service = ? AND env = ?", params![service, env], |r| r.get(0))?;
         self.sealer.open(&format!("oidc:{service}:{env}"), &kept)
+    }
+
+    /// A build cache's token (`build_cache::scope`), made the first time it's asked for.
+    pub fn build_cache_token(&self, project: &str, ns: &str) -> Result<String> {
+        let token = roll_auth::credentials::new_secret("rlr_");
+        let what = format!("build-cache:{project}:{ns}");
+        let (sealed, hash) = (self.sealer.seal(&what, &token), crate::public::token_hash(&token));
+        self.db.execute("INSERT INTO build_cache_tokens (project, ns, sealed, hash) VALUES (?, ?, ?, ?) ON CONFLICT (project, ns) DO NOTHING", params![project, ns, sealed, hash])?;
+        let kept: String = self.db.query_row("SELECT sealed FROM build_cache_tokens WHERE project = ? AND ns = ?", params![project, ns], |r| r.get(0))?;
+        self.sealer.open(&what, &kept)
+    }
+
+    /// The project and cache a token (by its hash) is.
+    pub fn build_cache_owner(&self, hash: &str) -> Result<Option<(String, String)>> {
+        Ok(self.db.query_row("SELECT project, ns FROM build_cache_tokens WHERE hash = ?", [hash], |r| Ok((r.get(0)?, r.get(1)?))).optional()?)
+    }
+
+    /// A leaked build cache token (by its hash) dropped, and everything its cache holds (what
+    /// it wrote could be anyone's): the next build gets a new one and an empty cache. Whose it
+    /// was, and the objects to delete.
+    pub fn drop_build_cache_token(&self, hash: &str) -> Result<Option<DroppedCache>> {
+        self.db.write(|c| {
+            let Some((p, ns)) = c.query_row("SELECT project, ns FROM build_cache_tokens WHERE hash = ?", [hash], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))).optional()? else { return Ok(None) };
+            let objects: Vec<String> = c.query("SELECT object FROM build_cache_artifacts WHERE project = ? AND ns = ?", params![p, ns], |r| r.get(0))?;
+            c.execute("DELETE FROM build_cache_artifacts WHERE project = ? AND ns = ?", params![p, ns])?;
+            c.execute("DELETE FROM build_cache_tokens WHERE project = ? AND ns = ?", params![p, ns])?;
+            Ok(Some(((p, ns), objects)))
+        })
+    }
+
+    /// A project environment's caches (every source's), with it: the objects to delete.
+    pub fn drop_build_caches(&self, project: &str, env: &str) -> Result<Vec<String>> {
+        let like = format!("{env}.%");
+        self.db.write(|c| {
+            let objects: Vec<String> = c.query("SELECT object FROM build_cache_artifacts WHERE project = ? AND ns LIKE ?", params![project, like], |r| r.get(0))?;
+            c.execute("DELETE FROM build_cache_artifacts WHERE project = ? AND ns LIKE ?", params![project, like])?;
+            c.execute("DELETE FROM build_cache_tokens WHERE project = ? AND ns LIKE ?", params![project, like])?;
+            Ok(objects)
+        })
+    }
+
+    /// An artifact and the object that holds it.
+    pub fn artifact(&self, project: &str, ns: &str, hash: &str) -> Result<Option<(crate::build_cache::Artifact, String)>> {
+        Ok(self
+            .db
+            .query_row("SELECT bytes, duration_ms, tag, used_at, object FROM build_cache_artifacts WHERE project = ? AND ns = ? AND hash = ?", params![project, ns, hash], |r| {
+                Ok((crate::build_cache::Artifact { bytes: r.get(0)?, duration_ms: r.get(1)?, tag: r.get(2)?, used_at: r.get(3)? }, r.get(4)?))
+            })
+            .optional()?)
+    }
+
+    /// An uploaded artifact (in `object`) put in: in place of one there (`replace`, Turborepo's
+    /// way) or only if there's none (Nx's). Then the cache's least recently used past `cap`
+    /// bytes go. The objects no row names any more, or `None` when it wasn't put in (there was
+    /// one, and `object` is the caller's to delete).
+    #[allow(clippy::too_many_arguments)]
+    pub fn put_artifact(&self, project: &str, ns: &str, hash: &str, object: &str, a: &crate::build_cache::Artifact, replace: bool, cap: i64) -> Result<Option<Vec<String>>> {
+        self.db.write(|c| {
+            let old: Option<String> = c.query_row("SELECT object FROM build_cache_artifacts WHERE project = ? AND ns = ? AND hash = ?", params![project, ns, hash], |r| r.get(0)).optional()?;
+            if old.is_some() && !replace {
+                return Ok(None);
+            }
+            c.execute(
+                "INSERT INTO build_cache_artifacts (project, ns, hash, object, bytes, duration_ms, tag, used_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?) \
+                 ON CONFLICT (project, ns, hash) DO UPDATE SET object = excluded.object, bytes = excluded.bytes, duration_ms = excluded.duration_ms, tag = excluded.tag, used_at = excluded.used_at",
+                params![project, ns, hash, object, a.bytes, a.duration_ms, a.tag, a.used_at],
+            )?;
+            let mut gone: Vec<String> = old.into_iter().collect();
+            let rows: Vec<(String, String, i64)> = c.query("SELECT hash, object, bytes FROM build_cache_artifacts WHERE project = ? AND ns = ? ORDER BY used_at DESC, hash", params![project, ns], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?;
+            let mut held = 0i64;
+            for (h, o, bytes) in rows {
+                held += bytes;
+                if held > cap && h != hash {
+                    c.execute("DELETE FROM build_cache_artifacts WHERE project = ? AND ns = ? AND hash = ?", params![project, ns, h])?;
+                    gone.push(o);
+                }
+            }
+            Ok(Some(gone))
+        })
+    }
+
+    /// What each cache holds now: `(project, ns, bytes)`.
+    pub fn cache_bytes(&self) -> Result<Vec<(String, String, i64)>> {
+        Ok(self.db.query("SELECT project, ns, SUM(bytes) FROM build_cache_artifacts GROUP BY project, ns", (), |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?)
+    }
+
+    pub fn touch_artifact(&self, project: &str, ns: &str, hash: &str, now: i64) -> Result<()> {
+        self.db.execute("UPDATE build_cache_artifacts SET used_at = ? WHERE project = ? AND ns = ? AND hash = ?", params![now, project, ns, hash])?;
+        Ok(())
+    }
+
+    /// Artifacts unused since `before` gone in one write: the objects to delete.
+    pub fn expire_artifacts(&self, before: i64) -> Result<Vec<String>> {
+        self.db.write(|c| {
+            let objects: Vec<String> = c.query("SELECT object FROM build_cache_artifacts WHERE used_at < ?", [before], |r| r.get(0))?;
+            c.execute("DELETE FROM build_cache_artifacts WHERE used_at < ?", [before])?;
+            Ok(objects)
+        })
     }
 
     /// The environment whose OIDC address a token is, by its hash; its row gone (the address
@@ -2811,6 +3007,11 @@ impl Store {
         })?)
     }
 
+    /// The ids of an environment's jobs started in `[from, before)` (their logs' retention).
+    pub fn jobs_started(&self, service: &str, env: &str, from: i64, before: i64) -> Result<Vec<String>> {
+        Ok(self.db.query("SELECT id FROM jobs WHERE service = ? AND env = ? AND started_at >= ? AND started_at < ?", params![service, env, from, before], |r| r.get(0))?)
+    }
+
     pub fn jobs(&self, service: &str, env: &str, limit: usize) -> Result<Vec<Job>> {
         Ok(self.db.query(&format!("SELECT {JOB_COLS} FROM jobs WHERE service = ? AND env = ? ORDER BY started_at DESC, id DESC LIMIT ?"), params![service, env, limit as i64], job_row)?)
     }
@@ -2923,17 +3124,36 @@ impl Store {
         Ok(())
     }
 
+    /// An hour of what roll stores for an environment (`what`: `logs`, `cache`), `gb` for that
+    /// hour, metered once: the hour it was metered for is marked in the same write, so a restart
+    /// or another node taking the service over never counts it twice. Whether it was metered now.
+    pub fn meter_stored(&self, service: &str, env: &str, what: &str, hour: i64, gb: f64) -> Result<bool> {
+        let key = format!("stored-{what}:{service}/{env}");
+        self.db.write(|c| {
+            let last: Option<i64> = c.query_row("SELECT value FROM state WHERE key = ?", [&key], |r| r.get::<_, String>(0)).optional()?.and_then(|v| v.parse().ok());
+            if last.is_some_and(|l| l >= hour) {
+                return Ok(false);
+            }
+            let n = c.execute("UPDATE usage SET stored_gb_hours = stored_gb_hours + ? WHERE service = ? AND env = ? AND hour = ?", params![gb, service, env, hour])?;
+            if n == 0 {
+                c.execute("INSERT INTO usage (service, env, hour, cpu_seconds, gb_seconds, requests, egress_bytes, build_seconds, stored_gb_hours) VALUES (?, ?, ?, 0, 0, 0, 0, 0, ?)", params![service, env, hour, gb])?;
+            }
+            c.execute("INSERT INTO state (key, value) VALUES (?, ?) ON CONFLICT (key) DO UPDATE SET value = excluded.value", params![key, hour.to_string()])?;
+            Ok(true)
+        })
+    }
+
     /// Add to an hour's usage.
     pub fn add_usage(&self, service: &str, env: &str, hour: i64, u: &UsageAdd) -> Result<()> {
         self.db.write(|c| {
             let n = c.execute(
-                "UPDATE usage SET cpu_seconds = cpu_seconds + ?, gb_seconds = gb_seconds + ?, requests = requests + ?, egress_bytes = egress_bytes + ?, build_seconds = build_seconds + ? WHERE service = ? AND env = ? AND hour = ?",
-                params![u.cpu_seconds, u.gb_seconds, u.requests, u.egress_bytes, u.build_seconds, service, env, hour],
+                "UPDATE usage SET cpu_seconds = cpu_seconds + ?, gb_seconds = gb_seconds + ?, requests = requests + ?, egress_bytes = egress_bytes + ?, build_seconds = build_seconds + ?, stored_gb_hours = stored_gb_hours + ? WHERE service = ? AND env = ? AND hour = ?",
+                params![u.cpu_seconds, u.gb_seconds, u.requests, u.egress_bytes, u.build_seconds, u.stored_gb_hours, service, env, hour],
             )?;
             if n == 0 {
                 c.execute(
-                    "INSERT INTO usage (service, env, hour, cpu_seconds, gb_seconds, requests, egress_bytes, build_seconds) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-                    params![service, env, hour, u.cpu_seconds, u.gb_seconds, u.requests, u.egress_bytes, u.build_seconds],
+                    "INSERT INTO usage (service, env, hour, cpu_seconds, gb_seconds, requests, egress_bytes, build_seconds, stored_gb_hours) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    params![service, env, hour, u.cpu_seconds, u.gb_seconds, u.requests, u.egress_bytes, u.build_seconds, u.stored_gb_hours],
                 )?;
             }
             Ok(())
@@ -2943,16 +3163,16 @@ impl Store {
     /// Usage per hour since `since_hour`: `(hour, usage)`.
     pub fn usage(&self, service: &str, env: Option<&str>, since_hour: i64) -> Result<Vec<(i64, UsageAdd)>> {
         let map = |r: &code_sql::Row<'_>| {
-            Ok((r.get(0)?, UsageAdd { cpu_seconds: r.get(1)?, gb_seconds: r.get(2)?, requests: r.get(3)?, egress_bytes: r.get(4)?, build_seconds: r.get(5)? }))
+            Ok((r.get(0)?, UsageAdd { cpu_seconds: r.get(1)?, gb_seconds: r.get(2)?, requests: r.get(3)?, egress_bytes: r.get(4)?, build_seconds: r.get(5)?, stored_gb_hours: r.get(6)? }))
         };
         Ok(match env {
             Some(e) => self.db.query(
-                "SELECT hour, cpu_seconds, gb_seconds, requests, egress_bytes, build_seconds FROM usage WHERE service = ? AND env = ? AND hour >= ? ORDER BY hour",
+                "SELECT hour, cpu_seconds, gb_seconds, requests, egress_bytes, build_seconds, stored_gb_hours FROM usage WHERE service = ? AND env = ? AND hour >= ? ORDER BY hour",
                 params![service, e, since_hour],
                 map,
             )?,
             None => self.db.query(
-                "SELECT hour, SUM(cpu_seconds), SUM(gb_seconds), SUM(requests), SUM(egress_bytes), SUM(build_seconds) FROM usage WHERE service = ? AND hour >= ? GROUP BY hour ORDER BY hour",
+                "SELECT hour, SUM(cpu_seconds), SUM(gb_seconds), SUM(requests), SUM(egress_bytes), SUM(build_seconds), SUM(stored_gb_hours) FROM usage WHERE service = ? AND hour >= ? GROUP BY hour ORDER BY hour",
                 params![service, since_hour],
                 map,
             )?,
@@ -2977,9 +3197,10 @@ impl Store {
         Ok(())
     }
 
-    pub fn set_egress(&self, service: &str, env: &str, egress: &crate::model::Egress) -> Result<()> {
+    /// Its egress, and who set it (the person a closed environment's placeholders are made by).
+    pub fn set_egress(&self, service: &str, env: &str, egress: &crate::model::Egress, by: Option<&str>) -> Result<()> {
         let j = egress.closed().then(|| serde_json::to_string(egress).expect("JSON"));
-        self.db.execute("UPDATE environments SET egress = ? WHERE service = ? AND name = ?", params![j, service, env])?;
+        self.db.execute("UPDATE environments SET egress = ?, egress_by = ? WHERE service = ? AND name = ?", params![j, by, service, env])?;
         Ok(())
     }
 
@@ -3102,6 +3323,60 @@ impl Store {
 
     pub fn set_maintenance(&self, service: &str, env: &str, message: Option<&str>) -> Result<()> {
         self.db.execute("UPDATE environments SET maintenance = ? WHERE service = ? AND name = ?", params![message, service, env])?;
+        Ok(())
+    }
+
+    pub fn set_badge(&self, service: &str, env: &str, on: bool) -> Result<()> {
+        self.db.execute("UPDATE environments SET badge = ? WHERE service = ? AND name = ?", params![on as i64, service, env])?;
+        Ok(())
+    }
+
+    pub fn set_approvals(&self, service: &str, env: &str, n: u32) -> Result<()> {
+        self.db.execute("UPDATE environments SET approvals = ? WHERE service = ? AND name = ?", params![(n > 0).then_some(n as i64), service, env])?;
+        Ok(())
+    }
+
+    /// `who` approves `deployment` (again: nothing new), in one write: everyone who has, oldest
+    /// first, and whether this approval is the one that made `needed` (those other than `author`).
+    pub fn approve(&self, deployment: &str, who: &str, author: Option<&str>, at: i64, needed: u32) -> Result<(Vec<String>, bool)> {
+        self.db.write(|c| {
+            let fresh = c.execute("INSERT INTO deploy_approvals (deployment, approver, at) VALUES (?, ?, ?) ON CONFLICT DO NOTHING", params![deployment, who, at])? > 0;
+            let all: Vec<String> = c.query("SELECT approver FROM deploy_approvals WHERE deployment = ? ORDER BY at, approver", [deployment], |r| r.get(0))?;
+            let counted = all.iter().filter(|a| Some(a.as_str()) != author).count() as u32;
+            Ok((all, fresh && counted == needed))
+        })
+    }
+
+    /// A build's edge settings from its tree (none: what an earlier build of it said goes).
+    pub fn set_deploy_edge(&self, deployment: &str, file: Option<&crate::model::EdgeFile>) -> Result<()> {
+        match file {
+            Some(f) => self.db.execute("INSERT INTO deploy_edge (deployment, file) VALUES (?, ?) ON CONFLICT (deployment) DO UPDATE SET file = excluded.file", params![deployment, to_json(f)])?,
+            None => self.db.execute("DELETE FROM deploy_edge WHERE deployment = ?", [deployment])?,
+        };
+        Ok(())
+    }
+
+    /// The edge settings of what's live in an environment, if its tree had any.
+    pub fn active_edge(&self, service: &str, env: &str) -> Result<Option<crate::model::EdgeFile>> {
+        let f: Option<String> = self.db.query_row("SELECT d.file FROM deploy_edge d JOIN environments e ON e.active = d.deployment WHERE e.service = ? AND e.name = ?", [service, env], |r| r.get(0)).optional()?;
+        Ok(f.and_then(|f| serde_json::from_str(&f).ok()))
+    }
+
+    pub fn set_deploy_person(&self, deployment: &str, person: &str) -> Result<()> {
+        self.db.execute("INSERT INTO deploy_people (deployment, person) VALUES (?, ?) ON CONFLICT (deployment) DO UPDATE SET person = excluded.person", params![deployment, person])?;
+        Ok(())
+    }
+
+    pub fn deploy_person(&self, deployment: &str) -> Result<Option<String>> {
+        Ok(self.db.query_row("SELECT person FROM deploy_people WHERE deployment = ?", [deployment], |r| r.get(0)).optional()?)
+    }
+
+    pub fn approvals_of(&self, deployment: &str) -> Result<Vec<String>> {
+        Ok(self.db.query("SELECT approver FROM deploy_approvals WHERE deployment = ? ORDER BY at, approver", [deployment], |r| r.get(0))?)
+    }
+
+    pub fn set_log_retention(&self, service: &str, env: &str, days: Option<u32>) -> Result<()> {
+        self.db.execute("UPDATE environments SET log_retention_days = ? WHERE service = ? AND name = ?", params![days.map(|d| d as i64), service, env])?;
         Ok(())
     }
 
@@ -3229,15 +3504,27 @@ impl Store {
     // ── log drains ──
 
     pub fn add_drain(&self, project: &str, host: &str, url: &str, secret: &str, format: &str, d: &DrainSettings) -> Result<LogDrain> {
+        self.add_drain_linked(project, host, url, secret, format, d, None)
+    }
+
+    /// A drain, and (a bucket drain's) the minted key to revoke when it goes, in one write.
+    #[allow(clippy::too_many_arguments)]
+    pub fn add_drain_linked(&self, project: &str, host: &str, url: &str, secret: &str, format: &str, d: &DrainSettings, link: Option<(&str, &str, &str)>) -> Result<LogDrain> {
         let id = new_id("lgd");
         let now = self.now()?;
         let (u, s) = (self.sealer.seal(&format!("drain:{id}:url"), url), self.sealer.seal(&format!("drain:{id}:secret"), secret));
         let h = self.seal_drain_headers(&id, &d.headers);
         let names = to_json(&d.headers.iter().map(|(n, _)| n.as_str()).collect::<Vec<_>>());
-        self.db.execute(
-            "INSERT INTO log_drains (id, project, host, url_sealed, secret_sealed, created_at, sources, environments, services, previews, headers_sealed, header_names, format) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            params![id, project, host, u, s, now, to_json(&d.sources), to_json(&d.environments), to_json(&d.services), d.previews, h, names, format],
-        )?;
+        self.db.write(|c| {
+            c.execute(
+                "INSERT INTO log_drains (id, project, host, url_sealed, secret_sealed, created_at, sources, environments, services, previews, headers_sealed, header_names, format) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                params![id, project, host, u, s, now, to_json(&d.sources), to_json(&d.environments), to_json(&d.services), d.previews, h, names, format],
+            )?;
+            if let Some((kind, r, kept)) = link {
+                c.execute("INSERT INTO drain_links (drain, kind, ref, kept) VALUES (?, ?, ?, ?)", params![id, kind, r, kept])?;
+            }
+            Ok::<(), Error>(())
+        })?;
         Ok(self.drains(project)?.into_iter().find(|x| x.id == id).expect("just made"))
     }
 
@@ -3327,11 +3614,16 @@ impl Store {
             .collect())
     }
 
-    pub fn delete_drain(&self, project: &str, id: &str) -> Result<()> {
-        match self.db.execute("DELETE FROM log_drains WHERE id = ? AND project = ?", [id, project])? {
-            0 => Err(Error::NotFound(format!("no log drain {id}"))),
-            _ => Ok(()),
-        }
+    /// A drain gone, with (a bucket drain's) the minted key to revoke, in one write.
+    pub fn delete_drain(&self, project: &str, id: &str) -> Result<Option<(String, String, String)>> {
+        self.db.write(|c| {
+            if c.execute("DELETE FROM log_drains WHERE id = ? AND project = ?", [id, project])? == 0 {
+                return Err(Error::NotFound(format!("no log drain {id}")));
+            }
+            let link: Option<(String, String, String)> = c.query_row("SELECT kind, ref, kept FROM drain_links WHERE drain = ?", [id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?))).optional()?;
+            c.execute("DELETE FROM drain_links WHERE drain = ?", [id])?;
+            Ok(link)
+        })
     }
 
     // ── spend limits ──
@@ -3386,31 +3678,32 @@ impl Store {
     /// used ([`Store::project_usage`]'s second half).
     pub fn project_usage_rows(&self, project: &str, from_hour: i64, to_hour: i64) -> Result<(Vec<ServiceUsage>, UsageAdd)> {
         let rows = self.db.query(
-            "SELECT u.service, s.name, u.env, COALESCE(e.ephemeral, 0), SUM(u.cpu_seconds), SUM(u.gb_seconds), SUM(u.requests), SUM(u.egress_bytes), SUM(u.build_seconds) \
+            // An environment that's gone (a closed preview, nearly always) counts with the previews.
+            "SELECT u.service, s.name, u.env, COALESCE(e.ephemeral, 1), SUM(u.cpu_seconds), SUM(u.gb_seconds), SUM(u.requests), SUM(u.egress_bytes), SUM(u.build_seconds), SUM(u.stored_gb_hours) \
              FROM usage u JOIN services s ON s.id = u.service LEFT JOIN environments e ON e.service = u.service AND e.name = u.env \
-             WHERE s.project = ? AND u.hour >= ? AND u.hour < ? GROUP BY u.service, s.name, u.env, COALESCE(e.ephemeral, 0) ORDER BY s.name, u.env",
+             WHERE s.project = ? AND u.hour >= ? AND u.hour < ? GROUP BY u.service, s.name, u.env, COALESCE(e.ephemeral, 1) ORDER BY s.name, u.env",
             params![project, from_hour, to_hour],
-            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get::<_, i64>(3)? != 0, UsageAdd { cpu_seconds: r.get(4)?, gb_seconds: r.get(5)?, requests: r.get(6)?, egress_bytes: r.get(7)?, build_seconds: r.get(8)? })),
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get::<_, i64>(3)? != 0, UsageAdd { cpu_seconds: r.get(4)?, gb_seconds: r.get(5)?, requests: r.get(6)?, egress_bytes: r.get(7)?, build_seconds: r.get(8)?, stored_gb_hours: r.get(9)? })),
         )?;
         let gone = self.db.query_row(
-            "SELECT COALESCE(SUM(cpu_seconds), 0), COALESCE(SUM(gb_seconds), 0), COALESCE(SUM(requests), 0), COALESCE(SUM(egress_bytes), 0), COALESCE(SUM(build_seconds), 0) \
+            "SELECT COALESCE(SUM(cpu_seconds), 0), COALESCE(SUM(gb_seconds), 0), COALESCE(SUM(requests), 0), COALESCE(SUM(egress_bytes), 0), COALESCE(SUM(build_seconds), 0), COALESCE(SUM(stored_gb_hours), 0) \
              FROM project_usage WHERE project = ? AND hour >= ? AND hour < ?",
             params![project, from_hour, to_hour],
-            |r| Ok(UsageAdd { cpu_seconds: r.get(0)?, gb_seconds: r.get(1)?, requests: r.get(2)?, egress_bytes: r.get(3)?, build_seconds: r.get(4)? }),
+            |r| Ok(UsageAdd { cpu_seconds: r.get(0)?, gb_seconds: r.get(1)?, requests: r.get(2)?, egress_bytes: r.get(3)?, build_seconds: r.get(4)?, stored_gb_hours: r.get(5)? }),
         )?;
         Ok((rows, gone))
     }
 
     pub fn project_usage(&self, project: &str, since_hour: i64) -> Result<UsageAdd> {
-        let row = |r: &code_sql::Row<'_>| Ok(UsageAdd { cpu_seconds: r.get(0)?, gb_seconds: r.get(1)?, requests: r.get(2)?, egress_bytes: r.get(3)?, build_seconds: r.get(4)? });
+        let row = |r: &code_sql::Row<'_>| Ok(UsageAdd { cpu_seconds: r.get(0)?, gb_seconds: r.get(1)?, requests: r.get(2)?, egress_bytes: r.get(3)?, build_seconds: r.get(4)?, stored_gb_hours: r.get(5)? });
         let live = self.db.query_row(
-            "SELECT COALESCE(SUM(u.cpu_seconds), 0), COALESCE(SUM(u.gb_seconds), 0), COALESCE(SUM(u.requests), 0), COALESCE(SUM(u.egress_bytes), 0), COALESCE(SUM(u.build_seconds), 0) \
+            "SELECT COALESCE(SUM(u.cpu_seconds), 0), COALESCE(SUM(u.gb_seconds), 0), COALESCE(SUM(u.requests), 0), COALESCE(SUM(u.egress_bytes), 0), COALESCE(SUM(u.build_seconds), 0), COALESCE(SUM(u.stored_gb_hours), 0) \
              FROM usage u JOIN services s ON s.id = u.service WHERE s.project = ? AND u.hour >= ?",
             params![project, since_hour],
             row,
         )?;
         let gone = self.db.query_row(
-            "SELECT COALESCE(SUM(cpu_seconds), 0), COALESCE(SUM(gb_seconds), 0), COALESCE(SUM(requests), 0), COALESCE(SUM(egress_bytes), 0), COALESCE(SUM(build_seconds), 0) \
+            "SELECT COALESCE(SUM(cpu_seconds), 0), COALESCE(SUM(gb_seconds), 0), COALESCE(SUM(requests), 0), COALESCE(SUM(egress_bytes), 0), COALESCE(SUM(build_seconds), 0), COALESCE(SUM(stored_gb_hours), 0) \
              FROM project_usage WHERE project = ? AND hour >= ?",
             params![project, since_hour],
             row,
@@ -3421,6 +3714,7 @@ impl Store {
             requests: live.requests + gone.requests,
             egress_bytes: live.egress_bytes + gone.egress_bytes,
             build_seconds: live.build_seconds + gone.build_seconds,
+            stored_gb_hours: live.stored_gb_hours + gone.stored_gb_hours,
         })
     }
 

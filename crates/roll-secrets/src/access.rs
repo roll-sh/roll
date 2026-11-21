@@ -4,7 +4,8 @@
 //! Inside the product, the checks that the gate can't make from the request alone (a second
 //! environment, a path inside a batch, each finding of a filtered answer) go through [`Grants`]:
 //! the operator (everything), a roll-access grant (`rlt_…`/`rlo_…`, [`GrantGrants`]; a person's
-//! own as them, [`Within`]) or a signed-in person ([`OwnProjects`]).
+//! own within their session, [`Within`]) or a signed-in person, whose session is the grant of their
+//! memberships' roles (docs/members.md), decided the same way.
 
 use serde::{Deserialize, Serialize};
 
@@ -85,8 +86,8 @@ pub trait Grants: Send + Sync + std::fmt::Debug {
         let _ = (project, repo);
         false
     }
-    /// Whether the caller may know `project` exists: a person's own projects only, so anyone
-    /// else's answers 404, as the workspace does.
+    /// Whether the caller may know `project` exists: a person's projects only (those they're a
+    /// member of), so anyone else's answers 404, as the workspace does.
     fn sees(&self, project: &str) -> bool {
         let _ = project;
         true
@@ -103,38 +104,46 @@ pub trait Grants: Send + Sync + std::fmt::Debug {
     }
 }
 
-/// A signed-in person who isn't an admin (docs/accounts.md): everything on the projects they own,
-/// nothing on anyone else's. Looked up per request (`Secrets::caller`), never kept.
-#[derive(Debug)]
-pub struct OwnProjects {
-    pub projects: std::collections::BTreeSet<String>,
-    /// Their roll code owner's name: the repositories under it are theirs (`owner/…`).
-    pub code_owner: Option<String>,
+/// Whether `repo` (`owner/name`) is under a person's own roll code owner.
+pub fn owns_repo(code_owner: Option<&str>, repo: &str) -> bool {
+    code_owner.is_some_and(|o| repo.split_once('/').is_some_and(|(owner, _)| owner == o))
 }
 
-impl OwnProjects {
-    /// Whether `repo` (`owner/name`) is under the person's own roll code owner.
-    pub fn owns_repo(code_owner: Option<&str>, repo: &str) -> bool {
-        code_owner.is_some_and(|o| repo.split_once('/').is_some_and(|(owner, _)| owner == o))
-    }
+/// Which of a project's environments are protected, as roll secrets has them now: what a rule
+/// limited to unprotected environments (`roll_auth::scope::Rule::unprotected`, a developer's
+/// default) reaches. Asked once per environment for one request's checks, never kept past it.
+#[derive(Clone, Default)]
+pub struct Protected {
+    lookup: Option<Lookup>,
+    seen: std::sync::Arc<std::sync::Mutex<Seen>>,
 }
 
-impl Grants for OwnProjects {
-    fn allows(&self, _: Action, at: &Scope<'_>) -> bool {
-        self.projects.contains(at.project)
+/// Whether `(project, env)` is protected (`None`: not known).
+type Lookup = std::sync::Arc<dyn Fn(&str, &str) -> Option<bool> + Send + Sync>;
+/// What one request asked already, by `(project, env)`.
+type Seen = std::collections::HashMap<(String, String), Option<bool>>;
+
+impl Protected {
+    pub fn of(f: impl Fn(&str, &str) -> Option<bool> + Send + Sync + 'static) -> Protected {
+        Protected { lookup: Some(std::sync::Arc::new(f)), seen: Default::default() }
     }
-    fn project(&self) -> Option<&str> {
-        let mut it = self.projects.iter();
-        match (it.next(), it.next()) {
-            (Some(p), None) => Some(p),
-            _ => None,
+
+    /// Whether `project`'s environment `env` is protected (`None`: not known).
+    pub fn get(&self, project: &str, env: &str) -> Option<bool> {
+        let f = self.lookup.as_ref()?;
+        let key = (project.to_string(), env.to_string());
+        if let Some(v) = self.seen.lock().expect("protected").get(&key) {
+            return *v;
         }
+        let v = f(project, env);
+        self.seen.lock().expect("protected").insert(key, v);
+        v
     }
-    fn reads_code(&self, project: &str, repo: &str) -> bool {
-        self.projects.contains(project) && OwnProjects::owns_repo(self.code_owner.as_deref(), repo)
-    }
-    fn sees(&self, project: &str) -> bool {
-        self.projects.contains(project)
+}
+
+impl std::fmt::Debug for Protected {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Protected")
     }
 }
 
@@ -157,10 +166,10 @@ pub fn is_person(principal: &str) -> bool {
     principal.starts_with("usr_")
 }
 
-/// A person's own grant, acting as them: what its rules allow, and only on the person's own
-/// projects (a person's token never reaches further than their session does).
+/// A person's own token, acting as them: what its rules allow, and only what their session's grant
+/// (their memberships now) allows too: a person's token never reaches further than their session.
 #[derive(Debug)]
-pub struct Within(pub GrantGrants, pub OwnProjects);
+pub struct Within(pub GrantGrants, pub GrantGrants);
 
 impl Grants for Within {
     fn allows(&self, action: Action, at: &Scope<'_>) -> bool {
@@ -174,6 +183,9 @@ impl Grants for Within {
     }
     fn sees(&self, project: &str) -> bool {
         self.1.sees(project)
+    }
+    fn reaches_key(&self, action: Action, project: &str, name: &str) -> bool {
+        self.0.reaches_key(action, project, name) && self.1.reaches_key(action, project, name)
     }
 }
 
@@ -243,6 +255,7 @@ pub fn rule(project: &str, environments: Option<Vec<String>>, paths: Option<Vec<
         resources: scope::Resources::Some(vec![scope::Selector::Project { project: project.into() }]),
         environments,
         paths,
+        unprotected: false,
         actions: actions.iter().map(|a| (action(*a), scope::Effect::Allow)).collect(),
     }
 }
@@ -264,15 +277,7 @@ fn scope_action(action: Action) -> roll_auth::scope::Action {
 /// data, not evaluated: anything it can't prove confined reaches further. An incident's cut-off
 /// leaves those to the operator, so one project's admin can't cut off another's.
 pub fn confined_to(g: &roll_auth::Grant, project: &str) -> bool {
-    use roll_auth::scope::{Resources, Selector};
-    !g.ask_otherwise
-        && g.scope.0.iter().all(|r| match &r.resources {
-            Resources::All => false,
-            Resources::Some(sel) => sel.iter().all(|s| match s {
-                Selector::Project { project: p } => p == project,
-                Selector::Id { id, .. } => r.product == "secrets" && id == project,
-            }),
-        })
+    roll_auth::roles::confined_to(&g.scope, g.ask_otherwise, project)
 }
 
 /// Short-lived roll-access tokens for workload identities' logins (rolld: `Access::mint_workload`).
@@ -331,10 +336,11 @@ pub struct Minted {
 }
 
 
-/// A roll-access grant (`rlt_…` tokens and OAuth connections, docs/permissions.md): rolld's gate
-/// classified the request already; this answers the second resources the product checks itself.
+/// A roll-access grant (`rlt_…` tokens, OAuth connections, a person's session; docs/permissions.md):
+/// rolld's gate classified the request already; this answers the second resources the product
+/// checks itself. `1` says which environments are protected, for rules that leave those out.
 #[derive(Debug)]
-pub struct GrantGrants(pub roll_auth::Grant);
+pub struct GrantGrants(pub roll_auth::Grant, pub Protected);
 
 impl Grants for GrantGrants {
     fn allows(&self, action: Action, at: &Scope<'_>) -> bool {
@@ -348,7 +354,8 @@ impl Grants for GrantGrants {
         // The resource as rolld's gate saw it: the project is also its id, so a rule naming it by
         // id (`{id: "prj_…"}`, as the builder and Tighten write it) reaches it as one naming the
         // project does.
-        let r = scope::Resource { product: "secrets".into(), id: Some(at.project.into()), project: Some(at.project.into()), environment: at.env.map(Into::into), path: at.path.map(Into::into), filters_itself: filtered, ..Default::default() };
+        let protected = at.env.and_then(|e| self.1.get(at.project, e));
+        let r = scope::Resource { product: "secrets".into(), id: Some(at.project.into()), project: Some(at.project.into()), environment: at.env.map(Into::into), protected, path: at.path.map(Into::into), filters_itself: filtered, ..Default::default() };
         // `ask` pauses a whole request at the gate; inside the product it's a no.
         self.0.allows(&r, action) == scope::Outcome::Allow
     }
@@ -365,6 +372,11 @@ impl Grants for GrantGrants {
         use roll_auth::scope;
         let r = scope::Resource { product: "code".into(), id: Some(repo.into()), project: Some(project.into()), ..Default::default() };
         self.0.allows(&r, scope::Action::Read) == scope::Outcome::Allow
+    }
+
+    /// A person's session knows only the projects they're a member of: anyone else's is a 404.
+    fn sees(&self, project: &str) -> bool {
+        self.0.kind != roll_auth::GrantKind::Session || roll_auth::roles::names_project(&self.0.scope, project)
     }
 
     /// The one project its secrets rules name, if they name exactly one.
@@ -399,9 +411,10 @@ pub struct Caller {
     /// The person's approval that let this request through roll-access's gate (an `ask` approved,
     /// or a rule an approval remembered for a while), for the audit log.
     pub approval: Option<Approval>,
-    /// The person behind an admin's session, which acts as the operator: what's recorded as the
-    /// maker of something that acts later (a sync, an identity, a product's reference), so it
-    /// stops when they're demoted or can't sign in. `None`: the principal is the maker.
+    /// The person behind an admin's session (which acts as the operator) or behind a person's own
+    /// token: what's recorded as the maker of something that acts later (a sync, an identity, a
+    /// product's reference, a registration), so it follows them, not the token, and stops when
+    /// they're demoted or can't sign in. `None`: the principal is the maker.
     pub maker: Option<String>,
     /// Who it is may read past an incident's freeze, where it has Admin ([`Caller::reads_frozen`]):
     /// the operator, a signed-in person, a roll-access token. Private, so only their constructors
@@ -426,7 +439,7 @@ pub const PREVIEWS: &str = "roll:previews";
 
 impl Caller {
     pub fn operator() -> Caller {
-        Caller { principal: "operator".into(), grants: std::sync::Arc::new(Everything), ip: None, runtime: false, approval: None, maker: None, frozen: true, session: true }
+        Caller { principal: "operator".into(), grants: std::sync::Arc::new(Everything), ip: None, runtime: false, approval: None, frozen: true, maker: None, session: true }
     }
 
     /// An admin's session: the operator, with the person (`usr_…`) as the maker of what it makes.
@@ -438,26 +451,33 @@ impl Caller {
     /// handing out the call may do, named for the audit log. Never past a freeze: the services,
     /// checks and previews reading a leaked folder are what a freeze stops.
     pub fn consumer(name: &str) -> Caller {
-        Caller { principal: name.into(), grants: std::sync::Arc::new(Everything), ip: None, runtime: true, approval: None, maker: None, frozen: false, session: false }
+        Caller { principal: name.into(), grants: std::sync::Arc::new(Everything), ip: None, runtime: true, approval: None, frozen: false, maker: None, session: false }
     }
 
     /// A signed-in person (`usr_…`), with what they may do.
     pub(crate) fn person(user: &str, grants: std::sync::Arc<dyn Grants>) -> Caller {
-        Caller { principal: user.into(), grants, ip: None, runtime: false, approval: None, maker: None, frozen: true, session: true }
+        Caller { principal: user.into(), grants, ip: None, runtime: false, approval: None, frozen: true, maker: None, session: true }
     }
 
     /// A roll-access token (`token:<id>`), with what its rules allow here.
     pub(crate) fn token(id: &str, grants: std::sync::Arc<dyn Grants>) -> Caller {
-        Caller { principal: format!("token:{id}"), grants, ip: None, runtime: false, approval: None, maker: None, frozen: true, session: false }
+        Caller { principal: format!("token:{id}"), grants, ip: None, runtime: false, approval: None, frozen: true, maker: None, session: false }
     }
 
     /// Something roll runs on someone's behalf that isn't a person or their token (a sync, a
     /// workload identity's login, a share link): not a runtime, never past a freeze.
     pub(crate) fn acting(principal: String, grants: std::sync::Arc<dyn Grants>) -> Caller {
-        Caller { principal, grants, ip: None, runtime: false, approval: None, maker: None, frozen: false, session: false }
+        Caller { principal, grants, ip: None, runtime: false, approval: None, frozen: false, maker: None, session: false }
     }
 
     /// This caller's access, acting as `principal` ([`Caller::acting`]): a sync runs as its maker.
+    /// This caller with `user` behind it (a person's own token): they're the maker of what it
+    /// registers ([`Caller::made_by`]).
+    pub(crate) fn of_person(mut self, user: Option<&str>) -> Caller {
+        self.maker = user.map(str::to_string);
+        self
+    }
+
     pub(crate) fn acting_as(self, principal: String) -> Caller {
         Caller { principal, frozen: false, session: false, ..self }
     }
@@ -467,7 +487,9 @@ impl Caller {
     /// operator. Never a token, admin or not (`rlt_`, `rlo_`, a workload identity's login), an
     /// in-process consumer, a sync or anything acting for someone: a prompt-injected agent or a
     /// leaked admin token that could tell the decoys would skip them. Planting one needs it too, or
-    /// a token could plant one and learn the mark by elimination.
+    /// a token could plant one and learn the mark by elimination. A member's session sees them only
+    /// where their role manages the project (docs/members.md): a developer or a viewer gets the
+    /// answers a normal key's would, as a token does.
     pub fn sees_decoys(&self) -> bool {
         self.session
     }
@@ -499,7 +521,7 @@ impl Caller {
     /// otherwise do: an untrusted one ([`Secrets::untrusted`](crate::Secrets::untrusted)), which
     /// never reads past a freeze.
     pub fn without(&self, except: Vec<String>) -> Caller {
-        Caller { principal: self.principal.clone(), grants: std::sync::Arc::new(Narrowed(self.grants.clone(), Except(except))), ip: self.ip.clone(), runtime: self.runtime, approval: self.approval.clone(), maker: self.maker.clone(), frozen: false, session: false }
+        Caller { principal: self.principal.clone(), grants: std::sync::Arc::new(Narrowed(self.grants.clone(), Except(except))), ip: self.ip.clone(), runtime: self.runtime, approval: self.approval.clone(), frozen: false, maker: self.maker.clone(), session: false }
     }
 
     pub fn allows(&self, action: Action, at: &Scope<'_>) -> bool {
@@ -531,7 +553,7 @@ impl Caller {
     }
 
     /// Who to record as the maker of something that acts later as them: the person behind an
-    /// admin's session, else the principal.
+    /// admin's session or a person's own token, else the principal.
     pub fn made_by(&self) -> &str {
         self.maker.as_deref().unwrap_or(&self.principal)
     }

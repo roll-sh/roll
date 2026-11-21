@@ -76,6 +76,9 @@ pub enum Output {
 pub struct Results {
     pub output: Output,
     pub shard_failures: Vec<Value>,
+    /// A search the query ran timed out (the node's cap on one request): what it found is
+    /// partial.
+    pub timed_out: bool,
 }
 
 // --- schema ----------------------------------------------------------------------------------
@@ -1334,6 +1337,8 @@ struct Ctx<'a> {
     pit: Option<String>,
     /// The failed shards of every search so far, once per shard.
     failures: Vec<Value>,
+    /// A search timed out ([`Results::timed_out`]).
+    timed_out: bool,
 }
 
 /// One event as the matching algorithms see it.
@@ -1477,6 +1482,7 @@ impl Ctx<'_> {
     /// Keeps a search response's shard failures (searches only answer with them when partial
     /// results are allowed).
     fn note_failures(&mut self, r: &Value) {
+        self.timed_out |= r.get("timed_out").and_then(Value::as_bool) == Some(true);
         let same = |a: &Value, b: &Value| a.get("index") == b.get("index") && a.get("shard") == b.get("shard");
         for f in r.pointer(&["_shards", "failures"]).and_then(Value::as_array).into_iter().flatten() {
             if !self.failures.iter().any(|x| same(x, f)) {
@@ -1869,7 +1875,7 @@ pub async fn run(cluster: &Cluster, src: &str, stmt: &Statement, s: &Settings) -
     };
     v.finish()?;
     let ts_type = schema.fields.get(&s.timestamp_field).map_or(FType::Date, |f| f.ty);
-    let mut ctx = Ctx { cluster, s, schema, ts_type, pit: None, failures: Vec::new() };
+    let mut ctx = Ctx { cluster, s, schema, ts_type, pit: None, failures: Vec::new(), timed_out: false };
     ctx.open_pit().await?;
     let lim = combine_limits(s.size, s.tail, &stmt.pipes);
     let result = match &plan {
@@ -1878,7 +1884,7 @@ pub async fn run(cluster: &Cluster, src: &str, stmt: &Statement, s: &Settings) -
         Plan::Sample(stages) => samples(&mut ctx, stages).await,
     };
     ctx.close_pit().await;
-    Ok(Results { output: result?, shard_failures: ctx.failures })
+    Ok(Results { output: result?, shard_failures: ctx.failures, timed_out: ctx.timed_out })
 }
 
 async fn events(ctx: &mut Ctx<'_>, st: &Stage, lim: Limit) -> EsResult<Output> {
@@ -2006,9 +2012,10 @@ async fn sequences(ctx: &mut Ctx<'_>, stages: &[Stage], until: Option<&Stage>, m
             missing_groups[i] = Some(group(&pool, base..pool.len()));
         }
     }
-    // Sequences over the shards that answered could be wrong (a failed shard may hold the
-    // events that complete or break them), so they're only returned when asked for.
-    if !ctx.failures.is_empty() && !ctx.s.allow_partial_sequence_results {
+    // Sequences over the shards that answered could be wrong (a failed shard, or a search the
+    // node's cap cut short, may hold the events that complete or break them), so they're only
+    // returned when asked for.
+    if (!ctx.failures.is_empty() || ctx.timed_out) && !ctx.s.allow_partial_sequence_results {
         return Ok(Output::Sequences(Vec::new()));
     }
     let positive: Vec<usize> = (0..n).filter(|i| !stages[*i].missing).collect();

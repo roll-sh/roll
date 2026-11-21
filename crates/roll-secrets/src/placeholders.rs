@@ -355,6 +355,23 @@ impl Secrets {
         Ok(b.and_then(|b| serde_json::from_str(&b).ok()))
     }
 
+    /// Whether whoever bound `secret_id` to hosts may still manage its folder, asked now as
+    /// everything a person made is: a demoted or removed member's binding swaps nothing more. It
+    /// still counts as a binding everywhere else (a read gets a placeholder, never the value), so
+    /// it fails closed until an admin binds the key again or clears it.
+    fn binder_reaches(&self, secret_id: &str) -> Result<bool> {
+        let row: Option<(String, String, String, String)> = self.db.read(|c| {
+            c.query_row(
+                "SELECT h.set_by, h.project_id, e.slug, s.path FROM key_hosts h JOIN secrets s ON s.id = h.secret_id JOIN environments e ON e.id = s.env_id WHERE h.secret_id = ?",
+                [secret_id],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+            )
+            .optional()
+        })?;
+        let Some((by, project, slug, path)) = row else { return Ok(false) };
+        self.registration_reaches(&by, &[(Action::Admin, Scope::at(&project, &slug, &path))])
+    }
+
     /// Bind shared key `key` of `slug`'s own folder `path` to `hosts`: an admin's, audited.
     pub fn set_hosts(&self, project: &str, slug: &str, path: &str, key: &str, hosts: Hosts, caller: &Caller) -> Result<Hosts> {
         let path = names::path(path)?;
@@ -380,7 +397,7 @@ impl Secrets {
             }
             c.execute(
                 "INSERT INTO key_hosts (secret_id, project_id, binding, set_by, set_at) VALUES (?, ?, ?, ?, ?) ON CONFLICT (secret_id) DO UPDATE SET binding = excluded.binding, set_by = excluded.set_by, set_at = excluded.set_at",
-                params![id, project, json(&hosts), caller.principal, now],
+                params![id, project, json(&hosts), caller.made_by().to_string(), now],
             )?;
             holders(c, &id)
         })?;
@@ -481,7 +498,7 @@ impl Secrets {
         if maker.starts_with("identity:") {
             return Err(Refusal::NotAllowed("a workload identity's login doesn't take placeholders".into()));
         }
-        if !self.maker_reaches(maker, project).map_err(failed)? {
+        if !self.maker_reaches(maker, &[(Action::Reveal, Scope::at(project, slug, path))]).map_err(failed)? {
             return Err(gone());
         }
         let c = match self.principal_caller(maker) {
@@ -549,6 +566,9 @@ impl Secrets {
         }
         let e = self.entry_for(project, &slug, path, key, &reader)?;
         let hosts = self.binding(&e.row.id).map_err(failed)?.ok_or_else(|| Refusal::Unusable(format!("{key} isn't bound to hosts any more")))?;
+        if !self.binder_reaches(&e.row.id).map_err(failed)? {
+            return Err(Refusal::MakerUnreachable(format!("whoever bound {key} to its hosts can no longer manage {slug}:{path} or can no longer sign in")));
+        }
         if !hosts.allows(host) {
             self.note_use(&row, &slug, host, true, now);
             return Err(Refusal::WrongHost(shown(host)));
@@ -789,15 +809,18 @@ fn holders(c: &code_sql::Conn<'_>, id: &str) -> Result<Vec<String>> {
 impl crate::intercept::BoundHosts for Secrets {
     fn bound_hosts(&self, consumer: &str) -> Result<std::collections::BTreeMap<String, std::collections::BTreeSet<String>>> {
         let now = self.db.now_ms()?;
-        let rows: Vec<(String, String)> = self.db.read(|c| {
+        let rows: Vec<(String, String, String)> = self.db.read(|c| {
             c.query(
-                "SELECT DISTINCT p.project_id, h.binding FROM placeholders p JOIN key_hosts h ON h.secret_id = p.secret_id WHERE p.consumer = ? AND p.revoked_at IS NULL AND p.expires_at > ?",
+                "SELECT DISTINCT p.project_id, h.secret_id, h.binding FROM placeholders p JOIN key_hosts h ON h.secret_id = p.secret_id WHERE p.consumer = ? AND p.revoked_at IS NULL AND p.expires_at > ?",
                 params![consumer, now],
-                |r| Ok((r.get(0)?, r.get(1)?)),
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
             )
         })?;
         let mut out: std::collections::BTreeMap<String, std::collections::BTreeSet<String>> = Default::default();
-        for (project, binding) in rows {
+        for (project, secret, binding) in rows {
+            if !self.binder_reaches(&secret)? {
+                continue;
+            }
             let b: Hosts = serde_json::from_str(&binding).map_err(|e| Error::Internal(format!("a key's hosts: {e}")))?;
             out.entry(project).or_default().extend(b.hosts);
         }

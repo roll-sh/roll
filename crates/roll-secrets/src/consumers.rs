@@ -305,7 +305,9 @@ impl Secrets {
         if r.env != env {
             return Err(Refusal::NotAllowed(format!("{by} chose this for {env}'s runtime, not {}'s", r.env)));
         }
-        if !self.maker_reaches(by, &project)? {
+        // While its maker may still reveal what it reads, as they are now (a member removed or
+        // demoted, or no longer an admin, stops it at once).
+        if !self.maker_reaches(by, &[(crate::access::Action::Reveal, crate::access::Scope::at(&project, &r.env, &r.path))])? {
             return Err(gone());
         }
         Ok((project, r, Caller::consumer(&format!("{} (runtime read for {by})", resource.consumer()))))

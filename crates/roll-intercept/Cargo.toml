@@ -1,0 +1,25 @@
+[package]
+name = "roll-intercept"
+description = "The TLS-intercepting egress step for roll secrets' placeholders (terminate, filter, re-dial), shared by roll previews and roll apps"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+bytes.workspace = true
+futures.workspace = true
+http-body-util.workspace = true
+hyper.workspace = true
+hyper-util.workspace = true
+parking_lot.workspace = true
+roll-net.workspace = true
+rustls-native-certs.workspace = true
+rustls-pemfile.workspace = true
+tokio.workspace = true
+tokio-rustls.workspace = true
+
+[dev-dependencies]
+rcgen.workspace = true
+tempfile.workspace = true
