@@ -394,6 +394,10 @@ pub struct Build {
     /// the commits their gitlinks pin, from public URLs; off, they're left out.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub submodules: Option<bool>,
+    /// A Git URL service's Git LFS objects fetched in place of their pointers (Vercel's,
+    /// Netlify's), from the repository's LFS server; off, the pointers are built as they are.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub lfs: Option<bool>,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]

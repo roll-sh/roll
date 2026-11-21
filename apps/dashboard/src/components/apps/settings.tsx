@@ -41,6 +41,7 @@ interface Form {
   buildTimeout: string;
   buildSize: string;
   submodules: boolean;
+  lfs: boolean;
   type: Run["type"];
   port: string;
   start: string;
@@ -149,6 +150,7 @@ export function formOf(s: Service): Form {
     buildTimeout: s.build.timeout_s ? String(Math.round(s.build.timeout_s / 60)) : "",
     buildSize: s.build.size ?? "small",
     submodules: !!s.build.submodules,
+    lfs: !!s.build.lfs,
     type: s.run.type,
     port: str(s.run.port),
     start: str(s.run.start),
@@ -257,6 +259,7 @@ export function patchOf(s: Service, f: Form): ServicePatch {
   }
   if (f.buildSize !== before.buildSize) build.size = f.buildSize === "small" ? null : (f.buildSize as "medium" | "large");
   if (f.submodules !== before.submodules) build.submodules = f.submodules ? true : null;
+  if (f.lfs !== before.lfs) build.lfs = f.lfs ? true : null;
   if (Object.keys(build).length) patch.build = build;
   const run: Reset<Run> = {};
   if (f.type !== before.type) run.type = f.type;
@@ -527,6 +530,14 @@ export function SettingsTab({
                   <select value={form.submodules ? "on" : "off"} onChange={(e) => set("submodules", e.target.value === "on")} className={`${input} w-full`}>
                     <option value="off">Left out</option>
                     <option value="on">Fetched into the build</option>
+                  </select>
+                </Field>
+              )}
+              {form.sourceKind === "git" && (
+                <Field label="Git LFS" hint="objects fetched in place of their pointers, checked against them">
+                  <select value={form.lfs ? "on" : "off"} onChange={(e) => set("lfs", e.target.value === "on")} className={`${input} w-full`}>
+                    <option value="off">Pointers as they are</option>
+                    <option value="on">Objects fetched</option>
                   </select>
                 </Field>
               )}

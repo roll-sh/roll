@@ -1,11 +1,11 @@
 //! Control logic: projects, branches, endpoints, wake-on-connect and suspend.
 
-use crate::compute::{DockerDriver, RunSpec, clone_dir, has_cluster};
+use crate::compute::{DockerDriver, RunSpec, clone_dir, container_name, has_cluster};
 use crate::config::Config;
 use crate::history::Target;
 use crate::ids::{new_id, new_password, now};
-use crate::store::{Branch, Endpoint, EndpointState, LocalState, Project, READ_ONLY, READ_WRITE, Store};
-use pg_proxy::decoy::Decoy;
+use crate::store::{Branch, ComputeAnswers, Endpoint, EndpointState, LocalState, Project, READ_ONLY, READ_WRITE, Store};
+use pg_proxy::decoy::{Answers, Decoy};
 use pg_proxy::{RouteError, Router};
 use pg_storage::Objects;
 use std::collections::{HashMap, HashSet};
@@ -47,6 +47,18 @@ pub struct Control {
     starts: Mutex<HashMap<String, Duration>>,
     /// Who hears of a decoy role's logins.
     decoy_listeners: Mutex<Vec<Arc<DecoyListener>>>,
+    /// What each compute image answers before a password (decoy roles), by image reference.
+    known: Mutex<HashMap<String, Known>>,
+    /// Held while an image's answers are learned, by image reference.
+    learning: Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
+    /// This process's name in claims on learning an image.
+    holder: String,
+}
+
+/// A compute image's answers as learned from `image_id`: `None` when the decoy can't match them.
+struct Known {
+    image_id: String,
+    answers: Option<Arc<Answers>>,
 }
 
 type DecoyListener = dyn Fn(&DecoyLogin) + Send + Sync;
@@ -70,6 +82,9 @@ pub struct DecoyRole {
     /// The project's root branch's primary, where the role was made.
     pub endpoint_id: String,
 }
+
+/// How long a claim on learning an image lasts (a throwaway compute's start and the probes).
+const CLAIM_S: i64 = 600;
 
 /// A compute's start when none was measured on this node yet (a decoy's refusal waits as long).
 const START_DEFAULT: Duration = Duration::from_millis(1500);
@@ -97,7 +112,7 @@ impl Control {
         let store = Store::open(&config.home.join("state.db"))?;
         let driver = DockerDriver::new(&config.home).await?;
         let objects = Objects::new(&config.storage)?;
-        Ok(Arc::new(Self {
+        let control = Arc::new(Self {
             config,
             store,
             driver,
@@ -108,7 +123,17 @@ impl Control {
             backups: Mutex::default(),
             starts: Mutex::default(),
             decoy_listeners: Mutex::default(),
-        }))
+            known: Mutex::default(),
+            learning: Mutex::default(),
+            holder: new_id("node"),
+        });
+        // No decoy's login should wait for its image's answers: learn them now, in the background.
+        if control.config.learn_answers_at_start {
+            for v in SUPPORTED_VERSIONS {
+                tokio::spawn(control.clone().learn_ahead(control.config.image(v), v));
+            }
+        }
+        Ok(control)
     }
 
     pub(crate) fn lock(&self, endpoint_id: &str) -> Arc<tokio::sync::Mutex<()>> {
@@ -281,6 +306,7 @@ impl Control {
                 if ordinary {
                     self.starts.lock().unwrap().insert(endpoint_id.to_string(), started.elapsed());
                 }
+                tokio::spawn(self.clone().check_answers(endpoint_id.to_string(), self.config.image(project.pg_version), project.pg_version, port));
                 info!(endpoint = endpoint_id, ms = started.elapsed().as_millis() as u64, "compute started");
                 Ok(SocketAddr::from((Ipv4Addr::LOCALHOST, port)))
             }
@@ -646,9 +672,10 @@ impl Control {
     /// refuses its logins on every endpoint of the project, as Postgres refuses a wrong password,
     /// without waking a compute, and tells [`Control::on_decoy_login`]'s listeners. It's also
     /// made `NOLOGIN` (with no password) on the root branch, for any way in around the proxy.
-    /// The name is the caller's, so it looks like the roles it makes; one that exists is refused.
+    /// The name is the caller's, so it looks like the roles it makes; one that exists is refused,
+    /// and so is any on an image whose answers the decoy can't match.
     pub async fn create_decoy_role(self: &Arc<Self>, project_id: &str, role: &str) -> Result<DecoyRole> {
-        self.project_or_404(project_id)?;
+        let pg_version = self.project_or_404(project_id)?.pg_version;
         if !decoy_name_ok(role) {
             return Err(ControlError::Invalid("a decoy role's name is 1-62 of [a-z0-9_], not starting with a digit or pg_".into()));
         }
@@ -656,6 +683,11 @@ impl Control {
             return Err(ControlError::Conflict(format!("{role} is a decoy already")));
         }
         let ep = self.root_endpoint(project_id)?;
+        // Its compute is up for the role anyway: what its image answers is known before any login.
+        let port = self.ensure_running(&ep.id).await?.port();
+        if self.answers(&self.config.image(pg_version), pg_version, Some((&ep.id, port))).await.is_none() {
+            return Err(ControlError::Invalid("roll can't answer a decoy role's logins as this database's Postgres image does, so one here could be told from a missing role".into()));
+        }
         // First in Postgres: this fails for a role that exists, which must never become a decoy.
         self.query(&ep.id, &format!("CREATE ROLE {role} NOLOGIN"), SqlAs::Owner).await?;
         let mut salt = [0u8; 16];
@@ -694,6 +726,144 @@ impl Control {
         for f in listeners {
             f(login);
         }
+    }
+
+    // ── what computes answer before a password (decoy roles) ──
+
+    /// What `image` answers before a password is checked, learned first when it isn't known:
+    /// from the endpoint's compute when it's up (`running`: its id and host port), else from a
+    /// compute started for that alone (a decoy's login never wakes an endpoint). `None`: the
+    /// decoy can't answer as it does (or it couldn't be asked).
+    async fn answers(&self, image: &str, pg_version: u32, running: Option<(&str, u16)>) -> Option<Arc<Answers>> {
+        if let Some(answers) = self.cached(image) {
+            return answers;
+        }
+        let _held = self.learning_lock(image).lock_owned().await;
+        if let Some(answers) = self.cached(image) {
+            return answers;
+        }
+        let learned = match running {
+            Some((endpoint, port)) => match self.driver.image_id(&container_name(endpoint)).await {
+                Ok(id) => self.learn_at(image, &id, pg_version, port).await,
+                Err(e) => Err(e),
+            },
+            None => self.learn_alone(image, pg_version).await,
+        };
+        learned.unwrap_or_else(|e| {
+            warn!(image, error = %e, "learning what a compute image answers failed");
+            None
+        })
+    }
+
+    /// `image`'s answers if they're learned (from this process's copy, else the catalog's).
+    fn cached(&self, image: &str) -> Option<Option<Arc<Answers>>> {
+        if let Some(k) = self.known.lock().unwrap().get(image) {
+            return Some(k.answers.clone());
+        }
+        let row = self.store.compute_answers_of(image).ok()??;
+        let answers = match row.answers.map(|j| serde_json::from_str::<Answers>(&j)) {
+            Some(Ok(answers)) if answers.complete() => Some(Arc::new(answers)),
+            // A row this version can't read is learned again.
+            Some(_) => {
+                let _ = self.store.delete_compute_answers_of(image);
+                return None;
+            }
+            None => None,
+        };
+        self.known.lock().unwrap().insert(image.into(), Known { image_id: row.image_id, answers: answers.clone() });
+        Some(answers)
+    }
+
+    fn learning_lock(&self, image: &str) -> Arc<tokio::sync::Mutex<()>> {
+        self.learning.lock().unwrap().entry(image.to_string()).or_default().clone()
+    }
+
+    /// Learn `image` from a compute of its own unless it's learned already, retrying with a
+    /// backoff: at start, so a decoy's login never waits for it. One node at a time claims it in
+    /// the catalog; another's claim means waiting for its result.
+    async fn learn_ahead(self: Arc<Self>, image: String, pg_version: u32) {
+        let mut wait = Duration::from_secs(5);
+        loop {
+            {
+                let _held = self.learning_lock(&image).lock_owned().await;
+                if self.cached(&image).is_some() {
+                    return;
+                }
+                match self.store.claim_compute_answers(&image, &self.holder, CLAIM_S) {
+                    Ok(true) => {
+                        let started = std::time::Instant::now();
+                        let learned = self.learn_alone(&image, pg_version).await;
+                        let _ = self.store.release_compute_answers_claim(&image, &self.holder);
+                        match learned {
+                            Ok(_) => return info!(image, ms = started.elapsed().as_millis() as u64, "learned a compute image ahead of any login"),
+                            Err(e) => warn!(image, error = %e, retry_s = wait.as_secs(), "learning what a compute image answers failed"),
+                        }
+                    }
+                    Ok(false) => {}
+                    Err(e) => warn!(image, error = %e, "claiming a compute image to learn failed"),
+                }
+            }
+            tokio::time::sleep(wait).await;
+            wait = (wait * 2).min(Duration::from_secs(600));
+        }
+    }
+
+    /// Forget every image's answers: each is learned again when it's next needed (as after an
+    /// upgrade that moves the pinned images).
+    pub fn forget_compute_answers(&self) -> anyhow::Result<()> {
+        self.store.delete_compute_answers()?;
+        self.known.lock().unwrap().clear();
+        Ok(())
+    }
+
+    /// After `endpoint`'s compute started on `image`: learn what it answers, unless that's known
+    /// for the image it runs (a reference by digest can't move; a tag can).
+    async fn check_answers(self: Arc<Self>, endpoint: String, image: String, pg_version: u32, port: u16) {
+        if image.contains("@sha256:") && self.cached(&image).is_some() {
+            return;
+        }
+        let _held = self.learning_lock(&image).lock_owned().await;
+        let learned = async {
+            let id = self.driver.image_id(&container_name(&endpoint)).await?;
+            if self.cached(&image).is_some() && self.known.lock().unwrap().get(&image).is_some_and(|k| k.image_id == id) {
+                return Ok(None);
+            }
+            self.learn_at(&image, &id, pg_version, port).await
+        };
+        if let Err(e) = learned.await {
+            warn!(endpoint, image, error = %e, "learning what a compute image answers failed");
+        }
+    }
+
+    /// Ask the compute at `port` (running `image`, whose id is `image_id`) and keep its answers.
+    async fn learn_at(&self, image: &str, image_id: &str, pg_version: u32, port: u16) -> anyhow::Result<Option<Arc<Answers>>> {
+        let answers = pg_proxy::decoy::learn::learn(SocketAddr::from((Ipv4Addr::LOCALHOST, port))).await?;
+        let json = answers.as_ref().map(serde_json::to_string).transpose()?;
+        self.store.put_compute_answers(&ComputeAnswers { image: image.into(), image_id: image_id.into(), answers: json }, pg_version)?;
+        match answers {
+            Some(_) => info!(image, "learned what a compute image answers before a password"),
+            None => warn!(image, "a decoy can't answer as this compute image does: decoy roles' logins on it go to Postgres"),
+        }
+        let answers = answers.map(Arc::new);
+        self.known.lock().unwrap().insert(image.into(), Known { image_id: image_id.into(), answers: answers.clone() });
+        Ok(answers)
+    }
+
+    /// Learn `image`'s answers from a compute of an empty cluster, started for that alone.
+    async fn learn_alone(&self, image: &str, pg_version: u32) -> anyhow::Result<Option<Arc<Answers>>> {
+        let id = new_id("learn");
+        let dir = self.config.home.join("learn").join(&id);
+        let password = new_password();
+        let spec = RunSpec { endpoint_id: &id, image: image.into(), pg_version, data_dir: &dir, password: &password, cpus: 0.5, mem_mb: 256, shared_buffers_mb: 32, cache_mb: 64 };
+        let learned = async {
+            let port = self.driver.run(&spec, READY_TIMEOUT).await?;
+            let image_id = self.driver.image_id(&container_name(&id)).await?;
+            self.learn_at(image, &image_id, pg_version, port).await
+        }
+        .await;
+        let _ = self.driver.remove(&id).await;
+        let _ = std::fs::remove_dir_all(&dir);
+        learned
     }
 
     /// The primary endpoint of the project's root branch.
@@ -871,7 +1041,7 @@ impl Router for ProxyRouter {
         }
     }
 
-    fn decoy(&self, endpoint: &str, user: &str, peer: Option<SocketAddr>) -> Option<Decoy> {
+    async fn decoy(&self, endpoint: &str, user: &str, peer: Option<SocketAddr>) -> Option<Decoy> {
         let found = match self.0.store.decoy_at(endpoint, user) {
             Ok(found) => found?,
             Err(e) => {
@@ -882,8 +1052,14 @@ impl Router for ProxyRouter {
         };
         let at = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_millis() as i64);
         self.0.tell_decoy_login(&DecoyLogin { project_id: found.project_id, endpoint_id: endpoint.to_string(), role: user.to_string(), peer: peer.map(|p| p.ip()), at });
-        let start = if found.running { Duration::ZERO } else { self.0.starts.lock().unwrap().get(endpoint).copied().unwrap_or(START_DEFAULT) };
-        Some(Decoy { salt: found.salt, pg_version: found.pg_version, start })
+        let asked = std::time::Instant::now();
+        let answers = self.0.answers(&self.0.config.image(found.pg_version), found.pg_version, found.running.map(|port| (endpoint, port))).await;
+        let start = match found.running {
+            Some(_) => Duration::ZERO,
+            None => self.0.starts.lock().unwrap().get(endpoint).copied().unwrap_or(START_DEFAULT),
+        };
+        // Learning them (once per image) counts toward the wait.
+        Some(Decoy { salt: found.salt, start: start.saturating_sub(asked.elapsed()), answers })
     }
 
     fn connection_opened(&self, endpoint: &str) {

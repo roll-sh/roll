@@ -315,6 +315,7 @@ dependencies = [
  "roll-auth",
  "roll-cluster",
  "roll-fetch",
+ "roll-intercept",
  "roll-workspace",
  "rustls-native-certs",
  "s3-image",
@@ -5919,6 +5920,7 @@ dependencies = [
  "anyhow",
  "bytes",
  "getrandom 0.4.3",
+ "serde",
  "tokio",
  "tracing",
 ]
