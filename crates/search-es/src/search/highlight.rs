@@ -485,6 +485,7 @@ fn runtime_highlight(
     }
     let mut terms = Terms { name: &rt.name, any_field: !o.require_field_match, out: Vec::new() };
     q.visit(&mut terms);
+    qctx.no_scripts()?;
     let ev = super::runtime::Evaluator::new(&qctx.cluster.scripts, qctx.st, qctx.table, qctx.shard as i32, &qctx.idx.name, rt.clone())?.counted();
     let values: Vec<String> =
         super::index_time::fetch_values(&ev, seg, local)?.into_iter().filter_map(|v| if let super::runtime::RtValue::Str(s) = v { Some(s) } else { None }).collect();
@@ -531,6 +532,7 @@ impl search_index::search::Query for Matchers {
 fn index_time_values(qctx: &QueryCtx, name: &str, searcher: &search_index::Searcher, doc: Option<u32>) -> EsResult<Option<Vec<String>>> {
     let scripts = super::index_time::of(&qctx.idx.mapping);
     let (Some(f), Some((seg, local))) = (scripts.get(name), doc.and_then(|d| searcher.segment_of(d))) else { return Ok(None) };
+    qctx.no_scripts()?;
     let ev = super::runtime::Evaluator::new(&qctx.cluster.scripts, qctx.st, qctx.table, qctx.shard as i32, &qctx.idx.name, f.clone())?.counted();
     let vals = super::index_time::fetch_values(&ev, seg, local)?;
     Ok(Some(vals.into_iter().filter_map(|v| if let super::runtime::RtValue::Str(s) = v { Some(s) } else { None }).collect()))

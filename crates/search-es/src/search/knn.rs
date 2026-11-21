@@ -260,14 +260,12 @@ pub fn dfs(ctx: &crate::cluster::Cluster, st: &crate::meta::ClusterState, now: i
             };
             let started = std::time::Instant::now();
             let table = t.table();
-            let qctx = QueryCtx::new(ctx, st, &t.idx, &table, &searcher, now, t.reader());
+            let mut qctx = QueryCtx::new(ctx, st, &t.idx, &table, &searcher, now, t.reader());
             // The boost applies once, to the score-doc queries below; an alias filter is one
-            // more pre-filter of the vector search (`filtersInitial`).
+            // more pre-filter of the vector search (`filtersInitial`), the owner's.
             let mut kq = k.clone();
             kq.common.boost = 1.0;
-            if let Some(af) = &t.alias_filter {
-                kq.filter.push(af.clone());
-            }
+            qctx.alias_filter = t.alias_filter.clone();
             let base = qctx.to_query(&crate::query::Query::from(kq)).map_err(|e| super::query::shard_exception(&t.idx, e))?;
             // The knn query rewrites to its top docs (a score-doc query).
             let mut c = search_index::collector::top_docs::TopScoreCollector::new(k.k.unwrap_or(10).max(1) as usize, u64::MAX);
