@@ -23,6 +23,18 @@ pub enum Tri {
     Out,
 }
 
+/// The bytes of a string of 8 bytes or fewer in a word, the first lowest.
+#[inline]
+fn word8(x: &[u8]) -> u64 {
+    x.iter().enumerate().fold(0, |w, (i, &c)| w | (c as u64) << (8 * i))
+}
+
+/// `VB::StrIn`'s items as lengths and words, when none is longer than 8 bytes (NULL items
+/// left out: they match nothing).
+fn short_items(items: &[Option<Box<[u8]>>]) -> Option<Box<[(usize, u64)]>> {
+    items.iter().flatten().map(|i| (i.len() <= 8).then(|| (i.len(), word8(i)))).collect()
+}
+
 /// `substring(x FROM start FOR count)` of a string column (`K::Substr`; `trim`: of a bpchar
 /// column cast to text, its trailing spaces gone first).
 #[derive(Clone, Copy)]
@@ -104,7 +116,9 @@ pub enum VB {
     /// `col = ANY (array)` / `col <> ALL (array)` of strings; `sub`: of `substring(col FROM
     /// start FOR count)`'s (a bpchar column's cast to text first: without trailing spaces),
     /// TPC-H q22's country codes.
-    StrIn { col: usize, items: Vec<Option<Box<[u8]>>>, bp: bool, neg: bool, sub: Option<Sub> },
+    /// `short`: every item 8 bytes or shorter, each as its length and its bytes in a word
+    /// (`word8`): a row's string compared with them without a `memcmp` call each.
+    StrIn { col: usize, items: Vec<Option<Box<[u8]>>>, short: Option<Box<[(usize, u64)]>>, bp: bool, neg: bool, sub: Option<Sub> },
     /// `col [NOT] LIKE 'pattern'` of a text column (`K::Like`).
     Like { col: usize, pat: Box<crate::sql::func::string::LikePattern>, neg: bool },
     /// `col = ANY (array)` / `col <> ALL (array)` of exact numbers (None: a NULL item).
@@ -513,7 +527,7 @@ impl VB {
                     let K::Const(v) = item else { return None };
                     items.push(text_const(v, b)?);
                 }
-                VB::StrIn { col, items, bp: bp?, neg: *neg, sub: None }
+                VB::StrIn { col, short: short_items(&items), items, bp: bp?, neg: *neg, sub: None }
             }
             K::IntIn(x, vals, null, neg) => {
                 let K::Col(col) = **x else { return None };
@@ -563,8 +577,8 @@ impl VB {
                     _ => return None,
                 };
                 if text_col(types, *col) {
-                    let items = a.items.iter().map(|v| text_const(v, bp)).collect::<Option<_>>()?;
-                    VB::StrIn { col: *col, items, bp, neg, sub }
+                    let items: Vec<_> = a.items.iter().map(|v| text_const(v, bp)).collect::<Option<_>>()?;
+                    VB::StrIn { col: *col, short: short_items(&items), items, bp, neg, sub }
                 } else if sub.is_none() && !bp && matches!(types.get(*col), Some(DataType::Int2 | DataType::Int4 | DataType::Int8 | DataType::Numeric(_))) {
                     let num = |v: &Value| if v.is_null() { Some(None) } else { super::kernel::small_num(v).map(Some) };
                     VB::NumIn { col: *col, items: a.items.iter().map(num).collect::<Option<_>>()?, neg }
@@ -673,16 +687,23 @@ impl VB {
                     };
                 }
             }
-            VB::StrIn { col, items, bp, neg, sub } => {
+            VB::StrIn { col, items, short, bp, neg, sub } => {
                 let Some(c) = col_at(b, *col) else { return fill(sel, out, Tri::Out) };
                 let saw_null = items.iter().any(Option::is_none);
                 let (hit, miss) = if *neg { (Tri::F, Tri::T) } else { (Tri::T, Tri::F) };
+                let found = |x: &[u8]| match short {
+                    Some(ws) => x.len() <= 8 && {
+                        let w = word8(x);
+                        ws.iter().any(|&(n, iw)| n == x.len() && iw == w)
+                    },
+                    None => items.iter().flatten().any(|i| **i == *x),
+                };
                 for &r in sel {
                     let r = r as usize;
                     let x = text_at(c, b, r, *bp).map(|x| sub.map_or(x, |s| s.of(x)));
                     out[r] = match (c.nulls[r], x) {
                         (true, _) => Tri::N,
-                        (false, Some(x)) if items.iter().flatten().any(|i| **i == *x) => hit,
+                        (false, Some(x)) if found(x) => hit,
                         (false, Some(_)) if saw_null => Tri::N,
                         (false, Some(_)) => miss,
                         (false, None) => Tri::Out,

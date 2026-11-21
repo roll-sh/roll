@@ -983,6 +983,9 @@ const VECTOR_QUERIES: &[&str] = &[
     "SELECT count(*), sum(id) FROM v WHERE t <> ALL ('{k1,k2}') AND a = ANY ('{1,3,NULL}'::int[])",
     "SELECT a, count(*) FROM v WHERE x = ANY ('{1.0000,2.5,33.3333}'::numeric[]) OR b <> ALL ('{1000003,2000006}'::int8[]) GROUP BY a",
     "SELECT a, count(*), sum(x) FROM v WHERE a IN (1, 3, 5) AND id <> ALL (ARRAY[7, NULL]) GROUP BY a",
+    // (Items of 8 bytes or fewer compared as words; a longer one in the list: as bytes.)
+    "SELECT count(*), sum(id) FROM v WHERE substring(t from 2 for 3) IN ('1', '39', '2110', '') OR t = ANY ('{k39,u21100,abcdefgh}')",
+    "SELECT t, count(*) FROM v WHERE t NOT IN ('k1', 'k12345678', 'u422') GROUP BY t",
     // LIKE over a text column (NULLs, NOT, _ and %), an escape ending the pattern (an error
     // at the first row with text left), a char(n) column cast to unbounded bpchar.
     "SELECT t, count(*) FROM v WHERE t LIKE 'k1%' GROUP BY t",
