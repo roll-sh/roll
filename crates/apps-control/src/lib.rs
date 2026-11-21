@@ -1461,6 +1461,11 @@ impl Apps {
 
     /// Delete a service for good, and everything that belongs to it.
     pub async fn purge_service(self: &Arc<Self>, id: &str) -> Result<()> {
+        // Gone for good: its home goes too (docs/members.md, "The canvas rule").
+        if let Some(ws) = self.deps.workspace.clone() {
+            let sid = id.to_string();
+            let _ = tokio::task::spawn_blocking(move || ws.forget_resource(roll_workspace::Kind::Service, &sid)).await;
+        }
         let sid = id.to_string();
         let envs = self.db(move |s| s.environments(&sid)).await?;
         let sid = id.to_string();

@@ -624,8 +624,26 @@ async fn run_with(mut args: Args) -> anyhow::Result<()> {
     // above this line, or its links 404.
     // People's accounts: what a person made acts while they can sign in, and a person's canvas
     // stands only for what's theirs (roll_workspace::Workspace::trusts, asked by every consumer).
+    // A deleted account leaves every project through the removal path (docs/members.md): roll
+    // accounts' outbox calls this after the deletion's write, and again until it succeeds.
+    {
+        let ws = workspace.clone();
+        accounts.on_deleted(Box::new(move |user| ws.forget_person(user, None).map(|_| ()).map_err(|e| e.to_string())));
+        let a = accounts.clone();
+        tokio::spawn(async move {
+            let mut tick = tokio::time::interval(std::time::Duration::from_secs(60));
+            loop {
+                tick.tick().await;
+                let a = a.clone();
+                let _ = tokio::task::spawn_blocking(move || a.run_deletions()).await;
+            }
+        });
+    }
     let people = secrets::People { accounts, code: code.as_ref().map(|c| c.code.clone()), search: search.as_ref().map(|s| s.control.clone()) };
     workspace.set_owners(std::sync::Arc::new(people.clone()));
+    // Members' handles and addresses, and invite links to the dashboard (docs/members.md).
+    workspace.set_people(std::sync::Arc::new(people.clone()));
+    workspace.set_web_url(&args.web_url);
     // Its tokens are roll-access's: grants for syncs a token made, workload tokens for identities.
     // Gateways into private networks: their links follow leases on the node's cluster.
     let gateways = secrets::gateway::Gateways::new(cluster.clone(), access.clone() as std::sync::Arc<dyn roll_auth::Grants>, args.code_webhook_allow_private.unwrap_or(!auth.enforcing()));
@@ -683,6 +701,11 @@ async fn run_with(mut args: Args) -> anyhow::Result<()> {
         access.on_leaked("rlk_", move |secret, _why| apps.revoke_leaked_hook(secret));
         let apps = a.apps.clone();
         access.on_leaked("rlr_", move |secret, _why| apps.revoke_leaked_address(secret));
+    }
+    // …and project invites' (`rlv_`).
+    {
+        let ws = workspace.clone();
+        access.on_leaked("rlv_", move |secret, _why| ws.revoke_leaked_invite(secret));
     }
     // …and previews' (`rlb_`).
     if let Some(e) = previews_engine.clone() {

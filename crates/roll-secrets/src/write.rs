@@ -805,7 +805,7 @@ impl Secrets {
                 let entry = match shared {
                     Some((_, state)) => (open_parts(&dek, project, state)?, state.clone()),
                     None => {
-                        if let Ok(p) = self.links.get(&link.kind)
+                        if let Ok(p) = self.provider_for(&link.kind, &link.r#ref)
                             && p.exclusive_for(&link.r#ref)
                             && let Some(other) = self.holder(project, env_slug, &link, items)?
                         {
@@ -813,7 +813,7 @@ impl Secrets {
                             break;
                         }
                         let label = format!("roll secrets {env_slug} {}", item.key);
-                        match self.links.get(&link.kind).and_then(|p| p.issue(&link.r#ref, &cred, &link, &label, None)) {
+                        match self.provider_for(&link.kind, &link.r#ref).and_then(|p| p.issue(&link.r#ref, &cred, &link, &label, None)) {
                             Ok(i) => {
                                 out.fresh.push(Fresh { kind: link.kind.clone(), r#ref: link.r#ref.clone(), handle: i.handle.clone() });
                                 let state = seal_parts(&dek, project, &i.parts, i.handle, self.db.now_ms()?);

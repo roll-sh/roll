@@ -336,6 +336,10 @@ impl LinkProvider for Provider {
         Ok(())
     }
 
+    fn maker(&self, r#ref: &str) -> Option<(String, String)> {
+        self.db.read(|c| c.query_row("SELECT project_id, created_by FROM directories WHERE id = ?", [r#ref], |r| Ok((r.get(0)?, r.get(1)?))).optional()).ok().flatten()
+    }
+
     fn name(&self, r#ref: &str) -> Option<String> {
         self.db.read(|c| c.query_row("SELECT name FROM directories WHERE id = ?", [r#ref], |r| r.get::<_, String>(0)).optional()).ok().flatten()
     }
@@ -459,7 +463,7 @@ impl Secrets {
         let id = names::new_id("dir", 16);
         let sealed = dek.seal(&aad(project, &id), &n.bind_password);
         let now = self.db.now_ms()?;
-        let d = RegisteredDirectory { id: id.clone(), name: n.name, url, flavor: n.flavor, bind_dn: n.bind_dn, user_base_dn, managed_accounts: n.managed_accounts, groups: n.groups, ca, gateway, created_at: now, created_by: caller.principal.clone() };
+        let d = RegisteredDirectory { id: id.clone(), name: n.name, url, flavor: n.flavor, bind_dn: n.bind_dn, user_base_dn, managed_accounts: n.managed_accounts, groups: n.groups, ca, gateway, created_at: now, created_by: caller.made_by().to_string() };
         self.db.write(|c| {
             if let Some(g) = &d.gateway
                 && c.query_row("SELECT 1 FROM gateways WHERE id = ? AND project_id = ?", [g, project], |_| Ok(())).optional()?.is_none()

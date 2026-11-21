@@ -384,11 +384,20 @@ The product should feel alive: dots react to the cursor and the marks "think". E
   - Tokens are roll-access's: a project's token is a grant with one secrets rule made through
     `POST /v1/access/tokens`, and identities' logins get `workload` grants (`Workloads`). Never
     add a token store to secrets; it asks the caller's `Grant` (`GrantGrants`).
-  - Signed-in people manage their own projects' secrets (`OwnProjects`; others' projects 404). A
-    canvas proves nothing about who owns what's on it: anything acting on a resource through a
-    project asks `roll_workspace::Workspace::trusts` (secrets' `members`, `counts_for_repo`, roll
-    previews), never membership alone. What a person made (tokens and their tokens, identities,
-    syncs) acts only while they can sign in and still reach the project (`maker_reaches`).
+  - Signed-in people reach the secrets of the projects they're members of, as their role there
+    allows (docs/members.md): their session is a `GrantKind::Session` grant of their memberships'
+    rules, decided by roll-access and asked again inside secrets (`GrantGrants`); others' projects
+    404. A person's token acts `Within` their session. A canvas proves nothing about who owns
+    what's on it: anything acting on a resource through a project asks
+    `roll_workspace::Workspace::trusts` (secrets' `members`, `counts_for_repo`, roll previews),
+    never membership alone, and a person's own grant never proves a resource is theirs (placing and
+    homing take `Owners`). What a person made acts later only at their rights now, checked on every
+    use with the action and scope it exercises: `maker_reaches(by, needs)` for identities (their
+    rule), backups, gateways, ACME bindings and placeholders' makers; `registration_reaches` for
+    sinks, notify URLs, host bindings and every registered provider (`LinkProvider::maker`, through `Secrets::provider_for`); exports on
+    every read (`dead_exports`); syncs push as them (`person_caller`). A registration stores the
+    person, never their token (`Caller::made_by`); shares and leases follow their maker through
+    `Secrets::maker` (`member_changed`).
   - Workload identities (`identities.rs`) log CI in with its own OIDC token: an issuer is a URL a
     tenant chose, fetched only through rolld's guarded client (`Deliver::get`), and a shared issuer
     (GitHub, GitLab) needs a subject that names one repo.
