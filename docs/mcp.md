@@ -1089,7 +1089,7 @@ previews are listed once those products are on.
 Ranked; the top item is in progress. A watchdog reads this list. Unblocked work comes first; what
 waits on a sibling PR reaching main is last.
 
-1. **Project members' roles as a tool (#631).** #501 landed (991d98225) with its own four tools
+1. **Project members' roles as a tool (this PR).** #501 landed (991d98225) with its own four tools
    (`workspace_list_members`, `_invite_member`, `_set_member_role`, `_remove_member`);
    `workspace_list_roles` maps its last route (`GET /v1/workspace/roles`: the four roles, the rules
    each grants, the products they cover, and the environments a developer reaches when none are
