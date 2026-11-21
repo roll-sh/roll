@@ -66,6 +66,7 @@ pub const RULES: &[Rule] = &[
     Rule { route: "/v1/accounts", access: Access::Product("accounts: sign-in, then the session decides") },
     // Workspace projects: the operator and every signed-in user, each seeing their own.
     Rule { route: "/v1/workspace", access: Access::User("workspace projects: a user's own") },
+    Rule { route: "/v1/previews", access: Access::User("previews: the projects a person is a member of, each route as their role there allows (docs/members.md)") },
     // roll search's control plane: the operator and every signed-in person, each seeing their own
     // clusters (search scopes by SignedIn; another's answers 404). Clusters' data plane is the
     // REST port, with the cluster's own credentials.

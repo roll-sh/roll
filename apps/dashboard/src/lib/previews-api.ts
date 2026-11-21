@@ -537,9 +537,10 @@ export const previewsApi = {
   /** Newest first. */
   list: (filter: { project?: string; state?: PreviewState } = {}) => call<Preview[]>("GET", `/v1/previews${query(filter)}`),
   get: (id: string) => call<Preview>("GET", one(id)),
-  /** A preview of a branch (no change) or of a change; the existing one if there is one. */
+  /** A preview of a branch (no change) or of a change; the existing one if there is one. Made in the
+   * project `X-Roll-Project` names, which roll-access decides a member's create by. */
   create: (projectId: string, repo: string, source: PreviewSource) =>
-    call<Preview>("POST", "/v1/previews", { project: projectId, repo, ...source }),
+    call<Preview>("POST", "/v1/previews", { project: projectId, repo, ...source }, { "x-roll-project": projectId }),
   /** Marks it for deletion (`desired: "deleted"`); the reconciler removes it. */
   remove: (id: string) => call<Preview>("DELETE", one(id)),
   refresh: (id: string) => call<Preview>("POST", `${one(id)}/refresh`),
