@@ -409,8 +409,9 @@ envelope `{event, delivery, webhook, repo{id, full_name, default_branch, visibil
 | `compare` | changesets and files → same JSON as `GET /compare/a...b`; missing base/head, unknown head; repo errors; auth | `mcp.rs::tools_map_onto_their_routes`, `mcp.rs::tool_argument_errors`, `mcp.rs::every_tool_is_authorized_like_its_route` |
 | `create_change` | files, body, draft, message defaults to the title, `work_item` as id / `owner/repo#N` / number (item goes to review), unknown work item; missing title, bad files/mode, missing base; repo errors; auth | `mcp.rs::tools_map_onto_their_routes`, `mcp.rs::tool_argument_errors`, `mcp.rs::every_tool_is_authorized_like_its_route` |
 | `revise_change` | by `owner/repo#N` and id; missing/malformed/unknown change, bad files; auth | `mcp.rs::tools_map_onto_their_routes`, `mcp.rs::tool_argument_errors`, `mcp.rs::every_tool_is_authorized_like_its_route` |
+| `update_change` | title, labels, a draft marked ready, equal to `GET /changes/{id}` after; back to draft refused (dequeue_change's); auth | `mcp.rs::tools_map_onto_their_routes`, `mcp.rs::every_tool_is_authorized_like_its_route` |
 | `land` | landed (direct, change id, `owner/repo#N`, `ref` branch), queued (position, urgent lane, direct), conflict (paths), blocked (blockers), landing twice = isError 409; malformed/unknown change, bad lane, bad bypass; auth (both routes) | `mcp.rs::land_outcomes_queued_branches_and_errors`, `mcp.rs::tool_argument_errors`, `mcp.rs::every_tool_is_authorized_like_its_route` |
-| `get_change` | change + review_status + threads, each equal to its route; by id and `owner/repo#N`; missing/malformed/unknown; auth | `mcp.rs::tools_map_onto_their_routes`, `mcp.rs::tool_argument_errors`, `mcp.rs::every_tool_is_authorized_like_its_route` |
+| `get_change` | change + review_status + threads + review_requests + reviews, each equal to its route; by id and `owner/repo#N`; missing/malformed/unknown; auth | `mcp.rs::tools_map_onto_their_routes`, `mcp.rs::tool_argument_errors`, `mcp.rs::every_tool_is_authorized_like_its_route` |
 | `list_changes` | all and by state → same JSON as `GET /changes`; bad state; repo errors; auth | `mcp.rs::tools_map_onto_their_routes`, `mcp.rs::land_outcomes_queued_branches_and_errors`, `mcp.rs::tool_argument_errors`, `mcp.rs::every_tool_is_authorized_like_its_route` |
 | `claim_work` | `{work: null}` (none, none with label), labels, lease_s; missing agent, ill-typed labels; repo errors; auth | `mcp.rs::tools_map_onto_their_routes`, `mcp.rs::tool_argument_errors`, `mcp.rs::every_tool_is_authorized_like_its_route` |
 | `heartbeat_work` | by `owner/repo#N`; another agent's lease is an error; missing/malformed/unknown work; auth | `mcp.rs::tools_map_onto_their_routes`, `mcp.rs::tool_argument_errors`, `mcp.rs::every_tool_is_authorized_like_its_route` |
@@ -423,12 +424,28 @@ envelope `{event, delivery, webhook, repo{id, full_name, default_branch, visibil
 | `queue_status` | post_merge; queue repo (depth, urgent first) → same JSON as `GET /queue`; missing repo; repo errors; auth | `mcp.rs::tools_map_onto_their_routes`, `mcp.rs::land_outcomes_queued_branches_and_errors`, `mcp.rs::tool_argument_errors`, `mcp.rs::protocol_edges`, `mcp.rs::every_tool_is_authorized_like_its_route` |
 | `enqueue_change` | queue a change in a lane (status queued, the entry); a closed change is 409; blocked is an outcome (as `land`); auth | `mcp.rs::land_outcomes_queued_branches_and_errors`, `mcp.rs::every_tool_is_authorized_like_its_route` |
 | `dequeue_change` | out of the queue, open again; auth | `mcp.rs::land_outcomes_queued_branches_and_errors`, `mcp.rs::every_tool_is_authorized_like_its_route` |
+| `set_change_lane` | a queued change moved to the normal lane; auth | `mcp.rs::land_outcomes_queued_branches_and_errors`, `mcp.rs::every_tool_is_authorized_like_its_route` |
 | `close_change` | closed, can't queue after; destructive hint; auth | `mcp.rs::land_outcomes_queued_branches_and_errors`, `mcp.rs::every_tool_is_authorized_like_its_route` |
 | `report_check` | a check on the change (name, status, summary); auth | `mcp.rs::tools_map_onto_their_routes`, `mcp.rs::every_tool_is_authorized_like_its_route` |
 | `set_commit_status` | a status on a revision under a context; auth | `mcp.rs::tools_map_onto_their_routes`, `mcp.rs::every_tool_is_authorized_like_its_route` |
+| `get_commit_statuses` | same JSON as `GET /statuses/{rev}`; auth | `mcp.rs::tools_map_onto_their_routes`, `mcp.rs::every_tool_is_authorized_like_its_route` |
+| `resolve_thread` | resolved, equal to `GET /threads/{id}`; auth | `mcp.rs::tools_map_onto_their_routes`, `mcp.rs::every_tool_is_authorized_like_its_route` |
+| `reopen_thread` | open again; auth | `mcp.rs::tools_map_onto_their_routes`, `mcp.rs::every_tool_is_authorized_like_its_route` |
+| `apply_suggestion` | a new revision holding the suggestion, its thread resolved; auth | `mcp.rs::tools_map_onto_their_routes`, `mcp.rs::every_tool_is_authorized_like_its_route` |
+| `request_review` | the change's requests, equal to `GET /review-requests` and `get_change`'s; auth | `mcp.rs::tools_map_onto_their_routes`, `mcp.rs::every_tool_is_authorized_like_its_route` |
+| `get_work` | by `owner/repo#N`, same JSON as `GET /work/{id}`; auth | `mcp.rs::tools_map_onto_their_routes`, `mcp.rs::every_tool_is_authorized_like_its_route` |
+| `update_work` | title and labels, equal to `GET /work/{id}` after; auth | `mcp.rs::tools_map_onto_their_routes`, `mcp.rs::every_tool_is_authorized_like_its_route` |
 | `list_refs` | same JSON as `GET /refs`; auth | `mcp.rs::tools_map_onto_their_routes`, `mcp.rs::every_tool_is_authorized_like_its_route` |
 | `create_repo` | a new repo, equal to `GET` of it; another owner's or a token-less call is refused as the route refuses it | `mcp.rs::tools_map_onto_their_routes`, `mcp.rs::every_tool_is_authorized_like_its_route` |
 | `request_ai_review` | queued job (mode, full) visible in `GET /ai-jobs`; bad mode, malformed/unknown change; auth | `mcp.rs::tools_map_onto_their_routes`, `mcp.rs::tool_argument_errors`, `mcp.rs::every_tool_is_authorized_like_its_route` |
+| `list_ai_reviews` | the route's jobs (by id); auth | `mcp.rs::tools_map_onto_their_routes`, `mcp.rs::every_tool_is_authorized_like_its_route` |
+| `get_ai_review_pricing` | same JSON as `GET /pricing` | `mcp.rs::tools_map_onto_their_routes` |
+| `get_review_usage` | same JSON as `GET /owners/{owner}/usage`; anonymous and another owner refused as the route refuses | `mcp.rs::tools_map_onto_their_routes`, `mcp.rs::every_tool_is_authorized_like_its_route` |
+| `get_reviewer` | the route's effective settings; auth | `mcp.rs::tools_map_onto_their_routes`, `mcp.rs::every_tool_is_authorized_like_its_route` |
+| `get_review_rules` | same JSON as `GET /review-settings`; auth | `mcp.rs::tools_map_onto_their_routes`, `mcp.rs::every_tool_is_authorized_like_its_route` |
+| `get_repo_audit` | same JSON as `GET /audit`; writers only, as the route; auth | `mcp.rs::tools_map_onto_their_routes`, `mcp.rs::every_tool_is_authorized_like_its_route` |
+| `start_preview` | answers as `POST /preview` does (the change, or its status); auth | `mcp.rs::tools_map_onto_their_routes`, `mcp.rs::every_tool_is_authorized_like_its_route` |
+| `stop_preview` | answers as `DELETE /preview` does; destructive hint; auth | `mcp.rs::tools_map_onto_their_routes`, `mcp.rs::every_tool_is_authorized_like_its_route` |
 | `list_agent_machines` | the owner's machines with `online`; another owner "not found" | `mcp.rs::agent_tools_drive_a_machine_like_their_routes` |
 | `list_agent_threads` | threads of a machine (by name) with their machine and project name, and the pending requests | `mcp.rs::agent_tools_drive_a_machine_like_their_routes` |
 | `create_agent_thread` | `thread.create` (provider, prompt, worktree) sent with the given id and the agent as `by`; the daemon's reply | `mcp.rs::agent_tools_drive_a_machine_like_their_routes` |
@@ -438,6 +455,7 @@ envelope `{event, delivery, webhook, repo{id, full_name, default_branch, visibil
 | `publish_agent_thread` | `thread.publish` with a push grant for the project's repo; the daemon's `published` reply | `mcp.rs::agent_tools_work_in_roll_code_like_their_routes` |
 | `create_agent_project` | the repo is created (visibility) and `project.add` clones it with a fetch grant | `mcp.rs::agent_tools_work_in_roll_code_like_their_routes` |
 | `claim_agent_work` | the next work item claimed as the agent and set on the thread; `work: null` when none is left; an unknown thread "not found" | `mcp.rs::agent_tools_work_in_roll_code_like_their_routes` |
+| `release_agent_work` | the thread holds no work, the item's claim stays; an unknown thread "not found" | `mcp.rs::agent_tools_work_in_roll_code_like_their_routes` |
 
 | `list_agent_automations` | the owner's automations | `mcp.rs::automation_tools_map_onto_their_routes` |
 | `save_agent_automation` | creates, or replaces by id over a revision | `mcp.rs::automation_tools_map_onto_their_routes` |
@@ -445,6 +463,14 @@ envelope `{event, delivery, webhook, repo{id, full_name, default_branch, visibil
 | `list_agent_automation_runs` | newest first, by automation | `mcp.rs::automation_tools_map_onto_their_routes` |
 | `get_agent_automation_run` | the run and its event | `mcp.rs::automation_tools_map_onto_their_routes` |
 | `cancel_agent_automation_run` | the owner's; an agent is refused | `mcp.rs::automation_tools_map_onto_their_routes` |
+| `retry_agent_automation_run` | a cancelled run goes on | `mcp.rs::automation_tools_map_onto_their_routes` |
+| `enable_agent_automation` | on again by id | `mcp.rs::automation_tools_map_onto_their_routes` |
+| `disable_agent_automation` | off by name, as `GET` of it then shows | `mcp.rs::automation_tools_map_onto_their_routes` |
+| `get_agent_automation_catalog` | same JSON as `GET …/automations/catalog` | `mcp.rs::automation_tools_map_onto_their_routes` |
+| `test_agent_automation` | same JSON as `POST …/automations/test` for the spec and event | `mcp.rs::automation_tools_map_onto_their_routes` |
+| `list_agent_sandboxes` | same JSON as `GET …/sandboxes` | `mcp.rs::automation_tools_map_onto_their_routes` |
+| `stop_agent_sandbox` | an unknown sandbox answers as the route does | `mcp.rs::automation_tools_map_onto_their_routes` |
+| `get_agent_sandbox_usage` | same JSON as `GET …/sandboxes/usage` | `mcp.rs::automation_tools_map_onto_their_routes` |
 
 ### Protocol
 
@@ -453,11 +479,12 @@ envelope `{event, delivery, webhook, repo{id, full_name, default_branch, visibil
 | sessions (400 without, 404 unknown, ended, bound to the token), version negotiation, `initialized`, ping, tools/list, unknown method and tool, non-object arguments, parse errors, wrong `jsonrpc`, batches with notifications, `MCP-Protocol-Version`, Origin, `GET` 405, `DELETE` | `mcp.rs::transport_sessions_and_protocol` |
 | tools enforce the routes' authorization: anonymous public reads, private 404, writes need a token, another owner can't write, admin can | `mcp.rs::every_tool_is_authorized_like_its_route` |
 | every tool's schema is closed and its required fields exist; path and query encoding | `code-control/src/mcp.rs` unit tests |
+| every `/v1/code` route the routers declare, method by method, is a tool's (`mcp::ROUTES`) or in `src/no-tool.txt` with why; every tool lists its routes, each one a router declares; no stale or vanished lines | `coverage_map.rs::every_route_has_an_mcp_tool_or_a_reason` |
 | `Accept: text/event-stream`: one `message` event per response (single and batch), notifications 202, sessions still required, initialize answers JSON | `mcp.rs::responses_as_server_sent_events` |
 | a revoked token ends its session (401) and can't start one | `tokens.rs::tokens_are_listed_and_revoked_everywhere_at_once` |
 | all four versions and the default, initialize inside a batch (400), empty batch, client responses and notification-only batches (202), one bad entry in a batch, `resources/list` and `prompts/list`, `tools/call` without arguments or a name, Origin edge cases, `GET` `Allow`, `DELETE` without a session | `mcp.rs::protocol_edges` |
 | a never-valid token: 401 on initialize, and it ends the session it's used on; anonymous callers can't use or end another token's session | `mcp.rs::invalid_tokens_and_foreign_sessions` |
-| `tools/list` is exactly the 22 tools of mcp.md, each with `readOnlyHint` | `mcp.rs::transport_sessions_and_protocol` |
+| `tools/list` is exactly the tools of mcp.md, each with `readOnlyHint`, and `destructiveHint` only where it can't be undone (`close_change`, `stop_preview`) | `mcp.rs::transport_sessions_and_protocol` |
 | event-stream answers hold one of the caller's stream slots (429 past the limit) | `streams.rs::mcp_event_stream_answers_share_the_callers_slots` |
 
 ## CLI (`roll code`)

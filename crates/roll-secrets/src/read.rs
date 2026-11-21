@@ -884,7 +884,10 @@ impl Secrets {
             None if in_process => return Err(Error::BadRequest(format!("{} is an in-process consumer: name who made it (a sandbox's secrets_by, a preview rule's writer) to take placeholders", caller.principal))),
             Some(m) => {
                 let at = names::path(path)?;
-                self.maker_may(m, project, slug, &at, caller.grants.untrusted()).map_err(|r| Error::Forbidden(r.to_string()))?;
+                self.maker_may(m, project, slug, &at, caller.grants.untrusted()).map_err(|r| match r {
+                    crate::proxy::Refusal::MakerUnreachable(m) => Error::MakerUnreachable(m),
+                    r => Error::Forbidden(r.to_string()),
+                })?;
             }
             None => {}
         }

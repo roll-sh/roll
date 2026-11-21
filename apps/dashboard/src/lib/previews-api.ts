@@ -372,6 +372,10 @@ export interface EndpointTime {
 /** Slower than main's by half again and by more than 20 ms (`EndpointAgainst::slower`). */
 export const endpointSlower = (e: EndpointTime) => e.slower ?? (e.main_ms != null && e.ms * 2 > e.main_ms * 3 && e.ms > e.main_ms + 20);
 
+/** Which row of the screenshot's chooser a page check goes in: a page, a view of the first one (a
+ * width or a browser), or a state (`state:<name>`). */
+export const pageGroup = (path: string): "Pages" | "Views" | "States" => (/^@\d+$/.test(path) || path.startsWith("browser:") ? "Views" : path.startsWith("state:") ? "States" : "Pages");
+
 export const pageLabel = (path: string) =>
   /^@\d+$/.test(path) ? `${path.slice(1)} px` : path === "browser:firefox" ? "Firefox" : path === "browser:webkit" ? "WebKit" : path === "browser:webkit-phone" ? "WebKit, phone" : path || "/";
 
@@ -533,9 +537,10 @@ export const previewsApi = {
   /** Newest first. */
   list: (filter: { project?: string; state?: PreviewState } = {}) => call<Preview[]>("GET", `/v1/previews${query(filter)}`),
   get: (id: string) => call<Preview>("GET", one(id)),
-  /** A preview of a branch (no change) or of a change; the existing one if there is one. */
+  /** A preview of a branch (no change) or of a change; the existing one if there is one. Made in the
+   * project `X-Roll-Project` names, which roll-access decides a member's create by. */
   create: (projectId: string, repo: string, source: PreviewSource) =>
-    call<Preview>("POST", "/v1/previews", { project: projectId, repo, ...source }),
+    call<Preview>("POST", "/v1/previews", { project: projectId, repo, ...source }, { "x-roll-project": projectId }),
   /** Marks it for deletion (`desired: "deleted"`); the reconciler removes it. */
   remove: (id: string) => call<Preview>("DELETE", one(id)),
   refresh: (id: string) => call<Preview>("POST", `${one(id)}/refresh`),

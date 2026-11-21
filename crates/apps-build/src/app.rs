@@ -47,10 +47,10 @@ pub const MAX_BYTES: u64 = 64 << 10;
 /// What `[app.run]` takes: a service's run settings (apps-control's `Run`, whose tests keep the
 /// two equal), but `volume` and `push` (a stream another product guards: set through the API,
 /// whose gate asks for access to it, never by a file in the tree being deployed).
-pub const RUN_KEYS: [&str; 46] = [
+pub const RUN_KEYS: [&str; 47] = [
     "type", "port", "start", "pre_deploy", "schedule", "timezone", "timeout_s", "retries", "min_instances", "max_instances", "concurrency", "cpu", "memory_mb", "health_path",
     "health_timeout_s", "suspend_after_s", "sleep_after_s", "alerts", "rollout", "h2c", "scale", "public", "drain_s", "cpu_target", "busy_cpu", "memory_target", "restart", "restart_tries", "affinity", "tcp",
-    "rollback_on_crash", "schedules", "health_every_s", "health_failures", "health_command", "rebuild_on_base", "sidecars", "block_on", "slo", "metrics", "schedule_scale", "log_metrics", "skew_protection", "queue_s", "latency_target_ms", "oidc_audiences",
+    "rollback_on_crash", "schedules", "health_every_s", "health_failures", "health_command", "rebuild_on_base", "sidecars", "block_on", "slo", "metrics", "schedule_scale", "log_metrics", "skew_protection", "queue_s", "latency_target_ms", "oidc_audiences", "health_grpc",
 ];
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]

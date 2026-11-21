@@ -3322,8 +3322,10 @@ the binding, issues placeholders, decides each swap and audits it, and ships the
   - **The maker.** An in-process consumer (`sandbox:…`, `preview:…`) runs for someone, so it names
     them: `Ask { maker }` in process, `"maker"` over HTTP. That's #440's `secrets_by` for a sandbox,
     and the rule's writer for a preview. The maker is a person (`usr_…`), a token (`token:…`) or the
-    operator, and must reveal the folder when the placeholders are issued (else 403). Each swap asks
-    again (below). A resolve by a token or a person over HTTP is its own maker; a product's resource
+    operator, and must reveal the folder when the placeholders are issued (else 403
+    `maker_unreachable`: they can no longer reveal there, or sign in; a preview resolves without
+    placeholders on it, and surfaces any other 403). Each swap asks again (below) and refuses with
+    `proxy::Refusal::MakerUnreachable`. A resolve by a token or a person over HTTP is its own maker; a product's resource
     stands for itself on its project's canvas (`ResourceRef`).
   - A placeholder is `rlph_`, 34 random characters and a 6-character checksum
     (`roll_auth::credentials::new_secret`, one of `SECRET_PREFIXES`): roll's guard refuses it where
@@ -3357,8 +3359,8 @@ the binding, issues placeholders, decides each swap and audits it, and ships the
   - the environment still exists, isn't frozen (an incident's cut-off), and isn't protected for an
     untrusted consumer;
   - the key still exists and is still bound, and whoever bound it (`set_by`, `Caller::made_by`) may
-    still `admin` its folder: a member demoted or removed stops every swap through their binding,
-    which still counts as one everywhere else (a read gets a placeholder, never the value) until an
+    still `admin` its folder: a member demoted or removed stops every swap through their binding
+    (`Refusal::MakerUnreachable`), which still counts as one everywhere else (a read gets a placeholder, never the value) until an
     admin binds the key again or takes the binding off;
   - the host and the place match its binding; a sensitive
     key's binding still opts in, for a reader that couldn't read it; the value holds no reference.
@@ -3489,7 +3491,13 @@ agents' sandboxes). Each one does exactly this:
 
 **Ending.** `Secrets::end_intercept_cas(consumer, why)` ends every live CA of the consumer, with a
 revocation row (`revoked_at`, `revoked_why`) and a `secrets.intercept_ca.end` audit row.
-`Secrets::end_consumer` calls it when the sandbox stops or the preview is torn down. The
+`Secrets::end_consumer` calls it when the sandbox stops or the preview is torn down. A CA also
+ends with its hosts: when the consumer's hosts shrink (one of its placeholders revoked, ended in a
+project or cut off, a key's binding cleared or narrowed), every CA of the consumer that names a
+host it no longer has ends once that write commits (`Secrets::end_unbound_intercept_cas`, reason
+`<hosts> no longer bound`), and the proxy's next `intercept_ca` names only the hosts it still has.
+A shrink nothing announces (a placeholder expiring, a key or environment deleted, a binder demoted
+or removed) ends the CA at its next `intercept_ca_live`, which answers `false` for a CA naming a host no longer bound. The
 proxy then drops the CA and its leaves at its next `intercept_ca_live`. No CRL is published: a
 trust anchor isn't checked against one, and the CA dies with its container or within a day. Rows
 go a day after they expire.
@@ -3771,9 +3779,10 @@ Agent's templates do).
   (`storage:bucket:photos`, `search:search:logs (untrusted)` for an untrusted copy), with the one
   key read.
 - **Refusals** say which part failed, never the value: no project, not trusted, not allowed (the
-  maker may not reveal it, or can't reach roll secrets any more), no such key, protected, or can't
-  be used (a dynamic credential, a sensitive key for anyone but a trusted runtime, a reference
-  inside the value that doesn't resolve). `digest_for` and `digest_as` refuse exactly what their
+  caller choosing it may not reveal it), maker unreachable (`Refusal::MakerUnreachable`: the maker
+  can no longer reveal it, or sign in; 403 `maker_unreachable` over HTTP), no such key, protected,
+  or can't be used (a dynamic credential, a sensitive key for anyone but a trusted runtime, a
+  reference inside the value that doesn't resolve). `digest_for` and `digest_as` refuse exactly what their
   resolve would; `bind_ref` refuses what `digest_as` would for the caller (it decrypts nothing, so
   a `${…}` reaching a sensitive key fails at the first read).
 - **Rotation.** Nothing is cached across calls in roll secrets. A product keeps what it built
@@ -4635,9 +4644,9 @@ a decoy credential:
 - **`rlt`**: a roll token that roll-access made as a decoy (docs/permissions.md, "Decoy tokens").
   It allows nothing, whatever its rules say. Any use is refused as an unknown token is, so whoever
   holds it learns nothing. roll-access records the use on the token, writes its own audit row,
-  mails the decoy's owner (whoever planted it) and the admins, and tells roll secrets
-  (`Access::on_decoy`). roll secrets keeps no token store: rolld mints the decoy through
-  `Workloads::mint_decoy`.
+  mails the decoy's owner (whoever planted it; from an admin's session, the person behind it, never
+  the operator) and the admins, and tells roll secrets (`Access::on_decoy`). roll secrets keeps no
+  token store: rolld mints the decoy through `Workloads::mint_decoy`.
 - **`postgres`**: a connection string for a role of `resource`, a roll Postgres database the
   project may link (on its canvas, as a link's). It's the root branch's connection string with a
   role and password shaped like the ones links issue (`roll_` and 12 letters and digits, 32
@@ -5479,7 +5488,8 @@ isn't in the workspace is 404.
 
 - 400: a bad slug, path, key, value, body or query.
 - 401: no credential, or a token that doesn't exist, is revoked or expired.
-- 403: the caller may not do this (`{"code": "forbidden"}`).
+- 403: the caller may not do this (`{"code": "forbidden"}`), or whoever set up placeholders or
+  chose a reference can no longer reveal there or sign in (`maker_unreachable`).
 - 404: no such project, environment, folder, secret, version, change, request, lease or token.
 - 410: a secret request answered as often as it allowed, expired or cancelled (`gone`).
 - 409: a slug that is taken (`conflict`), a write to a protected environment
