@@ -182,7 +182,10 @@ The product should feel alive: dots react to the cursor and the marks "think". E
       `code-control/tests/reviewer.rs`.
   - Review app tokens (`rla_…`) are always scoped to their repos, even on an open daemon.
     Webhooks only go to public addresses unless the config allows private ones
-    (`ROLL_CODE_WEBHOOK_ALLOW_PRIVATE`, local development only).
+    (`ROLL_CODE_WEBHOOK_ALLOW_PRIVATE`, local development only). Previews' intercepted
+    connections (keys a fork's preview never holds) dial public addresses only and verify against
+    the system's roots, unless `ROLL_PREVIEWS_INTERCEPT_ALLOW_PRIVATE=<root.pem>` (local
+    development only: a private TLS echo host for the live check; never plain egress).
   - Any URL a tenant chooses is fetched through a client with `roll_net::PublicOnly` (one crate,
     `crates/roll-net`; code-control and the model gateway re-export it) and no redirects, plus
     `roll_net::literal_private_host`, because IP literals skip the resolver. That covers webhooks,
