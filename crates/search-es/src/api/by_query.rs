@@ -238,8 +238,8 @@ fn scan_shard(
         None => arc(MatchAllQuery),
     };
     let mut b = BooleanQuery::new().add(Occur::Must, q).add(Occur::Filter, search_index::query::nested::root_filter());
-    if let Some(af) = &t.alias_filter {
-        b = b.add(Occur::Filter, qctx.to_filter(af)?);
+    if let Some(f) = t.filter.build(&qctx)? {
+        b = b.add(Occur::Filter, f);
     }
     if let Some((sid, max)) = slice
         && max > 1
