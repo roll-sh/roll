@@ -560,6 +560,27 @@ pub enum Secrets {
     },
     /// Rotate a linked secret's credential.
     Rotate { key: String },
+    /// Bind a key to hosts, for placeholders (docs/secrets.md, "Using a key without seeing it"): a
+    /// sandbox or a preview that asks for them gets a placeholder, and roll's proxy swaps the value
+    /// in only on the way to these hosts, only in `--header` or `--query`. An admin's.
+    Bind {
+        key: String,
+        /// A hostname (api.stripe.com) or a one-label wildcard (*.stripe.com); repeatable.
+        #[arg(long = "host", required = true, value_name = "HOST")]
+        hosts: Vec<String>,
+        /// The header that carries the key, `{}` where it goes.
+        #[arg(long, default_value = "Authorization: Bearer {}", value_name = "TEMPLATE")]
+        header: String,
+        /// The query parameter that carries the key instead, as its whole value.
+        #[arg(long, value_name = "NAME")]
+        query: Option<String>,
+        /// Untrusted code too (a fork's preview, an agent's sandbox): a sensitive key's placeholder
+        /// reaches it only with this.
+        #[arg(long)]
+        untrusted: bool,
+    },
+    /// Take a key's host binding off: every placeholder of it stops working.
+    Unbind { key: String },
     /// Change requests: list, approve, reject, apply, close.
     #[command(subcommand)]
     Requests(Requests),
@@ -2611,6 +2632,23 @@ pub async fn run(api: &Api, json_out: bool, args: AtArgs, cmd: Secrets) -> anyho
                 return print(&v);
             }
             println!("Rotated {key}");
+        }
+        Secrets::Bind { key, hosts, header, query, untrusted } => {
+            let (place, at) = match query {
+                Some(q) => (json!({ "query": q }), format!("query parameter {q}")),
+                None => (json!({ "header": header }), header),
+            };
+            let mut body = json!({ "hosts": hosts, "untrusted": untrusted });
+            body.as_object_mut().expect("an object").extend(place.as_object().expect("an object").clone());
+            let v = c.call(Method::PUT, &format!("{env}/secrets/{}/hosts?{}", enc(&key), c.q()), Some(body)).await?;
+            if json_out {
+                return print(&v);
+            }
+            println!("Bound {key} to {}, in {at}{}", hosts.join(", "), if untrusted { ", untrusted code too" } else { "" });
+        }
+        Secrets::Unbind { key } => {
+            c.call(Method::DELETE, &format!("{env}/secrets/{}/hosts?{}", enc(&key), c.q()), None).await?;
+            println!("Unbound {key}: its placeholders stop working");
         }
         Secrets::Requests(r) => {
             let (path, body) = match &r {

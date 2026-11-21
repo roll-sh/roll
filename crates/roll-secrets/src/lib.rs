@@ -281,6 +281,9 @@ pub type Result<T, E = Error> = std::result::Result<T, E>;
 pub enum Error {
     #[error("{0}")]
     BadRequest(String),
+    /// 400 with a code: `placement_required`.
+    #[error("{1}")]
+    Invalid(&'static str, String),
     #[error("{0}")]
     Unauthorized(String),
     #[error("{0}")]

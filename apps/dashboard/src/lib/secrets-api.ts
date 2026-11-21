@@ -111,7 +111,8 @@ export function secretsApi(project: string) {
     setFolderPolicy: (env: string, path: string, p: { approvals?: number; approvers?: string[] } = {}) => req<FolderPolicy>("PUT", `${E(env)}/folder-policies${qs({ path })}`, p),
     deleteFolderPolicy: (env: string, path: string) => req<null>("DELETE", `${E(env)}/folder-policies${qs({ path })}`),
     /** Destroys older versions' values of a key (all but the current one by default). */
-    /** Binds a key to hosts (an admin's): its value then reaches placeholder-taking consumers only through roll's proxy. */
+    /** Binds a key to hosts (an admin's): its value then reaches placeholder-taking consumers only through roll's proxy, only in
+     * the binding's header or query parameter (`untrusted` needs one: 400 `placement_required`). */
     setHosts: (env: string, key: string, hosts: Hosts, path = "/") => req<Hosts>("PUT", `${K(env, key)}/hosts${qs({ path })}`, hosts),
     clearHosts: (env: string, key: string, path = "/") => req<null>("DELETE", `${K(env, key)}/hosts${qs({ path })}`),
     purge: (env: string, key: string, path = "/", before_version?: number) => req<{ purged: number }>("POST", `${K(env, key)}/purge${qs({ path })}`, before_version ? { before_version } : {}),

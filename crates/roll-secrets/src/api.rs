@@ -180,6 +180,7 @@ impl IntoResponse for Error {
     fn into_response(self) -> Response {
         let (status, code) = match &self {
             Error::BadRequest(_) => (StatusCode::BAD_REQUEST, None),
+            Error::Invalid(code, _) => (StatusCode::BAD_REQUEST, Some(*code)),
             Error::Unauthorized(_) => (StatusCode::UNAUTHORIZED, Some("unauthorized")),
             Error::Forbidden(_) => (StatusCode::FORBIDDEN, Some("forbidden")),
             Error::NotFound(_) => (StatusCode::NOT_FOUND, None),

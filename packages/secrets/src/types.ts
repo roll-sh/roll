@@ -105,7 +105,9 @@ export type Secret = {
   hosts?: Hosts;
 };
 /** Where a key's value may go through a placeholder: hostnames or `*.` one-label wildcards, and the
- * one header (`Authorization: Bearer {}`) or query parameter that carries it (not both). */
+ * one header (`Authorization: Bearer {}`) or query parameter that carries it (not both). `untrusted`
+ * needs one (400 `placement_required`); a binding with neither, from before that, is health's
+ * `unplaced`. */
 export type Hosts = { hosts: string[]; header?: string; query?: string; untrusted?: boolean };
 /** A placeholder a resolve answered (never the placeholder itself). */
 export type Placeholder = { key: string; id: string; hosts: string[]; expires_at: number };
@@ -407,7 +409,7 @@ export type AwsRole = { id: string; name: string; role_arn: string; trust: "exte
 /** Where a key is set (`GET /v1/secrets/search?key=`): names and versions, never a value. */
 export type Place = { project: string; project_name: string; environment: string; path: string; key: string; version: number; updated_at: number; linked: boolean };
 /** One thing to fix (`GET …/health`), worst first: where, never a value. */
-export type Finding = { issue: "decoy_used" | "expired" | "rotation_failing" | "revoke_failing" | "missing" | "exposed" | "public" | "weak" | "operator_made" | "expiring" | "certificate_expiring" | "stale" | "unread" | "unreferenced"; environment: string; path: string; key: string; detail: string; owner?: string; decoy?: Decoy };
+export type Finding = { issue: "decoy_used" | "expired" | "rotation_failing" | "revoke_failing" | "missing" | "exposed" | "public" | "weak" | "unplaced" | "operator_made" | "expiring" | "certificate_expiring" | "stale" | "unread" | "unreferenced"; environment: string; path: string; key: string; detail: string; owner?: string; decoy?: Decoy };
 /** One project's findings (`GET /v1/secrets/findings`). */
 export type ProjectFindings = { project: string; project_name: string; findings: Finding[] };
 /** A URL roll calls to issue and revoke a value that lives outside roll (`rotator` links). */

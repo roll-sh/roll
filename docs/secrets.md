@@ -1094,7 +1094,9 @@ the Health view's "Managed credentials" list every managed credential with its s
 failure; `roll secrets rotations --rotate-due 7` rotates every one due within a week, or failing,
 in one run, for an operator's maintenance window, and fails if one does), `missing` (a required key an environment doesn't define, through its
 imports and base), `exposed` (a protected value also in an unprotected environment), `public`,
-`weak`, `expiring`, `certificate_expiring` (a certificate a project CA signed for a CSR that ends
+`weak`, `unplaced` (a key bound to hosts without a `header` or `query`, from before a placement
+was required: a trusted reader's placeholder may ride in any header, and an untrusted consumer's
+doesn't swap; see "Using a key without seeing it"), `expiring`, `certificate_expiring` (a certificate a project CA signed for a CSR that ends
 within two weeks: links' certificates are replaced by roll, a CSR's only by whoever asked; `key` is
 its names, `path` its CA), `operator_made` (a sync or a workload identity made as the
 operator account: "made by the operator account: re-save to bind it to a person". Before makers
@@ -2676,6 +2678,7 @@ roll secrets import  .env [--overwrite]                         # one change (.e
 roll secrets edit                                               # the folder in $EDITOR, one change
 roll secrets set     KEY --generate 48                          # a random value made locally
 roll secrets health                                            # every finding, every environment, worst first
+roll secrets bind    KEY --host api.stripe.com… [--header 'Authorization: Bearer {}' | --query NAME] [--untrusted]   # for placeholders; unbind KEY takes it off
 roll secrets setup   [-p P -e ENV --path /] | --approve | --show | --clear   # this directory's project (alone: approve roll.toml's, or pick)
 roll secrets doctor                                            # this machine's setup, checked
 roll secrets check   [.env.example] [--strict]                # keys a template names that the environment lacks
@@ -3299,12 +3302,21 @@ the binding, issues placeholders, decides each swap and audits it, and ships the
     sandbox could send the key to a subdomain of its own. Bind the exact host there
     (`myproject.supabase.co`); a wildcard under someone's own name there (`*.shop.vercel.app`) is
     fine. Matched case-insensitively, without the request's port or a final dot.
-  - Placement: `header: "Authorization: Bearer {}"` (or `"X-Api-Key: {}"`) swaps the placeholder
+  - Placement: where the placeholder goes, so the code holding it can't pick a header the host
+    echoes. `header: "Authorization: Bearer {}"` (or `"X-Api-Key: {}"`, `{}` exactly once) swaps it
     only in that header, written exactly as the template says; `query: "api_key"` only as that query
-    parameter's whole value. With neither, any request header may carry it, and never the query.
-    Not both. `Host`, `Content-Length`, `Transfer-Encoding` and `Connection` can't be templates.
+    parameter's whole value. Not both. `Host`, `Content-Length`, `Transfer-Encoding` and
+    `Connection` can't be templates. A placeholder anywhere else blocks the request. The dashboard's
+    binding form (a key's menu, "Bind to hosts…") and `roll secrets bind KEY --host api.stripe.com`
+    default to `Authorization: Bearer {}` (`--header` or `--query` for another).
+  - A binding with neither (made before a placement was required) stays valid for trusted readers,
+    whose placeholder may ride in any request header (never the query). Health lists it
+    (`unplaced`: "a placeholder for STRIPE_KEY may ride in any header"), and an untrusted
+    consumer's swap through it is refused (`PlacementRequired`). Binding it again with a placement
+    fixes both.
   - `untrusted: true` lets a **sensitive** key's placeholder reach readers that couldn't read its
-    value themselves: untrusted code (a fork's preview, a sandbox) and people's tokens. Off (the
+    value themselves: untrusted code (a fork's preview, a sandbox) and people's tokens. It needs a
+    placement (else 400 `placement_required`). Off (the
     default), only roll's trusted runtimes get a placeholder for a sensitive key, and everyone else
     has it withheld, as without placeholders. The binding's audit row says "untrusted consumers
     too".
@@ -3357,8 +3369,12 @@ the binding, issues placeholders, decides each swap and audits it, and ships the
     project, or a token revoked or narrowed, stops every swap of what they made;
   - the environment still exists, isn't frozen (an incident's cut-off), and isn't protected for an
     untrusted consumer;
-  - the key still exists and is still bound; the host and the place match its binding; a sensitive
-    key's binding still opts in, for a reader that couldn't read it; the value holds no reference.
+  - the key still exists and is still bound; the host and the place match its binding, which names a
+    placement for an untrusted consumer; a sensitive key's binding still opts in, for a reader that
+    couldn't read it; the value holds no reference.
+
+  It answers a `proxy::Swap`: the value, the key and the placeholder's record (`phd_…`), which the
+  response's scrub names.
 
   Then the key's own value is read as stored, never resolved. Nothing
   is cached, so a revocation, a binding taken off, or a freeze stops the next request. A rotation
@@ -3391,13 +3407,30 @@ the binding, issues placeholders, decides each swap and audits it, and ships the
   - a value with CR, LF or NUL is refused in a header; a query value is percent-encoded;
   - it's bounded: 64 KiB of headers, 16 KiB of query, 8 KiB of path, 16 placeholders and 16 KiB
     per value (`Limits`), or the request is refused before anything is asked;
-  - its errors say where and why, never the value or the placeholder.
-- **Not covered.** Responses aren't scrubbed. A binding with no `header` or `query` lets the
-  placeholder ride in any request header, and the code holding it picks which, so a bound host that
-  echoes any request header (request ids, debug endpoints) hands the key back. Until a placement is
-  required and responses are scrubbed (the thirty-fourth review's item 4), give every binding a
-  `header` (`Authorization: Bearer {}`). A placeholder inside Basic auth (base64) or a signed request (AWS SigV4) can't be swapped: use a
-  bearer header. Bodies are never rewritten.
+  - its errors say where and why, never the value or the placeholder;
+  - a request it swapped into asks for `Accept-Encoding: identity` (any other `Accept-Encoding` is
+    dropped), so its response can be scrubbed as it arrives;
+  - it answers the request's `proxy::Scrub` (below), empty when nothing was swapped.
+- **The response scrub (`roll_secrets::proxy::Scrub`).** No I/O. A bound host that echoes what it's
+  sent (a request id, a debug endpoint) would hand the value back to the code that never held it.
+  - It holds the forms of each value swapped into the request: as is, base64 (standard and URL-safe,
+    padded or not) and percent-encoded (upper and lower case hex). A value under 8 bytes isn't
+    looked for: it would match ordinary bytes, and every match ends the placeholder.
+  - `headers(&HeaderMap)` looks at each response header's name and value; `chunk(&[u8])` at the body
+    as it arrives, carrying the last (longest form − 1) bytes over, so a value split between two
+    reads is still found. Each answers `Err(Echoed { key, host, placeholder })`, the key, the host
+    and the placeholder's record, never the value or the placeholder, and keeps answering it.
+  - The forms live in memory only: `Debug` shows none, and they're wiped on drop. It's bounded by the
+    filter's limits (16 placeholders, 16 KiB per value), and a response costs one pass per form
+    over its bytes.
+  - `Secrets::echoed(placeholder, host)` (in process only; no HTTP route) ends the placeholder (a
+    host that echoes once will again) and records a `secrets.alert` row ("api.example.com echoed
+    STRIPE_KEY back…") with a notice to the environment's notify URL (`placeholder_echo`).
+- **Not covered.** A host that transforms the value before echoing it (hashes it, splits it across
+  fields, encrypts it), or one that echoes it compressed when asked not to (the proxy refuses those):
+  placement is what keeps the code from choosing an echoing header in the first place. A placeholder
+  inside Basic auth (base64) or a signed request (AWS SigV4) can't be swapped: use a bearer header.
+  Bodies are never rewritten.
 
 ### Using a key without seeing it: the proxy's contract
 
@@ -3448,10 +3481,21 @@ agents' sandboxes). Each one does exactly this:
    the CA. One label under a wildcard binding, never deeper.
 4. **Filter each request** with `roll_secrets::proxy::filter`, which calls `Secrets::substitute`
    for every placeholder. Pass the host it terminated TLS for, never the request's `Host` header.
-   Send nothing that the filter refuses.
+   Send nothing that the filter refuses, and send the headers it rewrote as they are (on a swapped
+   request it asks for `Accept-Encoding: identity`). Keep the `Scrub` it answers for step 6.
 5. **Re-dial upstream with real TLS verification**, against the system's roots (never the
    interception CA, never `insecure`), for the same host, so the consumer can't make the proxy
    trust a server the consumer controls.
+6. **Scrub the response** of a request that was swapped into (`Scrub::swapped() > 0`), before any
+   of it reaches the consumer:
+   - a response with a `Content-Encoding` other than `identity` is refused (the consumer gets a
+     502), never inflated;
+   - pass its headers to `Scrub::headers`, then each body chunk to `Scrub::chunk` before forwarding
+     that chunk;
+   - on `Echoed`, stop the response: the consumer gets a 502 if nothing was sent yet, or the
+     connection is cut, and none of the remaining bytes. Then call
+     `Secrets::echoed(&e.placeholder, &e.host)` (blocking, off the async runtime), which records the
+     alert, notifies, and ends the placeholder.
 
 **Ending.** `Secrets::end_intercept_cas(consumer, why)` ends every live CA of the consumer, with a
 revocation row (`revoked_at`, `revoked_why`) and a `secrets.intercept_ca.end` audit row.
@@ -5971,7 +6015,7 @@ found them sound. What's left is at the edges:
    them out on every start. The fix: store `{project, environment, by}` and resolve as the maker on
    each start.
 4. **A placeholder may ride in any header, and responses aren't scrubbed** (security, S; the
-   mechanism is confirmed, an echoing host isn't):
+   mechanism is confirmed, an echoing host isn't; fixing in `fix/secrets-placeholder-placement-scrub`):
    - a placement is required (the dashboard and CLI default to `Authorization: Bearer {}`), and
      untrusted bindings need one;
    - the proxy contract adds a bounded scrub of the swapped value (plain, base64, URL-encoded), as
