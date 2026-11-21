@@ -1411,7 +1411,7 @@ impl Apps {
                 let name = format!("vercel-{}", i + 1);
                 if run.schedules.len() < 20 && !run.schedules.iter().any(|s| s.path.as_deref() == Some(c.path.as_str()) || s.name == name) {
                     log.line(format!("plan: vercel.json's cron {} calls {}", c.schedule, c.path));
-                    run.schedules.push(crate::model::Scheduled { name, schedule: c.schedule.clone(), command: String::new(), path: Some(c.path.clone()), timezone: None, timeout_s: None });
+                    run.schedules.push(crate::model::Scheduled { name, schedule: c.schedule.clone(), command: String::new(), path: Some(c.path.clone()), timezone: None, timeout_s: None, auth: None });
                 }
             }
         }
@@ -2555,12 +2555,21 @@ impl Apps {
                             log.line(format!("scheduled {}: skipped, its last call to {path} is still out", sc.name));
                             continue;
                         }
-                        let host = url::Url::parse(&self.url(&e.slug)).ok().and_then(|u| u.host_str().map(str::to_string)).unwrap_or_default();
-                        let (this, sid, en, name, secret) = (self.clone(), svc.id.clone(), e.name.clone(), sc.name.clone(), secret.clone());
+                        let aud = self.url(&e.slug);
+                        let host = url::Url::parse(&aud).ok().and_then(|u| u.host_str().map(str::to_string)).unwrap_or_default();
+                        let (this, sid, en, name, secret, project, oidc) = (self.clone(), svc.id.clone(), e.name.clone(), sc.name.clone(), secret.clone(), svc.project.clone(), sc.auth.is_some());
                         let timeout = std::time::Duration::from_secs(sc.timeout_s.unwrap_or(300) as u64);
                         tokio::spawn(async move {
                             let began = std::time::Instant::now();
-                            let r = crate::public::call_scheduled(this.clone(), &sid, &en, &host, &path, secret.as_deref(), timeout).await;
+                            // `oidc`: roll's token for the service instead of CRON_SECRET.
+                            let r = match oidc {
+                                true => match this.service_token(&project, &sid, &en, &aud).await {
+                                    Ok(Some((jwt, _))) => crate::public::call_scheduled(this.clone(), &sid, &en, &host, &path, Some(&jwt), timeout).await,
+                                    Ok(None) => Err("roll issues no token for this environment".to_string()),
+                                    Err(e) => Err(format!("its token: {e:#}")),
+                                },
+                                false => crate::public::call_scheduled(this.clone(), &sid, &en, &host, &path, secret.as_deref(), timeout).await,
+                            };
                             this.calling.lock().remove(&key);
                             let ms = began.elapsed().as_millis() as u64;
                             let call = match &r {

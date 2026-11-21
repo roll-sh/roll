@@ -7473,9 +7473,58 @@ async fn an_instance_reads_its_oidc_token_for_an_allowed_audience() {
     assert!(s2.to_string().contains("oidc_audiences"), "{s2}");
 }
 
+/// Pushes and path schedules with `auth: "oidc"` (Pub/Sub push's and Cloud Scheduler's OIDC
+/// tokens): the bearer is roll's token for the service, the environment's URL its audience,
+/// instead of `CRON_SECRET`; a rule without it still carries the secret.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_push_rule_with_oidc_carries_rolls_token() {
+    let stream = Arc::new(FakeStream::default());
+    let rec = |value: &str| apps_control::integrations::StreamRecord { partition: 0, offset: 0, timestamp: 1, key: None, value: Some(value.as_bytes().to_vec()), headers: vec![] };
+    stream.records.lock().extend([("signed".to_string(), rec("a")), ("shared".to_string(), rec("b"))]);
+    let (s2, issuer) = (stream.clone(), Arc::new(FakeIssuer::default()));
+    let i2 = issuer.clone();
+    let w = world_full(|_| {}, false, move |d| {
+        d.resources = s2;
+        d.secrets = i2;
+    })
+    .await;
+    let ws = w.apps.deps.workspace.clone().unwrap();
+    ws.place(roll_workspace::Scope::All, &w.project, roll_workspace::Kind::Stream, "st_ag2345678abc", 0.0, 0.0).unwrap();
+    let run = json!({"port": 80,
+        "push": [{"stream": "st_ag2345678abc", "topic": "signed", "group": "web", "path": "/events", "auth": "oidc"}, {"stream": "st_ag2345678abc", "topic": "shared", "group": "web", "path": "/legacy"}],
+        "schedules": [{"name": "tick", "schedule": "*/5 * * * *", "path": "/api/cron", "auth": "oidc"}]});
+    let (svc, _) = image_service(&w, "web", run).await;
+    let id = svc["id"].as_str().unwrap().to_string();
+    let base = format!("/v1/apps/services/{id}/environments/production");
+    call(&w.api, "PATCH", &format!("{base}/variables"), Some(json!({"set": {"FAKE_LOG_AUTH": "1", "CRON_SECRET": "shared-secret"}}))).await;
+    let (_, d) = call(&w.api, "POST", &format!("{base}/redeploy"), Some(json!({}))).await;
+    assert_eq!(settled(&w, &id, "production", d["id"].as_str().unwrap()).await["status"], "active");
+    let token = format!("jwt.roll-apps:{}:{id}:production.{}", w.project, svc["environments"][0]["url"].as_str().unwrap());
+    let want = [format!("bearer /events {token}"), "bearer /legacy shared-secret".to_string(), format!("bearer /api/cron {token}")];
+    let mut lines = Vec::new();
+    let now = code_sql::now_ms();
+    w.apps.cron_pass(now).await;
+    for i in 0..200 {
+        w.apps.cron_pass(now + (i + 6) * 60_000).await;
+        let (_, log) = call(&w.api, "GET", &format!("{base}/logs"), None).await;
+        lines = log.as_array().unwrap().iter().filter_map(|l| l["text"].as_str().map(str::to_string)).filter(|t| t.starts_with("bearer ")).collect();
+        if want.iter().all(|w| lines.contains(w)) {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert!(want.iter().all(|w| lines.contains(w)), "{lines:?}");
+    // An auth that isn't oidc, or oidc on a command, is refused.
+    let bad = json!({"run": {"schedules": [{"name": "c", "schedule": "@daily", "command": "x", "auth": "oidc"}]}});
+    assert_eq!(call(&w.api, "PATCH", &format!("/v1/apps/services/{id}"), Some(bad)).await.0, StatusCode::BAD_REQUEST);
+    let bad = json!({"run": {"push": [{"stream": "st_ag2345678abc", "topic": "signed", "group": "web", "path": "/events", "auth": "basic"}]}});
+    assert_eq!(call(&w.api, "PATCH", &format!("/v1/apps/services/{id}"), Some(bad)).await.0, StatusCode::BAD_REQUEST);
+}
+
 /// Work after an answer (Vercel's `waitUntil`): an instance that asks at `ROLL_AWAKE_URL` isn't
 /// put to sleep while the hold lasts, and is once it ends; another instance's name or a wrong
-/// token holds nothing.
+/// token holds nothing. With `busy_cpu` (Railway's), one working on its own is held without
+/// asking.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn an_instance_held_awake_isnt_put_to_sleep() {
     let w = world().await;
@@ -7511,6 +7560,24 @@ async fn an_instance_held_awake_isnt_put_to_sleep() {
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
     assert!(!running(), "asleep once the hold ended");
+    // Over busy_cpu, idle past sleep_after: held, and said.
+    let (st, s) = call(&w.api, "PATCH", &format!("/v1/apps/services/{id}"), Some(json!({"run": {"busy_cpu": 50}}))).await;
+    assert_eq!(st, StatusCode::OK, "{s}");
+    let (_, d) = call(&w.api, "POST", &format!("{base}/redeploy"), Some(json!({}))).await;
+    let d = settled(&w, &id, "production", d["id"].as_str().unwrap()).await;
+    let (_, body) = visit_deployment(&w, &host(&svc["environments"][0]["url"]), d["id"].as_str().unwrap()).await;
+    let live = w.apps.live(&id, "production");
+    let up = body["vars"]["ROLL_INSTANCE"].as_str().unwrap_or_else(|| panic!("{body}")).to_string();
+    w.fake.set_busy(&up, 0.9);
+    live.tick().await;
+    tokio::time::sleep(Duration::from_millis(1500)).await;
+    live.tick().await;
+    live.tick().await;
+    assert!(w.fake.instances(&id).iter().any(|(n, _, st)| *n == up && *st == FakeState::Running), "busy, so awake");
+    let (_, log) = call(&w.api, "GET", &format!("{base}/logs"), None).await;
+    assert!(log.to_string().contains(&format!("{up} kept awake: CPU at")), "{log}");
+    let (st, _) = call(&w.api, "PATCH", &format!("/v1/apps/services/{id}"), Some(json!({"run": {"busy_cpu": 101}}))).await;
+    assert_eq!(st, StatusCode::BAD_REQUEST);
 }
 
 /// A project's month by service and environment (Railway's usage by service): each row priced,
