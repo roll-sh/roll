@@ -8,6 +8,10 @@ embed through the model provider you configure (`_inference`: OpenAI or any comp
 Cohere, Anthropic; the key sealed in the cluster), and `rrf`/`linear` retrievers mix them with
 lexical search.
 
+Guides for people building on roll search, one per workload, start with the first query in a
+minute: [guides/](guides/README.md) (site search, e-commerce, logs, RAG, multi-tenant SaaS). This
+README is the operator's and internals' view.
+
 Design: [architecture.md](architecture.md). Cross-crate interfaces: [contracts.md](contracts.md).
 On AWS search runs on the roll cloud fleet with every other product (docs/cloud/README.md).
 
