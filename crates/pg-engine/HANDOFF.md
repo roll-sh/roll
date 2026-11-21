@@ -12156,6 +12156,12 @@ instructions, which repeated within 0.1% from pair to pair. Every result hash eq
 - **The 22, base against cand/a280** (one pair): 103.80 -> 102.09 G user instructions (-1.64%):
   q22 -26.1%, q04 -11.1, q21 -9.6, q09 -3.8, q12 -1.1, the rest within +-0.2. VmHWM 1,678 ->
   1,684 MB. Against pgrust's 90.4 G (round 6's) 1.13x, from 1.15x.
+- **PGO (item 4)**: one `tools/dist-pgo.sh` build of cand/a280's head (`1dc351e4c`, default
+  training, 690 s; `--out ~/.cache/a280/bin/pgo`) and one pass of the 22 beside the plain build of
+  the same head: 102.07 G plain -> **93.65 G PGO** user instructions (-8.25%; every query
+  -0.1 to -20.8%, q15 -0.06, q01 -0.6, q06 -0.9), hashes PostgreSQL's, VmHWM 1,679 MB. The last
+  PGO figure (102.3 G) was three rounds old; two PGO builds of one commit differ by ~0.9%
+  (one build here). Against pgrust's PGO-built 90.4 G (round 6's): 1.04x.
 - **Dropped: item 1** (stored-bytes compares for rows without a header in index and bitmap heap
   scans' rechecks and filters; patch `~/.cache/a280/patches/0001-*.patch`). Its premise doesn't
   hold: every table row is written with a header (`exec::toast::encode`, a bulk load's COPY

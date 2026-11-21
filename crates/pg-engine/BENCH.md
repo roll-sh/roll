@@ -584,6 +584,27 @@ q02 +0.14, q07 -0.14, q08 -0.07, q09 -2.27 (EXTRACT), q22 +0.50 (the drift, belo
 VmHWM 1,678 -> 1,684 MB. Foreign cores b1 3.30, n3 2.85. All 22 result hashes PostgreSQL's (equal
 to round 9's).
 
+### PGO (item 4): one build of cand/a280's head, one pass of the 22 (n3 plain against pgo)
+
+`tools/dist-pgo.sh` of `1dc351e4c` (default training). 102.07 -> 93.65 G user instructions
+(-8.25%), hashes equal (PostgreSQL's), foreign cores n3 3.19, pgo 3.12, VmHWM 1,682 / 1,679 MB.
+
+| query | plain | PGO | % | query | plain | PGO | % |
+|---|---|---|---|---|---|---|---|
+| q01 | 7.755 | 7.707 | -0.63 | q12 | 6.150 | 6.072 | -1.28 |
+| q02 | 2.764 | 2.310 | -16.43 | q13 | 4.171 | 3.695 | -11.40 |
+| q03 | 4.595 | 4.096 | -10.85 | q14 | 1.456 | 1.257 | -13.66 |
+| q04 | 1.854 | 1.724 | -7.01 | q15 | 4.933 | 4.930 | -0.06 |
+| q05 | 3.492 | 3.132 | -10.30 | q16 | 2.925 | 2.539 | -13.20 |
+| q06 | 5.414 | 5.365 | -0.91 | q17 | 5.627 | 4.844 | -13.92 |
+| q07 | 4.328 | 3.765 | -13.02 | q18 | 16.584 | 14.828 | -10.59 |
+| q08 | 1.680 | 1.451 | -13.63 | q19 | 0.503 | 0.459 | -8.87 |
+| q09 | 9.768 | 8.889 | -9.00 | q20 | 1.435 | 1.137 | -20.82 |
+| q10 | 7.724 | 7.284 | -5.71 | q21 | 7.366 | 6.823 | -7.37 |
+| q11 | 0.881 | 0.761 | -13.70 | q22 | 0.664 | 0.586 | -11.77 |
+
+Round 6's pgrust (PGO-built) 90.4 G and PostgreSQL 159.3 G stand (no three-server table).
+
 ### q22's drift (item 3)
 
 b0 against n1 (no change to q22's path): `perf stat` of the engine, 10 runs: 896.36 -> 901.13 M
