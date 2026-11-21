@@ -666,6 +666,8 @@ pub struct UsageAdd {
     pub requests: i64,
     pub egress_bytes: i64,
     pub build_seconds: f64,
+    /// Stored logs past the first week (an environment keeping them 30 or 90 days), in GB-hours.
+    pub stored_gb_hours: f64,
 }
 
 /// One move of an environment's active deployment ([`Store::switch_active`]): from `from` to
@@ -957,6 +959,8 @@ impl Store {
         db.add_column("environments", "log_retention_days", "INTEGER")?;
         db.add_column("environments", "approvals", "INTEGER")?;
         db.add_column("environments", "badge", "INTEGER NOT NULL DEFAULT 0")?;
+        db.add_column("usage", "stored_gb_hours", "REAL NOT NULL DEFAULT 0")?;
+        db.add_column("project_usage", "stored_gb_hours", "REAL NOT NULL DEFAULT 0")?;
         // A custom domain sent to another of the app's ports.
         db.add_column("domains", "port", "INTEGER")?;
         // The roll login (`ses_…`) a ticket and a visit session came from: its end ends them.
@@ -1077,12 +1081,13 @@ impl Store {
             // What it used stays its project's (spend limits, the month's bill): deleting a
             // service and making another never brings the month's spend down.
             c.execute(
-                "INSERT INTO project_usage (project, hour, cpu_seconds, gb_seconds, requests, egress_bytes, build_seconds) \
-                 SELECT s.project, u.hour, SUM(u.cpu_seconds), SUM(u.gb_seconds), SUM(u.requests), SUM(u.egress_bytes), SUM(u.build_seconds) \
+                "INSERT INTO project_usage (project, hour, cpu_seconds, gb_seconds, requests, egress_bytes, build_seconds, stored_gb_hours) \
+                 SELECT s.project, u.hour, SUM(u.cpu_seconds), SUM(u.gb_seconds), SUM(u.requests), SUM(u.egress_bytes), SUM(u.build_seconds), SUM(u.stored_gb_hours) \
                  FROM usage u JOIN services s ON s.id = u.service WHERE u.service = ? GROUP BY s.project, u.hour \
                  ON CONFLICT (project, hour) DO UPDATE SET cpu_seconds = project_usage.cpu_seconds + excluded.cpu_seconds, \
                  gb_seconds = project_usage.gb_seconds + excluded.gb_seconds, requests = project_usage.requests + excluded.requests, \
-                 egress_bytes = project_usage.egress_bytes + excluded.egress_bytes, build_seconds = project_usage.build_seconds + excluded.build_seconds",
+                 egress_bytes = project_usage.egress_bytes + excluded.egress_bytes, build_seconds = project_usage.build_seconds + excluded.build_seconds, \
+                 stored_gb_hours = project_usage.stored_gb_hours + excluded.stored_gb_hours",
                 [id],
             )?;
             c.execute("DELETE FROM deploy_steps WHERE deployment IN (SELECT id FROM deployments WHERE service = ?)", [id])?;
@@ -3089,13 +3094,13 @@ impl Store {
     pub fn add_usage(&self, service: &str, env: &str, hour: i64, u: &UsageAdd) -> Result<()> {
         self.db.write(|c| {
             let n = c.execute(
-                "UPDATE usage SET cpu_seconds = cpu_seconds + ?, gb_seconds = gb_seconds + ?, requests = requests + ?, egress_bytes = egress_bytes + ?, build_seconds = build_seconds + ? WHERE service = ? AND env = ? AND hour = ?",
-                params![u.cpu_seconds, u.gb_seconds, u.requests, u.egress_bytes, u.build_seconds, service, env, hour],
+                "UPDATE usage SET cpu_seconds = cpu_seconds + ?, gb_seconds = gb_seconds + ?, requests = requests + ?, egress_bytes = egress_bytes + ?, build_seconds = build_seconds + ?, stored_gb_hours = stored_gb_hours + ? WHERE service = ? AND env = ? AND hour = ?",
+                params![u.cpu_seconds, u.gb_seconds, u.requests, u.egress_bytes, u.build_seconds, u.stored_gb_hours, service, env, hour],
             )?;
             if n == 0 {
                 c.execute(
-                    "INSERT INTO usage (service, env, hour, cpu_seconds, gb_seconds, requests, egress_bytes, build_seconds) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-                    params![service, env, hour, u.cpu_seconds, u.gb_seconds, u.requests, u.egress_bytes, u.build_seconds],
+                    "INSERT INTO usage (service, env, hour, cpu_seconds, gb_seconds, requests, egress_bytes, build_seconds, stored_gb_hours) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    params![service, env, hour, u.cpu_seconds, u.gb_seconds, u.requests, u.egress_bytes, u.build_seconds, u.stored_gb_hours],
                 )?;
             }
             Ok(())
@@ -3105,16 +3110,16 @@ impl Store {
     /// Usage per hour since `since_hour`: `(hour, usage)`.
     pub fn usage(&self, service: &str, env: Option<&str>, since_hour: i64) -> Result<Vec<(i64, UsageAdd)>> {
         let map = |r: &code_sql::Row<'_>| {
-            Ok((r.get(0)?, UsageAdd { cpu_seconds: r.get(1)?, gb_seconds: r.get(2)?, requests: r.get(3)?, egress_bytes: r.get(4)?, build_seconds: r.get(5)? }))
+            Ok((r.get(0)?, UsageAdd { cpu_seconds: r.get(1)?, gb_seconds: r.get(2)?, requests: r.get(3)?, egress_bytes: r.get(4)?, build_seconds: r.get(5)?, stored_gb_hours: r.get(6)? }))
         };
         Ok(match env {
             Some(e) => self.db.query(
-                "SELECT hour, cpu_seconds, gb_seconds, requests, egress_bytes, build_seconds FROM usage WHERE service = ? AND env = ? AND hour >= ? ORDER BY hour",
+                "SELECT hour, cpu_seconds, gb_seconds, requests, egress_bytes, build_seconds, stored_gb_hours FROM usage WHERE service = ? AND env = ? AND hour >= ? ORDER BY hour",
                 params![service, e, since_hour],
                 map,
             )?,
             None => self.db.query(
-                "SELECT hour, SUM(cpu_seconds), SUM(gb_seconds), SUM(requests), SUM(egress_bytes), SUM(build_seconds) FROM usage WHERE service = ? AND hour >= ? GROUP BY hour ORDER BY hour",
+                "SELECT hour, SUM(cpu_seconds), SUM(gb_seconds), SUM(requests), SUM(egress_bytes), SUM(build_seconds), SUM(stored_gb_hours) FROM usage WHERE service = ? AND hour >= ? GROUP BY hour ORDER BY hour",
                 params![service, since_hour],
                 map,
             )?,
@@ -3574,31 +3579,31 @@ impl Store {
     pub fn project_usage_rows(&self, project: &str, from_hour: i64, to_hour: i64) -> Result<(Vec<ServiceUsage>, UsageAdd)> {
         let rows = self.db.query(
             // An environment that's gone (a closed preview, nearly always) counts with the previews.
-            "SELECT u.service, s.name, u.env, COALESCE(e.ephemeral, 1), SUM(u.cpu_seconds), SUM(u.gb_seconds), SUM(u.requests), SUM(u.egress_bytes), SUM(u.build_seconds) \
+            "SELECT u.service, s.name, u.env, COALESCE(e.ephemeral, 1), SUM(u.cpu_seconds), SUM(u.gb_seconds), SUM(u.requests), SUM(u.egress_bytes), SUM(u.build_seconds), SUM(u.stored_gb_hours) \
              FROM usage u JOIN services s ON s.id = u.service LEFT JOIN environments e ON e.service = u.service AND e.name = u.env \
              WHERE s.project = ? AND u.hour >= ? AND u.hour < ? GROUP BY u.service, s.name, u.env, COALESCE(e.ephemeral, 1) ORDER BY s.name, u.env",
             params![project, from_hour, to_hour],
-            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get::<_, i64>(3)? != 0, UsageAdd { cpu_seconds: r.get(4)?, gb_seconds: r.get(5)?, requests: r.get(6)?, egress_bytes: r.get(7)?, build_seconds: r.get(8)? })),
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get::<_, i64>(3)? != 0, UsageAdd { cpu_seconds: r.get(4)?, gb_seconds: r.get(5)?, requests: r.get(6)?, egress_bytes: r.get(7)?, build_seconds: r.get(8)?, stored_gb_hours: r.get(9)? })),
         )?;
         let gone = self.db.query_row(
-            "SELECT COALESCE(SUM(cpu_seconds), 0), COALESCE(SUM(gb_seconds), 0), COALESCE(SUM(requests), 0), COALESCE(SUM(egress_bytes), 0), COALESCE(SUM(build_seconds), 0) \
+            "SELECT COALESCE(SUM(cpu_seconds), 0), COALESCE(SUM(gb_seconds), 0), COALESCE(SUM(requests), 0), COALESCE(SUM(egress_bytes), 0), COALESCE(SUM(build_seconds), 0), COALESCE(SUM(stored_gb_hours), 0) \
              FROM project_usage WHERE project = ? AND hour >= ? AND hour < ?",
             params![project, from_hour, to_hour],
-            |r| Ok(UsageAdd { cpu_seconds: r.get(0)?, gb_seconds: r.get(1)?, requests: r.get(2)?, egress_bytes: r.get(3)?, build_seconds: r.get(4)? }),
+            |r| Ok(UsageAdd { cpu_seconds: r.get(0)?, gb_seconds: r.get(1)?, requests: r.get(2)?, egress_bytes: r.get(3)?, build_seconds: r.get(4)?, stored_gb_hours: r.get(5)? }),
         )?;
         Ok((rows, gone))
     }
 
     pub fn project_usage(&self, project: &str, since_hour: i64) -> Result<UsageAdd> {
-        let row = |r: &code_sql::Row<'_>| Ok(UsageAdd { cpu_seconds: r.get(0)?, gb_seconds: r.get(1)?, requests: r.get(2)?, egress_bytes: r.get(3)?, build_seconds: r.get(4)? });
+        let row = |r: &code_sql::Row<'_>| Ok(UsageAdd { cpu_seconds: r.get(0)?, gb_seconds: r.get(1)?, requests: r.get(2)?, egress_bytes: r.get(3)?, build_seconds: r.get(4)?, stored_gb_hours: r.get(5)? });
         let live = self.db.query_row(
-            "SELECT COALESCE(SUM(u.cpu_seconds), 0), COALESCE(SUM(u.gb_seconds), 0), COALESCE(SUM(u.requests), 0), COALESCE(SUM(u.egress_bytes), 0), COALESCE(SUM(u.build_seconds), 0) \
+            "SELECT COALESCE(SUM(u.cpu_seconds), 0), COALESCE(SUM(u.gb_seconds), 0), COALESCE(SUM(u.requests), 0), COALESCE(SUM(u.egress_bytes), 0), COALESCE(SUM(u.build_seconds), 0), COALESCE(SUM(u.stored_gb_hours), 0) \
              FROM usage u JOIN services s ON s.id = u.service WHERE s.project = ? AND u.hour >= ?",
             params![project, since_hour],
             row,
         )?;
         let gone = self.db.query_row(
-            "SELECT COALESCE(SUM(cpu_seconds), 0), COALESCE(SUM(gb_seconds), 0), COALESCE(SUM(requests), 0), COALESCE(SUM(egress_bytes), 0), COALESCE(SUM(build_seconds), 0) \
+            "SELECT COALESCE(SUM(cpu_seconds), 0), COALESCE(SUM(gb_seconds), 0), COALESCE(SUM(requests), 0), COALESCE(SUM(egress_bytes), 0), COALESCE(SUM(build_seconds), 0), COALESCE(SUM(stored_gb_hours), 0) \
              FROM project_usage WHERE project = ? AND hour >= ?",
             params![project, since_hour],
             row,
@@ -3609,6 +3614,7 @@ impl Store {
             requests: live.requests + gone.requests,
             egress_bytes: live.egress_bytes + gone.egress_bytes,
             build_seconds: live.build_seconds + gone.build_seconds,
+            stored_gb_hours: live.stored_gb_hours + gone.stored_gb_hours,
         })
     }
 

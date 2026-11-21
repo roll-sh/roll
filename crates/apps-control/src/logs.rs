@@ -540,6 +540,13 @@ impl LogHub {
         gone
     }
 
+    /// The bytes of `key`'s stored chunks that start before `before` (ms).
+    pub async fn stored_before(&self, key: &str, before: i64) -> u64 {
+        let Some(objects) = &self.objects else { return 0 };
+        let starts = |chunk: &str| chunk.rsplit('/').next().and_then(|n| n.split('-').next()).and_then(|n| n.parse::<i64>().ok());
+        objects.list(&prefix(key)).await.unwrap_or_default().into_iter().filter(|(c, _)| starts(c).is_some_and(|s| s < before)).map(|(_, n)| n).sum()
+    }
+
     pub async fn delete(&self, key: &str) {
         self.forget(key);
         if let Some(o) = &self.objects {

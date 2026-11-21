@@ -7738,6 +7738,9 @@ async fn logs_past_their_retention_are_deleted() {
     put("env", "production", month).await;
     w.apps.cron_pass(now + 2 * 3_600_000).await;
     assert_eq!(left("production").await.len(), 2, "kept for its 30 days");
+    // What's kept past the first week is metered.
+    let stored: f64 = w.apps.store.usage(&id, Some("production"), 0).unwrap().iter().map(|(_, u)| u.stored_gb_hours).sum();
+    assert!(stored > 0.0, "{stored}");
     // A deleted environment's logs go with it.
     call(&w.api, "PUT", &format!("/v1/apps/services/{id}/environments/staging"), Some(json!({}))).await;
     put("env", "staging", recent).await;
@@ -7861,7 +7864,7 @@ async fn a_projects_month_reads_by_service() {
     let (a, _) = image_service(&w, "api", json!({"port": 80})).await;
     let (b, _) = image_service(&w, "web", json!({"port": 80})).await;
     let hour = code_sql::now_ms() / 3_600_000;
-    let use_of = |cpu: f64| apps_control::store::UsageAdd { cpu_seconds: cpu, gb_seconds: 0.0, requests: 0, egress_bytes: 0, build_seconds: 0.0 };
+    let use_of = |cpu: f64| apps_control::store::UsageAdd { cpu_seconds: cpu, ..Default::default() };
     let (ai, bi) = (a["id"].as_str().unwrap().to_string(), b["id"].as_str().unwrap().to_string());
     w.apps.db(move |s| {
         s.add_usage(&ai, "production", hour, &use_of(36_000.0))?;
