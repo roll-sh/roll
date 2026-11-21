@@ -37,6 +37,10 @@ pub fn router(apps: Arc<Apps>) -> axum::Router {
             if req.uri().path().starts_with(AWAKE) {
                 return hold_awake(apps, req).await;
             }
+            // Builds' remote cache (Turborepo, Nx), with their environment's token.
+            if req.uri().path().starts_with(crate::build_cache::PATH) && req.uri().path()[crate::build_cache::PATH.len()..].starts_with('/') {
+                return crate::build_cache::serve(apps, req).await;
+            }
             // An edge function's `context.next()` ([`crate::edge`]): signed, any host.
             if req.uri().path().starts_with(crate::edge::NEXT) {
                 return crate::edge::next(apps, req).await;
@@ -172,6 +176,11 @@ async fn oidc_token(apps: Arc<Apps>, req: Request) -> Response {
     if !audiences.contains(&aud) {
         return (StatusCode::FORBIDDEN, axum::Json(serde_json::json!({ "error": format!("{aud} isn't one of run.oidc_audiences") }))).into_response();
     }
+    // An environment's URL is the audience of roll's own pushes and scheduled calls to it: no
+    // instance gets one, or any service could sign a call to another's.
+    if apps.roll_audience(&aud) {
+        return (StatusCode::FORBIDDEN, axum::Json(serde_json::json!({ "error": format!("{aud} is on roll's apps domain: its pushes and scheduled calls are signed for it, and no instance may be") }))).into_response();
+    }
     let (jwt, until) = match apps.service_token(&project, id, env, &aud).await {
         Ok(Some(t)) => t,
         Ok(None) => return (StatusCode::SERVICE_UNAVAILABLE, axum::Json(serde_json::json!({ "error": "roll's OIDC issuer isn't on this deployment (it needs a public URL)" }))).into_response(),
@@ -184,6 +193,12 @@ impl Apps {
     /// Roll's OIDC token for `service` in `env` (`sub = roll-apps:<project>:<service>:<env>`) for
     /// `aud`, and when it expires (unix ms): the same one for a minute ([`OIDC_KEEP_MS`]), then signed
     /// again (so a rotation or a lost trust takes effect). None: no issuer here.
+    /// Whether `aud` names a URL on the apps domain (roll's pushes' and schedules' audiences).
+    pub(crate) fn roll_audience(&self, aud: &str) -> bool {
+        let domain = self.cfg.domain.to_ascii_lowercase();
+        url::Url::parse(aud).ok().and_then(|u| u.host_str().map(str::to_ascii_lowercase)).is_some_and(|h| h == domain || h.ends_with(&format!(".{domain}")))
+    }
+
     pub(crate) async fn service_token(&self, project: &str, service: &str, env: &str, aud: &str) -> anyhow::Result<Option<(String, i64)>> {
         let key = format!("{service}/{env}/{aud}");
         let now = code_sql::now_ms();

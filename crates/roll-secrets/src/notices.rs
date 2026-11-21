@@ -69,25 +69,27 @@ impl Secrets {
     /// readers needn't be ones who may reveal it) and `unread`. Returns how many were queued.
     pub(crate) fn sweep_reminders(&self) -> Result<usize> {
         let now = self.db.now_ms()?;
-        type Due = (String, String, String, Option<i64>);
+        type Due = (String, String, String, Option<i64>, bool);
         let due: Vec<Due> = self.db.read(|c| {
             c.query(
-                "SELECT id, project_id, slug, reminded_at FROM environments WHERE notify_url IS NOT NULL AND kind = 'standard' AND COALESCE(reminded_at, 0) <= ? LIMIT 100",
+                "SELECT id, project_id, slug, reminded_at, COALESCE(notify_set_by_session, 0) FROM environments WHERE notify_url IS NOT NULL AND kind = 'standard' AND COALESCE(reminded_at, 0) <= ? LIMIT 100",
                 params![now - REMIND_EVERY_MS],
-                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get::<_, i64>(4)? == 1)),
             )
         })?;
         let mut health: std::collections::HashMap<String, Vec<crate::health::Finding>> = Default::default();
         let mut queued = 0;
-        for (env_id, project, slug, at) in due {
+        for (env_id, project, slug, at, session) in due {
             if !health.contains_key(&project) {
-                let found = self.project_health(&project, &crate::Caller::operator(), false).unwrap_or_else(|e| {
+                // A decoy's staleness as any key's (`exempt` false): nothing to learn by elimination.
+                let found = self.findings(&project, &crate::Caller::operator(), false, false).unwrap_or_else(|e| {
                     tracing::warn!(%project, "a project's health for its reminders failed: {e}");
                     vec![]
                 });
                 health.insert(project.clone(), found);
             }
-            let findings: Vec<&crate::health::Finding> = health[&project].iter().filter(|f| f.environment == slug && !matches!(f.issue, Issue::Weak | Issue::Unread)).collect();
+            // `decoy_used` only to a URL a session or the operator set (`tells_decoy`).
+            let findings: Vec<&crate::health::Finding> = health[&project].iter().filter(|f| f.environment == slug && !matches!(f.issue, Issue::Weak | Issue::Unread) && (session || f.issue != Issue::DecoyUsed)).collect();
             let link = self.web_url.as_ref().map(|w| format!("{}/dashboard/projects/{project}/secrets?view=health", w.trim_end_matches('/')));
             let mut parts = vec![];
             for issue in [Issue::Expired, Issue::Missing, Issue::Exposed, Issue::Public, Issue::Expiring, Issue::Stale] {
@@ -129,18 +131,20 @@ impl Secrets {
         let now = self.db.now_ms()?;
         // The environment's URL as it is now (sealed: a chat's incoming webhook URL is a credential);
         // none any more, and the notice is dropped.
-        type Due = (String, String, String, Option<Vec<u8>>, String, i64);
+        type Due = (String, String, String, Option<Vec<u8>>, String, i64, bool);
         let due: Vec<Due> = self.db.read(|c| {
             c.query(
-                "SELECT n.id, n.project_id, n.env_id, e.notify_url, n.body, n.attempts FROM notices n LEFT JOIN environments e ON e.id = n.env_id
+                "SELECT n.id, n.project_id, n.env_id, e.notify_url, n.body, n.attempts, COALESCE(e.notify_set_by_session, 0) FROM notices n LEFT JOIN environments e ON e.id = n.env_id
                  WHERE n.sent_at IS NULL AND n.next_at <= ? AND n.attempts < ? LIMIT 50",
                 params![now, ATTEMPTS],
-                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?)),
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?, r.get::<_, i64>(6)? == 1)),
             )
         })?;
         let (mut sent, mut failed) = (0, 0);
-        for (id, project, env_id, sealed, body, attempts) in due {
-            let Some(sealed) = sealed else {
+        for (id, project, env_id, sealed, body, attempts, session) in due {
+            let body: Json = serde_json::from_str(&body).unwrap_or(Json::Null);
+            // No URL any more, or a decoy's news for a URL a token set since it was queued: dropped.
+            let Some(sealed) = sealed.filter(|_| session || !tells_decoy(&body)) else {
                 self.db.write(|c| c.execute("DELETE FROM notices WHERE id = ?", [&id]))?;
                 continue;
             };
@@ -156,7 +160,6 @@ impl Secrets {
             if self.db.write(|c| c.execute("UPDATE notices SET attempts = attempts + 1, next_at = ? WHERE id = ? AND attempts = ? AND sent_at IS NULL", params![hold, id, attempts]))? != 1 {
                 continue;
             }
-            let body: Json = serde_json::from_str(&body).unwrap_or(Json::Null);
             match deliver.post(url.expose(), &id, &Value::default(), &body) {
                 Ok(()) => {
                     sent += 1;
@@ -173,6 +176,13 @@ impl Secrets {
         self.db.write(|c| c.execute("DELETE FROM notices WHERE created_at < ? AND (sent_at IS NOT NULL OR attempts >= ?)", params![old, ATTEMPTS]))?;
         Ok((sent, failed))
     }
+}
+
+/// Whether a notice says a decoy was used (its own alert, or a reminder's `decoy_used`): only for a
+/// notify URL a session or the operator set (`notify_set_by_session`, [`Secrets::sees_decoys`]). A
+/// token that set one would otherwise learn which keys are decoys from it.
+fn tells_decoy(body: &Json) -> bool {
+    body["alert"]["kind"] == "decoy_used" || body["findings"].as_array().is_some_and(|f| f.iter().any(|f| f["issue"] == "decoy_used"))
 }
 
 /// The associated data of an environment's sealed notify URL.

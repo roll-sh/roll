@@ -47,6 +47,8 @@ export interface Build {
   packages?: string[];
   /** The longest its build may take, seconds (60–21600, held to the node's own limit); unset: the node's. */
   timeout_s?: number;
+  /** Its builder: small (2 vCPU, 4 GiB; default), medium (4, 8 GiB) or large (8, 16 GiB), minutes metered by size on the fleet. */
+  size?: "small" | "medium" | "large";
 }
 
 export type ServiceType = "web" | "worker" | "cron";
@@ -566,6 +568,10 @@ export interface EnvironmentPut {
   traces?: boolean;
   /** Its pages measure their Web Vitals (a tag roll adds). */
   vitals?: boolean;
+  /** How long its logs are kept (null: 7 days). */
+  log_retention_days?: 7 | 30 | 90 | null;
+  /** Approvals a deployment needs before it goes live (0 or null: none). */
+  approvals?: number | null;
   /** Its deploys post commit statuses and GitHub Deployments (false: someone else reports them). */
   report?: boolean;
   /** What its code may reach from the next deploy: roll and `hosts` only, or anything. null: open. */
@@ -681,6 +687,10 @@ export interface Environment extends EnvironmentSummary {
   traces?: boolean;
   /** Its pages measure their Web Vitals for roll. */
   vitals?: boolean;
+  /** Days its logs are kept: 7 (default), 30 or 90; a preview's are 7. */
+  log_retention_days?: number;
+  /** People other than a deployment's author who approve it before it goes live (0–3). */
+  approvals?: number;
   /** Its deploys are reported to the Git host (commit statuses, GitHub Deployments); false:
    *  someone else reports them (roll previews' `pv-` environments). */
   report?: boolean;
@@ -820,6 +830,8 @@ export interface Deployment {
   steps?: { step: string; at: number }[];
   /** Its image's last scan for known vulnerabilities, once one ran. */
   vulnerabilities?: ScanSummary;
+  /** Who approved putting it live, where its environment asks for approvals (single GET only). */
+  approved_by?: string[];
 }
 
 export interface Slo {
@@ -932,7 +944,7 @@ export interface Variables {
    * reference: a reference variable's template (names, never a value). sealed: run with, never
    * shown again (not by `reveal` either); a reference that reads a sealed value is sealed too.
    */
-  vars: { name: string; masked: string; source: VariableSource; reference?: string; sealed?: boolean; /** Kept as a file at this path in its instances (not in their environment). */ file?: string }[];
+  vars: { name: string; masked: string; source: VariableSource; reference?: string; sealed?: boolean; /** Kept as a file at this path in its instances (not in their environment). */ file?: string; /** Only its instances get it, never a build's steps. */ runtime_only?: boolean }[];
 }
 
 export interface LogLine {
@@ -1469,6 +1481,8 @@ export const appsApi = {
   rollback: (id: string, e: string, d: string, keepVariables = false) => call<Deployment>("POST", `${dep(id, e, d)}/rollback`, keepVariables ? { keep_variables: true } : undefined),
   /** Back to the one live before what runs (the server walks back through rollbacks). */
   rollbackPrevious: (id: string, e: string) => call<Deployment>("POST", `${env(id, e)}/rollback`),
+  /** A person's approval of a deployment waiting at ready; the last one needed puts it live. */
+  approve: (id: string, e: string, d: string) => call<{ deployment: string; approved_by: string[]; needed: number; live: string | null; waiting?: string }>("POST", `${dep(id, e, d)}/approve`),
   /** The live image again with the current variables and settings: no build, same revision. */
   redeploy: (id: string, e: string, body: { message?: string } = {}) => call<Deployment>("POST", `${env(id, e)}/redeploy`, body),
   pushStates: (id: string, e: string) => call<PushState[]>("GET", `${env(id, e)}/push`),
@@ -1502,7 +1516,7 @@ export const appsApi = {
   setVariables: (
     id: string,
     e: string,
-    change: { set?: Record<string, string>; unset?: string[]; seal?: string[]; files?: Record<string, string | null>; copy_from?: string; copy?: string[] },
+    change: { set?: Record<string, string>; unset?: string[]; seal?: string[]; files?: Record<string, string | null>; runtime_only?: Record<string, boolean>; copy_from?: string; copy?: string[] },
   ) => call<Variables>("PATCH", `${env(id, e)}/variables`, change),
   diff: (id: string, e: string, from: string) => call<EnvironmentDiff>("GET", `${env(id, e)}/diff${qs({ from })}`),
 
