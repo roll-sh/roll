@@ -1090,19 +1090,23 @@ previews are listed once those products are on.
 Ranked; the top item is in progress. A watchdog reads this list. Unblocked work comes first; what
 waits on a sibling PR reaching main is last.
 
-1. **A "hand this to an agent" workflow (this PR).** `hand_to_agent`: an error group or a slow
-   query (or a bug described) becomes a work item with its evidence (`code_create_work`), a coding
-   agent on one of the person's machines takes it (`agents_create_thread` in its own worktree, the
-   prompt shown first; `agents_claim_work` binds the item, not a lease), its requests go to the person, its branch is published as a change
-   (`agents_publish_thread`), checked and previewed (`code_get_change`, `previews_wait`), and only
-   the person queues it (`code_enqueue_change`). A workflow can now need roll code's tools:
-   `prompts::FRONTED` names them as `/v1/mcp` fronts them, and rolld's
-   `workflows_need_code_tools_that_exist` holds each to one roll code has. Its `owner` and `repo`
-   complete from `code_list_repos`.
-2. **A sandboxed "code mode"** (Cloudflare's): a short script calls tools as functions, each call
-   still through the gate and the audit log as if made one by one, for clients that pay per tool
-   in context. Search mode (`?tools=search`) covers the same clients today; code mode would cut
-   the round trips of a many-step task.
+1. **An outsider's reply never becomes a reviewer learning (this PR).** Found while mapping
+   learnings to a tool (#635's review): resolving roll's finding recorded the latest reply as a
+   learning, whoever wrote it, so on a public repo a reader (or a GitHub commenter who can't push)
+   could put words into what roll's reviewer keeps in mind for every later review, and roll's
+   approval can count toward landing. The reason now comes only from a reply that isn't `outside`
+   (`reviewer.rs::outsiders_replies_never_become_learnings`). Learnings made before this can still
+   hold such words, so reading them stays `no tool yet`; a person deletes one with `DELETE
+   …/learnings/{id}`.
+2. **Decision for the user: a sandboxed "code mode"** (Cloudflare's Code Mode, Anthropic's code
+   execution with MCP). A model writes a short script against typed tool functions; roll runs it
+   and each call still goes through the gate and the audit log as if made one by one. It cuts
+   tokens and round trips for clients with many tools (search mode, `?tools=search`, already
+   covers clients that can't take the list). It needs an embedded script engine on rolld (QuickJS
+   through `rquickjs`, with memory and time limits and no I/O but tool calls) and runs
+   model-written code on fleet nodes, which roll apps' rule keeps customer code off. Options: (a)
+   build it in rolld behind a flag; (b) run scripts in a preview-style container, slower to start;
+   (c) not now, search mode is enough. Not started until the user picks.
 3. **As siblings land** (`sibling-check.py`, 2026-11-21 21:30, over every open PR): secrets'
    deleted projects (#585: `GET /v1/secrets/deleted` a read; recovering one stays a person's, an
    admin row that undoes a confirmed delete, and #585 lists it in `no-tool.txt`); search's migration from a remote cluster (#485: `migrate` and
@@ -1119,18 +1123,20 @@ waits on a sibling PR reaching main is last.
    nears ~60 (47 now), as for any product past ~60; a docs search tool (Supabase, Vercel, Neon,
    Cloudflare and Stripe have one) once roll has user documentation (`docs/` is design notes and
    contracts); a call's `_meta.traceparent` (SEP-414) carried into the routed request once rolld's
-   API traces; a removed person's repositories handed to someone else (roll code's). For roll code's routes (found by
-   #631's review; the tools keep clear of both): `PATCH /v1/code/work/{id}` lets any writer change a
-   claimed item's state, ending another agent's lease that `release_work` would refuse; `PATCH
-   /v1/code/changes/{id}` with `draft: true` takes a queued change out of the queue as a `write`,
-   where `DELETE …/enqueue` is `delete`. For their
+   API traces; a removed person's repositories handed to someone else (roll code's). Looked at and left by design (#631's review): a work
+   item's claim is cooperative (heartbeat, release and complete check the claimant only when the
+   body names an `agent`), so `PATCH /v1/code/work/{id}`'s state is no weaker than `release_work`;
+   and `draft: true` on a queued change dequeues it as a `write`, which only delays a landing
+   (`update_work` and `update_change` keep clear of both anyway). For their
    owners (they fail only under load and pass alone): code-control's
    `automations::concurrency_cancel_and_retry` and
    `agents_code::roll_code_projects_with_auto_pull_follow_their_default_branch`.
    Not doing: "remember this browser"; a preset that reveals development's values without asking
    (#354); a connection-level `?project=` (only a token's rules bound a project; a default that
    some tools can't honour would look like a boundary).
-6. **Landed 2026-11-21:** roll code's second batch of routes with no tool (#635: AI review jobs,
+6. **Landed 2026-11-21:** `hand_to_agent`, a problem handed to a coding agent and its change brought
+   back for review, workflows that may need roll code's tools (`prompts::FRONTED`, held by rolld's
+   tests), and `list_agent_threads` answering each machine's projects (#637); roll code's second batch of routes with no tool (#635: AI review jobs,
    prices and spend; a repo's reviewer, review rules and audit log; previews made and removed,
    `stop_preview` destructive; automations on, off, retried, their catalogue and a dry run, retry
    and enable open-world; sandboxes listed, stopped and their use; learnings kept back until they
