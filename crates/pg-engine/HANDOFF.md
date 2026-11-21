@@ -12106,6 +12106,54 @@ at open, a compaction): older builds ignore the manifest's `format` and fail on 
   the probe needs from the OS page cache, as PostgreSQL's 8 kB page), each a format change for
   its own round.
 
+## Analytic CPU, round 11: lookup probes and seeks (agent 283)
+
+TPC-H SF1 on lane C, plain dist builds only (BENCH.md "Analytic CPU, round 11" has the tables).
+Base **h0** = origin's `79806dd6c` (cand/a277-2 and cand/a280 landed); data loaded by h0. Harness:
+agent 280's copied to `~/.cache/a283/tpch/` (`pair.sh`, ONE pair per `tools/lane.sh c` hold;
+`proflbr.sh` adds `perf script` output; `under.py` / `leafpar.py` break an LBR profile down by a
+frame and by a leaf's callers). Lane C read 3.6-6.8 foreign cores in lane.sh's reading, 1.5-3.3
+in the pairs' own: no pair met the 1.0 rule, and the gates are on user instructions, which
+repeated within 0.2% from pair to pair. Every result hash equal to h0's (and so PostgreSQL's).
+
+- **The head's real total (item 1)**: one pass of the 22 on h0, **100.35 G** user instructions
+  (q09 9.11, q18 16.57, q21 7.22, q22 0.646), every hash PostgreSQL's, VmHWM 1,680,764 kB. 277's
+  and 280's changes together, as the brief guessed (~100.5).
+- **Where the lookups' instructions were at h0** (`perf record -e instructions:u --call-graph
+  lbr`, q09 / q22 / q07 / q03 / q18 / q21 / q10 / q17): q09's unique-key probes of `orders_pkey`
+  (`Store::first_with` -> `PointReader::first_raw`) were **12.5% of q09**, more than the multi-get's
+  memcmp the brief named: each probe sought its entry (`smallest_key`: `find_block`, the block,
+  `Block::seek`, the block held), then sought the same key's newest version again (`newest`: the
+  memtables, `Held::holding`'s two compares, `seek_on`). q03's and q07's lineitem entries
+  (`Lookup::batch`'s scan of an index key not unique) went through `Scan::next`, which copies each
+  entry's key into a Vec and its value, made from the key, into a Bytes (`Cursor::take`), dropped
+  once the row key was appended to the batch. q21's EXISTS / NOT EXISTS lookups
+  (`first_row_scanned`) were 29% of q21 (`add` 9.4: decode and filter; `get_with` 7.1; `Scan::next`
+  6.0; `Scan::reseek` 5.0). q09's kept `supplier` lookups hashed their keys with SipHash
+  (`LookupScratch::cache`, ~0.9% of q09). q22 has no lookup left in its profile (280's NOT EXISTS
+  is a scan stopped at its first match); q18, q10 and q17 have none.
+- **cand/a283, first commit: a unique key's probe is one seek when L1 is the only source that may
+  hold its range** (`PointReader::first_in_l1`: no frozen source or L0 file, a memtable without
+  keys of the range's relation, no range deletion). Its first entry at or after the key is the
+  newest version of the smallest key there: the row when the snapshot sees it and it isn't a
+  deletion; otherwise (a newer version, a deletion, a key the start extends) the search as
+  before. A bulk-loaded and compacted database (TPC-H) has only L1. `file_first` hands its callers
+  the block and the position, not only the key.
+- **Second commit: a lookup reads its entries' row keys by reference** (`Scan::next_value`, the
+  value lent to a closure; `Lookup::batch`'s entry scan, `entry_keys`, `first_row_scanned`).
+- **Third commit: the kept table's lookup cache hashes with `fasthash`**.
+- **Gates** (h0 against b1 = the three commits, user instructions a run, 2 pairs): **q09 -3.77 /
+  -3.72%, q07 -3.79 / -3.62, q03 -3.55 / -3.44, q08 -2.28 / -2.27, q05 -1.43 / -1.42**, q04 -1.04
+  / -1.01, q21 -0.98 / -0.87, q22 -0.47 / -0.45. Point selects (lane A, 8 clients, one pair) 38,865
+  -> 38,292 instructions an op (-1.5%: a primary key's probe is `first_raw`); 100-row range reads
+  (lane B, one pair) 348,549 -> 348,620 (+0.02%).
+- **Verification of cand/a283** (`tools/quick-check.sh` on its code, `6c43700de`): clippy 16
+  warnings, none new in a changed file; 430 tests in 25 binaries, and again `--profile
+  verify-checked`; crash_random seeds 1-3 x 2, power_cut_at_every_point; regress 51,148 / 51,150,
+  0 newly differing; isolation 1,647 / 1,648; pg_dump_tap 14,609 passed. `first_in_l1` is
+  exercised by the storage model tests' `check_at` (`first_with` of every range at every snapshot,
+  after flushes and compactions: L1 alone, versions newer than the snapshot, deletions).
+
 ## Analytic CPU, round 10 (agent 280)
 
 TPC-H SF1 on lane C, plain dist builds only (BENCH.md "Analytic CPU, round 10" has the tables).

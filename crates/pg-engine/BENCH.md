@@ -285,6 +285,45 @@ The current checked measurements compare release engine builds and PostgreSQL 18
 the wire. Older rounds below are historical records, with their original methods and
 limits. Their results have not been reverified on the current source.
 
+## Analytic CPU, round 11: lookup probes and seeks (2026-11-21, agent 283)
+
+HANDOFF "Analytic CPU, round 11" has what changed. Plain dist builds (`tools/dist.sh`): **h0**
+origin's `79806dd6c`; **b1** cand/a283's three code commits on it. TPC-H: lane C, agent 280's
+harness copied to `~/.cache/a283/tpch/` (a fresh engine on a copy of SF1 loaded by h0, a 2 GB
+cache, a warm-up of the 22, 3 runs a query in one `perf stat` window over the engine's cgroup).
+Point selects and 100-row range reads: agent 277's harness (`~/.cache/a283/bench/`), 100,000 rows,
+8 clients, 10 s. Each pair in its own `tools/lane.sh` hold; lane.sh read 3.6-6.8 foreign cores
+(no pair met the 1.0 rule): the gates are on user instructions.
+
+### The 22 at the head (h0, one pass, 1 run a query)
+
+100.35 G user instructions: q01 7.76, q02 2.70, q03 4.45, q04 1.80, q05 3.42, q06 5.41, q07 4.05,
+q08 1.54, q09 9.11, q10 7.72, q11 0.86, q12 6.15, q13 4.17, q14 1.44, q15 4.93, q16 2.93, q17 5.55,
+q18 16.57, q19 0.49, q20 1.41, q21 7.22, q22 0.65. Every hash PostgreSQL's; VmHWM 1,680,764 kB;
+foreign cores 3.29.
+
+### b1 against h0 (user instructions a run, G; % per pair, pairs h0 b1 then b1 h0)
+
+| query | h0 | b1 | instructions % | cycles % |
+|---|---|---|---|---|
+| q03 | 4.450 | 4.295 | -3.55 / -3.44 | -8.1 / +6.1 |
+| q04 | 1.800 | 1.782 | -1.04 / -1.01 | -3.4 / -7.1 |
+| q05 | 3.420 | 3.371 | -1.43 / -1.42 | -2.9 / +5.5 |
+| q07 | 4.078 | 3.926 | -3.79 / -3.62 | +2.1 / -10.1 |
+| q08 | 1.588 | 1.552 | -2.28 / -2.27 | +3.9 / -10.9 |
+| q09 | 9.161 | 8.818 | -3.77 / -3.72 | -5.3 / -5.5 |
+| q21 | 7.224 | 7.157 | -0.98 / -0.87 | -7.5 / +8.0 |
+| q22 | 0.646 | 0.643 | -0.47 / -0.45 | -10.8 / +0.4 |
+
+Foreign cores per arm (the pair's own reading): h0 1.86 1.59, b1 1.53 1.49. Hashes equal.
+
+### Point selects and range reads (8 clients, one pair each, per op)
+
+| workload | h0 instructions | b1 instructions | % | cycles % | foreign cores h0 / b1 |
+|---|---|---|---|---|---|
+| point select (lane A) | 38,865 | 38,292 | -1.47 | -0.9 | 1.43 / 1.07 |
+| range read, 100 rows (lane B) | 348,549 | 348,620 | +0.02 | +2.0 | 1.28 / 1.52 |
+
 ## Bulk writes, round 21: the size model's per-row costs, INSERT … SELECT's modelled rows as stored (2026-11-21, agent 281)
 
 HANDOFF "Bulk writes, round 21" has what changed. Lane C, the 1M-row bulk script with joined
