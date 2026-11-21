@@ -149,6 +149,174 @@ pub fn policy_expr_tree(ctx: &ExecCtx, t: &Arc<Table>, sql: &str) -> Option<Stri
     Some(out)
 }
 
+/// What a stored expression over a table was analysed as.
+#[derive(Clone, Copy)]
+pub enum StoredTree<'a> {
+    /// A CHECK constraint or an index's predicate: a boolean condition.
+    Condition,
+    /// An index key, as written.
+    Key,
+    /// A column default or generation expression: assignment-coerced to the column's type.
+    Default(&'a DataType),
+}
+
+/// A binder over no relation, at a query level of its own, and the tree printer over it.
+fn tree_binder<'b, 'a>(ctx: &'b ExecCtx<'a>) -> Binder<'b, 'a> {
+    let mut b = Binder::new(ctx, vec![]);
+    b.deparse = true;
+    b.unplanned = true;
+    b.level().barrier = true;
+    let mut lvl = Level::new();
+    lvl.barrier = true;
+    b.levels.push(lvl);
+    b
+}
+
+fn tree_over<'q, 'b, 'a>(b: &'q mut Binder<'b, 'a>) -> Tree<'q, 'b, 'a> {
+    let mut t = Tree {
+        b,
+        qs: HashMap::new(),
+        subst: None,
+        recursive_flag: false,
+        rename: None,
+        colls: Vec::new(),
+    };
+    t.qs.insert(1, QState::default());
+    t
+}
+
+/// pg_constraint.conbin, pg_index.indexprs (`list`: a List of them) and indpred,
+/// pg_attrdef.adbin: stored expressions over table `t` (range-table entry 1) as
+/// nodeToString prints them. None when one uses something this doesn't model.
+pub fn table_expr_tree(ctx: &ExecCtx, t: &Arc<Table>, sql: &str, kind: StoredTree, list: bool) -> Option<String> {
+    let nodes = ast::parse_exprs(sql).ok()?;
+    let mut b = tree_binder(ctx);
+    let mut tr = tree_over(&mut b);
+    let names: Vec<String> = t
+        .columns
+        .iter()
+        .map(|c| if c.dropped { String::new() } else { c.name.clone() })
+        .collect();
+    let (rte, perm) = tr.relation_rte(t.oid, 'r', None, &t.name, &names, true, 1, 0, false);
+    let (rel, _) = tr.table_item(t, rte, perm, &t.name, None, &names)?;
+    tr.b.level().scope = Scope { rels: vec![rel] };
+    let clause = match kind {
+        StoredTree::Condition => Clause::Check,
+        StoredTree::Key => Clause::IndexExpr,
+        StoredTree::Default(_) => Clause::Default,
+    };
+    let mut out = Vec::new();
+    for n in &nodes {
+        let e = tr
+            .b
+            .in_clause(clause, |b| {
+                let e = b.bind_expr(n)?;
+                match kind {
+                    StoredTree::Condition => b.coerce_bool(e, "CHECK"),
+                    StoredTree::Key => Ok(e),
+                    StoredTree::Default(ty) => b.coerce_assign(e, ty, ""),
+                }
+            })
+            .ok()?;
+        let mut s = String::new();
+        tr.expr(&mut s, &e, 1)?;
+        out.push(s);
+    }
+    if list {
+        return Some(format!("({})", out.join(" ")));
+    }
+    let [one] = <[String; 1]>::try_from(out).ok()?;
+    Some(one)
+}
+
+/// pg_trigger.tgqual: a trigger's WHEN over its table's OLD (range-table entry 1) and NEW
+/// (entry 2) rows, as CreateTrigger stores it.
+pub fn trigger_when_tree(ctx: &ExecCtx, t: &Arc<Table>, sql: &str) -> Option<String> {
+    let n = ast::parse_expr(sql).ok()?;
+    let mut b = tree_binder(ctx);
+    let mut tr = tree_over(&mut b);
+    let names: Vec<String> = t
+        .columns
+        .iter()
+        .map(|c| if c.dropped { String::new() } else { c.name.clone() })
+        .collect();
+    let mut rels = Vec::new();
+    for refname in ["old", "new"] {
+        let (rte, perm) = tr.relation_rte(t.oid, 'r', None, refname, &names, false, 1, 0, false);
+        rels.push(tr.table_item(t, rte, perm, refname, None, &names)?.0);
+    }
+    tr.b.level().scope = Scope { rels };
+    let e = tr
+        .b
+        .in_clause(Clause::Where, |b| {
+            let e = b.bind_expr(&n)?;
+            b.coerce_bool(e, "WHEN")
+        })
+        .ok()?;
+    let mut s = String::new();
+    tr.expr(&mut s, &e, 1)?;
+    Some(s)
+}
+
+/// pg_constraint.conbin of a domain's CHECK: its VALUE a CoerceToDomainValue of the base
+/// type, as domainAddCheckConstraint stores it.
+pub fn domain_check_tree(ctx: &ExecCtx, base: &DataType, sql: &str) -> Option<String> {
+    let n = ast::parse_expr(sql).ok()?;
+    let mut b = tree_binder(ctx);
+    let mut tr = tree_over(&mut b);
+    let col = {
+        let q = tr.q();
+        let c = q.next_col;
+        q.next_col += 1;
+        let node = format!(
+            "{{COERCETODOMAINVALUE :typeId {} :typeMod {} :collation {} :location -1}}",
+            base.oid(),
+            base.typmod(),
+            type_collation(base)
+        );
+        q.domain_value = Some((c, node));
+        c
+    };
+    let rel = derived_rel("", &[OutCol::new("value", base.clone())], col);
+    tr.b.level().scope = Scope { rels: vec![rel] };
+    let e = tr
+        .b
+        .in_clause(Clause::Check, |b| {
+            let e = b.bind_expr(&n)?;
+            b.coerce_bool(e, "CHECK")
+        })
+        .ok()?;
+    let mut s = String::new();
+    tr.expr(&mut s, &e, 1)?;
+    Some(s)
+}
+
+/// pg_type.typdefaultbin and pg_proc.proargdefaults (`list`): defaults over no relation,
+/// each assignment-coerced to its type.
+pub fn default_exprs_tree(ctx: &ExecCtx, defaults: &[(&str, &DataType)], list: bool) -> Option<String> {
+    let mut b = tree_binder(ctx);
+    let mut tr = tree_over(&mut b);
+    let mut out = Vec::new();
+    for (sql, ty) in defaults {
+        let n = ast::parse_expr(sql).ok()?;
+        let e = tr
+            .b
+            .in_clause(Clause::Default, |b| {
+                let e = b.bind_expr(&n)?;
+                b.coerce_assign(e, ty, "")
+            })
+            .ok()?;
+        let mut s = String::new();
+        tr.expr(&mut s, &e, 1)?;
+        out.push(s);
+    }
+    if list {
+        return Some(format!("({})", out.join(" ")));
+    }
+    let [one] = <[String; 1]>::try_from(out).ok()?;
+    Some(one)
+}
+
 // ── output helpers ──
 
 /// pg_cast: (source, target) → (castfunc, castmethod).
@@ -479,6 +647,8 @@ struct QState {
     winrefs: Vec<usize>,
     /// The column position standing for merge_action() in a MERGE's RETURNING.
     merge_action: Option<usize>,
+    /// The column position standing for a domain CHECK's VALUE, and its node.
+    domain_value: Option<(usize, String)>,
 }
 
 /// A FROM item's column as a reference resolves it: its name and the Var.
@@ -3514,6 +3684,10 @@ impl Tree<'_, '_, '_> {
         let q = self.qs.get_mut(&lvl)?;
         if q.merge_action == Some(col) {
             out.push_str("{MERGESUPPORTFUNC :msftype 25 :msfcollid 100 :location -1}");
+            return Some(());
+        }
+        if let Some((_, node)) = q.domain_value.as_ref().filter(|(c, _)| *c == col) {
+            out.push_str(node);
             return Some(());
         }
         let v = q.cols.get(&col)?.clone();

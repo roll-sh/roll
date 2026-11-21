@@ -23,13 +23,16 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 /// The catalogs whose rows aren't spliced but are kept for a later version in which nothing
-/// they read changed (`unchanged`): pg_depend and information_schema's constraint views.
+/// they read changed (`unchanged`): pg_depend, pg_namespace and pg_proc (which the system
+/// views' definitions read) and information_schema's constraint views.
 pub fn kept(table: SysTable) -> bool {
     use SysTable::*;
     spliced(table)
         || matches!(
             table,
             PgDepend
+                | PgNamespace
+                | PgProc
                 | IsTableConstraints
                 | IsKeyColumnUsage
                 | IsReferentialConstraints

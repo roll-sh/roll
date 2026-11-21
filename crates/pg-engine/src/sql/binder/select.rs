@@ -4747,6 +4747,18 @@ impl Binder<'_, '_> {
         let rel = match rel {
             Some(r) => r,
             None => match SysTable::lookup(schema, &rv.relname, &self.ctx.search_path) {
+                // A system view planned from its definition, as a view of the user's is
+                // (not while collecting dependencies or deparsing: those see the view).
+                Some(st)
+                    if !self.deparse
+                        && !self.unplanned
+                        && self.deps.is_none()
+                        && self.refs.is_none()
+                        && locking.is_none()
+                        && let Some(v) = crate::catalog::system::expanded_view(st) =>
+                {
+                    Relation::View(v)
+                }
                 Some(st) => {
                     let cols: Vec<OutCol> = st
                         .columns()
@@ -5061,7 +5073,27 @@ impl Binder<'_, '_> {
                         }
                         let reads = self.outer_reads(&name, rename);
                         let saved_reads = std::mem::replace(&mut self.outer_reads, reads);
+                        // A view of a plain SELECT is pulled up (pull_up_simple_subquery): its
+                        // level is planned with the query's, its relations in the query's join
+                        // search under the query's quals.
+                        let node = ast::parse_stmt(&v.query).ok();
+                        let simple = !self.deparse
+                            && !self.unplanned
+                            && self.deps.is_none()
+                            && self.refs.is_none()
+                            && !v.option("security_barrier")
+                            && matches!(node.as_ref().and_then(inner), Some(NodeEnum::SelectStmt(s))
+                                if matches!(
+                                    pb::SetOperation::try_from(s.op).unwrap_or(pb::SetOperation::SetopNone),
+                                    pb::SetOperation::SetopNone | pb::SetOperation::Undefined
+                                ) && s.values_lists.is_empty());
+                        let saved_defer = (self.defer_level.take(), std::mem::take(&mut self.deferred));
+                        if simple {
+                            self.defer_level = Some(self.levels.len() + 1);
+                        }
                         let r = self.bind_view_query(&v);
+                        let deferred = std::mem::take(&mut self.deferred);
+                        (self.defer_level, self.deferred) = saved_defer;
                         self.outer_reads = saved_reads;
                         // (The view's relations, once pulled up, after this level's.)
                         let rt_up = (rt_lo, self.fresh_id(), self.last_rt_flat);
@@ -5069,7 +5101,18 @@ impl Binder<'_, '_> {
                         self.pushed_lock = saved_push;
                         self.view_lock = saved_lock;
                         self.view_stack.pop();
-                        let (plan, vcols) = r?;
+                        let (mut plan, vcols) = r?;
+                        // (One that keeps a level of its own, its Subquery Scan's: planned now.)
+                        if deferred
+                            && (node.as_ref().is_some_and(|n| own_query_level(n, &plan))
+                                || optimize::unsafe_outputs(&plan).iter().any(|u| *u))
+                        {
+                            self.planned_in_analysis += 1;
+                            self.hidden_rtes += crate::sql::paths::plan_query_limited(self.ctx, &mut plan, None);
+                            if let Err(e) = super::check_merge_keys(self.ctx, &mut plan) {
+                                self.plan_error(e)?;
+                            }
+                        }
                         // A column the view's query reads that fails (`ViewDef::rowtype_cols`)
                         // fails only where this query uses it: the view's own row has a NULL
                         // there.
