@@ -51,6 +51,8 @@ export interface Build {
   timeout_s?: number;
   /** Its builder: small (2 vCPU, 4 GiB; default), medium (4, 8 GiB) or large (8, 16 GiB), minutes metered by size on the fleet. */
   size?: "small" | "medium" | "large";
+  /** A Git URL service's submodules fetched into the tree (default: left out). */
+  submodules?: boolean;
 }
 
 export type ServiceType = "web" | "worker" | "cron";

@@ -1360,7 +1360,7 @@ impl Apps {
             (Source::Git { url, root }, _) => {
                 let rev = d.revision.as_deref().ok_or_else(|| anyhow::anyhow!("no revision to build"))?;
                 log.line(format!("fetching {url} at {}", &rev[..rev.len().min(12)]));
-                let files = crate::git_source::materialize(&self.git_remote(&svc.id, url).await, rev, &tree).await?;
+                let files = crate::git_source::materialize_with(&self.git_remote(&svc.id, url).await, rev, &tree, svc.build.submodules.unwrap_or(false)).await?;
                 log.line(format!("fetched {files} files"));
                 root.clone()
             }
