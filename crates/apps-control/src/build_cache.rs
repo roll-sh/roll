@@ -188,10 +188,10 @@ impl Apps {
 
     /// Artifacts unused for [`KEEP_DAYS`] deleted (their rows first, in one write: a read never
     /// finds a row without its object, and no upload's object is another's).
-    /// What each cache holds is metered too, `hours` of it (`stored_gb_hours`), shared by the
-    /// services that build from it ([`scope`]), each node for the services it owns (so a fleet
-    /// counts each once).
-    pub(crate) async fn build_cache_pass(self: &Arc<Self>, services: &[crate::store::ServiceRow], now: i64, hours: f64) {
+    /// What each cache holds is metered too, a GB-hour each hour (`stored_gb_hours`), shared by the
+    /// services that build from it ([`scope`]), each node for the services it owns and each hour
+    /// once (so a fleet, a restart or a takeover counts it once).
+    pub(crate) async fn build_cache_pass(self: &Arc<Self>, services: &[crate::store::ServiceRow], now: i64) {
         let Some(objects) = self.deps.objects.clone() else { return };
         let Ok(gone) = self.db(move |s| s.expire_artifacts(now - KEEP_DAYS * 86_400_000)).await else { return };
         for o in gone {
@@ -204,11 +204,10 @@ impl Apps {
             if users.is_empty() {
                 continue;
             }
-            let share = bytes as f64 / 1e9 * hours / users.len() as f64;
+            let share = bytes as f64 / 1e9 / users.len() as f64;
             for svc in users.into_iter().filter(|s| self.owns(&s.id)) {
-                let u = crate::store::UsageAdd { stored_gb_hours: share, ..Default::default() };
                 let (sid, e) = (svc.id.clone(), env.to_string());
-                let _ = self.db(move |s| s.add_usage(&sid, &e, now / 3_600_000, &u)).await;
+                let _ = self.db(move |s| s.meter_stored(&sid, &e, "cache", now / 3_600_000, share)).await;
             }
         }
     }
