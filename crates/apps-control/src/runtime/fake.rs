@@ -370,6 +370,10 @@ impl Runtime for Fake {
         self.intercepted.lock().insert(network.to_string(), i.is_some());
     }
 
+    fn intercepted(&self, network: &str) -> Option<super::egress::Intercepted> {
+        self.intercepted.lock().get(network).filter(|on| **on).map(|_| super::egress::Intercepted { requests: 3, swapped: 2, refused: vec!["api.stripe.com: a placeholder in the query".into()] })
+    }
+
     fn name(&self) -> &'static str {
         "fake"
     }

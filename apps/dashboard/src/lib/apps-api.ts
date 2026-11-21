@@ -712,6 +712,10 @@ export interface Environment extends EnvironmentSummary {
   egress?: Egress;
   /** Hosts its egress proxy refused lately: not listed, or (`private`) resolving only to private addresses. */
   egress_refused?: { host: string; private?: true }[];
+  /** Who a closed environment's placeholders are made by; null: no one (its bound keys withheld). */
+  closed_by?: string | null;
+  /** A closed environment's interception (roll secrets' placeholders): requests filtered, placeholders swapped, the latest refusals. */
+  intercepted?: { requests: number; swapped: number; refused?: string[] };
   /** A push deploys only once its commit's checks pass. */
   wait_for_ci?: boolean;
   /** The push (sha) waiting for its checks, if one is. */
