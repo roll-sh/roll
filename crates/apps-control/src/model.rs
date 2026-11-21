@@ -1157,13 +1157,51 @@ pub struct Alerts {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub log_match: Option<String>,
     pub log_count: u32,
+    /// CPU at or above this share of each instance's `cpu`, every minute of the five
+    /// (Railway's CPU monitor): `alert.cpu`. 0, off (the default).
+    pub cpu_pct: u8,
+    /// The app's own gauges (its Prometheus endpoint, OTLP, log metrics) past a threshold for
+    /// some minutes running (Cloud Monitoring's metric alerts): `alert.metric`.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub metrics: Vec<MetricAlert>,
 }
 
 impl Default for Alerts {
     fn default() -> Self {
-        Alerts { memory_pct: 90, error_pct: 5, p95_ms: 0, capacity_pct: 10, log_match: None, log_count: 10 }
+        Alerts { memory_pct: 90, error_pct: 5, p95_ms: 0, capacity_pct: 10, log_match: None, log_count: 10, cpu_pct: 0, metrics: Vec::new() }
     }
 }
+
+/// An alert on one of the app's own gauges: its value now (each series' newest point of the
+/// last minute, the largest, or their sum with `sum`) above or below a threshold in `minutes`
+/// judgments running (1–5, default 3).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MetricAlert {
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub above: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub below: Option<f64>,
+    #[serde(default = "MetricAlert::default_minutes")]
+    pub minutes: u8,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub sum: bool,
+}
+
+impl MetricAlert {
+    fn default_minutes() -> u8 {
+        3
+    }
+
+    /// Whether `value` is past its threshold.
+    pub fn breached(&self, value: f64) -> bool {
+        self.above.is_some_and(|t| value > t) || self.below.is_some_and(|t| value < t)
+    }
+}
+
+/// The most metric alerts a service has.
+pub const MAX_METRIC_ALERTS: usize = 10;
 
 impl Default for Run {
     fn default() -> Self {
@@ -1224,8 +1262,20 @@ impl Run {
     /// The checked settings, with what the type implies filled in (a worker runs at least one
     /// instance; a volume allows one).
     pub fn normalized(mut self) -> Result<Run> {
-        if self.alerts.memory_pct > 100 || self.alerts.error_pct > 100 || self.alerts.capacity_pct > 100 {
-            return Err(Error::BadRequest("alerts.memory_pct, alerts.error_pct and alerts.capacity_pct are 0–100 (0 is off)".into()));
+        if self.alerts.memory_pct > 100 || self.alerts.error_pct > 100 || self.alerts.capacity_pct > 100 || self.alerts.cpu_pct > 100 {
+            return Err(Error::BadRequest("alerts.memory_pct, alerts.error_pct, alerts.capacity_pct and alerts.cpu_pct are 0–100 (0 is off)".into()));
+        }
+        if self.alerts.metrics.len() > MAX_METRIC_ALERTS {
+            return Err(Error::BadRequest(format!("alerts.metrics is at most {MAX_METRIC_ALERTS} alerts")));
+        }
+        for (i, m) in self.alerts.metrics.iter().enumerate() {
+            let name_ok = !m.name.is_empty() && m.name.len() <= 200 && m.name.bytes().enumerate().all(|(i, b)| b.is_ascii_alphabetic() || b == b'_' || b == b':' || (i > 0 && (b.is_ascii_digit() || b == b'.')));
+            if !name_ok || m.above.is_some() == m.below.is_some() || m.above.or(m.below).is_some_and(|t| !t.is_finite()) || !(1..=5).contains(&m.minutes) {
+                return Err(Error::BadRequest("alerts.metrics[] is a gauge's name (a Prometheus name), one finite threshold, above or below, and minutes 1–5".into()));
+            }
+            if self.alerts.metrics[..i].iter().any(|o| o.name == m.name && o.sum == m.sum) {
+                return Err(Error::BadRequest(format!("alerts.metrics names {} twice", m.name)));
+            }
         }
         if self.alerts.log_match.as_ref().is_some_and(|m| m.trim().is_empty() || m.len() > 200) || !(1..=10_000).contains(&self.alerts.log_count) {
             return Err(Error::BadRequest("alerts.log_match is 1–200 characters, alerts.log_count 1–10000".into()));

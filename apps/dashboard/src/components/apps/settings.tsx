@@ -1,7 +1,7 @@
 import { Trash2 } from "lucide-react";
 import { useReducedMotion } from "@roll/brand";
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
-import { appsApi, SERVICE_NAME, type Build, type Environment, type Prices, type PushState, type Reset, type Run, type Service, type ServicePatch, type Source } from "@/lib/apps-api";
+import { appsApi, SERVICE_NAME, type Build, type Environment, type MetricAlert, type Prices, type PushState, type Reset, type Run, type Service, type ServicePatch, type Source } from "@/lib/apps-api";
 import { Field, Segmented } from "../redis/shared";
 import { btn, Confirm, danger, input, Panel, panel, primary } from "../ui";
 import { Link } from "@/components/link";
@@ -83,6 +83,10 @@ interface Form {
   alertCapacity: string;
   alertLog: string;
   alertLogCount: string;
+  /** CPU alert, a share of each instance's cpu. */
+  alertCpu: string;
+  /** Alerts on its own gauges, one a line (`queue_depth > 100 for 5m`). */
+  alertMetrics: string;
   rolloutSteps: string;
   rolloutStep: string;
   rolloutErrors: string;
@@ -191,6 +195,8 @@ export function formOf(s: Service): Form {
     alertCapacity: str(s.run.alerts?.capacity_pct),
     alertLog: s.run.alerts?.log_match ?? "",
     alertLogCount: str(s.run.alerts?.log_count ?? 10),
+    alertCpu: str(s.run.alerts?.cpu_pct ?? 0),
+    alertMetrics: (s.run.alerts?.metrics ?? []).map(metricAlertLine).join("\n"),
     rolloutSteps: (s.run.rollout?.steps ?? []).join(", "),
     rolloutStep: str(s.run.rollout?.step_s),
     rolloutErrors: str(s.run.rollout?.error_pct),
@@ -297,8 +303,10 @@ export function patchOf(s: Service, f: Form): ServicePatch {
     run.oidc_audiences = list.length ? list : null;
   }
   if (f.memoryTarget !== before.memoryTarget) run.memory_target = num(f.memoryTarget);
-  if (f.alertMemory !== before.alertMemory || f.alertErrors !== before.alertErrors || f.alertP95 !== before.alertP95 || f.alertCapacity !== before.alertCapacity || f.alertLog !== before.alertLog || f.alertLogCount !== before.alertLogCount)
+  if (f.alertMemory !== before.alertMemory || f.alertErrors !== before.alertErrors || f.alertP95 !== before.alertP95 || f.alertCapacity !== before.alertCapacity || f.alertLog !== before.alertLog || f.alertLogCount !== before.alertLogCount || f.alertCpu !== before.alertCpu || f.alertMetrics !== before.alertMetrics)
     run.alerts = {
+      cpu_pct: Number(f.alertCpu) || 0,
+      metrics: metricAlerts(f.alertMetrics),
       memory_pct: Number(f.alertMemory) || 0,
       error_pct: Number(f.alertErrors) || 0,
       p95_ms: Number(f.alertP95) || 0,
@@ -355,6 +363,27 @@ export function patchOf(s: Service, f: Form): ServicePatch {
   return patch;
 }
 
+/** A metric alert as Settings writes it: `queue_depth > 100 for 5m` (`sum` after it for their sum). */
+export function metricAlertLine(m: MetricAlert): string {
+  const op = m.above != null ? `> ${m.above}` : `< ${m.below ?? 0}`;
+  return `${m.name} ${op}${m.minutes && m.minutes !== 3 ? ` for ${m.minutes}m` : ""}${m.sum ? " sum" : ""}`;
+}
+
+/** Lines of `name > n` or `name < n`, each with an optional `for Nm` and `sum`, as `alerts.metrics`
+ *  (a line it can't read is left for the API to refuse whole, never dropped). */
+export function metricAlerts(text: string): MetricAlert[] {
+  return text
+    .split("\n")
+    .map((l) => l.trim())
+    .filter(Boolean)
+    .map((l) => {
+      const m = /^(\S+)\s*([<>])\s*(-?[\d.]+)(?:\s+for\s+(\d+)m)?(\s+sum)?$/.exec(l);
+      if (!m) return { name: l };
+      const value = Number(m[3]);
+      return { name: m[1], ...(m[2] === ">" ? { above: value } : { below: value }), ...(m[4] ? { minutes: Number(m[4]) } : {}), ...(m[5] ? { sum: true } : {}) };
+    });
+}
+
 /** `name: pattern` lines as `run.log_metrics` (a line with no name is its own pattern's). */
 export function logMetrics(text: string): { name: string; pattern: string }[] {
   return text
@@ -367,7 +396,7 @@ export function logMetrics(text: string): { name: string; pattern: string }[] {
     });
 }
 
-const NUMERIC: (keyof Form)[] = ["scalePer", "port", "timeout", "retries", "min", "max", "concurrency", "queue", "healthTimeout", "healthEvery", "healthFailures", "drain", "cpuTarget", "busyCpu", "latencyTarget", "memoryTarget", "suspendAfter", "sleepAfter", "volumeSize", "backupEvery", "backupKeep", "alertMemory", "alertErrors", "alertP95", "sloObjective", "sloLatency", "sloWindow", "metricsPort", "alertCapacity", "alertLogCount", "rolloutStep", "rolloutErrors", "restartTries"];
+const NUMERIC: (keyof Form)[] = ["scalePer", "port", "timeout", "retries", "min", "max", "concurrency", "queue", "healthTimeout", "healthEvery", "healthFailures", "drain", "cpuTarget", "busyCpu", "latencyTarget", "memoryTarget", "suspendAfter", "sleepAfter", "volumeSize", "backupEvery", "backupKeep", "alertMemory", "alertErrors", "alertP95", "sloObjective", "sloLatency", "sloWindow", "metricsPort", "alertCapacity", "alertLogCount", "alertCpu", "rolloutStep", "rolloutErrors", "restartTries"];
 
 /** A rollout's steps as typed (`10, 50`): increasing percents 1–99, at most five; null when they aren't. */
 export function rolloutSteps(v: string): number[] | null {
@@ -801,6 +830,9 @@ export function SettingsTab({
                 <Field label="Metrics from its log" hint="name: pattern, one a line; each minute, the lines holding it (any case) as a gauge">
                   <textarea value={form.logMetrics} onChange={(e) => set("logMetrics", e.target.value)} rows={2} placeholder="payments_failed: payment failed" className={`${input} w-full font-mono text-[12px]`} spellCheck={false} />
                 </Field>
+                <Field label="Alerts on its own gauges" hint="name > n or name < n, one a line; for 1–5m running (default 3), sum to add their series">
+                  <textarea value={form.alertMetrics} onChange={(e) => set("alertMetrics", e.target.value)} rows={2} placeholder="queue_depth > 1000 for 5m" className={`${input} w-full font-mono text-[12px]`} spellCheck={false} />
+                </Field>
                 <Field label="Metrics endpoint" hint="its Prometheus path, scraped every 15 s while it runs; empty: none">
                   {t("metricsPath", "/metrics")}
                 </Field>
@@ -829,6 +861,9 @@ export function SettingsTab({
             )}
             <Field label="Alert: memory (%)" hint="of its limit, five minutes; 0 off">
               {t("alertMemory", "90")}
+            </Field>
+            <Field label="Alert: CPU (%)" hint="of each instance's vCPU, five minutes; 0 off">
+              {t("alertCpu", "0")}
             </Field>
             <Field label="A crash loop after a deploy" hint="within ten minutes of going live">
               <select value={form.rollbackOnCrash ? "back" : "stay"} onChange={(e) => set("rollbackOnCrash", e.target.value === "back")} className={`${input} w-full`}>
