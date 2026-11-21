@@ -418,13 +418,15 @@ async fn query(
     let started = std::time::Instant::now();
     // The superuser only for the operator (no grant) or a grant the gate found may `admin` the
     // endpoint; any other grant's SQL runs as the writer role (docs/mcp.md, decision 6).
-    let may_admin = grant.is_none() || capable.is_some_and(|axum::Extension(roll_auth::Capable(a))| a == roll_auth::scope::Action::Admin);
+    use roll_auth::scope::Action;
+    let may = |a: Action| grant.is_none() || capable.as_ref().is_some_and(|axum::Extension(c)| c.has(a));
     let as_ = if body.read_only {
         crate::control::SqlAs::ReadOnly
-    } else if may_admin {
+    } else if may(Action::Admin) {
         crate::control::SqlAs::Owner
     } else {
-        crate::control::SqlAs::Writer
+        // Dropping objects needs `delete` on the endpoint (an event trigger refuses it otherwise).
+        crate::control::SqlAs::Writer { may_drop: may(Action::Delete) }
     };
     let results = c.query(&id, &body.sql, as_).await?;
     Ok(Json(json!({ "results": results, "took_ms": started.elapsed().as_millis() as u64 })))
