@@ -639,6 +639,8 @@ previews are listed once those products are on.
 | `postgres_execute` | Run SQL that may change data or schema (INSERT, UPDATE, DDL) on an endpoint; without `admin` on the endpoint, as a role that owns the database's objects, never the superuser (decision 6). | `POST /v1/endpoints/{endpoint}/query` |
 | `postgres_describe_schema` | Every table's columns and types on an endpoint (read-only). | `POST /v1/endpoints/{endpoint}/query` |
 | `postgres_explain` | A statement's plan as JSON, without running it (Neon's explain). | `POST /v1/endpoints/{id}/query` (read-only, `EXPLAIN (FORMAT JSON)`) |
+| `postgres_activity` | Every client session now, blocked ones first: user, app, state, what it waits on, `blocked_by`, how long its transaction and query have run, the query. | `POST /v1/endpoints/{endpoint}/query` (fixed, read-only) |
+| `postgres_health_checks` | A database's health in one read (Neon's `inspect_database`): cache and index hit rates, dead-row bloat, the oldest open transaction, idle-in-transaction sessions, connections against the limit, transaction ID age, size; each ok or warn. | `POST /v1/endpoints/{endpoint}/query` (fixed, read-only) |
 | `postgres_slow_queries` | The 20 slowest statements by mean time (Neon's slow queries; `pg_stat_statements`). | `POST /v1/endpoints/{id}/query` (read-only) |
 | `postgres_advisors` | Unused indexes, unindexed foreign keys, tables without a primary key, sequential scans (Supabase's advisors). | `POST /v1/endpoints/{id}/query` (read-only) |
 | `postgres_list_extensions` | Extensions installed and available. | `POST /v1/endpoints/{id}/query` (read-only) |
