@@ -17542,3 +17542,51 @@ Found, not fixed:
   (69: columns read through views and functions), geometric operators' row estimates (10 of 58),
   user aggregates' transition costs (shared transition states, SQL transition functions: 24 in
   aggregates.sql), Function Scan rows of set-returning SQL functions (46).
+
+## EXPLAIN plans against PostgreSQL 18.6's, round 2 (agent 274, 2026-11-21)
+
+Harness: agent 273's `~/.cache/a273/rx`, copied to `~/.cache/a274/rx` (`run.sh <port> <label>`,
+`cmp.py`, `classify.py`; `lst.py` lists every key of a group, `newdiff.py` counts blocks fixed
+and newly differing between two engine runs). PostgreSQL 18.6 ran in `a274-pg` (the pinned
+reference image, autovacuum off). Base `515ff3b04`: 2,483 of 17,654 differ (catalog 991, errors
+43, cost 657, width 239, rows 220, extra-node 121, display 117, other shapes 38, sort-agg 24,
+join-order 22, scan 8, join-method 3). Two PostgreSQL runs of the harness differ in 182 blocks
+(catalog plans and a few costs): compare against one run of your own.
+
+### First candidate (`cand/a274`)
+
+- **A hash join's `char` key from a join's nullable side** (273's find): EXPLAIN's join costing
+  (`explain.rs` `join_built`) takes each key's statistics through `strip_relabel`, which looked
+  through varchar / text casts only. The binder casts a `char` (`char(1)`) column to `bpchar`
+  for `bpchar = bpchar`, dropping the length: a RelabelType to PostgreSQL, which
+  examine_variable looks through. So the key had no statistics and the bucket size was the 0.1
+  default (cost 117.34..813.29 against 172.09). `strip_relabel` now strips every
+  binary-coercible cast (`costs::binary_coercible`, the rule `costs::strip` already used).
+  The join search had the right statistics (its `key_operand` strips the cast); the display and
+  every plan EXPLAIN re-costs from a planned join didn't.
+- **A left join reduced to an inner join** (`reduce_outer_joins`): its ON clause's equalities
+  joined the equivalence classes after the WHERE's and the joins above, because only joins
+  written as inner recorded them (`JoinMeta::ec_written`). PostgreSQL's deconstruct_jointree
+  meets the reduced join's quals as an inner join's, before those, so the class members' order
+  differed, and with it the join clause generate_join_implied_equalities picks for a pair of
+  relations and the size of the join relation (built from its first pair): `c left join a on
+  c.a = a.code join b on a.code = b.a` sized the three-way join at 1,670 rows (PostgreSQL
+  18,870) and chose another join order. The binder now records an outer join's ON equalities
+  (`JoinMeta::on_written`) and reduce_outer_joins moves them to the front of `ec_written` when
+  the join becomes inner.
+- Golden `a274_join_keys` (recorded from 18.6).
+
+Regression files' EXPLAINs: 0 fixed, 0 newly differing (the 2,483 stay), 11 blocks' costs moved
+toward PostgreSQL's (join:102 977.09 -> 266.22, PostgreSQL 268.22; opr_sanity:71 1,081.18 ->
+407.65, PostgreSQL 402.42; their remaining differences have other causes). TPC-H: base against
+new on SF 0.05 (`~/.cache/a274/tpchplans.sh`), 22 of 22 plans identical in text, costs x1.000.
+Verification: quick-check with `QC_CHECKED=1` on `0d3376b76`: build, clippy (16 warnings, none
+new), tests 391 passed in 11 binaries, the same 391 with `--profile verify-checked`, regress
+51,148 / 51,150 with 0 newly differing, isolation 1,647 / 1,648, pg_dump 14,609 passed. No
+performance gate: the changes are in planning (a cast test per join key in EXPLAIN's costing, a
+vector moved per reduced outer join).
+
+Found, not fixed (with repros in `~/.cache/a274/probe`):
+- A derived equality between two columns of one table comes out commuted (`Filter: (num = a)`,
+  PostgreSQL `(a = num)`) for `... join b on a.code = b.a where c.a = b.num`, also with plain
+  inner joins (the binder's generate_base_implied_equalities placement, `binder/optimize.rs`).
