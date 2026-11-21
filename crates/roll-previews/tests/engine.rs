@@ -1227,7 +1227,13 @@ async fn earlier_pushes_stay_reachable_at_their_own_urls() {
     let a = label(&b.url).replacen("-8b-", "-8a-", 1);
     let web = view.services.iter().find(|x| x.name == "web").map(|x| x.url.clone());
     let gone = roll_previews::store::GonePush { preview: p.id.clone(), service: "web".into(), revision: "cs_8a".into(), current_url: web };
-    assert_eq!(e.engine.store.gone_push(&a).unwrap(), Some(gone), "that service's latest push");
+    assert_eq!(e.engine.store.gone_push(&a).unwrap(), Some(gone.clone()), "that service's latest push");
+    // Under the project's own preview domain too, and only that project's.
+    let none = |_: &str| String::new();
+    e.engine.store.set_project_domain(&e.project, Some(("preview.acme.dev", true)), &none, &none).unwrap();
+    e.engine.store.set_project_domain("prj_other", Some(("preview.other.dev", false)), &none, &none).unwrap();
+    assert_eq!(e.engine.store.gone_domain_push(&a, "preview.acme.dev").unwrap(), Some(gone));
+    assert_eq!(e.engine.store.gone_domain_push(&a, "preview.other.dev").unwrap(), None);
     // An earlier push runs its own head on its own host.
     let (t, _) = e.engine.env(&p.id, "web@cs_8c").await.unwrap();
     assert_eq!(t.revision, "cs_8c");
@@ -1304,7 +1310,7 @@ async fn a_rules_reference_to_another_environment_needs_its_writers_reveal_there
             let parts: Vec<&str> = reference.strip_prefix("roll://").ok_or("not one")?.split('/').collect();
             Ok((parts[0].to_string(), if parts.len() > 2 { format!("/{}", parts[1..parts.len() - 1].join("/")) } else { "/".into() }))
         }
-        fn still(&self, _: &str, _: &str, _: bool, _: &str, maker: &str) -> Result<(), String> {
+        fn still(&self, _: &str, _: (roll_workspace::Kind, &str), _: bool, _: &str, maker: &str) -> Result<(), String> {
             if maker == "usr_b" { Ok(()) } else { Err(format!("{maker} may not reveal staging:/payments")) }
         }
     }
@@ -1370,6 +1376,16 @@ async fn a_rules_reference_to_another_environment_needs_its_writers_reveal_there
     e.engine.store.update(&p.id, |row| row.next_at = 0).unwrap();
     e.engine.pass().await.unwrap();
     assert!(!e.secrets.refs.lock().iter().any(|(k, _)| k == "OWN"));
+    // A start between converges never gives a reference whose writer lost it since: it waits for
+    // the converge that leaves it out.
+    use roll_previews::ports::EnvSource;
+    e.engine.store.set_env_refs(&e.project, &[], "x").unwrap();
+    e.engine.store.set_env_refs(&e.project, &roll_previews::settings::references(&st), "usr_gone").unwrap();
+    let said = |r: anyhow::Result<_>| r.err().map(|e| e.to_string()).unwrap_or_default();
+    let first = said(e.engine.env(&p.id, "web").await);
+    assert!(first.contains("converges without it"), "{first}");
+    e.engine.pass().await.unwrap();
+    assert!(!said(e.engine.env(&p.id, "web").await).contains("converges without it"), "once left out, starts go on");
 }
 
 /// A variable set while a deploy is still going, then removed, is removed from the backend too:

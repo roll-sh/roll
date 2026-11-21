@@ -29,6 +29,10 @@ pub struct Repository {
     /// `sas_token`), sealed with the cluster's sealer when it has one ([`crate::seal`]).
     /// Kept apart from `settings` so nothing that prints a repository can show them.
     pub secrets: BTreeMap<String, String>,
+    /// Who wrote the repository's roll secrets references (`roll://…` settings), as roll's
+    /// control plane named them (`api::snapshots`, "Credentials by reference"): every resolve
+    /// re-checks that they still may reveal what each names. `None` without references.
+    pub refs_by: Option<String>,
 }
 
 /// The `client` of roll's default repository: an `s3` repository on the cluster's own object
@@ -37,7 +41,7 @@ pub const ROLL_CLIENT: &str = "roll";
 
 impl Repository {
     pub fn new(ty: impl Into<String>, settings: Settings) -> Repository {
-        Repository { ty: ty.into(), settings, secrets: BTreeMap::new() }
+        Repository { ty: ty.into(), settings, secrets: BTreeMap::new(), refs_by: None }
     }
 
     /// roll's default repository (`found-snapshots` unless configured otherwise): shown as an
@@ -115,12 +119,16 @@ impl Repository {
         {
             m.insert("secrets".into(), Value::Obj(self.secrets.iter().map(|(k, s)| (k.clone(), Value::from(s.clone()))).collect()));
         }
+        if let (Some(by), Value::Obj(m)) = (&self.refs_by, &mut v) {
+            m.insert("refs_by".into(), Value::from(by.clone()));
+        }
         v
     }
 
     pub fn from_stored(v: &Value) -> Option<Repository> {
         let secrets = v.get("secrets").and_then(Value::as_object).map(|m| m.iter().filter_map(|(k, s)| Some((k.clone(), s.as_str()?.to_string()))).collect()).unwrap_or_default();
-        Some(Repository { ty: v.get("type")?.as_str()?.to_string(), settings: Settings::from_json(v.get("settings")?).ok()?, secrets })
+        let refs_by = v.get("refs_by").and_then(Value::as_str).map(str::to_string);
+        Some(Repository { ty: v.get("type")?.as_str()?.to_string(), settings: Settings::from_json(v.get("settings")?).ok()?, secrets, refs_by })
     }
 }
 

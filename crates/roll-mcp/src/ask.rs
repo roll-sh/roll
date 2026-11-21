@@ -30,6 +30,7 @@ pub fn source(product: &str, param: &str) -> Option<Source> {
         ("storage", "bucket") => Some(Source { tool: "storage_list_buckets", args: |_| json!({}), fields: &["name"] }),
         ("streams", "stream") => Some(Source { tool: "streams_list", args: |_| json!({}), fields: &["name"] }),
         ("streams", "topic") => Some(Source { tool: "streams_list_topics", args: |a| json!({ "stream": a["stream"] }), fields: &["name"] }),
+        ("streams", "group") => Some(Source { tool: "streams_list_groups", args: |a| json!({ "stream": a["stream"] }), fields: &["group_id"] }),
         ("nosql", "database") => Some(Source { tool: "nosql_list_databases", args: |_| json!({}), fields: &["name"] }),
         ("redis", "database") => Some(Source { tool: "redis_list_databases", args: |_| json!({}), fields: &["name"] }),
         ("search", "cluster") => Some(Source { tool: "search_list_clusters", args: |_| json!({}), fields: &["name"] }),

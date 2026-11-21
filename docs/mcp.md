@@ -92,7 +92,7 @@ GitHub's dynamic toolsets, applied to a stateless server:
 
 | Tool | What it does |
 | --- | --- |
-| `roll_find_tools` | Searches the tools this connection may use by what the agent wants to do (`query`, optional `product`, `limit` up to 25) and answers each match's name, description, input schema and which run tool takes it. With no query, it answers every tool's name and title. Words count by how rare they are among the tools, more in a name than a title than a description, and of two names holding the query, the one it covers more of comes first (`apps_deploy` before `apps_cancel_deploy`). `search::finds` holds 30 everyday queries, across every product, to their tool. |
+| `roll_find_tools` | Searches the tools this connection may use by what the agent wants to do (`query`, optional `product`, `limit` up to 25) and answers each match's name, description, input schema and which run tool takes it. With no query, it answers every tool's name and title. Words count by how rare they are among the tools, more in a name than a title than a description, and of two names holding the query, the one it covers more of comes first (`apps_deploy` before `apps_cancel_deploy`); a title that holds every word of the query counts double ("run a function now" is `tasks_invoke`, not `tasks_cancel_function_runs`). Question words (why, are, does) and plurals (`queries` is `query`) don't change a match. `search::finds` holds 73 everyday queries, across every product, to their tool. |
 | `roll_run_read` | Runs a read-only tool: `{"tool": …, "arguments": {…}}`. It refuses one that changes things. |
 | `roll_run` | Runs any tool the connection has. |
 
@@ -372,7 +372,8 @@ roll implements the MCP authorization spec (2025-06-18 and 2025-11-25) with OAut
     for `tools/call`, `resources/read` and `prompts/get` (the `=?base64?…?=` form decoded), or 400
     `HeaderMismatch` (`-32020`), so a proxy routing on headers and roll running the body agree. A
     version roll doesn't speak is 400 `UnsupportedProtocolVersion` (`-32022`) with `supported`; an
-    unknown method is 404 with `-32601`. It's one message, never a batch.
+    unknown method is 404 with `-32601`. It's one message, never a batch. A resource that isn't
+    there is `-32602` (Invalid Params, SEP-2164); the handshake revisions keep their `-32002`.
   - `server/discover` answers the versions, capabilities and instructions. Every result has
     `resultType` and `_meta["io.modelcontextprotocol/serverInfo"]`; lists (and discover) have
     `ttlMs: 60000` and `cacheScope: "private"`: a token's tools are its own, and its rules can
@@ -531,10 +532,11 @@ decided by the gate, and a connection is offered only the prompts whose tools it
 ids (letters, digits, `_`, `.`, `-`, at most 64), quoted in the message: anyone can name a project,
 and a prompt's text is the person's own message to the agent.
 
-A prompt's `project`, `service` and `env` complete as the person types (`completion/complete`): the
-values come from the list tool the connection would call (`workspace_list_projects`; a Postgres
-project's from `postgres_list_projects`;
-`apps_list_services`, `apps_list_environments` for the `service` already given), through the gate
+A prompt's arguments complete as the person types (`completion/complete`): the values come from
+the list tool the connection would call (`workspace_list_projects`; a Postgres project's from
+`postgres_list_projects`; `apps_list_services`, `apps_list_environments` for the `service` already
+given; `previews_list`; `queues_list_vhosts`, `queues_list_queues`; `streams_list`,
+`streams_list_groups` for the `stream` already given), through the gate
 with the caller's token, so a suggestion is only what it may read, and each is an audited read.
 Only ids are offered (what tools take). A completion never asks a person: a list that would ask
 is refused at once (`would_ask`), so typing opens no approval. A prompt the connection isn't offered
@@ -550,6 +552,10 @@ is `-32602`.
 | `tune_slow_query` | `project` | A slow query made faster on a branch first (Neon's query tuning): its plan, an index tried on a copy, both plans compared, main only when you say so. | `postgres_get_project`, `postgres_slow_queries`, `postgres_explain`, `postgres_create_branch`, `postgres_execute`, `postgres_delete_branch` |
 | `security_checkup` | | Which tokens need attention, most serious first: a narrower rule set for each over-broad one, where roaming ones were used from, which to revoke or give an expiry; adds secrets' findings, a project's secrets audit log that doesn't hold (`secrets_verify_audit`), unmasked personal data, over-broad or unused S3 keys, public buckets, search clusters with no IP allowlist, previews shared outside the team and live images with high or critical vulnerabilities when the connection has those tools. Changes nothing. | `access_checkup`, `access_tighten_token`, `access_token_networks` |
 | `debug_failing_service` | `service`, `env` | Why an environment is failing (what roll already flags in its `attention`, the whole timeline, deploys, deploy logs, failing requests and routes, metrics), then a fix or a rollback it asks about first. | `apps_get_environment`, `apps_activity`, `apps_route_stats`, `apps_list_deploys`, `apps_deploy_logs`, `apps_logs`, `apps_metrics` |
+| `review_preview` | `preview` | Whether a change's preview is ready to land: why it failed or waits for `approve-run`, its schema changes (a dropped column, a `NOT NULL` with no default), new errors, routes slower than main's preview, its pages against the base (screenshots it looks at), people's notes. Changes nothing without asking. | `previews_wait`, `previews_get`, `previews_logs`, `previews_errors`, `previews_routes`, `previews_screenshot`, `previews_list_notes` |
+| `clear_task_backlog` | | Why roll tasks' messages pile up or fail: a paused or limited queue, dead letters and each delivery's error grouped by cause, then a retry it asks about first (with how many). | `tasks_stats`, `tasks_list_queues`, `tasks_get_queue`, `tasks_list_dead_letters`, `tasks_get_message` |
+| `drain_queue` | `vhost`, `queue` | Why a queue backs up: no consumers, consumers that don't acknowledge (and which connection), rates, and why its dead-letter queue's messages died; a replay it asks about first, never a purge. | `queues_get_queue`, `queues_queue_rates`, `queues_list_channels`, `queues_peek`, `queues_list_bindings` |
+| `find_consumer_lag` | `stream`, `group` | Why a consumer group falls behind: lag per partition, members against partitions, throughput, and the record a stuck partition stops at; a reset (which skips records) it asks about first. | `streams_get_group`, `streams_get_topic`, `streams_usage`, `streams_read` |
 
 ### As skills
 
@@ -1025,6 +1031,7 @@ previews are listed once those products are on.
 | `apps_remove_preview_domain` | Remove a project's preview domain. | `DELETE /v1/apps/projects/{project}/preview-domain` |
 | `previews_list` | Preview environments. | `GET /v1/previews` |
 | `previews_get` | A preview with its branched resources and its schema changes. | `GET /v1/previews/{id}` |
+| `previews_wait` | A preview once it's ready, failed, sleeping or waiting on a person (a task waits as long as it takes). | `GET /v1/previews/{id}` |
 | `previews_create` | A preview environment for a change or a branch: the project's resources branched, its services deployed. | `POST /v1/previews` |
 | `previews_refresh` | Redeploy a preview now. | `POST /v1/previews/{id}/refresh` |
 | `previews_errors` | A preview's errors, grouped (masked as logs are). | `GET /v1/previews/{id}/errors` |
@@ -1064,9 +1071,12 @@ previews are listed once those products are on.
 Ranked; the top item is in progress. A watchdog reads this list. Unblocked work comes first; what
 waits on a sibling PR reaching main is last.
 
-1. **Next, ranked (now):** what each client takes, said only as documented: VS Code's 128, Cursor's
-   about 40; Windsurf's 100 no longer appears in its docs (now Devin's desktop app's), so roll stops
-   citing it (`feature/roll-mcp-client-limits`, this PR). Then, as each lands: search's browser keys
+1. **Next, ranked (now):** landed 2026-11-20/21: `previews_wait` (#555), 2026-07-28's
+   resource-not-found code (#556; the rest of that revision's changelog and deprecations were
+   already in: discover, listen, `resultType`, `ttlMs`, `Mcp-Name`, the renumbered errors, `iss`,
+   client ID metadata documents beside dynamic registration), and workflows for previews, tasks,
+   queues and streams (`review_preview`, `clear_task_backlog`, `drain_queue`,
+   `find_consumer_lag`; this PR). Then, as each lands: search's browser keys
    (#358: list and revoke as tools, making one stays a credential), secrets' found-credential view
    (#487's `unstored`) and placeholders (#520: the list as a read, the revokes destructive; binding a
    key to hosts stays a person's), project members (#501's own tools; its other routes are
@@ -1074,11 +1084,16 @@ waits on a sibling PR reaching main is last.
    "http"`) once its tool limit and OAuth are checked against a live client; a product past ~60
    tools gets areas before it reaches a client's limit; `sibling-check.py` on each thread's open
    PRs before their turns (it compares a PR that conflicts with main against its own merge base).
-   For their owners (they fail only under load and pass alone): code-control's
+   What has no tool goes in `no-tool.txt` with why; a product's new route fails roll-mcp's tests
+   until it has a tool or a line (that replaced the hand checks with `tool-gaps.py`). For their
+   owners (they fail only under load and pass alone): code-control's
    `automations::concurrency_cancel_and_retry` and
-   `agents_code::roll_code_projects_with_auto_pull_follow_their_default_branch`. What has no tool,
-   and why, is `crates/roll-mcp/src/no-tool.txt`. Waiting on roll code: a removed person's
-   repositories handed to someone else. Not doing: "remember this browser"; a preset that reveals
+   `agents_code::roll_code_projects_with_auto_pull_follow_their_default_branch`. Waiting on roll code: a removed person's
+   repositories handed to someone else. Later: a docs search tool (Supabase, Vercel, Neon,
+   Cloudflare and Stripe have one) once roll has user documentation to search (`docs/` is design
+   notes and contracts, not that); tasks' tools in areas once it nears ~60 (47 now); a call's
+   `_meta.traceparent` (SEP-414) carried into the routed request once rolld's API traces (apps'
+   and previews' traffic do). Not doing: "remember this browser"; a preset that reveals
    development's values without asking (#354); a connection-level `?project=` (only a token's
    rules bound a project; a default that some tools can't honour would look like a boundary).
 2. **Landed 2026-11-20, evening (main 32352f2fc, ci green):** secrets' toolset in areas (#538);
@@ -1173,32 +1188,28 @@ waits on a sibling PR reaching main is last.
    - Provider groups to roles over SCIM: **blocked.** roll has no org or team membership for people
      yet (docs/accounts.md phase 2, "Orgs"), and its one role, admin, is never SCIM's to grant.
      Groups map to org membership once orgs exist.
-16. **Tools for sibling routes as they reach main** (each a row in tools.rs and the table above).
-   `secrets_list_github_apps` (secrets #73) is #253; secrets' other routes after batch 1 are admin,
-   a credential, a person's review, or an existing tool's (`tool-gaps.py`, 2026-11-18). Waiting on
-   open PRs: `secrets_totp` (secrets #194), apps #230 (`apps_restore_service`, deploy,
-   its own row as agreed; `deleted` on `apps_list_services`; delete keeps a service 48 h), apps
-   #219/#221/#222 (`rebuild_on_base`, firewall `challenge`, `build_closed`), apps #235 (`GET …/diff`,
-   and `PATCH …/variables` `copy_from` on its own row with `copies_from`). Apps tells this thread
-   as #230 and #235 land (their turn began 2026-11-18 03:00).
-17. **Gate flakes under load, for their owners:** code-sql's `writes_are_serializable_and_retried`
+16. **Gate flakes under load, for their owners:** code-sql's `writes_are_serializable_and_retried`
    and `killed_connections_never_lose_or_repeat_acknowledged_writes` (16 threads on one row exhaust
-   the 40 conflict re-runs), and code-control's Linear e2e (30 s for the elicitation). A test-side
-   deadline, not more retries in production, is the likely fix. (The 2026-11-18 turn's combined
+   the 40 conflict re-runs), and code-control's Linear e2e (30 s for the elicitation). Measured
+   2026-11-20 on Postgres 18 at load 40-48: the first took 633-727 runs for its 400 increments
+   (about 1.7 attempts a write, the limit 40) and both passed 5 of 5, so the failures were heavier
+   load than that and no test was changed (8 threads × 50 would take about 1.3). When one fails
+   again, keep its run's "increments took" line and the load: that says whether contention or the
+   machine was the cause. A test-side deadline, not more retries in production, stays the fix. (The 2026-11-18 turn's combined
    gate passed without them: #208, #209, #210, #225, #226, #231, #236 and #239 landed as one gated
    tree, main 53b939213.)
-18. **Enterprise sign-in (#210), what's left:** a live check with a real provider's ID-JAG (Okta's
+17. **Enterprise sign-in (#210), what's left:** a live check with a real provider's ID-JAG (Okta's
    Cross App Access sandbox needs an account: the review pack's decision 5). The draft names the
    tenant `tenant`; a provider whose assertions say it another way (Entra's own tokens use `tid`)
    gets a mapping once its ID-JAGs are checked, never a guess.
-19. **Outsiders' text reaching roll's own agents:** checked 2026-11-19. An issue or comment from
+18. **Outsiders' text reaching roll's own agents:** checked 2026-11-19. An issue or comment from
    someone GitHub says can't push starts no automation unless its trigger says `anyone`
    (`chatops/github.rs`, as GitHub's lockdown does), forks' code waits for `approve-run`, and only
    an install's members drive roll from Slack or Discord. Left, the agents area's call: when a
    trigger says `anyone`, run its agent with a read-only grant (or ask before every write), since
    the outsider's text is then the agent's task. roll's agents don't connect to `/v1/mcp` (their
    MCP server is the orchestrator's), so `?lockdown` isn't where this belongs.
-20. **More MCP Apps views:** a rollback button on a deploy (calling `apps_rollback` through the
+19. **More MCP Apps views:** a rollback button on a deploy (calling `apps_rollback` through the
    host, so through the gate, as deploy), once a host that renders views is confirmed (the review
    pack's decision 4). A preview's screenshot against its baseline needs no view: hosts render
    `previews_screenshot`'s image (`diff=base`) themselves, and accepting a visual change stays a
@@ -1206,30 +1217,27 @@ waits on a sibling PR reaching main is last.
    (`examples/basic-host` v2.0.4: `users-live/host-shot.mjs`, with its one-line patch declaring
    the extension) and the stand-in; Claude.ai or ChatGPT need a public HTTPS rolld and the user's
    account.
-21. **Everyday routes with no tool:** rechecked on main 2026-11-18 (03:40, after secrets' batch 1
-   and search's and previews' turns): secrets' one gap is #253, search and previews have nothing new; what has no tool is a credential, a password, a key's
-   material, a deployment key's health, a person's review, or admin by design (tasks, streams,
-   storage, queues, postgres, Redis and NoSQL have theirs). Recheck each product after its thread
-   lands routes (`tool-gaps.py origin/main <product> <branch>`).
-22. **More tools that wait:** `apps_wait_deploy` is in #108. Rechecked on main (05:50): Postgres
+20. **More tools that wait:** `apps_wait_deploy`, `apps_wait_job`, `tasks_wait_run` and, since
+   2026-11-20, `previews_wait` (until a preview is ready, failed, sleeping, going or waiting on a
+   person's `approve-run`). Rechecked on main (05:50): Postgres
    branch backups and restores answer once done (nothing to wait on); search's reindexes are
    Elasticsearch's own `_tasks` behind the operator's request route. Branch backups and search reindexes
    can use `until` once their routes answer a state to wait on (search's reindex is an
    Elasticsearch task today, with no roll route to watch). Recheck with `mcpc` (`~/.local/share/roll-mcp/live/mcpc-tasks.sh`), and with the
    TypeScript SDK's `client/ext/tasks` once it ships.
-23. **Dry-merge the sibling heads after each of their pushes** that touches the gate, the catalogue or
+21. **Dry-merge the sibling heads after each of their pushes** that touches the gate, the catalogue or
    rolld, and send each thread its conflicts and their resolutions (`sibling-auth.sh`: every
    route classified, per method, with #25; agreed conflicts resolved by `known-conflicts.py`), and
    compare each product's routes with its tools (an everyday route with no tool is a gap: apps'
    were found this way). #24 and #25 are on main, so `feature/mcp-on-landing` is retired:
    secrets' #64 lands on main directly.
-24. **The operator's steps:** only if a load balancer that terminates HTTP sits in front of rolld (not
+22. **The operator's steps:** only if a load balancer that terminates HTTP sits in front of rolld (not
    roll's own edge, which needs nothing), set `ROLL_TRUSTED_PROXIES` to its addresses; and register `rlt_`, `rlo_`, `rlf_`, `rlc_`, `rlk_`, `rlp_`, `rlb_` and `rlq_` (`[a-z2-7]{40}` with a
    checksum) with GitHub's secret scanning partner program, so leaks on GitHub reach
    `/v1/access/leaks/github`.
-25. **Postgres e2e:** five history/replica e2e tests fail on this server because computes can't
+23. **Postgres e2e:** five history/replica e2e tests fail on this server because computes can't
    reach the daemon on the Docker bridge; run `pnpm test:pg` where they can (CI) before merging.
-26. **Step-up authorization (SEP-835), once clients do it:** a refused call could answer `403`
+24. **Step-up authorization (SEP-835), once clients do it:** a refused call could answer `403`
    `WWW-Authenticate: Bearer error="insufficient_scope", scope=…` so the client reopens roll's
    consent screen for the refused rule (as the refusal's widen link proposes it now). Not yet: today
    it would take the refusal's explanation and `access_request_access` away from the main clients,

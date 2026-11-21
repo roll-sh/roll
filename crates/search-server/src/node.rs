@@ -150,6 +150,9 @@ pub struct NodeConfig {
     /// `None`: they answer as on a cluster without ML nodes. Its memory counts against
     /// `memory_budget`.
     pub embedder: Option<Arc<crate::embed::EmbedPool>>,
+    /// Resolves the credential references clusters' snapshot repositories name
+    /// (`search_es::secret_refs`); `None`: they're refused.
+    pub secret_refs: Option<search_es::secret_refs::Resolver>,
 }
 
 impl Default for NodeConfig {
@@ -174,6 +177,7 @@ impl Default for NodeConfig {
             links: None,
             audit: crate::audit::AuditConfig::default(),
             embedder: None,
+            secret_refs: None,
         }
     }
 }
@@ -1129,6 +1133,7 @@ impl Node {
         cfg.links = self.cfg.links.clone();
         cfg.embedder = self.cfg.embedder.clone().map(|p| p as Arc<dyn search_es::xpack::inference::local::Embedder>);
         cfg.catalog_id = spec.catalog_id.clone();
+        cfg.secret_refs = self.cfg.secret_refs.clone();
         cfg.branch_of = spec.branch_of.clone();
         cfg.owner = spec.owner.clone();
         // Snapshot contents are durable only with object storage behind the cluster.

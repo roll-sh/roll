@@ -11,6 +11,8 @@ code-sql.workspace = true
 futures.workspace = true
 roll-auth.workspace = true
 roll-cluster.workspace = true
+# Only `Reference::parse`: whether a repository setting is a roll secrets reference.
+roll-secrets.workspace = true
 urlencoding.workspace = true
 search-es.workspace = true
 search-index.workspace = true

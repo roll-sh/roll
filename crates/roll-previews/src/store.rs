@@ -1099,6 +1099,8 @@ impl Store {
                 let col = if t == "previews" { "id" } else { "preview_id" };
                 c.execute(&format!("DELETE FROM {t} WHERE {col} = ?"), [id])?;
             }
+            // Its own variables' references' setters.
+            c.execute("DELETE FROM env_refs WHERE scope = ?", [format!("preview:{id}")])?;
             Ok::<_, Error>(())
         })
     }
@@ -2338,6 +2340,14 @@ impl Store {
             )
             .optional()
         })?)
+    }
+
+    /// [`Store::gone_push`] under a project's own preview domain (`base`): only that project's.
+    pub fn gone_domain_push(&self, label: &str, base: &str) -> Result<Option<GonePush>> {
+        let Some(project) = self.db.read(|c| c.query_row("SELECT project_id FROM project_domains WHERE base = ?", [base], |r| r.get::<_, String>(0)).optional())? else { return Ok(None) };
+        let Some(g) = self.gone_push(label)? else { return Ok(None) };
+        let theirs = self.db.read(|c| c.query_row("SELECT project_id FROM previews WHERE id = ?", [g.preview.as_str()], |r| r.get::<_, String>(0)).optional())?;
+        Ok((theirs.as_deref() == Some(project.as_str())).then_some(g))
     }
 
     /// The host a service (or an earlier push's, `<service>@<revision>`) answers on.

@@ -636,6 +636,10 @@ async fn run_with(mut args: Args) -> anyhow::Result<()> {
     code_secrets.set(secrets.clone(), workspace.clone());
     apps_secrets.set(secrets.clone(), workspace.clone());
     storage_secrets.set(secrets.clone());
+    // roll search's snapshot repositories resolve their roll:// credentials for their cluster.
+    if let Some(s) = &search {
+        s.control.set_secrets(std::sync::Arc::new(secrets::ForSearch(secrets.clone())));
+    }
     let _ = secrets_envs.0.set(secrets.clone());
     // Previews' rules name roll secrets' keys only where their writer may reveal them.
     if let Some(e) = &previews_engine {
@@ -665,7 +669,7 @@ async fn run_with(mut args: Args) -> anyhow::Result<()> {
         let apps = a.apps.clone();
         access.on_leaked("rlk_", move |secret, _why| apps.revoke_leaked_hook(secret));
         let apps = a.apps.clone();
-        access.on_leaked("rlr_", move |secret, _why| apps.revoke_leaked_oidc(secret));
+        access.on_leaked("rlr_", move |secret, _why| apps.revoke_leaked_address(secret));
     }
     // …and previews' (`rlb_`).
     if let Some(e) = previews_engine.clone() {
