@@ -500,13 +500,29 @@ impl Secrets {
             }
         }
         self.expire_shares()?;
+        self.expire_value_requests()?;
         self.reseal_wrapped();
         self.sweep_identity_logins()?;
         self.sweep_retention()?;
         self.sweep_reminders()?;
         self.sweep_alerts()?;
+        if let Err(e) = self.sweep_intercept_cas() {
+            tracing::warn!("sweeping interception CAs failed: {e}");
+        }
+        // Placeholders' quiet counts, and their rows a day past their end.
+        if let Err(e) = self.sweep_placeholders() {
+            tracing::warn!("sweeping placeholders failed: {e}");
+        }
         if let Err(e) = self.end_decoys() {
             tracing::warn!("revoking ended decoys failed: {e}");
+        }
+        // The issuer key's rotation (issuer.rs).
+        if let Err(e) = self.sweep_issuer() {
+            tracing::warn!("rotating roll's OIDC issuer key failed: {e}");
+        }
+        // The digest key's, before the digests it signs (audit_key.rs).
+        if let Err(e) = self.sweep_audit_key() {
+            tracing::warn!("rotating the audit log's digest key failed: {e}");
         }
         // Digests of the audit log, and its retention (at a digest: audit.rs).
         if let Err(e) = self.sweep_audit_chain(crate::audit::RETENTION_DAYS * 86_400_000) {

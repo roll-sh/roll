@@ -38,7 +38,10 @@ CREATE TABLE IF NOT EXISTS agent_sandboxes (
     deleted_at INTEGER,
     -- When its machine last did something (a thread running, a command, terminal traffic, a
     -- wake): it sleeps a window after.
-    last_active_at INTEGER
+    last_active_at INTEGER,
+    -- Who copied a roll secrets environment's values into its env (roll secrets' principal:
+    -- usr_…, token:…, operator); NULL without one.
+    secrets_by TEXT
 );
 CREATE INDEX IF NOT EXISTS agent_sandboxes_owner ON agent_sandboxes (owner_id, deleted_at);
 CREATE INDEX IF NOT EXISTS agent_sandboxes_machine ON agent_sandboxes (machine_id);
@@ -73,6 +76,7 @@ pub struct SandboxRow {
     pub metered_at: Option<i64>,
     pub deleted_at: Option<i64>,
     pub last_active_at: Option<i64>,
+    pub secrets_by: Option<String>,
 }
 
 impl SandboxRow {
@@ -97,7 +101,7 @@ impl SandboxRow {
 }
 
 const COLS: &str = "id, owner_id, machine_id, name, backend, backend_id, size, cpu, memory_gb, disk_gb, hourly_cents, status, desired, sealed, error, \
-                    created_at, updated_at, metered_at, deleted_at, last_active_at";
+                    created_at, updated_at, metered_at, deleted_at, last_active_at, secrets_by";
 
 pub(crate) fn status_str(s: SandboxStatus) -> &'static str {
     match s {
@@ -140,6 +144,7 @@ fn row(r: &Row<'_>) -> code_sql::Result<SandboxRow> {
         metered_at: r.get(17)?,
         deleted_at: r.get(18)?,
         last_active_at: r.get(19)?,
+        secrets_by: r.get(20)?,
     })
 }
 
@@ -194,6 +199,7 @@ pub struct NewSandbox<'a> {
     pub token_hash: &'a str,
     pub sealed: &'a str,
     pub max: u32,
+    pub secrets_by: Option<&'a str>,
 }
 
 /// A sandbox and its machine, at once.
@@ -208,7 +214,7 @@ pub fn create(db: &code_sql::Db, n: &NewSandbox<'_>) -> code_sql::Result<Created
             return Ok(Created::TooManyMachines);
         }
         c.execute(
-            &format!("INSERT INTO agent_sandboxes ({COLS}) VALUES (?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, ?, 'creating', 'running', ?, NULL, ?, ?, NULL, NULL, ?)"),
+            &format!("INSERT INTO agent_sandboxes ({COLS}) VALUES (?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, ?, 'creating', 'running', ?, NULL, ?, ?, NULL, NULL, ?, ?)"),
             params![
                 n.id,
                 n.owner_id,
@@ -223,7 +229,8 @@ pub fn create(db: &code_sql::Db, n: &NewSandbox<'_>) -> code_sql::Result<Created
                 n.sealed,
                 now,
                 now,
-                now
+                now,
+                n.secrets_by
             ],
         )?;
         let s = get(c, n.id)?.expect("just inserted");

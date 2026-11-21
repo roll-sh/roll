@@ -11,6 +11,15 @@
 //!   idle, until roll apps provides [`ports::Apps`].
 //! - [`api`] serves `/v1/previews`.
 
+/// What a preview of `repo` stands as on its project's canvas: the repo, or a Git URL service's
+/// preview (`git:<service>`) the service (as `discover` checks it still stands).
+pub fn canvas_resource(repo: &str) -> (roll_workspace::Kind, &str) {
+    match repo.strip_prefix("git:") {
+        Some(svc) => (roll_workspace::Kind::Service, svc),
+        None => (roll_workspace::Kind::Repo, repo),
+    }
+}
+
 pub mod api;
 pub mod code;
 pub mod cost;
@@ -1278,6 +1287,12 @@ pub fn label_part(s: &str, max: usize) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_git_url_services_preview_stands_as_the_service() {
+        assert_eq!(super::canvas_resource("acme/web"), (roll_workspace::Kind::Repo, "acme/web"));
+        assert_eq!(super::canvas_resource("git:svc_1"), (roll_workspace::Kind::Service, "svc_1"));
+    }
+
     use super::*;
 
     /// A value a cut splits (its start left at the end of a line, or of the text) never shows;

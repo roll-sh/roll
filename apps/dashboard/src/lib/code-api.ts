@@ -291,6 +291,54 @@ export interface Blocker {
   path?: string;
   line?: number;
   fingerprint?: string;
+  /** `secret_unstored`: whether it works, as its provider answered (roll secrets' validity checks, when the project has them on). */
+  validity?: CredentialValidity;
+}
+
+/** A credential's validity check (docs/secrets.md, "Is it live?"): never its value. */
+export interface CredentialValidity {
+  fingerprint: string;
+  /** `invalid`: revoked, deleted or never real. */
+  result: "live" | "invalid" | "unknown";
+  /** The provider's account (an AWS account, a GitHub login, a Slack team). */
+  account?: string;
+  checked_at?: number;
+  /** A live one's kind has a roll rotator: roll secrets' AWS IAM users, or a project's GitHub App tokens. */
+  rotator?: "aws-iam" | "github-app";
+}
+
+/** Where a `secret_unstored` notice's credential would be stored ("Store in roll"); never its value. */
+export interface UnstoredTarget {
+  kind: string;
+  /** Where the change adds it (1-based line). */
+  file: string;
+  line: number;
+  fingerprint: string;
+  /** The suggested key. */
+  key: string;
+  /** The project roll secrets trusts the repo for. */
+  project: { id: string; name: string };
+  /** Its environments the caller may read, in order. */
+  environments: string[];
+  /** The one to suggest (roll.toml's checks' environment, else `development`); null when it has neither. */
+  environment: string | null;
+  /** The folder (roll.toml's, else `/`). */
+  path: string;
+}
+
+/** What storing it did: where it went and the read to write instead. Never the value. */
+export interface UnstoredStored {
+  key: string;
+  project: string;
+  environment: string;
+  path: string;
+  file: string;
+  line: number;
+  /** The file's language's read of the key (`process.env.KEY`). */
+  replacement: string;
+  /** The environment's change number, or the change request opened where the folder needs approval. */
+  change: number | null;
+  request: string | null;
 }
 
 export type EntryState = "waiting" | "testing" | "bisecting" | "landing" | "ejected" | "landed";
@@ -1390,6 +1438,10 @@ export function createCodeApi(
       call<Change>("POST", `${ch(id)}/checks`, check),
     createPreview: (id: string) => call<Change>("POST", `${ch(id)}/preview`),
     deletePreview: (id: string) => call<Change>("DELETE", `${ch(id)}/preview`),
+    /** "Store in roll" for a `secret_unstored` notice: where it would go, then storing it as the caller. */
+    unstoredTarget: (id: string, fingerprint: string) => call<UnstoredTarget>("GET", `${ch(id)}/unstored/${enc(fingerprint)}`),
+    storeUnstored: (id: string, fingerprint: string, body: { key?: string; environment?: string; path?: string }) =>
+      call<UnstoredStored>("POST", `${ch(id)}/unstored/${enc(fingerprint)}/store`, body),
 
     reviews: (id: string) => call<Review[]>("GET", `${ch(id)}/reviews`),
     submitReview: (id: string, body: { verdict: Verdict; body?: string; comments?: NewReviewComment[] }) =>

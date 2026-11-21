@@ -1939,6 +1939,8 @@ dependencies = [
  "roll-auth",
  "roll-cluster",
  "roll-net",
+ "roll-secrets",
+ "roll-workspace",
  "rsa",
  "serde",
  "serde_json",
@@ -5886,6 +5888,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "axum",
+ "base64 0.22.1",
  "bytes",
  "futures",
  "getrandom 0.4.3",
@@ -5911,6 +5914,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "bytes",
+ "getrandom 0.4.3",
  "tokio",
  "tracing",
 ]
@@ -7274,6 +7278,8 @@ dependencies = [
  "roll-secrets-chain",
  "roll-workspace",
  "rsa",
+ "rustls-pki-types",
+ "rustls-webpki 0.103.15",
  "serde",
  "serde_json",
  "sha2 0.10.9",
@@ -8123,6 +8129,7 @@ dependencies = [
  "reqwest",
  "roll-auth",
  "roll-cluster",
+ "roll-secrets",
  "rsa",
  "rusqlite",
  "search-es",
@@ -8187,6 +8194,7 @@ dependencies = [
  "sha2 0.10.9",
  "tokio",
  "unicode-segmentation",
+ "zeroize",
  "zxcvbn",
 ]
 

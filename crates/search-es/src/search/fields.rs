@@ -280,7 +280,12 @@ fn parse_value(f: &FieldInfo, v: &Value, format: Option<&str>) -> Result<Option<
             Value::Arr(a) => Value::Arr(a.iter().map(vector_component).collect()),
             other => vector_component(other),
         },
-        Kind::Binary | Kind::DenseVector | Kind::SparseVector | Kind::RankFeatures | Kind::RankFeature | Kind::Completion => v.clone(),
+        // Each vector is a value: float vectors come back as floats.
+        Kind::RankVectors if f.rank_layout().is_none_or(|(e, _)| e.is_float()) => match v {
+            Value::Arr(a) => Value::Arr(a.iter().map(vector_component).collect()),
+            other => other.clone(),
+        },
+        Kind::Binary | Kind::DenseVector | Kind::RankVectors | Kind::SparseVector | Kind::RankFeatures | Kind::RankFeature | Kind::Completion => v.clone(),
         // Cartesian points read as GeoJSON (or WKT), without their z value.
         Kind::Point => {
             let parsed = match v {
@@ -342,6 +347,8 @@ fn drop_long_leaves(v: &Value, max: usize) -> Option<Value> {
 
 fn flatten_values(v: &Value, f: &FieldInfo, out: &mut Vec<Value>) {
     match v {
+        // One of a document's vectors (extracted keeping number arrays whole) is one value.
+        Value::Arr(_) if f.kind == Kind::RankVectors => out.push(v.clone()),
         // Arrays of point coordinates and vectors are one value.
         Value::Arr(a) if matches!(f.kind, Kind::DenseVector) || (matches!(f.kind, Kind::GeoPoint | Kind::Point) && a.first().is_some_and(|x| matches!(x, Value::Num(_)))) => {
             out.push(v.clone())
@@ -442,7 +449,7 @@ pub fn fetch_fields(table: &FieldTable, source: Option<&Value>, specs: &[FieldAn
             continue;
         }
         let mut raw = Vec::new();
-        let coords = matches!(f.kind, Kind::GeoPoint | Kind::Point);
+        let coords = matches!(f.kind, Kind::GeoPoint | Kind::Point | Kind::RankVectors);
         let extract = if coords { crate::engine::source::extract_values_keeping_coordinates } else { crate::engine::source::extract_values };
         extract(src, source_path(&f), &mut raw);
         for s in table.copy_sources.get(&f.name).into_iter().flatten() {
@@ -520,7 +527,11 @@ fn nested_values(table: &FieldTable, wanted: &[(String, Option<String>, bool)], 
             let Some(f) = table.get(n) else { continue };
             let Some(rel) = source_path(f).strip_prefix(&prefix) else { continue };
             let mut raw = Vec::new();
-            crate::engine::source::extract_values(om, rel, &mut raw);
+            if f.kind == Kind::RankVectors {
+                crate::engine::source::extract_values_keeping_coordinates(om, rel, &mut raw);
+            } else {
+                crate::engine::source::extract_values(om, rel, &mut raw);
+            }
             let mut vals = Vec::new();
             for v in raw {
                 let mut flat = Vec::new();

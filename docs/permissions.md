@@ -165,7 +165,9 @@ endpoint for an hour's access token, rather than holding a long-lived token in a
       secret. The audience defaults to roll's API. `subject` is the token's `sub` or a pattern with
       `*`. A shared issuer (GitHub Actions, GitLab.com, Terraform Cloud, Buildkite, Google) must
       name one tenant literally (`repo:acme/web:…`), or anyone's job could sign in, and that rule is
-      never optional. `claims` are up to ten others that must match (`repository_owner_id`, `ref`).
+      never optional. `claims` are up to ten others that must match (`repository_owner_id`, `ref`),
+      each a name or a JSON pointer to a nested or list claim (`/realm_access/roles`), with the
+      same syntax as roll secrets' workload identities (docs/secrets.md, "Claims").
       `jwks` pins the issuer's keys for one roll can't reach.
     - **Signing in:** RFC 7523's grant,
       `grant_type=urn:ietf:params:oauth:grant-type:jwt-bearer&client_id=mcl_…&assertion=<the OIDC token>`.
@@ -1105,9 +1107,10 @@ look (an old repo, a wiki page, a backup's config):
 ## Leaked tokens
 
 Other products' secrets made the same way are found and revoked the same way: apps' deploy hooks
-(`rlk_`, the secret in a hook's URL), previews' deploy hooks (`rlb_`) and SSO connections' SCIM tokens (`rlp_`, docs/accounts.md)
+(`rlk_`, the secret in a hook's URL), previews' deploy hooks (`rlb_`), SSO connections' SCIM tokens (`rlp_`, docs/accounts.md)
+and roll secrets' request links' answer tokens (`rlq_`, cancelling the request; docs/secrets.md)
 are in `SECRET_PREFIXES`, and a product registers how to revoke its own with `Access::on_leaked`
-(rolld wires apps' when apps is in, previews' when they are, and accounts' always). The audit log has each revocation.
+(rolld wires apps' when apps is in, previews' when they are, and accounts' and secrets' always). The audit log has each revocation.
 
 
 A token pasted into a file is a token anyone who reads that file holds. roll revokes one as soon as

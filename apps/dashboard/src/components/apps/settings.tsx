@@ -60,7 +60,10 @@ interface Form {
   healthCommand: string;
   drain: string;
   cpuTarget: string;
+  busyCpu: string;
   latencyTarget: string;
+  /** run.oidc_audiences, comma-separated. */
+  oidcAudiences: string;
   memoryTarget: string;
   alertMemory: string;
   alertErrors: string;
@@ -101,6 +104,8 @@ interface Form {
   pushGroup: string;
   pushPath: string;
   pushDead: string;
+  /** "oidc": each POST carries roll's OIDC token; "": the environment's CRON_SECRET. */
+  pushAuth: string;
   suspendAfter: string;
   sleepAfter: string;
   volumeMount: string;
@@ -112,6 +117,16 @@ interface Form {
 }
 
 const str = (v: string | number | undefined | null) => (v == null ? "" : String(v));
+
+/** The form after the service changed under it (a panel beside it saved, or someone else did):
+ *  `next` (the service as it is now) wherever the person hasn't edited `form` since `base`. */
+export function rebase(form: Form, base: Form, next: Form): Form {
+  const out = { ...next };
+  for (const k of Object.keys(form) as (keyof Form)[]) {
+    if (form[k] !== base[k]) (out as Record<keyof Form, unknown>)[k] = form[k];
+  }
+  return out;
+}
 
 export function formOf(s: Service): Form {
   return {
@@ -151,7 +166,9 @@ export function formOf(s: Service): Form {
     healthCommand: str(s.run.health_command),
     drain: str(s.run.drain_s),
     cpuTarget: str(s.run.cpu_target),
+    busyCpu: str(s.run.busy_cpu),
     latencyTarget: str(s.run.latency_target_ms),
+    oidcAudiences: (s.run.oidc_audiences ?? []).join(", "),
     memoryTarget: str(s.run.memory_target),
     alertMemory: str(s.run.alerts?.memory_pct),
     alertErrors: str(s.run.alerts?.error_pct),
@@ -189,6 +206,7 @@ export function formOf(s: Service): Form {
     pushGroup: s.run.push?.[0]?.group ?? "",
     pushPath: s.run.push?.[0]?.path ?? "",
     pushDead: s.run.push?.[0]?.dead_letter ?? "",
+    pushAuth: s.run.push?.[0]?.auth ?? "",
     suspendAfter: str(s.run.suspend_after_s),
     sleepAfter: str(s.run.sleep_after_s),
     volumeMount: s.run.volume?.mount ?? "",
@@ -256,7 +274,12 @@ export function patchOf(s: Service, f: Form): ServicePatch {
   if (f.healthCommand !== before.healthCommand) run.health_command = text(f.healthCommand);
   if (f.drain !== before.drain) run.drain_s = num(f.drain);
   if (f.cpuTarget !== before.cpuTarget) run.cpu_target = num(f.cpuTarget);
+  if (f.busyCpu !== before.busyCpu) run.busy_cpu = num(f.busyCpu);
   if (f.latencyTarget !== before.latencyTarget) run.latency_target_ms = num(f.latencyTarget);
+  if (f.oidcAudiences !== before.oidcAudiences) {
+    const list = f.oidcAudiences.split(/[,\s]+/).filter(Boolean);
+    run.oidc_audiences = list.length ? list : null;
+  }
   if (f.memoryTarget !== before.memoryTarget) run.memory_target = num(f.memoryTarget);
   if (f.alertMemory !== before.alertMemory || f.alertErrors !== before.alertErrors || f.alertP95 !== before.alertP95 || f.alertCapacity !== before.alertCapacity || f.alertLog !== before.alertLog || f.alertLogCount !== before.alertLogCount)
     run.alerts = {
@@ -298,9 +321,9 @@ export function patchOf(s: Service, f: Form): ServicePatch {
     const per = f.scalePer.trim() ? { per_instance: Number(f.scalePer) } : {};
     run.scale = f.scaleMetric.trim() ? { metric: f.scaleMetric.trim(), ...per } : f.scaleStream && f.scaleGroup.trim() ? { stream: f.scaleStream, group: f.scaleGroup.trim(), ...per } : null;
   }
-  if (f.pushStream !== before.pushStream || f.pushTopic !== before.pushTopic || f.pushGroup !== before.pushGroup || f.pushPath !== before.pushPath || f.pushDead !== before.pushDead) {
+  if (f.pushStream !== before.pushStream || f.pushTopic !== before.pushTopic || f.pushGroup !== before.pushGroup || f.pushPath !== before.pushPath || f.pushDead !== before.pushDead || f.pushAuth !== before.pushAuth) {
     const [first, ...rest] = s.run.push ?? [];
-    const rule = f.pushStream ? { ...first, stream: f.pushStream, topic: f.pushTopic.trim(), group: f.pushGroup.trim(), path: f.pushPath.trim(), dead_letter: f.pushDead.trim() || undefined } : null;
+    const rule = f.pushStream ? { ...first, stream: f.pushStream, topic: f.pushTopic.trim(), group: f.pushGroup.trim(), path: f.pushPath.trim(), dead_letter: f.pushDead.trim() || undefined, auth: f.pushAuth === "oidc" ? ("oidc" as const) : undefined } : null;
     if (rule && !rule.dead_letter) delete rule.max_attempts;
     const all = rule ? [rule, ...rest] : rest;
     run.push = all.length ? all : null;
@@ -328,7 +351,7 @@ export function logMetrics(text: string): { name: string; pattern: string }[] {
     });
 }
 
-const NUMERIC: (keyof Form)[] = ["scalePer", "port", "timeout", "retries", "min", "max", "concurrency", "queue", "healthTimeout", "healthEvery", "healthFailures", "drain", "cpuTarget", "latencyTarget", "memoryTarget", "suspendAfter", "sleepAfter", "volumeSize", "backupEvery", "backupKeep", "alertMemory", "alertErrors", "alertP95", "sloObjective", "sloLatency", "sloWindow", "metricsPort", "alertCapacity", "alertLogCount", "rolloutStep", "rolloutErrors", "restartTries"];
+const NUMERIC: (keyof Form)[] = ["scalePer", "port", "timeout", "retries", "min", "max", "concurrency", "queue", "healthTimeout", "healthEvery", "healthFailures", "drain", "cpuTarget", "busyCpu", "latencyTarget", "memoryTarget", "suspendAfter", "sleepAfter", "volumeSize", "backupEvery", "backupKeep", "alertMemory", "alertErrors", "alertP95", "sloObjective", "sloLatency", "sloWindow", "metricsPort", "alertCapacity", "alertLogCount", "rolloutStep", "rolloutErrors", "restartTries"];
 
 /** A rollout's steps as typed (`10, 50`): increasing percents 1–99, at most five; null when they aren't. */
 export function rolloutSteps(v: string): number[] | null {
@@ -358,12 +381,20 @@ export function SettingsTab({
   onEnvDeleted: () => void;
 }) {
   const [form, setForm] = useState<Form>(() => formOf(service));
+  const base = useRef<Form>(form);
   const [deleting, setDeleting] = useState(false);
-  // A save (or someone else's) brings the form back to what rolld has; polls that change nothing don't.
+  // A save (or someone else's, or a panel's beside it) brings what wasn't edited to what rolld
+  // has, and keeps what was; polls that change nothing don't.
   const saved = JSON.stringify([service.name, service.source, service.build, service.run]);
-  useEffect(() => setForm(formOf(service)), [saved]); // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(() => {
+    const next = formOf(service);
+    setForm((f) => rebase(f, base.current, next));
+    base.current = next;
+  }, [saved]); // eslint-disable-line react-hooks/exhaustive-deps
   const patch = useMemo(() => patchOf(service, form), [service, form]);
   const dirty = Object.keys(patch).length > 0;
+  // A push rule needs all of it before it's saved.
+  const pushIncomplete = !!form.pushStream && (!form.pushTopic.trim() || !form.pushGroup.trim() || !form.pushPath.trim().startsWith("/"));
   const set = <K extends keyof Form>(k: K, v: Form[K]) => setForm((f) => ({ ...f, [k]: NUMERIC.includes(k) && typeof v === "string" ? v.replace(/[^\d.]/g, "") : v }));
   const t = (k: keyof Form, placeholder?: string, mono = true) => (
     <input value={form[k] as string} onChange={(e) => set(k, e.target.value)} placeholder={placeholder} className={`${input} w-full ${mono ? "font-mono text-[12px]" : ""}`} spellCheck={false} />
@@ -380,6 +411,7 @@ export function SettingsTab({
     ...(form.sourceKind !== "image" ? ([["build", "Build"]] as [string, string][]) : []),
     ["run", "Run"],
     ...(form.type !== "cron" ? ([["scaling", "Scaling"]] as [string, string][]) : []),
+    ["identity", "Identity"],
     ["health", "Health and alerts"],
     ...(web ? ([["networking", "Networking"], ["rollout", "Rollout"]] as [string, string][]) : []),
     ...(form.type !== "cron" ? ([["sidecars", "Sidecars"]] as [string, string][]) : []),
@@ -613,6 +645,9 @@ export function SettingsTab({
                   <Field label="Memory target (%)" hint="of each instance's memory, the same way; empty: not on memory">
                     {t("memoryTarget", "80")}
                   </Field>
+                  <Field label="Busy over CPU (%)" hint="an instance working after its answer stays awake; empty: requests only">
+                    {t("busyCpu", "20")}
+                  </Field>
                   <Field label="Suspend after (s)" hint="idle; 0 never suspends">
                     {t("suspendAfter", "30")}
                   </Field>
@@ -635,6 +670,12 @@ export function SettingsTab({
                       <Field label="Consumer group">{t("pushGroup", "web")}</Field>
                       <Field label="Path" hint="POSTed in production">{t("pushPath", "/events")}</Field>
                       <Field label="Dead-letter topic" hint="after 5 failed tries; none: tried until taken">{t("pushDead", "orders-dead")}</Field>
+                      <Field label="Signed with" hint="the bearer token the app checks">
+                        <select value={form.pushAuth} onChange={(e) => set("pushAuth", e.target.value)} className={`${input} w-full`}>
+                          <option value="">CRON_SECRET</option>
+                          <option value="oidc">roll's OIDC token</option>
+                        </select>
+                      </Field>
                     </>
                   )}
                   {(service.run.push?.length ?? 0) > 1 && <p className="col-span-full text-[12px] text-subtle">And {(service.run.push?.length ?? 1) - 1} more set through the API, kept as they are.</p>}
@@ -671,6 +712,14 @@ export function SettingsTab({
             </Grid>
           </Section>
         )}
+
+        <Section id="identity" title="Identity">
+          <Grid>
+            <Field label="OIDC audiences" hint="its instances read roll's token for these at $ROLL_OIDC_URL (?aud=, the first by default): clouds trust it, no key in the app">
+              {t("oidcAudiences", "sts.amazonaws.com")}
+            </Field>
+          </Grid>
+        </Section>
 
         <Section id="health" title="Health and alerts">
           <Grid>
@@ -850,14 +899,14 @@ export function SettingsTab({
         )}
 
         <div className={`sticky bottom-4 z-10 flex items-center justify-end gap-2 transition-opacity duration-150 ${dirty ? "opacity-100" : "pointer-events-none opacity-0"}`}>
-          <span className="mr-auto text-[12px] text-muted">Changes apply with the next deploy.</span>
+          <span className="mr-auto text-[12px] text-muted">{pushIncomplete ? <span className="text-danger">A pushed stream needs its topic, group and a path starting with /.</span> : "Changes apply with the next deploy."}</span>
           <button className={btn} onClick={() => setForm(formOf(service))}>
             Discard
           </button>
           {env?.active && (
             <button
               className={btn}
-              disabled={!dirty || !SERVICE_NAME.test(form.name) || rolloutSteps(form.rolloutSteps) === null || runner.busy !== null}
+              disabled={!dirty || !SERVICE_NAME.test(form.name) || rolloutSteps(form.rolloutSteps) === null || pushIncomplete || runner.busy !== null}
               onClick={() =>
                 runner.run("settings", async () => {
                   await appsApi.update(service.id, patch);
@@ -871,7 +920,7 @@ export function SettingsTab({
           )}
           <button
             className={primary}
-            disabled={!dirty || !SERVICE_NAME.test(form.name) || rolloutSteps(form.rolloutSteps) === null || runner.busy !== null}
+            disabled={!dirty || !SERVICE_NAME.test(form.name) || rolloutSteps(form.rolloutSteps) === null || pushIncomplete || runner.busy !== null}
             onClick={() => runner.run("settings", () => appsApi.update(service.id, patch))}
           >
             {runner.busy === "settings" ? <span className="shimmer">Saving…</span> : "Save"}

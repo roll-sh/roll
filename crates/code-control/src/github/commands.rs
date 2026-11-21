@@ -46,6 +46,11 @@ pub(crate) async fn pr_comment(code: &Code, hub: &Hub, r: &RepoRow, link: &Link,
         return Ok(());
     }
     let by = super::reviews::reviewer_of(Some(user));
+    if let commands::Command::Preview(action) = cmd {
+        let reply = preview_command(code, &c, action, &user.login).await;
+        hub.client.create_comment(link.installation_id, &link.owner, &link.repo, e.issue.number, &reply).await.map_err(|e| crate::Error::Internal(e.into()))?;
+        return Ok(());
+    }
     if let Some(reply) = code.run_command_now(r, &c, None, &by, cmd)? {
         hub.client
             .create_comment(link.installation_id, &link.owner, &link.repo, e.issue.number, &reply)
@@ -53,6 +58,17 @@ pub(crate) async fn pr_comment(code: &Code, hub: &Hub, r: &RepoRow, link: &Link,
             .map_err(|e| crate::Error::Internal(e.into()))?;
     }
     Ok(())
+}
+
+/// `@roll preview …` from someone who can write to the repo: done by the change's preview backend,
+/// answered with what it did or why not (never a stack of internals).
+async fn preview_command(code: &Code, c: &crate::model::Change, action: Option<commands::PreviewAction>, login: &str) -> String {
+    let Some(action) = action else { return format!("I know these: {}.", commands::PreviewAction::HELP) };
+    let Some(backend) = code.previews.read().clone() else { return "This repo's changes have no previews here.".into() };
+    match backend.act(c, action, &format!("@{login}")).await {
+        Ok(done) => done,
+        Err(e) => format!("I couldn't: {}", format!("{e:#}").lines().next().unwrap_or("it failed")),
+    }
 }
 
 /// A command in an inline review comment that's now a roll thread: answered in the thread

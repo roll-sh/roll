@@ -571,6 +571,13 @@ pub struct Run {
     /// `max_instances`), and fewer stay once they'd be under it. 10–100; unset, requests only.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cpu_target: Option<u32>,
+    /// A web service's instance using over this percent of its CPU counts as busy, as one with a
+    /// request in flight does (Railway's sleep that watches what an app is doing): it isn't
+    /// suspended, put to sleep or scaled in until it's been under it for 30 s, so work after the
+    /// answer finishes without the app asking (`ROLL_AWAKE_URL`). 1–100; unset, requests and
+    /// holds only. Only what the runtime measures counts (Docker's cgroup; not Fargate).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub busy_cpu: Option<u32>,
     /// And on memory (Render's target memory): while its awake instances average over this
     /// percent of their memory limit for a minute another starts, and fewer stay once they'd be
     /// under it. 10–100; unset, not on memory. Where both are set, the one that asks for more
@@ -616,6 +623,11 @@ pub struct Run {
     /// this many ms for a window, another instance, as `cpu_target` adds one (50–60,000).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub latency_target_ms: Option<u32>,
+    /// Audiences its instances may ask roll's OIDC issuer for (Vercel's OIDC federation): each
+    /// instance reads a token from `ROLL_OIDC_URL` (`?aud=`, the first by default) that clouds'
+    /// federation and roll secrets' workload logins trust, so the app holds no key. At most five.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub oidc_audiences: Vec<String>,
     /// Commands on a schedule, each a job of the live deployment at its due times (Heroku
     /// Scheduler, Vercel crons): any service's, without a cron service of its own.
     #[serde(skip_serializing_if = "Vec::is_empty")]
@@ -889,6 +901,10 @@ pub struct Scheduled {
     /// 1–86400 (default 3600).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub timeout_s: Option<u32>,
+    /// A path's call: `oidc` carries roll's OIDC token for the service (its own `sub`, the
+    /// environment's URL as `aud`), as Cloud Scheduler's does; else `CRON_SECRET`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auth: Option<String>,
 }
 
 /// One of `run.push`: a topic of a roll stream delivered to a path of one environment, a record
@@ -920,6 +936,11 @@ pub struct Push {
     /// within a partition, and a busy topic scales the service out.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_in_flight: Option<u32>,
+    /// `oidc`: each POST carries roll's OIDC token for the service (its own `sub`, the
+    /// environment's URL as `aud`) for the app to check, as Pub/Sub's push does; else the
+    /// environment's `CRON_SECRET`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auth: Option<String>,
 }
 
 impl Push {
@@ -1120,6 +1141,7 @@ impl Default for Run {
             public: true,
             drain_s: None,
             cpu_target: None,
+            busy_cpu: None,
             memory_target: None,
             restart: Restart::Always,
             restart_tries: None,
@@ -1130,6 +1152,7 @@ impl Default for Run {
             skew_protection: false,
             queue_s: None,
             latency_target_ms: None,
+            oidc_audiences: Vec::new(),
             schedules: Vec::new(),
             push: Vec::new(),
             sidecars: Vec::new(),
@@ -1179,6 +1202,9 @@ impl Run {
             if sc.timeout_s.is_some_and(|t| !(1..=86_400).contains(&t)) {
                 return bad("schedules' timeout_s is 1–86400");
             }
+            if sc.auth.as_deref().is_some_and(|a| a != "oidc" || sc.path.is_none()) {
+                return bad("a schedule's auth is oidc, on a path's call");
+            }
         }
         if !self.push.is_empty() && (self.kind != RunType::Web || self.tcp) {
             return bad("push is a web service's (each record is an HTTP POST)");
@@ -1207,6 +1233,9 @@ impl Run {
             }
             if p.max_in_flight.is_some_and(|n| !(1..=32).contains(&n)) {
                 return bad("push's max_in_flight is 1–32");
+            }
+            if p.auth.as_deref().is_some_and(|a| a != "oidc") {
+                return bad("push's auth is oidc (roll's token), or none (CRON_SECRET)");
             }
             if self.push[..i].iter().any(|o| o.stream == p.stream && o.group == p.group && o.topic == p.topic) {
                 return bad("push has one rule per stream, topic and group");
@@ -1287,6 +1316,9 @@ impl Run {
         }
         if self.latency_target_ms.is_some_and(|t| !(50..=60_000).contains(&t)) {
             return bad("latency_target_ms is 50–60,000");
+        }
+        if self.oidc_audiences.len() > 5 || self.oidc_audiences.iter().enumerate().any(|(i, a)| a.is_empty() || a.len() > 256 || !a.bytes().all(|b| b.is_ascii_graphic()) || self.oidc_audiences[..i].contains(a)) {
+            return bad("oidc_audiences is up to five distinct audiences, 1–256 printable characters each (sts.amazonaws.com, a GCP pool provider, roll)");
         }
         let r = &self.rollout;
         if r.steps.len() > 5 || r.steps.iter().any(|s| !(1..=99).contains(s)) || r.steps.windows(2).any(|w| w[0] >= w[1]) {
@@ -1388,6 +1420,14 @@ impl Run {
             }
             if self.kind != RunType::Web {
                 return bad("cpu_target is for a web service (a worker follows its work with scale)");
+            }
+        }
+        if let Some(b) = self.busy_cpu {
+            if !(1..=100).contains(&b) {
+                return bad("busy_cpu is 1–100 (percent of an instance's CPU)");
+            }
+            if self.kind != RunType::Web {
+                return bad("busy_cpu is for a web service (only web instances sleep)");
             }
         }
         if let Some(t) = self.memory_target {

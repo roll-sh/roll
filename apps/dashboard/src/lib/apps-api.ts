@@ -65,6 +65,8 @@ export interface Push {
   timeout_s?: number;
   /** Records POSTed at once, each from its own partitions (1–32, default 4). */
   max_in_flight?: number;
+  /** `oidc`: each POST carries roll's OIDC token for the service instead of `CRON_SECRET`. */
+  auth?: "oidc";
 }
 
 /** A push rule as it stands (`…/environments/{env}/push`), on the service's owner since it began delivering. */
@@ -109,8 +111,12 @@ export interface Run {
   drain_s?: number;
   /** A web service also scales on CPU: another instance while they average over this percent for a minute (10–100). */
   cpu_target?: number;
+  /** 1–100: an instance over this percent of its CPU counts as busy and isn't put to sleep or scaled in. */
+  busy_cpu?: number;
   /** A web service also scaled on its answers' p95 (50–60,000 ms). */
   latency_target_ms?: number;
+  /** Audiences its instances may ask roll's OIDC issuer for, at ROLL_OIDC_URL (`?aud=`, the first by default). */
+  oidc_audiences?: string[];
   /** And on memory: another while they average over this percent of their memory for a minute (10–100). */
   memory_target?: number;
   suspend_after_s: number;
@@ -187,6 +193,8 @@ export interface Scheduled {
   path?: string;
   timezone?: string;
   timeout_s?: number;
+  /** `oidc`: a path's call carries roll's OIDC token for the service instead of `CRON_SECRET`. */
+  auth?: "oidc";
 }
 
 export type InstanceState = "none" | "stopped" | "suspended" | "waking" | "running" | "crashed" | "deploying";
@@ -853,6 +861,30 @@ export interface ScanSummary {
   sbom?: boolean;
 }
 
+/** One row of a project's month: a service's environment, its previews (`previews`), or deleted services (`deleted`). */
+export interface UsageRow {
+  service: string | null;
+  name: string | null;
+  environment: string | null;
+  previews?: boolean;
+  deleted?: boolean;
+  usd: number;
+  cpu_seconds: number;
+  gb_seconds: number;
+  requests: number;
+  egress_bytes: number;
+  build_seconds: number;
+}
+
+/** A project's month (`…/projects/{project}/usage`). */
+export interface ProjectUsage {
+  month: string;
+  total_usd: number;
+  /** This month at the pace so far (the current month only). */
+  projected_usd: number | null;
+  rows: UsageRow[];
+}
+
 /** Why a failed deployment failed, from the repo owner's model (`…/explain`). The model's words: shown as text. */
 export interface Explanation {
   summary: string;
@@ -988,7 +1020,7 @@ export interface Span {
 /** An environment's errors, grouped from its log: a trace joined from its lines, or an error line. */
 export interface ErrorGroup {
   fingerprint: string;
-  kind: "python" | "java" | "node" | "go" | "line";
+  kind: "python" | "java" | "node" | "go" | "ruby" | "php" | "dotnet" | "rust" | "elixir" | "line";
   title: string;
   count: number;
   first_seen: number;
@@ -1399,6 +1431,8 @@ export const appsApi = {
   deleteFormSubmission: (id: string, e: string, form: string, sub: string) => call<null>("DELETE", `${env(id, e)}/forms/${encodeURIComponent(form)}/submissions/${encodeURIComponent(sub)}`),
   removeDrain: (project: string, id: string) => call<null>("DELETE", `/v1/apps/projects/${enc(project)}/drains/${enc(id)}`),
   limits: (project: string) => call<SpendLimits>("GET", `/v1/apps/projects/${enc(project)}/limits`),
+  /** A month's use by service and environment (this one by default), most costly first. */
+  projectUsage: (project: string, month?: string) => call<ProjectUsage>("GET", `/v1/apps/projects/${enc(project)}/usage${qs({ month })}`),
   setLimits: (project: string, body: { alert_usd: number | null; hard_usd: number | null }) => call<SpendLimits>("PUT", `/v1/apps/projects/${enc(project)}/limits`, body),
   /** PagerDuty takes its integration's `routing_key`, Opsgenie its `api_key` (sealed, never returned), each with a `region`. */
   addNotifyTarget: (project: string, body: { kind: NotifyTarget["kind"]; url?: string; routing_key?: string; api_key?: string; region?: "us" | "eu"; events?: NotifyEvent[]; environments?: string[]; services?: string[]; previews?: boolean }) => call<NotifyTarget>("POST", `/v1/apps/projects/${enc(project)}/notifications`, body),
@@ -1590,15 +1624,42 @@ export interface AccessLine {
   by?: "allow_list" | "firewall" | "rate_limit" | "private" | "maintenance" | "wake" | "capped" | "paused" | "not_deployed" | "moving" | "unavailable";
 }
 
-/** Follows a service's changes (`…/changes`): `onChange` for each tick, `onOpen` as the stream comes and goes. */
-export function followChanges(service: string, opts: { onChange: () => void; onOpen?: (open: boolean) => void }): () => void {
-  return streamSse(`${ROLL_API}/v1/apps/services/${encodeURIComponent(service)}/changes`, {
-    headers: operatorHeaders,
-    onOpen: opts.onOpen,
-    onEvent: (e) => {
-      if (e.event === "changed") opts.onChange();
-    },
-  });
+type ChangeFollower = { onChange: () => void; onOpen?: (open: boolean) => void };
+
+/** One `…/changes` stream a service, shared by everything on the page that follows it. */
+const changeStreams = new Map<string, { followers: Set<ChangeFollower>; open: boolean; stop: () => void }>();
+
+/** Follows a service's changes (`…/changes`): `onChange` for each tick, `onOpen` as the stream comes and goes. Followers of one service share
+ *  one stream, which closes when the last stops. */
+export function followChanges(service: string, opts: ChangeFollower): () => void {
+  let s = changeStreams.get(service);
+  if (!s) {
+    const followers = new Set<ChangeFollower>();
+    const shared = { followers, open: false, stop: () => {} };
+    shared.stop = streamSse(`${ROLL_API}/v1/apps/services/${encodeURIComponent(service)}/changes`, {
+      headers: operatorHeaders,
+      onOpen: (open) => {
+        shared.open = open;
+        for (const f of [...followers]) f.onOpen?.(open);
+      },
+      onEvent: (e) => {
+        if (e.event === "changed") for (const f of [...followers]) f.onChange();
+      },
+    });
+    changeStreams.set(service, shared);
+    s = shared;
+  }
+  const follower = { ...opts };
+  s.followers.add(follower);
+  if (s.open) follower.onOpen?.(true);
+  const mine = s;
+  return () => {
+    mine.followers.delete(follower);
+    if (mine.followers.size === 0 && changeStreams.get(service) === mine) {
+      changeStreams.delete(service);
+      mine.stop();
+    }
+  };
 }
 
 export function followLog(

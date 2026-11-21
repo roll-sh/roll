@@ -189,7 +189,9 @@ Blocker   = {kind: "state" | "draft" | "untrusted" | "checks" | "needs_approval"
                    /* more may come: show unknown kinds by message */,
              message,
              key?: string, environments?: string[] /* secret_leak, secret_missing: the roll secrets key and where */,
-             path?: string, line?: number, fingerprint?: string /* secret_unstored: where (1-based line) and what .roll/secrets-allow names to keep it */}
+             path?: string, line?: number, fingerprint?: string /* secret_unstored: where (1-based line) and what .roll/secrets-allow names to keep it */,
+             validity?: {fingerprint, result: "live" | "invalid" | "unknown", account?: string, checked_at?: number, rotator?: "aws-iam" | "github-app"}
+               /* secret_unstored, with the project's roll secrets validity checks on: whether it works, as its provider answered (a live one is listed first); docs/secrets.md "Is it live?" */}
 QueueInfo = {id /* qe_… */, position: number | null /* 1-based while queued; null once it left */,
              lane: "urgent" | "normal", state: EntryState, error: string | null /* why it was ejected: one line */,
              output: string | null /* the failing checks' log tail behind `error`, "<check>:\n<tail>" per check */,
@@ -218,6 +220,25 @@ POST /v1/code/changes/{id}/close → Change
 POST /v1/code/changes/{id}/checks {name, status, url?, summary?, head?} → Change
      head: the changeset the check ran on (any unique prefix); 409 if the change has moved past it
 POST /v1/code/changes/{id}/preview → Change · DELETE → Change
+GET  /v1/code/changes/{id}/unstored/{fingerprint} → UnstoredTarget            writers
+POST /v1/code/changes/{id}/unstored/{fingerprint}/store {key?, environment?, path?} → UnstoredStored     writers
+     "Store in roll" for a `secret_unstored` notice (docs/secrets.md, "Credentials roll doesn't hold"): roll
+     reads the credential from the change's own blob at the notice's path and line (its current head, the
+     default branch's .roll/secrets-allow applied) and stores it through roll secrets as a new key of the
+     project roll secrets trusts the repo for (Workspace::trusts, never canvas membership alone), as the
+     caller: roll secrets checks `write` in the folder with the request's own grant, session or operator
+     token, and makes one change, or a change request where the environment or folder needs approval.
+     Defaults: the notice's key; the environment and folder roll.toml's first `[checks.*] secrets` names
+     ("staging:/api"), else `development` and "/". Recorded in the audit log (`secret_unstored_stored`:
+     key and where, never the value). Neither answer ever holds the value; roll never rewrites the change.
+     404: no such notice on the change's head; 409 if landed or closed, from outside the repo (`trusted:
+     false`, a fork's pull request: its credential isn't the repo's), or the key is already there
+     (never overwritten); 422 when no project roll secrets trusts the repo for, or roll secrets is off;
+     403 without `write` in the folder.
+UnstoredTarget = {kind, file, line, fingerprint, key /* suggested */, project: {id, name},
+                  environments: string[] /* the caller may read, in order */, environment: string | null /* suggested */, path}
+UnstoredStored = {key, project, environment, path, file, line, replacement /* the file's language's read: os.environ["KEY"] */,
+                  change: number | null /* the environment's change */, request: string | null /* req_…, where it needs approval */}
 ```
 
 ## Merge queue
@@ -867,8 +888,10 @@ POST   /v1/code/agents/{owner}/sandboxes {name?, size? /* a Size name */, env?: 
        until the backend has it, then dropped; never returned. At most 32 names (uppercase, digits, _),
        values one line of at most 4096 characters, 32 KiB in all; ROLL_*, AGENT37_*, HOME, USER, PATH,
        SHELL and IS_SANDBOX are reserved. secrets adds a roll secrets environment's values under env (docs/secrets.md):
-       the project must have one of the owner's repos on its canvas, the environment can't be protected, and its
-       values follow env's rules. 400 bad name, size, env or secrets; 422 at the owner's limit (deleting
+       the project must have one of the owner's repos on its canvas, the environment can't be protected, the
+       caller must be able to reveal it in roll secrets (a session, a roll token's rules or the operator; never
+       a code owner token), and its values follow env's rules. 400 bad name, size, env or secrets; 403 the
+       caller can't reveal secrets.environment (nothing is made); 422 at the owner's limit (deleting
        ones count until gone) or without ROLL_SECRET_KEY on the server; 503 sandboxes are off.
 POST   /v1/code/agents/{owner}/sandboxes/{id}/start → Sandbox   desired "running" (asleep ones too: a wake now);
        409 while it's being deleted
@@ -889,7 +912,8 @@ Sandbox = {id /* sbx_… */, name, machine /* mch_… */, backend, size: Size,
            desired: "running" | "stopped" | "asleep" | "deleted" /* asleep: the reconciler stopped it while idle */,
            stopped_reason?: "idle" | "owner" /* while stopped: asleep, or the owner's stop */,
            error?: string /* the backend's last complaint */,
-           created_at, updated_at, last_active_at? /* its machine last did something; it sleeps a window after */}
+           created_at, updated_at, last_active_at? /* its machine last did something; it sleeps a window after */,
+           secrets_by? /* who copied secrets into its env: roll secrets' principal (usr_…, token:…, operator) */}
 SandboxInfo = {backend, size /* a Size name */, status /* as Sandbox.status */, hourly_cents,
                stopped_reason? /* as Sandbox.stopped_reason */}   (Machine.sandbox)
 Size = {name /* "standard" */, cpu, memory_gb, disk_gb, hourly_cents /* price per running hour, US cents */}

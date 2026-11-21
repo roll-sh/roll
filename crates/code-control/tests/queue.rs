@@ -632,7 +632,7 @@ impl code_control::SecretEnv for FakeSecrets {
     async fn for_repo(&self, _: &str, _: &str, _: &str) -> anyhow::Result<Vec<(String, String)>> {
         anyhow::bail!("not in this test")
     }
-    async fn for_owner(&self, _: &str, _: &str, _: &str, _: &str) -> anyhow::Result<Vec<(String, String)>> {
+    async fn for_owner(&self, _: &str, _: &str, _: &str, _: &str, _: code_control::Asker<'_>) -> anyhow::Result<code_control::Revealed> {
         anyhow::bail!("not in this test")
     }
     async fn leaks(&self, repo: &str, candidates: Vec<String>) -> anyhow::Result<Vec<(usize, String, String, String)>> {
@@ -720,6 +720,72 @@ async fn a_credential_roll_secrets_doesnt_hold_is_a_notice_or_by_roll_toml_a_blo
     assert!(unstored(&v, "blockers").len() == 1 && !v.to_string().contains(&aws), "{v}");
 }
 
+/// roll secrets holding nothing, with validity checks on: the live fixture GitHub token works
+/// (login roll-fixture), an AWS key's account is read from its id without trying it, anything else
+/// is refused. Keeps what it was asked about.
+#[derive(Default)]
+struct CheckingSecrets(std::sync::Mutex<Vec<(String, Option<String>)>>);
+
+#[async_trait]
+impl code_control::SecretEnv for CheckingSecrets {
+    async fn for_repo(&self, _: &str, _: &str, _: &str) -> anyhow::Result<Vec<(String, String)>> {
+        anyhow::bail!("not in this test")
+    }
+    async fn for_owner(&self, _: &str, _: &str, _: &str, _: &str, _: code_control::Asker<'_>) -> anyhow::Result<code_control::Revealed> {
+        anyhow::bail!("not in this test")
+    }
+    async fn leaks(&self, _: &str, _: Vec<String>) -> anyhow::Result<Vec<(usize, String, String, String)>> {
+        Ok(Vec::new())
+    }
+    async fn validity(&self, _: &str, found: Vec<(String, Option<String>)>) -> anyhow::Result<Vec<code_control::model::CredentialValidity>> {
+        self.0.lock().unwrap().extend(found.iter().cloned());
+        Ok(found
+            .into_iter()
+            .map(|(value, _)| {
+                let live = value.contains("RollFixtureLive");
+                let aws = roll_auth::credentials::aws_account(&value);
+                code_control::model::CredentialValidity {
+                    fingerprint: roll_auth::credentials::fingerprint(&value),
+                    result: if live { "live" } else if aws.is_some() { "unknown" } else { "invalid" }.into(),
+                    account: if live { Some("roll-fixture".into()) } else { aws },
+                    checked_at: Some(std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as i64),
+                    rotator: live.then(|| "github-app".into()),
+                }
+            })
+            .collect())
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_credential_that_still_works_ranks_first_and_says_live() {
+    // Built from pieces: push protection scans this repo.
+    let (aws, secret) = (["AKIA", "ROLLFIXTURE", "23456"].concat(), ["rollFixture", "SecretKey", "0123456789", "abcdefghij"].concat());
+    let (dead, live) = (["ghp_", "RollFixtureDeadToken", "0123456789abcdef"].concat(), ["ghp_", "RollFixtureLiveToken", "0123456789abcdef"].concat());
+    let account = roll_auth::credentials::aws_account(&aws).unwrap();
+    let files = json!({ "deploy.py": { "content": format!("old = \"{dead}\"\naws_access_key_id = \"{aws}\"\naws_secret_access_key = \"{secret}\"\ntoken = \"{live}\"\n") } });
+    let a = queue_app("", Arc::new(QueueRunner::default())).await;
+    let checking = Arc::new(CheckingSecrets::default());
+    a.code.set_secret_env(checking.clone());
+    let c = change(&a, "deploy", files).await;
+    // The check runs in the background: the notices say what it found once it answered.
+    let mut notices = Value::Null;
+    for _ in 0..100 {
+        let v = a.ok("GET", &format!("/v1/code/changes/{}", id(&c)), None).await;
+        notices = v["notices"].clone();
+        if notices.as_array().is_some_and(|n| n.iter().filter(|b| b["validity"].is_object()).count() == 3) {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    assert_eq!(notices[0]["message"], "adds what looks like a GitHub token at deploy.py:4 (live: its provider accepted it, account roll-fixture), which roll secrets doesn't hold: rotate it, then store it as GITHUB_TOKEN (roll secrets scan --store GITHUB_TOKEN=deploy.py:4) and read it with os.environ[\"GITHUB_TOKEN\"], or allow it in .roll/secrets-allow", "{notices}");
+    assert_eq!((notices[0]["validity"]["result"].as_str(), notices[0]["validity"]["rotator"].as_str()), (Some("live"), Some("github-app")));
+    assert!(notices[1]["message"].as_str().unwrap().starts_with("adds what looks like a GitHub token at deploy.py:1 (revoked or invalid, its provider said)"), "{notices}");
+    assert!(notices[2]["message"].as_str().unwrap().starts_with(&format!("adds what looks like an AWS access key at deploy.py:2 (account {account}, not tried)")), "{notices}");
+    // The key id went with the secret next to it, and no value is in what the change shows.
+    assert!(checking.0.lock().unwrap().contains(&(aws.clone(), Some(secret.clone()))));
+    assert!(![&aws, &secret, &dead, &live].iter().any(|v| notices.to_string().contains(v.as_str())));
+}
+
 /// roll secrets that can't answer: every lookup fails.
 struct DownSecrets;
 
@@ -728,12 +794,181 @@ impl code_control::SecretEnv for DownSecrets {
     async fn for_repo(&self, _: &str, _: &str, _: &str) -> anyhow::Result<Vec<(String, String)>> {
         anyhow::bail!("roll secrets is down")
     }
-    async fn for_owner(&self, _: &str, _: &str, _: &str, _: &str) -> anyhow::Result<Vec<(String, String)>> {
+    async fn for_owner(&self, _: &str, _: &str, _: &str, _: &str, _: code_control::Asker<'_>) -> anyhow::Result<code_control::Revealed> {
         anyhow::bail!("roll secrets is down")
     }
     async fn leaks(&self, _: &str, _: Vec<String>) -> anyhow::Result<Vec<(usize, String, String, String)>> {
         anyhow::bail!("roll secrets is down")
     }
+}
+
+/// roll secrets in process, wired as rolld's `ForCode` wires it: the projects that have the repo on
+/// their canvas and count for it, and the request's own grant (or the operator) deciding.
+struct InProcessSecrets(Arc<roll_secrets::Secrets>, Arc<roll_workspace::Workspace>);
+
+fn secrets_error(e: roll_secrets::Error) -> code_control::Error {
+    use roll_secrets::Error as E;
+    match e {
+        E::BadRequest(m) => code_control::Error::Invalid(m),
+        E::Forbidden(m) => code_control::Error::Forbidden(m),
+        E::NotFound(m) => code_control::Error::NotFound(m),
+        E::Conflict("no_project", m) => code_control::Error::Unprocessable(m),
+        E::Conflict(_, m) => code_control::Error::Conflict(m),
+        e => code_control::Error::Internal(anyhow::anyhow!(e.to_string())),
+    }
+}
+
+#[async_trait]
+impl code_control::SecretEnv for InProcessSecrets {
+    async fn for_repo(&self, _: &str, _: &str, _: &str) -> anyhow::Result<Vec<(String, String)>> {
+        anyhow::bail!("not in this test")
+    }
+    async fn for_owner(&self, _: &str, _: &str, _: &str, _: &str, _: code_control::Asker<'_>) -> anyhow::Result<code_control::Revealed> {
+        anyhow::bail!("not in this test")
+    }
+    async fn leaks(&self, repo: &str, candidates: Vec<String>) -> anyhow::Result<Vec<(usize, String, String, String)>> {
+        let mut out = Vec::new();
+        for p in self.1.projects_of("repo", repo)?.into_iter().filter(|p| self.0.counts_for_repo(p, repo)) {
+            out.extend(self.0.leak_matches(&p, &candidates)?.into_iter().map(|(i, l)| (i, l.key, l.environment, l.path)));
+        }
+        Ok(out)
+    }
+    async fn store_target(&self, repo: &str, asker: &code_control::SecretsAsker, prefer: Option<&str>) -> code_control::Result<code_control::StoreTarget> {
+        let caller = self.0.caller_of(asker.operator, asker.user.as_ref(), asker.grant.as_ref()).map_err(secrets_error)?;
+        let t = self.0.found_target(repo, prefer, &caller).map_err(secrets_error)?;
+        Ok(code_control::StoreTarget { project: t.project, project_name: t.project_name, environments: t.environments, environment: t.environment })
+    }
+    async fn store(&self, repo: &str, asker: &code_control::SecretsAsker, c: code_control::StoreCredential) -> code_control::Result<code_control::StoredCredential> {
+        let caller = self.0.caller_of(asker.operator, asker.user.as_ref(), asker.grant.as_ref()).map_err(secrets_error)?;
+        let s = self.0.store_found(repo, c.environment.as_deref(), c.prefer.as_deref(), &c.path, &c.key, c.value.0, c.message, &caller).map_err(secrets_error)?;
+        Ok(code_control::StoredCredential { project: s.project, environment: s.environment, path: s.path, change: s.change, request: s.request })
+    }
+}
+
+/// roll secrets (open, as a loopback rolld is) and a project `shop` owned by `owner` ("": the
+/// operator's, which counts for its canvas) with acme/api on its canvas.
+fn in_process_secrets(dir: &Path, owner: &str) -> (Arc<roll_secrets::Secrets>, String, InProcessSecrets) {
+    let ws_db = code_sql::Db::open_or_test(&code_sql::Target::Sqlite(dir.join("workspace.db")), "workspace").unwrap();
+    let ws = Arc::new(roll_workspace::Workspace::new(ws_db).unwrap());
+    let project = ws.create(owner, "shop", "", None).unwrap().id;
+    ws.place(roll_workspace::Scope::All, &project, roll_workspace::Kind::Repo, "acme/api", 0.0, 0.0).unwrap();
+    let db = code_sql::Db::open_or_test(&code_sql::Target::Sqlite(dir.join("secrets.db")), "secrets").unwrap();
+    let opts = roll_secrets::Options {
+        keyring: Ok(roll_secrets::Keyring::new(&"k".repeat(32), None).unwrap()),
+        key_source: roll_secrets::KeySource::Env,
+        links: Default::default(),
+        syncs: Default::default(),
+        open: true,
+        trust_forwarded_for: false,
+        web_url: None,
+        deliver: None,
+        grants: None,
+        people: None,
+        kms: None,
+        sts: None,
+        outside: None,
+        directory: None,
+        github: None,
+        clouds: None,
+        workloads: None,
+        gateways: None,
+    };
+    let secrets = Arc::new(roll_secrets::Secrets::new(db, ws.clone(), opts).unwrap());
+    (secrets.clone(), project, InProcessSecrets(secrets, ws))
+}
+
+/// A change that adds an AWS key at deploy.py:2, and its `secret_unstored` notice's fingerprint.
+async fn unstored_change(a: &App, aws: &str) -> (String, String) {
+    let c = change(a, "deploy", json!({ "deploy.py": { "content": format!("import os\naws_access_key_id = \"{aws}\"\n") } })).await;
+    let c = a.ok("GET", &format!("/v1/code/changes/{}", id(&c)), None).await;
+    let n = c["notices"].as_array().into_iter().flatten().find(|n| n["kind"] == "secret_unstored").unwrap_or_else(|| panic!("{c}"));
+    (id(&c), n["fingerprint"].as_str().unwrap().to_string())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_writer_stores_a_notices_credential_in_the_project_the_repo_is_trusted_for() {
+    // Built from pieces: push protection scans this repo.
+    let aws = ["AKIA", "ROLLFIXTURE", "23456"].concat();
+    let dir = tempfile::tempdir().unwrap();
+    // roll.toml's checks read staging:/api: that's where it's suggested.
+    let a = queue_app("secrets = \"staging:/api\"\n", Arc::new(QueueRunner::default())).await;
+    let (secrets, project, env) = in_process_secrets(dir.path(), "");
+    a.code.set_secret_env(Arc::new(env));
+    let (cid, fp) = unstored_change(&a, &aws).await;
+    let at = format!("/v1/code/changes/{cid}/unstored/{fp}");
+
+    let target = a.ok("GET", &at, None).await;
+    assert_eq!((&target["project"]["id"], &target["environment"], &target["path"], &target["key"]), (&json!(project), &json!("staging"), &json!("/api"), &json!("AWS_ACCESS_KEY_ID")), "{target}");
+    assert_eq!(target["environments"], json!(["development", "staging", "production"]));
+    let stored = a.ok("POST", &format!("{at}/store"), Some(json!({}))).await;
+    assert_eq!(
+        stored,
+        json!({ "key": "AWS_ACCESS_KEY_ID", "project": project, "environment": "staging", "path": "/api", "file": "deploy.py", "line": 2, "replacement": "os.environ[\"AWS_ACCESS_KEY_ID\"]", "change": 1, "request": null })
+    );
+    let held = secrets.values(&project, "staging", "/api", true, None, &roll_secrets::Caller::operator()).unwrap();
+    assert_eq!(held.values.get("AWS_ACCESS_KEY_ID").map(|v| v.expose().to_string()), Some(aws.clone()));
+    // Another key and environment as asked; a key already there is refused, never overwritten.
+    let other = a.ok("POST", &format!("{at}/store"), Some(json!({ "key": "DEPLOY_AWS_KEY", "environment": "development", "path": "/" }))).await;
+    assert_eq!((&other["environment"], &other["replacement"]), (&json!("development"), &json!("os.environ[\"DEPLOY_AWS_KEY\"]")));
+    let (s, v) = a.req("POST", &format!("{at}/store"), Some(json!({})), None).await;
+    assert_eq!(s, StatusCode::CONFLICT, "{v}");
+    // Neither the answers nor roll code's audit log hold the value.
+    let audit = a.ok("GET", &format!("{P}/audit"), None).await;
+    assert_eq!(audit[0]["action"], "secret_unstored_stored");
+    for v in [&target, &stored, &other, &v, &audit] {
+        assert!(!v.to_string().contains(&aws), "{v}");
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn storing_a_notices_credential_needs_write_in_the_folder_and_a_trusted_project() {
+    use axum::body::Body;
+    use tower::ServiceExt;
+    let aws = ["AKIA", "ROLLFIXTURE", "65432"].concat();
+    let dir = tempfile::tempdir().unwrap();
+    let a = queue_app("", Arc::new(QueueRunner::default())).await;
+    let (secrets, project, env) = in_process_secrets(dir.path(), "");
+    a.code.set_secret_env(Arc::new(env));
+    let (cid, fp) = unstored_change(&a, &aws).await;
+    // A roll token that may read the project's secrets but write none: roll secrets refuses it.
+    let rule = roll_auth::scope::Rule {
+        product: "secrets".into(),
+        resources: roll_auth::scope::Resources::Some(vec![roll_auth::scope::Selector::Project { project: project.clone() }]),
+        environments: None,
+        paths: None,
+        actions: std::collections::BTreeMap::from([(roll_auth::scope::Action::Read, roll_auth::scope::Effect::Allow)]),
+    };
+    let grant = roll_auth::Grant { user: None, ask_otherwise: false, id: "tok_reader".into(), name: "reader".into(), kind: roll_auth::GrantKind::Token, scope: Arc::new(roll_auth::scope::Scope(vec![rule])) };
+    let mut req = axum::http::Request::post(format!("/v1/code/changes/{cid}/unstored/{fp}/store")).header("content-type", "application/json").body(Body::from("{}")).unwrap();
+    req.extensions_mut().insert(grant);
+    let resp = a.router.clone().oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+    assert!(secrets.values(&project, "development", "/", true, None, &roll_secrets::Caller::operator()).unwrap().values.is_empty());
+
+    // A person's project with acme/api on its canvas doesn't stand for it: no project to store in.
+    let b = queue_app("", Arc::new(QueueRunner::default())).await;
+    let dir = tempfile::tempdir().unwrap();
+    let (_, _, env) = in_process_secrets(dir.path(), "usr_mallory");
+    b.code.set_secret_env(Arc::new(env));
+    let (cid, fp) = unstored_change(&b, &aws).await;
+    let (s, v) = b.req("POST", &format!("/v1/code/changes/{cid}/unstored/{fp}/store"), Some(json!({})), None).await;
+    assert_eq!(s, StatusCode::UNPROCESSABLE_ENTITY, "{v}");
+    assert!(!v.to_string().contains(&aws), "{v}");
+
+    // An outsider's change (a fork's pull request) carries their credential, not the repo's: it's
+    // never stored in the trusted project, even once a writer approves its run.
+    let r = a.code.find_repo("acme", "api").unwrap();
+    let fork = json!({ "title": "from a fork", "message": "fork", "files": { "settings.py": { "content": format!("aws_access_key_id = \"{aws}\"\n") } } });
+    let u = a.code.create_change_as(&r, &Caller::Admin, &fork, None, false).await.unwrap();
+    a.ok("POST", &format!("/v1/code/changes/{}/approve-run", u.id), None).await;
+    let u = a.ok("GET", &format!("/v1/code/changes/{}", u.id), None).await;
+    let n = u["notices"].as_array().into_iter().flatten().find(|n| n["kind"] == "secret_unstored").unwrap_or_else(|| panic!("{u}"));
+    let at = format!("/v1/code/changes/{}/unstored/{}", id(&u), n["fingerprint"].as_str().unwrap());
+    for (method, path) in [("GET", at.clone()), ("POST", format!("{at}/store"))] {
+        let (s, v) = a.req(method, &path, if method == "POST" { Some(json!({})) } else { None }, None).await;
+        assert_eq!(s, StatusCode::CONFLICT, "{method} {v}");
+    }
+    assert!(secrets.values(&project, "development", "/", true, None, &roll_secrets::Caller::operator()).unwrap().values.is_empty());
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

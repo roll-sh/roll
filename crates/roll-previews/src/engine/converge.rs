@@ -439,8 +439,11 @@ impl Engine {
         // roll secrets as references; everything else, whatever it looks like, as plain text.
         let own = self.store.vars(&r.id)?;
         let rule_refs: Vec<(String, String)> = project_env(&s, r.branch.as_deref()).into_iter().filter(|(k, v)| crate::settings::is_reference(v) && !own.contains_key(k)).collect();
-        let refs: Vec<(String, String)> = vars.iter().filter(|kv| rule_refs.contains(kv)).cloned().collect();
+        // A preview's own variable may be one too, its setter's (`set_vars_as`).
+        let own_refs: Vec<(String, String)> = own.iter().filter(|(_, v)| crate::settings::is_reference(v)).map(|(k, v)| (k.clone(), v.clone())).collect();
+        let refs: Vec<(String, String)> = vars.iter().filter(|kv| rule_refs.contains(kv) || own_refs.contains(kv)).cloned().collect();
         vars.retain(|kv| !refs.contains(kv));
+        let refs = self.refs_still_chosen(r, &s, trusted, refs, &own_refs).await?;
         self.secrets.ensure(&r.project_id, &env_name(&r.id), &s.secrets.base, &vars, &refs, trusted, expires_at, &branched).await.map_err(|e| anyhow::anyhow!("secrets: {e:#}"))?;
         // Its logs' masks follow what it's given now: these values at once (roll apps' instances
         // get them without a start here), roll secrets' read again at the next logs read.
@@ -740,6 +743,75 @@ impl Engine {
     }
 
     /// The project's column masks for a fresh branch, if it has any for this resource.
+    /// The rules' references to an environment other than the one the previews follow, each kept
+    /// only while its writer may still choose it for this preview (roll secrets reads it as them:
+    /// `Reveal::still`); the rest are left out, said once in the activity. A reference to the base
+    /// reads what the preview reads anyway.
+    async fn refs_still_chosen(&self, r: &Row, s: &crate::settings::Settings, trusted: bool, refs: Vec<(String, String)>, own: &[(String, String)]) -> anyhow::Result<Vec<(String, String)>> {
+        let (kept, dropped) = self.check_refs(r, s, trusted, refs, own).await?;
+        let new = self.refs_told.lock().insert(r.id.clone(), dropped.clone()).is_none_or(|before| before != dropped);
+        if new && !dropped.is_empty() {
+            self.store.log(&r.id, &format!("references left out (who chose them can't now): {}", dropped.join("; ")))?;
+        }
+        Ok(kept)
+    }
+
+    /// Whether a start may go on: no reference its preview's environment still holds has lost its
+    /// writer since the last converge (that converge leaves it out; the start waits for it, so a
+    /// writer who lost access never reaches the service through a start in between).
+    pub(super) async fn refs_still_allowed(&self, r: &Row, s: &crate::settings::Settings, trusted: bool) -> anyhow::Result<()> {
+        let own = self.store.vars(&r.id)?;
+        let own_refs: Vec<(String, String)> = own.iter().filter(|(_, v)| crate::settings::is_reference(v)).map(|(k, v)| (k.clone(), v.clone())).collect();
+        let mut refs: Vec<(String, String)> = project_env(s, r.branch.as_deref()).into_iter().filter(|(k, v)| crate::settings::is_reference(v) && !own.contains_key(k)).collect();
+        refs.extend(own_refs.iter().cloned());
+        let (_, dropped) = self.check_refs(r, s, trusted, refs, &own_refs).await?;
+        let told: Vec<String> = self.refs_told.lock().get(&r.id).cloned().unwrap_or_default();
+        let key = |d: &String| d.split_once(": ").map_or(d.clone(), |(k, _)| k.to_string());
+        let told: Vec<String> = told.iter().map(key).collect();
+        if let Some(d) = dropped.iter().find(|d| !told.contains(&key(d))) {
+            self.store.update(&r.id, |row| row.next_at = 0)?;
+            self.kick();
+            anyhow::bail!("a reference's writer can't choose it any more ({d}): the preview converges without it first");
+        }
+        Ok(())
+    }
+
+    /// The references kept and the ones left out (`KEY: why`), each read as its writer.
+    async fn check_refs(&self, r: &Row, s: &crate::settings::Settings, trusted: bool, refs: Vec<(String, String)>, own: &[(String, String)]) -> anyhow::Result<(Vec<(String, String)>, Vec<String>)> {
+        if refs.is_empty() {
+            return Ok((refs, Vec::new()));
+        }
+        let Some(reveal) = self.reveal.get().cloned() else { anyhow::bail!("roll:// references need roll secrets on this node") };
+        let writers = self.store.env_ref_writers(&r.project_id)?;
+        let mine = format!("preview:{}", r.id);
+        let own = own.to_vec();
+        let (project, repo, base) = (r.project_id.clone(), r.repo.clone(), s.secrets.base.clone());
+        let (kept, dropped) = tokio::task::spawn_blocking(move || {
+            let (mut kept, mut dropped) = (Vec::new(), Vec::new());
+            for (k, v) in refs {
+                let why = match reveal.place(&v) {
+                    Ok((env, _)) if env == base => None,
+                    // The preview's own variable's setter, else the rule's writer.
+                    Ok(_) => {
+                        let is_own = own.iter().any(|(n, x)| *n == k && *x == v);
+                        match writers.iter().find(|(scope, n, reference, _)| *n == k && *reference == v && (*scope == mine) == is_own && (is_own || !scope.starts_with("preview:"))) {
+                            Some((_, _, _, by)) => reveal.still(&project, crate::canvas_resource(&repo), !trusted, &v, by).err(),
+                            None => Some(if is_own { "no setter is kept for it: set it again".into() } else { "no writer is kept for it: save the rules again".into() }),
+                        }
+                    }
+                    Err(e) => Some(e),
+                };
+                match why {
+                    None => kept.push((k, v)),
+                    Some(why) => dropped.push(format!("{k}: {why}")),
+                }
+            }
+            (kept, dropped)
+        })
+        .await?;
+        Ok((kept, dropped))
+    }
+
     /// The first service's screenshot at `r`'s head: `true` when one was kept. Not taken (a
     /// backend that can't, a failure) is remembered for the head, and the last one taken stays.
     pub(super) async fn take_screenshot(&self, r: &Row) -> bool {

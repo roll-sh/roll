@@ -292,7 +292,10 @@ A crate with no HTTP routes of its own. code-control drives it (`src/ai/`), and 
   - It also powers the `/search` API and the MCP `search` tool.
 - **Chat and commands:** replying `@roll` in a thread gets an answer in context. Commands:
   `@roll review` · `@roll full review` · `@roll pause` · `@roll resume` · `@roll resolve` ·
-  `@roll explain` · `@roll fix` (opens a revision with the suggested fix).
+  `@roll explain` · `@roll fix` (opens a revision with the suggested fix). In a pull request's
+  conversation, `@roll preview redeploy|reset|wake|sleep|keep [hours]` acts on the change's
+  preview through its backend (roll previews: as the commenter, in the preview's activity), and
+  answers with what it did; one it doesn't know lists them.
 - **Who can command roll:** only writers. A command from anyone else is ignored, because replies
   cost the owner money. `review`, `pause`, `resume`, `resolve` and `don't flag` act at once.
   `explain`, `fix` and questions become `command` jobs. `fix` applies the thread's suggestion, or

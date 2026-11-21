@@ -682,6 +682,7 @@ export function MetricsTab({
   memoryMb,
   maxInstances,
   cpus,
+  latencyTarget,
 }: {
   service: string;
   env: string;
@@ -691,6 +692,8 @@ export function MetricsTab({
   maxInstances?: number;
   /** The cores each instance gets. */
   cpus?: number;
+  /** Its run.latency_target_ms: the p95 it scales out past, drawn on the latency chart. */
+  latencyTarget?: number;
 }) {
   const [range, setRange] = useState<Range>(RANGES[0]);
   const [raw, setM] = useState<MetricsData | null>(null);
@@ -780,7 +783,8 @@ export function MetricsTab({
           { label: "p99", values: m.p99_ms, color: "var(--viz-4)" },
         ],
         format: formatMs,
-        summary: `p99 peaked at ${formatMs(peak(m.p99_ms))}`,
+        summary: `p99 peaked at ${formatMs(peak(m.p99_ms))}${latencyTarget ? `; scales out past a ${formatMs(latencyTarget)} p95` : ""}`,
+        limit: latencyTarget,
       },
       { title: "CPU (cores)", agg: "peak" as Agg, series: [{ label: "cpu", values: m.cpu, color: ink }], format: cores, summary: `peak ${cores(peak(m.cpu))} cores` },
       { title: "Memory", agg: "peak" as Agg, series: [{ label: "memory", values: m.memory_bytes, color: ink }], format: (v: number) => formatBytes(v), summary: `peak ${formatBytes(peak(m.memory_bytes))}${memoryMb ? ` of ${formatBytes(memoryMb * 1024 * 1024)}` : ""}`, limit: memoryMb ? memoryMb * 1024 * 1024 : undefined },
@@ -796,7 +800,7 @@ export function MetricsTab({
       { title: `Cold starts / ${per}`, agg: "total" as Agg, series: [{ label: "cold starts", values: m.cold_starts, color: ink }], format: count, summary: `${sum(m.cold_starts)} in the ${range.label}` },
       { title: "Cold start time", agg: "peak" as Agg, series: [{ label: "cold start", values: m.cold_start_ms, color: ink }], format: formatMs, summary: `slowest ${formatMs(peak(m.cold_start_ms))}` },
     ];
-  }, [m, range, per, memoryMb, maxInstances]);
+  }, [m, range, per, memoryMb, maxInstances, latencyTarget]);
 
   if (error && !m) return <p className="text-[13px] text-danger">Metrics didn't load: {error}</p>;
   if (!m) return <p className="text-[13px] text-subtle"><span className="shimmer">Loading metrics…</span></p>;

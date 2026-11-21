@@ -526,6 +526,13 @@ pub trait Reveal: Send + Sync {
     fn may_reveal(&self, who: &Asker<'_>, project: &str, env: &str, folder: &str) -> bool;
     /// A reference's environment and folder as roll secrets reads it, or why it can't be one.
     fn place(&self, reference: &str) -> std::result::Result<(String, String), String>;
+    /// Whether a rule's reference still reads for a preview in `project` as `maker`, its
+    /// writer (`operator`, `usr_…` or `token:…`), may now (roll secrets' `digest_as`: they can
+    /// still sign in and reach the project, may still reveal the folder, the key isn't sensitive,
+    /// and an `untrusted` preview reaches no protected environment). Asked at every converge,
+    /// never cached; it may read a database (called off the async workers). Why not, if not.
+    /// `resource`: what the preview stands as on the project's canvas ([`crate::canvas_resource`]).
+    fn still(&self, project: &str, resource: (roll_workspace::Kind, &str), untrusted: bool, reference: &str, maker: &str) -> std::result::Result<(), String>;
 }
 
 /// A preview's interception (docs/previews.md, "Keys a preview never holds"): the hosts its

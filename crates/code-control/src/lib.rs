@@ -15,6 +15,7 @@ pub mod git;
 pub mod leaks;
 pub mod github;
 mod secret_leaks;
+mod unstored;
 pub mod mcp;
 pub mod model;
 pub mod names;
@@ -28,7 +29,7 @@ pub mod settings;
 pub mod streams;
 pub mod webhooks;
 
-pub use ext::{PreviewBackend, Runner, SecretEnv};
+pub use ext::{Asker, CredentialValue, PreviewBackend, Refused, Revealed, Runner, SecretEnv, SecretsAsker, StoreCredential, StoreTarget, StoredCredential};
 pub use service::{FileWrite, LandOutcome, WriteFiles};
 
 use axum::Json;
@@ -435,6 +436,9 @@ pub struct Code {
     /// The environment variables a change reads that a roll secrets environment lacks, per
     /// (repo, head), with the merge base they were found from (`secret_leaks.rs`).
     pub(crate) env_facts: Cache<(String, ChangesetId), (Option<ChangesetId>, secret_leaks::Missing)>,
+    /// What roll secrets' validity checks said about credentials changes add, per (repo,
+    /// fingerprint) (`secret_leaks.rs`): filled in by background work, kept a day.
+    pub(crate) validity_facts: Arc<Cache<(String, String), model::CredentialValidity>>,
     /// Review-app webhook deliveries.
     pub(crate) deliveries: review::Deliveries,
     /// roll's own reviewer: its job queue, the codebase index, sealed keys.
@@ -571,6 +575,7 @@ impl Code {
             review_facts: Cache::new(16_384),
             leak_facts: Cache::new(16_384),
             env_facts: Cache::new(16_384),
+            validity_facts: Arc::new(Cache::new(16_384)),
             deliveries: review::Deliveries::default(),
             ai,
             worktrees: checkout::Worktrees::default(),
