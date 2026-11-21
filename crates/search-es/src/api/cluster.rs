@@ -1159,7 +1159,7 @@ pub fn get_settings(ctx: &Ctx) -> EsResult<Reply> {
         let mut node = vec![("node.attr.ml.allocated_processors_double".to_string(), format!("{:.1}", m.processors as f64))];
         node.extend(super::nodes::node_attributes(ctx.cluster, &m).into_iter().map(|(k, v)| (format!("node.attr.{k}"), v)));
         // `roll.security.*` holds credentials and other tenants' names: never printed.
-        node.extend(ctx.cluster.config.node_settings.iter().filter(|(k, _)| !k.starts_with("roll.security.")).cloned());
+        node.extend(ctx.cluster.config.shown_node_settings().into_iter().filter(|(k, _)| !k.starts_with("roll.security.")));
         for (k, v) in node {
             if !set.contains(&k) {
                 defaults.set(k, v);

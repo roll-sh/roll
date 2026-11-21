@@ -46,7 +46,7 @@ jobs:
         with:
           cache-on-failure: true
       - name: Pull Postgres images
-        run: for v in 16 17 18; do docker pull -q postgres:$v-alpine & done; wait
+        run: for i in $(grep -o 'postgres:[0-9.]*-alpine@sha256:[0-9a-f]*' crates/pg-control/src/config.rs); do docker pull -q "$i" & done; wait
       - name: Local object store
         run: scripts/test-postgres.sh --force
 

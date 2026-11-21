@@ -38,6 +38,12 @@ pub use mail::{Mail, MailConfig, Mailer};
 pub use oauth::{OAuthApp, Provider, ProviderConfig};
 
 const SCHEMA: &str = "
+CREATE TABLE IF NOT EXISTS account_deletions (
+    user_id TEXT PRIMARY KEY,
+    at INTEGER NOT NULL,
+    claimed_at INTEGER,
+    done INTEGER NOT NULL DEFAULT 0
+) WITHOUT ROWID;
 CREATE TABLE IF NOT EXISTS users (
     id TEXT PRIMARY KEY,
     email TEXT NOT NULL UNIQUE,
@@ -456,6 +462,9 @@ pub struct Accounts {
     /// Where account events go (rolld: roll-access's audit log); none until it's set.
     audit: std::sync::RwLock<Option<Arc<dyn audit::Audit>>>,
     owners: Option<Arc<dyn Owners>>,
+    /// What other products do when an account is deleted (rolld: the workspace removes its
+    /// memberships), run after the deletion's write from its outbox row until each succeeds.
+    on_deleted: std::sync::RwLock<Vec<deletion::OnDeleted>>,
     /// Sudo mode's window (`sudo::SUDO_MS`; shorter in tests).
     sudo_ms: std::sync::atomic::AtomicI64,
 }
@@ -536,7 +545,7 @@ impl Accounts {
         }
         let doh = std::env::var("ROLL_ACCOUNTS_DOH").ok().filter(|u| !u.trim().is_empty()).unwrap_or_else(|| "https://cloudflare-dns.com/dns-query".into());
         let txt: Arc<dyn sso::TxtLookup> = Arc::new(sso::Doh { client: sso_http.clone(), url: doh });
-        Ok(Accounts { db, config, mailer, http, sso_http, sso_discovery: Default::default(), txt: std::sync::RwLock::new(txt), audit: Default::default(), owners, sudo_ms: std::sync::atomic::AtomicI64::new(sudo::SUDO_MS) })
+        Ok(Accounts { db, config, mailer, http, sso_http, sso_discovery: Default::default(), txt: std::sync::RwLock::new(txt), audit: Default::default(), owners, on_deleted: Default::default(), sudo_ms: std::sync::atomic::AtomicI64::new(sudo::SUDO_MS) })
     }
 
     /// Where SSO domains' TXT records are read (tests answer from a table).

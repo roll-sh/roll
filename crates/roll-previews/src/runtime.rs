@@ -89,6 +89,13 @@ pub struct RuntimeConfig {
     /// How often a signed-in visitor's session (`access: team`) asks again whether its person may
     /// still open the project.
     pub visitor_recheck: Duration,
+    /// Where each preview's interception socket is made (`<dir>/<preview>/intercept.sock`, mounted
+    /// into its egress container). `None`: nothing is intercepted here.
+    pub intercept_dir: Option<std::path::PathBuf>,
+    /// Local development only (`ROLL_PREVIEWS_INTERCEPT_ALLOW_PRIVATE`): intercepted connections
+    /// may dial a private address and trust this root too (a local TLS echo host for the live
+    /// check). Plain egress is never touched by it.
+    pub intercept_private: Option<std::path::PathBuf>,
 }
 
 /// Playwright's image has a headless Chromium shell (its path names its version).
@@ -155,6 +162,8 @@ impl Default for RuntimeConfig {
             warm_for: Duration::from_secs(8 * 3600),
             warm_max: 32,
             visitor_recheck: Duration::from_secs(300),
+            intercept_dir: None,
+            intercept_private: None,
         }
     }
 }
@@ -185,6 +194,10 @@ pub struct Runtime {
     /// Held while a preview's egress proxy is checked and (re)made: its services start at once,
     /// and two makes under the one name would refuse each other (or one remove the other's).
     egress_making: Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
+    /// What tells a preview's interception (rolld, from roll secrets), set once.
+    intercepts: OnceLock<Arc<dyn crate::ports::Intercepts>>,
+    /// Each preview's interception socket being served here: what it covers, and its listener.
+    intercepting: Mutex<HashMap<String, (String, tokio::task::AbortHandle)>>,
     /// The latest requests to each preview's services through this node (newest last), at most
     /// [`REQUESTS_KEPT`] a preview, gone with its last service.
     requests: Mutex<HashMap<String, std::collections::VecDeque<crate::RequestLine>>>,
@@ -348,6 +361,8 @@ impl Runtime {
             browsers_failed: Mutex::new(None),
             browsers_building: tokio::sync::Mutex::new(()),
             egress_making: Mutex::new(HashMap::new()),
+            intercepts: OnceLock::new(),
+            intercepting: Mutex::new(HashMap::new()),
             requests: Mutex::new(HashMap::new()),
             client: Client::builder(TokioExecutor::new()).build_http(),
         })
@@ -366,6 +381,11 @@ impl Runtime {
                 rt.reap().await;
             }
         });
+    }
+
+    /// What tells each preview's interception (docs/previews.md, "Keys a preview never holds").
+    pub fn set_intercepts(&self, i: Arc<dyn crate::ports::Intercepts>) {
+        let _ = self.intercepts.set(i);
     }
 
     /// Serve preview hosts on their preview's holder, and stop a preview's containers here when
@@ -694,6 +714,7 @@ impl Runtime {
         }
         if let Some(n) = job.network.as_ref().filter(|_| !t.egress_hosts.is_empty()) {
             self.egress_proxy(preview, &n.name, &t.egress_hosts).await?;
+            self.trust_intercept_ca(preview, &mut job);
             let proxy = format!("http://{EGRESS_ALIAS}:3128");
             for k in ["HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy"] {
                 job.env.push((k.into(), proxy.clone()));
@@ -1573,6 +1594,11 @@ impl Apps for Runtime {
         self.service_status(preview, service)
     }
 
+    /// The runtime's own proxy counts on the preview's record as it goes.
+    async fn intercepted(&self, _preview: &str) -> Option<crate::AppsIntercepted> {
+        None
+    }
+
     async fn egress_refused(&self, preview: &str) -> Vec<String> {
         if self.iso.name() != "docker" {
             return Vec::new();
@@ -1913,15 +1939,115 @@ impl Runtime {
         let turn = self.egress_making.lock().entry(preview.to_string()).or_default().clone();
         let _turn = turn.lock().await;
         code_preview::docker::remove(&egress_name(preview)).await;
+        self.stop_intercepting(preview);
+    }
+
+    /// A preview being intercepted: its code trusts its interception CA too (the CA's PEM as a
+    /// variable, written to a file and added to the system's bundle before the command runs):
+    /// `NODE_EXTRA_CA_CERTS`, and `SSL_CERT_FILE`, `REQUESTS_CA_BUNDLE` and `CURL_CA_BUNDLE` as the
+    /// system's bundle plus it, so every other host still verifies as before. A runtime with a
+    /// store of its own (Java's keystore) doesn't read these.
+    fn trust_intercept_ca(&self, preview: &str, job: &mut code_preview::isolation::Job) {
+        let Some(dir) = self.cfg.intercept_dir.as_ref().filter(|_| self.intercepting.lock().contains_key(preview)) else { return };
+        let Ok(pem) = std::fs::read_to_string(dir.join(preview).join("ca.pem")) else { return };
+        job.env.push(("ROLL_INTERCEPT_CA".into(), pem));
+        job.run = format!("{TRUST_INTERCEPT_CA}\n{}", job.run);
+    }
+
+    fn stop_intercepting(&self, preview: &str) {
+        if let Some((_, h)) = self.intercepting.lock().remove(preview) {
+            h.abort();
+        }
+        if let Some(d) = &self.cfg.intercept_dir {
+            let _ = std::fs::remove_dir_all(d.join(preview));
+        }
+    }
+
+    /// The preview's interception, if it has one and this node intercepts: its socket served (made
+    /// again when what it covers changed) and what its egress container needs (the directory to
+    /// mount, the hosts, its owner to run as).
+    async fn intercepting(&self, preview: &str) -> anyhow::Result<Option<(std::path::PathBuf, String, String)>> {
+        let (Some(dir), Some(source)) = (self.cfg.intercept_dir.clone(), self.intercepts.get().cloned()) else { return Ok(None) };
+        let p = preview.to_string();
+        let Some(i) = tokio::task::spawn_blocking(move || source.of(&p)).await?? else {
+            self.stop_intercepting(preview);
+            return Ok(None);
+        };
+        let covered = serde_json::to_string(&i.hosts)?;
+        // A new CA with the same hosts is a new listener too: the old one's CA has ended.
+        let made = format!("{covered}#{}", i.id);
+        let dir = dir.join(preview);
+        let user = {
+            use std::os::unix::fs::{DirBuilderExt, MetadataExt};
+            let fresh = self.intercepting.lock().get(preview).is_none_or(|(c, h)| *c != made || h.is_finished());
+            if fresh {
+                // The directory stays (a running egress container has it mounted): only its socket
+                // is made again.
+                if let Some((_, h)) = self.intercepting.lock().remove(preview) {
+                    h.abort();
+                }
+                std::fs::DirBuilder::new().recursive(true).mode(0o700).create(dir.join("sock"))?;
+                std::fs::write(dir.join("ca.pem"), &i.ca_pem)?;
+                let sock = dir.join("sock").join("intercept.sock");
+                let _ = std::fs::remove_file(&sock);
+                let listener = tokio::net::UnixListener::bind(&sock)?;
+                let engine = self.engine.get().cloned();
+                let id = preview.to_string();
+                let done: Arc<dyn Fn(String, anyhow::Result<crate::intercept::Served>) + Send + Sync> = Arc::new(move |host, out| {
+                    // Its record's counts: requests a key was swapped into, and refusals.
+                    let (swapped, refused) = match &out {
+                        Ok(s) => (s.swapped as u64, s.blocked.len() as u64),
+                        Err(_) => (0, 1),
+                    };
+                    if swapped + refused > 0
+                        && let Some(e) = engine.as_ref().and_then(Weak::upgrade)
+                    {
+                        let _ = e.store.update_intercepted(&id, |x| {
+                            x.swapped += swapped;
+                            x.refused += refused;
+                        });
+                    }
+                    let line = match out {
+                        Ok(s) if s.blocked.is_empty() && s.swapped == 0 => return,
+                        Ok(s) if s.blocked.is_empty() => format!("egress to {host}: {} request(s), {} key(s) swapped in", s.requests, s.swapped),
+                        Ok(s) => format!("egress to {host}: {} request(s), {} key(s) swapped in, refused: {}", s.requests, s.swapped, s.blocked.join("; ")),
+                        // Its CA ended (a key's bound hosts changed): a converge makes the new one
+                        // and restarts the services with it.
+                        Err(e) if format!("{e:#}").contains("interception CA has ended") => {
+                            if let Some(e) = engine.as_ref().and_then(Weak::upgrade) {
+                                let _ = e.store.update(&id, |row| row.next_at = 0);
+                                e.kick();
+                            }
+                            format!("egress to {}: refused: a key's bound hosts changed; restarting with a new interception certificate", if host.is_empty() { "?" } else { &host })
+                        }
+                        Err(e) => format!("egress to {}: refused: {e:#}", if host.is_empty() { "?" } else { &host }),
+                    };
+                    if let Some(e) = engine.as_ref().and_then(Weak::upgrade) {
+                        let _ = e.store.log(&id, &line);
+                    }
+                });
+                let (upstream, dial) = match &self.cfg.intercept_private {
+                    Some(root) => (crate::intercept::with_root(root)?, crate::intercept::any_dial()),
+                    None => (crate::intercept::system_upstream(), crate::intercept::public_dial()),
+                };
+                let task = tokio::spawn(crate::intercept::listen(listener, i.interception, upstream, dial, done));
+                self.intercepting.lock().insert(preview.to_string(), (made.clone(), task.abort_handle()));
+            }
+            let m = std::fs::metadata(dir.join("sock"))?;
+            format!("{}:{}", m.uid(), m.gid())
+        };
+        Ok(Some((dir, covered, user)))
     }
 
     async fn egress_proxy(&self, preview: &str, network: &str, hosts: &[String]) -> anyhow::Result<()> {
         let hosts: Vec<&String> = hosts.iter().filter(|h| crate::settings::egress_host_ok(h)).take(crate::settings::MAX_EGRESS_HOSTS).collect();
-        let list = serde_json::to_string(&hosts)?;
-        let digest = format!("{:016x}", list.bytes().fold(0xcbf2_9ce4_8422_2325u64, |h, b| (h ^ b as u64).wrapping_mul(0x0100_0000_01b3)));
-        let name = egress_name(preview);
         let turn = self.egress_making.lock().entry(preview.to_string()).or_default().clone();
         let _turn = turn.lock().await;
+        // Under the turn: two starts at once make one socket and one listener.
+        let intercept = self.intercepting(preview).await?;
+        let list = serde_json::to_string(&(&hosts, intercept.as_ref().map(|(_, c, _)| c)))?;
+        let digest = format!("{:016x}", list.bytes().fold(0xcbf2_9ce4_8422_2325u64, |h, b| (h ^ b as u64).wrapping_mul(0x0100_0000_01b3)));
+        let name = egress_name(preview);
         let running = code_preview::docker::docker(&["inspect", "-f", "{{.State.Running}} {{index .Config.Labels \"sh.roll.egress\"}}", &name]).await.ok();
         if running.as_deref() == Some(format!("true {digest}").as_str()) {
             return Ok(());
@@ -1934,7 +2060,12 @@ impl Runtime {
         }
         args.extend(["--cap-drop".into(), "ALL".into(), "--security-opt".into(), "no-new-privileges".into(), "--read-only".into(), "--tmpfs".into(), "/tmp:rw,size=16m".into()]);
         args.extend(code_preview::docker::limits(128, 0.25));
-        args.extend(["--env".into(), format!("HOSTS={list}"), "--env".into(), format!("ROLL_EGRESS_JS={EGRESS_JS}"), self.cfg.screenshot_image.clone(), "sh".into(), "-c".into(), r#"node -e "$ROLL_EGRESS_JS""#.into()]);
+        // Hosts a placeholder's key is bound to go to rolld's socket: mounted, and the proxy runs as
+        // the socket's owner (it can't reach it as a root with no capabilities otherwise).
+        if let Some((dir, covered, user)) = &intercept {
+            args.extend(["--user".into(), user.clone(), "-v".into(), format!("{}:/roll:ro", dir.join("sock").display()), "--env".into(), format!("INTERCEPT={covered}")]);
+        }
+        args.extend(["--env".into(), format!("HOSTS={}", serde_json::to_string(&hosts)?), "--env".into(), format!("ROLL_EGRESS_JS={EGRESS_JS}"), self.cfg.screenshot_image.clone(), "sh".into(), "-c".into(), r#"node -e "$ROLL_EGRESS_JS""#.into()]);
         let argv: Vec<&str> = args.iter().map(String::as_str).collect();
         code_preview::docker::docker(&argv).await?;
         // Its way out: Docker's default network too.
@@ -1942,6 +2073,9 @@ impl Runtime {
         Ok(())
     }
 }
+
+/// What a service's command runs after when its preview is intercepted (`trust_intercept_ca`).
+const TRUST_INTERCEPT_CA: &str = r#"if [ -n "$ROLL_INTERCEPT_CA" ]; then printf '%s\n' "$ROLL_INTERCEPT_CA" > /tmp/roll-intercept-ca.pem; b=/tmp/roll-ca-bundle.pem; : > "$b"; for f in /etc/ssl/certs/ca-certificates.crt /etc/pki/tls/certs/ca-bundle.crt /etc/ssl/cert.pem; do if [ -r "$f" ]; then cat "$f" >> "$b"; break; fi; done; cat /tmp/roll-intercept-ca.pem >> "$b"; export NODE_EXTRA_CA_CERTS=/tmp/roll-intercept-ca.pem SSL_CERT_FILE="$b" REQUESTS_CA_BUNDLE="$b" CURL_CA_BUNDLE="$b"; fi"#;
 
 /// The network a preview whose project limits egress runs on (docs/previews.md, "Egress").
 fn network_name(preview: &str) -> String {

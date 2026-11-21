@@ -432,6 +432,12 @@ export function EnvironmentPanel({ service, env, runner, onDeleted }: { service:
               Refused lately: <span className="font-mono">{env.egress_refused.map((r) => (r.private ? `${r.host} (private address)` : r.host)).join(", ")}</span>
             </p>
           )}
+          {closed && env.intercepted && (
+            <p className="text-[12px] text-muted" title="Keys bound to hosts reach its code as placeholders; its proxy swaps them on the way out to those hosts only">
+              Keys used without being seen: {env.intercepted.swapped.toLocaleString()} swapped in {env.intercepted.requests.toLocaleString()} requests
+              {!!env.intercepted.refused?.length && <> · refused: <span className="font-mono">{env.intercepted.refused.slice(-3).join("; ")}</span></>}
+            </p>
+          )}
         </div>
 
         <div className="space-y-3 px-5 py-4">

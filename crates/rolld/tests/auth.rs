@@ -308,6 +308,31 @@ async fn every_control_plane_route_needs_the_operator_token() {
     let projects = http.get(format!("{api}/v1/workspace/projects")).bearer_auth(&adas).send().await.unwrap().status();
     let operators = http.get(format!("{api}/v1/redis/databases")).bearer_auth(&adas).send().await.unwrap().status();
     assert!(projects.is_success() && operators == 403, "projects {projects}, redis {operators}");
+    // Members (docs/members.md): a project she isn't a member of doesn't exist for her session,
+    // nor for her token; her own (she made it: its owner) answers both.
+    let theirs: serde_json::Value = http.post(format!("{api}/v1/workspace/projects")).header("authorization", &operator).json(&serde_json::json!({ "name": "theirs" })).send().await.unwrap().json().await.unwrap();
+    let theirs = theirs["id"].as_str().unwrap().to_string();
+    let mine: serde_json::Value = http
+        .post(format!("{api}/v1/workspace/projects"))
+        .header("cookie", &cookie)
+        .header("origin", DASHBOARD)
+        .header("x-roll-csrf", session["csrf"].as_str().unwrap())
+        .json(&serde_json::json!({ "name": "hers" }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(mine["role"], "owner", "{mine}");
+    let hers = mine["id"].as_str().unwrap().to_string();
+    for (project, want) in [(&theirs, 404), (&hers, 200)] {
+        for path in [format!("/v1/workspace/projects/{project}/members"), format!("/v1/secrets/projects/{project}/environments")] {
+            let by_session = http.get(format!("{api}{path}")).header("cookie", &cookie).send().await.unwrap().status().as_u16();
+            let by_token = http.get(format!("{api}{path}")).bearer_auth(&adas).send().await.unwrap().status().as_u16();
+            assert_eq!((by_session, by_token), (want, want), "{path}");
+        }
+    }
     let users: serde_json::Value = http.get(format!("{api}/v1/accounts/users")).header("authorization", &operator).send().await.unwrap().json().await.unwrap();
     let ada = users.as_array().unwrap().iter().find(|u| u["handle"] == "ada").unwrap()["id"].as_str().unwrap().to_string();
     let off = http.patch(format!("{api}/v1/accounts/users/{ada}")).header("authorization", &operator).json(&serde_json::json!({ "disabled": true })).send().await.unwrap();
@@ -357,6 +382,7 @@ async fn every_control_plane_route_needs_the_operator_token() {
         ("/v1/code/names", "public name lookups"),
         ("/v1/apps/hooks", "deploy hooks: the secret in the URL"),
         ("/v1/accounts", "people's accounts: sign-in, sessions and invites are a person's, never a token's"),
+        ("/v1/workspace/invites", "a person's own project invites: their session, never a token"),
         ("/v1/secrets/shares/{id}", "a one-time share: the link's key is the credential"),
         ("/v1/secrets/value-requests/{token}", "a secret request's link: its answer token is the credential"),
         ("/v1/secrets/unseal", "a sealed node's unseal: the deployment key's shares are the credential"),
