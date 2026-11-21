@@ -1100,12 +1100,14 @@ waits on a sibling PR reaching main is last.
    `mcp.rs` lists each tool's routes and `crates/code-control/src/no-tool.txt` the other 119 with
    why, held by `mcp::tests::every_route_has_a_tool_or_a_reason`. 30 are `no tool yet`; the most
    used by agents come next (item 3).
-3. **roll code's `no tool yet` routes, the ones agents reach for:** resolving, reopening and
-   applying a review thread's suggestion; asking someone to review (`review-requests`); a
-   revision's commit statuses; reading and updating one work item; giving back a thread's claimed
-   work; starting and stopping a change's preview; the reviewer's learnings; turning an automation
-   on or off, retrying a failed run, and its catalogue and dry run. Each against its route in
-   `code-control/tests/mcp.rs`.
+3. **roll code's `no tool yet` routes, the ones agents reach for (this PR, a first batch):** a
+   review thread resolved, reopened, or its suggestion applied (`resolve_thread`, `reopen_thread`,
+   `apply_suggestion`); a review asked for (`request_review`; `get_change` shows a change's
+   requests); a revision's statuses (`get_commit_statuses`); one work item read and updated
+   (`get_work`, `update_work`); a thread's work given back (`release_agent_work`). Next batch:
+   starting and stopping a change's preview, the reviewer's learnings, an automation on or off, a
+   failed run retried, its catalogue and dry run, sandboxes read and stopped. Each against its
+   route in `code-control/tests/mcp.rs`.
 4. **A "hand this to an agent" workflow.** An error group or a slow query becomes a work item
    (`code_create_work`), an agent claims it, its change gets a preview (`previews_wait`), and the
    preview is reviewed (`review_preview`) before it's queued (`enqueue_change`, #624). It waits on

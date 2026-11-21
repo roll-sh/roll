@@ -456,6 +456,15 @@ const ROUTES: &[(&str, &str, &str)] = &[
     ("list_refs", "GET", "/v1/code/repos/{owner}/{repo}/refs"),
     ("create_repo", "POST", "/v1/code/repos"),
     ("request_ai_review", "POST", "/v1/code/changes/{id}/ai-review"),
+    ("get_change", "GET", "/v1/code/changes/{id}/review-requests"),
+    ("resolve_thread", "POST", "/v1/code/threads/{id}/resolve"),
+    ("reopen_thread", "POST", "/v1/code/threads/{id}/unresolve"),
+    ("apply_suggestion", "POST", "/v1/code/threads/{id}/apply"),
+    ("request_review", "POST", "/v1/code/changes/{id}/review-requests"),
+    ("get_commit_statuses", "GET", "/v1/code/repos/{owner}/{repo}/statuses/{rev}"),
+    ("get_work", "GET", "/v1/code/work/{id}"),
+    ("update_work", "PATCH", "/v1/code/work/{id}"),
+    ("release_agent_work", "DELETE", "/v1/code/agents/{owner}/threads/{thread}/work"),
     ("list_agent_machines", "GET", "/v1/code/agents/{owner}/machines"),
     ("list_agent_threads", "GET", "/v1/code/agents/{owner}/state"),
     ("list_agent_threads", "GET", "/v1/code/agents/{owner}/machines"),
@@ -629,6 +638,15 @@ fn every_tool() -> Vec<Value> {
             &["repo", "title"],
             false,
         ),
+        tool("get_work", "Get a work item", "A work item: its state, labels, priority, who claimed it and until when, and the change it led to.", json!({ "work": work.clone() }), &["work"], true),
+        tool(
+            "update_work",
+            "Update a work item",
+            "Change a work item's title, body, labels, priority or state. Only what's given changes; a new state ends a claim's lease, and open clears who claimed it.",
+            json!({ "work": work.clone(), "title": s("New title"), "body": s("New body (markdown)"), "labels": json!({ "type": "array", "items": { "type": "string" }, "description": "The labels it should have (replaces them)" }), "priority": int("0 (P0, most urgent) to 3"), "state": json!({ "type": "string", "enum": ["open", "review", "done", "closed"], "description": "claim_work claims; this sets the rest" }) }),
+            &["work"],
+            false,
+        ),
         tool(
             "comment",
             "Comment",
@@ -648,6 +666,31 @@ fn every_tool() -> Vec<Value> {
                 "comments": json!({ "type": "array", "items": { "type": "object", "properties": { "path": { "type": "string" }, "line": { "type": "integer" }, "start_line": { "type": "integer" }, "side": { "type": "string", "enum": ["new", "old"] }, "body": { "type": "string" } }, "required": ["path", "line", "body"], "additionalProperties": false } })
             }),
             &["change", "verdict"],
+            false,
+        ),
+        tool(
+            "resolve_thread",
+            "Resolve a review thread",
+            "Mark a review thread resolved, once what it asked for is done. Writers, or whoever started the thread.",
+            json!({ "thread": s("Thread id (th_…), from get_change's threads") }),
+            &["thread"],
+            false,
+        ),
+        tool("reopen_thread", "Reopen a review thread", "Mark a resolved review thread open again. Writers, or whoever started the thread.", json!({ "thread": s("Thread id (th_…)") }), &["thread"], false),
+        tool(
+            "apply_suggestion",
+            "Apply a suggested edit",
+            "Apply a review comment's ```suggestion block to the change as a new revision, and resolve its thread. The thread's latest suggestion unless comment names another. Returns the change and the thread.",
+            json!({ "thread": s("Thread id (th_…)"), "comment": s("The comment (cm_…) whose suggestion to apply; default the thread's latest with one") }),
+            &["thread"],
+            false,
+        ),
+        tool(
+            "request_review",
+            "Request a review",
+            "Ask a person (@name), an agent (agent:name), a review app (app:name) or roll's own reviewer (roll) to review a change; required makes their approval a blocker. Returns the change's review requests.",
+            json!({ "change": change.clone(), "reviewer": s("@name, agent:name, app:name or roll"), "required": boolean("Their approval is needed to land (default false)") }),
+            &["change", "reviewer"],
             false,
         ),
         tool("queue_status", "Merge queue", "The merge queue: the batch being tested and who's waiting.", json!({ "repo": repo }), &["repo"], true),
@@ -690,6 +733,14 @@ fn every_tool() -> Vec<Value> {
             }),
             &["repo", "rev", "state"],
             false,
+        ),
+        tool(
+            "get_commit_statuses",
+            "Read commit statuses",
+            "The commit statuses on a revision, as GitHub's combined status reads: the combined state (failure, error, pending or success) and each context's latest.",
+            json!({ "repo": repo.clone(), "rev": s("A git commit, a changeset or a branch") }),
+            &["repo", "rev"],
+            true,
         ),
         tool("list_refs", "List branches and tags", "A repository's refs: each branch's and tag's name, the changeset it points at and its git commit.", json!({ "repo": repo }), &["repo"], true),
         tool(
@@ -801,6 +852,14 @@ fn every_tool() -> Vec<Value> {
             "Give an agent work",
             "Have an agent thread take a work item: a given one (work), or the next open one claimed from repo (labels narrow it). Returns work: null when there's nothing to claim.",
             json!({ "owner": owner, "thread": s("Thread (thr_…)"), "work": work, "repo": repo, "labels": json!({ "type": "array", "items": { "type": "string" } }), "lease_s": int("Lease length in seconds (default 900)") }),
+            &["owner", "thread"],
+            false,
+        ),
+        tool(
+            "release_agent_work",
+            "Take work off an agent",
+            "An agent thread lets go of the work item it holds: the thread no longer works on it, and the item's claim runs out on its own lease.",
+            json!({ "owner": owner.clone(), "thread": s("Thread (thr_…)") }),
             &["owner", "thread"],
             false,
         ),
@@ -1192,10 +1251,12 @@ async fn run(c: &Call<'_>, name: &str, args: &Value) -> std::result::Result<Outc
             }
             let status = c.get(&format!("/v1/code/changes/{}/review-status", seg(&id))).await;
             let threads = c.get(&format!("/v1/code/changes/{}/threads", seg(&id))).await;
+            let requests = c.get(&format!("/v1/code/changes/{}/review-requests", seg(&id))).await;
             ok(json!({
                 "change": ch.body,
                 "review_status": if status.ok() { status.body } else { Value::Null },
                 "threads": if threads.ok() { threads.body } else { json!([]) },
+                "review_requests": if requests.ok() { requests.body } else { json!([]) },
             }))
         }
         "list_changes" => {
@@ -1240,6 +1301,32 @@ async fn run(c: &Call<'_>, name: &str, args: &Value) -> std::result::Result<Outc
         "review" => {
             let id = c.change_id(args).await?;
             pass(c.post(&format!("/v1/code/changes/{}/reviews", seg(&id)), body_of(args, &["change"])).await)
+        }
+        "resolve_thread" | "reopen_thread" => {
+            let th = str_arg(args, "thread").ok_or_else(|| fail("thread is required (th_…)"))?;
+            let action = if name == "resolve_thread" { "resolve" } else { "unresolve" };
+            pass(c.post(&format!("/v1/code/threads/{}/{action}", seg(th)), json!({})).await)
+        }
+        "apply_suggestion" => {
+            let th = str_arg(args, "thread").ok_or_else(|| fail("thread is required (th_…)"))?;
+            pass(c.post(&format!("/v1/code/threads/{}/apply", seg(th)), body_of(args, &["thread"])).await)
+        }
+        "request_review" => {
+            let id = c.change_id(args).await?;
+            pass(c.post(&format!("/v1/code/changes/{}/review-requests", seg(&id)), body_of(args, &["change"])).await)
+        }
+        "get_commit_statuses" => {
+            let base = c.repo(args)?;
+            let rev = str_arg(args, "rev").ok_or_else(|| fail("rev is required"))?;
+            pass(c.get(&format!("{base}/statuses/{}", seg(rev))).await)
+        }
+        "get_work" => {
+            let id = c.work_id(args).await?;
+            pass(c.get(&format!("/v1/code/work/{}", seg(&id))).await)
+        }
+        "update_work" => {
+            let id = c.work_id(args).await?;
+            pass(c.api(Method::PATCH, &format!("/v1/code/work/{}", seg(&id)), Some(body_of(args, &["work"]))).await)
         }
         "queue_status" => {
             let base = c.repo(args)?;
@@ -1326,6 +1413,12 @@ async fn run(c: &Call<'_>, name: &str, args: &Value) -> std::result::Result<Outc
             } else {
                 r.error()
             }
+        }
+        "release_agent_work" => {
+            let owner = c.owner(args)?;
+            let thread = str_arg(args, "thread").ok_or_else(|| fail("thread is required (thr_…)"))?;
+            let r = c.delete(&format!("/v1/code/agents/{}/threads/{}/work", seg(owner), seg(thread))).await;
+            if r.ok() { ok(json!({ "released": true })) } else { r.error() }
         }
         "list_agent_automations" => {
             let owner = c.owner(args)?;

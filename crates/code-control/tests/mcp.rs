@@ -12,20 +12,22 @@ use serde_json::{Value, json};
 const MCP: &str = "/v1/code/mcp";
 
 /// The tools docs/code/mcp.md lists.
-const TOOLS: [&str; 45] = [
+const TOOLS: [&str; 53] = [
     "list_repos", "search_code", "read_file", "list_tree", "log", "blame", "get_changeset", "compare", "create_change", "revise_change", "land", "get_change",
     "list_changes", "claim_work", "heartbeat_work", "release_work", "complete_work", "list_work", "create_work", "comment", "review", "queue_status",
     "request_ai_review", "list_agent_machines", "list_agent_threads", "create_agent_thread", "send_agent_message", "respond_agent_request",
     "interrupt_agent_thread", "publish_agent_thread", "create_agent_project", "claim_agent_work", "list_agent_automations", "save_agent_automation",
     "run_agent_automation", "list_agent_automation_runs", "get_agent_automation_run", "cancel_agent_automation_run", "enqueue_change", "dequeue_change",
-    "close_change", "report_check", "set_commit_status", "list_refs", "create_repo",
+    "close_change", "report_check", "set_commit_status", "list_refs", "create_repo", "resolve_thread", "reopen_thread", "apply_suggestion", "request_review",
+    "get_commit_statuses", "get_work", "update_work", "release_agent_work",
 ];
 /// The agents tools (not repo-scoped: `agent_tools_drive_a_machine_like_their_routes`,
 /// `agent_tools_work_in_roll_code_like_their_routes` and `automation_tools_map_onto_their_routes`).
-const AGENT_TOOLS: usize = 15;
+const AGENT_TOOLS: usize = 16;
 /// The ones that only read (`readOnlyHint`).
-const READ_ONLY: [&str; 18] = [
+const READ_ONLY: [&str; 20] = [
     "list_repos", "search_code", "read_file", "list_tree", "log", "blame", "get_changeset", "compare", "get_change", "list_changes", "list_work", "queue_status", "list_refs",
+    "get_commit_statuses", "get_work",
     "list_agent_machines", "list_agent_threads", "list_agent_automations", "list_agent_automation_runs", "get_agent_automation_run",
 ];
 
@@ -636,6 +638,29 @@ async fn tools_map_onto_their_routes() {
     assert_eq!(refs["items"], a.ok("GET", &format!("{p}/refs"), None).await, "a list comes back as items");
     let made = c.tool("create_repo", json!({ "owner": "acme", "name": "fresh", "visibility": "private" })).await;
     assert_eq!(made, a.ok("GET", "/v1/code/repos/acme/fresh", None).await);
+
+    // A review thread resolved and reopened, a suggestion applied (a new revision, its thread
+    // resolved), a review asked for, statuses read back, one work item read and updated: each
+    // what its route then shows.
+    let resolved = c.tool("resolve_thread", json!({ "thread": th_id })).await;
+    assert_eq!(resolved["resolved"], true, "{resolved}");
+    assert_eq!(resolved, a.ok("GET", &format!("/v1/code/threads/{th_id}"), None).await);
+    assert_eq!(c.tool("reopen_thread", json!({ "thread": th_id })).await["resolved"], false);
+    let before = a.ok("GET", &format!("/v1/code/changes/{id}"), None).await["revision"].as_u64().unwrap();
+    let sug = c.tool("comment", json!({ "change": id, "path": "src/lib.rs", "line": 5, "side": "new", "body": "rename\n```suggestion\nfn e2() {}\n```" })).await;
+    let applied = c.tool("apply_suggestion", json!({ "thread": sug["id"] })).await;
+    assert_eq!((applied["change"]["revision"].as_u64(), applied["thread"]["resolved"].as_bool()), (Some(before + 1), Some(true)), "{applied}");
+    let file = c.tool("read_file", json!({ "repo": repo, "path": "src/lib.rs", "rev": applied["change"]["head"] })).await;
+    assert!(file["content"].as_str().unwrap().contains("fn e2() {}\n"), "{file}");
+    let asked = c.tool("request_review", json!({ "change": id, "reviewer": "agent:bot", "required": true })).await;
+    let requests = a.ok("GET", &format!("/v1/code/changes/{id}/review-requests"), None).await;
+    assert_eq!(asked["items"], requests, "{asked}");
+    assert_eq!(c.tool("get_change", json!({ "change": id })).await["review_requests"], requests);
+    same(c.tool("get_commit_statuses", json!({ "repo": repo, "rev": "main" })).await, a.ok("GET", &format!("{p}/statuses/main"), None).await);
+    same(c.tool("get_work", json!({ "work": wn })).await, a.ok("GET", &format!("/v1/code/work/{wid}"), None).await);
+    let upd = c.tool("update_work", json!({ "work": wid, "title": "Add f, renamed", "labels": ["feat", "later"] })).await;
+    assert_eq!((upd["title"].as_str(), upd["labels"].as_array().map(Vec::len)), (Some("Add f, renamed"), Some(2)), "{upd}");
+    assert_eq!(upd, a.ok("GET", &format!("/v1/code/work/{wid}"), None).await);
 }
 
 /// Every tool's argument errors: each required argument missing, ill-typed values, and
@@ -863,6 +888,13 @@ async fn every_tool_is_authorized_like_its_route() {
                 ("close_change", json!({ "change": ch }), post(format!("/v1/code/changes/{ch}/close"), json!({})), false),
                 ("report_check", json!({ "change": ch, "name": "ci", "status": "success" }), post(format!("/v1/code/changes/{ch}/checks"), json!({ "name": "ci", "status": "success" })), false),
                 ("set_commit_status", json!({ "repo": f.repo, "rev": "main", "state": "success" }), post(format!("{p}/statuses/main"), json!({ "state": "success" })), false),
+                ("get_commit_statuses", json!({ "repo": f.repo, "rev": "main" }), get(format!("{p}/statuses/main")), true),
+                ("resolve_thread", json!({ "thread": th }), post(format!("/v1/code/threads/{th}/resolve"), json!({})), false),
+                ("reopen_thread", json!({ "thread": th }), post(format!("/v1/code/threads/{th}/unresolve"), json!({})), false),
+                ("apply_suggestion", json!({ "thread": th }), post(format!("/v1/code/threads/{th}/apply"), json!({})), false),
+                ("request_review", json!({ "change": ch, "reviewer": "agent:bot" }), post(format!("/v1/code/changes/{ch}/review-requests"), json!({ "reviewer": "agent:bot" })), false),
+                ("get_work", json!({ "work": wi }), get(format!("/v1/code/work/{wi}")), true),
+                ("update_work", json!({ "work": wi, "title": "x" }), ("PATCH", format!("/v1/code/work/{wi}"), Some(json!({ "title": "x" }))), false),
             ];
             let mut seen = std::collections::HashSet::new();
             for (tool, args, (method, path, body), reads) in cases {
@@ -1165,6 +1197,14 @@ async fn agent_tools_work_in_roll_code_like_their_routes() {
     let (_, state) = a.req("GET", "/v1/code/agents/acme/state", None, root).await;
     let thread = state["entities"].as_array().unwrap().iter().find(|m| m["entity"]["id"] == "thr_a").unwrap();
     assert_eq!(thread["entity"]["work"]["id"], item["id"], "{thread}");
+    // Letting go: the thread holds no work, and the item's claim stays until its lease runs out.
+    assert_eq!(c.tool("release_agent_work", json!({ "owner": "acme", "thread": "thr_a" })).await["released"], true);
+    let (_, state) = a.req("GET", "/v1/code/agents/acme/state", None, root).await;
+    let thread = state["entities"].as_array().unwrap().iter().find(|m| m["entity"]["id"] == "thr_a").unwrap();
+    assert!(thread["entity"]["work"].is_null(), "{thread}");
+    let (_, w) = a.req("GET", &format!("/v1/code/work/{}", item["id"].as_str().unwrap()), None, root).await;
+    assert_eq!(w["claimed_by"], "agent:bot", "{w}");
+    assert!(c.tool_err("release_agent_work", json!({ "owner": "acme", "thread": "thr_nope" })).await.starts_with("not found"));
 }
 
 /// The automation tools map onto their routes: save, list, run (an agent only when the

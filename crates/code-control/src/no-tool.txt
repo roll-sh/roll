@@ -34,7 +34,6 @@ GET /v1/code/repos/{owner}/{repo}/paths/{rev}                                   
 POST /v1/code/repos/{owner}/{repo}/changesets                                   create_change and revise_change write files as a change; a bare changeset is git's (a push)
 GET /v1/code/repos/{owner}/{repo}/events                                        a stream: MCP answers results (get_change, queue_status; webhooks for the rest)
 GET /v1/code/repos/{owner}/{repo}/audit                                         no tool yet: queue bypasses, pauses and approved runs
-GET /v1/code/repos/{owner}/{repo}/statuses/{rev}                                no tool yet: a revision's commit statuses (set_commit_status writes them)
 * /v1/code/repos/{owner}/{repo}/leaks                                           an admin's: where secrets sit in the default branch
 POST /v1/code/repos/{owner}/{repo}/queue/pause                                  an admin's: pausing the queue stops every landing
 POST /v1/code/repos/{owner}/{repo}/queue/resume                                 an admin's: the queue's pause
@@ -59,15 +58,9 @@ POST /v1/code/changes/{id}/preview                                              
 DELETE /v1/code/changes/{id}/preview                                            no tool yet: stop a change's preview
 GET /v1/code/changes/{id}/reviews                                               get_change carries the change's review status
 POST /v1/code/changes/{id}/reviews/{rid}/dismiss                                a person's: dismissing someone else's review
-GET /v1/code/changes/{id}/review-requests                                       no tool yet: who a change waits on for review
-POST /v1/code/changes/{id}/review-requests                                      no tool yet: ask a person or agent to review a change
 GET /v1/code/changes/{id}/unstored/{fingerprint}                                a person's: where a credential found in a change would be stored in roll secrets
 POST /v1/code/changes/{id}/unstored/{fingerprint}/store                         a person's: storing a found credential reads its value
 * /v1/code/threads/{id}                                                         no tool yet: read or edit one review thread (get_change lists a change's threads)
-POST /v1/code/threads/{id}/apply                                                no tool yet: apply a review comment's suggested edit
-POST /v1/code/threads/{id}/resolve                                              no tool yet: resolve a review thread
-POST /v1/code/threads/{id}/unresolve                                            no tool yet: reopen a review thread
-* /v1/code/work/{id}                                                            no tool yet: read or update one work item (list_work lists them)
 GET /v1/code/agents/{owner}/automations/catalog                                 no tool yet: the triggers and steps an automation's spec can use
 GET /v1/code/agents/{owner}/automations/notices                                 the dashboard's banners about automations
 POST /v1/code/agents/{owner}/automations/test                                   no tool yet: try an automation's spec without saving it
@@ -119,4 +112,3 @@ PUT /v1/code/agents/{owner}/settings                                            
 GET /v1/code/agents/{owner}/shares                                              a credential: a share link reads the thread without signing in
 DELETE /v1/code/agents/{owner}/shares/{id}                                      a person's: share links are made by people
 POST /v1/code/agents/{owner}/threads/{thread}/shares                            a credential: a share link reads the thread without signing in
-DELETE /v1/code/agents/{owner}/threads/{thread}/work                            no tool yet: give back the work an agent thread claimed
