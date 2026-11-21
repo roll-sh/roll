@@ -693,6 +693,7 @@ static TOOLS: &[Tool] = &[
     t("workspace_create_project", "Create a project", "A new workspace project to group resources.", "workspace", "POST", "/v1/workspace/projects", &[breq("name", Ty::Str, "1-48 of a-z, 0-9 and -"), b("description", Ty::Str, "At most 280 characters"), b("icon", Ty::Obj, ICON)]),
     t("workspace_update_project", "Update a project", "Rename a project, or change its description or icon.", "workspace", "PATCH", "/v1/workspace/projects/{id}", &[WS, b("name", Ty::Str, "New name"), b("description", Ty::Str, "New description"), bnull("icon", Ty::Obj, ICON)]),
     t("workspace_delete_project", "Delete a project", "Delete a workspace project. Its resources stay; only the grouping goes.", "workspace", "DELETE", "/v1/workspace/projects/{id}", &[WS]),
+    t("workspace_list_roles", "List member roles", "The roles a project member can have (viewer, developer, admin, owner), the rules each one grants, the products those rules cover, and which environments a developer reaches when none are named.", "workspace", "GET", "/v1/workspace/roles", &[]),
     t(
         "workspace_place_resource",
         "Place a resource",
@@ -1872,8 +1873,10 @@ mod tests {
         assert!(missing.is_empty(), "docs/mcp.md doesn't list {missing:?}");
         // A tool a description or a workflow tells the agent to call is one roll has: a renamed
         // tool would otherwise send agents after a name that answers "unknown tool".
-        let names: Vec<String> = all().iter().map(|t| t.name.to_string()).chain([crate::search::FIND, crate::search::RUN_READ, crate::search::RUN].map(String::from)).collect();
-        let products = ["access", "workspace", "postgres", "redis", "storage", "streams", "tasks", "queues", "nosql", "search", "secrets", "apps", "previews", "roll"];
+        // roll code's are another crate's: the ones roll-mcp names are in prompts::FRONTED (rolld's
+        // tests hold each to one roll code fronts).
+        let names: Vec<String> = all().iter().map(|t| t.name.to_string()).chain([crate::search::FIND, crate::search::RUN_READ, crate::search::RUN].map(String::from)).chain(crate::prompts::FRONTED.iter().map(|n| n.to_string())).collect();
+        let products = ["access", "workspace", "postgres", "redis", "storage", "streams", "tasks", "queues", "nosql", "search", "secrets", "apps", "previews", "roll", "code", "agents"];
         // Words that look like a tool and aren't one: Elasticsearch's audit event names.
         let not_tools = ["access_denied"];
         let mut texts: Vec<(String, String)> = all().iter().map(|t| (t.name.to_string(), std::iter::once(t.title).chain([t.description]).chain(t.params.iter().map(|p| p.desc)).collect::<Vec<_>>().join(" "))).collect();

@@ -603,6 +603,7 @@ async fn run_with(mut args: Args) -> anyhow::Result<()> {
             secrets: secrets_envs.clone(),
             search: search.as_ref().map(|s| s.control.clone()),
             apps: apps.as_ref().map(|a| a.apps.clone()),
+            previews: previews_engine.clone(),
         },
         workspace.clone(),
     )?;
