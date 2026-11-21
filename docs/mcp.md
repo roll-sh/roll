@@ -1103,17 +1103,15 @@ waits on a sibling PR reaching main is last.
    found: `get_change` didn't carry reviews' text (it does now), `update_work`'s state let one agent
    clear another's claim (state is left to claim, release and complete), and `update_change`'s
    `draft: true` would dequeue with a write grant (only `ready` now).
-3. **roll code's `no tool yet` routes, the ones agents reach for (this PR, a first batch):** a
-   review thread resolved, reopened, or its suggestion applied (`resolve_thread`, `reopen_thread`,
-   `apply_suggestion`); a review asked for (`request_review`; `get_change` shows a change's
-   requests); a revision's statuses (`get_commit_statuses`); one work item read and updated
-   (`get_work`, `update_work`); a thread's work given back (`release_agent_work`); a change retitled, labelled or marked ready
-   (`update_change`, GitHub's `update_pull_request`) and moved between queue lanes
-   (`set_change_lane`). Next batch:
-   starting and stopping a change's preview, an automation on or off, a
-   failed run retried, its catalogue and dry run, sandboxes read and stopped, the reviewer's
-   learnings read (writing them stays a person's: they steer roll's reviewer). Each against its
-   route in `code-control/tests/mcp.rs`.
+3. **roll code's `no tool yet` routes (this PR, the second batch; #631 the first):** a change's AI
+   reviews, their price and an owner's spend (`list_ai_reviews`, `get_ai_review_pricing`,
+   `get_review_usage`); a repo's reviewer, review rules, learnings and audit log read
+   (`get_reviewer`, `get_review_rules`, `list_learnings`, `get_repo_audit`); a change's preview
+   started and stopped; an automation turned on or off, a failed run retried, the catalogue of
+   triggers and steps, and a dry run (`test_agent_automation`); sandboxes listed, stopped and their
+   month's use. One gap is left on purpose: deleting an automation (its runs are cancelled and its
+   secrets dropped) stays `no tool yet` until an agent needs it. #631 landed the first batch
+   (threads, review requests, statuses, work items, changes' title and lane).
 4. **A "hand this to an agent" workflow.** An error group or a slow query becomes a work item
    (`code_create_work`), an agent claims it, its change gets a preview (`previews_wait`), and the
    preview is reviewed (`review_preview`) before it's queued (`enqueue_change`, #624). It waits on

@@ -468,6 +468,23 @@ pub const ROUTES: &[(&str, &str, &str)] = &[
     ("get_work", "GET", "/v1/code/work/{id}"),
     ("update_work", "PATCH", "/v1/code/work/{id}"),
     ("release_agent_work", "DELETE", "/v1/code/agents/{owner}/threads/{thread}/work"),
+    ("get_ai_review_pricing", "GET", "/v1/code/pricing"),
+    ("get_review_usage", "GET", "/v1/code/owners/{owner}/usage"),
+    ("list_ai_reviews", "GET", "/v1/code/changes/{id}/ai-jobs"),
+    ("get_reviewer", "GET", "/v1/code/repos/{owner}/{repo}/reviewer"),
+    ("list_learnings", "GET", "/v1/code/repos/{owner}/{repo}/learnings"),
+    ("get_review_rules", "GET", "/v1/code/repos/{owner}/{repo}/review-settings"),
+    ("get_repo_audit", "GET", "/v1/code/repos/{owner}/{repo}/audit"),
+    ("start_preview", "POST", "/v1/code/changes/{id}/preview"),
+    ("stop_preview", "DELETE", "/v1/code/changes/{id}/preview"),
+    ("retry_agent_automation_run", "POST", "/v1/code/agents/{owner}/automations/runs/{run}/retry"),
+    ("enable_agent_automation", "POST", "/v1/code/agents/{owner}/automations/{id}/enable"),
+    ("disable_agent_automation", "POST", "/v1/code/agents/{owner}/automations/{id}/disable"),
+    ("get_agent_automation_catalog", "GET", "/v1/code/agents/{owner}/automations/catalog"),
+    ("test_agent_automation", "POST", "/v1/code/agents/{owner}/automations/test"),
+    ("list_agent_sandboxes", "GET", "/v1/code/agents/{owner}/sandboxes"),
+    ("stop_agent_sandbox", "POST", "/v1/code/agents/{owner}/sandboxes/{id}/stop"),
+    ("get_agent_sandbox_usage", "GET", "/v1/code/agents/{owner}/sandboxes/usage"),
     ("list_agent_machines", "GET", "/v1/code/agents/{owner}/machines"),
     ("list_agent_threads", "GET", "/v1/code/agents/{owner}/state"),
     ("list_agent_threads", "GET", "/v1/code/agents/{owner}/machines"),
@@ -784,6 +801,50 @@ fn every_tool() -> Vec<Value> {
             &["change"],
             false,
         ),
+        tool(
+            "get_ai_review_pricing",
+            "Read AI review prices",
+            "What roll's AI review costs: hosted per file and per review by mode (standard, deep, max), the price with the owner's own key, free reviews on public repos, and how spending caps work.",
+            json!({}),
+            &[],
+            true,
+        ),
+        tool(
+            "get_review_usage",
+            "Read an owner's AI review spend",
+            "An owner's AI reviews and chats in a month (default this UTC month): counts, price, free and capped reviews and tokens; by repo, mode and key; and what's left under the spending cap.",
+            json!({ "owner": s("An owner you manage"), "month": s("YYYY-MM") }),
+            &["owner"],
+            true,
+        ),
+        tool("list_ai_reviews", "List a change's AI reviews", "roll's reviews of a change, oldest first: each job's mode, status, cost and what it found.", json!({ "change": change.clone() }), &["change"], true),
+        tool(
+            "get_reviewer",
+            "Read a repo's reviewer",
+            "How roll reviews a repo: the effective settings (mode, paths, when it reviews), what's stored and what .roll/review.yaml sets, any errors in that file, the model it uses, its queued and running jobs, and its code index.",
+            json!({ "repo": repo.clone() }),
+            &["repo"],
+            true,
+        ),
+        tool("list_learnings", "List reviewer learnings", "What roll's reviewer keeps in mind for a repo (people add them when they correct a review), each with the path it applies to.", json!({ "repo": repo.clone() }), &["repo"], true),
+        tool(
+            "get_review_rules",
+            "Read a repo's review rules",
+            "What a change needs to land: approvals, code owners, resolved threads, self-approval, auto-approval; as stored and as .roll/review.yaml tightens them.",
+            json!({ "repo": repo.clone() }),
+            &["repo"],
+            true,
+        ),
+        tool("get_repo_audit", "Read a repo's audit log", "Queue bypasses, pauses and approved runs of outside code, newest first (200 at most). Writers only.", json!({ "repo": repo.clone() }), &["repo"], true),
+        tool(
+            "start_preview",
+            "Start a change's preview",
+            "Build and run a change's preview from its roll.toml (a change from outside the repo needs a writer's approve-run first). Returns the change with its preview.",
+            json!({ "change": change.clone() }),
+            &["change"],
+            false,
+        ),
+        tool("stop_preview", "Stop a change's preview", "Stop and remove a change's preview; start_preview makes it again.", json!({ "change": change.clone() }), &["change"], false),
         // roll code agents (docs/code/agents.md): drive agent threads on the owner's machines.
         tool(
             "list_agent_machines",
@@ -910,6 +971,35 @@ fn every_tool() -> Vec<Value> {
         ),
         tool("get_agent_automation_run", "Read an automation run", "A run with its steps (status, output, log) and the event it ran for.", json!({ "owner": owner.clone(), "run": s("A run id (arn_…)") }), &["owner", "run"], true),
         tool("cancel_agent_automation_run", "Cancel an automation run", "Cancel a run going on. The owner's.", json!({ "owner": owner, "run": s("A run id (arn_…)") }), &["owner", "run"], false),
+        tool("retry_agent_automation_run", "Retry an automation run", "Run a failed or cancelled run again from where it stopped. The owner's.", json!({ "owner": owner.clone(), "run": s("A run id (arn_…)") }), &["owner", "run"], false),
+        tool("enable_agent_automation", "Turn an automation on", "Turn an automation on: new events start runs again.", json!({ "owner": owner.clone(), "automation": s("An automation id (aut_…) or name") }), &["owner", "automation"], false),
+        tool("disable_agent_automation", "Turn an automation off", "Turn an automation off: new events start nothing; runs going on go on.", json!({ "owner": owner.clone(), "automation": s("An automation id (aut_…) or name") }), &["owner", "automation"], false),
+        tool(
+            "get_agent_automation_catalog",
+            "List automation triggers and steps",
+            "Every trigger source and step kind an automation's spec can use, with each config's JSON Schema; an integration not connected yet says needs_setup.",
+            json!({ "owner": owner.clone() }),
+            &["owner"],
+            true,
+        ),
+        tool(
+            "test_agent_automation",
+            "Try an automation",
+            "What an automation's spec would do with an event, without saving or running it: whether the trigger and each filter take it, and each step's config with its templates filled in (secrets never are).",
+            json!({ "owner": owner.clone(), "spec": json!({ "type": "object", "description": "An AutomationSpec, as save_agent_automation takes" }), "event": json!({ "type": "object", "description": "{source, kind, data?}: the event to try, as its trigger would send it", "properties": { "source": { "type": "string" }, "kind": { "type": "string" }, "data": { "description": "Any JSON" } }, "required": ["source", "kind"] }) }),
+            &["owner", "spec", "event"],
+            false,
+        ),
+        tool("list_agent_sandboxes", "List sandboxes", "The owner's sandboxes (machines roll runs for agents): each one's status, size and machine, the sizes there are, and how many an owner may have.", json!({ "owner": owner.clone() }), &["owner"], true),
+        tool("stop_agent_sandbox", "Stop a sandbox", "Stop a sandbox: its running time stops being billed, and a command to it starts it again.", json!({ "owner": owner.clone(), "sandbox": s("A sandbox id (sbx_…)") }), &["owner", "sandbox"], false),
+        tool(
+            "get_agent_sandbox_usage",
+            "Read sandbox usage",
+            "Each sandbox's running hours and price in a month (default this UTC month), with totals.",
+            json!({ "owner": owner.clone(), "month": s("YYYY-MM") }),
+            &["owner"],
+            true,
+        ),
     ]
 }
 
@@ -1343,6 +1433,30 @@ async fn run(c: &Call<'_>, name: &str, args: &Value) -> std::result::Result<Outc
             let id = c.change_id(args).await?;
             pass(c.api(Method::PATCH, &format!("/v1/code/changes/{}/enqueue", seg(&id)), Some(body_of(args, &["change"]))).await)
         }
+        "get_ai_review_pricing" => pass(c.get("/v1/code/pricing").await),
+        "get_review_usage" => {
+            let owner = str_arg(args, "owner").ok_or_else(|| fail("owner is required"))?;
+            pass(c.get(&format!("/v1/code/owners/{}/usage{}", seg(owner), query(&[("month", opt(args, "month"))]))).await)
+        }
+        "list_ai_reviews" => {
+            let id = c.change_id(args).await?;
+            pass(c.get(&format!("/v1/code/changes/{}/ai-jobs", seg(&id))).await)
+        }
+        "get_reviewer" | "list_learnings" | "get_review_rules" | "get_repo_audit" => {
+            let base = c.repo(args)?;
+            let tail = match name {
+                "get_reviewer" => "reviewer",
+                "list_learnings" => "learnings",
+                "get_review_rules" => "review-settings",
+                _ => "audit",
+            };
+            pass(c.get(&format!("{base}/{tail}")).await)
+        }
+        "start_preview" | "stop_preview" => {
+            let id = c.change_id(args).await?;
+            let path = format!("/v1/code/changes/{}/preview", seg(&id));
+            pass(if name == "start_preview" { c.post(&path, json!({})).await } else { c.delete(&path).await })
+        }
         "resolve_thread" | "reopen_thread" => {
             let th = str_arg(args, "thread").ok_or_else(|| fail("thread is required (th_…)"))?;
             let action = if name == "resolve_thread" { "resolve" } else { "unresolve" };
@@ -1501,6 +1615,40 @@ async fn run(c: &Call<'_>, name: &str, args: &Value) -> std::result::Result<Outc
             let run = str_arg(args, "run").ok_or_else(|| fail("run is required (arn_…)"))?;
             let path = format!("/v1/code/agents/{}/automations/runs/{}", seg(owner), seg(run));
             pass(if name == "get_agent_automation_run" { c.get(&path).await } else { c.post(&format!("{path}/cancel"), json!({})).await })
+        }
+        "retry_agent_automation_run" => {
+            let owner = c.owner(args)?;
+            let run = str_arg(args, "run").ok_or_else(|| fail("run is required (arn_…)"))?;
+            pass(c.post(&format!("/v1/code/agents/{}/automations/runs/{}/retry", seg(owner), seg(run)), json!({})).await)
+        }
+        "enable_agent_automation" | "disable_agent_automation" => {
+            let owner = c.owner(args)?;
+            let a = str_arg(args, "automation").ok_or_else(|| fail("automation is required (aut_… or its name)"))?;
+            let id = c.automation_id(owner, a).await?;
+            let action = if name == "enable_agent_automation" { "enable" } else { "disable" };
+            pass(c.post(&format!("/v1/code/agents/{}/automations/{}/{action}", seg(owner), seg(&id)), json!({})).await)
+        }
+        "get_agent_automation_catalog" => {
+            let owner = c.owner(args)?;
+            pass(c.get(&format!("/v1/code/agents/{}/automations/catalog", seg(owner))).await)
+        }
+        "test_agent_automation" => {
+            let owner = c.owner(args)?;
+            let body = json!({ "automation": args.get("spec"), "event": args.get("event") });
+            pass(c.post(&format!("/v1/code/agents/{}/automations/test", seg(owner)), body).await)
+        }
+        "list_agent_sandboxes" => {
+            let owner = c.owner(args)?;
+            pass(c.get(&format!("/v1/code/agents/{}/sandboxes", seg(owner))).await)
+        }
+        "stop_agent_sandbox" => {
+            let owner = c.owner(args)?;
+            let sbx = str_arg(args, "sandbox").ok_or_else(|| fail("sandbox is required (sbx_…)"))?;
+            pass(c.post(&format!("/v1/code/agents/{}/sandboxes/{}/stop", seg(owner), seg(sbx)), json!({})).await)
+        }
+        "get_agent_sandbox_usage" => {
+            let owner = c.owner(args)?;
+            pass(c.get(&format!("/v1/code/agents/{}/sandboxes/usage{}", seg(owner), query(&[("month", opt(args, "month"))]))).await)
         }
         other => fail(format!("unknown tool {other}")),
     })
