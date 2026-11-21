@@ -15,7 +15,7 @@ export function Inspector({ open, onClose, children }: { open: boolean; onClose:
     <aside
       data-panel
       aria-hidden={!open}
-      className={`absolute top-2 right-2 bottom-2 z-20 flex w-[340px] max-w-[calc(100%-1rem)] flex-col overflow-hidden rounded-xl border border-line-2 bg-sheet shadow-sheet inset-shadow-highlight transition-transform duration-300 ease-drawer motion-reduce:transition-none ${
+      className={`absolute top-2 right-2 bottom-2 z-20 flex w-[340px] max-w-[calc(100%-1rem)] flex-col max-sm:left-2 max-sm:w-auto overflow-hidden rounded-xl border border-line-2 bg-sheet shadow-sheet inset-shadow-highlight transition-transform duration-300 ease-drawer motion-reduce:transition-none ${
         open ? "translate-x-0" : "pointer-events-none translate-x-[calc(100%+1rem)]"
       }`}
       onKeyDown={(e) => e.key === "Escape" && onClose()}

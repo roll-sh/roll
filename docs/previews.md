@@ -2346,20 +2346,28 @@ Ranked by what a person notices first. Done so far:
    `preview`, admin, owner); a create only in the project roll-access decided it on, the dashboard
    and the CLI naming it; a request no role was decided for (past the gate) reaches only what the
    person owns. Members' fix merged in and gated; lands after #501.
-2. **Keys on roll apps as the rules' writer, in review** (#608, after roll apps' `closed_by`):
-   a closed preview's `pv-` environment names the person who wrote the rules as its
-   placeholders' maker (`null`: keys bound to hosts withheld), as previews' own runtime does;
-   the apps live check then asserts it.
-3. **Roll secrets' response scrub in `roll-intercept`** (after its #579): a response that echoes
-   a swapped key is stopped (502) and its placeholder ended; the live check's echo step then
-   expects that. And `maker_unreachable` (its #582): the fallback without placeholders takes it.
-   roll apps' closed environments get the scrub through the same crate.
+2. **Roll secrets' response scrub wired into `roll-intercept`, in review** (stacked on roll
+   secrets' #628): a response that echoes a swapped key is stopped (a 502, or the connection cut
+   before those bytes), the placeholder ended and the echo in the activity; roll apps' closed
+   environments get it through the same port. Live-checked by `scripts/preview-intercept.sh`.
+3. **A change's first deploy reuses main's build of a service it doesn't touch** (Railway's
+   focused PR environments, Render's build filters): with `watch`, a new preview whose change
+   touches none of a service's watched paths runs the image main's preview built at the merge
+   base, as later pushes already keep theirs. Measure first: if a cached rebuild of an untouched
+   service is already within a second or two, drop this.
 4. **Previews for the members thread's next products**: once roll apps' and roll search's routes
    become member routes (docs/members.md, v1.1), a preview's roll apps services and search branch
    follow the same roles, checked live against a member's session.
 5. **Cheap Postgres branches on ext4: overlay volumes over a frozen base** (pg-control; measured
    2026-11-17): 0.97 s against 3.5 s for a 1.4 GB copy, but a write copies the whole table file.
 6. **Watch: pg-control's recovery to a time seconds old** (unowned).
+
+Landed 2026-11-21 evening: keys on roll apps used as the rules' writer (#608, after apps' #610,
+#612 and #617), and the sheet looked at with real data at desktop and phone widths, dark and
+light: on a phone the sheet takes the width (a sliver of the list showed beside it), earlier
+pushes' links truncate instead of running off it, a wrapped line of details never starts with
+"·", the project's footer stays one line, and the screenshot's choices are grouped (pages, views,
+states).
 
 Landed 2026-11-21 midday: a search branch's link holds only its data-only credential (#607,
 roll search's report: never the branch's own login; old links branched again; its data key revoked
