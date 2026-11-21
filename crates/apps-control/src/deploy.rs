@@ -2630,7 +2630,7 @@ impl Apps {
             // The hours since the last pass, as stored logs are metered (a first pass, one).
             let hours = if last == 0 { 1.0 } else { ((now - last) as f64 / 3_600_000.0).min(2.0) };
             self.expire_logs_pass(&services, now, hours).await;
-            self.build_cache_pass(now).await;
+            self.build_cache_pass(&services, now, hours).await;
         }
         if now - self.status_swept.load(std::sync::atomic::Ordering::Relaxed) >= 60_000 {
             self.status_swept.store(now, std::sync::atomic::Ordering::Relaxed);

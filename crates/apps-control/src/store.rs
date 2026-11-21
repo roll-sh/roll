@@ -673,7 +673,8 @@ pub struct UsageAdd {
     pub requests: i64,
     pub egress_bytes: i64,
     pub build_seconds: f64,
-    /// Stored logs past the first week (an environment keeping them 30 or 90 days), in GB-hours.
+    /// What roll stores for it, in GB-hours: logs past the first week (an environment keeping them
+    /// 30 or 90 days) and its share of its build cache.
     pub stored_gb_hours: f64,
 }
 
@@ -2715,6 +2716,11 @@ impl Store {
             }
             Ok(Some(gone))
         })
+    }
+
+    /// What each cache holds now: `(project, ns, bytes)`.
+    pub fn cache_bytes(&self) -> Result<Vec<(String, String, i64)>> {
+        Ok(self.db.query("SELECT project, ns, SUM(bytes) FROM build_cache_artifacts GROUP BY project, ns", (), |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?)
     }
 
     pub fn touch_artifact(&self, project: &str, ns: &str, hash: &str, now: i64) -> Result<()> {

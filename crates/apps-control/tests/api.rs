@@ -4768,6 +4768,10 @@ async fn builds_share_a_remote_cache_for_turborepo_and_nx() {
     assert_eq!(send("PUT", "/v1/cache/a1b2c3", &token, "again", vec![]).await.0, StatusCode::CONFLICT);
     assert_eq!(send("PUT", "/v1/cache/d4e5f6", &token, "nx-tarball", vec![]).await.0, StatusCode::OK);
     assert_eq!(send("GET", "/v1/cache/d4e5f6", &token, "", vec![]).await.2, "nx-tarball");
+    // What it holds is metered to the service that builds from it, hourly.
+    w.apps.cron_pass(code_sql::now_ms() + 3_600_000).await;
+    let stored: f64 = w.apps.store.usage(&id, Some("production"), 0).unwrap().iter().map(|(_, u)| u.stored_gb_hours).sum();
+    assert!(stored > 0.0, "{stored}");
     // Another environment's cache is its own, and another source's; a wrong token reads nothing.
     for other in [scope("acme/site", "staging"), scope("someone/else", "production")] {
         let t = w.apps.store.build_cache_token(&w.project, &other).unwrap();

@@ -191,7 +191,7 @@ type Overview = {
   prices: Prices;
 };
 
-type Prices = { cpu_second: number; gb_second: number; egress_gb: number; build_minute: number; stored_gb_month: number /* logs kept past the first week (an environment's 30 or 90 days), metered hourly as stored_gb_hours */ };
+type Prices = { cpu_second: number; gb_second: number; egress_gb: number; build_minute: number; stored_gb_month: number /* what roll stores: logs kept past the first week (an environment's 30 or 90 days) and build caches (shared by the services that build from one), metered hourly as stored_gb_hours */ };
 
 type Source =
   | { kind: "repo"; repo: string /* owner/name in roll code (GitHub repos are mirrored there) */; root?: string }

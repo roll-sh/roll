@@ -14,7 +14,7 @@ export interface Prices {
   gb_second: number;
   egress_gb: number;
   build_minute: number;
-  /** A GB-month of logs kept past the first week. */
+  /** A GB-month stored: logs kept past the first week, build caches. */
   stored_gb_month: number;
 }
 
