@@ -4296,9 +4296,12 @@ a decoy credential:
     roll Postgres sends it every probe the decoy answers, as a role that doesn't exist, and keeps
     the answers (`compute_answers` in its catalog, by image reference) only if the decoy, answering
     from them, says exactly the same to every probe. Decoy roles are made only on an image whose
-    answers are known. A login on an image not learned yet waits for them: from the endpoint's
-    compute when it's up, else from a throwaway compute of the image (never the endpoint's, so a
-    decoy's login still wakes nothing). On an image the decoy can't match (an operator's own
+    answers are known. Each configured image is learned at start, in the background, from a
+    throwaway compute (claimed in `compute_answer_claims`, so one holder at a time, and retried
+    with a backoff), so no decoy's login waits for it: a slow first refusal would tell a decoy
+    apart. A login on an image still not learned (one first seen at a login) waits for it: from
+    the endpoint's compute when it's up, else from a throwaway compute of the image (never the
+    endpoint's, so a decoy's login still wakes nothing). On an image the decoy can't match (an operator's own
     `image`), decoy logins go to Postgres like any other, which refuses the `NOLOGIN` role as a
     missing one (and wakes a suspended endpoint), still alerted.
   - The compute images are pinned (`pg_control::config::IMAGES`, `tag@sha256:` of the
