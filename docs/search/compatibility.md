@@ -1285,13 +1285,15 @@ an ML node on Linux x86-64 deploying both of the model's builds:
   (`tests/fixtures/e5/es-9.5.5.json`) and checks what reaches the model;
   `crates/search-embed/tests/agreement.rs` (opt-in: `ROLL_E5_WEIGHTS=<dir with the pinned
   files>`) embeds the texts of `tests/fixtures/e5-es-9.5.5.json` and compares with the vectors
-  Elasticsearch answered (64 cases: 17 short texts in 12 languages, each with no `input_type`,
+  Elasticsearch answered (68 cases: 17 short texts in 12 languages, each with no `input_type`,
   `ingest` and `search`; long passages in English, Japanese and German; inputs of 508 to 514
-  tokens and far over 512). roll's float build against Elasticsearch's float build: every case
-  at cosine 1.000000 (identical to six digits). Against the x86-64 8-bit deployment: roll's
-  float build mean 0.994716, lowest 0.990233, the same as Elasticsearch's own float build
-  against it; roll's 8-bit reproduction mean 0.999064, lowest 0.993876, 35 of 64 cases
-  identical to six digits.
+  tokens and far over 512; and four past the 96 KiB cut: 120 KB of words, and an article after
+  33,000 zero-width spaces, 40,000 deleted control characters or 40,000 no-break and
+  ideographic spaces, which Elasticsearch embeds as the bare article). roll's float build
+  against Elasticsearch's float build: every case at cosine 1.000000 (identical to six digits).
+  Against the x86-64 8-bit deployment: roll's float build mean 0.994857, lowest 0.990233, the
+  same as Elasticsearch's own float build against it; roll's 8-bit reproduction mean 0.999010,
+  lowest 0.993876, 35 of 68 cases identical to six digits.
 
 On a node serving many tenants: one pool per node (`--search-embed-workers`, a third of the CPUs
 by default, `--search-embed-cpus` to pin them). Each input is cut to the start its 512 tokens
