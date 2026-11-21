@@ -113,7 +113,7 @@ pub struct ClusterConfig {
     /// `None`: remotes reach only the node itself.
     pub links: Option<std::sync::Arc<dyn crate::remote::links::Links>>,
     /// The cluster's id in roll's catalog (`srch_…`), when it has one: how it names itself to
-    /// `links`.
+    /// `links` and to [`Self::secret_refs`] (a name can be reused after a delete).
     pub catalog_id: Option<String>,
     /// The parent's catalog id, on a new branch's first load only: what it inherited from the
     /// parent is marked then, so its jobs don't act on the parent's outside storage or run twice
@@ -128,6 +128,9 @@ pub struct ClusterConfig {
     /// Where the cluster's security audit entries go ([`crate::xpack::security::audit`]);
     /// `None`: it records none.
     pub audit: Option<crate::xpack::security::audit::AuditLog>,
+    /// Resolves credentials given as references (`roll://ENV/KEY`, [`crate::secret_refs`]);
+    /// `None`: references are refused.
+    pub secret_refs: Option<crate::secret_refs::Resolver>,
 }
 
 impl ClusterConfig {
@@ -147,6 +150,7 @@ impl ClusterConfig {
             branch_of: None,
             file_service_tokens: false,
             audit: None,
+            secret_refs: None,
         }
     }
 

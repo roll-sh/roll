@@ -150,7 +150,8 @@ impl Control {
     /// owner (here, or forwarded signed): roll's own call, which the target's IP allowlist
     /// doesn't filter and which wakes it.
     async fn send_link(&self, t: &SearchCluster, key_id: &str, secret: &str, mut req: EsRequest) -> EsResponse {
-        req.headers.retain(|(k, _)| !k.eq_ignore_ascii_case("authorization") && !k.eq_ignore_ascii_case("host"));
+        // A repository's maker is said only by `Control::put_repository`.
+        req.headers.retain(|(k, _)| !k.eq_ignore_ascii_case("authorization") && !k.eq_ignore_ascii_case("host") && !k.eq_ignore_ascii_case(search_es::secret_refs::MAKER_HEADER));
         let token = base64::engine::general_purpose::STANDARD.encode(format!("{key_id}@{}:{secret}", t.name));
         req.headers.push(("Authorization".into(), format!("ApiKey {token}")));
         self.on_owner(&t.name, req).await
