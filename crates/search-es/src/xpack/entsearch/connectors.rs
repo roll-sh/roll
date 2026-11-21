@@ -1015,7 +1015,11 @@ pub async fn update(ctx: &Ctx<'_>) -> EsResult<Reply> {
                 }
                 _ => {}
             }
-            sync::config::protect(&mut m, &before, sealer.as_deref(), &me, adopting.as_deref());
+            sync::config::protect(&mut m, &before, sealer.as_deref(), &me, adopting.as_deref()).map_err(|field| {
+                EsError::illegal_argument(format!(
+                    "[{field}] is a sensitive value, and this node has no key to seal it with: set ROLL_SECRET_KEY on the node to store a connector's credentials (roll never stores them in the clear)"
+                ))
+            })?;
             sync::mark_current(st, now_ms)?;
             store::put(st, CONNECTORS, &id, updated_doc(m), now_ms).map(|_| false)
         })

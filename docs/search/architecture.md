@@ -711,6 +711,10 @@ both with Elasticsearch 9.5.5's shapes, validation and state machines
 - **Credentials.** Fields the schema marks `sensitive` (`password`, `aws_secret_access_key`) of a
   connector roll runs are sealed when written (`seal.rs`, under `ROLL_SECRET_KEY`), opened only
   by the sync, and never returned:
+  - A node without `ROLL_SECRET_KEY` has no key to seal with, so it refuses any write that would
+    store one (`illegal_argument_exception` naming the field and `ROLL_SECRET_KEY`) instead of
+    keeping it in the clear; nothing of that write is stored. Values stored in the clear before
+    roll ran syncs are sealed in place on the first load with a key (`sync::adopt_existing`).
   - `GET _connector`, its list and job documents' connector snapshots show `********`, and
     writing `********` back keeps the stored value, so a client can round-trip a
     configuration. A sealed value shows as `********` on every connector, self-managed ones

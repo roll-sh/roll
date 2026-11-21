@@ -546,6 +546,7 @@ async fn a_canceled_queued_job_doesnt_hold_up_other_tenants() {
         let pool = pool.clone();
         async move {
             let mut cfg = ClusterConfig::new(name);
+            cfg.sealer = search_es::seal::Sealer::from_secret("0123456789abcdef0123456789abcdef-connectors");
             cfg.node_settings.push(("roll.connectors.allow_private_hosts".into(), "true".into()));
             cfg.owner = Some(owner.into());
             cfg.connector_slots = Some(pool);

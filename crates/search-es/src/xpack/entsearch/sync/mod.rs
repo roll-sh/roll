@@ -1052,6 +1052,10 @@ mod tests {
         call(&fresh, "PUT", "/_connector/z", r#"{"index_name":"content-z","is_native":true,"service_type":"postgresql"}"#).await;
         adopt_existing(&fresh).await.unwrap();
         assert!(!waits_for_adoption(&fresh, &fresh.state(), "z"));
+        // That node has no sealing key: a password written to it is refused, never stored.
+        let refused = call(&fresh, "PUT", "/_connector/z/_configuration", r#"{"values":{"password":"pw-in-the-clear"}}"#).await;
+        assert!(refused.pointer(&["error", "reason"]).and_then(Value::as_str).is_some_and(|r| r.contains("ROLL_SECRET_KEY")), "{refused:?}");
+        assert!(!fresh.state().metadata.xpack.get(CONNECTORS, "z").unwrap().to_json().contains("pw-in-the-clear"));
 
         // Adopted by a configuration write that gives no password: none is kept.
         call(&c, "PUT", "/_connector/x/_configuration", r#"{"values":{}}"#).await;

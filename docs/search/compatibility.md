@@ -1320,7 +1320,8 @@ roll runs the syncs of Elastic-managed (`is_native: true`) `postgresql` and `s3`
 
 - Its `sensitive` configuration values (`password`, `aws_secret_access_key`) are sealed at rest
   and shown as `********` in `GET _connector`, its list and job snapshots; writing `********`
-  back keeps the stored value. Elasticsearch returns them in the clear. Changing where a
+  back keeps the stored value. Elasticsearch returns them in the clear. A node without
+  `ROLL_SECRET_KEY` refuses to store one (400, naming `ROLL_SECRET_KEY`). Changing where a
   credential goes (a Postgres `host`, `port`, `username`, `database` or TLS setting; an S3
   `endpoint`, `region`, access key id or `buckets`) without giving it again clears it and sets
   the connector to `needs_configuration`.

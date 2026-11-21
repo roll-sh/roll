@@ -207,20 +207,23 @@ fn value_of<'a>(m: &'a Map, field: &str) -> Option<&'a Value> {
 ///   other sensitive value is cleared, sealed or in the clear, so its syncs only ever use
 ///   credentials this cluster's owner entered.
 ///
+/// - A node without a sealing key (`ROLL_SECRET_KEY`) stores no sensitive value of a connector
+///   roll runs: a write that would is refused (`Err` names the field), never kept in the clear.
+///
 /// `cluster` is the cluster's catalog id, which seals are bound to ([`kind_of`]).
-pub fn protect(m: &mut Map, before: &Map, sealer: Option<&crate::seal::Sealer>, cluster: &str, adopting: Option<&[String]>) {
+pub fn protect(m: &mut Map, before: &Map, sealer: Option<&crate::seal::Sealer>, cluster: &str, adopting: Option<&[String]>) -> Result<(), String> {
     let ran = runs(&Value::Obj(before.clone()));
     if !runs(&Value::Obj(m.clone())) {
         if ran {
             clear_secrets(m);
         }
-        return;
+        return Ok(());
     }
     let service = m.get("service_type").and_then(Value::as_str).unwrap_or_default().to_string();
     if before.get("service_type") != m.get("service_type") {
         m.insert("configuration".into(), schema(&service));
         m.insert("status".into(), "needs_configuration".into());
-        return;
+        return Ok(());
     }
     let started = !ran || adopting.is_some();
     let id = m.get("id").and_then(Value::as_str).unwrap_or_default().to_string();
@@ -230,7 +233,11 @@ pub fn protect(m: &mut Map, before: &Map, sealer: Option<&crate::seal::Sealer>, 
     let retargeted = !started && had_secret && target_fields(&service).iter().any(|f| value_of(m, f) != value_of(before, f));
     let old = before.get("configuration").and_then(Value::as_object).cloned().unwrap_or_default();
     let mut cleared = false;
-    let Some(Value::Obj(cfg)) = m.get_mut("configuration") else { return };
+    let seal = |k: &str, v: &str| match sealer {
+        Some(s) => Ok(Value::from(crate::seal::seal_given_with(Some(s), &kind_of(cluster, &id, k), v))),
+        None => Err(k.to_string()),
+    };
+    let Some(Value::Obj(cfg)) = m.get_mut("configuration") else { return Ok(()) };
     for (k, entry) in cfg.iter_mut() {
         if !sensitive(entry) {
             continue;
@@ -246,7 +253,7 @@ pub fn protect(m: &mut Map, before: &Map, sealer: Option<&crate::seal::Sealer>, 
                 cleared = true;
                 Value::from("")
             } else {
-                Value::from(crate::seal::seal_given_with(sealer, &kind_of(cluster, &id, k), &v))
+                seal(k, &v)?
             };
             e.insert("value".into(), next);
             continue;
@@ -260,13 +267,14 @@ pub fn protect(m: &mut Map, before: &Map, sealer: Option<&crate::seal::Sealer>, 
             // The placeholder with nothing stored keeps nothing.
             stored.unwrap_or_else(|| Value::from(""))
         } else {
-            Value::from(crate::seal::seal_given_with(sealer, &kind_of(cluster, &id, k), &v))
+            seal(k, &v)?
         };
         e.insert("value".into(), next);
     }
     if cleared {
         m.insert("status".into(), "needs_configuration".into());
     }
+    Ok(())
 }
 
 /// Empties every sensitive value, and any sealed one, of a connector roll stops running.
@@ -435,7 +443,7 @@ mod tests {
         {
             e.insert("value".into(), "https://elsewhere.example".into());
         }
-        protect(&mut after, &before, None, "c", None);
+        protect(&mut after, &before, None, "c", None).unwrap();
         assert_eq!(secret(&after, "aws_secret_access_key"), "");
         assert_eq!(after.get("status").and_then(Value::as_str), Some("needs_configuration"));
         // The same write giving the secret again keeps it (sealed).
@@ -450,15 +458,22 @@ mod tests {
         {
             e.insert("value".into(), "https://other.example".into());
         }
-        protect(&mut again, &after, None, "c", None);
-        assert_eq!(secret(&again, "aws_secret_access_key"), "new-secret", "no sealer: kept as given");
+        let sealer = crate::seal::Sealer::from_secret("0123456789abcdef0123456789abcdef-protect").unwrap();
+        protect(&mut again, &after, Some(sealer.as_ref()), "c", None).unwrap();
+        assert!(crate::seal::is_sealed(&secret(&again, "aws_secret_access_key")), "kept, sealed");
 
         // Adopting keeps only what the write gave, a value stored in the clear included.
-        let mut adopted = again.clone();
-        protect(&mut adopted, &again, None, "c", Some(&[]));
+        let mut clear = again.clone();
+        if let Some(Value::Obj(c)) = clear.get_mut("configuration")
+            && let Some(Value::Obj(e)) = c.get_mut("aws_secret_access_key")
+        {
+            e.insert("value".into(), "stored-in-the-clear".into());
+        }
+        let mut adopted = clear.clone();
+        protect(&mut adopted, &clear, Some(sealer.as_ref()), "c", Some(&[])).unwrap();
         assert_eq!(secret(&adopted, "aws_secret_access_key"), "");
-        let mut adopted = again.clone();
-        protect(&mut adopted, &again, None, "c", Some(&["aws_secret_access_key".to_string()]));
-        assert_eq!(secret(&adopted, "aws_secret_access_key"), "new-secret");
+        let mut adopted = clear.clone();
+        protect(&mut adopted, &clear, Some(sealer.as_ref()), "c", Some(&["aws_secret_access_key".to_string()])).unwrap();
+        assert!(crate::seal::is_sealed(&secret(&adopted, "aws_secret_access_key")));
     }
 }
