@@ -49,10 +49,18 @@ use std::sync::Arc;
 
 mod analyze;
 mod cloud;
+mod refs;
 mod s3;
 mod transfer;
 pub use analyze::analyze_repository;
 pub use s3::ALLOW_PRIVATE as S3_ALLOW_PRIVATE;
+pub(crate) use cloud::AZURE_CONTAINER;
+
+/// The settings of repository type `ty` that are credentials (`s3`'s `access_key`, …): any of
+/// them may be a roll secrets reference, set only through roll's control plane.
+pub fn credential_settings(ty: &str) -> &'static [&'static str] {
+    cloud::secret_names(ty)
+}
 
 /// The shard contents of this process's snapshots, by snapshot uuid and index name (one
 /// searcher per shard), and the snapshot operations running here.
@@ -72,6 +80,8 @@ pub struct SnapshotData {
     io: parking_lot::Mutex<std::collections::HashMap<String, Arc<transfer::RepoIo>>>,
     /// The cluster's `indices.recovery.max_bytes_per_sec`, which restores also pay.
     recovery: transfer::RateLimiter,
+    /// Repositories' resolved credential references, kept while their digests stay the same.
+    refs: refs::KeptRefs,
 }
 
 impl SnapshotData {
@@ -710,8 +720,14 @@ pub async fn put_repository(ctx: &Ctx<'_>) -> EsResult<Reply> {
     }
     let mut settings = settings;
     validate_repository(ctx, &name, &ty, &settings)?;
+    let maker = refs::check(ctx, &name, &ty, &settings).await?;
     let secrets = cloud::take_secrets(ctx.cluster, &ty, &mut settings);
-    let repo = Repository { ty, settings, secrets };
+    let mut repo = Repository { ty, settings, secrets, refs_by: maker };
+    // A branch registers its parent's bucket read-only unless told otherwise.
+    if repo.settings.get("readonly").is_none() && crate::branch::inherited_location(ctx.cluster, &ctx.state(), &repo) {
+        repo.settings.set("readonly", "true");
+    }
+    let registering = name.clone();
     // A bucket is checked once registered (a write, a read and a delete); a repository that
     // fails stays registered, as on Elasticsearch, and the error is the answer.
     let registered = (repo.in_bucket() && verify).then(|| (name.clone(), repo.clone()));
@@ -737,6 +753,7 @@ pub async fn put_repository(ctx: &Ctx<'_>) -> EsResult<Reply> {
             Ok(())
         })
         .await?;
+    refs::forget(ctx.cluster, &registering);
     // The snapshots already in the bucket show from now on.
     if let Some((name, repo)) = registered {
         s3::verify(ctx.cluster, &name, &repo).await?;
@@ -839,6 +856,7 @@ pub async fn delete_repository(ctx: &Ctx<'_>) -> EsResult<Reply> {
             Ok(())
         })
         .await?;
+    refs::forget_unregistered(ctx.cluster, &ctx.state());
     Reply::acknowledged()
 }
 
@@ -1547,6 +1565,9 @@ pub async fn clone(ctx: &Ctx<'_>) -> EsResult<Reply> {
     validate_snapshot_name(&repo, &target)?;
     let now = ctx.now_ms;
     let target_uuid = random_uuid();
+    if ctx.state().metadata.repositories.get(&repo).is_some_and(|r| r.read_only()) {
+        return Err(repository_exception(&repo, "cannot create snapshot in a readonly repository"));
+    }
     let bucket = s3::bucket_repository(&ctx.state(), &repo);
     let durable = ctx.cluster.engine.snapshot_storage().filter(|_| bucket.is_none());
     let _taking = durable.as_ref().map(|_| ctx.cluster.snapshot_data.taking(&target_uuid));

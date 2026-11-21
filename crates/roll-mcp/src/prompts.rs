@@ -139,11 +139,15 @@ const PROMPTS: &[Prompt] = &[
              would drop, in plain words. For each one that roams, call access_token_networks and name the networks \
              it was used from, so I can tell whether one is unexpected. Say which tokens to revoke (unused) and \
              which need an expiry. If you also have secrets_findings or previews_mask_suggestions, add the secrets \
-             that need fixing and the personal data previews don't mask yet; with storage_list_keys, the S3 access \
+             that need fixing and the personal data previews don't mask yet; with secrets_verify_audit, each \
+             project whose secrets audit log doesn't hold (its first break), and each whose log has digests on a \
+             pulled signing key that nothing later vouches for (pulled with countersigned null: say from when to \
+             when); legacy digests are only a note; with storage_list_keys, the S3 access \
              keys that are admin over every bucket or unused for 90 days. Then what's open to the internet, with \
              whichever of these you have: buckets that are public (storage_list_buckets), search clusters with no \
              IP allowlist (search_list_clusters), and previews shared outside the team (previews_list, then \
-             previews_list_shares for who and until when), and the live deploys whose images have critical or \
+             previews_list_shares for who and until when), secrets' one-off share links still open (secrets_list_shares), a project's public status page (apps_status_page: \
+             what it shows), and the live deploys whose images have critical or \
              high vulnerabilities with a fix (apps_deploy_vulnerabilities with severity high). Change nothing \
              yourself: applying a \
              tighten, revoking or limiting a token is for me or the operator, on the token's page or with roll \
@@ -166,13 +170,123 @@ const PROMPTS: &[Prompt] = &[
                  knows (a crash loop, a spend cap, maintenance, a failed deploy with its error_detail). Then \
                  apps_activity with all for the timeline (deploys, failures, crash loops, alerts), and apps_route_stats \
                  for which routes fail or slowed (5xx, p95). Call apps_list_deploys to see what changed and when (apps_deploy_commits for what the newest deploy brought); apps_deploy_logs \
-                 for the newest deploy if it failed; apps_logs with http and a status of 500 for the failing \
+                 for the newest deploy if it failed (and, if you have it, apps_explain_deploy: the repo owner's model \
+                 reads its error and logs, and its answer is kept); apps_errors for the errors grouped, newest \
+                 regressions first; apps_logs with http and a status of 500 for the failing \
                  requests, and without http for errors; apps_metrics for CPU and memory. Tell me the most likely \
                  cause with the evidence. If the newest deploy caused it, offer apps_rollback_previous; it puts back \
                  that deploy's variables too, and in production it may ask a person first. Don't roll back without \
                  asking me.",
                 a("service"),
                 a("env")
+            )
+        },
+    },    Prompt {
+        name: "review_preview",
+        title: "Review a preview",
+        description: "Whether a change's preview is ready to land: its schema changes, new errors, routes slower than main, its pages against the base, and people's notes.",
+        args: &[Arg { name: "preview", description: "Preview id", required: true }],
+        needs: &["previews_wait", "previews_get", "previews_logs", "previews_errors", "previews_routes", "previews_screenshot", "previews_list_notes"],
+        text: |a| {
+            format!(
+                "Review preview {}. Call previews_wait first. If it failed, read previews_logs (the deploy's first) and \
+                 tell me why. If it's awaiting_approval, a writer has to approve-run its head first: say so and stop. Once \
+                 it's ready: previews_get for what it branched and its schema_changes (flag a dropped table or column, \
+                 or a NOT NULL column with no default on a table that has rows); previews_errors for errors in it; \
+                 previews_routes for routes slower than in main's preview (call out a p95 more than 20% slower, and \
+                 open one of its slow traces with previews_get_trace if you have it); previews_screenshot with diff=base \
+                 on the pages the change touches, and look at each image; previews_list_notes for what people left on \
+                 its pages. Tell me whether it's ready to land, with the evidence for each problem. Don't resolve \
+                 notes, refresh, reset or delete the preview without asking me.",
+                a("preview")
+            )
+        },
+    },
+    Prompt {
+        name: "clear_task_backlog",
+        title: "Clear a tasks backlog",
+        description: "Why roll tasks' messages pile up or fail: paused or limited queues, dead letters and each delivery's error, then a retry once the cause is fixed.",
+        args: &[],
+        needs: &["tasks_stats", "tasks_list_queues", "tasks_get_queue", "tasks_list_dead_letters", "tasks_get_message"],
+        text: |_| {
+            "Messages are piling up or failing in roll tasks. Start with tasks_stats and tasks_list_queues: which queue \
+             has the backlog, and is it paused, rate-limited or at its parallelism (tasks_get_queue for one)? Then \
+             tasks_list_dead_letters for what ran out of retries, and tasks_get_message on a few of them, and on a \
+             pending message with attempts, for each delivery's status and error: the endpoint answering 4xx or 5xx, \
+             a timeout, or a URL that doesn't resolve. Group the failures by cause and tell me the most likely one \
+             with the evidence. Once the endpoint is fixed, offer tasks_retry_dead_letters for that queue's (or \
+             tasks_resume_queue if it's paused); retrying many at once can flood the endpoint again, so say how many \
+             and ask me first. Don't cancel or delete messages without asking me."
+                .into()
+        },
+    },
+    Prompt {
+        name: "drain_queue",
+        title: "Drain a queue that's backing up",
+        description: "Why a RabbitMQ-compatible queue backs up: its consumers, their prefetch and acknowledgements, rates, and what its dead-letter queue holds.",
+        args: &[
+            Arg { name: "vhost", description: "Virtual host", required: true },
+            Arg { name: "queue", description: "Queue", required: true },
+        ],
+        needs: &["queues_get_queue", "queues_queue_rates", "queues_list_channels", "queues_peek", "queues_list_bindings"],
+        text: |a| {
+            format!(
+                "Messages are piling up in queue {} on virtual host {}. Start with queues_get_queue: ready against \
+                 unacknowledged, its consumers and their prefetch, its arguments, and the dead-letter queues it \
+                 feeds. Then queues_queue_rates: is publishing faster than acknowledging, or has acknowledging \
+                 stopped? No consumers means nothing reads it (a worker crashed); many unacknowledged with consumers \
+                 means they take messages and don't acknowledge them (queues_list_channels shows which connection \
+                 holds them). queues_peek a few messages, and those in its dead-letter queue: their x-death header \
+                 says why (rejected, expired, maxlen). queues_list_bindings if messages that should arrive don't. \
+                 Tell me the cause with the evidence and what to change. After a fix, offer queues_replay to move the \
+                 dead-lettered messages back, and ask me first. Never purge or delete the queue.",
+                a("queue"),
+                a("vhost")
+            )
+        },
+    },
+    Prompt {
+        name: "find_consumer_lag",
+        title: "Find why a consumer group lags",
+        description: "Why a stream's consumer group falls behind: lag per partition, its members against the partitions, throughput, and a record that stops it.",
+        args: &[
+            Arg { name: "stream", description: "Stream", required: true },
+            Arg { name: "group", description: "Consumer group", required: true },
+        ],
+        needs: &["streams_get_group", "streams_get_topic", "streams_usage", "streams_read"],
+        text: |a| {
+            format!(
+                "Consumer group {} on stream {} is falling behind. Start with streams_get_group: its members and, on \
+                 each partition, the committed offset and the lag. Lag on every partition while members are present \
+                 means the consumers are slower than what's produced (streams_usage has the throughput; more \
+                 partitions with more consumers is the usual fix). Lag on some partitions only means those have no \
+                 member or a stuck one (streams_get_topic: fewer members than partitions leaves some idle). No \
+                 members means nothing consumes. Where a committed offset doesn't move, streams_read one record at \
+                 that offset on that partition: a record the consumer can't process stops it there. Tell me the cause \
+                 with the evidence. Moving the group past records (streams_reset_group) skips them for good and works \
+                 only while the group has no members: offer it, and ask me first.",
+                a("group"),
+                a("stream")
+            )
+        },
+    },    Prompt {
+        name: "review_costs",
+        title: "Review a project's costs",
+        description: "Where a project's money goes this month, most first, against last month and its limits, and what would cost less; changes nothing without asking.",
+        args: &[Arg { name: "project", description: "Workspace project", required: true }],
+        needs: &["apps_project_usage", "apps_limits", "previews_usage", "previews_settings"],
+        text: |a| {
+            format!(
+                "Where does project {} spend? Start with apps_project_usage for this month (projected to its end) and \
+                 again with month set to last month, to see what grew; apps_limits for how close it is to its alert \
+                 and cap. Then previews_usage against its budget, and previews_settings: previews that live long, run \
+                 for drafts or for every branch cost the most. If you have workspace_get_project, it lists the \
+                 project's other resources: read each one's usage (postgres_usage, redis_usage, nosql_usage, \
+                 storage_usage, streams_usage, search_usage). Rank where the money goes, most first, with what changed \
+                 since last month, and for the top three say what would cost less: a service that never sleeps but \
+                 gets few requests, an environment nobody uses, previews kept too long, a database bigger than its \
+                 load. Don't change settings, sleep, delete anything or set limits without asking me.",
+                a("project")
             )
         },
     },
@@ -202,6 +316,10 @@ pub fn source(prompt: &str, arg: &str) -> Option<Source> {
         "project" => Some(workspace_projects()),
         "service" => Some(Source { tool: "apps_list_services", args: |_| json!({}), fields: &["id"] }),
         "env" => Some(Source { tool: "apps_list_environments", args: |ctx| json!({ "service": ctx["service"] }), fields: &["name"] }),
+        "branch" => crate::ask::source("postgres", "branch"),
+        "preview" => crate::ask::source("previews", "id"),
+        "vhost" | "queue" => crate::ask::source("queues", arg),
+        "stream" | "group" => crate::ask::source("streams", arg),
         _ => None,
     }
 }
@@ -219,7 +337,7 @@ pub fn values(answer: &Value, fields: &[&str], typed: &str) -> (Vec<String>, boo
     for item in items {
         for f in fields {
             if let Some(v) = item.get(*f).and_then(Value::as_str)
-                && is_id(v)
+                && is_choice(v)
                 && v.to_lowercase().starts_with(&typed)
                 && !out.iter().any(|o| o == v)
             {
@@ -243,6 +361,12 @@ fn clean(v: Option<&Value>) -> String {
 /// and a prompt's text is the person's own message to the agent.
 pub(crate) fn is_id(s: &str) -> bool {
     !s.is_empty() && s.len() <= 64 && s.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '.' | '-'))
+}
+
+/// What a form or a completion may offer: an id, or a repo's `owner/name` (each part an id, and
+/// neither only dots, so it names nothing above).
+pub(crate) fn is_choice(s: &str) -> bool {
+    is_id(s) || s.split_once('/').is_some_and(|(o, n)| [o, n].iter().all(|p| is_id(p) && !p.chars().all(|c| c == '.')))
 }
 
 fn offered<'a>(tools: &'a [String]) -> impl Iterator<Item = &'static Prompt> + 'a {
@@ -329,7 +453,9 @@ mod tests {
         let got = super::get("fix_secrets_health", &json!({ "project": "prj_a" }), &all).unwrap();
         let text = got["messages"][0]["content"]["text"].as_str().unwrap();
         assert!(text.contains("\"prj_a\"") && !text.contains("  "), "{text}");
-        let migration = super::get("try_migration_on_branch", &json!({ "project": "prj_a" }), &all).unwrap();
-        assert!(!migration["messages"][0]["content"]["text"].as_str().unwrap().contains("  "), "no runs of spaces");
+        // Every workflow's text joins its lines with one space.
+        for w in super::workflows(&all) {
+            assert!(!w.text.contains("  ") && !w.text.contains('\n'), "{}: {}", w.name, w.text);
+        }
     }
 }

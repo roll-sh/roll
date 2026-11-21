@@ -1,6 +1,8 @@
 //! An environment's errors, grouped (Cloud Run's Error Reporting, Sentry's issues, from the log
 //! alone; docs/apps/README.md, "Errors"). Read from its log when asked: each instance's stack
-//! traces (Python's `Traceback`, a JVM's `Exception … at`, Node's `Error … at`, Go's `panic:`)
+//! traces (Python's `Traceback`, a JVM's `Exception … at`, Node's `Error … at`, Go's `panic:`,
+//! Ruby's `…:in '…': … (Error)`, PHP's `PHP Fatal error:  Uncaught`, .NET's `Unhandled exception.`,
+//! Rust's `thread '…' panicked at`, Elixir's `** (Error)`)
 //! are joined from their lines, a trace's fingerprint is its error's type and first frames with
 //! line numbers, addresses and ids taken out, and an error line with no trace is grouped by its
 //! message the same way. Each group: how many, first and last seen, on how many instances, and
@@ -29,6 +31,11 @@ pub enum Kind {
     Java,
     Node,
     Go,
+    Ruby,
+    Php,
+    Dotnet,
+    Rust,
+    Elixir,
     /// An error line with no trace.
     Line,
 }
@@ -40,6 +47,11 @@ impl Kind {
             Kind::Java => "java",
             Kind::Node => "node",
             Kind::Go => "go",
+            Kind::Ruby => "ruby",
+            Kind::Php => "php",
+            Kind::Dotnet => "dotnet",
+            Kind::Rust => "rust",
+            Kind::Elixir => "elixir",
             Kind::Line => "line",
         }
     }
@@ -58,9 +70,32 @@ fn js_error(s: &str) -> bool {
     !name.is_empty() && name.ends_with("Error") && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
 }
 
+/// A Ruby error's first line: `app/x.rb:12:in 'save': msg (NoMethodError)`, or a Rails log's
+/// `NoMethodError (msg):`.
+fn ruby_error(t: &str) -> bool {
+    let located = t.contains(".rb:") && t.contains(":in ") && t.ends_with(')') && t.rsplit_once('(').is_some_and(|(_, c)| c.trim_end_matches(')').chars().next().is_some_and(|c| c.is_ascii_uppercase()));
+    let rails = t.split_once(" (").is_some_and(|(c, rest)| rest.ends_with("):") && !c.is_empty() && c.chars().next().is_some_and(|x| x.is_ascii_uppercase()) && c.chars().all(|x| x.is_ascii_alphanumeric() || x == ':') && (c.ends_with("Error") || c.ends_with("Exception") || c.contains("::")));
+    located || rails
+}
+
 /// The trace a line starts, if it starts one.
 pub(crate) fn starts(text: &str) -> Option<Kind> {
     let t = text.trim_end();
+    if t.starts_with("PHP Fatal error:") && t.contains("Uncaught ") {
+        return Some(Kind::Php);
+    }
+    if t.starts_with("Unhandled exception. ") || ((t.starts_with("System.") || t.starts_with("Microsoft.")) && java_class(t.split(':').next().unwrap_or(""))) {
+        return Some(Kind::Dotnet);
+    }
+    if t.starts_with("thread '") && t.contains("' panicked at ") {
+        return Some(Kind::Rust);
+    }
+    if t.starts_with("** (") && t[4..].contains(") ") {
+        return Some(Kind::Elixir);
+    }
+    if ruby_error(t) {
+        return Some(Kind::Ruby);
+    }
     if t.starts_with("Traceback (most recent call last):") {
         return Some(Kind::Python);
     }
@@ -90,6 +125,20 @@ pub(crate) fn continues(kind: Kind, text: &str, lines: usize) -> Option<bool> {
         // tab-indented files.
         Kind::Go if t.is_empty() && lines == 1 => Some(false),
         Kind::Go if t.starts_with("goroutine ") || t.starts_with('\t') || t.starts_with("created by ") || (t.contains('(') && t.ends_with(')')) || t.starts_with("[signal ") => Some(false),
+        // Ruby: `\tfrom app/x.rb:3:in '…'`, or a Rails backtrace's `app/x.rb:3:in '…'`; a line that
+        // starts another error (it ends with its class) ends this one.
+        Kind::Ruby if ruby_error(t) => None,
+        Kind::Ruby if t.trim_start().starts_with("from ") || (t.contains(".rb:") && t.contains(":in ")) => Some(false),
+        // PHP: `Stack trace:`, `#0 /app/x.php(12): f()`, then `  thrown in … on line 12` ends it.
+        Kind::Php if t.starts_with("Stack trace:") || t.trim_start().starts_with('#') => Some(false),
+        Kind::Php if t.trim_start().starts_with("thrown in ") => Some(true),
+        Kind::Dotnet if t.trim_start().starts_with("at ") || t.trim_start().starts_with("--- End of ") || t.trim_start().starts_with("---> ") => Some(false),
+        // Rust: its message (the next line), then `stack backtrace:` and its frames, or the
+        // `note: run with RUST_BACKTRACE` line that ends one without.
+        Kind::Rust if lines == 1 && !t.is_empty() => Some(false),
+        Kind::Rust if t.starts_with("note: ") => Some(true),
+        Kind::Rust if t.starts_with("stack backtrace:") || t.trim_start().chars().next().is_some_and(|c| c.is_ascii_digit()) || t.trim_start().starts_with("at ") => Some(false),
+        Kind::Elixir if t.starts_with("    (") || t.starts_with("    lib/") => Some(false),
         _ => None,
     }
 }
@@ -132,7 +181,12 @@ fn normal(s: &str) -> String {
 fn parts(kind: Kind, lines: &[&str]) -> (String, Vec<String>) {
     let frame = |l: &str| {
         let t = l.trim();
-        t.starts_with("at ") || t.starts_with("File \"") || (kind == Kind::Go && l.starts_with('\t'))
+        t.starts_with("at ")
+            || t.starts_with("File \"")
+            || (kind == Kind::Go && l.starts_with('\t'))
+            || (kind == Kind::Ruby && (t.starts_with("from ") || (t.contains(".rb:") && t.contains(":in ") && !t.ends_with(')'))))
+            || (kind == Kind::Php && t.starts_with('#'))
+            || (kind == Kind::Elixir && t.starts_with('('))
     };
     let frames: Vec<String> = lines.iter().filter(|l| frame(l)).take(FRAMES).map(|l| normal(l.trim())).collect();
     let error = match kind {
@@ -140,6 +194,14 @@ fn parts(kind: Kind, lines: &[&str]) -> (String, Vec<String>) {
         Kind::Python => lines.last().map(|l| l.split(':').next().unwrap_or(l).trim().to_string()).unwrap_or_default(),
         Kind::Go => normal(lines.first().copied().unwrap_or("")),
         Kind::Java => lines.first().map(|l| l.strip_prefix("Exception in thread ").and_then(|r| r.split_once(' ').map(|(_, c)| c)).unwrap_or(l).split(':').next().unwrap_or("").trim().to_string()).unwrap_or_default(),
+        // `… (NoMethodError)` at the end, or a Rails log's `NoMethodError (…):`.
+        Kind::Ruby => lines.first().map(|l| if l.ends_with(')') { l.rsplit_once('(').map(|(_, c)| c.trim_end_matches(')').to_string()).unwrap_or_default() } else { l.split(" (").next().unwrap_or("").to_string() }).unwrap_or_default(),
+        // `PHP Fatal error:  Uncaught RuntimeException: msg in /app/x.php:12`.
+        Kind::Php => lines.first().and_then(|l| l.split_once("Uncaught ")).map(|(_, r)| r.split(':').next().unwrap_or("").trim().to_string()).unwrap_or_default(),
+        Kind::Dotnet => lines.first().map(|l| l.trim_start_matches("Unhandled exception. ").split(':').next().unwrap_or("").trim().to_string()).unwrap_or_default(),
+        // The panic's place (numbers out) and its message, the next line.
+        Kind::Rust => normal(&format!("{} {}", lines.first().and_then(|l| l.split_once("panicked at ")).map(|(_, p)| p).unwrap_or(""), lines.get(1).copied().unwrap_or(""))),
+        Kind::Elixir => lines.first().and_then(|l| l.strip_prefix("** (")).and_then(|r| r.split_once(')')).map(|(c, _)| c.to_string()).unwrap_or_default(),
         _ => lines.first().map(|l| l.trim_start_matches("Uncaught ").split(':').next().unwrap_or("").trim().to_string()).unwrap_or_default(),
     };
     (error, frames)
@@ -165,9 +227,11 @@ pub struct Occurrence {
     pub text: String,
     pub at: i64,
     pub instance: Option<String>,
+    /// The deployment whose instance wrote it.
+    pub deployment: Option<String>,
 }
 
-fn occurrence(kind: Kind, lines: &[&str], at: i64, instance: Option<String>) -> Occurrence {
+fn occurrence(kind: Kind, lines: &[&str], at: i64, instance: Option<String>, deployment: Option<String>) -> Occurrence {
     use sha2::{Digest, Sha256};
     let (key, title) = if kind == Kind::Line {
         let m = message(lines[0]);
@@ -189,7 +253,7 @@ fn occurrence(kind: Kind, lines: &[&str], at: i64, instance: Option<String>) -> 
         }
         text.truncate(cut);
     }
-    Occurrence { kind, fingerprint, title, text, at, instance }
+    Occurrence { kind, fingerprint, title, text, at, instance, deployment }
 }
 
 /// The errors in an environment's lines (oldest first): each instance's and stream's traces
@@ -204,7 +268,7 @@ pub fn occurrences(lines: &[LogLine]) -> Vec<Occurrence> {
     let close = |o: Open, out: &mut Vec<Occurrence>| {
         let first = &lines[o.lines[0]];
         let texts: Vec<&str> = o.lines.iter().map(|i| lines[*i].text.as_str()).collect();
-        out.push(occurrence(o.kind, &texts, first.t, first.instance.clone()));
+        out.push(occurrence(o.kind, &texts, first.t, first.instance.clone(), first.deployment.clone()));
     };
     for (i, l) in lines.iter().enumerate() {
         if !matches!(l.stream, Stream::Stdout | Stream::Stderr) {
@@ -230,7 +294,7 @@ pub fn occurrences(lines: &[LogLine]) -> Vec<Occurrence> {
         if let Some(kind) = starts(&l.text) {
             open.insert(key, Open { kind, lines: vec![i] });
         } else if l.level.is_some_and(|lv| lv >= Level::Error) {
-            out.push(occurrence(Kind::Line, &[l.text.as_str()], l.t, l.instance.clone()));
+            out.push(occurrence(Kind::Line, &[l.text.as_str()], l.t, l.instance.clone(), l.deployment.clone()));
         }
     }
     let mut rest: Vec<Open> = open.into_values().collect();
@@ -301,7 +365,39 @@ pub fn groups(lines: &[LogLine]) -> Vec<Group> {
     list
 }
 
+/// What an error seen means ([`crate::store::Store::remember_error`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Seen {
+    /// The environment never had it: `error.new`.
+    New,
+    /// It was resolved, and it's back: open again, `error.regressed`.
+    Regressed,
+    /// Known (open, or muted): nothing said.
+    Known,
+}
+
+/// An error group's state (Cloud Run Error Reporting's): open; resolved (said again if it comes
+/// back after); muted (never said again).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Lifecycle {
+    Open,
+    Resolved,
+    Muted,
+}
+
 impl Apps {
+    /// `PATCH …/environments/{env}/errors/{fingerprint} {state}`: resolved, muted or open again.
+    pub async fn set_error_state(self: &Arc<Self>, service: &str, env: &str, fingerprint: &str, body: Value) -> Result<Value> {
+        self.service_env(service, env).await?;
+        let state: Lifecycle = body.get("state").cloned().and_then(|s| serde_json::from_value(s).ok()).ok_or_else(|| crate::Error::BadRequest("state is open, resolved or muted".into()))?;
+        let (sid, e, f) = (service.to_string(), env.to_string(), fingerprint.to_string());
+        if !self.db(move |s| s.set_error_state(&sid, &e, &f, state, code_sql::now_ms())).await? {
+            return Err(crate::Error::NotFound(format!("{env} never had the error {fingerprint}")));
+        }
+        Ok(json!({ "fingerprint": fingerprint, "state": state }))
+    }
+
     /// New errors in an environment's log since it was last looked at (the alerts' pass, each
     /// minute on the owner): a fingerprint it has never had is an `error.new` event, once ever
     /// (kept in `error_groups`, so a restart doesn't say it again). The event names the error's
@@ -325,14 +421,17 @@ impl Apps {
                 continue;
             }
             let name = name_of(&o);
-            let (sid, e, f, n, at) = (l.service.clone(), l.env.clone(), o.fingerprint.clone(), name.clone(), o.at);
-            if !self.db(move |s| s.remember_error(&sid, &e, &f, &n, at)).await.unwrap_or(false) {
-                continue;
-            }
-            let (sid, e, dep) = (l.service.clone(), l.env.clone(), l.template().map(|t| t.deployment.clone()));
+            let dep = o.deployment.clone().or_else(|| l.template().map(|t| t.deployment.clone()));
+            let (sid, e, f, n, at, d) = (l.service.clone(), l.env.clone(), o.fingerprint.clone(), name.clone(), o.at, dep.clone());
+            let kind = match self.db(move |s| s.remember_error(&sid, &e, &f, &n, at, d.as_deref())).await {
+                Ok(Seen::New) => "error.new",
+                Ok(Seen::Regressed) => "error.regressed",
+                _ => continue,
+            };
+            let (sid, e) = (l.service.clone(), l.env.clone());
             let data = json!({ "fingerprint": o.fingerprint, "kind": o.kind.name(), "name": name });
-            let _ = self.db(move |s| s.add_event("error.new", &sid, &e, dep.as_deref(), &data)).await;
-            l.log.stream(Stream::System).line(format!("a new error: {name} ({})", o.fingerprint));
+            let _ = self.db(move |s| s.add_event(kind, &sid, &e, dep.as_deref(), &data)).await;
+            l.log.stream(Stream::System).line(if kind == "error.new" { format!("a new error: {name} ({})", o.fingerprint) } else { format!("an error resolved before is back: {name} ({})", o.fingerprint) });
             told += 1;
         }
         if more > 0 {
@@ -351,6 +450,19 @@ impl Apps {
         let scanned = lines.len();
         let mut groups = groups(&lines);
         groups.truncate(MAX_GROUPS);
+        // Each with its state and the deployment it was first seen in, as kept.
+        let (sid, e) = (service.to_string(), env.to_string());
+        let states = self.db(move |s| s.error_states(&sid, &e)).await.unwrap_or_default();
+        let groups: Vec<Value> = groups
+            .iter()
+            .map(|g| {
+                let mut v = json!(g);
+                let (state, first) = states.get(&g.fingerprint).cloned().unwrap_or((Lifecycle::Open, None));
+                v["state"] = json!(state);
+                v["first_deployment"] = json!(first);
+                v
+            })
+            .collect();
         Ok(json!({ "minutes": minutes, "groups": groups, "scanned": scanned, "cut": cut || scanned >= MAX_LINES }))
     }
 }
@@ -401,5 +513,30 @@ mod tests {
         assert_eq!(found[3].text.lines().count(), 5, "a cause and its tail stay on the trace");
         assert_eq!(found[5].fingerprint, found[6].fingerprint, "messages that differ by an id");
         assert_ne!(found[0].fingerprint, found[1].fingerprint);
+    }
+
+    /// Ruby (a Rails log's and a script's), PHP, .NET, Rust and Elixir traces join and group as
+    /// their own kinds, by their error and first frames, whatever their line numbers.
+    #[test]
+    fn more_languages_traces_group_by_their_error() {
+        let ruby = |n: u32| vec![format!("app/models/order.rb:{n}:in 'charge': undefined method 'id' for nil (NoMethodError)"), format!("\tfrom app/controllers/orders_controller.rb:{}:in 'create'", n + 1), "\tfrom bin/rails:4:in '<main>'".to_string()];
+        let rails = ["NoMethodError (undefined method `id' for nil:NilClass):", "app/models/order.rb:12:in `charge'", "app/controllers/orders_controller.rb:8:in `create'"];
+        let php = ["PHP Fatal error:  Uncaught RuntimeException: card declined in /app/src/Pay.php:41", "Stack trace:", "#0 /app/src/Order.php(17): Pay->charge()", "#1 {main}", "  thrown in /app/src/Pay.php on line 41"];
+        let dotnet = ["Unhandled exception. System.InvalidOperationException: Sequence contains no elements", "   at System.Linq.ThrowHelper.ThrowNoElementsException()", "   at Shop.Orders.Get(Int32 id) in /app/Orders.cs:line 23"];
+        let rust = ["thread 'main' panicked at src/main.rs:5:9:", "called `Option::unwrap()` on a `None` value", "note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace"];
+        let elixir = ["** (RuntimeError) card declined", "    (shop 0.1.0) lib/shop/pay.ex:12: Shop.Pay.charge/1", "    (elixir 1.17.0) lib/enum.ex:987: Enum.map/2"];
+        let mut all: Vec<String> = ruby(10);
+        all.extend(ruby(42));
+        for group in [&rails[..], &php[..], &dotnet[..], &rust[..], &elixir[..]] {
+            all.extend(group.iter().map(|s| s.to_string()));
+        }
+        let ls = lines(&all.iter().map(|t| ("a", t.as_str())).collect::<Vec<_>>());
+        let found = occurrences(&ls);
+        let kinds: Vec<Kind> = found.iter().map(|o| o.kind).collect();
+        assert_eq!(kinds, [Kind::Ruby, Kind::Ruby, Kind::Ruby, Kind::Php, Kind::Dotnet, Kind::Rust, Kind::Elixir], "{found:#?}");
+        assert_eq!(found[0].fingerprint, found[1].fingerprint, "the same error at other line numbers");
+        assert_eq!(found[3].text.lines().count(), 5, "PHP's trace through its thrown in");
+        assert_eq!(found[5].text.lines().count(), 3, "Rust's message and note stay on it");
+        assert!(found.iter().all(|o| o.text.lines().count() >= 3), "{found:#?}");
     }
 }

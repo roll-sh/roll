@@ -1,10 +1,11 @@
-import { ClipboardPaste, Copy, Eye, EyeOff, FileText, Link2, Lock, LockOpen, Plus, Rocket, Trash2, Undo2 } from "lucide-react";
+import { ClipboardPaste, Copy, Eye, EyeOff, FileText, KeyRound, Link2, Lock, LockOpen, Plus, Rocket, Server, Trash2, Undo2 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { appsApi, describePending, parseEnv, toEnv, VARIABLE_NAME, type Environment, type Link, type LinkKind, type VariableSource, type Variables } from "@/lib/apps-api";
 import { KIND_LABEL, resourceKey, type ResourceView } from "@/lib/workspace-resources";
 import { useWorkspace } from "@/lib/workspace-store";
 import { btn, input, panel, primary } from "../ui";
 import { looksSecret } from "@/lib/secret-names";
+import { needsApproval, secretsApi } from "@/lib/secrets-api";
 import type { RefCatalog } from "@/lib/var-refs";
 import { RefInput } from "./ref-input";
 import { message, SureButton, type Runner } from "./shared";
@@ -81,6 +82,11 @@ export function VariablesTab({
       setFiling(null);
     }
   };
+  // Only for its instances, never a build's steps: from the next deploy.
+  const runtimeOnly = async (name: string, on: boolean) => {
+    const v = await runner.run("runtime", () => appsApi.setVariables(service, env.name, { runtime_only: { [name]: on } }));
+    if (v) setVars(v);
+  };
   const [added, setAdded] = useState<Edit[]>([]);
   const [pasting, setPasting] = useState(false);
   const [pasted, setPasted] = useState("");
@@ -140,6 +146,34 @@ export function VariablesTab({
     if (out) {
       setVars(out);
       setRaw(null);
+      setValues(null);
+    }
+  };
+
+  /** A secret-looking variable into roll secrets (its own folder, `/services/<id>`: no other
+   *  service gets it), leaving a `roll://` reference to it in its place. */
+  const moveToSecrets = async (name: string) => {
+    const out = await runner.run(`move:${name}`, async () => {
+      const value = (await appsApi.reveal(service, env.name))[name];
+      if (value === undefined) throw new Error(`${name}'s value can't be read here, so it can't be moved`);
+      const path = `/services/${service}`;
+      const s = secretsApi(project);
+      const body = { value, message: `moved from roll apps ${service}` };
+      // Its folder is made by the write.
+      try {
+        await s.set(env.name, name, body, path);
+      } catch (e) {
+        if (needsApproval(e)) throw new Error(`${env.name}'s secrets change only through an approved request: add ${name} there, then set this variable to roll://${env.name}${path}/${name}`);
+        throw e;
+      }
+      try {
+        return await appsApi.setVariables(service, env.name, { set: { [name]: `roll://${env.name}${path}/${name}` } });
+      } catch (e) {
+        throw new Error(`${name} is in roll secrets now, but the variable here still holds its value: ${message(e)}. Set it to roll://${env.name}${path}/${name}`);
+      }
+    });
+    if (out) {
+      setVars(out);
       setValues(null);
     }
   };
@@ -293,6 +327,11 @@ export function VariablesTab({
                       <Lock className="size-3" strokeWidth={1.5} /> sealed
                     </span>
                   )}
+                  {v.runtime_only && (
+                    <span className="inline-flex items-center gap-1 text-[11px] text-subtle" title="Only its instances get it: no build step can read it">
+                      <Server className="size-3" strokeWidth={1.5} /> runtime only
+                    </span>
+                  )}
                   {v.file && (
                     <span className="inline-flex max-w-full items-center gap-1 truncate font-mono text-[11px] text-subtle" title="Kept as a file in its instances, not in their environment">
                       <FileText className="size-3 shrink-0" strokeWidth={1.5} /> {v.file}
@@ -326,6 +365,30 @@ export function VariablesTab({
                       title={sealing.has(v.name) ? "Sealed at Save: click to keep it readable" : "Seal: the app runs with it, nothing shows it again"}
                     >
                       {sealing.has(v.name) ? <Lock className="size-3.5" /> : <LockOpen className="size-3.5" />}
+                    </button>
+                  )}
+                  {editable && !v.sealed && !gone && v.source === "service" && !v.reference && looksSecret(v.name) && (
+                    <SureButton
+                      className="p-1 text-subtle hover:text-fg"
+                      disabled={runner.busy !== null}
+                      label={`Move ${v.name} to roll secrets`}
+                      sure={`Sure? Move ${v.name}`}
+                      title="Into roll secrets (rotation, audit, its leak guard), leaving a roll:// reference here"
+                      onSure={() => void moveToSecrets(v.name)}
+                    >
+                      <KeyRound className="size-3.5" />
+                    </SureButton>
+                  )}
+                  {editable && !gone && (
+                    <button
+                      onClick={() => void runtimeOnly(v.name, !v.runtime_only)}
+                      disabled={runner.busy !== null}
+                      className={`p-1 hover:text-fg ${v.runtime_only ? "text-fg" : "text-subtle"}`}
+                      aria-pressed={!!v.runtime_only}
+                      aria-label={`Keep ${v.name} from builds`}
+                      title={v.runtime_only ? "Only its instances get it: click to give it to builds again" : "Only for its instances: no build step (a dependency's install script) can read it"}
+                    >
+                      <Server className="size-3.5" />
                     </button>
                   )}
                   {editable && !gone && (

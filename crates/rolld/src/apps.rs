@@ -173,6 +173,25 @@ impl apps_control::integrations::GitHubApp for CodeGitHub {
     }
 }
 
+/// roll code's model providers as roll apps' explainer: the repo's owner's provider (their own
+/// key, else the server's within their cap), metered on their account as `explain`.
+struct CodeExplainer(Arc<code_control::Code>);
+
+#[async_trait]
+impl apps_control::integrations::Explainer for CodeExplainer {
+    async fn ask(&self, repo: &str, system: &str, user: &str, schema: &serde_json::Value) -> apps_control::Result<Option<(serde_json::Value, String)>> {
+        use apps_control::Error as E;
+        let ask = code_control::ai::ModelAsk { kind: "explain", system: system.into(), user: user.into(), schema: schema.clone(), schema_name: "explanation" };
+        match self.0.ask_model(repo, &ask).await {
+            Ok(a) => Ok(a.json.map(|j| (j, a.model))),
+            Err(code_control::Error::Unprocessable(m) | code_control::Error::NotFound(m)) => Err(E::Conflict(m)),
+            Err(code_control::Error::Moved(to)) => Err(E::Conflict(format!("the repository moved to {to}: point the service at it"))),
+            Err(code_control::Error::Unavailable(m)) => Err(E::Unavailable(m)),
+            Err(e) => Err(E::Internal(e.to_string())),
+        }
+    }
+}
+
 /// roll code as roll apps' source of trees and landings.
 #[derive(Clone)]
 struct CodeSources(Arc<code_control::Code>);
@@ -450,6 +469,89 @@ impl Resources for RollResources {
         Ok(v["lag"].as_i64().unwrap_or(0).max(0) as u64)
     }
 
+    /// A server-managed group's next records (`GET …/topics/{t}/records?group=`, committed only
+    /// by `commit`), keys, values and headers as base64 so bytes come back as they were.
+    async fn read_group(&self, stream: &str, topic: &str, group: &str, consumer: &str, wait_ms: u64, limit: usize) -> anyhow::Result<Vec<apps_control::integrations::StreamRecord>> {
+        use base64::Engine;
+        let (base, token, http) = &self.api;
+        let enc = |s: &str| urlencoding::encode(s).into_owned();
+        let url = format!(
+            "{base}/v1/streams/{}/topics/{}/records?group={}&consumer={}&commit=manual&lease_ms=60000&encoding=base64&wait_ms={wait_ms}&limit={limit}",
+            enc(stream),
+            enc(topic),
+            enc(group),
+            enc(consumer)
+        );
+        let mut req = http.get(url).timeout(std::time::Duration::from_millis(wait_ms + 30_000));
+        if let Some(t) = token {
+            req = req.bearer_auth(t);
+        }
+        let resp = req.send().await?;
+        anyhow::ensure!(resp.status().is_success(), "the stream answered {}", resp.status());
+        let v: serde_json::Value = resp.json().await?;
+        let b64 = |v: &serde_json::Value| v.as_str().and_then(|s| base64::engine::general_purpose::STANDARD.decode(s).ok());
+        Ok(v["records"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .map(|r| apps_control::integrations::StreamRecord {
+                partition: r["partition"].as_i64().unwrap_or(0) as i32,
+                offset: r["offset"].as_i64().unwrap_or(0),
+                timestamp: r["timestamp"].as_i64().unwrap_or(0),
+                key: b64(&r["key"]),
+                value: b64(&r["value"]),
+                headers: r["headers"].as_array().into_iter().flatten().filter_map(|h| Some((h["key"].as_str()?.to_string(), b64(&h["value"]).unwrap_or_default()))).collect(),
+            })
+            .collect())
+    }
+
+    async fn commit(&self, stream: &str, topic: &str, group: &str, consumer: &str, partition: i32, offset: i64) -> anyhow::Result<()> {
+        let (base, token, http) = &self.api;
+        let enc = |s: &str| urlencoding::encode(s).into_owned();
+        let body = serde_json::json!({ "consumer": consumer, "offsets": [{ "topic": topic, "partition": partition, "offset": offset }] });
+        let mut req = http.post(format!("{base}/v1/streams/{}/groups/{}/commit", enc(stream), enc(group))).json(&body);
+        if let Some(t) = token {
+            req = req.bearer_auth(t);
+        }
+        let resp = req.send().await?;
+        anyhow::ensure!(resp.status().is_success(), "the stream answered {}", resp.status());
+        Ok(())
+    }
+
+    async fn leave(&self, stream: &str, group: &str, consumer: &str) -> anyhow::Result<()> {
+        let (base, token, http) = &self.api;
+        let enc = |s: &str| urlencoding::encode(s).into_owned();
+        let mut req = http.delete(format!("{base}/v1/streams/{}/groups/{}/consumers/{}", enc(stream), enc(group), enc(consumer)));
+        if let Some(t) = token {
+            req = req.bearer_auth(t);
+        }
+        let resp = req.send().await?;
+        anyhow::ensure!(resp.status().is_success() || resp.status() == reqwest::StatusCode::NOT_FOUND, "the stream answered {}", resp.status());
+        Ok(())
+    }
+
+    async fn produce(&self, stream: &str, topic: &str, r: &apps_control::integrations::StreamRecord) -> anyhow::Result<()> {
+        use base64::Engine;
+        let b64 = |b: &[u8]| base64::engine::general_purpose::STANDARD.encode(b);
+        let (base, token, http) = &self.api;
+        let enc = |s: &str| urlencoding::encode(s).into_owned();
+        let headers: Vec<serde_json::Value> = r.headers.iter().map(|(k, v)| serde_json::json!({ "key": k, "value_base64": b64(v) })).collect();
+        let mut rec = serde_json::json!({ "headers": headers });
+        if let Some(k) = &r.key {
+            rec["key_base64"] = b64(k).into();
+        }
+        if let Some(v) = &r.value {
+            rec["value_base64"] = b64(v).into();
+        }
+        let mut req = http.post(format!("{base}/v1/streams/{}/topics/{}/records", enc(stream), enc(topic))).json(&serde_json::json!({ "records": [rec] }));
+        if let Some(t) = token {
+            req = req.bearer_auth(t);
+        }
+        let resp = req.send().await?;
+        anyhow::ensure!(resp.status().is_success(), "the stream answered {}", resp.status());
+        Ok(())
+    }
+
     async fn link_vars(&self, kind: LinkKind, r#ref: &str) -> anyhow::Result<Vec<(String, String)>> {
         match kind {
             LinkKind::Postgres => {
@@ -479,7 +581,7 @@ impl Resources for RollResources {
                 })
                 .await
             }
-            LinkKind::Bucket | LinkKind::Stream | LinkKind::Nosql | LinkKind::Search => match self.provided(kind, r#ref, None).await? {
+            LinkKind::Bucket | LinkKind::Stream | LinkKind::Nosql | LinkKind::Search | LinkKind::Queue => match self.provided(kind, r#ref, None).await? {
                 Some(p) => Ok(p.vars),
                 None => anyhow::bail!("links to {} aren't wired on this node yet", kind.as_str()),
             },
@@ -491,7 +593,7 @@ impl Resources for RollResources {
     /// for the service; a search key has data access only, never the cluster's password), made once, revoked when the link goes; only those are kept with the link, and
     /// what's read (an endpoint, NoSQL's login, a database's URL) is read again at each deploy.
     async fn link(&self, kind: LinkKind, r#ref: &str, service: &str) -> anyhow::Result<Option<apps_control::integrations::Minted>> {
-        if !matches!(kind, LinkKind::Bucket | LinkKind::Stream | LinkKind::Nosql | LinkKind::Search) {
+        if !matches!(kind, LinkKind::Bucket | LinkKind::Stream | LinkKind::Nosql | LinkKind::Search | LinkKind::Queue) {
             return Ok(None);
         }
         let Some(p) = self.provided(kind, r#ref, Some(format!("roll apps {service}"))).await? else { return Ok(None) };
@@ -669,6 +771,7 @@ pub async fn start(
     let apps = Apps::new(cfg, store, deps);
     if let Some(c) = code {
         apps.set_github_app(Arc::new(CodeGitHub(c.clone())));
+        apps.set_explainer(Arc::new(CodeExplainer(c.clone())));
         // The App's verified pushes and pull requests reach the services connected to them
         // (queued here, run on each service's owner).
         let a = apps.clone();
@@ -783,6 +886,55 @@ mod tests {
     use super::*;
     use axum::routing::{delete, get, post};
 
+    /// `run.push` against the real broker's HTTP API: a group's records come back as they were
+    /// sent (key, value and headers, through base64), a commit moves the group so a fresh consumer
+    /// (the last one left) starts after it, the lag counts what isn't committed, and a dead letter
+    /// lands in its topic with its headers.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn push_reads_commits_and_dead_letters_through_the_broker() {
+        use apps_control::integrations::{Resources, StreamRecord};
+        let dir = tempfile::tempdir().unwrap();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let mut config = stream_broker::Config::local(dir.path().to_path_buf());
+        config.http_url = base.clone();
+        let broker = stream_broker::Broker::new(config).await.unwrap();
+        let (stream, _, _) = broker.create_stream("events", Default::default()).unwrap();
+        broker.create_topic(&stream, "orders", 2, 1, Default::default(), false).unwrap();
+        broker.create_topic(&stream, "dead", 1, 1, Default::default(), false).unwrap();
+        let sid = stream.id.clone();
+        tokio::spawn(broker.clone().run());
+        let router = stream_broker::http::router(broker.clone());
+        tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+        let http = reqwest::Client::new();
+        let sent = serde_json::json!({ "records": [
+            { "partition": 0, "key": "k1", "value": { "id": 1 }, "headers": { "content-type": "application/json" } },
+            { "partition": 1, "value": "two" },
+        ] });
+        let st = http.post(format!("{base}/v1/streams/{sid}/topics/orders/records")).json(&sent).send().await.unwrap().status();
+        assert!(st.is_success(), "{st}");
+        let r = RollResources { postgres: None, redis: None, api: (base.clone(), None, http.clone()), products: crate::secrets::Api::default() };
+        let got = r.read_group(&sid, "orders", "web", "c1", 1000, 10).await.unwrap();
+        assert_eq!(got.len(), 2, "{got:?}");
+        let first = got.iter().find(|x| x.partition == 0).unwrap();
+        assert_eq!((first.key.as_deref(), first.value.as_deref()), (Some(&b"k1"[..]), Some(&br#"{"id":1}"#[..])));
+        assert!(first.headers.iter().any(|(k, v)| k == "content-type" && v == b"application/json"), "{first:?}");
+        // Lag counts the partitions the group has committed on (Kafka's rule): none yet.
+        assert_eq!(r.backlog(&sid, "web").await.unwrap(), 0, "nothing committed yet");
+        r.commit(&sid, "orders", "web", "c1", 0, first.offset + 1).await.unwrap();
+        r.leave(&sid, "web", "c1").await.unwrap();
+        let again = r.read_group(&sid, "orders", "web", "c2", 1000, 10).await.unwrap();
+        assert_eq!(again.iter().map(|x| x.partition).collect::<Vec<_>>(), [1], "a fresh consumer starts after the commit: {again:?}");
+        let more = serde_json::json!({ "records": [{ "partition": 0, "value": "three" }] });
+        http.post(format!("{base}/v1/streams/{sid}/topics/orders/records")).json(&more).send().await.unwrap();
+        assert_eq!(r.backlog(&sid, "web").await.unwrap(), 1, "one past partition 0's commit");
+        let dead = StreamRecord { value: Some(b"x".to_vec()), headers: vec![("x-roll-error".into(), b"/events answered 500 after 5 tries".to_vec())], ..Default::default() };
+        r.produce(&sid, "dead", &dead).await.unwrap();
+        let landed = r.read_group(&sid, "dead", "check", "c3", 1000, 10).await.unwrap();
+        assert_eq!(landed.len(), 1, "{landed:?}");
+        assert_eq!((landed[0].value.as_deref(), landed[0].headers.iter().find(|(k, _)| k == "x-roll-error").map(|(_, v)| v.as_slice())), (Some(&b"x"[..]), Some(&b"/events answered 500 after 5 tries"[..])));
+    }
+
     /// A bucket's link gets a key of its own, named for the service and for that bucket only,
     /// with the storage's endpoint and region read as they are; unlinking revokes the key.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -822,5 +974,35 @@ mod tests {
         assert!(listed.iter().all(|(k, _)| !k.starts_with("AWS_ACCESS")), "{listed:?}");
         r.unlink(LinkKind::Bucket, "photos", &m.kept).await.unwrap();
         assert_eq!(*seen.lock().unwrap(), [r#"key roll apps svc_a "write" ["photos"]"#.to_string(), "revoked AKIA1".to_string()]);
+    }
+
+    /// A queue's link gets a vhost user of its own (roll secrets' queue provider): its
+    /// `AMQP_URL` carries that user, never the vhost admin's; unlinking deletes the user.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_queues_link_gets_a_user_of_its_own_and_unlinking_deletes_it() {
+        use axum::routing::put;
+        let seen = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let (s1, s2, s3) = (seen.clone(), seen.clone(), seen.clone());
+        let router = axum::Router::new()
+            .route("/v1/queues/vhosts", get(|| async { axum::Json(serde_json::json!([{ "name": "orders", "amqp_url": "amqp://admin:admin-pw@127.0.0.1:5672/orders" }])) }))
+            .route("/v1/queues/users/{user}", put(move |axum::extract::Path(u): axum::extract::Path<String>| async move {
+                s1.lock().unwrap().push(format!("user {}", u.starts_with("roll-")));
+                axum::http::StatusCode::NO_CONTENT
+            }).delete(move |axum::extract::Path(u): axum::extract::Path<String>| async move {
+                s3.lock().unwrap().push(format!("deleted {}", u.starts_with("roll-")));
+                axum::http::StatusCode::NO_CONTENT
+            }))
+            .route("/v1/queues/permissions/{vhost}/{user}", put(move |axum::extract::Path((v, _)): axum::extract::Path<(String, String)>, axum::Json(b): axum::Json<serde_json::Value>| async move {
+                s2.lock().unwrap().push(format!("permissions {v} {}", b["configure"]));
+                axum::http::StatusCode::NO_CONTENT
+            }));
+        let products = crate::secrets::Api::default();
+        products.set(router);
+        let r = RollResources { postgres: None, redis: None, api: (String::new(), None, reqwest::Client::new()), products };
+        let m = r.link(LinkKind::Queue, "orders", "svc_a").await.unwrap().expect("a user of its own");
+        let url = &m.vars.iter().find(|(k, _)| k == "AMQP_URL").expect("AMQP_URL").1;
+        assert!(url.starts_with("amqp://roll-") && url.ends_with("@127.0.0.1:5672/orders") && !url.contains("admin"), "{url}");
+        r.unlink(LinkKind::Queue, "orders", &m.kept).await.unwrap();
+        assert_eq!(*seen.lock().unwrap(), ["user true", r#"permissions orders ".*""#, "deleted true"]);
     }
 }

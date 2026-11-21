@@ -527,6 +527,56 @@ async fn landings_while_the_daemon_was_down_are_delivered_after_a_restart() {
     assert_eq!(msgs, vec![json!("before"), json!("burst 0"), json!("burst 1"), json!("burst 2")]);
 }
 
+/// A webhook made on a server without `ROLL_SECRET_KEY` keeps its secret in the clear. Once the
+/// server has the key, opening seals it (once: opening again leaves it as it is), and its
+/// deliveries are still signed with the secret it was given.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn webhooks_made_before_sealing_still_verify() {
+    let rx = receiver().await;
+    let dir = tempfile::tempdir().unwrap();
+    let kept = |code: &code_control::Code, id: &str| -> (String, i64) {
+        code.db.sql().query_row("SELECT secret, secret_sealed FROM repo_webhooks WHERE id = ?", [id], |r| Ok((r.get(0)?, r.get(1)?))).unwrap()
+    };
+    let verify = |g: &Got, secret: &str| {
+        let ts: i64 = g.headers["x-roll-timestamp"].to_str().unwrap().parse().unwrap();
+        assert_eq!(g.headers["x-roll-signature-256"].to_str().unwrap(), code_control::review::apps::signature(secret, ts, &g.raw));
+    };
+    let (id, secret, old) = {
+        let code = common::open_in(dir.path(), |c| c.review_app_retry_ms = 20);
+        let a = App { router: code_control::api::router(code.clone()), code, dir: tempfile::tempdir().unwrap() };
+        a.repo("acme", "api").await;
+        let created = a.ok("POST", &format!("{P}/webhooks"), Some(json!({ "url": rx.url, "events": ["landed"] }))).await;
+        let (id, secret) = (created["webhook"]["id"].as_str().unwrap().to_string(), created["secret"].as_str().unwrap().to_string());
+        verify(&rx.wait("ping", |_| true).await, &secret);
+        assert_eq!(kept(&a.code, &id), (secret.clone(), 0), "in the clear without a key");
+        (id, secret, Arc::downgrade(&a.code))
+    };
+    for _ in 0..500 {
+        if old.upgrade().is_none() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert!(old.upgrade().is_none(), "the old process is gone");
+    let with_key = |c: &mut code_control::Config| {
+        c.review_app_retry_ms = 20;
+        c.review.secret_key = Some("0123456789abcdef0123456789abcdef".into());
+    };
+    let code = common::open_in(dir.path(), with_key);
+    let (sealed, flag) = kept(&code, &id);
+    assert!(flag == 1 && !sealed.contains(&secret), "sealed on open");
+    assert_eq!(kept(&common::open_in(dir.path(), with_key), &id), (sealed, 1), "a second open leaves it alone");
+    let a = App { router: code_control::api::router(code.clone()), code: code.clone(), dir: tempfile::tempdir().unwrap() };
+    let ping = a.ok("POST", &format!("{P}/webhooks/{id}/ping"), None).await;
+    code.start_webhooks();
+    verify(&rx.wait("ping", |g| g.body["delivery"] == ping["id"]).await, &secret);
+    // A webhook made with the key is sealed from the start.
+    let created = a.ok("POST", &format!("{P}/webhooks"), Some(json!({ "url": rx.url, "events": ["landed"] }))).await;
+    let (id2, secret2) = (created["webhook"]["id"].as_str().unwrap(), created["secret"].as_str().unwrap());
+    assert_eq!(kept(&code, id2).1, 1);
+    verify(&rx.wait("ping", |g| g.body["webhook"] == id2).await, secret2);
+}
+
 /// A delivery queued by a process that stopped before sending it goes out once the next process
 /// starts its webhooks, without waiting for an event of its own to wake the delivery worker.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -869,7 +919,7 @@ async fn every_event_is_the_same_on_the_stream_and_in_webhooks() {
     assert_eq!(keys(&got["status"]), sorted(vec!["context", "state", "target_url", "description", "creator", "created_at", "updated_at"]));
     assert_eq!((got["status"]["context"].as_str(), got["status"]["state"].as_str()), (Some("ci/x"), Some("pending")));
 
-    // preview = {change, preview: Preview | null, became?: ["ready" | "visual_change"]}
+    // preview = {change, preview: Preview | null, became?: ["ready" | "failed" | "visual_change" | "regressions"]}
     a.ok("POST", &format!("/v1/code/changes/{id}/preview"), None).await;
     let got = ev.next("preview").await;
     assert_eq!(keys(&got), ["became", "change", "preview"]);
@@ -886,6 +936,18 @@ async fn every_event_is_the_same_on_the_stream_and_in_webhooks() {
     for (state, head, became) in [("creating", "cs_1", None), ("ready", "cs_1", Some(json!(["ready"]))), ("sleeping", "cs_1", None), ("ready", "cs_1", None), ("updating", "cs_2", None), ("ready", "cs_2", Some(json!(["ready"]))), ("failed", "cs_3", Some(json!(["failed"])))] {
         a.code.report_environment(&id, Some(&at(state, head))).unwrap();
         assert_eq!(ev.next("preview").await.get("became").cloned(), became, "{state} at {head}");
+    }
+    // Regressed against main's preview: once a push too (more of them at the same head isn't new).
+    let regressed = |head: &str, total: u64| -> code_control::model::Preview {
+        serde_json::from_value(json!({ "state": "running", "url": null, "postgres": null, "redis": null, "error": null, "created_at": 1,
+            "environment": { "id": "pv_1", "slug": "s", "state": "ready", "services": [], "resources": [], "sleeping_usd_month": 0.0, "active_usd_hour": 0.0, "head": head,
+                "new_errors": { "branch": "main", "total": total, "errors": [] } } }))
+        .unwrap()
+    };
+    // Gone and back at that head (main's preview asleep, then awake): not said again.
+    for (head, total, became) in [("cs_4", 1, Some(json!(["ready", "regressions"]))), ("cs_4", 2, None), ("cs_4", 0, None), ("cs_4", 3, None)] {
+        a.code.report_environment(&id, Some(&regressed(head, total))).unwrap();
+        assert_eq!(ev.next("preview").await.get("became").cloned(), became, "{total} at {head}");
     }
     a.ok("DELETE", &format!("/v1/code/changes/{id}/preview"), None).await;
     assert_eq!(ev.next("preview").await, json!({ "change": id, "preview": null }));

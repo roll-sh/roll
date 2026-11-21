@@ -8,6 +8,9 @@ use crate::model::{Change, Check, Preview, RepoRow};
 use async_trait::async_trait;
 use std::path::Path;
 
+/// What `@roll preview …` asks of a change's preview.
+pub use code_review::commands::PreviewAction;
+
 /// Creates and tears down a change's preview.
 #[async_trait]
 pub trait PreviewBackend: Send + Sync {
@@ -19,6 +22,12 @@ pub trait PreviewBackend: Send + Sync {
     /// came in. Backends without one can't.
     async fn accept_visual(&self, _change: &Change, _by: &str, _head: &str) -> anyhow::Result<()> {
         anyhow::bail!("this preview backend has no visual review")
+    }
+    /// `by` (someone who can write to the change's repo: the caller checked) asks `action` of the
+    /// change's preview (`@roll preview …`): what was done, said for the answer. Backends without
+    /// one can't.
+    async fn act(&self, _change: &Change, _action: PreviewAction, _by: &str) -> anyhow::Result<String> {
+        anyhow::bail!("this change's previews can't be acted on from a comment")
     }
 }
 
@@ -39,6 +48,40 @@ pub trait Runner: Send + Sync {
     async fn remove_leftovers(&self) {}
 }
 
+/// Who asks for an environment's values, as rolld's gate put them on the request: roll secrets
+/// answers as it would a request of theirs to it.
+#[derive(Clone, Copy, Default)]
+pub struct Asker<'a> {
+    pub operator: bool,
+    pub user: Option<&'a roll_auth::SignedIn>,
+    pub grant: Option<&'a roll_auth::Grant>,
+}
+
+impl<'a> Asker<'a> {
+    pub fn on(ext: &'a axum::http::Extensions) -> Asker<'a> {
+        Asker { operator: roll_auth::Operator::on(ext), user: ext.get::<roll_auth::SignedIn>(), grant: roll_auth::Grant::on(ext) }
+    }
+}
+
+/// An environment's values, and who revealed them (roll secrets' principal: `usr_…`,
+/// `token:…`, `operator`).
+pub struct Revealed {
+    pub by: String,
+    pub values: Vec<(String, String)>,
+}
+
+/// The asker may not reveal what they asked for (a 403).
+#[derive(Debug)]
+pub struct Refused(pub String);
+
+impl std::fmt::Display for Refused {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for Refused {}
+
 /// An environment's secrets from roll secrets (docs/secrets.md, "Consumption"). Values come back
 /// resolved; the caller puts them in a process's environment and nowhere else (no records, no
 /// logs). Every read is in the project's audit log as `consumer`.
@@ -48,8 +91,10 @@ pub trait SecretEnv: Send + Sync {
     /// `owner/name` on its canvas. Refuses a protected environment and unresolved references.
     async fn for_repo(&self, repo: &str, environment: &str, consumer: &str) -> anyhow::Result<Vec<(String, String)>>;
     /// The same for workspace project `project` (an id or a name), which must have one of
-    /// `owner`'s repos on its canvas (sandboxes).
-    async fn for_owner(&self, owner: &str, project: &str, environment: &str, consumer: &str) -> anyhow::Result<Vec<(String, String)>>;
+    /// `owner`'s repos on its canvas (sandboxes), copied by `who`: they must be able to reveal
+    /// `environment` themselves ([`Refused`] when they can't). The audit row is `consumer` for
+    /// [`Revealed::by`].
+    async fn for_owner(&self, owner: &str, project: &str, environment: &str, consumer: &str, who: Asker<'_>) -> anyhow::Result<Revealed>;
     /// (candidate index, key, environment, folder) for every secret, in any environment of the
     /// projects that have repo `owner/name` on their canvas, whose value is one of `candidates`
     /// (matched by fingerprint; values never come back). Empty for a repo on no project's canvas.
@@ -60,4 +105,85 @@ pub trait SecretEnv: Send + Sync {
         let _ = (repo, keys);
         Ok(Vec::new())
     }
+    /// Where a credential found in a change of repo `owner/name` would be stored ("Store in
+    /// roll"): the project roll secrets trusts the repo for, as `asker` sees it, and its
+    /// environments, suggesting `prefer` (what the repo's `roll.toml` names) when it has it.
+    async fn store_target(&self, repo: &str, asker: &SecretsAsker, prefer: Option<&str>) -> crate::Result<StoreTarget> {
+        let _ = (repo, asker, prefer);
+        Err(crate::Error::Unprocessable("roll secrets isn't on this server".into()))
+    }
+    /// Store a credential read from a change as a new key, as `asker` (who needs `write` in the
+    /// folder): one change, or a change request where the folder needs approval.
+    async fn store(&self, repo: &str, asker: &SecretsAsker, credential: StoreCredential) -> crate::Result<StoredCredential> {
+        let _ = (repo, asker, credential);
+        Err(crate::Error::Unprocessable("roll secrets isn't on this server".into()))
+    }
+    /// Whether credentials a change of repo `owner/name` adds work, asked of their providers when
+    /// a project with the repo on its canvas has roll secrets' validity checks on (docs/secrets.md,
+    /// "Is it live?"): (value, the AWS secret access key next to an access key id) in, an answer
+    /// per credential (by fingerprint) out; empty when checks are off. Waits for the answers: call
+    /// it from background work. The values go nowhere but the providers.
+    async fn validity(&self, repo: &str, found: Vec<(String, Option<String>)>) -> anyhow::Result<Vec<crate::model::CredentialValidity>> {
+        let _ = (repo, found);
+        Ok(Vec::new())
+    }
+}
+
+/// Who asks roll secrets, as rolld's gate put them on the request: roll secrets decides with them
+/// as it would a request of its own (a roll-access grant first, then a signed-in person, then the
+/// operator).
+#[derive(Clone, Debug, Default)]
+pub struct SecretsAsker {
+    pub operator: bool,
+    pub user: Option<roll_auth::SignedIn>,
+    pub grant: Option<roll_auth::Grant>,
+}
+
+impl SecretsAsker {
+    pub fn of(ext: &axum::http::Extensions) -> SecretsAsker {
+        SecretsAsker { operator: roll_auth::Operator::on(ext), user: ext.get::<roll_auth::SignedIn>().cloned(), grant: roll_auth::Grant::on(ext).cloned() }
+    }
+}
+
+/// Where a found credential would go ([`SecretEnv::store_target`]).
+#[derive(Clone, Debug, PartialEq)]
+pub struct StoreTarget {
+    pub project: String,
+    pub project_name: String,
+    pub environments: Vec<String>,
+    /// The one to suggest; none when the project has neither `roll.toml`'s nor `development`.
+    pub environment: Option<String>,
+}
+
+/// A credential to store ([`SecretEnv::store`]).
+#[derive(Debug)]
+pub struct StoreCredential {
+    pub key: String,
+    /// None: [`StoreTarget::environment`].
+    pub environment: Option<String>,
+    pub prefer: Option<String>,
+    pub path: String,
+    pub value: CredentialValue,
+    pub message: String,
+}
+
+/// A credential's value on its way to roll secrets: never printed (`Debug` redacts it).
+pub struct CredentialValue(pub String);
+
+impl std::fmt::Debug for CredentialValue {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("CredentialValue(<redacted>)")
+    }
+}
+
+/// What [`SecretEnv::store`] did.
+#[derive(Clone, Debug, PartialEq)]
+pub struct StoredCredential {
+    pub project: String,
+    pub environment: String,
+    pub path: String,
+    /// The change's number in the environment.
+    pub change: Option<i64>,
+    /// The change request opened instead (where the folder needs approval).
+    pub request: Option<String>,
 }

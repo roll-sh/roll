@@ -3,6 +3,9 @@
 //! - `roll://guide`: how to use roll over MCP (ids, approvals, failures), a static page.
 //! - `roll://access/me`: what this connection may do, in words, read from `GET /v1/access`
 //!   through the gated router like any tool, so it can't drift from what the gate decides.
+//! - `roll://code/{owner}/{repo}/{+path}`: a file of a roll code repo on its default branch, read
+//!   through `code_read_file` as the caller (GitHub's server has repository contents as
+//!   resources), so a client can attach one.
 
 use roll_auth::scope::{Resources, Rule, Selector};
 use serde_json::{Value, json};
@@ -12,6 +15,9 @@ pub const GUIDE: &str = "roll://guide";
 pub const PROJECT_TEMPLATE: &str = "roll://projects/{project}";
 const PROJECT_PREFIX: &str = "roll://projects/";
 pub const ME: &str = "roll://access/me";
+/// A file of a roll code repo on its default branch: `{+path}` keeps its slashes (RFC 6570).
+pub const CODE_TEMPLATE: &str = "roll://code/{owner}/{repo}/{+path}";
+const CODE_PREFIX: &str = "roll://code/";
 /// The route `roll://access/me` reads.
 pub const ME_ROUTE: &str = "/v1/access";
 
@@ -46,7 +52,51 @@ pub fn templates(tools: &[String]) -> Value {
             "mimeType": "text/markdown",
         }));
     }
+    if tools.iter().any(|t| t == "code_read_file") {
+        out.push(json!({
+            "uriTemplate": CODE_TEMPLATE,
+            "name": "code-file",
+            "title": "A file in a roll code repo",
+            "description": "A file on a repo's default branch (roll://code/acme/api/src/main.rs), to attach as context.",
+            "mimeType": "text/plain",
+        }));
+    }
     json!(out)
+}
+
+/// The repo (`owner/name`) and path a `roll://code/…` URI names, when it's one: owner and repo
+/// are ids, and the path's segments are percent-decoded, never empty, `.` or `..`.
+pub fn code_file_of(uri: &str) -> Option<(String, String)> {
+    let (owner, rest) = uri.strip_prefix(CODE_PREFIX)?.split_once('/')?;
+    let (repo, path) = rest.split_once('/')?;
+    let named = |s: &str| crate::prompts::is_id(s) && !s.chars().all(|c| c == '.');
+    if !named(owner) || !named(repo) || path.len() > 1024 {
+        return None;
+    }
+    let mut segments = Vec::new();
+    for s in path.split('/') {
+        let s = percent_encoding::percent_decode_str(s).decode_utf8().ok()?;
+        if s.is_empty() || s == "." || s == ".." || s.contains(['/', '\0']) {
+            return None;
+        }
+        segments.push(s.into_owned());
+    }
+    Some((format!("{owner}/{repo}"), segments.join("/")))
+}
+
+/// A file's resource from `code_read_file`'s answer: its text, or what it is when it isn't text,
+/// and where to read on when it was cut.
+pub fn code_file(uri: &str, answer: &Value) -> Value {
+    let text = if answer["binary"] == true {
+        format!("(a binary file, {} bytes: not shown)", answer["size"])
+    } else {
+        let mut t = answer["content"].as_str().unwrap_or_default().to_string();
+        if answer["truncated"] == true {
+            t.push_str(&format!("\n\n(lines 1-{} of {}: code_read_file with start_line={} reads on)", answer["end_line"], answer["total_lines"], answer["end_line"].as_u64().unwrap_or(0) + 1));
+        }
+        t
+    };
+    json!({ "contents": [{ "uri": uri, "mimeType": "text/plain", "text": text }] })
 }
 
 /// The project id `uri` names (`roll://projects/prj_…`), when it's one: letters, digits, `_` and

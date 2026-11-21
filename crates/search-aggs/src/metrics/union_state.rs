@@ -14,7 +14,7 @@ use crate::metrics::simple::{java_max, java_min};
 use crate::metrics::tdigest::TDigest;
 
 /// `HistogramUnionState`.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct UnionState {
     pub tdigest: Option<TDigest>,
     pub exp: Option<Merger>,

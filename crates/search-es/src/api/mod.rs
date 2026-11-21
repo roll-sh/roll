@@ -141,10 +141,11 @@ handlers! { ctx;
     MsearchTemplate => crate::search::misc::msearch_template(ctx).await,
     Termvectors => crate::search::misc::termvectors(ctx),
     Mtermvectors => crate::search::misc::mtermvectors(ctx),
-    Scroll => crate::search::contexts::scroll(ctx),
-    ClearScroll => crate::search::contexts::clear_scroll(ctx),
-    OpenPointInTime => crate::search::contexts::open_pit(ctx),
-    ClosePointInTime => crate::search::contexts::close_pit(ctx),
+    // Boxed: those over linked remote clusters fan out to them.
+    Scroll => Box::pin(crate::remote::contexts::scroll(ctx)).await,
+    ClearScroll => Box::pin(crate::remote::contexts::clear_scroll(ctx)).await,
+    OpenPointInTime => Box::pin(crate::remote::contexts::open_pit(ctx)).await,
+    ClosePointInTime => Box::pin(crate::remote::contexts::close_pit(ctx)).await,
     Ping => root::ping(ctx),
     Capabilities => root::capabilities(ctx),
 

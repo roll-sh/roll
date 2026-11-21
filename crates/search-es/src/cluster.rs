@@ -113,8 +113,13 @@ pub struct ClusterConfig {
     /// `None`: remotes reach only the node itself.
     pub links: Option<std::sync::Arc<dyn crate::remote::links::Links>>,
     /// The cluster's id in roll's catalog (`srch_…`), when it has one: how it names itself to
-    /// `links`.
+    /// `links` and to [`Self::secret_refs`] (a name can be reused after a delete).
     pub catalog_id: Option<String>,
+    /// The parent's catalog id, on a new branch's first load only: what it inherited from the
+    /// parent is marked then, so its jobs don't act on the parent's outside storage or run twice
+    /// ([`crate::branch`]). Later loads, and branches made before marking existed, have none:
+    /// their jobs are their own.
+    pub branch_of: Option<String>,
     /// Read service account tokens from `<path.conf>/service_tokens` too, as Elasticsearch
     /// does. The file is the node's, so a token in it would sign in to every cluster the node
     /// serves: the host sets this only for a node serving one cluster, or for the clusters its
@@ -123,6 +128,9 @@ pub struct ClusterConfig {
     /// Where the cluster's security audit entries go ([`crate::xpack::security::audit`]);
     /// `None`: it records none.
     pub audit: Option<crate::xpack::security::audit::AuditLog>,
+    /// Resolves credentials given as references (`roll://ENV/KEY`, [`crate::secret_refs`]);
+    /// `None`: references are refused.
+    pub secret_refs: Option<crate::secret_refs::Resolver>,
 }
 
 impl ClusterConfig {
@@ -139,8 +147,10 @@ impl ClusterConfig {
             default_repository: None,
             links: None,
             catalog_id: None,
+            branch_of: None,
             file_service_tokens: false,
             audit: None,
+            secret_refs: None,
         }
     }
 
@@ -178,6 +188,8 @@ pub struct Cluster {
     pub scripts: Arc<crate::scripting::ScriptService>,
     /// Open scrolls and points in time.
     pub contexts: crate::search::contexts::Contexts,
+    /// Scrolls and points in time over linked remote clusters ([`crate::remote::contexts`]).
+    pub ccs_contexts: crate::remote::contexts::CcsContexts,
     /// Compiled ingest pipelines.
     pub ingest: crate::ingest::pipeline::Cache,
     /// In-memory state of the x-pack APIs (async results, verified credentials).
@@ -589,6 +601,7 @@ impl Cluster {
             engine: Default::default(),
             scripts: Default::default(),
             contexts: Default::default(),
+            ccs_contexts: Default::default(),
             ingest: Default::default(),
             xpack: Default::default(),
             breakers: Default::default(),

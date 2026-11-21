@@ -307,6 +307,21 @@ pub struct Expr {
     pub kind: ExprKind,
     pub start: usize,
     pub end: usize,
+    /// The tree's height: 1 for a leaf, one more than its tallest child otherwise.
+    pub h: usize,
+}
+
+impl Expr {
+    pub fn new(kind: ExprKind, start: usize, end: usize) -> Expr {
+        let below = match &kind {
+            ExprKind::Lit(_) | ExprKind::Col(_) | ExprKind::Star | ExprKind::Span(_) => 0,
+            ExprKind::Neg(e) | ExprKind::Not(e) | ExprKind::IsNull(e, _) | ExprKind::Like(e, ..) | ExprKind::Cast(e, _) => e.h,
+            ExprKind::Bin(_, l, r) => l.h.max(r.h),
+            ExprKind::In(e, list, _) => list.iter().map(|x| x.h).fold(e.h, usize::max),
+            ExprKind::Call(_, args) => args.iter().map(|x| x.h).max().unwrap_or(0),
+        };
+        Expr { kind, start, end, h: below + 1 }
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -479,13 +494,64 @@ struct P<'a> {
     i: usize,
     params: &'a [V],
     named: &'a [(String, V)],
+    /// `FROM` subqueries around the command being parsed.
+    subqueries: usize,
 }
+
+/// `ExpressionBuilder.MAX_EXPRESSION_DEPTH` (and `EsqlParser`'s pre-scan). Parsing recurses
+/// once per parenthesis, `NOT` or sign, and the planner, the evaluator and dropping the tree
+/// recurse once per level of the tree: a stack overflow aborts the whole node, so both are
+/// bounded, as Elasticsearch bounds them (more than this is refused).
+const MAX_EXPRESSION_DEPTH: usize = 300;
+
+fn too_deep_at(src: &str, at: usize) -> EsError {
+    parse_error(src, at, &format!("ES|QL statement exceeded the maximum expression depth allowed ({MAX_EXPRESSION_DEPTH})"))
+}
+
+/// `EsqlParser`'s pre-scan of the tokens, before anything parses: parentheses nest, and a run
+/// of `NOT`s or signs adds to the nesting it is in.
+fn prescan(src: &str, toks: &[Token]) -> EsResult<()> {
+    let (mut parens, mut run, mut operand) = (0usize, 0usize, false);
+    for t in toks {
+        match &t.tok {
+            Tok::Op("(") => (parens, run, operand) = (parens + 1, 0, false),
+            Tok::Op(")") => (parens, run, operand) = (parens.saturating_sub(1), 0, true),
+            Tok::Ident(k) if k.eq_ignore_ascii_case("NOT") => (run, operand) = (run + 1, false),
+            Tok::Op("-" | "+") if !operand => run += 1,
+            other => (run, operand) = (0, matches!(other, Tok::Ident(_) | Tok::Quoted(_) | Tok::Str(_) | Tok::Int(_) | Tok::Dec(_) | Tok::Param(_) | Tok::Op("]" | "}"))),
+        }
+        if parens + run > MAX_EXPRESSION_DEPTH {
+            return Err(too_deep_at(src, t.start));
+        }
+    }
+    Ok(())
+}
+
+/// Subqueries (and views, which run as subqueries) nested in one another: each level runs as a
+/// nested query on the request's stack. roll's own limit.
+pub(super) const MAX_NESTED_QUERIES: usize = 16;
 
 fn kw(t: &Tok, k: &str) -> bool {
     matches!(t, Tok::Ident(s) if s.eq_ignore_ascii_case(k))
 }
 
 impl<'a> P<'a> {
+    /// `e`, unless its tree is taller than Elasticsearch allows (each chained operator is a
+    /// level: `a + b + c` is as tall as it is long).
+    fn tall(&self, e: Expr) -> EsResult<Expr> {
+        if e.h > MAX_EXPRESSION_DEPTH {
+            return Err(too_deep_at(self.src, e.start));
+        }
+        Ok(e)
+    }
+
+    /// Parses one nesting level deeper (on a fresh stack segment when this one runs low; the
+    /// pre-scan bounds how deep).
+    fn nest(&mut self, f: impl FnOnce(&mut Self) -> EsResult<Expr>) -> EsResult<Expr> {
+        let e = crate::stack::maybe_grow(|| f(self))?;
+        self.tall(e)
+    }
+
     fn peek(&self) -> &Token {
         &self.toks[self.i]
     }
@@ -592,6 +658,16 @@ impl<'a> P<'a> {
 
     /// The query inside a `FROM` subquery, after its `(`, up to and including its `)`.
     fn subquery(&mut self) -> EsResult<Vec<Cmd>> {
+        if self.subqueries >= MAX_NESTED_QUERIES {
+            return Err(parse_error(self.src, self.peek().start, &format!("views and subqueries nest deeper than {MAX_NESTED_QUERIES} levels")));
+        }
+        self.subqueries += 1;
+        let r = crate::stack::maybe_grow(|| self.subquery_cmds());
+        self.subqueries -= 1;
+        r
+    }
+
+    fn subquery_cmds(&mut self) -> EsResult<Vec<Cmd>> {
         let first = self.command()?;
         if !matches!(first, Cmd::From { .. } | Cmd::Ts { .. } | Cmd::Row(_) | Cmd::Show(_) | Cmd::Union { .. }) {
             return Err(parse_error(self.src, 0, "mismatched input expecting {'from', 'row', 'show'}"));
@@ -678,10 +754,12 @@ impl<'a> P<'a> {
                 let mut branches = Vec::new();
                 while self.is_op("(") {
                     self.bump();
-                    let mut cmds = vec![self.processing()?];
+                    // A branch may hold another `FORK` (refused once parsed): the pre-scan
+                    // bounds how deep.
+                    let mut cmds = vec![crate::stack::maybe_grow(|| self.processing())?];
                     while matches!(self.peek().tok, Tok::Pipe) {
                         self.bump();
-                        cmds.push(self.processing()?);
+                        cmds.push(crate::stack::maybe_grow(|| self.processing())?);
                     }
                     self.expect_op(")")?;
                     branches.push(cmds);
@@ -829,7 +907,7 @@ impl<'a> P<'a> {
                     // lookup index's).
                     fn relates(e: &Expr) -> bool {
                         match &e.kind {
-                            ExprKind::Bin(BinOp::And, a, b) => relates(a) || relates(b),
+                            ExprKind::Bin(BinOp::And, a, b) => crate::stack::maybe_grow(|| relates(a)) || crate::stack::maybe_grow(|| relates(b)),
                             ExprKind::Bin(BinOp::Eq | BinOp::Neq | BinOp::Lt | BinOp::Lte | BinOp::Gt | BinOp::Gte, a, b) => matches!((&a.kind, &b.kind), (ExprKind::Col(_), ExprKind::Col(_))),
                             _ => false,
                         }
@@ -983,7 +1061,7 @@ impl<'a> P<'a> {
             if self.eat_kw("WHERE") {
                 let cond = self.expr()?;
                 let (start, end) = (expr.start, cond.end);
-                expr = Expr { kind: ExprKind::Call("$where".into(), vec![expr, cond]), start, end };
+                expr = Expr::new(ExprKind::Call("$where".into(), vec![expr, cond]), start, end);
             }
             out.push(Named { name, expr });
             if !self.eat_op(",") {
@@ -1018,7 +1096,8 @@ impl<'a> P<'a> {
     }
 
     fn expr(&mut self) -> EsResult<Expr> {
-        self.or()
+        let e = self.or()?;
+        self.tall(e)
     }
 
     /// The right operand of a binary operator whose left operand starts at `left`: a token that
@@ -1041,7 +1120,7 @@ impl<'a> P<'a> {
         let mut l = self.and()?;
         while self.eat_kw("OR") {
             let r = self.and()?;
-            l = bin(BinOp::Or, l, r);
+            l = self.tall(bin(BinOp::Or, l, r))?;
         }
         Ok(l)
     }
@@ -1050,7 +1129,7 @@ impl<'a> P<'a> {
         let mut l = self.not()?;
         while self.eat_kw("AND") {
             let r = self.not()?;
-            l = bin(BinOp::And, l, r);
+            l = self.tall(bin(BinOp::And, l, r))?;
         }
         Ok(l)
     }
@@ -1058,9 +1137,9 @@ impl<'a> P<'a> {
     fn not(&mut self) -> EsResult<Expr> {
         let start = self.peek().start;
         if self.eat_kw("NOT") {
-            let e = self.not()?;
+            let e = self.nest(Self::not)?;
             let end = e.end;
-            return Ok(Expr { kind: ExprKind::Not(Box::new(e)), start, end });
+            return Ok(Expr::new(ExprKind::Not(Box::new(e)), start, end));
         }
         self.predicate()
     }
@@ -1075,7 +1154,7 @@ impl<'a> P<'a> {
                 return Err(self.mismatch("{'not', 'null'}"));
             }
             let end = self.toks[self.i - 1].end;
-            return Ok(Expr { kind: ExprKind::IsNull(Box::new(l), neg), start, end });
+            return Ok(Expr::new(ExprKind::IsNull(Box::new(l), neg), start, end));
         }
         let neg = if self.is_kw("NOT") && (kw(&self.toks[self.i + 1].tok, "LIKE") || kw(&self.toks[self.i + 1].tok, "RLIKE") || kw(&self.toks[self.i + 1].tok, "IN")) {
             self.bump();
@@ -1129,16 +1208,16 @@ impl<'a> P<'a> {
             }
             let mut it = pats.into_iter();
             let (p, _) = it.next().expect("one pattern");
-            let mut e = Expr { kind: ExprKind::Like(Box::new(l.clone()), p, rlike, false), start, end };
+            let mut e = Expr::new(ExprKind::Like(Box::new(l.clone()), p, rlike, false), start, end);
             for (p, _) in it {
-                let next = Expr { kind: ExprKind::Like(Box::new(l.clone()), p, rlike, false), start, end };
-                e = Expr { kind: ExprKind::Bin(BinOp::Or, Box::new(e), Box::new(next)), start, end };
+                let next = Expr::new(ExprKind::Like(Box::new(l.clone()), p, rlike, false), start, end);
+                e = self.tall(Expr::new(ExprKind::Bin(BinOp::Or, Box::new(e), Box::new(next)), start, end))?;
             }
             if neg {
                 if let ExprKind::Like(_, _, _, n) = &mut e.kind {
                     *n = true;
                 } else {
-                    e = Expr { kind: ExprKind::Not(Box::new(e)), start, end };
+                    e = Expr::new(ExprKind::Not(Box::new(e)), start, end);
                 }
             }
             return Ok(e);
@@ -1147,14 +1226,14 @@ impl<'a> P<'a> {
             self.expect_op("(")?;
             let mut list = Vec::new();
             loop {
-                list.push(self.expr()?);
+                list.push(self.nest(Self::expr)?);
                 if !self.eat_op(",") {
                     break;
                 }
             }
             let end = self.peek().end;
             self.expect_op(")")?;
-            return Ok(Expr { kind: ExprKind::In(Box::new(l), list, neg), start, end });
+            return Ok(Expr::new(ExprKind::In(Box::new(l), list, neg), start, end));
         }
         Ok(l)
     }
@@ -1173,7 +1252,7 @@ impl<'a> P<'a> {
                 self.bump();
                 let r = self.additive()?;
                 let (start, end) = (l.start, r.end);
-                return Ok(Expr { kind: ExprKind::Call("match_operator".into(), vec![l, r]), start, end });
+                return Ok(Expr::new(ExprKind::Call("match_operator".into(), vec![l, r]), start, end));
             }
             _ => return Ok(l),
         };
@@ -1192,7 +1271,7 @@ impl<'a> P<'a> {
             };
             self.bump();
             let r = self.operand(l.start, Self::multiplicative)?;
-            l = bin(op, l, r);
+            l = self.tall(bin(op, l, r))?;
         }
     }
 
@@ -1207,28 +1286,28 @@ impl<'a> P<'a> {
             };
             self.bump();
             let r = self.operand(l.start, Self::unary)?;
-            l = bin(op, l, r);
+            l = self.tall(bin(op, l, r))?;
         }
     }
 
     fn unary(&mut self) -> EsResult<Expr> {
         let start = self.peek().start;
         if self.eat_op("-") {
-            let e = self.unary()?;
+            let e = self.nest(Self::unary)?;
             let end = e.end;
             if let ExprKind::Lit(V::Long(n)) = e.kind {
-                return Ok(Expr { kind: ExprKind::Lit(V::Long(-n)), start, end });
+                return Ok(Expr::new(ExprKind::Lit(V::Long(-n)), start, end));
             }
             if let ExprKind::Lit(V::Int(n)) = e.kind {
-                return Ok(Expr { kind: ExprKind::Lit(V::Int(-n)), start, end });
+                return Ok(Expr::new(ExprKind::Lit(V::Int(-n)), start, end));
             }
             if let ExprKind::Lit(V::Double(n)) = e.kind {
-                return Ok(Expr { kind: ExprKind::Lit(V::Double(-n)), start, end });
+                return Ok(Expr::new(ExprKind::Lit(V::Double(-n)), start, end));
             }
-            return Ok(Expr { kind: ExprKind::Neg(Box::new(e)), start, end });
+            return Ok(Expr::new(ExprKind::Neg(Box::new(e)), start, end));
         }
         if self.eat_op("+") {
-            return self.unary();
+            return self.nest(Self::unary);
         }
         let mut e = self.primary()?;
         while self.eat_op("::") {
@@ -1246,10 +1325,10 @@ impl<'a> P<'a> {
             if let (ExprKind::Lit(V::Str(text)), "date_period" | "time_duration") = (&e.kind, ty.as_str())
                 && let Some(span) = span_text(text)
             {
-                e = Expr { kind: ExprKind::Span(span), start, end };
+                e = Expr::new(ExprKind::Span(span), start, end);
                 continue;
             }
-            e = Expr { kind: ExprKind::Cast(Box::new(e), ty), start, end };
+            e = self.tall(Expr::new(ExprKind::Cast(Box::new(e), ty), start, end))?;
         }
         Ok(e)
     }
@@ -1263,7 +1342,7 @@ impl<'a> P<'a> {
             loop {
                 let t = self.bump();
                 let Tok::Str(k) = t.tok else { return Err(parse_error(self.src, t.start, &format!("mismatched input '{}' expecting QUOTED_STRING", self.token_text(&t)))) };
-                pairs.push(Expr { kind: ExprKind::Lit(V::Str(k)), start: t.start, end: t.end });
+                pairs.push(Expr::new(ExprKind::Lit(V::Str(k)), t.start, t.end));
                 self.expect_op(":")?;
                 pairs.push(self.unary()?);
                 if !self.eat_op(",") {
@@ -1273,12 +1352,16 @@ impl<'a> P<'a> {
         }
         let end = self.peek().end;
         self.expect_op("}")?;
-        Ok(Expr { kind: ExprKind::Call("$map".into(), pairs), start, end })
+        Ok(Expr::new(ExprKind::Call("$map".into(), pairs), start, end))
     }
 
     fn primary(&mut self) -> EsResult<Expr> {
+        self.nest(Self::primary_at)
+    }
+
+    fn primary_at(&mut self) -> EsResult<Expr> {
         let t = self.peek().clone();
-        let lit = |v: V| Expr { kind: ExprKind::Lit(v), start: t.start, end: t.end };
+        let lit = |v: V| Expr::new(ExprKind::Lit(v), t.start, t.end);
         match &t.tok {
             Tok::Int(n) => {
                 self.bump();
@@ -1288,7 +1371,7 @@ impl<'a> P<'a> {
                 {
                     let u = self.bump();
                     let text = format!("{n} {}", self.src[u.start..u.end].to_ascii_lowercase());
-                    return Ok(Expr { kind: ExprKind::Span(text), start: t.start, end: u.end });
+                    return Ok(Expr::new(ExprKind::Span(text), t.start, u.end));
                 }
                 Ok(lit(if let Ok(i) = i32::try_from(*n) { V::Int(i) } else { V::Long(*n) }))
             }
@@ -1309,7 +1392,7 @@ impl<'a> P<'a> {
                 }
                 let end = self.peek().end;
                 self.expect_op("]")?;
-                Ok(Expr { kind: ExprKind::Lit(if vals.is_empty() { V::Null } else { V::Multi(vals) }), start: t.start, end })
+                Ok(Expr::new(ExprKind::Lit(if vals.is_empty() { V::Null } else { V::Multi(vals) }), t.start, end))
             }
             Tok::Dec(d) => {
                 self.bump();
@@ -1374,7 +1457,7 @@ impl<'a> P<'a> {
                     let mut args = Vec::new();
                     if self.is_op("*") {
                         let s = self.bump();
-                        args.push(Expr { kind: ExprKind::Star, start: s.start, end: s.end });
+                        args.push(Expr::new(ExprKind::Star, s.start, s.end));
                     } else if !self.is_op(")") {
                         loop {
                             if self.is_op("{") {
@@ -1389,11 +1472,11 @@ impl<'a> P<'a> {
                     }
                     let end = self.peek().end;
                     self.expect_op(")")?;
-                    return Ok(Expr { kind: ExprKind::Call(name.to_ascii_lowercase(), args), start: t.start, end });
+                    return Ok(Expr::new(ExprKind::Call(name.to_ascii_lowercase(), args), t.start, end));
                 }
                 let (name, _) = self.qualified()?;
                 let end = self.toks[self.i - 1].end;
-                Ok(Expr { kind: ExprKind::Col(name), start: t.start, end })
+                Ok(Expr::new(ExprKind::Col(name), t.start, end))
             }
             _ => Err(self.mismatch(EXPRESSION)),
         }
@@ -1413,7 +1496,7 @@ fn grok(src: &str, pattern: &str, at: usize) -> EsResult<search_painless::grok::
 
 fn bin(op: BinOp, l: Expr, r: Expr) -> Expr {
     let (start, end) = (l.start, r.end);
-    Expr { kind: ExprKind::Bin(op, Box::new(l), Box::new(r)), start, end }
+    Expr::new(ExprKind::Bin(op, Box::new(l), Box::new(r)), start, end)
 }
 
 /// The name of an unnamed output: its source text (columns by their name).
@@ -1473,6 +1556,7 @@ pub fn parse_with(src: &str, all: &[(Option<String>, Param)]) -> EsResult<Query>
 
 fn parse_tokens(src: &str, all: &[(Option<String>, Param)]) -> EsResult<Query> {
     let mut toks = lex(src)?;
+    prescan(src, &toks)?;
     let mut next = 0usize;
     let mut positional: Vec<V> = Vec::with_capacity(all.len());
     for (_, p) in all {
@@ -1510,7 +1594,7 @@ fn parse_tokens(src: &str, all: &[(Option<String>, Param)]) -> EsResult<Query> {
     let named = named_values;
     let params = &positional[..];
     let named = &named[..];
-    let mut p = P { src, toks, i: 0, params, named };
+    let mut p = P { src, toks, i: 0, params, named, subqueries: 0 };
     let mut settings = Settings::default();
     // Settings are validated once the whole query parses (syntax errors come first).
     let mut sets: Vec<(usize, String, SetValue)> = Vec::new();

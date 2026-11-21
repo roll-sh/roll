@@ -56,6 +56,9 @@ pub enum ControlError {
     /// A request body over the limit (HTTP 413).
     #[error("{0}")]
     TooLarge(String),
+    /// Refused to this caller (HTTP 403): roll secrets wouldn't let them reveal a reference.
+    #[error("{0}")]
+    Forbidden(String),
     #[error(transparent)]
     Internal(#[from] anyhow::Error),
 }
@@ -118,8 +121,8 @@ pub struct SearchConfig {
     pub defaults: Defaults,
     pub pricing: Pricing,
     /// Seals the secrets clusters store (watch passwords, connector and Fleet secrets, `s3`
-    /// repository credentials) under the deployment's key (rolld: `ROLL_SECRET_KEY`); `None`:
-    /// stored as given.
+    /// repository credentials) and clusters' own passwords in the catalog under the deployment's
+    /// key (rolld: `ROLL_SECRET_KEY`); `None`: stored as given.
     pub sealer: Option<Arc<search_es::seal::Sealer>>,
     /// The name every cluster's default snapshot repository has (`found-snapshots`, as on
     /// Elastic Cloud): an `s3` repository on roll's own object storage, so `_snapshot` and
@@ -347,6 +350,9 @@ pub fn spec_for(c: &SearchCluster) -> ClusterSpec {
     spec.destructive_requires_name = c.destructive_requires_name;
     spec.ip_allowlist = allowlist_of(&c.ip_allowlist);
     spec.catalog_id = Some(c.id.clone());
+    // Only until its first load has marked what it inherited: a branch made before marking
+    // existed, or one already marked, runs its jobs as its own.
+    spec.branch_of = c.parent_id.clone().filter(|_| c.inherit_pending);
     spec
 }
 
@@ -425,10 +431,17 @@ const OS_KEY_PREFIX: &str = "roll-key-";
 
 /// A link's credential ([`Control::mint_link`]): its variables (unprefixed) and what revoking
 /// it takes.
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct LinkCredential {
     pub vars: Vec<(String, String)>,
     pub kept: String,
+}
+
+impl std::fmt::Debug for LinkCredential {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let vars: Vec<_> = self.vars.iter().map(|(k, _)| (k.as_str(), "<redacted>")).collect();
+        f.debug_struct("LinkCredential").field("vars", &vars).field("kept", &self.kept).finish()
+    }
 }
 
 /// `spec` with a secret nobody knows.
@@ -503,7 +516,10 @@ pub struct Control {
     pub data: search_store::Store,
     pub meter: Arc<Meter>,
     /// Wakes in progress and clusters being deleted ([`crate::wake`]).
-    wakes: Arc<Wakes>,
+    pub(crate) wakes: Arc<Wakes>,
+    /// One query suggestions build at a time per index (`crate::suggestions`), by cluster id and
+    /// index.
+    pub(crate) suggest_locks: Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
     /// Serializes changes of a cluster's description with applying it to the node, so the node
     /// never ends up with an older one than the catalog's.
     specs: tokio::sync::Mutex<()>,
@@ -516,6 +532,8 @@ pub struct Control {
     refreshed: Mutex<HashMap<String, i64>>,
     /// The roll-cluster fleet this node serves clusters in ([`Control::join`]).
     leases: OnceLock<Arc<crate::cluster::ClusterLeases>>,
+    /// Resolves snapshot repositories' credential references ([`Control::set_secrets`]).
+    secret_refs: Arc<crate::secret_refs::CatalogRefs>,
 }
 
 impl Control {
@@ -540,6 +558,9 @@ impl Control {
             (None, Some(url)) => Arc::new(Store::postgres(url, code_sql::PgOptions { max_connections: cfg.catalog_connections.max(1), ..Default::default() })?),
             (None, None) => Arc::new(Store::open(&cfg.home.join("search.db"))?),
         };
+        if let Some(s) = &cfg.sealer {
+            store.seal_passwords(s.clone());
+        }
         let scfg = StoreConfig {
             node: cfg.node_name.clone(),
             wal: WalConfig { sync_objects: cfg.sync_objects, ..WalConfig::default() },
@@ -556,6 +577,7 @@ impl Control {
         let meter = Meter::new(store.clone());
         let wakes = Arc::new(Wakes::default());
         let hooks = Arc::new(ControlHooks { meter: MeterHooks(meter.clone()), wakes: wakes.clone(), control: OnceLock::new() });
+        let secret_refs = Arc::new(crate::secret_refs::CatalogRefs { store: store.clone(), secrets: OnceLock::new() });
         let links = Arc::new(crate::remotes::ControlLinks::new(cfg.domain.clone()));
         let node = Node::with_hooks(
             Arc::new(SqlCatalog { store: store.clone(), wakes: wakes.clone() }),
@@ -571,6 +593,7 @@ impl Control {
                 default_repository: cfg.default_repository.clone(),
                 links: Some(links.clone()),
                 audit: cfg.audit.clone(),
+                secret_refs: Some(search_es::secret_refs::Resolver(secret_refs.clone())),
                 ..NodeConfig::default()
             },
             hooks.clone(),
@@ -582,12 +605,14 @@ impl Control {
             data,
             meter,
             wakes,
+            suggest_locks: Mutex::new(HashMap::new()),
             specs: tokio::sync::Mutex::new(()),
             reloads: Mutex::new(HashSet::new()),
             reloader: AtomicBool::new(false),
             me: OnceLock::new(),
             refreshed: Mutex::new(HashMap::new()),
             leases: OnceLock::new(),
+            secret_refs,
         });
         // Nothing can load before the node is handed out, so the hook always finds the control.
         let _ = hooks.control.set(Arc::downgrade(&control));
@@ -663,6 +688,7 @@ impl Control {
                     }
                     Err(e) => tracing::warn!(error = %e, "listing search clusters with due jobs failed"),
                 }
+                c.wake_for_suggestions().await;
             }
         });
     }
@@ -683,7 +709,20 @@ impl Control {
         }
     }
 
+    /// Whether this node is the one to wake sleeping cluster `name` for its background work:
+    /// always on a single node; on a fleet, the node its lease is placed on.
+    pub(crate) fn wakes_here(&self, name: &str) -> bool {
+        self.cluster_leases().is_none_or(|l| l.cluster().preferred(&crate::cluster::key(name)).is_some_and(|n| n.id == l.cluster().node_id()))
+    }
+
     /// The fleet's leases, when this node is in one ([`Control::join`]).
+    /// Lets snapshot repositories name roll secrets references (`roll://ENV/KEY`) as
+    /// credentials, resolved by `secrets` ([`crate::secret_refs`]). Once; until then (and
+    /// without it) references are refused.
+    pub fn set_secrets(&self, secrets: Arc<dyn crate::secret_refs::ResourceSecrets>) {
+        let _ = self.secret_refs.secrets.set(secrets);
+    }
+
     pub fn cluster_leases(&self) -> Option<&Arc<crate::cluster::ClusterLeases>> {
         self.leases.get()
     }
@@ -817,6 +856,7 @@ impl Control {
             owner: None,
             restored_at: None,
             ip_allowlist: Vec::new(),
+            inherit_pending: false,
         }
     }
 
@@ -899,6 +939,8 @@ impl Control {
                 password_rotated_at: None,
                 parent_id: Some(p.id.clone()),
                 parent_at: Some(at.unwrap_or(now).min(now)),
+                // Its first load marks what it inherits (`search_es::branch`).
+                inherit_pending: true,
                 ..p.clone()
             },
             o,
@@ -1512,6 +1554,13 @@ impl Control {
     /// limits apply and it wakes the cluster like any client). On a fleet it runs on the node that
     /// owns the cluster: here, or sent there (an in-process caller on any node, as apps' links).
     pub(crate) async fn call(&self, c: &SearchCluster, mut req: EsRequest) -> EsResponse {
+        // Who wrote a repository's references is said only by `put_repository`, never by a
+        // request relayed here (the console's headers are the caller's).
+        req.headers.retain(|(k, _)| !k.eq_ignore_ascii_case(search_es::secret_refs::MAKER_HEADER));
+        self.call_as_roll(c, req).await
+    }
+
+    async fn call_as_roll(&self, c: &SearchCluster, mut req: EsRequest) -> EsResponse {
         req.headers.retain(|(k, _)| {
             !k.eq_ignore_ascii_case("authorization") && !k.eq_ignore_ascii_case("host") && !k.eq_ignore_ascii_case(search_es::remote::links::REMOTE_ACCESS_HEADER)
         });
@@ -1529,6 +1578,53 @@ impl Control {
             return resp;
         }
         self.node.handle(req).await
+    }
+
+    /// `PUT _snapshot/{name}` on cluster `id` with `body` (Elasticsearch's), its roll secrets
+    /// references (`roll://…` credential settings) written by `who`: roll secrets must let them
+    /// reveal each one (else [`ControlError::Forbidden`]), and the repository keeps them as its
+    /// maker, re-checked before every use ([`crate::secret_refs`]). The answer's status, content
+    /// type and body, unchanged.
+    pub async fn put_repository(&self, id: &str, name: &str, query: Option<&str>, body: bytes::Bytes, who: &crate::secret_refs::Who) -> Result<(u16, String, bytes::Bytes)> {
+        let c = self.get(id).await?;
+        let v: serde_json::Value = serde_json::from_slice(&body).map_err(|e| ControlError::Invalid(format!("invalid body: {e}")))?;
+        let ty = v["type"].as_str().unwrap_or_default();
+        let settings = v["settings"].as_object();
+        // Whether a setting is a reference is roll secrets' parser's to say: exactly `roll://…` is
+        // one, anything written like one but not exactly is refused, never kept as a value.
+        let mut refs: Vec<&str> = Vec::new();
+        for k in search_es::api::snapshots::credential_settings(ty) {
+            let Some(v) = settings.and_then(|s| s.get(*k)).and_then(serde_json::Value::as_str) else { continue };
+            match crate::secret_refs::classify(v) {
+                search_es::secret_refs::Setting::Value => {}
+                search_es::secret_refs::Setting::Reference => refs.push(v),
+                search_es::secret_refs::Setting::Malformed(why) => {
+                    return Err(ControlError::Invalid(format!("[{k}] is written like a roll secrets reference but isn't one: {why}")));
+                }
+            }
+        }
+        let mut maker = None;
+        if !refs.is_empty() {
+            let (holder, secrets) = self.secret_refs.holder(&c.id, "").await.map_err(ControlError::Invalid)?;
+            for r in refs {
+                let by = secrets.may_write(who, &holder, r).await.map_err(|e| match e {
+                    crate::secret_refs::Refused::Forbidden(m) => ControlError::Forbidden(format!("{r}: {m}")),
+                    crate::secret_refs::Refused::Invalid(m) => ControlError::Invalid(format!("{r}: {m}")),
+                })?;
+                maker = Some(by);
+            }
+        }
+        let uri = match query.filter(|q| !q.is_empty()) {
+            Some(q) => format!("/_snapshot/{}?{q}", urlencoding::encode(name)),
+            None => format!("/_snapshot/{}", urlencoding::encode(name)),
+        };
+        let mut req = EsRequest::json("PUT", &uri, body);
+        if let Some(m) = maker {
+            req.headers.push((search_es::secret_refs::MAKER_HEADER.into(), m));
+        }
+        let resp = self.call_as_roll(&c, req).await;
+        let ct = resp.header("content-type").unwrap_or("application/json").to_string();
+        Ok((resp.status, ct, resp.body))
     }
 
     /// One Elasticsearch request on cluster `id` as its owner narrowed to the index names of
@@ -1987,6 +2083,8 @@ impl Control {
                 self.meter.mark_dirty(&name);
             }
         }
+        // After the analytics above are in the catalog.
+        Box::pin(self.run_suggestions()).await;
         Ok(())
     }
 
@@ -2192,6 +2290,7 @@ mod tests {
             owner: None,
             restored_at: None,
             ip_allowlist: vec![IpRule { cidr: "203.0.113.0/24".into(), description: None }],
+            inherit_pending: false,
         };
         let s = spec_for(&c);
         assert!(s.ip_allowlist.contains("::ffff:203.0.113.9".parse().unwrap()) && !s.ip_allowlist.is_open());

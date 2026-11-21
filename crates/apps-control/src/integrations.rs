@@ -131,11 +131,48 @@ pub trait SecretSource: Send + Sync {
         self.digest(project, env).await
     }
 
+    /// A variable's `roll://ENV[/folder…]/KEY` value (`env`'s own) for `service`: read as the
+    /// service each deploy (roll secrets' `resolve_for`, audited as it), never kept. An error
+    /// fails the deploy (a preview's is left out). By default there's nothing to read it from.
+    async fn resolve_ref(&self, _project: &str, _env: &str, _service: &str, reference: &str) -> anyhow::Result<String> {
+        anyhow::bail!("{reference}: no roll secrets here to read it from")
+    }
+
     /// The project's `env` made in the store if it's missing (an apps environment named
     /// something roll secrets doesn't start with, `qa`), so its secrets have somewhere to go.
     /// Idempotent; never called for a preview's (previews make those, with their base).
     async fn ensure(&self, _project: &str, _env: &str) -> anyhow::Result<()> {
         Ok(())
+    }
+    /// A token of roll's OIDC issuer for one instance of `service` in `env` (`sub =
+    /// roll-apps:<project>:<service>:<env>`), for `aud`, living `ttl` (an hour at most): what
+    /// clouds' federation and roll secrets' workload logins trust (docs/secrets.md, "roll's tokens
+    /// for other products"). An error when the project doesn't stand for the service. None: no
+    /// issuer here.
+    async fn issue(&self, _project: &str, _service: &str, _env: &str, _aud: &str, _ttl: std::time::Duration) -> anyhow::Result<Option<String>> {
+        Ok(None)
+    }
+    /// Bind `reference` (a `roll://` of another environment) to `who`, who writes it into
+    /// `service`'s variables: refused unless they may reveal it there now. What to keep beside it
+    /// (roll secrets' maker: who chose it, never a credential).
+    async fn bind_ref(&self, _who: Asker<'_>, _project: &str, _service: &str, _reference: &str) -> anyhow::Result<String> {
+        anyhow::bail!("roll secrets isn't on this node")
+    }
+    /// [`SecretSource::bind_ref`] for a reference the service's runtime reads in `runtime_env` (a Git
+    /// login's token): a sensitive key there is allowed. The caller's `deploy` on the service is
+    /// the gate's (roll-access: a Git login naming a secret is deploy).
+    async fn bind_ref_runtime(&self, _who: Asker<'_>, _project: &str, _service: &str, _reference: &str, _runtime_env: &str) -> anyhow::Result<String> {
+        anyhow::bail!("roll secrets isn't on this node")
+    }
+    /// The digest of the folder a bound reference reads, as `maker` may now (no value, not
+    /// audited): what marks the environment as needing a deploy when it changes.
+    async fn digest_as(&self, _project: &str, _env: &str, _service: &str, _reference: &str, _maker: &str) -> anyhow::Result<String> {
+        anyhow::bail!("roll secrets isn't on this node")
+    }
+    /// `reference`'s value for `service` deployed in `env`, read as `maker` may now (each read
+    /// checks again that they can sign in, reach the project and reveal the folder).
+    async fn resolve_as(&self, _project: &str, _env: &str, _service: &str, _reference: &str, _maker: &str) -> anyhow::Result<String> {
+        anyhow::bail!("roll secrets isn't on this node")
     }
 }
 
@@ -259,6 +296,15 @@ pub trait Visitors: Send + Sync {
     fn session_live(&self, user: &str, session: &str) -> bool;
 }
 
+/// A model that reads a failed deployment (rolld: the owner of the service's roll code repo's
+/// provider, through roll code, metered on their account). Unset: nothing is explained.
+#[async_trait]
+pub trait Explainer: Send + Sync {
+    /// Ask `repo`'s (`owner/name`) owner's model; the answer follows `schema`. `None`: it gave
+    /// none (declined, cut off). The answer and the model's name are untrusted.
+    async fn ask(&self, repo: &str, system: &str, user: &str, schema: &serde_json::Value) -> crate::Result<Option<(serde_json::Value, String)>>;
+}
+
 /// Email to a person through their account (rolld fills it with roll-accounts' mailer). Unset or
 /// off: no email targets.
 #[async_trait]
@@ -330,6 +376,36 @@ pub trait Resources: Send + Sync {
     async fn backlog(&self, _stream: &str, _group: &str) -> anyhow::Result<u64> {
         anyhow::bail!("roll streams isn't on this node")
     }
+    /// The next records of `topic` for `group`'s `consumer` (a server-managed group, offsets
+    /// committed by [`Resources::commit`] only), waiting up to `wait_ms` for one: what
+    /// `run.push` delivers. Each partition's records in order.
+    async fn read_group(&self, _stream: &str, _topic: &str, _group: &str, _consumer: &str, _wait_ms: u64, _limit: usize) -> anyhow::Result<Vec<StreamRecord>> {
+        anyhow::bail!("roll streams isn't on this node")
+    }
+    /// Commit `group`'s offset on a partition: `offset` is the next record to deliver.
+    async fn commit(&self, _stream: &str, _topic: &str, _group: &str, _consumer: &str, _partition: i32, _offset: i64) -> anyhow::Result<()> {
+        anyhow::bail!("roll streams isn't on this node")
+    }
+    /// `consumer` leaves `group`: its partitions are free for another at once.
+    async fn leave(&self, _stream: &str, _group: &str, _consumer: &str) -> anyhow::Result<()> {
+        Ok(())
+    }
+    /// Append a record to `topic` (a push's dead letters).
+    async fn produce(&self, _stream: &str, _topic: &str, _record: &StreamRecord) -> anyhow::Result<()> {
+        anyhow::bail!("roll streams isn't on this node")
+    }
+}
+
+/// One record of a roll stream, as `run.push` delivers it.
+#[derive(Clone, Debug, PartialEq, Eq, Default)]
+pub struct StreamRecord {
+    pub partition: i32,
+    pub offset: i64,
+    /// Unix ms.
+    pub timestamp: i64,
+    pub key: Option<Vec<u8>>,
+    pub value: Option<Vec<u8>>,
+    pub headers: Vec<(String, Vec<u8>)>,
 }
 
 /// Credentials a link made for itself: its variables, and what revoking them needs.

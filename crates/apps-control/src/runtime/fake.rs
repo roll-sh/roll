@@ -6,7 +6,8 @@
 //! answer, `FAKE_SLOW_MS` delays every answer (requests pile up; one still waiting when the instance
 //! stops answers 502, as a killed process's would; `/sleep/<ms>` is one such request), `FAKE_MISSING=<prefix>` answers
 //! 404 for paths under it, `FAKE_CACHE=<value>` answers with it as `Cache-Control` (and `Cache-Tag: <the path's first
-//! segment>, all`), and counts
+//! segment>, all`), logs a pushed record's `ce-id` (`got event <id> (try <n>, <type>)`), with `FAKE_LOG_AUTH` logs a
+//! request's bearer (`bearer <path> <token>`), and counts
 //! the requests it answers at `/count`, `FAKE_EXIT=<code>` makes it a
 //! job that exits with that code (cron runs, workers). The fake builder fails a build whose tree
 //! has a file `FAIL_BUILD`, and takes as many milliseconds as a file `SLOW_BUILD` says.
@@ -253,6 +254,7 @@ async fn serve(spec: InstanceSpec, listener: tokio::net::TcpListener, log: LogSi
     let slow = var(&spec, "FAKE_SLOW_MS").and_then(|v| v.parse().ok()).map(Duration::from_millis);
     let missing = var(&spec, "FAKE_MISSING").map(str::to_string);
     let cache = var(&spec, "FAKE_CACHE").and_then(|v| axum::http::HeaderValue::from_str(v).ok());
+    let log_auth = var(&spec, "FAKE_LOG_AUTH").is_some();
     let answered = Arc::new(std::sync::atomic::AtomicU64::new(0));
     let echo: Vec<(String, String)> = var(&spec, "FAKE_ECHO")
         .map(|names| names.split(',').filter_map(|n| var(&spec, n).map(|v| (n.to_string(), v.to_string()))).collect())
@@ -263,9 +265,18 @@ async fn serve(spec: InstanceSpec, listener: tokio::net::TcpListener, log: LogSi
     log.line(format!("listening on {}", spec.port.unwrap_or(0)));
     let (name, dep, kill, port) = (spec.name.clone(), spec.deployment.clone(), killed.clone(), spec.port);
     let app = axum::Router::new().fallback(move |req: Request| {
-        let (name, dep, echo, sick, missing, killed, cache, answered) = (name.clone(), dep.clone(), echo.clone(), sick.clone(), missing.clone(), kill.clone(), cache.clone(), answered.clone());
+        let (name, dep, echo, sick, missing, killed, cache, answered, out) = (name.clone(), dep.clone(), echo.clone(), sick.clone(), missing.clone(), kill.clone(), cache.clone(), answered.clone(), log.clone());
         async move {
             use axum::response::IntoResponse;
+            // `FAKE_LOG_AUTH`: the bearer a request carried, said (`bearer <path> <token>`).
+            if let Some(b) = req.headers().get("authorization").and_then(|v| v.to_str().ok()).and_then(|v| v.strip_prefix("Bearer ")).filter(|_| log_auth) {
+                out.line(format!("bearer {} {b}", req.uri().path()));
+            }
+            // A pushed record (a CloudEvent): said in its output, as an app would log it.
+            if let Some(id) = req.headers().get("ce-id").and_then(|v| v.to_str().ok()) {
+                let attempt = req.headers().get("ce-rollattempt").and_then(|v| v.to_str().ok()).unwrap_or("");
+                out.line(format!("got event {id} (try {attempt}, {})", req.headers().get("ce-type").and_then(|v| v.to_str().ok()).unwrap_or("")));
+            }
             // A Prometheus endpoint, as a client library serves one.
             if req.uri().path() == "/metrics" {
                 let n = answered.load(std::sync::atomic::Ordering::SeqCst);
@@ -279,7 +290,7 @@ async fn serve(spec: InstanceSpec, listener: tokio::net::TcpListener, log: LogSi
                 return (axum::http::StatusCode::NOT_FOUND, axum::Json(serde_json::json!({ "path": req.uri().path() }))).into_response();
             }
             if req.uri().path() == "/page" {
-                return ([(axum::http::header::CONTENT_TYPE, "text/html")], format!("<html><body><h1>{dep}</h1></body></html>")).into_response();
+                return ([(axum::http::header::CONTENT_TYPE, "text/html")], format!("<html><head><title>{dep}</title></head><body><h1>{dep}</h1></body></html>")).into_response();
             }
             // As a gRPC server answers: data, then its status in a trailer.
             if req.uri().path() == "/trailers" {
@@ -303,9 +314,10 @@ async fn serve(spec: InstanceSpec, listener: tokio::net::TcpListener, log: LogSi
             let version = format!("{:?}", req.version());
             let te = req.headers().get("te").and_then(|h| h.to_str().ok()).unwrap_or("").to_string();
             let traceparent = req.headers().get("traceparent").and_then(|h| h.to_str().ok()).unwrap_or("").to_string();
+            let request_start = req.headers().get("x-request-start").and_then(|h| h.to_str().ok()).unwrap_or("").to_string();
             // What roll hands an edge function (`crate::edge`).
             let edge: serde_json::Map<String, serde_json::Value> = ["x-edge-path", "x-edge-next"].iter().filter_map(|h| Some((h.to_string(), req.headers().get(*h)?.to_str().ok()?.into()))).collect();
-            let mut r = (status, axum::Json(serde_json::json!({ "instance": name, "deployment": dep, "port": port, "path": req.uri().path(), "vars": vars, "forwarded_host": host, "cookie": cookie, "version": version, "te": te, "traceparent": traceparent, "edge": edge }))).into_response();
+            let mut r = (status, axum::Json(serde_json::json!({ "instance": name, "deployment": dep, "port": port, "path": req.uri().path(), "vars": vars, "forwarded_host": host, "cookie": cookie, "version": version, "te": te, "traceparent": traceparent, "edge": edge, "request_start": request_start }))).into_response();
             if let Some(c) = cache {
                 r.headers_mut().insert(axum::http::header::CACHE_CONTROL, c);
                 let seg = req.uri().path().trim_start_matches('/').split('/').next().unwrap_or("").to_string();
@@ -396,8 +408,14 @@ impl Runtime for Fake {
             let names: Vec<&str> = sc.vars.iter().map(|(k, _)| k.as_str()).collect();
             log.renamed(&super::sidecar_name(name, &sc.name)).line(format!("sidecar {} running {} with {}", sc.name, sc.image, names.join(",")));
         }
-        // A job: `FAKE_EXIT`, or a command `exit <code>` (a pre-deploy command, a cron run).
-        let exit = spec.command.as_deref().and_then(|c| c.strip_prefix("exit ")).and_then(|c| c.trim().parse::<i32>().ok());
+        // A job: `FAKE_EXIT`, or a command `exit <code>` (a pre-deploy command, a cron run);
+        // `exit <code> until try <n>` exits 0 from its `ROLL_TASK_ATTEMPT` n on (a flaky task).
+        let exit = spec.command.as_deref().and_then(|c| c.strip_prefix("exit ")).and_then(|c| {
+            let (code, until) = c.split_once(" until try ").map_or((c, None), |(a, n)| (a, n.trim().parse::<u32>().ok()));
+            let attempt = var(&spec, "ROLL_TASK_ATTEMPT").and_then(|a| a.parse::<u32>().ok()).unwrap_or(1);
+            let code = code.trim().parse::<i32>().ok()?;
+            Some(if until.is_some_and(|n| attempt >= n) { 0 } else { code })
+        });
         if let Some(code) = exit.or_else(|| var(&spec, "FAKE_EXIT").and_then(|c| c.parse::<i32>().ok())) {
             // A job's task says which it is.
             log.line(match var(&spec, "ROLL_TASK_INDEX") {
@@ -731,7 +749,8 @@ impl Builder for Fake {
         let Some(found) = self.scan_findings.lock().clone() else { return Ok(None) };
         self.scans.fetch_add(1, Ordering::SeqCst);
         log.line(format!("scanned {image}"));
-        Ok(Some(super::Scanned { scanner: "fake".into(), found }))
+        let sbom = Some(serde_json::to_vec(&serde_json::json!({ "bomFormat": "CycloneDX", "specVersion": "1.7", "components": [{ "type": "operating-system", "name": "fake" }] })).expect("JSON"));
+        Ok(Some(super::Scanned { scanner: "fake".into(), found, sbom }))
     }
 
     async fn build(&self, job: &BuildJob, log: &LogSink, cancel: tokio_util::sync::CancellationToken) -> anyhow::Result<String> {

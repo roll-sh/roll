@@ -38,17 +38,30 @@ pub use crate::metrics::simple::{Avg, ExtendedStats, Max, Min, Rate, Stats, Sum,
 pub use crate::pipeline::values::{BucketMetricValue, Derivative, ExtendedStatsBucket, PercentilesBucket, SimpleLongValue, SimpleValue, StatsBucket};
 
 /// One named aggregation result.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct Agg {
     pub name: String,
     pub meta: Option<Arc<Json>>,
     pub value: AggValue,
 }
 
-/// The aggregations of one level (the top level or a bucket), in request order.
-#[derive(Clone, Debug, Default)]
+/// The aggregations of one level (the top level or a bucket), in request order. Every bucket
+/// holds one, so decoding it from [`crate::wire`] counts the aggregations' nesting.
+#[derive(Clone, Debug, Default, serde::Serialize)]
 pub struct Aggs {
     pub list: Vec<Agg>,
+}
+
+#[derive(serde::Deserialize)]
+struct AggsDe {
+    list: Vec<Agg>,
+}
+
+impl<'de> serde::Deserialize<'de> for Aggs {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> std::result::Result<Self, D::Error> {
+        let _level = crate::wire::Nested::enter::<D::Error>()?;
+        Ok(Aggs { list: AggsDe::deserialize(d)?.list })
+    }
 }
 
 impl Aggs {
@@ -71,6 +84,24 @@ impl Aggs {
     /// Approximate heap bytes (memory accounting of reduce buffers).
     pub fn ram_bytes(&self) -> usize {
         self.list.iter().map(|a| 64 + a.name.len() + a.value.ram_bytes()).sum()
+    }
+
+    /// Calls `f` on every `top_hits` result of the tree, buckets' sub-aggregations included.
+    pub fn visit_top_hits_mut<E>(&mut self, f: &mut dyn FnMut(&mut TopHits) -> std::result::Result<(), E>) -> std::result::Result<(), E> {
+        for a in &mut self.list {
+            match &mut a.value {
+                AggValue::TopHits(t) => f(t)?,
+                AggValue::Single(s) => s.aggs.visit_top_hits_mut(f)?,
+                v => {
+                    if let Some(m) = v.multi_mut() {
+                        for i in 0..m.len() {
+                            m.aggs_mut(i).visit_top_hits_mut(f)?;
+                        }
+                    }
+                }
+            }
+        }
+        Ok(())
     }
 }
 
@@ -214,7 +245,7 @@ pub struct RenderCtx {
 macro_rules! agg_values {
     ($($v:ident($t:ty)),* $(,)?) => {
         /// Every result type.
-        #[derive(Clone, Debug)]
+        #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
         pub enum AggValue { $($v(Box<$t>)),* }
 
         impl AggValue {

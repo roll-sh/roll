@@ -56,6 +56,11 @@ CREATE TABLE IF NOT EXISTS repo_redirects (
     repo_id TEXT NOT NULL,
     PRIMARY KEY (owner_id, name_lower)
 );
+-- The head a change's preview last said it regressed at (`became: regressions`, once a head).
+CREATE TABLE IF NOT EXISTS preview_regressed (
+    change_id TEXT PRIMARY KEY,
+    head TEXT NOT NULL
+);
 CREATE TABLE IF NOT EXISTS changes (
     id TEXT PRIMARY KEY,
     repo_id TEXT NOT NULL,
@@ -429,6 +434,8 @@ const COLUMNS: &[(&str, &str, &str)] = &[
     ("agent_machines", "appearance", "TEXT"),
     // Sandboxes from before they slept when idle.
     ("agent_sandboxes", "last_active_at", "INTEGER"),
+    // Sandboxes from before they recorded who copied a secrets environment into them.
+    ("agent_sandboxes", "secrets_by", "TEXT"),
     // Automation runs from before a wake during a step's attempt was kept.
     ("automation_runs", "woken", "INTEGER NOT NULL DEFAULT 0"),
     // Work items from before issues said whether their author can push (the next sync says).
@@ -436,6 +443,9 @@ const COLUMNS: &[(&str, &str, &str)] = &[
     // Reviews and comments from before they said whether their author can push.
     ("reviews", "outside", "INTEGER NOT NULL DEFAULT 0"),
     ("review_comments", "outside", "INTEGER NOT NULL DEFAULT 0"),
+    // Signing secrets from before they were sealed (`crate::signing::seal_at_rest` seals them).
+    ("repo_webhooks", "secret_sealed", "INTEGER NOT NULL DEFAULT 0"),
+    ("review_apps", "secret_sealed", "INTEGER NOT NULL DEFAULT 0"),
 ];
 
 impl Db {
@@ -902,6 +912,15 @@ impl Db {
                     && old.as_ref().and_then(at) != Some(head)
                 {
                     became.push(what);
+                }
+            }
+            // Regressions come and go at one head (main's preview asleep, errors aging out): said
+            // once a head, which a mark keeps across that.
+            if let Some(head) = preview.and_then(Preview::regressions_at) {
+                let said: Option<String> = c.query_row("SELECT head FROM preview_regressed WHERE change_id = ?", [id], |r| r.get(0)).optional()?;
+                if said.as_deref() != Some(head) {
+                    c.execute("INSERT INTO preview_regressed (change_id, head) VALUES (?, ?) ON CONFLICT (change_id) DO UPDATE SET head = excluded.head", params![id, head])?;
+                    became.push("regressions");
                 }
             }
             let mut p = crate::webhooks::Promises::default();

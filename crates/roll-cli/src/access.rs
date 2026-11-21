@@ -662,7 +662,8 @@ pub enum Mcp {
         /// Use this scoped token instead of OAuth.
         #[arg(long)]
         with_token: Option<String>,
-        /// Only these products' tools (comma separated, e.g. postgres,code).
+        /// Only these products' tools (comma separated, e.g. postgres,code), or an area of one
+        /// (apps.observe, secrets.security: `GET /v1/mcp/toolsets` lists them).
         #[arg(long, value_delimiter = ',')]
         toolsets: Vec<String>,
         /// Only tools that read are listed and run, whatever the token allows.
@@ -1350,6 +1351,18 @@ pub fn tool_limit(client: Client) -> Option<(&'static str, u32)> {
 
 /// How a connection narrows what the server offers it (docs/mcp.md): the URL's query, in the
 /// dashboard's order (`toolsets`, `readonly`, `tools`, `lockdown`).
+/// A toolset's product must be one roll has (`postgress` is caught here, not when a client first
+/// connects and the server answers 400); an area's own name (`apps.observe`) is the server's to know.
+pub fn check_toolsets(toolsets: &[String]) -> anyhow::Result<()> {
+    for t in toolsets.iter().map(|t| t.trim().to_ascii_lowercase()).filter(|t| !t.is_empty()) {
+        let product = t.split_once('.').map_or(t.as_str(), |(p, _)| p);
+        if !roll_auth::scope::PRODUCTS.contains(&product) {
+            anyhow::bail!("no toolset {t:?}: one of {} (or an area, apps.observe)", roll_auth::scope::PRODUCTS.join(", "));
+        }
+    }
+    Ok(())
+}
+
 pub fn with_mode(url: &str, toolsets: &[String], readonly: bool, search: bool, lockdown: bool) -> String {
     let mut q = Vec::new();
     let mut sets: Vec<String> = toolsets.iter().map(|t| t.trim().to_ascii_lowercase()).filter(|t| !t.is_empty()).collect();
@@ -1424,6 +1437,7 @@ pub async fn mcp(api: &Api, json_out: bool, cmd: Mcp) -> anyhow::Result<()> {
             if let (Some((why, _)), true, false) = (limit, search, json_out) {
                 eprintln!("search mode: {why}, and roll lists every product's tools (--all-tools for the whole list)");
             }
+            check_toolsets(&toolsets)?;
             println!("{}", config(client, &with_mode(&server(&api.base), &toolsets, readonly, search, lockdown), with_token.as_deref()));
         }
         Mcp::Approvals { all } => {
@@ -1554,6 +1568,9 @@ mod tests {
         assert_eq!(with_mode(url, &[], false, false, false), url);
         assert_eq!(with_mode(url, &["redis".into(), "Postgres".into()], true, true, true), format!("{url}?toolsets=postgres,redis&readonly=1&tools=search&lockdown=1"));
         assert!(tool_limit(Client::Vscode).is_some() && tool_limit(Client::ClaudeCode).is_none());
+        // An area goes through; a product roll doesn't have is refused before a config is written.
+        assert_eq!(with_mode(url, &["apps.observe".into()], false, false, false), format!("{url}?toolsets=apps.observe"));
+        assert!(check_toolsets(&["apps.observe".into(), "postgres".into()]).is_ok() && check_toolsets(&["postgress".into()]).is_err());
         assert_eq!(config(Client::ClaudeCode, &format!("{url}?tools=search&lockdown=1"), None), format!("claude mcp add --transport http roll '{url}?tools=search&lockdown=1'"));
     }
 }

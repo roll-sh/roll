@@ -19,7 +19,7 @@ const READS_MAX: i64 = 100_000;
 #[serde(rename_all = "snake_case")]
 pub enum Issue {
     /// A decoy key's credential was used (docs/secrets.md, "Decoys"): someone found it where it
-    /// was planted. Only the project's admins see it.
+    /// was planted. Only the project's admins see it, signed in or the operator, never a token.
     DecoyUsed,
     /// Its value stopped working outside roll.
     Expired,
@@ -36,6 +36,11 @@ pub enum Issue {
     Public,
     /// A credential easy to guess (shown to whoever may reveal it).
     Weak,
+    /// A sync or a workload identity whose maker is the operator account: made from an admin's
+    /// session before makers were people, so it would act after they're demoted or can't sign
+    /// in. Re-saving it from a person's session binds it to them. `key` is the sync's or the
+    /// identity's id (the identity's `environment` and `path` are empty).
+    OperatorMade,
     /// Its value stops working outside roll within two weeks.
     Expiring,
     /// A certificate a project CA signed for a CSR ends within two weeks (pki.rs). Links' own
@@ -73,6 +78,10 @@ pub struct Finding {
     /// Who supplies the key, when a required key names them.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub owner: Option<String>,
+    /// A `decoy_used` finding's decoy (only [`Secrets::sees_decoys`] callers get the finding): its
+    /// uses and the last one's where. Never in a reminder: that lists issue, path, key and detail.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub decoy: Option<crate::decoys::Decoy>,
 }
 
 /// One project's findings, for health across projects.
@@ -119,6 +128,13 @@ impl Secrets {
     /// With `code`, keys no repository on the project's canvas mentions too (`unreferenced`):
     /// a search per key and repository, so only when asked for.
     pub fn project_health(&self, project: &str, caller: &Caller, code: bool) -> Result<Vec<Finding>> {
+        self.findings(project, caller, code, true)
+    }
+
+    /// [`Self::project_health`]. `exempt`: decoys left out of `stale` and `unread` for whoever sees
+    /// them (nobody should rotate or read one). Reminders pass `false`: a channel lists a decoy's
+    /// staleness as any key's, so nothing is learned there by elimination.
+    pub(crate) fn findings(&self, project: &str, caller: &Caller, code: bool, exempt: bool) -> Result<Vec<Finding>> {
         caller.need(Action::Read, &Scope::project(project))?;
         let dek = self.project(project)?;
         let now = self.db.now_ms()?;
@@ -142,7 +158,7 @@ impl Secrets {
         // Decoys, for the admins: their use first, and no staleness or disuse (nobody should read one).
         let admin = self.sees_decoys(project, caller);
         let used = if admin { self.used_decoys(project)? } else { vec![] };
-        let decoys: HashSet<(String, String, String)> = if admin { self.live_decoys(project)? } else { HashSet::new() };
+        let decoys: HashSet<(String, String, String)> = if admin && exempt { self.live_decoys(project)? } else { HashSet::new() };
         let mut read: HashSet<(String, String, String)> = HashSet::new();
         for (env, path, keys) in reads {
             for k in from_json::<Vec<String>>(&keys) {
@@ -166,9 +182,17 @@ impl Secrets {
         for d in used {
             // An ephemeral environment's (or a deleted one's) shows where the decoy was planted.
             let env = slug.get(d.env_id.as_str()).map_or_else(|| d.env_id.clone(), |e| e.slug.clone());
-            let from = d.used_ip.map(|i| format!(" from {i}")).unwrap_or_default();
-            let times = if d.uses == 1 { "once".to_string() } else { format!("{} times", d.uses) };
-            out.push(Finding { issue: Issue::DecoyUsed, environment: env, path: d.path, key: d.key, detail: format!("used {times}, last on {}{from}: cut it off and rotate what sits beside it", chrono_day(d.used_at)), owner: None });
+            let u = &d.decoy;
+            let from = u.used_ip.as_deref().map(|i| format!(" from {i}")).unwrap_or_default();
+            let on = match (&u.used_route, &u.used_endpoint) {
+                (_, Some(ep)) => format!(" on Postgres endpoint {ep}"),
+                (Some(route), None) => format!(" calling {route}"),
+                (None, None) => String::new(),
+            };
+            let times = if u.uses == 1 { "once".to_string() } else { format!("{} times", u.uses) };
+            let day = u.used_at.map(chrono_day).unwrap_or_default();
+            let detail = format!("used {times}, last on {day}{from}{on}: cut it off and rotate what sits beside it");
+            out.push(Finding { issue: Issue::DecoyUsed, environment: env, path: d.path, key: d.key, detail, owner: None, decoy: Some(d.decoy) });
         }
         let mut have: HashSet<(String, String, String)> = HashSet::new();
         for (env_id, path, key, fp, link, refs, updated_at, expires_at, weak, public) in &rows {
@@ -177,7 +201,7 @@ impl Secrets {
             if !caller.allows(Action::Read, &Scope::at(project, &e.slug, path)) {
                 continue;
             }
-            let mut add = |issue: Issue, detail: String| out.push(Finding { issue, environment: e.slug.clone(), path: path.clone(), key: key.clone(), detail, owner: None });
+            let mut add = |issue: Issue, detail: String| out.push(Finding { issue, environment: e.slug.clone(), path: path.clone(), key: key.clone(), detail, owner: None, decoy: None });
             let day = |ms: i64| chrono_day(ms);
             if let Some(t) = expires_at {
                 if *t <= now {
@@ -232,7 +256,7 @@ impl Secrets {
                 }
                 let seen = self.view(project, &e.slug, &r.path, caller, false, Action::Read)?.iter().any(|x| x.row.key == r.key);
                 if !seen {
-                    out.push(Finding { issue: Issue::Missing, environment: e.slug.clone(), path: r.path.clone(), key: r.key.clone(), detail: "required".into(), owner: None });
+                    out.push(Finding { issue: Issue::Missing, environment: e.slug.clone(), path: r.path.clone(), key: r.key.clone(), detail: "required".into(), owner: None, decoy: None });
                 }
             }
         }
@@ -253,7 +277,7 @@ impl Secrets {
                 for (env_id, path, key, ..) in &rows {
                     let Some(e) = slug.get(env_id.as_str()) else { continue };
                     if unread_by_code.contains(key) && caller.allows(Action::Read, &Scope::at(project, &e.slug, path)) {
-                        out.push(Finding { issue: Issue::Unreferenced, environment: e.slug.clone(), path: path.clone(), key: key.clone(), detail: format!("not in {}", repos.join(", ")), owner: None });
+                        out.push(Finding { issue: Issue::Unreferenced, environment: e.slug.clone(), path: path.clone(), key: key.clone(), detail: format!("not in {}", repos.join(", ")), owner: None, decoy: None });
                     }
                 }
             }
@@ -268,7 +292,7 @@ impl Secrets {
         })?;
         for (ca, names, serial, end) in ending {
             let names = from_json::<Vec<String>>(&names).join(", ");
-            out.push(Finding { issue: Issue::CertificateExpiring, environment: String::new(), path: ca, key: names, detail: format!("ends {} (serial {serial}): sign a new CSR", chrono_day(end)), owner: None });
+            out.push(Finding { issue: Issue::CertificateExpiring, environment: String::new(), path: ca, key: names, detail: format!("ends {} (serial {serial}): sign a new CSR", chrono_day(end)), owner: None, decoy: None });
         }
         // What roll couldn't do for a key: rotate it on schedule, or revoke a credential it issued.
         type Failed = Vec<(String, String, String, String)>;
@@ -293,8 +317,27 @@ impl Secrets {
             for (env_id, path, key, why) in rows {
                 let Some(e) = slug.get(env_id.as_str()) else { continue };
                 if caller.allows(Action::Read, &Scope::at(project, &e.slug, &path)) {
-                    out.push(Finding { issue, environment: e.slug.clone(), path, key, detail: why, owner: None });
+                    out.push(Finding { issue, environment: e.slug.clone(), path, key, detail: why, owner: None, decoy: None });
                 }
+            }
+        }
+        // Syncs and identities made as the operator account: an admin's session before it recorded
+        // the person, or the deployment's own token. Nothing tells which, so both are flagged.
+        type Made = Vec<(String, String, String, String)>;
+        let (syncs, identities): (Made, Made) = self.db.read(|c| {
+            Ok::<_, crate::Error>((
+                c.query("SELECT e.slug, s.path, s.id, s.kind FROM syncs s JOIN environments e ON e.id = s.env_id WHERE s.project_id = ? AND s.created_by = 'operator' ORDER BY s.id", [project], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))?,
+                c.query("SELECT '', '/', id, name FROM identities WHERE project_id = ? AND created_by = 'operator' ORDER BY id", [project], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))?,
+            ))
+        })?;
+        for (env, path, id, kind) in syncs {
+            if caller.allows(Action::Read, &Scope::at(project, &env, &path)) {
+                out.push(Finding { issue: Issue::OperatorMade, environment: env, path, key: id, detail: format!("{kind} sync made by the operator account: re-save it (make it again) from a person's session to bind it to them"), owner: None, decoy: None });
+            }
+        }
+        if caller.allows(Action::Read, &Scope::whole(project)) {
+            for (env, path, id, name) in identities {
+                out.push(Finding { issue: Issue::OperatorMade, environment: env, path, key: id, detail: format!("identity {name} made by the operator account: make it again (or set its pinned keys again) from a person's session to bind it to them"), owner: None, decoy: None });
             }
         }
         // Who to ask: the required key's owner, its folder's rule first, else the key's anywhere.

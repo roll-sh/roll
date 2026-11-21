@@ -20,7 +20,8 @@
 //! `credentials_file` (the service account key file's JSON, as a string) and `azure`'s
 //! `account`, `key` and `sas_token`. They're moved into [`Repository::secrets`] at once, sealed
 //! under the deployment's key, opened only to sign a request, and never returned by
-//! `GET _snapshot` or the cluster state or written into an error or a log line.
+//! `GET _snapshot` or the cluster state or written into an error or a log line. Any of them may
+//! be a roll secrets reference instead (`roll://ENV/KEY`, [`super::refs`]).
 //!
 //! roll's own clients choose part sizes: a GCS resumable upload's chunks and an Azure blob's
 //! blocks are [`PART`] (Elasticsearch has no `buffer_size` for either), each held once and
@@ -41,9 +42,9 @@ pub(super) const PART: u64 = 8 << 20;
 const GCS_MAX_CHUNK: i64 = 5 << 40;
 const AZURE_MAX_CHUNK: i64 = 2_684_354_550_000;
 /// `container`'s default.
-const AZURE_CONTAINER: &str = "elasticsearch-snapshots";
+pub(crate) const AZURE_CONTAINER: &str = "elasticsearch-snapshots";
 
-fn secret_names(ty: &str) -> &'static [&'static str] {
+pub(super) fn secret_names(ty: &str) -> &'static [&'static str] {
     match ty {
         "s3" => &s3::SECRET_SETTINGS,
         "gcs" => &GCS_SECRETS,
@@ -53,7 +54,7 @@ fn secret_names(ty: &str) -> &'static [&'static str] {
 }
 
 /// What sealed credentials of a type are bound to.
-fn secret_kind(ty: &str) -> &'static str {
+pub(super) fn secret_kind(ty: &str) -> &'static str {
     match ty {
         "gcs" => "gcs repository credential",
         "azure" => "azure repository credential",
@@ -74,10 +75,14 @@ pub(super) fn secret_shapes(ty: &str, settings: &Settings) -> EsResult<()> {
     Ok(())
 }
 
-/// Moves a type's credentials out of `settings`, as the cluster stores them (sealed when it can).
+/// Moves a type's credentials out of `settings`, as the cluster stores them (sealed when it
+/// can). A reference (`roll://…`, [`super::refs`]) isn't a value: it stays in the settings.
 pub(super) fn take_secrets(cluster: &crate::Cluster, ty: &str, settings: &mut Settings) -> BTreeMap<String, String> {
     let mut out = BTreeMap::new();
     for k in secret_names(ty) {
+        if settings.get(k).is_some_and(|v| crate::secret_refs::classify(cluster, v) != crate::secret_refs::Setting::Value) {
+            continue;
+        }
         if let Some(v) = settings.remove(k)
             && let Some(v) = v.as_str().filter(|v| !v.is_empty())
         {
@@ -85,10 +90,6 @@ pub(super) fn take_secrets(cluster: &crate::Cluster, ty: &str, settings: &mut Se
         }
     }
     out
-}
-
-fn secret(cluster: &crate::Cluster, r: &Repository, key: &str) -> EsResult<Option<String>> {
-    r.secrets.get(key).map(|v| crate::seal::open(cluster, secret_kind(&r.ty), v)).transpose()
 }
 
 /// `GoogleCloudStorageRepository`'s first check, before the blob store's own settings.
@@ -111,7 +112,7 @@ pub(super) fn validate_gcs(cluster: &crate::Cluster, name: &str, settings: &Sett
     s3::base_path(settings).map_err(create)?;
     let allow = s3::allow_private(cluster);
     gcs::endpoint(settings.get("endpoint"), allow).map_err(|e| create(EsError::illegal_argument(e)))?;
-    if let Some(json) = settings.get("credentials_file").filter(|j| !j.is_empty()) {
+    if let Some(json) = settings.get("credentials_file").filter(|j| !j.is_empty() && crate::secret_refs::classify(cluster, j) == crate::secret_refs::Setting::Value) {
         gcs::ServiceAccount::parse(json, settings.get("token_uri"), allow).map_err(|e| create(EsError::illegal_argument(e)))?;
     }
     Ok(())
@@ -146,13 +147,13 @@ fn sizes(r: &Repository) -> transfer::Sizes {
 
 /// A `gcs` repository's bucket. A client that can't be made fails as Elasticsearch's does
 /// ("cannot create blob store").
-pub(super) fn gcs_store(cluster: &crate::Cluster, name: &str, r: &Repository) -> EsResult<(Store, transfer::Sizes)> {
+pub(super) fn gcs_store(cluster: &crate::Cluster, name: &str, r: &Repository, creds: &refs::Creds) -> EsResult<(Store, transfer::Sizes)> {
     let cannot = |why: String| repository_exception(name, "cannot create blob store").caused_by(EsError::illegal_argument(why));
     let s = &r.settings;
     let allow = s3::allow_private(cluster);
     let endpoint = gcs::endpoint(s.get("endpoint"), allow).map_err(cannot)?;
-    let account = match secret(cluster, r, "credentials_file")? {
-        Some(json) => Some(gcs::ServiceAccount::parse(&json, s.get("token_uri"), allow).map_err(cannot)?),
+    let account = match creds.get("credentials_file") {
+        Some(json) => Some(gcs::ServiceAccount::parse(json, s.get("token_uri"), allow).map_err(cannot)?),
         None => None,
     };
     let client = gcs::Client::new(endpoint, s.get("bucket").unwrap_or_default(), account, s.get("application_name"), allow).map_err(|e| cannot(e.to_string()))?;
@@ -161,18 +162,18 @@ pub(super) fn gcs_store(cluster: &crate::Cluster, name: &str, r: &Repository) ->
 
 /// An `azure` repository's container. A client that can't be made fails with Elasticsearch's
 /// `settings_exception`: without an account there is no client.
-pub(super) fn azure_store(cluster: &crate::Cluster, name: &str, r: &Repository) -> EsResult<(Store, transfer::Sizes)> {
+pub(super) fn azure_store(cluster: &crate::Cluster, name: &str, r: &Repository, creds: &refs::Creds) -> EsResult<(Store, transfer::Sizes)> {
     let settings_error = |why: String| EsError::new(500, "settings_exception", why);
     let s = &r.settings;
     let client_name = s.get("client").filter(|c| !c.is_empty()).unwrap_or("default");
-    let Some(account) = secret(cluster, r, "account")?.filter(|a| !a.is_empty()) else {
+    let Some(account) = creds.get("account").filter(|a| !a.is_empty()) else {
         return Err(settings_error(format!("Unable to find client with name [{client_name}]")));
     };
     let mode = location_mode(s).map_err(|e| repository_exception(name, "cannot create blob store").caused_by(e))?;
-    let auth = azure::Auth::new(&account, secret(cluster, r, "key")?.as_deref(), secret(cluster, r, "sas_token")?.as_deref()).map_err(settings_error)?;
+    let auth = azure::Auth::new(account, creds.get("key"), creds.get("sas_token")).map_err(settings_error)?;
     let allow = s3::allow_private(cluster);
-    let (primary, secondary) = azure::endpoints(&account, s.get("endpoint_suffix"), s.get("endpoint"), s.get("secondary_endpoint"), mode, allow).map_err(settings_error)?;
+    let (primary, secondary) = azure::endpoints(account, s.get("endpoint_suffix"), s.get("endpoint"), s.get("secondary_endpoint"), mode, allow).map_err(settings_error)?;
     let container = s.get("container").filter(|c| !c.is_empty()).unwrap_or(AZURE_CONTAINER);
-    let client = azure::Client::new(&account, auth, primary, secondary, mode, container, allow).map_err(|e| settings_error(e.to_string()))?;
+    let client = azure::Client::new(account, auth, primary, secondary, mode, container, allow).map_err(|e| settings_error(e.to_string()))?;
     Ok((Store::Azure(client), sizes(r)))
 }

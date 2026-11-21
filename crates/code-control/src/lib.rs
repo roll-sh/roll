@@ -15,6 +15,7 @@ pub mod git;
 pub mod leaks;
 pub mod github;
 mod secret_leaks;
+mod unstored;
 pub mod mcp;
 pub mod model;
 pub mod names;
@@ -25,10 +26,11 @@ mod revert;
 pub mod review;
 mod service;
 pub mod settings;
+pub mod signing;
 pub mod streams;
 pub mod webhooks;
 
-pub use ext::{PreviewBackend, Runner, SecretEnv};
+pub use ext::{Asker, CredentialValue, PreviewBackend, Refused, Revealed, Runner, SecretEnv, SecretsAsker, StoreCredential, StoreTarget, StoredCredential};
 pub use service::{FileWrite, LandOutcome, WriteFiles};
 
 use axum::Json;
@@ -43,7 +45,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::broadcast;
 
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct Config {
     /// State directory: `<home>/code/control.db` and code-store's `<home>/code/code.db`.
     pub home: PathBuf,
@@ -110,6 +112,71 @@ pub struct Config {
     /// roll-hosted sandboxes for roll code agents: the backend, sizes and limits
     /// (`agents::sandbox::SandboxConfig::from_env`).
     pub sandboxes: agents::sandbox::SandboxConfig,
+}
+
+/// What `Debug` shows for a key, a token or a secret.
+pub(crate) const REDACTED: &str = "<redacted>";
+
+impl std::fmt::Debug for Config {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Every field by name, so a new one can't skip this.
+        let Config {
+            home,
+            admin_token,
+            operator_token,
+            api_url,
+            git_url,
+            web_url,
+            storage,
+            max_paths,
+            allow_private_webhooks,
+            allow_private_providers,
+            review_app_retry_ms,
+            review,
+            max_streams_per_caller,
+            max_streams,
+            trust_forwarded_for,
+            search_index_wait_ms,
+            review_index_wait_ms,
+            database,
+            cluster,
+            cluster_backend,
+            cluster_single_host,
+            git_memory_budget_bytes,
+            git_max_request_memory_bytes,
+            git_memory_wait,
+            repo_idle_release,
+            sandboxes,
+        } = self;
+        f.debug_struct("Config")
+            .field("home", home)
+            .field("admin_token", &admin_token.as_ref().map(|_| REDACTED))
+            .field("operator_token", operator_token)
+            .field("api_url", api_url)
+            .field("git_url", git_url)
+            .field("web_url", web_url)
+            .field("storage", storage)
+            .field("max_paths", max_paths)
+            .field("allow_private_webhooks", allow_private_webhooks)
+            .field("allow_private_providers", allow_private_providers)
+            .field("review_app_retry_ms", review_app_retry_ms)
+            .field("review", review)
+            .field("max_streams_per_caller", max_streams_per_caller)
+            .field("max_streams", max_streams)
+            .field("trust_forwarded_for", trust_forwarded_for)
+            .field("search_index_wait_ms", search_index_wait_ms)
+            .field("review_index_wait_ms", review_index_wait_ms)
+            .field("database", database)
+            .field("cluster", cluster)
+            .field("cluster_backend", cluster_backend)
+            .field("cluster_single_host", cluster_single_host)
+            .field("git_memory_budget_bytes", git_memory_budget_bytes)
+            .field("git_max_request_memory_bytes", git_max_request_memory_bytes)
+            .field("git_memory_wait", git_memory_wait)
+            .field("repo_idle_release", repo_idle_release)
+            .field("sandboxes", sandboxes)
+            .finish()
+    }
 }
 
 /// Where a cluster keeps its membership and leases (docs/code/cluster.md, "Backends"). Only
@@ -435,6 +502,9 @@ pub struct Code {
     /// The environment variables a change reads that a roll secrets environment lacks, per
     /// (repo, head), with the merge base they were found from (`secret_leaks.rs`).
     pub(crate) env_facts: Cache<(String, ChangesetId), (Option<ChangesetId>, secret_leaks::Missing)>,
+    /// What roll secrets' validity checks said about credentials changes add, per (repo,
+    /// fingerprint) (`secret_leaks.rs`): filled in by background work, kept a day.
+    pub(crate) validity_facts: Arc<Cache<(String, String), model::CredentialValidity>>,
     /// Review-app webhook deliveries.
     pub(crate) deliveries: review::Deliveries,
     /// roll's own reviewer: its job queue, the codebase index, sealed keys.
@@ -537,6 +607,7 @@ impl Code {
         let db = db::Db::open(control)?;
         let (events, _) = broadcast::channel(4096);
         let ai = ai::Ai::new(&config);
+        signing::seal_at_rest(&db, ai.sealer.as_ref())?;
         let git_budget = code_git::ServerConfig {
             memory_budget_bytes: config.git_memory_budget_bytes,
             max_request_memory_bytes: config.git_max_request_memory_bytes,
@@ -571,6 +642,7 @@ impl Code {
             review_facts: Cache::new(16_384),
             leak_facts: Cache::new(16_384),
             env_facts: Cache::new(16_384),
+            validity_facts: Arc::new(Cache::new(16_384)),
             deliveries: review::Deliveries::default(),
             ai,
             worktrees: checkout::Worktrees::default(),

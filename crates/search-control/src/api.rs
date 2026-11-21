@@ -41,6 +41,7 @@ impl IntoResponse for ControlError {
             ControlError::Invalid(_) => StatusCode::BAD_REQUEST,
             ControlError::Conflict(_) => StatusCode::CONFLICT,
             ControlError::TooLarge(_) => StatusCode::PAYLOAD_TOO_LARGE,
+            ControlError::Forbidden(_) => StatusCode::FORBIDDEN,
             ControlError::Internal(e) => {
                 tracing::warn!(error = %e, "search control error");
                 StatusCode::INTERNAL_SERVER_ERROR
@@ -67,6 +68,7 @@ pub fn router(control: Arc<Control>) -> Router {
         .route("/v1/search/clusters/{id}/audit", get(audit))
         .route("/v1/search/clusters/{id}/analytics", get(analytics))
         .route("/v1/search/clusters/{id}/keys", post(create_key))
+        .route("/v1/search/clusters/{id}/repositories/{name}", axum::routing::put(put_repository))
         .route("/v1/search/clusters/{id}/keys/{key}", axum::routing::delete(delete_key))
         .route("/v1/search/clusters/{id}/remotes", get(remotes))
         .route("/v1/search/clusters/{id}/remotes/{alias}", axum::routing::put(link_remote).delete(unlink_remote))
@@ -80,6 +82,8 @@ pub fn router(control: Arc<Control>) -> Router {
         .route("/v1/search/clusters/{id}/indices/{index}/docs/{doc}", get(doc_get).put(doc_put).delete(doc_delete))
         .route("/v1/search/clusters/{id}/indices/{index}/bulk", post(index_bulk))
         .route("/v1/search/clusters/{id}/indices/{index}/delete_by_query", post(index_delete_by_query))
+        .route("/v1/search/clusters/{id}/indices/{index}/suggestions", get(suggestions))
+        .route("/v1/search/clusters/{id}/indices/{index}/suggestions/rebuild", post(rebuild_suggestions))
         // Calls about one cluster: the caller's own, then on its owner.
         .layer(axum::middleware::from_fn_with_state(control.clone(), per_cluster))
         // The dashboard calls it from the browser, like the other control planes.
@@ -585,6 +589,21 @@ doc_route!(doc_get, "GET", EsBody::None);
 doc_route!(doc_put, "PUT", EsBody::Json);
 doc_route!(doc_delete, "DELETE", EsBody::None);
 
+/// `PUT /v1/search/clusters/{id}/repositories/{name}`: `PUT _snapshot/{name}` (Elasticsearch's
+/// body and query), the only way a repository's credentials can be roll secrets references: the
+/// caller must be able to reveal each, and is kept as their maker ([`crate::secret_refs`]). The
+/// cluster's answer, unchanged.
+async fn put_repository(State(c): State<AppState>, Path((id, name)): Path<(String, String)>, uri: axum::http::Uri, ext: Extensions, body: bytes::Bytes) -> Result<Response, ControlError> {
+    let who = crate::secret_refs::Who::of(&ext);
+    let (status, ct, body) = c.put_repository(&id, &name, uri.query(), body, &who).await?;
+    let mut r = Response::new(Body::from(body));
+    *r.status_mut() = StatusCode::from_u16(status).unwrap_or(StatusCode::BAD_GATEWAY);
+    if let Ok(v) = axum::http::HeaderValue::from_str(&ct) {
+        r.headers_mut().insert(axum::http::header::CONTENT_TYPE, v);
+    }
+    Ok(r)
+}
+
 #[derive(Deserialize)]
 struct NewKey {
     name: String,
@@ -687,6 +706,18 @@ struct AnalyticsQuery {
 async fn analytics(State(c): State<AppState>, Path(id): Path<String>, Query(q): Query<AnalyticsQuery>) -> ApiResult<Value> {
     let index = q.index.as_deref().filter(|i| !i.is_empty());
     Ok(Json(c.analytics(&id, index, q.range.as_deref().unwrap_or("24h")).await?))
+}
+
+/// An index's query suggestions: settings, last build, heaviest suggestions (`crate::suggestions`).
+async fn suggestions(State(c): State<AppState>, Path((id, index)): Path<(String, String)>) -> ApiResult<Value> {
+    index_segment(&index, false)?;
+    Ok(Json(c.suggestions(&id, &index).await?))
+}
+
+/// Rebuilds an index's suggestions index now.
+async fn rebuild_suggestions(State(c): State<AppState>, Path((id, index)): Path<(String, String)>) -> ApiResult<Value> {
+    index_segment(&index, false)?;
+    Ok(Json(Box::pin(c.rebuild_suggestions(&id, &index)).await?))
 }
 
 #[cfg(test)]

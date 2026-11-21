@@ -31,6 +31,7 @@
 use crate::db::{Db, now};
 use crate::model::{Change, ChangeState, RepoRow};
 use crate::review::apps::check_url;
+use crate::signing::Kept;
 use crate::{Caller, Code, Error, Result, cs_id, new_id};
 use code_sql::{Conn, OptionalExtension, Row, params};
 use code_store::ChangesetId;
@@ -47,12 +48,14 @@ CREATE TABLE IF NOT EXISTS repo_webhooks (
     repo_id TEXT NOT NULL,
     url TEXT NOT NULL,
     events TEXT NOT NULL,
+    -- Sealed to the webhook when secret_sealed is 1 (crate::signing).
     secret TEXT NOT NULL,
     active INTEGER NOT NULL,
     created_by TEXT NOT NULL,
     created_at INTEGER NOT NULL,
     updated_at INTEGER NOT NULL,
-    since_seq INTEGER NOT NULL DEFAULT 0
+    since_seq INTEGER NOT NULL DEFAULT 0,
+    secret_sealed INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS repo_webhooks_repo ON repo_webhooks (repo_id);
 CREATE TABLE IF NOT EXISTS webhook_land_cursor (
@@ -120,7 +123,8 @@ pub struct HookRow {
     pub repo_id: String,
     pub url: String,
     pub events: Vec<String>,
-    pub secret: String,
+    /// The signing secret as it's kept (`Debug` never shows it).
+    pub secret: Kept,
     pub active: bool,
     pub created_by: String,
     pub created_at: i64,
@@ -129,7 +133,7 @@ pub struct HookRow {
     pub since_seq: i64,
 }
 
-const HOOK_COLS: &str = "id, repo_id, url, events, secret, active, created_by, created_at, updated_at, since_seq";
+const HOOK_COLS: &str = "id, repo_id, url, events, secret, active, created_by, created_at, updated_at, since_seq, secret_sealed";
 
 fn hook_row(r: &Row<'_>) -> code_sql::Result<HookRow> {
     Ok(HookRow {
@@ -137,7 +141,7 @@ fn hook_row(r: &Row<'_>) -> code_sql::Result<HookRow> {
         repo_id: r.get(1)?,
         url: r.get(2)?,
         events: serde_json::from_str(&r.get::<_, String>(3)?).unwrap_or_default(),
-        secret: r.get(4)?,
+        secret: Kept::from_columns(r.get(4)?, r.get(10)?),
         active: r.get::<_, i64>(5)? != 0,
         created_by: r.get(6)?,
         created_at: r.get(7)?,
@@ -171,9 +175,10 @@ impl Db {
     }
 
     fn save_webhook(&self, h: &HookRow) -> Result<()> {
+        let (secret, sealed) = h.secret.columns();
         self.sql().execute(
-            "UPDATE repo_webhooks SET url = ?, events = ?, secret = ?, active = ?, updated_at = ? WHERE id = ?",
-            params![h.url, serde_json::to_string(&h.events).unwrap_or_default(), h.secret, h.active as i64, h.updated_at, h.id],
+            "UPDATE repo_webhooks SET url = ?, events = ?, secret = ?, secret_sealed = ?, active = ?, updated_at = ? WHERE id = ?",
+            params![h.url, serde_json::to_string(&h.events).unwrap_or_default(), secret, sealed, h.active as i64, h.updated_at, h.id],
         )?;
         Ok(())
     }
@@ -184,6 +189,7 @@ impl Db {
     /// moved it before `since_seq`. Every landing after `since_seq` reaches the webhook; none
     /// before it does. Returns `since_seq`.
     fn create_webhook(&self, h: &HookRow, store_head: i64) -> Result<i64> {
+        let (secret, sealed) = h.secret.columns();
         Ok(self.write(|c| {
             // The forwarder hasn't run yet: it starts here, not at a later head. (It may be
             // starting right now on another node, hence the upsert.)
@@ -191,8 +197,9 @@ impl Db {
             let cursor: i64 = c.query_row("SELECT seq FROM webhook_land_cursor WHERE id = 1", (), |r| r.get(0))?;
             let since = cursor.max(store_head);
             c.execute(
-                "INSERT INTO repo_webhooks (id, repo_id, url, events, secret, active, created_by, created_at, updated_at, since_seq) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                params![h.id, h.repo_id, h.url, serde_json::to_string(&h.events).unwrap_or_default(), h.secret, h.active as i64, h.created_by, h.created_at, h.updated_at, since],
+                "INSERT INTO repo_webhooks (id, repo_id, url, events, secret, secret_sealed, active, created_by, created_at, updated_at, since_seq) \
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                params![h.id, h.repo_id, h.url, serde_json::to_string(&h.events).unwrap_or_default(), secret, sealed, h.active as i64, h.created_by, h.created_at, h.updated_at, since],
             )?;
             Ok(since)
         })?)
@@ -851,13 +858,15 @@ impl Code {
             return Err(Error::Unprocessable(format!("at most {MAX_HOOKS_PER_REPO} webhooks per repo")));
         }
         let given = secret_of(input.get("secret"))?;
+        let secret = given.clone().unwrap_or_else(new_secret);
+        let id = new_id("wh");
         let t = now();
         let h = HookRow {
-            id: new_id("wh"),
+            secret: Kept::keep(self.ai.sealer.as_ref(), &id, &secret),
+            id,
             repo_id: r.id.clone(),
             url: url.to_string(),
             events: events_of(input.get("events"))?.unwrap_or_else(|| vec!["landed".into()]),
-            secret: given.clone().unwrap_or_else(new_secret),
             active: match input.get("active") {
                 None | Some(Value::Null) => true,
                 Some(Value::Bool(b)) => *b,
@@ -875,7 +884,7 @@ impl Code {
         let ping = self.queue_hook_delivery(r, &h, "ping", json!({ "zen": "keep the code rolling", "webhook": hook_json(&h) }))?;
         let mut v = json!({ "webhook": hook_json(&h), "ping": ping });
         if given.is_none() {
-            v["secret"] = json!(h.secret);
+            v["secret"] = json!(secret);
         }
         Ok(v)
     }
@@ -894,7 +903,7 @@ impl Code {
             h.events = e;
         }
         if let Some(s) = secret_of(patch.get("secret"))? {
-            h.secret = s;
+            h.secret = Kept::keep(self.ai.sealer.as_ref(), &h.id, &s);
         }
         match patch.get("active") {
             None | Some(Value::Null) => {}
