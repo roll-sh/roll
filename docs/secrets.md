@@ -4384,6 +4384,10 @@ the token it gets carries the same list.
 
 #### People (signed-in accounts)
 
+Project members with roles, replacing `OwnProjects` with a session grant, are designed in
+[members.md](members.md) (R1, not built yet).
+
+
 Someone signed in to roll (docs/accounts.md) who isn't an admin manages the secrets of the
 workspace projects they own (an admin's session is the operator):
 rolld's gate lets a session through `/v1/secrets` (`Access::UserOrCredential`: a session, or a
