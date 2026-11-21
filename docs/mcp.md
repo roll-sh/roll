@@ -623,6 +623,10 @@ previews are listed once those products are on.
 | `workspace_delete_project` | Delete a workspace project. Its resources stay; only the grouping goes. | `DELETE /v1/workspace/projects/{id}` |
 | `workspace_place_resource` | Put a resource on a project's canvas (or move it), at x, y. | `PUT /v1/workspace/projects/{id}/resources/{kind}/{ref}` |
 | `workspace_remove_resource` | Take a resource off a project's canvas (the resource itself stays). | `DELETE /v1/workspace/projects/{id}/resources/{kind}/{ref}` |
+| `workspace_list_members` | Who is in a workspace project: handle, role (viewer, developer, admin, owner), a developer's environments, who added them and when. Emails only for the project's admins. | `GET /v1/workspace/projects/{id}/members` |
+| `workspace_invite_member` | Invite an email address to a project with a role (never more than the caller's own). The answer has the invite link once; the person accepts it by signing in as that address. | `POST /v1/workspace/projects/{id}/invites` |
+| `workspace_set_member_role` | Change a member's role or a developer's environments. Both the old and the new role must be within the caller's own; the last owner can't be demoted. | `PATCH /v1/workspace/projects/{id}/members/{user}` |
+| `workspace_remove_member` | Take a person out of a project: their session and tokens stop reaching it at once, and their tokens confined to it are revoked. The last owner can't be removed. | `DELETE /v1/workspace/projects/{id}/members/{user}` |
 | `postgres_list_projects` | Postgres projects with their branches and endpoints. | `GET /v1/projects` |
 | `postgres_get_project` | A Postgres project with its branches and endpoints (connection strings need reveal). | `GET /v1/projects/{project}` |
 | `postgres_create_project` | A new serverless Postgres database (a project with a main branch and endpoint). | `POST /v1/projects` |

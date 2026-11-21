@@ -352,7 +352,8 @@ PATCH /v1/code/repos/{owner}/{repo}/review-settings {…Rules fields} → same; 
 ### Review apps
 
 ```
-ReviewApp = {id /* app_… */, owner, name, webhook_url, events: string[], repos: string[] /* full names */,
+ReviewApp = {id /* app_… */, owner, name, webhook_url /* scheme and host only, e.g. "https://hooks.example.com" */,
+             events: string[], repos: string[] /* full names */,
              all_repos: bool, required: bool, active: bool, created_at, updated_at}
 Delivery  = {id /* dl_… */, event, state: "pending" | "delivered" | "failed", attempts, last_status: number | null,
              last_error: string | null, last_response: string | null /* the start of the last attempt's
@@ -361,7 +362,8 @@ Delivery  = {id /* dl_… */, event, state: "pending" | "delivered" | "failed", 
 
 GET    /v1/code/owners/{owner}/review-apps → ReviewApp[]                 the owner (or admin)
 POST   /v1/code/owners/{owner}/review-apps {name, webhook_url, events?, repos?, required?}
-       → 201 {app: ReviewApp, token /* rla_…, shown once */, secret /* rls_…, shown once */}   409 name taken
+       → 201 {app: ReviewApp, token /* rla_…, shown once */, secret /* rls_…, shown once */}   409 name taken;
+       400 without ROLL_SECRET_KEY on the server (also for PATCH and rotate)
 GET    /v1/code/review-apps/{id} → ReviewApp · PATCH {name?, webhook_url?, events?, repos?, required?, active?} → ReviewApp
 DELETE /v1/code/review-apps/{id} → 204
 POST   /v1/code/review-apps/{id}/rotate → {token, secret}               the old ones stop working
@@ -384,11 +386,20 @@ reviews, threads, web}}` with headers `X-Roll-Event`, `X-Roll-Delivery`, `X-Roll
 are retried with backoff (8 attempts), then the delivery is `failed`. `urls.diff` is
 `GET …/compare/{base}...{head}?format=diff` (text/plain unified diffs).
 
-Signing secrets (review apps' and repo webhooks') are shown once, when made or rotated. With
-`ROLL_SECRET_KEY` on the server they're kept sealed with it, bound to their app or webhook, and
-secrets kept in the clear before the server had the key are sealed when it starts. Without the key
-they're kept in the clear, as before. Once sealed, a server started without the key (or with
-another one) can't sign: its deliveries fail with that error until the key is back.
+Review apps' and repo webhooks' URLs and signing secrets are credentials (a Slack or Discord
+incoming-webhook URL is enough to post), so they're kept only sealed with `ROLL_SECRET_KEY`, each
+bound to its app or webhook. Without the key on the server, making, changing or rotating one is a
+400 naming `ROLL_SECRET_KEY` (deleting one, its deliveries and redeliveries still work). The secret is
+shown once, when made or rotated; answers, pings, audit rows and delivery errors show a URL's scheme
+and host only (`"(sealed)"` on a server that can't open it). URLs and secrets an older server kept in
+the clear are sealed when a server with the key starts, and the URLs it wrote whole into
+`webhook_create` audit rows, pings and delivery errors are cut to their scheme and host, in one write
+that erases what it overwrote: on SQLite nothing of the old values is left in `control.db` or its
+`-wal` (`secure_delete`, then the WAL checkpointed and truncated). On Postgres the old row versions
+stay as dead tuples until autovacuum reuses their pages, and backups and WAL archives taken before
+still hold the clear values: rotate those URLs and secrets at their receivers if that matters. Once
+sealed, a server started without the key (or with another one) can't send: its deliveries fail with
+that error until the key is back.
 
 ## roll's reviewer
 
@@ -551,7 +562,8 @@ push    = {ref /* refs/heads/… */, before: sha | null /* null: created */, aft
 ## Webhooks and commit statuses
 
 ```
-Webhook = {id /* wh_… */, url, events: string[], active, created_by, created_at, updated_at}
+Webhook = {id /* wh_… */, url /* scheme and host only, e.g. "https://hooks.example.com" */, events: string[], active,
+           created_by, created_at, updated_at}
 Status  = {context, state: "pending" | "success" | "failure" | "error", target_url: string | null,
            description: string | null, creator, created_at, updated_at}
 
@@ -564,8 +576,8 @@ GET    /v1/code/repos/{owner}/{repo}/webhooks → Webhook[]                     
 POST   /v1/code/repos/{owner}/{repo}/webhooks {url, events?, secret?, active?}
        → 201 {webhook: Webhook, ping: delivery id, secret? /* only when roll generated it: shown once */}
        events: any of landed, change, review, thread, check, queue, work, preview, push, budget, or ["*"] (default
-       ["landed"]); secret: 16-200 characters (default: generated, rlw_…); 400 bad url/events/secret;
-       at most 20 per repo (422)
+       ["landed"]); secret: 16-200 characters (default: generated, rlw_…); 400 bad url/events/secret, or
+       no ROLL_SECRET_KEY on the server (also for PATCH); at most 20 per repo (422)
 GET    /v1/code/repos/{owner}/{repo}/webhooks/{id} → Webhook · PATCH {url?, events?, secret?, active?} → Webhook
 DELETE /v1/code/repos/{owner}/{repo}/webhooks/{id} → 204
 POST   /v1/code/repos/{owner}/{repo}/webhooks/{id}/ping → 202 Delivery
@@ -586,7 +598,7 @@ GET    /v1/code/repos/{owner}/{repo}/statuses/{rev} → {changeset, git_commit, 
   "{timestamp}.{body}")>`; anything but a 2xx is retried with backoff (8 attempts), then `failed`.
   The body is `{event, delivery, webhook, repo: {id, full_name, default_branch, visibility},
   data /* the event's data, as on /events */}`; `ping` is sent on creation and on request. The
-  secret is kept as review apps' are (sealed with `ROLL_SECRET_KEY` when the server has it).
+  URL and the secret are kept as review apps' are (sealed with `ROLL_SECRET_KEY`, "Review apps").
 - **`landed` never drops one.** Landings are read from the store's land log (written in each
   landing's own transaction) after a cursor kept in the control database, not from the in-memory
   broadcast: a burst larger than the broadcast channel, or a daemon that stopped between a landing

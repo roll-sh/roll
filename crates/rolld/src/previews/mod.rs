@@ -45,8 +45,8 @@ pub struct Running {
 
 /// Who may open a team-access project's previews: an account that still signs in, through the
 /// roll session that asked for the ticket (signed out, revoked or expired is a no), and is an
-/// admin or owns the project now (a disabled or deleted one, or one whose project went to
-/// someone else, is a no at once). A failed lookup is a no.
+/// admin account or the project's owner or admin now (a disabled or deleted one, or one removed
+/// or demoted, is a no at once). A failed lookup is a no.
 pub struct AccountsVisitors {
     pub accounts: Arc<roll_accounts::Accounts>,
     pub workspace: Arc<roll_workspace::Workspace>,
@@ -63,7 +63,9 @@ impl roll_previews::ports::Visitors for AccountsVisitors {
             return false;
         }
         match self.accounts.user(user) {
-            Ok(u) if !u.disabled => u.admin || self.workspace.get(roll_workspace::Scope::All, project).is_ok_and(|p| !p.owner.is_empty() && p.owner == user),
+            // An owner or admin of the project now (a member removed or demoted is a no at once),
+            // never by who made it.
+            Ok(u) if !u.disabled => u.admin || matches!(self.workspace.role_in(project, user), Ok(Some(roll_auth::roles::Role::Owner | roll_auth::roles::Role::Admin))),
             _ => false,
         }
     }

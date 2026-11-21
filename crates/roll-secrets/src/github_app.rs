@@ -205,6 +205,10 @@ impl LinkProvider for Provider {
         &[("token", Mode::Dynamic)]
     }
 
+    fn maker(&self, r#ref: &str) -> Option<(String, String)> {
+        self.db.read(|c| c.query_row("SELECT project_id, created_by FROM github_apps WHERE id = ?", [r#ref], |r| Ok((r.get(0)?, r.get(1)?))).optional()).ok().flatten()
+    }
+
     fn name(&self, r#ref: &str) -> Option<String> {
         self.db.read(|c| c.query_row("SELECT name FROM github_apps WHERE id = ?", [r#ref], |r| r.get::<_, String>(0)).optional()).ok().flatten()
     }
@@ -284,7 +288,7 @@ impl Secrets {
         let id = names::new_id("gha", 16);
         let sealed = dek.seal(&key_aad(project, &id), &key);
         let now = self.db.now_ms()?;
-        let app = GitHubApp { id: id.clone(), name: n.name, app_id: n.app_id, installation_id: n.installation_id, api_base, repositories: n.repositories, permissions: n.permissions, created_at: now, created_by: caller.principal.clone() };
+        let app = GitHubApp { id: id.clone(), name: n.name, app_id: n.app_id, installation_id: n.installation_id, api_base, repositories: n.repositories, permissions: n.permissions, created_at: now, created_by: caller.made_by().to_string() };
         self.db.write(|c| {
             if c.query_row("SELECT 1 FROM github_apps WHERE project_id = ? AND name = ?", [project, &app.name], |_| Ok(())).optional()?.is_some() {
                 return Err(Error::Conflict("exists", format!("a GitHub App named {} exists", app.name)));
