@@ -7,3 +7,10 @@ POST /v1/secrets/projects/{project}/transit key                                 
 POST /v1/secrets/projects/{project}/transit vault_version                        goes with a brought key (above)
 POST /v1/secrets/projects/{project}/transit/{name}/rotate key                    key material brought in: a credential in a tool's arguments (roll makes one instead)
 POST /v1/secrets/projects/{project}/transit/{name}/rotate vault_version          goes with a brought key (above)
+POST /v1/secrets/projects/{project}/transit/{name}/encrypt items                   the batch form: a tool call does one, call it once per item
+POST /v1/secrets/projects/{project}/transit/{name}/decrypt items                   the batch form: a tool call does one, call it once per item
+POST /v1/secrets/projects/{project}/transit/{name}/rewrap items                    the batch form: a tool call does one, call it once per item
+POST /v1/secrets/projects/{project}/transit/{name}/sign items                      the batch form: a tool call does one, call it once per item
+POST /v1/secrets/projects/{project}/transit/{name}/verify items                    the batch form: a tool call does one, call it once per item
+POST /v1/secrets/projects/{project}/transit/{name}/hmac items                      the batch form: a tool call does one, call it once per item
+POST /v1/secrets/projects/{project}/transit/{name}/hmac/verify items               the batch form: a tool call does one, call it once per item
