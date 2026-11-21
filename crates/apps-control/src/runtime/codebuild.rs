@@ -35,7 +35,7 @@ use super::{BuildJob, Builder};
 use crate::logs::{LogSink, Stream};
 use anyhow::{Context, bail};
 use async_trait::async_trait;
-use aws_sdk_codebuild::types::{Build, EnvironmentVariable, EnvironmentVariableType, SourceType, StatusType};
+use aws_sdk_codebuild::types::{Build, ComputeType, EnvironmentVariable, EnvironmentVariableType, SourceType, StatusType};
 use std::io::Write;
 use std::path::Path;
 use std::sync::Arc;
@@ -293,13 +293,19 @@ impl CodeBuild {
             None => Vec::new(),
         };
         let spec = |registry: &str, repo_uri: &str| buildspec(registry, repo_uri, tag, &job.dockerfile, names, job.own_dockerfile.then_some(&args[..]), &job.env_hash, job.no_cache, job.target.as_deref());
-        self.run_spec(&job.service, tag, spec, env, job.timeout, log, cancel, source).await
+        // `build.size`: CodeBuild's compute type (the project's own, small, by default).
+        let compute = match job.cpu {
+            c if c >= 8.0 => Some(ComputeType::BuildGeneral1Large),
+            c if c >= 4.0 => Some(ComputeType::BuildGeneral1Medium),
+            _ => None,
+        };
+        self.run_spec(&job.service, tag, spec, env, job.timeout, log, cancel, source, compute).await
     }
 
     /// A CodeBuild run of `spec` (given the registry and the service's repository) on the zip at
     /// `source`, to its end: the pushed `<repo>:<tag>` by its digest.
     #[allow(clippy::too_many_arguments)]
-    async fn run_spec(&self, service: &str, tag: &str, spec: impl FnOnce(&str, &str) -> String, env: Vec<EnvironmentVariable>, timeout: std::time::Duration, log: &LogSink, cancel: &CancellationToken, source: &str) -> anyhow::Result<String> {
+    async fn run_spec(&self, service: &str, tag: &str, spec: impl FnOnce(&str, &str) -> String, env: Vec<EnvironmentVariable>, timeout: std::time::Duration, log: &LogSink, cancel: &CancellationToken, source: &str, compute: Option<ComputeType>) -> anyhow::Result<String> {
         let repo_uri = self.repository(service).await?;
         let registry = repo_uri.split('/').next().unwrap_or(&repo_uri).to_string();
         let spec = spec(&registry, &repo_uri);
@@ -315,6 +321,7 @@ impl CodeBuild {
             .privileged_mode_override(true)
             .timeout_in_minutes_override(minutes)
             .set_environment_variables_override(Some(env).filter(|e| !e.is_empty()))
+            .set_compute_type_override(compute)
             .send()
             .await
             .map_err(|e| anyhow::anyhow!("StartBuild: {}", aws_sdk_codebuild::error::DisplayErrorContext(e)))?;
@@ -378,6 +385,10 @@ impl CodeBuild {
 
 #[async_trait]
 impl Builder for CodeBuild {
+    fn sizes_builds(&self) -> bool {
+        true
+    }
+
     fn name(&self) -> &'static str {
         "codebuild"
     }
@@ -443,7 +454,7 @@ impl Builder for CodeBuild {
             tokio::task::spawn_blocking(move || zip_dir(&d, &f)).await??;
             self.bucket.put_file(&key, &file).await?;
             let spec = |registry: &str, repo_uri: &str| load_spec(registry, repo_uri, dep);
-            self.run_spec(&service, dep, spec, Vec::new(), std::time::Duration::from_secs(1800), log, &CancellationToken::new(), &key).await
+            self.run_spec(&service, dep, spec, Vec::new(), std::time::Duration::from_secs(1800), log, &CancellationToken::new(), &key, None).await
         }
         .await;
         let _ = tokio::fs::remove_dir_all(&dir).await;

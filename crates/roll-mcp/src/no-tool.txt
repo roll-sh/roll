@@ -16,6 +16,7 @@ POST /v1/access/tokens/{id}/tighten                                            a
 GET /v1/access/tokens/{id}/tools                                               the dashboard's (what a token's connection lists)
 PUT /v1/apps/projects/{project}/status-page                                    a person's call (it makes the project's service names public)
 POST /v1/apps/services                                                         covered by apps_create_service (POST /v1/apps/projects/{project}/services)
+POST /v1/apps/services/{id}/environments/{env}/deploys/{dep}/approve           a person's call (a second person's approval; a token's never counts)
 GET /v1/apps/services/{id}/changes                                             the dashboard's (a server-sent change stream)
 GET /v1/apps/services/{id}/environments/{env}/files                            interactive (a shell, files, a forward): an admin's, live
 PUT /v1/apps/services/{id}/environments/{env}/files                            interactive (a shell, files, a forward): an admin's, live
@@ -166,7 +167,6 @@ DELETE /v1/secrets/projects/{project}/syncs/{id}                               a
 PATCH /v1/secrets/projects/{project}/syncs/{id}                                an outside integration's setup: an admin's, with its credentials
 POST /v1/secrets/projects/{project}/syncs/{id}/run                             an outside integration's setup: an admin's, with its credentials
 DELETE /v1/secrets/projects/{project}/transit/{name}                           a person's call: every ciphertext of the key stops opening
-GET /v1/secrets/projects/{project}/unstored/{fingerprint}                      no tool yet: a found credential's kind, place and liveness, never its value (#487)
 POST /v1/secrets/projects/{project}/validity                                   a person's call: it contacts outside providers (#487)
 GET /v1/secrets/whoami                                                         the operator's (health, migrations, process control)
 * /v1/storage/accounts/{id}                                                    an outside integration's setup: an admin's, with its credentials

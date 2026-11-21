@@ -374,7 +374,9 @@ roll implements the MCP authorization spec (2025-06-18 and 2025-11-25) with OAut
     version roll doesn't speak is 400 `UnsupportedProtocolVersion` (`-32022`) with `supported`; an
     unknown method is 404 with `-32601`. It's one message, never a batch. A resource that isn't
     there is `-32602` (Invalid Params, SEP-2164); the handshake revisions keep their `-32002`.
-  - `server/discover` answers the versions, capabilities and instructions. Every result has
+  - `server/discover` answers the versions, capabilities and instructions, and its `serverInfo`
+    has roll's icon (the Horizon mark, as `initialize`'s does); other answers name the server
+    without it. Every result has
     `resultType` and `_meta["io.modelcontextprotocol/serverInfo"]`; lists (and discover) have
     `ttlMs: 60000` and `cacheScope: "private"`: a token's tools are its own, and its rules can
     change.
@@ -927,6 +929,7 @@ previews are listed once those products are on.
 | `secrets_end_consumer_placeholders` | End every live placeholder a consumer holds. | `DELETE /v1/secrets/projects/{project}/placeholders?consumer=` |
 | `secrets_list_leases` | A project's live leases on dynamic credentials, never a credential. | `GET /v1/secrets/projects/{project}/leases` |
 | `secrets_end_lease` | End a dynamic credential's lease now (one's own with reveal). | `DELETE /v1/secrets/projects/{project}/leases/{id}` |
+| `secrets_credential_check` | A credential found in code that the project doesn't hold: its kind, whether it was live when last checked, its account and rotator (never its value). | `GET /v1/secrets/projects/{project}/unstored/{fingerprint}` |
 | `secrets_get_values` | All of an environment's values at once, resolved, as one reveal (`dynamic=false` leaves dynamic keys out). | `GET /v1/secrets/projects/{project}/environments/{env}/values` |
 | `secrets_health` | What needs fixing in a project's secrets, by name, in the environments you may read: expired, missing, exposed, weak, expiring, stale, unread, rotations or revocations failing, certificates expiring, public (`code`: keys no repository mentions). | `GET /v1/secrets/projects/{project}/health` |
 | `secrets_findings` | Every project's secrets health findings you may read. | `GET /v1/secrets/findings` |
@@ -1081,8 +1084,12 @@ waits on a sibling PR reaching main is last.
    already in: discover, listen, `resultType`, `ttlMs`, `Mcp-Name`, the renumbered errors, `iss`,
    client ID metadata documents beside dynamic registration), and workflows for previews, tasks,
    queues and streams (`review_preview`, `clear_task_backlog`, `drain_queue`,
-   `find_consumer_lag`; #560), search mode's ranking (#561: 73 everyday queries), and apps'
-   month by service as `apps_project_usage` once apps #562 landed (this PR). Then, as each lands: search's browser keys
+   `find_consumer_lag`; #560), search mode's ranking (#561: 73 everyday queries), apps' month
+   by service as `apps_project_usage` (#564) and the `review_costs` workflow (#565), and roll's
+   icon in `server/discover` (this PR). Ready on branches for when their PRs land:
+   `feature/roll-mcp-placeholders` (#520's three tools) and `feature/roll-mcp-unstored` (#487's
+   `secrets_credential_check`); #358's browser-key tools as a patch, since #358 conflicts with
+   main. Then, as each lands: search's browser keys
    (#358: list and revoke as tools, making one stays a credential), secrets' found-credential view
    (#487's `unstored`) and placeholders (#520: the list as a read, the revokes destructive; binding a
    key to hosts stays a person's), project members (#501's own tools; its other routes are
@@ -1247,8 +1254,8 @@ waits on a sibling PR reaching main is last.
    `WWW-Authenticate: Bearer error="insufficient_scope", scope=…` so the client reopens roll's
    consent screen for the refused rule (as the refusal's widen link proposes it now). Not yet: today
    it would take the refusal's explanation and `access_request_access` away from the main clients,
-   which don't step up (Claude Code's 403 path is open as anthropics/claude-code#44652, Codex's as
-   openai/codex#20518; ChatGPT reads `_meta["mcp/www_authenticate"]` on an in-band error). roll's
+   which don't step up (Claude Code's anthropics/claude-code#44652 was closed as stale on
+   2026-06-25, not fixed; Codex's openai/codex#20518 is open, rechecked 2026-11-21; ChatGPT reads `_meta["mcp/www_authenticate"]` on an in-band error). roll's
    unit is a rule chosen at consent, not a scope, so the challenge's scope would name the rule
    (`roll:add:<product>:<action>…`) for the consent screen to propose, never grant by itself.
    Recheck those issues each pass.
