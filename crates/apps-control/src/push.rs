@@ -31,6 +31,10 @@ const BATCH: usize = 100;
 const CONSUMER: &str = "roll-apps-";
 /// The longest wait between tries.
 const MAX_BACKOFF: Duration = Duration::from_secs(60);
+/// How long a loop works on what one read handed it: under the 60 s lease rolld reads with
+/// (`RollResources::read_group`), so a record refused past it is read again from the committed
+/// offset by a fresh consumer, never after a sibling took the partition and delivered past it.
+const HOLD: Duration = Duration::from_secs(45);
 /// What of an answer's body is read (and dropped) before the next.
 const ANSWER_BYTES: usize = 64 * 1024;
 
@@ -102,9 +106,12 @@ struct Wanted {
     digest: String,
     rule: Push,
     service: String,
+    project: String,
     env: String,
     host: String,
     secret: Option<String>,
+    /// The environment's URL: an `oidc` rule's tokens name it as their audience.
+    aud: String,
 }
 
 /// The wait before try `attempt + 1` (1 s, doubling, a minute at most).
@@ -199,7 +206,8 @@ impl Apps {
                         continue;
                     }
                     self.pushers.off.lock().remove(&key);
-                    let host = url::Url::parse(&self.url(&e.slug)).ok().and_then(|u| u.host_str().map(str::to_string)).unwrap_or_default();
+                    let aud = self.url(&e.slug);
+                    let host = url::Url::parse(&aud).ok().and_then(|u| u.host_str().map(str::to_string)).unwrap_or_default();
                     // A changed rule, address or secret starts the loop again with it.
                     let digest = {
                         use sha2::Digest;
@@ -208,7 +216,7 @@ impl Apps {
                     // A consumer a loop: the broker gives each a fair share of the partitions, so a
                     // record that's refused holds only its own partition's.
                     for i in 0..rule.max_in_flight.unwrap_or(IN_FLIGHT) {
-                        let w = Wanted { digest: digest.clone(), rule: rule.clone(), service: svc.id.clone(), env: e.name.clone(), host: host.clone(), secret: secret.clone() };
+                        let w = Wanted { digest: digest.clone(), rule: rule.clone(), service: svc.id.clone(), project: svc.project.clone(), env: e.name.clone(), host: host.clone(), secret: secret.clone(), aud: aud.clone() };
                         wanted.insert(format!("{key}#{i}"), w);
                     }
                 }
@@ -228,27 +236,34 @@ impl Apps {
             }
             let this = self.clone();
             let k = key.clone();
-            let h = tokio::spawn(async move { this.deliver(k, w.rule, w.service, w.env, w.host, w.secret).await }).abort_handle();
-            running.insert(key, (w.digest, h));
+            let digest = w.digest.clone();
+            let h = tokio::spawn(async move { this.deliver(k, w).await }).abort_handle();
+            running.insert(key, (digest, h));
         }
     }
 
     /// One rule's loop: read, POST each record until it's taken (or dead-lettered), commit.
-    async fn deliver(self: Arc<Self>, key: String, rule: Push, service: String, env: String, host: String, secret: Option<String>) {
+    async fn deliver(self: Arc<Self>, key: String, w: Wanted) {
+        let Wanted { rule, service, project, env, host, secret, aud, .. } = w;
         let log = self.logs.sink(format!("env:{service}/{env}"), Stream::System);
         let resources = self.deps.resources.clone();
         let timeout = Duration::from_secs(rule.timeout_s.unwrap_or(30) as u64);
         let mut read_failures = 0u32;
+        let mut token_failures = 0u32;
         let stats = rule_key(&service, &env, &rule);
         let note = |f: &dyn Fn(&mut Stats)| f(self.pushers.stats.lock().entry(stats.clone()).or_default());
         // A consumer of its own, the last loop's left (its partitions free at once, unless a read
         // of it is still out: then they wait out its lease).
         let mut consumer = self.new_consumer(&key, &rule).await;
-        loop {
+        // A record's tries so far, kept when its batch is read again (its dead letter still
+        // comes after `max_attempts`).
+        let mut tries: HashMap<(i32, i64), u32> = HashMap::new();
+        'read: loop {
             // Another node took the service: it delivers from here (this loop stops at its pass).
             if !self.owns(&service) {
                 return;
             }
+            let read_at = std::time::Instant::now();
             let records = match resources.read_group(&rule.stream, &rule.topic, &rule.group, &consumer, WAIT_MS, BATCH).await {
                 Ok(r) => {
                     read_failures = 0;
@@ -266,12 +281,40 @@ impl Apps {
                 }
             };
             for r in records {
-                let mut attempt = 1;
+                let mut attempt = tries.remove(&(r.partition, r.offset)).unwrap_or(1);
                 loop {
                     if !self.owns(&service) {
                         return;
                     }
-                    let Some(req) = request(&rule, &host, &r, attempt, secret.as_deref()) else { break };
+                    // `oidc`: roll's token for the service (cached, a fresh one well before it ends),
+                    // else the environment's CRON_SECRET.
+                    let bearer = match rule.auth.as_deref() {
+                        Some(_) => match self.service_token(&project, &service, &env, &aud).await {
+                            Ok(Some((jwt, _))) => Ok(Some(jwt)),
+                            Ok(None) => Err("roll issues no token for this environment".to_string()),
+                            Err(e) => Err(format!("its token: {e:#}")),
+                        },
+                        None => Ok(secret.clone()),
+                    };
+                    // No token: nothing is POSTed (or counted as a try); the batch is let go and
+                    // read again once there's one.
+                    let bearer = match bearer {
+                        Ok(b) => {
+                            token_failures = 0;
+                            b
+                        }
+                        Err(why) => {
+                            token_failures += 1;
+                            if token_failures == 1 {
+                                log.line(format!("push {}: {why}; trying again", rule.topic));
+                            }
+                            tries.insert((r.partition, r.offset), attempt);
+                            tokio::time::sleep(backoff(token_failures)).await;
+                            consumer = self.new_consumer(&key, &rule).await;
+                            continue 'read;
+                        }
+                    };
+                    let Some(req) = request(&rule, &host, &r, attempt, bearer.as_deref()) else { break };
                     let status = tokio::time::timeout(timeout, async {
                         let resp = crate::public::proxy(self.clone(), &service, &env, None, req).await;
                         let s = resp.status().as_u16();
@@ -319,6 +362,14 @@ impl Apps {
                         }
                     }
                     let wait = backoff(attempt);
+                    // Its lease would lapse before the next try: let the batch go and read it again
+                    // (this record first) as a fresh consumer.
+                    if read_at.elapsed() + wait >= HOLD {
+                        tries.insert((r.partition, r.offset), attempt + 1);
+                        tokio::time::sleep(wait).await;
+                        consumer = self.new_consumer(&key, &rule).await;
+                        continue 'read;
+                    }
                     // Said on the first failure and then each minute's worth, not every try.
                     if attempt == 1 || wait == MAX_BACKOFF {
                         log.line(format!("push {}: {} {why} for offset {} of partition {}; trying again in {} s", rule.topic, rule.path, r.offset, r.partition, wait.as_secs()));
@@ -394,7 +445,7 @@ mod tests {
 
     #[test]
     fn a_record_is_a_cloudevent_with_its_value() {
-        let rule = Push { stream: "st_aaaaaaaaaaaa".into(), topic: "orders".into(), group: "g".into(), path: "/events".into(), environment: None, dead_letter: None, max_attempts: None, timeout_s: None, max_in_flight: None };
+        let rule = Push { stream: "st_aaaaaaaaaaaa".into(), topic: "orders".into(), group: "g".into(), path: "/events".into(), environment: None, dead_letter: None, max_attempts: None, timeout_s: None, max_in_flight: None, auth: None };
         let headers = vec![("content-type".into(), b"application/json".to_vec()), ("trace id".into(), b"x".to_vec()), ("tenant".into(), b"acme".to_vec()), ("id".into(), b"forged".to_vec())];
         let r = StreamRecord { partition: 2, offset: 41, timestamp: 7, key: Some(b"k1".to_vec()), value: Some(b"{\"id\":1}".to_vec()), headers };
         let req = request(&rule, "web.roll.test", &r, 3, Some("s3cret")).unwrap();

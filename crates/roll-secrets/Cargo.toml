@@ -48,4 +48,7 @@ instant-acme.workspace = true
 tempfile.workspace = true
 tokio-rustls.workspace = true
 tower.workspace = true
+# The interception CA's name constraints, as a TLS client checks them (intercept.rs).
+rustls-pki-types.workspace = true
+rustls-webpki.workspace = true
 x509-parser = { workspace = true, features = ["verify"] }

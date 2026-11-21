@@ -6,7 +6,8 @@
 //! answer, `FAKE_SLOW_MS` delays every answer (requests pile up; one still waiting when the instance
 //! stops answers 502, as a killed process's would; `/sleep/<ms>` is one such request), `FAKE_MISSING=<prefix>` answers
 //! 404 for paths under it, `FAKE_CACHE=<value>` answers with it as `Cache-Control` (and `Cache-Tag: <the path's first
-//! segment>, all`), logs a pushed record's `ce-id` (`got event <id> (try <n>, <type>)`), and counts
+//! segment>, all`), logs a pushed record's `ce-id` (`got event <id> (try <n>, <type>)`), with `FAKE_LOG_AUTH` logs a
+//! request's bearer (`bearer <path> <token>`), and counts
 //! the requests it answers at `/count`, `FAKE_EXIT=<code>` makes it a
 //! job that exits with that code (cron runs, workers). The fake builder fails a build whose tree
 //! has a file `FAIL_BUILD`, and takes as many milliseconds as a file `SLOW_BUILD` says.
@@ -253,6 +254,7 @@ async fn serve(spec: InstanceSpec, listener: tokio::net::TcpListener, log: LogSi
     let slow = var(&spec, "FAKE_SLOW_MS").and_then(|v| v.parse().ok()).map(Duration::from_millis);
     let missing = var(&spec, "FAKE_MISSING").map(str::to_string);
     let cache = var(&spec, "FAKE_CACHE").and_then(|v| axum::http::HeaderValue::from_str(v).ok());
+    let log_auth = var(&spec, "FAKE_LOG_AUTH").is_some();
     let answered = Arc::new(std::sync::atomic::AtomicU64::new(0));
     let echo: Vec<(String, String)> = var(&spec, "FAKE_ECHO")
         .map(|names| names.split(',').filter_map(|n| var(&spec, n).map(|v| (n.to_string(), v.to_string()))).collect())
@@ -266,6 +268,10 @@ async fn serve(spec: InstanceSpec, listener: tokio::net::TcpListener, log: LogSi
         let (name, dep, echo, sick, missing, killed, cache, answered, out) = (name.clone(), dep.clone(), echo.clone(), sick.clone(), missing.clone(), kill.clone(), cache.clone(), answered.clone(), log.clone());
         async move {
             use axum::response::IntoResponse;
+            // `FAKE_LOG_AUTH`: the bearer a request carried, said (`bearer <path> <token>`).
+            if let Some(b) = req.headers().get("authorization").and_then(|v| v.to_str().ok()).and_then(|v| v.strip_prefix("Bearer ")).filter(|_| log_auth) {
+                out.line(format!("bearer {} {b}", req.uri().path()));
+            }
             // A pushed record (a CloudEvent): said in its output, as an app would log it.
             if let Some(id) = req.headers().get("ce-id").and_then(|v| v.to_str().ok()) {
                 let attempt = req.headers().get("ce-rollattempt").and_then(|v| v.to_str().ok()).unwrap_or("");

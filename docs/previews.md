@@ -127,6 +127,16 @@ idle instances. Only Neon branches cheaply, and only Postgres. roll previews:
   goes). For comparing before and after. A trusted change's only (an approval is for one head),
   `roll.toml` services only (roll apps runs its own), and old code on migrated data can break.
   They're on the sheet, `roll preview show`, the change and the pull request comment.
+  A link to one that's no longer kept says so: its host answers 410 with a page naming the
+  service and the push and linking the service's latest (on roll's preview domain and on a
+  project's own, there only for that project's previews; the latest 30 a preview evicted, gone
+  with the preview), not a 404 that reads as a broken preview.
+- **From the pull request** (Bunnyshell's and Uffizzi's comment commands): someone who can
+  write to the repo comments `@roll preview redeploy` (build and deploy it again), `reset` (its
+  data branched again from the parents), `wake`, `sleep` or `keep [hours]` (past its TTL, 24 when
+  not said, at most 720); roll answers in the conversation with what it did, and the preview's
+  activity names who asked ("@octo asked for its data reset from the pull request"). Readers and
+  strangers get nothing, as with every `@roll` command (roll code's GitHub permission check).
 - **Warm after a push**: once a new head is deployed, the change's own services are woken (after
   the pass, a few at a time), so the first visit, usually the pull request comment's link,
   doesn't wait for a cold start; they sleep again after `sleep_after` unused. Not a preview
@@ -419,7 +429,11 @@ behind the `Apps` trait:
   sign in, lost the project or its reveal, a revoked token, a key made sensitive since or a
   protected environment for an untrusted preview leaves it out, said once in the preview's
   activity ("references left out (who chose them can't now): K: …"). Saving the rules again as
-  someone who may brings it back. A reference to the base needs none of this, but changing the base needs its writer's
+  someone who may brings it back. A service start asks too: one whose reference lost its writer
+  since the last converge waits for the converge that leaves it out (`refs_still_allowed`), so it
+  never reaches a service in between. A Git URL service's preview is read as that service (its
+  place on the canvas), every other preview as its repo. A deleted preview's own references'
+  setters go with it. A reference to the base needs none of this, but changing the base needs its writer's
   reveal on the new one (every preview's code then reads it). The rules are written only as they
   were checked: another request's change in between is a 409.
   Moving the base checks the references that named the old one as new. A value that reads as a
@@ -433,12 +447,13 @@ behind the `Apps` trait:
   the rule, saved with the rest. The value then lives in roll secrets only. A protected base refuses
   the write (`approval_required`): the button opens a change request with it instead (as roll
   secrets' Find does), and the rule keeps its value and says so until it's approved.
-  Only the rules' own references (checked when saved) go to roll secrets as references, as their
-  own input to rolld's ensure; every other value previews write, a preview's own variables and
-  anything stored before included, is plain text: its `${` is escaped, so it's never a reference
-  by accident and reads back as written. A
-  preview's own variables refuse a reference (400) until roll secrets' maker-checked binding for
-  references a person chooses (`bind_ref`, its #407). Renaming an environment rewrites roll
+  Only references someone was checked for go to roll secrets as references, as their own input
+  to rolld's ensure: the rules' (when saved) and a preview's own variables' (`PUT …/{id}/env`:
+  its setter's reveal on that folder, 403 otherwise; the base needs none; kept as its writer
+  under `preview:<id>` in `env_refs`, which saving the rules leaves alone). Both are read as their
+  writer at every converge (`digest_as`, above). Every other value previews write, anything
+  stored before included, is plain text: its `${` is escaped, so it's never a reference by
+  accident and reads back as written. A look-alike (` roll://…`, `ROLL://…`) is refused (400). Renaming an environment rewrites roll
   secrets' references, not these rules: the next converge logs the old name as one that doesn't
   resolve. `a_roll_reference_becomes_roll_secrets_own_and_a_plain_value_stays_plain`,
   `a_rules_reference_to_another_environment_needs_its_writers_reveal_there`;
@@ -1424,7 +1439,7 @@ and admins see every project.
 | `GET /v1/previews/{id}/screenshot.png?exp=&sig=` | | `image/png` behind a signed, expiring link, without credentials (403 otherwise): the pull request comment's image; `&diff=base` under its own signature, the diff against main |
 | `GET`/`POST /v1/previews/{id}/shares` | `{hours}` (1–720) for a new one | `Share[]` (never a token), or 201 `Share` with `url`, the only time the link is shown; 409 for a public preview or past 20 live ones |
 | `DELETE /v1/previews/{id}/shares/{share}` | | 204: the link stops at the visitor's next request |
-| `GET`/`PUT /v1/previews/{id}/env` | `{vars: {NAME: value \| null}}` (`null` removes; at most 100, 32 KiB each) | `{vars}`: the preview's own variables; its services redeploy with them |
+| `GET`/`PUT /v1/previews/{id}/env` | `{vars: {NAME: value \| null}}` (`null` removes; at most 100, 32 KiB each; a value may be `roll://ENV[/folder]/KEY`) | `{vars}`: the preview's own variables; its services redeploy with them. 403 for a reference to an environment other than the base without the caller's reveal on its folder; 400 for a malformed one or a look-alike |
 | `POST /v1/previews/{id}/approve` | `{head}` (the head looked at) | `Preview`: that head of a fork's pull request on a Git URL service runs (`pull.approved_head`); the next push waits again. 409 when the preview moved on to another head or isn't a fork's pull request. Admin in the permissions catalogue, and no MCP tool: letting outside code run with the project's data is a person's call |
 | `POST /v1/previews/{id}/visit` | `{to}` (a URL at one of the preview's service hosts) | `{url}`: a one-use way into a team-access preview (`access: "team"`) at `to`, good for a minute, for a person signed in to roll (a session; a token is a 403). 400 when the project's previews aren't `team` or `to` isn't the preview's; 403 for a person who may not open the project. Operator-only in the permissions catalogue: no grant ever gives one |
 | `POST /v1/previews/{id}/keep` | `{hours}` (0–720; 0 releases) | `Preview`: kept past its TTL until then (`kept_until`); a landed or closed change still ends it |

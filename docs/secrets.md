@@ -1027,7 +1027,8 @@ key is only flagged: it doesn't stop `roll run`, a deploy or a check.
 notice a day with its health findings (see Health): expired, missing, exposed, expiring and stale
 keys, worst first, each with its detail (`findings`), up to 10 per kind in the text, and a link to
 the Health view. Weak values aren't in it (that says something about a value, and a channel's
-readers needn't be ones who may reveal it), nor unread ones. Stale needs a `max_age_days`; live
+readers needn't be ones who may reveal it), nor unread ones; `decoy_used` is only for a URL a
+session or the operator set, and a decoy is stale as any key is (see Decoys). Stale needs a `max_age_days`; live
 and dynamic links never count as stale (they change on their own), managed ones do. The same
 outbox and retries as approval notices carry it; two nodes never both send it, since the day is
 claimed in the same write that queues the notice, and an environment with nothing to say is
@@ -1083,8 +1084,8 @@ is one click.
 
 `GET …/health` (`roll secrets health`, the dashboard's Health view) is every finding above in
 every standard environment and folder at once, worst first, so none waits on someone opening the
-right folder: `decoy_used` (a decoy key's credential was used; only the project's admins see it, see
-Decoys), `expired`, `rotation_failing` (a managed key's scheduled rotation fails: the
+right folder: `decoy_used` (a decoy key's credential was used; only the project's admins see it, signed in or
+the operator, see Decoys), `expired`, `rotation_failing` (a managed key's scheduled rotation fails: the
 database, vendor, product or rotator refused or didn't answer; the detail says why, the old
 credential keeps working, and the sweeper tries again; cleared by the next rotation that works),
 `revoke_failing` (a credential roll retired, or a lease that ended, that it couldn't revoke yet: it
@@ -3129,6 +3130,93 @@ AWS access keys, GitHub, Slack, Stripe live, Google, Anthropic and OpenAI keys, 
   Until the author changes the code, the change adds a value roll secrets now holds, so it reads as
   a `secret_leak` on its next head.
 
+#### Is it live? (validity checks)
+
+A found credential may already be revoked, or may be the key production runs on. As GitGuardian's
+validity checks do, roll secrets can ask the credential's provider whether it still works, so a
+live one is handled first. It contacts the provider, so it's off until a project's admin turns it
+on (`PATCH /v1/secrets/projects/{project} {validity_checks: "on"}`, `roll secrets validity-checks
+on`, or Validity checks in the project's environments settings), audited as `validity.checks`.
+
+- **What's checked.** Nothing that would trip a canary. For each kind:
+
+  | Kind | How | Account it names |
+  | --- | --- | --- |
+  | AWS access key | read offline from the key id, never tried (below) | the AWS account |
+  | GitHub token | `GET https://api.github.com/user` | the login |
+  | Stripe live key | `GET https://api.stripe.com/v1/balance` | |
+  | Slack token | `POST https://slack.com/api/auth.test` | the team id |
+  | OpenAI API key | `GET https://api.openai.com/v1/models` | |
+  | Anthropic API key | `GET https://api.anthropic.com/v1/models` | |
+  | roll's own tokens (every roll prefix) | neither tried nor looked up: one answer for all | |
+
+  - **AWS isn't tried by default.** `sts:GetCallerIdentity` is exactly what AWS canary tokens
+    (canarytokens.org's, GitGuardian's) alert on. An access key id carries its account: after the
+    `AKIA`/`ASIA` prefix it's base32, and bits 1–40 of its first 6 bytes are the account number
+    (`credentials::aws_account`; ids whose fifth character is `I` or `J` predate that and say
+    nothing). So the answer is `unknown` with that account, and nobody is asked. An operator who
+    wants AWS keys tried sets `ROLL_SECRETS_VALIDITY_AWS_LIVE=on`. rolld then signs a
+    `GetCallerIdentity` to `https://sts.amazonaws.com/` with the found pair: the secret access key
+    next to the key id, which is the nearest 40-character base64 word within 5 lines
+    (`credentials::aws_secret_near`). It never sends one for an `ASIA…` session key, a key with no
+    pair, or a canary's.
+  - **Canaries.** A key whose account is one canarytokens.org's AWS tokens (and their look-alikes)
+    are issued from is never tried. That's a bundled list of the accounts public secret scanners
+    know. The operator adds their own with `ROLL_SECRETS_VALIDITY_CANARIES` (`aws:123456789012`,
+    any provider's `provider:account`, or a credential by fingerprint, `sha256:…`; commas or spaces
+    between). A canary's answer is `unknown`, saying so.
+  - **roll's own tokens** are neither tried nor looked up. Every roll-prefixed credential (`rlt_`,
+    `rlo_` and every other roll prefix, decoys included) gets one answer: `unknown`, "a roll token:
+    roll revokes it when it lands". A roll token pushed to roll code is revoked when it lands
+    anyway (roll-access's `revoke_leaked`), so a lookup would add nothing. And with one answer for
+    all, nothing tells a decoy ("Decoys") from a real token. Nothing is kept or audited for them.
+
+  Google API keys, private keys and database URLs aren't checked.
+- **The answer** is `live` (accepted), `invalid` (refused: revoked, deleted or never real) or
+  `unknown` (not tried, a canary, a redirect, a rate limit, or an answer that says neither; `why`
+  says which), plus the account id where it's known. A Stripe restricted key that isn't allowed to
+  read the balance (403) still authenticated, so it's live. With live AWS checks on, a key id whose
+  found secret doesn't sign for it (`SignatureDoesNotMatch`) is unknown, not invalid.
+- **The rules.** Hosts are fixed in `crates/roll-secrets/src/validity.rs`, never configured. The
+  request goes through rolld's guarded client (public addresses only, no redirects, a 15-second
+  timeout, at most 64 KiB of the answer read) and carries the credential and the headers its API
+  needs (`Accept`, Anthropic's `anthropic-version`), nothing else. Each credential is checked once
+  per fingerprint: the answer is kept a day (an `unknown` one an hour), per project, and a project
+  gets at most 100 checks an hour. A check is claimed in a write first, so two callers or two nodes
+  never ask twice; the request goes out after that write, outside any transaction, and the answer
+  is stored with its `secrets.validity` audit row (kind, fingerprint, result and account) in
+  another. An AWS account read offline and a roll token's answer ask nobody and aren't kept. The value is never stored,
+  logged, audited or put in an error.
+- **Where it shows.** On a change, roll code asks in background work after it finds the
+  credentials (only those kinds, only on the repo's own changes, never a fork's, which would make
+  the notice an oracle for anyone's key; only when one of the projects with the repo on its canvas
+  that may reach it has the checks on), and the `secret_unstored` notice says what came back once it has:
+  a live one ranks first and reads `adds what looks like an AWS access key at deploy.py:2 (live: its
+  provider accepted it, account 123456789012), which roll secrets doesn't hold: rotate it, then
+  store it as …`; a refused one says `(revoked or invalid, its provider said)`. The notice carries
+  `validity: {fingerprint, result, account?, checked_at?, rotator?}`, and the change page marks a
+  live one. An AWS key's notice names its account: `(account 123456789012, not tried)`.
+  `GET …/unstored/{fingerprint}` answers the kept result, and `roll secrets scan` prints it
+  (below).
+- **Rotating it.** When the credential is live and roll has a rotator for its kind, the answer's
+  `rotator` names it and the change page links to where it's set up: `aws-iam` (roll secrets
+  rotating an IAM user's keys, "AWS" above; only with live AWS checks on) and `github-app` (a project's GitHub App tokens instead
+  of a personal token, "GitHub App tokens"). Nothing is rotated for you.
+- **Tests.** Fake providers only:
+  - `validity_checks_ask_each_provider_once_and_only_when_an_admin_turned_them_on`
+    (`tests/api.rs`): off asks nobody; only an admin turns it on; live, invalid and a redirect's
+    unknown; an AWS key's account read with no request; every roll token, a decoy too, with one
+    answer, byte for byte but for its fingerprint; a found decoy neither kept nor audited; one request each, carrying only the credential; the cache;
+    the audit rows without a value.
+  - `an_aws_key_is_tried_only_when_the_operator_allows_and_a_canary_never`: with live AWS on, a
+    canary account's key and an operator-listed fingerprint ask nobody, and an allowed key is signed
+    with its pair.
+  - `a_credential_that_still_works_ranks_first_and_says_live` (roll code's notice).
+  - `a_redirect_is_answered_never_followed` (rolld's guarded client).
+  - Unit tests: the key id's account, SigV4 and pairing.
+
+  No test calls a real provider.
+
 #### Keys a change starts reading
 
 The same pass over the lines a change adds also picks out the environment variables they read, by
@@ -3167,7 +3255,12 @@ otherwise it would confirm guesses at values the caller can't read. Each scan is
 It also lists credentials the project doesn't hold ("Credentials roll doesn't hold" above: the same
 detectors, placeholder rule and `.roll/secrets-allow`, read from the working tree's top), as
 `file:line  an AWS access key, not in roll secrets: roll secrets scan --store AWS_KEY=deploy.ts:2
-[sha256:…]` (`--json`: `{file, line, unstored: true, kind, fingerprint, suggested_key}`). A plain
+[sha256:…]` (`--json`: `{file, line, unstored: true, kind, fingerprint, suggested_key, validity?}`).
+When the project has validity checks on ("Is it live?" above), the scan asks about the kinds a
+provider can check (`POST …/validity`; nothing is sent while they're off) and a live one is listed
+first: `config.ts:4  a GitHub token LIVE, account octocat; rotate it (or use a GitHub App's
+short-lived tokens: roll secrets github-apps add), not in roll secrets: …`; a refused one says
+`(revoked or invalid)`, an AWS key `(account 123456789012, not tried)`. A plain
 scan only reports them; `--staged` refuses the commit unless `--allow-unstored`. To move one in:
 
 ```
@@ -3178,6 +3271,188 @@ Replace it with process.env.AWS_KEY (roll run puts AWS_KEY in the environment), 
 
 The value is read from the file, never typed or pasted, and goes in one change to the folder of
 `-e`/`roll secrets setup`; a key that's already there is refused, never overwritten.
+
+### Using a key without seeing it
+
+An agent's sandbox or a fork's preview can call an outside API (Stripe's test API, say) with a key
+it never holds, as Infisical's Agent Vault, Akeyless's SecretlessAI and 1Password Environments' MCP
+do. Its environment has a **placeholder** where the value would be. The sandbox's egress proxy
+(roll previews', roll apps' or the agents sandbox's) swaps the placeholder for the value, and only
+in requests to the hosts the key is bound to. Those proxies are their products'. roll secrets holds
+the binding, issues placeholders, decides each swap and audits it, and ships the filter they embed
+(`roll_secrets::proxy`).
+
+- **Binding a key to hosts.** `PUT …/secrets/{key}/hosts?path=` with `{hosts, header?, query?,
+  untrusted?}` binds a shared key of the environment's own folder (not one it imports or inherits, not a personal
+  value). It's an admin write, audited as `secrets.hosts`; `DELETE` takes the binding off, and
+  every placeholder of the key stops working at its next use. Deleting the key drops its binding.
+  The key's record (`GET …/secrets/{key}`) shows it as `hosts`.
+  - `hosts`: 1 to 16 hostnames (`api.stripe.com`), or one-label wildcards (`*.stripe.com` matches
+    `api.stripe.com`, not `stripe.com` or `a.b.stripe.com`). Never `*`, an IP address or a port, and
+    never a wildcard directly under a name on the Public Suffix List (bundled as
+    `crates/roll-secrets/assets/public_suffix_list.dat`, read at compile time). Its private section
+    is where anyone can register a name (`*.supabase.co`, `*.vercel.app`, `*.workers.dev`,
+    `*.github.io`), and its ICANN section is registries' (`*.com`, `*.co.uk`): a prompt-injected
+    sandbox could send the key to a subdomain of its own. Bind the exact host there
+    (`myproject.supabase.co`); a wildcard under someone's own name there (`*.shop.vercel.app`) is
+    fine. Matched case-insensitively, without the request's port or a final dot.
+  - Placement: `header: "Authorization: Bearer {}"` (or `"X-Api-Key: {}"`) swaps the placeholder
+    only in that header, written exactly as the template says; `query: "api_key"` only as that query
+    parameter's whole value. With neither, any request header may carry it, and never the query.
+    Not both. `Host`, `Content-Length`, `Transfer-Encoding` and `Connection` can't be templates.
+  - `untrusted: true` lets a **sensitive** key's placeholder reach readers that couldn't read its
+    value themselves: untrusted code (a fork's preview, a sandbox) and people's tokens. Off (the
+    default), only roll's trusted runtimes get a placeholder for a sensitive key, and everyone else
+    has it withheld, as without placeholders. The binding's audit row says "untrusted consumers
+    too".
+  - A dynamic link's key can't be bound: its value is a lease's, issued per read. Nor can a key
+    whose value holds a `${…}` reference (see below).
+- **Placeholders.** A resolve that asks for them (`POST …/resolve` with `"placeholders": true`, or
+  in process `Secrets::values_with_placeholders`; another product's reference through
+  `ResourceRef::with_placeholders()`) gets, for each key with `hosts`, a placeholder instead of the
+  value, and the key in `placeholders: [{key, id, hosts, expires_at}]`. Keys without `hosts` are
+  unchanged: an untrusted consumer still gets unprotected, non-sensitive values only.
+  - **Only a literal value.** A placeholder stands for the key's own stored value (or its link's),
+    never resolved. A key whose value is or holds a reference gets none: it's left out with a
+    problem ("holds a ${…} reference"), and a swap refuses a key that has come to hold one since.
+    Otherwise a writer with no reveal could point a bound key at `${OTHER_SENSITIVE}` and send that
+    value to the bound host.
+  - **The maker.** An in-process consumer (`sandbox:…`, `preview:…`) runs for someone, so it names
+    them: `Ask { maker }` in process, `"maker"` over HTTP. That's #440's `secrets_by` for a sandbox,
+    and the rule's writer for a preview. The maker is a person (`usr_…`), a token (`token:…`) or the
+    operator, and must reveal the folder when the placeholders are issued (else 403). Each swap asks
+    again (below). A resolve by a token or a person over HTTP is its own maker; a product's resource
+    stands for itself on its project's canvas (`ResourceRef`).
+  - A placeholder is `rlph_`, 34 random characters and a 6-character checksum
+    (`roll_auth::credentials::new_secret`, one of `SECRET_PREFIXES`): roll's guard refuses it where
+    people read (roll code's files, comments, an agent's message), and a leaked one found by roll
+    code's landings or GitHub's secret scanning is revoked (`Access::on_leaked("rlph_")`).
+  - It's random, never derived from the value, and stored only as its SHA-256, bound to (project,
+    environment, folder, key, consumer, who asked, expiry). Its record's id is `phd_…`.
+  - It lives `placeholder_minutes` (default 1,440, at most 30 days); asking again issues new ones.
+  - A resolve audits the keys it answered as placeholders (`…, 2 as placeholders`).
+  - A workload identity's login can't ask for placeholders: what it may do ends with its token,
+    which the placeholder would outlive.
+- **Sensitive keys through a placeholder: only by the binding's opt-in.** A sensitive key promises
+  that no person or token reads its value back, and that only roll's own runtimes get it. Through a
+  placeholder the code in the sandbox never holds the value: only roll's proxy does, and only to
+  send it to a host an admin bound. But untrusted code still gets the key's *use* against that host,
+  where before it got nothing. So that's a separate decision per key, `untrusted: true` on the
+  binding (an admin's, audited), not a default. A protected environment never reaches an untrusted
+  consumer, placeholder or not: a placeholder would act as production against the host.
+- **Swapping (`Secrets::substitute`).** In process only, behind the `proxy::Substitute` trait: no
+  HTTP route trades a placeholder for its value, since holding a placeholder must never be enough
+  to read the value. The proxy passes the placeholder, the host it connects to (the name it
+  verified TLS for, never one a client wrote in a header), and where the placeholder is
+  (`proxy::Position`: a header's name and value, or a query parameter's). Each call checks again:
+  - the placeholder is live (not expired, revoked or ended with its consumer);
+  - whoever asked for it still may: the token still exists and may still reveal there, the person
+    can still sign in and still owns the project, a product's resource is still on a canvas that
+    stands for it;
+  - its maker, for an in-process consumer, still reaches the project (`maker_reaches`) and may still
+    reveal there, read as the consumer is (untrusted narrowing included): a person who loses the
+    project, or a token revoked or narrowed, stops every swap of what they made;
+  - the environment still exists, isn't frozen (an incident's cut-off), and isn't protected for an
+    untrusted consumer;
+  - the key still exists and is still bound; the host and the place match its binding; a sensitive
+    key's binding still opts in, for a reader that couldn't read it; the value holds no reference.
+
+  Then the key's own value is read as stored, never resolved. Nothing
+  is cached, so a revocation, a binding taken off, or a freeze stops the next request. A rotation
+  needs no new placeholder: the placeholder names the key, not the value.
+- **Audit.** Each (placeholder, host) is audited once a minute at most, as `secrets.substitute`
+  with a count (`substituted STRIPE_KEY for api.stripe.com 12 times for sandbox:sbx_1`). The first
+  use is recorded at once; a count left when traffic stops is written by the sweeper. A wrong host
+  is refused with `WrongHost` and an alert, which is likely an exfiltration attempt: a
+  `secrets.alert` row and the environment's notify URL. That's once a minute per placeholder,
+  whatever the host, with a count and up to five of the hosts (`… and others`), so a loop over random
+  hosts is one row and one notice a minute, not one per host. The placeholder keeps working for its bound hosts: off the proxy it's useless, and
+  the alert says who to look at. An expired, revoked or unknown placeholder is refused quietly.
+- **Ending.** A placeholder ends as a lease does: when it expires, with `DELETE …/placeholders/{id}`,
+  and with its consumer. `Secrets::end_consumer(consumer)` (or `DELETE …/placeholders?consumer=`)
+  ends every placeholder issued to it, when a sandbox stops or a preview is torn down
+  (`end_consumer` ends its interception CAs too). A preview's
+  ephemeral environment going ends its placeholders too, and so does the project going.
+  `GET …/placeholders` lists them (never the placeholder itself). Each placeholder records the
+  secret it stands for, so **Reach** lists the live ones of a folder's keys (or one key's) wherever
+  they were resolved (here, a folder importing it, an environment based on it), and an incident's
+  **cut-off** ends them in its transaction, freeze or not (`"placeholders": false` keeps them).
+- **The filter (`roll_secrets::proxy::filter`).** No I/O. It takes the request's host, path, headers
+  and query, finds every `rlph_` in them and swaps each through `Substitute`, all or nothing:
+  - it swaps only in headers and the query, never in the path or the body (the body isn't passed
+    in);
+  - the swap goes only to the request's host. A proxy calls the filter per request, so a redirect
+    or a second host is checked again;
+  - anything starting `rlph_` that doesn't swap (unknown, malformed, refused, or in the path) is
+    left as it is, and the request is refused (`Blocked`), so the proxy doesn't send it;
+  - a value with CR, LF or NUL is refused in a header; a query value is percent-encoded;
+  - it's bounded: 64 KiB of headers, 16 KiB of query, 8 KiB of path, 16 placeholders and 16 KiB
+    per value (`Limits`), or the request is refused before anything is asked;
+  - its errors say where and why, never the value or the placeholder.
+- **Not covered.** Responses aren't scrubbed: bind hosts that don't echo the key back. A
+  placeholder inside Basic auth (base64) or a signed request (AWS SigV4) can't be swapped: use a
+  bearer header. Bodies are never rewritten.
+
+### Using a key without seeing it: the proxy's contract
+
+A sandbox or a fork's preview holds `rlph_` placeholders instead of the values of keys bound to
+hosts ("Using a key without seeing it": host bindings, placeholders, `Secrets::substitute` and
+`roll_secrets::proxy::filter`). Its egress proxy swaps them, and to see a request's headers it has
+to terminate TLS. roll secrets gives it a CA for that, which can vouch for nothing but the hosts
+the consumer's keys are bound to. The proxies are their products' (roll previews, roll apps, the
+agents' sandboxes). Each one does exactly this:
+
+1. **Ask for the CA.** `Secrets::intercept_ca(consumer, ttl)` in process, with the consumer as its
+   placeholders name it (`sandbox:sbx_1`, `apps:service:svc_1 (untrusted)`). There's no HTTP route,
+   and none returns the key. The proxy passes only the consumer: roll secrets reads the hosts from
+   the bindings of the keys that consumer holds live placeholders for (`intercept::BoundHosts`,
+   which placeholders answers from its tables). A consumer with none gets `Error::NotFound`.
+   The answer is `InterceptCa { id, cert_pem, key, hosts, expires_at }`:
+   - The CA is self-signed, one per consumer, made for this call. It isn't signed by the project's
+     CA: the container trusts this one certificate, so its own constraints are all it can vouch
+     for. A project root would make the container trust every certificate the root signs, for every
+     consumer's hosts.
+   - It lives a day (`intercept::DEFAULT_TTL`); `ttl` can shorten it, to 5 minutes at least, and
+     nothing lengthens it (`MAX_TTL`). Asking again mints a new key and certificate. Earlier ones
+     stay valid until they expire, so a container that hasn't reloaded keeps working.
+   - Its name constraints are critical. They permit DNS names for the bound hosts only: an exact
+     binding (`api.stripe.com`) is permitted with its subdomains excluded (`.api.stripe.com`)
+     unless another binding sits under it, and a wildcard binding (`*.stripe.com`) permits the
+     subtree `.stripe.com` and not `stripe.com` itself. Every IP address is excluded, and email
+     addresses are permitted only at the reserved `invalid` domain, so none. A certificate made
+     with the stolen key for any other name fails verification at a client that trusts the CA.
+     X.509 can't say "one label", so the CA's subtree under a wildcard is deeper than the binding;
+     the proxy's own certificates are exact (step 3).
+   - Never `*`, a bare suffix (`*.com`) or a wildcard directly under a name on the Public Suffix
+     List (`*.co.uk`, `*.github.io`; the list host bindings use): such a binding refuses the whole
+     CA, never a narrower one.
+   - `key` is held in the proxy's memory only. It redacts itself in `Debug`, is wiped on drop, and
+     is never stored, logged or sent. A proxy that restarts asks again and reinstalls (step 2).
+   - Audited as `secrets.intercept_ca` in each project the hosts come from: the consumer, that
+     project's hosts and the expiry, never the key.
+2. **Install `cert_pem` in the consumer's trust store** and nothing else: the system store
+   (`/usr/local/share/ca-certificates/` and `update-ca-certificates`), plus `NODE_EXTRA_CA_CERTS`,
+   `REQUESTS_CA_BUNDLE`, `SSL_CERT_FILE` and `CURL_CA_BUNDLE` for runtimes that keep their own.
+   The key never enters the container.
+3. **Terminate TLS only for the bound hosts.** For each connection, take the host the client asked
+   for (SNI, or the `CONNECT` target). If `InterceptCa::covers(host)` is false, forward it as a
+   `CONNECT` tunnel untouched: no termination, no logging of its bytes. If it covers the host, check
+   `Secrets::intercept_ca_live(id)` (never cached: an ended consumer stops the next connection),
+   then serve `InterceptCa::leaf(host)`, a certificate for exactly that name that lives as long as
+   the CA. One label under a wildcard binding, never deeper.
+4. **Filter each request** with `roll_secrets::proxy::filter`, which calls `Secrets::substitute`
+   for every placeholder. Pass the host it terminated TLS for, never the request's `Host` header.
+   Send nothing that the filter refuses.
+5. **Re-dial upstream with real TLS verification**, against the system's roots (never the
+   interception CA, never `insecure`), for the same host, so the consumer can't make the proxy
+   trust a server the consumer controls.
+
+**Ending.** `Secrets::end_intercept_cas(consumer, why)` ends every live CA of the consumer, with a
+revocation row (`revoked_at`, `revoked_why`) and a `secrets.intercept_ca.end` audit row.
+`Secrets::end_consumer` calls it when the sandbox stops or the preview is torn down. The
+proxy then drops the CA and its leaves at its next `intercept_ca_live`. No CRL is published: a
+trust anchor isn't checked against one, and the CA dies with its container or within a day. Rows
+go a day after they expire.
 
 ### A local copy against the environment
 
@@ -3469,7 +3744,9 @@ Agent's templates do).
   why in its log), and nothing is dropped.
 - **Who may write one.** Storage takes references in a replication target only from the operator
   (its token, an admin's session): a scoped token that manages targets could otherwise point a
-  reference at any key the bucket's project holds and send it to an endpoint it chose.
+  reference at any key the bucket's project holds and send it to an endpoint it chose. Search
+  takes them only through roll's API (`PUT /v1/search/clusters/{id}/repositories/{name}`, bound
+  with `bind_ref` as the caller), never through the cluster's own endpoint.
 
 ### Templates
 
@@ -4169,14 +4446,15 @@ Who could lists roll-access's live tokens (`rlt_…`) by what each may do here, 
 by their identity rather than each login. OAuth connections (`rlo_…`) aren't listed yet.
 
 It also lists what the folder has handed out that's still out: dynamic credentials issued for
-its keys and not yet revoked (`leases`), open one-time shares made from them (`shares`, as their
+its keys and not yet revoked (`leases`), live placeholders of its keys wherever they were
+resolved (`placeholders`: `{id, key, consumer, maker, through, expires_at}`), open one-time shares made from them (`shares`, as their
 makers said with `from`), and how many of the project's open shares don't say where their value
 came from (`unattributed_shares`). `frozen` says whether it's frozen, and by whom and why.
 
 #### Cutting it off
 
 `POST …/environments/{env}/reach/cut-off?path=&key=` with `{why, tokens?, identities?, leases?,
-shares?, syncs?, freeze?}` (`roll secrets reach [KEY] --cut-off --why "…" [--freeze]`, the reach
+placeholders?, shares?, syncs?, freeze?}` (`roll secrets reach [KEY] --cut-off --why "…" [--freeze]`, the reach
 dialog's "Cut off…") cuts everything reach lists, in one call. It's a project admin's, as reach is.
 Each part is on unless it's `false`, except `freeze`, which is off unless it's `true`. It reads
 reach as the caller sees it (the list the confirmation showed), then:
@@ -4205,6 +4483,9 @@ reach as the caller sees it (the list the confirmation showed), then:
   product outside the transaction, as `DELETE …/leases/{id}` does; one the product refuses goes
   back to the sweeper and is named under `failed`. A retired managed credential waiting out its
   grace isn't tied to a folder and ends on its own; rotate the key to replace the current one.
+- **Placeholders** of its keys (or the key), wherever they were resolved, end in the transaction
+  (`placeholders`), freeze or not: roll's proxies refuse them at the next request (see "Using a key
+  without seeing it").
 - **Shares**: open one-time shares made from its keys expire, and the projects the folder is
   shared with stop reading it: its exports are removed (`projects`), so their importing folders
   lose its values at once. An export is the whole folder's, so a cut-off of one key removes the
@@ -4300,17 +4581,45 @@ a decoy credential:
 
 The key is an ordinary change (as a `PUT` of the key makes), so it reads, resolves, exports and
 syncs like any other key. Only the project's admins (`admin` over the whole project) see that it's
-a decoy:
-- the `decoy` on `Secret` in the folder's list (the dashboard's "decoy" badge, and "used N×" in
-  red once it's been used);
-- `decoy_used` in health;
-- its rows in the audit log (`secrets.decoy` when it's planted, `secrets.alert.decoy_used` on each
-  alert).
+a decoy, and only in a signed-in session (the dashboard) or with the operator token:
+- the `decoy` on `Secret` in the folder's list and on the key: who planted it and when
+  (`created_by`, `created_at`), and its uses (the dashboard's "decoy" badge, which says who planted
+  it, and "used N×" in red once it's been used);
+- `decoy_used` in health, with the same `decoy` on the finding (and decoys left out of `stale` and
+  `unread` there);
+- its `secrets.alert.decoy_used` rows in the audit log, one per alert, in listings, exports and the
+  audit sinks such a caller made;
+- its `decoy_used` notices, at a notify URL such a caller set.
 
-Everyone else gets the same answers as for any key, without those fields and rows. Nothing marks it
-in the grid, reach or a sync's target: syncing a decoy into CI, or exporting it into an old config,
-is the point. In a protected environment it lands without a change request. It changes no value
-anyone has, and only an admin (who could lift the protection) may plant one.
+Planting writes no audit row of its own: the change's only row is the key's ordinary
+`secrets.write`, as any new key's is, and the `decoy` on `Secret` is the record of who planted it.
+(Plants from before this wrote a `secrets.decoy` row; it's treated as an alert row is.)
+
+Every token gets the same answers as for any key, an admin's too: `rlt_` and `rlo_` grants (so an
+agent on roll MCP), workload identities' logins and roll's own in-process consumers. A
+prompt-injected agent, or whoever holds a leaked admin token, can't tell the decoys and skip them,
+which is who a decoy is for. `Caller::sees_decoys` is the one check. Their audit listings and
+exports leave the alert rows out, and sinks a token made never get them. The hash chain covers
+every field of a row, so redacting a row would fail `audit verify` as surely as leaving it out; an
+export without those rows has a gap at each, as any filtered export does (verify the log with `GET
+…/audit/verify`, or offline with an operator's or a session's export). Such a gap only says some
+decoy was used at some time, never which key: with no plant row, nothing in a token's view sits
+next to a decoy's own write. Nothing marks a decoy in the grid, reach or a sync's target: syncing a
+decoy into CI, or exporting it into an old config, is the point.
+
+A notify URL remembers whether a session or the operator set it (`notify_set_by_session`, set by
+`PUT …/policy`; a URL from before is counted as theirs only when every policy change the audit log
+still holds for its environment was). A URL a token set gets every other notice but never a decoy's:
+neither the alert nor `decoy_used` in the daily notice, and a decoy notice queued before a token
+replaced the URL is dropped. The audit row and the Health finding still record the use. The daily
+notice lists a decoy as `stale` as it would any key, whoever set the URL, so a channel can't tell
+the decoys by which old keys are missing.
+
+Planting one (`POST …/decoys`) takes a session or the operator token too: a token that planted one
+could tell it from the rest. In a protected environment it lands without a change request. It
+changes no value anyone has, and only an admin (who could lift the protection) may plant one.
+Ordinary writes still end a decoy by rights alone (deleting the key or giving it a value), and say
+nothing about it.
 
 **What to plant where.** Put it somewhere only an intruder reads, under a name a real credential
 would have (`LEGACY_DEPLOY_TOKEN`, `ROLL_ADMIN_TOKEN`). For example:
@@ -4325,12 +4634,16 @@ One decoy per place tells you which place leaked.
 decoy:
 - an audit row (`secrets.alert.decoy_used`, by `roll:decoys`, with the source address), which the
   environment's Activity shows under Alerts and audit sinks carry to a SIEM;
-- a notice to the environment's notify URL, if it has one (the same outbox and retries as read
-  alerts);
+- a notice to the environment's notify URL, if a session or the operator set it (the same outbox
+  and retries as read alerts);
 - `decoy_used` first in health, until the decoy ends.
 
-Each names the key, the environment, the folder, when and the address it came from, and the route
-it called. It never names a value.
+Each names the key, the environment, the folder, when and the address it came from, and what it
+called: the route pattern for an `rlt` (never the path or query), the endpoint for a `postgres`.
+It never names a value. The last use's where stays on the decoy for those who see decoys (an
+admin's session, the operator): `used_at`, `used_ip`, and `used_route` (`rlt`) or `used_endpoint`
+(`postgres`), next to `uses`. The badge's tooltip and the health finding say it ("used 3×, last
+from 203.0.113.7 on ep-abc123, 2m ago").
 
 **What to do.** Someone has read the place the decoy was planted:
 1. Cut off whatever can reach that place (the CI system's tokens, the repository's deploy keys, the
@@ -4356,7 +4669,7 @@ minutes.
   (`aud`, default this server's URL from the CLI and the dashboard, so a token minted for one roll
   server isn't good at another), a `subject` (`sub`, or a pattern of it where `*` stands for
   any run of characters), up to ten other `claims` that must match (`ref`, `environment`,
-  `repository_owner_id`…), and the scope of what a login gets: environments, folders and actions
+  `repository_owner_id`…; see "Claims" below), and the scope of what a login gets: environments, folders and actions
   like a token's (never more than its creator has) for `ttl_minutes`, 5–60 (default 15).
 - **Shared issuers.** GitHub Actions, GitLab.com, Terraform Cloud, Buildkite and Google sign for
   every tenant they host, so an identity of theirs must name one tenant literally in its subject
@@ -4371,6 +4684,22 @@ minutes.
   refused. Key fetches are one at a time per issuer, and a failed one isn't retried for 30 s.
   Logins are capped at 120 a minute per identity and 240 per client address (429 `rate_limited`),
   counted per node before any work.
+- **Claims.** Each of an identity's `claims` maps a claim to a value or a pattern with `*` (the
+  subject's rules: `*` is any run of characters, nothing else is special, never `**` recursion).
+  The key is a top-level claim's name (`ref`), or a JSON pointer (RFC 6901, starting with `/`)
+  into nested claims: `{"/realm_access/roles": "deployer"}` for Keycloak's realm roles,
+  `{"/groups": "team-*"}` for Entra ID's `groups` or `roles`, `{"/groups_direct": "acme/ops"}` for
+  GitLab's. In a pointer `~1` stands for `/` and `~0` for `~`, and a decimal segment indexes an
+  array (`/groups/0`). Through a pointer, an array claim matches when any of its first 256
+  elements does (one level: an array inside an array never matches), and numbers and booleans
+  match their JSON text (`2`, `true`). A plain name matches only a string claim, as rules made
+  before pointers did, so an existing rule never starts matching a list or a number it used to
+  refuse: write `/groups`, not `groups`, to match a list. An object, `null` or a missing claim
+  never matches. A pointer has at most 8 segments,
+  none empty, and can't start at `iss`, `aud`, `sub`, `exp`, `nbf` or `iat`. Claims only narrow
+  the subject: a shared issuer's subject still names one tenant, whatever the claims say. The rules
+  are `roll_oidc::check_identity` and `Jwt::unmatched`, which roll-access's trusted machine clients
+  use too.
 - **Pinned keys, for an issuer roll can't reach.** A cluster signs its service accounts' tokens as
   `https://kubernetes.default.svc.cluster.local` (k3s, kind, kubeadm, a private EKS endpoint), an
   issuer roll can't and shouldn't fetch. An identity can carry the issuer's public keys instead
@@ -4800,7 +5129,8 @@ with signed digests, so such a change shows:
   A row that fails is logged by kid (never the key) and ignored, so a database writer who adds a key
   of their own gets neither a digest nor a cloud to accept their signature.
 - **Offline.** `roll secrets audit verify -p prj_… --file audit.jsonl --jwks keys.json` checks an
-  export (`audit --format jsonl`, unfiltered: a filtered one has gaps) on the machine it runs on.
+  export (`audit --format jsonl`, unfiltered: a filtered one has gaps, and so has a token's where a
+  decoy's rows were, see Decoys) on the machine it runs on.
   `--jwks` is required: the digest JWKS as saved earlier from `/v1/secrets/audit/jwks` and kept
   apart from roll, since keys fetched from the server being checked would vouch for themselves.
   Save it once, and again after each rotation of the digest key (an emergency's names the pulled
@@ -4837,8 +5167,8 @@ isn't in the workspace is 404.
 | --- | --- | --- |
 | `GET /v1/secrets/health` | | `{ok, key: "env"\|"kms"\|"file"\|"shares"\|"missing", resealed: "all"\|number\|null, customer_managed, issuer_pulled: {kid, pulled_at, detail}[], links: string[], syncs: string[]}` (`links`, `syncs`: the kinds registered; `issuer_pulled`: issuer keys an emergency rotation pulled in the last 30 days) |
 | `GET`, `POST /v1/secrets/unseal` | `{share}` (`POST`) | `{sealed, have?, need?, error?}`: a sealed node's progress (public; see "Starting sealed"); 429 with `Retry-After` past the limits |
-| `GET` | | `{project, environments: Environment[], previews: number, history_days: number \| null}` |
-| `PATCH` | `{history_days}` | `{history_days}` (`admin`) |
+| `GET` | | `{project, environments: Environment[], previews: number, history_days: number \| null, validity_checks: "on" \| "off"}` |
+| `PATCH` | `{history_days?, validity_checks?: "on" \| "off"}` | what changed, as given (`admin`; validity checks audited as `validity.checks`) |
 | `GET /grid?path=` | | `Grid` |
 | `GET /environments` | | `Environment[]` in order |
 | `POST /environments` | `NewEnvironment` | 201 `Environment` |
@@ -4871,19 +5201,21 @@ isn't in the workspace is 404.
 | `PUT /environments/{env}/secrets/{key}?path=` | `SetSecret` | `Written`; 409 `stale` when `if_version` isn't the key's version |
 | `DELETE /environments/{env}/secrets/{key}?path=&type=&if_version=` | | `Written`; 409 `stale` when `if_version` isn't the key's version |
 | `GET /environments/{env}/secrets/{key}/value?path=&resolve=` | | `{value, problems}` |
-| `POST /environments/{env}/decoys` | `NewDecoy` | 201 `Secret` (admin; a new key, never its value; 409 `exists` when the key is there; "Decoys") |
+| `POST /environments/{env}/decoys` | `NewDecoy` | 201 `Secret` (admin, signed in or the operator; 403 for any token; a new key, never its value; 409 `exists` when the key is there; "Decoys") |
 | `GET /environments/{env}/secrets/{key}/totp?path=` | | `{code, expires_at, period}` (`reveal`; a key that isn't a TOTP key is a 400; audited as `secrets.totp`, without the code) |
 | `GET /environments/{env}/secrets/{key}/versions?path=&type=` | | `Version[]` newest first |
 | `GET /environments/{env}/secrets/{key}/versions/{v}/value?path=&type=` | | `{value}` |
 | `POST /environments/{env}/secrets/{key}/rotate?path=` | | `Applied` |
 | `POST /environments/{env}/secrets/{key}/purge?path=` | `{before_version?}` | `{purged}` (`admin`) |
+| `PUT /environments/{env}/secrets/{key}/hosts?path=` | `Hosts` | `Hosts` (`admin`; a shared key of the folder itself, not a dynamic link's; see "Using a key without seeing it") |
+| `DELETE /environments/{env}/secrets/{key}/hosts?path=` | | 204 (`admin`); 404 when it isn't bound |
 | `GET /environments/{env}/values?path=&format=&resolve=&dynamic=&strict=&digest=&codes=&name=&namespace=&seq=&at=` | | `Values` (`codes=1`: `<KEY>_CODE` beside each TOTP key, never a 304; `dynamic=false`: a dynamic key is left out, named in `dynamic`, instead of a fresh credential; `strict=1`: any problem is a 409 `unresolved` naming the keys, so a reader keeps what it had; `digest=1`: the folder's `…/digest`, taken just before the read, as `digest`; with `seq`: as stored after that change, `seq` in the answer), or text with `format`: `dotenv`, `shell`, `json`, `yaml`, `docker` (`--env-file`; a value with a line break is a 400 naming the key) or `kubernetes` (a Secret named `name`, default the environment, in `namespace`); with `digest=1` or `If-None-Match` an `ETag` (the digest), and `If-None-Match` with the digest still current is a 304 that decrypts and issues nothing, and writes one `secrets.revalidate` row a day per caller and folder (so health and insights still see the folder read) (never for a folder holding a dynamic credential unless `dynamic=false`: a lease ends without moving the digest) |
 | `GET /environments/{env}/insights?path=` | | `Insights` (read) |
 | `GET /environments/{env}/reach?path=&key=` | | `Reach` (a project admin's): tokens and identities that reach it, syncs, live leases and attributed shares, projects it's shared with, folders that import it, readers in 30 days, `frozen` |
-| `POST /environments/{env}/reach/cut-off?path=&key=` | `{why, tokens?, identities?, leases?, shares?, syncs?, freeze?}` | `CutOff`: what was cut, what was left to the operator (`skipped`: tokens reaching beyond the project) and what failed, with why (a project admin's; idempotent) |
+| `POST /environments/{env}/reach/cut-off?path=&key=` | `{why, tokens?, identities?, leases?, placeholders?, shares?, syncs?, freeze?}` | `CutOff`: what was cut, what was left to the operator (`skipped`: tokens reaching beyond the project) and what failed, with why (a project admin's; idempotent) |
 | `DELETE /environments/{env}/reach/cut-off?path=` | | 204: the folder's freeze lifted (a project admin's; 404 when it isn't frozen) |
 | `GET /environments/{env}/digest?path=&since=&wait=` | | `{digest}` (read: changes when the values would; a live link counts its value's keyed fingerprint as the product answers, read at most every 10 s, and at once when roll rotates it or the product's own password, reset or restore route changes it). With `since` (a digest the caller has) and `wait` (seconds, at most 25), a long poll: it answers as soon as the digest differs, else with the same one when `wait` runs out (at most 32 held per principal and 4096 per node; past that it answers at once); `roll run --watch`, `roll secrets render --watch` and the TS, Go and Python watches use it (and roll apps' redeploys in process, through `SecretSource::wait_digest`: one held poll per environment), so a change to the project's own values reaches them in a second or two (a live link's product-side change, or another project's shared folder, within about 10 s) |
-| `POST /environments/{env}/resolve` | `{path?, consumer, seal_to?, untrusted?, dynamic?, codes?}` | `Values` or `{sealed, context, problems, leases, dynamic, linked, followed}` (`dynamic: false`: a consumer that can't renew leases, such as a preview's service, gets no dynamic credential; those keys are left out, named in `dynamic`; a key linked to a resource the ephemeral environment branched is left out and named in `followed`, in the clear beside a sealed box: names only) |
+| `POST /environments/{env}/resolve` | `{path?, consumer, seal_to?, untrusted?, dynamic?, codes?, placeholders?, placeholder_minutes?, maker?}` | `Values` or `{sealed, context, problems, leases, dynamic, linked, followed, placeholders}` (`placeholders: true`: each key bound to hosts is an `rlph_…` placeholder in `values`, named in `placeholders`, for 1 to 43,200 minutes (default 1,440); refused for a workload identity's login; `maker`: who made the consumer, who must reveal here; not a sensitive key's for a reader that couldn't read it unless its binding has `untrusted`; not a key holding a reference, which is left out as a problem; `dynamic: false`: a consumer that can't renew leases, such as a preview's service, gets no dynamic credential; those keys are left out, named in `dynamic`; a key linked to a resource the ephemeral environment branched is left out and named in `followed`, in the clear beside a sealed box: names only) |
 | `GET /environments/{env}/changes?before=&limit=` | | `Change[]` newest first |
 | `POST /environments/{env}/changes` | `Batch` | 201 `Applied` |
 | `POST /environments/{env}/diff` | `{dotenv} \| {json}, path?` | `{added, changed, same, missing, references, linked}`: a local copy against the folder by fingerprint, names only (`reveal`, audited) |
@@ -4903,6 +5235,9 @@ isn't in the workspace is 404.
 | `GET /leases` | | `Lease[]` |
 | `DELETE /leases/{id}` | | 204 (whoever may delete there, or the caller it was issued to while it may still reveal there; 403 for another's) |
 | `POST /leases/{id}/renew` | `{ttl_minutes?}` | `Lease` (as ending one: `delete` there, or the caller it was issued to with `reveal`) |
+| `GET /placeholders` | | `PlaceholderRecord[]`, newest first, where the caller may read (never the placeholder) |
+| `DELETE /placeholders?consumer=` | | `{ended}`: the consumer's live placeholders the caller may `delete` |
+| `DELETE /placeholders/{id}` | | 204 (`delete` in its folder); 409 when it's already ended |
 | `GET /identities` | | `Identity[]` (admin) |
 | `POST /identities` | `NewIdentity` | 201 `Identity` |
 | `DELETE /identities/{id}` | | 204 (its tokens revoked) |
@@ -4935,6 +5270,8 @@ isn't in the workspace is 404.
 | `GET /v1/secrets/findings` | | `{project, project_name, findings: Finding[]}[]`: every project's findings the caller may read, projects with none left out |
 | `GET /health?code=` | | `Finding[]`, worst first: every standard environment's findings the caller may read (`read` on the project) |
 | `POST /leaks` | `{candidates: string[]}` (at most 20,000); header `X-Roll-Guard: 1` from a credential guard (roll MCP's check of what a tool call would write), audited as `secrets.guard` instead of `secrets.scan`; rolld keeps the header only on a request roll MCP's guard tool makes in process, and removes anyone else's | `{index, key, environment, path}[]`: candidates that are values the caller may reveal (`read` on the project) |
+| `POST /validity` | `{credentials: {value, pair?}[]}` (at most 200; `pair`: an AWS access key id's secret access key) | `{validity_checks: "on" \| "off", results: Checked[]}`, one per credential in order (`write` on the project); while checks are off, `results` is empty and nothing is asked. `Checked` is `{fingerprint, kind, result: "live" \| "invalid" \| "unknown", account?, checked_at?, why?, rotator?: "aws-iam" \| "github-app"}` ("Is it live?") |
+| `GET /unstored/{fingerprint}` | | `Checked`: a credential's last check (`read`; 404 when it hasn't been checked) |
 | `GET /kms` | | `{key: string \| null}`: the customer-managed key wrapping the project's data key (admin) |
 | `PUT /kms` | `{key}` (a KMS key's ARN) | `{key}` after encrypting and decrypting with it (admin; 400 when roll can't use it) |
 | `DELETE /kms` | | `{key: null}`: the data key sealed by roll's deployment key alone again (admin) |
@@ -5073,9 +5410,9 @@ type Secret = {
   updated_at: number; updated_by: string;
   source: { kind: "own" } | { kind: "import"; environment: string; path: string } | { kind: "base"; environment: string };
   overridden: boolean; // a personal value of the caller replaces it
-  decoy?: Decoy; // only for the project's admins ("Decoys"); absent for everyone else, as on any key
+  decoy?: Decoy; // only for the project's admins, signed in or the operator ("Decoys"); absent for everyone else, tokens too, as on any key
 };
-type Decoy = { kind: "rlt" | "postgres"; created_at: number; created_by: string; uses: number; used_at: number | null; used_ip: string | null };
+type Decoy = { kind: "rlt" | "postgres"; created_at: number; created_by: string; uses: number; used_at: number | null; used_ip: string | null; used_route: string | null; used_endpoint: string | null }; // the last use: when, its address, and the route pattern it called (rlt; never a path or query) or the endpoint it tried (postgres)
 type NewDecoy = { key: string; kind: "rlt"; path?: string } | { key: string; kind: "postgres"; resource: string; path?: string };
 type SetSecret = { value?: string; comment?: string; tags?: string[]; type?: "shared" | "personal"; link?: Link | null; message?: string; expires_at?: number | null; if_version?: number };
 type Op =
@@ -5089,16 +5426,16 @@ type Change = { seq: number; environment: string; path: string; message: string;
 type ChangeDetail = Change & { items: Item[]; state?: { key: string; path: string; version: number; fp: string; comment: string; tags: string[]; link: Link | null; at: number }[] };
 // what: added | changed | deleted | comment | tags | link | rotated
 type Version = { version: number; seq: number; op: "set" | "delete"; what: string[]; purged: boolean; fp: string | null; comment: string; tags: string[]; link: Link | null; at: number; by: string };
-type Values = { values: Record<string, string>; problems: { key: string; problem: string }[]; leases: string[]; dynamic: string[]; linked: string[]; plain?: string[]; withheld: string[]; sensitive: string[]; followed: Followed[] }; // plain: of linked, keys whose link field isn't a credential (a host, a port), which a consumer hiding secret values in logs may show (every other value is a secret); followed: keys linked to what the ephemeral environment's preview branched, not in values; leases: ids of dynamic credentials issued; dynamic: the keys holding one; linked: keys from any link (addresses a consumer on another network rewrites)
+type Values = { values: Record<string, string>; problems: { key: string; problem: string }[]; leases: string[]; dynamic: string[]; linked: string[]; plain?: string[]; withheld: string[]; sensitive: string[]; followed: Followed[]; placeholders?: Placeholder[] }; // placeholders: keys bound to hosts answered as rlph_… in values (a resolve that asked); plain: of linked, keys whose link field isn't a credential (a host, a port), which a consumer hiding secret values in logs may show (every other value is a secret); followed: keys linked to what the ephemeral environment's preview branched, not in values; leases: ids of dynamic credentials issued; dynamic: the keys holding one; linked: keys from any link (addresses a consumer on another network rewrites)
 type Values = { values: Record<string, string>; problems: { key: string; problem: string }[]; leases: string[]; dynamic: string[]; linked: string[]; plain?: string[]; followed: Followed[]; digest?: string }; // plain: as above; digest (with ?digest=1, not with seq or at): the folder's `…/digest`, taken just before this read; leases: ids of dynamic credentials issued; dynamic: the keys holding one; linked: keys from any link (addresses a consumer on another network rewrites)
 type Grid = { path: string; environments: string[]; rows: { key: string; cells: Record<string, Cell | null>; status: "same" | "different" | "missing"; required: boolean }[]; folders: string[]; previews: number };
-type Reach = { environment: string; path: string; key: string | null; protected: boolean; untrusted: boolean; tokens: Holder[]; identities: Holder[]; syncs: { id: string; kind: string; target: unknown; last_synced_at: number | null }[]; projects: string[]; imported_by: string[]; truncated: boolean; readers: { actor: string; last_at: number; reads: number }[]; uncounted: string }; // untrusted: checks, sandboxes and previews may read it (not protected)
+type Reach = { environment: string; path: string; key: string | null; protected: boolean; untrusted: boolean; tokens: Holder[]; identities: Holder[]; syncs: { id: string; kind: string; target: unknown; last_synced_at: number | null }[]; placeholders: { id: string; key: string; consumer: string; maker: string | null; through: string; expires_at: number }[]; projects: string[]; imported_by: string[]; truncated: boolean; readers: { actor: string; last_at: number; reads: number }[]; uncounted: string }; // untrusted: checks, sandboxes and previews may read it (not protected)
 type Holder = { id: string; name: string; actions: Action[]; expires_at: number | null; last_used_at: number | null; created_by: string };
 type Insights = { path: string; max_age_days: number | null; reads_since: number; keys: { key: string; version: number; updated_at: number; updated_by: string; last_read_at: number | null; last_read_by: string | null; reads_30d: number; stale: boolean }[] };
 type Required = { key: string; path: string; comment: string; type?: "url" | "int" | "port" | "bool" | "json" | "email"; pattern?: string; owner?: string /* who supplies it */; password?: { length: number; classes?: ("lower" | "upper" | "digit" | "symbol")[]; symbols?: string } };
 type Sink = { id: string; url: string; status: "new" | "ok" | "error"; error: string | null; cursor: number; delivered_at: number | null; created_at: number; created_by: string };
 type ProjectFindings = { project: string; project_name: string; findings: Finding[] };
-type Finding = { issue: "decoy_used" | "expired" | "rotation_failing" | "revoke_failing" | "missing" | "exposed" | "public" | "weak" | "operator_made" | "expiring" | "certificate_expiring" | "stale" | "unread" | "unreferenced"; environment: string; path: string; key: string; detail: string; owner?: string };
+type Finding = { issue: "decoy_used" | "expired" | "rotation_failing" | "revoke_failing" | "missing" | "exposed" | "public" | "weak" | "operator_made" | "expiring" | "certificate_expiring" | "stale" | "unread" | "unreferenced"; environment: string; path: string; key: string; detail: string; owner?: string; decoy?: Decoy }; // decoy: on decoy_used only (an admin's session's or the operator's), the key's Decoy
 type Rotation = { environment: string; path: string; keys: string[]; kind: string; ref: string; name: string; rotate_days: number | null; rotate_window: string | null; grace_minutes: number; issued_at: number | null; next_due: number | null; last_error: string | null; failed_at: number | null };
 type Rotator = { id: string; name: string; host: string; created_at: number; created_by: string };
 type SaasRotator = { id: string; name: string; vendor: "sendgrid" | "twilio" | "okta" | "entra" | "auth0"; target: Record<string, unknown>; created_at: number; created_by: string };
@@ -5115,9 +5452,12 @@ type Request = { id: string; environment: string; path: string; message: string;
 type FolderPolicy = { path: string; approvals: number; approvers: string[]; created_at: number; created_by: string };
 type LinkTarget = { kind: string; ref: string; name: string; fields: { field: string; label: string; modes: Link["mode"][]; secret: boolean; suggest: string; credential?: string }[] };
 type Lease = { id: string; environment: string; path: string; key: string; kind: "dynamic" | "retired"; link: Link | null; consumer: string; issued_at: number; expires_at: number; revoked_at: number | null };
+type Hosts = { hosts: string[]; header?: string; query?: string; untrusted?: boolean }; // untrusted: a sensitive key's placeholder also for readers that couldn't read it; header: "Authorization: Bearer {}"; query: a parameter name; not both. Secret has hosts? when bound
+type Placeholder = { key: string; id: string; hosts: string[]; expires_at: number };
+type PlaceholderRecord = { id: string; environment: string; path: string; key: string; consumer: string; issued_by: string; maker: string | null; issued_at: number; expires_at: number; revoked_at: number | null };
 type Identity = { id: string; name: string; kind: "oidc" | "aws"; arn?: string; server_id?: string; issuer: string; audience: string; subject: string; claims: Record<string, string>; environments: string[] | null; paths: string[] | null; actions: Action[]; ttl_minutes: number; created_at: number; created_by: string; last_used_at: number | null; last_subject: string | null; allowed_ips: string[] | null; pinned_keys?: number; gateway?: string }; // gateway: it logs that gateway in (no environments, paths or actions)
 type Gateway = { id: string; name: string; token_id?: string; created_at: number; created_by: string; status: { online: boolean; node?: string; version?: string; allow: string[]; connected_at?: number; last_seen_at?: number } };
-type NewIdentity = { name: string; environments?: string[]; paths?: string[]; actions: Action[]; ttl_minutes?: number; allowed_ips?: string[]; gateway?: string } & ({ kind?: "oidc"; issuer: string; audience: string; subject: string; claims?: Record<string, string>; jwks?: string } | { kind: "aws"; arn: string });
+type NewIdentity = { name: string; environments?: string[]; paths?: string[]; actions: Action[]; ttl_minutes?: number; allowed_ips?: string[]; gateway?: string } & ({ kind?: "oidc"; issuer: string; audience: string; subject: string; claims?: Record<string, string>; jwks?: string } | { kind: "aws"; arn: string }); // claims: a name or a JSON pointer ("/realm_access/roles") → a value or a * pattern (workload identities, "Claims")
 type Token = { id: string; name: string; environments: string[] | null; paths: string[] | null; actions: Action[]; expires_at: number | null; created_at: number; created_by: string; last_used_at: number | null; prefix: string; allowed_ips: string[] | null };
 type NewToken = { name: string; environments?: string[]; paths?: string[]; actions: Action[]; expires_at?: number; ttl_days?: number; allowed_ips?: string[] };
 type Action = "read" | "reveal" | "write" | "delete" | "admin";
@@ -5154,6 +5494,9 @@ changes(project_id, seq, env_id, path, kind, message, by, at, keys, PRIMARY KEY 
 requests(id PK, project_id, env_id, path, message, by, at, state, ops BLOB, items, reviews, applied_seq)
 leases(id PK, project_id, env_id, key, path, kind, link, handle, consumer, issued_at, expires_at,
        revoked_at)
+key_hosts(secret_id PK, project_id, binding, set_by, set_at)  -- binding: Hosts as JSON
+placeholders(id PK, hash UNIQUE, project_id, env_id, path, key, secret_id, consumer, issued_by, maker, resource,
+       untrusted, issued_at, expires_at, revoked_at)  -- hash: SHA-256 of the rlph_ placeholder; resource: {kind, ref}
 tokens(id PK, project_id, name, hash UNIQUE, prefix, environments, paths, actions, expires_at,
        created_at, created_by, last_used_at, revoked_at, identity)  -- identity: a login's
 identities(id PK, project_id, name, issuer, audience, subject, claims, environments, paths,
@@ -5170,6 +5513,10 @@ syncs(id PK, project_id, env_id, path, kind, target, keys, prefix, secret BLOB, 
 value_requests(id PK, project_id, env_id, path, keys, note, public_key, seal_key BLOB, answers_left,
       created_by, created_at, expires_at, answered_at, cancelled_at, outcome)
       -- seal_key: the request's X25519 secret key, sealed with the data key; NULL once it closes
+validity(project_id, fingerprint, kind, result, account, checked_at, why, claimed_at,
+      PRIMARY KEY (project_id, fingerprint))  -- validity checks' answers; result NULL while claimed
+intercept_cas(id PK, consumer, serial, hosts, projects, issued_at, expires_at, revoked_at,
+      revoked_why)  -- interception CAs (never their keys); gone a day after they expire
 ```
 
 `owner` is `''` for a shared secret and the principal for a personal one. A deleted secret keeps its
@@ -5259,6 +5606,67 @@ still covers 304s, and a product changing its own password.
 
 Every lookup by key inside a request is a hash map (a grid of ~11k keys over 5 environments took
 3.07 s before that, 0.43 s after, on a debug build).
+
+### Large changes
+
+An `.env` import, a move-in (`roll secrets import …`) or a promote of a big folder is one change
+of thousands of keys. A change used to cost five statements per key, each its own round trip:
+the key's row, a deleted key's old id, the new row, its folders, its version. On Postgres that was
+about 1.2 ms per key, and only about 1.6 s of a 9,900-key change's 11 s was the server executing
+statements (`pg_stat_statements`); the rest was waiting on round trips. Now `write::apply` reads
+every key's row and old id in lookups of up to 512 keys per folder, works out each key's version as
+before (the value sealed with the project's data key, bound to its project, id and version), then
+writes all the rows in one `execute_pipeline` inside the same transaction. On Postgres each
+statement carries up to 128 rows (2,432 parameters; the limit is 65,535), so the whole change is
+one round trip. An existing key's row is updated in place (`ON CONFLICT (id) DO UPDATE`). The
+audit chain still gets the one row per change it got before.
+
+SQLite runs in process, so a statement costs it no round trip. A statement that writes several rows
+inside a transaction needs a statement journal, which goes to a temporary file past 64 KiB, so
+SQLite keeps one row per statement. A first version wrote 128 rows per statement there too: its CPU
+time stayed the same, but its system time went from 0.06–0.10 s to 0.25–0.40 s for the bench's two
+changes, and the 9,900-key rewrite took about twice as long.
+
+`cargo run -p roll-secrets --release --example bench -- big 1000,9900` measures this. It writes one
+change of new keys into a fresh project, then one change of new values for all of them, and on
+Postgres with `pg_stat_statements` loaded it also counts the statements. Measured on 2026-11-20 on
+ai-server (release, Postgres 18 in Docker with `max_connections=500`): two alternated pairs under
+load averages of 20 to 26. Before is main at `d04cc26d4`, which already has #281 and #475. Each
+cell gives both runs.
+
+| one change of | SQLite before | SQLite after | Postgres before | Postgres after | Postgres statements |
+| --- | --- | --- | --- | --- | --- |
+| 1,000 new keys | 45, 23 ms | 42, 19 ms | 1.28, 1.20 s | 146, 161 ms | 5,029 → 62 |
+| 1,000 new values | 39, 35 ms | 39, 40 ms | 1.06, 0.97 s | 129, 121 ms | 4,022 → 58 |
+| 9,900 new keys | 304, 314 ms | 260, 195 ms | 12.0, 10.9 s | 1.15, 1.09 s | 49,529 → 236 |
+| 9,900 new values | 336, 236 ms | 419, 257 ms | 9.9, 9.9 s | 1.18, 1.02 s | 39,622 → 285 |
+
+On SQLite the two builds are within each other's noise: over three more alternated runs of the
+9,900-key bench, user CPU was 0.55–0.64 s and system 0.05–0.11 s for both. On Postgres, what's left
+is mostly the server inserting rows: the 77 inserts into `secrets` (four indexes) take 0.51–0.66 s
+of server time, and those into `versions` 0.23–0.31 s.
+`a_change_of_thousands_of_keys_keeps_every_version_and_the_audit_chain` (`tests/api.rs`) covers a
+3,000-key import and a change that rewrites, deletes and adds a thousand keys each, on both
+databases.
+
+**A placeholder's swap** (`Secrets::substitute`, what roll's egress proxy calls per outgoing
+request) reads only the one key: the folder's view takes a key (`view_in`'s `only`), so each
+folder on the way (its own, its imports, its base) is one indexed lookup instead of all 9,900
+rows. The same bench, 1,000 swaps a run on SQLite, measured 2026-11-20 (two runs each):
+
+| | before (`2cd7276fb`) | after |
+| --- | --- | --- |
+| p50 | 45–69 ms | 0.08 ms |
+| p99 | 70–89 ms | 0.10–0.18 ms |
+
+Loads were 49 before and 18 after, but the paths the change doesn't touch (grid, list, values,
+insights, compare) moved by ±30% between the two runs, against about 600× for the swap. Nothing
+is cached: the placeholder's row, the binding and the caller (and its maker) are read on every
+swap, so a revocation, a cut-off or a person losing the project stops the next request. A cache
+under the digest's invalidation would miss those (a token revoked in roll-access, a person's
+account, moves no project change number), and at 0.08 ms there's nothing left for it to save.
+The bench's consumer is an in-process one whose maker is the operator; a token or person maker
+adds roll-access's grant lookup or the accounts' and workspace's.
 
 ## Next
 
