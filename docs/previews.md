@@ -770,7 +770,10 @@ this: they get no secrets, or all of them.
 - What it holds is on its record (`intercepted`: each key with the hosts it's bound to, and how
   many requests through its egress proxy had a key swapped in or were refused; never a value or
   a placeholder) and the sheet ("Keys it never holds: STRIPE_KEY → api.stripe.com · 12 swapped
-  in, 1 refused").
+  in, 1 refused"). Its services on roll apps are counted by roll apps' proxies (their `pv-`
+  environments' `intercepted`, apps' #612: since each proxy came up, not kept across its
+  restarts), which previews reads with the egress refusals and adds as `on_apps` (requests,
+  swapped, the latest refusals' reasons, masked as its logs are): "on roll apps, 3 swapped in".
 - For a host the preview's interception CA (#517) covers, `egress.js` hands the client's
   connection to rolld over a unix socket in the preview's own directory, mounted into the egress
   container (containers can't reach the host's TCP ports on ai-server, and no port is opened).
