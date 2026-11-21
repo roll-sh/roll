@@ -5989,7 +5989,10 @@ and webhooks' and review apps' signing secrets sealed. Still open:
 - **The #432 decoy oracle:** fixed, #575 (8e16604f2). Compute images are pinned by digest, and each
   image's pre-auth answers are learned from a compute of that image, ahead of time at start, so no
   decoy login waits and none answers with bytes the compute wouldn't.
-- **Members (#501):** merging main again for batch 7. It lands first; #582 and #575 follow it.
+- **Members (#501): landed** as 991d98225 (batch 7, 2026-11-21 22:06), carrying #445's design docs.
+  Projects now have members with four roles, session grants and invites, and what a member made runs
+  at their current rights, scoped to what it does. #582 is being re-levelled on it (one conflict in
+  `placeholders.rs`), then lands; #585 follows its review fixes.
 - **Item 8** (placeholders had no consumer on main): done. Previews' #535 (a06876bd1) swaps them in
   `crates/roll-intercept`, shared with apps, and is checked end to end against a TLS echo host
   (`scripts/preview-intercept.sh`). The echo step flips to expect a 502 once item 4's scrub lands.
