@@ -550,6 +550,29 @@ impl Secrets {
         // An audit sink's format and its SIEM's token, sealed (sinks.rs): absent is roll's own.
         db.add_column("audit_sinks", "format", "TEXT")?;
         db.add_column("audit_sinks", "token", "BLOB")?;
+        // Whether a sink gets the rows that say which keys are decoys: its maker's
+        // `Secrets::sees_decoys` (sinks.rs). Older sinks: when a session or the operator made them.
+        db.add_column("audit_sinks", "decoys", "INTEGER")?;
+        db.migrate("secrets-sinks-decoys", |c| {
+            c.execute("UPDATE audit_sinks SET decoys = CASE WHEN created_by = 'operator' OR substr(created_by, 1, 4) = 'usr_' THEN 1 ELSE 0 END WHERE decoys IS NULL", ())?;
+            Ok(())
+        })?;
+        // Whether an environment's notify URL may hear a decoy was used: set by a session or the
+        // operator (`Secrets::sees_decoys`; notices.rs). Who set an older one isn't recorded: only
+        // when every policy change the audit log still holds for it was by the operator or a person.
+        db.add_column("environments", "notify_set_by_session", "INTEGER")?;
+        db.migrate("secrets-notify-set-by-session", |c| {
+            c.execute(
+                "UPDATE environments SET notify_set_by_session = CASE
+                   WHEN EXISTS (SELECT 1 FROM audit a WHERE a.project_id = environments.project_id AND a.env = environments.slug AND a.action = 'environment.policy')
+                    AND NOT EXISTS (SELECT 1 FROM audit a WHERE a.project_id = environments.project_id AND a.env = environments.slug AND a.action = 'environment.policy'
+                                    AND a.actor <> 'operator' AND substr(a.actor, 1, 4) <> 'usr_')
+                   THEN 1 ELSE 0 END
+                 WHERE notify_url IS NOT NULL AND notify_set_by_session IS NULL",
+                (),
+            )?;
+            Ok(())
+        })?;
         // How a role trusts roll (aws.rs): absent is the ExternalId, as before there were two.
         db.add_column("aws_roles", "trust", "TEXT")?;
         db.ensure_schema(issuer::SCHEMA)?;

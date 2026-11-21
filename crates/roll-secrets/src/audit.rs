@@ -310,15 +310,20 @@ impl Secrets {
             sql.push_str(" AND at >= ?");
             args.push(code_sql::Value::Int(since));
         }
+        // Which keys are decoys is for the admins' sessions and the operator: a token's answer
+        // leaves those rows out, in the query so its pages fill as anyone's do.
+        if !self.sees_decoys(project, caller) {
+            for a in crate::decoys::DECOY_ACTIONS {
+                sql.push_str(" AND action <> ?");
+                args.push(code_sql::Value::Text(a.into()));
+            }
+        }
         sql.push_str(" ORDER BY id DESC LIMIT ?");
         args.push(code_sql::Value::Int(limit));
         let rows = self.db.read(|c| c.query(&sql, &args, row))?;
-        // Which keys are decoys is the admins' to know.
-        let decoys = self.sees_decoys(project, caller);
         // A token limited to some environments sees only their rows.
         Ok(rows
             .into_iter()
-            .filter(|r| decoys || !crate::decoys::ADMIN_ACTIONS.contains(&r.action.as_str()))
             .filter(|r| r.environment.as_deref().is_none_or(|e| caller.allows(Action::Read, &Scope::at(project, e, r.path.as_deref().unwrap_or("/")))))
             .collect())
     }
