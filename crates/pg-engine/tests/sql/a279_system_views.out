@@ -1,0 +1,133 @@
+> create table a279t (id int primary key, code text not null unique, n int check (n > 0))
+-- CREATE TABLE
+
+> create table a279c (id int primary key, t int references a279t, note text)
+-- CREATE TABLE
+
+> create index a279c_note on a279c (lower(note)) where id > 0
+-- CREATE INDEX
+
+> create view a279v as select a279t.code, a279c.note, a279c.t from a279t left join a279c on a279c.t = a279t.id
+-- CREATE VIEW
+
+> select count(*) > 150 from information_schema.table_constraints
+?column?:bool
+t
+-- SELECT 1
+
+> select count(*) from information_schema.table_constraints where table_schema = 'public'
+count:int8
+8
+-- SELECT 1
+
+> select constraint_name, constraint_type from information_schema.table_constraints where table_schema = 'public' order by 1
+constraint_name:name | constraint_type:varchar
+a279c_id_not_null | CHECK
+a279c_pkey | PRIMARY KEY
+a279c_t_fkey | FOREIGN KEY
+a279t_code_key | UNIQUE
+a279t_code_not_null | CHECK
+a279t_id_not_null | CHECK
+a279t_n_check | CHECK
+a279t_pkey | PRIMARY KEY
+-- SELECT 8
+
+> select table_name, column_name from information_schema.constraint_column_usage where table_schema = 'public' order by 1, 2
+table_name:name | column_name:name
+a279c | id
+a279c | id
+a279t | code
+a279t | code
+a279t | id
+a279t | id
+a279t | id
+a279t | n
+-- SELECT 8
+
+> select table_name, column_name, ordinal_position from information_schema.key_column_usage where table_schema = 'public' order by 1, 2
+table_name:name | column_name:name | ordinal_position:int4
+a279c | id | 1
+a279c | t | 1
+a279t | code | 1
+a279t | id | 1
+-- SELECT 4
+
+> select count(*) > 100 from pg_indexes
+?column?:bool
+t
+-- SELECT 1
+
+> select tablename, indexname from pg_indexes where schemaname = 'public' order by 2
+tablename:name | indexname:name
+a279c | a279c_note
+a279c | a279c_pkey
+a279t | a279t_code_key
+a279t | a279t_pkey
+-- SELECT 4
+
+> select viewname from pg_views where schemaname = 'public'
+viewname:name
+a279v
+-- SELECT 1
+
+> explain select viewname from pg_views where viewname = 'a279v'
+QUERY PLAN:text
+Index Scan using pg_class_relname_nsp_index on pg_class c  (cost=0.27..8.29 rows=1 width=64)
+  Index Cond: (relname = 'a279v'::name)
+  Filter: (relkind = 'v'::"char")
+-- EXPLAIN
+
+> explain select rolname from pg_roles where rolname = 'postgres'
+QUERY PLAN:text
+Seq Scan on pg_authid  (cost=0.00..1.21 rows=1 width=64)
+  Filter: (rolname = 'postgres'::name)
+-- EXPLAIN
+
+> explain select gid from pg_prepared_xacts where gid ~ '^a279' order by gid
+QUERY PLAN:text
+Sort  (cost=12.56..12.57 rows=5 width=32)
+  Sort Key: p.gid
+  ->  Function Scan on pg_prepared_xact p  (cost=0.00..12.50 rows=5 width=32)
+        Filter: (gid ~ '^a279'::text)
+-- EXPLAIN
+
+> explain select locktype, mode from pg_locks where locktype = 'advisory' order by 1
+QUERY PLAN:text
+Function Scan on pg_lock_status l  (cost=0.00..12.50 rows=5 width=64)
+  Filter: (locktype = 'advisory'::text)
+-- EXPLAIN
+
+> explain select name from pg_cursors order by 1
+QUERY PLAN:text
+Sort  (cost=59.83..62.33 rows=1000 width=32)
+  Sort Key: c.name
+  ->  Function Scan on pg_cursor c  (cost=0.00..10.00 rows=1000 width=32)
+-- EXPLAIN
+
+> explain select name from pg_prepared_statements order by 1
+QUERY PLAN:text
+Sort  (cost=59.83..62.33 rows=1000 width=32)
+  Sort Key: p.name
+  ->  Function Scan on pg_prepared_statement p  (cost=0.00..10.00 rows=1000 width=32)
+-- EXPLAIN
+
+> explain select * from a279v where code = 'x'
+QUERY PLAN:text
+Hash Right Join  (cost=8.18..33.34 rows=1 width=68)
+  Hash Cond: (a279c.t = a279t.id)
+  ->  Seq Scan on a279c  (cost=0.00..22.00 rows=1200 width=36)
+  ->  Hash  (cost=8.17..8.17 rows=1 width=36)
+        ->  Index Scan using a279t_code_key on a279t  (cost=0.15..8.17 rows=1 width=36)
+              Index Cond: (code = 'x'::text)
+-- EXPLAIN
+
+> explain select * from a279v v join a279t t on v.t = t.id where t.n = 3
+QUERY PLAN:text
+Hash Join  (cost=25.07..50.24 rows=6 width=108)
+  Hash Cond: (a279c.t = a279t.id)
+  ->  Seq Scan on a279c  (cost=0.00..22.00 rows=1200 width=36)
+  ->  Hash  (cost=25.00..25.00 rows=6 width=40)
+        ->  Seq Scan on a279t  (cost=0.00..25.00 rows=6 width=40)
+              Filter: (n = 3)
+-- EXPLAIN
+

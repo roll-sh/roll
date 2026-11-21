@@ -128,28 +128,31 @@ fn column_compression_per_database() {
 }
 
 /// A system catalog's estimated rows follow the catalog as DDL changes it (they were cached
-/// by the catalog's address, which a later catalog can take once the earlier is dropped).
+/// by the catalog's address, which a later catalog can take once the earlier is dropped), as
+/// estimate_rel_size gives them: initdb's 415 pg_class rows while its pages have room (16
+/// tables, PostgreSQL's estimate too), more once the rows outgrow initdb's pages.
 #[test]
 fn catalog_estimates_follow_ddl() {
     on_thread(|| {
         let dir = tempfile::tempdir().unwrap();
         let mut s = engine_session(open_store(dir.path()), "b");
-        let mut stale = Vec::new();
-        for i in 0..16 {
-            run(&mut s, &format!("CREATE TABLE t{i} (a int)"));
-            let plan = run(&mut s, "EXPLAIN SELECT * FROM pg_class");
-            let count = run(&mut s, "SELECT count(*) FROM pg_class");
-            let rows = plan
-                .split("rows=")
+        let estimate = |s: &mut Session| {
+            let plan = run(s, "EXPLAIN SELECT * FROM pg_class");
+            plan.split("rows=")
                 .nth(1)
                 .and_then(|r| r.split(' ').next())
                 .unwrap_or_else(|| panic!("{plan}"))
-                .to_string();
-            if !count.lines().any(|l| l.trim() == rows) {
-                stale.push(format!("after {} tables: estimate {rows}, actual\n{count}", i + 1));
-            }
+                .parse::<u64>()
+                .unwrap()
+        };
+        for i in 0..16 {
+            run(&mut s, &format!("CREATE TABLE t{i} (a int)"));
+            assert_eq!(estimate(&mut s), 415, "after {} tables", i + 1);
         }
-        assert!(stale.is_empty(), "{}", stale.join("\n"));
+        for i in 16..140 {
+            run(&mut s, &format!("CREATE TABLE t{i} (a int)"));
+        }
+        assert!(estimate(&mut s) > 415, "after 140 tables");
     });
 }
 

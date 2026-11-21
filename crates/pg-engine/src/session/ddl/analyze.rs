@@ -61,7 +61,19 @@ impl Ddl<'_, '_> {
         let t = crate::sql::paths::sys_table(st);
         let rows = self.analyze_columns(&t, only, false)?.unwrap_or(0);
         let pages = crate::sql::paths::sys_size(st, self.ctx).pages as i32;
-        self.cat.relstats.insert(st.oid(), RelStats { pages, tuples: rows as f64, allvisible: 0, allfrozen: 0 });
+        // (relallvisible: visibilitymap_count, the pages initdb's or the last VACUUM's
+        // left all-visible.)
+        let (allvisible, allfrozen) = match self.cat.relstats.get(&st.oid()) {
+            Some(s) if s.pages >= 0 => (s.allvisible, s.allfrozen),
+            _ => {
+                let p = crate::catalog::static_rows::initdb_class_sizes().get(&st.oid()).map_or(0, |s| s.0 as i32);
+                (p, p)
+            }
+        };
+        self.cat.relstats.insert(
+            st.oid(),
+            RelStats { pages, tuples: rows as f64, allvisible: allvisible.min(pages), allfrozen: allfrozen.min(pages) },
+        );
         Ok(())
     }
 

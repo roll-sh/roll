@@ -17816,26 +17816,11 @@ pub(crate) fn sys_tuples(table: crate::catalog::system::SysTable, ctx: &ExecCtx)
     sys_rel_size(table, ctx).tuples
 }
 
-/// A system catalog's size as estimate_rel_size sees it, cached for the catalog version. A
-/// catalog initdb filled starts from its fresh pg_class relpages and reltuples: its pages are
-/// initdb's, more once its rows outgrow them, and its tuples its live rows (initdb's density
-/// over the pages they take), following DDL; one initdb left empty (relpages 0) has the
-/// density its columns' widths give. A view's, its rows now.
-pub(crate) fn sys_rel_size(table: crate::catalog::system::SysTable, ctx: &ExecCtx) -> costs::RelSize {
-    // (By the catalog's address, with a `Weak` to it: that keeps the allocation, so a later
-    // catalog can't take the address and find this one's size.)
-    type SysRows = HashMap<(usize, u32), (std::sync::Weak<crate::catalog::Catalog>, costs::RelSize)>;
-    thread_local! {
-        static SYS_ROWS: std::cell::RefCell<SysRows> = std::cell::RefCell::new(HashMap::new());
-    }
-    let cat = ctx.catalog();
-    let key = (Arc::as_ptr(&cat) as usize, table.oid());
-    if let Some(n) = SYS_ROWS.with(|m| m.borrow().get(&key).map(|e| e.1)) {
-        return n;
-    }
-    let n = if matches!(table, crate::catalog::system::SysTable::PgDepend) {
+/// A system catalog's live rows (counted without generating them where it can be).
+pub(crate) fn sys_live_rows(table: crate::catalog::system::SysTable, ctx: &ExecCtx) -> f64 {
+    if matches!(table, crate::catalog::system::SysTable::PgDepend) {
         // (Estimated from the catalog's counts, whether its rows are generated or not.)
-        crate::catalog::system::depend_estimate(&cat) as f64
+        crate::catalog::system::depend_estimate(&ctx.catalog()) as f64
     } else if crate::catalog::system::rows_cacheable(table) {
         // (Counted without generating the rows, unless they are already: `row_count`.)
         match crate::catalog::system::rows_cached(table, ctx) {
@@ -17856,27 +17841,56 @@ pub(crate) fn sys_rel_size(table: crate::catalog::system::SysTable, ctx: &ExecCt
                 None => crate::catalog::system::rows(table, ctx).map_or(1000.0, |r| r.len() as f64),
             },
         }
-    };
+    }
+}
+
+/// A system catalog's size as estimate_rel_size sees it, cached for the catalog version. A
+/// catalog starts from its pg_class relpages and reltuples (initdb's, or what a VACUUM or
+/// ANALYZE of it counted): its pages are those, more once its rows outgrow them, and its
+/// tuples their density times the pages; one initdb left empty (relpages 0) has the density
+/// its columns' widths give. A view's, its rows now.
+pub(crate) fn sys_rel_size(table: crate::catalog::system::SysTable, ctx: &ExecCtx) -> costs::RelSize {
+    // (By the catalog's address, with a `Weak` to it: that keeps the allocation, so a later
+    // catalog can't take the address and find this one's size.)
+    type SysRows = HashMap<(usize, u32), (std::sync::Weak<crate::catalog::Catalog>, costs::RelSize)>;
+    thread_local! {
+        static SYS_ROWS: std::cell::RefCell<SysRows> = std::cell::RefCell::new(HashMap::new());
+    }
+    let cat = ctx.catalog();
+    let key = (Arc::as_ptr(&cat) as usize, table.oid());
+    if let Some(n) = SYS_ROWS.with(|m| m.borrow().get(&key).map(|e| e.1)) {
+        return n;
+    }
+    let n = sys_live_rows(table, ctx);
     let width = || -> u32 {
         let t = crate::sql::paths::sys_table(table);
         (0..t.columns.len()).map(|i| costs::col_width(&cat, &t, i)).sum()
     };
-    let size = match crate::catalog::static_rows::initdb_class_sizes().get(&table.oid()) {
-        Some(&(relpages, reltuples)) => {
+    let counted = cat.relstats.get(&table.oid()).filter(|s| s.pages >= 0).map(|s| (s.pages as u32, s.tuples as f32));
+    let size = match counted.or_else(|| crate::catalog::static_rows::initdb_class_sizes().get(&table.oid()).copied()) {
+        Some((relpages, reltuples)) => {
             let relpages = relpages as f64;
             // (MAXALIGN(SizeofHeapTupleHeader) + sizeof(ItemIdData); integer division.)
             let by_width = || ((8192 - 24) / (width() + 28)).max(1) as f64;
             let density = if relpages > 0.0 { reltuples as f64 / relpages } else { by_width() };
-            // (The pages its rows fill now: initdb's last pages have room left, so rows
-            // added take more pages only past what its columns' widths would fit, or its
-            // own density where that is more; a catalog initdb found empty, as pg_shdepend,
-            // keeps a density of 0.)
-            let fill = density.max(by_width());
+            // (The pages its rows fill now: initdb's pages have room left, so rows added
+            // take more pages only past what they hold (`sys_capacity`), else past what its
+            // columns' widths or its own density would fit; a catalog initdb found empty, as
+            // pg_shdepend, keeps a density of 0.)
+            let fill = match crate::catalog::sys_sizes::sys_capacity(table.oid()) {
+                // (The rows a page holds: initdb's pages fill their free space first.)
+                Some(cap) => {
+                    let fresh = crate::catalog::static_rows::initdb_class_sizes().get(&table.oid()).map_or(0.0, |s| s.0 as f64);
+                    if fresh > 0.0 { cap as f64 / fresh } else { density.max(by_width()) }
+                }
+                None => density.max(by_width()),
+            };
             let pages = relpages.max((n / fill).ceil());
-            // (estimate_rel_size's density times the current pages: the pages its live rows
-            // take at initdb's density, so the tuples are its rows now, and a fresh
-            // database's reltuples; a density of 0 stays 0 tuples.)
-            let tuples = if density > 0.0 { n } else { 0.0 };
+            // (estimate_rel_size: the density times the current pages, rint. Rows added on
+            // initdb's last pages leave the estimate at initdb's reltuples until the heap
+            // grows; a catalog initdb left empty takes its width's density; a density of 0
+            // stays 0 tuples.)
+            let tuples = (density * pages).round_ties_even();
             costs::RelSize { pages, tuples }
         }
         None => {

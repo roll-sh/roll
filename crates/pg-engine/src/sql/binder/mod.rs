@@ -2344,9 +2344,16 @@ impl<'b, 'a> Binder<'b, 'a> {
         let col = match e {
             Expr::Collate(_, c, IMPLICIT_COLLATE) => return Ok(Coll::Implicit(c.clone())),
             Expr::Collate(_, c, l) => return Ok(Coll::Explicit(c.clone(), *l)),
-            // A domain declared with a collation gives its values that collation.
+            // A domain declared with a collation gives its values that collation
+            // (information_schema's text domains "C": `system::domain_collation`).
             Expr::CoerceToDomain(_, d)
-                if let Some(c) = self.cat.domains.get(&d.oid).and_then(|x| x.collation.clone()) =>
+                if let Some(c) = self.cat.domains.get(&d.oid).and_then(|x| {
+                    x.collation.clone().or_else(|| {
+                        (x.schema == crate::catalog::INFORMATION_SCHEMA_OID
+                            && crate::catalog::system::type_collation(&x.base) != 0)
+                            .then(|| "C".to_string())
+                    })
+                }) =>
             {
                 return Ok(Coll::Implicit(c));
             }

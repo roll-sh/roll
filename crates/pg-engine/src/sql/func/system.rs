@@ -1986,18 +1986,12 @@ fn pg_get_expr(a: &[Value], c: &FnCtx) -> Result<Value> {
     let pretty = a.get(2).is_some_and(|v| matches!(v, Value::Bool(true)));
     let cat = c.exec.catalog();
     let rel = cat.tables.get(&oid_arg(&a[1]));
-    // A policy's expression (pg_policy shows it as its node tree): the policy's SQL.
-    let t = match rel {
-        Some(rel) if t.starts_with('{') => cat
-            .policies
-            .values()
-            .filter(|p| p.table == rel.oid)
-            .flat_map(|p| p.qual.iter().chain(p.with_check.iter()))
-            .find(|q| {
-                crate::sql::nodetree::policy_expr_tree(c.exec, rel, q).as_deref() == Some(&**t)
-            })
-            .map_or_else(|| t.clone(), |q| Arc::from(q.as_str())),
-        _ => t.clone(),
+    // A node tree a catalog shows (pg_policy, pg_constraint, pg_index, pg_trigger, pg_type,
+    // pg_proc): the expression it was made from.
+    let t = if t.starts_with('{') || t.starts_with("({") {
+        tree_source(c.exec, &cat, rel, t).map_or_else(|| t.clone(), |s| Arc::from(s.as_str()))
+    } else {
+        t.clone()
     };
     let t = &t;
     // A column default's (adbin): its tree has the coercion to the column's type, which
@@ -2018,6 +2012,80 @@ fn pg_get_expr(a: &[Value], c: &FnCtx) -> Result<Value> {
     let shown = rel.and_then(|rel| stored_expr(c.exec, rel, t, Stored::Plain, pretty));
     Ok(text(shown.unwrap_or_else(|| t.to_string())))
 }
+/// What a catalog column showing node tree `tree` (`sql::nodetree`) holds it for, as the
+/// text the column holds beyond what the trees model: one of relation `rel`'s expressions
+/// (policies, CHECK constraints, index keys and predicates, triggers' WHEN), or with no
+/// relation a domain's default or a function's parameter defaults.
+fn tree_source(ctx: &ExecCtx, cat: &Catalog, rel: Option<&Arc<crate::catalog::Table>>, tree: &str) -> Option<String> {
+    use crate::sql::nodetree::{StoredTree, default_exprs_tree, policy_expr_tree, table_expr_tree, trigger_when_tree};
+    let Some(rel) = rel else {
+        for d in cat.domains.values() {
+            for (_, check) in &d.checks {
+                if crate::sql::nodetree::domain_check_tree(ctx, &d.base, check).as_deref() == Some(tree) {
+                    return Some(crate::sql::ruleutils::domain_check(ctx, &d.base, check, false).unwrap_or_else(|| check.clone()));
+                }
+            }
+            if let Some(def) = &d.default
+                && default_exprs_tree(ctx, &[(def, &d.base)], false).as_deref() == Some(tree)
+            {
+                return Some(crate::sql::ruleutils::domain_default(ctx, &d.base, def).unwrap_or_else(|| def.clone()));
+            }
+        }
+        for f in cat.functions.values().filter(|f| f.defaults.iter().any(Option::is_some)) {
+            let typed: Vec<(&str, &T)> =
+                f.args.iter().zip(&f.defaults).filter_map(|((_, ty), d)| Some((d.as_deref()?, ty))).collect();
+            if default_exprs_tree(ctx, &typed, true).as_deref() == Some(tree) {
+                return Some(typed.iter().map(|(d, _)| *d).collect::<Vec<_>>().join(", "));
+            }
+        }
+        return None;
+    };
+    for p in cat.policies.values().filter(|p| p.table == rel.oid) {
+        for q in p.qual.iter().chain(p.with_check.iter()) {
+            if policy_expr_tree(ctx, rel, q).as_deref() == Some(tree) {
+                return Some(q.clone());
+            }
+        }
+    }
+    for con in &rel.constraints {
+        if let ConstraintKind::Check { expr, .. } = &con.kind
+            && table_expr_tree(ctx, rel, expr, StoredTree::Condition, false).as_deref() == Some(tree)
+        {
+            return Some(stored_expr(ctx, rel, expr, Stored::Condition, false).unwrap_or_else(|| expr.clone()));
+        }
+    }
+    for ix in rel.indexes.iter().chain(rel.pkey_index.iter()).filter_map(|i| cat.indexes.get(i)) {
+        let keys: Vec<&str> = ix
+            .columns
+            .iter()
+            .filter_map(|c| match &c.key {
+                IndexKey::Expr(e) => Some(e.as_str()),
+                _ => None,
+            })
+            .collect();
+        if !keys.is_empty() && table_expr_tree(ctx, rel, &keys.join(", "), StoredTree::Key, true).as_deref() == Some(tree) {
+            let shown: Vec<String> = keys
+                .iter()
+                .map(|e| stored_expr(ctx, rel, e, Stored::Plain, false).unwrap_or_else(|| e.to_string()))
+                .collect();
+            return Some(shown.join(", "));
+        }
+        if let Some(p) = &ix.predicate
+            && table_expr_tree(ctx, rel, p, StoredTree::Condition, false).as_deref() == Some(tree)
+        {
+            return Some(stored_expr(ctx, rel, p, Stored::Condition, false).unwrap_or_else(|| p.clone()));
+        }
+    }
+    for x in cat.triggers.values().filter(|x| x.table == rel.oid) {
+        if let Some(w) = &x.when
+            && trigger_when_tree(ctx, rel, w).as_deref() == Some(tree)
+        {
+            return Some(w.clone());
+        }
+    }
+    None
+}
+
 /// What a function printing deparsed SQL returns, as `ruleutils.c` prints string literals
 /// under the session's `standard_conforming_strings`.
 fn deparsed(r: Result<Value>) -> Result<Value> {
@@ -3733,6 +3801,12 @@ fn command_progress(kind: &str, c: &FnCtx) -> Vec<Vec<Value>> {
     out
 }
 
+/// A system view's rows as the set-returning function it reads returns them.
+fn sys_rows_srf(table: crate::catalog::system::SysTable, c: &FnCtx) -> Result<super::SrfIter> {
+    let rows = crate::catalog::system::rows(table, c.exec)?;
+    Ok(Box::new(rows.into_iter().map(Ok)))
+}
+
 fn pg_get_keywords(_: &[Value], _: &FnCtx) -> Result<super::SrfIter> {
     // PostgreSQL 18.6's kwlist.h: word, category, whether it can be a bare column label.
     static KEYWORDS: &str = include_str!("keywords.tsv");
@@ -5099,6 +5173,62 @@ pub fn register(r: &mut Registry) {
             ("is_opt", Bool),
         ],
         pg_get_catalog_foreign_keys,
+    )
+    .stable();
+    // The functions pg_locks, pg_cursors and pg_prepared_statements read (their rows are
+    // the engine's lock table, the session's cursors and its prepared statements).
+    r.srf_cols(
+        "pg_lock_status",
+        vec![],
+        vec![
+            ("locktype", Text),
+            ("database", Oid),
+            ("relation", Oid),
+            ("page", Int4),
+            ("tuple", Int2),
+            ("virtualxid", Text),
+            ("transactionid", T::Xid),
+            ("classid", Oid),
+            ("objid", Oid),
+            ("objsubid", Int2),
+            ("virtualtransaction", Text),
+            ("pid", Int4),
+            ("mode", Text),
+            ("granted", Bool),
+            ("fastpath", Bool),
+            ("waitstart", T::TIMESTAMPTZ),
+        ],
+        |_, c| sys_rows_srf(crate::catalog::system::SysTable::PgLocks, c),
+    )
+    .volatile();
+    r.srf_cols(
+        "pg_cursor",
+        vec![],
+        vec![
+            ("name", Text),
+            ("statement", Text),
+            ("is_holdable", Bool),
+            ("is_binary", Bool),
+            ("is_scrollable", Bool),
+            ("creation_time", T::TIMESTAMPTZ),
+        ],
+        |_, c| sys_rows_srf(crate::catalog::system::SysTable::PgCursors, c),
+    )
+    .stable();
+    r.srf_cols(
+        "pg_prepared_statement",
+        vec![],
+        vec![
+            ("name", Text),
+            ("statement", Text),
+            ("prepare_time", T::TIMESTAMPTZ),
+            ("parameter_types", T::Array(Box::new(T::Regtype))),
+            ("result_types", T::Array(Box::new(T::Regtype))),
+            ("from_sql", Bool),
+            ("generic_plans", Int8),
+            ("custom_plans", Int8),
+        ],
+        |_, c| sys_rows_srf(crate::catalog::system::SysTable::PgPreparedStatements, c),
     )
     .stable();
     r.func(
