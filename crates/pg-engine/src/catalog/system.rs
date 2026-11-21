@@ -1499,6 +1499,56 @@ fn sql_views() -> &'static std::collections::HashMap<(&'static str, &'static str
     })
 }
 
+/// A system view a query plans from its definition, as PostgreSQL's rewriter expands every
+/// view: its relations join the query's, so the plan, its estimates and the order of rows
+/// read without ORDER BY are those of the definition's relations under the query's quals.
+/// The view is owned by the bootstrap superuser (its relations are read with its
+/// privileges). None: a view the engine generates as a relation of its own.
+pub fn expanded_view(table: SysTable) -> Option<Arc<super::ViewDef>> {
+    static DEFS: OnceLock<std::collections::HashMap<u32, Arc<super::ViewDef>>> = OnceLock::new();
+    DEFS.get_or_init(|| {
+        system_view_defs()
+            .iter()
+            .filter_map(|d| {
+                let t = SysTable::by_oid(d.oid).filter(|t| t.is_view())?;
+                let options = match t.name() {
+                    "pg_stats" | "pg_stats_ext" | "pg_stats_ext_exprs" => vec!["security_barrier=true".to_string()],
+                    _ => Vec::new(),
+                };
+                let columns = t.columns().to_vec();
+                let n = columns.len();
+                Some((
+                    t.oid(),
+                    Arc::new(super::ViewDef {
+                        oid: t.oid(),
+                        schema: t.schema(),
+                        name: t.name().to_string(),
+                        owner: super::BOOTSTRAP_SUPERUSER_OID,
+                        query: d.def.trim().trim_end_matches(';').to_string(),
+                        columns,
+                        materialized: false,
+                        check_option: None,
+                        storage: None,
+                        deps: Vec::new(),
+                        rowtype: 0,
+                        rowarray: 0,
+                        rule: 0,
+                        options,
+                        populated: true,
+                        domains: vec![None; n],
+                        collations: vec![None; n],
+                        defaults: Vec::new(),
+                        default_oids: Vec::new(),
+                        rowtype_cols: Vec::new(),
+                    }),
+                ))
+            })
+            .collect()
+    })
+    .get(&table.oid())
+    .cloned()
+}
+
 /// A system view's definition as Postgres's pg_get_viewdef prints it (and pretty).
 pub struct SysViewDef {
     pub oid: u32,
@@ -2839,7 +2889,7 @@ impl<'c> TypeRows<'c> {
         {
             let shown = crate::sql::ruleutils::domain_default(ctx, &d.base, def)
                 .unwrap_or_else(|| def.clone());
-            row[29] = nm(&shown);
+            row[29] = nm(crate::sql::nodetree::default_exprs_tree(ctx, &[(def, &d.base)], false).unwrap_or_else(|| shown.clone()));
             row[30] = nm(shown);
         }
         // A made base type's own attributes (its array's alignment follows it).
@@ -3899,12 +3949,29 @@ fn generate_raw(table: SysTable, ctx: &ExecCtx, only: Option<u32>, out: &mut Out
                             .collect(),
                     ),
                     vector(DataType::Int2, options),
+                    // (As their node trees: a List of the keys, the predicate.)
                     if exprs.is_empty() {
                         N
                     } else {
-                        nm(exprs.join(", "))
+                        let raw: Vec<&str> = ix
+                            .columns
+                            .iter()
+                            .filter_map(|c| match &c.key {
+                                IndexKey::Expr(e) => Some(e.as_str()),
+                                _ => None,
+                            })
+                            .collect();
+                        nm(table
+                            .and_then(|t| {
+                                crate::sql::nodetree::table_expr_tree(ctx, t, &raw.join(", "), crate::sql::nodetree::StoredTree::Key, true)
+                            })
+                            .unwrap_or_else(|| exprs.join(", ")))
                     },
-                    opt(ix.predicate.as_deref().map(|p| shown(p, Stored::Condition))),
+                    opt(ix.predicate.as_deref().map(|p| {
+                        table
+                            .and_then(|t| crate::sql::nodetree::table_expr_tree(ctx, t, p, crate::sql::nodetree::StoredTree::Condition, false))
+                            .unwrap_or_else(|| shown(p, Stored::Condition))
+                    })),
                 ]);
             }
             // TOAST indexes: the unique (chunk_id, chunk_seq) key, as create_toast_table
@@ -4363,7 +4430,13 @@ fn generate_raw(table: SysTable, ctx: &ExecCtx, only: Option<u32>, out: &mut Out
                         N,
                         N,
                         N,
-                        nm(expr),
+                        // (A NOT NULL constraint has no expression; a CHECK's is its node
+                        // tree over VALUE.)
+                        if kind == 'n' {
+                            N
+                        } else {
+                            nm(crate::sql::nodetree::domain_check_tree(ctx, &d.base, expr).unwrap_or_else(|| expr.clone()))
+                        },
                     ]);
                 }
             }
@@ -4502,7 +4575,17 @@ fn generate_raw(table: SysTable, ctx: &ExecCtx, only: Option<u32>, out: &mut Out
                 // adbin is), which pg_get_expr prints as Postgres prints the node list.
                 if ndefaults > 0 {
                     let d: Vec<&str> = f.defaults.iter().flatten().map(String::as_str).collect();
-                    row[23] = nm(d.join(", "));
+                    // (As their node trees, each coerced to its parameter's type.)
+                    let typed: Vec<(&str, &DataType)> = f
+                        .args
+                        .iter()
+                        .zip(&f.defaults)
+                        .filter_map(|((_, ty), d)| Some((d.as_deref()?, ty)))
+                        .collect();
+                    row[23] = nm((typed.len() == d.len())
+                        .then(|| crate::sql::nodetree::default_exprs_tree(ctx, &typed, true))
+                        .flatten()
+                        .unwrap_or_else(|| d.join(", ")));
                 }
                 row[4] = o(match lang {
                     "sql" => 14,
@@ -4755,7 +4838,14 @@ fn generate_raw(table: SysTable, ctx: &ExecCtx, only: Option<u32>, out: &mut Out
                         x.columns.iter().map(|c| i2(*c as i64 + 1)).collect(),
                     ),
                     Value::bytea(args),
-                    opt(x.when.as_deref()),
+                    // (Its node tree over OLD and NEW; its text beyond what that models.)
+                    x.when.as_deref().map_or(N, |w| {
+                        nm(cat
+                            .tables
+                            .get(&x.table)
+                            .and_then(|t| crate::sql::nodetree::trigger_when_tree(ctx, t, w))
+                            .unwrap_or_else(|| w.to_string()))
+                    }),
                     x.old_table.as_deref().map_or(N, nm),
                     x.new_table.as_deref().map_or(N, nm),
                 ]);
@@ -7024,8 +7114,10 @@ fn constraint_row(ctx: &ExecCtx, cat: &Catalog, t: &Arc<Table>, con: &super::Con
                 .filter(|(_, col)| expr_mentions(expr, &col.name))
                 .map(|(i, _)| i as i64 + 1)
                 .collect();
-            let shown =
-                stored_expr(ctx, t, expr, Stored::Condition, false).unwrap_or_else(|| expr.clone());
+            // (Its node tree; the expression's text beyond what that models.)
+            let shown = crate::sql::nodetree::table_expr_tree(ctx, t, expr, crate::sql::nodetree::StoredTree::Condition, false)
+                .or_else(|| stored_expr(ctx, t, expr, Stored::Condition, false))
+                .unwrap_or_else(|| expr.clone());
             (Some(cols), None, 0, c(' '), c(' '), c(' '), 0, nm(shown))
         }
         ConstraintKind::NotNull { column } => (

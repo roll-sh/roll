@@ -950,10 +950,19 @@ impl Ddl<'_, '_> {
             return;
         }
         let new = self.oldest_mxact();
-        for oid in oids {
+        for &oid in &oids {
             let old = self.cat.min_mxids.get(&oid).map_or(FIRST_MULTI, |m| *m as u32);
             if precedes(old, new) {
                 self.cat.min_mxids.insert(oid, new as u64);
+            }
+        }
+        // vac_update_relstats: each catalog's pages and the live rows the scan found, every
+        // page all-visible (what the planner's estimates start from after it).
+        for oid in oids {
+            if let Some(st) = crate::catalog::system::SysTable::by_oid(oid).filter(|t| !t.is_view()) {
+                let pages = crate::sql::paths::sys_size(st, self.ctx).pages as i32;
+                let tuples = crate::sql::explain::sys_live_rows(st, self.ctx);
+                self.cat.relstats.insert(oid, RelStats { pages, tuples, allvisible: pages, allfrozen: pages });
             }
         }
     }

@@ -501,9 +501,16 @@ fn cat_has_statistics(cat: &crate::catalog::Catalog, table: u32) -> bool {
 
 /// The relation's size as the planner sees it, and its all-visible fraction.
 fn rel_size(t: &Table, ctx: &ExecCtx) -> (RelSize, f64) {
-    // (A catalog's stand-in: all its rows visible.)
+    // (A catalog's stand-in: its pages all-visible as initdb's or the last VACUUM's
+    // relallvisible says, over the pages it has now.)
     if let Some(st) = syscat::stand_in_of(t) {
-        return (syscat::sys_size(st, ctx), 1.0);
+        let size = syscat::sys_size(st, ctx);
+        let allvis = match ctx.catalog().relstats.get(&t.oid) {
+            Some(s) if s.pages >= 0 => s.allvisible as f64,
+            _ => crate::catalog::static_rows::initdb_class_sizes().get(&t.oid).map_or(0.0, |s| s.0 as f64),
+        };
+        let frac = if allvis <= 0.0 || size.pages <= 0.0 { 0.0 } else { (allvis / size.pages).min(1.0) };
+        return (size, frac);
     }
     let size = costs::rel_size(t, ctx);
     let allvis = ctx
