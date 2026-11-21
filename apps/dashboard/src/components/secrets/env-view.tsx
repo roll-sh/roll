@@ -2,6 +2,7 @@ import { Clock, Copy, Dices, Download, Folder, FolderPlus, History, Import as Im
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Link } from "@/components/link";
 import { canRotate, needsApproval, SECRET_KEY, TAG, type Batch, type Environment, type ExportFormat, type Import, type KeyInsight, type Op, type Secret, type SecretType } from "@/lib/secrets-api";
+import { decoyUse } from "@/lib/secrets-decoy";
 import { generateValue } from "@/lib/secrets-generate";
 import { childPath, folderName } from "@/lib/secrets-grid";
 import { rollRef } from "@/lib/secrets-ref";
@@ -329,6 +330,7 @@ export function EnvView({ env }: { env: Environment }) {
                 login
                 title={path === "/" ? `${env.name} has no secrets yet` : `${path} is empty in ${env.name}`}
                 cli={[`roll secrets set -p ${project.name} -e ${env.slug} KEY=value`, `roll run -p ${project.name} --env ${env.slug} -- <cmd>`]}
+                install
               >
                 Add one, paste a .env file, or link a resource so its connection string and credentials stay correct when it changes.
                 {standard.length > 1 && " Compare promotes keys from another environment."} From the CLI:
@@ -891,12 +893,16 @@ function ValueHead({ onGenerate }: { onGenerate?: () => void }) {
   );
 }
 
-/** A decoy key (docs/secrets.md, "Decoys"), shown to the project's admins only: the API leaves it out for everyone else. */
+/**
+ * A decoy key (docs/secrets.md, "Decoys"), shown to the project's admins in a session only: the API leaves it out for
+ * tokens. Who planted it and when are here, not in the audit log (a plant's only row is its key's ordinary write).
+ */
 function DecoyMark({ decoy }: { decoy: NonNullable<Secret["decoy"]> }) {
   const used = decoy.uses > 0;
+  const planted = `Planted by ${decoy.created_by} ${ago(decoy.created_at)}.`;
   const title = used
-    ? `A decoy, used ${decoy.uses === 1 ? "once" : `${decoy.uses} times`}${decoy.used_at ? `, last ${ago(decoy.used_at)}` : ""}${decoy.used_ip ? ` from ${decoy.used_ip}` : ""}. Whoever used it found it where it was planted: cut them off and rotate what sits beside it.`
-    : `A decoy: its value is ${decoy.kind === "postgres" ? "a database login that never logs in" : "a roll token that opens nothing"}, and any use raises an alert. Only admins see this mark.`;
+    ? `A decoy, ${decoyUse(decoy, ago)}. Whoever used it found it where it was planted: cut them off and rotate what sits beside it. ${planted}`
+    : `A decoy: its value is ${decoy.kind === "postgres" ? "a database login that never logs in" : "a roll token that opens nothing"}, and any use raises an alert. ${planted} Only admins see this mark.`;
   return (
     <span className={`shrink-0 rounded border px-1 font-mono text-[10px] ${used ? "border-danger/40 text-danger" : "border-accent/40 text-accent"}`} title={title}>
       {used ? `decoy · used ${decoy.uses}×` : "decoy"}
