@@ -2,12 +2,12 @@
 //! each one `.gitmodules` names is written at its path, at the commit its gitlink pins. One on
 //! roll code's own host (a relative URL, or roll code's Git address) comes from roll code: a public
 //! repo, or a private one `build.submodule_repos` names (whoever set that could read it). One
-//! anywhere else is fetched from its public URL with no login. Two levels deep at most and
-//! [`MAX_SUBMODULES`] in all, as a Git URL service's.
+//! anywhere else is fetched from its public URL with no login. Two levels deep at most,
+//! [`MAX_SUBMODULES`] in all and [`MAX_FILES`] files between them, as a Git URL service's.
 
 use std::path::{Component, Path};
 
-use crate::git_source::{self, MAX_SUBMODULES, Remote};
+use crate::git_source::{self, MAX_FILES, MAX_SUBMODULES, Remote};
 use crate::integrations::Sources;
 
 /// Where a submodule comes from.
@@ -34,13 +34,31 @@ pub fn locate(base: &str, repo: &str, raw: &str) -> anyhow::Result<From> {
 
 /// The submodules under the tree of `repo` at `revision`, written into `dir`. How many.
 pub async fn fetch(sources: &dyn Sources, repo: &str, revision: &str, dir: &Path, allowed: &[String], allow_private: bool) -> anyhow::Result<usize> {
-    let mut budget = MAX_SUBMODULES;
+    let (mut budget, mut files) = (MAX_SUBMODULES, 0);
     let base = sources.git_base().unwrap_or_else(|| "roll-code://code".into());
-    fetch_at(sources, &base, repo, revision, dir, allowed, allow_private, 2, &mut budget).await
+    fetch_at(sources, &base, repo, revision, dir, allowed, allow_private, 2, &mut budget, &mut files).await
+}
+
+/// The files written under `dir` (links and directories aside), counted to `limit` at most.
+fn files_in(dir: &Path, limit: usize) -> anyhow::Result<usize> {
+    let (mut n, mut stack) = (0, vec![dir.to_path_buf()]);
+    while let Some(d) = stack.pop() {
+        for e in std::fs::read_dir(&d)? {
+            let e = e?;
+            let m = std::fs::symlink_metadata(e.path())?;
+            if m.is_dir() {
+                stack.push(e.path());
+            } else {
+                n += 1;
+                anyhow::ensure!(n <= limit, "more than {MAX_FILES} files in its submodules");
+            }
+        }
+    }
+    Ok(n)
 }
 
 #[allow(clippy::too_many_arguments)]
-fn fetch_at<'a>(sources: &'a dyn Sources, base: &'a str, repo: &'a str, revision: &'a str, dir: &'a Path, allowed: &'a [String], allow_private: bool, levels: u8, budget: &'a mut usize) -> std::pin::Pin<Box<dyn std::future::Future<Output = anyhow::Result<usize>> + Send + 'a>> {
+fn fetch_at<'a>(sources: &'a dyn Sources, base: &'a str, repo: &'a str, revision: &'a str, dir: &'a Path, allowed: &'a [String], allow_private: bool, levels: u8, budget: &'a mut usize, files: &'a mut usize) -> std::pin::Pin<Box<dyn std::future::Future<Output = anyhow::Result<usize>> + Send + 'a>> {
     Box::pin(async move {
         // `.gitmodules` as written (a regular file, never a link: the tree's own rules).
         let gm = dir.join(".gitmodules");
@@ -57,18 +75,22 @@ fn fetch_at<'a>(sources: &'a dyn Sources, base: &'a str, repo: &'a str, revision
             let at = empty_dir(dir, &path).map_err(|e| anyhow::anyhow!("submodule {path}: {e}"))?;
             match locate(base, repo, &raw).map_err(|e| anyhow::anyhow!("submodule {path}: {e}"))? {
                 From::Repo(sub) => {
-                    if !allowed.contains(&sub) && !sources.public(&sub).await? {
+                    // roll code's names are case-insensitive, so is the list.
+                    if !allowed.iter().any(|a| a.trim_end_matches(".git").eq_ignore_ascii_case(&sub)) && !sources.public(&sub).await? {
                         anyhow::bail!("submodule {path}: {sub} isn't public; name it in build.submodule_repos to build it with this repo");
                     }
                     sources.materialize(&sub, &commit, &at).await.map_err(|e| anyhow::anyhow!("submodule {path} ({sub}): {e:#}"))?;
+                    let (a, limit) = (at.clone(), MAX_FILES - *files);
+                    *files += tokio::task::spawn_blocking(move || files_in(&a, limit)).await??;
                     if levels > 1 {
-                        done += fetch_at(sources, base, &sub, &commit, &at, allowed, allow_private, levels - 1, budget).await?;
+                        done += fetch_at(sources, base, &sub, &commit, &at, allowed, allow_private, levels - 1, budget, files).await?;
                     }
                 }
                 From::Url(url) => {
                     git_source::check_url(&url, allow_private).map_err(|e| anyhow::anyhow!("submodule {path}: {}", e.trim_start_matches("source.url: ")))?;
                     let remote = Remote::new(allow_private, &url, None);
-                    git_source::materialize_sub(&remote, &commit, &at, levels - 1, budget).await.map_err(|e| anyhow::anyhow!("submodule {path}: {e:#}"))?;
+                    *files += git_source::materialize_sub(&remote, &commit, &at, levels - 1, budget).await.map_err(|e| anyhow::anyhow!("submodule {path}: {e:#}"))?;
+                    anyhow::ensure!(*files <= MAX_FILES, "more than {MAX_FILES} files in its submodules");
                 }
             }
             done += 1;
