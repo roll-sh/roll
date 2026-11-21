@@ -59,7 +59,7 @@ func (r *identityResource) Schema(_ context.Context, _ resource.SchemaRequest, r
 			"issuer":   str(true, "The OIDC token's iss, e.g. https://token.actions.githubusercontent.com."),
 			"audience": str(true, "The token's aud: the API's URL, as the CLI and the GitHub Action ask for."),
 			"subject":  str(true, "The token's sub, or a pattern of it with * (repo:acme/web:ref:refs/heads/main). Shared issuers must name one repository."),
-			"claims": schema.MapAttribute{Optional: true, ElementType: types.StringType, Description: "Other claims that must match (ref, environment…).",
+			"claims": schema.MapAttribute{Optional: true, ElementType: types.StringType, Description: "Other claims that must match: a name (ref, environment…) or a JSON pointer (/realm_access/roles) to a value or a pattern with *. An array claim matches when any element does.",
 				PlanModifiers: []planmodifier.Map{mapplanmodifier.RequiresReplace()}},
 			"environments": list(false, "The environments a login reaches (all when left out)."),
 			"paths":        list(false, "The folders a login reaches (all when left out)."),

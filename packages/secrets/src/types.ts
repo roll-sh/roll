@@ -284,7 +284,9 @@ export type Identity = {
   audience: string;
   /** The token's `sub`, or a pattern of it (`*` for any run of characters). */
   subject: string;
-  /** Other claims that must match. */
+  /** Other claims that must match: a name (`ref`) or a JSON pointer (`/realm_access/roles`) to a
+   *  value or a `*` pattern. An array claim matches when any element does; numbers and booleans
+   *  match their JSON text. */
   claims: Record<string, string>;
   environments: string[] | null;
   paths: string[] | null;
