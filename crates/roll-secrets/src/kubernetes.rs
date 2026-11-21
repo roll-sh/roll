@@ -565,7 +565,7 @@ impl Secrets {
         let sealed_token = dek.seal(&aad(project, &id, "token"), &token);
         let sealed_ca = ca.map(|c| dek.seal(&aad(project, &id, "ca"), &Value::new(c)));
         let now = self.db.now_ms()?;
-        let k = KubernetesCluster { id: id.clone(), name: n.name, api_url, has_ca: sealed_ca.is_some(), created_at: now, created_by: caller.maker_id() };
+        let k = KubernetesCluster { id: id.clone(), name: n.name, api_url, has_ca: sealed_ca.is_some(), created_at: now, created_by: caller.made_by().to_string() };
         self.db.write(|c| {
             if c.query_row("SELECT 1 FROM kubernetes_clusters WHERE project_id = ? AND name = ?", [project, &k.name], |_| Ok(())).optional()?.is_some() {
                 return Err(Error::Conflict("exists", format!("a Kubernetes cluster named {} exists", k.name)));

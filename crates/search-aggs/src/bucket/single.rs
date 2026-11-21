@@ -30,7 +30,7 @@ use crate::values::{BoundVs, BytesReader, DocCounter, GeoReader, NumReader, VsOp
 use crate::xparser::{Field, Token, Tokens, XParser};
 
 /// Which single-bucket aggregation produced a result.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum SingleKind {
     Filter,
     Global,
@@ -74,7 +74,7 @@ impl SingleKind {
 }
 
 /// A single-bucket result.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct SingleBucket {
     pub kind: SingleKind,
     pub doc_count: u64,
@@ -252,7 +252,9 @@ enum Mode {
     Filter { weight: Box<dyn Weight>, scorer: Option<Box<dyn Scorer>>, last: (u32, bool) },
     Global,
     Missing { vs: BoundVs, reader: MissingReader },
-    Nested { child: QueryRef, parent: QueryRef, bits: Option<(Arc<FixedBitSet>, Arc<FixedBitSet>)> },
+    /// `whole`: a top-level aggregation of a query matching every live root doc, which may take
+    /// a segment whose sub-aggregations all took it from their statistics.
+    Nested { child: QueryRef, parent: QueryRef, bits: Option<(Arc<FixedBitSet>, Arc<FixedBitSet>)>, whole: bool },
     ReverseNested { parent: QueryRef, bits: Option<Arc<FixedBitSet>>, last: hashbrown::HashMap<u32, u32> },
     /// A nested path that is unmapped: nothing is collected.
     Empty,
@@ -275,6 +277,10 @@ pub struct SingleAgg {
     doc_counter: DocCounter,
     doc_count_field: Option<u32>,
     children: Vec<u32>,
+    child_ords: Vec<u32>,
+    child_scores: Vec<f32>,
+    /// The current segment was taken whole (see [`Mode::Nested`]): none of its docs are needed.
+    seg_done: bool,
 }
 
 pub fn create(def: &AggDef, spec: &SingleSpec, ctx: &mut BindCtx<'_>) -> Result<Box<dyn Aggregator>> {
@@ -314,7 +320,7 @@ pub fn create(def: &AggDef, spec: &SingleSpec, ctx: &mut BindCtx<'_>) -> Result<
                             _ => ctx.lookup.root_filter(),
                         },
                     };
-                    Mode::Nested { child: n.child_filter, parent, bits: None }
+                    Mode::Nested { child: n.child_filter, parent, bits: None, whole: ctx.parents.is_empty() && ctx.matches_every_root() }
                 }
                 _ => Mode::Empty,
             };
@@ -390,6 +396,9 @@ fn finish(kind: SingleKind, mode: Mode, subs: Subs, ctx: &BindCtx<'_>) -> Result
         doc_counter: DocCounter::none(),
         doc_count_field: ctx.doc_count_field,
         children: Vec::new(),
+        child_ords: Vec::new(),
+        child_scores: Vec::new(),
+        seg_done: false,
     }))
 }
 
@@ -417,6 +426,9 @@ impl Aggregator for SingleAgg {
             SingleKind::RandomSampler => "RandomSamplerAggregator",
         }
     }
+    fn segment_done(&self) -> bool {
+        self.seg_done
+    }
     fn set_segment(&mut self, seg: &SegmentContext) -> Result<()> {
         self.doc_counter = DocCounter::open(seg, self.doc_count_field);
         match &mut self.mode {
@@ -435,10 +447,23 @@ impl Aggregator for SingleAgg {
                     }
                 };
             }
-            Mode::Nested { child, parent, bits } => {
+            Mode::Nested { child, parent, bits, whole } => {
                 let p = search_index::query::nested::segment_bits(&self.searcher, seg, parent)?;
                 let c = search_index::query::nested::segment_bits(&self.searcher, seg, child)?;
+                self.seg_done = false;
+                self.subs.set_segment(seg)?;
+                // Every root matches and none is deleted, so every doc of the path is collected:
+                // the bucket counts them all, and the sub-aggregations took them from their
+                // statistics.
+                if *whole && seg.live.is_none() && self.doc_counter.is_constant() && self.subs.all_done() {
+                    if self.counts.is_empty() {
+                        grow(&mut self.counts, 0, 0);
+                    }
+                    self.counts[0] += u64::from(c.cardinality());
+                    self.seg_done = true;
+                }
                 *bits = Some((p, c));
+                return Ok(());
             }
             Mode::ReverseNested { parent, bits, last } => {
                 *bits = Some(search_index::query::nested::segment_bits(&self.searcher, seg, parent)?);
@@ -553,29 +578,49 @@ impl SingleAgg {
             }
             Mode::Nested { bits, .. } => {
                 let Some((parents, children)) = bits.as_ref() else { return Ok(()) };
-                let (parents, children) = (parents.clone(), children.clone());
+                // Each parent's children are the child docs between the previous parent and it,
+                // read a word of the bit set at a time; the batch's children then go to the
+                // sub-aggregations together, in the order one at a time pushed them.
+                let mut docs = std::mem::take(&mut self.children);
+                let (mut ords, mut scores) = (std::mem::take(&mut self.child_ords), std::mem::take(&mut self.child_scores));
+                docs.clear();
+                ords.clear();
+                scores.clear();
+                let with_scores = self.subs.needs_scores();
+                let constant = self.doc_counter.is_constant();
                 for i in 0..b.len() {
                     let p = b.docs[i];
                     if p == 0 {
                         continue;
                     }
-                    let prev = parents.prev_set_bit(p - 1);
-                    let start = prev.map_or(0, |x| x + 1);
-                    self.children.clear();
-                    let mut c = children.next_set_bit(start);
-                    while c != NO_MORE_DOCS && c < p {
-                        self.children.push(c);
-                        c = if c + 1 >= children.len() { NO_MORE_DOCS } else { children.next_set_bit(c + 1) };
+                    let start = parents.prev_set_bit(p - 1).map_or(0, |x| x + 1);
+                    let from = docs.len();
+                    children.push_set_bits(start, p, &mut docs);
+                    let n = docs.len() - from;
+                    if n == 0 {
+                        continue;
                     }
                     let owning = b.ords[i];
-                    for k in 0..self.children.len() {
-                        let cd = self.children[k];
-                        self.count(owning, cd);
-                        if !self.subs.is_empty() {
-                            self.subs.push(cd, owning, b.score(i))?;
+                    if constant {
+                        if self.counts.len() <= owning as usize {
+                            grow(&mut self.counts, owning, 0);
+                        }
+                        self.counts[owning as usize] += n as u64;
+                    } else {
+                        for &d in &docs[from..] {
+                            self.count(owning, d);
                         }
                     }
+                    ords.resize(docs.len(), owning);
+                    if with_scores {
+                        scores.resize(docs.len(), b.score(i));
+                    }
                 }
+                let r = if self.subs.is_empty() { Ok(()) } else { self.subs.push_many(&docs, &ords, &scores) };
+                self.children = docs;
+                self.child_ords = ords;
+                self.child_scores = scores;
+                r?;
             }
             Mode::ReverseNested { bits, last, .. } => {
                 let Some(parents) = bits.as_ref() else { return Ok(()) };

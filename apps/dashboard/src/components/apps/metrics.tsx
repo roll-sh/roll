@@ -362,7 +362,19 @@ function Budget({ r }: { r: SloReport }) {
   );
 }
 
-function Errors({ groups }: { groups: ErrorGroup[] }) {
+function Errors({ groups, service, env }: { groups: ErrorGroup[]; service: string; env: string }) {
+  // Each group's state as set here, over what the read said.
+  const [states, setStates] = useState<Record<string, ErrorGroup["state"]>>({});
+  const [failed, setFailed] = useState<string | null>(null);
+  const set = async (g: ErrorGroup, state: "open" | "resolved" | "muted") => {
+    try {
+      setFailed(null);
+      await appsApi.setErrorState(service, env, g.fingerprint, state);
+      setStates((s) => ({ ...s, [g.fingerprint]: state }));
+    } catch (e) {
+      setFailed(e instanceof Error ? e.message : String(e));
+    }
+  };
   return (
     <section className={`${panel} overflow-hidden`} aria-label="Errors">
       <div className="border-b border-line px-4 py-2.5">
@@ -380,13 +392,38 @@ function Errors({ groups }: { groups: ErrorGroup[] }) {
                 <span className="text-[11px] text-subtle">
                   {g.kind === "line" ? "line" : `${g.kind} trace`} · {since(g.last_seen)}
                   {g.instances > 1 ? ` · ${g.instances} instances` : ""}
+                  {g.first_deployment ? ` · since ${g.first_deployment}` : ""}
                 </span>
+                {(() => {
+                  const state = states[g.fingerprint] ?? g.state ?? "open";
+                  return (
+                    <span className="flex items-center gap-1.5 text-[11px]">
+                      {state !== "open" && <span className="rounded border border-line-2 px-1.5 text-subtle">{state}</span>}
+                      {state !== "resolved" && (
+                        <button type="button" className="text-muted hover:text-fg" onClick={(e) => (e.preventDefault(), void set(g, "resolved"))} title="Said again if it comes back">
+                          Resolve
+                        </button>
+                      )}
+                      {state !== "muted" && (
+                        <button type="button" className="text-muted hover:text-fg" onClick={(e) => (e.preventDefault(), void set(g, "muted"))} title="Never said again">
+                          Mute
+                        </button>
+                      )}
+                      {state !== "open" && (
+                        <button type="button" className="text-muted hover:text-fg" onClick={(e) => (e.preventDefault(), void set(g, "open"))}>
+                          Reopen
+                        </button>
+                      )}
+                    </span>
+                  );
+                })()}
               </summary>
               <pre className="mt-2 max-h-72 overflow-auto rounded-md border border-line bg-bg p-3 font-mono text-[11px] leading-relaxed text-muted">{g.sample}</pre>
             </details>
           </li>
         ))}
       </ul>
+      {failed && <p className="border-t border-line px-4 py-2 text-[12px] text-danger">{failed}</p>}
     </section>
   );
 }
@@ -645,6 +682,7 @@ export function MetricsTab({
   memoryMb,
   maxInstances,
   cpus,
+  latencyTarget,
 }: {
   service: string;
   env: string;
@@ -654,6 +692,8 @@ export function MetricsTab({
   maxInstances?: number;
   /** The cores each instance gets. */
   cpus?: number;
+  /** Its run.latency_target_ms: the p95 it scales out past, drawn on the latency chart. */
+  latencyTarget?: number;
 }) {
   const [range, setRange] = useState<Range>(RANGES[0]);
   const [raw, setM] = useState<MetricsData | null>(null);
@@ -743,7 +783,8 @@ export function MetricsTab({
           { label: "p99", values: m.p99_ms, color: "var(--viz-4)" },
         ],
         format: formatMs,
-        summary: `p99 peaked at ${formatMs(peak(m.p99_ms))}`,
+        summary: `p99 peaked at ${formatMs(peak(m.p99_ms))}${latencyTarget ? `; scales out past a ${formatMs(latencyTarget)} p95` : ""}`,
+        limit: latencyTarget,
       },
       { title: "CPU (cores)", agg: "peak" as Agg, series: [{ label: "cpu", values: m.cpu, color: ink }], format: cores, summary: `peak ${cores(peak(m.cpu))} cores` },
       { title: "Memory", agg: "peak" as Agg, series: [{ label: "memory", values: m.memory_bytes, color: ink }], format: (v: number) => formatBytes(v), summary: `peak ${formatBytes(peak(m.memory_bytes))}${memoryMb ? ` of ${formatBytes(memoryMb * 1024 * 1024)}` : ""}`, limit: memoryMb ? memoryMb * 1024 * 1024 : undefined },
@@ -759,7 +800,7 @@ export function MetricsTab({
       { title: `Cold starts / ${per}`, agg: "total" as Agg, series: [{ label: "cold starts", values: m.cold_starts, color: ink }], format: count, summary: `${sum(m.cold_starts)} in the ${range.label}` },
       { title: "Cold start time", agg: "peak" as Agg, series: [{ label: "cold start", values: m.cold_start_ms, color: ink }], format: formatMs, summary: `slowest ${formatMs(peak(m.cold_start_ms))}` },
     ];
-  }, [m, range, per, memoryMb, maxInstances]);
+  }, [m, range, per, memoryMb, maxInstances, latencyTarget]);
 
   if (error && !m) return <p className="text-[13px] text-danger">Metrics didn't load: {error}</p>;
   if (!m) return <p className="text-[13px] text-subtle"><span className="shimmer">Loading metrics…</span></p>;
@@ -849,7 +890,7 @@ export function MetricsTab({
       {routes && <Routes stats={routes} />}
       {routes && <Splits stats={routes} />}
       {(raw?.by_instance?.length ?? 0) > 0 && <Instances rows={raw!.by_instance!} cpus={cpus} memoryMb={memoryMb} />}
-      {errorGroups.length > 0 && <Errors groups={errorGroups} />}
+      {errorGroups.length > 0 && <Errors groups={errorGroups} service={service} env={env} />}
       {speed && speed.samples > 0 && <Speed v={speed} />}
       {appMetrics && appMetrics.series.length > 0 && <AppMetricsPanel m={appMetrics} />}
       {visitors && visitors.page_views > 0 && <Visitors a={visitors} />}

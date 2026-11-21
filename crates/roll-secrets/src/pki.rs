@@ -489,7 +489,7 @@ impl Secrets {
         let id = names::new_id("ca", 16);
         let sealed = dek.seal(&aad(project, &id), &Value::new(key.serialize_pem()));
         let at = self.db.now_ms()?;
-        let ca = Ca { id: id.clone(), name: n.name, certificate: cert.pem(), policy, created_at: at, created_by: caller.maker_id() };
+        let ca = Ca { id: id.clone(), name: n.name, certificate: cert.pem(), policy, created_at: at, created_by: caller.made_by().to_string() };
         self.db.write(|c| {
             if c.query_row("SELECT 1 FROM cas WHERE project_id = ? AND name = ?", [project, &ca.name], |_| Ok(())).optional()?.is_some() {
                 return Err(Error::Conflict("exists", format!("a CA named {} exists", ca.name)));

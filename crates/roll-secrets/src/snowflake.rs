@@ -667,7 +667,7 @@ impl Secrets {
         let id = names::new_id("sfa", 16);
         let sealed = dek.seal(&aad(project, &id), &Value::new(base64::engine::general_purpose::STANDARD.encode(der.as_bytes())));
         let now = self.db.now_ms()?;
-        let a = SnowflakeAccount { id: id.clone(), name: n.name, account, host, admin_user, admin_role, admin_key_fp: fp, auth: n.auth, managed_user, roles, created_at: now, created_by: caller.maker_id() };
+        let a = SnowflakeAccount { id: id.clone(), name: n.name, account, host, admin_user, admin_role, admin_key_fp: fp, auth: n.auth, managed_user, roles, created_at: now, created_by: caller.made_by().to_string() };
         self.db.write(|c| {
             if c.query_row("SELECT 1 FROM snowflake_accounts WHERE project_id = ? AND name = ?", [project, &a.name], |_| Ok(())).optional()?.is_some() {
                 return Err(Error::Conflict("exists", format!("a Snowflake account named {} exists", a.name)));

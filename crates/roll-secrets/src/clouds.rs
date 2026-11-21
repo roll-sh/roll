@@ -232,8 +232,8 @@ impl Secrets {
         Ok(crate::issuer::Issuer { url: c.issuer.clone() }.discovery())
     }
 
-    /// The issuer's public keys: they verify the audit log's digests too, so they're served
-    /// whether or not clouds are set up. Only rows that are roll's (issuer.rs, `open_row`).
+    /// The issuer's public keys, served whether or not clouds are set up (the audit log's legacy
+    /// digests were signed with them). Only rows that are roll's (issuer.rs, `open_row`).
     pub fn oidc_jwks(&self) -> Result<Json> {
         crate::issuer::jwks(&self.db, self.keys()?, &self.issuer_keys)
     }
@@ -281,7 +281,7 @@ impl Secrets {
         exchange(&clouds, &self.db, keys, project, &n.account, 900)
             .map_err(|why| Error::BadRequest(format!("{} didn't give roll a token: {why} (its trust names issuer {} and subject {sub})", n.account.label(), clouds.issuer)))?;
         let now = self.db.now_ms()?;
-        let a = CloudAccount { id: names::new_id("cla", 16), name: n.name, account: n.account, created_at: now, created_by: caller.maker_id() };
+        let a = CloudAccount { id: names::new_id("cla", 16), name: n.name, account: n.account, created_at: now, created_by: caller.made_by().to_string() };
         self.db.write(|c| {
             if c.query_row("SELECT 1 FROM cloud_accounts WHERE project_id = ? AND name = ?", [project, &a.name], |_| Ok(())).optional()?.is_some() {
                 return Err(Error::Conflict("exists", format!("a cloud account named {} exists", a.name)));

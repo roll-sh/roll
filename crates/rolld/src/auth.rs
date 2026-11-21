@@ -82,6 +82,11 @@ pub const RULES: &[Rule] = &[
     Rule { route: "/v1/secrets", access: Access::UserOrCredential("a roll token (rlt_…), decided by roll-access") },
     // The deployment key's state is about the whole server: never a person's session.
     Rule { route: "/v1/secrets/health", access: Access::Credential("a roll token (rlt_…); the operator's answer") },
+    // roll's issuer key signs for every project: rotating it is the operator's.
+    Rule { route: "/v1/secrets/issuer", access: Access::Operator },
+    // So does the audit log's digest key, and its public keys are what exports are checked with.
+    Rule { route: "/v1/secrets/audit/key", access: Access::Operator },
+    Rule { route: "/v1/secrets/audit/jwks", access: Access::Public("the audit log's digest keys: public, as an export is checked against them offline") },
     // A gateway's link (docs/secrets.md, "Gateways"): only its own token or a workload identity's
     // login opens it, never a person's session (a WebSocket upgrade is a GET with no CSRF check).
     Rule { route: "/v1/secrets/gateways/{id}/connect", access: Access::Credential("a gateway's own roll token (rlt_…) or a workload identity's login; the operator's token is refused (403)") },
@@ -92,6 +97,11 @@ pub const RULES: &[Rule] = &[
     // per split. An unsealed node answers that it isn't sealed.
     Rule { route: "/v1/secrets/unseal", access: Access::Public("unsealing a sealed node: the deployment key's shares are the credential") },
     Rule { route: "/v1/secrets/shares", access: Access::Public("a one-time share's link: ciphertext only, the key stays in the link") },
+    // A secret request's link: for someone outside roll, who has no roll credential. It shows
+    // only the note and key names, takes values sealed to the request's own key, is answered a
+    // set number of times before it expires, and lands as whoever asked could write
+    // (docs/secrets.md, "Asking for a value").
+    Rule { route: "/v1/secrets/value-requests", access: Access::Public("a secret request's link: someone outside roll sends sealed values in, as whoever asked") },
     Rule { route: "/v1/secrets/ocsp", access: Access::Public("a project CA's OCSP responder, which anyone checking its certificates asks") },
     Rule { route: "/v1/secrets/crl", access: Access::Public("a project CA's certificate revocation list, which anyone checking its certificates fetches") },
     // ACME (RFC 8555) on a project's CA: the account key's JWS, made with an External Account

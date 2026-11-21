@@ -395,7 +395,7 @@ pub fn create_rounding(interval: &DateInterval, tz: Option<&crate::format::TimeZ
 }
 
 /// Settings shared by numeric histogram results.
-#[derive(Debug)]
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
 pub struct HistoConfig {
     pub order: BucketOrder,
     pub min_doc_count: u64,
@@ -959,6 +959,41 @@ impl HistoAgg {
     /// The date arm of [`collect_batch`](Self::collect_batch): single values inside the
     /// segment's prepared range go through the array and the per-bucket ordinal cache.
     fn collect_dates(&mut self, b: Batch<'_>, batch: &crate::values::NumBatch, decode: crate::values::Decode, rounding: &Rounding, hard: (Option<i64>, Option<i64>), prepared: Option<&crate::rounding::PreparedRounding>) -> Result<()> {
+        if let Some(pr) = prepared
+            && batch.all_single()
+        {
+            // One value per doc: neighbouring docs mostly share a bucket, so the previous doc's
+            // bucket is tried before the search.
+            let mut last = usize::MAX;
+            for (k, &p) in batch.pos.iter().enumerate() {
+                let (p, v) = (p as usize, decode.to_i64(batch.vals[k]));
+                let i = if last != usize::MAX && pr.holds(last, v) {
+                    last
+                } else if let Some(i) = pr.index(v) {
+                    i
+                } else {
+                    let key = rounding.round(v);
+                    if !(hard.1.is_some_and(|m| key >= m) || hard.0.is_some_and(|m| key < m)) {
+                        self.add(b.ords[p], key as u64, b.docs[p], b.score(p))?;
+                    }
+                    continue;
+                };
+                last = i;
+                let key = pr.point(i);
+                if hard.1.is_some_and(|m| key >= m) || hard.0.is_some_and(|m| key < m) {
+                    continue;
+                }
+                let owning = b.ords[p];
+                let cached = self.slot_ords[i];
+                if cached != u64::MAX && cached >> 32 == u64::from(owning) {
+                    self.add_existing(cached as u32, b.docs[p], b.score(p))?;
+                } else {
+                    let ord = self.add_ord(owning, key as u64, b.docs[p], b.score(p))?;
+                    self.slot_ords[i] = u64::from(owning) << 32 | u64::from(ord);
+                }
+            }
+            return Ok(());
+        }
         for (p, raw) in batch.docs() {
             let doc = b.docs[p];
             if let (Some(pr), [v]) = (prepared, raw)
@@ -1357,7 +1392,7 @@ fn r_val(vals: &[f64], j: usize) -> f64 {
 }
 
 /// `InternalHistogram.EmptyBucketInfo` (without the sub-aggregations, kept beside it).
-#[derive(Debug)]
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
 pub struct EmptyInfo {
     pub interval: f64,
     pub offset: f64,
@@ -1376,7 +1411,7 @@ impl EmptyInfo {
 }
 
 /// A numeric histogram bucket.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct HistoBucket {
     pub key: f64,
     pub doc_count: u64,
@@ -1384,7 +1419,7 @@ pub struct HistoBucket {
 }
 
 /// `InternalHistogram`.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct Histogram {
     pub buckets: Vec<HistoBucket>,
     pub cfg: Arc<HistoConfig>,
@@ -1603,7 +1638,7 @@ impl MultiBuckets for Histogram {
 }
 
 /// `InternalDateHistogram.EmptyBucketInfo`.
-#[derive(Debug)]
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
 pub struct DateEmptyInfo {
     /// The rounding without its offset.
     pub rounding: Rounding,
@@ -1612,7 +1647,7 @@ pub struct DateEmptyInfo {
 }
 
 /// A date histogram bucket.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct DateBucket {
     pub key: i64,
     pub doc_count: u64,
@@ -1620,7 +1655,7 @@ pub struct DateBucket {
 }
 
 /// `InternalDateHistogram`.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct DateHistogram {
     pub buckets: Vec<DateBucket>,
     pub cfg: Arc<HistoConfig>,

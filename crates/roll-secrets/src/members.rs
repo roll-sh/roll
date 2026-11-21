@@ -9,7 +9,7 @@
 //! shared.
 
 use crate::access::{Action, Caller, Grants, Scope, is_person};
-use crate::caller::Maker;
+use crate::caller::Origin;
 use crate::{Result, Secrets, audit};
 use code_sql::params;
 
@@ -41,7 +41,7 @@ impl Secrets {
             {
                 return Ok(true);
             }
-            Ok(matches!(self.maker(by)?, Maker::Person(p) if p == user))
+            Ok(matches!(self.maker(by)?, Origin::Person(p) if p == user))
         };
         let now = self.db.now_ms()?;
         let roll = Caller::consumer("roll:members");

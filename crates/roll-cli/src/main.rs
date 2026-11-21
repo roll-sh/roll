@@ -467,6 +467,12 @@ impl Api {
         }
         Api { base: base.to_string(), http: self.http.clone(), key: self.key.clone(), headers: self.headers.clone(), login: self.login.clone() }
     }
+    /// The same API, with one more header on each request when given (apps' `X-Roll-Override`).
+    fn with_header(&self, header: Option<(&str, &str)>) -> Api {
+        let mut headers = self.headers.clone();
+        headers.extend(header.map(|(n, v)| (n.to_string(), v.to_string())));
+        Api { base: self.base.clone(), http: self.http.clone(), key: self.key.clone(), headers, login: self.login.clone() }
+    }
     async fn get(&self, p: &str) -> anyhow::Result<Value> {
         self.call(reqwest::Method::GET, p, None).await
     }

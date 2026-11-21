@@ -233,6 +233,16 @@ function Conditions({ service, env, runner, go }: { service: Service; env: Envir
         </button>
       ),
     });
+  if (env.frozen)
+    lines.push({
+      key: "frozen",
+      text: `Deploys are frozen${env.freeze?.reason ? `: ${env.freeze.reason}` : ""}. Pushes and hooks build without going live; deploying by hand needs an override; a rollback always works.`,
+      action: (
+        <button type="button" className={btn} disabled={runner.busy !== null} onClick={() => runner.run("unfreeze", () => appsApi.putEnvironment(service.id, env.name, { freeze: null }))}>
+          Lift the freeze
+        </button>
+      ),
+    });
   if (env.held)
     lines.push({
       key: "held-by-you",
@@ -544,7 +554,7 @@ export function ServicePage({ id, env: envParam, tab: tabParam }: { id: string; 
           {(service.source.kind === "repo" || service.source.kind === "git") && (
             <label className="flex flex-col gap-1 text-[12px] text-muted">
               Revision
-              <input value={rev} onChange={(e) => setRev(e.target.value)} placeholder="the branch's head" spellCheck={false} className={`${input} w-56 font-mono text-[12px]`} />
+              <input value={rev} onChange={(e) => setRev(e.target.value)} placeholder="the branch's head; or a branch, tag or commit" spellCheck={false} className={`${input} w-56 font-mono text-[12px]`} />
             </label>
           )}
           {service.source.kind === "image" && (
@@ -689,11 +699,11 @@ export function ServicePage({ id, env: envParam, tab: tabParam }: { id: string; 
             )}
           </p>
         ) : tab === "deployments" ? (
-          <Deployments service={service.id} name={service.name} env={env!} deploys={data.deploys} runner={runner} own={service.run.type === "web" && !service.run.volume} upload={service.source.kind === "upload"} />
+          <Deployments service={service.id} name={service.name} env={env!} deploys={data.deploys} runner={runner} own={service.run.type === "web" && !service.run.volume} upload={service.source.kind === "upload"} explains={service.source.kind === "repo"} />
         ) : tab === "logs" ? (
           <RuntimeLogs service={service.id} env={envName} onGroup={() => go({ tab: "metrics" })} />
         ) : tab === "metrics" ? (
-          <MetricsTab service={service.id} env={envName} memoryMb={service.run.memory_mb} maxInstances={service.run.max_instances} cpus={service.run.cpu} />
+          <MetricsTab service={service.id} env={envName} memoryMb={service.run.memory_mb} maxInstances={service.run.max_instances} cpus={service.run.cpu} latencyTarget={service.run.latency_target_ms} />
         ) : tab === "variables" ? (
           <VariablesTab service={service.id} project={service.project} env={env!} envs={service.environments.map((e) => e.name).filter((n) => n !== env!.name)} runner={runner} onRedeploy={redeploy} />
         ) : tab === "jobs" ? (

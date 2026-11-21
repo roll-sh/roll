@@ -10,11 +10,13 @@ publish.workspace = true
 chrono.workspace = true
 chrono-tz.workspace = true
 foldhash.workspace = true
-hashbrown.workspace = true
+hashbrown = { workspace = true, features = ["serde"] }
 search-codec.workspace = true
 search-index.workspace = true
+serde = { workspace = true, features = ["rc"] }
+postcard.workspace = true
 serde_json = { workspace = true, features = ["float_roundtrip"] }
-smallvec.workspace = true
+smallvec = { workspace = true, features = ["serde"] }
 
 [dev-dependencies]
 rand.workspace = true

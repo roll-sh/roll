@@ -635,7 +635,7 @@ impl Secrets {
                 Some(Some(u)) => {
                     let sealed = dek.seal(&crate::notices::notify_aad(project, &env.id), &crate::Value::new(u.trim()));
                     let host = crate::names::url_host(u);
-                    c.execute("UPDATE environments SET notify_url = ?, notify_host = ?, notify_by = ? WHERE id = ?", params![sealed, host, caller.maker_id(), env.id])?;
+                    c.execute("UPDATE environments SET notify_url = ?, notify_host = ?, notify_by = ? WHERE id = ?", params![sealed, host, caller.made_by().to_string(), env.id])?;
                 }
                 Some(None) => {
                     c.execute("UPDATE environments SET notify_url = NULL, notify_host = NULL, notify_by = NULL WHERE id = ?", [&env.id])?;

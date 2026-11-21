@@ -301,7 +301,12 @@ The product should feel alive: dots react to the cursor and the marks "think". E
     product (Postgres runs `read_only` SQL as a role that can only read), not by parsing.
   - roll's MCP server is `crates/roll-mcp` (`/v1/mcp`): a tool is one route (`tools.rs`), called
     through the gated router, its hints from the catalogue; list it in docs/mcp.md (a test checks).
-    Never call a service directly from a tool.
+    Never call a service directly from a tool. After adding or changing tools, or a product's routes
+    or owner routing, run `pnpm test:mcp-sweep`: every tool called through `/v1/mcp` against a fresh
+    rolld, so a path, query or body the product rejects, or an id it routes on differently, fails.
+    A new route of a product with MCP tools gets a tool, or a line in
+    `crates/roll-mcp/src/no-tool.txt` saying why not (a credential, a person's call, the
+    operator's…; `no tool yet` for a gap): roll-mcp's tests fail on a route with neither.
 - **Projects (the dashboard's workspace):** `crates/roll-workspace` stores projects and where each
   product resource sits on its canvas (docs/workspace.md); the resources themselves stay in their
   products. The dashboard reads it through `lib/workspace-api.ts` (change both together), joins it
@@ -385,7 +390,7 @@ The product should feel alive: dots react to the cursor and the marks "think". E
     rule), backups, gateways and ACME bindings; `registration_reaches` for sinks, notify URLs and
     every registered provider (`LinkProvider::maker`, through `Secrets::provider_for`); exports on
     every read (`dead_exports`); syncs push as them (`person_caller`). A registration stores the
-    person, never their token (`Caller::maker_id`); shares and leases follow their maker through
+    person, never their token (`Caller::made_by`); shares and leases follow their maker through
     `Secrets::maker` (`member_changed`).
   - Workload identities (`identities.rs`) log CI in with its own OIDC token: an issuer is a URL a
     tenant chose, fetched only through rolld's guarded client (`Deliver::get`), and a shared issuer
@@ -396,6 +401,16 @@ The product should feel alive: dots react to the cursor and the marks "think". E
     database transaction; a write closure only touches the database.
   - Read-then-writes are one `code_sql` write (SQLite or the system database's `secrets` schema,
     shared by every node); background work claims each item in a write before acting on it.
+  - Another product holding a `roll://` reference: decide "is this a reference" only with
+    `roll_secrets::Reference::parse` (exact: ` roll://…` or `ROLL://…` is an error, never plain
+    text). A reference the operator wrote resolves through `Secrets::resolve_for`/`digest_for`; one
+    a person chose is bound with `bind_ref` (or `bind_ref_runtime`, the resource's own environment,
+    after the product's deploy check), its `Maker` stored where no tenant can write it, and read
+    with `resolve_as`/`digest_as`, which re-check the maker every time. Never resolve a
+    person's reference as the resource's runtime.
+  - roll's issuer (`Secrets::issue`) signs other products' workload tokens (apps' instances): never
+    for an untrusted preview environment; cloud trusts are written on the exact environment, never
+    `*`. Audit digests have a key of their own. Both rotate on a schedule and with `--now --retire`.
   - Tests: flows in `crates/roll-secrets/tests/api.rs` (also on Postgres with
     `ROLL_CODE_TEST_DATABASE`), two nodes in `tests/nodes.rs`, the CLI (`roll run --watch` too) in
     `crates/roll-cli/tests/secrets.rs`, rolld's link providers against its own products in

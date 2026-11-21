@@ -666,7 +666,7 @@ impl Secrets {
         let id = names::new_id("atl", 16);
         let sealed = dek.seal(&aad(project, &id), &secret);
         let now = self.db.now_ms()?;
-        let a = AtlasProject { id: id.clone(), name: n.name, group_id: group, client_id, managed_users, roles, created_at: now, created_by: caller.maker_id() };
+        let a = AtlasProject { id: id.clone(), name: n.name, group_id: group, client_id, managed_users, roles, created_at: now, created_by: caller.made_by().to_string() };
         self.db.write(|c| {
             if c.query_row("SELECT 1 FROM atlas_projects WHERE project_id = ? AND name = ?", [project, &a.name], |_| Ok(())).optional()?.is_some() {
                 return Err(Error::Conflict("exists", format!("an Atlas project named {} exists", a.name)));

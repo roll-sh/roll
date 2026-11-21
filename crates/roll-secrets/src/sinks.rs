@@ -260,7 +260,7 @@ impl Secrets {
             c.execute(
                 "INSERT INTO audit_sinks (id, project_id, url, secret, cursor, status, error, delivered_at, running_until, retry_at, created_at, created_by, format, token)
                  VALUES (?, ?, ?, ?, ?, 'new', NULL, NULL, 0, 0, ?, ?, ?, ?)",
-                params![id, project, n.url.trim(), sealed, cursor, now, caller.maker_id(), format, sealed_token],
+                params![id, project, n.url.trim(), sealed, cursor, now, caller.made_by().to_string(), format, sealed_token],
             )?;
             audit::record(c, self.keys()?, project, caller, "sink.create", None, None, &[], &format!("audit stream to {} ({format})", host(&n.url)), now)?;
             Ok(c.query_row(&format!("SELECT {COLUMNS} FROM audit_sinks WHERE id = ?"), [&id], sink_row)?)

@@ -94,6 +94,20 @@ fn flexible_path(root: &Map, path: &str, rest: &str) -> EsResult<FlexPath> {
     }
 }
 
+/// Objects one path may create: the document must still be writable, and Elasticsearch's
+/// writer nests at most 1000 levels (`StreamWriteConstraints`). Past that, the objects a path
+/// spells out make a document every walk over it would recurse through.
+pub(crate) const MAX_PATH_DEPTH: usize = 1000;
+
+/// Refuses a path whose objects couldn't be written.
+pub(crate) fn check_path_depth(path: &str) -> EsResult<()> {
+    let depth = path.bytes().filter(|&b| b == b'.').count() + 1;
+    if depth > MAX_PATH_DEPTH {
+        return Err(iae(format!("Document nesting depth ({}) exceeds the maximum allowed ({MAX_PATH_DEPTH}, from `StreamWriteConstraints.getMaxNestingDepth()`)", MAX_PATH_DEPTH + 1)));
+    }
+    Ok(())
+}
+
 fn not_a_map(path: &str, key: &str, v: &Value) -> EsError {
     match v {
         Value::Arr(_) => iae(format!("path [{path}] is not valid")),
@@ -257,6 +271,7 @@ impl IngestDoc {
         if rest.is_empty() {
             return Err(iae("path cannot be null nor empty".to_string()));
         }
+        check_path_depth(rest)?;
         let flexible = self.flexible;
         let root = self.root_mut(r);
         if r == 1 {

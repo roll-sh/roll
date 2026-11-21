@@ -288,7 +288,7 @@ impl Secrets {
         let id = names::new_id("gha", 16);
         let sealed = dek.seal(&key_aad(project, &id), &key);
         let now = self.db.now_ms()?;
-        let app = GitHubApp { id: id.clone(), name: n.name, app_id: n.app_id, installation_id: n.installation_id, api_base, repositories: n.repositories, permissions: n.permissions, created_at: now, created_by: caller.maker_id() };
+        let app = GitHubApp { id: id.clone(), name: n.name, app_id: n.app_id, installation_id: n.installation_id, api_base, repositories: n.repositories, permissions: n.permissions, created_at: now, created_by: caller.made_by().to_string() };
         self.db.write(|c| {
             if c.query_row("SELECT 1 FROM github_apps WHERE project_id = ? AND name = ?", [project, &app.name], |_| Ok(())).optional()?.is_some() {
                 return Err(Error::Conflict("exists", format!("a GitHub App named {} exists", app.name)));

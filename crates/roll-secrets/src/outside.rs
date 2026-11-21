@@ -412,7 +412,7 @@ impl Secrets {
         let id = names::new_id("odb", 16);
         let sealed = dek.seal(&aad(project, &id), &Value::new(n.url.clone()));
         let now = self.db.now_ms()?;
-        let d = OutsideDatabase { id: id.clone(), name: n.name, host, roles: n.roles, group, ca, gateway, created_at: now, created_by: caller.maker_id() };
+        let d = OutsideDatabase { id: id.clone(), name: n.name, host, roles: n.roles, group, ca, gateway, created_at: now, created_by: caller.made_by().to_string() };
         self.db.write(|c| {
             if let Some(g) = &d.gateway
                 && c.query_row("SELECT 1 FROM gateways WHERE id = ? AND project_id = ?", [g, project], |_| Ok(())).optional()?.is_none()

@@ -245,6 +245,7 @@ export function JobsTab({ service, env, runner, cron = false, schedules, states 
                       <span className="block truncate font-mono text-[12px]">
                         {j.command}
                         {(j.tasks ?? 1) > 1 && <span className="text-muted"> × {j.tasks}</span>}
+                        {(j.retries ?? 0) > 0 && <span className="text-subtle"> · up to {j.retries} {j.retries === 1 ? "retry" : "retries"}</span>}
                       </span>
                       <span className="mt-1 flex items-center justify-between gap-2">
                         <JobBadge job={j} />
@@ -293,6 +294,7 @@ function ScheduledRuns({ service, env, runner }: { service: string; env: string;
     if (!open) return;
     const buffer: LogLine[] = [];
     setLines([]);
+    let pending = false;
     return followLog(
       { run: { service, env, run: open } },
       {
@@ -304,7 +306,14 @@ function ScheduledRuns({ service, env, runner }: { service: string; env: string;
         onLine: (l) => {
           buffer.push(l);
           if (buffer.length > MAX_LINES) buffer.splice(0, buffer.length - MAX_LINES);
-          setLines(buffer.slice());
+          // One render per frame however fast the lines come (a copy a line was a copy of it all).
+          if (!pending) {
+            pending = true;
+            requestAnimationFrame(() => {
+              pending = false;
+              setLines(buffer.slice());
+            });
+          }
         },
       },
     );

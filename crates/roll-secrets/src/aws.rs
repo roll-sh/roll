@@ -246,7 +246,7 @@ impl Secrets {
         self.project(project)?;
         self.verify_role(project, &n.role_arn, &trust)?;
         let now = self.db.now_ms()?;
-        let r = AwsRole { id: names::new_id("awr", 16), name: n.name, role_arn: n.role_arn, trust, created_at: now, created_by: caller.maker_id() };
+        let r = AwsRole { id: names::new_id("awr", 16), name: n.name, role_arn: n.role_arn, trust, created_at: now, created_by: caller.made_by().to_string() };
         self.db.write(|c| {
             if c.query_row("SELECT 1 FROM aws_roles WHERE project_id = ? AND name = ?", [project, &r.name], |_| Ok(())).optional()?.is_some() {
                 return Err(Error::Conflict("exists", format!("an AWS role named {} exists", r.name)));

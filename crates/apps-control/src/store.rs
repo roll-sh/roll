@@ -88,6 +88,32 @@ CREATE TABLE IF NOT EXISTS trace_ingest (
     sealed TEXT NOT NULL,
     PRIMARY KEY (service, env)
 ) WITHOUT ROWID;
+-- Who chose a variable's roll:// reference into another environment (roll secrets' maker): each
+-- deploy reads it as them.
+CREATE TABLE IF NOT EXISTS variable_makers (
+    service TEXT NOT NULL,
+    env TEXT NOT NULL,
+    name TEXT NOT NULL,
+    maker TEXT NOT NULL,
+    PRIMARY KEY (service, env, name)
+) WITHOUT ROWID;
+-- Where an environment's instances read roll's OIDC tokens: its URL's token, sealed.
+CREATE TABLE IF NOT EXISTS oidc_access (
+    service TEXT NOT NULL,
+    env TEXT NOT NULL,
+    sealed TEXT NOT NULL,
+    -- Its SHA-256, to find it by a leaked copy (`Apps::revoke_leaked_oidc`).
+    hash TEXT NOT NULL,
+    PRIMARY KEY (service, env)
+) WITHOUT ROWID;
+CREATE TABLE IF NOT EXISTS runtime_config (
+    service TEXT NOT NULL,
+    env TEXT NOT NULL,
+    config TEXT,
+    version INTEGER NOT NULL,
+    sealed TEXT NOT NULL,
+    PRIMARY KEY (service, env)
+) WITHOUT ROWID;
 CREATE TABLE IF NOT EXISTS github_events (
     id TEXT PRIMARY KEY,
     service TEXT NOT NULL,
@@ -214,6 +240,30 @@ CREATE TABLE IF NOT EXISTS deploy_no_traffic (
 CREATE TABLE IF NOT EXISTS deploy_secrets (
     deployment TEXT PRIMARY KEY,
     digest TEXT NOT NULL
+) WITHOUT ROWID;
+CREATE TABLE IF NOT EXISTS status_pages (
+    project TEXT PRIMARY KEY,
+    slug TEXT NOT NULL UNIQUE,
+    title TEXT NOT NULL,
+    items TEXT NOT NULL
+) WITHOUT ROWID;
+CREATE TABLE IF NOT EXISTS status_incidents (
+    id TEXT PRIMARY KEY,
+    project TEXT NOT NULL,
+    title TEXT NOT NULL,
+    state TEXT NOT NULL,
+    started_at INTEGER NOT NULL,
+    resolved_at INTEGER,
+    auto_key TEXT,
+    updates TEXT NOT NULL
+) WITHOUT ROWID;
+CREATE INDEX IF NOT EXISTS status_incidents_project ON status_incidents (project, started_at);
+CREATE TABLE IF NOT EXISTS status_days (
+    key TEXT NOT NULL,
+    day INTEGER NOT NULL,
+    ok INTEGER NOT NULL,
+    bad INTEGER NOT NULL,
+    PRIMARY KEY (key, day)
 ) WITHOUT ROWID;
 CREATE TABLE IF NOT EXISTS deploy_scans (
     deployment TEXT PRIMARY KEY,
@@ -475,6 +525,14 @@ pub struct EnvRow {
     pub heartbeats: Vec<crate::model::Heartbeat>,
     /// Its split test ([`crate::model::Split`]).
     pub split: Option<crate::model::Split>,
+    /// Where a share of its requests is copied ([`crate::model::Split`]'s shape).
+    pub mirror: Option<crate::model::Split>,
+    /// Its deploy freeze ([`crate::freeze`]).
+    pub freeze: Option<crate::freeze::Freeze>,
+    /// When it's paused by the clock ([`crate::freeze::PauseSchedule`]).
+    pub pause_schedule: Option<crate::freeze::PauseSchedule>,
+    /// HTML of its own the proxy puts in every page ([`crate::model::Snippet`]).
+    pub snippets: Vec<crate::model::Snippet>,
     /// Paused (Render's Suspend): nothing of it runs, wakes, deploys or is scheduled until it's
     /// resumed.
     pub paused: bool,
@@ -603,7 +661,7 @@ fn name_taken(name: &str, deleted: Option<i64>) -> String {
         Some(_) => format!("a deleted service named {name} holds the name: restore it, or delete it again to delete it for good"),
     }
 }
-const ENV_COLS: &str = "service, name, branch, ephemeral, active, slug, port, created_at, wait_for_ci, run, hook_hash, follow_tag, tag_seen, feedback, maintenance, allow_ips, rate_limit, tcp_port, firewall, pages, redeploy_on_secrets, secrets_seen, headers, paused, held_by, egress, vitals, routes, report, checks, heartbeats, split";
+const ENV_COLS: &str = "service, name, branch, ephemeral, active, slug, port, created_at, wait_for_ci, run, hook_hash, follow_tag, tag_seen, feedback, maintenance, allow_ips, rate_limit, tcp_port, firewall, pages, redeploy_on_secrets, secrets_seen, headers, paused, held_by, egress, vitals, routes, report, checks, heartbeats, split, freeze, mirror, pause_schedule, snippets";
 /// A deployment [`Store::prune_deployments`] pruned, with its image when nothing else names it.
 pub struct Pruned {
     pub id: String,
@@ -686,6 +744,10 @@ fn env_row(r: &code_sql::Row<'_>) -> code_sql::Result<EnvRow> {
         heartbeats: r.get::<_, Option<String>>(30)?.and_then(|j| serde_json::from_str::<Vec<StoredHeartbeat>>(&j).ok()).unwrap_or_default().into_iter().map(Into::into).collect(),
         report: r.get::<_, i64>(28)? != 0,
         split: r.get::<_, Option<String>>(31)?.and_then(|j| serde_json::from_str(&j).ok()),
+        freeze: r.get::<_, Option<String>>(32)?.and_then(|j| serde_json::from_str(&j).ok()),
+        mirror: r.get::<_, Option<String>>(33)?.and_then(|j| serde_json::from_str(&j).ok()),
+        pause_schedule: r.get::<_, Option<String>>(34)?.and_then(|j| serde_json::from_str(&j).ok()),
+        snippets: r.get::<_, Option<String>>(35)?.and_then(|j| serde_json::from_str(&j).ok()).unwrap_or_default(),
     })
 }
 
@@ -777,6 +839,8 @@ impl Store {
         db.add_column("domains", "tls", "TEXT NOT NULL DEFAULT 'pending'")?;
         // A Git login's password read from one of the project's secrets, by name (none: sealed here).
         db.add_column("git_auth", "secret", "TEXT")?;
+        // A `roll://` secret's maker (roll secrets' runtime binding: who chose it).
+        db.add_column("git_auth", "secret_maker", "TEXT")?;
         db.add_column("domains", "tls_error", "TEXT")?;
         db.add_column("domains", "verified_at", "INTEGER")?;
         db.add_column("env_access", "bypass_hash", "TEXT")?;
@@ -791,6 +855,18 @@ impl Store {
         db.add_column("deployments", "retired_at", "INTEGER")?;
         db.add_column("deployments", "error_detail", "TEXT")?;
         db.add_column("deployments", "build_key", "TEXT")?;
+        // A failed deployment's explanation from a model (`explain::Explanation` as JSON).
+        db.add_column("deployments", "explanation", "TEXT")?;
+        // An ECR login's kind and region (`basic` logins have neither).
+        db.add_column("registry_auth", "kind", "TEXT")?;
+        db.add_column("registry_auth", "region", "TEXT")?;
+        // Instance addresses' tokens' SHA-256 (apps' `rlr_` secrets), to find one by a leaked
+        // copy (`Apps::revoke_leaked_address`); older `rlc_`/`rlx_` tokens have none.
+        db.add_column("runtime_config", "hash", "TEXT")?;
+        db.add_column("trace_ingest", "hash", "TEXT")?;
+        // Runtime config's token before its last rotation (sealed), and when that was.
+        db.add_column("runtime_config", "previous", "TEXT")?;
+        db.add_column("runtime_config", "rotated_at", "INTEGER")?;
         // A deleted service is kept this long (`DELETED_KEPT_MS`), stopped, until it's restored
         // or the prune sweep deletes it for good.
         db.add_column("services", "deleted_at", "INTEGER")?;
@@ -816,6 +892,8 @@ impl Store {
         db.add_column("environments", "allow_ips", "TEXT")?;
         db.add_column("environments", "rate_limit", "TEXT")?;
         db.add_column("jobs", "tasks", "INTEGER NOT NULL DEFAULT 1")?;
+        db.add_column("jobs", "retries", "INTEGER NOT NULL DEFAULT 0")?;
+        db.add_column("jobs", "parallelism", "INTEGER NOT NULL DEFAULT 10")?;
         db.add_column("environments", "tcp_port", "INTEGER")?;
         db.add_column("environments", "firewall", "TEXT")?;
         db.add_column("environments", "headers", "TEXT")?;
@@ -834,6 +912,16 @@ impl Store {
         db.add_column("environments", "checks", "TEXT")?;
         db.add_column("environments", "heartbeats", "TEXT")?;
         db.add_column("environments", "split", "TEXT")?;
+        db.add_column("deploy_scans", "sbom", "TEXT")?;
+        db.add_column("environments", "freeze", "TEXT")?;
+        db.add_column("environments", "mirror", "TEXT")?;
+        db.add_column("environments", "pause_schedule", "TEXT")?;
+        db.add_column("environments", "snippets", "TEXT")?;
+        // An error group's lifecycle (`errors::Lifecycle`): resolved or muted (open when NULL),
+        // since when, and the deployment it was first seen in.
+        db.add_column("error_groups", "state", "TEXT")?;
+        db.add_column("error_groups", "resolved_at", "INTEGER")?;
+        db.add_column("error_groups", "first_deployment", "TEXT")?;
         // Drains made before their filters sent every environment's runtime output: still so.
         db.add_column("log_drains", "sources", "TEXT")?;
         db.add_column("log_drains", "environments", "TEXT")?;
@@ -945,7 +1033,8 @@ impl Store {
             )?;
             c.execute("DELETE FROM deploy_steps WHERE deployment IN (SELECT id FROM deployments WHERE service = ?)", [id])?;
             c.execute("DELETE FROM state WHERE key LIKE ?", [format!("%:{id}/%")])?;
-            for t in ["environments", "deployments", "deploy_keys", "fences", "env_access", "registry_auth", "git_auth", "git_github", "github_events", "trace_ingest", "visit_tickets", "visit_sessions", "variable_files", "error_groups", "variables", "links", "domains", "preview_hosts", "runs", "jobs", "metrics", "usage", "form_submissions", "deploy_scans"] {
+            c.execute("DELETE FROM status_days WHERE key LIKE ?", [format!("%:{id}/%")])?;
+            for t in ["environments", "deployments", "deploy_keys", "fences", "env_access", "registry_auth", "git_auth", "git_github", "github_events", "trace_ingest", "runtime_config", "oidc_access", "variable_makers", "visit_tickets", "visit_sessions", "variable_files", "error_groups", "variables", "links", "domains", "preview_hosts", "runs", "jobs", "metrics", "usage", "form_submissions", "deploy_scans"] {
                 c.execute(&format!("DELETE FROM {t} WHERE service = ?"), [id])?;
             }
             match c.execute("DELETE FROM services WHERE id = ?", [id])? {
@@ -1044,7 +1133,7 @@ impl Store {
                     None => None,
                 };
                 c.execute(
-                    &format!("INSERT INTO environments ({ENV_COLS}) VALUES (?, ?, ?, ?, NULL, ?, ?, ?, 0, '{{}}', NULL, 0, NULL, 0, NULL, NULL, NULL, NULL, NULL, NULL, 0, NULL, NULL, 0, NULL, NULL, 0, NULL, 1, NULL, NULL, NULL)"),
+                    &format!("INSERT INTO environments ({ENV_COLS}) VALUES (?, ?, ?, ?, NULL, ?, ?, ?, 0, '{{}}', NULL, 0, NULL, 0, NULL, NULL, NULL, NULL, NULL, NULL, 0, NULL, NULL, 0, NULL, NULL, 0, NULL, 1, NULL, NULL, NULL, NULL, NULL, NULL, NULL)"),
                     params![service, env, branch.flatten(), ephemeral.unwrap_or(false) as i64, slug, port, now],
                 )?;
             }
@@ -1061,7 +1150,7 @@ impl Store {
             if n == 0 {
                 return Err(Error::NotFound(format!("service {service} has no environment {env}")));
             }
-            for t in ["variables", "variable_files", "error_groups", "domains", "preview_hosts", "runs", "jobs", "metrics", "deploy_keys", "env_access", "trace_ingest", "visit_tickets", "visit_sessions", "form_submissions"] {
+            for t in ["variables", "variable_files", "error_groups", "domains", "preview_hosts", "runs", "jobs", "metrics", "deploy_keys", "env_access", "trace_ingest", "runtime_config", "oidc_access", "variable_makers", "visit_tickets", "visit_sessions", "form_submissions"] {
                 c.execute(&format!("DELETE FROM {t} WHERE service = ? AND env = ?"), [service, env])?;
             }
             // Its schedules', challenge's and base images' state goes with it.
@@ -1496,7 +1585,7 @@ impl Store {
                 }
                 c.execute("UPDATE deployments SET pruned_at = ? WHERE id = ?", params![now, id])?;
                 // History keeps its counts; its findings went with its image.
-                c.execute("UPDATE deploy_scans SET items = '[]' WHERE deployment = ?", [&id])?;
+                c.execute("UPDATE deploy_scans SET items = '[]', sbom = NULL WHERE deployment = ?", [&id])?;
                 out.push(Pruned { id, image });
             }
             for p in &mut out {
@@ -1572,14 +1661,139 @@ impl Store {
 
     /// The project's secrets' digest ([`crate::integrations::SecretSource::digest`]) a deployment
     /// went live with.
-    /// A deployment's scan: its counts and its findings (most severe first, at most [`crate::model::MAX_VULNERABILITIES`]).
-    pub fn set_scan(&self, service: &str, deployment: &str, summary: &crate::model::ScanSummary, items: &[crate::model::Vulnerability]) -> Result<()> {
-        let (s, i) = (serde_json::to_string(summary).expect("a scan serializes"), serde_json::to_string(items).expect("findings serialize"));
+    /// A project's status page made or changed: a new one gets `slug`, a changed one keeps its own.
+    pub fn put_status_page(&self, project: &str, slug: &str, title: &str, items: &str) -> Result<crate::status_page::Page> {
         self.db.execute(
-            "INSERT INTO deploy_scans (deployment, service, summary, items) VALUES (?, ?, ?, ?) ON CONFLICT (deployment) DO UPDATE SET summary = excluded.summary, items = excluded.items",
-            params![deployment, service, s, i],
+            "INSERT INTO status_pages (project, slug, title, items) VALUES (?, ?, ?, ?) ON CONFLICT (project) DO UPDATE SET title = excluded.title, items = excluded.items",
+            params![project, slug, title, items],
+        )?;
+        self.status_page(project)?.ok_or_else(|| Error::NotFound(format!("{project} has no status page")))
+    }
+
+    pub fn status_page(&self, project: &str) -> Result<Option<crate::status_page::Page>> {
+        self.status_page_where("project", project)
+    }
+
+    pub fn status_page_by_slug(&self, slug: &str) -> Result<Option<crate::status_page::Page>> {
+        self.status_page_where("slug", slug)
+    }
+
+    fn status_page_where(&self, col: &str, v: &str) -> Result<Option<crate::status_page::Page>> {
+        let row: Option<(String, String, String, String)> = self.db.query_row(&format!("SELECT project, slug, title, items FROM status_pages WHERE {col} = ?"), [v], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))).optional()?;
+        row.map(|(project, slug, title, items)| Ok(crate::status_page::Page { project, slug, title, items: json(&items)? })).transpose()
+    }
+
+    /// An incident opened: a person's, or one a check or heartbeat opened (`auto_key`: one open
+    /// at a time per key, a second open of the same key is none).
+    pub fn open_incident(&self, project: &str, title: &str, state: &str, text: &str, auto_key: Option<&str>, at: i64) -> Result<Option<String>> {
+        let id = format!("inc_{}", crate::model::random(12).to_ascii_lowercase());
+        let updates = serde_json::to_string(&[serde_json::json!({ "at": at, "state": state, "text": text })]).expect("JSON");
+        self.db.write(|c| {
+            if let Some(k) = auto_key
+                && c.query_row("SELECT 1 FROM status_incidents WHERE project = ? AND auto_key = ? AND resolved_at IS NULL", params![project, k], |_| Ok(())).optional()?.is_some()
+            {
+                return Ok(None);
+            }
+            let resolved = (state == "resolved").then_some(at);
+            c.execute("INSERT INTO status_incidents (id, project, title, state, started_at, resolved_at, auto_key, updates) VALUES (?, ?, ?, ?, ?, ?, ?, ?)", params![id, project, title, state, at, resolved, auto_key, updates])?;
+            Ok(Some(id.clone()))
+        })
+    }
+
+    /// An update on an incident (`resolved` closes it); by its id, or the open one of `auto_key`.
+    pub fn update_incident(&self, project: &str, id: Option<&str>, auto_key: Option<&str>, state: &str, text: &str, at: i64) -> Result<bool> {
+        self.db.write(|c| {
+            let row: Option<(String, String, bool)> = match (id, auto_key) {
+                (Some(i), _) => c.query_row("SELECT id, updates, resolved_at IS NULL FROM status_incidents WHERE project = ? AND id = ?", params![project, i], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?))).optional()?,
+                (None, Some(k)) => c.query_row("SELECT id, updates, resolved_at IS NULL FROM status_incidents WHERE project = ? AND auto_key = ? AND resolved_at IS NULL", params![project, k], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?))).optional()?,
+                _ => None,
+            };
+            let Some((iid, updates, open)) = row else { return Ok(false) };
+            let mut list: Vec<serde_json::Value> = serde_json::from_str(&updates).unwrap_or_default();
+            // An open incident can always be resolved, however many updates it has.
+            if list.len() >= 100 && !(open && state == "resolved") {
+                return Err(Error::Conflict("an incident takes at most 100 updates".into()));
+            }
+            list.push(serde_json::json!({ "at": at, "state": state, "text": text }));
+            let resolved = (state == "resolved").then_some(at);
+            c.execute("UPDATE status_incidents SET state = ?, updates = ?, resolved_at = COALESCE(?, resolved_at) WHERE id = ?", params![state, serde_json::to_string(&list).expect("JSON"), resolved, iid])?;
+            Ok(true)
+        })
+    }
+
+    /// A project's incidents since `since` (unix ms) or still open, newest first.
+    pub fn incidents(&self, project: &str, since: i64) -> Result<Vec<serde_json::Value>> {
+        Ok(self.db.query(
+            "SELECT id, title, state, started_at, resolved_at, auto_key, updates FROM status_incidents WHERE project = ? AND (started_at >= ? OR resolved_at IS NULL) ORDER BY started_at DESC LIMIT 200",
+            params![project, since],
+            |r| {
+                let updates: String = r.get(6)?;
+                Ok(serde_json::json!({ "id": r.get::<_, String>(0)?, "title": r.get::<_, String>(1)?, "state": r.get::<_, String>(2)?, "started_at": r.get::<_, i64>(3)?, "resolved_at": r.get::<_, Option<i64>>(4)?, "automatic": r.get::<_, Option<String>>(5)?.is_some(), "updates": serde_json::from_str::<serde_json::Value>(&updates).unwrap_or(serde_json::Value::Null) }))
+            },
+        )?)
+    }
+
+    /// The page and its incidents, together.
+    pub fn delete_status_page(&self, project: &str) -> Result<()> {
+        self.db.write(|c| {
+            if c.execute("DELETE FROM status_pages WHERE project = ?", [project])? == 0 {
+                return Err(Error::NotFound(format!("{project} has no status page")));
+            }
+            c.execute("DELETE FROM status_incidents WHERE project = ?", [project])?;
+            Ok(())
+        })
+    }
+
+    /// Every project's open incidents that a check or heartbeat opened: (project, its key).
+    pub fn open_auto_incidents(&self) -> Result<Vec<(String, String)>> {
+        Ok(self.db.query("SELECT project, auto_key FROM status_incidents WHERE resolved_at IS NULL AND auto_key IS NOT NULL", (), |r| Ok((r.get(0)?, r.get(1)?)))?)
+    }
+
+    /// One more check run or ping (`ok`), or failure or miss, on `day` (days since 1970), and
+    /// what it is now (`up`: a check is down only after its failures in a row, not one try):
+    /// what it was before, when that changed. Once a day, days and resolved incidents past
+    /// [`crate::status_page::DAYS`] go.
+    pub fn status_day_add(&self, key: &str, day: i64, ok: bool, up: bool) -> Result<Option<Option<String>>> {
+        let (g, b) = if ok { (1, 0) } else { (0, 1) };
+        let (last_key, now) = (format!("status-last:{key}"), if up { "up" } else { "down" });
+        let changed = self.db.write(|c| {
+            c.execute(
+                "INSERT INTO status_days (key, day, ok, bad) VALUES (?, ?, ?, ?) ON CONFLICT (key, day) DO UPDATE SET ok = status_days.ok + excluded.ok, bad = status_days.bad + excluded.bad",
+                params![key, day, g, b],
+            )?;
+            let was: Option<String> = c.query_row("SELECT value FROM state WHERE key = ?", [&last_key], |r| r.get(0)).optional()?;
+            if was.as_deref() == Some(now) {
+                return Ok(None);
+            }
+            c.execute("INSERT INTO state (key, value) VALUES (?, ?) ON CONFLICT (key) DO UPDATE SET value = excluded.value", params![last_key, now])?;
+            Ok::<_, Error>(Some(was))
+        })?;
+        // The first count of a day prunes (one node's: the claim of the day).
+        if self.db.execute("INSERT INTO state (key, value) VALUES ('status-pruned', ?) ON CONFLICT (key) DO UPDATE SET value = excluded.value WHERE state.value <> excluded.value", [day.to_string()])? > 0 {
+            self.db.execute("DELETE FROM status_days WHERE day < ?", [day - crate::status_page::DAYS])?;
+            self.db.execute("DELETE FROM status_incidents WHERE resolved_at < ?", [(day - crate::status_page::DAYS) * 86_400_000])?;
+        }
+        Ok(changed)
+    }
+
+    pub fn status_days(&self, key: &str, since_day: i64) -> Result<Vec<(i64, i64, i64)>> {
+        Ok(self.db.query("SELECT day, ok, bad FROM status_days WHERE key = ? AND day >= ? ORDER BY day", params![key, since_day], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?)
+    }
+
+    /// A deployment's scan: its counts and its findings (most severe first, at most [`crate::model::MAX_VULNERABILITIES`]).
+    pub fn set_scan(&self, service: &str, deployment: &str, summary: &crate::model::ScanSummary, items: &[crate::model::Vulnerability], sbom: Option<&[u8]>) -> Result<()> {
+        let (s, i) = (serde_json::to_string(summary).expect("a scan serializes"), serde_json::to_string(items).expect("findings serialize"));
+        let b = sbom.map(|b| String::from_utf8_lossy(b).into_owned());
+        self.db.execute(
+            "INSERT INTO deploy_scans (deployment, service, summary, items, sbom) VALUES (?, ?, ?, ?, ?) ON CONFLICT (deployment) DO UPDATE SET summary = excluded.summary, items = excluded.items, sbom = excluded.sbom",
+            params![deployment, service, s, i, b],
         )?;
         Ok(())
+    }
+
+    /// A deployment's SBOM (CycloneDX JSON), when its scan kept one.
+    pub fn scan_sbom(&self, deployment: &str) -> Result<Option<String>> {
+        Ok(self.db.query_row("SELECT sbom FROM deploy_scans WHERE deployment = ?", [deployment], |r| r.get::<_, Option<String>>(0)).optional()?.flatten())
     }
 
     pub fn scan(&self, deployment: &str) -> Result<Option<(crate::model::ScanSummary, Vec<crate::model::Vulnerability>)>> {
@@ -1591,6 +1805,18 @@ impl Store {
     pub fn scan_summaries(&self, service: &str) -> Result<HashMap<String, crate::model::ScanSummary>> {
         let rows: Vec<(String, String)> = self.db.query("SELECT deployment, summary FROM deploy_scans WHERE service = ?", [service], |r| Ok((r.get(0)?, r.get(1)?)))?;
         rows.into_iter().map(|(d, s)| Ok((d, json(&s)?))).collect()
+    }
+
+    /// A failed deployment's explanation, once one was asked.
+    pub fn explanation(&self, deployment: &str) -> Result<Option<crate::explain::Explanation>> {
+        let row: Option<Option<String>> = self.db.query_row("SELECT explanation FROM deployments WHERE id = ?", [deployment], |r| r.get(0)).optional()?;
+        Ok(row.flatten().and_then(|s| serde_json::from_str(&s).ok()))
+    }
+
+    pub fn set_explanation(&self, deployment: &str, e: &crate::explain::Explanation) -> Result<()> {
+        let body = serde_json::to_string(e).map_err(|e| Error::Internal(e.to_string()))?;
+        self.db.execute("UPDATE deployments SET explanation = ? WHERE id = ?", params![body, deployment])?;
+        Ok(())
     }
 
     pub fn set_secrets_digest(&self, deployment: &str, digest: &str) -> Result<()> {
@@ -1726,8 +1952,20 @@ impl Store {
     /// Set, then unset, then seal (`seal`: names set here or kept). A sealed variable a new
     /// value replaces stays sealed: nothing unseals one.
     pub fn change_variables(&self, service: &str, env: &str, set: &BTreeMap<String, String>, unset: &[String], seal: &BTreeSet<String>) -> Result<()> {
+        self.change_variables_made(service, env, set, unset, seal, &BTreeMap::new())
+    }
+
+    /// [`Store::change_variables`], with the makers of `set`'s references into other environments
+    /// (a variable set without one has none from now on).
+    pub fn change_variables_made(&self, service: &str, env: &str, set: &BTreeMap<String, String>, unset: &[String], seal: &BTreeSet<String>, makers: &BTreeMap<String, String>) -> Result<()> {
         let sealed: Vec<(String, String)> = set.iter().map(|(k, v)| (k.clone(), self.sealer.seal(&Self::aad(service, env, k), v))).collect();
         self.db.write(|c| {
+            for n in unset.iter().chain(set.keys()) {
+                c.execute("DELETE FROM variable_makers WHERE service = ? AND env = ? AND name = ?", [service, env, n])?;
+            }
+            for (n, m) in makers {
+                c.execute("INSERT INTO variable_makers (service, env, name, maker) VALUES (?, ?, ?, ?)", [service, env, n, m])?;
+            }
             for n in unset {
                 c.execute("DELETE FROM variables WHERE service = ? AND env = ? AND name = ?", [service, env, n])?;
             }
@@ -1742,6 +1980,11 @@ impl Store {
             }
             Ok(())
         })
+    }
+
+    /// Who chose each of an environment's references into another environment, by variable.
+    pub fn variable_makers(&self, service: &str, env: &str) -> Result<BTreeMap<String, String>> {
+        Ok(self.db.query("SELECT name, maker FROM variable_makers WHERE service = ? AND env = ?", [service, env], |r| Ok((r.get(0)?, r.get(1)?)))?.into_iter().collect())
     }
 
     // ── links ──
@@ -2092,11 +2335,13 @@ impl Store {
 
     // ── private registries ──
 
-    pub fn set_registry(&self, service: &str, server: &str, username: &str, password: &str) -> Result<()> {
+    /// A login (`region`: an ECR access key's, `username` its id and `password` its secret).
+    pub fn set_registry(&self, service: &str, server: &str, username: &str, password: &str, region: Option<&str>) -> Result<()> {
         let sealed = self.sealer.seal(&format!("registry:{service}"), password);
+        let kind = region.map(|_| "ecr");
         self.db.execute(
-            "INSERT INTO registry_auth (service, server, username, sealed) VALUES (?, ?, ?, ?) ON CONFLICT (service) DO UPDATE SET server = excluded.server, username = excluded.username, sealed = excluded.sealed",
-            params![service, server, username, sealed],
+            "INSERT INTO registry_auth (service, server, username, sealed, kind, region) VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT (service) DO UPDATE SET server = excluded.server, username = excluded.username, sealed = excluded.sealed, kind = excluded.kind, region = excluded.region",
+            params![service, server, username, sealed, kind, region],
         )?;
         Ok(())
     }
@@ -2108,25 +2353,33 @@ impl Store {
 
     /// The login, without the password.
     pub fn registry(&self, service: &str) -> Result<Option<Registry>> {
-        Ok(self.db.query_row("SELECT server, username FROM registry_auth WHERE service = ?", [service], |r| Ok(Registry { server: r.get(0)?, username: r.get(1)? })).optional()?)
+        Ok(self.db.query_row("SELECT server, username, kind, region FROM registry_auth WHERE service = ?", [service], |r| Ok(Registry { server: r.get(0)?, username: r.get(1)?, kind: r.get(2)?, region: r.get(3)? })).optional()?)
     }
 
     /// The login with its password opened, for a pull.
     pub fn registry_login(&self, service: &str) -> Result<Option<(Registry, String)>> {
-        let row: Option<(String, String, String)> = self.db.query_row("SELECT server, username, sealed FROM registry_auth WHERE service = ?", [service], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?))).optional()?;
-        row.map(|(server, username, sealed)| Ok((Registry { server, username }, self.sealer.open(&format!("registry:{service}"), &sealed)?))).transpose()
+        type Row = (String, String, String, Option<String>, Option<String>);
+        let row: Option<Row> = self.db.query_row("SELECT server, username, sealed, kind, region FROM registry_auth WHERE service = ?", [service], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?))).optional()?;
+        row.map(|(server, username, sealed, kind, region)| Ok((Registry { server, username, kind, region }, self.sealer.open(&format!("registry:{service}"), &sealed)?))).transpose()
     }
 
     // ── private Git repositories ──
 
     /// A login: its password sealed here, or read from the project's secret `secret` at each use.
-    pub fn set_git_login(&self, service: &str, host: &str, username: &str, password: &str, secret: Option<&str>) -> Result<()> {
+    /// A login: its password sealed, or a project secret (`secret`: a key's name in production, or
+    /// a `roll://` reference with its `maker`).
+    pub fn set_git_login(&self, service: &str, host: &str, username: &str, password: &str, secret: Option<&str>, maker: Option<&str>) -> Result<()> {
         let sealed = self.sealer.seal(&format!("git:{service}"), password);
         self.db.execute(
-            "INSERT INTO git_auth (service, host, username, sealed, secret) VALUES (?, ?, ?, ?, ?) ON CONFLICT (service) DO UPDATE SET host = excluded.host, username = excluded.username, sealed = excluded.sealed, secret = excluded.secret",
-            params![service, host, username, sealed, secret],
+            "INSERT INTO git_auth (service, host, username, sealed, secret, secret_maker) VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT (service) DO UPDATE SET host = excluded.host, username = excluded.username, sealed = excluded.sealed, secret = excluded.secret, secret_maker = excluded.secret_maker",
+            params![service, host, username, sealed, secret, maker],
         )?;
         Ok(())
+    }
+
+    /// A Git login's `roll://` secret's maker.
+    pub fn git_login_maker(&self, service: &str) -> Result<Option<String>> {
+        Ok(self.db.query_row("SELECT secret_maker FROM git_auth WHERE service = ?", [service], |r| r.get::<_, Option<String>>(0)).optional()?.flatten())
     }
 
     pub fn delete_git_login(&self, service: &str) -> Result<()> {
@@ -2149,19 +2402,80 @@ impl Store {
 
     /// The environment's trace token, made once (`traces: true`).
     pub fn ensure_trace_token(&self, service: &str, env: &str) -> Result<()> {
-        let sealed = self.sealer.seal(&format!("trace:{service}:{env}"), &format!("rlx_{}", random(32)));
-        self.db.execute("INSERT INTO trace_ingest (service, env, sealed) VALUES (?, ?, ?) ON CONFLICT (service, env) DO NOTHING", params![service, env, sealed])?;
+        let token = roll_auth::credentials::new_secret("rlr_");
+        let (sealed, hash) = (self.sealer.seal(&format!("trace:{service}:{env}"), &token), crate::public::token_hash(&token));
+        self.db.execute("INSERT INTO trace_ingest (service, env, sealed, hash) VALUES (?, ?, ?, ?) ON CONFLICT (service, env) DO NOTHING", params![service, env, sealed, hash])?;
         Ok(())
     }
 
-    /// An error seen: whether it's the first time the environment has had it.
-    pub fn remember_error(&self, service: &str, env: &str, fingerprint: &str, name: &str, at: i64) -> Result<bool> {
-        // At most 1,000 kept an environment: past that, nothing more is new.
-        let n: i64 = self.db.query_row("SELECT COUNT(*) FROM error_groups WHERE service = ? AND env = ?", params![service, env], |r| r.get(0))?;
-        if n >= 1000 {
-            return Ok(false);
+    /// A new trace token for the environment whose token hashes to `hash` (a leaked one): the old
+    /// one takes nothing from now on. Which environment, if any.
+    pub fn replace_trace_token_by_hash(&self, hash: &str) -> Result<Option<(String, String)>> {
+        let row: Option<(String, String)> = self.db.query_row("SELECT service, env FROM trace_ingest WHERE hash = ?", [hash], |r| Ok((r.get(0)?, r.get(1)?))).optional()?;
+        if let Some((s, e)) = &row {
+            let token = roll_auth::credentials::new_secret("rlr_");
+            let (sealed, h) = (self.sealer.seal(&format!("trace:{s}:{e}"), &token), crate::public::token_hash(&token));
+            self.db.execute("UPDATE trace_ingest SET sealed = ?, hash = ? WHERE service = ? AND env = ?", params![sealed, h, s, e])?;
         }
-        Ok(self.db.execute("INSERT INTO error_groups (service, env, fingerprint, name, first_seen) VALUES (?, ?, ?, ?, ?) ON CONFLICT (service, env, fingerprint) DO NOTHING", params![service, env, fingerprint, name, at])? > 0)
+        Ok(row)
+    }
+
+    /// The environment whose runtime config token hashes to `hash`, if any.
+    pub fn runtime_config_by_hash(&self, hash: &str) -> Result<Option<(String, String)>> {
+        Ok(self.db.query_row("SELECT service, env FROM runtime_config WHERE hash = ?", [hash], |r| Ok((r.get(0)?, r.get(1)?))).optional()?)
+    }
+
+    /// An error seen at `at` in `deployment`: new to the environment, back after it was
+    /// resolved (open again), or neither (known, or muted: never said).
+    pub fn remember_error(&self, service: &str, env: &str, fingerprint: &str, name: &str, at: i64, deployment: Option<&str>) -> Result<crate::errors::Seen> {
+        use crate::errors::Seen;
+        self.db.write(|c| {
+            let row: Option<(Option<String>, Option<i64>)> = c.query_row("SELECT state, resolved_at FROM error_groups WHERE service = ? AND env = ? AND fingerprint = ?", params![service, env, fingerprint], |r| Ok((r.get(0)?, r.get(1)?))).optional()?;
+            match row {
+                // At most 1,000 kept an environment: past that, nothing more is new.
+                None => {
+                    let n: i64 = c.query_row("SELECT COUNT(*) FROM error_groups WHERE service = ? AND env = ?", params![service, env], |r| r.get(0))?;
+                    if n >= 1000 {
+                        return Ok(Seen::Known);
+                    }
+                    c.execute("INSERT INTO error_groups (service, env, fingerprint, name, first_seen, first_deployment) VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT (service, env, fingerprint) DO NOTHING", params![service, env, fingerprint, name, at, deployment])?;
+                    Ok(Seen::New)
+                }
+                Some((Some(s), Some(r))) if s == "resolved" && at > r => {
+                    c.execute("UPDATE error_groups SET state = NULL, resolved_at = NULL WHERE service = ? AND env = ? AND fingerprint = ?", params![service, env, fingerprint])?;
+                    Ok(Seen::Regressed)
+                }
+                _ => Ok(Seen::Known),
+            }
+        })
+    }
+
+    /// An error group resolved, muted or open again; false when the environment never had it.
+    pub fn set_error_state(&self, service: &str, env: &str, fingerprint: &str, state: crate::errors::Lifecycle, at: i64) -> Result<bool> {
+        use crate::errors::Lifecycle;
+        let (s, r) = match state {
+            Lifecycle::Open => (None, None),
+            Lifecycle::Resolved => (Some("resolved"), Some(at)),
+            Lifecycle::Muted => (Some("muted"), None),
+        };
+        Ok(self.db.execute("UPDATE error_groups SET state = ?, resolved_at = ? WHERE service = ? AND env = ? AND fingerprint = ?", params![s, r, service, env, fingerprint])? > 0)
+    }
+
+    /// Each kept error group's state and first deployment, by fingerprint.
+    pub fn error_states(&self, service: &str, env: &str) -> Result<HashMap<String, (crate::errors::Lifecycle, Option<String>)>> {
+        use crate::errors::Lifecycle;
+        let rows: Vec<(String, Option<String>, Option<String>)> = self.db.query("SELECT fingerprint, state, first_deployment FROM error_groups WHERE service = ? AND env = ?", params![service, env], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?;
+        Ok(rows
+            .into_iter()
+            .map(|(f, s, d)| {
+                let s = match s.as_deref() {
+                    Some("resolved") => Lifecycle::Resolved,
+                    Some("muted") => Lifecycle::Muted,
+                    _ => Lifecycle::Open,
+                };
+                (f, (s, d))
+            })
+            .collect())
     }
 
     /// The environment's variables kept as files: name → path.
@@ -2195,6 +2509,104 @@ impl Store {
     pub fn trace_token(&self, service: &str, env: &str) -> Result<Option<String>> {
         let sealed: Option<String> = self.db.query_row("SELECT sealed FROM trace_ingest WHERE service = ? AND env = ?", params![service, env], |r| r.get(0)).optional()?;
         sealed.map(|s| self.sealer.open(&format!("trace:{service}:{env}"), &s)).transpose()
+    }
+
+    // ── runtime config ──
+
+    /// An environment's runtime config set, or (none) emptied: its version one more either way,
+    /// and its token made once and kept, so running instances keep reading the same address
+    /// (it goes only with the environment).
+    pub fn set_runtime_config(&self, service: &str, env: &str, config: Option<&serde_json::Value>) -> Result<Option<i64>> {
+        let token = roll_auth::credentials::new_secret("rlr_");
+        let (j, sealed, hash) = (config.map(|c| c.to_string()), self.sealer.seal(&format!("config:{service}:{env}"), &token), crate::public::token_hash(&token));
+        self.db.write(|c| {
+            c.execute(
+                "INSERT INTO runtime_config (service, env, config, version, sealed, hash) VALUES (?, ?, ?, 1, ?, ?) ON CONFLICT (service, env) DO UPDATE SET config = excluded.config, version = runtime_config.version + 1",
+                params![service, env, j, sealed, hash],
+            )?;
+            Ok::<_, Error>(c.query_row("SELECT version FROM runtime_config WHERE service = ? AND env = ?", params![service, env], |r| r.get(0)).optional()?)
+        })
+    }
+
+    /// The environment's runtime config (null when emptied) and its version (none: it never had
+    /// one).
+    pub fn runtime_config(&self, service: &str, env: &str) -> Result<Option<(serde_json::Value, i64)>> {
+        let row: Option<(Option<String>, i64)> = self.db.query_row("SELECT config, version FROM runtime_config WHERE service = ? AND env = ?", params![service, env], |r| Ok((r.get(0)?, r.get(1)?))).optional()?;
+        Ok(row.map(|(c, v)| (c.and_then(|c| serde_json::from_str(&c).ok()).unwrap_or(serde_json::Value::Null), v)))
+    }
+
+    /// Only its version: what a long poll compares.
+    pub fn runtime_config_version(&self, service: &str, env: &str) -> Result<Option<i64>> {
+        Ok(self.db.query_row("SELECT version FROM runtime_config WHERE service = ? AND env = ?", params![service, env], |r| r.get(0)).optional()?)
+    }
+
+    /// Its runtime config's read token, opened (none: no config).
+    pub fn runtime_config_token(&self, service: &str, env: &str) -> Result<Option<String>> {
+        let sealed: Option<String> = self.db.query_row("SELECT sealed FROM runtime_config WHERE service = ? AND env = ?", params![service, env], |r| r.get(0)).optional()?;
+        sealed.map(|s| self.sealer.open(&format!("config:{service}:{env}"), &s)).transpose()
+    }
+
+    /// The token of the URL an environment's instances read OIDC tokens from, made once and
+    /// kept (it goes only with the environment).
+    pub fn oidc_token(&self, service: &str, env: &str) -> Result<String> {
+        // Apps' own prefix, checksummed (`roll_auth::credentials::SECRET_PREFIXES`): scanners
+        // know it, and a leaked one comes back to `Apps::revoke_leaked_oidc`.
+        let token = roll_auth::credentials::new_secret("rlr_");
+        let sealed = self.sealer.seal(&format!("oidc:{service}:{env}"), &token);
+        let hash = crate::public::token_hash(&token);
+        self.db.execute("INSERT INTO oidc_access (service, env, sealed, hash) VALUES (?, ?, ?, ?) ON CONFLICT (service, env) DO NOTHING", params![service, env, sealed, hash])?;
+        let kept: String = self.db.query_row("SELECT sealed FROM oidc_access WHERE service = ? AND env = ?", params![service, env], |r| r.get(0))?;
+        self.sealer.open(&format!("oidc:{service}:{env}"), &kept)
+    }
+
+    /// The environment whose OIDC address a token is, by its hash; its row gone (the address
+    /// reads nothing from now on; the next deploy makes a new one).
+    pub fn drop_oidc_by_hash(&self, hash: &str) -> Result<Option<(String, String)>> {
+        let row: Option<(String, String)> = self.db.query_row("SELECT service, env FROM oidc_access WHERE hash = ?", [hash], |r| Ok((r.get(0)?, r.get(1)?))).optional()?;
+        if let Some((s, e)) = &row {
+            self.db.execute("DELETE FROM oidc_access WHERE service = ? AND env = ?", params![s, e])?;
+        }
+        Ok(row)
+    }
+
+    /// That token, when the environment has one (none: never asked for).
+    pub fn oidc_token_of(&self, service: &str, env: &str) -> Result<Option<String>> {
+        let kept: Option<String> = self.db.query_row("SELECT sealed FROM oidc_access WHERE service = ? AND env = ?", params![service, env], |r| r.get(0)).optional()?;
+        kept.map(|k| self.sealer.open(&format!("oidc:{service}:{env}"), &k)).transpose()
+    }
+
+    /// A new read token for its runtime config (a leaked `ROLL_CONFIG_URL`); the one before is
+    /// kept for [`Store::runtime_config_tokens`]. When it was (none: it has no config).
+    pub fn rotate_runtime_config(&self, service: &str, env: &str) -> Result<Option<i64>> {
+        let now = self.now()?;
+        let token = roll_auth::credentials::new_secret("rlr_");
+        let (sealed, hash) = (self.sealer.seal(&format!("config:{service}:{env}"), &token), crate::public::token_hash(&token));
+        let n = self.db.execute("UPDATE runtime_config SET previous = sealed, sealed = ?, hash = ?, rotated_at = ? WHERE service = ? AND env = ?", params![sealed, hash, now, service, env])?;
+        Ok((n > 0).then_some(now))
+    }
+
+    /// When its runtime config's token was last rotated.
+    pub fn runtime_config_rotated(&self, service: &str, env: &str) -> Result<Option<i64>> {
+        Ok(self.db.query_row("SELECT rotated_at FROM runtime_config WHERE service = ? AND env = ?", params![service, env], |r| r.get::<_, Option<i64>>(0)).optional()?.flatten())
+    }
+
+    /// The tokens that read its runtime config: the current one, and the one before the last
+    /// rotation while instances started with it may run: while the environment's live
+    /// deployment of the service, or of its site's functions service, was made before the
+    /// rotation (a deploy after it gives them the new address).
+    pub fn runtime_config_tokens(&self, service: &str, env: &str) -> Result<Option<(String, Option<String>)>> {
+        let row: Option<(String, Option<String>, Option<i64>)> = self.db.query_row("SELECT sealed, previous, rotated_at FROM runtime_config WHERE service = ? AND env = ?", params![service, env], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?))).optional()?;
+        let Some((sealed, previous, rotated)) = row else { return Ok(None) };
+        let open = |s: &str| self.sealer.open(&format!("config:{service}:{env}"), s);
+        let current = open(&sealed)?;
+        let (Some(previous), Some(at)) = (previous, rotated) else { return Ok(Some((current, None))) };
+        let svc = self.service(service)?;
+        let fn_name: String = format!("{}-fn", svc.name).chars().take(40).collect();
+        let functions = self.services(Some(&svc.project))?.into_iter().find(|s| s.name == fn_name && s.build.builder == crate::model::Builder::Functions).map(|s| s.id);
+        let live_before = [Some(service.to_string()), functions].into_iter().flatten().any(|id| {
+            self.environment(&id, env).ok().and_then(|e| e.active).and_then(|a| self.deployment(&a).ok()).is_some_and(|d| d.created_at < at)
+        });
+        Ok(Some((current, live_before.then(|| open(&previous)).transpose()?)))
     }
 
     // ── roll's GitHub App on a Git URL service ──
@@ -2339,14 +2751,15 @@ impl Store {
 
     // ── jobs ──
 
-    pub fn add_job(&self, service: &str, env: &str, deployment: &str, command: &str, tasks: u32) -> Result<Job> {
+    #[allow(clippy::too_many_arguments)]
+    pub fn add_job(&self, service: &str, env: &str, deployment: &str, command: &str, tasks: u32, retries: u32, parallelism: u32) -> Result<Job> {
         let id = new_id("job");
         let now = self.now()?;
         self.db.execute(
-            "INSERT INTO jobs (id, service, env, deployment, command, status, exit_code, started_at, finished_at, tasks) VALUES (?, ?, ?, ?, ?, 'running', NULL, ?, NULL, ?)",
-            params![id, service, env, deployment, command, now, tasks as i64],
+            "INSERT INTO jobs (id, service, env, deployment, command, status, exit_code, started_at, finished_at, tasks, retries, parallelism) VALUES (?, ?, ?, ?, ?, 'running', NULL, ?, NULL, ?, ?, ?)",
+            params![id, service, env, deployment, command, now, tasks as i64, retries as i64, parallelism as i64],
         )?;
-        Ok(Job { id, deployment: deployment.into(), command: command.into(), tasks, status: RunStatus::Running, exit_code: None, started_at: now, finished_at: None })
+        Ok(Job { id, deployment: deployment.into(), command: command.into(), tasks, retries, parallelism, status: RunStatus::Running, exit_code: None, started_at: now, finished_at: None })
     }
 
     /// A job ends, if it's still running (a takeover may have failed it first): a failure is its
@@ -2574,9 +2987,33 @@ impl Store {
         Ok(())
     }
 
+    pub fn set_freeze(&self, service: &str, env: &str, freeze: Option<&crate::freeze::Freeze>) -> Result<()> {
+        let j = freeze.map(|f| serde_json::to_string(f).expect("a freeze serializes"));
+        self.db.execute("UPDATE environments SET freeze = ? WHERE service = ? AND name = ?", params![j, service, env])?;
+        Ok(())
+    }
+
     pub fn set_split(&self, service: &str, env: &str, split: Option<&crate::model::Split>) -> Result<()> {
         let j = split.map(|s| serde_json::to_string(s).expect("a split serializes"));
         self.db.execute("UPDATE environments SET split = ? WHERE service = ? AND name = ?", params![j, service, env])?;
+        Ok(())
+    }
+
+    pub fn set_pause_schedule(&self, service: &str, env: &str, p: Option<&crate::freeze::PauseSchedule>) -> Result<()> {
+        let j = p.map(|p| serde_json::to_string(p).expect("a schedule serializes"));
+        self.db.execute("UPDATE environments SET pause_schedule = ? WHERE service = ? AND name = ?", params![j, service, env])?;
+        Ok(())
+    }
+
+    pub fn set_snippets(&self, service: &str, env: &str, snippets: &[crate::model::Snippet]) -> Result<()> {
+        let j = (!snippets.is_empty()).then(|| serde_json::to_string(snippets).expect("snippets serialize"));
+        self.db.execute("UPDATE environments SET snippets = ? WHERE service = ? AND name = ?", params![j, service, env])?;
+        Ok(())
+    }
+
+    pub fn set_mirror(&self, service: &str, env: &str, mirror: Option<&crate::model::Split>) -> Result<()> {
+        let j = mirror.map(|s| serde_json::to_string(s).expect("a mirror serializes"));
+        self.db.execute("UPDATE environments SET mirror = ? WHERE service = ? AND name = ?", params![j, service, env])?;
         Ok(())
     }
 
@@ -2841,10 +3278,11 @@ impl Store {
     }
 
     /// Whether any drain asks for request lines and for build lines (the log tap's gate).
-    pub fn drain_sources_wanted(&self) -> Result<(bool, bool)> {
+    /// Whether some drain takes requests, builds, traces, metrics.
+    pub fn drain_sources_wanted(&self) -> Result<(bool, bool, bool, bool)> {
         let all: Vec<Option<String>> = self.db.query("SELECT sources FROM log_drains", (), |r| r.get(0))?;
         let has = |k: &str| all.iter().flatten().any(|j| serde_json::from_str::<Vec<String>>(j).is_ok_and(|v| v.iter().any(|s| s == k)));
-        Ok((has("http"), has("build")))
+        Ok((has("http"), has("build"), has("traces"), has("metrics")))
     }
 
     /// A project's drains with their URLs, secrets and headers opened, to send to.
@@ -3064,7 +3502,7 @@ fn target_row(r: &code_sql::Row<'_>) -> code_sql::Result<NotifyTarget> {
     })
 }
 
-const JOB_COLS: &str = "id, deployment, command, status, exit_code, started_at, finished_at, tasks";
+const JOB_COLS: &str = "id, deployment, command, status, exit_code, started_at, finished_at, tasks, retries, parallelism";
 
 fn job_row(r: &code_sql::Row<'_>) -> code_sql::Result<Job> {
     Ok(Job {
@@ -3076,6 +3514,8 @@ fn job_row(r: &code_sql::Row<'_>) -> code_sql::Result<Job> {
         started_at: r.get(5)?,
         finished_at: r.get(6)?,
         tasks: r.get::<_, i64>(7)? as u32,
+        retries: r.get::<_, i64>(8)? as u32,
+        parallelism: r.get::<_, i64>(9)? as u32,
     })
 }
 

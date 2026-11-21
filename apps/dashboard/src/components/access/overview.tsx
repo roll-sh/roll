@@ -25,6 +25,9 @@ import {
   KEEP_OLD,
   startsLater,
   toolsetCost,
+  areasOf,
+  pickArea,
+  productPicked,
   type ToolsetCosts,
   mcpUrl,
   reach,
@@ -116,11 +119,11 @@ export function ConnectPanel({ token }: { token?: string }) {
       .then(setCosts)
       .catch(() => {});
   }, []);
-  const cost = toolsetCost(costs.products, picked, readonly, search ? costs.search : undefined);
+  const cost = toolsetCost(costs.products, picked, readonly, search ? costs.search : undefined, costs.areas);
   const limit = CLIENT_TOOL_LIMIT[client];
   // A client that can't take the whole list (VS Code, Cursor) gets search mode to start with,
   // whenever the client is picked or the counts arrive; the checkbox still turns it off.
-  const whole = toolsetCost(costs.products, picked, readonly).tools;
+  const whole = toolsetCost(costs.products, picked, readonly, undefined, costs.areas).tools;
   useEffect(() => {
     if (costs.search) setSearch(Boolean(limit && whole > limit.tools));
     // Only on a new client or new counts: a person's own choice of products stays theirs.
@@ -170,13 +173,13 @@ export function ConnectPanel({ token }: { token?: string }) {
             </p>
             <div className="flex flex-wrap gap-1.5">
               {products.map((p) => {
-                const on = picked.includes(p);
+                const on = productPicked(picked, p);
                 return (
                   <button
                     key={p}
                     type="button"
                     aria-pressed={on}
-                    onClick={() => setPicked(on ? picked.filter((x) => x !== p) : [...picked, p])}
+                    onClick={() => setPicked(on ? picked.filter((x) => x !== p && !x.startsWith(`${p}.`)) : [...picked, p])}
                     className={`rounded-full border px-2.5 py-0.5 text-[12px] transition-colors duration-150 ${on ? "border-fg text-fg" : "border-line text-muted hover:border-line-2"}`}
                   >
                     {productName(p)}
@@ -184,6 +187,28 @@ export function ConnectPanel({ token }: { token?: string }) {
                 );
               })}
             </div>
+            {/* A product too big for some clients on its own (apps) splits into areas: all of it, or the ones the agent works in. */}
+            {products
+              .filter((p) => productPicked(picked, p) && areasOf(costs, p).length > 0)
+              .map((p) => (
+                <div key={p} className="flex flex-wrap items-center gap-1.5" role="group" aria-label={`${productName(p)} areas`}>
+                  <span className="text-[12px] text-subtle">{productName(p)}:</span>
+                  {[null, ...areasOf(costs, p)].map((a) => {
+                    const on = a === null ? picked.includes(p) : picked.includes(`${p}.${a}`);
+                    return (
+                      <button
+                        key={a ?? "all"}
+                        type="button"
+                        aria-pressed={on}
+                        onClick={() => setPicked(pickArea(picked, p, a))}
+                        className={`rounded-full border px-2.5 py-0.5 text-[12px] transition-colors duration-150 ${on ? "border-fg text-fg" : "border-line text-muted hover:border-line-2"}`}
+                      >
+                        {a === null ? "All" : a[0].toUpperCase() + a.slice(1)}
+                      </button>
+                    );
+                  })}
+                </div>
+              ))}
           </div>
         )}
         {costs.products.length > 0 && (

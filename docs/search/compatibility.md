@@ -33,7 +33,7 @@ Reproduce the YAML numbers with `scripts/search-yaml-suites.sh roll` (set `ROLL_
   `-kuromoji`, `-nori`, `-smartcn` and `-icu` plugins added; `logsdb` and runtime fields rerun on
   2026-11-17). 46 suites pass every test
   Elasticsearch passes. What's left, largest first: x-pack
-  `platinum` (1,065 of 1,412; machine learning is most of it), plugins roll doesn't ship
+  `platinum` (1,080 of 1,412; machine learning is most of it), plugins roll doesn't ship
   (`mapper-annotated-text`, `-murmur3` and `-size`, `ingest-attachment`, `ingest-otel`, `prometheus`), `apm-data`'s templates and
   pipelines (1 of 26), cross-cluster replication (none),
   `mapper-unsigned-long` (33 of 34: a `terms` aggregation across `long` and `unsigned_long`
@@ -267,7 +267,7 @@ the discovery/store plugins.
 | `watcher` | `x-pack/plugin/watcher:mustache,painless,watcher` | plain | 92 | 89 | 89 | 89 | 0 |
 | `watcher-security` | `x-pack/plugin/watcher:security` | security | 9 | 9 | 9 | 9 | 0 |
 | `wildcard` | `x-pack/plugin/wildcard` | plain | 9 | 9 | 9 | 9 | 0 |
-| `platinum` | `rest-resources platinum:-esql,downsample,downsample-with-security,entsearch,eql,mustache,painless,transform,watcher` | security | 1728 | 1412 | 1065 | 1065 | 347 |
+| `platinum` | `rest-resources platinum:-esql,downsample,downsample-with-security,entsearch,eql,mustache,painless,transform,watcher` | security | 1728 | 1412 | 1080 | 1080 | 332 |
 | `esql` | `rest-resources platinum:esql` | plain | 619 | 549 | 549 | 549 | 0 |
 | `analysis-icu` | `plugins/analysis-icu` | plugins | 13 | 13 | 13 | 13 | 0 |
 | `analysis-kuromoji` | `plugins/analysis-kuromoji` | plugins | 7 | 7 | 7 | 7 | 0 |
@@ -323,7 +323,7 @@ the discovery/store plugins.
 <!-- test-search: watcher >= 89 -->
 <!-- test-search: watcher-security >= 9 -->
 <!-- test-search: wildcard >= 9 -->
-<!-- test-search: platinum >= 1065 -->
+<!-- test-search: platinum >= 1080 -->
 <!-- test-search: inference >= 161 -->
 <!-- test-search: esql >= 549 -->
 <!-- test-search: analysis-phonetic >= 5 -->
@@ -337,7 +337,7 @@ the discovery/store plugins.
 `platinum` by directory (roll / Elasticsearch passes): `ml` 349/618, `analytics` 113/114, `spatial`
 92/105, `security` 100/101, `rollup` 52/52, `exponential_histogram` 44/44, `vector-tile` 34/34,
 `api_key` 32/32, `aggregate-metrics` 26/28, `inference` 22/23, `search.vectors` 22/23, `wildcard`
-22/22, `terms_enum` 20/20, `rank_vectors` 0/15, `users` 15/15, `constant_keyword` 13/13,
+22/22, `terms_enum` 20/20, `rank_vectors` 15/15, `users` 15/15, `constant_keyword` 13/13,
 `counted_keyword` 8/11, `data_streams` 11/11, `migrate` 0/11, `change_password` 8/8, `roles` 8/8,
 `text_structure` 5/8, `enrich` 6/7, `privileges` 7/7, `profiling` 0/7, `token` 6/6, `versionfield`
 6/6, `async_search` 4/5, `redact` 5/5, `sql` 5/5, `user_profile` 5/5, `authenticate` 4/4, `logsdb`
@@ -345,6 +345,22 @@ the discovery/store plugins.
 `searchable_snapshots` 1/3, `snapshot` 1/3, `logging` 0/2, `migration` 2/2, `service_accounts` 2/2,
 `set_security_user` 2/2, `xpack` 0/2, `deprecation` 0/1, `graph` 1/1, `health` 0/1,
 `vectordb_document` 0/1, `voting_only_node` 1/1.
+
+`rank_vectors` (multi-vector fields for late-interaction reranking) is built: `element_type`
+`float` / `bfloat16` / `byte` / `bit`, `dims` from the mapping or the first document, each document's
+vectors flat in one binary doc value (`search_codec::vectors::multi`: no header, the count is the
+value's length over the vector width), `maxSimDotProduct` and `maxSimInvHamming` in
+`script_score`, `doc[...]` / `field(...)` vectors and magnitudes, `docvalue_fields`, `fields`, and
+the vectors left out of `_source` (inside `nested` too, and in nested inner hits) unless
+`exclude_vectors: false` or the includes name them, printed as their element type keeps them
+(`byte` and `bit` as integers, `bfloat16` rounded). Infinite float values are refused at index
+time, for `dense_vector` too, with Elasticsearch's message. roll keeps them in the stored `_source` and hides them on read, where
+Elasticsearch strips them and patches them back from the doc values. A MaxSim costs query vectors ×
+document vectors × dimensions for one document, so it polls the search's control (the request's
+`timeout` or `search.default_search_timeout`, and task cancellation) every 2^20 multiply-adds: a
+document with many vectors stops at the request's deadline instead of holding a search thread.
+Not built: a synthetic `_source` from the doc values (synthetic indices keep the vectors as sent)
+and `rank_vectors` in ES|QL.
 
 Largest gaps by suite (from the roll reports, `target/search-yaml/extended/roll-<suite>.json`):
 not implemented at all: the plugin mappers (`annotated_text`,
@@ -493,6 +509,13 @@ A refused transform or rollup job stays stopped. Watches and SLM policies are ch
 every run, and ILM steps retry, so they resume when a disabled user is enabled again. An
 invalidated key never acts again: its jobs need setting up again by a user who can act (a
 transform `_update`, a policy or watch `PUT`, a new rollup job).
+A branch (README, "Branches and what they inherit") differs from the cluster it copies, which
+Elasticsearch has no counterpart of: its inherited bucket repositories (`s3`, `gcs`, `azure`)
+are registered with `readonly: true`, as Elastic Cloud registers another deployment's
+repository; its inherited SLM policies don't run and record why in `last_failure` (no
+`next_execution`; `_execute` is a 409 `illegal_state_exception`, and an ILM `wait_for_snapshot`
+on one names the pause in `step_info`); its inherited watches are inactive. Cloning a snapshot into any read-only
+repository is refused as on Elasticsearch ("cannot create snapshot in a readonly repository").
 The `watcher` suite's webhooks and `http` inputs call the node itself: its test cluster sets
 `roll.watcher.allow_private_hosts` (a roll-only option in `extended.txt`), which nothing else does.
 
@@ -1533,6 +1556,25 @@ the rest are skipped by the tests' own prerequisites.
   setting. A `search_click` behavioral analytics event is indexed as on Elasticsearch, and also
   counts as a click for the index's analytics when they're on.
 
+- Query languages nest only so deep, because a stack overflow aborts a node every tenant
+  shares:
+  - **ES|QL, SQL and EQL:** Elasticsearch's own limits and messages, counted as it counts them.
+    Before parsing, parentheses (every `(`, `FORK`'s included) plus each run of `NOT`s and
+    signs may nest 300, 250 and 250 levels. ES|QL also bounds the expression tree's height at
+    300 (an operator chain is as tall as it is long).
+  - **SQL and EQL operator chains:** Elasticsearch doesn't bound these. roll allows trees up to
+    1,000 levels (SQL) and 1,000 chained operators in one expression (EQL), because the trees
+    are walked and dropped recursively.
+  - **ES|QL subqueries and views:** these nest at most 16 levels, and one query splices at
+    most 1,000 views (roll's own).
+  - **PPL:** the same pre-scan with 300 levels, and 1,000 chained operators per expression
+    (roll's own).
+  - **KQL, PromQL, `query_string` and `simple_query_string`:** 300 levels (roll's own;
+    Elasticsearch and OpenSearch fail with a `StackOverflowError` somewhere deeper).
+- An Elasticsearch-flavor cluster holds at most 1,000 open points in time (roll's own;
+  Elasticsearch has no limit). The 1,001st fails as OpenSearch 3.9 refuses one past
+  `search.max_open_pit_context` (a 429 `rejected_execution_exception`), which
+  OpenSearch-flavor clusters now enforce.
 - By-query tasks (`wait_for_completion=false`) run to completion before their task id is
   returned (their results are stored in the `.tasks` system index), so they are not
   throttled and `_rethrottle` doesn't reach them; synchronous requests are throttled by
@@ -1545,11 +1587,22 @@ the rest are skipped by the tests' own prerequisites.
   owner with API key based security (README.md, "Cross-cluster search"), or the node itself
   (the YAML suites' loopback); roll speaks no transport protocol, so a seed or proxy address
   outside roll is never connected. A remote's `credentials` are set through roll's API, not a
-  keystore. Searches merge as `ccs_minimize_roundtrips: true` does whatever the parameter says;
-  aggregations over several clusters merge from their JSON (bucket aggregations, `min`, `max`,
-  `sum`, `value_count`, `stats`; others are refused with a 400, and `histogram`s with calendar
-  intervals whose clusters' ranges don't overlap). Not across clusters yet: `scroll`, point in
-  time, suggesters, ES|QL `FROM <alias>:<index>`, and remotes of OpenSearch-flavor clusters.
+  keystore. Searches merge as `ccs_minimize_roundtrips: true` does whatever the parameter says
+  (aggregations from each cluster's partially reduced state, so they equal one cluster's; a
+  `geo_centroid` may differ in its last digit, as Elasticsearch's does). A scroll over several
+  clusters is a set of per-cluster scrolls under one id, paged as one cluster's would be, where
+  Elasticsearch scrolls across clusters without minimizing round trips; the pages hold the same
+  hits. A remote that fails a later scroll page while it may not be skipped
+  (`skip_unavailable: false`) fails that page, and the hits the clusters after it sent for that
+  page are lost to the scroll (Elasticsearch fails the shards' parts alike). Not across clusters
+  yet: suggesters and ES|QL `FROM <alias>:<index>`.
+- OpenSearch-flavor clusters' `cluster.remote.*` and `_remote/info` follow OpenSearch 3.9
+  (`skip_unavailable` defaults to `false`, a seed or proxy address must be `host:port`, no
+  `cluster_credentials`), but a search naming `alias:index` on them is refused (400), loopback
+  remotes included, where OpenSearch 3.9 searches a loopback. Linking OpenSearch-flavor
+  clusters is left: it needs a credential model of its own, since OpenSearch has no
+  `cross_cluster` API keys (probably an internal user on the remote with a search-only role,
+  issued and sealed as links' keys are).
 - Aggregations and sorting on keyed flattened sub-fields, `_index_mode` aggregations,
   nested sorts inside `top_hits`, and shard-level aggregation failures as partial results.
 - Compound retrievers (`rrf`, `linear`, `pinned`, `rule` and `rescorer` over them) follow

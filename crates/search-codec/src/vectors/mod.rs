@@ -39,6 +39,7 @@
 //! graph always search exactly.
 
 pub mod distance;
+pub mod multi;
 pub(crate) mod bbq;
 pub(crate) mod hnsw;
 pub(crate) mod quant;
@@ -590,6 +591,17 @@ impl VectorsReader {
 
     pub fn has_graph(&self) -> bool {
         self.graph.is_some()
+    }
+
+    /// Whether the graph search steers by scores that rank vectors about as the exact scores
+    /// do: full precision or 8-bit codes. One-bit (`bbq`) and 4-bit estimates are coarse, so
+    /// their beam holds a segment's exact best hits only when it is wide.
+    pub fn steers_precisely(&self) -> bool {
+        match &self.quant {
+            None => true,
+            Some(Quantized::Scalar { code_len, .. }) => *code_len == self.spec.dims as usize,
+            Some(Quantized::Binary { .. }) => false,
+        }
     }
 
     /// Ordinal of `doc`'s vector.

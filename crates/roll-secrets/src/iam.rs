@@ -169,7 +169,7 @@ impl Secrets {
             .ok_or_else(|| Error::BadRequest(format!("no AWS role {} in this project that trusts roll by ExternalId: register the role first (IAM users act through an ExternalId role)", n.role)))?;
         sts.iam_keys(&arn, &external_id(project), &n.user).map_err(|why| Error::BadRequest(format!("roll couldn't list {}'s access keys as {arn}: {why}", n.user)))?;
         let now = self.db.now_ms()?;
-        let u = AwsUser { id: names::new_id("awu", 16), name: n.name, role: n.role, user: n.user, created_at: now, created_by: caller.maker_id() };
+        let u = AwsUser { id: names::new_id("awu", 16), name: n.name, role: n.role, user: n.user, created_at: now, created_by: caller.made_by().to_string() };
         self.db.write(|c| {
             if c.query_row("SELECT 1 FROM aws_users WHERE project_id = ? AND name = ?", [project, &u.name], |_| Ok(())).optional()?.is_some() {
                 return Err(Error::Conflict("exists", format!("an AWS user named {} exists", u.name)));

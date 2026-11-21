@@ -584,7 +584,7 @@ async fn judge(mut ctx: Ctx, req: Request, next: Next, j: Judge) -> Response {
     // What the request needs: one action, or every action a push's ref updates take.
     let mut needs = vec![match row.act {
         catalog::Act::Raw(f) => f(buffered.as_deref().unwrap_or_default()),
-        _ => row.action(&ctx.method, &params, json_body.as_ref()),
+        _ => row.action_with(&ctx.method, &params, json_body.as_ref(), &parts.headers),
     }];
     // A git push: its ref updates come first; the pack after them streams on untouched.
     let mut git_commands: Option<bytes::Bytes> = None;
@@ -755,10 +755,12 @@ async fn judge(mut ctx: Ctx, req: Request, next: Next, j: Judge) -> Response {
             }
             let bytes = buffered.clone().unwrap_or_default();
             // Bound to everything that decides what the request does: the method, path and body,
-            // what it's about, and the headers that change it (account, project, reviewer).
+            // what it's about, and the headers that change it (account, project, reviewer, and the
+            // row's own, `X-Roll-Override`: an approval of a deploy is never one past a freeze).
             let bound: Vec<String> = ["x-roll-account", "x-roll-project", "x-roll-user", "x-roll-agent"]
-                .iter()
-                .map(|h| format!("{h}={}", parts.headers.get(*h).and_then(|v| v.to_str().ok()).unwrap_or("")))
+                .into_iter()
+                .chain(row.admin_if)
+                .map(|h| format!("{h}={}", parts.headers.get(h).and_then(|v| v.to_str().ok()).unwrap_or("")))
                 .collect();
             let request_hash = hash(&format!(
                 "{}\n{}\n{}\n{:?}\n{}",

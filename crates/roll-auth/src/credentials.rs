@@ -19,9 +19,11 @@ use serde_json::Value;
 
 /// The secrets roll makes that scanners look for: grants' (`rlt_`, `rlo_`, `rlf_`), machine
 /// clients' (`rlc_`), and other products' made the same way: apps' deploy hooks (`rlk_`), SSO
-/// connections' SCIM tokens (`rlp_`, roll-accounts) and previews' deploy hooks (`rlb_`, a rebuild).
+/// connections' SCIM tokens (`rlp_`, roll-accounts), previews' deploy hooks (`rlb_`, a rebuild) and
+/// apps' instance addresses (`rlr_`: where an environment's instances read roll's OIDC tokens), and
+/// workspace project invites (`rlv_`, docs/members.md).
 /// (`rlh_` is roll code's automations' inbound webhook secrets: another shape, not ours.)
-pub const SECRET_PREFIXES: [&str; 8] = ["rlt_", "rlo_", "rlf_", "rlc_", "rlk_", "rlp_", "rlb_", "rlv_"];
+pub const SECRET_PREFIXES: [&str; 10] = ["rlt_", "rlo_", "rlf_", "rlc_", "rlk_", "rlp_", "rlb_", "rlq_", "rlr_", "rlv_"];
 
 /// A secret: `prefix`, 34 random characters of lowercase base32 (170 bits) and 6 of checksum, so a
 /// scanner can tell a real roll token from look-alike text without asking roll ([`checksum_ok`],
@@ -49,8 +51,9 @@ pub fn checksum_ok(s: &str) -> bool {
     rest.len() == 40 && rest.bytes().all(|b| b.is_ascii_lowercase() || (b'2'..=b'7').contains(&b)) && checksum(&s[..s.len() - 6]) == s[s.len() - 6..]
 }
 
-/// Products whose writes people and other agents read.
-const READ_BY_OTHERS: &[&str] = &["code", "previews", "workspace", "agents"];
+/// Products whose writes people and other agents read, and `published`: what a tool puts on a public
+/// page (roll-mcp's `Tool::published`, a status page's incidents), read by anyone.
+const READ_BY_OTHERS: &[&str] = &["code", "previews", "workspace", "agents", "published"];
 
 /// What a call's arguments would leak: the kind of credential, and where (`arguments.body`).
 #[derive(Debug, PartialEq, Eq)]
