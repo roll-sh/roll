@@ -1278,8 +1278,8 @@ async fn a_roll_only_preview_takes_placeholders_made_by_who_saved_its_rules() {
         fn leaf(&self, _: &str) -> anyhow::Result<roll_previews::intercept::Leaf> {
             anyhow::bail!("none")
         }
-        fn filter(&self, _: roll_previews::intercept::Outgoing<'_>) -> Result<usize, String> {
-            Ok(0)
+        fn filter(&self, _: roll_previews::intercept::Outgoing<'_>) -> Result<roll_previews::intercept::Filtered, String> {
+            Ok(Default::default())
         }
     }
     impl roll_previews::ports::Intercepts for Ca {

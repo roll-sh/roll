@@ -785,10 +785,15 @@ this: they get no secrets, or all of them.
   CAs stop at once.
 - The preview resolves as the rule's writer (`Ask { maker }`, from `env_refs`), so a placeholder
   works only while that person still may reveal the key.
-- Limits: a host that echoes a request's headers back (an echo service) hands the key back in its
-  response; roll secrets' response scrub (its #579: the request swapped into is sent with
-  `Accept-Encoding: identity`, and a response that echoes it is stopped with a 502 and the
-  placeholder ended) closes that, and goes into `roll-intercept` when it lands. Swapped requests and refusals
+- A host that echoes a key back (an echo service, a debug endpoint) never hands it to the
+  preview: a request a key was swapped into goes with `Accept-Encoding: identity`, and its response
+  goes through roll secrets' scrub (`proxy::Scrub`, the values in any form it looks for, never
+  leaving roll secrets) before it reaches the preview. In a header: a 502. In the body: the
+  connection is cut before those bytes. An encoded body (which can't be checked): a 502. An echo
+  ends the placeholder (`Secrets::echoed`: an alert audited, the environment's notice queued) and
+  says so in the activity ("echo.localhost echoed STRIPE_KEY back in its response: stopped, and its
+  placeholder ended"). `roll-intercept`'s port: `Interception::filter` answers a `Filtered` with a
+  `ResponseScrub`, so roll apps' closed environments get the same. Swapped requests and refusals
   are counted in the preview's activity, never their values or placeholders.
 
 The intercepting step is its own crate, `crates/roll-intercept` (product-neutral: roll apps'

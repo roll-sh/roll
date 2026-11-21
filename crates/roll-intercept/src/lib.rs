@@ -48,9 +48,30 @@ pub trait Interception: Send + Sync {
     fn covers(&self, host: &str) -> bool;
     /// A certificate for exactly `host`, signed by the CA.
     fn leaf(&self, host: &str) -> anyhow::Result<Leaf>;
-    /// Swap every placeholder in the request's headers and query, or none: how many were swapped,
-    /// or why the request mustn't go (never holding a value or a placeholder).
-    fn filter(&self, req: Outgoing<'_>) -> Result<usize, String>;
+    /// Swap every placeholder in the request's headers and query, or none: how many were swapped
+    /// and what its response is checked against, or why the request mustn't go (never holding a
+    /// value or a placeholder).
+    fn filter(&self, req: Outgoing<'_>) -> Result<Filtered, String>;
+}
+
+/// A request [`Interception::filter`] let go.
+#[derive(Default)]
+pub struct Filtered {
+    pub swapped: usize,
+    /// With a key swapped in: its response's check (roll secrets' scrub).
+    pub scrub: Option<Box<dyn ResponseScrub>>,
+}
+
+/// The check of a response to a request a key was swapped into (roll secrets' scrub, docs/secrets.md
+/// "the proxy's contract"): its headers, then its body as it arrives, for the values swapped in
+/// (in any form it looks for). It holds them itself; [`serve`] never sees one.
+pub trait ResponseScrub: Send + Sync {
+    /// The response's headers, or its trailers: why not, when they echo a value.
+    fn headers(&mut self, headers: &hyper::HeaderMap) -> Result<(), String>;
+    /// The body's next bytes (a value split between two is found): why not, when they echo one.
+    fn chunk(&mut self, bytes: &[u8]) -> Result<(), String>;
+    /// After an echo: report it, which ends the placeholder. Blocking.
+    fn echoed(&self);
 }
 
 /// A leaf certificate and its key, PEM.
@@ -212,7 +233,7 @@ impl Interception for Leaves {
         self.made.lock().insert(host.to_string(), l.clone());
         Ok(l)
     }
-    fn filter(&self, req: Outgoing<'_>) -> Result<usize, String> {
+    fn filter(&self, req: Outgoing<'_>) -> Result<Filtered, String> {
         self.inner.filter(req)
     }
 }
@@ -270,7 +291,62 @@ where
     Ok(out)
 }
 
-type Body = BoxBody<Bytes, hyper::Error>;
+type BoxError = Box<dyn std::error::Error + Send + Sync>;
+type Body = BoxBody<Bytes, BoxError>;
+
+/// A response body checked frame by frame before each goes on to the client: data through the
+/// scrub, trailers as headers. An echo ends it with an error, so the client's connection is cut
+/// (its status went already) and nothing of the value reaches it; the echo is reported.
+struct Scrubbed {
+    inner: BoxBody<Bytes, hyper::Error>,
+    scrub: Option<Box<dyn ResponseScrub>>,
+    served: Arc<parking_lot::Mutex<Served>>,
+}
+
+impl hyper::body::Body for Scrubbed {
+    type Data = Bytes;
+    type Error = BoxError;
+
+    fn poll_frame(mut self: std::pin::Pin<&mut Self>, cx: &mut std::task::Context<'_>) -> std::task::Poll<Option<Result<hyper::body::Frame<Bytes>, BoxError>>> {
+        use std::task::Poll;
+        let Self { inner, scrub, served } = &mut *self;
+        let Some(check) = scrub.as_mut() else { return Poll::Ready(Some(Err("its response echoed a key".into()))) };
+        let frame = match std::pin::Pin::new(inner).poll_frame(cx) {
+            Poll::Ready(Some(Ok(f))) => f,
+            Poll::Ready(Some(Err(e))) => return Poll::Ready(Some(Err(e.into()))),
+            Poll::Ready(None) => return Poll::Ready(None),
+            Poll::Pending => return Poll::Pending,
+        };
+        let checked = match (frame.data_ref(), frame.trailers_ref()) {
+            (Some(d), _) => check.chunk(d),
+            (None, Some(t)) => check.headers(t),
+            (None, None) => Ok(()),
+        };
+        match checked {
+            Ok(()) => Poll::Ready(Some(Ok(frame))),
+            Err(why) => {
+                let taken = scrub.take().expect("checked above");
+                echoed(served, taken, &why);
+                Poll::Ready(Some(Err(why.into())))
+            }
+        }
+    }
+
+    fn is_end_stream(&self) -> bool {
+        self.scrub.is_some() && self.inner.is_end_stream()
+    }
+}
+
+/// An echo: counted with the refusals, and reported (off the async threads).
+fn echoed(served: &parking_lot::Mutex<Served>, scrub: Box<dyn ResponseScrub>, why: &str) {
+    {
+        let mut s = served.lock();
+        if s.blocked.len() < MAX_BLOCKED {
+            s.blocked.push(format!("{why}: stopped, and its placeholder ended"));
+        }
+    }
+    tokio::task::spawn_blocking(move || scrub.echoed());
+}
 
 fn said(status: StatusCode, why: &str) -> Response<Body> {
     let mut r = Response::new(Full::new(Bytes::from(format!("roll's egress didn't send this request: {why}\n"))).map_err(|never| match never {}).boxed());
@@ -311,10 +387,10 @@ async fn one(req: Request<Incoming>, i: Arc<dyn Interception>, host: String, aut
         (n, headers, query, path)
     })
     .await;
-    let (headers, query, path) = match filtered {
-        Ok((Ok(n), headers, query, path)) => {
-            served.lock().swapped += n;
-            (headers, query, path)
+    let (headers, query, path, scrub) = match filtered {
+        Ok((Ok(f), headers, query, path)) => {
+            served.lock().swapped += f.swapped;
+            (headers, query, path, f.scrub.filter(|_| f.swapped > 0))
         }
         Ok((Err(why), ..)) => return block(why),
         Err(e) => return said(StatusCode::INTERNAL_SERVER_ERROR, &format!("checking it failed: {e}")),
@@ -358,7 +434,22 @@ async fn one(req: Request<Incoming>, i: Arc<dyn Interception>, host: String, aut
             for h in HOP {
                 resp.headers_mut().remove(*h);
             }
-            resp.map(BodyExt::boxed)
+            let Some(mut scrub) = scrub else { return resp.map(|b| b.map_err(BoxError::from).boxed()) };
+            // A key went in: what comes back is checked before it reaches the preview. Asked for
+            // without encoding (the filter's `Accept-Encoding: identity`), so it can be read.
+            if let Some(enc) = resp.headers().get(hyper::header::CONTENT_ENCODING).filter(|e| !e.as_bytes().eq_ignore_ascii_case(b"identity")) {
+                let why = format!("the host answered a request a key was swapped into with a {} body, which can't be checked", String::from_utf8_lossy(enc.as_bytes()));
+                let mut s = served.lock();
+                if s.blocked.len() < MAX_BLOCKED {
+                    s.blocked.push(why.clone());
+                }
+                return said(StatusCode::BAD_GATEWAY, &why);
+            }
+            if let Err(why) = scrub.headers(resp.headers()) {
+                echoed(&served, scrub, &why);
+                return said(StatusCode::BAD_GATEWAY, &format!("{why}: stopped"));
+            }
+            resp.map(|b| Scrubbed { inner: b.boxed(), scrub: Some(scrub), served: served.clone() }.boxed())
         }
         Err(e) => said(StatusCode::BAD_GATEWAY, &format!("the host: {e}")),
     }
@@ -405,6 +496,7 @@ mod tests {
     struct Fake {
         issuer: rcgen::Issuer<'static, rcgen::KeyPair>,
         live: bool,
+        echoes: Arc<AtomicUsize>,
     }
 
     impl Interception for Fake {
@@ -417,7 +509,7 @@ mod tests {
         fn leaf(&self, host: &str) -> anyhow::Result<Leaf> {
             Ok(leaf_of(&self.issuer, host))
         }
-        fn filter(&self, req: Outgoing<'_>) -> Result<usize, String> {
+        fn filter(&self, req: Outgoing<'_>) -> Result<Filtered, String> {
             let mut n = 0;
             for (_, v) in req.headers.iter_mut() {
                 if v.contains("rlph_bad") {
@@ -428,7 +520,22 @@ mod tests {
                     n += 1;
                 }
             }
-            Ok(n)
+            Ok(Filtered { swapped: n, scrub: Some(Box::new(FakeScrub(self.echoes.clone()))) })
+        }
+    }
+
+    /// roll secrets' scrub as the fake has it: `sk_real` anywhere in a header or a chunk.
+    struct FakeScrub(Arc<AtomicUsize>);
+
+    impl ResponseScrub for FakeScrub {
+        fn headers(&mut self, headers: &hyper::HeaderMap) -> Result<(), String> {
+            if headers.values().any(|v| v.as_bytes().windows(7).any(|w| w == b"sk_real")) { Err("echoed STRIPE_KEY".into()) } else { Ok(()) }
+        }
+        fn chunk(&mut self, bytes: &[u8]) -> Result<(), String> {
+            if bytes.windows(7).any(|w| w == b"sk_real") { Err("echoed STRIPE_KEY".into()) } else { Ok(()) }
+        }
+        fn echoed(&self) {
+            self.0.fetch_add(1, Ordering::SeqCst);
         }
     }
 
@@ -448,7 +555,20 @@ mod tests {
                         let host = req.headers().get("host").and_then(|v| v.to_str().ok()).unwrap_or_default().to_string();
                         // It closes each connection after answering (as an idle timeout would).
                         async move {
-                            let mut r = Response::new(Full::new(Bytes::from(format!("real={} host={host} q={}", auth == "Bearer sk_real", req.uri().query().unwrap_or_default()))));
+                            let mut r = match req.uri().path() {
+                                "/echo" => Response::new(Full::new(Bytes::from(format!("you sent {auth}")))),
+                                "/echo-header" => {
+                                    let mut r = Response::new(Full::new(Bytes::from("ok")));
+                                    r.headers_mut().insert("x-echo", hyper::header::HeaderValue::from_str(&auth).unwrap());
+                                    r
+                                }
+                                "/gzip" => {
+                                    let mut r = Response::new(Full::new(Bytes::from_static(b"\x1f\x8b")));
+                                    r.headers_mut().insert(hyper::header::CONTENT_ENCODING, hyper::header::HeaderValue::from_static("gzip"));
+                                    r
+                                }
+                                _ => Response::new(Full::new(Bytes::from(format!("real={} host={host} q={}", auth == "Bearer sk_real", req.uri().query().unwrap_or_default())))),
+                            };
                             r.headers_mut().insert(hyper::header::CONNECTION, hyper::header::HeaderValue::from_static("close"));
                             Ok::<_, Infallible>(r)
                         }
@@ -474,10 +594,17 @@ mod tests {
     }
 
     async fn get(s: &mut hyper::client::conn::http1::SendRequest<Full<Bytes>>, auth: &str) -> (u16, String) {
-        let req = Request::get("/v1/charges?limit=1").header("host", "evil.test").header("authorization", auth).body(Full::new(Bytes::new())).unwrap();
-        let resp = s.send_request(req).await.unwrap();
+        let (status, body) = get_at(s, "/v1/charges?limit=1", auth).await;
+        (status, body.expect("the whole body"))
+    }
+
+    /// The status, and the body unless the connection was cut while it came.
+    async fn get_at(s: &mut hyper::client::conn::http1::SendRequest<Full<Bytes>>, path: &str, auth: &str) -> (u16, Option<String>) {
+        let req = Request::get(path).header("host", "evil.test").header("authorization", auth).body(Full::new(Bytes::new())).unwrap();
+        // Cut before its status line went: no status (0).
+        let Ok(resp) = s.send_request(req).await else { return (0, None) };
         let status = resp.status().as_u16();
-        (status, String::from_utf8(resp.into_body().collect().await.unwrap().to_bytes().to_vec()).unwrap())
+        (status, resp.into_body().collect().await.ok().map(|b| String::from_utf8(b.to_bytes().to_vec()).unwrap()))
     }
 
     #[tokio::test]
@@ -496,7 +623,7 @@ mod tests {
         let (real_ca, real_pem) = ca("a public root");
         let hits = Arc::new(AtomicUsize::new(0));
         let addr = upstream(&real_ca, hits.clone()).await;
-        let i: Arc<dyn Interception> = Arc::new(Fake { issuer: preview_ca, live: true });
+        let i: Arc<dyn Interception> = Arc::new(Fake { issuer: preview_ca, live: true, echoes: Arc::new(AtomicUsize::new(0)) });
 
         // In through the preview's socket, as its egress proxy hands a connection over.
         let dir = tempfile::tempdir().unwrap();
@@ -532,7 +659,7 @@ mod tests {
 
         // A host the CA doesn't cover, or a CA that ended: nothing is terminated or dialled.
         for (host, live) in [("evil.test", true), ("api.example.test", false)] {
-            let i: Arc<dyn Interception> = Arc::new(Fake { issuer: ca("preview").0, live });
+            let i: Arc<dyn Interception> = Arc::new(Fake { issuer: ca("preview").0, live, echoes: Arc::new(AtomicUsize::new(0)) });
             let (_mine, theirs) = tokio::io::duplex(1024);
             assert!(serve(theirs, host, 443, i, upstream_config(roots(&real_pem)), dial_to(addr)).await.is_err(), "{host} live={live}");
         }
@@ -550,5 +677,40 @@ mod tests {
         let out = tokio::time::timeout(std::time::Duration::from_secs(10), served).await.expect("serve ends");
         assert!(out.unwrap().is_err());
         assert_eq!(hits.load(Ordering::SeqCst), 2);
+    }
+
+    /// A response that echoes a key swapped into its request never brings it back: in a header,
+    /// a 502; in the body, the connection is cut before those bytes. Either way it's reported
+    /// (which ends the placeholder). An encoded body, which can't be checked, is a 502 too.
+    #[tokio::test]
+    async fn a_response_that_echoes_a_swapped_key_is_stopped() {
+        let (preview_ca, preview_pem) = ca("preview");
+        let (real_ca, real_pem) = ca("a public root");
+        let addr = upstream(&real_ca, Arc::new(AtomicUsize::new(0))).await;
+        let echoes = Arc::new(AtomicUsize::new(0));
+        let i: Arc<dyn Interception> = Arc::new(Fake { issuer: preview_ca, live: true, echoes: echoes.clone() });
+        let mut outs = Vec::new();
+        for (path, auth) in [("/echo-header", "Bearer rlph_good"), ("/gzip", "Bearer rlph_good"), ("/echo", "Bearer rlph_good"), ("/echo", "Bearer not-a-placeholder")] {
+            let (mine, theirs) = tokio::io::duplex(64 << 10);
+            let served = tokio::spawn(serve(theirs, "api.example.test", 443, i.clone(), upstream_config(roots(&real_pem)), dial_to(addr)));
+            let mut s = client(&preview_pem, mine).await;
+            let got = get_at(&mut s, path, auth).await;
+            drop(s);
+            let out = tokio::time::timeout(std::time::Duration::from_secs(10), served).await.expect("serve ends").unwrap().unwrap();
+            outs.push((got, out.blocked.len()));
+        }
+        let [(header, h_blocked), (gzip, g_blocked), (body, b_blocked), (plain, p_blocked)] = outs.try_into().unwrap();
+        assert_eq!((header.0, header.1.as_deref().is_some_and(|b| !b.contains("sk_real")), h_blocked), (502, true, 1), "a header echo: {header:?}");
+        assert_eq!((gzip.0, g_blocked), (502, 1), "an encoded body: {gzip:?}");
+        assert!(matches!(body, (0 | 200, None)) && b_blocked == 1, "a body echo: the connection cut before its bytes: {body:?}");
+        assert_eq!((plain.0, plain.1.as_deref(), p_blocked), (200, Some("you sent Bearer not-a-placeholder"), 0), "nothing swapped, nothing checked");
+        // Reported once per echo (off the async threads), never for the encoded body.
+        for _ in 0..100 {
+            if echoes.load(Ordering::SeqCst) == 2 {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        assert_eq!(echoes.load(Ordering::SeqCst), 2);
     }
 }
