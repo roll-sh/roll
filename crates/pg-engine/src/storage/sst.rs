@@ -272,6 +272,12 @@ const DEAD_MAGIC: &[u8; 8] = b"rolldead";
 impl DeadSet {
     /// Block `b`'s dead entries (None: none).
     pub fn block(&self, b: usize) -> Option<&[u64]> {
+        // (The last block first: a set being made has its entries added in order.)
+        if let Some((lb, w)) = self.blocks.last()
+            && *lb as usize == b
+        {
+            return Some(w);
+        }
         let i = self.blocks.binary_search_by_key(&(b as u32), |e| e.0).ok()?;
         Some(&self.blocks[i].1)
     }
@@ -288,12 +294,19 @@ impl DeadSet {
     /// to the last one).
     pub fn add(&mut self, b: usize, i: usize) {
         let b = b as u32;
-        let at = match self.blocks.binary_search_by_key(&b, |e| e.0) {
-            Ok(at) => at,
-            Err(at) => {
-                self.blocks.insert(at, (b, Box::default()));
-                at
+        let at = match self.blocks.last() {
+            Some((lb, _)) if *lb == b => self.blocks.len() - 1,
+            Some((lb, _)) if *lb < b => {
+                self.blocks.push((b, Box::default()));
+                self.blocks.len() - 1
             }
+            _ => match self.blocks.binary_search_by_key(&b, |e| e.0) {
+                Ok(at) => at,
+                Err(at) => {
+                    self.blocks.insert(at, (b, Box::default()));
+                    at
+                }
+            },
         };
         let w = &mut self.blocks[at].1;
         if w.len() <= i / 64 {

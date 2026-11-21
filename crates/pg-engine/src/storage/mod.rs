@@ -2241,11 +2241,32 @@ impl Store {
                 merged_l0.push(l.clone());
             }
         }
+        // (An L0 file of deletions alone that is merged is read only from the first to the last
+        // user key of the files written again and the other L0 files merged: its deletions
+        // outside are dropped (L1 is the bottom level and no snapshot reads past them) and
+        // delete nothing merged. A bulk DELETE's run holds its index entries' deletions after
+        // the table's rows, for index files marked: each was read and dropped.)
+        let reach = inputs_l1
+            .iter()
+            .chain(merged_l0.iter().filter(|l| !only_deletions(l)))
+            .map(|f| (user_key(&f.meta.first_key), user_key(&f.meta.last_key)))
+            .reduce(|(a, b), (c, d)| (a.min(c), b.max(d)));
         // (The next L1 file left in place that the outputs reach: one ends before it.)
         let mut next_kept = 0;
         let mut sources: Vec<Cursor> = merged_l0
             .iter()
-            .map(|s| Cursor::level_uncached(vec![s.clone()]))
+            .map(|s| match reach {
+                Some((lo, hi)) if only_deletions(s) => {
+                    let mut end = hi.to_vec();
+                    end.extend_from_slice(&[0xFF; 9]);
+                    let mut c = Cursor::level(vec![s.clone()], lo, &end);
+                    if let Cursor::Level { fill, .. } = &mut c {
+                        *fill = false;
+                    }
+                    c
+                }
+                _ => Cursor::level_uncached(vec![s.clone()]),
+            })
             .collect();
         sources.push(Cursor::level_uncached(inputs_l1.clone()));
         let mut merge = Merge::new(sources, Vec::new());
@@ -2429,7 +2450,7 @@ impl Store {
             if v.is_some() || deletion_ts > horizon {
                 return Ok(Marked::Rewrite);
             }
-            if user_key(k) == uk.as_slice() {
+            if sst::short_eq(user_key(k), &uk) {
                 // (An older deletion of the key marked already.)
                 merge.sources[i].advance();
                 continue;
@@ -2437,8 +2458,13 @@ impl Store {
             uk.clear();
             uk.extend_from_slice(user_key(k));
             merge.sources[i].advance();
-            // The key's versions in `f`, from its first.
-            let mut b = f.find_block(&uk);
+            // The key's versions in `f`, from its first: in the block read last when its last
+            // key isn't below (the keys come in order, and the key before was in it or before
+            // it), else where the block index says.
+            let mut b = match &cur {
+                Some((cb, _)) if f.block_holds(*cb, &uk) => *cb,
+                _ => f.find_block(&uk),
+            };
             if b >= f.block_count() {
                 continue;
             }
@@ -2463,7 +2489,7 @@ impl Store {
                     cur = Some((b, blk));
                     continue;
                 }
-                if user_key(pos.key()) != uk.as_slice() {
+                if !sst::short_eq(user_key(pos.key()), &uk) {
                     break;
                 }
                 let (vts, tomb) = (key_ts(pos.key()), blk.value_ref(&pos).is_none());
