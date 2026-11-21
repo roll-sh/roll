@@ -602,6 +602,11 @@ pub struct Run {
     /// proxy and its health checks talk HTTP/2 to it (Cloud Run's `--use-http2`).
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub h2c: bool,
+    /// With `h2c`: its health is gRPC's (Cloud Run's and Kubernetes' gRPC probes), a unary
+    /// `grpc.health.v1.Health/Check` for this service (empty: the server as a whole) answering
+    /// SERVING, at start and every `health_every_s`, in place of `health_path`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub health_grpc: Option<String>,
     /// A worker's instances follow its work: a stream consumer group's lag (docs/apps/README.md,
     /// "Workers that follow their work"). Between `min_instances` and `max_instances`.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1220,6 +1225,7 @@ impl Default for Run {
             cpu: 0.5,
             memory_mb: 512,
             health_path: None,
+            health_grpc: None,
             health_timeout_s: 60,
             health_every_s: None,
             health_failures: None,
@@ -1553,6 +1559,14 @@ impl Run {
             && (!p.starts_with('/') || p.len() > 200 || !p.bytes().all(|b| b.is_ascii_graphic()))
         {
             return bad("health_path is a path starting with /");
+        }
+        if let Some(g) = &self.health_grpc {
+            if !self.h2c || self.kind != RunType::Web {
+                return bad("health_grpc is a gRPC server's: a web service with h2c");
+            }
+            if g.len() > 100 || !g.bytes().all(|b| b.is_ascii_graphic()) {
+                return bad("health_grpc is a gRPC service's full name (grpc.health.v1's `service`), at most 100 characters, or empty for the server");
+            }
         }
         if self.start.as_ref().is_some_and(|c| c.len() > 2000 || c.contains('\0')) {
             return bad("start is a command of at most 2000 characters");
