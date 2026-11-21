@@ -92,6 +92,10 @@ pub struct RuntimeConfig {
     /// Where each preview's interception socket is made (`<dir>/<preview>/intercept.sock`, mounted
     /// into its egress container). `None`: nothing is intercepted here.
     pub intercept_dir: Option<std::path::PathBuf>,
+    /// Local development only (`ROLL_PREVIEWS_INTERCEPT_ALLOW_PRIVATE`): intercepted connections
+    /// may dial a private address and trust this root too (a local TLS echo host for the live
+    /// check). Plain egress is never touched by it.
+    pub intercept_private: Option<std::path::PathBuf>,
 }
 
 /// Playwright's image has a headless Chromium shell (its path names its version).
@@ -159,6 +163,7 @@ impl Default for RuntimeConfig {
             warm_max: 32,
             visitor_recheck: Duration::from_secs(300),
             intercept_dir: None,
+            intercept_private: None,
         }
     }
 }
@@ -2003,7 +2008,11 @@ impl Runtime {
                         let _ = e.store.log(&id, &line);
                     }
                 });
-                let task = tokio::spawn(crate::intercept::listen(listener, i.interception, crate::intercept::system_upstream(), crate::intercept::public_dial(), done));
+                let (upstream, dial) = match &self.cfg.intercept_private {
+                    Some(root) => (crate::intercept::with_root(root)?, crate::intercept::any_dial()),
+                    None => (crate::intercept::system_upstream(), crate::intercept::public_dial()),
+                };
+                let task = tokio::spawn(crate::intercept::listen(listener, i.interception, upstream, dial, done));
                 self.intercepting.lock().insert(preview.to_string(), (made.clone(), task.abort_handle()));
             }
             let m = std::fs::metadata(dir.join("sock"))?;

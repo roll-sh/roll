@@ -94,6 +94,24 @@ pub fn system_upstream() -> Arc<rustls::ClientConfig> {
     upstream_config(roots)
 }
 
+/// The system's roots plus the one at `root` (PEM): local development's TLS echo host
+/// (`ROLL_PREVIEWS_INTERCEPT_ALLOW_PRIVATE`), for intercepted connections only.
+pub fn with_root(root: &std::path::Path) -> anyhow::Result<Arc<rustls::ClientConfig>> {
+    let mut roots = rustls::RootCertStore::empty();
+    for c in rustls_native_certs::load_native_certs().certs {
+        let _ = roots.add(c);
+    }
+    for c in rustls_pemfile::certs(&mut std::fs::read(root)?.as_slice()) {
+        roots.add(c?)?;
+    }
+    Ok(upstream_config(roots))
+}
+
+/// A [`Dial`] to any address the name resolves to: local development only (with [`with_root`]).
+pub fn any_dial() -> Dial {
+    Arc::new(|host: String, port: u16| Box::pin(async move { tokio::net::TcpStream::connect((host.as_str(), port)).await }))
+}
+
 /// [`Dial`] as rolld dials: the host resolved here, and only a public address connected to (roll-net's
 /// `private_ip`), so a bound name pointed at the host, the fleet or the cloud's metadata reaches
 /// nothing.
