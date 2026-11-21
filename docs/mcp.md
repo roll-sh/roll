@@ -1091,12 +1091,16 @@ waits on a sibling PR reaching main is last.
 
 1. **roll code's `no tool yet` routes (this PR, the second batch; #631 the first):** a change's AI
    reviews, their price and an owner's spend (`list_ai_reviews`, `get_ai_review_pricing`,
-   `get_review_usage`); a repo's reviewer, review rules, learnings and audit log read
-   (`get_reviewer`, `get_review_rules`, `list_learnings`, `get_repo_audit`); a change's preview
-   started and stopped; an automation turned on or off, a failed run retried, the catalogue of
+   `get_review_usage`); a repo's reviewer, review rules and audit log read
+   (`get_reviewer`, `get_review_rules`, `get_repo_audit`); a change's preview made and removed
+   (`stop_preview` is destructive: its database branch and Redis go with it); an automation turned on or off, a failed run retried, the catalogue of
    triggers and steps, and a dry run (`test_agent_automation`); sandboxes listed, stopped and their
-   month's use. One gap is left on purpose: deleting an automation (its runs are cancelled and its
-   secrets dropped) stays `no tool yet` until an agent needs it. #631 landed the first batch
+   month's use. Two gaps are left on purpose: deleting an automation (its runs are cancelled and its
+   secrets dropped), and reading the reviewer's learnings, which can hold the words of a commenter
+   who can't push with no `outside` mark, so lockdown couldn't withhold them (roll code: mark
+   learnings made from an outsider's comment `outside`, then it's a read tool). An outside review
+   of this PR also found `stop_preview` destroys data (now destructive) and retrying or turning on
+   an automation reaches model providers (now open-world). #631 landed the first batch
    (threads, review requests, statuses, work items, changes' title and lane).
 2. **A "hand this to an agent" workflow.** An error group or a slow query becomes a work item
    (`code_create_work`), an agent claims it, its change gets a preview (`previews_wait`), and the

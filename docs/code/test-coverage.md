@@ -442,11 +442,10 @@ envelope `{event, delivery, webhook, repo{id, full_name, default_branch, visibil
 | `get_ai_review_pricing` | same JSON as `GET /pricing` | `mcp.rs::tools_map_onto_their_routes` |
 | `get_review_usage` | same JSON as `GET /owners/{owner}/usage`; anonymous and another owner refused as the route refuses | `mcp.rs::tools_map_onto_their_routes`, `mcp.rs::every_tool_is_authorized_like_its_route` |
 | `get_reviewer` | the route's effective settings; auth | `mcp.rs::tools_map_onto_their_routes`, `mcp.rs::every_tool_is_authorized_like_its_route` |
-| `list_learnings` | same JSON as `GET /learnings`; auth | `mcp.rs::tools_map_onto_their_routes`, `mcp.rs::every_tool_is_authorized_like_its_route` |
 | `get_review_rules` | same JSON as `GET /review-settings`; auth | `mcp.rs::tools_map_onto_their_routes`, `mcp.rs::every_tool_is_authorized_like_its_route` |
 | `get_repo_audit` | same JSON as `GET /audit`; writers only, as the route; auth | `mcp.rs::tools_map_onto_their_routes`, `mcp.rs::every_tool_is_authorized_like_its_route` |
 | `start_preview` | answers as `POST /preview` does (the change, or its status); auth | `mcp.rs::tools_map_onto_their_routes`, `mcp.rs::every_tool_is_authorized_like_its_route` |
-| `stop_preview` | answers as `DELETE /preview` does; auth | `mcp.rs::tools_map_onto_their_routes`, `mcp.rs::every_tool_is_authorized_like_its_route` |
+| `stop_preview` | answers as `DELETE /preview` does; destructive hint; auth | `mcp.rs::tools_map_onto_their_routes`, `mcp.rs::every_tool_is_authorized_like_its_route` |
 | `list_agent_machines` | the owner's machines with `online`; another owner "not found" | `mcp.rs::agent_tools_drive_a_machine_like_their_routes` |
 | `list_agent_threads` | threads of a machine (by name) with their machine and project name, and the pending requests | `mcp.rs::agent_tools_drive_a_machine_like_their_routes` |
 | `create_agent_thread` | `thread.create` (provider, prompt, worktree) sent with the given id and the agent as `by`; the daemon's reply | `mcp.rs::agent_tools_drive_a_machine_like_their_routes` |
@@ -485,7 +484,7 @@ envelope `{event, delivery, webhook, repo{id, full_name, default_branch, visibil
 | a revoked token ends its session (401) and can't start one | `tokens.rs::tokens_are_listed_and_revoked_everywhere_at_once` |
 | all four versions and the default, initialize inside a batch (400), empty batch, client responses and notification-only batches (202), one bad entry in a batch, `resources/list` and `prompts/list`, `tools/call` without arguments or a name, Origin edge cases, `GET` `Allow`, `DELETE` without a session | `mcp.rs::protocol_edges` |
 | a never-valid token: 401 on initialize, and it ends the session it's used on; anonymous callers can't use or end another token's session | `mcp.rs::invalid_tokens_and_foreign_sessions` |
-| `tools/list` is exactly the 22 tools of mcp.md, each with `readOnlyHint` | `mcp.rs::transport_sessions_and_protocol` |
+| `tools/list` is exactly the tools of mcp.md, each with `readOnlyHint`, and `destructiveHint` only where it can't be undone (`close_change`, `stop_preview`) | `mcp.rs::transport_sessions_and_protocol` |
 | event-stream answers hold one of the caller's stream slots (429 past the limit) | `streams.rs::mcp_event_stream_answers_share_the_callers_slots` |
 
 ## CLI (`roll code`)

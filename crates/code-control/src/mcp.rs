@@ -407,8 +407,8 @@ fn files_schema() -> Value {
 /// Tools that reach outside roll (MCP's `openWorldHint`): a model provider (an AI review, a coding
 /// agent's turns and automations) or a branch's remote (publishing an agent's work).
 /// Tools whose effect can't be undone: clients ask a person first.
-const DESTRUCTIVE: [&str; 1] = ["close_change"];
-const OPEN_WORLD: [&str; 7] = ["request_ai_review", "create_agent_thread", "send_agent_message", "respond_agent_request", "claim_agent_work", "run_agent_automation", "publish_agent_thread"];
+const DESTRUCTIVE: [&str; 2] = ["close_change", "stop_preview"];
+const OPEN_WORLD: [&str; 9] = ["request_ai_review", "create_agent_thread", "send_agent_message", "respond_agent_request", "claim_agent_work", "run_agent_automation", "retry_agent_automation_run", "enable_agent_automation", "publish_agent_thread"];
 
 /// The routes each tool calls, as `(tool, method, route)` in the router's pattern: a lookup it
 /// makes on the way (a repo's default branch, `owner/repo#N`, a machine's or automation's name) is
@@ -472,7 +472,6 @@ pub const ROUTES: &[(&str, &str, &str)] = &[
     ("get_review_usage", "GET", "/v1/code/owners/{owner}/usage"),
     ("list_ai_reviews", "GET", "/v1/code/changes/{id}/ai-jobs"),
     ("get_reviewer", "GET", "/v1/code/repos/{owner}/{repo}/reviewer"),
-    ("list_learnings", "GET", "/v1/code/repos/{owner}/{repo}/learnings"),
     ("get_review_rules", "GET", "/v1/code/repos/{owner}/{repo}/review-settings"),
     ("get_repo_audit", "GET", "/v1/code/repos/{owner}/{repo}/audit"),
     ("start_preview", "POST", "/v1/code/changes/{id}/preview"),
@@ -817,7 +816,7 @@ fn every_tool() -> Vec<Value> {
             &["owner"],
             true,
         ),
-        tool("list_ai_reviews", "List a change's AI reviews", "roll's reviews of a change, oldest first: each job's mode, status, cost and what it found.", json!({ "change": change.clone() }), &["change"], true),
+        tool("list_ai_reviews", "List a change's AI reviews", "roll's review jobs for a change, oldest first: each one's kind, mode, state and stage, who asked, its progress, any error, and the review it made (get_change reads the review itself).", json!({ "change": change.clone() }), &["change"], true),
         tool(
             "get_reviewer",
             "Read a repo's reviewer",
@@ -826,7 +825,6 @@ fn every_tool() -> Vec<Value> {
             &["repo"],
             true,
         ),
-        tool("list_learnings", "List reviewer learnings", "What roll's reviewer keeps in mind for a repo (people add them when they correct a review), each with the path it applies to.", json!({ "repo": repo.clone() }), &["repo"], true),
         tool(
             "get_review_rules",
             "Read a repo's review rules",
@@ -835,16 +833,16 @@ fn every_tool() -> Vec<Value> {
             &["repo"],
             true,
         ),
-        tool("get_repo_audit", "Read a repo's audit log", "Queue bypasses, pauses and approved runs of outside code, newest first (200 at most). Writers only.", json!({ "repo": repo.clone() }), &["repo"], true),
+        tool("get_repo_audit", "Read a repo's audit log", "What changed in a repo's queue and settings, newest first (200 at most): bypasses, pauses, lane moves, approved runs of outside code, webhooks, review and reviewer settings, dismissed reviews, credentials stored in roll secrets. Writers only.", json!({ "repo": repo.clone() }), &["repo"], true),
         tool(
             "start_preview",
             "Start a change's preview",
-            "Build and run a change's preview from its roll.toml (a change from outside the repo needs a writer's approve-run first). Returns the change with its preview.",
+            "Make a change's preview from its roll.toml: it builds and starts on its first visit, and a change from outside the repo starts only after a writer's approve-run. Returns the change with its preview's url.",
             json!({ "change": change.clone() }),
             &["change"],
             false,
         ),
-        tool("stop_preview", "Stop a change's preview", "Stop and remove a change's preview; start_preview makes it again.", json!({ "change": change.clone() }), &["change"], false),
+        tool("stop_preview", "Stop a change's preview", "Remove a change's preview, and its database branch and Redis with it: start_preview makes a fresh one, not the same data.", json!({ "change": change.clone() }), &["change"], false),
         // roll code agents (docs/code/agents.md): drive agent threads on the owner's machines.
         tool(
             "list_agent_machines",
@@ -972,8 +970,8 @@ fn every_tool() -> Vec<Value> {
         tool("get_agent_automation_run", "Read an automation run", "A run with its steps (status, output, log) and the event it ran for.", json!({ "owner": owner.clone(), "run": s("A run id (arn_…)") }), &["owner", "run"], true),
         tool("cancel_agent_automation_run", "Cancel an automation run", "Cancel a run going on. The owner's.", json!({ "owner": owner, "run": s("A run id (arn_…)") }), &["owner", "run"], false),
         tool("retry_agent_automation_run", "Retry an automation run", "Run a failed or cancelled run again from where it stopped. The owner's.", json!({ "owner": owner.clone(), "run": s("A run id (arn_…)") }), &["owner", "run"], false),
-        tool("enable_agent_automation", "Turn an automation on", "Turn an automation on: new events start runs again.", json!({ "owner": owner.clone(), "automation": s("An automation id (aut_…) or name") }), &["owner", "automation"], false),
-        tool("disable_agent_automation", "Turn an automation off", "Turn an automation off: new events start nothing; runs going on go on.", json!({ "owner": owner.clone(), "automation": s("An automation id (aut_…) or name") }), &["owner", "automation"], false),
+        tool("enable_agent_automation", "Turn an automation on", "Turn an automation on: new events start runs again. The owner's.", json!({ "owner": owner.clone(), "automation": s("An automation id (aut_…) or name") }), &["owner", "automation"], false),
+        tool("disable_agent_automation", "Turn an automation off", "Turn an automation off: new events start nothing; runs going on go on. The owner's.", json!({ "owner": owner.clone(), "automation": s("An automation id (aut_…) or name") }), &["owner", "automation"], false),
         tool(
             "get_agent_automation_catalog",
             "List automation triggers and steps",
@@ -1442,11 +1440,10 @@ async fn run(c: &Call<'_>, name: &str, args: &Value) -> std::result::Result<Outc
             let id = c.change_id(args).await?;
             pass(c.get(&format!("/v1/code/changes/{}/ai-jobs", seg(&id))).await)
         }
-        "get_reviewer" | "list_learnings" | "get_review_rules" | "get_repo_audit" => {
+        "get_reviewer" | "get_review_rules" | "get_repo_audit" => {
             let base = c.repo(args)?;
             let tail = match name {
                 "get_reviewer" => "reviewer",
-                "list_learnings" => "learnings",
                 "get_review_rules" => "review-settings",
                 _ => "audit",
             };
@@ -1634,7 +1631,9 @@ async fn run(c: &Call<'_>, name: &str, args: &Value) -> std::result::Result<Outc
         }
         "test_agent_automation" => {
             let owner = c.owner(args)?;
-            let body = json!({ "automation": args.get("spec"), "event": args.get("event") });
+            let spec = args.get("spec").filter(|v| v.is_object()).ok_or_else(|| fail("spec must be an object (an AutomationSpec)"))?;
+            let event = args.get("event").filter(|v| v.is_object()).ok_or_else(|| fail("event must be an object ({source, kind, data?})"))?;
+            let body = json!({ "automation": spec, "event": event });
             pass(c.post(&format!("/v1/code/agents/{}/automations/test", seg(owner)), body).await)
         }
         "list_agent_sandboxes" => {
