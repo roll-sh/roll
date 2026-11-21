@@ -340,6 +340,13 @@ pub enum AppsCmd {
         /// With `--alert-log`: how many times (default 10).
         #[arg(long)]
         alert_log_count: Option<u32>,
+        /// Alert when each instance's CPU stays at this share of its vCPU for five minutes (0 off).
+        #[arg(long, value_name = "PERCENT")]
+        alert_cpu: Option<u8>,
+        /// An alert on one of its own gauges, `name>100` or `name<1`, with ` for 5m` (1–5, default
+        /// 3) and ` sum` after it; repeat for more, `none` clears them.
+        #[arg(long, value_name = "RULE")]
+        alert_metric: Vec<String>,
         #[arg(long)]
         schedule: Option<String>,
         /// The zone a cron schedule's fields are in (IANA: `Europe/Budapest`).
@@ -2812,7 +2819,7 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
             }
             v
         }
-        AppsCmd::Set { target, name, repo, root, image, upload, builder, dockerfile, stage, install, build_command, build_start, health_timeout, health_every, health_failures, health_command, alert_memory, alert_errors, alert_p95, alert_log, alert_log_count, min, max, cpu, memory, port, start, pre_deploy, health, schedule, timezone, kind, concurrency, suspend_after, sleep_after, timeout, retries, volume, watch, packages, build_timeout, build_size, submodules, submodule_repos, lfs, rollout, rollout_step, rollout_errors, rollout_manual, overlap, h2c, scale, public, drain, cpu_target, busy_cpu, memory_target, latency_target, oidc_audience, push, restart, restart_tries, affinity, tcp, rollback_on_crash, rebuild_on_base, block_on } => {
+        AppsCmd::Set { target, name, repo, root, image, upload, builder, dockerfile, stage, install, build_command, build_start, health_timeout, health_every, health_failures, health_command, alert_memory, alert_errors, alert_p95, alert_log, alert_log_count, alert_cpu, alert_metric, min, max, cpu, memory, port, start, pre_deploy, health, schedule, timezone, kind, concurrency, suspend_after, sleep_after, timeout, retries, volume, watch, packages, build_timeout, build_size, submodules, submodule_repos, lfs, rollout, rollout_step, rollout_errors, rollout_manual, overlap, h2c, scale, public, drain, cpu_target, busy_cpu, memory_target, latency_target, oidc_audience, push, restart, restart_tries, affinity, tcp, rollback_on_crash, rebuild_on_base, block_on } => {
             let svc = service(api, &target).await?;
             // The service's rollout with what was given replaced (the API takes it whole).
             let rollout = if rollout.is_some() || rollout_step.is_some() || rollout_errors.is_some() || rollout_manual.is_some() || overlap.is_some() {
@@ -2919,9 +2926,13 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
                 body.insert("build".into(), Value::Object(build));
             }
             // The service's alerts with what was given replaced (the API takes them whole).
-            let alerts = if alert_memory.is_some() || alert_errors.is_some() || alert_p95.is_some() || alert_log.is_some() || alert_log_count.is_some() {
+            let alerts = if alert_memory.is_some() || alert_errors.is_some() || alert_p95.is_some() || alert_log.is_some() || alert_log_count.is_some() || alert_cpu.is_some() || !alert_metric.is_empty() {
                 let mut a = svc["run"]["alerts"].as_object().cloned().unwrap_or_default();
-                for (k, v) in [("memory_pct", alert_memory.map(Value::from)), ("error_pct", alert_errors.map(Value::from)), ("p95_ms", alert_p95.map(Value::from)), ("log_count", alert_log_count.map(Value::from))] {
+                if !alert_metric.is_empty() {
+                    let rules = alert_metric.iter().filter(|r| *r != "none").map(|r| metric_alert(r)).collect::<anyhow::Result<Vec<_>>>()?;
+                    a.insert("metrics".into(), Value::Array(rules));
+                }
+                for (k, v) in [("memory_pct", alert_memory.map(Value::from)), ("error_pct", alert_errors.map(Value::from)), ("p95_ms", alert_p95.map(Value::from)), ("log_count", alert_log_count.map(Value::from)), ("cpu_pct", alert_cpu.map(Value::from))] {
                     if let Some(v) = v {
                         a.insert(k.into(), v);
                     }
@@ -4810,6 +4821,26 @@ fn internal_rewritten(v: &str, host: &str, local: &str) -> Option<String> {
     }
     out.push_str(rest);
     hit.then_some(out)
+}
+
+/// `--alert-metric`: `name>100` or `name<1`, then ` for 5m` and ` sum`, as an `alerts.metrics` entry.
+fn metric_alert(rule: &str) -> anyhow::Result<Value> {
+    let bad = || anyhow::anyhow!("--alert-metric is name>N or name<N, with \" for 1m\"–\" for 5m\" and \" sum\" after it: {rule}");
+    let (head, rest) = rule.trim().split_once(' ').map_or((rule.trim(), ""), |(h, r)| (h, r));
+    let (at, op) = head.find(['>', '<']).map(|i| (i, &head[i..i + 1])).ok_or_else(bad)?;
+    let (name, value) = (&head[..at], head[at + 1..].parse::<f64>().map_err(|_| bad())?);
+    let mut m = serde_json::Map::new();
+    m.insert("name".into(), json!(name));
+    m.insert(if op == ">" { "above" } else { "below" }.into(), json!(value));
+    let mut words = rest.split_whitespace();
+    while let Some(w) = words.next() {
+        match w {
+            "for" => m.insert("minutes".into(), json!(words.next().and_then(|d| d.strip_suffix('m')).and_then(|d| d.parse::<u8>().ok()).ok_or_else(bad)?)),
+            "sum" => m.insert("sum".into(), json!(true)),
+            _ => return Err(bad()),
+        };
+    }
+    Ok(Value::Object(m))
 }
 
 #[cfg(test)]

@@ -703,6 +703,28 @@ static TOOLS: &[Tool] = &[
         &[WS, req("kind", "postgres, redis, stream, bucket, nosql or repo"), req("ref", "The resource's id (owner/name for a repo)"), breq("x", Ty::Num, "Canvas x"), breq("y", Ty::Num, "Canvas y")],
     ),
     t("workspace_remove_resource", "Remove a resource from a project", "Take a resource off a project's canvas (the resource itself stays).", "workspace", "DELETE", "/v1/workspace/projects/{id}/resources/{kind}/{ref}", &[WS, req("kind", "Resource kind"), req("ref", "The resource's id")]).undoable(),
+    // Members (docs/members.md): accepting an invite is a person's own, so it's no tool.
+    t("workspace_list_members", "List a project's members", "Who is in a workspace project: handle, role (viewer, developer, admin, owner), a developer's environments, who added them and when. Emails only for the project's admins.", "workspace", "GET", "/v1/workspace/projects/{id}/members", &[WS]),
+    t(
+        "workspace_invite_member",
+        "Invite a member",
+        "Invite an email address to a project with a role (never more than the caller's own). The answer has the invite link once; the person accepts it by signing in as that address.",
+        "workspace",
+        "POST",
+        "/v1/workspace/projects/{id}/invites",
+        &[WS, breq("email", Ty::Str, "Their email address"), breq("role", Ty::Str, "viewer, developer, admin or owner"), b("environments", Ty::Arr, "A developer's environments, where the role applies in full (default: every environment that isn't protected)")],
+    ),
+    t(
+        "workspace_set_member_role",
+        "Change a member's role",
+        "Change a member's role or a developer's environments. Both the old and the new role must be within the caller's own; the last owner can't be demoted.",
+        "workspace",
+        "PATCH",
+        "/v1/workspace/projects/{id}/members/{user}",
+        &[WS, req("user", "The member (usr_…)"), b("role", Ty::Str, "viewer, developer, admin or owner"), b("environments", Ty::Arr, "A developer's environments (null: the default)")],
+    )
+    .destructive(),
+    t("workspace_remove_member", "Remove a member", "Take a person out of a project: their session and tokens stop reaching it at once, and their tokens confined to it are revoked. The last owner can't be removed.", "workspace", "DELETE", "/v1/workspace/projects/{id}/members/{user}", &[WS, req("user", "The member (usr_…)")]).destructive(),
     // ── Postgres ──
     t("postgres_list_projects", "List Postgres projects", "Postgres projects with their branches and endpoints.", "postgres", "GET", "/v1/projects", &[]),
     t("postgres_get_project", "Get a Postgres project", "A Postgres project with its branches and endpoints (connection strings need reveal).", "postgres", "GET", "/v1/projects/{project}", &[PROJECT]),
@@ -1030,6 +1052,8 @@ static TOOLS: &[Tool] = &[
     t("search_overview", "roll search here", "What roll search offers here: versions, the endpoint, defaults, the history window and pricing.", "search", "GET", "/v1/search", &[]),
     t("search_unlink_remote", "Unlink a remote cluster", "Stop a cluster searching another (alias:index): the remote's settings and credentials go, and a cross-cluster key roll made for it is revoked. Linking one stays the cluster admin's (no tool).", "search", "DELETE", "/v1/search/clusters/{cluster}/remotes/{alias}", &[req("cluster", "Cluster id or name"), req("alias", "The remote's alias")]).destructive(),
     t("search_revoke_key", "Revoke a cluster API key", "Revoke one of a cluster's API keys at once (404 once it's gone; on a deleted cluster the revoke is applied by its restore). Making one answers a credential, so it has no tool.", "search", "DELETE", "/v1/search/clusters/{cluster}/keys/{key}", &[req("cluster", "Cluster id or name"), req("key", "The API key's id")]).destructive(),
+    t("search_list_browser_keys", "List a cluster's browser keys", "The keys a cluster gave web pages for search from the browser that still work, newest first: name, the indices or search application each may read, its filter, rate limit and when it expires (never the key). Making one answers a credential, so it has no tool.", "search", "GET", "/v1/search/clusters/{cluster}/browser-keys", &[req("cluster", "Cluster id or name")]),
+    t("search_revoke_browser_key", "Revoke a browser key", "Revoke one of a cluster's browser keys at once: pages shipping it stop getting answers (on a deleted cluster the revoke is applied by its restore).", "search", "DELETE", "/v1/search/clusters/{cluster}/browser-keys/{key}", &[req("cluster", "Cluster id or name"), req("key", "Browser key id (from search_list_browser_keys)")]),
     t("search_list_inference_secrets", "Inference endpoints keyed by a roll secret", "A cluster's inference endpoints whose API key comes from a roll secret, with the project and key each follows (a rotated value reaches the endpoint within seconds; never the value), and the projects whose secrets it could use.", "search", "GET", "/v1/search/clusters/{cluster}/inference/secrets", &[req("cluster", "Cluster id or name")]),
     t("search_branch_cluster", "Branch a search cluster", "A copy-on-write branch of a cluster, now or at a time within its history.", "search", "POST", "/v1/search/clusters/{cluster}/branches", &[req("cluster", "Cluster id or name"), breq("name", Ty::Str, "Branch name"), b("at", Ty::Int, "Unix seconds")]),
     t("search_update_cluster", "Update a search cluster", "Change a cluster's settings: idle_timeout_s (0: always loaded), max_in_flight, max_body_mb at once; flavor or destructive_requires_name put it to sleep to reload once no request runs; ip_allowlist replaces the networks its endpoint answers (up to 64 CIDRs, each a string or {cidr, description}; [] answers everyone; this API isn't filtered by it).", "search", "PATCH", "/v1/search/clusters/{cluster}", &[req("cluster", "Cluster id or name"), b("idle_timeout_s", Ty::Int, "Seconds idle before it sleeps (0: never)"), b("max_in_flight", Ty::Int, "Requests at once"), b("max_body_mb", Ty::Int, "Largest request body"), b("destructive_requires_name", Ty::Bool, "Refuse wildcard deletes"), b("flavor", Ty::Str, "elasticsearch or opensearch"), b("ip_allowlist", Ty::Arr, "CIDRs its endpoint answers (strings or {cidr, description})")]),

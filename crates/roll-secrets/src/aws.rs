@@ -194,6 +194,10 @@ impl LinkProvider for Provider {
         &[("access_key_id", Mode::Dynamic), ("secret_access_key", Mode::Dynamic), ("session_token", Mode::Dynamic)]
     }
 
+    fn maker(&self, r#ref: &str) -> Option<(String, String)> {
+        self.db.read(|c| c.query_row("SELECT project_id, created_by FROM aws_roles WHERE id = ?", [r#ref], |r| Ok((r.get(0)?, r.get(1)?))).optional()).ok().flatten()
+    }
+
     fn name(&self, r#ref: &str) -> Option<String> {
         self.role(r#ref).ok().map(|(_, name, _, _)| name)
     }
@@ -242,7 +246,7 @@ impl Secrets {
         self.project(project)?;
         self.verify_role(project, &n.role_arn, &trust)?;
         let now = self.db.now_ms()?;
-        let r = AwsRole { id: names::new_id("awr", 16), name: n.name, role_arn: n.role_arn, trust, created_at: now, created_by: caller.principal.clone() };
+        let r = AwsRole { id: names::new_id("awr", 16), name: n.name, role_arn: n.role_arn, trust, created_at: now, created_by: caller.made_by().to_string() };
         self.db.write(|c| {
             if c.query_row("SELECT 1 FROM aws_roles WHERE project_id = ? AND name = ?", [project, &r.name], |_| Ok(())).optional()?.is_some() {
                 return Err(Error::Conflict("exists", format!("an AWS role named {} exists", r.name)));

@@ -118,6 +118,18 @@ pub struct Target {
     pub security: Option<crate::xpack::security::dls::ReadSecurity>,
 }
 
+impl SearchRequest {
+    /// The browser key policy the request runs under ([`crate::xpack::security::browser`]).
+    pub fn browser(&self) -> Option<crate::xpack::security::browser::Policy> {
+        self.security.as_ref().and_then(|s| s.browser().cloned())
+    }
+}
+
+/// Whether a reader's policy keeps painless from running (a browser key without `allow_scripts`).
+fn denies_scripts(security: Option<&crate::xpack::security::dls::ReadSecurity>) -> bool {
+    security.and_then(|s| s.browser()).is_some_and(|p| !p.allow_scripts)
+}
+
 impl Target {
     /// Whose reads the target's queries make ([`query::Reader`]).
     pub fn reader(&self) -> query::Reader {
@@ -351,6 +363,8 @@ pub fn parse_request(ctx: &Ctx, body: Option<&Value>, raw: Option<&[u8]>) -> EsR
     if rest_total && let Some(TrackTotalHits::UpTo(n)) = source.track_total_hits {
         return Err(EsError::illegal_argument(format!("[rest_total_hits_as_int] cannot be used if the tracking of total hits is not accurate, got {n}")));
     }
+    // A browser key's request, URL and body merged ([`crate::xpack::security::browser`]).
+    crate::xpack::security::browser::check_source(ctx, &source, scroll.is_some())?;
     let exprs = ctx.param("index").map(resolve::split_expressions).unwrap_or_default();
     let opts = ctx.indices_options(IndicesOptions::STRICT_EXPAND_OPEN_FORBID_CLOSED)?;
     Ok(SearchRequest {
@@ -495,6 +509,20 @@ pub fn resolve_targets(cluster: &Cluster, st: &ClusterState, req: &SearchRequest
             Some(sec) => sec.documents(cluster, crate::xpack::security::dls::READ, &idx.name)?,
             None => None,
         };
+        // `DlsFlsRequestValidator`: suggesters read the terms of every document, and a profile
+        // shows the restriction's query, so neither runs where documents are restricted.
+        if dls.is_some() {
+            let mut errors = Vec::new();
+            if req.source.suggest.is_some() {
+                errors.push("Suggest isn't supported if document level security is enabled".to_string());
+            }
+            if req.source.profile {
+                errors.push("A search request cannot be profiled if document level security is enabled".to_string());
+            }
+            if !errors.is_empty() {
+                return Err(EsError::action_request_validation(&errors));
+            }
+        }
         let filter = match (filter, dls) {
             (Some(a), Some(d)) => Some(crate::query::Query::from(crate::query::compound::Bool { filter: vec![a, d], ..Default::default() })),
             (a, d) => a.or(d),
@@ -791,7 +819,9 @@ fn shard_query_main(qctx: &QueryCtx, t: &Target, main: QueryRef) -> EsResult<Que
     // `DefaultSearchContext.buildFilteredQuery`: the non-nested filter first, and only where
     // the query (and the alias filter) might match nested documents.
     let alias = match &t.alias_filter {
-        Some(af) => Some(qctx.to_filter(af)?),
+        // The owner's (with the reader's document level security): a browser key's policy
+        // doesn't hold it.
+        Some(af) => Some(qctx.owner_filter(af)?),
         None => None,
     };
     let mut filters: Vec<QueryRef> = Vec::new();
@@ -1161,7 +1191,11 @@ pub fn query_phase(cluster: &Cluster, st: &ClusterState, req: &SearchRequest, t:
     // The request's cancellation (its client went away) and its limit stay in force.
     let (cancelled, limit) = search_index::search::ambient_control().map_or((None, None), |c| (c.cancelled, c.limit));
     // The runtime fields scripts read through `doc[...]` travel with the control.
-    let scope = runtime::RuntimeScope::build(&cluster.scripts, cluster.state(), &t.idx, &t.table(), t.shard.id as i32, req.source.runtime_mappings.as_ref())?;
+    // A browser key that runs no painless gets no runtime fields (they are scripts).
+    let scope = match denies_scripts(t.security.as_ref()) {
+        true => None,
+        false => runtime::RuntimeScope::build(&cluster.scripts, cluster.state(), &t.idx, &t.table(), t.shard.id as i32, req.source.runtime_mappings.as_ref())?,
+    };
     let ctl = (deadline.is_some() || limit.is_some() || cancelled.is_some() || scope.is_some()).then(|| search_index::search::SearchControl {
         deadline,
         limit,
@@ -1405,6 +1439,10 @@ fn query_phase_inner(cluster: &Cluster, st: &ClusterState, req: &SearchRequest, 
                 lookup = lookup.with_rescore(prepare_rescore(&QueryCtx::new(cluster, st, &t.idx, &table, &searcher, req.now_ms, t.reader()), src));
             }
             let max_buckets = st.metadata.cluster_setting("search.max_buckets").and_then(|v| v.parse::<usize>().ok());
+            let max_buckets = match req.browser() {
+                Some(p) => Some(max_buckets.map_or(p.max_buckets, |m| m.min(p.max_buckets))),
+                None => max_buckets,
+            };
             let opts = search_aggs::ShardOptions {
                 max_buckets,
                 // Top-level aggregations may answer from segment statistics only when the query
@@ -2550,6 +2588,11 @@ fn execute_after_can_match(cluster: &Cluster, req: &SearchRequest, targets: &[Ta
 }
 
 fn execute_targets(cluster: &Cluster, req: &SearchRequest, targets: &[Target]) -> EsResult<SearchOutcome> {
+    // Every search a browser key's request runs (collapse's expansions, retrievers' children,
+    // the top-level one again) is held to its policy here, whoever built its source.
+    if let Some(p) = req.browser() {
+        crate::xpack::security::browser::check_parsed(&p, &req.source, req.scroll.is_some())?;
+    }
     if let Some(f) = &req.source.fusion {
         return fusion::execute(cluster, req, targets, f);
     }
@@ -3041,7 +3084,7 @@ fn execute_targets(cluster: &Cluster, req: &SearchRequest, targets: &[Target]) -
                 partial_aggs = Some(out);
                 None
             } else {
-            let mut out = aggs::reduce(cluster, &st, a, parts, req.typed_keys).map_err(|e| with_query_failures(e, &cluster.node.id, targets, &failures))?;
+            let mut out = aggs::reduce(cluster, &st, a, parts, req.typed_keys, req.browser()).map_err(|e| with_query_failures(e, &cluster.node.id, targets, &failures))?;
             finish_top_hits(cluster, &st, req, targets, &results, &mut out)?;
             if let Some(raw) = &src.aggs
                 && aggs::mentions_tsid(raw)
@@ -3430,6 +3473,9 @@ fn script_fields_of_hit(cluster: &Cluster, st: &ClusterState, t: &Target, table:
     let Some((seg, local)) = searcher.segment_of(doc) else { return Ok(()) };
     let id_fielddata = id_fielddata::scripts(st);
     let mut sf = Map::new();
+    if denies_scripts(t.security.as_ref()) && !fields.is_empty() {
+        return Err(crate::xpack::security::browser::refused("painless ([script_fields])"));
+    }
     for f in fields {
         let bound = cluster.scripts.compile(st, &f.script, search_painless::Context::Field)?;
         let p = scripts::Painless { bound, table: table.clone(), shard: t.shard.id as i32, index: t.idx.name.clone(), id_fielddata, counted: false };
@@ -3588,6 +3634,7 @@ fn runtime_fields_of_hit(cluster: &Cluster, st: &ClusterState, src: &SearchSourc
     let shard = t.shard.id as i32;
     let scope = match runtime::RuntimeScope::ambient().filter(|s| s.is_for(&t.idx.name, shard)) {
         Some(s) => Some(s),
+        None if denies_scripts(t.security.as_ref()) => None,
         None => runtime::RuntimeScope::build(&cluster.scripts, cluster.state(), &t.idx, table, shard, src.runtime_mappings.as_ref())?,
     };
     let index_scripts = index_time::of(&t.idx.mapping);
@@ -3628,6 +3675,9 @@ fn runtime_fields_of_hit(cluster: &Cluster, st: &ClusterState, src: &SearchSourc
             let hit = if spec.field.contains('*') { crate::xcontent::filter::glob_match(&spec.field, &f.name) } else { spec.field == f.name };
             if !hit || out.contains_key(&f.name) || scope.as_ref().is_some_and(|s| s.shadows(&f.name)) {
                 continue;
+            }
+            if denies_scripts(t.security.as_ref()) {
+                return Err(crate::xpack::security::browser::refused("painless (a scripted field)"));
             }
             let ev = runtime::Evaluator::new(&cluster.scripts, st, table, shard, &t.idx.name, f.clone())?.counted();
             let vals = index_time::fetch_values(&ev, seg, local)?;
@@ -3760,6 +3810,10 @@ fn collapse_inner_hits(cluster: &Cluster, req: &SearchRequest, c: &crate::search
         let Some(name) = spec.get("name").and_then(Value::as_str) else {
             return Err(EsError::illegal_argument("[inner_hits] must have a [name] when used in [collapse]"));
         };
+        // A browser key's request pays for each expansion, `size: 0` ones too.
+        if let Some(s) = &req.security {
+            s.spend_sub_search()?;
+        }
         let mut sub = req.clone();
         sub.scroll = None;
         // The group's documents among everything the compound retriever matches.
@@ -4112,7 +4166,7 @@ pub async fn search(ctx: &Ctx<'_>) -> EsResult<Reply> {
     // Retrievers that need inference: a top-level `text_similarity_reranker` reranks the page
     // after the search, and `rrf`/`linear`'s simplified `query`/`fields` form expands against
     // the targets' mappings.
-    let reranker = crate::xpack::inference::rerank::take(&mut body)?;
+    let reranker = crate::xpack::inference::rerank::take(ctx, &mut body)?;
     if let Some(b) = body.as_mut()
         && crate::xpack::inference::retrievers::uses_simplified(b)
     {
@@ -4182,7 +4236,7 @@ pub(crate) fn reduce_clusters(ctx: &Ctx, req: &SearchRequest, parts: Vec<search_
     let Some(a) = req.source.aggs.as_ref().filter(|_| !parts.is_empty()) else { return Ok(None) };
     let agg_req = aggs::parse(a, req.source.aggs_raw.as_deref().map(|r| (r, a)))?;
     let st = ctx.state();
-    let mut out = aggs::reduce(ctx.cluster, &st, &agg_req, parts, req.typed_keys)?;
+    let mut out = aggs::reduce(ctx.cluster, &st, &agg_req, parts, req.typed_keys, req.browser())?;
     // Every part's top hits were fetched on its cluster: only `rest_total_hits_as_int` is left.
     finish_top_hits(ctx.cluster, &st, req, &[], &[], &mut out)?;
     if aggs::mentions_tsid(a) {
@@ -4445,6 +4499,9 @@ pub async fn msearch(ctx: &Ctx<'_>) -> EsResult<Reply> {
     } else if !data.is_empty() {
         return Err(EsError::illegal_argument("The msearch request must be terminated by a newline [\\n]"));
     }
+    // A browser key's searches past its `max_items`, counted from the lines before any is parsed
+    // (each search is a header line and a body line).
+    crate::xpack::security::browser::check_item_lines(ctx, lines.len() / 2)?;
     let mut responses = Vec::new();
     let mut i = 0;
     let os = ctx.cluster.dialect == crate::cluster::Dialect::OpenSearch;
@@ -4518,6 +4575,8 @@ pub async fn msearch(ctx: &Ctx<'_>) -> EsResult<Reply> {
     if !errs.is_empty() {
         return Err(EsError::action_request_validation(&errs));
     }
+    // A browser key pays for every search, as parsed and checked here, before any runs.
+    crate::xpack::security::browser::charge_items(ctx, reqs.len())?;
     // Buffered items are charged to the request breaker until the response is sent
     // (Elasticsearch 9.5); a trip fails the whole request with that 429. OpenSearch has no
     // such accounting.
@@ -4799,9 +4858,15 @@ fn doc_allowed(cluster: &Cluster, st: &ClusterState, idx: &Arc<IndexMeta>, table
     Ok(searcher.explain(&query, doc).map_err(crate::engine::convert::index_error)?.is_match())
 }
 
-pub fn matches_doc(cluster: &Cluster, st: &ClusterState, idx: &Arc<IndexMeta>, engine: &Arc<IndexEngine>, shard: &Arc<ShardEngine>, id: &str, q: &crate::query::Query) -> EsResult<bool> {
-    shard.refresh()?;
-    let searcher = shard.searcher();
+/// Whether document `id` as a get read it (`realtime`: through the realtime get's reader, which
+/// holds what is written but not yet refreshed, without refreshing the shard) matches `q`, the
+/// owner's document level security query.
+#[allow(clippy::too_many_arguments)]
+pub fn matches_doc(cluster: &Cluster, st: &ClusterState, idx: &Arc<IndexMeta>, engine: &Arc<IndexEngine>, shard: &Arc<ShardEngine>, id: &str, q: &crate::query::Query, realtime: bool) -> EsResult<bool> {
+    let searcher = match realtime {
+        true => shard.shard.realtime_searcher(id.as_bytes()).map_err(crate::engine::convert::index_error)?,
+        false => shard.searcher(),
+    };
     let Some(doc) = find_doc(&searcher, id) else { return Ok(false) };
     let table = engine.table();
     let qctx = QueryCtx::new(cluster, st, idx, &table, &searcher, crate::time::now_millis(), crate::search::query::Reader::Unrestricted);

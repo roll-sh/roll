@@ -21,7 +21,7 @@
 use super::{Reviewer, ReviewerKind};
 use super::store::{AppRow, DeliveryRow};
 use crate::model::{Owner, RepoRow};
-use crate::signing::Kept;
+use crate::kept::{self, Field, Kept};
 use crate::{Caller, Code, Error, Result, hash_token, new_id};
 use hmac::{Hmac, Mac};
 use parking_lot::Mutex;
@@ -165,7 +165,8 @@ impl Code {
             "id": a.id,
             "owner": owner,
             "name": a.name,
-            "webhook_url": a.webhook_url,
+            // Its scheme and host only: the URL itself is kept sealed (crate::kept).
+            "webhook_url": a.webhook_url.shown_url(self.ai.sealer.as_ref(), &a.id),
             "events": a.events,
             "repos": repos,
             "all_repos": a.repos.is_empty(),
@@ -224,6 +225,7 @@ impl Code {
     /// `POST /owners/{owner}/review-apps`: the app, its token and its secret (shown once).
     pub fn create_app(&self, caller: &Caller, owner: &str, input: &Value) -> Result<Value> {
         let o = self.manage_owner(caller, owner)?;
+        let sealer = kept::require(self.ai.sealer.as_ref(), "review apps")?;
         let name = app_name(input.get("name").and_then(Value::as_str).unwrap_or(""))?;
         let url = check_url(input.get("webhook_url").and_then(Value::as_str).ok_or_else(|| Error::Invalid("webhook_url is required".into()))?)?;
         if self.db.apps(Some(&o.id))?.len() >= MAX_APPS_PER_OWNER {
@@ -232,11 +234,11 @@ impl Code {
         let t = crate::db::now();
         let (id, secret) = (new_id("app"), new_secret());
         let a = AppRow {
-            secret: Kept::keep(self.ai.sealer.as_ref(), &id, &secret),
+            secret: Kept::seal(sealer, Field::Secret, &id, &secret),
+            webhook_url: Kept::seal(sealer, Field::Url, &id, url.as_str()),
             id,
             owner_id: o.id.clone(),
             name: name.clone(),
-            webhook_url: url.to_string(),
             events: Self::app_events(input.get("events"))?.unwrap_or_else(|| EVENTS[..3].iter().map(|s| s.to_string()).collect()),
             repos: self.app_repos(&o, input.get("repos"))?.unwrap_or_default(),
             required: Self::bool_field(input.get("required"), "required")?.unwrap_or(false),
@@ -283,12 +285,13 @@ impl Code {
 
     pub fn update_app(&self, caller: &Caller, id: &str, patch: &Value) -> Result<Value> {
         let mut a = self.managed_app(caller, id)?;
+        let sealer = kept::require(self.ai.sealer.as_ref(), "review apps")?;
         let o = self.db.owner_by_id(&a.owner_id)?.ok_or_else(|| Error::NotFound("owner".into()))?;
         if let Some(n) = patch.get("name").and_then(Value::as_str) {
             a.name = app_name(n)?;
         }
         if let Some(u) = patch.get("webhook_url").and_then(Value::as_str) {
-            a.webhook_url = check_url(u)?.to_string();
+            a.webhook_url = Kept::seal(sealer, Field::Url, &a.id, check_url(u)?.as_str());
         }
         if let Some(e) = Self::app_events(patch.get("events"))? {
             a.events = e;
@@ -319,8 +322,9 @@ impl Code {
     /// A new token and secret; the old ones stop working.
     pub fn rotate_app(&self, caller: &Caller, id: &str) -> Result<Value> {
         let a = self.managed_app(caller, id)?;
+        let sealer = kept::require(self.ai.sealer.as_ref(), "review apps")?;
         let (token, secret) = (new_app_token(), new_secret());
-        self.db.rotate_app(&a.id, &Kept::keep(self.ai.sealer.as_ref(), &a.id, &secret), &hash_token(&token))?;
+        self.db.rotate_app(&a.id, &Kept::seal(sealer, Field::Secret, &a.id, &secret), &hash_token(&token))?;
         self.audit_app(&a, caller, "review_app_rotate")?;
         Ok(json!({ "token": token, "secret": secret }))
     }
@@ -524,7 +528,7 @@ impl Code {
         let attempts = d.attempts + 1;
         // Deliveries go to review apps (`app_…`) and repo webhooks (`wh_…`) alike (GitHub's,
         // `gh_…`, went to `send_github`).
-        let target: std::result::Result<Option<(&str, bool, String, Kept)>, String> = if d.app_id.starts_with("wh_") {
+        let target: std::result::Result<Option<(&str, bool, Kept, Kept)>, String> = if d.app_id.starts_with("wh_") {
             self.db.webhook(&d.app_id).map(|h| h.map(|h| ("webhook", h.active, h.url, h.secret))).map_err(|e| e.to_string())
         } else {
             self.db.app(&d.app_id).map(|a| a.map(|a| ("app", a.active, a.webhook_url, a.secret))).map_err(|e| e.to_string())
@@ -539,10 +543,13 @@ impl Code {
             return;
         }
         let result = match target {
-            Ok(Some((_, true, url, secret))) => match secret.open(self.ai.sealer.as_ref(), &d.app_id) {
-                Ok(secret) => self.post(client, &url, &secret, &d).await,
-                Err(e) => Err((None, e, None)),
-            },
+            Ok(Some((_, true, url, secret))) => {
+                let sealer = self.ai.sealer.as_ref();
+                match (url.open(sealer, Field::Url, &d.app_id), secret.open(sealer, Field::Secret, &d.app_id)) {
+                    (Ok(url), Ok(secret)) => self.post(client, &url, &secret, &d).await,
+                    (Err(e), _) | (_, Err(e)) => Err((None, e, None)),
+                }
+            }
             Ok(Some((what, false, ..))) => Err((None, format!("the {what} is disabled"), None)),
             Ok(None) => Err((None, "the app or webhook was deleted".to_string(), None)),
             Err(e) => Err((None, e, None)),
@@ -587,7 +594,8 @@ impl Code {
             .body(body)
             .send()
             .await
-            .map_err(|e| (None, e.to_string(), None))?;
+            // The error names the URL: never keep or show it (crate::kept).
+            .map_err(|e| (None, e.without_url().to_string(), None))?;
         let status = resp.status().as_u16();
         let ok = resp.status().is_success();
         let body = response_start(resp).await;

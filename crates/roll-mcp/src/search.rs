@@ -380,6 +380,7 @@ mod finds {
             ("redis memory usage", "redis_usage"),
             ("which service costs the most this month", "apps_project_usage"),
             ("is the leaked key in my code still live", "secrets_credential_check"),
+            ("browser keys for search on my site", "search_list_browser_keys"),
         ]
         .iter()
         .filter_map(|(q, want)| {
