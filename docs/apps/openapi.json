@@ -1092,6 +1092,35 @@
         "x-roll-action": "write"
       }
     },
+    "/v1/apps/projects/{project}/usage": {
+      "get": {
+        "description": "Answers `ProjectUsage`: a month's use (`YYYY-MM`, this one by default; 400 for a month to come) by service and environment at roll's prices, each service's previews as one row (`previews: true`), deleted services as one (`deleted: true`), most costly first; this month's projected to its end at the pace so far.",
+        "operationId": "getProjectsProjectUsage",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "project",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "`ProjectUsage`: a month's use (`YYYY-MM`, this one by default; 400 for a month to come) by service and environment at roll's prices, each service's previews as one row (`previews: true`), deleted services as one (`deleted: true`), most costly first; this month's projected to its end at the pace so far"
+          },
+          "4XX": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "summary": "Get usage",
+        "tags": [
+          "projects"
+        ],
+        "x-roll-action": "read"
+      }
+    },
     "/v1/apps/services": {
       "get": {
         "description": "Answers `Service[]`; `deleted=true`: `{id, project, name, deleted_at, purge_at}[]` (unix ms, newest first), the deleted services kept for a restore until `purge_at`, 48 hours after the delete.",
@@ -2364,7 +2393,7 @@
     },
     "/v1/apps/services/{id}/environments/{env}/errors": {
       "get": {
-        "description": "Answers `{ minutes, groups: { fingerprint, kind: \"python\" | \"java\" | \"node\" | \"go\" | \"line\", title, count, first_seen, last_seen, instances, sample }[], scanned, cut }`: the environment's errors from its log (5–10,080 minutes, default 1,440), each instance's stack traces joined from their lines and grouped by their error and first frames (line numbers, addresses and ids taken out), error lines with no trace by their message the same way; the most frequent first, at most 50, `sample` the newest whole (at most 8 KiB); at most the newest 100,000 lines read (`cut`).",
+        "description": "Answers `{ minutes, groups: { fingerprint, kind: \"python\" | \"java\" | \"node\" | \"go\" | \"ruby\" | \"php\" | \"dotnet\" | \"rust\" | \"elixir\" | \"line\", title, count, first_seen, last_seen, instances, sample }[], scanned, cut }`: the environment's errors from its log (5–10,080 minutes, default 1,440), each instance's stack traces joined from their lines and grouped by their error and first frames (line numbers, addresses and ids taken out), error lines with no trace by their message the same way; the most frequent first, at most 50, `sample` the newest whole (at most 8 KiB); at most the newest 100,000 lines read (`cut`).",
         "operationId": "getServicesIdEnvironmentsEnvErrors",
         "parameters": [
           {
@@ -2386,7 +2415,7 @@
         ],
         "responses": {
           "200": {
-            "description": "`{ minutes, groups: { fingerprint, kind: \"python\" | \"java\" | \"node\" | \"go\" | \"line\", title, count, first_seen, last_seen, instances, sample }[], scanned, cut }`: the environment's errors from its log (5–10,080 minutes, default 1,440), each instance's stack traces joined from their lines and grouped by their error and first frames (line numbers, addresses and ids taken out), error lines with no trace by their message the same way; the most frequent first, at most 50, `sample` the newest whole (at most 8 KiB); at most the newest 100,000 lines read (`cut`)"
+            "description": "`{ minutes, groups: { fingerprint, kind: \"python\" | \"java\" | \"node\" | \"go\" | \"ruby\" | \"php\" | \"dotnet\" | \"rust\" | \"elixir\" | \"line\", title, count, first_seen, last_seen, instances, sample }[], scanned, cut }`: the environment's errors from its log (5–10,080 minutes, default 1,440), each instance's stack traces joined from their lines and grouped by their error and first frames (line numbers, addresses and ids taken out), error lines with no trace by their message the same way; the most frequent first, at most 50, `sample` the newest whole (at most 8 KiB); at most the newest 100,000 lines read (`cut`)"
           },
           "4XX": {
             "$ref": "#/components/responses/Error"
@@ -4174,7 +4203,7 @@
               }
             }
           },
-          "description": "`{set?: {[name]: value}, unset?: string[], seal?: string[], files?: {[name]: path | null}, copy_from?: string, copy?: string[]}` (`copy_from` with `copy`: those names' values from another environment's own variables, set here as `set` sets them; 400 for a sealed one or one it lacks; reveal on `copy_from` too. set, then unset, then seal: names set here or already set; 400 for another; nothing unseals, a new value stays sealed. `files`: kept as a file at an absolute path in its instances, not in their environment, from the next deploy (0444; at most 20; not under `/proc`, `/sys` or `/dev`, no `..`; two can't share a path; null puts it back; unsetting a variable drops its file; 400 otherwise; on Fargate the deploy fails for now). A value `roll://ENV[/folder…]/KEY` is read from roll secrets at each deploy: its own environment's as the service, another environment's as whoever set it (bound to them when it's set; a 403 unless they may reveal it for the service now)"
+          "description": "`{set?: {[name]: value}, unset?: string[], seal?: string[], files?: {[name]: path | null}, runtime_only?: {[name]: boolean}, copy_from?: string, copy?: string[]}` (`copy_from` with `copy`: those names' values from another environment's own variables, set here as `set` sets them; 400 for a sealed one or one it lacks; reveal on `copy_from` too. set, then unset, then seal: names set here or already set; 400 for another; nothing unseals, a new value stays sealed. `files`: kept as a file at an absolute path in its instances, not in their environment, from the next deploy (0444; at most 20; not under `/proc`, `/sys` or `/dev`, no `..`; two can't share a path; null puts it back; unsetting a variable drops its file; 400 otherwise; on Fargate the deploy fails for now). `runtime_only`: true gives it to its instances only, never a build's steps (from the next deploy; one of its own variables, else 400); false gives it to builds again; unsetting drops it. A value `roll://ENV[/folder…]/KEY` is read from roll secrets at each deploy: its own environment's as the service, another environment's as whoever set it (bound to them when it's set; a 403 unless they may reveal it for the service now)"
         },
         "responses": {
           "200": {

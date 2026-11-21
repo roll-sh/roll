@@ -7272,6 +7272,8 @@ dependencies = [
  "roll-secrets-chain",
  "roll-workspace",
  "rsa",
+ "rustls-pki-types",
+ "rustls-webpki 0.103.15",
  "serde",
  "serde_json",
  "sha2 0.10.9",
@@ -8124,6 +8126,7 @@ dependencies = [
  "reqwest",
  "roll-auth",
  "roll-cluster",
+ "roll-secrets",
  "rsa",
  "rusqlite",
  "search-es",
@@ -8188,6 +8191,7 @@ dependencies = [
  "sha2 0.10.9",
  "tokio",
  "unicode-segmentation",
+ "zeroize",
  "zxcvbn",
 ]
 

@@ -65,6 +65,8 @@ export interface Push {
   timeout_s?: number;
   /** Records POSTed at once, each from its own partitions (1–32, default 4). */
   max_in_flight?: number;
+  /** `oidc`: each POST carries roll's OIDC token for the service instead of `CRON_SECRET`. */
+  auth?: "oidc";
 }
 
 /** A push rule as it stands (`…/environments/{env}/push`), on the service's owner since it began delivering. */
@@ -109,6 +111,8 @@ export interface Run {
   drain_s?: number;
   /** A web service also scales on CPU: another instance while they average over this percent for a minute (10–100). */
   cpu_target?: number;
+  /** 1–100: an instance over this percent of its CPU counts as busy and isn't put to sleep or scaled in. */
+  busy_cpu?: number;
   /** A web service also scaled on its answers' p95 (50–60,000 ms). */
   latency_target_ms?: number;
   /** Audiences its instances may ask roll's OIDC issuer for, at ROLL_OIDC_URL (`?aud=`, the first by default). */
@@ -189,6 +193,8 @@ export interface Scheduled {
   path?: string;
   timezone?: string;
   timeout_s?: number;
+  /** `oidc`: a path's call carries roll's OIDC token for the service instead of `CRON_SECRET`. */
+  auth?: "oidc";
 }
 
 export type InstanceState = "none" | "stopped" | "suspended" | "waking" | "running" | "crashed" | "deploying";
@@ -560,6 +566,8 @@ export interface EnvironmentPut {
   traces?: boolean;
   /** Its pages measure their Web Vitals (a tag roll adds). */
   vitals?: boolean;
+  /** How long its logs are kept (null: 7 days). */
+  log_retention_days?: 7 | 30 | 90 | null;
   /** Its deploys post commit statuses and GitHub Deployments (false: someone else reports them). */
   report?: boolean;
   /** What its code may reach from the next deploy: roll and `hosts` only, or anything. null: open. */
@@ -675,6 +683,8 @@ export interface Environment extends EnvironmentSummary {
   traces?: boolean;
   /** Its pages measure their Web Vitals for roll. */
   vitals?: boolean;
+  /** Days its logs are kept: 7 (default), 30 or 90; a preview's are 7. */
+  log_retention_days?: number;
   /** Its deploys are reported to the Git host (commit statuses, GitHub Deployments); false:
    *  someone else reports them (roll previews' `pv-` environments). */
   report?: boolean;
@@ -855,6 +865,30 @@ export interface ScanSummary {
   sbom?: boolean;
 }
 
+/** One row of a project's month: a service's environment, its previews (`previews`), or deleted services (`deleted`). */
+export interface UsageRow {
+  service: string | null;
+  name: string | null;
+  environment: string | null;
+  previews?: boolean;
+  deleted?: boolean;
+  usd: number;
+  cpu_seconds: number;
+  gb_seconds: number;
+  requests: number;
+  egress_bytes: number;
+  build_seconds: number;
+}
+
+/** A project's month (`…/projects/{project}/usage`). */
+export interface ProjectUsage {
+  month: string;
+  total_usd: number;
+  /** This month at the pace so far (the current month only). */
+  projected_usd: number | null;
+  rows: UsageRow[];
+}
+
 /** Why a failed deployment failed, from the repo owner's model (`…/explain`). The model's words: shown as text. */
 export interface Explanation {
   summary: string;
@@ -902,7 +936,7 @@ export interface Variables {
    * reference: a reference variable's template (names, never a value). sealed: run with, never
    * shown again (not by `reveal` either); a reference that reads a sealed value is sealed too.
    */
-  vars: { name: string; masked: string; source: VariableSource; reference?: string; sealed?: boolean; /** Kept as a file at this path in its instances (not in their environment). */ file?: string }[];
+  vars: { name: string; masked: string; source: VariableSource; reference?: string; sealed?: boolean; /** Kept as a file at this path in its instances (not in their environment). */ file?: string; /** Only its instances get it, never a build's steps. */ runtime_only?: boolean }[];
 }
 
 export interface LogLine {
@@ -990,7 +1024,7 @@ export interface Span {
 /** An environment's errors, grouped from its log: a trace joined from its lines, or an error line. */
 export interface ErrorGroup {
   fingerprint: string;
-  kind: "python" | "java" | "node" | "go" | "line";
+  kind: "python" | "java" | "node" | "go" | "ruby" | "php" | "dotnet" | "rust" | "elixir" | "line";
   title: string;
   count: number;
   first_seen: number;
@@ -1401,6 +1435,8 @@ export const appsApi = {
   deleteFormSubmission: (id: string, e: string, form: string, sub: string) => call<null>("DELETE", `${env(id, e)}/forms/${encodeURIComponent(form)}/submissions/${encodeURIComponent(sub)}`),
   removeDrain: (project: string, id: string) => call<null>("DELETE", `/v1/apps/projects/${enc(project)}/drains/${enc(id)}`),
   limits: (project: string) => call<SpendLimits>("GET", `/v1/apps/projects/${enc(project)}/limits`),
+  /** A month's use by service and environment (this one by default), most costly first. */
+  projectUsage: (project: string, month?: string) => call<ProjectUsage>("GET", `/v1/apps/projects/${enc(project)}/usage${qs({ month })}`),
   setLimits: (project: string, body: { alert_usd: number | null; hard_usd: number | null }) => call<SpendLimits>("PUT", `/v1/apps/projects/${enc(project)}/limits`, body),
   /** PagerDuty takes its integration's `routing_key`, Opsgenie its `api_key` (sealed, never returned), each with a `region`. */
   addNotifyTarget: (project: string, body: { kind: NotifyTarget["kind"]; url?: string; routing_key?: string; api_key?: string; region?: "us" | "eu"; events?: NotifyEvent[]; environments?: string[]; services?: string[]; previews?: boolean }) => call<NotifyTarget>("POST", `/v1/apps/projects/${enc(project)}/notifications`, body),
@@ -1470,7 +1506,7 @@ export const appsApi = {
   setVariables: (
     id: string,
     e: string,
-    change: { set?: Record<string, string>; unset?: string[]; seal?: string[]; files?: Record<string, string | null>; copy_from?: string; copy?: string[] },
+    change: { set?: Record<string, string>; unset?: string[]; seal?: string[]; files?: Record<string, string | null>; runtime_only?: Record<string, boolean>; copy_from?: string; copy?: string[] },
   ) => call<Variables>("PATCH", `${env(id, e)}/variables`, change),
   diff: (id: string, e: string, from: string) => call<EnvironmentDiff>("GET", `${env(id, e)}/diff${qs({ from })}`),
 

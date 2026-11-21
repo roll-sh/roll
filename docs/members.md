@@ -270,6 +270,7 @@ After the write, it acts on what the person made:
 | dynamic leases they hold, one-time shares they made | revoked and ended | `Secrets::member_changed(project, user)` on the event, outside the workspace write |
 | folders they shared with other projects | stop being shared once they may no longer manage the project | the same hook |
 | backups, gateways, ACME bindings, sinks, notify URLs, rotators, outside databases and directories they set up | stop | `maker_reaches(by, [admin on the project])` on every use |
+| keys they bound to hosts, placeholders made for their consumers | stop swapping (a read still gets a placeholder, never the value) | each swap asks again: the binding's `set_by` may still `admin` its folder, a placeholder's maker may still `reveal` there |
 | their pending invites | revoked, or those their new role no longer gives | in the same write |
 | their personal overrides | stay (only they read them) | not v1 |
 | approvals they gave on open change requests | no longer count | gates are checked as they are when applied |

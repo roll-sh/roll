@@ -32,10 +32,10 @@ impl roll_previews::ports::Reveal for SecretsReveal {
         }
     }
 
-    fn still(&self, project: &str, repo: &str, untrusted: bool, reference: &str, maker: &str) -> Result<(), String> {
+    fn still(&self, project: &str, (kind, r#ref): (roll_workspace::Kind, &str), untrusted: bool, reference: &str, maker: &str) -> Result<(), String> {
         // Named for this preview's project: its repo may be on other projects' canvases too.
         let named = reference.strip_prefix("roll://").map(|rest| format!("roll://{project}@{rest}")).ok_or("not a roll:// reference")?;
-        let mut resource = roll_secrets::ResourceRef::new(roll_workspace::Kind::Repo, repo);
+        let mut resource = roll_secrets::ResourceRef::new(kind, r#ref);
         if untrusted {
             resource = resource.untrusted();
         }

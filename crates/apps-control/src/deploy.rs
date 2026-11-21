@@ -500,9 +500,16 @@ impl Apps {
     /// (`keep_deployments`): pruned in the store, then their images (once no deployment names
     /// them), static sites and build logs go; and deleted services kept past
     /// [`crate::DELETED_KEPT_MS`] are deleted for good (by their owner, a node taking the lease
-    /// of one nobody holds). Every ten minutes.
+    /// of one nobody holds); closed builds' networks nothing runs on go too
+    /// ([`crate::runtime::Runtime::sweep_build_networks`]). Every ten minutes.
     pub async fn prune(self: &Arc<Self>) {
         let now = code_sql::now_ms();
+        // Closed builds' networks nothing runs on, but never those of a project with a closed
+        // environment here (a build may be setting one up).
+        if let Ok((envs, all)) = self.db(|s| Ok((s.all_environments()?, s.services(None)?))).await {
+            let closed: std::collections::HashSet<String> = envs.iter().filter(|e| e.egress.closed()).filter_map(|e| all.iter().find(|s| s.id == e.service).map(|s| s.project.clone())).collect();
+            self.deps.runtime.sweep_build_networks(&closed).await;
+        }
         if let Ok(deleted) = self.db(|s| s.deleted_services(None)).await {
             for (svc, at) in deleted.into_iter().filter(|(_, at)| now - at >= crate::DELETED_KEPT_MS) {
                 let key = lease_key(&svc.id);
@@ -868,7 +875,7 @@ impl Apps {
         let vars_hash = {
             let r = self.resolve_vars(&svc, &env, &dep.id).await?;
             r.check_refs()?;
-            fingerprint(&r.vars_for_hash(), &svc)
+            fingerprint(&r.vars_for_hash(), &svc, &env.egress)
         };
         let tpl = Arc::new(self.template(&svc, &env, &dep).await?);
         let did = d.id.clone();
@@ -1305,10 +1312,26 @@ impl Apps {
         let env_row = self.db(move |s| s.environment(&sid, &e)).await?;
         let resolved = self.resolve_vars(svc, &env_row, &d.id).await?;
         resolved.check_refs()?;
+        // The environment's remote build cache (Turborepo, Nx), unless its variables name another
+        // (Vercel's, a team's own). Never a closed build's: a fork's code would fill a cache the
+        // trusted builds read.
+        // Nor a deploy without the cache (one that suspects what's in it).
+        let did = d.id.clone();
+        let uncached = self.db(move |s| s.no_cache(&did)).await?;
+        let cache_vars = match env_row.egress.closed() || uncached {
+            true => Vec::new(),
+            false => self.build_cache_vars(&svc.project, &crate::build_cache::scope(&svc.source, &svc.id, &d.environment)).await?.into_iter().filter(|(k, _)| !resolved.vars.iter().any(|(v, _)| v == k || (k.starts_with("TURBO_") && v.starts_with("TURBO_")) || (k.starts_with("NX_SELF_HOSTED") && v.starts_with("NX_SELF_HOSTED")))).collect(),
+        };
         // Its secret values never reach the build's log, whatever a step prints.
-        self.logs.redact(&format!("build:{}", d.id), &d.id, resolved.secret_values());
+        let mut hidden = resolved.secret_values();
+        hidden.extend(cache_vars.iter().filter(|(k, _)| k.ends_with("TOKEN")).map(|(_, v)| v.clone()));
+        self.logs.redact(&format!("build:{}", d.id), &d.id, hidden);
         let closed_vars = env_row.egress.closed().then(|| resolved.without_secrets());
         let mut build_env = resolved.vars;
+        // Instances' own addresses (kept awake, roll's OIDC tokens) are the running instances',
+        // never a build's: a build step can't mint the service's cloud tokens, and services that
+        // build alike share a build.
+        build_env.retain(|(k, _)| !matches!(k.as_str(), "ROLL_AWAKE_URL" | "ROLL_OIDC_URL"));
         // A closed environment builds on a network of its project's own with no route out and no
         // way to the host (`Runtime::build_egress`): its steps reach public hosts only, through
         // roll's proxy (packages, base images), never the node's services, private ranges or its
@@ -1330,6 +1353,14 @@ impl Apps {
                 log.line(format!("a closed environment builds without its secret values ({} left out; its instances get them)", before - build_env.len()));
             }
         }
+        // What's only for its instances never reaches a step.
+        let (sid, e) = (svc.id.clone(), d.environment.clone());
+        let runtime_only = self.db(move |s| s.runtime_only(&sid, &e)).await?;
+        if !runtime_only.is_empty() {
+            build_env.retain(|(k, _)| !runtime_only.contains(k));
+            log.line(format!("{} variable(s) only for its instances, left out of the build", runtime_only.len()));
+        }
+        build_env.extend(cache_vars);
         // Per deployment (the cache would never hit) or only for the running app.
         build_env.retain(|(k, _)| k != "ROLL_DEPLOYMENT" && k != "PORT");
         // The commit changes every push: out of the hash and the secrets, or no build would hit
@@ -1407,7 +1438,7 @@ impl Apps {
                 let name = format!("vercel-{}", i + 1);
                 if run.schedules.len() < 20 && !run.schedules.iter().any(|s| s.path.as_deref() == Some(c.path.as_str()) || s.name == name) {
                     log.line(format!("plan: vercel.json's cron {} calls {}", c.schedule, c.path));
-                    run.schedules.push(crate::model::Scheduled { name, schedule: c.schedule.clone(), command: String::new(), path: Some(c.path.clone()), timezone: None, timeout_s: None });
+                    run.schedules.push(crate::model::Scheduled { name, schedule: c.schedule.clone(), command: String::new(), path: Some(c.path.clone()), timezone: None, timeout_s: None, auth: None });
                 }
             }
         }
@@ -2465,6 +2496,33 @@ impl Apps {
 
     /// Cron: start the runs that are due at `now` in owned cron services (a run still going
     /// when the next is due is skipped). The reaper's pass, every few seconds.
+    /// Owned environments' stored logs past their retention (`log_retention_days`, a week by
+    /// default and always for a preview) deleted, chunk by chunk.
+    async fn expire_logs_pass(self: &Arc<Self>, services: &[crate::store::ServiceRow], now: i64) {
+        let Ok(envs) = self.db(|s| s.all_environments()).await else { return };
+        for svc in services.iter().filter(|s| self.owns(&s.id)) {
+            for e in envs.iter().filter(|e| e.service == svc.id) {
+                let days = if e.ephemeral { crate::logs::KEEP_DAYS } else { e.log_retention_days.unwrap_or(crate::logs::KEEP_DAYS) };
+                let before = now - days as i64 * 86_400_000;
+                for key in crate::logs::env_keys(&svc.id, &e.name) {
+                    self.logs.expire(&key, before).await;
+                }
+                // Its jobs' logs, each whole once its job started before then: those started
+                // since the last pass's cutoff (kept, so a node that was down catches up).
+                let mark = format!("job-logs-expired:{}/{}", svc.id, e.name);
+                let (sid, en, m) = (svc.id.clone(), e.name.clone(), mark.clone());
+                let from = self.db(move |s| s.get_state(&m)).await.ok().flatten().and_then(|v| v.parse::<i64>().ok()).unwrap_or(0);
+                if let Ok(ids) = self.db(move |s| s.jobs_started(&sid, &en, from, before)).await {
+                    for id in ids {
+                        self.logs.delete(&format!("job:{id}")).await;
+                    }
+                    let v = before.to_string();
+                    let _ = self.db(move |s| s.set_state(&mark, &v)).await;
+                }
+            }
+        }
+    }
+
     pub async fn cron_pass(self: &Arc<Self>, now: i64) {
         let Ok(services) = self.db(|s| s.services(None)).await else { return };
         self.schedules_pass(&services, now).await;
@@ -2474,6 +2532,11 @@ impl Apps {
         self.heartbeats_pass(&services, now).await;
         self.rescan_pass(&services, now).await;
         self.pause_pass(&services, now).await;
+        if now - self.logs_expired.load(std::sync::atomic::Ordering::Relaxed) >= 3_600_000 {
+            self.logs_expired.store(now, std::sync::atomic::Ordering::Relaxed);
+            self.expire_logs_pass(&services, now).await;
+            self.build_cache_pass(now).await;
+        }
         if now - self.status_swept.load(std::sync::atomic::Ordering::Relaxed) >= 60_000 {
             self.status_swept.store(now, std::sync::atomic::Ordering::Relaxed);
             self.status_sweep(&services).await;
@@ -2551,12 +2614,21 @@ impl Apps {
                             log.line(format!("scheduled {}: skipped, its last call to {path} is still out", sc.name));
                             continue;
                         }
-                        let host = url::Url::parse(&self.url(&e.slug)).ok().and_then(|u| u.host_str().map(str::to_string)).unwrap_or_default();
-                        let (this, sid, en, name, secret) = (self.clone(), svc.id.clone(), e.name.clone(), sc.name.clone(), secret.clone());
+                        let aud = self.url(&e.slug);
+                        let host = url::Url::parse(&aud).ok().and_then(|u| u.host_str().map(str::to_string)).unwrap_or_default();
+                        let (this, sid, en, name, secret, project, oidc) = (self.clone(), svc.id.clone(), e.name.clone(), sc.name.clone(), secret.clone(), svc.project.clone(), sc.auth.is_some());
                         let timeout = std::time::Duration::from_secs(sc.timeout_s.unwrap_or(300) as u64);
                         tokio::spawn(async move {
                             let began = std::time::Instant::now();
-                            let r = crate::public::call_scheduled(this.clone(), &sid, &en, &host, &path, secret.as_deref(), timeout).await;
+                            // `oidc`: roll's token for the service instead of CRON_SECRET.
+                            let r = match oidc {
+                                true => match this.service_token(&project, &sid, &en, &aud).await {
+                                    Ok(Some((jwt, _))) => crate::public::call_scheduled(this.clone(), &sid, &en, &host, &path, Some(&jwt), timeout).await,
+                                    Ok(None) => Err("roll issues no token for this environment".to_string()),
+                                    Err(e) => Err(format!("its token: {e:#}")),
+                                },
+                                false => crate::public::call_scheduled(this.clone(), &sid, &en, &host, &path, secret.as_deref(), timeout).await,
+                            };
                             this.calling.lock().remove(&key);
                             let ms = began.elapsed().as_millis() as u64;
                             let call = match &r {

@@ -420,6 +420,9 @@ pub struct Caller {
     /// the operator, a signed-in person, a roll-access token. Private, so only their constructors
     /// set it: a consumer, an untrusted caller, a sync, a login or a share link never has it.
     frozen: bool,
+    /// A signed-in person's session or the operator ([`Caller::sees_decoys`]). Private, so only
+    /// their constructors set it.
+    session: bool,
 }
 
 /// An approval from roll-access's gate, as the audit log records it (roll-secrets-chain, so an
@@ -436,7 +439,7 @@ pub const PREVIEWS: &str = "roll:previews";
 
 impl Caller {
     pub fn operator() -> Caller {
-        Caller { principal: "operator".into(), grants: std::sync::Arc::new(Everything), ip: None, runtime: false, approval: None, frozen: true, maker: None }
+        Caller { principal: "operator".into(), grants: std::sync::Arc::new(Everything), ip: None, runtime: false, approval: None, frozen: true, maker: None, session: true }
     }
 
     /// An admin's session: the operator, with the person (`usr_…`) as the maker of what it makes.
@@ -448,23 +451,23 @@ impl Caller {
     /// handing out the call may do, named for the audit log. Never past a freeze: the services,
     /// checks and previews reading a leaked folder are what a freeze stops.
     pub fn consumer(name: &str) -> Caller {
-        Caller { principal: name.into(), grants: std::sync::Arc::new(Everything), ip: None, runtime: true, approval: None, frozen: false, maker: None }
+        Caller { principal: name.into(), grants: std::sync::Arc::new(Everything), ip: None, runtime: true, approval: None, frozen: false, maker: None, session: false }
     }
 
     /// A signed-in person (`usr_…`), with what they may do.
     pub(crate) fn person(user: &str, grants: std::sync::Arc<dyn Grants>) -> Caller {
-        Caller { principal: user.into(), grants, ip: None, runtime: false, approval: None, frozen: true, maker: None }
+        Caller { principal: user.into(), grants, ip: None, runtime: false, approval: None, frozen: true, maker: None, session: true }
     }
 
     /// A roll-access token (`token:<id>`), with what its rules allow here.
     pub(crate) fn token(id: &str, grants: std::sync::Arc<dyn Grants>) -> Caller {
-        Caller { principal: format!("token:{id}"), grants, ip: None, runtime: false, approval: None, frozen: true, maker: None }
+        Caller { principal: format!("token:{id}"), grants, ip: None, runtime: false, approval: None, frozen: true, maker: None, session: false }
     }
 
     /// Something roll runs on someone's behalf that isn't a person or their token (a sync, a
     /// workload identity's login, a share link): not a runtime, never past a freeze.
     pub(crate) fn acting(principal: String, grants: std::sync::Arc<dyn Grants>) -> Caller {
-        Caller { principal, grants, ip: None, runtime: false, approval: None, frozen: false, maker: None }
+        Caller { principal, grants, ip: None, runtime: false, approval: None, frozen: false, maker: None, session: false }
     }
 
     /// This caller's access, acting as `principal` ([`Caller::acting`]): a sync runs as its maker.
@@ -476,7 +479,19 @@ impl Caller {
     }
 
     pub(crate) fn acting_as(self, principal: String) -> Caller {
-        Caller { principal, frozen: false, ..self }
+        Caller { principal, frozen: false, session: false, ..self }
+    }
+
+    /// Whether it may be told which keys are decoys (docs/secrets.md, "Decoys"), where it's an admin
+    /// ([`crate::Secrets::sees_decoys`]): a signed-in person's session (the dashboard) or the
+    /// operator. Never a token, admin or not (`rlt_`, `rlo_`, a workload identity's login), an
+    /// in-process consumer, a sync or anything acting for someone: a prompt-injected agent or a
+    /// leaked admin token that could tell the decoys would skip them. Planting one needs it too, or
+    /// a token could plant one and learn the mark by elimination. A member's session sees them only
+    /// where their role manages the project (docs/members.md): a developer or a viewer gets the
+    /// answers a normal key's would, as a token does.
+    pub fn sees_decoys(&self) -> bool {
+        self.session
     }
 
     /// Whether it reads past an incident's freeze where it's an admin: the operator, a signed-in
@@ -506,7 +521,7 @@ impl Caller {
     /// otherwise do: an untrusted one ([`Secrets::untrusted`](crate::Secrets::untrusted)), which
     /// never reads past a freeze.
     pub fn without(&self, except: Vec<String>) -> Caller {
-        Caller { principal: self.principal.clone(), grants: std::sync::Arc::new(Narrowed(self.grants.clone(), Except(except))), ip: self.ip.clone(), runtime: self.runtime, approval: self.approval.clone(), frozen: false, maker: self.maker.clone() }
+        Caller { principal: self.principal.clone(), grants: std::sync::Arc::new(Narrowed(self.grants.clone(), Except(except))), ip: self.ip.clone(), runtime: self.runtime, approval: self.approval.clone(), frozen: false, maker: self.maker.clone(), session: false }
     }
 
     pub fn allows(&self, action: Action, at: &Scope<'_>) -> bool {

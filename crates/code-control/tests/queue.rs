@@ -720,6 +720,72 @@ async fn a_credential_roll_secrets_doesnt_hold_is_a_notice_or_by_roll_toml_a_blo
     assert!(unstored(&v, "blockers").len() == 1 && !v.to_string().contains(&aws), "{v}");
 }
 
+/// roll secrets holding nothing, with validity checks on: the live fixture GitHub token works
+/// (login roll-fixture), an AWS key's account is read from its id without trying it, anything else
+/// is refused. Keeps what it was asked about.
+#[derive(Default)]
+struct CheckingSecrets(std::sync::Mutex<Vec<(String, Option<String>)>>);
+
+#[async_trait]
+impl code_control::SecretEnv for CheckingSecrets {
+    async fn for_repo(&self, _: &str, _: &str, _: &str) -> anyhow::Result<Vec<(String, String)>> {
+        anyhow::bail!("not in this test")
+    }
+    async fn for_owner(&self, _: &str, _: &str, _: &str, _: &str, _: code_control::Asker<'_>) -> anyhow::Result<code_control::Revealed> {
+        anyhow::bail!("not in this test")
+    }
+    async fn leaks(&self, _: &str, _: Vec<String>) -> anyhow::Result<Vec<(usize, String, String, String)>> {
+        Ok(Vec::new())
+    }
+    async fn validity(&self, _: &str, found: Vec<(String, Option<String>)>) -> anyhow::Result<Vec<code_control::model::CredentialValidity>> {
+        self.0.lock().unwrap().extend(found.iter().cloned());
+        Ok(found
+            .into_iter()
+            .map(|(value, _)| {
+                let live = value.contains("RollFixtureLive");
+                let aws = roll_auth::credentials::aws_account(&value);
+                code_control::model::CredentialValidity {
+                    fingerprint: roll_auth::credentials::fingerprint(&value),
+                    result: if live { "live" } else if aws.is_some() { "unknown" } else { "invalid" }.into(),
+                    account: if live { Some("roll-fixture".into()) } else { aws },
+                    checked_at: Some(std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as i64),
+                    rotator: live.then(|| "github-app".into()),
+                }
+            })
+            .collect())
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_credential_that_still_works_ranks_first_and_says_live() {
+    // Built from pieces: push protection scans this repo.
+    let (aws, secret) = (["AKIA", "ROLLFIXTURE", "23456"].concat(), ["rollFixture", "SecretKey", "0123456789", "abcdefghij"].concat());
+    let (dead, live) = (["ghp_", "RollFixtureDeadToken", "0123456789abcdef"].concat(), ["ghp_", "RollFixtureLiveToken", "0123456789abcdef"].concat());
+    let account = roll_auth::credentials::aws_account(&aws).unwrap();
+    let files = json!({ "deploy.py": { "content": format!("old = \"{dead}\"\naws_access_key_id = \"{aws}\"\naws_secret_access_key = \"{secret}\"\ntoken = \"{live}\"\n") } });
+    let a = queue_app("", Arc::new(QueueRunner::default())).await;
+    let checking = Arc::new(CheckingSecrets::default());
+    a.code.set_secret_env(checking.clone());
+    let c = change(&a, "deploy", files).await;
+    // The check runs in the background: the notices say what it found once it answered.
+    let mut notices = Value::Null;
+    for _ in 0..100 {
+        let v = a.ok("GET", &format!("/v1/code/changes/{}", id(&c)), None).await;
+        notices = v["notices"].clone();
+        if notices.as_array().is_some_and(|n| n.iter().filter(|b| b["validity"].is_object()).count() == 3) {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    assert_eq!(notices[0]["message"], "adds what looks like a GitHub token at deploy.py:4 (live: its provider accepted it, account roll-fixture), which roll secrets doesn't hold: rotate it, then store it as GITHUB_TOKEN (roll secrets scan --store GITHUB_TOKEN=deploy.py:4) and read it with os.environ[\"GITHUB_TOKEN\"], or allow it in .roll/secrets-allow", "{notices}");
+    assert_eq!((notices[0]["validity"]["result"].as_str(), notices[0]["validity"]["rotator"].as_str()), (Some("live"), Some("github-app")));
+    assert!(notices[1]["message"].as_str().unwrap().starts_with("adds what looks like a GitHub token at deploy.py:1 (revoked or invalid, its provider said)"), "{notices}");
+    assert!(notices[2]["message"].as_str().unwrap().starts_with(&format!("adds what looks like an AWS access key at deploy.py:2 (account {account}, not tried)")), "{notices}");
+    // The key id went with the secret next to it, and no value is in what the change shows.
+    assert!(checking.0.lock().unwrap().contains(&(aws.clone(), Some(secret.clone()))));
+    assert!(![&aws, &secret, &dead, &live].iter().any(|v| notices.to_string().contains(v.as_str())));
+}
+
 /// roll secrets that can't answer: every lookup fails.
 struct DownSecrets;
 

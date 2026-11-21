@@ -347,7 +347,7 @@ pub struct Signed {
 /// 16 random bytes, the top bit clear (a positive serial).
 /// 16 random bytes, positive and with no leading zero byte (DER would drop it, and the serial
 /// clients show wouldn't be the one roll keeps).
-fn serial() -> [u8; 16] {
+pub(crate) fn serial() -> [u8; 16] {
     let mut s = [0u8; 16];
     getrandom::fill(&mut s).expect("system randomness");
     s[0] = (s[0] & 0x7f).max(1);

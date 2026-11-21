@@ -14,6 +14,9 @@ use code_sql::{Db, OptionalExtension, params};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
+/// A dropped build cache: its project and cache, and the objects to delete.
+pub type DroppedCache = ((String, String), Vec<String>);
+
 /// How many hours of hourly metrics are kept past the week of minutes (90 days in all).
 pub const HOURS_KEPT: i64 = 83 * 24;
 
@@ -96,6 +99,27 @@ CREATE TABLE IF NOT EXISTS variable_makers (
     name TEXT NOT NULL,
     maker TEXT NOT NULL,
     PRIMARY KEY (service, env, name)
+) WITHOUT ROWID;
+-- A remote build cache (Turborepo, Nx), one a project's environment and source (`ns`,
+-- `build_cache::scope`): its builds' token, sealed, found by its hash on each request; and what it
+-- holds, each artifact's bytes in object storage under a key of its own upload's.
+CREATE TABLE IF NOT EXISTS build_cache_tokens (
+    project TEXT NOT NULL,
+    ns TEXT NOT NULL,
+    sealed TEXT NOT NULL,
+    hash TEXT NOT NULL UNIQUE,
+    PRIMARY KEY (project, ns)
+);
+CREATE TABLE IF NOT EXISTS build_cache_artifacts (
+    project TEXT NOT NULL,
+    ns TEXT NOT NULL,
+    hash TEXT NOT NULL,
+    object TEXT NOT NULL,
+    bytes INTEGER NOT NULL,
+    duration_ms INTEGER,
+    tag TEXT,
+    used_at INTEGER NOT NULL,
+    PRIMARY KEY (project, ns, hash)
 ) WITHOUT ROWID;
 -- Where an environment's instances read roll's OIDC tokens: its URL's token, sealed.
 CREATE TABLE IF NOT EXISTS oidc_access (
@@ -306,6 +330,13 @@ CREATE TABLE IF NOT EXISTS error_groups (
     name TEXT NOT NULL,
     first_seen INTEGER NOT NULL,
     PRIMARY KEY (service, env, fingerprint)
+) WITHOUT ROWID;
+-- Variables only its instances get, never a build's steps (Vercel's and Netlify's scopes).
+CREATE TABLE IF NOT EXISTS variable_runtime_only (
+    service TEXT NOT NULL,
+    env TEXT NOT NULL,
+    name TEXT NOT NULL,
+    PRIMARY KEY (service, env, name)
 ) WITHOUT ROWID;
 CREATE TABLE IF NOT EXISTS variable_files (
     service TEXT NOT NULL,
@@ -543,6 +574,8 @@ pub struct EnvRow {
     pub egress: crate::model::Egress,
     /// Its pages measure their Web Vitals for roll (a tag the proxy adds).
     pub vitals: bool,
+    /// Days its logs are kept (7, 30 or 90); None: [`crate::logs::KEEP_DAYS`].
+    pub log_retention_days: Option<u32>,
     /// Its deploys are reported to the Git host (commit statuses, GitHub Deployments); false:
     /// someone else reports them (roll previews for its `pv-` environments).
     pub report: bool,
@@ -611,6 +644,9 @@ pub struct MinuteRow {
     pub over_capacity: i64,
 }
 
+/// A service's use in one environment: its id, name, the environment, whether it's a preview.
+pub type ServiceUsage = (String, String, String, bool, UsageAdd);
+
 /// What an hour of an environment used.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct UsageAdd {
@@ -661,7 +697,7 @@ fn name_taken(name: &str, deleted: Option<i64>) -> String {
         Some(_) => format!("a deleted service named {name} holds the name: restore it, or delete it again to delete it for good"),
     }
 }
-const ENV_COLS: &str = "service, name, branch, ephemeral, active, slug, port, created_at, wait_for_ci, run, hook_hash, follow_tag, tag_seen, feedback, maintenance, allow_ips, rate_limit, tcp_port, firewall, pages, redeploy_on_secrets, secrets_seen, headers, paused, held_by, egress, vitals, routes, report, checks, heartbeats, split, freeze, mirror, pause_schedule, snippets";
+const ENV_COLS: &str = "service, name, branch, ephemeral, active, slug, port, created_at, wait_for_ci, run, hook_hash, follow_tag, tag_seen, feedback, maintenance, allow_ips, rate_limit, tcp_port, firewall, pages, redeploy_on_secrets, secrets_seen, headers, paused, held_by, egress, vitals, routes, report, checks, heartbeats, split, freeze, mirror, pause_schedule, snippets, log_retention_days";
 /// A deployment [`Store::prune_deployments`] pruned, with its image when nothing else names it.
 pub struct Pruned {
     pub id: String,
@@ -748,6 +784,7 @@ fn env_row(r: &code_sql::Row<'_>) -> code_sql::Result<EnvRow> {
         mirror: r.get::<_, Option<String>>(33)?.and_then(|j| serde_json::from_str(&j).ok()),
         pause_schedule: r.get::<_, Option<String>>(34)?.and_then(|j| serde_json::from_str(&j).ok()),
         snippets: r.get::<_, Option<String>>(35)?.and_then(|j| serde_json::from_str(&j).ok()).unwrap_or_default(),
+        log_retention_days: r.get::<_, Option<i64>>(36)?.map(|d| d as u32),
     })
 }
 
@@ -903,6 +940,7 @@ impl Store {
         db.add_column("environments", "egress", "TEXT")?;
         db.add_column("environments", "vitals", "INTEGER NOT NULL DEFAULT 0")?;
         db.add_column("environments", "report", "INTEGER NOT NULL DEFAULT 1")?;
+        db.add_column("environments", "log_retention_days", "INTEGER")?;
         // A custom domain sent to another of the app's ports.
         db.add_column("domains", "port", "INTEGER")?;
         // The roll login (`ses_…`) a ticket and a visit session came from: its end ends them.
@@ -1034,7 +1072,7 @@ impl Store {
             c.execute("DELETE FROM deploy_steps WHERE deployment IN (SELECT id FROM deployments WHERE service = ?)", [id])?;
             c.execute("DELETE FROM state WHERE key LIKE ?", [format!("%:{id}/%")])?;
             c.execute("DELETE FROM status_days WHERE key LIKE ?", [format!("%:{id}/%")])?;
-            for t in ["environments", "deployments", "deploy_keys", "fences", "env_access", "registry_auth", "git_auth", "git_github", "github_events", "trace_ingest", "runtime_config", "oidc_access", "variable_makers", "visit_tickets", "visit_sessions", "variable_files", "error_groups", "variables", "links", "domains", "preview_hosts", "runs", "jobs", "metrics", "usage", "form_submissions", "deploy_scans"] {
+            for t in ["environments", "deployments", "deploy_keys", "fences", "env_access", "registry_auth", "git_auth", "git_github", "github_events", "trace_ingest", "runtime_config", "oidc_access", "variable_makers", "variable_runtime_only", "visit_tickets", "visit_sessions", "variable_files", "error_groups", "variables", "links", "domains", "preview_hosts", "runs", "jobs", "metrics", "usage", "form_submissions", "deploy_scans"] {
                 c.execute(&format!("DELETE FROM {t} WHERE service = ?"), [id])?;
             }
             match c.execute("DELETE FROM services WHERE id = ?", [id])? {
@@ -1133,7 +1171,7 @@ impl Store {
                     None => None,
                 };
                 c.execute(
-                    &format!("INSERT INTO environments ({ENV_COLS}) VALUES (?, ?, ?, ?, NULL, ?, ?, ?, 0, '{{}}', NULL, 0, NULL, 0, NULL, NULL, NULL, NULL, NULL, NULL, 0, NULL, NULL, 0, NULL, NULL, 0, NULL, 1, NULL, NULL, NULL, NULL, NULL, NULL, NULL)"),
+                    &format!("INSERT INTO environments ({ENV_COLS}) VALUES (?, ?, ?, ?, NULL, ?, ?, ?, 0, '{{}}', NULL, 0, NULL, 0, NULL, NULL, NULL, NULL, NULL, NULL, 0, NULL, NULL, 0, NULL, NULL, 0, NULL, 1, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL)"),
                     params![service, env, branch.flatten(), ephemeral.unwrap_or(false) as i64, slug, port, now],
                 )?;
             }
@@ -1150,7 +1188,7 @@ impl Store {
             if n == 0 {
                 return Err(Error::NotFound(format!("service {service} has no environment {env}")));
             }
-            for t in ["variables", "variable_files", "error_groups", "domains", "preview_hosts", "runs", "jobs", "metrics", "deploy_keys", "env_access", "trace_ingest", "runtime_config", "oidc_access", "variable_makers", "visit_tickets", "visit_sessions", "form_submissions"] {
+            for t in ["variables", "variable_files", "error_groups", "domains", "preview_hosts", "runs", "jobs", "metrics", "deploy_keys", "env_access", "trace_ingest", "runtime_config", "oidc_access", "variable_makers", "variable_runtime_only", "visit_tickets", "visit_sessions", "form_submissions"] {
                 c.execute(&format!("DELETE FROM {t} WHERE service = ? AND env = ?"), [service, env])?;
             }
             // Its schedules', challenge's and base images' state goes with it.
@@ -2484,6 +2522,19 @@ impl Store {
     }
 
     /// Kept as a file at `path`, or (none) in the environment again.
+    /// The names only instances get (never a build's steps).
+    pub fn runtime_only(&self, service: &str, env: &str) -> Result<BTreeSet<String>> {
+        Ok(self.db.query("SELECT name FROM variable_runtime_only WHERE service = ? AND env = ?", params![service, env], |r| r.get(0))?.into_iter().collect())
+    }
+
+    pub fn set_runtime_only(&self, service: &str, env: &str, name: &str, on: bool) -> Result<()> {
+        match on {
+            true => self.db.execute("INSERT INTO variable_runtime_only (service, env, name) VALUES (?, ?, ?) ON CONFLICT DO NOTHING", params![service, env, name])?,
+            false => self.db.execute("DELETE FROM variable_runtime_only WHERE service = ? AND env = ? AND name = ?", params![service, env, name])?,
+        };
+        Ok(())
+    }
+
     pub fn set_variable_file(&self, service: &str, env: &str, name: &str, path: Option<&str>) -> Result<()> {
         match path {
             Some(p) => self.db.execute(
@@ -2557,6 +2608,99 @@ impl Store {
         self.db.execute("INSERT INTO oidc_access (service, env, sealed, hash) VALUES (?, ?, ?, ?) ON CONFLICT (service, env) DO NOTHING", params![service, env, sealed, hash])?;
         let kept: String = self.db.query_row("SELECT sealed FROM oidc_access WHERE service = ? AND env = ?", params![service, env], |r| r.get(0))?;
         self.sealer.open(&format!("oidc:{service}:{env}"), &kept)
+    }
+
+    /// A build cache's token (`build_cache::scope`), made the first time it's asked for.
+    pub fn build_cache_token(&self, project: &str, ns: &str) -> Result<String> {
+        let token = roll_auth::credentials::new_secret("rlr_");
+        let what = format!("build-cache:{project}:{ns}");
+        let (sealed, hash) = (self.sealer.seal(&what, &token), crate::public::token_hash(&token));
+        self.db.execute("INSERT INTO build_cache_tokens (project, ns, sealed, hash) VALUES (?, ?, ?, ?) ON CONFLICT (project, ns) DO NOTHING", params![project, ns, sealed, hash])?;
+        let kept: String = self.db.query_row("SELECT sealed FROM build_cache_tokens WHERE project = ? AND ns = ?", params![project, ns], |r| r.get(0))?;
+        self.sealer.open(&what, &kept)
+    }
+
+    /// The project and cache a token (by its hash) is.
+    pub fn build_cache_owner(&self, hash: &str) -> Result<Option<(String, String)>> {
+        Ok(self.db.query_row("SELECT project, ns FROM build_cache_tokens WHERE hash = ?", [hash], |r| Ok((r.get(0)?, r.get(1)?))).optional()?)
+    }
+
+    /// A leaked build cache token (by its hash) dropped, and everything its cache holds (what
+    /// it wrote could be anyone's): the next build gets a new one and an empty cache. Whose it
+    /// was, and the objects to delete.
+    pub fn drop_build_cache_token(&self, hash: &str) -> Result<Option<DroppedCache>> {
+        self.db.write(|c| {
+            let Some((p, ns)) = c.query_row("SELECT project, ns FROM build_cache_tokens WHERE hash = ?", [hash], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))).optional()? else { return Ok(None) };
+            let objects: Vec<String> = c.query("SELECT object FROM build_cache_artifacts WHERE project = ? AND ns = ?", params![p, ns], |r| r.get(0))?;
+            c.execute("DELETE FROM build_cache_artifacts WHERE project = ? AND ns = ?", params![p, ns])?;
+            c.execute("DELETE FROM build_cache_tokens WHERE project = ? AND ns = ?", params![p, ns])?;
+            Ok(Some(((p, ns), objects)))
+        })
+    }
+
+    /// A project environment's caches (every source's), with it: the objects to delete.
+    pub fn drop_build_caches(&self, project: &str, env: &str) -> Result<Vec<String>> {
+        let like = format!("{env}.%");
+        self.db.write(|c| {
+            let objects: Vec<String> = c.query("SELECT object FROM build_cache_artifacts WHERE project = ? AND ns LIKE ?", params![project, like], |r| r.get(0))?;
+            c.execute("DELETE FROM build_cache_artifacts WHERE project = ? AND ns LIKE ?", params![project, like])?;
+            c.execute("DELETE FROM build_cache_tokens WHERE project = ? AND ns LIKE ?", params![project, like])?;
+            Ok(objects)
+        })
+    }
+
+    /// An artifact and the object that holds it.
+    pub fn artifact(&self, project: &str, ns: &str, hash: &str) -> Result<Option<(crate::build_cache::Artifact, String)>> {
+        Ok(self
+            .db
+            .query_row("SELECT bytes, duration_ms, tag, used_at, object FROM build_cache_artifacts WHERE project = ? AND ns = ? AND hash = ?", params![project, ns, hash], |r| {
+                Ok((crate::build_cache::Artifact { bytes: r.get(0)?, duration_ms: r.get(1)?, tag: r.get(2)?, used_at: r.get(3)? }, r.get(4)?))
+            })
+            .optional()?)
+    }
+
+    /// An uploaded artifact (in `object`) put in: in place of one there (`replace`, Turborepo's
+    /// way) or only if there's none (Nx's). Then the cache's least recently used past `cap`
+    /// bytes go. The objects no row names any more, or `None` when it wasn't put in (there was
+    /// one, and `object` is the caller's to delete).
+    #[allow(clippy::too_many_arguments)]
+    pub fn put_artifact(&self, project: &str, ns: &str, hash: &str, object: &str, a: &crate::build_cache::Artifact, replace: bool, cap: i64) -> Result<Option<Vec<String>>> {
+        self.db.write(|c| {
+            let old: Option<String> = c.query_row("SELECT object FROM build_cache_artifacts WHERE project = ? AND ns = ? AND hash = ?", params![project, ns, hash], |r| r.get(0)).optional()?;
+            if old.is_some() && !replace {
+                return Ok(None);
+            }
+            c.execute(
+                "INSERT INTO build_cache_artifacts (project, ns, hash, object, bytes, duration_ms, tag, used_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?) \
+                 ON CONFLICT (project, ns, hash) DO UPDATE SET object = excluded.object, bytes = excluded.bytes, duration_ms = excluded.duration_ms, tag = excluded.tag, used_at = excluded.used_at",
+                params![project, ns, hash, object, a.bytes, a.duration_ms, a.tag, a.used_at],
+            )?;
+            let mut gone: Vec<String> = old.into_iter().collect();
+            let rows: Vec<(String, String, i64)> = c.query("SELECT hash, object, bytes FROM build_cache_artifacts WHERE project = ? AND ns = ? ORDER BY used_at DESC, hash", params![project, ns], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?;
+            let mut held = 0i64;
+            for (h, o, bytes) in rows {
+                held += bytes;
+                if held > cap && h != hash {
+                    c.execute("DELETE FROM build_cache_artifacts WHERE project = ? AND ns = ? AND hash = ?", params![project, ns, h])?;
+                    gone.push(o);
+                }
+            }
+            Ok(Some(gone))
+        })
+    }
+
+    pub fn touch_artifact(&self, project: &str, ns: &str, hash: &str, now: i64) -> Result<()> {
+        self.db.execute("UPDATE build_cache_artifacts SET used_at = ? WHERE project = ? AND ns = ? AND hash = ?", params![now, project, ns, hash])?;
+        Ok(())
+    }
+
+    /// Artifacts unused since `before` gone in one write: the objects to delete.
+    pub fn expire_artifacts(&self, before: i64) -> Result<Vec<String>> {
+        self.db.write(|c| {
+            let objects: Vec<String> = c.query("SELECT object FROM build_cache_artifacts WHERE used_at < ?", [before], |r| r.get(0))?;
+            c.execute("DELETE FROM build_cache_artifacts WHERE used_at < ?", [before])?;
+            Ok(objects)
+        })
     }
 
     /// The environment whose OIDC address a token is, by its hash; its row gone (the address
@@ -2806,6 +2950,11 @@ impl Store {
             }
             Ok::<_, code_sql::Error>(n)
         })?)
+    }
+
+    /// The ids of an environment's jobs started in `[from, before)` (their logs' retention).
+    pub fn jobs_started(&self, service: &str, env: &str, from: i64, before: i64) -> Result<Vec<String>> {
+        Ok(self.db.query("SELECT id FROM jobs WHERE service = ? AND env = ? AND started_at >= ? AND started_at < ?", params![service, env, from, before], |r| r.get(0))?)
     }
 
     pub fn jobs(&self, service: &str, env: &str, limit: usize) -> Result<Vec<Job>> {
@@ -3102,6 +3251,11 @@ impl Store {
         Ok(())
     }
 
+    pub fn set_log_retention(&self, service: &str, env: &str, days: Option<u32>) -> Result<()> {
+        self.db.execute("UPDATE environments SET log_retention_days = ? WHERE service = ? AND name = ?", params![days.map(|d| d as i64), service, env])?;
+        Ok(())
+    }
+
     pub fn set_report(&self, service: &str, env: &str, on: bool) -> Result<()> {
         self.db.execute("UPDATE environments SET report = ? WHERE service = ? AND name = ?", params![on as i64, service, env])?;
         Ok(())
@@ -3378,6 +3532,27 @@ impl Store {
     }
 
     /// A project's use since `since_hour`: its services', and what deleted ones used.
+    /// A project's use from `from_hour` until `to_hour` (not included), by service and environment
+    /// (the service's name, and whether the environment is a preview), and what deleted services
+    /// used ([`Store::project_usage`]'s second half).
+    pub fn project_usage_rows(&self, project: &str, from_hour: i64, to_hour: i64) -> Result<(Vec<ServiceUsage>, UsageAdd)> {
+        let rows = self.db.query(
+            // An environment that's gone (a closed preview, nearly always) counts with the previews.
+            "SELECT u.service, s.name, u.env, COALESCE(e.ephemeral, 1), SUM(u.cpu_seconds), SUM(u.gb_seconds), SUM(u.requests), SUM(u.egress_bytes), SUM(u.build_seconds) \
+             FROM usage u JOIN services s ON s.id = u.service LEFT JOIN environments e ON e.service = u.service AND e.name = u.env \
+             WHERE s.project = ? AND u.hour >= ? AND u.hour < ? GROUP BY u.service, s.name, u.env, COALESCE(e.ephemeral, 1) ORDER BY s.name, u.env",
+            params![project, from_hour, to_hour],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get::<_, i64>(3)? != 0, UsageAdd { cpu_seconds: r.get(4)?, gb_seconds: r.get(5)?, requests: r.get(6)?, egress_bytes: r.get(7)?, build_seconds: r.get(8)? })),
+        )?;
+        let gone = self.db.query_row(
+            "SELECT COALESCE(SUM(cpu_seconds), 0), COALESCE(SUM(gb_seconds), 0), COALESCE(SUM(requests), 0), COALESCE(SUM(egress_bytes), 0), COALESCE(SUM(build_seconds), 0) \
+             FROM project_usage WHERE project = ? AND hour >= ? AND hour < ?",
+            params![project, from_hour, to_hour],
+            |r| Ok(UsageAdd { cpu_seconds: r.get(0)?, gb_seconds: r.get(1)?, requests: r.get(2)?, egress_bytes: r.get(3)?, build_seconds: r.get(4)? }),
+        )?;
+        Ok((rows, gone))
+    }
+
     pub fn project_usage(&self, project: &str, since_hour: i64) -> Result<UsageAdd> {
         let row = |r: &code_sql::Row<'_>| Ok(UsageAdd { cpu_seconds: r.get(0)?, gb_seconds: r.get(1)?, requests: r.get(2)?, egress_bytes: r.get(3)?, build_seconds: r.get(4)? });
         let live = self.db.query_row(

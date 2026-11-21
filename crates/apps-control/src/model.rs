@@ -571,6 +571,13 @@ pub struct Run {
     /// `max_instances`), and fewer stay once they'd be under it. 10–100; unset, requests only.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cpu_target: Option<u32>,
+    /// A web service's instance using over this percent of its CPU counts as busy, as one with a
+    /// request in flight does (Railway's sleep that watches what an app is doing): it isn't
+    /// suspended, put to sleep or scaled in until it's been under it for 30 s, so work after the
+    /// answer finishes without the app asking (`ROLL_AWAKE_URL`). 1–100; unset, requests and
+    /// holds only. Only what the runtime measures counts (Docker's cgroup; not Fargate).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub busy_cpu: Option<u32>,
     /// And on memory (Render's target memory): while its awake instances average over this
     /// percent of their memory limit for a minute another starts, and fewer stay once they'd be
     /// under it. 10–100; unset, not on memory. Where both are set, the one that asks for more
@@ -894,6 +901,10 @@ pub struct Scheduled {
     /// 1–86400 (default 3600).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub timeout_s: Option<u32>,
+    /// A path's call: `oidc` carries roll's OIDC token for the service (its own `sub`, the
+    /// environment's URL as `aud`), as Cloud Scheduler's does; else `CRON_SECRET`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auth: Option<String>,
 }
 
 /// One of `run.push`: a topic of a roll stream delivered to a path of one environment, a record
@@ -925,6 +936,11 @@ pub struct Push {
     /// within a partition, and a busy topic scales the service out.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_in_flight: Option<u32>,
+    /// `oidc`: each POST carries roll's OIDC token for the service (its own `sub`, the
+    /// environment's URL as `aud`) for the app to check, as Pub/Sub's push does; else the
+    /// environment's `CRON_SECRET`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auth: Option<String>,
 }
 
 impl Push {
@@ -1125,6 +1141,7 @@ impl Default for Run {
             public: true,
             drain_s: None,
             cpu_target: None,
+            busy_cpu: None,
             memory_target: None,
             restart: Restart::Always,
             restart_tries: None,
@@ -1185,6 +1202,9 @@ impl Run {
             if sc.timeout_s.is_some_and(|t| !(1..=86_400).contains(&t)) {
                 return bad("schedules' timeout_s is 1–86400");
             }
+            if sc.auth.as_deref().is_some_and(|a| a != "oidc" || sc.path.is_none()) {
+                return bad("a schedule's auth is oidc, on a path's call");
+            }
         }
         if !self.push.is_empty() && (self.kind != RunType::Web || self.tcp) {
             return bad("push is a web service's (each record is an HTTP POST)");
@@ -1213,6 +1233,9 @@ impl Run {
             }
             if p.max_in_flight.is_some_and(|n| !(1..=32).contains(&n)) {
                 return bad("push's max_in_flight is 1–32");
+            }
+            if p.auth.as_deref().is_some_and(|a| a != "oidc") {
+                return bad("push's auth is oidc (roll's token), or none (CRON_SECRET)");
             }
             if self.push[..i].iter().any(|o| o.stream == p.stream && o.group == p.group && o.topic == p.topic) {
                 return bad("push has one rule per stream, topic and group");
@@ -1397,6 +1420,14 @@ impl Run {
             }
             if self.kind != RunType::Web {
                 return bad("cpu_target is for a web service (a worker follows its work with scale)");
+            }
+        }
+        if let Some(b) = self.busy_cpu {
+            if !(1..=100).contains(&b) {
+                return bad("busy_cpu is 1–100 (percent of an instance's CPU)");
+            }
+            if self.kind != RunType::Web {
+                return bad("busy_cpu is for a web service (only web instances sleep)");
             }
         }
         if let Some(t) = self.memory_target {
@@ -1630,6 +1661,9 @@ pub struct Environment {
     pub traces: bool,
     /// Its pages measure their Web Vitals for roll (`…/vitals`).
     pub vitals: bool,
+    /// Days its logs (output, requests, traces, events and Vitals) are kept: 7 (the default),
+    /// 30 or 90 (Railway's, Render's longer retention); a preview's are 7.
+    pub log_retention_days: u32,
     /// Its deploys are reported to the Git host (commit statuses, GitHub Deployments); false:
     /// someone else reports them (roll previews, for its `pv-` environments: one voice on a
     /// pull request).
@@ -2749,6 +2783,9 @@ pub struct VarView {
     /// Kept as a file at this path in its instances (not in their environment).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub file: Option<String>,
+    /// Only its instances get it, never a build's steps.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub runtime_only: bool,
 }
 
 /// An environment's own HTML for roll's pages (Heroku's `ERROR_PAGE_URL` and

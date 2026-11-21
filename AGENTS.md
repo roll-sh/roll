@@ -387,8 +387,8 @@ The product should feel alive: dots react to the cursor and the marks "think". E
     never membership alone, and a person's own grant never proves a resource is theirs (placing and
     homing take `Owners`). What a person made acts later only at their rights now, checked on every
     use with the action and scope it exercises: `maker_reaches(by, needs)` for identities (their
-    rule), backups, gateways and ACME bindings; `registration_reaches` for sinks, notify URLs and
-    every registered provider (`LinkProvider::maker`, through `Secrets::provider_for`); exports on
+    rule), backups, gateways, ACME bindings and placeholders' makers; `registration_reaches` for
+    sinks, notify URLs, host bindings and every registered provider (`LinkProvider::maker`, through `Secrets::provider_for`); exports on
     every read (`dead_exports`); syncs push as them (`person_caller`). A registration stores the
     person, never their token (`Caller::made_by`); shares and leases follow their maker through
     `Secrets::maker` (`member_changed`).

@@ -483,6 +483,10 @@ impl code_control::PreviewBackend for Accepted {
         self.0.lock().push((change.id.clone(), by.to_string(), head.to_string()));
         Ok(())
     }
+    async fn act(&self, change: &code_control::model::Change, action: code_control::ext::PreviewAction, by: &str) -> anyhow::Result<String> {
+        self.0.lock().push((change.id.clone(), by.to_string(), format!("{action:?}")));
+        Ok(format!("Done: {action:?}."))
+    }
 }
 
 async fn hook(a: &App, event: &str, delivery: &str, body: &Value, secret: &str) -> StatusCode {
@@ -1244,6 +1248,17 @@ async fn roll_commands_from_github_comments() {
     // Line-level commands need a line: the answer says so.
     hook(&a, "issue_comment", "ic-8", &convo("created", 907, "octo", "@roll explain", &issue), SECRET).await;
     until("the explain answer", || async { pr_comments(&g.mock).iter().any(|b| b.contains("inline comment")) }).await;
+    // A writer acts on the change's preview from the conversation (`@roll preview …`): done by the
+    // preview backend, as them, answered there; one it doesn't know lists them.
+    let backend = Arc::new(Accepted::default());
+    a.code.set_preview_backend(backend.clone());
+    hook(&a, "issue_comment", "ic-p1", &convo("created", 920, "octo", "@roll preview keep 48", &issue), SECRET).await;
+    until("the preview answer", || async { pr_comments(&g.mock).iter().any(|b| b == "Done: Keep(48).") }).await;
+    assert_eq!(backend.0.lock().clone(), vec![(id.clone(), "@octo".to_string(), "Keep(48)".to_string())]);
+    hook(&a, "issue_comment", "ic-p2", &convo("created", 921, "viewer", "@roll preview reset", &issue), SECRET).await;
+    hook(&a, "issue_comment", "ic-p3", &convo("created", 922, "octo", "@roll preview dance", &issue), SECRET).await;
+    until("the list of preview commands", || async { pr_comments(&g.mock).iter().any(|b| b.contains("@roll preview redeploy")) }).await;
+    assert_eq!(backend.0.lock().len(), 1, "a reader can't act on it");
     // Learnings from the conversation.
     hook(&a, "issue_comment", "ic-9", &convo("created", 908, "octo", "@roll don't flag TODO comments", &issue), SECRET).await;
     until("the learning", || async { a.ok("GET", "/v1/code/repos/acme/app/learnings", None).await.as_array().unwrap().iter().any(|l| l["text"].as_str().unwrap_or("").contains("TODO")) }).await;

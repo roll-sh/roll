@@ -708,6 +708,7 @@ impl Access {
                             "rlb_" => Some("previews".to_string()),
                             "rlp_" => Some("accounts".to_string()),
                             "rlq_" => Some("secrets".to_string()),
+                            "rlph" => Some("secrets".to_string()),
                             _ => None,
                         }),
                         action: Some("admin".into()),

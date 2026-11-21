@@ -112,24 +112,32 @@ impl Secrets {
                 for (text, _) in &said {
                     crate::audit::record(c, self.keys()?, &project, &crate::Caller::consumer("roll:alerts"), "secrets.alert", Some(&env), None, &reader_keys, text, now)?;
                 }
-                // Only an environment with somewhere to say it.
-                let target: Option<String> = c.query_row("SELECT id FROM environments WHERE project_id = ? AND slug = ? AND notify_url IS NOT NULL", [&project, &env], |r| r.get(0)).optional()?;
-                let Some(env_id) = target else { continue };
-                let link = self.web_url.as_ref().map(|w| format!("{}/dashboard/projects/{project}/secrets?env={env}&tab=activity", w.trim_end_matches('/')));
                 for (text, alert) in said {
-                    let mut text = format!("roll secrets: {text}.");
-                    if let Some(l) = &link {
-                        text.push_str(&format!(" {l}"));
+                    if self.queue_alert(c, &project, &env, &text, alert, at, now)? {
+                        queued += 1;
                     }
-                    let body = json!({ "text": text, "content": text, "allowed_mentions": { "parse": [] }, "project": project, "environment": env, "alert": alert, "at": at, "link": link });
-                    c.execute(
-                        "INSERT INTO notices (id, project_id, env_id, body, attempts, next_at, sent_at, created_at) VALUES (?, ?, ?, ?, 0, ?, NULL, ?)",
-                        params![names::new_id("ntc", 16), project, env_id, body.to_string(), now, now],
-                    )?;
-                    queued += 1;
                 }
             }
             Ok::<_, crate::Error>(queued)
         })
+    }
+
+    /// Queue `text` (`alert`: what it's about, as JSON) to `env`'s notify URL, in the caller's
+    /// write: whether the environment has one to say it to.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn queue_alert(&self, c: &code_sql::Conn<'_>, project: &str, env: &str, text: &str, alert: serde_json::Value, at: i64, now: i64) -> Result<bool> {
+        let target: Option<String> = c.query_row("SELECT id FROM environments WHERE project_id = ? AND slug = ? AND notify_url IS NOT NULL", [project, env], |r| r.get(0)).optional()?;
+        let Some(env_id) = target else { return Ok(false) };
+        let link = self.web_url.as_ref().map(|w| format!("{}/dashboard/projects/{project}/secrets?env={env}&tab=activity", w.trim_end_matches('/')));
+        let mut text = format!("roll secrets: {text}.");
+        if let Some(l) = &link {
+            text.push_str(&format!(" {l}"));
+        }
+        let body = json!({ "text": text, "content": text, "allowed_mentions": { "parse": [] }, "project": project, "environment": env, "alert": alert, "at": at, "link": link });
+        c.execute(
+            "INSERT INTO notices (id, project_id, env_id, body, attempts, next_at, sent_at, created_at) VALUES (?, ?, ?, ?, 0, ?, NULL, ?)",
+            params![names::new_id("ntc", 16), project, env_id, body.to_string(), now, now],
+        )?;
+        Ok(true)
     }
 }
