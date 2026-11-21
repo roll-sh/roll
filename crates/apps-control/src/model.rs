@@ -390,6 +390,10 @@ pub struct Build {
     /// Docker builds unsized).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub size: Option<BuildSize>,
+    /// A Git URL service's submodules fetched into the tree (Vercel's, Netlify's, Render's), at
+    /// the commits their gitlinks pin, from public URLs; off, they're left out.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub submodules: Option<bool>,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]

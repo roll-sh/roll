@@ -381,7 +381,8 @@ impl Apps {
             self.refuse_frozen(service, env, over, actor.clone()).await?;
             // A never-live build goes live with its approvals (rolling back to what was live
             // needs none), or an admin's override, said in the audit log.
-            let counted = old.approved_by.iter().filter(|a| Some(a.as_str()) != old.actor.as_deref()).count() as u32;
+            let author = self.deploy_person(dep).await.or(old.actor.clone());
+            let counted = old.approved_by.iter().filter(|a| Some(a.as_str()) != author.as_deref()).count() as u32;
             if counted < needed {
                 if !over {
                     return Err(Error::Conflict(format!("{dep} needs {needed} approval(s) from people other than who started it ({counted} so far): POST …/deploys/{dep}/approve, or an admin's `X-Roll-Override: 1`")));
@@ -580,6 +581,20 @@ impl Apps {
         Ok(d)
     }
 
+    /// The person who started a deployment (their session's, their own token's, the operator's),
+    /// where it's known: what an approval is compared with.
+    pub(crate) async fn deploy_person(self: &Arc<Self>, dep: &str) -> Option<String> {
+        let d = dep.to_string();
+        self.db(move |s| s.deploy_person(&d)).await.ok().flatten()
+    }
+
+    /// Who started `dep`, as a person, kept for its approvals.
+    pub async fn note_deploy_person(self: &Arc<Self>, dep: &str, person: Option<String>) {
+        let Some(p) = person else { return };
+        let d = dep.to_string();
+        let _ = self.db(move |s| s.set_deploy_person(&d, &p)).await;
+    }
+
     /// Under the environment's `approvals`, a person's deploy waits at `ready` for them: whether
     /// it does (a web service without a volume, which can wait beside the live one), or why it
     /// can't (409).
@@ -610,16 +625,29 @@ impl Apps {
         if d.status != DeployStatus::Ready {
             return Err(Error::Conflict(format!("{dep} isn't waiting at ready to go live")));
         }
+        // Something newer went live since: approving this one would put an older build back.
+        if let Some(a) = row.active.clone() {
+            let live = self.db(move |s| s.deployment(&a)).await?;
+            let since = live.rollback_of.clone().unwrap_or(live.id.clone());
+            let (s_id, dc) = (since.clone(), d.created_at);
+            let newer = since != d.id && self.db(move |s| s.deployment(&s_id)).await.is_ok_and(|o| o.created_at > dc);
+            if newer {
+                return Err(Error::Conflict(format!("a newer deployment ({since}) went live after {dep}: deploy again to approve what's next")));
+            }
+        }
         let who = who.ok_or_else(|| Error::Forbidden("an approval is a person's: signed in, or the operator, never a token".into()))?;
-        if d.actor.as_deref() == Some(who.as_str()) {
+        // Its author, as a person: whoever started it however they did (their own token is them).
+        let author = self.deploy_person(dep).await.or(d.actor.clone());
+        if author.as_deref() == Some(who.as_str()) {
             return Err(Error::Forbidden(format!("{who} started {dep}: someone else approves it")));
         }
-        let (id, w) = (dep.to_string(), who.clone());
-        let all = self.db(move |s| s.approve(&id, &w, code_sql::now_ms())).await?;
-        let counted = all.iter().filter(|a| Some(a.as_str()) != d.actor.as_deref()).count() as u32;
+        // Recorded and counted in one write: only the approval that reaches the count acts.
+        let (id, w, au) = (dep.to_string(), who.clone(), author.clone());
+        let (all, crossed) = self.db(move |s| s.approve(&id, &w, au.as_deref(), code_sql::now_ms(), row.approvals)).await?;
+        let counted = all.iter().filter(|a| Some(a.as_str()) != author.as_deref()).count() as u32;
         self.audit("deploy.approved", service, env, Some(who.clone()), json!({ "deployment": dep, "approvals": counted, "needed": row.approvals })).await;
         let mut out = json!({ "deployment": dep, "approved_by": all, "needed": row.approvals, "live": null });
-        if counted >= row.approvals {
+        if crossed {
             match self.rollback(service, env, dep, Some(who), true, false).await {
                 Ok(live) => out["live"] = json!(live.id),
                 Err(e) => out["waiting"] = json!(e.to_string()),
@@ -977,6 +1005,14 @@ impl Apps {
         });
         // Paused while it built: nothing of it starts or goes live.
         anyhow::ensure!(!live.paused(), "the environment was paused while it built: not put live");
+        // Waiting for approvals (GitHub's environments withhold their secrets until then): built
+        // and ready, but nothing of it starts with the environment's values before it's approved.
+        if no_traffic && env.approvals > 0 {
+            let (sid, en, did, data) = (svc.id.clone(), env.name.clone(), d.id.clone(), serde_json::json!({ "revision": d.revision, "approvals": env.approvals }));
+            self.db(move |s| s.set_ready(&did, &sid, &en, &data)).await?;
+            log.stream(Stream::System).line(format!("built, waiting for {} approval(s): it starts once approved, never before", env.approvals));
+            return Ok(());
+        }
         let prepared = match live.prepare(&tpl, None).await {
             Ok(p) => p,
             // What the app said before it failed (a stack trace, a missing variable), in the deploy
@@ -1324,7 +1360,7 @@ impl Apps {
             (Source::Git { url, root }, _) => {
                 let rev = d.revision.as_deref().ok_or_else(|| anyhow::anyhow!("no revision to build"))?;
                 log.line(format!("fetching {url} at {}", &rev[..rev.len().min(12)]));
-                let files = crate::git_source::materialize(&self.git_remote(&svc.id, url).await, rev, &tree).await?;
+                let files = crate::git_source::materialize_with(&self.git_remote(&svc.id, url).await, rev, &tree, svc.build.submodules.unwrap_or(false)).await?;
                 log.line(format!("fetched {files} files"));
                 root.clone()
             }
@@ -2578,9 +2614,9 @@ impl Apps {
     /// when the next is due is skipped). The reaper's pass, every few seconds.
     /// Owned environments' stored logs past their retention (`log_retention_days`, a week by
     /// default and always for a preview) deleted, chunk by chunk.
-    /// Logs kept past the first week (30 or 90 days) are metered too, `hours` of what's stored
-    /// past it now (`stored_gb_hours`).
-    async fn expire_logs_pass(self: &Arc<Self>, services: &[crate::store::ServiceRow], now: i64, hours: f64) {
+    /// Logs kept past the first week (30 or 90 days) are metered too: this hour's GB-hour of
+    /// what's stored past it now (`stored_gb_hours`), once an hour however many passes run.
+    async fn expire_logs_pass(self: &Arc<Self>, services: &[crate::store::ServiceRow], now: i64) {
         let Ok(envs) = self.db(|s| s.all_environments()).await else { return };
         for svc in services.iter().filter(|s| self.owns(&s.id)) {
             for e in envs.iter().filter(|e| e.service == svc.id) {
@@ -2595,9 +2631,8 @@ impl Apps {
                     }
                 }
                 if past_week > 0 {
-                    let u = crate::store::UsageAdd { stored_gb_hours: past_week as f64 / 1e9 * hours, ..Default::default() };
-                    let (sid, en) = (svc.id.clone(), e.name.clone());
-                    let _ = self.db(move |s| s.add_usage(&sid, &en, now / 3_600_000, &u)).await;
+                    let (sid, en, gb) = (svc.id.clone(), e.name.clone(), past_week as f64 / 1e9);
+                    let _ = self.db(move |s| s.meter_stored(&sid, &en, "logs", now / 3_600_000, gb)).await;
                 }
                 // Its jobs' logs, each whole once its job started before then: those started
                 // since the last pass's cutoff (kept, so a node that was down catches up).
@@ -2624,13 +2659,10 @@ impl Apps {
         self.heartbeats_pass(&services, now).await;
         self.rescan_pass(&services, now).await;
         self.pause_pass(&services, now).await;
-        let last = self.logs_expired.load(std::sync::atomic::Ordering::Relaxed);
-        if now - last >= 3_600_000 {
+        if now - self.logs_expired.load(std::sync::atomic::Ordering::Relaxed) >= 3_600_000 {
             self.logs_expired.store(now, std::sync::atomic::Ordering::Relaxed);
-            // The hours since the last pass, as stored logs are metered (a first pass, one).
-            let hours = if last == 0 { 1.0 } else { ((now - last) as f64 / 3_600_000.0).min(2.0) };
-            self.expire_logs_pass(&services, now, hours).await;
-            self.build_cache_pass(now).await;
+            self.expire_logs_pass(&services, now).await;
+            self.build_cache_pass(&services, now).await;
         }
         if now - self.status_swept.load(std::sync::atomic::Ordering::Relaxed) >= 60_000 {
             self.status_swept.store(now, std::sync::atomic::Ordering::Relaxed);

@@ -808,6 +808,7 @@ async fn create_deploy(State(apps): S, Path((id, env)): Path<(String, String)>, 
     } else {
         apps.deploy(&id, &env, with_override(body(&b)?, &headers)?, By { trigger: Trigger::Manual, actor }, None, key).await?
     };
+    apps.note_deploy_person(&d.id, person(&ext)).await;
     apps.lift_hold(&id, &env).await;
     Ok((StatusCode::ACCEPTED, Json(d)).into_response())
 }
@@ -829,7 +830,7 @@ struct ExplainQuery {
 /// A deployment waiting at ready approved by a person (never a token: an agent's or a CI's
 /// approval would defeat it); the last approval needed puts it live.
 async fn approve_deploy(State(apps): S, Path((id, env, dep)): Path<(String, String, String)>, ext: Extensions) -> R {
-    let person = roll_auth::Grant::on(&ext).is_none().then(|| actor(&ext)).flatten();
+    let person = roll_auth::Grant::on(&ext).is_none().then(|| person(&ext)).flatten();
     ok(apps.approve(&id, &env, &dep, person).await?)
 }
 
@@ -1087,6 +1088,18 @@ fn asker(ext: &Extensions) -> crate::integrations::Asker<'_> {
     crate::integrations::Asker { operator: roll_auth::Operator::on(ext), user: ext.get::<roll_auth::SignedIn>(), grant: roll_auth::Grant::on(ext) }
 }
 
+/// The person behind a request: a signed-in user, a user's own token (it acts as them), or the
+/// operator (its token or session). What an approval is checked against.
+fn person(ext: &Extensions) -> Option<String> {
+    if let Some(g) = roll_auth::Grant::on(ext) {
+        return Some(g.user.as_deref().map(str::to_string).unwrap_or_else(|| "operator".into()));
+    }
+    if let Some(u) = ext.get::<roll_auth::SignedIn>() {
+        return Some(u.user.clone());
+    }
+    roll_auth::Operator::on(ext).then(|| "operator".to_string())
+}
+
 fn actor(ext: &Extensions) -> Option<String> {
     if let Some(g) = roll_auth::Grant::on(ext) {
         return Some(format!("token:{}", g.name));
@@ -1103,6 +1116,7 @@ async fn redeploy(State(apps): S, Path((id, env)): Path<(String, String)>, ext: 
         None => None,
     };
     let d = apps.redeploy(&id, &env, with_override(if b.is_empty() { json!({}) } else { body(&b)? }, &headers)?, actor(&ext), key).await?;
+    apps.note_deploy_person(&d.id, person(&ext)).await;
     apps.lift_hold(&id, &env).await;
     Ok((StatusCode::ACCEPTED, Json(d)).into_response())
 }
@@ -1202,6 +1216,7 @@ async fn run_hook(State(apps): S, Path((id, env, token)): Path<(String, String, 
 
 async fn promote(State(apps): S, Path((id, env)): Path<(String, String)>, ext: Extensions, headers: HeaderMap, b: Bytes) -> R {
     let d = apps.promote(&id, &env, with_override(body(&b)?, &headers)?, actor(&ext)).await?;
+    apps.note_deploy_person(&d.id, person(&ext)).await;
     apps.lift_hold(&id, &env).await;
     Ok((StatusCode::ACCEPTED, Json(d)).into_response())
 }
