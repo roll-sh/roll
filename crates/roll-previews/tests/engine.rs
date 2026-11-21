@@ -1248,6 +1248,66 @@ async fn earlier_pushes_stay_reachable_at_their_own_urls() {
     assert!(e.apps.removed.lock().contains(&(p.id.clone(), "web@cs_8d".into())));
 }
 
+/// A preview whose egress goes through its proxy ("Roll only") gets the keys bound to hosts as
+/// placeholders, made by whoever last saved the project's rules (roll secrets checks them); with
+/// no one recorded (the operator saved them) or open egress, it resolves as before.
+#[tokio::test]
+async fn a_roll_only_preview_takes_placeholders_made_by_who_saved_its_rules() {
+    use roll_previews::ports::EnvSource;
+    let e = env(json!({ "enabled": true, "egress": "roll", "egress_hosts": ["api.stripe.com"] }));
+    e.code.open(change("chg_ph", 6));
+    e.engine.pass().await.unwrap();
+    let p = e.engine.store.row_by_change("chg_ph").unwrap().unwrap();
+    let asked = || e.secrets.placeholders.lock().len();
+    // Saved by the operator: no one makes them.
+    let _ = e.engine.env(&p.id, "web").await;
+    assert_eq!(asked(), 0);
+    e.engine.store.set_rules_maker(&e.project, Some("usr_b")).unwrap();
+    let _ = e.engine.env(&p.id, "web").await;
+    assert_eq!(e.secrets.placeholders.lock().last().cloned(), Some((roll_previews::ports::intercept_consumer(&p.id), "usr_b".to_string())));
+    // Its CA changes (a key's bound hosts did): its services restart, trusting the new one.
+    struct Ca(parking_lot::Mutex<String>);
+    struct Nothing;
+    impl roll_previews::intercept::Interception for Nothing {
+        fn live(&self) -> anyhow::Result<bool> {
+            Ok(true)
+        }
+        fn covers(&self, _: &str) -> bool {
+            false
+        }
+        fn leaf(&self, _: &str) -> anyhow::Result<roll_previews::intercept::Leaf> {
+            anyhow::bail!("none")
+        }
+        fn filter(&self, _: roll_previews::intercept::Outgoing<'_>) -> Result<usize, String> {
+            Ok(0)
+        }
+    }
+    impl roll_previews::ports::Intercepts for Ca {
+        fn of(&self, _: &str) -> anyhow::Result<Option<roll_previews::ports::Intercepted>> {
+            Ok(Some(roll_previews::ports::Intercepted { id: self.0.lock().clone(), hosts: vec!["api.stripe.com".into()], ca_pem: String::new(), interception: Arc::new(Nothing) }))
+        }
+    }
+    let ca = Arc::new(Ca(parking_lot::Mutex::new("ica_1".into())));
+    let _ = e.engine.intercepts.set(ca.clone());
+    e.engine.store.update(&p.id, |row| row.next_at = 0).unwrap();
+    e.engine.pass().await.unwrap();
+    let before = e.engine.store.service_config(&p.id, "web").unwrap();
+    *ca.0.lock() = "ica_2".into();
+    e.engine.store.update(&p.id, |row| row.next_at = 0).unwrap();
+    e.engine.pass().await.unwrap();
+    let after = e.engine.store.service_config(&p.id, "web").unwrap();
+    assert!(before != after && after.as_deref().is_some_and(|c| c.contains("iica_2")), "{before:?} {after:?}");
+    // Open egress: nothing would swap them, so none.
+    let n = asked();
+    let mut st = e.engine.store.settings(&e.project).unwrap();
+    st.egress = roll_previews::settings::EgressRule::Open;
+    st.egress_forks = roll_previews::settings::EgressRule::Open;
+    st.egress_hosts.clear();
+    e.engine.store.put_settings(&e.project, &st).unwrap();
+    let _ = e.engine.env(&p.id, "web").await;
+    assert_eq!(asked(), n);
+}
+
 /// A push that touches none of what a service watches (`roll.toml` `watch`) keeps the build it
 /// runs, and it still starts at the new head; one that touches its paths rebuilds it.
 #[tokio::test]

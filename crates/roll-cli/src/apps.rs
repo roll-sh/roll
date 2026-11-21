@@ -1007,6 +1007,13 @@ pub enum AppsCmd {
         target: Target,
         #[arg(long, conflicts_with_all = ["remove", "edit", "test"])]
         add: Option<String>,
+        /// Add a drain into a roll storage bucket on the project (an `s3` drain with a key minted
+        /// for it, revoked with it: nothing to paste in).
+        #[arg(long, value_name = "BUCKET", conflicts_with_all = ["add", "remove", "edit", "test"])]
+        bucket: Option<String>,
+        /// With `--bucket`: where in it, `logs/web` (letters, digits, - _ . /).
+        #[arg(long, requires = "bucket")]
+        prefix: Option<String>,
         /// With `--add`: how its lines go: `ndjson` (the default, signed), `otlp` (OpenTelemetry
         /// logs over OTLP/HTTP JSON) or `syslog` (RFC 5424 over TLS).
         #[arg(long, requires = "add", value_parser = ["ndjson", "otlp", "syslog", "s3"])]
@@ -4131,9 +4138,9 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
             }
             v
         }
-        AppsCmd::Drains { target, add, format, source, only_env, only_service, previews, every_env, every_service, header, edit, test, remove } => {
+        AppsCmd::Drains { target, add, bucket, prefix, format, source, only_env, only_service, previews, every_env, every_service, header, edit, test, remove } => {
             let given = source.is_some() || !only_env.is_empty() || !only_service.is_empty() || previews.is_some() || !header.is_empty();
-            if given && add.is_none() && edit.is_none() {
+            if given && add.is_none() && edit.is_none() && bucket.is_none() {
                 bail!("--source, --only-env, --only-service, --previews and --header go with --add or --edit");
             }
             let svc = service(api, &target).await?;
@@ -4181,6 +4188,17 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
                     bail!("nothing to change: --source, --only-env, --only-service, --previews or --header");
                 }
                 let d = api.call(reqwest::Method::PATCH, &format!("{path}/{}", enc(&id)), Some(Value::Object(settings))).await?;
+                if !json_out {
+                    println!("{}", row(&d));
+                    return Ok(());
+                }
+                d
+            } else if let Some(b) = bucket {
+                settings.insert("bucket".into(), json!(b));
+                if let Some(p) = prefix {
+                    settings.insert("prefix".into(), json!(p));
+                }
+                let d = api.post(&path, Value::Object(settings)).await?;
                 if !json_out {
                     println!("{}", row(&d));
                     return Ok(());

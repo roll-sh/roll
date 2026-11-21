@@ -182,7 +182,10 @@ The product should feel alive: dots react to the cursor and the marks "think". E
       `code-control/tests/reviewer.rs`.
   - Review app tokens (`rla_…`) are always scoped to their repos, even on an open daemon.
     Webhooks only go to public addresses unless the config allows private ones
-    (`ROLL_CODE_WEBHOOK_ALLOW_PRIVATE`, local development only).
+    (`ROLL_CODE_WEBHOOK_ALLOW_PRIVATE`, local development only). Previews' intercepted
+    connections (keys a fork's preview never holds) dial public addresses only and verify against
+    the system's roots, unless `ROLL_PREVIEWS_INTERCEPT_ALLOW_PRIVATE=<root.pem>` (local
+    development only: a private TLS echo host for the live check; never plain egress).
   - Any URL a tenant chooses is fetched through a client with `roll_net::PublicOnly` (one crate,
     `crates/roll-net`; code-control and the model gateway re-export it) and no redirects, plus
     `roll_net::literal_private_host`, because IP literals skip the resolver. That covers webhooks,
@@ -301,8 +304,8 @@ The product should feel alive: dots react to the cursor and the marks "think". E
     product (Postgres runs `read_only` SQL as a role that can only read), not by parsing.
   - roll's MCP server is `crates/roll-mcp` (`/v1/mcp`): a tool is one route (`tools.rs`), called
     through the gated router, its hints from the catalogue; list it in docs/mcp.md (a test checks).
-    A body field added to a route that has a tool goes in the tool's arguments, or in
-    `crates/roll-mcp/src/no-field.txt` with why (a test reads the product's HTTP contract).
+    A body field or query parameter added to a route that has a tool goes in the tool's arguments,
+    or in `crates/roll-mcp/src/no-field.txt` with why (a test reads the product's HTTP contract).
     Never call a service directly from a tool. After adding or changing tools, or a product's routes
     or owner routing, run `pnpm test:mcp-sweep`: every tool called through `/v1/mcp` against a fresh
     rolld, so a path, query or body the product rejects, or an id it routes on differently, fails.

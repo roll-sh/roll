@@ -543,6 +543,15 @@ impl Engine {
 
         // The project's own preview domain, when it has one (`Store::set_project_domain`).
         let domain = self.store.project_domain(&r.project_id)?;
+        // Its interception CA, when its egress goes through the proxy: its services trust that
+        // certificate, so a new one (its bound hosts changed) restarts them.
+        let ca = match (s.egress_for(r.trusted) == crate::settings::EgressRule::Roll, self.intercepts.get().cloned()) {
+            (true, Some(i)) => {
+                let id = r.id.clone();
+                tokio::task::spawn_blocking(move || i.of(&id)).await?.map_err(|e| anyhow::anyhow!("its interception: {e:#}"))?.map(|x| x.id)
+            }
+            _ => None,
+        };
         for (spec, repo, rev, on_apps) in wanted {
             keep.push(spec.name.clone());
             if let Some(path) = &spec.health {
@@ -566,6 +575,7 @@ impl Engine {
                 // Traces: a runtime service takes the OpenTelemetry variables when it starts;
                 // roll apps' environment turns its own on and redeploys.
                 + if s.traces { "o" } else { "" }
+                + &ca.as_deref().filter(|_| !on_apps).map(|id| format!("i{id}")).unwrap_or_default()
                 + &rebuilt;
             let was = self.store.service_config(&r.id, &spec.name)?;
             let config_moved = was.as_deref() != Some(fingerprint.as_str());
@@ -1329,6 +1339,11 @@ impl Engine {
             self.store.drop_service(&r.id, &svc.name)?;
         }
         self.secrets.delete(&r.project_id, &env_name(&r.id)).await.map_err(|e| anyhow::anyhow!("secrets: {e:#}"))?;
+        // Its placeholders and interception CAs end with it, not at their expiry.
+        if let Some(i) = self.intercepts.get().cloned() {
+            let id = r.id.clone();
+            tokio::task::spawn_blocking(move || i.end(&id)).await?.map_err(|e| anyhow::anyhow!("ending its interception: {e:#}"))?;
+        }
         let name = branch_name(&r.id);
         for res in self.store.resources(&r.id)? {
             self.delete_branch(&r.id, &res, &name).await?;

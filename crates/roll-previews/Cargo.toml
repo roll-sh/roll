@@ -26,6 +26,7 @@ hyper-util.workspace = true
 parking_lot.workspace = true
 percent-encoding.workspace = true
 roll-cluster.workspace = true
+roll-intercept.workspace = true
 roll-workspace.workspace = true
 roll-auth.workspace = true
 serde.workspace = true

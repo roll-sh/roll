@@ -4768,6 +4768,10 @@ async fn builds_share_a_remote_cache_for_turborepo_and_nx() {
     assert_eq!(send("PUT", "/v1/cache/a1b2c3", &token, "again", vec![]).await.0, StatusCode::CONFLICT);
     assert_eq!(send("PUT", "/v1/cache/d4e5f6", &token, "nx-tarball", vec![]).await.0, StatusCode::OK);
     assert_eq!(send("GET", "/v1/cache/d4e5f6", &token, "", vec![]).await.2, "nx-tarball");
+    // What it holds is metered to the service that builds from it, hourly.
+    w.apps.cron_pass(code_sql::now_ms() + 3_600_000).await;
+    let stored: f64 = w.apps.store.usage(&id, Some("production"), 0).unwrap().iter().map(|(_, u)| u.stored_gb_hours).sum();
+    assert!(stored > 0.0, "{stored}");
     // Another environment's cache is its own, and another source's; a wrong token reads nothing.
     for other in [scope("acme/site", "staging"), scope("someone/else", "production")] {
         let t = w.apps.store.build_cache_token(&w.project, &other).unwrap();
@@ -4823,6 +4827,10 @@ async fn a_deploy_waits_for_another_persons_approval() {
     let dep = d["id"].as_str().unwrap().to_string();
     assert_eq!(settled(&w, &id, "production", &dep).await["status"], "ready");
     assert_eq!(call(&w.api, "GET", &env, None).await.1["active"]["id"], live_before);
+    // Nothing of it runs with production's values before it's approved, its own URL included.
+    assert!(!w.fake.instances(&id).iter().any(|(_, d, _)| *d == dep), "{:?}", w.fake.instances(&id));
+    let own = format!("{}--{}", dep.strip_prefix("dep_").unwrap(), host(&svc["environments"][0]["url"]));
+    assert_ne!(visit(&w, &own, "/").await.0, StatusCode::OK, "its own URL waits too");
     // Not live without an approval; not with its author's, nor without a person.
     assert_eq!(call(&w.api, "POST", &format!("{env}/deploys/{dep}/rollback"), Some(json!({"keep_variables": true}))).await.0, StatusCode::CONFLICT);
     assert_eq!(as_person("POST", format!("{env}/deploys/{dep}/approve"), Some("usr_ada"), json!({})).await.0, StatusCode::FORBIDDEN);
@@ -4835,6 +4843,10 @@ async fn a_deploy_waits_for_another_persons_approval() {
     assert_eq!(settled(&w, &id, "production", &live).await["status"], "active");
     let (_, one) = call(&w.api, "GET", &format!("{env}/deploys/{dep}"), None).await;
     assert_eq!(one["approved_by"], json!(["usr_grace"]), "{one}");
+    // A later approval doesn't put it live again: only the one that made the count acts.
+    let (st, again) = as_person("POST", format!("{env}/deploys/{dep}/approve"), Some("usr_bob"), json!({})).await;
+    assert_eq!((st, &again["live"]), (StatusCode::OK, &Value::Null), "{again}");
+    assert_eq!(call(&w.api, "GET", &env, None).await.1["active"]["id"], json!(live));
 }
 
 /// A status badge (Netlify's): off, a 404; on, an SVG saying the environment is live, cached a
@@ -4856,7 +4868,7 @@ async fn a_status_badge_says_what_deploys_stand_at() {
     };
     assert_eq!(get().await.0, StatusCode::NOT_FOUND, "off by default");
     let (_, e) = call(&w.api, "PUT", &format!("/v1/apps/services/{id}/environments/production"), Some(json!({"badge": true}))).await;
-    assert!(e["badge_url"].as_str().is_some_and(|u| u.ends_with(&path)), "{e}");
+    assert!(e["badge_url"].as_str().is_some_and(|u| u.ends_with(&path) && u.starts_with(svc["environments"][0]["url"].as_str().unwrap())), "on its public name: {e}");
     let (st, h, svg) = get().await;
     assert_eq!((st, h["content-type"].to_str().unwrap()), (StatusCode::OK, "image/svg+xml; charset=utf-8"));
     assert!(svg.starts_with("<svg") && svg.contains("web production") && svg.contains(">live<"), "{svg}");
