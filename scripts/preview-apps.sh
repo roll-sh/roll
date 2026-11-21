@@ -61,6 +61,8 @@ export ROLL_HOME=$H ROLL_API=$API ROLL_PROXY=127.0.0.1:${PORTS}432 ROLL_REDIS=12
   ROLL_APPS_LISTEN=127.0.0.1:${PORTS}080 ROLL_APPS_DOMAIN=apps.localhost ROLL_CODE_PREVIEW_DOMAIN=preview.localhost \
   ROLL_PRODUCTS=code,redis,streams,apps ROLL_APPS_ALLOW_PRIVATE=1 RUST_LOG=${RUST_LOG:-info}
 unset ROLL_ADMIN_TOKEN ROLL_CODE_TOKEN
+# A deployment key, as a real node has: a preview's own variables are kept sealed with it.
+export ROLL_SECRET_KEY=${PREVIEW_APPS_SECRET_KEY:-$(python3 -c 'import secrets; print(secrets.token_hex(32))')}
 nice -n 10 "$BIN" >"$H/rolld.log" 2>&1 &
 PID=$!
 for _ in $(seq 1 120); do kill -0 "$PID" 2>/dev/null || { tail -20 "$H/rolld.log"; exit 1; }; curl -sf "http://$API/v1/info" >/dev/null 2>&1 && break; sleep 0.5; done

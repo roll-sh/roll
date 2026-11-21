@@ -1031,6 +1031,8 @@ async fn put_settings(AxState(e): S, Path(project): Path<String>, ext: axum::htt
         let s = current.patched(&patch)?;
         let s = e.store.put_settings(&project, &s)?;
         e.store.set_env_refs(&project, &crate::settings::references(&s), &by)?;
+        // Whom its previews' placeholders are made by: a person or their token, never the operator.
+        e.store.set_rules_maker(&project, Some(by.as_str()).filter(|b| *b != "operator"))?;
         // Every preview of the project converges on the new rules (modes, masks, variables,
         // access): nothing waits for its next push.
         reconverge(e, &project)?;

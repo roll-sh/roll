@@ -183,6 +183,7 @@ roll-access = { path = "crates/roll-access" }
 roll-oidc = { path = "crates/roll-oidc" }
 roll-mcp = { path = "crates/roll-mcp" }
 roll-net = { path = "crates/roll-net" }
+roll-intercept = { path = "crates/roll-intercept" }
 roll-secrets = { path = "crates/roll-secrets" }
 roll-secrets-chain = { path = "crates/roll-secrets-chain" }
 roll-keyshares = { path = "crates/roll-keyshares" }

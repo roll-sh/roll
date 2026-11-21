@@ -1731,7 +1731,8 @@ impl Apps {
             vitals: r.vitals,
             log_retention_days: r.log_retention_days.unwrap_or(crate::logs::KEEP_DAYS),
             approvals: r.approvals,
-            badge_url: r.badge.then(|| self.cfg.otlp_base.as_deref().map(|b| format!("{}{}{}/{}.svg", b.trim_end_matches('/'), crate::public::BADGE, r.service, r.name))).flatten(),
+            // On the environment's own public name (the apps listener answers `/_roll/badge/` on any).
+            badge_url: r.badge.then(|| format!("{}{}{}/{}.svg", self.url(&r.slug), crate::public::BADGE, r.service, r.name)),
             report: r.report,
             preview_host: {
                 let (sid, e) = (r.service.clone(), r.name.clone());
@@ -3901,6 +3902,10 @@ impl Apps {
         if d.run.volume.is_some() {
             return Err(Error::Conflict("a service with a volume has no deployment URLs: one instance writes the volume".into()));
         }
+        // Waiting for its approvals: nothing of it runs (with the environment's values) before.
+        if row.approvals > 0 && d.status == DeployStatus::Ready {
+            return Err(Error::Conflict(format!("{dep} waits for {} approval(s): it runs once approved", row.approvals)));
+        }
         self.template(&svc.for_env(&row)?, &row, &d).await
     }
 
@@ -4082,6 +4087,7 @@ impl Apps {
             d.requests += u.requests;
             d.egress_bytes += u.egress_bytes;
             d.build_seconds += u.build_seconds;
+            d.stored_gb_hours += u.stored_gb_hours;
         }
         let p = self.cfg.prices;
         let mut total = 0.0;
@@ -4090,7 +4096,7 @@ impl Apps {
                 let u = by_day.remove(&d).unwrap_or_default();
                 let usd = p.cost(&u);
                 total += usd;
-                json!({ "day": d, "cpu_seconds": u.cpu_seconds, "gb_seconds": u.gb_seconds, "requests": u.requests, "egress_bytes": u.egress_bytes, "build_seconds": u.build_seconds, "usd": usd })
+                json!({ "day": d, "cpu_seconds": u.cpu_seconds, "gb_seconds": u.gb_seconds, "requests": u.requests, "egress_bytes": u.egress_bytes, "build_seconds": u.build_seconds, "stored_gb_hours": u.stored_gb_hours, "usd": usd })
             })
             .collect();
         Ok(json!({ "days": days, "total_usd": total }))
