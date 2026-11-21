@@ -1306,6 +1306,7 @@ impl Engine {
             anyhow::bail!("refusing to delete {} {branch}: it's the preview's parent", res.kind.as_str());
         }
         self.store.set_resource(id, res.kind, &res.parent, |x| x.state = ResourceState::Deleting)?;
+        self.brancher(res.kind)?.retire(&res.parent, branch, res.kept.as_deref()).await.map_err(|e| anyhow::anyhow!("revoking what the {} branch {branch} handed out: {e:#}", res.kind.as_str()))?;
         self.brancher(res.kind)?.delete(&res.parent, branch, name).await.map_err(|e| anyhow::anyhow!("deleting the {} branch {branch}: {e:#}", res.kind.as_str()))?;
         self.store.log(id, &format!("deleted the {} branch {branch}", res.kind.as_str()))?;
         Ok(())

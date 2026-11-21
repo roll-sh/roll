@@ -981,11 +981,31 @@ impl Brancher for Search {
         }
     }
 
-    async fn reset(&self, parent: &str, branch: &str, _kept: Option<&str>, name: &str, mode: Mode) -> anyhow::Result<Branched> {
+    async fn reset(&self, parent: &str, branch: &str, kept: Option<&str>, name: &str, mode: Mode) -> anyhow::Result<Branched> {
+        self.retire(parent, branch, kept).await?;
         self.delete(parent, branch, name).await?;
         self.branch(parent, name, mode).await
     }
 
+    /// roll search keeps a deleted cluster restorable with its keys and password: so first the
+    /// branch's data credential previews handed out is revoked (its id is in what's kept: an API
+    /// key is `base64(<id>@<cluster>:<key>)`, an OpenSearch data user `<id>@<cluster>`).
+    async fn retire(&self, _parent: &str, branch: &str, kept: Option<&str>) -> anyhow::Result<()> {
+        let Some(v) = kept.and_then(|k| serde_json::from_str::<Value>(k).ok()) else { return Ok(()) };
+        let from_key = s(&v["ELASTICSEARCH_API_KEY"]).and_then(|k| {
+            use base64::Engine as _;
+            let raw = String::from_utf8(base64::engine::general_purpose::STANDARD.decode(k).ok()?).ok()?;
+            raw.split_once(':').and_then(|(id, _)| id.rsplit_once('@')).map(|(id, _)| id.to_string())
+        });
+        let from_user = s(&v["OPENSEARCH_USERNAME"]).and_then(|u| u.rsplit_once('@').map(|(id, _)| id.to_string()));
+        match from_key.or(from_user) {
+            Some(key) => self.0.delete(&format!("/v1/search/clusters/{}/keys/{}", seg(branch), seg(&key))).await,
+            None => Ok(()),
+        }
+    }
+
+    /// Its password is changed first: a restored copy then holds no login previews ever handed
+    /// out (links made before 2026-11-21 carried it). No change, no delete (tried again).
     async fn delete(&self, parent: &str, branch: &str, name: &str) -> anyhow::Result<()> {
         let c = match self.0.get(&format!("/v1/search/clusters/{}", seg(branch))).await {
             Ok(c) => c,
@@ -994,6 +1014,7 @@ impl Brancher for Search {
         };
         let of_parent = c["parent_id"] == parent || c["parent_name"] == parent;
         anyhow::ensure!(c["name"] == name && of_parent && branch != parent, "refusing to delete search cluster {branch}: it isn't {parent}'s branch {name}");
+        self.0.post(&format!("/v1/search/clusters/{}/password", seg(branch)), json!({})).await.map_err(|e| anyhow::anyhow!("changing the search branch's password before it's deleted: {e:#}"))?;
         self.0.delete(&format!("/v1/search/clusters/{}", seg(branch))).await
     }
 
@@ -1089,12 +1110,16 @@ mod tests {
     /// revoked at once).
     #[tokio::test]
     async fn a_search_branch_gives_only_a_data_credential() {
-        use axum::routing::{delete, post};
+        use axum::routing::{delete, get, post};
         use std::sync::{Arc, Mutex};
         let answer: Arc<Mutex<(u16, serde_json::Value)>> = Arc::new(Mutex::new((200, serde_json::json!({}))));
         let revoked: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
         let (a, r) = (answer.clone(), revoked.clone());
+        let (r2, r3) = (revoked.clone(), revoked.clone());
         let app = axum::Router::new()
+            .route("/v1/search/clusters/{id}", get(|| async { axum::Json(serde_json::json!({ "id": "srch_b", "name": "pv-x", "parent_id": "srch_p" })) }))
+            .route("/v1/search/clusters/{id}/password", post(move || async move { r2.lock().unwrap().push("password".into()); axum::Json(serde_json::json!({})) }))
+            .route("/v1/search/clusters/{id}", delete(move || async move { r3.lock().unwrap().push("cluster".into()); axum::http::StatusCode::NO_CONTENT }))
             .route(
                 "/v1/search/clusters/{id}/keys",
                 post(move || {
@@ -1143,6 +1168,15 @@ mod tests {
         *answer.lock().unwrap() = (200, serde_json::json!({ "id": "key_3", "access": "admin", "api_key": "admin-key" }));
         assert!(search.kept_with_key(&branch, "pv-x").await.is_err());
         assert_eq!(revoked.lock().unwrap().clone(), vec!["key_3".to_string()]);
+        // Deleted (or reset): roll search keeps it restorable, so the data key previews handed
+        // out is revoked (by the id in it) and the branch's password changed before the delete.
+        revoked.lock().unwrap().clear();
+        use roll_previews::ports::Brancher as _;
+        let key = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, "key_1@pv-x:secret");
+        search.retire("srch_p", "srch_b", Some(&serde_json::json!({ "ELASTICSEARCH_URL": "http://search.test:9200", "ELASTICSEARCH_API_KEY": key }).to_string())).await.unwrap();
+        search.retire("srch_p", "srch_b", Some(&serde_json::json!({ "OPENSEARCH_USERNAME": "pv@pv-x" }).to_string())).await.unwrap();
+        search.delete("srch_p", "srch_b", "pv-x").await.unwrap();
+        assert_eq!(revoked.lock().unwrap().clone(), ["key_1", "pv", "password", "cluster"].map(String::from).to_vec());
     }
 
     #[test]
