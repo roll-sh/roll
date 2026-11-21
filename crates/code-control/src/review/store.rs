@@ -4,6 +4,7 @@
 
 use super::{Comment, Review, Reviewer, ReviewerKind, Thread, Verdict};
 use crate::db::{Db, now};
+use crate::signing::Kept;
 use anyhow::Result;
 use code_sql::{OptionalExtension, Row, params};
 
@@ -102,10 +103,12 @@ CREATE TABLE IF NOT EXISTS review_apps (
     repos TEXT NOT NULL,
     required INTEGER NOT NULL DEFAULT 0,
     active INTEGER NOT NULL DEFAULT 1,
+    -- Sealed to the app when secret_sealed is 1 (crate::signing).
     secret TEXT NOT NULL,
     token_hash TEXT NOT NULL UNIQUE,
     created_at INTEGER NOT NULL,
     updated_at INTEGER NOT NULL,
+    secret_sealed INTEGER NOT NULL DEFAULT 0,
     UNIQUE (owner_id, name_lower)
 );
 CREATE TABLE IF NOT EXISTS review_deliveries (
@@ -263,12 +266,13 @@ pub struct AppRow {
     pub repos: Vec<String>,
     pub required: bool,
     pub active: bool,
-    pub secret: String,
+    /// The signing secret as it's kept (`Debug` never shows it).
+    pub secret: Kept,
     pub created_at: i64,
     pub updated_at: i64,
 }
 
-const APP_COLS: &str = "id, owner_id, name, webhook_url, events, repos, required, active, secret, created_at, updated_at";
+const APP_COLS: &str = "id, owner_id, name, webhook_url, events, repos, required, active, secret, created_at, updated_at, secret_sealed";
 
 fn app_row(r: &Row<'_>) -> code_sql::Result<AppRow> {
     Ok(AppRow {
@@ -280,7 +284,7 @@ fn app_row(r: &Row<'_>) -> code_sql::Result<AppRow> {
         repos: serde_json::from_str(&r.get::<_, String>(5)?).unwrap_or_default(),
         required: r.get::<_, i64>(6)? != 0,
         active: r.get::<_, i64>(7)? != 0,
-        secret: r.get(8)?,
+        secret: Kept::from_columns(r.get(8)?, r.get(11)?),
         created_at: r.get(9)?,
         updated_at: r.get(10)?,
     })
@@ -626,9 +630,10 @@ impl Db {
     // ── review apps ──
 
     pub fn insert_app(&self, a: &AppRow, token_hash: &str) -> Result<bool> {
+        let (secret, sealed) = a.secret.columns();
         let n = self.sql().execute(
             "INSERT OR IGNORE INTO review_apps (id, owner_id, name, name_lower, webhook_url, events, repos, required, active, secret, \
-             token_hash, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+             secret_sealed, token_hash, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             params![
                 a.id,
                 a.owner_id,
@@ -639,7 +644,8 @@ impl Db {
                 serde_json::to_string(&a.repos)?,
                 a.required,
                 a.active,
-                a.secret,
+                secret,
+                sealed,
                 token_hash,
                 a.created_at,
                 a.updated_at
@@ -675,10 +681,11 @@ impl Db {
         })
     }
 
-    pub fn rotate_app(&self, id: &str, secret: &str, token_hash: &str) -> Result<()> {
+    pub fn rotate_app(&self, id: &str, secret: &Kept, token_hash: &str) -> Result<()> {
+        let (secret, sealed) = secret.columns();
         self.sql().execute(
-            "UPDATE review_apps SET secret = ?, token_hash = ?, updated_at = ? WHERE id = ?",
-            params![secret, token_hash, now(), id],
+            "UPDATE review_apps SET secret = ?, secret_sealed = ?, token_hash = ?, updated_at = ? WHERE id = ?",
+            params![secret, sealed, token_hash, now(), id],
         )?;
         Ok(())
     }

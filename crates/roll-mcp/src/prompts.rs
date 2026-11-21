@@ -269,6 +269,26 @@ const PROMPTS: &[Prompt] = &[
                 a("stream")
             )
         },
+    },    Prompt {
+        name: "review_costs",
+        title: "Review a project's costs",
+        description: "Where a project's money goes this month, most first, against last month and its limits, and what would cost less; changes nothing without asking.",
+        args: &[Arg { name: "project", description: "Workspace project", required: true }],
+        needs: &["apps_project_usage", "apps_limits", "previews_usage", "previews_settings"],
+        text: |a| {
+            format!(
+                "Where does project {} spend? Start with apps_project_usage for this month (projected to its end) and \
+                 again with month set to last month, to see what grew; apps_limits for how close it is to its alert \
+                 and cap. Then previews_usage against its budget, and previews_settings: previews that live long, run \
+                 for drafts or for every branch cost the most. If you have workspace_get_project, it lists the \
+                 project's other resources: read each one's usage (postgres_usage, redis_usage, nosql_usage, \
+                 storage_usage, streams_usage, search_usage). Rank where the money goes, most first, with what changed \
+                 since last month, and for the top three say what would cost less: a service that never sleeps but \
+                 gets few requests, an environment nobody uses, previews kept too long, a database bigger than its \
+                 load. Don't change settings, sleep, delete anything or set limits without asking me.",
+                a("project")
+            )
+        },
     },
 ];
 

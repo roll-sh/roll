@@ -629,16 +629,18 @@ impl Secrets {
         }
         let dek = self.project(project)?;
         let now = self.db.now_ms()?;
+        // Whether the URL may hear a decoy was used: set by someone who sees decoys.
+        let session = self.sees_decoys(project, caller);
         self.db.write(|c| {
             let env = by_slug(c, project, slug)?;
             match &p.notify_url {
                 Some(Some(u)) => {
                     let sealed = dek.seal(&crate::notices::notify_aad(project, &env.id), &crate::Value::new(u.trim()));
                     let host = crate::names::url_host(u);
-                    c.execute("UPDATE environments SET notify_url = ?, notify_host = ? WHERE id = ?", params![sealed, host, env.id])?;
+                    c.execute("UPDATE environments SET notify_url = ?, notify_host = ?, notify_set_by_session = ? WHERE id = ?", params![sealed, host, session as i64, env.id])?;
                 }
                 Some(None) => {
-                    c.execute("UPDATE environments SET notify_url = NULL, notify_host = NULL WHERE id = ?", [&env.id])?;
+                    c.execute("UPDATE environments SET notify_url = NULL, notify_host = NULL, notify_set_by_session = NULL WHERE id = ?", [&env.id])?;
                 }
                 None => {}
             }
@@ -877,7 +879,9 @@ pub(crate) fn ensure_folders(c: &Conn<'_>, env_id: &str, path: &str, now: i64) -
 }
 
 fn drop_env(c: &Conn<'_>, env: &EnvRow) -> Result<()> {
-    for t in ["secrets", "versions", "requests", "leases", "folders", "imports", "exports", "folder_policies"] {
+    // Its keys' hosts and its placeholders (a preview's, torn down with it) end with it.
+    c.execute("DELETE FROM key_hosts WHERE secret_id IN (SELECT id FROM secrets WHERE env_id = ?)", [&env.id])?;
+    for t in ["secrets", "versions", "requests", "leases", "folders", "imports", "exports", "folder_policies", "placeholders"] {
         c.execute(&format!("DELETE FROM {t} WHERE env_id = ?"), [&env.id])?;
     }
     c.execute("DELETE FROM imports WHERE from_env_id = ?", [&env.id])?;

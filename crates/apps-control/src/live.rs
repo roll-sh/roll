@@ -35,6 +35,8 @@ pub fn instance_prefix(service: &str, env: &str, deployment: &str) -> String {
 
 /// How far back crashes count toward a crash loop.
 const CRASH_WINDOW: Duration = Duration::from_secs(600);
+/// How long an instance over `run.busy_cpu` stays held after its last busy sample.
+const BUSY_HOLD: Duration = Duration::from_secs(30);
 
 /// What instances of the active deployment are made from.
 #[derive(Clone, Debug)]
@@ -163,6 +165,15 @@ impl Inst {
     }
 
     /// It's kept awake now (a hold that hasn't ended).
+    /// Held awake until at least `for_` from now (a later hold stands). The hold's end.
+    fn hold(&self, for_: Duration) -> Instant {
+        let until = Instant::now() + for_;
+        let mut h = self.held_until.lock();
+        let until = h.filter(|t| *t > until).unwrap_or(until);
+        *h = Some(until);
+        until
+    }
+
     pub fn held(&self) -> bool {
         self.held_until.lock().is_some_and(|t| t > Instant::now())
     }
@@ -652,11 +663,7 @@ impl EnvLive {
     pub fn hold_awake(&self, name: &str, for_: Duration) -> Option<Instant> {
         let insts = self.insts.lock();
         let i = insts.iter().find(|i| i.name == name && matches!(i.phase(), Phase::Running(_) | Phase::Suspended(_)))?;
-        let until = Instant::now() + for_.min(Duration::from_secs(15 * 60));
-        let mut h = i.held_until.lock();
-        let until = h.filter(|t| *t > until).unwrap_or(until);
-        *h = Some(until);
-        Some(until)
+        Some(i.hold(for_.min(Duration::from_secs(15 * 60))))
     }
 
     /// The deployment a request goes to: a visitor's bucket (0–99, its `roll_bucket` cookie)
@@ -1989,7 +1996,19 @@ impl EnvLive {
                         // Its sidecars' use is the instance's (usage adds it): so is their size.
                         if let Some(tpl) = self.serving(&i.deployment) {
                             used += d;
-                            capacity += (tpl.run.cpu + tpl.spec.sidecars_size().0) * elapsed;
+                            let size = tpl.run.cpu + tpl.spec.sidecars_size().0;
+                            capacity += size * elapsed;
+                            // Busy on its own (`run.busy_cpu`): held awake as a request would.
+                            if let Some(b) = tpl.run.busy_cpu.filter(|_| elapsed > 0.0 && size > 0.0) {
+                                let pct = d / elapsed / size * 100.0;
+                                if pct >= b as f64 {
+                                    let was = i.held();
+                                    i.hold(BUSY_HOLD);
+                                    if !was {
+                                        self.log.stream(Stream::System).line(format!("{} kept awake: CPU at {pct:.0}%, over its {b}%", i.name));
+                                    }
+                                }
+                            }
                         }
                     }
                     *seen = Some(u.cpu_ns);
