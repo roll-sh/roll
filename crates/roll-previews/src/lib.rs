@@ -389,6 +389,10 @@ pub struct Preview {
     /// project keeps traces): until then nothing above says "no regressions".
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub regressions_compared: bool,
+    /// The keys it holds as placeholders, and what its egress proxy swapped or refused for them
+    /// (docs/previews.md, "Keys a preview never holds"). Never a value or a placeholder.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub intercepted: Option<Intercepted>,
     /// The screenshot's signed link (`(expiry, signature)`), for roll code's summary; never in
     /// API answers.
     #[serde(skip)]
@@ -409,6 +413,23 @@ pub struct Preview {
     pub baseline: bool,
     pub created_at: i64,
     pub updated_at: i64,
+}
+
+/// A preview's keys held as placeholders: each named with the hosts it's bound to, and how many
+/// requests through its egress proxy had a key swapped in, or were refused.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct Intercepted {
+    pub keys: Vec<HeldKey>,
+    #[serde(default)]
+    pub swapped: u64,
+    #[serde(default)]
+    pub refused: u64,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct HeldKey {
+    pub key: String,
+    pub hosts: Vec<String>,
 }
 
 impl Preview {
