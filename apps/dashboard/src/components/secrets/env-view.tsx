@@ -329,6 +329,7 @@ export function EnvView({ env }: { env: Environment }) {
                 login
                 title={path === "/" ? `${env.name} has no secrets yet` : `${path} is empty in ${env.name}`}
                 cli={[`roll secrets set -p ${project.name} -e ${env.slug} KEY=value`, `roll run -p ${project.name} --env ${env.slug} -- <cmd>`]}
+                install
               >
                 Add one, paste a .env file, or link a resource so its connection string and credentials stay correct when it changes.
                 {standard.length > 1 && " Compare promotes keys from another environment."} From the CLI:
