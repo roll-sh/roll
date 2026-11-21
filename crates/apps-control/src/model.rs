@@ -1157,13 +1157,51 @@ pub struct Alerts {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub log_match: Option<String>,
     pub log_count: u32,
+    /// CPU at or above this share of each instance's `cpu`, every minute of the five
+    /// (Railway's CPU monitor): `alert.cpu`. 0, off (the default).
+    pub cpu_pct: u8,
+    /// The app's own gauges (its Prometheus endpoint, OTLP, log metrics) past a threshold for
+    /// some minutes running (Cloud Monitoring's metric alerts): `alert.metric`.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub metrics: Vec<MetricAlert>,
 }
 
 impl Default for Alerts {
     fn default() -> Self {
-        Alerts { memory_pct: 90, error_pct: 5, p95_ms: 0, capacity_pct: 10, log_match: None, log_count: 10 }
+        Alerts { memory_pct: 90, error_pct: 5, p95_ms: 0, capacity_pct: 10, log_match: None, log_count: 10, cpu_pct: 0, metrics: Vec::new() }
     }
 }
+
+/// An alert on one of the app's own gauges: its value now (each series' newest point of the
+/// last minute, the largest, or their sum with `sum`) above or below a threshold in `minutes`
+/// judgments running (1–5, default 3).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MetricAlert {
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub above: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub below: Option<f64>,
+    #[serde(default = "MetricAlert::default_minutes")]
+    pub minutes: u8,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub sum: bool,
+}
+
+impl MetricAlert {
+    fn default_minutes() -> u8 {
+        3
+    }
+
+    /// Whether `value` is past its threshold.
+    pub fn breached(&self, value: f64) -> bool {
+        self.above.is_some_and(|t| value > t) || self.below.is_some_and(|t| value < t)
+    }
+}
+
+/// The most metric alerts a service has.
+pub const MAX_METRIC_ALERTS: usize = 10;
 
 impl Default for Run {
     fn default() -> Self {
@@ -1224,8 +1262,20 @@ impl Run {
     /// The checked settings, with what the type implies filled in (a worker runs at least one
     /// instance; a volume allows one).
     pub fn normalized(mut self) -> Result<Run> {
-        if self.alerts.memory_pct > 100 || self.alerts.error_pct > 100 || self.alerts.capacity_pct > 100 {
-            return Err(Error::BadRequest("alerts.memory_pct, alerts.error_pct and alerts.capacity_pct are 0–100 (0 is off)".into()));
+        if self.alerts.memory_pct > 100 || self.alerts.error_pct > 100 || self.alerts.capacity_pct > 100 || self.alerts.cpu_pct > 100 {
+            return Err(Error::BadRequest("alerts.memory_pct, alerts.error_pct, alerts.capacity_pct and alerts.cpu_pct are 0–100 (0 is off)".into()));
+        }
+        if self.alerts.metrics.len() > MAX_METRIC_ALERTS {
+            return Err(Error::BadRequest(format!("alerts.metrics is at most {MAX_METRIC_ALERTS} alerts")));
+        }
+        for (i, m) in self.alerts.metrics.iter().enumerate() {
+            let name_ok = !m.name.is_empty() && m.name.len() <= 200 && m.name.bytes().enumerate().all(|(i, b)| b.is_ascii_alphabetic() || b == b'_' || b == b':' || (i > 0 && (b.is_ascii_digit() || b == b'.')));
+            if !name_ok || m.above.is_some() == m.below.is_some() || m.above.or(m.below).is_some_and(|t| !t.is_finite()) || !(1..=5).contains(&m.minutes) {
+                return Err(Error::BadRequest("alerts.metrics[] is a gauge's name (a Prometheus name), one finite threshold, above or below, and minutes 1–5".into()));
+            }
+            if self.alerts.metrics[..i].iter().any(|o| o.name == m.name && o.sum == m.sum) {
+                return Err(Error::BadRequest(format!("alerts.metrics names {} twice", m.name)));
+            }
         }
         if self.alerts.log_match.as_ref().is_some_and(|m| m.trim().is_empty() || m.len() > 200) || !(1..=10_000).contains(&self.alerts.log_count) {
             return Err(Error::BadRequest("alerts.log_match is 1–200 characters, alerts.log_count 1–10000".into()));
@@ -2076,6 +2126,115 @@ pub struct HeaderRule {
 
 /// The most header rules an environment has.
 pub const MAX_HEADER_RULES: usize = 20;
+
+/// One block of roll.toml's edge settings (`[app]`, `[app.previews]` or
+/// `[app.environments.<env>]`): what it sets, checked as the API checks an environment's.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct EdgeBlock {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub headers: Option<Vec<HeaderRule>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub firewall: Option<Vec<FirewallRule>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rate_limit: Option<RateLimit>,
+}
+
+impl EdgeBlock {
+    fn is_empty(&self) -> bool {
+        self.headers.is_none() && self.firewall.is_none() && self.rate_limit.is_none()
+    }
+}
+
+/// A deployment's edge settings from its tree's roll.toml, every block kept, so the same image
+/// promoted or rolled back elsewhere reads the block of the environment it's live in.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct EdgeFile {
+    #[serde(default, skip_serializing_if = "EdgeBlock::is_empty")]
+    pub app: EdgeBlock,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub previews: Option<EdgeBlock>,
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub environments: std::collections::BTreeMap<String, EdgeBlock>,
+}
+
+/// What a live deployment's file adds to its environment's gate.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Edge {
+    pub headers: Vec<HeaderRule>,
+    pub firewall: Vec<FirewallRule>,
+    pub rate_limit: Option<RateLimit>,
+}
+
+impl EdgeFile {
+    /// roll.toml's edge keys, each block checked as the API checks an environment's; none set: none.
+    pub fn from_app(app: &apps_build::app::AppConfig) -> Result<Option<EdgeFile>> {
+        fn block(name: &str, c: &apps_build::app::AppConfig) -> Result<EdgeBlock> {
+            let bad = |what: &str, e: String| Error::BadRequest(format!("roll.toml [{name}] {what}: {e}"));
+            let json = |t: &toml::Table| serde_json::to_value(t).map_err(|e| e.to_string());
+            let headers = match &c.headers {
+                None => None,
+                Some(h) if h.len() > MAX_HEADER_RULES => return Err(bad("headers", format!("at most {MAX_HEADER_RULES} rules"))),
+                Some(h) => Some(h.iter().map(|t| json(t).and_then(|v| serde_json::from_value::<HeaderRule>(v).map_err(|e| e.to_string())).map_err(|e| bad("headers", e)).and_then(HeaderRule::check)).collect::<Result<Vec<_>>>()?),
+            };
+            let firewall = match &c.firewall {
+                None => None,
+                Some(f) if f.len() > MAX_FIREWALL_RULES => return Err(bad("firewall", format!("at most {MAX_FIREWALL_RULES} rules"))),
+                Some(f) => Some(f.iter().map(|t| json(t).and_then(|v| serde_json::from_value::<FirewallRule>(v).map_err(|e| e.to_string())).map_err(|e| bad("firewall", e)).and_then(FirewallRule::check)).collect::<Result<Vec<_>>>()?),
+            };
+            if firewall.iter().flatten().any(|r| r.action == FirewallAction::Allow) {
+                return Err(bad("firewall", "only deny, limit or challenge".into()));
+            }
+            let rate_limit = match &c.rate_limit {
+                None => None,
+                Some(t) => {
+                    let r: RateLimit = json(t).and_then(|v| serde_json::from_value(v).map_err(|e| e.to_string())).map_err(|e| bad("rate_limit", e))?;
+                    r.check()?;
+                    Some(r)
+                }
+            };
+            Ok(EdgeBlock { headers, firewall, rate_limit })
+        }
+        let mut f = EdgeFile { app: block("app", app)?, previews: app.previews.as_deref().map(|p| block("app.previews", p)).transpose()?.filter(|b| !b.is_empty()), environments: Default::default() };
+        for (n, e) in app.environments.iter().flatten() {
+            let b = block(&format!("app.environments.{n}"), e)?;
+            if !b.is_empty() {
+                f.environments.insert(n.clone(), b);
+            }
+        }
+        Ok((!f.app.is_empty() || f.previews.is_some() || !f.environments.is_empty()).then_some(f))
+    }
+
+    /// What applies in `env`: the file's, a preview's, then the environment's own block, the last
+    /// block that sets a key deciding it (as roll.toml's other keys).
+    pub fn resolve(&self, env: &str, ephemeral: bool) -> Edge {
+        let mut layers = vec![&self.app];
+        layers.extend(self.previews.as_ref().filter(|_| ephemeral));
+        layers.extend(self.environments.get(env));
+        let mut e = Edge::default();
+        for l in layers {
+            if let Some(h) = &l.headers {
+                e.headers.clone_from(h);
+            }
+            if let Some(f) = &l.firewall {
+                e.firewall.clone_from(f);
+            }
+            if l.rate_limit.is_some() {
+                e.rate_limit = l.rate_limit;
+            }
+        }
+        e
+    }
+}
+
+impl RateLimit {
+    /// The stricter of two limits: the lower rate, and the smaller burst (unset: a minute's worth).
+    pub fn stricter(a: Option<RateLimit>, b: Option<RateLimit>) -> Option<RateLimit> {
+        match (a, b) {
+            (Some(x), Some(y)) => Some(RateLimit { per_minute: x.per_minute.min(y.per_minute), burst: Some(x.burst.unwrap_or(x.per_minute).min(y.burst.unwrap_or(y.per_minute))) }),
+            (x, y) => x.or(y),
+        }
+    }
+}
 
 /// A path on an environment's domains answered by another service of its project (Vercel's
 /// rewrites to another project, Cloud Run's URL maps): that service's environment of the same

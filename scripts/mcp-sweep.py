@@ -11,7 +11,7 @@ made-up value and a product that's off are fine.
 
     mcp-sweep.py <api> <operator token file> [--writes] [-v] [--tool NAME]
 """
-import json, sys, urllib.error, urllib.request
+import json, re, sys, urllib.error, urllib.request
 
 api, tok = sys.argv[1], open(sys.argv[2]).read().strip()
 only = sys.argv[sys.argv.index("--tool") + 1] if "--tool" in sys.argv else None
@@ -240,6 +240,14 @@ for pass_ in (0, 1):
             sc = res.get("result", {}).get("structuredContent")
             stood_in[-1] += f" -> {sc.get('http_status', 200) if isinstance(sc, dict) and res['result'].get('isError') else 200}: {json.dumps(sc)[:120] if res.get('result', {}).get('isError') else 'ok'}"
         bad = judge(t["name"], res)
+        # A Postgres tool whose SQL is its own (no sql argument) failing with a class-42 error
+        # (syntax, an unknown column, function or table) is the tool's SQL that's wrong: a 400
+        # would otherwise pass as a fresh rolld's.
+        if not bad and t.get("_meta", {}).get("roll/product") == "postgres" and "sql" not in t["inputSchema"].get("properties", {}) and res.get("result", {}).get("isError"):
+            text = json.dumps(res["result"].get("structuredContent")) + " ".join(c.get("text", "") for c in res["result"].get("content", []))
+            # (pg_stat_statements is made once by the caller, as postgres_slow_queries says.)
+            if re.search(r"\b42[0-9A-Z]{3}: ", text) and "pg_stat_statements" not in text:
+                bad = f"its own SQL fails: {text[:200]}"
         if bad:
             fails.append(f"{t['name']} {json.dumps(args)}: {bad}")
         else:

@@ -450,6 +450,9 @@ impl Apps for FakeApps {
     async fn egress_refused(&self, _: &str) -> Vec<String> {
         Vec::new()
     }
+    async fn intercepted(&self, _: &str) -> Option<roll_previews::AppsIntercepted> {
+        None
+    }
 }
 
 /// roll secrets as previews see it: every `ensure` (environment, trusted). With `dynamic`, each

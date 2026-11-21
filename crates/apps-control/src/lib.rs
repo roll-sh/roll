@@ -169,6 +169,9 @@ pub struct AppsConfig {
     /// registries whose names resolve to one (local development and tests only:
     /// `ROLL_APPS_ALLOW_PRIVATE`).
     pub allow_private: bool,
+    /// An open daemon (no admin token: rolld's gate puts no `Operator` on a request): a request
+    /// that's neither a user's token nor a signed-in person's is the operator's, as roll-mcp reads it.
+    pub open: bool,
     /// PagerDuty's Events API v2 and Opsgenie's Alert API, per region (`us`, `eu`): fixed, never
     /// a tenant's URL ([`notify`]'s on-call targets). Tests point them at their own servers.
     pub oncall_apis: OncallApis,
@@ -207,6 +210,7 @@ impl AppsConfig {
             visitor_recheck: Duration::from_secs(300),
             otlp_base: None,
             allow_private: false,
+            open: false,
             oncall_apis: OncallApis::default(),
             spend_every: Duration::from_secs(30),
             cron_retry_after: Duration::from_secs(30),
@@ -362,6 +366,8 @@ pub struct Apps {
     site_loads: Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
     /// Environments in a crash loop whose event is written (one per loop).
     looping: Mutex<std::collections::HashSet<String>>,
+    /// Each metric alert's run of judgments past its threshold (`service/env/name/sum`).
+    metric_streaks: Mutex<std::collections::HashMap<String, u8>>,
     /// For notification targets: public addresses only, no redirects.
     notify_client: reqwest::Client,
     /// A static site's proxy rewrites to other sites (`_redirects`' `https://… 200`): public
@@ -667,6 +673,7 @@ impl Apps {
             edge_noted: Mutex::new(Default::default()),
             password_tries: Mutex::new(HashMap::new()),
             looping: Mutex::new(std::collections::HashSet::new()),
+            metric_streaks: Mutex::new(std::collections::HashMap::new()),
             client: hyper_util::client::legacy::Client::builder(hyper_util::rt::TokioExecutor::new()).pool_idle_timeout(Duration::from_secs(30)).build_http(),
             client_h2: hyper_util::client::legacy::Client::builder(hyper_util::rt::TokioExecutor::new()).pool_idle_timeout(Duration::from_secs(30)).http2_only(true).build_http(),
             stop: CancellationToken::new(),
@@ -3852,17 +3859,29 @@ impl Apps {
         }
         let seen = live.gate_gen();
         let (sid, e) = (live.service.clone(), live.env.clone());
-        let (row, traces) = self.db(move |s| Ok((s.environment(&sid, &e)?, s.traces_on(&sid, &e)?))).await?;
+        let (row, traces, file) = self.db(move |s| Ok((s.environment(&sid, &e)?, s.traces_on(&sid, &e)?, s.active_edge(&sid, &e)?))).await?;
         let allow = row.allow_ips.iter().filter_map(|r| r.cidr.parse::<ipnet::IpNet>().ok()).collect();
+        // What the live deployment's roll.toml adds: only ever tighter (`live::Gate`).
+        let file = file.map(|f| f.resolve(&row.name, row.ephemeral)).unwrap_or_default();
         // The environment's challenge key, made the first time a rule needs it (every node reads the same).
-        let challenge_key = match row.firewall.iter().any(|r| r.action == crate::model::FirewallAction::Challenge) {
+        let challenge_key = match row.firewall.iter().chain(&file.firewall).any(|r| r.action == crate::model::FirewallAction::Challenge) {
             true => {
                 let (k, v) = (format!("challenge_key:{}/{}", live.service, live.env), crate::model::random(32));
                 Some(self.db(move |s| s.state_or(&k, &v)).await?.into_bytes())
             }
             false => None,
         };
-        let g = Arc::new(live::Gate { maintenance: row.maintenance, allow, rate: row.rate_limit, firewall: row.firewall, pages: row.pages, preview: row.ephemeral, headers: row.headers, routes: row.routes, traces, vitals: row.vitals, challenge_key, split: row.split, mirror: row.mirror, snippets: snippets_of(&row.snippets) });
+        let g = Arc::new(live::Gate {
+            maintenance: row.maintenance,
+            allow,
+            rate: crate::model::RateLimit::stricter(row.rate_limit, file.rate_limit),
+            firewall: row.firewall,
+            file_firewall: file.firewall,
+            file_headers: file.headers,
+            pages: row.pages,
+            preview: row.ephemeral,
+            headers: row.headers,
+            routes: row.routes, traces, vitals: row.vitals, challenge_key, split: row.split, mirror: row.mirror, snippets: snippets_of(&row.snippets) });
         live.set_gate(g.clone(), seen);
         Ok(g)
     }

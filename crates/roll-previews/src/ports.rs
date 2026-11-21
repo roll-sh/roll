@@ -468,6 +468,11 @@ pub struct Target {
     /// With `egress` `roll`: the hosts outside roll it may still reach, through the preview's
     /// egress proxy.
     pub egress_hosts: Vec<String>,
+    /// With `egress` `roll`, for a backend that resolves the environment's secrets itself (roll
+    /// apps' `closed_by`): who its keys bound to hosts are used as, the person who last saved
+    /// the project's preview rules, or their token. None: nobody (the operator saved them), and
+    /// those keys are withheld. The runtime reads it itself ([`crate::Engine`]'s secrets).
+    pub maker: Option<String>,
     /// The `n`th rebuild a deploy hook asked for: built again at the same head with nothing
     /// cached (a static site reads its content at build time). roll apps builds with `no_cache`;
     /// the runtime builds at each start anyway.
@@ -760,6 +765,10 @@ pub trait Apps: Send + Sync {
     /// The hosts the preview's egress proxy refused lately (its project's `egress_hosts` don't
     /// list them), each once. No default, as `warm`.
     async fn egress_refused(&self, preview: &str) -> Vec<String>;
+    /// What a backend's own egress proxies swapped and refused for the preview's keys, where the
+    /// backend resolves its secrets itself (roll apps' `pv-` environments). None: nothing there.
+    /// No default, as `warm`.
+    async fn intercepted(&self, preview: &str) -> Option<crate::AppsIntercepted>;
     /// A login shell in the running service (started if it sleeps), `cols` by `rows`. `None`
     /// where this backend has none here: roll apps' services have roll apps' own shell, on
     /// their `pv-` environment.

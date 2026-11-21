@@ -344,6 +344,8 @@ mod finds {
             ("ask a person for an api key", "secrets_request_value"),
             ("who changed this secret and when", "secrets_audit"),
             ("one-time code", "secrets_totp"),
+            ("what's blocking my queries", "postgres_activity"),
+            ("is my database healthy", "postgres_health_checks"),
             ("archive my logs to an s3 bucket", "apps_add_drain"),
             ("which placeholders has my sandbox got", "secrets_list_placeholders"),
             ("vulnerabilities in my image", "apps_deploy_vulnerabilities"),
