@@ -691,6 +691,16 @@ impl Engine {
             if !local {
                 continue;
             }
+            // What roll apps' proxies did for its keys there, on its record (a refusal's reason
+            // can name a host its code chose: masked as its logs are).
+            let mut on_apps = self.apps.intercepted(&r.id).await;
+            if let Some(x) = on_apps.as_mut().filter(|x| !x.refused.is_empty()) {
+                match self.masks(&r.id).await {
+                    Ok(values) => x.refused = x.refused.iter().map(|h| code_preview::runner::mask(h, &values)).collect(),
+                    Err(_) => x.refused.clear(),
+                }
+            }
+            let _ = self.store.set_runtime_fact(&r.id, "intercepted_apps", on_apps.as_ref());
             let fresh: Vec<String> = {
                 let refused = self.apps.egress_refused(&r.id).await;
                 let mut told = self.egress_told.lock();

@@ -1360,6 +1360,13 @@ impl Apps {
                 log.line(format!("checking out {repo} at {}", &rev[..rev.len().min(12)]));
                 let sources = self.deps.sources.as_ref().ok_or_else(|| anyhow::anyhow!("roll code isn't on this node"))?;
                 sources.materialize(repo, rev, &tree).await?;
+                if svc.build.submodules.unwrap_or(false) {
+                    let allowed = svc.build.submodule_repos.clone().unwrap_or_default();
+                    let n = crate::submodules::fetch(sources.as_ref(), repo, rev, &tree, &allowed, self.cfg.allow_private).await?;
+                    if n > 0 {
+                        log.line(format!("fetched {n} submodule(s)"));
+                    }
+                }
                 root.clone()
             }
             (Source::Git { url, root }, _) => {

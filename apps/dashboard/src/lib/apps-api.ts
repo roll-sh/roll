@@ -51,8 +51,10 @@ export interface Build {
   timeout_s?: number;
   /** Its builder: small (2 vCPU, 4 GiB; default), medium (4, 8 GiB) or large (8, 16 GiB), minutes metered by size on the fleet. */
   size?: "small" | "medium" | "large";
-  /** A Git URL service's submodules fetched into the tree (default: left out). */
+  /** Submodules fetched into the tree (default: left out): a Git URL's, or a roll code repo's. */
   submodules?: boolean;
+  /** The private roll code repos (owner/name) a roll code repo's submodules may come from. */
+  submodule_repos?: string[];
   /** A Git URL service's Git LFS objects in place of their pointers (default: pointers as text). */
   lfs?: boolean;
 }

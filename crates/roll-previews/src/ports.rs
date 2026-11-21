@@ -765,6 +765,10 @@ pub trait Apps: Send + Sync {
     /// The hosts the preview's egress proxy refused lately (its project's `egress_hosts` don't
     /// list them), each once. No default, as `warm`.
     async fn egress_refused(&self, preview: &str) -> Vec<String>;
+    /// What a backend's own egress proxies swapped and refused for the preview's keys, where the
+    /// backend resolves its secrets itself (roll apps' `pv-` environments). None: nothing there.
+    /// No default, as `warm`.
+    async fn intercepted(&self, preview: &str) -> Option<crate::AppsIntercepted>;
     /// A login shell in the running service (started if it sleeps), `cols` by `rows`. `None`
     /// where this backend has none here: roll apps' services have roll apps' own shell, on
     /// their `pv-` environment.
