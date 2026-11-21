@@ -1661,6 +1661,9 @@ pub struct Environment {
     pub traces: bool,
     /// Its pages measure their Web Vitals for roll (`…/vitals`).
     pub vitals: bool,
+    /// Days its logs (output, requests, traces, events and Vitals) are kept: 7 (the default),
+    /// 30 or 90 (Railway's, Render's longer retention); a preview's are 7.
+    pub log_retention_days: u32,
     /// Its deploys are reported to the Git host (commit statuses, GitHub Deployments); false:
     /// someone else reports them (roll previews, for its `pv-` environments: one voice on a
     /// pull request).
@@ -2780,6 +2783,9 @@ pub struct VarView {
     /// Kept as a file at this path in its instances (not in their environment).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub file: Option<String>,
+    /// Only its instances get it, never a build's steps.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub runtime_only: bool,
 }
 
 /// An environment's own HTML for roll's pages (Heroku's `ERROR_PAGE_URL` and
