@@ -2451,6 +2451,101 @@ pub fn inserted_stored(t: &Table, len: usize, ctx: &ExecCtx) -> Option<bool> {
     Some(r)
 }
 
+/// What `inserted_stored_modelled` did with a row.
+pub enum StoredPlace {
+    /// Placed in the model: its TID (None: as `inserted_with` leaves a row whose table's heap
+    /// went just then, stored without one).
+    Modelled(Option<Tid>),
+    /// The table is past the model's size: nothing placed, for the caller to place the row
+    /// in the estimate (`inserted_stored`).
+    Estimated,
+}
+
+/// `inserted_with` of a row going in as stored (an INSERT … SELECT's, `StoredInsert`) into
+/// table `t` without indexes, whose tuple length `len` (`stored_tuple_len`) is at most
+/// `TOAST_THRESHOLD`: placed as `inserted_with` places such a row, with no value out of line
+/// and no index or GiST entry. (`note_compression_len` records nothing for it: its values come
+/// from a table that never stored one compressed or out of line, `Node::each_stored`, so none
+/// was read from a compressed datum, and the tuple is too short to compress.)
+pub fn inserted_stored_modelled(t: &Table, key: &[u8], len: usize, ctx: &ExecCtx) -> Result<StoredPlace> {
+    debug_assert!(len <= TOAST_THRESHOLD);
+    if !ensure(t, &[], ctx)? {
+        return Ok(StoredPlace::Estimated);
+    }
+    let txn = ctx.txn.borrow().id;
+    let db = &ctx.sess.db;
+    // (A COPY's multi-insert buffer on this thread for the table: the row waits in it.)
+    if with_batch((db.instance, t.oid, txn), |b| {
+        b.rows.push(Pending { key: key.to_vec(), len, exts: Vec::new(), entries: Vec::new(), gist: Vec::new() });
+    })
+    .is_some()
+    {
+        return Ok(StoredPlace::Modelled(None));
+    }
+    let xid = ctx.txn.borrow_mut().cur_xid();
+    let cid = ctx.txn.borrow_mut().output_cid();
+    let xids = db.xids();
+    let v = vis_of(xids, t, ctx);
+    let big;
+    let tid = {
+        let mut rf = db.relfiles.of(t.oid).write();
+        let RelFiles { heaps, btrees, bulk, .. } = &mut *rf;
+        if !heaps.contains_key(&t.oid) {
+            return Ok(StoredPlace::Modelled(None));
+        }
+        let b = bulk.get_mut(&(t.oid, txn));
+        // (As `inserted_with`: the rows of a load deferring its model wait for its end.)
+        if let Some(Bulk { defer: Some(d), mode, .. }) = b
+            && d.deferring()
+        {
+            if d.batches.is_empty() {
+                d.batches.push(Vec::new());
+            }
+            d.batches[0].push(Pending {
+                key: key.to_vec(),
+                len,
+                exts: Vec::new(),
+                entries: Vec::new(),
+                gist: Vec::new(),
+            });
+            d.rows += 1;
+            (d.xid, d.cid) = (xid, cid);
+            let Some(heap) = heaps.get_mut(&t.oid) else {
+                return Ok(StoredPlace::Modelled(None));
+            };
+            if heap.versions() + d.rows <= max_versions() {
+                return Ok(StoredPlace::Modelled(None));
+            }
+            let (est, entries) = past_model(heap, btrees, d, mode);
+            drop(rf);
+            untrack(db, t, Some(est));
+            est_inserted(db, t.oid, entries);
+            return Ok(StoredPlace::Modelled(None));
+        }
+        let mut single = InsertMode::single();
+        let mode = match b {
+            Some(b) => {
+                if let Some(d) = &mut b.defer {
+                    d.modelled += 1;
+                }
+                &mut b.mode
+            }
+            None => &mut single,
+        };
+        let Some(heap) = heaps.get_mut(&t.oid) else {
+            return Ok(StoredPlace::Modelled(None));
+        };
+        let tid = heap.insert(key, len, xid, cid, mode);
+        heap.settle_left(&v);
+        big = heap.versions() > max_versions();
+        tid
+    };
+    if big {
+        untrack(db, t, None);
+    }
+    Ok(StoredPlace::Modelled(Some(tid)))
+}
+
 /// The row `inserted_stored` took, which began a run of the heap order's places, went in
 /// under `key`.
 pub fn stored_run_key(t: &Table, key: &[u8], db: &Database) {

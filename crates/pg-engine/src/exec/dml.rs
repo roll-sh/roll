@@ -3912,8 +3912,9 @@ pub static STORED_INSERTS: crate::counter::Counter = crate::counter::Counter::ne
 /// A plain INSERT … SELECT whose source hands out a table's rows as stored
 /// (`Node::each_stored`: its columns as they are, which are the target's, of the same types)
 /// into a table keyed by row ids without indexes, CHECK constraints, domains, RLS or a
-/// change stream, past its size model: each row's stored values go in as they are under a
-/// new header, without being decoded and encoded again (`insert`).
+/// change stream: each row's stored values go in as they are under a new header (with the
+/// TID the target's model gives it, while modelled), without being decoded and encoded again
+/// (`insert`).
 struct StoredInsert {
     /// The target is past its model now (`sizing::is_estimated`): it stays so.
     estimated: std::cell::Cell<bool>,
@@ -3949,15 +3950,14 @@ impl StoredInsert {
 
     /// A stored row of the source in (`plain_counts` counting it): false when it can't go in
     /// as stored (a NULL in a NOT NULL column, a value out of line or long enough that it
-    /// might go out of line, a row stored before a column was added, a modelled table), for
-    /// the caller to insert decoded.
+    /// might go out of line, a row stored before a column was added), for the caller to
+    /// insert decoded.
     fn insert(&self, plan: &InsertPlan, bytes: &[u8], plain_counts: &std::cell::Cell<i64>, ctx: &ExecCtx) -> Result<bool> {
         let t = &plan.rules.table;
-        // (A modelled target places each row in its model: decoded.)
         if !self.estimated.get() {
             self.estimated.set(super::sizing::is_estimated(t.oid, &ctx.sess.db));
         }
-        if !self.estimated.get() || crate::storage::toast::has_external(bytes) {
+        if crate::storage::toast::has_external(bytes) {
             return Ok(false);
         }
         let data = super::scan::row_data(bytes)?;
@@ -3972,20 +3972,53 @@ impl StoredInsert {
         let Some(len) = crate::storage::row::stored_tuple_len_with(data, &self.types, &self.none, fits) else {
             return Ok(false);
         };
-        let Some(run) = super::sizing::inserted_stored(t, len, ctx) else {
+        if len > super::sizing::TOAST_THRESHOLD {
             return Ok(false);
-        };
-        let rowid = ctx.sess.db.nextval_by_one(t.oid, || crate::session::ddl::rowid_sequence(t))?;
-        let dkey = data_key(t, &[], Some(rowid));
-        if run {
-            super::sizing::stored_run_key(t, &dkey, &ctx.sess.db);
         }
+        // A modelled target places the row in its model as `plain_row` would (`inserted_with`),
+        // the row stored with its TID; one past the model, in its estimate.
+        let (dkey, tid) = if self.estimated.get() {
+            let Some(run) = super::sizing::inserted_stored(t, len, ctx) else {
+                return Ok(false);
+            };
+            let rowid = ctx.sess.db.nextval_by_one(t.oid, || crate::session::ddl::rowid_sequence(t))?;
+            let dkey = data_key(t, &[], Some(rowid));
+            if run {
+                super::sizing::stored_run_key(t, &dkey, &ctx.sess.db);
+            }
+            (dkey, None)
+        } else {
+            let rowid = ctx.sess.db.nextval_by_one(t.oid, || crate::session::ddl::rowid_sequence(t))?;
+            let dkey = data_key(t, &[], Some(rowid));
+            match super::sizing::inserted_stored_modelled(t, &dkey, len, ctx)? {
+                super::sizing::StoredPlace::Modelled(tid) => (dkey, tid),
+                // (It went past the model with the row before: placed in the estimate, as
+                // `plain_row`'s `untracked_write` places it.)
+                super::sizing::StoredPlace::Estimated => {
+                    self.estimated.set(true);
+                    if super::sizing::inserted_stored(t, len, ctx) == Some(true) {
+                        super::sizing::stored_run_key(t, &dkey, &ctx.sess.db);
+                    }
+                    (dkey, None)
+                }
+            }
+        };
         plain_counts.set(plain_counts.get() + 1);
         let mut txn = ctx.txn.borrow_mut();
         let xid = txn.cur_xid();
-        let mut row = Vec::with_capacity(data.len() + 10);
-        row.push(crate::storage::row::ROW_HEADER);
-        crate::storage::sst::put_varint(&mut row, xid);
+        let mut row = Vec::with_capacity(data.len() + 31);
+        match tid {
+            Some((block, off)) => {
+                row.push(crate::storage::row::ROW_HEADER_TID);
+                crate::storage::sst::put_varint(&mut row, xid);
+                crate::storage::sst::put_varint(&mut row, block as u64);
+                crate::storage::sst::put_varint(&mut row, off as u64);
+            }
+            None => {
+                row.push(crate::storage::row::ROW_HEADER);
+                crate::storage::sst::put_varint(&mut row, xid);
+            }
+        }
         row.extend_from_slice(data);
         txn.put_fresh(dkey, row)?;
         STORED_INSERTS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
