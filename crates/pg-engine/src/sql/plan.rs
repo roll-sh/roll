@@ -447,6 +447,10 @@ pub struct JoinMeta {
     /// (in their order). process_equivalence met them so: the join search's equivalence
     /// classes list their members in that order (`Search::ec_members`).
     pub ec_written: Vec<crate::sql::expr::Expr>,
+    /// An outer join's ON clause's equalities as written, over the join's row: its
+    /// `ec_written` once reduce_outer_joins makes it an inner join (deconstruct_jointree
+    /// then distributes them as an inner join's, before the WHERE's).
+    pub on_written: Vec<crate::sql::expr::Expr>,
     /// A semi join's right side's columns its join relation's reltarget still has (an
     /// equivalence class's member needed at a join above, generate_base_implied_equalities'
     /// add_vars_to_targetlist over ec_relids): their widths, part of the join's width though

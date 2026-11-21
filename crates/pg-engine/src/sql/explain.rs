@@ -4375,14 +4375,9 @@ fn strip_relabel(e: &Expr) -> &Expr {
         Expr::Relabel(x, _) | Expr::Collate(x, ..) => strip_relabel(x),
         // (A hash key under a nondeterministic collation: its column's statistics.)
         Expr::Call(d, a, _) if d.name == crate::sql::binder::NONDETERMINISTIC_HASH => strip_relabel(&a[0]),
-        Expr::Cast(x, from, to, false)
-            if matches!(
-                (from, to),
-                (DataType::Varchar(_) | DataType::Name | DataType::Text, DataType::Text | DataType::Varchar(_))
-            ) =>
-        {
-            strip_relabel(x)
-        }
+        // (A binary-coercible cast is a RelabelType, examine_variable's: `char(1)` to
+        // `bpchar` dropping the length, `varchar` to `text`.)
+        Expr::Cast(x, from, to, _) if costs::binary_coercible(from, to) => strip_relabel(x),
         e => e,
     }
 }

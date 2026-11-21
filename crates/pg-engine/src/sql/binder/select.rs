@@ -6633,8 +6633,8 @@ impl Binder<'_, '_> {
                 }
                 c => (rp, c),
             };
-            let on_written = match (&cond, kind) {
-                (Some(c), JoinKind::Inner) if !self.deparse => {
+            let on_written = match &cond {
+                Some(c) if !self.deparse => {
                     let mut parts = Vec::new();
                     optimize::conjuncts(c.clone(), &mut parts);
                     optimize::written_equalities(&parts)
@@ -6695,12 +6695,16 @@ impl Binder<'_, '_> {
             };
             // (JOIN syntax: its sides are one join problem only within join_collapse_limit.)
             let mut plan = plan;
-            if kind == JoinKind::Inner
-                && let Plan::Join { kind: JoinKind::Inner, meta, nleft: nl, .. } = &mut plan
+            if let Plan::Join { kind: k, meta, nleft: nl, .. } = &mut plan
+                && *k == kind
                 && *nl == nleft
             {
-                meta.explicit = true;
-                meta.ec_written = on_written;
+                if kind == JoinKind::Inner {
+                    meta.explicit = true;
+                    meta.ec_written = on_written;
+                } else {
+                    meta.on_written = on_written;
+                }
             }
             if !self.deparse {
                 self.note_semi_joins(&plan);

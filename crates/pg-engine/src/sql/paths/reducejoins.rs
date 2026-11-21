@@ -506,6 +506,13 @@ impl Planner<'_, '_> {
             let r = std::mem::replace(take(right), Plan::One);
             let mut m = std::mem::take(meta);
             m.written_kind = m.written_kind.or(Some(old));
+            // (Its ON clause's equalities are an inner join's now: process_equivalence
+            // meets them before a WHERE's the FROM list's top join carries.)
+            if k == JoinKind::Inner {
+                let mut w = std::mem::take(&mut m.on_written);
+                w.append(&mut m.ec_written);
+                m.ec_written = w;
+            }
             let old_hash = hash.take();
             let mut j = join(&self.cat, k, l, r, cond.take(), params.clone(), nl, nr);
             if let Plan::Join { meta: jm, hash: h, .. } = &mut j {

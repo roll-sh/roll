@@ -1,0 +1,57 @@
+> create table a274a (code char primary key)
+-- CREATE TABLE
+
+> create table a274b (a char not null, num int not null, primary key (a, num))
+-- CREATE TABLE
+
+> create table a274c (name char primary key, a char)
+-- CREATE TABLE
+
+> explain select * from a274c left join a274a on a274c.a = a274a.code left join a274b on a274a.code = a274b.a
+QUERY PLAN:text
+Hash Right Join  (cost=117.34..172.09 rows=1850 width=36)
+  Hash Cond: (a274b.a = a274a.code)
+  ->  Seq Scan on a274b  (cost=0.00..30.40 rows=2040 width=12)
+  ->  Hash  (cost=94.22..94.22 rows=1850 width=24)
+        ->  Hash Left Join  (cost=60.85..94.22 rows=1850 width=24)
+              Hash Cond: (a274c.a = a274a.code)
+              ->  Seq Scan on a274c  (cost=0.00..28.50 rows=1850 width=16)
+              ->  Hash  (cost=32.60..32.60 rows=2260 width=8)
+                    ->  Seq Scan on a274a  (cost=0.00..32.60 rows=2260 width=8)
+-- EXPLAIN
+
+> explain select * from a274c left join a274a on a274c.a = a274a.code join a274b on a274a.code = a274b.a
+QUERY PLAN:text
+Hash Join  (cost=122.12..174.25 rows=18870 width=36)
+  Hash Cond: (a274c.a = a274a.code)
+  ->  Seq Scan on a274c  (cost=0.00..28.50 rows=1850 width=16)
+  ->  Hash  (cost=96.62..96.62 rows=2040 width=20)
+        ->  Hash Join  (cost=60.85..96.62 rows=2040 width=20)
+              Hash Cond: (a274b.a = a274a.code)
+              ->  Seq Scan on a274b  (cost=0.00..30.40 rows=2040 width=12)
+              ->  Hash  (cost=32.60..32.60 rows=2260 width=8)
+                    ->  Seq Scan on a274a  (cost=0.00..32.60 rows=2260 width=8)
+-- EXPLAIN
+
+> create table a274ai (code int primary key)
+-- CREATE TABLE
+
+> create table a274bi (a int not null, num int not null, primary key (a, num))
+-- CREATE TABLE
+
+> create table a274ci (name int primary key, a int)
+-- CREATE TABLE
+
+> explain select * from a274ci left join a274ai on a274ci.a = a274ai.code join a274bi on a274ai.code = a274bi.a
+QUERY PLAN:text
+Hash Join  (cost=134.17..195.27 rows=25538 width=20)
+  Hash Cond: (a274ci.a = a274ai.code)
+  ->  Seq Scan on a274ci  (cost=0.00..32.60 rows=2260 width=8)
+  ->  Hash  (cost=105.92..105.92 rows=2260 width=12)
+        ->  Hash Join  (cost=67.38..105.92 rows=2260 width=12)
+              Hash Cond: (a274bi.a = a274ai.code)
+              ->  Seq Scan on a274bi  (cost=0.00..32.60 rows=2260 width=8)
+              ->  Hash  (cost=35.50..35.50 rows=2550 width=4)
+                    ->  Seq Scan on a274ai  (cost=0.00..35.50 rows=2550 width=4)
+-- EXPLAIN
+

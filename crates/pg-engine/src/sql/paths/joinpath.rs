@@ -7351,6 +7351,7 @@ impl Search<'_, '_, '_> {
                         from_call: None,
                         hash_swapped: Vec::new(),
                         ec_written: Vec::new(),
+                        on_written: Vec::new(),
                         fdw_alt: Default::default(),
                         par_alt: Default::default(),
                         par_alt_cost: Default::default(),

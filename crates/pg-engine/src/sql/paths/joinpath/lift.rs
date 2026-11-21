@@ -1261,6 +1261,7 @@ fn lift(
             meta2.pushed = remap_cols(&meta.pushed);
             // (The equalities as written over the new row: a subquery's output its expression.)
             meta2.ec_written = meta.ec_written.iter().map(|e| subst(e, &map)).collect();
+            meta2.on_written = meta.on_written.iter().map(|e| subst(e, &map)).collect();
             // (Its relations the group's now; a LATERAL subquery pulled up into the right
             // side, whose values its relations still read.)
             meta2.lateral_sub = false;
@@ -1492,6 +1493,7 @@ fn lift(
             meta2.kept = remap_cols(&meta.kept);
             meta2.pushed = remap_cols(&meta.pushed);
             meta2.ec_written = meta.ec_written.iter().map(|e| subst(e, &map)).collect();
+            meta2.on_written = meta.on_written.iter().map(|e| subst(e, &map)).collect();
             (
                 Plan::Join {
                     kind: *kind,

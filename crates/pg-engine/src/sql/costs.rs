@@ -675,7 +675,7 @@ pub(crate) fn io_cast(from: &DataType, to: &DataType) -> bool {
     (string(to) && !(with_function(from) && !matches!(from, T::Regclass))) || (string(from) && !with_function(to))
 }
 
-fn binary_coercible(from: &DataType, to: &DataType) -> bool {
+pub(crate) fn binary_coercible(from: &DataType, to: &DataType) -> bool {
     use DataType as T;
     // (pg_cast's castmethod 'b': integer, oid and the reg* types among themselves, through
     // integer or oid, and regproc / regprocedure, regoper / regoperator.)
