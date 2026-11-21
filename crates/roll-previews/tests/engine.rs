@@ -1263,8 +1263,12 @@ async fn a_roll_only_preview_takes_placeholders_made_by_who_saved_its_rules() {
     let _ = e.engine.env(&p.id, "web").await;
     assert_eq!(asked(), 0);
     e.engine.store.set_rules_maker(&e.project, Some("usr_b")).unwrap();
+    // One key bound to a host its egress allows and one it doesn't: the second is said.
+    *e.secrets.placeholder_hosts.lock() = vec![("STRIPE_KEY".into(), vec!["api.stripe.com".into(), "api.other.example".into()])];
     let _ = e.engine.env(&p.id, "web").await;
     assert_eq!(e.secrets.placeholders.lock().last().cloned(), Some((roll_previews::ports::intercept_consumer(&p.id), "usr_b".to_string())));
+    let said: Vec<String> = e.engine.store.activity(&p.id).unwrap().into_iter().map(|a| a.message).collect();
+    assert!(said.iter().any(|m| m.contains("its egress doesn't allow") && m.contains("STRIPE_KEY → api.other.example") && !m.contains("api.stripe.com")), "{said:?}");
     // Its CA changes (a key's bound hosts did): its services restart, trusting the new one.
     struct Ca(parking_lot::Mutex<String>);
     struct Nothing;

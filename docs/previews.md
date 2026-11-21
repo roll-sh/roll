@@ -764,8 +764,9 @@ this: they get no secrets, or all of them.
 
 - `egress_hosts` decides first. A key's bound hosts never open egress by themselves: a fork's
   preview reaches a bound host only when the project lists it too (agreed with roll secrets), and
-  the preview's status names a key bound to a host its egress doesn't allow, so a call that fails
-  says why.
+  its activity names a key bound to a host its egress doesn't allow ("keys bound to hosts its
+  egress doesn't allow (add them to egress_hosts, or calls there fail): STRIPE_KEY →
+  api.stripe.com", once until it changes), so a call that fails says why.
 - For a host the preview's interception CA (#517) covers, `egress.js` hands the client's
   connection to rolld over a unix socket in the preview's own directory, mounted into the egress
   container (containers can't reach the host's TCP ports on ai-server, and no port is opened).
