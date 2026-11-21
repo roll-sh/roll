@@ -770,7 +770,8 @@ deterministic (#396).
    remote cluster's indices, copies mappings, settings and aliases, reindexes with progress
    (`_tasks`), and switches an alias when done. Algolia's export (records, synonyms, rules)
    mapped onto indices, synonym sets and query rules after that.
-3. **One memory account per request** (in progress; Elasticsearch charges every request's
+3. **One memory account per request** (in progress: ES|QL and aggregations against a node budget
+   no tenant setting can raise in #549, Painless per execution, and a node-wide body budget; Elasticsearch charges every request's
    memory to its circuit breakers, ES|QL's blocks included, and Elastic Cloud's per-deployment
    limits hold because of it). roll serves many tenants per node, so a request whose memory the
    breakers don't see is a way for one tenant to stop everyone's searches. Today's reviews found
@@ -876,7 +877,8 @@ deterministic (#396).
    like ILM (an idle cluster pays nothing between syncs), with `_connector/_sync_job` rows as
    Elasticsearch keeps them; `postgresql` (full and incremental) and `s3` first, reaching a
    person's own roll Postgres or storage through a link instead of copied credentials.
-8. **Semantic search with no keys** (in progress; Elastic Cloud's `.multilingual-e5-small-elasticsearch`
+8. **Semantic search with no keys** (built in #563, in review: roll's float build of E5 equals
+   Elasticsearch's float deployment, cosine 1.000000 on 64 of 64 cases; Elastic Cloud's `.multilingual-e5-small-elasticsearch`
    and Elastic Inference Service, Typesense's and Meilisearch's built-in embedding models,
    Algolia's NeuralSearch): every `semantic_text` field and `text_embedding` endpoint on roll needs
    the customer's own provider key today, so the first semantic search means an OpenAI or Cohere
@@ -900,8 +902,10 @@ deterministic (#396).
    against a real bucket (it plans and answers without touching one), multipart uploads and a
    `chunk_size` setting (a chunk is ~8 MiB; one object per chunk), the `gcs` and `azure` types,
    `max_snapshot_bytes_per_sec`/`max_restore_bytes_per_sec` throttling of bucket traffic, and
-   credentials from roll secrets instead of the repository's settings. Restoring from a snapshot
-   Elasticsearch wrote: feasible but not built. It means reading Elasticsearch's repository
+   credentials from roll secrets instead of the repository's settings (landed in #361: `roll://ENV/KEY`
+   references, the maker checked again on every use). Restoring from a snapshot Elasticsearch wrote:
+   in progress (read-only foreign repositories, `_source` read from the Lucene stored fields and
+   reindexed). It means reading Elasticsearch's repository
    (`index-N`, `snap-*.dat`, `meta-*.dat`, shard `index-*`/`snap-*.dat`: SMILE inside Lucene
    codec headers, DEFLATE-compressed) and each shard's Lucene files (segment infos, field infos,
    compound files, LZ4/DEFLATE stored fields for `_id`, `_routing`, `_source`, numeric doc values
@@ -1012,7 +1016,7 @@ deterministic (#396).
    it for in search, and the rest is a product of its own. Left: `_ignored_source`'s storage
    cost (its values are stored twice; measure on a logs corpus); downsample's last one (allocation filtering). In the opensearch dialect, pick
    `auto_date_histogram`'s rounding from the bounds as OpenSearch's rewrite does where it differs
-   from collecting (roll counts with Elasticsearch's choice in both dialects). In review: `rank_vectors`
+   from collecting (roll counts with Elasticsearch's choice in both dialects). Landed: `rank_vectors`
    (#496: platinum 1,065 → 1,080).
 13. **Language analysis: what's left.** Every analysis plugin Elastic Cloud ships runs now (42 of 42
    tests). Landed: `analysis-phonetic` (every encoder, Commons Codec's algorithms ported: identical
@@ -1135,7 +1139,11 @@ deterministic (#396).
    take over a second, and the test still lost 1 run in 10 (at host loads 63-81; the old build
    passed 10 of 10 there, but at loads 18-50). The suite's minimum (108) holds on a rerun, and
    that load is much harsher than CI's.
-20. **Security**: a second review of what landed since the first (the `_inference` API, `semantic_text`,
+20. **Security**: a third, whole-product review on 2026-11-20 (main at 21708aef1) found no
+   cross-tenant reach through branches, links or internal calls. Being fixed: Painless memory per
+   execution, aggregation memory across the node (#549), observations keyed by name (a reused
+   cluster name saw the old one's slow log), a node-wide body budget, and the console answering
+   credentials under `admin`. Before it, a second review of what landed since the first (the `_inference` API, `semantic_text`,
    the new retrievers, workflow-restricted keys, service tokens, OpenSearch Security's new
    endpoints, ES|QL's new functions) landed in 7288684b9: `semantic_text` under field level
    security (queries and the semantic highlighter, `copy_to` sources included), an inference key
