@@ -3523,7 +3523,10 @@ impl Scan {
         e.extend_from_slice(end);
         self.merge = Merge::new(sources, e);
         self.rdels = rdel::RangeDels::new(self._view.rdels.relevant(start, end, ts));
-        self.decided = None;
+        // (Its buffer kept: an empty key is none decided, as `fill_batch_with` leaves it.)
+        if let Some(d) = &mut self.decided {
+            d.clear();
+        }
         self.decided_ts = 0;
         self.skipped = 0;
         self.newer = None;
