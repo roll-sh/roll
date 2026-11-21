@@ -6062,7 +6062,7 @@ and webhooks' and review apps' signing secrets sealed. Still open:
   - search: `fix/search-security-1120` and #318;
   - roll code: done, #627 (4af6bb3b5). Webhooks' and review apps' URLs are sealed, nothing is made
     without `ROLL_SECRET_KEY`, and an upgraded database keeps no clear URL or secret.
-- **Batch 6's follow-ups:** #582, gated green. A consumer's CAs end as soon as it loses a host;
+- **Batch 6's follow-ups: landed**, #582 (32dd78392). A consumer's CAs end as soon as it loses a host;
   `maker_unreachable` (403) when a placeholder's or a chosen reference's maker no longer reaches it;
   a decoy planted from a session mails that person.
 - **The #432 decoy oracle:** fixed, #575 (8e16604f2). Compute images are pinned by digest, and each
