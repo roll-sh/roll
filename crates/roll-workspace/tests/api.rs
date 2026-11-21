@@ -10,6 +10,7 @@ use tower::ServiceExt;
 
 struct Api {
     router: Router,
+    ws: Arc<roll_workspace::Workspace>,
     _dir: tempfile::TempDir,
 }
 
@@ -18,8 +19,8 @@ impl Api {
         let dir = tempfile::tempdir().unwrap();
         let target = code_sql::Target::Sqlite(dir.path().join("workspace.db"));
         let db = code_sql::Db::open_or_test(&target, "workspace").unwrap();
-        let ws = roll_workspace::Workspace::new(db).unwrap();
-        Api { router: roll_workspace::router(Arc::new(ws)), _dir: dir }
+        let ws = Arc::new(roll_workspace::Workspace::new(db).unwrap());
+        Api { router: roll_workspace::router(ws.clone()), ws, _dir: dir }
     }
 
     async fn call(&self, method: Method, path: &str, body: Option<Value>) -> (StatusCode, Value) {
@@ -211,4 +212,44 @@ fn projects_from_before_owners_become_the_operators() {
         // Opening again finds the new tables and leaves them be.
         assert_eq!(roll_workspace::Workspace::new(db).unwrap().list(roll_workspace::Scope::All).unwrap().len(), 1);
     }
+}
+
+#[tokio::test]
+async fn a_product_may_refuse_a_delete_and_a_deleted_project_comes_back_with_its_canvas() {
+    let api = Api::new();
+    let p = api.create("shop").await;
+    let id = p["id"].as_str().unwrap().to_string();
+    let (s, _) = api.call(Method::PUT, &format!("/v1/workspace/projects/{id}/resources/bucket/assets"), Some(json!({ "x": 1, "y": 2 }))).await;
+    assert_eq!(s, StatusCode::OK);
+    // A product's no, answered as it gave it, until the request carries what it asks for.
+    api.ws.before_delete(Box::new(|d| match d.request.uri.query() {
+        Some("confirm=shop") => Ok(()),
+        _ => Err(roll_workspace::Refusal { status: 409, code: "holds_things".into(), message: format!("{} holds things", d.project.name) }),
+    }));
+    let told = Arc::new(std::sync::Mutex::new(vec![]));
+    let t = told.clone();
+    api.ws.on_delete(Box::new(move |d| t.lock().unwrap().push(d.project.id.clone())));
+    let (s, e) = api.call(Method::DELETE, &format!("/v1/workspace/projects/{id}"), None).await;
+    assert_eq!((s, e["code"].as_str(), e["error"].as_str()), (StatusCode::CONFLICT, Some("holds_things"), Some("shop holds things")));
+    assert!(told.lock().unwrap().is_empty());
+    assert_eq!(api.call(Method::GET, &format!("/v1/workspace/projects/{id}"), None).await.0, StatusCode::OK);
+    let (s, _) = api.call(Method::DELETE, &format!("/v1/workspace/projects/{id}?confirm=shop"), None).await;
+    assert_eq!(s, StatusCode::NO_CONTENT);
+    assert_eq!(*told.lock().unwrap(), vec![id.clone()]);
+    assert_eq!(api.call(Method::GET, &format!("/v1/workspace/projects/{id}"), None).await.0, StatusCode::NOT_FOUND);
+    assert_eq!(api.ws.deleted(&id).unwrap().unwrap().resources.len(), 1);
+
+    // Its name taken meanwhile: not restored over another project.
+    let other = api.create("shop").await;
+    assert!(matches!(api.ws.restore(&id), Err(roll_workspace::Error::Conflict(_))));
+    let (s, _) = api.call(Method::PATCH, &format!("/v1/workspace/projects/{}", other["id"].as_str().unwrap()), Some(json!({ "name": "shop-2" }))).await;
+    assert_eq!(s, StatusCode::OK);
+    let back = api.ws.restore(&id).unwrap();
+    assert_eq!((back.name.as_str(), back.resources.len(), back.resources[0].x), ("shop", 1, 1.0));
+    assert!(api.ws.deleted(&id).unwrap().is_none());
+    // Once a product purged it, it's gone for good.
+    let (s, _) = api.call(Method::DELETE, &format!("/v1/workspace/projects/{id}?confirm=shop"), None).await;
+    assert_eq!(s, StatusCode::NO_CONTENT);
+    api.ws.forget_deleted(&id).unwrap();
+    assert!(matches!(api.ws.restore(&id), Err(roll_workspace::Error::NotFound(_))));
 }

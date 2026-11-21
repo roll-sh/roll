@@ -398,3 +398,26 @@ async fn a_sealed_rolld_runs_nothing_that_needs_the_key_until_its_shares_unseal_
         tokio::time::sleep(Duration::from_millis(200)).await;
     }
 }
+
+/// rolld wires roll secrets into the workspace's deletes: a project holding secrets is refused
+/// until a secrets admin confirms, then its secrets wait out the operator's window, unreadable,
+/// and come back with the workspace project.
+#[tokio::test]
+async fn a_workspace_delete_asks_roll_secrets_first_and_keeps_the_secrets_for_its_window() {
+    const KEY: &str = "fake-deployment-key-for-the-delete-window-test-0000";
+    let r = Rolld::start_in(Arc::new(tempfile::tempdir().unwrap()), "search", false, &[("ROLL_SECRET_KEY", KEY), ("ROLL_SECRETS_DELETE_WINDOW_DAYS", "3")], "/v1/info").await;
+    let p = Project::new(&r).await;
+    r.call(reqwest::Method::PUT, &format!("/v1/secrets/projects/{}/environments/production/secrets/API_KEY", p.id), Some(json!({ "value": "kept-through-the-window" }))).await;
+    let send = |method: reqwest::Method, path: String| r.http.request(method, format!("{}{path}", r.api)).bearer_auth(TOKEN).send();
+    let a = send(reqwest::Method::DELETE, format!("/v1/workspace/projects/{}", p.id)).await.unwrap();
+    assert_eq!(a.status(), 409);
+    assert_eq!(a.json::<Value>().await.unwrap()["code"], "project_holds_secrets");
+    let a = send(reqwest::Method::DELETE, format!("/v1/workspace/projects/{}?confirm=shop", p.id)).await.unwrap();
+    assert_eq!(a.status(), 204);
+    let a = send(reqwest::Method::GET, format!("/v1/secrets/projects/{}/environments/production/values?path=/", p.id)).await.unwrap();
+    assert_eq!(a.status(), 404, "read by nobody in the window");
+    let deleted = r.get("/v1/secrets/deleted").await;
+    assert_eq!(deleted[0]["purge_at"].as_i64().unwrap() - deleted[0]["deleted_at"].as_i64().unwrap(), 3 * 86_400_000, "{deleted}");
+    r.post(&format!("/v1/secrets/projects/{}/recover", p.id), json!({})).await;
+    assert_eq!(p.value("API_KEY").await, "kept-through-the-window");
+}

@@ -372,7 +372,8 @@ impl crate::Secrets {
                 Some(pull) => format!("an emergency rotation of the audit log's digest key: {kid} signs now, and {pull} was pulled (its digests vouch for nothing; the next digest covers them)"),
                 None => format!("a rotation of the audit log's digest key: {kid} signs now"),
             };
-            for project in c.query("SELECT project_id FROM projects WHERE forgotten_at IS NULL", (), |r| r.get::<_, String>(0))? {
+            // A deleted project's chain is signed until its closing digest (deleted.rs).
+            for project in c.query("SELECT project_id FROM projects WHERE closed_at IS NULL", (), |r| r.get::<_, String>(0))? {
                 crate::audit::record(c, keys, &project, caller, "audit.key.rotate", None, None, &[], &summary, now)?;
             }
             Ok(())
