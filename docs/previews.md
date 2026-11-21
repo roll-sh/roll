@@ -2295,22 +2295,26 @@ Ranked by what a person notices first. Done so far:
    secrets' #520 and #517, its batch 6): see "Keys a preview never holds". Built: the swap, the
    handoff, the runtime's socket and the services' trust, bounded per preview after review. Next:
    the live check end to end.
-3. **In review as turn 15**: the gone page tested at the edge (#559), the live check's leaked
-   roll apps build networks (#567: the closed build's egress proxy removed, "Roll only" waiting for
-   a deployment made closed), and `@roll preview` in any of a change's threads with
-   `Reveal::still`'s trust tested (#568).
-4. **A preview's activity in the pull request** (Vercel's deployment log link, Render's events):
-   the comment's line for a failed deploy names its step and links the sheet's log at that step;
-   today a failure says the step's last line only.
-5. **Ask the preview from the pull request**: `@roll preview why` answers why the latest deploy
-   failed or what changed against main's preview (its regressions, slower routes, new errors),
-   from what previews already keep, no model call.
+3. **Credentials at rest, in review** (#581, roll secrets' thirty-fourth review): the rules'
+   pasted values, a preview's own variables and the screenshot links' key sealed with the
+   deployment key, refused in the clear without one, an upgraded database sealed with nothing
+   left in its file or WAL.
+4. **The live check of keys a fork's preview never holds**: a token saving the rules (the maker),
+   a key bound to a local TLS echo host (`ROLL_PREVIEWS_INTERCEPT_ALLOW_PRIVATE`), a "Roll only"
+   preview whose service calls it: the echo sees the key, the service only the placeholder; a
+   revoked placeholder restarts with a new CA.
+5. **A key bound to a host egress refuses, said**: roll secrets' suggestion; a preview whose
+   placeholders name a host `egress_hosts` doesn't list says so on its status.
 6. **Previews for the members thread's next products**: once roll apps' and roll search's routes
    become member routes (docs/members.md, v1.1), a preview's roll apps services and search branch
    follow the same roles, checked live against a member's session.
 7. **Cheap Postgres branches on ext4: overlay volumes over a frozen base** (pg-control; measured
    2026-11-17): 0.97 s against 3.5 s for a 1.4 GB copy, but a write copies the whole table file.
 8. **Watch: pg-control's recovery to a time seconds old** (unowned).
+
+Landed 2026-11-21 (main c4b6561c9; turn 15): the gone page tested at the edge (#559), the live
+check's leaked build networks fixed (#567), `@roll preview` in any of a change's threads (#568)
+and watch paths per service (#570: a push outside them keeps the service's build).
 
 Landed 2026-11-21 (main e947ac207, ca30f77f1; turn 14): an independent review's fixes to
 references (#557: a Git URL service's preview read as its service, starts waiting for the
