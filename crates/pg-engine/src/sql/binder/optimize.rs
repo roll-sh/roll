@@ -911,7 +911,14 @@ fn add_filter_as(cat: &Catalog, plan: Plan, pred: Expr, index: bool) -> Plan {
             let mut meta = meta;
             if kind == JoinKind::Semi && params.is_empty() {
                 let mut rpush = Vec::new();
-                for p in &push {
+                // (And the left side's own: a column it fixes is the class's, whichever
+                // clause fixed it first, a semi join below it taking the WHERE's.)
+                let fixed: Vec<Expr> = input_restrictions(&left)
+                    .into_iter()
+                    .filter(|q| matches!(q, Expr::Call(d, a, _) if d.name == "=" && a.len() == 2
+                        && matches!((&a[0], &a[1]), (Expr::Col(..), Expr::Const(..)) | (Expr::Const(..), Expr::Col(..)))))
+                    .collect();
+                for p in push.iter().chain(&fixed) {
                     let Expr::Call(d, args, _) = p else { continue };
                     if d.name != "=" || args.len() != 2 || p.is_volatile() || d.coll.as_ref().is_some_and(|c| !c.deterministic) {
                         continue;
@@ -2444,6 +2451,8 @@ fn restrictions(p: &Plan, lower: bool) -> Vec<Expr> {
                 out.extend(input_restrictions(right).into_iter().map(|e| e.shift_cols(*nleft as isize)));
             }
         }
+        // (A semi / anti join's rows are its left side's rows.)
+        Plan::Join { kind: JoinKind::Semi | JoinKind::Anti, left, .. } => out.extend(input_restrictions(left)),
         // (An outer join's preserved side: its restrictions hold for every row of the join,
         // in the same join domain; the nullable side's are a lower domain's.)
         Plan::Join { kind: kind @ (JoinKind::Left | JoinKind::Right), left, right, nleft, params, .. } => {

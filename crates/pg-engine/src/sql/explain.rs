@@ -8393,7 +8393,36 @@ impl Builder<'_, '_> {
                         .map(|(_, c)| c.clone())
                         .collect(),
                 };
-                n.rows = self.num_groups(&keys, c.node.rows);
+                // (A key computed from the columns: estimate_num_groups over the Vars it
+                // reads, each once; a boolean 2 values, a constant 1.)
+                let group_cols: Vec<ColInfo> = match on {
+                    Some(on) if on.iter().any(|e| !matches!(e, Expr::Col(..))) => {
+                        let mut out = Vec::new();
+                        let mut read: Vec<usize> = Vec::new();
+                        for e in on {
+                            match e {
+                                Expr::Col(j, _) => out.push(cols.get(*j).cloned().unwrap_or_default()),
+                                Expr::Const(..) => {}
+                                e if e.ty() == DataType::Bool => out.push(ColInfo {
+                                    distinct: Some(2.0),
+                                    ..ColInfo::default()
+                                }),
+                                e if e.is_volatile() || e.columns().is_empty() => out.push(ColInfo::default()),
+                                e => {
+                                    for j in e.columns() {
+                                        if !read.contains(&j) {
+                                            read.push(j);
+                                            out.push(cols.get(j).cloned().unwrap_or_default());
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        out
+                    }
+                    _ => keys.clone(),
+                };
+                n.rows = self.num_groups(&group_cols, c.node.rows);
                 // (estimate_num_groups: a volatile key with no columns makes every row a
                 // group.)
                 if let Plan::Project { exprs, .. } = &**input

@@ -1222,6 +1222,45 @@ impl<'s, 'c, 'a> Search<'s, 'c, 'a> {
 
     /// The equivalence class members (group columns, then expression members by their
     /// numbers) in the order their clauses list them.
+    /// The group's equalities as written (`written_eqs`) that equate two members of one class,
+    /// as member pairs, and each over the group's row (a removed self-join relation's columns
+    /// the kept one's, `alias`).
+    fn written_pairs(&self, p: &Plan, alias: &[usize]) -> (Vec<(usize, usize)>, Vec<Expr>) {
+        let mut written = Vec::new();
+        let mut virt = crate::sql::binder::plan_width(p);
+        written_eqs(p, 0, &mut virt, self.general, &mut written);
+        let mut members = Vec::new();
+        for c in self.clauses.iter().filter(|c| !c.derived) {
+            if self.clause_ec(c).is_none() {
+                continue;
+            }
+            let (a, b, _, _) = c.eq.as_ref().unwrap();
+            members.extend([self.mem_id(a), self.mem_id(b)].into_iter().flatten());
+        }
+        let (mut pairs, mut exprs) = (Vec::new(), Vec::new());
+        for e in written {
+            let e = e
+                .transform(&mut |x| {
+                    Ok(match x {
+                        Expr::Col(g, t) if g < alias.len() => Expr::Col(alias[g], t),
+                        x => x,
+                    })
+                })
+                .expect("remapping a written equality");
+            let Expr::Call(_, args, _) = &e else { continue };
+            if let (Some(x), Some(y)) = (self.mem_id(&args[0]), self.mem_id(&args[1]))
+                && x != y
+                && members.contains(&x)
+                && members.contains(&y)
+                && self.m_ec(x) == self.m_ec(y)
+            {
+                pairs.push((x, y));
+                exprs.push(e);
+            }
+        }
+        (pairs, exprs)
+    }
+
     fn ec_members(&self) -> Vec<usize> {
         // process_equivalence over the equalities as written, in deconstruct_jointree's
         // order (`ec_written`), then the clauses the group has beyond them (a semi join's,
@@ -9364,7 +9403,13 @@ impl Planner<'_, '_> {
             };
             let mut prev: Vec<(usize, usize, usize)> = Vec::new();
             let mut drop_xm: Vec<usize> = Vec::new();
-            for g in s.ec_members() {
+            // (The members in process_equivalence's order: the equalities as written first,
+            // in deconstruct_jointree's order, a JOIN's ON before the WHERE.)
+            let (pairs, _) = s.written_pairs(p, &alias);
+            let saved = std::mem::replace(&mut s.ec_written, pairs);
+            let members = s.ec_members();
+            s.ec_written = saved;
+            for g in members {
                 let (l, e) = (s.m_leaf(g), s.m_ec(g));
                 let Some(slot) = prev.iter().position(|(pe, pl, _)| *pe == e && *pl == l) else {
                     prev.push((e, l, g));
@@ -9851,43 +9896,8 @@ impl Planner<'_, '_> {
         // over the group's row, a removed self-join relation's columns the kept one's.)
         // (Kept for the planned join too: a level planned apart and read again by the level
         // above as items of its group, a FROM subquery's join, passes them on.)
-        let mut planned_written: Vec<Expr> = Vec::new();
-        {
-            let mut written = Vec::new();
-            let mut virt = crate::sql::binder::plan_width(p);
-            written_eqs(p, 0, &mut virt, s.general, &mut written);
-            let members: Vec<usize> = {
-                let mut m = Vec::new();
-                for c in s.clauses.iter().filter(|c| !c.derived) {
-                    if s.clause_ec(c).is_none() {
-                        continue;
-                    }
-                    let (a, b, _, _) = c.eq.as_ref().unwrap();
-                    m.extend([s.mem_id(a), s.mem_id(b)].into_iter().flatten());
-                }
-                m
-            };
-            for e in written {
-                let e = e
-                    .transform(&mut |x| {
-                        Ok(match x {
-                            Expr::Col(g, t) if g < alias.len() => Expr::Col(alias[g], t),
-                            x => x,
-                        })
-                    })
-                    .expect("remapping a written equality");
-                let Expr::Call(_, args, _) = &e else { continue };
-                if let (Some(x), Some(y)) = (s.mem_id(&args[0]), s.mem_id(&args[1]))
-                    && x != y
-                    && members.contains(&x)
-                    && members.contains(&y)
-                    && s.m_ec(x) == s.m_ec(y)
-                {
-                    s.ec_written.push((x, y));
-                    planned_written.push(e.clone());
-                }
-            }
-        }
+        let (pairs, planned_written) = s.written_pairs(p, &alias);
+        s.ec_written.extend(pairs);
         let classes = s.kind == JoinKind::Inner && (!s.general || s.semi_classes());
         if classes && s.leaves.len() >= 3 {
             s.derive_equalities();

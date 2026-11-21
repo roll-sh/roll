@@ -1,0 +1,101 @@
+> create function a278_strict(text) returns text as 'select coalesce($1, ''null'')' language sql volatile strict
+-- CREATE FUNCTION
+
+> explain select a278_strict(null)
+QUERY PLAN:text
+Result  (cost=0.00..0.01 rows=1 width=32)
+-- EXPLAIN
+
+> select a278_strict(null) is null
+?column?:bool
+t
+-- SELECT 1
+
+> create table a278i (code int primary key)
+-- CREATE TABLE
+
+> create table a278j (a int not null, num int not null, primary key (a, num))
+-- CREATE TABLE
+
+> create table a278k (name int primary key, a int)
+-- CREATE TABLE
+
+> explain select * from a278k join a278i on a278k.a = a278i.code join a278j on a278i.code = a278j.a where a278k.a = a278j.num
+QUERY PLAN:text
+Nested Loop  (cost=38.54..104.51 rows=124 width=20)
+  ->  Hash Join  (cost=38.39..80.70 rows=124 width=16)
+        Hash Cond: (a278k.a = a278j.a)
+        ->  Seq Scan on a278k  (cost=0.00..32.60 rows=2260 width=8)
+        ->  Hash  (cost=38.25..38.25 rows=11 width=8)
+              ->  Seq Scan on a278j  (cost=0.00..38.25 rows=11 width=8)
+                    Filter: (a = num)
+  ->  Index Only Scan using a278i_pkey on a278i  (cost=0.15..0.19 rows=1 width=4)
+        Index Cond: (code = a278k.a)
+-- EXPLAIN
+
+> create table a278x (u int, v int) with (autovacuum_enabled = off)
+-- CREATE TABLE
+
+> insert into a278x select g, g from generate_series(0, 999) g
+-- INSERT 0 1000
+
+> create index a278x_u on a278x (u)
+-- CREATE INDEX
+
+> analyze a278x
+-- ANALYZE
+
+> create table a278y (f int) with (autovacuum_enabled = off)
+-- CREATE TABLE
+
+> insert into a278y values (0), (1), (2), (3), (4)
+-- INSERT 0 5
+
+> analyze a278y
+-- ANALYZE
+
+> explain select count(*) from a278x x where x.u in (select f from a278y a where f > 0) and x.u = 0 and x.u in (select f from a278y aa)
+QUERY PLAN:text
+Aggregate  (cost=10.45..10.46 rows=1 width=8)
+  ->  Nested Loop Semi Join  (cost=0.28..10.45 rows=1 width=0)
+        ->  Nested Loop Semi Join  (cost=0.28..9.38 rows=1 width=4)
+              ->  Index Only Scan using a278x_u on a278x x  (cost=0.28..8.29 rows=1 width=4)
+                    Index Cond: (u = 0)
+              ->  Seq Scan on a278y a  (cost=0.00..1.07 rows=1 width=4)
+                    Filter: ((f > 0) AND (f = 0))
+        ->  Seq Scan on a278y aa  (cost=0.00..1.06 rows=1 width=4)
+              Filter: (f = 0)
+-- EXPLAIN
+
+> create table a278s (f1 int, f2 int, f3 float8) with (autovacuum_enabled = off)
+-- CREATE TABLE
+
+> explain select f1 from a278s where (f1, f2) in (select f2, cast(f3 as int4) from a278s where f3 is not null)
+QUERY PLAN:text
+Hash Join  (cost=42.70..87.33 rows=462 width=4)
+  Hash Cond: ((a278s.f1 = a278s_1.f2) AND (a278s.f2 = (a278s_1.f3)::integer))
+  ->  Seq Scan on a278s  (cost=0.00..28.50 rows=1850 width=8)
+  ->  Hash  (cost=39.70..39.70 rows=200 width=12)
+        ->  HashAggregate  (cost=37.70..39.70 rows=200 width=12)
+              Group Key: a278s_1.f2, (a278s_1.f3)::integer
+              ->  Seq Scan on a278s a278s_1  (cost=0.00..28.50 rows=1841 width=12)
+                    Filter: (f3 IS NOT NULL)
+-- EXPLAIN
+
+> select pg_typeof(0b10000000000000000000000000000000), pg_typeof(-0b10000000000000000000000000000000),
+>   pg_typeof(0o20000000000), pg_typeof(-0x8000000000000000), pg_typeof(0X7FFFFFFF)
+pg_typeof:regtype | pg_typeof:regtype | pg_typeof:regtype | pg_typeof:regtype | pg_typeof:regtype
+bigint | integer | bigint | bigint | integer
+-- SELECT 1
+
+> explain select 0b10000000000000000000000000000000
+QUERY PLAN:text
+Result  (cost=0.00..0.01 rows=1 width=8)
+-- EXPLAIN
+
+> drop function a278_strict(text)
+-- DROP FUNCTION
+
+> drop table a278i, a278j, a278k, a278x, a278y, a278s
+-- DROP TABLE
+
