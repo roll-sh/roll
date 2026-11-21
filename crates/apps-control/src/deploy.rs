@@ -2578,14 +2578,26 @@ impl Apps {
     /// when the next is due is skipped). The reaper's pass, every few seconds.
     /// Owned environments' stored logs past their retention (`log_retention_days`, a week by
     /// default and always for a preview) deleted, chunk by chunk.
-    async fn expire_logs_pass(self: &Arc<Self>, services: &[crate::store::ServiceRow], now: i64) {
+    /// Logs kept past the first week (30 or 90 days) are metered too, `hours` of what's stored
+    /// past it now (`stored_gb_hours`).
+    async fn expire_logs_pass(self: &Arc<Self>, services: &[crate::store::ServiceRow], now: i64, hours: f64) {
         let Ok(envs) = self.db(|s| s.all_environments()).await else { return };
         for svc in services.iter().filter(|s| self.owns(&s.id)) {
             for e in envs.iter().filter(|e| e.service == svc.id) {
                 let days = if e.ephemeral { crate::logs::KEEP_DAYS } else { e.log_retention_days.unwrap_or(crate::logs::KEEP_DAYS) };
                 let before = now - days as i64 * 86_400_000;
+                let week = now - crate::logs::KEEP_DAYS as i64 * 86_400_000;
+                let mut past_week = 0u64;
                 for key in crate::logs::env_keys(&svc.id, &e.name) {
                     self.logs.expire(&key, before).await;
+                    if days > crate::logs::KEEP_DAYS {
+                        past_week += self.logs.stored_before(&key, week).await;
+                    }
+                }
+                if past_week > 0 {
+                    let u = crate::store::UsageAdd { stored_gb_hours: past_week as f64 / 1e9 * hours, ..Default::default() };
+                    let (sid, en) = (svc.id.clone(), e.name.clone());
+                    let _ = self.db(move |s| s.add_usage(&sid, &en, now / 3_600_000, &u)).await;
                 }
                 // Its jobs' logs, each whole once its job started before then: those started
                 // since the last pass's cutoff (kept, so a node that was down catches up).
@@ -2612,9 +2624,12 @@ impl Apps {
         self.heartbeats_pass(&services, now).await;
         self.rescan_pass(&services, now).await;
         self.pause_pass(&services, now).await;
-        if now - self.logs_expired.load(std::sync::atomic::Ordering::Relaxed) >= 3_600_000 {
+        let last = self.logs_expired.load(std::sync::atomic::Ordering::Relaxed);
+        if now - last >= 3_600_000 {
             self.logs_expired.store(now, std::sync::atomic::Ordering::Relaxed);
-            self.expire_logs_pass(&services, now).await;
+            // The hours since the last pass, as stored logs are metered (a first pass, one).
+            let hours = if last == 0 { 1.0 } else { ((now - last) as f64 / 3_600_000.0).min(2.0) };
+            self.expire_logs_pass(&services, now, hours).await;
             self.build_cache_pass(now).await;
         }
         if now - self.status_swept.load(std::sync::atomic::Ordering::Relaxed) >= 60_000 {

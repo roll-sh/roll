@@ -383,13 +383,16 @@ if "--writes" in sys.argv:
         if any(w in name for w in ("url", "endpoint", "webhook", "target")):
             return "https://example.invalid/sweep"
         return f"sweep-{name}"
+    # Arguments a tool can't require because only some of another's values need them, which its
+    # default does: a notification's url (a webhook's; email, PagerDuty and Opsgenie take none).
+    REQUIRED_BY_DEFAULT = {"apps_add_notification": ["url"]}
     writes = [t for t in tools if not t.get("annotations", {}).get("readOnlyHint") and "wait" not in t["name"] and (only is None or t["name"] == only)]
     writes.sort(key=lambda t: bool(t.get("annotations", {}).get("destructiveHint")))
     wran, wfails, wslow = 0, [], []
     for t in writes:
         prod = t.get("_meta", {}).get("roll/product", "")
         props = t["inputSchema"].get("properties", {})
-        args = {a: fake(a, props.get(a, {}), prod) for a in t["inputSchema"].get("required", [])}
+        args = {a: fake(a, props.get(a, {}), prod) for a in t["inputSchema"].get("required", []) + REQUIRED_BY_DEFAULT.get(t["name"], [])}
         try:
             res = rpc("tools/call", {"name": t["name"], "arguments": args})
         except Exception as e:
