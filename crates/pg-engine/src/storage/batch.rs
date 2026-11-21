@@ -86,6 +86,7 @@ impl RowBatch {
     /// Row `i` (entry `e`) of a column block: its bytes, made when first wanted. (Out of line:
     /// the accessors' common path stays as small as without column blocks.)
     #[inline(never)]
+    #[cold]
     fn lazy_row(&self, i: usize, e: Ent) -> Option<&Bytes> {
         let blk = self.lazy.get(e.buf as usize)?.as_ref()?;
         let (row, cell) = &self.lrows[i];
@@ -182,8 +183,9 @@ impl RowBatch {
     }
 
     /// Row `i`'s value with the buffer holding it and where in it (None: a copied value, in
-    /// the batch's own buffer, valid until it is cleared).
-    #[inline]
+    /// the batch's own buffer, valid until it is cleared). (Inlined into the walks: out of line,
+    /// a call a row was 6% of q06.)
+    #[inline(always)]
     pub fn value_in(&self, i: usize) -> (&[u8], Option<(&Bytes, usize)>) {
         let e = self.ents[i];
         let (o, l) = (e.off as usize, e.len as usize);
@@ -269,6 +271,7 @@ impl RowBatch {
 
     /// The index rows pushed next refer to `buf` by (`push_shared`): the last row's when it
     /// is the same buffer.
+    #[inline]
     pub fn buf_index(&mut self, buf: &Bytes) -> u32 {
         let same = self.bufs.last().is_some_and(|b| b.as_ptr() == buf.as_ptr() && b.len() == buf.len()) && !matches!(self.lazy.get(self.bufs.len() - 1), Some(Some(_)));
         if !same {

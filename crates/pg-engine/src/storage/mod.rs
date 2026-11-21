@@ -2979,6 +2979,7 @@ impl Cursor {
     }
 
     /// `head`'s key alone (a column block's row not made).
+    #[inline]
     fn head_key(&self) -> Option<&[u8]> {
         match self {
             Cursor::Mem { buf, .. } => buf.front().map(|(k, _)| k.as_slice()),
@@ -2998,6 +2999,7 @@ impl Cursor {
 
     /// `head`'s key, and whether its entry has a value (Some) stored out of line (true),
     /// without making a column block's row.
+    #[inline]
     fn head_meta(&self) -> Option<(&[u8], Option<bool>)> {
         match self {
             Cursor::Mem { .. } => self.head().map(|(k, v)| (k, v.map(toast::has_external))),
