@@ -403,4 +403,13 @@ mod tests {
         assert_eq!(super::rename("list_agent_machines"), "agents_list_machines");
         assert_eq!(super::rename("respond_agent_request"), "agents_respond_request");
     }
+
+    /// A workflow may need roll code's tools by their fronted names: each is one roll code has.
+    #[test]
+    fn workflows_need_code_tools_that_exist() {
+        let names: Vec<String> = code_control::mcp::tools().iter().map(|t| super::rename(t["name"].as_str().unwrap())).collect();
+        for n in roll_mcp::prompts::FRONTED {
+            assert!(names.iter().any(|m| m == n), "roll_mcp::prompts::FRONTED names {n}, which roll code doesn't front");
+        }
+    }
 }

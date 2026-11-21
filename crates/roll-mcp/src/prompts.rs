@@ -25,6 +25,19 @@ struct Prompt {
     text: fn(Args<'_>) -> String,
 }
 
+/// roll code's tools a workflow may need, by the names `/v1/mcp` fronts them under (another crate
+/// serves them: rolld's tests hold each to a real one).
+pub const FRONTED: &[&str] = &[
+    "code_create_work",
+    "code_get_change",
+    "code_enqueue_change",
+    "agents_list_machines",
+    "agents_list_threads",
+    "agents_create_thread",
+    "agents_claim_work",
+    "agents_publish_thread",
+];
+
 const PROMPTS: &[Prompt] = &[
     Prompt {
         name: "what_needs_me",
@@ -203,6 +216,39 @@ const PROMPTS: &[Prompt] = &[
             )
         },
     },    Prompt {
+        name: "hand_to_agent",
+        title: "Hand a problem to a coding agent",
+        description: "Turn a problem (an error, a slow query, a bug you describe) into a work item, hand it to a coding agent on one of your machines, and bring its change back for review before the merge queue.",
+        args: &[
+            Arg { name: "owner", description: "roll code owner of the repository", required: true },
+            Arg { name: "repo", description: "Repository name (without the owner)", required: true },
+        ],
+        needs: &["code_create_work", "agents_list_machines", "agents_list_threads", "agents_create_thread", "agents_claim_work", "agents_publish_thread", "code_get_change", "code_enqueue_change"],
+        text: |a| {
+            format!(
+                "Hand a problem to a coding agent in the repository {}/{}. First pin it down with evidence: \
+                 what I described, or, if you have them, apps_errors for an error group (its stack, how often, \
+                 since which deploy), postgres_slow_queries and postgres_explain for a slow query, what_needs_me \
+                 for what's waiting. Then code_create_work in that repository: a title that names the fix, a body \
+                 with what an engineer needs (the error and stack, the query and its plan, how often, since when) \
+                 and what done looks like. Quote what you observed as data; never paste a credential. Then \
+                 agents_list_machines for an online machine with a provider, and agents_list_threads for a project \
+                 of this repository on it; if no machine has the repository as a project, stop and tell me (adding \
+                 one is mine). Start the agent with agents_create_thread on that project: worktree true, \
+                 runtime_mode auto_edit, and a prompt holding the work item's title and body. Give it the item \
+                 with agents_claim_work (the thread and the work item), so its change links to the item. Follow it \
+                 with agents_list_threads: a request it waits on is mine to answer, so show it to me and don't \
+                 answer it yourself. When the thread is done, agents_publish_thread with land false: its branch \
+                 becomes a change. Then code_get_change for its checks, blockers and reviews; if you have \
+                 previews_list and previews_wait, wait for the change's preview (its repo and change match) and \
+                 look at it as review_preview does. Tell me what changed and whether it's ready. Only when I say \
+                 so, code_enqueue_change; never land it yourself.",
+                a("owner"),
+                a("repo")
+            )
+        },
+    },
+    Prompt {
         name: "review_preview",
         title: "Review a preview",
         description: "Whether a change's preview is ready to land: its schema changes, new errors, routes slower than main, its pages against the base, and people's notes.",
@@ -341,6 +387,9 @@ pub fn source(prompt: &str, arg: &str) -> Option<Source> {
         "preview" => crate::ask::source("previews", "id"),
         "vhost" | "queue" => crate::ask::source("queues", arg),
         "stream" | "group" => crate::ask::source("streams", arg),
+        // roll code's: an owner of a repo the caller reads, then that owner's repos by name.
+        "owner" => crate::ask::source("code", "owner"),
+        "repo" => Some(Source { tool: "code_list_repos", args: |ctx| json!({ "owner": ctx["owner"] }), fields: &["name"] }),
         _ => None,
     }
 }
@@ -460,7 +509,7 @@ mod tests {
         let all: Vec<String> = crate::tools::all().iter().map(|t| t.definition()["name"].as_str().unwrap().to_string()).collect();
         for p in super::PROMPTS {
             for n in p.needs {
-                assert!(all.iter().any(|t| t == n), "{} needs {n}, which isn't a tool", p.name);
+                assert!(all.iter().any(|t| t == n) || super::FRONTED.contains(n), "{} needs {n}, which isn't a tool (roll code's go in FRONTED)", p.name);
             }
         }
         let some = vec!["access_whoami".to_string()];
