@@ -400,6 +400,11 @@ pub struct Build {
     /// service's repo can't build a repo it can't read into its code by pinning it.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub submodule_repos: Option<Vec<String>>,
+    /// The language's OpenTelemetry agent in a generated Dockerfile (Heroku's Telemetry,
+    /// `@vercel/otel`): Node's and Python's, pinned, started while the environment's traces are
+    /// on (`apps_build::otel`); none in the tree's own Dockerfile.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub otel: Option<bool>,
     /// A Git URL service's Git LFS objects fetched in place of their pointers (Vercel's,
     /// Netlify's), from the repository's LFS server; off, the pointers are built as they are.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -489,6 +494,7 @@ impl Build {
             start: self.start.clone(),
             spa: self.spa,
             packages: self.packages.clone().unwrap_or_default(),
+            otel: self.otel.unwrap_or(false),
             build_env: Vec::new(),
             build_files: Vec::new(),
             process: None,
