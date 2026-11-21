@@ -86,7 +86,7 @@ pub struct Row {
     pub admin_if: Option<&'static str>,
     /// A JSON body field whose presence makes it `admin` (apps' `freeze`: setting or lifting a
     /// freeze is the same call as going past one).
-    pub admin_if_field: Option<&'static str>,
+    pub admin_if_field: Option<&'static [&'static str]>,
 }
 
 /// Where a request names other resources it hands to this one ([`Row::lends`]).
@@ -130,6 +130,11 @@ fn apps_push(b: &Value) -> Vec<Lent> {
             Some(Lent { kind: "stream".into(), r#ref: s.into(), action })
         })
         .collect()
+}
+
+/// A drain into a roll storage bucket (`bucket`): apps mints a key that writes there for it.
+fn apps_drain_bucket(b: &Value) -> Vec<Lent> {
+    b.get("bucket").and_then(Value::as_str).map(|r| Lent { kind: "bucket".into(), r#ref: r.into(), action: Action::Write }).into_iter().collect()
 }
 
 /// A roll code repo the body names, which apps reads for the caller (`repo` for a plan or an import,
@@ -269,8 +274,8 @@ impl Row {
         self.admin_if = Some(header);
         self
     }
-    const fn admin_if_field(mut self, field: &'static str) -> Row {
-        self.admin_if_field = Some(field);
+    const fn admin_if_field(mut self, fields: &'static [&'static str]) -> Row {
+        self.admin_if_field = Some(fields);
         self
     }
 
@@ -278,7 +283,7 @@ impl Row {
     pub fn action_with(&self, method: &str, params: &[(String, String)], body: Option<&Value>, headers: &axum::http::HeaderMap) -> Action {
         match (self.admin_if, self.admin_if_field) {
             (Some(h), _) if headers.get(h).is_some_and(|v| v == "1") => Action::Admin,
-            (_, Some(f)) if body.and_then(|b| b.get(f)).is_some() => Action::Admin,
+            (_, Some(fs)) if fs.iter().any(|f| body.and_then(|b| b.get(f)).is_some()) => Action::Admin,
             _ => self.action(method, params, body),
         }
     }
@@ -1267,6 +1272,11 @@ static ROWS: &[Row] = &[
     // Which candidates are this project's stored values (`roll secrets scan`): read on the
     // project. Secrets keeps only matches in folders the caller may reveal, so it's no oracle.
     row("POST", "/v1/secrets/projects/{project}/leaks", "secrets", R, one(&["project"], "project")).filters_itself(),
+    // Validity checks (docs/secrets.md, "Is it live?"): asking a credential's provider whether a
+    // credential found in code works is a write (it calls out and is audited, rate-limited per
+    // project); a kept answer by fingerprint (never the value) is a read.
+    row("POST", "/v1/secrets/projects/{project}/validity", "secrets", W, one(&["project"], "project")),
+    row("GET", "/v1/secrets/projects/{project}/unstored/{fingerprint}", "secrets", R, one(&["project"], "project")),
     // Rotators: URLs roll calls to issue and revoke values that live outside roll. Listing shows
     // names and hosts; adding one answers its signing secret once; both changes are admin.
     row("GET", "/v1/secrets/projects/{project}/rotations", "secrets", R, one(&["project"], "project")),
@@ -1415,6 +1425,10 @@ static ROWS: &[Row] = &[
     row("POST", "/v1/secrets/projects/{project}/environments/{env}/value-requests", "secrets", W, one(&["project"], "project")).env(EnvFrom::Param("env")).path_query("path"),
     row("GET", "/v1/secrets/projects/{project}/value-requests", "secrets", R, one(&["project"], "project")),
     row("DELETE", "/v1/secrets/projects/{project}/value-requests/{id}", "secrets", W, one(&["project"], "project")),
+    // Binding a key to hosts decides where its value goes through a placeholder (docs/secrets.md,
+    // "Using a key without seeing it"): the folder's admin, as purge is.
+    row("PUT", "/v1/secrets/projects/{project}/environments/{env}/secrets/{name}/hosts", "secrets", ADMIN, one(&["project"], "project")).env(EnvFrom::Param("env")).path_query("path"),
+    row("DELETE", "/v1/secrets/projects/{project}/environments/{env}/secrets/{name}/hosts", "secrets", ADMIN, one(&["project"], "project")).env(EnvFrom::Param("env")).path_query("path"),
     // Purging a secret's history can't be undone.
     row("POST", "/v1/secrets/projects/{project}/environments/{env}/secrets/{name}/purge", "secrets", ADMIN, one(&["project"], "project")).env(EnvFrom::Param("env")).path_query("path"),
     // A change request's current and proposed values, for its approvers.
@@ -1464,7 +1478,7 @@ static ROWS: &[Row] = &[
     row("POST", "/v1/apps/projects/{project}/preview-domain/verify", "apps", W, one(&["project"], "project")),
     // Its services as roll.toml: settings and variables' names, never a value.
     row("POST", "/v1/apps/projects/{project}/export", "apps", R, one(&["project"], "project")),
-    row("POST", "/v1/apps/projects/{project}/drains", "apps", REVEAL, one(&["project"], "project")),
+    row("POST", "/v1/apps/projects/{project}/drains", "apps", REVEAL, one(&["project"], "project")).lends(Lend::Each(apps_drain_bucket)),
     row("DELETE", "/v1/apps/projects/{project}/drains/{did}", "apps", W, one(&["project"], "project")),
     // An edit can send more out (another source, every environment): reveal, as making one is.
     row("PATCH", "/v1/apps/projects/{project}/drains/{did}", "apps", REVEAL, one(&["project"], "project")),
@@ -1489,7 +1503,7 @@ static ROWS: &[Row] = &[
     // `variables_from` copies another environment's values into this one: reveal there too.
     // A new heartbeat's ping URL (its token) is in the PUT's answer, once: a credential.
     // Setting or lifting a deploy freeze is admin (lifting one would get past it).
-    row("*", "/v1/apps/services/{id}/environments/{env}", "apps", Act::ProductionIf("env"), one(PG, "service")).env(EnvFrom::Param("env")).admin_if_field("freeze").copies_from(CopyFrom::Body("variables_from")).reveals(&["heartbeat_urls"]),
+    row("*", "/v1/apps/services/{id}/environments/{env}", "apps", Act::ProductionIf("env"), one(PG, "service")).env(EnvFrom::Param("env")).admin_if_field(&["freeze", "approvals"]).copies_from(CopyFrom::Body("variables_from")).reveals(&["heartbeat_urls"]),
     row("GET", "/v1/apps/services/{id}/environments/{env}", "apps", R, one(PG, "service")).env(EnvFrom::Param("env")),
     row("DELETE", "/v1/apps/services/{id}/environments/{env}", "apps", D, one(PG, "service")).env(EnvFrom::Param("env")),
     row("GET", "/v1/apps/services/{id}/environments/{env}/", "apps", R, one(PG, "service")).env(EnvFrom::Param("env")),
@@ -1500,6 +1514,7 @@ static ROWS: &[Row] = &[
     // "Why did it fail?": reads a deploy's logs and keeps the repo owner's model's answer (metered
     // on their usage), in any environment: write, never production's deploy.
     row("POST", "/v1/apps/services/{id}/environments/{env}/deploys/{dep}/explain", "apps", W, one(PG, "service")).env(EnvFrom::Param("env")),
+    row("POST", "/v1/apps/services/{id}/environments/{env}/deploys/{dep}/approve", "apps", Act::ProductionIf("env"), one(PG, "service")).env(EnvFrom::Param("env")),
     row("POST", "/v1/apps/services/{id}/environments/{env}/deploys/{dep}/rollback", "apps", Act::ProductionIf("env"), one(PG, "service")).env(EnvFrom::Param("env")).admin_if("x-roll-override"),
     // An error group resolved, muted or open again: the team's triage, a write in any environment.
     row("PATCH", "/v1/apps/services/{id}/environments/{env}/errors/{fingerprint}", "apps", W, one(PG, "service")).env(EnvFrom::Param("env")),
@@ -1842,10 +1857,12 @@ mod tests {
             let f = find("POST", &format!("/v1/apps/services/{{id}}/environments/{{env}}/{route}"), "x").unwrap();
             assert_eq!(f.row.action_with("POST", &[("env".into(), "staging".into())], None, &over), Action::Admin, "{route}");
         }
-        // Lifting a freeze would get past it: admin too, any environment.
+        // Lifting a freeze would get past it, and so would turning approvals off: admin too, any
+        // environment.
         let env = find("PUT", "/v1/apps/services/{id}/environments/{env}", "x").unwrap();
         let none = axum::http::HeaderMap::new();
         assert_eq!(env.row.action_with("PUT", &[("env".into(), "staging".into())], Some(&serde_json::json!({ "freeze": null })), &none), Action::Admin);
+        assert_eq!(env.row.action_with("PUT", &[("env".into(), "production".into())], Some(&serde_json::json!({ "approvals": 0 })), &none), Action::Admin);
         assert_eq!(env.row.action_with("PUT", &[("env".into(), "staging".into())], Some(&serde_json::json!({ "vitals": true })), &none), Action::Write);
         assert_eq!(dep.row.action("POST", &[("env".into(), "staging".into())], None), Action::Write);
         assert_eq!(sql_action(&serde_json::json!({ "sql": "select 1", "read_only": true })), Action::Read);

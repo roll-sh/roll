@@ -79,6 +79,7 @@ tower.workspace = true
 url.workspace = true
 roll-accounts.workspace = true
 roll-previews.workspace = true
+roll-intercept.workspace = true
 roll-access.workspace = true
 roll-oidc.workspace = true
 roll-mcp.workspace = true

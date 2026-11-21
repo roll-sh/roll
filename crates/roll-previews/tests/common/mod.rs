@@ -20,6 +20,8 @@ pub struct FakeCode {
     pub paths: Mutex<HashMap<String, Vec<String>>>,
     /// The paths between two heads, by `"<from>..<to>"` (unlisted: not known).
     pub between: Mutex<HashMap<String, Vec<String>>>,
+    /// What every repo's service watches (`roll.toml` `watch`).
+    pub watch: Mutex<Vec<String>>,
     /// The feedback left on changes' preview pages, by change.
     pub feedback: Mutex<HashMap<String, Vec<roll_previews::notes::Note>>>,
     /// The `health` path every service says it has.
@@ -84,7 +86,7 @@ impl Source for FakeCode {
     }
     async fn services(&self, repo: &str, _revision: &str) -> anyhow::Result<Vec<ServiceSpec>> {
         let name = repo.rsplit('/').next().unwrap().to_string();
-        Ok(vec![ServiceSpec { name, image: "node:22".into(), run: "node app.js".into(), port: 3000, memory_mb: 512, cpus: 0.5, env: vec![], health: self.health.lock().clone(), states: self.repo_states.lock().clone(), pages: vec![], hide: vec![] }])
+        Ok(vec![ServiceSpec { name, image: "node:22".into(), run: "node app.js".into(), port: 3000, memory_mb: 512, cpus: 0.5, env: vec![], health: self.health.lock().clone(), states: self.repo_states.lock().clone(), pages: vec![], hide: vec![], watch: self.watch.lock().clone() }])
     }
     async fn report(&self, p: &Preview, _s: &Settings) {
         self.reports.lock().push(p.clone());
@@ -523,6 +525,8 @@ pub struct FakeSecrets {
     pub own: Mutex<Vec<(String, String)>>,
     /// The references the last ensure sent.
     pub refs: Mutex<Vec<(String, String)>>,
+    /// Resolves that asked for placeholders: (consumer, maker).
+    pub placeholders: Mutex<Vec<(String, String)>>,
     /// Values every resolve answers (static secrets).
     pub values: Mutex<Vec<(String, String)>>,
     /// Why each resolve was asked for (`logs`: values read to mask output).
@@ -537,6 +541,10 @@ impl roll_previews::ports::Secrets for FakeSecrets {
         *self.branched.lock() = branches.to_vec();
         *self.own.lock() = vars.to_vec();
         Ok(())
+    }
+    async fn resolve_with_placeholders(&self, project: &str, env: &str, untrusted: bool, dynamic: bool, consumer: &str, maker: &str) -> anyhow::Result<roll_previews::ports::Resolved> {
+        self.placeholders.lock().push((consumer.to_string(), maker.to_string()));
+        self.resolve(project, env, untrusted, dynamic, consumer).await
     }
     async fn resolve(&self, _: &str, _: &str, _: bool, dynamic: bool, reason: &str) -> anyhow::Result<roll_previews::ports::Resolved> {
         self.reasons.lock().push(reason.to_string());
@@ -599,6 +607,19 @@ pub fn change(id: &str, n: i64) -> ChangeInfo {
     }
 }
 
+/// A sealer for tests: hex, bound to its associated data (no value shows in the file).
+pub struct HexSealer;
+
+impl roll_previews::ports::Sealer for HexSealer {
+    fn seal(&self, aad: &str, plain: &str) -> String {
+        format!("v1:{}|{}", hex::encode(aad), hex::encode(plain))
+    }
+    fn open(&self, aad: &str, sealed: &str) -> Option<String> {
+        let rest = sealed.strip_prefix(&format!("v1:{}|", hex::encode(aad)))?;
+        String::from_utf8(hex::decode(rest).ok()?).ok()
+    }
+}
+
 pub fn env(settings: serde_json::Value) -> Env {
     let dir = tempfile::tempdir().unwrap();
     let ws = Arc::new(Workspace::open(&code_sql::Target::Sqlite(dir.path().join("ws.db")), Default::default()).unwrap());
@@ -607,6 +628,8 @@ pub fn env(settings: serde_json::Value) -> Env {
         ws.place(roll_workspace::Scope::All, &p.id, kind, r, 0.0, 0.0).unwrap();
     }
     let store = Arc::new(Store::open(&code_sql::Target::Sqlite(dir.path().join("previews.db")), Default::default()).unwrap());
+    // A deployment key, as rolld has one: pasted values are kept sealed.
+    store.set_sealer(Arc::new(HexSealer)).unwrap();
     let s = Settings::default().patched(&settings).unwrap();
     store.put_settings(&p.id, &s).unwrap();
     let code = Arc::new(FakeCode::default());

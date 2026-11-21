@@ -280,11 +280,14 @@ dependencies = [
  "argon2",
  "async-trait",
  "aws-config",
+ "aws-credential-types",
  "aws-sdk-cloudwatchlogs",
  "aws-sdk-codebuild",
  "aws-sdk-ecr",
  "aws-sdk-ecs",
  "aws-sdk-secretsmanager",
+ "aws-sigv4",
+ "aws-smithy-runtime-api",
  "axum",
  "base64 0.22.1",
  "bytes",
@@ -7157,6 +7160,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "roll-intercept"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "bytes",
+ "futures",
+ "http-body-util",
+ "hyper 1.12.0",
+ "hyper-util",
+ "parking_lot",
+ "rcgen",
+ "roll-net",
+ "rustls-native-certs",
+ "rustls-pemfile",
+ "tempfile",
+ "tokio",
+ "tokio-rustls 0.26.6",
+]
+
+[[package]]
 name = "roll-keyshares"
 version = "0.1.0"
 dependencies = [
@@ -7232,6 +7255,7 @@ dependencies = [
  "percent-encoding",
  "roll-auth",
  "roll-cluster",
+ "roll-intercept",
  "roll-workspace",
  "serde",
  "serde_json",
@@ -7272,6 +7296,8 @@ dependencies = [
  "roll-secrets-chain",
  "roll-workspace",
  "rsa",
+ "rustls-pki-types",
+ "rustls-webpki 0.103.15",
  "serde",
  "serde_json",
  "sha2 0.10.9",
@@ -7399,6 +7425,7 @@ dependencies = [
  "roll-cluster",
  "roll-edge",
  "roll-gateway",
+ "roll-intercept",
  "roll-keyshares",
  "roll-mcp",
  "roll-net",

@@ -2,6 +2,14 @@
 
 use super::*;
 
+/// A service kept on its earlier build at a head (`roll.toml` `watch`): the head, and the
+/// revision it runs.
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+pub(super) struct KeptBuild {
+    pub head: String,
+    pub revision: String,
+}
+
 /// How long one resource's columns are read for mask suggestions before it's named in `unread`.
 pub const SUGGEST_READ_FOR: std::time::Duration = std::time::Duration::from_secs(10);
 
@@ -504,7 +512,7 @@ impl Engine {
                         },
                         None => String::new(),
                     };
-                    let spec = ServiceSpec { name: c.name.clone(), image: String::new(), run: String::new(), port: 0, memory_mb: c.memory_mb, cpus: 0.0, env: Vec::new(), health: None, states: Vec::new(), pages: Vec::new(), hide: Vec::new() };
+                    let spec = ServiceSpec { name: c.name.clone(), image: String::new(), run: String::new(), port: 0, memory_mb: c.memory_mb, cpus: 0.0, env: Vec::new(), health: None, states: Vec::new(), pages: Vec::new(), hide: Vec::new(), watch: Vec::new() };
                     wanted.push((spec, c.repo.unwrap_or_default(), rev, true));
                 }
             }
@@ -512,7 +520,12 @@ impl Engine {
                 for repo in &repos {
                     let Some(rev) = head_of(repo.clone()).await? else { continue };
                     for spec in self.source.services(repo, &rev).await.map_err(|e| anyhow::anyhow!("reading {repo}'s services: {e:#}"))? {
-                        wanted.push((spec, repo.clone(), rev.clone(), false));
+                        // A push that touched none of what it watches keeps the build it runs.
+                        let rev = match self.kept_build(r, repo, &rev, &spec).await? {
+                            Some(kept) => kept,
+                            None => rev.clone(),
+                        };
+                        wanted.push((spec, repo.clone(), rev, false));
                     }
                 }
             }
@@ -530,6 +543,15 @@ impl Engine {
 
         // The project's own preview domain, when it has one (`Store::set_project_domain`).
         let domain = self.store.project_domain(&r.project_id)?;
+        // Its interception CA, when its egress goes through the proxy: its services trust that
+        // certificate, so a new one (its bound hosts changed) restarts them.
+        let ca = match (s.egress_for(r.trusted) == crate::settings::EgressRule::Roll, self.intercepts.get().cloned()) {
+            (true, Some(i)) => {
+                let id = r.id.clone();
+                tokio::task::spawn_blocking(move || i.of(&id)).await?.map_err(|e| anyhow::anyhow!("its interception: {e:#}"))?.map(|x| x.id)
+            }
+            _ => None,
+        };
         for (spec, repo, rev, on_apps) in wanted {
             keep.push(spec.name.clone());
             if let Some(path) = &spec.health {
@@ -553,6 +575,7 @@ impl Engine {
                 // Traces: a runtime service takes the OpenTelemetry variables when it starts;
                 // roll apps' environment turns its own on and redeploys.
                 + if s.traces { "o" } else { "" }
+                + &ca.as_deref().filter(|_| !on_apps).map(|id| format!("i{id}")).unwrap_or_default()
                 + &rebuilt;
             let was = self.store.service_config(&r.id, &spec.name)?;
             let config_moved = was.as_deref() != Some(fingerprint.as_str());
@@ -810,6 +833,37 @@ impl Engine {
         })
         .await?;
         Ok((kept, dropped))
+    }
+
+    /// The build a service of the change's own repo keeps at `head` (`roll.toml` `watch`): the
+    /// revision it runs, when the push since touched none of its watched paths (nor `roll.toml`,
+    /// nor a path that can't be read). Only for a trusted change (a fork's approval is for one
+    /// head) and never on a rebuild. Recorded for that head, so a start of it at the head goes on.
+    async fn kept_build(&self, r: &Row, repo: &str, head: &str, spec: &ServiceSpec) -> anyhow::Result<Option<String>> {
+        use code_control::review::pattern::{any_match, Pattern};
+        let kind = format!("kept:{}", spec.name);
+        if spec.watch.is_empty() || repo != r.repo || !r.trusted || self.store.rebuilds(&r.id)? > 0 {
+            self.store.set_runtime_fact::<KeptBuild>(&r.id, &kind, None)?;
+            return Ok(None);
+        }
+        let Some(running) = self.store.services(&r.id)?.into_iter().find(|x| x.name == spec.name).and_then(|x| x.revision) else { return Ok(None) };
+        if running == head {
+            return Ok(None);
+        }
+        let patterns: Option<Vec<Pattern>> = spec.watch.iter().map(|p| Pattern::new(p)).collect();
+        let keep = match (patterns, self.source.paths_between(repo, &running, head).await?) {
+            (Some(watch), Some(paths)) => paths.iter().all(|p| p != "roll.toml" && !any_match(&watch, p)),
+            _ => false,
+        };
+        if !keep {
+            self.store.set_runtime_fact::<KeptBuild>(&r.id, &kind, None)?;
+            return Ok(None);
+        }
+        let fact = KeptBuild { head: head.to_string(), revision: running.clone() };
+        if self.store.set_runtime_fact(&r.id, &kind, Some(&fact))? {
+            self.store.log(&r.id, &format!("kept {}'s build at {}: the push to {} touched none of what it watches", spec.name, short(&running), short(head)))?;
+        }
+        Ok(Some(running))
     }
 
     /// The first service's screenshot at `r`'s head: `true` when one was kept. Not taken (a
@@ -1285,6 +1339,11 @@ impl Engine {
             self.store.drop_service(&r.id, &svc.name)?;
         }
         self.secrets.delete(&r.project_id, &env_name(&r.id)).await.map_err(|e| anyhow::anyhow!("secrets: {e:#}"))?;
+        // Its placeholders and interception CAs end with it, not at their expiry.
+        if let Some(i) = self.intercepts.get().cloned() {
+            let id = r.id.clone();
+            tokio::task::spawn_blocking(move || i.end(&id)).await?.map_err(|e| anyhow::anyhow!("ending its interception: {e:#}"))?;
+        }
         let name = branch_name(&r.id);
         for res in self.store.resources(&r.id)? {
             self.delete_branch(&r.id, &res, &name).await?;
