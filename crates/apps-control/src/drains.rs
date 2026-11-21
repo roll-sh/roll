@@ -36,6 +36,14 @@ const BUFFER: usize = 10_000;
 /// The most lines a batch carries, and the longest a line waits for its batch.
 const BATCH: usize = 500;
 const LINGER: Duration = Duration::from_secs(1);
+/// An `s3` drain's: an object a batch, so fewer and bigger.
+const S3_BATCH: usize = 5_000;
+const S3_LINGER: Duration = Duration::from_secs(60);
+/// An `s3` drain's credentials, in its sealed headers (never sent as headers).
+const S3_KEYS: [&str; 3] = ["aws-access-key-id", "aws-secret-access-key", "aws-region"];
+/// Marks a bucket drain's (roll storage's own endpoint, its key minted by roll): a header no
+/// caller can set (`x-roll-*` is roll's).
+const OWN: &str = "x-roll-own";
 /// How long a node keeps a project's drains (and a service's project) before reading again.
 const REFRESH: Duration = Duration::from_secs(30);
 /// Previews' batches waiting for the drainer; past it, a batch is dropped (counted).
@@ -68,16 +76,52 @@ impl Apps {
     /// this once.
     pub async fn add_drain(self: &Arc<Self>, project: &str, body: Value) -> Result<Value> {
         let o = body.as_object().cloned().unwrap_or_default();
-        if let Some(k) = o.keys().find(|k| !["url", "sources", "environments", "services", "previews", "headers", "format"].contains(&k.as_str())) {
+        if let Some(k) = o.keys().find(|k| !["url", "sources", "environments", "services", "previews", "headers", "format", "bucket", "prefix"].contains(&k.as_str())) {
             return Err(Error::BadRequest(format!("unknown field {k}")));
         }
+        // A roll storage bucket of the project's: an `s3` drain with a key minted for it.
+        let bucket = match o.get("bucket") {
+            None | Some(Value::Null) => None,
+            Some(Value::String(b)) if o.get("url").is_none() && o.get("headers").is_none() && o.get("format").is_none_or(|f| f == "s3") => Some(b.clone()),
+            Some(_) => return Err(Error::BadRequest("bucket is a roll storage bucket of the project's, without url, headers or another format (its key is minted for the drain)".into())),
+        };
         let format = match o.get("format") {
+            _ if bucket.is_some() => "s3",
             None | Some(Value::Null) => "ndjson",
             Some(Value::String(f)) if DRAIN_FORMATS.contains(&f.as_str()) => f.as_str(),
             Some(_) => return Err(Error::BadRequest(format!("format is one of {}", DRAIN_FORMATS.join(", ")))),
         }
         .to_string();
-        let settings = self.drain_settings(project, &o, None).await?;
+        let mut settings = self.drain_settings(project, &o, None).await?;
+        if let Some(b) = &bucket {
+            let p = project.to_string();
+            if self.db(move |s| s.drains(&p)).await?.len() >= MAX_DRAINS {
+                return Err(Error::Conflict(format!("a project has at most {MAX_DRAINS} log drains")));
+            }
+            let prefix = match o.get("prefix") {
+                None | Some(Value::Null) => String::new(),
+                Some(Value::String(p)) if p.len() <= 200 && p.bytes().all(|c| c.is_ascii_alphanumeric() || matches!(c, b'-' | b'_' | b'.' | b'/')) && !p.contains("//") => p.trim_matches('/').to_string(),
+                Some(_) => return Err(Error::BadRequest("prefix is at most 200 of letters, digits, - _ . /".into())),
+            };
+            let (url, kept) = self.mint_bucket_drain(project, b, &prefix, &mut settings).await?;
+            let secret = format!("whsec_{}", crate::model::random(32));
+            let host = url::Url::parse(&url).ok().and_then(|u| u.host_str().map(str::to_string)).unwrap_or_default();
+            let (p, s2, u2) = (project.to_string(), secret.clone(), url.clone());
+            let made = self.db(move |s| s.add_drain(&p, &host, &u2, &s2, "s3", &settings)).await;
+            let d = match made {
+                Ok(d) => d,
+                Err(e) => {
+                    let _ = self.deps.resources.unlink(crate::model::LinkKind::Bucket, b, &kept).await;
+                    return Err(e);
+                }
+            };
+            let (id, b2) = (d.id.clone(), b.clone());
+            self.db(move |s| s.add_drain_link(&id, "bucket", &b2, &kept)).await?;
+            self.drains_changed(project).await;
+            let mut v = serde_json::to_value(&d).expect("JSON");
+            v["secret"] = json!(secret);
+            return Ok(v);
+        }
         let url = o.get("url").and_then(Value::as_str).ok_or_else(|| Error::BadRequest("url is required".into()))?.trim().to_string();
         let host = if format == "syslog" {
             // A syslog server takes no headers: a vendor's token goes in its host or port.
@@ -85,6 +129,9 @@ impl Apps {
                 return Err(Error::BadRequest("headers: a syslog drain is sent none".into()));
             }
             self.syslog_target(&url)?.0
+        } else if format == "s3" {
+            check_s3(&url, &settings.headers)?;
+            self.check_target("webhook", &url)?
         } else {
             self.check_target("webhook", &url)?
         };
@@ -210,6 +257,12 @@ impl Apps {
         let p = project.to_string();
         let current = self.db(move |s| s.drain_secrets(&p)).await?.into_iter().find(|d| d.drain.id == id).ok_or_else(|| Error::NotFound(format!("no log drain {id}")))?;
         let settings = self.drain_settings(project, &o, Some(&current)).await?;
+        if current.drain.format == "s3" {
+            if current.headers.iter().any(|(k, _)| k == OWN) && o.contains_key("headers") {
+                return Err(Error::BadRequest("headers: a bucket drain's key is roll's".into()));
+            }
+            check_s3(&current.url, &settings.headers)?;
+        }
         if current.drain.format == "syslog" && !settings.headers.is_empty() {
             return Err(Error::BadRequest("headers: a syslog drain is sent none".into()));
         }
@@ -244,8 +297,42 @@ impl Apps {
     pub async fn delete_drain(self: &Arc<Self>, project: &str, id: &str) -> Result<()> {
         let (p, i) = (project.to_string(), id.to_string());
         self.db(move |s| s.delete_drain(&p, &i)).await?;
+        // A bucket drain's key goes with it (a failure is logged: the drain is gone either way).
+        let i = id.to_string();
+        if let Ok(Some((_, r, kept))) = self.db(move |s| s.take_drain_link(&i)).await
+            && let Err(e) = self.deps.resources.unlink(crate::model::LinkKind::Bucket, &r, &kept).await
+        {
+            tracing::warn!(drain = id, bucket = %r, error = %e, "apps: a bucket drain's key couldn't be revoked");
+        }
         self.drains_changed(project).await;
         Ok(())
+    }
+
+    /// A bucket drain's target and key: the bucket on the project's canvas (the operator's
+    /// project, as a stream must be), its endpoint and region from roll storage, and a key of the
+    /// drain's own (write on that bucket) minted through the bucket link's provider, put in its
+    /// sealed headers with `x-roll-own` (the endpoint is roll's own, reached past the public-only
+    /// client). Its URL and what to revoke.
+    async fn mint_bucket_drain(self: &Arc<Self>, project: &str, bucket: &str, prefix: &str, settings: &mut DrainSettings) -> Result<(String, String)> {
+        let p = self.deps.workspace.as_ref().and_then(|ws| ws.get(roll_workspace::Scope::All, project).ok());
+        if !p.as_ref().is_some_and(|p| p.resources.iter().any(|r| r.kind == roll_workspace::Kind::Bucket && r.r#ref == bucket)) {
+            return Err(Error::BadRequest(format!("bucket {bucket} isn't on this project")));
+        }
+        if !p.is_some_and(|p| p.owner.is_empty()) {
+            return Err(Error::BadRequest("a person's project can't drain into a bucket until buckets know their owners".into()));
+        }
+        let vars: HashMap<String, String> = self.deps.resources.link_vars(crate::model::LinkKind::Bucket, bucket).await.map_err(|e| Error::BadRequest(format!("bucket {bucket}: {e:#}")))?.into_iter().collect();
+        let (Some(endpoint), Some(name)) = (vars.get("AWS_ENDPOINT_URL"), vars.get("S3_BUCKET")) else { return Err(Error::Conflict("roll storage gave no endpoint for the bucket".into())) };
+        let region = vars.get("AWS_REGION").cloned().unwrap_or_else(|| "us-east-1".into());
+        let m = self.deps.resources.link(crate::model::LinkKind::Bucket, bucket, &format!("drain:{project}")).await.map_err(|e| Error::Conflict(format!("a key for bucket {bucket}: {e:#}")))?.ok_or_else(|| Error::Conflict("roll storage made no key for the drain".into()))?;
+        let get = |k: &str| m.vars.iter().find(|(n, _)| n == k).map(|(_, v)| v.clone());
+        let (Some(id), Some(key)) = (get("AWS_ACCESS_KEY_ID"), get("AWS_SECRET_ACCESS_KEY")) else {
+            let _ = self.deps.resources.unlink(crate::model::LinkKind::Bucket, bucket, &m.kept).await;
+            return Err(Error::Conflict("roll storage's key for the drain had no access key".into()));
+        };
+        settings.headers = vec![(S3_KEYS[0].into(), id), (S3_KEYS[1].into(), key), (S3_KEYS[2].into(), region), (OWN.into(), "1".into())];
+        let url = format!("{}/{name}{}", endpoint.trim_end_matches('/'), if prefix.is_empty() { String::new() } else { format!("/{prefix}") });
+        Ok((url, m.kept))
     }
 
     /// Every node: read the log tap, batch each project's lines per drain, and send them.
@@ -356,10 +443,11 @@ impl Apps {
                         for o in list {
                             let d = &o.drain;
                             let Some(q) = queues.get_mut(&d.id) else { continue };
-                            if q.out || q.lines.is_empty() || (q.lines.len() < BATCH && q.first.elapsed() < LINGER) {
+                            let (most, linger) = if d.format == "s3" { (S3_BATCH, S3_LINGER) } else { (BATCH, LINGER) };
+                            if q.out || q.lines.is_empty() || (q.lines.len() < most && q.first.elapsed() < linger) {
                                 continue;
                             }
-                            let n = q.lines.len().min(BATCH);
+                            let n = q.lines.len().min(most);
                             let batch: Vec<Value> = q.lines.drain(..n).collect();
                             q.out = true;
                             let dropped = std::mem::take(&mut q.dropped);
@@ -443,6 +531,7 @@ impl Apps {
         let mut url = o.url.clone();
         let (body, content_type) = match o.drain.format.as_str() {
             "syslog" => return self.send_syslog(&o.url, batch).await.map(|()| None),
+            "s3" => return self.put_s3(o, batch, delivery).await.map(Some),
             "otlp" => {
                 url = signal_url(&o.url, signal);
                 let v = match signal {
@@ -482,6 +571,53 @@ impl Apps {
         }
         match req.body(body).send().await {
             Ok(r) => Ok(Some(r.status().as_u16())),
+            Err(e) => Err(e.without_url().to_string()),
+        }
+    }
+
+    /// An `s3` drain's batch: one NDJSON object, `<prefix>/YYYY/MM/DD/HH/<time>-<delivery>.ndjson`,
+    /// PUT to its bucket signed with SigV4 (its sealed keys; roll storage's buckets, AWS's,
+    /// any S3-compatible), through the public-only client. Its status, or why it didn't go.
+    async fn put_s3(&self, o: &OpenedDrain, batch: &[Value], delivery: &str) -> std::result::Result<u16, String> {
+        use sha2::Digest;
+        let key = |k: &str| o.headers.iter().find(|(n, _)| n.eq_ignore_ascii_case(k)).map(|(_, v)| v.clone());
+        let (Some(access), Some(secret)) = (key(S3_KEYS[0]), key(S3_KEYS[1])) else { return Err("the drain has no S3 keys".into()) };
+        let region = key(S3_KEYS[2]).unwrap_or_else(|| "us-east-1".into());
+        let mut body = Vec::new();
+        for l in batch {
+            serde_json::to_writer(&mut body, l).expect("JSON");
+            body.push(b'\n');
+        }
+        let now = chrono::Utc::now();
+        let url = format!("{}/{}/{}-{delivery}.ndjson", o.url.trim_end_matches('/'), now.format("%Y/%m/%d/%H"), now.format("%Y%m%dT%H%M%SZ"));
+        let parsed = url::Url::parse(&url).map_err(|e| e.to_string())?;
+        let host = match parsed.port() {
+            Some(p) => format!("{}:{p}", parsed.host_str().unwrap_or_default()),
+            None => parsed.host_str().unwrap_or_default().to_string(),
+        };
+        let hash = hex::encode(sha2::Sha256::digest(&body));
+        let date = now.format("%Y%m%dT%H%M%SZ").to_string();
+        let unsigned = [("host", host.as_str()), ("x-amz-content-sha256", hash.as_str()), ("x-amz-date", date.as_str())];
+        let identity: aws_smithy_runtime_api::client::identity::Identity = aws_credential_types::Credentials::new(access, secret, None, None, "roll-drain").into();
+        let params: aws_sigv4::http_request::SigningParams = aws_sigv4::sign::v4::SigningParams::builder()
+            .identity(&identity)
+            .region(&region)
+            .name("s3")
+            .time(now.into())
+            .settings(aws_sigv4::http_request::SigningSettings::default())
+            .build()
+            .map_err(|e| e.to_string())?
+            .into();
+        let signable = aws_sigv4::http_request::SignableRequest::new("PUT", url.as_str(), unsigned.iter().copied(), aws_sigv4::http_request::SignableBody::Precomputed(hash.clone())).map_err(|e| e.to_string())?;
+        let (instructions, _) = aws_sigv4::http_request::sign(signable, &params).map_err(|e| e.to_string())?.into_parts();
+        // A bucket drain's endpoint is roll storage's own, not a tenant's.
+        let client = if key(OWN).is_some() { &self.scrape_client } else { &self.notify_client };
+        let mut req = client.put(&url).header("content-type", "application/x-ndjson").header("x-amz-content-sha256", &hash).header("x-amz-date", &date);
+        for (k, v) in instructions.headers() {
+            req = req.header(k, v);
+        }
+        match req.body(body).send().await {
+            Ok(r) => Ok(r.status().as_u16()),
             Err(e) => Err(e.without_url().to_string()),
         }
     }
@@ -539,6 +675,24 @@ impl Apps {
 }
 
 /// The TLS settings syslog drains connect with: the system's roots, ring, TLS 1.2 and up.
+/// An `s3` drain: its URL names a bucket and maybe a prefix (`https://host/bucket[/prefix]`,
+/// path-style, letters, digits and `-_./` only), and its headers are its keys and nothing else.
+fn check_s3(url: &str, headers: &[(String, String)]) -> Result<()> {
+    let u = url::Url::parse(url).map_err(|e| Error::BadRequest(format!("url: {e}")))?;
+    let path = u.path().trim_matches('/');
+    if path.is_empty() || u.query().is_some() || !path.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.' | b'/')) || path.contains("//") {
+        return Err(Error::BadRequest("url: an s3 drain's is https://<endpoint>/<bucket>[/<prefix>] (path-style; letters, digits, - _ . /)".into()));
+    }
+    let names: Vec<String> = headers.iter().map(|(k, _)| k.to_ascii_lowercase()).collect();
+    if let Some(n) = names.iter().find(|n| !S3_KEYS.contains(&n.as_str()) && *n != OWN) {
+        return Err(Error::BadRequest(format!("headers: an s3 drain takes only {} ({n} isn't one)", S3_KEYS.join(", "))));
+    }
+    if !names.iter().any(|n| n == S3_KEYS[0]) || !names.iter().any(|n| n == S3_KEYS[1]) {
+        return Err(Error::BadRequest(format!("headers: an s3 drain needs {} and {}", S3_KEYS[0], S3_KEYS[1])));
+    }
+    Ok(())
+}
+
 fn syslog_tls() -> Arc<tokio_rustls::rustls::ClientConfig> {
     use tokio_rustls::rustls;
     static CONFIG: std::sync::OnceLock<Arc<rustls::ClientConfig>> = std::sync::OnceLock::new();

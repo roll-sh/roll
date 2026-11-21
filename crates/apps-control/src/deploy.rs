@@ -75,11 +75,15 @@ impl Apps {
         let (revision, image, message) = (text("revision")?, text("image")?, text("message")?);
         // Built and health-checked, not switched to: its own URL runs it (Cloud Run's
         // `--no-traffic`); a rollback to it puts it live.
-        let no_traffic = match o.get("no_traffic") {
+        let mut no_traffic = match o.get("no_traffic") {
             None | Some(Value::Null) => false,
             Some(Value::Bool(b)) => *b,
             Some(_) => return Err(Error::BadRequest("no_traffic is a boolean".into())),
         };
+        // A person's deploy where approvals are asked for waits at ready for them.
+        if matches!(by.trigger, Trigger::Manual | Trigger::Upload) && self.waits_for_approval(service, env).await? {
+            no_traffic = true;
+        }
         // Render's "Clear build cache & deploy": for a build a stale cached layer keeps breaking.
         let no_cache = match o.get("no_cache") {
             None | Some(Value::Null) => false,
@@ -232,6 +236,8 @@ impl Apps {
     pub async fn redeploy(self: &Arc<Self>, service: &str, env: &str, body: Value, actor: Option<String>, key: Option<&str>) -> Result<Deployment> {
         self.refuse_capped(service)?;
         self.refuse_paused(service, env).await?;
+        // Where approvals are asked for, it waits at ready for them.
+        let waits = self.waits_for_approval(service, env).await?;
         let mut body = body;
         let over = body.as_object_mut().and_then(|o| o.remove("override")).is_some_and(|v| v == true);
         self.refuse_frozen(service, env, over, actor.clone()).await?;
@@ -286,7 +292,7 @@ impl Apps {
             upload: None,
             status: DeployStatus::Queued,
             actor,
-            no_traffic: false,
+            no_traffic: waits,
             no_cache: false,
         };
         let (sid, e) = (service.to_string(), env.to_string());
@@ -306,6 +312,7 @@ impl Apps {
         let mut o = body.as_object().cloned().unwrap_or_default();
         let over = o.remove("override").is_some_and(|v| v == true);
         self.refuse_frozen(service, env, over, actor.clone()).await?;
+        let waits = self.waits_for_approval(service, env).await?;
         if let Some(k) = o.keys().find(|k| !["from", "message", "expect"].contains(&k.as_str())) {
             return Err(Error::BadRequest(format!("unknown field {k}")));
         }
@@ -347,7 +354,7 @@ impl Apps {
             upload: None,
             status: DeployStatus::Queued,
             actor,
-            no_traffic: false,
+            no_traffic: waits,
             no_cache: false,
         };
         let (sid, e) = (service.to_string(), env.to_string());
@@ -368,8 +375,19 @@ impl Apps {
         self.refuse_capped(service)?;
         self.refuse_paused(service, env).await?;
         let old = self.deployment(service, env, dep).await?;
+        let (sid, e) = (service.to_string(), env.to_string());
+        let needed = self.db(move |s| s.environment(&sid, &e)).await?.approvals;
         if old.status == DeployStatus::Ready {
             self.refuse_frozen(service, env, over, actor.clone()).await?;
+            // A never-live build goes live with its approvals (rolling back to what was live
+            // needs none), or an admin's override, said in the audit log.
+            let counted = old.approved_by.iter().filter(|a| Some(a.as_str()) != old.actor.as_deref()).count() as u32;
+            if counted < needed {
+                if !over {
+                    return Err(Error::Conflict(format!("{dep} needs {needed} approval(s) from people other than who started it ({counted} so far): POST …/deploys/{dep}/approve, or an admin's `X-Roll-Override: 1`")));
+                }
+                self.audit("approvals.bypassed", service, env, actor.clone(), json!({ "deployment": dep, "approvals": counted, "needed": needed })).await;
+            }
         }
         let Some(image) = old.image.clone() else { return Err(Error::Conflict(format!("{dep} never built an image, so there's nothing to roll back to"))) };
         if old.pruned_at.is_some() {
@@ -413,9 +431,11 @@ impl Apps {
         let (sid, e) = (service.to_string(), env.to_string());
         let dep = self.db(move |s| s.create_deployment(&sid, &e, d, "", None)).await?;
         // Held from here: the next push mustn't put back what was just rolled away from (a
-        // person's own hold stays theirs: putting a held build live is a rollback to it).
+        // person's own hold stays theirs: putting a held build live is a rollback to it, and so
+        // is an approved one, whose environment's pushes wait at ready anyway).
         let (sid, e, rid) = (service.to_string(), env.to_string(), dep.id.clone());
-        if self.held(service, env).await.as_deref() != Some(MANUAL_HOLD) && self.db(move |s| s.set_hold(&sid, &e, Some(&rid))).await.unwrap_or(false) {
+        let approved = needed > 0 && old.status == DeployStatus::Ready;
+        if !approved && self.held(service, env).await.as_deref() != Some(MANUAL_HOLD) && self.db(move |s| s.set_hold(&sid, &e, Some(&rid))).await.unwrap_or(false) {
             self.logs.sink(format!("env:{service}/{env}"), Stream::System).line("deploys held after the rollback: pushes, hooks and tag moves aren't put live until you deploy or resume them");
         }
         self.kick(service, env);
@@ -555,7 +575,57 @@ impl Apps {
         d.steps = self.db(move |s| s.steps(&id)).await?;
         let id = dep.to_string();
         d.vulnerabilities = self.db(move |s| s.scan(&id)).await?.map(|(sum, _)| sum);
+        let id = dep.to_string();
+        d.approved_by = self.db(move |s| s.approvals_of(&id)).await?;
         Ok(d)
+    }
+
+    /// Under the environment's `approvals`, a person's deploy waits at `ready` for them: whether
+    /// it does (a web service without a volume, which can wait beside the live one), or why it
+    /// can't (409).
+    pub(crate) async fn waits_for_approval(self: &Arc<Self>, service: &str, env: &str) -> Result<bool> {
+        let (sid, e) = (service.to_string(), env.to_string());
+        let Ok((svc, row)) = self.db(move |s| Ok((s.service(&sid)?, s.environment(&sid, &e)?))).await else { return Ok(false) };
+        if row.approvals == 0 {
+            return Ok(false);
+        }
+        let run = svc.for_env(&row).map(|s| s.run).unwrap_or(svc.run);
+        match run.kind == RunType::Web && run.volume.is_none() {
+            true => Ok(true),
+            false => Err(Error::Conflict(format!("{env}'s deploys need {} approval(s) before they go live, and this service's can't wait beside the live one for them", row.approvals))),
+        }
+    }
+
+    /// `POST …/deploys/{dep}/approve` (GitHub Environments' required reviewers): a person who
+    /// didn't start it approves a deployment waiting at `ready`; the approval that makes the
+    /// environment's count puts it live (a rollback to it, as "Put live", which a freeze still
+    /// stops). `who` is the person, never a token's.
+    pub async fn approve(self: &Arc<Self>, service: &str, env: &str, dep: &str, who: Option<String>) -> Result<Value> {
+        let d = self.deployment(service, env, dep).await?;
+        let (sid, e) = (service.to_string(), env.to_string());
+        let row = self.db(move |s| s.environment(&sid, &e)).await?;
+        if row.approvals == 0 {
+            return Err(Error::Conflict(format!("{env} asks for no approvals")));
+        }
+        if d.status != DeployStatus::Ready {
+            return Err(Error::Conflict(format!("{dep} isn't waiting at ready to go live")));
+        }
+        let who = who.ok_or_else(|| Error::Forbidden("an approval is a person's: signed in, or the operator, never a token".into()))?;
+        if d.actor.as_deref() == Some(who.as_str()) {
+            return Err(Error::Forbidden(format!("{who} started {dep}: someone else approves it")));
+        }
+        let (id, w) = (dep.to_string(), who.clone());
+        let all = self.db(move |s| s.approve(&id, &w, code_sql::now_ms())).await?;
+        let counted = all.iter().filter(|a| Some(a.as_str()) != d.actor.as_deref()).count() as u32;
+        self.audit("deploy.approved", service, env, Some(who.clone()), json!({ "deployment": dep, "approvals": counted, "needed": row.approvals })).await;
+        let mut out = json!({ "deployment": dep, "approved_by": all, "needed": row.approvals, "live": null });
+        if counted >= row.approvals {
+            match self.rollback(service, env, dep, Some(who), true, false).await {
+                Ok(live) => out["live"] = json!(live.id),
+                Err(e) => out["waiting"] = json!(e.to_string()),
+            }
+        }
+        Ok(out)
     }
 
     /// `GET …/deploys/{dep}/commits`: what a repo deployment brings over the one it's measured
@@ -1203,7 +1273,9 @@ impl Apps {
         if let Ok(Some(key)) = self.db(move |s| s.deployment_upload(&id)).await {
             self.drop_upload(&d.id, &key).await;
         }
-        self.live(&svc.id, &d.environment).meter.lock().build(code_sql::now_ms(), began.elapsed().as_secs_f64());
+        // Metered by its builder's size where the builder gives it one.
+        let factor = if self.deps.builder.sizes_builds() { svc.build.size.unwrap_or_default().factor() } else { 1.0 };
+        self.live(&svc.id, &d.environment).meter.lock().build(code_sql::now_ms(), began.elapsed().as_secs_f64() * factor);
         result
     }
 
@@ -1470,14 +1542,22 @@ impl Apps {
         if plan.provider == apps_build::Provider::Dockerfile {
             build_env.extend(commit);
         }
+        // `build.size`: what the builder gives it, where it can (one node's Docker can't).
+        let size = svc.build.size.unwrap_or_default();
+        if size != crate::model::BuildSize::Small {
+            match self.deps.builder.sizes_builds() {
+                true => log.line(format!("a {} builder: {} vCPU, {} GiB", serde_json::to_value(size).ok().and_then(|v| v.as_str().map(str::to_string)).unwrap_or_default(), size.resources().0, size.resources().1 / 1024)),
+                false => log.line("build.size: this node's builds share its BuildKit, unsized (it applies on the fleet's builders)"),
+            }
+        }
         let job = BuildJob {
             service: svc.id.clone(),
             deployment: d.id.clone(),
             context,
             dockerfile,
             tag: format!("roll-apps-{}:{}", svc.id.strip_prefix("svc_").unwrap_or(&svc.id), d.id.strip_prefix("dep_").unwrap_or(&d.id)),
-            cpu: 2.0,
-            memory_mb: 4096,
+            cpu: size.resources().0,
+            memory_mb: size.resources().1,
             timeout: build_timeout(svc.build.timeout_s, self.cfg.build_timeout, log),
             own_dockerfile: plan.provider == apps_build::Provider::Dockerfile,
             env: build_env,
@@ -2498,14 +2578,26 @@ impl Apps {
     /// when the next is due is skipped). The reaper's pass, every few seconds.
     /// Owned environments' stored logs past their retention (`log_retention_days`, a week by
     /// default and always for a preview) deleted, chunk by chunk.
-    async fn expire_logs_pass(self: &Arc<Self>, services: &[crate::store::ServiceRow], now: i64) {
+    /// Logs kept past the first week (30 or 90 days) are metered too, `hours` of what's stored
+    /// past it now (`stored_gb_hours`).
+    async fn expire_logs_pass(self: &Arc<Self>, services: &[crate::store::ServiceRow], now: i64, hours: f64) {
         let Ok(envs) = self.db(|s| s.all_environments()).await else { return };
         for svc in services.iter().filter(|s| self.owns(&s.id)) {
             for e in envs.iter().filter(|e| e.service == svc.id) {
                 let days = if e.ephemeral { crate::logs::KEEP_DAYS } else { e.log_retention_days.unwrap_or(crate::logs::KEEP_DAYS) };
                 let before = now - days as i64 * 86_400_000;
+                let week = now - crate::logs::KEEP_DAYS as i64 * 86_400_000;
+                let mut past_week = 0u64;
                 for key in crate::logs::env_keys(&svc.id, &e.name) {
                     self.logs.expire(&key, before).await;
+                    if days > crate::logs::KEEP_DAYS {
+                        past_week += self.logs.stored_before(&key, week).await;
+                    }
+                }
+                if past_week > 0 {
+                    let u = crate::store::UsageAdd { stored_gb_hours: past_week as f64 / 1e9 * hours, ..Default::default() };
+                    let (sid, en) = (svc.id.clone(), e.name.clone());
+                    let _ = self.db(move |s| s.add_usage(&sid, &en, now / 3_600_000, &u)).await;
                 }
                 // Its jobs' logs, each whole once its job started before then: those started
                 // since the last pass's cutoff (kept, so a node that was down catches up).
@@ -2532,9 +2624,12 @@ impl Apps {
         self.heartbeats_pass(&services, now).await;
         self.rescan_pass(&services, now).await;
         self.pause_pass(&services, now).await;
-        if now - self.logs_expired.load(std::sync::atomic::Ordering::Relaxed) >= 3_600_000 {
+        let last = self.logs_expired.load(std::sync::atomic::Ordering::Relaxed);
+        if now - last >= 3_600_000 {
             self.logs_expired.store(now, std::sync::atomic::Ordering::Relaxed);
-            self.expire_logs_pass(&services, now).await;
+            // The hours since the last pass, as stored logs are metered (a first pass, one).
+            let hours = if last == 0 { 1.0 } else { ((now - last) as f64 / 3_600_000.0).min(2.0) };
+            self.expire_logs_pass(&services, now, hours).await;
             self.build_cache_pass(now).await;
         }
         if now - self.status_swept.load(std::sync::atomic::Ordering::Relaxed) >= 60_000 {
@@ -2956,6 +3051,13 @@ pub(crate) fn hold_of(svc: &crate::store::ServiceRow, e: &crate::store::EnvRow) 
         return match svc.run.kind == RunType::Web && svc.run.volume.is_none() {
             true => Held::Ready,
             false => Held::Skip(format!("{}, and this service's can't wait beside the live one", f.says())),
+        };
+    }
+    // Approvals: what automation builds waits at ready for them.
+    if e.approvals > 0 {
+        return match svc.run.kind == RunType::Web && svc.run.volume.is_none() {
+            true => Held::Ready,
+            false => Held::Skip(format!("deploys need {} approval(s), and this service's can't wait beside the live one for them", e.approvals)),
         };
     }
     match e.held_by.as_deref() {

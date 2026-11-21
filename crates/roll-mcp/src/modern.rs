@@ -120,7 +120,13 @@ pub fn finish(method: &str, mut resp: Value) -> Value {
     result.entry("resultType").or_insert_with(|| json!("complete"));
     let meta = result.entry("_meta").or_insert_with(|| json!({}));
     if let Some(m) = meta.as_object_mut() {
-        m.insert(SERVER_INFO.into(), json!({ "name": "roll", "title": "roll", "version": env!("CARGO_PKG_VERSION") }));
+        let mut info = json!({ "name": "roll", "title": "roll", "version": env!("CARGO_PKG_VERSION") });
+        // Discovery is where a client gets what to show for the server (its icon, as `initialize`
+        // gives a handshake client); every other answer names it without the image.
+        if method == "server/discover" {
+            info["icons"] = json!([crate::server_icon()]);
+        }
+        m.insert(SERVER_INFO.into(), info);
     }
     if matches!(method, "tools/list" | "prompts/list" | "resources/list" | "resources/templates/list" | "resources/read" | "server/discover") {
         result.insert("ttlMs".into(), json!(LIST_TTL_MS));

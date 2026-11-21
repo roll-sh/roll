@@ -791,9 +791,19 @@ impl Code {
                 self.db.insert_learning(&id, &r.id, None, &text, "command", &by.display(), th.map(|t| t.id.as_str()))?;
                 format!("Got it — I'll remember for future reviews: _{}_", text.trim())
             }
-            // Async (a call to the preview backend): run where the comment is read, in a pull
-            // request's conversation.
-            Preview(_) => "`@roll preview …` works in the pull request's conversation.".into(),
+            // A call to the preview backend (async): done in the background, answered in the
+            // thread when it's done. A pull request's conversation runs it where it's read.
+            Preview(action) => {
+                let (Some(th), Some(me)) = (th, self.me.upgrade()) else { return Ok(Some("`@roll preview …` works in a thread or the pull request's conversation.".into())) };
+                let (r, c, th, by) = (r.clone(), c.clone(), th.clone(), by.display());
+                tokio::spawn(async move {
+                    let reply = crate::github::commands::preview_command(&me, &c, action, &by).await;
+                    if let Err(e) = me.roll_reply(&r, &c, &th, &reply) {
+                        tracing::warn!(change = %c.id, error = %e, "@roll preview's answer");
+                    }
+                });
+                return Ok(None);
+            }
             Explain | Fix | Ask(_) => {
                 let Some(th) = th else {
                     return Ok(Some("`@roll explain`, `@roll fix` and questions work in an inline comment on the lines you mean.".into()));

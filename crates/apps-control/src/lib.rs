@@ -1735,6 +1735,8 @@ impl Apps {
             feedback: r.feedback,
             vitals: r.vitals,
             log_retention_days: r.log_retention_days.unwrap_or(crate::logs::KEEP_DAYS),
+            approvals: r.approvals,
+            badge_url: r.badge.then(|| self.cfg.otlp_base.as_deref().map(|b| format!("{}{}{}/{}.svg", b.trim_end_matches('/'), crate::public::BADGE, r.service, r.name))).flatten(),
             report: r.report,
             preview_host: {
                 let (sid, e) = (r.service.clone(), r.name.clone());
@@ -1837,7 +1839,7 @@ impl Apps {
                 settings.push(json!({ "field": format!("run.{k}"), "from": x, "to": y, "put": { "run": { k: x } } }));
             }
         }
-        for k in ["wait_for_ci", "follow_tag", "redeploy_on_secrets", "traces", "vitals", "report", "egress", "allow_ips", "rate_limit", "firewall", "headers", "routes", "checks", "log_retention_days"] {
+        for k in ["wait_for_ci", "follow_tag", "redeploy_on_secrets", "traces", "vitals", "report", "egress", "allow_ips", "rate_limit", "firewall", "headers", "routes", "checks", "log_retention_days", "approvals"] {
             let (x, y) = (a.get(k).cloned().unwrap_or(Value::Null), b.get(k).cloned().unwrap_or(Value::Null));
             if x != y {
                 settings.push(json!({ "field": k, "from": x, "to": y, "put": { k: x } }));
@@ -1881,7 +1883,7 @@ impl Apps {
     pub async fn put_environment(self: &Arc<Self>, service: &str, env: &str, body: Value) -> Result<Environment> {
         let o = body.as_object().cloned().unwrap_or_default();
         for k in o.keys() {
-            if !["branch", "ephemeral", "access", "variables_from", "wait_for_ci", "run", "follow_tag", "redeploy_on_secrets", "feedback", "maintenance", "pages", "allow_ips", "rate_limit", "firewall", "headers", "routes", "checks", "heartbeats", "split", "mirror", "snippets", "config", "freeze", "pause_schedule", "paused", "held", "hostname", "traces", "egress", "vitals", "report", "preview_host", "log_retention_days"].contains(&k.as_str()) {
+            if !["branch", "ephemeral", "access", "variables_from", "wait_for_ci", "run", "follow_tag", "redeploy_on_secrets", "feedback", "maintenance", "pages", "allow_ips", "rate_limit", "firewall", "headers", "routes", "checks", "heartbeats", "split", "mirror", "snippets", "config", "freeze", "pause_schedule", "paused", "held", "hostname", "traces", "egress", "vitals", "report", "preview_host", "log_retention_days", "approvals", "badge"].contains(&k.as_str()) {
                 return Err(Error::BadRequest(format!("unknown field {k}")));
             }
         }
@@ -2217,7 +2219,7 @@ impl Apps {
                 svc.for_env(&row).map_err(|e| Error::BadRequest(e.to_string().replace("no longer fit", "don't fit")))?;
             }
         }
-        for k in ["feedback", "follow_tag", "wait_for_ci", "redeploy_on_secrets", "traces", "vitals", "report"] {
+        for k in ["feedback", "follow_tag", "wait_for_ci", "redeploy_on_secrets", "traces", "vitals", "report", "badge"] {
             if !matches!(o.get(k), None | Some(Value::Null | Value::Bool(_))) {
                 return Err(Error::BadRequest(format!("{k} is a boolean")));
             }
@@ -2233,6 +2235,18 @@ impl Apps {
         };
         if retention.flatten().is_some_and(|d| d != crate::logs::KEEP_DAYS) && ephemeral.unwrap_or(existing.as_ref().is_some_and(|r| r.ephemeral)) {
             return Err(Error::BadRequest("a preview's logs are kept 7 days".into()));
+        }
+        // Approvals from people other than a deployment's author before it goes live: 0–3.
+        let approvals = match o.get("approvals") {
+            None => None,
+            Some(Value::Null) => Some(0),
+            Some(v) => match v.as_u64() {
+                Some(n @ 0..=3) => Some(n as u32),
+                _ => return Err(Error::BadRequest("approvals is 0–3 people".into())),
+            },
+        };
+        if approvals.is_some_and(|n| n > 0) && ephemeral.unwrap_or(existing.as_ref().is_some_and(|r| r.ephemeral)) {
+            return Err(Error::BadRequest("a preview's deploys need no approvals".into()));
         }
         if o.get("traces") == Some(&Value::Bool(true)) && self.cfg.otlp_base.is_none() {
             return Err(Error::Conflict("traces aren't set up on this node (no OTLP address)".into()));
@@ -2418,6 +2432,18 @@ impl Apps {
         if let Some(Value::Bool(on)) = o.get("report") {
             let (sid, e, on) = (service.to_string(), env.to_string(), *on);
             self.db(move |s| s.set_report(&sid, &e, on)).await?;
+            self.changed(service);
+        }
+        // Its badge answers anyone from now on (or no one).
+        if let Some(Value::Bool(on)) = o.get("badge") {
+            let (sid, e, on) = (service.to_string(), env.to_string(), *on);
+            self.db(move |s| s.set_badge(&sid, &e, on)).await?;
+            self.changed(service);
+        }
+        // From the next deploy on: what's put live waits for them.
+        if let Some(n) = approvals {
+            let (sid, e) = (service.to_string(), env.to_string());
+            self.db(move |s| s.set_approvals(&sid, &e, n)).await?;
             self.changed(service);
         }
         // Kept from the next hourly pass on (logs::expire_pass).
@@ -4061,6 +4087,7 @@ impl Apps {
             d.requests += u.requests;
             d.egress_bytes += u.egress_bytes;
             d.build_seconds += u.build_seconds;
+            d.stored_gb_hours += u.stored_gb_hours;
         }
         let p = self.cfg.prices;
         let mut total = 0.0;
@@ -4069,7 +4096,7 @@ impl Apps {
                 let u = by_day.remove(&d).unwrap_or_default();
                 let usd = p.cost(&u);
                 total += usd;
-                json!({ "day": d, "cpu_seconds": u.cpu_seconds, "gb_seconds": u.gb_seconds, "requests": u.requests, "egress_bytes": u.egress_bytes, "build_seconds": u.build_seconds, "usd": usd })
+                json!({ "day": d, "cpu_seconds": u.cpu_seconds, "gb_seconds": u.gb_seconds, "requests": u.requests, "egress_bytes": u.egress_bytes, "build_seconds": u.build_seconds, "stored_gb_hours": u.stored_gb_hours, "usd": usd })
             })
             .collect();
         Ok(json!({ "days": days, "total_usd": total }))

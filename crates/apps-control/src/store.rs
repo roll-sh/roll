@@ -221,6 +221,13 @@ CREATE TABLE IF NOT EXISTS form_submissions (
     fields_sealed TEXT NOT NULL
 ) WITHOUT ROWID;
 CREATE INDEX IF NOT EXISTS form_submissions_by_form ON form_submissions (service, env, form, created_at);
+-- A bucket drain's key, minted by roll storage for it: what to revoke when it goes.
+CREATE TABLE IF NOT EXISTS drain_links (
+    drain TEXT PRIMARY KEY,
+    kind TEXT NOT NULL,
+    ref TEXT NOT NULL,
+    kept TEXT NOT NULL
+);
 CREATE TABLE IF NOT EXISTS log_drains (
     id TEXT PRIMARY KEY,
     project TEXT NOT NULL,
@@ -330,6 +337,13 @@ CREATE TABLE IF NOT EXISTS error_groups (
     name TEXT NOT NULL,
     first_seen INTEGER NOT NULL,
     PRIMARY KEY (service, env, fingerprint)
+) WITHOUT ROWID;
+-- Who approved putting a deployment live (an environment's `approvals`), one row a person.
+CREATE TABLE IF NOT EXISTS deploy_approvals (
+    deployment TEXT NOT NULL,
+    approver TEXT NOT NULL,
+    at INTEGER NOT NULL,
+    PRIMARY KEY (deployment, approver)
 ) WITHOUT ROWID;
 -- Variables only its instances get, never a build's steps (Vercel's and Netlify's scopes).
 CREATE TABLE IF NOT EXISTS variable_runtime_only (
@@ -576,6 +590,10 @@ pub struct EnvRow {
     pub vitals: bool,
     /// Days its logs are kept (7, 30 or 90); None: [`crate::logs::KEEP_DAYS`].
     pub log_retention_days: Option<u32>,
+    /// Approvals a deployment needs from people other than its author before it goes live.
+    pub approvals: u32,
+    /// Its deploy status badge answers (`/_roll/badge/…`), for anyone.
+    pub badge: bool,
     /// Its deploys are reported to the Git host (commit statuses, GitHub Deployments); false:
     /// someone else reports them (roll previews for its `pv-` environments).
     pub report: bool,
@@ -655,6 +673,8 @@ pub struct UsageAdd {
     pub requests: i64,
     pub egress_bytes: i64,
     pub build_seconds: f64,
+    /// Stored logs past the first week (an environment keeping them 30 or 90 days), in GB-hours.
+    pub stored_gb_hours: f64,
 }
 
 /// One move of an environment's active deployment ([`Store::switch_active`]): from `from` to
@@ -697,7 +717,7 @@ fn name_taken(name: &str, deleted: Option<i64>) -> String {
         Some(_) => format!("a deleted service named {name} holds the name: restore it, or delete it again to delete it for good"),
     }
 }
-const ENV_COLS: &str = "service, name, branch, ephemeral, active, slug, port, created_at, wait_for_ci, run, hook_hash, follow_tag, tag_seen, feedback, maintenance, allow_ips, rate_limit, tcp_port, firewall, pages, redeploy_on_secrets, secrets_seen, headers, paused, held_by, egress, vitals, routes, report, checks, heartbeats, split, freeze, mirror, pause_schedule, snippets, log_retention_days";
+const ENV_COLS: &str = "service, name, branch, ephemeral, active, slug, port, created_at, wait_for_ci, run, hook_hash, follow_tag, tag_seen, feedback, maintenance, allow_ips, rate_limit, tcp_port, firewall, pages, redeploy_on_secrets, secrets_seen, headers, paused, held_by, egress, vitals, routes, report, checks, heartbeats, split, freeze, mirror, pause_schedule, snippets, log_retention_days, approvals, badge";
 /// A deployment [`Store::prune_deployments`] pruned, with its image when nothing else names it.
 pub struct Pruned {
     pub id: String,
@@ -785,6 +805,8 @@ fn env_row(r: &code_sql::Row<'_>) -> code_sql::Result<EnvRow> {
         pause_schedule: r.get::<_, Option<String>>(34)?.and_then(|j| serde_json::from_str(&j).ok()),
         snippets: r.get::<_, Option<String>>(35)?.and_then(|j| serde_json::from_str(&j).ok()).unwrap_or_default(),
         log_retention_days: r.get::<_, Option<i64>>(36)?.map(|d| d as u32),
+        approvals: r.get::<_, Option<i64>>(37)?.unwrap_or(0) as u32,
+        badge: r.get::<_, i64>(38)? != 0,
     })
 }
 
@@ -841,6 +863,7 @@ fn deploy_row(r: &code_sql::Row<'_>) -> code_sql::Result<Deployment> {
         error_detail,
         fix,
         steps: Vec::new(),
+        approved_by: Vec::new(),
     })
 }
 
@@ -941,6 +964,10 @@ impl Store {
         db.add_column("environments", "vitals", "INTEGER NOT NULL DEFAULT 0")?;
         db.add_column("environments", "report", "INTEGER NOT NULL DEFAULT 1")?;
         db.add_column("environments", "log_retention_days", "INTEGER")?;
+        db.add_column("environments", "approvals", "INTEGER")?;
+        db.add_column("environments", "badge", "INTEGER NOT NULL DEFAULT 0")?;
+        db.add_column("usage", "stored_gb_hours", "REAL NOT NULL DEFAULT 0")?;
+        db.add_column("project_usage", "stored_gb_hours", "REAL NOT NULL DEFAULT 0")?;
         // A custom domain sent to another of the app's ports.
         db.add_column("domains", "port", "INTEGER")?;
         // The roll login (`ses_…`) a ticket and a visit session came from: its end ends them.
@@ -1061,12 +1088,13 @@ impl Store {
             // What it used stays its project's (spend limits, the month's bill): deleting a
             // service and making another never brings the month's spend down.
             c.execute(
-                "INSERT INTO project_usage (project, hour, cpu_seconds, gb_seconds, requests, egress_bytes, build_seconds) \
-                 SELECT s.project, u.hour, SUM(u.cpu_seconds), SUM(u.gb_seconds), SUM(u.requests), SUM(u.egress_bytes), SUM(u.build_seconds) \
+                "INSERT INTO project_usage (project, hour, cpu_seconds, gb_seconds, requests, egress_bytes, build_seconds, stored_gb_hours) \
+                 SELECT s.project, u.hour, SUM(u.cpu_seconds), SUM(u.gb_seconds), SUM(u.requests), SUM(u.egress_bytes), SUM(u.build_seconds), SUM(u.stored_gb_hours) \
                  FROM usage u JOIN services s ON s.id = u.service WHERE u.service = ? GROUP BY s.project, u.hour \
                  ON CONFLICT (project, hour) DO UPDATE SET cpu_seconds = project_usage.cpu_seconds + excluded.cpu_seconds, \
                  gb_seconds = project_usage.gb_seconds + excluded.gb_seconds, requests = project_usage.requests + excluded.requests, \
-                 egress_bytes = project_usage.egress_bytes + excluded.egress_bytes, build_seconds = project_usage.build_seconds + excluded.build_seconds",
+                 egress_bytes = project_usage.egress_bytes + excluded.egress_bytes, build_seconds = project_usage.build_seconds + excluded.build_seconds, \
+                 stored_gb_hours = project_usage.stored_gb_hours + excluded.stored_gb_hours",
                 [id],
             )?;
             c.execute("DELETE FROM deploy_steps WHERE deployment IN (SELECT id FROM deployments WHERE service = ?)", [id])?;
@@ -1171,7 +1199,7 @@ impl Store {
                     None => None,
                 };
                 c.execute(
-                    &format!("INSERT INTO environments ({ENV_COLS}) VALUES (?, ?, ?, ?, NULL, ?, ?, ?, 0, '{{}}', NULL, 0, NULL, 0, NULL, NULL, NULL, NULL, NULL, NULL, 0, NULL, NULL, 0, NULL, NULL, 0, NULL, 1, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL)"),
+                    &format!("INSERT INTO environments ({ENV_COLS}) VALUES (?, ?, ?, ?, NULL, ?, ?, ?, 0, '{{}}', NULL, 0, NULL, 0, NULL, NULL, NULL, NULL, NULL, NULL, 0, NULL, NULL, 0, NULL, NULL, 0, NULL, 1, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, 0)"),
                     params![service, env, branch.flatten(), ephemeral.unwrap_or(false) as i64, slug, port, now],
                 )?;
             }
@@ -3073,13 +3101,13 @@ impl Store {
     pub fn add_usage(&self, service: &str, env: &str, hour: i64, u: &UsageAdd) -> Result<()> {
         self.db.write(|c| {
             let n = c.execute(
-                "UPDATE usage SET cpu_seconds = cpu_seconds + ?, gb_seconds = gb_seconds + ?, requests = requests + ?, egress_bytes = egress_bytes + ?, build_seconds = build_seconds + ? WHERE service = ? AND env = ? AND hour = ?",
-                params![u.cpu_seconds, u.gb_seconds, u.requests, u.egress_bytes, u.build_seconds, service, env, hour],
+                "UPDATE usage SET cpu_seconds = cpu_seconds + ?, gb_seconds = gb_seconds + ?, requests = requests + ?, egress_bytes = egress_bytes + ?, build_seconds = build_seconds + ?, stored_gb_hours = stored_gb_hours + ? WHERE service = ? AND env = ? AND hour = ?",
+                params![u.cpu_seconds, u.gb_seconds, u.requests, u.egress_bytes, u.build_seconds, u.stored_gb_hours, service, env, hour],
             )?;
             if n == 0 {
                 c.execute(
-                    "INSERT INTO usage (service, env, hour, cpu_seconds, gb_seconds, requests, egress_bytes, build_seconds) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-                    params![service, env, hour, u.cpu_seconds, u.gb_seconds, u.requests, u.egress_bytes, u.build_seconds],
+                    "INSERT INTO usage (service, env, hour, cpu_seconds, gb_seconds, requests, egress_bytes, build_seconds, stored_gb_hours) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    params![service, env, hour, u.cpu_seconds, u.gb_seconds, u.requests, u.egress_bytes, u.build_seconds, u.stored_gb_hours],
                 )?;
             }
             Ok(())
@@ -3089,16 +3117,16 @@ impl Store {
     /// Usage per hour since `since_hour`: `(hour, usage)`.
     pub fn usage(&self, service: &str, env: Option<&str>, since_hour: i64) -> Result<Vec<(i64, UsageAdd)>> {
         let map = |r: &code_sql::Row<'_>| {
-            Ok((r.get(0)?, UsageAdd { cpu_seconds: r.get(1)?, gb_seconds: r.get(2)?, requests: r.get(3)?, egress_bytes: r.get(4)?, build_seconds: r.get(5)? }))
+            Ok((r.get(0)?, UsageAdd { cpu_seconds: r.get(1)?, gb_seconds: r.get(2)?, requests: r.get(3)?, egress_bytes: r.get(4)?, build_seconds: r.get(5)?, stored_gb_hours: r.get(6)? }))
         };
         Ok(match env {
             Some(e) => self.db.query(
-                "SELECT hour, cpu_seconds, gb_seconds, requests, egress_bytes, build_seconds FROM usage WHERE service = ? AND env = ? AND hour >= ? ORDER BY hour",
+                "SELECT hour, cpu_seconds, gb_seconds, requests, egress_bytes, build_seconds, stored_gb_hours FROM usage WHERE service = ? AND env = ? AND hour >= ? ORDER BY hour",
                 params![service, e, since_hour],
                 map,
             )?,
             None => self.db.query(
-                "SELECT hour, SUM(cpu_seconds), SUM(gb_seconds), SUM(requests), SUM(egress_bytes), SUM(build_seconds) FROM usage WHERE service = ? AND hour >= ? GROUP BY hour ORDER BY hour",
+                "SELECT hour, SUM(cpu_seconds), SUM(gb_seconds), SUM(requests), SUM(egress_bytes), SUM(build_seconds), SUM(stored_gb_hours) FROM usage WHERE service = ? AND hour >= ? GROUP BY hour ORDER BY hour",
                 params![service, since_hour],
                 map,
             )?,
@@ -3249,6 +3277,40 @@ impl Store {
     pub fn set_maintenance(&self, service: &str, env: &str, message: Option<&str>) -> Result<()> {
         self.db.execute("UPDATE environments SET maintenance = ? WHERE service = ? AND name = ?", params![message, service, env])?;
         Ok(())
+    }
+
+    pub fn add_drain_link(&self, drain: &str, kind: &str, r#ref: &str, kept: &str) -> Result<()> {
+        self.db.execute("INSERT INTO drain_links (drain, kind, ref, kept) VALUES (?, ?, ?, ?)", params![drain, kind, r#ref, kept])?;
+        Ok(())
+    }
+
+    /// A deleted drain's minted key, its row gone.
+    pub fn take_drain_link(&self, drain: &str) -> Result<Option<(String, String, String)>> {
+        let row: Option<(String, String, String)> = self.db.query_row("SELECT kind, ref, kept FROM drain_links WHERE drain = ?", [drain], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?))).optional()?;
+        if row.is_some() {
+            self.db.execute("DELETE FROM drain_links WHERE drain = ?", [drain])?;
+        }
+        Ok(row)
+    }
+
+    pub fn set_badge(&self, service: &str, env: &str, on: bool) -> Result<()> {
+        self.db.execute("UPDATE environments SET badge = ? WHERE service = ? AND name = ?", params![on as i64, service, env])?;
+        Ok(())
+    }
+
+    pub fn set_approvals(&self, service: &str, env: &str, n: u32) -> Result<()> {
+        self.db.execute("UPDATE environments SET approvals = ? WHERE service = ? AND name = ?", params![(n > 0).then_some(n as i64), service, env])?;
+        Ok(())
+    }
+
+    /// `who` approves `deployment` (again: nothing new). Everyone who has, oldest first.
+    pub fn approve(&self, deployment: &str, who: &str, at: i64) -> Result<Vec<String>> {
+        self.db.execute("INSERT INTO deploy_approvals (deployment, approver, at) VALUES (?, ?, ?) ON CONFLICT DO NOTHING", params![deployment, who, at])?;
+        self.approvals_of(deployment)
+    }
+
+    pub fn approvals_of(&self, deployment: &str) -> Result<Vec<String>> {
+        Ok(self.db.query("SELECT approver FROM deploy_approvals WHERE deployment = ? ORDER BY at, approver", [deployment], |r| r.get(0))?)
     }
 
     pub fn set_log_retention(&self, service: &str, env: &str, days: Option<u32>) -> Result<()> {
@@ -3538,31 +3600,31 @@ impl Store {
     pub fn project_usage_rows(&self, project: &str, from_hour: i64, to_hour: i64) -> Result<(Vec<ServiceUsage>, UsageAdd)> {
         let rows = self.db.query(
             // An environment that's gone (a closed preview, nearly always) counts with the previews.
-            "SELECT u.service, s.name, u.env, COALESCE(e.ephemeral, 1), SUM(u.cpu_seconds), SUM(u.gb_seconds), SUM(u.requests), SUM(u.egress_bytes), SUM(u.build_seconds) \
+            "SELECT u.service, s.name, u.env, COALESCE(e.ephemeral, 1), SUM(u.cpu_seconds), SUM(u.gb_seconds), SUM(u.requests), SUM(u.egress_bytes), SUM(u.build_seconds), SUM(u.stored_gb_hours) \
              FROM usage u JOIN services s ON s.id = u.service LEFT JOIN environments e ON e.service = u.service AND e.name = u.env \
              WHERE s.project = ? AND u.hour >= ? AND u.hour < ? GROUP BY u.service, s.name, u.env, COALESCE(e.ephemeral, 1) ORDER BY s.name, u.env",
             params![project, from_hour, to_hour],
-            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get::<_, i64>(3)? != 0, UsageAdd { cpu_seconds: r.get(4)?, gb_seconds: r.get(5)?, requests: r.get(6)?, egress_bytes: r.get(7)?, build_seconds: r.get(8)? })),
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get::<_, i64>(3)? != 0, UsageAdd { cpu_seconds: r.get(4)?, gb_seconds: r.get(5)?, requests: r.get(6)?, egress_bytes: r.get(7)?, build_seconds: r.get(8)?, stored_gb_hours: r.get(9)? })),
         )?;
         let gone = self.db.query_row(
-            "SELECT COALESCE(SUM(cpu_seconds), 0), COALESCE(SUM(gb_seconds), 0), COALESCE(SUM(requests), 0), COALESCE(SUM(egress_bytes), 0), COALESCE(SUM(build_seconds), 0) \
+            "SELECT COALESCE(SUM(cpu_seconds), 0), COALESCE(SUM(gb_seconds), 0), COALESCE(SUM(requests), 0), COALESCE(SUM(egress_bytes), 0), COALESCE(SUM(build_seconds), 0), COALESCE(SUM(stored_gb_hours), 0) \
              FROM project_usage WHERE project = ? AND hour >= ? AND hour < ?",
             params![project, from_hour, to_hour],
-            |r| Ok(UsageAdd { cpu_seconds: r.get(0)?, gb_seconds: r.get(1)?, requests: r.get(2)?, egress_bytes: r.get(3)?, build_seconds: r.get(4)? }),
+            |r| Ok(UsageAdd { cpu_seconds: r.get(0)?, gb_seconds: r.get(1)?, requests: r.get(2)?, egress_bytes: r.get(3)?, build_seconds: r.get(4)?, stored_gb_hours: r.get(5)? }),
         )?;
         Ok((rows, gone))
     }
 
     pub fn project_usage(&self, project: &str, since_hour: i64) -> Result<UsageAdd> {
-        let row = |r: &code_sql::Row<'_>| Ok(UsageAdd { cpu_seconds: r.get(0)?, gb_seconds: r.get(1)?, requests: r.get(2)?, egress_bytes: r.get(3)?, build_seconds: r.get(4)? });
+        let row = |r: &code_sql::Row<'_>| Ok(UsageAdd { cpu_seconds: r.get(0)?, gb_seconds: r.get(1)?, requests: r.get(2)?, egress_bytes: r.get(3)?, build_seconds: r.get(4)?, stored_gb_hours: r.get(5)? });
         let live = self.db.query_row(
-            "SELECT COALESCE(SUM(u.cpu_seconds), 0), COALESCE(SUM(u.gb_seconds), 0), COALESCE(SUM(u.requests), 0), COALESCE(SUM(u.egress_bytes), 0), COALESCE(SUM(u.build_seconds), 0) \
+            "SELECT COALESCE(SUM(u.cpu_seconds), 0), COALESCE(SUM(u.gb_seconds), 0), COALESCE(SUM(u.requests), 0), COALESCE(SUM(u.egress_bytes), 0), COALESCE(SUM(u.build_seconds), 0), COALESCE(SUM(u.stored_gb_hours), 0) \
              FROM usage u JOIN services s ON s.id = u.service WHERE s.project = ? AND u.hour >= ?",
             params![project, since_hour],
             row,
         )?;
         let gone = self.db.query_row(
-            "SELECT COALESCE(SUM(cpu_seconds), 0), COALESCE(SUM(gb_seconds), 0), COALESCE(SUM(requests), 0), COALESCE(SUM(egress_bytes), 0), COALESCE(SUM(build_seconds), 0) \
+            "SELECT COALESCE(SUM(cpu_seconds), 0), COALESCE(SUM(gb_seconds), 0), COALESCE(SUM(requests), 0), COALESCE(SUM(egress_bytes), 0), COALESCE(SUM(build_seconds), 0), COALESCE(SUM(stored_gb_hours), 0) \
              FROM project_usage WHERE project = ? AND hour >= ?",
             params![project, since_hour],
             row,
@@ -3573,6 +3635,7 @@ impl Store {
             requests: live.requests + gone.requests,
             egress_bytes: live.egress_bytes + gone.egress_bytes,
             build_seconds: live.build_seconds + gone.build_seconds,
+            stored_gb_hours: live.stored_gb_hours + gone.stored_gb_hours,
         })
     }
 
