@@ -21,7 +21,7 @@ mod services;
 pub mod fleet;
 
 pub use data::*;
-pub use secrets::{Secrets, SecretsReveal};
+pub use secrets::{Secrets, SecretsIntercepts, SecretsReveal};
 pub use services::{RollApps, Services};
 
 /// Which products run here (an adapter for each).
@@ -128,6 +128,8 @@ pub fn start(
             // this many on the node.
             warm_for: std::time::Duration::from_secs(60 * std::env::var("ROLL_PREVIEWS_WARM_MINUTES").ok().and_then(|v| v.parse::<u64>().ok()).unwrap_or(8 * 60).min(24 * 60)),
             warm_max: std::env::var("ROLL_PREVIEWS_WARM_MAX").ok().and_then(|v| v.parse::<usize>().ok()).unwrap_or(32).min(1000),
+            // Each preview's interception socket (keys a fork's preview never holds).
+            intercept_dir: Some(home.join("previews").join("intercept")),
             ..Default::default()
         },
         code.isolation.clone(),

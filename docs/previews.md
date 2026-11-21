@@ -811,6 +811,19 @@ names only connections that swapped or refused something; hop-by-hop headers sta
 nothing but h2 can't connect. Next: rolld's adapter once roll secrets' batch 6 lands, then the
 live check.
 
+Wired to roll secrets (batch 6: #520 placeholders, #517 the CA): a preview whose egress goes
+through its proxy ("Roll only", a fork's default) resolves with placeholders for its consumer
+(`preview:pv-…`), made by whoever last saved the project's preview rules (recorded with them; the
+operator is no one, so rules it saved make none). When that person may no longer reveal there,
+it resolves as without placeholders and says "placeholders off: …; a writer saving the rules
+again turns them back on" in its activity, never with anyone else's rights. rolld's
+`SecretsIntercepts` asks `intercept_ca` for the consumer (reused while it lives, asked again
+after an hour so newly bound hosts are covered; none while the preview holds no placeholder),
+`intercept_ca_live` on every connection, and roll secrets' `proxy::filter` for each request; the
+preview's teardown calls `end_consumer`, ending its placeholders and CAs at once. Each preview's
+socket lives under `<home>/previews/intercept`. `a_roll_only_preview_takes_placeholders_made_by_who_saved_its_rules`.
+Next: the live check end to end (a key bound to a host, a fork's preview, Docker).
+
 ## Safety
 
 - **Forks.** A change with `trusted: false` (a PR from a fork) gets a preview only for a head a
@@ -2275,7 +2288,7 @@ Ranked by what a person notices first. Done so far:
 2. **Keys a fork's preview never holds, in progress** (`feature/roll-previews-intercept`; roll
    secrets' #520 and #517, its batch 6): see "Keys a preview never holds". Built: the swap, the
    handoff, the runtime's socket and the services' trust, bounded per preview after review. Next:
-   rolld's adapter once batch 6 lands, then the live check.
+   the live check end to end.
 3. **In review as turn 15**: the gone page tested at the edge (#559), the live check's leaked
    roll apps build networks (#567: the closed build's egress proxy removed, "Roll only" waiting for
    a deployment made closed), and `@roll preview` in any of a change's threads with

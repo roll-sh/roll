@@ -547,6 +547,15 @@ pub struct Intercepted {
 /// consumer). `None`: nothing to intercept, and its egress is as it was. May block.
 pub trait Intercepts: Send + Sync {
     fn of(&self, preview: &str) -> anyhow::Result<Option<Intercepted>>;
+    /// The preview is gone: its placeholders and CAs end at once (roll secrets' `end_consumer`).
+    fn end(&self, _preview: &str) -> anyhow::Result<()> {
+        Ok(())
+    }
+}
+
+/// The consumer roll secrets issues a preview's placeholders and interception CA for.
+pub fn intercept_consumer(preview: &str) -> String {
+    format!("preview:{}", crate::engine::env_name(preview))
 }
 
 /// Seals a preview's own variables at rest (rolld: AES-256-GCM under `ROLL_SECRET_KEY`), each
@@ -817,6 +826,14 @@ pub trait Secrets: Send + Sync {
     /// `dynamic: false`: no dynamic credential is issued at all (those keys are left out), for a
     /// read that starts nothing (masking a preview's logs).
     async fn resolve(&self, project: &str, env: &str, untrusted: bool, dynamic: bool, consumer: &str) -> anyhow::Result<Resolved>;
+    /// [`Secrets::resolve`] with every key bound to hosts answered as a placeholder (`rlph_…`) for
+    /// `consumer`, made by `maker` (who last saved the project's preview rules): its egress proxy
+    /// swaps them (docs/previews.md, "Keys a preview never holds"). When the maker may no longer,
+    /// it resolves as without placeholders and says so in `problems`.
+    async fn resolve_with_placeholders(&self, project: &str, env: &str, untrusted: bool, dynamic: bool, consumer: &str, maker: &str) -> anyhow::Result<Resolved> {
+        let _ = maker;
+        self.resolve(project, env, untrusted, dynamic, consumer).await
+    }
     /// The links of environment `env` (its own and what it inherits or imports): `(key, kind,
     /// resource, field)`, with no values (nothing resolved, no lease).
     async fn links(&self, _project: &str, _env: &str) -> anyhow::Result<Vec<(String, Kind, String, String)>> {

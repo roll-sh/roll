@@ -1285,6 +1285,11 @@ impl Engine {
             self.store.drop_service(&r.id, &svc.name)?;
         }
         self.secrets.delete(&r.project_id, &env_name(&r.id)).await.map_err(|e| anyhow::anyhow!("secrets: {e:#}"))?;
+        // Its placeholders and interception CAs end with it, not at their expiry.
+        if let Some(i) = self.intercepts.get().cloned() {
+            let id = r.id.clone();
+            tokio::task::spawn_blocking(move || i.end(&id)).await?.map_err(|e| anyhow::anyhow!("ending its interception: {e:#}"))?;
+        }
         let name = branch_name(&r.id);
         for res in self.store.resources(&r.id)? {
             self.delete_branch(&r.id, &res, &name).await?;

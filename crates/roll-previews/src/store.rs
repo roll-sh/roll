@@ -241,6 +241,11 @@ CREATE TABLE IF NOT EXISTS runtime_facts (
     json TEXT NOT NULL,
     PRIMARY KEY (preview_id, kind)
 );
+CREATE TABLE IF NOT EXISTS rules_makers (
+    project_id TEXT PRIMARY KEY,
+    by TEXT NOT NULL,
+    at INTEGER NOT NULL
+);
 CREATE TABLE IF NOT EXISTS env_refs (
     project_id TEXT NOT NULL,
     scope TEXT NOT NULL,
@@ -881,6 +886,23 @@ impl Store {
             c.execute("UPDATE services SET config = ? WHERE preview_id = ? AND name = ?", params![config, id, name])?;
             Ok::<_, Error>(())
         })
+    }
+
+    /// Who last saved the project's preview rules, when it was a person or their token (the
+    /// operator is no one's: `None`): whom a preview's placeholders are made by.
+    pub fn set_rules_maker(&self, project: &str, by: Option<&str>) -> Result<()> {
+        let now = self.now_ms()?;
+        self.db.write(|c| {
+            match by {
+                Some(b) => c.execute("INSERT INTO rules_makers (project_id, by, at) VALUES (?, ?, ?) ON CONFLICT (project_id) DO UPDATE SET by = excluded.by, at = excluded.at", params![project, b, now])?,
+                None => c.execute("DELETE FROM rules_makers WHERE project_id = ?", [project])?,
+            };
+            Ok::<_, Error>(())
+        })
+    }
+
+    pub fn rules_maker(&self, project: &str) -> Result<Option<String>> {
+        Ok(self.db.read(|c| c.query_row("SELECT by FROM rules_makers WHERE project_id = ?", [project], |r| r.get(0)).optional())?)
     }
 
     /// Each of a project's references with who wrote it: `(scope, name, reference, by)`. A rule's

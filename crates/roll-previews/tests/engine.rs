@@ -1248,6 +1248,34 @@ async fn earlier_pushes_stay_reachable_at_their_own_urls() {
     assert!(e.apps.removed.lock().contains(&(p.id.clone(), "web@cs_8d".into())));
 }
 
+/// A preview whose egress goes through its proxy ("Roll only") gets the keys bound to hosts as
+/// placeholders, made by whoever last saved the project's rules (roll secrets checks them); with
+/// no one recorded (the operator saved them) or open egress, it resolves as before.
+#[tokio::test]
+async fn a_roll_only_preview_takes_placeholders_made_by_who_saved_its_rules() {
+    use roll_previews::ports::EnvSource;
+    let e = env(json!({ "enabled": true, "egress": "roll", "egress_hosts": ["api.stripe.com"] }));
+    e.code.open(change("chg_ph", 6));
+    e.engine.pass().await.unwrap();
+    let p = e.engine.store.row_by_change("chg_ph").unwrap().unwrap();
+    let asked = || e.secrets.placeholders.lock().len();
+    // Saved by the operator: no one makes them.
+    let _ = e.engine.env(&p.id, "web").await;
+    assert_eq!(asked(), 0);
+    e.engine.store.set_rules_maker(&e.project, Some("usr_b")).unwrap();
+    let _ = e.engine.env(&p.id, "web").await;
+    assert_eq!(e.secrets.placeholders.lock().last().cloned(), Some((roll_previews::ports::intercept_consumer(&p.id), "usr_b".to_string())));
+    // Open egress: nothing would swap them, so none.
+    let n = asked();
+    let mut st = e.engine.store.settings(&e.project).unwrap();
+    st.egress = roll_previews::settings::EgressRule::Open;
+    st.egress_forks = roll_previews::settings::EgressRule::Open;
+    st.egress_hosts.clear();
+    e.engine.store.put_settings(&e.project, &st).unwrap();
+    let _ = e.engine.env(&p.id, "web").await;
+    assert_eq!(asked(), n);
+}
+
 /// A signed-in person sees only their own projects' previews (as the workspace's projects); a
 /// token, the operator and admins see all.
 #[tokio::test]

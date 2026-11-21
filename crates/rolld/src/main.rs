@@ -650,6 +650,12 @@ async fn run_with(mut args: Args) -> anyhow::Result<()> {
     if let Some(e) = &previews_engine {
         let _ = e.reveal.set(std::sync::Arc::new(previews::SecretsReveal(secrets.clone())));
     }
+    // Keys a fork's preview never holds: its interception CA and the swap, roll secrets'.
+    if let Some((rt, e)) = &preview_hosts {
+        let i = std::sync::Arc::new(previews::SecretsIntercepts::new(secrets.clone()));
+        let _ = e.intercepts.set(i.clone());
+        rt.set_intercepts(i);
+    }
     if let Some(c) = &code {
         secrets.set_code_refs(std::sync::Arc::new(secrets::CodeRefs(c.code.clone())));
     }
