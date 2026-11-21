@@ -480,7 +480,7 @@ behind the `Apps` trait:
      | Stream | `KAFKA_BOOTSTRAP_SERVERS`, `KAFKA_SASL_USERNAME`, `KAFKA_SASL_PASSWORD` |
      | Queue | `AMQP_URL` |
      | Tasks | `ROLL_TASKS_URL`, `ROLL_TASKS_TOKEN` |
-     | Search | `ELASTICSEARCH_URL` (the branch's own login in it), and a data-only credential of the branch as production's link gets: `ELASTICSEARCH_API_KEY`, or `OPENSEARCH_USERNAME`/`OPENSEARCH_PASSWORD` on OpenSearch |
+     | Search | Only a data-only credential of the branch, as production's link gets (roll search's keys route, `access: data`): `ELASTICSEARCH_URL` with no login and `ELASTICSEARCH_API_KEY`, or on OpenSearch the data user in the URL and `OPENSEARCH_USERNAME`/`OPENSEARCH_PASSWORD`. Never the branch's own login: no data credential, no link (the branch fails and is made again). A branch whose link held that login (made before 2026-11-21) is branched again at the next converge. roll search keeps a deleted cluster restorable with its keys and password, so before a search branch is deleted or reset its data key is revoked (`Brancher::retire`) and its password changed (no change, no delete). `a_search_branch_gives_only_a_data_credential` |
 
      A search branch starts with its parent's IP allowlist (`ip_allowlist`, search's #243). Masking
      a branch goes through roll search's own console route, so it works whatever the list says.

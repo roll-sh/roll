@@ -77,6 +77,13 @@ pub trait Brancher: Send + Sync {
     /// refused). Ok when it's already gone. Never touches `parent`.
     async fn delete(&self, parent: &str, branch: &str, name: &str) -> anyhow::Result<()>;
 
+    /// Before `branch` is deleted or reset: revoke the credentials it handed out (`kept`), for a
+    /// product that keeps a deleted branch restorable with them (roll search's restore window).
+    /// Ok when they're already gone. Nothing by default.
+    async fn retire(&self, _parent: &str, _branch: &str, _kept: Option<&str>) -> anyhow::Result<()> {
+        Ok(())
+    }
+
     /// How a service reaches the branch, as environment variables (`DATABASE_URL`, …). Read
     /// fresh for every deploy: nothing here is stored.
     async fn connect(&self, parent: &str, branch: &str, kept: Option<&str>) -> anyhow::Result<Vec<(String, String)>>;
