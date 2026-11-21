@@ -3666,25 +3666,55 @@ impl Planner<'_, '_> {
         let mut nd = 1.0;
         let mut maxnd: f64 = 0.0;
         let mut n = 0;
+        // estimate_num_groups: a boolean key has 2 values; an expression with statistics of
+        // its own (an index's) is one variable; any other contributes its columns
+        // (pull_var_clause), each counted once (add_unique_group_var), a constant none.
+        let mut bools: f64 = 1.0;
+        let mut seen: Vec<usize> = Vec::new();
+        let col_nd = |c: usize| {
+            VarRef {
+                table: rel.table.clone(),
+                col: c,
+                tuples: rel.size.tuples,
+                expr: None,
+                rows: 0.0,
+                inh: false,
+            }
+            .ndistinct(&self.cat)
+            .0
+        };
         for e in exprs {
+            let mut add = |d: f64| {
+                nd *= d;
+                maxnd = maxnd.max(d);
+                n += 1;
+            };
+            if e.ty() == DataType::Bool {
+                bools *= 2.0;
+                continue;
+            }
             match e {
                 Expr::Col(c, _) => {
-                    let d = VarRef {
-                        table: rel.table.clone(),
-                        col: *c,
-                        tuples: rel.size.tuples,
-                        expr: None,
-                        rows: 0.0,
-                        inh: false,
+                    if !seen.contains(c) {
+                        seen.push(*c);
+                        add(col_nd(*c));
                     }
-                    .ndistinct(&self.cat)
-                    .0;
-                    nd *= d;
-                    maxnd = maxnd.max(d);
-                    n += 1;
                 }
-                _ => return rows.clamp(1.0, costs::DEFAULT_NUM_DISTINCT),
+                e => match rel.exprs.iter().find(|(x, _)| x.same_as(e)) {
+                    Some((_, v)) => add(v.ndistinct(&self.cat).0),
+                    None => {
+                        for c in e.columns() {
+                            if !seen.contains(&c) {
+                                seen.push(c);
+                                add(col_nd(c));
+                            }
+                        }
+                    }
+                },
             }
+        }
+        if n == 0 {
+            return bools.ceil().min(rows).max(1.0);
         }
         let tuples = rel.size.tuples;
         let mut clamp = tuples;
@@ -3701,7 +3731,7 @@ impl Planner<'_, '_> {
         if tuples > 0.0 && nd > 0.0 && rows < tuples {
             nd *= 1.0 - ((tuples - rows) / tuples).powf(tuples / nd);
         }
-        costs::clamp_rows(nd).ceil().min(rows).max(1.0)
+        (costs::clamp_rows(nd) * bools).ceil().min(rows).max(1.0)
     }
 
     /// create_ordered_paths over the relation's paths, then the LIMIT: the path to run.
