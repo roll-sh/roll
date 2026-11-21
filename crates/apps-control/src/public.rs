@@ -172,22 +172,29 @@ async fn oidc_token(apps: Arc<Apps>, req: Request) -> Response {
     if !audiences.contains(&aud) {
         return (StatusCode::FORBIDDEN, axum::Json(serde_json::json!({ "error": format!("{aud} isn't one of run.oidc_audiences") }))).into_response();
     }
-    let key = format!("{id}/{env}/{aud}");
-    let now = code_sql::now_ms();
-    let kept = apps.oidc_tokens.lock().get(&key).cloned().filter(|(_, until)| until - now > OIDC_TTL_MS - OIDC_KEEP_MS);
-    let (jwt, until) = match kept {
-        Some(k) => k,
-        None => match apps.deps.secrets.issue(&project, id, env, &aud, std::time::Duration::from_millis(OIDC_TTL_MS as u64)).await {
-            Ok(Some(jwt)) => {
-                let until = now + OIDC_TTL_MS;
-                apps.oidc_tokens.lock().insert(key, (jwt.clone(), until));
-                (jwt, until)
-            }
-            Ok(None) => return (StatusCode::SERVICE_UNAVAILABLE, axum::Json(serde_json::json!({ "error": "roll's OIDC issuer isn't on this deployment (it needs a public URL)" }))).into_response(),
-            Err(e) => return (StatusCode::FORBIDDEN, axum::Json(serde_json::json!({ "error": format!("{e:#}") }))).into_response(),
-        },
+    let (jwt, until) = match apps.service_token(&project, id, env, &aud).await {
+        Ok(Some(t)) => t,
+        Ok(None) => return (StatusCode::SERVICE_UNAVAILABLE, axum::Json(serde_json::json!({ "error": "roll's OIDC issuer isn't on this deployment (it needs a public URL)" }))).into_response(),
+        Err(e) => return (StatusCode::FORBIDDEN, axum::Json(serde_json::json!({ "error": format!("{e:#}") }))).into_response(),
     };
     (StatusCode::OK, [(header::CACHE_CONTROL, "no-store")], axum::Json(serde_json::json!({ "token": jwt, "expires_at": until }))).into_response()
+}
+
+impl Apps {
+    /// Roll's OIDC token for `service` in `env` (`sub = roll-apps:<project>:<service>:<env>`) for
+    /// `aud`, and when it expires (unix ms): the same one for a minute ([`OIDC_KEEP_MS`]), then signed
+    /// again (so a rotation or a lost trust takes effect). None: no issuer here.
+    pub(crate) async fn service_token(&self, project: &str, service: &str, env: &str, aud: &str) -> anyhow::Result<Option<(String, i64)>> {
+        let key = format!("{service}/{env}/{aud}");
+        let now = code_sql::now_ms();
+        if let Some(k) = self.oidc_tokens.lock().get(&key).cloned().filter(|(_, until)| until - now > OIDC_TTL_MS - OIDC_KEEP_MS) {
+            return Ok(Some(k));
+        }
+        let Some(jwt) = self.deps.secrets.issue(project, service, env, aud, std::time::Duration::from_millis(OIDC_TTL_MS as u64)).await? else { return Ok(None) };
+        let until = now + OIDC_TTL_MS;
+        self.oidc_tokens.lock().insert(key, (jwt.clone(), until));
+        Ok(Some((jwt, until)))
+    }
 }
 
 /// Where an environment's instances read its runtime config (`ROLL_CONFIG_URL`):
