@@ -790,6 +790,14 @@ this: they get no secrets, or all of them.
   CAs stop at once.
 - The preview resolves as the rule's writer (`Ask { maker }`, from `env_refs`), so a placeholder
   works only while that person still may reveal the key.
+- Services on roll apps: roll apps resolves the `pv-` environment's secrets itself, and its
+  closed environments swap placeholders with the same step (`roll-intercept`, consumer
+  `apps:<project>/pv-…`, apps' #603). Previews names the maker there too: the environment's PUT
+  carries `closed_by` (the rules' writer, or `null` for none, when keys bound to hosts are
+  withheld), which only the operator may send, so a fork's preview on roll apps uses a key only
+  while the person who wrote the rules may reveal it, not whoever owns the project. A roll apps
+  without the field refuses it as unknown and the environment is made without it (its maker is
+  who set the egress, as before). A change of writer deploys it again.
 - Limits: a host that echoes a request's headers back (an echo service) hands the key back in its
   response; roll secrets' response scrub (its #579: the request swapped into is sent with
   `Accept-Encoding: identity`, and a response that echoes it is stopped with a 502 and the
