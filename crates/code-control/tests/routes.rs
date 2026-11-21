@@ -174,6 +174,8 @@ fn writes() -> Vec<(&'static str, String)> {
         change("POST", "/checks"),
         change("POST", "/preview"),
         change("DELETE", "/preview"),
+        change("GET", "/unstored/sha256:0"),
+        change("POST", "/unstored/sha256:0/store"),
         work("PATCH", ""),
         work("POST", "/heartbeat"),
         work("POST", "/release"),
@@ -406,6 +408,10 @@ async fn statuses_of_every_route() {
         ("POST", format!("/v1/code/changes/{cid}/land"), Some(json!({ "lane": "vip" })), StatusCode::BAD_REQUEST),
         ("POST", format!("/v1/code/changes/{cid}/revise"), Some(json!({ "message": "m", "files": {} })), StatusCode::BAD_REQUEST),
         ("POST", format!("/v1/code/changes/{cid}/revise"), Some(json!({ "base": "nope", "message": "m", "files": files })), NOT_FOUND),
+        // "Store in roll": a notice the change doesn't have, and a key roll secrets wouldn't take.
+        ("GET", format!("/v1/code/changes/{cid}/unstored/sha256:0"), None, NOT_FOUND),
+        ("POST", format!("/v1/code/changes/{cid}/unstored/sha256:0/store"), Some(json!({})), NOT_FOUND),
+        ("POST", format!("/v1/code/changes/{cid}/unstored/sha256:0/store"), Some(json!({ "key": "1-bad" })), StatusCode::BAD_REQUEST),
         // Work items.
         ("PATCH", "/v1/code/work/wi_nope".into(), Some(json!({ "title": "t" })), NOT_FOUND),
     ];
@@ -932,7 +938,7 @@ async fn automation_routes_follow_the_auth_matrix() {
         ("PUT", format!("{base}/{id}"), Some(spec.clone()), OK),
         ("POST", format!("{base}/{id}/disable"), None, OK),
         ("POST", format!("{base}/{id}/enable"), None, OK),
-        ("PUT", format!("{base}/{id}/secrets/TOKEN"), Some(json!({ "value": "v" })), StatusCode::UNPROCESSABLE_ENTITY),
+        ("PUT", format!("{base}/{id}/secrets/TOKEN"), Some(json!({ "value": "v" })), StatusCode::NO_CONTENT),
         ("DELETE", format!("{base}/{id}/secrets/TOKEN"), None, StatusCode::NO_CONTENT),
         ("POST", format!("{base}/{id}/webhook/secret"), None, NOT_FOUND),
         ("POST", format!("{base}/runs/arn_nope/cancel"), None, NOT_FOUND),
@@ -969,13 +975,17 @@ async fn automation_routes_follow_the_auth_matrix() {
             assert_eq!(call(a, m, p, b.as_ref(), token).await, write, "{who}: {m} {p}");
         }
     }
-    // The ingress: no token; not a webhook automation (404), and unsigned for one (401: no secret
-    // key on this server makes webhooks unavailable, 422 at creation).
+    // The ingress: no token; not a webhook automation (404), and unsigned for one (401).
     for token in [None, Some(w.acme.as_str())] {
         assert_eq!(call(a, "POST", &format!("{base}/{id}/webhook"), Some(&json!({})), token).await, NOT_FOUND);
     }
     let hook = json!({ "name": "h", "trigger": { "type": "webhook" }, "steps": [{ "id": "t", "kind": "notify", "config": { "title": "x" } }] });
-    assert_eq!(call(a, "POST", base, Some(&hook), Some(ADMIN)).await, StatusCode::UNPROCESSABLE_ENTITY);
+    let (s, v) = a.req("POST", base, Some(hook), Some(ADMIN)).await;
+    assert_eq!(s, StatusCode::CREATED, "{v}");
+    let hook_id = v["automation"]["id"].as_str().unwrap().to_string();
+    for token in [None, Some(w.acme.as_str())] {
+        assert_eq!(call(a, "POST", &format!("{base}/{hook_id}/webhook"), Some(&json!({})), token).await, UNAUTHORIZED);
+    }
     assert_eq!(call(a, "DELETE", &format!("{base}/{id}"), None, Some(&w.agent)).await, FORBIDDEN);
     assert_eq!(call(a, "DELETE", &format!("{base}/{id}"), None, Some(&w.acme)).await, StatusCode::NO_CONTENT);
 }

@@ -62,7 +62,7 @@ pub fn validate_query(ctx: &Ctx) -> EsResult<Reply> {
         seen.push(t.idx.name.clone());
         let searcher = t.searcher()?;
         let table = t.table();
-        let qctx = QueryCtx::new(ctx.cluster, &st, &t.idx, &table, &searcher, ctx.now_ms);
+        let qctx = QueryCtx::new(ctx.cluster, &st, &t.idx, &table, &searcher, ctx.now_ms, t.reader());
         let r = match &req.source.query {
             Some(q) => qctx.to_query(q),
             None if crate::opensearch::active() => Ok(crate::opensearch::approximate::ApproximateScoreQuery::match_all()),
@@ -558,7 +558,15 @@ fn termvectors_one(ctx: &Ctx, index: &str, id: Option<&str>, doc: Option<&Value>
         (None, Some(id)) => {
             m.insert("_id".into(), Value::Str(id.to_string()));
             let realtime = flag("realtime", true);
-            let got = shard.shard.get(id.as_bytes(), realtime).map_err(crate::engine::convert::index_error)?;
+            let mut got = shard.shard.get(id.as_bytes(), realtime).map_err(crate::engine::convert::index_error)?;
+            // Document level security: a document the reader may not see is not found, as a get.
+            if got.is_some()
+                && let Some(sec) = crate::xpack::security::dls::ReadSecurity::of(ctx)
+                && let Some(q) = sec.documents(ctx.cluster, crate::xpack::security::dls::READ, &idx.name)?
+                && !crate::search::matches_doc(ctx.cluster, &st, &idx, &engine, &shard, id, &q, realtime)?
+            {
+                got = None;
+            }
             match got {
                 Some(g) => {
                     // A realtime get reads through Elasticsearch's internal reader (refreshed

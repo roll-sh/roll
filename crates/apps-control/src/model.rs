@@ -220,10 +220,10 @@ pub struct LogDrain {
 }
 
 /// How a drain's lines can go ([`LogDrain::format`]).
-pub const DRAIN_FORMATS: [&str; 3] = ["ndjson", "otlp", "syslog"];
+pub const DRAIN_FORMATS: [&str; 4] = ["ndjson", "otlp", "syslog", "s3"];
 
 /// What a drain can be sent.
-pub const DRAIN_SOURCES: [&str; 3] = ["runtime", "http", "build"];
+pub const DRAIN_SOURCES: [&str; 6] = ["runtime", "http", "build", "audit", "traces", "metrics"];
 
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct NotifyTarget {
@@ -283,11 +283,24 @@ pub struct Access {
 }
 
 /// A private registry's login for a service's image (`PUT …/registry`); the password is sealed
-/// and never returned.
+/// and never returned. An ECR login (`kind: "ecr"`) is an access key (its id as `username`) that
+/// each pull exchanges for ECR's 12-hour token in `region`.
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct Registry {
     pub server: String,
     pub username: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub kind: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub region: Option<String>,
+}
+
+/// An ECR registry host (`<account>.dkr.ecr.<region>.amazonaws.com`): its region.
+pub fn ecr_region(host: &str) -> Option<&str> {
+    let rest = host.strip_suffix(".amazonaws.com")?;
+    let (account, region) = rest.split_once(".dkr.ecr.")?;
+    let ok = account.len() == 12 && account.bytes().all(|b| b.is_ascii_digit()) && !region.is_empty() && region.len() <= 32 && region.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-');
+    ok.then_some(region)
 }
 
 /// A private Git repository's login for a Git URL service (`PUT …/git-login`): sent only to
@@ -371,6 +384,51 @@ pub struct Build {
     /// it); unset: the node's.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub timeout_s: Option<u32>,
+    /// Its builder's size (Vercel's, Render's and Netlify's bigger build machines): `small` (2
+    /// vCPU, 4 GiB; the default), `medium` (4, 8 GiB) or `large` (8, 16 GiB), its build minutes
+    /// metered by that factor where the builder honours it (CodeBuild on the fleet; one node's
+    /// Docker builds unsized).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub size: Option<BuildSize>,
+    /// Submodules fetched into the tree (Vercel's, Netlify's, Render's), at the commits their
+    /// gitlinks pin: a Git URL service's from public URLs; a roll code repo's from public URLs,
+    /// public roll code repos and the private ones `submodule_repos` names. Off, they're left out.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub submodules: Option<bool>,
+    /// The private roll code repos (`owner/name`) a roll code repo's submodules may come from:
+    /// whoever sets it must be able to read each (the catalogue lends read), so a writer to the
+    /// service's repo can't build a repo it can't read into its code by pinning it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub submodule_repos: Option<Vec<String>>,
+    /// A Git URL service's Git LFS objects fetched in place of their pointers (Vercel's,
+    /// Netlify's), from the repository's LFS server; off, the pointers are built as they are.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub lfs: Option<bool>,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum BuildSize {
+    #[default]
+    Small,
+    Medium,
+    Large,
+}
+
+impl BuildSize {
+    /// Its CPUs and memory (MiB).
+    pub fn resources(self) -> (f64, u32) {
+        match self {
+            BuildSize::Small => (2.0, 4096),
+            BuildSize::Medium => (4.0, 8192),
+            BuildSize::Large => (8.0, 16384),
+        }
+    }
+
+    /// What a build minute counts as (the price's factor).
+    pub fn factor(self) -> f64 {
+        self.resources().0 / 2.0
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -409,6 +467,11 @@ impl Build {
         }
         if self.timeout_s.is_some_and(|t| !(60..=6 * 3600).contains(&t)) {
             return Err(Error::BadRequest("build.timeout_s is 60–21600 seconds".into()));
+        }
+        if let Some(r) = &self.submodule_repos
+            && (r.len() > crate::git_source::MAX_SUBMODULES || r.iter().any(|n| n.len() > 200 || n.split('/').count() != 2 || n.split('/').any(|p| p.is_empty() || p.starts_with('.') || !p.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-' | b'.')))))
+        {
+            return Err(Error::BadRequest(format!("build.submodule_repos is at most {} roll code repos, each owner/name", crate::git_source::MAX_SUBMODULES)));
         }
         Ok(())
     }
@@ -525,6 +588,14 @@ pub struct Run {
     /// `[metrics]`) and shown on Metrics with what an OpenTelemetry SDK sends.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub metrics: Option<Scrape>,
+    /// Floors by the clock (AWS's scheduled actions, Azure's autoscale profiles): in any of a
+    /// rule's weekly windows its `min_instances` is the floor, when higher.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub schedule_scale: Vec<ScaleWindow>,
+    /// Counts of its log lines (Cloud Logging's log-based metrics): each minute, the lines of its
+    /// output matching `pattern` (any case) as a gauge named `name`, on Metrics and for `scale`.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub log_metrics: Vec<LogMetric>,
     /// How a new deployment takes over: at once, or a share of requests at a time.
     pub rollout: Rollout,
     /// The app speaks HTTP/2 without TLS (h2c, prior knowledge), as a gRPC server does: the
@@ -550,6 +621,13 @@ pub struct Run {
     /// `max_instances`), and fewer stay once they'd be under it. 10–100; unset, requests only.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cpu_target: Option<u32>,
+    /// A web service's instance using over this percent of its CPU counts as busy, as one with a
+    /// request in flight does (Railway's sleep that watches what an app is doing): it isn't
+    /// suspended, put to sleep or scaled in until it's been under it for 30 s, so work after the
+    /// answer finishes without the app asking (`ROLL_AWAKE_URL`). 1–100; unset, requests and
+    /// holds only. Only what the runtime measures counts (Docker's cgroup; not Fargate).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub busy_cpu: Option<u32>,
     /// And on memory (Render's target memory): while its awake instances average over this
     /// percent of their memory limit for a minute another starts, and fewer stay once they'd be
     /// under it. 10–100; unset, not on memory. Where both are set, the one that asks for more
@@ -582,10 +660,32 @@ pub struct Run {
     /// patches). Without it the environment only says so (`base_updated`).
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub rebuild_on_base: bool,
+    /// A web service's page loaded before a deploy keeps talking to the deployment that served
+    /// it, for a day (Vercel's skew protection; [`crate::skew`]).
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub skew_protection: bool,
+    /// A web service's hard limit (Cloud Run's, Fly's `hard_limit`): with every instance at its
+    /// `concurrency` and `max_instances` of them, a request waits up to this long (1–60 s) for a
+    /// slot, then gets a 429. Without it the least busy instance takes it past its concurrency.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub queue_s: Option<u32>,
+    /// A web service scaled on its answers' p95 too (Heroku's response-time autoscaling): over
+    /// this many ms for a window, another instance, as `cpu_target` adds one (50–60,000).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub latency_target_ms: Option<u32>,
+    /// Audiences its instances may ask roll's OIDC issuer for (Vercel's OIDC federation): each
+    /// instance reads a token from `ROLL_OIDC_URL` (`?aud=`, the first by default) that clouds'
+    /// federation and roll secrets' workload logins trust, so the app holds no key. At most five.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub oidc_audiences: Vec<String>,
     /// Commands on a schedule, each a job of the live deployment at its due times (Heroku
     /// Scheduler, Vercel crons): any service's, without a cron service of its own.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub schedules: Vec<Scheduled>,
+    /// A roll stream's records POSTed to a web service's path as they arrive (Cloud Run's
+    /// Pub/Sub push): a group's offset committed on each 2xx (`crate::push`). At most four.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub push: Vec<Push>,
     /// Containers beside each instance (Cloud Run's sidecars, Fly's multi-container machines):
     /// in its network namespace (they reach each other on localhost), started after it, frozen,
     /// stopped and removed with it. A web service's or a worker's; at most four.
@@ -596,6 +696,40 @@ pub struct Run {
     /// the rollout, not beside it. A rollback is never held. Changing it is a deploy.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub block_on: Option<Severity>,
+}
+
+/// A count of matching log lines a minute ([`Run::log_metrics`]).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LogMetric {
+    pub name: String,
+    pub pattern: String,
+}
+
+/// A floor for some hours of the week ([`Run::schedule_scale`]).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ScaleWindow {
+    pub windows: Vec<crate::freeze::Window>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timezone: Option<String>,
+    pub min_instances: u32,
+}
+
+impl ScaleWindow {
+    fn on(&self, now: i64) -> bool {
+        crate::freeze::Freeze { until: None, windows: self.windows.clone(), timezone: self.timezone.clone(), reason: String::new() }.on(now)
+    }
+}
+
+impl Run {
+    /// These settings with the floor its schedule asks for at `now` (the reaper's view).
+    pub fn at(&self, now: i64) -> Run {
+        let floor = self.schedule_scale.iter().filter(|w| w.on(now)).map(|w| w.min_instances).max().unwrap_or(0);
+        let mut r = self.clone();
+        r.min_instances = r.min_instances.max(floor.min(r.max_instances));
+        r
+    }
 }
 
 /// Where an app's Prometheus endpoint is ([`crate::prom`]): its port (the app's own by default)
@@ -692,6 +826,9 @@ pub struct ScanSummary {
     /// Why the scan didn't finish (the counts are then zero and mean nothing).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+    /// Its SBOM is kept (`…/deploys/{dep}/sbom`).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub sbom: bool,
 }
 
 impl ScanSummary {
@@ -814,6 +951,67 @@ pub struct Scheduled {
     /// 1–86400 (default 3600).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub timeout_s: Option<u32>,
+    /// A path's call: `oidc` carries roll's OIDC token for the service (its own `sub`, the
+    /// environment's URL as `aud`), as Cloud Scheduler's does; else `CRON_SECRET`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auth: Option<String>,
+    /// A command's run at its own size (0.25–8 vCPU, 256–16384 MiB); unset, the service's.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cpu: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub memory_mb: Option<u32>,
+}
+
+/// One of `run.push`: a topic of a roll stream delivered to a path of one environment, a record
+/// a POST, each partition in order, the group's offset committed on a 2xx (at least once).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Push {
+    /// The stream, by its id (`st_…`), on the service's own project.
+    pub stream: String,
+    pub topic: String,
+    /// The consumer group whose committed offsets say what was delivered.
+    pub group: String,
+    /// Where each record is POSTed: an absolute path, like `/events`.
+    pub path: String,
+    /// The environment that gets them (default `production`): one, so two never split a group.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub environment: Option<String>,
+    /// A topic of the same stream a record goes to after `max_attempts` failed tries, so its
+    /// partition moves on; without one a record is tried until it's taken.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dead_letter: Option<String>,
+    /// 1–100 (default 5), with `dead_letter`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_attempts: Option<u32>,
+    /// How long one POST may take: 1–600 s (default 30).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timeout_s: Option<u32>,
+    /// Records POSTed at once, each from its own partitions (1–32, default 4): order holds
+    /// within a partition, and a busy topic scales the service out.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_in_flight: Option<u32>,
+    /// `oidc`: each POST carries roll's OIDC token for the service (its own `sub`, the
+    /// environment's URL as `aud`) for the app to check, as Pub/Sub's push does; else the
+    /// environment's `CRON_SECRET`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auth: Option<String>,
+}
+
+impl Push {
+    pub fn environment(&self) -> &str {
+        self.environment.as_deref().unwrap_or(PRODUCTION)
+    }
+}
+
+/// A topic or group name as Kafka takes one.
+fn kafka_name(s: &str) -> bool {
+    !s.is_empty() && s.len() <= 249 && s != "." && s != ".." && s.bytes().all(|b| b.is_ascii_alphanumeric() || b"._-".contains(&b))
+}
+
+/// A stream's id (`st_` and 12 of a-z, 0-9): never a name.
+pub fn stream_id(s: &str) -> bool {
+    s.strip_prefix("st_").is_some_and(|r| r.len() == 12 && r.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit()))
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -897,12 +1095,29 @@ pub struct Rollout {
     /// for errors meanwhile.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub manual: bool,
+    /// With `run.slo`: a step fails when the new deployment spends its error budget this many
+    /// times as fast as it lasts (Argo Rollouts' analysis); default 14.4, the fast burn alert's.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub slo_burn: Option<f64>,
+    /// A step fails when the new deployment's p95 response time is more than this many percent
+    /// above the old one's (Flagger's request duration check); off unless set.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub p95_pct: Option<u32>,
+    /// `false`: the old instances stop (draining for `drain_s`) before the new ones start, so
+    /// two never run at once (Fly's `immediate`, Heroku's workers): a bot, a scheduler, a
+    /// consumer that must be alone. A web service's requests wait for the new one meanwhile.
+    #[serde(skip_serializing_if = "is_true")]
+    pub overlap: bool,
 }
 
 impl Default for Rollout {
     fn default() -> Self {
-        Rollout { steps: Vec::new(), step_s: 120, error_pct: 5, manual: false }
+        Rollout { steps: Vec::new(), step_s: 120, error_pct: 5, manual: false, slo_burn: None, p95_pct: None, overlap: true }
     }
+}
+
+impl Rollout {
+    pub const SLO_BURN: f64 = 14.4;
 }
 
 /// What a person says to a rollout that waits for them.
@@ -942,13 +1157,51 @@ pub struct Alerts {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub log_match: Option<String>,
     pub log_count: u32,
+    /// CPU at or above this share of each instance's `cpu`, every minute of the five
+    /// (Railway's CPU monitor): `alert.cpu`. 0, off (the default).
+    pub cpu_pct: u8,
+    /// The app's own gauges (its Prometheus endpoint, OTLP, log metrics) past a threshold for
+    /// some minutes running (Cloud Monitoring's metric alerts): `alert.metric`.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub metrics: Vec<MetricAlert>,
 }
 
 impl Default for Alerts {
     fn default() -> Self {
-        Alerts { memory_pct: 90, error_pct: 5, p95_ms: 0, capacity_pct: 10, log_match: None, log_count: 10 }
+        Alerts { memory_pct: 90, error_pct: 5, p95_ms: 0, capacity_pct: 10, log_match: None, log_count: 10, cpu_pct: 0, metrics: Vec::new() }
     }
 }
+
+/// An alert on one of the app's own gauges: its value now (each series' newest point of the
+/// last minute, the largest, or their sum with `sum`) above or below a threshold in `minutes`
+/// judgments running (1–5, default 3).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MetricAlert {
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub above: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub below: Option<f64>,
+    #[serde(default = "MetricAlert::default_minutes")]
+    pub minutes: u8,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub sum: bool,
+}
+
+impl MetricAlert {
+    fn default_minutes() -> u8 {
+        3
+    }
+
+    /// Whether `value` is past its threshold.
+    pub fn breached(&self, value: f64) -> bool {
+        self.above.is_some_and(|t| value > t) || self.below.is_some_and(|t| value < t)
+    }
+}
+
+/// The most metric alerts a service has.
+pub const MAX_METRIC_ALERTS: usize = 10;
 
 impl Default for Run {
     fn default() -> Self {
@@ -981,6 +1234,7 @@ impl Default for Run {
             public: true,
             drain_s: None,
             cpu_target: None,
+            busy_cpu: None,
             memory_target: None,
             restart: Restart::Always,
             restart_tries: None,
@@ -988,11 +1242,18 @@ impl Default for Run {
             tcp: false,
             rollback_on_crash: false,
             rebuild_on_base: false,
+            skew_protection: false,
+            queue_s: None,
+            latency_target_ms: None,
+            oidc_audiences: Vec::new(),
             schedules: Vec::new(),
+            push: Vec::new(),
             sidecars: Vec::new(),
             block_on: None,
             slo: None,
             metrics: None,
+            schedule_scale: Vec::new(),
+            log_metrics: Vec::new(),
         }
     }
 }
@@ -1001,8 +1262,20 @@ impl Run {
     /// The checked settings, with what the type implies filled in (a worker runs at least one
     /// instance; a volume allows one).
     pub fn normalized(mut self) -> Result<Run> {
-        if self.alerts.memory_pct > 100 || self.alerts.error_pct > 100 || self.alerts.capacity_pct > 100 {
-            return Err(Error::BadRequest("alerts.memory_pct, alerts.error_pct and alerts.capacity_pct are 0–100 (0 is off)".into()));
+        if self.alerts.memory_pct > 100 || self.alerts.error_pct > 100 || self.alerts.capacity_pct > 100 || self.alerts.cpu_pct > 100 {
+            return Err(Error::BadRequest("alerts.memory_pct, alerts.error_pct, alerts.capacity_pct and alerts.cpu_pct are 0–100 (0 is off)".into()));
+        }
+        if self.alerts.metrics.len() > MAX_METRIC_ALERTS {
+            return Err(Error::BadRequest(format!("alerts.metrics is at most {MAX_METRIC_ALERTS} alerts")));
+        }
+        for (i, m) in self.alerts.metrics.iter().enumerate() {
+            let name_ok = !m.name.is_empty() && m.name.len() <= 200 && m.name.bytes().enumerate().all(|(i, b)| b.is_ascii_alphabetic() || b == b'_' || b == b':' || (i > 0 && (b.is_ascii_digit() || b == b'.')));
+            if !name_ok || m.above.is_some() == m.below.is_some() || m.above.or(m.below).is_some_and(|t| !t.is_finite()) || !(1..=5).contains(&m.minutes) {
+                return Err(Error::BadRequest("alerts.metrics[] is a gauge's name (a Prometheus name), one finite threshold, above or below, and minutes 1–5".into()));
+            }
+            if self.alerts.metrics[..i].iter().any(|o| o.name == m.name && o.sum == m.sum) {
+                return Err(Error::BadRequest(format!("alerts.metrics names {} twice", m.name)));
+            }
         }
         if self.alerts.log_match.as_ref().is_some_and(|m| m.trim().is_empty() || m.len() > 200) || !(1..=10_000).contains(&self.alerts.log_count) {
             return Err(Error::BadRequest("alerts.log_match is 1–200 characters, alerts.log_count 1–10000".into()));
@@ -1034,6 +1307,47 @@ impl Run {
             if sc.timeout_s.is_some_and(|t| !(1..=86_400).contains(&t)) {
                 return bad("schedules' timeout_s is 1–86400");
             }
+            if sc.auth.as_deref().is_some_and(|a| a != "oidc" || sc.path.is_none()) {
+                return bad("a schedule's auth is oidc, on a path's call");
+            }
+            if sc.cpu.is_some_and(|c| !(0.25..=8.0).contains(&c)) || sc.memory_mb.is_some_and(|m| !(256..=16384).contains(&m)) || ((sc.cpu.is_some() || sc.memory_mb.is_some()) && sc.path.is_some()) {
+                return bad("a schedule's cpu (0.25–8) and memory_mb (256–16384) are a command's");
+            }
+        }
+        if !self.push.is_empty() && (self.kind != RunType::Web || self.tcp) {
+            return bad("push is a web service's (each record is an HTTP POST)");
+        }
+        if self.push.len() > 4 {
+            return bad("push is at most four");
+        }
+        for (i, p) in self.push.iter().enumerate() {
+            if !stream_id(&p.stream) || !kafka_name(&p.topic) || !kafka_name(&p.group) {
+                return bad("push is [{ stream: a stream's id (st_…), topic, group: a-z, A-Z, 0-9, . _ -, path }]");
+            }
+            if !p.path.starts_with('/') || p.path.len() > 2000 || !p.path.bytes().all(|b| b.is_ascii_graphic()) {
+                return bad("push's path is an absolute path, like /events");
+            }
+            if let Some(e) = &p.environment {
+                check_name("push's environment", e)?;
+            }
+            if p.dead_letter.as_deref().is_some_and(|d| !kafka_name(d) || d == p.topic) {
+                return bad("push's dead_letter is another topic of the stream");
+            }
+            if p.max_attempts.is_some_and(|m| p.dead_letter.is_none() || !(1..=100).contains(&m)) {
+                return bad("push's max_attempts is 1–100, with a dead_letter");
+            }
+            if p.timeout_s.is_some_and(|t| !(1..=600).contains(&t)) {
+                return bad("push's timeout_s is 1–600");
+            }
+            if p.max_in_flight.is_some_and(|n| !(1..=32).contains(&n)) {
+                return bad("push's max_in_flight is 1–32");
+            }
+            if p.auth.as_deref().is_some_and(|a| a != "oidc") {
+                return bad("push's auth is oidc (roll's token), or none (CRON_SECRET)");
+            }
+            if self.push[..i].iter().any(|o| o.stream == p.stream && o.group == p.group && o.topic == p.topic) {
+                return bad("push has one rule per stream, topic and group");
+            }
         }
         if !self.sidecars.is_empty() && !matches!(self.kind, RunType::Web | RunType::Worker) {
             return bad("sidecars are a web service's or a worker's");
@@ -1042,6 +1356,24 @@ impl Run {
             && (!(90.0..=99.999).contains(&s.objective) || !(1..=60).contains(&s.window_days) || s.latency_ms.is_some_and(|ms| !(1..=60_000).contains(&ms)))
         {
             return bad("slo is {objective: 90–99.999, latency_ms?: 1–60000, window_days?: 1–60}");
+        }
+        if self.log_metrics.len() > 10 {
+            return bad("log_metrics is at most 10");
+        }
+        for (i, m) in self.log_metrics.iter().enumerate() {
+            let name_ok = !m.name.is_empty() && m.name.len() <= 100 && m.name.bytes().enumerate().all(|(j, b)| b.is_ascii_alphabetic() || b == b'_' || (j > 0 && (b.is_ascii_digit() || b == b'.')));
+            if !name_ok || m.pattern.is_empty() || m.pattern.chars().count() > 200 || self.log_metrics[..i].iter().any(|o| o.name == m.name) {
+                return bad("log_metrics are {name: a metric's name (unique), pattern: 1–200 characters}");
+            }
+        }
+        if self.schedule_scale.len() > 10 {
+            return bad("schedule_scale is at most 10 rules");
+        }
+        for w in &self.schedule_scale {
+            if w.windows.is_empty() || w.min_instances > self.max_instances.max(1) {
+                return bad("schedule_scale's rules are {windows: [{from, to}], timezone?, min_instances: up to max_instances}");
+            }
+            crate::freeze::Freeze { until: None, windows: w.windows.clone(), timezone: w.timezone.clone(), reason: String::new() }.check().map_err(|e| Error::BadRequest(format!("run.schedule_scale: {e}")))?;
         }
         if let Some(m) = &self.metrics {
             if !matches!(self.kind, RunType::Web | RunType::Worker) {
@@ -1087,12 +1419,27 @@ impl Run {
                 return bad("a sidecar's cpu is 0.1–2, its memory_mb 64–4096");
             }
         }
+        if self.queue_s.is_some_and(|q| !(1..=60).contains(&q)) {
+            return bad("queue_s is 1–60 seconds");
+        }
+        if self.latency_target_ms.is_some_and(|t| !(50..=60_000).contains(&t)) {
+            return bad("latency_target_ms is 50–60,000");
+        }
+        if self.oidc_audiences.len() > 5 || self.oidc_audiences.iter().enumerate().any(|(i, a)| a.is_empty() || a.len() > 256 || !a.bytes().all(|b| b.is_ascii_graphic()) || self.oidc_audiences[..i].contains(a)) {
+            return bad("oidc_audiences is up to five distinct audiences, 1–256 printable characters each (sts.amazonaws.com, a GCP pool provider, roll)");
+        }
         let r = &self.rollout;
         if r.steps.len() > 5 || r.steps.iter().any(|s| !(1..=99).contains(s)) || r.steps.windows(2).any(|w| w[0] >= w[1]) {
             return bad("rollout.steps is up to five increasing percents, 1–99");
         }
         if !(1..=3600).contains(&r.step_s) {
             return bad("rollout.step_s is 1–3600");
+        }
+        if r.slo_burn.is_some_and(|b| !(1.0..=1000.0).contains(&b)) {
+            return bad("rollout.slo_burn is 1–1000");
+        }
+        if r.p95_pct.is_some_and(|p| !(1..=1000).contains(&p)) {
+            return bad("rollout.p95_pct is 1–1000");
         }
         if !(1..=100).contains(&r.error_pct) {
             return bad("rollout.error_pct is 1–100");
@@ -1114,9 +1461,7 @@ impl Run {
             }
         } else if let Some(sc) = &self.scale {
             // A stream by its id (`st_…`), never a name; a group as Kafka names one.
-            let stream_ok = sc.stream.strip_prefix("st_").is_some_and(|r| r.len() == 12 && r.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit()));
-            let group_ok = !sc.group.is_empty() && sc.group.len() <= 249 && sc.group != "." && sc.group != ".." && sc.group.bytes().all(|b| b.is_ascii_alphanumeric() || b"._-".contains(&b));
-            if !stream_ok || !group_ok || !(1..=1_000_000_000).contains(&sc.per_instance) {
+            if !stream_id(&sc.stream) || !kafka_name(&sc.group) || !(1..=1_000_000_000).contains(&sc.per_instance) {
                 return bad("scale is { stream: a stream's id (st_…), group: a-z, A-Z, 0-9, . _ -, per_instance: 1–1e9 }");
             }
         }
@@ -1185,6 +1530,14 @@ impl Run {
                 return bad("cpu_target is for a web service (a worker follows its work with scale)");
             }
         }
+        if let Some(b) = self.busy_cpu {
+            if !(1..=100).contains(&b) {
+                return bad("busy_cpu is 1–100 (percent of an instance's CPU)");
+            }
+            if self.kind != RunType::Web {
+                return bad("busy_cpu is for a web service (only web instances sleep)");
+            }
+        }
         if let Some(t) = self.memory_target {
             if !(10..=100).contains(&t) {
                 return bad("memory_target is 10–100 (percent of an instance's memory)");
@@ -1229,6 +1582,9 @@ impl Run {
             // Only requests can be split: a worker or a cron run switches at once.
             self.rollout.steps.clear();
         }
+        if !self.rollout.overlap && !self.rollout.steps.is_empty() {
+            return bad("rollout: without overlap nothing runs beside the new deployment, so it can't take a share of requests (no steps)");
+        }
         match self.kind {
             RunType::Cron => {
                 let Some(s) = &self.schedule else { return bad("schedule is required for a cron service") };
@@ -1244,7 +1600,12 @@ impl Run {
             RunType::Worker => {
                 self.schedule = None;
                 self.timezone = None;
-                self.min_instances = self.min_instances.max(1);
+                // A worker runs at least one, unless it follows a stream's lag: then caught up it
+                // may run none (KEDA's scale to zero), one starting once there's work. A gauge
+                // of its own reports nothing while it's stopped, so that one keeps one.
+                if self.scale.as_ref().is_none_or(|s| !s.metric.is_empty()) {
+                    self.min_instances = self.min_instances.max(1);
+                }
                 self.max_instances = self.max_instances.max(self.min_instances);
             }
             RunType::Web => {
@@ -1413,6 +1774,17 @@ pub struct Environment {
     pub traces: bool,
     /// Its pages measure their Web Vitals for roll (`…/vitals`).
     pub vitals: bool,
+    /// Where its deploy status badge is (Netlify's), when it has one (`badge: true`): an SVG for a
+    /// README, answered to anyone.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub badge_url: Option<String>,
+    /// People other than its author who must approve a deployment before it goes live (GitHub
+    /// Environments' required reviewers): 0 (none) to 3; never a preview's.
+    #[serde(skip_serializing_if = "is_zero")]
+    pub approvals: u32,
+    /// Days its logs (output, requests, traces, events and Vitals) are kept: 7 (the default),
+    /// 30 or 90 (Railway's, Render's longer retention); a preview's are 7.
+    pub log_retention_days: u32,
     /// Its deploys are reported to the Git host (commit statuses, GitHub Deployments); false:
     /// someone else reports them (roll previews, for its `pv-` environments: one voice on a
     /// pull request).
@@ -1469,11 +1841,44 @@ pub struct Environment {
     /// Its split test: a share of its visitors served by another environment.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub split: Option<Split>,
+    /// When it's paused by the clock (`pause_schedule`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pause_schedule: Option<crate::freeze::PauseSchedule>,
+    /// Where a share of its requests is copied, their answers dropped (`mirror`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mirror: Option<Split>,
+    /// HTML of its own in every page (Netlify's snippet injection).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub snippets: Vec<Snippet>,
+    /// Its runtime config (Vercel's Edge Config): values its instances read at `ROLL_CONFIG_URL`
+    /// without a deploy, and the version they're at.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub config: Option<serde_json::Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub config_version: Option<i64>,
+    /// When its token was last rotated (`…/config/rotate`): the address before it reads until a
+    /// deploy made after it is live.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub config_rotated_at: Option<i64>,
+    /// Its deploy freeze, and whether it's on now ([`crate::freeze`]).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub freeze: Option<crate::freeze::Freeze>,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub frozen: bool,
     /// What its code may reach: anything (`open`), or roll and the listed hosts (`roll`).
     pub egress: Egress,
     /// Hosts its egress proxy refused lately (its code tried them; they aren't listed).
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub egress_refused: Vec<crate::runtime::egress::Refused>,
+    /// Who a closed environment's placeholders are made by (`usr_…`, `token:…`, the operator);
+    /// null, no one (its keys bound to hosts withheld); absent when it's open or it was closed
+    /// before that was kept.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub closed_by: Option<serde_json::Value>,
+    /// A closed environment's interception on its owner (roll secrets' placeholders): requests
+    /// filtered, placeholders swapped, the latest refusals; none until it has done something.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub intercepted: Option<crate::runtime::egress::Intercepted>,
     /// A worker that follows its work: the backlog it last read (null before the first read)
     /// and the instances that wants.
     pub scaling: Option<Scaling>,
@@ -1727,6 +2132,115 @@ pub struct HeaderRule {
 /// The most header rules an environment has.
 pub const MAX_HEADER_RULES: usize = 20;
 
+/// One block of roll.toml's edge settings (`[app]`, `[app.previews]` or
+/// `[app.environments.<env>]`): what it sets, checked as the API checks an environment's.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct EdgeBlock {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub headers: Option<Vec<HeaderRule>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub firewall: Option<Vec<FirewallRule>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rate_limit: Option<RateLimit>,
+}
+
+impl EdgeBlock {
+    fn is_empty(&self) -> bool {
+        self.headers.is_none() && self.firewall.is_none() && self.rate_limit.is_none()
+    }
+}
+
+/// A deployment's edge settings from its tree's roll.toml, every block kept, so the same image
+/// promoted or rolled back elsewhere reads the block of the environment it's live in.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct EdgeFile {
+    #[serde(default, skip_serializing_if = "EdgeBlock::is_empty")]
+    pub app: EdgeBlock,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub previews: Option<EdgeBlock>,
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub environments: std::collections::BTreeMap<String, EdgeBlock>,
+}
+
+/// What a live deployment's file adds to its environment's gate.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Edge {
+    pub headers: Vec<HeaderRule>,
+    pub firewall: Vec<FirewallRule>,
+    pub rate_limit: Option<RateLimit>,
+}
+
+impl EdgeFile {
+    /// roll.toml's edge keys, each block checked as the API checks an environment's; none set: none.
+    pub fn from_app(app: &apps_build::app::AppConfig) -> Result<Option<EdgeFile>> {
+        fn block(name: &str, c: &apps_build::app::AppConfig) -> Result<EdgeBlock> {
+            let bad = |what: &str, e: String| Error::BadRequest(format!("roll.toml [{name}] {what}: {e}"));
+            let json = |t: &toml::Table| serde_json::to_value(t).map_err(|e| e.to_string());
+            let headers = match &c.headers {
+                None => None,
+                Some(h) if h.len() > MAX_HEADER_RULES => return Err(bad("headers", format!("at most {MAX_HEADER_RULES} rules"))),
+                Some(h) => Some(h.iter().map(|t| json(t).and_then(|v| serde_json::from_value::<HeaderRule>(v).map_err(|e| e.to_string())).map_err(|e| bad("headers", e)).and_then(HeaderRule::check)).collect::<Result<Vec<_>>>()?),
+            };
+            let firewall = match &c.firewall {
+                None => None,
+                Some(f) if f.len() > MAX_FIREWALL_RULES => return Err(bad("firewall", format!("at most {MAX_FIREWALL_RULES} rules"))),
+                Some(f) => Some(f.iter().map(|t| json(t).and_then(|v| serde_json::from_value::<FirewallRule>(v).map_err(|e| e.to_string())).map_err(|e| bad("firewall", e)).and_then(FirewallRule::check)).collect::<Result<Vec<_>>>()?),
+            };
+            if firewall.iter().flatten().any(|r| r.action == FirewallAction::Allow) {
+                return Err(bad("firewall", "only deny, limit or challenge".into()));
+            }
+            let rate_limit = match &c.rate_limit {
+                None => None,
+                Some(t) => {
+                    let r: RateLimit = json(t).and_then(|v| serde_json::from_value(v).map_err(|e| e.to_string())).map_err(|e| bad("rate_limit", e))?;
+                    r.check()?;
+                    Some(r)
+                }
+            };
+            Ok(EdgeBlock { headers, firewall, rate_limit })
+        }
+        let mut f = EdgeFile { app: block("app", app)?, previews: app.previews.as_deref().map(|p| block("app.previews", p)).transpose()?.filter(|b| !b.is_empty()), environments: Default::default() };
+        for (n, e) in app.environments.iter().flatten() {
+            let b = block(&format!("app.environments.{n}"), e)?;
+            if !b.is_empty() {
+                f.environments.insert(n.clone(), b);
+            }
+        }
+        Ok((!f.app.is_empty() || f.previews.is_some() || !f.environments.is_empty()).then_some(f))
+    }
+
+    /// What applies in `env`: the file's, a preview's, then the environment's own block, the last
+    /// block that sets a key deciding it (as roll.toml's other keys).
+    pub fn resolve(&self, env: &str, ephemeral: bool) -> Edge {
+        let mut layers = vec![&self.app];
+        layers.extend(self.previews.as_ref().filter(|_| ephemeral));
+        layers.extend(self.environments.get(env));
+        let mut e = Edge::default();
+        for l in layers {
+            if let Some(h) = &l.headers {
+                e.headers.clone_from(h);
+            }
+            if let Some(f) = &l.firewall {
+                e.firewall.clone_from(f);
+            }
+            if l.rate_limit.is_some() {
+                e.rate_limit = l.rate_limit;
+            }
+        }
+        e
+    }
+}
+
+impl RateLimit {
+    /// The stricter of two limits: the lower rate, and the smaller burst (unset: a minute's worth).
+    pub fn stricter(a: Option<RateLimit>, b: Option<RateLimit>) -> Option<RateLimit> {
+        match (a, b) {
+            (Some(x), Some(y)) => Some(RateLimit { per_minute: x.per_minute.min(y.per_minute), burst: Some(x.burst.unwrap_or(x.per_minute).min(y.burst.unwrap_or(y.per_minute))) }),
+            (x, y) => x.or(y),
+        }
+    }
+}
+
 /// A path on an environment's domains answered by another service of its project (Vercel's
 /// rewrites to another project, Cloud Run's URL maps): that service's environment of the same
 /// name, the path and query as they came.
@@ -1737,6 +2251,33 @@ pub struct Route {
     pub path: String,
     /// The other service, by its name in the project.
     pub service: String,
+}
+
+/// HTML of an environment's own in every page the proxy answers (Netlify's snippet injection):
+/// an analytics or chat tag without a code change. Only the owner's text, in a 200 HTML page.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Snippet {
+    pub at: SnippetAt,
+    pub html: String,
+}
+
+/// Where a snippet goes in each page: before `</head>`, or before `</body>`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SnippetAt {
+    Head,
+    BodyEnd,
+}
+
+impl Snippet {
+    /// At most five, each 1 byte to 16 KiB of text.
+    pub fn check(all: &[Snippet]) -> Result<()> {
+        if all.len() > 5 || all.iter().any(|s| s.html.trim().is_empty() || s.html.len() > 16 << 10 || s.html.contains('\0')) {
+            return Err(Error::BadRequest("snippets are at most 5 of {at: head | body_end, html: 1 byte to 16 KiB}".into()));
+        }
+        Ok(())
+    }
 }
 
 /// An environment's split test (Netlify's split testing): `percent` of its visitors, each kept
@@ -2201,6 +2742,10 @@ pub struct Deployment {
     /// single deployment's GET; the list leaves them out.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub steps: Vec<Step>,
+    /// Who approved putting it live, where the environment asks for approvals; on a single
+    /// deployment's GET.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub approved_by: Vec<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize)]
@@ -2431,6 +2976,35 @@ pub struct Link {
     pub vars: Vec<String>,
 }
 
+/// The environment a `roll://ENV[/folder…]/KEY` value names (roll secrets' references; its
+/// own syntax is checked where it resolves): None when it isn't one; an error when it's
+/// malformed, or names a project (a service's references are its own project's).
+pub fn secret_ref_env(v: &str) -> Option<Result<String>> {
+    let bad = |m: &str| Some(Err(Error::BadRequest(m.into())));
+    // What roll secrets' parser would take for one (it trims) is one; only its exact form is
+    // accepted, so no check here or elsewhere reads it differently.
+    if !v.trim().to_ascii_lowercase().starts_with("roll://") {
+        return None;
+    }
+    let Some(rest) = v.strip_prefix("roll://").filter(|_| v.trim() == v) else {
+        return bad("a roll:// reference is written exactly: roll://ENV/KEY, lowercase, with nothing around it");
+    };
+    if rest.contains('@') {
+        return bad("a service's roll:// reference names its own project's secrets: roll://ENV/KEY, without a project");
+    }
+    match rest.split_once('/') {
+        Some((env, key)) if !env.is_empty() && !key.is_empty() && !key.ends_with('/') => Some(Ok(env.to_string())),
+        _ => bad("a roll:// reference is roll://ENV/KEY or roll://ENV/folder/KEY"),
+    }
+}
+
+/// Whether a `roll://` reference's folder may be read by `service`: one under `/services/<id>`
+/// (where "Move to roll secrets" keeps a service's own) only by that service.
+pub fn secret_ref_folder_ok(v: &str, service: &str) -> bool {
+    let parts: Vec<&str> = v.strip_prefix("roll://").unwrap_or(v).split('/').collect();
+    !(parts.len() >= 4 && parts[1] == "services" && parts[2] != service)
+}
+
 /// An environment variable's name: `[A-Za-z_][A-Za-z0-9_]*`, at most 128 characters.
 pub fn check_var_name(n: &str) -> Result<()> {
     let mut b = n.bytes();
@@ -2452,6 +3026,9 @@ pub struct VarView {
     /// Kept as a file at this path in its instances (not in their environment).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub file: Option<String>,
+    /// Only its instances get it, never a build's steps.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub runtime_only: bool,
 }
 
 /// An environment's own HTML for roll's pages (Heroku's `ERROR_PAGE_URL` and
@@ -2527,6 +3104,12 @@ pub struct Job {
     pub command: String,
     /// Containers it runs, each with `ROLL_TASK_INDEX` and `ROLL_TASK_COUNT` (Cloud Run Jobs').
     pub tasks: u32,
+    /// Tries after a task's failure (Cloud Run Jobs' `--max-retries`): 0–5, each in a fresh
+    /// container with `ROLL_TASK_ATTEMPT`.
+    #[serde(skip_serializing_if = "is_zero")]
+    pub retries: u32,
+    /// Tasks running at once (Cloud Run Jobs' `--parallelism`): 1–100.
+    pub parallelism: u32,
     pub status: RunStatus,
     pub exit_code: Option<i32>,
     pub started_at: i64,
@@ -2705,4 +3288,8 @@ mod fix_tests {
         assert!(f("the build failed (docker build exited with 1)", Some("npm ci can only install packages when your package.json and package-lock.json are in sync")).contains("package-lock.json"));
         assert_eq!(super::fix_for("a reason nobody wrote down", None), None);
     }
+}
+
+fn is_zero(n: &u32) -> bool {
+    *n == 0
 }

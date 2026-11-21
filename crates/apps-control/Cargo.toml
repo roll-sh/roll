@@ -13,6 +13,10 @@ anyhow.workspace = true
 apps-build.workspace = true
 async-trait.workspace = true
 aws-config.workspace = true
+aws-credential-types.workspace = true
+aws-sigv4.workspace = true
+aws-smithy-runtime-api.workspace = true
+roll-intercept.workspace = true
 aws-sdk-cloudwatchlogs.workspace = true
 aws-sdk-codebuild.workspace = true
 aws-sdk-ecr.workspace = true
@@ -65,4 +69,5 @@ url.workspace = true
 zip.workspace = true
 
 [dev-dependencies]
+code-review.workspace = true
 tokio-tungstenite.workspace = true

@@ -35,26 +35,18 @@ impl Apps {
                         let level = v.max(0.0).ceil() as u64;
                         l.set_wanted(sc.instances(level, run.min_instances, run.max_instances), Some(level));
                     }
-                    Err(why) => l.note_scale(&format!("scale: {why}")),
+                    Err(why) => {
+                        l.forget_backlog();
+                        l.note_scale(&format!("scale: {why}"));
+                    }
                 }
                 continue;
             }
             let sid = l.service.clone();
             let Ok(svc) = self.db(move |s| s.service(&sid)).await else { continue };
-            // A canvas proves ownership only where the operator placed it: anyone can put any
-            // reference on their own project, and streams don't know their owners yet. So a
-            // person's project doesn't follow a stream (as roll secrets refuses links there).
-            let project = self.deps.workspace.as_ref().and_then(|ws| ws.get(roll_workspace::Scope::All, &svc.project).ok());
-            let placed = project.as_ref().is_some_and(|p| p.resources.iter().any(|r| r.kind == roll_workspace::Kind::Stream && r.r#ref == sc.stream));
-            let operators = project.as_ref().is_some_and(|p| p.owner.is_empty());
-            let off = if !placed {
-                Some(format!("stream {} isn't on this service's project", sc.stream))
-            } else if !operators {
-                Some("a person's project can't follow a stream until streams know their owners".to_string())
-            } else {
-                None
-            };
-            if let Some(why) = off {
+            // A canvas proves ownership only where the operator placed it (as roll secrets
+            // refuses links on a person's project).
+            if let Err(why) = self.stream_followable(&svc.project, &sc.stream) {
                 l.note_scale(&format!("scaling on a backlog is off: {why}"));
                 l.set_wanted(0, None);
                 continue;
@@ -64,7 +56,10 @@ impl Apps {
                     l.note_scale("");
                     l.set_wanted(sc.instances(lag, run.min_instances, run.max_instances), Some(lag));
                 }
-                Err(e) => l.note_scale(&format!("scale: reading {}'s lag: {e:#}", sc.group)),
+                Err(e) => {
+                    l.forget_backlog();
+                    l.note_scale(&format!("scale: reading {}'s lag: {e:#}", sc.group));
+                }
             }
         }
     }

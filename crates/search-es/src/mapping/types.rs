@@ -619,6 +619,14 @@ fn default_vector_index_options(f: &FieldMapper, ctx: &MappingCtx) -> Value {
     }
 }
 
+/// `RankVectorsFieldMapper`: multi-vector fields (late interaction), stored flat in doc values.
+pub static RANK_VECTORS: &[ParamDef] = &[
+    p("element_type", Enum(&["float", "byte", "bit", "bfloat16"]), Dv::Str("float"), Fixed),
+    // Set once: by the mapping, or by the first document (`write::set_vector_dims`).
+    p("dims", Int { min: i32::MIN as i64, max: INT_MAX, msg: None }, Dv::Null, Fixed).ser(Ser::WhenSet),
+    META,
+];
+
 pub static SPARSE_VECTOR: &[ParamDef] = &[p("store", Bool, TRUE, Fixed), META, p("index_options", Json, Dv::Fn(default_sparse_options), Updatable).nullable()];
 
 fn default_sparse_options(_: &FieldMapper, _: &MappingCtx) -> Value {
@@ -889,6 +897,7 @@ pub static TYPES: &[TypeDef] = &[
     def!("point", POINT, Family::Geo),
     TypeDef { multi_fields: false, validate: Some(validate_rank_feature), ..def!("rank_feature", RANK_FEATURE, Family::Other) },
     TypeDef { multi_fields: false, ..def!("rank_features", RANK_FEATURES, Family::Other) },
+    TypeDef { multi_fields: false, in_multi_field: false, validate: Some(validate_rank_vectors), ..def!("rank_vectors", RANK_VECTORS, Family::Vector) },
     def!("scaled_float", SCALED_FLOAT, Family::Numeric).with_validate(validate_number),
     TypeDef { multi_fields: false, ..def!("search_as_you_type", SEARCH_AS_YOU_TYPE, Family::Text) },
     // Multi-fields and `copy_to` sources are allowed in the new format; it can't be a multi-field.
@@ -1054,14 +1063,6 @@ pub fn lookup(name: &str) -> Option<&'static TypeDef> {
     TYPES.binary_search_by(|t| t.name.cmp(name)).ok().map(|i| &TYPES[i])
 }
 
-/// Types Elasticsearch knows but roll search refuses, with the reason.
-pub fn unsupported(name: &str) -> Option<&'static str> {
-    match name {
-        "rank_vectors" => Some("rank_vectors fields are not supported by roll search"),
-        _ => None,
-    }
-}
-
 // --- Validation hooks (messages from Elasticsearch). ---
 
 fn precludes(f: &FieldMapper, ctx: &MappingCtx, param: &str, others: &[&str]) -> Result<(), EsError> {
@@ -1220,16 +1221,7 @@ fn validate_dense_vector(f: &FieldMapper, ctx: &MappingCtx) -> Result<(), EsErro
         }
     }
     let bit = f.effective("element_type", ctx).as_str() == Some("bit");
-    if let Some(d) = f.raw("dims").and_then(Value::as_i64) {
-        // `dims`' validator: bits come in bytes, up to 4096 bytes.
-        let (min, max) = if bit { (8, 32768) } else { (1, 4096) };
-        if d < min || d > max {
-            return Err(EsError::mapper_parsing(format!("The number of dimensions should be in the range [{min}, {max}] but was [{d}]")));
-        }
-        if bit && d % 8 != 0 {
-            return Err(EsError::mapper_parsing(format!("The number of dimensions for should be a multiple of 8 but was [{d}]")));
-        }
-    }
+    validate_vector_dims(f, bit)?;
     if bit
         && let Some(s) = f.raw("similarity").and_then(Value::as_str)
         && s != "l2_norm"
@@ -1256,6 +1248,24 @@ fn validate_dense_vector(f: &FieldMapper, ctx: &MappingCtx) -> Result<(), EsErro
         }
     }
     Ok(())
+}
+
+/// `dims`' validator (`dense_vector` and `rank_vectors`): bits come in bytes, up to 4096 bytes.
+fn validate_vector_dims(f: &FieldMapper, bit: bool) -> Result<(), EsError> {
+    if let Some(d) = f.raw("dims").and_then(Value::as_i64) {
+        let (min, max) = if bit { (8, 32768) } else { (1, 4096) };
+        if d < min || d > max {
+            return Err(EsError::mapper_parsing(format!("The number of dimensions should be in the range [{min}, {max}] but was [{d}]")));
+        }
+        if bit && d % 8 != 0 {
+            return Err(EsError::mapper_parsing(format!("The number of dimensions for should be a multiple of 8 but was [{d}]")));
+        }
+    }
+    Ok(())
+}
+
+fn validate_rank_vectors(f: &FieldMapper, ctx: &MappingCtx) -> Result<(), EsError> {
+    validate_vector_dims(f, f.effective("element_type", ctx).as_str() == Some("bit"))
 }
 
 /// `passthrough: {priority: n}` makes the mapped sub-fields resolvable from the root.

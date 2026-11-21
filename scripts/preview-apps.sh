@@ -37,7 +37,9 @@ cleanup() {
   if [ -n "$PRJ" ]; then
     # A closed environment's egress proxy, and the project's closed builder (buildx, named as its
     # network) with its proxy: left running when rolld stops before the environment's delete.
-    for c in $(docker ps -aq --filter "name=roll-apps-egress-closed-${PRJ#prj_}" --filter "name=roll-apps-build-${PRJ#prj_}"); do docker rm -f "$c" >/dev/null; done
+    # The closed build's own egress proxy too: still attached, it keeps the build network from
+    # going, and leaked networks use up Docker's address pools (closed deploys then fail).
+    for c in $(docker ps -aq --filter "name=roll-apps-egress-closed-${PRJ#prj_}" --filter "name=roll-apps-build-${PRJ#prj_}" --filter "name=roll-apps-egress-build-${PRJ#prj_}"); do docker rm -f "$c" >/dev/null; done
     docker buildx rm -f "roll-apps-build-${PRJ#prj_}" >/dev/null 2>&1 || true
     docker network rm "roll-apps-build-${PRJ#prj_}" >/dev/null 2>&1 || true
     for n in $(docker network ls --format '{{.Name}}' | grep "^roll-apps-net-${PRJ#prj_}-" || true); do docker network rm "$n" >/dev/null || true; done
@@ -59,6 +61,8 @@ export ROLL_HOME=$H ROLL_API=$API ROLL_PROXY=127.0.0.1:${PORTS}432 ROLL_REDIS=12
   ROLL_APPS_LISTEN=127.0.0.1:${PORTS}080 ROLL_APPS_DOMAIN=apps.localhost ROLL_CODE_PREVIEW_DOMAIN=preview.localhost \
   ROLL_PRODUCTS=code,redis,streams,apps ROLL_APPS_ALLOW_PRIVATE=1 RUST_LOG=${RUST_LOG:-info}
 unset ROLL_ADMIN_TOKEN ROLL_CODE_TOKEN
+# A deployment key, as a real node has: a preview's own variables are kept sealed with it.
+export ROLL_SECRET_KEY=${PREVIEW_APPS_SECRET_KEY:-$(python3 -c 'import secrets; print(secrets.token_hex(32))')}
 nice -n 10 "$BIN" >"$H/rolld.log" 2>&1 &
 PID=$!
 for _ in $(seq 1 120); do kill -0 "$PID" 2>/dev/null || { tail -20 "$H/rolld.log"; exit 1; }; curl -sf "http://$API/v1/info" >/dev/null 2>&1 && break; sleep 0.5; done
@@ -139,19 +143,28 @@ APPS_ROBOTS=$(curl -sS -o /dev/null -D - -H "Host: $HOSTPART" "http://127.0.0.1:
 [ "$APPS_ROBOTS" = noindex ] || { echo "a pv- environment's page should carry X-Robots-Tag: noindex, not '$APPS_ROBOTS'"; exit 1; }
 
 say "Roll only on roll apps (apps' #143): the pv- instance reaches nothing but its listed hosts"
+OPEN_DEP=$(api GET "/v1/apps/services/$SVC/environments/$ENV" | jq_ "(d.get('active') or {}).get('id','')")
 api PUT "/v1/previews/projects/$PRJ/settings" '{"egress":"roll","egress_hosts":["example.com"]}' >/dev/null
 api POST "/v1/previews/$PV/refresh" >/dev/null
+# A deployment made closed, live: not the open one still answering while it's made.
 for _ in $(seq 1 600); do
   E=$(api GET "/v1/apps/services/$SVC/environments/$ENV")
-  [ "$(echo "$E" | jq_ "(d.get('egress') or {}).get('mode')")" = roll ] && [ "$(echo "$E" | jq_ "(d.get('latest') or {}).get('status','')")" = active ] && break
+  [ "$(echo "$E" | jq_ "(d.get('egress') or {}).get('mode')")" = roll ] && [ "$(echo "$E" | jq_ "(d.get('active') or {}).get('id','')")" != "$OPEN_DEP" ] && [ "$(echo "$E" | jq_ "(d.get('latest') or {}).get('status','')")" = active ] && break
   sleep 1
 done
+[ "$(echo "$E" | jq_ "(d.get('active') or {}).get('id','')")" != "$OPEN_DEP" ] || { echo "the pv- environment should be deployed again closed: $(echo "$E" | jq_ "d.get('latest')"); see rolld.log"; exit 1; }
 [ "$(echo "$E" | jq_ "(d.get('egress') or {}).get('mode')")" = roll ] || { echo "the pv- environment should be closed: $(echo "$E" | jq_ "d.get('egress')")"; exit 1; }
 # One voice on the pull request: previews reports the pv- environment, roll apps doesn't (#249).
 [ "$(echo "$E" | jq_ "d.get('report')")" = False ] || { echo "the pv- environment should leave reporting to previews (report: false): $(echo "$E" | jq_ "d.get('report')")"; exit 1; }
+# Its keys bound to hosts are used as the rules' writer (closed_by, apps' #610): the operator
+# saved these rules, so no one, and they're withheld (without previews' field, roll apps would
+# name whoever set the egress: the operator).
+[ "$(echo "$E" | jq_ "d.get('closed_by', 'absent')")" = None ] || { echo "the closed pv- environment should name no one as its placeholders' maker (closed_by: null): $(echo "$E" | jq_ "d.get('closed_by', 'absent')")"; exit 1; }
 curl -sS -o /dev/null -H "Host: $HOSTPART" "http://127.0.0.1:${PORTS}080/" --max-time 120
 INST=""
-for _ in $(seq 1 60); do INST=$(docker ps --format '{{.Names}}' | grep "^roll-apps-${SVC#svc_}-$ENV-" | head -1); [ -n "$INST" ] && break; sleep 1; done
+# The closed deployment's instance (its id's first six characters are in the name).
+CLOSED=$(echo "$E" | jq_ "d['active']['id'][len('dep_'):][:6]")
+for _ in $(seq 1 60); do INST=$(docker ps --format '{{.Names}}' | grep "^roll-apps-${SVC#svc_}-$ENV-$CLOSED-" | head -1); [ -n "$INST" ] && break; sleep 1; done
 EGRESS_APPS=$(docker exec "$INST" python3 -c '
 import socket, urllib.request
 r = []

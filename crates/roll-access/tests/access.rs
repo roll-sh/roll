@@ -104,7 +104,7 @@ struct Addresses(Arc<People>);
 impl roll_workspace::People for Addresses {
     fn person(&self, user: &str) -> Option<roll_workspace::Person> {
         let p = self.0.0.lock().unwrap().get(user).cloned()?;
-        Some(roll_workspace::Person { email: Some(format!("{}@acme.test", p.handle)), handle: p.handle })
+        Some(roll_workspace::Person { email: Some(format!("{}@acme.test", p.handle)), handle: p.handle, admin: p.admin })
     }
 }
 
@@ -151,6 +151,7 @@ fn postgres() -> Router {
         .route("/v1/apps/services/{id}", axum::routing::patch(|| async { axum::Json(json!({ "ok": true })) }))
         .route("/v1/apps/services/{id}/links/{kind}/{ref}", axum::routing::put(|| async { axum::Json(json!({ "ok": true })) }))
         .route("/v1/apps/services/{id}/environments/{env}", axum::routing::put(|| async { axum::Json(json!({ "ok": true })) }))
+        .route("/v1/apps/services/{id}/environments/{env}/redeploy", post(|| async { axum::Json(json!({ "ok": true })) }))
         .route("/v1/search/clusters/{id}/indices/{index}/search", post(|| async { axum::Json(json!({ "hits": [] })) }))
         .route("/v1/search/clusters", post(|| async { axum::Json(json!({ "id": "cl_new", "password": "fresh" })) }))
         .route("/v1/search/clusters/{id}/indices", get(|| async { axum::Json(json!([])) }))
@@ -589,6 +590,31 @@ async fn ask_waits_for_a_person() {
     assert_eq!(s, StatusCode::OK);
     let again = d.send(&token, Method::DELETE, "/v1/projects/pc", None, &[("x-roll-approval", &id)]).await;
     assert_eq!(again.1["code"], "approval_used");
+}
+
+/// A deploy past a freeze (`X-Roll-Override: 1`) is admin, and a deploy's approval is never one
+/// for the same request with the override: it's another request, asked about on its own.
+#[tokio::test]
+async fn an_approved_deploy_is_no_approval_past_a_freeze() {
+    let d = Daemon::new(50);
+    let (token, _) = d.token(json!([{ "product": "apps", "resources": "*", "actions": { "deploy": "ask", "admin": "ask" } }]), json!({})).await;
+    let path = "/v1/apps/services/svc_a/environments/production/redeploy";
+    let (s, out) = d.call(&token, Method::POST, path, Some(json!({}))).await;
+    assert_eq!((s, out["code"].as_str()), (StatusCode::FORBIDDEN, Some("approval_pending")), "{out}");
+    let id = out["approval"].as_str().unwrap().to_string();
+    let (_, list) = d.call(OPERATOR, Method::GET, "/v1/access/approvals?state=pending", None).await;
+    assert_eq!(list[0]["action"], "deploy", "{list}");
+    assert_eq!(d.call(OPERATOR, Method::POST, &format!("/v1/access/approvals/{id}/approve"), None).await.0, StatusCode::OK);
+    // The same request with the override: not what was approved.
+    let over = d.send(&token, Method::POST, path, Some(json!({})), &[("x-roll-approval", &id), ("x-roll-override", "1")]).await;
+    assert_eq!(over.1["code"], "approval_mismatch", "{over:?}");
+    // Asked on its own, it's about admin.
+    let (s, out) = d.send(&token, Method::POST, path, Some(json!({})), &[("x-roll-override", "1")]).await;
+    assert_eq!((s, out["code"].as_str()), (StatusCode::FORBIDDEN, Some("approval_pending")), "{out}");
+    let (_, list) = d.call(OPERATOR, Method::GET, "/v1/access/approvals?state=pending", None).await;
+    assert!(list.as_array().unwrap().iter().any(|a| a["action"] == "admin"), "{list}");
+    // The approved request itself still runs once.
+    assert_eq!(d.send(&token, Method::POST, path, Some(json!({})), &[("x-roll-approval", &id)]).await.0, StatusCode::OK);
 }
 
 /// A token allowed to manage access makes only tokens it covers, for no longer than it lives;
@@ -1972,6 +1998,25 @@ async fn a_link_needs_reveal_on_what_it_links() {
         { "product": "streams", "resources": [{ "id": "st_9" }], "actions": { "read": "allow" } },
     ]), json!({})).await;
     assert_eq!(d.call(&reader, Method::PATCH, "/v1/apps/services/svc_a", Some(scale)).await.0, StatusCode::OK);
+    // A stream pushed to a web service: read on it (apps consumes it for the service), and write
+    // with a dead-letter topic (apps appends to it).
+    let push = |dead: bool| {
+        let mut rule = json!({ "stream": "st_9", "topic": "orders", "group": "web", "path": "/events" });
+        if dead {
+            rule["dead_letter"] = json!("orders-dead");
+        }
+        json!({ "run": { "push": [rule] } })
+    };
+    let (s, e) = d.call(&apps, Method::PATCH, "/v1/apps/services/svc_a", Some(push(false))).await;
+    assert_eq!((s, e["needs"]["product"].as_str(), e["needs"]["action"].as_str()), (StatusCode::FORBIDDEN, Some("streams"), Some("read")), "{e}");
+    // (A setting that changes what production does, `push` is deploy-level, not `write`.)
+    let (pusher, _) = d.token(json!([
+        { "product": "apps", "resources": "*", "actions": { "write": "allow", "deploy": "allow" } },
+        { "product": "streams", "resources": [{ "id": "st_9" }], "actions": { "read": "allow" } },
+    ]), json!({})).await;
+    assert_eq!(d.call(&pusher, Method::PATCH, "/v1/apps/services/svc_a", Some(push(false))).await.0, StatusCode::OK);
+    let (s, e) = d.call(&pusher, Method::PATCH, "/v1/apps/services/svc_a", Some(push(true))).await;
+    assert_eq!((s, e["needs"]["action"].as_str()), (StatusCode::FORBIDDEN, Some("write")), "{e}");
     // A roll code repo apps reads for the caller (a service built from it, a plan of it): read on
     // that repo too, so no apps grant reaches a repo's code, head or stack by itself.
     let from_repo = json!({ "project": "p", "name": "api", "source": { "kind": "repo", "repo": "acme/secret" } });
@@ -2692,4 +2737,8 @@ async fn a_persons_grant_never_homes_or_places_someone_elses_resource() {
     assert_eq!(d.as_user("usr_mal", Method::PUT, &format!("/v1/workspace/projects/{id}/resources/postgres/prj_theirs"), Some(json!({ "x": 1, "y": 1 }))).await.0, StatusCode::OK);
     // A bucket's name can be made again by someone else: it gets no home at all.
     assert_eq!(d.call(OPERATOR, Method::PUT, &format!("/v1/workspace/projects/{id}/homes/bucket/acme-prod"), None).await.0, StatusCode::BAD_REQUEST);
+    // Taking something off her own canvas is hers to do, whoever put it there.
+    let place = format!("/v1/workspace/projects/{id}/resources/bucket/acme-prod");
+    assert_eq!(d.call(OPERATOR, Method::PUT, &place, Some(json!({ "x": 0, "y": 0 }))).await.0, StatusCode::OK);
+    assert_eq!(d.as_user("usr_mal", Method::DELETE, &place, None).await.0, StatusCode::NO_CONTENT);
 }

@@ -483,6 +483,10 @@ impl code_control::PreviewBackend for Accepted {
         self.0.lock().push((change.id.clone(), by.to_string(), head.to_string()));
         Ok(())
     }
+    async fn act(&self, change: &code_control::model::Change, action: code_control::ext::PreviewAction, by: &str) -> anyhow::Result<String> {
+        self.0.lock().push((change.id.clone(), by.to_string(), format!("{action:?}")));
+        Ok(format!("Done: {action:?}."))
+    }
 }
 
 async fn hook(a: &App, event: &str, delivery: &str, body: &Value, secret: &str) -> StatusCode {
@@ -716,10 +720,15 @@ async fn connect_import_webhooks_and_mirror() {
             page_health: None,
             page_a11y: None,
             page_links: None,
+            slower_routes: None,
+            new_errors: None,
             base_change: None,
             diff_url: None,
             pages: Vec::new(),
             speed_budget: None,
+            regressions: None,
+            regressions_accepted_by: None,
+            regressions_compared: false,
             visual_review: None,
             notes: Vec::new(),
             issues: Vec::new(),
@@ -739,6 +748,19 @@ async fn connect_import_webhooks_and_mirror() {
     .await;
     assert_eq!(preview_calls("/issues/5/comments").len(), 1, "one comment, edited in place");
     assert_eq!(preview_calls("/deployments").iter().filter(|(_, p, _)| p.ends_with("/deployments")).count(), 1, "one deployment per head");
+
+    // `roll/regressions` follows the comparison with main's preview alone: pending until compared at
+    // the head, then failing on a new error, though nothing else about the preview changed.
+    let regressions = || preview_calls("/statuses/").iter().filter(|(_, _, b)| b["context"] == "roll/regressions").map(|(_, _, b)| b["state"].as_str().unwrap_or("").to_string()).collect::<Vec<_>>();
+    let mut checked = env("ready");
+    checked.environment.as_mut().unwrap().regressions = Some("check".into());
+    a.code.report_environment(c5_id, Some(&checked)).unwrap();
+    until("roll/regressions pending before a comparison", || async { regressions().last().map(String::as_str) == Some("pending") }).await;
+    let e = checked.environment.as_mut().unwrap();
+    e.regressions_compared = true;
+    e.new_errors = Some(code_control::model::PreviewNewErrors { branch: "main".into(), total: 1, errors: Vec::new() });
+    a.code.report_environment(c5_id, Some(&checked)).unwrap();
+    until("roll/regressions failing on a new error", || async { regressions().last().map(String::as_str) == Some("failure") }).await;
 
     // A visual change waiting for a review: `roll/visual`, a check run with Accept. A click is
     // accepted for a writer who isn't the change's author, through the preview backend.
@@ -1226,6 +1248,17 @@ async fn roll_commands_from_github_comments() {
     // Line-level commands need a line: the answer says so.
     hook(&a, "issue_comment", "ic-8", &convo("created", 907, "octo", "@roll explain", &issue), SECRET).await;
     until("the explain answer", || async { pr_comments(&g.mock).iter().any(|b| b.contains("inline comment")) }).await;
+    // A writer acts on the change's preview from the conversation (`@roll preview …`): done by the
+    // preview backend, as them, answered there; one it doesn't know lists them.
+    let backend = Arc::new(Accepted::default());
+    a.code.set_preview_backend(backend.clone());
+    hook(&a, "issue_comment", "ic-p1", &convo("created", 920, "octo", "@roll preview keep 48", &issue), SECRET).await;
+    until("the preview answer", || async { pr_comments(&g.mock).iter().any(|b| b == "Done: Keep(48).") }).await;
+    assert_eq!(backend.0.lock().clone(), vec![(id.clone(), "@octo".to_string(), "Keep(48)".to_string())]);
+    hook(&a, "issue_comment", "ic-p2", &convo("created", 921, "viewer", "@roll preview reset", &issue), SECRET).await;
+    hook(&a, "issue_comment", "ic-p3", &convo("created", 922, "octo", "@roll preview dance", &issue), SECRET).await;
+    until("the list of preview commands", || async { pr_comments(&g.mock).iter().any(|b| b.contains("@roll preview redeploy")) }).await;
+    assert_eq!(backend.0.lock().len(), 1, "a reader can't act on it");
     // Learnings from the conversation.
     hook(&a, "issue_comment", "ic-9", &convo("created", 908, "octo", "@roll don't flag TODO comments", &issue), SECRET).await;
     until("the learning", || async { a.ok("GET", "/v1/code/repos/acme/app/learnings", None).await.as_array().unwrap().iter().any(|l| l["text"].as_str().unwrap_or("").contains("TODO")) }).await;

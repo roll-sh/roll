@@ -10,6 +10,9 @@
 //!   failure or a deadlock, or the connection drops before the commit. So the closure must
 //!   only touch the database (no side effects outside it), and code keeps the guarantees it had
 //!   with one writer: read-then-write inside a closure is atomic.
+//! - A hot row many writers update (a counter, a chain's head) can starve a serializable write
+//!   that keeps losing to them: [`Conn::claim`] queues them on a lock instead, and a write that
+//!   lost once runs its next attempt holding it.
 //! - A write is durable when `write` returns: Postgres commits synchronously, and SQLite group-
 //!   commits an fsync of the WAL after the transaction, outside the writer's lock
 //!   (`durable.rs`). If the connection drops during `COMMIT`, the pool asks Postgres on another
@@ -251,6 +254,17 @@ impl Db {
 
     /// [`Db::write`] without waiting for durability on SQLite (bulk work that calls
     /// [`Db::sync`] at the end). The same as `write` on Postgres.
+    /// [`Db::write`], then what it overwrote erased from the file (SQLite: `secure_delete` during
+    /// it, the WAL checkpointed and truncated after). For rewriting values that must not linger;
+    /// on Postgres an ordinary write: the old row versions stay as dead tuples until (auto)vacuum
+    /// reuses their pages.
+    pub fn write_erasing<T, E: From<Error>>(&self, mut f: impl FnMut(&Conn<'_>) -> Result<T, E>) -> Result<T, E> {
+        match &*self.0 {
+            Inner::Sqlite(s) => s.write_erasing(|c| f(&Conn(ConnRef::Sqlite(c)))),
+            Inner::Pg(p) => p.write(Isolation::Serializable, |c| f(&Conn(ConnRef::Pg(c)))),
+        }
+    }
+
     pub fn write_unsynced<T, E: From<Error>>(&self, mut f: impl FnMut(&Conn<'_>) -> Result<T, E>) -> Result<T, E> {
         match &*self.0 {
             Inner::Sqlite(s) => s.write(false, |c| f(&Conn(ConnRef::Sqlite(c)))),
@@ -407,6 +421,19 @@ enum ConnRef<'a> {
 }
 
 impl Conn<'_> {
+    /// Serialize this write with every other write that claims `key` (on Postgres; SQLite has
+    /// one writer). A read-committed write takes the key's lock at once: claim first, before
+    /// the rows it guards. A serializable write runs optimistically, and if it loses a conflict,
+    /// its next attempt holds the lock from before its snapshot, so claimers can't commit under
+    /// it and it gets a clean run. For one hot row many writers update: they queue rather than
+    /// re-run over and over.
+    pub fn claim(&self, key: &str) -> Result<()> {
+        match self.0 {
+            ConnRef::Sqlite(_) => Ok(()),
+            ConnRef::Pg(c) => c.claim(key),
+        }
+    }
+
     pub fn backend(&self) -> Backend {
         match self.0 {
             ConnRef::Sqlite(_) => Backend::Sqlite,

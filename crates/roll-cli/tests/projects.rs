@@ -9,7 +9,7 @@ struct People;
 impl roll_workspace::People for People {
     fn person(&self, user: &str) -> Option<roll_workspace::Person> {
         let handle = user.strip_prefix("usr_")?;
-        Some(roll_workspace::Person { handle: handle.into(), email: Some(format!("{handle}@example.com")) })
+        Some(roll_workspace::Person { handle: handle.into(), email: Some(format!("{handle}@example.com")), admin: handle == "ana" })
     }
 }
 

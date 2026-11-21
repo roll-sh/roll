@@ -697,7 +697,7 @@ pub fn range_query(ctx: &QueryCtx, r: &Range) -> EsResult<QueryRef> {
             Ok(arc(MultiTermQuery::range(f.number, lo, hi, r.include_lower, r.include_upper)))
         }
         Kind::Keyword | Kind::Text | Kind::MatchOnlyText | Kind::SearchAsYouType | Kind::Flattened | Kind::CountedKeyword | Kind::Wildcard => {
-            if !ctx.allow_expensive {
+            if !ctx.allows_expensive() {
                 return Err(EsError::new(
                     400,
                     "exception",

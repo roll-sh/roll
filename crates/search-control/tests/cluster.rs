@@ -20,6 +20,11 @@ struct Node {
 }
 
 async fn node(id: &str, leases: &MemoryStore, objects: &search_store::Objects, catalog: &Arc<search_control::store::Store>) -> Node {
+    node_with(id, leases, objects, catalog, |_| {}).await
+}
+
+/// [`node`] with `f` applied to its config.
+async fn node_with(id: &str, leases: &MemoryStore, objects: &search_store::Objects, catalog: &Arc<search_control::store::Store>, f: impl FnOnce(&mut SearchConfig)) -> Node {
     let home = tempfile::tempdir().unwrap();
     let api_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let api = format!("http://{}", api_listener.local_addr().unwrap());
@@ -35,6 +40,7 @@ async fn node(id: &str, leases: &MemoryStore, objects: &search_store::Objects, c
     cfg.http_port = rest_listener.local_addr().unwrap().port();
     cfg.sync_objects = true;
     cfg.gc_interval = None;
+    f(&mut cfg);
     let control = Control::with_catalog(cfg, objects.clone(), catalog.clone()).await.unwrap();
     control.join(cluster.clone()).unwrap();
     let router = search_control::api::router(control.clone())
@@ -195,6 +201,51 @@ async fn the_default_repository_snapshots_and_restores_on_the_fleet() {
     assert_eq!((s, v["error"]["type"].as_str()), (400, Some("illegal_argument_exception")), "{v}");
 }
 
+/// On a fleet a cluster's CORS settings travel with it: whichever node a browser's preflight
+/// reaches, it is answered the same way (on the cluster's owner, as every request is), also right
+/// after a change made through another node.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn every_node_answers_a_preflight_the_same_way() {
+    let leases = MemoryStore::new();
+    let objects = search_store::test_objects("fleet-cors");
+    let catalog = Arc::new(search_control::store::Store::memory().unwrap());
+    let domain = |c: &mut SearchConfig| c.domain = Some("search.test".into());
+    let a = node_with("a", &leases, &objects, &catalog, domain).await;
+    let b = node_with("b", &leases, &objects, &catalog, domain).await;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
+    while a.cluster.nodes().len() != 2 || b.cluster.nodes().len() != 2 {
+        assert!(tokio::time::Instant::now() < deadline, "the nodes never saw each other");
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    let http = reqwest::Client::new();
+    let (s, c) = call(&http, reqwest::Method::POST, format!("{}/v1/search/clusters", a.api), None, Some(json!({"name": "web", "cors": {"allow_origin": ["https://shop.example"]}}))).await;
+    assert_eq!(s, 200, "{c}");
+    let pw = c["password"].as_str().unwrap().to_string();
+    let r = http.get(format!("{}/", a.rest)).header("host", "web.search.test").basic_auth("elastic", Some(&pw)).send().await.unwrap();
+    assert_eq!(r.status(), 200, "loaded on its owner");
+    let preflight = |base: &str, origin: &str| {
+        http.request(reqwest::Method::OPTIONS, format!("{base}/products/_search"))
+            .header("host", "web.search.test")
+            .header("origin", origin)
+            .header("access-control-request-method", "POST")
+            .send()
+    };
+    let allowed = |r: &reqwest::Response| r.headers().get("access-control-allow-origin").map(|v| v.to_str().unwrap().to_string());
+    for node in [&a, &b] {
+        let r = preflight(&node.rest, "https://shop.example").await.unwrap();
+        assert_eq!((r.status().as_u16(), allowed(&r).as_deref()), (200, Some("https://shop.example")), "through {}", node.api);
+    }
+    // Changed through the other node: every node answers with the new origins at once.
+    let (s, v) = call(&http, reqwest::Method::PATCH, format!("{}/v1/search/clusters/web", b.api), None, Some(json!({"cors": {"allow_origin": ["https://new.example"]}}))).await;
+    assert_eq!(s, 200, "{v}");
+    for node in [&a, &b] {
+        let r = preflight(&node.rest, "https://shop.example").await.unwrap();
+        assert_eq!((r.status().as_u16(), allowed(&r)), (403, None), "through {}", node.api);
+        let r = preflight(&node.rest, "https://new.example").await.unwrap();
+        assert_eq!(r.status().as_u16(), 200, "through {}", node.api);
+    }
+}
+
 /// A cluster's IP allowlist is checked on its owner against the client's own address, which the
 /// node the client reached carries in the signed forward (not the forwarding node's address),
 /// and the internal route the forwards arrive on takes signed requests only.
@@ -299,4 +350,81 @@ async fn a_remote_on_another_node_is_searched_through_the_signed_forward() {
     }
     assert!(!near_node.control.node.loaded().iter().any(|n| **n == *far), "the remote isn't loaded on the local cluster's node");
     assert!(far_node.control.node.loaded().iter().any(|n| **n == *far), "it runs on its owner");
+}
+
+/// A scroll and a point in time whose parts live on two owner nodes: the local cluster's on
+/// its owner, the remote's on the other, each reached through the signed forward; pages go
+/// through either front.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_scroll_over_clusters_on_two_nodes_pages_through_either_front() {
+    let leases = MemoryStore::new();
+    let objects = search_store::test_objects("fleet-ccs-scroll");
+    let catalog = Arc::new(search_control::store::Store::memory().unwrap());
+    let a = node("a", &leases, &objects, &catalog).await;
+    let b = node("b", &leases, &objects, &catalog).await;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
+    while a.cluster.nodes().len() != 2 || b.cluster.nodes().len() != 2 {
+        assert!(tokio::time::Instant::now() < deadline, "the nodes never saw each other");
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    let http = reqwest::Client::new();
+    let owner_of = |name: &str| if a.cluster.owns(&search_control::cluster::key(name)) { "a" } else { "b" };
+    let (s, c) = call(&http, reqwest::Method::POST, format!("{}/v1/search/clusters", a.api), None, Some(json!({"name": "home"}))).await;
+    assert_eq!(s, 200, "{c}");
+    let pw = c["password"].as_str().unwrap().to_string();
+    let index = |name: String, pw: String, ns: Vec<i64>| {
+        let http = http.clone();
+        let rest = a.rest.clone();
+        async move {
+            for n in ns {
+                let (s, v) = call(&http, reqwest::Method::PUT, format!("{rest}/items/_doc/{n}?refresh=true"), Some((&name, &pw)), Some(json!({"n": n}))).await;
+                assert_eq!(s, 201, "{v}");
+            }
+        }
+    };
+    index("home".into(), pw.clone(), vec![1, 3, 5, 7]).await;
+    let mut away = None;
+    for i in 0..16 {
+        let name = format!("away-{i}");
+        let (s, c) = call(&http, reqwest::Method::POST, format!("{}/v1/search/clusters", a.api), None, Some(json!({"name": name}))).await;
+        assert_eq!(s, 200, "{c}");
+        // Writing loads it on its owner.
+        index(name.clone(), c["password"].as_str().unwrap().to_string(), vec![0, 2, 4, 6, 8]).await;
+        if owner_of(&name) != owner_of("home") {
+            away = Some(name);
+            break;
+        }
+    }
+    let away = away.expect("some cluster lands on the other node");
+    let (s, v) = call(&http, reqwest::Method::PUT, format!("{}/v1/search/clusters/home/remotes/away", b.api), None, Some(json!({"cluster": away}))).await;
+    assert_eq!(s, 200, "{v}");
+    let fronts = [&a, &b];
+    let (s, v) = call(&http, reqwest::Method::POST, format!("{}/items,away:items/_search?scroll=1m", a.rest), Some(("home", &pw)), Some(json!({"size": 3, "sort": [{"n": "asc"}]}))).await;
+    assert_eq!(s, 200, "{v}");
+    let id = v["_scroll_id"].as_str().unwrap().to_string();
+    let mut seen: Vec<i64> = v["hits"]["hits"].as_array().unwrap().iter().map(|h| h["_source"]["n"].as_i64().unwrap()).collect();
+    for i in 0.. {
+        let (s, v) = call(&http, reqwest::Method::POST, format!("{}/_search/scroll", fronts[i % 2].rest), Some(("home", &pw)), Some(json!({"scroll_id": id, "scroll": "1m"}))).await;
+        assert_eq!(s, 200, "{v}");
+        let hits = v["hits"]["hits"].as_array().unwrap();
+        if hits.is_empty() {
+            break;
+        }
+        seen.extend(hits.iter().map(|h| h["_source"]["n"].as_i64().unwrap()));
+    }
+    assert_eq!(seen, (0..9).collect::<Vec<i64>>());
+    let (s, v) = call(&http, reqwest::Method::DELETE, format!("{}/_search/scroll", b.rest), Some(("home", &pw)), Some(json!({"scroll_id": id}))).await;
+    assert_eq!(s, 200, "{v}");
+    // A point in time over both, searched and closed through the other front.
+    let (s, v) = call(&http, reqwest::Method::POST, format!("{}/items,away:items/_pit?keep_alive=1m", a.rest), Some(("home", &pw)), None).await;
+    assert_eq!(s, 200, "{v}");
+    let pit = v["id"].as_str().unwrap().to_string();
+    let (s, v) = call(&http, reqwest::Method::POST, format!("{}/_search", b.rest), Some(("home", &pw)), Some(json!({"pit": {"id": pit}, "size": 20, "sort": [{"n": "desc"}]}))).await;
+    let ns: Vec<i64> = v["hits"]["hits"].as_array().map(|a| a.iter().map(|h| h["_source"]["n"].as_i64().unwrap()).collect()).unwrap_or_default();
+    assert_eq!((s, ns), (200, (0..9).rev().collect::<Vec<i64>>()), "{v}");
+    let (s, v) = call(&http, reqwest::Method::DELETE, format!("{}/_pit", b.rest), Some(("home", &pw)), Some(json!({"id": pit}))).await;
+    assert_eq!((s, v["succeeded"].as_bool()), (200, Some(true)), "{v}");
+    let (home_node, away_node) = if owner_of("home") == "a" { (&a, &b) } else { (&b, &a) };
+    assert!(!home_node.control.node.loaded().iter().any(|n| **n == *away), "the remote's parts run only on its owner");
+    assert!(away_node.control.node.loaded().iter().any(|n| **n == *away));
 }

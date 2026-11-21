@@ -1116,6 +1116,16 @@ impl Runtime for Docker {
         Ok(())
     }
 
+    fn intercepted(&self, network: &str) -> Option<super::egress::Intercepted> {
+        self.egress.as_ref().and_then(|p| p.intercepted(network))
+    }
+
+    fn set_interception(&self, network: &str, i: Option<std::sync::Arc<dyn roll_intercept::Interception>>) {
+        if let Some(p) = &self.egress {
+            p.set_interception(network, i);
+        }
+    }
+
     fn closes_egress(&self) -> bool {
         self.egress.is_some()
     }
@@ -1158,6 +1168,31 @@ impl Runtime for Docker {
         // Its builder's container and its cache go with it (`buildx rm`), then its relay.
         let _ = docker(&["buildx", "rm", "-f", &name]).await;
         self.remove_network(&name).await;
+    }
+
+    async fn sweep_build_networks(&self, projects: &std::collections::HashSet<String>) {
+        let ours: std::collections::HashSet<String> = projects.iter().map(|p| build_network_name(p)).collect();
+        let prefix = format!("{}build-", super::PREFIX);
+        let Ok(listed) = docker(&["network", "ls", "--filter", &format!("label={LABEL}.project"), "--format", "{{.Name}}\t{{.CreatedAt}}"]).await else { return };
+        let now = chrono::Utc::now();
+        for line in listed.lines() {
+            let Some((name, created)) = line.split_once('\t') else { continue };
+            if !name.starts_with(&prefix) || ours.contains(name) {
+                continue;
+            }
+            // `2026-11-20 22:53:33.596282026 +0100 CET`: one made in the last ten minutes may be
+            // a build's that hasn't started its proxy yet.
+            let made = created.rsplit_once(' ').and_then(|(t, _)| chrono::DateTime::parse_from_str(t, "%Y-%m-%d %H:%M:%S%.f %z").ok());
+            if made.is_none_or(|m| now.signed_duration_since(m) < chrono::Duration::minutes(10)) {
+                continue;
+            }
+            match docker(&["ps", "--filter", &format!("network={name}"), "--format", "{{.Names}}"]).await {
+                Ok(running) if running.trim().is_empty() => {}
+                _ => continue,
+            }
+            let _ = docker(&["buildx", "rm", "-f", name]).await;
+            self.remove_network(name).await;
+        }
     }
 
     fn egress_refused(&self, network: &str, hosts: &[String]) -> Vec<super::egress::Refused> {
@@ -1648,8 +1683,8 @@ impl Builder for DockerBuilder {
     }
 
     async fn scan(&self, image: &str, service: &str, log: &LogSink) -> anyhow::Result<Option<super::Scanned>> {
-        let found = self.scanner.scan(image, service, |n| log.line(n)).await?;
-        Ok(Some(super::Scanned { scanner: super::scan::SCANNER.to_string(), found }))
+        let (found, sbom) = self.scanner.scan(image, service, |n| log.line(n)).await?;
+        Ok(Some(super::Scanned { scanner: super::scan::SCANNER.to_string(), found, sbom }))
     }
 
     async fn load(&self, archive: &std::path::Path, tag: &str, log: &LogSink) -> anyhow::Result<String> {

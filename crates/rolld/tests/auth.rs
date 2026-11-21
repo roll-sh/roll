@@ -407,12 +407,14 @@ async fn every_control_plane_route_needs_the_operator_token() {
         ("/v1/accounts", "people's accounts: sign-in, sessions and invites are a person's, never a token's"),
         ("/v1/workspace/invites", "a person's own project invites: their session, never a token"),
         ("/v1/secrets/shares/{id}", "a one-time share: the link's key is the credential"),
+        ("/v1/secrets/value-requests/{token}", "a secret request's link: its answer token is the credential"),
         ("/v1/secrets/unseal", "a sealed node's unseal: the deployment key's shares are the credential"),
         ("/v1/secrets/login", "workload identities: the workload's OIDC token is the credential"),
         ("/v1/secrets/crl/{id}", "a CA's revocation list: public, as any CRL"),
         ("/v1/secrets/ocsp/{id}", "a CA's OCSP responder: public, as any OCSP"),
         ("/v1/secrets/acme/{ca}", "ACME on a CA: the account key's JWS and its External Account Binding are the credential"),
         ("/v1/secrets/oidc", "roll's OIDC issuer: public keys and discovery, fetched anonymously by clouds"),
+        ("/v1/secrets/audit/jwks", "the audit log's digest keys: public, as an export is checked against them offline"),
     ];
     let unscoped: Vec<_> = scoped
         .lock()

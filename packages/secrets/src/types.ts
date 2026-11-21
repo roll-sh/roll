@@ -53,7 +53,22 @@ export type NewEnvironment = {
   branches?: Branch[];
 };
 /** `history_days`: how long old values are kept (null: for good). */
-export type Overview = { project: string; environments: Environment[]; previews: number; history_days: number | null };
+/** `validity_checks`: whether credentials found in code are checked with their providers (docs/secrets.md, "Is it live?"). */
+export type Overview = { project: string; environments: Environment[]; previews: number; history_days: number | null; validity_checks: "on" | "off" };
+/** A credential to check: a found value and, for an AWS access key id, the secret access key next to it. */
+export type ValidityProbe = { value: string; pair?: string | null };
+/** What a credential's provider said: never its value. `invalid` is revoked, deleted or never real. */
+export type CheckedCredential = {
+  fingerprint: string;
+  kind: string;
+  result: "live" | "invalid" | "unknown";
+  account?: string;
+  checked_at?: number;
+  /** Why it's `unknown`. */
+  why?: string;
+  /** A live one's kind has a roll rotator: roll secrets' AWS IAM users, or a project's GitHub App tokens. */
+  rotator?: "aws-iam" | "github-app";
+};
 export type Folder = { path: string; name: string; secrets: number; folders: number };
 /** `project`: a folder another project shares with this one (it exported it). */
 export type Import = { project?: string; environment: string; path: string };
@@ -86,11 +101,22 @@ export type Secret = {
   weak?: string;
   /** That it's a decoy (docs/secrets.md, "Decoys"): only for the project's admins. */
   decoy?: Decoy;
+  /** The hosts its value may be sent to through a placeholder ("Using a key without seeing it"). */
+  hosts?: Hosts;
 };
-/** A decoy key's mark: what it is, and its uses (each refused). */
-export type Decoy = { kind: "rlt"; created_at: number; created_by: string; uses: number; used_at: number | null; used_ip: string | null };
-/** `POST …/environments/{env}/decoys`: a new key whose value is a decoy credential. */
-export type NewDecoy = { key: string; kind: "rlt"; path?: string };
+/** Where a key's value may go through a placeholder: hostnames or `*.` one-label wildcards, and the
+ * one header (`Authorization: Bearer {}`) or query parameter that carries it (not both). */
+export type Hosts = { hosts: string[]; header?: string; query?: string; untrusted?: boolean };
+/** A placeholder a resolve answered (never the placeholder itself). */
+export type Placeholder = { key: string; id: string; hosts: string[]; expires_at: number };
+/** A placeholder's record (`GET …/placeholders`). */
+export type PlaceholderRecord = { id: string; environment: string; path: string; key: string; consumer: string; issued_by: string; maker: string | null; issued_at: number; expires_at: number; revoked_at: number | null };
+/** A decoy key's mark: what it is, and its uses (each refused). The last use's where:
+ * `used_ip`, plus the route pattern it called (`rlt`) or the endpoint it tried (`postgres`). */
+export type Decoy = { kind: "rlt" | "postgres"; created_at: number; created_by: string; uses: number; used_at: number | null; used_ip: string | null; used_route: string | null; used_endpoint: string | null };
+/** `POST …/environments/{env}/decoys`: a new key whose value is a decoy credential (`postgres`: a
+ * connection string for a role of `resource`, a roll Postgres database on the project's canvas). */
+export type NewDecoy = { key: string; kind: "rlt"; path?: string } | { key: string; kind: "postgres"; resource: string; path?: string };
 /** `expires_at`: null clears it; absent keeps it. */
 export type SetSecret = { value?: string; comment?: string; tags?: string[]; type?: SecretType; link?: Link | null; message?: string; expires_at?: number | null; if_version?: number };
 /** `path`: another folder for this one operation (default: the batch's). */
@@ -127,7 +153,7 @@ export type Problem = { key: string; problem: string };
 /** `plain`: of `linked`, keys whose link field isn't a credential (a host, a port): logs may show them; every other value is a secret. */
 /** `GET …/secrets/{key}/totp`: a TOTP key's code (a credential), valid until `expires_at` (ms: the end of its step). */
 export type Totp = { code: string; expires_at: number; period: number };
-export type Values = { values: Record<string, string>; problems: Problem[]; leases: string[]; dynamic: string[]; linked: string[]; plain?: string[]; withheld?: string[]; sensitive?: string[]; followed?: Followed[]; digest?: string };
+export type Values = { values: Record<string, string>; problems: Problem[]; leases: string[]; dynamic: string[]; linked: string[]; plain?: string[]; withheld?: string[]; sensitive?: string[]; followed?: Followed[]; placeholders?: Placeholder[]; digest?: string };
 export type CellSource = "own" | "import" | "base";
 /** `misfit`: the typed-key rule the stored value breaks (shown only to whoever may reveal it). */
 export type Cell = { fp: string; version: number; updated_at: number; link: Link | null; reference: boolean; source: CellSource; comment: boolean; personal: boolean; misfit?: string; expires_at?: number };
@@ -168,6 +194,8 @@ export type Reach = {
   syncs: { id: string; kind: string; target: unknown; last_synced_at: number | null; paused_at: number | null }[];
   /** Live dynamic credentials issued for its keys. */
   leases: { id: string; key: string; consumer: string; issued_at: number; expires_at: number }[];
+  /** Live placeholders of its keys, wherever they were resolved (`through`: `env:/path` or `project prj_…`). */
+  placeholders?: { id: string; key: string; consumer: string; maker: string | null; through: string; expires_at: number }[];
   /** Open one-time shares made from its keys, as their makers said (`from`). */
   shares: { id: string; note: string; key: string; created_by: string; expires_at: number }[];
   /** Open shares of the project that don't say where their value came from. */
@@ -180,7 +208,7 @@ export type Reach = {
   frozen: Freeze | null;
 };
 /** `POST …/reach/cut-off`: what to cut (each on unless false; `freeze` off unless true), and why. */
-export type CutOffRequest = { why: string; tokens?: boolean; identities?: boolean; leases?: boolean; shares?: boolean; syncs?: boolean; freeze?: boolean };
+export type CutOffRequest = { why: string; tokens?: boolean; identities?: boolean; leases?: boolean; placeholders?: boolean; shares?: boolean; syncs?: boolean; freeze?: boolean };
 export type Cut = { id: string; name: string };
 /** What a cut-off did: what was cut, and what couldn't be with why (the rest went on). `skipped`: tokens that reach beyond the project, left for the operator to revoke. `batches`: calls to roll-access, 500 grants each at most. */
 export type CutOff = {
@@ -194,11 +222,13 @@ export type CutOff = {
   logins: number;
   batches: number;
   leases: Cut[];
+  /** Placeholders of its keys, ended. */
+  placeholders?: Cut[];
   shares: Cut[];
   projects: string[];
   syncs: Cut[];
   frozen: boolean;
-  failed: { what: "tokens" | "identities" | "logins" | "leases" | "shares" | "syncs" | "freeze" | "audit"; ids: string[]; why: string }[];
+  failed: { what: "tokens" | "identities" | "logins" | "leases" | "placeholders" | "shares" | "syncs" | "freeze" | "audit"; ids: string[]; why: string }[];
 };
 export type Insights = { path: string; max_age_days: number | null; reads_since: number; keys: KeyInsight[] };
 
@@ -256,6 +286,10 @@ export type Share = { id: string; note: string; views_left: number; created_by: 
 export type ShareFrom = { environment: string; path?: string; key: string };
 /** `ciphertext`: base64url(nonce ‖ AES-256-GCM ciphertext) with `roll-share-v1` as associated data; `views` 1–10, `ttl_minutes` 5–10080. */
 export type NewShare = { ciphertext: string; note?: string; views?: number; ttl_minutes?: number; from?: ShareFrom };
+/** A secret request: a link asking someone outside roll for a folder's values (never a key). `outcome`: what the last answer became. */
+export type ValueRequest = { id: string; environment: string; path: string; keys: string[]; note: string; answers_left: number; created_by: string; created_at: number; expires_at: number; answered_at: number | null; cancelled_at: number | null; open: boolean; outcome: { change: number } | { request: string } | null; /** Only in create's answer: the link's answer token (`rlq_…`) and `<dashboard>/request/<token>`. */ token?: string; link?: string };
+/** `keys` 1–20; `ttl_minutes` 5–43200 (default 7 days); `answers` 1–10 (default 1). */
+export type NewValueRequest = { keys: string[]; note?: string; ttl_minutes?: number; answers?: number };
 export type KeyType = "url" | "int" | "port" | "bool" | "json" | "email" | "totp";
 /** A key every standard environment must define in a folder; typed keys also say what its value must be. */
 /** `owner`: who supplies it (a person or team), named in health and the daily notice. */
@@ -279,7 +313,9 @@ export type Identity = {
   audience: string;
   /** The token's `sub`, or a pattern of it (`*` for any run of characters). */
   subject: string;
-  /** Other claims that must match. */
+  /** Other claims that must match: a name (`ref`) or a JSON pointer (`/realm_access/roles`) to a
+   *  value or a `*` pattern. An array claim matches when any element does; numbers and booleans
+   *  match their JSON text. */
   claims: Record<string, string>;
   environments: string[] | null;
   paths: string[] | null;
@@ -310,10 +346,12 @@ export type NewToken = { name: string; environments?: string[]; paths?: string[]
 /** `approval`: the approval that let the request through roll-access's gate (an `ask` approved; `until` when a rule it remembered allowed it). */
 /** `seq` and `hash` place a row in its project's chain (absent on rows from before it); an `audit.digest` row's `digest` is roll's signed JWS of it. */
 export type AuditEntry = { id: number; seq?: number; hash?: string; at: number; actor: string; action: string; environment: string | null; path: string | null; keys: string[]; summary: string; ip: string | null; approval?: Approval; digest?: string };
-/** Where the chain breaks: `edited`, `missing`, `rewritten`, `signature`, `truncated`, `cut`, `unchained`, `gap`, `head` or `stale`. */
+/** Where the chain breaks: `edited`, `missing`, `rewritten`, `signature`, `pulled`, `truncated`, `cut`, `unchained`, `gap`, `head` or `stale`. */
 export type AuditBreak = { seq?: number; reason: string; detail: string };
-/** `GET …/audit/verify`: rows `from`–`head` walked, signed by a digest `through` a row. */
-export type AuditVerification = { ok: boolean; from: number | null; through: number | null; signed_at: number | null; head: number | null; rows: number; digests: number; unchained: number; broken: AuditBreak | null };
+/** `GET …/audit/verify`: rows `from`–`head` walked, signed by a digest `through` a row. `legacy`: digests roll's issuer key signed before the digest key (they count); `pulled`: digests on keys pulled in an emergency (they don't), each covered by the good digest at `countersigned`, or not (`null`: a `pulled` break). */
+export type AuditVerification = { ok: boolean; from: number | null; through: number | null; signed_at: number | null; head: number | null; rows: number; digests: number; unchained: number; broken: AuditBreak | null; legacy?: AuditLegacy; pulled?: AuditPulled[] };
+export type AuditLegacy = { signer: "issuer key"; digests: number; through: number };
+export type AuditPulled = { kid: string; pulled_at: number; digests: number; first: number; last: number; countersigned: number | null };
 /** `by`: who approved it, in order (more than one when a policy asks for two people). */
 export type Approval = { id: string; by?: string[]; until?: number };
 /** `since`: rows at or after this time (ms); `before`: rows older than this id. */
@@ -359,7 +397,8 @@ export type SyncField = { name: string; label: string; required: boolean; placeh
 export type SyncKind = { kind: string; label: string; values: boolean; signed: boolean; fields: SyncField[] };
 /** `resealed`: "all", or how many projects still need the previous key (null without a key); `links`, `syncs`: the kinds registered. */
 /** `customer_managed`: projects whose data key a customer's own KMS key wraps too. */
-export type Health = { ok: boolean; key: "env" | "kms" | "file" | "missing"; resealed: "all" | number | null; customer_managed: number; links: string[]; syncs: string[] };
+/** `issuer_pulled`: issuer keys an emergency rotation pulled from the JWKS in the last 30 days. */
+export type Health = { ok: boolean; key: "env" | "kms" | "file" | "missing"; resealed: "all" | number | null; customer_managed: number; issuer_pulled?: { kid: string; pulled_at: number; detail: string }[]; links: string[]; syncs: string[] };
 /** An IAM user whose access keys roll rotates, acting as one of the project's AWS roles (`role` is its id). */
 export type AwsUser = { id: string; name: string; role: string; user: string; created_at: number; created_by: string };
 /** An AWS role a project registered for dynamic credentials (its trust policy pins `sts:ExternalId` = `roll-secrets:<project>`). */
@@ -368,7 +407,7 @@ export type AwsRole = { id: string; name: string; role_arn: string; trust: "exte
 /** Where a key is set (`GET /v1/secrets/search?key=`): names and versions, never a value. */
 export type Place = { project: string; project_name: string; environment: string; path: string; key: string; version: number; updated_at: number; linked: boolean };
 /** One thing to fix (`GET …/health`), worst first: where, never a value. */
-export type Finding = { issue: "decoy_used" | "expired" | "rotation_failing" | "revoke_failing" | "missing" | "exposed" | "public" | "weak" | "expiring" | "certificate_expiring" | "stale" | "unread" | "unreferenced"; environment: string; path: string; key: string; detail: string; owner?: string };
+export type Finding = { issue: "decoy_used" | "expired" | "rotation_failing" | "revoke_failing" | "missing" | "exposed" | "public" | "weak" | "operator_made" | "expiring" | "certificate_expiring" | "stale" | "unread" | "unreferenced"; environment: string; path: string; key: string; detail: string; owner?: string; decoy?: Decoy };
 /** One project's findings (`GET /v1/secrets/findings`). */
 export type ProjectFindings = { project: string; project_name: string; findings: Finding[] };
 /** A URL roll calls to issue and revoke a value that lives outside roll (`rotator` links). */

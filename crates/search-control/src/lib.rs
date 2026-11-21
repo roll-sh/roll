@@ -21,7 +21,9 @@ pub mod control;
 pub mod meter;
 pub mod pricing;
 pub mod remotes;
+pub mod secret_refs;
 pub mod store;
+pub mod suggestions;
 mod wake;
 
 pub use control::{ClusterOptions, ConsoleRequest, ConsoleResponse, Control, ControlError, Defaults, SearchConfig, SqlCatalog};
@@ -31,3 +33,5 @@ pub use search_es::seal::Sealer;
 pub use search_es::api::snapshots::S3_ALLOW_PRIVATE;
 /// Node setting that lets inference endpoints reach private addresses (local development, tests).
 pub use search_es::xpack::inference::http::ALLOW_PRIVATE as INFERENCE_ALLOW_PRIVATE;
+/// The node setting capping one search's time (`roll.search.max_time`).
+pub use search_es::search::MAX_TIME as SEARCH_MAX_TIME;

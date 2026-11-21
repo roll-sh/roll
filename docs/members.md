@@ -201,14 +201,17 @@ ref)` answers yes when:
 
 1. the project is the operator's (`owner` empty), as now; or
 2. the resource's **home** is this project: it was made through this project (a create the
-   evaluator placed with `X-Roll-Project`), or the operator or an admin set it there; or
-3. `Owners` says the resource is one of the project's **owners'** (role `owner`): their repos,
-   their search clusters, and everything for an admin, as today. Before members, this was asked
-   of the project's creator.
+   evaluator placed with `X-Roll-Project`), or someone set it there who may: the operator, or a
+   person whose own it is (`Owners`). Only kinds whose ids are never given out again have homes
+   (`HOME_KINDS`); or
+3. `Owners` says the resource is one of the project's **owners'** (role `owner`): their repos and
+   their search clusters (`Owners::owns`). The person who made the project also counts as before
+   members (`Owners::trusts`: everything, when they're an admin account); an admin account added
+   as an owner later adds only what's its own.
 
 A resource has at most one home (`homes`, keyed by kind and ref). Moving it to another project's
-canvas doesn't move its home. Only the operator, an admin, or an owner of both projects can
-re-home it, in one write.
+canvas doesn't move its home. Moving a home away from a project takes being that project's admin
+too, in one write.
 
 What this means for members:
 
@@ -267,6 +270,7 @@ After the write, it acts on what the person made:
 | dynamic leases they hold, one-time shares they made | revoked and ended | `Secrets::member_changed(project, user)` on the event, outside the workspace write |
 | folders they shared with other projects | stop being shared once they may no longer manage the project | the same hook |
 | backups, gateways, ACME bindings, sinks, notify URLs, rotators, outside databases and directories they set up | stop | `maker_reaches(by, [admin on the project])` on every use |
+| keys they bound to hosts, placeholders made for their consumers | stop swapping (a read still gets a placeholder, never the value) | each swap asks again: the binding's `set_by` may still `admin` its folder, a placeholder's maker may still `reveal` there |
 | their pending invites | revoked, or those their new role no longer gives | in the same write |
 | their personal overrides | stay (only they read them) | not v1 |
 | approvals they gave on open change requests | no longer count | gates are checked as they are when applied |

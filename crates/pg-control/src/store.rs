@@ -152,6 +152,25 @@ pub struct BaseImage {
     pub bytes: i64,
 }
 
+/// A decoy role (roll secrets' Postgres decoys) as the proxy sees it at a login.
+#[derive(Clone, Debug)]
+pub struct DecoyAt {
+    pub project_id: String,
+    /// The SCRAM salt the proxy answers its logins with (base64 of 16 bytes).
+    pub salt: String,
+    pub pg_version: u32,
+    /// The endpoint's compute is up (on this host port): a real login wouldn't wait for it.
+    pub running: Option<u16>,
+}
+
+/// A compute image's answers as learned: `answers` (JSON of `pg_proxy::decoy::Answers`) `None`
+/// when the decoy can't match it.
+pub struct ComputeAnswers {
+    pub image: String,
+    pub image_id: String,
+    pub answers: Option<String>,
+}
+
 pub struct Store {
     conn: Mutex<Connection>,
 }
@@ -208,6 +227,25 @@ ALTER TABLE endpoints ADD COLUMN data_dir TEXT;
 "#,
     r#"
 ALTER TABLE branches ADD COLUMN app_password TEXT;
+"#,
+    // Decoy roles (roll secrets' Postgres decoys): refused by the proxy on every endpoint of the
+    // project, keyed for the one read each login makes.
+    r#"
+CREATE TABLE decoy_roles (
+  project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE, role TEXT NOT NULL,
+  salt TEXT NOT NULL, created_at INTEGER NOT NULL, PRIMARY KEY (project_id, role)
+) WITHOUT ROWID;
+"#,
+    // What each compute image answers before a password is checked (`pg_proxy::decoy::learn`),
+    // for decoy roles; `answers` NULL: the decoy can't say what it says. `image_id` is the image
+    // it was learned from, for a reference that can move.
+    r#"
+CREATE TABLE compute_answers (
+  image TEXT PRIMARY KEY, image_id TEXT NOT NULL, pg_version INTEGER NOT NULL, answers TEXT,
+  learned_at INTEGER NOT NULL
+) WITHOUT ROWID;
+-- Who is learning an image ahead of any login, until when (one node at a time).
+CREATE TABLE compute_answer_claims (image TEXT PRIMARY KEY, holder TEXT NOT NULL, until INTEGER NOT NULL) WITHOUT ROWID;
 "#,
 ];
 
@@ -340,6 +378,110 @@ impl Store {
                 )?;
             }
             c.execute("DELETE FROM projects WHERE id = ?1", [id]).map(drop)
+        })
+    }
+
+    // ── decoy roles ──
+
+    pub fn insert_decoy_role(&self, project_id: &str, role: &str, salt: &str) -> anyhow::Result<()> {
+        self.with(|c| {
+            c.execute(
+                "INSERT INTO decoy_roles (project_id, role, salt, created_at) VALUES (?1, ?2, ?3, ?4)",
+                params![project_id, role, salt, now()],
+            )
+            .map(drop)
+        })
+    }
+
+    pub fn is_decoy_role(&self, project_id: &str, role: &str) -> anyhow::Result<bool> {
+        self.with(|c| {
+            c.query_row("SELECT 1 FROM decoy_roles WHERE project_id = ?1 AND role = ?2", [project_id, role], |_| Ok(()))
+                .optional()
+                .map(|r| r.is_some())
+        })
+    }
+
+    pub fn delete_decoy_role(&self, project_id: &str, role: &str) -> anyhow::Result<()> {
+        self.with(|c| {
+            c.execute("DELETE FROM decoy_roles WHERE project_id = ?1 AND role = ?2", [project_id, role]).map(drop)
+        })
+    }
+
+    /// `role` at `endpoint`, if it's a decoy of the endpoint's project: the proxy asks on every
+    /// login, so it's one statement over three primary keys.
+    pub fn decoy_at(&self, endpoint_id: &str, role: &str) -> anyhow::Result<Option<DecoyAt>> {
+        self.with(|c| {
+            c.prepare_cached(
+                "SELECT d.project_id, d.salt, p.pg_version, e.state, e.host_port FROM endpoints e \
+                 JOIN decoy_roles d ON d.project_id = e.project_id AND d.role = ?2 \
+                 JOIN projects p ON p.id = e.project_id WHERE e.id = ?1",
+            )?
+            .query_row([endpoint_id, role], |r| {
+                Ok(DecoyAt {
+                    project_id: r.get(0)?,
+                    salt: r.get(1)?,
+                    pg_version: r.get(2)?,
+                    running: (r.get::<_, String>(3)? == EndpointState::Running.as_str()).then(|| r.get::<_, Option<u16>>(4)).transpose()?.flatten(),
+                })
+            })
+            .optional()
+        })
+    }
+
+    // ── compute answers ──
+
+    pub fn compute_answers(&self) -> anyhow::Result<Vec<ComputeAnswers>> {
+        self.with(|c| {
+            let mut s = c.prepare("SELECT image, image_id, answers FROM compute_answers")?;
+            s.query_map([], |r| Ok(ComputeAnswers { image: r.get(0)?, image_id: r.get(1)?, answers: r.get(2)? }))?.collect()
+        })
+    }
+
+    pub fn compute_answers_of(&self, image: &str) -> anyhow::Result<Option<ComputeAnswers>> {
+        self.with(|c| {
+            c.query_row("SELECT image, image_id, answers FROM compute_answers WHERE image = ?1", [image], |r| {
+                Ok(ComputeAnswers { image: r.get(0)?, image_id: r.get(1)?, answers: r.get(2)? })
+            })
+            .optional()
+        })
+    }
+
+    pub fn delete_compute_answers(&self) -> anyhow::Result<()> {
+        self.with(|c| c.execute_batch("DELETE FROM compute_answers; DELETE FROM compute_answer_claims;"))
+    }
+
+    pub fn delete_compute_answers_of(&self, image: &str) -> anyhow::Result<()> {
+        self.with(|c| c.execute("DELETE FROM compute_answers WHERE image = ?1", [image]).map(drop))
+    }
+
+    /// Claim learning `image` for `holder` for `ttl_s`: only while nobody has learned it and no
+    /// other holder's claim is current. Whether it's this holder's now.
+    pub fn claim_compute_answers(&self, image: &str, holder: &str, ttl_s: i64) -> anyhow::Result<bool> {
+        self.with(|c| {
+            let t = now();
+            c.execute(
+                "INSERT INTO compute_answer_claims (image, holder, until) \
+                 SELECT ?1, ?2, ?3 WHERE NOT EXISTS (SELECT 1 FROM compute_answers WHERE image = ?1) \
+                 ON CONFLICT (image) DO UPDATE SET holder = excluded.holder, until = excluded.until \
+                 WHERE compute_answer_claims.until < ?4 OR compute_answer_claims.holder = excluded.holder",
+                params![image, holder, t + ttl_s, t],
+            )
+            .map(|n| n == 1)
+        })
+    }
+
+    pub fn release_compute_answers_claim(&self, image: &str, holder: &str) -> anyhow::Result<()> {
+        self.with(|c| c.execute("DELETE FROM compute_answer_claims WHERE image = ?1 AND holder = ?2", [image, holder]).map(drop))
+    }
+
+    pub fn put_compute_answers(&self, a: &ComputeAnswers, pg_version: u32) -> anyhow::Result<()> {
+        self.with(|c| {
+            c.execute(
+                "INSERT INTO compute_answers (image, image_id, pg_version, answers, learned_at) VALUES (?1, ?2, ?3, ?4, ?5) \
+                 ON CONFLICT (image) DO UPDATE SET image_id = ?2, pg_version = ?3, answers = ?4, learned_at = ?5",
+                params![a.image, a.image_id, pg_version, a.answers, now()],
+            )
+            .map(drop)
         })
     }
 
@@ -763,6 +905,21 @@ mod tests {
         // Re-opening is a no-op.
         drop(store);
         Store::open(&path).unwrap();
+    }
+
+    #[test]
+    fn one_holder_at_a_time_learns_an_image() {
+        let path = temp_db("claims");
+        let store = Store::open(&path).unwrap();
+        assert!(store.claim_compute_answers("img", "a", 600).unwrap());
+        assert!(!store.claim_compute_answers("img", "b", 600).unwrap());
+        assert!(store.claim_compute_answers("img", "a", 600).unwrap(), "a holder renews its own");
+        store.release_compute_answers_claim("img", "a").unwrap();
+        assert!(store.claim_compute_answers("img", "b", -1).unwrap());
+        assert!(store.claim_compute_answers("img", "a", 600).unwrap(), "an expired claim is taken over");
+        store.put_compute_answers(&ComputeAnswers { image: "img".into(), image_id: "sha256:x".into(), answers: None }, 18).unwrap();
+        store.release_compute_answers_claim("img", "a").unwrap();
+        assert!(!store.claim_compute_answers("img", "b", 600).unwrap(), "learned already");
     }
 
     #[test]

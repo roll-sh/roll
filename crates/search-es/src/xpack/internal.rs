@@ -149,11 +149,17 @@ pub fn acting_principal(req: &EsRequest) -> Option<crate::xpack::security::Princ
 impl Caller {
     /// The client of `ctx`, unless it may read everything anyway.
     pub fn of(ctx: &crate::rest::Ctx<'_>) -> Option<Caller> {
-        use crate::xpack::security::{AUTHENTICATED_HEADER, INDEX_SCOPE_HEADER, RUN_AS_HEADER};
-        let p = ctx.principal.get()?;
-        if p.is_superuser() {
+        if ctx.principal.get()?.is_superuser() {
             return None;
         }
+        Caller::client(ctx)
+    }
+
+    /// The client of `ctx`, a superuser too: for calls whose result belongs to whoever sent
+    /// them (a point in time or scroll is bound to its opener).
+    pub fn client(ctx: &crate::rest::Ctx<'_>) -> Option<Caller> {
+        use crate::xpack::security::{AUTHENTICATED_HEADER, INDEX_SCOPE_HEADER, RUN_AS_HEADER};
+        ctx.principal.get()?;
         // The headers that made it this principal: the node's authentication (narrowed to some
         // indices on a per-index route) or the client's credentials, and its run-as user.
         // A linked remote cluster's request keeps its remote access too (only roll's own calls
@@ -182,6 +188,12 @@ pub fn caller() -> Option<Caller> {
     }
     CALLER.try_with(Caller::clone).ok()
 }
+
+/// The query parameter of an internal pager's searches (a transform's, an enrich policy's
+/// load, a downsample's scan): a page cut short (a failed shard, the node's cap on one
+/// request, [`crate::search::MAX_TIME`]) fails the search, so the job reports and retries it
+/// instead of taking a short page as complete.
+pub const STRICT: &str = "allow_partial_search_results=false";
 
 /// Sends `method uri` with a JSON body; the parsed response on 2xx, else its error.
 pub fn call<'a>(cluster: &'a Cluster, method: &str, uri: &str, body: Option<&Value>) -> Call<'a> {

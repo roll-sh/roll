@@ -41,6 +41,7 @@ impl IntoResponse for ControlError {
             ControlError::Invalid(_) => StatusCode::BAD_REQUEST,
             ControlError::Conflict(_) => StatusCode::CONFLICT,
             ControlError::TooLarge(_) => StatusCode::PAYLOAD_TOO_LARGE,
+            ControlError::Forbidden(_) => StatusCode::FORBIDDEN,
             ControlError::Internal(e) => {
                 tracing::warn!(error = %e, "search control error");
                 StatusCode::INTERNAL_SERVER_ERROR
@@ -67,7 +68,10 @@ pub fn router(control: Arc<Control>) -> Router {
         .route("/v1/search/clusters/{id}/audit", get(audit))
         .route("/v1/search/clusters/{id}/analytics", get(analytics))
         .route("/v1/search/clusters/{id}/keys", post(create_key))
+        .route("/v1/search/clusters/{id}/repositories/{name}", axum::routing::put(put_repository))
         .route("/v1/search/clusters/{id}/keys/{key}", axum::routing::delete(delete_key))
+        .route("/v1/search/clusters/{id}/browser-keys", get(browser_keys).post(create_browser_key))
+        .route("/v1/search/clusters/{id}/browser-keys/{key}", axum::routing::delete(revoke_browser_key))
         .route("/v1/search/clusters/{id}/remotes", get(remotes))
         .route("/v1/search/clusters/{id}/remotes/{alias}", axum::routing::put(link_remote).delete(unlink_remote))
         .route("/v1/search/clusters/{id}/indices/{index}", get(index_get).put(index_create).delete(index_delete))
@@ -80,6 +84,8 @@ pub fn router(control: Arc<Control>) -> Router {
         .route("/v1/search/clusters/{id}/indices/{index}/docs/{doc}", get(doc_get).put(doc_put).delete(doc_delete))
         .route("/v1/search/clusters/{id}/indices/{index}/bulk", post(index_bulk))
         .route("/v1/search/clusters/{id}/indices/{index}/delete_by_query", post(index_delete_by_query))
+        .route("/v1/search/clusters/{id}/indices/{index}/suggestions", get(suggestions))
+        .route("/v1/search/clusters/{id}/indices/{index}/suggestions/rebuild", post(rebuild_suggestions))
         // Calls about one cluster: the caller's own, then on its owner.
         .layer(axum::middleware::from_fn_with_state(control.clone(), per_cluster))
         // The dashboard calls it from the browser, like the other control planes.
@@ -177,7 +183,7 @@ async fn per_cluster(State(c): State<AppState>, req: Request, next: Next) -> Res
         Ok(d) => d,
         // A key revoked while its cluster is deleted is kept for the restore
         // (`Control::delete_key`): it too runs where it lands, for whoever may see the cluster.
-        Err(ControlError::NotFound(_)) if req.method() == Method::DELETE && rest.is_some_and(|(_, r)| r.starts_with("keys/")) => {
+        Err(ControlError::NotFound(_)) if req.method() == Method::DELETE && rest.is_some_and(|(_, r)| r.starts_with("keys/") || r.starts_with("browser-keys/")) => {
             return match c.get_deleted(&id).await {
                 Ok(d) if Caller::of(req.extensions()).sees(&d.cluster) => next.run(req).await,
                 _ => no_such(&id).into_response(),
@@ -585,6 +591,21 @@ doc_route!(doc_get, "GET", EsBody::None);
 doc_route!(doc_put, "PUT", EsBody::Json);
 doc_route!(doc_delete, "DELETE", EsBody::None);
 
+/// `PUT /v1/search/clusters/{id}/repositories/{name}`: `PUT _snapshot/{name}` (Elasticsearch's
+/// body and query), the only way a repository's credentials can be roll secrets references: the
+/// caller must be able to reveal each, and is kept as their maker ([`crate::secret_refs`]). The
+/// cluster's answer, unchanged.
+async fn put_repository(State(c): State<AppState>, Path((id, name)): Path<(String, String)>, uri: axum::http::Uri, ext: Extensions, body: bytes::Bytes) -> Result<Response, ControlError> {
+    let who = crate::secret_refs::Who::of(&ext);
+    let (status, ct, body) = c.put_repository(&id, &name, uri.query(), body, &who).await?;
+    let mut r = Response::new(Body::from(body));
+    *r.status_mut() = StatusCode::from_u16(status).unwrap_or(StatusCode::BAD_GATEWAY);
+    if let Ok(v) = axum::http::HeaderValue::from_str(&ct) {
+        r.headers_mut().insert(axum::http::header::CONTENT_TYPE, v);
+    }
+    Ok(r)
+}
+
 #[derive(Deserialize)]
 struct NewKey {
     name: String,
@@ -599,6 +620,28 @@ async fn create_key(State(c): State<AppState>, Path(id): Path<String>, Json(k): 
 async fn delete_key(State(c): State<AppState>, Path((id, key)): Path<(String, String)>) -> Result<StatusCode, ControlError> {
     c.delete_key(&id, &key).await?;
     Ok(StatusCode::NO_CONTENT)
+}
+
+/// `GET /v1/search/clusters/{id}/browser-keys`: the keys web pages ship, without their secrets.
+async fn browser_keys(State(c): State<AppState>, Path(id): Path<String>) -> ApiResult<Value> {
+    Ok(Json(json!({ "keys": c.browser_keys(&id).await? })))
+}
+
+/// `POST /v1/search/clusters/{id}/browser-keys`: a key a web page can ship (read-only, one
+/// application or named indices, an optional filter, expiry and rate limit); shown once.
+async fn create_browser_key(State(c): State<AppState>, Path(id): Path<String>, Json(k): Json<crate::control::NewBrowserKey>) -> ApiResult<Value> {
+    Ok(Json(c.create_browser_key(&id, k).await?))
+}
+
+/// `DELETE /v1/search/clusters/{id}/browser-keys/{key}`: 204, or 202 on a deleted cluster (the
+/// restore revokes it).
+async fn revoke_browser_key(State(c): State<AppState>, Path((id, key)): Path<(String, String)>) -> Result<Response, ControlError> {
+    Ok(match c.revoke_browser_key(&id, &key).await? {
+        crate::control::Revoked::Now => StatusCode::NO_CONTENT.into_response(),
+        crate::control::Revoked::AtRestore => {
+            (StatusCode::ACCEPTED, Json(json!({ "revoked": "at restore", "note": "the cluster is deleted: restoring it revokes the key before it answers" }))).into_response()
+        }
+    })
 }
 
 /// The remote clusters a cluster holds credentials for (never the credentials).
@@ -687,6 +730,18 @@ struct AnalyticsQuery {
 async fn analytics(State(c): State<AppState>, Path(id): Path<String>, Query(q): Query<AnalyticsQuery>) -> ApiResult<Value> {
     let index = q.index.as_deref().filter(|i| !i.is_empty());
     Ok(Json(c.analytics(&id, index, q.range.as_deref().unwrap_or("24h")).await?))
+}
+
+/// An index's query suggestions: settings, last build, heaviest suggestions (`crate::suggestions`).
+async fn suggestions(State(c): State<AppState>, Path((id, index)): Path<(String, String)>) -> ApiResult<Value> {
+    index_segment(&index, false)?;
+    Ok(Json(c.suggestions(&id, &index).await?))
+}
+
+/// Rebuilds an index's suggestions index now.
+async fn rebuild_suggestions(State(c): State<AppState>, Path((id, index)): Path<(String, String)>) -> ApiResult<Value> {
+    index_segment(&index, false)?;
+    Ok(Json(Box::pin(c.rebuild_suggestions(&id, &index)).await?))
 }
 
 #[cfg(test)]

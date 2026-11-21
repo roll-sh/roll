@@ -463,7 +463,7 @@ impl Secrets {
         let id = names::new_id("dir", 16);
         let sealed = dek.seal(&aad(project, &id), &n.bind_password);
         let now = self.db.now_ms()?;
-        let d = RegisteredDirectory { id: id.clone(), name: n.name, url, flavor: n.flavor, bind_dn: n.bind_dn, user_base_dn, managed_accounts: n.managed_accounts, groups: n.groups, ca, gateway, created_at: now, created_by: caller.principal.clone() };
+        let d = RegisteredDirectory { id: id.clone(), name: n.name, url, flavor: n.flavor, bind_dn: n.bind_dn, user_base_dn, managed_accounts: n.managed_accounts, groups: n.groups, ca, gateway, created_at: now, created_by: caller.made_by().to_string() };
         self.db.write(|c| {
             if let Some(g) = &d.gateway
                 && c.query_row("SELECT 1 FROM gateways WHERE id = ? AND project_id = ?", [g, project], |_| Ok(())).optional()?.is_none()

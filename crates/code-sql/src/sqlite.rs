@@ -80,6 +80,25 @@ impl Sqlite {
         f(&self.reader())
     }
 
+    /// `f` in one transaction on the writer with `secure_delete` on (what it frees is zeroed), then
+    /// the WAL checkpointed into the file and truncated: nothing it overwrote stays readable in
+    /// the database's free pages or its `-wal`.
+    pub(crate) fn write_erasing<T, E: From<Error>>(&self, f: impl FnOnce(&Connection) -> Result<T, E>) -> Result<T, E> {
+        let conn = self.writer.lock();
+        conn.execute_batch("PRAGMA secure_delete = ON").map_err(Error::from)?;
+        let out = (|| {
+            conn.execute_batch("BEGIN IMMEDIATE").map_err(Error::from)?;
+            let _guard = Rollback(&conn);
+            let v = f(&conn)?;
+            conn.execute_batch("COMMIT").map_err(Error::from)?;
+            Ok::<T, E>(v)
+        })();
+        let _ = conn.execute_batch("PRAGMA secure_delete = OFF");
+        let v = out?;
+        empty_wal(&conn, std::time::Duration::from_secs(30)).map_err(E::from)?;
+        Ok(v)
+    }
+
     /// One transaction on the writer; then, if `sync`, wait for the WAL to be durable past it.
     pub(crate) fn write<T, E: From<Error>>(&self, sync: bool, f: impl FnOnce(&Connection) -> Result<T, E>) -> Result<T, E> {
         let out = {
@@ -170,4 +189,46 @@ pub(crate) fn column<T>(r: &rusqlite::Row<'_>, i: usize, f: impl FnOnce(ValueRef
         SqRef::Blob(b) => ValueRef::Blob(b),
     };
     f(v)
+}
+
+/// Copy the whole WAL into the database file and truncate it, so what an erasing write removed
+/// is in neither. A TRUNCATE checkpoint answers busy, rather than failing, when it can't finish:
+/// the background checkpointer holds the checkpoint lock, or a reader is on an older snapshot
+/// past the busy timeout. Tried again until it's done, for at most `within`.
+fn empty_wal(conn: &Connection, within: std::time::Duration) -> Result<()> {
+    let until = std::time::Instant::now() + within;
+    loop {
+        let (busy, log, copied): (i64, i64, i64) = conn.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?;
+        if busy == 0 && log == copied {
+            return Ok(());
+        }
+        if std::time::Instant::now() >= until {
+            return Err(Error::Other(format!("the WAL couldn't be emptied after an erasing write ({copied} of {log} frames copied): a reader held an older snapshot")));
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+}
+
+#[cfg(test)]
+mod erasing_tests {
+    /// A checkpoint that can't finish at once (a reader on an older snapshot) is tried again:
+    /// the WAL ends empty, not with the erased rows still in it.
+    #[test]
+    fn the_wal_is_emptied_even_when_a_checkpoint_is_busy() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("e.db");
+        let w = rusqlite::Connection::open(&path).unwrap();
+        w.execute_batch("PRAGMA journal_mode=WAL; PRAGMA busy_timeout=0; CREATE TABLE t (v TEXT); INSERT INTO t VALUES ('old');").unwrap();
+        let r = rusqlite::Connection::open(&path).unwrap();
+        r.execute_batch("BEGIN").unwrap();
+        let _: String = r.query_row("SELECT v FROM t", [], |x| x.get(0)).unwrap();
+        w.execute_batch("UPDATE t SET v = 'secret'").unwrap();
+        let reader = std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(200));
+            r.execute_batch("COMMIT").unwrap();
+        });
+        super::empty_wal(&w, std::time::Duration::from_secs(10)).unwrap();
+        reader.join().unwrap();
+        assert_eq!(std::fs::metadata(dir.path().join("e.db-wal")).map(|m| m.len()).unwrap_or(0), 0, "the WAL is empty");
+    }
 }

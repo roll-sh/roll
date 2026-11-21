@@ -47,6 +47,7 @@ Repos are `"owner/repo"`. Changes are `"chg_…"` or `"owner/repo#N"`, and work 
 | `search_code` | literal or regex search; `rev` searches a change's head or a branch | `GET /repos/{r}/search` |
 | `read_file` | a file at a revision; long files come back in line ranges (`start_line`, `end_line`) | `GET /repos/{r}/blob/{rev}/{path}` |
 | `list_tree` | a directory, with each entry's last change | `GET /repos/{r}/tree/{rev}/{path}` |
+| `list_repos` | the repositories the caller can read, optionally one owner's | `GET /repos` |
 | `log` | first-parent history, optionally for one path | `GET /repos/{r}/log` |
 | `blame` | which changeset last changed each line | `GET /repos/{r}/blame/{rev}/{path}` |
 | `get_changeset` | a changeset and its diff | `GET /repos/{r}/changesets/{id}` |
@@ -62,6 +63,12 @@ Repos are `"owner/repo"`. Changes are `"chg_…"` or `"owner/repo#N"`, and work 
 | `comment` | reply in a thread, or start one on a line of a change | `POST /threads/{id}/comments`, `POST /changes/{id}/threads` |
 | `review` | approve, request changes or comment, with inline comments | `POST /changes/{id}/reviews` |
 | `queue_status` | the merge queue | `GET /repos/{r}/queue` |
+| `enqueue_change`, `dequeue_change` | put a change in the merge queue (a lane; blocked is an outcome, as with `land`), or take it out | `POST`/`DELETE /changes/{id}/enqueue` |
+| `close_change` | close a change without landing it (it can't be reopened: `destructiveHint`) | `POST /changes/{id}/close` |
+| `report_check` | a check's result on a change, from CI outside roll | `POST /changes/{id}/checks` |
+| `set_commit_status` | a commit status on a revision (GitHub's statuses) | `POST /repos/{r}/statuses/{rev}` |
+| `list_refs` | the repo's branches and tags | `GET /repos/{r}/refs` |
+| `create_repo` | a new, empty repository under an owner you manage | `POST /repos` |
 | `request_ai_review` | ask roll's reviewer for a review | `POST /changes/{id}/ai-review` |
 | `list_agent_machines` | the owner's machines running `roll agent up` (online, providers) | `GET /agents/{owner}/machines` |
 | `list_agent_threads` | agent threads (with their machine and project name) and the requests waiting for an answer | `GET /agents/{owner}/state` |

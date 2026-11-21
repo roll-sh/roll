@@ -165,7 +165,9 @@ endpoint for an hour's access token, rather than holding a long-lived token in a
       secret. The audience defaults to roll's API. `subject` is the token's `sub` or a pattern with
       `*`. A shared issuer (GitHub Actions, GitLab.com, Terraform Cloud, Buildkite, Google) must
       name one tenant literally (`repo:acme/web:…`), or anyone's job could sign in, and that rule is
-      never optional. `claims` are up to ten others that must match (`repository_owner_id`, `ref`).
+      never optional. `claims` are up to ten others that must match (`repository_owner_id`, `ref`),
+      each a name or a JSON pointer to a nested or list claim (`/realm_access/roles`), with the
+      same syntax as roll secrets' workload identities (docs/secrets.md, "Claims").
       `jwks` pins the issuer's keys for one roll can't reach.
     - **Signing in:** RFC 7523's grant,
       `grant_type=urn:ietf:params:oauth:grant-type:jwt-bearer&client_id=mcl_…&assertion=<the OIDC token>`.
@@ -364,7 +366,18 @@ first, so they can't hide what runs, and anything that makes or changes credenti
 
 - Postgres SQL: `{"read_only": true}` is `read`, and the SQL runs as a role made for that one query
   that holds only `pg_read_all_data`, so Postgres refuses its writes whatever the SQL says (on a
-  branch's primary; a read replica refuses read-only SQL). Anything else is `write`.
+  branch's primary; a read replica refuses read-only SQL). Anything else is `write`, and a grant
+  that may not `admin` the endpoint runs it as a role made for that one query too: a member of the
+  roles that own the database's objects (its `roll_owner`, which takes what the project's superuser
+  owns there, and a branch's app role) holding `pg_read_all_data` and `pg_write_all_data`. It
+  changes rows and schemas, tables the superuser made included, and what it makes stays
+  (`roll_owner`'s); it can't make roles, run programs (`COPY … PROGRAM`) or read the server's
+  files, however the SQL is written (dynamic SQL in a `DO` block too). The operator's SQL, and a
+  grant's that may `admin` the endpoint (the gate's `roll_auth::Capable`, from the row's
+  `capable(Admin)`), runs as the superuser. On a read replica, write SQL from such a grant is
+  refused: send it `read_only`. Dropping objects (tables, indexes, columns, schemas, functions)
+  needs `delete` on the endpoint: without it the writer is a member of `roll_no_drop`, and an event
+  trigger the superuser owns refuses its drops. Deleting rows is a write.
 - Redis commands: commands that only read are `read`; `FLUSHDB`, `FLUSHALL`, `SWAPDB` and scripts
   (`EVAL`, `FCALL`, `FUNCTION`, `SCRIPT`) are `delete`; the server's own, Redis's `@dangerous`
   category (`ACL`, `CONFIG`, `MONITOR` and `SYNC`, which stream everyone's commands and data,
@@ -661,8 +674,11 @@ route goes on as it did.
   session request leaves no audit row either, only its answer. Membership changes are
   (`product=workspace`: `member.invite`, `member.accept`, `member.role`, `member.remove`,
   `member.leave`, `home.set`, …).
-- Placing a resource on a canvas from a session needs `admin` outright on it where it is, or that
-  it's the person's own (`Owners`: their repo, their search cluster).
+- A person (their session, or a token of theirs) puts a resource on a canvas, or makes a project
+  its home, only when `Owners` says it's theirs (their repo, their search cluster), or when it's
+  already at home in that project. Their grant's rules never count for this: a token can name any
+  resource. Taking a resource off their project's canvas is the project's `write`, whoever put it
+  there. The operator's tokens keep the rule of `admin` outright on the resource where it is.
 
 On an open daemon (loopback, no `ROLL_ADMIN_TOKEN`), requests without a token still pass, and a
 request **with** a scoped token is still evaluated. That keeps a well-behaved client to its rules,
@@ -895,6 +911,9 @@ type AuditEvent = {
   strings and headers are not.
 - Arguments are redacted before they're stored: any field named like a password, secret, token,
   key, credential or value has its value replaced with `"[redacted]"`, and strings are cut at 2 KiB.
+  Names that only end in "key" are kept where they aren't secrets (a partition, sort, object or
+  primary key, and roll queues' AMQP `routing_key`); a `routing_key` anywhere else is a credential
+  (PagerDuty's integration key on an apps notification) and is redacted.
 - The log is kept for 90 days (`ROLL_ACCESS_AUDIT_DAYS`; older rows are deleted 5,000 at a time,
   so a large prune never holds the database's write lock) and read through `/v1/access/audit`,
   filtered by grant, product, decision and time.
@@ -1138,9 +1157,10 @@ look (an old repo, a wiki page, a backup's config):
 ## Leaked tokens
 
 Other products' secrets made the same way are found and revoked the same way: apps' deploy hooks
-(`rlk_`, the secret in a hook's URL), previews' deploy hooks (`rlb_`) and SSO connections' SCIM tokens (`rlp_`, docs/accounts.md)
+(`rlk_`, the secret in a hook's URL), previews' deploy hooks (`rlb_`), SSO connections' SCIM tokens (`rlp_`, docs/accounts.md)
+and roll secrets' request links' answer tokens (`rlq_`, cancelling the request; docs/secrets.md)
 are in `SECRET_PREFIXES`, and a product registers how to revoke its own with `Access::on_leaked`
-(rolld wires apps' when apps is in, previews' when they are, and accounts' always). The audit log has each revocation.
+(rolld wires apps' when apps is in, previews' when they are, and accounts' and secrets' always). The audit log has each revocation.
 
 
 A token pasted into a file is a token anyone who reads that file holds. roll revokes one as soon as

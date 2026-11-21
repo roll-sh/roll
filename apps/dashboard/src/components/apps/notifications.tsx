@@ -2,7 +2,7 @@ import { BellRing, Send, Trash2 } from "lucide-react";
 import { useCallback, useEffect, useState } from "react";
 import { appsApi, type NotifyDelivery, type NotifyEvent, type NotifyTarget } from "@/lib/apps-api";
 import { btn, CopyButton, input, Panel, primary, useCopy } from "../ui";
-import { since, type Runner } from "./shared";
+import { since, SureButton, type Runner } from "./shared";
 
 const EVENTS: { value: NotifyEvent; label: string }[] = [
   { value: "deploy.failed", label: "Deploy failed" },
@@ -14,12 +14,15 @@ const EVENTS: { value: NotifyEvent; label: string }[] = [
   { value: "spend.alert", label: "Spend alert" },
   { value: "spend.limit", label: "Spend limit" },
   { value: "alert.memory", label: "Memory alert" },
+  { value: "alert.cpu", label: "CPU alert" },
+  { value: "alert.metric", label: "Metric alert (its own gauges)" },
   { value: "alert.errors", label: "5xx alert" },
   { value: "alert.latency", label: "Latency alert" },
   { value: "alert.capacity", label: "At capacity" },
   { value: "alert.slo", label: "Error budget burning" },
   { value: "alert.log", label: "Log alert" },
   { value: "error.new", label: "New error" },
+  { value: "error.regressed", label: "A resolved error came back" },
   { value: "cron.failed", label: "Cron run failed" },
   { value: "job.failed", label: "Job failed" },
   { value: "domain.active", label: "Domain live" },
@@ -31,11 +34,14 @@ const EVENTS: { value: NotifyEvent; label: string }[] = [
   { value: "check.down", label: "Uptime check down" },
   { value: "heartbeat.missed", label: "Heartbeat missed" },
   { value: "deploy.vulnerable", label: "New known vulnerabilities" },
+  { value: "audit", label: "Every change people make (audit log)" },
 ];
 
 const KINDS: { value: NotifyTarget["kind"]; label: string; placeholder: string }[] = [
   { value: "slack", label: "Slack", placeholder: "https://hooks.slack.com/services/…" },
   { value: "discord", label: "Discord", placeholder: "https://discord.com/api/webhooks/…" },
+  { value: "teams", label: "Microsoft Teams", placeholder: "A Workflows webhook URL (…logic.azure.com/…)" },
+  { value: "googlechat", label: "Google Chat", placeholder: "https://chat.googleapis.com/v1/spaces/…" },
   { value: "webhook", label: "Webhook", placeholder: "https://example.com/roll-events" },
   { value: "email", label: "Email", placeholder: "" },
   // On-call: each failure an incident, closed when its alert resolves or the next deploy works.
@@ -50,7 +56,7 @@ export function NotificationsPanel({ project, projectName, runner }: { project: 
   const [url, setUrl] = useState("");
   const [region, setRegion] = useState<"us" | "eu">("us");
   const oncall = kind === "pagerduty" || kind === "opsgenie";
-  const [events, setEvents] = useState<NotifyEvent[]>(["check.down", "heartbeat.missed", "alert.slo", "deploy.failed", "rollout.waiting", "deploy.ready", "error.new", "crash_loop", "spend.alert", "spend.limit", "alert.memory", "alert.errors", "alert.latency", "alert.capacity", "alert.log", "cron.failed", "domain.expiring", "domain.expired", "domain.tls_failed", "volume.backup_failed", "volume.full"]);
+  const [events, setEvents] = useState<NotifyEvent[]>(["check.down", "heartbeat.missed", "alert.slo", "deploy.failed", "rollout.waiting", "deploy.ready", "error.new", "error.regressed", "crash_loop", "spend.alert", "spend.limit", "alert.memory", "alert.cpu", "alert.metric", "alert.errors", "alert.latency", "alert.capacity", "alert.log", "cron.failed", "domain.expiring", "domain.expired", "domain.tls_failed", "volume.backup_failed", "volume.full"]);
   const [envs, setEnvs] = useState("");
   const [previews, setPreviews] = useState(false);
   // Only some of the project's services (none chosen: every one).
@@ -64,7 +70,19 @@ export function NotificationsPanel({ project, projectName, runner }: { project: 
   // The target whose events are being changed (in place: its URL and secret stay).
   const [editing, setEditing] = useState<string | null>(null);
   const { copied, copy } = useCopy();
-  const load = useCallback(() => appsApi.notifyTargets(project).then(setTargets, () => setTargets([])), [project]);
+  // A read that failed says so (an empty list would read as "nothing set").
+  const [failed, setFailed] = useState<string | null>(null);
+  const load = useCallback(
+    () =>
+      appsApi.notifyTargets(project).then(
+        (t) => {
+          setTargets(t);
+          setFailed(null);
+        },
+        (e: unknown) => setFailed(e instanceof Error ? e.message : String(e)),
+      ),
+    [project],
+  );
   useEffect(() => {
     void load();
   }, [load]);
@@ -84,6 +102,7 @@ export function NotificationsPanel({ project, projectName, runner }: { project: 
 
   return (
     <Panel title={`Notifications for ${projectName}`} aside={<span className="text-[12px] text-muted">the project's services</span>}>
+      {failed && <p className="border-b border-line px-5 py-3 text-[12.5px] text-danger">Its targets couldn't be read: {failed}</p>}
       {targets && targets.length > 0 && (
         <ul className="divide-y divide-line border-b border-line">
           {targets.map((t) => (
@@ -108,9 +127,9 @@ export function NotificationsPanel({ project, projectName, runner }: { project: 
                   <button type="button" className={btn} onClick={() => setOpen(open === t.id ? null : t.id)}>
                     Deliveries
                   </button>
-                  <button type="button" className={btn} aria-label="Remove" disabled={runner.busy !== null} onClick={() => void runner.run("remove", () => appsApi.removeNotifyTarget(project, t.id)).then(load)}>
+                  <SureButton className={btn} label="Remove" sure="Sure? Remove" disabled={runner.busy !== null} onSure={() => void runner.run("remove", () => appsApi.removeNotifyTarget(project, t.id)).then(load)}>
                     <Trash2 className="size-3.5" />
-                  </button>
+                  </SureButton>
                 </span>
               </div>
               {editing === t.id && (

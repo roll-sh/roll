@@ -351,7 +351,7 @@ fn initialize(m: &Mcp, headers: &HeaderMap, params: &Value) -> crate::Result<(Va
         "protocolVersion": version,
         "capabilities": { "tools": { "listChanged": false } },
         "serverInfo": { "name": "roll-code", "title": "roll code", "version": env!("CARGO_PKG_VERSION") },
-        "instructions": "roll code: source control for agents. Repos are \"owner/repo\". Read with search_code, read_file, \
+        "instructions": "roll code: source control for agents. Repos are \"owner/repo\" (list_repos lists them). Read with search_code, read_file, \
 list_tree, log, blame, compare. Take work with claim_work (keep it alive with heartbeat_work), make a change with \
 create_change (files map: {path: {content} | {content_b64} | {delete: true}}), then land it. A land can come back \
 queued (merge queue), blocked (review or checks rules; the blockers say what's missing) or conflict (the paths \
@@ -404,8 +404,27 @@ fn files_schema() -> Value {
     })
 }
 
+/// Tools that reach outside roll (MCP's `openWorldHint`): a model provider (an AI review, a coding
+/// agent's turns and automations) or a branch's remote (publishing an agent's work).
+/// Tools whose effect can't be undone: clients ask a person first.
+const DESTRUCTIVE: [&str; 1] = ["close_change"];
+const OPEN_WORLD: [&str; 7] = ["request_ai_review", "create_agent_thread", "send_agent_message", "respond_agent_request", "claim_agent_work", "run_agent_automation", "publish_agent_thread"];
+
 /// Every tool, with its JSON Schema.
 pub fn tools() -> Vec<Value> {
+    let mut all = every_tool();
+    for t in &mut all {
+        if t["name"].as_str().is_some_and(|n| OPEN_WORLD.contains(&n)) {
+            t["annotations"]["openWorldHint"] = Value::Bool(true);
+        }
+        if t["name"].as_str().is_some_and(|n| DESTRUCTIVE.contains(&n)) {
+            t["annotations"]["destructiveHint"] = Value::Bool(true);
+        }
+    }
+    all
+}
+
+fn every_tool() -> Vec<Value> {
     let repo = s("Repository, \"owner/repo\"");
     let rev = s("Revision: a branch, tag, changeset (cs_…) or git commit; default: the default branch");
     let change = s("Change: \"chg_…\" or \"owner/repo#N\"");
@@ -414,6 +433,14 @@ pub fn tools() -> Vec<Value> {
     let machine = s("Machine: its id (mch_…) or name");
     let command_id = s("Idempotency key: retrying with the same id never runs it twice (default: a new one)");
     vec![
+        tool(
+            "list_repos",
+            "List repositories",
+            "The repositories this caller can read, as `owner/repo` (`full_name`) with each one's default branch and description: where to start before naming a repo.",
+            json!({ "owner": s("Only this owner's repositories") }),
+            &[],
+            true,
+        ),
         tool(
             "search_code",
             "Search code",
@@ -559,6 +586,61 @@ pub fn tools() -> Vec<Value> {
             false,
         ),
         tool("queue_status", "Merge queue", "The merge queue: the batch being tested and who's waiting.", json!({ "repo": repo }), &["repo"], true),
+        tool(
+            "enqueue_change",
+            "Queue a change to land",
+            "Put a change in its repo's merge queue (a queue repo lands only tested trees): its position and queue entry. A change something blocks answers status \"blocked\" with its blockers, not an error; queueing a queued change answers its entry.",
+            json!({ "change": change, "lane": json!({ "type": "string", "enum": ["urgent", "normal"], "description": "urgent goes before normal (default normal)" }) }),
+            &["change"],
+            false,
+        ),
+        tool("dequeue_change", "Take a change out of the queue", "Take a queued change out of the merge queue: it's open again.", json!({ "change": change }), &["change"], false),
+        tool("close_change", "Close a change", "Close a change without landing it. It can't be reopened: make a new change to try again.", json!({ "change": change }), &["change"], false),
+        tool(
+            "report_check",
+            "Report a check on a change",
+            "Record a check's result on a change, as a CI job outside roll does: name, status, a link and a summary. head names the changeset it ran on (409 once the change has moved past it). A repo's required checks gate the queue on these.",
+            json!({
+                "change": change,
+                "name": s("The check's name, e.g. \"tests\""),
+                "status": json!({ "type": "string", "enum": ["queued", "running", "success", "failure", "cancelled", "skipped"] }),
+                "url": s("Where its output is (http or https)"),
+                "summary": s("One line on what it found"),
+                "head": s("The changeset it ran on (any unique prefix)"),
+            }),
+            &["change", "name", "status"],
+            false,
+        ),
+        tool(
+            "set_commit_status",
+            "Set a commit status",
+            "A status on a revision, as GitHub's commit statuses work: CI that knows a git commit reports success, failure, error or pending under a context; it becomes a check on the changes it heads.",
+            json!({
+                "repo": repo,
+                "rev": s("A git commit, a changeset or a branch"),
+                "state": json!({ "type": "string", "enum": ["pending", "success", "failure", "error"] }),
+                "context": s("What reported it, e.g. \"ci/tests\" (default \"default\", at most 100 characters)"),
+                "target_url": s("Where its output is (http or https)"),
+                "description": s("One line on it"),
+            }),
+            &["repo", "rev", "state"],
+            false,
+        ),
+        tool("list_refs", "List branches and tags", "A repository's refs: each branch's and tag's name, the changeset it points at and its git commit.", json!({ "repo": repo }), &["repo"], true),
+        tool(
+            "create_repo",
+            "Create a repository",
+            "A new, empty repository under an owner you manage, to land into: `owner/name`, its default branch and visibility (409 if the name is taken). Connecting a GitHub repository is an admin's call.",
+            json!({
+                "owner": s("The owner it goes under"),
+                "name": s("Its name: letters, digits, - and _"),
+                "description": s("One line on it"),
+                "visibility": json!({ "type": "string", "enum": ["private", "public"], "description": "default private" }),
+                "default_branch": s("Default \"main\""),
+            }),
+            &["owner", "name"],
+            false,
+        ),
         tool(
             "request_ai_review",
             "Request an AI review",
@@ -806,6 +888,10 @@ impl Call<'_> {
         self.api(Method::POST, path, Some(body)).await
     }
 
+    async fn delete(&self, path: &str) -> Api {
+        self.api(Method::DELETE, path, None).await
+    }
+
     /// `/v1/code/repos/{owner}/{repo}` for "owner/repo".
     fn repo(&self, args: &Value) -> std::result::Result<String, Outcome> {
         let r = str_arg(args, "repo").ok_or_else(|| fail("repo is required (\"owner/repo\")"))?;
@@ -981,6 +1067,7 @@ async fn run(c: &Call<'_>, name: &str, args: &Value) -> std::result::Result<Outc
             let path = str_arg(args, "path").map(path_segs).unwrap_or_default();
             pass(c.get(&format!("{base}/tree/{}/{path}", seg(&rev))).await)
         }
+        "list_repos" => pass(c.get(&format!("/v1/code/repos{}", query(&[("owner", opt(args, "owner"))]))).await),
         "log" => {
             let base = c.repo(args)?;
             let limit = opt(args, "limit").or(Some("30".into()));
@@ -1093,6 +1180,32 @@ async fn run(c: &Call<'_>, name: &str, args: &Value) -> std::result::Result<Outc
             let base = c.repo(args)?;
             pass(c.get(&format!("{base}/queue")).await)
         }
+        "enqueue_change" => {
+            let id = c.change_id(args).await?;
+            land_outcome(c.post(&format!("/v1/code/changes/{}/enqueue", seg(&id)), body_of(args, &["change"])).await)
+        }
+        "dequeue_change" => {
+            let id = c.change_id(args).await?;
+            pass(c.delete(&format!("/v1/code/changes/{}/enqueue", seg(&id))).await)
+        }
+        "close_change" => {
+            let id = c.change_id(args).await?;
+            pass(c.post(&format!("/v1/code/changes/{}/close", seg(&id)), json!({})).await)
+        }
+        "report_check" => {
+            let id = c.change_id(args).await?;
+            pass(c.post(&format!("/v1/code/changes/{}/checks", seg(&id)), body_of(args, &["change"])).await)
+        }
+        "set_commit_status" => {
+            let base = c.repo(args)?;
+            let rev = str_arg(args, "rev").ok_or_else(|| fail("rev is required"))?;
+            pass(c.post(&format!("{base}/statuses/{}", seg(rev)), body_of(args, &["repo", "rev"])).await)
+        }
+        "list_refs" => {
+            let base = c.repo(args)?;
+            pass(c.get(&format!("{base}/refs")).await)
+        }
+        "create_repo" => pass(c.post("/v1/code/repos", body_of(args, &[])).await),
         "request_ai_review" => {
             let id = c.change_id(args).await?;
             pass(c.post(&format!("/v1/code/changes/{}/ai-review", seg(&id)), body_of(args, &["change"])).await)

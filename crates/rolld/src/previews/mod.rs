@@ -21,7 +21,7 @@ mod services;
 pub mod fleet;
 
 pub use data::*;
-pub use secrets::Secrets;
+pub use secrets::{Secrets, SecretsIntercepts, SecretsReveal};
 pub use services::{RollApps, Services};
 
 /// Which products run here (an adapter for each).
@@ -53,6 +53,11 @@ pub struct AccountsVisitors {
 }
 
 impl roll_previews::ports::Visitors for AccountsVisitors {
+    fn names_of(&self, user: &str) -> anyhow::Result<Vec<String>> {
+        let u = self.accounts.user(user).map_err(|e| anyhow::anyhow!("{e}"))?;
+        Ok(std::iter::once(u.handle).chain(u.identities.into_iter().filter(|i| i.provider == "github").map(|i| i.login)).collect())
+    }
+
     fn may_open(&self, user: &str, session: &str, project: &str) -> bool {
         if !self.accounts.session_live(user, session).unwrap_or(false) {
             return false;
@@ -94,6 +99,14 @@ mod team_access_tests {
 /// Open the store and start the engine: branches through this node's API, services as
 /// containers through roll code's isolation (Docker or Fargate), roll code's changes as the
 /// source, and roll code's preview backend in front of its own single-container previews.
+/// `ROLL_PREVIEWS_INTERCEPT_ALLOW_PRIVATE=<root.pem>`: intercepted connections may dial private
+/// addresses and trust that root too. Local development only; said loudly when on.
+fn intercept_private() -> Option<std::path::PathBuf> {
+    let root = std::env::var("ROLL_PREVIEWS_INTERCEPT_ALLOW_PRIVATE").ok().filter(|v| !v.trim().is_empty())?;
+    tracing::warn!(root = %root, "ROLL_PREVIEWS_INTERCEPT_ALLOW_PRIVATE is set: previews' intercepted connections may reach private addresses and trust this root (local development only)");
+    Some(std::path::PathBuf::from(root))
+}
+
 pub fn start(
     args: &crate::Args,
     home: &Path,
@@ -104,6 +117,16 @@ pub fn start(
     apps: Option<Arc<apps_control::Apps>>,
 ) -> anyhow::Result<Running> {
     let store = open_store(args, home)?;
+    // A preview's own variables sealed at rest with the deployment key (as roll's reviewer keys
+    // are); without one they're kept as written.
+    if let Some(key) = args.secret_key() {
+        match code_review::secret::Sealer::new(&key) {
+            Ok(s) => {
+                store.set_sealer(Arc::new(VarsSealer(s)))?;
+            }
+            Err(e) => tracing::warn!(error = %e, "previews: a preview's own variables aren't sealed"),
+        }
+    }
     let api = Api::new(args.api);
     let mut branchers: Vec<Arc<dyn Brancher>> = Vec::new();
     if on.postgres {
@@ -140,6 +163,10 @@ pub fn start(
             // this many on the node.
             warm_for: std::time::Duration::from_secs(60 * std::env::var("ROLL_PREVIEWS_WARM_MINUTES").ok().and_then(|v| v.parse::<u64>().ok()).unwrap_or(8 * 60).min(24 * 60)),
             warm_max: std::env::var("ROLL_PREVIEWS_WARM_MAX").ok().and_then(|v| v.parse::<usize>().ok()).unwrap_or(32).min(1000),
+            // Each preview's interception socket (keys a fork's preview never holds).
+            intercept_dir: Some(home.join("previews").join("intercept")),
+            // Local development only: a private TLS echo host for the live check.
+            intercept_private: intercept_private(),
             ..Default::default()
         },
         code.isolation.clone(),
@@ -160,7 +187,13 @@ pub fn start(
     let apps_for_notes = apps.clone();
     let shots: Option<Arc<dyn fleet::Shoot>> = apps.clone().map(|a| Arc::new(services::AppsShots { reach: Arc::new(services::AppsReach(a)), runtime: runtime.clone() }) as Arc<dyn fleet::Shoot>);
     let engine = roll_previews::Engine::new(
-        roll_previews::engine::Config { domain, port: Some(args.api.port()), mail: Some(format!("127.0.0.1:{}", args.previews_smtp.port())), otlp: Some(format!("127.0.0.1:{}", args.api.port())), ..Default::default() },
+        {
+            let mut c = roll_previews::engine::Config { domain, port: Some(args.api.port()), mail: Some(format!("127.0.0.1:{}", args.previews_smtp.port())), otlp: Some(format!("127.0.0.1:{}", args.api.port())), ..Default::default() };
+            if let Some(s) = args.previews_compare_every {
+                (c.routes_every, c.new_errors_every) = (std::time::Duration::from_secs(s), std::time::Duration::from_secs(s));
+            }
+            c
+        },
         store.clone(),
         workspace,
         source.clone(),
@@ -209,6 +242,20 @@ pub fn start(
     tracing::info!("roll previews: on");
     let internal = shots.filter(|_| clustered).map(|s| fleet::internal_router(s, cluster.clone()));
     Ok(Running { engine, runtime, internal })
+}
+
+/// roll's reviewer's sealer (AES-256-GCM under `ROLL_SECRET_KEY`) for a preview's own variables,
+/// bound to the preview (`preview-vars:<id>`).
+struct VarsSealer(code_review::secret::Sealer);
+
+impl roll_previews::ports::Sealer for VarsSealer {
+    fn seal(&self, aad: &str, plain: &str) -> String {
+        self.0.seal(aad, plain)
+    }
+
+    fn open(&self, aad: &str, sealed: &str) -> Option<String> {
+        self.0.open(aad, sealed).ok()
+    }
 }
 
 pub fn open_store(args: &crate::Args, home: &Path) -> anyhow::Result<Arc<Store>> {

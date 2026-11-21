@@ -23,6 +23,7 @@ mod edge;
 mod isolation;
 mod logs;
 mod nosql;
+mod intercept;
 mod previews;
 mod products;
 mod queues;
@@ -157,6 +158,11 @@ struct Args {
     /// people in its data. A port that's taken leaves it off, and previews' mail fails.
     #[arg(long, env = "ROLL_PREVIEWS_SMTP", default_value = "0.0.0.0:2525")]
     previews_smtp: std::net::SocketAddr,
+    /// How often (seconds) previews are compared with main's preview (routes from their traces,
+    /// errors from their output); unset, every minute for routes and five for errors. Tests set
+    /// it low.
+    #[arg(long, env = "ROLL_PREVIEWS_COMPARE_EVERY")]
+    previews_compare_every: Option<u64>,
     /// roll code checks running at once from this node (each in its own container or Fargate
     /// task; `ROLL_CODE_RUNNER`, see `isolation.rs`).
     #[arg(long, env = "ROLL_CODE_RUNNER_CONCURRENCY", default_value_t = 2)]
@@ -466,7 +472,7 @@ async fn run_with(mut args: Args) -> anyhow::Result<()> {
 
     // roll search: same object storage; the Elasticsearch REST listener and `/v1/search`.
     let search = match on.on(Product::Search) {
-        true => Some(search::Search::start(&home, &args.search, &storage, &args.public_host, &args.node, &cluster, args.code.cluster.system_database.as_deref(), args.db_budget()?.search, edge::Public::of(&args).as_ref(), args.secret_key().as_deref().map(String::as_str)).await?),
+        true => Some(search::Search::start(&home, &args.search, &storage, &args.public_host, &args.node, &cluster, args.code.cluster.system_database.as_deref(), args.db_budget()?.search, edge::Public::of(&args).as_ref(), args.secret_key().as_deref().map(String::as_str), !auth.enforcing()).await?),
         false => None,
     };
 
@@ -490,6 +496,7 @@ async fn run_with(mut args: Args) -> anyhow::Result<()> {
                 redis.as_ref().map(|r| r.control.clone()),
                 apps_secrets.clone(),
                 products_api.clone(),
+                !auth.enforcing(),
             )
             .await?,
         ),
@@ -618,6 +625,21 @@ async fn run_with(mut args: Args) -> anyhow::Result<()> {
     // above this line, or its links 404.
     // People's accounts: what a person made acts while they can sign in, and a person's canvas
     // stands only for what's theirs (roll_workspace::Workspace::trusts, asked by every consumer).
+    // A deleted account leaves every project through the removal path (docs/members.md): roll
+    // accounts' outbox calls this after the deletion's write, and again until it succeeds.
+    {
+        let ws = workspace.clone();
+        accounts.on_deleted(Box::new(move |user| ws.forget_person(user, None).map(|_| ()).map_err(|e| e.to_string())));
+        let a = accounts.clone();
+        tokio::spawn(async move {
+            let mut tick = tokio::time::interval(std::time::Duration::from_secs(60));
+            loop {
+                tick.tick().await;
+                let a = a.clone();
+                let _ = tokio::task::spawn_blocking(move || a.run_deletions()).await;
+            }
+        });
+    }
     let people = secrets::People { accounts, code: code.as_ref().map(|c| c.code.clone()), search: search.as_ref().map(|s| s.control.clone()) };
     workspace.set_owners(std::sync::Arc::new(people.clone()));
     // Members' handles and addresses, and invite links to the dashboard (docs/members.md).
@@ -627,14 +649,41 @@ async fn run_with(mut args: Args) -> anyhow::Result<()> {
     // Gateways into private networks: their links follow leases on the node's cluster.
     let gateways = secrets::gateway::Gateways::new(cluster.clone(), access.clone() as std::sync::Arc<dyn roll_auth::Grants>, args.code_webhook_allow_private.unwrap_or(!auth.enforcing()));
     let secrets = secrets::open(&args, &home, workspace.clone(), !auth.enforcing(), products_api.clone(), access.clone(), people, gateways.clone())?;
+    if let Some(p) = &postgres {
+        secrets::tell_postgres_decoys(&p.control, secrets.clone());
+    }
     // Its counters and gauges, a line a minute beside the cluster's (JSON logs only).
     let _secrets_metrics = logs::SecretsMetrics::start(cluster.node_id().to_string(), secrets.clone());
     code_secrets.set(secrets.clone(), workspace.clone());
     apps_secrets.set(secrets.clone(), workspace.clone());
     storage_secrets.set(secrets.clone());
+    // roll search's snapshot repositories resolve their roll:// credentials for their cluster.
+    if let Some(s) = &search {
+        s.control.set_secrets(std::sync::Arc::new(secrets::ForSearch(secrets.clone())));
+    }
     let _ = secrets_envs.0.set(secrets.clone());
+    // roll secrets' placeholders found leaked (`rlph_`) stop working, like tokens.
+    {
+        let secrets = secrets.clone();
+        access.on_leaked("rlph_", move |secret, why| secrets.revoke_leaked_placeholder(secret, why));
+    }
+    // Previews' rules name roll secrets' keys only where their writer may reveal them.
+    if let Some(e) = &previews_engine {
+        let _ = e.reveal.set(std::sync::Arc::new(previews::SecretsReveal(secrets.clone())));
+    }
+    // Keys a fork's preview never holds: its interception CA and the swap, roll secrets'.
+    if let Some((rt, e)) = &preview_hosts {
+        let i = std::sync::Arc::new(previews::SecretsIntercepts::new(secrets.clone()));
+        let _ = e.intercepts.set(i.clone());
+        rt.set_intercepts(i);
+    }
     if let Some(c) = &code {
         secrets.set_code_refs(std::sync::Arc::new(secrets::CodeRefs(c.code.clone())));
+    }
+    // Secret requests' answer tokens found leaked (`rlq_`) cancel their requests.
+    {
+        let secrets = secrets.clone();
+        access.on_leaked("rlq_", move |token, why| secrets.cancel_leaked_value_request(token, why));
     }
     router = router.merge(roll_secrets::router(secrets.clone()).layer(axum::middleware::map_request(secrets::guard_header))).merge(gateways.router());
     // A node that isn't (or no longer is) sealed answers the unseal with nothing to give.
@@ -651,6 +700,8 @@ async fn run_with(mut args: Args) -> anyhow::Result<()> {
     if let Some(a) = &apps {
         let apps = a.apps.clone();
         access.on_leaked("rlk_", move |secret, _why| apps.revoke_leaked_hook(secret));
+        let apps = a.apps.clone();
+        access.on_leaked("rlr_", move |secret, _why| apps.revoke_leaked_address(secret));
     }
     // …and project invites' (`rlv_`).
     {

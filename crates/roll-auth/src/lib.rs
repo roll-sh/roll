@@ -174,6 +174,20 @@ impl fmt::Debug for Grant {
     }
 }
 
+/// In a grant's request when the grant also allows a stronger action on the route's resource that
+/// the catalogue row names (`capable`): a product that can do more within one route does it only
+/// with this (Postgres runs SQL as the database's superuser only for a grant that may `admin` it,
+/// and lets it drop objects only for one that may `delete`).
+/// The operator's requests carry no grant and need none.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Capable(pub Vec<scope::Action>);
+
+impl Capable {
+    pub fn has(&self, a: scope::Action) -> bool {
+        self.0.contains(&a)
+    }
+}
+
 /// In a grant's request when a person's approval is what let it run: this one request approved
 /// (`until: None`), or a rule an approval allowed for a while (`until`: when that rule lapses). A
 /// product's audit names it ("revealed by token X, approved by Y"). Set only by the gate, on the
@@ -222,6 +236,13 @@ pub trait Grants: Send + Sync + 'static {
     /// this allows it. Blocking; never cached.
     fn session(&self, user: &str) -> Option<Grant> {
         let _ = user;
+        None
+    }
+    /// Whose grant `id` is, whether or not it still works: `Some(Some(usr_…))` a person's,
+    /// `Some(None)` the operator's, `None` unknown. What a person registered through their token
+    /// (a rotator, a sink) is theirs, and acts while they may, after the token ends. Blocking.
+    fn owner(&self, id: &str) -> Option<Option<String>> {
+        let _ = id;
         None
     }
 }

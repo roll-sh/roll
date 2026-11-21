@@ -18,7 +18,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 /// A secret a client may present for a cluster.
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct Credential {
     /// The Basic auth user it belongs to (`None`: any user name, e.g. `elastic`).
     pub user: Option<String>,
@@ -28,6 +28,17 @@ pub struct Credential {
     pub secret: String,
     /// SHA-256 of the secret; when set, presented secrets are hashed and compared with it.
     pub secret_sha256: Option<[u8; 32]>,
+}
+
+impl std::fmt::Debug for Credential {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Credential")
+            .field("user", &self.user)
+            .field("api_key_id", &self.api_key_id)
+            .field("secret", &"<redacted>")
+            .field("secret_sha256", &self.secret_sha256.map(|_| "<redacted>"))
+            .finish()
+    }
 }
 
 impl Credential {
@@ -82,8 +93,18 @@ pub struct ClusterSpec {
     pub max_resident_bytes: Option<u64>,
     /// Who may reach the cluster's data plane, checked before authentication (empty: anyone).
     pub ip_allowlist: crate::allow::IpAllowlist,
-    /// Its id in the control plane's catalog, when it has one (`search_es::ClusterConfig::catalog_id`).
+    /// Which web pages may call the cluster from a browser (`http.cors.*`; `None`: CORS off,
+    /// Elasticsearch's default). Checked after the IP allowlist.
+    pub cors: Option<Arc<crate::cors::Cors>>,
+    /// Requests per minute all its browser keys may make together (`None`:
+    /// [`crate::browser::DEFAULT_CLUSTER_PER_MINUTE`]).
+    pub browser_per_minute: Option<u64>,
+    /// Its id in the control plane's catalog, when it has one (`search_es::ClusterConfig::catalog_id`):
+    /// it stays across a restore under another name, a branch has its own, and browser keys are
+    /// bound to it ([`crate::browser`]).
     pub catalog_id: Option<String>,
+    /// The parent's catalog id when the cluster is a branch (`search_es::ClusterConfig::branch_of`).
+    pub branch_of: Option<String>,
 }
 
 impl ClusterSpec {
@@ -100,7 +121,10 @@ impl ClusterSpec {
             max_in_flight_bytes: None,
             max_resident_bytes: None,
             ip_allowlist: Default::default(),
+            cors: None,
+            browser_per_minute: None,
             catalog_id: None,
+            branch_of: None,
         }
     }
 

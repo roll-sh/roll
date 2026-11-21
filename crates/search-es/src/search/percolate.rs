@@ -28,7 +28,7 @@ pub fn check_query(cluster: &Cluster, st: &ClusterState, idx: &IndexMeta, table:
     let v = crate::json::parse(json.as_bytes()).map_err(|e| EsError::parse(e.to_string()))?.unwrap_or(Value::Null);
     let (q, _) = crate::query::parse_query(&v, None, &[])?;
     let searcher = engine.shard(0).shard.searcher();
-    let qctx = QueryCtx::new(cluster, st, idx, table, &searcher, crate::time::now_millis());
+    let qctx = QueryCtx::new(cluster, st, idx, table, &searcher, crate::time::now_millis(), crate::search::query::Reader::Unset);
     qctx.strict_unmapped.set(true);
     qctx.to_query(&q)?;
     if let Some(f) = qctx.unmapped.take() {
@@ -148,7 +148,7 @@ impl Percolated {
         let (slots, q) = (&v.slots, &*v.query);
         let table = self.mem.engine.table();
         let searcher = self.mem.engine.shard(0).shard.searcher();
-        let qctx = QueryCtx::new(cluster, st, &self.mem.meta, &table, &searcher, now);
+        let qctx = QueryCtx::new(cluster, st, &self.mem.meta, &table, &searcher, now, crate::search::query::Reader::Unset);
         let query = qctx.to_query(q)?;
         for slot in slots {
             let Some((&mdoc, _)) = self.slot_of.iter().find(|(_, s)| *s == slot) else { continue };
@@ -169,18 +169,19 @@ fn indexed_document(ctx: &QueryCtx, p: &Percolate) -> EsResult<Value> {
     let id = p.id.clone().unwrap_or_default();
     let missing = || EsError::resource_not_found(format!("indexed document [{index}/{id}] couldn't be found"));
     let Some(meta) = crate::write::resolve_existing(ctx.st, &index) else { return Err(EsError::index_not_found(&index)) };
-    let engine = ctx.cluster.engine.index(ctx.cluster, ctx.st, &meta)?;
-    let shard = crate::meta::routing::shard_for(&meta, &id, p.routing.as_deref());
-    let doc = engine.shard(shard).shard.get(id.as_bytes(), true).map_err(crate::engine::convert::index_error)?.ok_or_else(missing)?;
-    if p.version.is_some_and(|v| v != doc.version) {
-        return Err(EsError::new(409, "version_conflict_engine_exception", format!("[{id}]: version conflict, current version [{}] is different than the one provided [{}]", doc.version, p.version.unwrap_or(0))));
+    // Read as the request's reader may read it (its document and field level security).
+    let (version, src) = super::lookup_source(ctx, &meta, &id, p.routing.as_deref())?.ok_or_else(missing)?;
+    if p.version.is_some_and(|v| v != version) {
+        return Err(EsError::new(409, "version_conflict_engine_exception", format!("[{id}]: version conflict, current version [{version}] is different than the one provided [{}]", p.version.unwrap_or(0))));
     }
-    let src = crate::fetch::source_bytes(&doc.fields).ok_or_else(missing)?;
-    crate::fetch::parse_source(src)
+    src.ok_or_else(missing)
 }
 
 /// `PercolateQueryBuilder.doToQuery`: the stored queries matching the documents.
 pub fn percolate(ctx: &QueryCtx, p: &Percolate) -> EsResult<QueryRef> {
+    // Before anything else, as Elasticsearch 9.5.5 checks it: the stored queries run with the
+    // index owner's reach (a browser key's policy refuses it the same way).
+    ctx.check_expensive("percolate")?;
     let Some(f) = ctx.table.get(&p.field).cloned() else {
         return Err(qse(ctx, format!("field [{}] does not exist", p.field)));
     };
@@ -235,7 +236,7 @@ pub fn percolate(ctx: &QueryCtx, p: &Percolate) -> EsResult<QueryRef> {
                 continue;
             }
             let parsed = stored.queries[i as usize].clone();
-            let qctx = QueryCtx::new(ctx.cluster, ctx.st, &mem.meta, &mem_table, &mem_searcher, ctx.now_ms);
+            let qctx = QueryCtx::new(ctx.cluster, ctx.st, &mem.meta, &mem_table, &mem_searcher, ctx.now_ms, crate::search::query::Reader::Unset);
             let Ok(stored_q) = qctx.to_query(&parsed) else { continue };
             let q: QueryRef = arc(search_index::query::BooleanQuery::new().add(search_index::query::Occur::Must, stored_q).add(search_index::query::Occur::Filter, root.clone()));
             let w = mem_searcher.create_weight(&q, ScoreMode::Complete).map_err(ie)?;

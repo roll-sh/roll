@@ -28,6 +28,7 @@ import { NewIndexPanel } from "./new-index";
 import { Templates } from "./templates";
 import { InferenceTab } from "./inference";
 import { ApiKeys } from "./api-keys";
+import { BrowserSearch } from "./browser";
 import { AuditLog } from "./audit-log";
 import { SearchConsole } from "./console";
 import { IndexBrowser } from "./index-browser";
@@ -35,6 +36,7 @@ import { PerformanceTab } from "./performance";
 import { Playground } from "./playground";
 import { PipelinesTab } from "./pipelines";
 import { RelevanceTab } from "./relevance";
+import { Remotes } from "./remotes";
 import { SnapshotsTab } from "./snapshots";
 import { CredentialsOnce, SearchStateDot, settingsOf, SettingsFields, stateLabel, useAction, useSearchClusters, type Run } from "./shared";
 
@@ -1035,7 +1037,11 @@ function SettingsTab({
 
       <AllowedNetworks cluster={cluster} busy={busy} run={run} />
 
+      <BrowserSearch cluster={cluster} busy={busy} run={run} />
+
       <ApiKeys cluster={cluster} />
+
+      <Remotes cluster={cluster} />
 
       <AuditLog cluster={cluster} />
 

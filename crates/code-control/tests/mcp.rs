@@ -12,19 +12,20 @@ use serde_json::{Value, json};
 const MCP: &str = "/v1/code/mcp";
 
 /// The tools docs/code/mcp.md lists.
-const TOOLS: [&str; 37] = [
-    "search_code", "read_file", "list_tree", "log", "blame", "get_changeset", "compare", "create_change", "revise_change", "land", "get_change",
+const TOOLS: [&str; 45] = [
+    "list_repos", "search_code", "read_file", "list_tree", "log", "blame", "get_changeset", "compare", "create_change", "revise_change", "land", "get_change",
     "list_changes", "claim_work", "heartbeat_work", "release_work", "complete_work", "list_work", "create_work", "comment", "review", "queue_status",
     "request_ai_review", "list_agent_machines", "list_agent_threads", "create_agent_thread", "send_agent_message", "respond_agent_request",
     "interrupt_agent_thread", "publish_agent_thread", "create_agent_project", "claim_agent_work", "list_agent_automations", "save_agent_automation",
-    "run_agent_automation", "list_agent_automation_runs", "get_agent_automation_run", "cancel_agent_automation_run",
+    "run_agent_automation", "list_agent_automation_runs", "get_agent_automation_run", "cancel_agent_automation_run", "enqueue_change", "dequeue_change",
+    "close_change", "report_check", "set_commit_status", "list_refs", "create_repo",
 ];
 /// The agents tools (not repo-scoped: `agent_tools_drive_a_machine_like_their_routes`,
 /// `agent_tools_work_in_roll_code_like_their_routes` and `automation_tools_map_onto_their_routes`).
 const AGENT_TOOLS: usize = 15;
 /// The ones that only read (`readOnlyHint`).
-const READ_ONLY: [&str; 16] = [
-    "search_code", "read_file", "list_tree", "log", "blame", "get_changeset", "compare", "get_change", "list_changes", "list_work", "queue_status",
+const READ_ONLY: [&str; 18] = [
+    "list_repos", "search_code", "read_file", "list_tree", "log", "blame", "get_changeset", "compare", "get_change", "list_changes", "list_work", "queue_status", "list_refs",
     "list_agent_machines", "list_agent_threads", "list_agent_automations", "list_agent_automation_runs", "get_agent_automation_run",
 ];
 
@@ -136,6 +137,11 @@ async fn transport_sessions_and_protocol() {
         assert_eq!(t["inputSchema"]["additionalProperties"], false, "{}", t["name"]);
         let read_only = READ_ONLY.contains(&t["name"].as_str().unwrap());
         assert_eq!(t["annotations"]["readOnlyHint"], read_only, "{}", t["name"]);
+        // A model provider or a branch's remote is outside roll; a repo's own reads and writes aren't.
+        let open = ["request_ai_review", "create_agent_thread", "publish_agent_thread"].contains(&t["name"].as_str().unwrap());
+        if open || ["read_file", "land", "comment"].contains(&t["name"].as_str().unwrap()) {
+            assert_eq!(t["annotations"]["openWorldHint"], open, "{}", t["name"]);
+        }
     }
     assert_eq!(c.rpc("ping", json!({})).await["result"], json!({}));
     assert_eq!(c.rpc("nope/method", json!({})).await["error"]["code"], -32601);
@@ -444,6 +450,14 @@ async fn land_outcomes_queued_branches_and_errors() {
     let three = c.tool("create_change", json!({ "repo": repo, "title": "three", "base": "main", "files": { "4.txt": { "content": "4\n" } } })).await;
     let bad = c.call("land", json!({ "change": three["id"], "lane": "sideways" })).await;
     assert_eq!((bad["isError"].as_bool(), bad["structuredContent"]["http_status"].as_i64()), (Some(true), Some(400)), "{bad}");
+    // The queue's own tools: queue a change in a lane, take it out (open again), close it; a
+    // closed change can't queue.
+    let qd = c.tool("enqueue_change", json!({ "change": three["id"], "lane": "urgent" })).await;
+    assert_eq!((qd["status"].as_str(), qd["change"]["queue"]["lane"].as_str()), (Some("queued"), Some("urgent")), "{qd}");
+    assert_eq!(c.tool("dequeue_change", json!({ "change": three["id"] })).await["state"], "open");
+    assert_eq!(c.tool("close_change", json!({ "change": three["id"] })).await["state"], "closed");
+    let shut = c.call("enqueue_change", json!({ "change": three["id"] })).await;
+    assert_eq!((shut["isError"].as_bool(), shut["structuredContent"]["http_status"].as_i64()), (Some(true), Some(409)), "{shut}");
 }
 
 /// `read_file` past 2,000 lines comes back in ranges with a pointer to the next one; a binary
@@ -589,6 +603,8 @@ async fn tools_map_onto_their_routes() {
     assert_eq!(gc["change"], a.ok("GET", &format!("/v1/code/changes/{id}"), None).await);
     assert_eq!(gc["review_status"], a.ok("GET", &format!("/v1/code/changes/{id}/review-status"), None).await);
     assert_eq!(gc["threads"], a.ok("GET", &format!("/v1/code/changes/{id}/threads"), None).await);
+    same(c.tool("list_repos", json!({})).await, a.ok("GET", "/v1/code/repos", None).await);
+    same(c.tool("list_repos", json!({ "owner": "acme" })).await, a.ok("GET", "/v1/code/repos?owner=acme", None).await);
     same(c.tool("list_changes", json!({ "repo": repo })).await, a.ok("GET", &format!("{p}/changes"), None).await);
     same(c.tool("list_changes", json!({ "repo": repo, "state": "closed" })).await, a.ok("GET", &format!("{p}/changes?state=closed"), None).await);
     same(c.tool("list_work", json!({ "repo": repo, "state": "done", "label": "feat" })).await, a.ok("GET", &format!("{p}/work?state=done&label=feat"), None).await);
@@ -610,6 +626,16 @@ async fn tools_map_onto_their_routes() {
     ada.initialize("2025-06-18").await;
     let r = ada.tool("review", json!({ "change": id, "verdict": "approve" })).await;
     assert_eq!((r["reviewer"]["kind"].as_str(), r["reviewer"]["name"].as_str()), (Some("user"), Some("ada")), "{r}");
+
+    // What outside CI reports, a repo's refs, and a new repo: each what its route then shows.
+    let ch = c.tool("report_check", json!({ "change": id, "name": "tests", "status": "success", "summary": "42 passed" })).await;
+    assert!(ch["checks"].as_array().unwrap().iter().any(|k| k["name"] == "tests" && k["status"] == "success"), "{ch}");
+    let st = c.tool("set_commit_status", json!({ "repo": repo, "rev": "main", "state": "pending", "context": "ci/build" })).await;
+    assert_eq!(st["status"]["context"], "ci/build", "{st}");
+    let refs = c.tool("list_refs", json!({ "repo": repo })).await;
+    assert_eq!(refs["items"], a.ok("GET", &format!("{p}/refs"), None).await, "a list comes back as items");
+    let made = c.tool("create_repo", json!({ "owner": "acme", "name": "fresh", "visibility": "private" })).await;
+    assert_eq!(made, a.ok("GET", "/v1/code/repos/acme/fresh", None).await);
 }
 
 /// Every tool's argument errors: each required argument missing, ill-typed values, and
@@ -831,6 +857,12 @@ async fn every_tool_is_authorized_like_its_route() {
                 ("review", json!({ "change": ch, "verdict": "approve" }), post(format!("/v1/code/changes/{ch}/reviews"), json!({ "verdict": "approve" })), false),
                 ("review", json!({ "change": ch, "verdict": "comment", "body": "c" }), post(format!("/v1/code/changes/{ch}/reviews"), json!({ "verdict": "comment", "body": "c" })), false),
                 ("request_ai_review", json!({ "change": ch }), post(format!("/v1/code/changes/{ch}/ai-review"), json!({})), false),
+                ("list_refs", json!({ "repo": f.repo }), get(format!("{p}/refs")), true),
+                ("enqueue_change", json!({ "change": ch }), post(format!("/v1/code/changes/{ch}/enqueue"), json!({})), false),
+                ("dequeue_change", json!({ "change": ch }), ("DELETE", format!("/v1/code/changes/{ch}/enqueue"), None), false),
+                ("close_change", json!({ "change": ch }), post(format!("/v1/code/changes/{ch}/close"), json!({})), false),
+                ("report_check", json!({ "change": ch, "name": "ci", "status": "success" }), post(format!("/v1/code/changes/{ch}/checks"), json!({ "name": "ci", "status": "success" })), false),
+                ("set_commit_status", json!({ "repo": f.repo, "rev": "main", "state": "success" }), post(format!("{p}/statuses/main"), json!({ "state": "success" })), false),
             ];
             let mut seen = std::collections::HashSet::new();
             for (tool, args, (method, path, body), reads) in cases {
@@ -861,8 +893,17 @@ async fn every_tool_is_authorized_like_its_route() {
                     _ => assert!(text.starts_with("not found"), "{ctx}"),
                 }
             }
-            assert_eq!(seen.len(), TOOLS.len() - AGENT_TOOLS, "every repo tool is checked");
+            assert_eq!(seen.len(), TOOLS.len() - AGENT_TOOLS - 2, "every repo tool is checked (list_repos and create_repo below)");
         }
+        // The list is the route's: only what the caller may read, so the private repo isn't in it.
+        let listed = c.tool("list_repos", json!({})).await;
+        let names: Vec<&str> = listed["items"].as_array().unwrap().iter().filter_map(|r| r["full_name"].as_str()).collect();
+        assert_eq!(names, ["acme/pub"], "{who}: {listed}");
+        // Making a repo under acme is acme's (or the admin's): as the route answers.
+        let (status, _) = a.req("POST", "/v1/code/repos", Some(json!({ "owner": "acme", "name": "nope" })), token).await;
+        let res = c.call("create_repo", json!({ "owner": "acme", "name": "nope" })).await;
+        assert_eq!((res["isError"].as_bool(), res["structuredContent"]["http_status"].as_u64()), (Some(true), Some(status.as_u16() as u64)), "{who}: {res}");
+        assert!(!status.is_success(), "{who} made a repo under acme");
     }
     // The owner's own token and the admin read and write the private repo.
     let (_, t) = a.req("POST", "/v1/code/owners/acme/tokens", Some(json!({ "name": "t" })), root).await;

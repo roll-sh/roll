@@ -45,11 +45,12 @@ use std::path::Path;
 pub const MAX_BYTES: u64 = 64 << 10;
 
 /// What `[app.run]` takes: a service's run settings (apps-control's `Run`, whose tests keep the
-/// two equal), but `volume`.
-pub const RUN_KEYS: [&str; 39] = [
+/// two equal), but `volume` and `push` (a stream another product guards: set through the API,
+/// whose gate asks for access to it, never by a file in the tree being deployed).
+pub const RUN_KEYS: [&str; 46] = [
     "type", "port", "start", "pre_deploy", "schedule", "timezone", "timeout_s", "retries", "min_instances", "max_instances", "concurrency", "cpu", "memory_mb", "health_path",
-    "health_timeout_s", "suspend_after_s", "sleep_after_s", "alerts", "rollout", "h2c", "scale", "public", "drain_s", "cpu_target", "memory_target", "restart", "restart_tries", "affinity", "tcp",
-    "rollback_on_crash", "schedules", "health_every_s", "health_failures", "health_command", "rebuild_on_base", "sidecars", "block_on", "slo", "metrics",
+    "health_timeout_s", "suspend_after_s", "sleep_after_s", "alerts", "rollout", "h2c", "scale", "public", "drain_s", "cpu_target", "busy_cpu", "memory_target", "restart", "restart_tries", "affinity", "tcp",
+    "rollback_on_crash", "schedules", "health_every_s", "health_failures", "health_command", "rebuild_on_base", "sidecars", "block_on", "slo", "metrics", "schedule_scale", "log_metrics", "skew_protection", "queue_s", "latency_target_ms", "oidc_audiences",
 ];
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]
@@ -70,6 +71,14 @@ pub struct AppConfig {
     pub packages: Option<Vec<String>>,
     /// Run settings ([`RUN_KEYS`], as the API's `run`).
     pub run: Option<toml::Table>,
+    /// Edge settings the deployment carries (fly.toml's, vercel.json's, render.yaml's), only ever
+    /// tightening what the environment's own settings let through: headers added after the
+    /// environment's (never over one it sets), firewall rules judged beside the environment's
+    /// (`deny`, `limit` and `challenge` only; the stricter answer wins), and a rate limit (the
+    /// lower one wins). Shapes as the API's environment settings; apps-control checks them.
+    pub headers: Option<Vec<toml::Table>>,
+    pub firewall: Option<Vec<toml::Table>>,
+    pub rate_limit: Option<toml::Table>,
     /// Per environment, the same keys again (no `environments` in them), applied last.
     pub environments: Option<std::collections::BTreeMap<String, AppConfig>>,
     /// Preview environments (ephemeral ones), the same keys again, before a named block.
@@ -146,6 +155,11 @@ pub fn parse(text: &str) -> Result<Option<AppConfig>, String> {
         if let Some(p) = &e.packages {
             crate::packages::check(p).map_err(|why| format!("roll.toml [{name}]: {why}"))?;
         }
+        // A file in the tree only tightens: an `allow` rule could let past a rule of the
+        // environment's that a later one of its own would stop.
+        if e.firewall.iter().flatten().any(|r| r.get("action").and_then(|a| a.as_str()) == Some("allow")) {
+            return Err(format!("roll.toml [{name}]: firewall rules here only tighten (deny, limit or challenge); an allow rule is the environment's setting"));
+        }
         if e.screenshots.is_some() && name != "app.previews" {
             return Err(format!("roll.toml: screenshots go in [app.previews.screenshots], not [{name}]"));
         }
@@ -153,6 +167,11 @@ pub fn parse(text: &str) -> Result<Option<AppConfig>, String> {
     for (_, e) in all {
         if e.run.as_ref().is_some_and(|r| r.contains_key("volume")) {
             return Err("roll.toml: a volume is the service's setting, not the tree's (`roll apps set --volume`)".into());
+        }
+        // A file in the tree being deployed never subscribes to a stream: who sets push needs
+        // access to the stream, and only the API's gate asks.
+        if e.run.as_ref().is_some_and(|r| r.contains_key("push")) {
+            return Err("roll.toml: push is the service's setting, not the tree's (setting it needs access to the stream)".into());
         }
     }
     Ok(f.app)
@@ -213,6 +232,14 @@ impl AppConfig {
         for (k, v) in self.run.iter().flatten() {
             set(&format!("run.{k}"), &v.to_string());
         }
+        for (what, n) in [("headers", self.headers.as_ref().map(Vec::len)), ("firewall", self.firewall.as_ref().map(Vec::len))] {
+            if let Some(n) = n {
+                set(what, &format!("{n} rule(s), on top of the environment's"));
+            }
+        }
+        if let Some(r) = &self.rate_limit {
+            set("rate_limit", &format!("{} a minute, or the environment's if lower", r.get("per_minute").map(|v| v.to_string()).unwrap_or_default()));
+        }
         said
     }
 
@@ -256,6 +283,8 @@ mod tests {
         let typo = parse("[app.environments.staging.run]\nmin_instaces = 1\n").unwrap().unwrap();
         assert!(typo.check_all().unwrap_err().contains("min_instaces"), "nor in run, before a push");
         assert!(parse("[app.run]\nvolume = { mount = \"/data\", size_gb = 9 }\n").is_err(), "a push can't move a volume");
+        let push = "[app.environments.production.run]\npush = [{ stream = \"st_aaaaaaaaaaaa\", topic = \"t\", group = \"g\", path = \"/e\" }]\n";
+        assert!(parse(push).unwrap_err().to_string().contains("push is the service's setting"), "nor subscribe to a stream");
         assert!(parse("[app.environments.production.environments.x]\nstart = \"a\"\n").is_err());
         assert_eq!(parse("[checks.test]\nrun = \"npm test\"\n[apps.web]\nroot = \"web\"\n").unwrap(), None, "roll code's and roll up --all's sections are theirs");
         let app = parse("[app]\nbuild = \"pnpm build\"\n[app.run]\nconcurrency = 20\n[app.environments.production]\nstart = \"node a.js\"\n").unwrap().unwrap();
@@ -291,6 +320,9 @@ mod tests {
             spa: Some(true),
             packages: Some(vec![]),
             run: Some(toml::Table::new()),
+            headers: Some(vec![]),
+            firewall: Some(vec![]),
+            rate_limit: Some(toml::Table::new()),
             environments: Some(Default::default()),
             previews: Some(Box::default()),
             screenshots: Some(toml::Table::new()),

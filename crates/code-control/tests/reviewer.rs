@@ -447,6 +447,23 @@ async fn fast_streams_threads_and_max_verifies() {
     assert!(threads(&t, c2["id"].as_str().unwrap()).await.is_empty());
 }
 
+/// A preview backend that answers what it was asked, and by whom.
+struct Wakes;
+
+#[async_trait::async_trait]
+impl code_control::PreviewBackend for Wakes {
+    async fn create(&self, _: &code_control::model::RepoRow, _: &code_control::model::Change, _: &std::path::Path) -> anyhow::Result<code_control::model::Preview> {
+        anyhow::bail!("not in this test")
+    }
+    async fn delete(&self, _: &code_control::model::RepoRow, _: &code_control::model::Change) -> anyhow::Result<()> {
+        Ok(())
+    }
+    async fn act(&self, _: &code_control::model::Change, action: code_control::ext::PreviewAction, by: &str) -> anyhow::Result<String> {
+        assert_eq!(action, code_control::ext::PreviewAction::Wake);
+        Ok(format!("Woken, as asked by {by}."))
+    }
+}
+
 #[tokio::test]
 async fn roll_commands_in_threads() {
     let t = setup(|_, _| {}).await;
@@ -502,6 +519,12 @@ async fn roll_commands_in_threads() {
     assert_eq!(t.m.messages().len(), before, "paused");
     say("@roll resume").await;
     wait_comments(11).await;
+    // @roll preview in a thread: the change's preview backend acts, as the commenter, and roll
+    // answers in the thread when it's done.
+    t.a.code.set_preview_backend(Arc::new(Wakes));
+    say("@roll preview wake").await;
+    let th5 = wait_comments(13).await;
+    assert!(last_comment(&th5).starts_with("Woken, as asked by "), "{}", last_comment(&th5));
     // review deep: a forced mode, with the learning in the system prompt.
     say("@roll review deep").await;
     let r = roll_reviews(&t, &id, 2).await;
@@ -2034,4 +2057,24 @@ async fn concurrent_public_reviews_on_two_nodes_never_share_the_last_free_one() 
     let u = ok(&t.a, "GET", "/v1/code/owners/acme/usage", None).await;
     assert_eq!(u["totals"]["price_usd"], 0.25, "never over the cap: {u}");
     assert_eq!(u["totals"]["free_reviews"], 1, "the free review was used once");
+}
+
+/// Another product's question (roll apps' "Why did it fail?") runs on the repo owner's model like
+/// a reply: metered as its own kind, and refused past a paused cap without a model call.
+#[tokio::test]
+async fn another_products_question_is_metered_and_capped() {
+    let t = setup(|_, _| {}).await;
+    let schema = json!({ "type": "object", "additionalProperties": false, "required": ["summary"], "properties": { "summary": { "type": "string" } } });
+    let ask = code_control::ai::ModelAsk { kind: "explain", system: "You explain failures.".into(), user: "# Error\n\nexit 1".into(), schema, schema_name: "explanation" };
+    t.m.set(|s, _| s.user().contains("exit 1").then(|| reply(json!({ "summary": "it exited" }), json!({ "input_tokens": 40, "output_tokens": 5 }))));
+    let a = t.a.code.ask_model("acme/api", &ask).await.unwrap();
+    assert_eq!(a.json, Some(json!({ "summary": "it exited" })));
+    let sent = t.m.messages().last().unwrap().clone();
+    assert_eq!((sent.body["output_config"]["effort"].as_str(), sent.system().as_str()), (Some("medium"), "You explain failures."));
+    let u = ok(&t.a, "GET", "/v1/code/owners/acme/usage", None).await;
+    assert_eq!((u["recent"][0]["kind"].as_str(), u["recent"][0]["key_source"].as_str(), u["totals"]["chats"].as_u64()), (Some("explain"), Some("hosted"), Some(1)), "{u}");
+    ok(&t.a, "PUT", "/v1/code/owners/acme/billing", Some(json!({ "monthly_cap_usd": 0.01, "on_cap": "pause" }))).await;
+    let before = t.m.messages().len();
+    assert!(matches!(t.a.code.ask_model("acme/api", &ask).await, Err(code_control::Error::Unprocessable(_))));
+    assert_eq!(t.m.messages().len(), before, "no model call past the cap");
 }

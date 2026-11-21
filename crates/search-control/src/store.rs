@@ -34,6 +34,11 @@
 //!   list of top queries and of queries with no results. A slot is replaced when its time comes
 //!   round again; an index whose analytics go off or that is deleted loses its rows.
 //!
+//! A cluster's password is sealed in its row under the deployment's key ([`Store::seal_passwords`]:
+//! rolld's `ROLL_SECRET_KEY`), bound to the cluster's id, and opened as the row is read. A row
+//! still holding one in the clear (written before sealing) is sealed as it's read. Without a key
+//! (local development) passwords are stored as given, like every secret search keeps.
+//!
 //! The schema is created with `CREATE … IF NOT EXISTS` (`Db::ensure_schema`: on Postgres under
 //! an advisory lock, since nodes start together); it reads the `search.db` files the earlier
 //! catalog wrote.
@@ -42,12 +47,14 @@
 //! microseconds; Postgres on a runtime of its own).
 
 use code_sql::{Db, OptionalExtension, Row, params};
+use search_es::seal::{Sealer, is_sealed};
 use search_server::metrics::Stats;
 use serde::{Deserialize, Serialize};
 
 use std::path::Path;
+use std::sync::{Arc, OnceLock};
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Serialize)]
 pub struct SearchCluster {
     pub id: String,
     /// The tenant's name on the node: the Basic auth user, the host label under the node's
@@ -96,6 +103,66 @@ pub struct SearchCluster {
     /// Who may reach its data plane (Elastic Cloud's traffic filters): canonical CIDRs, each with
     /// an optional description; empty: anyone. Branches start with their parent's.
     pub ip_allowlist: Vec<IpRule>,
+    /// Which web pages may call it from a browser (`http.cors.*`, checked after the
+    /// allowlist); `None`: CORS off. Branches start with their parent's.
+    pub cors: Option<CorsSettings>,
+    /// Requests per minute all its browser keys may make together (`None`: the node's default,
+    /// `search_server::browser::DEFAULT_CLUSTER_PER_MINUTE`).
+    pub browser_per_minute: Option<i64>,
+    /// A new branch whose node hasn't yet marked what it inherited from its parent
+    /// (`search_es::branch`): set when the branch is made, cleared once a load marked it.
+    /// Branches made before marking existed never have it, so their own jobs are left alone.
+    #[serde(skip)]
+    pub inherit_pending: bool,
+}
+
+impl std::fmt::Debug for SearchCluster {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SearchCluster")
+            .field("id", &self.id)
+            .field("name", &self.name)
+            .field("region", &self.region)
+            .field("flavor", &self.flavor)
+            .field("password", &"<redacted>")
+            .field("idle_timeout_s", &self.idle_timeout_s)
+            .field("max_in_flight", &self.max_in_flight)
+            .field("max_body_mb", &self.max_body_mb)
+            .field("destructive_requires_name", &self.destructive_requires_name)
+            .field("parent_id", &self.parent_id)
+            .field("parent_at", &self.parent_at)
+            .field("created_at", &self.created_at)
+            .field("password_rotated_at", &self.password_rotated_at)
+            .field("indices", &self.indices)
+            .field("docs", &self.docs)
+            .field("stored_bytes", &self.stored_bytes)
+            .field("own_bytes", &self.own_bytes)
+            .field("loaded_on", &self.loaded_on)
+            .field("wake_at", &self.wake_at)
+            .field("owner", &self.owner)
+            .field("restored_at", &self.restored_at)
+            .field("ip_allowlist", &self.ip_allowlist)
+            .field("cors", &self.cors)
+            .field("browser_per_minute", &self.browser_per_minute)
+            .finish()
+    }
+}
+
+/// A cluster's `http.cors.*` (docs/search/README.md, "Search from the browser"): as checked by
+/// `search_server::cors::Cors::new`, which keeps origins as browsers send them.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CorsSettings {
+    /// `scheme://host[:port]`, `/regex/` or `*`.
+    pub allow_origin: Vec<String>,
+    /// `http.cors.allow-methods` (`None`: Elasticsearch's default).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub allow_methods: Option<Vec<String>>,
+    /// `http.cors.allow-headers` (`None`: Elasticsearch's default).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub allow_headers: Option<Vec<String>>,
+    /// `http.cors.max-age`, in seconds (`None`: Elasticsearch's 1728000).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_age: Option<i64>,
 }
 
 /// A remote cluster's credentials: a `cross_cluster` API key of cluster `target_id` that
@@ -204,6 +271,14 @@ const LIVE: &str = "deleting = 0 AND deleted_at IS NULL";
 
 pub struct Store {
     db: Db,
+    /// Seals clusters' passwords in their rows ([`Store::seal_passwords`]); unset: as given.
+    sealer: OnceLock<Arc<Sealer>>,
+}
+
+/// What a cluster's sealed password is bound to: its row, so a password can't be moved into
+/// another cluster's.
+fn password_kind(id: &str) -> String {
+    format!("search_cluster_password:{id}")
 }
 
 /// Per-person limits a write checks in its own transaction (`0`: no cap). Only clusters with an
@@ -281,13 +356,20 @@ CREATE TABLE IF NOT EXISTS search_analytics (
   cluster_id TEXT NOT NULL, idx TEXT NOT NULL, res INTEGER NOT NULL, slot INTEGER NOT NULL, at INTEGER NOT NULL, data TEXT NOT NULL,
   PRIMARY KEY (cluster_id, idx, res, slot)
 );
+CREATE TABLE IF NOT EXISTS search_suggestions (
+  cluster_id TEXT NOT NULL, idx TEXT NOT NULL, config TEXT NOT NULL, due_at INTEGER NOT NULL,
+  attempted_at INTEGER, built_at INTEGER, built_index TEXT, count INTEGER NOT NULL DEFAULT 0, took_ms INTEGER NOT NULL DEFAULT 0,
+  digest TEXT, error TEXT, sample TEXT NOT NULL DEFAULT '[]',
+  PRIMARY KEY (cluster_id, idx)
+);
+CREATE INDEX IF NOT EXISTS search_suggestions_due ON search_suggestions (due_at);
 "#;
 
 const COLS: &str = "id, name, region, flavor, password, idle_timeout_s, max_in_flight, max_body_mb, destructive_requires_name, \
-                    parent_id, parent_at, created_at, password_rotated_at, indices, docs, stored_bytes, owner, ip_allowlist";
+                    parent_id, parent_at, created_at, password_rotated_at, indices, docs, stored_bytes, owner, ip_allowlist, cors, browser_per_minute, inherit_pending";
 /// What lookups read: [`COLS`] and where the cluster is loaded.
 const READ_COLS: &str = "id, name, region, flavor, password, idle_timeout_s, max_in_flight, max_body_mb, destructive_requires_name, \
-                         parent_id, parent_at, created_at, password_rotated_at, indices, docs, stored_bytes, owner, loaded_on, own_bytes, wake_at, restored_at, ip_allowlist";
+                         parent_id, parent_at, created_at, password_rotated_at, indices, docs, stored_bytes, owner, loaded_on, own_bytes, wake_at, restored_at, ip_allowlist, cors, browser_per_minute, inherit_pending";
 /// What deleted clusters' reads add to [`READ_COLS`].
 const DELETED_COLS: &str = "deleted_name, deleted_at, purge_at, stored_as, name";
 
@@ -316,21 +398,76 @@ fn row(r: &Row) -> code_sql::Result<SearchCluster> {
         restored_at: r.get(20)?,
         // Unreadable, the cluster can't be looked up (and so can't be reached), never opened up.
         ip_allowlist: serde_json::from_str(&r.get::<_, String>(21)?).map_err(|e| code_sql::Error::Conversion(format!("ip_allowlist: {e}")))?,
+        cors: match r.get::<_, Option<String>>(22)? {
+            Some(j) => Some(serde_json::from_str(&j).map_err(|e| code_sql::Error::Conversion(format!("cors: {e}")))?),
+            None => None,
+        },
+        browser_per_minute: r.get(23)?,
+        inherit_pending: r.get(24)?,
     })
 }
 
 fn deleted_row(r: &Row) -> code_sql::Result<DeletedCluster> {
     let mut c = row(r)?;
-    c.name = r.get(22)?;
+    c.name = r.get(25)?;
     c.loaded_on = None;
     c.wake_at = None;
-    Ok(DeletedCluster { cluster: c, deleted_at: r.get(23)?, purge_at: r.get(24)?, stored_as: r.get(25)?, reserved: r.get(26)? })
+    Ok(DeletedCluster { cluster: c, deleted_at: r.get(26)?, purge_at: r.get(27)?, stored_as: r.get(28)?, reserved: r.get(29)? })
+}
+
+/// What the catalog keeps of an index's query suggestions (`crate::suggestions`): its settings
+/// as of the last look, when it's next due, and its last build.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct SuggestionsRow {
+    pub index: String,
+    /// `search_es::query_suggestions::Config::to_json`.
+    pub config: String,
+    /// Milliseconds.
+    pub due_at: i64,
+    pub attempted_at: Option<i64>,
+    pub built_at: Option<i64>,
+    /// The concrete index the alias points at.
+    pub built_index: Option<String>,
+    pub count: i64,
+    pub took_ms: i64,
+    pub digest: Option<String>,
+    /// Why the last attempt failed.
+    pub error: Option<String>,
+    /// The heaviest suggestions of the last build, as JSON (what the dashboard shows without
+    /// waking the cluster).
+    pub sample: String,
+}
+
+const SUGGESTION_COLS: &str = "idx, config, due_at, attempted_at, built_at, built_index, count, took_ms, digest, error, sample";
+
+fn suggestions_row(r: &Row) -> code_sql::Result<SuggestionsRow> {
+    suggestions_row_at(r, 0)
+}
+
+fn suggestions_row_at(r: &Row, o: usize) -> code_sql::Result<SuggestionsRow> {
+    Ok(SuggestionsRow {
+        index: r.get(o)?,
+        config: r.get(o + 1)?,
+        due_at: r.get(o + 2)?,
+        attempted_at: r.get(o + 3)?,
+        built_at: r.get(o + 4)?,
+        built_index: r.get(o + 5)?,
+        count: r.get(o + 6)?,
+        took_ms: r.get(o + 7)?,
+        digest: r.get(o + 8)?,
+        error: r.get(o + 9)?,
+        sample: r.get(o + 10)?,
+    })
 }
 
 /// One-minute buckets a cluster keeps: 24 hours.
 pub const MINUTE_SLOTS: i64 = 1440;
 /// One-hour buckets a cluster keeps: 14 days.
 pub const HOUR_SLOTS: i64 = 336;
+
+fn cors_json(cors: &Option<CorsSettings>) -> Option<String> {
+    cors.as_ref().map(|c| serde_json::to_string(c).unwrap_or_else(|_| "null".into()))
+}
 
 /// One-hour analytics buckets an index keeps: 7 days.
 pub const ANALYTICS_HOUR_SLOTS: i64 = 168;
@@ -385,6 +522,11 @@ impl Store {
         db.add_column("search_clusters", "owner", "TEXT")?;
         // Clusters made before allowlists are open, as they were.
         db.add_column("search_clusters", "ip_allowlist", "TEXT NOT NULL DEFAULT '[]'")?;
+        // Clusters made before browser search have CORS off, as Elasticsearch does.
+        db.add_column("search_clusters", "cors", "TEXT")?;
+        db.add_column("search_clusters", "browser_per_minute", "INTEGER")?;
+        // Branches made before marking aren't marked (`SearchCluster::inherit_pending`).
+        db.add_column("search_clusters", "inherit_pending", "INTEGER NOT NULL DEFAULT 0")?;
         db.ensure_schema("CREATE INDEX IF NOT EXISTS search_clusters_owner ON search_clusters (owner, created_at)")?;
         // Deleted clusters kept for restoring.
         db.add_column("search_clusters", "deleted_at", "INTEGER")?;
@@ -404,7 +546,53 @@ impl Store {
         )?;
         // Catalogs written before `code-sql` lack nothing but may lack the index on parents
         // (created above); their extra columns (`seq`) and tables (`search_tombstones`) are unused.
-        Ok(Self { db })
+        Ok(Self { db, sealer: OnceLock::new() })
+    }
+
+    /// Seals clusters' passwords under the deployment's key from now on (rolld:
+    /// `ROLL_SECRET_KEY`), each bound to its cluster's id; rows written in the clear before are
+    /// sealed as they're read. The first sealer given stays.
+    pub fn seal_passwords(&self, sealer: Arc<Sealer>) {
+        let _ = self.sealer.set(sealer);
+    }
+
+    /// `c`'s password as its row keeps it.
+    fn stored_password(&self, c: &SearchCluster) -> String {
+        match self.sealer.get() {
+            Some(s) => s.seal_text(&password_kind(&c.id), &c.password),
+            None => c.password.clone(),
+        }
+    }
+
+    /// Opens the passwords of clusters just read. A row still holding its password in the clear
+    /// is sealed in one write, only where it still holds what was read (a rotation since keeps
+    /// its own). A sealed password this node can't open (no key, another key) fails the read,
+    /// naming the cluster, never the value.
+    fn reveal<'a>(&self, clusters: impl IntoIterator<Item = &'a mut SearchCluster>) -> anyhow::Result<()> {
+        let sealer = self.sealer.get();
+        let mut legacy = Vec::new();
+        for c in clusters {
+            if is_sealed(&c.password) {
+                let Some(plain) = sealer.and_then(|s| s.open_text(&password_kind(&c.id), &c.password)) else {
+                    anyhow::bail!("cluster {}'s password is sealed under another key than this node's (ROLL_SECRET_KEY unset or changed)", c.id);
+                };
+                c.password = plain;
+            } else if let Some(s) = sealer {
+                legacy.push((c.id.clone(), s.seal_text(&password_kind(&c.id), &c.password), c.password.clone()));
+            }
+        }
+        if !legacy.is_empty() {
+            let r = self.db.write(|x| {
+                for (id, sealed, plain) in &legacy {
+                    x.execute("UPDATE search_clusters SET password = ?2 WHERE id = ?1 AND password = ?3", params![id, sealed, plain])?;
+                }
+                Ok::<_, code_sql::Error>(())
+            });
+            if let Err(e) = r {
+                tracing::warn!(clusters = legacy.len(), error = %e, "sealing clusters' passwords failed: they stay in the clear until read again");
+            }
+        }
+        Ok(())
     }
 
     /// Inserts a new cluster, unless its name (or id) is taken or its owner is at a cap. The
@@ -412,6 +600,7 @@ impl Store {
     /// Postgres `SERIALIZABLE`, which re-runs one of two racing creates), so two creates at the
     /// cap can't both pass.
     pub async fn insert(&self, c: &SearchCluster, caps: Caps) -> anyhow::Result<Inserted> {
+        let password = self.stored_password(c);
         let r = self.db.write(|x| {
             if let Some(owner) = &c.owner
                 && let Some(over) = over_caps(x, owner, c.idle_timeout_s, caps)?
@@ -419,13 +608,13 @@ impl Store {
                 return Ok(Inserted::Over(over));
             }
             x.execute(
-                &format!("INSERT INTO search_clusters ({COLS}) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)"),
+                &format!("INSERT INTO search_clusters ({COLS}) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21)"),
                 params![
                     c.id,
                     c.name,
                     c.region,
                     c.flavor,
-                    c.password,
+                    password,
                     c.idle_timeout_s,
                     c.max_in_flight,
                     c.max_body_mb,
@@ -438,7 +627,10 @@ impl Store {
                     c.docs,
                     c.stored_bytes,
                     c.owner,
-                    allowlist_json(&c.ip_allowlist)
+                    allowlist_json(&c.ip_allowlist),
+                    cors_json(&c.cors),
+                    c.browser_per_minute,
+                    c.inherit_pending
                 ],
             )
             .map(|_| Inserted::Yes)
@@ -459,6 +651,7 @@ impl Store {
     /// Saves the settings and the password (not the metering figures: see [`Store::set_stats`]).
     /// Making an owned cluster always-on checks `caps.always_on` in the same transaction.
     pub async fn update(&self, c: &SearchCluster, caps: Caps) -> anyhow::Result<Result<(), Over>> {
+        let password = self.stored_password(c);
         Ok(self.db.write(|x| {
             if let Some(owner) = &c.owner
                 && let Some(over) = over_always_on(x, owner, Some(&c.id), c.idle_timeout_s, caps)?
@@ -467,17 +660,19 @@ impl Store {
             }
             x.execute(
                 "UPDATE search_clusters SET flavor = ?2, password = ?3, idle_timeout_s = ?4, max_in_flight = ?5, max_body_mb = ?6,
-                 destructive_requires_name = ?7, password_rotated_at = ?8, ip_allowlist = ?9 WHERE id = ?1",
+                 destructive_requires_name = ?7, password_rotated_at = ?8, ip_allowlist = ?9, cors = ?10, browser_per_minute = ?11 WHERE id = ?1",
                 params![
                     c.id,
                     c.flavor,
-                    c.password,
+                    password,
                     c.idle_timeout_s,
                     c.max_in_flight,
                     c.max_body_mb,
                     c.destructive_requires_name,
                     c.password_rotated_at,
-                    allowlist_json(&c.ip_allowlist)
+                    allowlist_json(&c.ip_allowlist),
+                    cors_json(&c.cors),
+                    c.browser_per_minute
                 ],
             )?;
             Ok::<_, code_sql::Error>(Ok(()))
@@ -502,7 +697,9 @@ impl Store {
     }
 
     async fn one(&self, filter: &str, arg: &str) -> anyhow::Result<Option<SearchCluster>> {
-        Ok(self.db.read(|x| x.query_row(&format!("SELECT {READ_COLS} FROM search_clusters WHERE {filter} = ?1 AND {LIVE}"), params![arg], row).optional())?)
+        let mut c = self.db.read(|x| x.query_row(&format!("SELECT {READ_COLS} FROM search_clusters WHERE {filter} = ?1 AND {LIVE}"), params![arg], row).optional())?;
+        self.reveal(c.iter_mut())?;
+        Ok(c)
     }
 
     pub async fn get(&self, id: &str) -> anyhow::Result<Option<SearchCluster>> {
@@ -516,10 +713,12 @@ impl Store {
 
     async fn many(&self, filter: &str, arg: Option<&str>) -> anyhow::Result<Vec<SearchCluster>> {
         let sql = format!("SELECT {READ_COLS} FROM search_clusters WHERE {LIVE} {filter} ORDER BY created_at, rowid");
-        Ok(self.db.read(|x| match arg {
+        let mut v = self.db.read(|x| match arg {
             Some(a) => x.query(&sql, params![a], row),
             None => x.query(&sql, params![], row),
-        })?)
+        })?;
+        self.reveal(v.iter_mut())?;
+        Ok(v)
     }
 
     pub async fn list(&self) -> anyhow::Result<Vec<SearchCluster>> {
@@ -552,6 +751,12 @@ impl Store {
         Ok(())
     }
 
+    /// Sets or clears [`SearchCluster::inherit_pending`].
+    pub async fn set_inherit_pending(&self, name: &str, pending: bool) -> anyhow::Result<()> {
+        self.db.write(|x| x.execute("UPDATE search_clusters SET inherit_pending = ?2 WHERE name = ?1", params![name, pending]))?;
+        Ok(())
+    }
+
     /// When cluster `name` must load again to run a background job that comes due (Unix ms;
     /// `None`: no job, or it is loaded and its scheduler runs them).
     pub async fn set_wake_at(&self, name: &str, at: Option<i64>) -> anyhow::Result<()> {
@@ -562,7 +767,9 @@ impl Store {
     /// Sleeping clusters with a background job due by `now_ms`.
     pub async fn due_wakes(&self, now_ms: i64) -> anyhow::Result<Vec<SearchCluster>> {
         let sql = format!("SELECT {READ_COLS} FROM search_clusters WHERE {LIVE} AND wake_at IS NOT NULL AND wake_at <= ?1 ORDER BY wake_at");
-        Ok(self.db.read(|x| x.query(&sql, params![now_ms], row))?)
+        let mut v = self.db.read(|x| x.query(&sql, params![now_ms], row))?;
+        self.reveal(v.iter_mut())?;
+        Ok(v)
     }
 
     /// Hides a cluster from lookups while its data is deleted (`on`), or shows it again (the
@@ -589,22 +796,28 @@ impl Store {
     /// Deleted clusters kept for restoring (of `owner` only, when given), newest first.
     pub async fn list_deleted(&self, owner: Option<&str>) -> anyhow::Result<Vec<DeletedCluster>> {
         let sql = format!("SELECT {READ_COLS}, {DELETED_COLS} FROM search_clusters WHERE deleted_at IS NOT NULL {} ORDER BY deleted_at DESC, rowid DESC", if owner.is_some() { "AND owner = ?1" } else { "" });
-        Ok(self.db.read(|x| match owner {
+        let mut v = self.db.read(|x| match owner {
             Some(o) => x.query(&sql, params![o], deleted_row),
             None => x.query(&sql, params![], deleted_row),
-        })?)
+        })?;
+        self.reveal(v.iter_mut().map(|d| &mut d.cluster))?;
+        Ok(v)
     }
 
     /// The deleted cluster `id`, if it is kept.
     pub async fn get_deleted(&self, id: &str) -> anyhow::Result<Option<DeletedCluster>> {
         let sql = format!("SELECT {READ_COLS}, {DELETED_COLS} FROM search_clusters WHERE id = ?1 AND deleted_at IS NOT NULL");
-        Ok(self.db.read(|x| x.query_row(&sql, params![id], deleted_row).optional())?)
+        let mut d = self.db.read(|x| x.query_row(&sql, params![id], deleted_row).optional())?;
+        self.reveal(d.iter_mut().map(|d| &mut d.cluster))?;
+        Ok(d)
     }
 
     /// Deleted clusters whose window ended by `now` (Unix seconds).
     pub async fn due_purges(&self, now: i64) -> anyhow::Result<Vec<DeletedCluster>> {
         let sql = format!("SELECT {READ_COLS}, {DELETED_COLS} FROM search_clusters WHERE deleted_at IS NOT NULL AND purge_at <= ?1 ORDER BY purge_at");
-        Ok(self.db.read(|x| x.query(&sql, params![now], deleted_row))?)
+        let mut v = self.db.read(|x| x.query(&sql, params![now], deleted_row))?;
+        self.reveal(v.iter_mut().map(|d| &mut d.cluster))?;
+        Ok(v)
     }
 
     /// Claims deleted cluster `id` for a restore (`restore_as`: the name it comes back under,
@@ -697,6 +910,7 @@ impl Store {
             x.execute("DELETE FROM search_metrics WHERE cluster_id = ?1", params![id])?;
             x.execute("DELETE FROM search_slowlog WHERE cluster_id = ?1", params![id])?;
             x.execute("DELETE FROM search_analytics WHERE cluster_id = ?1", params![id])?;
+            x.execute("DELETE FROM search_suggestions WHERE cluster_id = ?1", params![id])?;
             Ok(true)
         })?)
     }
@@ -760,6 +974,7 @@ impl Store {
             x.execute("DELETE FROM search_metrics WHERE cluster_id = ?1", params![id])?;
             x.execute("DELETE FROM search_slowlog WHERE cluster_id = ?1", params![id])?;
             x.execute("DELETE FROM search_analytics WHERE cluster_id = ?1", params![id])?;
+            x.execute("DELETE FROM search_suggestions WHERE cluster_id = ?1", params![id])?;
             x.execute("DELETE FROM search_storage WHERE cluster_id = ?1", params![id])?;
             x.execute("DELETE FROM search_remotes WHERE cluster_id = ?1", params![id])?;
             x.execute("DELETE FROM search_revokes WHERE cluster_id = ?1", params![id])
@@ -812,13 +1027,18 @@ impl Store {
             return Ok(());
         }
         self.db.write(|x| {
+            // A suggestions row holds query text too (its sample): it goes with the analytics.
             for i in cleared {
                 x.execute("DELETE FROM search_analytics WHERE cluster_id = ?1 AND idx = ?2", params![id, i])?;
+                x.execute("DELETE FROM search_suggestions WHERE cluster_id = ?1 AND idx = ?2", params![id, i])?;
             }
             if let Some(on) = enabled {
-                let kept: Vec<String> = x.query("SELECT DISTINCT idx FROM search_analytics WHERE cluster_id = ?1", params![id], |r| r.get(0))?;
+                let mut kept: Vec<String> = x.query("SELECT DISTINCT idx FROM search_analytics WHERE cluster_id = ?1", params![id], |r| r.get(0))?;
+                let suggested: Vec<String> = x.query("SELECT idx FROM search_suggestions WHERE cluster_id = ?1", params![id], |r| r.get(0))?;
+                kept.extend(suggested);
                 for i in kept.iter().filter(|i| !on.contains(i)) {
                     x.execute("DELETE FROM search_analytics WHERE cluster_id = ?1 AND idx = ?2", params![id, i])?;
+                    x.execute("DELETE FROM search_suggestions WHERE cluster_id = ?1 AND idx = ?2", params![id, i])?;
                 }
             }
             for (idx, hour, bucket) in hours {
@@ -866,6 +1086,66 @@ impl Store {
     /// The indices a cluster keeps analytics of.
     pub async fn analytics_indices(&self, id: &str) -> anyhow::Result<Vec<String>> {
         Ok(self.db.read(|x| x.query("SELECT DISTINCT idx FROM search_analytics WHERE cluster_id = ?1 ORDER BY idx", params![id], |r| r.get(0)))?)
+    }
+
+    /// A cluster's query suggestion rows (`crate::suggestions`), by index.
+    pub async fn suggestions(&self, id: &str) -> anyhow::Result<Vec<SuggestionsRow>> {
+        let sql = format!("SELECT {SUGGESTION_COLS} FROM search_suggestions WHERE cluster_id = ?1 ORDER BY idx");
+        Ok(self.db.read(|x| x.query(&sql, params![id], suggestions_row))?)
+    }
+
+    /// Index `idx`'s query suggestion row.
+    pub async fn suggestion(&self, id: &str, idx: &str) -> anyhow::Result<Option<SuggestionsRow>> {
+        let sql = format!("SELECT {SUGGESTION_COLS} FROM search_suggestions WHERE cluster_id = ?1 AND idx = ?2");
+        Ok(self.db.read(|x| x.query_row(&sql, params![id, idx], suggestions_row).optional())?)
+    }
+
+    /// Writes a query suggestion row whole.
+    pub async fn put_suggestion(&self, id: &str, r: &SuggestionsRow) -> anyhow::Result<()> {
+        self.db.write(|x| {
+            x.execute(
+                "INSERT INTO search_suggestions (cluster_id, idx, config, due_at, attempted_at, built_at, built_index, count, took_ms, digest, error, sample)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
+                 ON CONFLICT (cluster_id, idx) DO UPDATE SET config = excluded.config, due_at = excluded.due_at, attempted_at = excluded.attempted_at,
+                   built_at = excluded.built_at, built_index = excluded.built_index, count = excluded.count, took_ms = excluded.took_ms,
+                   digest = excluded.digest, error = excluded.error, sample = excluded.sample",
+                params![id, r.index, r.config, r.due_at, r.attempted_at, r.built_at, r.built_index, r.count, r.took_ms, r.digest, r.error, r.sample],
+            )
+        })?;
+        Ok(())
+    }
+
+    /// Forgets index `idx`'s query suggestions (turned off, or the index is gone).
+    pub async fn delete_suggestion(&self, id: &str, idx: &str) -> anyhow::Result<()> {
+        self.db.write(|x| x.execute("DELETE FROM search_suggestions WHERE cluster_id = ?1 AND idx = ?2", params![id, idx]))?;
+        Ok(())
+    }
+
+    /// Sets when index `idx`'s suggestions are next due (ms), and when they were last looked
+    /// at when `attempted_at` is given (a check that found nothing to change).
+    pub async fn set_suggestion_due(&self, id: &str, idx: &str, due_at: i64, attempted_at: Option<i64>) -> anyhow::Result<()> {
+        self.db.write(|x| {
+            x.execute(
+                "UPDATE search_suggestions SET due_at = ?3, attempted_at = COALESCE(?4, attempted_at) WHERE cluster_id = ?1 AND idx = ?2",
+                params![id, idx, due_at, attempted_at],
+            )
+        })?;
+        Ok(())
+    }
+
+    /// Suggestion rows of live clusters due by `now_ms`, soonest first: (cluster id, row).
+    pub async fn due_suggestions(&self, now_ms: i64) -> anyhow::Result<Vec<(String, SuggestionsRow)>> {
+        let cols: String = SUGGESTION_COLS.split(", ").map(|c| format!("s.{c}")).collect::<Vec<_>>().join(", ");
+        let sql = format!(
+            "SELECT s.cluster_id, {cols} FROM search_suggestions s JOIN search_clusters c ON c.id = s.cluster_id
+             WHERE c.deleting = 0 AND c.deleted_at IS NULL AND s.due_at <= ?1 ORDER BY s.due_at LIMIT 100"
+        );
+        Ok(self.db.read(|x| {
+            x.query(&sql, params![now_ms], |r| {
+                let id: String = r.get(0)?;
+                Ok((id, suggestions_row_at(r, 1)?))
+            })
+        })?)
     }
 
     /// The latest figures metering saw. A change of `stored_bytes` is logged at `at` for the
@@ -1082,6 +1362,9 @@ mod tests {
             owner: None,
             restored_at: None,
             ip_allowlist: Vec::new(),
+            cors: None,
+            browser_per_minute: None,
+            inherit_pending: false,
         }
     }
 
@@ -1307,6 +1590,43 @@ mod tests {
         s.delete("srch_o").await.unwrap();
         all(&s).await;
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// With a key, a password is sealed in its row and bound to it; a row written in the clear
+    /// is sealed as it's read.
+    #[tokio::test]
+    async fn passwords_are_sealed_in_their_rows() {
+        let s = Store::memory().unwrap();
+        let stored = |id: &str| s.db.read(|x| x.query_row("SELECT password FROM search_clusters WHERE id = ?1", params![id], |r| r.get::<_, String>(0))).unwrap();
+        // Written before the node had a key: in the clear.
+        s.insert(&cluster("srch_l", "legacy"), Caps::NONE).await.unwrap();
+        assert_eq!(stored("srch_l"), "pw");
+        s.seal_passwords(Sealer::from_secret("0123456789abcdef0123456789abcdef").unwrap());
+        let mut c = cluster("srch_s", "sealed");
+        c.password = "hunter2-hunter2".into();
+        s.insert(&c, Caps::NONE).await.unwrap();
+        assert!(is_sealed(&stored("srch_s")) && !stored("srch_s").contains("hunter2"));
+        assert_eq!(s.get("srch_s").await.unwrap().unwrap().password, "hunter2-hunter2");
+
+        assert_eq!(s.by_name("legacy").await.unwrap().unwrap().password, "pw");
+        let migrated = stored("srch_l");
+        assert!(is_sealed(&migrated), "sealed on its first read");
+        assert_eq!(s.list().await.unwrap().iter().map(|c| c.password.as_str()).collect::<Vec<_>>(), ["pw", "hunter2-hunter2"]);
+        assert_eq!(stored("srch_l"), migrated, "sealed once");
+
+        // Another cluster's sealed password doesn't open in this row.
+        let moved = stored("srch_s");
+        s.db.write(|x| x.execute("UPDATE search_clusters SET password = ?2 WHERE id = ?1", params!["srch_l", moved])).unwrap();
+        let e = s.get("srch_l").await.unwrap_err().to_string();
+        assert!(e.contains("srch_l") && !e.contains("hunter2"), "{e}");
+    }
+
+    #[test]
+    fn debug_hides_the_password() {
+        let mut c = cluster("srch_d", "debug");
+        c.password = "hunter2-hunter2".into();
+        let printed = format!("{c:?}");
+        assert!(printed.contains("srch_d") && !printed.contains("hunter2"), "{printed}");
     }
 
     #[test]

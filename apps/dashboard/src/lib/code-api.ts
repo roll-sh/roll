@@ -291,6 +291,54 @@ export interface Blocker {
   path?: string;
   line?: number;
   fingerprint?: string;
+  /** `secret_unstored`: whether it works, as its provider answered (roll secrets' validity checks, when the project has them on). */
+  validity?: CredentialValidity;
+}
+
+/** A credential's validity check (docs/secrets.md, "Is it live?"): never its value. */
+export interface CredentialValidity {
+  fingerprint: string;
+  /** `invalid`: revoked, deleted or never real. */
+  result: "live" | "invalid" | "unknown";
+  /** The provider's account (an AWS account, a GitHub login, a Slack team). */
+  account?: string;
+  checked_at?: number;
+  /** A live one's kind has a roll rotator: roll secrets' AWS IAM users, or a project's GitHub App tokens. */
+  rotator?: "aws-iam" | "github-app";
+}
+
+/** Where a `secret_unstored` notice's credential would be stored ("Store in roll"); never its value. */
+export interface UnstoredTarget {
+  kind: string;
+  /** Where the change adds it (1-based line). */
+  file: string;
+  line: number;
+  fingerprint: string;
+  /** The suggested key. */
+  key: string;
+  /** The project roll secrets trusts the repo for. */
+  project: { id: string; name: string };
+  /** Its environments the caller may read, in order. */
+  environments: string[];
+  /** The one to suggest (roll.toml's checks' environment, else `development`); null when it has neither. */
+  environment: string | null;
+  /** The folder (roll.toml's, else `/`). */
+  path: string;
+}
+
+/** What storing it did: where it went and the read to write instead. Never the value. */
+export interface UnstoredStored {
+  key: string;
+  project: string;
+  environment: string;
+  path: string;
+  file: string;
+  line: number;
+  /** The file's language's read of the key (`process.env.KEY`). */
+  replacement: string;
+  /** The environment's change number, or the change request opened where the folder needs approval. */
+  change: number | null;
+  request: string | null;
 }
 
 export type EntryState = "waiting" | "testing" | "bisecting" | "landing" | "ejected" | "landed";
@@ -407,6 +455,10 @@ export interface PreviewEnvironment {
   issues?: string[];
   /** What a screen reader can't name on that page. */
   page_links?: { checked: number; broken: { path: string; status: number }[] };
+  /** Its routes (from its traces) clearly slower than the same routes on main's preview; a name is the preview's code's words. */
+  /** Its error groups main's preview doesn't have; a title is the preview's code's words. */
+  new_errors?: { branch: string; total: number; errors: { service: string; title: string }[] };
+  slower_routes?: { branch: string; routes: { name: string; p50_ms: number; main_p50_ms: number; /** The span whose time grew most: [name, ms, main's ms]. */ grew?: [string, number, number]; budget_ms?: number }[] };
   page_a11y?: { issues: { kind: string; count: number; first: string | null; impact?: "minor" | "moderate" | "serious" | "critical" | null; help?: string | null }[]; lang: boolean; title: boolean; seo?: string[] };
 }
 
@@ -718,6 +770,7 @@ export interface ReviewApp {
   id: string;
   owner: string;
   name: string;
+  /** Scheme and host only (`https://hooks.example.com`): the URL is kept sealed and never returned. */
   webhook_url: string;
   events: string[];
   /** Full names. */
@@ -956,6 +1009,7 @@ export type WebhookEvent = (typeof WEBHOOK_EVENTS)[number];
 
 export interface Webhook {
   id: string;
+  /** Scheme and host only (`https://hooks.example.com`): the URL is kept sealed and never returned. */
   url: string;
   /** Event names, or `["*"]` for all of them. */
   events: string[];
@@ -1386,6 +1440,10 @@ export function createCodeApi(
       call<Change>("POST", `${ch(id)}/checks`, check),
     createPreview: (id: string) => call<Change>("POST", `${ch(id)}/preview`),
     deletePreview: (id: string) => call<Change>("DELETE", `${ch(id)}/preview`),
+    /** "Store in roll" for a `secret_unstored` notice: where it would go, then storing it as the caller. */
+    unstoredTarget: (id: string, fingerprint: string) => call<UnstoredTarget>("GET", `${ch(id)}/unstored/${enc(fingerprint)}`),
+    storeUnstored: (id: string, fingerprint: string, body: { key?: string; environment?: string; path?: string }) =>
+      call<UnstoredStored>("POST", `${ch(id)}/unstored/${enc(fingerprint)}/store`, body),
 
     reviews: (id: string) => call<Review[]>("GET", `${ch(id)}/reviews`),
     submitReview: (id: string, body: { verdict: Verdict; body?: string; comments?: NewReviewComment[] }) =>

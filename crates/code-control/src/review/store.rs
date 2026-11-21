@@ -4,6 +4,7 @@
 
 use super::{Comment, Review, Reviewer, ReviewerKind, Thread, Verdict};
 use crate::db::{Db, now};
+use crate::kept::Kept;
 use anyhow::Result;
 use code_sql::{OptionalExtension, Row, params};
 
@@ -97,15 +98,19 @@ CREATE TABLE IF NOT EXISTS review_apps (
     owner_id TEXT NOT NULL,
     name TEXT NOT NULL,
     name_lower TEXT NOT NULL,
+    -- Sealed to the app when url_sealed is 1 (crate::kept).
     webhook_url TEXT NOT NULL,
     events TEXT NOT NULL,
     repos TEXT NOT NULL,
     required INTEGER NOT NULL DEFAULT 0,
     active INTEGER NOT NULL DEFAULT 1,
+    -- Sealed to the app when secret_sealed is 1 (crate::kept).
     secret TEXT NOT NULL,
     token_hash TEXT NOT NULL UNIQUE,
     created_at INTEGER NOT NULL,
     updated_at INTEGER NOT NULL,
+    secret_sealed INTEGER NOT NULL DEFAULT 0,
+    url_sealed INTEGER NOT NULL DEFAULT 0,
     UNIQUE (owner_id, name_lower)
 );
 CREATE TABLE IF NOT EXISTS review_deliveries (
@@ -257,30 +262,32 @@ pub struct AppRow {
     pub id: String,
     pub owner_id: String,
     pub name: String,
-    pub webhook_url: String,
+    /// Where deliveries go, as it's kept (`Debug` never shows it).
+    pub webhook_url: Kept,
     pub events: Vec<String>,
     /// Repo ids; empty: every repo of the owner.
     pub repos: Vec<String>,
     pub required: bool,
     pub active: bool,
-    pub secret: String,
+    /// The signing secret as it's kept (`Debug` never shows it).
+    pub secret: Kept,
     pub created_at: i64,
     pub updated_at: i64,
 }
 
-const APP_COLS: &str = "id, owner_id, name, webhook_url, events, repos, required, active, secret, created_at, updated_at";
+const APP_COLS: &str = "id, owner_id, name, webhook_url, events, repos, required, active, secret, created_at, updated_at, secret_sealed, url_sealed";
 
 fn app_row(r: &Row<'_>) -> code_sql::Result<AppRow> {
     Ok(AppRow {
         id: r.get(0)?,
         owner_id: r.get(1)?,
         name: r.get(2)?,
-        webhook_url: r.get(3)?,
+        webhook_url: Kept::from_columns(r.get(3)?, r.get(12)?),
         events: serde_json::from_str(&r.get::<_, String>(4)?).unwrap_or_default(),
         repos: serde_json::from_str(&r.get::<_, String>(5)?).unwrap_or_default(),
         required: r.get::<_, i64>(6)? != 0,
         active: r.get::<_, i64>(7)? != 0,
-        secret: r.get(8)?,
+        secret: Kept::from_columns(r.get(8)?, r.get(11)?),
         created_at: r.get(9)?,
         updated_at: r.get(10)?,
     })
@@ -626,20 +633,24 @@ impl Db {
     // ── review apps ──
 
     pub fn insert_app(&self, a: &AppRow, token_hash: &str) -> Result<bool> {
+        let (secret, sealed) = a.secret.columns();
+        let (url, url_sealed) = a.webhook_url.columns();
         let n = self.sql().execute(
-            "INSERT OR IGNORE INTO review_apps (id, owner_id, name, name_lower, webhook_url, events, repos, required, active, secret, \
-             token_hash, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "INSERT OR IGNORE INTO review_apps (id, owner_id, name, name_lower, webhook_url, url_sealed, events, repos, required, active, secret, \
+             secret_sealed, token_hash, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             params![
                 a.id,
                 a.owner_id,
                 a.name,
                 a.name.to_ascii_lowercase(),
-                a.webhook_url,
+                url,
+                url_sealed,
                 serde_json::to_string(&a.events)?,
                 serde_json::to_string(&a.repos)?,
                 a.required,
                 a.active,
-                a.secret,
+                secret,
+                sealed,
                 token_hash,
                 a.created_at,
                 a.updated_at
@@ -652,6 +663,7 @@ impl Db {
     /// app is gone).
     pub fn update_app(&self, a: &AppRow) -> Result<bool> {
         let (name_lower, events, repos) = (a.name.to_ascii_lowercase(), serde_json::to_string(&a.events)?, serde_json::to_string(&a.repos)?);
+        let (url, url_sealed) = a.webhook_url.columns();
         self.write(|c| {
             // Checked first rather than ignored: a failed statement ends a Postgres transaction.
             let taken = c
@@ -667,18 +679,19 @@ impl Db {
                 return Ok(false);
             }
             let n = c.execute(
-                "UPDATE review_apps SET name = ?, name_lower = ?, webhook_url = ?, events = ?, repos = ?, required = ?, active = ?, \
-                 updated_at = ? WHERE id = ?",
-                params![a.name, name_lower, a.webhook_url, events, repos, a.required, a.active, now(), a.id],
+                "UPDATE review_apps SET name = ?, name_lower = ?, webhook_url = ?, url_sealed = ?, events = ?, repos = ?, required = ?, \
+                 active = ?, updated_at = ? WHERE id = ?",
+                params![a.name, name_lower, url, url_sealed, events, repos, a.required, a.active, now(), a.id],
             )?;
             Ok(n == 1)
         })
     }
 
-    pub fn rotate_app(&self, id: &str, secret: &str, token_hash: &str) -> Result<()> {
+    pub fn rotate_app(&self, id: &str, secret: &Kept, token_hash: &str) -> Result<()> {
+        let (secret, sealed) = secret.columns();
         self.sql().execute(
-            "UPDATE review_apps SET secret = ?, token_hash = ?, updated_at = ? WHERE id = ?",
-            params![secret, token_hash, now(), id],
+            "UPDATE review_apps SET secret = ?, secret_sealed = ?, token_hash = ?, updated_at = ? WHERE id = ?",
+            params![secret, sealed, token_hash, now(), id],
         )?;
         Ok(())
     }

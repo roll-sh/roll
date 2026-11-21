@@ -125,6 +125,8 @@ pub fn open(args: &crate::Args, home: &std::path::Path, auth: &crate::auth::Auth
     // People's sessions are their memberships' grants (docs/members.md); a membership change goes
     // in the audit log, and a removal revokes the person's tokens confined to the project (D7).
     let _ = access.workspace.set(workspace.clone());
+    // An invite made with a token is checked against that token as it is when it's accepted.
+    workspace.set_grants(access.clone() as Arc<dyn roll_auth::Grants>);
     let a = access.clone();
     workspace.on_event(Box::new(move |e| a.member_event(e).map_err(|e| e.to_string())));
     // What a crash left between a change and its event's effects, now and then.

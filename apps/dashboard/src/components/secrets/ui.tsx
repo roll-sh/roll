@@ -1,10 +1,12 @@
 import { AtSign, BadgeCheck, Braces, Check, Clock, Copy, CornerDownRight, Eye, EyeOff, Import as ImportIcon, Link2, MessageSquare, Timer, User } from "lucide-react";
 import { useReducedMotion } from "@roll/brand";
 import { useWorkspace } from "@/lib/workspace-store";
-import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useRef, useState, useSyncExternalStore, type ReactNode } from "react";
+import { ROLL_API } from "@/lib/roll-api";
 import type { AuditEntry, Cell, Link, Problem, Secret, Totp } from "@/lib/secrets-api";
 import { KIND_ICON } from "../workspace/kind";
 import type { ResourceKind } from "@/lib/workspace-api";
+import { useInstallLine } from "@/lib/install-line";
 
 /** The Secrets surface's controls, on the dashboard frame's tokens (docs/code/agents-design.md). */
 export const button =
@@ -89,8 +91,26 @@ export function Warnings({ items, className = "" }: { items: string[]; className
   );
 }
 
-/** An empty state that teaches: what goes here, and the CLI way to do it. */
-export function Teach({ title, children, cli }: { title: string; children: ReactNode; cli?: string[] }) {
+const still = () => () => {};
+
+/**
+ * How the CLI signs in to this roll, before an empty state's CLI lines: `roll login` with the API
+ * as this browser reaches it (relative to the page's origin); later commands go to the last
+ * login's roll. None on the server, which has no origin.
+ */
+function useCliLogin(): string[] {
+  const api = useSyncExternalStore(still, () => new URL(ROLL_API, window.location.origin).href.replace(/\/$/, ""), () => null);
+  return api ? [`roll login ${api}`] : [];
+}
+
+/**
+ * An empty state that teaches: what goes here, and the CLI way to do it. The CLI lines start with
+ * how to install roll (`install`), then signing in to this roll (`login`).
+ */
+export function Teach({ title, children, cli, install = false, login = false }: { title: string; children: ReactNode; cli?: string[]; install?: boolean; login?: boolean }) {
+  const installLine = useInstallLine();
+  const signIn = useCliLogin();
+  if (cli) cli = [...(install ? [installLine] : []), ...(login ? signIn : []), ...cli];
   return (
     <div className="rise mx-auto w-full max-w-[520px] px-4 py-14 text-center">
       <h2 className="text-[18px] font-semibold tracking-[-0.045em]">{title}</h2>

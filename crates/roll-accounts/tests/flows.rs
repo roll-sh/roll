@@ -43,6 +43,8 @@ impl Owners for FakeOwners {
 struct Seen {
     challenge: HashMap<String, String>,
     nonce: HashMap<String, String>,
+    /// The fake GitHub's login for its user (`Ada-L` when not set): renamed by a test.
+    github_login: Option<String>,
 }
 
 struct Env {
@@ -98,7 +100,7 @@ async fn fake_providers(seen: Arc<Mutex<Seen>>) -> String {
     let base = Arc::new(Mutex::new(String::new()));
     let app = Router::new()
         .route("/token", post(token))
-        .route("/user", get(|| async { Json(json!({ "id": 42, "login": "Ada-L", "name": "Ada Lovelace" })) }))
+        .route("/user", get(|State(s): State<S>| async move { Json(json!({ "id": 42, "login": s.seen.lock().unwrap().github_login.clone().unwrap_or_else(|| "Ada-L".into()), "name": "Ada Lovelace" })) }))
         .route(
             "/user/emails",
             get(|| async { Json(json!([{ "email": "ada@old.example", "primary": false, "verified": true }, { "email": "ada@example.com", "primary": true, "verified": true }])) }),
@@ -316,9 +318,13 @@ async fn github_and_google_sign_in() {
     assert_eq!((a.status, location(&a)), (StatusCode::SEE_OTHER, "https://roll.test/dashboard/code"));
     let me = env.call(&mut b, Method::GET, "/v1/accounts/me", None).await;
     assert_eq!((me.json["handle"].as_str(), me.json["identities"][0]["login"].as_str()), (Some("ada-l"), Some("Ada-L")), "{}", me.json);
-    // Once linked, the identity signs in without an invite.
-    let a = env.oauth(&mut Browser::default(), "github", json!({})).await;
+    // Once linked, the identity signs in without an invite; a login renamed on GitHub since follows.
+    env.seen.lock().unwrap().github_login = Some("Ada-New".into());
+    let mut b = Browser::default();
+    let a = env.oauth(&mut b, "github", json!({})).await;
     assert_eq!(location(&a), "https://roll.test/dashboard");
+    let me = env.call(&mut b, Method::GET, "/v1/accounts/me", None).await;
+    assert_eq!(me.json["identities"][0]["login"].as_str(), Some("Ada-New"), "{}", me.json);
 
     // No invite, no account: refused.
     let a = env.oauth(&mut Browser::default(), "google", json!({})).await;
@@ -1690,6 +1696,19 @@ async fn a_person_deletes_their_own_account() {
     let signed = env.email_sign_in(&mut ada, "ada@example.com", Some(&env.invite("ada@example.com").await)).await.json;
     let (id, handle) = (signed["user"]["id"].as_str().unwrap().to_string(), signed["user"]["handle"].as_str().unwrap().to_string());
 
+    // Other products hear of a deletion from its outbox, until each has acted (docs/members.md:
+    // the workspace removes their memberships). The first try fails here; the next run delivers.
+    let heard = Arc::new(std::sync::Mutex::new((0u32, Vec::<String>::new())));
+    let h = heard.clone();
+    env.accounts.on_deleted(Box::new(move |user| {
+        let mut h = h.lock().unwrap();
+        h.0 += 1;
+        if h.0 == 1 {
+            return Err("the workspace is busy".into());
+        }
+        h.1.push(user.to_string());
+        Ok(())
+    }));
     env.accounts.set_sudo_window(0);
     assert_eq!(delete(&env, &mut ada, &handle).await.json["code"], "reauth_required", "a stolen cookie alone can't");
     env.accounts.set_sudo_window(2 * 60 * 60 * 1000);
@@ -1701,6 +1720,11 @@ async fn a_person_deletes_their_own_account() {
     assert!(gone.headers.get(header::SET_COOKIE).unwrap().to_str().unwrap().contains("Max-Age=0"));
     assert_eq!(env.call(&mut ada, Method::GET, "/v1/accounts/me", None).await.status, StatusCode::UNAUTHORIZED);
     assert!(env.accounts.person(&id).unwrap().is_none(), "its tokens act as nobody");
+    assert!(heard.lock().unwrap().1.is_empty(), "the first try failed, and it's kept");
+    env.accounts.run_deletions();
+    assert_eq!(heard.lock().unwrap().1, [id.as_str()], "delivered once, on the next run");
+    env.accounts.run_deletions();
+    assert_eq!(heard.lock().unwrap().1.len(), 1, "and never again");
     assert!(mails_about(&env.outbox, "ada@example.com", "was deleted", 1).await[0].1.contains(&handle));
     // Gone from the admin's list, and no admin turns it back on.
     let people = env.call(&mut root, Method::GET, "/v1/accounts/users", None).await.json;

@@ -1,7 +1,7 @@
 //! End-to-end tests for serverless Postgres: a real control plane, proxy and Postgres computes in
 //! Docker, driven over the wire protocol with a real driver and over the HTTP API.
 //!
-//! They need Docker and the `postgres:{16,17,18}-alpine` images, so they only run with
+//! They need Docker and the compute images (`pg_control::config::IMAGES`), so they only run with
 //! `ROLL_E2E=1` (`scripts/test-postgres.sh` sets it). Optional:
 //! - `ROLL_E2E_BIND=0.0.0.0` where containers can't reach the host's loopback (Linux)
 //! - `ROLL_E2E_S3_BUCKET` (+ `ROLL_E2E_S3_ENDPOINT`, AWS env vars) to use S3 instead of a directory
@@ -10,7 +10,8 @@ use futures::{SinkExt, StreamExt};
 use pg_control::compute::container_name;
 use pg_control::history::Target;
 use pg_control::store::{Branch, Endpoint, EndpointState, LocalState, Project};
-use pg_control::{Config, Control, api, reconciler};
+use pg_control::{Config, Control, SqlAs, api, reconciler};
+use pg_proxy::decoy::learn::{self, Probe, probes, shape};
 use pg_proxy::{Proxy, ProxyConfig};
 use pg_storage::{Lsn, StorageConfig};
 use serde_json::{Value, json};
@@ -20,6 +21,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio_postgres::error::SqlState;
+use tokio::io::AsyncWriteExt;
 use tokio_postgres::{Client, NoTls};
 
 // ── harness ──
@@ -54,7 +56,12 @@ fn unique(prefix: &str) -> String {
 
 macro_rules! harness {
     () => {
-        match Harness::start().await {
+        harness!(false)
+    };
+    // Whether it learns the compute images' answers at start, as rolld does (three throwaway
+    // computes: only the decoy test needs them).
+    ($learn:expr) => {
+        match Harness::start($learn).await {
             Some(h) => h,
             None => return,
         }
@@ -62,7 +69,7 @@ macro_rules! harness {
 }
 
 impl Harness {
-    async fn start() -> Option<Self> {
+    async fn start(learn_answers_at_start: bool) -> Option<Self> {
         if std::env::var("ROLL_E2E").is_err() {
             eprintln!("skipped: set ROLL_E2E=1 to run (needs Docker)");
             return None;
@@ -77,6 +84,7 @@ impl Harness {
 
         let mut config = Config::local(home.clone());
         config.public_port = proxy_listen.port();
+        config.learn_answers_at_start = learn_answers_at_start;
         config.internal_url = format!("http://host.docker.internal:{api_port}");
         if let Ok(bucket) = std::env::var("ROLL_E2E_S3_BUCKET") {
             config.storage = StorageConfig::S3 {
@@ -464,8 +472,11 @@ async fn read_only_sql_cannot_write() {
     let db = h.project(None).await;
     let c = h.connect(&db, &db.ep.id).await;
     seed(&c, 10).await;
-    let rows = h.control.query(&db.ep.id, "SELECT count(*) FROM t", true).await.unwrap();
+    let rows = h.control.query(&db.ep.id, "SELECT count(*) FROM t", SqlAs::ReadOnly).await.unwrap();
     assert_eq!(rows[0].rows[0][0].as_deref(), Some("10"));
+    // It sees what other sessions run (slow-query and health tools read it), not "<insufficient privilege>".
+    let rows = h.control.query(&db.ep.id, "SELECT count(*) FROM pg_stat_activity WHERE query = '<insufficient privilege>'", SqlAs::ReadOnly).await.unwrap();
+    assert_eq!(rows[0].rows[0][0].as_deref(), Some("0"));
     for sql in [
         "INSERT INTO t VALUES (99, 'x')",
         "SET default_transaction_read_only = off; DELETE FROM t",
@@ -473,12 +484,71 @@ async fn read_only_sql_cannot_write() {
         "CREATE TABLE sneaky (id int)",
         "ALTER ROLE roll PASSWORD 'x'",
     ] {
-        assert!(h.control.query(&db.ep.id, sql, true).await.is_err(), "{sql} ran read-only");
+        assert!(h.control.query(&db.ep.id, sql, SqlAs::ReadOnly).await.is_err(), "{sql} ran read-only");
     }
     assert_eq!(count(&c, "SELECT count(*) FROM t").await, 10);
-    h.control.query(&db.ep.id, "INSERT INTO t VALUES (99, 'x')", false).await.unwrap();
+    h.control.query(&db.ep.id, "INSERT INTO t VALUES (99, 'x')", SqlAs::Owner).await.unwrap();
     assert_eq!(count(&c, "SELECT count(*) FROM t").await, 11);
     assert_eq!(count(&c, "SELECT count(*) FROM pg_roles WHERE rolname LIKE 'roll_ro_%'").await, 0);
+}
+
+/// SQL from a token that may only write runs as a member of the database's owner role: rows and
+/// schema changes, on tables the superuser made too, and what it makes stays; never the
+/// superuser's powers, however the SQL is written (docs/mcp.md, decision 6).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn write_sql_is_never_the_superuser() {
+    let h = harness!();
+    let db = h.project(None).await;
+    let c = h.connect(&db, &db.ep.id).await;
+    seed(&c, 10).await;
+    let w = |sql: &'static str| h.control.query(&db.ep.id, sql, SqlAs::Writer { may_drop: true });
+    for sql in [
+        "INSERT INTO t VALUES (99, 'x')",
+        "ALTER TABLE t ADD COLUMN extra int",
+        "CREATE INDEX ON t (v)",
+        "CREATE TABLE made (id int)",
+        "DROP TABLE made",
+        "CREATE TABLE kept (id int)",
+    ] {
+        w(sql).await.unwrap_or_else(|e| panic!("{sql} didn't run as a writer: {e}"));
+    }
+    for sql in [
+        "DO $$ BEGIN EXECUTE 'CREA' || 'TE ROLE sneaky SUPERUSER'; END $$",
+        "CREATE ROLE sneaky",
+        "ALTER ROLE roll PASSWORD 'x'",
+        "COPY (SELECT 1) TO PROGRAM 'true'",
+        "SET ROLE roll",
+        "SELECT pg_read_file('postgresql.conf')",
+    ] {
+        assert!(w(sql).await.is_err(), "{sql} ran as a writer");
+    }
+    assert_eq!(count(&c, "SELECT count(*) FROM t").await, 11);
+    assert_eq!(count(&c, "SELECT count(*) FROM pg_roles WHERE rolname = 'sneaky'").await, 0);
+    // What it made stays, the owner role's, and no writer role is left behind.
+    assert_eq!(count(&c, "SELECT count(*) FROM pg_tables WHERE tablename = 'kept' AND tableowner = 'roll_owner'").await, 1);
+    assert_eq!(count(&c, "SELECT count(*) FROM pg_roles WHERE rolname LIKE 'roll\\_wr\\_%'").await, 0);
+    // What the superuser's own connection makes later is the writer's to change next time.
+    c.batch_execute("CREATE TABLE later (id int)").await.unwrap();
+    w("ALTER TABLE later ADD COLUMN x int").await.unwrap();
+    // A grant that may not delete changes rows and schemas but drops nothing, and can't turn the
+    // guard off.
+    let nd = |sql: &'static str| h.control.query(&db.ep.id, sql, SqlAs::Writer { may_drop: false });
+    for sql in ["DELETE FROM t WHERE id = 99", "CREATE TABLE more (id int)", "ALTER TABLE later ADD COLUMN y int"] {
+        nd(sql).await.unwrap_or_else(|e| panic!("{sql} didn't run without delete: {e}"));
+    }
+    for sql in [
+        "DROP TABLE kept",
+        "ALTER TABLE later DROP COLUMN x",
+        "DROP EVENT TRIGGER roll_no_drop",
+        "ALTER EVENT TRIGGER roll_no_drop DISABLE",
+        "CREATE OR REPLACE FUNCTION roll_guard.no_drop() RETURNS event_trigger LANGUAGE plpgsql AS $$ BEGIN END $$",
+    ] {
+        assert!(nd(sql).await.is_err(), "{sql} ran without delete");
+    }
+    assert_eq!(count(&c, "SELECT count(*) FROM pg_tables WHERE tablename = 'kept'").await, 1);
+    assert_eq!(count(&c, "SELECT count(*) FROM pg_event_trigger WHERE evtname = 'roll_no_drop' AND evtenabled = 'O'").await, 1);
+    // The superuser (and a grant that may delete) still drops.
+    w("DROP TABLE kept").await.unwrap();
 }
 
 // ── branching ──
@@ -898,4 +968,139 @@ async fn postgres_16() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn postgres_17() {
     version_roundtrip(17).await;
+}
+
+// ── decoy roles ──
+
+/// Everything the server says to `user` for `probe` through the proxy, until it hangs up.
+async fn transcript(port: u16, endpoint: &str, user: &str, version: i32, extra: &[(&str, &str)], probe: Probe) -> Vec<Vec<u8>> {
+    let options = format!("endpoint={endpoint}");
+    let mut params = vec![("options", options.as_str())];
+    params.extend_from_slice(extra);
+    let mut s = tokio::net::TcpStream::connect(("127.0.0.1", port)).await.unwrap();
+    s.write_all(&learn::startup(version, user, &params)).await.unwrap();
+    learn::transcript(&mut s, probe).await
+}
+
+/// A decoy role (roll secrets' Postgres decoys) is refused by the proxy exactly as Postgres
+/// refuses a wrong password: every probe gets the bytes a compute gives a role that doesn't exist,
+/// on the pinned 16, 17 and 18 images, from what the proxy learned of each image. Its logins wake
+/// no compute and each is told once; it's `NOLOGIN` in Postgres too, and dropping it ends it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_decoy_role_is_refused_as_a_wrong_password_is() {
+    let h = harness!(true);
+    // Every image's answers are learned at start, before any project or login needs them.
+    wait_for("every compute image's answers, learned at start", Duration::from_secs(300), || async {
+        let learned = h.control.store.compute_answers().unwrap();
+        [16, 17, 18].iter().all(|v| learned.iter().any(|a| a.image == h.control.config.image(*v) && a.answers.is_some()))
+    })
+    .await;
+    assert!(h.control.store.projects().unwrap().is_empty());
+    let told: Arc<std::sync::Mutex<Vec<pg_control::DecoyLogin>>> = Arc::default();
+    let t = told.clone();
+    h.control.on_decoy_login(move |l| t.lock().unwrap().push(l.clone()));
+    // Obviously fake, and as long as each other.
+    let (decoy, missing) = ("roll_fakedecoy01", "roll_fakemissin1");
+    for v in [18, 17, 16] {
+        let db = h.project(Some(v)).await;
+        let ep = &db.ep.id;
+        let (status, made) = h.post(&format!("/v1/projects/{}/decoy-roles", db.project.id), json!({ "role": decoy })).await;
+        assert_eq!((status, made["role"].as_str(), made["endpoint_id"].as_str()), (201, Some(decoy), Some(ep.as_str())), "{made}");
+        // A name that exists can't be a decoy, nor can one twice.
+        assert_eq!(h.post(&format!("/v1/projects/{}/decoy-roles", db.project.id), json!({ "role": "roll" })).await.0, 400);
+        assert_eq!(h.post(&format!("/v1/projects/{}/decoy-roles", db.project.id), json!({ "role": decoy })).await.0, 409);
+        let c = h.connect(&db, ep).await;
+        let can_login: bool = c.query_one("SELECT rolcanlogin FROM pg_roles WHERE rolname = $1", &[&decoy]).await.unwrap().get(0);
+        assert!(!can_login);
+
+        // The image's answers were learned before the decoy was made.
+        let image = h.control.config.image(v);
+        assert!(image.contains("@sha256:"), "{image}");
+        let learned = h.control.store.compute_answers().unwrap().into_iter().find(|a| a.image == image);
+        assert!(learned.is_some_and(|a| a.answers.is_some()), "{image}");
+
+        let before = told.lock().unwrap().len();
+        let mut decoys = vec![];
+        for (version, extra, probe) in probes() {
+            decoys.push(shape(&transcript(h.proxy_port, ep, decoy, version, &extra, probe).await, decoy));
+        }
+        assert_eq!(told.lock().unwrap().len() - before, probes().len(), "one alert per login");
+        for (i, (version, extra, probe)) in probes().into_iter().enumerate() {
+            let real = shape(&transcript(h.proxy_port, ep, missing, version, &extra, probe).await, missing);
+            assert_eq!(decoys[i], real, "Postgres {v}: {probe:?} {version:#x} {extra:?}");
+        }
+        // One role, one salt, as Postgres has.
+        let salt = |t: Vec<Vec<u8>>| String::from_utf8_lossy(&t[1][9..]).split(",s=").nth(1).unwrap().to_string();
+        let a = salt(transcript(h.proxy_port, ep, decoy, 3 << 16, &[], Probe::WrongPassword(b'n')).await);
+        assert_eq!(a, salt(transcript(h.proxy_port, ep, decoy, 3 << 16, &[], Probe::WrongPassword(b'n')).await));
+
+        let l = told.lock().unwrap().last().cloned().unwrap();
+        assert_eq!((l.project_id.as_str(), l.endpoint_id.as_str(), l.role.as_str(), l.peer), (db.project.id.as_str(), ep.as_str(), decoy, Some("127.0.0.1".parse().unwrap())));
+        drop(c);
+        if v != 18 {
+            continue;
+        }
+
+        // A suspended endpoint: refused as a wrong password, after as long as a start takes, and
+        // it stays asleep. A real driver sees Postgres' own error.
+        h.control.suspend(ep).await.unwrap();
+        let n = told.lock().unwrap().len();
+        let at = Instant::now();
+        let mut cfg = tokio_postgres::Config::new();
+        cfg.host("127.0.0.1").port(h.proxy_port).user(decoy).password("fake-decoy-password").dbname("main").options(format!("endpoint={ep}"));
+        let Err(err) = cfg.connect(NoTls).await else { panic!("refused") };
+        let took = at.elapsed();
+        let db_err = err.as_db_error().unwrap_or_else(|| panic!("{err:?}"));
+        assert_eq!((db_err.code(), db_err.message()), (&SqlState::INVALID_PASSWORD, format!("password authentication failed for user \"{decoy}\"").as_str()));
+        assert_eq!((db_err.file(), db_err.routine()), (Some("auth.c"), Some("auth_failed")));
+        assert_eq!(h.control.endpoint_or_404(ep).unwrap().state, EndpointState::Suspended);
+        assert_eq!(h.docker_inspect(ep, "{{.State.Running}}").await, "false");
+        assert_eq!(told.lock().unwrap().len(), n + 1);
+        eprintln!("decoy refused on a suspended endpoint after {took:?}");
+        // As long as an ordinary start (initdb's first start isn't one).
+        assert!(took < Duration::from_secs(5), "{took:?}");
+        // An image never learned here (a new pin): learned from a compute of its own, and the
+        // endpoint still sleeps.
+        h.control.forget_compute_answers().unwrap();
+        let Err(err) = cfg.connect(NoTls).await else { panic!("refused") };
+        assert_eq!(err.as_db_error().map(|e| e.code()), Some(&SqlState::INVALID_PASSWORD));
+        assert!(h.control.store.compute_answers().unwrap().iter().any(|a| a.image == image && a.answers.is_some()));
+        assert_eq!(h.control.endpoint_or_404(ep).unwrap().state, EndpointState::Suspended);
+        assert_eq!(h.docker_inspect(ep, "{{.State.Running}}").await, "false");
+        assert_eq!(told.lock().unwrap().len(), n + 2);
+        let at = Instant::now();
+        let Err(err) = h.connect_as(missing, "fake-password", ep).await else { panic!("refused") };
+        eprintln!("a missing role refused on a suspended endpoint (a start) after {:?}", at.elapsed());
+        assert_eq!(sql_state(&err), Some(&SqlState::INVALID_PASSWORD));
+
+        // The read every login makes.
+        let n = 20_000;
+        let at = Instant::now();
+        for _ in 0..n {
+            assert!(h.control.store.decoy_at(ep, "roll").unwrap().is_none());
+        }
+        eprintln!("decoy lookup per login (not a decoy): {:?}", at.elapsed() / n);
+        let at = Instant::now();
+        for _ in 0..n {
+            assert!(h.control.store.decoy_at(ep, decoy).unwrap().is_some());
+        }
+        eprintln!("decoy lookup per login (a decoy): {:?}", at.elapsed() / n);
+        let at = Instant::now();
+        for _ in 0..200 {
+            h.connect(&db, ep).await;
+        }
+        eprintln!("a whole login through the proxy: {:?}", at.elapsed() / 200);
+
+        // Dropping it: gone from Postgres and from the proxy (Postgres answers it now).
+        let drop_url = format!("{}/v1/projects/{}/decoy-roles/{decoy}", h.api, db.project.id);
+        assert_eq!(h.http.delete(&drop_url).send().await.unwrap().status().as_u16(), 204);
+        assert_eq!(h.http.delete(&drop_url).send().await.unwrap().status().as_u16(), 204, "gone already is fine");
+        assert!(!h.control.store.is_decoy_role(&db.project.id, decoy).unwrap());
+        let c = h.connect(&db, ep).await;
+        assert_eq!(count(&c, &format!("SELECT count(*) FROM pg_roles WHERE rolname = '{decoy}'")).await, 0);
+        let n = told.lock().unwrap().len();
+        let Err(err) = h.connect_as(decoy, "fake-decoy-password", ep).await else { panic!("refused") };
+        assert_eq!(sql_state(&err), Some(&SqlState::INVALID_PASSWORD));
+        assert_eq!(told.lock().unwrap().len(), n);
+    }
 }

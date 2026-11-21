@@ -1,14 +1,16 @@
-import { useNavigate } from "@tanstack/react-router";
-import { ArrowLeftRight, ChevronRight, HeartPulse, KeyRound, LayoutGrid, Lock, RefreshCw, ScrollText, Settings2, ShieldCheck } from "lucide-react";
-import { createContext, useContext, useMemo, type ReactNode } from "react";
+import { useLocation, useNavigate } from "@tanstack/react-router";
+import { ArrowLeftRight, ChevronRight, FileKey, HeartPulse, KeyRound, LayoutGrid, Lock, Plug, RefreshCw, ScrollText, Settings2, ShieldCheck, type LucideIcon } from "lucide-react";
+import { createContext, useContext, useEffect, useMemo, type ReactNode } from "react";
 import { Link } from "@/components/link";
 import { secretsApi, type Environment, type Link as SecretLink, type Required, type SecretsApi } from "@/lib/secrets-api";
 import { stringifySearch, type Search } from "@/lib/search";
+import { movedPanel } from "@/lib/secrets-tabs";
 import type { WorkspaceProject } from "@/lib/workspace-api";
 import { resourceKey } from "@/lib/workspace-resources";
 import { useWorkspace } from "@/lib/workspace-store";
 import { AppShell } from "../app-shell";
 import { ProjectIcon } from "../workspace/project-icon";
+import { MissingProject } from "../workspace/missing-project";
 import { AccessView } from "./access";
 import { AuditView } from "./audit";
 import { CompareView } from "./compare";
@@ -17,10 +19,11 @@ import { EnvironmentsView } from "./environments";
 import { FindKey } from "./find";
 import { HealthView } from "./health";
 import { OverviewGrid } from "./grid";
+import { CredentialsView, KeysView } from "./panels";
 import { SyncsView } from "./syncs";
-import { ErrorNote, useLoad } from "./ui";
+import { button, ErrorNote, useLoad } from "./ui";
 
-export type View = "overview" | "health" | "compare" | "environments" | "access" | "syncs" | "audit";
+export type View = "overview" | "health" | "compare" | "environments" | "access" | "syncs" | "credentials" | "keys" | "audit";
 
 type Ctx = {
   project: WorkspaceProject;
@@ -32,6 +35,8 @@ type Ctx = {
   reloadEnvs: () => void;
   /** How long old values are kept, in days (null: for good). */
   historyDays: number | null;
+  /** Whether credentials found in code are checked with their providers. */
+  validityChecks: "on" | "off";
   search: Search;
   /** Goes to the surface with these search params (`env`, `path`, `view`, `key`, `tab`…). */
   go: (next: Search, replace?: boolean) => void;
@@ -58,14 +63,7 @@ export const secretsHref = (project: string, search: Search = {}) => `/dashboard
 export function SecretsPage({ id, search }: { id: string; search: Search }) {
   const ws = useWorkspace();
   const project = ws.projects.find((p) => p.id === id);
-  if (!project)
-    return (
-      <AppShell crumb={ws.status === "loading" ? "" : "Secrets"} bleed>
-        <div className="grid h-full place-items-center text-[13px] text-muted">
-          {ws.status === "loading" ? "" : ws.status === "error" ? `Projects didn't load: ${ws.error}` : "There's no such project."}
-        </div>
-      </AppShell>
-    );
+  if (!project) return <MissingProject crumb="Secrets" to={(p) => secretsHref(p)} />;
   return <Surface key={project.id} project={project} search={search} />;
 }
 
@@ -89,6 +87,7 @@ function Surface({ project, search }: { project: WorkspaceProject; search: Searc
     previews,
     reloadEnvs: overview.reload,
     historyDays: overview.data?.history_days ?? null,
+    validityChecks: overview.data?.validity_checks ?? "off",
     search,
     go: (next, replace) => navigate({ href: secretsHref(project.id, next), replace }),
     resourceName: (l) => ws.inventory.get(resourceKey({ kind: l.kind as never, ref: l.ref }))?.name ?? l.ref,
@@ -98,10 +97,24 @@ function Surface({ project, search }: { project: WorkspaceProject; search: Searc
   };
 
   const env = search.env ? envs.find((e) => e.slug === search.env) : undefined;
-  const view: View = (["health", "compare", "environments", "access", "syncs", "audit"] as const).find((v) => v === search.view) ?? "overview";
+  const view: View = (["health", "compare", "environments", "access", "syncs", "credentials", "keys", "audit"] as const).find((v) => v === search.view) ?? "overview";
+  // A link to a panel that has moved tabs (`?view=syncs#transit-keys`, from before Syncs was split) goes to its tab.
+  const hash = useLocation({ select: (l) => l.hash });
+  const moved = movedPanel(search.view, hash);
+  useEffect(() => {
+    if (moved) navigate({ href: `${secretsHref(project.id, { ...search, view: moved })}#${hash.replace(/^#/, "")}`, replace: true });
+  }, [moved, hash, navigate, project.id, search]);
 
   let body: ReactNode;
-  if (overview.error && !overview.data) body = <ErrorNote error={`Secrets didn't load: ${overview.error}`} className="m-4" />;
+  if (overview.error && !overview.data)
+    body = (
+      <div className="m-4 flex flex-wrap items-start gap-2">
+        <ErrorNote error={`Secrets didn't load: ${overview.error}`} className="min-w-0 flex-1" />
+        <button className={button} onClick={overview.reload}>
+          Try again
+        </button>
+      </div>
+    );
   else if (!overview.data) body = null;
   else if (search.env && !env) body = <ErrorNote error={`There's no environment "${search.env}" in ${project.name}.`} className="m-4" />;
   else if (env) body = <EnvView key={env.slug} env={env} />;
@@ -109,7 +122,10 @@ function Surface({ project, search }: { project: WorkspaceProject; search: Searc
   else if (view === "compare") body = <CompareView />;
   else if (view === "environments") body = <EnvironmentsView />;
   else if (view === "access") body = <AccessView />;
+  else if (moved) body = null;
   else if (view === "syncs") body = <SyncsView />;
+  else if (view === "credentials") body = <CredentialsView />;
+  else if (view === "keys") body = <KeysView />;
   else if (view === "audit") body = <AuditView />;
   else body = <OverviewGrid />;
 
@@ -158,13 +174,15 @@ const tab = (on: boolean) =>
 function ViewsBar({ env, view }: { env: string | null; view: View | null }) {
   const { standard, previews, search, project, serious } = useSecrets();
   const path = search.path && search.path !== "/" ? search.path : undefined;
-  const side: { view: View; label: string; icon: ReactNode }[] = [
-    { view: "health", label: "Health", icon: <HeartPulse className="size-3.5" /> },
-    { view: "compare", label: "Compare", icon: <ArrowLeftRight className="size-3.5" /> },
-    { view: "environments", label: "Environments", icon: <Settings2 className="size-3.5" /> },
-    { view: "access", label: "Access", icon: <ShieldCheck className="size-3.5" /> },
-    { view: "syncs", label: "Syncs", icon: <RefreshCw className="size-3.5" /> },
-    { view: "audit", label: "Audit", icon: <ScrollText className="size-3.5" /> },
+  const side: { view: View; label: string; Icon: LucideIcon }[] = [
+    { view: "health", label: "Health", Icon: HeartPulse },
+    { view: "compare", label: "Compare", Icon: ArrowLeftRight },
+    { view: "environments", label: "Environments", Icon: Settings2 },
+    { view: "access", label: "Access", Icon: ShieldCheck },
+    { view: "syncs", label: "Syncs", Icon: RefreshCw },
+    { view: "credentials", label: "Credentials", Icon: Plug },
+    { view: "keys", label: "Keys & certificates", Icon: FileKey },
+    { view: "audit", label: "Audit", Icon: ScrollText },
   ];
   return (
     <nav className="flex h-11 shrink-0 items-center gap-1 overflow-x-auto border-b border-line px-2 [scrollbar-width:none]" aria-label="Secrets views">
@@ -187,8 +205,9 @@ function ViewsBar({ env, view }: { env: string | null; view: View | null }) {
       <span className="ml-auto" />
       {side.map((s) => (
         <Link key={s.view} href={secretsHref(project.id, { view: s.view })} className={tab(view === s.view)} title={s.label}>
-          {s.icon}
-          <span className="max-lg:hidden">{s.label}</span>
+          {/* Icons alone up to 1400px, labels alone up to 2xl, both above: the bar fits without scrolling from 1280px. */}
+          <s.Icon className="size-3.5 min-[1400px]:max-2xl:hidden" />
+          <span className="max-[1400px]:hidden">{s.label}</span>
           {s.view === "health" && serious > 0 && (
             <span className="grid h-4 min-w-4 place-items-center rounded-full bg-danger/15 px-1 font-mono text-[10px] text-danger tabular-nums" aria-label={`${serious} to fix now`}>
               {serious}

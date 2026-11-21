@@ -189,7 +189,9 @@ Blocker   = {kind: "state" | "draft" | "untrusted" | "checks" | "needs_approval"
                    /* more may come: show unknown kinds by message */,
              message,
              key?: string, environments?: string[] /* secret_leak, secret_missing: the roll secrets key and where */,
-             path?: string, line?: number, fingerprint?: string /* secret_unstored: where (1-based line) and what .roll/secrets-allow names to keep it */}
+             path?: string, line?: number, fingerprint?: string /* secret_unstored: where (1-based line) and what .roll/secrets-allow names to keep it */,
+             validity?: {fingerprint, result: "live" | "invalid" | "unknown", account?: string, checked_at?: number, rotator?: "aws-iam" | "github-app"}
+               /* secret_unstored, with the project's roll secrets validity checks on: whether it works, as its provider answered (a live one is listed first); docs/secrets.md "Is it live?" */}
 QueueInfo = {id /* qe_… */, position: number | null /* 1-based while queued; null once it left */,
              lane: "urgent" | "normal", state: EntryState, error: string | null /* why it was ejected: one line */,
              output: string | null /* the failing checks' log tail behind `error`, "<check>:\n<tail>" per check */,
@@ -218,6 +220,25 @@ POST /v1/code/changes/{id}/close → Change
 POST /v1/code/changes/{id}/checks {name, status, url?, summary?, head?} → Change
      head: the changeset the check ran on (any unique prefix); 409 if the change has moved past it
 POST /v1/code/changes/{id}/preview → Change · DELETE → Change
+GET  /v1/code/changes/{id}/unstored/{fingerprint} → UnstoredTarget            writers
+POST /v1/code/changes/{id}/unstored/{fingerprint}/store {key?, environment?, path?} → UnstoredStored     writers
+     "Store in roll" for a `secret_unstored` notice (docs/secrets.md, "Credentials roll doesn't hold"): roll
+     reads the credential from the change's own blob at the notice's path and line (its current head, the
+     default branch's .roll/secrets-allow applied) and stores it through roll secrets as a new key of the
+     project roll secrets trusts the repo for (Workspace::trusts, never canvas membership alone), as the
+     caller: roll secrets checks `write` in the folder with the request's own grant, session or operator
+     token, and makes one change, or a change request where the environment or folder needs approval.
+     Defaults: the notice's key; the environment and folder roll.toml's first `[checks.*] secrets` names
+     ("staging:/api"), else `development` and "/". Recorded in the audit log (`secret_unstored_stored`:
+     key and where, never the value). Neither answer ever holds the value; roll never rewrites the change.
+     404: no such notice on the change's head; 409 if landed or closed, from outside the repo (`trusted:
+     false`, a fork's pull request: its credential isn't the repo's), or the key is already there
+     (never overwritten); 422 when no project roll secrets trusts the repo for, or roll secrets is off;
+     403 without `write` in the folder.
+UnstoredTarget = {kind, file, line, fingerprint, key /* suggested */, project: {id, name},
+                  environments: string[] /* the caller may read, in order */, environment: string | null /* suggested */, path}
+UnstoredStored = {key, project, environment, path, file, line, replacement /* the file's language's read: os.environ["KEY"] */,
+                  change: number | null /* the environment's change */, request: string | null /* req_…, where it needs approval */}
 ```
 
 ## Merge queue
@@ -331,7 +352,8 @@ PATCH /v1/code/repos/{owner}/{repo}/review-settings {…Rules fields} → same; 
 ### Review apps
 
 ```
-ReviewApp = {id /* app_… */, owner, name, webhook_url, events: string[], repos: string[] /* full names */,
+ReviewApp = {id /* app_… */, owner, name, webhook_url /* scheme and host only, e.g. "https://hooks.example.com" */,
+             events: string[], repos: string[] /* full names */,
              all_repos: bool, required: bool, active: bool, created_at, updated_at}
 Delivery  = {id /* dl_… */, event, state: "pending" | "delivered" | "failed", attempts, last_status: number | null,
              last_error: string | null, last_response: string | null /* the start of the last attempt's
@@ -340,7 +362,8 @@ Delivery  = {id /* dl_… */, event, state: "pending" | "delivered" | "failed", 
 
 GET    /v1/code/owners/{owner}/review-apps → ReviewApp[]                 the owner (or admin)
 POST   /v1/code/owners/{owner}/review-apps {name, webhook_url, events?, repos?, required?}
-       → 201 {app: ReviewApp, token /* rla_…, shown once */, secret /* rls_…, shown once */}   409 name taken
+       → 201 {app: ReviewApp, token /* rla_…, shown once */, secret /* rls_…, shown once */}   409 name taken;
+       400 without ROLL_SECRET_KEY on the server (also for PATCH and rotate)
 GET    /v1/code/review-apps/{id} → ReviewApp · PATCH {name?, webhook_url?, events?, repos?, required?, active?} → ReviewApp
 DELETE /v1/code/review-apps/{id} → 204
 POST   /v1/code/review-apps/{id}/rotate → {token, secret}               the old ones stop working
@@ -362,6 +385,21 @@ reviews, threads, web}}` with headers `X-Roll-Event`, `X-Roll-Delivery`, `X-Roll
 `X-Roll-Signature-256: sha256=<hex HMAC-SHA256(secret, "{timestamp}.{body}")>`. Non-2xx answers
 are retried with backoff (8 attempts), then the delivery is `failed`. `urls.diff` is
 `GET …/compare/{base}...{head}?format=diff` (text/plain unified diffs).
+
+Review apps' and repo webhooks' URLs and signing secrets are credentials (a Slack or Discord
+incoming-webhook URL is enough to post), so they're kept only sealed with `ROLL_SECRET_KEY`, each
+bound to its app or webhook. Without the key on the server, making, changing or rotating one is a
+400 naming `ROLL_SECRET_KEY` (deleting one, its deliveries and redeliveries still work). The secret is
+shown once, when made or rotated; answers, pings, audit rows and delivery errors show a URL's scheme
+and host only (`"(sealed)"` on a server that can't open it). URLs and secrets an older server kept in
+the clear are sealed when a server with the key starts, and the URLs it wrote whole into
+`webhook_create` audit rows, pings and delivery errors are cut to their scheme and host, in one write
+that erases what it overwrote: on SQLite nothing of the old values is left in `control.db` or its
+`-wal` (`secure_delete`, then the WAL checkpointed and truncated). On Postgres the old row versions
+stay as dead tuples until autovacuum reuses their pages, and backups and WAL archives taken before
+still hold the clear values: rotate those URLs and secrets at their receivers if that matters. Once
+sealed, a server started without the key (or with another one) can't send: its deliveries fail with
+that error until the key is back.
 
 ## roll's reviewer
 
@@ -447,6 +485,9 @@ GET   /v1/code/owners/{owner}/usage?month=YYYY-MM → {owner, month,
   `@roll resume`, `@roll resolve`, `@roll explain`, `@roll fix`, `@roll don't flag …`, any other
   question) run for writers only; roll answers in the thread. `explain`, `fix` and questions are
   jobs (`kind: "command"`) metered as `chat`.
+- **Other products' questions** run on the same provider choice, cap and prices as a chat reply
+  (`Code::ask_model`): roll apps' "Why did it fail?" asks the model of the owner of the service's
+  repo and is metered as `kind: "explain"` (counted in `totals.chats`).
 - **On GitHub** (connected repos), the same commands work in a pull request's conversation and in
   inline review comments, for people GitHub reports as `admin`, `maintain` or `write` on the repo
   (anyone it can't vouch for is a reader and is ignored). Conversation commands are answered with a
@@ -510,7 +551,7 @@ same slots.
 
 ```
 landed  = {changeset, git_commit: sha | null, ref, generation, message, author, change: string | null, files: number, at, count}
-change  = Change      work = WorkItem      preview = {change, preview: Preview, became?: ("ready" | "failed" | "visual_change")[]}
+change  = Change      work = WorkItem      preview = {change, preview: Preview, became?: ("ready" | "failed" | "visual_change" | "regressions")[]}
 check   = {change, check: Check}  |  {changeset, status: Status} /* a commit status was posted */
 queue   = {state, paused, depth, batch: Queue.batch}   a summary: refetch GET …/queue for the entries
 review  = Review      thread = Thread
@@ -521,7 +562,8 @@ push    = {ref /* refs/heads/… */, before: sha | null /* null: created */, aft
 ## Webhooks and commit statuses
 
 ```
-Webhook = {id /* wh_… */, url, events: string[], active, created_by, created_at, updated_at}
+Webhook = {id /* wh_… */, url /* scheme and host only, e.g. "https://hooks.example.com" */, events: string[], active,
+           created_by, created_at, updated_at}
 Status  = {context, state: "pending" | "success" | "failure" | "error", target_url: string | null,
            description: string | null, creator, created_at, updated_at}
 
@@ -534,8 +576,8 @@ GET    /v1/code/repos/{owner}/{repo}/webhooks → Webhook[]                     
 POST   /v1/code/repos/{owner}/{repo}/webhooks {url, events?, secret?, active?}
        → 201 {webhook: Webhook, ping: delivery id, secret? /* only when roll generated it: shown once */}
        events: any of landed, change, review, thread, check, queue, work, preview, push, budget, or ["*"] (default
-       ["landed"]); secret: 16-200 characters (default: generated, rlw_…); 400 bad url/events/secret;
-       at most 20 per repo (422)
+       ["landed"]); secret: 16-200 characters (default: generated, rlw_…); 400 bad url/events/secret, or
+       no ROLL_SECRET_KEY on the server (also for PATCH); at most 20 per repo (422)
 GET    /v1/code/repos/{owner}/{repo}/webhooks/{id} → Webhook · PATCH {url?, events?, secret?, active?} → Webhook
 DELETE /v1/code/repos/{owner}/{repo}/webhooks/{id} → 204
 POST   /v1/code/repos/{owner}/{repo}/webhooks/{id}/ping → 202 Delivery
@@ -555,7 +597,8 @@ GET    /v1/code/repos/{owner}/{repo}/statuses/{rev} → {changeset, git_commit, 
   `X-Roll-Delivery`, `X-Roll-Timestamp` and `X-Roll-Signature-256: sha256=<hex HMAC-SHA256(secret,
   "{timestamp}.{body}")>`; anything but a 2xx is retried with backoff (8 attempts), then `failed`.
   The body is `{event, delivery, webhook, repo: {id, full_name, default_branch, visibility},
-  data /* the event's data, as on /events */}`; `ping` is sent on creation and on request.
+  data /* the event's data, as on /events */}`; `ping` is sent on creation and on request. The
+  URL and the secret are kept as review apps' are (sealed with `ROLL_SECRET_KEY`, "Review apps").
 - **`landed` never drops one.** Landings are read from the store's land log (written in each
   landing's own transaction) after a cursor kept in the control database, not from the in-memory
   broadcast: a burst larger than the broadcast channel, or a daemon that stopped between a landing
@@ -864,8 +907,10 @@ POST   /v1/code/agents/{owner}/sandboxes {name?, size? /* a Size name */, env?: 
        until the backend has it, then dropped; never returned. At most 32 names (uppercase, digits, _),
        values one line of at most 4096 characters, 32 KiB in all; ROLL_*, AGENT37_*, HOME, USER, PATH,
        SHELL and IS_SANDBOX are reserved. secrets adds a roll secrets environment's values under env (docs/secrets.md):
-       the project must have one of the owner's repos on its canvas, the environment can't be protected, and its
-       values follow env's rules. 400 bad name, size, env or secrets; 422 at the owner's limit (deleting
+       the project must have one of the owner's repos on its canvas, the environment can't be protected, the
+       caller must be able to reveal it in roll secrets (a session, a roll token's rules or the operator; never
+       a code owner token), and its values follow env's rules. 400 bad name, size, env or secrets; 403 the
+       caller can't reveal secrets.environment (nothing is made); 422 at the owner's limit (deleting
        ones count until gone) or without ROLL_SECRET_KEY on the server; 503 sandboxes are off.
 POST   /v1/code/agents/{owner}/sandboxes/{id}/start → Sandbox   desired "running" (asleep ones too: a wake now);
        409 while it's being deleted
@@ -886,7 +931,8 @@ Sandbox = {id /* sbx_… */, name, machine /* mch_… */, backend, size: Size,
            desired: "running" | "stopped" | "asleep" | "deleted" /* asleep: the reconciler stopped it while idle */,
            stopped_reason?: "idle" | "owner" /* while stopped: asleep, or the owner's stop */,
            error?: string /* the backend's last complaint */,
-           created_at, updated_at, last_active_at? /* its machine last did something; it sleeps a window after */}
+           created_at, updated_at, last_active_at? /* its machine last did something; it sleeps a window after */,
+           secrets_by? /* who copied secrets into its env: roll secrets' principal (usr_…, token:…, operator) */}
 SandboxInfo = {backend, size /* a Size name */, status /* as Sandbox.status */, hourly_cents,
                stopped_reason? /* as Sandbox.stopped_reason */}   (Machine.sandbox)
 Size = {name /* "standard" */, cpu, memory_gb, disk_gb, hourly_cents /* price per running hour, US cents */}

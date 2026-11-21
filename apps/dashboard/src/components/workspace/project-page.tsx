@@ -29,6 +29,7 @@ import { Inspector, ResourceSheet, StagedSheet } from "./inspector";
 import { ProjectAgents, threadsOf, useAgents } from "./agents";
 import { KindTile } from "./kind";
 import { ProjectIcon } from "./project-icon";
+import { MissingProject } from "./missing-project";
 import { DeployChanges, stagedChanges } from "./deploy-changes";
 import { ProjectSettings } from "./project-settings";
 import { PreviewsOverlay } from "./previews-overlay";
@@ -36,7 +37,7 @@ import { PreviewsOverlay } from "./previews-overlay";
 const btn =
   "flex h-7 items-center gap-1.5 rounded-md border border-line-2 bg-raised px-2.5 text-[12px] font-medium inset-shadow-highlight transition-colors hover:border-line-3";
 
-export type ProjectTab = "canvas" | "previews" | "logs" | "members";
+export type ProjectTab = "canvas" | "previews" | "logs" | "metrics" | "members";
 
 /**
  * `/dashboard/projects/$id`: the project's resources on a canvas, or (`children`, the route's
@@ -45,14 +46,7 @@ export type ProjectTab = "canvas" | "previews" | "logs" | "members";
 export function ProjectPage({ id, tab = "canvas", children }: { id: string; tab?: ProjectTab; children?: ReactNode }) {
   const ws = useWorkspace();
   const project = ws.projects.find((p) => p.id === id);
-  if (!project)
-    return (
-      <AppShell crumb={ws.status === "loading" ? "" : "Project"} bleed>
-        <div className="grid h-full place-items-center text-[13px] text-muted">
-          {ws.status === "loading" ? "" : ws.status === "error" ? `Projects didn't load: ${ws.error}` : "There's no such project."}
-        </div>
-      </AppShell>
-    );
+  if (!project) return <MissingProject crumb="Project" to={(id) => `/dashboard/projects/${id}`} />;
   return (
     <Project key={project.id} ws={ws} project={project} tab={tab}>
       {children}
@@ -171,14 +165,14 @@ function Project({ ws, project, tab, children }: { ws: WorkspaceState; project: 
             </span>
           )}
           <nav aria-label="Project views" className="flex h-7 items-center rounded-md border border-line-2 bg-canvas p-0.5">
-            {(["canvas", "previews", "logs", "members"] as const).map((t) => (
+            {(["canvas", "previews", "logs", "metrics", "members"] as const).map((t) => (
               <Link
                 key={t}
                 href={`/dashboard/projects/${encodeURIComponent(project.id)}${t === "canvas" ? "" : `/${t}`}`}
                 aria-current={tab === t ? "page" : undefined}
                 className={`flex h-full items-center rounded-[5px] px-2 text-[12px] font-medium transition-colors ${tab === t ? "bg-panel-3 text-fg" : "text-muted hover:text-fg"}`}
               >
-                {t === "canvas" ? "Canvas" : t === "previews" ? "Previews" : t === "logs" ? "Logs" : "Members"}
+                {t === "canvas" ? "Canvas" : t === "previews" ? "Previews" : t === "logs" ? "Logs" : t === "metrics" ? "Metrics" : "Members"}
               </Link>
             ))}
           </nav>

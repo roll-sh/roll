@@ -9,8 +9,10 @@
 import { apiHeaders, call, onApiStatus, ROLL_API } from "./roll-api";
 import { withSession } from "./code-token";
 import { analyticsQuery, type AnalyticsRange, type SearchAnalytics } from "./search-analytics";
+import type { SuggestionsStatus } from "./search-suggestions";
 import type { MetricsRange, SearchMetrics, SearchSlowLog } from "./search-performance";
 import type { AuditPage } from "./search-audit";
+import type { LinkBody, RemoteLink } from "./search-remotes";
 
 export type Flavor = "elasticsearch" | "opensearch";
 
@@ -92,11 +94,56 @@ export interface IpRule {
   description?: string;
 }
 
+/** A cluster's `http.cors.*`: which web pages may call it from a browser. */
+export interface CorsSettings {
+  /** `scheme://host[:port]`, `/regex/` or `*`, kept as browsers send origins. */
+  allow_origin: string[];
+  /** Elasticsearch's defaults when left out. */
+  allow_methods?: string[];
+  allow_headers?: string[];
+  max_age?: number;
+}
+
 /** What `PATCH /v1/search/clusters/{id}` takes. */
 export type SearchClusterPatch = Partial<SearchSettings> & {
   /** Only these networks reach the cluster's endpoint ([]: anyone). */
   ip_allowlist?: (string | IpRule)[];
+  /** null (or no origins) turns CORS off. */
+  cors?: CorsSettings | null;
+  /** Requests per minute all browser keys may make together; null: the node's default. */
+  browser_per_minute?: number | null;
 };
+
+/** A key a web page ships (`/v1/search/clusters/{id}/browser-keys`): read-only and rate limited. */
+export interface BrowserKey {
+  id: string;
+  name: string | null;
+  /** The indices it reads, or … */
+  indices?: string[];
+  /** … the one search application whose template it may run. */
+  application?: string;
+  /** A query every search through it is filtered by. */
+  filter?: Record<string, unknown>;
+  rate_limit: { per_minute: number; per_ip_per_minute?: number } | null;
+  /** Unix seconds. */
+  created_at: number | null;
+  expires_at: number | null;
+}
+
+/** A new browser key: `api_key` (sent as `Authorization: ApiKey …`) is shown once. */
+export interface NewBrowserKey extends BrowserKey {
+  api_key: string;
+  url: string;
+}
+
+export interface BrowserKeyRequest {
+  name: string;
+  indices?: string[];
+  application?: string;
+  filter?: Record<string, unknown>;
+  expires_in_s?: number;
+  rate_limit?: { per_minute?: number; per_ip_per_minute?: number };
+}
 
 export interface BranchRef {
   id: string;
@@ -124,6 +171,10 @@ export interface SearchCluster extends SearchSettings {
   owner?: string | null;
   /** Only these networks reach its endpoint ([]: anyone). The dashboard and API aren't filtered. */
   ip_allowlist: IpRule[];
+  /** Which web pages may call it from a browser (null: CORS off). */
+  cors?: CorsSettings | null;
+  /** Requests per minute all its browser keys may make together (null: the node's default). */
+  browser_per_minute?: number | null;
   url: string;
   host: string;
   port: number;
@@ -251,9 +302,21 @@ export const searchApi = {
   metrics: (id: string, range: MetricsRange) => call<SearchMetrics>("GET", `${cl(id)}/metrics?range=${range}`),
   slowlog: (id: string) => call<SearchSlowLog>("GET", `${cl(id)}/slowlog`),
   analytics: (id: string, index: string | null, range: AnalyticsRange) => call<SearchAnalytics>("GET", `${cl(id)}/analytics?${analyticsQuery(index, range)}`),
+  /** An index's query suggestions: settings, last build, heaviest suggestions (never wakes the cluster). */
+  suggestions: (id: string, index: string) => call<SuggestionsStatus>("GET", `${cl(id)}/indices/${encodeURIComponent(index)}/suggestions`),
+  rebuildSuggestions: (id: string, index: string) => call<SuggestionsStatus>("POST", `${cl(id)}/indices/${encodeURIComponent(index)}/suggestions/rebuild`, {}),
   createKey: (id: string, name: string, access: KeyAccess, expiresInS?: number) =>
     call<NewSearchKey>("POST", `${cl(id)}/keys`, { name, access, expires_in_s: expiresInS }),
   revokeKey: (id: string, key: string) => call<null>("DELETE", `${cl(id)}/keys/${encodeURIComponent(key)}`),
+  browserKeys: (id: string) => call<{ keys: BrowserKey[] }>("GET", `${cl(id)}/browser-keys`),
+  createBrowserKey: (id: string, k: BrowserKeyRequest) => call<NewBrowserKey>("POST", `${cl(id)}/browser-keys`, k),
+  revokeBrowserKey: (id: string, key: string) => call<null>("DELETE", `${cl(id)}/browser-keys/${encodeURIComponent(key)}`),
+  /** The remote clusters roll holds credentials for (never wakes the cluster, never the key). */
+  remotes: (id: string) => call<{ remotes: RemoteLink[] }>("GET", `${cl(id)}/remotes`),
+  /** Links another of the person's clusters as remote `alias` (roll makes its cross-cluster key). */
+  linkRemote: (id: string, alias: string, body: LinkBody) => call<unknown>("PUT", `${cl(id)}/remotes/${encodeURIComponent(alias)}`, body),
+  /** Unlinks it: its settings and credentials go, a key roll made is revoked. */
+  unlinkRemote: (id: string, alias: string) => call<null>("DELETE", `${cl(id)}/remotes/${encodeURIComponent(alias)}`),
   /** The endpoints whose key comes from a roll secret, and the projects whose secrets may key one. */
   inferenceSecrets: (id: string) => call<InferenceSecrets>("GET", `${cl(id)}/inference/secrets`),
   /** An endpoint keyed by a roll secret: `config` is the `_inference` body without `api_key`. */

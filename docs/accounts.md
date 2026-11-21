@@ -250,7 +250,9 @@ parallel (to any node) can't get past a limit.
    roll checks the state (single use, 10 minutes, made for this browser's cookie), exchanges the
    code with the PKCE verifier (S256), and reads the verified email:
    - GitHub (scope `read:user user:email`): the user's id and login from `GET /user`, and the
-     email marked `primary` and `verified` from `GET /user/emails`.
+     email marked `primary` and `verified` from `GET /user/emails`. A login renamed on GitHub
+     since it was linked is updated on the next sign-in or link with it (roll previews tells a
+     change's author apart by it).
    - Google (OpenID Connect, scope `openid email profile`): the ID token from the token endpoint
      (received directly over TLS, so its signature isn't checked; `iss`, `aud`, `exp` and the
      nonce are), with `email_verified` true.
@@ -626,8 +628,10 @@ being the person's handle, answers 204 and clears the session cookie.
 - The old address gets "Your roll account was deleted", in case it wasn't them.
 - They leave every workspace project through the same path as a removal (docs/members.md): the
   audit log's `member.remove`, their tokens confined to a project revoked (D7), their shares,
-  leases and shared folders ended, and their pending invites revoked. A project left with no owner
-  who can sign in is the operator's or an admin's to give one.
+  leases and shared folders ended, and their pending invites revoked (an audit row each). A project
+  left with no owner who can sign in is the operator's or an admin's to give one. The deletion's
+  write records it in an outbox (`account_deletions`), and other products' hooks
+  (`Accounts::on_deleted`) run from it after the write, and again until each succeeds.
 
 ## Routes
 

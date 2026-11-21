@@ -489,10 +489,37 @@ pub fn check_metric_scripts(st: &ClusterState, aggs: &Map) -> EsResult<()> {
     walk(aggs, &inline, &stored)
 }
 
+/// A partial reduce (`final_reduce: false`): every bucket and the mergeable state kept, for a
+/// cross-cluster search's coordinating cluster ([`search_aggs::wire`]).
+pub fn reduce_partial(cluster: &Cluster, st: &ClusterState, req: &AggRequest, parts: Vec<search_aggs::Aggs>) -> EsResult<search_aggs::Aggs> {
+    let opts = search_aggs::ReduceOptions { final_reduce: false, budget: Some(cluster.breakers.request(cluster, st)), ..Default::default() };
+    search_aggs::reduce(parts, req, &opts).map_err(|e| reduce_failure(agg_error(e)))
+}
+
+/// Rebuilds the date formats of results from another cluster ([`search_aggs::wire::decode`]):
+/// in a field's locale when one came with them, else as aggregations here print and parse.
+pub fn date_factory() -> search_aggs::wire::DateFactory {
+    Arc::new(|pattern: &str, locale: Option<&str>| -> search_aggs::Result<Arc<dyn search_aggs::DateFormatter>> {
+        if let Some(l) = locale
+            && let l @ crate::time::DateLocale::Cldr(_) = crate::time::DateLocale::parse(l)
+            && let Ok(f) = crate::time::DateFormatter::new(pattern)
+        {
+            return Ok(Arc::new(LocaleDates { pattern: pattern.to_string(), fmt: f.with_locale(l) }));
+        }
+        let printer = search_aggs::format::builtin_date_formatter(pattern)?;
+        Ok(match crate::time::DateFormatter::new(pattern) {
+            Ok(parser) => Arc::new(EsDates { printer, parser }),
+            Err(_) => printer,
+        })
+    })
+}
+
 /// The final reduce, rendered.
-pub fn reduce(cluster: &Cluster, st: &ClusterState, req: &AggRequest, parts: Vec<search_aggs::Aggs>, typed_keys: bool) -> EsResult<Value> {
+pub fn reduce(cluster: &Cluster, st: &ClusterState, req: &AggRequest, parts: Vec<search_aggs::Aggs>, typed_keys: bool, browser: Option<crate::xpack::security::browser::Policy>) -> EsResult<Value> {
     let max_buckets = st.metadata.cluster_setting("search.max_buckets").and_then(|v| v.parse::<usize>().ok()).unwrap_or(65536);
-    let host: Arc<dyn search_aggs::ScriptHost> = Arc::new(super::agg_scripts::Host::new(cluster, None, 0, String::new()));
+    // A browser key's `max_buckets` under the cluster's, and no painless in its pipelines.
+    let max_buckets = browser.as_ref().map_or(max_buckets, |p| p.max_buckets.min(max_buckets));
+    let host: Arc<dyn search_aggs::ScriptHost> = Arc::new(super::agg_scripts::Host::new(cluster, None, 0, String::new()).denying(browser.is_some_and(|p| !p.allow_scripts)));
     let opts = search_aggs::ReduceOptions { final_reduce: true, max_buckets, scripts: Some(host), budget: Some(cluster.breakers.request(cluster, st)), ..Default::default() };
     let out = search_aggs::reduce(parts, req, &opts).map_err(|e| reduce_failure(agg_error(e)))?;
     Ok(from_json(&out.to_json(typed_keys)))
@@ -581,9 +608,10 @@ impl Lookup<'_> {
     /// A hit sort on a runtime field (it shadows a mapped field of the name).
     fn runtime_sort(&self, field: &str, reverse: bool) -> search_aggs::Result<Option<search_aggs::HitSort>> {
         let err = |e: EsError| search_aggs::AggError::new(e.status, e.kind.to_string(), e.reason().to_string());
-        let ctx = QueryCtx::new(self.cluster, self.st, &self.idx, &self.table, &self.searcher, self.now);
+        let ctx = QueryCtx::new(self.cluster, self.st, &self.idx, &self.table, &self.searcher, self.now, crate::search::query::Reader::of(self.security.clone()));
         let rf = super::runtime::RuntimeScope::ambient().filter(|s| s.index_name() == self.idx.name).and_then(|s| s.field(field).cloned()).or_else(|| ctx.runtime_field(field));
         let Some(rf) = rf.filter(|f| f.ty != super::runtime::RtType::GeoPoint) else { return Ok(None) };
+        ctx.no_scripts().map_err(err)?;
         let ev = super::runtime::Evaluator::new(&self.cluster.scripts, self.st, &self.table, self.shard.0 as i32, &self.idx.name, rf).map_err(err)?.counted();
         Ok(Some(search_aggs::HitSort::Computed { sort: Arc::new(super::computed_sort::RuntimeKey { ev: Arc::new(ev), reverse }), reverse }))
     }
@@ -591,7 +619,7 @@ impl Lookup<'_> {
     fn computed_sort(&self, item: &Json) -> search_aggs::Result<search_aggs::HitSort> {
         let err = |e: EsError| search_aggs::AggError::new(e.status, e.kind.to_string(), e.reason().to_string());
         let sorts = crate::search_source::parse_sorts_value(&from_json(item)).map_err(err)?;
-        let ctx = QueryCtx::new(self.cluster, self.st, &self.idx, &self.table, &self.searcher, self.now);
+        let ctx = QueryCtx::new(self.cluster, self.st, &self.idx, &self.table, &self.searcher, self.now, crate::search::query::Reader::of(self.security.clone()));
         match sorts.into_iter().next() {
             Some(crate::search_source::Sort::Script { script, ty, order, .. }) => {
                 let reverse = order == Some(crate::search_source::SortOrder::Desc);
@@ -765,7 +793,7 @@ impl FieldLookup for Lookup<'_> {
     fn query(&self, query: &Json) -> search_aggs::Result<QueryRef> {
         let v = from_json(query);
         let q = crate::query::parse_query(&v, None, &[]).map_err(|e| search_aggs::AggError::new(e.status, e.kind.to_string(), e.reason().to_string()))?.0;
-        let ctx = QueryCtx::new(self.cluster, self.st, &self.idx, &self.table, &self.searcher, self.now);
+        let ctx = QueryCtx::new(self.cluster, self.st, &self.idx, &self.table, &self.searcher, self.now, crate::search::query::Reader::of(self.security.clone()));
         ctx.to_query(&q).map_err(|e| search_aggs::AggError::new(e.status, e.kind.to_string(), e.reason().to_string()))
     }
 
@@ -803,8 +831,8 @@ impl FieldLookup for Lookup<'_> {
             Arc::new(search_index::query::MatchAllQuery)
         };
         let Some(af) = &self.alias_filter else { return root };
-        let ctx = QueryCtx::new(self.cluster, self.st, &self.idx, &self.table, &self.searcher, self.now);
-        match ctx.to_filter(af) {
+        let ctx = QueryCtx::new(self.cluster, self.st, &self.idx, &self.table, &self.searcher, self.now, crate::search::query::Reader::of(self.security.clone()));
+        match ctx.owner_filter(af) {
             Ok(f) => Arc::new(search_index::query::BooleanQuery::new().add(search_index::query::Occur::Filter, f).add(search_index::query::Occur::Filter, root)),
             Err(_) => root,
         }
@@ -937,7 +965,8 @@ impl FieldLookup for Lookup<'_> {
     }
 
     fn scripts(&self) -> Option<Arc<dyn search_aggs::ScriptHost>> {
-        Some(Arc::new(super::agg_scripts::Host::new(self.cluster, Some(self.table.clone()), self.shard.0 as i32, self.index.clone())))
+        let deny = self.security.as_ref().and_then(|s| s.browser()).is_some_and(|p| !p.allow_scripts);
+        Some(Arc::new(super::agg_scripts::Host::new(self.cluster, Some(self.table.clone()), self.shard.0 as i32, self.index.clone()).denying(deny)))
     }
 
     fn time_series(&self) -> Option<search_aggs::TimeSeriesInfo> {
@@ -1003,6 +1032,13 @@ struct LocaleDates {
 impl search_aggs::DateFormatter for LocaleDates {
     fn pattern(&self) -> &str {
         &self.pattern
+    }
+
+    fn locale(&self) -> Option<&str> {
+        match self.fmt.locale {
+            crate::time::DateLocale::Cldr(tag) => Some(tag),
+            _ => None,
+        }
     }
 
     fn format(&self, millis: i64, nanos: u32, zone: &search_aggs::TimeZone) -> String {
@@ -1247,6 +1283,9 @@ impl search_aggs::TopHitsFetcher for Fetcher {
             marker.insert("highlight".into(), h.clone());
         }
         if get("explain").and_then(Value::as_bool) == Some(true) {
+            if let Some(s) = &self.security {
+                s.refuse_for_browser(crate::xpack::security::browser::Banned::Explain).map_err(fetch_err)?;
+            }
             marker.insert("explain".into(), Value::Bool(true));
         }
         if let Some(sf @ Value::Obj(_)) = get("script_fields") {

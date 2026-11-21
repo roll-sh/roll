@@ -540,7 +540,7 @@ impl Secrets {
         let target = vendor.target().to_string();
         let sealed = dek.seal(&aad(project, &id, vendor.name(), &target), &Value::new(credential));
         let now = self.db.now_ms()?;
-        let r = SaasRotator { id: id.clone(), name: n.name, vendor, created_at: now, created_by: caller.principal.clone() };
+        let r = SaasRotator { id: id.clone(), name: n.name, vendor, created_at: now, created_by: caller.made_by().to_string() };
         self.db.write(|c| {
             if c.query_row("SELECT 1 FROM saas_rotators WHERE project_id = ? AND name = ?", [project, &r.name], |_| Ok(())).optional()?.is_some() {
                 return Err(Error::Conflict("exists", format!("a SaaS rotator named {} exists", r.name)));

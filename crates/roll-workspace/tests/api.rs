@@ -20,7 +20,7 @@ struct People;
 impl roll_workspace::People for People {
     fn person(&self, user: &str) -> Option<roll_workspace::Person> {
         let handle = user.strip_prefix("usr_")?;
-        (handle != "gone").then(|| roll_workspace::Person { handle: handle.into(), email: Some(format!("{handle}@example.com")) })
+        (handle != "gone").then(|| roll_workspace::Person { handle: handle.into(), email: Some(format!("{handle}@example.com")), admin: handle == "root" })
     }
 }
 
@@ -366,4 +366,100 @@ async fn homes_are_kept_only_for_ids_never_given_out_again() {
     let (s, e) = api.call(Method::PUT, &format!("/v1/workspace/projects/{id}/homes/bucket/acme-prod"), None).await;
     assert_eq!(s, StatusCode::BAD_REQUEST, "{e}");
     assert!(!api.ws.trusts(&project, roll_workspace::Kind::Bucket, "acme-prod"));
+}
+
+/// roll-access as far as an invite's inviter goes: the operator's token `tok_ci`, every rule, until
+/// it's revoked.
+#[derive(Default)]
+struct Revocable(std::sync::Mutex<bool>);
+
+impl roll_auth::Grants for Revocable {
+    fn grant(&self, id: &str) -> Option<roll_auth::Grant> {
+        let all: roll_auth::scope::Scope = serde_json::from_value(json!([{ "product": "*", "resources": "*", "actions": { "read": "allow", "write": "allow", "admin": "allow", "delete": "allow", "reveal": "allow", "deploy": "allow" } }])).unwrap();
+        (id == "tok_ci" && !*self.0.lock().unwrap()).then(|| roll_auth::Grant { id: id.into(), name: "ci".into(), kind: roll_auth::GrantKind::Token, scope: Arc::new(all), user: None, ask_otherwise: false })
+    }
+}
+
+/// What an admin account is to `Owners`: anything (`trusts`), but nothing of its own (`owns`).
+struct AdminEverything;
+
+impl roll_workspace::Owners for AdminEverything {
+    fn trusts(&self, user: &str, _: roll_workspace::Kind, _: &str) -> bool {
+        user == "usr_root"
+    }
+    fn owns(&self, _: &str, _: roll_workspace::Kind, _: &str) -> bool {
+        false
+    }
+}
+
+/// The re-review (docs/members.md, "Lifecycle"): an invite never gives more than its inviter can
+/// when it's accepted, and goes when their role no longer gives it; a re-invite never quietly
+/// takes a higher invite away; an admin account made an owner of someone's project adds nothing of
+/// its own; a deleted account leaves every project and its invites go, each audited.
+#[tokio::test]
+async fn invites_follow_their_inviter_and_admin_owners_add_nothing() {
+    let api = Api::new();
+    api.ws.set_owners(std::sync::Arc::new(AdminEverything));
+    let events = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+    let seen = events.clone();
+    api.ws.on_event(Box::new(move |e| {
+        seen.lock().unwrap().push(format!("{} {}", e.action, e.subject.as_deref().unwrap_or("-")));
+        Ok(())
+    }));
+    let (_, p) = api.call_as(Some("usr_ada"), Method::POST, "/v1/workspace/projects", Some(json!({ "name": "pay" }))).await;
+    let id = p["id"].as_str().unwrap().to_string();
+    let at = |rest: &str| format!("/v1/workspace/projects/{id}{rest}");
+    let join = |who: &'static str, role: &'static str| {
+        let (api, at) = (&api, at(""));
+        async move {
+            let (_, inv) = api.call_as(Some("usr_ada"), Method::POST, &format!("{at}/invites"), Some(json!({ "email": format!("{who}@example.com"), "role": role }))).await;
+            let t = inv["url"].as_str().unwrap().split("token=").nth(1).unwrap().to_string();
+            assert_eq!(api.call_as(Some(&format!("usr_{who}")), Method::POST, &format!("/v1/workspace/invites/{t}/accept"), None).await.0, StatusCode::OK);
+        }
+    };
+    join("cat", "admin").await;
+
+    // Cat invites two people; then she's demoted: what her role no longer gives goes, at once.
+    let (s, inv) = api.call_as(Some("usr_cat"), Method::POST, &at("/invites"), Some(json!({ "email": "dan@example.com", "role": "admin" }))).await;
+    assert_eq!(s, StatusCode::CREATED);
+    let dan = inv["url"].as_str().unwrap().split("token=").nth(1).unwrap().to_string();
+    // Re-inviting an address replaces its pending invite only for someone who may give that
+    // invite's role: an admin can't quietly swap an owner's invite for a viewer's.
+    let (_, owner_inv) = api.call_as(Some("usr_ada"), Method::POST, &at("/invites"), Some(json!({ "email": "eve@example.com", "role": "owner" }))).await;
+    let (s, e) = api.call_as(Some("usr_cat"), Method::POST, &at("/invites"), Some(json!({ "email": "eve@example.com", "role": "viewer" }))).await;
+    assert_eq!(s, StatusCode::CONFLICT, "a re-invite can't take an owner's invite away: {e}");
+    assert!(owner_inv["id"].is_string());
+    assert_eq!(api.call_as(Some("usr_ada"), Method::PATCH, &at("/members/usr_cat"), Some(json!({ "role": "viewer" }))).await.0, StatusCode::OK);
+    let (_, pending) = api.call_as(Some("usr_ada"), Method::GET, &at("/invites"), None).await;
+    let emails: Vec<&str> = pending.as_array().unwrap().iter().map(|i| i["email"].as_str().unwrap()).collect();
+    assert_eq!(emails, ["eve@example.com"], "cat's invite went with her role");
+    assert_eq!(api.call_as(Some("usr_dan"), Method::POST, &format!("/v1/workspace/invites/{dan}/accept"), None).await.0, StatusCode::NOT_FOUND);
+
+    // An invite whose inviter can no longer give it isn't accepted: checked again at accept time
+    // (here, the operator's token that made it was revoked meanwhile).
+    let ci = Arc::new(Revocable::default());
+    api.ws.set_grants(ci.clone());
+    let mut req = axum::http::Request::builder().method(Method::POST).uri(at("/invites")).header("content-type", "application/json").body(axum::body::Body::from(json!({ "email": "fay@example.com", "role": "admin" }).to_string())).unwrap();
+    req.extensions_mut().insert(roll_auth::Grants::grant(&*ci, "tok_ci").unwrap());
+    let resp = api.router.clone().oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::CREATED);
+    let inv: Value = serde_json::from_slice(&resp.into_body().collect().await.unwrap().to_bytes()).unwrap();
+    let fay = inv["url"].as_str().unwrap().split("token=").nth(1).unwrap().to_string();
+    *ci.0.lock().unwrap() = true;
+    let (s, e) = api.call_as(Some("usr_fay"), Method::POST, &format!("/v1/workspace/invites/{fay}/accept"), None).await;
+    assert_eq!(s, StatusCode::FORBIDDEN, "{e}");
+
+    // An admin account made an owner of ada's project adds nothing of its own to what it trusts.
+    join("root", "owner").await;
+    let project = api.ws.get(roll_workspace::Scope::All, &id).unwrap();
+    assert!(!api.ws.trusts(&project, roll_workspace::Kind::Bucket, "anyone-elses"));
+
+    // Root deletes their account: they leave, and their pending invites go, each in the audit.
+    let (_, inv) = api.call_as(Some("usr_root"), Method::POST, &at("/invites"), Some(json!({ "email": "gus@example.com", "role": "viewer" }))).await;
+    assert!(inv["id"].is_string(), "{inv}");
+    assert_eq!(api.ws.forget_person("usr_root", None).unwrap(), 1);
+    assert_eq!(api.ws.role_in(&id, "usr_root").unwrap(), None);
+    let log = events.lock().unwrap().clone();
+    assert!(log.contains(&"member.remove usr_root".to_string()) && log.contains(&"member.invite_revoke usr_root".to_string()), "{log:?}");
+    assert!(log.contains(&"member.invite_revoke usr_cat".to_string()), "cat's demotion revoked hers: {log:?}");
 }

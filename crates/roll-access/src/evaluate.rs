@@ -588,7 +588,7 @@ async fn judge(mut ctx: Ctx, req: Request, next: Next, j: Judge) -> Response {
     // What the request needs: one action, or every action a push's ref updates take.
     let mut needs = vec![match row.act {
         catalog::Act::Raw(f) => f(buffered.as_deref().unwrap_or_default()),
-        _ => row.action(&ctx.method, &params, json_body.as_ref()),
+        _ => row.action_with(&ctx.method, &params, json_body.as_ref(), &parts.headers),
     }];
     // A git push: its ref updates come first; the pack after them streams on untouched.
     let mut git_commands: Option<bytes::Bytes> = None;
@@ -623,15 +623,20 @@ async fn judge(mut ctx: Ctx, req: Request, next: Next, j: Judge) -> Response {
         // can name any product's resources, whatever the person reaches. A person places only what
         // `Owners` says is theirs (their repo, their cluster), or moves on its canvas what's already
         // at home in the project.
-        let ok = !as_user && moved.is_some_and(|m| scope.outcome(&Target::One(m), Action::Admin) == Outcome::Allow);
-        let user = person.as_ref().filter(|_| as_user).map(|p| p.user.clone());
+        // Taking a resource off a person's own canvas is theirs to do (the project's write): only
+        // putting one on, or making a project its home, needs it to be theirs.
+        let taking_off = as_user && ctx.method == "DELETE";
+        let ok = taking_off || (!as_user && moved.is_some_and(|m| scope.outcome(&Target::One(m), Action::Admin) == Outcome::Allow));
+        let user = person.as_ref().filter(|_| as_user && !ok).map(|p| p.user.clone());
         let kind = params.iter().find(|(k, _)| k == "kind").and_then(|(_, v)| roll_workspace::Kind::parse(v).ok());
         let project = params.iter().find(|(k, _)| k == "id").map(|(_, v)| v.clone());
         let own = match (user, kind, project) {
             (Some(u), Some(k), Some(p)) => {
                 let a = access.clone();
                 tokio::task::spawn_blocking(move || {
-                    a.workspace.get().is_some_and(|ws| ws.owned_by(&u, k, &r#ref) || ws.home_of(k, &r#ref).ok().flatten().as_deref() == Some(p.as_str()))
+                    a.workspace.get().is_some_and(|ws| {
+                        ws.owned_by(&u, k, &r#ref) || (roll_workspace::members::HOME_KINDS.contains(&k) && ws.home_of(k, &r#ref).ok().flatten().as_deref() == Some(p.as_str()))
+                    })
                 })
                 .await
                 .unwrap_or(false)
@@ -754,10 +759,12 @@ async fn judge(mut ctx: Ctx, req: Request, next: Next, j: Judge) -> Response {
             }
             let bytes = buffered.clone().unwrap_or_default();
             // Bound to everything that decides what the request does: the method, path and body,
-            // what it's about, and the headers that change it (account, project, reviewer).
+            // what it's about, and the headers that change it (account, project, reviewer, and the
+            // row's own, `X-Roll-Override`: an approval of a deploy is never one past a freeze).
             let bound: Vec<String> = ["x-roll-account", "x-roll-project", "x-roll-user", "x-roll-agent"]
-                .iter()
-                .map(|h| format!("{h}={}", parts.headers.get(*h).and_then(|v| v.to_str().ok()).unwrap_or("")))
+                .into_iter()
+                .chain(row.admin_if)
+                .map(|h| format!("{h}={}", parts.headers.get(h).and_then(|v| v.to_str().ok()).unwrap_or("")))
                 .collect();
             let request_hash = hash(&format!(
                 "{}\n{}\n{}\n{:?}\n{}",
@@ -810,6 +817,13 @@ async fn judge(mut ctx: Ctx, req: Request, next: Next, j: Judge) -> Response {
     }
     if let Some(a) = approved.clone() {
         parts.extensions.insert(a);
+    }
+    // A stronger action the product may use here (the row's `capable`): decided at it already
+    // (allowed or approved), or allowed outright. An `ask` for it asks nobody: the product just
+    // does less.
+    let capable: Vec<Action> = row.capable.iter().copied().filter(|a| action == *a || scope.outcome(&target, *a) == Outcome::Allow).collect();
+    if !capable.is_empty() {
+        parts.extensions.insert(roll_auth::Capable(capable));
     }
     parts.extensions.insert(roll_auth::Grant {
         id: ctx.grant.id.as_str().into(),

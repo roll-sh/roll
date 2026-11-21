@@ -16,6 +16,7 @@ use std::time::Duration;
 
 #[derive(Clone, Debug)]
 struct Got {
+    path: String,
     headers: HeaderMap,
     raw: Vec<u8>,
     body: Value,
@@ -40,13 +41,13 @@ async fn receiver() -> Receiver {
     let fail_first: Arc<Mutex<HashMap<String, u32>>> = Arc::default();
     let fail_events: Arc<Mutex<HashMap<String, u32>>> = Arc::default();
     let (g, f, fe) = (got.clone(), fail_first.clone(), fail_events.clone());
-    let app = axum::Router::new().fallback(move |headers: HeaderMap, body: Bytes| {
+    let app = axum::Router::new().fallback(move |uri: axum::http::Uri, headers: HeaderMap, body: Bytes| {
         let (got, fail, fail_events) = (g.clone(), f.clone(), fe.clone());
         async move {
             let v: Value = serde_json::from_slice(&body).unwrap_or(Value::Null);
             let d = headers.get("x-roll-delivery").and_then(|v| v.to_str().ok()).unwrap_or("").to_string();
             let ev = headers.get("x-roll-event").and_then(|v| v.to_str().ok()).unwrap_or("").to_string();
-            got.lock().push(Got { headers, raw: body.to_vec(), body: v });
+            got.lock().push(Got { path: uri.path().to_string(), headers, raw: body.to_vec(), body: v });
             {
                 let mut fe = fail_events.lock();
                 if let Some(n) = fe.get_mut(&ev)
@@ -527,6 +528,115 @@ async fn landings_while_the_daemon_was_down_are_delivered_after_a_restart() {
     assert_eq!(msgs, vec![json!("before"), json!("burst 0"), json!("burst 1"), json!("burst 2")]);
 }
 
+/// Without `ROLL_SECRET_KEY` no webhook or review app is made (400). Rows an older server kept
+/// in the clear (URLs, signing secrets, and the URL in an audit row, a ping and an error) are
+/// sealed when a server with the key opens: nothing of them is left in the SQLite file or its
+/// `-wal`, answers show the URL's scheme and host only, and the webhook still gets its pings at
+/// its whole URL, signed with the secret it had.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn clear_webhooks_are_sealed_and_erased_and_none_is_made_without_a_key() {
+    let rx = receiver().await;
+    let dir = tempfile::tempdir().unwrap();
+    let hook_url = format!("{}/T0FAKE/B0FAKE/fakehooktokenXXXX1", rx.url);
+    let app_url = "https://hooks.example.invalid/T0FAKE/B0FAKE/fakeapptokenXXXX2";
+    let (hook_secret, app_secret) = ("rlw_fakeoldsecret_0000000000000001", "rls_fakeoldsecret_0000000000000002");
+    let clear = [hook_url.as_str(), "fakehooktokenXXXX1", app_url, "fakeapptokenXXXX2", hook_secret, app_secret];
+    let old = {
+        let code = common::open_in(dir.path(), |c| {
+            c.review_app_retry_ms = 20;
+            c.review.secret_key = None;
+        });
+        let a = App { router: code_control::api::router(code.clone()), code, dir: tempfile::tempdir().unwrap() };
+        let repo = a.repo("acme", "api").await;
+        for (path, body) in [
+            (format!("{P}/webhooks"), json!({ "url": rx.url })),
+            ("/v1/code/owners/acme/review-apps".to_string(), json!({ "name": "bot", "webhook_url": app_url })),
+        ] {
+            let (s, v) = a.req("POST", &path, Some(body), None).await;
+            assert_eq!(s, StatusCode::BAD_REQUEST, "{v}");
+            assert!(v["error"].as_str().unwrap().contains("ROLL_SECRET_KEY"), "{v}");
+        }
+        // What a server before this release kept.
+        let (repo_id, owner_id) = (repo["id"].as_str().unwrap().to_string(), a.code.db.sql().query_row("SELECT id FROM owners WHERE name = 'acme'", (), |r| r.get::<_, String>(0)).unwrap());
+        let sql = a.code.db.sql();
+        sql.execute(
+            "INSERT INTO repo_webhooks (id, repo_id, url, events, secret, active, created_by, created_at, updated_at) VALUES ('wh_old', ?, ?, '[\"landed\"]', ?, 1, 'ada', 1, 1)",
+            code_sql::params![repo_id.as_str(), hook_url.as_str(), hook_secret],
+        )
+        .unwrap();
+        sql.execute(
+            "INSERT INTO review_apps (id, owner_id, name, name_lower, webhook_url, events, repos, secret, token_hash, created_at, updated_at) \
+             VALUES ('app_old', ?, 'bot', 'bot', ?, '[\"change.opened\"]', '[]', ?, 'fakehash', 1, 1)",
+            code_sql::params![owner_id.as_str(), app_url, app_secret],
+        )
+        .unwrap();
+        a.code.db.audit(&repo_id, "ada", "webhook_create", &json!({ "webhook": "wh_old", "url": hook_url })).unwrap();
+        sql.execute(
+            "INSERT INTO review_deliveries (id, app_id, event, payload, state, attempts, next_at, last_error, created_at) VALUES ('dl_old', 'wh_old', 'ping', ?, 'failed', 8, 0, ?, 1)",
+            code_sql::params![json!({ "event": "ping", "delivery": "dl_old", "webhook": "wh_old", "data": { "webhook": { "id": "wh_old", "url": hook_url } } }).to_string(), format!("error sending request for url ({hook_url})")],
+        )
+        .unwrap();
+        // Long since in the database file itself, not only its WAL.
+        sql.write_erasing(|_| Ok::<_, code_sql::Error>(())).unwrap();
+        if sql.backend() == code_sql::Backend::Sqlite {
+            let file = std::fs::read(dir.path().join("code").join("control.db")).unwrap();
+            assert!(file.windows(18).any(|w| w == b"fakehooktokenXXXX1"), "the premise: it's in the file");
+        }
+        Arc::downgrade(&a.code)
+    };
+    for _ in 0..500 {
+        if old.upgrade().is_none() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert!(old.upgrade().is_none(), "the old process is gone");
+    // The harness's servers have a key.
+    let code = common::open_in(dir.path(), |c| c.review_app_retry_ms = 20);
+    let left_in_files = || -> Vec<String> {
+        if code.db.backend() != code_sql::Backend::Sqlite {
+            return Vec::new();
+        }
+        let db = dir.path().join("code").join("control.db");
+        let files = [db.clone(), db.with_extension("db-wal")];
+        let bytes: Vec<(String, Vec<u8>)> = files.iter().filter_map(|f| Some((f.display().to_string(), std::fs::read(f).ok()?))).collect();
+        assert!(!bytes.is_empty() && bytes[0].1.len() > 4096, "control.db is where it was");
+        let mut found = Vec::new();
+        for (f, b) in &bytes {
+            for c in clear {
+                if b.windows(c.len()).any(|w| w == c.as_bytes()) {
+                    found.push(format!("{c} in {f}"));
+                }
+            }
+        }
+        found
+    };
+    assert_eq!(left_in_files(), Vec::<String>::new(), "nothing kept in the clear is left in the file");
+    let rows: Vec<String> = code
+        .db
+        .sql()
+        .query(
+            "SELECT url || secret FROM repo_webhooks UNION ALL SELECT webhook_url || secret FROM review_apps \
+             UNION ALL SELECT detail FROM audit UNION ALL SELECT payload || COALESCE(last_error, '') FROM review_deliveries",
+            (),
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert!(rows.iter().all(|r| clear.iter().all(|c| !r.contains(c))), "{rows:?}");
+    let a = App { router: code_control::api::router(code.clone()), code: code.clone(), dir: tempfile::tempdir().unwrap() };
+    let origin = rx.url.trim_end_matches("/hook");
+    assert_eq!(a.ok("GET", &format!("{P}/webhooks/wh_old"), None).await["url"], json!(origin));
+    assert_eq!(a.ok("GET", "/v1/code/review-apps/app_old", None).await["webhook_url"], json!("https://hooks.example.invalid"));
+    let ping = a.ok("POST", &format!("{P}/webhooks/wh_old/ping"), None).await;
+    code.start_webhooks();
+    let g = rx.wait("ping", |g| g.body["delivery"] == ping["id"]).await;
+    assert_eq!(g.path, "/hook/T0FAKE/B0FAKE/fakehooktokenXXXX1", "delivered to the whole URL");
+    let ts: i64 = g.headers["x-roll-timestamp"].to_str().unwrap().parse().unwrap();
+    assert_eq!(g.headers["x-roll-signature-256"].to_str().unwrap(), code_control::review::apps::signature(hook_secret, ts, &g.raw));
+    assert_eq!(g.body["data"]["webhook"]["url"], json!(origin), "pings show the scheme and host only");
+    assert_eq!(left_in_files(), Vec::<String>::new(), "nor after a ping");
+}
+
 /// A delivery queued by a process that stopped before sending it goes out once the next process
 /// starts its webhooks, without waiting for an event of its own to wake the delivery worker.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -869,7 +979,7 @@ async fn every_event_is_the_same_on_the_stream_and_in_webhooks() {
     assert_eq!(keys(&got["status"]), sorted(vec!["context", "state", "target_url", "description", "creator", "created_at", "updated_at"]));
     assert_eq!((got["status"]["context"].as_str(), got["status"]["state"].as_str()), (Some("ci/x"), Some("pending")));
 
-    // preview = {change, preview: Preview | null, became?: ["ready" | "visual_change"]}
+    // preview = {change, preview: Preview | null, became?: ["ready" | "failed" | "visual_change" | "regressions"]}
     a.ok("POST", &format!("/v1/code/changes/{id}/preview"), None).await;
     let got = ev.next("preview").await;
     assert_eq!(keys(&got), ["became", "change", "preview"]);
@@ -886,6 +996,18 @@ async fn every_event_is_the_same_on_the_stream_and_in_webhooks() {
     for (state, head, became) in [("creating", "cs_1", None), ("ready", "cs_1", Some(json!(["ready"]))), ("sleeping", "cs_1", None), ("ready", "cs_1", None), ("updating", "cs_2", None), ("ready", "cs_2", Some(json!(["ready"]))), ("failed", "cs_3", Some(json!(["failed"])))] {
         a.code.report_environment(&id, Some(&at(state, head))).unwrap();
         assert_eq!(ev.next("preview").await.get("became").cloned(), became, "{state} at {head}");
+    }
+    // Regressed against main's preview: once a push too (more of them at the same head isn't new).
+    let regressed = |head: &str, total: u64| -> code_control::model::Preview {
+        serde_json::from_value(json!({ "state": "running", "url": null, "postgres": null, "redis": null, "error": null, "created_at": 1,
+            "environment": { "id": "pv_1", "slug": "s", "state": "ready", "services": [], "resources": [], "sleeping_usd_month": 0.0, "active_usd_hour": 0.0, "head": head,
+                "new_errors": { "branch": "main", "total": total, "errors": [] } } }))
+        .unwrap()
+    };
+    // Gone and back at that head (main's preview asleep, then awake): not said again.
+    for (head, total, became) in [("cs_4", 1, Some(json!(["ready", "regressions"]))), ("cs_4", 2, None), ("cs_4", 0, None), ("cs_4", 3, None)] {
+        a.code.report_environment(&id, Some(&regressed(head, total))).unwrap();
+        assert_eq!(ev.next("preview").await.get("became").cloned(), became, "{total} at {head}");
     }
     a.ok("DELETE", &format!("/v1/code/changes/{id}/preview"), None).await;
     assert_eq!(ev.next("preview").await, json!({ "change": id, "preview": null }));

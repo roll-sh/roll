@@ -1,14 +1,15 @@
 //! Control logic: projects, branches, endpoints, wake-on-connect and suspend.
 
-use crate::compute::{DockerDriver, RunSpec, clone_dir, has_cluster};
+use crate::compute::{DockerDriver, RunSpec, clone_dir, container_name, has_cluster};
 use crate::config::Config;
 use crate::history::Target;
 use crate::ids::{new_id, new_password, now};
-use crate::store::{Branch, Endpoint, EndpointState, LocalState, Project, READ_ONLY, READ_WRITE, Store};
+use crate::store::{Branch, ComputeAnswers, Endpoint, EndpointState, LocalState, Project, READ_ONLY, READ_WRITE, Store};
+use pg_proxy::decoy::{Answers, Decoy};
 use pg_proxy::{RouteError, Router};
 use pg_storage::Objects;
 use std::collections::{HashMap, HashSet};
-use std::net::{Ipv4Addr, SocketAddr};
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use thiserror::Error;
@@ -41,7 +42,52 @@ pub struct Control {
     pub(crate) receivers: Mutex<HashMap<String, JoinHandle<()>>>,
     /// Branches with a base backup in progress.
     pub(crate) backups: Mutex<HashSet<String>>,
+    /// How long each endpoint's compute took to start last from local data (a decoy's refusal
+    /// waits as long).
+    starts: Mutex<HashMap<String, Duration>>,
+    /// Who hears of a decoy role's logins.
+    decoy_listeners: Mutex<Vec<Arc<DecoyListener>>>,
+    /// What each compute image answers before a password (decoy roles), by image reference.
+    known: Mutex<HashMap<String, Known>>,
+    /// Held while an image's answers are learned, by image reference.
+    learning: Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
+    /// This process's name in claims on learning an image.
+    holder: String,
 }
+
+/// A compute image's answers as learned from `image_id`: `None` when the decoy can't match them.
+struct Known {
+    image_id: String,
+    answers: Option<Arc<Answers>>,
+}
+
+type DecoyListener = dyn Fn(&DecoyLogin) + Send + Sync;
+
+/// A decoy role's login (roll secrets' Postgres decoys), refused by the proxy. Names and the
+/// address, never what the client sent.
+#[derive(Clone, Debug)]
+pub struct DecoyLogin {
+    pub project_id: String,
+    pub endpoint_id: String,
+    pub role: String,
+    pub peer: Option<IpAddr>,
+    /// Unix ms.
+    pub at: i64,
+}
+
+/// A decoy role as made.
+#[derive(Clone, Debug, serde::Serialize)]
+pub struct DecoyRole {
+    pub role: String,
+    /// The project's root branch's primary, where the role was made.
+    pub endpoint_id: String,
+}
+
+/// How long a claim on learning an image lasts (a throwaway compute's start and the probes).
+const CLAIM_S: i64 = 600;
+
+/// A compute's start when none was measured on this node yet (a decoy's refusal waits as long).
+const START_DEFAULT: Duration = Duration::from_millis(1500);
 
 pub const SUPPORTED_VERSIONS: [u32; 3] = [16, 17, 18];
 
@@ -66,7 +112,7 @@ impl Control {
         let store = Store::open(&config.home.join("state.db"))?;
         let driver = DockerDriver::new(&config.home).await?;
         let objects = Objects::new(&config.storage)?;
-        Ok(Arc::new(Self {
+        let control = Arc::new(Self {
             config,
             store,
             driver,
@@ -75,7 +121,19 @@ impl Control {
             locks: Mutex::default(),
             receivers: Mutex::default(),
             backups: Mutex::default(),
-        }))
+            starts: Mutex::default(),
+            decoy_listeners: Mutex::default(),
+            known: Mutex::default(),
+            learning: Mutex::default(),
+            holder: new_id("node"),
+        });
+        // No decoy's login should wait for its image's answers: learn them now, in the background.
+        if control.config.learn_answers_at_start {
+            for v in SUPPORTED_VERSIONS {
+                tokio::spawn(control.clone().learn_ahead(control.config.image(v), v));
+            }
+        }
+        Ok(control)
     }
 
     pub(crate) fn lock(&self, endpoint_id: &str) -> Arc<tokio::sync::Mutex<()>> {
@@ -124,7 +182,7 @@ impl Control {
             }
         };
         let ep = self.store.endpoint_for_branch(&branch.id)?.ok_or_else(|| ControlError::NotFound("primary endpoint".into()))?;
-        self.query(&ep.id, &crate::roles::role_sql(&branch.id, &password), false).await?;
+        self.query(&ep.id, &crate::roles::role_sql(&branch.id, &password), SqlAs::Owner).await?;
         self.branch_in(project_id, &branch.id)
     }
 
@@ -182,6 +240,11 @@ impl Control {
         let project = self.project_or_404(&ep.project_id)?;
         let branch = self.store.branch(&ep.branch_id)?.ok_or_else(|| ControlError::NotFound(ep.branch_id.clone()))?;
         let started = std::time::Instant::now();
+        // A start from local data, as most are: not initdb's, a restore's or a new replica's.
+        let ordinary = match ep.is_primary() {
+            true => has_cluster(&self.branch_path(&branch), project.pg_version) && !branch.pending_recovery,
+            false => has_cluster(&self.replica_path(&ep), project.pg_version),
+        };
         self.store.set_endpoint_state(endpoint_id, EndpointState::Starting, None)?;
 
         let result = async {
@@ -240,6 +303,10 @@ impl Control {
                 self.store.set_endpoint_cu(endpoint_id, cu)?;
                 self.store.open_segment(endpoint_id, &ep.project_id, cu)?;
                 self.store.touch_endpoint(endpoint_id)?;
+                if ordinary {
+                    self.starts.lock().unwrap().insert(endpoint_id.to_string(), started.elapsed());
+                }
+                tokio::spawn(self.clone().check_answers(endpoint_id.to_string(), self.config.image(project.pg_version), project.pg_version, port));
                 info!(endpoint = endpoint_id, ms = started.elapsed().as_millis() as u64, "compute started");
                 Ok(SocketAddr::from((Ipv4Addr::LOCALHOST, port)))
             }
@@ -563,7 +630,7 @@ impl Control {
     /// with anything it made when the query ends, even if the caller goes away. Postgres itself
     /// refuses its writes, whatever the SQL does (`SET`, `COMMIT; …`, procedures). A standby can't
     /// make the role, and its only user is the superuser: read-only SQL runs on the primary.
-    pub async fn query(self: &Arc<Self>, endpoint_id: &str, sql: &str, read_only: bool) -> Result<Vec<QueryResult>> {
+    pub async fn query(self: &Arc<Self>, endpoint_id: &str, sql: &str, as_: SqlAs) -> Result<Vec<QueryResult>> {
         let ep = self.endpoint_or_404(endpoint_id)?;
         let project = self.project_or_404(&ep.project_id)?;
         let addr = self.ensure_running(endpoint_id).await?;
@@ -571,7 +638,7 @@ impl Control {
         // Detached: the role made for a read-only query is dropped even if this request isn't
         // awaited to the end.
         let (sql, password) = (sql.to_string(), project.password.clone());
-        let out = tokio::spawn(async move { run_sql(addr, &password, &sql, read_only).await }).await;
+        let out = tokio::spawn(async move { run_sql(addr, &password, &sql, as_).await }).await;
         self.connection_closed(endpoint_id);
         let out = out.map_err(|e| ControlError::Internal(anyhow::anyhow!("the query task failed: {e}")))?;
         let messages = out?;
@@ -599,6 +666,212 @@ impl Control {
         Ok(results)
     }
 
+    // ── decoy roles ──
+
+    /// Make `role` a decoy of the project (roll secrets' Postgres decoys): from here on the proxy
+    /// refuses its logins on every endpoint of the project, as Postgres refuses a wrong password,
+    /// without waking a compute, and tells [`Control::on_decoy_login`]'s listeners. It's also
+    /// made `NOLOGIN` (with no password) on the root branch, for any way in around the proxy.
+    /// The name is the caller's, so it looks like the roles it makes; one that exists is refused,
+    /// and so is any on an image whose answers the decoy can't match.
+    pub async fn create_decoy_role(self: &Arc<Self>, project_id: &str, role: &str) -> Result<DecoyRole> {
+        let pg_version = self.project_or_404(project_id)?.pg_version;
+        if !decoy_name_ok(role) {
+            return Err(ControlError::Invalid("a decoy role's name is 1-62 of [a-z0-9_], not starting with a digit or pg_".into()));
+        }
+        if self.store.is_decoy_role(project_id, role)? {
+            return Err(ControlError::Conflict(format!("{role} is a decoy already")));
+        }
+        let ep = self.root_endpoint(project_id)?;
+        // Its compute is up for the role anyway: what its image answers is known before any login.
+        let port = self.ensure_running(&ep.id).await?.port();
+        if self.answers(&self.config.image(pg_version), pg_version, Some((&ep.id, port))).await.is_none() {
+            return Err(ControlError::Invalid("roll can't answer a decoy role's logins as this database's Postgres image does, so one here could be told from a missing role".into()));
+        }
+        // First in Postgres: this fails for a role that exists, which must never become a decoy.
+        self.query(&ep.id, &format!("CREATE ROLE {role} NOLOGIN"), SqlAs::Owner).await?;
+        let mut salt = [0u8; 16];
+        getrandom::fill(&mut salt).map_err(|e| anyhow::anyhow!("os randomness: {e}"))?;
+        use base64::Engine as _;
+        if let Err(e) = self.store.insert_decoy_role(project_id, role, &base64::engine::general_purpose::STANDARD.encode(salt)) {
+            let _ = self.query(&ep.id, &format!("DROP ROLE IF EXISTS {role}"), SqlAs::Owner).await;
+            return Err(e.into());
+        }
+        Ok(DecoyRole { role: role.to_string(), endpoint_id: ep.id })
+    }
+
+    /// Drop a decoy role: from Postgres (with anything granted to it), then from the proxy's
+    /// table. Done already (or never a decoy) is fine.
+    pub async fn drop_decoy_role(self: &Arc<Self>, project_id: &str, role: &str) -> Result<()> {
+        self.project_or_404(project_id)?;
+        if !self.store.is_decoy_role(project_id, role)? {
+            return Ok(());
+        }
+        // Only names `create_decoy_role` took are in the table.
+        let ep = self.root_endpoint(project_id)?;
+        let sql = format!("DO $$ BEGIN IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = '{role}') THEN EXECUTE 'DROP OWNED BY {role}'; EXECUTE 'DROP ROLE {role}'; END IF; END $$;");
+        self.query(&ep.id, &sql, SqlAs::Owner).await?;
+        self.store.delete_decoy_role(project_id, role)?;
+        Ok(())
+    }
+
+    /// Hear of every decoy role's login this node's proxy refuses (called on the login's task:
+    /// hand anything slow off).
+    pub fn on_decoy_login(&self, f: impl Fn(&DecoyLogin) + Send + Sync + 'static) {
+        self.decoy_listeners.lock().unwrap().push(Arc::new(f));
+    }
+
+    fn tell_decoy_login(&self, login: &DecoyLogin) {
+        let listeners = self.decoy_listeners.lock().unwrap().clone();
+        for f in listeners {
+            f(login);
+        }
+    }
+
+    // ── what computes answer before a password (decoy roles) ──
+
+    /// What `image` answers before a password is checked, learned first when it isn't known:
+    /// from the endpoint's compute when it's up (`running`: its id and host port), else from a
+    /// compute started for that alone (a decoy's login never wakes an endpoint). `None`: the
+    /// decoy can't answer as it does (or it couldn't be asked).
+    async fn answers(&self, image: &str, pg_version: u32, running: Option<(&str, u16)>) -> Option<Arc<Answers>> {
+        if let Some(answers) = self.cached(image) {
+            return answers;
+        }
+        let _held = self.learning_lock(image).lock_owned().await;
+        if let Some(answers) = self.cached(image) {
+            return answers;
+        }
+        let learned = match running {
+            Some((endpoint, port)) => match self.driver.image_id(&container_name(endpoint)).await {
+                Ok(id) => self.learn_at(image, &id, pg_version, port).await,
+                Err(e) => Err(e),
+            },
+            None => self.learn_alone(image, pg_version).await,
+        };
+        learned.unwrap_or_else(|e| {
+            warn!(image, error = %e, "learning what a compute image answers failed");
+            None
+        })
+    }
+
+    /// `image`'s answers if they're learned (from this process's copy, else the catalog's).
+    fn cached(&self, image: &str) -> Option<Option<Arc<Answers>>> {
+        if let Some(k) = self.known.lock().unwrap().get(image) {
+            return Some(k.answers.clone());
+        }
+        let row = self.store.compute_answers_of(image).ok()??;
+        let answers = match row.answers.map(|j| serde_json::from_str::<Answers>(&j)) {
+            Some(Ok(answers)) if answers.complete() => Some(Arc::new(answers)),
+            // A row this version can't read is learned again.
+            Some(_) => {
+                let _ = self.store.delete_compute_answers_of(image);
+                return None;
+            }
+            None => None,
+        };
+        self.known.lock().unwrap().insert(image.into(), Known { image_id: row.image_id, answers: answers.clone() });
+        Some(answers)
+    }
+
+    fn learning_lock(&self, image: &str) -> Arc<tokio::sync::Mutex<()>> {
+        self.learning.lock().unwrap().entry(image.to_string()).or_default().clone()
+    }
+
+    /// Learn `image` from a compute of its own unless it's learned already, retrying with a
+    /// backoff: at start, so a decoy's login never waits for it. One node at a time claims it in
+    /// the catalog; another's claim means waiting for its result.
+    async fn learn_ahead(self: Arc<Self>, image: String, pg_version: u32) {
+        let mut wait = Duration::from_secs(5);
+        loop {
+            {
+                let _held = self.learning_lock(&image).lock_owned().await;
+                if self.cached(&image).is_some() {
+                    return;
+                }
+                match self.store.claim_compute_answers(&image, &self.holder, CLAIM_S) {
+                    Ok(true) => {
+                        let started = std::time::Instant::now();
+                        let learned = self.learn_alone(&image, pg_version).await;
+                        let _ = self.store.release_compute_answers_claim(&image, &self.holder);
+                        match learned {
+                            Ok(_) => return info!(image, ms = started.elapsed().as_millis() as u64, "learned a compute image ahead of any login"),
+                            Err(e) => warn!(image, error = %e, retry_s = wait.as_secs(), "learning what a compute image answers failed"),
+                        }
+                    }
+                    Ok(false) => {}
+                    Err(e) => warn!(image, error = %e, "claiming a compute image to learn failed"),
+                }
+            }
+            tokio::time::sleep(wait).await;
+            wait = (wait * 2).min(Duration::from_secs(600));
+        }
+    }
+
+    /// Forget every image's answers: each is learned again when it's next needed (as after an
+    /// upgrade that moves the pinned images).
+    pub fn forget_compute_answers(&self) -> anyhow::Result<()> {
+        self.store.delete_compute_answers()?;
+        self.known.lock().unwrap().clear();
+        Ok(())
+    }
+
+    /// After `endpoint`'s compute started on `image`: learn what it answers, unless that's known
+    /// for the image it runs (a reference by digest can't move; a tag can).
+    async fn check_answers(self: Arc<Self>, endpoint: String, image: String, pg_version: u32, port: u16) {
+        if image.contains("@sha256:") && self.cached(&image).is_some() {
+            return;
+        }
+        let _held = self.learning_lock(&image).lock_owned().await;
+        let learned = async {
+            let id = self.driver.image_id(&container_name(&endpoint)).await?;
+            if self.cached(&image).is_some() && self.known.lock().unwrap().get(&image).is_some_and(|k| k.image_id == id) {
+                return Ok(None);
+            }
+            self.learn_at(&image, &id, pg_version, port).await
+        };
+        if let Err(e) = learned.await {
+            warn!(endpoint, image, error = %e, "learning what a compute image answers failed");
+        }
+    }
+
+    /// Ask the compute at `port` (running `image`, whose id is `image_id`) and keep its answers.
+    async fn learn_at(&self, image: &str, image_id: &str, pg_version: u32, port: u16) -> anyhow::Result<Option<Arc<Answers>>> {
+        let answers = pg_proxy::decoy::learn::learn(SocketAddr::from((Ipv4Addr::LOCALHOST, port))).await?;
+        let json = answers.as_ref().map(serde_json::to_string).transpose()?;
+        self.store.put_compute_answers(&ComputeAnswers { image: image.into(), image_id: image_id.into(), answers: json }, pg_version)?;
+        match answers {
+            Some(_) => info!(image, "learned what a compute image answers before a password"),
+            None => warn!(image, "a decoy can't answer as this compute image does: decoy roles' logins on it go to Postgres"),
+        }
+        let answers = answers.map(Arc::new);
+        self.known.lock().unwrap().insert(image.into(), Known { image_id: image_id.into(), answers: answers.clone() });
+        Ok(answers)
+    }
+
+    /// Learn `image`'s answers from a compute of an empty cluster, started for that alone.
+    async fn learn_alone(&self, image: &str, pg_version: u32) -> anyhow::Result<Option<Arc<Answers>>> {
+        let id = new_id("learn");
+        let dir = self.config.home.join("learn").join(&id);
+        let password = new_password();
+        let spec = RunSpec { endpoint_id: &id, image: image.into(), pg_version, data_dir: &dir, password: &password, cpus: 0.5, mem_mb: 256, shared_buffers_mb: 32, cache_mb: 64 };
+        let learned = async {
+            let port = self.driver.run(&spec, READY_TIMEOUT).await?;
+            let image_id = self.driver.image_id(&container_name(&id)).await?;
+            self.learn_at(image, &image_id, pg_version, port).await
+        }
+        .await;
+        let _ = self.driver.remove(&id).await;
+        let _ = std::fs::remove_dir_all(&dir);
+        learned
+    }
+
+    /// The primary endpoint of the project's root branch.
+    fn root_endpoint(&self, project_id: &str) -> Result<Endpoint> {
+        let root = self.store.branches(project_id)?.into_iter().find(|b| b.parent_id.is_none()).ok_or_else(|| ControlError::NotFound("root branch".into()))?;
+        self.store.endpoint_for_branch(&root.id)?.ok_or_else(|| ControlError::NotFound("primary endpoint".into()))
+    }
+
     pub(crate) fn connection_opened(&self, endpoint: &str) {
         *self.connections.lock().unwrap().entry(endpoint.to_string()).or_default() += 1;
         let _ = self.store.touch_endpoint(endpoint);
@@ -612,8 +885,35 @@ impl Control {
     }
 }
 
+/// A name `CREATE ROLE` takes unquoted, that Postgres won't cut (63 bytes) and doesn't reserve.
+fn decoy_name_ok(role: &str) -> bool {
+    (1..=62).contains(&role.len())
+        && role.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_')
+        && !role.as_bytes()[0].is_ascii_digit()
+        && !role.starts_with("pg_")
+}
+
 /// One query's messages: as the owner, or (`read_only`) as a role made for it and dropped after.
-async fn run_sql(addr: SocketAddr, password: &str, sql: &str, read_only: bool) -> Result<Vec<tokio_postgres::SimpleQueryMessage>> {
+/// Who SQL on an endpoint runs as ([`Control::query`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SqlAs {
+    /// A role made for the query holding only `pg_read_all_data` and `pg_read_all_stats` (other
+    /// sessions' queries and `pg_stat_statements`' text, which slow-query and health tools read),
+    /// in read-only transactions: Postgres refuses its writes.
+    ReadOnly,
+    /// A role made for the query that is a member of the roles owning the app's objects (the
+    /// database's `roll_owner`, a branch's app role) and holds `pg_read_all_data` and
+    /// `pg_write_all_data`: rows and schema changes, never the superuser's powers (roles,
+    /// `COPY … PROGRAM`, the server's files). What it makes stays, owned by `roll_owner`. Without
+    /// `may_drop` it's a member of `roll_no_drop` too, and Postgres refuses its drops of tables,
+    /// columns, schemas and the like (deleting rows is a write).
+    Writer { may_drop: bool },
+    /// The project's superuser: the operator's, a grant that may `admin` the endpoint, and roll's
+    /// own work (app roles, decoys).
+    Owner,
+}
+
+async fn run_sql(addr: SocketAddr, password: &str, sql: &str, as_: SqlAs) -> Result<Vec<tokio_postgres::SimpleQueryMessage>> {
     let conn = |user: &str, password: &str| {
         format!("host={} port={} user={user} password={password} dbname=main connect_timeout=10 application_name=roll-console", addr.ip(), addr.port())
     };
@@ -622,7 +922,7 @@ async fn run_sql(addr: SocketAddr, password: &str, sql: &str, read_only: bool) -
         Ok::<_, ControlError>((client, tokio::spawn(connection)))
     };
     let (admin, admin_conn) = connect(conn("roll", password)).await?;
-    if !read_only {
+    if as_ == SqlAs::Owner {
         let messages = admin.simple_query(sql).await;
         drop(admin);
         let _ = admin_conn.await;
@@ -631,20 +931,58 @@ async fn run_sql(addr: SocketAddr, password: &str, sql: &str, read_only: bool) -
     if admin.query_one("SELECT pg_is_in_recovery()", &[]).await.map(|r| r.get::<_, bool>(0)).unwrap_or(true) {
         drop(admin);
         let _ = admin_conn.await;
-        return Err(ControlError::Invalid("read-only SQL runs on a branch's primary endpoint, not a read replica".into()));
+        return Err(ControlError::Invalid(match as_ {
+            SqlAs::ReadOnly => "read-only SQL runs on a branch's primary endpoint, not a read replica".into(),
+            _ => "SQL that may write runs on a branch's primary endpoint; on a read replica, send it read_only".into(),
+        }));
     }
-    let role = format!("roll_ro_{}", crate::ids::random_string(16));
     let pw = crate::ids::random_string(32);
-    admin
-        .batch_execute(&format!(
-            "CREATE ROLE {role} LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS CONNECTION LIMIT 1 \
-             PASSWORD '{pw}' VALID UNTIL '{until}' IN ROLE pg_read_all_data; \
-             ALTER ROLE {role} SET default_transaction_read_only = on; \
-             ALTER ROLE {role} SET statement_timeout = '60s'",
-            until = chrono_like_in(600)
-        ))
-        .await
-        .map_err(|e| ControlError::Internal(anyhow::anyhow!("making the read-only role: {}", pg_error_text(&e))))?;
+    let until = chrono_like_in(600);
+    let role = match as_ {
+        SqlAs::ReadOnly => {
+            let role = format!("roll_ro_{}", crate::ids::random_string(16));
+            admin
+                .batch_execute(&format!(
+                    "CREATE ROLE {role} LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS CONNECTION LIMIT 1 \
+                     PASSWORD '{pw}' VALID UNTIL '{until}' IN ROLE pg_read_all_data, pg_read_all_stats; \
+                     ALTER ROLE {role} SET default_transaction_read_only = on; \
+                     ALTER ROLE {role} SET statement_timeout = '60s'"
+                ))
+                .await
+                .map_err(|e| ControlError::Internal(anyhow::anyhow!("making the read-only role: {}", pg_error_text(&e))))?;
+            role
+        }
+        _ => {
+            // The database's owner role takes what the superuser owns (roles.rs), then the
+            // writer joins the roles that own the app's objects: their rights, never more.
+            let role = format!("roll_wr_{}", crate::ids::random_string(16));
+            let made = async {
+                admin.batch_execute(crate::roles::OWNER_SQL).await?;
+                let owners: Vec<String> = admin.query(crate::roles::OWNERS_SQL, &[]).await?.iter().map(|r| r.get(0)).collect();
+                let v16 = admin.query_one("SELECT current_setting('server_version_num')::int >= 160000", &[]).await?.get::<_, bool>(0);
+                let mut sql = format!(
+                    "CREATE ROLE {role} LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS CONNECTION LIMIT 1 \
+                     PASSWORD '{pw}' VALID UNTIL '{until}' IN ROLE pg_read_all_data, pg_write_all_data;"
+                );
+                for o in &owners {
+                    let quoted = format!("\"{}\"", o.replace('"', "\"\""));
+                    // On 16 and later it can't SET ROLE to them either: their rights, not their name.
+                    sql.push_str(&format!(" GRANT {quoted} TO {role}{};", if v16 { " WITH INHERIT TRUE, SET FALSE" } else { "" }));
+                }
+                if as_ == (SqlAs::Writer { may_drop: false }) {
+                    sql.push_str(&format!(" GRANT roll_no_drop TO {role};"));
+                }
+                admin.batch_execute(&sql).await
+            };
+            if let Err(e) = made.await {
+                let _ = admin.batch_execute(&format!("DROP ROLE IF EXISTS {role}")).await;
+                drop(admin);
+                let _ = admin_conn.await;
+                return Err(ControlError::Internal(anyhow::anyhow!("making the writer role: {}", pg_error_text(&e))));
+            }
+            role
+        }
+    };
     let messages = match connect(conn(&role, &pw)).await {
         Ok((reader, reader_conn)) => {
             let m = reader.simple_query(sql).await;
@@ -654,9 +992,11 @@ async fn run_sql(addr: SocketAddr, password: &str, sql: &str, read_only: bool) -
         }
         Err(e) => Err(e),
     };
-    // Whatever the role made (a temporary table goes with its session) goes with it.
-    if let Err(e) = admin.batch_execute(&format!("DROP OWNED BY {role}; DROP ROLE {role}")).await {
-        tracing::warn!(role, error = %pg_error_text(&e), "dropping a read-only query role");
+    // A writer's objects stay, as the database's owner role's; whatever a reader made (a
+    // temporary table goes with its session) goes with it.
+    let keep = if matches!(as_, SqlAs::Writer { .. }) { format!("REASSIGN OWNED BY {role} TO roll_owner; ") } else { String::new() };
+    if let Err(e) = admin.batch_execute(&format!("{keep}DROP OWNED BY {role}; DROP ROLE {role}")).await {
+        tracing::warn!(role, error = %pg_error_text(&e), "dropping a query role");
     }
     drop(admin);
     let _ = admin_conn.await;
@@ -705,6 +1045,27 @@ impl Router for ProxyRouter {
             Err(ControlError::NotFound(_)) => Err(RouteError::NotFound(format!("endpoint {endpoint} does not exist"))),
             Err(e) => Err(RouteError::Unavailable(format!("endpoint {endpoint} could not start: {e}"))),
         }
+    }
+
+    async fn decoy(&self, endpoint: &str, user: &str, peer: Option<SocketAddr>) -> Option<Decoy> {
+        let found = match self.0.store.decoy_at(endpoint, user) {
+            Ok(found) => found?,
+            Err(e) => {
+                // Postgres refuses it anyway (`NOLOGIN`, no password): only the alert is lost.
+                warn!(endpoint, error = %e, "looking up a decoy role failed");
+                return None;
+            }
+        };
+        let at = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_millis() as i64);
+        self.0.tell_decoy_login(&DecoyLogin { project_id: found.project_id, endpoint_id: endpoint.to_string(), role: user.to_string(), peer: peer.map(|p| p.ip()), at });
+        let asked = std::time::Instant::now();
+        let answers = self.0.answers(&self.0.config.image(found.pg_version), found.pg_version, found.running.map(|port| (endpoint, port))).await;
+        let start = match found.running {
+            Some(_) => Duration::ZERO,
+            None => self.0.starts.lock().unwrap().get(endpoint).copied().unwrap_or(START_DEFAULT),
+        };
+        // Learning them (once per image) counts toward the wait.
+        Some(Decoy { salt: found.salt, start: start.saturating_sub(asked.elapsed()), answers })
     }
 
     fn connection_opened(&self, endpoint: &str) {

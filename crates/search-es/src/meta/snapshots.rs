@@ -29,6 +29,10 @@ pub struct Repository {
     /// `sas_token`), sealed with the cluster's sealer when it has one ([`crate::seal`]).
     /// Kept apart from `settings` so nothing that prints a repository can show them.
     pub secrets: BTreeMap<String, String>,
+    /// Who wrote the repository's roll secrets references (`roll://…` settings), as roll's
+    /// control plane named them (`api::snapshots`, "Credentials by reference"): every resolve
+    /// re-checks that they still may reveal what each names. `None` without references.
+    pub refs_by: Option<String>,
 }
 
 /// The `client` of roll's default repository: an `s3` repository on the cluster's own object
@@ -37,7 +41,7 @@ pub const ROLL_CLIENT: &str = "roll";
 
 impl Repository {
     pub fn new(ty: impl Into<String>, settings: Settings) -> Repository {
-        Repository { ty: ty.into(), settings, secrets: BTreeMap::new() }
+        Repository { ty: ty.into(), settings, secrets: BTreeMap::new(), refs_by: None }
     }
 
     /// roll's default repository (`found-snapshots` unless configured otherwise): shown as an
@@ -78,6 +82,28 @@ impl Repository {
         format!("{}:{loc}", self.ty)
     }
 
+    /// The bucket storage a repository in a tenant's bucket ([`Repository::in_bucket`]) reaches,
+    /// as its client resolves it: the bucket (or an `azure` container, Elasticsearch's default
+    /// when none is named) and the `base_path` without its outer slashes, lower case. Unlike
+    /// [`Repository::location_key`] (the key its contents are kept under, the settings as given),
+    /// spellings of one place compare equal: `prod` and `prod/`, an unnamed container and
+    /// `elasticsearch-snapshots`. Type, endpoint and account are left out on purpose: two
+    /// repositories at one bucket path through different clients (S3 interoperability on GCS,
+    /// another endpoint spelling) may be one place, and what this decides ([`crate::branch`])
+    /// only errs towards read-only. `None` for other repositories.
+    pub fn bucket_place(&self) -> Option<String> {
+        if !self.in_bucket() {
+            return None;
+        }
+        let s = &self.settings;
+        let bucket = match self.ty.as_str() {
+            "azure" => s.get("container").filter(|c| !c.is_empty()).unwrap_or(crate::api::snapshots::AZURE_CONTAINER),
+            _ => s.get("bucket").unwrap_or_default(),
+        };
+        let base = s.get("base_path").unwrap_or_default().trim_matches('/');
+        Some(format!("{}/{}", bucket.to_ascii_lowercase(), base.to_ascii_lowercase()))
+    }
+
     /// `readonly: true` (only that spelling; `url` repositories are read-only by nature, and an
     /// `azure` one reading only its secondary location, as Elasticsearch forces it).
     pub fn read_only(&self) -> bool {
@@ -93,12 +119,16 @@ impl Repository {
         {
             m.insert("secrets".into(), Value::Obj(self.secrets.iter().map(|(k, s)| (k.clone(), Value::from(s.clone()))).collect()));
         }
+        if let (Some(by), Value::Obj(m)) = (&self.refs_by, &mut v) {
+            m.insert("refs_by".into(), Value::from(by.clone()));
+        }
         v
     }
 
     pub fn from_stored(v: &Value) -> Option<Repository> {
         let secrets = v.get("secrets").and_then(Value::as_object).map(|m| m.iter().filter_map(|(k, s)| Some((k.clone(), s.as_str()?.to_string()))).collect()).unwrap_or_default();
-        Some(Repository { ty: v.get("type")?.as_str()?.to_string(), settings: Settings::from_json(v.get("settings")?).ok()?, secrets })
+        let refs_by = v.get("refs_by").and_then(Value::as_str).map(str::to_string);
+        Some(Repository { ty: v.get("type")?.as_str()?.to_string(), settings: Settings::from_json(v.get("settings")?).ok()?, secrets, refs_by })
     }
 }
 

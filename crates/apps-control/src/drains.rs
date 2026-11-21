@@ -22,6 +22,7 @@
 
 use crate::model::{DRAIN_FORMATS, DRAIN_SOURCES, LogDrain};
 use crate::store::{DrainSettings, OpenedDrain};
+use crate::traces::Signal;
 use crate::{Apps, Error, Result};
 use serde_json::{Value, json};
 use std::collections::{HashMap, VecDeque};
@@ -35,6 +36,14 @@ const BUFFER: usize = 10_000;
 /// The most lines a batch carries, and the longest a line waits for its batch.
 const BATCH: usize = 500;
 const LINGER: Duration = Duration::from_secs(1);
+/// An `s3` drain's: an object a batch, so fewer and bigger.
+const S3_BATCH: usize = 5_000;
+const S3_LINGER: Duration = Duration::from_secs(60);
+/// An `s3` drain's credentials, in its sealed headers (never sent as headers).
+const S3_KEYS: [&str; 3] = ["aws-access-key-id", "aws-secret-access-key", "aws-region"];
+/// Marks a bucket drain's (roll storage's own endpoint, its key minted by roll): a header no
+/// caller can set (`x-roll-*` is roll's).
+const OWN: &str = "x-roll-own";
 /// How long a node keeps a project's drains (and a service's project) before reading again.
 const REFRESH: Duration = Duration::from_secs(30);
 /// Previews' batches waiting for the drainer; past it, a batch is dropped (counted).
@@ -67,16 +76,50 @@ impl Apps {
     /// this once.
     pub async fn add_drain(self: &Arc<Self>, project: &str, body: Value) -> Result<Value> {
         let o = body.as_object().cloned().unwrap_or_default();
-        if let Some(k) = o.keys().find(|k| !["url", "sources", "environments", "services", "previews", "headers", "format"].contains(&k.as_str())) {
+        if let Some(k) = o.keys().find(|k| !["url", "sources", "environments", "services", "previews", "headers", "format", "bucket", "prefix"].contains(&k.as_str())) {
             return Err(Error::BadRequest(format!("unknown field {k}")));
         }
+        // A roll storage bucket of the project's: an `s3` drain with a key minted for it.
+        let bucket = match o.get("bucket") {
+            None | Some(Value::Null) => None,
+            Some(Value::String(b)) if o.get("url").is_none() && o.get("headers").is_none() && o.get("format").is_none_or(|f| f == "s3") => Some(b.clone()),
+            Some(_) => return Err(Error::BadRequest("bucket is a roll storage bucket of the project's, without url, headers or another format (its key is minted for the drain)".into())),
+        };
         let format = match o.get("format") {
+            _ if bucket.is_some() => "s3",
             None | Some(Value::Null) => "ndjson",
             Some(Value::String(f)) if DRAIN_FORMATS.contains(&f.as_str()) => f.as_str(),
             Some(_) => return Err(Error::BadRequest(format!("format is one of {}", DRAIN_FORMATS.join(", ")))),
         }
         .to_string();
-        let settings = self.drain_settings(project, &o, None).await?;
+        let mut settings = self.drain_settings(project, &o, None).await?;
+        if let Some(b) = &bucket {
+            let p = project.to_string();
+            if self.db(move |s| s.drains(&p)).await?.len() >= MAX_DRAINS {
+                return Err(Error::Conflict(format!("a project has at most {MAX_DRAINS} log drains")));
+            }
+            let prefix = match o.get("prefix") {
+                None | Some(Value::Null) => String::new(),
+                Some(Value::String(p)) if p.len() <= 200 && p.bytes().all(|c| c.is_ascii_alphanumeric() || matches!(c, b'-' | b'_' | b'.' | b'/')) && !p.contains("//") => p.trim_matches('/').to_string(),
+                Some(_) => return Err(Error::BadRequest("prefix is at most 200 of letters, digits, - _ . /".into())),
+            };
+            let (url, kept) = self.mint_bucket_drain(project, b, &prefix, &mut settings).await?;
+            let secret = format!("whsec_{}", crate::model::random(32));
+            let host = url::Url::parse(&url).ok().and_then(|u| u.host_str().map(str::to_string)).unwrap_or_default();
+            let (p, s2, u2, b2, k2) = (project.to_string(), secret.clone(), url.clone(), b.clone(), kept.clone());
+            let made = self.db(move |s| s.add_drain_linked(&p, &host, &u2, &s2, "s3", &settings, Some(("bucket", &b2, &k2)))).await;
+            let d = match made {
+                Ok(d) => d,
+                Err(e) => {
+                    let _ = self.deps.resources.unlink(crate::model::LinkKind::Bucket, b, &kept).await;
+                    return Err(e);
+                }
+            };
+            self.drains_changed(project).await;
+            let mut v = serde_json::to_value(&d).expect("JSON");
+            v["secret"] = json!(secret);
+            return Ok(v);
+        }
         let url = o.get("url").and_then(Value::as_str).ok_or_else(|| Error::BadRequest("url is required".into()))?.trim().to_string();
         let host = if format == "syslog" {
             // A syslog server takes no headers: a vendor's token goes in its host or port.
@@ -84,6 +127,9 @@ impl Apps {
                 return Err(Error::BadRequest("headers: a syslog drain is sent none".into()));
             }
             self.syslog_target(&url)?.0
+        } else if format == "s3" {
+            check_s3(&url, &settings.headers)?;
+            self.check_target("webhook", &url)?
         } else {
             self.check_target("webhook", &url)?
         };
@@ -209,6 +255,12 @@ impl Apps {
         let p = project.to_string();
         let current = self.db(move |s| s.drain_secrets(&p)).await?.into_iter().find(|d| d.drain.id == id).ok_or_else(|| Error::NotFound(format!("no log drain {id}")))?;
         let settings = self.drain_settings(project, &o, Some(&current)).await?;
+        if current.drain.format == "s3" {
+            if current.headers.iter().any(|(k, _)| k == OWN) && o.contains_key("headers") {
+                return Err(Error::BadRequest("headers: a bucket drain's key is roll's".into()));
+            }
+            check_s3(&current.url, &settings.headers)?;
+        }
         if current.drain.format == "syslog" && !settings.headers.is_empty() {
             return Err(Error::BadRequest("headers: a syslog drain is sent none".into()));
         }
@@ -223,8 +275,8 @@ impl Apps {
     async fn drains_changed(self: &Arc<Self>, project: &str) {
         self.drains_dirty.lock().insert(project.to_string());
         // The tap's gate before the answer: a new drain of requests gets the next one.
-        if let Ok((http, build)) = self.db(|s| s.drain_sources_wanted()).await {
-            self.logs.set_tapped(http, build);
+        if let Ok((http, build, traces, metrics)) = self.db(|s| s.drain_sources_wanted()).await {
+            self.logs.set_tapped(http, build, traces, metrics);
         }
     }
 
@@ -234,7 +286,7 @@ impl Apps {
         let p = project.to_string();
         let d = self.db(move |s| s.drain_secrets(&p)).await?.into_iter().find(|d| d.drain.id == id).ok_or_else(|| Error::NotFound(format!("no log drain {id}")))?;
         let line = json!({ "t": code_sql::now_ms(), "source": "test", "text": "a test line from roll apps" });
-        Ok(match self.post_batch(&d, &[line], &format!("lgb_{}", crate::model::random(12))).await {
+        Ok(match self.post_batch(&d, &[line], &format!("lgb_{}", crate::model::random(12)), Signal::Logs).await {
             Ok(code) => json!({ "ok": code.is_none_or(|c| (200..300).contains(&c)), "code": code, "error": Value::Null }),
             Err(e) => json!({ "ok": false, "code": Value::Null, "error": e }),
         })
@@ -242,9 +294,41 @@ impl Apps {
 
     pub async fn delete_drain(self: &Arc<Self>, project: &str, id: &str) -> Result<()> {
         let (p, i) = (project.to_string(), id.to_string());
-        self.db(move |s| s.delete_drain(&p, &i)).await?;
+        // A bucket drain's key goes with it (a failure is logged: the drain is gone either way).
+        if let Some((_, r, kept)) = self.db(move |s| s.delete_drain(&p, &i)).await?
+            && let Err(e) = self.deps.resources.unlink(crate::model::LinkKind::Bucket, &r, &kept).await
+        {
+            tracing::warn!(drain = id, bucket = %r, error = %e, "apps: a bucket drain's key couldn't be revoked");
+        }
         self.drains_changed(project).await;
         Ok(())
+    }
+
+    /// A bucket drain's target and key: the bucket on the project's canvas (the operator's
+    /// project, as a stream must be), its endpoint and region from roll storage, and a key of the
+    /// drain's own (write on that bucket) minted through the bucket link's provider, put in its
+    /// sealed headers with `x-roll-own` (the endpoint is roll's own, reached past the public-only
+    /// client). Its URL and what to revoke.
+    async fn mint_bucket_drain(self: &Arc<Self>, project: &str, bucket: &str, prefix: &str, settings: &mut DrainSettings) -> Result<(String, String)> {
+        let p = self.deps.workspace.as_ref().and_then(|ws| ws.get(roll_workspace::Scope::All, project).ok());
+        if !p.as_ref().is_some_and(|p| p.resources.iter().any(|r| r.kind == roll_workspace::Kind::Bucket && r.r#ref == bucket)) {
+            return Err(Error::BadRequest(format!("bucket {bucket} isn't on this project")));
+        }
+        if !p.is_some_and(|p| p.owner.is_empty()) {
+            return Err(Error::BadRequest("a person's project can't drain into a bucket until buckets know their owners".into()));
+        }
+        let vars: HashMap<String, String> = self.deps.resources.link_vars(crate::model::LinkKind::Bucket, bucket).await.map_err(|e| Error::BadRequest(format!("bucket {bucket}: {e:#}")))?.into_iter().collect();
+        let (Some(endpoint), Some(name)) = (vars.get("AWS_ENDPOINT_URL"), vars.get("S3_BUCKET")) else { return Err(Error::Conflict("roll storage gave no endpoint for the bucket".into())) };
+        let region = vars.get("AWS_REGION").cloned().unwrap_or_else(|| "us-east-1".into());
+        let m = self.deps.resources.link(crate::model::LinkKind::Bucket, bucket, &format!("drain:{project}")).await.map_err(|e| Error::Conflict(format!("a key for bucket {bucket}: {e:#}")))?.ok_or_else(|| Error::Conflict("roll storage made no key for the drain".into()))?;
+        let get = |k: &str| m.vars.iter().find(|(n, _)| n == k).map(|(_, v)| v.clone());
+        let (Some(id), Some(key)) = (get("AWS_ACCESS_KEY_ID"), get("AWS_SECRET_ACCESS_KEY")) else {
+            let _ = self.deps.resources.unlink(crate::model::LinkKind::Bucket, bucket, &m.kept).await;
+            return Err(Error::Conflict("roll storage's key for the drain had no access key".into()));
+        };
+        settings.headers = vec![(S3_KEYS[0].into(), id), (S3_KEYS[1].into(), key), (S3_KEYS[2].into(), region), (OWN.into(), "1".into())];
+        let url = format!("{}/{name}{}", endpoint.trim_end_matches('/'), if prefix.is_empty() { String::new() } else { format!("/{prefix}") });
+        Ok((url, m.kept))
     }
 
     /// Every node: read the log tap, batch each project's lines per drain, and send them.
@@ -284,6 +368,16 @@ impl Apps {
                         ("runtime", s.to_string(), e.to_string())
                     } else if let Some((s, e)) = key.strip_prefix("http:").and_then(|k| k.split_once('/')) {
                         ("http", s.to_string(), e.to_string())
+                    } else if let Some((s, e)) = key.strip_prefix("trace:").and_then(|k| k.split_once('/')) {
+                        ("traces", s.to_string(), e.to_string())
+                    } else if let Some((s, e)) = key.strip_prefix("metric:").and_then(|k| k.split_once('/')) {
+                        ("metrics", s.to_string(), e.to_string())
+                    } else if let Some((s, e)) = key.strip_prefix("audit:").and_then(|k| k.split_once('/')) {
+                        // A deleted service's own entry (`audit.deleted`) is read deleted.
+                        let sid = s.to_string();
+                        let found = self.db(move |st| st.service_any(&sid)).await.ok().map(|(s, _)| (s.project, s.name));
+                        services.insert(s.to_string(), (Instant::now(), found));
+                        ("audit", s.to_string(), e.to_string())
                     } else if let Some(dep) = key.strip_prefix("build:") {
                         if !builds.contains_key(dep) {
                             if builds.len() > 1000 {
@@ -337,18 +431,19 @@ impl Apps {
                 _ = tick.tick() => {
                     if wanted_at.elapsed() >= REFRESH {
                         wanted_at = Instant::now();
-                        if let Ok((http, build)) = self.db(|s| s.drain_sources_wanted()).await {
-                            self.logs.set_tapped(http, build);
+                        if let Ok((http, build, traces, metrics)) = self.db(|s| s.drain_sources_wanted()).await {
+                            self.logs.set_tapped(http, build, traces, metrics);
                         }
                     }
                     for (_, list) in drains.values() {
                         for o in list {
                             let d = &o.drain;
                             let Some(q) = queues.get_mut(&d.id) else { continue };
-                            if q.out || q.lines.is_empty() || (q.lines.len() < BATCH && q.first.elapsed() < LINGER) {
+                            let (most, linger) = if d.format == "s3" { (S3_BATCH, S3_LINGER) } else { (BATCH, LINGER) };
+                            if q.out || q.lines.is_empty() || (q.lines.len() < most && q.first.elapsed() < linger) {
                                 continue;
                             }
-                            let n = q.lines.len().min(BATCH);
+                            let n = q.lines.len().min(most);
                             let batch: Vec<Value> = q.lines.drain(..n).collect();
                             q.out = true;
                             let dropped = std::mem::take(&mut q.dropped);
@@ -394,12 +489,28 @@ impl Apps {
 
     /// One batch, tried three times (1 s, then 5 s apart), then dropped.
     async fn send_batch(&self, o: &OpenedDrain, batch: &[Value]) {
+        // OTLP's signals go apart: logs to the drain's URL, spans and points to its `/v1/traces`
+        // and `/v1/metrics`, each in its own shape.
+        if o.drain.format == "otlp" {
+            let of = |src: &str| batch.iter().filter(|l| l["source"] == src).cloned().collect::<Vec<_>>();
+            let logs: Vec<Value> = batch.iter().filter(|l| !matches!(l["source"].as_str(), Some("traces" | "metrics"))).cloned().collect();
+            for (part, signal) in [(logs, Signal::Logs), (of("traces"), Signal::Traces), (of("metrics"), Signal::Metrics)] {
+                if !part.is_empty() {
+                    self.send_part(o, &part, signal).await;
+                }
+            }
+            return;
+        }
+        self.send_part(o, batch, Signal::Logs).await;
+    }
+
+    async fn send_part(&self, o: &OpenedDrain, batch: &[Value], signal: Signal) {
         let drain = o.drain.id.as_str();
         // One id for the batch, its retries too: a receiver dedupes by it.
         let delivery = format!("lgb_{}", crate::model::random(12));
         for (i, wait) in [0u64, 1, 5].into_iter().enumerate() {
             tokio::time::sleep(Duration::from_secs(wait)).await;
-            match self.post_batch(o, batch, &delivery).await {
+            match self.post_batch(o, batch, &delivery, signal).await {
                 Ok(None) => return,
                 Ok(Some(code)) if (200..300).contains(&code) => return,
                 Ok(Some(code)) if i == 2 => tracing::warn!(drain, status = code, lines = batch.len(), "apps: a log drain refused a batch; it's dropped"),
@@ -412,10 +523,20 @@ impl Apps {
     /// A batch sent once in its drain's format: an HTTP drain's status (signed as webhooks are,
     /// with the drain's own headers), `None` for a syslog server that took it, or why it didn't go
     /// (never the URL).
-    async fn post_batch(&self, o: &OpenedDrain, batch: &[Value], delivery: &str) -> std::result::Result<Option<u16>, String> {
+    async fn post_batch(&self, o: &OpenedDrain, batch: &[Value], delivery: &str, signal: Signal) -> std::result::Result<Option<u16>, String> {
+        let mut url = o.url.clone();
         let (body, content_type) = match o.drain.format.as_str() {
             "syslog" => return self.send_syslog(&o.url, batch).await.map(|()| None),
-            "otlp" => (serde_json::to_vec(&otlp_logs(batch)).expect("JSON"), "application/json"),
+            "s3" => return self.put_s3(o, batch, delivery).await.map(Some),
+            "otlp" => {
+                url = signal_url(&o.url, signal);
+                let v = match signal {
+                    Signal::Logs => otlp_logs(batch),
+                    Signal::Traces => otlp_traces(batch),
+                    Signal::Metrics => otlp_metrics(batch),
+                };
+                (serde_json::to_vec(&v).expect("JSON"), "application/json")
+            }
             _ => {
                 let mut body = Vec::new();
                 for l in batch {
@@ -436,7 +557,7 @@ impl Apps {
         };
         let mut req = self
             .notify_client
-            .post(&o.url)
+            .post(&url)
             .header("content-type", content_type)
             .header("x-roll-delivery", delivery)
             .header("x-roll-timestamp", ts)
@@ -446,6 +567,53 @@ impl Apps {
         }
         match req.body(body).send().await {
             Ok(r) => Ok(Some(r.status().as_u16())),
+            Err(e) => Err(e.without_url().to_string()),
+        }
+    }
+
+    /// An `s3` drain's batch: one NDJSON object, `<prefix>/YYYY/MM/DD/HH/<time>-<delivery>.ndjson`,
+    /// PUT to its bucket signed with SigV4 (its sealed keys; roll storage's buckets, AWS's,
+    /// any S3-compatible), through the public-only client. Its status, or why it didn't go.
+    async fn put_s3(&self, o: &OpenedDrain, batch: &[Value], delivery: &str) -> std::result::Result<u16, String> {
+        use sha2::Digest;
+        let key = |k: &str| o.headers.iter().find(|(n, _)| n.eq_ignore_ascii_case(k)).map(|(_, v)| v.clone());
+        let (Some(access), Some(secret)) = (key(S3_KEYS[0]), key(S3_KEYS[1])) else { return Err("the drain has no S3 keys".into()) };
+        let region = key(S3_KEYS[2]).unwrap_or_else(|| "us-east-1".into());
+        let mut body = Vec::new();
+        for l in batch {
+            serde_json::to_writer(&mut body, l).expect("JSON");
+            body.push(b'\n');
+        }
+        let now = chrono::Utc::now();
+        let url = format!("{}/{}/{}-{delivery}.ndjson", o.url.trim_end_matches('/'), now.format("%Y/%m/%d/%H"), now.format("%Y%m%dT%H%M%SZ"));
+        let parsed = url::Url::parse(&url).map_err(|e| e.to_string())?;
+        let host = match parsed.port() {
+            Some(p) => format!("{}:{p}", parsed.host_str().unwrap_or_default()),
+            None => parsed.host_str().unwrap_or_default().to_string(),
+        };
+        let hash = hex::encode(sha2::Sha256::digest(&body));
+        let date = now.format("%Y%m%dT%H%M%SZ").to_string();
+        let unsigned = [("host", host.as_str()), ("x-amz-content-sha256", hash.as_str()), ("x-amz-date", date.as_str())];
+        let identity: aws_smithy_runtime_api::client::identity::Identity = aws_credential_types::Credentials::new(access, secret, None, None, "roll-drain").into();
+        let params: aws_sigv4::http_request::SigningParams = aws_sigv4::sign::v4::SigningParams::builder()
+            .identity(&identity)
+            .region(&region)
+            .name("s3")
+            .time(now.into())
+            .settings(aws_sigv4::http_request::SigningSettings::default())
+            .build()
+            .map_err(|e| e.to_string())?
+            .into();
+        let signable = aws_sigv4::http_request::SignableRequest::new("PUT", url.as_str(), unsigned.iter().copied(), aws_sigv4::http_request::SignableBody::Precomputed(hash.clone())).map_err(|e| e.to_string())?;
+        let (instructions, _) = aws_sigv4::http_request::sign(signable, &params).map_err(|e| e.to_string())?.into_parts();
+        // A bucket drain's endpoint is roll storage's own, not a tenant's.
+        let client = if key(OWN).is_some() { &self.scrape_client } else { &self.notify_client };
+        let mut req = client.put(&url).header("content-type", "application/x-ndjson").header("x-amz-content-sha256", &hash).header("x-amz-date", &date);
+        for (k, v) in instructions.headers() {
+            req = req.header(k, v);
+        }
+        match req.body(body).send().await {
+            Ok(r) => Ok(r.status().as_u16()),
             Err(e) => Err(e.without_url().to_string()),
         }
     }
@@ -503,6 +671,24 @@ impl Apps {
 }
 
 /// The TLS settings syslog drains connect with: the system's roots, ring, TLS 1.2 and up.
+/// An `s3` drain: its URL names a bucket and maybe a prefix (`https://host/bucket[/prefix]`,
+/// path-style, letters, digits and `-_./` only), and its headers are its keys and nothing else.
+fn check_s3(url: &str, headers: &[(String, String)]) -> Result<()> {
+    let u = url::Url::parse(url).map_err(|e| Error::BadRequest(format!("url: {e}")))?;
+    let path = u.path().trim_matches('/');
+    if path.is_empty() || u.query().is_some() || !path.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.' | b'/')) || path.contains("//") {
+        return Err(Error::BadRequest("url: an s3 drain's is https://<endpoint>/<bucket>[/<prefix>] (path-style; letters, digits, - _ . /)".into()));
+    }
+    let names: Vec<String> = headers.iter().map(|(k, _)| k.to_ascii_lowercase()).collect();
+    if let Some(n) = names.iter().find(|n| !S3_KEYS.contains(&n.as_str()) && *n != OWN) {
+        return Err(Error::BadRequest(format!("headers: an s3 drain takes only {} ({n} isn't one)", S3_KEYS.join(", "))));
+    }
+    if !names.iter().any(|n| n == S3_KEYS[0]) || !names.iter().any(|n| n == S3_KEYS[1]) {
+        return Err(Error::BadRequest(format!("headers: an s3 drain needs {} and {}", S3_KEYS[0], S3_KEYS[1])));
+    }
+    Ok(())
+}
+
 fn syslog_tls() -> Arc<tokio_rustls::rustls::ClientConfig> {
     use tokio_rustls::rustls;
     static CONFIG: std::sync::OnceLock<Arc<rustls::ClientConfig>> = std::sync::OnceLock::new();
@@ -546,6 +732,95 @@ fn syslog_message(l: &Value) -> String {
 /// A batch as an OTLP/HTTP JSON `ExportLogsServiceRequest`: a resource per service and
 /// environment (`service.name`, `deployment.environment.name`, `roll.service.id`), each line a
 /// log record with its stream, source, instance and deployment as attributes.
+/// An OTLP drain's address for `signal`: its URL is the logs' (`…/v1/logs`), traces and metrics
+/// beside it (`…/v1/traces`, `…/v1/metrics`); any other URL gets the signal's path after it.
+fn signal_url(url: &str, signal: Signal) -> String {
+    let path = match signal {
+        Signal::Logs => return url.to_string(),
+        Signal::Traces => "v1/traces",
+        Signal::Metrics => "v1/metrics",
+    };
+    match url.strip_suffix("v1/logs") {
+        Some(base) => format!("{base}{path}"),
+        None => format!("{}/{path}", url.trim_end_matches('/')),
+    }
+}
+
+/// A resource per service and environment, as [`otlp_logs`] has them.
+fn otlp_resource(batch: &[Value], service: &str, env: &str) -> Value {
+    let attr = |k: &str, v: &Value| v.as_str().filter(|s| !s.is_empty()).map(|s| json!({ "key": k, "value": { "stringValue": s } }));
+    let name = batch.iter().find(|l| l["service"] == service && l["environment"] == env).map(|l| l["service_name"].clone()).unwrap_or(Value::Null);
+    let attributes: Vec<Value> = [attr("service.name", &name), attr("deployment.environment.name", &json!(env)), attr("roll.service.id", &json!(service))].into_iter().flatten().collect();
+    json!({ "attributes": attributes })
+}
+
+/// Lines grouped by their service and environment, each parsed as a `T` (a span, a point).
+fn by_resource<T: serde::de::DeserializeOwned>(batch: &[Value]) -> Vec<((String, String), Vec<T>)> {
+    let mut groups: Vec<((String, String), Vec<T>)> = Vec::new();
+    for l in batch {
+        let Some(item) = l["text"].as_str().and_then(|t| serde_json::from_str::<T>(t).ok()) else { continue };
+        let key = (l["service"].as_str().unwrap_or("").to_string(), l["environment"].as_str().unwrap_or("").to_string());
+        match groups.iter_mut().find(|(k, _)| *k == key) {
+            Some((_, items)) => items.push(item),
+            None => groups.push((key, vec![item])),
+        }
+    }
+    groups
+}
+
+fn otlp_attrs(attrs: &[(String, String)]) -> Vec<Value> {
+    attrs.iter().map(|(k, v)| json!({ "key": k, "value": { "stringValue": v } })).collect()
+}
+
+/// Spans (the `trace:` log's) as OTLP/HTTP JSON traces.
+fn otlp_traces(batch: &[Value]) -> Value {
+    let resource_spans: Vec<Value> = by_resource::<crate::otlp::Span>(batch)
+        .into_iter()
+        .map(|((service, env), spans)| {
+            let spans: Vec<Value> = spans
+                .iter()
+                .map(|s| {
+                    let mut v = json!({ "traceId": s.trace, "spanId": s.span, "name": s.name, "startTimeUnixNano": s.start.to_string(), "endTimeUnixNano": s.end.to_string(), "attributes": otlp_attrs(&s.attrs) });
+                    if !s.parent.is_empty() {
+                        v["parentSpanId"] = json!(s.parent);
+                    }
+                    if s.error {
+                        v["status"] = json!({ "code": 2 });
+                    }
+                    v
+                })
+                .collect();
+            json!({ "resource": otlp_resource(batch, &service, &env), "scopeSpans": [{ "scope": { "name": "roll-apps" }, "spans": spans }] })
+        })
+        .collect();
+    json!({ "resourceSpans": resource_spans })
+}
+
+/// Data points (the `metric:` log's) as OTLP/HTTP JSON metrics: a gauge, a sum (cumulative and
+/// monotonic when it counts up) or a histogram's sum and count.
+fn otlp_metrics(batch: &[Value]) -> Value {
+    let resource_metrics: Vec<Value> = by_resource::<crate::otlp::Point>(batch)
+        .into_iter()
+        .map(|((service, env), points)| {
+            let metrics: Vec<Value> = points
+                .iter()
+                .map(|p| {
+                    let point = json!({ "timeUnixNano": p.time.to_string(), "asDouble": p.value, "attributes": otlp_attrs(&p.attrs) });
+                    let mut m = json!({ "name": p.name, "unit": p.unit });
+                    match p.kind.as_str() {
+                        "sum" => m["sum"] = json!({ "dataPoints": [point], "aggregationTemporality": 2, "isMonotonic": p.counter }),
+                        "histogram" => m["histogram"] = json!({ "dataPoints": [{ "timeUnixNano": p.time.to_string(), "sum": p.value, "count": p.count.unwrap_or(0).to_string(), "attributes": otlp_attrs(&p.attrs) }], "aggregationTemporality": 2 }),
+                        _ => m["gauge"] = json!({ "dataPoints": [point] }),
+                    }
+                    m
+                })
+                .collect();
+            json!({ "resource": otlp_resource(batch, &service, &env), "scopeMetrics": [{ "scope": { "name": "roll-apps" }, "metrics": metrics }] })
+        })
+        .collect();
+    json!({ "resourceMetrics": resource_metrics })
+}
+
 fn otlp_logs(batch: &[Value]) -> Value {
     let attr = |k: &str, v: &Value| v.as_str().filter(|s| !s.is_empty()).map(|s| json!({ "key": k, "value": { "stringValue": s } }));
     let mut groups: Vec<((String, String), Vec<Value>)> = Vec::new();

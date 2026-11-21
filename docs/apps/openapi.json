@@ -235,7 +235,7 @@
               }
             }
           },
-          "description": "`{ url, format?, sources?, environments?, services?, previews?, headers? }` (https, a public host, or `syslog+tls://host:port` for `format: \"syslog\"`, which takes no headers; `sources` some of `runtime` (default), `http`, `build`; services by name or id; `headers` `{name: value}`, at most 10, sealed, never roll's own or `content-type`)"
+          "description": "`{ url, format?, sources?, environments?, services?, previews?, headers? }` or `{ bucket, prefix?, sources?, … }` (a roll storage bucket on the project's canvas, without url, headers or another format: an `s3` drain with a key minted for it, write on the bucket asked of the caller, revoked with the drain; https, a public host, or `syslog+tls://host:port` for `format: \"syslog\"`, which takes no headers; for `format: \"s3\"`, `https://<endpoint>/<bucket>[/<prefix>]` with headers `aws-access-key-id`, `aws-secret-access-key` and optionally `aws-region`, nothing else; `sources` some of `runtime` (default), `http`, `build`, `audit`, `traces`, `metrics`; services by name or id; `headers` `{name: value}`, at most 10, sealed, never roll's own or `content-type`)"
         },
         "responses": {
           "201": {
@@ -886,6 +886,241 @@
         "x-roll-action": "deploy* (as above)"
       }
     },
+    "/v1/apps/projects/{project}/status-page": {
+      "delete": {
+        "description": "Answers 204: taken down.",
+        "operationId": "deleteProjectsProjectStatusPage",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "project",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "204: taken down"
+          },
+          "4XX": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "summary": "Delete status page",
+        "tags": [
+          "projects"
+        ],
+        "x-roll-action": "write"
+      },
+      "get": {
+        "description": "Answers `{ title, url, items }`: the project's public status page; 404 without one.",
+        "operationId": "getProjectsProjectStatusPage",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "project",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "`{ title, url, items }`: the project's public status page; 404 without one"
+          },
+          "4XX": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "summary": "Get status page",
+        "tags": [
+          "projects"
+        ],
+        "x-roll-action": "read"
+      },
+      "put": {
+        "description": "Answers `{ title, url, items }`: made (a new public name, `status-<slug>.<domain>`) or changed (its name kept).",
+        "operationId": "putProjectsProjectStatusPage",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "project",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object"
+              }
+            }
+          },
+          "description": "`{ title?: string /* 1–80, default \"Status\" */, items?: { service, environment?, check? | heartbeat? }[] /* at most 50; none: every check and heartbeat of its environments */ }`"
+        },
+        "responses": {
+          "200": {
+            "description": "`{ title, url, items }`: made (a new public name, `status-<slug>.<domain>`) or changed (its name kept)"
+          },
+          "4XX": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "summary": "Set status page",
+        "tags": [
+          "projects"
+        ],
+        "x-roll-action": "admin (it makes the project's service names public: a person's call, not a token's write)"
+      }
+    },
+    "/v1/apps/projects/{project}/status-page/incidents": {
+      "get": {
+        "description": "Answers `{ incidents: { id, title, state, started_at, resolved_at, automatic, updates: { at, state, text }[] }[] }`: the last 90 days' and the open ones, newest first (at most 200).",
+        "operationId": "getProjectsProjectStatusPageIncidents",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "project",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "`{ incidents: { id, title, state, started_at, resolved_at, automatic, updates: { at, state, text }[] }[] }`: the last 90 days' and the open ones, newest first (at most 200)"
+          },
+          "4XX": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "summary": "List incidents",
+        "tags": [
+          "projects"
+        ],
+        "x-roll-action": "read"
+      },
+      "post": {
+        "description": "Answers 201 `{ id }`: a person's incident on the page; 404 without a page.",
+        "operationId": "postProjectsProjectStatusPageIncidents",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "project",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object"
+              }
+            }
+          },
+          "description": "`{ title: string /* 1–120 */, state?: \"investigating\" | \"identified\" | \"monitoring\" | \"resolved\", text: string /* 1–2000 */ }`"
+        },
+        "responses": {
+          "201": {
+            "description": "201 `{ id }`: a person's incident on the page; 404 without a page"
+          },
+          "4XX": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "summary": "Create incident",
+        "tags": [
+          "projects"
+        ],
+        "x-roll-action": "write"
+      }
+    },
+    "/v1/apps/projects/{project}/status-page/incidents/{iid}/updates": {
+      "post": {
+        "description": "Answers 204: an update (at most 100 an incident); `resolved` closes it.",
+        "operationId": "postProjectsProjectStatusPageIncidentsIidUpdates",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "project",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "iid",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object"
+              }
+            }
+          },
+          "description": "`{ state, text }`"
+        },
+        "responses": {
+          "204": {
+            "description": "204: an update (at most 100 an incident); `resolved` closes it"
+          },
+          "4XX": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "summary": "Create update",
+        "tags": [
+          "projects"
+        ],
+        "x-roll-action": "write"
+      }
+    },
+    "/v1/apps/projects/{project}/usage": {
+      "get": {
+        "description": "Answers `ProjectUsage`: a month's use (`YYYY-MM`, this one by default; 400 for a month to come) by service and environment at roll's prices, each service's previews as one row (`previews: true`), deleted services as one (`deleted: true`), most costly first; this month's projected to its end at the pace so far.",
+        "operationId": "getProjectsProjectUsage",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "project",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "`ProjectUsage`: a month's use (`YYYY-MM`, this one by default; 400 for a month to come) by service and environment at roll's prices, each service's previews as one row (`previews: true`), deleted services as one (`deleted: true`), most costly first; this month's projected to its end at the pace so far"
+          },
+          "4XX": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "summary": "Get usage",
+        "tags": [
+          "projects"
+        ],
+        "x-roll-action": "read"
+      }
+    },
     "/v1/apps/services": {
       "get": {
         "description": "Answers `Service[]`; `deleted=true`: `{id, project, name, deleted_at, purge_at}[]` (unix ms, newest first), the deleted services kept for a restore until `purge_at`, 48 hours after the delete.",
@@ -1350,6 +1585,43 @@
         "x-roll-action": "deploy*"
       }
     },
+    "/v1/apps/services/{id}/environments/{env}/config/rotate": {
+      "post": {
+        "description": "Answers `Environment`: its runtime config gets a new read token (a leaked `ROLL_CONFIG_URL`); the old address reads until a deployment made after the rotation is live (of the service, or of its site's functions service), so a redeploy finishes it; audited as `audit.config.rotated`. 404 when it has no runtime config; 409 while the last rotation's old address still reads (redeploy first).",
+        "operationId": "postServicesIdEnvironmentsEnvConfigRotate",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "env",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "`Environment`: its runtime config gets a new read token (a leaked `ROLL_CONFIG_URL`); the old address reads until a deployment made after the rotation is live (of the service, or of its site's functions service), so a redeploy finishes it; audited as `audit.config.rotated`. 404 when it has no runtime config; 409 while the last rotation's old address still reads (redeploy first)"
+          },
+          "4XX": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "summary": "Rotate environment",
+        "tags": [
+          "services"
+        ],
+        "x-roll-action": "write"
+      }
+    },
     "/v1/apps/services/{id}/environments/{env}/deploys": {
       "get": {
         "description": "Answers `Deployment[]`, newest first, 100 at most; `before` (unix ms, the last one's `created_at`): the next page.",
@@ -1429,7 +1701,7 @@
         "tags": [
           "services"
         ],
-        "x-roll-action": "deploy*"
+        "x-roll-action": "deploy*; admin with `X-Roll-Override: 1`"
       }
     },
     "/v1/apps/services/{id}/environments/{env}/deploys/{dep}": {
@@ -1475,6 +1747,51 @@
           "services"
         ],
         "x-roll-action": "read"
+      }
+    },
+    "/v1/apps/services/{id}/environments/{env}/deploys/{dep}/approve": {
+      "post": {
+        "description": "Answers 200 `{deployment, approved_by, needed, live, waiting?}`: a person's approval (signed in or the operator; a token's is 403) of a deployment waiting at `ready` where the environment asks for `approvals`, never its own author's (403); the one that makes the count puts it live (`live`: the new deployment), unless a freeze still stops it (`waiting` says why); 409 when the environment asks for none or it isn't waiting.",
+        "operationId": "postServicesIdEnvironmentsEnvDeploysDepApprove",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "env",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "dep",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "200 `{deployment, approved_by, needed, live, waiting?}`: a person's approval (signed in or the operator; a token's is 403) of a deployment waiting at `ready` where the environment asks for `approvals`, never its own author's (403); the one that makes the count puts it live (`live`: the new deployment), unless a freeze still stops it (`waiting` says why); 409 when the environment asks for none or it isn't waiting"
+          },
+          "4XX": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "summary": "Approve deploy",
+        "tags": [
+          "services"
+        ],
+        "x-roll-action": "deploy*"
       }
     },
     "/v1/apps/services/{id}/environments/{env}/deploys/{dep}/cancel": {
@@ -1567,9 +1884,54 @@
         "x-roll-action": "read"
       }
     },
+    "/v1/apps/services/{id}/environments/{env}/deploys/{dep}/explain": {
+      "post": {
+        "description": "Answers `Explanation`: why a failed deployment failed, read from its error, plan, steps and the newest lines of its build log and output (masked as they're written) by the model of the owner of the service's roll code repo (their own provider, else the server's within their cap; metered on their roll code usage as `explain`). Kept with the deployment and answered again without a model call, unless `again=1` (at most once a minute; one question a deployment at a time). 409 when it didn't fail, it was asked anew less than a minute ago or is being asked now, the service doesn't deploy from a roll code repo, the server has no model, or the owner has none or is past their cap; 503 when the model gave no answer.",
+        "operationId": "postServicesIdEnvironmentsEnvDeploysDepExplain",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "env",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "dep",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "`Explanation`: why a failed deployment failed, read from its error, plan, steps and the newest lines of its build log and output (masked as they're written) by the model of the owner of the service's roll code repo (their own provider, else the server's within their cap; metered on their roll code usage as `explain`). Kept with the deployment and answered again without a model call, unless `again=1` (at most once a minute; one question a deployment at a time). 409 when it didn't fail, it was asked anew less than a minute ago or is being asked now, the service doesn't deploy from a roll code repo, the server has no model, or the owner has none or is past their cap; 503 when the model gave no answer"
+          },
+          "4XX": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "summary": "Explain deploy",
+        "tags": [
+          "services"
+        ],
+        "x-roll-action": "write"
+      }
+    },
     "/v1/apps/services/{id}/environments/{env}/deploys/{dep}/logs": {
       "get": {
-        "description": "Answers `LogLine[]` or SSE.",
+        "description": "Answers `LogLine[]` or SSE (ends with the deploy: an `end` event, then the stream closes, so a follower stops instead of reading it again; a job's and a run's log end the same way).",
         "operationId": "getServicesIdEnvironmentsEnvDeploysDepLogs",
         "parameters": [
           {
@@ -1599,7 +1961,7 @@
         ],
         "responses": {
           "200": {
-            "description": "`LogLine[]` or SSE"
+            "description": "`LogLine[]` or SSE (ends with the deploy: an `end` event, then the stream closes, so a follower stops instead of reading it again; a job's and a run's log end the same way)"
           },
           "4XX": {
             "$ref": "#/components/responses/Error"
@@ -1650,7 +2012,7 @@
               }
             }
           },
-          "description": "`{ keep_variables? }` (default false: the variables come back as they were when it was live)"
+          "description": "`{ keep_variables? }` (default false: the variables come back as they were when it was live); `X-Roll-Override: 1` puts a never-live `ready` build live during a freeze, audited"
         },
         "responses": {
           "202": {
@@ -1664,7 +2026,7 @@
         "tags": [
           "services"
         ],
-        "x-roll-action": "deploy*"
+        "x-roll-action": "deploy*; admin with `X-Roll-Override: 1`"
       }
     },
     "/v1/apps/services/{id}/environments/{env}/deploys/{dep}/rollout": {
@@ -1720,6 +2082,51 @@
           "services"
         ],
         "x-roll-action": "deploy*"
+      }
+    },
+    "/v1/apps/services/{id}/environments/{env}/deploys/{dep}/sbom": {
+      "get": {
+        "description": "Answers its image's SBOM, CycloneDX JSON (`application/vnd.cyclonedx+json`, as a download) from the same scan; 404 when it wasn't scanned, the SBOM was over 8 MiB, or the deployment was pruned.",
+        "operationId": "getServicesIdEnvironmentsEnvDeploysDepSbom",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "env",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "dep",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "its image's SBOM, CycloneDX JSON (`application/vnd.cyclonedx+json`, as a download) from the same scan; 404 when it wasn't scanned, the SBOM was over 8 MiB, or the deployment was pruned"
+          },
+          "4XX": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "summary": "Get sbom",
+        "tags": [
+          "services"
+        ],
+        "x-roll-action": "read"
       }
     },
     "/v1/apps/services/{id}/environments/{env}/deploys/{dep}/vulnerabilities": {
@@ -2031,7 +2438,7 @@
     },
     "/v1/apps/services/{id}/environments/{env}/errors": {
       "get": {
-        "description": "Answers `{ minutes, groups: { fingerprint, kind: \"python\" | \"java\" | \"node\" | \"go\" | \"line\", title, count, first_seen, last_seen, instances, sample }[], scanned, cut }`: the environment's errors from its log (5–10,080 minutes, default 1,440), each instance's stack traces joined from their lines and grouped by their error and first frames (line numbers, addresses and ids taken out), error lines with no trace by their message the same way; the most frequent first, at most 50, `sample` the newest whole (at most 8 KiB); at most the newest 100,000 lines read (`cut`).",
+        "description": "Answers `{ minutes, groups: { fingerprint, kind: \"python\" | \"java\" | \"node\" | \"go\" | \"ruby\" | \"php\" | \"dotnet\" | \"rust\" | \"elixir\" | \"line\", title, count, first_seen, last_seen, instances, sample }[], scanned, cut }`: the environment's errors from its log (5–10,080 minutes, default 1,440), each instance's stack traces joined from their lines and grouped by their error and first frames (line numbers, addresses and ids taken out), error lines with no trace by their message the same way; the most frequent first, at most 50, `sample` the newest whole (at most 8 KiB); at most the newest 100,000 lines read (`cut`).",
         "operationId": "getServicesIdEnvironmentsEnvErrors",
         "parameters": [
           {
@@ -2053,7 +2460,7 @@
         ],
         "responses": {
           "200": {
-            "description": "`{ minutes, groups: { fingerprint, kind: \"python\" | \"java\" | \"node\" | \"go\" | \"line\", title, count, first_seen, last_seen, instances, sample }[], scanned, cut }`: the environment's errors from its log (5–10,080 minutes, default 1,440), each instance's stack traces joined from their lines and grouped by their error and first frames (line numbers, addresses and ids taken out), error lines with no trace by their message the same way; the most frequent first, at most 50, `sample` the newest whole (at most 8 KiB); at most the newest 100,000 lines read (`cut`)"
+            "description": "`{ minutes, groups: { fingerprint, kind: \"python\" | \"java\" | \"node\" | \"go\" | \"ruby\" | \"php\" | \"dotnet\" | \"rust\" | \"elixir\" | \"line\", title, count, first_seen, last_seen, instances, sample }[], scanned, cut }`: the environment's errors from its log (5–10,080 minutes, default 1,440), each instance's stack traces joined from their lines and grouped by their error and first frames (line numbers, addresses and ids taken out), error lines with no trace by their message the same way; the most frequent first, at most 50, `sample` the newest whole (at most 8 KiB); at most the newest 100,000 lines read (`cut`)"
           },
           "4XX": {
             "$ref": "#/components/responses/Error"
@@ -2064,6 +2471,61 @@
           "services"
         ],
         "x-roll-action": "read"
+      }
+    },
+    "/v1/apps/services/{id}/environments/{env}/errors/{fingerprint}": {
+      "patch": {
+        "description": "Answers `{ fingerprint, state }`; 404 for one the environment never had.",
+        "operationId": "patchServicesIdEnvironmentsEnvErrorsFingerprint",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "env",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "fingerprint",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object"
+              }
+            }
+          },
+          "description": "`{ state: \"open\" | \"resolved\" | \"muted\" }`"
+        },
+        "responses": {
+          "200": {
+            "description": "`{ fingerprint, state }`; 404 for one the environment never had"
+          },
+          "4XX": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "summary": "Update error",
+        "tags": [
+          "services"
+        ],
+        "x-roll-action": "write"
       }
     },
     "/v1/apps/services/{id}/environments/{env}/files": {
@@ -2437,7 +2899,7 @@
         "x-roll-action": "read"
       },
       "post": {
-        "description": "Answers 202 `Job` (with `tasks`).",
+        "description": "Answers 202 `Job`.",
         "operationId": "postServicesIdEnvironmentsEnvJobs",
         "parameters": [
           {
@@ -2465,11 +2927,11 @@
               }
             }
           },
-          "description": "`{ command, timeout_s?, tasks? }` (tasks 1–100: that many containers, ten at a time, each with `ROLL_TASK_INDEX` and `ROLL_TASK_COUNT`; the job fails on the first task that does)"
+          "description": "`{ command, timeout_s?, tasks?, retries?, parallelism?, cpu?, memory_mb? }` (`cpu` 0.25–8 and `memory_mb` 256–16384: each task's container at that size, metered at it, Heroku's `run --size`; unset, the service's; tasks 1–100: that many containers, `parallelism` at a time (1–10, default ten or fewer tasks: a node's job containers are shared), each with `ROLL_TASK_INDEX` and `ROLL_TASK_COUNT`; `retries` 0–5: a failed or timed-out task tried again in a fresh container with `ROLL_TASK_ATTEMPT`, as a cron run's retries wait, never after a cancel or once another deployment is live; the job fails on the first task that does in the end)"
         },
         "responses": {
           "202": {
-            "description": "202 `Job` (with `tasks`)"
+            "description": "202 `Job`"
           },
           "4XX": {
             "$ref": "#/components/responses/Error"
@@ -2574,7 +3036,7 @@
     },
     "/v1/apps/services/{id}/environments/{env}/jobs/{job}/logs": {
       "get": {
-        "description": "Answers `LogLine[]` or SSE (ends with the job).",
+        "description": "Answers `LogLine[]` or SSE (ends with the job, then `end`).",
         "operationId": "getServicesIdEnvironmentsEnvJobsJobLogs",
         "parameters": [
           {
@@ -2604,7 +3066,7 @@
         ],
         "responses": {
           "200": {
-            "description": "`LogLine[]` or SSE (ends with the job)"
+            "description": "`LogLine[]` or SSE (ends with the job, then `end`)"
           },
           "4XX": {
             "$ref": "#/components/responses/Error"
@@ -2772,7 +3234,44 @@
         "tags": [
           "services"
         ],
-        "x-roll-action": "deploy*"
+        "x-roll-action": "deploy*; admin with `X-Roll-Override: 1`"
+      }
+    },
+    "/v1/apps/services/{id}/environments/{env}/push": {
+      "get": {
+        "description": "Answers `PushState[]`: the environment's `run.push` rules as they stand, read on the service's owner: each group's `lag` (records past its committed offset, on the partitions it has committed on: Kafka's rule, so 0 before its first delivery), `delivered`, `dead_lettered`, `last_delivered_at`, `failing_since` and `last_error` since that node began delivering, and `off` (why nothing is delivered).",
+        "operationId": "getServicesIdEnvironmentsEnvPush",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "env",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "`PushState[]`: the environment's `run.push` rules as they stand, read on the service's owner: each group's `lag` (records past its committed offset, on the partitions it has committed on: Kafka's rule, so 0 before its first delivery), `delivered`, `dead_lettered`, `last_delivered_at`, `failing_since` and `last_error` since that node began delivering, and `off` (why nothing is delivered)"
+          },
+          "4XX": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "summary": "Get push",
+        "tags": [
+          "services"
+        ],
+        "x-roll-action": "read"
       }
     },
     "/v1/apps/services/{id}/environments/{env}/redeploy": {
@@ -2819,7 +3318,7 @@
         "tags": [
           "services"
         ],
-        "x-roll-action": "deploy*"
+        "x-roll-action": "deploy*; admin with `X-Roll-Override: 1`"
       }
     },
     "/v1/apps/services/{id}/environments/{env}/restart": {
@@ -3107,7 +3606,7 @@
     },
     "/v1/apps/services/{id}/environments/{env}/runs/{run}/logs": {
       "get": {
-        "description": "Answers `LogLine[]` or SSE (ends with the run): its container's lines (named by the run's id).",
+        "description": "Answers `LogLine[]` or SSE (ends with the run, then `end`): its container's lines (named by the run's id).",
         "operationId": "getServicesIdEnvironmentsEnvRunsRunLogs",
         "parameters": [
           {
@@ -3137,7 +3636,7 @@
         ],
         "responses": {
           "200": {
-            "description": "`LogLine[]` or SSE (ends with the run): its container's lines (named by the run's id)"
+            "description": "`LogLine[]` or SSE (ends with the run, then `end`): its container's lines (named by the run's id)"
           },
           "4XX": {
             "$ref": "#/components/responses/Error"
@@ -3749,7 +4248,7 @@
               }
             }
           },
-          "description": "`{set?: {[name]: value}, unset?: string[], seal?: string[], files?: {[name]: path | null}, copy_from?: string, copy?: string[]}` (`copy_from` with `copy`: those names' values from another environment's own variables, set here as `set` sets them; 400 for a sealed one or one it lacks; reveal on `copy_from` too. set, then unset, then seal: names set here or already set; 400 for another; nothing unseals, a new value stays sealed. `files`: kept as a file at an absolute path in its instances, not in their environment, from the next deploy (0444; at most 20; not under `/proc`, `/sys` or `/dev`, no `..`; two can't share a path; null puts it back; unsetting a variable drops its file; 400 otherwise; on Fargate the deploy fails for now)"
+          "description": "`{set?: {[name]: value}, unset?: string[], seal?: string[], files?: {[name]: path | null}, runtime_only?: {[name]: boolean}, copy_from?: string, copy?: string[]}` (`copy_from` with `copy`: those names' values from another environment's own variables, set here as `set` sets them; 400 for a sealed one or one it lacks; reveal on `copy_from` too. set, then unset, then seal: names set here or already set; 400 for another; nothing unseals, a new value stays sealed. `files`: kept as a file at an absolute path in its instances, not in their environment, from the next deploy (0444; at most 20; not under `/proc`, `/sys` or `/dev`, no `..`; two can't share a path; null puts it back; unsetting a variable drops its file; 400 otherwise; on Fargate the deploy fails for now). `runtime_only`: true gives it to its instances only, never a build's steps (from the next deploy; one of its own variables, else 400); false gives it to builds again; unsetting drops it. A value `roll://ENV[/folder…]/KEY` is read from roll secrets at each deploy: its own environment's as the service, another environment's as whoever set it (bound to them when it's set; a 403 unless they may reveal it for the service now)"
         },
         "responses": {
           "200": {
@@ -4100,7 +4599,7 @@
               }
             }
           },
-          "description": "`{ username, password }` (a deploy token, app password or access token as `password`; one line each), or `{ username, secret }` (the name of the project's secret that holds it, read from its production secrets at each fetch: a rotated token just works, nothing is kept here)"
+          "description": "`{ username, password }` (a deploy token, app password or access token as `password`; one line each), or `{ username, secret }` (the name of the project's secret that holds it, read from its production secrets at each fetch: a rotated token just works, nothing is kept here; or a reference `roll://production/…/KEY`, bound to the caller as production's runtime read and read as them at each fetch: 403 unless they may reveal it for the service, 400 for another environment's)"
         },
         "responses": {
           "200": {
@@ -4329,7 +4828,7 @@
         "x-roll-action": "write"
       },
       "put": {
-        "description": "Answers `Service` (a private registry's login for an image source; sealed, never returned).",
+        "description": "Answers `Service` (a private registry's login for an image source; sealed, never returned; an ECR key is exchanged for ECR's 12-hour token at a pull, user `AWS`, kept until it has an hour left and then fetched again for what runs).",
         "operationId": "putServicesIdRegistry",
         "parameters": [
           {
@@ -4349,11 +4848,11 @@
               }
             }
           },
-          "description": "`{ username, password, server? }`"
+          "description": "`{ username, password, server? }`, or for an image on ECR `{ kind: \"ecr\", access_key_id, secret_access_key, region? }` (region defaults to the registry's; another is a 400)"
         },
         "responses": {
           "200": {
-            "description": "`Service` (a private registry's login for an image source; sealed, never returned)"
+            "description": "`Service` (a private registry's login for an image source; sealed, never returned; an ECR key is exchanged for ECR's 12-hour token at a pull, user `AWS`, kept until it has an hour left and then fetched again for what runs)"
           },
           "4XX": {
             "$ref": "#/components/responses/Error"

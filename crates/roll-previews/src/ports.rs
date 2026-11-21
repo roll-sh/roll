@@ -77,6 +77,13 @@ pub trait Brancher: Send + Sync {
     /// refused). Ok when it's already gone. Never touches `parent`.
     async fn delete(&self, parent: &str, branch: &str, name: &str) -> anyhow::Result<()>;
 
+    /// Before `branch` is deleted or reset: revoke the credentials it handed out (`kept`), for a
+    /// product that keeps a deleted branch restorable with them (roll search's restore window).
+    /// Ok when they're already gone. Nothing by default.
+    async fn retire(&self, _parent: &str, _branch: &str, _kept: Option<&str>) -> anyhow::Result<()> {
+        Ok(())
+    }
+
     /// How a service reaches the branch, as environment variables (`DATABASE_URL`, …). Read
     /// fresh for every deploy: nothing here is stored.
     async fn connect(&self, parent: &str, branch: &str, kept: Option<&str>) -> anyhow::Result<Vec<(String, String)>>;
@@ -150,6 +157,9 @@ pub struct ChangeInfo {
     /// Who opened it (roll code's `author`): not the one to accept its visual change.
     pub author: String,
     pub github_pr: Option<i64>,
+    /// Its repo's roll code owner (`own_…`): who may write to it (roll code's bar for a landing
+    /// decision, as accepting regressions is).
+    pub owner_id: String,
 }
 
 impl ChangeInfo {
@@ -176,6 +186,8 @@ pub struct ServiceSpec {
     /// More of its own pages, and selectors blanked in screenshots, from its `roll.toml`.
     pub pages: Vec<String>,
     pub hide: Vec<String>,
+    /// The paths whose change rebuilds it (`roll.toml` `watch`); empty: every push does.
+    pub watch: Vec<String>,
 }
 
 /// A screenshot of a service's page, and how fast it loaded when the backend could time it.
@@ -456,6 +468,11 @@ pub struct Target {
     /// With `egress` `roll`: the hosts outside roll it may still reach, through the preview's
     /// egress proxy.
     pub egress_hosts: Vec<String>,
+    /// With `egress` `roll`, for a backend that resolves the environment's secrets itself (roll
+    /// apps' `closed_by`): who its keys bound to hosts are used as, the person who last saved
+    /// the project's preview rules, or their token. None: nobody (the operator saved them), and
+    /// those keys are withheld. The runtime reads it itself ([`crate::Engine`]'s secrets).
+    pub maker: Option<String>,
     /// The `n`th rebuild a deploy hook asked for: built again at the same head with nothing
     /// cached (a static site reads its content at build time). roll apps builds with `no_cache`;
     /// the runtime builds at each start anyway.
@@ -494,6 +511,77 @@ pub struct BudgetAlert {
 
 /// What's at a path in a service, as a tar, as it's read.
 pub type FileStream = Box<dyn tokio::io::AsyncRead + Send + Unpin>;
+
+/// Who asks, as rolld's gate put it on the request: roll secrets decides from it.
+pub struct Asker<'a> {
+    pub operator: bool,
+    pub user: Option<&'a roll_auth::SignedIn>,
+    pub grant: Option<&'a roll_auth::Grant>,
+}
+
+impl Asker<'_> {
+    pub fn of(ext: &axum::http::Extensions) -> Asker<'_> {
+        Asker { operator: roll_auth::Operator::on(ext), user: ext.get::<roll_auth::SignedIn>(), grant: roll_auth::Grant::on(ext) }
+    }
+
+    /// Who they are in what's kept: a token by its id, a person by theirs, else the operator.
+    pub fn principal(&self) -> String {
+        match (self.grant, self.user) {
+            (Some(g), _) => format!("token:{}", g.id),
+            (None, Some(u)) => u.user.clone(),
+            (None, None) => "operator".into(),
+        }
+    }
+}
+
+/// Whether someone may reveal a folder of a project's environment in roll secrets (rolld: roll
+/// secrets' own check, `Caller::allows(Reveal, …)`).
+pub trait Reveal: Send + Sync {
+    fn may_reveal(&self, who: &Asker<'_>, project: &str, env: &str, folder: &str) -> bool;
+    /// A reference's environment and folder as roll secrets reads it, or why it can't be one.
+    fn place(&self, reference: &str) -> std::result::Result<(String, String), String>;
+    /// Whether a rule's reference still reads for a preview in `project` as `maker`, its
+    /// writer (`operator`, `usr_…` or `token:…`), may now (roll secrets' `digest_as`: they can
+    /// still sign in and reach the project, may still reveal the folder, the key isn't sensitive,
+    /// and an `untrusted` preview reaches no protected environment). Asked at every converge,
+    /// never cached; it may read a database (called off the async workers). Why not, if not.
+    /// `resource`: what the preview stands as on the project's canvas ([`crate::canvas_resource`]).
+    fn still(&self, project: &str, resource: (roll_workspace::Kind, &str), untrusted: bool, reference: &str, maker: &str) -> std::result::Result<(), String>;
+}
+
+/// A preview's interception (docs/previews.md, "Keys a preview never holds"): the hosts its
+/// placeholders' keys are bound to, the CA its containers trust for them, and what serves them.
+pub struct Intercepted {
+    /// The CA's record: a new one (its bound hosts changed) restarts the preview's services, which
+    /// trust its certificate.
+    pub id: String,
+    pub hosts: Vec<String>,
+    pub ca_pem: String,
+    pub interception: std::sync::Arc<dyn crate::intercept::Interception>,
+}
+
+/// Whether a preview holds placeholders to swap (rolld: roll secrets' interception CA for its
+/// consumer). `None`: nothing to intercept, and its egress is as it was. May block.
+pub trait Intercepts: Send + Sync {
+    fn of(&self, preview: &str) -> anyhow::Result<Option<Intercepted>>;
+    /// The preview is gone: its placeholders and CAs end at once (roll secrets' `end_consumer`).
+    fn end(&self, _preview: &str) -> anyhow::Result<()> {
+        Ok(())
+    }
+}
+
+/// The consumer roll secrets issues a preview's placeholders and interception CA for.
+pub fn intercept_consumer(preview: &str) -> String {
+    format!("preview:{}", crate::engine::env_name(preview))
+}
+
+/// Seals a preview's own variables at rest (rolld: AES-256-GCM under `ROLL_SECRET_KEY`), each
+/// bound to its `aad` (the preview's id), so a value copied to another row doesn't open.
+pub trait Sealer: Send + Sync {
+    fn seal(&self, aad: &str, plain: &str) -> String;
+    /// `None`: not one this key sealed for `aad`.
+    fn open(&self, aad: &str, sealed: &str) -> Option<String>;
+}
 
 /// What reads an OpenTelemetry export request (OTLP/HTTP: protobuf or JSON, gzip or not) into
 /// spans (rolld: roll apps' reader). An error is the request's fault.
@@ -677,6 +765,10 @@ pub trait Apps: Send + Sync {
     /// The hosts the preview's egress proxy refused lately (its project's `egress_hosts` don't
     /// list them), each once. No default, as `warm`.
     async fn egress_refused(&self, preview: &str) -> Vec<String>;
+    /// What a backend's own egress proxies swapped and refused for the preview's keys, where the
+    /// backend resolves its secrets itself (roll apps' `pv-` environments). None: nothing there.
+    /// No default, as `warm`.
+    async fn intercepted(&self, preview: &str) -> Option<crate::AppsIntercepted>;
     /// A login shell in the running service (started if it sleeps), `cols` by `rows`. `None`
     /// where this backend has none here: roll apps' services have roll apps' own shell, on
     /// their `pv-` environment.
@@ -723,6 +815,13 @@ pub trait Apps: Send + Sync {
 /// no. It may read a database: it's called off the async workers.
 pub trait Visitors: Send + Sync {
     fn may_open(&self, user: &str, session: &str, project: &str) -> bool;
+    /// Every name a person goes by where a change's author is written (their roll handle, and the
+    /// login of each GitHub account linked to them): how an author is told apart, whichever name
+    /// their change carries. It may read a database: it's called off the async workers. An error
+    /// refuses the accept (an author isn't let through because their names couldn't be read).
+    fn names_of(&self, _user: &str) -> anyhow::Result<Vec<String>> {
+        Ok(Vec::new())
+    }
 }
 
 /// A project's secrets, per environment (roll secrets; docs/secrets.md).
@@ -736,7 +835,10 @@ pub trait Secrets: Send + Sync {
     /// `branches`: what the preview branched (`(kind, parent)`): a link of the environment (or its
     /// base) to one of those parents isn't resolved but comes back in [`Resolved::followed`].
     #[allow(clippy::too_many_arguments)]
-    async fn ensure(&self, project: &str, env: &str, base: &str, vars: &[(String, String)], trusted: bool, expires_at: i64, branches: &[(Kind, String)]) -> anyhow::Result<()>;
+    /// `refs`: the project's rules' `roll://` references (checked when they were saved), kept as
+    /// roll secrets' own references; every value in `vars` is plain text, whatever it looks like.
+    #[allow(clippy::too_many_arguments)]
+    async fn ensure(&self, project: &str, env: &str, base: &str, vars: &[(String, String)], refs: &[(String, String)], trusted: bool, expires_at: i64, branches: &[(Kind, String)]) -> anyhow::Result<()>;
     /// Every variable of `env`, inherited ones included, for `consumer` (a start of one service,
     /// a job): a dynamic link issues it a fresh credential under a lease ([`Resolved::leases`]),
     /// which the caller renews while it runs and revokes when it stops.
@@ -745,6 +847,14 @@ pub trait Secrets: Send + Sync {
     /// `dynamic: false`: no dynamic credential is issued at all (those keys are left out), for a
     /// read that starts nothing (masking a preview's logs).
     async fn resolve(&self, project: &str, env: &str, untrusted: bool, dynamic: bool, consumer: &str) -> anyhow::Result<Resolved>;
+    /// [`Secrets::resolve`] with every key bound to hosts answered as a placeholder (`rlph_…`) for
+    /// `consumer`, made by `maker` (who last saved the project's preview rules): its egress proxy
+    /// swaps them (docs/previews.md, "Keys a preview never holds"). When the maker may no longer,
+    /// it resolves as without placeholders and says so in `problems`.
+    async fn resolve_with_placeholders(&self, project: &str, env: &str, untrusted: bool, dynamic: bool, consumer: &str, maker: &str) -> anyhow::Result<Resolved> {
+        let _ = maker;
+        self.resolve(project, env, untrusted, dynamic, consumer).await
+    }
     /// The links of environment `env` (its own and what it inherits or imports): `(key, kind,
     /// resource, field)`, with no values (nothing resolved, no lease).
     async fn links(&self, _project: &str, _env: &str) -> anyhow::Result<Vec<(String, Kind, String, String)>> {
@@ -777,6 +887,8 @@ pub struct Resolved {
     /// Keys of `values` linked to a field that isn't a credential (a host, a port, a database's
     /// name): roll secrets' `plain`. A preview's logs show them; every other value is masked.
     pub plain: Vec<String>,
+    /// Keys answered as placeholders, with the hosts each is bound to.
+    pub placeholders: Vec<(String, Vec<String>)>,
 }
 
 /// Until roll secrets lands: no environments, so services get the project's overrides and the
@@ -785,7 +897,7 @@ pub struct NoSecrets;
 
 #[async_trait]
 impl Secrets for NoSecrets {
-    async fn ensure(&self, _: &str, _: &str, _: &str, _: &[(String, String)], _: bool, _: i64, _: &[(Kind, String)]) -> anyhow::Result<()> {
+    async fn ensure(&self, _: &str, _: &str, _: &str, _: &[(String, String)], _: &[(String, String)], _: bool, _: i64, _: &[(Kind, String)]) -> anyhow::Result<()> {
         Ok(())
     }
 

@@ -137,7 +137,9 @@ impl<'a> RequestTask<'a> {
             Some(f) => (f, None),
             None => {
                 let f = Arc::new(AtomicBool::new(false));
-                let ctl = search_index::search::SearchControl { deadline: None, cancelled: Some(f.clone()), ext: None };
+                // Whatever the thread's control already holds (the request's limit) stays.
+                let mut ctl = search_index::search::ambient_control().unwrap_or_default();
+                ctl.cancelled = Some(f.clone());
                 (f, Some(search_index::search::set_ambient_control(Some(ctl))))
             }
         };
@@ -257,7 +259,7 @@ pub fn scan_started<'a>(ctx: &Ctx<'a>, parent: u64, req: &SearchRequest, targets
     // The scan (and the scripts it runs) sees the run's cancellation: `_tasks/_cancel` of the
     // run stops it, as it stops Elasticsearch's scroll.
     let ambient = match (&cancelled, search_index::search::ambient_control()) {
-        (Some(flag), None) => Some(search_index::search::set_ambient_control(Some(search_index::search::SearchControl { deadline: None, cancelled: Some(flag.clone()), ext: None }))),
+        (Some(flag), None) => Some(search_index::search::set_ambient_control(Some(search_index::search::SearchControl { cancelled: Some(flag.clone()), ..Default::default() }))),
         _ => None,
     };
     let restore = cancelled.map(|flag| enter(Current { cluster: cluster_key(cluster), id: search, kind: Kind::Search, flag, headers: headers.into() }));
@@ -653,6 +655,7 @@ mod tests {
     fn req(indices: &[&str], body: &str) -> SearchRequest {
         SearchRequest {
             slowlog: Default::default(),
+            partial_aggs: false,
             indices: indices.iter().map(|s| s.to_string()).collect(),
             opts: crate::meta::resolve::IndicesOptions::STRICT_EXPAND_OPEN_FORBID_CLOSED,
             source: source(body),

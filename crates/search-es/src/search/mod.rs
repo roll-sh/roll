@@ -98,6 +98,9 @@ pub struct SearchRequest {
     pub security: Option<crate::xpack::security::dls::ReadSecurity>,
     /// What its slow log entries say about it (its body, `X-Opaque-Id`).
     pub slowlog: crate::slowlog::Origin,
+    /// A linked cluster's part of a cross-cluster search: the aggregations stop at a partial
+    /// reduce ([`SearchOutcome::partial_aggs`]) for the coordinating cluster's final one.
+    pub partial_aggs: bool,
 }
 
 /// One shard to search.
@@ -115,7 +118,24 @@ pub struct Target {
     pub security: Option<crate::xpack::security::dls::ReadSecurity>,
 }
 
+impl SearchRequest {
+    /// The browser key policy the request runs under ([`crate::xpack::security::browser`]).
+    pub fn browser(&self) -> Option<crate::xpack::security::browser::Policy> {
+        self.security.as_ref().and_then(|s| s.browser().cloned())
+    }
+}
+
+/// Whether a reader's policy keeps painless from running (a browser key without `allow_scripts`).
+fn denies_scripts(security: Option<&crate::xpack::security::dls::ReadSecurity>) -> bool {
+    security.and_then(|s| s.browser()).is_some_and(|p| !p.allow_scripts)
+}
+
 impl Target {
+    /// Whose reads the target's queries make ([`query::Reader`]).
+    pub fn reader(&self) -> query::Reader {
+        query::Reader::of(self.security.clone())
+    }
+
     /// The fields the target's reader sees: under field level security, the fields it may not
     /// read are unmapped (queries, aggregations, sorts and `fields` don't find them).
     pub fn table(&self) -> Arc<crate::engine::fields::FieldTable> {
@@ -199,6 +219,9 @@ pub struct SearchOutcome {
     pub clusters: Option<Value>,
     /// `num_reduce_phases` of a search over linked remote clusters (printed unless 1).
     pub reduce_phases: Option<usize>,
+    /// The partially reduced aggregations of a [`SearchRequest::partial_aggs`] search (its
+    /// `aggs` stay `None`).
+    pub partial_aggs: Option<search_aggs::Aggs>,
 }
 
 fn list(s: &str) -> Vec<String> {
@@ -340,6 +363,8 @@ pub fn parse_request(ctx: &Ctx, body: Option<&Value>, raw: Option<&[u8]>) -> EsR
     if rest_total && let Some(TrackTotalHits::UpTo(n)) = source.track_total_hits {
         return Err(EsError::illegal_argument(format!("[rest_total_hits_as_int] cannot be used if the tracking of total hits is not accurate, got {n}")));
     }
+    // A browser key's request, URL and body merged ([`crate::xpack::security::browser`]).
+    crate::xpack::security::browser::check_source(ctx, &source, scroll.is_some())?;
     let exprs = ctx.param("index").map(resolve::split_expressions).unwrap_or_default();
     let opts = ctx.indices_options(IndicesOptions::STRICT_EXPAND_OPEN_FORBID_CLOSED)?;
     Ok(SearchRequest {
@@ -361,6 +386,7 @@ pub fn parse_request(ctx: &Ctx, body: Option<&Value>, raw: Option<&[u8]>) -> EsR
         security: crate::xpack::security::dls::ReadSecurity::of(ctx),
         now_ms: ctx.now_ms,
         slowlog: crate::slowlog::Origin::of(&ctx.request.body, raw, ctx.request.header("x-opaque-id")),
+        partial_aggs: false,
     })
 }
 
@@ -483,6 +509,20 @@ pub fn resolve_targets(cluster: &Cluster, st: &ClusterState, req: &SearchRequest
             Some(sec) => sec.documents(cluster, crate::xpack::security::dls::READ, &idx.name)?,
             None => None,
         };
+        // `DlsFlsRequestValidator`: suggesters read the terms of every document, and a profile
+        // shows the restriction's query, so neither runs where documents are restricted.
+        if dls.is_some() {
+            let mut errors = Vec::new();
+            if req.source.suggest.is_some() {
+                errors.push("Suggest isn't supported if document level security is enabled".to_string());
+            }
+            if req.source.profile {
+                errors.push("A search request cannot be profiled if document level security is enabled".to_string());
+            }
+            if !errors.is_empty() {
+                return Err(EsError::action_request_validation(&errors));
+            }
+        }
         let filter = match (filter, dls) {
             (Some(a), Some(d)) => Some(crate::query::Query::from(crate::query::compound::Bool { filter: vec![a, d], ..Default::default() })),
             (a, d) => a.or(d),
@@ -779,7 +819,9 @@ fn shard_query_main(qctx: &QueryCtx, t: &Target, main: QueryRef) -> EsResult<Que
     // `DefaultSearchContext.buildFilteredQuery`: the non-nested filter first, and only where
     // the query (and the alias filter) might match nested documents.
     let alias = match &t.alias_filter {
-        Some(af) => Some(qctx.to_filter(af)?),
+        // The owner's (with the reader's document level security): a browser key's policy
+        // doesn't hold it.
+        Some(af) => Some(qctx.owner_filter(af)?),
         None => None,
     };
     let mut filters: Vec<QueryRef> = Vec::new();
@@ -1039,11 +1081,63 @@ fn is_time_exceeded(e: &EsError) -> bool {
     e.kind == "time_exceeded_exception"
 }
 
+/// Node setting: the longest one request that searches may run on this node (roll's own;
+/// Elasticsearch has no such cap). Shared nodes set it so no tenant's request holds a worker
+/// indefinitely. The time is fixed once per request ([`bound_request`]) and bounds every
+/// phase, shard and nested search of it, below the search's own `timeout`. Unset, `0` or
+/// `-1`: no cap.
+pub const MAX_TIME: &str = "roll.search.max_time";
+
+/// The node's [`MAX_TIME`], if it has one. [`check_max_time`] refused an unreadable value
+/// when the node started.
+pub(crate) fn max_time(cluster: &Cluster) -> Option<std::time::Duration> {
+    let v = cluster.config.node_setting(MAX_TIME)?;
+    let nanos = crate::units::TimeValue::parse(v, MAX_TIME).ok()?.nanos();
+    (nanos > 0).then(|| std::time::Duration::from_nanos(nanos.min(u64::MAX as i128) as u64))
+}
+
+/// Refuses a node whose [`MAX_TIME`] isn't a time value (`node_settings`, the last one wins),
+/// so a typo can't turn the cap off. Called once when the node starts.
+pub fn check_max_time(node_settings: &[(String, String)]) -> anyhow::Result<()> {
+    if let Some((_, v)) = node_settings.iter().rev().find(|(k, _)| k == MAX_TIME) {
+        crate::units::TimeValue::parse(v, MAX_TIME).map_err(|e| anyhow::anyhow!("{MAX_TIME}: {}", e.reason.unwrap_or_default()))?;
+    }
+    Ok(())
+}
+
+/// Fixes when the request running on this thread stops ([`MAX_TIME`] from now), unless an
+/// outer part of it already did: every phase, shard and nested search then keeps that one
+/// instant ([`SearchControl::limit`](search_index::search::SearchControl::limit)), carried
+/// with the request's cancellation. `None` without a cap or when the limit is already set.
+pub(crate) fn bound_request(cluster: &Cluster) -> Option<search_index::search::AmbientGuard> {
+    let mut ctl = search_index::search::ambient_control().unwrap_or_default();
+    if ctl.limit.is_some() {
+        return None;
+    }
+    ctl.limit = Some(std::time::Instant::now().checked_add(max_time(cluster)?)?);
+    Some(search_index::search::set_ambient_control(Some(ctl)))
+}
+
+/// Whether the request's limit ([`bound_request`]) has passed.
+pub(crate) fn limit_passed() -> bool {
+    search_index::search::ambient_control().is_some_and(|c| c.limit_passed())
+}
+
+/// The vectors the request's `_source` keeps: all of them (`None`, `exclude_vectors: false`), or
+/// those its includes name (none when it fetches no source).
+fn vectors_kept(req: &SearchRequest) -> Option<Vec<String>> {
+    match &req.source.source {
+        Some(s) if s.exclude_vectors == Some(false) => None,
+        Some(s) if s.fetch => Some(s.includes.clone()),
+        _ => Some(Vec::new()),
+    }
+}
+
 /// When the query phase of `req` stops collecting (`QueryPhase.getTimeoutCheck`): the
 /// request's `timeout`, else `search.default_search_timeout`; never for a scroll or for
 /// `-1` (`NO_TIMEOUT`). Elasticsearch counts whole milliseconds and times out once the clock
 /// is past `start + timeout` (`time > maxTime`), so `timeout=0` lets a search that takes less
-/// than a millisecond finish.
+/// than a millisecond finish. The request's limit ([`bound_request`]) applies besides.
 fn search_deadline(st: &ClusterState, req: &SearchRequest) -> Option<std::time::Instant> {
     if req.scroll.is_some() {
         return None;
@@ -1059,6 +1153,27 @@ fn search_deadline(st: &ClusterState, req: &SearchRequest) -> Option<std::time::
     std::time::Instant::now().checked_add(std::time::Duration::from_millis(millis.saturating_add(1)))
 }
 
+/// Makes `deadline` this thread's search deadline unless an earlier one is set, keeping the
+/// cancellation, limit and request state.
+fn with_deadline(deadline: std::time::Instant) -> search_index::search::AmbientGuard {
+    let mut ctl = search_index::search::ambient_control().unwrap_or_default();
+    ctl.deadline = Some(ctl.deadline.map_or(deadline, |d| d.min(deadline)));
+    search_index::search::set_ambient_control(Some(ctl))
+}
+
+/// `e`, or the search's `search_timeout_exception` when a deadline interrupted it (collection,
+/// a script, a nested search) in a phase that has no partial answer.
+pub(crate) fn timeout_error(e: EsError) -> EsError {
+    let mut cause = Some(&e);
+    while let Some(c) = cause {
+        if is_time_exceeded(c) {
+            return search_timeout_error();
+        }
+        cause = c.caused_by.as_deref();
+    }
+    e
+}
+
 /// Runs the query phase on one shard.
 ///
 /// `window` is the shard's request-window failure (`DefaultSearchContext.preProcess`), raised
@@ -1070,13 +1185,20 @@ fn search_deadline(st: &ClusterState, req: &SearchRequest) -> Option<std::time::
 /// result, `timed_out`.
 #[allow(clippy::too_many_arguments)]
 pub fn query_phase(cluster: &Cluster, st: &ClusterState, req: &SearchRequest, t: &Target, ti: usize, shards: usize, n: usize, after: Option<&[Value]>, aggs: Option<&search_aggs::AggRequest>, knn: &[QueryRef], window: Option<EsError>) -> EsResult<ShardResult> {
+    // A query phase run outside a request (a background job's search) is a request of its own.
+    let _bound = bound_request(cluster);
     let deadline = search_deadline(st, req);
-    // The request's cancellation (its client went away) stays in force.
-    let cancelled = search_index::search::ambient_control().and_then(|c| c.cancelled);
+    // The request's cancellation (its client went away) and its limit stay in force.
+    let (cancelled, limit) = search_index::search::ambient_control().map_or((None, None), |c| (c.cancelled, c.limit));
     // The runtime fields scripts read through `doc[...]` travel with the control.
-    let scope = runtime::RuntimeScope::build(&cluster.scripts, cluster.state(), &t.idx, &t.table(), t.shard.id as i32, req.source.runtime_mappings.as_ref())?;
-    let ctl = (deadline.is_some() || cancelled.is_some() || scope.is_some()).then(|| search_index::search::SearchControl {
+    // A browser key that runs no painless gets no runtime fields (they are scripts).
+    let scope = match denies_scripts(t.security.as_ref()) {
+        true => None,
+        false => runtime::RuntimeScope::build(&cluster.scripts, cluster.state(), &t.idx, &t.table(), t.shard.id as i32, req.source.runtime_mappings.as_ref())?,
+    };
+    let ctl = (deadline.is_some() || limit.is_some() || cancelled.is_some() || scope.is_some()).then(|| search_index::search::SearchControl {
         deadline,
+        limit,
         cancelled,
         ext: scope.clone().map(|s| s as Arc<dyn std::any::Any + Send + Sync>),
     });
@@ -1092,7 +1214,8 @@ pub fn query_phase(cluster: &Cluster, st: &ClusterState, req: &SearchRequest, t:
     let timed_out = SHARD_TIMED_OUT.with(|c| c.replace(false));
     match r {
         Ok(mut sr) if timed_out => {
-            if !req.allow_partial {
+            // A scroll page cut short would leave documents out of the scroll for good.
+            if !req.allow_partial || req.scroll.is_some() {
                 return Err(search_timeout_error());
             }
             sr.timed_out = true;
@@ -1104,7 +1227,7 @@ pub fn query_phase(cluster: &Cluster, st: &ClusterState, req: &SearchRequest, t:
             Ok(sr)
         }
         Err(e) if is_time_exceeded(&e) => {
-            if !req.allow_partial {
+            if !req.allow_partial || req.scroll.is_some() {
                 return Err(search_timeout_error());
             }
             // Collection stopped where partial results can't be kept (a concurrent search, a
@@ -1183,11 +1306,10 @@ fn query_phase_inner(cluster: &Cluster, st: &ClusterState, req: &SearchRequest, 
         None => t.searcher()?,
     };
     let table = t.table();
-    let mut qctx = QueryCtx::new(cluster, st, &t.idx, &table, &searcher, req.now_ms);
+    let mut qctx = QueryCtx::new(cluster, st, &t.idx, &table, &searcher, req.now_ms, t.reader());
     qctx.shard = t.shard.id;
     qctx.runtime_mappings = src.runtime_mappings.clone();
     qctx.alias_filter = t.alias_filter.clone();
-    qctx.security = t.security.clone();
     if let Some(rm) = &src.runtime_mappings {
         let names: Vec<&str> = rm.keys().map(String::as_str).collect();
         runtime::check_time_series(&t.idx, &names, true)?;
@@ -1314,9 +1436,13 @@ fn query_phase_inner(cluster: &Cluster, st: &ClusterState, req: &SearchRequest, 
         Some(a) => {
             let mut lookup = aggs::Lookup::new(cluster, st, t, &table, &searcher, req.now_ms).with_parent_fields(&src.fields);
             if !src.rescore.is_empty() {
-                lookup = lookup.with_rescore(prepare_rescore(&QueryCtx::new(cluster, st, &t.idx, &table, &searcher, req.now_ms), src));
+                lookup = lookup.with_rescore(prepare_rescore(&QueryCtx::new(cluster, st, &t.idx, &table, &searcher, req.now_ms, t.reader()), src));
             }
             let max_buckets = st.metadata.cluster_setting("search.max_buckets").and_then(|v| v.parse::<usize>().ok());
+            let max_buckets = match req.browser() {
+                Some(p) => Some(max_buckets.map_or(p.max_buckets, |m| m.min(p.max_buckets))),
+                None => max_buckets,
+            };
             let opts = search_aggs::ShardOptions {
                 max_buckets,
                 // Top-level aggregations may answer from segment statistics only when the query
@@ -1813,6 +1939,13 @@ fn cacheable(req: &SearchRequest, t: &Target) -> bool {
         return false;
     }
     if req.request_cache.is_none() && t.idx.settings.get("index.requests.cache.enable") == Some("false") {
+        return false;
+    }
+    // A reader whose document or field level security restricts anything never reads or
+    // writes the cache: its answers depend on what it may read, here and in every index its
+    // queries look documents up in, which the key can't hold (Elasticsearch disables the cache
+    // in similar cases, e.g. templated role queries).
+    if t.security.is_some() {
         return false;
     }
     let text = format!("{src:?}");
@@ -2374,11 +2507,12 @@ fn run_query_phases(n: usize, run: &(dyn Fn(usize) -> EsResult<ShardResult> + Sy
     let opensearch = crate::opensearch::active();
     let lookups = extra::LookupScope::current();
     let page = contexts::page_state();
-    // The request's cancellation (`_tasks/_cancel`, a closed connection) reaches every shard.
-    let cancelled = search_index::search::ambient_control().and_then(|c| c.cancelled);
+    // The request's cancellation (`_tasks/_cancel`, a closed connection) and its limit reach
+    // every shard.
+    let ctl = search_index::search::ambient_control().map(|c| search_index::search::SearchControl { cancelled: c.cancelled, limit: c.limit, ..Default::default() });
     pool::for_each_index(n, (n - 1).min(cores - 1), &|i| {
         let _lookups = extra::LookupScope::adopt(lookups.clone());
-        let _ambient = cancelled.clone().map(|c| search_index::search::set_ambient_control(Some(search_index::search::SearchControl { deadline: None, cancelled: Some(c), ext: None })));
+        let _ambient = ctl.clone().map(|c| search_index::search::set_ambient_control(Some(c)));
         let r = crate::opensearch::with(opensearch, || contexts::with_page(page.clone(), || run(i)));
         *slots[i].lock() = Some(r);
     });
@@ -2413,6 +2547,14 @@ pub(super) fn context_checks_of(t: &Target, req: &SearchRequest) -> EsResult<()>
 pub fn execute_on(cluster: &Cluster, req: &SearchRequest, targets: &[Target]) -> EsResult<SearchOutcome> {
     // The search's shard tasks (`_tasks`), under the request's task.
     let _tasks = crate::tasks::search_started(cluster, req, targets);
+    // The request's limit bounds every phase (DFS, can-match, knn, query, reduce, fetch); the
+    // phases without a partial answer fail when it passes.
+    let _bound = bound_request(cluster);
+    execute_capped(cluster, req, targets).map_err(timeout_error)
+}
+
+/// [`execute_on`] under the request's limit.
+fn execute_capped(cluster: &Cluster, req: &SearchRequest, targets: &[Target]) -> EsResult<SearchOutcome> {
     // `dfs_query_then_fetch` over more than one shard (a single shard runs query_then_fetch):
     // a DFS phase, then the query phase Elasticsearch calls `dfs_query`.
     if req.dfs && targets.len() > 1 && targets.iter().all(|t| t.searcher.as_ref().is_none_or(|s| s.global_stats().is_none())) {
@@ -2446,6 +2588,11 @@ fn execute_after_can_match(cluster: &Cluster, req: &SearchRequest, targets: &[Ta
 }
 
 fn execute_targets(cluster: &Cluster, req: &SearchRequest, targets: &[Target]) -> EsResult<SearchOutcome> {
+    // Every search a browser key's request runs (collapse's expansions, retrievers' children,
+    // the top-level one again) is held to its policy here, whoever built its source.
+    if let Some(p) = req.browser() {
+        crate::xpack::security::browser::check_parsed(&p, &req.source, req.scroll.is_some())?;
+    }
     if let Some(f) = &req.source.fusion {
         return fusion::execute(cluster, req, targets, f);
     }
@@ -2597,7 +2744,9 @@ fn execute_targets(cluster: &Cluster, req: &SearchRequest, targets: &[Target]) -
     failures.sort_by_key(|(i, _)| request_index[*i]);
     // Shards the can-match phase skipped count as successful: with one, the search stands.
     let skipped_ok = CAN_MATCH_SKIPPED.with(|c| c.get()) > 0;
-    if !failures.is_empty() && ((results.is_empty() && !skipped_ok) || !req.allow_partial) {
+    // A scroll page with a timed-out shard fails whole: the scroll would miss its documents.
+    let scroll_timed_out = req.scroll.is_some() && failures.iter().any(|(_, e)| e.kind == "search_timeout_exception");
+    if !failures.is_empty() && ((results.is_empty() && !skipped_ok) || !req.allow_partial || scroll_timed_out) {
         return Err(all_shards_failed(&cluster.node.id, targets, &failures, if results.is_empty() { "all shards failed" } else { "Partial shards failure" }));
     }
     // Reduce: merge hits in sort order (shard order breaks ties).
@@ -2606,7 +2755,7 @@ fn execute_targets(cluster: &Cluster, req: &SearchRequest, targets: &[Target]) -
     } else {
         let t = &targets[results[0].target];
         let table = t.table();
-        let mut qctx = QueryCtx::new(cluster, &st, &t.idx, &table, &results[0].searcher, req.now_ms);
+        let mut qctx = QueryCtx::new(cluster, &st, &t.idx, &table, &results[0].searcher, req.now_ms, t.reader());
         // Sorts on the request's runtime fields resolve them here too.
         qctx.runtime_mappings = src.runtime_mappings.clone();
         let b = sort::build(&qctx, &src.sort)?;
@@ -2617,7 +2766,7 @@ fn execute_targets(cluster: &Cluster, req: &SearchRequest, targets: &[Target]) -
     } else {
         let t = &targets[results[0].target];
         let table = t.table();
-        let mut qctx = QueryCtx::new(cluster, &st, &t.idx, &table, &results[0].searcher, req.now_ms);
+        let mut qctx = QueryCtx::new(cluster, &st, &t.idx, &table, &results[0].searcher, req.now_ms, t.reader());
         // Sorts on the request's runtime fields resolve them here too.
         qctx.runtime_mappings = src.runtime_mappings.clone();
         sort::build(&qctx, &src.sort)?.formats
@@ -2638,7 +2787,7 @@ fn execute_targets(cluster: &Cluster, req: &SearchRequest, targets: &[Target]) -
                 return f.clone();
             }
             let table = t.table();
-            let mut qctx = QueryCtx::new(cluster, &st, &t.idx, &table, &r.searcher, req.now_ms);
+            let mut qctx = QueryCtx::new(cluster, &st, &t.idx, &table, &r.searcher, req.now_ms, t.reader());
             // Sorts on the request's runtime fields resolve them here too.
             qctx.runtime_mappings = src.runtime_mappings.clone();
             let f = sort::build(&qctx, &src.sort).ok().map(|b| Arc::new(b.formats));
@@ -2743,6 +2892,7 @@ fn execute_targets(cluster: &Cluster, req: &SearchRequest, targets: &[Target]) -
             ranked,
             clusters: None,
             reduce_phases: None,
+            partial_aggs: None,
         });
     }
     let opts = FetchOpts {
@@ -2911,6 +3061,7 @@ fn execute_targets(cluster: &Cluster, req: &SearchRequest, targets: &[Target]) -
             }
         }
     }
+    let mut partial_aggs = None;
     let aggs_out = match &agg_req {
         Some(a) => {
             // Reduced in shard request order (`QueryPhaseResultConsumer` sorts by shard index):
@@ -2918,7 +3069,22 @@ fn execute_targets(cluster: &Cluster, req: &SearchRequest, targets: &[Target]) -
             let mut order: Vec<usize> = (0..results.len()).collect();
             order.sort_by_key(|&i| request_index[results[i].target]);
             let parts: Vec<search_aggs::Aggs> = order.iter().filter_map(|&i| results[i].aggs.take()).collect();
-            let mut out = aggs::reduce(cluster, &st, a, parts, req.typed_keys).map_err(|e| with_query_failures(e, &cluster.node.id, targets, &failures))?;
+            if req.partial_aggs {
+                // A linked cluster's part: reduced partially, its top hits fetched here (the
+                // coordinating cluster can't reach these shards).
+                let mut out = aggs::reduce_partial(cluster, &st, a, parts).map_err(|e| with_query_failures(e, &cluster.node.id, targets, &failures))?;
+                out.visit_top_hits_mut(&mut |t: &mut search_aggs::internal::TopHits| -> EsResult<()> {
+                    for h in t.hits.iter_mut() {
+                        let mut v = aggs::from_json(&h.json);
+                        finish_top_hits(cluster, &st, req, targets, &results, &mut v)?;
+                        h.json = aggs::to_json(&v);
+                    }
+                    Ok(())
+                })?;
+                partial_aggs = Some(out);
+                None
+            } else {
+            let mut out = aggs::reduce(cluster, &st, a, parts, req.typed_keys, req.browser()).map_err(|e| with_query_failures(e, &cluster.node.id, targets, &failures))?;
             finish_top_hits(cluster, &st, req, targets, &results, &mut out)?;
             if let Some(raw) = &src.aggs
                 && aggs::mentions_tsid(raw)
@@ -2926,6 +3092,7 @@ fn execute_targets(cluster: &Cluster, req: &SearchRequest, targets: &[Target]) -
                 aggs::render_tsid_keys(raw, &mut out, req.typed_keys);
             }
             Some(out)
+            }
         }
         None => None,
     };
@@ -3026,6 +3193,7 @@ fn execute_targets(cluster: &Cluster, req: &SearchRequest, targets: &[Target]) -
         ranked,
         clusters: None,
         reduce_phases: None,
+        partial_aggs,
     })
 }
 
@@ -3068,8 +3236,11 @@ fn fetch_parallel(page: &[(usize, ShardHit)], render: impl Fn(usize, &ShardHit) 
     let opensearch = crate::opensearch::active();
     let lookups = extra::LookupScope::current();
     let page_state = contexts::page_state();
+    // The fetch phase's deadline and cancellation reach the scripts each unit runs.
+    let ctl = search_index::search::ambient_control();
     pool::for_each_index(units.len(), (units.len() - 1).min(cores - 1), &|u| {
         let _lookups = extra::LookupScope::adopt(lookups.clone());
+        let _ambient = ctl.clone().map(|c| search_index::search::set_ambient_control(Some(c)));
         let out = crate::opensearch::with(opensearch, || {
             contexts::with_page(page_state.clone(), || {
                 let mut out = Vec::with_capacity(units[u].len());
@@ -3099,13 +3270,12 @@ fn fetch_parallel(page: &[(usize, ShardHit)], render: impl Fn(usize, &ShardHit) 
 
 #[allow(clippy::too_many_arguments)]
 fn render_hit(cluster: &Cluster, st: &ClusterState, req: &SearchRequest, t: &Target, r: &ShardResult, h: &ShardHit, opts: &FetchOpts, formats: &[sort::ValueFormat]) -> EsResult<Value> {
-    // Fetch-phase scripts read the search's runtime fields too.
+    // Fetch-phase scripts read the search's runtime fields too, under the fetch phase's
+    // deadline and cancellation.
     let _ambient = r.runtime.as_ref().map(|scope| {
-        search_index::search::set_ambient_control(Some(search_index::search::SearchControl {
-            deadline: None,
-            cancelled: None,
-            ext: Some(scope.clone() as Arc<dyn std::any::Any + Send + Sync>),
-        }))
+        let mut ctl = search_index::search::ambient_control().unwrap_or_default();
+        ctl.ext = Some(scope.clone() as Arc<dyn std::any::Any + Send + Sync>);
+        search_index::search::set_ambient_control(Some(ctl))
     });
     let src = &req.source;
     let table = t.table();
@@ -3206,7 +3376,7 @@ fn render_hit(cluster: &Cluster, st: &ClusterState, req: &SearchRequest, t: &Tar
         spec.semantic = crate::xpack::inference::highlight::probes(src.query.as_ref());
         // The stored fields read at the top serve the highlighter too.
         let source = crate::fetch::source_bytes(&stored).map(crate::fetch::parse_source).transpose()?;
-        let qctx = QueryCtx::new(cluster, st, &t.idx, &table, &r.searcher, req.now_ms);
+        let qctx = QueryCtx::new(cluster, st, &t.idx, &table, &r.searcher, req.now_ms, t.reader());
         let id = m.get("_id").and_then(Value::as_str).unwrap_or_default().to_string();
         let mut out = highlight::highlight_hit(&qctx, &spec, &r.query, source.as_ref(), &id, &r.searcher, Some(h.doc), Some(&stored), Some(&r.match_weights))?;
         // Percolated documents are highlighted with the stored query that matched them.
@@ -3246,7 +3416,7 @@ fn render_hit(cluster: &Cluster, st: &ClusterState, req: &SearchRequest, t: &Tar
     if explain {
         let mut e = r.searcher.explain(&r.query, h.doc).map_err(crate::engine::convert::index_error)?;
         if !r.rescored.is_empty() {
-            let qctx = QueryCtx::new(cluster, st, &t.idx, &table, &r.searcher, req.now_ms);
+            let qctx = QueryCtx::new(cluster, st, &t.idx, &table, &r.searcher, req.now_ms, t.reader());
             e = explain_rescored(&qctx, &r.searcher, src, &r.rescored, h.doc, e)?;
         }
         m.insert("_explanation".into(), explanation_json(&e));
@@ -3254,8 +3424,8 @@ fn render_hit(cluster: &Cluster, st: &ClusterState, req: &SearchRequest, t: &Tar
     if !r.inner_hits.is_empty() {
         let stored = r.searcher.stored(h.doc).map_err(crate::engine::convert::index_error)?;
         let source = crate::fetch::source_bytes(&stored).map(crate::fetch::parse_source).transpose()?;
-        let qctx = QueryCtx::new(cluster, st, &t.idx, &table, &r.searcher, req.now_ms);
-        let mut ih = inner::render(&qctx, t, r, h.doc, &hits::stored_id(&stored).unwrap_or_default(), source.as_ref(), req.total_as_int)?;
+        let qctx = QueryCtx::new(cluster, st, &t.idx, &table, &r.searcher, req.now_ms, t.reader());
+        let mut ih = inner::render(&qctx, t, r, h.doc, &hits::stored_id(&stored).unwrap_or_default(), source.as_ref(), vectors_kept(req).as_deref(), req.total_as_int)?;
         // `stored_fields: _none_` reaches nested inner hits (their sub-context reads the
         // search's stored fields context): they print no `_id` either.
         if req.source.stored_fields.as_ref().is_some_and(|sf| sf.fields.is_none())
@@ -3303,6 +3473,9 @@ fn script_fields_of_hit(cluster: &Cluster, st: &ClusterState, t: &Target, table:
     let Some((seg, local)) = searcher.segment_of(doc) else { return Ok(()) };
     let id_fielddata = id_fielddata::scripts(st);
     let mut sf = Map::new();
+    if denies_scripts(t.security.as_ref()) && !fields.is_empty() {
+        return Err(crate::xpack::security::browser::refused("painless ([script_fields])"));
+    }
     for f in fields {
         let bound = cluster.scripts.compile(st, &f.script, search_painless::Context::Field)?;
         let p = scripts::Painless { bound, table: table.clone(), shard: t.shard.id as i32, index: t.idx.name.clone(), id_fielddata, counted: false };
@@ -3404,7 +3577,7 @@ fn complete_top_hit(cluster: &Cluster, st: &ClusterState, req: &SearchRequest, t
         if let Some(root) = root {
             let stored = r.searcher.stored(root).map_err(crate::engine::convert::index_error)?;
             let source = crate::fetch::source_bytes(&stored).map(crate::fetch::parse_source).transpose()?;
-            let qctx = QueryCtx::new(cluster, st, &t.idx, &table, &r.searcher, req.now_ms);
+            let qctx = QueryCtx::new(cluster, st, &t.idx, &table, &r.searcher, req.now_ms, t.reader());
             let id = m.get("_id").and_then(Value::as_str).unwrap_or_default().to_string();
             let out = highlight::highlight_hit(&qctx, &spec, &r.query, source.as_ref(), &id, &r.searcher, Some(root), Some(&stored), Some(&r.match_weights))?;
             if !out.is_empty() {
@@ -3446,8 +3619,8 @@ fn complete_top_hit(cluster: &Cluster, st: &ClusterState, req: &SearchRequest, t
     if !nested && !r.inner_hits.is_empty() {
         let stored = r.searcher.stored(doc).map_err(crate::engine::convert::index_error)?;
         let source = crate::fetch::source_bytes(&stored).map(crate::fetch::parse_source).transpose()?;
-        let qctx = QueryCtx::new(cluster, st, &t.idx, &table, &r.searcher, req.now_ms);
-        m.insert("inner_hits".into(), inner::render(&qctx, t, r, doc, &hits::stored_id(&stored).unwrap_or_default(), source.as_ref(), req.total_as_int)?);
+        let qctx = QueryCtx::new(cluster, st, &t.idx, &table, &r.searcher, req.now_ms, t.reader());
+        m.insert("inner_hits".into(), inner::render(&qctx, t, r, doc, &hits::stored_id(&stored).unwrap_or_default(), source.as_ref(), vectors_kept(req).as_deref(), req.total_as_int)?);
     }
     Ok(())
 }
@@ -3461,6 +3634,7 @@ fn runtime_fields_of_hit(cluster: &Cluster, st: &ClusterState, src: &SearchSourc
     let shard = t.shard.id as i32;
     let scope = match runtime::RuntimeScope::ambient().filter(|s| s.is_for(&t.idx.name, shard)) {
         Some(s) => Some(s),
+        None if denies_scripts(t.security.as_ref()) => None,
         None => runtime::RuntimeScope::build(&cluster.scripts, cluster.state(), &t.idx, table, shard, src.runtime_mappings.as_ref())?,
     };
     let index_scripts = index_time::of(&t.idx.mapping);
@@ -3469,7 +3643,7 @@ fn runtime_fields_of_hit(cluster: &Cluster, st: &ClusterState, src: &SearchSourc
     }
     let Some((seg, local)) = searcher.segment_of(doc) else { return Ok(()) };
     let mut out = Map::new();
-    lookup_fields_of_hit(cluster, src, table, searcher, doc, &mut out)?;
+    lookup_fields_of_hit(cluster, src, table, searcher, doc, t.security.as_ref(), &mut out)?;
     // Runtime fields shadowing a concrete field the concrete fetch already printed: their
     // own values (or none) replace those.
     let mut shadowed_empty = Vec::new();
@@ -3501,6 +3675,9 @@ fn runtime_fields_of_hit(cluster: &Cluster, st: &ClusterState, src: &SearchSourc
             let hit = if spec.field.contains('*') { crate::xcontent::filter::glob_match(&spec.field, &f.name) } else { spec.field == f.name };
             if !hit || out.contains_key(&f.name) || scope.as_ref().is_some_and(|s| s.shadows(&f.name)) {
                 continue;
+            }
+            if denies_scripts(t.security.as_ref()) {
+                return Err(crate::xpack::security::browser::refused("painless (a scripted field)"));
             }
             let ev = runtime::Evaluator::new(&cluster.scripts, st, table, shard, &t.idx.name, f.clone())?.counted();
             let vals = index_time::fetch_values(&ev, seg, local)?;
@@ -3540,8 +3717,10 @@ fn runtime_fields_of_hit(cluster: &Cluster, st: &ClusterState, src: &SearchSourc
 
 /// `lookup` runtime fields (`LookupRuntimeFieldType`) of the request's `fields`: per value of
 /// `input_field`, the `fetch_fields` of the first document of `target_index` whose
-/// `target_field` holds it; values without a match are left out.
-fn lookup_fields_of_hit(cluster: &Cluster, src: &SearchSource, table: &Arc<crate::engine::fields::FieldTable>, searcher: &Searcher, doc: u32, out: &mut Map) -> EsResult<()> {
+/// `target_field` holds it; values without a match are left out. The lookups read as the
+/// search's reader (`security`: its document and field level security over `target_index`).
+#[allow(clippy::too_many_arguments)]
+fn lookup_fields_of_hit(cluster: &Cluster, src: &SearchSource, table: &Arc<crate::engine::fields::FieldTable>, searcher: &Searcher, doc: u32, security: Option<&crate::xpack::security::dls::ReadSecurity>, out: &mut Map) -> EsResult<()> {
     let Some(rm) = &src.runtime_mappings else { return Ok(()) };
     let lookups: Vec<(&String, &Map)> = rm.iter().filter_map(|(k, d)| d.as_object().filter(|m| m.get("type").and_then(Value::as_str) == Some("lookup")).map(|m| (k, m))).collect();
     if lookups.is_empty() {
@@ -3576,6 +3755,7 @@ fn lookup_fields_of_hit(cluster: &Cluster, src: &SearchSource, table: &Arc<crate
             };
             let req = SearchRequest {
                 slowlog: Default::default(),
+                partial_aggs: false,
                 indices: vec![target_index.clone()],
                 opts: IndicesOptions::STRICT_EXPAND_OPEN,
                 source: SearchSource::parse(&body, None)?,
@@ -3592,7 +3772,7 @@ fn lookup_fields_of_hit(cluster: &Cluster, src: &SearchSource, table: &Arc<crate
                 now_ms: crate::time::now_millis(),
                 fused: None,
                 rank_only: false,
-                security: None,
+                security: security.cloned(),
             };
             let o = execute(cluster, &req)?;
             if let Some(Value::Obj(f)) = o.hits.first().and_then(|h| h.get("fields")) {
@@ -3630,6 +3810,10 @@ fn collapse_inner_hits(cluster: &Cluster, req: &SearchRequest, c: &crate::search
         let Some(name) = spec.get("name").and_then(Value::as_str) else {
             return Err(EsError::illegal_argument("[inner_hits] must have a [name] when used in [collapse]"));
         };
+        // A browser key's request pays for each expansion, `size: 0` ones too.
+        if let Some(s) = &req.security {
+            s.spend_sub_search()?;
+        }
         let mut sub = req.clone();
         sub.scroll = None;
         // The group's documents among everything the compound retriever matches.
@@ -3966,8 +4150,11 @@ pub(crate) fn analytics_record(ctx: &Ctx, watch: Option<Watch>, req: &SearchRequ
 
 pub async fn search(ctx: &Ctx<'_>) -> EsResult<Reply> {
     let mut body = ctx.body()?;
+    check_pit_without_indices(ctx, body.as_ref().is_some_and(|b| b.get("pit").is_some()))?;
     // A search naming remote clusters keeps the body it was sent for the linked ones.
-    let original = ctx.param("index").is_some_and(|i| i.contains(':')).then(|| body.clone()).flatten();
+    // So does one on a point in time over linked clusters.
+    let ccs_pit = body.as_ref().and_then(|b| b.pointer(&["pit", "id"])).and_then(Value::as_str).is_some_and(crate::remote::contexts::is_ccs);
+    let original = (ccs_pit || ctx.param("index").is_some_and(|i| i.contains(':'))).then(|| body.clone()).flatten();
     let watch = analytics_watch(ctx, body.as_ref());
     // OpenSearch: the search pipeline the request names, defines inline or its index defaults to.
     let pipeline = if ctx.cluster.dialect == crate::cluster::Dialect::OpenSearch {
@@ -3979,7 +4166,7 @@ pub async fn search(ctx: &Ctx<'_>) -> EsResult<Reply> {
     // Retrievers that need inference: a top-level `text_similarity_reranker` reranks the page
     // after the search, and `rrf`/`linear`'s simplified `query`/`fields` form expands against
     // the targets' mappings.
-    let reranker = crate::xpack::inference::rerank::take(&mut body)?;
+    let reranker = crate::xpack::inference::rerank::take(ctx, &mut body)?;
     if let Some(b) = body.as_mut()
         && crate::xpack::inference::retrievers::uses_simplified(b)
     {
@@ -3991,6 +4178,8 @@ pub async fn search(ctx: &Ctx<'_>) -> EsResult<Reply> {
         crate::xpack::inference::retrievers::expand(&targets, b)?;
     }
     let mut req = parse_request(ctx, body.as_ref(), ctx.raw_json())?;
+    // A linked cluster's part of a cross-cluster search: aggregations partially reduced.
+    req.partial_aggs = req.source.aggs.is_some() && crate::remote::links::wants_partial(ctx);
     // Queries that need inference (`semantic`, and others on `semantic_text` fields).
     crate::xpack::inference::query::rewrite_request(ctx, &mut req).await?;
     crate::xpack::entsearch::query_rules::check_rulesets(ctx, body.as_ref())?;
@@ -4015,6 +4204,9 @@ pub async fn search(ctx: &Ctx<'_>) -> EsResult<Reply> {
         let mut out = crate::json::raw::with_enabled(raw, || run(ctx, req.clone()))?;
         analytics_record(ctx, watch, &req, &out);
         let mut v = render_take(&mut out, &req);
+        if let Some(p) = out.partial_aggs.take() {
+            crate::remote::links::attach_partial(&mut v, &p)?;
+        }
         if let Some(rr) = &reranker {
             crate::xpack::inference::rerank::apply(ctx, rr, &mut v).await?;
         }
@@ -4038,9 +4230,38 @@ pub async fn search(ctx: &Ctx<'_>) -> EsResult<Reply> {
     Reply::ok(v)
 }
 
+/// The final reduce of a cross-cluster search's partially reduced aggregations (each
+/// cluster's part, in cluster order), rendered; `None` without aggregations or parts.
+pub(crate) fn reduce_clusters(ctx: &Ctx, req: &SearchRequest, parts: Vec<search_aggs::Aggs>) -> EsResult<Option<Value>> {
+    let Some(a) = req.source.aggs.as_ref().filter(|_| !parts.is_empty()) else { return Ok(None) };
+    let agg_req = aggs::parse(a, req.source.aggs_raw.as_deref().map(|r| (r, a)))?;
+    let st = ctx.state();
+    let mut out = aggs::reduce(ctx.cluster, &st, &agg_req, parts, req.typed_keys, req.browser())?;
+    // Every part's top hits were fetched on its cluster: only `rest_total_hits_as_int` is left.
+    finish_top_hits(ctx.cluster, &st, req, &[], &[], &mut out)?;
+    if aggs::mentions_tsid(a) {
+        aggs::render_tsid_keys(a, &mut out, req.typed_keys);
+    }
+    Ok(Some(out))
+}
+
+/// `SearchRequest.validate`: a search on a point in time names no index (its indices are the
+/// point in time's). Checked before anything reads the request's indices (`has_pit`: the body
+/// names one; else read from it).
+pub(crate) fn check_pit_without_indices(ctx: &Ctx, has_pit: bool) -> EsResult<()> {
+    if ctx.param("index").is_none() || !(has_pit || ctx.body().ok().flatten().is_some_and(|b| b.get("pit").is_some())) {
+        return Ok(());
+    }
+    let msg = match ctx.cluster.dialect {
+        crate::cluster::Dialect::OpenSearch => "[indices] cannot be used with point in time",
+        crate::cluster::Dialect::Elasticsearch => "[indices] cannot be used with point in time. Do not specify any index with point in time.",
+    };
+    Err(EsError::action_request_validation(&[msg.into()]))
+}
+
 /// `SearchRequest.rewrite`: a sorted point-in-time search gets a `_shard_doc` tiebreaker when
 /// its sort doesn't end with one, unless `search_after` was given without a value for it.
-fn add_pit_tiebreaker(src: &mut SearchSource) {
+pub(crate) fn add_pit_tiebreaker(src: &mut SearchSource) {
     if src.sort.is_empty() || src.search_after.as_ref().is_some_and(|a| a.len() != src.sort.len() + 1) {
         return;
     }
@@ -4278,6 +4499,9 @@ pub async fn msearch(ctx: &Ctx<'_>) -> EsResult<Reply> {
     } else if !data.is_empty() {
         return Err(EsError::illegal_argument("The msearch request must be terminated by a newline [\\n]"));
     }
+    // A browser key's searches past its `max_items`, counted from the lines before any is parsed
+    // (each search is a header line and a body line).
+    crate::xpack::security::browser::check_item_lines(ctx, lines.len() / 2)?;
     let mut responses = Vec::new();
     let mut i = 0;
     let os = ctx.cluster.dialect == crate::cluster::Dialect::OpenSearch;
@@ -4351,14 +4575,21 @@ pub async fn msearch(ctx: &Ctx<'_>) -> EsResult<Reply> {
     if !errs.is_empty() {
         return Err(EsError::action_request_validation(&errs));
     }
+    // A browser key pays for every search, as parsed and checked here, before any runs.
+    crate::xpack::security::browser::charge_items(ctx, reqs.len())?;
     // Buffered items are charged to the request breaker until the response is sent
     // (Elasticsearch 9.5); a trip fails the whole request with that 429. OpenSearch has no
     // such accounting.
     let mut held = (ctx.cluster.dialect != crate::cluster::Dialect::OpenSearch)
         .then(|| crate::breaker::Reservation::new(ctx.cluster.breakers.request(ctx.cluster, &ctx.state())));
     for ((mut req, body), watch) in reqs.into_iter().zip(watches) {
-        // Each search is authorized as a search request of its own.
-        let r = match crate::xpack::security::authorize_search(ctx, &req.indices, &req.opts) {
+        // Each search is authorized as a search request of its own: one on a point in time
+        // against the point in time's indices (its own stay empty, or `run` refuses them).
+        let authorized = match &req.source.pit {
+            Some(pit) => crate::xpack::security::authorize_search_pit(ctx, &pit.id).map(|()| None),
+            None => crate::xpack::security::authorize_search(ctx, &req.indices, &req.opts),
+        };
+        let r = match authorized {
             Ok(narrowed) => {
                 if let Some(n) = narrowed {
                     req.indices = n;
@@ -4455,17 +4686,23 @@ pub fn explain(ctx: &Ctx) -> EsResult<Reply> {
     let shard = engine.shard(crate::meta::routing::shard_for(&idx, &id, routing.as_deref())).clone();
     shard.before_search(IndexEngine::refresh_interval(&idx))?;
     let searcher = shard.searcher();
-    let table = engine.table();
-    let qctx = QueryCtx::new(ctx.cluster, &st, &idx, &table, &searcher, ctx.now_ms);
     let security = crate::xpack::security::dls::ReadSecurity::of(ctx);
     let alias_filter = match &security {
         Some(s) => s.documents(ctx.cluster, crate::xpack::security::dls::READ, &idx.name)?,
         None => None,
     };
+    let fls = security.as_ref().and_then(|s| s.fields(crate::xpack::security::dls::READ, &idx.name));
     let t = Target { idx: idx.clone(), engine: engine.clone(), shard: shard.clone(), alias_filter, boost: 1.0, searcher: Some(searcher.clone()), security };
+    // The reader's fields only: those its field level security hides are unmapped.
+    let table = t.table();
+    let qctx = QueryCtx::new(ctx.cluster, &st, &idx, &table, &searcher, ctx.now_ms, t.reader());
     // `TransportExplainAction.shardOperation` looks the document up before it builds the
-    // query: a missing document answers 404 whatever the query.
-    let doc = find_doc(&searcher, &id);
+    // query: a missing document answers 404 whatever the query, and so does one the reader's
+    // document level security hides (its reader doesn't hold it).
+    let doc = match find_doc(&searcher, &id) {
+        Some(d) if !doc_allowed(ctx.cluster, &st, &idx, &engine.table(), &searcher, d, t.alias_filter.as_ref())? => None,
+        d => d,
+    };
     let mut m = Map::new();
     m.insert("_index".into(), Value::Str(idx.name.clone()));
     m.insert("_id".into(), Value::Str(id.clone()));
@@ -4474,7 +4711,10 @@ pub fn explain(ctx: &Ctx) -> EsResult<Reply> {
         return Ok(Reply::Body(404, Value::Obj(m)));
     };
     let q = shard_query(&qctx, &t, &req.source).map_err(|e| query::shard_exception(&idx, e))?;
-    let e = searcher.explain(&q, doc).map_err(crate::engine::convert::index_error)?;
+    // Elasticsearch explains with no timeout (`NO_TIMEOUT`); the request's limit still bounds
+    // the scripts it runs.
+    let _bound = bound_request(ctx.cluster);
+    let e = searcher.explain(&q, doc).map_err(|e| timeout_error(crate::engine::convert::index_error(e)))?;
     m.insert("matched".into(), Value::Bool(e.is_match()));
     m.insert("explanation".into(), explanation_json(&e));
     let fs = crate::fetch::FetchSource::from_params(ctx.query("_source"), ctx.query("_source_includes"), ctx.query("_source_excludes"))?;
@@ -4490,10 +4730,16 @@ pub fn explain(ctx: &Ctx) -> EsResult<Reply> {
         g.insert("found".into(), Value::Bool(true));
         let view = crate::fetch::SourceView { idx: &idx, table: &table, force_synthetic: false, search: true };
         if let Some(src) = crate::fetch::render_source_view(&stored, &fs2, &view)? {
-            g.insert("_source".into(), src);
+            g.insert("_source".into(), match &fls {
+                Some(f) => f.filter_source(src),
+                None => src,
+            });
         }
         if let Some(s) = &sf {
-            let f = crate::fetch::stored_fields(&table, &stored, s);
+            let mut f = crate::fetch::stored_fields(&table, &stored, s);
+            if let Some(fls) = &fls {
+                f = fls.filter_fields(f);
+            }
             if !f.is_empty() {
                 g.insert("fields".into(), Value::Obj(f));
             }
@@ -4535,7 +4781,7 @@ fn complete_completion_options(cluster: &Cluster, st: &ClusterState, req: &Searc
                 let table = t.table();
                 let stored = r.searcher.stored(doc).map_err(crate::engine::convert::index_error)?;
                 let source = crate::fetch::source_bytes(&stored).map(crate::fetch::parse_source).transpose()?;
-                let qctx = QueryCtx::new(cluster, st, &t.idx, &table, &r.searcher, req.now_ms);
+                let qctx = QueryCtx::new(cluster, st, &t.idx, &table, &r.searcher, req.now_ms, t.reader());
                 if let Some(hl) = &src.highlight {
                     let spec = match &mut spec {
                         Some(s) => s,
@@ -4563,7 +4809,7 @@ fn complete_completion_options(cluster: &Cluster, st: &ClusterState, req: &Searc
                     script_fields_of_hit(cluster, st, t, &table, &r.searcher, doc, score, &src.script_fields, m)?;
                 }
                 if !r.inner_hits.is_empty() {
-                    m.insert("inner_hits".into(), inner::render(&qctx, t, r, doc, &hits::stored_id(&stored).unwrap_or_default(), source.as_ref(), req.total_as_int)?);
+                    m.insert("inner_hits".into(), inner::render(&qctx, t, r, doc, &hits::stored_id(&stored).unwrap_or_default(), source.as_ref(), vectors_kept(req).as_deref(), req.total_as_int)?);
                 }
             }
         }
@@ -4573,12 +4819,57 @@ fn complete_completion_options(cluster: &Cluster, st: &ClusterState, req: &Searc
 
 /// Whether document `id` of `shard` matches `q` (document level security of a get): the shard
 /// is refreshed first, so a realtime get of a document not yet searchable is judged too.
-pub fn matches_doc(cluster: &Cluster, st: &ClusterState, idx: &Arc<IndexMeta>, engine: &Arc<IndexEngine>, shard: &Arc<ShardEngine>, id: &str, q: &crate::query::Query) -> EsResult<bool> {
-    shard.refresh()?;
-    let searcher = shard.searcher();
+/// Document `id` of `idx` as a query reads it on behalf of its request (a `percolate` query's
+/// or an `indexed_shape`'s document): `None` when it's missing or the reader's document level
+/// security hides it, else its version and `_source` (`None`: not stored) without the fields
+/// the reader's field level security hides, as a get by the reader answers.
+pub(crate) fn lookup_source(ctx: &QueryCtx, idx: &Arc<IndexMeta>, id: &str, routing: Option<&str>) -> EsResult<Option<(i64, Option<Value>)>> {
+    use crate::xpack::security::dls::READ;
+    let engine = ctx.cluster.engine.index(ctx.cluster, ctx.st, idx)?;
+    let shard = engine.shard(crate::meta::routing::shard_for(idx, id, routing));
+    let sec = ctx.security.read_as()?;
+    let Some(doc) = shard.shard.get(id.as_bytes(), true).map_err(crate::engine::convert::index_error)? else { return Ok(None) };
+    let fields = match sec.map(|s| s.documents(ctx.cluster, READ, &idx.name)).transpose()?.flatten() {
+        None => doc.fields,
+        // Under document level security the document is read from the searcher the filter is
+        // checked on (a document not searchable yet isn't visible).
+        Some(q) => {
+            let searcher = shard.searcher();
+            match find_doc(&searcher, id) {
+                Some(d) if doc_allowed(ctx.cluster, ctx.st, idx, &engine.table(), &searcher, d, Some(&q))? => searcher.stored(d).map_err(crate::engine::convert::index_error)?,
+                _ => return Ok(None),
+            }
+        }
+    };
+    let Some(src) = crate::fetch::source_bytes(&fields) else { return Ok(Some((doc.version, None))) };
+    let src = crate::fetch::parse_source(src)?;
+    Ok(Some((doc.version, Some(match sec.and_then(|s| s.fields(READ, &idx.name)) {
+        Some(f) => f.filter_source(src),
+        None => src,
+    }))))
+}
+
+/// Whether document `doc` of `searcher` matches a reader's document filter (`None`: none
+/// applies), on that searcher: the copy a request checks is the copy it reads.
+fn doc_allowed(cluster: &Cluster, st: &ClusterState, idx: &Arc<IndexMeta>, table: &Arc<crate::engine::fields::FieldTable>, searcher: &Searcher, doc: u32, filter: Option<&crate::query::Query>) -> EsResult<bool> {
+    let Some(q) = filter else { return Ok(true) };
+    let qctx = QueryCtx::new(cluster, st, idx, table, searcher, crate::time::now_millis(), query::Reader::Unrestricted);
+    let query = qctx.to_filter(q)?;
+    Ok(searcher.explain(&query, doc).map_err(crate::engine::convert::index_error)?.is_match())
+}
+
+/// Whether document `id` as a get read it (`realtime`: through the realtime get's reader, which
+/// holds what is written but not yet refreshed, without refreshing the shard) matches `q`, the
+/// owner's document level security query.
+#[allow(clippy::too_many_arguments)]
+pub fn matches_doc(cluster: &Cluster, st: &ClusterState, idx: &Arc<IndexMeta>, engine: &Arc<IndexEngine>, shard: &Arc<ShardEngine>, id: &str, q: &crate::query::Query, realtime: bool) -> EsResult<bool> {
+    let searcher = match realtime {
+        true => shard.shard.realtime_searcher(id.as_bytes()).map_err(crate::engine::convert::index_error)?,
+        false => shard.searcher(),
+    };
     let Some(doc) = find_doc(&searcher, id) else { return Ok(false) };
     let table = engine.table();
-    let qctx = QueryCtx::new(cluster, st, idx, &table, &searcher, crate::time::now_millis());
+    let qctx = QueryCtx::new(cluster, st, idx, &table, &searcher, crate::time::now_millis(), crate::search::query::Reader::Unrestricted);
     let query = qctx.to_filter(q)?;
     Ok(searcher.explain(&query, doc).map_err(crate::engine::convert::index_error)?.is_match())
 }
@@ -4621,15 +4912,27 @@ pub fn count(ctx: &Ctx) -> EsResult<Reply> {
     let mut total = 0u64;
     let mut failures = Vec::new();
     let mut terminated_early = false;
+    // One limit for every shard of the count.
+    let _bound = bound_request(ctx.cluster);
     for (i, t) in targets.iter().enumerate() {
+        // A count is a search (`RestCountAction`): each shard stops at the search's own
+        // deadline and counts what it reached.
+        let _deadline = search_deadline(&st, &req).map(with_deadline);
+        SHARD_TIMED_OUT.with(|c| c.set(false));
         let r = (|| -> EsResult<u64> {
             let searcher = t.searcher()?;
             let table = t.table();
-            let qctx = QueryCtx::new(ctx.cluster, &st, &t.idx, &table, &searcher, ctx.now_ms);
+            let qctx = QueryCtx::new(ctx.cluster, &st, &t.idx, &table, &searcher, ctx.now_ms, t.reader());
             check_inner_hit_names(&req.source)?;
             let q = shard_query(&qctx, t, &req.source).map_err(|e| query::shard_exception(&t.idx, e))?;
             match (req.source.min_score, req.source.terminate_after) {
-                (None, None) => searcher.count(&q).map_err(crate::engine::convert::index_error),
+                (None, None) => {
+                    let (n, timed_out) = searcher.count_partial(&q, &search_index::search::ambient_control().unwrap_or_default()).map_err(crate::engine::convert::index_error)?;
+                    if timed_out {
+                        SHARD_TIMED_OUT.with(|c| c.set(true));
+                    }
+                    Ok(n)
+                }
                 _ => {
                     let c = search_index::collector::top_docs::TotalHitCountCollector::default();
                     let mut terminated = false;
@@ -4639,13 +4942,23 @@ pub fn count(ctx: &Ctx) -> EsResult<Reply> {
                 }
             }
         })();
+        let timed_out = SHARD_TIMED_OUT.with(|c| c.replace(false));
         match r {
+            // The node's limit stopped the shard: it failed, so the count is never short
+            // without a sign. The caller's own timeout keeps the partial count, as on
+            // Elasticsearch.
+            Ok(_) if timed_out && (limit_passed() || !req.allow_partial) => failures.push((i, search_timeout_error())),
             Ok(n) => total += n,
+            // The caller's own timeout stopped the shard before it collected (`min_score` or
+            // `terminate_after` set up their counting first): it counted nothing so far.
+            Err(e) if is_time_exceeded(&e) && req.allow_partial && !limit_passed() => {}
+            Err(e) if is_time_exceeded(&e) => failures.push((i, search_timeout_error())),
             Err(e) => failures.push((i, e)),
         }
     }
-    if !failures.is_empty() && failures.len() == targets.len() {
-        return Err(all_shards_failed(&ctx.cluster.node.id, &targets, &failures, "all shards failed"));
+    if !failures.is_empty() && (failures.len() == targets.len() || !req.allow_partial) {
+        let reason = if failures.len() == targets.len() { "all shards failed" } else { "Partial shards failure" };
+        return Err(all_shards_failed(&ctx.cluster.node.id, &targets, &failures, reason));
     }
     let mut m = Map::new();
     // `RestCountAction`: reported whenever `terminate_after` is set.

@@ -291,6 +291,14 @@ impl Preview {
         let v = self.environment.as_ref()?.visual_review.as_ref().filter(|v| v.state == "changed")?;
         Some(v.head.as_deref().unwrap_or(""))
     }
+
+    /// The head at which its preview regressed against main's (routes slower, or errors new).
+    pub fn regressions_at(&self) -> Option<&str> {
+        // Up at its head (a push still deploying hasn't been compared at it).
+        let e = self.environment.as_ref().filter(|e| matches!(e.state.as_str(), "ready" | "sleeping"))?;
+        let any = e.slower_routes.as_ref().is_some_and(|s| !s.routes.is_empty()) || e.new_errors.as_ref().is_some_and(|n| n.total > 0);
+        any.then(|| e.head.as_deref().unwrap_or(""))
+    }
 }
 
 /// What a change shows of its preview environment (roll previews' `Preview`, summed up).
@@ -355,6 +363,12 @@ pub struct PreviewEnvironment {
     /// Its first page's own links that are broken, of those checked.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub page_links: Option<PreviewPageLinks>,
+    /// Its routes (from its traces) clearly slower than the same routes on main's preview.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub slower_routes: Option<PreviewSlowerRoutes>,
+    /// Its error groups (from its services' output) that main's preview doesn't have.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub new_errors: Option<PreviewNewErrors>,
     /// How much its page differs from the project's preview of the default branch.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub base_change: Option<PreviewBaseChange>,
@@ -368,6 +382,16 @@ pub struct PreviewEnvironment {
     /// How slow and heavy its first page may get (`roll/speed`), when the project set a budget.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub speed_budget: Option<PreviewSpeedBudget>,
+    /// The project's rule for regressions against main's preview (`check`: the `roll/regressions`
+    /// status), when it has one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub regressions: Option<String>,
+    /// Who accepted its regressions at this head (not its author, for `required`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub regressions_accepted_by: Option<String>,
+    /// Whether its preview was compared with main's at its head (errors, and routes with traces).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub regressions_compared: bool,
     /// The `roll/visual` status (the project's `github.visual_review`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub visual_review: Option<PreviewVisualReview>,
@@ -510,6 +534,43 @@ pub struct PreviewBaseChange {
     /// the branch's.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub endpoints: Vec<PreviewEndpoint>,
+}
+
+/// Error groups the branch's preview doesn't have: how many, and the most frequent few. A title
+/// is the preview's code's words (untrusted, masked).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct PreviewNewErrors {
+    pub branch: String,
+    pub total: usize,
+    pub errors: Vec<PreviewNewError>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct PreviewNewError {
+    pub service: String,
+    pub title: String,
+}
+
+/// Routes slower than on the branch's preview, the slowest against it first. A route's name is
+/// the preview's code's words (untrusted).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct PreviewSlowerRoutes {
+    pub branch: String,
+    pub routes: Vec<PreviewSlowerRoute>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct PreviewSlowerRoute {
+    pub name: String,
+    pub p50_ms: u64,
+    pub main_p50_ms: u64,
+    /// The span inside it whose time grew most against the branch's preview: `(name, ms, the
+    /// branch's ms)`. A name is the preview's code's words (untrusted).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub grew: Option<(String, u64, u64)>,
+    /// The project's budget for it, when its p50 is over it (roll previews' `github.budget.routes`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub budget_ms: Option<u64>,
 }
 
 /// One endpoint's time against the branch's.
@@ -666,11 +727,34 @@ pub struct Blocker {
     pub line: Option<usize>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fingerprint: Option<String>,
+    /// `secret_unstored`: whether the credential works, as its provider answered, when the
+    /// project's roll secrets validity checks are on (docs/secrets.md, "Is it live?").
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub validity: Option<CredentialValidity>,
+}
+
+/// A credential's validity as its provider answered (roll secrets' validity checks): never its
+/// value.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CredentialValidity {
+    pub fingerprint: String,
+    /// `live`, `invalid` (revoked, deleted or never real) or `unknown`.
+    pub result: String,
+    /// The provider's account it belongs to (an AWS account, a GitHub login, a Slack team).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub account: Option<String>,
+    /// When the provider answered (ms).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub checked_at: Option<i64>,
+    /// A live credential whose kind roll can rotate for you: `aws-iam` (roll secrets' AWS IAM
+    /// users) or `github-app` (a project's GitHub App tokens).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rotator: Option<String>,
 }
 
 impl Blocker {
     pub fn new(kind: &str, message: impl Into<String>) -> Blocker {
-        Blocker { kind: kind.into(), message: message.into(), key: None, environments: Vec::new(), path: None, line: None, fingerprint: None }
+        Blocker { kind: kind.into(), message: message.into(), key: None, environments: Vec::new(), path: None, line: None, fingerprint: None, validity: None }
     }
 
     /// One about roll secrets key `key` in `environments`.
