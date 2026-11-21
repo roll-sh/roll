@@ -672,6 +672,40 @@ fn gather(col: &mut Col, dir: &ColDir, d: &[u8], c: usize, (r0, m, brow): (usize
     Ok(odd)
 }
 
+/// `decode_cols`' rows of column blocks (format 5): each run's needed columns copied from its
+/// block (`gather`), the rows it took marked in `covered`. Whether some column kept odd values
+/// out of row order. (Out of line: `decode_cols`' walk compiles as without it.)
+#[inline(never)]
+#[allow(clippy::too_many_arguments)]
+fn gather_runs(batch: &RowBatch, rows: &std::ops::Range<usize>, len: usize, cols: &mut [Option<Col>], bufs: &mut Vec<Bytes>, own: &mut Vec<u8>, missing: &[Value], covered: &mut Vec<bool>) -> Result<bool> {
+    let mut sort_odd = false;
+    let mut scratch = Vec::new();
+    let null = Value::Null;
+    for run in batch.col_runs() {
+        let (a, b) = ((run.at as usize).max(rows.start), (run.at as usize + run.n as usize).min(rows.end));
+        if a >= b {
+            continue;
+        }
+        let blk = batch.col_block(run.buf).expect("a column block");
+        let dir = blk.col_dir().expect("a column block");
+        let d = &blk.data()[..];
+        let last = bufs.last().unwrap();
+        if bufs.len() == 1 || last.as_ptr() != d.as_ptr() || last.len() != d.len() {
+            bufs.push(blk.data().clone());
+        }
+        let bi = (bufs.len() - 1) as u32;
+        let span = (a - rows.start, b - a, run.row as usize + (a - run.at as usize));
+        for (c, slot) in cols.iter_mut().enumerate() {
+            if let Some(col) = slot {
+                sort_odd |= gather(col, dir, d, c, span, bi, own, missing.get(c).unwrap_or(&null), &mut scratch)?;
+            }
+        }
+        covered.resize(len, false);
+        covered[a - rows.start..b - rows.start].fill(true);
+    }
+    Ok(sort_odd)
+}
+
 /// Rows `rows` of `batch` as columns into `out`: the columns `need` marks, decoded as
 /// `types` declares them, a column a row was stored without as `missing`'s value.
 pub fn decode_cols(
@@ -718,34 +752,8 @@ pub fn decode_cols(
     // (Rows of column blocks (format 5): their columns copied from the blocks'; the walk takes
     // the others.)
     let mut covered: Vec<bool> = Vec::new();
-    let mut sort_odd = false;
-    if !batch.col_runs().is_empty() {
-        let mut scratch = Vec::new();
-        let null = Value::Null;
-        for run in batch.col_runs() {
-            let (a, b) = ((run.at as usize).max(rows.start), (run.at as usize + run.n as usize).min(rows.end));
-            if a >= b {
-                continue;
-            }
-            let blk = batch.col_block(run.buf).expect("a column block");
-            let dir = blk.col_dir().expect("a column block");
-            let d = &blk.data()[..];
-            let last = bufs.last().unwrap();
-            if bufs.len() == 1 || last.as_ptr() != d.as_ptr() || last.len() != d.len() {
-                bufs.push(blk.data().clone());
-            }
-            let bi = (bufs.len() - 1) as u32;
-            let span = (a - rows.start, b - a, run.row as usize + (a - run.at as usize));
-            for (c, slot) in cols.iter_mut().enumerate() {
-                if let Some(col) = slot {
-                    sort_odd |= gather(col, dir, d, c, span, bi, own, missing.get(c).unwrap_or(&null), &mut scratch)?;
-                }
-            }
-            covered.resize(len, false);
-            covered[a - rows.start..b - rows.start].fill(true);
-        }
-    }
-    let taken = |r: usize| covered.get(r) == Some(&true);
+    let sort_odd = !batch.col_runs().is_empty() && gather_runs(batch, &rows, len, cols, bufs, own, missing, &mut covered)?;
+    let taken = |r: usize| !covered.is_empty() && covered[r];
     // (Rows the typed walk didn't take, in order: the general walk's.)
     let mut left: Vec<u32> = Vec::new();
     let all_left = match walk_plan(cols, types) {

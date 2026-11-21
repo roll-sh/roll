@@ -56,6 +56,8 @@ pub struct RowBatch {
     /// By row of the batch (up to its last column block row): its block row, and its bytes once
     /// a reader wanted them (made alone: the block's rows stay unmade).
     lrows: Vec<(u32, std::sync::OnceLock<Bytes>)>,
+    /// Some row is a column block's (`lazy`): the accessors look there first.
+    any_lazy: bool,
 }
 
 /// Rows `at..at + n` of a batch are rows `row..row + n` of the column block of buffer `buf`.
@@ -78,23 +80,16 @@ impl RowBatch {
         self.lazy.clear();
         self.cruns.clear();
         self.lrows.clear();
+        self.any_lazy = false;
     }
 
-    /// Row `i` (entry `e`) of a column block: its bytes, made when first wanted.
-    #[inline]
+    /// Row `i` (entry `e`) of a column block: its bytes, made when first wanted. (Out of line:
+    /// the accessors' common path stays as small as without column blocks.)
+    #[inline(never)]
     fn lazy_row(&self, i: usize, e: Ent) -> Option<&Bytes> {
         let blk = self.lazy.get(e.buf as usize)?.as_ref()?;
         let (row, cell) = &self.lrows[i];
         Some(cell.get_or_init(|| blk.row_bytes(*row as usize, e.off as usize, e.len as usize)))
-    }
-
-    /// Buffer `b` (a column block's rows made when first wanted).
-    #[inline]
-    fn buf(&self, b: u32) -> &Bytes {
-        match self.lazy.get(b as usize) {
-            Some(Some(blk)) => blk.vals().0,
-            _ => &self.bufs[b as usize],
-        }
     }
 
     /// The rows from column blocks, in order.
@@ -114,6 +109,7 @@ impl RowBatch {
         {
             return self.bufs.len() as u32 - 1;
         }
+        self.any_lazy = true;
         self.lazy.resize(self.bufs.len(), None);
         self.bufs.push(Bytes::new());
         self.lazy.push(Some(blk.clone()));
@@ -173,12 +169,14 @@ impl RowBatch {
         let e = self.ents[i];
         let k = &self.keys[self.key_start(i)..e.key_end as usize];
         let (o, l) = (e.off as usize, e.len as usize);
-        if let Some(r) = self.lazy_row(i, e) {
+        if self.any_lazy
+            && let Some(r) = self.lazy_row(i, e)
+        {
             return (k, &r[..]);
         }
         let v = match e.buf {
             OWN => &self.own[o..o + l],
-            b => &self.buf(b)[o..o + l],
+            b => &self.bufs[b as usize][o..o + l],
         };
         (k, v)
     }
@@ -189,13 +187,15 @@ impl RowBatch {
     pub fn value_in(&self, i: usize) -> (&[u8], Option<(&Bytes, usize)>) {
         let e = self.ents[i];
         let (o, l) = (e.off as usize, e.len as usize);
-        if let Some(r) = self.lazy_row(i, e) {
+        if self.any_lazy
+            && let Some(r) = self.lazy_row(i, e)
+        {
             return (&r[..], Some((r, 0)));
         }
         match e.buf {
             OWN => (&self.own[o..o + l], None),
             b => {
-                let buf = self.buf(b);
+                let buf = &self.bufs[b as usize];
                 (&buf[o..o + l], Some((buf, o)))
             }
         }
@@ -245,9 +245,9 @@ impl RowBatch {
         let k = self.keys[self.key_start(i)..e.key_end as usize].to_vec();
         let (o, l) = (e.off as usize, e.len as usize);
         let v = match e.buf {
-            _ if self.lazy_row(i, e).is_some() => self.lazy_row(i, e).unwrap().clone(),
+            _ if self.any_lazy && self.lazy_row(i, e).is_some() => self.lazy_row(i, e).unwrap().clone(),
             OWN => Bytes::copy_from_slice(&self.own[o..o + l]),
-            b => self.buf(b).slice(o..o + l),
+            b => self.bufs[b as usize].slice(o..o + l),
         };
         Some((k, v))
     }
