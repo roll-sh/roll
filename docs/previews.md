@@ -2352,27 +2352,20 @@ Ranked by what a person notices first. Done so far:
   runtime runs, printable schema lines, budget alerts that can't be lost or silenced, followed
   logs that say when lines were missed and stop with a hidden tab).
 
-1. **Previews on members, in review** (#524, stacked on roll's members #501): a member's role
-   decides each previews route by roll-access's catalogue (viewer reads, developer reveals and
-   writes, admin opens shells and manages the rules); team access by role (reveal: developer in
-   `preview`, admin, owner); a create only in the project roll-access decided it on, the dashboard
-   and the CLI naming it; a request no role was decided for (past the gate) reaches only what the
-   person owns. Members' fix merged in and gated; lands after #501.
-2. **Roll secrets' response scrub wired into `roll-intercept`, in review** (stacked on roll
+1. **Roll secrets' response scrub wired into `roll-intercept`, in review** (stacked on roll
    secrets' #628): a response that echoes a swapped key is stopped (a 502, or the connection cut
    before those bytes), the placeholder ended and the echo in the activity; roll apps' closed
    environments get it through the same port. Live-checked by `scripts/preview-intercept.sh`.
-3. **A change's first deploy reuses main's build of a service it doesn't touch** (Railway's
-   focused PR environments, Render's build filters): with `watch`, a new preview whose change
-   touches none of a service's watched paths runs the image main's preview built at the merge
-   base, as later pushes already keep theirs. Measure first: if a cached rebuild of an untouched
-   service is already within a second or two, drop this.
-4. **Previews for the members thread's next products**: once roll apps' and roll search's routes
+2. **Previews for the members thread's next products**: once roll apps' and roll search's routes
    become member routes (docs/members.md, v1.1), a preview's roll apps services and search branch
    follow the same roles, checked live against a member's session.
-5. **Cheap Postgres branches on ext4: overlay volumes over a frozen base** (pg-control; measured
+3. **Cheap Postgres branches on ext4: overlay volumes over a frozen base** (pg-control; measured
    2026-11-17): 0.97 s against 3.5 s for a 1.4 GB copy, but a write copies the whole table file.
-6. **Watch: pg-control's recovery to a time seconds old** (unowned).
+4. **Watch: pg-control's recovery to a time seconds old** (unowned).
+
+Dropped 2026-11-21: reusing main's build for a service a change's first deploy doesn't touch. A cached rebuild of an untouched service costs a few seconds of CPU and runs at once with the changed service's build, which sets the wall time (two roll apps services, a push with cached builds: live in 4.2 s, see step 6 above), so a person would see no difference.
+
+Landed 2026-11-21 night: previews on members (#524, after members v1 #501): a member's role decides each previews route by roll-access's catalogue, team access by role, a create only in the project roll-access decided it on.
 
 Landed 2026-11-21 evening: keys on roll apps used as the rules' writer (#608, after apps' #610,
 #612 and #617), and the sheet looked at with real data at desktop and phone widths, dark and
