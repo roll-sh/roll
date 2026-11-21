@@ -1302,8 +1302,32 @@ scale (`_ml/trained_models`), and a cold node answers its first call after loadi
 (about a second) where Elasticsearch may answer 408 while its deployment starts.
 `semantic_text` keeps the float embeddings it was given in `_inference_fields`, where
 Elasticsearch 9.5.5 returns them rebuilt from its index at bfloat16 precision (the same vector to
-a cosine of 0.99999). Performance against Elasticsearch's deployment on the same CPUs:
-PERF_NUMBERS.
+a cosine of 0.99999).
+
+Performance, against Elasticsearch's deployments of both builds on the same 6 cores (12
+threads) of a shared host (other tenants' load 40 to 100), each side alone on them in turn,
+inputs unique (Elasticsearch caches answers by text). Milliseconds per input, one worker
+against one allocation of one thread, medians of 15 calls in two pairs:
+
+| input | roll (float) | Elasticsearch float | Elasticsearch x86-64 8-bit |
+|---|---:|---:|---:|
+| short query (≈11 tokens), alone | 46, 42 | 53, 50 | 32, 26 |
+| short, in a call of 64 | 41, 39 | 39, 39 | 17, 16 |
+| 512 tokens, alone | 874, 876 | 537, 522 | 407, 399 |
+| 512 tokens, in a call of 64 | 872, 845 | 504, 513 | 441, 371 |
+
+`semantic_text` bulk of 10,000 documents (4 to 8 sentences each, 50 per request), 12 workers
+against 12 allocations, documents per second:
+
+| clients | roll (float) | Elasticsearch float | Elasticsearch x86-64 8-bit |
+|---|---:|---:|---:|
+| 1 | 17.6 | 38.2 | 41.8 |
+| 8 | 27.9 | 54.8 | 79.3 |
+
+Short inputs cost the same as on Elasticsearch's float build; long ones about 1.7 times as much
+CPU (the attention products and softmax), and a single bulk request keeps at most 7 workers busy
+(jobs of 8 inputs), so bulks embed at about half Elasticsearch's rate. roll's 8-bit build, when
+it ships, measured 678 ms per 512-token input and 24.2 and 28.2 documents per second.
 
 YAML: `platinum/inference` 22 of the 23 tests that pass on Elasticsearch (the last needs the
 `random_reranker` retriever). The `inference` extended suite runs the
