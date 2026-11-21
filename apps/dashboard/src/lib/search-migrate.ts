@@ -26,7 +26,9 @@ export interface RemoteIndex {
   primary_size_bytes: number | null;
   primaries: number | null;
   replicas: number | null;
+  /** Its first aliases (`aliases_more` counts the rest). */
   aliases: string[];
+  aliases_more?: number;
   /** Its aliases that roll has already (as an alias or an index): not copied, so the copy never
    * joins what they point at. */
   aliases_on_roll: string[];
@@ -39,6 +41,8 @@ export interface MigrateInspect {
   indices: RemoteIndex[];
   /** Indices past the first 10,000 roll lists (they aren't shown). */
   more_indices?: number;
+  /** Data streams past the first 100 named. */
+  more_data_streams?: number;
   /** Data streams on the remote, which this flow doesn't copy yet. */
   data_streams: string[];
 }

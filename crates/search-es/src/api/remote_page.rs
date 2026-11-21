@@ -303,10 +303,7 @@ pub fn scan_rows(page: &Bytes, held: Option<&mut crate::breaker::Reservation>, c
             if row.iter().any(|(n, _)| *n == k) {
                 return Err(bad(&format!("the column [{k}] twice in one row")));
             }
-            if let Some(h) = held.as_deref_mut() {
-                h.add(per_entry, "reindex_remote_response")?;
-            }
-            let v = match sc.peek() {
+            let v: Option<String> = match sc.peek() {
                 Some(b'"') => Some(sc.string(MAX_NAME)?),
                 _ => {
                     let (a, b) = sc.skip()?;
@@ -314,6 +311,10 @@ pub fn scan_rows(page: &Bytes, held: Option<&mut crate::breaker::Reservation>, c
                     (text != "null").then(|| text.chars().take(64).collect())
                 }
             };
+            // Charged at its size before it's kept.
+            if let Some(h) = held.as_deref_mut() {
+                h.add(per_entry + k.len() as u64 + v.as_ref().map_or(0, |v| v.len()) as u64, "reindex_remote_response")?;
+            }
             row.push((k, v));
         }
         if keep {
@@ -390,19 +391,22 @@ mod tests {
     }
 
     /// One row of a million keys the listing didn't ask for keeps none of them: the answer holds
-    /// only the requested columns, charged as they're kept, under a budget of a few hundred bytes.
+    /// only the requested columns, each charged at its size as it's kept (two entries of
+    /// different sizes: `256 + 5 + 1` and `256 + 10 + 5`), under a budget of under a kilobyte.
     #[test]
     fn unknown_cat_keys_are_never_kept() {
-        let mut row = String::from(r#"[{"index":"a""#);
+        let mut row = String::from(r#"[{"index":"a","docs.count":"12345""#);
         for _ in 0..1_000_000 {
             row.push_str(r#","":1"#);
         }
         row.push_str("}]");
-        let budget = search_aggs::memory::MemoryBudget::new(512);
+        let budget = search_aggs::memory::MemoryBudget::new(1000);
         let mut held = crate::breaker::Reservation::new(budget.clone());
         let rows = scan_rows(&Bytes::from(row), Some(&mut held), COLS, 256, usize::MAX).unwrap().rows;
-        assert_eq!((rows.len(), rows[0].len()), (1, 1));
-        assert_eq!(budget.used(), 256);
+        assert_eq!((rows.len(), rows[0].len()), (1, 2));
+        assert_eq!(budget.used(), (256 + 5 + 1) + (256 + 10 + 5));
+        drop(held);
+        assert_eq!(budget.used(), 0);
     }
 
     #[test]

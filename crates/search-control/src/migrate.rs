@@ -40,8 +40,14 @@ use serde_json::{json, Value};
 pub const MAX_INDICES: usize = 100;
 /// The most indices `inspect` lists (it says how many more there are).
 pub const MAX_LISTED: usize = 10_000;
-/// What one listed index costs in the answer `inspect` builds.
-const LISTED_ROW_BYTES: u64 = 1024;
+/// What one listed index costs in the answer `inspect` builds, besides its strings.
+const LISTED_ROW_BYTES: u64 = 512;
+/// What one string in that answer costs besides its bytes.
+const STRING_BYTES: u64 = 48;
+/// The most alias names one listed index carries (the row says how many more it has).
+pub const MAX_ALIASES_LISTED: usize = 20;
+/// The most data stream names `inspect` names.
+pub const MAX_STREAMS_LISTED: usize = 100;
 /// The columns `inspect` asks the remote's `_cat/indices` for, and keeps.
 const LISTING_COLUMNS: &[&str] = &["index", "health", "status", "docs.count", "store.size"];
 /// How long one `inspect` or `migrate` call may take, all its requests to the remote included:
@@ -210,6 +216,63 @@ fn small(v: &EsValue) -> Value {
     serde_json::from_str(&text).unwrap_or(Value::Null)
 }
 
+/// `inspect`'s answer, serialized, and the charge for it: hold `held` until `body` is sent.
+pub struct Inspected {
+    pub body: bytes::Bytes,
+    pub held: search_es::breaker::Reservation,
+}
+
+/// The rows `inspect` answers with, from the remote's `_cat/indices` rows and `/_alias` answer:
+/// at most [`MAX_ALIASES_LISTED`] alias names per index (and how many more), each string charged
+/// at its length as it's added to `held`. A listing that names one index twice is refused, so no
+/// part of the answer grows as the product of two counts the remote chose.
+fn listing(rows: &[search_es::api::remote_page::CatRow], aliases: Option<&EsValue>, existing: &std::collections::HashSet<String>, held: &mut search_es::breaker::Reservation) -> search_es::EsResult<Vec<Value>> {
+    let label = "migrate_listing";
+    let mut seen = std::collections::HashSet::new();
+    let mut out = Vec::with_capacity(rows.len());
+    for r in rows {
+        let col = |k: &str| r.iter().find(|(n, _)| n == k).and_then(|(_, v)| v.clone());
+        let Some(index) = col("index") else { continue };
+        if index.starts_with('.') {
+            continue;
+        }
+        held.add(LISTED_ROW_BYTES + 2 * STRING_BYTES + 2 * index.len() as u64, label)?;
+        if !seen.insert(index.clone()) {
+            return Err(search_es::EsError::illegal_argument(format!("the remote lists index [{index}] twice")));
+        }
+        let (health, status) = (col("health"), col("status"));
+        held.add(2 * STRING_BYTES + health.as_ref().map_or(0, |s| s.len()) as u64 + status.as_ref().map_or(0, |s| s.len()) as u64, label)?;
+        let all = aliases.and_then(|a| a.get(&index)).and_then(|d| d.get("aliases")).and_then(EsValue::as_object);
+        let total = all.map_or(0, |m| m.len());
+        let (mut names, mut on_roll) = (Vec::new(), Vec::new());
+        for name in all.into_iter().flat_map(|m| m.keys()).take(MAX_ALIASES_LISTED) {
+            held.add(STRING_BYTES + name.len() as u64, label)?;
+            if existing.contains(name) {
+                held.add(STRING_BYTES + name.len() as u64, label)?;
+                on_roll.push(name.clone());
+            }
+            names.push(name.clone());
+        }
+        let n = |k: &str| col(k).and_then(|v| v.parse::<i64>().ok()).map(Value::from).unwrap_or(Value::Null);
+        out.push(json!({
+            "index": index,
+            "health": health,
+            "status": status,
+            "docs": n("docs.count"),
+            "size_bytes": n("store.size"),
+            "primary_size_bytes": Value::Null,
+            "primaries": Value::Null,
+            "replicas": Value::Null,
+            "aliases": names,
+            "aliases_more": total.saturating_sub(MAX_ALIASES_LISTED),
+            "aliases_on_roll": on_roll,
+            "exists": existing.contains(&index),
+        }));
+    }
+    out.sort_by(|a, b| a["index"].as_str().cmp(&b["index"].as_str()));
+    Ok(out)
+}
+
 /// What happened to one index of a `migrate` call so far (reported even when the call's
 /// deadline cuts it short).
 #[derive(Default)]
@@ -288,7 +351,7 @@ impl Control {
     /// Lists the remote's open indices with their documents, size and aliases, whether an
     /// index of the same name exists on cluster `id`, and which of its aliases do (those aren't
     /// copied). Within [`DEADLINE`].
-    pub async fn migrate_inspect(&self, id: &str, s: &Source) -> Result<Value> {
+    pub async fn migrate_inspect(&self, id: &str, s: &Source) -> Result<Inspected> {
         let c = self.get(id).await?;
         let _slot = self.control_slot(&c)?;
         tokio::time::timeout(DEADLINE, Box::pin(self.inspect_within(&c, s)))
@@ -296,7 +359,7 @@ impl Control {
             .map_err(|_| ControlError::Invalid(format!("the remote cluster didn't answer within {}s", DEADLINE.as_secs())))?
     }
 
-    async fn inspect_within(&self, c: &SearchCluster, s: &Source) -> Result<Value> {
+    async fn inspect_within(&self, c: &SearchCluster, s: &Source) -> Result<Inspected> {
         let host = normalize_host(&s.host)?;
         let client = self.control_client(s, remote::CONTROL_ANSWER_LIMIT).await?;
         // The listing may be long (many indices): read with a larger cap, row by row, no tree.
@@ -304,49 +367,23 @@ impl Control {
         let err = |e| remote_error(&host, e);
         let mut retries = 0;
         let info = client.info(&mut retries).await.map_err(err)?;
-        let (cat, _held) = lister.get_rows(&format!("/_cat/indices?format=json&bytes=b&expand_wildcards=open&h={}", LISTING_COLUMNS.join(",")), LISTING_COLUMNS, MAX_LISTED).await.map_err(err)?;
-        // The answer built from the rows is charged too, while it's built and sent.
-        let mut built = search_es::breaker::Reservation::new(self.node.reindex().control_budget.clone());
-        built.add(cat.rows.len() as u64 * LISTED_ROW_BYTES, "migrate_listing").map_err(err)?;
+        let (cat, _rows_held) = lister.get_rows(&format!("/_cat/indices?format=json&bytes=b&expand_wildcards=open&h={}", LISTING_COLUMNS.join(",")), LISTING_COLUMNS, MAX_LISTED).await.map_err(err)?;
         let aliases = client.get("/_alias").await.ok();
-        // Data streams aren't migrated yet; name them so nobody wonders where they went.
-        let streams: Vec<String> = match client.get("/_data_stream").await {
-            Ok(v) => v.value.get("data_streams").and_then(EsValue::as_array).map(|a| a.iter().filter_map(|d| d.get("name").and_then(EsValue::as_str).map(str::to_string)).collect()).unwrap_or_default(),
-            Err(_) => Vec::new(),
-        };
+        let streams = client.get("/_data_stream").await.ok();
         let existing = self.roll_names(c).await?;
-        let alias_names = |index: &str| -> Vec<String> {
-            aliases.as_ref().and_then(|a| a.value.get(index)).and_then(|d| d.get("aliases")).and_then(EsValue::as_object).map(|m| m.keys().cloned().collect()).unwrap_or_default()
-        };
-        let mut rows: Vec<Value> = cat
-            .rows
-            .iter()
-            .filter_map(|r| {
-                let col = |k: &str| r.iter().find(|(n, _)| n == k).and_then(|(_, v)| v.clone());
-                let index = col("index")?;
-                if index.starts_with('.') {
-                    return None;
-                }
-                let names = alias_names(&index);
-                let on_roll: Vec<&String> = names.iter().filter(|a| existing.contains(*a)).collect();
-                let n = |k: &str| col(k).and_then(|v| v.parse::<i64>().ok()).map(Value::from).unwrap_or(Value::Null);
-                Some(json!({
-                    "index": index,
-                    "health": col("health"),
-                    "status": col("status"),
-                    "docs": n("docs.count"),
-                    "size_bytes": n("store.size"),
-                    "primary_size_bytes": Value::Null,
-                    "primaries": Value::Null,
-                    "replicas": Value::Null,
-                    "aliases": names,
-                    "aliases_on_roll": on_roll,
-                    "exists": existing.contains(&index),
-                }))
-            })
-            .collect();
-        rows.sort_by(|a, b| a["index"].as_str().cmp(&b["index"].as_str()));
-        Ok(json!({
+        // Everything the answer holds is charged as it's built, and stays charged until the body
+        // is handed to the connection ([`Inspected`]).
+        let mut held = search_es::breaker::Reservation::new(self.node.reindex().control_budget.clone());
+        let rows = listing(&cat.rows, aliases.as_ref().map(|a| &a.value), &existing, &mut held).map_err(err)?;
+        let mut names = Vec::new();
+        let all_streams = streams.as_ref().and_then(|v| v.value.get("data_streams")).and_then(EsValue::as_array).map(|a| a.as_slice()).unwrap_or_default();
+        for d in all_streams.iter().take(MAX_STREAMS_LISTED) {
+            if let Some(n) = d.get("name").and_then(EsValue::as_str) {
+                held.add(STRING_BYTES + n.len() as u64, "migrate_listing").map_err(err)?;
+                names.push(n.to_string());
+            }
+        }
+        let answer = json!({
             "remote": {
                 "host": host,
                 "version": info.number,
@@ -356,8 +393,15 @@ impl Control {
             "indices": rows,
             // Indices past the first [`MAX_LISTED`] the listing didn't keep.
             "more_indices": cat.total.saturating_sub(cat.rows.len()),
-            "data_streams": streams,
-        }))
+            // Data streams aren't migrated yet; named so nobody wonders where they went.
+            "data_streams": names,
+            "more_data_streams": all_streams.len().saturating_sub(MAX_STREAMS_LISTED),
+        });
+        // Serialized inside the charged scope, the text charged too.
+        let body = serde_json::to_vec(&answer).map_err(|e| ControlError::Internal(e.into()))?;
+        drop(answer);
+        held.add(body.len() as u64, "migrate_listing").map_err(err)?;
+        Ok(Inspected { body: body.into(), held })
     }
 
     /// Copies each picked index's definition into cluster `id` and starts its reindex from
@@ -768,6 +812,38 @@ mod tests {
         assert_eq!(named_setting("unknown setting [index.foo.bar] please check that any required plugins are installed").as_deref(), Some("index.foo.bar"));
         assert_eq!(named_setting("Failed to parse value [x] for setting [index.refresh_interval]").as_deref(), Some("index.refresh_interval"));
         assert_eq!(named_setting("no setting here [x]"), None);
+    }
+
+    /// `inspect`'s answer never grows as the product of two counts the remote chose: a listing
+    /// that repeats an index is refused, and a large alias set costs at most
+    /// [`MAX_ALIASES_LISTED`] names per row, charged while held, all given back after.
+    #[test]
+    fn a_listing_holds_no_product_of_remote_counts() {
+        let node = remote::RemoteNode::from_settings(&[("roll.reindex.remote.memory".into(), "1mb".into())]);
+        let budget = node.control_budget.clone();
+        let mut many = String::from(r#"{"a":{"aliases":{"#);
+        for i in 0..100_000 {
+            many.push_str(&format!(r#"{}"alias-{i}":{{}}"#, if i == 0 { "" } else { "," }));
+        }
+        many.push_str("}}}");
+        let aliases = search_es::json::parse(many.as_bytes()).unwrap().unwrap();
+        let row = |i: &str| vec![("index".to_string(), Some(i.to_string()))];
+        let existing = std::collections::HashSet::new();
+
+        let same: Vec<_> = (0..10_000).map(|_| row("a")).collect();
+        let mut held = search_es::breaker::Reservation::new(budget.clone());
+        let e = listing(&same, Some(&aliases), &existing, &mut held).expect_err("refused");
+        assert_eq!(e.reason(), "the remote lists index [a] twice");
+        drop(held);
+        assert_eq!(budget.used(), 0);
+
+        let mut held = search_es::breaker::Reservation::new(budget.clone());
+        let rows = listing(&[row("a"), row("b")], Some(&aliases), &existing, &mut held).unwrap();
+        assert_eq!((rows[0]["aliases"].as_array().map(Vec::len), rows[0]["aliases_more"].as_u64()), (Some(MAX_ALIASES_LISTED), Some(100_000 - MAX_ALIASES_LISTED as u64)));
+        let during = budget.used();
+        assert!(during > 0 && during < 8 * 1024, "{during}");
+        drop((rows, held));
+        assert_eq!(budget.used(), 0);
     }
 
     #[test]

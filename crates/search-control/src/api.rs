@@ -625,8 +625,14 @@ async fn delete_key(State(c): State<AppState>, Path((id, key)): Path<(String, St
 
 /// Lists an Elasticsearch or OpenSearch cluster's indices for a migration into cluster `id`
 /// (`crate::migrate`): fetched by roll, never by the browser; the credentials aren't kept.
-async fn migrate_inspect(State(c): State<AppState>, Path(id): Path<String>, Json(b): Json<crate::migrate::InspectRequest>) -> ApiResult<Value> {
-    Ok(Json(c.migrate_inspect(&id, &b.source).await?))
+async fn migrate_inspect(State(c): State<AppState>, Path(id): Path<String>, Json(b): Json<crate::migrate::InspectRequest>) -> Result<Response, ControlError> {
+    let crate::migrate::Inspected { body, held } = c.migrate_inspect(&id, &b.source).await?;
+    // The answer's charge goes with the body: given back once the bytes are handed on.
+    let stream = futures::stream::once(async move {
+        let _held = held;
+        Ok::<_, std::convert::Infallible>(body)
+    });
+    Ok(([(axum::http::header::CONTENT_TYPE, "application/json")], Body::from_stream(stream)).into_response())
 }
 
 /// Copies the picked indices' definitions into cluster `id` and starts a reindex from remote

@@ -187,7 +187,7 @@ export function MigratePanel({ cluster, existing, onClose, onChanged }: { cluste
       } catch (e) {
         const status = e instanceof ApiError ? e.status : undefined;
         if (retryableStart(status)) {
-          // Busy, a deadline or the network: ask again later rather than stall.
+          // Busy or a deadline (roll answered 429 or 5xx): ask again later rather than stall.
           setTimeout(() => setNudge((n) => n + 1), queueRetryDelay(failures.current++));
         } else {
           waiting.current = null;
@@ -376,6 +376,7 @@ export function MigratePanel({ cluster, existing, onClose, onChanged }: { cluste
                                     {i.aliases_on_roll.includes(a) ? <span className="line-through">{a}</span> : a}
                                   </span>
                                 ))}
+                            {(i.aliases_more ?? 0) > 0 && <span> +{formatCount(i.aliases_more ?? 0)}</span>}
                           </td>
                           <td className="px-3 py-1.5">
                             <input

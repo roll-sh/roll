@@ -356,8 +356,15 @@ struct Guarded {
     deny_names: Arc<Vec<String>>,
 }
 
-/// The public addresses [`DENY_NAMES`] resolved to lately, by the joined names.
-type DenyCache = parking_lot::Mutex<std::collections::HashMap<String, (std::time::Instant, Arc<Vec<IpAddr>>)>>;
+/// What [`DENY_NAMES`] resolved to lately, by the joined names.
+struct DenyEntry {
+    at: std::time::Instant,
+    addrs: Arc<Vec<IpAddr>>,
+    /// The names that have answered at least once (with addresses, or "no such name").
+    answered: std::collections::HashSet<String>,
+}
+
+type DenyCache = parking_lot::Mutex<std::collections::HashMap<String, DenyEntry>>;
 
 fn deny_cache() -> &'static DenyCache {
     static C: std::sync::OnceLock<DenyCache> = std::sync::OnceLock::new();
@@ -367,48 +374,74 @@ fn deny_cache() -> &'static DenyCache {
 /// What `names` resolved to last (any age), without resolving: for literals, which never reach
 /// the resolver.
 fn cached_denied(names: &[String]) -> Arc<Vec<IpAddr>> {
-    deny_cache().lock().get(&names.join(",")).map(|(_, a)| a.clone()).unwrap_or_default()
+    deny_cache().lock().get(&names.join(",")).map(|e| e.addrs.clone()).unwrap_or_default()
 }
 
 /// The public addresses `names` resolve to now (at most [`DENY_NAMES_TTL`] old). Private ones are
-/// refused anyway unless private hosts are allowed, which is local development.
-async fn denied_now(names: &[String]) -> Arc<Vec<IpAddr>> {
+/// refused anyway unless private hosts are allowed, which is local development. Until every name
+/// has answered once (an address, or "no such name"), it fails closed: no connection may go out
+/// while roll doesn't know its own addresses, and the names are asked again soon.
+async fn denied_now(names: &[String]) -> Result<Arc<Vec<IpAddr>>, String> {
     if names.is_empty() {
-        return Arc::default();
+        return Ok(Arc::default());
     }
     let key = names.join(",");
-    if let Some((at, a)) = deny_cache().lock().get(&key)
-        && at.elapsed() < DENY_NAMES_TTL
+    let complete = |e: &DenyEntry| names.iter().all(|n| e.answered.contains(n));
+    if let Some(e) = deny_cache().lock().get(&key)
+        && e.at.elapsed() < DENY_NAMES_TTL
     {
-        return a.clone();
+        return if complete(e) { Ok(e.addrs.clone()) } else { Err(unknown(names, e)) };
     }
     let mut out = Vec::new();
+    let mut answered = std::collections::HashSet::new();
     let mut failed = false;
     for n in names {
         if let Ok(ip) = n.trim_start_matches('[').trim_end_matches(']').parse::<IpAddr>() {
             out.extend(Some(unwrap_v4(ip)).filter(|ip| !roll_net::private_ip(*ip)));
+            answered.insert(n.clone());
             continue;
         }
         match tokio::time::timeout(Duration::from_secs(2), tokio::net::lookup_host((n.as_str(), 0))).await {
-            Ok(Ok(addrs)) => out.extend(addrs.map(|a| unwrap_v4(a.ip())).filter(|ip| !roll_net::private_ip(*ip))),
-            _ => failed = true,
+            Ok(Ok(addrs)) => {
+                out.extend(addrs.map(|a| unwrap_v4(a.ip())).filter(|ip| !roll_net::private_ip(*ip)));
+                answered.insert(n.clone());
+            }
+            // The resolver answered: no such name (nothing to deny for it), or it failed.
+            Ok(Err(_)) => {
+                answered.insert(n.clone());
+                failed = true;
+            }
+            // No answer at all.
+            Err(_) => failed = true,
         }
     }
     let now = std::time::Instant::now();
     let mut at = now;
-    if failed {
-        // A name that didn't resolve keeps the addresses it had (never fewer than before), and is
-        // asked again soon.
-        if let Some((_, prev)) = deny_cache().lock().get(&key) {
-            out.extend(prev.iter().copied());
+    let mut cache = deny_cache().lock();
+    if let Some(prev) = cache.get(&key) {
+        if failed {
+            // A name that didn't resolve keeps the addresses it had (never fewer than before).
+            out.extend(prev.addrs.iter().copied());
         }
+        answered.extend(prev.answered.iter().cloned());
+    }
+    let entry = DenyEntry { at, addrs: Arc::default(), answered };
+    if failed || !complete(&entry) {
+        // Asked again soon.
         at = now.checked_sub(DENY_NAMES_TTL.saturating_sub(DENY_NAMES_RETRY)).unwrap_or(now);
     }
     out.sort();
     out.dedup();
-    let a = Arc::new(out);
-    deny_cache().lock().insert(key, (at, a.clone()));
-    a
+    let entry = DenyEntry { at, addrs: Arc::new(out), ..entry };
+    let r = if complete(&entry) { Ok(entry.addrs.clone()) } else { Err(unknown(names, &entry)) };
+    cache.insert(key, entry);
+    r
+}
+
+/// Why a connection is refused while some of the node's own names haven't answered yet.
+fn unknown(names: &[String], e: &DenyEntry) -> String {
+    let missing: Vec<&str> = names.iter().filter(|n| !e.answered.contains(*n)).map(String::as_str).collect();
+    format!("roll hasn't resolved its own addresses yet ({}): try again in a few seconds", missing.join(", "))
 }
 
 impl reqwest::dns::Resolve for Guarded {
@@ -417,7 +450,7 @@ impl reqwest::dns::Resolve for Guarded {
         let (allow_private, deny, deny_names) = (self.allow_private, self.deny.clone(), self.deny_names.clone());
         Box::pin(async move {
             let addrs: Vec<std::net::SocketAddr> = tokio::net::lookup_host((host.as_str(), 0)).await?.collect();
-            let own = denied_now(&deny_names).await;
+            let own = denied_now(&deny_names).await.map_err(|why| -> Box<dyn std::error::Error + Send + Sync> { why.into() })?;
             let denied = |ip: IpAddr| deny.iter().any(|n| n.contains(ip)) || own.contains(&unwrap_v4(ip));
             let private = addrs.iter().any(|a| !allow_private && roll_net::private_ip(a.ip()));
             let ok: Vec<std::net::SocketAddr> = addrs.into_iter().filter(|a| (allow_private || !roll_net::private_ip(a.ip())) && !denied(a.ip())).collect();
@@ -495,8 +528,9 @@ impl Rules {
         self.check(r)?;
         let url = reqwest::Url::parse(&format!("{}://{}:{}/", r.scheme, r.host, r.port)).map_err(|_| EsError::illegal_argument(format!("[host] [{}:{}] is not a valid host", r.host, r.port)))?;
         let literal = url.host_str().and_then(|h| h.trim_start_matches('[').trim_end_matches(']').parse::<IpAddr>().ok());
+        let own = denied_now(&self.deny_names).await.map_err(|why| EsError::java(503, "connect_exception", why))?;
         if let Some(ip) = literal
-            && denied_now(&self.deny_names).await.contains(&unwrap_v4(ip))
+            && own.contains(&unwrap_v4(ip))
         {
             return Err(EsError::illegal_argument(format!("[{}:{}] is an address reindex from remote may not reach", r.host, r.port)));
         }
