@@ -5990,6 +5990,9 @@ and webhooks' and review apps' signing secrets sealed. Still open:
 - **The #432 decoy oracle:** #575. Images are pinned, and pre-auth answers are learned per image (and
   ahead of time at start, so no decoy login waits). Its full gate is running.
 - **Members (#501):** merging main again for batch 7. It lands first; #582 and #575 follow it.
+- **Item 8** (placeholders had no consumer on main): done. Previews' #535 (a06876bd1) swaps them in
+  `crates/roll-intercept`, shared with apps, and is checked end to end against a TLS echo host
+  (`scripts/preview-intercept.sh`). The echo step flips to expect a 502 once item 4's scrub lands.
 - **Found while gating:** rolld's test binaries race each other for ports (`free_port` only avoids
   repeats within one process). Three gates hit it today. Next: rolld listens on port 0 and reports
   its addresses, so tests never guess.
