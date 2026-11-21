@@ -2927,7 +2927,7 @@
               }
             }
           },
-          "description": "`{ command, timeout_s?, tasks?, retries?, parallelism? }` (tasks 1–100: that many containers, `parallelism` at a time (1–10, default ten or fewer tasks: a node's job containers are shared), each with `ROLL_TASK_INDEX` and `ROLL_TASK_COUNT`; `retries` 0–5: a failed or timed-out task tried again in a fresh container with `ROLL_TASK_ATTEMPT`, as a cron run's retries wait, never after a cancel or once another deployment is live; the job fails on the first task that does in the end)"
+          "description": "`{ command, timeout_s?, tasks?, retries?, parallelism?, cpu?, memory_mb? }` (`cpu` 0.25–8 and `memory_mb` 256–16384: each task's container at that size, metered at it, Heroku's `run --size`; unset, the service's; tasks 1–100: that many containers, `parallelism` at a time (1–10, default ten or fewer tasks: a node's job containers are shared), each with `ROLL_TASK_INDEX` and `ROLL_TASK_COUNT`; `retries` 0–5: a failed or timed-out task tried again in a fresh container with `ROLL_TASK_ATTEMPT`, as a cron run's retries wait, never after a cancel or once another deployment is live; the job fails on the first task that does in the end)"
         },
         "responses": {
           "202": {

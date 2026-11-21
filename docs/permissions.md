@@ -366,7 +366,18 @@ first, so they can't hide what runs, and anything that makes or changes credenti
 
 - Postgres SQL: `{"read_only": true}` is `read`, and the SQL runs as a role made for that one query
   that holds only `pg_read_all_data`, so Postgres refuses its writes whatever the SQL says (on a
-  branch's primary; a read replica refuses read-only SQL). Anything else is `write`.
+  branch's primary; a read replica refuses read-only SQL). Anything else is `write`, and a grant
+  that may not `admin` the endpoint runs it as a role made for that one query too: a member of the
+  roles that own the database's objects (its `roll_owner`, which takes what the project's superuser
+  owns there, and a branch's app role) holding `pg_read_all_data` and `pg_write_all_data`. It
+  changes rows and schemas, tables the superuser made included, and what it makes stays
+  (`roll_owner`'s); it can't make roles, run programs (`COPY … PROGRAM`) or read the server's
+  files, however the SQL is written (dynamic SQL in a `DO` block too). The operator's SQL, and a
+  grant's that may `admin` the endpoint (the gate's `roll_auth::Capable`, from the row's
+  `capable(Admin)`), runs as the superuser. On a read replica, write SQL from such a grant is
+  refused: send it `read_only`. Dropping objects (tables, indexes, columns, schemas, functions)
+  needs `delete` on the endpoint: without it the writer is a member of `roll_no_drop`, and an event
+  trigger the superuser owns refuses its drops. Deleting rows is a write.
 - Redis commands: commands that only read are `read`; `FLUSHDB`, `FLUSHALL`, `SWAPDB` and scripts
   (`EVAL`, `FCALL`, `FUNCTION`, `SCRIPT`) are `delete`; the server's own, Redis's `@dangerous`
   category (`ACL`, `CONFIG`, `MONITOR` and `SYNC`, which stream everyone's commands and data,

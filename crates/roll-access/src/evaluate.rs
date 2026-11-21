@@ -814,6 +814,13 @@ async fn judge(mut ctx: Ctx, req: Request, next: Next, j: Judge) -> Response {
     if let Some(a) = approved.clone() {
         parts.extensions.insert(a);
     }
+    // A stronger action the product may use here (the row's `capable`): decided at it already
+    // (allowed or approved), or allowed outright. An `ask` for it asks nobody: the product just
+    // does less.
+    let capable: Vec<Action> = row.capable.iter().copied().filter(|a| action == *a || scope.outcome(&target, *a) == Outcome::Allow).collect();
+    if !capable.is_empty() {
+        parts.extensions.insert(roll_auth::Capable(capable));
+    }
     parts.extensions.insert(roll_auth::Grant {
         id: ctx.grant.id.as_str().into(),
         name: ctx.grant.name.as_str().into(),

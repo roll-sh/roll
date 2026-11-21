@@ -4623,13 +4623,29 @@ a decoy credential:
     (branches and replicas too), and never wakes a compute.
   - The answer is Postgres' own, byte for byte: the SCRAM exchange as Postgres runs it for a
     role that doesn't exist (the role's own stable salt, a 24-character server nonce, 4096
-    iterations), then `FATAL 28P01 password authentication failed for user "…"` with Postgres'
-    source file, line and routine for the endpoint's major version (16, 17, 18). Every malformed
-    message a prober can send gets the error Postgres would give (`pg-proxy/src/decoy.rs` ports
-    `CheckSASLAuth`, `scram_exchange` and its parsers, and `NegotiateProtocolVersion`). Once the
-    proxy has seen the endpoint's compute refuse a wrong password, it answers with those exact
-    bytes (its language and line). It answers as late as the compute would: as long as the
-    endpoint's last start when it's suspended, plus the time a running compute takes to answer.
+    iterations), then `FATAL 28P01 password authentication failed for user "…"`. Every malformed
+    message a prober can send gets the error Postgres would give (`pg-proxy/src/decoy/` ports
+    `CheckSASLAuth`, `scram_exchange` and its parsers, and `NegotiateProtocolVersion`). It
+    answers as late as the compute would: as long as the endpoint's last start when it's
+    suspended, plus the time a running compute takes to answer.
+  - What moves between Postgres minors (each error's source file, line and routine, the newest
+    protocol, the refusal's words) isn't written in roll: it's learned from the compute image
+    itself (`pg_proxy::decoy::learn`). The first time a compute of an image starts on a node,
+    roll Postgres sends it every probe the decoy answers, as a role that doesn't exist, and keeps
+    the answers (`compute_answers` in its catalog, by image reference) only if the decoy, answering
+    from them, says exactly the same to every probe. Decoy roles are made only on an image whose
+    answers are known. Each configured image is learned at start, in the background, from a
+    throwaway compute (claimed in `compute_answer_claims`, so one holder at a time, and retried
+    with a backoff), so no decoy's login waits for it: a slow first refusal would tell a decoy
+    apart. A login on an image still not learned (one first seen at a login) waits for it: from
+    the endpoint's compute when it's up, else from a throwaway compute of the image (never the
+    endpoint's, so a decoy's login still wakes nothing). On an image the decoy can't match (an operator's own
+    `image`), decoy logins go to Postgres like any other, which refuses the `NOLOGIN` role as a
+    missing one (and wakes a suspended endpoint), still alerted.
+  - The compute images are pinned (`pg_control::config::IMAGES`, `tag@sha256:` of the
+    multi-arch index): a new minor is a deliberate change that `pnpm test:pg` checks. A tag that
+    moves under a suspended endpoint is only noticed at its next start, so keep an operator's
+    `image` pinned too.
     `pg-control/tests/e2e.rs` compares each path with a compute's answers to a missing role.
   - Each login is told to rolld (`Control::on_decoy_login`: the endpoint, the client's address
     from the PROXY header, the time), which hands it to `Secrets::decoy_used` as `on_decoy` does

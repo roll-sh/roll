@@ -23,6 +23,7 @@ mod edge;
 mod isolation;
 mod logs;
 mod nosql;
+mod intercept;
 mod previews;
 mod products;
 mod queues;
@@ -471,7 +472,7 @@ async fn run_with(mut args: Args) -> anyhow::Result<()> {
 
     // roll search: same object storage; the Elasticsearch REST listener and `/v1/search`.
     let search = match on.on(Product::Search) {
-        true => Some(search::Search::start(&home, &args.search, &storage, &args.public_host, &args.node, &cluster, args.code.cluster.system_database.as_deref(), args.db_budget()?.search, edge::Public::of(&args).as_ref(), args.secret_key().as_deref().map(String::as_str)).await?),
+        true => Some(search::Search::start(&home, &args.search, &storage, &args.public_host, &args.node, &cluster, args.code.cluster.system_database.as_deref(), args.db_budget()?.search, edge::Public::of(&args).as_ref(), args.secret_key().as_deref().map(String::as_str), !auth.enforcing()).await?),
         false => None,
     };
 
@@ -495,6 +496,7 @@ async fn run_with(mut args: Args) -> anyhow::Result<()> {
                 redis.as_ref().map(|r| r.control.clone()),
                 apps_secrets.clone(),
                 products_api.clone(),
+                !auth.enforcing(),
             )
             .await?,
         ),
@@ -667,6 +669,12 @@ async fn run_with(mut args: Args) -> anyhow::Result<()> {
     // Previews' rules name roll secrets' keys only where their writer may reveal them.
     if let Some(e) = &previews_engine {
         let _ = e.reveal.set(std::sync::Arc::new(previews::SecretsReveal(secrets.clone())));
+    }
+    // Keys a fork's preview never holds: its interception CA and the swap, roll secrets'.
+    if let Some((rt, e)) = &preview_hosts {
+        let i = std::sync::Arc::new(previews::SecretsIntercepts::new(secrets.clone()));
+        let _ = e.intercepts.set(i.clone());
+        rt.set_intercepts(i);
     }
     if let Some(c) = &code {
         secrets.set_code_refs(std::sync::Arc::new(secrets::CodeRefs(c.code.clone())));

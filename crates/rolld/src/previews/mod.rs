@@ -21,7 +21,7 @@ mod services;
 pub mod fleet;
 
 pub use data::*;
-pub use secrets::{Secrets, SecretsReveal};
+pub use secrets::{Secrets, SecretsIntercepts, SecretsReveal};
 pub use services::{RollApps, Services};
 
 /// Which products run here (an adapter for each).
@@ -74,6 +74,14 @@ impl roll_previews::ports::Visitors for AccountsVisitors {
 /// Open the store and start the engine: branches through this node's API, services as
 /// containers through roll code's isolation (Docker or Fargate), roll code's changes as the
 /// source, and roll code's preview backend in front of its own single-container previews.
+/// `ROLL_PREVIEWS_INTERCEPT_ALLOW_PRIVATE=<root.pem>`: intercepted connections may dial private
+/// addresses and trust that root too. Local development only; said loudly when on.
+fn intercept_private() -> Option<std::path::PathBuf> {
+    let root = std::env::var("ROLL_PREVIEWS_INTERCEPT_ALLOW_PRIVATE").ok().filter(|v| !v.trim().is_empty())?;
+    tracing::warn!(root = %root, "ROLL_PREVIEWS_INTERCEPT_ALLOW_PRIVATE is set: previews' intercepted connections may reach private addresses and trust this root (local development only)");
+    Some(std::path::PathBuf::from(root))
+}
+
 pub fn start(
     args: &crate::Args,
     home: &Path,
@@ -130,6 +138,10 @@ pub fn start(
             // this many on the node.
             warm_for: std::time::Duration::from_secs(60 * std::env::var("ROLL_PREVIEWS_WARM_MINUTES").ok().and_then(|v| v.parse::<u64>().ok()).unwrap_or(8 * 60).min(24 * 60)),
             warm_max: std::env::var("ROLL_PREVIEWS_WARM_MAX").ok().and_then(|v| v.parse::<usize>().ok()).unwrap_or(32).min(1000),
+            // Each preview's interception socket (keys a fork's preview never holds).
+            intercept_dir: Some(home.join("previews").join("intercept")),
+            // Local development only: a private TLS echo host for the live check.
+            intercept_private: intercept_private(),
             ..Default::default()
         },
         code.isolation.clone(),
