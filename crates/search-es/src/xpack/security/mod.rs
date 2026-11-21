@@ -1235,6 +1235,15 @@ pub(crate) fn who(p: &Principal) -> String {
     }
 }
 
+/// Whether the request's principal may run cluster action `action`, else Elasticsearch's 403.
+pub fn check_cluster_action(ctx: &Ctx, action: &str) -> EsResult<()> {
+    let p = principal(ctx);
+    if p.is_superuser() || effective(&file_roles(ctx.cluster), &ctx.state(), p).allows_cluster(action) {
+        return Ok(());
+    }
+    Err(denied(p, action, None))
+}
+
 /// Elasticsearch's 403 for an action the principal's roles don't grant.
 fn denied(p: &Principal, action: &str, indices: Option<&[String]>) -> EsError {
     audit::access_denied(p, action, indices);
