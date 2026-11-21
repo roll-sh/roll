@@ -269,26 +269,45 @@ pub fn scan(page: &Bytes, max_id: usize, budget: &mut HitBudget<'_>) -> EsResult
 /// null).
 pub type CatRow = Vec<(String, Option<String>)>;
 
-/// Reads a `_cat` answer in `format=json` (an array of flat objects) without a tree: each row
-/// charged `per_row` bytes to `held` as it's read; a value that's an object or an array is
+/// A `_cat` answer read by [`scan_rows`]: its first rows, and how many there were in all.
+pub struct CatRows {
+    pub rows: Vec<CatRow>,
+    pub total: usize,
+}
+
+/// Reads a `_cat` answer in `format=json` (an array of flat objects) without a tree. Only the
+/// `columns` asked for are kept (other keys are stepped over, never stored; a kept one twice in
+/// a row is refused), each kept entry charged `per_entry` bytes to `held` as it's pushed; rows
+/// past the first `max_rows` are counted, not kept. A value that's an object or an array is
 /// refused (no `_cat` column holds one).
-pub fn scan_rows(page: &Bytes, held: Option<&mut crate::breaker::Reservation>, per_row: u64) -> EsResult<Vec<CatRow>> {
+pub fn scan_rows(page: &Bytes, held: Option<&mut crate::breaker::Reservation>, columns: &[&str], per_entry: u64, max_rows: usize) -> EsResult<CatRows> {
     let mut held = held;
     let mut sc = Scan { s: page, pos: 0 };
-    let mut out = Vec::new();
+    let mut out = CatRows { rows: Vec::new(), total: 0 };
     sc.expect(b'[')?;
     let mut first = true;
     while sc.element(&mut first)? {
-        if let Some(h) = held.as_deref_mut() {
-            h.add(per_row, "reindex_remote_response")?;
-        }
+        out.total += 1;
+        let keep = out.rows.len() < max_rows;
         sc.expect(b'{')?;
-        let mut row = Vec::new();
+        let mut row: CatRow = Vec::new();
         let mut first_key = true;
         while let Some(k) = sc.key(&mut first_key)? {
+            if matches!(sc.peek(), Some(b'{' | b'[')) {
+                return Err(bad("a `_cat` value that isn't a string, a number or null"));
+            }
+            if !keep || !columns.contains(&k.as_str()) {
+                sc.skip()?;
+                continue;
+            }
+            if row.iter().any(|(n, _)| *n == k) {
+                return Err(bad(&format!("the column [{k}] twice in one row")));
+            }
+            if let Some(h) = held.as_deref_mut() {
+                h.add(per_entry, "reindex_remote_response")?;
+            }
             let v = match sc.peek() {
                 Some(b'"') => Some(sc.string(MAX_NAME)?),
-                Some(b'{' | b'[') => return Err(bad("a `_cat` value that isn't a string, a number or null")),
                 _ => {
                     let (a, b) = sc.skip()?;
                     let text = std::str::from_utf8(&page[a..b]).map_err(|_| bad("an invalid value"))?;
@@ -297,7 +316,9 @@ pub fn scan_rows(page: &Bytes, held: Option<&mut crate::breaker::Reservation>, p
             };
             row.push((k, v));
         }
-        out.push(row);
+        if keep {
+            out.rows.push(row);
+        }
     }
     Ok(out)
 }
@@ -352,14 +373,36 @@ mod tests {
         HitBudget { max_hits: usize::MAX, per_hit: 0, held: None }
     }
 
+    const COLS: &[&str] = &["index", "docs.count", "store.size"];
+
     #[test]
     fn cat_rows_are_read_flat() {
         let page = Bytes::from_static(br#"[{"index":"a","docs.count":"12","store.size":null},{"index":"b\u00e9","docs.count":3}]"#);
-        let rows = scan_rows(&page, None, 0).unwrap();
+        let rows = scan_rows(&page, None, COLS, 0, usize::MAX).unwrap().rows;
         assert_eq!(rows[0], vec![("index".into(), Some("a".into())), ("docs.count".into(), Some("12".into())), ("store.size".into(), None)]);
         assert_eq!(rows[1][0].1.as_deref(), Some("b\u{e9}"));
         assert_eq!(rows[1][1].1.as_deref(), Some("3"));
-        assert!(scan_rows(&Bytes::from_static(br#"[{"index":{"x":1}}]"#), None, 0).is_err());
+        assert!(scan_rows(&Bytes::from_static(br#"[{"index":{"x":1}}]"#), None, COLS, 0, usize::MAX).is_err());
+        // A requested column twice in a row is refused; rows past the cap are counted only.
+        assert!(scan_rows(&Bytes::from_static(br#"[{"index":"a","index":"b"}]"#), None, COLS, 0, usize::MAX).is_err());
+        let capped = scan_rows(&Bytes::from_static(br#"[{"index":"a"},{"index":"b"},{"index":"c"}]"#), None, COLS, 0, 2).unwrap();
+        assert_eq!((capped.rows.len(), capped.total), (2, 3));
+    }
+
+    /// One row of a million keys the listing didn't ask for keeps none of them: the answer holds
+    /// only the requested columns, charged as they're kept, under a budget of a few hundred bytes.
+    #[test]
+    fn unknown_cat_keys_are_never_kept() {
+        let mut row = String::from(r#"[{"index":"a""#);
+        for _ in 0..1_000_000 {
+            row.push_str(r#","":1"#);
+        }
+        row.push_str("}]");
+        let budget = search_aggs::memory::MemoryBudget::new(512);
+        let mut held = crate::breaker::Reservation::new(budget.clone());
+        let rows = scan_rows(&Bytes::from(row), Some(&mut held), COLS, 256, usize::MAX).unwrap().rows;
+        assert_eq!((rows.len(), rows[0].len()), (1, 1));
+        assert_eq!(budget.used(), 256);
     }
 
     #[test]

@@ -37,6 +37,8 @@ export interface RemoteIndex {
 export interface MigrateInspect {
   remote: { host: string; version: string; distribution: string; cluster_name: string | null };
   indices: RemoteIndex[];
+  /** Indices past the first 10,000 roll lists (they aren't shown). */
+  more_indices?: number;
   /** Data streams on the remote, which this flow doesn't copy yet. */
   data_streams: string[];
 }
@@ -258,10 +260,11 @@ export function shouldStartQueued(rows: MigrateStarted[], states: Record<string,
   return running < atOnce;
 }
 
-/** Whether a failed attempt to start waiting copies is worth repeating: roll was busy (429), a
- * deadline or server error (5xx), or the network (no status). A refusal (4xx) isn't. */
+/** Whether a failed attempt to start waiting copies is worth repeating: roll was busy (429) or
+ * answered a deadline or server error (5xx). A refusal (4xx) isn't, and neither is a failure
+ * without an answer from roll (`undefined`): the panel shows it and stops. */
 export function retryableStart(status: number | undefined): boolean {
-  return status === undefined || status === 429 || status >= 500;
+  return status !== undefined && (status === 429 || status >= 500);
 }
 
 /** How long to wait before asking again to start waiting copies, after `failures` attempts in a

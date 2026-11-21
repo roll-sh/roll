@@ -38,6 +38,12 @@ use serde_json::{json, Value};
 
 /// The most indices one `migrate` call takes.
 pub const MAX_INDICES: usize = 100;
+/// The most indices `inspect` lists (it says how many more there are).
+pub const MAX_LISTED: usize = 10_000;
+/// What one listed index costs in the answer `inspect` builds.
+const LISTED_ROW_BYTES: u64 = 1024;
+/// The columns `inspect` asks the remote's `_cat/indices` for, and keeps.
+const LISTING_COLUMNS: &[&str] = &["index", "health", "status", "docs.count", "store.size"];
 /// How long one `inspect` or `migrate` call may take, all its requests to the remote included:
 /// `migrate` starts the copies (tasks) and returns, it never waits for one.
 pub const DEADLINE: std::time::Duration = std::time::Duration::from_secs(60);
@@ -210,6 +216,8 @@ fn small(v: &EsValue) -> Value {
 struct Progress {
     created: bool,
     task: Option<String>,
+    /// The empty copy was being removed (every task slot was taken).
+    removing: bool,
 }
 
 impl Control {
@@ -222,20 +230,23 @@ impl Control {
     /// A client for roll's own calls to the remote: the node's rules (the deny list, the
     /// blocklist, private addresses; not the cluster's whitelist), answers of at most `limit`
     /// charged to the node's control budget, quiet errors.
-    fn control_client(&self, s: &Source, limit: u64) -> Result<Client> {
+    async fn control_client(&self, s: &Source, limit: u64) -> Result<Client> {
         let r = remote_of(s)?;
         let host = normalize_host(&s.host)?;
         let budget = self.node.reindex().control_budget.clone();
-        Client::new(&self.remote_rules()?.without_whitelist(), &r, Some(budget)).map(|c| c.for_control(limit)).map_err(|e| {
-            // An address roll refuses (private, denied, blocked) reads like any remote it can't
-            // reach: no oracle for which names lead where.
+        let rules = self.remote_rules()?.without_whitelist();
+        // An address roll refuses (private, denied, blocked) reads like any remote it can't
+        // reach: no oracle for which names lead where.
+        let refused = |e: search_es::EsError| {
             let reason = e.reason();
             if reason.contains("private address") || reason.contains("may not reach") || reason.contains("blocked in") || reason.contains("not whitelisted") {
                 ControlError::Invalid(format!("couldn't reach the remote at {host}"))
             } else {
                 ControlError::Invalid(reason.to_string())
             }
-        })
+        };
+        rules.check_now(&r).await.map_err(refused)?;
+        Client::new(&rules, &r, Some(budget)).map(|c| c.for_control(limit)).map_err(refused)
     }
 
     /// A place in the node's pool of control calls for cluster `c` (429 when it's taken).
@@ -287,13 +298,16 @@ impl Control {
 
     async fn inspect_within(&self, c: &SearchCluster, s: &Source) -> Result<Value> {
         let host = normalize_host(&s.host)?;
-        let client = self.control_client(s, remote::CONTROL_ANSWER_LIMIT)?;
+        let client = self.control_client(s, remote::CONTROL_ANSWER_LIMIT).await?;
         // The listing may be long (many indices): read with a larger cap, row by row, no tree.
-        let lister = self.control_client(s, remote::CONTROL_LISTING_LIMIT)?;
+        let lister = self.control_client(s, remote::CONTROL_LISTING_LIMIT).await?;
         let err = |e| remote_error(&host, e);
         let mut retries = 0;
         let info = client.info(&mut retries).await.map_err(err)?;
-        let (cat, _held) = lister.get_rows("/_cat/indices?format=json&bytes=b&expand_wildcards=open&h=index,health,status,docs.count,store.size").await.map_err(err)?;
+        let (cat, _held) = lister.get_rows(&format!("/_cat/indices?format=json&bytes=b&expand_wildcards=open&h={}", LISTING_COLUMNS.join(",")), LISTING_COLUMNS, MAX_LISTED).await.map_err(err)?;
+        // The answer built from the rows is charged too, while it's built and sent.
+        let mut built = search_es::breaker::Reservation::new(self.node.reindex().control_budget.clone());
+        built.add(cat.rows.len() as u64 * LISTED_ROW_BYTES, "migrate_listing").map_err(err)?;
         let aliases = client.get("/_alias").await.ok();
         // Data streams aren't migrated yet; name them so nobody wonders where they went.
         let streams: Vec<String> = match client.get("/_data_stream").await {
@@ -305,6 +319,7 @@ impl Control {
             aliases.as_ref().and_then(|a| a.value.get(index)).and_then(|d| d.get("aliases")).and_then(EsValue::as_object).map(|m| m.keys().cloned().collect()).unwrap_or_default()
         };
         let mut rows: Vec<Value> = cat
+            .rows
             .iter()
             .filter_map(|r| {
                 let col = |k: &str| r.iter().find(|(n, _)| n == k).and_then(|(_, v)| v.clone());
@@ -339,6 +354,8 @@ impl Control {
                 "cluster_name": info.cluster_name,
             },
             "indices": rows,
+            // Indices past the first [`MAX_LISTED`] the listing didn't keep.
+            "more_indices": cat.total.saturating_sub(cat.rows.len()),
             "data_streams": streams,
         }))
     }
@@ -366,7 +383,7 @@ impl Control {
         let host = remote["host"].as_str().unwrap_or_default().to_string();
         let _slot = self.control_slot(&c)?;
         let deadline = tokio::time::Instant::now() + DEADLINE;
-        let client = self.control_client(&req.source, DEFINITION_LIMIT)?;
+        let client = self.control_client(&req.source, DEFINITION_LIMIT).await?;
         // The remote answers before its host is whitelisted.
         let mut retries = 0;
         tokio::time::timeout_at(deadline, client.info(&mut retries))
@@ -395,6 +412,9 @@ impl Control {
                     }
                 }
                 Ok(Err(e)) => row["error"] = json!(e),
+                Err(_) if progress.removing => {
+                    row["error"] = json!(format!("not started (every task slot was taken), and the call ran past {}s while the empty index [{dest}] was being removed: it may remain; delete it, then copy it again", DEADLINE.as_secs()));
+                }
                 Err(_) if progress.created && progress.task.is_none() => {
                     // The deadline came while the copy was being started: look its task up.
                     match tokio::time::timeout(std::time::Duration::from_secs(5), self.running_copy(&c, &dest)).await {
@@ -588,6 +608,7 @@ impl Control {
         let (status, v) = self.call_json(c, "POST", &path, Some(&body)).await;
         if status == 429 {
             // Another copy took the last slot meanwhile: the empty copy goes, the index waits.
+            progress.removing = true;
             let (deleted, _) = self.call_json(c, "DELETE", &format!("/{}", urlencoding::encode(dest)), None).await;
             if deleted != 200 {
                 return Err(format!("[{dest}] was created, but not started (every task slot was taken) and couldn't be removed ({deleted}): delete it, then copy it again"));

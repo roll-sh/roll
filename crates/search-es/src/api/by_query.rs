@@ -964,6 +964,7 @@ async fn reindex_remote(ctx: &Ctx<'_>, plan: &ReindexPlan, req: &super::by_query
     let rules = super::remote::Rules::of_cluster(ctx.cluster)?;
     let node = ctx.cluster.remote.clone();
     let deadline = tokio::time::Instant::now() + node.max_duration;
+    rules.check_now(remote).await?;
     let client = super::remote::Client::new(&rules, remote, Some(node.budget.clone()))?;
     let mut src = match until_stopped(live, deadline, super::remote::RemoteSource::open(client, req, remote, max_docs)).await {
         Err(Stop::Cancelled) => return Ok((cancelled_before_start(live), Vec::new())),

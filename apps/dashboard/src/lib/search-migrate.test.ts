@@ -92,7 +92,7 @@ test("copies past the free task slots wait, and start as earlier ones end", () =
 });
 
 test("a start of waiting copies that fails is retried, with growing pauses, unless roll refused it", () => {
-  assert.ok(retryableStart(429) && retryableStart(503) && retryableStart(undefined));
-  assert.ok(!retryableStart(400) && !retryableStart(403) && !retryableStart(404));
+  assert.ok(retryableStart(429) && retryableStart(503));
+  assert.ok(!retryableStart(400) && !retryableStart(403) && !retryableStart(404) && !retryableStart(undefined));
   assert.deepEqual([0, 1, 2, 3, 4, 20].map(queueRetryDelay), [5_000, 10_000, 20_000, 40_000, 60_000, 60_000]);
 });

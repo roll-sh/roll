@@ -82,6 +82,8 @@ pub const DENY_ADDRESSES: &str = "roll.reindex.remote.deny_addresses";
 pub const DENY_NAMES: &str = "roll.reindex.remote.deny_names";
 /// How long the addresses of [`DENY_NAMES`] are reused before they're resolved again.
 const DENY_NAMES_TTL: Duration = Duration::from_secs(30);
+/// After a name of [`DENY_NAMES`] failed to resolve, how soon it's asked again.
+const DENY_NAMES_RETRY: Duration = Duration::from_secs(5);
 /// roll's own calls to a remote (a migration's listing and index definitions) at once per node;
 /// one per cluster.
 pub const MAX_CONTROL_PER_NODE: usize = 4;
@@ -101,6 +103,8 @@ const TREE_BYTES_PER_TOKEN: u64 = 2 * std::mem::size_of::<Value>() as u64;
 const DEFAULT_BUFFER_LIMIT: u64 = 16 * 1024 * 1024;
 const DEFAULT_MEMORY: u64 = 256 * 1024 * 1024;
 const DEFAULT_MAX_DURATION: Duration = Duration::from_secs(24 * 3600);
+/// What one kept `_cat` entry (a column's name and value) costs besides the answer's bytes.
+const CAT_ENTRY_BYTES: u64 = 160;
 /// What one hit's decoded envelope (`_index`, `_id`, `_routing`) costs besides the page's bytes.
 const HIT_OVERHEAD: u64 = 256;
 /// `RemoteParseContext.REMOTE_RESPONSE_BREAKER_LABEL`.
@@ -279,17 +283,28 @@ impl Net {
     pub fn parse(s: &str) -> Option<Net> {
         let (a, p) = s.trim().split_once('/').map_or((s.trim(), None), |(a, p)| (a, Some(p)));
         let addr: IpAddr = a.trim_start_matches('[').trim_end_matches(']').parse().ok()?;
-        let addr = unwrap_v4(addr);
         let max = if addr.is_ipv4() { 32 } else { 128 };
         let prefix = match p {
             Some(p) => p.parse::<u8>().ok().filter(|p| *p <= max)?,
             None => max,
         };
+        // An IPv4-mapped network is that IPv4 network (its prefix less the 96 bits before it);
+        // any other IPv6 network stays one (`2002::/16` is all of 6to4).
+        if let IpAddr::V6(v) = addr
+            && let Some(v4) = v.to_ipv4_mapped()
+            && prefix >= 96
+        {
+            return Some(Net { addr: IpAddr::V4(v4), prefix: prefix - 96 });
+        }
         Some(Net { addr, prefix })
     }
 
+    /// Whether `ip` is in the network as written, or the IPv4 address it carries is.
     pub fn contains(&self, ip: IpAddr) -> bool {
-        let ip = unwrap_v4(ip);
+        self.holds(ip) || { let v4 = unwrap_v4(ip); v4 != ip && self.holds(v4) }
+    }
+
+    fn holds(&self, ip: IpAddr) -> bool {
         let mask = |bits: u32, len: u8| if len == 0 { 0 } else { u128::MAX << (bits - len as u32) };
         match (self.addr, ip) {
             (IpAddr::V4(n), IpAddr::V4(i)) => {
@@ -368,19 +383,31 @@ async fn denied_now(names: &[String]) -> Arc<Vec<IpAddr>> {
         return a.clone();
     }
     let mut out = Vec::new();
+    let mut failed = false;
     for n in names {
         if let Ok(ip) = n.trim_start_matches('[').trim_end_matches(']').parse::<IpAddr>() {
             out.extend(Some(unwrap_v4(ip)).filter(|ip| !roll_net::private_ip(*ip)));
             continue;
         }
-        if let Ok(Ok(addrs)) = tokio::time::timeout(Duration::from_secs(2), tokio::net::lookup_host((n.as_str(), 0))).await {
-            out.extend(addrs.map(|a| unwrap_v4(a.ip())).filter(|ip| !roll_net::private_ip(*ip)));
+        match tokio::time::timeout(Duration::from_secs(2), tokio::net::lookup_host((n.as_str(), 0))).await {
+            Ok(Ok(addrs)) => out.extend(addrs.map(|a| unwrap_v4(a.ip())).filter(|ip| !roll_net::private_ip(*ip))),
+            _ => failed = true,
         }
+    }
+    let now = std::time::Instant::now();
+    let mut at = now;
+    if failed {
+        // A name that didn't resolve keeps the addresses it had (never fewer than before), and is
+        // asked again soon.
+        if let Some((_, prev)) = deny_cache().lock().get(&key) {
+            out.extend(prev.iter().copied());
+        }
+        at = now.checked_sub(DENY_NAMES_TTL.saturating_sub(DENY_NAMES_RETRY)).unwrap_or(now);
     }
     out.sort();
     out.dedup();
     let a = Arc::new(out);
-    deny_cache().lock().insert(key, (std::time::Instant::now(), a.clone()));
+    deny_cache().lock().insert(key, (at, a.clone()));
     a
 }
 
@@ -462,6 +489,20 @@ impl Rules {
         self
     }
 
+    /// [`Rules::check`], with an address written out checked against what the node's own names
+    /// resolve to now ([`DENY_NAMES`], resolved again if stale): for callers about to connect.
+    pub async fn check_now(&self, r: &Remote) -> EsResult<()> {
+        self.check(r)?;
+        let url = reqwest::Url::parse(&format!("{}://{}:{}/", r.scheme, r.host, r.port)).map_err(|_| EsError::illegal_argument(format!("[host] [{}:{}] is not a valid host", r.host, r.port)))?;
+        let literal = url.host_str().and_then(|h| h.trim_start_matches('[').trim_end_matches(']').parse::<IpAddr>().ok());
+        if let Some(ip) = literal
+            && denied_now(&self.deny_names).await.contains(&unwrap_v4(ip))
+        {
+            return Err(EsError::illegal_argument(format!("[{}:{}] is an address reindex from remote may not reach", r.host, r.port)));
+        }
+        Ok(())
+    }
+
     /// `ReindexValidator.checkRemoteWhitelist`, then roll's address rule.
     pub fn check(&self, r: &Remote) -> EsResult<()> {
         if !matches!(r.scheme.as_str(), "http" | "https") {
@@ -476,6 +517,11 @@ impl Rules {
         // case, an address in its canonical form), without a trailing dot: what the lists match.
         let url = reqwest::Url::parse(&format!("{}://{target}/", r.scheme)).map_err(|_| EsError::illegal_argument(format!("[host] [{target}] is not a valid host")))?;
         let host = url.host_str().map(normal_host).filter(|h| !h.is_empty()).ok_or_else(|| EsError::illegal_argument(format!("[host] [{target}] is not a valid host")))?;
+        // The URL connected to is the one the lists match: the port named, nothing after the host
+        // (a `?`, `#` or `\` in the host would move the port or the path).
+        if url.port_or_known_default() != Some(r.port) || url.path() != "/" || url.query().is_some() || url.fragment().is_some() {
+            return Err(EsError::illegal_argument(format!("[host] [{target}] is not a valid host")));
+        }
         let normal = format!("{host}:{}", r.port);
         let matches = |list: &[String]| list.iter().any(|p| crate::xcontent::filter::glob_match(&normal_host(p), &normal));
         // `ReindexValidator.checkRemoteWhitelist`: unset or empty, every remote is refused.
@@ -838,10 +884,10 @@ impl Client {
 
     /// One `GET` of a `_cat` API in `format=json`, read row by row without a tree
     /// ([`super::remote_page::scan_rows`]): the answer's bytes and each row charged while held.
-    pub async fn get_rows(&self, path_query: &str) -> EsResult<(Vec<super::remote_page::CatRow>, Option<Reservation>)> {
+    pub async fn get_rows(&self, path_query: &str, columns: &[&str], max_rows: usize) -> EsResult<(super::remote_page::CatRows, Option<Reservation>)> {
         let mut retries = 0;
         let mut b = self.checked(&reqwest::Method::GET, path_query, None, &mut retries).await?;
-        let rows = super::remote_page::scan_rows(&b.bytes, b.held.as_mut(), HIT_OVERHEAD).map_err(|e| match &*e.kind {
+        let rows = super::remote_page::scan_rows(&b.bytes, b.held.as_mut(), columns, CAT_ENTRY_BYTES, max_rows).map_err(|e| match &*e.kind {
             "circuit_breaking_exception" => e,
             _ => not_elasticsearch(Some(e)),
         })?;
@@ -1124,6 +1170,10 @@ mod tests {
             assert!(e.ends_with("blocked in reindex.remote.blocklist"), "{h}: {e}");
         }
         assert!(r.check(&remote("other.example.com", 443)).is_ok());
+        // A host that would connect to another port or path than the lists matched.
+        for h in ["good.example?", "good.example#", "good.example\\x", "good.example/x"] {
+            assert!(r.check(&remote(h, 9200)).err().is_some_and(|e| e.reason().ends_with("is not a valid host")), "{h}");
+        }
         for k in ["Host", "host", ":authority"] {
             let mut x = remote("other.example.com", 443);
             x.headers = vec![(k.into(), "victim.search.example.com".into())];
@@ -1138,6 +1188,12 @@ mod tests {
             assert!(n.contains(ip.parse().unwrap()), "{ip}");
         }
         assert!(!n.contains("2001:db8::1".parse().unwrap()));
+        // Networks keep their own size: 6to4 as a whole, a mapped IPv4 network as that network.
+        let six_to_four = Net::parse("2002::/16").unwrap();
+        assert!(six_to_four.contains("2002:cb00:7109::1".parse().unwrap()) && six_to_four.contains("2002:a00:1::1".parse().unwrap()));
+        assert!(!six_to_four.contains("203.0.113.9".parse().unwrap()));
+        let mapped = Net::parse("::ffff:203.0.113.0/120").unwrap();
+        assert!(mapped.contains("203.0.113.200".parse().unwrap()) && !mapped.contains("203.0.114.1".parse().unwrap()));
     }
 
     #[test]

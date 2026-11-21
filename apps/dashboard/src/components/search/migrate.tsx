@@ -400,6 +400,11 @@ export function MigratePanel({ cluster, existing, onClose, onChanged }: { cluste
                 Aliases roll has already (struck through) aren&apos;t copied: the copy never joins what they point at.
               </p>
             )}
+            {(remote.more_indices ?? 0) > 0 && (
+              <p className="text-[12px] text-subtle">
+                {formatCount(remote.more_indices ?? 0)} more indices on the remote aren&apos;t listed: roll lists the first 10,000.
+              </p>
+            )}
             {remote.data_streams.length > 0 && (
               <p className="text-[12px] text-subtle">
                 {remote.data_streams.length} data {remote.data_streams.length === 1 ? "stream isn't" : "streams aren't"} listed (
@@ -536,7 +541,8 @@ export function MigratePanel({ cluster, existing, onClose, onChanged }: { cluste
             <div className="flex flex-wrap items-center justify-between gap-3">
               <p className="text-[12px] text-subtle">
                 Copies run on roll as reindex tasks: closing this panel doesn&apos;t stop them.
-                {started.some((x) => x.queued) && " Copies still waiting start only while this panel stays open."}
+                {started.some((x) => x.queued) &&
+                  " Copies still waiting start only while this panel stays open, and if the remote can't be reached when their turn comes, they stop: start them again with Migrate more."}
               </p>
               {allEnded && (
                 <button onClick={restart} className={btn}>
