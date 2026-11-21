@@ -1503,6 +1503,95 @@ mod tests {
     /// Every tool calls a route the permission catalogue classifies, tool names are unique and
     /// fit every client (`^[a-zA-Z0-9_-]{1,64}$`), path parameters are all declared, and the hints
     /// follow the catalogue.
+    /// The top-level field names of a contract's body column (`{ a?, b: string, c?: {…} }`).
+    fn body_fields(body: &str) -> Vec<String> {
+        let Some(start) = body.find('{') else { return Vec::new() };
+        let (mut depth, mut segs, mut cur) = (0usize, Vec::new(), String::new());
+        for c in body[start + 1..].chars() {
+            match c {
+                '{' | '[' | '(' => depth += 1,
+                '}' | ']' | ')' if depth == 0 => break,
+                '}' | ']' | ')' => depth -= 1,
+                ',' if depth == 0 => {
+                    segs.push(std::mem::take(&mut cur));
+                    continue;
+                }
+                _ => {}
+            }
+            if depth == 0 {
+                cur.push(c);
+            }
+        }
+        segs.push(cur);
+        segs.iter()
+            .filter_map(|seg| {
+                let seg = seg.trim();
+                let name: String = seg.chars().take_while(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || *c == '_').collect();
+                let rest = seg[name.len()..].trim_start_matches('?').trim_start();
+                (!name.is_empty() && name.starts_with(|c: char| c.is_ascii_lowercase()) && (rest.is_empty() || rest.starts_with(':'))).then_some(name)
+            })
+            .collect()
+    }
+
+    /// A tool takes every body field its route's contract lists, or no-field.txt says why not: a
+    /// field a product adds later (S3 log drains, a promotion's `expect`) can't go unmentioned.
+    #[test]
+    fn tools_take_their_routes_body_fields() {
+        const CONTRACTS: &[(&str, &str)] = &[
+            (include_str!("../../../docs/apps/http-api.md"), ""),
+            (include_str!("../../../docs/workspace.md"), ""),
+            (include_str!("../../../docs/previews.md"), ""),
+            (include_str!("../../../docs/queues/http-api.md"), ""),
+            (include_str!("../../../docs/secrets.md"), "/v1/secrets/projects/{project}"),
+        ];
+        let norm = |p: &str| p.split('?').next().unwrap_or("").split('/').map(|s| if s.starts_with('{') { "{}" } else { s }).collect::<Vec<_>>().join("/").trim_end_matches('/').to_string();
+        let listed: Vec<(String, String, String)> = include_str!("no-field.txt")
+            .lines()
+            .filter(|l| !l.starts_with('#') && !l.trim().is_empty())
+            .filter_map(|l| {
+                let mut w = l.split_whitespace();
+                Some((w.next()?.to_string(), norm(w.next()?), w.next()?.to_string()))
+            })
+            .collect();
+        let (mut missing, mut taken) = (Vec::new(), std::collections::HashSet::new());
+        for (doc, prefix) in CONTRACTS {
+            for line in doc.lines() {
+                let Some(rest) = line.strip_prefix("| `") else { continue };
+                let Some((route, rest)) = rest.split_once('`') else { continue };
+                let Some((method, path)) = route.split_once(' ') else { continue };
+                if !matches!(method, "POST" | "PUT" | "PATCH") || !path.starts_with('/') {
+                    continue;
+                }
+                let path = if path.starts_with("/v1") { path.to_string() } else { format!("{prefix}{path}") };
+                // The body column: up to the next `|` that isn't escaped.
+                let rest = rest.trim_start().trim_start_matches('|');
+                let mut body = String::new();
+                let mut chars = rest.chars();
+                while let Some(c) = chars.next() {
+                    match c {
+                        '\\' => body.extend(chars.next()),
+                        '|' => break,
+                        c => body.push(c),
+                    }
+                }
+                let tools: Vec<&Tool> = all().iter().filter(|t| t.method == method && norm(t.path) == norm(&path)).collect();
+                for t in tools.iter().filter(|t| !t.params.iter().any(|p| p.at == At::RawJson)) {
+                    for field in body_fields(&body) {
+                        if t.params.iter().any(|p| p.name == field) {
+                            taken.insert((method.to_string(), norm(&path), field));
+                        } else if !listed.iter().any(|(m, r, f)| m == method && *r == norm(&path) && *f == field) {
+                            missing.push(format!("{} ({method} {path}): {field}", t.name));
+                        }
+                    }
+                }
+            }
+        }
+        assert!(missing.is_empty(), "body fields a route's contract lists that its tool doesn't take: add each to the tool in tools.rs, or `METHOD route field  why` to crates/roll-mcp/src/no-field.txt:\n{}", missing.join("\n"));
+        let stale: Vec<String> = listed.iter().filter(|l| taken.contains(l)).map(|(m, r, f)| format!("{m} {r} {f}")).collect();
+        assert!(stale.is_empty(), "no-field.txt lines for fields a tool takes now: remove them:\n{}", stale.join("\n"));
+        assert_eq!(body_fields("{ from, message?, expect?: string, files?: {[name]: path | null} }"), ["from", "message", "expect", "files"]);
+    }
+
     #[test]
     fn tools_map_onto_classified_routes() {
         let mut names = std::collections::HashSet::new();

@@ -132,6 +132,11 @@ fn apps_push(b: &Value) -> Vec<Lent> {
         .collect()
 }
 
+/// A drain into a roll storage bucket (`bucket`): apps mints a key that writes there for it.
+fn apps_drain_bucket(b: &Value) -> Vec<Lent> {
+    b.get("bucket").and_then(Value::as_str).map(|r| Lent { kind: "bucket".into(), r#ref: r.into(), action: Action::Write }).into_iter().collect()
+}
+
 /// A roll code repo the body names, which apps reads for the caller (`repo` for a plan or an import,
 /// `source.repo` for a service built from one): read on it, so a token can't learn a repo's stack,
 /// head or roll.toml, or build and run its code, without being allowed to read it.
@@ -1473,7 +1478,7 @@ static ROWS: &[Row] = &[
     row("POST", "/v1/apps/projects/{project}/preview-domain/verify", "apps", W, one(&["project"], "project")),
     // Its services as roll.toml: settings and variables' names, never a value.
     row("POST", "/v1/apps/projects/{project}/export", "apps", R, one(&["project"], "project")),
-    row("POST", "/v1/apps/projects/{project}/drains", "apps", REVEAL, one(&["project"], "project")),
+    row("POST", "/v1/apps/projects/{project}/drains", "apps", REVEAL, one(&["project"], "project")).lends(Lend::Each(apps_drain_bucket)),
     row("DELETE", "/v1/apps/projects/{project}/drains/{did}", "apps", W, one(&["project"], "project")),
     // An edit can send more out (another source, every environment): reveal, as making one is.
     row("PATCH", "/v1/apps/projects/{project}/drains/{did}", "apps", REVEAL, one(&["project"], "project")),
