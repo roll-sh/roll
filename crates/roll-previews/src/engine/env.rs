@@ -40,8 +40,10 @@ impl EnvSource for Engine {
             }
             None => {
                 let rev = svc.revision.clone().ok_or_else(|| anyhow::anyhow!("{service} isn't deployed yet"))?;
-                // The change's own repo runs only the head that was checked (and approved, for a fork).
-                if svc.repo == r.repo && rev != r.build() {
+                // The change's own repo runs only the head that was checked (and approved, for a
+                // fork), or the build it kept at that head (`watch`).
+                let kept = self.store.runtime_fact::<super::converge::KeptBuild>(&r.id, &format!("kept:{name}"))?.is_some_and(|k| k.head == r.build() && k.revision == rev);
+                if svc.repo == r.repo && rev != r.build() && !kept {
                     anyhow::bail!("{service} is being redeployed at the change's new head");
                 }
                 (rev, svc.host.clone(), svc.url.clone())
@@ -123,6 +125,7 @@ impl EnvSource for Engine {
             feedback: false,
             egress: s.egress_for(r.trusted),
             egress_hosts: s.egress_hosts.clone(),
+            maker: None,
             rebuild: None,
             traces: s.traces,
         };

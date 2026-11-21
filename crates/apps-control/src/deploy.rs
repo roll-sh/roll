@@ -75,11 +75,15 @@ impl Apps {
         let (revision, image, message) = (text("revision")?, text("image")?, text("message")?);
         // Built and health-checked, not switched to: its own URL runs it (Cloud Run's
         // `--no-traffic`); a rollback to it puts it live.
-        let no_traffic = match o.get("no_traffic") {
+        let mut no_traffic = match o.get("no_traffic") {
             None | Some(Value::Null) => false,
             Some(Value::Bool(b)) => *b,
             Some(_) => return Err(Error::BadRequest("no_traffic is a boolean".into())),
         };
+        // A person's deploy where approvals are asked for waits at ready for them.
+        if matches!(by.trigger, Trigger::Manual | Trigger::Upload) && self.waits_for_approval(service, env).await? {
+            no_traffic = true;
+        }
         // Render's "Clear build cache & deploy": for a build a stale cached layer keeps breaking.
         let no_cache = match o.get("no_cache") {
             None | Some(Value::Null) => false,
@@ -232,6 +236,8 @@ impl Apps {
     pub async fn redeploy(self: &Arc<Self>, service: &str, env: &str, body: Value, actor: Option<String>, key: Option<&str>) -> Result<Deployment> {
         self.refuse_capped(service)?;
         self.refuse_paused(service, env).await?;
+        // Where approvals are asked for, it waits at ready for them.
+        let waits = self.waits_for_approval(service, env).await?;
         let mut body = body;
         let over = body.as_object_mut().and_then(|o| o.remove("override")).is_some_and(|v| v == true);
         self.refuse_frozen(service, env, over, actor.clone()).await?;
@@ -286,7 +292,7 @@ impl Apps {
             upload: None,
             status: DeployStatus::Queued,
             actor,
-            no_traffic: false,
+            no_traffic: waits,
             no_cache: false,
         };
         let (sid, e) = (service.to_string(), env.to_string());
@@ -306,6 +312,7 @@ impl Apps {
         let mut o = body.as_object().cloned().unwrap_or_default();
         let over = o.remove("override").is_some_and(|v| v == true);
         self.refuse_frozen(service, env, over, actor.clone()).await?;
+        let waits = self.waits_for_approval(service, env).await?;
         if let Some(k) = o.keys().find(|k| !["from", "message", "expect"].contains(&k.as_str())) {
             return Err(Error::BadRequest(format!("unknown field {k}")));
         }
@@ -347,7 +354,7 @@ impl Apps {
             upload: None,
             status: DeployStatus::Queued,
             actor,
-            no_traffic: false,
+            no_traffic: waits,
             no_cache: false,
         };
         let (sid, e) = (service.to_string(), env.to_string());
@@ -368,8 +375,20 @@ impl Apps {
         self.refuse_capped(service)?;
         self.refuse_paused(service, env).await?;
         let old = self.deployment(service, env, dep).await?;
+        let (sid, e) = (service.to_string(), env.to_string());
+        let needed = self.db(move |s| s.environment(&sid, &e)).await?.approvals;
         if old.status == DeployStatus::Ready {
             self.refuse_frozen(service, env, over, actor.clone()).await?;
+            // A never-live build goes live with its approvals (rolling back to what was live
+            // needs none), or an admin's override, said in the audit log.
+            let author = self.deploy_person(dep).await.or(old.actor.clone());
+            let counted = old.approved_by.iter().filter(|a| Some(a.as_str()) != author.as_deref()).count() as u32;
+            if counted < needed {
+                if !over {
+                    return Err(Error::Conflict(format!("{dep} needs {needed} approval(s) from people other than who started it ({counted} so far): POST …/deploys/{dep}/approve, or an admin's `X-Roll-Override: 1`")));
+                }
+                self.audit("approvals.bypassed", service, env, actor.clone(), json!({ "deployment": dep, "approvals": counted, "needed": needed })).await;
+            }
         }
         let Some(image) = old.image.clone() else { return Err(Error::Conflict(format!("{dep} never built an image, so there's nothing to roll back to"))) };
         if old.pruned_at.is_some() {
@@ -413,9 +432,11 @@ impl Apps {
         let (sid, e) = (service.to_string(), env.to_string());
         let dep = self.db(move |s| s.create_deployment(&sid, &e, d, "", None)).await?;
         // Held from here: the next push mustn't put back what was just rolled away from (a
-        // person's own hold stays theirs: putting a held build live is a rollback to it).
+        // person's own hold stays theirs: putting a held build live is a rollback to it, and so
+        // is an approved one, whose environment's pushes wait at ready anyway).
         let (sid, e, rid) = (service.to_string(), env.to_string(), dep.id.clone());
-        if self.held(service, env).await.as_deref() != Some(MANUAL_HOLD) && self.db(move |s| s.set_hold(&sid, &e, Some(&rid))).await.unwrap_or(false) {
+        let approved = needed > 0 && old.status == DeployStatus::Ready;
+        if !approved && self.held(service, env).await.as_deref() != Some(MANUAL_HOLD) && self.db(move |s| s.set_hold(&sid, &e, Some(&rid))).await.unwrap_or(false) {
             self.logs.sink(format!("env:{service}/{env}"), Stream::System).line("deploys held after the rollback: pushes, hooks and tag moves aren't put live until you deploy or resume them");
         }
         self.kick(service, env);
@@ -555,7 +576,84 @@ impl Apps {
         d.steps = self.db(move |s| s.steps(&id)).await?;
         let id = dep.to_string();
         d.vulnerabilities = self.db(move |s| s.scan(&id)).await?.map(|(sum, _)| sum);
+        let id = dep.to_string();
+        d.approved_by = self.db(move |s| s.approvals_of(&id)).await?;
         Ok(d)
+    }
+
+    /// The person who started a deployment (their session's, their own token's, the operator's),
+    /// where it's known: what an approval is compared with.
+    pub(crate) async fn deploy_person(self: &Arc<Self>, dep: &str) -> Option<String> {
+        let d = dep.to_string();
+        self.db(move |s| s.deploy_person(&d)).await.ok().flatten()
+    }
+
+    /// Who started `dep`, as a person, kept for its approvals.
+    pub async fn note_deploy_person(self: &Arc<Self>, dep: &str, person: Option<String>) {
+        let Some(p) = person else { return };
+        let d = dep.to_string();
+        let _ = self.db(move |s| s.set_deploy_person(&d, &p)).await;
+    }
+
+    /// Under the environment's `approvals`, a person's deploy waits at `ready` for them: whether
+    /// it does (a web service without a volume, which can wait beside the live one), or why it
+    /// can't (409).
+    pub(crate) async fn waits_for_approval(self: &Arc<Self>, service: &str, env: &str) -> Result<bool> {
+        let (sid, e) = (service.to_string(), env.to_string());
+        let Ok((svc, row)) = self.db(move |s| Ok((s.service(&sid)?, s.environment(&sid, &e)?))).await else { return Ok(false) };
+        if row.approvals == 0 {
+            return Ok(false);
+        }
+        let run = svc.for_env(&row).map(|s| s.run).unwrap_or(svc.run);
+        match run.kind == RunType::Web && run.volume.is_none() {
+            true => Ok(true),
+            false => Err(Error::Conflict(format!("{env}'s deploys need {} approval(s) before they go live, and this service's can't wait beside the live one for them", row.approvals))),
+        }
+    }
+
+    /// `POST …/deploys/{dep}/approve` (GitHub Environments' required reviewers): a person who
+    /// didn't start it approves a deployment waiting at `ready`; the approval that makes the
+    /// environment's count puts it live (a rollback to it, as "Put live", which a freeze still
+    /// stops). `who` is the person, never a token's.
+    pub async fn approve(self: &Arc<Self>, service: &str, env: &str, dep: &str, who: Option<String>) -> Result<Value> {
+        let d = self.deployment(service, env, dep).await?;
+        let (sid, e) = (service.to_string(), env.to_string());
+        let row = self.db(move |s| s.environment(&sid, &e)).await?;
+        if row.approvals == 0 {
+            return Err(Error::Conflict(format!("{env} asks for no approvals")));
+        }
+        if d.status != DeployStatus::Ready {
+            return Err(Error::Conflict(format!("{dep} isn't waiting at ready to go live")));
+        }
+        // Something newer went live since: approving this one would put an older build back.
+        if let Some(a) = row.active.clone() {
+            let live = self.db(move |s| s.deployment(&a)).await?;
+            let since = live.rollback_of.clone().unwrap_or(live.id.clone());
+            let (s_id, dc) = (since.clone(), d.created_at);
+            let newer = since != d.id && self.db(move |s| s.deployment(&s_id)).await.is_ok_and(|o| o.created_at > dc);
+            if newer {
+                return Err(Error::Conflict(format!("a newer deployment ({since}) went live after {dep}: deploy again to approve what's next")));
+            }
+        }
+        let who = who.ok_or_else(|| Error::Forbidden("an approval is a person's: signed in, or the operator, never a token".into()))?;
+        // Its author, as a person: whoever started it however they did (their own token is them).
+        let author = self.deploy_person(dep).await.or(d.actor.clone());
+        if author.as_deref() == Some(who.as_str()) {
+            return Err(Error::Forbidden(format!("{who} started {dep}: someone else approves it")));
+        }
+        // Recorded and counted in one write: only the approval that reaches the count acts.
+        let (id, w, au) = (dep.to_string(), who.clone(), author.clone());
+        let (all, crossed) = self.db(move |s| s.approve(&id, &w, au.as_deref(), code_sql::now_ms(), row.approvals)).await?;
+        let counted = all.iter().filter(|a| Some(a.as_str()) != author.as_deref()).count() as u32;
+        self.audit("deploy.approved", service, env, Some(who.clone()), json!({ "deployment": dep, "approvals": counted, "needed": row.approvals })).await;
+        let mut out = json!({ "deployment": dep, "approved_by": all, "needed": row.approvals, "live": null });
+        if crossed {
+            match self.rollback(service, env, dep, Some(who), true, false).await {
+                Ok(live) => out["live"] = json!(live.id),
+                Err(e) => out["waiting"] = json!(e.to_string()),
+            }
+        }
+        Ok(out)
     }
 
     /// `GET …/deploys/{dep}/commits`: what a repo deployment brings over the one it's measured
@@ -859,9 +957,14 @@ impl Apps {
             && dep.run.volume.is_none()
             && let Some(img) = dep.image.clone()
         {
-            match self.export_site(&img).await {
+            // Its files hold no secret value (Netlify's secrets scan): one that does fails the
+            // deploy (a container would serve the same file).
+            let r = self.resolve_vars(&svc, &env, &dep.id).await?;
+            let secrets: Vec<(String, String)> = r.vars.iter().filter(|(k, _)| r.is_secret(k)).cloned().collect();
+            match self.export_site_checked(&img, secrets).await {
                 Ok(Some(n)) => log.stream(Stream::System).line(format!("static site: {} KiB of files, served without an instance", n.div_ceil(1024))),
                 Ok(None) => {}
+                Err(e) if e.downcast_ref::<crate::sites::SecretInSite>().is_some() => return Err(e),
                 Err(e) => log.stream(Stream::System).line(format!("static site: its files couldn't be exported ({e:#}); a container serves it")),
             }
         }
@@ -907,6 +1010,14 @@ impl Apps {
         });
         // Paused while it built: nothing of it starts or goes live.
         anyhow::ensure!(!live.paused(), "the environment was paused while it built: not put live");
+        // Waiting for approvals (GitHub's environments withhold their secrets until then): built
+        // and ready, but nothing of it starts with the environment's values before it's approved.
+        if no_traffic && env.approvals > 0 {
+            let (sid, en, did, data) = (svc.id.clone(), env.name.clone(), d.id.clone(), serde_json::json!({ "revision": d.revision, "approvals": env.approvals }));
+            self.db(move |s| s.set_ready(&did, &sid, &en, &data)).await?;
+            log.stream(Stream::System).line(format!("built, waiting for {} approval(s): it starts once approved, never before", env.approvals));
+            return Ok(());
+        }
         let prepared = match live.prepare(&tpl, None).await {
             Ok(p) => p,
             // What the app said before it failed (a stack trace, a missing variable), in the deploy
@@ -990,6 +1101,8 @@ impl Apps {
                 .db(move |s| s.switch_active(&Switch { service: &sid, env: &e, from: from.as_deref(), to: &to, ready_ms: ready, epoch, vars_hash: Some(&vh), snapshot: Some(&snap) }))
                 .await?;
             anyhow::ensure!(ok, "another deploy switched this environment meanwhile");
+            // Its tree's edge settings are the environment's gate's now.
+            live.forget_gate();
             // What the old deployment answered isn't this one's.
             self.responses.clear(&crate::env_key(&d.service, &d.environment));
             Ok(())
@@ -1203,7 +1316,9 @@ impl Apps {
         if let Ok(Some(key)) = self.db(move |s| s.deployment_upload(&id)).await {
             self.drop_upload(&d.id, &key).await;
         }
-        self.live(&svc.id, &d.environment).meter.lock().build(code_sql::now_ms(), began.elapsed().as_secs_f64());
+        // Metered by its builder's size where the builder gives it one.
+        let factor = if self.deps.builder.sizes_builds() { svc.build.size.unwrap_or_default().factor() } else { 1.0 };
+        self.live(&svc.id, &d.environment).meter.lock().build(code_sql::now_ms(), began.elapsed().as_secs_f64() * factor);
         result
     }
 
@@ -1247,13 +1362,27 @@ impl Apps {
                 log.line(format!("checking out {repo} at {}", &rev[..rev.len().min(12)]));
                 let sources = self.deps.sources.as_ref().ok_or_else(|| anyhow::anyhow!("roll code isn't on this node"))?;
                 sources.materialize(repo, rev, &tree).await?;
+                if svc.build.submodules.unwrap_or(false) {
+                    let allowed = svc.build.submodule_repos.clone().unwrap_or_default();
+                    let n = crate::submodules::fetch(sources.as_ref(), repo, rev, &tree, &allowed, self.cfg.allow_private).await?;
+                    if n > 0 {
+                        log.line(format!("fetched {n} submodule(s)"));
+                    }
+                }
                 root.clone()
             }
             (Source::Git { url, root }, _) => {
                 let rev = d.revision.as_deref().ok_or_else(|| anyhow::anyhow!("no revision to build"))?;
                 log.line(format!("fetching {url} at {}", &rev[..rev.len().min(12)]));
-                let files = crate::git_source::materialize(&self.git_remote(&svc.id, url).await, rev, &tree).await?;
+                let remote = self.git_remote(&svc.id, url).await;
+                let files = crate::git_source::materialize_with(&remote, rev, &tree, svc.build.submodules.unwrap_or(false)).await?;
                 log.line(format!("fetched {files} files"));
+                if svc.build.lfs.unwrap_or(false) {
+                    let n = crate::git_source::fetch_lfs(&remote, &tree).await?;
+                    if n > 0 {
+                        log.line(format!("fetched {n} Git LFS object(s)"));
+                    }
+                }
                 root.clone()
             }
             (Source::Upload, _) => anyhow::bail!("this service deploys uploads"),
@@ -1269,6 +1398,11 @@ impl Apps {
         let ephemeral = self.db(move |s| s.environment(&sid, &e)).await?.ephemeral;
         let scope = crate::config::EnvScope { name: &d.environment, ephemeral };
         let file = crate::config::read(&context).map_err(|e| anyhow::anyhow!("{e}"))?;
+        // Its edge settings (headers, firewall, rate limit), kept with the deployment: they're the
+        // gate's once it's live, and travel with its image to a promotion or a rollback.
+        let edge = file.as_ref().map(crate::model::EdgeFile::from_app).transpose().map_err(|e| anyhow::anyhow!("{e}"))?.flatten();
+        let id = d.id.clone();
+        self.db(move |s| s.set_deploy_edge(&id, edge.as_ref())).await?;
         let (mut build_cfg, mut run) = match &file {
             Some(app) => {
                 let (b, r, said) = app.apply(&svc.build, &svc.run, Some(scope)).map_err(|e| anyhow::anyhow!("{e}"))?;
@@ -1438,7 +1572,7 @@ impl Apps {
                 let name = format!("vercel-{}", i + 1);
                 if run.schedules.len() < 20 && !run.schedules.iter().any(|s| s.path.as_deref() == Some(c.path.as_str()) || s.name == name) {
                     log.line(format!("plan: vercel.json's cron {} calls {}", c.schedule, c.path));
-                    run.schedules.push(crate::model::Scheduled { name, schedule: c.schedule.clone(), command: String::new(), path: Some(c.path.clone()), timezone: None, timeout_s: None, auth: None });
+                    run.schedules.push(crate::model::Scheduled { name, schedule: c.schedule.clone(), command: String::new(), path: Some(c.path.clone()), timezone: None, timeout_s: None, auth: None, cpu: None, memory_mb: None });
                 }
             }
         }
@@ -1470,14 +1604,22 @@ impl Apps {
         if plan.provider == apps_build::Provider::Dockerfile {
             build_env.extend(commit);
         }
+        // `build.size`: what the builder gives it, where it can (one node's Docker can't).
+        let size = svc.build.size.unwrap_or_default();
+        if size != crate::model::BuildSize::Small {
+            match self.deps.builder.sizes_builds() {
+                true => log.line(format!("a {} builder: {} vCPU, {} GiB", serde_json::to_value(size).ok().and_then(|v| v.as_str().map(str::to_string)).unwrap_or_default(), size.resources().0, size.resources().1 / 1024)),
+                false => log.line("build.size: this node's builds share its BuildKit, unsized (it applies on the fleet's builders)"),
+            }
+        }
         let job = BuildJob {
             service: svc.id.clone(),
             deployment: d.id.clone(),
             context,
             dockerfile,
             tag: format!("roll-apps-{}:{}", svc.id.strip_prefix("svc_").unwrap_or(&svc.id), d.id.strip_prefix("dep_").unwrap_or(&d.id)),
-            cpu: 2.0,
-            memory_mb: 4096,
+            cpu: size.resources().0,
+            memory_mb: size.resources().1,
             timeout: build_timeout(svc.build.timeout_s, self.cfg.build_timeout, log),
             own_dockerfile: plan.provider == apps_build::Provider::Dockerfile,
             env: build_env,
@@ -1562,6 +1704,9 @@ impl Apps {
         if !resolved.unresolved.is_empty() {
             self.logs.sink(format!("env:{}/{}", svc.id, env.name), Stream::System).line(format!("references that name nothing, left empty: {}", resolved.unresolved.join(", ")));
         }
+        for n in &resolved.notices {
+            self.logs.sink(format!("env:{}/{}", svc.id, env.name), Stream::System).line(n.clone());
+        }
         let mut vars = resolved.vars;
         if run.kind != RunType::Web {
             vars.retain(|(k, _)| k != "PORT");
@@ -1594,6 +1739,26 @@ impl Apps {
             for (k, v) in egress_vars(&proxy, &names, &vars) {
                 if !vars.iter().any(|(n, _)| n == &k) {
                     vars.push((k, v));
+                }
+            }
+            // Keys used without being seen (roll secrets' placeholders): its proxies swap them for
+            // the hosts the keys are bound to, and its instances trust the interception CA (with
+            // the host's roots, one file every runtime reads).
+            match self.deps.secrets.intercept(&svc.project, &env.name).await {
+                Ok(Some(i)) => {
+                    self.deps.runtime.set_interception(&network, Some(i.interception.clone()));
+                    files.push((INTERCEPT_CA.to_string(), trust_bundle(&i.ca_pem)));
+                    for k in ["NODE_EXTRA_CA_CERTS", "SSL_CERT_FILE", "REQUESTS_CA_BUNDLE", "CURL_CA_BUNDLE"] {
+                        if !vars.iter().any(|(n, _)| n == k) {
+                            vars.push((k.to_string(), INTERCEPT_CA.to_string()));
+                        }
+                    }
+                    self.intercept_cas.lock().insert(crate::env_key(&svc.id, &env.name), ca_digest(&i.ca_pem));
+                }
+                Ok(None) => self.deps.runtime.set_interception(&network, None),
+                Err(e) => {
+                    self.deps.runtime.set_interception(&network, None);
+                    self.logs.sink(format!("env:{}/{}", svc.id, env.name), Stream::System).line(format!("keys bound to hosts can't be swapped by its proxy now ({e:#}): their placeholders reach no one"));
                 }
             }
         }
@@ -1971,6 +2136,14 @@ impl Apps {
                 firing.push(("alert.memory", serde_json::json!({ "value": value, "threshold": a.memory_pct, "limit_mb": limit_mb })));
             }
         }
+        // CPU: what its instances used of their `cpu` (CPU seconds a minute over instances × cpu × 60).
+        if a.cpu_pct > 0 && rows.len() >= 5 && tpl.run.cpu > 0.0 {
+            let share = |r: &crate::store::MinuteRow| r.cpu / (r.instances.max(1) as f64 * tpl.run.cpu * 60.0) * 100.0;
+            if rows.iter().all(|r| r.instances > 0 && share(r) >= a.cpu_pct as f64) {
+                let value = rows.iter().map(share).fold(0.0, f64::max).round();
+                firing.push(("alert.cpu", serde_json::json!({ "value": value, "threshold": a.cpu_pct, "cpu": tpl.run.cpu })));
+            }
+        }
         let (requests, errors): (i64, i64) = rows.iter().fold((0, 0), |(q, e), r| (q + r.requests, e + r.errors));
         if a.error_pct > 0 && requests >= 20 && errors * 100 >= a.error_pct as i64 * requests {
             firing.push(("alert.errors", serde_json::json!({ "value": (errors * 100 / requests), "threshold": a.error_pct, "requests": requests })));
@@ -2014,7 +2187,48 @@ impl Apps {
         {
             firing.push(("alert.slo", serde_json::json!({ "indicator": indicator, "burn_rate": (rate * 10.0).round() / 10.0, "window": window, "objective": slo.objective })));
         }
-        for kind in ["alert.memory", "alert.errors", "alert.latency", "alert.capacity", "alert.log", "alert.slo"] {
+        // The app's own gauges: each judgment that finds one past its threshold counts toward its
+        // run of minutes; one that doesn't (or finds nothing) starts it again.
+        let mut metric_firing: Vec<(String, serde_json::Value)> = Vec::new();
+        for m in &a.metrics {
+            let key = format!("{}/{}/{}/{}", l.service, l.env, m.name, m.sum);
+            let value = self.gauge(&l.service, &l.env, &m.name, m.sum).await.ok();
+            let run = {
+                let mut streaks = self.metric_streaks.lock();
+                let n = streaks.entry(key).or_default();
+                *n = if value.is_some_and(|v| m.breached(v)) { n.saturating_add(1) } else { 0 };
+                *n
+            };
+            if run >= m.minutes {
+                let (op, threshold) = match m.above {
+                    Some(t) => ("above", t),
+                    None => ("below", m.below.unwrap_or_default()),
+                };
+                let mut data = serde_json::json!({ "metric": m.name, "value": value, "minutes": m.minutes });
+                data[op] = serde_json::json!(threshold);
+                metric_firing.push((m.name.clone(), data));
+            }
+        }
+        for m in &a.metrics {
+            let key = format!("{}/{}/alert.metric:{}", l.service, l.env, m.name);
+            match metric_firing.iter().find(|(n, _)| *n == m.name) {
+                Some((_, data)) => {
+                    if self.looping.lock().insert(key) {
+                        let (sid, e, dep, d) = (l.service.clone(), l.env.clone(), tpl.deployment.clone(), data.clone());
+                        let _ = self.db(move |s| s.add_event("alert.metric", &sid, &e, Some(&dep), &d)).await;
+                        l.log.stream(Stream::System).line(format!("alert: alert.metric {data}"));
+                    }
+                }
+                None => {
+                    if self.looping.lock().remove(&key) {
+                        let (sid, e, dep, d) = (l.service.clone(), l.env.clone(), tpl.deployment.clone(), serde_json::json!({ "alert": "alert.metric", "metric": m.name }));
+                        let _ = self.db(move |s| s.add_event("alert.resolved", &sid, &e, Some(&dep), &d)).await;
+                        l.log.stream(Stream::System).line(format!("alert: alert.metric {} resolved", m.name));
+                    }
+                }
+            }
+        }
+        for kind in ["alert.memory", "alert.cpu", "alert.errors", "alert.latency", "alert.capacity", "alert.log", "alert.slo"] {
             let key = format!("{}/{}/{kind}", l.service, l.env);
             match firing.iter().find(|(k, _)| *k == kind) {
                 Some((_, data)) => {
@@ -2496,16 +2710,64 @@ impl Apps {
 
     /// Cron: start the runs that are due at `now` in owned cron services (a run still going
     /// when the next is due is skipped). The reaper's pass, every few seconds.
+    /// Closed environments whose instances trust an interception CA roll secrets has moved on from
+    /// (near its end, or ended early: a binding narrowed, a placeholder revoked): their proxies
+    /// take the new one at once; running instances are redeployed (the live image again, rolled)
+    /// to trust it, and a sleeping environment's next start does (its template's bundle swapped),
+    /// with no redeploy. Each minute, on the owner.
+    async fn refresh_intercepts(self: &Arc<Self>, services: &[crate::store::ServiceRow]) {
+        let kept: Vec<(String, String)> = self.intercept_cas.lock().iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+        for (key, trusted) in kept {
+            let Some((sid, env)) = key.split_once('/').map(|(s, e)| (s.to_string(), e.to_string())) else { continue };
+            let Some(svc) = services.iter().find(|s| s.id == sid).filter(|s| self.owns(&s.id)) else { continue };
+            let network = crate::closed_network_name(&svc.project, &env);
+            let log = self.logs.sink(format!("env:{sid}/{env}"), Stream::System);
+            match self.deps.secrets.intercept(&svc.project, &env).await {
+                Ok(Some(i)) if ca_digest(&i.ca_pem) != trusted => {
+                    self.deps.runtime.set_interception(&network, Some(i.interception.clone()));
+                    let live = self.live(&sid, &env);
+                    if live.awake() > 0 {
+                        match self.redeploy(&sid, &env, json!({ "message": "roll's interception CA renewed" }), Some("roll".into()), None).await {
+                            Ok(d) => log.line(format!("the interception CA changed (near its end, or a key's binding moved): redeploying ({}) to trust the next", d.id)),
+                            Err(e) => log.line(format!("the interception CA changed, and the redeploy that hands the instances the next didn't start: {e}")),
+                        }
+                    } else {
+                        live.set_file(INTERCEPT_CA, &trust_bundle(&i.ca_pem));
+                        self.intercept_cas.lock().insert(key.clone(), ca_digest(&i.ca_pem));
+                        log.line("the interception CA changed while it slept: its next start trusts the new one");
+                    }
+                }
+                Ok(None) => {
+                    self.deps.runtime.set_interception(&network, None);
+                    self.intercept_cas.lock().remove(&key);
+                    log.line("no key of its is bound to hosts now: its proxies tunnel everything again");
+                }
+                _ => {}
+            }
+        }
+    }
+
     /// Owned environments' stored logs past their retention (`log_retention_days`, a week by
     /// default and always for a preview) deleted, chunk by chunk.
+    /// Logs kept past the first week (30 or 90 days) are metered too: this hour's GB-hour of
+    /// what's stored past it now (`stored_gb_hours`), once an hour however many passes run.
     async fn expire_logs_pass(self: &Arc<Self>, services: &[crate::store::ServiceRow], now: i64) {
         let Ok(envs) = self.db(|s| s.all_environments()).await else { return };
         for svc in services.iter().filter(|s| self.owns(&s.id)) {
             for e in envs.iter().filter(|e| e.service == svc.id) {
                 let days = if e.ephemeral { crate::logs::KEEP_DAYS } else { e.log_retention_days.unwrap_or(crate::logs::KEEP_DAYS) };
                 let before = now - days as i64 * 86_400_000;
+                let week = now - crate::logs::KEEP_DAYS as i64 * 86_400_000;
+                let mut past_week = 0u64;
                 for key in crate::logs::env_keys(&svc.id, &e.name) {
                     self.logs.expire(&key, before).await;
+                    if days > crate::logs::KEEP_DAYS {
+                        past_week += self.logs.stored_before(&key, week).await;
+                    }
+                }
+                if past_week > 0 {
+                    let (sid, en, gb) = (svc.id.clone(), e.name.clone(), past_week as f64 / 1e9);
+                    let _ = self.db(move |s| s.meter_stored(&sid, &en, "logs", now / 3_600_000, gb)).await;
                 }
                 // Its jobs' logs, each whole once its job started before then: those started
                 // since the last pass's cutoff (kept, so a node that was down catches up).
@@ -2535,7 +2797,11 @@ impl Apps {
         if now - self.logs_expired.load(std::sync::atomic::Ordering::Relaxed) >= 3_600_000 {
             self.logs_expired.store(now, std::sync::atomic::Ordering::Relaxed);
             self.expire_logs_pass(&services, now).await;
-            self.build_cache_pass(now).await;
+            self.build_cache_pass(&services, now).await;
+        }
+        if now - self.intercepts_checked.load(std::sync::atomic::Ordering::Relaxed) >= 60_000 {
+            self.intercepts_checked.store(now, std::sync::atomic::Ordering::Relaxed);
+            self.refresh_intercepts(&services).await;
         }
         if now - self.status_swept.load(std::sync::atomic::Ordering::Relaxed) >= 60_000 {
             self.status_swept.store(now, std::sync::atomic::Ordering::Relaxed);
@@ -2665,7 +2931,7 @@ impl Apps {
                             continue;
                         }
                     }
-                    match self.start_job(&svc.id, &e.name, serde_json::json!({ "command": sc.command, "timeout_s": sc.timeout_s })).await {
+                    match self.start_job(&svc.id, &e.name, serde_json::json!({ "command": sc.command, "timeout_s": sc.timeout_s, "cpu": sc.cpu, "memory_mb": sc.memory_mb })).await {
                         Ok(job) => {
                             log.line(format!("scheduled {}: job {} started", sc.name, job.id));
                             let id = job.id.clone();
@@ -2733,7 +2999,7 @@ impl Apps {
             // Its output stays in the environment's log (drains read it there); its container's
             // name, its own id in it, is what picks its own lines out.
             let name = crate::live::run_name(&sid, &live.env, &run_dep, &id);
-            let (status, code) = match live.run_to_exit(None, &[], timeout, None, cancel, Some(name)).await {
+            let (status, code) = match live.run_to_exit(None, &[], timeout, None, cancel, Some(name), None).await {
                 Ok(x) if x.canceled => (RunStatus::Canceled, None),
                 Ok(x) if x.timed_out => (RunStatus::TimedOut, None),
                 Ok(x) if x.code == Some(0) => (RunStatus::Succeeded, Some(0)),
@@ -2926,6 +3192,21 @@ fn build_timeout(own: Option<u32>, node: Duration, log: &LogSink) -> Duration {
 /// A closed environment's proxy variables (`proxy` for its listed hosts): `HTTP_PROXY` and
 /// `HTTPS_PROXY` in both cases, and `NO_PROXY` naming what's reached directly: the host, its
 /// links' relays and the project's services (by name and `<name>.<env>.internal`).
+/// Where a closed environment's instances find the interception CA, with the host's roots.
+pub const INTERCEPT_CA: &str = "/etc/roll/intercept-ca.pem";
+
+/// A CA's PEM, as which one instances trust is kept.
+fn ca_digest(pem: &str) -> String {
+    use sha2::Digest;
+    hex::encode(&sha2::Sha256::digest(pem.as_bytes())[..12])
+}
+
+/// The host's roots (the instance's own may be older or missing) and the interception CA.
+fn trust_bundle(ca_pem: &str) -> String {
+    let roots = ["/etc/ssl/certs/ca-certificates.crt", "/etc/pki/tls/certs/ca-bundle.crt", "/etc/ssl/cert.pem"].iter().find_map(|p| std::fs::read_to_string(p).ok()).unwrap_or_default();
+    format!("{}\n{}\n", roots.trim_end(), ca_pem.trim())
+}
+
 fn egress_vars(proxy: &str, services: &[String], vars: &[(String, String)]) -> Vec<(String, String)> {
     let mut direct: Vec<String> = ["localhost", "127.0.0.1", "::1", "host.docker.internal", ".internal"].map(str::to_string).to_vec();
     direct.extend(services.iter().cloned());
@@ -2956,6 +3237,13 @@ pub(crate) fn hold_of(svc: &crate::store::ServiceRow, e: &crate::store::EnvRow) 
         return match svc.run.kind == RunType::Web && svc.run.volume.is_none() {
             true => Held::Ready,
             false => Held::Skip(format!("{}, and this service's can't wait beside the live one", f.says())),
+        };
+    }
+    // Approvals: what automation builds waits at ready for them.
+    if e.approvals > 0 {
+        return match svc.run.kind == RunType::Web && svc.run.volume.is_none() {
+            true => Held::Ready,
+            false => Held::Skip(format!("deploys need {} approval(s), and this service's can't wait beside the live one for them", e.approvals)),
         };
     }
     match e.held_by.as_deref() {

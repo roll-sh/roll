@@ -447,6 +447,23 @@ async fn fast_streams_threads_and_max_verifies() {
     assert!(threads(&t, c2["id"].as_str().unwrap()).await.is_empty());
 }
 
+/// A preview backend that answers what it was asked, and by whom.
+struct Wakes;
+
+#[async_trait::async_trait]
+impl code_control::PreviewBackend for Wakes {
+    async fn create(&self, _: &code_control::model::RepoRow, _: &code_control::model::Change, _: &std::path::Path) -> anyhow::Result<code_control::model::Preview> {
+        anyhow::bail!("not in this test")
+    }
+    async fn delete(&self, _: &code_control::model::RepoRow, _: &code_control::model::Change) -> anyhow::Result<()> {
+        Ok(())
+    }
+    async fn act(&self, _: &code_control::model::Change, action: code_control::ext::PreviewAction, by: &str) -> anyhow::Result<String> {
+        assert_eq!(action, code_control::ext::PreviewAction::Wake);
+        Ok(format!("Woken, as asked by {by}."))
+    }
+}
+
 #[tokio::test]
 async fn roll_commands_in_threads() {
     let t = setup(|_, _| {}).await;
@@ -502,6 +519,12 @@ async fn roll_commands_in_threads() {
     assert_eq!(t.m.messages().len(), before, "paused");
     say("@roll resume").await;
     wait_comments(11).await;
+    // @roll preview in a thread: the change's preview backend acts, as the commenter, and roll
+    // answers in the thread when it's done.
+    t.a.code.set_preview_backend(Arc::new(Wakes));
+    say("@roll preview wake").await;
+    let th5 = wait_comments(13).await;
+    assert!(last_comment(&th5).starts_with("Woken, as asked by "), "{}", last_comment(&th5));
     // review deep: a forced mode, with the learning in the system prompt.
     say("@roll review deep").await;
     let r = roll_reviews(&t, &id, 2).await;

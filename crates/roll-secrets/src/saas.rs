@@ -252,6 +252,10 @@ impl LinkProvider for Provider {
         self.vendor(r#ref).map(|v| v.fields()).unwrap_or_else(|| FIELDS.to_vec())
     }
 
+    fn maker(&self, r#ref: &str) -> Option<(String, String)> {
+        self.db.read(|c| c.query_row("SELECT project_id, created_by FROM saas_rotators WHERE id = ?", [r#ref], |r| Ok((r.get(0)?, r.get(1)?))).optional()).ok().flatten()
+    }
+
     fn name(&self, r#ref: &str) -> Option<String> {
         self.db.read(|c| c.query_row("SELECT name FROM saas_rotators WHERE id = ?", [r#ref], |r| r.get::<_, String>(0)).optional()).ok().flatten()
     }
@@ -536,7 +540,7 @@ impl Secrets {
         let target = vendor.target().to_string();
         let sealed = dek.seal(&aad(project, &id, vendor.name(), &target), &Value::new(credential));
         let now = self.db.now_ms()?;
-        let r = SaasRotator { id: id.clone(), name: n.name, vendor, created_at: now, created_by: caller.principal.clone() };
+        let r = SaasRotator { id: id.clone(), name: n.name, vendor, created_at: now, created_by: caller.made_by().to_string() };
         self.db.write(|c| {
             if c.query_row("SELECT 1 FROM saas_rotators WHERE project_id = ? AND name = ?", [project, &r.name], |_| Ok(())).optional()?.is_some() {
                 return Err(Error::Conflict("exists", format!("a SaaS rotator named {} exists", r.name)));

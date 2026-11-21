@@ -3356,7 +3356,11 @@ the binding, issues placeholders, decides each swap and audits it, and ships the
     project, or a token revoked or narrowed, stops every swap of what they made;
   - the environment still exists, isn't frozen (an incident's cut-off), and isn't protected for an
     untrusted consumer;
-  - the key still exists and is still bound; the host and the place match its binding; a sensitive
+  - the key still exists and is still bound, and whoever bound it (`set_by`, `Caller::made_by`) may
+    still `admin` its folder: a member demoted or removed stops every swap through their binding,
+    which still counts as one everywhere else (a read gets a placeholder, never the value) until an
+    admin binds the key again or takes the binding off;
+  - the host and the place match its binding; a sensitive
     key's binding still opts in, for a reader that couldn't read it; the value holds no reference.
 
   Then the key's own value is read as stored, never resolved. Nothing
@@ -4392,7 +4396,8 @@ It is the operator (`Everything`), a roll-access grant (`GrantGrants`, for `rlt_
 with one secrets rule (`POST /v1/access/tokens`), and a workload identity's login is a `workload` grant.
 
 Secrets accepts the operator (`roll_auth::Operator`, or any request when rolld has no operator
-token), signed-in people on their own projects (below), and roll-access's grants: there is one
+token), signed-in people on the projects they're members of, as their role allows (below, and
+docs/members.md), and roll-access's grants: there is one
 permission system (docs/permissions.md). A token for CI or a service is a roll token (`rlt_…`)
 with one rule on the project's secrets (environments or all, folder prefixes or all, the actions
 above), an optional expiry and client addresses (up to 20 addresses or CIDRs; from anywhere else
@@ -4414,22 +4419,70 @@ the token it gets carries the same list.
 
 #### People (signed-in accounts)
 
-Someone signed in to roll (docs/accounts.md) who isn't an admin manages the secrets of the
-workspace projects they own (an admin's session is the operator):
-rolld's gate lets a session through `/v1/secrets` (`Access::UserOrCredential`: a session, or a
-request carrying a credential secrets checks), with `X-Roll-CSRF` on writes. Their caller is
-`OwnProjects`: everything on their own projects as the workspace has them on this request, nothing
-on anyone else's, which answers 404 as the workspace does (sharing a folder with a project they
-can't see is refused the same way as with one that doesn't exist). Search, findings and
-`health --all` keep only their projects. The audit log names the person by user id (`usr_…`), and
-their personal overrides are theirs. The deployment key's state (`GET /v1/secrets/health`) is the
-operator's.
+Someone signed in to roll (docs/accounts.md) who isn't an admin reaches the secrets of the
+workspace projects they're a **member** of, as their role there allows (docs/members.md; an
+admin's session is the operator): rolld's gate decides their request from their session's grant
+(`GrantKind::Session`: their memberships' rules, built on every request) exactly as a token's, and
+secrets' second checks ask the same grant (`GrantGrants`). A project they aren't in answers 404 as
+the workspace does (sharing a folder with a project they can't see is refused the same way as with
+one that doesn't exist). Search, findings and `health --all` keep only what they may read. The
+audit log names the person by user id (`usr_…`), and their personal overrides are theirs. The
+deployment key's state (`GET /v1/secrets/health`) is the operator's.
 
-What a person made acts later only while they can sign in and still reach its project (an admin
-then, or its owner now): their tokens, any token one of those made, their identities' logins,
-their syncs and the references they chose for another product (`bind_ref`). What an admin's
-session makes is the person's (`Caller::maker`), though the audit log names it `operator`. rolld asks roll-accounts on every use (`People`); a lookup that fails is an error, not
-a disabled account. A sync a person made pushes as them, as they are then.
+| | viewer | developer | admin and owner |
+| --- | --- | --- | --- |
+| names, versions, history, audit log | yes | yes | yes |
+| values (`reveal`) | no (D2) | in its environments: by default every one without a protection policy, production only when named (D3) | everywhere (D4) |
+| set, change, rollback, promote into | no | in its environments; a protected one takes a change request | yes |
+| delete; protection, approvals, syncs, links, tokens, identities, sinks | no | no | yes |
+| review a change request | no | no | yes, or when named as an approver |
+
+Approvers may name roles beside principals (`role:admin`, `role:owner`): a member with that role
+in the project then counts. Approvals count as their approvers are **when the request is
+applied**: one who left the project, or no longer has `admin` where the gate is, doesn't.
+
+A person's own token reaches only what its rules and their session's grant now both allow
+(`Within`): removing them from the project stops it there at once, and roll-access revokes their
+tokens confined to the project (D7).
+
+What a person made acts later only at their rights as they are now (`maker_reaches`, asked on
+every use with the action and scope the made thing exercises, nothing broader; an admin account
+and the operator always pass):
+
+- a scheduled backup runs while its maker may still `admin` and `reveal` the whole project;
+- a gateway, an ACME external account binding, an audit sink, an environment's notify URL, and
+  every registered provider (a rotator, SaaS rotator, outside database, directory, Kubernetes
+  cluster, GitHub App, Snowflake or Atlas account, AWS role or IAM user, cloud account, CA or SSH
+  CA) work while their maker is still the project's admin (`Secrets::provider_for` before issuing,
+  reading, leasing, renewing or rotating through one; revoking what one issued always goes on);
+- the references a person chose for another product (`bind_ref`) resolve only while they may
+  still reveal what they name;
+- a key's host binding swaps placeholders while whoever bound it may still `admin` its folder, and
+  a placeholder made for a person's consumer (`maker`) while they may still `reveal` there;
+- what an admin's session makes is the person's (`Caller::maker`, recorded through
+  `Secrets::maker_of`), though the audit log names it `operator`: it acts only while they're still
+  an admin or a member who may;
+- what a person **registers** through a token of theirs (a sink, a notify URL, a provider) is
+  theirs (`Caller::made_by` stores `usr_…`): it outlives the token, at their rights now. A row from
+  before that names the token stands for its person through roll-access (`Grants::owner`). What a
+  token **does** stays the token's: a folder it shared with another project, a one-time share and a
+  lease end with the token or its person, whichever comes first (`dead_exports` on every read,
+  `member_changed`). Identities, gateways, backups and ACME bindings stay bound to the token that
+  made them, as before members, so revoking a leaked token stops them;
+- a workload identity logs in only while its maker's session allows every action of its rule in
+  each of its environments and folders, and the token it gets runs within that session too (it's
+  the maker's, so `Within` caps it on each request);
+- their tokens and any token one of those made act within their session (`Within`); a sync pushes
+  as them (`person_caller`).
+
+When a member is removed, leaves, is demoted or deletes their account, rolld also calls
+`Secrets::member_changed`: the folders they shared with other projects stop being shared once they
+may no longer manage the project, and the one-time shares they made end and the dynamic leases
+issued to them are revoked once they're no longer a member. Their personal overrides stay (only
+they read them, and they can't).
+
+So removing or demoting a member stops or narrows what they made at once. rolld asks roll-accounts
+and roll-access on every use; a lookup that fails is an error, not a disabled account.
 
 Anyone may put any resource on their own canvas, so a project reaches a resource only where the
 workspace trusts it to (`Workspace::trusts`, docs/workspace.md "What a canvas stands for"): the
@@ -4600,13 +4653,29 @@ a decoy credential:
     (branches and replicas too), and never wakes a compute.
   - The answer is Postgres' own, byte for byte: the SCRAM exchange as Postgres runs it for a
     role that doesn't exist (the role's own stable salt, a 24-character server nonce, 4096
-    iterations), then `FATAL 28P01 password authentication failed for user "…"` with Postgres'
-    source file, line and routine for the endpoint's major version (16, 17, 18). Every malformed
-    message a prober can send gets the error Postgres would give (`pg-proxy/src/decoy.rs` ports
-    `CheckSASLAuth`, `scram_exchange` and its parsers, and `NegotiateProtocolVersion`). Once the
-    proxy has seen the endpoint's compute refuse a wrong password, it answers with those exact
-    bytes (its language and line). It answers as late as the compute would: as long as the
-    endpoint's last start when it's suspended, plus the time a running compute takes to answer.
+    iterations), then `FATAL 28P01 password authentication failed for user "…"`. Every malformed
+    message a prober can send gets the error Postgres would give (`pg-proxy/src/decoy/` ports
+    `CheckSASLAuth`, `scram_exchange` and its parsers, and `NegotiateProtocolVersion`). It
+    answers as late as the compute would: as long as the endpoint's last start when it's
+    suspended, plus the time a running compute takes to answer.
+  - What moves between Postgres minors (each error's source file, line and routine, the newest
+    protocol, the refusal's words) isn't written in roll: it's learned from the compute image
+    itself (`pg_proxy::decoy::learn`). The first time a compute of an image starts on a node,
+    roll Postgres sends it every probe the decoy answers, as a role that doesn't exist, and keeps
+    the answers (`compute_answers` in its catalog, by image reference) only if the decoy, answering
+    from them, says exactly the same to every probe. Decoy roles are made only on an image whose
+    answers are known. Each configured image is learned at start, in the background, from a
+    throwaway compute (claimed in `compute_answer_claims`, so one holder at a time, and retried
+    with a backoff), so no decoy's login waits for it: a slow first refusal would tell a decoy
+    apart. A login on an image still not learned (one first seen at a login) waits for it: from
+    the endpoint's compute when it's up, else from a throwaway compute of the image (never the
+    endpoint's, so a decoy's login still wakes nothing). On an image the decoy can't match (an operator's own
+    `image`), decoy logins go to Postgres like any other, which refuses the `NOLOGIN` role as a
+    missing one (and wakes a suspended endpoint), still alerted.
+  - The compute images are pinned (`pg_control::config::IMAGES`, `tag@sha256:` of the
+    multi-arch index): a new minor is a deliberate change that `pnpm test:pg` checks. A tag that
+    moves under a suspended endpoint is only noticed at its next start, so keep an operator's
+    `image` pinned too.
     `pg-control/tests/e2e.rs` compares each path with a compute's answers to a missing role.
   - Each login is told to rolld (`Control::on_decoy_login`: the endpoint, the client's address
     from the PROXY header, the time), which hands it to `Secrets::decoy_used` as `on_decoy` does
@@ -6439,8 +6508,8 @@ cache waited out. Ranked now:
 **The thirtieth product review** (2026-11-18, against Vault/OpenBao, Infisical, Doppler, AWS, 1Password,
 Akeyless, GitGuardian and Bitwarden SM, open PRs checked first) ranked these gaps; its four doc
 inconsistencies are fixed in #264:
-- R1. **Project members and roles for people** (L; every competitor's unit of sharing): waits on the
-  accounts/workspace and roll-access threads.
+- R1. **Project members and roles for people** (L; every competitor's unit of sharing): v1 built
+  (docs/members.md: workspace and secrets; "What v1 leaves out" lists the rest).
 - R2. **Cut off everything that reaches a folder** (M): reach lists it but can't act; one action to
   revoke its tokens and identities, end leases and shares, pause syncs and optionally freeze reads.
   roll MCP's #267 (on main) has `Access::revoke_many(ids, why, by)` (atomic, ≤500 ids, one audit row

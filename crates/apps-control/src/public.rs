@@ -37,6 +37,10 @@ pub fn router(apps: Arc<Apps>) -> axum::Router {
             if req.uri().path().starts_with(AWAKE) {
                 return hold_awake(apps, req).await;
             }
+            // An environment's deploy status badge, where it has one.
+            if req.uri().path().starts_with(BADGE) {
+                return badge(apps, req).await;
+            }
             // Builds' remote cache (Turborepo, Nx), with their environment's token.
             if req.uri().path().starts_with(crate::build_cache::PATH) && req.uri().path()[crate::build_cache::PATH.len()..].starts_with('/') {
                 return crate::build_cache::serve(apps, req).await;
@@ -132,6 +136,58 @@ async fn hold_awake(apps: Arc<Apps>, req: Request) -> Response {
             }
         })
         .await
+}
+
+/// An environment's deploy status badge (Netlify's): `/_roll/badge/<service>/<env>.svg`.
+pub const BADGE: &str = "/_roll/badge/";
+
+/// `GET …/_roll/badge/<service>/<env>.svg`: what the environment's deploys stand at, as an SVG
+/// for a README (live, deploying, waiting, failed, paused, not deployed), cached a minute. Only
+/// where its `badge` is on; anything else is a 404, as a path that isn't one.
+async fn badge(apps: Arc<Apps>, req: Request) -> Response {
+    let rest = req.uri().path()[BADGE.len()..].to_string();
+    let Some((id, env)) = rest.strip_suffix(".svg").and_then(|r| r.split_once('/')) else { return (StatusCode::NOT_FOUND, "").into_response() };
+    if req.method() != axum::http::Method::GET || !id.starts_with("svc_") || env.contains('/') {
+        return (StatusCode::NOT_FOUND, "").into_response();
+    }
+    let (sid, e) = (id.to_string(), env.to_string());
+    let found = apps
+        .db(move |s| {
+            let Ok(svc) = s.service(&sid) else { return Ok(None) };
+            let Ok(row) = s.environment(&sid, &e) else { return Ok(None) };
+            if !row.badge {
+                return Ok(None);
+            }
+            let latest = s.deployments(&sid, &e, 1, None)?.into_iter().next();
+            Ok(Some((svc.name, row, latest)))
+        })
+        .await;
+    let Ok(Some((name, row, latest))) = found else { return (StatusCode::NOT_FOUND, "").into_response() };
+    use crate::model::DeployStatus as S;
+    let (said, color) = match (row.paused, latest.as_ref().map(|d| (d.status, row.active.as_deref() == Some(d.id.as_str())))) {
+        (true, _) => ("paused", "#6b7280"),
+        (_, Some((S::Queued | S::Building | S::Deploying, _))) => ("deploying", "#4c8dff"),
+        (_, Some((S::Ready, _))) => ("waiting", "#4c8dff"),
+        (_, Some((S::Failed, _))) => ("failed", "#e5484d"),
+        _ if row.active.is_some() => ("live", "#2fa86b"),
+        _ => ("not deployed", "#6b7280"),
+    };
+    let svg = badge_svg(&format!("{name} {}", row.name), said, color);
+    ([(header::CONTENT_TYPE, "image/svg+xml; charset=utf-8"), (header::CACHE_CONTROL, "public, max-age=60")], svg).into_response()
+}
+
+/// A flat two-part badge, label and status, widths by a rough character measure (Verdana 11).
+fn badge_svg(label: &str, status: &str, color: &str) -> String {
+    let esc = |s: &str| s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;").replace('"', "&quot;");
+    let width = |s: &str| 10 + s.chars().count() as u32 * 7;
+    let (lw, sw) = (width(label), width(status));
+    let (label, status) = (esc(label), esc(status));
+    format!(
+        r##"<svg xmlns="http://www.w3.org/2000/svg" width="{w}" height="20" role="img" aria-label="{label}: {status}"><title>{label}: {status}</title><rect width="{lw}" height="20" fill="#24292e"/><rect x="{lw}" width="{sw}" height="20" fill="{color}"/><g fill="#fff" font-family="Verdana,Geneva,DejaVu Sans,sans-serif" font-size="11" text-anchor="middle"><text x="{lx}" y="14">{label}</text><text x="{sx}" y="14">{status}</text></g></svg>"##,
+        w = lw + sw,
+        lx = lw / 2,
+        sx = lw + sw / 2,
+    )
 }
 
 /// Where an environment's instances read roll's OIDC tokens (`ROLL_OIDC_URL`):
@@ -1396,9 +1452,22 @@ pub(crate) async fn proxy(apps: Arc<Apps>, service: &str, env: &str, deployment:
     // The environment's own headers (HSTS, a CSP): the app's own of the same name win unless the
     // rule replaces them, as a static site's `_headers` do.
     if let Some(g) = &gate {
+        let mut ours = Vec::new();
         for rule in g.headers.iter().filter(|h| h.matches(&path)) {
             for (k, v) in &rule.set {
                 if let (Ok(name), Ok(value)) = (axum::http::HeaderName::from_bytes(k.as_bytes()), HeaderValue::from_str(v))
+                    && (rule.replace || !r.headers().contains_key(&name))
+                {
+                    ours.push(name.clone());
+                    r.headers_mut().insert(name, value);
+                }
+            }
+        }
+        // Then the live deployment's roll.toml headers: never over one the environment set.
+        for rule in g.file_headers.iter().filter(|h| h.matches(&path)) {
+            for (k, v) in &rule.set {
+                if let (Ok(name), Ok(value)) = (axum::http::HeaderName::from_bytes(k.as_bytes()), HeaderValue::from_str(v))
+                    && !ours.contains(&name)
                     && (rule.replace || !r.headers().contains_key(&name))
                 {
                     r.headers_mut().insert(name, value);
@@ -1457,7 +1526,7 @@ async fn proxy_inner(apps: Arc<Apps>, service: &str, env: &str, deployment: Opti
         r.headers_mut().insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
         return by("challenge", r);
     }
-    if !ours && !gate.firewall.is_empty() {
+    if !ours && !(gate.firewall.is_empty() && gate.file_firewall.is_empty()) {
         let path = crate::model::normal_path(req.uri().path());
         let asked = crate::model::Asked { method: req.method().as_str(), path: &path, user_agent: &ua, ip: crate::live::client_ip(client.as_deref()), headers: req.headers(), query: req.uri().query() };
         let verdict = gate.firewall_verdict(&asked);

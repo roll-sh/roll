@@ -28,6 +28,7 @@ import { NewIndexPanel } from "./new-index";
 import { Templates } from "./templates";
 import { InferenceTab } from "./inference";
 import { ApiKeys } from "./api-keys";
+import { BrowserSearch } from "./browser";
 import { AuditLog } from "./audit-log";
 import { SearchConsole } from "./console";
 import { IndexBrowser } from "./index-browser";
@@ -1035,6 +1036,8 @@ function SettingsTab({
       </Panel>
 
       <AllowedNetworks cluster={cluster} busy={busy} run={run} />
+
+      <BrowserSearch cluster={cluster} busy={busy} run={run} />
 
       <ApiKeys cluster={cluster} />
 

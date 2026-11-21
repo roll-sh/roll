@@ -14,6 +14,8 @@ export interface Prices {
   gb_second: number;
   egress_gb: number;
   build_minute: number;
+  /** A GB-month stored: logs kept past the first week, build caches. */
+  stored_gb_month: number;
 }
 
 export interface Overview {
@@ -47,6 +49,14 @@ export interface Build {
   packages?: string[];
   /** The longest its build may take, seconds (60–21600, held to the node's own limit); unset: the node's. */
   timeout_s?: number;
+  /** Its builder: small (2 vCPU, 4 GiB; default), medium (4, 8 GiB) or large (8, 16 GiB), minutes metered by size on the fleet. */
+  size?: "small" | "medium" | "large";
+  /** Submodules fetched into the tree (default: left out): a Git URL's, or a roll code repo's. */
+  submodules?: boolean;
+  /** The private roll code repos (owner/name) a roll code repo's submodules may come from. */
+  submodule_repos?: string[];
+  /** A Git URL service's Git LFS objects in place of their pointers (default: pointers as text). */
+  lfs?: boolean;
 }
 
 export type ServiceType = "web" | "worker" | "cron";
@@ -80,6 +90,15 @@ export interface PushState extends Push {
   last_delivered_at?: number;
   failing_since?: number;
   last_error?: string;
+}
+
+/** An alert on one of the app's own gauges: above or below a threshold for 1–5 minutes running. */
+export interface MetricAlert {
+  name: string;
+  above?: number;
+  below?: number;
+  minutes?: number;
+  sum?: boolean;
 }
 
 export interface Run {
@@ -125,7 +144,7 @@ export interface Run {
   volume?: { mount: string; size_gb: number; backups?: { every_hours: number; keep: number } };
   /** Metric alerts (`alert.*` events), over five minutes; each 0 is off. */
   /** log_match: text its output holds log_count times in five minutes (alert.log). */
-  alerts?: { memory_pct: number; error_pct: number; p95_ms: number; capacity_pct?: number; log_match?: string; log_count?: number };
+  alerts?: { memory_pct: number; error_pct: number; p95_ms: number; capacity_pct?: number; log_match?: string; log_count?: number; cpu_pct?: number; metrics?: MetricAlert[] };
   /** Its service level objective: `objective`% of requests not 5xx (and of minutes under `latency_ms` at p95) over `window_days`; `alert.slo` when its budget burns fast. */
   slo?: Slo;
   /** Its own Prometheus endpoint, scraped every 15 s on each running instance (port: the app's own by default). */
@@ -568,6 +587,10 @@ export interface EnvironmentPut {
   vitals?: boolean;
   /** How long its logs are kept (null: 7 days). */
   log_retention_days?: 7 | 30 | 90 | null;
+  /** Approvals a deployment needs before it goes live (0 or null: none). */
+  approvals?: number | null;
+  /** A deploy status badge anyone may load. */
+  badge?: boolean;
   /** Its deploys post commit statuses and GitHub Deployments (false: someone else reports them). */
   report?: boolean;
   /** What its code may reach from the next deploy: roll and `hosts` only, or anything. null: open. */
@@ -685,6 +708,10 @@ export interface Environment extends EnvironmentSummary {
   vitals?: boolean;
   /** Days its logs are kept: 7 (default), 30 or 90; a preview's are 7. */
   log_retention_days?: number;
+  /** People other than a deployment's author who approve it before it goes live (0–3). */
+  approvals?: number;
+  /** Its deploy status badge (an SVG for a README), when it has one. */
+  badge_url?: string;
   /** Its deploys are reported to the Git host (commit statuses, GitHub Deployments); false:
    *  someone else reports them (roll previews' `pv-` environments). */
   report?: boolean;
@@ -696,6 +723,10 @@ export interface Environment extends EnvironmentSummary {
   egress?: Egress;
   /** Hosts its egress proxy refused lately: not listed, or (`private`) resolving only to private addresses. */
   egress_refused?: { host: string; private?: true }[];
+  /** Who a closed environment's placeholders are made by; null: no one (its bound keys withheld). */
+  closed_by?: string | null;
+  /** A closed environment's interception (roll secrets' placeholders): requests filtered, placeholders swapped, the latest refusals. */
+  intercepted?: { requests: number; swapped: number; refused?: string[] };
   /** A push deploys only once its commit's checks pass. */
   wait_for_ci?: boolean;
   /** The push (sha) waiting for its checks, if one is. */
@@ -824,6 +855,8 @@ export interface Deployment {
   steps?: { step: string; at: number }[];
   /** Its image's last scan for known vulnerabilities, once one ran. */
   vulnerabilities?: ScanSummary;
+  /** Who approved putting it live, where its environment asks for approvals (single GET only). */
+  approved_by?: string[];
 }
 
 export interface Slo {
@@ -1185,7 +1218,7 @@ export interface InstanceSeries {
 
 export interface Usage {
   /** `day` is a unix day (days since 1970-01-01, UTC); every day of the window is there. */
-  days: { day: number; cpu_seconds: number; gb_seconds: number; requests: number; egress_bytes: number; build_seconds: number; usd: number }[];
+  days: { day: number; cpu_seconds: number; gb_seconds: number; requests: number; egress_bytes: number; build_seconds: number; stored_gb_hours: number; usd: number }[];
   total_usd: number;
 }
 
@@ -1219,6 +1252,8 @@ export type NotifyEvent =
   | "spend.alert"
   | "spend.limit"
   | "alert.memory"
+  | "alert.cpu"
+  | "alert.metric"
   | "alert.errors"
   | "alert.latency"
   | "alert.capacity"
@@ -1285,7 +1320,7 @@ export interface LogDrain {
   previews: boolean;
   /** The names of the headers it's sent with; their values are sealed, never shown. */
   headers: string[];
-  /** How its lines go: roll's signed NDJSON, OpenTelemetry logs (OTLP/HTTP JSON), or syslog (RFC 5424 over TLS). */
+  /** How its lines go: roll's signed NDJSON, OpenTelemetry logs (OTLP/HTTP JSON), syslog (RFC 5424 over TLS), or NDJSON objects in an S3 bucket. */
   format: DrainFormat;
   /** Only in the answer that made it. */
   secret?: string;
@@ -1305,7 +1340,7 @@ export interface FormSubmission {
   fields: { name: string; value: string }[];
 }
 
-export type DrainFormat = "ndjson" | "otlp" | "syslog";
+export type DrainFormat = "ndjson" | "otlp" | "syslog" | "s3";
 
 /** A project's monthly spend limits (US dollars at roll's prices, the calendar month in UTC). */
 export interface SpendLimits {
@@ -1424,7 +1459,8 @@ export const appsApi = {
   environment: (id: string, e: string) => call<Environment>("GET", env(id, e)),
   notifyTargets: (project: string) => call<NotifyTarget[]>("GET", `/v1/apps/projects/${enc(project)}/notifications`),
   drains: (project: string) => call<LogDrain[]>("GET", `/v1/apps/projects/${enc(project)}/drains`),
-  addDrain: (project: string, body: { url: string; format?: DrainFormat } & DrainSettings) => call<LogDrain>("POST", `/v1/apps/projects/${enc(project)}/drains`, body),
+  /** A drain to a URL, or (`bucket`) into a roll storage bucket on the project, an `s3` drain with a key roll mints for it. */
+  addDrain: (project: string, body: ({ url: string; format?: DrainFormat } | { bucket: string; prefix?: string }) & DrainSettings) => call<LogDrain>("POST", `/v1/apps/projects/${enc(project)}/drains`, body),
   /** Its sources, filters and headers (given ones replace; `headers` replaces them all); its URL and secret stay. */
   updateDrain: (project: string, id: string, body: DrainSettings) => call<LogDrain>("PATCH", `/v1/apps/projects/${enc(project)}/drains/${enc(id)}`, body),
   testDrain: (project: string, id: string) => call<{ ok: boolean; code: number | null; error: string | null }>("POST", `/v1/apps/projects/${enc(project)}/drains/${enc(id)}/test`),
@@ -1473,6 +1509,8 @@ export const appsApi = {
   rollback: (id: string, e: string, d: string, keepVariables = false) => call<Deployment>("POST", `${dep(id, e, d)}/rollback`, keepVariables ? { keep_variables: true } : undefined),
   /** Back to the one live before what runs (the server walks back through rollbacks). */
   rollbackPrevious: (id: string, e: string) => call<Deployment>("POST", `${env(id, e)}/rollback`),
+  /** A person's approval of a deployment waiting at ready; the last one needed puts it live. */
+  approve: (id: string, e: string, d: string) => call<{ deployment: string; approved_by: string[]; needed: number; live: string | null; waiting?: string }>("POST", `${dep(id, e, d)}/approve`),
   /** The live image again with the current variables and settings: no build, same revision. */
   redeploy: (id: string, e: string, body: { message?: string } = {}) => call<Deployment>("POST", `${env(id, e)}/redeploy`, body),
   pushStates: (id: string, e: string) => call<PushState[]>("GET", `${env(id, e)}/push`),

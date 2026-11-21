@@ -291,6 +291,9 @@ pub trait Runtime: Send + Sync {
     async fn build_egress(&self, _project: &str) -> anyhow::Result<Option<BuildEgress>> {
         Ok(None)
     }
+    /// The interception (roll secrets' placeholders swapped for the hosts its keys are bound to)
+    /// a closed network's egress proxies run for those hosts, or none.
+    fn set_interception(&self, _network: &str, _i: Option<std::sync::Arc<dyn roll_intercept::Interception>>) {}
     /// The project's closed builds' builder and network, once it has no service left.
     async fn remove_build_egress(&self, _project: &str) {}
     /// Closed builds' networks nothing runs on any more (a process that stopped without
@@ -301,6 +304,10 @@ pub trait Runtime: Send + Sync {
     async fn sweep_build_networks(&self, _projects: &std::collections::HashSet<String>) {}
     /// The hosts closed `network`'s egress proxy for `hosts` refused lately (none: it hasn't, or
     /// isn't here).
+    /// What a closed network's interception did on this node (none: nothing, or no proxy here).
+    fn intercepted(&self, _network: &str) -> Option<egress::Intercepted> {
+        None
+    }
     fn egress_refused(&self, _network: &str, _hosts: &[String]) -> Vec<egress::Refused> {
         Vec::new()
     }
@@ -484,6 +491,11 @@ pub trait Builder: Send + Sync {
     /// Whether its builds share one BuildKit, cache mounts and all (one node's Docker): then
     /// each service's mounts are namespaced (`apps_build::isolate_caches`).
     fn shares_caches(&self) -> bool {
+        false
+    }
+    /// Whether a build gets the CPU and memory its job asks (`build.size`), so its minutes are
+    /// metered by that size; one node's BuildKit takes no per-build limit.
+    fn sizes_builds(&self) -> bool {
         false
     }
 }
