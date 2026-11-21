@@ -29,6 +29,7 @@ import { Inspector, ResourceSheet, StagedSheet } from "./inspector";
 import { ProjectAgents, threadsOf, useAgents } from "./agents";
 import { KindTile } from "./kind";
 import { ProjectIcon } from "./project-icon";
+import { MissingProject } from "./missing-project";
 import { DeployChanges, stagedChanges } from "./deploy-changes";
 import { ProjectSettings } from "./project-settings";
 import { PreviewsOverlay } from "./previews-overlay";
@@ -45,14 +46,7 @@ export type ProjectTab = "canvas" | "previews" | "logs" | "metrics";
 export function ProjectPage({ id, tab = "canvas", children }: { id: string; tab?: ProjectTab; children?: ReactNode }) {
   const ws = useWorkspace();
   const project = ws.projects.find((p) => p.id === id);
-  if (!project)
-    return (
-      <AppShell crumb={ws.status === "loading" ? "" : "Project"} bleed>
-        <div className="grid h-full place-items-center text-[13px] text-muted">
-          {ws.status === "loading" ? "" : ws.status === "error" ? `Projects didn't load: ${ws.error}` : "There's no such project."}
-        </div>
-      </AppShell>
-    );
+  if (!project) return <MissingProject crumb="Project" to={(id) => `/dashboard/projects/${id}`} />;
   return (
     <Project key={project.id} ws={ws} project={project} tab={tab}>
       {children}

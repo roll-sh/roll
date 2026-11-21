@@ -470,6 +470,15 @@ pub fn open(args: &crate::Args, home: &Path, workspace: Arc<roll_workspace::Work
     if let Some(id) = std::env::var("ROLL_SECRETS_AWS_SERVER_ID").ok().filter(|v| !v.trim().is_empty()).or_else(|| args.code_public_url.clone()) {
         secrets.set_aws_server_id(id);
     }
+    // Validity checks (docs/secrets.md, "Is it live?"): AWS keys are tried only when the operator
+    // says so, and never a canary's.
+    let aws_live = match std::env::var("ROLL_SECRETS_VALIDITY_AWS_LIVE").unwrap_or_default().trim() {
+        "" | "0" | "false" | "off" => false,
+        "1" | "true" | "on" => true,
+        v => anyhow::bail!("ROLL_SECRETS_VALIDITY_AWS_LIVE is on or off, not {v:?}"),
+    };
+    let canaries = roll_secrets::validity::Canaries::parse(&std::env::var("ROLL_SECRETS_VALIDITY_CANARIES").unwrap_or_default()).map_err(|e| anyhow::anyhow!("ROLL_SECRETS_VALIDITY_CANARIES: {e}"))?;
+    secrets.set_validity_settings(roll_secrets::validity::Settings { aws_live, canaries });
     tell_decoys(&access, secrets.clone());
     // ACME's http-01 and dns-01 checks: public addresses only, as webhooks.
     secrets.set_acme_checks(Arc::new(acme::Checks::new(allow_private)));
@@ -528,8 +537,8 @@ pub fn tell_postgres_decoys(control: &pg_control::Control, secrets: Arc<Secrets>
         let (s, login) = (secrets.clone(), login.clone());
         let Ok(rt) = tokio::runtime::Handle::try_current() else { return };
         rt.spawn_blocking(move || {
-            let (ip, route) = (login.peer.map(|p| p.to_string()), format!("Postgres endpoint {}", login.endpoint_id));
-            if let Err(e) = s.decoy_used("postgres", &decoy_handle(&login.project_id, &login.role), ip.as_deref(), &route) {
+            let ip = login.peer.map(|p| p.to_string());
+            if let Err(e) = s.decoy_used("postgres", &decoy_handle(&login.project_id, &login.role), ip.as_deref(), &login.endpoint_id) {
                 tracing::warn!(endpoint = %login.endpoint_id, "raising a decoy role's alert failed: {e}");
             }
         });
@@ -1817,6 +1826,30 @@ impl code_control::SecretEnv for ForCode {
         Ok(code_control::Revealed { by, values })
     }
 
+    /// The first project with the repo on its canvas that may reach it and has validity checks on
+    /// asks (and keeps, and audits, as `roll:code`); none: nothing is asked.
+    async fn validity(&self, repo: &str, found: Vec<(String, Option<String>)>) -> anyhow::Result<Vec<code_control::model::CredentialValidity>> {
+        let (secrets, ws) = self.0.get().cloned().ok_or_else(|| anyhow::anyhow!("roll secrets is starting"))?;
+        let r = repo.to_string();
+        tokio::task::spawn_blocking(move || {
+            let projects = ws.projects_of(roll_workspace::Kind::Repo.as_str(), &r)?;
+            let Some(p) = projects.into_iter().find(|p| secrets.counts_for_repo(p, &r) && secrets.validity_checks(p).unwrap_or(false)) else { return Ok(Vec::new()) };
+            let probes = found.into_iter().map(|(value, pair)| roll_secrets::validity::Probe { value: roll_secrets::Value::new(value), pair: pair.map(roll_secrets::Value::new) }).collect();
+            let checked = secrets.check_validity(&p, probes, &roll_secrets::Caller::consumer("roll:code"))?.unwrap_or_default();
+            Ok(checked
+                .into_iter()
+                .map(|c| code_control::model::CredentialValidity {
+                    fingerprint: c.fingerprint,
+                    result: c.result.as_str().to_string(),
+                    account: c.account,
+                    checked_at: c.checked_at,
+                    rotator: c.rotator.map(str::to_string),
+                })
+                .collect())
+        })
+        .await?
+    }
+
     async fn leaks(&self, repo: &str, candidates: Vec<String>) -> anyhow::Result<Vec<(usize, String, String, String)>> {
         let (secrets, ws) = self.0.get().cloned().ok_or_else(|| anyhow::anyhow!("roll secrets is starting"))?;
         let r = repo.to_string();
@@ -2306,6 +2339,7 @@ mod tests {
         let first = first.expect("a finding");
         assert_eq!((first.issue, first.key.as_str()), (roll_secrets::health::Issue::DecoyUsed, "OLD_DEPLOY_TOKEN"));
         assert!(first.detail.contains("198.51.100.4"), "{}", first.detail);
+        assert_eq!(first.decoy.as_ref().and_then(|d| d.used_route.as_deref()), Some("/v1/secrets/whoami"));
         assert!(call("DELETE", "/secrets/OLD_DEPLOY_TOKEN", None).await.unwrap().status().is_success());
         assert!(access.store.by_secret(value.expose()).unwrap().is_none());
         assert!(access.store.get(&g.id).unwrap().revoked_at.is_some());
