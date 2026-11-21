@@ -138,6 +138,15 @@ idle instances. Only Neon branches cheaply, and only Postgres. roll previews:
   not said, at most 720); roll answers where it was asked with what it did, and the preview's
   activity names who asked ("@octo asked for its data reset from the pull request"). Readers and
   strangers get nothing, as with every `@roll` command (roll code's GitHub permission check).
+- **Watch paths** (Railway's watch paths, Render's per-service build filters): a `roll.toml`
+  service lists the paths whose change rebuilds it (`[preview] watch = ["web/**",
+  "package.json"]`, gitignore-style as `paths` reads them; at most 50, no `!negation`). A push to
+  the change that touches none of them, nor `roll.toml`, keeps the build the service runs: no
+  build, no redeploy, and a start at the new head runs it ("kept web's build at 3f2a…: the push
+  to 9c1d… touched none of what it watches", in the activity). A path list that can't be read, a
+  pattern that doesn't parse, a deploy hook's rebuild or a fork's change (its approval is for one
+  head) rebuilds it as before. Like an earlier push, the kept build runs on data the new head's
+  release may have migrated. Empty (the default): every push rebuilds it.
 - **Warm after a push**: once a new head is deployed, the change's own services are woken (after
   the pass, a few at a time), so the first visit, usually the pull request comment's link,
   doesn't wait for a cold start; they sleep again after `sleep_after` unused. Not a preview

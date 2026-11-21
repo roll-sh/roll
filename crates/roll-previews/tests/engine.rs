@@ -1248,6 +1248,37 @@ async fn earlier_pushes_stay_reachable_at_their_own_urls() {
     assert!(e.apps.removed.lock().contains(&(p.id.clone(), "web@cs_8d".into())));
 }
 
+/// A push that touches none of what a service watches (`roll.toml` `watch`) keeps the build it
+/// runs, and it still starts at the new head; one that touches its paths rebuilds it.
+#[tokio::test]
+async fn a_push_outside_a_services_watch_paths_keeps_its_build() {
+    use roll_previews::ports::EnvSource;
+    let e = env(json!({ "enabled": true }));
+    *e.code.watch.lock() = vec!["src/**".to_string()];
+    e.code.open(change("chg_wt", 7));
+    e.engine.pass().await.unwrap();
+    e.engine.pass().await.unwrap();
+    let p = e.engine.store.row_by_change("chg_wt").unwrap().unwrap();
+    let running = || e.engine.store.services(&p.id).unwrap().into_iter().find(|x| x.name == "web").and_then(|x| x.revision);
+    assert_eq!(running().as_deref(), Some("cs_7a"));
+    // Docs only: the service keeps cs_7a, the preview is at the new head, and it starts.
+    e.code.between.lock().insert("cs_7a..cs_7b".into(), vec!["docs/guide.md".into()]);
+    e.code.edit("chg_wt", |c| c.head = "cs_7b".into());
+    e.engine.pass().await.unwrap();
+    e.engine.pass().await.unwrap();
+    assert_eq!(running().as_deref(), Some("cs_7a"), "kept");
+    assert_eq!(e.engine.store.row(&p.id).unwrap().head, "cs_7b");
+    assert!(e.engine.store.activity(&p.id).unwrap().iter().any(|a| a.message.starts_with("kept web's build at")));
+    let (t, _) = e.engine.env(&p.id, "web").await.unwrap();
+    assert_eq!(t.revision, "cs_7a");
+    // Its own code: rebuilt at the head.
+    e.code.between.lock().insert("cs_7a..cs_7c".into(), vec!["src/app.js".into()]);
+    e.code.edit("chg_wt", |c| c.head = "cs_7c".into());
+    e.engine.pass().await.unwrap();
+    e.engine.pass().await.unwrap();
+    assert_eq!(running().as_deref(), Some("cs_7c"));
+}
+
 /// A signed-in person sees only their own projects' previews (as the workspace's projects); a
 /// token, the operator and admins see all.
 #[tokio::test]
