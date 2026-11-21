@@ -636,6 +636,10 @@ async fn run_with(mut args: Args) -> anyhow::Result<()> {
     code_secrets.set(secrets.clone(), workspace.clone());
     apps_secrets.set(secrets.clone(), workspace.clone());
     storage_secrets.set(secrets.clone());
+    // roll search's snapshot repositories resolve their roll:// credentials for their cluster.
+    if let Some(s) = &search {
+        s.control.set_secrets(std::sync::Arc::new(secrets::ForSearch(secrets.clone())));
+    }
     let _ = secrets_envs.0.set(secrets.clone());
     // roll secrets' placeholders found leaked (`rlph_`) stop working, like tokens.
     {
