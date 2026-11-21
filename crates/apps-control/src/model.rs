@@ -390,6 +390,20 @@ pub struct Build {
     /// Docker builds unsized).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub size: Option<BuildSize>,
+    /// Submodules fetched into the tree (Vercel's, Netlify's, Render's), at the commits their
+    /// gitlinks pin: a Git URL service's from public URLs; a roll code repo's from public URLs,
+    /// public roll code repos and the private ones `submodule_repos` names. Off, they're left out.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub submodules: Option<bool>,
+    /// The private roll code repos (`owner/name`) a roll code repo's submodules may come from:
+    /// whoever sets it must be able to read each (the catalogue lends read), so a writer to the
+    /// service's repo can't build a repo it can't read into its code by pinning it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub submodule_repos: Option<Vec<String>>,
+    /// A Git URL service's Git LFS objects fetched in place of their pointers (Vercel's,
+    /// Netlify's), from the repository's LFS server; off, the pointers are built as they are.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub lfs: Option<bool>,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -453,6 +467,11 @@ impl Build {
         }
         if self.timeout_s.is_some_and(|t| !(60..=6 * 3600).contains(&t)) {
             return Err(Error::BadRequest("build.timeout_s is 60–21600 seconds".into()));
+        }
+        if let Some(r) = &self.submodule_repos
+            && (r.len() > crate::git_source::MAX_SUBMODULES || r.iter().any(|n| n.len() > 200 || n.split('/').count() != 2 || n.split('/').any(|p| p.is_empty() || p.starts_with('.') || !p.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-' | b'.')))))
+        {
+            return Err(Error::BadRequest(format!("build.submodule_repos is at most {} roll code repos, each owner/name", crate::git_source::MAX_SUBMODULES)));
         }
         Ok(())
     }
@@ -936,6 +955,11 @@ pub struct Scheduled {
     /// environment's URL as `aud`), as Cloud Scheduler's does; else `CRON_SECRET`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub auth: Option<String>,
+    /// A command's run at its own size (0.25–8 vCPU, 256–16384 MiB); unset, the service's.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cpu: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub memory_mb: Option<u32>,
 }
 
 /// One of `run.push`: a topic of a roll stream delivered to a path of one environment, a record
@@ -1235,6 +1259,9 @@ impl Run {
             }
             if sc.auth.as_deref().is_some_and(|a| a != "oidc" || sc.path.is_none()) {
                 return bad("a schedule's auth is oidc, on a path's call");
+            }
+            if sc.cpu.is_some_and(|c| !(0.25..=8.0).contains(&c)) || sc.memory_mb.is_some_and(|m| !(256..=16384).contains(&m)) || ((sc.cpu.is_some() || sc.memory_mb.is_some()) && sc.path.is_some()) {
+                return bad("a schedule's cpu (0.25–8) and memory_mb (256–16384) are a command's");
             }
         }
         if !self.push.is_empty() && (self.kind != RunType::Web || self.tcp) {
@@ -1788,6 +1815,15 @@ pub struct Environment {
     /// Hosts its egress proxy refused lately (its code tried them; they aren't listed).
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub egress_refused: Vec<crate::runtime::egress::Refused>,
+    /// Who a closed environment's placeholders are made by (`usr_…`, `token:…`, the operator);
+    /// null, no one (its keys bound to hosts withheld); absent when it's open or it was closed
+    /// before that was kept.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub closed_by: Option<serde_json::Value>,
+    /// A closed environment's interception on its owner (roll secrets' placeholders): requests
+    /// filtered, placeholders swapped, the latest refusals; none until it has done something.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub intercepted: Option<crate::runtime::egress::Intercepted>,
     /// A worker that follows its work: the backlog it last read (null before the first read)
     /// and the instances that wants.
     pub scaling: Option<Scaling>,

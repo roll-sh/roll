@@ -688,7 +688,7 @@ async fn load(cluster: &Cluster, policy: &str, index: &str) -> EsResult<()> {
         if let (Some(a), Value::Obj(m)) = (&after, &mut req) {
             m.insert("search_after".into(), a.clone());
         }
-        let resp = internal::call(cluster, "POST", &format!("/{}/_search", enc(index)), Some(&req)).await?;
+        let resp = internal::call(cluster, "POST", &format!("/{}/_search?{}", enc(index), internal::STRICT), Some(&req)).await?;
         let hits = resp.pointer(&["hits", "hits"]).and_then(Value::as_array).cloned().unwrap_or_default();
         if hits.is_empty() {
             break;

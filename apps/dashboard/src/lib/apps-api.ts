@@ -14,7 +14,7 @@ export interface Prices {
   gb_second: number;
   egress_gb: number;
   build_minute: number;
-  /** A GB-month of logs kept past the first week. */
+  /** A GB-month stored: logs kept past the first week, build caches. */
   stored_gb_month: number;
 }
 
@@ -51,6 +51,12 @@ export interface Build {
   timeout_s?: number;
   /** Its builder: small (2 vCPU, 4 GiB; default), medium (4, 8 GiB) or large (8, 16 GiB), minutes metered by size on the fleet. */
   size?: "small" | "medium" | "large";
+  /** Submodules fetched into the tree (default: left out): a Git URL's, or a roll code repo's. */
+  submodules?: boolean;
+  /** The private roll code repos (owner/name) a roll code repo's submodules may come from. */
+  submodule_repos?: string[];
+  /** A Git URL service's Git LFS objects in place of their pointers (default: pointers as text). */
+  lfs?: boolean;
 }
 
 export type ServiceType = "web" | "worker" | "cron";
@@ -708,6 +714,10 @@ export interface Environment extends EnvironmentSummary {
   egress?: Egress;
   /** Hosts its egress proxy refused lately: not listed, or (`private`) resolving only to private addresses. */
   egress_refused?: { host: string; private?: true }[];
+  /** Who a closed environment's placeholders are made by; null: no one (its bound keys withheld). */
+  closed_by?: string | null;
+  /** A closed environment's interception (roll secrets' placeholders): requests filtered, placeholders swapped, the latest refusals. */
+  intercepted?: { requests: number; swapped: number; refused?: string[] };
   /** A push deploys only once its commit's checks pass. */
   wait_for_ci?: boolean;
   /** The push (sha) waiting for its checks, if one is. */
@@ -1438,7 +1448,8 @@ export const appsApi = {
   environment: (id: string, e: string) => call<Environment>("GET", env(id, e)),
   notifyTargets: (project: string) => call<NotifyTarget[]>("GET", `/v1/apps/projects/${enc(project)}/notifications`),
   drains: (project: string) => call<LogDrain[]>("GET", `/v1/apps/projects/${enc(project)}/drains`),
-  addDrain: (project: string, body: { url: string; format?: DrainFormat } & DrainSettings) => call<LogDrain>("POST", `/v1/apps/projects/${enc(project)}/drains`, body),
+  /** A drain to a URL, or (`bucket`) into a roll storage bucket on the project, an `s3` drain with a key roll mints for it. */
+  addDrain: (project: string, body: ({ url: string; format?: DrainFormat } | { bucket: string; prefix?: string }) & DrainSettings) => call<LogDrain>("POST", `/v1/apps/projects/${enc(project)}/drains`, body),
   /** Its sources, filters and headers (given ones replace; `headers` replaces them all); its URL and secret stay. */
   updateDrain: (project: string, id: string, body: DrainSettings) => call<LogDrain>("PATCH", `/v1/apps/projects/${enc(project)}/drains/${enc(id)}`, body),
   testDrain: (project: string, id: string) => call<{ ok: boolean; code: number | null; error: string | null }>("POST", `/v1/apps/projects/${enc(project)}/drains/${enc(id)}/test`),

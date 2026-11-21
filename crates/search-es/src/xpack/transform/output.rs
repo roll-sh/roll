@@ -11,7 +11,7 @@ pub(super) fn agg_kind(a: &Value) -> Option<&str> {
 /// The search of a transform's sources: missing indices are skipped (an unattended transform
 /// or a wildcard matching nothing reads no documents rather than failing).
 pub(super) fn search_uri(t: &Value) -> String {
-    format!("/{}/_search?ignore_unavailable=true&allow_no_indices=true", enc(&source_indices(t).join(",")))
+    format!("/{}/_search?ignore_unavailable=true&allow_no_indices=true&{}", enc(&source_indices(t).join(",")), internal::STRICT)
 }
 
 /// The field types of the source indices (`field_caps`), by field name.

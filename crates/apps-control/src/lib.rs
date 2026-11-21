@@ -19,6 +19,7 @@ pub mod build_cache;
 pub mod hooks;
 pub mod tags;
 pub mod sites;
+pub mod submodules;
 pub mod skew;
 pub mod site_rules;
 pub mod tunnel;
@@ -168,6 +169,9 @@ pub struct AppsConfig {
     /// registries whose names resolve to one (local development and tests only:
     /// `ROLL_APPS_ALLOW_PRIVATE`).
     pub allow_private: bool,
+    /// An open daemon (no admin token: rolld's gate puts no `Operator` on a request): a request
+    /// that's neither a user's token nor a signed-in person's is the operator's, as roll-mcp reads it.
+    pub open: bool,
     /// PagerDuty's Events API v2 and Opsgenie's Alert API, per region (`us`, `eu`): fixed, never
     /// a tenant's URL ([`notify`]'s on-call targets). Tests point them at their own servers.
     pub oncall_apis: OncallApis,
@@ -206,6 +210,7 @@ impl AppsConfig {
             visitor_recheck: Duration::from_secs(300),
             otlp_base: None,
             allow_private: false,
+            open: false,
             oncall_apis: OncallApis::default(),
             spend_every: Duration::from_secs(30),
             cron_retry_after: Duration::from_secs(30),
@@ -290,6 +295,11 @@ pub struct Apps {
     status_swept: std::sync::atomic::AtomicI64,
     /// When owned environments' logs were last expired (hourly, [`Apps::expire_logs_pass`]).
     logs_expired: std::sync::atomic::AtomicI64,
+    /// The interception CA each closed environment's instances trust (its PEM's digest): when
+    /// roll secrets answers another (near its end, or ended early), they're moved to it.
+    pub(crate) intercept_cas: Mutex<HashMap<String, String>>,
+    /// When closed environments' CAs were last checked (each minute).
+    intercepts_checked: std::sync::atomic::AtomicI64,
     /// Private environments' token hashes, by environment, as the owner last read or set them.
     access: Mutex<HashMap<String, Option<Access>>>,
     /// Bumped by every change to the access cache: a cold read caches what it read only if
@@ -521,6 +531,9 @@ pub struct ResolvedVars {
     /// which logs may show but for a URL's password.
     pub from_secrets: BTreeSet<String>,
     pub plain_secrets: BTreeSet<String>,
+    /// What roll secrets said about the resolve (a closed environment's keys withheld): said in
+    /// the environment's log at each deploy.
+    pub notices: Vec<String>,
 }
 
 impl ResolvedVars {
@@ -615,6 +628,8 @@ impl Apps {
             status_cache: Default::default(),
             status_swept: std::sync::atomic::AtomicI64::new(0),
             logs_expired: std::sync::atomic::AtomicI64::new(0),
+            intercept_cas: Mutex::new(HashMap::new()),
+            intercepts_checked: std::sync::atomic::AtomicI64::new(0),
             access: Mutex::new(HashMap::new()),
             access_gen: std::sync::atomic::AtomicU64::new(0),
             visits: Mutex::new(HashMap::new()),
@@ -1731,7 +1746,8 @@ impl Apps {
             vitals: r.vitals,
             log_retention_days: r.log_retention_days.unwrap_or(crate::logs::KEEP_DAYS),
             approvals: r.approvals,
-            badge_url: r.badge.then(|| self.cfg.otlp_base.as_deref().map(|b| format!("{}{}{}/{}.svg", b.trim_end_matches('/'), crate::public::BADGE, r.service, r.name))).flatten(),
+            // On the environment's own public name (the apps listener answers `/_roll/badge/` on any).
+            badge_url: r.badge.then(|| format!("{}{}{}/{}.svg", self.url(&r.slug), crate::public::BADGE, r.service, r.name)),
             report: r.report,
             preview_host: {
                 let (sid, e) = (r.service.clone(), r.name.clone());
@@ -1762,6 +1778,8 @@ impl Apps {
             freeze: r.freeze.clone(),
             heartbeat_urls: Default::default(),
             egress_refused: if r.egress.closed() { self.deps.runtime.egress_refused(&closed_network_name(&svc.project, &r.name), &r.egress.hosts) } else { Vec::new() },
+            intercepted: r.egress.closed().then(|| self.deps.runtime.intercepted(&closed_network_name(&svc.project, &r.name))).flatten(),
+            closed_by: r.egress_by.as_ref().filter(|_| r.egress.closed()).map(|m| if m.is_empty() { Value::Null } else { Value::String(m.clone()) }),
             egress: r.egress.clone(),
             scaling,
             wait_for_ci: r.wait_for_ci,
@@ -1876,9 +1894,15 @@ impl Apps {
     }
 
     pub async fn put_environment(self: &Arc<Self>, service: &str, env: &str, body: Value) -> Result<Environment> {
+        self.put_environment_by(service, env, body, None).await
+    }
+
+    /// [`Apps::put_environment`], `by` the person asking (who an egress change is recorded as:
+    /// a closed environment's placeholders are made by them).
+    pub async fn put_environment_by(self: &Arc<Self>, service: &str, env: &str, body: Value, by: Option<String>) -> Result<Environment> {
         let o = body.as_object().cloned().unwrap_or_default();
         for k in o.keys() {
-            if !["branch", "ephemeral", "access", "variables_from", "wait_for_ci", "run", "follow_tag", "redeploy_on_secrets", "feedback", "maintenance", "pages", "allow_ips", "rate_limit", "firewall", "headers", "routes", "checks", "heartbeats", "split", "mirror", "snippets", "config", "freeze", "pause_schedule", "paused", "held", "hostname", "traces", "egress", "vitals", "report", "preview_host", "log_retention_days", "approvals", "badge"].contains(&k.as_str()) {
+            if !["branch", "ephemeral", "access", "variables_from", "wait_for_ci", "run", "follow_tag", "redeploy_on_secrets", "feedback", "maintenance", "pages", "allow_ips", "rate_limit", "firewall", "headers", "routes", "checks", "heartbeats", "split", "mirror", "snippets", "config", "freeze", "pause_schedule", "paused", "held", "hostname", "traces", "egress", "vitals", "report", "preview_host", "log_retention_days", "approvals", "badge", "closed_by"].contains(&k.as_str()) {
                 return Err(Error::BadRequest(format!("unknown field {k}")));
             }
         }
@@ -2116,6 +2140,16 @@ impl Apps {
         if egress.as_ref().is_some_and(crate::model::Egress::closed) && !self.deps.runtime.closes_egress() {
             return Err(Error::Conflict("egress \"roll\" needs a runtime that can close an environment's network (Docker on this host); this node's can't".into()));
         }
+        // Who a closed environment's placeholders are made by, named by the operator's caller (roll
+        // previews: its rules' maker); null, no one (its bound keys withheld). With egress only.
+        let closed_by = match o.get("closed_by") {
+            None => None,
+            _ if egress.is_none() => return Err(Error::BadRequest("closed_by goes with egress".into())),
+            Some(Value::Null) => Some(String::new()),
+            Some(Value::String(m)) if (m.starts_with("usr_") || m.starts_with("token:")) && m.len() <= 128 && !m.contains(char::is_whitespace) => Some(m.clone()),
+            Some(_) => return Err(Error::BadRequest("closed_by is a person (usr_…), a token (token:…) or null".into())),
+        };
+        let by = closed_by.or(by);
         let branch = match o.get("branch") {
             None => None,
             Some(Value::Null) => Some(None),
@@ -2352,7 +2386,8 @@ impl Apps {
         // variables); what runs keeps its way out until then, and `needs_deploy` says so.
         if let Some(eg) = egress {
             let (sid, e) = (service.to_string(), env.to_string());
-            self.db(move |s| s.set_egress(&sid, &e, &eg)).await?;
+            let who = by.clone();
+            self.db(move |s| s.set_egress(&sid, &e, &eg, who.as_deref())).await?;
             self.settings_changed();
             self.changed(service);
         }
@@ -2574,10 +2609,14 @@ impl Apps {
         if let Ok(false) = self.db(move |s| s.env_in_use(&p, &e, &l)).await {
             self.deps.runtime.remove_network(&network_name(project, env)).await;
             self.deps.runtime.remove_network(&closed_network_name(project, env)).await;
-            // Its build caches too: no service of the project builds there any more.
+            // Its build caches too: no service of the project builds there any more; and its
+            // placeholders and interception end.
             let (p, e) = (project.to_string(), env.to_string());
             if let Ok(gone) = self.db(move |s| s.drop_build_caches(&p, &e)).await {
                 self.drop_cache_objects(gone);
+            }
+            if let Err(e) = self.deps.secrets.end_intercept(project, env).await {
+                tracing::warn!(project, env, error = %e, "apps: a closed environment's placeholders couldn't be ended");
             }
         }
     }
@@ -2822,7 +2861,16 @@ impl Apps {
         }
         let mut sensitive = BTreeSet::new();
         let (mut from_secrets, mut plain_secrets) = (BTreeSet::new(), BTreeSet::new());
-        match self.deps.secrets.resolve(&svc.project, &env.name, &svc.id).await {
+        // A closed environment's keys bound to hosts come as placeholders its egress proxy swaps.
+        let mut notices = Vec::new();
+        let resolved = match env.egress.closed() {
+            true => self.deps.secrets.resolve_closed(&svc.project, &env.name, &svc.id, env.egress_by.as_deref()).await.map(|c| {
+                notices.extend(c.notice);
+                c.vars
+            }),
+            false => self.deps.secrets.resolve(&svc.project, &env.name, &svc.id).await,
+        };
+        match resolved {
             Ok(secrets) => {
                 for s in secrets {
                     if s.sensitive {
@@ -2934,7 +2982,7 @@ impl Apps {
         // Reference variables, one level deep: against what resolved above, and other services'.
         let unresolved = self.fill_references(svc, &env.name, &mut vars, &mut sealed).await;
         let sources = vars.iter().map(|(k, (_, s))| (k.clone(), *s)).collect();
-        Ok(ResolvedVars { vars: vars.into_iter().map(|(k, (v, _))| (k, v)).collect(), sources, unresolved, refused, ref_texts, sealed, from_secrets, plain_secrets })
+        Ok(ResolvedVars { vars: vars.into_iter().map(|(k, (v, _))| (k, v)).collect(), sources, unresolved, refused, ref_texts, sealed, from_secrets, plain_secrets, notices })
     }
 
     /// Fill the `${{ … }}` in the service's own variables ([`refs`]); what named nothing. A
@@ -3900,6 +3948,10 @@ impl Apps {
         }
         if d.run.volume.is_some() {
             return Err(Error::Conflict("a service with a volume has no deployment URLs: one instance writes the volume".into()));
+        }
+        // Waiting for its approvals: nothing of it runs (with the environment's values) before.
+        if row.approvals > 0 && d.status == DeployStatus::Ready {
+            return Err(Error::Conflict(format!("{dep} waits for {} approval(s): it runs once approved", row.approvals)));
         }
         self.template(&svc.for_env(&row)?, &row, &d).await
     }

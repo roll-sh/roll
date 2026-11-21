@@ -189,6 +189,12 @@ pub fn caller() -> Option<Caller> {
     CALLER.try_with(Caller::clone).ok()
 }
 
+/// The query parameter of an internal pager's searches (a transform's, an enrich policy's
+/// load, a downsample's scan): a page cut short (a failed shard, the node's cap on one
+/// request, [`crate::search::MAX_TIME`]) fails the search, so the job reports and retries it
+/// instead of taking a short page as complete.
+pub const STRICT: &str = "allow_partial_search_results=false";
+
 /// Sends `method uri` with a JSON body; the parsed response on 2xx, else its error.
 pub fn call<'a>(cluster: &'a Cluster, method: &str, uri: &str, body: Option<&Value>) -> Call<'a> {
     let mut req = EsRequest::new(method, uri);

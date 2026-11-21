@@ -241,6 +241,11 @@ CREATE TABLE IF NOT EXISTS runtime_facts (
     json TEXT NOT NULL,
     PRIMARY KEY (preview_id, kind)
 );
+CREATE TABLE IF NOT EXISTS rules_makers (
+    project_id TEXT PRIMARY KEY,
+    by TEXT NOT NULL,
+    at INTEGER NOT NULL
+);
 CREATE TABLE IF NOT EXISTS env_refs (
     project_id TEXT NOT NULL,
     scope TEXT NOT NULL,
@@ -958,6 +963,23 @@ impl Store {
             c.execute("UPDATE services SET config = ? WHERE preview_id = ? AND name = ?", params![config, id, name])?;
             Ok::<_, Error>(())
         })
+    }
+
+    /// Who last saved the project's preview rules, when it was a person or their token (the
+    /// operator is no one's: `None`): whom a preview's placeholders are made by.
+    pub fn set_rules_maker(&self, project: &str, by: Option<&str>) -> Result<()> {
+        let now = self.now_ms()?;
+        self.db.write(|c| {
+            match by {
+                Some(b) => c.execute("INSERT INTO rules_makers (project_id, by, at) VALUES (?, ?, ?) ON CONFLICT (project_id) DO UPDATE SET by = excluded.by, at = excluded.at", params![project, b, now])?,
+                None => c.execute("DELETE FROM rules_makers WHERE project_id = ?", [project])?,
+            };
+            Ok::<_, Error>(())
+        })
+    }
+
+    pub fn rules_maker(&self, project: &str) -> Result<Option<String>> {
+        Ok(self.db.read(|c| c.query_row("SELECT by FROM rules_makers WHERE project_id = ?", [project], |r| r.get(0)).optional())?)
     }
 
     /// Each of a project's references with who wrote it: `(scope, name, reference, by)`. A rule's
@@ -2575,6 +2597,21 @@ impl Store {
     }
 
     /// Keep what its holder read (`None`: nothing to say); whether that changed what was kept.
+    /// Change a preview's interception record in one write (`f` may run again).
+    pub fn update_intercepted(&self, id: &str, f: impl Fn(&mut crate::Intercepted)) -> Result<()> {
+        self.db.write(|c| {
+            let json: Option<String> = c.query_row("SELECT json FROM runtime_facts WHERE preview_id = ? AND kind = 'intercepted'", [id], |r| r.get(0)).optional()?;
+            let mut x: crate::Intercepted = json.and_then(|j| serde_json::from_str(&j).ok()).unwrap_or_default();
+            f(&mut x);
+            let json = serde_json::to_string(&x).map_err(|e| Error::Internal(e.to_string()))?;
+            c.execute(
+                "INSERT INTO runtime_facts (preview_id, kind, json) VALUES (?, 'intercepted', ?) ON CONFLICT (preview_id, kind) DO UPDATE SET json = excluded.json",
+                params![id, json],
+            )?;
+            Ok::<_, Error>(())
+        })
+    }
+
     pub fn set_runtime_fact<T: serde::Serialize>(&self, id: &str, kind: &str, fact: Option<&T>) -> Result<bool> {
         let json = fact.map(serde_json::to_string).transpose().map_err(|e| Error::Internal(e.to_string()))?;
         self.db.write(|c| {
@@ -2921,6 +2958,14 @@ impl Store {
         let slower_routes = if settings.traces { self.runtime_fact::<crate::SlowerRoutes>(&r.id, "slower_routes")?.filter(|f| f.head == r.head) } else { None };
         let compared_at = |kind: &str| -> Result<bool> { Ok(self.runtime_fact::<String>(&r.id, kind)?.as_deref() == Some(r.head.as_str())) };
         let regressions_compared = compared_at("compared_errors")? && (!settings.traces || compared_at("compared_routes")?);
+        // Its own proxy's record (with the keys it holds), and roll apps' counts for its services there.
+        let closed = settings.egress_for(r.trusted) == crate::settings::EgressRule::Roll;
+        let on_apps = self.runtime_fact::<crate::AppsIntercepted>(&r.id, "intercepted_apps")?.filter(|_| closed);
+        let intercepted = match (self.runtime_fact::<crate::Intercepted>(&r.id, "intercepted")?.filter(|x| !x.keys.is_empty()), on_apps) {
+            (Some(x), on_apps) => Some(crate::Intercepted { on_apps, ..x }),
+            (None, Some(a)) => Some(crate::Intercepted { on_apps: Some(a), ..Default::default() }),
+            (None, None) => None,
+        };
         let regressions = match settings.regressions {
             crate::settings::RegressionsRule::Off => None,
             crate::settings::RegressionsRule::Check => Some("check".to_string()),
@@ -2998,6 +3043,7 @@ impl Store {
             regressions,
             regressions_accepted,
             regressions_compared,
+            intercepted,
             page_speed,
             page_health,
             page_a11y,

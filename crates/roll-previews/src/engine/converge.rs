@@ -304,6 +304,15 @@ impl Engine {
             self.store.drop_resource(&r.id, res.kind, &res.parent)?;
             self.store.log(&r.id, &format!("{}:{} moves to {} mode: branched again", res.kind.as_str(), res.parent, res.mode.as_str()))?;
         }
+        // A search branch whose link was made with the branch's own login (before a preview got
+        // only a data credential): made again, so that login stops working wherever it went.
+        for res in self.store.resources(&r.id)? {
+            if res.kind == Kind::Search && res.kept.as_deref().is_some_and(crate::names::search_link_holds_branch_login) {
+                self.delete_branch(&r.id, &res, &name).await?;
+                self.store.drop_resource(&r.id, res.kind, &res.parent)?;
+                self.store.log(&r.id, &format!("search:{}: its link held the branch's own login: branched again, with a data-only credential", res.parent))?;
+            }
+        }
         for gone in self.store.want_resources(&r.id, &wanted)? {
             self.delete_branch(&r.id, &gone, &name).await?;
             self.store.drop_resource(&r.id, gone.kind, &gone.parent)?;
@@ -543,6 +552,15 @@ impl Engine {
 
         // The project's own preview domain, when it has one (`Store::set_project_domain`).
         let domain = self.store.project_domain(&r.project_id)?;
+        // Its interception CA, when its egress goes through the proxy: its services trust that
+        // certificate, so a new one (its bound hosts changed) restarts them.
+        let ca = match (s.egress_for(r.trusted) == crate::settings::EgressRule::Roll, self.intercepts.get().cloned()) {
+            (true, Some(i)) => {
+                let id = r.id.clone();
+                tokio::task::spawn_blocking(move || i.of(&id)).await?.map_err(|e| anyhow::anyhow!("its interception: {e:#}"))?.map(|x| x.id)
+            }
+            _ => None,
+        };
         for (spec, repo, rev, on_apps) in wanted {
             keep.push(spec.name.clone());
             if let Some(path) = &spec.health {
@@ -566,6 +584,7 @@ impl Engine {
                 // Traces: a runtime service takes the OpenTelemetry variables when it starts;
                 // roll apps' environment turns its own on and redeploys.
                 + if s.traces { "o" } else { "" }
+                + &ca.as_deref().filter(|_| !on_apps).map(|id| format!("i{id}")).unwrap_or_default()
                 + &rebuilt;
             let was = self.store.service_config(&r.id, &spec.name)?;
             let config_moved = was.as_deref() != Some(fingerprint.as_str());
@@ -1287,6 +1306,7 @@ impl Engine {
             anyhow::bail!("refusing to delete {} {branch}: it's the preview's parent", res.kind.as_str());
         }
         self.store.set_resource(id, res.kind, &res.parent, |x| x.state = ResourceState::Deleting)?;
+        self.brancher(res.kind)?.retire(&res.parent, branch, res.kept.as_deref()).await.map_err(|e| anyhow::anyhow!("revoking what the {} branch {branch} handed out: {e:#}", res.kind.as_str()))?;
         self.brancher(res.kind)?.delete(&res.parent, branch, name).await.map_err(|e| anyhow::anyhow!("deleting the {} branch {branch}: {e:#}", res.kind.as_str()))?;
         self.store.log(id, &format!("deleted the {} branch {branch}", res.kind.as_str()))?;
         Ok(())
@@ -1329,6 +1349,11 @@ impl Engine {
             self.store.drop_service(&r.id, &svc.name)?;
         }
         self.secrets.delete(&r.project_id, &env_name(&r.id)).await.map_err(|e| anyhow::anyhow!("secrets: {e:#}"))?;
+        // Its placeholders and interception CAs end with it, not at their expiry.
+        if let Some(i) = self.intercepts.get().cloned() {
+            let id = r.id.clone();
+            tokio::task::spawn_blocking(move || i.end(&id)).await?.map_err(|e| anyhow::anyhow!("ending its interception: {e:#}"))?;
+        }
         let name = branch_name(&r.id);
         for res in self.store.resources(&r.id)? {
             self.delete_branch(&r.id, &res, &name).await?;
