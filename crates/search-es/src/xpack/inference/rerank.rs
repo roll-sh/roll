@@ -95,6 +95,7 @@ fn admit(ctx: &crate::rest::Ctx<'_>, rr: &Reranker) -> EsResult<()> {
     if rr.window > p.max_rerank_window {
         return Err(browser::refused(format!("a [text_similarity_reranker] [rank_window_size] over [{}] (the key's max_rerank_window)", p.max_rerank_window)));
     }
+    browser::check_inference_text(&rr.text)?;
     sec.spend_inference(1)?;
     browser::charge_work(ctx, "rerank", (rr.window.max(1) as u64).div_ceil(browser::RERANK_DOCS_PER_ITEM as u64))
 }

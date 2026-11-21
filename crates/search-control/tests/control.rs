@@ -1016,6 +1016,7 @@ async fn a_browser_key_only_searches() {
     assert_eq!(r["status"], 200, "{r}");
     let terms = |sub: Value| json!({"size": 0, "aggs": {"c": {"terms": {"field": "color.keyword"}, "aggs": {"t": sub}}}});
     let five_texts: Vec<Value> = (0..5).map(|i| json!({"sparse_vector": {"field": "body", "inference_id": ".elser-2-elasticsearch", "query": format!("text {i}")}})).collect();
+    let expansions: Vec<Value> = (0..101).map(|i| json!({"name": format!("i{i}"), "size": 0})).collect();
     // Why each is refused: the browser policy, `search.allow_expensive_queries: false`'s own
     // refusal, or the key's window.
     let (browser, expensive, window) = ("isn't available to a browser key", "'search.allow_expensive_queries' is set to false", "for a browser key");
@@ -1034,6 +1035,8 @@ async fn a_browser_key_only_searches() {
         (post.clone(), "/products/_search", Some(terms(json!({"top_hits": {"explain": true}}))), browser),
         (post.clone(), "/products/_search", Some(json!({"collapse": {"field": "color.keyword", "inner_hits": {"name": "x", "explain": true}}})), browser),
         (post.clone(), "/products/_search", Some(json!({"query": {"bool": {"should": five_texts}}})), "embedding more than [4] distinct texts"),
+        (post.clone(), "/products/_search", Some(json!({"query": {"sparse_vector": {"field": "title", "inference_id": "someone-elses", "query": "shoes"}}})), "inference endpoint [someone-elses]"),
+        (post.clone(), "/products/_search", Some(json!({"collapse": {"field": "color.keyword", "inner_hits": expansions}})), "expanding more than [100]"),
         (post.clone(), "/products/_search?explain=true", Some(json!({})), browser),
         (post.clone(), "/products/_search", Some(json!({"size": "5000"})), window),
         (post.clone(), "/products/_search?size=600", Some(json!({"from": 500})), window),
@@ -1050,6 +1053,19 @@ async fn a_browser_key_only_searches() {
     }
     let (s, v) = as_key(&e, &key, post.clone(), "/products/_search", Some(json!({"query": {"match": {"title": {"query": "shose", "fuzziness": "AUTO"}}}}))).await;
     assert_eq!((s, total(&v)), (200, 1), "search-as-you-type still works: {v}");
+    // A reranker the owner allowed still reranks at most `max_rerank_window` documents.
+    let rr = e.post("/v1/search/clusters/shop/browser-keys", json!({"name": "rr", "indices": ["products"], "limits": {"inference_endpoints": [".rerank-v1-elasticsearch"]}})).await["api_key"].as_str().unwrap().to_string();
+    let rerank = json!({"retriever": {"text_similarity_reranker": {"retriever": {"standard": {"query": {"match_all": {}}}}, "field": "title", "inference_text": "shoes", "rank_window_size": 101}}});
+    let (s, v) = as_key(&e, &rr, post.clone(), "/products/_search", Some(rerank)).await;
+    assert!(s == 400 && v.to_string().contains("max_rerank_window"), "{s} {v}");
+    // An `_msearch` whose items each need inference after the key's bucket is empty runs none:
+    // a refused inference charge gives no token back for the next item.
+    let slow = e.post("/v1/search/clusters/shop/browser-keys", json!({"name": "slow", "indices": ["products"], "rate_limit": {"per_minute": 3}})).await["api_key"].as_str().unwrap().to_string();
+    let lines: String = (0..3).map(|i| format!("{{\"index\":\"products\"}}\n{{\"query\":{{\"sparse_vector\":{{\"field\":\"body\",\"inference_id\":\".elser-2-elasticsearch\",\"query\":\"t{i}\"}}}}}}\n")).collect();
+    let r = e.http.post(format!("{}/_msearch", e.es)).header("authorization", format!("ApiKey {slow}")).header("content-type", "application/x-ndjson").body(lines).send().await.unwrap();
+    let v: Value = r.json().await.unwrap();
+    let statuses: Vec<i64> = v["responses"].as_array().unwrap().iter().map(|i| i["status"].as_i64().unwrap_or(200)).collect();
+    assert_eq!(statuses, vec![429, 429, 429], "{v}");
     // `_terms_enum` works for a key that reads every document (its internal `_field_caps` call
     // runs as the key).
     let open = e.post("/v1/search/clusters/shop/browser-keys", json!({"name": "open", "indices": ["products"]})).await["api_key"].as_str().unwrap().to_string();

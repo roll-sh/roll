@@ -16,9 +16,10 @@
 //! field and every document of it (`TransportTermsEnumAction.canAccess`): enumerating a
 //! dictionary can't tell which documents a term came from.
 //!
-//! `timeout` (1s) holds during the walk, as Elasticsearch's shards check it between terms: past
-//! it the terms found so far come back with `complete: false`. A browser key's `size` is at
-//! most its `max_result_window` (Elasticsearch caps no one).
+//! `timeout` (1s) holds during the walk, as Elasticsearch's shards check it between terms (the
+//! clock read every 1,024 terms across all segments), and for the aggregation path: past it the
+//! terms found so far come back with `complete: false`. A browser key's `size` is at most its
+//! `max_result_window` and its `timeout` at most 5s (Elasticsearch caps no one).
 
 use crate::error::{EsError, EsResult};
 use crate::json::Value;
@@ -115,22 +116,53 @@ struct Matcher<'a> {
     /// The encoded `search_after` (exclusive), without the key prefix.
     after: Option<Vec<u8>>,
     size: usize,
-    /// When the request's `timeout` is up; set in `timed_out` once a walk saw it pass.
-    deadline: std::time::Instant,
-    timed_out: &'a std::sync::atomic::AtomicBool,
+    /// The request's `timeout`, shared by every segment and shard the walk reads.
+    clock: &'a Clock,
 }
 
 /// How many terms a walk reads between looks at the clock.
 const CLOCK_EVERY: u32 = 1024;
 
-impl Matcher<'_> {
-    /// Whether the request's `timeout` is up (checked every [`CLOCK_EVERY`] terms read).
-    fn expired(&self, read: &mut u32) -> bool {
-        *read += 1;
-        if read.is_multiple_of(CLOCK_EVERY) && std::time::Instant::now() >= self.deadline {
+/// A browser key's longest `timeout` (its walks and aggregations end there).
+const BROWSER_MAX_TIMEOUT_MS: i64 = 5_000;
+
+/// The request's `timeout`: terms read over the whole walk (every segment and shard), the clock
+/// looked at every [`CLOCK_EVERY`] of them, and whether it ran out.
+struct Clock {
+    deadline: std::time::Instant,
+    reads: std::sync::atomic::AtomicU32,
+    timed_out: std::sync::atomic::AtomicBool,
+}
+
+impl Clock {
+    fn new(deadline: std::time::Instant) -> Clock {
+        Clock { deadline, reads: Default::default(), timed_out: Default::default() }
+    }
+
+    /// Looks at the clock now: whether the `timeout` is up.
+    fn up(&self) -> bool {
+        if std::time::Instant::now() >= self.deadline {
             self.timed_out.store(true, std::sync::atomic::Ordering::Relaxed);
         }
+        self.timed_out()
+    }
+
+    fn timed_out(&self) -> bool {
         self.timed_out.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// One more term read: whether the `timeout` is up (the clock looked at every
+    /// [`CLOCK_EVERY`] terms, counted across segments).
+    fn tick(&self) -> bool {
+        let n = self.reads.fetch_add(1, std::sync::atomic::Ordering::Relaxed).wrapping_add(1);
+        if n.is_multiple_of(CLOCK_EVERY) { self.up() } else { self.timed_out() }
+    }
+}
+
+impl Matcher<'_> {
+    /// Whether the request's `timeout` is up, one more term read.
+    fn expired(&self) -> bool {
+        self.clock.tick()
     }
 
     /// The term's text if it matches (the bytes after the key prefix).
@@ -157,7 +189,6 @@ impl Matcher<'_> {
     fn segment(&self, reader: &search_codec::reader::SegmentReader, d: &Dict, out: &mut Vec<Found>) {
         use std::ops::Bound;
         let mut found = 0;
-        let mut read = 0;
         if d.doc_values {
             let Some(dv) = reader.sorted_set(d.number) else { return };
             let start = match &self.after {
@@ -169,7 +200,7 @@ impl Matcher<'_> {
             };
             let mut buf = Vec::new();
             for ord in start..dv.value_count() {
-                if self.expired(&mut read) {
+                if self.expired() {
                     break;
                 }
                 buf.clear();
@@ -203,7 +234,7 @@ impl Matcher<'_> {
         }
         let mut it = terms.range(if inclusive { Bound::Included(&lower[..]) } else { Bound::Excluded(&lower[..]) }, Bound::Unbounded);
         while let Some(t) = it.next() {
-            if self.expired(&mut read) {
+            if self.expired() {
                 break;
             }
             let Some(rest) = t.strip_prefix(&d.key_prefix[..]) else { break };
@@ -292,7 +323,7 @@ fn enumerate(
         let m = Matcher { after, ..*m };
         let searcher = t.searcher()?;
         for seg in searcher.segments() {
-            if m.timed_out.load(std::sync::atomic::Ordering::Relaxed) {
+            if m.clock.up() {
                 break;
             }
             m.segment(&seg.reader, &dict, &mut out);
@@ -355,6 +386,11 @@ pub async fn terms_enum(ctx: &Ctx<'_>) -> EsResult<Reply> {
     if timeout_ms > 60_000 {
         return Err(EsError::action_request_validation(&["Timeout cannot be > 1 minute".into()]));
     }
+    // A browser key's walk ends within 5 seconds, whatever it asks.
+    let timeout_ms = match crate::xpack::security::browser::policy(ctx) {
+        Some(_) => timeout_ms.min(BROWSER_MAX_TIMEOUT_MS),
+        None => timeout_ms,
+    };
     let prefix = body.get("string").map(Value::to_es_string).unwrap_or_default();
     // The shards collect until they hold `size` terms, checked after adding one: a size of 0
     // or less returns the first term.
@@ -400,24 +436,25 @@ pub async fn terms_enum(ctx: &Ctx<'_>) -> EsResult<Reply> {
     }
     let started = std::time::Instant::now();
     let security = crate::xpack::security::dls::ReadSecurity::of(ctx);
-    let timed_out = std::sync::atomic::AtomicBool::new(false);
-    let deadline = started + std::time::Duration::from_millis(timeout_ms.max(0) as u64);
-    let m = Matcher { prefix: &prefix, ci, after_text: after.as_deref(), after: None, size: size as usize, deadline, timed_out: &timed_out };
+    let clock = Clock::new(started + std::time::Duration::from_millis(timeout_ms.max(0) as u64));
+    let m = Matcher { prefix: &prefix, ci, after_text: after.as_deref(), after: None, size: size as usize, clock: &clock };
     let (mut out, by_aggregation) = enumerate(ctx.cluster, security.as_ref(), &targets, &field, &m)?;
-    if !by_aggregation.is_empty() {
-        out.extend(aggregated(ctx, &by_aggregation.join(","), &field, &prefix, ci, after.as_deref(), size).await?.into_iter().map(|t| (t.clone().into_bytes(), t)));
+    if !by_aggregation.is_empty() && !clock.up() {
+        out.extend(aggregated(ctx, &by_aggregation.join(","), &field, &prefix, ci, after.as_deref(), size, &clock).await?.into_iter().map(|t| (t.clone().into_bytes(), t)));
     }
     out.sort_unstable_by(|a, b| a.0.cmp(&b.0));
     out.dedup_by(|a, b| a.0 == b.0);
     out.truncate(size as usize);
-    let complete = !timed_out.load(std::sync::atomic::Ordering::Relaxed) && (started.elapsed().as_millis() as i64) < timeout_ms;
+    let complete = !clock.timed_out() && (started.elapsed().as_millis() as i64) < timeout_ms;
     Reply::ok(obj! { "_shards" => shards(total_shards), "terms" => Value::Arr(out.into_iter().map(|(_, t)| Value::from(t)).collect()), "complete" => complete })
 }
 
 /// The terms of a `constant_keyword` or `wildcard` field: a terms aggregation in key order (a
 /// constant keyword has one term; wildcard values come from doc values) on `indices`, which
-/// the reader sees all of.
-async fn aggregated(ctx: &Ctx<'_>, indices: &str, field: &str, prefix: &str, ci: bool, after: Option<&str>, size: i64) -> EsResult<Vec<String>> {
+/// the reader sees all of. It runs with what is left of the request's `timeout`; a search that
+/// ran out of it marks the walk timed out.
+#[allow(clippy::too_many_arguments)]
+async fn aggregated(ctx: &Ctx<'_>, indices: &str, field: &str, prefix: &str, ci: bool, after: Option<&str>, size: i64, clock: &Clock) -> EsResult<Vec<String>> {
     let fetch = size + i64::from(after.is_some()) * 1000;
     let mut terms_agg = obj! { "field" => field, "size" => fetch, "order" => obj! { "_key" => "asc" }, "min_doc_count" => 1 };
     if !prefix.is_empty()
@@ -425,9 +462,13 @@ async fn aggregated(ctx: &Ctx<'_>, indices: &str, field: &str, prefix: &str, ci:
     {
         m.insert("include".into(), prefix_regex(prefix, ci).into());
     }
-    let q = obj! { "size" => 0, "aggs" => obj! { "t" => obj! { "terms" => terms_agg } } };
+    let left = clock.deadline.saturating_duration_since(std::time::Instant::now()).as_millis().max(1) as i64;
+    let q = obj! { "size" => 0, "timeout" => format!("{left}ms"), "aggs" => obj! { "t" => obj! { "terms" => terms_agg } } };
     let uri = format!("/{}/_search?ignore_unavailable=true", enc(indices));
     let r = internal::call(ctx.cluster, "POST", &uri, Some(&q)).await?;
+    if r.get("timed_out").and_then(Value::as_bool) == Some(true) {
+        clock.timed_out.store(true, std::sync::atomic::Ordering::Relaxed);
+    }
     Ok(r
         .pointer(&["aggregations", "t", "buckets"])
         .and_then(Value::as_array)
@@ -457,16 +498,15 @@ mod tests {
         assert!(!has_prefix("k", "kk", true));
         assert_eq!(ip_text(&ip_bytes("10.0.5.1").unwrap()), "10.0.5.1");
         assert_eq!(ip_text(&ip_bytes("2001:db8::1").unwrap()), "2001:db8::1");
-        let never = std::sync::atomic::AtomicBool::new(false);
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
-        let m = Matcher { prefix: "k01", ci: false, after_text: None, after: None, size: 3, deadline, timed_out: &never };
+        let clock = Clock::new(std::time::Instant::now() + std::time::Duration::from_secs(60));
+        let m = Matcher { prefix: "k01", ci: false, after_text: None, after: None, size: 3, clock: &clock };
         assert!(m.past(TermKind::Raw, b"k02"));
         assert!(!m.past(TermKind::Raw, b"k011"));
         assert!(!m.past(TermKind::Raw, b"a"));
         // Version prefixes apply to the decoded text, so they never end a scan.
         assert!(!m.past(TermKind::Version, b"zzz"));
         let enc = search_aggs::version_string::encode("1.11000.0").unwrap();
-        let v = Matcher { prefix: "1.1100", ci: false, after_text: None, after: None, size: 3, deadline, timed_out: &never };
+        let v = Matcher { prefix: "1.1100", ci: false, after_text: None, after: None, size: 3, clock: &clock };
         assert_eq!(v.text(TermKind::Version, &enc).as_deref(), Some("1.11000.0"));
     }
 }

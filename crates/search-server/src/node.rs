@@ -751,10 +751,7 @@ impl search_es::xpack::security::browser::ItemCharge for Charger {
         let Some(l) = self.node.upgrade().and_then(|node| node.get_loaded(&self.name)) else { return Ok(()) };
         let Some(limit) = key_limit(&l, key_id) else { return Ok(()) };
         let ceiling = l.spec().browser_per_minute.unwrap_or(crate::browser::DEFAULT_CLUSTER_PER_MINUTE);
-        l.browser.check(key_id, client, limit, ceiling, n).inspect_err(|_| {
-            // Refused whole: the token its admission took goes back too.
-            l.browser.refund(key_id, client, limit, 1);
-        })
+        l.browser.check(key_id, client, limit, ceiling, n)
     }
 
     fn refund(&self, key_id: &str, client: Option<std::net::IpAddr>) {

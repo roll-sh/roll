@@ -158,6 +158,9 @@ fn admit(ctx: &Ctx, targets: &Targets, distinct: &[Wanted]) -> EsResult<()> {
             "inference endpoint [{id}] (a browser key embeds only with its indices' semantic_text fields' endpoints and those its limits.inference_endpoints name)"
         )));
     }
+    for w in distinct {
+        browser::check_inference_text(&w.text)?;
+    }
     sec.spend_inference(distinct.len())?;
     browser::charge_work(ctx, "inference", distinct.len() as u64)
 }

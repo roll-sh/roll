@@ -34,7 +34,8 @@
 //!   aggregations stop at `max_buckets`.
 //! - **Inference** (`xpack::inference::query`, `rerank`): only the endpoints the target indices'
 //!   `semantic_text` fields search with, or those the owner lists in `inference_endpoints`; at
-//!   most `max_inference` distinct texts per request, each charged as an item
+//!   most `max_inference` distinct texts per request, each at most [`MAX_INFERENCE_TEXT_CHARS`]
+//!   characters and charged as an item
 //!   ([`charge_work`]); a `text_similarity_reranker` within `max_rerank_window`, charged one
 //!   item per [`RERANK_DOCS_PER_ITEM`] documents.
 //! - **Items**: an `_msearch`'s searches and an `_mget`'s documents, as the engine parsed them,
@@ -52,6 +53,18 @@ pub const METADATA: &str = "roll_browser";
 /// hits definitions × page hits), each also one document of its fetch budget.
 pub const MAX_SUB_SEARCHES: i64 = 100;
 
+/// The longest text a browser key may have embedded or rerank against, in characters
+/// (`max_inference` counts texts; this bounds each one).
+pub const MAX_INFERENCE_TEXT_CHARS: usize = 1_000;
+
+/// Refuses an inference text longer than [`MAX_INFERENCE_TEXT_CHARS`].
+pub fn check_inference_text(text: &str) -> EsResult<()> {
+    if text.chars().count() > MAX_INFERENCE_TEXT_CHARS {
+        return Err(refused(format!("an inference text over [{MAX_INFERENCE_TEXT_CHARS}] characters")));
+    }
+    Ok(())
+}
+
 /// A `text_similarity_reranker` costs a browser key one item per this many documents reranked.
 pub const RERANK_DOCS_PER_ITEM: i64 = 10;
 
@@ -63,8 +76,8 @@ const APIS: &[&str] = &[
 
 /// Charges a browser key's items to its rate limits (the node's, `search_server::browser`).
 pub trait ItemCharge: Send + Sync {
-    /// Charges `n` more items to browser key `key_id` from `client`; `Err`: refused, retry after
-    /// that many seconds (the request's admission token is given back then).
+    /// Charges `n` more items to browser key `key_id` from `client`, all or none; `Err`: refused,
+    /// retry after that many seconds.
     fn charge(&self, key_id: &str, client: Option<std::net::IpAddr>, n: u64) -> Result<(), u64>;
     /// Gives back the token the request's admission took: it is refused before running.
     fn refund(&self, key_id: &str, client: Option<std::net::IpAddr>);
@@ -248,18 +261,23 @@ fn too_many(ctx: &Ctx, retry_after: u64, why: String) -> EsError {
 /// goes back.
 pub fn charge_items(ctx: &Ctx, n: usize) -> EsResult<()> {
     let Some((p, key, client)) = key_of(ctx) else { return Ok(()) };
-    if n > p.max_items {
+    // Refused before anything ran: the token its admission took goes back.
+    let refund = || {
         if let Some(charge) = &ctx.cluster.config.item_charge {
             charge.refund(key, client);
         }
+    };
+    if n > p.max_items {
+        refund();
         return Err(too_many(ctx, 60, format!("a browser key's request holds at most [{}] items, this one [{n}] (the key's max_items)", p.max_items)));
     }
-    charge_n(ctx, key, client, n.saturating_sub(1) as u64, || format!("its [{n}] items exceed"))
+    charge_n(ctx, key, client, n.saturating_sub(1) as u64, || format!("its [{n}] items exceed")).inspect_err(|_| refund())
 }
 
 /// Charges `n` items of work a browser key's request asks for besides its searches (inference
 /// calls, a rerank's documents) to the key's rate limits, before the work runs: all or none, a
-/// 429 with `Retry-After` past them.
+/// 429 with `Retry-After` past them. What the request already ran (its admission, its other
+/// `_msearch` items) stays paid: nothing is given back.
 pub fn charge_work(ctx: &Ctx, what: &str, n: u64) -> EsResult<()> {
     let Some((_, key, client)) = key_of(ctx) else { return Ok(()) };
     charge_n(ctx, key, client, n, || format!("its {what} ([{n}] items) exceeds"))

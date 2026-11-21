@@ -318,14 +318,17 @@ applications). A web page calls a cluster directly, with no backend of its own i
     target indices' `semantic_text` fields search with, plus those `limits.inference_endpoints`
     names; an explicit `inference_id` or `model_id` naming any other is a 400. At most
     `limits.max_inference` (4) distinct texts a request (every query and `_msearch` item
-    together, a reranker counting one), each charged one item to the rate limits (below) before
-    its call. A reranker needs its endpoint in `inference_endpoints` and a `rank_window_size` of
+    together, a reranker counting one), each at most 1,000 characters (a reranker's
+    `inference_text` too), each charged one item to the rate limits (below) before its call. A
+    refused charge gives nothing back: what the request already ran (its admission, other
+    `_msearch` items) stays paid. A reranker needs its endpoint in `inference_endpoints` and a `rank_window_size` of
     at most `limits.max_rerank_window` (100), and is charged one item per 10 documents of its
     window. For every caller, an endpoint whose task type can't serve the query (a
     `text_embedding` one named by `sparse_vector`) is refused before the call.
-  - *`_terms_enum`*: `size` at most `limits.max_result_window` (Elasticsearch caps no one);
-    its `timeout` holds during the walk for everyone, as in Elasticsearch, past it the terms
-    found so far with `complete: false`. An index whose documents the key's `filter` restricts
+  - *`_terms_enum`*: `size` at most `limits.max_result_window` and `timeout` at most 5s
+    (Elasticsearch caps no one); the `timeout` holds during the walk for everyone, as in
+    Elasticsearch (the aggregation path for `constant_keyword` and `wildcard` too), past it the
+    terms found so far with `complete: false`. An index whose documents the key's `filter` restricts
     takes no part (as for any reader with document level security).
   - *Items*: an `_msearch`'s searches and an `_mget`'s documents, as the engine parsed them
     (whatever the URL, `?source=` or body format), are charged to the key's rate limits before
