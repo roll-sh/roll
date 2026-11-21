@@ -546,6 +546,8 @@ type Environment = EnvironmentSummary & {
   preview_host?: string; // its label under the project's preview domain
   egress: { mode: "roll" | "open"; hosts: string[] }; // what its code may reach (roll: roll and the hosts)
   egress_refused?: { host: string; private?: true }[]; // hosts its egress proxy refused lately, oldest first, at most 20: not listed, or (private) listed but resolving only to private addresses
+  closed_by?: string | null; // a closed environment's placeholders' maker (usr_…, token:…, operator); null: no one (its keys bound to hosts withheld); absent when open or closed before it was kept
+  intercepted?: { requests: number; swapped: number; refused?: string[] }; // a closed environment's interception on its owner (roll secrets' placeholders) since that node started: requests filtered, placeholders swapped, the latest refusals' reasons (at most 20; never a value or a placeholder)
   feedback: boolean;          // a preview's pages carry roll previews' feedback button
   maintenance: { message: string | null } | null; // in maintenance (null message: roll's words); null: serving
   paused?: true;              // paused (absent: not)

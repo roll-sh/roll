@@ -8074,6 +8074,7 @@ async fn a_closed_environment_uses_its_keys_without_seeing_them() {
     let (_, d) = call(&w.api, "POST", &format!("{base}/staging/deploys"), Some(json!({}))).await;
     settled(&w, &id, "staging", d["id"].as_str().unwrap()).await;
     assert!(vault.0.lock().contains(&"closed by usr_rules".to_string()), "{:?}", vault.0.lock());
+    assert_eq!(call(&w.api, "GET", &format!("{base}/staging"), None).await.1["closed_by"], "usr_rules", "the environment says who");
     assert!(!closed.vars.iter().any(|(_, v)| v.contains("sk_live_real")));
     for k in ["NODE_EXTRA_CA_CERTS", "SSL_CERT_FILE", "REQUESTS_CA_BUNDLE", "CURL_CA_BUNDLE"] {
         assert_eq!(var(k).as_deref(), Some(apps_control::deploy::INTERCEPT_CA), "{k}");
@@ -8081,6 +8082,9 @@ async fn a_closed_environment_uses_its_keys_without_seeing_them() {
     assert!(closed.files.iter().any(|(p, c)| p == apps_control::deploy::INTERCEPT_CA && c.contains("FAKECA")), "the CA in its trust bundle");
     let network = apps_control::closed_network_name(&w.project, "staging");
     assert_eq!(w.fake.intercepted.lock().get(&network).copied(), Some(true), "its proxies intercept");
+    // What its interception did, on the environment (roll previews' sheet).
+    let (_, e) = call(&w.api, "GET", &format!("{base}/staging"), None).await;
+    assert_eq!((e["intercepted"]["requests"].as_u64(), e["intercepted"]["swapped"].as_u64()), (Some(3), Some(2)), "{e}");
     assert!(call(&w.api, "DELETE", &format!("{base}/staging"), None).await.0.is_success());
     assert!(vault.0.lock().contains(&format!("end {}/staging", w.project)), "{:?}", vault.0.lock());
 }

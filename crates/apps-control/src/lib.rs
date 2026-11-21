@@ -1773,6 +1773,8 @@ impl Apps {
             freeze: r.freeze.clone(),
             heartbeat_urls: Default::default(),
             egress_refused: if r.egress.closed() { self.deps.runtime.egress_refused(&closed_network_name(&svc.project, &r.name), &r.egress.hosts) } else { Vec::new() },
+            intercepted: r.egress.closed().then(|| self.deps.runtime.intercepted(&closed_network_name(&svc.project, &r.name))).flatten(),
+            closed_by: r.egress_by.as_ref().filter(|_| r.egress.closed()).map(|m| if m.is_empty() { Value::Null } else { Value::String(m.clone()) }),
             egress: r.egress.clone(),
             scaling,
             wait_for_ci: r.wait_for_ci,
