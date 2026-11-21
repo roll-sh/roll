@@ -1420,6 +1420,10 @@ static ROWS: &[Row] = &[
     row("POST", "/v1/secrets/projects/{project}/environments/{env}/value-requests", "secrets", W, one(&["project"], "project")).env(EnvFrom::Param("env")).path_query("path"),
     row("GET", "/v1/secrets/projects/{project}/value-requests", "secrets", R, one(&["project"], "project")),
     row("DELETE", "/v1/secrets/projects/{project}/value-requests/{id}", "secrets", W, one(&["project"], "project")),
+    // Binding a key to hosts decides where its value goes through a placeholder (docs/secrets.md,
+    // "Using a key without seeing it"): the folder's admin, as purge is.
+    row("PUT", "/v1/secrets/projects/{project}/environments/{env}/secrets/{name}/hosts", "secrets", ADMIN, one(&["project"], "project")).env(EnvFrom::Param("env")).path_query("path"),
+    row("DELETE", "/v1/secrets/projects/{project}/environments/{env}/secrets/{name}/hosts", "secrets", ADMIN, one(&["project"], "project")).env(EnvFrom::Param("env")).path_query("path"),
     // Purging a secret's history can't be undone.
     row("POST", "/v1/secrets/projects/{project}/environments/{env}/secrets/{name}/purge", "secrets", ADMIN, one(&["project"], "project")).env(EnvFrom::Param("env")).path_query("path"),
     // A change request's current and proposed values, for its approvers.
@@ -1505,6 +1509,7 @@ static ROWS: &[Row] = &[
     // "Why did it fail?": reads a deploy's logs and keeps the repo owner's model's answer (metered
     // on their usage), in any environment: write, never production's deploy.
     row("POST", "/v1/apps/services/{id}/environments/{env}/deploys/{dep}/explain", "apps", W, one(PG, "service")).env(EnvFrom::Param("env")),
+    row("POST", "/v1/apps/services/{id}/environments/{env}/deploys/{dep}/approve", "apps", Act::ProductionIf("env"), one(PG, "service")).env(EnvFrom::Param("env")),
     row("POST", "/v1/apps/services/{id}/environments/{env}/deploys/{dep}/rollback", "apps", Act::ProductionIf("env"), one(PG, "service")).env(EnvFrom::Param("env")).admin_if("x-roll-override"),
     // An error group resolved, muted or open again: the team's triage, a write in any environment.
     row("PATCH", "/v1/apps/services/{id}/environments/{env}/errors/{fingerprint}", "apps", W, one(PG, "service")).env(EnvFrom::Param("env")),

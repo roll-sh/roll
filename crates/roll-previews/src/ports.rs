@@ -179,6 +179,8 @@ pub struct ServiceSpec {
     /// More of its own pages, and selectors blanked in screenshots, from its `roll.toml`.
     pub pages: Vec<String>,
     pub hide: Vec<String>,
+    /// The paths whose change rebuilds it (`roll.toml` `watch`); empty: every push does.
+    pub watch: Vec<String>,
 }
 
 /// A screenshot of a service's page, and how fast it loaded when the backend could time it.

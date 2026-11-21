@@ -102,6 +102,27 @@ fn main() {
     for _ in 0..2 {
         time("reach (300 importers)", &mut || drop(s.reach(&project, "production", "/", None, &c).unwrap()));
     }
+    // A sandbox's outgoing request swapping a placeholder (docs/secrets.md, "Using a key without
+    // seeing it"): what roll's egress proxy calls per request, over 1,000 calls.
+    use roll_secrets::proxy::{Place, Position};
+    let hosts = roll_secrets::placeholders::Hosts { hosts: vec!["api.example.com".into()], header: None, query: None, untrusted: false };
+    s.set_hosts(&project, "production", "/", "K00001", hosts, &c).unwrap();
+    let sandbox = s.untrusted(&project, &Caller::consumer("sandbox:bench")).unwrap();
+    let ask = roll_secrets::placeholders::Ask { minutes: None, maker: Some("operator") };
+    let v = s.values_with_placeholders(&project, "production", "/", "sandbox:bench", false, ask, &sandbox).unwrap();
+    let ph = v.values["K00001"].expose().to_string();
+    let bearer = format!("Bearer {ph}");
+    for _ in 0..2 {
+        let mut ms: Vec<f64> = (0..1000)
+            .map(|_| {
+                let t = Instant::now();
+                drop(s.substitute(&ph, "api.example.com", Position { place: Place::Header, name: "authorization", value: &bearer }).unwrap());
+                t.elapsed().as_secs_f64() * 1000.0
+            })
+            .collect();
+        ms.sort_by(f64::total_cmp);
+        println!("{backend:>8} {n:>6} keys  {:<24} {:>8.2} ms p50 {:>8.2} ms p99", "substitute", ms[500], ms[990]);
+    }
 }
 
 fn concurrent(ns: &[usize], secs: u64, nodes: usize) {

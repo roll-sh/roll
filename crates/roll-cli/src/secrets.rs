@@ -699,7 +699,8 @@ pub enum Secrets {
     /// (`ROLL_IDENTITY`), no stored token: list, add, rm.
     #[command(subcommand)]
     Identities(Identities),
-    /// Decoy keys: a credential planted to be found, whose use raises `decoy_used` (admins only).
+    /// Decoy keys: a credential planted to be found, whose use raises `decoy_used` (admins, with
+    /// the operator token: a roll token can't plant one).
     #[command(subcommand)]
     Decoy(DecoyCmd),
     /// Hand a value to someone outside roll: a link that opens once (or `--views`) and expires.

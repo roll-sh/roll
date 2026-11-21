@@ -293,6 +293,12 @@ pub trait Runtime: Send + Sync {
     }
     /// The project's closed builds' builder and network, once it has no service left.
     async fn remove_build_egress(&self, _project: &str) {}
+    /// Closed builds' networks nothing runs on any more (a process that stopped without
+    /// deleting its projects left them, its proxy since stopped): gone with their builders, so
+    /// they don't use up the host's address pools. A rolld still building has its proxy running
+    /// on its network; one that builds again makes it again. Never one of `projects` (this
+    /// node's projects with a closed environment: a build may be setting it up).
+    async fn sweep_build_networks(&self, _projects: &std::collections::HashSet<String>) {}
     /// The hosts closed `network`'s egress proxy for `hosts` refused lately (none: it hasn't, or
     /// isn't here).
     fn egress_refused(&self, _network: &str, _hosts: &[String]) -> Vec<egress::Refused> {
@@ -478,6 +484,11 @@ pub trait Builder: Send + Sync {
     /// Whether its builds share one BuildKit, cache mounts and all (one node's Docker): then
     /// each service's mounts are namespaced (`apps_build::isolate_caches`).
     fn shares_caches(&self) -> bool {
+        false
+    }
+    /// Whether a build gets the CPU and memory its job asks (`build.size`), so its minutes are
+    /// metered by that size; one node's BuildKit takes no per-build limit.
+    fn sizes_builds(&self) -> bool {
         false
     }
 }

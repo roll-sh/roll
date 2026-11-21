@@ -1510,6 +1510,18 @@ mod tests {
             }
             assert!(t.name.starts_with(t.product), "{} isn't named after {}", t.name, t.product);
         }
+        // A tool that another's text names ("from secrets_list_placeholders") is one roll has
+        // (`access_denied` is an audit event; roll code's tools are another crate's).
+        for t in all() {
+            let params: Vec<&str> = t.params.iter().map(|p| p.desc).collect();
+            let text = format!("{} {} {}", t.title, t.description, params.join(" "));
+            for word in text.split(|c: char| !(c.is_ascii_lowercase() || c == '_')) {
+                let Some((product, _)) = word.split_once('_') else { continue };
+                if roll_auth::scope::PRODUCTS.contains(&product) && !matches!(product, "code" | "agents") && word != "access_denied" {
+                    assert!(names.contains(word), "{} names {word}, which isn't a tool", t.name);
+                }
+            }
+        }
         let def = |n: &str| all().iter().find(|t| t.name == n).unwrap().definition();
         assert_eq!(def("postgres_query")["annotations"]["readOnlyHint"], true);
         assert_eq!(def("storage_presign")["annotations"]["readOnlyHint"], false, "a presigned PUT writes");

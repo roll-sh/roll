@@ -47,7 +47,7 @@ pub(crate) async fn pr_comment(code: &Code, hub: &Hub, r: &RepoRow, link: &Link,
     }
     let by = super::reviews::reviewer_of(Some(user));
     if let commands::Command::Preview(action) = cmd {
-        let reply = preview_command(code, &c, action, &user.login).await;
+        let reply = preview_command(code, &c, action, &format!("@{}", user.login)).await;
         hub.client.create_comment(link.installation_id, &link.owner, &link.repo, e.issue.number, &reply).await.map_err(|e| crate::Error::Internal(e.into()))?;
         return Ok(());
     }
@@ -60,12 +60,13 @@ pub(crate) async fn pr_comment(code: &Code, hub: &Hub, r: &RepoRow, link: &Link,
     Ok(())
 }
 
-/// `@roll preview …` from someone who can write to the repo: done by the change's preview backend,
-/// answered with what it did or why not (never a stack of internals).
-async fn preview_command(code: &Code, c: &crate::model::Change, action: Option<commands::PreviewAction>, login: &str) -> String {
+/// `@roll preview …` from someone who can write to the repo (`by`, as the activity names them):
+/// done by the change's preview backend, answered with what it did or why not (never a stack of
+/// internals).
+pub(crate) async fn preview_command(code: &Code, c: &crate::model::Change, action: Option<commands::PreviewAction>, by: &str) -> String {
     let Some(action) = action else { return format!("I know these: {}.", commands::PreviewAction::HELP) };
     let Some(backend) = code.previews.read().clone() else { return "This repo's changes have no previews here.".into() };
-    match backend.act(c, action, &format!("@{login}")).await {
+    match backend.act(c, action, by).await {
         Ok(done) => done,
         Err(e) => format!("I couldn't: {}", format!("{e:#}").lines().next().unwrap_or("it failed")),
     }

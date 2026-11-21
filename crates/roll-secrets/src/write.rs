@@ -624,6 +624,8 @@ pub(crate) fn apply(c: &Conn<'_>, dek: &Dek, mac: &crate::Keyring, env: &EnvRow,
         let mut steps = Steps::new(c);
         steps.in_list("UPDATE decoys SET ended_at = ? WHERE ended_at IS NULL AND secret_id", &[Int(now)], &ended);
         steps.in_list("DELETE FROM secrets WHERE id", &[], &gone);
+        // Its hosts go with it: set again, a key is bound again only by an admin.
+        steps.in_list("DELETE FROM key_hosts WHERE secret_id", &[], &gone);
         // A key's row keeps its id: an existing one is updated in place.
         steps.insert(
             "INSERT INTO secrets (id, project_id, env_id, path, key, owner, version, value, fp, comment, tags, link, link_state, refs, updated_at, updated_by, expires_at, weak, public)",
