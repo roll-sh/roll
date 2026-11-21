@@ -582,6 +582,9 @@ impl Cluster {
         let analytics = crate::analytics::Analytics::default();
         analytics.sync(&state);
         let breakers = crate::breaker::Breakers::with_node(config.request_memory.clone(), config.node_setting(crate::breaker::REQUEST_MAX_LIMIT));
+        // Kept async results count against what this cluster's requests may hold.
+        let xpack = crate::xpack::Runtime::default();
+        xpack.results.charge_to(breakers.request_budget().clone());
         Ok(Cluster {
             analytics,
             changes,
@@ -610,7 +613,7 @@ impl Cluster {
             contexts: Default::default(),
             ccs_contexts: Default::default(),
             ingest: Default::default(),
-            xpack: Default::default(),
+            xpack,
             breakers,
             thread_pools,
             snapshot_data: Default::default(),

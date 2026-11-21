@@ -938,6 +938,20 @@ impl TDigest {
         if high_accuracy { TDigest::Avl(Box::new(AvlTreeDigest::new(compression))) } else { TDigest::Hybrid(HybridDigest::new(compression)) }
     }
 
+    /// What the digest holds outside its own slot (its arrays' capacities).
+    pub fn heap_bytes(&self) -> usize {
+        let f = size_of::<f64>();
+        match self {
+            TDigest::Hybrid(h) => {
+                h.sorting.as_ref().map_or(0, |s| s.values.capacity() * f)
+                    + h.merging.as_ref().map_or(0, |m| {
+                        size_of::<MergingDigest>() + (m.weight.capacity() + m.mean.capacity() + m.temp_weight.capacity() + m.temp_mean.capacity()) * f + m.order.capacity() * size_of::<u32>()
+                    })
+            }
+            TDigest::Avl(a) => size_of::<AvlTreeDigest>() + a.means.capacity() * f + a.counts.capacity() * size_of::<u64>(),
+        }
+    }
+
     /// An empty digest of the same type and compression (`createUsingParamsFrom`).
     pub fn empty_like(&self) -> TDigest {
         match self {

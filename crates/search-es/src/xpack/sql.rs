@@ -1187,9 +1187,9 @@ fn render(ctx: &Ctx, columns: Option<&[(String, String)]>, rows: &[Vec<Value>], 
 }
 
 /// Splits a result at `fetch_size`, keeping the rest behind a cursor.
-fn page(ctx: &Ctx, result: &Result, fetch: usize) -> Option<String> {
+fn page(ctx: &Ctx, result: &Result, fetch: usize) -> EsResult<Option<String>> {
     if result.rows.len() <= fetch {
-        return None;
+        return Ok(None);
     }
     let cursor = async_results::new_id();
     let rest = obj! {
@@ -1197,8 +1197,8 @@ fn page(ctx: &Ctx, result: &Result, fetch: usize) -> Option<String> {
         "text" => Value::Arr(result.text_rows[fetch..].iter().map(|r| Value::Arr(r.iter().map(|s| Value::from(s.clone())).collect())).collect()),
         "fetch" => fetch,
     };
-    ctx.cluster.xpack.results.put(cursor.clone(), Entry { kind: Kind::SqlCursor, response: Value::Null, start_ms: ctx.now_ms, expiration_ms: ctx.now_ms + CURSOR_KEEP_MS, bytes: 0, extra: rest }, ctx.now_ms);
-    Some(cursor)
+    ctx.cluster.xpack.results.put(cursor.clone(), Entry { kind: Kind::SqlCursor, response: Value::Null, start_ms: ctx.now_ms, expiration_ms: ctx.now_ms + CURSOR_KEEP_MS, bytes: 0, extra: rest }, ctx.now_ms)?;
+    Ok(Some(cursor))
 }
 
 /// A cursor roll never issued: Elasticsearch fails to inflate it.
@@ -1223,7 +1223,7 @@ fn next_page(ctx: &Ctx, cursor: &str) -> EsResult<Reply> {
     let text: Vec<Vec<String>> = e.extra.get("text").and_then(Value::as_array).map(|a| a.iter().map(|r| r.as_array().map(|x| x.iter().map(Value::to_es_string).collect()).unwrap_or_default()).collect()).unwrap_or_default();
     let fetch = e.extra.get("fetch").and_then(Value::as_i64).unwrap_or(1000).max(1) as usize;
     let res = Result { columns: Vec::new(), rows, text_rows: text };
-    let next = page(ctx, &res, fetch);
+    let next = page(ctx, &res, fetch)?;
     let n = res.rows.len().min(fetch);
     render(ctx, None, &res.rows[..n], &res.text_rows[..n], next.as_deref(), None)
 }
@@ -1255,7 +1255,7 @@ pub async fn query(ctx: &Ctx<'_>) -> EsResult<Reply> {
     let result = run(ctx, stmt, body.get("filter").cloned(), lenient).await?;
     let is_async = body.get("wait_for_completion_timeout").is_some() || body.get("keep_on_completion").and_then(Value::as_bool) == Some(true);
     let fetch = fetch as usize;
-    let cursor = page(ctx, &result, fetch);
+    let cursor = page(ctx, &result, fetch)?;
     let n = result.rows.len().min(fetch);
     if is_async {
         let keep = body.get("keep_alive").map(|k| crate::units::TimeValue::parse(&k.to_es_string(), "keep_alive")).transpose()?.map_or(5 * 24 * 3600 * 1000, |t| t.as_millis());
@@ -1266,7 +1266,7 @@ pub async fn query(ctx: &Ctx<'_>) -> EsResult<Reply> {
         if let Some(c) = &cursor {
             m.insert("cursor".into(), c.clone().into());
         }
-        ctx.cluster.xpack.results.put(id.clone(), Entry { kind: Kind::Sql, response: Value::Obj(m), start_ms: ctx.now_ms, expiration_ms: ctx.now_ms + keep, bytes: 0, extra: Value::Null }, ctx.now_ms);
+        ctx.cluster.xpack.results.put(id.clone(), Entry { kind: Kind::Sql, response: Value::Obj(m), start_ms: ctx.now_ms, expiration_ms: ctx.now_ms + keep, bytes: 0, extra: Value::Null }, ctx.now_ms)?;
         let mut head = Map::new();
         head.insert("id".into(), id.into());
         head.insert("is_partial".into(), false.into());

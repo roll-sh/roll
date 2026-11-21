@@ -394,9 +394,9 @@ async fn run(ctx: &Ctx<'_>, req: &Request, mem: &memory::Memory) -> EsResult<(Ma
         union_types(all, &stats.original_types);
     }
     out.insert("columns".into(), columns);
-    let values = exec::values_json_in(&table, req.columnar, tz.as_ref());
-    mem.hold(memory::json_bytes(&values), memory::REUSED_ARRAYS)?.keep();
-    out.insert("values".into(), values);
+    // Charged before it is built; it stays charged until the response is rendered.
+    mem.hold(memory::json_estimate(&table), memory::REUSED_ARRAYS)?.keep();
+    out.insert("values".into(), exec::values_json_in(&table, req.columnar, tz.as_ref()));
     if req.profile {
         out.insert("profile".into(), profile::build(ctx.cluster, start_ms, took.as_nanos() as i64, unmapped, &shape, &stats, &table));
     }
@@ -431,7 +431,7 @@ fn union_types(columns: &mut Value, original: &[(String, Vec<String>)]) {
 }
 
 /// The response in the requested format (`txt`, `csv`, `tsv` are rendered here).
-fn reply(ctx: &Ctx, out: Map, table: &exec::Table) -> EsResult<Reply> {
+fn reply(ctx: &Ctx, out: Map, table: &exec::Table, mem: &memory::Memory) -> EsResult<Reply> {
     let format = ctx.query("format").map(str::to_ascii_lowercase).or_else(|| {
         ctx.request.header("accept").and_then(|a| {
             let a = a.to_ascii_lowercase();
@@ -452,6 +452,8 @@ fn reply(ctx: &Ctx, out: Map, table: &exec::Table) -> EsResult<Reply> {
             if f != "csv" && ctx.query("delimiter").is_some() {
                 return Err(EsError::illegal_argument(format!("parameter: [delimiter] can only be used with the format [csv] for request [{}]", ctx.path)));
             }
+            // The cells and the body, charged before they are built.
+            mem.hold(memory::text_estimate(table), memory::REUSED_ARRAYS)?.keep();
             let names: Vec<String> = table.cols.iter().map(|c| c.name.clone()).collect();
             let rows: Vec<Vec<String>> = table.rows.iter().map(|r| r.iter().enumerate().map(|(i, v)| exec::cell_text(v, table.cols[i].ty, f)).collect()).collect();
             let header = !(f == "csv" && ctx.query("header") == Some("absent"));
@@ -473,7 +475,7 @@ pub async fn query(ctx: &Ctx<'_>) -> EsResult<Reply> {
     let req = parse_request(ctx, &body, false)?;
     let mem = memory::Memory::for_query(ctx.cluster);
     let (out, table) = run(ctx, &req, &mem).await?;
-    reply(ctx, out, &table)
+    reply(ctx, out, &table, &mem)
 }
 
 fn with_id(id: &str, running: bool, out: &Map) -> Value {
@@ -496,14 +498,14 @@ pub async fn async_query(ctx: &Ctx<'_>) -> EsResult<Reply> {
         let mut m = Map::with_capacity(out.len() + 1);
         m.insert("is_running".into(), false.into());
         m.extend(out);
-        return reply(ctx, m, &table);
+        return reply(ctx, m, &table, &mem);
     }
     let id = async_results::async_id(&ctx.cluster.node.id);
     ctx.cluster.xpack.results.put(
         id.clone(),
         Entry { kind: Kind::Esql, response: Value::Obj(out.clone()), start_ms: ctx.now_ms, expiration_ms: ctx.now_ms + req.keep_alive, bytes: 0, extra: Value::Null },
         ctx.now_ms,
-    );
+    )?;
     Reply::ok(with_id(&id, false, &out))
 }
 

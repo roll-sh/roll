@@ -269,17 +269,22 @@ request-rate and in-flight byte budgets so one tenant can't starve the node.
 
 One memory account per request: what a request holds is charged as it is built to the
 cluster's `request` breaker, and through it (a parent budget, `search_aggs::memory`) to the
-node's budget for requests, `Node::request_memory`, which only the operator sets
-(`--search-memory-mb`, else half of the host's memory). Either refuses with Elasticsearch's 429
-`circuit_breaking_exception`. The tenant sets `indices.breaker.request.limit` (`-1` even), but
+node's budget, `Node::request_memory`, which only the operator sets. It is one budget with what
+the loaded clusters hold resident: `--search-memory-mb` (else half of the host's memory) covers
+both, the reaper telling the budget what residents hold, so requests get what residents leave.
+The node shares that room fairly (a cluster over its share grows only while an eighth stays
+free) and refuses as Elasticsearch's `[parent]` breaker, in the cluster's own numbers; the
+`request` breaker refuses as `[request]`. Both are a 429 `circuit_breaking_exception`. The tenant sets `indices.breaker.request.limit` (`-1` even), but
 its effective limit is held to `--search-request-memory-max` (node setting
 `roll.breaker.request.max_limit`, by default a quarter of the node's budget), so a few busy
 tenants can't add up past the host. Aggregations (shard collection and reduces, composite and
 `terms` included, so transforms and rollups too), buffered `_msearch` responses, snapshot
 transfers and ES|QL all charge it; ES|QL charges each page of rows, group table and aggregate
 state, sort buffer, join and lookup table and its result as they grow, from what they allocate,
-and gives each back when it drops (`xpack/esql/memory.rs`). Past `--search-memory-mb`, idle
-clusters unload to make room for what requests hold too.
+and gives each back when it drops (`xpack/esql/memory.rs`); kept async results and
+cross-cluster contexts stay charged while they live. Eviction looks at resident memory only:
+past `--search-memory-mb` in resident bytes, idle clusters unload (unloading frees no request
+memory).
 
 APIs built on other APIs (EQL, ES|QL, SQL, PPL, graph, vector tiles, `terms_enum`, transforms'
 preview, rollup search, downsampling, search applications, …) make their inner requests as

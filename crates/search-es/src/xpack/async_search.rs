@@ -94,11 +94,19 @@ pub async fn submit(ctx: &Ctx<'_>) -> EsResult<Reply> {
         }
     }
     if keep {
+        // `AsyncTaskIndexService`'s limit on a stored response (`search.max_async_search_response_size`).
+        let max = ctx.state().metadata.cluster_setting("search.max_async_search_response_size").and_then(|v| crate::units::ByteSize::parse(v, "search.max_async_search_response_size").ok()).map_or(10 << 20, |b| b.bytes());
+        if max >= 0 {
+            let len = Value::Obj(m.clone()).to_json().len() as i64;
+            if len > max {
+                return Err(EsError::illegal_argument(format!("Can't store an async search response larger than [{max}] bytes. This limit can be set by changing the [search.max_async_search_response_size] setting.")));
+            }
+        }
         ctx.cluster.xpack.results.put(
             id.clone(),
             Entry { kind: Kind::Search, response: Value::Obj(m.clone()), start_ms: start, expiration_ms: start + keep_alive, bytes: 0, extra: Value::from(status as i64) },
             ctx.now_ms,
-        );
+        )?;
         let mut with_id = Map::new();
         with_id.insert("id".into(), id.into());
         with_id.extend(m);

@@ -1146,21 +1146,51 @@ Checked against Elasticsearch 9.5.5 (captures in
   nothing yet.
 - ES|QL's memory (and SQL's, which runs on it) is charged to `request` as Elasticsearch charges
   its blocks: each page of rows while the commands work on it; `STATS` group tables and
-  aggregate states as they grow (`VALUES`, `TOP`, percentiles, `COUNT_DISTINCT`'s sketch);
-  `SORT` buffers and keys; `MV_EXPAND`, `ENRICH` and `LOOKUP JOIN` output as it is built; lookup
-  tables; `INLINE STATS`; `FORK` branches' and subqueries' results; and the result and its JSON
-  until the response is built. Everything comes back when the query ends, however it ends
+  aggregate states as they grow; `SORT` buffers, keys and merge buffers; what `EVAL`, `DISSECT`,
+  `GROK`, `MV_EXPAND`, `ENRICH` and `LOOKUP JOIN` build, row by row as it is built; lookup
+  tables; `INLINE STATS`; `FORK` branches' and subqueries' results (once each); and the result,
+  its JSON or text rendering until the response is built, and a result kept with
+  `keep_on_completion` until it is deleted or expires. Aggregate states are bounded as
+  Elasticsearch's are, with the same results: `VALUES` keeps each distinct value once, `TOP` the
+  best `n`, `SAMPLE` a reservoir of `n`, `MEDIAN`, `PERCENTILE` and `MEDIAN_ABSOLUTE_DEVIATION`
+  the t-digest `QuantileStates` builds (compression 1000, exact up to 20,000 values), `STD_DEV`
+  and `VARIANCE` Welford's sums. Everything comes back when the query ends, however it ends
   (`_nodes/stats` shows `request` at 0 after a refusal). Past the limit, `_query` and
   `_query/async` answer Elasticsearch's 429 `circuit_breaking_exception` (checked against
   9.5.5). Sizes are what roll allocates, so a query crosses the limit at a different point than
   on Elasticsearch, and `data for [...]` names where roll's query was (`<reused_arrays>`, `load
   blocks`; Elasticsearch's varies too: `ords`, `<reused_arrays>`, `load blocks`). The internal
   `_search` reads keep their own accounting.
+- ES|QL's string builders stop at 1 MiB as Elasticsearch 9.5.5's do: `CONCAT` past it fails the
+  query (400 `esql_client_exception`, `concatenating more than [1048576] bytes is not
+  supported`), `REPLACE` past it is null with Elasticsearch's two warnings, `REPEAT` and `SPACE`
+  as before. Elasticsearch charges what its other functions build to the breaker as it builds
+  it; roll holds them to the same 1 MiB instead, null with a warning: `MV_CONCAT`, `MV_APPEND`,
+  `MV_ZIP`, `URL_ENCODE`, `URL_ENCODE_COMPONENT`, `TO_BASE64`, `TO_UPPER`, `TO_LOWER` and
+  `TO_STRING` of a multi-value (`Creating strings with more than [1048576] bytes is not
+  supported`, or `multi-values` for a list).
+- Kept async results (async search, ES|QL, SQL, EQL, SQL cursors) are charged to `request` at
+  what they hold in memory until they are deleted, expire or are pushed out, so a client that
+  keeps results can't hold memory the breakers don't see. One the breaker refuses is not kept
+  and the request fails with its 429; one larger than the store (256 MiB) fails with
+  `illegal_argument_exception` (`Can't store an async search response larger than [268435456]
+  bytes.`). Async search also enforces `search.max_async_search_response_size` (10mb) on a kept
+  response, with Elasticsearch's error. Elasticsearch 9.5.5 applies no such limit to ES|QL.
+- Cross-cluster scroll and point-in-time contexts hold their parts' buffered hits on `request`,
+  at what they hold in memory, for as long as they live (`keep_alive`); local contexts hold only
+  shard searchers. Their number is bounded by `search.max_open_scroll_context` (500) and their
+  memory by the cluster's share of the node's budget (below).
 - roll's differences in the `request` breaker, because one node serves many clusters:
-  - everything charged to it (aggregations, ES|QL, buffered `_msearch` responses, snapshot
-    transfers) is also charged to the node's budget for requests, which only the operator sets
-    (`--search-memory-mb`, else half of the host's memory). A request past it gets the same 429,
-    with the node's limit as `bytes_limit`;
+  - everything charged to it (aggregations, ES|QL, kept results and contexts, buffered
+    `_msearch` responses, snapshot transfers) is also charged to the node's budget, which only
+    the operator sets: `--search-memory-mb`, shared with what the loaded clusters hold resident
+    (else half of the host's memory). The node divides what residents leave fairly: a cluster
+    holding more than its share (that room over the clusters holding request memory, at least
+    two) may grow only while an eighth of it stays free, so one busy tenant never takes the last
+    of it from the others. A refusal is Elasticsearch's `[parent]` breaker
+    (`circuit_breaking_exception`, 429, counted in `parent.tripped`), told in the cluster's own
+    numbers: `bytes_wanted` is what it would hold, `bytes_limit` what it could have had, `real
+    usage` what it held, and `usages` lists `request` only;
   - its effective limit is `indices.breaker.request.limit` held to an operator maximum
     (`--search-request-memory-max`, node setting `roll.breaker.request.max_limit`: a byte size,
     or a percentage of the node's budget, `25%` by default; `-1` for none). The setting still

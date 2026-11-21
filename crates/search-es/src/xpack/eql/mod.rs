@@ -247,7 +247,7 @@ pub async fn search(ctx: &Ctx<'_>) -> EsResult<Reply> {
         id.clone(),
         Entry { kind: Kind::Eql, response: Value::Obj(m.clone()), start_ms: ctx.now_ms, expiration_ms: ctx.now_ms + req.keep_alive_ms, bytes: 0, extra: Value::Null },
         ctx.now_ms,
-    );
+    )?;
     Reply::ok(with_id(&id, &m))
 }
 

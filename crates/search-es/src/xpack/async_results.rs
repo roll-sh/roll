@@ -7,6 +7,12 @@
 //! never deletes them can't grow a cluster without limit. Every query runs to completion before
 //! its submit request answers, so stored results are always complete.
 //!
+//! What a stored result holds in memory is charged to the cluster's `request` breaker (and
+//! through it to the node's budget, [`crate::breaker`]) from when it is stored until it is
+//! removed, expires or is pushed out, so kept results count against the memory requests may
+//! hold. A result that the breaker refuses, or that is larger than the store itself
+//! ([`MAX_BYTES`]), is not stored: the request that would keep it fails.
+//!
 //! A durable cluster unloads when idle, which an Elasticsearch node never does, so there the
 //! results also go to the `.async-search` system index, as on Elasticsearch: once
 //! [`Results::track_changes`] is on, every id put, touched or removed is noted, and the server
@@ -35,7 +41,7 @@ pub struct Entry {
     pub response: Value,
     pub start_ms: i64,
     pub expiration_ms: i64,
-    /// Bytes this entry accounts for (its JSON size).
+    /// Bytes this entry accounts for (what its trees hold in memory).
     pub bytes: usize,
     /// Extra state a kind needs (SQL cursors: the remaining rows and columns).
     pub extra: Value,
@@ -44,19 +50,32 @@ pub struct Entry {
 /// At most this many stored results per cluster...
 const MAX_ENTRIES: usize = 1024;
 /// ...and this many bytes of them.
-const MAX_BYTES: usize = 256 << 20;
+pub const MAX_BYTES: usize = 256 << 20;
 
 #[derive(Default)]
 pub struct Results {
     inner: parking_lot::Mutex<Inner>,
     /// Some change is noted ([`Results::has_changes`], checked after every request).
     changed: AtomicBool,
+    /// The cluster's `request` budget the entries are charged to ([`Results::charge_to`]).
+    budget: std::sync::OnceLock<std::sync::Arc<search_aggs::memory::MemoryBudget>>,
+}
+
+impl Drop for Results {
+    fn drop(&mut self) {
+        let charged = self.inner.get_mut().charged;
+        if let Some(b) = self.budget.get() {
+            b.release(charged as u64);
+        }
+    }
 }
 
 #[derive(Default)]
 struct Inner {
     entries: HashMap<String, Entry>,
     bytes: usize,
+    /// What the budget holds for the entries (`bytes`, once [`Results::settle`] ran).
+    charged: usize,
     /// Note changed ids ([`Results::track_changes`]); in memory nobody would take them.
     track: bool,
     /// Ids put, touched or removed since the last [`Results::take_changes`].
@@ -169,25 +188,61 @@ pub fn task_of(id: &str) -> Result<String, crate::error::EsError> {
     Ok(task)
 }
 
+/// What an entry's trees hold in memory.
+fn entry_bytes(e: &Entry) -> usize {
+    crate::breaker::json_bytes(&e.response) + crate::breaker::json_bytes(&e.extra)
+}
+
 impl Results {
-    pub fn put(&self, id: String, mut entry: Entry, now: i64) {
-        entry.bytes = entry.response.to_json().len() + entry.extra.to_json().len();
+    /// Charges the entries to `budget` from now on (the cluster's `request` breaker).
+    pub fn charge_to(&self, budget: std::sync::Arc<search_aggs::memory::MemoryBudget>) {
+        let _ = self.budget.set(budget);
+    }
+
+    /// Gives back what the budget holds for entries that are gone.
+    fn settle(&self, g: &mut Inner) {
+        if g.charged > g.bytes {
+            if let Some(b) = self.budget.get() {
+                b.release((g.charged - g.bytes) as u64);
+            }
+            g.charged = g.bytes;
+        }
+    }
+
+    /// Stores `entry` under `id`, charged to the budget; refused (and not stored) when larger
+    /// than the store or when the breaker refuses it.
+    pub fn put(&self, id: String, mut entry: Entry, now: i64) -> crate::error::EsResult<()> {
+        entry.bytes = entry_bytes(&entry);
+        if entry.bytes > MAX_BYTES {
+            return Err(crate::error::EsError::illegal_argument(format!("Can't store an async search response larger than [{MAX_BYTES}] bytes.")));
+        }
         let mut g = self.inner.lock();
         g.expire(now);
         if let Some(old) = g.entries.remove(&id) {
             g.bytes -= old.bytes;
+            g.note(&id);
         }
         g.make_room(entry.bytes);
+        self.settle(&mut g);
+        if let Some(b) = self.budget.get()
+            && let Err(e) = b.reserve(entry.bytes as u64, "<async_result>")
+        {
+            self.flag(&g);
+            return Err(crate::search::aggs::agg_error(e));
+        }
         g.bytes += entry.bytes;
+        g.charged += entry.bytes;
         g.note(&id);
         g.entries.insert(id, entry);
         self.flag(&g);
+        Ok(())
     }
 
     /// A live result of the given kind.
     pub fn get(&self, id: &str, kind: Kind, now: i64) -> Option<Entry> {
         let mut g = self.inner.lock();
         g.expire(now);
+        self.settle(&mut g);
         g.entries.get(id).filter(|e| e.kind == kind).cloned()
     }
 
@@ -210,6 +265,7 @@ impl Results {
                 let e = g.entries.remove(id).expect("present");
                 g.bytes -= e.bytes;
                 g.note(id);
+                self.settle(&mut g);
                 self.flag(&g);
                 true
             }
@@ -238,6 +294,7 @@ impl Results {
     pub fn take_changes(&self, now: i64) -> Vec<(String, Option<Entry>)> {
         let mut g = self.inner.lock();
         g.expire(now);
+        self.settle(&mut g);
         self.changed.store(false, Ordering::Release);
         let dirty = std::mem::take(&mut g.dirty);
         let mut out: Vec<(String, Option<Entry>)> = dirty.into_iter().map(|id| { let e = g.entries.get(&id).cloned(); (id, e) }).collect();
@@ -273,12 +330,21 @@ impl Results {
             self.flag(&g);
             return;
         }
-        entry.bytes = entry.response.to_json().len() + entry.extra.to_json().len();
+        entry.bytes = entry_bytes(&entry);
         if let Some(old) = g.entries.remove(&id) {
             g.bytes -= old.bytes;
         }
         g.make_room(entry.bytes);
+        self.settle(&mut g);
+        let charged = entry.bytes <= MAX_BYTES && self.budget.get().is_none_or(|b| b.reserve(entry.bytes as u64, "<async_result>").is_ok());
+        if !charged {
+            // Doesn't fit now: its stored copy goes.
+            g.note(&id);
+            self.flag(&g);
+            return;
+        }
         g.bytes += entry.bytes;
+        g.charged += entry.bytes;
         g.entries.insert(id, entry);
         self.flag(&g);
     }
@@ -304,11 +370,11 @@ mod tests {
     #[test]
     fn put_get_expire_remove() {
         let r = Results::default();
-        r.put("a".into(), entry(Kind::Search, 100), 0);
+        r.put("a".into(), entry(Kind::Search, 100), 0).unwrap();
         assert!(r.get("a", Kind::Search, 50).is_some());
         assert!(r.get("a", Kind::Esql, 50).is_none());
         assert!(r.get("a", Kind::Search, 100).is_none());
-        r.put("b".into(), entry(Kind::Sql, 100), 0);
+        r.put("b".into(), entry(Kind::Sql, 100), 0).unwrap();
         assert!(!r.remove("b", Kind::Search));
         assert!(r.remove("b", Kind::Sql));
         assert!(r.is_empty());
@@ -318,7 +384,7 @@ mod tests {
     fn bounded() {
         let r = Results::default();
         for i in 0..(MAX_ENTRIES + 10) {
-            r.put(format!("{i}"), entry(Kind::Search, 1000 + i as i64), 0);
+            r.put(format!("{i}"), entry(Kind::Search, 1000 + i as i64), 0).unwrap();
         }
         assert_eq!(r.len(), MAX_ENTRIES);
         assert!(r.get("0", Kind::Search, 1).is_none());
@@ -329,11 +395,11 @@ mod tests {
     #[test]
     fn changes_are_noted_only_when_tracked() {
         let r = Results::default();
-        r.put("a".into(), entry(Kind::Search, 100), 0);
+        r.put("a".into(), entry(Kind::Search, 100), 0).unwrap();
         assert!(!r.has_changes(), "in memory nothing is noted");
         assert!(r.take_changes(0).is_empty());
         r.track_changes();
-        r.put("b".into(), entry(Kind::Eql, 100), 0);
+        r.put("b".into(), entry(Kind::Eql, 100), 0).unwrap();
         r.touch("a", 50); // not later than its expiration: no change
         assert!(r.has_changes());
         let c = r.take_changes(0);
@@ -346,7 +412,7 @@ mod tests {
         let c = r.take_changes(0);
         assert_eq!(c.iter().map(|(id, e)| (id.as_str(), e.as_ref().map(|e| e.expiration_ms))).collect::<Vec<_>>(), vec![("a", Some(200)), ("b", None)]);
         // Expired entries are noted as removed; a failed write is noted again.
-        r.put("c".into(), entry(Kind::Sql, 10), 0);
+        r.put("c".into(), entry(Kind::Sql, 10), 0).unwrap();
         let _ = r.take_changes(0);
         let c = r.take_changes(20);
         assert_eq!(c.iter().map(|(id, e)| (id.as_str(), e.is_some())).collect::<Vec<_>>(), vec![("c", false)]);

@@ -22,6 +22,12 @@ use std::sync::Arc;
 use std::time::Duration;
 use tracing::info;
 
+/// `--search-request-memory-max`: refused at startup unless it's a byte size, a percentage above
+/// 0 and at most 100, or -1.
+fn request_memory_max(v: &str) -> Result<String, String> {
+    search_control::request_max_limit(v, 1 << 30).map(|_| v.trim().to_string())
+}
+
 #[derive(Args, Clone, Debug)]
 pub struct SearchArgs {
     /// Disable roll search.
@@ -54,15 +60,16 @@ pub struct SearchArgs {
     /// Local disk cache for segments, in bytes.
     #[arg(long = "search-cache-bytes", env = "ROLL_SEARCH_CACHE_BYTES", default_value_t = 10 << 30)]
     pub search_cache_bytes: u64,
-    /// Memory all loaded clusters may hold together, in MiB (0: no budget). Past it the least
-    /// recently used idle clusters unload, and requests (aggregations, ES|QL) that would hold
-    /// more fail with `circuit_breaking_exception` (0: half of the host's memory for those).
+    /// Memory loaded clusters and their requests may hold together, in MiB (0: no budget for
+    /// loaded clusters, and half of the host's memory for both). Past it in resident memory the
+    /// least recently used idle clusters unload; a request (aggregations, ES|QL, kept results)
+    /// that would take residents and requests past it fails with `circuit_breaking_exception`.
     #[arg(long = "search-memory-mb", env = "ROLL_SEARCH_MEMORY_MB", default_value_t = 0)]
     pub search_memory_mb: u64,
     /// The most one cluster's `request` circuit breaker may allow, whatever its
     /// `indices.breaker.request.limit`: a byte size (`512mb`) or a percentage of the node's memory
     /// for requests (default `25%`; `-1`: no maximum).
-    #[arg(long = "search-request-memory-max", env = "ROLL_SEARCH_REQUEST_MEMORY_MAX", default_value = "25%")]
+    #[arg(long = "search-request-memory-max", env = "ROLL_SEARCH_REQUEST_MEMORY_MAX", default_value = "25%", value_parser = request_memory_max)]
     pub search_request_memory_max: String,
     /// Acknowledge writes once the WAL is in object storage (for nodes with ephemeral disks;
     /// always on in a cluster).

@@ -75,6 +75,27 @@ impl Default for Breakers {
 /// requests; `-1`: no maximum. Default: `25%` on a node with a budget, none otherwise.
 pub const REQUEST_MAX_LIMIT: &str = "roll.breaker.request.max_limit";
 
+/// A [`REQUEST_MAX_LIMIT`] value against a node budget of `of` bytes: `None` for `-1` (no
+/// maximum), else the bytes; a percentage must be above 0 and at most 100, a size above 0.
+pub fn request_max_limit(value: &str, of: i64) -> Result<Option<u64>, String> {
+    let v = value.trim();
+    if v == "-1" {
+        return Ok(None);
+    }
+    if let Some(p) = v.strip_suffix('%') {
+        let pct: f64 = p.trim().parse().map_err(|_| format!("[{REQUEST_MAX_LIMIT}] must be a byte size, a percentage or -1, got [{value}]"))?;
+        if !(pct > 0.0 && pct <= 100.0) {
+            return Err(format!("[{REQUEST_MAX_LIMIT}] must be a percentage above 0 and at most 100, got [{value}]"));
+        }
+        return Ok(Some((of.max(0) as f64 * pct / 100.0) as u64));
+    }
+    let b = crate::units::ByteSize::parse(v, REQUEST_MAX_LIMIT).map_err(|_| format!("[{REQUEST_MAX_LIMIT}] must be a byte size, a percentage or -1, got [{value}]"))?.bytes();
+    if b <= 0 {
+        return Err(format!("[{REQUEST_MAX_LIMIT}] must be above 0 (or -1 for no maximum), got [{value}]"));
+    }
+    Ok(Some(b as u64))
+}
+
 /// The overhead `inflight_requests` multiplies its bytes by (`network.breaker.inflight_requests.overhead`).
 const IN_FLIGHT_OVERHEAD: f64 = 2.0;
 
@@ -168,11 +189,14 @@ impl Breakers {
         let max_limit = match &node {
             Some(n) => {
                 let of = n.limit().min(i64::MAX as u64) as i64;
-                max.and_then(|v| memory_size(v, of)).or_else(|| memory_size("25%", of)).unwrap_or(u64::MAX)
+                // rolld refuses a bad value at startup; one given otherwise (`-E`) falls back.
+                let parsed = max.map(|v| request_max_limit(v, of)).unwrap_or(Ok(Some((of.max(0) / 4) as u64)));
+                parsed.unwrap_or(Some((of.max(0) / 4) as u64))
             }
             // A cluster alone on its node: only an absolute maximum means anything.
-            None => max.filter(|v| !v.trim().ends_with('%')).and_then(|v| memory_size(v, 0)).unwrap_or(u64::MAX),
-        };
+            None => max.filter(|v| !v.trim().ends_with('%')).and_then(|v| request_max_limit(v, 0).ok().flatten()),
+        }
+        .unwrap_or(u64::MAX);
         Breakers { request: MemoryBudget::with_parent(u64::MAX, node.clone()), node, max_limit, ..Breakers::default() }
     }
 
@@ -277,7 +301,8 @@ impl Breakers {
         let parent: i64 = self.usages().iter().map(|(_, b)| b).sum();
         (
             (self.in_flight.load(Ordering::Relaxed) as i64, self.in_flight_tripped.load(Ordering::Relaxed) as i64),
-            (parent, self.parent_tripped.load(Ordering::Relaxed) as i64),
+            // The node's budget refusing a request counts as Elasticsearch's parent breaker.
+            (parent, (self.parent_tripped.load(Ordering::Relaxed) + self.request.parent_tripped()) as i64),
         )
     }
 }
@@ -339,6 +364,20 @@ pub fn estimate_search_response(v: &crate::json::Value) -> u64 {
         }
     }
     bytes
+}
+
+/// What a JSON tree holds in memory (nodes, string capacities, map entries): the real size of
+/// a kept response, where [`estimate_search_response`] is Elasticsearch's estimate of one.
+pub fn json_bytes(v: &crate::json::Value) -> usize {
+    use crate::json::Value;
+    size_of::<Value>()
+        + match v {
+            Value::Str(s) => s.capacity(),
+            Value::Arr(a) => (a.capacity().saturating_sub(a.len())) * size_of::<Value>() + a.iter().map(json_bytes).sum::<usize>(),
+            // An index map: its entries (key, value, hash) and its index table.
+            Value::Obj(m) => m.capacity() * (size_of::<String>() + size_of::<u64>() + size_of::<usize>()) + m.iter().map(|(k, v)| k.capacity() + json_bytes(v)).sum::<usize>(),
+            _ => 0,
+        }
 }
 
 /// `estimateFailureBytes` for a failed `_msearch` item (its rendered `error`).
@@ -439,5 +478,11 @@ mod tests {
         assert_eq!(memory_size("-1", 10), Some(u64::MAX));
         assert_eq!(memory_size("101%", 10), None);
         assert_eq!(memory_size("x", 10), None);
+        assert_eq!(request_max_limit("25%", 400), Ok(Some(100)));
+        assert_eq!(request_max_limit("1kb", 400), Ok(Some(1024)));
+        assert_eq!(request_max_limit("-1", 400), Ok(None));
+        for bad in ["0", "0%", "101%", "25 %x", "lots", "-2"] {
+            assert!(request_max_limit(bad, 400).is_err(), "{bad}");
+        }
     }
 }

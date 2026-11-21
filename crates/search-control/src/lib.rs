@@ -33,5 +33,7 @@ pub use search_es::seal::Sealer;
 pub use search_es::api::snapshots::S3_ALLOW_PRIVATE;
 /// Node setting: the most one cluster's `request` breaker may allow, whatever its tenant sets.
 pub use search_es::breaker::REQUEST_MAX_LIMIT as SEARCH_REQUEST_MAX_LIMIT;
+/// Checks a [`SEARCH_REQUEST_MAX_LIMIT`] value (`25%`, `512mb`, `-1`).
+pub use search_es::breaker::request_max_limit;
 /// Node setting that lets inference endpoints reach private addresses (local development, tests).
 pub use search_es::xpack::inference::http::ALLOW_PRIVATE as INFERENCE_ALLOW_PRIVATE;

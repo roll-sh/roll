@@ -18,7 +18,6 @@
 
 use super::value::{Acc, V};
 use crate::error::EsResult;
-use crate::json::Value;
 use search_aggs::memory::MemoryBudget;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -83,6 +82,15 @@ impl Memory {
         a.request.release(bytes);
     }
 
+    /// Gives back `bytes` of what results kept on the account hold, once their rows moved into
+    /// another table that is charged on its own (`FORK` branches, subqueries).
+    pub fn give_back(&self, bytes: usize) {
+        if let Some(a) = &self.0 {
+            let bytes = (bytes as u64).min(a.held.load(Ordering::Relaxed));
+            self.release(bytes);
+        }
+    }
+
     /// A structure of `bytes`, charged under `label` until the [`Held`] drops.
     pub fn hold(&self, bytes: usize, label: &'static str) -> EsResult<Held> {
         let mut h = Held { mem: self.clone(), bytes: 0, label };
@@ -120,6 +128,13 @@ impl Held {
     pub fn keep(mut self) {
         self.bytes = 0;
     }
+
+    /// Takes over what `t` charged on the same account, settling it first.
+    pub fn absorb(&mut self, mut t: Tally) -> EsResult<()> {
+        t.settle()?;
+        self.bytes += std::mem::take(&mut t.held.bytes);
+        Ok(())
+    }
 }
 
 impl Drop for Held {
@@ -138,6 +153,11 @@ pub struct Tally {
 impl Tally {
     pub fn new(mem: &Memory) -> EsResult<Tally> {
         Ok(Tally { held: mem.hold(0, REUSED_ARRAYS)?, pending: 0 })
+    }
+
+    /// A new tally on the same account.
+    pub fn fresh(&self) -> EsResult<Tally> {
+        Tally::new(&self.held.mem)
     }
 
     /// Adds `bytes`, charged at the next [`Tally::check`] or [`Tally::settle`].
@@ -225,14 +245,16 @@ pub fn rows_bytes(rows: &Vec<Vec<V>>) -> usize {
 }
 
 /// What an aggregate state holds outside its slot; O(1), so it can be read around every value
-/// added (a collecting state's values are counted as they are added, [`Acc`] by [`value_heap`]).
+/// added (states that keep values count their strings as they take them).
 #[inline]
 pub fn acc_heap(a: &Acc) -> usize {
     match a {
-        Acc::Collect(all) => all.capacity() * size_of::<V>(),
+        Acc::Values { seen, out, heap } => out.capacity() * size_of::<V>() + seen.capacity() * (size_of::<super::exec::GroupKey>() + size_of::<u64>()) + heap,
+        Acc::Top { buf, heap, .. } | Acc::Sample { buf, heap, .. } => buf.capacity() * size_of::<V>() + heap,
+        Acc::Quantile(d) => size_of::<search_aggs::metrics::tdigest::TDigest>() + d.heap_bytes(),
         Acc::Points(points) => points.capacity() * size_of::<(i64, V)>(),
         Acc::Distinct { hll, .. } => size_of::<search_aggs::metrics::cardinality::Hll>() + hll.heap_bytes(),
-        Acc::MinMax(Some(v)) => value_heap(v),
+        Acc::MinMax(Some(v)) | Acc::Edge { v: Some(v), .. } => value_heap(v),
         _ => 0,
     }
 }
@@ -240,19 +262,38 @@ pub fn acc_heap(a: &Acc) -> usize {
 /// Whether adding to `a` can grow it.
 #[inline]
 pub fn acc_grows(a: &Acc) -> bool {
-    matches!(a, Acc::Collect(_) | Acc::Points(_) | Acc::Distinct { .. } | Acc::MinMax(_))
+    matches!(a, Acc::Values { .. } | Acc::Top { .. } | Acc::Sample { .. } | Acc::Quantile(_) | Acc::Points(_) | Acc::Distinct { .. } | Acc::MinMax(_) | Acc::Edge { .. })
 }
 
-/// What a JSON tree holds (the response's values).
-pub fn json_bytes(v: &Value) -> usize {
-    size_of::<Value>()
-        + match v {
-            Value::Str(s) => s.capacity(),
-            Value::Arr(a) => (a.capacity().saturating_sub(a.len())) * size_of::<Value>() + a.iter().map(json_bytes).sum::<usize>(),
-            // An index map: its entries (key, value, hash) and its index table.
-            Value::Obj(m) => m.capacity() * (size_of::<String>() + size_of::<u64>() + size_of::<usize>()) + m.iter().map(|(k, v)| k.capacity() + json_bytes(v)).sum::<usize>(),
+pub use crate::breaker::json_bytes;
+
+/// What a value's text takes once rendered (JSON string or text cell).
+fn text_len(v: &V) -> usize {
+    match v {
+        V::Str(s) | V::Ip(s) => s.len(),
+        V::Multi(vs) => vs.iter().map(text_len).sum::<usize>() + vs.len(),
+        V::Null => 4,
+        _ => 24,
+    }
+}
+
+/// What the response's `values` tree for `t` will hold, from the table, before it is built.
+pub fn json_estimate(t: &super::exec::Table) -> usize {
+    let node = size_of::<crate::json::Value>();
+    fn value(v: &V, node: usize) -> usize {
+        node + match v {
+            V::Str(s) | V::Ip(s) => s.len(),
+            V::Date(_) => 24,
+            V::Multi(vs) => vs.iter().map(|x| value(x, node)).sum::<usize>(),
             _ => 0,
         }
+    }
+    (t.rows.len() + t.cols.len()) * node + t.rows.iter().flat_map(|r| r.iter()).map(|v| value(v, node)).sum::<usize>()
+}
+
+/// What rendering `t` as text, CSV or TSV holds: every cell's string, then the body.
+pub fn text_estimate(t: &super::exec::Table) -> usize {
+    t.rows.iter().map(|r| size_of::<Vec<String>>() + r.iter().map(|v| size_of::<String>() + 2 * text_len(v)).sum::<usize>()).sum()
 }
 
 #[cfg(test)]

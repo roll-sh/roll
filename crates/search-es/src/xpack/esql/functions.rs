@@ -803,8 +803,65 @@ pub fn check(f: F, written: &str, call: &str, at: (usize, usize), args: &[Arg<'_
     Ok(f.result_type(&types))
 }
 
-/// Evaluates a call.
+/// The most a function may build into one string or multi-value from its inputs: Elasticsearch's
+/// 1 MiB for strings (`CONCAT`, `REPEAT`, `REPLACE`); its blocks are charged to the breaker as
+/// they are built, so nothing it computes grows unaccounted, and roll holds the other builders
+/// to the same bound, checked from the inputs before building where they give the size.
+pub const MAX_BUILT: usize = 1 << 20;
+
+/// Elasticsearch's warning for a string past [`MAX_BUILT`] (`REPLACE`, `Concat`'s callers).
+const STRING_TOO_LONG: &str = "java.lang.IllegalArgumentException: Creating strings with more than [1048576] bytes is not supported";
+/// roll's for a multi-value past [`MAX_BUILT`] (Elasticsearch's breaker refuses those instead).
+const MULTI_TOO_LARGE: &str = "java.lang.IllegalArgumentException: Creating multi-values with more than [1048576] bytes is not supported";
+
+/// The bytes of a value's text, as the builders count their inputs.
+fn built_len(v: &V) -> usize {
+    match v {
+        V::Str(s) | V::Ip(s) => s.len(),
+        V::Multi(vs) => vs.iter().map(built_len).sum(),
+        V::Null => 0,
+        // A number, date or boolean's text is short.
+        _ => 32,
+    }
+}
+
+/// The inputs of a builder that would make it build past [`MAX_BUILT`].
+fn too_large_inputs(f: F, args: &[V]) -> Option<Fail> {
+    let total = || args.iter().map(built_len).sum::<usize>();
+    match f {
+        // `Concat.process`: the request fails (checked against 9.5.5).
+        F::Concat if total() > MAX_BUILT => Some(Fail::Error(EsError::new(400, "esql_client_exception", format!("concatenating more than [{MAX_BUILT}] bytes is not supported")))),
+        F::MvConcat if total() > MAX_BUILT => Some(warn(STRING_TOO_LONG)),
+        F::MvAppend | F::MvZip if total() > MAX_BUILT => Some(warn(MULTI_TOO_LARGE)),
+        // These grow their input by at most 3x and 4/3.
+        F::UrlEncode | F::UrlEncodeComponent if built_len(&args[0]).saturating_mul(3) > MAX_BUILT && url_encoded_len(&args[0]) > MAX_BUILT => Some(warn(STRING_TOO_LONG)),
+        F::ToBase64 if built_len(&args[0]).div_ceil(3).saturating_mul(4) > MAX_BUILT => Some(warn(STRING_TOO_LONG)),
+        _ => None,
+    }
+}
+
+/// The exact length `URL_ENCODE` would build (only computed for inputs that could pass the cap).
+fn url_encoded_len(v: &V) -> usize {
+    match v {
+        V::Str(s) => s.bytes().map(|b| if b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.' | b'~' | b' ' | b'*') { 1 } else { 3 }).sum(),
+        other => built_len(other).saturating_mul(3),
+    }
+}
+
+/// Evaluates a call, holding what builders build to [`MAX_BUILT`].
 pub fn eval(f: F, args: &[V], types: &[DataType]) -> Result<V, Fail> {
+    if let Some(fail) = too_large_inputs(f, args) {
+        return Err(fail);
+    }
+    let v = eval_call(f, args, types)?;
+    // Builders whose output the inputs don't bound in advance.
+    if matches!(f, F::Replace | F::ToUpper | F::ToLower | F::ToString | F::ToText | F::MvConcat | F::MvZip | F::MvAppend | F::UrlEncode | F::UrlEncodeComponent) && built_len(&v) > MAX_BUILT {
+        return Err(warn(if matches!(v, V::Multi(_)) { MULTI_TOO_LARGE } else { STRING_TOO_LONG }));
+    }
+    Ok(v)
+}
+
+fn eval_call(f: F, args: &[V], types: &[DataType]) -> Result<V, Fail> {
     if !f.takes_multi() && args.iter().any(|a| matches!(a, V::Multi(_))) {
         return Err(warn(MULTI));
     }

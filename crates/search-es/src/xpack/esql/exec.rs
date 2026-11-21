@@ -1349,13 +1349,6 @@ enum Stage {
     LookupWhere { eq: Vec<usize>, rows: std::sync::Arc<HashMap<Vec<GroupKey>, Vec<Vec<V>>>>, cond: CE, add: usize, keep: Vec<usize> },
 }
 
-impl Stage {
-    /// Whether the stage can make a page hold more than it did.
-    fn grows(&self) -> bool {
-        !matches!(self, Stage::Where(_) | Stage::Project(_) | Stage::Sample(_))
-    }
-}
-
 /// A hashable form of a value, for group keys and joins.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum GroupKey {
@@ -1716,7 +1709,8 @@ fn compile_stage(src: &Src<'_>, cmd: &Cmd, cols: &[Col]) -> EsResult<(Stage, Vec
     })
 }
 
-fn run_stage(stage: &Stage, in_cols: usize, rows: Vec<Vec<V>>, w: &mut Warnings, mem: &Memory) -> EsResult<Vec<Vec<V>>> {
+/// Runs one stage; every value or row it builds is charged to `grown` before it is kept.
+fn run_stage(stage: &Stage, in_cols: usize, rows: Vec<Vec<V>>, w: &mut Warnings, grown: &mut Tally) -> EsResult<Vec<Vec<V>>> {
     let mut out = Vec::with_capacity(rows.len());
     match stage {
         Stage::Where(c) => {
@@ -1731,6 +1725,7 @@ fn run_stage(stage: &Stage, in_cols: usize, rows: Vec<Vec<V>>, w: &mut Warnings,
                 let _ = in_cols;
                 for (c, _) in evals {
                     let v = eval(c, &r, &[], w)?;
+                    grown.add(size_of::<V>() + memory::value_heap(&v))?;
                     r.push(v);
                 }
                 out.push(r);
@@ -1752,6 +1747,7 @@ fn run_stage(stage: &Stage, in_cols: usize, rows: Vec<Vec<V>>, w: &mut Warnings,
                 for k in keys {
                     n.push(parsed.as_ref().and_then(|m| m.get(k)).map(|s| V::Str(s.clone())).unwrap_or(V::Null));
                 }
+                grown.add(memory::row_bytes(&n))?;
                 out.push(n);
             }
         }
@@ -1778,11 +1774,11 @@ fn run_stage(stage: &Stage, in_cols: usize, rows: Vec<Vec<V>>, w: &mut Warnings,
                 for (name, _) in outputs {
                     n.push(caps.as_ref().and_then(|c| c.iter().find(|(k, _)| k == name)).map(|(_, g)| conv(g)).unwrap_or(V::Null));
                 }
+                grown.add(memory::row_bytes(&n))?;
                 out.push(n);
             }
         }
         Stage::Enrich { key, table, fields, keep } => {
-            let mut grown = Growth::new(mem)?;
             for r in rows {
                 let k = r.get(*key).cloned().unwrap_or(V::Null);
                 let hits = if k.is_null() { Vec::new() } else { table.lookup(&k.to_json(DataType::Keyword), usize::MAX) };
@@ -1804,8 +1800,8 @@ fn run_stage(stage: &Stage, in_cols: usize, rows: Vec<Vec<V>>, w: &mut Warnings,
                         _ => V::Multi(vals),
                     });
                 }
+                grown.add(memory::row_bytes(&n))?;
                 out.push(n);
-                grown.track(&out)?;
             }
         }
         Stage::Sample(p) => {
@@ -1818,8 +1814,7 @@ fn run_stage(stage: &Stage, in_cols: usize, rows: Vec<Vec<V>>, w: &mut Warnings,
             }
         }
         Stage::Lookup { on, rows: lk, add, keep } => {
-            // A key can match many lookup rows: the output is charged as it grows.
-            let mut grown = Growth::new(mem)?;
+            // A key can match many lookup rows: each output row is charged as it is built.
             for r in rows {
                 let k: Vec<GroupKey> = on.iter().map(|i| GroupKey::of(&r[*i])).collect();
                 let base: Vec<V> = keep.iter().map(|i| r[*i].clone()).collect();
@@ -1828,8 +1823,8 @@ fn run_stage(stage: &Stage, in_cols: usize, rows: Vec<Vec<V>>, w: &mut Warnings,
                         for m in matches {
                             let mut n = base.clone();
                             n.extend(m.iter().cloned());
+                            grown.add(memory::row_bytes(&n))?;
                             out.push(n);
-                            grown.track(&out)?;
                         }
                     }
                     None => {
@@ -1841,7 +1836,6 @@ fn run_stage(stage: &Stage, in_cols: usize, rows: Vec<Vec<V>>, w: &mut Warnings,
             }
         }
         Stage::LookupWhere { eq, rows: lk, cond, add, keep } => {
-            let mut grown = Growth::new(mem)?;
             for r in rows {
                 // Without equalities every lookup row is under the empty key, in index order.
                 let k: Vec<GroupKey> = eq.iter().map(|i| GroupKey::of(&r[*i])).collect();
@@ -1854,8 +1848,8 @@ fn run_stage(stage: &Stage, in_cols: usize, rows: Vec<Vec<V>>, w: &mut Warnings,
                     if eval(cond, &joined, &[], w)?.truthy() == Some(true) {
                         let mut n = base.clone();
                         n.extend(m.iter().cloned());
+                        grown.add(memory::row_bytes(&n))?;
                         out.push(n);
-                        grown.track(&out)?;
                         matched = true;
                     }
                 }
@@ -1867,15 +1861,14 @@ fn run_stage(stage: &Stage, in_cols: usize, rows: Vec<Vec<V>>, w: &mut Warnings,
             }
         }
         Stage::MvExpand(i) => {
-            let mut grown = Growth::new(mem)?;
             for r in rows {
                 match r.get(*i) {
                     Some(V::Multi(vs)) => {
                         for v in vs {
                             let mut n = r.clone();
                             n[*i] = v.clone();
+                            grown.add(memory::row_bytes(&n))?;
                             out.push(n);
-                            grown.track(&out)?;
                         }
                     }
                     _ => out.push(r),
@@ -1905,13 +1898,18 @@ struct Pipeline {
 impl Pipeline {
     /// Runs the stages over a page of rows, which is charged while they work on it (as
     /// Elasticsearch's blocks are) and given back with the rows: whoever keeps them charges them.
-    fn run(&self, mut rows: Vec<Vec<V>>, w: &mut Warnings) -> EsResult<Vec<Vec<V>>> {
+    fn run(&self, rows: Vec<Vec<V>>, w: &mut Warnings) -> EsResult<Vec<Vec<V>>> {
         let mut page = self.mem.hold(memory::rows_bytes(&rows), memory::LOAD_BLOCKS)?;
+        self.run_on(rows, w, &mut page)
+    }
+
+    /// Runs the stages over rows `held` already charges: what they build is charged as it is
+    /// built and added to `held` (no stage walks the rows again to measure them; what a stage
+    /// drops stays charged until `held` is set again or dropped).
+    fn run_on(&self, mut rows: Vec<Vec<V>>, w: &mut Warnings, held: &mut memory::Held) -> EsResult<Vec<Vec<V>>> {
+        let mut grown = Tally::new(&self.mem)?;
         for (s, n, proj) in &self.stages {
-            rows = run_stage(s, *n, rows, w, &self.mem)?;
-            if s.grows() {
-                page.set(memory::rows_bytes(&rows))?;
-            }
+            rows = run_stage(s, *n, rows, w, &mut grown)?;
             if let Some(p) = proj {
                 // Each output column reads a distinct physical column, so values move.
                 for r in &mut rows {
@@ -1923,6 +1921,7 @@ impl Pipeline {
                 }
             }
         }
+        held.absorb(grown)?;
         Ok(rows)
     }
 }
@@ -1972,16 +1971,6 @@ struct Group {
     accs: Vec<Acc>,
     /// The next group with the same hash (`u32::MAX`: none).
     next: u32,
-}
-
-/// The heap a collecting state took on when `v` was added to it (its values, cloned).
-#[inline]
-fn collected(a: &Acc, v: &V) -> usize {
-    match (a, v) {
-        (Acc::Collect(_), V::Multi(vs)) => vs.iter().map(memory::value_heap).sum(),
-        (Acc::Collect(_), v) => memory::value_heap(v),
-        _ => 0,
-    }
 }
 
 /// The hasher of keys that are already hashes.
@@ -2215,8 +2204,8 @@ impl Grouper {
             {
                 continue;
             }
-            // States that keep values (`VALUES`, `TOP`, percentiles, `COUNT_DISTINCT`'s sketch)
-            // are charged by what they grow, measured around the add.
+            // States that keep values (`VALUES`, `TOP`, `SAMPLE`, the quantiles' digest,
+            // `COUNT_DISTINCT`'s sketch) are charged by what they grow, measured around the add.
             let before = if memory::acc_grows(a) { Some(memory::acc_heap(a)) } else { None };
             let kept = match &s.arg {
                 None => {
@@ -2231,14 +2220,13 @@ impl Grouper {
                     if matches!(a, Acc::Points(_)) { memory::value_heap(&v) } else { 0 }
                 }
                 Some(CE::Col(i)) => {
-                    let v = r.get(*i).unwrap_or(&V::Null);
-                    a.add(&s.func, v, false);
-                    collected(a, v)
+                    a.add(&s.func, r.get(*i).unwrap_or(&V::Null), false);
+                    0
                 }
                 Some(c) => {
                     let v = eval(c, r, &[], w)?;
                     a.add(&s.func, &v, false);
-                    collected(a, &v)
+                    0
                 }
             };
             if let Some(before) = before {
@@ -2259,6 +2247,9 @@ impl Grouper {
         }
         let windowed = self.windowed_rates();
         let mut rows = Vec::with_capacity(self.groups.len());
+        // The output rows: charged as they are built, before a group's key is cloned into one.
+        let mut out = self.held.fresh()?;
+        out.add(rows.capacity() * size_of::<Vec<V>>())?;
         for (g, Group { key, accs, .. }) in self.groups.iter().enumerate() {
             let results: Vec<V> = self
                 .specs
@@ -2270,7 +2261,8 @@ impl Grouper {
                     None => a.finish(&s.func, value::agg_type(&s.func, s.arg_ty), &s.extra),
                 })
                 .collect();
-            let mut row = Vec::new();
+            out.add(size_of::<Vec<V>>() + cols.len() * size_of::<V>() + results.iter().map(memory::value_heap).sum::<usize>() + key.iter().map(memory::value_heap).sum::<usize>())?;
+            let mut row = Vec::with_capacity(cols.len());
             for (c, _, n) in &self.outputs {
                 if self.keys.iter().any(|(_, _, kn)| kn == n) {
                     continue;
@@ -2280,6 +2272,8 @@ impl Grouper {
             row.extend(key.iter().cloned());
             rows.push(row);
         }
+        // The caller charges the table from here on.
+        drop(out);
         Ok(Table { cols, rows })
     }
 }
@@ -2545,6 +2539,8 @@ fn sort_rows(src: &Src<'_>, keys: &[super::parser::SortKey], t: &mut Table, w: &
         keys.add(memory::row_bytes(&k))?;
         keyed.push((k, r));
     }
+    // The stable sort's merge buffer (half the elements) and the sorted rows' new vector.
+    keys.add(keyed.len() / 2 * size_of::<(Vec<V>, Vec<V>)>() + keyed.len() * size_of::<Vec<V>>())?;
     keys.settle()?;
     keyed.sort_by(|a, b| spec.cmp(&a.0, &b.0));
     t.rows = keyed.into_iter().map(|(_, r)| r).collect();
@@ -4018,7 +4014,11 @@ fn run_query<'a>(cluster: &'a Cluster, mut q: Query, filter: Option<Value>, w: &
                 verification(&text, at, &format!("Column [{name}] has conflicting data types in FORK branches: [{}] and [{}]", type_text(new).to_ascii_uppercase(), type_text(have).to_ascii_uppercase()))
             };
             let mut original = std::mem::take(&mut stats.original_types);
+            // The branches' tables were kept charged; their rows move into the merged one,
+            // which `run_rest` charges below.
+            let parts_bytes: usize = parts.iter().map(|t| memory::rows_bytes(&t.rows)).sum();
             let t = union_tables(parts, &conflict, &|_, _| false, &mut original)?;
+            mem.give_back(parts_bytes);
             stats.original_types = original;
             (vec![t], rest)
         } else {
@@ -4079,7 +4079,9 @@ fn run_query<'a>(cluster: &'a Cluster, mut q: Query, filter: Option<Value>, w: &
                 true
             };
             let mut original = std::mem::take(&mut stats.original_types);
+            let parts_bytes: usize = parts.iter().map(|t| memory::rows_bytes(&t.rows)).sum();
             let t = union_tables(parts, &conflict, &lazy, &mut original)?;
+            mem.give_back(parts_bytes);
             stats.original_types = original;
             let mut used = std::collections::HashSet::new();
             for c in rest.iter().filter(|c| !matches!(c, Cmd::Keep(_) | Cmd::Drop(_))) {
@@ -4516,8 +4518,9 @@ fn run_rest(src: &Src<'_>, mut t: Table, cmds: &[Cmd], w: &mut Warnings) -> EsRe
                 }
                 // The groups' results, by key, and the new rows as they are built.
                 let mut lookup = Tally::new(&src.mem)?;
-                for (k, a) in &by_key {
-                    lookup.add(key_bytes(k, std::iter::empty()) + memory::row_bytes(a))?;
+                for r in &stats.rows {
+                    // A key and the aggregations it maps to, copied out of the stats row.
+                    lookup.add(size_of::<Vec<GroupKey>>() + nk * size_of::<GroupKey>() + r[na..].iter().map(memory::value_heap).sum::<usize>() + size_of::<Vec<V>>() + na * size_of::<V>() + r[..na].iter().map(memory::value_heap).sum::<usize>())?;
                 }
                 lookup.add(memory::rows_bytes(&stats.rows))?;
                 let names: Vec<String> = stats.cols.iter().map(|c| c.name.clone()).collect();
@@ -4580,10 +4583,10 @@ fn run_rest(src: &Src<'_>, mut t: Table, cmds: &[Cmd], w: &mut Warnings) -> EsRe
             }
             c if is_row_wise(c) => {
                 let (p, out) = build_pipeline(src, std::slice::from_ref(c), t.cols.clone())?;
-                // The pipeline charges the rows while it runs over them.
-                held.set(0)?;
-                t.rows = p.run(std::mem::take(&mut t.rows), w)?;
+                // What the command builds joins the table's charge as it is built.
+                t.rows = p.run_on(std::mem::take(&mut t.rows), w, &mut held)?;
                 t.cols = out;
+                continue;
             }
             _ => return Err(super::parser::parse_error(src, 0, "mismatched input 'FROM' expecting {'eval', 'keep', 'limit', 'sort', 'stats', 'where'}")),
         }
