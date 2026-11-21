@@ -584,6 +584,7 @@ impl Control {
     }
 
     async fn open_with(cfg: SearchConfig, objects: Objects, wal_objects: Option<Objects>, catalog: Option<Arc<Store>>) -> anyhow::Result<Arc<Self>> {
+        search_es::search::check_max_time(&cfg.node_settings)?;
         std::fs::create_dir_all(&cfg.home)?;
         let store = match (catalog, &cfg.catalog) {
             (Some(c), _) => c,

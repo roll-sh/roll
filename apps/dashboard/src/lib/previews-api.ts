@@ -156,6 +156,9 @@ export interface Preview {
   regressions?: "check" | "required" | null;
   /** Who accepted its regressions at its head. */
   regressions_accepted?: { head: string; by: string; at: number } | null;
+  /** The keys it holds as placeholders (its egress proxy swaps each in for its hosts only), and
+   * how many requests had one swapped in or were refused. Never a value. */
+  intercepted?: { keys: { key: string; hosts: string[] }[]; swapped: number; refused: number } | null;
   /** Its error groups main's preview doesn't have, as its holder last read them. */
   new_errors?: { branch: string; total: number; errors: { service: string; title: string }[] } | null;
   slower_routes?: { branch: string; routes: { name: string; count: number; p50_ms: number; main_p50_ms: number; grew?: GrewSpan | null; /** Its budget, when it's over it. */ budget_ms?: number | null }[] } | null;

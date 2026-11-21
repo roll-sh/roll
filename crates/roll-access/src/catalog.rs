@@ -84,6 +84,10 @@ pub struct Row {
     /// A request header that makes it `admin` when it's `1` (apps' `X-Roll-Override`: going past
     /// a deploy freeze the team set is a person's call, never a deploy token's).
     pub admin_if: Option<&'static str>,
+    /// A stronger action the product may use within this route when the grant allows it (Postgres
+    /// SQL as the database's superuser only for a grant that may `admin` the endpoint): the gate
+    /// asks it quietly, never refusing for it, and says yes with `roll_auth::Capable`.
+    pub capable: &'static [Action],
     /// A JSON body field whose presence makes it `admin` (apps' `freeze`: setting or lifting a
     /// freeze is the same call as going past one).
     pub admin_if_field: Option<&'static [&'static str]>,
@@ -137,12 +141,14 @@ fn apps_drain_bucket(b: &Value) -> Vec<Lent> {
     b.get("bucket").and_then(Value::as_str).map(|r| Lent { kind: "bucket".into(), r#ref: r.into(), action: Action::Write }).into_iter().collect()
 }
 
-/// A roll code repo the body names, which apps reads for the caller (`repo` for a plan or an import,
-/// `source.repo` for a service built from one): read on it, so a token can't learn a repo's stack,
-/// head or roll.toml, or build and run its code, without being allowed to read it.
+/// The roll code repos the body names, which apps reads for the caller (`repo` for a plan or an
+/// import, `source.repo` for a service built from one, `build.submodule_repos` its private
+/// submodules come from): read on each, so a token can't learn a repo's stack, head or roll.toml,
+/// or build and run its code, without being allowed to read it.
 fn apps_repo(b: &Value) -> Vec<Lent> {
     let from_source = (b.pointer("/source/kind").and_then(Value::as_str) == Some("repo")).then(|| b.pointer("/source/repo").and_then(Value::as_str)).flatten();
-    b.get("repo").and_then(Value::as_str).or(from_source).map(|r| Lent { kind: "repo".into(), r#ref: r.into(), action: Action::Read }).into_iter().collect()
+    let subs = b.pointer("/build/submodule_repos").and_then(Value::as_array).into_iter().flatten().filter_map(Value::as_str);
+    b.get("repo").and_then(Value::as_str).or(from_source).into_iter().chain(subs).map(|r| Lent { kind: "repo".into(), r#ref: r.into(), action: Action::Read }).collect()
 }
 
 /// A new service: its links, its scaling and pushed streams and the repo it's built from.
@@ -232,7 +238,7 @@ impl Row {
 }
 
 const fn row(method: &'static str, route: &'static str, product: &'static str, act: Act, target: Tgt) -> Row {
-    Row { method, route, product, act, target, env: EnvFrom::None, path_query: None, reveals: &[], copies_from: None, index: None, lends: None, filters_itself: false, filters_index: false, admin_if: None, admin_if_field: None }
+    Row { method, route, product, act, target, env: EnvFrom::None, path_query: None, reveals: &[], copies_from: None, index: None, lends: None, filters_itself: false, filters_index: false, admin_if: None, admin_if_field: None, capable: &[] }
 }
 
 const R: Act = Act::Is(Action::Read);
@@ -268,6 +274,10 @@ impl Row {
     }
     const fn path_query(mut self, q: &'static str) -> Row {
         self.path_query = Some(q);
+        self
+    }
+    const fn capable(mut self, a: &'static [Action]) -> Row {
+        self.capable = a;
         self
     }
     const fn admin_if(mut self, header: &'static str) -> Row {
@@ -995,7 +1005,10 @@ static ROWS: &[Row] = &[
     row("DELETE", "/v1/endpoints/{id}", "postgres", D, one(PG, "endpoint")),
     row("POST", "/v1/endpoints/{id}/start", "postgres", W, one(PG, "endpoint")),
     row("POST", "/v1/endpoints/{id}/suspend", "postgres", W, one(PG, "endpoint")),
-    row("POST", "/v1/endpoints/{id}/query", "postgres", Act::Body(sql_action), one(PG, "endpoint")),
+    // SQL that isn't read-only runs as a role that owns the database's objects but is never the
+    // superuser (pg-control's `SqlAs::Writer`), unless the grant may `admin` the endpoint; it
+    // drops objects only if the grant may `delete` there.
+    row("POST", "/v1/endpoints/{id}/query", "postgres", Act::Body(sql_action), one(PG, "endpoint")).capable(&[Action::Admin, Action::Delete]),
     // ── Redis ──
     row("GET", "/v1/redis", "redis", R, Tgt::AnyGrant),
     row("GET", "/v1/redis/databases", "redis", R, list("id")).reveals(REDIS_SECRETS),
@@ -1872,9 +1885,12 @@ mod tests {
         assert_eq!(dep.row.action("POST", &[("env".into(), "staging".into())], None), Action::Write);
         assert_eq!(sql_action(&serde_json::json!({ "sql": "select 1", "read_only": true })), Action::Read);
         assert_eq!(sql_action(&serde_json::json!({ "sql": "select 1" })), Action::Write);
+        // Without `admin`, pg-control runs it as the database's owner role, never the superuser.
+        assert_eq!(by_path("POST", "/v1/endpoints/ep_x/query").map(|f| f.row.capable), Some(&[Action::Admin, Action::Delete][..]));
         // A repo apps reads for the caller needs read on it: a plan's, an import's, a source's.
         let repo = |r: &str| vec![Lent { kind: "repo".into(), r#ref: r.into(), action: Action::Read }];
         assert_eq!(apps_repo(&serde_json::json!({ "repo": "acme/web", "revision": "main" })), repo("acme/web"));
+        assert_eq!(apps_repo(&serde_json::json!({ "build": { "submodule_repos": ["acme/lib"] } })), repo("acme/lib"));
         assert_eq!(apps_repo(&serde_json::json!({ "source": { "kind": "repo", "repo": "acme/api" } })), repo("acme/api"));
         assert!(apps_repo(&serde_json::json!({ "source": { "kind": "image", "image": "nginx" } })).is_empty());
         assert_eq!(link_target("repo"), Some(("code", "repo")));

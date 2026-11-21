@@ -40,6 +40,10 @@ interface Form {
   /** The build's timeout, minutes. */
   buildTimeout: string;
   buildSize: string;
+  submodules: boolean;
+  /** Private roll code repos submodules may come from, comma-separated. */
+  submoduleRepos: string;
+  lfs: boolean;
   type: Run["type"];
   port: string;
   start: string;
@@ -147,6 +151,9 @@ export function formOf(s: Service): Form {
     packages: (s.build.packages ?? []).join(" "),
     buildTimeout: s.build.timeout_s ? String(Math.round(s.build.timeout_s / 60)) : "",
     buildSize: s.build.size ?? "small",
+    submodules: !!s.build.submodules,
+    submoduleRepos: (s.build.submodule_repos ?? []).join(", "),
+    lfs: !!s.build.lfs,
     type: s.run.type,
     port: str(s.run.port),
     start: str(s.run.start),
@@ -254,6 +261,12 @@ export function patchOf(s: Service, f: Form): ServicePatch {
     build.timeout_s = m === null ? null : m * 60;
   }
   if (f.buildSize !== before.buildSize) build.size = f.buildSize === "small" ? null : (f.buildSize as "medium" | "large");
+  if (f.submodules !== before.submodules) build.submodules = f.submodules ? true : null;
+  if (f.submoduleRepos !== before.submoduleRepos) {
+    const repos = f.submoduleRepos.split(/[\s,]+/).filter(Boolean);
+    build.submodule_repos = repos.length ? repos : null;
+  }
+  if (f.lfs !== before.lfs) build.lfs = f.lfs ? true : null;
   if (Object.keys(build).length) patch.build = build;
   const run: Reset<Run> = {};
   if (f.type !== before.type) run.type = f.type;
@@ -517,6 +530,27 @@ export function SettingsTab({
               {(form.sourceKind === "repo" || form.sourceKind === "git") && (
                 <Field label="Watch paths" hint="a push deploys only when it changes one">
                   {t("watch", "apps/web/**, packages/ui/**")}
+                </Field>
+              )}
+              {(form.sourceKind === "git" || form.sourceKind === "repo") && (
+                <Field label="Submodules" hint={form.sourceKind === "repo" ? "fetched at the commits the repo pins: public URLs, public roll code repos and the private ones named below" : "fetched at the commits the repository pins, from their own public URLs"}>
+                  <select value={form.submodules ? "on" : "off"} onChange={(e) => set("submodules", e.target.value === "on")} className={`${input} w-full`}>
+                    <option value="off">Left out</option>
+                    <option value="on">Fetched into the build</option>
+                  </select>
+                </Field>
+              )}
+              {form.sourceKind === "repo" && form.submodules && (
+                <Field label="Private submodule repos" hint="roll code repos you can read that its submodules may come from">
+                  {t("submoduleRepos", "acme/lib, acme/ui")}
+                </Field>
+              )}
+              {form.sourceKind === "git" && (
+                <Field label="Git LFS" hint="objects fetched in place of their pointers, checked against them">
+                  <select value={form.lfs ? "on" : "off"} onChange={(e) => set("lfs", e.target.value === "on")} className={`${input} w-full`}>
+                    <option value="off">Pointers as they are</option>
+                    <option value="on">Objects fetched</option>
+                  </select>
                 </Field>
               )}
             </Grid>
