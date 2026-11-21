@@ -924,6 +924,9 @@ previews are listed once those products are on.
 | `secrets_diff` | A local .env against an environment, by fingerprint (names only). | `POST /v1/secrets/projects/{project}/environments/{env}/diff` |
 | `secrets_list_rotations` | A project's secret rotations: what rotated and what's due. | `GET /v1/secrets/projects/{project}/rotations` |
 | `secrets_ca_certificates` | The certificates a project's CA has issued (never a key). | `GET /v1/secrets/projects/{project}/cas/{ca}/certificates` |
+| `secrets_list_placeholders` | Placeholders handed out for a project's host-bound keys (key, consumer, expiry; never the placeholder or the value). | `GET /v1/secrets/projects/{project}/placeholders` |
+| `secrets_end_placeholder` | End one placeholder now. | `DELETE /v1/secrets/projects/{project}/placeholders/{id}` |
+| `secrets_end_consumer_placeholders` | End every live placeholder a consumer holds. | `DELETE /v1/secrets/projects/{project}/placeholders?consumer=` |
 | `secrets_list_leases` | A project's live leases on dynamic credentials, never a credential. | `GET /v1/secrets/projects/{project}/leases` |
 | `secrets_end_lease` | End a dynamic credential's lease now (one's own with reveal). | `DELETE /v1/secrets/projects/{project}/leases/{id}` |
 | `secrets_credential_check` | A credential found in code that the project doesn't hold: its kind, whether it was live when last checked, its account and rotator (never its value). | `GET /v1/secrets/projects/{project}/unstored/{fingerprint}` |

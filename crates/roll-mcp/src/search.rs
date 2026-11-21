@@ -344,6 +344,7 @@ mod finds {
             ("ask a person for an api key", "secrets_request_value"),
             ("who changed this secret and when", "secrets_audit"),
             ("one-time code", "secrets_totp"),
+            ("which placeholders has my sandbox got", "secrets_list_placeholders"),
             ("vulnerabilities in my image", "apps_deploy_vulnerabilities"),
             ("slo error budget", "apps_environment_slo"),
             ("contact form submissions", "apps_form_submissions"),
