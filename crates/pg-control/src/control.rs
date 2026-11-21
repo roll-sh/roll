@@ -182,7 +182,7 @@ impl Control {
             }
         };
         let ep = self.store.endpoint_for_branch(&branch.id)?.ok_or_else(|| ControlError::NotFound("primary endpoint".into()))?;
-        self.query(&ep.id, &crate::roles::role_sql(&branch.id, &password), false).await?;
+        self.query(&ep.id, &crate::roles::role_sql(&branch.id, &password), SqlAs::Owner).await?;
         self.branch_in(project_id, &branch.id)
     }
 
@@ -630,7 +630,7 @@ impl Control {
     /// with anything it made when the query ends, even if the caller goes away. Postgres itself
     /// refuses its writes, whatever the SQL does (`SET`, `COMMIT; …`, procedures). A standby can't
     /// make the role, and its only user is the superuser: read-only SQL runs on the primary.
-    pub async fn query(self: &Arc<Self>, endpoint_id: &str, sql: &str, read_only: bool) -> Result<Vec<QueryResult>> {
+    pub async fn query(self: &Arc<Self>, endpoint_id: &str, sql: &str, as_: SqlAs) -> Result<Vec<QueryResult>> {
         let ep = self.endpoint_or_404(endpoint_id)?;
         let project = self.project_or_404(&ep.project_id)?;
         let addr = self.ensure_running(endpoint_id).await?;
@@ -638,7 +638,7 @@ impl Control {
         // Detached: the role made for a read-only query is dropped even if this request isn't
         // awaited to the end.
         let (sql, password) = (sql.to_string(), project.password.clone());
-        let out = tokio::spawn(async move { run_sql(addr, &password, &sql, read_only).await }).await;
+        let out = tokio::spawn(async move { run_sql(addr, &password, &sql, as_).await }).await;
         self.connection_closed(endpoint_id);
         let out = out.map_err(|e| ControlError::Internal(anyhow::anyhow!("the query task failed: {e}")))?;
         let messages = out?;
@@ -689,12 +689,12 @@ impl Control {
             return Err(ControlError::Invalid("roll can't answer a decoy role's logins as this database's Postgres image does, so one here could be told from a missing role".into()));
         }
         // First in Postgres: this fails for a role that exists, which must never become a decoy.
-        self.query(&ep.id, &format!("CREATE ROLE {role} NOLOGIN"), false).await?;
+        self.query(&ep.id, &format!("CREATE ROLE {role} NOLOGIN"), SqlAs::Owner).await?;
         let mut salt = [0u8; 16];
         getrandom::fill(&mut salt).map_err(|e| anyhow::anyhow!("os randomness: {e}"))?;
         use base64::Engine as _;
         if let Err(e) = self.store.insert_decoy_role(project_id, role, &base64::engine::general_purpose::STANDARD.encode(salt)) {
-            let _ = self.query(&ep.id, &format!("DROP ROLE IF EXISTS {role}"), false).await;
+            let _ = self.query(&ep.id, &format!("DROP ROLE IF EXISTS {role}"), SqlAs::Owner).await;
             return Err(e.into());
         }
         Ok(DecoyRole { role: role.to_string(), endpoint_id: ep.id })
@@ -710,7 +710,7 @@ impl Control {
         // Only names `create_decoy_role` took are in the table.
         let ep = self.root_endpoint(project_id)?;
         let sql = format!("DO $$ BEGIN IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = '{role}') THEN EXECUTE 'DROP OWNED BY {role}'; EXECUTE 'DROP ROLE {role}'; END IF; END $$;");
-        self.query(&ep.id, &sql, false).await?;
+        self.query(&ep.id, &sql, SqlAs::Owner).await?;
         self.store.delete_decoy_role(project_id, role)?;
         Ok(())
     }
@@ -894,7 +894,26 @@ fn decoy_name_ok(role: &str) -> bool {
 }
 
 /// One query's messages: as the owner, or (`read_only`) as a role made for it and dropped after.
-async fn run_sql(addr: SocketAddr, password: &str, sql: &str, read_only: bool) -> Result<Vec<tokio_postgres::SimpleQueryMessage>> {
+/// Who SQL on an endpoint runs as ([`Control::query`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SqlAs {
+    /// A role made for the query holding only `pg_read_all_data` and `pg_read_all_stats` (other
+    /// sessions' queries and `pg_stat_statements`' text, which slow-query and health tools read),
+    /// in read-only transactions: Postgres refuses its writes.
+    ReadOnly,
+    /// A role made for the query that is a member of the roles owning the app's objects (the
+    /// database's `roll_owner`, a branch's app role) and holds `pg_read_all_data` and
+    /// `pg_write_all_data`: rows and schema changes, never the superuser's powers (roles,
+    /// `COPY … PROGRAM`, the server's files). What it makes stays, owned by `roll_owner`. Without
+    /// `may_drop` it's a member of `roll_no_drop` too, and Postgres refuses its drops of tables,
+    /// columns, schemas and the like (deleting rows is a write).
+    Writer { may_drop: bool },
+    /// The project's superuser: the operator's, a grant that may `admin` the endpoint, and roll's
+    /// own work (app roles, decoys).
+    Owner,
+}
+
+async fn run_sql(addr: SocketAddr, password: &str, sql: &str, as_: SqlAs) -> Result<Vec<tokio_postgres::SimpleQueryMessage>> {
     let conn = |user: &str, password: &str| {
         format!("host={} port={} user={user} password={password} dbname=main connect_timeout=10 application_name=roll-console", addr.ip(), addr.port())
     };
@@ -903,7 +922,7 @@ async fn run_sql(addr: SocketAddr, password: &str, sql: &str, read_only: bool) -
         Ok::<_, ControlError>((client, tokio::spawn(connection)))
     };
     let (admin, admin_conn) = connect(conn("roll", password)).await?;
-    if !read_only {
+    if as_ == SqlAs::Owner {
         let messages = admin.simple_query(sql).await;
         drop(admin);
         let _ = admin_conn.await;
@@ -912,20 +931,58 @@ async fn run_sql(addr: SocketAddr, password: &str, sql: &str, read_only: bool) -
     if admin.query_one("SELECT pg_is_in_recovery()", &[]).await.map(|r| r.get::<_, bool>(0)).unwrap_or(true) {
         drop(admin);
         let _ = admin_conn.await;
-        return Err(ControlError::Invalid("read-only SQL runs on a branch's primary endpoint, not a read replica".into()));
+        return Err(ControlError::Invalid(match as_ {
+            SqlAs::ReadOnly => "read-only SQL runs on a branch's primary endpoint, not a read replica".into(),
+            _ => "SQL that may write runs on a branch's primary endpoint; on a read replica, send it read_only".into(),
+        }));
     }
-    let role = format!("roll_ro_{}", crate::ids::random_string(16));
     let pw = crate::ids::random_string(32);
-    admin
-        .batch_execute(&format!(
-            "CREATE ROLE {role} LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS CONNECTION LIMIT 1 \
-             PASSWORD '{pw}' VALID UNTIL '{until}' IN ROLE pg_read_all_data; \
-             ALTER ROLE {role} SET default_transaction_read_only = on; \
-             ALTER ROLE {role} SET statement_timeout = '60s'",
-            until = chrono_like_in(600)
-        ))
-        .await
-        .map_err(|e| ControlError::Internal(anyhow::anyhow!("making the read-only role: {}", pg_error_text(&e))))?;
+    let until = chrono_like_in(600);
+    let role = match as_ {
+        SqlAs::ReadOnly => {
+            let role = format!("roll_ro_{}", crate::ids::random_string(16));
+            admin
+                .batch_execute(&format!(
+                    "CREATE ROLE {role} LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS CONNECTION LIMIT 1 \
+                     PASSWORD '{pw}' VALID UNTIL '{until}' IN ROLE pg_read_all_data, pg_read_all_stats; \
+                     ALTER ROLE {role} SET default_transaction_read_only = on; \
+                     ALTER ROLE {role} SET statement_timeout = '60s'"
+                ))
+                .await
+                .map_err(|e| ControlError::Internal(anyhow::anyhow!("making the read-only role: {}", pg_error_text(&e))))?;
+            role
+        }
+        _ => {
+            // The database's owner role takes what the superuser owns (roles.rs), then the
+            // writer joins the roles that own the app's objects: their rights, never more.
+            let role = format!("roll_wr_{}", crate::ids::random_string(16));
+            let made = async {
+                admin.batch_execute(crate::roles::OWNER_SQL).await?;
+                let owners: Vec<String> = admin.query(crate::roles::OWNERS_SQL, &[]).await?.iter().map(|r| r.get(0)).collect();
+                let v16 = admin.query_one("SELECT current_setting('server_version_num')::int >= 160000", &[]).await?.get::<_, bool>(0);
+                let mut sql = format!(
+                    "CREATE ROLE {role} LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS CONNECTION LIMIT 1 \
+                     PASSWORD '{pw}' VALID UNTIL '{until}' IN ROLE pg_read_all_data, pg_write_all_data;"
+                );
+                for o in &owners {
+                    let quoted = format!("\"{}\"", o.replace('"', "\"\""));
+                    // On 16 and later it can't SET ROLE to them either: their rights, not their name.
+                    sql.push_str(&format!(" GRANT {quoted} TO {role}{};", if v16 { " WITH INHERIT TRUE, SET FALSE" } else { "" }));
+                }
+                if as_ == (SqlAs::Writer { may_drop: false }) {
+                    sql.push_str(&format!(" GRANT roll_no_drop TO {role};"));
+                }
+                admin.batch_execute(&sql).await
+            };
+            if let Err(e) = made.await {
+                let _ = admin.batch_execute(&format!("DROP ROLE IF EXISTS {role}")).await;
+                drop(admin);
+                let _ = admin_conn.await;
+                return Err(ControlError::Internal(anyhow::anyhow!("making the writer role: {}", pg_error_text(&e))));
+            }
+            role
+        }
+    };
     let messages = match connect(conn(&role, &pw)).await {
         Ok((reader, reader_conn)) => {
             let m = reader.simple_query(sql).await;
@@ -935,9 +992,11 @@ async fn run_sql(addr: SocketAddr, password: &str, sql: &str, read_only: bool) -
         }
         Err(e) => Err(e),
     };
-    // Whatever the role made (a temporary table goes with its session) goes with it.
-    if let Err(e) = admin.batch_execute(&format!("DROP OWNED BY {role}; DROP ROLE {role}")).await {
-        tracing::warn!(role, error = %pg_error_text(&e), "dropping a read-only query role");
+    // A writer's objects stay, as the database's owner role's; whatever a reader made (a
+    // temporary table goes with its session) goes with it.
+    let keep = if matches!(as_, SqlAs::Writer { .. }) { format!("REASSIGN OWNED BY {role} TO roll_owner; ") } else { String::new() };
+    if let Err(e) = admin.batch_execute(&format!("{keep}DROP OWNED BY {role}; DROP ROLE {role}")).await {
+        tracing::warn!(role, error = %pg_error_text(&e), "dropping a query role");
     }
     drop(admin);
     let _ = admin_conn.await;

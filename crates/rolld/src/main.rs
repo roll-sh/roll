@@ -472,7 +472,7 @@ async fn run_with(mut args: Args) -> anyhow::Result<()> {
 
     // roll search: same object storage; the Elasticsearch REST listener and `/v1/search`.
     let search = match on.on(Product::Search) {
-        true => Some(search::Search::start(&home, &args.search, &storage, &args.public_host, &args.node, &cluster, args.code.cluster.system_database.as_deref(), args.db_budget()?.search, edge::Public::of(&args).as_ref(), args.secret_key().as_deref().map(String::as_str)).await?),
+        true => Some(search::Search::start(&home, &args.search, &storage, &args.public_host, &args.node, &cluster, args.code.cluster.system_database.as_deref(), args.db_budget()?.search, edge::Public::of(&args).as_ref(), args.secret_key().as_deref().map(String::as_str), !auth.enforcing()).await?),
         false => None,
     };
 
@@ -496,6 +496,7 @@ async fn run_with(mut args: Args) -> anyhow::Result<()> {
                 redis.as_ref().map(|r| r.control.clone()),
                 apps_secrets.clone(),
                 products_api.clone(),
+                !auth.enforcing(),
             )
             .await?,
         ),

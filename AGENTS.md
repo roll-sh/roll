@@ -301,7 +301,8 @@ The product should feel alive: dots react to the cursor and the marks "think". E
   - After touching access or MCP, run `pnpm test:code` (it runs roll-auth, roll-access, roll-mcp
     and roll-net with roll code's suites; `--docker` runs them on Postgres too) and
     `cargo test -p rolld --test auth` (every route classified). Read-only must be enforced by the
-    product (Postgres runs `read_only` SQL as a role that can only read), not by parsing.
+    product (Postgres runs `read_only` SQL as a role that can only read, and a write-only grant's
+    SQL as a member of the database's owner role, never the superuser), not by parsing.
   - roll's MCP server is `crates/roll-mcp` (`/v1/mcp`): a tool is one route (`tools.rs`), called
     through the gated router, its hints from the catalogue; list it in docs/mcp.md (a test checks).
     A body field or query parameter added to a route that has a tool goes in the tool's arguments,

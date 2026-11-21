@@ -636,9 +636,11 @@ previews are listed once those products are on.
 | `postgres_get_endpoint` | An endpoint's compute state and limits. | `GET /v1/endpoints/{id}` |
 | `postgres_update_endpoint` | An endpoint's autoscaling limits and suspend timeout. | `PATCH /v1/endpoints/{id}` |
 | `postgres_query` | Run read-only SQL on an endpoint: it runs in a read-only transaction, so writes fail. Returns columns and rows. | `POST /v1/endpoints/{endpoint}/query` |
-| `postgres_execute` | Run SQL that may change data or schema (INSERT, UPDATE, DDL) on an endpoint. | `POST /v1/endpoints/{endpoint}/query` |
+| `postgres_execute` | Run SQL that may change data or schema (INSERT, UPDATE, DDL) on an endpoint; without `admin` on the endpoint, as a role that owns the database's objects, never the superuser (decision 6). | `POST /v1/endpoints/{endpoint}/query` |
 | `postgres_describe_schema` | Every table's columns and types on an endpoint (read-only). | `POST /v1/endpoints/{endpoint}/query` |
 | `postgres_explain` | A statement's plan as JSON, without running it (Neon's explain). | `POST /v1/endpoints/{id}/query` (read-only, `EXPLAIN (FORMAT JSON)`) |
+| `postgres_activity` | Every client session now, blocked ones first: user, app, state, what it waits on, `blocked_by`, how long its transaction and query have run, the query. | `POST /v1/endpoints/{endpoint}/query` (fixed, read-only) |
+| `postgres_health_checks` | A database's health in one read (Neon's `inspect_database`): cache and index hit rates, dead-row bloat, the oldest open transaction, idle-in-transaction sessions, connections against the limit, transaction ID age, size; each ok or warn. | `POST /v1/endpoints/{endpoint}/query` (fixed, read-only) |
 | `postgres_slow_queries` | The 20 slowest statements by mean time (Neon's slow queries; `pg_stat_statements`). | `POST /v1/endpoints/{id}/query` (read-only) |
 | `postgres_advisors` | Unused indexes, unindexed foreign keys, tables without a primary key, sequential scans (Supabase's advisors). | `POST /v1/endpoints/{id}/query` (read-only) |
 | `postgres_list_extensions` | Extensions installed and available. | `POST /v1/endpoints/{id}/query` (read-only) |
@@ -810,6 +812,8 @@ previews are listed once those products are on.
 | `search_overview` | What roll search offers here: versions, endpoint, defaults, pricing. | `GET /v1/search` |
 | `search_unlink_remote` | Unlink a remote cluster (its credentials go; a key roll made is revoked). | `DELETE /v1/search/clusters/{cluster}/remotes/{alias}` |
 | `search_revoke_key` | Revoke a cluster API key at once. | `DELETE /v1/search/clusters/{cluster}/keys/{key}` |
+| `search_list_browser_keys` | A cluster's browser keys that still work: name, indices or application, filter, rate limit, expiry (never the key). | `GET /v1/search/clusters/{cluster}/browser-keys` |
+| `search_revoke_browser_key` | Revoke a browser key at once. | `DELETE /v1/search/clusters/{cluster}/browser-keys/{key}` |
 | `search_list_inference_secrets` | Inference endpoints keyed by a roll secret, and what each follows (never the value). | `GET /v1/search/clusters/{id}/inference/secrets` |
 | `search_branch_cluster` | A copy-on-write branch of a cluster. | `POST /v1/search/clusters/{cluster}/branches` |
 | `search_update_cluster` | A cluster's idle timeout, request limits, flavor, IP allowlist (admin). | `PATCH /v1/search/clusters/{id}` |
@@ -1080,27 +1084,27 @@ previews are listed once those products are on.
 Ranked; the top item is in progress. A watchdog reads this list. Unblocked work comes first; what
 waits on a sibling PR reaching main is last.
 
-1. **Postgres SQL from a `write` token runs as the project's superuser (decision 6, the
-   user's).** `POST /v1/endpoints/{id}/query` without `read_only` is `write`, and runs as `roll`,
-   the bootstrap superuser. Only a text check (`grants_access`) makes role and privilege SQL
-   `admin`, and dynamic SQL gets past it (`DO $$ BEGIN EXECUTE 'CREA' || 'TE ROLE x SUPERUSER'; END
-   $$`), as it does `COPY … TO PROGRAM` (a shell in the compute) and dropping tables a `delete` rule
-   would have asked about. A token with `reveal` already gets a connection string, but an agent's
-   write-only token shouldn't reach superuser. Text checks aren't the fix (they were bypassed three
-   times before). The product must run `write` SQL as a role that can't. Two ways, and the choice
-   changes what `write` can do on existing databases:
-   - (a) A per-query role with `pg_read_all_data`, `pg_write_all_data` and CREATE on the schemas
-     (what it makes is reassigned to the owner after): rows and new objects, but altering or dropping
-     an existing table needs `admin`. Works today; migrations with a write token stop working on
-     databases without an app role.
-   - (b) Every database gets a non-superuser owner role that owns its user objects (as a branch's
-     app role does), and `write` runs as a per-query member of it (`INHERIT TRUE, SET FALSE`): full
-     DDL, never superuser. Each existing database migrates once; the app-role code must take it into
-     account. Recommended. Never membership in `roll` itself: it owns the system catalogs.
-   Either way the gate gains a quiet second outcome (a row's `capable(Admin)`, answered as a
-   request extension) so pg-control runs as `roll` only for the operator or a grant that may
-   `admin` the endpoint. Found by the 2026-11-21 comparison with Supabase's and PlanetScale's MCP
-   servers, which ask before destructive SQL.
+1. **Dropping objects needs `delete` (this PR; decision 6's option (b) landed in #606).** A
+   write-only grant's SQL runs as a member of the database's `roll_owner`, never the superuser
+   (`SqlAs::Writer`), and owners may drop, so a token whose `delete` is `ask` or refused could still
+   `DROP TABLE` (Supabase and PlanetScale ask before destructive SQL). There's no Postgres parser in
+   the workspace, so Postgres decides: `OWNER_SQL` makes a `roll_no_drop` role and, in `roll_guard`
+   (the superuser's schema, never handed to an owner role), an event trigger on `sql_drop` that
+   refuses any drop (a table, an index, a column by `ALTER … DROP`, a schema, a function) by a
+   session that is a member of `roll_no_drop`, saying to ask for `delete`. The writer joins it
+   unless the gate's `capable` says the grant may `delete` the endpoint (`roll_auth::Capable` now
+   carries a list: `admin` and `delete` for this route). A writer can't drop, disable or replace
+   the trigger (not its owner; `session_replication_role` is the superuser's). Deleting rows stays a
+   write: `DELETE FROM t` empties a table as `TRUNCATE` does, and `write` must be able to delete
+   rows, so guarding `TRUNCATE` alone would buy nothing. Test: `write_sql_is_never_the_superuser`
+   (a writer without delete deletes rows, makes tables and columns, drops nothing, and can't touch
+   the guard; one with delete drops).
+   Decision 6's write-up, for the record: `roll_owner` (no login, never a superuser) takes the
+   database and what the superuser owns in the app's schemas; a writer joins only owner roles that
+   are, and can become, nothing more (`WITH INHERIT TRUE, SET FALSE`), never `roll`, which owns
+   the system catalogs; option (a), a role with no ownership, would have broken every write
+   token's migrations. The gate's `capable(Admin)` keeps the superuser for the operator and admin
+   grants (`roll_auth::Capable`).
 2. **From that comparison, unblocked:** a "hand this to an agent" workflow (an error or a slow
    query to `code_create_work`, an agent's claim, `previews_wait`, `review_preview`) once roll
    code's tools can be a workflow's requirements (they're another crate's); roll code's routes with
@@ -1111,7 +1115,7 @@ waits on a sibling PR reaching main is last.
    preview's or app's URL through its access gate (Vercel's `web_fetch_vercel_url`; previews,
    apps), Postgres logs and live metrics and migrations as records (Supabase, Neon, PlanetScale),
    a read-only ES|QL route (search), log grouping and field values (apps).
-3. **Landed (now):** `what_needs_me`, a workflow for what's waiting on you across roll (this PR);
+3. **Landed (now):** `what_needs_me`, a workflow for what's waiting on you across roll (#597);
    landed 2026-11-20/21: `previews_wait` (#555), 2026-07-28's
    resource-not-found code (#556; the rest of that revision's changelog and deprecations were
    already in: discover, listen, `resultType`, `ttlMs`, `Mcp-Name`, the renumbered errors, `iss`,

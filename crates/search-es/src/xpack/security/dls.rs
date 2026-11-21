@@ -41,6 +41,14 @@ struct Inner {
     user: Value,
     /// The salt of masked fields' hashes (OpenSearch Security).
     salt: [u8; 16],
+    /// A browser key's policy ([`super::browser`]): what its queries, scripts and fetches may do.
+    browser: Option<super::browser::Policy>,
+    /// What the request may still fetch (hits, `top_hits`, inner hits) under the policy.
+    fetch_left: std::sync::atomic::AtomicI64,
+    /// The distinct texts the request may still embed under the policy.
+    inference_left: std::sync::atomic::AtomicI64,
+    /// The searches collapse's `inner_hits` may still expand under the policy.
+    sub_searches_left: std::sync::atomic::AtomicI64,
 }
 
 impl std::fmt::Debug for ReadSecurity {
@@ -206,15 +214,91 @@ fn prefix_may_match(pattern: &str, prefix: &str) -> bool {
 impl ReadSecurity {
     /// The read restrictions of the request's principal.
     pub fn of(ctx: &Ctx) -> Option<ReadSecurity> {
+        // Not yet authenticated: nothing to keep.
+        ctx.principal.get()?;
+        ctx.read_security.get_or_init(|| ReadSecurity::compute(ctx)).clone()
+    }
+
+    fn compute(ctx: &Ctx) -> Option<ReadSecurity> {
         let p = ctx.principal.get().filter(|p| !p.is_superuser())?;
         let eff = super::effective(&super::file_roles(ctx.cluster), &ctx.state(), p);
         let restricts = eff.own.iter().chain(eff.limited_by.iter().flatten()).chain(eff.also.iter().flatten()).flat_map(|r| r.indices.iter()).any(|g| g.query.is_some() || g.field_security.is_some() || !g.masked.is_empty());
-        if !restricts {
+        // A browser key is restricted whatever its roles: its policy rides with its reads.
+        let browser = super::browser::policy(ctx);
+        if !restricts && browser.is_none() {
             return None;
         }
         let st = ctx.state();
         let aliases = st.metadata.indices.values().filter(|i| !i.aliases.is_empty()).map(|i| (i.name.clone(), i.aliases.keys().cloned().collect())).collect();
-        Some(ReadSecurity(Arc::new(Inner { eff, aliases, user: user_params(p), salt: super::opensearch::masking_salt(ctx.cluster) })))
+        let left = |n: fn(&super::browser::Policy) -> i64| std::sync::atomic::AtomicI64::new(browser.as_ref().map_or(i64::MAX, n));
+        let fetch_left = left(|b| b.max_result_window);
+        let inference_left = left(|b| b.max_inference);
+        let sub_searches_left = left(|_| super::browser::MAX_SUB_SEARCHES);
+        Some(ReadSecurity(Arc::new(Inner {
+            eff,
+            aliases,
+            user: user_params(p),
+            salt: super::opensearch::masking_salt(ctx.cluster),
+            browser,
+            fetch_left,
+            inference_left,
+            sub_searches_left,
+        })))
+    }
+
+    /// The browser key policy its reads run under (`None`: not a browser key).
+    pub fn browser(&self) -> Option<&super::browser::Policy> {
+        self.0.browser.as_ref()
+    }
+
+    /// Takes one document from the request's fetch budget (a browser key's `max_result_window`,
+    /// shared by its hits, `top_hits` and inner hits, however many buckets ask): past it, 400.
+    pub fn spend_fetch(&self) -> EsResult<()> {
+        let Some(b) = &self.0.browser else { return Ok(()) };
+        if self.0.fetch_left.fetch_sub(1, std::sync::atomic::Ordering::Relaxed) <= 0 {
+            return Err(super::browser::refused(format!(
+                "fetching more than [{}] documents in one request (hits, top_hits and inner hits together; the key's max_result_window)",
+                b.max_result_window
+            )));
+        }
+        Ok(())
+    }
+
+    /// Takes `n` distinct texts from what the request may embed (a browser key's
+    /// `max_inference`, shared by every query and `_msearch` item): past it, 400.
+    pub fn spend_inference(&self, n: usize) -> EsResult<()> {
+        let Some(b) = &self.0.browser else { return Ok(()) };
+        let n = n as i64;
+        if self.0.inference_left.fetch_sub(n, std::sync::atomic::Ordering::Relaxed) < n {
+            return Err(super::browser::refused(format!(
+                "embedding more than [{}] distinct texts in one request (the key's max_inference)",
+                b.max_inference
+            )));
+        }
+        Ok(())
+    }
+
+    /// Takes one search collapse's `inner_hits` expands: at most
+    /// [`super::browser::MAX_SUB_SEARCHES`] a request, each one document of the fetch budget.
+    pub fn spend_sub_search(&self) -> EsResult<()> {
+        if self.0.browser.is_none() {
+            return Ok(());
+        }
+        if self.0.sub_searches_left.fetch_sub(1, std::sync::atomic::Ordering::Relaxed) <= 0 {
+            return Err(super::browser::refused(format!(
+                "expanding more than [{}] collapsed groups' inner hits in one request (inner hits definitions times page hits)",
+                super::browser::MAX_SUB_SEARCHES
+            )));
+        }
+        self.spend_fetch()
+    }
+
+    /// Refuses `what` (painless, `explain`) when a browser key's policy doesn't allow it.
+    pub fn refuse_for_browser(&self, what: super::browser::Banned) -> EsResult<()> {
+        match &self.0.browser {
+            Some(b) if !b.allows(what) => Err(super::browser::refused(what.describe())),
+            _ => Ok(()),
+        }
     }
 
     fn sets(&self) -> impl Iterator<Item = &Vec<Permission>> {

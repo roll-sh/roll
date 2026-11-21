@@ -1594,6 +1594,11 @@ impl Apps for Runtime {
         self.service_status(preview, service)
     }
 
+    /// The runtime's own proxy counts on the preview's record as it goes.
+    async fn intercepted(&self, _preview: &str) -> Option<crate::AppsIntercepted> {
+        None
+    }
+
     async fn egress_refused(&self, preview: &str) -> Vec<String> {
         if self.iso.name() != "docker" {
             return Vec::new();

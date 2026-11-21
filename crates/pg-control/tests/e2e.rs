@@ -10,7 +10,7 @@ use futures::{SinkExt, StreamExt};
 use pg_control::compute::container_name;
 use pg_control::history::Target;
 use pg_control::store::{Branch, Endpoint, EndpointState, LocalState, Project};
-use pg_control::{Config, Control, api, reconciler};
+use pg_control::{Config, Control, SqlAs, api, reconciler};
 use pg_proxy::decoy::learn::{self, Probe, probes, shape};
 use pg_proxy::{Proxy, ProxyConfig};
 use pg_storage::{Lsn, StorageConfig};
@@ -472,8 +472,11 @@ async fn read_only_sql_cannot_write() {
     let db = h.project(None).await;
     let c = h.connect(&db, &db.ep.id).await;
     seed(&c, 10).await;
-    let rows = h.control.query(&db.ep.id, "SELECT count(*) FROM t", true).await.unwrap();
+    let rows = h.control.query(&db.ep.id, "SELECT count(*) FROM t", SqlAs::ReadOnly).await.unwrap();
     assert_eq!(rows[0].rows[0][0].as_deref(), Some("10"));
+    // It sees what other sessions run (slow-query and health tools read it), not "<insufficient privilege>".
+    let rows = h.control.query(&db.ep.id, "SELECT count(*) FROM pg_stat_activity WHERE query = '<insufficient privilege>'", SqlAs::ReadOnly).await.unwrap();
+    assert_eq!(rows[0].rows[0][0].as_deref(), Some("0"));
     for sql in [
         "INSERT INTO t VALUES (99, 'x')",
         "SET default_transaction_read_only = off; DELETE FROM t",
@@ -481,12 +484,71 @@ async fn read_only_sql_cannot_write() {
         "CREATE TABLE sneaky (id int)",
         "ALTER ROLE roll PASSWORD 'x'",
     ] {
-        assert!(h.control.query(&db.ep.id, sql, true).await.is_err(), "{sql} ran read-only");
+        assert!(h.control.query(&db.ep.id, sql, SqlAs::ReadOnly).await.is_err(), "{sql} ran read-only");
     }
     assert_eq!(count(&c, "SELECT count(*) FROM t").await, 10);
-    h.control.query(&db.ep.id, "INSERT INTO t VALUES (99, 'x')", false).await.unwrap();
+    h.control.query(&db.ep.id, "INSERT INTO t VALUES (99, 'x')", SqlAs::Owner).await.unwrap();
     assert_eq!(count(&c, "SELECT count(*) FROM t").await, 11);
     assert_eq!(count(&c, "SELECT count(*) FROM pg_roles WHERE rolname LIKE 'roll_ro_%'").await, 0);
+}
+
+/// SQL from a token that may only write runs as a member of the database's owner role: rows and
+/// schema changes, on tables the superuser made too, and what it makes stays; never the
+/// superuser's powers, however the SQL is written (docs/mcp.md, decision 6).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn write_sql_is_never_the_superuser() {
+    let h = harness!();
+    let db = h.project(None).await;
+    let c = h.connect(&db, &db.ep.id).await;
+    seed(&c, 10).await;
+    let w = |sql: &'static str| h.control.query(&db.ep.id, sql, SqlAs::Writer { may_drop: true });
+    for sql in [
+        "INSERT INTO t VALUES (99, 'x')",
+        "ALTER TABLE t ADD COLUMN extra int",
+        "CREATE INDEX ON t (v)",
+        "CREATE TABLE made (id int)",
+        "DROP TABLE made",
+        "CREATE TABLE kept (id int)",
+    ] {
+        w(sql).await.unwrap_or_else(|e| panic!("{sql} didn't run as a writer: {e}"));
+    }
+    for sql in [
+        "DO $$ BEGIN EXECUTE 'CREA' || 'TE ROLE sneaky SUPERUSER'; END $$",
+        "CREATE ROLE sneaky",
+        "ALTER ROLE roll PASSWORD 'x'",
+        "COPY (SELECT 1) TO PROGRAM 'true'",
+        "SET ROLE roll",
+        "SELECT pg_read_file('postgresql.conf')",
+    ] {
+        assert!(w(sql).await.is_err(), "{sql} ran as a writer");
+    }
+    assert_eq!(count(&c, "SELECT count(*) FROM t").await, 11);
+    assert_eq!(count(&c, "SELECT count(*) FROM pg_roles WHERE rolname = 'sneaky'").await, 0);
+    // What it made stays, the owner role's, and no writer role is left behind.
+    assert_eq!(count(&c, "SELECT count(*) FROM pg_tables WHERE tablename = 'kept' AND tableowner = 'roll_owner'").await, 1);
+    assert_eq!(count(&c, "SELECT count(*) FROM pg_roles WHERE rolname LIKE 'roll\\_wr\\_%'").await, 0);
+    // What the superuser's own connection makes later is the writer's to change next time.
+    c.batch_execute("CREATE TABLE later (id int)").await.unwrap();
+    w("ALTER TABLE later ADD COLUMN x int").await.unwrap();
+    // A grant that may not delete changes rows and schemas but drops nothing, and can't turn the
+    // guard off.
+    let nd = |sql: &'static str| h.control.query(&db.ep.id, sql, SqlAs::Writer { may_drop: false });
+    for sql in ["DELETE FROM t WHERE id = 99", "CREATE TABLE more (id int)", "ALTER TABLE later ADD COLUMN y int"] {
+        nd(sql).await.unwrap_or_else(|e| panic!("{sql} didn't run without delete: {e}"));
+    }
+    for sql in [
+        "DROP TABLE kept",
+        "ALTER TABLE later DROP COLUMN x",
+        "DROP EVENT TRIGGER roll_no_drop",
+        "ALTER EVENT TRIGGER roll_no_drop DISABLE",
+        "CREATE OR REPLACE FUNCTION roll_guard.no_drop() RETURNS event_trigger LANGUAGE plpgsql AS $$ BEGIN END $$",
+    ] {
+        assert!(nd(sql).await.is_err(), "{sql} ran without delete");
+    }
+    assert_eq!(count(&c, "SELECT count(*) FROM pg_tables WHERE tablename = 'kept'").await, 1);
+    assert_eq!(count(&c, "SELECT count(*) FROM pg_event_trigger WHERE evtname = 'roll_no_drop' AND evtenabled = 'O'").await, 1);
+    // The superuser (and a grant that may delete) still drops.
+    w("DROP TABLE kept").await.unwrap();
 }
 
 // ── branching ──

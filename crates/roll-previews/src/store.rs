@@ -2958,7 +2958,14 @@ impl Store {
         let slower_routes = if settings.traces { self.runtime_fact::<crate::SlowerRoutes>(&r.id, "slower_routes")?.filter(|f| f.head == r.head) } else { None };
         let compared_at = |kind: &str| -> Result<bool> { Ok(self.runtime_fact::<String>(&r.id, kind)?.as_deref() == Some(r.head.as_str())) };
         let regressions_compared = compared_at("compared_errors")? && (!settings.traces || compared_at("compared_routes")?);
-        let intercepted = self.runtime_fact::<crate::Intercepted>(&r.id, "intercepted")?.filter(|x| !x.keys.is_empty());
+        // Its own proxy's record (with the keys it holds), and roll apps' counts for its services there.
+        let closed = settings.egress_for(r.trusted) == crate::settings::EgressRule::Roll;
+        let on_apps = self.runtime_fact::<crate::AppsIntercepted>(&r.id, "intercepted_apps")?.filter(|_| closed);
+        let intercepted = match (self.runtime_fact::<crate::Intercepted>(&r.id, "intercepted")?.filter(|x| !x.keys.is_empty()), on_apps) {
+            (Some(x), on_apps) => Some(crate::Intercepted { on_apps, ..x }),
+            (None, Some(a)) => Some(crate::Intercepted { on_apps: Some(a), ..Default::default() }),
+            (None, None) => None,
+        };
         let regressions = match settings.regressions {
             crate::settings::RegressionsRule::Off => None,
             crate::settings::RegressionsRule::Check => Some("check".to_string()),

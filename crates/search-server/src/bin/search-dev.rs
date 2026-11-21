@@ -159,6 +159,7 @@ async fn run() -> anyhow::Result<()> {
         },
         None => search_server::node::DEFAULT_MAX_BODY,
     };
+    search_es::search::check_max_time(&node_settings)?;
     let cfg = NodeConfig {
         max_body_bytes,
         node_name: args.node_name,

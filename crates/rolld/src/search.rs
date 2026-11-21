@@ -103,6 +103,13 @@ pub struct SearchArgs {
     /// on this machine, tests).
     #[arg(long = "search-inference-allow-private", env = "ROLL_SEARCH_INFERENCE_ALLOW_PRIVATE", value_parser = clap::builder::BoolishValueParser::new(), default_value_t = false, num_args = 0..=1, default_missing_value = "true")]
     pub search_inference_allow_private: bool,
+    /// The longest one request that searches may run on this node, in seconds (0: no cap),
+    /// counted once for all its shards and phases. A request's own larger `timeout` is lowered
+    /// to it; past it a search answers with what it collected, `timed_out: true`
+    /// (Elasticsearch has no such cap). Unset: 60 on a daemon that serves
+    /// others (ROLL_ADMIN_TOKEN set), none on an open one.
+    #[arg(long = "search-max-time", env = "ROLL_SEARCH_MAX_TIME")]
+    pub search_max_time_s: Option<u64>,
     /// Search clusters a signed-in person may own, branches included (0: no cap). The operator
     /// and admins aren't capped.
     #[arg(long = "search-max-clusters-per-person", env = "ROLL_SEARCH_MAX_CLUSTERS_PER_PERSON", default_value_t = 50)]
@@ -192,6 +199,9 @@ pub struct Search {
     stop: search_server::Shutdown,
 }
 
+/// `--search-max-time` on a daemon that serves others.
+const DEFAULT_MAX_TIME_S: u64 = 60;
+
 /// How long a stop may take to flush what's still loaded (a drain has handed the rest over).
 const SHUTDOWN: Duration = Duration::from_secs(60);
 
@@ -200,7 +210,8 @@ impl Search {
     /// cluster is served by the holder of its lease (`search_control::cluster`), with the catalog
     /// in the system database and acknowledgements once writes are in object storage.
     #[allow(clippy::too_many_arguments)]
-    pub async fn start(home: &Path, args: &SearchArgs, storage: &StorageConfig, public_host: &str, node: &str, cluster: &Arc<roll_cluster::Cluster>, system_database: Option<&str>, db_connections: usize, public: Option<&crate::edge::Public>, secret_key: Option<&str>) -> anyhow::Result<Self> {
+    /// `open`: the daemon enforces no operator token (one person's own node).
+    pub async fn start(home: &Path, args: &SearchArgs, storage: &StorageConfig, public_host: &str, node: &str, cluster: &Arc<roll_cluster::Cluster>, system_database: Option<&str>, db_connections: usize, public: Option<&crate::edge::Public>, secret_key: Option<&str>, open: bool) -> anyhow::Result<Self> {
         let mut cfg = SearchConfig::local(home.join("search"));
         let fleet = (cluster.backend_name() != "memory").then(|| cluster.clone());
         cfg.node_name = node.to_string();
@@ -239,6 +250,10 @@ impl Search {
         }
         if args.search_inference_allow_private {
             cfg.node_settings.push((search_control::INFERENCE_ALLOW_PRIVATE.to_string(), "true".to_string()));
+        }
+        match args.search_max_time_s.unwrap_or(if open { 0 } else { DEFAULT_MAX_TIME_S }) {
+            0 => {}
+            s => cfg.node_settings.push((search_control::SEARCH_MAX_TIME.to_string(), format!("{s}s"))),
         }
         // Watch passwords, connector and Fleet secrets are sealed in cluster state under the
         // deployment's key; without one they're stored as given (as on Elasticsearch).
