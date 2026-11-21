@@ -8,7 +8,7 @@
 /// branch's app role and the database's owner role.
 macro_rules! move_owned {
     () => {
-        r#"  FOR r IN SELECT n.nspname FROM pg_namespace n WHERE n.nspname NOT LIKE 'pg\_%' AND n.nspname <> 'information_schema' AND n.nspowner = me
+        r#"  FOR r IN SELECT n.nspname FROM pg_namespace n WHERE n.nspname NOT LIKE 'pg\_%' AND n.nspname NOT IN ('information_schema', 'roll_guard') AND n.nspowner = me
            AND NOT EXISTS (SELECT 1 FROM pg_depend d WHERE d.classid = 'pg_namespace'::regclass AND d.objid = n.oid AND d.deptype = 'e') LOOP
     EXECUTE format('ALTER SCHEMA %I OWNER TO %I', r.nspname, role);
   END LOOP;
@@ -18,7 +18,7 @@ macro_rules! move_owned {
     EXECUTE format('ALTER %s %s OWNER TO %I', CASE r.relkind WHEN 'v' THEN 'VIEW' WHEN 'm' THEN 'MATERIALIZED VIEW' WHEN 'S' THEN 'SEQUENCE' WHEN 'f' THEN 'FOREIGN TABLE' ELSE 'TABLE' END, r.name, role);
   END LOOP;
   FOR r IN SELECT p.oid::regprocedure AS name FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
-           WHERE n.nspname NOT LIKE 'pg\_%' AND n.nspname <> 'information_schema' AND p.proowner = me
+           WHERE n.nspname NOT LIKE 'pg\_%' AND n.nspname NOT IN ('information_schema', 'roll_guard') AND p.proowner = me
              AND NOT EXISTS (SELECT 1 FROM pg_depend d WHERE d.classid = 'pg_proc'::regclass AND d.objid = p.oid AND d.deptype = 'e') LOOP
     EXECUTE format('ALTER ROUTINE %s OWNER TO %I', r.name, role);
   END LOOP;
@@ -80,6 +80,34 @@ BEGIN
   END IF;
   IF (SELECT r2.rolsuper FROM pg_database d JOIN pg_roles r2 ON r2.oid = d.datdba WHERE d.datname = current_database()) THEN
     EXECUTE format('ALTER DATABASE %I OWNER TO %I', current_database(), role);
+  END IF;
+  -- Dropping objects needs `delete`: a writer whose grant may not delete is a member of
+  -- roll_no_drop, and an event trigger in roll_guard (the superuser's, never handed to an owner
+  -- role, so no writer can change or disable it) refuses its drops.
+  IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'roll_no_drop') THEN
+    BEGIN
+      CREATE ROLE roll_no_drop NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS;
+    EXCEPTION WHEN duplicate_object OR unique_violation THEN
+      NULL;
+    END;
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM pg_event_trigger WHERE evtname = 'roll_no_drop') THEN
+    CREATE SCHEMA IF NOT EXISTS roll_guard;
+    EXECUTE format('ALTER SCHEMA roll_guard OWNER TO %I', current_user);
+    REVOKE ALL ON SCHEMA roll_guard FROM PUBLIC;
+    GRANT USAGE ON SCHEMA roll_guard TO PUBLIC;
+    CREATE OR REPLACE FUNCTION roll_guard.no_drop() RETURNS event_trigger LANGUAGE plpgsql SET search_path = pg_catalog AS $f$
+    BEGIN
+      IF pg_has_role(session_user, 'roll_no_drop', 'MEMBER') THEN
+        RAISE EXCEPTION 'dropping needs delete on this endpoint: ask for it (access_request_access) and run it again'
+          USING ERRCODE = 'insufficient_privilege';
+      END IF;
+    END $f$;
+    BEGIN
+      CREATE EVENT TRIGGER roll_no_drop ON sql_drop EXECUTE FUNCTION roll_guard.no_drop();
+    EXCEPTION WHEN duplicate_object THEN
+      NULL;
+    END;
   END IF;
 "#,
     move_owned!(),

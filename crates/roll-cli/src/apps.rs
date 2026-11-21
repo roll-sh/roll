@@ -603,11 +603,12 @@ pub enum AppsCmd {
         /// A terminal to it: `roll apps run -i -- rails console`.
         #[arg(short = 'i', long, conflicts_with_all = ["timeout", "tasks", "retries", "parallelism"])]
         interactive: bool,
-        /// A console's CPUs (0.25–8; default the environment's size).
-        #[arg(long, requires = "interactive")]
+        /// A console's or a job's CPUs (0.25–8; default the environment's size), Heroku's
+        /// `run --size`.
+        #[arg(long)]
         cpu: Option<f64>,
-        /// A console's memory in MB (256–16384; default the environment's size).
-        #[arg(long, requires = "interactive")]
+        /// A console's or a job's memory in MB (256–16384; default the environment's size).
+        #[arg(long)]
         memory: Option<u32>,
         /// The job's limit, in seconds (default 3600).
         #[arg(long)]
@@ -620,7 +621,7 @@ pub enum AppsCmd {
         /// `ROLL_TASK_ATTEMPT`, as a cron run's retries wait.
         #[arg(long)]
         retries: Option<u32>,
-        /// Tasks running at once (1–100; default ten, or fewer tasks).
+        /// Tasks running at once (1–10; default ten, or fewer tasks).
         #[arg(long)]
         parallelism: Option<u32>,
         #[arg(trailing_var_arg = true, required_unless_present = "interactive", allow_hyphen_values = true)]
@@ -3615,10 +3616,10 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
             }
             return ssh(api, &env_path(&svc, &target.env), &query).await;
         }
-        AppsCmd::Run { target, timeout, tasks, retries, parallelism, command, .. } => {
+        AppsCmd::Run { target, timeout, tasks, retries, parallelism, cpu, memory, command, .. } => {
             let svc = service(api, &target).await?;
             let base = format!("{}/jobs", env_path(&svc, &target.env));
-            let job = api.post(&base, json!({ "command": shell_join(&command), "timeout_s": timeout, "tasks": tasks, "retries": retries, "parallelism": parallelism })).await?;
+            let job = api.post(&base, json!({ "command": shell_join(&command), "timeout_s": timeout, "tasks": tasks, "retries": retries, "parallelism": parallelism, "cpu": cpu, "memory_mb": memory })).await?;
             if !json_out {
                 let id = s(&job["id"]);
                 follow(api, &format!("{base}/{}/logs?follow=1", enc(&id))).await?;

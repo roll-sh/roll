@@ -1773,6 +1773,8 @@ impl Apps {
             freeze: r.freeze.clone(),
             heartbeat_urls: Default::default(),
             egress_refused: if r.egress.closed() { self.deps.runtime.egress_refused(&closed_network_name(&svc.project, &r.name), &r.egress.hosts) } else { Vec::new() },
+            intercepted: r.egress.closed().then(|| self.deps.runtime.intercepted(&closed_network_name(&svc.project, &r.name))).flatten(),
+            closed_by: r.egress_by.as_ref().filter(|_| r.egress.closed()).map(|m| if m.is_empty() { Value::Null } else { Value::String(m.clone()) }),
             egress: r.egress.clone(),
             scaling,
             wait_for_ci: r.wait_for_ci,
@@ -1895,7 +1897,7 @@ impl Apps {
     pub async fn put_environment_by(self: &Arc<Self>, service: &str, env: &str, body: Value, by: Option<String>) -> Result<Environment> {
         let o = body.as_object().cloned().unwrap_or_default();
         for k in o.keys() {
-            if !["branch", "ephemeral", "access", "variables_from", "wait_for_ci", "run", "follow_tag", "redeploy_on_secrets", "feedback", "maintenance", "pages", "allow_ips", "rate_limit", "firewall", "headers", "routes", "checks", "heartbeats", "split", "mirror", "snippets", "config", "freeze", "pause_schedule", "paused", "held", "hostname", "traces", "egress", "vitals", "report", "preview_host", "log_retention_days", "approvals", "badge"].contains(&k.as_str()) {
+            if !["branch", "ephemeral", "access", "variables_from", "wait_for_ci", "run", "follow_tag", "redeploy_on_secrets", "feedback", "maintenance", "pages", "allow_ips", "rate_limit", "firewall", "headers", "routes", "checks", "heartbeats", "split", "mirror", "snippets", "config", "freeze", "pause_schedule", "paused", "held", "hostname", "traces", "egress", "vitals", "report", "preview_host", "log_retention_days", "approvals", "badge", "closed_by"].contains(&k.as_str()) {
                 return Err(Error::BadRequest(format!("unknown field {k}")));
             }
         }
@@ -2133,6 +2135,16 @@ impl Apps {
         if egress.as_ref().is_some_and(crate::model::Egress::closed) && !self.deps.runtime.closes_egress() {
             return Err(Error::Conflict("egress \"roll\" needs a runtime that can close an environment's network (Docker on this host); this node's can't".into()));
         }
+        // Who a closed environment's placeholders are made by, named by the operator's caller (roll
+        // previews: its rules' maker); null, no one (its bound keys withheld). With egress only.
+        let closed_by = match o.get("closed_by") {
+            None => None,
+            _ if egress.is_none() => return Err(Error::BadRequest("closed_by goes with egress".into())),
+            Some(Value::Null) => Some(String::new()),
+            Some(Value::String(m)) if (m.starts_with("usr_") || m.starts_with("token:")) && m.len() <= 128 && !m.contains(char::is_whitespace) => Some(m.clone()),
+            Some(_) => return Err(Error::BadRequest("closed_by is a person (usr_…), a token (token:…) or null".into())),
+        };
+        let by = closed_by.or(by);
         let branch = match o.get("branch") {
             None => None,
             Some(Value::Null) => Some(None),

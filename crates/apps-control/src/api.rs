@@ -747,6 +747,10 @@ async fn rotate_config(State(apps): S, Path((id, env)): Path<(String, String)>, 
 
 async fn put_env(State(apps): S, Path((id, env)): Path<(String, String)>, ext: Extensions, b: Bytes) -> R {
     let put = body(&b)?;
+    // Naming another maker is the operator's (roll previews in process), never anyone else's.
+    if put.get("closed_by").is_some() && (roll_auth::Grant::on(&ext).is_some_and(|g| g.user.is_some()) || ext.get::<roll_auth::SignedIn>().is_some() || !roll_auth::Operator::on(&ext)) {
+        return Err(Error::Forbidden("closed_by is the operator's to set (roll previews names its rules' maker)".into()));
+    }
     let e = apps.put_environment_by(&id, &env, put.clone(), maker(&ext)).await?;
     apps.settings_changed();
     // The access token is a secret: the trail says it changed, never what it is.

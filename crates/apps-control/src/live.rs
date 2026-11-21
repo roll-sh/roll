@@ -2426,7 +2426,7 @@ impl EnvLive {
 
     /// One cron run: a fresh instance of the active deployment, to its exit or `timeout`.
     pub async fn run_once(self: &Arc<Self>, timeout: Duration) -> anyhow::Result<(String, Option<i32>, bool)> {
-        let e = self.run_to_exit(None, &[], timeout, None, tokio_util::sync::CancellationToken::new(), None).await?;
+        let e = self.run_to_exit(None, &[], timeout, None, tokio_util::sync::CancellationToken::new(), None, None).await?;
         Ok((e.deployment, e.code, e.timed_out))
     }
 
@@ -2434,6 +2434,7 @@ impl EnvLive {
     /// run, or a one-off job (`command` in place of the image's, with no port and no volume,
     /// since the service's own instance may be using it). `made` gets the container's name
     /// before it starts; the container is removed after, whatever happened.
+    #[allow(clippy::too_many_arguments)]
     pub async fn run_to_exit(
         self: &Arc<Self>,
         command: Option<&str>,
@@ -2442,8 +2443,13 @@ impl EnvLive {
         log: Option<LogSink>,
         cancel: tokio_util::sync::CancellationToken,
         name: Option<String>,
+        size: Option<(f64, u32)>,
     ) -> anyhow::Result<Exit> {
         let mut tpl = (*self.template().ok_or_else(|| anyhow::anyhow!("no deployment"))?).clone();
+        // A job's own size (Heroku's `run --size`): its container's, and what it's metered at.
+        if let Some((cpu, mb)) = size {
+            (tpl.spec.cpu, tpl.spec.memory_mb, tpl.run.cpu, tpl.run.memory_mb) = (cpu, mb, cpu, mb);
+        }
         anyhow::ensure!(command.is_some() || tpl.spec.volume.is_none() || !self.held.load(Ordering::SeqCst), "its volume is being restored");
         if let Some(cmd) = command {
             tpl.spec.command = Some(cmd.to_string());
