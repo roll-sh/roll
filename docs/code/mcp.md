@@ -109,6 +109,11 @@ Agent tokens may use them to orchestrate agents, within what an agent's commands
   found", "not allowed", or "this needs a token". Protocol problems, such as an unknown method or tool,
   or arguments that aren't an object, are JSON-RPC errors.
 - `claim_work` returns `{work: null}` when nothing matches.
+- Every catalogued `/v1/code` route is a tool's or has a reason. `ROUTES` in `src/mcp.rs` lists
+  the routes each tool calls; `src/no-tool.txt` lists every other route with why it has no tool
+  (a person's, an admin's, a credential, a stream, covered by another tool, or `no tool yet` for a
+  gap). A new route fails `mcp::tests::every_route_has_a_tool_or_a_reason` until it has one or the
+  other, as roll's other products do in `crates/roll-mcp`.
 
 ## Protocol
 

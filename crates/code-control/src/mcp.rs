@@ -410,6 +410,71 @@ fn files_schema() -> Value {
 const DESTRUCTIVE: [&str; 1] = ["close_change"];
 const OPEN_WORLD: [&str; 7] = ["request_ai_review", "create_agent_thread", "send_agent_message", "respond_agent_request", "claim_agent_work", "run_agent_automation", "publish_agent_thread"];
 
+/// The routes each tool calls, as `(tool, method, route)` in the router's pattern: a lookup it
+/// makes on the way (a repo's default branch, `owner/repo#N`, a machine's or automation's name) is
+/// listed under one of the tools that make it. A test holds every catalogued `/v1/code` route to a
+/// row here or a line in `no-tool.txt` saying why it has no tool.
+const ROUTES: &[(&str, &str, &str)] = &[
+    ("list_repos", "GET", "/v1/code/repos"),
+    ("search_code", "GET", "/v1/code/repos/{owner}/{repo}/search"),
+    ("read_file", "GET", "/v1/code/repos/{owner}/{repo}/blob/{rev}/{*path}"),
+    ("read_file", "GET", "/v1/code/repos/{owner}/{repo}"),
+    ("list_tree", "GET", "/v1/code/repos/{owner}/{repo}/tree/{rev}/{*path}"),
+    ("list_tree", "GET", "/v1/code/repos/{owner}/{repo}/tree/{rev}/"),
+    ("list_tree", "GET", "/v1/code/repos/{owner}/{repo}"),
+    ("log", "GET", "/v1/code/repos/{owner}/{repo}/log"),
+    ("blame", "GET", "/v1/code/repos/{owner}/{repo}/blame/{rev}/{*path}"),
+    ("blame", "GET", "/v1/code/repos/{owner}/{repo}"),
+    ("get_changeset", "GET", "/v1/code/repos/{owner}/{repo}/changesets/{id}"),
+    ("compare", "GET", "/v1/code/repos/{owner}/{repo}/compare/{spec}"),
+    ("create_change", "POST", "/v1/code/repos/{owner}/{repo}/changes"),
+    ("create_change", "GET", "/v1/code/repos/{owner}/{repo}/work/{number}"),
+    ("revise_change", "POST", "/v1/code/changes/{id}/revise"),
+    ("land", "POST", "/v1/code/changes/{id}/land"),
+    ("land", "POST", "/v1/code/repos/{owner}/{repo}/land"),
+    ("get_change", "GET", "/v1/code/changes/{id}"),
+    ("get_change", "GET", "/v1/code/changes/{id}/review-status"),
+    ("get_change", "GET", "/v1/code/changes/{id}/threads"),
+    ("get_change", "GET", "/v1/code/repos/{owner}/{repo}/changes/{number}"),
+    ("list_changes", "GET", "/v1/code/repos/{owner}/{repo}/changes"),
+    ("claim_work", "POST", "/v1/code/repos/{owner}/{repo}/work/claim"),
+    ("heartbeat_work", "POST", "/v1/code/work/{id}/heartbeat"),
+    ("heartbeat_work", "GET", "/v1/code/repos/{owner}/{repo}/work/{number}"),
+    ("complete_work", "POST", "/v1/code/work/{id}/complete"),
+    ("release_work", "POST", "/v1/code/work/{id}/release"),
+    ("list_work", "GET", "/v1/code/repos/{owner}/{repo}/work"),
+    ("create_work", "POST", "/v1/code/repos/{owner}/{repo}/work"),
+    ("comment", "POST", "/v1/code/threads/{id}/comments"),
+    ("comment", "POST", "/v1/code/changes/{id}/threads"),
+    ("review", "POST", "/v1/code/changes/{id}/reviews"),
+    ("queue_status", "GET", "/v1/code/repos/{owner}/{repo}/queue"),
+    ("enqueue_change", "POST", "/v1/code/changes/{id}/enqueue"),
+    ("dequeue_change", "DELETE", "/v1/code/changes/{id}/enqueue"),
+    ("close_change", "POST", "/v1/code/changes/{id}/close"),
+    ("report_check", "POST", "/v1/code/changes/{id}/checks"),
+    ("set_commit_status", "POST", "/v1/code/repos/{owner}/{repo}/statuses/{rev}"),
+    ("list_refs", "GET", "/v1/code/repos/{owner}/{repo}/refs"),
+    ("create_repo", "POST", "/v1/code/repos"),
+    ("request_ai_review", "POST", "/v1/code/changes/{id}/ai-review"),
+    ("list_agent_machines", "GET", "/v1/code/agents/{owner}/machines"),
+    ("list_agent_threads", "GET", "/v1/code/agents/{owner}/state"),
+    ("list_agent_threads", "GET", "/v1/code/agents/{owner}/machines"),
+    ("create_agent_thread", "POST", "/v1/code/agents/{owner}/machines/{machine}/commands"),
+    ("send_agent_message", "POST", "/v1/code/agents/{owner}/machines/{machine}/commands"),
+    ("respond_agent_request", "POST", "/v1/code/agents/{owner}/machines/{machine}/commands"),
+    ("interrupt_agent_thread", "POST", "/v1/code/agents/{owner}/machines/{machine}/commands"),
+    ("publish_agent_thread", "POST", "/v1/code/agents/{owner}/machines/{machine}/commands"),
+    ("create_agent_project", "POST", "/v1/code/agents/{owner}/machines/{machine}/projects"),
+    ("claim_agent_work", "POST", "/v1/code/agents/{owner}/threads/{thread}/work"),
+    ("list_agent_automations", "GET", "/v1/code/agents/{owner}/automations"),
+    ("save_agent_automation", "POST", "/v1/code/agents/{owner}/automations"),
+    ("save_agent_automation", "PUT", "/v1/code/agents/{owner}/automations/{id}"),
+    ("run_agent_automation", "POST", "/v1/code/agents/{owner}/automations/{id}/run"),
+    ("list_agent_automation_runs", "GET", "/v1/code/agents/{owner}/automations/runs"),
+    ("get_agent_automation_run", "GET", "/v1/code/agents/{owner}/automations/runs/{run}"),
+    ("cancel_agent_automation_run", "POST", "/v1/code/agents/{owner}/automations/runs/{run}/cancel"),
+];
+
 /// Every tool, with its JSON Schema.
 pub fn tools() -> Vec<Value> {
     let mut all = every_tool();
@@ -1435,6 +1500,39 @@ mod tests {
         assert!(repo_base("acme/api").is_ok());
         assert!(repo_base("acme").is_err());
         assert!(repo_base("a/b/c").is_err());
+    }
+
+    #[test]
+    fn every_route_has_a_tool_or_a_reason() {
+        // Every catalogued /v1/code route is a tool's (ROUTES) or in no-tool.txt with why, as
+        // roll-mcp's own test holds roll's other products: a new route can't land undecided.
+        let norm = |p: &str| p.split('/').map(|s| if s.starts_with('{') { "{}" } else { s }).collect::<Vec<_>>().join("/").trim_end_matches('/').to_string();
+        let names: Vec<String> = tools().iter().map(|t| t["name"].as_str().unwrap().to_string()).collect();
+        let silent: Vec<&String> = names.iter().filter(|n| !ROUTES.iter().any(|r| r.0 == n.as_str())).collect();
+        assert!(silent.is_empty(), "tools with no ROUTES row: {silent:?}");
+        let unknown: Vec<&str> = ROUTES.iter().map(|r| r.0).filter(|t| !names.iter().any(|n| n == t)).collect();
+        assert!(unknown.is_empty(), "ROUTES rows for tools that don't exist: {unknown:?}");
+        let mut routes: Vec<(&str, &str)> = roll_access::catalog::rows().iter().filter(|r| r.route.starts_with("/v1/code") && !r.route.ends_with('/')).map(|r| (r.method, r.route)).collect();
+        routes.extend(roll_access::catalog::prefix_reviewed_routes().filter(|(_, r)| r.starts_with("/v1/code")));
+        let same = |m: &str, r: &str, (om, or): (&str, &str)| (m == "*" || om == "*" || m == om) && norm(r) == norm(or);
+        let invented: Vec<String> = ROUTES.iter().filter(|(_, m, r)| !routes.iter().any(|c| same(m, r, *c))).map(|(t, m, r)| format!("{t}: {m} {r}")).collect();
+        assert!(invented.is_empty(), "ROUTES rows the catalogue doesn't know (a wrong path or method):\n{}", invented.join("\n"));
+        let covered = |m: &str, r: &str| ROUTES.iter().any(|(_, tm, tr)| same(m, r, (tm, tr)));
+        let listed: Vec<(&str, &str)> = include_str!("no-tool.txt")
+            .lines()
+            .filter(|l| !l.starts_with('#') && !l.trim().is_empty())
+            .filter_map(|l| {
+                let mut w = l.split_whitespace();
+                Some((w.next()?, w.next()?))
+            })
+            .collect();
+        let undecided: Vec<String> = routes.iter().filter(|(m, r)| !covered(m, r) && !listed.iter().any(|(lm, lr)| lm == m && norm(lr) == norm(r))).map(|(m, r)| format!("{m} {r}")).collect();
+        assert!(undecided.is_empty(), "catalogued /v1/code routes with no MCP tool and no reason: add the tool (and its ROUTES row), or `METHOD route  why` to crates/code-control/src/no-tool.txt:\n{}", undecided.join("\n"));
+        // A `*` line speaks for the methods with no tool, so a tool on its path doesn't make it stale.
+        let stale: Vec<String> = listed.iter().filter(|(m, r)| *m != "*" && covered(m, r)).map(|(m, r)| format!("{m} {r}")).collect();
+        assert!(stale.is_empty(), "no-tool.txt lines for routes that have a tool now: remove them:\n{}", stale.join("\n"));
+        let gone: Vec<String> = listed.iter().filter(|(m, r)| !routes.iter().any(|c| c.0 == *m && norm(c.1) == norm(r))).map(|(m, r)| format!("{m} {r}")).collect();
+        assert!(gone.is_empty(), "no-tool.txt lines for routes the catalogue doesn't have: remove them:\n{}", gone.join("\n"));
     }
 
 }
