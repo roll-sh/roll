@@ -18024,3 +18024,72 @@ build, clippy (16 warnings, none new), tests 146 passed in 10 binaries, the same
 level's top nodes for a planned FROM subquery's join when bound trees exist, and a
 collation name compare per index clause on a collatable key; not measured, as a change of
 that size isn't measurable against the lanes' noise.
+
+### Second candidate (`cand/a278-2`, on top of the first: it extends the first's semi join branch in `binder/optimize.rs`)
+
+- **A strict function of a NULL constant is NULL** (alter_table:112, :115; 274's find):
+  evaluate_function replaces a strict call with a constant NULL argument by NULL whatever
+  the function's volatility, before inline_function. The engine did that only for
+  immutable calls over constants; any other became a CASE over the call (a SQL function's
+  0.25 cost). Now `user_call` folds it first (not into a domain, whose constant would lose
+  it).
+- **Derived equalities' operand order** (274's find): generate_base_implied_equalities
+  gives a relation `earlier member = later member` of a class, the members in
+  process_equivalence's order (deconstruct_jointree's: a JOIN's ON clauses, then the WHERE).
+  The join search took the members in its clauses' order there, because the equalities as
+  written (`ec_written`) were recorded only after the items' restrictions were derived:
+  `... join b on a.code = b.a where c.a = b.num` gave `Filter: (num = a)`, PostgreSQL
+  `(a = num)`. `Search::written_pairs` now gives the order to both.
+- **A constant into a second IN** (join:66): a semi join whose left side fixes a column to a
+  constant (a semi join below it took the WHERE's `x.unique1 = 0`) fixes the column it
+  equates on its right, the semi join's clause going, as for the WHERE's constants (one
+  equivalence class); `input_restrictions` reads a semi / anti join's left side (its rows
+  are that side's).
+- **EXPLAIN's groups of a unique path hashed on an expression** (subselect:20; 274's find):
+  estimate_num_groups over the columns the expression reads, each once (a boolean 2, a
+  constant 1), as the planner's `num_groups` counts them; it took an unknown key's default
+  (1,841 rows against 200). The cost per key is unchanged.
+- **Integer literals with a 0b / 0o / 0x prefix past int4** (numerology:5-26; found in the
+  width group): int8 when they fit, as make_const's pg_strtoint64_safe reads them (a sign,
+  either case of the prefix, underscores; a negative magnitude down to int8's minimum).
+  Binary and octal ones, and `-0x8000000000000000`, were numeric: `pg_typeof(0b1000...)`
+  said numeric and EXPLAIN's width was 32.
+- Golden `a278_folds`.
+
+Regression files' EXPLAINs (full pass, `out-c2`, against the first candidate's `out-c1c`): 15
+more match (alter_table:112, :115, join:66, numerology:5, :7, :10, :11, :12, :13, :16, :18,
+:22, :24, :26, subselect:20), none newly differ; join:67 now has PostgreSQL's costs and nodes,
+its two equal-cost semi joins nested the other way round. Both candidates against the base:
+22 more of the 17,654 match, none newly differ (2,438 differ, 8 of them the date blocks).
+TPC-H: base against new on one copied SF 0.05 data directory, 22 of 22 plans identical in
+text, costs x1.000.
+Verification: quick-check with `QC_CHECKED=1` on `64f8c5679` (both candidates on `1c0a79d67`):
+build, clippy (16 warnings, none new), tests 146 passed in 10 binaries, the same 146 with
+`--profile verify-checked`, regress 51,148 / 51,150 with 0 newly differing, isolation
+1,647 / 1,648, pg_dump 14,609 passed. No performance gate: a NULL test per strict user call's
+arguments when bound, one more walk of the written equalities per join group, a prefix test
+per non-decimal literal.
+
+Found, not fixed (repros in `~/.cache/a278/probe`):
+- **Pathkeys by collation identity** (`collord.sql`): the quals now match an index's
+  collation by identity, ORDER BY doesn't: pathkeys compare sort behaviour (`PathKey::coll`,
+  0 for any collation that sorts bytes), so in a C database `order by t` reads an index on
+  `t COLLATE "C"` (PostgreSQL sorts) and `order by t collate "C"` doesn't read it (PostgreSQL
+  does: the COLLATE is a RelabelType, the EC's collation C). Needs the identity in
+  `PathKey` (index_pathkeys, the sort keys' `key_order`, merge keys) and `bare_key` stripping
+  a COLLATE naming it.
+- `IN (select ... from (select distinct on ...) s)` (subselect:39): still the `ANY_subquery`
+  level (274's find, unchanged).
+- Extra Subquery Scans (27, `pg+Subquery Scan`): mostly UNION arms whose outputs need a
+  coercion (`SELECT 1.1 UNION SELECT 2`: PostgreSQL's arm keeps a Subquery Scan computing
+  `(2)::numeric` over a Result of width 4; the engine folds the cast into the Result), and
+  window queries over a sorted subquery (window:27).
+- Group Key casts in a semi join's unique-ification (`Group Key: nt.n` for PostgreSQL's
+  `(nt.n)::double precision`, 274's find, unchanged).
+- Width group: a Result left by a pulled-up one-row FROM (VALUES, FROM-less subquery) has
+  width 0 in PostgreSQL (its values pulled up into the expressions above), the engine shows
+  the columns' (aggregates:4, multirangetypes:432-447, partition_aggregate:3, stats_ext:405).
+- One-row Result costs: an immutable SQL function over a VARIADIC array of constants isn't
+  evaluated (`myleast(10, 1, 20, 33)`: the array is an ARRAY[] expression, not folded to a
+  constant before evaluate_function), SQL/JSON constructors' and `age(timestamp ...)`
+  costs.
