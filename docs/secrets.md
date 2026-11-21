@@ -5106,6 +5106,14 @@ The other threads' work that builds on these:
 
 roll MCP adds no cut-off tool: #304 is a person's call, since it can revoke the agent's own token.
 
+**State, 2026-11-21 03:10.** #455 is on main (f9bb26c17, CI green): roll code's keys out of `Debug`,
+and webhooks' and review apps' signing secrets sealed. Still open:
+- #501 members v1: the final gate on the main-merged tree, past the secrets suites on SQLite and
+  Postgres; then #445 and #501 land as batch 7, ahead of previews' #524;
+- the #432 decoy-oracle fix: computes pinned by digest, and each image's pre-auth answers learned from a
+  compute of that image (about 2 s per image, never waking a suspended endpoint). Its full gate is
+  running.
+
 **State, 2026-11-21 02:52.** Batch 6 is on main (802935600, CI green, exactly the gated tree), in three
 rounds:
 1. #499 claims, #511 batched writes, #487 validity checks, #513 decoys session-only, #467 decoy dashboard,
