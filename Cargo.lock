@@ -5918,6 +5918,7 @@ dependencies = [
  "anyhow",
  "bytes",
  "getrandom 0.4.3",
+ "serde",
  "tokio",
  "tracing",
 ]
