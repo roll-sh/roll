@@ -420,7 +420,7 @@ impl Search<'_, '_, '_> {
         }
         if f.opts.use_remote_estimate {
             for e in &want.merge {
-                let key = PathKey { expr: e.clone(), desc: false, nulls_first: false, cmp: 0, coll: 0 };
+                let key = PathKey { expr: e.clone(), desc: false, nulls_first: false, cmp: 0, coll: 0, ident: None };
                 let Expr::Col(k, _) = e else { continue };
                 // (The query's own single key is taken already.)
                 if nq == 1 && useful.first().is_some_and(|u| u[0].expr.same_as(e)) || !shippable(std::slice::from_ref(&key)) {

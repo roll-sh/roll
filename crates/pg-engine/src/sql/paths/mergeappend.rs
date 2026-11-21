@@ -121,6 +121,7 @@ impl Planner<'_, '_> {
                     nulls_first: *nulls_first,
                     cmp: 0,
                     coll: *coll,
+                    ident: None,
                 })
                 .collect(),
             limit: None,

@@ -2407,7 +2407,8 @@ fn shown_subqueries(root: &Plan, needed: &HashMap<usize, Vec<bool>>) -> HashMap<
             Plan::Distinct { input, on: None, .. } if hashed_columns_of(input).is_some() => {
                 go(hashed_columns_of(input).expect("checked"), false, needed, out)
             }
-            Plan::Sort { input, .. } => go(input, true, needed, out),
+            // (create_windowagg_plan asks its input for a small target list too.)
+            Plan::Sort { input, .. } | Plan::Window { input, .. } => go(input, true, needed, out),
             Plan::Limit { input, .. } | Plan::LockRows { input, .. } | Plan::Context { input, .. } => {
                 go(input, demand, needed, out)
             }
@@ -2417,7 +2418,13 @@ fn shown_subqueries(root: &Plan, needed: &HashMap<usize, Vec<bool>>) -> HashMap<
                 }
             }
             Plan::Join { left, right, params, meta, .. } => {
-                go(left, false, needed, out);
+                // (A side a semi join unique-ified over a subquery's columns: not a query's
+                // DISTINCT, create_unique_plan asks its input for an exact target list.)
+                let side = |p: &Plan, demand: bool, out: &mut HashMap<usize, bool>| match p {
+                    Plan::Distinct { input, on: None, .. } if hashed_columns_of(input).is_some() => go(input, true, needed, out),
+                    p => go(p, demand, needed, out),
+                };
+                side(left, false, out);
                 // (A merge join's materialized inner side is its own node, no path:
                 // materialize_inner leaves the side's target list as it is.)
                 let small = params.is_empty()
@@ -2425,7 +2432,7 @@ fn shown_subqueries(root: &Plan, needed: &HashMap<usize, Vec<bool>>) -> HashMap<
                     && (meta.method == Some(super::plan::JoinMethod::Hash)
                         || meta.material && meta.method != Some(super::plan::JoinMethod::Merge)
                         || meta.memoize.is_some());
-                go(right, small, needed, out);
+                side(right, small, out);
             }
             p => {
                 for c in plan_inputs(p) {
@@ -4488,7 +4495,13 @@ fn presorted_name(k: &str) -> String {
             break;
         }
     }
-    s.strip_suffix(" DESC").unwrap_or(s).to_string()
+    let s = s.strip_suffix(" DESC").unwrap_or(s);
+    // (A collation shown is show_sortorder_options', not the expression's: the planner
+    // made every CollateExpr a RelabelType.)
+    match s.rsplit_once(" COLLATE ") {
+        Some((e, c)) if !c.contains(' ') => e.to_string(),
+        _ => s.to_string(),
+    }
 }
 
 fn sort_suffix(k: &SortKey) -> String {
@@ -6379,15 +6392,34 @@ impl Builder<'_, '_> {
                 }
                 // cost_functionscan: the calls once, then a tuple per row. (The calls'
                 // evaluation, their arguments' included, cost_qual_eval_node over
-                // rte->functions: a LATERAL call's `t.x::integer % 10` too.)
-                n.rows = calls
-                    .iter()
-                    .map(|c| costs::call_rows(&c.func, &c.args))
-                    .fold(1.0, f64::max);
-                n.startup_cost = calls
-                    .iter()
-                    .map(|c| costs::call_cost(&c.func) + c.args.iter().map(costs::qual_cost).sum::<f64>())
-                    .sum();
+                // rte->functions: a LATERAL call's `t.x::integer % 10` too. A CREATE
+                // FUNCTION function's call: its ROWS and COST, a SQL one not inlined (WITH
+                // ORDINALITY) too.)
+                let (rows, startup) = {
+                    let cat = self.ctx.catalog();
+                    let user = |c: &crate::sql::plan::SrfCall| (c.func.oid != 0).then(|| cat.functions.get(&c.func.oid)).flatten();
+                    let rows = calls
+                        .iter()
+                        .map(|c| match user(c) {
+                            Some(f) if f.returns_set => f.prorows() as f64,
+                            Some(_) => 1.0,
+                            None => costs::call_rows(&c.func, &c.args),
+                        })
+                        .fold(1.0, f64::max);
+                    let startup: f64 = calls
+                        .iter()
+                        .map(|c| {
+                            let own = match user(c) {
+                                Some(f) => f.procost() as f64 * costs::CPU_OPERATOR_COST,
+                                None => costs::call_cost(&c.func),
+                            };
+                            own + c.args.iter().map(costs::qual_cost).sum::<f64>()
+                        })
+                        .sum();
+                    (rows, startup)
+                };
+                n.rows = rows;
+                n.startup_cost = startup;
                 n.total_cost = n.startup_cost + n.rows * costs::CPU_TUPLE_COST;
                 // Its columns' widths: each call's value (a call returning a row: its
                 // columns), then WITH ORDINALITY's bigint; only those used above count (its
@@ -6428,17 +6460,15 @@ impl Builder<'_, '_> {
                 };
                 // get_variable_numdistinct without statistics: a relation of fewer tuples
                 // than the default has that many values.
-                if calls.len() == cols.len() {
-                    let distinct = (n.rows < costs::DEFAULT_NUM_DISTINCT).then_some(costs::clamp_rows(n.rows));
-                    n.cols = calls
-                        .iter()
-                        .map(|c| ColInfo {
-                            width: type_width(&c.ty),
-                            var: None,
-                            distinct,
-                            groups: None,
-                        })
-                        .collect();
+                // (A call returning a row, or WITH ORDINALITY: a width per column.)
+                let distinct = (n.rows < costs::DEFAULT_NUM_DISTINCT).then_some(costs::clamp_rows(n.rows));
+                let col_widths: Option<Vec<u32>> = if calls.len() == cols.len() {
+                    Some(calls.iter().map(|c| type_width(&c.ty)).collect())
+                } else {
+                    (widths.len() == cols.len()).then(|| widths.clone())
+                };
+                if let Some(ws) = col_widths {
+                    n.cols = ws.into_iter().map(|width| ColInfo { width, var: None, distinct, groups: None }).collect();
                 }
                 Built::passthrough(n, names)
             }
@@ -6942,6 +6972,12 @@ impl Builder<'_, '_> {
                     .iter()
                     .map(|e| match e {
                         Expr::Col(j, _) if *j < c.node.cols.len() => c.node.cols[*j].clone(),
+                        // (A COLLATE over a column is a RelabelType: its statistics are the
+                        // column's, examine_variable looking through it; its width the type's.)
+                        Expr::Collate(x, ..) if matches!(&**x, Expr::Col(j, _) if *j < c.node.cols.len()) => {
+                            let Expr::Col(j, _) = &**x else { unreachable!() };
+                            ColInfo { width: type_width(&e.ty()), ..c.node.cols[*j].clone() }
+                        }
                         e => ColInfo {
                             // (A domain's value has no typmod of its own: exprTypmod of a
                             // CoerceToDomain is -1.)
@@ -7972,9 +8008,11 @@ impl Builder<'_, '_> {
                         list[..common].iter().map(|k| presorted_name(k)).collect(),
                     ));
                     n.details.push(Detail::IncSortInfo);
+                    // (A COLLATE over a column is a RelabelType: examine_variable sees the
+                    // column.)
                     let pre: Vec<ColInfo> = keys[..common]
                         .iter()
-                        .map(|k| match &k.expr {
+                        .map(|k| match crate::sql::paths::uncollated(&k.expr) {
                             Expr::Col(j, _) => c.node.cols.get(*j).cloned().unwrap_or_default(),
                             _ => ColInfo::default(),
                         })
@@ -12845,16 +12883,24 @@ impl Builder<'_, '_> {
                     .index
                     .as_ref()
                     .is_some_and(|(ix, _)| matches!(ix.method.as_str(), "gist" | "spgist"));
-                n.order = super::paths::index_order(self.ctx, s)
+                // (Under the index column's collation when it isn't the type's own, as
+                // show_sortorder_options shows a sort's: an ORDER BY under another one is
+                // another order.)
+                n.order = super::paths::index_order_collated(self.ctx, s)
                     .iter()
-                    .map(|k| {
+                    .map(|(k, coll)| {
                         let shown = self.show(&k.expr, names, Cx::Upper);
                         let shown = if knn && !matches!(k.expr, Expr::Col(..)) {
                             format!("({shown})")
                         } else {
                             shown
                         };
-                        shown + &sort_suffix(k)
+                        let own = if matches!(k.expr.ty(), DataType::Name) { "C" } else { "default" };
+                        let coll = match coll {
+                            Some(c) if c != own => format!(" COLLATE {}", quote_ident(c)),
+                            _ => String::new(),
+                        };
+                        shown + &coll + &sort_suffix(k)
                     })
                     .collect();
             }
@@ -13656,6 +13702,11 @@ impl Builder<'_, '_> {
         }
         if !gating.is_empty() {
             if c.node.node_type == "Result" && c.node.children.is_empty() && quals.is_empty() {
+                // (create_group_result_path: the qual evaluated once, at startup.)
+                let (sp_startup, sp_per) = subplan_costs(&gating, self.ctx);
+                let once = sp_startup + sp_per + gating.iter().map(costs::qual_cost).sum::<f64>();
+                c.node.startup_cost += once;
+                c.node.total_cost += once;
                 let texts = gating
                     .iter()
                     .map(|e| self.show(e, &c.internal, Cx::Upper))

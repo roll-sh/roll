@@ -7577,7 +7577,18 @@ impl Binder<'_, '_> {
                             .map(|a| self.coerce_implicit(a, &elem))
                             .collect::<Result<Vec<_>>>()?;
                         let ty = DataType::array_of(elem);
-                        args.push(Expr::Array(items, ty.clone()));
+                        // (Of constants, a constant: eval_const_expressions simplifies the
+                        // ArrayExpr before the call, which evaluate_function then runs.)
+                        let arr = Expr::Array(items, ty.clone());
+                        let arr = match &arr {
+                            Expr::Array(xs, _)
+                                if !self.deparse && !self.unplanned && xs.iter().all(|x| matches!(x, Expr::Const(..))) =>
+                            {
+                                crate::sql::expr::eval(&arr, &[], self.ctx).map_or(arr, |v| Expr::Const(v, ty.clone()))
+                            }
+                            _ => arr,
+                        };
+                        args.push(arr);
                         arg_types.truncate(fixed);
                         arg_types.push(ty);
                     }

@@ -53,12 +53,15 @@ fn const_rel(p: &Plan, ctx: &ExecCtx) -> Option<Vec<Expr>> {
         }
         _ => return None,
     };
+    // (An uncorrelated sub-select too, is_simple_values takes any expression neither
+    // volatile nor returning a set: put in where the column is read, an InitPlan each. A
+    // SQL function's call isn't one: its own rules, `lift`'s.)
     let ok = exprs.iter().all(|e| {
-        let mut plain = e.columns().is_empty() && !e.is_volatile() && !e.has_outer_refs();
-        e.walk(&mut |x| {
-            if matches!(x, Expr::Subquery(_) | Expr::Agg(..) | Expr::Window(..) | Expr::Srf(..)) {
-                plain = false
-            }
+        let mut plain = e.columns().is_empty() && !super::expr_volatile_deep(e) && !e.has_outer_refs();
+        e.walk(&mut |x| match x {
+            Expr::Subquery(s) if !s.params.is_empty() || s.call.is_some() || s.func.is_some() => plain = false,
+            Expr::Agg(..) | Expr::Window(..) | Expr::Srf(..) => plain = false,
+            _ => {}
         });
         plain
     });
@@ -192,6 +195,49 @@ impl Planner<'_, '_> {
                 };
             }
         }
+        // An aggregation without grouping over such an item: its values put in for its
+        // columns in the aggregates' arguments, the Result returning none (the item an
+        // RTE_RESULT, its Vars replaced).
+        if let Plan::Agg { input, groups, sets: None, aggs } = p
+            && groups.is_empty()
+            && !matches!(&**input, Plan::One)
+            && let Some(consts) = const_rel(input, self.ctx)
+            && !consts.iter().any(|c| {
+                let mut sub = false;
+                c.walk(&mut |x| sub |= matches!(x, Expr::Subquery(_)));
+                sub
+            })
+        {
+            // (Then simplified, eval_const_expressions over the pulled-up query.)
+            let ctx = self.ctx;
+            let put = |e: &Expr| -> Expr {
+                let e = e
+                    .clone()
+                    .transform(&mut |x| {
+                        Ok(match x {
+                            Expr::Col(i, t) => consts.get(i).cloned().unwrap_or(Expr::Col(i, t)),
+                            x => x,
+                        })
+                    })
+                    .unwrap();
+                let mut plain = !matches!(e, Expr::Const(..)) && !super::expr_volatile_deep(&e) && !e.has_outer_refs();
+                e.walk(&mut |x| plain &= !matches!(x, Expr::Col(..) | Expr::Subquery(_) | Expr::Param(..) | Expr::Agg(..) | Expr::Window(..) | Expr::Srf(..)));
+                if !plain {
+                    return e;
+                }
+                let ty = e.ty();
+                crate::sql::expr::eval(&e, &[], ctx).map_or(e, |v| Expr::Const(v, ty))
+            };
+            for a in aggs.iter_mut() {
+                a.args = a.args.iter().map(put).collect();
+                a.direct = a.direct.iter().map(put).collect();
+                a.filter = a.filter.as_ref().map(put);
+                for k in &mut a.order_by {
+                    k.expr = put(&k.expr);
+                }
+            }
+            *input = Arc::new(Plan::One);
+        }
         if let Some(out) = lateral_one_row(p) {
             *p = out;
             // (Its range table entry stays: EXPLAIN qualifies the columns.)
@@ -248,14 +294,34 @@ impl Planner<'_, '_> {
         if outer && cond.is_none() && hash.is_none() {
             return None;
         }
-        // The join's clauses over the other side's row.
+        // The join's clauses over the other side's row. (A sub-select among the values: a
+        // copy of its own in each place, pullup_replace_vars', its own InitPlan.)
+        let value = |i: usize| -> Expr {
+            let v = consts[i].clone();
+            let mut sub = false;
+            v.walk(&mut |x| sub |= matches!(x, Expr::Subquery(_)));
+            if !sub {
+                return v;
+            }
+            v.transform(&mut |y| {
+                Ok(match y {
+                    Expr::Subquery(mut q) => {
+                        super::sublinkcopy::make_copy(&mut q);
+                        q.tlist = false;
+                        Expr::Subquery(q)
+                    }
+                    y => y,
+                })
+            })
+            .unwrap()
+        };
         let subst = |e: Expr| -> Expr {
             e.transform(&mut |x| {
                 Ok(match x {
                     Expr::Col(i, t) => {
                         if const_left {
                             if i < nl {
-                                consts[i].clone()
+                                value(i)
                             } else if outer {
                                 // (An outer join keeps its row.)
                                 Expr::Col(i, t)
@@ -263,7 +329,7 @@ impl Planner<'_, '_> {
                                 Expr::Col(i - nl, t)
                             }
                         } else if i >= nl {
-                            consts[i - nl].clone()
+                            value(i - nl)
                         } else {
                             Expr::Col(i, t)
                         }
@@ -316,6 +382,23 @@ impl Planner<'_, '_> {
         }
         let types = super::analyzejoins::col_types(&other);
         let n_other = if const_left { nr } else { nl };
+        // (The values read above: the query's target list's, preprocessed before its
+        // quals.)
+        let consts: Vec<Expr> = consts
+            .into_iter()
+            .map(|v| {
+                v.transform(&mut |y| {
+                    Ok(match y {
+                        Expr::Subquery(mut q) => {
+                            q.tlist = true;
+                            Expr::Subquery(q)
+                        }
+                        y => y,
+                    })
+                })
+                .unwrap()
+            })
+            .collect();
         let cols = (0..n_other).map(|i| Expr::Col(i, types.get(i).cloned().unwrap_or(DataType::Unknown)));
         let exprs: Vec<Expr> = if const_left {
             consts.into_iter().chain(cols).collect()

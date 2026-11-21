@@ -1133,6 +1133,43 @@ impl Binder<'_, '_> {
         })
     }
 
+    /// A set operation's input coerced to its column types. A leaf query (`*SELECT* n`)
+    /// whose column needs another type is a level of its own, the coercion over its
+    /// output (generate_setop_tlist over the leaf's subquery scan: its Subquery Scan
+    /// isn't trivial); an unknown literal is coerced in the leaf's own target list
+    /// (transformSetOperationTree), as is a column differing only in its typmod.
+    fn coerce_setop_leaf(
+        &mut self,
+        plan: Plan,
+        cols: &[OutCol],
+        types: &[DataType],
+        level: Option<(usize, Option<usize>)>,
+    ) -> Result<Plan> {
+        let cur: Vec<DataType> = cols.iter().map(|c| c.ty.clone()).collect();
+        let above = |c: &OutCol, t: &DataType| !matches!(c.ty, DataType::Unknown) && !c.ty.same_base(t);
+        let own = !self.deparse && !self.unplanned && self.deps.is_none() && self.refs.is_none();
+        let Some((i, sorted)) = level.filter(|_| own && cols.iter().zip(types).any(|(c, t)| above(c, t))) else {
+            return self.coerce_plan_types(plan, &cur, types);
+        };
+        let mid: Vec<DataType> = cols
+            .iter()
+            .zip(types)
+            .map(|(c, t)| if above(c, t) { c.ty.clone() } else { t.clone() })
+            .collect();
+        let plan = self.coerce_plan_types(plan, &cur, &mid)?;
+        let plan = Plan::Barrier {
+            input: Arc::new(plan),
+            alias: format!("*SELECT* {i}"),
+            cols: cols.iter().map(|c| c.name.clone()).collect(),
+            secure: false,
+            path: None,
+            sorted,
+            rti: Default::default(),
+            copies: Vec::new(),
+        };
+        self.coerce_plan_types(plan, &mid, types)
+    }
+
     // ── set operations ──
 
     fn bind_set_op(
@@ -1192,10 +1229,15 @@ impl Binder<'_, '_> {
                 }
                 _ => plan,
             };
-            Ok::<_, Error>((plan, cols))
+            // (A leaf query not made a level of its own yet: its number and ORDER BY's
+            // length, for one its columns' coercion makes one.)
+            let leaf_level = index
+                .filter(|_| !matches!(plan, Plan::Barrier { .. }))
+                .map(|i| (i, (!n.sort_clause.is_empty()).then_some(n.sort_clause.len())));
+            Ok::<_, Error>((plan, cols, leaf_level))
         };
-        let (lp, lcols) = leaf(self, s.larg.as_deref().unwrap())?;
-        let (rp, rcols) = leaf(self, s.rarg.as_deref().unwrap())?;
+        let (lp, lcols, llevel) = leaf(self, s.larg.as_deref().unwrap())?;
+        let (rp, rcols, rlevel) = leaf(self, s.rarg.as_deref().unwrap())?;
         if lcols.len() != rcols.len() {
             // (At the right query's first target, as written.)
             let r = s.rarg.as_deref().unwrap();
@@ -1238,16 +1280,8 @@ impl Binder<'_, '_> {
         if !lcols.iter().zip(&types).all(|(c, t)| same(c, t)) || !rcols.iter().zip(&types).all(|(c, t)| same(c, t)) {
             self.setop_coerced = true;
         }
-        let lp = self.coerce_plan_types(
-            lp,
-            &lcols.iter().map(|c| c.ty.clone()).collect::<Vec<_>>(),
-            &types,
-        )?;
-        let rp = self.coerce_plan_types(
-            rp,
-            &rcols.iter().map(|c| c.ty.clone()).collect::<Vec<_>>(),
-            &types,
-        )?;
+        let lp = self.coerce_setop_leaf(lp, &lcols, &types, llevel)?;
+        let rp = self.coerce_setop_leaf(rp, &rcols, &types, rlevel)?;
         // The output collations (select_common_collation): differing explicit ones are an
         // error, and so are differing implicit ones when rows are compared.
         let none_ok = kind == SetOpKind::Union && s.all;
@@ -8211,8 +8245,12 @@ pub(super) fn own_query_level_stmt(s: &pb::SelectStmt, plan: &Plan) -> bool {
         }
         return !simple(s) && matches!(plan, Plan::Append { inh: None, .. });
     }
-    if !matches!(op, pb::SetOperation::SetopNone | pb::SetOperation::Undefined) || !s.values_lists.is_empty() {
+    if !matches!(op, pb::SetOperation::SetopNone | pb::SetOperation::Undefined) {
         return false;
+    }
+    // (A VALUES list's query is one with a WITH: is_simple_subquery's cteList test.)
+    if !s.values_lists.is_empty() {
+        return s.with_clause.is_some();
     }
     // The level's own nodes, down to its FROM's.
     fn top(p: &Plan, agg: &mut bool, win: &mut bool) {

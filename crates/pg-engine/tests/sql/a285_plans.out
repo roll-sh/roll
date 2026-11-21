@@ -1,0 +1,246 @@
+> create table a285co (t text, u text collate "C", i int) with (autovacuum_enabled = off)
+-- CREATE TABLE
+
+> insert into a285co select g::text, g::text, g from generate_series(1, 2000) g
+-- INSERT 0 2000
+
+> create index a285co_t on a285co (t collate "C")
+-- CREATE INDEX
+
+> create index a285co_u on a285co (u)
+-- CREATE INDEX
+
+> analyze a285co
+-- ANALYZE
+
+> explain select * from a285co order by t limit 5
+QUERY PLAN:text
+Limit  (cost=64.22..64.23 rows=5 width=12)
+  ->  Sort  (cost=64.22..69.22 rows=2000 width=12)
+        Sort Key: t
+        ->  Seq Scan on a285co  (cost=0.00..31.00 rows=2000 width=12)
+-- EXPLAIN
+
+> explain select * from a285co order by t collate "C" limit 5
+QUERY PLAN:text
+Limit  (cost=0.28..0.53 rows=5 width=44)
+  ->  Index Scan using a285co_t on a285co  (cost=0.28..101.72 rows=2000 width=44)
+-- EXPLAIN
+
+> explain select * from a285co order by u collate "default" limit 5
+QUERY PLAN:text
+Limit  (cost=64.22..64.23 rows=5 width=44)
+  ->  Sort  (cost=64.22..69.22 rows=2000 width=44)
+        Sort Key: u
+        ->  Seq Scan on a285co  (cost=0.00..31.00 rows=2000 width=44)
+-- EXPLAIN
+
+> explain select * from a285co order by t collate "C", i limit 5
+QUERY PLAN:text
+Limit  (cost=0.34..0.82 rows=5 width=44)
+  ->  Incremental Sort  (cost=0.34..191.72 rows=2000 width=44)
+        Sort Key: t COLLATE "C", i
+        Presorted Key: t
+        ->  Index Scan using a285co_t on a285co  (cost=0.28..101.72 rows=2000 width=44)
+-- EXPLAIN
+
+> explain select * from a285co order by u, t limit 5
+QUERY PLAN:text
+Limit  (cost=0.34..0.82 rows=5 width=12)
+  ->  Incremental Sort  (cost=0.34..191.72 rows=2000 width=12)
+        Sort Key: u COLLATE "C", t
+        Presorted Key: u
+        ->  Index Scan using a285co_u on a285co  (cost=0.28..101.72 rows=2000 width=12)
+-- EXPLAIN
+
+> select t from a285co order by t collate "C" limit 3
+t:text
+1
+10
+100
+-- SELECT 3
+
+> create table a285f (id int) with (autovacuum_enabled = off)
+-- CREATE TABLE
+
+> create table a285b (id1 int, id2 int) with (autovacuum_enabled = off)
+-- CREATE TABLE
+
+> insert into a285f values (1), (2)
+-- INSERT 0 2
+
+> insert into a285b values (1, 1), (2, 2), (3, 1)
+-- INSERT 0 3
+
+> explain select * from a285f where id in (select id2 from (select id2 from a285b group by id2) s)
+QUERY PLAN:text
+Hash Join  (cost=42.75..85.09 rows=2550 width=4)
+  Hash Cond: (a285f.id = a285b.id2)
+  ->  Seq Scan on a285f  (cost=0.00..35.50 rows=2550 width=4)
+  ->  Hash  (cost=40.25..40.25 rows=200 width=4)
+        ->  HashAggregate  (cost=38.25..40.25 rows=200 width=4)
+              Group Key: a285b.id2
+              ->  Seq Scan on a285b  (cost=0.00..32.60 rows=2260 width=4)
+-- EXPLAIN
+
+> select * from a285f where id in (select id2 from (select distinct on (id2) id1, id2 from a285b) s) order by 1
+id:int4
+1
+2
+-- SELECT 2
+
+> explain select * from a285f where id in (select id2 from (select distinct id1, id2 from a285b) s)
+QUERY PLAN:text
+Hash Join  (cost=53.48..109.86 rows=1275 width=4)
+  Hash Cond: (a285f.id = s.id2)
+  ->  Seq Scan on a285f  (cost=0.00..35.50 rows=2550 width=4)
+  ->  Hash  (cost=50.98..50.98 rows=200 width=4)
+        ->  HashAggregate  (cost=48.98..50.98 rows=200 width=4)
+              Group Key: s.id2
+              ->  Subquery Scan on s  (cost=43.90..48.42 rows=226 width=4)
+                    ->  HashAggregate  (cost=43.90..46.16 rows=226 width=8)
+                          Group Key: a285b.id1, a285b.id2
+                          ->  Seq Scan on a285b  (cost=0.00..32.60 rows=2260 width=8)
+-- EXPLAIN
+
+> explain select * from a285f where id in (select id2 from (select id1, id2 from a285b union select id1, id2 from a285b) s)
+QUERY PLAN:text
+Hash Join  (cost=216.60..272.98 rows=1275 width=4)
+  Hash Cond: (a285f.id = s.id2)
+  ->  Seq Scan on a285f  (cost=0.00..35.50 rows=2550 width=4)
+  ->  Hash  (cost=214.10..214.10 rows=200 width=4)
+        ->  HashAggregate  (cost=212.10..214.10 rows=200 width=4)
+              Group Key: s.id2
+              ->  Subquery Scan on s  (cost=110.40..200.80 rows=4520 width=4)
+                    ->  HashAggregate  (cost=110.40..155.60 rows=4520 width=8)
+                          Group Key: a285b.id1, a285b.id2
+                          ->  Append  (cost=0.00..87.80 rows=4520 width=8)
+                                ->  Seq Scan on a285b  (cost=0.00..32.60 rows=2260 width=8)
+                                ->  Seq Scan on a285b a285b_1  (cost=0.00..32.60 rows=2260 width=8)
+-- EXPLAIN
+
+> explain select * from a285f where id in (select id2 from (select id2 from a285b union select id2 from a285b) s)
+QUERY PLAN:text
+Hash Join  (cost=200.80..243.14 rows=57630 width=4)
+  Hash Cond: (a285f.id = a285b.id2)
+  ->  Seq Scan on a285f  (cost=0.00..35.50 rows=2550 width=4)
+  ->  Hash  (cost=144.30..144.30 rows=4520 width=4)
+        ->  HashAggregate  (cost=99.10..144.30 rows=4520 width=4)
+              Group Key: a285b.id2
+              ->  Append  (cost=0.00..87.80 rows=4520 width=4)
+                    ->  Seq Scan on a285b  (cost=0.00..32.60 rows=2260 width=4)
+                    ->  Seq Scan on a285b a285b_1  (cost=0.00..32.60 rows=2260 width=4)
+-- EXPLAIN
+
+> select * from a285f where id in (select id2 from (select id2 from a285b union select id2 from a285b) s) order by 1
+id:int4
+1
+2
+-- SELECT 2
+
+> select id from a285f f where id in (select f.id + id1 - 1 from a285b where id2 = f.id) order by 1
+id:int4
+1
+-- SELECT 1
+
+> explain select * from a285co, (values ((select i from (values (3), (2), ((select 7))) v(i) order by i limit 1))) w(i) where a285co.i = w.i
+QUERY PLAN:text
+Seq Scan on a285co  (cost=0.13..36.13 rows=1 width=16)
+  Filter: (i = (InitPlan 4).col1)
+  InitPlan 2
+    ->  Limit  (cost=0.06..0.07 rows=1 width=4)
+          InitPlan 1
+            ->  Result  (cost=0.00..0.01 rows=1 width=4)
+          ->  Sort  (cost=0.05..0.06 rows=3 width=4)
+                Sort Key: "*VALUES*".column1
+                ->  Values Scan on "*VALUES*"  (cost=0.00..0.04 rows=3 width=4)
+  InitPlan 4
+    ->  Limit  (cost=0.06..0.07 rows=1 width=4)
+          InitPlan 3
+            ->  Result  (cost=0.00..0.01 rows=1 width=4)
+          ->  Sort  (cost=0.05..0.06 rows=3 width=4)
+                Sort Key: "*VALUES*_1".column1
+                ->  Values Scan on "*VALUES*_1"  (cost=0.00..0.04 rows=3 width=4)
+-- EXPLAIN
+
+> select * from a285co, (values ((select i from (values (3), (2), ((select 7))) v(i) order by i limit 1))) w(i) where a285co.i = w.i
+t:text | u:text | i:int4 | i:int4
+2 | 2 | 2 | 2
+-- SELECT 1
+
+> create function a285srf(int) returns setof a285b as 'select * from a285b where id1 = $1' language sql
+-- CREATE FUNCTION
+
+> explain select * from a285srf(1) with ordinality as z(a, b, o)
+QUERY PLAN:text
+Function Scan on a285srf z  (cost=0.25..10.25 rows=1000 width=16)
+-- EXPLAIN
+
+> explain select * from a285f, a285srf(a285f.id) with ordinality as z(a, b, o) where a285f.id = z.b
+QUERY PLAN:text
+Nested Loop  (cost=0.25..32038.25 rows=12750 width=20)
+  ->  Seq Scan on a285f  (cost=0.00..35.50 rows=2550 width=4)
+  ->  Function Scan on a285srf z  (cost=0.25..12.75 rows=5 width=16)
+        Filter: (a285f.id = b)
+-- EXPLAIN
+
+> explain select 1.1 as two union select 2 order by 1
+QUERY PLAN:text
+Unique  (cost=0.05..0.06 rows=2 width=32)
+  ->  Sort  (cost=0.05..0.06 rows=2 width=32)
+        Sort Key: (1.1)
+        ->  Append  (cost=0.00..0.04 rows=2 width=32)
+              ->  Result  (cost=0.00..0.01 rows=1 width=32)
+              ->  Subquery Scan on "*SELECT* 2"  (cost=0.00..0.02 rows=1 width=32)
+                    ->  Result  (cost=0.00..0.01 rows=1 width=4)
+-- EXPLAIN
+
+> explain select id from a285f union all select id1::int8 from a285b
+QUERY PLAN:text
+Append  (cost=0.00..129.68 rows=4810 width=8)
+  ->  Subquery Scan on "*SELECT* 1"  (cost=0.00..67.38 rows=2550 width=8)
+        ->  Seq Scan on a285f  (cost=0.00..35.50 rows=2550 width=4)
+  ->  Seq Scan on a285b  (cost=0.00..38.25 rows=2260 width=8)
+-- EXPLAIN
+
+> explain select any_value(v) from (values (null)) as v (v)
+QUERY PLAN:text
+Aggregate  (cost=0.01..0.02 rows=1 width=32)
+  ->  Result  (cost=0.00..0.01 rows=1 width=0)
+-- EXPLAIN
+
+> select sum(x), count(*) filter (where x > 1), array_agg(x order by x) from (values (5)) t(x)
+sum:int8 | count:int8 | array_agg:int4[]
+5 | 1 | {5}
+-- SELECT 1
+
+> create function a285least(variadic anyarray) returns anyelement as 'select min($1[i]) from generate_subscripts($1, 1) g(i)' language sql immutable strict
+-- CREATE FUNCTION
+
+> explain select a285least(10, 1, 20, 33)
+QUERY PLAN:text
+Result  (cost=0.00..0.01 rows=1 width=4)
+-- EXPLAIN
+
+> select a285least(10, 1, 20, 33)
+a285least:int4
+1
+-- SELECT 1
+
+> explain select 1 as one where 1 in (select 1)
+QUERY PLAN:text
+Result  (cost=0.02..0.03 rows=1 width=4)
+  One-Time Filter: (ANY (1 = (hashed SubPlan 1).col1))
+  SubPlan 1
+    ->  Result  (cost=0.00..0.01 rows=1 width=4)
+-- EXPLAIN
+
+> drop function a285least(variadic anyarray)
+-- DROP FUNCTION
+
+> drop function a285srf(int)
+-- DROP FUNCTION
+
+> drop table a285co, a285f, a285b
+-- DROP TABLE
+

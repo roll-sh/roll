@@ -54,6 +54,7 @@ fn as_path(p: &JP) -> Path {
                 nulls_first: k.nulls_first,
                 cmp: 0,
                 coll: 0,
+                ident: None,
             })
             .collect(),
         disabled: p.disabled,

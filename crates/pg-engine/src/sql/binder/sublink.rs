@@ -1708,6 +1708,16 @@ fn any_join(cat: &Catalog, plan: &Plan, sub: &Subquery, unplanned: &Unplanned) -
             let types = crate::sql::paths::analyzejoins::col_types(&rhs);
             (corr, rhs, types, false)
         }
+        // A sub-select over one FROM subquery planned as a level of its own (DISTINCT,
+        // GROUP BY, a set operation): a simple one, pulled up (pull_up_simple_subquery
+        // over convert_ANY_sublink_to_join's "ANY_subquery"), the semi join's right side
+        // that FROM subquery, the select list over its outputs.
+        None if sub.params.is_empty()
+            && matches!(p, Plan::Barrier { secure: false, .. } | Plan::SetOp { sub: Some(_), .. })
+            && crate::sql::explain::plan_inputs(p).iter().all(|c| plan_clean_with(c, true)) =>
+        {
+            (Vec::new(), p.clone(), vec![crate::types::DataType::Unknown; width(p)], false)
+        }
         // Any other uncorrelated subquery joins as it is: a VALUES list pulled up
         // (pull_up_simple_values), else a subquery of its own ("ANY_subquery").
         None if sub.params.is_empty()
@@ -1797,7 +1807,9 @@ fn any_join(cat: &Catalog, plan: &Plan, sub: &Subquery, unplanned: &Unplanned) -
         return None;
     }
     // The select list may read queries further up (their values reach this one as its
-    // own outer references), not this query's rows.
+    // own outer references), and this query's row: a LATERAL subquery to
+    // convert_ANY_sublink_to_join, pulled up, its values in the join's clause (kept as
+    // outer references here, put in place below).
     let exprs = match exprs {
         Some(ex) if ex.iter().any(Expr::has_outer_refs) => {
             let mut ok = true;
@@ -1808,6 +1820,7 @@ fn any_join(cat: &Catalog, plan: &Plan, sub: &Subquery, unplanned: &Unplanned) -
                         Ok(match x {
                             Expr::Outer(1, i, t) => match sub.params.get(i) {
                                 Some(v) if v.columns().is_empty() && !v.is_volatile() => v.clone(),
+                                Some(v) if !v.is_volatile() && !has_sublink(v) => Expr::Outer(1, i, t),
                                 _ => {
                                     ok = false;
                                     Expr::Outer(1, i, t)
@@ -1864,14 +1877,12 @@ fn any_join(cat: &Catalog, plan: &Plan, sub: &Subquery, unplanned: &Unplanned) -
     // distributes the semi join's right side before its qual.)
     let cond: Vec<Expr> = corr
         .into_iter()
+        .map(Some)
         .chain(sub.left.iter().zip(&exprs).zip(&sub.ops).map(|((l, r), op)| {
-            Expr::Call(
-                op.clone(),
-                vec![l.clone(), r.clone().shift_cols(nleft as isize)],
-                crate::types::DataType::Bool,
-            )
+            let r = outer_to_params(r.clone().shift_cols(nleft as isize), &sub.params)?;
+            Some(Expr::Call(op.clone(), vec![l.clone(), r], crate::types::DataType::Bool))
         }))
-        .collect();
+        .collect::<Option<_>>()?;
     Some(super::optimize::join(
         cat,
         JoinKind::Semi,

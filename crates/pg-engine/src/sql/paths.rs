@@ -1807,6 +1807,9 @@ pub struct PathKey {
     pub cmp: u32,
     /// The collation it sorts under when that doesn't sort by bytes (0: bytes).
     pub coll: u32,
+    /// The collation it sorts under by identity, by name (an index column's; the one an
+    /// ORDER BY key derives); None: not collatable, or not known where it was made.
+    pub ident: Option<String>,
 }
 
 impl PathKey {
@@ -1815,7 +1818,26 @@ impl PathKey {
             && self.nulls_first == o.nulls_first
             && self.cmp == o.cmp
             && self.coll == o.coll
-            && same_key(&self.expr, &o.expr)
+            && self.matches(&o.expr, o.ident.as_deref())
+    }
+
+    /// Whether its expression is `e`'s (of collation `ident`): when both collations are
+    /// known, by identity as PostgreSQL's equivalence classes compare them (an index on
+    /// `t COLLATE "C"` orders no `ORDER BY t` under "default", though both sort bytes),
+    /// a COLLATE on top naming that collation not part of the expression (a RelabelType
+    /// to PostgreSQL: `ORDER BY t COLLATE "C"` reads that index).
+    fn matches(&self, e: &Expr, ident: Option<&str>) -> bool {
+        match (self.ident.as_deref(), ident) {
+            (Some(a), Some(b)) => a == b && same_key(uncollated(&self.expr), uncollated(e)),
+            _ => same_key(&self.expr, e),
+        }
+    }
+}
+
+pub(crate) fn uncollated(e: &Expr) -> &Expr {
+    match e {
+        Expr::Collate(x, ..) => uncollated(x),
+        e => e,
     }
 }
 
@@ -3287,10 +3309,11 @@ fn index_pathkeys(rel: &Rel, ii: &IndexInfo, backward: bool, w: &Want) -> Vec<Pa
             nulls_first: c.nulls_first != backward,
             cmp: ii.order.get(i).and_then(|o| o.as_ref()).map_or(0, |o| o.0),
             coll: ii.kcolls.get(i).and_then(Option::as_ref).map_or(0, |k| k.coll.oid),
+            ident: index_collation(ii, i).map(str::to_string),
         };
         // Only keys the query sorts or merges by have an equivalence class to be a
         // pathkey of (a boolean one fixed by a clause has none: past it).
-        if !want.iter().any(|x| same_key(&x.expr, k)) && !w.merge.iter().any(|m| same_key(m, k))
+        if !want.iter().any(|x| x.matches(k, pk.ident.as_deref())) && !w.merge.iter().any(|m| same_key(m, k))
         {
             if bool_const(rel, k) {
                 continue;
@@ -3311,7 +3334,7 @@ fn index_pathkeys(rel: &Rel, ii: &IndexInfo, backward: bool, w: &Want) -> Vec<Pa
         .take_while(|k| {
             let right_desc = want
                 .iter()
-                .find(|x| same_key(&x.expr, &k.expr))
+                .find(|x| x.matches(&k.expr, k.ident.as_deref()))
                 .is_some_and(|x| x.desc);
             k.cmp == 0 && k.coll == 0 && k.desc == right_desc && w.merge.iter().any(|m| same_key(m, &k.expr))
         })
@@ -6476,7 +6499,7 @@ impl Planner<'_, '_> {
                     continue;
                 }
                 let (desc, nulls_first) = dir_of(e);
-                k.push(PathKey { expr: e.clone(), desc, nulls_first, cmp: 0, coll: 0 });
+                k.push(PathKey { expr: e.clone(), desc, nulls_first, cmp: 0, coll: 0, ident: None });
             }
             k
         } else {
@@ -6922,18 +6945,21 @@ impl Planner<'_, '_> {
         if !plannable(s) {
             return false;
         }
+        let idents: Vec<Option<String>> = mapped.iter().map(|e| derived_collation(&s.table, e)).collect();
         let want = Want {
             merge: Vec::new(),
             keys: mapped
                 .into_iter()
                 .zip(dirs)
                 .zip(cmps)
-                .map(|((expr, (desc, nulls_first)), (cmp, coll))| PathKey {
+                .zip(idents)
+                .map(|(((expr, (desc, nulls_first)), (cmp, coll)), ident)| PathKey {
                     expr: bare_key(&expr, coll),
                     desc,
                     nulls_first,
                     cmp,
                     coll,
+                    ident,
                 })
                 .collect(),
             limit: lim,
@@ -7850,6 +7876,12 @@ impl Planner<'_, '_> {
 /// The order an index scan returns rows in: its key columns in the scan's direction,
 /// those a qual fixes left out.
 pub fn index_order(ctx: &ExecCtx, s: &ScanPlan) -> Vec<SortKey> {
+    index_order_collated(ctx, s).into_iter().map(|(k, _)| k).collect()
+}
+
+/// `index_order` with each key's index column collation by name (its COLLATE, else the
+/// one its key derives; None: not collatable, or a GiST / SP-GiST ordering operator's).
+pub fn index_order_collated(ctx: &ExecCtx, s: &ScanPlan) -> Vec<(SortKey, Option<String>)> {
     let Some((ix, _)) = &s.index else {
         return Vec::new();
     };
@@ -7860,7 +7892,7 @@ pub fn index_order(ctx: &ExecCtx, s: &ScanPlan) -> Vec<SortKey> {
         return Vec::new();
     };
     if matches!(ix.method.as_str(), "gist" | "spgist") {
-        return s.index.as_ref().map_or_else(Vec::new, |(_, b)| b.order.clone());
+        return s.index.as_ref().map_or_else(Vec::new, |(_, b)| b.order.iter().map(|k| (k.clone(), None)).collect());
     }
     if ix.method != "btree" {
         return Vec::new();
@@ -7899,12 +7931,16 @@ pub fn index_order(ctx: &ExecCtx, s: &ScanPlan) -> Vec<SortKey> {
             continue;
         }
         let c = &ix.columns[i];
-        out.push(SortKey {
-            expr: k.clone(),
-            desc: c.desc != s.reverse,
-            nulls_first: c.nulls_first != s.reverse,
-            using: None,
-        });
+        let coll = derived_collation(&s.table, k).map(|d| c.collation.clone().unwrap_or(d));
+        out.push((
+            SortKey {
+                expr: k.clone(),
+                desc: c.desc != s.reverse,
+                nulls_first: c.nulls_first != s.reverse,
+                using: None,
+            },
+            coll,
+        ));
     }
     out
 }
@@ -7976,11 +8012,17 @@ fn written_collation(ops: &[&Expr]) -> Option<String> {
 /// under the database default, an index on `t COLLATE "C"` serves no `t = 'x'`, though both
 /// compare bytes in a C database. A key that isn't collatable matches any.
 fn collation_matches(ii: &IndexInfo, col: usize, ops: &[&Expr]) -> bool {
-    let Some(Some(derived)) = ii.key_colls.get(col) else {
+    let (Some(Some(derived)), Some(index)) = (ii.key_colls.get(col), index_collation(ii, col)) else {
         return true;
     };
-    let index = ii.ix.columns.get(col).and_then(|c| c.collation.as_deref()).unwrap_or(derived);
     written_collation(ops).as_deref().unwrap_or(derived) == index
+}
+
+/// Index column `col`'s collation, by name: its COLLATE, else the one its key derives;
+/// None when the key isn't collatable (or no collations were recorded: a catalog's).
+fn index_collation(ii: &IndexInfo, col: usize) -> Option<&str> {
+    let derived = ii.key_colls.get(col)?.as_deref()?;
+    Some(ii.ix.columns.get(col).and_then(|c| c.collation.as_deref()).unwrap_or(derived))
 }
 
 /// Whether a comparison is in the order of index column `col`'s keys: under the collation

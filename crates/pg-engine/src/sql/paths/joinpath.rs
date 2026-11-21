@@ -432,6 +432,7 @@ fn add_jpath_rows(list: &mut Vec<JP>, new: JP, startup: bool, by_rows: bool) {
                 nulls_first: k.nulls_first,
                 cmp: 0,
                 coll: 0,
+                ident: None,
             })
             .collect(),
         disabled: p.disabled,
@@ -2111,6 +2112,7 @@ impl Search<'_, '_, '_> {
                     nulls_first: q.nulls_first,
                     cmp: 0,
                     coll: 0,
+                    ident: None,
                 }),
                 None => break,
             }
@@ -3704,7 +3706,8 @@ fn cheapest_param(list: &[JP]) -> Option<&JP> {
 }
 
 /// query_is_distinct_for: a query level's plan returns no two rows equal in `cols` (its
-/// output columns): grouped by columns among them, DISTINCT on them, or one row.
+/// output columns): grouped by columns among them, DISTINCT (ON) on them, a UNION,
+/// INTERSECT or EXCEPT (not ALL) over all of them, or one row.
 fn distinct_for(p: &Plan, cols: &[usize]) -> bool {
     match p {
         Plan::Sort { input, .. } | Plan::Limit { input, .. } | Plan::Filter { input, .. } => distinct_for(input, cols),
@@ -3726,6 +3729,10 @@ fn distinct_for(p: &Plan, cols: &[usize]) -> bool {
         Plan::Distinct { input, on: None, .. } => {
             (0..crate::sql::binder::plan_width(input)).all(|g| cols.contains(&g))
         }
+        Plan::Distinct { on: Some(on), .. } => {
+            !on.is_empty() && on.iter().all(|e| matches!(e, Expr::Col(j, _) if cols.contains(j)))
+        }
+        Plan::SetOp { all: false, .. } => (0..crate::sql::binder::plan_width(p)).all(|g| cols.contains(&g)),
         _ => false,
     }
 }
@@ -4526,6 +4533,7 @@ impl Search<'_, '_, '_> {
         };
         let sub = match &leaf.plan {
             Plan::Barrier { input, .. } => Some(&**input),
+            p @ Plan::SetOp { .. } => Some(p),
             p if grouped(p) => Some(p),
             _ => None,
         };
