@@ -452,7 +452,7 @@ type EnvironmentPut = {
    *  the app's. */
   vitals?: boolean;
   log_retention_days?: 7 | 30 | 90 | null; // how long its logs are kept (null: 7); a preview's stay 7 (400)
-  closed_by?: string | null; // with egress, the operator's only (roll previews in process; 403 for anyone else): who a closed environment's placeholders are made by (usr_… or token:…); null, no one (its keys bound to hosts withheld); unset, whoever set the egress
+  closed_by?: string | null; // with egress, the operator's only (roll previews in process, or any caller on an open daemon; a token needs admin; 403 for a user's token or a signed-in person): who a closed environment's placeholders are made by (usr_… or token:…); null, no one (its keys bound to hosts withheld); unset, whoever set the egress
   badge?: boolean; // a deploy status badge at GET /_roll/badge/<service>/<env>.svg on the apps listener, answered to anyone (Netlify's): live, deploying, waiting, failed, paused or not deployed; false: 404
   approvals?: 0 | 1 | 2 | 3 | null; // admin (as freeze): people other than a deployment's author (the person behind it: their session, their own token, the operator) who approve it (`…/approve`) before it goes live; a waiting build doesn't run (no instance, its own URL 409) until then: deploys, redeploys, promotions and automation's build to ready and wait (a service that can't wait beside the live one: 409, or skipped), putting one live without them is a 409 unless an admin's `X-Roll-Override: 1` (audited `approvals.bypassed`); rolling back to what was live needs none; never a preview's (400)
   report?: boolean; // false: its deploys post no commit status and no GitHub Deployment (someone else reports them: roll previews, for its `pv-` environments)

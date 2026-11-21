@@ -1516,7 +1516,7 @@ static ROWS: &[Row] = &[
     // `variables_from` copies another environment's values into this one: reveal there too.
     // A new heartbeat's ping URL (its token) is in the PUT's answer, once: a credential.
     // Setting or lifting a deploy freeze is admin (lifting one would get past it).
-    row("*", "/v1/apps/services/{id}/environments/{env}", "apps", Act::ProductionIf("env"), one(PG, "service")).env(EnvFrom::Param("env")).admin_if_field(&["freeze", "approvals"]).copies_from(CopyFrom::Body("variables_from")).reveals(&["heartbeat_urls"]),
+    row("*", "/v1/apps/services/{id}/environments/{env}", "apps", Act::ProductionIf("env"), one(PG, "service")).env(EnvFrom::Param("env")).admin_if_field(&["freeze", "approvals", "closed_by"]).copies_from(CopyFrom::Body("variables_from")).reveals(&["heartbeat_urls"]),
     row("GET", "/v1/apps/services/{id}/environments/{env}", "apps", R, one(PG, "service")).env(EnvFrom::Param("env")),
     row("DELETE", "/v1/apps/services/{id}/environments/{env}", "apps", D, one(PG, "service")).env(EnvFrom::Param("env")),
     row("GET", "/v1/apps/services/{id}/environments/{env}/", "apps", R, one(PG, "service")).env(EnvFrom::Param("env")),
@@ -1876,6 +1876,8 @@ mod tests {
         let none = axum::http::HeaderMap::new();
         assert_eq!(env.row.action_with("PUT", &[("env".into(), "staging".into())], Some(&serde_json::json!({ "freeze": null })), &none), Action::Admin);
         assert_eq!(env.row.action_with("PUT", &[("env".into(), "production".into())], Some(&serde_json::json!({ "approvals": 0 })), &none), Action::Admin);
+        // Naming whose placeholders a closed environment uses is the operator's call, never write's.
+        assert_eq!(env.row.action_with("PUT", &[("env".into(), "staging".into())], Some(&serde_json::json!({ "closed_by": null })), &none), Action::Admin);
         assert_eq!(env.row.action_with("PUT", &[("env".into(), "staging".into())], Some(&serde_json::json!({ "vitals": true })), &none), Action::Write);
         assert_eq!(dep.row.action("POST", &[("env".into(), "staging".into())], None), Action::Write);
         assert_eq!(sql_action(&serde_json::json!({ "sql": "select 1", "read_only": true })), Action::Read);

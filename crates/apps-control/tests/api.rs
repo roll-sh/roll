@@ -175,6 +175,10 @@ struct FakeResources;
 
 /// What the fake made and revoked for `logs` links, in order.
 static MINTED: Mutex<Vec<String>> = Mutex::new(Vec::new());
+/// While set, a `logs` link waits (a while at most) for a second one to reach the provider too,
+/// so two requests racing to make one link both get there whatever the machine's load.
+static RACING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+static RACE: std::sync::LazyLock<tokio::sync::Barrier> = std::sync::LazyLock::new(|| tokio::sync::Barrier::new(2));
 
 #[async_trait]
 impl apps_control::integrations::Resources for FakeResources {
@@ -190,7 +194,9 @@ impl apps_control::integrations::Resources for FakeResources {
             return Ok(None);
         }
         // A provider takes a moment: two requests at once both get here.
-        tokio::time::sleep(Duration::from_millis(30)).await;
+        if RACING.load(Ordering::SeqCst) {
+            let _ = tokio::time::timeout(Duration::from_secs(10), RACE.wait()).await;
+        }
         let mut m = MINTED.lock();
         let key = format!("key{}", m.len());
         m.push(format!("link {service} {key}"));
@@ -1643,7 +1649,9 @@ async fn a_link_puts_its_variables_in_the_instances() {
     let rid = racer["id"].as_str().unwrap().to_string();
     let path = format!("/v1/apps/services/{rid}/links/search/logs");
     let before = MINTED.lock().len();
+    RACING.store(true, Ordering::SeqCst);
     let (a, b) = tokio::join!(call(&w.api, "PUT", &path, Some(json!({}))), call(&w.api, "PUT", &path, Some(json!({}))));
+    RACING.store(false, Ordering::SeqCst);
     assert_eq!((a.0, b.0), (StatusCode::OK, StatusCode::OK));
     let log: Vec<String> = MINTED.lock()[before..].to_vec();
     assert_eq!(log.iter().filter(|l| l.starts_with("link ")).count(), 2, "{log:?}");
@@ -8133,6 +8141,8 @@ async fn a_closed_environment_uses_its_keys_without_seeing_them() {
         async move { api.oneshot(req).await.unwrap().status() }
     };
     assert_eq!(put(Some(roll_auth::SignedIn { user: "usr_ada".into(), handle: "ada".into(), admin: false, code_owner: None, session: "ses_1".into() }), false).await, StatusCode::FORBIDDEN);
+    // No one at all on a locked daemon (an open one's caller is the operator: `AppsConfig::open`).
+    assert_eq!(put(None, false).await, StatusCode::FORBIDDEN);
     assert!(put(None, true).await.is_success());
     let (_, d) = call(&w.api, "POST", &format!("{base}/staging/deploys"), Some(json!({}))).await;
     settled(&w, &id, "staging", d["id"].as_str().unwrap()).await;
