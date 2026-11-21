@@ -68,7 +68,7 @@ impl Minute {
     }
 
     pub fn usage(&self) -> UsageAdd {
-        UsageAdd { cpu_seconds: self.cpu_seconds, gb_seconds: self.gb_seconds, requests: self.requests, egress_bytes: self.egress_bytes, build_seconds: self.build_seconds }
+        UsageAdd { cpu_seconds: self.cpu_seconds, gb_seconds: self.gb_seconds, requests: self.requests, egress_bytes: self.egress_bytes, build_seconds: self.build_seconds, stored_gb_hours: 0.0 }
     }
 
     fn is_empty(&self) -> bool {
@@ -146,6 +146,9 @@ impl Meter {
     }
 }
 
+/// A month's hours, as storage is priced (365 × 24 / 12).
+const HOURS_A_MONTH: f64 = 730.0;
+
 /// The prices of a second of real use (docs/apps/README.md, "Prices").
 #[derive(Clone, Copy, Debug, PartialEq, Serialize)]
 pub struct Prices {
@@ -153,17 +156,20 @@ pub struct Prices {
     pub gb_second: f64,
     pub egress_gb: f64,
     pub build_minute: f64,
+    /// A GB-month stored: logs kept past the first week (an environment's 30 or 90 days) and
+    /// build caches.
+    pub stored_gb_month: f64,
 }
 
 impl Default for Prices {
     fn default() -> Self {
-        Prices { cpu_second: 0.000012, gb_second: 0.000004, egress_gb: 0.05, build_minute: 0.005 }
+        Prices { cpu_second: 0.000012, gb_second: 0.000004, egress_gb: 0.05, build_minute: 0.005, stored_gb_month: 0.10 }
     }
 }
 
 impl Prices {
     pub fn cost(&self, u: &UsageAdd) -> f64 {
-        u.cpu_seconds * self.cpu_second + u.gb_seconds * self.gb_second + u.egress_bytes as f64 / 1e9 * self.egress_gb + u.build_seconds / 60.0 * self.build_minute
+        u.cpu_seconds * self.cpu_second + u.gb_seconds * self.gb_second + u.egress_bytes as f64 / 1e9 * self.egress_gb + u.build_seconds / 60.0 * self.build_minute + u.stored_gb_hours / HOURS_A_MONTH * self.stored_gb_month
     }
 }
 

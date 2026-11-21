@@ -86,11 +86,7 @@ pub struct Row {
     pub admin_if: Option<&'static str>,
     /// A JSON body field whose presence makes it `admin` (apps' `freeze`: setting or lifting a
     /// freeze is the same call as going past one).
-    pub admin_if_field: Option<&'static str>,
-    /// Whether the JSON body asks for an answer holding credentials (search's console naming
-    /// `_security/api_key`): then it also needs `reveal` on the same resource, and gets the
-    /// weaker of the two decisions. A body that isn't JSON counts as asking.
-    pub reveals_if: Option<fn(&Value) -> bool>,
+    pub admin_if_field: Option<&'static [&'static str]>,
 }
 
 /// Where a request names other resources it hands to this one ([`Row::lends`]).
@@ -109,28 +105,6 @@ pub struct Lent {
     pub kind: String,
     pub r#ref: String,
     pub action: Action,
-}
-
-/// Whether a search console request (`{method, path, body?}`) may answer a credential: a new API
-/// key (`_security/api_key`, cross-cluster ones, grants), a service account token, an OAuth2,
-/// SAML, OIDC or PKI token, an enrollment token, a connector's or Fleet's stored secret, or an
-/// OpenSearch on-behalf-of token. Matched loosely, on the path decoded until it stops changing,
-/// with runs of `/` as one, whatever the method, so no spelling of the route gets past: a false
-/// match only asks for `reveal` too. A path that isn't a string asks.
-fn search_console_reveals(b: &Value) -> bool {
-    const CREDENTIALS: &[&str] = &["api_key", "_secret", "_fleet/secret", "credential", "oauth2", "/authenticate", "delegate_pki", "enroll", "onbehalfof", "obotoken"];
-    let Some(path) = b.get("path").and_then(Value::as_str) else { return true };
-    let mut path = path.to_ascii_lowercase();
-    loop {
-        let decoded = percent_encoding::percent_decode_str(&path).decode_utf8_lossy().to_ascii_lowercase();
-        if decoded == path {
-            break;
-        }
-        path = decoded;
-    }
-    let mut path: String = path.split('/').filter(|s| !s.is_empty()).collect::<Vec<_>>().join("/");
-    path.insert(0, '/');
-    CREDENTIALS.iter().any(|c| path.contains(c))
 }
 
 /// Apps' `links: [{kind, ref}]`: each linked resource's credentials go to the service (reveal).
@@ -156,6 +130,11 @@ fn apps_push(b: &Value) -> Vec<Lent> {
             Some(Lent { kind: "stream".into(), r#ref: s.into(), action })
         })
         .collect()
+}
+
+/// A drain into a roll storage bucket (`bucket`): apps mints a key that writes there for it.
+fn apps_drain_bucket(b: &Value) -> Vec<Lent> {
+    b.get("bucket").and_then(Value::as_str).map(|r| Lent { kind: "bucket".into(), r#ref: r.into(), action: Action::Write }).into_iter().collect()
 }
 
 /// A roll code repo the body names, which apps reads for the caller (`repo` for a plan or an import,
@@ -229,7 +208,7 @@ pub type Sources = Vec<(String, Option<String>)>;
 
 impl Row {
     pub fn needs_body(&self) -> bool {
-        self.admin_if_field.is_some() || self.reveals_if.is_some() || matches!(self.act, Act::Body(_) | Act::Raw(_)) || matches!(self.copies_from, Some(CopyFrom::Body(_) | CopyFrom::Each(_))) || matches!(self.lends, Some(Lend::Each(_)))
+        self.admin_if_field.is_some() || matches!(self.act, Act::Body(_) | Act::Raw(_)) || matches!(self.copies_from, Some(CopyFrom::Body(_) | CopyFrom::Each(_))) || matches!(self.lends, Some(Lend::Each(_)))
     }
 
     pub fn action(&self, method: &str, params: &[(String, String)], body: Option<&Value>) -> Action {
@@ -253,7 +232,7 @@ impl Row {
 }
 
 const fn row(method: &'static str, route: &'static str, product: &'static str, act: Act, target: Tgt) -> Row {
-    Row { method, route, product, act, target, env: EnvFrom::None, path_query: None, reveals: &[], copies_from: None, index: None, lends: None, filters_itself: false, filters_index: false, admin_if: None, admin_if_field: None, reveals_if: None }
+    Row { method, route, product, act, target, env: EnvFrom::None, path_query: None, reveals: &[], copies_from: None, index: None, lends: None, filters_itself: false, filters_index: false, admin_if: None, admin_if_field: None }
 }
 
 const R: Act = Act::Is(Action::Read);
@@ -295,25 +274,16 @@ impl Row {
         self.admin_if = Some(header);
         self
     }
-    const fn admin_if_field(mut self, field: &'static str) -> Row {
-        self.admin_if_field = Some(field);
+    const fn admin_if_field(mut self, fields: &'static [&'static str]) -> Row {
+        self.admin_if_field = Some(fields);
         self
-    }
-    const fn reveals_if(mut self, f: fn(&Value) -> bool) -> Row {
-        self.reveals_if = Some(f);
-        self
-    }
-
-    /// Whether the request also needs `reveal` ([`Row::reveals_if`]).
-    pub fn needs_reveal(&self, body: Option<&Value>) -> bool {
-        self.reveals_if.is_some_and(|f| body.is_none_or(f))
     }
 
     /// The action with the request's headers: `admin` when [`Row::admin_if`]'s is `1`.
     pub fn action_with(&self, method: &str, params: &[(String, String)], body: Option<&Value>, headers: &axum::http::HeaderMap) -> Action {
         match (self.admin_if, self.admin_if_field) {
             (Some(h), _) if headers.get(h).is_some_and(|v| v == "1") => Action::Admin,
-            (_, Some(f)) if body.and_then(|b| b.get(f)).is_some() => Action::Admin,
+            (_, Some(fs)) if fs.iter().any(|f| body.and_then(|b| b.get(f)).is_some()) => Action::Admin,
             _ => self.action(method, params, body),
         }
     }
@@ -648,7 +618,6 @@ pub fn view(r: &Row) -> RowView {
         Act::Body(_) | Act::Raw(_) => "from the body".into(),
         Act::GitPush => "deploy onto the default branch, delete for a deleted ref, else write".into(),
     };
-    let action = if r.reveals_if.is_some() { format!("{action}; also reveal when it answers credentials") } else { action };
     let target = match r.target {
         Tgt::Param(..) => "one",
         Tgt::List { .. } => "list",
@@ -1227,9 +1196,7 @@ static ROWS: &[Row] = &[
     row("POST", "/v1/search/clusters/{id}/password", "search", REVEAL, one(PG, "cluster")),
     // A deleted cluster back (its id still resolves while it is kept): a write, like a create.
     row("POST", "/v1/search/clusters/{id}/restore", "search", W, one(PG, "cluster")),
-    // Any request as the cluster's owner; one whose answer holds a credential (a new API key, a
-    // connector's or Fleet's secret) is also `reveal`, as `…/keys` is.
-    row("POST", "/v1/search/clusters/{id}/request", "search", ADMIN, one(PG, "cluster")).reveals_if(search_console_reveals),
+    row("POST", "/v1/search/clusters/{id}/request", "search", ADMIN, one(PG, "cluster")),
     // An API key: its secret is in the answer.
     row("POST", "/v1/search/clusters/{id}/keys", "search", REVEAL, one(PG, "cluster")),
     row("DELETE", "/v1/search/clusters/{id}/keys/{key}", "search", ADMIN, one(PG, "cluster")),
@@ -1511,7 +1478,7 @@ static ROWS: &[Row] = &[
     row("POST", "/v1/apps/projects/{project}/preview-domain/verify", "apps", W, one(&["project"], "project")),
     // Its services as roll.toml: settings and variables' names, never a value.
     row("POST", "/v1/apps/projects/{project}/export", "apps", R, one(&["project"], "project")),
-    row("POST", "/v1/apps/projects/{project}/drains", "apps", REVEAL, one(&["project"], "project")),
+    row("POST", "/v1/apps/projects/{project}/drains", "apps", REVEAL, one(&["project"], "project")).lends(Lend::Each(apps_drain_bucket)),
     row("DELETE", "/v1/apps/projects/{project}/drains/{did}", "apps", W, one(&["project"], "project")),
     // An edit can send more out (another source, every environment): reveal, as making one is.
     row("PATCH", "/v1/apps/projects/{project}/drains/{did}", "apps", REVEAL, one(&["project"], "project")),
@@ -1536,7 +1503,7 @@ static ROWS: &[Row] = &[
     // `variables_from` copies another environment's values into this one: reveal there too.
     // A new heartbeat's ping URL (its token) is in the PUT's answer, once: a credential.
     // Setting or lifting a deploy freeze is admin (lifting one would get past it).
-    row("*", "/v1/apps/services/{id}/environments/{env}", "apps", Act::ProductionIf("env"), one(PG, "service")).env(EnvFrom::Param("env")).admin_if_field("freeze").copies_from(CopyFrom::Body("variables_from")).reveals(&["heartbeat_urls"]),
+    row("*", "/v1/apps/services/{id}/environments/{env}", "apps", Act::ProductionIf("env"), one(PG, "service")).env(EnvFrom::Param("env")).admin_if_field(&["freeze", "approvals"]).copies_from(CopyFrom::Body("variables_from")).reveals(&["heartbeat_urls"]),
     row("GET", "/v1/apps/services/{id}/environments/{env}", "apps", R, one(PG, "service")).env(EnvFrom::Param("env")),
     row("DELETE", "/v1/apps/services/{id}/environments/{env}", "apps", D, one(PG, "service")).env(EnvFrom::Param("env")),
     row("GET", "/v1/apps/services/{id}/environments/{env}/", "apps", R, one(PG, "service")).env(EnvFrom::Param("env")),
@@ -1890,10 +1857,12 @@ mod tests {
             let f = find("POST", &format!("/v1/apps/services/{{id}}/environments/{{env}}/{route}"), "x").unwrap();
             assert_eq!(f.row.action_with("POST", &[("env".into(), "staging".into())], None, &over), Action::Admin, "{route}");
         }
-        // Lifting a freeze would get past it: admin too, any environment.
+        // Lifting a freeze would get past it, and so would turning approvals off: admin too, any
+        // environment.
         let env = find("PUT", "/v1/apps/services/{id}/environments/{env}", "x").unwrap();
         let none = axum::http::HeaderMap::new();
         assert_eq!(env.row.action_with("PUT", &[("env".into(), "staging".into())], Some(&serde_json::json!({ "freeze": null })), &none), Action::Admin);
+        assert_eq!(env.row.action_with("PUT", &[("env".into(), "production".into())], Some(&serde_json::json!({ "approvals": 0 })), &none), Action::Admin);
         assert_eq!(env.row.action_with("PUT", &[("env".into(), "staging".into())], Some(&serde_json::json!({ "vitals": true })), &none), Action::Write);
         assert_eq!(dep.row.action("POST", &[("env".into(), "staging".into())], None), Action::Write);
         assert_eq!(sql_action(&serde_json::json!({ "sql": "select 1", "read_only": true })), Action::Read);

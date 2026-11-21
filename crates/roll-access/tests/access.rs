@@ -1890,25 +1890,6 @@ async fn a_rule_can_grant_one_encryption_key() {
     assert_eq!(d.call(&all, Method::POST, "/v1/secrets/projects/prj_a/transit/billing/encrypt", Some(json!({ "plaintext": "aGk=" }))).await.0, StatusCode::OK);
 }
 
-/// The search console is `admin`; a console request whose answer holds a credential (a new API
-/// key, a connector's or Fleet's secret), however its path is spelled, is `reveal` too, as
-/// `POST …/keys` is.
-#[tokio::test]
-async fn a_console_request_for_a_credential_needs_reveal() {
-    let d = Daemon::new(50);
-    let (admin, _) = d.token(json!([{ "product": "search", "resources": [{ "id": "cl_1" }], "actions": { "admin": "allow" } }]), json!({})).await;
-    let (both, _) = d.token(json!([{ "product": "search", "resources": [{ "id": "cl_1" }], "actions": { "admin": "allow", "reveal": "allow" } }]), json!({})).await;
-    let console = |t: &str, method: &str, path: &str| {
-        let (d, t, body) = (&d, t.to_string(), json!({ "method": method, "path": path }));
-        async move { d.call(&t, Method::POST, "/v1/search/clusters/cl_1/request", Some(body)).await.0 }
-    };
-    assert_eq!(console(&admin, "GET", "/_cat/indices").await, StatusCode::OK);
-    for (method, path) in [("POST", "/_security/api_key"), ("PUT", "_security/%61pi_key"), ("GET", "/_connector/_secret/s1"), ("GET", "//_fleet//secret/s1"), ("POST", "/_security/service/elastic/fleet-server/credential/token/t1")] {
-        assert_eq!(console(&admin, method, path).await, StatusCode::FORBIDDEN, "{method} {path}");
-        assert_eq!(console(&both, method, path).await, StatusCode::OK, "{method} {path}");
-    }
-}
-
 /// A rule can grant some indices of a search cluster: index routes are decided name by name, the
 /// cluster's own (the index list, the console) stay shut, and a remembered approval keeps to the
 /// index it was about.

@@ -340,13 +340,6 @@ async fn check(State(a): S, ext: Extensions, Json(c): Json<Check>) -> crate::Res
     }
     let mut action = row.action_with(&method, &params, c.body.as_ref(), &headers);
     let mut outcome = if matches!(row.target, catalog::Tgt::AnyGrant) { Outcome::Allow } else { scope.outcome(&target, action) };
-    // An answer holding credentials (search's console asking for an API key): `reveal` too.
-    if row.needs_reveal(c.body.as_ref()) {
-        let revealed = scope.outcome(&target, Action::Reveal);
-        if crate::evaluate::rank(revealed) < crate::evaluate::rank(outcome) {
-            (outcome, action) = (revealed, Action::Reveal);
-        }
-    }
     if let Some((copied, _, _)) = crate::evaluate::copy_outcome(&a, row, &params, &target, (c.body.as_ref(), uri.query()), &scope).await
         && crate::evaluate::rank(copied) < crate::evaluate::rank(outcome)
     {

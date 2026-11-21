@@ -48,6 +48,7 @@ export function UsageTab({ service, env, prices }: { service: string; env: strin
                     ["Memory", `${price(prices.gb_second)} per GB-second resident`],
                     ["Egress", `${price(prices.egress_gb)} per GB`],
                     ["Builds", `${price(prices.build_minute)} per build minute`],
+                    ["Stored", `${price(prices.stored_gb_month)} per GB-month (logs kept past a week, build caches)`],
                     ["Requests", "free"],
                   ]
                 : [["", "Loading…"]]

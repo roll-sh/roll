@@ -24,6 +24,8 @@ pub mod api;
 pub mod code;
 pub mod cost;
 pub mod engine;
+/// The intercepting egress step (`roll-intercept`), as previews names it.
+pub use roll_intercept as intercept;
 pub mod glob;
 pub mod ports;
 pub mod mail;

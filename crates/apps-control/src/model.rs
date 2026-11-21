@@ -220,7 +220,7 @@ pub struct LogDrain {
 }
 
 /// How a drain's lines can go ([`LogDrain::format`]).
-pub const DRAIN_FORMATS: [&str; 3] = ["ndjson", "otlp", "syslog"];
+pub const DRAIN_FORMATS: [&str; 4] = ["ndjson", "otlp", "syslog", "s3"];
 
 /// What a drain can be sent.
 pub const DRAIN_SOURCES: [&str; 6] = ["runtime", "http", "build", "audit", "traces", "metrics"];
@@ -384,6 +384,41 @@ pub struct Build {
     /// it); unset: the node's.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub timeout_s: Option<u32>,
+    /// Its builder's size (Vercel's, Render's and Netlify's bigger build machines): `small` (2
+    /// vCPU, 4 GiB; the default), `medium` (4, 8 GiB) or `large` (8, 16 GiB), its build minutes
+    /// metered by that factor where the builder honours it (CodeBuild on the fleet; one node's
+    /// Docker builds unsized).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub size: Option<BuildSize>,
+    /// A Git URL service's submodules fetched into the tree (Vercel's, Netlify's, Render's), at
+    /// the commits their gitlinks pin, from public URLs; off, they're left out.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub submodules: Option<bool>,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum BuildSize {
+    #[default]
+    Small,
+    Medium,
+    Large,
+}
+
+impl BuildSize {
+    /// Its CPUs and memory (MiB).
+    pub fn resources(self) -> (f64, u32) {
+        match self {
+            BuildSize::Small => (2.0, 4096),
+            BuildSize::Medium => (4.0, 8192),
+            BuildSize::Large => (8.0, 16384),
+        }
+    }
+
+    /// What a build minute counts as (the price's factor).
+    pub fn factor(self) -> f64 {
+        self.resources().0 / 2.0
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -1661,6 +1696,10 @@ pub struct Environment {
     pub traces: bool,
     /// Its pages measure their Web Vitals for roll (`…/vitals`).
     pub vitals: bool,
+    /// Where its deploy status badge is (Netlify's), when it has one (`badge: true`): an SVG for a
+    /// README, answered to anyone.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub badge_url: Option<String>,
     /// People other than its author who must approve a deployment before it goes live (GitHub
     /// Environments' required reviewers): 0 (none) to 3; never a preview's.
     #[serde(skip_serializing_if = "is_zero")]

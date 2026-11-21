@@ -27,6 +27,27 @@ struct Prompt {
 
 const PROMPTS: &[Prompt] = &[
     Prompt {
+        name: "what_needs_me",
+        title: "What needs my attention?",
+        description: "Across roll, what's waiting on you now, most urgent first: approvals, failing services, exposed secrets, previews that failed or wait for a person, dead letters, risky tokens. Changes nothing.",
+        args: &[],
+        // Offered to every connection: it reads with whichever of its tools the connection has.
+        needs: &[],
+        text: |_| {
+            "What needs my attention in roll right now? Use the tools this connection has, and skip \
+             the rest without saying so: access_list_approvals with state pending (requests waiting \
+             for a person); apps_overview (an environment's state and attention: a crash loop, a failed \
+             deploy, a spend cap, maintenance), then apps_events for what just happened; \
+             secrets_findings (exposed, expired or leaked secrets); previews_list with state failed, and \
+             any awaiting_approval (a fork's change waits for a writer's approve-run); tasks_stats and \
+             tasks_list_dead_letters (work that ran out of retries); access_checkup (tokens with too \
+             much, no expiry or unused); and if you have code_list_work, broken-main items on my \
+             repos. Answer as three short groups, act now, soon and worth knowing, each item one line \
+             naming the tool call that shows it. Change nothing."
+                .into()
+        },
+    },
+    Prompt {
         name: "what_can_i_do",
         title: "What can this connection do?",
         description: "What roll lets this connection do, in words, and how to ask for more.",
@@ -444,7 +465,8 @@ mod tests {
         }
         let some = vec!["access_whoami".to_string()];
         let listed = super::list(&some);
-        assert_eq!(listed["prompts"].as_array().unwrap().len(), 1, "{listed}");
+        let names: Vec<&str> = listed["prompts"].as_array().unwrap().iter().filter_map(|p| p["name"].as_str()).collect();
+        assert_eq!(names, ["what_needs_me", "what_can_i_do"], "only what needs nothing or only access_whoami");
         assert!(super::get("fix_secrets_health", &json!({ "project": "p" }), &some).is_err(), "not offered without secrets_health");
         assert!(super::get("fix_secrets_health", &json!({}), &all).is_err(), "project is required");
         // Arguments are ids, quoted: a name that carries instructions isn't one.
@@ -453,9 +475,19 @@ mod tests {
         let got = super::get("fix_secrets_health", &json!({ "project": "prj_a" }), &all).unwrap();
         let text = got["messages"][0]["content"]["text"].as_str().unwrap();
         assert!(text.contains("\"prj_a\"") && !text.contains("  "), "{text}");
-        // Every workflow's text joins its lines with one space.
+        // Every workflow's text joins its lines with one space, and every tool it or the guide
+        // names is one roll has (roll code's are another crate's).
         for w in super::workflows(&all) {
             assert!(!w.text.contains("  ") && !w.text.contains('\n'), "{}: {}", w.name, w.text);
+        }
+        let texts: Vec<String> = super::workflows(&all).into_iter().map(|w| w.text).chain([include_str!("guide.md").to_string()]).collect();
+        for text in &texts {
+            for word in text.split(|c: char| !(c.is_ascii_lowercase() || c == '_')) {
+                let Some((product, _)) = word.split_once('_') else { continue };
+                if roll_auth::scope::PRODUCTS.contains(&product) && !matches!(product, "code" | "agents") {
+                    assert!(all.iter().any(|t| t == word), "a workflow or the guide names {word}, which isn't a tool");
+                }
+            }
         }
     }
 }

@@ -486,6 +486,11 @@ pub trait Builder: Send + Sync {
     fn shares_caches(&self) -> bool {
         false
     }
+    /// Whether a build gets the CPU and memory its job asks (`build.size`), so its minutes are
+    /// metered by that size; one node's BuildKit takes no per-build limit.
+    fn sizes_builds(&self) -> bool {
+        false
+    }
 }
 
 /// What a scan found, and what scanned it (`trivy 0.76.1`).
