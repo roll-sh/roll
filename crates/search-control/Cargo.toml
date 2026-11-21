@@ -35,6 +35,7 @@ tower-http.workspace = true
 tracing.workspace = true
 
 [dev-dependencies]
+search-embed.workspace = true
 flate2.workspace = true
 # The `gcs` and `azure` repository tests: a service account's key and its token endpoint, an
 # account SAS, and the log lines they check.

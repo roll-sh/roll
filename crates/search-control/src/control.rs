@@ -134,6 +134,10 @@ pub struct SearchConfig {
     /// How long and how much each cluster's security audit log keeps (rolld:
     /// `--search-audit-retention-days`, `--search-audit-max-mb`).
     pub audit: search_server::audit::AuditConfig,
+    /// The node's embedding pool (`multilingual-e5-small` for the E5 inference endpoints;
+    /// rolld: `--search-embed-*`), its CPU metered to each cluster as inference. `None`: E5
+    /// endpoints answer as on a cluster without ML nodes.
+    pub embed: Option<search_server::embed::EmbedConfig>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -184,6 +188,7 @@ impl SearchConfig {
             default_repository: Some("found-snapshots".into()),
             person_caps: Caps { clusters: 50, always_on: 2 },
             audit: search_server::audit::AuditConfig::default(),
+            embed: None,
         }
     }
 }
@@ -353,6 +358,7 @@ pub fn spec_for(c: &SearchCluster) -> ClusterSpec {
     // Only until its first load has marked what it inherited: a branch made before marking
     // existed, or one already marked, runs its jobs as its own.
     spec.branch_of = c.parent_id.clone().filter(|_| c.inherit_pending);
+    spec.owner = c.owner.clone();
     spec
 }
 
@@ -593,6 +599,7 @@ impl Control {
                 default_repository: cfg.default_repository.clone(),
                 links: Some(links.clone()),
                 audit: cfg.audit.clone(),
+                embedder: cfg.embed.clone().map(search_server::embed::EmbedPool::new),
                 secret_refs: Some(search_es::secret_refs::Resolver(secret_refs.clone())),
                 ..NodeConfig::default()
             },
@@ -2065,6 +2072,9 @@ impl Control {
     pub async fn sample(&self) -> anyhow::Result<()> {
         for (name, n) in self.node.take_request_counts() {
             self.meter.count_requests(&name, n.min(i64::MAX as u64) as i64);
+        }
+        for (name, cpu) in self.node.take_inference_cpu() {
+            self.meter.count_inference(&name, cpu);
         }
         for (name, o) in self.node.take_observations() {
             // Lost if the catalog can't take them now: they are a picture, not a bill.

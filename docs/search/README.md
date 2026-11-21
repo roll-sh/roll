@@ -4,9 +4,11 @@ Elasticsearch-compatible search clusters that cost nothing while idle, wake in m
 branch instantly and keep their data on object storage. Clients speak the Elasticsearch REST API
 (or OpenSearch's): the official clients, searchkick, Laravel Scout and Spring Data work by
 changing the URL. Semantic and hybrid search work as on Elasticsearch 9: `semantic_text` fields
-embed through the model provider you configure (`_inference`: OpenAI or any compatible server,
-Cohere, Anthropic; the key sealed in the cluster), and `rrf`/`linear` retrievers mix them with
-lexical search.
+embed with no key through roll's own multilingual-e5-small (the preconfigured
+`.multilingual-e5-small-elasticsearch` endpoint, run on the node's CPUs as Elasticsearch's ML
+nodes run it), or through the model provider you configure (`_inference`: OpenAI or any
+compatible server, Cohere, Anthropic, …; the key sealed in the cluster), and `rrf`/`linear`
+retrievers mix them with lexical search.
 
 Design: [architecture.md](architecture.md). Cross-crate interfaces: [contracts.md](contracts.md).
 On AWS search runs on the roll cloud fleet with every other product (docs/cloud/README.md).
@@ -38,6 +40,14 @@ pnpm dev                                # dashboard: /dashboard/search
 | `--search-max-always-on-per-person` (`ROLL_SEARCH_MAX_ALWAYS_ON_PER_PERSON`) | `2` | of those, always-on ones (`idle_timeout_s` 0) (0: no cap) |
 | `--search-audit-retention-days` (`ROLL_SEARCH_AUDIT_RETENTION_DAYS`) | `7` | how long each cluster's security audit log keeps its entries |
 | `--search-audit-max-mb` (`ROLL_SEARCH_AUDIT_MAX_MB`) | `32` | audit entries kept per cluster, compressed MiB; past it the oldest go |
+| `--search-embed-model` (`ROLL_SEARCH_EMBED_MODEL`) | `e5`              | `off`: the E5 endpoint answers as Elasticsearch without ML nodes (429), and no weights are fetched |
+| `--search-embed-url` (`ROLL_SEARCH_EMBED_URL`)     | pinned Hugging Face revision | where the model's two files are fetched from, once, into `<home>/search/models` (`<url>/model.safetensors`, `<url>/tokenizer.json`, checked against the pinned SHA-256 digests) |
+| `--search-embed-dir` (`ROLL_SEARCH_EMBED_DIR`)     |                   | read the model's files from this directory instead (air-gapped nodes; same digests) |
+| `--search-embed-workers`, `--search-embed-cpus` (`ROLL_SEARCH_EMBED_WORKERS`, `ROLL_SEARCH_EMBED_CPUS`) | a third of the CPUs, not pinned | the embedding pool's threads, and the CPUs they're pinned to (`0-5,18-23`) |
+| `--search-embed-idle` (`ROLL_SEARCH_EMBED_IDLE`)   | `300`             | seconds without inputs before the model leaves memory |
+| `--search-embed-queue`, `--search-embed-queue-mb` (`ROLL_SEARCH_EMBED_QUEUE`, `ROLL_SEARCH_EMBED_QUEUE_MB`) | `4096`, `64` | inputs, and MiB of them, one cluster may have queued; past either a call gets 429 `es_rejected_execution_exception` |
+| `--search-embed-node-queue-mb` (`ROLL_SEARCH_EMBED_NODE_QUEUE_MB`) | `512` | MiB of inputs every cluster's queues hold together; past it a call gets 429 |
+| `--search-embed-max-inputs` (`ROLL_SEARCH_EMBED_MAX_INPUTS`) | `2048` | inputs per inference call (400 past it); each input is cut to the start its 512 tokens come from, so its length isn't capped |
 | `--no-search`, `--search-only`                     |                   | shorthands for `ROLL_PRODUCTS` without search, or with only search |
 | `--search-public-url` (`ROLL_SEARCH_PUBLIC_URL`)   |                   | the front clients use (a load balancer): cluster URLs name it |
 
@@ -50,6 +60,20 @@ fleet").
 
 Storage is rolld's: `--s3-bucket` (with `--s3-prefix`, `--s3-endpoint`), or `<home>/objects`.
 Local disk under `<home>/search/` holds `search.db` (the control plane's SQLite) and the cache.
+
+The built-in embedding model (`crates/search-embed`, `crates/search-server/src/embed.rs`;
+compatibility.md, "Inference"): `intfloat/multilingual-e5-small` (MIT), in Rust on the CPU
+(candle and Hugging Face's `tokenizers`, no Python, no GPU). A node fetches its two files
+(`model.safetensors`, 471 MB, and `tokenizer.json`, 17 MB) once, on the first input any cluster
+sends it, into `<home>/search/models/multilingual-e5-small/<revision>/`, from the pinned revision
+or `--search-embed-url` (a mirror), and checks both against the SHA-256 digests pinned in
+`search_embed::FILES` before loading them. Tenants never choose where weights come from. On an
+air-gapped node copy the two files of that revision into a directory and pass
+`--search-embed-dir`; the same digests are checked. `--search-embed-model off` turns it off. The
+model loads on first use (about a second from the cache) and leaves memory after
+`--search-embed-idle` seconds without inputs, so a node whose clusters don't embed holds nothing.
+Its memory (about 470 MB while loaded, plus the batches running) counts against
+`--search-memory-mb`: clusters unload to make room for it.
 
 ## Use it
 
@@ -78,7 +102,15 @@ roll search keys list app | revoke app <id>
 roll search index show app books | mapping … | delete-by-query … | delete app books
 ```
 
-Semantic search (or the dashboard's Inference tab):
+Semantic search with roll's own model, no key (Elasticsearch's preconfigured E5 endpoint):
+
+```sh
+roll search request app PUT /articles '{"mappings":{"properties":{"body":{"type":"semantic_text","inference_id":".multilingual-e5-small-elasticsearch"}}}}'
+roll search request app POST '/articles/_doc?refresh=true' '{"body":"Passwords can be reset from the sign-in page."}'
+roll search request app POST /articles/_search '{"query":{"semantic":{"field":"body","query":"elfelejtettem a jelszavam"}}}'
+```
+
+Or through a provider (or the dashboard's Inference tab):
 
 ```sh
 OPENAI_API_KEY=… roll search inference create app emb --model text-embedding-3-small   # key from the environment, sealed in the cluster
@@ -659,7 +691,12 @@ commit points. Both count Lucene documents (nested ones included), as `_stats` d
 doesn't jump when the cluster unloads. Stored bytes are re-read from the cluster's commit points after every load and
 unload and every 10 minutes while loaded; storage accrues from a change log, so a sleeping
 cluster adds no rows. A deleted cluster kept for restoring keeps its last size in the log, so its
-storage is billed until it is purged, when its rows go. Prices are AWS list prices in `crates/search-control/src/pricing.rs`, each
+storage is billed until it is purged, when its rows go. Inference on the node's embedding pool
+(the E5 endpoint, `semantic_text` with it) is billed by the CPU it took: each job's thread CPU
+time is measured on its worker and handed to the meter with the requests
+(`inference_cpu_seconds`, priced per vCPU-hour as `usd_per_vcpu_hour`), to the cluster whose
+request runs it: a linked cluster's cross-cluster query that embeds on this cluster, or a
+browser key's search, is billed here (the browser keys of #358 will cap inference per request). Prices are AWS list prices in `crates/search-control/src/pricing.rs`, each
 with its source.
 
 ## Tests

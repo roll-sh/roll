@@ -128,6 +128,13 @@ pub struct ClusterConfig {
     /// Where the cluster's security audit entries go ([`crate::xpack::security::audit`]);
     /// `None`: it records none.
     pub audit: Option<crate::xpack::security::audit::AuditLog>,
+    /// The node's embedding pool, which runs `multilingual-e5-small` for the `elasticsearch`
+    /// inference service ([`crate::xpack::inference::local`]); `None`: E5 endpoints answer as
+    /// on a cluster without ML nodes.
+    pub embedder: Option<std::sync::Arc<dyn crate::xpack::inference::local::Embedder>>,
+    /// Who owns the cluster in roll's catalog (`None`: the operator), for the embedding pool's
+    /// turns.
+    pub owner: Option<String>,
     /// Resolves credentials given as references (`roll://ENV/KEY`, [`crate::secret_refs`]);
     /// `None`: references are refused.
     pub secret_refs: Option<crate::secret_refs::Resolver>,
@@ -150,6 +157,8 @@ impl ClusterConfig {
             branch_of: None,
             file_service_tokens: false,
             audit: None,
+            embedder: None,
+            owner: None,
             secret_refs: None,
         }
     }

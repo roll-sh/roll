@@ -56,14 +56,17 @@ branch instantly and keep their data on object storage.
 | `search-painless` | the Painless scripting language: parser, type checker, compiler to a compact bytecode, VM, and the script contexts Elasticsearch exposes |
 | `search-store`    | durability and storage: the write-ahead log (group commit to object storage), segment upload, per-shard manifests, the local cache, branching and garbage collection |
 | `search-es`       | Elasticsearch semantics: mappings, settings, index templates, aliases, the Query DSL, the document and search APIs, `_cat`, cluster and node APIs, errors with Elasticsearch's types and texts |
-| `search-server`   | the node: HTTP listener, tenants (clusters), authentication, wake-on-request, idle unload, request limits, TLS |
+| `search-embed`    | the built-in embedding model, multilingual-e5-small: XLM-RoBERTa tokenizer, BERT encoder, mean pooling and normalization on the CPU (candle), reading two files; no other I/O |
+| `search-server`   | the node: HTTP listener, tenants (clusters), authentication, wake-on-request, idle unload, request limits, TLS, the embedding pool (`embed.rs`: weights fetched once and checked, fair turns per cluster, CPU metered) |
 | `search-control`  | the roll API (`/v1/search/...`) for the dashboard and CLI: clusters, credentials, branches, usage, metering and pricing |
 | `search-yaml`     | a runner for Elasticsearch's YAML REST test format, usable against any URL (roll or a real Elasticsearch) |
 | `rolld`           | runs everything on one node (`crates/rolld/src/search.rs`) |
 
-`search-analysis`, `search-codec` and `search-painless` depend on nothing else in roll search.
-`search-index` builds on codec and analysis; `search-aggs` on index; `search-es` on all of them;
-`search-server` on es and store; `search-control` on server.
+`search-analysis`, `search-codec`, `search-painless` and `search-embed` depend on nothing else in
+roll search. `search-index` builds on codec and analysis; `search-aggs` on index; `search-es` on
+all of them but `search-embed` (it sees the node's model through
+`xpack::inference::local::Embedder`); `search-server` on es, store and embed; `search-control` on
+server.
 
 ## Data model
 
@@ -199,6 +202,10 @@ Lucene can (the FSTs, smartcn's serialized tables), the FSTs are rebuilt with th
   writes nothing.
 - **Local disk** is a cache with a byte budget (`--search-cache-bytes`). Evicting a segment is
   always safe: every segment in a manifest is already in object storage.
+- **The embedding model** (multilingual-e5-small, `search_server::embed`) is fetched on the first
+  input any cluster sends the node, loaded then, and dropped after `--search-embed-idle` seconds
+  (300) without inputs; its workers sleep on a condition variable. A node whose clusters don't
+  embed never fetches or holds it.
 - **The audit log** (README, "Audit log") writes nothing for a cluster nothing happens to: a
   node's flusher runs only while entries wait (5 s batches, one object each, under
   `search/c/<cluster>/audit/`), reading it never wakes the cluster, and a wrong cluster password
@@ -266,6 +273,17 @@ password, or `<user>@<cluster>`), `Authorization: ApiKey base64(id:secret)` wher
 cluster, `Authorization: Bearer <cluster>_<secret>`, or the TLS SNI/`Host` label under the node's
 domain (`<cluster>.search.<domain>`). Secrets are compared in constant time. Each cluster has
 request-rate and in-flight byte budgets so one tenant can't starve the node.
+
+The embedding model is the node's, shared by its clusters (`search_server::embed`): a bounded
+pool of workers (a third of the CPUs by default, optionally pinned); inputs cut to the bounded
+start their 512 tokens come from and queued per cluster in jobs of about 1,024 tokens; turns by
+owner first (the catalog's owner, in `ClusterSpec::owner`), then by cluster; queue caps per
+cluster (inputs, bytes) and per node (bytes, tokens) answered with Elasticsearch's 429
+(`es_rejected_execution_exception`); a cap on inputs per call; the model, a load in progress, the
+queued inputs and the running jobs counted against the node's memory budget; and each job's
+thread CPU time metered to its cluster. One detached task fetches, checks and loads the model
+however many callers wait or give up. The weights come only from the operator (a pinned URL or
+a directory), checked by SHA-256.
 
 APIs built on other APIs (EQL, ES|QL, SQL, PPL, graph, vector tiles, `terms_enum`, transforms'
 preview, rollup search, downsampling, search applications, …) make their inner requests as
@@ -559,8 +577,17 @@ applies: every cluster is this node's.
 - **Drains** (SIGTERM, deploys, Spot): roll-cluster hands every lease off; each cluster flushes and
   unloads as its guard ends, and the next request loads it on its new owner from its manifests and
   the WAL after them.
-- **Metering** per cluster: loaded GB-hours, requests, stored GB-months; the dashboard compares the
-  cost with Elastic Cloud and Amazon OpenSearch Service for the same workload.
+- **Metering** per cluster: loaded GB-hours, requests, stored GB-months, inference CPU; the
+  dashboard compares the cost with Elastic Cloud and Amazon OpenSearch Service for the same
+  workload.
+- **Embedding** runs where the request runs, on the cluster's owner, from the node's pool (each
+  node fetches its own copy of the weights once). `semantic_text` embeds a bulk request's
+  documents before they're written and writes each document with its embeddings, so a takeover
+  mid-bulk loses nothing: documents written before it are durable with their embeddings,
+  documents after it fail with the old owner's fencing error (or their embedding call fails,
+  `inference_exception`) and are embedded again only when the client retries them, as on
+  Elasticsearch, whose bulk filter embeds before indexing too. An item is never written without
+  its embeddings.
 
 ## Observability
 

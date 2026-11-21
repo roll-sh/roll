@@ -8,6 +8,7 @@ publish.workspace = true
 
 [dependencies]
 search-codec.workspace = true
+search-embed.workspace = true
 search-es.workspace = true
 search-index.workspace = true
 search-store.workspace = true
@@ -27,6 +28,7 @@ libc.workspace = true
 libmimalloc-sys.workspace = true
 mimalloc.workspace = true
 parking_lot.workspace = true
+reqwest = { workspace = true, features = ["rustls"] }
 serde_json.workspace = true
 sha2.workspace = true
 tokio.workspace = true

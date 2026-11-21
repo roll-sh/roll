@@ -8,10 +8,10 @@
 //! prints an endpoint reads them, and they are opened only to send a request.
 //!
 //! Services (`services`): `openai` (with `url`, any OpenAI-compatible server), `cohere`,
-//! `anthropic`, and `elasticsearch`, whose models need ML nodes roll doesn't run: its three
-//! preconfigured endpoints (`.elser-2-elasticsearch`, `.multilingual-e5-small-elasticsearch`,
-//! `.rerank-v1-elasticsearch`) are listed, and using them answers what a cluster without ML
-//! nodes answers. On YAML test clusters (`roll.inference.test_services`) the services of
+//! `anthropic`, …, and `elasticsearch`: its three preconfigured endpoints
+//! (`.elser-2-elasticsearch`, `.multilingual-e5-small-elasticsearch`, `.rerank-v1-elasticsearch`)
+//! are listed; E5 runs on the node's embedding pool ([`local`]), and the other models answer what
+//! a cluster without ML nodes answers. On YAML test clusters (`roll.inference.test_services`) the services of
 //! Elasticsearch's `inference-service-test` plugin are there too.
 //!
 //! Creating or updating an endpoint calls the service once, as Elasticsearch's model validators
@@ -20,6 +20,7 @@
 pub mod chunking;
 pub mod highlight;
 pub mod http;
+pub mod local;
 pub mod query;
 pub mod rate;
 pub mod region;
@@ -46,6 +47,10 @@ pub const ENDPOINTS: &str = "inference";
 pub const SECRETS: &str = "inference_secret";
 /// Preconfigured endpoints deleted with `force=true`.
 pub const DELETED_DEFAULTS: &str = "inference.deleted_default";
+/// A deadline that never comes: what roll's own calls pass where Elasticsearch passes
+/// `TimeValue.MAX_VALUE` (the bulk inference filter). Remote calls are still held to the node's
+/// `roll.inference.max_timeout` ([`http::max_timeout`]).
+pub const NO_DEADLINE: Duration = Duration::from_secs(365 * 86_400);
 
 /// What kind of inference an endpoint does.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -255,7 +260,7 @@ pub async fn put(ctx: &Ctx<'_>) -> EsResult<Reply> {
             "Invalid inference_id; '{id}' can contain lowercase alphanumeric (a-z and 0-9), hyphens or underscores; must start and end with alphanumeric"
         )]));
     }
-    if services::builtin::default_endpoint(&id).is_some() {
+    if services::builtin::is_default(&id) {
         return Err(EsError::status(400, format!("[{id}] is a reserved inference ID. Cannot create a new inference endpoint with a reserved ID.")));
     }
     let mut config = ctx.body_map()?.unwrap_or_default();
@@ -268,8 +273,9 @@ pub async fn put(ctx: &Ctx<'_>) -> EsResult<Reply> {
     };
     let timeout = timeout(ctx)?;
     let mut ep = service.parse(ctx.cluster, &id, task, config)?;
-    // The elasticsearch service's model deployment starts after the endpoint is stored.
-    let deploys = service == Service::Elasticsearch;
+    // The elasticsearch service's model deployment starts after the endpoint is stored: E5's is
+    // the node's pool, there already; other models' can't start.
+    let deploys = service == Service::Elasticsearch && !services::builtin::deploys(ctx.cluster, &ep);
     if !skip_validation(ctx.cluster) && !deploys {
         service.validate(ctx.cluster, &mut ep, timeout).await?;
     }
@@ -360,7 +366,7 @@ pub async fn delete(ctx: &Ctx<'_>) -> EsResult<Reply> {
     if task != TaskType::Any && e.task != task {
         return Err(EsError::status(400, format!("Requested task type [{}] does not match the inference endpoint's task type [{}]", task.name(), e.task.name())));
     }
-    let preconfigured = services::builtin::default_endpoint(&id).is_some();
+    let preconfigured = services::builtin::is_default(&id);
     let (indexes, pipelines) = uses(&st, &id);
     let names = |v: &[String]| Value::Arr(v.iter().map(|s| Value::from(s.as_str())).collect());
     if dry_run {
@@ -430,7 +436,7 @@ pub async fn update(ctx: &Ctx<'_>) -> EsResult<Reply> {
     let task = resolve_task(url_task, body.shift_remove("task_type").as_ref())?;
     let st = ctx.state();
     let current = endpoint(ctx.cluster, &st, &id).ok_or_else(|| not_found(&id))?;
-    if services::builtin::default_endpoint(&id).is_some() {
+    if services::builtin::is_default(&id) {
         return Err(EsError::status(400, format!("Cannot update inference endpoint [{id}] because it is a preconfigured endpoint")));
     }
     if current.task != task {
