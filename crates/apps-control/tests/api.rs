@@ -4739,6 +4739,19 @@ async fn a_deploy_waits_for_another_persons_approval() {
     assert_eq!(one["approved_by"], json!(["usr_grace"]), "{one}");
 }
 
+/// A bigger build machine (`build.size`): the builder is asked for its CPUs and memory; a size
+/// that isn't one is refused.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_large_build_asks_its_builder_for_more() {
+    let w = world().await;
+    let (st, svc) = call(&w.api, "POST", "/v1/apps/services", Some(json!({ "project": w.project, "name": "site", "source": {"kind": "repo", "repo": "acme/site"}, "build": {"size": "large"} }))).await;
+    assert_eq!(st, StatusCode::CREATED, "{svc}");
+    settled(&w, svc["id"].as_str().unwrap(), "production", svc["environments"][0]["latest"]["id"].as_str().unwrap()).await;
+    assert_eq!(w.fake.build_sizes.lock().last().copied(), Some((8.0, 16384)));
+    let (st, _) = call(&w.api, "PATCH", &format!("/v1/apps/services/{}", svc["id"].as_str().unwrap()), Some(json!({"build": {"size": "huge"}}))).await;
+    assert_eq!(st, StatusCode::BAD_REQUEST);
+}
+
 /// A runtime-only variable (Vercel's and Netlify's scopes) reaches the instances but never a
 /// build's steps; one that isn't the environment's own is refused; given back to builds, the
 /// next build has it.
