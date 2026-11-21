@@ -3398,6 +3398,37 @@ the binding, issues placeholders, decides each swap and audits it, and ships the
   required and responses are scrubbed (the thirty-fourth review's item 4), give every binding a
   `header` (`Authorization: Bearer {}`). A placeholder inside Basic auth (base64) or a signed request (AWS SigV4) can't be swapped: use a
   bearer header. Bodies are never rewritten.
+- **Planned: a placement is required, and responses are scrubbed** (the thirty-fourth review's
+  item 4).
+  - **Placement.**
+    - A binding names where its placeholder goes: a `header` with a template holding `{}` once
+      (`Authorization: Bearer {}`, `X-Api-Key: {}`), or a `query` parameter.
+    - The dashboard and `roll secrets bind` default to `Authorization: Bearer {}`.
+    - `untrusted: true` needs a placement.
+    - A binding with none stays valid for trusted readers. Health lists it ("a placeholder for
+      STRIPE_KEY may ride in any header"), and an untrusted swap through it is refused
+      (`PlacementRequired`).
+    - The filter swaps only where the binding says. A placeholder anywhere else is `Blocked`, so the
+      code holding it can't pick a header the host echoes.
+  - **The response scrub** (a sixth step of the proxy contract, `roll_secrets::proxy::Scrub`, no
+    I/O).
+    - `filter` returns, with the rewritten request, a `Scrub` holding the forms of the values it
+      swapped into that request: as is, base64 (standard and URL-safe, padded or not) and
+      percent-encoded.
+    - The proxy feeds it the response's headers and then its body in chunks, as they arrive.
+      `Scrub` keeps a window one form-length long across chunks, so a value split between two reads
+      is still found.
+    - The proxy sends `Accept-Encoding: identity` on a request it swapped into. A response that
+      comes back compressed anyway is refused rather than inflated.
+    - On a match, the proxy stops the response: the consumer gets a 502 and none of the remaining
+      bytes. roll secrets records a `secrets.alert` ("api.example.com echoed STRIPE_KEY") and sends
+      the environment's notify URL. The placeholder ends: a host that echoes once will again.
+    - `Scrub` holds the forms in memory only, redacts itself in `Debug` and is wiped on drop. It's
+      bounded by the 16 placeholders and 16 KiB per value the filter already allows. Scanning is one
+      pass per form over the bytes, so a response costs O(length × forms).
+    - What it doesn't cover: a host that transforms the value (hashes it, splits it across fields,
+      encrypts it) before echoing it. Placement is what keeps the code from choosing an echoing
+      header in the first place.
 
 ### Using a key without seeing it: the proxy's contract
 
