@@ -221,6 +221,13 @@ CREATE TABLE IF NOT EXISTS form_submissions (
     fields_sealed TEXT NOT NULL
 ) WITHOUT ROWID;
 CREATE INDEX IF NOT EXISTS form_submissions_by_form ON form_submissions (service, env, form, created_at);
+-- A bucket drain's key, minted by roll storage for it: what to revoke when it goes.
+CREATE TABLE IF NOT EXISTS drain_links (
+    drain TEXT PRIMARY KEY,
+    kind TEXT NOT NULL,
+    ref TEXT NOT NULL,
+    kept TEXT NOT NULL
+);
 CREATE TABLE IF NOT EXISTS log_drains (
     id TEXT PRIMARY KEY,
     project TEXT NOT NULL,
@@ -3270,6 +3277,20 @@ impl Store {
     pub fn set_maintenance(&self, service: &str, env: &str, message: Option<&str>) -> Result<()> {
         self.db.execute("UPDATE environments SET maintenance = ? WHERE service = ? AND name = ?", params![message, service, env])?;
         Ok(())
+    }
+
+    pub fn add_drain_link(&self, drain: &str, kind: &str, r#ref: &str, kept: &str) -> Result<()> {
+        self.db.execute("INSERT INTO drain_links (drain, kind, ref, kept) VALUES (?, ?, ?, ?)", params![drain, kind, r#ref, kept])?;
+        Ok(())
+    }
+
+    /// A deleted drain's minted key, its row gone.
+    pub fn take_drain_link(&self, drain: &str) -> Result<Option<(String, String, String)>> {
+        let row: Option<(String, String, String)> = self.db.query_row("SELECT kind, ref, kept FROM drain_links WHERE drain = ?", [drain], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?))).optional()?;
+        if row.is_some() {
+            self.db.execute("DELETE FROM drain_links WHERE drain = ?", [drain])?;
+        }
+        Ok(row)
     }
 
     pub fn set_badge(&self, service: &str, env: &str, on: bool) -> Result<()> {
