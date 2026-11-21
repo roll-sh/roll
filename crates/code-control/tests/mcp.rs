@@ -657,16 +657,20 @@ async fn tools_map_onto_their_routes() {
     let asked = c.tool("request_review", json!({ "change": id, "reviewer": "agent:bot", "required": true })).await;
     let requests = a.ok("GET", &format!("/v1/code/changes/{id}/review-requests"), None).await;
     assert_eq!(asked["items"], requests, "{asked}");
-    assert_eq!(c.tool("get_change", json!({ "change": id })).await["review_requests"], requests);
+    let gc = c.tool("get_change", json!({ "change": id })).await;
+    assert_eq!(gc["review_requests"], requests);
+    assert_eq!(gc["reviews"], a.ok("GET", &format!("/v1/code/changes/{id}/reviews"), None).await, "reviews with what each reviewer wrote");
     same(c.tool("get_commit_statuses", json!({ "repo": repo, "rev": "main" })).await, a.ok("GET", &format!("{p}/statuses/main"), None).await);
     same(c.tool("get_work", json!({ "work": wn })).await, a.ok("GET", &format!("/v1/code/work/{wid}"), None).await);
     let upd = c.tool("update_work", json!({ "work": wid, "title": "Add f, renamed", "labels": ["feat", "later"] })).await;
     assert_eq!((upd["title"].as_str(), upd["labels"].as_array().map(Vec::len)), (Some("Add f, renamed"), Some(2)), "{upd}");
     assert_eq!(upd, a.ok("GET", &format!("/v1/code/work/{wid}"), None).await);
     // A change retitled, labelled and marked ready, as its route then shows.
-    let ready = c.tool("update_change", json!({ "change": id, "title": "Add d and e", "draft": false, "labels": ["api"] })).await;
+    let ready = c.tool("update_change", json!({ "change": id, "title": "Add d and e", "ready": true, "labels": ["api"] })).await;
     assert_eq!((ready["title"].as_str(), ready["draft"].as_bool(), ready["labels"][0].as_str()), (Some("Add d and e"), Some(false), Some("api")), "{ready}");
     assert_eq!(ready, a.ok("GET", &format!("/v1/code/changes/{id}"), None).await);
+    // Back to draft would take a queued change out of the queue: that's dequeue_change's.
+    assert!(c.tool_err("update_change", json!({ "change": id, "ready": false })).await.contains("dequeue_change"));
 }
 
 /// Every tool's argument errors: each required argument missing, ill-typed values, and

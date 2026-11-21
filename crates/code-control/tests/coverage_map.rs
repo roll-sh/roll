@@ -43,6 +43,21 @@ fn routes(src: &str) -> BTreeSet<String> {
     out
 }
 
+/// The files whose routers declare roll code's routes.
+const ROUTERS: [&str; 11] = [
+    "crates/code-control/src/api.rs",
+    "crates/code-control/src/review/api.rs",
+    "crates/code-control/src/ai/api.rs",
+    "crates/code-control/src/agents/api.rs",
+    "crates/code-control/src/agents/sandbox/api.rs",
+    "crates/code-control/src/chatops/api.rs",
+    "crates/code-control/src/agents/automations/api.rs",
+    "crates/code-control/src/agents/linear/api.rs",
+    "crates/code-control/src/agents/lookup/mod.rs",
+    "crates/code-control/src/mcp.rs",
+    "crates/code-git/src/server.rs",
+];
+
 /// Table rows of the map: (first column, the rest).
 fn rows(doc: &str) -> Vec<(String, String)> {
     doc.lines()
@@ -67,7 +82,7 @@ fn every_route_tool_and_event_has_tests_in_the_map() {
     let mut missing = Vec::new();
 
     let mut all = BTreeSet::new();
-    for f in ["crates/code-control/src/api.rs", "crates/code-control/src/review/api.rs", "crates/code-control/src/ai/api.rs", "crates/code-control/src/agents/api.rs", "crates/code-control/src/agents/sandbox/api.rs", "crates/code-control/src/chatops/api.rs", "crates/code-control/src/agents/automations/api.rs", "crates/code-control/src/agents/linear/api.rs", "crates/code-control/src/agents/lookup/mod.rs", "crates/code-control/src/mcp.rs", "crates/code-git/src/server.rs"] {
+    for f in ROUTERS {
         all.extend(routes(&read(f)));
     }
     assert!(all.len() > 100, "found only {} routes: is the parser still right?", all.len());
@@ -173,4 +188,45 @@ fn every_web_test_file_the_map_names_exists() {
     }
     assert!(checked > 50, "checked only {checked} references");
     assert!(wrong.is_empty(), "docs/code/test-coverage.md names web test files that don't exist:\n  {}", wrong.join("\n  "));
+}
+
+/// Every `/v1/code` route the routers declare is an MCP tool's (`mcp::ROUTES`) or in
+/// `crates/code-control/src/no-tool.txt` with why, method by method, as roll-mcp holds roll's other
+/// products: a new route can't land undecided.
+#[test]
+fn every_route_has_an_mcp_tool_or_a_reason() {
+    let norm = |p: &str| p.split('/').map(|s| if s.starts_with('{') { "{}" } else { s }).collect::<Vec<_>>().join("/").trim_end_matches('/').to_string();
+    let declared: BTreeSet<(String, String)> = ROUTERS
+        .iter()
+        .flat_map(|f| routes(&read(f)))
+        .filter_map(|r| {
+            let (m, p) = r.split_once(' ')?;
+            (p == "/v1/code" || p.starts_with("/v1/code/")).then(|| (m.to_string(), norm(p)))
+        })
+        .collect();
+    assert!(declared.len() > 150, "found only {} /v1/code routes: is the parser still right?", declared.len());
+    let names: Vec<String> = code_control::mcp::tools().iter().map(|t| t["name"].as_str().unwrap().to_string()).collect();
+    let table = code_control::mcp::ROUTES;
+    let silent: Vec<&String> = names.iter().filter(|n| !table.iter().any(|r| r.0 == n.as_str())).collect();
+    assert!(silent.is_empty(), "tools with no mcp::ROUTES row: {silent:?}");
+    let unknown: Vec<&str> = table.iter().map(|r| r.0).filter(|t| !names.iter().any(|n| n == t)).collect();
+    assert!(unknown.is_empty(), "mcp::ROUTES rows for tools that don't exist: {unknown:?}");
+    let invented: Vec<String> = table.iter().filter(|(_, m, p)| !declared.contains(&(m.to_string(), norm(p)))).map(|(t, m, p)| format!("{t}: {m} {p}")).collect();
+    assert!(invented.is_empty(), "mcp::ROUTES rows no router declares (a wrong path or method):\n{}", invented.join("\n"));
+    let covered = |m: &str, p: &str| table.iter().any(|(_, tm, tp)| *tm == m && norm(tp) == p);
+    let doc = read("crates/code-control/src/no-tool.txt");
+    let listed: Vec<(String, String)> = doc
+        .lines()
+        .filter(|l| !l.starts_with('#') && !l.trim().is_empty())
+        .filter_map(|l| {
+            let mut w = l.split_whitespace();
+            Some((w.next()?.to_string(), norm(w.next()?)))
+        })
+        .collect();
+    let undecided: Vec<String> = declared.iter().filter(|(m, p)| !covered(m, p) && !listed.contains(&(m.clone(), p.clone()))).map(|(m, p)| format!("{m} {p}")).collect();
+    assert!(undecided.is_empty(), "/v1/code routes with no MCP tool and no reason: add the tool (and its mcp::ROUTES row), or `METHOD route  why` to crates/code-control/src/no-tool.txt:\n{}", undecided.join("\n"));
+    let stale: Vec<String> = listed.iter().filter(|(m, p)| covered(m, p)).map(|(m, p)| format!("{m} {p}")).collect();
+    assert!(stale.is_empty(), "no-tool.txt lines for routes that have a tool now: remove them:\n{}", stale.join("\n"));
+    let gone: Vec<String> = listed.iter().filter(|r| !declared.contains(r)).map(|(m, p)| format!("{m} {p}")).collect();
+    assert!(gone.is_empty(), "no-tool.txt lines for routes no router declares: remove them:\n{}", gone.join("\n"));
 }

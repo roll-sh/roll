@@ -412,9 +412,9 @@ const OPEN_WORLD: [&str; 7] = ["request_ai_review", "create_agent_thread", "send
 
 /// The routes each tool calls, as `(tool, method, route)` in the router's pattern: a lookup it
 /// makes on the way (a repo's default branch, `owner/repo#N`, a machine's or automation's name) is
-/// listed under one of the tools that make it. A test holds every catalogued `/v1/code` route to a
-/// row here or a line in `no-tool.txt` saying why it has no tool.
-const ROUTES: &[(&str, &str, &str)] = &[
+/// listed under one of the tools that make it. `tests/coverage_map.rs` holds every `/v1/code` route
+/// the routers declare to a row here or a line in `no-tool.txt` saying why it has no tool.
+pub const ROUTES: &[(&str, &str, &str)] = &[
     ("list_repos", "GET", "/v1/code/repos"),
     ("search_code", "GET", "/v1/code/repos/{owner}/{repo}/search"),
     ("read_file", "GET", "/v1/code/repos/{owner}/{repo}/blob/{rev}/{*path}"),
@@ -459,6 +459,7 @@ const ROUTES: &[(&str, &str, &str)] = &[
     ("create_repo", "POST", "/v1/code/repos"),
     ("request_ai_review", "POST", "/v1/code/changes/{id}/ai-review"),
     ("get_change", "GET", "/v1/code/changes/{id}/review-requests"),
+    ("get_change", "GET", "/v1/code/changes/{id}/reviews"),
     ("resolve_thread", "POST", "/v1/code/threads/{id}/resolve"),
     ("reopen_thread", "POST", "/v1/code/threads/{id}/unresolve"),
     ("apply_suggestion", "POST", "/v1/code/threads/{id}/apply"),
@@ -592,8 +593,8 @@ fn every_tool() -> Vec<Value> {
         tool(
             "update_change",
             "Update a change",
-            "Change a change's title, description, labels or work item, or mark a draft ready (draft: false). Only what's given changes; marking a queued change draft takes it out of the queue.",
-            json!({ "change": change.clone(), "title": s("New title"), "body": s("New description (markdown)"), "draft": boolean("true: a draft; false: ready for review"), "labels": json!({ "type": "array", "items": { "type": "string" }, "description": "The labels it should have (replaces them; at most 20, 50 characters each)" }), "work_item": s("The work item it does: \"wi_…\" or \"owner/repo#N\" of the change's repo") }),
+            "Change a change's title, description, labels or work item, or mark a draft ready for review (ready: true). Only what's given changes. Taking a change out of the queue is dequeue_change's.",
+            json!({ "change": change.clone(), "title": s("New title"), "body": s("New description (markdown)"), "ready": boolean("true: a draft becomes ready for review"), "labels": json!({ "type": "array", "items": { "type": "string" }, "description": "The labels it should have (replaces them; at most 20, 50 characters each)" }), "work_item": s("The work item it does: \"wi_…\" or \"owner/repo#N\" of the change's repo") }),
             &["change"],
             false,
         ),
@@ -608,7 +609,7 @@ fn every_tool() -> Vec<Value> {
         tool(
             "get_change",
             "Get a change",
-            "A change with its blockers, checks, review status and inline threads, and any notices: `secret_missing` means it reads an environment variable some roll secrets environment doesn't set (secrets_health says which); set it with secrets_set before merging, unless it comes from elsewhere.",
+            "A change with its blockers, checks, review status, reviews (with what each reviewer wrote), inline threads and review requests, and any notices: `secret_missing` means it reads an environment variable some roll secrets environment doesn't set (secrets_health says which); set it with secrets_set before merging, unless it comes from elsewhere.",
             json!({ "change": change }),
             &["change"],
             true,
@@ -652,8 +653,8 @@ fn every_tool() -> Vec<Value> {
         tool(
             "update_work",
             "Update a work item",
-            "Change a work item's title, body, labels, priority or state. Only what's given changes; a new state ends a claim's lease, and open clears who claimed it.",
-            json!({ "work": work.clone(), "title": s("New title"), "body": s("New body (markdown)"), "labels": json!({ "type": "array", "items": { "type": "string" }, "description": "The labels it should have (replaces them)" }), "priority": int("0 (P0, most urgent) to 3"), "state": json!({ "type": "string", "enum": ["open", "review", "done", "closed"], "description": "claim_work claims; this sets the rest" }) }),
+            "Change a work item's title, body, labels or priority. Only what's given changes. Its state moves through claim_work, release_work and complete_work, which hold to who claimed it.",
+            json!({ "work": work.clone(), "title": s("New title"), "body": s("New body (markdown)"), "labels": json!({ "type": "array", "items": { "type": "string" }, "description": "The labels it should have (replaces them)" }), "priority": int("0 (P0, most urgent) to 3") }),
             &["work"],
             false,
         ),
@@ -698,8 +699,8 @@ fn every_tool() -> Vec<Value> {
         tool(
             "request_review",
             "Request a review",
-            "Ask a person (@name), an agent (agent:name), a review app (app:name) or roll's own reviewer (roll) to review a change; required makes their approval a blocker. Returns the change's review requests.",
-            json!({ "change": change.clone(), "reviewer": s("@name, agent:name, app:name or roll"), "required": boolean("Their approval is needed to land (default false)") }),
+            "Ask a person (@name), an agent (agent:name), a review app (app:name) or roll's own reviewer (roll) to review a change. With required, the change can't land until they've reviewed its current head (any verdict; a new revision asks again). Returns the change's review requests.",
+            json!({ "change": change.clone(), "reviewer": s("@name, agent:name, app:name or roll"), "required": boolean("They must review the current head before it lands (default false)") }),
             &["change", "reviewer"],
             false,
         ),
@@ -755,7 +756,7 @@ fn every_tool() -> Vec<Value> {
         tool(
             "get_commit_statuses",
             "Read commit statuses",
-            "The commit statuses on a revision, as GitHub's combined status reads: the combined state (failure, error, pending or success) and each context's latest.",
+            "The commit statuses on a revision, as GitHub's combined status reads: the combined state (failure, pending or success; an error counts as failure) and each context's latest.",
             json!({ "repo": repo.clone(), "rev": s("A git commit, a changeset or a branch") }),
             &["repo", "rev"],
             true,
@@ -1270,11 +1271,13 @@ async fn run(c: &Call<'_>, name: &str, args: &Value) -> std::result::Result<Outc
             let status = c.get(&format!("/v1/code/changes/{}/review-status", seg(&id))).await;
             let threads = c.get(&format!("/v1/code/changes/{}/threads", seg(&id))).await;
             let requests = c.get(&format!("/v1/code/changes/{}/review-requests", seg(&id))).await;
+            let reviews = c.get(&format!("/v1/code/changes/{}/reviews", seg(&id))).await;
             ok(json!({
                 "change": ch.body,
                 "review_status": if status.ok() { status.body } else { Value::Null },
                 "threads": if threads.ok() { threads.body } else { json!([]) },
                 "review_requests": if requests.ok() { requests.body } else { json!([]) },
+                "reviews": if reviews.ok() { reviews.body } else { json!([]) },
             }))
         }
         "list_changes" => {
@@ -1322,7 +1325,14 @@ async fn run(c: &Call<'_>, name: &str, args: &Value) -> std::result::Result<Outc
         }
         "update_change" => {
             let id = c.change_id(args).await?;
-            let mut body = body_of(args, &["change"]);
+            let mut body = body_of(args, &["change", "ready"]);
+            // Only ready: marking a change draft would take a queued one out of the queue, which
+            // needs delete (dequeue_change), not this tool's write.
+            match args.get("ready").and_then(Value::as_bool) {
+                Some(true) => body["draft"] = json!(false),
+                Some(false) => return Err(fail("ready: false isn't something this tool does: dequeue_change takes a change out of the queue")),
+                None => {}
+            }
             // The route takes the item's id; the tool also takes "owner/repo#N".
             if let Some(w) = opt(args, "work_item").filter(|w| w.contains('#')) {
                 body["work_item"] = json!(c.by_number(&w, "work").await?);
@@ -1624,39 +1634,6 @@ mod tests {
         assert!(repo_base("acme/api").is_ok());
         assert!(repo_base("acme").is_err());
         assert!(repo_base("a/b/c").is_err());
-    }
-
-    #[test]
-    fn every_route_has_a_tool_or_a_reason() {
-        // Every catalogued /v1/code route is a tool's (ROUTES) or in no-tool.txt with why, as
-        // roll-mcp's own test holds roll's other products: a new route can't land undecided.
-        let norm = |p: &str| p.split('/').map(|s| if s.starts_with('{') { "{}" } else { s }).collect::<Vec<_>>().join("/").trim_end_matches('/').to_string();
-        let names: Vec<String> = tools().iter().map(|t| t["name"].as_str().unwrap().to_string()).collect();
-        let silent: Vec<&String> = names.iter().filter(|n| !ROUTES.iter().any(|r| r.0 == n.as_str())).collect();
-        assert!(silent.is_empty(), "tools with no ROUTES row: {silent:?}");
-        let unknown: Vec<&str> = ROUTES.iter().map(|r| r.0).filter(|t| !names.iter().any(|n| n == t)).collect();
-        assert!(unknown.is_empty(), "ROUTES rows for tools that don't exist: {unknown:?}");
-        let mut routes: Vec<(&str, &str)> = roll_access::catalog::rows().iter().filter(|r| r.route.starts_with("/v1/code") && !r.route.ends_with('/')).map(|r| (r.method, r.route)).collect();
-        routes.extend(roll_access::catalog::prefix_reviewed_routes().filter(|(_, r)| r.starts_with("/v1/code")));
-        let same = |m: &str, r: &str, (om, or): (&str, &str)| (m == "*" || om == "*" || m == om) && norm(r) == norm(or);
-        let invented: Vec<String> = ROUTES.iter().filter(|(_, m, r)| !routes.iter().any(|c| same(m, r, *c))).map(|(t, m, r)| format!("{t}: {m} {r}")).collect();
-        assert!(invented.is_empty(), "ROUTES rows the catalogue doesn't know (a wrong path or method):\n{}", invented.join("\n"));
-        let covered = |m: &str, r: &str| ROUTES.iter().any(|(_, tm, tr)| same(m, r, (tm, tr)));
-        let listed: Vec<(&str, &str)> = include_str!("no-tool.txt")
-            .lines()
-            .filter(|l| !l.starts_with('#') && !l.trim().is_empty())
-            .filter_map(|l| {
-                let mut w = l.split_whitespace();
-                Some((w.next()?, w.next()?))
-            })
-            .collect();
-        let undecided: Vec<String> = routes.iter().filter(|(m, r)| !covered(m, r) && !listed.iter().any(|(lm, lr)| lm == m && norm(lr) == norm(r))).map(|(m, r)| format!("{m} {r}")).collect();
-        assert!(undecided.is_empty(), "catalogued /v1/code routes with no MCP tool and no reason: add the tool (and its ROUTES row), or `METHOD route  why` to crates/code-control/src/no-tool.txt:\n{}", undecided.join("\n"));
-        // A `*` line speaks for the methods with no tool, so a tool on its path doesn't make it stale.
-        let stale: Vec<String> = listed.iter().filter(|(m, r)| *m != "*" && covered(m, r)).map(|(m, r)| format!("{m} {r}")).collect();
-        assert!(stale.is_empty(), "no-tool.txt lines for routes that have a tool now: remove them:\n{}", stale.join("\n"));
-        let gone: Vec<String> = listed.iter().filter(|(m, r)| !routes.iter().any(|c| c.0 == *m && norm(c.1) == norm(r))).map(|(m, r)| format!("{m} {r}")).collect();
-        assert!(gone.is_empty(), "no-tool.txt lines for routes the catalogue doesn't have: remove them:\n{}", gone.join("\n"));
     }
 
 }

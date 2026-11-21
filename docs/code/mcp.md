@@ -54,19 +54,19 @@ Repos are `"owner/repo"`. Changes are `"chg_…"` or `"owner/repo#N"`, and work 
 | `compare` | changesets and file diffs between two revisions | `GET /repos/{r}/compare/{a}...{b}` |
 | `create_change` | open a change from file edits on a base | `POST /repos/{r}/changes` |
 | `revise_change` | a new revision of a change | `POST /changes/{id}/revise` |
-| `update_change` | a change's title, description, labels or work item; mark a draft ready | `PATCH /changes/{id}` |
+| `update_change` | a change's title, description, labels or work item; mark a draft ready (back to draft would dequeue it: `dequeue_change`) | `PATCH /changes/{id}` |
 | `land` | land a change, or edits directly | `POST /changes/{id}/land`, `POST /repos/{r}/land` |
-| `get_change` | a change with its blockers, checks, review status, threads and review requests | `GET /changes/{id}` + `/review-status` + `/threads` + `/review-requests` |
+| `get_change` | a change with its blockers, checks, review status, reviews (with what each reviewer wrote), threads and review requests | `GET /changes/{id}` + `/review-status` + `/reviews` + `/threads` + `/review-requests` |
 | `list_changes` | a repo's changes | `GET /repos/{r}/changes` |
 | `claim_work` | claim the highest-priority open work item (a lease) | `POST /repos/{r}/work/claim` |
 | `heartbeat_work`, `release_work`, `complete_work` | keep, give back or finish a claimed item | `POST /work/{id}/…` |
 | `list_work`, `create_work` | work items | `GET`/`POST /repos/{r}/work` |
-| `get_work`, `update_work` | one work item; change its title, body, labels, priority or state | `GET`/`PATCH /work/{id}` |
+| `get_work`, `update_work` | one work item; change its title, body, labels or priority (its state moves through claim, release and complete) | `GET`/`PATCH /work/{id}` |
 | `comment` | reply in a thread, or start one on a line of a change | `POST /threads/{id}/comments`, `POST /changes/{id}/threads` |
 | `review` | approve, request changes or comment, with inline comments | `POST /changes/{id}/reviews` |
 | `resolve_thread`, `reopen_thread` | mark a review thread resolved, or open again | `POST /threads/{id}/resolve`, `/unresolve` |
 | `apply_suggestion` | apply a comment's ```` ```suggestion ```` as a new revision and resolve its thread | `POST /threads/{id}/apply` |
-| `request_review` | ask a person, an agent, a review app or roll to review a change (`required` makes it a blocker) | `POST /changes/{id}/review-requests` |
+| `request_review` | ask a person, an agent, a review app or roll to review a change (`required`: it can't land until they've reviewed its head) | `POST /changes/{id}/review-requests` |
 | `queue_status` | the merge queue | `GET /repos/{r}/queue` |
 | `enqueue_change`, `dequeue_change` | put a change in the merge queue (a lane; blocked is an outcome, as with `land`), or take it out | `POST`/`DELETE /changes/{id}/enqueue` |
 | `set_change_lane` | move a queued change to the other lane, keeping its place in time | `PATCH /changes/{id}/enqueue` |
@@ -117,11 +117,12 @@ Agent tokens may use them to orchestrate agents, within what an agent's commands
   found", "not allowed", or "this needs a token". Protocol problems, such as an unknown method or tool,
   or arguments that aren't an object, are JSON-RPC errors.
 - `claim_work` returns `{work: null}` when nothing matches.
-- Every catalogued `/v1/code` route is a tool's or has a reason. `ROUTES` in `src/mcp.rs` lists
-  the routes each tool calls; `src/no-tool.txt` lists every other route with why it has no tool
-  (a person's, an admin's, a credential, a stream, covered by another tool, or `no tool yet` for a
-  gap). A new route fails `mcp::tests::every_route_has_a_tool_or_a_reason` until it has one or the
-  other, as roll's other products do in `crates/roll-mcp`.
+- Every `/v1/code` route the routers declare is a tool's or has a reason, method by method.
+  `ROUTES` in `src/mcp.rs` lists the routes each tool calls; `src/no-tool.txt` lists every other
+  route with why it has no tool (a person's, an admin's, a credential, an outside service's
+  delivery, a stream, covered by another tool, or `no tool yet` for a gap). A new route fails
+  `coverage_map.rs::every_route_has_an_mcp_tool_or_a_reason` until it has one or the other, as
+  roll's other products do in `crates/roll-mcp`.
 
 ## Protocol
 

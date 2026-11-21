@@ -1097,9 +1097,12 @@ waits on a sibling PR reaching main is last.
 2. **roll code under the tool-or-reason test (this PR).** roll code's tools are code-control's own
    MCP server (`/v1/code/mcp`, 45 tools), so roll-mcp's test never saw its routes and a new
    `/v1/code` route could land with neither a tool nor a reason. Now `ROUTES` in code-control's
-   `mcp.rs` lists each tool's routes and `crates/code-control/src/no-tool.txt` the other 119 with
-   why, held by `mcp::tests::every_route_has_a_tool_or_a_reason`. 30 are `no tool yet`; the most
-   used by agents come next (item 3).
+   `mcp.rs` lists each tool's routes and `crates/code-control/src/no-tool.txt` the other 134 with
+   why, method by method as the routers declare them (`coverage_map.rs::
+   every_route_has_an_mcp_tool_or_a_reason`). 18 are `no tool yet`. An outside review of this PR
+   found: `get_change` didn't carry reviews' text (it does now), `update_work`'s state let one agent
+   clear another's claim (state is left to claim, release and complete), and `update_change`'s
+   `draft: true` would dequeue with a write grant (only `ready` now).
 3. **roll code's `no tool yet` routes, the ones agents reach for (this PR, a first batch):** a
    review thread resolved, reopened, or its suggestion applied (`resolve_thread`, `reopen_thread`,
    `apply_suggestion`); a review asked for (`request_review`; `get_change` shows a change's
@@ -1107,8 +1110,9 @@ waits on a sibling PR reaching main is last.
    (`get_work`, `update_work`); a thread's work given back (`release_agent_work`); a change retitled, labelled or marked ready
    (`update_change`, GitHub's `update_pull_request`) and moved between queue lanes
    (`set_change_lane`). Next batch:
-   starting and stopping a change's preview, the reviewer's learnings, an automation on or off, a
-   failed run retried, its catalogue and dry run, sandboxes read and stopped. Each against its
+   starting and stopping a change's preview, an automation on or off, a
+   failed run retried, its catalogue and dry run, sandboxes read and stopped, the reviewer's
+   learnings read (writing them stays a person's: they steer roll's reviewer). Each against its
    route in `code-control/tests/mcp.rs`.
 4. **A "hand this to an agent" workflow.** An error group or a slow query becomes a work item
    (`code_create_work`), an agent claims it, its change gets a preview (`previews_wait`), and the
@@ -1135,7 +1139,11 @@ waits on a sibling PR reaching main is last.
    nears ~60 (47 now), as for any product past ~60; a docs search tool (Supabase, Vercel, Neon,
    Cloudflare and Stripe have one) once roll has user documentation (`docs/` is design notes and
    contracts); a call's `_meta.traceparent` (SEP-414) carried into the routed request once rolld's
-   API traces; a removed person's repositories handed to someone else (roll code's). For their
+   API traces; a removed person's repositories handed to someone else (roll code's). For roll code's routes (found by
+   #631's review; the tools keep clear of both): `PATCH /v1/code/work/{id}` lets any writer change a
+   claimed item's state, ending another agent's lease that `release_work` would refuse; `PATCH
+   /v1/code/changes/{id}` with `draft: true` takes a queued change out of the queue as a `write`,
+   where `DELETE …/enqueue` is `delete`. For their
    owners (they fail only under load and pass alone): code-control's
    `automations::concurrency_cancel_and_retry` and
    `agents_code::roll_code_projects_with_auto_pull_follow_their_default_branch`.
