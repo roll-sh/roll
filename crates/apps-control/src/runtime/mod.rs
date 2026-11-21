@@ -410,6 +410,9 @@ pub struct BuildJob {
     pub layers: Option<String>,
     /// A closed environment's build: on this network, through its proxy, not the default one.
     pub egress: Option<BuildEgress>,
+    /// Not a preview's (Vercel's prioritized production builds): a builder with a queue lets it
+    /// past a burst of previews' builds.
+    pub priority: bool,
 }
 
 impl std::fmt::Debug for BuildJob {
@@ -539,6 +542,7 @@ mod tests {
             target: None,
             layers: None,
             egress: None,
+            priority: true,
         };
         assert_eq!(build_args(&job), ["NPM_TOKEN", "A"]);
         job.own_dockerfile = false;

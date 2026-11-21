@@ -1335,6 +1335,7 @@ impl Apps {
             row.name = n.to_string();
         }
         let (mut forget_login, mut forget_git) = (false, false);
+        let before_source = o.get("source").map(|_| row.source.clone());
         if let Some(s) = o.get("source") {
             let source: Source = serde_json::from_value(s.clone()).map_err(|e| Error::BadRequest(format!("source: {e}")))?;
             self.check_source(&source)?;
@@ -1353,7 +1354,13 @@ impl Apps {
             forget_git = git(&row.source) != git(&source);
             row.source = source;
         }
+        let repo_moved = matches!((&before_source, &row.source), (Some(Source::Repo { repo: a, .. }), Source::Repo { repo: b, .. }) if a != b) || matches!((&before_source, &row.source), (Some(Source::Repo { .. }), s) if !matches!(s, Source::Repo { .. }));
         row.build = merge(&row.build, o.get("build"), "build")?;
+        // The private repos its submodules may come from were allowed for the repo it was built
+        // from: another repo starts with none unless this request names them (and is lent read).
+        if repo_moved && o.get("build").and_then(|b| b.get("submodule_repos")).is_none() {
+            row.build.submodule_repos = None;
+        }
         row.build.check()?;
         row.run = row.run.merged(o.get("run"))?;
         let r = row.clone();
