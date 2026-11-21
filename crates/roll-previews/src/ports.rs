@@ -871,6 +871,8 @@ pub struct Resolved {
     /// Keys of `values` linked to a field that isn't a credential (a host, a port, a database's
     /// name): roll secrets' `plain`. A preview's logs show them; every other value is masked.
     pub plain: Vec<String>,
+    /// Keys answered as placeholders, with the hosts each is bound to.
+    pub placeholders: Vec<(String, Vec<String>)>,
 }
 
 /// Until roll secrets lands: no environments, so services get the project's overrides and the

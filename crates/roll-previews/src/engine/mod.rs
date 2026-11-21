@@ -241,6 +241,8 @@ pub struct Engine {
     secrets_told: Mutex<HashMap<String, Vec<String>>>,
     /// The rules' references last left out per preview, their writers unable to now (told once).
     refs_told: Mutex<HashMap<String, Vec<String>>>,
+    /// Keys bound to hosts its egress doesn't allow, last told per preview.
+    bound_told: Mutex<HashMap<String, Vec<String>>>,
     /// What ends a preview's interception when it's torn down (rolld, over roll secrets).
     pub intercepts: std::sync::OnceLock<Arc<dyn crate::ports::Intercepts>>,
     /// When each project's own preview domain was last read from roll apps (ms).
@@ -308,6 +310,7 @@ impl Engine {
             },
             secrets_told: Mutex::new(HashMap::new()),
             refs_told: Mutex::new(HashMap::new()),
+            bound_told: Mutex::new(HashMap::new()),
             intercepts: std::sync::OnceLock::new(),
             domain_read: Mutex::new(HashMap::new()),
             paths_seen: Mutex::new(HashMap::new()),
@@ -606,6 +609,14 @@ impl Engine {
             None => self.secrets.resolve(&r.project_id, &env_name(&r.id), untrusted, dynamic, &consumer).await,
         }
         .map_err(|e| anyhow::anyhow!("secrets: {e:#}"))?;
+        // A key bound to a host its egress doesn't allow: a binding never opens egress, so calls
+        // there fail; said once, so it doesn't read as a broken key.
+        let mut unreachable: Vec<String> = got.placeholders.iter().flat_map(|(k, hosts)| hosts.iter().filter(|h| !crate::settings::egress_allows(&s.egress_hosts, h)).map(move |h| format!("{k} → {h}"))).collect();
+        unreachable.sort();
+        let new = self.bound_told.lock().insert(r.id.clone(), unreachable.clone()).is_none_or(|before| before != unreachable);
+        if new && !unreachable.is_empty() {
+            let _ = self.store.log(&r.id, &format!("keys bound to hosts its egress doesn't allow (add them to egress_hosts, or calls there fail): {}", unreachable.join("; ")));
+        }
         let mut problems = got.problems.clone();
         problems.sort();
         let new = self.secrets_told.lock().insert(r.id.clone(), problems.clone()).is_none_or(|before| before != problems);
