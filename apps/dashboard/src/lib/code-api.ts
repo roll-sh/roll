@@ -770,6 +770,7 @@ export interface ReviewApp {
   id: string;
   owner: string;
   name: string;
+  /** Scheme and host only (`https://hooks.example.com`): the URL is kept sealed and never returned. */
   webhook_url: string;
   events: string[];
   /** Full names. */
@@ -1008,6 +1009,7 @@ export type WebhookEvent = (typeof WEBHOOK_EVENTS)[number];
 
 export interface Webhook {
   id: string;
+  /** Scheme and host only (`https://hooks.example.com`): the URL is kept sealed and never returned. */
   url: string;
   /** Event names, or `["*"]` for all of them. */
   events: string[];

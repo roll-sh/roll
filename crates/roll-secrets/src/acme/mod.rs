@@ -450,7 +450,8 @@ impl Secrets {
         if expires_at.is_some_and(|t| t <= code_sql::now_ms()) {
             return Err(Problem::unauthorized("the external account binding has expired"));
         }
-        if !self.maker_reaches(&created_by, &project)? {
+        // An external account binding is the project admin's: it works while its maker still is one.
+        if !self.maker_reaches(&created_by, &[(crate::access::Action::Admin, crate::access::Scope::whole(&project))])? {
             return Err(Problem::unauthorized("whoever made the external account binding can no longer reach its project"));
         }
         let policy = serde_json::from_str(&policy).map_err(|_| Error::Internal("a CA's policy isn't JSON".into()))?;

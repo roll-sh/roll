@@ -450,6 +450,9 @@ impl Apps for FakeApps {
     async fn egress_refused(&self, _: &str) -> Vec<String> {
         Vec::new()
     }
+    async fn intercepted(&self, _: &str) -> Option<roll_previews::AppsIntercepted> {
+        None
+    }
 }
 
 /// roll secrets as previews see it: every `ensure` (environment, trusted). With `dynamic`, each
@@ -527,6 +530,8 @@ pub struct FakeSecrets {
     pub refs: Mutex<Vec<(String, String)>>,
     /// Resolves that asked for placeholders: (consumer, maker).
     pub placeholders: Mutex<Vec<(String, String)>>,
+    /// What those resolves answer as placeholders: (key, its bound hosts).
+    pub placeholder_hosts: Mutex<Vec<(String, Vec<String>)>>,
     /// Values every resolve answers (static secrets).
     pub values: Mutex<Vec<(String, String)>>,
     /// Why each resolve was asked for (`logs`: values read to mask output).
@@ -544,7 +549,9 @@ impl roll_previews::ports::Secrets for FakeSecrets {
     }
     async fn resolve_with_placeholders(&self, project: &str, env: &str, untrusted: bool, dynamic: bool, consumer: &str, maker: &str) -> anyhow::Result<roll_previews::ports::Resolved> {
         self.placeholders.lock().push((consumer.to_string(), maker.to_string()));
-        self.resolve(project, env, untrusted, dynamic, consumer).await
+        let mut got = self.resolve(project, env, untrusted, dynamic, consumer).await?;
+        got.placeholders = self.placeholder_hosts.lock().clone();
+        Ok(got)
     }
     async fn resolve(&self, _: &str, _: &str, _: bool, dynamic: bool, reason: &str) -> anyhow::Result<roll_previews::ports::Resolved> {
         self.reasons.lock().push(reason.to_string());
@@ -555,7 +562,7 @@ impl roll_previews::ports::Secrets for FakeSecrets {
         }
         let n = self.issued.fetch_add(1, Ordering::SeqCst) + 1;
         let values = values.into_iter().chain([("DB_PASSWORD".into(), format!("pw-{n}"))]).collect();
-        Ok(roll_previews::ports::Resolved { values, problems: Vec::new(), leases: vec![format!("lease-{n}")], followed, plain: Vec::new() })
+        Ok(roll_previews::ports::Resolved { values, problems: Vec::new(), leases: vec![format!("lease-{n}")], followed, plain: Vec::new(), placeholders: Vec::new() })
     }
     async fn links(&self, _: &str, _: &str) -> anyhow::Result<Vec<(String, Kind, String, String)>> {
         Ok(self.links.lock().clone())

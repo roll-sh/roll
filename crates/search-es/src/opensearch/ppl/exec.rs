@@ -688,7 +688,7 @@ async fn scan(cluster: &Cluster, target: &str, indices: &[String], query: &Value
     drop(st);
     if let Some(n) = limit.filter(|n| *n <= window) {
         let body = crate::obj! { "size" => n as i64, "query" => query.clone(), "sort" => crate::arr!["_doc"], "track_total_hits" => false };
-        let resp = internal::call(cluster, "POST", &format!("/{}/_search?ignore_unavailable=true", encode(target)), Some(&body)).await?;
+        let resp = internal::call(cluster, "POST", &format!("/{}/_search?ignore_unavailable=true&{}", encode(target), internal::STRICT), Some(&body)).await?;
         for h in resp.pointer(&["hits", "hits"]).and_then(Value::as_array).map(Vec::as_slice).unwrap_or(&[]) {
             f(h);
         }
@@ -711,7 +711,7 @@ async fn scan(cluster: &Cluster, target: &str, indices: &[String], query: &Value
             if let (Some(a), Value::Obj(m)) = (&after, &mut body) {
                 m.insert("search_after".into(), a.clone());
             }
-            let resp = internal::call(cluster, "POST", "/_search", Some(&body)).await?;
+            let resp = internal::call(cluster, "POST", &format!("/_search?{}", internal::STRICT), Some(&body)).await?;
             let hits = resp.pointer(&["hits", "hits"]).and_then(Value::as_array).map(Vec::as_slice).unwrap_or(&[]);
             for h in hits {
                 f(h);

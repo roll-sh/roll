@@ -1263,8 +1263,20 @@ async fn a_roll_only_preview_takes_placeholders_made_by_who_saved_its_rules() {
     let _ = e.engine.env(&p.id, "web").await;
     assert_eq!(asked(), 0);
     e.engine.store.set_rules_maker(&e.project, Some("usr_b")).unwrap();
+    // One key bound to a host its egress allows and one it doesn't: the second is said.
+    *e.secrets.placeholder_hosts.lock() = vec![("STRIPE_KEY".into(), vec!["api.stripe.com".into(), "api.other.example".into()])];
     let _ = e.engine.env(&p.id, "web").await;
     assert_eq!(e.secrets.placeholders.lock().last().cloned(), Some((roll_previews::ports::intercept_consumer(&p.id), "usr_b".to_string())));
+    let said: Vec<String> = e.engine.store.activity(&p.id).unwrap().into_iter().map(|a| a.message).collect();
+    assert!(said.iter().any(|m| m.contains("its egress doesn't allow") && m.contains("STRIPE_KEY → api.other.example") && !m.contains("api.stripe.com")), "{said:?}");
+    // On its record: the key and its hosts, and what its egress proxy did (never a value).
+    e.engine.store.update_intercepted(&p.id, |x| x.swapped += 2).unwrap();
+    let held = e.engine.store.preview(&p.id).unwrap().intercepted.expect("its keys");
+    assert_eq!((held.keys[0].key.as_str(), held.keys[0].hosts.len(), held.swapped), ("STRIPE_KEY", 2, 2));
+    // roll apps' proxies' counts for its services there, beside its own.
+    let apps = roll_previews::AppsIntercepted { requests: 3, swapped: 1, refused: vec!["api.stripe.com: a placeholder in the query".into()] };
+    e.engine.store.set_runtime_fact(&p.id, "intercepted_apps", Some(&apps)).unwrap();
+    assert_eq!(e.engine.store.preview(&p.id).unwrap().intercepted.and_then(|x| x.on_apps), Some(apps));
     // Its CA changes (a key's bound hosts did): its services restart, trusting the new one.
     struct Ca(parking_lot::Mutex<String>);
     struct Nothing;
@@ -1373,6 +1385,22 @@ async fn a_signed_in_person_sees_only_their_own_projects_previews() {
     // Their own project's: there.
     let mine = e.ws.create("usr_b", "mine", "", None).unwrap();
     assert_eq!(call(other, format!("/v1/previews/projects/{}/settings", mine.id)).await.0, 200);
+    // A member who isn't an owner (a viewer here) gets none of it: previews aren't a member
+    // product yet, and they reach shells, files and branches' credentials (docs/members.md).
+    struct Addresses;
+    impl roll_workspace::People for Addresses {
+        fn person(&self, user: &str) -> Option<roll_workspace::Person> {
+            let h = user.strip_prefix("usr_")?;
+            Some(roll_workspace::Person { handle: h.into(), email: Some(format!("{h}@example.com")), admin: false })
+        }
+    }
+    e.ws.set_people(std::sync::Arc::new(Addresses));
+    let (_, url) = e.ws.invite(&roll_workspace::Actor::operator(), &e.project, "v@example.com", "viewer", None).unwrap();
+    e.ws.accept("usr_v", url.split("token=").nth(1).unwrap(), None).unwrap();
+    let viewer = Some(("usr_v", false));
+    assert_eq!(call(viewer, format!("/v1/previews/{}", p.id)).await.0, 404);
+    assert_eq!(call(viewer, format!("/v1/previews/{}/connect", p.id)).await.0, 404, "a viewer never gets the branches' credentials");
+    assert_eq!(call(viewer, format!("/v1/previews/{}/env", p.id)).await.0, 404);
     // A token (no signed-in person) and an admin see it.
     assert_eq!(call(None, format!("/v1/previews/{}", p.id)).await.0, 200);
     assert_eq!(call(Some(("usr_c", true)), format!("/v1/previews/{}", p.id)).await.0, 200);
@@ -2010,6 +2038,9 @@ async fn the_project_that_has_had_a_service_longest_speaks_for_its_branches() {
         fn trusts(&self, user: &str, _kind: Res, r: &str) -> bool {
             user == "usr_ada" && r == "svc_shop"
         }
+        fn owns(&self, user: &str, kind: Res, r: &str) -> bool {
+            self.trusts(user, kind, r)
+        }
     }
     let e = env(json!({ "enabled": true, "branches": ["feat/*"] }));
     e.ws.set_owners(Arc::new(Ada));
@@ -2068,6 +2099,9 @@ async fn a_preview_made_by_hand_is_only_of_a_repo_the_project_stands_for() {
     impl roll_workspace::Owners for Ada {
         fn trusts(&self, user: &str, _kind: Res, r: &str) -> bool {
             user == "usr_ada" && r == "acme/api"
+        }
+        fn owns(&self, user: &str, kind: Res, r: &str) -> bool {
+            self.trusts(user, kind, r)
         }
     }
     let e = env(json!({ "enabled": true }));

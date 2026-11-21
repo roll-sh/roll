@@ -1099,6 +1099,7 @@ pub(crate) fn rule_of(found: &crate::store::Approval) -> crate::Result<roll_auth
         // Only where the request was: an approval in development never reaches production.
         environments: found.environment.clone().map(|e| vec![e]),
         paths: found.scope_path.clone().map(|p| vec![p]),
+        unprotected: false,
         actions: [(action, roll_auth::scope::Effect::Allow)].into_iter().collect(),
     })
 }

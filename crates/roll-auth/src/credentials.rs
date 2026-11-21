@@ -22,9 +22,10 @@ use serde_json::Value;
 /// connections' SCIM tokens (`rlp_`, roll-accounts), previews' deploy hooks (`rlb_`, a rebuild),
 /// apps' instance addresses (`rlr_`: where an environment's instances read roll's OIDC tokens),
 /// roll secrets' request answers (`rlq_`) and placeholders (`rlph_`: what a sandbox holds instead
-/// of a key, swapped by roll's egress proxy). (`rlh_` is roll code's automations' inbound webhook
-/// secrets: another shape, not ours.)
-pub const SECRET_PREFIXES: [&str; 10] = ["rlt_", "rlo_", "rlf_", "rlc_", "rlk_", "rlp_", "rlb_", "rlq_", "rlr_", "rlph_"];
+/// of a key, swapped by roll's egress proxy), and workspace project invites (`rlv_`,
+/// docs/members.md). (`rlh_` is roll code's automations' inbound webhook secrets: another shape,
+/// not ours.)
+pub const SECRET_PREFIXES: [&str; 11] = ["rlt_", "rlo_", "rlf_", "rlc_", "rlk_", "rlp_", "rlb_", "rlq_", "rlr_", "rlph_", "rlv_"];
 
 /// A secret: `prefix`, 34 random characters of lowercase base32 (170 bits) and 6 of checksum, so a
 /// scanner can tell a real roll token from look-alike text without asking roll ([`checksum_ok`],

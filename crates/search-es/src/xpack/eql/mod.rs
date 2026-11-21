@@ -208,11 +208,13 @@ fn response(took: i64, result: exec::Results) -> Map {
         exec::Output::Events(e) => ("events", e),
         exec::Output::Sequences(s) => ("sequences", s),
     };
+    // A search that timed out (the node's cap) leaves the answer partial, as Elasticsearch's
+    // EQL reports a timeout.
     let mut m = Map::new();
-    m.insert("is_partial".into(), false.into());
+    m.insert("is_partial".into(), result.timed_out.into());
     m.insert("is_running".into(), false.into());
     m.insert("took".into(), took.into());
-    m.insert("timed_out".into(), false.into());
+    m.insert("timed_out".into(), result.timed_out.into());
     if !result.shard_failures.is_empty() {
         m.insert("shard_failures".into(), Value::Arr(result.shard_failures));
     }
@@ -245,7 +247,7 @@ pub async fn search(ctx: &Ctx<'_>) -> EsResult<Reply> {
     let id = async_results::async_id(&ctx.cluster.node.id);
     ctx.cluster.xpack.results.put(
         id.clone(),
-        Entry { kind: Kind::Eql, response: Value::Obj(m.clone()), start_ms: ctx.now_ms, expiration_ms: ctx.now_ms + req.keep_alive_ms, bytes: 0, extra: Value::Null },
+        Entry { kind: Kind::Eql, response: Value::Obj(m.clone()), start_ms: ctx.now_ms, expiration_ms: ctx.now_ms + req.keep_alive_ms, bytes: 0, extra: Value::Null, owner: crate::xpack::async_results::owner(ctx) },
         ctx.now_ms,
     );
     Reply::ok(with_id(&id, &m))
@@ -254,7 +256,7 @@ pub async fn search(ctx: &Ctx<'_>) -> EsResult<Reply> {
 fn stored(ctx: &Ctx) -> EsResult<(String, Entry)> {
     let id = ctx.path_param("id").unwrap_or_default().to_string();
     async_results::check_id(&id)?;
-    match ctx.cluster.xpack.results.get(&id, Kind::Eql, ctx.now_ms) {
+    match crate::xpack::async_results::get_own(ctx, &id, Kind::Eql) {
         Some(e) => Ok((id, e)),
         None => Err(EsError::resource_not_found(id)),
     }
@@ -285,7 +287,7 @@ pub fn status(ctx: &Ctx) -> EsResult<Reply> {
 pub fn delete(ctx: &Ctx) -> EsResult<Reply> {
     let id = ctx.path_param("id").unwrap_or_default().to_string();
     async_results::check_id(&id)?;
-    if ctx.cluster.xpack.results.remove(&id, Kind::Eql) {
+    if crate::xpack::async_results::remove_own(ctx, &id, Kind::Eql) {
         Reply::acknowledged()
     } else {
         Err(EsError::resource_not_found(id))
