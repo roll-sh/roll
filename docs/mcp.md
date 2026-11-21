@@ -556,6 +556,7 @@ is `-32602`.
 | `clear_task_backlog` | | Why roll tasks' messages pile up or fail: a paused or limited queue, dead letters and each delivery's error grouped by cause, then a retry it asks about first (with how many). | `tasks_stats`, `tasks_list_queues`, `tasks_get_queue`, `tasks_list_dead_letters`, `tasks_get_message` |
 | `drain_queue` | `vhost`, `queue` | Why a queue backs up: no consumers, consumers that don't acknowledge (and which connection), rates, and why its dead-letter queue's messages died; a replay it asks about first, never a purge. | `queues_get_queue`, `queues_queue_rates`, `queues_list_channels`, `queues_peek`, `queues_list_bindings` |
 | `find_consumer_lag` | `stream`, `group` | Why a consumer group falls behind: lag per partition, members against partitions, throughput, and the record a stuck partition stops at; a reset (which skips records) it asks about first. | `streams_get_group`, `streams_get_topic`, `streams_usage`, `streams_read` |
+| `review_costs` | `project` | Where a project's money goes this month (apps by service, projected; previews against their budget and rules; the canvas's databases, buckets, streams and clusters when the connection has their tools), against last month and its limits, with what would cost less for the top three. Changes nothing without asking. | `apps_project_usage`, `apps_limits`, `previews_usage`, `previews_settings` |
 
 ### As skills
 
