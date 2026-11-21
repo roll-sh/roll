@@ -1273,7 +1273,9 @@ impl Apps {
         if let Ok(Some(key)) = self.db(move |s| s.deployment_upload(&id)).await {
             self.drop_upload(&d.id, &key).await;
         }
-        self.live(&svc.id, &d.environment).meter.lock().build(code_sql::now_ms(), began.elapsed().as_secs_f64());
+        // Metered by its builder's size where the builder gives it one.
+        let factor = if self.deps.builder.sizes_builds() { svc.build.size.unwrap_or_default().factor() } else { 1.0 };
+        self.live(&svc.id, &d.environment).meter.lock().build(code_sql::now_ms(), began.elapsed().as_secs_f64() * factor);
         result
     }
 
@@ -1540,14 +1542,22 @@ impl Apps {
         if plan.provider == apps_build::Provider::Dockerfile {
             build_env.extend(commit);
         }
+        // `build.size`: what the builder gives it, where it can (one node's Docker can't).
+        let size = svc.build.size.unwrap_or_default();
+        if size != crate::model::BuildSize::Small {
+            match self.deps.builder.sizes_builds() {
+                true => log.line(format!("a {} builder: {} vCPU, {} GiB", serde_json::to_value(size).ok().and_then(|v| v.as_str().map(str::to_string)).unwrap_or_default(), size.resources().0, size.resources().1 / 1024)),
+                false => log.line("build.size: this node's builds share its BuildKit, unsized (it applies on the fleet's builders)"),
+            }
+        }
         let job = BuildJob {
             service: svc.id.clone(),
             deployment: d.id.clone(),
             context,
             dockerfile,
             tag: format!("roll-apps-{}:{}", svc.id.strip_prefix("svc_").unwrap_or(&svc.id), d.id.strip_prefix("dep_").unwrap_or(&d.id)),
-            cpu: 2.0,
-            memory_mb: 4096,
+            cpu: size.resources().0,
+            memory_mb: size.resources().1,
             timeout: build_timeout(svc.build.timeout_s, self.cfg.build_timeout, log),
             own_dockerfile: plan.provider == apps_build::Provider::Dockerfile,
             env: build_env,
