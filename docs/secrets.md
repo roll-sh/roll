@@ -5106,6 +5106,14 @@ The other threads' work that builds on these:
 
 roll MCP adds no cut-off tool: #304 is a person's call, since it can revoke the agent's own token.
 
+**Found 2026-11-21 02:20: a decoy oracle on main (#432).**
+- **Cause:** computes run the unpinned `postgres:{v}-alpine`, which moved past the 18.6 error text #432
+  ported. A real compute now says `L816` where a decoy says `L791`, so a malformed startup packet tells a
+  decoy role from a real login.
+- **Fix, building (`fix/pg-decoys-version-oracle`):**
+  - pin compute images by digest;
+  - take the decoy's pre-auth bytes from the compute's real version.
+
 **State, 2026-11-20 23:00.**
 - **Batch 6:** per-PR gates green so far: #487, #499 (its Terraform step re-run on Go 1.25), #511, #513,
   #517, #520, and the #520 and #493 prepared merges. #493 is gating; the combined gate comes next.
