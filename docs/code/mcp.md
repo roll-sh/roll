@@ -63,6 +63,12 @@ Repos are `"owner/repo"`. Changes are `"chg_…"` or `"owner/repo#N"`, and work 
 | `comment` | reply in a thread, or start one on a line of a change | `POST /threads/{id}/comments`, `POST /changes/{id}/threads` |
 | `review` | approve, request changes or comment, with inline comments | `POST /changes/{id}/reviews` |
 | `queue_status` | the merge queue | `GET /repos/{r}/queue` |
+| `enqueue_change`, `dequeue_change` | put a change in the merge queue (a lane; blocked is an outcome, as with `land`), or take it out | `POST`/`DELETE /changes/{id}/enqueue` |
+| `close_change` | close a change without landing it (it can't be reopened: `destructiveHint`) | `POST /changes/{id}/close` |
+| `report_check` | a check's result on a change, from CI outside roll | `POST /changes/{id}/checks` |
+| `set_commit_status` | a commit status on a revision (GitHub's statuses) | `POST /repos/{r}/statuses/{rev}` |
+| `list_refs` | the repo's branches and tags | `GET /repos/{r}/refs` |
+| `create_repo` | a new, empty repository under an owner you manage | `POST /repos` |
 | `request_ai_review` | ask roll's reviewer for a review | `POST /changes/{id}/ai-review` |
 | `list_agent_machines` | the owner's machines running `roll agent up` (online, providers) | `GET /agents/{owner}/machines` |
 | `list_agent_threads` | agent threads (with their machine and project name) and the requests waiting for an answer | `GET /agents/{owner}/state` |
