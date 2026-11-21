@@ -1293,7 +1293,7 @@ export interface LogDrain {
   previews: boolean;
   /** The names of the headers it's sent with; their values are sealed, never shown. */
   headers: string[];
-  /** How its lines go: roll's signed NDJSON, OpenTelemetry logs (OTLP/HTTP JSON), or syslog (RFC 5424 over TLS). */
+  /** How its lines go: roll's signed NDJSON, OpenTelemetry logs (OTLP/HTTP JSON), syslog (RFC 5424 over TLS), or NDJSON objects in an S3 bucket. */
   format: DrainFormat;
   /** Only in the answer that made it. */
   secret?: string;
@@ -1313,7 +1313,7 @@ export interface FormSubmission {
   fields: { name: string; value: string }[];
 }
 
-export type DrainFormat = "ndjson" | "otlp" | "syslog";
+export type DrainFormat = "ndjson" | "otlp" | "syslog" | "s3";
 
 /** A project's monthly spend limits (US dollars at roll's prices, the calendar month in UTC). */
 export interface SpendLimits {

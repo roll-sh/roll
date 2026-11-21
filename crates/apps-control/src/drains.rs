@@ -36,6 +36,11 @@ const BUFFER: usize = 10_000;
 /// The most lines a batch carries, and the longest a line waits for its batch.
 const BATCH: usize = 500;
 const LINGER: Duration = Duration::from_secs(1);
+/// An `s3` drain's: an object a batch, so fewer and bigger.
+const S3_BATCH: usize = 5_000;
+const S3_LINGER: Duration = Duration::from_secs(60);
+/// An `s3` drain's credentials, in its sealed headers (never sent as headers).
+const S3_KEYS: [&str; 3] = ["aws-access-key-id", "aws-secret-access-key", "aws-region"];
 /// How long a node keeps a project's drains (and a service's project) before reading again.
 const REFRESH: Duration = Duration::from_secs(30);
 /// Previews' batches waiting for the drainer; past it, a batch is dropped (counted).
@@ -85,6 +90,9 @@ impl Apps {
                 return Err(Error::BadRequest("headers: a syslog drain is sent none".into()));
             }
             self.syslog_target(&url)?.0
+        } else if format == "s3" {
+            check_s3(&url, &settings.headers)?;
+            self.check_target("webhook", &url)?
         } else {
             self.check_target("webhook", &url)?
         };
@@ -210,6 +218,9 @@ impl Apps {
         let p = project.to_string();
         let current = self.db(move |s| s.drain_secrets(&p)).await?.into_iter().find(|d| d.drain.id == id).ok_or_else(|| Error::NotFound(format!("no log drain {id}")))?;
         let settings = self.drain_settings(project, &o, Some(&current)).await?;
+        if current.drain.format == "s3" {
+            check_s3(&current.url, &settings.headers)?;
+        }
         if current.drain.format == "syslog" && !settings.headers.is_empty() {
             return Err(Error::BadRequest("headers: a syslog drain is sent none".into()));
         }
@@ -356,10 +367,11 @@ impl Apps {
                         for o in list {
                             let d = &o.drain;
                             let Some(q) = queues.get_mut(&d.id) else { continue };
-                            if q.out || q.lines.is_empty() || (q.lines.len() < BATCH && q.first.elapsed() < LINGER) {
+                            let (most, linger) = if d.format == "s3" { (S3_BATCH, S3_LINGER) } else { (BATCH, LINGER) };
+                            if q.out || q.lines.is_empty() || (q.lines.len() < most && q.first.elapsed() < linger) {
                                 continue;
                             }
-                            let n = q.lines.len().min(BATCH);
+                            let n = q.lines.len().min(most);
                             let batch: Vec<Value> = q.lines.drain(..n).collect();
                             q.out = true;
                             let dropped = std::mem::take(&mut q.dropped);
@@ -443,6 +455,7 @@ impl Apps {
         let mut url = o.url.clone();
         let (body, content_type) = match o.drain.format.as_str() {
             "syslog" => return self.send_syslog(&o.url, batch).await.map(|()| None),
+            "s3" => return self.put_s3(o, batch, delivery).await.map(Some),
             "otlp" => {
                 url = signal_url(&o.url, signal);
                 let v = match signal {
@@ -482,6 +495,51 @@ impl Apps {
         }
         match req.body(body).send().await {
             Ok(r) => Ok(Some(r.status().as_u16())),
+            Err(e) => Err(e.without_url().to_string()),
+        }
+    }
+
+    /// An `s3` drain's batch: one NDJSON object, `<prefix>/YYYY/MM/DD/HH/<time>-<delivery>.ndjson`,
+    /// PUT to its bucket signed with SigV4 (its sealed keys; roll storage's buckets, AWS's,
+    /// any S3-compatible), through the public-only client. Its status, or why it didn't go.
+    async fn put_s3(&self, o: &OpenedDrain, batch: &[Value], delivery: &str) -> std::result::Result<u16, String> {
+        use sha2::Digest;
+        let key = |k: &str| o.headers.iter().find(|(n, _)| n.eq_ignore_ascii_case(k)).map(|(_, v)| v.clone());
+        let (Some(access), Some(secret)) = (key(S3_KEYS[0]), key(S3_KEYS[1])) else { return Err("the drain has no S3 keys".into()) };
+        let region = key(S3_KEYS[2]).unwrap_or_else(|| "us-east-1".into());
+        let mut body = Vec::new();
+        for l in batch {
+            serde_json::to_writer(&mut body, l).expect("JSON");
+            body.push(b'\n');
+        }
+        let now = chrono::Utc::now();
+        let url = format!("{}/{}/{}-{delivery}.ndjson", o.url.trim_end_matches('/'), now.format("%Y/%m/%d/%H"), now.format("%Y%m%dT%H%M%SZ"));
+        let parsed = url::Url::parse(&url).map_err(|e| e.to_string())?;
+        let host = match parsed.port() {
+            Some(p) => format!("{}:{p}", parsed.host_str().unwrap_or_default()),
+            None => parsed.host_str().unwrap_or_default().to_string(),
+        };
+        let hash = hex::encode(sha2::Sha256::digest(&body));
+        let date = now.format("%Y%m%dT%H%M%SZ").to_string();
+        let unsigned = [("host", host.as_str()), ("x-amz-content-sha256", hash.as_str()), ("x-amz-date", date.as_str())];
+        let identity: aws_smithy_runtime_api::client::identity::Identity = aws_credential_types::Credentials::new(access, secret, None, None, "roll-drain").into();
+        let params: aws_sigv4::http_request::SigningParams = aws_sigv4::sign::v4::SigningParams::builder()
+            .identity(&identity)
+            .region(&region)
+            .name("s3")
+            .time(now.into())
+            .settings(aws_sigv4::http_request::SigningSettings::default())
+            .build()
+            .map_err(|e| e.to_string())?
+            .into();
+        let signable = aws_sigv4::http_request::SignableRequest::new("PUT", url.as_str(), unsigned.iter().copied(), aws_sigv4::http_request::SignableBody::Precomputed(hash.clone())).map_err(|e| e.to_string())?;
+        let (instructions, _) = aws_sigv4::http_request::sign(signable, &params).map_err(|e| e.to_string())?.into_parts();
+        let mut req = self.notify_client.put(&url).header("content-type", "application/x-ndjson").header("x-amz-content-sha256", &hash).header("x-amz-date", &date);
+        for (k, v) in instructions.headers() {
+            req = req.header(k, v);
+        }
+        match req.body(body).send().await {
+            Ok(r) => Ok(r.status().as_u16()),
             Err(e) => Err(e.without_url().to_string()),
         }
     }
@@ -539,6 +597,24 @@ impl Apps {
 }
 
 /// The TLS settings syslog drains connect with: the system's roots, ring, TLS 1.2 and up.
+/// An `s3` drain: its URL names a bucket and maybe a prefix (`https://host/bucket[/prefix]`,
+/// path-style, letters, digits and `-_./` only), and its headers are its keys and nothing else.
+fn check_s3(url: &str, headers: &[(String, String)]) -> Result<()> {
+    let u = url::Url::parse(url).map_err(|e| Error::BadRequest(format!("url: {e}")))?;
+    let path = u.path().trim_matches('/');
+    if path.is_empty() || u.query().is_some() || !path.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.' | b'/')) || path.contains("//") {
+        return Err(Error::BadRequest("url: an s3 drain's is https://<endpoint>/<bucket>[/<prefix>] (path-style; letters, digits, - _ . /)".into()));
+    }
+    let names: Vec<String> = headers.iter().map(|(k, _)| k.to_ascii_lowercase()).collect();
+    if let Some(n) = names.iter().find(|n| !S3_KEYS.contains(&n.as_str())) {
+        return Err(Error::BadRequest(format!("headers: an s3 drain takes only {} ({n} isn't one)", S3_KEYS.join(", "))));
+    }
+    if !names.iter().any(|n| n == S3_KEYS[0]) || !names.iter().any(|n| n == S3_KEYS[1]) {
+        return Err(Error::BadRequest(format!("headers: an s3 drain needs {} and {}", S3_KEYS[0], S3_KEYS[1])));
+    }
+    Ok(())
+}
+
 fn syslog_tls() -> Arc<tokio_rustls::rustls::ClientConfig> {
     use tokio_rustls::rustls;
     static CONFIG: std::sync::OnceLock<Arc<rustls::ClientConfig>> = std::sync::OnceLock::new();

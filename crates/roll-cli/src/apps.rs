@@ -999,7 +999,9 @@ pub enum AppsCmd {
     },
     /// The project's log drains: list them, `--add <https url>` (prints its signing secret
     /// once; `--format otlp` for a collector's `/v1/logs`, `--format syslog` for
-    /// `syslog+tls://host:port`), `--edit <id>`, `--test <id>`, or `--remove <id>`.
+    /// `syslog+tls://host:port`, `--format s3` for `https://<endpoint>/<bucket>[/<prefix>]` with
+    /// `--header aws-access-key-id=… --header aws-secret-access-key=…`), `--edit <id>`, `--test
+    /// <id>`, or `--remove <id>`.
     Drains {
         #[command(flatten)]
         target: Target,
@@ -1007,7 +1009,7 @@ pub enum AppsCmd {
         add: Option<String>,
         /// With `--add`: how its lines go: `ndjson` (the default, signed), `otlp` (OpenTelemetry
         /// logs over OTLP/HTTP JSON) or `syslog` (RFC 5424 over TLS).
-        #[arg(long, requires = "add", value_parser = ["ndjson", "otlp", "syslog"])]
+        #[arg(long, requires = "add", value_parser = ["ndjson", "otlp", "syslog", "s3"])]
         format: Option<String>,
         /// With `--add` or `--edit`: what it's sent, comma-separated: `runtime` (the default),
         /// `http` (a request a line), `build`, `audit` (each change people make).
