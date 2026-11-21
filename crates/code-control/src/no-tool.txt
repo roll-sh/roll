@@ -8,14 +8,9 @@ GET /v1/code/agents/connect                                                     
 POST /v1/code/agents/login                                                      device login: `roll agent up` asks, a person approves in their browser
 POST /v1/code/agents/login/poll                                                 device login: `roll agent up` asks, a person approves in their browser
 GET /v1/code/agents/shares/{id}                                                 a share link's own page, read with the link (a credential)
-GET /v1/code/agents/{owner}/automations/catalog                                 no tool yet: the triggers and steps an automation's spec can use
 GET /v1/code/agents/{owner}/automations/notices                                 the dashboard's banners about automations
-POST /v1/code/agents/{owner}/automations/runs/{run}/retry                       no tool yet: run a failed automation run again
-POST /v1/code/agents/{owner}/automations/test                                   no tool yet: try an automation's spec without saving it
 DELETE /v1/code/agents/{owner}/automations/{id}                                 no tool yet: delete an automation
 GET /v1/code/agents/{owner}/automations/{id}                                    list_agent_automations answers each automation in full
-POST /v1/code/agents/{owner}/automations/{id}/disable                           no tool yet: turn an automation off
-POST /v1/code/agents/{owner}/automations/{id}/enable                            no tool yet: turn an automation on
 GET /v1/code/agents/{owner}/automations/{id}/runs                               list_agent_automation_runs takes the automation
 DELETE /v1/code/agents/{owner}/automations/{id}/secrets/{name}                  a credential: an automation's secrets
 PUT /v1/code/agents/{owner}/automations/{id}/secrets/{name}                     a credential: an automation's secrets
@@ -51,21 +46,15 @@ POST /v1/code/agents/{owner}/lookup/{source}/{kind}                             
 POST /v1/code/agents/{owner}/machines                                           a machine joins with `roll agent up` (device login)
 DELETE /v1/code/agents/{owner}/machines/{machine}                               a person's: removing a machine ends its link
 PATCH /v1/code/agents/{owner}/machines/{machine}                                a person's: renaming a machine
-GET /v1/code/agents/{owner}/sandboxes                                           no tool yet: an owner's sandboxes and whether each runs
 POST /v1/code/agents/{owner}/sandboxes                                          a person's: a sandbox is a machine billed while it runs
-GET /v1/code/agents/{owner}/sandboxes/usage                                     no tool yet: what an owner's sandboxes have used
 DELETE /v1/code/agents/{owner}/sandboxes/{id}                                   a person's: a sandbox's disk goes with it
 POST /v1/code/agents/{owner}/sandboxes/{id}/start                               a person's: a sandbox is a machine billed while it runs
-POST /v1/code/agents/{owner}/sandboxes/{id}/stop                                no tool yet: stop a sandbox (ends its spend)
 GET /v1/code/agents/{owner}/settings                                            a person's: the owner's agent settings
 PUT /v1/code/agents/{owner}/settings                                            a person's: the owner's agent settings
 GET /v1/code/agents/{owner}/shares                                              a credential: a share link reads the thread without signing in
 DELETE /v1/code/agents/{owner}/shares/{id}                                      a person's: share links are made by people
 POST /v1/code/agents/{owner}/threads/{thread}/shares                            a credential: a share link reads the thread without signing in
-GET /v1/code/changes/{id}/ai-jobs                                               no tool yet: a change's AI reviews, oldest first (request_ai_review answers its own job)
 POST /v1/code/changes/{id}/approve-run                                          an admin's: running code from outside the repo with its data is a person's decision
-DELETE /v1/code/changes/{id}/preview                                            no tool yet: stop a change's preview
-POST /v1/code/changes/{id}/preview                                              no tool yet: start a change's preview (roll's previews_wait waits on one)
 POST /v1/code/changes/{id}/reviews/{rid}/dismiss                                a person's: dismissing someone else's review
 GET /v1/code/changes/{id}/unstored/{fingerprint}                                a person's: where a credential found in a change would be stored in roll secrets
 POST /v1/code/changes/{id}/unstored/{fingerprint}/store                         a person's: storing a found credential reads its value
@@ -102,24 +91,19 @@ PUT /v1/code/owners/{owner}/review-provider                                     
 GET /v1/code/owners/{owner}/tokens                                              a person's: an owner's own roll code tokens (roll's access tokens have access_* tools)
 POST /v1/code/owners/{owner}/tokens                                             a credential: the token is answered once
 DELETE /v1/code/owners/{owner}/tokens/{id}                                      a person's: revoking a token that may be the caller's
-GET /v1/code/owners/{owner}/usage                                               no tool yet: an owner's AI review spend this month
-GET /v1/code/pricing                                                            no tool yet: what roll's AI review costs per mode
 DELETE /v1/code/repos/{owner}/{repo}                                            a person's: a repository and its history go for good (GitHub's MCP server has no such tool either)
 PATCH /v1/code/repos/{owner}/{repo}                                             an admin's: visibility, the default branch and landing settings
-GET /v1/code/repos/{owner}/{repo}/audit                                         no tool yet: queue bypasses, pauses and approved runs
 POST /v1/code/repos/{owner}/{repo}/changesets                                   create_change and revise_change write files as a change; a bare changeset is git's (a push)
 GET /v1/code/repos/{owner}/{repo}/events                                        a stream: MCP answers results (get_change, queue_status; webhooks for the rest)
 GET /v1/code/repos/{owner}/{repo}/leaks                                         an admin's: where secrets sit in the default branch
-GET /v1/code/repos/{owner}/{repo}/learnings                                     no tool yet: what roll's reviewer keeps in mind for the repo
+GET /v1/code/repos/{owner}/{repo}/learnings                                     no tool yet: learnings can hold an outsider's words with no `outside` mark, so lockdown couldn't withhold them
 POST /v1/code/repos/{owner}/{repo}/learnings                                    a person's: learnings steer roll's reviewer, whose approval can count toward landing
 DELETE /v1/code/repos/{owner}/{repo}/learnings/{id}                             a person's: learnings steer roll's reviewer, whose approval can count toward landing
 GET /v1/code/repos/{owner}/{repo}/paths/{rev}                                   the dashboard's file finder: list_tree and search_code cover it
 POST /v1/code/repos/{owner}/{repo}/queue/pause                                  an admin's: pausing the queue stops every landing
 POST /v1/code/repos/{owner}/{repo}/queue/resume                                 an admin's: the queue's pause
 GET /v1/code/repos/{owner}/{repo}/readme/{rev}                                  read_file reads it
-GET /v1/code/repos/{owner}/{repo}/review-settings                               no tool yet: what a change needs to land (approvals, code owners)
 PATCH /v1/code/repos/{owner}/{repo}/review-settings                             an admin's: what a change needs to land
-GET /v1/code/repos/{owner}/{repo}/reviewer                                      no tool yet: roll's reviewer for the repo (its mode, model and index)
 PATCH /v1/code/repos/{owner}/{repo}/reviewer                                    an admin's: the repo's reviewer settings
 GET /v1/code/repos/{owner}/{repo}/webhooks                                      an admin's: a webhook's URL and signing secret
 POST /v1/code/repos/{owner}/{repo}/webhooks                                     an admin's: a webhook's URL and signing secret

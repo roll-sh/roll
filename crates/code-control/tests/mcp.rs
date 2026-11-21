@@ -12,7 +12,7 @@ use serde_json::{Value, json};
 const MCP: &str = "/v1/code/mcp";
 
 /// The tools docs/code/mcp.md lists.
-const TOOLS: [&str; 55] = [
+const TOOLS: [&str; 71] = [
     "list_repos", "search_code", "read_file", "list_tree", "log", "blame", "get_changeset", "compare", "create_change", "revise_change", "land", "get_change",
     "list_changes", "claim_work", "heartbeat_work", "release_work", "complete_work", "list_work", "create_work", "comment", "review", "queue_status",
     "request_ai_review", "list_agent_machines", "list_agent_threads", "create_agent_thread", "send_agent_message", "respond_agent_request",
@@ -20,14 +20,18 @@ const TOOLS: [&str; 55] = [
     "run_agent_automation", "list_agent_automation_runs", "get_agent_automation_run", "cancel_agent_automation_run", "enqueue_change", "dequeue_change",
     "close_change", "report_check", "set_commit_status", "list_refs", "create_repo", "resolve_thread", "reopen_thread", "apply_suggestion", "request_review",
     "get_commit_statuses", "get_work", "update_work", "release_agent_work", "update_change", "set_change_lane",
+    "get_ai_review_pricing", "get_review_usage", "list_ai_reviews", "get_reviewer", "get_review_rules", "get_repo_audit", "start_preview",
+    "stop_preview", "retry_agent_automation_run", "enable_agent_automation", "disable_agent_automation", "get_agent_automation_catalog", "test_agent_automation",
+    "list_agent_sandboxes", "stop_agent_sandbox", "get_agent_sandbox_usage",
 ];
 /// The agents tools (not repo-scoped: `agent_tools_drive_a_machine_like_their_routes`,
 /// `agent_tools_work_in_roll_code_like_their_routes` and `automation_tools_map_onto_their_routes`).
-const AGENT_TOOLS: usize = 16;
+const AGENT_TOOLS: usize = 24;
 /// The ones that only read (`readOnlyHint`).
-const READ_ONLY: [&str; 20] = [
+const READ_ONLY: [&str; 29] = [
     "list_repos", "search_code", "read_file", "list_tree", "log", "blame", "get_changeset", "compare", "get_change", "list_changes", "list_work", "queue_status", "list_refs",
-    "get_commit_statuses", "get_work",
+    "get_commit_statuses", "get_work", "get_ai_review_pricing", "get_review_usage", "list_ai_reviews", "get_reviewer", "get_review_rules",
+    "get_repo_audit", "get_agent_automation_catalog", "list_agent_sandboxes", "get_agent_sandbox_usage",
     "list_agent_machines", "list_agent_threads", "list_agent_automations", "list_agent_automation_runs", "get_agent_automation_run",
 ];
 
@@ -140,7 +144,10 @@ async fn transport_sessions_and_protocol() {
         let read_only = READ_ONLY.contains(&t["name"].as_str().unwrap());
         assert_eq!(t["annotations"]["readOnlyHint"], read_only, "{}", t["name"]);
         // A model provider or a branch's remote is outside roll; a repo's own reads and writes aren't.
-        let open = ["request_ai_review", "create_agent_thread", "publish_agent_thread"].contains(&t["name"].as_str().unwrap());
+        let open = ["request_ai_review", "create_agent_thread", "publish_agent_thread", "retry_agent_automation_run"].contains(&t["name"].as_str().unwrap());
+        // What can't be undone asks a person first: a closed change, a preview's data.
+        let destructive = ["close_change", "stop_preview"].contains(&t["name"].as_str().unwrap());
+        assert_eq!(t["annotations"]["destructiveHint"], destructive, "{}", t["name"]);
         if open || ["read_file", "land", "comment"].contains(&t["name"].as_str().unwrap()) {
             assert_eq!(t["annotations"]["openWorldHint"], open, "{}", t["name"]);
         }
@@ -671,6 +678,27 @@ async fn tools_map_onto_their_routes() {
     assert_eq!(ready, a.ok("GET", &format!("/v1/code/changes/{id}"), None).await);
     // Back to draft would take a queued change out of the queue: that's dequeue_change's.
     assert!(c.tool_err("update_change", json!({ "change": id, "ready": false })).await.contains("dequeue_change"));
+
+    // The reviewer's reads, each its route's (jobs and their status move on their own, so ids).
+    let ids = |v: &Value| v.as_array().map(|a| a.iter().map(|j| j["id"].clone()).collect::<Vec<_>>());
+    let jobs = c.tool("list_ai_reviews", json!({ "change": id })).await;
+    assert_eq!(ids(&jobs["items"]), ids(&a.ok("GET", &format!("/v1/code/changes/{id}/ai-jobs"), None).await), "{jobs}");
+    let reviewer = c.tool("get_reviewer", json!({ "repo": repo })).await;
+    assert_eq!(reviewer["effective"], a.ok("GET", &format!("{p}/reviewer"), None).await["effective"]);
+    same(c.tool("get_review_rules", json!({ "repo": repo })).await, a.ok("GET", &format!("{p}/review-settings"), None).await);
+    same(c.tool("get_repo_audit", json!({ "repo": repo })).await, a.ok("GET", &format!("{p}/audit"), None).await);
+    same(c.tool("get_ai_review_pricing", json!({})).await, a.ok("GET", "/v1/code/pricing", None).await);
+    same(c.tool("get_review_usage", json!({ "owner": "acme" })).await, a.ok("GET", "/v1/code/owners/acme/usage", None).await);
+    // A preview answers as its route does, whether this app runs previews or not.
+    for (tool, method) in [("start_preview", "POST"), ("stop_preview", "DELETE")] {
+        let r = c.call(tool, json!({ "change": id })).await;
+        let (status, body) = a.req(method, &format!("/v1/code/changes/{id}/preview"), None, None).await;
+        if status.is_success() {
+            assert_eq!((r["isError"].as_bool(), &r["structuredContent"]["id"]), (Some(false), &body["id"]), "{tool}: {r}");
+        } else {
+            assert_eq!((r["isError"].as_bool(), r["structuredContent"]["http_status"].as_u64()), (Some(true), Some(status.as_u16() as u64)), "{tool}: {r}");
+        }
+    }
 }
 
 /// Every tool's argument errors: each required argument missing, ill-typed values, and
@@ -899,6 +927,12 @@ async fn every_tool_is_authorized_like_its_route() {
                 ("report_check", json!({ "change": ch, "name": "ci", "status": "success" }), post(format!("/v1/code/changes/{ch}/checks"), json!({ "name": "ci", "status": "success" })), false),
                 ("set_commit_status", json!({ "repo": f.repo, "rev": "main", "state": "success" }), post(format!("{p}/statuses/main"), json!({ "state": "success" })), false),
                 ("get_commit_statuses", json!({ "repo": f.repo, "rev": "main" }), get(format!("{p}/statuses/main")), true),
+                ("list_ai_reviews", json!({ "change": ch }), get(format!("/v1/code/changes/{ch}/ai-jobs")), true),
+                ("get_reviewer", json!({ "repo": f.repo }), get(format!("{p}/reviewer")), true),
+                ("get_review_rules", json!({ "repo": f.repo }), get(format!("{p}/review-settings")), true),
+                ("get_repo_audit", json!({ "repo": f.repo }), get(format!("{p}/audit")), false),
+                ("start_preview", json!({ "change": ch }), post(format!("/v1/code/changes/{ch}/preview"), json!({})), false),
+                ("stop_preview", json!({ "change": ch }), ("DELETE", format!("/v1/code/changes/{ch}/preview"), None), false),
                 ("update_change", json!({ "change": ch, "title": "x" }), ("PATCH", format!("/v1/code/changes/{ch}"), Some(json!({ "title": "x" }))), false),
                 ("set_change_lane", json!({ "change": ch, "lane": "urgent" }), ("PATCH", format!("/v1/code/changes/{ch}/enqueue"), Some(json!({ "lane": "urgent" }))), false),
                 ("resolve_thread", json!({ "thread": th }), post(format!("/v1/code/threads/{th}/resolve"), json!({})), false),
@@ -937,7 +971,7 @@ async fn every_tool_is_authorized_like_its_route() {
                     _ => assert!(text.starts_with("not found"), "{ctx}"),
                 }
             }
-            assert_eq!(seen.len(), TOOLS.len() - AGENT_TOOLS - 2, "every repo tool is checked (list_repos and create_repo below)");
+            assert_eq!(seen.len(), TOOLS.len() - AGENT_TOOLS - 4, "every repo tool is checked (list_repos, create_repo and get_review_usage below; get_ai_review_pricing is public)");
         }
         // The list is the route's: only what the caller may read, so the private repo isn't in it.
         let listed = c.tool("list_repos", json!({})).await;
@@ -948,6 +982,10 @@ async fn every_tool_is_authorized_like_its_route() {
         let res = c.call("create_repo", json!({ "owner": "acme", "name": "nope" })).await;
         assert_eq!((res["isError"].as_bool(), res["structuredContent"]["http_status"].as_u64()), (Some(true), Some(status.as_u16() as u64)), "{who}: {res}");
         assert!(!status.is_success(), "{who} made a repo under acme");
+        // An owner's spend is its managers': as the route answers.
+        let (status, _) = a.req("GET", "/v1/code/owners/acme/usage", None, token).await;
+        let res = c.call("get_review_usage", json!({ "owner": "acme" })).await;
+        assert_eq!((res["isError"].as_bool(), res["structuredContent"]["http_status"].as_u64()), (Some(true), Some(status.as_u16() as u64)), "{who}: {res}");
     }
     // The owner's own token and the admin read and write the private repo.
     let (_, t) = a.req("POST", "/v1/code/owners/acme/tokens", Some(json!({ "name": "t" })), root).await;
@@ -1257,4 +1295,22 @@ async fn automation_tools_map_onto_their_routes() {
     assert!(err.contains("agent"), "{err}");
     let cancelled = owner.tool("cancel_agent_automation_run", json!({ "owner": "acme", "run": rid })).await;
     assert_eq!(cancelled["status"], "cancelled");
+    // A cancelled run goes on again; an automation turned off and on by name; the catalogue and a
+    // dry run, each what its route answers.
+    let retried = owner.tool("retry_agent_automation_run", json!({ "owner": "acme", "run": rid })).await;
+    assert_ne!(retried["status"], "cancelled", "{retried}");
+    assert_eq!(owner.tool("disable_agent_automation", json!({ "owner": "acme", "automation": "Hello again" })).await["enabled"], false);
+    assert_eq!(a.req("GET", &format!("/v1/code/agents/acme/automations/{id}"), None, root).await.1["enabled"], false);
+    assert_eq!(owner.tool("enable_agent_automation", json!({ "owner": "acme", "automation": id })).await["enabled"], true);
+    assert_eq!(owner.tool("get_agent_automation_catalog", json!({ "owner": "acme" })).await, a.req("GET", "/v1/code/agents/acme/automations/catalog", None, root).await.1);
+    let event = json!({ "source": "manual", "kind": "run", "data": { "input": 1 } });
+    let tried = owner.tool("test_agent_automation", json!({ "owner": "acme", "spec": spec, "event": event })).await;
+    assert_eq!(tried, a.req("POST", "/v1/code/agents/acme/automations/test", Some(json!({ "automation": spec, "event": event })), root).await.1);
+    assert!(tried["trigger"].is_boolean(), "{tried}");
+    // Sandboxes: the list and a month's use as their routes answer; an unknown one isn't found.
+    assert_eq!(owner.tool("list_agent_sandboxes", json!({ "owner": "acme" })).await, a.req("GET", "/v1/code/agents/acme/sandboxes", None, root).await.1);
+    assert_eq!(owner.tool("get_agent_sandbox_usage", json!({ "owner": "acme" })).await, a.req("GET", "/v1/code/agents/acme/sandboxes/usage", None, root).await.1);
+    let (status, _) = a.req("POST", "/v1/code/agents/acme/sandboxes/sbx_nope/stop", Some(json!({})), root).await;
+    let r = owner.call("stop_agent_sandbox", json!({ "owner": "acme", "sandbox": "sbx_nope" })).await;
+    assert_eq!((r["isError"].as_bool(), r["structuredContent"]["http_status"].as_u64()), (Some(true), Some(status.as_u16() as u64)), "{r}");
 }
