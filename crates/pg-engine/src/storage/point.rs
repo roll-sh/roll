@@ -265,6 +265,9 @@ impl PointReader {
         // (Rows found in the batch's blocks, their values asked for and read after every seek:
         // a row's first byte was a miss of its own, one row after another.)
         let mut found: Vec<(usize, usize, (u32, u32))> = Vec::with_capacity(sorted.len());
+        // (Rows of column blocks whose rows aren't made (format 5): made after the seeks, one after
+        // another into one buffer, each value a slice of it.)
+        let mut colrows: Vec<(usize, usize, usize)> = Vec::new();
         for st in sorted.iter() {
             let key = keys[st.i].as_ref();
             let sk = &seek[st.seek.clone()];
@@ -319,6 +322,13 @@ impl PointReader {
                 found.push((st.i, plan[pi - 1].0, span));
                 continue;
             }
+            if let L1::Block(..) = st.l1
+                && block.col_dir().is_some()
+                && block.has_value(bpos)
+            {
+                colrows.push((st.i, plan[pi - 1].0, bpos.index()));
+                continue;
+            }
             // (Not `value_ref`: a column block's row is made alone, by `value`.)
             if block.has_value(bpos) {
                 match resolve && block.external(bpos) {
@@ -336,6 +346,21 @@ impl PointReader {
                 true => super::toast::resolve(view, keys[i].as_ref(), block.span(span), ts)?,
                 false => block.span(span),
             });
+        }
+        if !colrows.is_empty() {
+            let mut buf = Vec::new();
+            let mut ends = Vec::with_capacity(colrows.len());
+            for &(_, b, r) in &colrows {
+                let block = &*blocks[b].2;
+                block.col_dir().expect("a column block").row(&block.data()[..], r, &mut buf);
+                ends.push(buf.len());
+            }
+            let all = Bytes::from(buf);
+            let mut s = 0;
+            for (&(i, _, _), e) in colrows.iter().zip(ends) {
+                out[i] = Some(all.slice(s..e));
+                s = e;
+            }
         }
         // (Held for the reader's next reads: a nested loop's next outer row's keys are often
         // in it.)
