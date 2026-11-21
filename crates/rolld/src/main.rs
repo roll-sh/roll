@@ -21,6 +21,7 @@ mod cluster;
 mod code;
 mod edge;
 mod isolation;
+mod listen;
 mod logs;
 mod nosql;
 mod previews;
@@ -310,6 +311,12 @@ struct Args {
     /// The deployment key a sealed start's shares gave: in memory only, never the environment.
     #[arg(skip)]
     unsealed_key: Option<std::sync::Arc<zeroize::Zeroizing<String>>>,
+    /// Once every listener accepts, write where each one is to this file, as a JSON object of
+    /// flag names and addresses (`{"api":"127.0.0.1:41234","s3":…}`; written to a temporary file
+    /// and renamed). A listener given port 0 gets a port from the OS: tests start rolld that way
+    /// and read the file (`listen.rs`).
+    #[arg(long, env = "ROLL_ADDR_FILE")]
+    addr_file: Option<PathBuf>,
 }
 
 impl Args {
@@ -388,7 +395,10 @@ async fn run() -> anyhow::Result<()> {
 }
 
 async fn run_with(mut args: Args) -> anyhow::Result<()> {
+    // Port-0 listeners get their ports before anything reads the flags (the edge's Kafka move too).
+    listen::reserve(&mut args)?;
     edge::configure(&mut args);
+    let listeners = listen::names(&mut args);
     let mut auth = auth::Auth::new(&args)?;
     let on = args.products()?;
     info!(products = %on, "starting");
@@ -397,7 +407,7 @@ async fn run_with(mut args: Args) -> anyhow::Result<()> {
     let mut api_listener = None;
     if let Some(s) = args.secret_key_sealed.as_deref().filter(|s| !s.trim().is_empty()) {
         let sealed = roll_secrets::unseal::Sealed::parse(s).map_err(anyhow::Error::msg)?;
-        let Some((listener, key)) = sealed::unseal(&args, &home, sealed).await? else { return Ok(()) };
+        let Some((listener, key)) = sealed::unseal(&args, &home, sealed, &listeners).await? else { return Ok(()) };
         args.unsealed_key = Some(std::sync::Arc::new(key));
         api_listener = Some(listener);
     }
@@ -761,7 +771,8 @@ async fn run_with(mut args: Args) -> anyhow::Result<()> {
     type Serving<'a> = std::pin::Pin<Box<dyn std::future::Future<Output = anyhow::Result<()>> + 'a>>;
     let mut serving: Vec<Serving<'_>> = vec![Box::pin(edge::serve(edge))];
     if let Some(p) = &postgres {
-        serving.push(Box::pin(p.proxy.clone().serve_shared()));
+        let (proxy, addr) = (p.proxy.clone(), args.proxy);
+        serving.push(Box::pin(async move { proxy.serve_listener(listen::bind(addr)?).await }));
         serving.push(Box::pin(async {
             reconciler::run(p.control.clone()).await;
             Ok(())
@@ -800,7 +811,7 @@ async fn run_with(mut args: Args) -> anyhow::Result<()> {
     // A sealed start kept its listener: connections waited in its backlog while products started.
     let bound = match api_listener {
         Some(l) => l,
-        None => tokio::net::TcpListener::bind(args.api).await?,
+        None => listen::bind(args.api)?,
     };
     // No Nagle: a WebSocket's small frames (a gateway's `open`, roll code's events) would otherwise
     // wait for the peer's delayed ACK.
@@ -816,7 +827,15 @@ async fn run_with(mut args: Args) -> anyhow::Result<()> {
         })
         .into_future();
     tokio::pin!(api);
+    // Written once the branches above it have been polled: every listener is bound by then.
+    let announce = async {
+        if let Some(path) = &args.addr_file {
+            listen::announce(path, &listeners, false)?;
+        }
+        std::future::pending::<anyhow::Result<()>>().await
+    };
     tokio::select! {
+        biased;
         r = &mut api => r?,
         (r, ..) = futures::future::select_all(serving) => r?,
         grace = stop(code.as_ref(), queues.as_ref(), &cluster, &args) => {
@@ -838,6 +857,7 @@ async fn run_with(mut args: Args) -> anyhow::Result<()> {
                 r.shutdown().await?;
             }
         }
+        r = announce => r?,
     }
     if let Some(a) = &apps {
         a.shutdown().await;

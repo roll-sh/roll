@@ -187,11 +187,7 @@ pub fn start(
     backend.attach(&engine);
     code.code.set_preview_backend(backend);
     // The mail catcher: previews' mail is kept with them, never sent on.
-    let bound = std::net::TcpListener::bind(args.previews_smtp).and_then(|l| {
-        l.set_nonblocking(true)?;
-        tokio::net::TcpListener::from_std(l)
-    });
-    match bound {
+    match crate::listen::bind(args.previews_smtp) {
         Ok(l) => {
             tracing::info!(addr = %args.previews_smtp, "roll previews: catching previews' mail");
             tokio::spawn(roll_previews::mail::serve(l, Arc::new(roll_previews::mail::Store(store))));
