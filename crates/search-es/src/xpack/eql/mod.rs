@@ -208,11 +208,13 @@ fn response(took: i64, result: exec::Results) -> Map {
         exec::Output::Events(e) => ("events", e),
         exec::Output::Sequences(s) => ("sequences", s),
     };
+    // A search that timed out (the node's cap) leaves the answer partial, as Elasticsearch's
+    // EQL reports a timeout.
     let mut m = Map::new();
-    m.insert("is_partial".into(), false.into());
+    m.insert("is_partial".into(), result.timed_out.into());
     m.insert("is_running".into(), false.into());
     m.insert("took".into(), took.into());
-    m.insert("timed_out".into(), false.into());
+    m.insert("timed_out".into(), result.timed_out.into());
     if !result.shard_failures.is_empty() {
         m.insert("shard_failures".into(), Value::Arr(result.shard_failures));
     }

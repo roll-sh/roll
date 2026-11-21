@@ -159,10 +159,17 @@ impl fmt::Debug for Grant {
 
 /// In a grant's request when the grant also allows a stronger action on the route's resource that
 /// the catalogue row names (`capable`): a product that can do more within one route does it only
-/// with this (Postgres runs SQL as the database's superuser only for a grant that may `admin` it).
+/// with this (Postgres runs SQL as the database's superuser only for a grant that may `admin` it,
+/// and lets it drop objects only for one that may `delete`).
 /// The operator's requests carry no grant and need none.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct Capable(pub scope::Action);
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Capable(pub Vec<scope::Action>);
+
+impl Capable {
+    pub fn has(&self, a: scope::Action) -> bool {
+        self.0.contains(&a)
+    }
+}
 
 /// In a grant's request when a person's approval is what let it run: this one request approved
 /// (`until: None`), or a rule an approval allowed for a while (`until`: when that rule lapses). A

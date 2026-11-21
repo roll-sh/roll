@@ -957,9 +957,14 @@ impl Apps {
             && dep.run.volume.is_none()
             && let Some(img) = dep.image.clone()
         {
-            match self.export_site(&img).await {
+            // Its files hold no secret value (Netlify's secrets scan): one that does fails the
+            // deploy (a container would serve the same file).
+            let r = self.resolve_vars(&svc, &env, &dep.id).await?;
+            let secrets: Vec<(String, String)> = r.vars.iter().filter(|(k, _)| r.is_secret(k)).cloned().collect();
+            match self.export_site_checked(&img, secrets).await {
                 Ok(Some(n)) => log.stream(Stream::System).line(format!("static site: {} KiB of files, served without an instance", n.div_ceil(1024))),
                 Ok(None) => {}
+                Err(e) if e.downcast_ref::<crate::sites::SecretInSite>().is_some() => return Err(e),
                 Err(e) => log.stream(Stream::System).line(format!("static site: its files couldn't be exported ({e:#}); a container serves it")),
             }
         }
@@ -1355,6 +1360,13 @@ impl Apps {
                 log.line(format!("checking out {repo} at {}", &rev[..rev.len().min(12)]));
                 let sources = self.deps.sources.as_ref().ok_or_else(|| anyhow::anyhow!("roll code isn't on this node"))?;
                 sources.materialize(repo, rev, &tree).await?;
+                if svc.build.submodules.unwrap_or(false) {
+                    let allowed = svc.build.submodule_repos.clone().unwrap_or_default();
+                    let n = crate::submodules::fetch(sources.as_ref(), repo, rev, &tree, &allowed, self.cfg.allow_private).await?;
+                    if n > 0 {
+                        log.line(format!("fetched {n} submodule(s)"));
+                    }
+                }
                 root.clone()
             }
             (Source::Git { url, root }, _) => {
@@ -1553,7 +1565,7 @@ impl Apps {
                 let name = format!("vercel-{}", i + 1);
                 if run.schedules.len() < 20 && !run.schedules.iter().any(|s| s.path.as_deref() == Some(c.path.as_str()) || s.name == name) {
                     log.line(format!("plan: vercel.json's cron {} calls {}", c.schedule, c.path));
-                    run.schedules.push(crate::model::Scheduled { name, schedule: c.schedule.clone(), command: String::new(), path: Some(c.path.clone()), timezone: None, timeout_s: None, auth: None });
+                    run.schedules.push(crate::model::Scheduled { name, schedule: c.schedule.clone(), command: String::new(), path: Some(c.path.clone()), timezone: None, timeout_s: None, auth: None, cpu: None, memory_mb: None });
                 }
             }
         }
@@ -2863,7 +2875,7 @@ impl Apps {
                             continue;
                         }
                     }
-                    match self.start_job(&svc.id, &e.name, serde_json::json!({ "command": sc.command, "timeout_s": sc.timeout_s })).await {
+                    match self.start_job(&svc.id, &e.name, serde_json::json!({ "command": sc.command, "timeout_s": sc.timeout_s, "cpu": sc.cpu, "memory_mb": sc.memory_mb })).await {
                         Ok(job) => {
                             log.line(format!("scheduled {}: job {} started", sc.name, job.id));
                             let id = job.id.clone();
@@ -2931,7 +2943,7 @@ impl Apps {
             // Its output stays in the environment's log (drains read it there); its container's
             // name, its own id in it, is what picks its own lines out.
             let name = crate::live::run_name(&sid, &live.env, &run_dep, &id);
-            let (status, code) = match live.run_to_exit(None, &[], timeout, None, cancel, Some(name)).await {
+            let (status, code) = match live.run_to_exit(None, &[], timeout, None, cancel, Some(name), None).await {
                 Ok(x) if x.canceled => (RunStatus::Canceled, None),
                 Ok(x) if x.timed_out => (RunStatus::TimedOut, None),
                 Ok(x) if x.code == Some(0) => (RunStatus::Succeeded, Some(0)),

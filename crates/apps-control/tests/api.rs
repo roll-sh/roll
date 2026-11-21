@@ -30,7 +30,14 @@ struct FakeCode {
     statuses: Mutex<Vec<(String, String, String)>>,
     /// What a commit's checks say (CI).
     ci: Mutex<Option<apps_control::integrations::Ci>>,
+    /// `acme/site`'s gitlinks: a path and the commit it pins.
+    links: Mutex<BTreeMap<String, String>>,
+    /// Its other repos: whether each is public, and its files.
+    others: Mutex<BTreeMap<String, OtherRepo>>,
 }
+
+/// Whether a repo is public, and its files.
+type OtherRepo = (bool, BTreeMap<String, String>);
 
 impl FakeCode {
     fn push(&self, sha: &str, message: &str, files: &[(&str, &str)]) {
@@ -64,7 +71,27 @@ impl Sources for FakeCode {
     async fn read_file(&self, _repo: &str, _revision: &str, path: &str) -> anyhow::Result<Option<Vec<u8>>> {
         Ok(self.files.lock().get(path).map(|v| v.as_bytes().to_vec()))
     }
-    async fn materialize(&self, _repo: &str, _revision: &str, dir: &Path) -> anyhow::Result<()> {
+    async fn gitlink(&self, repo: &str, _revision: &str, path: &str) -> anyhow::Result<Option<String>> {
+        Ok(self.links.lock().get(path).filter(|_| repo == "acme/site").cloned())
+    }
+    fn git_base(&self) -> Option<String> {
+        Some("https://code.test/git".into())
+    }
+    async fn public(&self, repo: &str) -> anyhow::Result<bool> {
+        Ok(self.others.lock().get(repo).is_some_and(|(p, _)| *p))
+    }
+    async fn materialize(&self, repo: &str, _revision: &str, dir: &Path) -> anyhow::Result<()> {
+        if repo != "acme/site" {
+            let files = self.others.lock().get(repo).map(|(_, f)| f.clone()).ok_or_else(|| anyhow::anyhow!("no repo {repo}"))?;
+            for (k, v) in files {
+                std::fs::write(dir.join(k), v)?;
+            }
+            return Ok(());
+        }
+        // A gitlink is an empty directory, as roll code writes it.
+        for p in self.links.lock().keys() {
+            std::fs::create_dir_all(dir.join(p))?;
+        }
         for (k, v) in self.files.lock().iter() {
             let p = dir.join(k);
             std::fs::create_dir_all(p.parent().unwrap())?;
@@ -148,6 +175,10 @@ struct FakeResources;
 
 /// What the fake made and revoked for `logs` links, in order.
 static MINTED: Mutex<Vec<String>> = Mutex::new(Vec::new());
+/// While set, a `logs` link waits (a while at most) for a second one to reach the provider too,
+/// so two requests racing to make one link both get there whatever the machine's load.
+static RACING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+static RACE: std::sync::LazyLock<tokio::sync::Barrier> = std::sync::LazyLock::new(|| tokio::sync::Barrier::new(2));
 
 #[async_trait]
 impl apps_control::integrations::Resources for FakeResources {
@@ -163,7 +194,9 @@ impl apps_control::integrations::Resources for FakeResources {
             return Ok(None);
         }
         // A provider takes a moment: two requests at once both get here.
-        tokio::time::sleep(Duration::from_millis(30)).await;
+        if RACING.load(Ordering::SeqCst) {
+            let _ = tokio::time::timeout(Duration::from_secs(10), RACE.wait()).await;
+        }
         let mut m = MINTED.lock();
         let key = format!("key{}", m.len());
         m.push(format!("link {service} {key}"));
@@ -1616,7 +1649,9 @@ async fn a_link_puts_its_variables_in_the_instances() {
     let rid = racer["id"].as_str().unwrap().to_string();
     let path = format!("/v1/apps/services/{rid}/links/search/logs");
     let before = MINTED.lock().len();
+    RACING.store(true, Ordering::SeqCst);
     let (a, b) = tokio::join!(call(&w.api, "PUT", &path, Some(json!({}))), call(&w.api, "PUT", &path, Some(json!({}))));
+    RACING.store(false, Ordering::SeqCst);
     assert_eq!((a.0, b.0), (StatusCode::OK, StatusCode::OK));
     let log: Vec<String> = MINTED.lock()[before..].to_vec();
     assert_eq!(log.iter().filter(|l| l.starts_with("link ")).count(), 2, "{log:?}");
@@ -1686,6 +1721,26 @@ async fn roll_toml_sets_run_settings_per_environment() {
     assert_eq!(settled(&w, &id, "production", r["id"].as_str().unwrap()).await["status"], "active");
     tokio::time::sleep(Duration::from_millis(200)).await;
     assert_eq!(up(&w), 1, "a redeploy keeps what roll.toml set");
+}
+
+/// A static site whose published files hold a secret's value (Netlify's secrets scan): the
+/// deploy fails naming the file and the variable, never the value; a site without one deploys.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_static_site_holding_a_secret_isnt_published() {
+    let w = world().await;
+    w.code.push("f2f2f2f2f2f2", "site", &[("package.json", r#"{"name":"site","scripts":{"build":"vite build"},"devDependencies":{"vite":"5.0.0"}}"#)]);
+    let (_, svc) = call(&w.api, "POST", "/v1/apps/services", Some(json!({ "project": w.project, "name": "site", "source": {"kind": "repo", "repo": "acme/site"} }))).await;
+    let id = svc["id"].as_str().unwrap_or_else(|| panic!("{svc}")).to_string();
+    assert_eq!(settled(&w, &id, "production", svc["environments"][0]["latest"]["id"].as_str().unwrap()).await["status"], "active");
+    let env = format!("/v1/apps/services/{id}/environments/production");
+    call(&w.api, "PATCH", &format!("{env}/variables"), Some(json!({"set": {"STRIPE_SECRET": "sk_live_leaked_9f8e7d"}, "seal": ["STRIPE_SECRET"]}))).await;
+    // A build step wrote it into a published file.
+    *w.fake.site_redirects.lock() = "# sk_live_leaked_9f8e7d\n".into();
+    let (_, d) = call(&w.api, "POST", &format!("{env}/deploys"), Some(json!({"no_cache": true}))).await;
+    let d = settled(&w, &id, "production", d["id"].as_str().unwrap()).await;
+    assert_eq!(d["status"], "failed", "{d}");
+    let why = d["error"].as_str().unwrap_or_default();
+    assert!(why.contains("_redirects") && why.contains("STRIPE_SECRET") && !why.contains("sk_live_leaked"), "{why}");
 }
 
 /// A static site's `_redirects` proxies a path to another site (Netlify's 200 proxies, Vercel's
@@ -4874,6 +4929,28 @@ async fn a_status_badge_says_what_deploys_stand_at() {
     assert!(svg.starts_with("<svg") && svg.contains("web production") && svg.contains(">live<"), "{svg}");
 }
 
+/// A job at its own size (Heroku's `run --size`): its container gets the CPUs and memory it
+/// names, not the service's; a size out of range is refused.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_job_runs_at_its_own_size() {
+    let w = world().await;
+    let (svc, _) = image_service(&w, "api", json!({"port": 80})).await;
+    let id = svc["id"].as_str().unwrap().to_string();
+    let jobs = format!("/v1/apps/services/{id}/environments/production/jobs");
+    assert_eq!(call(&w.api, "POST", &jobs, Some(json!({"command": "true", "cpu": 64}))).await.0, StatusCode::BAD_REQUEST);
+    let (st, j) = call(&w.api, "POST", &jobs, Some(json!({"command": "sleep 1", "cpu": 4, "memory_mb": 8192}))).await;
+    assert!(st.is_success(), "{j}");
+    let mut sized = None;
+    for _ in 0..200 {
+        sized = w.fake.commands_made.lock().iter().find(|(c, ..)| c == "sleep 1").map(|(_, cpu, mb)| (*cpu, *mb));
+        if sized.is_some() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert_eq!(sized, Some((4.0, 8192)));
+}
+
 /// A bigger build machine (`build.size`): the builder is asked for its CPUs and memory; a size
 /// that isn't one is refused.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -6681,6 +6758,42 @@ async fn a_git_url_services_submodules_are_built_with_it() {
     }
 }
 
+/// A roll code repo's submodules (`build.submodules`): a public roll code repo's and an outside Git
+/// URL's are built with it; a private roll code repo's only once `build.submodule_repos` names it
+/// (the catalogue lends read on each), so a writer can't build in a repo by pinning it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_repos_submodules_come_from_roll_code_and_from_elsewhere() {
+    let w = world().await;
+    let vendor = Arc::new(GitHost::default());
+    let pinned = vendor.commit(&[("v.js", "module.exports = 3")]);
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let at = listener.local_addr().unwrap();
+    tokio::spawn(async move { axum::serve(listener, code_git::router(vendor, code_git::ServerConfig::default())).await.unwrap() });
+    w.code.others.lock().insert("acme/lib".into(), (false, [("lib.js".to_string(), "module.exports = 1".to_string())].into()));
+    w.code.others.lock().insert("oss/ui".into(), (true, [("ui.js".to_string(), "module.exports = 2".to_string())].into()));
+    *w.code.links.lock() = [("lib", "1".repeat(40)), ("ui", "2".repeat(40)), ("vendor", pinned)].into_iter().map(|(k, v)| (k.to_string(), v)).collect();
+    let gitmodules = format!("[submodule \"lib\"]\n\tpath = lib\n\turl = ../lib.git\n[submodule \"ui\"]\n\tpath = ui\n\turl = https://code.test/git/oss/ui.git\n[submodule \"vendor\"]\n\tpath = vendor\n\turl = http://{at}/git/oss/vendor\n");
+    // The repo's tree as it is (no landing: nothing redeploys behind the test).
+    for (k, v) in [("package.json", r#"{"name":"site","scripts":{"start":"node server.js"}}"#), ("server.js", "x"), (".gitmodules", &gitmodules)] {
+        w.code.files.lock().insert(k.to_string(), v.to_string());
+    }
+    let (st, svc) = call(&w.api, "POST", "/v1/apps/services", Some(json!({ "project": w.project, "name": "site", "source": {"kind": "repo", "repo": "acme/site"}, "build": {"submodules": true} }))).await;
+    assert_eq!(st, StatusCode::CREATED, "{svc}");
+    let id = svc["id"].as_str().unwrap().to_string();
+    let d = settled(&w, &id, "production", svc["environments"][0]["latest"]["id"].as_str().unwrap()).await;
+    assert_eq!(d["status"], "failed", "{d}");
+    assert!(d["error"].as_str().unwrap_or_default().contains("acme/lib isn't public"), "{d}");
+    let (st, s) = call(&w.api, "PATCH", &format!("/v1/apps/services/{id}"), Some(json!({ "build": {"submodule_repos": ["acme/lib"]} }))).await;
+    assert_eq!(st, StatusCode::OK, "{s}");
+    let (_, r) = call(&w.api, "POST", &format!("/v1/apps/services/{id}/environments/production/deploys"), Some(json!({}))).await;
+    let d = settled(&w, &id, "production", r["id"].as_str().unwrap_or_else(|| panic!("{r}"))).await;
+    assert_eq!(d["status"], "active", "{d}");
+    let tree = w.fake.build_trees.lock().last().cloned().unwrap();
+    for f in ["lib/lib.js", "ui/ui.js", "vendor/v.js"] {
+        assert!(tree.iter().any(|p| p == f), "{f}: {tree:?}");
+    }
+}
+
 /// A Git URL service's Git LFS objects (`build.lfs`): asked of its LFS server, checked against the
 /// pointer's sha256 and size, and built in the pointer's place; without it, the pointer stays.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -8015,6 +8128,26 @@ async fn a_closed_environment_uses_its_keys_without_seeing_them() {
     let var = |k: &str| closed.vars.iter().find(|(n, _)| n == k).map(|(_, v)| v.clone());
     assert_eq!(var("STRIPE_KEY").as_deref(), Some("rlph_placeholder"), "closed: a placeholder, never the value");
     assert!(vault.0.lock().contains(&"closed by usr_ada".to_string()), "{:?}", vault.0.lock());
+    // Naming another maker is the operator's (roll previews' rules' maker), nobody else's.
+    let put = |ext: Option<roll_auth::SignedIn>, operator: bool| {
+        let mut req = Request::builder().method("PUT").uri(format!("{base}/staging")).header("content-type", "application/json").body(Body::from(json!({"egress": {"mode": "roll", "hosts": ["api.stripe.com"]}, "closed_by": "usr_rules"}).to_string())).unwrap();
+        if let Some(u) = ext {
+            req.extensions_mut().insert(u);
+        }
+        if operator {
+            req.extensions_mut().insert(roll_auth::Operator);
+        }
+        let api = w.api.clone();
+        async move { api.oneshot(req).await.unwrap().status() }
+    };
+    assert_eq!(put(Some(roll_auth::SignedIn { user: "usr_ada".into(), handle: "ada".into(), admin: false, code_owner: None, session: "ses_1".into() }), false).await, StatusCode::FORBIDDEN);
+    // No one at all on a locked daemon (an open one's caller is the operator: `AppsConfig::open`).
+    assert_eq!(put(None, false).await, StatusCode::FORBIDDEN);
+    assert!(put(None, true).await.is_success());
+    let (_, d) = call(&w.api, "POST", &format!("{base}/staging/deploys"), Some(json!({}))).await;
+    settled(&w, &id, "staging", d["id"].as_str().unwrap()).await;
+    assert!(vault.0.lock().contains(&"closed by usr_rules".to_string()), "{:?}", vault.0.lock());
+    assert_eq!(call(&w.api, "GET", &format!("{base}/staging"), None).await.1["closed_by"], "usr_rules", "the environment says who");
     assert!(!closed.vars.iter().any(|(_, v)| v.contains("sk_live_real")));
     for k in ["NODE_EXTRA_CA_CERTS", "SSL_CERT_FILE", "REQUESTS_CA_BUNDLE", "CURL_CA_BUNDLE"] {
         assert_eq!(var(k).as_deref(), Some(apps_control::deploy::INTERCEPT_CA), "{k}");
@@ -8022,6 +8155,9 @@ async fn a_closed_environment_uses_its_keys_without_seeing_them() {
     assert!(closed.files.iter().any(|(p, c)| p == apps_control::deploy::INTERCEPT_CA && c.contains("FAKECA")), "the CA in its trust bundle");
     let network = apps_control::closed_network_name(&w.project, "staging");
     assert_eq!(w.fake.intercepted.lock().get(&network).copied(), Some(true), "its proxies intercept");
+    // What its interception did, on the environment (roll previews' sheet).
+    let (_, e) = call(&w.api, "GET", &format!("{base}/staging"), None).await;
+    assert_eq!((e["intercepted"]["requests"].as_u64(), e["intercepted"]["swapped"].as_u64()), (Some(3), Some(2)), "{e}");
     assert!(call(&w.api, "DELETE", &format!("{base}/staging"), None).await.0.is_success());
     assert!(vault.0.lock().contains(&format!("end {}/staging", w.project)), "{:?}", vault.0.lock());
 }

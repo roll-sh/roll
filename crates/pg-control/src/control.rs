@@ -903,8 +903,10 @@ pub enum SqlAs {
     /// A role made for the query that is a member of the roles owning the app's objects (the
     /// database's `roll_owner`, a branch's app role) and holds `pg_read_all_data` and
     /// `pg_write_all_data`: rows and schema changes, never the superuser's powers (roles,
-    /// `COPY … PROGRAM`, the server's files). What it makes stays, owned by `roll_owner`.
-    Writer,
+    /// `COPY … PROGRAM`, the server's files). What it makes stays, owned by `roll_owner`. Without
+    /// `may_drop` it's a member of `roll_no_drop` too, and Postgres refuses its drops of tables,
+    /// columns, schemas and the like (deleting rows is a write).
+    Writer { may_drop: bool },
     /// The project's superuser: the operator's, a grant that may `admin` the endpoint, and roll's
     /// own work (app roles, decoys).
     Owner,
@@ -966,6 +968,9 @@ async fn run_sql(addr: SocketAddr, password: &str, sql: &str, as_: SqlAs) -> Res
                     // On 16 and later it can't SET ROLE to them either: their rights, not their name.
                     sql.push_str(&format!(" GRANT {quoted} TO {role}{};", if v16 { " WITH INHERIT TRUE, SET FALSE" } else { "" }));
                 }
+                if as_ == (SqlAs::Writer { may_drop: false }) {
+                    sql.push_str(&format!(" GRANT roll_no_drop TO {role};"));
+                }
                 admin.batch_execute(&sql).await
             };
             if let Err(e) = made.await {
@@ -988,7 +993,7 @@ async fn run_sql(addr: SocketAddr, password: &str, sql: &str, as_: SqlAs) -> Res
     };
     // A writer's objects stay, as the database's owner role's; whatever a reader made (a
     // temporary table goes with its session) goes with it.
-    let keep = if as_ == SqlAs::Writer { format!("REASSIGN OWNED BY {role} TO roll_owner; ") } else { String::new() };
+    let keep = if matches!(as_, SqlAs::Writer { .. }) { format!("REASSIGN OWNED BY {role} TO roll_owner; ") } else { String::new() };
     if let Err(e) = admin.batch_execute(&format!("{keep}DROP OWNED BY {role}; DROP ROLE {role}")).await {
         tracing::warn!(role, error = %pg_error_text(&e), "dropping a query role");
     }

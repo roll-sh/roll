@@ -38,6 +38,7 @@ pnpm dev                                # dashboard: /dashboard/search
 | `--search-gc-interval`                             | `3600`            | garbage collection of unreferenced objects (0: off; one node per bucket) |
 | `--search-deleted-retention-days` (`ROLL_SEARCH_DELETED_RETENTION_DAYS`) | `7` | days a deleted cluster can be restored, its storage billed meanwhile (0: deleted at once) |
 | `--search-test-features`                           | off               | publish Elasticsearch's test features (YAML suites through `--cluster-hook`; test deployments only) |
+| `--search-max-time` (`ROLL_SEARCH_MAX_TIME`) | `60`, none on an open daemon | seconds one request that searches may run, all its shards and phases together (node setting `roll.search.max_time`; 0: no cap; compatibility.md "Operations") |
 | `--search-max-clusters-per-person` (`ROLL_SEARCH_MAX_CLUSTERS_PER_PERSON`) | `50` | clusters a signed-in person may own, branches included (0: no cap; the operator and admins aren't capped) |
 | `--search-max-always-on-per-person` (`ROLL_SEARCH_MAX_ALWAYS_ON_PER_PERSON`) | `2` | of those, always-on ones (`idle_timeout_s` 0) (0: no cap) |
 | `--search-audit-retention-days` (`ROLL_SEARCH_AUDIT_RETENTION_DAYS`) | `7` | how long each cluster's security audit log keeps its entries |
@@ -91,6 +92,8 @@ roll search request app POST '/articles/_doc?refresh=true' '{"body":"Passwords c
 roll search request app POST /articles/_search '{"query":{"semantic":{"field":"body","query":"forgot my password"}}}'
 roll search inference list app | test app emb "some text" | delete app emb
 ```
+
+Answers generated from search hits (chat with citations, RAG) are designed in [rag.md](rag.md).
 
 A cluster's name is its identity: the Basic auth user, the host label under `--search-domain`,
 `cluster_name` in `GET /`. Names are DNS labels (lowercase letters, digits, `-`) and can't
@@ -799,7 +802,7 @@ deterministic (#396).
    and `ENRICH` tables, `VALUES` and `TOP` states). The fix for ES|QL is Elasticsearch's: every
    page of rows charged to the request breaker as it is built and released when dropped,
    `circuit_breaking_exception` past the limit, and a node-level limit no tenant setting can
-   raise. Time has its own cap (#530, in review). Rule: charge what a structure costs as it is
+   raise. Time has its own cap (#530, landed: one limit per request, by-query scans and internal pagers included). Rule: charge what a structure costs as it is
    built, never a multiple of the bytes it came from. Also left: `_bulk`'s own preparation (`bulk_ahead`
    parses each source into a tree) is charged only as the body's `inflight_requests`, for
    clients' bulks and connector syncs' alike (#318's pages are text until then).
@@ -944,11 +947,12 @@ deterministic (#396).
    query, then stops. Writing settings also unblocks the suggestions tools (they need
    `index.roll.suggestions.enabled`), and a redacted answer would let `POST …/inference/secrets`
    become a tool, so an agent can set up semantic search end to end.
-11. **Conversational search and RAG** (Elastic Playground's chat with citations, Typesense
+11. **Conversational search and RAG** (phase 1 in progress: streamed `chat_completion` and
+   `completion` inference and the Playground's Chat tab; Elastic Playground's chat with citations, Typesense
    `conversation=true`, Meilisearch `/chats`, OpenSearch's `retrieval_augmented_generation`
    processor): roll serves `completion` and `chat_completion` inference already, but the Playground
    compares retrieval only. Chat over hits with citations, the code for a RAG app, and a chat API
-   (OpenSearch's processor shape on OpenSearch-flavor clusters).
+   (OpenSearch's processor shape on OpenSearch-flavor clusters). Design: [rag.md](rag.md).
 12. **The first query in a minute** (the guides are #604, landing; writing them found: an API
    key's `encoded` value works only at the cluster's own host, so clients behind a shared address
    re-encode it as `<id>@<cluster>:<key>`; a `data` key can't post click events, so an app tracking
@@ -1184,8 +1188,9 @@ deterministic (#396).
    index patterns or read-only (`[databases] kind = "search"` takes neither; the keys route does);
    apps' log drains can't yet land in a roll search data stream (apps is building a drain that writes
    ECS documents through `_bulk` with a key limited to `create_doc` on its stream: no OTLP needed); previews
-   put a branch's superuser login in `ELASTICSEARCH_URL` beside the data key (previews is fixing it:
-   only the data credential, and no fallback to the login);
+   put a branch's superuser login in `ELASTICSEARCH_URL` beside the data key (fixed in #607: only the
+   data credential, no fallback, and old branches remade with the key revoked and the password
+   rotated first);
    a cluster's admin password can't be kept as a project secret from roll's API or CLI; and only a
    unit test covers previews' search branch, and one MCP test search (no create → bulk → query
    flow with a person's scoped token).
