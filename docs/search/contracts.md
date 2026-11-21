@@ -1211,7 +1211,7 @@ pub struct ClusterConfig { pub name, pub dialect: Dialect /* Elasticsearch|OpenS
                           pub host_metrics: bool /* false: node stats report synthetic figures (shared nodes must not leak the host) */,
                           pub default_repository: Option<String> /* roll's default snapshot repository's name (api::snapshots::install_default_repository) */,
                           pub file_service_tokens: bool /* read <path.conf>/service_tokens; search-server sets it in dev mode or for clusters named in roll.security.service_token_file.clusters */,
-                          pub request_memory: Option<Arc<MemoryBudget>> /* the node's budget for what requests hold, charged with the `request` breaker (breaker::Breakers::node); search-server passes Node::request_memory */ }
+                          pub request_memory: Option<Arc<MemoryBudget>> /* the node's budget for what requests hold: the `request` breaker's parent (breaker::Breakers::node), its limit held to roll.breaker.request.max_limit (25% of this by default); search-server passes Node::request_memory */ }
                           // + fn node_setting(key) -> Option<&str>; fn processors() -> usize
 impl Cluster { async fn open(ClusterConfig, Arc<dyn MetaStore>) -> Result<Cluster>; async fn in_memory(name) -> Cluster;
                fn state(&self) -> Arc<meta::ClusterState>;                        // published metadata (immutable snapshot)

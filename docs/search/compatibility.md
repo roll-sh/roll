@@ -1139,10 +1139,17 @@ Checked against Elasticsearch 9.5.5 (captures in
   9.5.5). Sizes are what roll allocates, so a query crosses the limit at a different point than
   on Elasticsearch, and `data for [...]` names where roll's query was (`<reused_arrays>`, `load
   blocks`; Elasticsearch's varies too: `ords`, `<reused_arrays>`, `load blocks`). The internal
-  `_search` reads keep their own accounting. roll's difference: every charge also goes to the
-  node's budget for requests, which only the operator sets (`--search-memory-mb`, else half of
-  the host's memory) and no tenant setting raises; a query past it gets the same 429 with the
-  node's limit as `bytes_limit`.
+  `_search` reads keep their own accounting.
+- roll's differences in the `request` breaker, because one node serves many clusters:
+  - everything charged to it (aggregations, ES|QL, buffered `_msearch` responses, snapshot
+    transfers) is also charged to the node's budget for requests, which only the operator sets
+    (`--search-memory-mb`, else half of the host's memory). A request past it gets the same 429,
+    with the node's limit as `bytes_limit`;
+  - its effective limit is `indices.breaker.request.limit` held to an operator maximum
+    (`--search-request-memory-max`, node setting `roll.breaker.request.max_limit`: a byte size,
+    or a percentage of the node's budget, `25%` by default; `-1` for none). The setting still
+    reads and writes as on Elasticsearch (`-1` included); `_nodes/stats` and
+    `_cat/circuit_breaker` show the effective limit, and refusals carry it as `bytes_limit`.
 
 ## Inference (`_inference`)
 

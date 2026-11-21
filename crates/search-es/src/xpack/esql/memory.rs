@@ -12,8 +12,9 @@
 //! so a query that fails or is cancelled gives everything back.
 //!
 //! Each charge goes to the cluster's `request` breaker, whose limit a tenant sets
-//! (`indices.breaker.request.limit`), and to the node's budget ([`crate::ClusterConfig::request_memory`]),
-//! which only the operator sets: either one refuses a charge past its limit.
+//! (`indices.breaker.request.limit`) up to the operator's maximum, and through it to the node's
+//! budget ([`crate::breaker`]), which only the operator sets: either one refuses a charge past
+//! its limit.
 
 use super::value::{Acc, V};
 use crate::error::EsResult;
@@ -36,32 +37,26 @@ pub struct Memory(Option<Arc<Account>>);
 
 struct Account {
     request: Arc<MemoryBudget>,
-    node: Option<Arc<MemoryBudget>>,
     /// Everything charged through this account and not yet released.
     held: AtomicU64,
 }
 
 impl Drop for Account {
     fn drop(&mut self) {
-        let left = *self.held.get_mut();
-        self.request.release(left);
-        if let Some(n) = &self.node {
-            n.release(left);
-        }
+        self.request.release(*self.held.get_mut());
     }
 }
 
 impl Memory {
-    /// An account charging `request` and, when there is one, the node's budget.
-    pub fn new(request: Arc<MemoryBudget>, node: Option<Arc<MemoryBudget>>) -> Memory {
-        Memory(Some(Arc::new(Account { request, node, held: AtomicU64::new(0) })))
+    /// An account charging `request` (and its parent, the node's budget).
+    pub fn new(request: Arc<MemoryBudget>) -> Memory {
+        Memory(Some(Arc::new(Account { request, held: AtomicU64::new(0) })))
     }
 
-    /// The account of a query on `cluster`: its `request` breaker (limit brought up to date)
-    /// and the node's budget.
+    /// The account of a query on `cluster`: its `request` breaker, limit brought up to date.
     pub fn for_query(cluster: &crate::cluster::Cluster) -> Memory {
         let st = cluster.state();
-        Memory::new(cluster.breakers.request(cluster, &st), cluster.breakers.node().cloned())
+        Memory::new(cluster.breakers.request(cluster, &st))
     }
 
     /// Bytes this account holds now.
@@ -75,12 +70,6 @@ impl Memory {
             return Ok(());
         }
         a.request.reserve(bytes, label).map_err(crate::search::aggs::agg_error)?;
-        if let Some(n) = &a.node
-            && let Err(e) = n.reserve(bytes, label)
-        {
-            a.request.release(bytes);
-            return Err(crate::search::aggs::agg_error(e));
-        }
         a.held.fetch_add(bytes, Ordering::Relaxed);
         Ok(())
     }
@@ -92,9 +81,6 @@ impl Memory {
         }
         a.held.fetch_sub(bytes, Ordering::Relaxed);
         a.request.release(bytes);
-        if let Some(n) = &a.node {
-            n.release(bytes);
-        }
     }
 
     /// A structure of `bytes`, charged under `label` until the [`Held`] drops.
@@ -275,9 +261,9 @@ mod tests {
 
     #[test]
     fn both_budgets_and_release() {
-        let request = MemoryBudget::new(1 << 20);
         let node = MemoryBudget::new(1000);
-        let mem = Memory::new(request.clone(), Some(node.clone()));
+        let request = MemoryBudget::with_parent(1 << 20, Some(node.clone()));
+        let mem = Memory::new(request.clone());
         let mut h = mem.hold(600, REUSED_ARRAYS).unwrap();
         let e = h.grow(600).unwrap_err();
         assert_eq!((e.status, &*e.kind), (429, "circuit_breaking_exception"));

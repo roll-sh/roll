@@ -267,14 +267,19 @@ cluster, `Authorization: Bearer <cluster>_<secret>`, or the TLS SNI/`Host` label
 domain (`<cluster>.search.<domain>`). Secrets are compared in constant time. Each cluster has
 request-rate and in-flight byte budgets so one tenant can't starve the node.
 
-Memory a request holds is charged as it is built to the cluster's `request` breaker, whose limit
-the tenant sets (`indices.breaker.request.limit`, `-1` even), and to the node's budget for
-requests, which only the operator sets (`Node::request_memory`: `--search-memory-mb`, else half
-of the host's memory); either refuses with Elasticsearch's 429 `circuit_breaking_exception`.
-ES|QL charges each page of rows, group table and aggregate state, sort buffer, join and lookup
-table and its result as they grow, from what they allocate, and gives each back when it drops
-(`xpack/esql/memory.rs`). Past `--search-memory-mb`, idle clusters unload to make room for
-what requests hold too.
+One memory account per request: what a request holds is charged as it is built to the
+cluster's `request` breaker, and through it (a parent budget, `search_aggs::memory`) to the
+node's budget for requests, `Node::request_memory`, which only the operator sets
+(`--search-memory-mb`, else half of the host's memory). Either refuses with Elasticsearch's 429
+`circuit_breaking_exception`. The tenant sets `indices.breaker.request.limit` (`-1` even), but
+its effective limit is held to `--search-request-memory-max` (node setting
+`roll.breaker.request.max_limit`, by default a quarter of the node's budget), so a few busy
+tenants can't add up past the host. Aggregations (shard collection and reduces, composite and
+`terms` included, so transforms and rollups too), buffered `_msearch` responses, snapshot
+transfers and ES|QL all charge it; ES|QL charges each page of rows, group table and aggregate
+state, sort buffer, join and lookup table and its result as they grow, from what they allocate,
+and gives each back when it drops (`xpack/esql/memory.rs`). Past `--search-memory-mb`, idle
+clusters unload to make room for what requests hold too.
 
 APIs built on other APIs (EQL, ES|QL, SQL, PPL, graph, vector tiles, `terms_enum`, transforms'
 preview, rollup search, downsampling, search applications, …) make their inner requests as
