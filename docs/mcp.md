@@ -1080,27 +1080,29 @@ previews are listed once those products are on.
 Ranked; the top item is in progress. A watchdog reads this list. Unblocked work comes first; what
 waits on a sibling PR reaching main is last.
 
-1. **Postgres SQL from a `write` token runs as the project's superuser (decision 6, the
-   user's).** `POST /v1/endpoints/{id}/query` without `read_only` is `write`, and runs as `roll`,
-   the bootstrap superuser. Only a text check (`grants_access`) makes role and privilege SQL
-   `admin`, and dynamic SQL gets past it (`DO $$ BEGIN EXECUTE 'CREA' || 'TE ROLE x SUPERUSER'; END
-   $$`), as it does `COPY … TO PROGRAM` (a shell in the compute) and dropping tables a `delete` rule
-   would have asked about. A token with `reveal` already gets a connection string, but an agent's
-   write-only token shouldn't reach superuser. Text checks aren't the fix (they were bypassed three
-   times before). The product must run `write` SQL as a role that can't. Two ways, and the choice
-   changes what `write` can do on existing databases:
-   - (a) A per-query role with `pg_read_all_data`, `pg_write_all_data` and CREATE on the schemas
-     (what it makes is reassigned to the owner after): rows and new objects, but altering or dropping
-     an existing table needs `admin`. Works today; migrations with a write token stop working on
+1. **Postgres SQL from a `write` token ran as the project's superuser: decision 6, option (b),
+   building (this PR; the user can still override it before it lands).** `POST
+   /v1/endpoints/{id}/query` without `read_only` is `write`, and ran as `roll`, the bootstrap
+   superuser; only a text check (`grants_access`) made role and privilege SQL `admin`, and dynamic
+   SQL got past it (`DO $$ BEGIN EXECUTE 'CREA' || 'TE ROLE x SUPERUSER'; END $$`), as did
+   `COPY … TO PROGRAM` (a shell in the compute). The choice, and why:
+   - (b), taken: every database gets `roll_owner` (no login, never a superuser), which takes the
+     database and what the superuser owns in the app's schemas (the app-role SQL's loops, idempotent,
+     run before each such query); a write-only grant's SQL runs as a role made for the query that is
+     a member of the roles owning the app's objects (`roll_owner`, a branch's app role; never one
+     that is or can become more), with `pg_read_all_data` and `pg_write_all_data`, `SET FALSE` on 16+.
+     `write` keeps everything it could do to the app's data and schemas, migrations included, and
+     loses only the superuser's powers. What it makes is reassigned to `roll_owner`. A branch's app
+     role joins `roll_owner`. Never membership in `roll`: it owns the system catalogs.
+   - (a), not taken: a role with only `pg_read_all_data`/`pg_write_all_data` and CREATE would make
+     altering or dropping an existing table `admin`, breaking every write token's migrations on
      databases without an app role.
-   - (b) Every database gets a non-superuser owner role that owns its user objects (as a branch's
-     app role does), and `write` runs as a per-query member of it (`INHERIT TRUE, SET FALSE`): full
-     DDL, never superuser. Each existing database migrates once; the app-role code must take it into
-     account. Recommended. Never membership in `roll` itself: it owns the system catalogs.
-   Either way the gate gains a quiet second outcome (a row's `capable(Admin)`, answered as a
-   request extension) so pg-control runs as `roll` only for the operator or a grant that may
-   `admin` the endpoint. Found by the 2026-11-21 comparison with Supabase's and PlanetScale's MCP
-   servers, which ask before destructive SQL.
+   - The gate asks the route's `capable(Admin)` quietly and says yes with `roll_auth::Capable`, so
+     the operator's SQL and an admin grant's still run as `roll`. Test:
+     `pg-control/tests/e2e.rs::write_sql_is_never_the_superuser`.
+   - Still open: `DROP TABLE` under `write` doesn't ask a `delete` rule (Supabase and PlanetScale
+     ask before destructive SQL); it would take the parsed statement in the product.
+
 2. **From that comparison, unblocked:** a "hand this to an agent" workflow (an error or a slow
    query to `code_create_work`, an agent's claim, `previews_wait`, `review_preview`) once roll
    code's tools can be a workflow's requirements (they're another crate's); roll code's routes with
@@ -1111,7 +1113,7 @@ waits on a sibling PR reaching main is last.
    preview's or app's URL through its access gate (Vercel's `web_fetch_vercel_url`; previews,
    apps), Postgres logs and live metrics and migrations as records (Supabase, Neon, PlanetScale),
    a read-only ES|QL route (search), log grouping and field values (apps).
-3. **Landed (now):** `what_needs_me`, a workflow for what's waiting on you across roll (this PR);
+3. **Landed (now):** `what_needs_me`, a workflow for what's waiting on you across roll (#597);
    landed 2026-11-20/21: `previews_wait` (#555), 2026-07-28's
    resource-not-found code (#556; the rest of that revision's changelog and deprecations were
    already in: discover, listen, `resultType`, `ttlMs`, `Mcp-Name`, the renumbered errors, `iss`,

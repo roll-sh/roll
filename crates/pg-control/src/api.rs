@@ -408,9 +408,25 @@ struct QueryBody {
     read_only: bool,
 }
 
-async fn query(State(c): State<AppState>, Path(id): Path<String>, Json(body): Json<QueryBody>) -> ApiResult<Value> {
+async fn query(
+    State(c): State<AppState>,
+    Path(id): Path<String>,
+    grant: Option<axum::Extension<roll_auth::Grant>>,
+    capable: Option<axum::Extension<roll_auth::Capable>>,
+    Json(body): Json<QueryBody>,
+) -> ApiResult<Value> {
     let started = std::time::Instant::now();
-    let results = c.query(&id, &body.sql, body.read_only).await?;
+    // The superuser only for the operator (no grant) or a grant the gate found may `admin` the
+    // endpoint; any other grant's SQL runs as the writer role (docs/mcp.md, decision 6).
+    let may_admin = grant.is_none() || capable.is_some_and(|axum::Extension(roll_auth::Capable(a))| a == roll_auth::scope::Action::Admin);
+    let as_ = if body.read_only {
+        crate::control::SqlAs::ReadOnly
+    } else if may_admin {
+        crate::control::SqlAs::Owner
+    } else {
+        crate::control::SqlAs::Writer
+    };
+    let results = c.query(&id, &body.sql, as_).await?;
     Ok(Json(json!({ "results": results, "took_ms": started.elapsed().as_millis() as u64 })))
 }
 
