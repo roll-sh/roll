@@ -110,10 +110,12 @@ pub trait SecretSource: Send + Sync {
     /// audit names, `app:<service>`). An unresolved reference or a missing required key is an
     /// error: the deploy fails rather than start without it.
     async fn resolve(&self, project: &str, env: &str, service: &str) -> anyhow::Result<Vec<SecretVar>>;
-    /// Whether `who` may see the project's secrets in `env` in the clear, by roll secrets' own
-    /// rules (protected environments, a token's scope): `…/variables/values` answers them only
-    /// then. No: the safe default.
-    async fn may_reveal(&self, _who: Asker<'_>, _project: &str, _env: &str) -> bool {
+    /// Whether `who` may see what `ask` names of `service`'s variables from roll secrets in `env`
+    /// in the clear: each key resolves for them read as roll secrets' own reveal would read it
+    /// (the environment's base, imports and references only as far as they may reveal; a token's
+    /// scope; protected environments), and so does each `roll://` reference. `…/variables/values`,
+    /// a shell and a job's output answer only then, never in part. No: the safe default.
+    async fn may_reveal(&self, _who: Asker<'_>, _project: &str, _env: &str, _service: &str, _ask: Reveal<'_>) -> bool {
         false
     }
     /// What the project's secrets in `env` are, as a digest with no value in it (roll secrets'
@@ -338,6 +340,17 @@ pub struct Asker<'a> {
     pub operator: bool,
     pub user: Option<&'a roll_auth::SignedIn>,
     pub grant: Option<&'a roll_auth::Grant>,
+}
+
+/// What a reveal would show of the variables roll secrets gave ([`SecretSource::may_reveal`]).
+#[derive(Clone, Copy, Default)]
+pub struct Reveal<'a> {
+    /// Keys of the environment's secrets (at its root, as the service reads them).
+    pub keys: &'a [String],
+    /// `roll://` references the service's own variables hold.
+    pub refs: &'a [String],
+    /// Sensitive values too: a shell or a job's output shows the container's environment.
+    pub sensitive: bool,
 }
 
 /// No project secrets (until roll secrets is on this node): services use their own variables.

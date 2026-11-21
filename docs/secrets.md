@@ -891,6 +891,10 @@ A value can include other values:
 - References are resolved on the server when values are read with `resolve` (the default for
   `values`, `export` and `roll run`). A reference to another environment needs `reveal` access to
   that environment too.
+- Writing one needs it too: a value that references another folder (`${production.KEY}` written
+  into staging) is a 403 unless the writer may reveal that folder, as for an import or a base.
+  Every reader of the folder reads through it, runtimes included, and a service's runtime read
+  follows it whoever reads staging.
 - Resolution follows references up to 8 deep, and a cycle is reported with its path:
   `cycle: DB_URL → DATABASE_URL → DB_URL`. A missing key or an unreadable environment leaves the
   reference unresolved. Reads report it in `problems`, and `roll run` fails on it unless
@@ -2897,6 +2901,13 @@ unresolved reference or a dynamic credential fails the deploy, saying which. It 
   &caller)` for code nobody vetted. Dynamic links issue leases owned by the consumer, and the call
   is audited as `resolve` by `app:<service>`. `Secrets::digest(project, env, path, &caller)` (no
   decryption, unaudited) moves whenever the values would: compare it to decide a redeploy.
+- **Showing them is the asker's read.** apps' `…/variables/values`, shell, files and job output
+  show what the service got, so `ForApps::may_reveal` reads the environment again as the person or
+  token asking (`Secrets::values_seen_by`: the service's read, shared values only, with the
+  asker's rights, audited as an export by `app:<service> (shown to <who>)`). Every key shown must
+  resolve for them, so staging's `${production.KEY}`, an import or a base they can't reveal is a
+  403, never a partial answer; a shell asks for sensitive values too, and each `roll://` variable's
+  key in its own folder.
 - **Preview environments are untrusted themselves.** An ephemeral environment that wasn't made
   `trusted` never reads a protected environment, whoever resolves it: an app deployed into a
   preview's environment as `app:<service>` gets its overrides and the unprotected rest, never

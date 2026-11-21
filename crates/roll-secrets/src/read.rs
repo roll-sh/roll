@@ -868,6 +868,19 @@ impl Secrets {
         self.values_inner(project, slug, path, resolve, consumer, dynamic, None, caller)
     }
 
+    /// A folder as `consumer`'s runtime reads it (shared values only, never the caller's personal
+    /// ones), with `caller`'s rights: what another product may show `caller` of the values it gave
+    /// `consumer` (roll apps' reveal, shell and job output). Its base, imports and references read
+    /// only as far as `caller` may reveal; what stays out is missing or a problem. `runtime`: a
+    /// sensitive value too (a shell sees the container's environment). No dynamic credential is
+    /// issued. Audited as an export by `<consumer> (shown to <caller>)`.
+    pub fn values_seen_by(&self, project: &str, slug: &str, path: &str, consumer: &str, runtime: bool, caller: &Caller) -> Result<Values> {
+        // Named for both, with a `:` so it reads no person's own overrides (`Caller::personal`).
+        let mut seen = caller.clone().acting_as(format!("{consumer} (shown to {})", caller.made_by()));
+        seen.runtime = runtime;
+        self.values_inner(project, slug, path, true, None, false, None, &seen)
+    }
+
     /// [`Secrets::values_for`] (resolved) for `consumer`, with every key bound to hosts answered
     /// as a placeholder (docs/secrets.md, "Using a key without seeing it"). Not a sensitive key's
     /// for a reader that couldn't read it, unless its binding opts in; not a key whose value holds

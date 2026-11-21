@@ -5142,7 +5142,7 @@ async fn secret_values_are_revealed_only_as_roll_secrets_allows() {
                 apps_control::integrations::SecretVar { name: "SIGNING_KEY".into(), value: "only-for-runtimes".into(), linked: false, sensitive: true, plain: false },
             ])
         }
-        async fn may_reveal(&self, who: apps_control::integrations::Asker<'_>, _: &str, _: &str) -> bool {
+        async fn may_reveal(&self, who: apps_control::integrations::Asker<'_>, _: &str, _: &str, _: &str, _: apps_control::integrations::Reveal<'_>) -> bool {
             who.operator
         }
         async fn ensure(&self, _: &str, env: &str) -> anyhow::Result<()> {

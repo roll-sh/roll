@@ -999,16 +999,24 @@ impl Secrets {
 
     /// Each item's own check: write or delete in its folder, and `admin` to set a link
     /// (a link reaches a resource's credentials as the operator, so who links what into which
-    /// environment is an admin's choice).
+    /// environment is an admin's choice). A value's reference to another folder needs `reveal`
+    /// there, as an import or a base does: every reader of this folder (its runtimes too) would
+    /// read it.
     pub(crate) fn check_items(&self, project: &str, env: &str, items: &[Item], caller: &Caller) -> Result<()> {
         for i in items {
             let at = Scope::at(project, env, &i.path);
             match &i.action {
                 ItemAction::Delete => caller.need(Action::Delete, &at)?,
-                ItemAction::Set { link, .. } => {
+                ItemAction::Set { link, value, .. } => {
                     caller.need(Action::Write, &at)?;
                     if matches!(link, Some(Some(_))) {
                         caller.need(Action::Admin, &at)?;
+                    }
+                    for r in value.as_ref().map(|v| crate::refs::refs(v.expose())).unwrap_or_default() {
+                        let Some(e) = r.env.as_deref().filter(|e| *e != env || r.path != i.path) else { continue };
+                        if !caller.allows(Action::Reveal, &Scope::at(project, e, &r.path)) {
+                            return Err(Error::Forbidden(format!("{} references {}, which you may not reveal: everyone who reads {env} would read it", i.key, r.display())));
+                        }
                     }
                 }
             }

@@ -564,6 +564,19 @@ impl ResolvedVars {
         self.sealed.contains(k) || (secret && !self.plain_secrets.contains(k)) || (credential && source == Some("link"))
     }
 
+    /// What showing these variables would show of roll secrets': the keys it gave and the
+    /// `roll://` references read (from a listing: their text), sealed ones only when `sealed`.
+    fn secrets_shown(&self, sealed: bool) -> (Vec<String>, Vec<String>) {
+        let (mut keys, mut refs) = (Vec::new(), Vec::new());
+        for (k, v) in &self.vars {
+            if self.sources.get(k) != Some(&"secret") || (!sealed && self.sealed.contains(k)) {
+                continue;
+            }
+            if self.ref_texts.contains_key(k) { refs.push(v.clone()) } else { keys.push(k.clone()) }
+        }
+        (keys, refs)
+    }
+
     /// The variables a closed environment's build may have: none that is a secret
     /// ([`Self::is_secret`]), none that carries a URL password, and none that holds a secret
     /// value of eight characters or more (a reference that copied one).
@@ -3000,8 +3013,6 @@ impl Apps {
         Ok(())
     }
 
-    /// What reads a job's output or opens a shell needs when the environment has values from
-    /// roll secrets (a job may print them, a shell reads them all): roll secrets' own rule for
     /// The web service named `name` in `service`'s project (a site's `service:` rewrite), looked
     /// up at most every 30 s (a miss every 2 s).
     pub(crate) async fn project_service(self: &Arc<Self>, service: &str, name: &str) -> Option<String> {
@@ -3029,11 +3040,14 @@ impl Apps {
         id
     }
 
-    /// revealing them.
+    /// What reads a job's output or opens a shell needs when the environment has values from
+    /// roll secrets (a job may print them, a shell reads them all, sensitive and `roll://` ones
+    /// too): roll secrets would show `who` every one of them.
     pub async fn check_secret_reveal(self: &Arc<Self>, service: &str, env: &str, who: integrations::Asker<'_>) -> Result<()> {
         let (svc, row) = self.service_env(service, env).await?;
         let r = self.listed_vars(&svc, &row, row.active.as_deref().unwrap_or("")).await?;
-        if r.sources.values().any(|s| *s == "secret") && !self.deps.secrets.may_reveal(who, &svc.project, env).await {
+        let (keys, refs) = r.secrets_shown(true);
+        if (!keys.is_empty() || !refs.is_empty()) && !self.deps.secrets.may_reveal(who, &svc.project, env, &svc.id, integrations::Reveal { keys: &keys, refs: &refs, sensitive: true }).await {
             return Err(Error::Forbidden(format!("this environment's values come from roll secrets, which you may not reveal in {env} (a shell or a job's output shows them)")));
         }
         Ok(())
@@ -3046,10 +3060,11 @@ impl Apps {
         let (svc, row) = self.service_env(service, env).await?;
         let r = self.listed_vars(&svc, &row, row.active.as_deref().unwrap_or("")).await?;
         if let Some(who) = reveal {
-            // Sensitive ones are left out for everyone, so they need no one's leave.
-            let secret: Vec<&String> = r.sources.iter().filter(|(k, s)| **s == "secret" && !r.sealed.contains(*k)).map(|(k, _)| k).collect();
-            if !secret.is_empty() && !self.deps.secrets.may_reveal(who, &svc.project, env).await {
-                return Err(Error::Forbidden(format!("{} come from roll secrets, which you may not reveal in {env}", secret.iter().map(|k| k.as_str()).collect::<Vec<_>>().join(", "))));
+            // Sealed ones (sensitive, `roll://`) are left out for everyone, so they need no one's
+            // leave; every other one, as roll secrets would show it to them.
+            let (secret, _) = r.secrets_shown(false);
+            if !secret.is_empty() && !self.deps.secrets.may_reveal(who, &svc.project, env, &svc.id, integrations::Reveal { keys: &secret, refs: &[], sensitive: false }).await {
+                return Err(Error::Forbidden(format!("{} come from roll secrets, which you may not reveal in {env}", secret.join(", "))));
             }
             // A sealed one is never in the clear, to anyone.
             let m: serde_json::Map<String, Value> = r.vars.into_iter().filter(|(k, _)| !r.sealed.contains(k)).map(|(k, v)| (k, Value::String(v))).collect();
