@@ -765,7 +765,11 @@ in memory only (its links stop at a restart: local development). A database from
 the moment the key comes (`Store::set_sealer`), in one write with SQLite's `secure_delete` on and
 the WAL checkpointed and truncated after it, so nothing of the old values stays readable in the
 file, its free pages or its `-wal` (`credentials_are_sealed_at_rest_and_nothing_stays_in_the_file`,
-on an upgraded database). Roll secrets' thirty-fourth review found them in the clear.
+on an upgraded database). On Postgres (a fleet's control database) the rewrite is an ordinary
+write: the old row versions stay as dead tuples until autovacuum reuses their pages (`VACUUM FULL`
+on `settings`, `previews` and `keys` removes them at once). Either way, backups and WAL archives
+taken before the key came still hold the clear values: rotate or expire them. Roll secrets'
+thirty-fourth review found them in the clear.
 
 ## Safety
 
