@@ -135,7 +135,11 @@ impl Tool {
     /// Whether any grant may call it (an `AnyGrant` route).
     /// Which area of its product's toolset this tool is in (`?toolsets=apps.observe`).
     pub fn area(&self) -> Area {
-        if self.product == "apps" { apps_area(self.method, self.path) } else { Area::Every }
+        match self.product {
+            "apps" => apps_area(self.method, self.path),
+            "secrets" => secrets_area(self.method, self.path),
+            _ => Area::Every,
+        }
     }
 
     pub fn open(&self) -> bool {
@@ -315,9 +319,9 @@ impl Tool {
 }
 
 /// The areas a product's toolset splits into, as GitHub's server splits its own: a client with a
-/// tool limit (Windsurf 100, Cursor about 40) takes the area it works in. Only apps so far: alone it
-/// is 89 tools, at Windsurf's limit with the access tools.
-pub const AREAS: &[(&str, &[&str])] = &[("apps", &["observe", "deploy", "configure", "project"])];
+/// tool limit (VS Code 128, Cursor about 40) takes the area it works in: apps (101 tools) and secrets
+/// (94) near VS Code's with the access tools, far past Cursor's.
+pub const AREAS: &[(&str, &[&str])] = &[("apps", &["observe", "deploy", "configure", "project"]), ("secrets", &["values", "security", "integrations"])];
 
 /// Where a tool sits in its product's areas.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -327,6 +331,36 @@ pub enum Area {
     One(&'static str),
     /// A route the table below doesn't place: a test fails until it does.
     Unplaced,
+}
+
+/// A secrets tool's area, from its route: the values themselves (keys, folders, environments and
+/// what moves them), who reaches them and what's wrong (audit, findings, shares), or what roll
+/// keeps for outside systems (transit, leases, clouds, CAs, syncs).
+fn secrets_area(method: &str, path: &str) -> Area {
+    let Some(rest) = path.strip_prefix("/v1/secrets") else { return Area::Unplaced };
+    let parts: Vec<&str> = rest.split('/').filter(|s| !s.is_empty() && !s.starts_with('{')).collect();
+    let read = method == "GET";
+    let area = match parts.as_slice() {
+        // A project and its environments: every area starts there.
+        ["projects"] | ["projects", "environments"] if read => return Area::Every,
+        ["findings", ..] => "security",
+        ["search", ..] => "values",
+        ["projects", "environments", s, ..] => match *s {
+            "secrets" | "changes" | "diff" | "folders" | "import" | "imports" | "exports" | "order" | "promote" | "rollback" | "requests" | "value-requests" | "values" => "values",
+            "reach" | "insights" | "folder-policies" => "security",
+            _ => return Area::Unplaced,
+        },
+        ["projects", "environments"] | ["projects"] => "values",
+        ["projects", s, ..] => match *s {
+            "grid" | "compare" | "required" | "shared" | "suggestions" | "links" | "value-requests" => "values",
+            "audit" | "health" | "leaks" | "shares" | "rotations" | "backup" => "security",
+            "transit" | "leases" | "cas" | "ssh-cas" | "atlas-projects" | "aws-roles" | "aws-users" | "cloud-accounts" | "directories" | "gateways" | "github-apps"
+            | "kubernetes" | "outside-databases" | "rotators" | "saas" | "snowflake-accounts" | "syncs" => "integrations",
+            _ => return Area::Unplaced,
+        },
+        _ => return Area::Unplaced,
+    };
+    Area::One(area)
 }
 
 /// An apps tool's area, from its route: what an agent does with it (watch, ship, set up, run the
@@ -389,6 +423,12 @@ const fn t(name: &'static str, title: &'static str, description: &'static str, p
     Tool { name, title, description, product, method, path, params, fixed: None, wrap: None, hint: Hint::Auto, until: None, outside: &[], published: false, open_world: false, bodiless: false }
 }
 
+/// A value request takes one answer and lasts a day unless asked otherwise: the link is a way to
+/// write those keys (the API's own default is a week).
+fn value_request_defaults() -> Value {
+    json!({ "ttl_minutes": 1440, "answers": 1 })
+}
+
 /// A tasks run that's over (`completed`, `failed` or `canceled`).
 fn run_over(v: &Value) -> bool {
     matches!(v["status"].as_str(), Some("completed" | "failed" | "canceled"))
@@ -398,6 +438,13 @@ fn run_over(v: &Value) -> bool {
 /// `deploying` aren't.
 fn deploy_over(v: &Value) -> bool {
     matches!(v["status"].as_str(), Some("active" | "ready" | "failed" | "canceled" | "superseded" | "removed" | "inactive"))
+}
+
+/// A preview that's done changing (roll previews' `ready`, `sleeping`, `failed`, `deleting`), or
+/// waits on a person (`awaiting_approval`: a fork's change runs only after `approve-run`); `queued`,
+/// `creating` and `updating` aren't.
+fn preview_settled(v: &Value) -> bool {
+    matches!(v["state"].as_str(), Some("ready" | "sleeping" | "failed" | "deleting" | "awaiting_approval"))
 }
 
 /// A job that ended (roll apps' `succeeded`, `failed`, `skipped`, `timed_out`, `canceled`):
@@ -628,7 +675,7 @@ static TOOLS: &[Tool] = &[
     t("postgres_advisors", "Database advice", "What's worth fixing: unused indexes, foreign keys without an index, tables without a primary key, large tables read by sequential scans.", "postgres", "POST", "/v1/endpoints/{endpoint}/query", &[ENDPOINT]).fixed(advisors),
     t("postgres_list_extensions", "Extensions", "Extensions installed and available, with versions.", "postgres", "POST", "/v1/endpoints/{endpoint}/query", &[ENDPOINT]).fixed(extensions),
     t("postgres_typescript_types", "TypeScript types", "TypeScript interfaces for every table on an endpoint (enums as unions, arrays, nullable columns as | null): to write typed code against the schema.", "postgres", "POST", "/v1/endpoints/{endpoint}/query", &[ENDPOINT]).fixed(typescript_types),
-    t("postgres_start_endpoint", "Start an endpoint", "Wake an endpoint's compute.", "postgres", "POST", "/v1/endpoints/{endpoint}/start", &[ENDPOINT]),
+    t("postgres_start_endpoint", "Start (wake) a database's compute", "Wake a Postgres endpoint's compute now, before a client connects (one connecting wakes it too).", "postgres", "POST", "/v1/endpoints/{endpoint}/start", &[ENDPOINT]),
     t("postgres_suspend_endpoint", "Suspend an endpoint", "Suspend an endpoint's compute.", "postgres", "POST", "/v1/endpoints/{endpoint}/suspend", &[ENDPOINT]),
     t("postgres_update_project", "Change a Postgres project", "How long a project keeps history for point-in-time restores and branches.", "postgres", "PATCH", "/v1/projects/{project}", &[PROJECT, breq("history_retention_s", Ty::Int, "Seconds of history to keep")]),
     t("postgres_backup_branch", "Back up a branch", "Take a base backup of a branch now (restores and new branches start from the newest).", "postgres", "POST", "/v1/projects/{project}/branches/{branch}/backup", &[PROJECT, BRANCH]),
@@ -663,7 +710,7 @@ static TOOLS: &[Tool] = &[
     t("storage_delete_bucket", "Delete a bucket", "Delete an empty bucket (force deletes every object too, irreversibly).", "storage", "DELETE", "/v1/storage/buckets/{bucket}", &[BUCKET, q("force", Ty::Bool, "Delete every object and the trash too")]),
     t(
         "storage_list_objects",
-        "List objects",
+        "List objects (a bucket's files)",
         "Objects in a bucket, by prefix; with delimiter \"/\" it lists one level like a folder.",
         "storage",
         "GET",
@@ -697,7 +744,7 @@ static TOOLS: &[Tool] = &[
     t("storage_get_role", "Get an IAM role", "One IAM role: its ARN, trust, permissions policy and session length.", "storage", "GET", "/v1/storage/roles/{name}", &[req("name", "Role name"), q("account", Ty::Str, "Account id (12 digits; the default account when left out)")]),
     t("storage_revoke_role_sessions", "Revoke a role's sessions", "Deny every session issued for a role until now (AWS's AWSRevokeOlderSessions): leaked temporary credentials stop working at once; new sessions still can be made.", "storage", "POST", "/v1/storage/roles/{name}/revoke", &[req("name", "Role name"), q("account", Ty::Str, "Account id (12 digits; the default account when left out)")]).destructive(),
     t("storage_list_replication_targets", "List replication targets", "Buckets outside roll that replication copies to: endpoint, region, access key id, buckets (never the secret; adding one is admin).", "storage", "GET", "/v1/storage/replication-targets", &[]),
-    t("storage_get_replication_target", "Get a replication target", "One replication target outside roll: its endpoint, bucket, region and access key id (never its secret).", "storage", "GET", "/v1/storage/replication-targets/{name}", &[req("name", "Target name"), q("account", Ty::Str, "Account id (12 digits; the default account when left out)")]),
+    t("storage_get_replication_target", "Get a replication target", "One replication target outside roll: its endpoint, bucket, region and access key id (never its secret).", "storage", "GET", "/v1/storage/replication-targets/{name}", &[req("name", "Target name")]),
     t(
         "storage_update_bucket",
         "Change a bucket",
@@ -736,7 +783,7 @@ static TOOLS: &[Tool] = &[
         "/v1/streams/{stream}/topics/{topic}/records",
         &[STREAM, TOPIC, q("offset", Ty::Str, "earliest, latest or a number"), q("timestamp", Ty::Int, "Unix ms"), q("limit", Ty::Int, "At most"), q("partitions", Ty::Str, "Comma-separated partitions")],
     ),
-    t("streams_list_groups", "List consumer groups", "Consumer groups with their lag.", "streams", "GET", "/v1/streams/{stream}/groups", &[STREAM]),
+    t("streams_list_groups", "List consumer groups and their lag", "Consumer groups with their lag.", "streams", "GET", "/v1/streams/{stream}/groups", &[STREAM]),
     t("streams_reset_group", "Reset a consumer group", "Move a group's offsets (earliest, latest, an offset or timestamp:<ms>).", "streams", "POST", "/v1/streams/{stream}/groups/{group}/reset", &[STREAM, req("group", "Group id"), breq("topic", Ty::Str, "Topic"), breq("to", Ty::Str, "Where to")]),
     t("streams_get_topic", "Get a topic", "A topic's partitions, their offsets and its settings (retention, compaction).", "streams", "GET", "/v1/streams/{stream}/topics/{topic}", &[STREAM, TOPIC]),
     t("streams_get_group", "Get a consumer group", "A group's members and its committed offset and lag on each partition.", "streams", "GET", "/v1/streams/{stream}/groups/{group}", &[STREAM, req("group", "Group id")]),
@@ -799,7 +846,7 @@ static TOOLS: &[Tool] = &[
     t("queues_declare_queue", "Declare a queue", "Create a queue.", "queues", "POST", "/v1/queues/vhosts/{vhost}/queues", &[VHOST, breq("name", Ty::Str, "Queue name"), b("type", Ty::Str, "classic, quorum or stream"), b("durable", Ty::Bool, "Durable")]),
     t("queues_delete_queue", "Delete a queue", "Delete a queue and its messages.", "queues", "DELETE", "/v1/queues/vhosts/{vhost}/queues/{queue}", &[VHOST, QUEUE]),
     t("queues_purge_queue", "Purge a queue", "Drop every message in a queue.", "queues", "POST", "/v1/queues/vhosts/{vhost}/queues/{queue}/purge", &[VHOST, QUEUE]),
-    t("queues_get_queue", "Get a queue", "One queue: its messages (ready and unacknowledged), consumers and their prefetch, arguments, and the dead-letter queues it feeds. Start here when messages pile up.", "queues", "GET", "/v1/queues/vhosts/{vhost}/queues/{queue}", &[VHOST, QUEUE]),
+    t("queues_get_queue", "Get a queue", "One queue: its messages (ready and unacknowledged), consumers and their prefetch, arguments, and the dead-letter queues it feeds. Start here when a queue is backing up and messages are piling up.", "queues", "GET", "/v1/queues/vhosts/{vhost}/queues/{queue}", &[VHOST, QUEUE]),
     t("queues_queue_rates", "One queue's rates", "A queue's publish, deliver and acknowledge rates and depth over the last seconds (5-300, default 300), as points.", "queues", "GET", "/v1/queues/vhosts/{vhost}/queues/{queue}/rates", &[VHOST, QUEUE, q("seconds", Ty::Int, "How far back, 5-300 (default 300)")]),
     t("queues_list_exchanges", "List exchanges", "A virtual host's exchanges, their types and arguments.", "queues", "GET", "/v1/queues/vhosts/{vhost}/exchanges", &[VHOST]),
     t("queues_list_bindings", "List bindings", "A virtual host's bindings: which exchange routes to which queue by which key. Why a message went nowhere.", "queues", "GET", "/v1/queues/vhosts/{vhost}/bindings", &[VHOST]),
@@ -845,7 +892,7 @@ static TOOLS: &[Tool] = &[
     t("tasks_delete_schedule", "Delete a schedule", "Delete a schedule.", "tasks", "DELETE", "/v1/tasks/schedules/{id}", &[req("id", "Schedule id")]),
     t("tasks_list_runs", "List function runs", "Durable function runs.", "tasks", "GET", "/v1/tasks/runs", &[q("function", Ty::Str, "Function"), q("status", Ty::Str, "Status"), q("limit", Ty::Int, "At most")]),
     t("tasks_get_run", "Get a function run", "A run with its steps.", "tasks", "GET", "/v1/tasks/runs/{id}", &[req("id", "Run id (run_…)")]),
-    t("tasks_invoke", "Invoke a function", "Start a durable function run.", "tasks", "POST", "/v1/tasks/functions/{id}/invoke", &[req("id", "Function id"), b("data", Ty::Obj, "Input"), b("wait", Ty::Bool, "Wait for the result")]).open_world(),
+    t("tasks_invoke", "Run a function now", "Start a durable function run (invoke it).", "tasks", "POST", "/v1/tasks/functions/{id}/invoke", &[req("id", "Function id"), b("data", Ty::Obj, "Input"), b("wait", Ty::Bool, "Wait for the result")]).open_world(),
     t("tasks_retry_message", "Retry a message", "Deliver a failed or dead-lettered message again now.", "tasks", "POST", "/v1/tasks/messages/{id}/retry", &[req("id", "Message id")]).open_world(),
     t("tasks_retry_dead_letters", "Retry dead letters", "Deliver dead-lettered messages again: these ids, a queue's, or all.", "tasks", "POST", "/v1/tasks/dlq/retry", &[b("ids", Ty::Arr, "Message ids"), b("queue", Ty::Str, "Only this queue's"), b("all", Ty::Bool, "Every dead letter")]).open_world(),
     t("tasks_cancel_run", "Cancel a run", "Stop a durable function run (its finished steps stay done).", "tasks", "POST", "/v1/tasks/runs/{id}/cancel", &[req("id", "Run id")]),
@@ -857,7 +904,7 @@ static TOOLS: &[Tool] = &[
     t("tasks_delete_api_key", "Revoke an API key", "Revoke one of tasks' API keys at once: clients using it are refused. Making one answers its secret, so it has no tool.", "tasks", "DELETE", "/v1/tasks/api-keys/{id}", &[req("id", "API key id")]),
     t("tasks_list_queues", "List task queues", "Queues with their parallelism, rate and backlog.", "tasks", "GET", "/v1/tasks/queues", &[]),
     t("tasks_stats", "Tasks stats", "Nodes, queue stats, dead letters, schedules and functions.", "tasks", "GET", "/v1/tasks/stats", &[]),
-    t("tasks_list_dead_letters", "List dead letters", "Messages that ran out of retries, newest first.", "tasks", "GET", "/v1/tasks/dlq", &[q("queue", Ty::Str, "Only this queue's"), q("topic", Ty::Str, "Only this topic's"), q("cursor", Ty::Str, "From a page's cursor"), q("limit", Ty::Int, "At most")]),
+    t("tasks_list_dead_letters", "List dead letters", "Messages that kept failing until they ran out of retries, newest first.", "tasks", "GET", "/v1/tasks/dlq", &[q("queue", Ty::Str, "Only this queue's"), q("topic", Ty::Str, "Only this topic's"), q("cursor", Ty::Str, "From a page's cursor"), q("limit", Ty::Int, "At most")]),
     t("tasks_delete_dead_letter", "Delete a dead letter", "Drop a dead-lettered message for good.", "tasks", "DELETE", "/v1/tasks/dlq/{id}", &[req("id", "Message id (msg_…)")]),
     t("tasks_get_queue", "Get a task queue", "A queue's parallelism, rate, retries, backlog and whether it's paused.", "tasks", "GET", "/v1/tasks/queues/{name}", &[req("name", "Queue")]),
     t(
@@ -972,7 +1019,7 @@ static TOOLS: &[Tool] = &[
     t("secrets_list_environments", "List environments", "A project's secret environments.", "secrets", "GET", "/v1/secrets/projects/{project}/environments", &[SECRET_PROJECT]),
     t("secrets_project", "A project's secrets at a glance", "A project's environments (with their kind, base, protection and expiry), how many are previews', and how long old versions are kept.", "secrets", "GET", "/v1/secrets/projects/{project}", &[SECRET_PROJECT]),
     t("secrets_get_environment", "Get an environment", "One environment's settings: slug, name, kind (standard or ephemeral), base, labels, protection, approvals, expiry and max age.", "secrets", "GET", "/v1/secrets/projects/{project}/environments/{env}", &[SECRET_PROJECT, ENV]),
-    t("secrets_ensure_environment", "Make or update an environment", "Make an environment if it isn't there, or check it matches (409 mismatch; replace: true changes it): standard, or ephemeral with a base it overlays and an expiry (a preview's or a CI run's). Protection and approvers are a person's (secrets' policy), not set here.", "secrets", "PUT", "/v1/secrets/projects/{project}/environments/{env}", &[SECRET_PROJECT, ENV, b("name", Ty::Str, "Display name"), b("kind", Ty::Str, "standard (default) or ephemeral"), b("base", Ty::Str, "Ephemeral: the environment it overlays"), b("labels", Ty::Obj, "Labels, {key: value}"), b("expires_at", Ty::Int, "Ephemeral: unix ms it's deleted at"), b("ttl_minutes", Ty::Int, "Ephemeral: or minutes from now"), b("trusted", Ty::Bool, "Ephemeral: may read a protected base (admin on it)"), b("replace", Ty::Bool, "Change an existing one to match")]),
+    t("secrets_ensure_environment", "Make or update an environment", "Make an environment if it isn't there, or check one that is matches (a mismatch is a 409, and changing a kind or base means deleting it first: a person's): standard, or ephemeral with a base it overlays and an expiry (a preview's or a CI run's). Protection and approvers are a person's (secrets' policy), not set here.", "secrets", "PUT", "/v1/secrets/projects/{project}/environments/{env}", &[SECRET_PROJECT, ENV, b("name", Ty::Str, "Display name"), b("kind", Ty::Str, "standard (default) or ephemeral"), b("base", Ty::Str, "Ephemeral: the environment it overlays"), b("labels", Ty::Obj, "Labels, {key: value}"), b("expires_at", Ty::Int, "Ephemeral: unix ms it's deleted at"), b("ttl_minutes", Ty::Int, "Ephemeral: or minutes from now"), b("trusted", Ty::Bool, "Ephemeral: may read a protected base (admin on it)")]),
     t("secrets_update_environment", "Rename or set an environment's expiry", "Change an environment's slug, name, expiry or max age (how old a value may get before it's flagged). A field left out stays.", "secrets", "PATCH", "/v1/secrets/projects/{project}/environments/{env}", &[SECRET_PROJECT, ENV, b("slug", Ty::Str, "New slug"), b("name", Ty::Str, "New display name"), bnull("expires_at", Ty::Int, "Unix ms it's deleted at (clear it: never)"), bnull("max_age_days", Ty::Int, "Days a value may get old (clear it: no limit)")]),
     t("secrets_delete_environment", "Delete an environment", "Delete an environment and every secret in it.", "secrets", "DELETE", "/v1/secrets/projects/{project}/environments/{env}", &[SECRET_PROJECT, ENV]),
     t("secrets_delete_ephemeral_environments", "Delete ephemeral environments by label", "Delete every ephemeral environment with a label (a finished CI run's, a closed preview's): standard ones are never touched.", "secrets", "DELETE", "/v1/secrets/projects/{project}/environments", &[SECRET_PROJECT, qreq("label", "key=value")]),
@@ -981,7 +1028,7 @@ static TOOLS: &[Tool] = &[
     t("secrets_delete_folder", "Delete a folder", "Delete a folder and every key in it (a change in the history).", "secrets", "DELETE", "/v1/secrets/projects/{project}/environments/{env}/folders", &[SECRET_PROJECT, ENV, qreq("path", "Folder path")]),
     t("secrets_set_imports", "Set an environment's imports", "Which environments (or other projects' shared folders) a folder of this environment reads keys from, replacing the list: [{environment, path, project?}]. Each needs read on what it imports.", "secrets", "PUT", "/v1/secrets/projects/{project}/environments/{env}/imports", &[SECRET_PROJECT, ENV, q("path", Ty::Str, "Folder"), P { name: "imports", ty: Ty::Arr, at: At::RawJson, required: true, desc: "[{environment, path, project?}]" }]),
     t("secrets_set_required", "Set the keys every environment needs", "The keys every standard environment of a project must define, replacing the list: [{key, path, comment, type?, pattern?, owner?, password?}] (password: how a generated value is made).", "secrets", "PUT", "/v1/secrets/projects/{project}/required", &[SECRET_PROJECT, P { name: "required", ty: Ty::Arr, at: At::RawJson, required: true, desc: "[{key, path, comment, type?, pattern?, owner?, password?}]" }]),
-    t("secrets_apply_changes", "Change several keys at once", "Set and delete several keys of a folder in one change (one entry in the history): ops [{op: set, key, value?, comment?, tags?, link?, if_version?} | {op: delete, key, if_version?}]. if_seq refuses it when the environment changed since. Into a protected environment it opens a request instead.", "secrets", "POST", "/v1/secrets/projects/{project}/environments/{env}/changes", &[SECRET_PROJECT, ENV, b("path", Ty::Str, "Folder"), b("message", Ty::Str, "Why"), breq("ops", Ty::Arr, "The set and delete operations"), b("if_seq", Ty::Int, "Only if the environment's last change is this")]),
+    t("secrets_apply_changes", "Change several keys at once", "Set and delete several keys of a folder in one change (one entry in the history): ops [{op: set, key, value?, comment?, tags?, link?, if_version?} | {op: delete, key, if_version?}]. if_seq refuses it when the environment changed since. A protected environment refuses it (409 approval_required): propose it there with secrets_propose.", "secrets", "POST", "/v1/secrets/projects/{project}/environments/{env}/changes", &[SECRET_PROJECT, ENV, b("path", Ty::Str, "Folder"), b("message", Ty::Str, "Why"), breq("ops", Ty::Arr, "The set and delete operations"), b("if_seq", Ty::Int, "Only if the environment's last change is this")]).destructive(),
     t("secrets_revoke_share", "Revoke a share link", "Revoke one of a project's one-off share links at once (secrets_list_shares lists them): it opens nothing after.", "secrets", "DELETE", "/v1/secrets/projects/{project}/shares/{id}", &[SECRET_PROJECT, req("id", "Share id")]),
     t("secrets_create_transit_key", "Make a transit key", "A key roll keeps to encrypt and sign for an app (secrets_transit_encrypt, secrets_transit_sign and the like), whose material never leaves roll. Bringing your own material is a person's (no tool).", "secrets", "POST", "/v1/secrets/projects/{project}/transit", &[SECRET_PROJECT, breq("name", Ty::Str, "Key name")]),
     t("secrets_rotate_transit_key", "Rotate a transit key", "A new version of a transit key, made by roll: new ciphertexts use it, old ones still decrypt until min_decrypt_version moves past them.", "secrets", "POST", "/v1/secrets/projects/{project}/transit/{name}/rotate", &[SECRET_PROJECT, req("name", "Key name")]).undoable().bodiless(),
@@ -1030,6 +1077,9 @@ static TOOLS: &[Tool] = &[
     t("secrets_rotate", "Rotate a secret", "Make a new value for a secret and switch to it: a generated one, or a managed link's (a database user's password, a cloud key) made where it lives.", "secrets", "POST", "/v1/secrets/projects/{project}/environments/{env}/secrets/{name}/rotate", &[SECRET_PROJECT, ENV, req("name", "Secret name"), q("path", Ty::Str, "Folder")]).open_world().destructive(),
     t("secrets_promote", "Promote secrets", "Copy an environment's secrets into this one (all, or some keys). Into a protected environment it opens a change request for a person instead.", "secrets", "POST", "/v1/secrets/projects/{project}/environments/{env}/promote", &[SECRET_PROJECT, ENV, qreq("from", "The environment to copy from"), b("keys", Ty::Arr, "Only these keys"), b("path", Ty::Str, "Folder"), b("message", Ty::Str, "Why")]),
     t("secrets_list_requests", "Change requests", "An environment's change requests (proposed changes waiting on review).", "secrets", "GET", "/v1/secrets/projects/{project}/environments/{env}/requests", &[SECRET_PROJECT, ENV, q("state", Ty::Str, "open, applied or closed")]),
+    t("secrets_get_request", "Get a change request", "One change request on a protected environment: what it changes (keys, fingerprints, never values), who asked, its reviews and whether its approvals are met.", "secrets", "GET", "/v1/secrets/projects/{project}/environments/{env}/requests/{id}", &[SECRET_PROJECT, ENV, req("id", "Request id")]),
+    t("secrets_apply_request", "Apply an approved change request", "Apply a change request whose approvals are met, as one change. Applying one that isn't approved (bypass) is a person's: not here.", "secrets", "POST", "/v1/secrets/projects/{project}/environments/{env}/requests/{id}/apply", &[SECRET_PROJECT, ENV, req("id", "Request id")]),
+    t("secrets_close_request", "Close a change request", "Withdraw a change request without applying it.", "secrets", "POST", "/v1/secrets/projects/{project}/environments/{env}/requests/{id}/close", &[SECRET_PROJECT, ENV, req("id", "Request id")]),
     t("secrets_propose", "Propose a change", "Propose changes to an environment for a person to review and apply: ops [{op: set, key, value?, if_version?} or {op: delete, key, if_version?}]; if_version keeps each op from applying over a change made meanwhile. The way to change a protected environment.", "secrets", "POST", "/v1/secrets/projects/{project}/environments/{env}/requests", &[SECRET_PROJECT, ENV, breq("ops", Ty::Arr, "[{op: set|delete, key, value?, comment?, if_version?}]"), b("message", Ty::Str, "Why"), b("path", Ty::Str, "Folder")]),
     t("secrets_transit_encrypt", "Encrypt with a key", "Encrypt with one of a project's encryption keys; the key never leaves roll. plaintext is base64. Returns ciphertext (roll:v<n>:…) to store.", "secrets", "POST", "/v1/secrets/projects/{project}/transit/{name}/encrypt", &[SECRET_PROJECT, req("name", "Encryption key name"), breq("plaintext", Ty::Str, "Base64"), b("context", Ty::Str, "Base64 context, if the key derives per context")]),
     t("secrets_transit_decrypt", "Decrypt with a key", "Decrypt a ciphertext (roll:v<n>:…, or vault:v<n>:… for a key brought from Vault). Returns plaintext as base64. Audited.", "secrets", "POST", "/v1/secrets/projects/{project}/transit/{name}/decrypt", &[SECRET_PROJECT, req("name", "Encryption key name"), breq("ciphertext", Ty::Str, "roll:v<n>:…"), b("context", Ty::Str, "Base64 context")]),
@@ -1050,6 +1100,9 @@ static TOOLS: &[Tool] = &[
         "/v1/secrets/projects/{project}/environments/{env}/secrets/{name}/versions/{v}/value",
         &[SECRET_PROJECT, ENV, req("name", "Secret name"), req_int("v", "Version number"), q("path", Ty::Str, "Folder")],
     ),
+    t("secrets_request_value", "Ask a person for an API key or other secret value", "When you need a value you don't have (a vendor's API key, a webhook secret), don't ask for it in the chat: this answers a link where the person pastes it, sealed in their browser and written straight into the folder, so it never passes through the conversation. The link is set when roll knows the dashboard's address; the token (rlq_…) always comes back, and the page is <dashboard>/request/<token>. Give the link or token only to the person it's for, in a message to them: whoever opens it first can send values for these keys, and roll refuses to write either where others read (a repo, an issue, a comment). By default it takes one answer and expires in a day. An answer lands as a change by request:<id> on behalf of whoever asked (a change request in a protected environment), so it can be seen and rolled back. Follow it with secrets_list_value_requests.", "secrets", "POST", "/v1/secrets/projects/{project}/environments/{env}/value-requests", &[SECRET_PROJECT, ENV, q("path", Ty::Str, "Folder, e.g. /api (the root when left out)"), breq("keys", Ty::Arr, "1-20 key names to ask for"), b("note", Ty::Str, "What it's for, shown on the page (never the project or who asked)"), b("ttl_minutes", Ty::Int, "Minutes until it expires (5-43200; default 1440, a day)"), b("answers", Ty::Int, "How many times it may be answered (1-10; default 1)")]).fixed(value_request_defaults),
+    t("secrets_list_value_requests", "List secret value requests", "A project's value requests, newest first: keys, folder, whether each is open, answered, expired or cancelled, and what an answer became (a change or a change request). Never a value.", "secrets", "GET", "/v1/secrets/projects/{project}/value-requests", &[SECRET_PROJECT]),
+    t("secrets_cancel_value_request", "Cancel a secret value request", "Close a value request so its link stops working (whoever asked, or an admin of the folder).", "secrets", "DELETE", "/v1/secrets/projects/{project}/value-requests/{id}", &[SECRET_PROJECT, req("id", "Value request id")]),
     t("secrets_renew_lease", "Renew a lease", "Push a dynamic credential's expiry out, as a long-running consumer does instead of restarting.", "secrets", "POST", "/v1/secrets/projects/{project}/leases/{id}/renew", &[SECRET_PROJECT, req("id", "Lease id"), b("ttl_minutes", Ty::Int, "Minutes from now")]),
     t("secrets_reach", "Who reaches a secret", "Which tokens and identities reach an environment's folder or key, whether code nobody vetted can, where it flows (syncs, shares, imports) and who read it in 30 days: names only. Who has to rotate what after a leak (the project admin's).", "secrets", "GET", "/v1/secrets/projects/{project}/environments/{env}/reach", &[SECRET_PROJECT, ENV, q("path", Ty::Str, "Folder"), q("key", Ty::Str, "One key")]),
     t("secrets_folder_policies", "Folder approval policies", "An environment's approval policies per folder: who must approve a change there.", "secrets", "GET", "/v1/secrets/projects/{project}/environments/{env}/folder-policies", &[SECRET_PROJECT, ENV, q("path", Ty::Str, "Folder")]),
@@ -1333,6 +1386,16 @@ static TOOLS: &[Tool] = &[
         &[req("id", "Preview id")],
     ),
     t(
+        "previews_wait",
+        "Wait for a preview to be ready",
+        "A preview once it's ready (its url and share_url), failed (its error), sleeping, going away, or waiting on a person (awaiting_approval: a fork's change runs only after a writer's approve-run). A client that runs MCP tasks gets a task that waits as long as it takes; otherwise this answers the state now (call again to keep waiting).",
+        "previews",
+        "GET",
+        "/v1/previews/{id}",
+        &[req("id", "Preview id (from previews_create or previews_list)")],
+    )
+    .until(preview_settled),
+    t(
         "previews_create",
         "Create a preview",
         "A preview environment for a change or a branch: the project's resources branched, its services deployed.",
@@ -1367,7 +1430,7 @@ static TOOLS: &[Tool] = &[
     t("previews_list_shares", "List a preview's share links", "Who a preview is shared with outside the team, and until when (never the links' tokens).", "previews", "GET", "/v1/previews/{id}/shares", &[req("id", "Preview id")]),
     t("previews_env", "A preview's variables", "A preview's own variables, with their values (reveal).", "previews", "GET", "/v1/previews/{id}/env", &[req("id", "Preview id")]),
     t("previews_connect", "A preview's data connections", "Each data branch's connection as the preview's services get it (DATABASE_URL, REDIS_URL, a branch bucket's keys): the branches' own credentials, never production's. For querying what a preview sees.", "previews", "GET", "/v1/previews/{id}/connect", &[req("id", "Preview id")]),
-    t("previews_list_mail", "A preview's mail", "The mail a preview's services sent, caught and never delivered: who to, subject, when (for checking a sign-up or receipt flow). It can hold production's data: reveal.", "previews", "GET", "/v1/previews/{id}/mail", &[req("id", "Preview id")]),
+    t("previews_list_mail", "A preview's mail (the emails it sent)", "The mail a preview's services sent, caught and never delivered: who to, subject, when (for checking a sign-up or receipt flow). It can hold production's data: reveal.", "previews", "GET", "/v1/previews/{id}/mail", &[req("id", "Preview id")]),
     t("previews_read_mail", "Read a preview's mail", "One caught message as text.", "previews", "GET", "/v1/previews/{id}/mail/{mail}", &[req("id", "Preview id"), req("mail", "Message id from previews_list_mail")]),
     t("previews_list_notes", "A preview's notes", "Notes people left on a preview's pages through its feedback button and nobody has resolved yet: page, element, what they said, who, when (the latest 500).", "previews", "GET", "/v1/previews/{id}/notes", &[req("id", "Preview id")]),
     t("previews_resolve_note", "Resolve a preview note", "Mark a note left on a preview page's feedback button as dealt with, so the page stops listing it (after fixing what it asked).", "previews", "POST", "/v1/previews/{id}/notes/{note}/resolve", &[req("id", "Preview id"), req("note", "Note id from previews_list_notes")]),
@@ -1378,7 +1441,7 @@ static TOOLS: &[Tool] = &[
     t(
         "previews_set_rules",
         "Change a project's preview rules",
-        "Change how a project's previews are made and kept (a field left out stays): which changes get one (branches, drafts, manual, paths, ignore_paths, skip_authors), how each resource is branched (resources, data), how long they live and sleep, their budgets, and what reaches GitHub. Who can open them (access), production secrets, egress, variables, masking, the visual review's gate and the seed, release and teardown jobs are a person's, in the dashboard: not here.",
+        "Change how a project's previews are made and kept (a field left out stays): which changes get one (branches, drafts, manual, paths, ignore_paths, skip_authors), how each resource is branched (resources, data), how long they live and sleep, their budgets, Who can open them (access), production secrets, egress, variables, masking, the visual review and what reaches GitHub (its screenshots, thresholds and hidden parts decide that review), and the seed, release and teardown jobs are a person's, in the dashboard: not here.",
         "previews",
         "PUT",
         "/v1/previews/projects/{project}/settings",
@@ -1399,7 +1462,6 @@ static TOOLS: &[Tool] = &[
             b("max_previews", Ty::Int, "At most this many at once"),
             b("max_bytes", Ty::Int, "At most this much branched data"),
             b("max_usd_month", Ty::Num, "New previews wait once the month's cost reaches it (0: no cap)"),
-            b("github", Ty::Obj, "What reaches a pull request: {comment, status, deployment, screenshot, pages, …}"),
             b("feedback", Ty::Bool, "A feedback button on its pages for people who came in through roll"),
             b("warm", Ty::Bool, "Wake the services as soon as a new head is deployed"),
         ],
@@ -1457,13 +1519,16 @@ mod tests {
         // Taking a status page down deletes its incidents too: a write the catalogue calls write.
         assert_eq!(def("apps_remove_status_page")["annotations"]["destructiveHint"], true);
         // Every apps tool has an area (or is a lookup every area lists), and each area is a fraction of the whole.
-        let apps: Vec<&Tool> = all().iter().filter(|t| t.product == "apps").collect();
-        let unplaced: Vec<&str> = apps.iter().filter(|t| t.area() == Area::Unplaced).map(|t| t.name).collect();
-        assert!(unplaced.is_empty(), "apps tools with no area (add their route to apps_area): {unplaced:?}");
-        for area in AREAS[0].1 {
-            let n = apps.iter().filter(|t| matches!(t.area(), Area::Every) || t.area() == Area::One(area)).count();
-            assert!(n > 5 && n < 45, "apps.{area}: {n} tools");
+        for (product, areas) in AREAS {
+            let tools: Vec<&Tool> = all().iter().filter(|t| t.product == *product).collect();
+            let unplaced: Vec<&str> = tools.iter().filter(|t| t.area() == Area::Unplaced).map(|t| t.name).collect();
+            assert!(unplaced.is_empty(), "{product} tools with no area (add their route to {product}_area): {unplaced:?}");
+            for area in *areas {
+                let n = tools.iter().filter(|t| matches!(t.area(), Area::Every) || t.area() == Area::One(area)).count();
+                assert!(n > 5 && n < 50, "{product}.{area}: {n} tools");
+            }
         }
+        assert_eq!(all().iter().find(|t| t.name == "secrets_transit_encrypt").unwrap().area(), Area::One("integrations"));
         assert_eq!(all().iter().find(|t| t.name == "apps_logs").unwrap().area(), Area::One("observe"));
         assert_eq!(all().iter().find(|t| t.name == "apps_list_services").unwrap().area(), Area::Every);
         // Every catalogued route of a product with tools here is a tool's, or in no-tool.txt with
@@ -1509,10 +1574,17 @@ mod tests {
         // previews, production secrets, egress, variables, masking, the visual review's gate and the
         // jobs (which run with the preview's secrets) stay a person's, so the closed schema refuses them.
         let rules = all().iter().find(|t| t.name == "previews_set_rules").unwrap();
-        for field in ["access", "secrets", "egress", "egress_hosts", "egress_forks", "env", "env_for", "masking", "visual_review", "seed", "release", "teardown"] {
+        for field in ["access", "secrets", "egress", "egress_hosts", "egress_forks", "env", "env_for", "masking", "visual_review", "github", "seed", "release", "teardown"] {
             assert!(rules.request(&json!({ "project": "prj_a", field: "x" })).is_err(), "previews_set_rules takes {field}");
         }
         assert!(rules.request(&json!({ "project": "prj_a", "ttl_hours": 24 })).is_ok());
+        // Ensuring an environment never deletes keys (the product's `replace` drops the folder's
+        // keys it isn't given), and a batch that can delete keys says so.
+        assert!(all().iter().find(|t| t.name == "secrets_ensure_environment").unwrap().request(&json!({ "project": "prj_a", "env": "staging", "replace": true })).is_err());
+        assert_eq!(def("secrets_apply_changes")["annotations"]["destructiveHint"], true);
+        // Waiting on a preview stops where it settles or needs a person, never while it's still being made.
+        let settled = all().iter().find(|t| t.name == "previews_wait").unwrap().until.unwrap();
+        assert!(["ready", "failed", "awaiting_approval"].iter().all(|s| settled(&json!({ "state": s }))) && !settled(&json!({ "state": "creating" })));
         // Revoking a credential can't be undone: clients that ask before destructive calls ask.
         for n in ["storage_revoke_key", "streams_revoke_key", "search_revoke_key", "search_unlink_remote", "previews_delete_hook"] {
             assert_eq!(def(n)["annotations"]["destructiveHint"], true, "{n}");
@@ -1542,6 +1614,15 @@ mod tests {
         for n in ["postgres_explain", "postgres_slow_queries", "postgres_advisors", "postgres_list_extensions"] {
             assert_eq!(def(n)["annotations"]["readOnlyHint"], true, "{n}");
         }
+        // A value request's link writes those keys: one answer and a day unless the agent asks for more.
+        let ask = all().iter().find(|t| t.name == "secrets_request_value").unwrap();
+        let r = ask.request(&json!({ "project": "prj_a", "env": "production", "path": "/api", "keys": ["STRIPE_KEY"] })).unwrap();
+        assert_eq!(r.uri, "/v1/secrets/projects/prj_a/environments/production/value-requests?path=%2Fapi");
+        assert!(matches!(r.body, Built::Json(ref b) if b["ttl_minutes"] == 1440 && b["answers"] == 1 && b["keys"][0] == "STRIPE_KEY"));
+        let r = ask.request(&json!({ "project": "prj_a", "env": "production", "keys": ["A"], "answers": 3 })).unwrap();
+        assert!(matches!(r.body, Built::Json(ref b) if b["answers"] == 3 && b["ttl_minutes"] == 1440));
+        // Skipping a protected environment's approvals is a person's: an agent applies only what's approved.
+        assert!(all().iter().find(|t| t.name == "secrets_apply_request").unwrap().request(&json!({ "project": "prj_a", "env": "production", "id": "req_a", "bypass": true })).is_err());
         // A field is cleared only when `clear` names it: a null is left out (a client that fills
         // unused fields with null changes nothing), and only a field that can be is.
         let domain = all().iter().find(|t| t.name == "apps_update_domain").unwrap();

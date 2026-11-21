@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { deployChange, describePending, followLog, formatFirewall, formatHeaders, parseEnv, parseFirewall, parseHeaders, stepDurations, toEnv, type DeployStatus, type EnvironmentSummary, type InstanceState, type Service } from "./apps-api";
+import { deployChange, describePending, followChanges, followLog, formatFirewall, formatHeaders, parseEnv, parseFirewall, parseHeaders, stepDurations, toEnv, type DeployStatus, type EnvironmentSummary, type InstanceState, type Service } from "./apps-api";
 import { service } from "./workspace-resources";
 
 const svc = (env: Partial<EnvironmentSummary>, id = "svc_a"): Service => ({
@@ -137,6 +137,26 @@ describe("following a log", () => {
     await new Promise((r) => setTimeout(r, 700));
     expect(lines).toEqual(["done"]);
     expect(fetchFn).toHaveBeenCalledTimes(1);
+    vi.unstubAllGlobals();
+  });
+});
+
+describe("following a service's changes", () => {
+  it("shares one stream among a page's followers and closes it with the last", async () => {
+    const fetchFn = vi.fn((_url: string, init: RequestInit) => new Promise<Response>((resolve) => {
+      const enc = new TextEncoder();
+      resolve(new Response(new ReadableStream({ start(c) { c.enqueue(enc.encode("event: changed\ndata: {}\n\n")); init.signal?.addEventListener("abort", () => c.error(new DOMException("aborted", "AbortError"))); } })));
+    }));
+    vi.stubGlobal("fetch", fetchFn);
+    let a = 0;
+    let b = 0;
+    const stopA = followChanges("svc_1", { onChange: () => a++ });
+    const stopB = followChanges("svc_1", { onChange: () => b++ });
+    await vi.waitFor(() => expect(a + b).toBe(2));
+    expect(fetchFn).toHaveBeenCalledTimes(1);
+    stopA();
+    stopB();
+    expect((fetchFn.mock.calls[0][1] as RequestInit).signal?.aborted).toBe(true);
     vi.unstubAllGlobals();
   });
 });
