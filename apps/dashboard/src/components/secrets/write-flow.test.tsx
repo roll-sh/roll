@@ -16,7 +16,7 @@ const api = new Proxy({} as SecretsApi, {
 });
 const fn = (key: keyof SecretsApi) => api[key] as unknown as Mock;
 
-const ctx = { project: { id: "prj_1", name: "shop" }, api, envs: [] as Environment[], standard: [] as Environment[], previews: [], reloadEnvs: vi.fn(), historyDays: null, search: {}, go: vi.fn(), resourceName: () => "", required: [], serious: 0, reloadRequired: vi.fn() };
+const ctx = { project: { id: "prj_1", name: "shop" }, api, envs: [] as Environment[], standard: [] as Environment[], previews: [], reloadEnvs: vi.fn(), historyDays: null, validityChecks: "off" as const, search: {}, go: vi.fn(), resourceName: () => "", required: [], serious: 0, reloadRequired: vi.fn() };
 vi.mock("./secrets-page", () => ({ useSecrets: () => ctx, secretsHref: () => "/" }));
 
 const environment = (slug: string, isProtected: boolean): Environment => ({ id: `env_${slug}`, slug, name: slug[0].toUpperCase() + slug.slice(1), position: 0, kind: "standard", base: null, labels: {}, expires_at: null, protected: isProtected, approvals: 1, approvers: [], created_at: 0, secrets: 1, max_age_days: null, notify: null, trusted: false });

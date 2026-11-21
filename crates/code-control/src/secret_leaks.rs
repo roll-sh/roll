@@ -167,6 +167,8 @@ impl Unstored {
 /// A credential found in a change's added lines, before roll secrets is asked about it.
 struct Added {
     value: String,
+    /// An AWS access key id's secret access key, when one is next to it (for its validity check).
+    pair: Option<String>,
     unstored: Unstored,
 }
 
@@ -211,6 +213,7 @@ impl Code {
             self.leak_facts.put(key, (mb, Arc::new(LeakFacts { unstored, ..Default::default() })));
             return;
         };
+        let repo = r.id.clone();
         // The variables it starts reading that an environment lacks: a notice, never a blocker.
         match if reads.is_empty() { Ok(Vec::new()) } else { secrets.missing(&r.full_name(), reads.into_iter().collect()).await } {
             Ok(missing) => self.env_facts.put(key.clone(), (mb, Arc::new(missing))),
@@ -234,7 +237,13 @@ impl Code {
                 let mut leaks: Vec<(String, String)> = found.into_iter().map(|(_, key, env, _)| (key, env)).collect();
                 leaks.sort();
                 leaks.dedup();
-                let unstored = added.into_iter().zip(at).filter(|(_, i)| !stored.contains(i)).map(|(a, _)| a.unstored).collect();
+                let unstored: Vec<Added> = added.into_iter().zip(at).filter(|(_, i)| !stored.contains(i)).map(|(a, _)| a).collect();
+                // Only the repo's own changes: a fork's would make the notice an oracle for whether
+                // anyone's credential works, at the project's expense.
+                if c.trusted {
+                    self.check_validity(&repo, &r.full_name(), &secrets, &unstored);
+                }
+                let unstored = unstored.into_iter().map(|a| a.unstored).collect();
                 self.leak_facts.put(key, (mb, Arc::new(LeakFacts { leaks, unstored, ..Default::default() })));
             }
             // Finding credentials needs nothing from roll secrets: they all count as unstored
@@ -245,6 +254,35 @@ impl Code {
                 self.leak_facts.put(key, (mb, Arc::new(LeakFacts { unstored, retry: true, ..Default::default() })));
             }
         }
+    }
+
+    /// Ask roll secrets' validity checks (docs/secrets.md, "Is it live?") about the credentials in
+    /// `found` whose kind a provider can be asked about and that no fresh answer covers, in
+    /// background work: the answers land in `validity_facts`, and the notices show them from then
+    /// on. The values go only to roll secrets (which sends each to its provider when the project
+    /// has the checks on) and are dropped when it answers.
+    fn check_validity(&self, repo_id: &str, repo: &str, secrets: &Arc<dyn crate::SecretEnv>, found: &[Added]) {
+        let now = now_ms();
+        let probes: Vec<(String, Option<String>)> = found
+            .iter()
+            .filter(|a| roll_auth::credentials::VERIFIABLE.contains(&a.unstored.kind))
+            .filter(|a| !self.validity_facts.get(&(repo_id.to_string(), a.unstored.fingerprint.clone())).is_some_and(|v| fresh(&v, now)))
+            .map(|a| (a.value.clone(), a.pair.clone()))
+            .collect();
+        if probes.is_empty() {
+            return;
+        }
+        let (secrets, facts, repo_id, repo) = (secrets.clone(), self.validity_facts.clone(), repo_id.to_string(), repo.to_string());
+        tokio::spawn(async move {
+            match secrets.validity(&repo, probes).await {
+                Ok(answers) => {
+                    for v in answers {
+                        facts.put((repo_id.clone(), v.fingerprint.clone()), v);
+                    }
+                }
+                Err(e) => tracing::warn!(repo = %repo, error = %e, "checking whether a change's credentials work"),
+            }
+        });
     }
 
     /// One `secret_leak` blocker per key whose value `c` adds (from what
@@ -281,20 +319,39 @@ impl Code {
             let block = settings.secrets.unstored_credentials == crate::settings::Unstored::Block;
             return if block { vec![Blocker::new("secret_unstored", "couldn't check this change for credentials: try again, or an admin can land it over this")] } else { Vec::new() };
         }
-        let found: Vec<&Unstored> = facts.unstored.iter().filter(|u| !u.allowed(&settings.secrets_allow)).collect();
+        let now = now_ms();
+        let mut found: Vec<(&Unstored, Option<crate::model::CredentialValidity>)> = facts
+            .unstored
+            .iter()
+            .filter(|u| !u.allowed(&settings.secrets_allow))
+            .map(|u| (u, self.validity_facts.get(&(r.id.clone(), u.fingerprint.clone())).filter(|v| c.trusted && fresh(v, now))))
+            .collect();
+        // A credential that works ranks first: it's the one to rotate now.
+        found.sort_by_key(|(_, v)| v.as_ref().is_none_or(|v| v.result != "live"));
         let mut out: Vec<Blocker> = found
             .iter()
             .take(UNSTORED_SHOWN)
-            .map(|u| {
+            .map(|(u, validity)| {
                 let at = format!("{}:{}", u.path, u.line);
                 let read = roll_auth::credentials::env_read(&u.path, &u.key);
+                let result = validity.as_ref().map(|v| v.result.as_str());
+                let said = match (result, validity.as_ref().and_then(|v| v.account.as_deref())) {
+                    (Some("live"), Some(a)) => format!(" (live: its provider accepted it, account {a})"),
+                    (Some("live"), None) => " (live: its provider accepted it)".to_string(),
+                    (Some("invalid"), _) => " (revoked or invalid, its provider said)".to_string(),
+                    // An AWS key's account, read from the key id: it isn't tried.
+                    (Some("unknown"), Some(a)) => format!(" (account {a}, not tried)"),
+                    _ => String::new(),
+                };
+                let rotate = if result == Some("live") { "rotate it, then " } else { "" };
                 Blocker {
                     path: Some(u.path.clone()),
                     line: Some(u.line),
                     fingerprint: Some(u.fingerprint.clone()),
+                    validity: validity.clone(),
                     ..Blocker::new(
                         "secret_unstored",
-                        format!("adds what looks like {} at {at}, which roll secrets doesn't hold: store it as {} (roll secrets scan --store {}={at}) and read it with {read}, or allow it in .roll/secrets-allow", u.kind, u.key, u.key),
+                        format!("adds what looks like {} at {at}{said}, which roll secrets doesn't hold: {rotate}store it as {} (roll secrets scan --store {}={at}) and read it with {read}, or allow it in .roll/secrets-allow", u.kind, u.key, u.key),
                     )
                 }
             })
@@ -555,7 +612,8 @@ fn credentials_in(path: &str, patch: &str, out: &mut Vec<Added>) {
                 key: roll_auth::credentials::suggested_key(m.kind, &text[line_start..m.start]),
             };
             if !out.iter().any(|a| a.unstored == unstored) {
-                out.push(Added { value: value.to_string(), unstored });
+                let pair = (m.kind == "an AWS access key").then(|| roll_auth::credentials::aws_secret_near(&text, &m)).flatten().map(str::to_string);
+                out.push(Added { value: value.to_string(), pair, unstored });
             }
         }
     };
@@ -583,6 +641,17 @@ fn credentials_in(path: &str, patch: &str, out: &mut Vec<Added>) {
         }
     }
     flush(&mut run, out);
+}
+
+/// How long a validity answer counts (roll secrets keeps them a day too).
+const VALIDITY_TTL_MS: i64 = 24 * 3_600_000;
+
+fn fresh(v: &crate::model::CredentialValidity, now: i64) -> bool {
+    v.checked_at.is_some_and(|at| now - at < VALIDITY_TTL_MS)
+}
+
+fn now_ms() -> i64 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis() as i64).unwrap_or_default()
 }
 
 /// The lines a unified patch adds (up to [`MAX_LINE`] bytes each).
