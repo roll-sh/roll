@@ -366,6 +366,8 @@ pub struct Apps {
     site_loads: Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
     /// Environments in a crash loop whose event is written (one per loop).
     looping: Mutex<std::collections::HashSet<String>>,
+    /// Each metric alert's run of judgments past its threshold (`service/env/name/sum`).
+    metric_streaks: Mutex<std::collections::HashMap<String, u8>>,
     /// For notification targets: public addresses only, no redirects.
     notify_client: reqwest::Client,
     /// A static site's proxy rewrites to other sites (`_redirects`' `https://… 200`): public
@@ -671,6 +673,7 @@ impl Apps {
             edge_noted: Mutex::new(Default::default()),
             password_tries: Mutex::new(HashMap::new()),
             looping: Mutex::new(std::collections::HashSet::new()),
+            metric_streaks: Mutex::new(std::collections::HashMap::new()),
             client: hyper_util::client::legacy::Client::builder(hyper_util::rt::TokioExecutor::new()).pool_idle_timeout(Duration::from_secs(30)).build_http(),
             client_h2: hyper_util::client::legacy::Client::builder(hyper_util::rt::TokioExecutor::new()).pool_idle_timeout(Duration::from_secs(30)).http2_only(true).build_http(),
             stop: CancellationToken::new(),

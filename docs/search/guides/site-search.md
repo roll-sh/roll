@@ -216,12 +216,81 @@ analytics" and "Query suggestions".
 
 ## Search from the browser
 
-A web page can't call the cluster directly yet: clusters don't send CORS headers. Browser keys
-(search-only keys a page can ship, with allowed origins and rate limits) are coming with #358,
-which is in review and not on main.
+A page can call the cluster itself, with no backend of its own in front, using a browser key. A
+browser key can only search, reaches only what you name, and is rate limited, so it's safe to ship
+in the page's JavaScript.
 
-Until then, put a small endpoint in front of search. Give it a key that can only read `pages` and
-`pages-suggestions` (creating a key with `role_descriptors` needs the admin key):
+In the dashboard, open the cluster's **Settings**, then **Browser search**:
+
+1. Under **Allowed origins**, add your site's origin, one per line: `https://docs.example.com`,
+   plus `http://localhost:3000` while you develop. Click **Save**.
+2. Under **Browser keys**, name the key `site`, set **Reaches** to **Indices** with
+   `pages, pages-suggestions`, and set **Per address** to `60` so one visitor can't spend the
+   key's whole budget. Create the key and copy it, because it's shown only once.
+
+Browsers have to call the cluster at its own URL (`https://docs.search.…`), since that's how a
+preflight request, which carries no key, names its cluster. A shared address such as
+`http://127.0.0.1:59200` can't serve browsers.
+
+```html
+<input id="q" type="search" placeholder="Search the docs" autocomplete="off">
+<ul id="hits"></ul>
+<script type="module">
+const CLUSTER = 'https://docs.search.…'   // the cluster's URL
+const KEY = '…'                            // the browser key
+const box = document.getElementById('q'), list = document.getElementById('hits')
+let inflight
+box.addEventListener('input', async () => {
+  inflight?.abort()
+  inflight = new AbortController()
+  const q = box.value.slice(0, 200)
+  if (!q.trim()) { list.replaceChildren(); return }
+  try {
+    const r = await fetch(`${CLUSTER}/pages/_search`, {
+      method: 'POST',
+      signal: inflight.signal,
+      headers: { authorization: `ApiKey ${KEY}`, 'content-type': 'application/json' },
+      body: JSON.stringify({
+        size: 8,
+        _source: ['url', 'title'],
+        query: { multi_match: { query: q, type: 'bool_prefix', fuzziness: 'AUTO',
+          fields: ['title', 'title._2gram', 'title._3gram', 'body'] } },
+        highlight: { fields: { body: { number_of_fragments: 1 } } },
+      }),
+    })
+    if (!r.ok) return   // 429: the key's rate limit; the next keystroke tries again
+    const { hits } = await r.json()
+    list.replaceChildren(...hits.hits.map((h) => {
+      const li = document.createElement('li'), a = document.createElement('a')
+      a.href = h._source.url
+      a.textContent = h._source.title
+      li.append(a)
+      return li
+    }))
+  } catch (e) {
+    if (e.name !== 'AbortError') throw e
+  }
+})
+</script>
+```
+
+The page sends no `X-Roll-Search-Query` header. Analytics reads the visitor's text from the
+`multi_match` query, so searches still count toward the **Relevance** tab and query suggestions.
+To keep some pages out of results, give the key a **Filter**, such as
+`{"term": {"public": true}}`: every search the key makes is filtered by it, whatever the page
+sends. The panel's **Search UI** and **InstantSearch (Searchkit)** snippets set up those libraries
+with the same key.
+
+A browser key can't index, change settings or read other indices. It's still public, though:
+anyone can copy it out of the page and search `pages` from a script, within its rate limits.
+Allowed origins only bind browsers. The limits a browser key works under are listed in
+[../README.md](../README.md), "Search from the browser".
+
+### Or keep a backend
+
+If you'd rather not ship a key, put a small endpoint in front of search. Give it a key that can
+only read `pages` and `pages-suggestions` (creating a key with `role_descriptors` needs the admin
+key):
 
 ```sh
 es POST /_security/api_key '{
