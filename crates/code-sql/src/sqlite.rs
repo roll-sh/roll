@@ -80,6 +80,25 @@ impl Sqlite {
         f(&self.reader())
     }
 
+    /// `f` in one transaction on the writer with `secure_delete` on (what it frees is zeroed), then
+    /// the WAL checkpointed into the file and truncated: nothing it overwrote stays readable in
+    /// the database's free pages or its `-wal`.
+    pub(crate) fn write_erasing<T, E: From<Error>>(&self, f: impl FnOnce(&Connection) -> Result<T, E>) -> Result<T, E> {
+        let conn = self.writer.lock();
+        conn.execute_batch("PRAGMA secure_delete = ON").map_err(Error::from)?;
+        let out = (|| {
+            conn.execute_batch("BEGIN IMMEDIATE").map_err(Error::from)?;
+            let _guard = Rollback(&conn);
+            let v = f(&conn)?;
+            conn.execute_batch("COMMIT").map_err(Error::from)?;
+            Ok::<T, E>(v)
+        })();
+        let _ = conn.execute_batch("PRAGMA secure_delete = OFF");
+        let v = out?;
+        conn.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |_| Ok(())).map_err(Error::from)?;
+        Ok(v)
+    }
+
     /// One transaction on the writer; then, if `sync`, wait for the WAL to be durable past it.
     pub(crate) fn write<T, E: From<Error>>(&self, sync: bool, f: impl FnOnce(&Connection) -> Result<T, E>) -> Result<T, E> {
         let out = {
