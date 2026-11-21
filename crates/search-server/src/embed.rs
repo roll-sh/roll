@@ -347,7 +347,7 @@ impl State {
         self.node.add(&job);
         let q = self.queues.entry(cluster.clone()).or_default();
         let first = q.is_empty();
-        q.push_back(job);
+        q.push(job);
         if first {
             let turns = self.clusters.entry(owner.clone()).or_default();
             if turns.is_empty() {
