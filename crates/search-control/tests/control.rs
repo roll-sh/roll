@@ -1092,7 +1092,8 @@ async fn a_browser_keys_fetches_share_one_budget() {
 
 /// A browser key pays for every item the engine parses (an `_msearch`'s searches however its
 /// lines or URL are written, an `_mget`'s documents however its body is given), each search
-/// checked; more than its `max_items` is a 429.
+/// checked; more than its `max_items` is a 429, an `_msearch`'s counted from its lines before any
+/// is parsed. A request refused after its body was parsed keeps its admission token as payment.
 /// Browser requests running at once are capped per key and per cluster, below the cluster's own
 /// permits: past either a browser request gets 429 while the owner's clients go on.
 #[tokio::test]
@@ -1110,15 +1111,22 @@ async fn browser_keys_pay_per_item_and_leave_the_owner_permits() {
     let r = send(reqwest::Method::GET, url, String::new()).await.unwrap();
     assert_eq!(r.status().as_u16(), 429, "3 tokens left can't pay for 4 documents");
     assert!(r.headers().contains_key("retry-after"));
-    // Blank lines are empty headers: 3 searches, 3 tokens.
-    let blank = "{\"index\":\"products\"}\n{}\n\n{}\n\n{}\n".to_string();
-    assert_eq!(send(reqwest::Method::POST, format!("{}/_msearch", e.es), blank).await.unwrap().status().as_u16(), 200, "3 searches, 3 tokens");
+    // The refused `_mget` was parsed: its admission stays paid, 2 tokens left. Blank lines are
+    // empty headers: 2 searches, 2 tokens, and nothing left for another request.
+    let blank = "{\"index\":\"products\"}\n{}\n\n{}\n".to_string();
+    assert_eq!(send(reqwest::Method::POST, format!("{}/_msearch", e.es), blank).await.unwrap().status().as_u16(), 200, "2 searches, 2 tokens");
+    assert_eq!(send(reqwest::Method::POST, format!("{}/products/_search", e.es), String::new()).await.unwrap().status().as_u16(), 429, "the refused _mget's admission stayed paid");
     // Each search is checked, an empty header's too; more than the key's 100 items is a 429.
     let big = e.post("/v1/search/clusters/shop/browser-keys", json!({"name": "big", "indices": ["products"], "rate_limit": {"per_minute": 10000}})).await["api_key"].as_str().unwrap().to_string();
     let as_big = |body: String| e.http.post(format!("{}/_msearch", e.es)).header("authorization", format!("ApiKey {big}")).header("content-type", "application/x-ndjson").body(body).send();
     let explained = "{\"index\":\"products\"}\n{}\n\n{\"explain\":true}\n".to_string();
     assert_eq!(as_big(explained).await.unwrap().status().as_u16(), 400);
-    assert_eq!(as_big(items(101)).await.unwrap().status().as_u16(), 429);
+    // Past 100 searches by its line count, before any line is parsed: an unparseable line after
+    // the cap still gets the item count's 429.
+    let r = as_big(items(101) + "not json\n{\n").await.unwrap();
+    let status = r.status().as_u16();
+    let text = r.text().await.unwrap();
+    assert!(status == 429 && text.contains("max_items"), "{status} {text}");
 
     // Running at once: a cluster of 8 permits gives browser keys 4. Four browser requests held
     // (as running requests hold their leases): the next browser request gets 429, the owner's

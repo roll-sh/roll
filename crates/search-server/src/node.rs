@@ -406,6 +406,8 @@ pub struct Lease {
 /// A browser key's request, admitted with one token and a running slot.
 struct BrowserCharge {
     id: String,
+    /// The key's body cap (`limits.max_body_bytes`, 1 MiB by default).
+    max_body: usize,
 }
 
 /// Counts a request in the cluster's queue for as long as it waits, however the wait ends
@@ -436,7 +438,12 @@ impl Drop for Lease {
 
 impl Lease {
     pub fn max_body_bytes(&self, node: &Node) -> usize {
-        self.loaded.spec().max_body_bytes.unwrap_or(node.cfg.max_body_bytes)
+        let cluster = self.loaded.spec().max_body_bytes.unwrap_or(node.cfg.max_body_bytes);
+        // A browser key's own cap, under the cluster's.
+        match &self.browser {
+            Some(b) => cluster.min(b.max_body),
+            None => cluster,
+        }
     }
 
     /// Reserves `bytes` of the cluster's in-flight body budget (from `Content-Length`, before
@@ -729,6 +736,15 @@ fn browser_key(loaded: &Loaded, p: &search_es::xpack::security::Principal) -> Re
         _ => return Err(()),
     }
     Ok(key_limit(loaded, &k.id).map(|limit| (k.id.clone(), limit)))
+}
+
+/// Browser key `key_id`'s body cap: its `limits.max_body_bytes`, else
+/// [`crate::browser::DEFAULT_MAX_BODY_BYTES`].
+fn browser_body_cap(loaded: &Loaded, key_id: &str) -> usize {
+    let meta = search_es::xpack::security::api_keys::metadata(&loaded.cluster, key_id);
+    let n = meta.as_ref().and_then(|m| m.get(crate::browser::METADATA)).and_then(|b| b.get("limits")).and_then(|l| l.get("max_body_bytes")).and_then(|v| v.as_i64());
+    let n = n.and_then(|n| u64::try_from(n).ok()).filter(|n| (1..=crate::browser::MAX_BODY_BYTES).contains(n)).unwrap_or(crate::browser::DEFAULT_MAX_BODY_BYTES);
+    usize::try_from(n).unwrap_or(usize::MAX)
 }
 
 /// Browser key `key_id`'s limits, from its `metadata.roll_browser` (`None`: not a browser key).
@@ -2112,7 +2128,8 @@ impl Node {
                 ));
                 return Err(Refused::Throttled(Rejected { error, dialect: lease.dialect }, 1));
             }
-            lease.browser = Some(BrowserCharge { id });
+            let max_body = browser_body_cap(&lease.loaded, &id);
+            lease.browser = Some(BrowserCharge { id, max_body });
         }
         Ok(lease)
     }

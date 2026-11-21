@@ -79,7 +79,7 @@ pub trait ItemCharge: Send + Sync {
     /// Charges `n` more items to browser key `key_id` from `client`, all or none; `Err`: refused,
     /// retry after that many seconds.
     fn charge(&self, key_id: &str, client: Option<std::net::IpAddr>, n: u64) -> Result<(), u64>;
-    /// Gives back the token the request's admission took: it is refused before running.
+    /// Gives back the token the request's admission took: it is refused before its body is parsed.
     fn refund(&self, key_id: &str, client: Option<std::net::IpAddr>);
 }
 
@@ -255,23 +255,34 @@ fn too_many(ctx: &Ctx, retry_after: u64, why: String) -> EsError {
     EsError::too_many_requests(format!("rejected execution of [{}]: {why}", ctx.api.name())).with_header("Retry-After", retry_after.to_string())
 }
 
+fn over_max_items(ctx: &Ctx, p: &Policy, n: usize) -> EsError {
+    too_many(ctx, 60, format!("a browser key's request holds at most [{}] items, this one [{n}] (the key's max_items)", p.max_items))
+}
+
+/// Refuses an `_msearch` whose body holds more than the key's `max_items` searches from its line
+/// count alone (`at_least`: half its lines), before any line is parsed: nothing ran, so the token
+/// its admission took goes back.
+pub fn check_item_lines(ctx: &Ctx, at_least: usize) -> EsResult<()> {
+    let Some((p, key, client)) = key_of(ctx) else { return Ok(()) };
+    if at_least <= p.max_items {
+        return Ok(());
+    }
+    if let Some(charge) = &ctx.cluster.config.item_charge {
+        charge.refund(key, client);
+    }
+    Err(over_max_items(ctx, &p, at_least))
+}
+
 /// Charges an `_msearch`'s or `_mget`'s items, as the engine parsed them, to a browser key's
 /// rate limits before they run (its admission paid for one). More than the key's `max_items`,
-/// or more than its limits have left, is a 429 with `Retry-After`, and the admission's token
-/// goes back.
+/// or more than its limits have left, is a 429 with `Retry-After`; the parse already ran, so
+/// the admission's token stays paid.
 pub fn charge_items(ctx: &Ctx, n: usize) -> EsResult<()> {
     let Some((p, key, client)) = key_of(ctx) else { return Ok(()) };
-    // Refused before anything ran: the token its admission took goes back.
-    let refund = || {
-        if let Some(charge) = &ctx.cluster.config.item_charge {
-            charge.refund(key, client);
-        }
-    };
     if n > p.max_items {
-        refund();
-        return Err(too_many(ctx, 60, format!("a browser key's request holds at most [{}] items, this one [{n}] (the key's max_items)", p.max_items)));
+        return Err(over_max_items(ctx, &p, n));
     }
-    charge_n(ctx, key, client, n.saturating_sub(1) as u64, || format!("its [{n}] items exceed")).inspect_err(|_| refund())
+    charge_n(ctx, key, client, n.saturating_sub(1) as u64, || format!("its [{n}] items exceed"))
 }
 
 /// Charges `n` items of work a browser key's request asks for besides its searches (inference

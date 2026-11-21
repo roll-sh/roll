@@ -76,6 +76,9 @@ pub struct Limits {
     /// The most documents a `text_similarity_reranker` reranks (100).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_rerank_window: Option<u64>,
+    /// The largest request body, in bytes (1 MiB; never past the cluster's `max_body_bytes`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_body_bytes: Option<u64>,
     /// Inference endpoints besides those of the indices' `semantic_text` fields (a reranker's).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub inference_endpoints: Option<Vec<String>>,
@@ -161,9 +164,10 @@ fn reach(k: &NewBrowserKey) -> Result<Value> {
         || !within(l.max_items, 1_000)
         || !within(l.max_inference, 64)
         || !within(l.max_rerank_window, 1_000)
+        || !within(l.max_body_bytes, search_server::browser::MAX_BODY_BYTES)
     {
         return Err(ControlError::Invalid(
-            "limits: max_concurrent 1-64, max_result_window 1-10000, max_buckets 1-65536, max_items 1-1000, max_inference 1-64, max_rerank_window 1-1000".into(),
+            "limits: max_concurrent 1-64, max_result_window 1-10000, max_buckets 1-65536, max_items 1-1000, max_inference 1-64, max_rerank_window 1-1000, max_body_bytes 1-104857600".into(),
         ));
     }
     let endpoints = l.inference_endpoints.as_deref().unwrap_or_default();

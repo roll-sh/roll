@@ -37,6 +37,12 @@ pub const MAX_PER_MINUTE: u64 = 100_000;
 pub const DEFAULT_CLUSTER_PER_MINUTE: u64 = 6_000;
 /// A key's concurrent requests when it sets none.
 pub const DEFAULT_MAX_CONCURRENT: u64 = 4;
+/// The largest request body a browser key may send when its `limits.max_body_bytes` sets
+/// none (under the cluster's own `max_body_bytes`): one token never buys a parse of the
+/// cluster's whole body limit.
+pub const DEFAULT_MAX_BODY_BYTES: u64 = 1024 * 1024;
+/// The most a key's `limits.max_body_bytes` may be.
+pub const MAX_BODY_BYTES: u64 = 100 * 1024 * 1024;
 
 /// A browser key's limits, from its metadata.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

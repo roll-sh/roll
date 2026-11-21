@@ -339,12 +339,17 @@ applications). A web page calls a cluster directly, with no backend of its own i
     takes no part (as for any reader with document level security).
   - *Items*: an `_msearch`'s searches and an `_mget`'s documents, as the engine parsed them
     (whatever the URL, `?source=` or body format), are charged to the key's rate limits before
-    they run (below); more than `limits.max_items` (100) is a 429.
+    they run (below); more than `limits.max_items` (100) is a 429. An `_msearch` is counted from
+    its lines first (a header and a body line per search): past the limit it's refused before
+    any line is parsed, and its admission token goes back. Once a body was parsed, a refused
+    request keeps its admission token as payment.
+  - *Body*: at most `limits.max_body_bytes` (1 MiB), under the cluster's own `max_body_bytes`:
+    one token never buys a parse of the cluster's whole body limit.
 
   The owner widens them in `limits` when making the key (`max_concurrent` 1-64,
   `max_result_window` up to 10,000, `max_buckets` up to 65,536, `max_items` up to 1,000,
-  `max_inference` up to 64, `max_rerank_window` up to 1,000, `inference_endpoints` up to 16
-  ids, the two `allow_` switches); the list shows them.
+  `max_inference` up to 64, `max_rerank_window` up to 1,000, `max_body_bytes` up to 100 MiB,
+  `inference_endpoints` up to 16 ids, the two `allow_` switches); the list shows them.
 - *Term statistics aren't filtered* (as in Elasticsearch): a filter (document level security)
   hides documents from searches and gets, and exact counts, but `_score` (idf, average field
   lengths), term vectors' `term_statistics` and `_explain` come from every document of the
@@ -535,7 +540,7 @@ origins (browser search), once they're on main.
 | POST | `/v1/search/clusters/{id}/keys` | a new API key of the cluster `{name, expires_in_s?, access?}` (`access`: `admin`, the default, or `data`: a link's role, data, templates, pipelines and lifecycle policies without security) → `{id, name, access, api_key, url, expires_at?}` (`access`: the access the key was made with): `api_key` is `base64(<key id>@<cluster>:<key>)` for `Authorization: ApiKey …`, in this answer only (roll secrets' managed links use it instead of sharing the password); on an OpenSearch-flavor cluster (whose clients sign in with a user) the key is an internal user of its own: `{id, name, access, username, password, url, expires_at?}` without `api_key`, `username` being `<user>@<cluster>`, refused once `expires_in_s` passes |
 | DELETE | `/v1/search/clusters/{id}/keys/{key}` | revoke it (204; 404 when it's gone). On a deleted cluster (by its id) the revoke is kept and applied by its restore (204) |
 | GET | `/v1/search/clusters/{id}/browser-keys` | `{keys}`: the browser keys that still work, newest first, each `{id, name, indices or application, filter?, rate_limit, created_at, expires_at}` (no secret). Wakes the cluster |
-| POST | `/v1/search/clusters/{id}/browser-keys` | a key a web page ships (above) `{name, indices or application, filter?, expires_in_s?, rate_limit?: {per_minute?, per_ip_per_minute?}, limits?: {max_concurrent?, max_result_window?, max_buckets?, max_items?, max_inference?, max_rerank_window?, inference_endpoints?, allow_scripts?, allow_expensive_queries?}}` → the same fields plus `api_key` (once) and `url`. 400 on an OpenSearch-flavor cluster; 409 past 20 browser keys |
+| POST | `/v1/search/clusters/{id}/browser-keys` | a key a web page ships (above) `{name, indices or application, filter?, expires_in_s?, rate_limit?: {per_minute?, per_ip_per_minute?}, limits?: {max_concurrent?, max_result_window?, max_buckets?, max_items?, max_inference?, max_rerank_window?, max_body_bytes?, inference_endpoints?, allow_scripts?, allow_expensive_queries?}}` → the same fields plus `api_key` (once) and `url`. 400 on an OpenSearch-flavor cluster; 409 past 20 browser keys |
 | DELETE | `/v1/search/clusters/{id}/browser-keys/{key}` | revoke a browser key (204; 404 for any other key of the cluster; on a deleted cluster, a browser key of it is kept for the restore, which revokes it: 202) |
 | GET | `/v1/search/clusters/{id}/remotes` | the remote clusters it holds credentials for: `{remotes: [{alias, cluster, cluster_id, key_id, minted, created_at, connected}]}` (never the key) |
 | PUT | `/v1/search/clusters/{id}/remotes/{alias}` | link another cluster of the same owner as remote `alias` (above): `{cluster, skip_unavailable?, access?}` or `{cluster, skip_unavailable?, api_key}` → `{alias, cluster, cluster_id, mode, proxy_address, key_id, minted, skip_unavailable?}`; 404 for a cluster the caller can't link to, missing or not. `admin` on both clusters for roll-access |

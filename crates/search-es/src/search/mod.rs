@@ -4499,6 +4499,9 @@ pub async fn msearch(ctx: &Ctx<'_>) -> EsResult<Reply> {
     } else if !data.is_empty() {
         return Err(EsError::illegal_argument("The msearch request must be terminated by a newline [\\n]"));
     }
+    // A browser key's searches past its `max_items`, counted from the lines before any is parsed
+    // (each search is a header line and a body line).
+    crate::xpack::security::browser::check_item_lines(ctx, lines.len() / 2)?;
     let mut responses = Vec::new();
     let mut i = 0;
     let os = ctx.cluster.dialect == crate::cluster::Dialect::OpenSearch;
