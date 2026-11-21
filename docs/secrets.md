@@ -5978,7 +5978,9 @@ and webhooks' and review apps' signing secrets sealed. Still open:
 - **Item 4** (a placement required, responses scrubbed): the design is below, under "Using a key
   without seeing it"; `fix/secrets-placeholder-placement-scrub`, building.
 - **Item 5:**
-  - previews: #581, sealing rules, vars and the screenshot key;
+  - previews: done, #581 (4c575f044). The rules' pasted values, a preview's own variables and the
+    screenshot links' key are sealed. Without a key a pasted value is refused, and the signing key
+    lives in memory. An upgraded database keeps nothing in its file or WAL;
   - search: `fix/search-security-1120` and #318;
   - roll code: `fix/code-webhooks-sealed-at-rest`, webhook URLs sealed and no clear signing secret
     without a key.
