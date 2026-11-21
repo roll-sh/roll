@@ -1989,6 +1989,19 @@ impl Runtime {
                 let engine = self.engine.get().cloned();
                 let id = preview.to_string();
                 let done: Arc<dyn Fn(String, anyhow::Result<crate::intercept::Served>) + Send + Sync> = Arc::new(move |host, out| {
+                    // Its record's counts: requests a key was swapped into, and refusals.
+                    let (swapped, refused) = match &out {
+                        Ok(s) => (s.swapped as u64, s.blocked.len() as u64),
+                        Err(_) => (0, 1),
+                    };
+                    if swapped + refused > 0
+                        && let Some(e) = engine.as_ref().and_then(Weak::upgrade)
+                    {
+                        let _ = e.store.update_intercepted(&id, |x| {
+                            x.swapped += swapped;
+                            x.refused += refused;
+                        });
+                    }
                     let line = match out {
                         Ok(s) if s.blocked.is_empty() && s.swapped == 0 => return,
                         Ok(s) if s.blocked.is_empty() => format!("egress to {host}: {} request(s), {} key(s) swapped in", s.requests, s.swapped),

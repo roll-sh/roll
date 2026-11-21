@@ -1269,6 +1269,10 @@ async fn a_roll_only_preview_takes_placeholders_made_by_who_saved_its_rules() {
     assert_eq!(e.secrets.placeholders.lock().last().cloned(), Some((roll_previews::ports::intercept_consumer(&p.id), "usr_b".to_string())));
     let said: Vec<String> = e.engine.store.activity(&p.id).unwrap().into_iter().map(|a| a.message).collect();
     assert!(said.iter().any(|m| m.contains("its egress doesn't allow") && m.contains("STRIPE_KEY → api.other.example") && !m.contains("api.stripe.com")), "{said:?}");
+    // On its record: the key and its hosts, and what its egress proxy did (never a value).
+    e.engine.store.update_intercepted(&p.id, |x| x.swapped += 2).unwrap();
+    let held = e.engine.store.preview(&p.id).unwrap().intercepted.expect("its keys");
+    assert_eq!((held.keys[0].key.as_str(), held.keys[0].hosts.len(), held.swapped), ("STRIPE_KEY", 2, 2));
     // Its CA changes (a key's bound hosts did): its services restart, trusting the new one.
     struct Ca(parking_lot::Mutex<String>);
     struct Nothing;
