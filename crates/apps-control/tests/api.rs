@@ -6794,6 +6794,44 @@ async fn a_repos_submodules_come_from_roll_code_and_from_elsewhere() {
     }
 }
 
+/// roll.toml's edge settings (fly.toml's, vercel.json's): a live deployment's headers, firewall
+/// rules and rate limit go on its environment's gate, only ever tightening it: a rule of the
+/// tree's denies past the environment's allow, the environment's header wins over the tree's of the
+/// same name, and the lower rate limit holds. An allow rule in the tree isn't read at all.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_trees_edge_settings_only_tighten_its_environment() {
+    let w = world().await;
+    let file = "[app]\nheaders = [{ set = { \"x-from-file\" = \"1\", \"x-frame-options\" = \"SAMEORIGIN\" } }]\n[app.environments.production]\nfirewall = [{ action = \"deny\", path = \"/admin/*\" }]\nrate_limit = { per_minute = 1000, burst = 3 }\n";
+    for (k, v) in [("package.json", r#"{"name":"site","scripts":{"start":"node server.js"}}"#), ("server.js", "x"), ("roll.toml", file)] {
+        w.code.files.lock().insert(k.to_string(), v.to_string());
+    }
+    let (st, svc) = call(&w.api, "POST", "/v1/apps/services", Some(json!({ "project": w.project, "name": "site", "source": {"kind": "repo", "repo": "acme/site"} }))).await;
+    assert_eq!(st, StatusCode::CREATED, "{svc}");
+    let id = svc["id"].as_str().unwrap().to_string();
+    let d = settled(&w, &id, "production", svc["environments"][0]["latest"]["id"].as_str().unwrap()).await;
+    assert_eq!(d["status"], "active", "{d}");
+    let env = json!({"headers": [{"set": {"x-frame-options": "DENY"}}], "firewall": [{"action": "allow", "path": "/admin/*"}], "rate_limit": {"per_minute": 100000}});
+    let (st, e) = call(&w.api, "PUT", &format!("/v1/apps/services/{id}/environments/production"), Some(env)).await;
+    assert_eq!(st, StatusCode::OK, "{e}");
+    let h = host(&svc["environments"][0]["url"]);
+    let get = |path: &str| {
+        let req = Request::builder().uri(path).header("host", &h).body(Body::empty()).unwrap();
+        let public = w.public.clone();
+        async move { public.oneshot(req).await.unwrap() }
+    };
+    assert_eq!(get("/admin/users").await.status(), StatusCode::FORBIDDEN, "the tree's deny past the environment's allow");
+    let r = get("/").await;
+    assert_eq!(r.status(), StatusCode::OK);
+    assert_eq!((r.headers()["x-from-file"].to_str().unwrap(), r.headers()["x-frame-options"].to_str().unwrap()), ("1", "DENY"), "the environment's header wins");
+    // A burst of 3 (the tree's, lower than the environment's): one was taken above (the denied
+    // request never reached the limit).
+    for _ in 0..2 {
+        assert_eq!(get("/").await.status(), StatusCode::OK);
+    }
+    assert_eq!(get("/").await.status(), StatusCode::TOO_MANY_REQUESTS);
+    assert!(apps_control::config::parse("[app]\nfirewall = [{ action = \"allow\", path = \"/\" }]\n").is_err());
+}
+
 /// A Git URL service's Git LFS objects (`build.lfs`): asked of its LFS server, checked against the
 /// pointer's sha256 and size, and built in the pointer's place; without it, the pointer stays.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

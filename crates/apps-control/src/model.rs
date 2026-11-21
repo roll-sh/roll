@@ -2077,6 +2077,115 @@ pub struct HeaderRule {
 /// The most header rules an environment has.
 pub const MAX_HEADER_RULES: usize = 20;
 
+/// One block of roll.toml's edge settings (`[app]`, `[app.previews]` or
+/// `[app.environments.<env>]`): what it sets, checked as the API checks an environment's.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct EdgeBlock {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub headers: Option<Vec<HeaderRule>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub firewall: Option<Vec<FirewallRule>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rate_limit: Option<RateLimit>,
+}
+
+impl EdgeBlock {
+    fn is_empty(&self) -> bool {
+        self.headers.is_none() && self.firewall.is_none() && self.rate_limit.is_none()
+    }
+}
+
+/// A deployment's edge settings from its tree's roll.toml, every block kept, so the same image
+/// promoted or rolled back elsewhere reads the block of the environment it's live in.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct EdgeFile {
+    #[serde(default, skip_serializing_if = "EdgeBlock::is_empty")]
+    pub app: EdgeBlock,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub previews: Option<EdgeBlock>,
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub environments: std::collections::BTreeMap<String, EdgeBlock>,
+}
+
+/// What a live deployment's file adds to its environment's gate.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Edge {
+    pub headers: Vec<HeaderRule>,
+    pub firewall: Vec<FirewallRule>,
+    pub rate_limit: Option<RateLimit>,
+}
+
+impl EdgeFile {
+    /// roll.toml's edge keys, each block checked as the API checks an environment's; none set: none.
+    pub fn from_app(app: &apps_build::app::AppConfig) -> Result<Option<EdgeFile>> {
+        fn block(name: &str, c: &apps_build::app::AppConfig) -> Result<EdgeBlock> {
+            let bad = |what: &str, e: String| Error::BadRequest(format!("roll.toml [{name}] {what}: {e}"));
+            let json = |t: &toml::Table| serde_json::to_value(t).map_err(|e| e.to_string());
+            let headers = match &c.headers {
+                None => None,
+                Some(h) if h.len() > MAX_HEADER_RULES => return Err(bad("headers", format!("at most {MAX_HEADER_RULES} rules"))),
+                Some(h) => Some(h.iter().map(|t| json(t).and_then(|v| serde_json::from_value::<HeaderRule>(v).map_err(|e| e.to_string())).map_err(|e| bad("headers", e)).and_then(HeaderRule::check)).collect::<Result<Vec<_>>>()?),
+            };
+            let firewall = match &c.firewall {
+                None => None,
+                Some(f) if f.len() > MAX_FIREWALL_RULES => return Err(bad("firewall", format!("at most {MAX_FIREWALL_RULES} rules"))),
+                Some(f) => Some(f.iter().map(|t| json(t).and_then(|v| serde_json::from_value::<FirewallRule>(v).map_err(|e| e.to_string())).map_err(|e| bad("firewall", e)).and_then(FirewallRule::check)).collect::<Result<Vec<_>>>()?),
+            };
+            if firewall.iter().flatten().any(|r| r.action == FirewallAction::Allow) {
+                return Err(bad("firewall", "only deny, limit or challenge".into()));
+            }
+            let rate_limit = match &c.rate_limit {
+                None => None,
+                Some(t) => {
+                    let r: RateLimit = json(t).and_then(|v| serde_json::from_value(v).map_err(|e| e.to_string())).map_err(|e| bad("rate_limit", e))?;
+                    r.check()?;
+                    Some(r)
+                }
+            };
+            Ok(EdgeBlock { headers, firewall, rate_limit })
+        }
+        let mut f = EdgeFile { app: block("app", app)?, previews: app.previews.as_deref().map(|p| block("app.previews", p)).transpose()?.filter(|b| !b.is_empty()), environments: Default::default() };
+        for (n, e) in app.environments.iter().flatten() {
+            let b = block(&format!("app.environments.{n}"), e)?;
+            if !b.is_empty() {
+                f.environments.insert(n.clone(), b);
+            }
+        }
+        Ok((!f.app.is_empty() || f.previews.is_some() || !f.environments.is_empty()).then_some(f))
+    }
+
+    /// What applies in `env`: the file's, a preview's, then the environment's own block, the last
+    /// block that sets a key deciding it (as roll.toml's other keys).
+    pub fn resolve(&self, env: &str, ephemeral: bool) -> Edge {
+        let mut layers = vec![&self.app];
+        layers.extend(self.previews.as_ref().filter(|_| ephemeral));
+        layers.extend(self.environments.get(env));
+        let mut e = Edge::default();
+        for l in layers {
+            if let Some(h) = &l.headers {
+                e.headers.clone_from(h);
+            }
+            if let Some(f) = &l.firewall {
+                e.firewall.clone_from(f);
+            }
+            if l.rate_limit.is_some() {
+                e.rate_limit = l.rate_limit;
+            }
+        }
+        e
+    }
+}
+
+impl RateLimit {
+    /// The stricter of two limits: the lower rate, and the smaller burst (unset: a minute's worth).
+    pub fn stricter(a: Option<RateLimit>, b: Option<RateLimit>) -> Option<RateLimit> {
+        match (a, b) {
+            (Some(x), Some(y)) => Some(RateLimit { per_minute: x.per_minute.min(y.per_minute), burst: Some(x.burst.unwrap_or(x.per_minute).min(y.burst.unwrap_or(y.per_minute))) }),
+            (x, y) => x.or(y),
+        }
+    }
+}
+
 /// A path on an environment's domains answered by another service of its project (Vercel's
 /// rewrites to another project, Cloud Run's URL maps): that service's environment of the same
 /// name, the path and query as they came.

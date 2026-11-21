@@ -1101,6 +1101,8 @@ impl Apps {
                 .db(move |s| s.switch_active(&Switch { service: &sid, env: &e, from: from.as_deref(), to: &to, ready_ms: ready, epoch, vars_hash: Some(&vh), snapshot: Some(&snap) }))
                 .await?;
             anyhow::ensure!(ok, "another deploy switched this environment meanwhile");
+            // Its tree's edge settings are the environment's gate's now.
+            live.forget_gate();
             // What the old deployment answered isn't this one's.
             self.responses.clear(&crate::env_key(&d.service, &d.environment));
             Ok(())
@@ -1396,6 +1398,11 @@ impl Apps {
         let ephemeral = self.db(move |s| s.environment(&sid, &e)).await?.ephemeral;
         let scope = crate::config::EnvScope { name: &d.environment, ephemeral };
         let file = crate::config::read(&context).map_err(|e| anyhow::anyhow!("{e}"))?;
+        // Its edge settings (headers, firewall, rate limit), kept with the deployment: they're the
+        // gate's once it's live, and travel with its image to a promotion or a rollback.
+        let edge = file.as_ref().map(crate::model::EdgeFile::from_app).transpose().map_err(|e| anyhow::anyhow!("{e}"))?.flatten();
+        let id = d.id.clone();
+        self.db(move |s| s.set_deploy_edge(&id, edge.as_ref())).await?;
         let (mut build_cfg, mut run) = match &file {
             Some(app) => {
                 let (b, r, said) = app.apply(&svc.build, &svc.run, Some(scope)).map_err(|e| anyhow::anyhow!("{e}"))?;
