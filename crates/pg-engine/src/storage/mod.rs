@@ -7,6 +7,7 @@
 
 pub mod batch;
 pub mod cache;
+pub mod colblock;
 pub mod cols;
 mod dead;
 pub mod discard;
@@ -558,7 +559,7 @@ const BULK_RATIO: u64 = 4;
 /// files' dead entries as live), and 4 for one naming a file with a dictionary
 /// (`sst::FORMAT_DICT`), whose blocks builds before it can't decompress. A manifest says 3
 /// or 4 while it names one.
-pub const STORE_FORMAT: u32 = sst::FORMAT_DICT;
+pub const STORE_FORMAT: u32 = sst::FORMAT_COLS;
 const DEAD_FORMAT: u32 = 3;
 
 /// Replace the manifest durably. The directory is fsynced first: the SSTs it names were
@@ -567,7 +568,9 @@ const DEAD_FORMAT: u32 = 3;
 fn write_manifest(dir: &Path, m: &Manifest) -> Result<()> {
     let dead = m.l1.iter().chain(&m.l0).any(|s| s.dv.is_some());
     let dict = m.l1.iter().chain(&m.l0).any(|s| s.dict);
+    let cols = m.l1.iter().chain(&m.l0).any(|s| s.cols);
     let format = match (dict, dead) {
+        _ if cols => sst::FORMAT_COLS,
         (true, _) => sst::FORMAT_DICT,
         (false, true) => DEAD_FORMAT,
         (false, false) => m.format.min(sst::FORMAT),
@@ -2460,7 +2463,7 @@ impl Store {
                 if user_key(pos.key()) != uk.as_slice() {
                     break;
                 }
-                let (vts, tomb) = (key_ts(pos.key()), blk.value_ref(&pos).is_none());
+                let (vts, tomb) = (key_ts(pos.key()), !blk.has_value(&pos));
                 if !dead.is_dead(b, pos.index()) {
                     // (The deletion, at or before `horizon`, sorts before the versions it
                     // isn't newer than: from it on, a version below `horizon` is dropped.)
@@ -2975,6 +2978,25 @@ impl Cursor {
         }
     }
 
+    /// `head`'s key, and whether its entry has a value (Some) stored out of line (true),
+    /// without making a column block's row.
+    fn head_meta(&self) -> Option<(&[u8], Option<bool>)> {
+        match self {
+            Cursor::Mem { .. } => self.head().map(|(k, v)| (k, v.map(toast::has_external))),
+            Cursor::Level { ssts, file, block, pos, end, whole, .. } => {
+                if *file >= ssts.len() {
+                    return None;
+                }
+                let b = block.as_ref()?;
+                if pos.index() >= b.len() {
+                    return None;
+                }
+                let k = pos.key();
+                (*whole || end.is_empty() || k < end.as_slice()).then(|| (k, b.has_value(pos).then(|| b.external(pos))))
+            }
+        }
+    }
+
     /// The head entry, owned, and on past it.
     fn take(&mut self) -> RawEntry {
         match self {
@@ -2998,7 +3020,13 @@ impl Cursor {
             }
             Cursor::Level { block, pos, .. } => {
                 let b = block.as_ref().expect("a head entry");
-                b.push_value(pos, &pos.key()[..ulen], batch);
+                match b.col_dir() {
+                    Some(_) => {
+                        let buf = batch.buf_block(b);
+                        b.push_col(pos, &pos.key()[..ulen], buf, batch);
+                    }
+                    None => b.push_value(pos, &pos.key()[..ulen], batch),
+                }
             }
         }
     }
@@ -3030,17 +3058,18 @@ impl Cursor {
             if kts > ts || same {
                 break;
             }
-            let Some(v) = b.value_ref(pos) else {
-                break;
-            };
-            if resolve && toast::has_external(v) {
+            if !b.has_value(pos) || (resolve && b.external(pos)) {
                 break;
             }
-            b.push_value(pos, uk, batch);
+            let cbuf = b.col_dir().map(|_| batch.buf_block(b));
+            match cbuf {
+                Some(buf) => b.push_col(pos, uk, buf, batch),
+                None => b.push_value(pos, uk, batch),
+            }
             n += 1;
             last = kts;
             if runs && n < max {
-                let (m, ver) = b.run_rows(pos, ts, max - n, resolve, batch);
+                let (m, ver) = b.run_rows_in(pos, ts, max - n, resolve, batch, cbuf);
                 if m > 0 {
                     n += m;
                     last = ver;
@@ -3069,7 +3098,7 @@ impl Cursor {
             }
             let (uk, kts) = (user_key(k), key_ts(k));
             if uk != decided.as_slice() {
-                if kts > ts || b.value_ref(pos).is_some() {
+                if kts > ts || b.has_value(pos) {
                     break;
                 }
                 decided.clear();
@@ -3528,7 +3557,7 @@ impl Scan {
                 return Ok(None);
             };
             // (Entries passed over are never copied.)
-            let (k, v) = self.merge.sources[i].head().expect("a head entry");
+            let (k, v) = self.merge.sources[i].head_meta().expect("a head entry");
             let uk = user_key(k);
             if self.decided.as_deref() == Some(uk) {
                 // Another version of a key decided already. Past a second one, a seek past
@@ -3653,8 +3682,8 @@ impl Scan {
                 break;
             };
             let c = &mut self.merge.sources[i];
-            let (k, v) = c.head().expect("a head entry");
-            if resolve && v.is_some_and(toast::has_external) {
+            let (k, v) = c.head_meta().expect("a head entry");
+            if resolve && v == Some(true) {
                 if put_back.is_some() && batch.len() > first {
                     // (Left at the head for the next call, which `position` finds again: not
                     // as a key decided already.)

@@ -319,13 +319,15 @@ impl PointReader {
                 found.push((st.i, plan[pi - 1].0, span));
                 continue;
             }
-            match block.value_ref(bpos) {
-                None => {}
-                Some(v) if resolve && super::toast::has_external(v) => {
-                    let v = block.value(bpos).expect("a value");
-                    out[st.i] = Some(super::toast::resolve(view, key, v, ts)?);
+            // (Not `value_ref`: a column block's row is made alone, by `value`.)
+            if block.has_value(bpos) {
+                match resolve && block.external(bpos) {
+                    true => {
+                        let v = block.value(bpos).expect("a value");
+                        out[st.i] = Some(super::toast::resolve(view, key, v, ts)?);
+                    }
+                    false => out[st.i] = block.value(bpos),
                 }
-                Some(_) => out[st.i] = block.value(bpos),
             }
         }
         for (i, b, span) in found {
