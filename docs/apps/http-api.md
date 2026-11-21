@@ -225,6 +225,10 @@ type Build = {
    *  fleet, its build minutes metered ×1, ×2 or ×4; one node's Docker builds unsized (the build
    *  log says so) and meters ×1. */
   size?: "small" | "medium" | "large";
+  /** A Git URL service's submodules fetched into the tree (default false: left out): each one
+   *  .gitmodules names, at the commit its gitlink pins, from its own public URL (relative ones
+   *  against the repository's), two levels deep and 32 at most. */
+  submodules?: boolean;
 };
 
 type Run = {
