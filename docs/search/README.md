@@ -941,10 +941,10 @@ failure (#426); knn beams sized to each segment (#401, Rally's last vector loss 
 nyc_taxis bulk indexing at -28% instructions per document (#417); and #347's expiry test made
 deterministic (#396).
 
-1. **Search from the browser** (built in #358; three reviews found
-   requests the browser pre-check read differently from the engine, so its policy now runs in the
-   engine on the parsed request, with a fourth review next: per-cluster CORS, browser keys with
-   rate limits, a Browser search section; Algolia's search-only and secured API keys,
+1. **Search from the browser** (landed in #358 after six reviews, its policy enforced in the
+   engine on the parsed request: per-cluster CORS, browser keys with rate limits and their own body
+   cap, a Browser search section and the site-search guide's browser page; what remains is RAG's
+   chat limits for browser keys, item 11; Algolia's search-only and secured API keys,
    Typesense's scoped keys, Meilisearch's tenant tokens, Elastic's search applications): a web
    page can't call a roll cluster today. There's no CORS (`http.cors.*` are static settings no
    tenant can set), so every site needs a backend in front of search, which is the first thing
