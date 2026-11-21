@@ -46,7 +46,8 @@ const CACHE_KEYS: usize = 1 << 16;
 /// snapshot (a cache only saves reading them again: the counts are the scans').
 #[derive(Default)]
 pub struct LookupScratch {
-    cache: std::collections::HashMap<Vec<u8>, std::rc::Rc<Vec<Value>>>,
+    /// A kept table's rows by index key (`Lookup::cache`).
+    cache: super::fasthash::HashMap<Vec<u8>, std::rc::Rc<Vec<Value>>>,
     loops: u64,
     fetched: u64,
     /// The worker's reader of the rows' keys, kept from lookup to lookup: the blocks the
