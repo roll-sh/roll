@@ -11898,6 +11898,147 @@ at open, a compaction): older builds ignore the manifest's `format` and fail on 
   the probe needs from the OS page cache, as PostgreSQL's 8 kB page), each a format change for
   its own round.
 
+## Storage format 5: column blocks, a prototype (agent 282, not for landing)
+
+**A prototype on branch `proto/a282-format5` (on `059fb33d8`), not a candidate**: a new format is
+a one-way upgrade of users' data directories, and the user decides that. BENCH.md "Storage format
+5: column blocks, a prototype" has the tables. Plain dist builds: **b0** `059fb33d8`; **n4** the
+prototype (`a729a5da7`; n1-n3 were earlier versions, below). One binary reads and writes both
+forms: `ROLL_COLBLOCKS=0` makes its L1 writers write format 4's blocks, so "f4" and "f5" data are
+the same build on the same rows (TPC-H SF1 loaded twice by n1 and closed cleanly). Lane C was never
+quiet (5-8 foreign cores on lane.sh's reading, 2.5-3 on the pairs' own): every gate below is on user
+instructions, which repeated within 0.3% from pair to pair.
+
+**Design.** A format 2 block is its entries (keys, value lengths), its values (the rows' bytes in
+entry order), then its restarts and trailer. A *column block* keeps the entries, restarts and
+trailer and stores the values as a column section instead (`storage/colblock.rs`): per column of
+the block's rows one layout, each value at a place computed from its row number: `Fixed` (a tag's
+2/4/8 bytes: int2/4/8, date, float, timestamps), `Num` (numerics of one scale in the block, the
+unscaled value in the narrowest of 1-8 bytes), `Bool`, `Str` (offsets, then bytes), `Dict` (up to
+32 distinct strings: a code byte a row), `Raw` (each value's row bytes, for mixed tags and other
+types), `Null`; a NULL bitmap per column when any; the header numbers (xmin, TID) as base plus a
+narrow width. The section is lossless: `ColDir::row` makes each row's bytes back exactly (the writer
+checks every block before it writes one so), so any reader that wants rows gets format 4's bytes,
+and the entries' value offsets keep their meaning (into the rows' bytes, `vbase` where they start).
+- *Which blocks*: only L1 writers (the ones with a dictionary: compactions, a clean close's rewrite
+  of linked runs) and only a block whose entries are all rows of one header kind (`ROW_HEADER` or
+  `ROW_HEADER_TID`, none stored out of line) and one column count; any other block (index entries,
+  deletions, rows stored before ADD COLUMN beside newer ones) stays format 2 in the same file. Trailer
+  flag bit 1 marks a column block; a file with one says format 5 (`FORMAT_COLS`, format 4's footer
+  with a dictionary of length 0 when it has none), a manifest naming one says 5.
+- *In memory*: the cache holds the block as read (entries + column section), not rows. Scans read
+  columns: `Cursor::run_into` pushes a column block's rows into the `RowBatch` by block row
+  (`push_col`, `run_rows_in`, `ColRun`), not making them, and `cols::decode_cols` copies each needed
+  column of a run from the block (`gather`: a loop per kind and width, a dictionary's spans looked up
+  once a run; strings stay in the block's buffer); the typed walk takes the other rows as before.
+  Every other reader gets rows: a batch's row when first asked for (`RowBatch::lazy_row`, one row,
+  kept for the batch), a point read's or a multi-get's rows made alone into one buffer a call
+  (`Block::value`, `PointReader` `colrows`), a compaction's or a zip's input block's rows all at once
+  (`Block::vals`, kept with the block while it lives). The merge compares heads by key alone
+  (`head_key`) and asks "a value? stored out of line?" without making the row (`head_meta`,
+  `Block::has_value`, `external`).
+
+**Measured** (TPC-H SF1, 2 GB cache, 22 queries' warm-up then 3 runs a query in one window; two
+pairs n4 f4 / f5 in both orders, one pair b0 / n4 on f4; every pass's 22 result hashes equal across
+b0 f4, n4 f4 and n4 f5):
+- q01 7.755 (b0) -> 5.629 G (n4 f5): **-27.4%** (pgrust 6.91 in round 6's table); q06 5.414 ->
+  3.583: **-33.8%** (pgrust 5.79); q10 7.726 -> 6.836: **-11.5%** (pgrust 4.60); **q03 5.827 ->
+  7.071: +21.4%; q09 10.691 -> 11.740: +9.8%** (the lookups' rows are made from columns: below).
+  Against n4 on f4 (the same binary): q01 -29.4%, q06 -36.8%, q10 -13.9%, q03 +19.5%, q09 +9.3%.
+- Where it went (n1's profiles, one run, samples of 200k instructions): q01's walk (`Pre::decode`)
+  5,601 -> 3,247 samples, q06's 5,301 -> 2,148, `value_in` gone; the store's `fill_batch_with`
+  unchanged (q06 1,939 -> 2,156: a key, an entry and a lazy-row slot a row are now 28% of q06). q03 on
+  f5: `ColDir::value` (rows made back for its lineitem lookups) 15% of the query's samples, plus
+  `ColDir::row` and malloc.
+- **Peak memory** (VmHWM over the warm-up and the five queries): b0 f4 1,681 MB, n4 f4 1,685, **n4 f5
+  1,362 (-19%)**: the cache holds column sections, smaller than the rows (n1, which kept every
+  scanned block's rows made, peaked at 2,596).
+- **Bytes on disk** after the load and a clean close: 612.2 -> **569.5 MB (-7.0%)**: lineitem 326.5 ->
+  291.0 (-10.9%), partsupp 47.0 -> 41.4 (-12.1%), orders 71.6 -> 68.9 (-3.7%); part +3.5%, customer
+  +4.5% (text-heavy rows: a string column's offsets cost more than zstd gains); index files equal.
+- **Point and range reads** (orders by key, a hot 10% of the keys, 1 client, pgbench -M prepared;
+  lanes A and B): b0 f4 62,835 and n4 f4 62,842 user instructions a point select (equal); n4 f5
+  **+3.3%** (64,603 against 62,521; n3 +1.6% in an earlier pair): the 9-column row made from columns
+  (1,000-2,100 instructions). A 100-row range read through the primary key: b0 3.784 M, n4 f4 3.778 M,
+  n4 f5 **+4.1%** (3.932 M; n3 +2.5%). Both rise; the brief's rule says they must not.
+- **Bulk script** (1M rows, joined windows, n4 f4 -> f5, two pairs in both orders, within 0.3%;
+  rows equal): COPY in 9.118 -> 9.134
+  G (+0.2%), CREATE INDEX +0.2%, CREATE UNIQUE INDEX +0.7%, COPY out +0.4%, INSERT ... SELECT +0.4%,
+  UPDATE +0.3%, **DELETE with its compaction 8.285 -> 8.995 (+8.6%)**, VACUUM
+  1.735 -> 2.188 (+26%), **ANALYZE 0.489 -> 1.000 (+104%)**, the aggregating scans -15 to -18%
+  (count(*), sum(c) 0.386 -> 0.318; sum(a) 0.351 -> 0.299), count(*) alone +5% (0.180 -> 0.190: the
+  per-row lazy slots). Cgroup peak 348 / 325 -> 363 / 383 MB, VmHWM 284 -> 285 MB.
+- **The load** (TPC-H SF1 load and clean close, one run each, n4): 668.2 -> 722.7 G (+8.2%), close
+  32.6 / 29.7 s. Its profile (n3): `colblock::encode` ~23 G, rows made back from columns ~10.5 G (the
+  writer's check of every block, and the load's row readers), the numerics' shortest-form check
+  ~4.7 G; zstd's compression -9.6 G (-7.6%).
+- **The prototype's cost on format 4 data** (n4 f4 against b0): q01 +2.8%, q06 +4.7%, q10 +2.7%,
+  q03 +1.5%, q09 +0.5%, inside `Pre::decode` and the store's run loop (the column-block branches); in
+  n1-n3 `RowBatch::value_in` stopped being inlined and that alone was +5 to +9% (now
+  `#[inline(always)]`, the column-block path out of line).
+
+**What a format 5 to land would need** (largest first; none of it changes the stored format above):
+1. Lookups and point reads decode from columns, not from rows made back: a row handle (block, row)
+   through the multi-get into `Lookup::decode_into` and `decode_table_row`, decoding only the columns
+   asked for. That turns q03 / q09 from +21% / +10% into wins (their inner rows' decode is
+   `decode_row_need_spare` + `decode_value` today, ~12% of q03 on f4) and point selects level or lower.
+2. The other row consumers read columns too: ANALYZE's sample, VACUUM, UPDATE / DELETE's scans
+   (`StoredCmps` over a column block), CREATE INDEX's key extraction, COPY TO's text out.
+3. `fill_batch_with` takes a column block's run as one entry (no key, `Ent` or lazy slot a row unless
+   a reader asks): q06 on f5 spends 28% there.
+4. The writer: one pass, no rebuild check outside debug builds, numerics' lengths from their leading
+   bits; it must cost no more than the zstd it saves (today 38 G against 9.6 G over the load).
+5. Compaction merges column blocks column-wise (and copies unchanged blocks: agent 231's item 6)
+   instead of making every input row and encoding it again (the DELETE step's +8.6%).
+6. Keep the column-block branches out of format 4's row walk (n4 f4's +2.8-4.7%).
+
+**Upgrade of an existing data directory**: lazy, at compaction, like formats 2 and 4. A format 5 build
+reads files of formats 1-4 exactly as before (their decode doesn't change), so **older files stay
+readable**; every L1 file a compaction or a clean close writes becomes format 5 where its row blocks
+fit columns. No up-front rewrite is needed (a full one costs what the load's clean close cost here:
+30-33 s and +8% CPU over format 4 for TPC-H SF1). The manifest says 5 once it names a file with column
+blocks, and builds before refuse it at open, before WAL replay ("of storage format 5, newer than this
+build reads (4)"): **one-way**, with no downgrade tool, as formats 2 and 4.
+
+**B: bulk DELETE with snapshot-bounded markers** (not built; estimated from agent 275's profile of the
+DELETE, 8.19 G: the statement 54%, its compaction 46%). The same revision would add *dated dead-entry
+sets*: per L1 file, a bitmap of entries per block with the deleting commit's ts (one generation per
+DELETE; folded into today's `DeadSet` once the GC horizon passes it), named in the manifest beside
+`dv`. A reader at snapshot S treats an entry whose bit is set in a generation with ts <= S as deleted
+(a scan ANDs a block's bitmaps into its runs: with column blocks a run just splits; a point read checks
+one bit). The DELETE writes the bitmaps instead of 750,000 row tombstones and their index entries' (the
+table's rows are found by the scan that read them: their block and row are in the batch; the index
+entries by an ordered search, as `mark_dead` does): the deferred deletions (13%, ~1.06 G) become ~0.1
+G, and the compaction is no longer due for them (in this script it still folds the UPDATE's 500,000
+versions, so that 3.8 G moves to whenever L0 is compacted rather than going away). Estimated: the
+DELETE's window 8.2 -> ~4 G (PostgreSQL 1.67); the script -1 G at least. Needs: conflict checks and
+`repl::decode` reading the bitmaps (a WAL record of the deleted keys keeps replay and decoding as
+now), the bitmaps committed with the WAL record (a crash before the manifest names them replays the
+record), and a threshold (half dead) for rewriting the file. Older builds must refuse it (they'd show
+deleted rows): part of format 5's version, or 6.
+
+**C: cheaper compression.** Measured: column sections compress to 7% fewer bytes overall (lineitem
+-11%), and zstd on them costs less: over the load -7.6% of zstd's compression (its dictionary
+match-finding -10%, its sequence encoding -21%), in the bulk DELETE's compaction -7.6% (18.1% -> 15.0% of
+the step). The prototype's encoder cost more than that (the load +38 G against -9.6 G; the DELETE step
++5.7% of colblock code against -1.4% of zstd). What would buy the rest: most of a lineitem column
+section is already narrow (fixed, numerics of 1-4 bytes, dates, dictionary codes: ~55% of its bytes),
+and zstd's time is mostly match-finding over them; leaving those columns uncompressed (or frame-of-
+reference plus bit-packing for dates and keys) and compressing only the string columns would cut zstd's
+input for lineitem blocks about in half at a few % more bytes (estimated, not measured). COPY's and
+CREATE INDEX's zstd (runs and L0 files, no dictionary, row form) are untouched by this revision.
+
+**Tests**: `storage::colblock::tests::sections_give_their_rows_back` (every layout, NULLs, mixed tags,
+numerics past a word and of two scales, long and few strings, with and without TIDs, back byte for
+byte; rows of two column counts or stored out of line refused); `newer_formats_are_refused` now
+refuses format 6. Correctness of the prototype otherwise rests on the writer's check of every block it
+wrote (two TPC-H loads and the bulk runs) and on result hashes: all 22 TPC-H queries equal across the
+three arms, the bulk script's row checks equal. No quick-check (the brief: not needed for a prototype).
+
+**Dropped**: nothing measured and dropped; the prototype's versions n1-n3 (whole blocks' rows kept made:
++912 MB peak; `value_in` out of line: +5-9% on format 4) are fixed in n4, not dropped. Patch of the
+whole prototype: `~/.cache/a282/patches/format5-prototype.patch`.
+
 ## Analytic CPU, round 8 (agent 272)
 
 TPC-H SF1 on lane C, plain dist builds only (BENCH.md "Analytic CPU, round 8" has the tables).

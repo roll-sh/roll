@@ -425,6 +425,110 @@ Foreign load 1.5-3.3 cores in every pass.
 
 Lane A held 3.7-5.2 foreign cores (other agents' runs) through all three: every pair flagged.
 
+## Storage format 5: column blocks, a prototype (2026-11-21, agent 282)
+
+HANDOFF "Storage format 5: column blocks, a prototype" has the design. **A prototype, not landed**
+(branch `proto/a282-format5`). Plain dist builds (`tools/dist.sh`): **b0** `059fb33d8`, **n4** the
+prototype `a729a5da7`. Data: TPC-H SF1 loaded by the prototype (n1) and closed cleanly, once with
+`ROLL_COLBLOCKS=0` (**f4**: format 4's files, as b0 writes them) and once without (**f5**). Harness:
+agent 276's TPC-H pairs copied to `~/.cache/a282/tpch/` (`pair.sh` with arm specs in `arms.sh`:
+binary, data, environment), lane C, 2 GB cache, `max_parallel_workers_per_gather=2`,
+`max_parallel_workers=8`, per arm a fresh engine on a copy of its data, the 22 as warm-up, then per
+query 3 runs in one `perf stat -e instructions:u,cycles:u` window over the engine's cgroup. ONE pair
+per `tools/lane.sh c` hold. Lane C at 5.7-7.3 foreign cores on lane.sh's reading (2.5-3.0 on the
+pairs' own) in every hold: instructions only.
+
+### TPC-H (G user instructions a run)
+
+| query | b0 f4 | n4 f4 | n4 f5, pair 1 / 2 | f5 against n4 f4 | f5 against b0 | pgrust (round 6) |
+|---|---|---|---|---|---|---|
+| q01 | 7.755 | 7.970 | 5.629 / 5.629 | -29.4% | -27.4% | 6.91 |
+| q06 | 5.414 | 5.671 | 3.583 / 3.582 | -36.8% | -33.8% | 5.79 |
+| q10 | 7.726 | 7.935 | 6.836 / 6.815 | -13.9% | -11.6% | 4.60 |
+| q03 | 5.827 | 5.917 | 7.071 / 7.076 | +19.5% | +21.4% | 3.61 |
+| q09 | 10.691 | 10.746 | 11.740 / 11.745 | +9.3% | +9.8% | 14.47 |
+
+n4 f4 in its three passes: q01 7.970 / 7.971 / 7.970 (repeats within 0.01%). All 22 result hashes of
+the warm-up passes equal across b0 f4, n4 f4 and n4 f5. VmHWM: b0 f4 1,681 MB, n4 f4 1,685 / 1,687 /
+1,682, **n4 f5 1,362 / 1,360** (cgroup peaks 1,715 / 1,618 against 1,314 / 1,322). Earlier versions
+on the same data: n1 (rows of every scanned block kept made) f5 q01 6.525, q06 3.939, q10 6.414, q03
+5.651, q09 10.728, **VmHWM 2,596 MB**; n2 (rows made one at a time) q03 7.530, q09 12.064; n3 (rows
+made faster) q03 7.273, q09 11.906.
+
+### Bytes on disk (after the load and a clean close)
+
+| relation | f4 MB | f5 MB | % |
+|---|---|---|---|
+| lineitem rows | 326.5 | 291.0 | -10.9 |
+| orders rows | 71.6 | 68.9 | -3.7 |
+| partsupp rows | 47.0 | 41.4 | -12.1 |
+| part rows | 11.4 | 11.8 | +3.5 |
+| customer rows | 10.5 | 11.0 | +4.5 |
+| every index file | | | 0.0 |
+| **the store** | **612.2** | **569.5** | **-7.0** |
+
+58 of the store's 75 files hold column blocks (the rest are index entries).
+
+### The load (TPC-H SF1 load, index builds, VACUUM ANALYZE and the clean close; one run each, lane C)
+
+| build | f4 G | f5 G | % | close s f4 / f5 | VmHWM MB f4 / f5 |
+|---|---|---|---|---|---|
+| n1 | 669.5 | 725.0 | +8.3 | 23.9 / 32.7 | 2,130 / 2,155 |
+| n4 | 668.2 | 722.7 | +8.2 | 32.6 / 29.7 | 2,110 / 2,081 |
+
+Profile (n3, `perf record -e instructions:u -c 2000003` of the engine over the whole load, samples):
+334,527 -> 358,327 (+7.1%); `colblock::encode` 0 -> 11,544, `ColDir::value` (rows made back: the
+writer's check and the load's row readers) 0 -> 5,271, `i128_signed_le` 2,698 -> 5,032; zstd's
+compression 63,122 -> 58,293 (-7.6%: `ZSTD_compressBlock_fast_dictMatchState` 20,818 -> 18,668,
+`ZSTD_encodeSequences` 11,607 -> 9,216, `ZSTD_compressBlock_fast_noDict` (runs, L0) 12,396 -> 12,444).
+
+### Point and range reads (orders by key, lanes A and B, 1 client)
+
+pgbench `-M prepared` in a container on the lane's client CPUs, the engine on its server CPUs on a
+copy of the TPC-H data (2 GB cache); `~/.cache/a282/pt/pt.sh`. A point select of one orders row (all
+9 columns) by `o_orderkey`, a range read of 100 rows by key range through the primary key, keys
+uniform over a hot 10% of orders, 8-25 s warm-up, 10 s measured; user instructions per statement of
+the engine's cgroup. Lanes at 2-4 foreign cores: tps meaningless.
+
+| workload | b0 f4 | n4 f4 | n4 f5 | f5 against f4 | n3 f4 / f5 (earlier pair) |
+|---|---|---|---|---|---|
+| point select | 62,835 | 62,521-62,842 | 64,603 | +3.3% | 64,484 / 65,542 (+1.6%) |
+| range read, 100 rows | 3,784,299 | 3,777,728 | 3,932,225 | +4.1% | 3,750,819 / 3,845,980 (+2.5%) |
+
+(With the whole orders key range the reads were mostly block cache misses, 124k instructions a point
+select, and f5 was cheaper per miss: smaller blocks to decompress. Not the steady state.)
+
+### The bulk script (1M rows, joined windows; n4 f4 against f5; G user instructions)
+
+Agent 275's `bulkx.sh` copied to `~/.cache/a282/bench` (`bpair.sh`, `bpair2.sh`), lane C, two pairs in
+both orders: every step repeated within 0.3% (pair 1's numbers below). Rows equal in every run.
+
+| step | f4 | f5 | % |
+|---|---|---|---|
+| COPY in | 9.118 | 9.134 | +0.2 |
+| CREATE INDEX | 4.401 | 4.411 | +0.2 |
+| CREATE UNIQUE INDEX | 3.363 | 3.387 | +0.7 |
+| COPY out | 3.207 | 3.220 | +0.4 |
+| INSERT ... SELECT | 6.715 | 6.745 | +0.4 |
+| UPDATE half | 12.135 | 12.175 | +0.3 |
+| DELETE a quarter, with its compaction | 8.285 | 8.995 | +8.6 |
+| VACUUM | 1.735 | 2.188 | +26.1 |
+| ANALYZE | 0.489 | 1.000 | +104.5 |
+| count(*), sum(c) | 0.386 | 0.318 | -17.6 |
+| count(*), Seq Scan | 0.180 | 0.190 | +5.6 |
+| sum(a), Seq Scan | 0.351 | 0.299 | -14.8 |
+| count(*) | 0.180 | 0.189 | +5.0 |
+| sum(a) | 0.350 | 0.298 | -14.9 |
+| cgroup peak MB, pair 1 / 2 | 348 / 325 | 363 / 383 | |
+| VmHWM MB, pair 2 | 284 | 285 | |
+
+Bytes written equal but for the DELETE (54.0 -> 54.8 MB); pair 1's UPDATE wrote 104.5 MB in f4 against
+63.5 (both 63.5 in pair 2: a compaction inside or outside the window, not the format).
+
+The DELETE step's profile (`perf record -e instructions:u -c 200003`, samples): 21,237 -> 23,725;
+zstd's compression 3,854 -> 3,563 (18.1% -> 15.0% of the step), colblock code 0 -> 1,351 (encode 824,
+rows made back 302).
+
 ## Analytic CPU, round 8 (2026-11-20, agent 272)
 
 HANDOFF "Analytic CPU, round 8" has what changed. Lane C (the engine in a container on CPUs
