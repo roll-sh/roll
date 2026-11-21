@@ -1008,7 +1008,7 @@ previews are listed once those products are on.
 | `apps_test_notification` | Send a test event now (not retried): whether it arrived. | `POST /v1/apps/projects/{project}/notifications/{nid}/test` |
 | `apps_notification_deliveries` | A notification's last 50 deliveries, newest first: what was sent and whether it arrived. | `GET /v1/apps/projects/{project}/notifications/{nid}/deliveries` |
 | `apps_list_drains` | Where a project's logs are sent (the URL's host only). | `GET /v1/apps/projects/{project}/drains` |
-| `apps_add_drain` | Send every matching service's logs out of roll to an HTTPS endpoint, signed (its signing secret comes back once). | `POST /v1/apps/projects/{project}/drains` |
+| `apps_add_drain` | Send every matching service's logs out of roll: an HTTPS endpoint (signed; its signing secret comes back once), an OTLP collector, syslog over TLS, or an S3 bucket (apps #580; the AWS keys go as headers, which the audit log redacts). | `POST /v1/apps/projects/{project}/drains` |
 | `apps_update_drain` | Change what a drain sends or its headers: given ones replace (a new URL is a new drain). | `PATCH /v1/apps/projects/{project}/drains/{did}` |
 | `apps_delete_drain` | Stop sending a project's logs there. | `DELETE /v1/apps/projects/{project}/drains/{did}` |
 | `apps_test_drain` | Send one signed test line now (not retried): whether it arrived. | `POST /v1/apps/projects/{project}/drains/{did}/test` |
@@ -1085,11 +1085,12 @@ waits on a sibling PR reaching main is last.
    client ID metadata documents beside dynamic registration), and workflows for previews, tasks,
    queues and streams (`review_preview`, `clear_task_backlog`, `drain_queue`,
    `find_consumer_lag`; #560), search mode's ranking (#561: 73 everyday queries), apps' month
-   by service as `apps_project_usage` (#564) and the `review_costs` workflow (#565), and roll's
-   icon in `server/discover` (this PR). Ready on branches for when their PRs land:
-   `feature/roll-mcp-placeholders` (#520's three tools) and `feature/roll-mcp-unstored` (#487's
-   `secrets_credential_check`); #358's browser-key tools as a patch, since #358 conflicts with
-   main. Then, as each lands: search's browser keys
+   by service as `apps_project_usage` (#564) and the `review_costs` workflow (#565), roll's icon
+   in `server/discover` (#569), tests that every tool a text names exists (#571), secrets' batch 6
+   as tools (#572 `secrets_credential_check`, #573 the placeholders), `apps_wait_deploy` and deploy
+   approvals (#577), and S3 log drains on `apps_add_drain` (this PR). #358's browser-key tools wait
+   as a patch (`~/.local/share/roll-mcp/browser-keys-358.patch`), since #358 conflicts with main.
+   Then, as each lands: search's browser keys
    (#358: list and revoke as tools, making one stays a credential), secrets' found-credential view
    (#487's `unstored`) and placeholders (#520: the list as a read, the revokes destructive; binding a
    key to hosts stays a person's), project members (#501's own tools; its other routes are
