@@ -169,6 +169,9 @@ pub struct AppsConfig {
     /// registries whose names resolve to one (local development and tests only:
     /// `ROLL_APPS_ALLOW_PRIVATE`).
     pub allow_private: bool,
+    /// An open daemon (no admin token: rolld's gate puts no `Operator` on a request): a request
+    /// that's neither a user's token nor a signed-in person's is the operator's, as roll-mcp reads it.
+    pub open: bool,
     /// PagerDuty's Events API v2 and Opsgenie's Alert API, per region (`us`, `eu`): fixed, never
     /// a tenant's URL ([`notify`]'s on-call targets). Tests point them at their own servers.
     pub oncall_apis: OncallApis,
@@ -207,6 +210,7 @@ impl AppsConfig {
             visitor_recheck: Duration::from_secs(300),
             otlp_base: None,
             allow_private: false,
+            open: false,
             oncall_apis: OncallApis::default(),
             spend_every: Duration::from_secs(30),
             cron_retry_after: Duration::from_secs(30),

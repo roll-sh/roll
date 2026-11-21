@@ -679,6 +679,7 @@ pub async fn start(
     redis: Option<Arc<redis_control::Control>>,
     secrets: crate::secrets::ForApps,
     products: crate::secrets::Api,
+    open: bool,
 ) -> anyhow::Result<AppsNode> {
     let a = &args.apps;
     let single = cluster.backend_name() == "memory";
@@ -706,6 +707,7 @@ pub async fn start(
     });
     // Local development only: notification targets on this machine or a private network.
     cfg.allow_private = std::env::var("ROLL_APPS_ALLOW_PRIVATE").is_ok_and(|v| v == "1" || v == "true");
+    cfg.open = open;
     // Built deployments each environment keeps to roll back to (older ones' images go).
     if let Some(n) = std::env::var("ROLL_APPS_KEEP_DEPLOYMENTS").ok().and_then(|v| v.parse::<usize>().ok()).filter(|n| *n > 0) {
         cfg.keep_deployments = n;

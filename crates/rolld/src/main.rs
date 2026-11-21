@@ -496,6 +496,7 @@ async fn run_with(mut args: Args) -> anyhow::Result<()> {
                 redis.as_ref().map(|r| r.control.clone()),
                 apps_secrets.clone(),
                 products_api.clone(),
+                !auth.enforcing(),
             )
             .await?,
         ),
