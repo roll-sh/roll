@@ -251,6 +251,7 @@ pub fn service_of(repo: &str, p: &PreviewSpec) -> ServiceSpec {
         states: p.states.clone(),
         pages: p.pages.clone(),
         hide: p.hide.clone(),
+        watch: p.watch.clone(),
     }
 }
 
