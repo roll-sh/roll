@@ -170,7 +170,6 @@ DELETE /v1/secrets/projects/{project}/syncs/{id}                               a
 PATCH /v1/secrets/projects/{project}/syncs/{id}                                an outside integration's setup: an admin's, with its credentials
 POST /v1/secrets/projects/{project}/syncs/{id}/run                             an outside integration's setup: an admin's, with its credentials
 DELETE /v1/secrets/projects/{project}/transit/{name}                           a person's call: every ciphertext of the key stops opening
-GET /v1/secrets/projects/{project}/unstored/{fingerprint}                      no tool yet: a found credential's kind, place and liveness, never its value (#487)
 POST /v1/secrets/projects/{project}/validity                                   a person's call: it contacts outside providers (#487)
 GET /v1/secrets/whoami                                                         the operator's (health, migrations, process control)
 * /v1/storage/accounts/{id}                                                    an outside integration's setup: an admin's, with its credentials
