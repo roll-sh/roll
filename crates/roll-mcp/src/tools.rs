@@ -555,6 +555,60 @@ FROM pg_stat_statements WHERE dbid = (SELECT oid FROM pg_database WHERE datname 
 ORDER BY mean_exec_time DESC LIMIT 20" })
 }
 
+/// Every client session on the database now, blocked ones first (Neon's and PlanetScale's live
+/// connections): what it runs, waits on and is blocked by, and how long its transaction has been
+/// open. Read-only (the read-only role has `pg_read_all_stats`).
+fn activity() -> Value {
+    json!({ "read_only": true, "sql": r#"SELECT pid, usename AS "user", application_name AS app, client_addr::text AS client, state,
+  wait_event_type || coalesce(':' || wait_event, '') AS waiting_on, pg_blocking_pids(pid) AS blocked_by,
+  round(extract(epoch FROM now() - xact_start)::numeric, 1) AS transaction_s, round(extract(epoch FROM now() - query_start)::numeric, 1) AS query_s,
+  left(query, 300) AS query
+FROM pg_stat_activity
+WHERE datname = current_database() AND pid <> pg_backend_pid() AND backend_type = 'client backend'
+ORDER BY cardinality(pg_blocking_pids(pid)) DESC, xact_start NULLS LAST"# })
+}
+
+/// A database's health in one read (Neon's `inspect_database`): each check's value, `ok` or
+/// `warn`, and what it means.
+fn health_checks() -> Value {
+    json!({ "read_only": true, "sql": r#"SELECT name AS "check", value, status, detail FROM (
+  SELECT 1 AS n, 'cache hit rate' AS name, coalesce(round(100.0 * sum(blks_hit) / nullif(sum(blks_hit) + sum(blks_read), 0), 1)::text || '%', 'no reads yet') AS value,
+    CASE WHEN coalesce(100.0 * sum(blks_hit) / nullif(sum(blks_hit) + sum(blks_read), 0), 100) >= 99 THEN 'ok' ELSE 'warn' END AS status,
+    'reads served from memory; under 99% the working set doesn''t fit (a bigger compute, or fewer scans: postgres_slow_queries)' AS detail
+  FROM pg_stat_database WHERE datname = current_database()
+  UNION ALL
+  SELECT 2, 'index hit rate', coalesce(round(100.0 * sum(idx_blks_hit) / nullif(sum(idx_blks_hit) + sum(idx_blks_read), 0), 1)::text || '%', 'no index reads yet'),
+    CASE WHEN coalesce(100.0 * sum(idx_blks_hit) / nullif(sum(idx_blks_hit) + sum(idx_blks_read), 0), 100) >= 99 THEN 'ok' ELSE 'warn' END,
+    'index reads served from memory'
+  FROM pg_statio_user_indexes
+  UNION ALL
+  SELECT 3, 'dead rows', coalesce(string_agg(relname || ' ' || n_dead_tup || ' (' || round(100.0 * n_dead_tup / nullif(n_live_tup + n_dead_tup, 0)) || '%)', ', ' ORDER BY n_dead_tup DESC), 'none'),
+    CASE WHEN count(*) = 0 THEN 'ok' ELSE 'warn' END,
+    'tables with 10,000 or more dead rows and over 20% of them: bloat until vacuum reclaims it'
+  FROM (SELECT relname, n_dead_tup, n_live_tup FROM pg_stat_user_tables WHERE n_dead_tup >= 10000 AND n_dead_tup > 0.2 * (n_live_tup + n_dead_tup) ORDER BY n_dead_tup DESC LIMIT 5) d
+  UNION ALL
+  SELECT 4, 'oldest open transaction', coalesce(round(max(extract(epoch FROM now() - xact_start)))::text || ' s', 'none'),
+    CASE WHEN coalesce(max(extract(epoch FROM now() - xact_start)), 0) < 300 THEN 'ok' ELSE 'warn' END,
+    'a transaction open for minutes holds locks and keeps vacuum from cleaning up (postgres_activity shows whose)'
+  FROM pg_stat_activity WHERE datname = current_database() AND xact_start IS NOT NULL AND pid <> pg_backend_pid()
+  UNION ALL
+  SELECT 5, 'idle in transaction', count(*)::text, CASE WHEN count(*) = 0 THEN 'ok' ELSE 'warn' END,
+    'sessions that began a transaction and went quiet: they hold their locks'
+  FROM pg_stat_activity WHERE datname = current_database() AND state LIKE 'idle in transaction%'
+  UNION ALL
+  SELECT 6, 'connections', count(*)::text || ' of ' || current_setting('max_connections'),
+    CASE WHEN count(*) < 0.8 * current_setting('max_connections')::int THEN 'ok' ELSE 'warn' END,
+    'client connections against the limit (a pooler, or fewer idle connections)'
+  FROM pg_stat_activity WHERE backend_type = 'client backend'
+  UNION ALL
+  SELECT 7, 'transaction id age', age(datfrozenxid)::text, CASE WHEN age(datfrozenxid) < 500000000 THEN 'ok' ELSE 'warn' END,
+    'past about 2 billion Postgres stops taking writes; vacuum freezes old rows'
+  FROM pg_database WHERE datname = current_database()
+  UNION ALL
+  SELECT 8, 'database size', pg_size_pretty(pg_database_size(current_database())), 'ok', ''
+) checks ORDER BY n"# })
+}
+
 /// TypeScript interfaces for every table, written by the query itself (Supabase's generated
 /// types): one per table, enums as unions of their labels, arrays, nullable columns `| null`.
 fn typescript_types() -> Value {
@@ -674,6 +728,8 @@ static TOOLS: &[Tool] = &[
     t("postgres_execute", "Execute SQL", "Run SQL that may change data or schema (INSERT, UPDATE, DDL) on an endpoint. Without admin on the endpoint it runs as a role that owns the database's objects but isn't the superuser: making roles, untrusted extensions, COPY … PROGRAM and the server's files need admin, and dropping a table, column or schema needs delete.", "postgres", "POST", "/v1/endpoints/{endpoint}/query", &[ENDPOINT, breq("sql", Ty::Str, "SQL to run")]).fixed(writes).destructive(),
     t("postgres_describe_schema", "Describe the schema", "Every table's columns and types on an endpoint (read-only).", "postgres", "POST", "/v1/endpoints/{endpoint}/query", &[ENDPOINT]).fixed(describe_schema),
     t("postgres_explain", "Explain a query", "A statement's plan as JSON (EXPLAIN, FORMAT JSON), without running it: which indexes it uses, its estimated cost and rows. For real timings, postgres_query with EXPLAIN ANALYZE.", "postgres", "POST", "/v1/endpoints/{endpoint}/query", &[ENDPOINT, breq("sql", Ty::Str, "The statement")]).fixed(read_only).wraps(explain),
+    t("postgres_activity", "What's running on a database", "Every client session on an endpoint now: user, application, state, what it waits on, which sessions block it (blocked_by), how long its transaction and query have run, and its query (300 characters). Blocked sessions first. Start here when queries hang or time out.", "postgres", "POST", "/v1/endpoints/{endpoint}/query", &[ENDPOINT]).fixed(activity),
+    t("postgres_health_checks", "Database health checks", "A database's health in one read, each check ok or warn with what it means: cache and index hit rates, tables bloated with dead rows, the oldest open transaction, sessions idle in a transaction, connections against the limit, transaction ID age, and size.", "postgres", "POST", "/v1/endpoints/{endpoint}/query", &[ENDPOINT]).fixed(health_checks),
     t("postgres_slow_queries", "Slowest queries", "The 20 slowest statements by mean time, with calls, rows and cache hit rate (pg_stat_statements; if it's missing, CREATE EXTENSION pg_stat_statements once with postgres_execute, which takes admin on the endpoint).", "postgres", "POST", "/v1/endpoints/{endpoint}/query", &[ENDPOINT]).fixed(slow_queries),
     t("postgres_advisors", "Database advice", "What's worth fixing: unused indexes, foreign keys without an index, tables without a primary key, large tables read by sequential scans.", "postgres", "POST", "/v1/endpoints/{endpoint}/query", &[ENDPOINT]).fixed(advisors),
     t("postgres_list_extensions", "Extensions", "Extensions installed and available, with versions.", "postgres", "POST", "/v1/endpoints/{endpoint}/query", &[ENDPOINT]).fixed(extensions),
