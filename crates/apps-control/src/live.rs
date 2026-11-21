@@ -391,6 +391,11 @@ pub struct Gate {
     pub preview: bool,
     /// Headers its answers carry.
     pub headers: Vec<crate::model::HeaderRule>,
+    /// The live deployment's roll.toml firewall rules (deny, limit, challenge), judged beside
+    /// `firewall`: the stricter answer wins, so the tree only ever tightens.
+    pub file_firewall: Vec<crate::model::FirewallRule>,
+    /// The live deployment's roll.toml headers, after `headers` and never over one they set.
+    pub file_headers: Vec<crate::model::HeaderRule>,
     /// Paths another service answers, the first that takes a path deciding.
     pub routes: Vec<crate::model::Route>,
     /// Traces are on: the proxy adds its own span to each request's trace.
@@ -407,8 +412,23 @@ pub struct Gate {
     pub snippets: Option<(bytes::Bytes, bytes::Bytes)>,
 }
 
-/// A rate-limit bucket: which (0 the environment's, 1 + i firewall rule i's) and whose.
+/// A rate-limit bucket: which (0 the environment's, 1 + i firewall rule i's, [`FILE_BUCKETS`] + i
+/// the live deployment's roll.toml rule i's) and whose.
 type BucketKey = (u16, Option<std::net::IpAddr>);
+
+/// Where the buckets of a deployment's own firewall rules start (past any environment's).
+const FILE_BUCKETS: u16 = 1000;
+
+/// The first of `rules` that matches decides; none: in. A limit's bucket is `base` + its index.
+fn first_match(rules: &[crate::model::FirewallRule], asked: &crate::model::Asked<'_>, base: u16) -> Verdict {
+    match rules.iter().enumerate().find(|(_, r)| r.matches(asked)) {
+        None => Verdict::Allow,
+        Some((_, r)) if r.action == crate::model::FirewallAction::Allow => Verdict::Allow,
+        Some((i, r)) if r.action == crate::model::FirewallAction::Limit => Verdict::Limit(base + i as u16, crate::model::RateLimit { per_minute: r.per_minute.unwrap_or(60), burst: r.burst }),
+        Some((_, r)) if r.action == crate::model::FirewallAction::Challenge => Verdict::Challenge,
+        Some(_) => Verdict::Deny,
+    }
+}
 
 /// A firewall's answer: in, a 403, or in under a rule's own limit (its bucket, 1 + its index).
 #[derive(Debug, PartialEq)]
@@ -429,12 +449,22 @@ impl Gate {
     /// What its firewall says of the request: the first rule that matches decides; none lets it
     /// in.
     pub fn firewall_verdict(&self, asked: &crate::model::Asked<'_>) -> Verdict {
-        match self.firewall.iter().enumerate().find(|(_, r)| r.matches(asked)) {
-            None => Verdict::Allow,
-            Some((_, r)) if r.action == crate::model::FirewallAction::Allow => Verdict::Allow,
-            Some((i, r)) if r.action == crate::model::FirewallAction::Limit => Verdict::Limit(i as u16 + 1, crate::model::RateLimit { per_minute: r.per_minute.unwrap_or(60), burst: r.burst }),
-            Some((_, r)) if r.action == crate::model::FirewallAction::Challenge => Verdict::Challenge,
-            Some(_) => Verdict::Deny,
+        let own = first_match(&self.firewall, asked, 1);
+        if self.file_firewall.is_empty() {
+            return own;
+        }
+        // The tree's rules on their own, their limits in buckets of their own: the stricter of
+        // the two answers (deny, then a challenge, then the lower limit) decides.
+        let file = first_match(&self.file_firewall, asked, FILE_BUCKETS);
+        let rank = |v: &Verdict| match v {
+            Verdict::Allow => 0,
+            Verdict::Limit(..) => 1,
+            Verdict::Challenge => 2,
+            Verdict::Deny => 3,
+        };
+        match (own, file) {
+            (Verdict::Limit(a, x), Verdict::Limit(b, y)) => if y.per_minute < x.per_minute { Verdict::Limit(b, y) } else { Verdict::Limit(a, x) },
+            (a, b) => if rank(&b) > rank(&a) { b } else { a },
         }
     }
 

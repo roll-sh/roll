@@ -340,6 +340,12 @@ CREATE TABLE IF NOT EXISTS error_groups (
 ) WITHOUT ROWID;
 -- Who started a deployment, as a person (their session's, their own token's, the operator's): what
 -- an approval is compared with.
+-- A deployment's edge settings from its tree's roll.toml (`EdgeFile`, every block), copied to a
+-- promotion or a rollback of it: they travel with the image.
+CREATE TABLE IF NOT EXISTS deploy_edge (
+    deployment TEXT PRIMARY KEY,
+    file TEXT NOT NULL
+) WITHOUT ROWID;
 CREATE TABLE IF NOT EXISTS deploy_people (
     deployment TEXT PRIMARY KEY,
     person TEXT NOT NULL
@@ -1571,6 +1577,10 @@ impl Store {
             )?;
             if d.no_traffic {
                 c.execute("INSERT INTO deploy_no_traffic (deployment) VALUES (?)", [&id])?;
+            }
+            // A promotion or a rollback runs its source's image: and its tree's edge settings.
+            if let Some(of) = &d.rollback_of {
+                c.execute("INSERT INTO deploy_edge (deployment, file) SELECT ?, file FROM deploy_edge WHERE deployment = ? ON CONFLICT (deployment) DO NOTHING", params![id, of])?;
             }
             if d.no_cache {
                 c.execute("INSERT INTO deploy_no_cache (deployment) VALUES (?)", [&id])?;
@@ -3335,6 +3345,21 @@ impl Store {
             let counted = all.iter().filter(|a| Some(a.as_str()) != author).count() as u32;
             Ok((all, fresh && counted == needed))
         })
+    }
+
+    /// A build's edge settings from its tree (none: what an earlier build of it said goes).
+    pub fn set_deploy_edge(&self, deployment: &str, file: Option<&crate::model::EdgeFile>) -> Result<()> {
+        match file {
+            Some(f) => self.db.execute("INSERT INTO deploy_edge (deployment, file) VALUES (?, ?) ON CONFLICT (deployment) DO UPDATE SET file = excluded.file", params![deployment, to_json(f)])?,
+            None => self.db.execute("DELETE FROM deploy_edge WHERE deployment = ?", [deployment])?,
+        };
+        Ok(())
+    }
+
+    /// The edge settings of what's live in an environment, if its tree had any.
+    pub fn active_edge(&self, service: &str, env: &str) -> Result<Option<crate::model::EdgeFile>> {
+        let f: Option<String> = self.db.query_row("SELECT d.file FROM deploy_edge d JOIN environments e ON e.active = d.deployment WHERE e.service = ? AND e.name = ?", [service, env], |r| r.get(0)).optional()?;
+        Ok(f.and_then(|f| serde_json::from_str(&f).ok()))
     }
 
     pub fn set_deploy_person(&self, deployment: &str, person: &str) -> Result<()> {

@@ -1273,6 +1273,10 @@ async fn a_roll_only_preview_takes_placeholders_made_by_who_saved_its_rules() {
     e.engine.store.update_intercepted(&p.id, |x| x.swapped += 2).unwrap();
     let held = e.engine.store.preview(&p.id).unwrap().intercepted.expect("its keys");
     assert_eq!((held.keys[0].key.as_str(), held.keys[0].hosts.len(), held.swapped), ("STRIPE_KEY", 2, 2));
+    // roll apps' proxies' counts for its services there, beside its own.
+    let apps = roll_previews::AppsIntercepted { requests: 3, swapped: 1, refused: vec!["api.stripe.com: a placeholder in the query".into()] };
+    e.engine.store.set_runtime_fact(&p.id, "intercepted_apps", Some(&apps)).unwrap();
+    assert_eq!(e.engine.store.preview(&p.id).unwrap().intercepted.and_then(|x| x.on_apps), Some(apps));
     // Its CA changes (a key's bound hosts did): its services restart, trusting the new one.
     struct Ca(parking_lot::Mutex<String>);
     struct Nothing;

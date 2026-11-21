@@ -27,6 +27,7 @@
 
 pub mod actions;
 pub mod api_keys;
+pub mod browser;
 pub mod audit;
 pub mod dls;
 pub mod opensearch;
@@ -221,6 +222,62 @@ impl Principal {
             "authentication_type" => "realm",
         }
     }
+}
+
+/// The families that hold a cluster's principals and their secrets: users and their passwords,
+/// API keys, access and refresh tokens, service tokens, roles, mappings, profiles, and OpenSearch
+/// Security's configuration (internal users, roles, mappings).
+const SECURITY_FAMILIES: [&str; 2] = ["security.", "opendistro_security."];
+
+/// A point-in-time branch's stored state (`branch`, as its parent was at that point) with its
+/// parent's security as it is now (`current`, the parent's latest stored state): every key
+/// revoked, token invalidated, user deleted or password changed since that point stays so on
+/// the branch, which only takes the data back in time. Both are the JSON documents a cluster
+/// saves; the answer is one too.
+pub fn adopt_current_security(branch: &[u8], current: &[u8], dialect: crate::cluster::Dialect, now_ms: i64) -> anyhow::Result<Vec<u8>> {
+    let read = |b: &[u8]| -> anyhow::Result<crate::meta::ClusterState> {
+        let v = crate::json::parse(b).map_err(|e| anyhow::anyhow!("corrupt cluster state: {e}"))?.unwrap_or(Value::Null);
+        crate::meta::ClusterState::from_json_in(&v, dialect).map_err(|e| anyhow::anyhow!("corrupt cluster state: {}", e.reason()))
+    };
+    let mut st = read(branch)?;
+    let now = read(current)?;
+    let is_security = |f: &str| SECURITY_FAMILIES.iter().any(|p| f.starts_with(p));
+    let mut families: Vec<String> = st.metadata.xpack.family_names().chain(now.metadata.xpack.family_names()).filter(|f| is_security(f)).cloned().collect();
+    families.sort();
+    families.dedup();
+    for f in &families {
+        crate::xpack::store::clear(&mut st, f);
+        for (id, v) in now.metadata.xpack.iter(f) {
+            crate::xpack::store::put(&mut st, f, id, v.clone(), now_ms).map_err(|e| anyhow::anyhow!("{}", e.reason()))?;
+        }
+    }
+    Ok(st.to_json().to_json().into_bytes())
+}
+
+/// The cluster id a browser key of a stored state (a deleted cluster's) was made for, from its
+/// `metadata.roll_browser.cluster` (`None`: no such key, or not a browser key).
+pub fn stored_browser_key_cluster(state: &[u8], dialect: crate::cluster::Dialect, key_id: &str) -> Option<String> {
+    let v = crate::json::parse(state).ok()??;
+    let st = crate::meta::ClusterState::from_json_in(&v, dialect).ok()?;
+    let meta = st.metadata.xpack.get(api_keys::KEYS, key_id)?.get("metadata")?.get(browser::METADATA)?.get("cluster")?.as_str()?.to_string();
+    Some(meta)
+}
+
+/// Who owns what a request stores for later (async search results): the API key it
+/// authenticated with, else its user and realm (the run-as user when there is one), as
+/// Elasticsearch's `Authentication.canAccessResourcesOf` tells owners apart.
+pub fn resource_owner(ctx: &Ctx) -> String {
+    let p = principal(ctx);
+    match &p.kind {
+        AuthKind::ApiKey(a) => format!("api_key:{}", a.id),
+        _ => format!("user:{}:{}:{}", p.realm_type, p.realm_name, p.username),
+    }
+}
+
+/// Whether the request's principal holds the cluster privilege that grants `action`.
+pub fn allows_cluster_action(ctx: &Ctx, action: &str) -> bool {
+    let p = principal(ctx);
+    p.is_superuser() || effective(&file_roles(ctx.cluster), &ctx.state(), p).allows_cluster(action)
 }
 
 /// The principal of a request (authenticated by [`authenticate`]; the owner if it wasn't).
@@ -629,6 +686,7 @@ fn check_workflow(ctx: &Ctx, p: &Principal) -> EsResult<()> {
 pub fn authorize(ctx: &Ctx) -> EsResult<Option<String>> {
     let r = authorize_action(ctx)?;
     check_lookups(ctx, None)?;
+    browser::check(ctx)?;
     Ok(r)
 }
 

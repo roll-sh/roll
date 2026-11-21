@@ -117,7 +117,7 @@
         },
         "alerts": {
           "type": "object",
-          "description": "Alert thresholds (memory_pct, error_pct, p95_ms, capacity_pct, log_match, log_count)."
+          "description": "Alert thresholds (memory_pct, error_pct, p95_ms, capacity_pct, cpu_pct, log_match, log_count) and metrics: alerts on the app's own gauges ({ name, above or below, minutes, sum })."
         },
         "rollout": {
           "type": "object",
@@ -408,6 +408,106 @@
             "pattern": "^[a-z0-9][a-z0-9+\\-.:=~_]{0,99}$"
           },
           "description": "System packages the generated Dockerfile installs (apt, or apk on Alpine): ffmpeg, chromium, libvips42."
+        },
+        "headers": {
+          "type": "array",
+          "maxItems": 20,
+          "description": "Headers the answers carry, added after the environment's own (never over a header it sets); the app's own of the same name win unless replace.",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "set"
+            ],
+            "properties": {
+              "path": {
+                "type": "string",
+                "pattern": "^/",
+                "description": "A path, or a prefix ending in * (/assets/*); none: every path."
+              },
+              "set": {
+                "type": "object",
+                "additionalProperties": {
+                  "type": "string"
+                }
+              },
+              "replace": {
+                "type": "boolean"
+              }
+            }
+          }
+        },
+        "firewall": {
+          "type": "array",
+          "maxItems": 50,
+          "description": "Firewall rules judged beside the environment's: deny, limit or challenge (never allow); the stricter answer wins.",
+          "items": {
+            "type": "object",
+            "additionalProperties": true,
+            "required": [
+              "action"
+            ],
+            "properties": {
+              "action": {
+                "enum": [
+                  "deny",
+                  "limit",
+                  "challenge"
+                ]
+              },
+              "path": {
+                "type": "string",
+                "pattern": "^/",
+                "description": "A path, or a prefix ending in * (/assets/*); none: every path."
+              },
+              "methods": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "user_agent": {
+                "type": "string"
+              },
+              "ips": {
+                "type": "array",
+                "maxItems": 100,
+                "items": {
+                  "type": "string"
+                }
+              },
+              "per_minute": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 100000
+              },
+              "burst": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 100000
+              }
+            }
+          }
+        },
+        "rate_limit": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "per_minute"
+          ],
+          "description": "Each client's requests a minute; the environment's own if it's lower.",
+          "properties": {
+            "per_minute": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 100000
+            },
+            "burst": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 100000
+            }
+          }
         }
       }
     },
@@ -448,6 +548,15 @@
         },
         "run": {
           "$ref": "#/definitions/settings/properties/run"
+        },
+        "headers": {
+          "$ref": "#/definitions/settings/properties/headers"
+        },
+        "firewall": {
+          "$ref": "#/definitions/settings/properties/firewall"
+        },
+        "rate_limit": {
+          "$ref": "#/definitions/settings/properties/rate_limit"
         },
         "environments": {
           "type": "object",
@@ -498,6 +607,15 @@
         },
         "run": {
           "$ref": "#/definitions/settings/properties/run"
+        },
+        "headers": {
+          "$ref": "#/definitions/settings/properties/headers"
+        },
+        "firewall": {
+          "$ref": "#/definitions/settings/properties/firewall"
+        },
+        "rate_limit": {
+          "$ref": "#/definitions/settings/properties/rate_limit"
         },
         "screenshots": {
           "type": "object",
