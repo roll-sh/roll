@@ -708,6 +708,14 @@ pub enum AppsCmd {
         #[command(flatten)]
         target: Target,
     },
+    /// Approve a deployment waiting at ready where the environment asks for approvals (GitHub
+    /// Environments' required reviewers): yours counts unless you started it, and the last one
+    /// needed puts it live.
+    Approve {
+        deployment: String,
+        #[command(flatten)]
+        target: Target,
+    },
     /// Roll back to an earlier deployment (no build: its image runs again); with no id, the one
     /// that was live before the current one (`heroku rollback`).
     Rollback {
@@ -3610,6 +3618,20 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
                 return watch(api, &svc, &target.env, &dep).await;
             }
             dep
+        }
+        AppsCmd::Approve { deployment, target } => {
+            let svc = service(api, &target).await?;
+            let v = api.post(&format!("{}/deploys/{}/approve", env_path(&svc, &target.env), enc(&deployment)), json!({})).await?;
+            if !json_out {
+                let have = v["approved_by"].as_array().map_or(0, Vec::len);
+                match (v["live"].as_str(), v["waiting"].as_str()) {
+                    (Some(live), _) => println!("approved ({have} of {}): going live as {live}", v["needed"]),
+                    (None, Some(why)) => println!("approved ({have} of {}), but it can't go live yet: {why}", v["needed"]),
+                    (None, None) => println!("approved ({have} of {} needed)", v["needed"]),
+                }
+                return Ok(());
+            }
+            v
         }
         AppsCmd::Rollback { deployment, target, keep_variables, override_freeze } => {
             let svc = service(api, &target).await?;
