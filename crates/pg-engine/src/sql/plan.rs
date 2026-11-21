@@ -1105,6 +1105,10 @@ pub struct InsertPlan {
 #[derive(Debug)]
 pub enum CopyRow {
     Values(Vec<crate::types::Value>),
+    /// A plain COPY's row into a table it may copy stored rows into (`CopyInParsed::stored`):
+    /// its values encoded as a stored row holds them after its header (the column count,
+    /// then each value: `storage::row::encode_value`), for `dml::StoredInsert`. Never a NULL.
+    Stored(Vec<u8>),
     Exprs(Vec<Expr>),
     /// A line ON_ERROR ignore skipped: its defaults are evaluated as its place in the data
     /// comes (NextCopyFrom computes them before CopyFrom drops the row), nothing goes in.

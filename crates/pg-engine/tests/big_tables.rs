@@ -925,6 +925,50 @@ ALTER TABLE dnn ALTER COLUMN a SET NOT NULL",
     });
 }
 
+/// A plain COPY's lines without escapes go in as stored rows (`CopyRow::Stored`,
+/// `dml::StoredInsert`), modelled and past the model: the same rows, ctids, counts and size as
+/// the same values through the decoded path (each line with an escape); a long value and a
+/// NULL go the general way, and a bad value fails with its line and column.
+#[test]
+fn copy_stored_rows() {
+    use pg_engine::exec::dml::STORED_COPY_ROWS;
+    let dir = tempfile::tempdir().unwrap();
+    let eng = open(dir.path());
+    with_max_versions(500, || {
+        let mut s = eng.connect(1, "postgres", "postgres", "t").unwrap();
+        run(&mut s, "CREATE TABLE cst (id int NOT NULL, a smallint, b text, c float8, d bigint, e date);\nCREATE TABLE csd (LIKE cst INCLUDING ALL)");
+        // (`esc`: the text's last byte as a \x escape, the line read through the general path.)
+        let data = |esc: bool| -> String {
+            (1..=3000)
+                .map(|i| {
+                    let b = if i % 500 == 0 { "x".repeat(300) } else { format!("text {i}") };
+                    let b = if esc { format!("{}\\x{:02x}", &b[..b.len() - 1], b.as_bytes()[b.len() - 1]) } else { b };
+                    let a = if i == 2500 { "\\N".to_string() } else { (i % 7 - 3).to_string() };
+                    format!("{i}\t{a}\t{b}\t{}\t{}\t2026-11-{:02}\n", i as f64 / 3.0, i as i64 * -1_000_003, 1 + i % 28)
+                })
+                .collect()
+        };
+        let before = STORED_COPY_ROWS.load(Ordering::Relaxed);
+        run(&mut s, "BEGIN");
+        s.query_copy("COPY cst FROM STDIN", data(false).as_bytes()).unwrap();
+        let stored = STORED_COPY_ROWS.load(Ordering::Relaxed) - before;
+        assert!(stored > 2900 && stored < 3000, "{stored} rows stored");
+        s.query_copy("COPY csd FROM STDIN", data(true).as_bytes()).unwrap();
+        assert_eq!(STORED_COPY_ROWS.load(Ordering::Relaxed) - before, stored);
+        assert_eq!(rows(&mut s, "SELECT n_tup_ins FROM pg_stat_xact_user_tables WHERE relname IN ('cst', 'csd') ORDER BY relname"), ["[Int8(3000)]", "[Int8(3000)]"]);
+        run(&mut s, "COMMIT");
+        let all = |s: &mut Session, t: &str| rows(s, &format!("SELECT ctid, * FROM {t} ORDER BY id"));
+        assert_eq!(all(&mut s, "cst"), all(&mut s, "csd"));
+        assert_eq!(rows(&mut s, "SELECT count(*), count(a) FROM cst"), ["[Int8(3000), Int8(2999)]"]);
+        assert_eq!(rows(&mut s, "SELECT pg_relation_size('cst') = pg_relation_size('csd'), pg_relation_size('cst') > 0"), ["[Bool(true), Bool(true)]"]);
+        let bad = "3001\t1\tt\t0.5\t1\t2026-11-01\n3002\t1\tt\tx1\t1\t2026-11-01\n";
+        let e = s.query_copy("COPY cst FROM STDIN", bad.as_bytes()).unwrap_err();
+        let e = format!("{e:?}");
+        assert!(e.contains("invalid input syntax for type double precision: \\\"x1\\\"") && e.contains("COPY cst, line 2, column c: \\\"x1\\\""), "{e}");
+        assert_eq!(rows(&mut s, "SELECT count(*) FROM cst"), ["[Int8(3000)]"]);
+    });
+}
+
 /// Rewrites of a table too big to model (VACUUM FULL, CLUSTER, ALTER TABLE's rewrite, a
 /// materialized view's load) store each row's TID with it, as a modelled heap's rows have
 /// theirs: the ctids, heap order and sizes PostgreSQL 18.6 gives (its answers below), in the

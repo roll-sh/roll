@@ -1043,13 +1043,20 @@ const RETRY_INSERT: &str = "XXRTY";
 /// (`session::copy`; nothing of the insert's state changes on it).
 pub const NEED_COPY_ROWS: &str = "XXCPY";
 
+/// A row COPY FROM hands its insert: its values, or a plain COPY's stored values
+/// (`CopyRow::Stored`, for `StoredInsert`).
+enum Copied {
+    Values(Row),
+    Stored(Vec<u8>),
+}
+
 /// COPY FROM's next row (its values, line number and text); None: the data has all been
 /// read and inserted.
 fn next_copied(
     c: &CopyLines,
     taken: &mut std::collections::VecDeque<(crate::sql::plan::CopyRow, usize, crate::sql::plan::CopyRaw)>,
     ctx: &ExecCtx,
-) -> Result<Option<(Row, (usize, crate::sql::plan::CopyRaw))>> {
+) -> Result<Option<(Copied, (usize, crate::sql::plan::CopyRaw))>> {
     loop {
         // (The feed's rows taken a batch at a time: one lock each, not one a row.)
         let mut done = false;
@@ -1060,7 +1067,10 @@ fn next_copied(
         }
         match taken.pop_front() {
             Some((crate::sql::plan::CopyRow::Values(row), line, raw)) => {
-                return Ok(Some((row, (line, raw))));
+                return Ok(Some((Copied::Values(row), (line, raw))));
+            }
+            Some((crate::sql::plan::CopyRow::Stored(data), line, raw)) => {
+                return Ok(Some((Copied::Stored(data), (line, raw))));
             }
             // (The values read are constants, taken as they are; defaults are evaluated.)
             Some((crate::sql::plan::CopyRow::Exprs(exprs), line, raw)) => {
@@ -1071,7 +1081,7 @@ fn next_copied(
                         e => eval(&e, &[], ctx)?,
                     });
                 }
-                return Ok(Some((row, (line, raw))));
+                return Ok(Some((Copied::Values(row), (line, raw))));
             }
             Some((crate::sql::plan::CopyRow::Skipped(exprs, context), _, _)) => {
                 for e in exprs {
@@ -3901,6 +3911,9 @@ pub struct InsertNode {
     /// A plain INSERT … SELECT copying a table's stored rows (`StoredInsert`), once decided;
     /// Some(None): not this one.
     stored: Option<Option<StoredInsert>>,
+    /// A plain COPY's `StoredInsert` for its stored rows (`CopyRow::Stored`), once decided;
+    /// Some(None): not this one.
+    copy_stored: Option<Option<StoredInsert>>,
     /// Its source handed out all its rows that way (`Node::each_stored`).
     source_done: bool,
 }
@@ -3908,6 +3921,29 @@ pub struct InsertNode {
 /// Rows INSERT … SELECT copied as stored (`StoredInsert::insert`), for tests.
 #[doc(hidden)]
 pub static STORED_INSERTS: crate::counter::Counter = crate::counter::Counter::new();
+
+/// A plain COPY's rows that went in as stored (`InsertNode::insert_stored_copy`), for tests.
+#[doc(hidden)]
+pub static STORED_COPY_ROWS: crate::counter::Counter = crate::counter::Counter::new();
+
+/// Whether rows of table `t` (its `rules`; the columns an insert gives, `target`) may go in
+/// as stored values (`StoredInsert`): a table keyed by row ids, not temporary, without
+/// indexes, CHECK constraints, domains, generated, dropped or virtual columns, every column
+/// given in order, in a transaction not tracked for serializability, no change stream
+/// logging its inserts. (`session::copy` asks it before a COPY's lines are read.)
+pub(crate) fn copies_stored(t: &Table, rules: &TableRules, target: &[usize], ctx: &ExecCtx) -> bool {
+    let n = t.columns.len();
+    t.has_rowid()
+        && !t.temporary
+        && rules.indexes.is_empty()
+        && rules.checks.is_empty()
+        && rules.domain_checks.iter().all(Option::is_none)
+        && t.columns.iter().all(|c| !c.dropped && !c.virtual_gen && c.generated.is_none())
+        && target.len() == n
+        && target.iter().enumerate().all(|(i, c)| i == *c)
+        && !ctx.txn.borrow().serializable_tracked()
+        && !crate::repl::log::logs_inserts(t, ctx)
+}
 
 /// A plain INSERT … SELECT whose source hands out a table's rows as stored
 /// (`Node::each_stored`: its columns as they are, which are the target's, of the same types)
@@ -3926,26 +3962,23 @@ struct StoredInsert {
 
 impl StoredInsert {
     fn of(plan: &InsertPlan, ctx: &ExecCtx) -> Option<StoredInsert> {
-        let rules = &plan.rules;
-        let t = &rules.table;
+        (plan.copy.is_none() && copies_stored(&plan.rules.table, &plan.rules, &plan.target, ctx)).then(|| Self::new(&plan.rules.table))
+    }
+
+    /// A plain multi-insert COPY's (`CopyRow::Stored`): its rows go in as INSERT … SELECT's
+    /// do, each placed as `plain_row` places it.
+    fn of_copy(plan: &InsertPlan, ctx: &ExecCtx) -> Option<StoredInsert> {
+        (plan.copy.as_ref().is_some_and(|c| c.multi) && copies_stored(&plan.rules.table, &plan.rules, &plan.target, ctx)).then(|| Self::new(&plan.rules.table))
+    }
+
+    fn new(t: &Table) -> StoredInsert {
         let n = t.columns.len();
-        let plain = plan.copy.is_none()
-            && t.has_rowid()
-            && !t.temporary
-            && rules.indexes.is_empty()
-            && rules.checks.is_empty()
-            && rules.domain_checks.iter().all(Option::is_none)
-            && t.columns.iter().all(|c| !c.dropped && !c.virtual_gen && c.generated.is_none())
-            && plan.target.len() == n
-            && plan.target.iter().enumerate().all(|(i, c)| i == *c)
-            && !ctx.txn.borrow().serializable_tracked()
-            && !crate::repl::log::logs_inserts(t, ctx);
-        plain.then(|| StoredInsert {
+        StoredInsert {
             estimated: std::cell::Cell::new(false),
             types: t.columns.iter().map(|c| c.ty.clone()).collect(),
             none: vec![false; n],
             not_null: t.columns.iter().map(|c| c.not_null).collect(),
-        })
+        }
     }
 
     /// A stored row of the source in (`plain_counts` counting it): false when it can't go in
@@ -3953,14 +3986,22 @@ impl StoredInsert {
     /// might go out of line, a row stored before a column was added), for the caller to
     /// insert decoded.
     fn insert(&self, plan: &InsertPlan, bytes: &[u8], plain_counts: &std::cell::Cell<i64>, ctx: &ExecCtx) -> Result<bool> {
+        if crate::storage::toast::has_external(bytes) {
+            return Ok(false);
+        }
+        let done = self.insert_data(plan, super::scan::row_data(bytes)?, plain_counts, ctx)?;
+        if done {
+            STORED_INSERTS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
+        Ok(done)
+    }
+
+    /// `insert` of a row's stored values (its bytes after the header), none out of line.
+    fn insert_data(&self, plan: &InsertPlan, data: &[u8], plain_counts: &std::cell::Cell<i64>, ctx: &ExecCtx) -> Result<bool> {
         let t = &plan.rules.table;
         if !self.estimated.get() {
             self.estimated.set(super::sizing::is_estimated(t.oid, &ctx.sess.db));
         }
-        if crate::storage::toast::has_external(bytes) {
-            return Ok(false);
-        }
-        let data = super::scan::row_data(bytes)?;
         let mut pos = 0;
         if crate::storage::sst::get_varint(data, &mut pos)? as usize != self.types.len() {
             return Ok(false);
@@ -4021,7 +4062,6 @@ impl StoredInsert {
         }
         row.extend_from_slice(data);
         txn.put_fresh(dkey, row)?;
-        STORED_INSERTS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         Ok(true)
     }
 }
@@ -4138,6 +4178,7 @@ impl InsertNode {
             plain_counts: Default::default(),
             held_counts: Default::default(),
             stored: None,
+            copy_stored: None,
             source_done: false,
         })
     }
@@ -4284,7 +4325,7 @@ impl InsertNode {
 
     /// Insert a COPY FROM row under its line's context. Buffered rows reach their indexes
     /// after the line is gone, so a unique violation names only the line number.
-    fn insert_copied(&mut self, src: Row, ctx: &ExecCtx) -> Result<Option<(Row, Vec<u8>, Option<Row>)>> {
+    fn insert_copied(&mut self, src: Copied, ctx: &ExecCtx) -> Result<Option<(Row, Vec<u8>, Option<Row>)>> {
         // (What the row needs of the plan's COPY, so the plan isn't held across the insert.)
         let (table, multi, binary) = match &self.plan.copy {
             Some(c) => (c.table.clone(), c.multi, c.binary),
@@ -4329,7 +4370,11 @@ impl InsertNode {
         if hold {
             super::pgstat::hold_inserts(ctx);
         }
-        let r = if self.plain { self.insert_plain(src, ctx) } else { self.insert(src, ctx) };
+        let r = match src {
+            Copied::Stored(data) => self.insert_stored_copy(&data, ctx),
+            Copied::Values(src) if self.plain => self.insert_plain(src, ctx),
+            Copied::Values(src) => self.insert(src, ctx),
+        };
         if hold {
             let mut h = self.held_counts.borrow_mut();
             for (rel, n) in super::pgstat::take_held(ctx) {
@@ -4386,6 +4431,22 @@ impl InsertNode {
     /// `plain_row` of this insert's row.
     fn insert_plain(&mut self, src: Row, ctx: &ExecCtx) -> Result<Option<(Row, Vec<u8>, Option<Row>)>> {
         Self::plain_row(&self.plan, &self.plain_counts, src, ctx)
+    }
+
+    /// A plain COPY's stored row (`CopyRow::Stored`): copied as it is by the COPY's
+    /// `StoredInsert` where it takes the row, else decoded and inserted as its values would
+    /// be. (The row returned is never read: a plain insert has no RETURNING.)
+    fn insert_stored_copy(&mut self, data: &[u8], ctx: &ExecCtx) -> Result<Option<(Row, Vec<u8>, Option<Row>)>> {
+        let InsertNode { plan, plain, plain_counts, copy_stored, .. } = &mut *self;
+        if *plain
+            && let Some(si) = copy_stored.get_or_insert_with(|| StoredInsert::of_copy(plan, ctx))
+            && si.insert_data(plan, data, plain_counts, ctx)?
+        {
+            STORED_COPY_ROWS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            return Ok(Some((Vec::new(), Vec::new(), None)));
+        }
+        let row = crate::storage::row::decode_row(data)?;
+        if self.plain { self.insert_plain(row, ctx) } else { self.insert(row, ctx) }
     }
 
     /// A plain INSERT … SELECT's rows from its source as stored (`StoredInsert`), each one
@@ -4772,7 +4833,7 @@ impl Node for InsertNode {
                     None => None,
                 },
                 None if self.source_done => None,
-                None => self.source.next(ctx).inspect_err(|_| self.flush_plain_counts(ctx))?,
+                None => self.source.next(ctx).inspect_err(|_| self.flush_plain_counts(ctx))?.map(Copied::Values),
             };
             let Some(src) = next else {
                 self.flush_plain_counts(ctx);
@@ -4851,9 +4912,10 @@ impl Node for InsertNode {
                 })?;
                 return Ok(None);
             };
-            let inserted = match &self.plan.copy {
-                Some(_) => self.insert_copied(src, ctx).inspect_err(|_| self.counts_on_error(ctx))?,
-                None => {
+            let inserted = match (&self.plan.copy, src) {
+                (Some(_), src) => self.insert_copied(src, ctx).inspect_err(|_| self.counts_on_error(ctx))?,
+                (None, Copied::Stored(_)) => unreachable!("only COPY's rows come stored"),
+                (None, Copied::Values(src)) => {
                     // (Its rows are stored as they go, final: the sink takes them once there
                     // are enough to be worth its room.)
                     if self.sink == Some(false) && ctx.processed.get() >= SINK_AFTER {

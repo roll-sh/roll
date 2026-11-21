@@ -452,6 +452,9 @@ pub struct CopyInParsed {
     rows: Vec<CopyRow>,
     /// A plain COPY (`CopyReader::plain`): records are parsed straight into values.
     plain: bool,
+    /// And one whose insert copies stored rows (`stored_copy`): a line without escapes is
+    /// encoded straight into one (`CopyRow::Stored`).
+    stored: bool,
     /// Each row's line number and text.
     lines: Vec<(usize, CopyRaw)>,
     /// Rows ON_ERROR ignore skipped.
@@ -1140,6 +1143,7 @@ impl Session {
                     crate::catalog::trigger_type::INSERT,
                     ctx,
                 );
+            rd.st.stored = rd.st.plain && multi && stored_copy(&t, &rules, &target, ctx);
             // The defaults COPY may use are planned when it starts (BeginCopyFrom): those of
             // the columns not copied, and with DEFAULT, every column's.
             for (i, d) in rules.defaults.iter().enumerate() {
@@ -1305,7 +1309,7 @@ impl CopyReader<'_> {
             cols.iter().any(|&k| match &st.rows[r] {
                 CopyRow::Values(v) => matches!(v.get(k), Some(Value::Null)),
                 CopyRow::Exprs(e) => matches!(e.get(k), Some(Expr::Const(Value::Null, _))),
-                CopyRow::Skipped(..) => false,
+                CopyRow::Skipped(..) | CopyRow::Stored(_) => false,
             })
         })
     }
@@ -1475,6 +1479,8 @@ impl CopyReader<'_> {
                         .collect(),
                     None,
                 ),
+                // (Only a plain COPY's, which `prepare` never sees.)
+                CopyRow::Stored(_) => unreachable!("a plain COPY's rows aren't prepared"),
                 CopyRow::Skipped(e, context) => (e, Some(context)),
             };
             // Domain input functions run before the missing columns' defaults, like the
@@ -1678,11 +1684,13 @@ pub(crate) fn parse_copy_data(
         lines,
         skipped,
         plain,
+        stored,
         csv_eol,
         csv_quoted_lines,
         ..
     } = st;
     let plain = *plain;
+    let stored = *stored;
     let ctx_line = |line: usize, raw: &str| format!("COPY {}, line {line}: \"{raw}\"", t.name);
     // (Each record's text as a range of one copy of the chunk: `CopyRaw`. A CSV record's is
     // made apart, as its own.)
@@ -1709,13 +1717,17 @@ pub(crate) fn parse_copy_data(
         let rec = match rec {
             Rec::Fields(v) => v,
             Rec::Plain(text) => {
-                if direct
-                    && !(lineno == 0 && f.header)
-                    && let Some(vals) = plain_values(text, c, &kinds, fmt)
-                {
-                    rows.push(CopyRow::Values(vals));
-                    lines.push((line, raw_of(&raw)));
-                    continue;
+                if direct && !(lineno == 0 && f.header) {
+                    let row = if stored {
+                        stored_values(text, c, &kinds, fmt).map(CopyRow::Stored)
+                    } else {
+                        plain_values(text, c, &kinds, fmt).map(CopyRow::Values)
+                    };
+                    if let Some(row) = row {
+                        rows.push(row);
+                        lines.push((line, raw_of(&raw)));
+                        continue;
+                    }
                 }
                 plain_fields(text, f)
             }
@@ -1897,7 +1909,7 @@ impl CopyInParsed {
                 CopyRow::Exprs(e) => Some(e),
                 CopyRow::Skipped(..) => None,
                 // (Only `CopyReader` reads plain.)
-                CopyRow::Values(_) => unreachable!("file_fdw's rows are never plain"),
+                CopyRow::Values(_) | CopyRow::Stored(_) => unreachable!("file_fdw's rows are never plain"),
             })
             .collect();
         (rows, self.skipped)
@@ -2035,6 +2047,77 @@ impl<'a> PlainKind<'a> {
             PlainKind::Other(ty) => parse_value(s, ty, fmt).ok(),
         }
     }
+}
+
+impl PlainKind<'_> {
+    /// `parse` of `s` encoded onto `out` as `storage::row::encode_value` encodes the value.
+    #[inline]
+    fn encode(self, s: &str, ty: &DataType, fmt: &crate::types::text::FormatCtx, out: &mut Vec<u8>) -> Option<()> {
+        use crate::storage::row::tag;
+        match self {
+            PlainKind::Int(min, max, _) if let Some(v) = crate::types::text::int_fast(s.as_bytes()).filter(|v| *v >= min && *v <= max) => {
+                match ty {
+                    DataType::Int2 => {
+                        out.push(tag::INT2);
+                        out.extend_from_slice(&(v as i16).to_le_bytes());
+                    }
+                    DataType::Int4 => {
+                        out.push(tag::INT4);
+                        out.extend_from_slice(&(v as i32).to_le_bytes());
+                    }
+                    _ => {
+                        out.push(tag::INT8);
+                        out.extend_from_slice(&v.to_le_bytes());
+                    }
+                }
+            }
+            PlainKind::Float8 if let Some(v) = crate::types::text::float_fast(s.as_bytes()) => {
+                out.push(tag::FLOAT8);
+                out.extend_from_slice(&v.to_le_bytes());
+            }
+            PlainKind::Text => {
+                out.push(tag::TEXT);
+                crate::storage::row::put_bytes(out, s.as_bytes());
+            }
+            // (Never a NULL: a stored COPY row has none, `CopyRow::Stored`.)
+            kind => crate::storage::row::encode_value(out, &kind.parse(s, ty, fmt).filter(|v| !v.is_null())?),
+        }
+        Some(())
+    }
+}
+
+/// `plain_values`' values, encoded as a stored row holds them after its header (the column
+/// count, then each value), into a row of one allocation (`CopyRow::Stored`).
+fn stored_values(line: &str, c: &CopyIn, kinds: &[PlainKind<'_>], fmt: &crate::types::text::FormatCtx) -> Option<Vec<u8>> {
+    let d = u8::try_from(c.format.delimiter).ok().filter(u8::is_ascii)?;
+    // (Each value's encoding is about its text's length, plus a tag and a length or a
+    // fixed width.)
+    let mut out = Vec::with_capacity(line.len() + 8 * c.ncols + 2);
+    crate::storage::sst::put_varint(&mut out, c.ncols as u64);
+    let mut ends = memchr::memchr_iter(d, line.as_bytes()).chain(std::iter::once(line.len()));
+    let mut start = 0;
+    for (&col, kind) in c.target.iter().zip(kinds) {
+        let end = ends.next()?;
+        kind.encode(&line[start..end], &c.table.columns[col].ty, fmt, &mut out)?;
+        start = end + 1;
+    }
+    ends.next().is_none().then_some(out)
+}
+
+/// Whether a plain multi-insert COPY into `t` (its `rules`, the columns it gives `target`)
+/// copies stored rows: those `dml::StoredInsert::of_copy` takes (every column given, in
+/// order; no index, CHECK, domain, generated, dropped or virtual column, temporary table,
+/// change stream or serializable tracking), into a table the insert takes rows into plainly
+/// (no triggers, RLS, view checks, partitions or foreign storage).
+fn stored_copy(t: &Table, rules: &crate::sql::plan::TableRules, target: &[usize], ctx: &ExecCtx) -> bool {
+    !rules.view
+        && t.partkey.is_none()
+        && t.foreign.is_none()
+        && rules.triggers.is_empty()
+        && rules.rls_checks.is_empty()
+        && rules.view_checks.is_empty()
+        && rules.part_check.is_none()
+        && crate::exec::dml::copies_stored(t, rules, target, ctx)
 }
 
 /// A plain text COPY's line without escapes, when it gives every column a value that

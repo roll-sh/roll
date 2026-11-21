@@ -76,7 +76,7 @@ pub const ROW_HEADER_TID: u8 = 0xFE;
 pub const ROW_HEADER_EXT: u8 = 0xFD;
 pub const ROW_HEADER_TID_EXT: u8 = 0xFC;
 
-fn put_bytes(out: &mut Vec<u8>, b: &[u8]) {
+pub(crate) fn put_bytes(out: &mut Vec<u8>, b: &[u8]) {
     put_varint(out, b.len() as u64);
     out.extend_from_slice(b);
 }
