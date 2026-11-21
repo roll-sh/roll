@@ -795,7 +795,9 @@ deterministic (#396).
    page of rows charged to the request breaker as it is built and released when dropped,
    `circuit_breaking_exception` past the limit, and a node-level limit no tenant setting can
    raise. Time has its own cap (#530, in review). Rule: charge what a structure costs as it is
-   built, never a multiple of the bytes it came from.
+   built, never a multiple of the bytes it came from. Also left: `_bulk`'s own preparation (`bulk_ahead`
+   parses each source into a tree) is charged only as the body's `inflight_requests`, for
+   clients' bulks and connector syncs' alike (#318's pages are text until then).
 4. **A sweep for the bug classes the 2026-11-19 reviews kept finding** (first pass landed in #434, the follow-up in #492; what
    today's reviews still find is resource accounting, item 3). Four
    independent security reviews (connectors #318, cross-cluster search #347 and its gaps #389,
@@ -805,9 +807,7 @@ deterministic (#396).
    host they go to changes, sealed values a client can plant, an alias wildcard that skips one
    authorization path, and secrets or keys a branch inherits from its parent. Only the code those
    reviews read has been checked. Every decoder, cache, context store, credential field and branch
-   copy in search gets the same questions, with a test per real finding. Known: `_bulk`'s own
-   preparation (`bulk_ahead` parses each source) is charged only as the body's
-   `inflight_requests`, for clients' bulks and connector syncs' alike.
+   copy in search gets the same questions, with a test per real finding.
 5. **Cross-cluster search: what's left** (ES|QL across clusters is #504, in its third review; landed in #347, after its security review's fixes: an alias wildcard matching a link and a
    loopback remote skipped the local index check, and merges were quadratic and unbounded;
    same owner only,
