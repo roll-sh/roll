@@ -77,6 +77,11 @@ Repos are `"owner/repo"`. Changes are `"chg_…"` or `"owner/repo#N"`, and work 
 | `list_refs` | the repo's branches and tags | `GET /repos/{r}/refs` |
 | `create_repo` | a new, empty repository under an owner you manage | `POST /repos` |
 | `request_ai_review` | ask roll's reviewer for a review | `POST /changes/{id}/ai-review` |
+| `list_ai_reviews` | roll's review jobs for a change, oldest first (state, stage, progress, the review made) | `GET /changes/{id}/ai-jobs` |
+| `get_ai_review_pricing`, `get_review_usage` | what an AI review costs by mode; an owner's spend in a month (by repo, mode, key; the cap left) | `GET /pricing`, `GET /owners/{owner}/usage` |
+| `get_reviewer`, `get_review_rules` | how roll reviews a repo (effective settings, model, jobs, index); what a change needs to land | `GET /repos/{r}/reviewer`, `/review-settings` |
+| `get_repo_audit` | what changed in the queue and settings (bypasses, pauses, lanes, approved runs, webhooks, review settings, dismissals, stored credentials), newest first (writers) | `GET /repos/{r}/audit` |
+| `start_preview`, `stop_preview` | make a change's preview (it starts on its first visit), or remove it with its database (`destructiveHint`) | `POST`/`DELETE /changes/{id}/preview` |
 | `list_agent_machines` | the owner's machines running `roll agent up` (online, providers) | `GET /agents/{owner}/machines` |
 | `list_agent_threads` | agent threads (with their machine and project name) and the requests waiting for an answer | `GET /agents/{owner}/state` |
 | `create_agent_thread` | start a coding agent in a project on a machine | `POST /agents/{owner}/machines/{m}/commands` (`thread.create`) |
@@ -93,6 +98,11 @@ Repos are `"owner/repo"`. Changes are `"chg_…"` or `"owner/repo#N"`, and work 
 | `list_agent_automation_runs` | runs, newest first (of one automation, by status) | `GET …/automations/runs` |
 | `get_agent_automation_run` | a run's steps (status, output, log) and its event | `GET …/automations/runs/{run}` |
 | `cancel_agent_automation_run` | cancel a run going on (the owner's) | `POST …/automations/runs/{run}/cancel` |
+| `retry_agent_automation_run` | a failed or cancelled run goes on from where it stopped (the owner's; `openWorldHint`, as `run_agent_automation`) | `POST …/automations/runs/{run}/retry` |
+| `enable_agent_automation`, `disable_agent_automation` | turn an automation on or off (by id or name; runs going on go on) | `POST …/automations/{id}/enable`, `/disable` |
+| `get_agent_automation_catalog` | every trigger and step kind, with each config's JSON Schema | `GET …/automations/catalog` |
+| `test_agent_automation` | what a spec would do with an event, saving and running nothing | `POST …/automations/test` |
+| `list_agent_sandboxes`, `stop_agent_sandbox`, `get_agent_sandbox_usage` | the owner's sandboxes; stop one (its billing stops); a month's running hours and price | `GET /agents/{owner}/sandboxes`, `POST …/{id}/stop`, `GET …/usage` |
 
 The agents tools (docs/code/agents.md) take `owner`, and a `machine` by id (`mch_…`) or name.
 Commands take an optional `id`, the idempotency key (a fresh one by default). Whatever the
