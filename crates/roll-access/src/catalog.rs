@@ -141,12 +141,14 @@ fn apps_drain_bucket(b: &Value) -> Vec<Lent> {
     b.get("bucket").and_then(Value::as_str).map(|r| Lent { kind: "bucket".into(), r#ref: r.into(), action: Action::Write }).into_iter().collect()
 }
 
-/// A roll code repo the body names, which apps reads for the caller (`repo` for a plan or an import,
-/// `source.repo` for a service built from one): read on it, so a token can't learn a repo's stack,
-/// head or roll.toml, or build and run its code, without being allowed to read it.
+/// The roll code repos the body names, which apps reads for the caller (`repo` for a plan or an
+/// import, `source.repo` for a service built from one, `build.submodule_repos` its private
+/// submodules come from): read on each, so a token can't learn a repo's stack, head or roll.toml,
+/// or build and run its code, without being allowed to read it.
 fn apps_repo(b: &Value) -> Vec<Lent> {
     let from_source = (b.pointer("/source/kind").and_then(Value::as_str) == Some("repo")).then(|| b.pointer("/source/repo").and_then(Value::as_str)).flatten();
-    b.get("repo").and_then(Value::as_str).or(from_source).map(|r| Lent { kind: "repo".into(), r#ref: r.into(), action: Action::Read }).into_iter().collect()
+    let subs = b.pointer("/build/submodule_repos").and_then(Value::as_array).into_iter().flatten().filter_map(Value::as_str);
+    b.get("repo").and_then(Value::as_str).or(from_source).into_iter().chain(subs).map(|r| Lent { kind: "repo".into(), r#ref: r.into(), action: Action::Read }).collect()
 }
 
 /// A new service: its links, its scaling and pushed streams and the repo it's built from.
@@ -1883,6 +1885,7 @@ mod tests {
         // A repo apps reads for the caller needs read on it: a plan's, an import's, a source's.
         let repo = |r: &str| vec![Lent { kind: "repo".into(), r#ref: r.into(), action: Action::Read }];
         assert_eq!(apps_repo(&serde_json::json!({ "repo": "acme/web", "revision": "main" })), repo("acme/web"));
+        assert_eq!(apps_repo(&serde_json::json!({ "build": { "submodule_repos": ["acme/lib"] } })), repo("acme/lib"));
         assert_eq!(apps_repo(&serde_json::json!({ "source": { "kind": "repo", "repo": "acme/api" } })), repo("acme/api"));
         assert!(apps_repo(&serde_json::json!({ "source": { "kind": "image", "image": "nginx" } })).is_empty());
         assert_eq!(link_target("repo"), Some(("code", "repo")));

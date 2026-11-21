@@ -19,6 +19,7 @@ pub mod build_cache;
 pub mod hooks;
 pub mod tags;
 pub mod sites;
+pub mod submodules;
 pub mod skew;
 pub mod site_rules;
 pub mod tunnel;
