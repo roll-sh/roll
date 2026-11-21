@@ -693,6 +693,7 @@ static TOOLS: &[Tool] = &[
     t("workspace_create_project", "Create a project", "A new workspace project to group resources.", "workspace", "POST", "/v1/workspace/projects", &[breq("name", Ty::Str, "1-48 of a-z, 0-9 and -"), b("description", Ty::Str, "At most 280 characters"), b("icon", Ty::Obj, ICON)]),
     t("workspace_update_project", "Update a project", "Rename a project, or change its description or icon.", "workspace", "PATCH", "/v1/workspace/projects/{id}", &[WS, b("name", Ty::Str, "New name"), b("description", Ty::Str, "New description"), bnull("icon", Ty::Obj, ICON)]),
     t("workspace_delete_project", "Delete a project", "Delete a workspace project. Its resources stay; only the grouping goes.", "workspace", "DELETE", "/v1/workspace/projects/{id}", &[WS]),
+    t("workspace_list_roles", "List member roles", "The roles a project member can have (viewer, developer, admin, owner), the rules each one grants, the products those rules cover, and which environments a developer reaches when none are named.", "workspace", "GET", "/v1/workspace/roles", &[]),
     t(
         "workspace_place_resource",
         "Place a resource",

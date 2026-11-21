@@ -410,6 +410,83 @@ fn files_schema() -> Value {
 const DESTRUCTIVE: [&str; 1] = ["close_change"];
 const OPEN_WORLD: [&str; 7] = ["request_ai_review", "create_agent_thread", "send_agent_message", "respond_agent_request", "claim_agent_work", "run_agent_automation", "publish_agent_thread"];
 
+/// The routes each tool calls, as `(tool, method, route)` in the router's pattern: a lookup it
+/// makes on the way (a repo's default branch, `owner/repo#N`, a machine's or automation's name) is
+/// listed under one of the tools that make it. `tests/coverage_map.rs` holds every `/v1/code` route
+/// the routers declare to a row here or a line in `no-tool.txt` saying why it has no tool.
+pub const ROUTES: &[(&str, &str, &str)] = &[
+    ("list_repos", "GET", "/v1/code/repos"),
+    ("search_code", "GET", "/v1/code/repos/{owner}/{repo}/search"),
+    ("read_file", "GET", "/v1/code/repos/{owner}/{repo}/blob/{rev}/{*path}"),
+    ("read_file", "GET", "/v1/code/repos/{owner}/{repo}"),
+    ("list_tree", "GET", "/v1/code/repos/{owner}/{repo}/tree/{rev}/{*path}"),
+    ("list_tree", "GET", "/v1/code/repos/{owner}/{repo}/tree/{rev}/"),
+    ("list_tree", "GET", "/v1/code/repos/{owner}/{repo}"),
+    ("log", "GET", "/v1/code/repos/{owner}/{repo}/log"),
+    ("blame", "GET", "/v1/code/repos/{owner}/{repo}/blame/{rev}/{*path}"),
+    ("blame", "GET", "/v1/code/repos/{owner}/{repo}"),
+    ("get_changeset", "GET", "/v1/code/repos/{owner}/{repo}/changesets/{id}"),
+    ("compare", "GET", "/v1/code/repos/{owner}/{repo}/compare/{spec}"),
+    ("create_change", "POST", "/v1/code/repos/{owner}/{repo}/changes"),
+    ("create_change", "GET", "/v1/code/repos/{owner}/{repo}/work/{number}"),
+    ("revise_change", "POST", "/v1/code/changes/{id}/revise"),
+    ("land", "POST", "/v1/code/changes/{id}/land"),
+    ("land", "POST", "/v1/code/repos/{owner}/{repo}/land"),
+    ("get_change", "GET", "/v1/code/changes/{id}"),
+    ("get_change", "GET", "/v1/code/changes/{id}/review-status"),
+    ("get_change", "GET", "/v1/code/changes/{id}/threads"),
+    ("get_change", "GET", "/v1/code/repos/{owner}/{repo}/changes/{number}"),
+    ("list_changes", "GET", "/v1/code/repos/{owner}/{repo}/changes"),
+    ("claim_work", "POST", "/v1/code/repos/{owner}/{repo}/work/claim"),
+    ("heartbeat_work", "POST", "/v1/code/work/{id}/heartbeat"),
+    ("heartbeat_work", "GET", "/v1/code/repos/{owner}/{repo}/work/{number}"),
+    ("complete_work", "POST", "/v1/code/work/{id}/complete"),
+    ("release_work", "POST", "/v1/code/work/{id}/release"),
+    ("list_work", "GET", "/v1/code/repos/{owner}/{repo}/work"),
+    ("create_work", "POST", "/v1/code/repos/{owner}/{repo}/work"),
+    ("comment", "POST", "/v1/code/threads/{id}/comments"),
+    ("comment", "POST", "/v1/code/changes/{id}/threads"),
+    ("review", "POST", "/v1/code/changes/{id}/reviews"),
+    ("queue_status", "GET", "/v1/code/repos/{owner}/{repo}/queue"),
+    ("enqueue_change", "POST", "/v1/code/changes/{id}/enqueue"),
+    ("dequeue_change", "DELETE", "/v1/code/changes/{id}/enqueue"),
+    ("set_change_lane", "PATCH", "/v1/code/changes/{id}/enqueue"),
+    ("update_change", "PATCH", "/v1/code/changes/{id}"),
+    ("close_change", "POST", "/v1/code/changes/{id}/close"),
+    ("report_check", "POST", "/v1/code/changes/{id}/checks"),
+    ("set_commit_status", "POST", "/v1/code/repos/{owner}/{repo}/statuses/{rev}"),
+    ("list_refs", "GET", "/v1/code/repos/{owner}/{repo}/refs"),
+    ("create_repo", "POST", "/v1/code/repos"),
+    ("request_ai_review", "POST", "/v1/code/changes/{id}/ai-review"),
+    ("get_change", "GET", "/v1/code/changes/{id}/review-requests"),
+    ("get_change", "GET", "/v1/code/changes/{id}/reviews"),
+    ("resolve_thread", "POST", "/v1/code/threads/{id}/resolve"),
+    ("reopen_thread", "POST", "/v1/code/threads/{id}/unresolve"),
+    ("apply_suggestion", "POST", "/v1/code/threads/{id}/apply"),
+    ("request_review", "POST", "/v1/code/changes/{id}/review-requests"),
+    ("get_commit_statuses", "GET", "/v1/code/repos/{owner}/{repo}/statuses/{rev}"),
+    ("get_work", "GET", "/v1/code/work/{id}"),
+    ("update_work", "PATCH", "/v1/code/work/{id}"),
+    ("release_agent_work", "DELETE", "/v1/code/agents/{owner}/threads/{thread}/work"),
+    ("list_agent_machines", "GET", "/v1/code/agents/{owner}/machines"),
+    ("list_agent_threads", "GET", "/v1/code/agents/{owner}/state"),
+    ("list_agent_threads", "GET", "/v1/code/agents/{owner}/machines"),
+    ("create_agent_thread", "POST", "/v1/code/agents/{owner}/machines/{machine}/commands"),
+    ("send_agent_message", "POST", "/v1/code/agents/{owner}/machines/{machine}/commands"),
+    ("respond_agent_request", "POST", "/v1/code/agents/{owner}/machines/{machine}/commands"),
+    ("interrupt_agent_thread", "POST", "/v1/code/agents/{owner}/machines/{machine}/commands"),
+    ("publish_agent_thread", "POST", "/v1/code/agents/{owner}/machines/{machine}/commands"),
+    ("create_agent_project", "POST", "/v1/code/agents/{owner}/machines/{machine}/projects"),
+    ("claim_agent_work", "POST", "/v1/code/agents/{owner}/threads/{thread}/work"),
+    ("list_agent_automations", "GET", "/v1/code/agents/{owner}/automations"),
+    ("save_agent_automation", "POST", "/v1/code/agents/{owner}/automations"),
+    ("save_agent_automation", "PUT", "/v1/code/agents/{owner}/automations/{id}"),
+    ("run_agent_automation", "POST", "/v1/code/agents/{owner}/automations/{id}/run"),
+    ("list_agent_automation_runs", "GET", "/v1/code/agents/{owner}/automations/runs"),
+    ("get_agent_automation_run", "GET", "/v1/code/agents/{owner}/automations/runs/{run}"),
+    ("cancel_agent_automation_run", "POST", "/v1/code/agents/{owner}/automations/runs/{run}/cancel"),
+];
+
 /// Every tool, with its JSON Schema.
 pub fn tools() -> Vec<Value> {
     let mut all = every_tool();
@@ -514,6 +591,14 @@ fn every_tool() -> Vec<Value> {
             false,
         ),
         tool(
+            "update_change",
+            "Update a change",
+            "Change a change's title, description, labels or work item, or mark a draft ready for review (ready: true). Only what's given changes. Taking a change out of the queue is dequeue_change's.",
+            json!({ "change": change.clone(), "title": s("New title"), "body": s("New description (markdown)"), "ready": boolean("true: a draft becomes ready for review"), "labels": json!({ "type": "array", "items": { "type": "string" }, "description": "The labels it should have (replaces them; at most 20, 50 characters each)" }), "work_item": s("The work item it does: \"wi_…\" or \"owner/repo#N\" of the change's repo") }),
+            &["change"],
+            false,
+        ),
+        tool(
             "land",
             "Land",
             "Land a change, or edits directly. Returns status landed, queued (merge queue), blocked (with blockers) or conflict (with paths).",
@@ -524,7 +609,7 @@ fn every_tool() -> Vec<Value> {
         tool(
             "get_change",
             "Get a change",
-            "A change with its blockers, checks, review status and inline threads, and any notices: `secret_missing` means it reads an environment variable some roll secrets environment doesn't set (secrets_health says which); set it with secrets_set before merging, unless it comes from elsewhere.",
+            "A change with its blockers, checks, review status, reviews (with what each reviewer wrote), inline threads and review requests, and any notices: `secret_missing` means it reads an environment variable some roll secrets environment doesn't set (secrets_health says which); set it with secrets_set before merging, unless it comes from elsewhere.",
             json!({ "change": change }),
             &["change"],
             true,
@@ -564,6 +649,15 @@ fn every_tool() -> Vec<Value> {
             &["repo", "title"],
             false,
         ),
+        tool("get_work", "Get a work item", "A work item: its state, labels, priority, who claimed it and until when, and the change it led to.", json!({ "work": work.clone() }), &["work"], true),
+        tool(
+            "update_work",
+            "Update a work item",
+            "Change a work item's title, body, labels or priority. Only what's given changes. Its state moves through claim_work, release_work and complete_work, which hold to who claimed it.",
+            json!({ "work": work.clone(), "title": s("New title"), "body": s("New body (markdown)"), "labels": json!({ "type": "array", "items": { "type": "string" }, "description": "The labels it should have (replaces them)" }), "priority": int("0 (P0, most urgent) to 3") }),
+            &["work"],
+            false,
+        ),
         tool(
             "comment",
             "Comment",
@@ -585,6 +679,31 @@ fn every_tool() -> Vec<Value> {
             &["change", "verdict"],
             false,
         ),
+        tool(
+            "resolve_thread",
+            "Resolve a review thread",
+            "Mark a review thread resolved, once what it asked for is done. Writers, or whoever started the thread.",
+            json!({ "thread": s("Thread id (th_…), from get_change's threads") }),
+            &["thread"],
+            false,
+        ),
+        tool("reopen_thread", "Reopen a review thread", "Mark a resolved review thread open again. Writers, or whoever started the thread.", json!({ "thread": s("Thread id (th_…)") }), &["thread"], false),
+        tool(
+            "apply_suggestion",
+            "Apply a suggested edit",
+            "Apply a review comment's ```suggestion block to the change as a new revision, and resolve its thread. The thread's latest suggestion unless comment names another. Returns the change and the thread.",
+            json!({ "thread": s("Thread id (th_…)"), "comment": s("The comment (cm_…) whose suggestion to apply; default the thread's latest with one") }),
+            &["thread"],
+            false,
+        ),
+        tool(
+            "request_review",
+            "Request a review",
+            "Ask a person (@name), an agent (agent:name), a review app (app:name) or roll's own reviewer (roll) to review a change. With required, the change can't land until they've reviewed its current head (any verdict; a new revision asks again). Returns the change's review requests.",
+            json!({ "change": change.clone(), "reviewer": s("@name, agent:name, app:name or roll"), "required": boolean("They must review the current head before it lands (default false)") }),
+            &["change", "reviewer"],
+            false,
+        ),
         tool("queue_status", "Merge queue", "The merge queue: the batch being tested and who's waiting.", json!({ "repo": repo }), &["repo"], true),
         tool(
             "enqueue_change",
@@ -594,7 +713,15 @@ fn every_tool() -> Vec<Value> {
             &["change"],
             false,
         ),
-        tool("dequeue_change", "Take a change out of the queue", "Take a queued change out of the merge queue: it's open again.", json!({ "change": change }), &["change"], false),
+        tool("dequeue_change", "Take a change out of the queue", "Take a queued change out of the merge queue: it's open again.", json!({ "change": change.clone() }), &["change"], false),
+        tool(
+            "set_change_lane",
+            "Move a queued change's lane",
+            "Move a queued change to the other lane (urgent goes before normal), keeping its place in time. A change that isn't queued is a 409: enqueue_change picks a lane when queuing.",
+            json!({ "change": change.clone(), "lane": json!({ "type": "string", "enum": ["urgent", "normal"] }) }),
+            &["change", "lane"],
+            false,
+        ),
         tool("close_change", "Close a change", "Close a change without landing it. It can't be reopened: make a new change to try again.", json!({ "change": change }), &["change"], false),
         tool(
             "report_check",
@@ -625,6 +752,14 @@ fn every_tool() -> Vec<Value> {
             }),
             &["repo", "rev", "state"],
             false,
+        ),
+        tool(
+            "get_commit_statuses",
+            "Read commit statuses",
+            "The commit statuses on a revision, as GitHub's combined status reads: the combined state (failure, pending or success; an error counts as failure) and each context's latest.",
+            json!({ "repo": repo.clone(), "rev": s("A git commit, a changeset or a branch") }),
+            &["repo", "rev"],
+            true,
         ),
         tool("list_refs", "List branches and tags", "A repository's refs: each branch's and tag's name, the changeset it points at and its git commit.", json!({ "repo": repo }), &["repo"], true),
         tool(
@@ -736,6 +871,14 @@ fn every_tool() -> Vec<Value> {
             "Give an agent work",
             "Have an agent thread take a work item: a given one (work), or the next open one claimed from repo (labels narrow it). Returns work: null when there's nothing to claim.",
             json!({ "owner": owner, "thread": s("Thread (thr_…)"), "work": work, "repo": repo, "labels": json!({ "type": "array", "items": { "type": "string" } }), "lease_s": int("Lease length in seconds (default 900)") }),
+            &["owner", "thread"],
+            false,
+        ),
+        tool(
+            "release_agent_work",
+            "Take work off an agent",
+            "An agent thread lets go of the work item it holds: the thread no longer works on it, and the item's claim runs out on its own lease.",
+            json!({ "owner": owner.clone(), "thread": s("Thread (thr_…)") }),
             &["owner", "thread"],
             false,
         ),
@@ -1127,10 +1270,14 @@ async fn run(c: &Call<'_>, name: &str, args: &Value) -> std::result::Result<Outc
             }
             let status = c.get(&format!("/v1/code/changes/{}/review-status", seg(&id))).await;
             let threads = c.get(&format!("/v1/code/changes/{}/threads", seg(&id))).await;
+            let requests = c.get(&format!("/v1/code/changes/{}/review-requests", seg(&id))).await;
+            let reviews = c.get(&format!("/v1/code/changes/{}/reviews", seg(&id))).await;
             ok(json!({
                 "change": ch.body,
                 "review_status": if status.ok() { status.body } else { Value::Null },
                 "threads": if threads.ok() { threads.body } else { json!([]) },
+                "review_requests": if requests.ok() { requests.body } else { json!([]) },
+                "reviews": if reviews.ok() { reviews.body } else { json!([]) },
             }))
         }
         "list_changes" => {
@@ -1175,6 +1322,52 @@ async fn run(c: &Call<'_>, name: &str, args: &Value) -> std::result::Result<Outc
         "review" => {
             let id = c.change_id(args).await?;
             pass(c.post(&format!("/v1/code/changes/{}/reviews", seg(&id)), body_of(args, &["change"])).await)
+        }
+        "update_change" => {
+            let id = c.change_id(args).await?;
+            let mut body = body_of(args, &["change", "ready"]);
+            // Only ready: marking a change draft would take a queued one out of the queue, which
+            // needs delete (dequeue_change), not this tool's write.
+            match args.get("ready").and_then(Value::as_bool) {
+                Some(true) => body["draft"] = json!(false),
+                Some(false) => return Err(fail("ready: false isn't something this tool does: dequeue_change takes a change out of the queue")),
+                None => {}
+            }
+            // The route takes the item's id; the tool also takes "owner/repo#N".
+            if let Some(w) = opt(args, "work_item").filter(|w| w.contains('#')) {
+                body["work_item"] = json!(c.by_number(&w, "work").await?);
+            }
+            pass(c.api(Method::PATCH, &format!("/v1/code/changes/{}", seg(&id)), Some(body)).await)
+        }
+        "set_change_lane" => {
+            let id = c.change_id(args).await?;
+            pass(c.api(Method::PATCH, &format!("/v1/code/changes/{}/enqueue", seg(&id)), Some(body_of(args, &["change"]))).await)
+        }
+        "resolve_thread" | "reopen_thread" => {
+            let th = str_arg(args, "thread").ok_or_else(|| fail("thread is required (th_…)"))?;
+            let action = if name == "resolve_thread" { "resolve" } else { "unresolve" };
+            pass(c.post(&format!("/v1/code/threads/{}/{action}", seg(th)), json!({})).await)
+        }
+        "apply_suggestion" => {
+            let th = str_arg(args, "thread").ok_or_else(|| fail("thread is required (th_…)"))?;
+            pass(c.post(&format!("/v1/code/threads/{}/apply", seg(th)), body_of(args, &["thread"])).await)
+        }
+        "request_review" => {
+            let id = c.change_id(args).await?;
+            pass(c.post(&format!("/v1/code/changes/{}/review-requests", seg(&id)), body_of(args, &["change"])).await)
+        }
+        "get_commit_statuses" => {
+            let base = c.repo(args)?;
+            let rev = str_arg(args, "rev").ok_or_else(|| fail("rev is required"))?;
+            pass(c.get(&format!("{base}/statuses/{}", seg(rev))).await)
+        }
+        "get_work" => {
+            let id = c.work_id(args).await?;
+            pass(c.get(&format!("/v1/code/work/{}", seg(&id))).await)
+        }
+        "update_work" => {
+            let id = c.work_id(args).await?;
+            pass(c.api(Method::PATCH, &format!("/v1/code/work/{}", seg(&id)), Some(body_of(args, &["work"]))).await)
         }
         "queue_status" => {
             let base = c.repo(args)?;
@@ -1261,6 +1454,12 @@ async fn run(c: &Call<'_>, name: &str, args: &Value) -> std::result::Result<Outc
             } else {
                 r.error()
             }
+        }
+        "release_agent_work" => {
+            let owner = c.owner(args)?;
+            let thread = str_arg(args, "thread").ok_or_else(|| fail("thread is required (thr_…)"))?;
+            let r = c.delete(&format!("/v1/code/agents/{}/threads/{}/work", seg(owner), seg(thread))).await;
+            if r.ok() { ok(json!({ "released": true })) } else { r.error() }
         }
         "list_agent_automations" => {
             let owner = c.owner(args)?;

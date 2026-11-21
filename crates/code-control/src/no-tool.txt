@@ -1,0 +1,138 @@
+# Every /v1/code route the routers declare that has no MCP tool, and why. `no tool yet` marks a gap;
+# the rest are a person's, an admin's, a credential, an outside service's delivery, a stream or
+# covered by another tool. A route with neither a tool (`ROUTES` in mcp.rs) nor a line here fails
+# tests/coverage_map.rs::every_route_has_an_mcp_tool_or_a_reason, method by method.
+GET /v1/code                                                                    server info and who the request is: the dashboard's sign-in check
+DELETE /v1/code/agents/connect                                                  the daemon's relay link (a machine token's), not a caller's
+GET /v1/code/agents/connect                                                     the daemon's relay link (a machine token's), not a caller's
+POST /v1/code/agents/login                                                      device login: `roll agent up` asks, a person approves in their browser
+POST /v1/code/agents/login/poll                                                 device login: `roll agent up` asks, a person approves in their browser
+GET /v1/code/agents/shares/{id}                                                 a share link's own page, read with the link (a credential)
+GET /v1/code/agents/{owner}/automations/catalog                                 no tool yet: the triggers and steps an automation's spec can use
+GET /v1/code/agents/{owner}/automations/notices                                 the dashboard's banners about automations
+POST /v1/code/agents/{owner}/automations/runs/{run}/retry                       no tool yet: run a failed automation run again
+POST /v1/code/agents/{owner}/automations/test                                   no tool yet: try an automation's spec without saving it
+DELETE /v1/code/agents/{owner}/automations/{id}                                 no tool yet: delete an automation
+GET /v1/code/agents/{owner}/automations/{id}                                    list_agent_automations answers each automation in full
+POST /v1/code/agents/{owner}/automations/{id}/disable                           no tool yet: turn an automation off
+POST /v1/code/agents/{owner}/automations/{id}/enable                            no tool yet: turn an automation on
+GET /v1/code/agents/{owner}/automations/{id}/runs                               list_agent_automation_runs takes the automation
+DELETE /v1/code/agents/{owner}/automations/{id}/secrets/{name}                  a credential: an automation's secrets
+PUT /v1/code/agents/{owner}/automations/{id}/secrets/{name}                     a credential: an automation's secrets
+POST /v1/code/agents/{owner}/automations/{id}/webhook                           an outside caller's trigger, signed with the automation's secret
+POST /v1/code/agents/{owner}/automations/{id}/webhook/secret                    a credential: the trigger's signing secret is answered once
+GET /v1/code/agents/{owner}/canvas                                              the dashboard's canvas layout
+PUT /v1/code/agents/{owner}/canvas                                              the dashboard's canvas layout
+GET /v1/code/agents/{owner}/endpoints                                           a person's: which model endpoints the owner's machines use (keys go from the browser to each daemon, never here)
+DELETE /v1/code/agents/{owner}/endpoints/{id}                                   a person's: which model endpoints the owner's machines use (keys go from the browser to each daemon, never here)
+PUT /v1/code/agents/{owner}/endpoints/{id}                                      a person's: which model endpoints the owner's machines use (keys go from the browser to each daemon, never here)
+GET /v1/code/agents/{owner}/events                                              a stream: MCP answers results (list_agent_threads)
+DELETE /v1/code/agents/{owner}/gateway                                          a person's: the gateway runs on one person's machine with their upstream keys
+GET /v1/code/agents/{owner}/gateway                                             a person's: the gateway runs on one person's machine with their upstream keys
+PUT /v1/code/agents/{owner}/gateway                                             a person's: the gateway runs on one person's machine with their upstream keys
+POST /v1/code/agents/{owner}/gateway/members                                    a credential: a member's client key is sealed to it
+DELETE /v1/code/agents/{owner}/gateway/members/{machine}                        a person's: the gateway's members
+GET /v1/code/agents/{owner}/integrations                                        a person's: Slack and Discord installs
+POST /v1/code/agents/{owner}/integrations/{platform}/install                    a person's: installing is OAuth in a browser
+DELETE /v1/code/agents/{owner}/integrations/{platform}/{id}                     a person's: Slack and Discord installs
+PATCH /v1/code/agents/{owner}/integrations/{platform}/{id}                      a person's: Slack and Discord installs
+DELETE /v1/code/agents/{owner}/linear                                           a person's: the Linear connection holds the owner's key
+GET /v1/code/agents/{owner}/linear                                              a person's: the Linear connection holds the owner's key
+PUT /v1/code/agents/{owner}/linear/key                                          a credential: the owner's Linear key
+POST /v1/code/agents/{owner}/linear/oauth                                       a person's: connecting Linear is OAuth in a browser
+PUT /v1/code/agents/{owner}/linear/settings                                     a person's: the Linear connection
+GET /v1/code/agents/{owner}/linear/teams                                        a person's: the Linear connection's picker
+PUT /v1/code/agents/{owner}/linear/webhook/secret                               a credential: Linear's webhook secret
+POST /v1/code/agents/{owner}/login/approve                                      a person's: device login approves a machine in their browser
+POST /v1/code/agents/{owner}/login/deny                                         a person's: device login approves a machine in their browser
+GET /v1/code/agents/{owner}/login/{user_code}                                   a person's: device login approves a machine in their browser
+GET /v1/code/agents/{owner}/lookup/{source}/{kind}                              the dashboard's pickers for an integration's things
+POST /v1/code/agents/{owner}/lookup/{source}/{kind}                             the dashboard's pickers for an integration's things
+POST /v1/code/agents/{owner}/machines                                           a machine joins with `roll agent up` (device login)
+DELETE /v1/code/agents/{owner}/machines/{machine}                               a person's: removing a machine ends its link
+PATCH /v1/code/agents/{owner}/machines/{machine}                                a person's: renaming a machine
+GET /v1/code/agents/{owner}/sandboxes                                           no tool yet: an owner's sandboxes and whether each runs
+POST /v1/code/agents/{owner}/sandboxes                                          a person's: a sandbox is a machine billed while it runs
+GET /v1/code/agents/{owner}/sandboxes/usage                                     no tool yet: what an owner's sandboxes have used
+DELETE /v1/code/agents/{owner}/sandboxes/{id}                                   a person's: a sandbox's disk goes with it
+POST /v1/code/agents/{owner}/sandboxes/{id}/start                               a person's: a sandbox is a machine billed while it runs
+POST /v1/code/agents/{owner}/sandboxes/{id}/stop                                no tool yet: stop a sandbox (ends its spend)
+GET /v1/code/agents/{owner}/settings                                            a person's: the owner's agent settings
+PUT /v1/code/agents/{owner}/settings                                            a person's: the owner's agent settings
+GET /v1/code/agents/{owner}/shares                                              a credential: a share link reads the thread without signing in
+DELETE /v1/code/agents/{owner}/shares/{id}                                      a person's: share links are made by people
+POST /v1/code/agents/{owner}/threads/{thread}/shares                            a credential: a share link reads the thread without signing in
+GET /v1/code/changes/{id}/ai-jobs                                               no tool yet: a change's AI reviews, oldest first (request_ai_review answers its own job)
+POST /v1/code/changes/{id}/approve-run                                          an admin's: running code from outside the repo with its data is a person's decision
+DELETE /v1/code/changes/{id}/preview                                            no tool yet: stop a change's preview
+POST /v1/code/changes/{id}/preview                                              no tool yet: start a change's preview (roll's previews_wait waits on one)
+POST /v1/code/changes/{id}/reviews/{rid}/dismiss                                a person's: dismissing someone else's review
+GET /v1/code/changes/{id}/unstored/{fingerprint}                                a person's: where a credential found in a change would be stored in roll secrets
+POST /v1/code/changes/{id}/unstored/{fingerprint}/store                         a person's: storing a found credential reads its value
+POST /v1/code/chat/discord/interactions                                         Discord's own deliveries, signed by Discord
+GET /v1/code/chat/discord/oauth                                                 a person's: installing is OAuth in a browser
+POST /v1/code/chat/slack/commands                                               Slack's own deliveries, signed by Slack
+POST /v1/code/chat/slack/events                                                 Slack's own deliveries, signed by Slack
+POST /v1/code/chat/slack/interactions                                           Slack's own deliveries, signed by Slack
+GET /v1/code/chat/slack/oauth                                                   a person's: installing is OAuth in a browser
+GET /v1/code/github                                                             an admin's: GitHub installations span tenants
+GET /v1/code/github/installations                                               an admin's: GitHub installations span tenants
+GET /v1/code/github/setup                                                       GitHub's redirect after an App install, in a browser
+POST /v1/code/github/webhook                                                    GitHub's own deliveries, signed by GitHub
+GET /v1/code/health                                                             the operator's health probe
+GET /v1/code/linear/oauth/callback                                              a person's: connecting Linear is OAuth in a browser
+POST /v1/code/linear/webhook                                                    Linear's own deliveries, signed by Linear
+POST /v1/code/linear/webhook/{hook}                                             Linear's own deliveries, signed by Linear
+DELETE /v1/code/mcp                                                             the MCP server itself
+GET /v1/code/mcp                                                                the MCP server itself
+POST /v1/code/mcp                                                               the MCP server itself
+GET /v1/code/names/{name}                                                       the dashboard's check while a name is typed: create_repo answers a taken name itself
+GET /v1/code/names/{owner}/{repo}                                               the dashboard's check while a name is typed: create_repo answers a taken name itself
+GET /v1/code/owners                                                             list_repos names each repository's owner
+POST /v1/code/owners                                                            an admin's: making an owner is account setup
+GET /v1/code/owners/{owner}                                                     list_repos names each repository's owner; an owner's settings are a person's
+PATCH /v1/code/owners/{owner}                                                   an admin's: an owner's settings
+GET /v1/code/owners/{owner}/billing                                             a person's: an owner's billing
+PUT /v1/code/owners/{owner}/billing                                             a person's: an owner's billing
+GET /v1/code/owners/{owner}/review-apps                                         an admin's: review apps hold an rla_ token
+POST /v1/code/owners/{owner}/review-apps                                        a credential: a new review app's token is answered once
+DELETE /v1/code/owners/{owner}/review-provider                                  an admin's: the owner's own model key
+GET /v1/code/owners/{owner}/review-provider                                     an admin's: the owner's own model key (sealed, never returned)
+PUT /v1/code/owners/{owner}/review-provider                                     a credential: the owner's own model key
+GET /v1/code/owners/{owner}/tokens                                              a person's: an owner's own roll code tokens (roll's access tokens have access_* tools)
+POST /v1/code/owners/{owner}/tokens                                             a credential: the token is answered once
+DELETE /v1/code/owners/{owner}/tokens/{id}                                      a person's: revoking a token that may be the caller's
+GET /v1/code/owners/{owner}/usage                                               no tool yet: an owner's AI review spend this month
+GET /v1/code/pricing                                                            no tool yet: what roll's AI review costs per mode
+DELETE /v1/code/repos/{owner}/{repo}                                            a person's: a repository and its history go for good (GitHub's MCP server has no such tool either)
+PATCH /v1/code/repos/{owner}/{repo}                                             an admin's: visibility, the default branch and landing settings
+GET /v1/code/repos/{owner}/{repo}/audit                                         no tool yet: queue bypasses, pauses and approved runs
+POST /v1/code/repos/{owner}/{repo}/changesets                                   create_change and revise_change write files as a change; a bare changeset is git's (a push)
+GET /v1/code/repos/{owner}/{repo}/events                                        a stream: MCP answers results (get_change, queue_status; webhooks for the rest)
+GET /v1/code/repos/{owner}/{repo}/leaks                                         an admin's: where secrets sit in the default branch
+GET /v1/code/repos/{owner}/{repo}/learnings                                     no tool yet: what roll's reviewer keeps in mind for the repo
+POST /v1/code/repos/{owner}/{repo}/learnings                                    a person's: learnings steer roll's reviewer, whose approval can count toward landing
+DELETE /v1/code/repos/{owner}/{repo}/learnings/{id}                             a person's: learnings steer roll's reviewer, whose approval can count toward landing
+GET /v1/code/repos/{owner}/{repo}/paths/{rev}                                   the dashboard's file finder: list_tree and search_code cover it
+POST /v1/code/repos/{owner}/{repo}/queue/pause                                  an admin's: pausing the queue stops every landing
+POST /v1/code/repos/{owner}/{repo}/queue/resume                                 an admin's: the queue's pause
+GET /v1/code/repos/{owner}/{repo}/readme/{rev}                                  read_file reads it
+GET /v1/code/repos/{owner}/{repo}/review-settings                               no tool yet: what a change needs to land (approvals, code owners)
+PATCH /v1/code/repos/{owner}/{repo}/review-settings                             an admin's: what a change needs to land
+GET /v1/code/repos/{owner}/{repo}/reviewer                                      no tool yet: roll's reviewer for the repo (its mode, model and index)
+PATCH /v1/code/repos/{owner}/{repo}/reviewer                                    an admin's: the repo's reviewer settings
+GET /v1/code/repos/{owner}/{repo}/webhooks                                      an admin's: a webhook's URL and signing secret
+POST /v1/code/repos/{owner}/{repo}/webhooks                                     an admin's: a webhook's URL and signing secret
+DELETE /v1/code/repos/{owner}/{repo}/webhooks/{id}                              an admin's: a webhook's URL and signing secret
+GET /v1/code/repos/{owner}/{repo}/webhooks/{id}                                 an admin's: a webhook's URL and signing secret
+PATCH /v1/code/repos/{owner}/{repo}/webhooks/{id}                               an admin's: a webhook's URL and signing secret
+GET /v1/code/repos/{owner}/{repo}/webhooks/{id}/deliveries                      an admin's: a webhook's URL and signing secret
+POST /v1/code/repos/{owner}/{repo}/webhooks/{id}/deliveries/{did}/redeliver     an admin's: a webhook's URL and signing secret
+POST /v1/code/repos/{owner}/{repo}/webhooks/{id}/ping                           an admin's: a webhook's URL and signing secret
+DELETE /v1/code/review-apps/{id}                                                an admin's: review apps hold an rla_ token
+GET /v1/code/review-apps/{id}                                                   an admin's: review apps hold an rla_ token
+PATCH /v1/code/review-apps/{id}                                                 an admin's: review apps hold an rla_ token
+GET /v1/code/review-apps/{id}/deliveries                                        an admin's: review apps hold an rla_ token
+POST /v1/code/review-apps/{id}/deliveries/{did}/redeliver                       an admin's: review apps hold an rla_ token
+POST /v1/code/review-apps/{id}/rotate                                           a credential: the new token is answered once
+GET /v1/code/threads/{id}                                                       get_change answers a change's threads in full
