@@ -277,6 +277,10 @@ type Run = {
   /** The app speaks HTTP/2 without TLS (a gRPC server): the proxy and health checks use h2c,
    *  `te: trailers` passes, trailers come back. A WebSocket upgrade stays HTTP/1.1. Default false. */
   h2c?: boolean;
+  /** With h2c (a web service): its health is gRPC's, a unary `grpc.health.v1.Health/Check` for
+   *  this service ("" the whole server; at most 100 characters) that must answer SERVING, at
+   *  start and every health_every_s, in place of health_path (Cloud Run's gRPC probes). */
+  health_grpc?: string;
   /** A worker only: its instances follow `group`'s lag on `stream` (a roll stream on the
    *  service's project; another's is never read), one per `per_instance` (default 1000) behind,
    *  within min_instances–max_instances; read every 10 s on the owner, scaled in one at a time. */

@@ -127,6 +127,11 @@
           "type": "boolean",
           "description": "The app speaks HTTP/2 without TLS (gRPC)."
         },
+        "health_grpc": {
+          "type": "string",
+          "maxLength": 100,
+          "description": "With h2c: its health is a unary grpc.health.v1.Health/Check for this service (empty: the whole server) answering SERVING, in place of health_path."
+        },
         "scale": {
           "type": "object",
           "description": "Scale a worker on a stream's lag: stream, group, per_instance."

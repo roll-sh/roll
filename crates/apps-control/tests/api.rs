@@ -4376,11 +4376,19 @@ async fn a_deployment_without_traffic_answers_on_its_own_url_until_put_live() {
 }
 
 /// An h2c app (a gRPC server) is spoken HTTP/2 to, with `te: trailers`, and its trailers reach
-/// the client; an HTTP/1 app still gets HTTP/1.1.
+/// the client; an HTTP/1 app still gets HTTP/1.1. With `health_grpc` its health is gRPC's: a
+/// server whose grpc.health.v1 check answers SERVING goes live, one answering NOT_SERVING doesn't.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn an_h2c_app_gets_http2_and_its_trailers_pass() {
     let w = world().await;
-    let (svc, _) = image_service(&w, "grpc", json!({"port": 80, "h2c": true})).await;
+    let (svc, d) = image_service(&w, "grpc", json!({"port": 80, "h2c": true, "health_grpc": ""})).await;
+    assert_eq!(d["status"], "active", "{d}");
+    let sick = json!({ "project": w.project, "name": "sick", "source": {"kind": "image", "image": "nginx:1.27"}, "run": {"port": 80, "h2c": true, "health_grpc": "acme.Orders", "health_timeout_s": 2}, "variables": {"FAKE_UNHEALTHY": "1"} });
+    let (st, s) = call(&w.api, "POST", "/v1/apps/services", Some(sick)).await;
+    assert_eq!(st, StatusCode::CREATED, "{s}");
+    let d = settled(&w, s["id"].as_str().unwrap(), "production", s["environments"][0]["latest"]["id"].as_str().unwrap()).await;
+    assert_eq!(d["status"], "failed", "NOT_SERVING never goes live: {d}");
+    assert_eq!(call(&w.api, "PATCH", &format!("/v1/apps/services/{}", svc["id"].as_str().unwrap()), Some(json!({"run": {"h2c": false}}))).await.0, StatusCode::BAD_REQUEST, "gRPC's health needs h2c");
     let (_, env) = call(&w.api, "GET", &format!("/v1/apps/services/{}/environments/production", svc["id"].as_str().unwrap()), None).await;
     let h = host(&env["url"]);
     let req = Request::builder().uri("/").header("host", &h).header("te", "trailers").body(Body::empty()).unwrap();

@@ -111,6 +111,7 @@ mod tests {
             cpu: 1.0,
             memory_mb: 1,
             health_path: Some("/".into()),
+            health_grpc: Some(String::new()),
             health_timeout_s: 1,
             health_every_s: Some(2),
             health_failures: Some(1),

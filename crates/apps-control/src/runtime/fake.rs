@@ -302,6 +302,17 @@ async fn serve(spec: InstanceSpec, listener: tokio::net::TcpListener, log: LogSi
             if req.uri().path() == "/page" {
                 return ([(axum::http::header::CONTENT_TYPE, "text/html")], format!("<html><head><title>{dep}</title></head><body><h1>{dep}</h1></body></html>")).into_response();
             }
+            // gRPC's health service (grpc.health.v1): SERVING, or NOT_SERVING while it's unhealthy.
+            if req.uri().path() == "/grpc.health.v1.Health/Check" {
+                let status = if unhealthy || sick.lock().contains(&name) { 2u8 } else { 1 };
+                let mut t = axum::http::HeaderMap::new();
+                t.insert("grpc-status", axum::http::HeaderValue::from_static("0"));
+                let frame = bytes::Bytes::from(vec![0, 0, 0, 0, 2, 0x08, status]);
+                let frames = futures::stream::iter([Ok::<_, std::convert::Infallible>(hyper::body::Frame::data(frame)), Ok(hyper::body::Frame::trailers(t))]);
+                let mut r = axum::response::Response::new(axum::body::Body::new(http_body_util::StreamBody::new(frames)));
+                r.headers_mut().insert(axum::http::header::CONTENT_TYPE, axum::http::HeaderValue::from_static("application/grpc"));
+                return r;
+            }
             // As a gRPC server answers: data, then its status in a trailer.
             if req.uri().path() == "/trailers" {
                 let mut t = axum::http::HeaderMap::new();
