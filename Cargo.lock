@@ -8526,6 +8526,7 @@ dependencies = [
  "crc32fast",
  "flate2",
  "foldhash 0.2.0",
+ "futures",
  "hkdf",
  "indexmap",
  "itoa",
