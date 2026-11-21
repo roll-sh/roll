@@ -23,8 +23,9 @@ use clap::Parser;
 use search_es::Dialect;
 use std::time::Duration;
 
+/// `Counting` keeps each Painless execution's memory account, as in rolld.
 #[global_allocator]
-static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+static GLOBAL: search_painless::Counting<mimalloc::MiMalloc> = search_painless::Counting(mimalloc::MiMalloc);
 use search_server::{ClusterSpec, ListenOptions, MemoryStores, Node, NodeConfig, StaticCatalog};
 use std::sync::Arc;
 

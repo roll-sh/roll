@@ -9,6 +9,7 @@ publish.workspace = true
 [dependencies]
 search-codec.workspace = true
 search-es.workspace = true
+search-painless.workspace = true
 search-index.workspace = true
 search-store.workspace = true
 anyhow.workspace = true

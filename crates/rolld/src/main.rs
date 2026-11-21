@@ -7,8 +7,10 @@ use std::path::PathBuf;
 use tracing::info;
 
 /// mimalloc hands freed memory back to the OS; the system allocator on macOS keeps it.
+/// `Counting` keeps each Painless execution's memory account (an add per call on a
+/// thread-local counter).
 #[global_allocator]
-static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+static GLOBAL: search_painless::Counting<mimalloc::MiMalloc> = search_painless::Counting(mimalloc::MiMalloc);
 
 /// `mi_option_purge_delay` (libmimalloc-sys doesn't export the constant).
 const MI_OPTION_PURGE_DELAY: libmimalloc_sys::mi_option_t = 15;

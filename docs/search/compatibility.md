@@ -1571,6 +1571,25 @@ the rest are skipped by the tests' own prerequisites.
     (roll's own).
   - **KQL, PromQL, `query_string` and `simple_query_string`:** 300 levels (roll's own;
     Elasticsearch and OpenSearch fail with a `StackOverflowError` somewhere deeper).
+- **Painless memory per execution.** One Painless execution may hold at most the node's
+  `--search-script-memory-mb` (`ROLL_SEARCH_SCRIPT_MEMORY_MB`, 64 MiB on roll's hosted
+  nodes; 0 turns it off). It's an operator setting, and no cluster or index setting can raise
+  it. Elasticsearch 9.5.5 has no limit by default: a script that keeps copies of a large
+  string (each under the object size cap) runs the JVM out of heap and the node exits. Its
+  opt-in guard, `script.painless.max_allocation_bytes.context.<context>.limit`, counts every
+  allocation the script's bytecode makes and never gives any back. roll counts what the
+  execution holds: everything allocated while it runs, library code and `def` conversions
+  included, minus what it frees. So a script can churn through temporaries far beyond the
+  limit, as long as it doesn't keep them. Past the limit roll answers like that guard: a
+  `script_exception` caused by an uncatchable `painless_error`, `script allocation limit
+  exceeded: allocation of [N] bytes brings the running total to [T] bytes, over the limit of
+  [L] bytes`, without a script portion. Both guards apply in every context (`_execute`,
+  ingest, `_update`, by-query, searches, watches), and each execution has its own account.
+  Search and aggregation scripts that run once per document also charge what their executions
+  hold, at each one's peak and including what they keep between documents (`params`, a
+  scripted metric's state), to the `request` breaker under `<script>`. Past its limit they fail
+  with a `circuit_breaking_exception`, as the regex breaker does. Elasticsearch doesn't charge
+  scripts to any breaker.
 - An Elasticsearch-flavor cluster holds at most 1,000 open points in time (roll's own;
   Elasticsearch has no limit). The 1,001st fails as OpenSearch 3.9 refuses one past
   `search.max_open_pit_context` (a 429 `rejected_execution_exception`), which

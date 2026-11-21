@@ -3337,7 +3337,7 @@ fn col_n_copies(_: &mut Vm, a: &mut [Value]) -> VR {
         return Err(iae(format!("List length = {n}")).with_frames(&["java.base/java.util.Collections.nCopies(Collections.java:5506)"]));
     }
     // Java's copies list is a view of one element; this one holds every copy
-    crate::guard::check_elements(n as usize)?;
+    crate::guard::check_new_elements(n as usize)?;
     Ok(immutable_list(vec![a[1].clone(); n as usize], cls::IMMUTABLE_LIST))
 }
 fn col_replace_all(_: &mut Vm, a: &mut [Value]) -> VR {

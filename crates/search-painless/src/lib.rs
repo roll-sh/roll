@@ -54,7 +54,8 @@ pub mod xcontent;
 pub use contexts::Context;
 pub use engine::{compile_painless, Compiled, Engine, Instance, Lang, RegexEnabled, Script, Settings, Stats, Vars};
 pub use error::{Position, ScriptError};
-pub use host::{DocKind, DocValues, Host, HostError, NoHost, TermStats, VectorElement, VectorView};
+pub use guard::{default_max_execution_bytes, set_default_max_execution_bytes, Counting};
+pub use host::{DocKind, DocValues, Host, HostError, MemoryRefused, NoHost, TermStats, VectorElement, VectorView};
 pub use value::Value;
 #[doc(hidden)]
 pub use lookup::dump as registry_dump;

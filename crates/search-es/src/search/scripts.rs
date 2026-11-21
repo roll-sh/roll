@@ -63,7 +63,33 @@ pub struct DocHost {
     /// script fields; other scripts read the stored source, without them, as Elasticsearch's do).
     pub source_vectors: bool,
     vector_buf: Vec<f32>,
+    /// The search's `request` breaker and what this host's executions hold on it
+    /// ([`Host::script_memory`]).
+    memory: Option<(search_aggs::memory::MemTracker, i64)>,
 }
+
+/// What a search's scripts need from the request, carried by its `SearchControl` (`ext`) to
+/// every thread that runs its segments.
+pub struct ScriptExt {
+    /// The search's runtime fields, which `doc[...]` reads.
+    pub runtime: Option<Arc<super::runtime::RuntimeScope>>,
+    /// The breaker the scripts' memory is charged to.
+    pub request: Option<Arc<search_aggs::memory::MemoryBudget>>,
+}
+
+impl ScriptExt {
+    pub fn of_control(ctl: Option<&search_index::search::SearchControl>) -> Option<Arc<ScriptExt>> {
+        ctl?.ext.clone()?.downcast::<ScriptExt>().ok()
+    }
+
+    /// The control's `ext`.
+    pub fn into_ext(self) -> Arc<dyn std::any::Any + Send + Sync> {
+        Arc::new(self)
+    }
+}
+
+/// The label scripts' memory is charged under on the `request` breaker.
+const SCRIPT_MEMORY: &str = "<script>";
 
 /// How [`Host::with_vector`] reads its field in this segment.
 enum VectorSlot {
@@ -108,8 +134,10 @@ const RESOLVED_MAX: usize = 8;
 impl DocHost {
     pub fn new(table: Arc<FieldTable>, seg: SegmentContext, shard: i32, index: String) -> DocHost {
         let ctl = search_index::search::ambient_control();
-        let runtime = super::runtime::RuntimeScope::of_control(ctl.as_ref());
-        DocHost { table, seg, doc: 0, score: 0.0, shard, index, id_fielddata: crate::opensearch::active(), buf: Vec::new(), resolved: Vec::new(), slots: Vec::new(), cols: Vec::new(), block_start: 0, cancellable: search_scripts_poll(), ctl, term_stats: None, runtime, chain: Vec::new(), rt_leaves: Vec::new(), vector: None, vector_buf: Vec::new(), source_vectors: false }
+        let ext = ScriptExt::of_control(ctl.as_ref());
+        let runtime = ext.as_ref().and_then(|e| e.runtime.clone());
+        let memory = ext.and_then(|e| e.request.clone()).map(|b| (search_aggs::memory::MemTracker::with_label(Some(b), SCRIPT_MEMORY), 0));
+        DocHost { table, seg, doc: 0, score: 0.0, shard, index, id_fielddata: crate::opensearch::active(), buf: Vec::new(), resolved: Vec::new(), slots: Vec::new(), cols: Vec::new(), block_start: 0, cancellable: search_scripts_poll(), ctl, term_stats: None, runtime, chain: Vec::new(), rt_leaves: Vec::new(), vector: None, vector_buf: Vec::new(), source_vectors: false, memory }
     }
 
     /// `doc[field]` of a runtime field (`None`: `field` is no runtime field of the search on
@@ -507,6 +535,17 @@ impl Host for CancelHost {
 impl Host for DocHost {
     fn score(&mut self) -> f64 {
         self.score
+    }
+
+    /// Charges what this host's executions hold to the search's `request` breaker (the peak
+    /// stays reserved until the host goes, like an aggregation's).
+    fn script_memory(&mut self, delta: i64) -> Result<(), search_painless::MemoryRefused> {
+        let Some((tracker, held)) = &mut self.memory else { return Ok(()) };
+        *held = held.saturating_add(delta);
+        tracker.ensure((*held).max(0) as usize).map_err(|e| {
+            let meta = |k: &str| e.meta.iter().find(|(n, _)| n == k).and_then(|(_, v)| v.as_i64()).unwrap_or(0).max(0) as u64;
+            search_painless::MemoryRefused { wanted: meta("bytes_wanted"), limit: meta("bytes_limit"), reason: e.reason }
+        })
     }
 
     fn term_stats(&mut self) -> Option<search_painless::TermStats> {

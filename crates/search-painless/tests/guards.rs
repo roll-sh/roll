@@ -3,8 +3,58 @@
 //! `stack_overflow_error`, an `out_of_memory_error`, or the host's cancellation) and leave the
 //! engine usable.
 
-use search_painless::{Context, DocKind, DocValues, Engine, Host, HostError, Lang, NoHost, Settings, Value};
+use search_painless::{Context, DocKind, DocValues, Engine, Host, HostError, Lang, MemoryRefused, NoHost, Settings, Value};
 use serde_json::{json, Value as Json};
+use std::alloc::{GlobalAlloc, Layout, System};
+use std::cell::Cell;
+
+/// The allocator wrapper a host installs to keep executions' memory accounts, over one that
+/// records this thread's peak.
+#[global_allocator]
+static ALLOC: search_painless::Counting<Peak> = search_painless::Counting(Peak);
+
+struct Peak;
+
+thread_local! {
+    static LIVE: Cell<i64> = const { Cell::new(0) };
+    static PEAK: Cell<i64> = const { Cell::new(0) };
+}
+
+fn moved(delta: i64) {
+    let live = LIVE.get() + delta;
+    LIVE.set(live);
+    PEAK.set(PEAK.get().max(live));
+}
+
+// SAFETY: forwards to the system allocator; the counters are const thread-locals without
+// destructors.
+unsafe impl GlobalAlloc for Peak {
+    unsafe fn alloc(&self, l: Layout) -> *mut u8 {
+        moved(l.size() as i64);
+        unsafe { System.alloc(l) }
+    }
+    unsafe fn dealloc(&self, p: *mut u8, l: Layout) {
+        moved(-(l.size() as i64));
+        unsafe { System.dealloc(p, l) }
+    }
+    unsafe fn realloc(&self, p: *mut u8, l: Layout, n: usize) -> *mut u8 {
+        moved(n as i64 - l.size() as i64);
+        unsafe { System.realloc(p, l, n) }
+    }
+}
+
+/// Runs `f`, and how far this thread's live bytes rose above where they started.
+fn peak_growth<T>(f: impl FnOnce() -> T) -> (T, i64) {
+    let start = LIVE.get();
+    PEAK.set(start);
+    let r = f();
+    (r, PEAK.get() - start)
+}
+
+/// An engine whose executions may hold `bytes`.
+fn limited(bytes: u64) -> Engine {
+    Engine::new(Settings { max_compilations_rate: None, max_execution_bytes: bytes, ..Settings::default() })
+}
 
 /// An engine whose objects may not exceed 1 MiB, so the size checks trip without the test
 /// allocating much.
@@ -317,4 +367,80 @@ fn allocation_limit_per_context() {
     for _ in 0..3 {
         assert_eq!(inst.execute(&mut NoHost).unwrap().to_java_string(), "15");
     }
+}
+
+/// The security review's script, scaled down: every copy is under the object cap, together
+/// they would be 1 GiB (125 GiB with its 128 MiB string). The execution's account refuses it
+/// the way Elasticsearch 9.5's per-execution guard does, and the thread never holds much more
+/// than the limit.
+#[test]
+fn memory_per_execution_is_bounded() {
+    let e = limited(4 << 20);
+    let src = "String s = 'x'; while (s.length() < 1024 * 1024) { s = s + s; } List l = new ArrayList(); for (int i = 0; i < 1000; i++) { l.add(s + i); } return l.size();";
+    let (r, grew) = peak_growth(|| run(&e, src));
+    let err = r.unwrap_err();
+    assert_eq!(err["error"]["type"], "script_exception", "{err}");
+    assert_eq!(err["error"]["script_stack"], json!(["<<< unknown portion of script >>>"]));
+    assert_eq!(err["error"]["root_cause"][0]["type"], "painless_error");
+    let (kind, reason) = cause(&err);
+    assert_eq!(kind, "painless_error");
+    let reason = reason.unwrap();
+    assert!(reason.starts_with("script allocation limit exceeded: allocation of [") && reason.ends_with("bytes, over the limit of [4194304] bytes"), "{reason}");
+    assert!(grew < 8 << 20, "the thread held {grew} bytes");
+}
+
+/// What an execution holds counts, not what it allocated: 128 MiB of temporaries and a list of
+/// a thousand strings in a 4 MiB account, run again and again.
+#[test]
+fn memory_under_the_limit_is_unaffected() {
+    let e = limited(4 << 20);
+    let script = e.compile("String s = 'x'; while (s.length() < 64 * 1024) { s = s + s; } int n = 0; for (int i = 0; i < 2000; i++) { String t = s + i; n += t.length(); } List l = []; for (int i = 0; i < 1000; i++) { l.add('v' + i); } return n + l.size();", Context::PainlessTest).unwrap();
+    let mut inst = script.instance();
+    let digits: i64 = (0..2000).map(|i: i64| i.to_string().len() as i64).sum();
+    for _ in 0..3 {
+        assert_eq!(inst.execute(&mut NoHost).unwrap().to_java_string(), (2000 * 65536 + digits + 1000).to_string());
+    }
+}
+
+/// A host that adds up what executions report, refusing past a limit like a search's
+/// `request` breaker.
+struct Breaker {
+    held: i64,
+    limit: i64,
+}
+
+impl Host for Breaker {
+    fn script_memory(&mut self, delta: i64) -> Result<(), MemoryRefused> {
+        self.held += delta;
+        if self.held > self.limit {
+            return Err(MemoryRefused { reason: format!("[request] Data too large, data for [<script>] would be [{}b]", self.held), wanted: self.held as u64, limit: self.limit as u64 });
+        }
+        Ok(())
+    }
+}
+
+/// Each execution has its own account, so a script run per document is also charged to its
+/// host what it keeps from one execution to the next (here in a scripted metric's state), and
+/// nothing for what it returns or throws away.
+#[test]
+fn hosts_hear_what_executions_keep() {
+    let e = limited(4 << 20);
+    let returns = e.compile("String t = 'x'; while (t.length() < 64 * 1024) { t = t + t; } return t + 'y'", Context::PainlessTest).unwrap();
+    let mut inst = returns.instance();
+    let mut host = Breaker { held: 0, limit: 1 << 20 };
+    for _ in 0..1000 {
+        let v = inst.execute(&mut host).unwrap();
+        assert_eq!(v.to_java_string().len(), 65537);
+    }
+    assert!(host.held < 1 << 20, "{}", host.held);
+
+    let keeps = e.compile("if (!state.containsKey('l')) { state.l = []; } state.l.add(new int[16384]);", Context::AggsMap).unwrap();
+    let mut inst = keeps.instance();
+    inst.set_var("state", Value::from_json_map(&json!({})));
+    let mut host = Breaker { held: 0, limit: 10 << 20 };
+    let runs = (0..1000).position(|_| inst.execute(&mut host).is_err()).expect("the breaker refuses");
+    // 64 KiB a document: well past one execution's account, refused near the breaker's limit
+    assert!((100..200).contains(&runs), "{runs}");
+    let err = inst.execute(&mut host).unwrap_err().to_response();
+    assert_eq!(cause(&err).0, "circuit_breaking_exception", "{err}");
 }
