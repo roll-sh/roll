@@ -10628,8 +10628,9 @@ Agent 218's short-transaction stack (ten steps, `wip/a218`) was gated this way a
 ## Bulk writes, round 21: the size model's per-row costs, INSERT … SELECT's modelled rows as stored (agent 281)
 
 BENCH.md "Bulk writes, round 21" has the measurements (lane C, the 1M-row bulk script with joined
-windows, plain dist builds). `cand/a281`: two code commits on origin's `1c0a79d67` and this
-section. No format change: the same rows, TIDs, files and sizes.
+windows, plain dist builds). `cand/a281-2`: two code commits on origin's `1c0a79d67` and this
+section (`cand/a281` with the dropped item's note added; the same code). No format change: the
+same rows, TIDs, files and sizes.
 
 **Where COPY in and INSERT … SELECT went** (b0 = `059fb33d8`, instruction samples of each joined
 window; shares within one profile only, as samples are lost under load):
@@ -10702,11 +10703,25 @@ generic `stored_tuple_len_with` (CREATE INDEX and VACUUM, which call it, read -0
 Verification: `tools/quick-check.sh` with `QC_CHECKED=1` on ``fda2c783c` (both commits on `1c0a79d67`; the pushed commits have the same trees, their messages rewritten)`: Clippy 16 warnings, none new in a changed file; 447 tests in 27 binaries, again built `--profile verify-checked`; crash_random seeds 1-3 x 2, power_cut_at_every_point; regress 51,148 / 51,150, 0 newly differing; isolation 1,647 / 1,648; pg_dump_tap 14,609 passed. Before it,
 `big_tables` under `verify-checked` (22 passed).
 
+**Measured and dropped: COPY's rows past the model placed with their batch**
+(`~/.cache/a281/patches/dropped-copy-past-model-batched.patch`, on `cand/a281`). The 600,000 rows
+of the script's COPY past the model each took `ensure`'s read lock and `untracked_write`'s write
+lock to go in the estimate; they waited in the multi-insert batch instead (`Batch::past`, set the
+first time `ensure` says the table is past the model) and went in with it (`CopyLoad::place_past`:
+one lock a batch, the same `add_in`, `placed` and btree entries in order). Two plain dist pairs
+against n2: COPY in 8.737 -> 8.688 G (-0.6% both), UPDATE +0.2% both (code it doesn't touch),
+INSERT … SELECT -0.0 / +0.4%, all steps -0.1 / -0.0%. About 0.03 G on the script, where the profile
+put 6% of COPY in those two functions: the samples land on the instruction after the locks' atomic
+operations, which are slow but few. It would also have changed what a failed COPY leaves in the
+estimate (its unflushed buffer's rows no longer placed, as PostgreSQL's never reach the heap: the
+modelled path already discards them). Not worth the code; dropped.
+
 **Left (G user instructions, n2 against PostgreSQL 18.6's):**
 1. COPY in 8.74 against 6.48: parsing (~23%: the float parser 5%, the integers, a `Vec` and an
-   `Arc<str>` a row), the put and runs (~26%), the rows past the model (`untracked_write` 4.1%,
-   `ensure` 2.2%: a read lock and a write lock a row; agent 281's next candidate queues them in the
-   multi-insert batch), the first 400,000 rows' model (7%).
+   `Arc<str>` a row), the put and runs (~26%), the first 400,000 rows' model (7%: the key map,
+   `multi_place_cid`, `with_tid` and the held rows' second put). The rows past the model
+   (`untracked_write` 4.1%, `ensure` 2.2% of the samples) cost far fewer instructions than their
+   share says (below).
 2. INSERT … SELECT 5.11 against 4.31: the runs' zstd and the put (~37%), the heap model's insert
    for the first 400,000 rows (`Heap::insert` ~8%: `get_buffer`'s lookup, the key map, line
    pointers; ~1,000 instructions a row), the source's scan.

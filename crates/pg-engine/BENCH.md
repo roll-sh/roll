@@ -323,6 +323,12 @@ COPY in 9.111 -> 8.737 (-4.1%), INSERT … SELECT 6.590 -> 6.285 (-4.6%), UPDATE
 (-2.3%), DELETE -0.5%, VACUUM -0.5%, CREATE INDEX -0.3%, CREATE UNIQUE INDEX +0.1%; all steps 49.34
 -> 48.32 (-2.1%). Rows equal; VmHWM 278 / 281 MB.
 
+### n2 against n3 (the dropped batched placement of COPY's rows past the model; 2 pairs)
+
+COPY in 8.737 -> 8.688 (-0.6 / -0.6%), UPDATE 11.726 -> 11.745 (+0.2 / +0.2%), INSERT … SELECT
+5.108 -> 5.117 (-0.0 / +0.4%), CREATE UNIQUE INDEX -0.8 / -0.2%, every other step level; all steps
+46.69 -> 46.66 (-0.1 / -0.0%). Rows equal; VmHWM 266-281 MB on both. Foreign load 3.4-3.7 cores.
+
 Against the numbers that stand (agent 260's same-day runs, 2026-11-19): all steps 46.69 against
 PostgreSQL's 52.33 (0.892x) and pgrust's 44.92 (1.039x); INSERT … SELECT 5.11 against PostgreSQL's
 4.31; COPY in 8.74 against PostgreSQL's 6.48 and pgrust's 4.97. Not re-run on PostgreSQL or pgrust.
