@@ -1109,8 +1109,8 @@ waits on a sibling PR reaching main is last.
    in context. Search mode (`?tools=search`) covers the same clients today; code mode would cut
    the round trips of a many-step task.
 5. **As siblings land** (`sibling-check.py`, 2026-11-21 21:30, over every open PR): secrets'
-   deleted projects and recovery (#585: `GET /v1/secrets/deleted` a read, `POST
-   …/projects/{id}/recover` a write); search's migration from a remote cluster (#485: `migrate` and
+   deleted projects (#585: `GET /v1/secrets/deleted` a read; recovering one stays a person's, an
+   admin row that undoes a confirmed delete, and #585 lists it in `no-tool.txt`); search's migration from a remote cluster (#485: `migrate` and
    `migrate/inspect`, open-world, since roll fetches an address the caller chose); search's
    relevance tuning (search-relevance-api, not yet open). #524 (previews on members) adds no routes
    beyond #501's; #627, #629, #596 and #504 add none. Not a tool: making a search browser key
