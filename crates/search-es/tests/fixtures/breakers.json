@@ -1,5 +1,5 @@
 {
- "_about": "Elasticsearch 9.5.5 (private node, 1 GB heap): circuit breaker trips. in_flight: network.breaker.inflight_requests.limit=100b, then a 117-byte document and a 98-byte search body; exempt: GET _cluster/health and _nodes/stats under the same limit; parent: indices.breaker.total.limit=1b, GET _cat/health (real usage numbers are the JVM's); stats_default: _nodes/stats/breaker with default settings.",
+ "_about": "Elasticsearch 9.5.5 (private node, 1 GB heap): circuit breaker trips. in_flight: network.breaker.inflight_requests.limit=100b, then a 117-byte document and a 98-byte search body; exempt: GET _cluster/health and _nodes/stats under the same limit; parent: indices.breaker.total.limit=1b, GET _cat/health (real usage numbers are the JVM's); stats_default: _nodes/stats/breaker with default settings. esql_values_by: indices.breaker.request.limit=1mb, 10,000 documents {host: h<i%10>, message: \"message number <i> \" + 150 x's} (keywords), then POST _query {\"query\": \"FROM logs | STATS v = VALUES(message) BY host | LIMIT 1\"} (the label in [...] is where Elasticsearch's query crossed the limit, which varies: ords, <reused_arrays>, load blocks). esql_concat_over_1mib / esql_replace_over_1mib: index cc {f: keyword} with one document {f: \"x\"}, POST _query with the queries in each entry ([status, body] and, for REPLACE, its Warning headers but the implicit limit's). (CONCAT/REPLACE with indices.breaker.request.limit=60%)",
  "stats_default": [
   200,
   {
@@ -165,5 +165,59 @@
    },
    "status": 429
   }
+ ],
+ "esql_values_by": [
+  429,
+  {
+   "error": {
+    "root_cause": [
+     {
+      "type": "circuit_breaking_exception",
+      "reason": "[request] Data too large, data for [ords] would be [1062726/1mb], which is larger than the limit of [1048576/1mb]; for more information, see https://www.elastic.co/docs/troubleshoot/elasticsearch/circuit-breaker-errors?version=9.5",
+      "bytes_wanted": 1062726,
+      "bytes_limit": 1048576,
+      "durability": "TRANSIENT"
+     }
+    ],
+    "type": "circuit_breaking_exception",
+    "reason": "[request] Data too large, data for [ords] would be [1062726/1mb], which is larger than the limit of [1048576/1mb]; for more information, see https://www.elastic.co/docs/troubleshoot/elasticsearch/circuit-breaker-errors?version=9.5",
+    "bytes_wanted": 1062726,
+    "bytes_limit": 1048576,
+    "durability": "TRANSIENT"
+   },
+   "status": 429
+  }
+ ],
+ "esql_concat_over_1mib": [
+  400,
+  {
+   "error": {
+    "root_cause": [
+     {
+      "type": "esql_client_exception",
+      "reason": "concatenating more than [1048576] bytes is not supported"
+     }
+    ],
+    "type": "esql_client_exception",
+    "reason": "concatenating more than [1048576] bytes is not supported"
+   },
+   "status": 400
+  },
+  "FROM cc | EVAL a = REPEAT(f, 1048576), b = CONCAT(a, a, a, a, a, a, a, a, a, a), c = CONCAT(b, b, b, b, b, b, b, b, b, b) | KEEP c"
+ ],
+ "esql_replace_over_1mib": [
+  200,
+  {
+   "values": [
+    [
+     null
+    ]
+   ],
+   "warnings": [
+    "Line 1:49: evaluation of [REPLACE(a, \\\"x\\\", \\\"yy\\\")] failed, treating result as null. Only first 20 failures recorded.",
+    "Line 1:49: java.lang.IllegalArgumentException: Creating strings with more than [1048576] bytes is not supported"
+   ]
+  },
+  "FROM cc | EVAL a = REPEAT(f, 600000) | EVAL b = REPLACE(a, \"x\", \"yy\") | KEEP b"
  ]
 }

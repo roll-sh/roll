@@ -122,9 +122,12 @@ pub struct NodeConfig {
     /// Lease time to live, with [`Node::set_leases`].
     pub lease_ttl: Duration,
     /// Memory all loaded clusters together may hold (indexing buffers, in-heap segments,
-    /// version maps; [`Usage::resident_bytes`]). Past it, the least recently used clusters with
-    /// no request in flight are unloaded, and waking another cluster first makes room.
-    /// `None`: no node budget.
+    /// version maps; [`Usage::resident_bytes`]) and what their requests hold
+    /// ([`Node::request_memory`]), together. Past it in resident memory, the least recently used
+    /// clusters with no request in flight are unloaded, and waking another cluster first makes
+    /// room; a request that would take residents and requests past it fails with
+    /// `circuit_breaking_exception`. `None`: no node budget for loaded clusters, and half of the
+    /// host's memory for residents and requests.
     pub memory_budget: Option<u64>,
     /// Let idle and memory-budget unloads drop clusters whose documents live only in memory
     /// (a [`StoreProvider`] without [`StoreProvider::data`]): they lose every document and keep
@@ -350,6 +353,12 @@ pub struct Node {
     pub unloads: AtomicU64,
     /// Every cluster's security audit log.
     pub audit: Arc<crate::audit::AuditLogs>,
+    /// What requests on every cluster hold together (aggregations, ES|QL, kept results),
+    /// whatever the tenants set their `request` breakers to: one budget with the loaded clusters'
+    /// resident memory, the operator's `memory_budget` (or else half of the host's memory,
+    /// [`search_es::breaker::Breakers::node_budget`]). The reaper tells it what clusters hold
+    /// resident ([`Node::enforce_memory`]); requests get the rest.
+    pub request_memory: Arc<search_es::breaker::MemoryBudget>,
 }
 
 /// Holds a cluster's transition lock; drops the map entry when nobody else wants it.
@@ -818,8 +827,10 @@ impl Node {
             n => n,
         };
         let audit = crate::audit::AuditLogs::new(stores.data(), cfg.audit.clone());
+        let request_memory = search_es::breaker::Breakers::node_budget(cfg.memory_budget);
         Arc::new(Node {
             audit,
+            request_memory,
             catalog,
             stores,
             fair: (running != usize::MAX).then(|| FairScheduler::new(running)),
@@ -1133,6 +1144,7 @@ impl Node {
         cfg.default_repository = self.cfg.default_repository.clone().filter(|_| data_store.is_some());
         cfg.file_service_tokens = self.reads_file_service_tokens(&spec.name);
         cfg.audit = Some(search_es::xpack::security::audit::AuditLog(self.audit.clone()));
+        cfg.request_memory = Some(self.request_memory.clone());
         let mut cluster = Cluster::open(cfg, store).await?;
         cluster.node.id = stable_node_id(&spec.name);
         if cluster.state().version <= 1 {
@@ -1519,6 +1531,7 @@ impl Node {
     async fn enforce_memory_with(&self, room: u64, commit: bool) -> Vec<String> {
         let loaded: Vec<Arc<Loaded>> = self.clusters.read().values().filter_map(|s| s.get().cloned()).collect();
         if loaded.is_empty() {
+            self.request_memory.set_held_elsewhere(0);
             return Vec::new();
         }
         let mut sizes: Vec<(Arc<Loaded>, u64)> = loaded.into_iter().map(|l| {
@@ -1536,8 +1549,10 @@ impl Node {
             }
         }
         let mut evicted = Vec::new();
-        let Some(budget) = self.cfg.memory_budget else { return evicted };
         let mut total: u64 = sizes.iter().map(|(_, r)| *r).sum();
+        // One budget: what clusters hold resident leaves the rest to requests.
+        self.request_memory.set_held_elsewhere(total);
+        let Some(budget) = self.cfg.memory_budget else { return evicted };
         if total.saturating_add(room) <= budget {
             return evicted;
         }
@@ -1553,6 +1568,7 @@ impl Node {
             if self.unload_with(&l.name, true, Some(&l)).await {
                 tracing::info!(cluster = &*l.name, resident = r, total, budget, "unloaded a cluster to stay within the node's memory budget");
                 total = total.saturating_sub(r);
+                self.request_memory.set_held_elsewhere(total);
                 evicted.push(l.name.to_string());
             }
         }

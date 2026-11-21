@@ -12,6 +12,7 @@
 //! `LIMIT` stops the scan once it is satisfied.
 
 use super::functions::{self, F, Fail};
+use super::memory::{self, Growth, Memory, Tally};
 use super::parser::{BinOp, Cmd, Expr, ExprKind, Query, Unmapped};
 use super::value::{self, Acc, DataType, V, Warnings};
 use crate::cluster::Cluster;
@@ -75,6 +76,8 @@ pub struct Src<'a> {
     pub res: &'a Resources,
     /// The query's time zone (`SET time_zone`, the request's `time_zone`), when not UTC.
     pub tz: Option<crate::time::Zone>,
+    /// The query's memory account ([`super::memory`]).
+    pub mem: Memory,
 }
 
 /// A union type: each mapping type of a field and the indices that map it.
@@ -1306,7 +1309,7 @@ pub fn fold(text: &str, e: &Expr) -> Option<V> {
         return None;
     }
     let res = Resources::default();
-    let src = Src { text, sql: false, locale: None, res: &res, tz: None };
+    let src = Src { text, sql: false, locale: None, res: &res, tz: None, mem: Memory::default() };
     let (c, _) = Compiler { src: &src, cols: &[], aggs: None }.compile(e).ok()?;
     eval(&c, &[], &[], &mut Warnings::default()).ok()
 }
@@ -1360,6 +1363,12 @@ pub enum GroupKey {
     Str(String),
     Date(i64),
     Multi(Vec<GroupKey>),
+}
+
+/// What a join or group key holds: its vector, plus the heap of the values it was made from
+/// (a key holds their strings).
+fn key_bytes<'v>(k: &Vec<GroupKey>, from: impl Iterator<Item = &'v V>) -> usize {
+    size_of::<Vec<GroupKey>>() + k.capacity() * size_of::<GroupKey>() + from.map(memory::value_heap).sum::<usize>()
 }
 
 impl GroupKey {
@@ -1648,13 +1657,17 @@ fn compile_stage(src: &Src<'_>, cmd: &Cmd, cols: &[Col]) -> EsResult<(Stage, Vec
             let (keep, mut out) = keep_except(cols, &names);
             out.extend(lt.cols.iter().cloned());
             let mut by_key: HashMap<Vec<GroupKey>, Vec<Vec<V>>> = HashMap::new();
+            let mut held = Tally::new(&src.mem)?;
             for r in &lt.rows {
                 let k: Vec<GroupKey> = lk_idx.iter().map(|j| GroupKey::of(&r[*j])).collect();
                 if k.iter().any(|x| matches!(x, GroupKey::Null | GroupKey::Multi(_))) {
                     continue;
                 }
+                held.add(key_bytes(&k, lk_idx.iter().map(|j| &r[*j])) + memory::row_bytes(r))?;
                 by_key.entry(k).or_default().push(r.clone());
             }
+            // The map lives as long as the query's pipeline.
+            held.keep()?;
             (Stage::LookupWhere { eq, rows: std::sync::Arc::new(by_key), cond: c, add: lt.cols.len(), keep }, out)
         }
         Cmd::LookupJoin { index, index_at, on, .. } => {
@@ -1679,20 +1692,25 @@ fn compile_stage(src: &Src<'_>, cmd: &Cmd, cols: &[Col]) -> EsResult<(Stage, Vec
             let (keep, mut out) = keep_except(cols, &names);
             out.extend(add_cols.iter().map(|j| lt.cols[*j].clone()));
             let mut by_key: HashMap<Vec<GroupKey>, Vec<Vec<V>>> = HashMap::new();
+            let mut held = Tally::new(&src.mem)?;
             for r in &lt.rows {
                 let k: Vec<GroupKey> = lk_idx.iter().map(|j| GroupKey::of(&r[*j])).collect();
                 if k.iter().any(|x| matches!(x, GroupKey::Null | GroupKey::Multi(_))) {
                     continue;
                 }
-                by_key.entry(k).or_default().push(add_cols.iter().map(|j| r[*j].clone()).collect());
+                let row: Vec<V> = add_cols.iter().map(|j| r[*j].clone()).collect();
+                held.add(key_bytes(&k, lk_idx.iter().map(|j| &r[*j])) + memory::row_bytes(&row))?;
+                by_key.entry(k).or_default().push(row);
             }
+            held.keep()?;
             (Stage::Lookup { on: on_idx, rows: std::sync::Arc::new(by_key), add: add_cols.len(), keep }, out)
         }
         _ => unreachable!("not a row-wise command"),
     })
 }
 
-fn run_stage(stage: &Stage, in_cols: usize, rows: Vec<Vec<V>>, w: &mut Warnings) -> EsResult<Vec<Vec<V>>> {
+/// Runs one stage; every value or row it builds is charged to `grown` before it is kept.
+fn run_stage(stage: &Stage, in_cols: usize, rows: Vec<Vec<V>>, w: &mut Warnings, grown: &mut Tally) -> EsResult<Vec<Vec<V>>> {
     let mut out = Vec::with_capacity(rows.len());
     match stage {
         Stage::Where(c) => {
@@ -1707,6 +1725,7 @@ fn run_stage(stage: &Stage, in_cols: usize, rows: Vec<Vec<V>>, w: &mut Warnings)
                 let _ = in_cols;
                 for (c, _) in evals {
                     let v = eval(c, &r, &[], w)?;
+                    grown.add(size_of::<V>() + memory::value_heap(&v))?;
                     r.push(v);
                 }
                 out.push(r);
@@ -1728,6 +1747,7 @@ fn run_stage(stage: &Stage, in_cols: usize, rows: Vec<Vec<V>>, w: &mut Warnings)
                 for k in keys {
                     n.push(parsed.as_ref().and_then(|m| m.get(k)).map(|s| V::Str(s.clone())).unwrap_or(V::Null));
                 }
+                grown.add(memory::row_bytes(&n))?;
                 out.push(n);
             }
         }
@@ -1754,6 +1774,7 @@ fn run_stage(stage: &Stage, in_cols: usize, rows: Vec<Vec<V>>, w: &mut Warnings)
                 for (name, _) in outputs {
                     n.push(caps.as_ref().and_then(|c| c.iter().find(|(k, _)| k == name)).map(|(_, g)| conv(g)).unwrap_or(V::Null));
                 }
+                grown.add(memory::row_bytes(&n))?;
                 out.push(n);
             }
         }
@@ -1779,6 +1800,7 @@ fn run_stage(stage: &Stage, in_cols: usize, rows: Vec<Vec<V>>, w: &mut Warnings)
                         _ => V::Multi(vals),
                     });
                 }
+                grown.add(memory::row_bytes(&n))?;
                 out.push(n);
             }
         }
@@ -1792,6 +1814,7 @@ fn run_stage(stage: &Stage, in_cols: usize, rows: Vec<Vec<V>>, w: &mut Warnings)
             }
         }
         Stage::Lookup { on, rows: lk, add, keep } => {
+            // A key can match many lookup rows: each output row is charged as it is built.
             for r in rows {
                 let k: Vec<GroupKey> = on.iter().map(|i| GroupKey::of(&r[*i])).collect();
                 let base: Vec<V> = keep.iter().map(|i| r[*i].clone()).collect();
@@ -1800,6 +1823,7 @@ fn run_stage(stage: &Stage, in_cols: usize, rows: Vec<Vec<V>>, w: &mut Warnings)
                         for m in matches {
                             let mut n = base.clone();
                             n.extend(m.iter().cloned());
+                            grown.add(memory::row_bytes(&n))?;
                             out.push(n);
                         }
                     }
@@ -1824,6 +1848,7 @@ fn run_stage(stage: &Stage, in_cols: usize, rows: Vec<Vec<V>>, w: &mut Warnings)
                     if eval(cond, &joined, &[], w)?.truthy() == Some(true) {
                         let mut n = base.clone();
                         n.extend(m.iter().cloned());
+                        grown.add(memory::row_bytes(&n))?;
                         out.push(n);
                         matched = true;
                     }
@@ -1842,6 +1867,7 @@ fn run_stage(stage: &Stage, in_cols: usize, rows: Vec<Vec<V>>, w: &mut Warnings)
                         for v in vs {
                             let mut n = r.clone();
                             n[*i] = v.clone();
+                            grown.add(memory::row_bytes(&n))?;
                             out.push(n);
                         }
                     }
@@ -1866,12 +1892,24 @@ fn eval_projection(cols_in: &[Col], list: &[super::parser::Named], out: &[Col]) 
 /// A pipeline of row-wise stages.
 struct Pipeline {
     stages: Vec<(Stage, usize, Option<Vec<usize>>)>,
+    mem: Memory,
 }
 
 impl Pipeline {
-    fn run(&self, mut rows: Vec<Vec<V>>, w: &mut Warnings) -> EsResult<Vec<Vec<V>>> {
+    /// Runs the stages over a page of rows, which is charged while they work on it (as
+    /// Elasticsearch's blocks are) and given back with the rows: whoever keeps them charges them.
+    fn run(&self, rows: Vec<Vec<V>>, w: &mut Warnings) -> EsResult<Vec<Vec<V>>> {
+        let mut page = self.mem.hold(memory::rows_bytes(&rows), memory::LOAD_BLOCKS)?;
+        self.run_on(rows, w, &mut page)
+    }
+
+    /// Runs the stages over rows `held` already charges: what they build is charged as it is
+    /// built and added to `held` (no stage walks the rows again to measure them; what a stage
+    /// drops stays charged until `held` is set again or dropped).
+    fn run_on(&self, mut rows: Vec<Vec<V>>, w: &mut Warnings, held: &mut memory::Held) -> EsResult<Vec<Vec<V>>> {
+        let mut grown = Tally::new(&self.mem)?;
         for (s, n, proj) in &self.stages {
-            rows = run_stage(s, *n, rows, w)?;
+            rows = run_stage(s, *n, rows, w, &mut grown)?;
             if let Some(p) = proj {
                 // Each output column reads a distinct physical column, so values move.
                 for r in &mut rows {
@@ -1883,6 +1921,7 @@ impl Pipeline {
                 }
             }
         }
+        held.absorb(grown)?;
         Ok(rows)
     }
 }
@@ -1899,7 +1938,7 @@ fn build_pipeline(src: &Src<'_>, cmds: &[Cmd], mut cols: Vec<Col>) -> EsResult<(
         stages.push((stage, cols.len(), proj));
         cols = out;
     }
-    Ok((Pipeline { stages }, cols))
+    Ok((Pipeline { stages, mem: src.mem.clone() }, cols))
 }
 
 fn is_row_wise(c: &Cmd) -> bool {
@@ -1921,6 +1960,10 @@ struct Grouper {
     specs: Vec<AggSpec>,
     index: HashMap<u64, u32, std::hash::BuildHasherDefault<IdHasher>>,
     groups: Vec<Group>,
+    /// What the groups and their states hold, charged as they grow.
+    held: Tally,
+    /// The bytes of `index` and `groups` themselves already noted.
+    tables: usize,
 }
 
 struct Group {
@@ -2060,7 +2103,7 @@ impl Grouper {
             outputs.push((c, t, n.name.clone()));
         }
         *src.res.approx.lock() = aggs.iter().filter(|n| matches!(&n.expr.kind, ExprKind::Call(f, _) if APPROXIMABLE.contains(&f.as_str()))).map(|n| n.name.clone()).collect();
-        Ok(Grouper { keys, outputs, specs, index: HashMap::default(), groups: Vec::new() })
+        Ok(Grouper { keys, outputs, specs, index: HashMap::default(), groups: Vec::new(), held: Tally::new(&src.mem)?, tables: 0 })
     }
 
     fn add(&mut self, rows: &[Vec<V>], w: &mut Warnings) -> EsResult<()> {
@@ -2109,8 +2152,9 @@ impl Grouper {
                 };
                 self.add_row(g, r, w)?;
             }
+            self.held.check()?;
         }
-        Ok(())
+        self.held.settle()
     }
 
     /// The group of `key`, created (in output order) when new.
@@ -2137,7 +2181,17 @@ impl Grouper {
             }
             self.groups[at as usize].next = fresh;
         }
-        self.groups.push(Group { key: key.iter().map(|v| (*v).clone()).collect(), accs: self.specs.iter().map(|s| Acc::for_spec(&s.func, s.arg_ty, &s.extra)).collect(), next: u32::MAX });
+        let group = Group { key: key.iter().map(|v| (*v).clone()).collect(), accs: self.specs.iter().map(|s| Acc::for_spec(&s.func, s.arg_ty, &s.extra)).collect(), next: u32::MAX };
+        self.held.note(
+            group.key.capacity() * size_of::<V>() + group.key.iter().map(memory::value_heap).sum::<usize>() + group.accs.capacity() * size_of::<Acc>() + group.accs.iter().map(memory::acc_heap).sum::<usize>(),
+        );
+        self.groups.push(group);
+        // The table and its hash index (a `u64` and a `u32` per bucket, plus a control byte).
+        let tables = self.groups.capacity() * size_of::<Group>() + self.index.capacity() * (size_of::<(u64, u32)>() + 1);
+        if tables > self.tables {
+            self.held.note(tables - self.tables);
+            self.tables = tables;
+        }
         fresh as usize
     }
 
@@ -2150,18 +2204,33 @@ impl Grouper {
             {
                 continue;
             }
-            match &s.arg {
-                None => a.add(&s.func, &V::Null, true),
+            // States that keep values (`VALUES`, `TOP`, `SAMPLE`, the quantiles' digest,
+            // `COUNT_DISTINCT`'s sketch) are charged by what they grow, measured around the add.
+            let before = if memory::acc_grows(a) { Some(memory::acc_heap(a)) } else { None };
+            let kept = match &s.arg {
+                None => {
+                    a.add(&s.func, &V::Null, true);
+                    0
+                }
                 Some(c) if s.weight.is_some() => {
                     let v = eval(c, r, &[], w)?;
                     let weight = eval(s.weight.as_ref().expect("weight"), r, &[], w)?;
                     a.add_weighted(&v, &weight);
+                    // A time series state keeps the value whole.
+                    if matches!(a, Acc::Points(_)) { memory::value_heap(&v) } else { 0 }
                 }
-                Some(CE::Col(i)) => a.add(&s.func, r.get(*i).unwrap_or(&V::Null), false),
+                Some(CE::Col(i)) => {
+                    a.add(&s.func, r.get(*i).unwrap_or(&V::Null), false);
+                    0
+                }
                 Some(c) => {
                     let v = eval(c, r, &[], w)?;
                     a.add(&s.func, &v, false);
+                    0
                 }
+            };
+            if let Some(before) = before {
+                self.held.note(memory::acc_heap(a).saturating_sub(before) + kept);
             }
         }
         Ok(())
@@ -2178,6 +2247,9 @@ impl Grouper {
         }
         let windowed = self.windowed_rates();
         let mut rows = Vec::with_capacity(self.groups.len());
+        // The output rows: charged as they are built, before a group's key is cloned into one.
+        let mut out = self.held.fresh()?;
+        out.add(rows.capacity() * size_of::<Vec<V>>())?;
         for (g, Group { key, accs, .. }) in self.groups.iter().enumerate() {
             let results: Vec<V> = self
                 .specs
@@ -2189,7 +2261,8 @@ impl Grouper {
                     None => a.finish(&s.func, value::agg_type(&s.func, s.arg_ty), &s.extra),
                 })
                 .collect();
-            let mut row = Vec::new();
+            out.add(size_of::<Vec<V>>() + cols.len() * size_of::<V>() + results.iter().map(memory::value_heap).sum::<usize>() + key.iter().map(memory::value_heap).sum::<usize>())?;
+            let mut row = Vec::with_capacity(cols.len());
             for (c, _, n) in &self.outputs {
                 if self.keys.iter().any(|(_, _, kn)| kn == n) {
                     continue;
@@ -2199,6 +2272,8 @@ impl Grouper {
             row.extend(key.iter().cloned());
             rows.push(row);
         }
+        // The caller charges the table from here on.
+        drop(out);
         Ok(Table { cols, rows })
     }
 }
@@ -2456,9 +2531,17 @@ impl SortSpec {
 fn sort_rows(src: &Src<'_>, keys: &[super::parser::SortKey], t: &mut Table, w: &mut Warnings) -> EsResult<()> {
     let spec = SortSpec::new(src, keys, &t.cols)?;
     let mut keyed: Vec<(Vec<V>, Vec<V>)> = Vec::with_capacity(t.rows.len());
+    // The rows are the table's (charged with it); the keys are charged while the sort runs.
+    let mut keys = Tally::new(&src.mem)?;
+    keys.note(keyed.capacity() * size_of::<Vec<V>>());
     for r in std::mem::take(&mut t.rows) {
-        keyed.push((spec.key(&r, w)?, r));
+        let k = spec.key(&r, w)?;
+        keys.add(memory::row_bytes(&k))?;
+        keyed.push((k, r));
     }
+    // The stable sort's merge buffer (half the elements) and the sorted rows' new vector.
+    keys.add(keyed.len() / 2 * size_of::<(Vec<V>, Vec<V>)>() + keyed.len() * size_of::<Vec<V>>())?;
+    keys.settle()?;
     keyed.sort_by(|a, b| spec.cmp(&a.0, &b.0));
     t.rows = keyed.into_iter().map(|(_, r)| r).collect();
     Ok(())
@@ -2476,11 +2559,18 @@ struct TopN {
     seq: u64,
     /// The worst kept key after the last trim.
     bound: Option<Vec<V>>,
+    /// What `buf`'s rows and keys hold, and its charge.
+    bytes: usize,
+    held: memory::Held,
 }
 
 impl TopN {
-    fn new(spec: SortSpec, n: usize) -> TopN {
-        TopN { spec, n, buf: Vec::new(), seq: 0, bound: None }
+    fn new(spec: SortSpec, n: usize, mem: &Memory) -> EsResult<TopN> {
+        Ok(TopN { spec, n, buf: Vec::new(), seq: 0, bound: None, bytes: 0, held: mem.hold(0, memory::REUSED_ARRAYS)? })
+    }
+
+    fn entry_bytes(e: &(Vec<V>, u64, Vec<V>)) -> usize {
+        memory::row_bytes(&e.0) + memory::row_bytes(&e.2)
     }
 
     fn add(&mut self, rows: Vec<Vec<V>>, w: &mut Warnings) -> EsResult<()> {
@@ -2493,14 +2583,17 @@ impl TopN {
             if self.bound.as_ref().is_some_and(|b| self.spec.cmp(&k, b) != std::cmp::Ordering::Less) {
                 continue;
             }
-            self.buf.push((k, self.seq, r));
+            let e = (k, self.seq, r);
+            self.bytes += Self::entry_bytes(&e);
+            self.buf.push(e);
         }
         if self.buf.len() >= self.n.saturating_mul(2).max(1024) {
             self.trim();
+            self.bytes = self.buf.iter().map(Self::entry_bytes).sum();
             let spec = &self.spec;
             self.bound = self.buf.iter().max_by(|a, b| spec.cmp(&a.0, &b.0).then(a.1.cmp(&b.1))).map(|e| e.0.clone());
         }
-        Ok(())
+        self.held.set(self.bytes + self.buf.capacity() * size_of::<(Vec<V>, u64, Vec<V>)>())
     }
 
     fn trim(&mut self) {
@@ -3653,8 +3746,10 @@ fn merge_stats(into: &mut Stats, from: Stats) {
 }
 
 /// Runs a parsed query.
-pub async fn execute(cluster: &Cluster, q: Query, filter: Option<Value>, w: &mut Warnings) -> EsResult<(Table, Stats)> {
-    let (mut t, stats) = execute_inner(cluster, q, filter, w).await?;
+/// Runs a query, charging what it builds to `mem` ([`super::memory`]); the result table stays
+/// charged until `mem` drops.
+pub async fn execute(cluster: &Cluster, q: Query, filter: Option<Value>, w: &mut Warnings, mem: &Memory) -> EsResult<(Table, Stats)> {
+    let (mut t, stats) = execute_inner(cluster, q, filter, w, mem).await?;
     // Unsupported columns (union types read for their conversions among them) print null.
     let unsupported: Vec<usize> = (0..t.cols.len()).filter(|&i| t.cols[i].ty == DataType::Unsupported).collect();
     if !unsupported.is_empty() {
@@ -3677,7 +3772,7 @@ pub async fn execute(cluster: &Cluster, q: Query, filter: Option<Value>, w: &mut
     Ok((t, stats))
 }
 
-async fn execute_inner(cluster: &Cluster, q: Query, filter: Option<Value>, w: &mut Warnings) -> EsResult<(Table, Stats)> {
+async fn execute_inner(cluster: &Cluster, q: Query, filter: Option<Value>, w: &mut Warnings, mem: &Memory) -> EsResult<(Table, Stats)> {
     let q = expand_views(&cluster.state(), q)?;
     // An implicit `LIMIT 1000` ends every query without a limit; Elasticsearch doesn't warn of
     // it after a time series aggregation (`TS ... | STATS`, `PROMQL`).
@@ -3686,7 +3781,7 @@ async fn execute_inner(cluster: &Cluster, q: Query, filter: Option<Value>, w: &m
         w.add(format!("No limit defined, adding default limit of [{DEFAULT_LIMIT}]"));
     }
     check_forks(&q.src, &q.cmds)?;
-    run_query(cluster, q, filter, w, true, &[]).await
+    run_query(cluster, q, filter, w, true, &[], mem).await
 }
 
 /// Every column name the commands reference, with where (expressions, `KEEP`/`DROP`
@@ -3881,7 +3976,7 @@ type QueryRun<'a> = std::pin::Pin<Box<dyn std::future::Future<Output = EsResult<
 /// Runs a query (`top`: the request's own, which gets the implicit limit; branches of a union
 /// don't). `outer`: the commands that will run over this query's result, for fields they
 /// reference that `SET unmapped_fields` has to provide.
-fn run_query<'a>(cluster: &'a Cluster, mut q: Query, filter: Option<Value>, w: &'a mut Warnings, top: bool, outer: &'a [Cmd]) -> QueryRun<'a> {
+fn run_query<'a>(cluster: &'a Cluster, mut q: Query, filter: Option<Value>, w: &'a mut Warnings, top: bool, outer: &'a [Cmd], mem: &'a Memory) -> QueryRun<'a> {
     Box::pin(async move {
         if matches!(q.cmds.first(), Some(Cmd::Ts { .. })) {
             ts_rewrite(&q.src, &mut q.cmds)?;
@@ -3892,7 +3987,7 @@ fn run_query<'a>(cluster: &'a Cluster, mut q: Query, filter: Option<Value>, w: &
         let fork = q.cmds.iter().position(|c| matches!(c, Cmd::Fork { .. }));
         let union = matches!(q.cmds.first(), Some(Cmd::Union { .. }));
         if fork.is_none() && !union {
-            return execute_plain(cluster, q, filter, w, outer).await;
+            return execute_plain(cluster, q, filter, w, outer, mem).await;
         }
         let mut stats = Stats::default();
         let (parts, rest): (Vec<Table>, Vec<Cmd>) = if let Some(f) = fork {
@@ -3909,7 +4004,7 @@ fn run_query<'a>(cluster: &'a Cluster, mut q: Query, filter: Option<Value>, w: &
                 let tag = Expr::new(ExprKind::Lit(V::Str(format!("fork{}", i + 1))), at, at);
                 cmds.push(Cmd::Eval(vec![super::parser::Named { name: "_fork".into(), expr: tag }]));
                 let bq = Query { src: q.src.clone(), cmds, sql: q.sql, locale: q.locale.clone(), settings: q.settings.clone() };
-                let (t, s) = run_query(cluster, bq, filter.clone(), w, false, &refs).await?;
+                let (t, s) = run_query(cluster, bq, filter.clone(), w, false, &refs, mem).await?;
                 merge_stats(&mut stats, s);
                 parts.push(t);
             }
@@ -3919,7 +4014,11 @@ fn run_query<'a>(cluster: &'a Cluster, mut q: Query, filter: Option<Value>, w: &
                 verification(&text, at, &format!("Column [{name}] has conflicting data types in FORK branches: [{}] and [{}]", type_text(new).to_ascii_uppercase(), type_text(have).to_ascii_uppercase()))
             };
             let mut original = std::mem::take(&mut stats.original_types);
+            // The branches' tables were kept charged; their rows move into the merged one,
+            // which `run_rest` charges below.
+            let parts_bytes: usize = parts.iter().map(|t| memory::rows_bytes(&t.rows)).sum();
             let t = union_tables(parts, &conflict, &|_, _| false, &mut original)?;
+            mem.give_back(parts_bytes);
             stats.original_types = original;
             (vec![t], rest)
         } else {
@@ -3944,7 +4043,7 @@ fn run_query<'a>(cluster: &'a Cluster, mut q: Query, filter: Option<Value>, w: &
             let mut parts = Vec::with_capacity(branches.len());
             for b in &branches {
                 let bq = Query { src: b.src.to_string(), cmds: b.cmds.clone(), sql: q.sql, locale: q.locale.clone(), settings: q.settings.clone() };
-                let (t, mut s) = run_query(cluster, bq, filter.clone(), w, false, &carry).await?;
+                let (t, mut s) = run_query(cluster, bq, filter.clone(), w, false, &carry, mem).await?;
                 // A view's own conflicts are located in the view.
                 if let Some(v) = &b.view {
                     for (_, e) in &mut s.conflicts {
@@ -3980,7 +4079,9 @@ fn run_query<'a>(cluster: &'a Cluster, mut q: Query, filter: Option<Value>, w: &
                 true
             };
             let mut original = std::mem::take(&mut stats.original_types);
+            let parts_bytes: usize = parts.iter().map(|t| memory::rows_bytes(&t.rows)).sum();
             let t = union_tables(parts, &conflict, &lazy, &mut original)?;
+            mem.give_back(parts_bytes);
             stats.original_types = original;
             let mut used = std::collections::HashSet::new();
             for c in rest.iter().filter(|c| !matches!(c, Cmd::Keep(_) | Cmd::Drop(_))) {
@@ -3997,9 +4098,9 @@ fn run_query<'a>(cluster: &'a Cluster, mut q: Query, filter: Option<Value>, w: &
         };
         let t = parts.into_iter().next().unwrap_or_default();
         let text = q.src.clone();
-        let res = load_resources(cluster, &text, &rest).await?;
+        let res = load_resources(cluster, &text, &rest, mem).await?;
         let tz = q.settings.time_zone.as_deref().and_then(|z| crate::time::Zone::parse(z).ok()).filter(|z| *z != crate::time::Zone::UTC);
-        let src = Src { text: &text, sql: q.sql, locale: q.locale.as_deref(), res: &res, tz };
+        let src = Src { text: &text, sql: q.sql, locale: q.locale.as_deref(), res: &res, tz, mem: mem.clone() };
         let t = run_rest(&src, t, &rest, w)?;
         stats.rows_emitted = t.rows.len() as i64;
         stats.col_meta.extend(std::mem::take(&mut *src.res.col_meta.lock()));
@@ -4009,11 +4110,11 @@ fn run_query<'a>(cluster: &'a Cluster, mut q: Query, filter: Option<Value>, w: &
 }
 
 /// Runs a query with no `FORK` and no union source.
-async fn execute_plain(cluster: &Cluster, q: Query, filter: Option<Value>, w: &mut Warnings, outer: &[Cmd]) -> EsResult<(Table, Stats)> {
+async fn execute_plain(cluster: &Cluster, q: Query, filter: Option<Value>, w: &mut Warnings, outer: &[Cmd], mem: &Memory) -> EsResult<(Table, Stats)> {
     let text = q.src.clone();
-    let res = load_resources(cluster, &text, &q.cmds).await?;
+    let res = load_resources(cluster, &text, &q.cmds, mem).await?;
     let tz = q.settings.time_zone.as_deref().and_then(|z| crate::time::Zone::parse(z).ok()).filter(|z| *z != crate::time::Zone::UTC);
-    let src = Src { text: &text, sql: q.sql, locale: q.locale.as_deref(), res: &res, tz };
+    let src = Src { text: &text, sql: q.sql, locale: q.locale.as_deref(), res: &res, tz, mem: mem.clone() };
     let mut stats = Stats::default();
     let mut cmds: Vec<Cmd> = q.cmds.clone();
     let first = cmds.remove(0);
@@ -4176,7 +4277,7 @@ async fn execute_plain(cluster: &Cluster, q: Query, filter: Option<Value>, w: &m
                 }
                 Some(Cmd::Sort(_)) if sort_then_limit(rest).is_some() => {
                     let (keys, n, j) = sort_then_limit(rest).expect("matched");
-                    let mut top = TopN::new(SortSpec::new(&src, keys, &out_cols)?, n.min(MAX_LIMIT));
+                    let mut top = TopN::new(SortSpec::new(&src, keys, &out_cols)?, n.min(MAX_LIMIT), &src.mem)?;
                     match top_from_source(cluster, &src, &source, prefix, keys, top.n, query.as_ref(), &mut stats, w)? {
                         Some(rows) => top.add(rows, w)?,
                         None => {
@@ -4197,23 +4298,30 @@ async fn execute_plain(cluster: &Cluster, q: Query, filter: Option<Value>, w: &m
                     let n = (*n).min(MAX_LIMIT);
                     let only_scan_bound = keeps_one_row_per_doc(prefix);
                     let mut rows_out: Vec<Vec<V>> = Vec::new();
+                    let mut held = Growth::new(&src.mem)?;
                     scan(cluster, &source, query, only_scan_bound.then_some(n), &mut stats, |rows| {
                         let mut rows = pipe.run(rows, w)?;
                         rows.truncate(n - rows_out.len());
                         rows_out.extend(rows);
+                        held.track(&rows_out)?;
                         Ok(rows_out.len() < n)
                     })
                     .await?;
+                    // `finish` charges the table from here on.
+                    drop(held);
                     let t = Table { cols: out_cols, rows: rows_out };
                     return finish(cluster, &src, t, &rest[1..], w, stats).await;
                 }
                 _ => {
                     let mut rows_out: Vec<Vec<V>> = Vec::new();
+                    let mut held = Growth::new(&src.mem)?;
                     scan(cluster, &source, query, None, &mut stats, |rows| {
                         rows_out.extend(pipe.run(rows, w)?);
+                        held.track(&rows_out)?;
                         Ok(true)
                     })
                     .await?;
+                    drop(held);
                     Table { cols: out_cols, rows: rows_out }
                 }
             }
@@ -4237,7 +4345,7 @@ fn keeps_one_row_per_doc(prefix: &[Cmd]) -> bool {
 }
 
 /// Loads the enrich tables and lookup indices `cmds` read.
-async fn load_resources(cluster: &Cluster, text: &str, cmds: &[Cmd]) -> EsResult<Resources> {
+async fn load_resources(cluster: &Cluster, text: &str, cmds: &[Cmd], mem: &Memory) -> EsResult<Resources> {
     let mut res = Resources::default();
     let mut warmed = false;
     for c in cmds {
@@ -4307,11 +4415,15 @@ async fn load_resources(cluster: &Cluster, text: &str, cmds: &[Cmd]) -> EsResult
                 let source = resolve_source(cluster, text, std::slice::from_ref(&concrete), &[], *index_at).await?;
                 let mut rows: Vec<Vec<V>> = Vec::new();
                 let mut stats = Stats::default();
+                // Every row of the lookup index, held for the whole query.
+                let mut held = Growth::new(mem)?;
                 scan(cluster, &source, None, None, &mut stats, |batch| {
                     rows.extend(batch);
+                    held.track(&rows)?;
                     Ok(true)
                 })
                 .await?;
+                held.keep()?;
                 res.lookup.insert(index.clone(), Table { cols: source.cols, rows });
             }
             _ => {}
@@ -4381,7 +4493,10 @@ fn ts_info(src: &Src<'_>, t: &Table, ts: bool) -> Table {
     Table { cols, rows }
 }
 
+/// The table is charged from here until the query ends (it is the query's result, or a part of
+/// it), each command's output as it replaces the input.
 fn run_rest(src: &Src<'_>, mut t: Table, cmds: &[Cmd], w: &mut Warnings) -> EsResult<Table> {
+    let mut held = src.mem.hold(memory::rows_bytes(&t.rows), memory::REUSED_ARRAYS)?;
     for cmd in cmds {
         match cmd {
             Cmd::Stats { aggs, by } => {
@@ -4401,10 +4516,18 @@ fn run_rest(src: &Src<'_>, mut t: Table, cmds: &[Cmd], w: &mut Warnings) -> EsRe
                 for r in &stats.rows {
                     by_key.insert(r[na..].iter().map(GroupKey::of).collect(), r[..na].to_vec());
                 }
+                // The groups' results, by key, and the new rows as they are built.
+                let mut lookup = Tally::new(&src.mem)?;
+                for r in &stats.rows {
+                    // A key and the aggregations it maps to, copied out of the stats row.
+                    lookup.add(size_of::<Vec<GroupKey>>() + nk * size_of::<GroupKey>() + r[na..].iter().map(memory::value_heap).sum::<usize>() + size_of::<Vec<V>>() + na * size_of::<V>() + r[..na].iter().map(memory::value_heap).sum::<usize>())?;
+                }
+                lookup.add(memory::rows_bytes(&stats.rows))?;
                 let names: Vec<String> = stats.cols.iter().map(|c| c.name.clone()).collect();
                 let (keep, mut cols) = keep_except(&t.cols, &names);
                 cols.extend(stats.cols.iter().cloned());
                 let mut rows = Vec::with_capacity(t.rows.len());
+                let mut grown = Growth::new(&src.mem)?;
                 for r in std::mem::take(&mut t.rows) {
                     let mut kv = Vec::with_capacity(nk);
                     for c in &key_cols {
@@ -4437,6 +4560,7 @@ fn run_rest(src: &Src<'_>, mut t: Table, cmds: &[Cmd], w: &mut Warnings) -> EsRe
                     }
                     n.extend(kv);
                     rows.push(n);
+                    grown.track(&rows)?;
                 }
                 t = Table { cols, rows };
             }
@@ -4459,12 +4583,16 @@ fn run_rest(src: &Src<'_>, mut t: Table, cmds: &[Cmd], w: &mut Warnings) -> EsRe
             }
             c if is_row_wise(c) => {
                 let (p, out) = build_pipeline(src, std::slice::from_ref(c), t.cols.clone())?;
-                t.rows = p.run(std::mem::take(&mut t.rows), w)?;
+                // What the command builds joins the table's charge as it is built.
+                t.rows = p.run_on(std::mem::take(&mut t.rows), w, &mut held)?;
                 t.cols = out;
+                continue;
             }
             _ => return Err(super::parser::parse_error(src, 0, "mismatched input 'FROM' expecting {'eval', 'keep', 'limit', 'sort', 'stats', 'where'}")),
         }
+        held.set(memory::rows_bytes(&t.rows))?;
     }
+    held.keep();
     Ok(t)
 }
 
@@ -4596,7 +4724,7 @@ mod tests {
     fn run(q: &str) -> Table {
         let parsed = super::super::parser::parse(&format!("ROW z = 1 | {q}"), &[], &[]).unwrap();
         let mut w = Warnings::default();
-        run_rest(&Src { text: &parsed.src, sql: false, locale: None, res: &Resources::default(), tz: None }, table(), &parsed.cmds[1..], &mut w).unwrap()
+        run_rest(&Src { text: &parsed.src, sql: false, locale: None, res: &Resources::default(), tz: None, mem: Memory::default() }, table(), &parsed.cmds[1..], &mut w).unwrap()
     }
 
     fn src_of(text: &str) -> (String, Resources) {
@@ -4613,7 +4741,7 @@ mod tests {
         let parsed = super::super::parser::parse(text, &[], &[]).unwrap();
         let Cmd::Stats { aggs, by } = &parsed.cmds[1] else { panic!() };
         let res = Resources::default();
-        let src = Src { text, sql: false, locale: None, res: &res, tz: None };
+        let src = Src { text, sql: false, locale: None, res: &res, tz: None, mem: Memory::default() };
         let mut w = Warnings::default();
         let mut g = Grouper::new(&src, aggs, by, &[Col { name: "a".into(), ty: DataType::Double }]).unwrap();
         let s = |x: &str| V::Str(x.into());
@@ -4651,7 +4779,7 @@ mod tests {
         let compile = |text: &str| -> EsResult<DataType> {
             let parsed = super::super::parser::parse(&format!("ROW z = 1 | EVAL x = {text}"), &[], &[]).unwrap();
             let Cmd::Eval(list) = &parsed.cmds[1] else { panic!() };
-            let src = Src { text: &parsed.src, sql: false, locale: None, res: &res, tz: None };
+            let src = Src { text: &parsed.src, sql: false, locale: None, res: &res, tz: None, mem: Memory::default() };
             Compiler { src: &src, cols: &cols, aggs: None }.compile(&list[0].expr).map(|(_, t)| t)
         };
         assert_eq!(compile("TO_IP(client_ip)").unwrap(), DataType::Ip);
@@ -4666,14 +4794,14 @@ mod tests {
         res2.unsupported.set(HashMap::from([("client_ip".to_string(), "binary".to_string())])).unwrap();
         let parsed = super::super::parser::parse("ROW z = 1 | EVAL x = TO_IP(client_ip)", &[], &[]).unwrap();
         let Cmd::Eval(list) = &parsed.cmds[1] else { panic!() };
-        let src = Src { text: &parsed.src, sql: false, locale: None, res: &res2, tz: None };
+        let src = Src { text: &parsed.src, sql: false, locale: None, res: &res2, tz: None, mem: Memory::default() };
         let err = Compiler { src: &src, cols: &cols, aggs: None }.compile(&list[0].expr).unwrap_err();
         assert_eq!(err.reason(), "Found 1 problem\nline 1:28: Cannot use field [client_ip] with unsupported type [binary]");
         // Unsupported for roll alone (no known Elasticsearch-unsupported type): reads as null.
         let res3 = Resources::default();
         let parsed = super::super::parser::parse("ROW z = 1 | EVAL x = client_ip", &[], &[]).unwrap();
         let Cmd::Eval(list) = &parsed.cmds[1] else { panic!() };
-        let src = Src { text: &parsed.src, sql: false, locale: None, res: &res3, tz: None };
+        let src = Src { text: &parsed.src, sql: false, locale: None, res: &res3, tz: None, mem: Memory::default() };
         assert_eq!(Compiler { src: &src, cols: &cols, aggs: None }.compile(&list[0].expr).unwrap().1, DataType::Unsupported);
     }
 
@@ -4686,7 +4814,7 @@ mod tests {
             cols: vec![Col { name: "t".into(), ty: DataType::Keyword }, Col { name: "n".into(), ty: DataType::Long }],
             rows: vec![vec![V::Multi(vec![V::Str("b".into()), V::Str("a".into())]), V::Multi(vec![V::Long(3), V::Long(1)])]],
         };
-        let out = run_rest(&Src { text: &parsed.src, sql: false, locale: None, res: &Resources::default(), tz: None }, t, &parsed.cmds[1..], &mut w).unwrap();
+        let out = run_rest(&Src { text: &parsed.src, sql: false, locale: None, res: &Resources::default(), tz: None, mem: Memory::default() }, t, &parsed.cmds[1..], &mut w).unwrap();
         (out, w.list)
     }
 
@@ -4748,14 +4876,14 @@ mod tests {
         res.unsupported.set(HashMap::from([("g".to_string(), "binary".to_string())])).unwrap();
         let cols = vec![Col { name: "f".into(), ty: DataType::Unsupported }, Col { name: "g".into(), ty: DataType::Unsupported }, Col { name: "h".into(), ty: DataType::Long }];
         let parsed = super::super::parser::parse("FROM u* | RENAME f AS z, g AS w, h AS v", &[], &[]).unwrap();
-        let src = Src { text: &parsed.src, sql: false, locale: None, res: &res, tz: None };
+        let src = Src { text: &parsed.src, sql: false, locale: None, res: &res, tz: None, mem: Memory::default() };
         let Err(err) = build_pipeline(&src, &parsed.cmds[1..], cols.clone()) else { panic!("rename must fail") };
         assert_eq!(
             err.reason(),
             "Found 2 problems\nline 1:18: Cannot use field [f] due to ambiguities being mapped as [2] incompatible types: [keyword] in [u2], [long] in [u1]\nline 1:26: Cannot use field [g] with unsupported type [binary]"
         );
         let parsed = super::super::parser::parse("FROM u* | RENAME h AS v", &[], &[]).unwrap();
-        let src = Src { text: &parsed.src, sql: false, locale: None, res: &res, tz: None };
+        let src = Src { text: &parsed.src, sql: false, locale: None, res: &res, tz: None, mem: Memory::default() };
         assert!(build_pipeline(&src, &parsed.cmds[1..], cols).is_ok());
     }
 
@@ -4806,12 +4934,12 @@ mod tests {
     #[test]
     fn top_n_bound_drops_rows_that_cannot_win() {
         let (text, res) = src_of("ROW a = 1 | SORT a");
-        let src = Src { text: &text, sql: false, locale: None, res: &res, tz: None };
+        let src = Src { text: &text, sql: false, locale: None, res: &res, tz: None, mem: Memory::default() };
         let parsed = super::super::parser::parse(&text, &[], &[]).unwrap();
         let Cmd::Sort(keys) = &parsed.cmds[1] else { panic!() };
         let cols = vec![Col { name: "a".into(), ty: DataType::Integer }, Col { name: "seq".into(), ty: DataType::Integer }];
         let mut w = Warnings::default();
-        let mut top = TopN::new(SortSpec::new(&src, keys, &cols).unwrap(), 2);
+        let mut top = TopN::new(SortSpec::new(&src, keys, &cols).unwrap(), 2, &Memory::default()).unwrap();
         top.add((0..2000).map(|i| vec![V::Int(i % 10), V::Int(i)]).collect(), &mut w).unwrap();
         assert!(top.bound.is_some());
         let before = top.buf.len();
@@ -4826,12 +4954,12 @@ mod tests {
     #[test]
     fn top_n_keeps_the_best_rows_in_arrival_order_for_ties() {
         let (text, res) = src_of("ROW a = 1 | SORT a DESC");
-        let src = Src { text: &text, sql: false, locale: None, res: &res, tz: None };
+        let src = Src { text: &text, sql: false, locale: None, res: &res, tz: None, mem: Memory::default() };
         let parsed = super::super::parser::parse(&text, &[], &[]).unwrap();
         let Cmd::Sort(keys) = &parsed.cmds[1] else { panic!() };
         let cols = vec![Col { name: "a".into(), ty: DataType::Integer }, Col { name: "seq".into(), ty: DataType::Integer }];
         let mut w = Warnings::default();
-        let mut top = TopN::new(SortSpec::new(&src, keys, &cols).unwrap(), 3);
+        let mut top = TopN::new(SortSpec::new(&src, keys, &cols).unwrap(), 3, &Memory::default()).unwrap();
         // Many batches, so the buffer is trimmed several times; ties on `a` keep arrival order.
         let mut seq = 0;
         for batch in 0..20 {
@@ -4848,7 +4976,7 @@ mod tests {
         assert!(out.iter().all(|r| r[0] == V::Int(100)));
         let seqs: Vec<&V> = out.iter().map(|r| &r[1]).collect();
         assert!(seqs.windows(2).all(|w| value::cmp(w[0], w[1]).is_lt()), "{seqs:?}");
-        let empty = TopN::new(SortSpec::new(&src, keys, &cols).unwrap(), 0);
+        let empty = TopN::new(SortSpec::new(&src, keys, &cols).unwrap(), 0, &Memory::default()).unwrap();
         assert!(empty.finish().is_empty());
     }
 
@@ -4911,7 +5039,7 @@ mod tests {
     fn unknown_columns_fail_with_locations() {
         let parsed = super::super::parser::parse("ROW z = 1 | WHERE nofield > 1", &[], &[]).unwrap();
         let mut w = Warnings::default();
-        let e = run_rest(&Src { text: &parsed.src, sql: false, locale: None, res: &Resources::default(), tz: None }, table(), &parsed.cmds[1..], &mut w).unwrap_err();
+        let e = run_rest(&Src { text: &parsed.src, sql: false, locale: None, res: &Resources::default(), tz: None, mem: Memory::default() }, table(), &parsed.cmds[1..], &mut w).unwrap_err();
         assert_eq!(e.reason(), "Found 1 problem\nline 1:19: Unknown column [nofield]");
     }
 

@@ -133,6 +133,11 @@ impl NodeMetrics {
         m
     }
 
+    /// The host's memory (bytes; 0 when unknown), whatever the node reports.
+    pub fn host_memory() -> i64 {
+        Self::host().mem_total
+    }
+
     pub fn heap_percent(&self) -> i64 {
         if self.heap_max > 0 { self.rss * 100 / self.heap_max } else { 0 }
     }
