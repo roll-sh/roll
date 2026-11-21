@@ -1309,6 +1309,10 @@ impl Apps {
         self.logs.redact(&format!("build:{}", d.id), &d.id, resolved.secret_values());
         let closed_vars = env_row.egress.closed().then(|| resolved.without_secrets());
         let mut build_env = resolved.vars;
+        // Instances' own addresses (kept awake, roll's OIDC tokens) are the running instances',
+        // never a build's: a build step can't mint the service's cloud tokens, and services that
+        // build alike share a build.
+        build_env.retain(|(k, _)| !matches!(k.as_str(), "ROLL_AWAKE_URL" | "ROLL_OIDC_URL"));
         // A closed environment builds on a network of its project's own with no route out and no
         // way to the host (`Runtime::build_egress`): its steps reach public hosts only, through
         // roll's proxy (packages, base images), never the node's services, private ranges or its
@@ -1407,7 +1411,7 @@ impl Apps {
                 let name = format!("vercel-{}", i + 1);
                 if run.schedules.len() < 20 && !run.schedules.iter().any(|s| s.path.as_deref() == Some(c.path.as_str()) || s.name == name) {
                     log.line(format!("plan: vercel.json's cron {} calls {}", c.schedule, c.path));
-                    run.schedules.push(crate::model::Scheduled { name, schedule: c.schedule.clone(), command: String::new(), path: Some(c.path.clone()), timezone: None, timeout_s: None });
+                    run.schedules.push(crate::model::Scheduled { name, schedule: c.schedule.clone(), command: String::new(), path: Some(c.path.clone()), timezone: None, timeout_s: None, auth: None });
                 }
             }
         }
@@ -2551,12 +2555,21 @@ impl Apps {
                             log.line(format!("scheduled {}: skipped, its last call to {path} is still out", sc.name));
                             continue;
                         }
-                        let host = url::Url::parse(&self.url(&e.slug)).ok().and_then(|u| u.host_str().map(str::to_string)).unwrap_or_default();
-                        let (this, sid, en, name, secret) = (self.clone(), svc.id.clone(), e.name.clone(), sc.name.clone(), secret.clone());
+                        let aud = self.url(&e.slug);
+                        let host = url::Url::parse(&aud).ok().and_then(|u| u.host_str().map(str::to_string)).unwrap_or_default();
+                        let (this, sid, en, name, secret, project, oidc) = (self.clone(), svc.id.clone(), e.name.clone(), sc.name.clone(), secret.clone(), svc.project.clone(), sc.auth.is_some());
                         let timeout = std::time::Duration::from_secs(sc.timeout_s.unwrap_or(300) as u64);
                         tokio::spawn(async move {
                             let began = std::time::Instant::now();
-                            let r = crate::public::call_scheduled(this.clone(), &sid, &en, &host, &path, secret.as_deref(), timeout).await;
+                            // `oidc`: roll's token for the service instead of CRON_SECRET.
+                            let r = match oidc {
+                                true => match this.service_token(&project, &sid, &en, &aud).await {
+                                    Ok(Some((jwt, _))) => crate::public::call_scheduled(this.clone(), &sid, &en, &host, &path, Some(&jwt), timeout).await,
+                                    Ok(None) => Err("roll issues no token for this environment".to_string()),
+                                    Err(e) => Err(format!("its token: {e:#}")),
+                                },
+                                false => crate::public::call_scheduled(this.clone(), &sid, &en, &host, &path, secret.as_deref(), timeout).await,
+                            };
                             this.calling.lock().remove(&key);
                             let ms = began.elapsed().as_millis() as u64;
                             let call = match &r {

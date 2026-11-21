@@ -213,7 +213,10 @@ fn prepare_one(t: &Target, ctx: &mut crate::mapping::MappingCtx, id: &str, routi
             for f in parsed.fields.iter().chain(parsed.nested.iter().flat_map(|n| n.fields.iter())) {
                 match &f.value {
                     // Vectors may set `dims` on the mapping; percolator queries check the mapping.
-                    crate::document::FieldValue::DenseVector(_) | crate::document::FieldValue::ByteVector(_) | crate::document::FieldValue::Percolator(..) => return None,
+                    crate::document::FieldValue::DenseVector(_)
+                    | crate::document::FieldValue::ByteVector(_)
+                    | crate::document::FieldValue::RankVectors { .. }
+                    | crate::document::FieldValue::Percolator(..) => return None,
                     _ => {}
                 }
             }

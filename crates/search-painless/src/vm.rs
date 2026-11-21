@@ -123,7 +123,7 @@ pub fn uoe() -> Thrown {
 /// A failed [`crate::Host::check_cancelled`] poll (a search timeout or cancellation). Like
 /// Elasticsearch's `TimeExceededException` / `TaskCancelledException` raised outside the
 /// script's frames, a script's `catch` can't swallow it: it must stop the script.
-fn cancelled_error(e: crate::host::HostError) -> Thrown {
+pub(crate) fn cancelled_error(e: crate::host::HostError) -> Thrown {
     let mut t = crate::es::doc::host_error(e);
     t.catchable = false;
     t

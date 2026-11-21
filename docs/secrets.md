@@ -3562,7 +3562,9 @@ Agent's templates do).
   why in its log), and nothing is dropped.
 - **Who may write one.** Storage takes references in a replication target only from the operator
   (its token, an admin's session): a scoped token that manages targets could otherwise point a
-  reference at any key the bucket's project holds and send it to an endpoint it chose.
+  reference at any key the bucket's project holds and send it to an endpoint it chose. Search
+  takes them only through roll's API (`PUT /v1/search/clusters/{id}/repositories/{name}`, bound
+  with `bind_ref` as the caller), never through the cluster's own endpoint.
 
 ### Templates
 
