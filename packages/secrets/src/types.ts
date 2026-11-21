@@ -54,7 +54,9 @@ export type NewEnvironment = {
 };
 /** `history_days`: how long old values are kept (null: for good). */
 /** `validity_checks`: whether credentials found in code are checked with their providers (docs/secrets.md, "Is it live?"). */
-export type Overview = { project: string; environments: Environment[]; previews: number; history_days: number | null; validity_checks: "on" | "off" };
+/** What deleting the workspace project takes from roll secrets (`holds`: `null` for nothing), and how many days it stays recoverable. */
+export type Deletion = { window_days: number; holds: string | null };
+export type Overview = { project: string; environments: Environment[]; previews: number; history_days: number | null; validity_checks: "on" | "off"; deletion: Deletion };
 /** A credential to check: a found value and, for an AWS access key id, the secret access key next to it. */
 export type ValidityProbe = { value: string; pair?: string | null };
 /** What a credential's provider said: never its value. `invalid` is revoked, deleted or never real. */

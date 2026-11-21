@@ -557,8 +557,10 @@ impl Secrets {
         let Ok(keys) = self.keys() else { return };
         let current = keys.current_id().to_string();
         let rows: Vec<(String, String)> = self.db.read(|c| c.query("SELECT project_id, dek FROM projects WHERE dek LIKE 'kms:%' LIMIT 500", (), |r| Ok((r.get(0)?, r.get(1)?)))).unwrap_or_default();
+        // Through the stored key, not the workspace: a deleted project's key is resealed too (and
+        // never sits in the batch failing, ahead of live ones).
         for (project, _) in rows.into_iter().filter(|(_, d)| crate::kms::sealed_by(d).is_some_and(|id| id != current)).take(50) {
-            if let Err(e) = self.project(&project) {
+            if let Err(e) = self.stored_key(&project) {
                 tracing::warn!(%project, "resealing a customer-wrapped data key after a rotation: {e}");
             }
         }

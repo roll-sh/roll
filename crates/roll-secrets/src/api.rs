@@ -302,7 +302,9 @@ async fn overview(State(s): S, Who(c): Who, Path(project): Path<String>) -> crat
         let previews = envs.iter().filter(|e| e.kind == crate::envs::Kind::Ephemeral).count();
         let history_days = s.history_days(&project)?;
         let validity_checks = if s.validity_checks(&project)? { "on" } else { "off" };
-        Ok(json!({ "project": project, "environments": envs, "previews": previews, "history_days": history_days, "validity_checks": validity_checks }))
+        // What deleting the workspace project would take with it, and for how long it's recoverable.
+        let deletion = s.deletion(&project)?;
+        Ok(json!({ "project": project, "environments": envs, "previews": previews, "history_days": history_days, "validity_checks": validity_checks, "deletion": deletion }))
     })
     .await?;
     Ok(ok(v))

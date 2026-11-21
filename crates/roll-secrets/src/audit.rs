@@ -117,6 +117,11 @@ fn entry(caller: &Caller, action: &str, env: Option<&str>, path: Option<&str>, k
 /// sign it. `start` moves where the log starts (retention's cut). Returns the last row's `seq`.
 fn append(c: &Conn<'_>, mac: &Keyring, project: &str, entries: &[AuditEntry], start: Option<i64>) -> Result<i64> {
     type Head = (i64, String, i64, Option<String>);
+    // A deleted project's log ends at its closing digest (deleted.rs): nothing goes after it, and
+    // no fresh head starts. 410: a caller that only takes notes lets it pass.
+    if c.query_row("SELECT closed_at FROM projects WHERE project_id = ?", [project], |r| r.get::<_, Option<i64>>(0)).optional()?.flatten().is_some() {
+        return Err(Error::Gone(format!("{project}'s audit log is closed: the project was deleted")));
+    }
     let (n, at) = (entries.len() as i64, entries.last().map_or(0, |e| e.at));
     c.claim(&format!("audit:{project}"))?;
     let take = |c: &Conn<'_>| -> Result<Option<Head>> {

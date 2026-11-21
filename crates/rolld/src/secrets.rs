@@ -488,6 +488,11 @@ pub fn open(args: &crate::Args, home: &Path, workspace: Arc<roll_workspace::Work
         let days: u32 = days.trim().parse().map_err(|_| anyhow::anyhow!("ROLL_SECRETS_DELETE_WINDOW_DAYS is a number of days (1–{}), not {days:?}", roll_secrets::deleted::WINDOW_DAYS_MAX))?;
         secrets.set_delete_window_days(days).map_err(|e| anyhow::anyhow!("ROLL_SECRETS_DELETE_WINDOW_DAYS: {e}"))?;
     }
+    // How long the purge waits for an audit sink that hasn't taken a closed project's last rows.
+    if let Ok(hours) = std::env::var("ROLL_SECRETS_PURGE_SINK_GRACE_HOURS") {
+        let hours: u32 = hours.trim().parse().map_err(|_| anyhow::anyhow!("ROLL_SECRETS_PURGE_SINK_GRACE_HOURS is a number of hours, not {hours:?}"))?;
+        secrets.set_purge_sink_grace_hours(hours).map_err(|e| anyhow::anyhow!("ROLL_SECRETS_PURGE_SINK_GRACE_HOURS: {e}"))?;
+    }
     secrets.watch_workspace();
     // Two sweepers: work in roll (expired leases and environments, due rotations, old audit
     // rows), and deliveries outside it (notices, syncs, sinks), so a slow platform holds up neither.

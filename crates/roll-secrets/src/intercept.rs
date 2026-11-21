@@ -290,7 +290,14 @@ impl Secrets {
             for (id, projects) in &live {
                 c.execute("UPDATE intercept_cas SET revoked_at = ?, revoked_why = ? WHERE id = ?", params![now, why, id])?;
                 for project in serde_json::from_str::<Vec<String>>(projects).unwrap_or_default() {
-                    audit::record(c, self.keys()?, &project, &caller, "secrets.intercept_ca.end", None, None, &[], &format!("ended interception CA {id} for {consumer}: {why}"), now)?;
+                    // A purged project has no log to note it in, a closed one takes nothing more.
+                    if c.query_row("SELECT 1 FROM projects WHERE project_id = ?", [&project], |r| r.get::<_, i64>(0)).optional()?.is_none() {
+                        continue;
+                    }
+                    match audit::record(c, self.keys()?, &project, &caller, "secrets.intercept_ca.end", None, None, &[], &format!("ended interception CA {id} for {consumer}: {why}"), now) {
+                        Ok(()) | Err(Error::Gone(_)) => {}
+                        Err(e) => return Err(e),
+                    }
                 }
             }
             Ok::<_, Error>(live.len())

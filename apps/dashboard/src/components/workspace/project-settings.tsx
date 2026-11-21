@@ -1,5 +1,6 @@
 import { useNavigate } from "@tanstack/react-router";
-import { useState } from "react";
+import { useEffect, useState } from "react";
+import { secretsApi, type Deletion } from "@/lib/secrets-api";
 import { DESCRIPTION_MAX, PROJECT_NAME, type WorkspaceIcon, type WorkspaceProject } from "@/lib/workspace-api";
 import { workspace } from "@/lib/workspace-store";
 import { Dialog } from "../agents/ui/dialog";
@@ -66,6 +67,21 @@ function Form({ project, onDone }: { project: WorkspaceProject; onDone: () => vo
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [confirm, setConfirm] = useState("");
+  // What roll secrets would lose with it, as its refusal would say (never a dry-run delete):
+  // unknown to someone who may not read the project's secrets.
+  const [deletion, setDeletion] = useState<Deletion | null>(null);
+  useEffect(() => {
+    let live = true;
+    secretsApi(project.id)
+      .overview()
+      .then(
+        (o) => live && setDeletion(o.deletion),
+        () => live && setDeletion(null),
+      );
+    return () => {
+      live = false;
+    };
+  }, [project.id]);
 
   const changed = name !== project.name || description !== project.description || JSON.stringify(icon) !== JSON.stringify(project.icon);
   const valid = PROJECT_NAME.test(name);
@@ -119,9 +135,7 @@ function Form({ project, onDone }: { project: WorkspaceProject; onDone: () => vo
 
       <div className="rounded-xl border border-danger/30 p-3">
         <div className="text-[12.5px] font-medium">Delete this project</div>
-        <p className="mt-0.5 text-[11.5px] text-subtle">
-          Its databases, buckets, streams and repositories stay. This project's secrets, their history and encryption keys go too. They can be restored for 7 days.
-        </p>
+        <p className="mt-0.5 text-[11.5px] text-subtle">Its databases, buckets, streams and repositories stay. {secretsGoing(deletion)}</p>
         <div className="mt-2.5 flex gap-2">
           <input value={confirm} onChange={(e) => setConfirm(e.target.value)} placeholder={project.name} aria-label="Type the project's name to delete it" className={`${field} h-8 flex-1 font-mono text-[12px]`} />
           <button
@@ -135,4 +149,12 @@ function Form({ project, onDone }: { project: WorkspaceProject; onDone: () => vo
       </div>
     </div>
   );
+}
+
+/** What the delete says about roll secrets: exactly what goes and for how long it's recoverable, or neutral words without numbers. */
+export function secretsGoing(d: Deletion | null): string {
+  if (!d) return "Any secrets it holds, their history and encryption keys go too; an admin of them can restore them for a while.";
+  if (!d.holds) return "It holds no secrets.";
+  const days = d.window_days === 1 ? "1 day" : `${d.window_days} days`;
+  return `This project's secrets go too (${d.holds}), with their history and encryption keys. They can be restored for ${days}.`;
 }

@@ -351,8 +351,6 @@ export const findSecret = (key: string) => req<Place[]>("GET", `/v1/secrets/sear
 export const deletedProjects = () => req<DeletedProject[]>("GET", "/v1/secrets/deleted");
 /** Brings a deleted project back (its workspace project and canvas too): 410 `gone` once its window ended, 409 `name_taken` if another project has its name now. */
 export const recoverProject = (project: string) => req<Recovered>("POST", `/v1/secrets/projects/${enc(project)}/recover`);
-/** Deleting a workspace project that holds secrets needs `?confirm=<its name>` from a secrets admin (`DELETE /v1/workspace/projects/{id}`). */
-export const holdsSecrets = (e: unknown): e is SecretsError => e instanceof SecretsError && e.code === "project_holds_secrets";
 
 /** The rule for keys (docs/secrets.md, "Secrets"). */
 export const SECRET_KEY = /^[A-Za-z_][A-Za-z0-9_]{0,255}$/;

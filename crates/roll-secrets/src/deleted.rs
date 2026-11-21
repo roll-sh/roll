@@ -23,9 +23,9 @@ pub const WINDOW_DAYS: u32 = 7;
 /// The longest window: the workspace keeps a deleted project a little longer
 /// ([`roll_workspace::KEEP_DELETED_DAYS`]).
 pub const WINDOW_DAYS_MAX: u32 = 90;
-/// How long the purge waits for an audit sink that hasn't taken the closing digest (one that's
-/// down retries every few minutes).
-const SINK_GRACE_MS: i64 = 86_400_000;
+/// How long the purge waits for an audit sink that hasn't taken the closing digest, unless the
+/// operator sets it (`ROLL_SECRETS_PURGE_SINK_GRACE_HOURS`): a sink down longer loses those rows.
+pub const SINK_GRACE_HOURS: u32 = 24;
 const DAY_MS: i64 = 86_400_000;
 
 /// A project's rows by `project_id`, gone at the purge (its registries wait for revocations:
@@ -34,11 +34,13 @@ const DATA: &[&str] = &[
     "secrets", "versions", "changes", "requests", "audit", "audit_heads", "required", "shares", "value_requests", "syncs", "audit_sinks", "notices", "identities", "identity_logins", "transit_keys", "oidc_issued", "placeholders", "key_hosts", "validity", "backup_schedules",
 ];
 
-/// Gone at the delete itself: links that hand something out to whoever holds them, and logins.
+/// Gone at the delete itself: links that hand something out to whoever holds them, and logins
+/// (their tokens are revoked as the rows go).
 const AT_DELETE: &[&str] = &["shares", "value_requests", "identity_logins"];
 
-/// Registries of the project's own resources (rotators…): a lease's revocation reads them.
-const REGISTRIES: &[&str] = &["rotators", "saas_rotators", "outside_dbs", "directories", "snowflake_accounts", "atlas_projects", "aws_users", "aws_roles", "cloud_accounts", "kubernetes_clusters", "cas", "ca_certs", "ssh_cas", "github_apps"];
+/// Registries of the project's own resources (rotators…): a lease's revocation reads them. A
+/// gateway's token is revoked when its row goes.
+const REGISTRIES: &[&str] = &["rotators", "saas_rotators", "outside_dbs", "directories", "snowflake_accounts", "atlas_projects", "aws_users", "aws_roles", "cloud_accounts", "kubernetes_clusters", "cas", "ca_certs", "ssh_cas", "github_apps", "gateways"];
 
 /// SQL: the project in column `col` isn't deleted (in its window or after). Background work that
 /// would act for a project (syncs, rotations, reminders, backups) waits on it.
@@ -64,19 +66,25 @@ struct Held {
     values: i64,
     protected: Vec<String>,
     keys: i64,
+    /// Certificate authorities, X.509 and SSH: their keys go too.
+    cas: i64,
+    identities: i64,
 }
 
 impl Held {
     fn of(c: &code_sql::Conn<'_>, project: &str) -> code_sql::Result<Held> {
+        let n = |sql: &str| c.query_row(sql, [project], |r| r.get::<_, i64>(0));
         Ok(Held {
-            values: c.query_row("SELECT COUNT(*) FROM secrets WHERE project_id = ?", [project], |r| r.get(0))?,
+            values: n("SELECT COUNT(*) FROM secrets WHERE project_id = ?")?,
             protected: c.query("SELECT slug FROM environments WHERE project_id = ? AND protected = 1 ORDER BY position", [project], |r| r.get(0))?,
-            keys: c.query_row("SELECT COUNT(*) FROM transit_keys WHERE project_id = ?", [project], |r| r.get(0))?,
+            keys: n("SELECT COUNT(*) FROM transit_keys WHERE project_id = ?")?,
+            cas: n("SELECT COUNT(*) FROM cas WHERE project_id = ?")? + n("SELECT COUNT(*) FROM ssh_cas WHERE project_id = ?")?,
+            identities: n("SELECT COUNT(*) FROM identities WHERE project_id = ?")?,
         })
     }
 
     fn is_empty(&self) -> bool {
-        self.values == 0 && self.protected.is_empty() && self.keys == 0
+        self.values == 0 && self.protected.is_empty() && self.keys == 0 && self.cas == 0 && self.identities == 0
     }
 
     /// `3 secrets, the protected environment production and 1 encryption key`.
@@ -93,6 +101,12 @@ impl Held {
         }
         if self.keys > 0 {
             parts.push(n(self.keys, "encryption key", "encryption keys"));
+        }
+        if self.cas > 0 {
+            parts.push(n(self.cas, "certificate authority", "certificate authorities"));
+        }
+        if self.identities > 0 {
+            parts.push(n(self.identities, "workload identity", "workload identities"));
         }
         match parts.len() {
             0 | 1 => parts.concat(),
@@ -120,8 +134,26 @@ impl Secrets {
         Ok(())
     }
 
-    fn window_days(&self) -> u32 {
+    pub(crate) fn window_days(&self) -> u32 {
         self.delete_window_days.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// How many hours the purge waits for an audit sink that hasn't taken the closing digest
+    /// (24 unless set; at least 1).
+    pub fn set_purge_sink_grace_hours(&self, hours: u32) -> Result<()> {
+        if hours == 0 {
+            return Err(Error::BadRequest("the sinks' grace is at least an hour".into()));
+        }
+        self.purge_sink_grace_hours.store(hours, std::sync::atomic::Ordering::Relaxed);
+        Ok(())
+    }
+
+    /// What deleting `project` would destroy, as the delete's refusal says it (`None`: nothing),
+    /// and the window (the overview's `deletion`).
+    pub(crate) fn deletion(&self, project: &str) -> Result<serde_json::Value> {
+        let held = self.db.read(|c| Held::of(c, project))?;
+        let holds = (!held.is_empty()).then(|| held.describe());
+        Ok(serde_json::json!({ "window_days": self.window_days(), "holds": holds }))
     }
 
     /// Answer the workspace's deletes (rolld and the tests call it once): refuse one that would
@@ -155,11 +187,12 @@ impl Secrets {
         if held.is_empty() {
             return Ok(());
         }
-        let what = held.describe();
         let caller = self.caller(request)?;
+        // Nothing about what it holds to someone who may not see it.
         if !caller.allows(Action::Admin, &Scope::project(project)) {
-            return Err(Error::Forbidden(format!("{name} holds {what}: only an admin of its secrets may delete it")));
+            return Err(Error::Forbidden(format!("{name} holds secrets: only an admin of its secrets may delete it")));
         }
+        let what = held.describe();
         let confirm = axum::extract::Query::<std::collections::HashMap<String, String>>::try_from_uri(&request.uri).ok().and_then(|q| q.0.get("confirm").cloned());
         if confirm.as_deref() != Some(name) && confirm.as_deref() != Some(project) {
             let days = self.window_days();
@@ -187,10 +220,17 @@ impl Secrets {
         let now = self.db.now_ms()?;
         let purge_at = now + self.window_days() as i64 * DAY_MS;
         let keys = self.keys().ok();
-        self.db.write(|c| {
+        type Ended = (Vec<String>, Vec<String>, Vec<String>);
+        let (grants, consumers, gateways): Ended = self.db.write(|c| {
             if c.execute("UPDATE projects SET forgotten_at = ?, purge_at = ?, forgotten_by = ? WHERE project_id = ? AND forgotten_at IS NULL", params![now, purge_at, by.principal, project])? == 0 {
-                return Ok(());
+                return Ok((vec![], vec![], vec![]));
             }
+            // Workload identities' tokens (revoked next), its placeholders (ended now), the
+            // consumers whose interception CAs name its hosts, and its gateways' links.
+            let grants: Vec<String> = c.query("SELECT grant_id FROM identity_logins WHERE project_id = ? AND expires_at > ?", params![project, now], |r| r.get(0))?;
+            let consumers: Vec<String> = c.query("SELECT DISTINCT consumer FROM placeholders WHERE project_id = ? AND revoked_at IS NULL AND expires_at > ?", params![project, now], |r| r.get(0))?;
+            c.execute("UPDATE placeholders SET revoked_at = ? WHERE project_id = ? AND revoked_at IS NULL", params![now, project])?;
+            let gateways: Vec<String> = c.query("SELECT id FROM gateways WHERE project_id = ?", [project], |r| r.get(0))?;
             for t in AT_DELETE {
                 c.execute(&format!("DELETE FROM {t} WHERE project_id = ?"), [project])?;
             }
@@ -207,8 +247,24 @@ impl Secrets {
                 let summary = format!("the workspace project was deleted: what it issued is revoked, and its secrets, history and keys are kept unreadable until {}, then purged", utc(purge_at));
                 audit::record(c, keys, project, by, "project.delete", None, None, &[], &summary, now)?;
             }
-            Ok::<_, Error>(())
+            Ok::<_, Error>((grants, consumers, gateways))
         })?;
+        if let Some(w) = &self.workloads {
+            for g in &grants {
+                if let Err(e) = w.revoke(g) {
+                    tracing::warn!(project, grant = %g, "revoking a deleted project's workload token failed: {e}");
+                }
+            }
+        }
+        for consumer in &consumers {
+            if let Err(e) = self.end_intercept_cas(consumer, "a project whose hosts it covered was deleted") {
+                tracing::warn!(project, %consumer, "ending an interception CA of a deleted project's consumer failed: {e}");
+            }
+        }
+        // Their links close now: a deleted project's gateway opens nothing (`gateway_link`).
+        for g in &gateways {
+            self.recheck_gateway(g);
+        }
         if let Err(e) = self.end_decoys() {
             tracing::warn!(project, "revoking a deleted project's decoys failed (the sweeper retries): {e}");
         }
@@ -257,19 +313,36 @@ impl Secrets {
             Some((Some(_), Some(_))) => return Err(Error::Gone(format!("{project}'s recovery window ended: its secrets were purged"))),
             _ => return Err(unknown()),
         }
-        let p = self.workspace.restore(project).map_err(|e| match e {
-            roll_workspace::Error::Conflict(m) => Error::Conflict("name_taken", m),
-            roll_workspace::Error::NotFound(_) => unknown(),
-            e => Error::Internal(e.to_string()),
-        })?;
-        let now = self.db.now_ms()?;
-        self.db.write(|c| {
-            if c.execute("UPDATE projects SET forgotten_at = NULL, purge_at = NULL, forgotten_by = NULL WHERE project_id = ? AND forgotten_at IS NOT NULL AND closed_at IS NULL", [project])? == 0 {
-                return Err(Error::Gone(format!("{project}'s recovery window ended: its secrets were purged")));
+        // The claim first, on the secrets' side: a close on another node after it finds nothing to
+        // close, and one before it leaves nothing to claim (and the workspace untouched).
+        type Was = (i64, Option<i64>, Option<String>);
+        let was: Option<Was> = self.db.write(|c| {
+            let was: Option<Was> = c.query_row("SELECT forgotten_at, purge_at, forgotten_by FROM projects WHERE project_id = ? AND forgotten_at IS NOT NULL AND closed_at IS NULL", [project], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?))).optional()?;
+            if was.is_some() {
+                c.execute("UPDATE projects SET forgotten_at = NULL, purge_at = NULL, forgotten_by = NULL WHERE project_id = ?", [project])?;
             }
-            let summary = "recovered within its window: what it issued was revoked at the delete (dynamic leases are issued again, managed links get new credentials)";
-            audit::record(c, self.keys()?, project, caller, "project.recover", None, None, &[], summary, now)
+            Ok::<_, Error>(was)
         })?;
+        let Some((forgotten_at, purge_at, forgotten_by)) = was else {
+            // Recovered meanwhile (another request's claim), or closed since.
+            let closed = self.db.read(|c| c.query_row("SELECT closed_at FROM projects WHERE project_id = ?", [project], |r| r.get::<_, Option<i64>>(0)).optional())?.flatten();
+            return Err(if closed.is_some() { Error::Gone(format!("{project}'s recovery window ended: its secrets were purged")) } else { unknown() });
+        };
+        let p = match self.workspace.restore(project) {
+            Ok(p) => p,
+            Err(e) => {
+                // Not back after all: deleted again, with the window it had.
+                self.db.write(|c| c.execute("UPDATE projects SET forgotten_at = ?, purge_at = ?, forgotten_by = ? WHERE project_id = ? AND forgotten_at IS NULL", params![forgotten_at, purge_at, forgotten_by, project]))?;
+                return Err(match e {
+                    roll_workspace::Error::Conflict(m) => Error::Conflict("name_taken", m),
+                    roll_workspace::Error::NotFound(_) => unknown(),
+                    e => Error::Internal(e.to_string()),
+                });
+            }
+        };
+        let now = self.db.now_ms()?;
+        let summary = "recovered within its window: what it issued was revoked at the delete (dynamic leases are issued again, managed links get new credentials)";
+        self.db.write(|c| audit::record(c, self.keys()?, project, caller, "project.recover", None, None, &[], summary, now))?;
         // Managed links: one new credential each (their old ones were revoked at the delete).
         let managed: Vec<(String, String, String, String)> = self.db.read(|c| {
             c.query(
@@ -308,39 +381,77 @@ impl Secrets {
             let (kid, key) = crate::audit_key::signer(&self.db, mac, &self.audit_keys, &self.issuer_keys)?;
             let sign = |d: &Digest| -> Result<String> { Ok(chain::sign(&kid, &key, d)) };
             for project in due {
+                // Its workspace project is back (a recovery that stopped between its two steps):
+                // that recovery is finished, not the project closed.
+                if self.workspace.get(roll_workspace::Scope::All, &project).is_ok() {
+                    let roll = Caller::consumer("roll:sweeper");
+                    self.db.write(|c| {
+                        if c.execute("UPDATE projects SET forgotten_at = NULL, purge_at = NULL, forgotten_by = NULL WHERE project_id = ? AND forgotten_at IS NOT NULL AND closed_at IS NULL", [&project])? == 1 {
+                            audit::record(c, mac, &project, &roll, "project.recover", None, None, &[], "recovered: its workspace project was back", now)?;
+                        }
+                        Ok::<_, Error>(())
+                    })?;
+                    continue;
+                }
+                // The write is the claim: the last row and the digest after it, then closed. A
+                // head that isn't roll's isn't signed, so nothing closes: the operator looks.
                 let closed = self.db.write(|c| {
-                    if c.execute("UPDATE projects SET closed_at = ? WHERE project_id = ? AND forgotten_at IS NOT NULL AND closed_at IS NULL AND purge_at <= ?", params![now, project, now])? == 0 {
+                    let due: Option<i64> = c.query_row("SELECT 1 FROM projects WHERE project_id = ? AND forgotten_at IS NOT NULL AND closed_at IS NULL AND purge_at <= ?", params![project, now], |r| r.get(0)).optional()?;
+                    if due.is_none() {
                         return Ok(false);
                     }
                     let roll = Caller::consumer("roll:purge");
                     audit::record(c, mac, &project, &roll, "project.purge", None, None, &[], "the recovery window ended: this project's secrets, their history and its encryption keys are purged, and this log ends at the next digest", now)?;
-                    audit::write_digest(c, mac, &project, now, now - audit::RETENTION_DAYS * DAY_MS, true, &sign)?;
+                    if !audit::write_digest(c, mac, &project, now, now - audit::RETENTION_DAYS * DAY_MS, true, &sign)? {
+                        // Rolls the last row back with it.
+                        return Err(Error::Conflict("unsigned", "its audit log's head isn't one roll wrote".into()));
+                    }
+                    c.execute("UPDATE projects SET closed_at = ? WHERE project_id = ?", params![now, project])?;
                     Ok::<_, Error>(true)
-                })?;
-                if closed {
-                    tracing::info!(%project, "a deleted project's recovery window ended: its audit log is closed");
+                });
+                match closed {
+                    Ok(true) => tracing::info!(%project, "a deleted project's recovery window ended: its audit log is closed"),
+                    Ok(false) => {}
+                    Err(Error::Conflict("unsigned", why)) => {
+                        tracing::error!(%project, "not closing a deleted project's audit log, nor purging it: {why}. Left for the operator; asked again in an hour");
+                        self.db.write(|c| c.execute("UPDATE projects SET purge_at = ? WHERE project_id = ? AND closed_at IS NULL", params![now + 3_600_000, project]))?;
+                    }
+                    Err(e) => return Err(e),
                 }
             }
         }
-        // Closed, and every sink has the last row (or a day went by): the rows go.
+        // Closed, and every sink has the last row (or the grace went by): the rows go.
+        let grace_ms = self.purge_sink_grace_hours.load(std::sync::atomic::Ordering::Relaxed) as i64 * 3_600_000;
         let purgeable: Vec<String> = self.db.read(|c| {
             c.query(
                 "SELECT p.project_id FROM projects p WHERE p.closed_at IS NOT NULL AND p.purged_at IS NULL AND (p.closed_at <= ? OR NOT EXISTS (
                    SELECT 1 FROM audit_sinks s WHERE s.project_id = p.project_id AND s.cursor < (SELECT COALESCE(MAX(a.id), 0) FROM audit a WHERE a.project_id = p.project_id))) LIMIT 50",
-                [now - SINK_GRACE_MS],
+                [now - grace_ms],
                 |r| r.get(0),
             )
         })?;
         for project in purgeable {
-            let purged = self.db.write(|c| {
+            type Missed = Vec<(String, i64)>;
+            let purged: Option<(Missed, Vec<String>)> = self.db.write(|c| {
                 if c.execute("UPDATE projects SET purged_at = ? WHERE project_id = ? AND closed_at IS NOT NULL AND purged_at IS NULL", params![now, project])? == 0 {
-                    return Ok(false);
+                    return Ok(None);
                 }
+                // A sink still behind past the grace loses what it hadn't taken, the closing
+                // digest with it: said once, per sink.
+                let missed: Missed = c.query(
+                    "SELECT s.id, (SELECT COUNT(*) FROM audit a WHERE a.project_id = s.project_id AND a.id > s.cursor) FROM audit_sinks s WHERE s.project_id = ?",
+                    [&project],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )?;
                 purge_rows(c, &project)?;
-                forget_if_done(c, &project, now)?;
-                Ok::<_, Error>(true)
+                let tokens = forget_if_done(c, &project, now)?;
+                Ok::<_, Error>(Some((missed, tokens)))
             })?;
-            if purged {
+            if let Some((missed, tokens)) = purged {
+                for (sink, n) in missed.into_iter().filter(|(_, n)| *n > 0) {
+                    tracing::warn!(%project, %sink, undelivered = n, "a deleted project was purged before this audit sink took its last rows (the closing digest among them)");
+                }
+                self.revoke_gateway_tokens(&project, tokens);
                 if let Err(e) = self.workspace.forget_deleted(&project) {
                     tracing::warn!(%project, "dropping a purged project from the workspace failed: {e}");
                 }
@@ -348,6 +459,16 @@ impl Secrets {
             }
         }
         self.sweep_forgotten()
+    }
+
+    /// The tokens of a purged project's gateways, whose rows just went (outside the transaction).
+    fn revoke_gateway_tokens(&self, project: &str, tokens: Vec<String>) {
+        let Some(w) = &self.workloads else { return };
+        for t in tokens {
+            if let Err(e) = w.revoke_token(&t, "its project was purged") {
+                tracing::warn!(project, token = %t, "revoking a purged project's gateway token failed: {e}");
+            }
+        }
     }
 
     /// Purged projects whose last lease is revoked: their key and registries go.
@@ -360,10 +481,17 @@ impl Secrets {
                 [now],
                 |r| r.get::<_, String>(0),
             )?;
+            let mut tokens = vec![];
             for p in due {
-                forget_if_done(c, &p, now)?;
+                let t = forget_if_done(c, &p, now)?;
+                tokens.push((p, t));
             }
-            Ok(())
+            Ok::<_, Error>(tokens)
+        })
+        .map(|done| {
+            for (p, t) in done {
+                self.revoke_gateway_tokens(&p, t);
+            }
         })
     }
 
@@ -401,15 +529,18 @@ fn purge_rows(c: &code_sql::Conn<'_>, project: &str) -> Result<()> {
 /// Drop a purged project's key and registries once no lease of its waits to be revoked, and no
 /// certificate its CAs revoked is still within its lifetime (their CRLs, signed with the CA's key,
 /// keep being served until then: a client that can't fetch one would trust the certificate again).
-fn forget_if_done(c: &code_sql::Conn<'_>, project: &str, now: i64) -> Result<()> {
+/// The tokens of the gateways that went, to be revoked once the write is in.
+fn forget_if_done(c: &code_sql::Conn<'_>, project: &str, now: i64) -> Result<Vec<String>> {
     let waiting: i64 = c.query_row("SELECT COUNT(*) FROM leases WHERE project_id = ? AND revoked_at IS NULL", [project], |r| r.get(0))?;
     let revoked: i64 = c.query_row("SELECT COUNT(*) FROM ca_certs WHERE project_id = ? AND revoked_at IS NOT NULL AND not_after >= ?", params![project, now], |r| r.get(0))?;
+    let mut tokens = vec![];
     if waiting == 0 && revoked == 0 {
+        tokens = c.query("SELECT token_id FROM gateways WHERE project_id = ? AND token_id IS NOT NULL", [project], |r| r.get(0))?;
         c.execute("DELETE FROM leases WHERE project_id = ?", [project])?;
         for t in REGISTRIES {
             c.execute(&format!("DELETE FROM {t} WHERE project_id = ?"), [project])?;
         }
         c.execute("DELETE FROM projects WHERE project_id = ?", [project])?;
     }
-    Ok(())
+    Ok(tokens)
 }
