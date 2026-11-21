@@ -1080,29 +1080,27 @@ previews are listed once those products are on.
 Ranked; the top item is in progress. A watchdog reads this list. Unblocked work comes first; what
 waits on a sibling PR reaching main is last.
 
-1. **Postgres SQL from a `write` token ran as the project's superuser: decision 6, option (b),
-   building (this PR; the user can still override it before it lands).** `POST
-   /v1/endpoints/{id}/query` without `read_only` is `write`, and ran as `roll`, the bootstrap
-   superuser; only a text check (`grants_access`) made role and privilege SQL `admin`, and dynamic
-   SQL got past it (`DO $$ BEGIN EXECUTE 'CREA' || 'TE ROLE x SUPERUSER'; END $$`), as did
-   `COPY … TO PROGRAM` (a shell in the compute). The choice, and why:
-   - (b), taken: every database gets `roll_owner` (no login, never a superuser), which takes the
-     database and what the superuser owns in the app's schemas (the app-role SQL's loops, idempotent,
-     run before each such query); a write-only grant's SQL runs as a role made for the query that is
-     a member of the roles owning the app's objects (`roll_owner`, a branch's app role; never one
-     that is or can become more), with `pg_read_all_data` and `pg_write_all_data`, `SET FALSE` on 16+.
-     `write` keeps everything it could do to the app's data and schemas, migrations included, and
-     loses only the superuser's powers. What it makes is reassigned to `roll_owner`. A branch's app
-     role joins `roll_owner`. Never membership in `roll`: it owns the system catalogs.
-   - (a), not taken: a role with only `pg_read_all_data`/`pg_write_all_data` and CREATE would make
-     altering or dropping an existing table `admin`, breaking every write token's migrations on
-     databases without an app role.
-   - The gate asks the route's `capable(Admin)` quietly and says yes with `roll_auth::Capable`, so
-     the operator's SQL and an admin grant's still run as `roll`. Test:
-     `pg-control/tests/e2e.rs::write_sql_is_never_the_superuser`.
-   - Still open: `DROP TABLE` under `write` doesn't ask a `delete` rule (Supabase and PlanetScale
-     ask before destructive SQL); it would take the parsed statement in the product.
-
+1. **Dropping objects needs `delete` (this PR; decision 6's option (b) landed in #606).** A
+   write-only grant's SQL runs as a member of the database's `roll_owner`, never the superuser
+   (`SqlAs::Writer`), and owners may drop, so a token whose `delete` is `ask` or refused could still
+   `DROP TABLE` (Supabase and PlanetScale ask before destructive SQL). There's no Postgres parser in
+   the workspace, so Postgres decides: `OWNER_SQL` makes a `roll_no_drop` role and, in `roll_guard`
+   (the superuser's schema, never handed to an owner role), an event trigger on `sql_drop` that
+   refuses any drop (a table, an index, a column by `ALTER … DROP`, a schema, a function) by a
+   session that is a member of `roll_no_drop`, saying to ask for `delete`. The writer joins it
+   unless the gate's `capable` says the grant may `delete` the endpoint (`roll_auth::Capable` now
+   carries a list: `admin` and `delete` for this route). A writer can't drop, disable or replace
+   the trigger (not its owner; `session_replication_role` is the superuser's). Deleting rows stays a
+   write: `DELETE FROM t` empties a table as `TRUNCATE` does, and `write` must be able to delete
+   rows, so guarding `TRUNCATE` alone would buy nothing. Test: `write_sql_is_never_the_superuser`
+   (a writer without delete deletes rows, makes tables and columns, drops nothing, and can't touch
+   the guard; one with delete drops).
+   Decision 6's write-up, for the record: `roll_owner` (no login, never a superuser) takes the
+   database and what the superuser owns in the app's schemas; a writer joins only owner roles that
+   are, and can become, nothing more (`WITH INHERIT TRUE, SET FALSE`), never `roll`, which owns
+   the system catalogs; option (a), a role with no ownership, would have broken every write
+   token's migrations. The gate's `capable(Admin)` keeps the superuser for the operator and admin
+   grants (`roll_auth::Capable`).
 2. **From that comparison, unblocked:** a "hand this to an agent" workflow (an error or a slow
    query to `code_create_work`, an agent's claim, `previews_wait`, `review_preview`) once roll
    code's tools can be a workflow's requirements (they're another crate's); roll code's routes with
