@@ -1693,6 +1693,11 @@ pub(crate) fn parse_copy_data(
     };
     // (Lines without escapes of a plain text COPY: `plain_values`.)
     let direct = plain && !f.csv && f.default.is_none() && f.null.contains('\\') && c.ncols > 0 && c.target.len() == c.ncols;
+    let kinds: Vec<PlainKind<'_>> = if direct {
+        c.target.iter().map(|&col| PlainKind::of(&t.columns[col].ty)).collect()
+    } else {
+        Vec::new()
+    };
     'records: for (lineno, (raw, rec)) in records.into_iter().enumerate() {
         let lineno = first + lineno;
         match *csv_eol {
@@ -1706,7 +1711,7 @@ pub(crate) fn parse_copy_data(
             Rec::Plain(text) => {
                 if direct
                     && !(lineno == 0 && f.header)
-                    && let Some(vals) = plain_values(text, c, fmt)
+                    && let Some(vals) = plain_values(text, c, &kinds, fmt)
                 {
                     rows.push(CopyRow::Values(vals));
                     lines.push((line, raw_of(&raw)));
@@ -1991,18 +1996,60 @@ fn plain_fields<'a>(line: &'a str, f: &CopyFormat) -> Vec<InField<'a>> {
         .collect()
 }
 
+/// How `plain_values` reads a column's text: the common types by their fast paths
+/// (`int_fast`, `float_fast`, the text as it is), falling back to `parse_value` for a value
+/// they don't take; any other type by `parse_value`. Made once per chunk.
+#[derive(Clone, Copy)]
+enum PlainKind<'a> {
+    Int(i64, i64, fn(i64) -> Value),
+    Float8,
+    Text,
+    Other(&'a DataType),
+}
+
+impl<'a> PlainKind<'a> {
+    fn of(ty: &'a DataType) -> PlainKind<'a> {
+        match ty {
+            DataType::Int2 => PlainKind::Int(i16::MIN as i64, i16::MAX as i64, |v| Value::Int2(v as i16)),
+            DataType::Int4 => PlainKind::Int(i32::MIN as i64, i32::MAX as i64, |v| Value::Int4(v as i32)),
+            DataType::Int8 => PlainKind::Int(i64::MIN, i64::MAX, Value::Int8),
+            DataType::Float8 => PlainKind::Float8,
+            DataType::Text => PlainKind::Text,
+            ty => PlainKind::Other(ty),
+        }
+    }
+
+    /// `parse_value` of `s` for this column, None where it fails.
+    #[inline]
+    fn parse(self, s: &str, ty: &DataType, fmt: &crate::types::text::FormatCtx) -> Option<Value> {
+        match self {
+            PlainKind::Int(min, max, make) => match crate::types::text::int_fast(s.as_bytes()) {
+                Some(v) if v >= min && v <= max => Some(make(v)),
+                _ => parse_value(s, ty, fmt).ok(),
+            },
+            PlainKind::Float8 => match crate::types::text::float_fast(s.as_bytes()) {
+                Some(v) => Some(Value::Float8(v)),
+                None => parse_value(s, ty, fmt).ok(),
+            },
+            PlainKind::Text => Some(Value::text(s)),
+            PlainKind::Other(ty) => parse_value(s, ty, fmt).ok(),
+        }
+    }
+}
+
 /// A plain text COPY's line without escapes, when it gives every column a value that
 /// parses: the values, as the record loop makes them (no field can be the NULL marker, which
 /// has a backslash, or a DEFAULT one, which this COPY hasn't). None: the loop's general path.
-fn plain_values(line: &str, c: &CopyIn, fmt: &crate::types::text::FormatCtx) -> Option<Vec<Value>> {
+/// `kinds`: the target columns' `PlainKind`s.
+fn plain_values(line: &str, c: &CopyIn, kinds: &[PlainKind<'_>], fmt: &crate::types::text::FormatCtx) -> Option<Vec<Value>> {
     // (The delimiter is one byte, ASCII: its bytes found as such, not as a char's.)
     let d = u8::try_from(c.format.delimiter).ok().filter(u8::is_ascii)?;
     let mut vals = Vec::with_capacity(c.ncols);
     let mut ends = memchr::memchr_iter(d, line.as_bytes()).chain(std::iter::once(line.len()));
     let mut start = 0;
-    for &col in &c.target {
+    for (&col, kind) in c.target.iter().zip(kinds) {
         let end = ends.next()?;
-        vals.push(parse_value(&line[start..end], &c.table.columns[col].ty, fmt).ok()?);
+        vals.push(kind.parse(&line[start..end], &c.table.columns[col].ty, fmt)?);
         start = end + 1;
     }
     ends.next().is_none().then_some(vals)

@@ -4284,12 +4284,12 @@ impl InsertNode {
 
     /// Insert a COPY FROM row under its line's context. Buffered rows reach their indexes
     /// after the line is gone, so a unique violation names only the line number.
-    fn insert_copied(
-        &mut self,
-        c: &CopyLines,
-        src: Row,
-        ctx: &ExecCtx,
-    ) -> Result<Option<(Row, Vec<u8>, Option<Row>)>> {
+    fn insert_copied(&mut self, src: Row, ctx: &ExecCtx) -> Result<Option<(Row, Vec<u8>, Option<Row>)>> {
+        // (What the row needs of the plan's COPY, so the plan isn't held across the insert.)
+        let (table, multi, binary) = match &self.plan.copy {
+            Some(c) => (c.table.clone(), c.multi, c.binary),
+            None => return Ok(None),
+        };
         // (The sink opens once the rows stored are left alone until the load ends; its writes
         // go to runs once the table is past the model's size, or when its rows are held and
         // so stored with their TIDs: nothing stamps them then.)
@@ -4318,14 +4318,14 @@ impl InsertNode {
         let n = {
             let mut f = frames.borrow_mut();
             f.push(Frame::Copy {
-                table: c.table.clone(),
+                table,
                 line,
-                raw: (!c.binary).then_some(raw),
+                raw: (!binary).then_some(raw),
             });
             f.len() - 1
         };
         let mut at_flush = false;
-        let hold = c.multi && !self.plain;
+        let hold = multi && !self.plain;
         if hold {
             super::pgstat::hold_inserts(ctx);
         }
@@ -4341,16 +4341,14 @@ impl InsertNode {
         }
         let r = r.map_err(|e| {
             // (And an index entry too big, `rowsize`: its index insertion is the flush's too.)
-            if c.multi
+            if multi
                 && !e.stacked
                 && (e.code == code::UNIQUE_VIOLATION || e.code == code::EXCLUSION_VIOLATION || e.code == code::PROGRAM_LIMIT_EXCEEDED)
             {
                 at_flush = true;
-                frames.borrow_mut()[n] = Frame::Copy {
-                    table: c.table.clone(),
-                    line,
-                    raw: None,
-                };
+                if let Frame::Copy { raw, .. } = &mut frames.borrow_mut()[n] {
+                    *raw = None;
+                }
             }
             e.in_frames(&frames.borrow())
         });
@@ -4371,7 +4369,7 @@ impl InsertNode {
                 crate::repl::log::multi_insert(ctx);
             }
         }
-        if c.multi && r.is_ok() {
+        if multi && r.is_ok() {
             self.copy_buf = (self.copy_buf.0 + 1, self.copy_buf.1 + raw_len);
             if self.copy_buf.0 >= super::sizing::COPY_TUPLES || self.copy_buf.1 >= super::sizing::COPY_BYTES {
                 self.copy_buf = (0, 0);
@@ -4457,14 +4455,17 @@ impl InsertNode {
         }
         let xid = ctx.txn.borrow_mut().cur_xid();
         let fresh = t.has_rowid();
+        // (The key is the caller's only for RETURNING, which a plain insert hasn't; kept for
+        // the index entries when there are any.)
+        let kept = if rules.indexes.is_empty() { Vec::new() } else { dkey.clone() };
         if fresh {
-            super::toast::put_new_row(t, dkey.clone(), &row, xid, tid, &mut ctx.txn.borrow_mut())?;
+            super::toast::put_new_row(t, dkey, &row, xid, tid, &mut ctx.txn.borrow_mut())?;
         } else {
-            super::toast::put_row(t, dkey.clone(), &row, xid, tid, &mut ctx.txn.borrow_mut())?;
+            super::toast::put_row(t, dkey, &row, xid, tid, &mut ctx.txn.borrow_mut())?;
         }
         crate::repl::log::insert(t, &row, ctx)?;
-        put_index_entries_with(t, &rules.indexes, &vals.vals, &dkey, fresh, ctx)?;
-        Ok(Some((row, dkey, None)))
+        put_index_entries_with(t, &rules.indexes, &vals.vals, &kept, fresh, ctx)?;
+        Ok(Some((row, kept, None)))
     }
 
     /// The pg_stat counts of a plain COPY's rows since the last flush (`insert_plain`), as
@@ -4850,8 +4851,8 @@ impl Node for InsertNode {
                 })?;
                 return Ok(None);
             };
-            let inserted = match self.plan.copy.clone() {
-                Some(c) => self.insert_copied(&c, src, ctx).inspect_err(|_| self.counts_on_error(ctx))?,
+            let inserted = match &self.plan.copy {
+                Some(_) => self.insert_copied(src, ctx).inspect_err(|_| self.counts_on_error(ctx))?,
                 None => {
                     // (Its rows are stored as they go, final: the sink takes them once there
                     // are enough to be worth its room.)

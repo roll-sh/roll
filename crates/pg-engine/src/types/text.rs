@@ -557,7 +557,117 @@ fn hex_float(t: &str) -> Option<(f64, bool)> {
     Some((if neg { -v } else { v }, nonzero))
 }
 
+/// Powers of ten that fit in a u64.
+const POW10: [u64; 20] = {
+    let mut p = [1u64; 20];
+    let mut i = 1;
+    while i < 20 {
+        p[i] = p[i - 1] * 10;
+        i += 1;
+    }
+    p
+};
+
+/// The digits from `i` on, accumulated onto `w` (8 a step while 8 bytes are left: each a
+/// digit as `int_fast` checks them), and where they end. The caller bounds their number.
+#[inline]
+fn float_digits(b: &[u8], mut i: usize, mut w: u64) -> (u64, usize) {
+    const HIGH: u64 = 0xF0F0_F0F0_F0F0_F0F0;
+    const ZEROS: u64 = 0x3030_3030_3030_3030;
+    while let Some(c) = b.get(i..i + 8) {
+        let x = u64::from_le_bytes(c.try_into().expect("8 bytes"));
+        if x & HIGH != ZEROS || x.wrapping_add(0x0606_0606_0606_0606) & HIGH != ZEROS {
+            break;
+        }
+        let x = x - ZEROS;
+        let x = x * 10 + (x >> 8);
+        let x = ((x & 0x0000_00FF_0000_00FF).wrapping_mul(100 + (1_000_000 << 32)).wrapping_add(((x >> 16) & 0x0000_00FF_0000_00FF).wrapping_mul(1 + (10_000 << 32)))) >> 32;
+        w = w.wrapping_mul(100_000_000).wrapping_add(x);
+        i += 8;
+    }
+    while let Some(&c) = b.get(i) {
+        let d = c.wrapping_sub(b'0');
+        if d > 9 {
+            break;
+        }
+        w = w.wrapping_mul(10).wrapping_add(d as u64);
+        i += 1;
+    }
+    (w, i)
+}
+
+/// The common float literal: an optional minus, digits, and a point with digits after it
+/// or none, 19 digits at most (None: anything else, for `parse_float`'s general path). Its
+/// value is `w / 10^k` for the digits' integer `w` and the `k` after the point, the double
+/// nearest it (ties to even), as strtod and Rust's parser give it: `w` and `10^k` are exact
+/// in a u64; for `w < 2^53` and `k <= 15` both are exact doubles and one division rounds
+/// once (Clinger's fast path); otherwise `w` shifted so the quotient by `10^k` has 63 or 64
+/// bits, its top 53 the mantissa, the rest and the remainder deciding the rounding. The
+/// result is never subnormal or infinite (between 10^-19 and 10^19).
+#[inline]
+pub fn float_fast(b: &[u8]) -> Option<f64> {
+    let (neg, b) = match b.first() {
+        Some(b'-') => (true, &b[1..]),
+        _ => (false, b),
+    };
+    if b.len() > 20 {
+        return None;
+    }
+    let (w, i) = float_digits(b, 0, 0);
+    if i == 0 {
+        return None;
+    }
+    let (w, k) = if i == b.len() {
+        (w, 0)
+    } else {
+        if b[i] != b'.' {
+            return None;
+        }
+        let (w, j) = float_digits(b, i + 1, w);
+        if j != b.len() {
+            return None;
+        }
+        (w, j - i - 1)
+    };
+    if b.len() - usize::from(i < b.len()) > 19 {
+        return None;
+    }
+    let v = if w == 0 {
+        0.0
+    } else if k == 0 || (w < 1 << 53 && k <= 15) {
+        w as f64 / POW10[k] as f64
+    } else {
+        let d = POW10[k];
+        let s = 63 + (64 - d.leading_zeros()) - (64 - w.leading_zeros());
+        let n = (w as u128) << s;
+        let q = (n / d as u128) as u64;
+        let r = (n % d as u128) as u64;
+        let drop = 11 - q.leading_zeros();
+        let mut m = q >> drop;
+        let rest = q & ((1 << drop) - 1);
+        let half = 1 << (drop - 1);
+        let mut e2 = drop as i32 - s as i32;
+        if rest > half || (rest == half && (r != 0 || m & 1 == 1)) {
+            m += 1;
+            if m == 1 << 53 {
+                m = 1 << 52;
+                e2 += 1;
+            }
+        }
+        m as f64 * f64::from_bits(((e2 + 1023) as u64) << 52)
+    };
+    Some(if neg { -v } else { v })
+}
+
 fn parse_float(s: &str, tname: &str) -> Result<f64> {
+    if let Some(v) = float_fast(s.as_bytes()) {
+        return Ok(v);
+    }
+    parse_float_general(s, tname)
+}
+
+#[inline(never)]
+fn parse_float_general(s: &str, tname: &str) -> Result<f64> {
     // (The common case: digits with a point, an optional minus, no exponent; finite and,
     // with a nonzero digit, not rounded to zero. The bytes checked without stopping at the
     // first other one, a loop the compiler does 16 bytes at a time: a COPY's 19-digit value
@@ -640,24 +750,53 @@ pub fn int_type_name(ty: &DataType) -> &'static str {
     }
 }
 
-/// Parse an integer literal with Postgres's rules (whitespace, sign, `_` separators, 0x/0o/0b).
-pub fn parse_int(s: &str, tname: &str, min: i64, max: i64) -> Result<i64> {
-    // (The common case: an optional minus and up to 18 decimal digits, nothing else.)
-    let b = s.as_bytes();
-    let (neg, digits) = match b.first() {
+/// The common integer literal: an optional minus and 1 to 18 decimal digits, nothing else
+/// (None: anything else, for `parse_int`'s general path). Up to 8 digits are checked and
+/// converted as one word: a digit's byte is 0x30-0x39, and each step adds pairs of the
+/// digits before it (1+1, 2+2, 4+4) times their powers of ten.
+#[inline]
+pub fn int_fast(b: &[u8]) -> Option<i64> {
+    let (neg, d) = match b.first() {
         Some(b'-') => (true, &b[1..]),
         _ => (false, b),
     };
-    if !digits.is_empty() && digits.len() <= 18 && digits.iter().all(u8::is_ascii_digit) {
-        let mut v: i64 = 0;
-        for d in digits {
-            v = v * 10 + (d - b'0') as i64;
+    let v = match d.len() {
+        n @ 1..=8 => {
+            // (The digits in the word's last n bytes, '0's before them.)
+            let mut w = [b'0'; 8];
+            w[8 - n..].copy_from_slice(d);
+            let x = u64::from_le_bytes(w);
+            const HIGH: u64 = 0xF0F0_F0F0_F0F0_F0F0;
+            const ZEROS: u64 = 0x3030_3030_3030_3030;
+            if x & HIGH != ZEROS || x.wrapping_add(0x0606_0606_0606_0606) & HIGH != ZEROS {
+                return None;
+            }
+            // (The products wrap: their high halves aren't wanted.)
+            let x = x - ZEROS;
+            let x = x * 10 + (x >> 8);
+            (((x & 0x0000_00FF_0000_00FF).wrapping_mul(100 + (1_000_000 << 32)).wrapping_add(((x >> 16) & 0x0000_00FF_0000_00FF).wrapping_mul(1 + (10_000 << 32)))) >> 32) as i64
         }
-        let v = if neg { -v } else { v };
-        if v >= min && v <= max {
-            return Ok(v);
-        }
+        9..=18 if d.iter().all(u8::is_ascii_digit) => d.iter().fold(0i64, |v, c| v * 10 + (c - b'0') as i64),
+        _ => return None,
+    };
+    Some(if neg { -v } else { v })
+}
+
+/// Parse an integer literal with Postgres's rules (whitespace, sign, `_` separators, 0x/0o/0b).
+pub fn parse_int(s: &str, tname: &str, min: i64, max: i64) -> Result<i64> {
+    // (The common case, `int_fast`; the rest apart, out of line, so this one sets up no frame
+    // for it.)
+    if let Some(v) = int_fast(s.as_bytes())
+        && v >= min
+        && v <= max
+    {
+        return Ok(v);
     }
+    parse_int_general(s, tname, min, max)
+}
+
+#[inline(never)]
+fn parse_int_general(s: &str, tname: &str, min: i64, max: i64) -> Result<i64> {
     let bad = || {
         err!(
             INVALID_TEXT_REPRESENTATION,
@@ -2516,6 +2655,68 @@ pub fn format_interval(i: &Interval, ctx: &FormatCtx) -> String {
 
 #[cfg(test)]
 mod tests {
+    /// `float_fast` and `int_fast` against Rust's parsers (the general paths' results for
+    /// these forms) over random digit strings with and without a point, signs, zeros, nines,
+    /// 1 to 21 digits and stray bytes: the same double to the bit, the same integer, or
+    /// None where the fast path doesn't take the form.
+    #[test]
+    fn number_fast_paths_agree() {
+        let mut x: u64 = 0x2545_f491_4f6c_dd1d;
+        let mut next = move || {
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            x
+        };
+        let mut s = String::new();
+        for i in 0..400_000u32 {
+            s.clear();
+            let r = next();
+            if r & 3 == 0 {
+                s.push('-');
+            }
+            let nd = 1 + (r >> 2) % 21;
+            let point = (r >> 8) % (nd + 2);
+            for j in 0..nd {
+                if j == point {
+                    s.push('.');
+                }
+                let d = match i % 5 {
+                    0 => b"095"[(next() % 3) as usize],
+                    _ => b'0' + (next() % 10) as u8,
+                };
+                s.push(d as char);
+            }
+            if point == nd {
+                s.push('.');
+            }
+            if i % 97 == 0 {
+                s.push([' ', 'e', '/', ':', '.'][(next() % 5) as usize]);
+            }
+            let b = s.as_bytes();
+            let plain = b.iter().filter(|c| c.is_ascii_digit()).count() <= 19
+                && b.iter().all(|c| c.is_ascii_digit() || *c == b'.' || *c == b'-')
+                && b.iter().filter(|c| **c == b'.').count() <= 1
+                && b.get(usize::from(b[0] == b'-')).is_some_and(u8::is_ascii_digit);
+            match float_fast(b) {
+                Some(v) => assert_eq!(v.to_bits(), s.parse::<f64>().unwrap().to_bits(), "{s}"),
+                None => assert!(!plain, "{s} not taken"),
+            }
+            if !s.contains('.') {
+                let want = s.parse::<i64>().ok().filter(|_| s.trim_start_matches('-').len() <= 18 && !s.starts_with("--"));
+                assert_eq!(int_fast(b), want, "{s}");
+            }
+        }
+        for s in ["", "-", ".", "-.", ".5", "-.5", "+1", "0", "-0", "0.0", "-0.0", "5.", "12345678", "123456789", "-99999999", "999999999999999999", "9999999999999999999", "1.7976931348623157", "9007199254740993", "0.1", "0.30000000000000004", "1e5", "1_000"] {
+            let b = s.as_bytes();
+            if let Some(v) = float_fast(b) {
+                assert_eq!(v.to_bits(), s.parse::<f64>().unwrap().to_bits(), "{s}");
+            }
+            assert_eq!(int_fast(b), s.parse::<i64>().ok().filter(|_| !s.starts_with('+') && s.trim_start_matches('-').len() <= 18), "{s}");
+        }
+        assert_eq!(float_fast(b"-0").map(f64::to_bits), Some((-0.0f64).to_bits()));
+    }
+
     /// The divisibility check never rules out a midpoint the exact comparison finds.
     #[test]
     fn midpoint_quick_check_agrees() {
