@@ -338,6 +338,12 @@ CREATE TABLE IF NOT EXISTS error_groups (
     first_seen INTEGER NOT NULL,
     PRIMARY KEY (service, env, fingerprint)
 ) WITHOUT ROWID;
+-- Who started a deployment, as a person (their session's, their own token's, the operator's): what
+-- an approval is compared with.
+CREATE TABLE IF NOT EXISTS deploy_people (
+    deployment TEXT PRIMARY KEY,
+    person TEXT NOT NULL
+) WITHOUT ROWID;
 -- Who approved putting a deployment live (an environment's `approvals`), one row a person.
 CREATE TABLE IF NOT EXISTS deploy_approvals (
     deployment TEXT NOT NULL,
@@ -673,7 +679,8 @@ pub struct UsageAdd {
     pub requests: i64,
     pub egress_bytes: i64,
     pub build_seconds: f64,
-    /// Stored logs past the first week (an environment keeping them 30 or 90 days), in GB-hours.
+    /// What roll stores for it, in GB-hours: logs past the first week (an environment keeping them
+    /// 30 or 90 days) and its share of its build cache.
     pub stored_gb_hours: f64,
 }
 
@@ -2717,6 +2724,11 @@ impl Store {
         })
     }
 
+    /// What each cache holds now: `(project, ns, bytes)`.
+    pub fn cache_bytes(&self) -> Result<Vec<(String, String, i64)>> {
+        Ok(self.db.query("SELECT project, ns, SUM(bytes) FROM build_cache_artifacts GROUP BY project, ns", (), |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?)
+    }
+
     pub fn touch_artifact(&self, project: &str, ns: &str, hash: &str, now: i64) -> Result<()> {
         self.db.execute("UPDATE build_cache_artifacts SET used_at = ? WHERE project = ? AND ns = ? AND hash = ?", params![now, project, ns, hash])?;
         Ok(())
@@ -3097,6 +3109,25 @@ impl Store {
         Ok(())
     }
 
+    /// An hour of what roll stores for an environment (`what`: `logs`, `cache`), `gb` for that
+    /// hour, metered once: the hour it was metered for is marked in the same write, so a restart
+    /// or another node taking the service over never counts it twice. Whether it was metered now.
+    pub fn meter_stored(&self, service: &str, env: &str, what: &str, hour: i64, gb: f64) -> Result<bool> {
+        let key = format!("stored-{what}:{service}/{env}");
+        self.db.write(|c| {
+            let last: Option<i64> = c.query_row("SELECT value FROM state WHERE key = ?", [&key], |r| r.get::<_, String>(0)).optional()?.and_then(|v| v.parse().ok());
+            if last.is_some_and(|l| l >= hour) {
+                return Ok(false);
+            }
+            let n = c.execute("UPDATE usage SET stored_gb_hours = stored_gb_hours + ? WHERE service = ? AND env = ? AND hour = ?", params![gb, service, env, hour])?;
+            if n == 0 {
+                c.execute("INSERT INTO usage (service, env, hour, cpu_seconds, gb_seconds, requests, egress_bytes, build_seconds, stored_gb_hours) VALUES (?, ?, ?, 0, 0, 0, 0, 0, ?)", params![service, env, hour, gb])?;
+            }
+            c.execute("INSERT INTO state (key, value) VALUES (?, ?) ON CONFLICT (key) DO UPDATE SET value = excluded.value", params![key, hour.to_string()])?;
+            Ok(true)
+        })
+    }
+
     /// Add to an hour's usage.
     pub fn add_usage(&self, service: &str, env: &str, hour: i64, u: &UsageAdd) -> Result<()> {
         self.db.write(|c| {
@@ -3279,20 +3310,6 @@ impl Store {
         Ok(())
     }
 
-    pub fn add_drain_link(&self, drain: &str, kind: &str, r#ref: &str, kept: &str) -> Result<()> {
-        self.db.execute("INSERT INTO drain_links (drain, kind, ref, kept) VALUES (?, ?, ?, ?)", params![drain, kind, r#ref, kept])?;
-        Ok(())
-    }
-
-    /// A deleted drain's minted key, its row gone.
-    pub fn take_drain_link(&self, drain: &str) -> Result<Option<(String, String, String)>> {
-        let row: Option<(String, String, String)> = self.db.query_row("SELECT kind, ref, kept FROM drain_links WHERE drain = ?", [drain], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?))).optional()?;
-        if row.is_some() {
-            self.db.execute("DELETE FROM drain_links WHERE drain = ?", [drain])?;
-        }
-        Ok(row)
-    }
-
     pub fn set_badge(&self, service: &str, env: &str, on: bool) -> Result<()> {
         self.db.execute("UPDATE environments SET badge = ? WHERE service = ? AND name = ?", params![on as i64, service, env])?;
         Ok(())
@@ -3303,10 +3320,24 @@ impl Store {
         Ok(())
     }
 
-    /// `who` approves `deployment` (again: nothing new). Everyone who has, oldest first.
-    pub fn approve(&self, deployment: &str, who: &str, at: i64) -> Result<Vec<String>> {
-        self.db.execute("INSERT INTO deploy_approvals (deployment, approver, at) VALUES (?, ?, ?) ON CONFLICT DO NOTHING", params![deployment, who, at])?;
-        self.approvals_of(deployment)
+    /// `who` approves `deployment` (again: nothing new), in one write: everyone who has, oldest
+    /// first, and whether this approval is the one that made `needed` (those other than `author`).
+    pub fn approve(&self, deployment: &str, who: &str, author: Option<&str>, at: i64, needed: u32) -> Result<(Vec<String>, bool)> {
+        self.db.write(|c| {
+            let fresh = c.execute("INSERT INTO deploy_approvals (deployment, approver, at) VALUES (?, ?, ?) ON CONFLICT DO NOTHING", params![deployment, who, at])? > 0;
+            let all: Vec<String> = c.query("SELECT approver FROM deploy_approvals WHERE deployment = ? ORDER BY at, approver", [deployment], |r| r.get(0))?;
+            let counted = all.iter().filter(|a| Some(a.as_str()) != author).count() as u32;
+            Ok((all, fresh && counted == needed))
+        })
+    }
+
+    pub fn set_deploy_person(&self, deployment: &str, person: &str) -> Result<()> {
+        self.db.execute("INSERT INTO deploy_people (deployment, person) VALUES (?, ?) ON CONFLICT (deployment) DO UPDATE SET person = excluded.person", params![deployment, person])?;
+        Ok(())
+    }
+
+    pub fn deploy_person(&self, deployment: &str) -> Result<Option<String>> {
+        Ok(self.db.query_row("SELECT person FROM deploy_people WHERE deployment = ?", [deployment], |r| r.get(0)).optional()?)
     }
 
     pub fn approvals_of(&self, deployment: &str) -> Result<Vec<String>> {
@@ -3442,15 +3473,27 @@ impl Store {
     // ── log drains ──
 
     pub fn add_drain(&self, project: &str, host: &str, url: &str, secret: &str, format: &str, d: &DrainSettings) -> Result<LogDrain> {
+        self.add_drain_linked(project, host, url, secret, format, d, None)
+    }
+
+    /// A drain, and (a bucket drain's) the minted key to revoke when it goes, in one write.
+    #[allow(clippy::too_many_arguments)]
+    pub fn add_drain_linked(&self, project: &str, host: &str, url: &str, secret: &str, format: &str, d: &DrainSettings, link: Option<(&str, &str, &str)>) -> Result<LogDrain> {
         let id = new_id("lgd");
         let now = self.now()?;
         let (u, s) = (self.sealer.seal(&format!("drain:{id}:url"), url), self.sealer.seal(&format!("drain:{id}:secret"), secret));
         let h = self.seal_drain_headers(&id, &d.headers);
         let names = to_json(&d.headers.iter().map(|(n, _)| n.as_str()).collect::<Vec<_>>());
-        self.db.execute(
-            "INSERT INTO log_drains (id, project, host, url_sealed, secret_sealed, created_at, sources, environments, services, previews, headers_sealed, header_names, format) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            params![id, project, host, u, s, now, to_json(&d.sources), to_json(&d.environments), to_json(&d.services), d.previews, h, names, format],
-        )?;
+        self.db.write(|c| {
+            c.execute(
+                "INSERT INTO log_drains (id, project, host, url_sealed, secret_sealed, created_at, sources, environments, services, previews, headers_sealed, header_names, format) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                params![id, project, host, u, s, now, to_json(&d.sources), to_json(&d.environments), to_json(&d.services), d.previews, h, names, format],
+            )?;
+            if let Some((kind, r, kept)) = link {
+                c.execute("INSERT INTO drain_links (drain, kind, ref, kept) VALUES (?, ?, ?, ?)", params![id, kind, r, kept])?;
+            }
+            Ok::<(), Error>(())
+        })?;
         Ok(self.drains(project)?.into_iter().find(|x| x.id == id).expect("just made"))
     }
 
@@ -3540,11 +3583,16 @@ impl Store {
             .collect())
     }
 
-    pub fn delete_drain(&self, project: &str, id: &str) -> Result<()> {
-        match self.db.execute("DELETE FROM log_drains WHERE id = ? AND project = ?", [id, project])? {
-            0 => Err(Error::NotFound(format!("no log drain {id}"))),
-            _ => Ok(()),
-        }
+    /// A drain gone, with (a bucket drain's) the minted key to revoke, in one write.
+    pub fn delete_drain(&self, project: &str, id: &str) -> Result<Option<(String, String, String)>> {
+        self.db.write(|c| {
+            if c.execute("DELETE FROM log_drains WHERE id = ? AND project = ?", [id, project])? == 0 {
+                return Err(Error::NotFound(format!("no log drain {id}")));
+            }
+            let link: Option<(String, String, String)> = c.query_row("SELECT kind, ref, kept FROM drain_links WHERE drain = ?", [id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?))).optional()?;
+            c.execute("DELETE FROM drain_links WHERE drain = ?", [id])?;
+            Ok(link)
+        })
     }
 
     // ── spend limits ──

@@ -191,7 +191,7 @@ type Overview = {
   prices: Prices;
 };
 
-type Prices = { cpu_second: number; gb_second: number; egress_gb: number; build_minute: number; stored_gb_month: number /* logs kept past the first week (an environment's 30 or 90 days), metered hourly as stored_gb_hours */ };
+type Prices = { cpu_second: number; gb_second: number; egress_gb: number; build_minute: number; stored_gb_month: number /* what roll stores: logs kept past the first week (an environment's 30 or 90 days) and build caches (shared by the services that build from one), metered hourly as stored_gb_hours */ };
 
 type Source =
   | { kind: "repo"; repo: string /* owner/name in roll code (GitHub repos are mirrored there) */; root?: string }
@@ -225,6 +225,10 @@ type Build = {
    *  fleet, its build minutes metered ×1, ×2 or ×4; one node's Docker builds unsized (the build
    *  log says so) and meters ×1. */
   size?: "small" | "medium" | "large";
+  /** A Git URL service's submodules fetched into the tree (default false: left out): each one
+   *  .gitmodules names, at the commit its gitlink pins, from its own public URL (relative ones
+   *  against the repository's), two levels deep and 32 at most. */
+  submodules?: boolean;
 };
 
 type Run = {
@@ -439,7 +443,7 @@ type EnvironmentPut = {
   vitals?: boolean;
   log_retention_days?: 7 | 30 | 90 | null; // how long its logs are kept (null: 7); a preview's stay 7 (400)
   badge?: boolean; // a deploy status badge at GET /_roll/badge/<service>/<env>.svg on the apps listener, answered to anyone (Netlify's): live, deploying, waiting, failed, paused or not deployed; false: 404
-  approvals?: 0 | 1 | 2 | 3 | null; // people other than a deployment's author who approve it (`…/approve`) before it goes live: deploys, redeploys, promotions and automation's build to ready and wait (a service that can't wait beside the live one: 409, or skipped), putting one live without them is a 409 unless an admin's `X-Roll-Override: 1` (audited `approvals.bypassed`); rolling back to what was live needs none; never a preview's (400)
+  approvals?: 0 | 1 | 2 | 3 | null; // admin (as freeze): people other than a deployment's author (the person behind it: their session, their own token, the operator) who approve it (`…/approve`) before it goes live; a waiting build doesn't run (no instance, its own URL 409) until then: deploys, redeploys, promotions and automation's build to ready and wait (a service that can't wait beside the live one: 409, or skipped), putting one live without them is a 409 unless an admin's `X-Roll-Override: 1` (audited `approvals.bypassed`); rolling back to what was live needs none; never a preview's (400)
   report?: boolean; // false: its deploys post no commit status and no GitHub Deployment (someone else reports them: roll previews, for its `pv-` environments)
   preview_host?: string | null; // the one DNS label it answers to under its project's preview domain (`<label>.preview.acme.dev`; roll previews sets it), unique in the project (409); null: none
   follow_tag?: boolean;
