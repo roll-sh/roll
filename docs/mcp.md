@@ -812,6 +812,8 @@ previews are listed once those products are on.
 | `search_overview` | What roll search offers here: versions, endpoint, defaults, pricing. | `GET /v1/search` |
 | `search_unlink_remote` | Unlink a remote cluster (its credentials go; a key roll made is revoked). | `DELETE /v1/search/clusters/{cluster}/remotes/{alias}` |
 | `search_revoke_key` | Revoke a cluster API key at once. | `DELETE /v1/search/clusters/{cluster}/keys/{key}` |
+| `search_list_browser_keys` | A cluster's browser keys that still work: name, indices or application, filter, rate limit, expiry (never the key). | `GET /v1/search/clusters/{cluster}/browser-keys` |
+| `search_revoke_browser_key` | Revoke a browser key at once. | `DELETE /v1/search/clusters/{cluster}/browser-keys/{key}` |
 | `search_list_inference_secrets` | Inference endpoints keyed by a roll secret, and what each follows (never the value). | `GET /v1/search/clusters/{id}/inference/secrets` |
 | `search_branch_cluster` | A copy-on-write branch of a cluster. | `POST /v1/search/clusters/{cluster}/branches` |
 | `search_update_cluster` | A cluster's idle timeout, request limits, flavor, IP allowlist (admin). | `PATCH /v1/search/clusters/{id}` |
