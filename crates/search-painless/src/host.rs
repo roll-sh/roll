@@ -228,8 +228,29 @@ impl HostError {
     }
 }
 
+/// A host's memory breaker refused the bytes its scripts hold (see [`Host::script_memory`]).
+#[derive(Debug, Clone)]
+pub struct MemoryRefused {
+    /// The breaker's message (`[request] Data too large, …`).
+    pub reason: String,
+    pub wanted: u64,
+    pub limit: u64,
+}
+
 /// Per-document data a running script reads.
 pub trait Host {
+    /// The bytes this host's script executions hold changed by `delta` (negative: they gave some
+    /// back). Called when a running execution has grown by about a MiB since the last call and
+    /// when an execution ends with a different amount than it last reported, so a host sees what
+    /// its scripts hold across executions (values kept in `params` or a scripted metric's state)
+    /// and at the peak of each one. Hosts that answer to a memory breaker (a search's `request`
+    /// breaker) reserve it there and refuse past its limit; the script then fails with a
+    /// `circuit_breaking_exception`.
+    fn script_memory(&mut self, delta: i64) -> Result<(), MemoryRefused> {
+        let _ = delta;
+        Ok(())
+    }
+
     /// `_score` of the current document.
     fn score(&mut self) -> f64 {
         0.0

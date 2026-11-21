@@ -1097,11 +1097,9 @@ pub fn query_phase(cluster: &Cluster, st: &ClusterState, req: &SearchRequest, t:
     let cancelled = search_index::search::ambient_control().and_then(|c| c.cancelled);
     // The runtime fields scripts read through `doc[...]` travel with the control.
     let scope = runtime::RuntimeScope::build(&cluster.scripts, cluster.state(), &t.idx, &t.table(), t.shard.id as i32, req.source.runtime_mappings.as_ref())?;
-    let ctl = (deadline.is_some() || cancelled.is_some() || scope.is_some()).then(|| search_index::search::SearchControl {
-        deadline,
-        cancelled,
-        ext: scope.clone().map(|s| s as Arc<dyn std::any::Any + Send + Sync>),
-    });
+    // as does the `request` breaker their memory is charged to
+    let ext = scripts::ScriptExt { runtime: scope.clone(), request: Some(cluster.breakers.request(cluster, st)) };
+    let ctl = Some(search_index::search::SearchControl { deadline, cancelled, ext: Some(ext.into_ext()) });
     let _ambient = search_index::search::set_ambient_control(ctl);
     SHARD_TIMED_OUT.with(|c| c.set(false));
     // Timed only when a slow log threshold could log it: one relaxed load otherwise.
@@ -3151,7 +3149,7 @@ fn render_hit(cluster: &Cluster, st: &ClusterState, req: &SearchRequest, t: &Tar
         search_index::search::set_ambient_control(Some(search_index::search::SearchControl {
             deadline: None,
             cancelled: None,
-            ext: Some(scope.clone() as Arc<dyn std::any::Any + Send + Sync>),
+            ext: Some(scripts::ScriptExt { runtime: Some(scope.clone()), request: None }.into_ext()),
         }))
     });
     let src = &req.source;

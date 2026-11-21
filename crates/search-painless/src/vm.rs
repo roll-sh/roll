@@ -120,6 +120,22 @@ pub fn ise(msg: impl Into<String>) -> Thrown {
 pub fn uoe() -> Thrown {
     Throw::new(cls::UNSUPPORTED_OPERATION_EXCEPTION, None)
 }
+/// A memory breaker of the host refused what the script holds: a `circuit_breaking_exception`
+/// the script cannot catch, reported like the regex breaker's.
+pub fn memory_refused(e: crate::host::MemoryRefused) -> Thrown {
+    let mut t = Throw::new(cls::RUNTIME_EXCEPTION, Some(e.reason));
+    t.catchable = false;
+    t.offset = Some(u32::MAX);
+    t.es_type = Some("circuit_breaking_exception");
+    t.es_root = true;
+    t.cause_fields = vec![
+        ("bytes_wanted".into(), serde_json::json!(e.wanted)),
+        ("bytes_limit".into(), serde_json::json!(e.limit)),
+        ("durability".into(), serde_json::json!("TRANSIENT")),
+    ];
+    t
+}
+
 /// A failed [`crate::Host::check_cancelled`] poll (a search timeout or cancellation). Like
 /// Elasticsearch's `TimeExceededException` / `TaskCancelledException` raised outside the
 /// script's frames, a script's `catch` can't swallow it: it must stop the script.
@@ -804,6 +820,19 @@ impl<'a> Vm<'a> {
         self.host.check_cancelled().map_err(cancelled_error)
     }
 
+    /// The execution has used up the room its account gave it: past the limit it fails,
+    /// otherwise it gets more room and the host hears what it holds now.
+    #[cold]
+    #[inline(never)]
+    fn memory_poll(&mut self) -> Result<(), Thrown> {
+        crate::guard::refill(0)?;
+        let delta = crate::guard::MemoryScope::unreported();
+        if delta != 0 {
+            self.host.script_memory(delta).map_err(memory_refused)?;
+        }
+        Ok(())
+    }
+
     /// `$checkAllocBytes`: the running total (a Java `long`) over the limit fails the script.
     #[cold]
     fn charge(&mut self, bytes: i64) -> Result<(), Thrown> {
@@ -992,7 +1021,12 @@ impl<'a> Vm<'a> {
         macro_rules! slow {
             ($insn:expr) => {{
                 *pc_ref = pc_now!();
-                if let Some(exit) = self.slow(func, base, $insn, pc_ref, counter)? {
+                let exit = self.slow(func, base, $insn, pc_ref, counter)?;
+                // everything that allocates runs here: look at the account once its room is gone
+                if crate::guard::memory_exhausted() {
+                    self.memory_poll()?;
+                }
+                if let Some(exit) = exit {
                     return Ok(exit);
                 }
                 // SAFETY: `slow` leaves a valid instruction index

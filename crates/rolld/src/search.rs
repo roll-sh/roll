@@ -58,6 +58,10 @@ pub struct SearchArgs {
     /// recently used idle clusters unload.
     #[arg(long = "search-memory-mb", env = "ROLL_SEARCH_MEMORY_MB", default_value_t = 0)]
     pub search_memory_mb: u64,
+    /// Memory one Painless script execution may hold, in MiB (0: no limit). Tenants can't
+    /// raise it; past it the script fails with a `painless_error`.
+    #[arg(long = "search-script-memory-mb", env = "ROLL_SEARCH_SCRIPT_MEMORY_MB", default_value_t = 64)]
+    pub search_script_memory_mb: u64,
     /// Acknowledge writes once the WAL is in object storage (for nodes with ephemeral disks;
     /// always on in a cluster).
     #[arg(long = "search-sync-objects", env = "ROLL_SEARCH_SYNC_OBJECTS", value_parser = clap::builder::BoolishValueParser::new(), default_value_t = false, num_args = 0..=1, default_missing_value = "true")]
@@ -163,6 +167,8 @@ impl Search {
         cfg.defaults.idle_timeout_s = args.search_idle_unload_s as i64;
         cfg.cache_bytes = args.search_cache_bytes;
         cfg.memory_budget = (args.search_memory_mb > 0).then_some(args.search_memory_mb << 20);
+        // every cluster's script engine is made after this
+        search_painless::set_default_max_execution_bytes(args.search_script_memory_mb << 20);
         cfg.sync_objects |= args.search_sync_objects;
         cfg.history_retention = Duration::from_secs(args.search_history_s);
         cfg.test_features = args.search_test_features;

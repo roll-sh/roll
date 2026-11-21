@@ -503,7 +503,7 @@ impl RuntimeScope {
 
     /// The scope carried by a search control.
     pub fn of_control(ctl: Option<&search_index::search::SearchControl>) -> Option<Arc<RuntimeScope>> {
-        ctl?.ext.clone()?.downcast::<RuntimeScope>().ok()
+        super::scripts::ScriptExt::of_control(ctl)?.runtime.clone()
     }
 
     /// The scope of the search running on this thread.
