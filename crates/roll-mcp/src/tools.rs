@@ -1244,7 +1244,7 @@ static TOOLS: &[Tool] = &[
         "apps",
         "POST",
         "/v1/apps/services/{service}/environments/{env}/jobs",
-        &[SERVICE, ENV, breq("command", Ty::Str, "The command line"), b("timeout_s", Ty::Int, "Seconds before it's stopped"), b("tasks", Ty::Int, "Containers to run it in, 1-100 (each gets ROLL_TASK_INDEX and ROLL_TASK_COUNT)"), b("parallelism", Ty::Int, "Tasks at a time, 1-10"), b("retries", Ty::Int, "Tries again for a failed or timed-out task, 0-5")],
+        &[SERVICE, ENV, breq("command", Ty::Str, "The command line"), b("timeout_s", Ty::Int, "Seconds before it's stopped"), b("tasks", Ty::Int, "Containers to run it in, 1-100 (each gets ROLL_TASK_INDEX and ROLL_TASK_COUNT)"), b("parallelism", Ty::Int, "Tasks at a time, 1-10"), b("retries", Ty::Int, "Tries again for a failed or timed-out task, 0-5"), b("cpu", Ty::Num, "Each container's vCPUs, 0.25-8 (default: the service's)"), b("memory_mb", Ty::Int, "Each container's memory in MiB, 256-16384 (default: the service's)")],
     ),
     t("apps_job_logs", "Job logs", "A job's output (it ends with the job).", "apps", "GET", "/v1/apps/services/{service}/environments/{env}/jobs/{job}/logs", &[SERVICE, ENV, req("job", "Job id"), q("tail", Ty::Int, "Last lines")]),
     t("apps_list_jobs", "List jobs", "An environment's one-off jobs, newest first: command, status, exit code, when.", "apps", "GET", "/v1/apps/services/{service}/environments/{env}/jobs", &[SERVICE, ENV]),
