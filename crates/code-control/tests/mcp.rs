@@ -633,7 +633,7 @@ async fn tools_map_onto_their_routes() {
     let st = c.tool("set_commit_status", json!({ "repo": repo, "rev": "main", "state": "pending", "context": "ci/build" })).await;
     assert_eq!(st["status"]["context"], "ci/build", "{st}");
     let refs = c.tool("list_refs", json!({ "repo": repo })).await;
-    assert_eq!(refs, a.ok("GET", &format!("{p}/refs"), None).await);
+    assert_eq!(refs["items"], a.ok("GET", &format!("{p}/refs"), None).await, "a list comes back as items");
     let made = c.tool("create_repo", json!({ "owner": "acme", "name": "fresh", "visibility": "private" })).await;
     assert_eq!(made, a.ok("GET", "/v1/code/repos/acme/fresh", None).await);
 }
