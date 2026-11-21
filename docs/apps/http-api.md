@@ -225,10 +225,17 @@ type Build = {
    *  fleet, its build minutes metered ×1, ×2 or ×4; one node's Docker builds unsized (the build
    *  log says so) and meters ×1. */
   size?: "small" | "medium" | "large";
-  /** A Git URL service's submodules fetched into the tree (default false: left out): each one
-   *  .gitmodules names, at the commit its gitlink pins, from its own public URL (relative ones
-   *  against the repository's), two levels deep and 32 at most. */
+  /** Submodules fetched into the tree (default false: left out): each one .gitmodules names, at
+   *  the commit its gitlink pins (relative URLs against the repository's, as git reads them),
+   *  two levels deep and 32 at most. A Git URL service's come from their own public URLs; a roll
+   *  code repo's from public URLs, public roll code repos (a relative URL, or roll code's Git
+   *  address), and the private roll code repos `submodule_repos` names (any other fails the
+   *  build: "<repo> isn't public; name it in build.submodule_repos"). */
   submodules?: boolean;
+  /** The private roll code repos (`owner/name`, 32 at most) a roll code repo's submodules may
+   *  come from. A token that sets it needs read on each (the catalogue lends it), so a writer to
+   *  the service's repo can't build a repo it can't read by pinning it. */
+  submodule_repos?: string[];
   /** A Git URL service's Git LFS objects in place of their pointers (default false): from the
    *  repository's LFS batch API, checked against each pointer's sha256 and size, 2 GiB in all. */
   lfs?: boolean;
@@ -445,7 +452,7 @@ type EnvironmentPut = {
    *  the app's. */
   vitals?: boolean;
   log_retention_days?: 7 | 30 | 90 | null; // how long its logs are kept (null: 7); a preview's stay 7 (400)
-  closed_by?: string | null; // with egress, the operator's only (roll previews in process; 403 for anyone else): who a closed environment's placeholders are made by (usr_… or token:…); null, no one (its keys bound to hosts withheld); unset, whoever set the egress
+  closed_by?: string | null; // with egress, the operator's only (roll previews in process, or any caller on an open daemon; a token needs admin; 403 for a user's token or a signed-in person): who a closed environment's placeholders are made by (usr_… or token:…); null, no one (its keys bound to hosts withheld); unset, whoever set the egress
   badge?: boolean; // a deploy status badge at GET /_roll/badge/<service>/<env>.svg on the apps listener, answered to anyone (Netlify's): live, deploying, waiting, failed, paused or not deployed; false: 404
   approvals?: 0 | 1 | 2 | 3 | null; // admin (as freeze): people other than a deployment's author (the person behind it: their session, their own token, the operator) who approve it (`…/approve`) before it goes live; a waiting build doesn't run (no instance, its own URL 409) until then: deploys, redeploys, promotions and automation's build to ready and wait (a service that can't wait beside the live one: 409, or skipped), putting one live without them is a 409 unless an admin's `X-Roll-Override: 1` (audited `approvals.bypassed`); rolling back to what was live needs none; never a preview's (400)
   report?: boolean; // false: its deploys post no commit status and no GitHub Deployment (someone else reports them: roll previews, for its `pv-` environments)
@@ -546,6 +553,8 @@ type Environment = EnvironmentSummary & {
   preview_host?: string; // its label under the project's preview domain
   egress: { mode: "roll" | "open"; hosts: string[] }; // what its code may reach (roll: roll and the hosts)
   egress_refused?: { host: string; private?: true }[]; // hosts its egress proxy refused lately, oldest first, at most 20: not listed, or (private) listed but resolving only to private addresses
+  closed_by?: string | null; // a closed environment's placeholders' maker (usr_…, token:…, operator); null: no one (its keys bound to hosts withheld); absent when open or closed before it was kept
+  intercepted?: { requests: number; swapped: number; refused?: string[] }; // a closed environment's interception on its owner (roll secrets' placeholders) since that node started: requests filtered, placeholders swapped, the latest refusals' reasons (at most 20; never a value or a placeholder)
   feedback: boolean;          // a preview's pages carry roll previews' feedback button
   maintenance: { message: string | null } | null; // in maintenance (null message: roll's words); null: serving
   paused?: true;              // paused (absent: not)

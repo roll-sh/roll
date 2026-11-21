@@ -304,6 +304,10 @@ pub trait Runtime: Send + Sync {
     async fn sweep_build_networks(&self, _projects: &std::collections::HashSet<String>) {}
     /// The hosts closed `network`'s egress proxy for `hosts` refused lately (none: it hasn't, or
     /// isn't here).
+    /// What a closed network's interception did on this node (none: nothing, or no proxy here).
+    fn intercepted(&self, _network: &str) -> Option<egress::Intercepted> {
+        None
+    }
     fn egress_refused(&self, _network: &str, _hosts: &[String]) -> Vec<egress::Refused> {
         Vec::new()
     }

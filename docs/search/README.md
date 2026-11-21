@@ -798,7 +798,7 @@ deterministic (#396).
    and `ENRICH` tables, `VALUES` and `TOP` states). The fix for ES|QL is Elasticsearch's: every
    page of rows charged to the request breaker as it is built and released when dropped,
    `circuit_breaking_exception` past the limit, and a node-level limit no tenant setting can
-   raise. Time has its own cap (#530, in review). Rule: charge what a structure costs as it is
+   raise. Time has its own cap (#530, landed: one limit per request, by-query scans and internal pagers included). Rule: charge what a structure costs as it is
    built, never a multiple of the bytes it came from.
 4. **A sweep for the bug classes the 2026-11-19 reviews kept finding** (first pass landed in #434, the follow-up in #492; what
    today's reviews still find is resource accounting, item 3). Four
@@ -941,7 +941,8 @@ deterministic (#396).
    query, then stops. Writing settings also unblocks the suggestions tools (they need
    `index.roll.suggestions.enabled`), and a redacted answer would let `POST …/inference/secrets`
    become a tool, so an agent can set up semantic search end to end.
-11. **Conversational search and RAG** (Elastic Playground's chat with citations, Typesense
+11. **Conversational search and RAG** (phase 1 in progress: streamed `chat_completion` and
+   `completion` inference and the Playground's Chat tab; Elastic Playground's chat with citations, Typesense
    `conversation=true`, Meilisearch `/chats`, OpenSearch's `retrieval_augmented_generation`
    processor): roll serves `completion` and `chat_completion` inference already, but the Playground
    compares retrieval only. Chat over hits with citations, the code for a RAG app, and a chat API
@@ -1181,8 +1182,9 @@ deterministic (#396).
    index patterns or read-only (`[databases] kind = "search"` takes neither; the keys route does);
    apps' log drains can't yet land in a roll search data stream (apps is building a drain that writes
    ECS documents through `_bulk` with a key limited to `create_doc` on its stream: no OTLP needed); previews
-   put a branch's superuser login in `ELASTICSEARCH_URL` beside the data key (previews is fixing it:
-   only the data credential, and no fallback to the login);
+   put a branch's superuser login in `ELASTICSEARCH_URL` beside the data key (fixed in #607: only the
+   data credential, no fallback, and old branches remade with the key revoked and the password
+   rotated first);
    a cluster's admin password can't be kept as a project secret from roll's API or CLI; and only a
    unit test covers previews' search branch, and one MCP test search (no create → bulk → query
    flow with a person's scoped token).
