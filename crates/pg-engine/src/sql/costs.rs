@@ -873,6 +873,16 @@ impl Est<'_> {
                 s
             }
             Expr::Not(x) => 1.0 - self.clause(x),
+            // (A DistinctExpr: its `=` estimated as an OpExpr, negated, clause_selectivity_ext;
+            // IS NOT DISTINCT FROM is a NOT over it.)
+            // (Against a NULL constant: the NullTest it stands for, make_nulltest_from_distinct.)
+            Expr::IsDistinct(a, b, not, _) if matches!(**b, Expr::Const(Value::Null, _)) => {
+                self.clause(&Expr::IsNull(a.clone(), !*not))
+            }
+            Expr::IsDistinct(a, b, not, op) => {
+                let s = 1.0 - self.clause(&Expr::Call(op.clone(), vec![(**a).clone(), (**b).clone()], DataType::Bool));
+                if *not { 1.0 - s } else { s }
+            }
             // rowcomparesel: the first pair's comparison.
             Expr::RowCompare(rc) => rc.cmps.first().map_or(DEFAULT_INEQ_SEL, |c| self.clause(c)),
             Expr::Const(Value::Bool(b), _) => {
@@ -2284,7 +2294,41 @@ pub fn ops(e: &Expr) -> usize {
     n
 }
 
-/// cost_qual_eval's operator count with `x op ANY (array)` charged for half the array.
+/// convert_saop_to_hashed_saop: `x = ANY (array)` (or `x <> ALL`, its negator hashing)
+/// over a constant array of at least 9 elements, whose `=` hashes the left operand's type
+/// as it does the elements': the array's length, the executor's hash table built once.
+pub fn hashed_saop(left: &Expr, right: &Expr, op: &crate::sql::func::FuncDef, all: bool) -> Option<usize> {
+    const MIN_ARRAY_SIZE_FOR_HASHED_SAOP: usize = 9;
+    let n = match strip(right) {
+        Expr::Const(Value::Array(a), _) => a.items.len(),
+        Expr::Array(items, _) if items.iter().all(|x| matches!(x, Expr::Const(..))) => items.len(),
+        _ => return None,
+    };
+    let elem = right.ty().elem().cloned()?;
+    let hashes = if all { op.name == "<>" } else { op.name == "=" };
+    (hashes
+        && n >= MIN_ARRAY_SIZE_FOR_HASHED_SAOP
+        && left.ty().without_typmod() == elem.without_typmod()
+        && crate::catalog::userobj::type_hashable(&elem, &|_| false))
+    .then_some(n)
+}
+
+/// cost_qual_eval's startup of an expression: building the hash tables of its hashed
+/// `= ANY (array)`s, a hash function call per element.
+pub fn qual_startup(e: &Expr) -> f64 {
+    let mut n = 0.0;
+    e.walk(&mut |x| {
+        if let Expr::ArrayOp { left, right, op, all } = x
+            && let Some(len) = hashed_saop(left, right, op, *all)
+        {
+            n += len as f64;
+        }
+    });
+    n * CPU_OPERATOR_COST
+}
+
+/// cost_qual_eval's operator count with `x op ANY (array)` charged for half the array (a
+/// hashed one: a hash and a comparison).
 pub fn qual_cost(e: &Expr) -> f64 {
     let mut n = 0.0;
     e.walk(&mut |x| match x {
@@ -2293,6 +2337,11 @@ pub fn qual_cost(e: &Expr) -> f64 {
         Expr::Call(d, ..) => n += builtin_proc(d.oid).map_or(1.0, |(_, _, cost)| cost),
         // (GREATEST / LEAST: a MinMaxExpr, cost_qual_eval_walker's one operator.)
         Expr::MinMax(..) => n += 1.0,
+        // (NULLIF and IS DISTINCT FROM: a NullIfExpr / DistinctExpr, their `=`'s function
+        // as an OpExpr's.)
+        // (Against a NULL constant, IS DISTINCT FROM is a NullTest: free.)
+        Expr::IsDistinct(_, b, ..) if matches!(**b, Expr::Const(Value::Null, _)) => {}
+        Expr::NullIf(..) | Expr::IsDistinct(..) => n += 1.0,
         // (A row comparison checks every pair, once: its `=`s aren't calls of their own.)
         Expr::RowCompare(rc) => n -= rc.eqs.len() as f64,
         // A user-defined function called (not inlined): its procost.
@@ -2310,6 +2359,7 @@ pub fn qual_cost(e: &Expr) -> f64 {
         {
             n += 1.0
         }
+        Expr::ArrayOp { left, right, op, all } if hashed_saop(left, right, op, *all).is_some() => n += 2.0,
         Expr::ArrayOp { right, .. } => {
             let len = match strip(right) {
                 Expr::Array(items, _) => items.len(),

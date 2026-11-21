@@ -1,0 +1,79 @@
+> create table a274k (code char primary key)
+-- CREATE TABLE
+
+> create table a274g (a char not null, num int not null, primary key (a, num))
+-- CREATE TABLE
+
+> explain select a274k.code from a274k left join (select count(1) as cnt, a274g.a from a274g group by a274g.a) g on a274k.code = g.a
+QUERY PLAN:text
+Seq Scan on a274k  (cost=0.00..32.60 rows=2260 width=8)
+-- EXPLAIN
+
+> create table a274s (a int, b text, c numeric, f float8, i int) with (autovacuum_enabled = off)
+-- CREATE TABLE
+
+> insert into a274s select g, g::text, g, g / 3.0, g % 7 from generate_series(1, 5000) g
+-- INSERT 0 5000
+
+> analyze a274s
+-- ANALYZE
+
+> explain select * from a274s where a in (1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12)
+QUERY PLAN:text
+Seq Scan on a274s  (cost=0.03..112.03 rows=12 width=25)
+  Filter: (a = ANY ('{1,2,3,4,5,6,7,8,9,10,11,12}'::integer[]))
+-- EXPLAIN
+
+> explain select * from a274s where b in ('1', '2', '3', '4', '5', '6', '7', '8', '9', '10')
+QUERY PLAN:text
+Seq Scan on a274s  (cost=0.03..112.03 rows=10 width=25)
+  Filter: (b = ANY ('{1,2,3,4,5,6,7,8,9,10}'::text[]))
+-- EXPLAIN
+
+> explain select * from a274s where a not in (1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12)
+QUERY PLAN:text
+Seq Scan on a274s  (cost=0.03..112.03 rows=4988 width=25)
+  Filter: (a <> ALL ('{1,2,3,4,5,6,7,8,9,10,11,12}'::integer[]))
+-- EXPLAIN
+
+> explain select * from a274s where a in (1, 2, 3, 4, 5, 6, 7, 8)
+QUERY PLAN:text
+Seq Scan on a274s  (cost=0.00..137.00 rows=8 width=25)
+  Filter: (a = ANY ('{1,2,3,4,5,6,7,8}'::integer[]))
+-- EXPLAIN
+
+> explain select * from a274s where c = any ('{1,2,3,4,5,6,7,8,9,10}'::numeric[])
+QUERY PLAN:text
+Seq Scan on a274s  (cost=0.03..112.03 rows=10 width=25)
+  Filter: (c = ANY ('{1,2,3,4,5,6,7,8,9,10}'::numeric[]))
+-- EXPLAIN
+
+> explain select a, a in (10, 9, 2, 8, 3, 7, 4, 6, 5, 1) from a274s
+QUERY PLAN:text
+Seq Scan on a274s  (cost=0.03..112.03 rows=5000 width=5)
+-- EXPLAIN
+
+> explain select * from a274s where nullif(f, i) = 2
+QUERY PLAN:text
+Seq Scan on a274s  (cost=0.00..124.50 rows=25 width=25)
+  Filter: (NULLIF(f, (i)::double precision) = '2'::double precision)
+-- EXPLAIN
+
+> explain select * from a274s where f is distinct from i
+QUERY PLAN:text
+Seq Scan on a274s  (cost=0.00..112.00 rows=4975 width=25)
+  Filter: (f IS DISTINCT FROM (i)::double precision)
+-- EXPLAIN
+
+> explain select * from a274s where f is not distinct from i
+QUERY PLAN:text
+Seq Scan on a274s  (cost=0.00..112.00 rows=25 width=25)
+  Filter: (NOT (f IS DISTINCT FROM (i)::double precision))
+-- EXPLAIN
+
+> explain select * from a274s where a is distinct from 5
+QUERY PLAN:text
+Seq Scan on a274s  (cost=0.00..99.50 rows=4999 width=25)
+  Filter: (a IS DISTINCT FROM 5)
+-- EXPLAIN
+

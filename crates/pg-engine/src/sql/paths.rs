@@ -3435,6 +3435,7 @@ impl Planner<'_, '_> {
         let (mut startup, mut per_tuple) = (0.0, 0.0);
         for q in quals {
             per_tuple += costs::qual_cost(q);
+            startup += costs::qual_startup(q);
             q.walk(&mut |e| {
                 let Expr::Subquery(s) = e else { return };
                 // (A function call is costed as one: its procost.)

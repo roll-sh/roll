@@ -16,14 +16,13 @@ fn bare(e: &Expr) -> &Expr {
                 (DataType::Int2, DataType::Int4 | DataType::Int8)
                     | (DataType::Int4, DataType::Int8)
                     | (DataType::Float4, DataType::Float8)
-                    | (
-                        DataType::Varchar(_) | DataType::Name | DataType::Text,
-                        DataType::Text | DataType::Varchar(_)
-                    )
             ) =>
         {
             bare(x)
         }
+        // (A binary-coercible cast is a RelabelType: `char(1)` to `bpchar` dropping the
+        // length, `varchar` to `text`.)
+        Expr::Cast(x, from, to, _) if crate::sql::costs::binary_coercible(from, to) => bare(x),
         e => e,
     }
 }

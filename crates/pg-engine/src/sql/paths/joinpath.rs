@@ -4068,8 +4068,8 @@ impl Search<'_, '_, '_> {
             };
             can_btree &= cl.mergeable;
             can_hash &= cl.hashable;
-            // (An expression of the side's columns: unique-ified on it by sorting, a
-            // Unique keeping a row per value.)
+            // (An expression of the side's columns: unique-ified on it, by sorting or
+            // hashing on its value.)
             // (compute_semijoin_info's semi_rhs_exprs are the right-hand operands of the
             // semi join's quals as written, not the class member a clause made of them
             // equates: `t2.x` of `t3.p = t2.x AND t2.x = t1.a`.)
@@ -4081,7 +4081,6 @@ impl Search<'_, '_, '_> {
                 if !ok {
                     return None;
                 }
-                can_hash = false;
                 if !exprs.iter().any(|x| x.same_as(rhs)) {
                     exprs.push(rhs.clone());
                 }
@@ -6737,10 +6736,25 @@ impl Search<'_, '_, '_> {
                 exprs: keyx,
                 ..
             } if !keyx.is_empty() => {
-                // (Sorted on the expressions too, a Unique on them all, then the columns.)
+                // (Sorted on the expressions too, a Unique on them all, then the columns;
+                // or a HashAggregate grouping on them over the columns, as
+                // create_unique_plan's AGG_HASHED plan computes its keys.)
                 let (p, layout) = self.build(input);
                 let pos = |g: usize| layout.iter().position(|&x| x == g).unwrap_or(g);
-                let _ = hashed;
+                if *hashed {
+                    let proj = Plan::Project {
+                        input: Arc::new(p),
+                        exprs: cols.iter().map(|&g| Expr::Col(pos(g), self.col_type(g))).collect(),
+                    };
+                    let at = |g: usize| cols.iter().position(|&c| c == g).unwrap_or(g);
+                    let plan = Plan::Distinct {
+                        input: Arc::new(proj),
+                        on: Some(keyx.iter().map(|e| e.clone().remap_cols(&at)).collect()),
+                        order: 0,
+                        hashed: true,
+                    };
+                    return (plan, cols.clone());
+                }
                 let mut exprs: Vec<Expr> = cols
                     .iter()
                     .map(|&g| Expr::Col(pos(g), self.col_type(g)))

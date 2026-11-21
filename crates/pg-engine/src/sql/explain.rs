@@ -8282,14 +8282,15 @@ impl Builder<'_, '_> {
                         ..ExNode::new("Aggregate")
                     };
                     n.title = "HashAggregate".into();
-                    let keys = on
-                        .iter()
-                        .flatten()
-                        .filter_map(|e| match e {
-                            Expr::Col(j, _) => c.exported.get(*j).map(|k| self.pick(k, Cx::Upper)),
-                            _ => None,
-                        })
-                        .collect();
+                    // (A key computed from the columns, a semi join's operand: the
+                    // expression, as the Agg computes it.)
+                    let mut keys = Vec::new();
+                    for e in on.iter().flatten() {
+                        match e {
+                            Expr::Col(j, _) => keys.extend(c.exported.get(*j).map(|k| self.pick(k, Cx::Upper))),
+                            e => keys.push(self.show(e, &c.exported, Cx::Upper)),
+                        }
+                    }
                     n.details.push(Detail::List("Group Key", keys));
                     n.details.push(Detail::HashAggInfo(0));
                     n.disabled = !crate::sql::paths::Gucs::read(self.ctx).hashagg;
@@ -19771,6 +19772,8 @@ pub(crate) fn subplan_costs(exprs: &[Expr], ctx: &ExecCtx) -> (f64, f64) {
     use crate::sql::expr::SubqueryKind as K;
     let (mut startup, mut per) = (0.0, 0.0);
     for x in exprs {
+        // (A hashed `= ANY (array)`'s table, built once: cost_qual_eval's startup.)
+        startup += costs::qual_startup(x);
         x.walk(&mut |e| {
             let Expr::Subquery(s) = e else { return };
             // (A function call is costed as one: its procost.)

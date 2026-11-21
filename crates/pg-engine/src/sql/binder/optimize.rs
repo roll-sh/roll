@@ -3017,6 +3017,8 @@ fn qual_cost(e: &Expr) -> f64 {
     let mut cost = 0.0;
     e.walk(&mut |x| match x {
         Expr::Call(..) | Expr::IsDistinct(..) | Expr::NullIf(..) => cost += 1.0,
+        // (A hashed one: a hash and a comparison, convert_saop_to_hashed_saop.)
+        Expr::ArrayOp { left, right, op, all } if crate::sql::costs::hashed_saop(left, right, op, *all).is_some() => cost += 2.0,
         Expr::ArrayOp { right, .. } => {
             cost += match &**right {
                 Expr::Const(Value::Array(a), _) => 0.5 * a.items.len().max(1) as f64,
