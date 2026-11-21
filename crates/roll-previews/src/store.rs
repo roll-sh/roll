@@ -2597,6 +2597,21 @@ impl Store {
     }
 
     /// Keep what its holder read (`None`: nothing to say); whether that changed what was kept.
+    /// Change a preview's interception record in one write (`f` may run again).
+    pub fn update_intercepted(&self, id: &str, f: impl Fn(&mut crate::Intercepted)) -> Result<()> {
+        self.db.write(|c| {
+            let json: Option<String> = c.query_row("SELECT json FROM runtime_facts WHERE preview_id = ? AND kind = 'intercepted'", [id], |r| r.get(0)).optional()?;
+            let mut x: crate::Intercepted = json.and_then(|j| serde_json::from_str(&j).ok()).unwrap_or_default();
+            f(&mut x);
+            let json = serde_json::to_string(&x).map_err(|e| Error::Internal(e.to_string()))?;
+            c.execute(
+                "INSERT INTO runtime_facts (preview_id, kind, json) VALUES (?, 'intercepted', ?) ON CONFLICT (preview_id, kind) DO UPDATE SET json = excluded.json",
+                params![id, json],
+            )?;
+            Ok::<_, Error>(())
+        })
+    }
+
     pub fn set_runtime_fact<T: serde::Serialize>(&self, id: &str, kind: &str, fact: Option<&T>) -> Result<bool> {
         let json = fact.map(serde_json::to_string).transpose().map_err(|e| Error::Internal(e.to_string()))?;
         self.db.write(|c| {
@@ -2943,6 +2958,7 @@ impl Store {
         let slower_routes = if settings.traces { self.runtime_fact::<crate::SlowerRoutes>(&r.id, "slower_routes")?.filter(|f| f.head == r.head) } else { None };
         let compared_at = |kind: &str| -> Result<bool> { Ok(self.runtime_fact::<String>(&r.id, kind)?.as_deref() == Some(r.head.as_str())) };
         let regressions_compared = compared_at("compared_errors")? && (!settings.traces || compared_at("compared_routes")?);
+        let intercepted = self.runtime_fact::<crate::Intercepted>(&r.id, "intercepted")?.filter(|x| !x.keys.is_empty());
         let regressions = match settings.regressions {
             crate::settings::RegressionsRule::Off => None,
             crate::settings::RegressionsRule::Check => Some("check".to_string()),
@@ -3020,6 +3036,7 @@ impl Store {
             regressions,
             regressions_accepted,
             regressions_compared,
+            intercepted,
             page_speed,
             page_health,
             page_a11y,
