@@ -618,6 +618,8 @@ impl Cluster {
         // Jobs due while the cluster was unloaded (Index State Management steps, started
         // transforms' triggers) run now.
         self.jobs.kick(self);
+        // Restores from Elasticsearch repositories a previous owner left running go on here.
+        crate::api::snapshots::resume_elasticsearch_restores(self);
     }
 
     /// A strong handle for background work, when enabled.

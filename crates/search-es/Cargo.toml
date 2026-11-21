@@ -50,6 +50,7 @@ search-aggs.workspace = true
 search-analysis.workspace = true
 search-codec.workspace = true
 search-index.workspace = true
+search-lucene.workspace = true
 search-painless.workspace = true
 serde_json.workspace = true
 serde_yaml_ng.workspace = true

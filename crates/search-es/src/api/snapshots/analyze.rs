@@ -202,7 +202,7 @@ pub async fn analyze_repository(ctx: &Ctx<'_>) -> EsResult<Reply> {
         repo.clone()
     };
     let p = params(ctx)?;
-    if repo.read_only() {
+    if repo.read_only() || super::elastic::open(ctx.cluster, &name, &repo).await?.is_some() {
         return Err(EsError::illegal_argument(format!("repository [{name}] is read-only")));
     }
     let mut rng = SplitMix(p.seed as u64);

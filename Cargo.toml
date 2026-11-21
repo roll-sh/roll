@@ -45,6 +45,7 @@ object_store = { version = "0.14", features = ["aws"] }
 postgres-protocol = "0.6"
 zstd = "0.14"
 flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
+miniz_oxide = "0.9"
 lz4_flex = { version = "0.11", default-features = false, features = ["frame", "std"] }
 snap = "1"
 humantime = "2"
@@ -302,6 +303,7 @@ regex-syntax = "0.8"
 search-analysis = { path = "crates/search-analysis" }
 search-codec = { path = "crates/search-codec" }
 search-index = { path = "crates/search-index" }
+search-lucene = { path = "crates/search-lucene" }
 search-aggs = { path = "crates/search-aggs" }
 search-painless = { path = "crates/search-painless" }
 search-store = { path = "crates/search-store" }

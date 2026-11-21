@@ -524,7 +524,8 @@ The product should feel alive: dots react to the cursor and the marks "think". E
     interfaces in `contracts.md`). The target is 1:1 client-visible behaviour with Elasticsearch
     9.5.5, plus an OpenSearch 3.9 dialect: gate on `Dialect`, never on a guess.
   - `search-analysis`, `search-codec`, `search-index`, `search-aggs` and `search-painless` are the
-    engine (no I/O); `search-store` is object storage (WAL, segments, manifests, branches, GC);
+    engine (no I/O); `search-lucene` reads the Lucene files of Elasticsearch's snapshots (no I/O, ported
+    from Lucene only, naming the class); `search-store` is object storage (WAL, segments, manifests, branches, GC);
     `search-es` is the REST API; `search-server` the multi-tenant node; `search-control`
     `/v1/search`, metering and the fleet; `search-yaml` the YAML REST runner.
   - On a fleet a cluster is loaded only on the holder of its lease `search:cluster:<name>`

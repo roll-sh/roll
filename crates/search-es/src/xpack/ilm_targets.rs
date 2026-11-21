@@ -772,7 +772,7 @@ mod tests {
         let repo = Repository::new("s3", s);
         let snap = Snapshot::from_stored(&crate::obj! { "name" => "base", "uuid" => "u1", "indices" => Value::from(vec!["logs".to_string()]) }).unwrap();
         c.update(move |st| {
-            let data = RepositoryData { uuid: "r1".into(), generation: 1, snapshots: vec![Arc::new(snap)] };
+            let data = RepositoryData { uuid: "r1".into(), generation: 1, snapshots: vec![Arc::new(snap)], elastic: false };
             st.metadata.repository_data.insert(repo.location_key(), Arc::new(data));
             st.metadata.repositories.insert("backup".into(), Arc::new(repo));
             Ok(())

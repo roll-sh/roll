@@ -869,30 +869,46 @@ pub fn recovery(ctx: &Ctx) -> EsResult<Reply> {
     let st = ctx.state();
     let node = &ctx.cluster.node;
     let mut t = table(ctx, columns!(ctx, RECOVERY));
-    if !active_only {
-        for n in names {
-            let idx = &st.metadata.indices[&n];
-            let closed = idx.is_closed();
-            for shard in 0..idx.number_of_shards() {
-                t.push_row(|c| match c {
-                    "index" => Cell::str(&idx.name),
-                    "shard" => Cell::Int(shard as i64),
-                    "start_time" => Cell::Int(idx.creation_date()),
-                    "start_time_millis" => Cell::Int(idx.creation_date()),
-                    "stop_time" | "stop_time_millis" => Cell::Int(idx.creation_date()),
-                    "time" => Cell::Time(TimeValue::ZERO),
-                    "type" => Cell::str(if closed { "existing_store" } else { "empty_store" }),
-                    "stage" => Cell::str("done"),
-                    "source_host" | "source_node" | "repository" | "snapshot" => Cell::str("n/a"),
-                    "target_host" => Cell::str(&node.ip),
-                    "target_node" => Cell::str(&node.name),
-                    "files" | "files_recovered" | "files_total" | "translog_ops" | "translog_ops_recovered" => Cell::Int(0),
-                    "files_percent" | "bytes_percent" => Cell::str("0.0%"),
-                    "translog_ops_percent" => Cell::str("100.0%"),
-                    "bytes" | "bytes_recovered" | "bytes_total" => Cell::Bytes(0),
-                    _ => Cell::Null,
-                });
-            }
+    let pct = |done: u64, total: u64| if total == 0 { "0.0%".to_string() } else { format!("{:.1}%", done as f64 * 100.0 / total as f64) };
+    for n in names {
+        let idx = &st.metadata.indices[&n];
+        let closed = idx.is_closed();
+        // Restores from an Elasticsearch repository show each shard as it's read.
+        let live = ctx.cluster.snapshot_data.elastic_shards(&idx.uuid);
+        if active_only && live.is_none() {
+            continue;
+        }
+        let source = idx.recovery_source.as_ref().filter(|_| live.is_some());
+        let named = |k: &str| source.and_then(|r| r.get(k)).and_then(Value::as_str).unwrap_or("n/a").to_string();
+        for shard in 0..idx.number_of_shards() {
+            let view = live.as_ref().and_then(|l| l.get(shard as usize));
+            let (files, bytes) = view.map(|v| (v.files, v.bytes)).unwrap_or_default();
+            let start = view.map(|v| v.start_ms).filter(|t| *t > 0).unwrap_or(idx.creation_date());
+            let stop = view.map(|v| if v.stop_ms > 0 { v.stop_ms } else { crate::time::now_millis() }).unwrap_or(idx.creation_date());
+            t.push_row(|c| match c {
+                "index" => Cell::str(&idx.name),
+                "shard" => Cell::Int(shard as i64),
+                "start_time" => Cell::Int(start),
+                "start_time_millis" => Cell::Int(start),
+                "stop_time" | "stop_time_millis" => Cell::Int(stop),
+                "time" => Cell::Time(if view.is_some() { TimeValue::millis((stop - start).max(0)) } else { TimeValue::ZERO }),
+                "type" => Cell::str(if view.is_some() { "snapshot" } else if closed { "existing_store" } else { "empty_store" }),
+                "stage" => Cell::str(view.map(|v| v.stage.to_ascii_lowercase()).as_deref().unwrap_or("done")),
+                "repository" => Cell::str(&named("repository")),
+                "snapshot" => Cell::str(&named("snapshot")),
+                "source_host" | "source_node" => Cell::str("n/a"),
+                "target_host" => Cell::str(&node.ip),
+                "target_node" => Cell::str(&node.name),
+                "files" | "files_total" => Cell::Int(files.1 as i64),
+                "files_recovered" => Cell::Int(files.0 as i64),
+                "translog_ops" | "translog_ops_recovered" => Cell::Int(0),
+                "files_percent" => Cell::str(&pct(files.0, files.1)),
+                "bytes_percent" => Cell::str(&pct(bytes.0, bytes.1)),
+                "translog_ops_percent" => Cell::str("100.0%"),
+                "bytes" | "bytes_total" => Cell::Bytes(bytes.1 as i64),
+                "bytes_recovered" => Cell::Bytes(bytes.0 as i64),
+                _ => Cell::Null,
+            });
         }
     }
     finish(t)

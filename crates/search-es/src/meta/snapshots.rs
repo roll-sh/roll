@@ -261,6 +261,9 @@ pub struct RepositoryData {
     /// Bumped on every change (`RepositoryData` generation).
     pub generation: i64,
     pub snapshots: Vec<Arc<Snapshot>>,
+    /// Elasticsearch wrote this repository (`api::snapshots::elastic`): it is read only, its
+    /// snapshots restore from Elasticsearch's own files, and `uuid` and `generation` are its.
+    pub elastic: bool,
 }
 
 impl RepositoryData {
@@ -268,6 +271,7 @@ impl RepositoryData {
         obj! {
             "uuid" => self.uuid.clone(), "generation" => self.generation,
             "snapshots" => Value::Arr(self.snapshots.iter().map(|s| s.to_stored()).collect()),
+            "elastic" => self.elastic,
         }
     }
 
@@ -276,6 +280,7 @@ impl RepositoryData {
             uuid: v.get("uuid")?.as_str()?.to_string(),
             generation: v.get("generation").and_then(Value::as_i64).unwrap_or(0),
             snapshots: v.get("snapshots").and_then(Value::as_array).map(|a| a.iter().filter_map(Snapshot::from_stored).map(Arc::new).collect()).unwrap_or_default(),
+            elastic: v.get("elastic").and_then(Value::as_bool).unwrap_or(false),
         })
     }
 
@@ -323,7 +328,7 @@ mod tests {
             global: None,
             shard_files: BTreeMap::from([("i".to_string(), vec![ShardFiles { file_count: 3, size_in_bytes: 900, incremental_file_count: 1, incremental_size_in_bytes: 100, segments: 2, start_ms: 1, time_ms: 1 }])]),
         };
-        let data = RepositoryData { uuid: "r".into(), generation: 3, snapshots: vec![Arc::new(snap)] };
+        let data = RepositoryData { uuid: "r".into(), generation: 3, snapshots: vec![Arc::new(snap)], elastic: false };
         assert_eq!(RepositoryData::from_stored(&data.to_stored()).unwrap(), data);
     }
 }

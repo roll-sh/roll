@@ -764,7 +764,7 @@ fn inflate(raw: &[u8], max: usize) -> Result<Vec<u8>, String> {
 
 /// At least as many values (keys included) as parsing JSON `text` would build: one more
 /// than its separators and opening brackets outside strings.
-fn json_values(text: &[u8]) -> usize {
+pub(super) fn json_values(text: &[u8]) -> usize {
     let (mut n, mut in_str, mut escaped) = (1, false, false);
     for &b in text {
         match (in_str, b) {
@@ -782,7 +782,7 @@ fn json_values(text: &[u8]) -> usize {
 
 /// The largest document source a restore indexes: the node's `http.max_content_length`, as
 /// no write could have sent a larger one.
-fn source_max(cluster: &crate::Cluster) -> usize {
+pub(super) fn source_max(cluster: &crate::Cluster) -> usize {
     let node = cluster.config.node_setting("http.max_content_length").and_then(|v| crate::units::ByteSize::parse(v, "http.max_content_length").ok());
     node.map_or(crate::api::nodes::MAX_CONTENT_LENGTH, |b| b.0).clamp(0, i32::MAX as i64) as usize
 }
@@ -829,7 +829,7 @@ pub(super) fn bucket_repository(st: &ClusterState, name: &str) -> Option<Arc<Rep
 
 /// Makes the cluster's copy of the bucket's repository data the bucket's (one state write when
 /// it changed).
-async fn store_copy(cluster: &crate::Cluster, r: &Repository, latest: Option<RepositoryData>) -> EsResult<()> {
+pub(super) async fn store_copy(cluster: &crate::Cluster, r: &Repository, latest: Option<RepositoryData>) -> EsResult<()> {
     let key = r.location_key();
     let same = match (cluster.state().metadata.repository_data.get(&key), &latest) {
         (Some(c), Some(l)) => c.uuid == l.uuid && c.generation == l.generation,

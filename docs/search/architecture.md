@@ -54,6 +54,7 @@ branch instantly and keep their data on object storage.
 | `search-index`    | one shard's engine: in-memory indexing buffer, refresh, segment flush and merges, deletes and updates, the query/weight/scorer model, BM25, collectors, highlighting |
 | `search-aggs`     | aggregations over doc values: buckets, metrics, pipelines, with Elasticsearch's semantics and response shapes |
 | `search-painless` | the Painless scripting language: parser, type checker, compiler to a compact bytecode, VM, and the script contexts Elasticsearch exposes |
+| `search-lucene`   | readers for the Lucene 9 and 10 files of an Elasticsearch snapshot (segment infos, compound files, field infos, stored fields, live docs, numeric doc values, flat vectors), as hostile input, for restoring Elasticsearch's snapshots |
 | `search-store`    | durability and storage: the write-ahead log (group commit to object storage), segment upload, per-shard manifests, the local cache, branching and garbage collection |
 | `search-es`       | Elasticsearch semantics: mappings, settings, index templates, aliases, the Query DSL, the document and search APIs, `_cat`, cluster and node APIs, errors with Elasticsearch's types and texts |
 | `search-server`   | the node: HTTP listener, tenants (clusters), authentication, wake-on-request, idle unload, request limits, TLS |
@@ -61,7 +62,7 @@ branch instantly and keep their data on object storage.
 | `search-yaml`     | a runner for Elasticsearch's YAML REST test format, usable against any URL (roll or a real Elasticsearch) |
 | `rolld`           | runs everything on one node (`crates/rolld/src/search.rs`) |
 
-`search-analysis`, `search-codec` and `search-painless` depend on nothing else in roll search.
+`search-analysis`, `search-codec`, `search-painless` and `search-lucene` depend on nothing else in roll search.
 `search-index` builds on codec and analysis; `search-aggs` on index; `search-es` on all of them;
 `search-server` on es and store; `search-control` on server.
 
@@ -468,6 +469,16 @@ allowlist (a preview's branch included); change it like any setting.
   `If-Match`/`If-None-Match`. Only S3 lists dangling uploads. An `azure` repository's reads go
   where `location_mode` says (primary, secondary, either first), writes to the primary;
   `secondary_only` is read-only.
+- **Repositories Elasticsearch wrote** (`api/snapshots/elastic.rs`, `elastic_restore.rs`). A
+  location whose base path holds Elasticsearch's `index.latest` (roll's own are under `roll/`)
+  is read only, its snapshots listed from its `index-N` and `SnapshotInfo` blobs into the
+  cluster's copy (marked `elastic`). A restore creates each index from Elasticsearch's index
+  metadata as `PUT <index>` would (no templates), then a task reads each shard's Lucene files
+  through `search-lucene` on a blocking thread (ranged reads in 8 MiB windows across a file's
+  `.partN` blobs, throttled like any restore; checksums checked as files stream; what is kept
+  charged to the `request` breaker) and hands live documents over a bounded channel to be
+  indexed like writes. The restore's state is in each index's recovery source, so a new owner
+  restores an unfinished index again when it opens the cluster.
 - **Credentials.** Elasticsearch takes a client's secure settings from its keystore; a roll
   tenant has none, so they come with the repository's settings (`s3`: `access_key`,
   `secret_key`, `session_token`; `gcs`: `credentials_file`, the service account key file's
