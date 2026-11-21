@@ -1028,7 +1028,7 @@ Checked against Elasticsearch 9.5.5 (captures in
   worker of a node that many tenants share. Elasticsearch has no such cap. The cap is the node
   setting `roll.search.max_time` (rolld's `--search-max-time`): 60 s on a daemon with an
   operator token, none on an open daemon, and `0` turns it off. A value that isn't a time
-  refuses to load the cluster. The time is fixed once per request, when it holds its thread
+  stops the node from starting. The time is fixed once per request, when it holds its thread
   pool slot, and bounds every phase, shard and nested search of it: the cap is never per shard
   or per phase. A request's own `timeout` (or `search.default_search_timeout`) still applies per
   shard's query phase, as on Elasticsearch, so a caller's larger `timeout` is held to the cap.
@@ -1057,7 +1057,9 @@ Checked against Elasticsearch 9.5.5 (captures in
     `wait_for_completion`): the cap bounds each slice's search, never the run's writes or
     throttle waits, so a long sliced run whose every scan stays under the cap succeeds. A scan
     that passes the cap fails its slice with `search_timeout_exception` before the slice writes
-    anything, and the run fails as a run with a failed slice does.
+    anything. The other slices run to their end (refreshed with `refresh=true`), and the run
+    fails with the first failed slice's error, the others' suppressed, as a run with a failed
+    slice does.
   - **Query languages:** ES|QL (`_query` and `_query/async`) and SQL read indices through doc
     values or an internal scroll, both under the request's cap: past it the query fails with
     `search_timeout_exception`. PPL pages over a point in time and fails the same way. EQL's

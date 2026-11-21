@@ -2012,9 +2012,10 @@ async fn sequences(ctx: &mut Ctx<'_>, stages: &[Stage], until: Option<&Stage>, m
             missing_groups[i] = Some(group(&pool, base..pool.len()));
         }
     }
-    // Sequences over the shards that answered could be wrong (a failed shard may hold the
-    // events that complete or break them), so they're only returned when asked for.
-    if !ctx.failures.is_empty() && !ctx.s.allow_partial_sequence_results {
+    // Sequences over the shards that answered could be wrong (a failed shard, or a search the
+    // node's cap cut short, may hold the events that complete or break them), so they're only
+    // returned when asked for.
+    if (!ctx.failures.is_empty() || ctx.timed_out) && !ctx.s.allow_partial_sequence_results {
         return Ok(Output::Sequences(Vec::new()));
     }
     let positive: Vec<usize> = (0..n).filter(|i| !stages[*i].missing).collect();

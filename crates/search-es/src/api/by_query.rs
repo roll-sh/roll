@@ -187,8 +187,10 @@ pub fn scan(
     };
     let targets = crate::search::shard_targets(cluster, &st, &req)?;
     let _tasks = crate::tasks::scan_started(ctx, parent, &req, &targets);
-    // The scan is the run's search: the node's cap on one request bounds it (a run in the
-    // background, off its request's thread, starts its own).
+    // The shards' refreshes first (`before_search`): they aren't the search.
+    let ready: Vec<EsResult<()>> = targets.iter().map(|t| t.shard.before_search(crate::engine::IndexEngine::refresh_interval(&t.idx))).collect();
+    // The scan is the slice's search: the node's cap on one request bounds it, from here, and
+    // never the slice's writes.
     let _bound = crate::search::bound_request(cluster);
     let mut shards = Vec::new();
     let mut matched = 0u64;
@@ -197,7 +199,7 @@ pub fn scan(
     // Every shard is scanned: which of them the first `max_docs` documents come from is only
     // known after the merge. No shard contributes more than `max_docs`.
     for (ti, t) in targets.iter().enumerate() {
-        match scan_shard(ctx, &st, t, query, slice, max_docs) {
+        match ready[ti].clone().and_then(|()| scan_shard(ctx, &st, t, query, slice, max_docs)) {
             Ok(sh) => {
                 succeeded += 1;
                 matched += sh.docs.len() as u64;
@@ -231,7 +233,7 @@ fn scan_shard(
     if let Some((_, max)) = slice {
         crate::search::check_slice_count(&t.idx, max as i64)?;
     }
-    t.shard.before_search(crate::engine::IndexEngine::refresh_interval(&t.idx))?;
+    // [`scan`] ran `before_search`.
     let searcher = t.shard.searcher();
     let table = t.table();
     let qctx = QueryCtx::new(cluster, st, &t.idx, &table, &searcher, ctx.now_ms, t.reader());
@@ -708,6 +710,7 @@ async fn run_slices<'c, F, Fut>(
     parent: Arc<Live>,
     action: &str,
     description: &str,
+    refresh: bool,
     one: F,
 ) -> EsResult<SliceRun>
 where
@@ -757,8 +760,15 @@ where
     let mut total = Status::default();
     let mut parts = Vec::with_capacity(n as usize);
     let mut touched: Vec<String> = Vec::new();
+    let mut errors = Vec::new();
     for (i, r) in results.into_iter().enumerate() {
-        let (mut s, t) = r?;
+        let (mut s, t) = match r {
+            Ok(v) => v,
+            Err(e) => {
+                errors.push(e);
+                continue;
+            }
+        };
         s.slice_id = Some(i as u32);
         s.requests_per_second = lives[i].rate();
         *lives[i].status.lock() = Status { failures: Vec::new(), ..s.clone() };
@@ -770,6 +780,17 @@ where
                 touched.push(u);
             }
         }
+    }
+    if !errors.is_empty() {
+        // Every slice ran to its end (`ParentBulkByScrollTask`): the ones that wrote are
+        // refreshed as asked, and the run fails with the first failed slice's error, the
+        // others' suppressed (bounded).
+        if refresh {
+            let _ = refresh_touched(ctx, true, &touched);
+        }
+        let first = errors.remove(0);
+        errors.truncate(MAX_SUPPRESSED_SLICES);
+        return Err(if errors.is_empty() { first } else { first.with_suppressed(errors) });
     }
     total.slices = Some(parts);
     Ok((total, touched))
@@ -1022,8 +1043,9 @@ pub async fn delete_by_query(ctx: &Ctx<'_>) -> EsResult<Reply> {
                 Ok((s, touched))
             }
         };
-        let (s, touched) = run_slices(ctx, opts, &indices, slice, task, live, action, &d2, one).await?;
-        refresh_touched(ctx, ctx.bool_param("refresh", false)?, &touched)?;
+        let refresh = ctx.bool_param("refresh", false)?;
+        let (s, touched) = run_slices(ctx, opts, &indices, slice, task, live, action, &d2, refresh, one).await?;
+        refresh_touched(ctx, refresh, &touched)?;
         Ok((s, touched))
     })
     .await
@@ -1144,8 +1166,9 @@ pub async fn update_by_query(ctx: &Ctx<'_>) -> EsResult<Reply> {
                 Ok((s, touched))
             }
         };
-        let (s, touched) = run_slices(ctx, opts, &indices, slice, task, live, action, &d2, one).await?;
-        refresh_touched(ctx, ctx.bool_param("refresh", false)?, &touched)?;
+        let refresh = ctx.bool_param("refresh", false)?;
+        let (s, touched) = run_slices(ctx, opts, &indices, slice, task, live, action, &d2, refresh, one).await?;
+        refresh_touched(ctx, refresh, &touched)?;
         Ok((s, touched))
     })
     .await
@@ -1459,7 +1482,7 @@ pub async fn reindex(ctx: &Ctx<'_>) -> EsResult<Reply> {
                         Ok((s, touched))
                     }
                 };
-                run_slices(ctx, opts, &src_indices, slice, task, live, action, &d2, one).await?
+                run_slices(ctx, opts, &src_indices, slice, task, live, action, &d2, opts.refresh, one).await?
             }
         };
         refresh_touched(ctx, opts.refresh, &touched)?;

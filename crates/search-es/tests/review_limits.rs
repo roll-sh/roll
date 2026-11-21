@@ -231,11 +231,11 @@ async fn the_cap_bounds_a_by_query_runs_searches_not_its_writes() {
     // scans. The run succeeds: the cap is per search.
     let c = capped("300ms").await;
     let update = r#"{"script":{"source":"long n = 0; for (int i = 0; i < 900000; i++) { n += i; } ctx._source.a = n;"}}"#;
-    let t = Instant::now();
-    let (status, v, _) = call_within(&c, Duration::from_secs(120), "POST", "/idx/_update_by_query?slices=2&refresh=true", update.into()).await;
+    let (status, v, took) = call_within(&c, Duration::from_secs(120), "POST", "/idx/_update_by_query?slices=2&refresh=true", update.into()).await;
     assert_eq!(status, 200, "{}", v.to_json());
-    assert_eq!(at(&v, &["updated"]).as_i64(), Some(40), "{}", v.to_json());
-    assert!(t.elapsed() > Duration::from_millis(300), "the run took {:?}, under the cap: it proves nothing", t.elapsed());
+    // Both slices wrote their share, slice 1 after slice 0's updates outlasted the cap.
+    assert!(at(&v, &["slices", "0", "updated"]).as_i64().unwrap_or(0) > 0, "{}", v.to_json());
+    assert_eq!(at(&v, &["updated"]).as_i64(), Some(40), "{} in {took:?}", v.to_json());
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

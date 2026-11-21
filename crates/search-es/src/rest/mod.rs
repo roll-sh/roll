@@ -689,6 +689,7 @@ fn runs_searches(api: Api) -> bool {
             | Api::EsqlQuery
             | Api::EsqlAsyncQuery
             | Api::SqlQuery
+            | Api::Ppl
             | Api::OpenPointInTime
     )
 }
