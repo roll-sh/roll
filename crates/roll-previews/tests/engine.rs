@@ -1301,7 +1301,8 @@ async fn a_signed_in_person_sees_only_their_own_projects_previews() {
 #[tokio::test]
 async fn a_rules_reference_to_another_environment_needs_its_writers_reveal_there() {
     use tower::ServiceExt;
-    struct StagingOnly;
+    #[derive(Default)]
+    struct StagingOnly(parking_lot::Mutex<Vec<(roll_workspace::Kind, bool)>>);
     impl roll_previews::ports::Reveal for StagingOnly {
         fn may_reveal(&self, who: &roll_previews::ports::Asker<'_>, _: &str, env: &str, folder: &str) -> bool {
             who.user.is_some_and(|u| u.user == "usr_b") && ((env == "staging" && folder == "/payments") || (env == "dev2" && folder == "/"))
@@ -1310,12 +1311,14 @@ async fn a_rules_reference_to_another_environment_needs_its_writers_reveal_there
             let parts: Vec<&str> = reference.strip_prefix("roll://").ok_or("not one")?.split('/').collect();
             Ok((parts[0].to_string(), if parts.len() > 2 { format!("/{}", parts[1..parts.len() - 1].join("/")) } else { "/".into() }))
         }
-        fn still(&self, _: &str, _: (roll_workspace::Kind, &str), _: bool, _: &str, maker: &str) -> Result<(), String> {
+        fn still(&self, _: &str, (kind, _): (roll_workspace::Kind, &str), untrusted: bool, _: &str, maker: &str) -> Result<(), String> {
+            self.0.lock().push((kind, untrusted));
             if maker == "usr_b" { Ok(()) } else { Err(format!("{maker} may not reveal staging:/payments")) }
         }
     }
     let e = env(json!({ "enabled": true }));
-    let _ = e.engine.reveal.set(Arc::new(StagingOnly));
+    let reveal = Arc::new(StagingOnly::default());
+    let _ = e.engine.reveal.set(reveal.clone());
     let mine = e.ws.create("usr_b", "mine", "", None).unwrap();
     let put = |env: serde_json::Value| {
         let router = roll_previews::api::router(e.engine.clone());
@@ -1386,6 +1389,15 @@ async fn a_rules_reference_to_another_environment_needs_its_writers_reveal_there
     assert!(first.contains("converges without it"), "{first}");
     e.engine.pass().await.unwrap();
     assert!(!said(e.engine.env(&p.id, "web").await).contains("converges without it"), "once left out, starts go on");
+    // Read as the preview's repo, untrusted unless the project trusts its changes with production.
+    assert!(reveal.0.lock().iter().all(|(k, u)| *k == roll_workspace::Kind::Repo && *u), "{:?}", reveal.0.lock());
+    let mut st = e.engine.store.settings(&e.project).unwrap();
+    st.secrets.allow_production = true;
+    e.engine.store.put_settings(&e.project, &st).unwrap();
+    reveal.0.lock().clear();
+    e.engine.store.update(&p.id, |row| row.next_at = 0).unwrap();
+    e.engine.pass().await.unwrap();
+    assert!(reveal.0.lock().iter().any(|(_, u)| !*u), "a trusted change's preview is asked as trusted");
 }
 
 /// A variable set while a deploy is still going, then removed, is removed from the backend too:
