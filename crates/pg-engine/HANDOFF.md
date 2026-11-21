@@ -12031,7 +12031,8 @@ CREATE INDEX's zstd (runs and L0 files, no dictionary, row form) are untouched b
 **Tests**: `storage::colblock::tests::sections_give_their_rows_back` (every layout, NULLs, mixed tags,
 numerics past a word and of two scales, long and few strings, with and without TIDs, back byte for
 byte; rows of two column counts or stored out of line refused); `newer_formats_are_refused` now
-refuses format 6. Correctness of the prototype otherwise rests on the writer's check of every block it
+refuses format 6. Run built `--profile verify-checked`: the `storage::colblock`, `storage::cols`,
+`storage::batch` and `storage::sst` unit tests, 20 passed. Correctness of the prototype otherwise rests on the writer's check of every block it
 wrote (two TPC-H loads and the bulk runs) and on result hashes: all 22 TPC-H queries equal across the
 three arms, the bulk script's row checks equal. No quick-check (the brief: not needed for a prototype).
 
