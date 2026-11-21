@@ -13157,6 +13157,73 @@ user (`a234-rref2`): 1,881 / 1,881 units, newly differing 0, i.e. 51,148 / 51,15
 Run regress references as the image's user, not `--user 1000:1000`. No planner change: the
 difftest guard was not run.
 
+## Read path, round 8: block seeks without the keys before the one found (agent 277)
+
+BENCH.md "Read path, round 8" has the tables. Base `1c0a79d67` (cand/a275 and cand/a276 landed).
+`cand/a277`: one code commit and this section. No format change.
+
+**Where the multi-get's time was** (b0 = cand/a275 + a276's code; `perf record -e instructions:u
+--call-graph lbr` of the engine on lane C, the libc samples attributed to the first engine frame
+of their chains, `~/.cache/a277/libcallers.py`; call sites inside the inlined `Lookup::batch`
+mapped with objdump): libc's memcmp / memcpy were **16.4% of q09's user instructions, 19.2% of
+q07's, 10.1% of q05's**. Of q09's: `Lookup::batch` 35.5% (the multi-get inlined into it), of which
+the call sites of `Block::seek_from`'s loop (the key of every entry from the restart on made by
+memcpy and compared by memcmp) were 1,407 of 2,494 samples; `Block::seek` 19.2%; the lookup's sorts
+of keys ~13%; `first_raw` 5.7%; `Held::holding`, `find_block`, `Cursor::head`, `Block::read` 2-3%
+each. The same loop was ~42% of `Lookup::batch`'s own samples. The brief's other ideas are already
+in `PointReader::get_sorted`: a key in the block the key before went to is sought on from there,
+the block held from the last batch needs no file or index search, L1's bloom filters aren't read.
+
+**Kept (`cand/a277`): a block seek finds its entry without making or comparing the keys before
+it** (`Block::seek_from`). From the restart on, each entry's key is the one before's first
+`shared` bytes and its stored tail. With `m` the bytes the key before shares with the sought key
+(that key below it): an entry sharing more than `m` is below the sought key too, sharing `m`, and
+is passed by one comparison of two numbers; one sharing at most `m` starts as the sought key does,
+and only its tail, then the block's version, is compared with the rest (`common_prefix`, 8 bytes at
+a time). The key is made once, for the entry found, from the sought key's first `shared` bytes
+(`read` makes the rest). It holds whatever `shared` is (format 2 stops it before the version):
+only "shares more than `m`" decides without a comparison, and that needs no more than the entries'
+order. `block_positions` also seeks, for each entry, a key below it in its last byte (inside an
+index entry's version).
+
+Gates (plain dist, b1 = `1c0a79d67`, n2 = cand/a277; user instructions a run): TPC-H SF1 2 pairs
+(b1 n2, n2 b1): **q09 -4.50 / -4.34%, q08 -4.41 / -4.37, q07 -4.33 / -4.23, q03 -2.81 / -2.73,
+q05 -1.86 / -1.87**; the 22 in one pair 103.61 -> 102.22 G (-1.35%; q02 -2.4, q04 -2.6, q11 -2.9,
+q22 -2.8, q20 -1.9, q21 -1.75, q17 -1.5; none up by more than +0.09%), every result hash equal to
+b1's (PostgreSQL's), VmHWM 1,678,652 -> 1,680,448 kB. 100-row range reads at 8 clients (lane B, one pair)
+349,247 -> 348,661 instructions an op (-0.17%); point selects at 8 clients (lane A, one pair) 39,986
+-> 39,223 (-1.9%). **No pair met the 1.0 foreign-core rule**: every lane read 6-7.5 foreign cores
+in lane.sh's reading for the whole session (the TPC-H pairs' own reading ~3); b1 repeated within
+0.15% across three pairs, so the instruction counts stand; cycles moved -2.6 to +2.8% and decide
+nothing. Not gated on PGO: `seek_from` keeps its `#[inline(always)]`, no function boundary moved.
+
+Verification: `tools/quick-check.sh` on `27e8745fb`: Clippy 16 warnings, none new in a changed
+file; 382 tests in 19 binaries; crash_random seeds 1-3 x 2, power_cut_at_every_point; regress
+51,148 / 51,150, 0 newly differing; isolation 1,647 / 1,648; pg_dump_tap 14,609 passed. The storage
+unit tests (58) also in a dev build with debug assertions. No assertions or catalog counts touched.
+
+**Measured and dropped: libc's compares and copies replaced inline across the cursor path** (item 1
+of the brief; `~/.cache/a277/patches/dropped-item1-word-compares.patch`). `BlockPos`'s key held in a
+buffer with slack, tails copied by fixed 16-byte moves, and 275's `short_cmp` / `short_eq`
+(extended below 8 bytes) in `seek_from`, `seek_on`, `first_restart`, the block index search,
+`Merge::min`, `rank_of`, `Cursor::head` / `seek` / `reseek`, `run_into`, `skip_deleted`,
+`Scan::position`, `Held::holding`, `block_holds`, `l1_in`, `file_get`, `first_raw` and the lookup's
+sorts; keys appended by a padded fixed copy (`push_key`). One pair against b1: **q03 +4.1%, q07
++4.4%, q09 +3.3%, q08 +3.2%, q05 +1.9% user instructions**, cycles level. A share of libc in an
+instruction profile is a share of instructions: avx2/evex memcmp of a 25-byte key is ~17
+instructions with its call, the scalar word comparison (two 16-byte loads a side, byte swaps,
+bounds checks, the length's tie-break) about twice that, and the larger inline bodies took
+`multi_get`, `block_holds` and an L1 `partition_point` out of their callers. Instructions come
+down by comparing less, not by comparing inline.
+
+**Left** (q09 after cand/a277: libc 11.0% of the engine's instructions):
+1. The lookup's two sorts of keys by memcmp, ~3.8% of q09 and q07 (`Lookup::batch`'s `order`,
+   `multi_get`'s): fixed-length keys sorted by words made once (next candidate).
+2. `seek_on`'s steps (each a `read` and a memcmp) under scans' reseeks and held blocks.
+3. `first_raw` (a unique index's probe: `smallest_key` then `newest`, two seeks in the held
+   block, keys copied and compared, the found key cloned into a Vec only to be dropped by
+   `entry_spans`), `find_block` per key of a new block, `Cursor::head`'s end comparison.
+
 ## Read path, round 7: the audit since 6d3b7e9e5, the estimates' operator lookups (agent 255)
 
 BENCH.md "Read path, round 7" has the tables. Two items: an owed regression audit of point

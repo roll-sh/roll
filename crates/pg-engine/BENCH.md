@@ -333,6 +333,48 @@ Against the numbers that stand (agent 260's same-day runs, 2026-11-19): all step
 PostgreSQL's 52.33 (0.892x) and pgrust's 44.92 (1.039x); INSERT … SELECT 5.11 against PostgreSQL's
 4.31; COPY in 8.74 against PostgreSQL's 6.48 and pgrust's 4.97. Not re-run on PostgreSQL or pgrust.
 
+## Read path, round 8: block seeks (2026-11-21, agent 277)
+
+HANDOFF "Read path, round 8" has what changed. Plain dist builds (`tools/dist.sh`): **b1** origin's
+`1c0a79d67`; **n2** cand/a277 (`27e8745fb`); **n1** the dropped inline compares (one pair).
+TPC-H: lane C, agent 276's harness copied to `~/.cache/a277/tpch/` (a fresh engine on a copy of SF1
+loaded by this round's first build, a 2 GB cache, a warm-up of the 22, 3 runs a query in one
+`perf stat` window over the engine's cgroup). Point selects and 100-row range reads: agent 255's
+harness (`~/.cache/a277/bench/`), 100,000 rows, 8 clients, 10 s. Each pair in its own
+`tools/lane.sh` hold; lane.sh read 6.0-7.5 foreign cores on every lane all session (no pair met
+the 1.0 rule): the gates are on user instructions.
+
+### n2 against b1 (user instructions a run, G; % per pair, pairs b1 n2 then n2 b1)
+
+| query | b1 | n2 | instructions % | cycles % |
+|---|---|---|---|---|
+| q03 | 4.604 | 4.475 | -2.81 / -2.73 | -1.2 / +2.8 |
+| q05 | 3.491 | 3.426 | -1.86 / -1.87 | -0.5 / -0.1 |
+| q07 | 4.335 | 4.147 | -4.33 / -4.23 | +0.2 / +0.6 |
+| q08 | 1.683 | 1.609 | -4.41 / -4.37 | -1.2 / -2.6 |
+| q09 | 10.156 | 9.699 | -4.50 / -4.34 | -1.7 / -2.2 |
+
+Foreign cores per arm (the pair's own reading): b1 3.10 3.05, n2 3.06 2.97.
+
+### The 22 (b1 against n2, one pair, 1 run a query)
+
+103.61 -> 102.22 G user instructions (-1.35%): q09 -4.53%, q08 -4.55, q07 -4.47, q03 -3.03, q11
+-2.86, q22 -2.81, q04 -2.63, q02 -2.41, q05 -1.96, q20 -1.93, q21 -1.75, q17 -1.51, q19 -1.50, q14
+-1.39, q10 +0.09, the rest within +-0.07. All 22 result hashes equal. VmHWM 1,678,652 -> 1,680,448 kB.
+Foreign cores 3.39 / 3.38.
+
+### Point selects and range reads (8 clients, one pair each, per op)
+
+| workload | b1 instructions | n2 instructions | % | cycles % | foreign cores b1 / n2 |
+|---|---|---|---|---|---|
+| point select (lane A) | 39,986 | 39,223 | -1.91 | -2.3 | 1.97 / 2.25 |
+| range read, 100 rows (lane B) | 349,247 | 348,661 | -0.17 | +2.1 | 1.75 / 1.71 |
+
+### Dropped: inline compares and copies (n1 against b1, one pair)
+
+q03 4.611 -> 4.802 G (+4.14%), q05 +1.92%, q07 +4.44%, q08 +3.19%, q09 +3.27%; cycles -1.2 to
++3.0%. Hashes equal.
+
 ## Bulk writes, round 20: bulk DELETE, its merges and its compaction (2026-11-21, agent 275)
 
 HANDOFF "Bulk writes, round 20" has what changed. Lane C, the 1M-row bulk script with joined
