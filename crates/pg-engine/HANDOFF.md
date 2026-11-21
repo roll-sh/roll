@@ -12005,6 +12005,88 @@ at open, a compaction): older builds ignore the manifest's `format` and fail on 
   the probe needs from the OS page cache, as PostgreSQL's 8 kB page), each a format change for
   its own round.
 
+## Analytic CPU, round 9 (agent 276)
+
+TPC-H SF1 on lane C, plain dist builds only (BENCH.md "Analytic CPU, round 9" has the tables).
+Base `515ff3b04`. Harness: agent 272's copied to `~/.cache/a276/tpch/` (`pair.sh`: per arm a fresh
+engine in a container on a copy of the loaded data, a 2 GB cache, a warm-up of the 22, then per
+query 3 runs in one `perf stat -e instructions:u,cycles:u` window over the engine's cgroup, opened
+2.5 s early), ONE pair per `tools/lane.sh c` hold. **Lane C was never quiet** (the pairs' own
+reading 0.6-3.0 foreign cores, lane.sh's 2.5-7.0): the gates are decided on user instructions,
+which repeat within 0.1-0.4% from pair to pair (q21 within 1%: b0 alone read 8.17-8.26 G); cycles
+are in BENCH and mean little. Every pass's result hashes are PostgreSQL's. One candidate,
+`cand/a276` (two code commits and this section).
+
+- **Where `Lookup::batch`'s 13% of q09 is** (`perf record -e instructions:u` of the base; the dist
+  build has no line tables, so the function's hot offsets were mapped to the calls around them
+  with objdump): about 3,500 of its 4,848 samples are the store's multi-get inlined into it
+  (`PointReader::get_sorted`'s block seeks: restart search, entry varints, key copies and
+  compares), ~550 `take` (each entry's binary search, the decode call, the filter), ~250 the index
+  keys. The lookups' own cost was in what they built around that: `decode_row_need_spare` (a Vec
+  an inner row), `joined_from`, `drop_row`, `extend_with`, an allocation and a drop per inner row,
+  and every inner row decoded before its filter.
+- **cand/a276, first commit: a lookup stage's inner rows are made end to end in one buffer**
+  (`Lookup::decode_into`, `Got::Rows` spans of values, `pipe::truncate_row`): no Vec an inner row,
+  each decoded in place (the columns the stage reads, as `Decode::row`; a column added since the
+  row was stored, its default); a small table's kept rows (`LookupScratch::cache`) are copied into
+  it instead of cloned as rows; each entry's row is found by its place among the multi-get's keys
+  (`BatchBufs::slot`, made as the keys are sorted: no binary search an entry); the last inner
+  row's values are moved into the joined row (`pipe::joined_from_taken`), not cloned and dropped.
+  The inner filter's leading conjuncts that are comparisons with constants run over the stored
+  values before the row is decoded (`StoredCmps`; also a row stored without a header, as a bulk
+  load writes them): a row they turn away isn't decoded. Only the leading ones: an inner scan's
+  filter ends with the join's equality over the outer row (`=(#0, ^1#0)`, which stays with the
+  kernel), and a row turned away is one whose quals stop there, as ExecQual stops at the first
+  false one, before a later qual that may raise an error. When they are the whole filter, the
+  kernel's filter isn't run again. `parallel_scan`'s lookup queries gain one with such a filter.
+- **cand/a276, second commit: `StoredCmps` compares dates and timestamps with constants**
+  (`row::peek_dt`): of one type as their numbers (as `cmp_total`), a date with a timestamp as
+  instants (`ops::date_instant`, as `p_dt_*`). That is what TPC-H's lookups filter on: q03's and
+  q07's lineitem by `l_shipdate`, q08's orders by `o_orderdate`. `stored_filters` checks each new
+  filter against itself ANDed with a volatile call (NULLs, infinity, a date past the timestamps'
+  range).
+- **Gates** (user instructions a run, plain dist): the first commit's first version against the
+  base (3 pairs; its stored filter reached none of these queries yet): q07 -6.87 / -6.84 / -6.52%,
+  q03 -6.00 / -5.91 / -5.63, q09 -4.62 / -4.56 / -4.56, q05 -3.95 / -3.94 / -3.80, q08 -2.56 /
+  -2.53 / -2.56, q21 -1.26 / -1.98 / -0.43, q02 (no lookup) -0.01 / -0.01 / +0.01. The stored
+  filter reaching them (the final version against the one before, n3 -> n4, 2 pairs): q03 -15.69 /
+  -15.32%, q07 -8.25 / -7.80, q08 -1.12 / -1.06, q09 / q05 / q12 within +-0.2, q21 -1.06 / +0.93.
+- **The 22, base against cand/a276** (one pair, b0 -> n4): 106.59 -> 103.71 G user instructions
+  (-2.70%): q03 -21.0% (5.83 -> 4.60 G), q07 -14.9 (5.09 -> 4.34), q09 -5.1 (10.69 -> 10.15), q05
+  -4.5, q08 -3.9, q19 -1.3, q21 -1.2, q04 -1.1, q22 +0.6, q16 +0.2, the rest within +-0.1. VmHWM
+  1,687 -> 1,688 MB. All 22 result hashes PostgreSQL's (agent 261's `pg` arm). Against
+  pgrust's 90.4 G (round 6's) 1.15x, from 1.18x.
+- **How the stored filter was found not to run** (it measured as nothing twice): a profile showed
+  `StoredCmps::passes` without a sample; first cause, `scan::row_data_fast` returns None for a
+  row stored without a header (all of TPC-H's, bulk-loaded): the lookup now takes `row_data`.
+  Second, a dev build printing the inner scan's filter (`A276_DEBUG`, not kept) showed
+  `AND[>=(#10, date), <=(#10, date), =(#0, ^1#0)]`: the outer row's equality made the whole filter
+  not compile. Found, not changed: the serial index scans' `filter_kernel` takes `row_data_fast`
+  too, so their rechecks never run over stored values on a bulk-loaded table.
+- **Item 3 (q16 +0.85%, q13 +0.6%, q22 +0.6-1.0% after round 8)**: 272's builds are gone and its
+  before / after commits would take two more builds in a second checkout (one build directory at
+  a time), so not compared directly. What this round measured instead: on these builds NOPs are
+  2.5-3.3% of the user instructions retired (q16, q22: the share of `instructions:u` samples on
+  NOP instructions, sampled from the engine's process at `-c 50021` and mapped to the binary with
+  nm and objdump; `~/.cache/a276/nopshare.py`): the 32-byte branch padding of
+  `tools/dist-flags.sh` is partly NOPs, which count as instructions, so code placement alone
+  moves a query's instruction count by tenths of a percent. This round's q16 +0.23% matches its
+  NOP share going 2.53 -> 2.73% (+-0.11), mostly in `fill_batch_with` (untouched): placement.
+  q22's +0.61% (no lookup, no stored filter in it) isn't explained that way (NOP share 3.25 ->
+  3.06%, +-0.23 at its sample count) and stays open; q22 has risen with unrelated changes in
+  rounds 7, 8 and now 9.
+- **Not done**: item 2 (q10's rows the probe passed made from the batch's columns): the lineitem
+  row path is ~5% of q10's samples (`into_row_passed`, `LazyBuf::read`, `Lazy::decode`,
+  `Built::lookup`), and 2% of the scan's 6M rows pass its probe: decoding the kept columns in the
+  batch costs every row two numerics' decode (why `VPlan::wide` waits for 25% passing), and a
+  path decoding only the passed rows' kept columns from their stored bytes would save at most
+  half of the 5% (~0.1 G). No PGO build (no change here is to inlining or function boundaries).
+  Nothing dropped: no patch under `~/.cache/a276/patches/`.
+- **Left** (largest first): the store's multi-get inside `Lookup::batch` (~70% of its samples:
+  block seeks; a unique index's lookup is a `first_raw` probe of the index, then the row's read);
+  the kernels over the joined rows above the stages (q09's `K::num` / `K::run` over `Joined`,
+  ~7%); the typed walk and `fill_batch_with` of the lineitem scans (q10 26% / 14%); q22's drift.
+
 ## Analytic CPU, round 8 (agent 272)
 
 TPC-H SF1 on lane C, plain dist builds only (BENCH.md "Analytic CPU, round 8" has the tables).

@@ -482,6 +482,63 @@ Foreign load 1.5-3.3 cores in every pass.
 
 Lane A held 3.7-5.2 foreign cores (other agents' runs) through all three: every pair flagged.
 
+## Analytic CPU, round 9 (2026-11-21, agent 276)
+
+HANDOFF "Analytic CPU, round 9" has what changed. Lane C (the engine in a container on CPUs
+14,15,32,33, `--memory 8g`; the client on 16,17,34,35), TPC-H SF1, a 2 GB cache,
+`max_parallel_workers_per_gather=2`, `max_parallel_workers=8`. Harness: agent 272's copied to
+`~/.cache/a276/tpch/` (`pair.sh`), each pair in its own `tools/lane.sh c` hold. Plain dist builds
+(`tools/dist.sh`): **b0** origin's `515ff3b04`; **n4** cand/a276 (`c1e41622c`); earlier versions of
+its commits: **n1** the first commit's first version (its stored filter reaching none of these
+queries), **n3** with the second commit and the stored filter's header fix (still not reaching
+them). The lane was never quiet (foreign cores per arm below; lane.sh's 2.5-7.0): gates are
+decided on user instructions. No PGO build and no three-server table this round (round 6's
+PostgreSQL 159.3 G and pgrust 90.4 G stand).
+
+### The changes, gated (user instructions a run, G, and % per pair)
+
+**First commit's first version (n1 against b0, 3 pairs)**
+
+| query | b0 | n1 | instructions % per pair | cycles % per pair |
+|---|---|---|---|---|
+| q03 | 5.838 | 5.487 | -6.00 / -5.91 / -5.63 | -11.8 / -1.6 / -5.0 |
+| q05 | 3.655 | 3.510 | -3.95 / -3.94 / -3.80 | -4.8 / +3.0 / -11.2 |
+| q07 | 5.100 | 4.750 | -6.87 / -6.84 / -6.52 | -7.6 / -3.0 / -11.2 |
+| q08 | 1.752 | 1.707 | -2.56 / -2.53 / -2.56 | -7.0 / -6.4 / -14.0 |
+| q09 | 10.693 | 10.198 | -4.62 / -4.56 / -4.56 | -16.3 / -13.9 / -9.1 |
+| q21 | 8.191 | 8.087 | -1.26 / -1.98 / -0.43 | -2.7 / -13.9 / -14.1 |
+| q02 | 2.762 | 2.762 | -0.01 / -0.01 / +0.01 | -3.2 / -21.5 / -13.0 |
+
+foreign cores per arm: b0 1.07 1.66 2.23; n1 0.60 1.76 1.72.
+
+**The stored filter reaching the lookups (n4 against n3, 2 pairs)**
+
+| query | n3 | n4 | instructions % per pair | cycles % per pair |
+|---|---|---|---|---|
+| q03 | 5.451 | 4.596 | -15.69 / -15.32 | -11.6 / -15.5 |
+| q07 | 4.719 | 4.329 | -8.25 / -7.80 | -3.3 / -3.7 |
+| q08 | 1.701 | 1.682 | -1.12 / -1.06 | -3.1 / -8.8 |
+| q05 | 3.495 | 3.489 | -0.16 / +0.09 | +0.4 / +0.4 |
+| q09 | 10.154 | 10.151 | -0.03 / +0.02 | -2.4 / -9.9 |
+| q12 | 6.216 | 6.216 | +0.00 / -0.01 | -0.1 / -7.8 |
+| q21 | 8.151 | 8.065 | -1.06 / +0.93 | +1.9 / -9.9 |
+
+foreign cores per arm: n3 2.96 2.57; n4 2.74 1.89.
+
+### The 22, base against cand/a276 (b0 against n4, one pair, plain dist)
+
+106.59 -> 103.71 G user instructions (-2.70%): q03 -21.03% (5.830 -> 4.604 G), q07 -14.85 (5.091 ->
+4.335), q09 -5.05 (10.692 -> 10.152), q05 -4.45, q08 -3.92, q19 -1.28, q21 -1.21, q04 -1.07, q22
++0.61, q16 +0.23, the rest within +-0.11. VmHWM 1,687 -> 1,688 MB. Foreign cores b0 2.56, n4 2.54.
+All 22 result hashes PostgreSQL's.
+
+### NOPs among the instructions (item 3)
+
+Share of `instructions:u` samples on NOP instructions (the engine's process, `-c 50021`, 3 runs a
+query; `~/.cache/a276/nopshare.py`): q16 b0 2.53% (567 / 22,420), n4 2.73% (676 / 24,804); q22 b0
+3.25% (203 / 6,253), n4 3.06% (224 / 7,309). The rest of the branch padding is prefixes, which
+don't count.
+
 ## Analytic CPU, round 8 (2026-11-20, agent 272)
 
 HANDOFF "Analytic CPU, round 8" has what changed. Lane C (the engine in a container on CPUs
