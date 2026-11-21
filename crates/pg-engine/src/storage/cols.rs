@@ -600,6 +600,43 @@ fn gather(col: &mut Col, dir: &ColDir, d: &[u8], c: usize, (r0, m, brow): (usize
             return Ok(false);
         }};
     }
+    // (No NULL in the column: the slots' flags cleared at once, the values copied in loops the
+    // compiler unrolls, one per width.)
+    if k.nulls == u32::MAX {
+        macro_rules! plain {
+            ($v:expr, $w:expr, |$c:ident| $x:expr) => {{
+                nulls[r0..r0 + m].fill(false);
+                let src = &d[at + brow * $w..at + (brow + m) * $w];
+                for (dst, $c) in $v[r0..r0 + m].iter_mut().zip(src.chunks_exact($w)) {
+                    *dst = $x;
+                }
+                return Ok(false);
+            }};
+        }
+        match (&mut *data, k.kind) {
+            (ColData::I32(v), Kind::Fixed { tag: tag::INT4, .. }) => plain!(v, 4, |c| i32::from_le_bytes(c.try_into().unwrap())),
+            (ColData::Date(v), Kind::Fixed { tag: tag::DATE, .. }) => plain!(v, 4, |c| i32::from_le_bytes(c.try_into().unwrap())),
+            (ColData::I64(v), Kind::Fixed { tag: tag::INT8, .. }) => plain!(v, 8, |c| i64::from_le_bytes(c.try_into().unwrap())),
+            (ColData::F64(v), Kind::Fixed { tag: tag::FLOAT8, .. }) => plain!(v, 8, |c| f64::from_le_bytes(c.try_into().unwrap())),
+            (ColData::Num(v), Kind::Num { scale, w: 1 }) => plain!(v, 1, |c| (c[0] as i8 as i128, scale)),
+            (ColData::Num(v), Kind::Num { scale, w: 2 }) => plain!(v, 2, |c| (i16::from_le_bytes(c.try_into().unwrap()) as i128, scale)),
+            (ColData::Num(v), Kind::Num { scale, w: 4 }) => plain!(v, 4, |c| (i32::from_le_bytes(c.try_into().unwrap()) as i128, scale)),
+            (ColData::Num(v), Kind::Num { scale, w: 8 }) => plain!(v, 8, |c| (i64::from_le_bytes(c.try_into().unwrap()) as i128, scale)),
+            (ColData::Bytes(v), Kind::Dict { tag: tag::TEXT | tag::BYTEA, k: nk }) => {
+                // (The dictionary's spans looked up once a run.)
+                let spans: Vec<(u32, u32, u32)> = (0..nk).map(|x| {
+                    let (s, e) = dir.dict_span(d, c, x as u8);
+                    (bi, s as u32, e as u32)
+                }).collect();
+                nulls[r0..r0 + m].fill(false);
+                for (dst, code) in v[r0..r0 + m].iter_mut().zip(&d[at + brow..at + brow + m]) {
+                    *dst = spans[*code as usize];
+                }
+                return Ok(false);
+            }
+            _ => {}
+        }
+    }
     match (data, k.kind) {
         (ColData::I32(v), Kind::Fixed { tag: tag::INT4 | tag::INT2, w }) => each!(v, 0, |b| sint(d, at + b * w as usize, w) as i32),
         (ColData::Date(v), Kind::Fixed { tag: tag::DATE, .. }) => each!(v, 0, |b| sint(d, at + b * 4, 4) as i32),
