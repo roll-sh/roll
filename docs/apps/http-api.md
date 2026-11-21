@@ -220,6 +220,11 @@ type Build = {
    *  own limit (`ROLL_APPS_BUILD_TIMEOUT`, minutes, 30 by default; the build log says so when it
    *  is); unset: the node's. */
   timeout_s?: number;
+  /** Its builder (Vercel's, Render's, Netlify's bigger build machines): "small" (2 vCPU, 4 GiB;
+   *  the default), "medium" (4, 8 GiB) or "large" (8, 16 GiB): CodeBuild's compute type on the
+   *  fleet, its build minutes metered ×1, ×2 or ×4; one node's Docker builds unsized (the build
+   *  log says so) and meters ×1. */
+  size?: "small" | "medium" | "large";
 };
 
 type Run = {
