@@ -53,6 +53,9 @@ pub struct RowBatch {
     lazy: Vec<Option<Arc<super::sst::Block>>>,
     /// Rows from column blocks: (first row of the batch, rows, block row of the first).
     cruns: Vec<ColRun>,
+    /// By row of the batch (up to its last column block row): its block row, and its bytes once
+    /// a reader wanted them (made alone: the block's rows stay unmade).
+    lrows: Vec<(u32, std::sync::OnceLock<Bytes>)>,
 }
 
 /// Rows `at..at + n` of a batch are rows `row..row + n` of the column block of buffer `buf`.
@@ -74,6 +77,15 @@ impl RowBatch {
         self.pos = 0;
         self.lazy.clear();
         self.cruns.clear();
+        self.lrows.clear();
+    }
+
+    /// Row `i` (entry `e`) of a column block: its bytes, made when first wanted.
+    #[inline]
+    fn lazy_row(&self, i: usize, e: Ent) -> Option<&Bytes> {
+        let blk = self.lazy.get(e.buf as usize)?.as_ref()?;
+        let (row, cell) = &self.lrows[i];
+        Some(cell.get_or_init(|| blk.row_bytes(*row as usize, e.off as usize, e.len as usize)))
     }
 
     /// Buffer `b` (a column block's rows made when first wanted).
@@ -119,6 +131,8 @@ impl RowBatch {
     pub fn note_rows(&mut self, n: usize, row: u32) {
         let at = (self.ents.len() - n) as u32;
         let buf = self.ents[at as usize].buf;
+        self.lrows.resize_with(at as usize, || (u32::MAX, std::sync::OnceLock::new()));
+        self.lrows.extend((0..n as u32).map(|j| (row + j, std::sync::OnceLock::new())));
         if let Some(r) = self.cruns.last_mut()
             && r.buf == buf
             && r.at + r.n == at
@@ -159,6 +173,9 @@ impl RowBatch {
         let e = self.ents[i];
         let k = &self.keys[self.key_start(i)..e.key_end as usize];
         let (o, l) = (e.off as usize, e.len as usize);
+        if let Some(r) = self.lazy_row(i, e) {
+            return (k, &r[..]);
+        }
         let v = match e.buf {
             OWN => &self.own[o..o + l],
             b => &self.buf(b)[o..o + l],
@@ -172,6 +189,9 @@ impl RowBatch {
     pub fn value_in(&self, i: usize) -> (&[u8], Option<(&Bytes, usize)>) {
         let e = self.ents[i];
         let (o, l) = (e.off as usize, e.len as usize);
+        if let Some(r) = self.lazy_row(i, e) {
+            return (&r[..], Some((r, 0)));
+        }
         match e.buf {
             OWN => (&self.own[o..o + l], None),
             b => {
@@ -225,6 +245,7 @@ impl RowBatch {
         let k = self.keys[self.key_start(i)..e.key_end as usize].to_vec();
         let (o, l) = (e.off as usize, e.len as usize);
         let v = match e.buf {
+            _ if self.lazy_row(i, e).is_some() => self.lazy_row(i, e).unwrap().clone(),
             OWN => Bytes::copy_from_slice(&self.own[o..o + l]),
             b => self.buf(b).slice(o..o + l),
         };

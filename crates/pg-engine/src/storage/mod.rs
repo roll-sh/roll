@@ -2978,6 +2978,24 @@ impl Cursor {
         }
     }
 
+    /// `head`'s key alone (a column block's row not made).
+    fn head_key(&self) -> Option<&[u8]> {
+        match self {
+            Cursor::Mem { buf, .. } => buf.front().map(|(k, _)| k.as_slice()),
+            Cursor::Level { ssts, file, block, pos, end, whole, .. } => {
+                if *file >= ssts.len() {
+                    return None;
+                }
+                let b = block.as_ref()?;
+                if pos.index() >= b.len() {
+                    return None;
+                }
+                let k = pos.key();
+                (*whole || end.is_empty() || k < end.as_slice()).then_some(k)
+            }
+        }
+    }
+
     /// `head`'s key, and whether its entry has a value (Some) stored out of line (true),
     /// without making a column block's row.
     fn head_meta(&self) -> Option<(&[u8], Option<bool>)> {
@@ -3180,7 +3198,7 @@ impl Cursor {
 
 /// How many of the ranked sources `rank` (heads ascending) have a head below `k`.
 fn rank_of(sources: &[Cursor], rank: &[usize], k: &[u8]) -> usize {
-    rank.iter().take_while(|&&j| sources[j].head().is_some_and(|(h, _)| h < k)).count()
+    rank.iter().take_while(|&&j| sources[j].head_key().is_some_and(|h| h < k)).count()
 }
 
 struct Merge {
@@ -3215,15 +3233,15 @@ impl Merge {
         if let Some(i) = self.cur {
             self.sources[i].fill()?;
             // (A source's entries stop at the end: `head`, the memtables' ranges.)
-            match self.sources[i].head() {
-                Some((k, _)) if !self.bounded || k < self.bound.as_slice() => return Ok(Some(i)),
+            match self.sources[i].head_key() {
+                Some(k) if !self.bounded || k < self.bound.as_slice() => return Ok(Some(i)),
                 None if !self.bounded => return Ok(None),
                 _ => {}
             }
             // (Past the bound, the next source's head, or run out.)
             debug_assert_eq!(self.rank.first(), Some(&i));
             self.rank.remove(0);
-            if let Some((k, _)) = self.sources[i].head() {
+            if let Some(k) = self.sources[i].head_key() {
                 let at = 1 + rank_of(&self.sources, &self.rank[1..], k);
                 self.rank.insert(at, i);
             }
@@ -3233,7 +3251,7 @@ impl Merge {
             }
             self.rank.clear();
             for i in 0..self.sources.len() {
-                if let Some((k, _)) = self.sources[i].head() {
+                if let Some(k) = self.sources[i].head_key() {
                     let at = rank_of(&self.sources, &self.rank, k);
                     self.rank.insert(at, i);
                 }
@@ -3243,7 +3261,7 @@ impl Merge {
             self.cur = None;
             return Ok(None);
         };
-        let (k, _) = self.sources[i].head().expect("a ranked head");
+        let k = self.sources[i].head_key().expect("a ranked head");
         if !self.end.is_empty() && k >= self.end.as_slice() {
             self.cur = None;
             return Ok(None);
@@ -3251,7 +3269,7 @@ impl Merge {
         self.bound.clear();
         self.bounded = self.rank.len() > 1;
         if self.bounded {
-            let (b, _) = self.sources[self.rank[1]].head().expect("a ranked head");
+            let b = self.sources[self.rank[1]].head_key().expect("a ranked head");
             self.bound.extend_from_slice(b);
         }
         self.cur = Some(i);
@@ -3271,7 +3289,7 @@ impl Merge {
         }
         let bound = match self.rank.get(n) {
             Some(&ic) => {
-                let (k, _) = self.sources[ic].head().expect("a ranked head");
+                let k = self.sources[ic].head_key().expect("a ranked head");
                 self.zbound.clear();
                 self.zbound.extend_from_slice(k);
                 Some(self.zbound.as_slice())

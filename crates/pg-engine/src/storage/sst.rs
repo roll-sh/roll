@@ -1570,6 +1570,22 @@ impl Block {
         }
     }
 
+    /// Row `r`'s bytes (its value at `off` of the rows, `len` bytes): a slice of the rows when
+    /// made, else this row alone made from the columns (a column block's).
+    pub fn row_bytes(&self, r: usize, off: usize, len: usize) -> Bytes {
+        match &self.cols {
+            Some(c) => match c.rows.get() {
+                Some(rows) => rows.slice(off..off + len),
+                None => {
+                    let mut v = Vec::with_capacity(len);
+                    c.dir.row(&self.data, r, &mut v);
+                    Bytes::from(v)
+                }
+            },
+            None => self.data.slice(off..off + len),
+        }
+    }
+
     /// A column block's section (format 5).
     #[inline]
     pub fn col_dir(&self) -> Option<&super::colblock::ColDir> {
