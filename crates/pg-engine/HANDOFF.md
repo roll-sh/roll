@@ -10625,6 +10625,120 @@ and confirm on PGO:
 Agent 218's short-transaction stack (ten steps, `wip/a218`) was gated this way and landed: BENCH
 "Profile-guided build", part 2.
 
+## Bulk writes, round 22: COPY's plain lines as stored rows, number fast paths (agent 284)
+
+BENCH.md "Bulk writes, round 22" has the measurements (lane C, the 1M-row bulk script with joined
+windows, plain dist builds). `cand/a284`: two code commits on origin's `79806dd6c` and this
+section; the second depends on the first. No format change: the same rows, TIDs (a hash of every
+row's ctid in id order equal after COPY), files and bytes written.
+
+**Where COPY in's 8.74 G went** (b0 = `79806dd6c`, `instructions:upp` samples of the joined
+window, shares within the one profile): parsing 23% (`parse_copy_data` itself 7%, `parse_value_ex`
+3.3%, `parse_int` 3.6% for two integers a row, the float path 5.2%: the pre-check, `from_str`,
+`parse_number`, Eisel-Lemire), the runs 24% (zstd 15%, `SstWriter::add` 3.4%, the bloom filter
+2.2%), the size model about 12% (`row_len` 3.0%, `untracked_write` 2.2%, `ensure` 2.2%,
+`note_compression_len` 1.5%, `inserted_with` 1.6%, `CopyLoad::model` 1.2%), `InsertNode::next` and
+`plain_row` themselves 10%, encoding the row 4.5% (`toast::encode`, `encode_value`), mimalloc 5.5%
+(a `Vec<Value>`, an `Arc<str>` for the text, the key and its clone, the encoded row, a row).
+About 8,700 instructions a row; PostgreSQL's whole COPY is 6,480.
+
+**Number fast paths** (first commit; `types/text.rs`, `session/copy.rs`, `exec/dml.rs`):
+- `text::int_fast`: an optional minus and 1-18 digits; up to 8 checked and converted as one word
+  (SWAR). `parse_int` takes it first and keeps the general path (`parse_int_general`) out of line:
+  its 0xf8-byte frame and six saved registers were set up for every integer. Standalone, a
+  million of the script's integers: 118 -> 66 instructions each.
+- `text::float_fast`: an optional minus and at most 19 digits with at most one point, as w / 10^k:
+  Clinger's fast path (w < 2^53, k <= 15), else w shifted so its quotient by 10^k has 63 or 64
+  bits, one 128-by-64-bit division, the mantissa its top 53 bits rounded to even by the rest and
+  the remainder. Never subnormal or infinite (10^-19 to 10^19). `parse_float` takes it first;
+  the old fast path (a pre-check, then Rust's parser) and the rest stay behind it. Standalone,
+  the script's floats (17 significant digits, past Clinger's range): 408 -> 256 instructions
+  each. Test: `text::tests::number_fast_paths_agree`, both against Rust's parsers to the bit over
+  400,000 random digit strings (signs, points, 1-21 digits, runs of 0, 5 and 9, stray bytes).
+- A plain COPY's lines without escapes read each column by a `PlainKind` chosen once a chunk
+  (integers, float8, text by those paths; anything else, or a value they refuse, by
+  `parse_value`), not `parse_value_ex`'s match a field.
+- `plain_row` doesn't clone the row's key when the table has no indexes (the caller reads it only
+  for RETURNING, which a plain insert hasn't); `insert_copied` takes the COPY's table name and
+  flags instead of an `Arc<CopyLines>` clone a row.
+
+**COPY's plain lines as stored rows** (second commit; `session/copy.rs`, `exec/dml.rs`,
+`sql/plan.rs`). INSERT … SELECT copies a table's stored rows into a table without indexes
+(`StoredInsert`; round 21 for a modelled target too), but COPY decoded every line into `Value`s and took the general
+row path: `new_row_checked`, `check_row_except`, `row_len`, `note_compression_len`,
+`inserted_with`, `toast::encode`. Now a plain multi-insert COPY into a table `StoredInsert` may
+take (`dml::copies_stored`, shared with INSERT … SELECT: keyed by row ids, every column given in
+order, no index, CHECK, domain, generated, dropped or virtual column, not temporary, no change
+stream or serializable tracking; and `session::copy::stored_copy`: no triggers, RLS, view
+checks, partitions or foreign storage) encodes each line without escapes straight into a stored
+row's values (`stored_values`, `PlainKind::encode`: the column count, then each value as
+`storage::row::encode_value` writes it; integers, float8 and text without a `Value`; one
+allocation a row), and the insert takes it as INSERT … SELECT's stored rows go in
+(`StoredInsert::of_copy`, `insert_data`): its length by `stored_tuple_len_with`, placed in the
+model by `inserted_stored_modelled` (its COPY multi-insert batch branch, written for this in round
+21 and unused until now) or in the estimate by `inserted_stored`, stored once (`put_fresh`; a
+held batch's rows get their TIDs from `CopyLoad` as before). Why that is the same row:
+- `new_row` returns a row whose columns are all given, in order, as it is; `check_row_except`
+  checks NOT NULL and CHECK constraints, and a stored line has no NULL (the NULL marker has a
+  backslash, so its line isn't plain; `PlainKind::encode` refuses a value that parses to NULL)
+  and its table no CHECK; `StoredInsert`'s check refuses a NULL in a NOT NULL column anyway.
+- `note_compression_len` records nothing for a freshly parsed value (`read_from` matches values
+  read from a table by their allocation, held by a `Weak`) or a tuple of at most `TOAST_THRESHOLD`
+  bytes; `StoredInsert` refuses a longer one and a value whose encoding is 128 bytes or more
+  (`toast::encode` keeps such a value in line).
+- The row's bytes: `toast::encode` writes the header, xid, TID, column count and
+  `encode_value` of each value; `StoredInsert` writes the same header and the data as encoded.
+A row `StoredInsert` won't take is decoded (`decode_row`) and goes in as before; a line that
+doesn't parse, or has an escape or a NULL, takes the general path as before, so errors, line
+numbers and CONTEXT are unchanged. `STORED_COPY_ROWS` counts the rows, for tests. Test:
+`big_tables::copy_stored_rows` copies 3,000 rows (smallint, text, float8, bigint, date; 6 long
+texts and a NULL that go the other ways) once as they are and once with an escape in every line
+(the decoded path): the same rows and ctids (the first 500 modelled, the rest past the model),
+pg_stat counts and relation size; a bad float fails with its line and column.
+
+Results (BENCH "Bulk writes, round 22"; plain dist, G user instructions, two alternating pairs of
+COPY in and INSERT … SELECT each): b0 -> n1 (the first commit) COPY in 8.737 -> 8.225 (-5.9% both),
+n1 -> n2 (both) 8.225 -> 6.566 (-20.2% both): 8.737 -> 6.566, -24.8%, against PostgreSQL 18.6's
+6.48 (1.013x) and pgrust's 4.97. INSERT … SELECT level (5.824-5.839 on all three: these short
+gates ran it without the CREATE INDEX steps before it). The whole script once each, b0 against
+n2: all steps 45.94 -> 43.72 (-4.8%), every other step within ±0.8% (ANALYZE +0.8%, UPDATE -0.5%,
+VACUUM +0.3%: the spread one build shows run to run); rows equal, the ctid hash equal, bytes
+written per step equal (COPY 33.7 MB), COPY in's VmHWM 142-147 MB on all three builds. Cycles
+(under 6.4-7.6 foreign cores on lane C in every pair, a reading only): COPY in 5.8-6.4 -> 4.6-4.7 G.
+
+**Not yet gated on the PGO build** when this was handed in: the first commit splits `parse_int` and
+`parse_float` (their general paths now out of line) and adds `#[inline]` fast paths, a change of
+function boundaries; a PGO pair (b0 and n2, each trained by `tools/dist-pgo.sh`) was started after
+quick-check and its numbers follow in `cand/a284-2` (same code).
+
+Verification: `tools/quick-check.sh` with `QC_CHECKED=1` on `59ca75115` (both commits on
+`79806dd6c`): Clippy 16 warnings, none new in a changed file; 460 tests in 29 binaries, again built
+`--profile verify-checked`; crash_random seeds 1-3 x 2, power_cut_at_every_point; regress 51,148 /
+51,150, 0 newly differing; isolation 1,647 / 1,648; pg_dump_tap 14,609 passed. An earlier run's
+checked stage caught the word conversions' products overflowing under overflow checks
+(app_concurrency's integer inputs): they wrap by design, now spelled `wrapping_mul` /
+`wrapping_add` (release builds wrap them the same, so the measured builds computed the same).
+
+**Considered, not built:**
+- A word-at-a-time delimiter scan of the line (the brief's field splitting): `memchr`'s calls are
+  under 1% of COPY in here (one `memchr2` pass a chunk finds lines and backslashes; a field's
+  delimiter is one short `memchr` call); its char-boundary checks a few instructions a field.
+- `SstWriter::add`'s per-entry work (three `put_varint` pushes, the key's copy into `prev_key`,
+  `derived_tail`, ~290 instructions an entry, shared by COPY and INSERT … SELECT): agent 275 measured
+  a held previous key and dropped it (index builds rose).
+
+**Left (G user instructions, n2 against PostgreSQL 18.6's):**
+1. COPY in 6.57 against 6.48 (pgrust 4.97): the runs' zstd (now ~20% of the step) and the writer
+   (`SstWriter::add`, the bloom filter); the line splitting and its per-row bookkeeping
+   (`Vec<(Cow, Rec)>` of records, the rows' and lines' vectors moved into the feed's `VecDeque`,
+   a `CopyRaw` with an `Arc` clone a row); `StoredInsert`'s second pass over the values
+   (`stored_tuple_len_with`: the length could come from `stored_values` as it encodes).
+2. COPY into a table with indexes still takes the decoded path (index entries need the values);
+   a stored row could carry its index columns' values.
+3. INSERT … SELECT 5.10 against 4.31: zstd of the runs and of the source's blocks (~35%), the
+   writer (`SstWriter::add` 5.5%, the bloom filter 4.8%), the heap model's insert for the first
+   400,000 rows (7%).
+
 ## Bulk writes, round 21: the size model's per-row costs, INSERT … SELECT's modelled rows as stored (agent 281)
 
 BENCH.md "Bulk writes, round 21" has the measurements (lane C, the 1M-row bulk script with joined

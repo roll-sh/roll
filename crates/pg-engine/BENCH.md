@@ -455,6 +455,59 @@ pgrust's PGO-built 90.4 G 0.996-1.013x.
 
 Foreign cores per arm 2.4-3.2. One binary's q03 cycles moved 8.5% between pairs.
 
+## Bulk writes, round 22: COPY's plain lines as stored rows, number fast paths (2026-11-21, agent 284)
+
+HANDOFF "Bulk writes, round 22" has what changed. Lane C, the 1M-row bulk script with joined
+windows (agent 246's `bulkx.sh` with `JOIN=1`, copied to `~/.cache/a284/bench`), plain dist builds
+(`tools/dist.sh`) of **b0**, origin's `79806dd6c`, **n1**, the first commit of `cand/a284` on it,
+and **n2**, both commits (built from `e4108fc55` / `42b374a7f`: the pushed commits' code but for
+a test's line, a clippy fix, and the word conversions' products spelled `wrapping_mul`, which the
+checked build's overflow checks need and release builds compile alike). Each pair one
+`tools/lane.sh` hold. G user instructions of the server's cgroup; every counter ran 100% of its
+window. **Foreign load was over 1.0 core in every run** (lane C's CPUs
+6.4-7.6 foreign cores by lane.sh, 2.9-3.8 by the harness's wall-weighted reading of the server's
+CPUs): the instruction counts repeat within 0.01-0.3% regardless; cycles are a reading only.
+Rows equal in every run (count and sums of every column of both tables).
+
+### COPY in and INSERT … SELECT (2 alternating pairs each, % per pair)
+
+| step | b0 | n1 | n2 | n1 vs b0 | n2 vs n1 |
+|---|---|---|---|---|---|
+| COPY in | 8.737 | 8.225 | 6.566 | -5.9 / -5.9 | -20.2 / -20.2 |
+| INSERT … SELECT | 5.824 / 5.826 | 5.824-5.839 | 5.816 / 5.826 | +0.0 / +0.3 | -0.3 / -0.0 |
+
+(These short gates ran COPY in, INSERT … SELECT and the checks only: INSERT … SELECT without the
+CREATE INDEX steps before it reads 5.82 G, in the whole script 5.10.) Bytes written the same (COPY
+33.7 MB, INSERT … SELECT 35.7 MB); COPY in's VmHWM 142-147 MB on all three. Cycles: COPY in b0
+5.8-6.3, n1 6.0-6.4, n2 4.6-4.7 G.
+
+### The whole script, b0 against n2 (one run each, one hold)
+
+| step | b0 | n2 | % |
+|---|---|---|---|
+| COPY in | 8.737 | 6.566 | -24.8 |
+| CREATE INDEX | 3.683 | 3.686 | +0.1 |
+| CREATE UNIQUE INDEX | 3.376 | 3.380 | +0.1 |
+| COPY out | 3.093 | 3.094 | +0.0 |
+| INSERT … SELECT | 5.109 | 5.100 | -0.2 |
+| UPDATE half | 11.723 | 11.662 | -0.5 |
+| DELETE a quarter, with its compaction | 7.659 | 7.660 | +0.0 |
+| VACUUM | 1.719 | 1.724 | +0.3 |
+| ANALYZE | 0.472 | 0.476 | +0.8 (0.472-0.476 on one build, round 19) |
+| count_after and the four scans | | | +0.0, the same values on both |
+| **all steps** (12) | 45.94 | 43.72 | -4.8 |
+
+Bytes written per step the same (UPDATE 63.5 MB, DELETE 54.0 MB); a hash of every row's ctid in id
+order after COPY in the same (`md5(string_agg(ctid::text, ',' ORDER BY id))`, a step added to the
+script for this run; its sort set both runs' VmHWM, 474 / 496 MB, after COPY's 142 / 146).
+Data directory after the script 10 MB on both.
+
+Not yet gated on the PGO build when handed in (HANDOFF): a PGO pair follows in `cand/a284-2`.
+
+Against the numbers that stand (agent 260's same-day runs, 2026-11-19): COPY in 6.57 against
+PostgreSQL 18.6's 6.48 (1.013x) and pgrust's 4.97; all steps 43.72 against PostgreSQL's 52.33
+(0.835x) and pgrust's 44.92 (0.973x). Not re-run on PostgreSQL or pgrust.
+
 ## Bulk writes, round 21: the size model's per-row costs, INSERT … SELECT's modelled rows as stored (2026-11-21, agent 281)
 
 HANDOFF "Bulk writes, round 21" has what changed. Lane C, the 1M-row bulk script with joined
