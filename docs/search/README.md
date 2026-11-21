@@ -930,7 +930,8 @@ deterministic (#396).
    the logsdb and time-series default, `_source.enabled: false`) can't come back that way.
    Decided 2026-11-17: not now. A live cluster moves by reindex from remote (item 2: today it
    can't, over HTTPS); build it once tenants ask to move by backup alone.
-10. **Relevance tuning by API, CLI and MCP** (Algolia's API and CLI `rules`/`synonyms import`,
+10. **Relevance tuning by API, CLI and MCP** (in progress, with `roll search keys create` taking
+   index patterns and read-only access; Algolia's API and CLI `rules`/`synonyms import`,
    Elastic's APIs): `/v1/search` has no routes for `_synonyms`, `_query_rules` (and `_test`), writing
    an index's settings, or `_explain` (`search-control/src/api.rs`), so roll's MCP has no tools for
    them, nor do `roll search` and the Terraform provider; an agent can create a cluster, index and
@@ -942,7 +943,12 @@ deterministic (#396).
    processor): roll serves `completion` and `chat_completion` inference already, but the Playground
    compares retrieval only. Chat over hits with citations, the code for a RAG app, and a chat API
    (OpenSearch's processor shape on OpenSearch-flavor clusters).
-12. **The first query in a minute** (in progress for the guides; Kibana's sample data,
+12. **The first query in a minute** (the guides are #604, landing; writing them found: an API
+   key's `encoded` value works only at the cluster's own host, so clients behind a shared address
+   re-encode it as `<id>@<cluster>:<key>`; a `data` key can't post click events, so an app tracking
+   clicks needs a second key; a `semantic_text` field with no `inference_id` fails, because its
+   default (`.elser-2-elasticsearch`) answers as a cluster without ML nodes, the first error anyone
+   copying Elasticsearch's docs hits; and no screen is named Discover; Kibana's sample data,
    Meilisearch's movies, Algolia's demo indices; Typesense's and Meilisearch's docs): the empty state
    is a paragraph and a button (`components/search/clusters.tsx`). Sample data in one click, a guided
    first query with a key made inline and a snippet per language; and user guides per workload (site
@@ -1170,8 +1176,10 @@ deterministic (#396).
    1.2 s in the rolling restart).
    Joins the 2026-11-21 category review found, not yet built: an apps link can't be narrowed to
    index patterns or read-only (`[databases] kind = "search"` takes neither; the keys route does);
-   apps' log drains can't land in a roll search data stream (no OTLP intake, item 18); a preview's
-   search branch keeps the branch's superuser login when its data key fails (previews' code, told);
+   apps' log drains can't yet land in a roll search data stream (apps is building a drain that writes
+   ECS documents through `_bulk` with a key limited to `create_doc` on its stream: no OTLP needed); previews
+   put a branch's superuser login in `ELASTICSEARCH_URL` beside the data key (previews is fixing it:
+   only the data credential, and no fallback to the login);
    a cluster's admin password can't be kept as a project secret from roll's API or CLI; and only a
    unit test covers previews' search branch, and one MCP test search (no create → bulk → query
    flow with a person's scoped token).
