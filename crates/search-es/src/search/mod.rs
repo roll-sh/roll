@@ -1059,16 +1059,17 @@ fn is_time_exceeded(e: &EsError) -> bool {
 pub const MAX_TIME: &str = "roll.search.max_time";
 
 /// The node's [`MAX_TIME`], if it has one. [`check_max_time`] refused an unreadable value
-/// when the cluster opened.
+/// when the node started.
 pub(crate) fn max_time(cluster: &Cluster) -> Option<std::time::Duration> {
     let v = cluster.config.node_setting(MAX_TIME)?;
     let nanos = crate::units::TimeValue::parse(v, MAX_TIME).ok()?.nanos();
     (nanos > 0).then(|| std::time::Duration::from_nanos(nanos.min(u64::MAX as i128) as u64))
 }
 
-/// Refuses a [`MAX_TIME`] that isn't a time value, so a typo can't turn the cap off.
-pub(crate) fn check_max_time(config: &crate::cluster::ClusterConfig) -> anyhow::Result<()> {
-    if let Some(v) = config.node_setting(MAX_TIME) {
+/// Refuses a node whose [`MAX_TIME`] isn't a time value (`node_settings`, the last one wins),
+/// so a typo can't turn the cap off. Called once when the node starts.
+pub fn check_max_time(node_settings: &[(String, String)]) -> anyhow::Result<()> {
+    if let Some((_, v)) = node_settings.iter().rev().find(|(k, _)| k == MAX_TIME) {
         crate::units::TimeValue::parse(v, MAX_TIME).map_err(|e| anyhow::anyhow!("{MAX_TIME}: {}", e.reason.unwrap_or_default()))?;
     }
     Ok(())
@@ -4873,6 +4874,9 @@ pub fn count(ctx: &Ctx) -> EsResult<Reply> {
             // Elasticsearch.
             Ok(_) if timed_out && (limit_passed() || !req.allow_partial) => failures.push((i, search_timeout_error())),
             Ok(n) => total += n,
+            // The caller's own timeout stopped the shard before it collected (`min_score` or
+            // `terminate_after` set up their counting first): it counted nothing so far.
+            Err(e) if is_time_exceeded(&e) && req.allow_partial && !limit_passed() => {}
             Err(e) if is_time_exceeded(&e) => failures.push((i, search_timeout_error())),
             Err(e) => failures.push((i, e)),
         }

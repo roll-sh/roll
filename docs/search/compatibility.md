@@ -1038,13 +1038,16 @@ Checked against Elasticsearch 9.5.5 (captures in
     fail with `search_timeout_exception` once the cap passes. Elasticsearch doesn't time these
     out.
   - **By-query requests** (`_delete_by_query`, `_update_by_query`, `_reindex`, with or without
-    `wait_for_completion`): their search stops at the cap and the run fails with
-    `search_timeout_exception` before it writes anything, as a scroll that fails does.
-  - **Query languages:** ES|QL and SQL read indices through doc values or an internal scroll,
-    both under the request's cap: past it the query fails with `search_timeout_exception`. PPL
-    pages over a point in time and fails the same way. EQL's searches are capped like any
-    search, and keep its `allow_partial_search_results`: with it (the default) a capped search
-    contributes the events it found.
+    `wait_for_completion`): the cap bounds each slice's search, never the run's writes or
+    throttle waits, so a long sliced run whose every scan stays under the cap succeeds. A scan
+    that passes the cap fails its slice with `search_timeout_exception` before the slice writes
+    anything, and the run fails as a run with a failed slice does.
+  - **Query languages:** ES|QL (`_query` and `_query/async`) and SQL read indices through doc
+    values or an internal scroll, both under the request's cap: past it the query fails with
+    `search_timeout_exception`. PPL pages over a point in time and fails the same way. EQL's
+    searches are capped like any search: with `allow_partial_search_results` (the default) the
+    response then says so (`timed_out: true`, `is_partial: true`), and without it the query
+    fails.
   - **Background jobs:** each search a job makes is a request with its own cap. Transforms,
     enrich policies' loads, downsampling and the rollup indexer page through their sources with
     `allow_partial_search_results=false`, so a page the cap cut short is a failed search that

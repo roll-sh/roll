@@ -177,13 +177,19 @@ async fn capped(cap: &str) -> Arc<Cluster> {
     c
 }
 
-/// Runs a call on a task of its own, failing the test (instead of hanging it) when it runs past
-/// `within`; with how long it took.
+/// Runs a call on a task of its own; with how long it took. A call still running after
+/// `within` aborts the test binary: its search would spin on, so a regression exits instead of
+/// hanging the run.
 async fn call_within(c: &Arc<Cluster>, within: Duration, method: &'static str, uri: &str, body: String) -> (u16, Value, Duration) {
     let (c, uri) = (c.clone(), uri.to_string());
     let t = Instant::now();
+    let what = format!("{method} {uri}");
     let task = tokio::spawn(async move { call(&c, method, &uri, &body).await });
-    let (status, v) = tokio::time::timeout(within, task).await.expect("the call ran past the cap").unwrap();
+    let Ok(done) = tokio::time::timeout(within, task).await else {
+        eprintln!("{what} ran past {within:?}: the cap didn't stop it");
+        std::process::abort();
+    };
+    let (status, v) = done.unwrap();
     (status, v, t.elapsed())
 }
 
@@ -209,13 +215,27 @@ async fn the_node_cap_bounds_one_request() {
     assert_ne!(status, 200, "{}", v.to_json());
     assert!(v.to_json().contains("search_timeout_exception"), "{}", v.to_json());
     assert!(took < Duration::from_secs(5), "took {took:?}");
-    // A by-query run's search stops at the cap and fails the run; nothing was deleted.
-    let (status, v, took) = call_within(&c, within, "POST", "/idx/_delete_by_query", filter).await;
+    // Each slice's scan stops at the cap and fails the run before it writes: nothing was
+    // deleted.
+    let (status, v, took) = call_within(&c, within, "POST", "/idx/_delete_by_query?slices=2", filter).await;
     assert_ne!(status, 200, "{}", v.to_json());
     assert!(v.to_json().contains("search_timeout_exception"), "{}", v.to_json());
     assert!(took < Duration::from_secs(5), "took {took:?}");
     let (_, v) = call(&c, "GET", "/idx/_count", "").await;
     assert_eq!(at(&v, &["count"]).as_i64(), Some(40));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_cap_bounds_a_by_query_runs_searches_not_its_writes() {
+    // Every scan takes milliseconds; slice 0's updates take longer than the cap before slice 1
+    // scans. The run succeeds: the cap is per search.
+    let c = capped("300ms").await;
+    let update = r#"{"script":{"source":"long n = 0; for (int i = 0; i < 900000; i++) { n += i; } ctx._source.a = n;"}}"#;
+    let t = Instant::now();
+    let (status, v, _) = call_within(&c, Duration::from_secs(120), "POST", "/idx/_update_by_query?slices=2&refresh=true", update.into()).await;
+    assert_eq!(status, 200, "{}", v.to_json());
+    assert_eq!(at(&v, &["updated"]).as_i64(), Some(40), "{}", v.to_json());
+    assert!(t.elapsed() > Duration::from_millis(300), "the run took {:?}, under the cap: it proves nothing", t.elapsed());
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
