@@ -18652,3 +18652,153 @@ FROM call node, a width per system column).
 
 Left: `select a, ctid from t for update` scans 10 wide (PostgreSQL 16: the row mark's ctid is a
 column of its own beside the one selected; the engine reads one); combocid:7.
+
+## Plans and rows of catalog queries (agent 279, 2026-11-21)
+
+Recorded against a private PostgreSQL 18.6 (`a279-pg`, the pinned image, `--locale=C`,
+autovacuum off as the engine in the harness). Harnesses in `~/.cache/a279`: `rx/` is agent 274's
+regress-EXPLAIN comparison (`run.sh <port> <label>`, `cmp.py`, `classify.py`, `newdiff.py`) plus
+`catcause.py`, which groups the catalog blocks by cause; `probe/viewprobe.sql` runs each system
+view's definition beside the engine's own rows; `replaydiff.py` diffs two runs of the
+pgAdmin / DBeaver replay. My PostgreSQL run against agent 274's: 127 blocks differ, 111 of them
+catalog plans (pg_class's size wanders with its dead row versions from run to run), so compare
+against one run of your own.
+
+### The 989 catalog plans by cause (item 1)
+
+Base `059fb33d8`: 2,455 of the 17,654 regress EXPLAINs differ, 989 over catalogs.
+
+| cause | base | after |
+|---|---:|---:|
+| a system view generated as a relation (pg_locks 50, pg_stats 37, information_schema.views 23 / columns 20 / tables 14, pg_roles 18, pg_indexes 17, pg_prepared_statements 16, pg_cursors 14, ...) | 355 | 0 |
+| cost only (catalog pages, index pages and descent, all-visible fraction) | 313 | 242 |
+| an unfiltered catalog scan's rows (its size: reltuples / relpages) | 116 | 88 |
+| a filtered catalog scan's rows (selectivity over that size) | 107 | 78 |
+| plan shape (join method / order / extra nodes from the above) | 46 | 109 |
+| other relation sets (not a view) | 9 | 91 |
+| scan kind on a catalog | 17 | 24 |
+| detail lines, join rows, widths | 26 | 81 |
+| total | 989 | 713 |
+
+Missing catalog indexes as paths: none; `sys_indexes.tsv` has all 124 of PostgreSQL's. The views'
+blocks now fall into the other rows: their relations are planned, but under the same size model.
+
+### What changed
+
+- **System views are planned from PostgreSQL's definitions** (`catalog/system.rs`
+  `expanded_view`, `binder/select.rs`): a FROM item naming a system view binds the view's
+  pg_get_viewdef text (`data/sys_viewdefs.tsv.zst`) as a view owned by the bootstrap superuser,
+  as the rewriter expands it (pg_stats and pg_stats_ext* with security_barrier, as PostgreSQL has
+  them). Collecting dependencies, deparsing and FOR UPDATE keep the generated relation. Beyond
+  plans, the rows change: the engine's own information_schema relations left out pg_catalog's
+  objects, so on a database of pgAdmin's replay `table_constraints` had 18 rows (PostgreSQL 210),
+  `constraint_column_usage` 19 (282), `key_column_usage` 8 (189), `check_constraints` 15 (97),
+  `views` 2 (147), `routine_privileges` 200 (6,985), `udt_privileges` 34 (460),
+  `usage_privileges` 20 (929), `applicable_roles` 1 (4), and pg_indexes 13 (137); with the
+  definitions each count is PostgreSQL's. `pg_lock_status()`, `pg_cursor()` and
+  `pg_prepared_statement()` (which pg_locks, pg_cursors and pg_prepared_statements read) return
+  the rows those relations had.
+- **A view of a plain SELECT is pulled up** (pull_up_simple_subquery): its level is left
+  unplanned and planned with the query's, so the query's quals reach its relations before the
+  join search. Before, the view's join was planned alone and a WHERE pushed below its Sort
+  afterwards: `select * from v where a = 5` over `ta join tb` was a Merge Join over 2,260 sorted
+  rows with the filter above the Sort, PostgreSQL's a Hash Join over the 11 filtered rows. A view
+  that keeps a query level of its own (aggregates, DISTINCT, set operations, unsafe outputs) is
+  planned as before; FROM subqueries are untouched (agent 278's item).
+- **Join removal through catalogs' unique indexes** (`analyzejoins.rs` `distinct_for`): a
+  view's LEFT JOIN to pg_authid / pg_database / pg_namespace / pg_tablespace / pg_attrdef /
+  pg_db_role_setting on a unique key, nothing of it read, goes as PostgreSQL removes it.
+- **pg_node_tree columns hold nodeToString's text** (`sql/nodetree.rs` `table_expr_tree`,
+  `trigger_when_tree`, `domain_check_tree`, `default_exprs_tree`): pg_constraint.conbin of a
+  table's CHECK (over range-table entry 1) and of a domain's (VALUE a CoerceToDomainValue),
+  pg_index.indexprs (a List) and indpred, pg_trigger.tgqual (OLD entry 1, NEW entry 2),
+  pg_type.typdefaultbin and pg_proc.proargdefaults (each coerced to its type); a domain's NOT
+  NULL constraint has no conbin (it showed ''). `pg_get_expr` maps such a tree back to the
+  expression it was made from (`tree_source`), so every printer prints as before. Where an
+  expression uses something the tree printer doesn't model, the column keeps its SQL text.
+- **Catalog sizes as estimate_rel_size computes them** (`explain.rs` `sys_rel_size`): tuples are
+  the density (reltuples / relpages) times the pages, not the live rows: rows added on initdb's
+  pages leave initdb's reltuples (pg_authid with 21 roles estimates 17, as PostgreSQL). The pages
+  grow only past what initdb's pages hold: `sys_sizes::SYS_CAPACITY`, from pg_freespace after
+  initdb (pg_class holds 537 rows before it grows past its 14 pages, pg_proc 3,511). VACUUM
+  records each catalog's pages, live rows and relallvisible (`catalogs_vacuumed`), as
+  vac_update_relstats does (the regress suite's sanity_check runs a database-wide VACUUM),
+  ANALYZE keeps relallvisible; the planner reads those counts, and an index-only scan of a
+  catalog pays the heap for the pages past relallvisible.
+- `sysdelta::kept` keeps pg_namespace and pg_proc for a later catalog version in which nothing
+  they read changed (a COMMENT), as pg_depend: the expanded information_schema views read them
+  (test `ddl_scaling::more_catalogs_after_ddl_are_spliced_or_kept`).
+
+Goldens `a279_system_views`, `a279_node_trees`, `a279_catalog_sizes` (recorded from 18.6; their
+queries differ on the base build).
+
+### Measured
+
+Regress EXPLAINs (my PostgreSQL run against each engine run, plain dist / verify builds):
+base 989 catalog plans differ, after 713; 300 blocks fixed, 24 newly differing (all catalog
+costs one hundredth apart: a btree descent's `ceil(log2(tuples))` or a page more, where
+PostgreSQL's pg_class / pg_index / pg_constraint had grown by dead row versions the engine
+doesn't model) and 8 date blocks (`'today'` crossed midnight in America/Los_Angeles between the
+runs). Non-catalog blocks unchanged.
+
+pgAdmin 4 / DBeaver replay (`tools/compat/compat.sh run ... metaqueries`, fresh servers, same
+day): 22 of 856 ids differ on the base, 16 after. Fixed: the 7 node-tree ids (DBeaver's
+types, constraints, indexes, procedures and triggers, pgAdmin's trigger properties). New: one
+(`tables/acl.sql@obj`, the order of privileges in an array_agg, below). drizzle-kit
+(`drizzlekit`, same day): 7 of 49 ids differ on the base and after (47 pass, 2 fail on both
+servers: `push::again`, `push::alter-again` fail on PostgreSQL too).
+
+Catalog query time (psql, a81_meta, medians of three, machine load ~80): information_schema
+columns of one table PostgreSQL 17.0 / base 12.4 / after 65.0 ms (second query 4.9 / 27.8 /
+34.6), all columns 9.5 / 86.8 / 56.2, table_constraints of one table 2.5 / 7.9 / 4.5,
+key_column_usage 3.4 / 7.8 / 11.2, routines 7.9 / 12.1 / 33.2, tables of a schema 2.1 / 4.0 /
+10.3, pg_indexes 3.4 / 3.9 / 4.8, pg_stats 4.0 / 54.5 / 22.4. The engine's cached rows of its
+own views are gone; the definitions run over the catalogs' cached rows.
+
+Gate (point selects; tests/clients has no ORM startup query set): plain dist builds of the
+parent `1c0a79d67` and of this commit (`tools/dist.sh`), pgbench `-S -M prepared` at 8 clients
+on lane A, one pair per `tools/lane.sh a` hold (agent 263's `gate/run1.sh`, copied to
+`~/.cache/a279/gate`, perf from an image of my own). No pair counts: lane A carried 6.5 to
+14.2 foreign cores in every run. User instructions per transaction, parent / new: 40,866 /
+40,936 (+0.17%), 40,937 / 42,008 (+2.6%, new first), 40,731 / 40,545 (-0.46%); cycles 98.1k /
+99.7k, 99.3k / 101.7k, 93.1k / 95.4k. A point select's plan reads no system view and no
+catalog; what this adds to it is a test after a relation lookup misses the user catalog. 100
+idle sessions (trust auth, RSS 6 s after connecting, three runs each): parent 47.4 / 47.5 /
+47.8 MB, new 46.7 / 47.3 / 47.8 MB. No PGO gate (no inlining or function boundary on those paths
+changed).
+
+Verification: quick-check with `QC_CHECKED=1` on `eef68f988` (this commit on `1c0a79d67`) and again
+on `a1bf44df2` (rebased on `410808dc3`) and `f338432bc` (rebased on `51ea8f0aa`, agent 278's FROM
+subquery pull-up), the same each time:
+build, clippy (16 warnings, none new in changed files), tests 179 passed in 18 binaries and the
+same with `--profile verify-checked`, regress 51,149 / 51,150 with 0 newly differing, isolation
+1,647 / 1,648, pg_dump 14,609 passed. Earlier runs failed, each fixed in this commit:
+`ddl_scaling::more_catalogs_after_ddl_are_spliced_or_kept` (pg_namespace regenerated after a
+COMMENT: `sysdelta::kept`), goldens `analyze_stats` (has_column_privilege of an index's column
+was NULL, so pg_stats' definition dropped index statistics), `domain_identity` (a domain CHECK
+through pg_get_expr(conbin, 0)), `pg_node_tree_text` (information_schema's text domains collate
+"C"), `privileges` (acldefault('c', ...) is an empty ACL), `roles` (an in-process store's role
+setting for a database it doesn't have showed as the role's own), regress `numa:2`
+(pg_get_shmem_allocations_numa raises libnuma's error); and
+`session_state::catalog_estimates_follow_ddl`, which held the old live-count estimate
+(PostgreSQL keeps 415 for pg_class there), now asserts PostgreSQL's.
+
+### Left
+
+- Plans of the expanded views where the join search differs: information_schema.tables with
+  ORDER BY table_name (PostgreSQL reads pg_class_relname_nsp_index in order through the domain
+  cast, the engine sorts) and with a LIKE (a merge right join where PostgreSQL takes a
+  parameterized nested loop); drizzle-kit's PK / FK listing (three information_schema views
+  joined; PostgreSQL hashes pg_constraint against the UNION's Append) whose row order follows
+  that plan; the pgAdmin ACL queries' array_agg order (an aclexplode subquery PostgreSQL pulls
+  up, the engine keeps as a Subquery Scan, and the side of a hash join).
+- `pg_typeof` of an expanded view's domain column (`information_schema.sql_identifier`) shows
+  the base type: the view's columns are the generated relation's types.
+- Catalogs' dead row versions: pg_class and others grow in PostgreSQL by the versions DDL
+  leaves, which the size model doesn't follow (the 24 newly differing blocks; PostgreSQL itself
+  wanders by 111 blocks between runs).
+- adbin (pg_attrdef) and a non-view rule's ev_action keep SQL text: adbin is what every ORM's
+  pg_get_expr(adbin, adrelid) reads, and mapping each call back costs a tree per default of the
+  relation; it wants a cache from tree to expression first.
+- The replay's stats ids (pg_stat / pg_statio block and tuple counters), names holding oids
+  (pg_toast_N, RI_ConstraintTrigger_c_N) and pg_depend's order.
