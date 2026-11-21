@@ -920,7 +920,8 @@ Sandbox = {id /* sbx_… */, name, machine /* mch_… */, backend, size: Size,
            stopped_reason?: "idle" | "owner" /* while stopped: asleep, or the owner's stop */,
            error?: string /* the backend's last complaint */,
            created_at, updated_at, last_active_at? /* its machine last did something; it sleeps a window after */,
-           secrets_by? /* who copied secrets into its env: roll secrets' principal (usr_…, token:…, operator) */}
+           secrets_by? /* who copied secrets into its env: roll secrets' maker (usr_…, token:…, operator; an admin's session is the person) */,
+           secrets_dropped? /* why the copied secrets were taken out: secrets_by may no longer reveal them */}
 SandboxInfo = {backend, size /* a Size name */, status /* as Sandbox.status */, hourly_cents,
                stopped_reason? /* as Sandbox.stopped_reason */}   (Machine.sandbox)
 Size = {name /* "standard" */, cpu, memory_gb, disk_gb, hourly_cents /* price per running hour, US cents */}
@@ -932,6 +933,15 @@ its own while it should run is started again. A running one goes to sleep (desir
 `0` keeps sandboxes up): no thread on it starting or running (a thread waiting on its user is idle),
 no command for it and no terminal output. "starting" is a stopped sandbox on its way up again (a wake,
 or start); its machine comes online once its daemon connects. Asleep, it isn't billed.
+
+Copied secrets go to its code only while `secrets_by` may reveal them. Only where they came from
+(project, environment and which variables) is kept, and roll secrets is asked again before each
+create and start (a wake too). Once the copier can't reach the project or reveal the environment
+(removed, demoted, a token revoked), the sandbox starts without those variables, its home and the
+rest of its env kept (`secrets_dropped` says why), on backends that can (docker: a new container on
+the same home volume; fargate: what it starts with is kept without them). agent37 can't change an
+instance's env, and a sandbox made before the source was kept doesn't say which variables they
+are, so either one isn't started at all: its `error` says so, and it's deleted and made again.
 
 ### Automations
 

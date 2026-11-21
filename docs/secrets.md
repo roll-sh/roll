@@ -2986,8 +2986,11 @@ cluster, instead of a key pasted into it: the Inference tab's "A roll secret", o
   and nothing is copied. A roll code owner token isn't anyone to roll secrets, so it can't copy
   secrets, and an agent token never manages the owner. The values are sealed with the rest of the
   sandbox's env until the backend has them. The sandbox records who copied them (`secrets_by`, the
-  principal), and the read is theirs in the audit log (its actor), resolved for `sandbox:<id> for
-  <principal>`.
+  maker: an admin's session is the person), and the read is theirs in the audit log (its actor),
+  resolved for `sandbox:<id> for <principal>`. Only where they came from is kept: before each
+  start roll code asks `Secrets::maker_may_reveal` (they still reach the project and may reveal the
+  environment, read untrusted), and once they may not the sandbox starts without those variables
+  (docs/code/http-api.md, "Sandboxes").
 - **Previews**: roll previews (docs/previews.md) makes an ephemeral environment per change (see
   "Ephemeral environments") and resolves it as `preview:<slug>`. A preview runs a change's code, so
   it resolves with `"untrusted": true`: an ephemeral environment based on a protected one gets its

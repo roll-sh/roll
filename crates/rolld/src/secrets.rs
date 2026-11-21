@@ -1755,7 +1755,8 @@ impl ForCode {
             // Never a protected environment: not asked for, nor through a reference, an import or
             // an ephemeral environment's base.
             // Not a runtime: a sandbox is a terminal, so sensitive keys stay out (checks too).
-            let principal = base.principal.clone();
+            // Who made the copy: the person behind an admin's session, so it stops with them.
+            let principal = base.made_by().to_string();
             let caller = secrets.untrusted(&project, &base.not_runtime())?;
             if !caller.allows(roll_secrets::Action::Reveal, &roll_secrets::Scope::at(&project, &slug, &path)) {
                 anyhow::bail!("{slug} is protected: protected environments never go to checks or sandboxes");
@@ -1843,8 +1844,30 @@ impl code_control::SecretEnv for ForCode {
             anyhow::bail!("no project {project}");
         }
         let p = named.iter().find(|p| has_repo(p)).cloned().ok_or_else(|| anyhow::anyhow!("project {project} has none of {owner}'s repos on its canvas"))?;
-        let (by, values) = self.resolve(p.id, environment, consumer, Some(asker)).await?;
-        Ok(code_control::Revealed { by, values })
+        let (by, values) = self.resolve(p.id.clone(), environment, consumer, Some(asker)).await?;
+        Ok(code_control::Revealed { by, project: p.id, values })
+    }
+
+    /// As roll secrets answers `by` now (`maker_may_reveal`: they reach the project and may reveal
+    /// the environment as an untrusted reader), or for a copy whose source wasn't kept, whether
+    /// they can act at all.
+    async fn still_reveals(&self, by: &str, source: Option<(&str, &str)>) -> anyhow::Result<()> {
+        let (secrets, _) = self.0.get().cloned().ok_or_else(|| anyhow::anyhow!("roll secrets is starting"))?;
+        let (by, source) = (by.to_string(), source.map(|(p, e)| (p.to_string(), e.to_string())));
+        tokio::task::spawn_blocking(move || {
+            let r = match &source {
+                Some((project, environment)) => {
+                    let (slug, path) = environment.split_once(':').unwrap_or((environment, "/"));
+                    secrets.maker_may_reveal(&by, project, slug, path)
+                }
+                None => secrets.maker_acts(&by),
+            };
+            r.map_err(|e| match e {
+                roll_secrets::Error::Forbidden(m) | roll_secrets::Error::NotFound(m) => code_control::Refused(m).into(),
+                e => anyhow::Error::from(e),
+            })
+        })
+        .await?
     }
 
     /// The first project with the repo on its canvas that may reach it and has validity checks on
