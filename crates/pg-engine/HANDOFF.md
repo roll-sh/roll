@@ -17964,3 +17964,63 @@ Found, not fixed (repros in `~/.cache/a274/probe`):
   Scan.
 - One-row Result costs: a strict SQL function or operator of a NULL constant folds to NULL in
   PostgreSQL (`test_strict(NULL)`, `33 = any (null::int[])`), the engine charges the call.
+
+## EXPLAIN plans against PostgreSQL 18.6's, round 3 (agent 278, 2026-11-21)
+
+Harness: agent 274's `~/.cache/a274/rx`, copied to `~/.cache/a278/rx` (`run.sh <port> <label>`,
+`cmp.py`, `classify.py`, `lst.py`, `newdiff.py`, `show.py`). PostgreSQL 18.6 ran in `a278-pg`
+(the pinned reference image, autovacuum off). Base `059fb33d8`: 2,452 of 17,654 differ (catalog
+989, errors 43, cost 628, width 239, rows 218, extra-node 121, display 121, other shapes 38,
+sort-agg 23, join-order 21, scan 8, join-method 3). Blocks with `'today'` / `now()` literals
+differ when a run crosses midnight in America/Los_Angeles (timestamp:1-3, timestamptz:1-5):
+not plan changes.
+
+### First candidate (`cand/a278`)
+
+- **An IN / EXISTS sub-select inside a FROM subquery** (subselect:32, :33, :46; 274's find).
+  Two causes. (1) The level above re-planned the subquery's already planned join as a group of
+  its own, the side the semi join unique-ified an opaque leaf (no statistics, still under the
+  Sort the subquery's merge join had put over it): EXPLAIN showed a Hash Join over a Sort.
+  PostgreSQL pulls the subquery up before any join search and plans the semi join once, at
+  the level above. Now `plan_level` first puts the join tree the subquery's level had before
+  planning (`ExecCtx::bound_trees`, as `lift` already does for a FROM subquery that is an item
+  of a join group) in place of the planned join wherever the level reads it only through its
+  select list, grouping, ordering or limit (`paths::pull_up_semi_trees`,
+  `lift::bound_tree`), so the level above plans the semi join itself; not a tree reading a
+  value of an enclosing level (`lift::semi_tree_reads_outer`, `lift`'s own test). The binder
+  now records the clauses it pushes into a planned semi join in `JoinMeta::bound_pushed`, as
+  it did for inner joins only: without them the tree put back lost them (quick-check's
+  golden `a41_semi_pullup` caught it: `exists (select 1 from (select ... where exists (...))
+  s where s.id = a41_a.id)` returned every row, its `s.id = a41_a.id` gone). (2) EXPLAIN took a
+  unique-ified side under a merge join's Sort for an upper DISTINCT (create_distinct_paths),
+  so it read an index in order and showed a Unique without the Sort: create_unique_path
+  sorts or hashes the relation's cheapest path, no input order used. A join side that is a
+  Sort over the Distinct is now a semi join's unique side too (`unique_sides`).
+- **Index collation by identity** (rules:106-110, 274's find). PostgreSQL uses an index
+  column for a clause only when the column's collation is the clause's input collation by
+  OID (IndexCollMatchesExprColl): in a C database an index on `t COLLATE "C"` serves no
+  `t = 'x'` (the default collation), though both compare bytes. The engine compared sort
+  behaviour (`key_order_op`, `KeyColl`). Now each index key has the collation its
+  expression derives (`IndexInfo::key_colls`, `derived_collation`: a COLLATE written in it,
+  else a column's collation other than "default", its declared one or its type's, `name`'s
+  "C"), and a comparison, `= ANY`, a row comparison's pair or an OR arm matches only when the
+  collation its operands derive (a COLLATE written in them, else the key's) is the index
+  column's (its COLLATE, else the key's) (`collation_matches`). A key written with a COLLATE
+  naming the index's collation is the key (`t COLLATE "C" = 'x'` uses the `"C"` index, as a
+  RelabelType to PostgreSQL); before, only under a collation that doesn't sort by bytes.
+  System catalogs' indexes keep the old rule (no key collations recorded: agent 279's area).
+- Golden `a278_semi_coll` (recorded from 18.6).
+
+Regression files' EXPLAINs (full pass, `~/.cache/a278/rx/out-c1`, against `out-base`): 7 more
+match (rules:106, :107, :108, :110; subselect:32, :33, :46), none newly differ (the 8 date
+blocks above aside); 180 blocks changed text, all others catalog OIDs and timestamps.
+TPC-H: base against new on SF 0.05 on one copied data directory (`~/.cache/a278/tpch-one.sh`),
+22 of 22 plans identical in text, costs x1.000.
+Verification: quick-check with `QC_CHECKED=1` on `d72181015` (this commit on `1c0a79d67`):
+build, clippy (16 warnings, none new), tests 146 passed in 10 binaries, the same 146 with
+`--profile verify-checked`, regress 51,148 / 51,150 with 0 newly differing, isolation
+1,647 / 1,648, pg_dump 14,609 passed. (The first quick-check of the candidate failed golden
+`a41_semi_pullup`, the lost clause above.) No performance gate: planning does one walk of a
+level's top nodes for a planned FROM subquery's join when bound trees exist, and a
+collation name compare per index clause on a collatable key; not measured, as a change of
+that size isn't measurable against the lanes' noise.
