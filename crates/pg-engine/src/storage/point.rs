@@ -130,6 +130,9 @@ impl PointReader {
     /// visible version (deleted ones): a scan is cheaper.
     pub fn first_raw(&mut self, start: &[u8], end: &[u8]) -> Result<First> {
         self.room();
+        if let Some(first) = self.first_in_l1(start, end)? {
+            return Ok(first);
+        }
         let Bufs { held, pos, seek: from, cand, .. } = &mut self.bufs;
         from.clear();
         from.extend_from_slice(start);
@@ -164,6 +167,36 @@ impl PointReader {
             from.truncate(cand.len());
             from.extend_from_slice(&[0xFF; 9]);
         })
+    }
+
+    /// `first_raw` by one seek, when L1 is the only source that may hold a key of
+    /// [start, end) (no frozen source, no L0 file, a memtable without keys of the range's
+    /// relation, no range deletion): its first entry at or after `start` is the newest version
+    /// of the smallest key there, the answer when the snapshot sees it and it holds a row.
+    /// None: not decided by it (a newer version, a deletion: the search above). (`first_raw`
+    /// sought that entry, then sought the key's newest version again through `newest`.)
+    fn first_in_l1(&mut self, start: &[u8], end: &[u8]) -> Result<Option<First>> {
+        let view = &*self.view;
+        if !view.imm.is_empty() || !view.l0.is_empty() || view.l1.is_empty() || !view.rdels.is_empty() || (!view.mem.is_empty() && view.mem.may_hold_range(start, end)) {
+            return Ok(None);
+        }
+        let ts = self.ts;
+        let Bufs { held, pos, .. } = &mut self.bufs;
+        // (No entry at or after `start`: no row, as `smallest_key` finding none. L1's slot is
+        // the first.)
+        let mut first = Some(First::None);
+        file_first(&view.l1, held.get_mut(0), start, pos, &mut |block, pos| {
+            let k = pos.key();
+            let uk = user_key(k);
+            first = if !end.is_empty() && uk >= end {
+                Some(First::None)
+            } else if uk < start || key_ts(k) > ts {
+                None
+            } else {
+                block.value(pos).map(|v| First::Row(uk.to_vec(), v))
+            };
+        })?;
+        Ok(first)
     }
 }
 
@@ -417,20 +450,27 @@ fn smallest_key(view: &View, from: &[u8], end: &[u8], held: &mut [Held], pos: &m
         .chain(std::iter::once(Some(view.l1.as_slice())));
     for (slot, ssts) in files.enumerate() {
         if let Some(ssts) = ssts.filter(|s| !s.is_empty()) {
-            file_first(ssts, held.get_mut(slot), from, pos, &mut take)?;
+            file_first(ssts, held.get_mut(slot), from, pos, &mut |_, p| take(p.key()))?;
         }
     }
     Ok(found)
 }
 
-/// The first storage key at or after `from` in non-overlapping files in key order, to `f`
-/// (not called: none), through the block `held` keeps when `from` falls in it.
-fn file_first(ssts: &[Arc<SstReader>], mut held: Option<&mut Held>, from: &[u8], pos: &mut BlockPos, f: &mut dyn FnMut(&[u8])) -> Result<()> {
+/// The first entry at or after `from` in non-overlapping files in key order, to `f` (its
+/// block and position; not called: none), through the block `held` keeps when `from` falls in
+/// it.
+fn file_first(
+    ssts: &[Arc<SstReader>],
+    mut held: Option<&mut Held>,
+    from: &[u8],
+    pos: &mut BlockPos,
+    f: &mut dyn FnMut(&super::sst::Block, &BlockPos),
+) -> Result<()> {
     if let Some((block, hpos)) = held.as_deref_mut().and_then(|h| h.holding(from)) {
         // (From where the last read in the block stopped.)
         block.seek_on(from, hpos);
         if hpos.index() < block.len() {
-            f(hpos.key());
+            f(block, hpos);
         }
         return Ok(());
     }
@@ -443,7 +483,7 @@ fn file_first(ssts: &[Arc<SstReader>], mut held: Option<&mut Held>, from: &[u8],
             if pos.index() >= block.len() {
                 continue;
             }
-            f(pos.key());
+            f(&block, pos);
             if b == first
                 && let Some(slot) = held
             {
