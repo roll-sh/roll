@@ -39,6 +39,7 @@ interface Form {
   packages: string;
   /** The build's timeout, minutes. */
   buildTimeout: string;
+  buildSize: string;
   type: Run["type"];
   port: string;
   start: string;
@@ -145,6 +146,7 @@ export function formOf(s: Service): Form {
     watch: (s.build.watch ?? []).join(", "),
     packages: (s.build.packages ?? []).join(" "),
     buildTimeout: s.build.timeout_s ? String(Math.round(s.build.timeout_s / 60)) : "",
+    buildSize: s.build.size ?? "small",
     type: s.run.type,
     port: str(s.run.port),
     start: str(s.run.start),
@@ -251,6 +253,7 @@ export function patchOf(s: Service, f: Form): ServicePatch {
     const m = num(f.buildTimeout);
     build.timeout_s = m === null ? null : m * 60;
   }
+  if (f.buildSize !== before.buildSize) build.size = f.buildSize === "small" ? null : (f.buildSize as "medium" | "large");
   if (Object.keys(build).length) patch.build = build;
   const run: Reset<Run> = {};
   if (f.type !== before.type) run.type = f.type;
@@ -503,6 +506,13 @@ export function SettingsTab({
               </Field>
               <Field label="Build timeout" hint="minutes, 1–360; held to the node's own limit">
                 {t("buildTimeout", "the node's (30)")}
+              </Field>
+              <Field label="Build machine" hint="its minutes count by size on the fleet's builders">
+                <select value={form.buildSize} onChange={(e) => set("buildSize", e.target.value)} className={`${input} w-full`}>
+                  <option value="small">Small: 2 vCPU, 4 GiB</option>
+                  <option value="medium">Medium: 4 vCPU, 8 GiB</option>
+                  <option value="large">Large: 8 vCPU, 16 GiB</option>
+                </select>
               </Field>
               {(form.sourceKind === "repo" || form.sourceKind === "git") && (
                 <Field label="Watch paths" hint="a push deploys only when it changes one">

@@ -378,6 +378,10 @@ pub enum AppsCmd {
         /// `none`: the node's.
         #[arg(long, value_name = "SECONDS")]
         build_timeout: Option<String>,
+        /// Its builder: `small` (2 vCPU, 4 GiB; the default), `medium` (4, 8 GiB) or `large`
+        /// (8, 16 GiB), its minutes metered by size on the fleet's builders.
+        #[arg(long, value_name = "SIZE", value_parser = ["small", "medium", "large"])]
+        build_size: Option<String>,
         /// A gradual rollout: the shares of requests a new deployment takes in turn (`10,50`);
         /// `none` switches at once.
         #[arg(long, value_name = "PERCENTS")]
@@ -708,6 +712,14 @@ pub enum AppsCmd {
         #[command(flatten)]
         target: Target,
     },
+    /// Approve a deployment waiting at ready where the environment asks for approvals (GitHub
+    /// Environments' required reviewers): yours counts unless you started it, and the last one
+    /// needed puts it live.
+    Approve {
+        deployment: String,
+        #[command(flatten)]
+        target: Target,
+    },
     /// Roll back to an earlier deployment (no build: its image runs again); with no id, the one
     /// that was live before the current one (`heroku rollback`).
     Rollback {
@@ -987,7 +999,9 @@ pub enum AppsCmd {
     },
     /// The project's log drains: list them, `--add <https url>` (prints its signing secret
     /// once; `--format otlp` for a collector's `/v1/logs`, `--format syslog` for
-    /// `syslog+tls://host:port`), `--edit <id>`, `--test <id>`, or `--remove <id>`.
+    /// `syslog+tls://host:port`, `--format s3` for `https://<endpoint>/<bucket>[/<prefix>]` with
+    /// `--header aws-access-key-id=… --header aws-secret-access-key=…`), `--edit <id>`, `--test
+    /// <id>`, or `--remove <id>`.
     Drains {
         #[command(flatten)]
         target: Target,
@@ -995,7 +1009,7 @@ pub enum AppsCmd {
         add: Option<String>,
         /// With `--add`: how its lines go: `ndjson` (the default, signed), `otlp` (OpenTelemetry
         /// logs over OTLP/HTTP JSON) or `syslog` (RFC 5424 over TLS).
-        #[arg(long, requires = "add", value_parser = ["ndjson", "otlp", "syslog"])]
+        #[arg(long, requires = "add", value_parser = ["ndjson", "otlp", "syslog", "s3"])]
         format: Option<String>,
         /// With `--add` or `--edit`: what it's sent, comma-separated: `runtime` (the default),
         /// `http` (a request a line), `build`, `audit` (each change people make).
@@ -2779,7 +2793,7 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
             }
             v
         }
-        AppsCmd::Set { target, name, repo, root, image, upload, builder, dockerfile, stage, install, build_command, build_start, health_timeout, health_every, health_failures, health_command, alert_memory, alert_errors, alert_p95, alert_log, alert_log_count, min, max, cpu, memory, port, start, pre_deploy, health, schedule, timezone, kind, concurrency, suspend_after, sleep_after, timeout, retries, volume, watch, packages, build_timeout, rollout, rollout_step, rollout_errors, rollout_manual, overlap, h2c, scale, public, drain, cpu_target, busy_cpu, memory_target, latency_target, oidc_audience, push, restart, restart_tries, affinity, tcp, rollback_on_crash, rebuild_on_base, block_on } => {
+        AppsCmd::Set { target, name, repo, root, image, upload, builder, dockerfile, stage, install, build_command, build_start, health_timeout, health_every, health_failures, health_command, alert_memory, alert_errors, alert_p95, alert_log, alert_log_count, min, max, cpu, memory, port, start, pre_deploy, health, schedule, timezone, kind, concurrency, suspend_after, sleep_after, timeout, retries, volume, watch, packages, build_timeout, build_size, rollout, rollout_step, rollout_errors, rollout_manual, overlap, h2c, scale, public, drain, cpu_target, busy_cpu, memory_target, latency_target, oidc_audience, push, restart, restart_tries, affinity, tcp, rollback_on_crash, rebuild_on_base, block_on } => {
             let svc = service(api, &target).await?;
             // The service's rollout with what was given replaced (the API takes it whole).
             let rollout = if rollout.is_some() || rollout_step.is_some() || rollout_errors.is_some() || rollout_manual.is_some() || overlap.is_some() {
@@ -2845,6 +2859,9 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
                     let paths: Vec<&str> = w.split(',').map(str::trim).filter(|p| !p.is_empty()).collect();
                     build.insert("watch".into(), json!(paths));
                 }
+            }
+            if let Some(z) = &build_size {
+                build.insert("size".into(), if z == "small" { Value::Null } else { json!(z) });
             }
             match build_timeout.as_deref() {
                 None => {}
@@ -3610,6 +3627,20 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
                 return watch(api, &svc, &target.env, &dep).await;
             }
             dep
+        }
+        AppsCmd::Approve { deployment, target } => {
+            let svc = service(api, &target).await?;
+            let v = api.post(&format!("{}/deploys/{}/approve", env_path(&svc, &target.env), enc(&deployment)), json!({})).await?;
+            if !json_out {
+                let have = v["approved_by"].as_array().map_or(0, Vec::len);
+                match (v["live"].as_str(), v["waiting"].as_str()) {
+                    (Some(live), _) => println!("approved ({have} of {}): going live as {live}", v["needed"]),
+                    (None, Some(why)) => println!("approved ({have} of {}), but it can't go live yet: {why}", v["needed"]),
+                    (None, None) => println!("approved ({have} of {} needed)", v["needed"]),
+                }
+                return Ok(());
+            }
+            v
         }
         AppsCmd::Rollback { deployment, target, keep_variables, override_freeze } => {
             let svc = service(api, &target).await?;
