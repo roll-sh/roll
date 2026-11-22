@@ -6105,8 +6105,13 @@ and webhooks' and review apps' signing secrets sealed. Still open:
 **State, 2026-11-21 05:10.** The thirty-fourth review's items, where they are:
 - **Item 1** (apps' reveal and shell as the asker) **and item 3** (the sandbox resolving as its copier):
   `fix/secrets-reveal-as-asker`, gating.
-- **Item 2** (a project delete gets a veto, a 7-day window and a closing digest):
-  `fix/secrets-project-delete-window`, gating.
+- **Item 2: landed**, #585 (a2e1d8b2f), after an independent review (1 high, 5 medium, all fixed). A
+  workspace project's delete asks roll secrets first (403 unless a secrets admin; 409
+  `project_holds_secrets` until `?confirm=`). Its secrets are kept for a window (7 days by default,
+  `ROLL_SECRETS_DELETE_WINDOW_DAYS`), unreadable and recoverable (`POST …/recover`, `roll secrets
+  recover`, the dashboard's "Recently deleted"), then purged after a signed closing digest. ACME,
+  interception CAs, gateways and workload grants all stop at the delete, and members and homes come
+  back on recovery.
 - **Item 4** (a placement required, responses scrubbed): the design is below, under "Using a key
   without seeing it"; `fix/secrets-placeholder-placement-scrub`, building.
 - **Item 5:**
