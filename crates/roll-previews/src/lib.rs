@@ -1458,15 +1458,13 @@ mod tests {
 
 #[cfg(test)]
 mod contract {
-    /// docs/previews.md's `Preview` (the API's contract with every client) names each field the
-    /// record answers: the shape had fallen 19 fields behind.
-    #[test]
-    fn the_documented_preview_names_every_field_it_answers() {
-        let src = include_str!("lib.rs");
+    /// Fields `src`'s `pub struct <name>` serializes (not `#[serde(skip)]`) that docs/previews.md's
+    /// `type <name> = { … }` doesn't name.
+    fn undocumented<'a>(src: &'a str, name: &str) -> Vec<&'a str> {
         let doc = include_str!("../../../docs/previews.md");
-        let s = &src[src.find("pub struct Preview {").unwrap()..];
+        let s = &src[src.find(&format!("pub struct {name} {{")).unwrap()..];
         let s = &s[..s.find("\n}\n").unwrap()];
-        let shape = &doc[doc.find("type Preview = {").unwrap()..];
+        let shape = &doc[doc.find(&format!("type {name} = {{")).unwrap()..];
         let shape = &shape[..shape.find("\n};").unwrap()];
         let (mut skipped, mut missing) = (false, Vec::new());
         for line in s.lines().map(str::trim) {
@@ -1479,6 +1477,14 @@ mod contract {
                 skipped = false;
             }
         }
-        assert!(missing.is_empty(), "docs/previews.md's Preview doesn't name {missing:?}");
+        missing
+    }
+
+    /// docs/previews.md's `Preview` and `Settings` (the API's contract with every client) name
+    /// each field the record and the rules answer: the shapes had fallen 23 fields behind.
+    #[test]
+    fn the_documented_shapes_name_every_field_they_answer() {
+        assert_eq!(undocumented(include_str!("lib.rs"), "Preview"), Vec::<&str>::new(), "docs/previews.md's Preview");
+        assert_eq!(undocumented(include_str!("settings.rs"), "Settings"), Vec::<&str>::new(), "docs/previews.md's Settings");
     }
 }
