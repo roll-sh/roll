@@ -1187,6 +1187,7 @@ impl Store {
                 [id],
             )?;
             c.execute("DELETE FROM deploy_steps WHERE deployment IN (SELECT id FROM deployments WHERE service = ?)", [id])?;
+            c.execute("DELETE FROM deploy_closed WHERE deployment IN (SELECT id FROM deployments WHERE service = ?)", [id])?;
             c.execute("DELETE FROM state WHERE key LIKE ?", [format!("%:{id}/%")])?;
             c.execute("DELETE FROM status_days WHERE key LIKE ?", [format!("%:{id}/%")])?;
             for t in ["environments", "deployments", "deploy_keys", "fences", "env_access", "registry_auth", "git_auth", "git_github", "github_events", "trace_ingest", "runtime_config", "oidc_access", "variable_makers", "variable_runtime_only", "visit_tickets", "visit_sessions", "variable_files", "error_groups", "variables", "links", "domains", "preview_hosts", "runs", "jobs", "metrics", "usage", "form_submissions", "deploy_scans", "env_data", "env_branches", "udp_ports", "env_unscheduled", "sandboxes", "env_peering"] {
