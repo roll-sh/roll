@@ -1352,13 +1352,15 @@ async fn an_earlier_push_runs_on_its_own_copy_of_the_data() {
     e.code.open(change("chg_od", 7));
     e.engine.pass().await.unwrap();
     let p = e.engine.store.row_by_change("chg_od").unwrap().unwrap();
-    let db = |env: &[(String, String)]| env.iter().find(|(k, _)| k == "DATABASE_URL").map(|(_, v)| v.clone()).unwrap();
+    let var = |env: &[(String, String)], k: &str| env.iter().find(|(n, _)| n == k).map(|(_, v)| v.clone()).unwrap();
+    let db = |env: &[(String, String)]| var(env, "DATABASE_URL");
     e.code.edit("chg_od", |c| c.head = "cs_7b".into());
     e.engine.pass().await.unwrap();
     e.engine.pass().await.unwrap();
     let (_, live) = e.engine.env(&p.id, "web").await.unwrap();
     let (_, earlier) = e.engine.env(&p.id, "web@cs_7a").await.unwrap();
     assert!(db(&earlier).contains("-7a") && db(&earlier) != db(&live), "{} / {}", db(&earlier), db(&live));
+    assert!(var(&earlier, "REDIS_URL").contains("-7a") && var(&earlier, "REDIS_URL") != var(&live, "REDIS_URL"), "Redis too");
     // Kept with its push: the fourth push since evicts cs_7a, and its copy goes.
     for head in ["cs_7c", "cs_7d", "cs_7e"] {
         e.code.edit("chg_od", |c| c.head = head.into());
@@ -1366,8 +1368,8 @@ async fn an_earlier_push_runs_on_its_own_copy_of_the_data() {
         e.engine.pass().await.unwrap();
     }
     let copies = |e: &Env| e.engine.store.pinned_data(&p.id).unwrap().into_iter().map(|d| d.revision).collect::<Vec<_>>();
-    assert_eq!(copies(&e), ["cs_7b", "cs_7c", "cs_7d"]);
-    assert!(!e.pg.branches.lock().iter().any(|b| b.ends_with("-7a")), "{:?}", e.pg.branches.lock());
+    assert_eq!(copies(&e), ["cs_7b", "cs_7b", "cs_7c", "cs_7c", "cs_7d", "cs_7d"], "Postgres and Redis");
+    assert!(!e.pg.branches.lock().iter().chain(e.redis.branches.lock().iter()).any(|b| b.ends_with("-7a")), "{:?}", e.pg.branches.lock());
     // A reset replaces the data: the copies of the old go with it.
     e.engine.reset(&p.id, Vec::new()).unwrap();
     e.engine.pass().await.unwrap();
