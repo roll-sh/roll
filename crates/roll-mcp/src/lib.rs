@@ -453,6 +453,10 @@ async fn handle(State(m): State<Mcp>, uri: axum::http::Uri, ext: Extensions, hea
     if ctx.modern && !batch && messages.len() == 1 && messages[0]["method"] == "subscriptions/listen" {
         return listen(ctx, &messages[0]).await;
     }
+    // MCP Events' push mode: one subscription's stream of its own (SEP-3415).
+    if ctx.modern && !batch && messages.len() == 1 && messages[0]["method"] == "events/stream" {
+        return events::stream(ctx, &messages[0]).await;
+    }
     let progress = accepts_sse(&ctx.headers).then(|| messages.iter().find(|m| m["method"] == "tools/call").and_then(|m| m["params"]["_meta"].get("progressToken").cloned())).flatten();
     let mut resp = if progress.is_some() {
         let stream = progress_stream(Box::pin(async move { process(&ctx, messages).await }), progress, PROGRESS_EVERY)
@@ -984,10 +988,12 @@ struct ListenSlot(String);
 static LISTENS: std::sync::LazyLock<std::sync::Mutex<std::collections::HashMap<String, usize>>> = std::sync::LazyLock::new(Default::default);
 
 impl ListenSlot {
-    fn take(who: &str) -> Option<ListenSlot> {
+    /// One of `max` open streams `who` may hold on this node (a listen stream's key is its token,
+    /// an event stream's `events:` and its token).
+    fn take(who: &str, max: usize) -> Option<ListenSlot> {
         let mut open = LISTENS.lock().unwrap_or_else(|e| e.into_inner());
         let n = open.entry(who.to_string()).or_default();
-        if *n >= LISTENS_PER_TOKEN {
+        if *n >= max {
             return None;
         }
         *n += 1;
@@ -1037,7 +1043,7 @@ async fn listen(ctx: Arc<Ctx>, msg: &Value) -> Response {
         Principal::Operator => None,
     };
     // A few open at once per token: each looks at its grant every few seconds.
-    let held = match ListenSlot::take(grant.as_deref().unwrap_or("operator")) {
+    let held = match ListenSlot::take(grant.as_deref().unwrap_or("operator"), LISTENS_PER_TOKEN) {
         Some(h) => h,
         None => return Json(rpc_error(id, -32000, format!("at most {LISTENS_PER_TOKEN} subscriptions open at once per token: close one first"))).into_response(),
     };

@@ -110,7 +110,7 @@ fn input_schema(f: &Feed) -> Value {
 /// (a server with a sealing key) and the connection can be looked up later (a token or OAuth).
 fn delivery(ctx: &Ctx) -> Value {
     let hooks = subscriber(ctx).is_ok();
-    if hooks { json!(["poll", "webhook"]) } else { json!(["poll"]) }
+    if hooks { json!(["poll", "push", "webhook"]) } else { json!(["poll", "push"]) }
 }
 
 /// `events/list`: the types this connection may poll (its tool is listed for it).
@@ -575,6 +575,191 @@ pub fn spawn_deliveries(api: axum::Router, access: Arc<roll_access::Access>, pro
 fn internal(e: impl std::fmt::Display) -> Refused {
     tracing::warn!(error = %e, "MCP events");
     (-32603, "internal error".into(), json!({}))
+}
+
+/// Event streams one token may hold open on a node.
+const STREAMS_PER_TOKEN: usize = 10;
+/// How often an open stream reads its feed (each read the caller's request, in the audit log).
+const STREAM_READ_EVERY: std::time::Duration = std::time::Duration::from_secs(15);
+/// The heartbeat a stream grants: what the client asks, within these (30 s if it doesn't say).
+const HEARTBEAT_MIN_MS: u64 = 15_000;
+const HEARTBEAT_MAX_MS: u64 = 120_000;
+/// How long a stream stays open: then roll closes it with its result, and the client reconnects
+/// with its cursor (a token's rules change, a node drains).
+const STREAM_FOR: std::time::Duration = std::time::Duration::from_secs(3600);
+
+/// What one read of a feed gave a subscription: its notifications, where it got to, whether more
+/// is waiting, and whether `maxAgeMs` skipped any.
+struct Read {
+    out: Vec<Value>,
+    cursor: i64,
+    more: bool,
+    aged: bool,
+}
+
+/// Read a feed after `after` as the caller (unattended: nothing asks a person) and turn what the
+/// filter keeps into event notifications, each with its cursor.
+async fn read_feed(ctx: &Arc<Ctx>, f: &'static Feed, filter: &Filter, after: i64, floor: Option<i64>, meta: &Value) -> Result<Read, Refused> {
+    let audit = json!({ "name": f.name });
+    let page = crate::read_route_as(ctx, &format!("{}{after}", f.after), &format!("events/stream:{}", f.name), audit, true).await.map_err(|e| refused(f, e))?;
+    let events = page["events"].as_array().cloned().unwrap_or_default();
+    let more = events.len() >= PAGE;
+    let outside = tool(f).map_or(&[][..], |t| t.outside);
+    let (mut out, mut cursor, mut aged) = (Vec::new(), after, false);
+    for mut e in events {
+        cursor = e["seq"].as_i64().unwrap_or(cursor);
+        if floor.is_some_and(|fl| e["at"].as_i64().unwrap_or(0) < fl) {
+            aged = true;
+            continue;
+        }
+        if !filter.keeps(&e) {
+            continue;
+        }
+        if ctx.lockdown {
+            lockdown::withhold(&mut e);
+            lockdown::withhold_fields(&mut e, outside);
+        }
+        let at = e["at"].as_i64().unwrap_or(0);
+        out.push(json!({ "jsonrpc": "2.0", "method": "notifications/events/event", "params": {
+            "eventId": format!("{}:{cursor}", f.name), "name": f.name, "timestamp": iso8601(at), "data": e, "cursor": format!("{CURSOR}{cursor}"), "_meta": meta,
+        } }));
+    }
+    if !more {
+        cursor = page["next"].as_i64().unwrap_or(cursor).max(cursor);
+    }
+    Ok(Read { out, cursor, more, aged })
+}
+
+/// `events/stream` (push mode): one subscription's events on a stream of its own, while the
+/// client holds it. Checked before it opens (an error is the answer, no stream); then
+/// `notifications/events/active` (its cursor and heartbeat), each event as it's read (every 15
+/// seconds, as the caller: its token's rules decide each read, so a revoked one ends the stream with
+/// `notifications/events/terminated`), a heartbeat with the cursor when nothing else went for its
+/// interval, `notifications/events/error` when a read failed for a moment, and its result when roll
+/// closes it after an hour (the client reconnects with its cursor).
+pub(crate) async fn stream(ctx: Arc<Ctx>, msg: &Value) -> axum::response::Response {
+    use axum::response::IntoResponse;
+    use axum::response::sse::{Event, KeepAlive, Sse};
+    use futures::StreamExt;
+    let id = msg.get("id").cloned().unwrap_or(Value::Null);
+    let params = msg["params"].clone();
+    let fail = |(code, message, data): Refused| axum::Json(json!({ "jsonrpc": "2.0", "id": id, "error": { "code": code, "message": message, "data": data } })).into_response();
+    let name = params["name"].as_str().unwrap_or("");
+    let Some(f) = feed(name) else {
+        return fail((-32023, format!("no event {name:?}: events/list says which there are"), json!({ "kind": "event" })));
+    };
+    if !tool(f).is_some_and(|t| ctx.usable(t)) {
+        return fail((-32024, "Forbidden".into(), json!({ "reason": format!("this connection can't use {}", f.tool) })));
+    }
+    let filter = match Filter::parse(f, &params["arguments"]) {
+        Ok(x) => x,
+        Err(e) => return fail(e),
+    };
+    let heartbeat = match &params["heartbeatMs"] {
+        Value::Null => 30_000,
+        v => match v.as_u64() {
+            Some(n) => n.clamp(HEARTBEAT_MIN_MS, HEARTBEAT_MAX_MS),
+            None => return fail(invalid("heartbeatMs is a number of milliseconds")),
+        },
+    };
+    let floor = match &params["maxAgeMs"] {
+        Value::Null => None,
+        v => match v.as_i64().filter(|n| *n >= 0) {
+            Some(n) => Some(crate::code_sql_now() - n),
+            None => return fail(invalid("maxAgeMs is a number of milliseconds")),
+        },
+    };
+    let who = match &ctx.principal {
+        crate::Principal::Grant(g) => g.id.to_string(),
+        crate::Principal::Operator => "operator".to_string(),
+    };
+    let Some(slot) = crate::ListenSlot::take(&format!("events:{who}"), STREAMS_PER_TOKEN) else {
+        return fail((-32025, "ResourceExhausted".into(), json!({ "limit": "streams", "max": STREAMS_PER_TOKEN })));
+    };
+    let meta = json!({ "io.modelcontextprotocol/subscriptionId": id });
+    // Where it starts: now (no cursor; `maxAgeMs` doesn't apply), the client's cursor, or now with a
+    // possible gap for one roll can't read. The first read happens before the stream opens, so a
+    // refusal is the answer and a gap is said on `active`.
+    let (start, mut truncated, floor) = match &params["cursor"] {
+        Value::String(c) if c.strip_prefix(CURSOR).is_some_and(|n| n.parse::<i64>().is_ok_and(|n| n >= 0)) => (c[CURSOR.len()..].parse::<i64>().ok(), false, floor),
+        Value::String(_) => (None, true, None),
+        _ => (None, false, None),
+    };
+    let (cursor, first) = match start {
+        Some(after) => match read_feed(&ctx, f, &filter, after, floor, &meta).await {
+            Ok(r) => (r.cursor, Some(r)),
+            Err(e) => return fail(e),
+        },
+        None => match crate::read_route_as(&ctx, f.latest, &format!("events/stream:{}", f.name), json!({ "name": f.name }), true).await {
+            Ok(page) => (page["next"].as_i64().unwrap_or(0), None),
+            Err(e) => return fail(refused(f, e)),
+        },
+    };
+    truncated |= first.as_ref().is_some_and(|r| r.aged);
+    let mut queue = vec![json!({ "jsonrpc": "2.0", "method": "notifications/events/active", "params": { "cursor": format!("{CURSOR}{cursor}"), "truncated": truncated, "heartbeatMs": heartbeat, "_meta": meta } })];
+    let more = first.as_ref().is_some_and(|r| r.more);
+    queue.extend(first.map(|r| r.out).unwrap_or_default());
+    struct State {
+        ctx: Arc<Ctx>,
+        filter: Filter,
+        cursor: i64,
+        queue: std::collections::VecDeque<Value>,
+        more: bool,
+        sent: tokio::time::Instant,
+        done: bool,
+        _slot: crate::ListenSlot,
+    }
+    let deadline = tokio::time::Instant::now() + STREAM_FOR;
+    let state = State { ctx, filter, cursor, queue: queue.into(), more, sent: tokio::time::Instant::now(), done: false, _slot: slot };
+    let beat = std::time::Duration::from_millis(heartbeat);
+    let stream = futures::stream::unfold(state, move |mut s| {
+        let (meta, id) = (meta.clone(), id.clone());
+        async move {
+            loop {
+                if let Some(next) = s.queue.pop_front() {
+                    s.sent = tokio::time::Instant::now();
+                    return Some((next, s));
+                }
+                if s.done {
+                    return None;
+                }
+                if tokio::time::Instant::now() >= deadline {
+                    s.done = true;
+                    s.queue.push_back(json!({ "jsonrpc": "2.0", "id": id, "result": { "resultType": "complete", "_meta": meta } }));
+                    continue;
+                }
+                // A full page reads on at once; otherwise the next read waits its turn.
+                if !s.more {
+                    tokio::time::sleep(STREAM_READ_EVERY).await;
+                }
+                match read_feed(&s.ctx, f, &s.filter, s.cursor, None, &meta).await {
+                    Ok(r) => {
+                        (s.cursor, s.more) = (r.cursor, r.more);
+                        s.queue.extend(r.out);
+                    }
+                    // The connection can't read it any more (its token's rules, a policy), or the
+                    // event type is gone: the subscription ends, and the stream with it.
+                    Err((code @ (-32024 | -32023), message, data)) => {
+                        s.done = true;
+                        s.queue.push_back(json!({ "jsonrpc": "2.0", "method": "notifications/events/terminated", "params": { "error": { "code": code, "message": message, "data": data }, "_meta": meta } }));
+                        s.queue.push_back(json!({ "jsonrpc": "2.0", "id": id, "result": { "resultType": "complete", "_meta": meta } }));
+                        continue;
+                    }
+                    Err(_) => {
+                        s.more = false;
+                        s.queue.push_back(json!({ "jsonrpc": "2.0", "method": "notifications/events/error", "params": { "error": { "code": -32603, "message": "UpstreamError", "data": { "reason": "the feed didn't answer this time; roll reads it again" } }, "_meta": meta } }));
+                        continue;
+                    }
+                }
+                // Quiet past the next read: a heartbeat now, so the client's cursor moves.
+                if s.queue.is_empty() && s.sent.elapsed() + STREAM_READ_EVERY > beat {
+                    s.queue.push_back(json!({ "jsonrpc": "2.0", "method": "notifications/events/heartbeat", "params": { "cursor": format!("{CURSOR}{}", s.cursor), "_meta": meta } }));
+                }
+            }
+        }
+    })
+    .map(|v| Ok::<_, std::convert::Infallible>(Event::default().event("message").data(v.to_string())));
+    Sse::new(stream).keep_alive(KeepAlive::new().interval(crate::SSE_KEEPALIVE)).into_response()
 }
 
 /// Unix milliseconds as ISO 8601 in UTC (`2026-11-22T09:30:00.123Z`).
