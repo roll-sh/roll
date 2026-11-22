@@ -931,8 +931,11 @@ impl EnvLive {
         let (mut looked, mut hint) = (Instant::now(), None);
         match (run.kind, addr) {
             (RunType::Web, Some(a)) => loop {
-                // A TCP service is up when its port accepts; anything else answers HTTP.
-                let up = if run.tcp {
+                // A TCP service is up when its port accepts; a UDP one once it runs (nothing to
+                // ask over UDP); anything else answers HTTP.
+                let up = if run.udp {
+                    true
+                } else if run.tcp {
                     tcp_answers(a).await
                 } else if let Some(svc) = run.health_grpc.as_deref() {
                     self.answers_grpc(a, svc).await
@@ -1783,7 +1786,7 @@ impl EnvLive {
                 // Asleep and frozen: kept so, nothing asked of it (a frozen process answers nothing).
                 (_, Some(a)) if a.paused => Some(Phase::Suspended(a.addr)),
                 (RunType::Web, Some(Adopted { addr: Some(a), .. })) => {
-                    let up = if tpl.run.tcp { tcp_answers(a).await } else { self.answers(a, None, tpl.run.h2c).await };
+                    let up = if tpl.run.udp { true } else if tpl.run.tcp { tcp_answers(a).await } else { self.answers(a, None, tpl.run.h2c).await };
                     up.then_some(Phase::Running(Some(a)))
                 }
                 (RunType::Web, Some(_)) => None,
@@ -2705,6 +2708,7 @@ mod tests {
                 vars: vars.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect(),
                 port: Some(8080),
                 ports: vec![],
+                udp: false,
                 cpu: 0.5,
                 memory_mb: 512,
                 network: None,

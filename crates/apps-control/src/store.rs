@@ -340,6 +340,13 @@ CREATE TABLE IF NOT EXISTS error_groups (
 ) WITHOUT ROWID;
 -- Who started a deployment, as a person (their session's, their own token's, the operator's): what
 -- an approval is compared with.
+-- A UDP service's port per environment (run.udp), from the node's UDP range.
+CREATE TABLE IF NOT EXISTS udp_ports (
+    service TEXT NOT NULL,
+    env TEXT NOT NULL,
+    port INTEGER NOT NULL UNIQUE,
+    PRIMARY KEY (service, env)
+) WITHOUT ROWID;
 -- Environments with data of their own (data: branch), and the branch each linked database
 -- made for one: its sealed variables and what deletes it (shared by an environment's services).
 CREATE TABLE IF NOT EXISTS env_data (
@@ -1180,6 +1187,30 @@ impl Store {
         })
     }
 
+    /// A UDP service's port here (`run.udp`), from the node's UDP range: the one it has, or the
+    /// next free one after the last given (one write). None: the range is full.
+    pub fn assign_udp_port(&self, service: &str, env: &str, range: (u16, u16)) -> Result<Option<u16>> {
+        self.db.write(|c| {
+            let had: Option<i64> = c.query_row("SELECT port FROM udp_ports WHERE service = ? AND env = ?", [service, env], |r| r.get(0)).optional()?;
+            if let Some(p) = had {
+                return Ok(Some(p as u16));
+            }
+            let used: std::collections::HashSet<i64> = c.query("SELECT port FROM udp_ports", (), |r| r.get(0))?.into_iter().collect();
+            let last: Option<i64> = c.query_row("SELECT value FROM state WHERE key = 'apps.udp.last'", (), |r| r.get::<_, String>(0)).optional()?.and_then(|v| v.parse().ok());
+            let (lo, hi) = (range.0 as i64, range.1 as i64);
+            let start = last.filter(|l| (lo..=hi).contains(l)).map_or(lo, |l| l + 1);
+            let span = hi - lo + 1;
+            let Some(p) = (0..span).map(|i| lo + (start - lo + i).rem_euclid(span)).find(|p| !used.contains(p)) else { return Ok(None) };
+            c.execute("INSERT INTO udp_ports (service, env, port) VALUES (?, ?, ?)", params![service, env, p])?;
+            c.execute("INSERT INTO state (key, value) VALUES ('apps.udp.last', ?) ON CONFLICT (key) DO UPDATE SET value = excluded.value", [p.to_string()])?;
+            Ok(Some(p as u16))
+        })
+    }
+
+    pub fn udp_port(&self, service: &str, env: &str) -> Result<Option<u16>> {
+        Ok(self.db.query_row("SELECT port FROM udp_ports WHERE service = ? AND env = ?", [service, env], |r| r.get::<_, i64>(0)).optional()?.map(|p| p as u16))
+    }
+
     pub fn all_environments(&self) -> Result<Vec<EnvRow>> {
         Ok(self.db.query(&format!("SELECT {ENV_COLS} FROM environments ORDER BY created_at"), (), env_row)?)
     }
@@ -1250,7 +1281,7 @@ impl Store {
             if n == 0 {
                 return Err(Error::NotFound(format!("service {service} has no environment {env}")));
             }
-            for t in ["variables", "variable_files", "error_groups", "domains", "preview_hosts", "runs", "jobs", "metrics", "deploy_keys", "env_access", "trace_ingest", "runtime_config", "oidc_access", "variable_makers", "variable_runtime_only", "visit_tickets", "visit_sessions", "form_submissions", "env_data"] {
+            for t in ["variables", "variable_files", "error_groups", "domains", "preview_hosts", "runs", "jobs", "metrics", "deploy_keys", "env_access", "trace_ingest", "runtime_config", "oidc_access", "variable_makers", "variable_runtime_only", "visit_tickets", "visit_sessions", "form_submissions", "env_data", "udp_ports"] {
                 c.execute(&format!("DELETE FROM {t} WHERE service = ? AND env = ?"), [service, env])?;
             }
             // Its schedules', challenge's and base images' state goes with it.
@@ -3393,6 +3424,26 @@ impl Store {
         let sealed = self.sealer.seal(&format!("branch:{service}:{env}:{}:{}", kind.as_str(), r#ref), &to_json(&m.vars));
         self.db.execute("INSERT INTO env_branches (service, env, kind, ref, kept, vars) VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT (service, env, kind, ref) DO NOTHING", params![service, env, kind.as_str(), r#ref, m.kept, sealed])?;
         Ok(())
+    }
+
+    /// The branch another service of `project` made for the same environment of the same
+    /// resource, kept for `service` too (an environment's services share one), in one write:
+    /// whether there was one. A drop running beside it sees this row and keeps the branch.
+    pub fn share_env_branch(&self, service: &str, project: &str, env: &str, kind: LinkKind, r#ref: &str) -> Result<bool> {
+        self.db.write(|c| {
+            let row: Option<(String, String, String)> = c
+                .query_row(
+                    "SELECT b.service, b.kept, b.vars FROM env_branches b JOIN services s ON s.id = b.service WHERE s.project = ? AND b.env = ? AND b.kind = ? AND b.ref = ? AND b.service <> ? LIMIT 1",
+                    params![project, env, kind.as_str(), r#ref, service],
+                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+                )
+                .optional()?;
+            let Some((other, kept, sealed)) = row else { return Ok(false) };
+            let vars = self.sealer.open(&format!("branch:{other}:{env}:{}:{}", kind.as_str(), r#ref), &sealed)?;
+            let mine = self.sealer.seal(&format!("branch:{service}:{env}:{}:{}", kind.as_str(), r#ref), &vars);
+            c.execute("INSERT INTO env_branches (service, env, kind, ref, kept, vars) VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT (service, env, kind, ref) DO NOTHING", params![service, env, kind.as_str(), r#ref, kept, mine])?;
+            Ok::<_, Error>(true)
+        })
     }
 
     /// The environment's branches taken off it (one link's, with `only`), in one write: each,

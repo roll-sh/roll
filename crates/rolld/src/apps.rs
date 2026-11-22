@@ -40,6 +40,10 @@ pub struct AppsArgs {
     /// One node only.
     #[arg(id = "apps_tcp_ports", long = "apps-tcp-ports", env = "ROLL_APPS_TCP_PORTS")]
     pub tcp_ports: Option<String>,
+    /// UDP services' ports (`run.udp`): each environment of one gets a UDP port from this range
+    /// (`21000-21099`), on the apps listener's address. One node only.
+    #[arg(id = "apps_udp_ports", long = "apps-udp-ports", env = "ROLL_APPS_UDP_PORTS")]
+    pub udp_ports: Option<String>,
     /// DNS over HTTPS, for checking custom domains.
     #[arg(id = "apps_doh", long = "apps-doh", env = "ROLL_APPS_DOH", default_value = "https://cloudflare-dns.com/dns-query")]
     pub doh: String,
@@ -409,9 +413,29 @@ struct RollResources {
     /// bucket's key, a stream's, a NoSQL database's): roll secrets' providers, as its managed
     /// links use them.
     products: crate::secrets::Api,
+    /// rolld's own API as roll previews' branch adapters call it (on a fleet each call reaches
+    /// the data's owner): an environment's own data (`data: "branch"`). None in tests.
+    branches: Option<Arc<crate::previews::Api>>,
 }
 
 impl RollResources {
+    /// roll previews' branch adapter for a link's kind: its own role for a Postgres branch (never
+    /// the project's superuser), a parent check before adopting or deleting a name, the product's
+    /// owner reached through the API.
+    fn brancher(&self, kind: LinkKind) -> Option<Box<dyn roll_previews::ports::Brancher>> {
+        use crate::previews::data;
+        let api = (**self.branches.as_ref()?).clone();
+        Some(match kind {
+            LinkKind::Postgres => Box::new(data::Postgres(api)),
+            LinkKind::Redis => Box::new(data::Redis(api)),
+            LinkKind::Nosql => Box::new(data::Nosql(api)),
+            LinkKind::Bucket => Box::new(data::Bucket(api)),
+            LinkKind::Stream => Box::new(data::Stream(api)),
+            LinkKind::Queue => Box::new(data::Queue(api)),
+            _ => return None,
+        })
+    }
+
     /// What a link to `kind` sets through roll secrets' provider for it: each live field read
     /// now, and (`label`: the credential's name in the product) each credential issued once,
     /// its handles kept to revoke, and which variables those are. None: a kind that has no
@@ -571,42 +595,23 @@ impl Resources for RollResources {
         Ok(())
     }
 
-    /// An environment's own branch of a linked database: roll Postgres' branch `apps/<env>` of
-    /// the project (an environment's services share it), or roll Redis' `<db>-<env>`, made from
-    /// its main (or the one there by that name), as roll previews branches its data.
-    async fn branch(&self, kind: LinkKind, r#ref: &str, env: &str) -> anyhow::Result<Option<Minted>> {
-        match kind {
-            LinkKind::Postgres => {
-                let pg = self.postgres.clone().ok_or_else(|| anyhow::anyhow!("roll postgres isn't on this node"))?;
-                let name = format!("apps/{env}");
-                let project = pg.store.project(r#ref)?.ok_or_else(|| anyhow::anyhow!("no Postgres project {}", r#ref))?;
-                let branch = match pg.store.branch_by_name(r#ref, &name)? {
-                    Some(b) => b,
-                    None => pg.create_branch(r#ref, &name, None, None).await.map_err(|e| anyhow::anyhow!("branching Postgres: {e}"))?,
-                };
-                let ep = pg.store.endpoint_for_branch(&branch.id)?.ok_or_else(|| anyhow::anyhow!("Postgres branch {} has no endpoint", branch.id))?;
-                Ok(Some(Minted { vars: vec![("DATABASE_URL".into(), pg.connection_uri(&project, &ep.id))], kept: branch.id }))
-            }
-            LinkKind::Redis => {
-                let redis = self.redis.clone().ok_or_else(|| anyhow::anyhow!("roll redis isn't on this node"))?;
-                let name = format!("{}-{env}", r#ref);
-                let d = match redis.store.db_by_name(&name)? {
-                    Some(d) => d,
-                    None => redis.branch(r#ref, &name, None).await.map_err(|e| anyhow::anyhow!("branching Redis: {e}"))?,
-                };
-                let conn = redis.connection(&d.id, &d.password);
-                Ok(Some(Minted { vars: vec![("REDIS_URL".into(), conn["redis_url"].as_str().unwrap_or_default().to_string())], kept: d.id }))
-            }
-            _ => Ok(None),
-        }
+    /// An environment's own branch of a linked resource, named `name` (apps' own, unguessable):
+    /// made through roll previews' adapter for its kind, connected with the branch's own
+    /// credentials. `kept`: what deletes it again, the branch's id and name and what it kept.
+    async fn branch(&self, kind: LinkKind, r#ref: &str, name: &str) -> anyhow::Result<Option<Minted>> {
+        let Some(b) = self.brancher(kind) else { return Ok(None) };
+        let made = b.branch(r#ref, name, roll_previews::Mode::Branch).await?;
+        let vars = b.connect(r#ref, &made.r#ref, made.kept.as_deref()).await?;
+        let kept = serde_json::json!({ "id": made.r#ref, "name": name, "kept": made.kept }).to_string();
+        Ok(Some(Minted { vars, kept }))
     }
 
     async fn unbranch(&self, kind: LinkKind, r#ref: &str, kept: &str) -> anyhow::Result<()> {
-        match kind {
-            LinkKind::Postgres => self.postgres.clone().ok_or_else(|| anyhow::anyhow!("roll postgres isn't on this node"))?.delete_branch(r#ref, kept).await.map_err(|e| anyhow::anyhow!("deleting a Postgres branch: {e}")),
-            LinkKind::Redis => self.redis.clone().ok_or_else(|| anyhow::anyhow!("roll redis isn't on this node"))?.delete(kept).await.map_err(|e| anyhow::anyhow!("deleting a Redis branch: {e}")),
-            _ => Ok(()),
-        }
+        let Some(b) = self.brancher(kind) else { return Ok(()) };
+        let k: serde_json::Value = serde_json::from_str(kept)?;
+        let (id, name) = (k["id"].as_str().unwrap_or_default(), k["name"].as_str().unwrap_or_default());
+        anyhow::ensure!(!id.is_empty() && !name.is_empty(), "a branch's record names no branch");
+        b.delete(r#ref, id, name).await
     }
 
     async fn link_vars(&self, kind: LinkKind, r#ref: &str) -> anyhow::Result<Vec<(String, String)>> {
@@ -786,6 +791,12 @@ pub async fn start(
         cfg.tcp_ports = Some((lo, hi));
         cfg.tcp_host = args.public_host.clone();
     }
+    if let Some(p) = &a.udp_ports {
+        anyhow::ensure!(single, "ROLL_APPS_UDP_PORTS is for a node alone (a UDP service answers on its owner's port; the fleet's edge doesn't carry UDP)");
+        let (lo, hi) = parse_ports(p).map_err(|e| anyhow::anyhow!("ROLL_APPS_UDP_PORTS: {e}"))?;
+        cfg.udp_ports = Some((lo, hi));
+        cfg.tcp_host = args.public_host.clone();
+    }
     let objects = match storage {
         // A local directory is this node's alone: logs stay with it.
         pg_storage::StorageConfig::Local(_) if !single => None,
@@ -820,6 +831,7 @@ pub async fn start(
                 (format!("http://{}", std::net::SocketAddr::new(ip, args.api.port())), token, reqwest::Client::builder().timeout(std::time::Duration::from_secs(5)).no_proxy().build()?)
             },
             products,
+            branches: Some(Arc::new(crate::previews::Api::new(args.api))),
         }),
         resolver: Arc::new(Doh::new(&a.doh)),
         tls: domain_tls(args, single)?,
@@ -866,6 +878,7 @@ impl AppsNode {
         let main = axum::serve(listener, public.into_make_service_with_connect_info::<SocketAddr>()).into_future();
         let ports = self.serve_ports();
         tokio::spawn(self.apps.clone().serve_tcp_ports(self.listen.ip()));
+        tokio::spawn(self.apps.clone().serve_udp_ports(self.listen.ip()));
         tokio::select! {
             r = main => Ok(r?),
             r = ports => r,
@@ -972,7 +985,7 @@ mod tests {
         ] });
         let st = http.post(format!("{base}/v1/streams/{sid}/topics/orders/records")).json(&sent).send().await.unwrap().status();
         assert!(st.is_success(), "{st}");
-        let r = RollResources { postgres: None, redis: None, api: (base.clone(), None, http.clone()), products: crate::secrets::Api::default() };
+        let r = RollResources { postgres: None, redis: None, api: (base.clone(), None, http.clone()), products: crate::secrets::Api::default(), branches: None };
         let got = r.read_group(&sid, "orders", "web", "c1", 1000, 10).await.unwrap();
         assert_eq!(got.len(), 2, "{got:?}");
         let first = got.iter().find(|x| x.partition == 0).unwrap();
@@ -1018,7 +1031,7 @@ mod tests {
             );
         let products = crate::secrets::Api::default();
         products.set(router);
-        let r = RollResources { postgres: None, redis: None, api: (String::new(), None, reqwest::Client::new()), products };
+        let r = RollResources { postgres: None, redis: None, api: (String::new(), None, reqwest::Client::new()), products, branches: None };
         let m = r.link(LinkKind::Bucket, "photos", "svc_a").await.unwrap().expect("credentials of its own");
         // Only what it issued is kept with the link: the rest is read at each deploy.
         assert_eq!(m.vars.iter().map(|(k, _)| k.as_str()).collect::<Vec<_>>(), ["AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY"]);
@@ -1057,7 +1070,7 @@ mod tests {
             }));
         let products = crate::secrets::Api::default();
         products.set(router);
-        let r = RollResources { postgres: None, redis: None, api: (String::new(), None, reqwest::Client::new()), products };
+        let r = RollResources { postgres: None, redis: None, api: (String::new(), None, reqwest::Client::new()), products, branches: None };
         let m = r.link(LinkKind::Queue, "orders", "svc_a").await.unwrap().expect("a user of its own");
         let url = &m.vars.iter().find(|(k, _)| k == "AMQP_URL").expect("AMQP_URL").1;
         assert!(url.starts_with("amqp://roll-") && url.ends_with("@127.0.0.1:5672/orders") && !url.contains("admin"), "{url}");

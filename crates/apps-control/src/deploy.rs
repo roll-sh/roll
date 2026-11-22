@@ -1572,7 +1572,7 @@ impl Apps {
         }
         // vercel.json's crons: schedules that call their paths, unless the service already
         // calls that path (its own schedules win).
-        if run.kind == RunType::Web && !run.tcp {
+        if run.kind == RunType::Web && !run.tcp && !run.udp {
             for (i, c) in plan.crons.iter().enumerate() {
                 let name = format!("vercel-{}", i + 1);
                 if run.schedules.len() < 20 && !run.schedules.iter().any(|s| s.path.as_deref() == Some(c.path.as_str()) || s.name == name) {
@@ -1816,6 +1816,7 @@ impl Apps {
                 }
                 p
             },
+            udp: run.udp && run.kind == RunType::Web,
             cpu: run.cpu,
             memory_mb: run.memory_mb,
             network: Some(network),
