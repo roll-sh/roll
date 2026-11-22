@@ -386,6 +386,22 @@ impl Engine {
         self.kick.notify_one();
     }
 
+    /// A service of `id` came up: a preview waiting on it (a health check asked while it was still
+    /// starting, then left for [`DEPLOY_POLL_MS`]) converges now instead. Only a preview on its way
+    /// up, never a settled one (a visit waking a service converges nothing). Safe beside a converge
+    /// in flight: passes don't overlap, and that converge's own settling wins.
+    pub fn service_up(&self, id: &str) {
+        let Ok(now) = self.store.now_ms() else { return };
+        let pulled = self.store.update(id, |row| {
+            if matches!(row.state, State::Creating | State::Updating) && row.next_at > now && row.next_at != SETTLED {
+                row.next_at = now;
+            }
+        });
+        if pulled.is_ok_and(|row| row.next_at == now) {
+            self.kick();
+        }
+    }
+
     /// One pass: discover, then converge every preview that's due.
     pub async fn pass(self: &Arc<Self>) -> Result<()> {
         let _one = self.passing.lock().await;
@@ -691,6 +707,16 @@ impl Engine {
             if !local {
                 continue;
             }
+            // What roll apps' proxies did for its keys there, on its record (a refusal's reason
+            // can name a host its code chose: masked as its logs are).
+            let mut on_apps = self.apps.intercepted(&r.id).await;
+            if let Some(x) = on_apps.as_mut().filter(|x| !x.refused.is_empty()) {
+                match self.masks(&r.id).await {
+                    Ok(values) => x.refused = x.refused.iter().map(|h| code_preview::runner::mask(h, &values)).collect(),
+                    Err(_) => x.refused.clear(),
+                }
+            }
+            let _ = self.store.set_runtime_fact(&r.id, "intercepted_apps", on_apps.as_ref());
             let fresh: Vec<String> = {
                 let refused = self.apps.egress_refused(&r.id).await;
                 let mut told = self.egress_told.lock();

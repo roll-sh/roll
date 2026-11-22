@@ -1212,11 +1212,59 @@ A link is `{kind, ref, field, mode, options}`:
 - **When a secret, an environment or the project goes**, what it issued is revoked first, while
   the project's key and registries (rotators…) can still reach it. A revocation that fails (the
   product or the customer's endpoint is down) stays as a lease that's already due, and the sweeper
-  retries it; a deleted project keeps its key and registries (`projects.forgotten_at`) until its
-  last lease is revoked, then they go too. Nothing it issued outlives it unrevoked. Deleting the
-  workspace project erases its secrets, their versions, its encryption keys and its audit chain at
-  once, with no recovery window and no closing digest. A recovery window and a signed closing digest
-  are planned (the thirty-fourth review's item 2).
+  retries it; a purged project keeps its key and registries until its last lease is revoked, then
+  they go too. Nothing it issued outlives it unrevoked.
+- **Deleting the workspace project** (`DELETE /v1/workspace/projects/{id}`) can't destroy secrets
+  by accident, as AWS Secrets Manager's and Azure Key Vault's waits can't:
+  - while the project holds any value, a protected environment, an encryption key, a certificate
+    authority or a workload identity, roll secrets refuses it
+    (`roll_workspace::Workspace::before_delete`): 403 for anyone who may not `admin` the project's
+    secrets (asked of the caller's grant, as every secrets route does; the 403 says nothing about
+    what it holds), and 409 `project_holds_secrets`, naming what goes, until a secrets admin
+    repeats the project's name or id in `?confirm=`. Workspace `delete` alone is never enough. The
+    project's overview says what would go and for how long (`deletion`); the dashboard's dialog
+    says exactly that and passes the name typed into it;
+  - then what it issued is revoked: leases and managed credentials, its decoys, its workload
+    identities' tokens (roll-access's grants, so an old one doesn't work after a recovery either),
+    its placeholders, and the interception CAs of consumers that held a placeholder of it that name
+    its hosts (`end_unbound_intercept_cas`; they get a new one, without its hosts, from
+    `…/intercept-ca`). Its one-time shares and secret
+    requests end, its gateways' links close and open nothing more, and its CAs answer ACME with
+    `unauthorized` (their CRLs are still served). The rest is kept for a recovery window
+    (`ROLL_SECRETS_DELETE_WINDOW_DAYS`, 1–90 days, 7 unless set). The delete is audited in the
+    project's log (`project.delete`: who, and the window's end). Through the window nobody reads
+    it: every route answers as for an unknown project, resolves and placeholders stop with them,
+    and syncs, rotations, reminders and backups wait. Its audit sinks keep delivering;
+  - its members are kept apart with it (docs/members.md), so a member's session and their tokens
+    reach nothing while it's deleted, and its invites end. What members made follows the same
+    rules as everything else: one-time shares end at the delete, syncs and the rest wait, and it
+    all acts for them again only once a recovery brings their membership back;
+  - `POST /v1/secrets/projects/{project}/recover` brings it back within the window (the operator,
+    an admin of its secrets by their grant as it is now, or the person whose namespace it is while
+    they were still one of its owners when it was deleted, so an owner can undo an admin's delete
+    of their project; membership kept from the delete never lets anyone else in;
+    `GET /v1/secrets/deleted` lists what the caller may recover, as do
+    the dashboard's Home, "Recently deleted", and `roll secrets recover [project]`). The workspace
+    keeps a deleted project, its canvas and members apart for this (`deleted_projects`, at most
+    91 days), and recovering brings them back.
+    Recovering claims the project on the secrets side first (one write: a close on another node
+    then finds nothing to close), then puts the workspace project back: 409 `name_taken` if its
+    owner has made another project of that name since, and the claim is undone. Dynamic leases
+    are issued afresh on the next read; managed links get new credentials at once (`rotated`,
+    `rotation_failed`). The recovery is audited (`project.recover`);
+  - after the window the sweeper closes the log, in one write that is its claim: a last row
+    (`project.purge`) and a signed digest right after it, so the chain ends at a digest the way
+    retention cuts it. Nothing is written after it (`audit` refuses a closed log). A head that
+    isn't roll's isn't signed, so such a project isn't closed or purged: it's logged for the
+    operator and asked again hourly. A project whose workspace project is back (a recovery that
+    stopped halfway) is recovered instead. Once every audit sink has taken both rows, every row
+    goes, then the project's data key and registries (its gateways too, their tokens revoked) once
+    nothing it issued waits. Through the window a sink keeps delivering, the closing digest too,
+    while whoever set it up managed the project when it was deleted (the only use of the kept
+    membership besides bringing it back). **A sink still behind after the grace
+    (`ROLL_SECRETS_PURGE_SINK_GRACE_HOURS`, 24 unless set) loses the rows it hadn't taken, the
+    closing digest with them**; the purge logs a warning per sink with how many. After the closing
+    digest it can't be recovered (410 `gone`).
 
 **Suggested links.** `GET …/suggestions` lists each resource on the project's canvas with the
 standard environments that neither link it nor have its usual keys at `/`, and those keys: the
@@ -3323,8 +3371,10 @@ the binding, issues placeholders, decides each swap and audits it, and ships the
   - **The maker.** An in-process consumer (`sandbox:…`, `preview:…`) runs for someone, so it names
     them: `Ask { maker }` in process, `"maker"` over HTTP. That's #440's `secrets_by` for a sandbox,
     and the rule's writer for a preview. The maker is a person (`usr_…`), a token (`token:…`) or the
-    operator, and must reveal the folder when the placeholders are issued (else 403). Each swap asks
-    again (below). A resolve by a token or a person over HTTP is its own maker; a product's resource
+    operator, and must reveal the folder when the placeholders are issued (else 403
+    `maker_unreachable`: they can no longer reveal there, or sign in; a preview resolves without
+    placeholders on it, and surfaces any other 403). Each swap asks again (below) and refuses with
+    `proxy::Refusal::MakerUnreachable`. A resolve by a token or a person over HTTP is its own maker; a product's resource
     stands for itself on its project's canvas (`ResourceRef`).
   - A placeholder is `rlph_`, 34 random characters and a 6-character checksum
     (`roll_auth::credentials::new_secret`, one of `SECRET_PREFIXES`): roll's guard refuses it where
@@ -3357,7 +3407,11 @@ the binding, issues placeholders, decides each swap and audits it, and ships the
     project, or a token revoked or narrowed, stops every swap of what they made;
   - the environment still exists, isn't frozen (an incident's cut-off), and isn't protected for an
     untrusted consumer;
-  - the key still exists and is still bound; the host and the place match its binding; a sensitive
+  - the key still exists and is still bound, and whoever bound it (`set_by`, `Caller::made_by`) may
+    still `admin` its folder: a member demoted or removed stops every swap through their binding
+    (`Refusal::MakerUnreachable`), which still counts as one everywhere else (a read gets a placeholder, never the value) until an
+    admin binds the key again or takes the binding off;
+  - the host and the place match its binding; a sensitive
     key's binding still opts in, for a reader that couldn't read it; the value holds no reference.
 
   Then the key's own value is read as stored, never resolved. Nothing
@@ -3455,7 +3509,13 @@ agents' sandboxes). Each one does exactly this:
 
 **Ending.** `Secrets::end_intercept_cas(consumer, why)` ends every live CA of the consumer, with a
 revocation row (`revoked_at`, `revoked_why`) and a `secrets.intercept_ca.end` audit row.
-`Secrets::end_consumer` calls it when the sandbox stops or the preview is torn down. The
+`Secrets::end_consumer` calls it when the sandbox stops or the preview is torn down. A CA also
+ends with its hosts: when the consumer's hosts shrink (one of its placeholders revoked, ended in a
+project or cut off, a key's binding cleared or narrowed), every CA of the consumer that names a
+host it no longer has ends once that write commits (`Secrets::end_unbound_intercept_cas`, reason
+`<hosts> no longer bound`), and the proxy's next `intercept_ca` names only the hosts it still has.
+A shrink nothing announces (a placeholder expiring, a key or environment deleted, a binder demoted
+or removed) ends the CA at its next `intercept_ca_live`, which answers `false` for a CA naming a host no longer bound. The
 proxy then drops the CA and its leaves at its next `intercept_ca_live`. No CRL is published: a
 trust anchor isn't checked against one, and the CA dies with its container or within a day. Rows
 go a day after they expire.
@@ -3737,9 +3797,10 @@ Agent's templates do).
   (`storage:bucket:photos`, `search:search:logs (untrusted)` for an untrusted copy), with the one
   key read.
 - **Refusals** say which part failed, never the value: no project, not trusted, not allowed (the
-  maker may not reveal it, or can't reach roll secrets any more), no such key, protected, or can't
-  be used (a dynamic credential, a sensitive key for anyone but a trusted runtime, a reference
-  inside the value that doesn't resolve). `digest_for` and `digest_as` refuse exactly what their
+  caller choosing it may not reveal it), maker unreachable (`Refusal::MakerUnreachable`: the maker
+  can no longer reveal it, or sign in; 403 `maker_unreachable` over HTTP), no such key, protected,
+  or can't be used (a dynamic credential, a sensitive key for anyone but a trusted runtime, a
+  reference inside the value that doesn't resolve). `digest_for` and `digest_as` refuse exactly what their
   resolve would; `bind_ref` refuses what `digest_as` would for the caller (it decrypts nothing, so
   a `${…}` reaching a sensitive key fails at the first read).
 - **Rotation.** Nothing is cached across calls in roll secrets. A product keeps what it built
@@ -4362,7 +4423,8 @@ It is the operator (`Everything`), a roll-access grant (`GrantGrants`, for `rlt_
 with one secrets rule (`POST /v1/access/tokens`), and a workload identity's login is a `workload` grant.
 
 Secrets accepts the operator (`roll_auth::Operator`, or any request when rolld has no operator
-token), signed-in people on their own projects (below), and roll-access's grants: there is one
+token), signed-in people on the projects they're members of, as their role allows (below, and
+docs/members.md), and roll-access's grants: there is one
 permission system (docs/permissions.md). A token for CI or a service is a roll token (`rlt_…`)
 with one rule on the project's secrets (environments or all, folder prefixes or all, the actions
 above), an optional expiry and client addresses (up to 20 addresses or CIDRs; from anywhere else
@@ -4384,22 +4446,70 @@ the token it gets carries the same list.
 
 #### People (signed-in accounts)
 
-Someone signed in to roll (docs/accounts.md) who isn't an admin manages the secrets of the
-workspace projects they own (an admin's session is the operator):
-rolld's gate lets a session through `/v1/secrets` (`Access::UserOrCredential`: a session, or a
-request carrying a credential secrets checks), with `X-Roll-CSRF` on writes. Their caller is
-`OwnProjects`: everything on their own projects as the workspace has them on this request, nothing
-on anyone else's, which answers 404 as the workspace does (sharing a folder with a project they
-can't see is refused the same way as with one that doesn't exist). Search, findings and
-`health --all` keep only their projects. The audit log names the person by user id (`usr_…`), and
-their personal overrides are theirs. The deployment key's state (`GET /v1/secrets/health`) is the
-operator's.
+Someone signed in to roll (docs/accounts.md) who isn't an admin reaches the secrets of the
+workspace projects they're a **member** of, as their role there allows (docs/members.md; an
+admin's session is the operator): rolld's gate decides their request from their session's grant
+(`GrantKind::Session`: their memberships' rules, built on every request) exactly as a token's, and
+secrets' second checks ask the same grant (`GrantGrants`). A project they aren't in answers 404 as
+the workspace does (sharing a folder with a project they can't see is refused the same way as with
+one that doesn't exist). Search, findings and `health --all` keep only what they may read. The
+audit log names the person by user id (`usr_…`), and their personal overrides are theirs. The
+deployment key's state (`GET /v1/secrets/health`) is the operator's.
 
-What a person made acts later only while they can sign in and still reach its project (an admin
-then, or its owner now): their tokens, any token one of those made, their identities' logins,
-their syncs and the references they chose for another product (`bind_ref`). What an admin's
-session makes is the person's (`Caller::maker`), though the audit log names it `operator`. rolld asks roll-accounts on every use (`People`); a lookup that fails is an error, not
-a disabled account. A sync a person made pushes as them, as they are then.
+| | viewer | developer | admin and owner |
+| --- | --- | --- | --- |
+| names, versions, history, audit log | yes | yes | yes |
+| values (`reveal`) | no (D2) | in its environments: by default every one without a protection policy, production only when named (D3) | everywhere (D4) |
+| set, change, rollback, promote into | no | in its environments; a protected one takes a change request | yes |
+| delete; protection, approvals, syncs, links, tokens, identities, sinks | no | no | yes |
+| review a change request | no | no | yes, or when named as an approver |
+
+Approvers may name roles beside principals (`role:admin`, `role:owner`): a member with that role
+in the project then counts. Approvals count as their approvers are **when the request is
+applied**: one who left the project, or no longer has `admin` where the gate is, doesn't.
+
+A person's own token reaches only what its rules and their session's grant now both allow
+(`Within`): removing them from the project stops it there at once, and roll-access revokes their
+tokens confined to the project (D7).
+
+What a person made acts later only at their rights as they are now (`maker_reaches`, asked on
+every use with the action and scope the made thing exercises, nothing broader; an admin account
+and the operator always pass):
+
+- a scheduled backup runs while its maker may still `admin` and `reveal` the whole project;
+- a gateway, an ACME external account binding, an audit sink, an environment's notify URL, and
+  every registered provider (a rotator, SaaS rotator, outside database, directory, Kubernetes
+  cluster, GitHub App, Snowflake or Atlas account, AWS role or IAM user, cloud account, CA or SSH
+  CA) work while their maker is still the project's admin (`Secrets::provider_for` before issuing,
+  reading, leasing, renewing or rotating through one; revoking what one issued always goes on);
+- the references a person chose for another product (`bind_ref`) resolve only while they may
+  still reveal what they name;
+- a key's host binding swaps placeholders while whoever bound it may still `admin` its folder, and
+  a placeholder made for a person's consumer (`maker`) while they may still `reveal` there;
+- what an admin's session makes is the person's (`Caller::maker`, recorded through
+  `Secrets::maker_of`), though the audit log names it `operator`: it acts only while they're still
+  an admin or a member who may;
+- what a person **registers** through a token of theirs (a sink, a notify URL, a provider) is
+  theirs (`Caller::made_by` stores `usr_…`): it outlives the token, at their rights now. A row from
+  before that names the token stands for its person through roll-access (`Grants::owner`). What a
+  token **does** stays the token's: a folder it shared with another project, a one-time share and a
+  lease end with the token or its person, whichever comes first (`dead_exports` on every read,
+  `member_changed`). Identities, gateways, backups and ACME bindings stay bound to the token that
+  made them, as before members, so revoking a leaked token stops them;
+- a workload identity logs in only while its maker's session allows every action of its rule in
+  each of its environments and folders, and the token it gets runs within that session too (it's
+  the maker's, so `Within` caps it on each request);
+- their tokens and any token one of those made act within their session (`Within`); a sync pushes
+  as them (`person_caller`).
+
+When a member is removed, leaves, is demoted or deletes their account, rolld also calls
+`Secrets::member_changed`: the folders they shared with other projects stop being shared once they
+may no longer manage the project, and the one-time shares they made end and the dynamic leases
+issued to them are revoked once they're no longer a member. Their personal overrides stay (only
+they read them, and they can't).
+
+So removing or demoting a member stops or narrows what they made at once. rolld asks roll-accounts
+and roll-access on every use; a lookup that fails is an error, not a disabled account.
 
 Anyone may put any resource on their own canvas, so a project reaches a resource only where the
 workspace trusts it to (`Workspace::trusts`, docs/workspace.md "What a canvas stands for"): the
@@ -4552,9 +4662,9 @@ a decoy credential:
 - **`rlt`**: a roll token that roll-access made as a decoy (docs/permissions.md, "Decoy tokens").
   It allows nothing, whatever its rules say. Any use is refused as an unknown token is, so whoever
   holds it learns nothing. roll-access records the use on the token, writes its own audit row,
-  mails the decoy's owner (whoever planted it) and the admins, and tells roll secrets
-  (`Access::on_decoy`). roll secrets keeps no token store: rolld mints the decoy through
-  `Workloads::mint_decoy`.
+  mails the decoy's owner (whoever planted it; from an admin's session, the person behind it, never
+  the operator) and the admins, and tells roll secrets (`Access::on_decoy`). roll secrets keeps no
+  token store: rolld mints the decoy through `Workloads::mint_decoy`.
 - **`postgres`**: a connection string for a role of `resource`, a roll Postgres database the
   project may link (on its canvas, as a link's). It's the root branch's connection string with a
   role and password shaped like the ones links issue (`roll_` and 12 letters and digits, 32
@@ -5189,7 +5299,7 @@ isn't in the workspace is 404.
 | --- | --- | --- |
 | `GET /v1/secrets/health` | | `{ok, key: "env"\|"kms"\|"file"\|"shares"\|"missing", resealed: "all"\|number\|null, customer_managed, issuer_pulled: {kid, pulled_at, detail}[], links: string[], syncs: string[]}` (`links`, `syncs`: the kinds registered; `issuer_pulled`: issuer keys an emergency rotation pulled in the last 30 days) |
 | `GET`, `POST /v1/secrets/unseal` | `{share}` (`POST`) | `{sealed, have?, need?, error?}`: a sealed node's progress (public; see "Starting sealed"); 429 with `Retry-After` past the limits |
-| `GET` | | `{project, environments: Environment[], previews: number, history_days: number \| null, validity_checks: "on" \| "off"}` |
+| `GET` | | `{project, environments: Environment[], previews: number, history_days: number \| null, validity_checks: "on" \| "off", deletion: {window_days, holds: string \| null}}` (`deletion`: what deleting the workspace project takes with it, as its refusal says it, and how many days it stays recoverable) |
 | `PATCH` | `{history_days?, validity_checks?: "on" \| "off"}` | what changed, as given (`admin`; validity checks audited as `validity.checks`) |
 | `GET /grid?path=` | | `Grid` |
 | `GET /environments` | | `Environment[]` in order |
@@ -5393,14 +5503,21 @@ isn't in the workspace is 404.
 | `GET /transit/{name}/public` | | `TransitPublicKey[]`: `{version, public_key (base64), pem, jwk}` for every version (`read`) |
 | `GET /v1/secrets/whoami` | | `{principal, project?, scopes?}` |
 | `GET /v1/secrets/search?key=` | | `Place[]`: every project, environment and folder holding `key` (`PREFIX*` for a prefix) that the caller may read; never values |
+| `GET /v1/secrets/deleted` | | `DeletedProject[]`: `{project, name, deleted_at, deleted_by, purge_at}` for each deleted project in its recovery window that the caller may recover, soonest purged first |
+| `POST /recover` | | `{project, name, recovered_at, rotated, rotation_failed: string[]}`: a deleted project back, with its workspace project and canvas (`admin`, or the person whose project it was; audited as `project.recover`) |
 
 - 400: a bad slug, path, key, value, body or query.
 - 401: no credential, or a token that doesn't exist, is revoked or expired.
-- 403: the caller may not do this (`{"code": "forbidden"}`).
+- 403: the caller may not do this (`{"code": "forbidden"}`), or whoever set up placeholders or
+  chose a reference can no longer reveal there or sign in (`maker_unreachable`).
 - 404: no such project, environment, folder, secret, version, change, request, lease or token.
-- 410: a secret request answered as often as it allowed, expired or cancelled (`gone`).
+- 410: a secret request answered as often as it allowed, expired or cancelled, or a deleted
+  project past its recovery window (`gone`).
 - 409: a slug that is taken (`conflict`), a write to a protected environment
-  (`approval_required`), a request that is `stale`, the last standard environment.
+  (`approval_required`), a request that is `stale`, the last standard environment, a recovered
+  project's name taken meanwhile (`name_taken`), and, on the workspace's
+  `DELETE /v1/workspace/projects/{id}`, a project that holds secrets without `?confirm=`
+  (`project_holds_secrets`).
 - 503: no deployment key on a node that shares the system database (`no_key`).
 
 ### Shapes
@@ -5950,7 +6067,7 @@ and webhooks' and review apps' signing secrets sealed. Still open:
   as soon as its bound hosts shrink (a placeholder revoked, hosts cleared, a cut-off), not only with
   the consumer, and a decoy planted from an admin's session mails that person, not the operator;
 - the thirty-fourth product review (ranked below): items 1 and 3 are being fixed together in
-  `fix/secrets-reveal-as-asker`;
+  `fix/secrets-reveal-as-asker`, and item 2 in `fix/secrets-project-delete-window`;
 - the #432 decoy-oracle fix: computes pinned by digest, and each image's pre-auth answers learned from a
   compute of that image (about 2 s per image, never waking a suspended endpoint). Its full gate is
   running.
@@ -5971,7 +6088,7 @@ found them sound. What's left is at the edges:
    - the fix: answer as the asker (any `from_secrets` key that doesn't resolve for them is a 403), and
      a bound `roll://` variable needs reveal on its own folder.
 2. **Deleting a workspace project erases its secrets, history, encryption keys and audit at once**
-   (security and data loss, M):
+   (security and data loss, M; fixing in `fix/secrets-project-delete-window`):
    - workspace `delete` is enough: `on_delete` → `forget_project` deletes everything in one write;
    - no protected-environment confirm, no transit-key name, no recovery window, nothing audited;
    - the dashboard says "only the project and its canvas go";
@@ -6394,8 +6511,8 @@ cache waited out. Ranked now:
 **The thirtieth product review** (2026-11-18, against Vault/OpenBao, Infisical, Doppler, AWS, 1Password,
 Akeyless, GitGuardian and Bitwarden SM, open PRs checked first) ranked these gaps; its four doc
 inconsistencies are fixed in #264:
-- R1. **Project members and roles for people** (L; every competitor's unit of sharing): waits on the
-  accounts/workspace and roll-access threads.
+- R1. **Project members and roles for people** (L; every competitor's unit of sharing): v1 built
+  (docs/members.md: workspace and secrets; "What v1 leaves out" lists the rest).
 - R2. **Cut off everything that reaches a folder** (M): reach lists it but can't act; one action to
   revoke its tokens and identities, end leases and shares, pause syncs and optionally freeze reads.
   roll MCP's #267 (on main) has `Access::revoke_many(ids, why, by)` (atomic, ≤500 ids, one audit row

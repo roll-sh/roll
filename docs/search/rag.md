@@ -28,8 +28,8 @@ matters: browser keys and CORS (#358), E5 run by roll (#563), and one memory acc
   carries the client's headers when it runs inside `internal::as_caller`
   (`crates/search-es/src/xpack/internal.rs`), so document and field level security apply as the
   client.
-- **Keys and limits for browser pages are in review (#358).** In
-  `crates/search-es/src/xpack/security/browser.rs` on `feature/search-browser`, a browser key may
+- **Keys and limits for browser pages are on main (#358).** In
+  `crates/search-es/src/xpack/security/browser.rs`, a browser key may
   call a search application's `_search`. Inference is limited to the endpoints the target's
   `semantic_text` fields use or `limits.inference_endpoints` names, at most `limits.max_inference`
   texts a request, each charged to the key's rate limits.

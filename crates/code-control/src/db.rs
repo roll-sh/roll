@@ -443,9 +443,11 @@ const COLUMNS: &[(&str, &str, &str)] = &[
     // Reviews and comments from before they said whether their author can push.
     ("reviews", "outside", "INTEGER NOT NULL DEFAULT 0"),
     ("review_comments", "outside", "INTEGER NOT NULL DEFAULT 0"),
-    // Signing secrets from before they were sealed (`crate::signing::seal_at_rest` seals them).
+    // Signing secrets and URLs from before they were sealed (`crate::kept::seal_at_rest` seals them).
     ("repo_webhooks", "secret_sealed", "INTEGER NOT NULL DEFAULT 0"),
     ("review_apps", "secret_sealed", "INTEGER NOT NULL DEFAULT 0"),
+    ("repo_webhooks", "url_sealed", "INTEGER NOT NULL DEFAULT 0"),
+    ("review_apps", "url_sealed", "INTEGER NOT NULL DEFAULT 0"),
 ];
 
 impl Db {
@@ -458,6 +460,7 @@ impl Db {
             crate::ai::store::SCHEMA,
             crate::webhooks::SCHEMA,
             crate::leaks::SCHEMA,
+            crate::github::SCHEMA,
             crate::broken::SCHEMA,
             crate::mcp::SCHEMA,
             crate::agents::SCHEMA,

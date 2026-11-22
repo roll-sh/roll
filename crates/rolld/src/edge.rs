@@ -263,7 +263,7 @@ pub struct Edge {
 }
 
 async fn bind(addr: SocketAddr) -> anyhow::Result<TcpListener> {
-    TcpListener::bind(addr).await.map_err(|e| anyhow::anyhow!("edge: bind {addr}: {e}"))
+    crate::listen::bind(addr).map_err(|e| anyhow::anyhow!("edge: bind {addr}: {e}"))
 }
 
 /// A listener's address as a URL this process can reach.

@@ -50,6 +50,18 @@ pub trait Sources: Send + Sync {
     async fn landings(&self, after: i64, limit: usize) -> anyhow::Result<Vec<Landing>>;
     /// The newest landing's sequence number.
     async fn head(&self) -> anyhow::Result<i64>;
+    /// The commit the gitlink at `path` pins (a submodule), or `None` when something else is there.
+    async fn gitlink(&self, _repo: &str, _revision: &str, _path: &str) -> anyhow::Result<Option<String>> {
+        Ok(None)
+    }
+    /// roll code's own Git address (`https://roll.sh`): a submodule URL on it is one of its repos.
+    fn git_base(&self) -> Option<String> {
+        None
+    }
+    /// Whether anyone can read `repo` (a public repo); a missing one isn't.
+    async fn public(&self, _repo: &str) -> anyhow::Result<bool> {
+        Ok(false)
+    }
     /// A file at `revision` (at most 64 KiB; a larger one or a symlink is `None`).
     async fn read_file(&self, _repo: &str, _revision: &str, _path: &str) -> anyhow::Result<Option<Vec<u8>>> {
         Ok(None)
@@ -404,6 +416,18 @@ pub trait Resources: Send + Sync {
     /// Revoke what [`Resources::link`] made (`kept`: what it said to keep, a key's id) when
     /// the link goes.
     async fn unlink(&self, _kind: LinkKind, _ref: &str, _kept: &str) -> anyhow::Result<()> {
+        Ok(())
+    }
+    /// A branch of the linked resource for one environment (`data: "branch"`; Railway's
+    /// environments' own databases), named `name` (apps' own, unguessable): its own copy of the
+    /// resource's data with credentials of its own (never the resource's own login), its
+    /// variables as the link's (`DATABASE_URL`…) and `kept` what [`Resources::unbranch`] deletes.
+    /// None: this kind has no branches.
+    async fn branch(&self, _kind: LinkKind, _ref: &str, _name: &str) -> anyhow::Result<Option<Minted>> {
+        Ok(None)
+    }
+    /// Delete what [`Resources::branch`] made, once no environment uses it.
+    async fn unbranch(&self, _kind: LinkKind, _ref: &str, _kept: &str) -> anyhow::Result<()> {
         Ok(())
     }
     /// How far `group` is behind on `stream` (messages, every partition): what a worker with

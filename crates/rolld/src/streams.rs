@@ -76,7 +76,7 @@ pub async fn start(args: &Args, auth: &crate::auth::Auth, home: &std::path::Path
         return Err(e.into());
     }
     broker.txns.recover(&broker).await?;
-    let kafka = tokio::net::TcpListener::bind(args.kafka).await?;
+    let kafka = crate::listen::bind(args.kafka)?;
     Ok(Streams { broker, kafka: Some(kafka) })
 }
 

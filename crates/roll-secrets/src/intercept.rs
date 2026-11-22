@@ -15,9 +15,13 @@
 //! - **Hosts come from the bindings**, never from the proxy: [`BoundHosts`] answers, per project, the
 //!   hosts of the keys the consumer holds live placeholders for. [`Secrets`] answers it from
 //!   placeholders' `placeholders` and `key_hosts` tables, and [`Secrets::end_consumer`] calls
-//!   [`Secrets::end_intercept_cas`].
+//!   [`Secrets::end_intercept_cas`]. When a consumer's hosts shrink (a placeholder revoked, cut off
+//!   or ended in one project, a binding cleared or narrowed), the write that shrank them, once
+//!   committed, ends every CA of the consumer naming a host it no longer has
+//!   ([`Secrets::end_unbound_intercept_cas`]); [`Secrets::intercept_ca_live`] ends one that a shrink
+//!   nothing called it for left behind (a placeholder expiring, a key or environment deleted).
 //! - **Short-lived**: [`DEFAULT_TTL`] and at most [`MAX_TTL`]. Each call mints a new key and
-//!   certificate; one ends at its expiry or with its consumer (a revocation row), and the proxy
+//!   certificate; one ends at its expiry, with its consumer or its hosts (a revocation row), and the proxy
 //!   asks [`Secrets::intercept_ca_live`] before each connection it terminates, never caching it.
 //! - Audited as `secrets.intercept_ca` (consumer, that project's hosts, expiry) in each project the
 //!   hosts come from, and `secrets.intercept_ca.end`; never the key.
@@ -210,6 +214,14 @@ pub(crate) fn mint(id: &str, hosts: &[String], not_after: time::OffsetDateTime) 
     Ok((cert.pem(), Value::new(key.serialize_pem()), crate::pki::hex(&serial)))
 }
 
+/// The hosts a CA names (`hosts`, as stored) that `bound` no longer has, listed; `None` when it
+/// has them all. Unreadable hosts count as unbound.
+fn unbound(hosts: &str, bound: &BTreeSet<String>) -> Option<String> {
+    let Ok(hosts) = serde_json::from_str::<Vec<String>>(hosts) else { return Some("its hosts".into()) };
+    let gone: Vec<&str> = hosts.iter().filter(|h| !bound.contains(*h)).map(String::as_str).collect();
+    (!gone.is_empty()).then(|| gone.join(", "))
+}
+
 fn when(ms: i64) -> String {
     at(ms).map(|t| format!("{}-{:02}-{:02} {:02}:{:02} UTC", t.year(), u8::from(t.month()), t.day(), t.hour(), t.minute())).unwrap_or_default()
 }
@@ -228,19 +240,12 @@ impl Secrets {
         if consumer.is_empty() || consumer.len() > 256 || consumer.chars().any(char::is_control) {
             return Err(Error::BadRequest("a consumer is 1 to 256 printable characters".into()));
         }
-        let mut by_project = match self.bound_hosts.get() {
-            Some(source) => source.bound_hosts(consumer)?,
-            None => BoundHosts::bound_hosts(self, consumer)?,
-        };
+        let by_project = self.hosts_now(consumer)?;
         let mut all = BTreeSet::new();
-        for hosts in by_project.values_mut() {
-            *hosts = std::mem::take(hosts).into_iter().map(|h| h.trim().to_ascii_lowercase()).collect();
-            for h in hosts.iter() {
-                checked(h).map_err(|why| Error::BadRequest(format!("a binding can't be intercepted: {why}")))?;
-                all.insert(h.clone());
-            }
+        for h in by_project.values().flatten() {
+            checked(h).map_err(|why| Error::BadRequest(format!("a binding can't be intercepted: {why}")))?;
+            all.insert(h.clone());
         }
-        by_project.retain(|_, hosts| !hosts.is_empty());
         if all.is_empty() {
             return Err(Error::NotFound(format!("{} holds no live placeholder of a key bound to hosts", shown(consumer))));
         }
@@ -270,30 +275,93 @@ impl Secrets {
         Ok(InterceptCa { id, consumer: consumer.to_string(), cert_pem, key, hosts, expires_at })
     }
 
-    /// Whether the proxy may still terminate TLS with CA `id`: it exists, hasn't expired, and its
-    /// consumer hasn't ended. Asked per connection; never cache it.
+    /// `consumer`'s bound hosts now, by project, as a CA names them (lower case; projects with
+    /// none left out).
+    fn hosts_now(&self, consumer: &str) -> Result<BTreeMap<String, BTreeSet<String>>> {
+        let mut by_project = match self.bound_hosts.get() {
+            Some(source) => source.bound_hosts(consumer)?,
+            None => BoundHosts::bound_hosts(self, consumer)?,
+        };
+        for hosts in by_project.values_mut() {
+            *hosts = std::mem::take(hosts).into_iter().map(|h| h.trim().to_ascii_lowercase()).collect();
+        }
+        by_project.retain(|_, hosts| !hosts.is_empty());
+        Ok(by_project)
+    }
+
+    /// Whether the proxy may still terminate TLS with CA `id`: it exists, hasn't expired, its
+    /// consumer hasn't ended, and every host it names is still bound for that consumer (one that
+    /// isn't ends it here, as [`Secrets::end_unbound_intercept_cas`] would have). Asked per
+    /// connection; never cache it.
     pub fn intercept_ca_live(&self, id: &str) -> Result<bool> {
         let now = self.db.now_ms()?;
-        let row: Option<(i64, Option<i64>)> = self.db.read(|c| c.query_row("SELECT expires_at, revoked_at FROM intercept_cas WHERE id = ?", [id], |r| Ok((r.get(0)?, r.get(1)?))).optional())?;
-        Ok(row.is_some_and(|(end, revoked)| revoked.is_none() && end > now))
+        let row: Option<(String, String, i64, Option<i64>)> =
+            self.db.read(|c| c.query_row("SELECT consumer, hosts, expires_at, revoked_at FROM intercept_cas WHERE id = ?", [id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))).optional())?;
+        let Some((consumer, hosts, end, None)) = row else { return Ok(false) };
+        if end <= now {
+            return Ok(false);
+        }
+        let bound: BTreeSet<String> = self.hosts_now(&consumer)?.into_values().flatten().collect();
+        if unbound(&hosts, &bound).is_none() {
+            return Ok(true);
+        }
+        self.end_unbound_intercept_cas(&consumer)?;
+        Ok(false)
     }
 
     /// Ends every live interception CA of `consumer` (its sandbox stopped, its preview torn down),
     /// with a revocation row and `why`; the proxy drops them at its next [`Secrets::intercept_ca_live`].
     /// [`Secrets::end_consumer`] calls it. How many ended.
     pub fn end_intercept_cas(&self, consumer: &str, why: &str) -> Result<usize> {
+        self.end_cas(consumer, |_| Some(why.to_string()))
+    }
+
+    /// Ends every live interception CA of `consumer` naming a host it's no longer bound to, after
+    /// the write that shrank its hosts committed (a placeholder revoked, cut off or ended in a
+    /// project, a binding cleared or narrowed). The proxy's next [`Secrets::intercept_ca`] gets a
+    /// fresh one for the hosts it still has. How many ended.
+    pub fn end_unbound_intercept_cas(&self, consumer: &str) -> Result<usize> {
+        let bound: BTreeSet<String> = self.hosts_now(consumer)?.into_values().flatten().collect();
+        self.end_cas(consumer, |hosts| unbound(hosts, &bound).map(|gone| format!("{gone} no longer bound")))
+    }
+
+    /// [`Secrets::end_unbound_intercept_cas`] for each of `consumers`, after a write committed:
+    /// a failure is logged, not answered (the write stands, and [`Secrets::intercept_ca_live`]
+    /// ends the CA at its next connection).
+    pub(crate) fn hosts_shrank<'a>(&self, consumers: impl IntoIterator<Item = &'a str>) {
+        let consumers: BTreeSet<&str> = consumers.into_iter().collect();
+        for consumer in consumers {
+            if let Err(e) = self.end_unbound_intercept_cas(consumer) {
+                tracing::warn!("ending interception CAs whose hosts were unbound failed (their next connection ends them): {e}");
+            }
+        }
+    }
+
+    /// Ends the live CAs of `consumer` that `why` (given a CA's hosts, as stored) answers a reason
+    /// for, each with a revocation row and an audit row in its projects. How many ended.
+    fn end_cas(&self, consumer: &str, why: impl Fn(&str) -> Option<String>) -> Result<usize> {
         let now = self.db.now_ms()?;
         let caller = Caller::consumer(consumer);
         self.db.write(|c| {
-            let live: Vec<(String, String)> =
-                c.query("SELECT id, projects FROM intercept_cas WHERE consumer = ? AND revoked_at IS NULL AND expires_at > ?", params![consumer, now], |r| Ok((r.get(0)?, r.get(1)?)))?;
-            for (id, projects) in &live {
+            let live: Vec<(String, String, String)> =
+                c.query("SELECT id, hosts, projects FROM intercept_cas WHERE consumer = ? AND revoked_at IS NULL AND expires_at > ?", params![consumer, now], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?;
+            let mut ended = 0;
+            for (id, hosts, projects) in &live {
+                let Some(why) = why(hosts) else { continue };
                 c.execute("UPDATE intercept_cas SET revoked_at = ?, revoked_why = ? WHERE id = ?", params![now, why, id])?;
                 for project in serde_json::from_str::<Vec<String>>(projects).unwrap_or_default() {
-                    audit::record(c, self.keys()?, &project, &caller, "secrets.intercept_ca.end", None, None, &[], &format!("ended interception CA {id} for {consumer}: {why}"), now)?;
+                    // A purged project has no log to note it in, a closed one takes nothing more.
+                    if c.query_row("SELECT 1 FROM projects WHERE project_id = ?", [&project], |r| r.get::<_, i64>(0)).optional()?.is_none() {
+                        continue;
+                    }
+                    match audit::record(c, self.keys()?, &project, &caller, "secrets.intercept_ca.end", None, None, &[], &format!("ended interception CA {id} for {consumer}: {why}"), now) {
+                        Ok(()) | Err(Error::Gone(_)) => {}
+                        Err(e) => return Err(e),
+                    }
                 }
+                ended += 1;
             }
-            Ok::<_, Error>(live.len())
+            Ok::<_, Error>(ended)
         })
     }
 

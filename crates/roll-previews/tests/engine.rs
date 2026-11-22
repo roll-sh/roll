@@ -26,6 +26,11 @@ async fn a_change_gets_a_full_preview_that_follows_pushes_and_goes_when_it_lands
     assert!(urls.contains(&("web", "http://web-pr107-shop.preview.test", "cs_7a")), "{urls:?}");
     assert!(urls.contains(&("api", "http://api-pr107-shop.preview.test", "cs_api0")), "{urls:?}");
     assert!(p.cost.sleeping_usd_month > 0.0 && p.cost.active_usd_hour > 0.0, "{:?}", p.cost);
+    // How its head came up, step by step, in order.
+    let tl = e.engine.store.preview(&p.id).unwrap().timeline.expect("its timeline");
+    let steps: Vec<&str> = tl.steps.iter().map(|x| x.step.as_str()).collect();
+    assert_eq!((tl.head.as_str(), steps), ("cs_7a", vec!["data", "setup", "deploy", "checks", "ready"]));
+    assert!(tl.steps.windows(2).all(|w| w[0].at <= w[1].at) && tl.started_at <= tl.steps[0].at);
 
     // Converging again changes nothing: branching is idempotent.
     e.engine.pass().await.unwrap();
@@ -1178,6 +1183,18 @@ async fn a_service_with_a_health_path_is_ready_only_once_it_answers_well() {
     e.engine.store.update(&p.id, |r| r.next_at = 0).unwrap();
     e.engine.pass().await.unwrap();
     assert_eq!(e.engine.store.row(&p.id).unwrap().state, State::Ready);
+    // A push whose service is still starting when it's asked: left for the next poll, it goes on
+    // as soon as the service is up (the live run's preview spent 13 of 32 s waiting so).
+    e.apps.starting.store(1, Ordering::SeqCst);
+    e.code.edit("chg_hc", |c| c.head = "cs_5b".into());
+    e.engine.pass().await.unwrap();
+    let now = e.engine.store.now_ms().unwrap();
+    let waiting = e.engine.store.row(&p.id).unwrap();
+    assert!(waiting.state == State::Updating && waiting.next_at > now, "{waiting:?}");
+    e.engine.service_up(&p.id);
+    assert!(e.engine.store.row(&p.id).unwrap().next_at <= e.engine.store.now_ms().unwrap(), "due at once");
+    e.engine.pass().await.unwrap();
+    assert_eq!(e.engine.store.row(&p.id).unwrap().state, State::Ready);
 }
 
 #[tokio::test]
@@ -1273,6 +1290,10 @@ async fn a_roll_only_preview_takes_placeholders_made_by_who_saved_its_rules() {
     e.engine.store.update_intercepted(&p.id, |x| x.swapped += 2).unwrap();
     let held = e.engine.store.preview(&p.id).unwrap().intercepted.expect("its keys");
     assert_eq!((held.keys[0].key.as_str(), held.keys[0].hosts.len(), held.swapped), ("STRIPE_KEY", 2, 2));
+    // roll apps' proxies' counts for its services there, beside its own.
+    let apps = roll_previews::AppsIntercepted { requests: 3, swapped: 1, refused: vec!["api.stripe.com: a placeholder in the query".into()] };
+    e.engine.store.set_runtime_fact(&p.id, "intercepted_apps", Some(&apps)).unwrap();
+    assert_eq!(e.engine.store.preview(&p.id).unwrap().intercepted.and_then(|x| x.on_apps), Some(apps));
     // Its CA changes (a key's bound hosts did): its services restart, trusting the new one.
     struct Ca(parking_lot::Mutex<String>);
     struct Nothing;
@@ -1381,6 +1402,32 @@ async fn a_signed_in_person_sees_only_their_own_projects_previews() {
     // Their own project's: there.
     let mine = e.ws.create("usr_b", "mine", "", None).unwrap();
     assert_eq!(call(other, format!("/v1/previews/projects/{}/settings", mine.id)).await.0, 200);
+    // A create is made in the project roll-access decided it on (`X-Roll-Project`), never in another
+    // the body names.
+    let req = axum::http::Request::post("/v1/previews")
+        .header("x-roll-project", mine.id.as_str())
+        .body(axum::body::Body::from(json!({ "project": e.project, "repo": "acme/web", "branch": "main" }).to_string()))
+        .unwrap();
+    assert_eq!(roll_previews::api::router(e.engine.clone()).oneshot(req).await.unwrap().status().as_u16(), 400);
+    // A member (a viewer here) passes previews' own check once roll-access decided the request by
+    // their role (their session's grant beside it; roll-access/tests/access.rs::
+    // a_members_role_decides_what_they_do_to_a_preview: a viewer reads it, never its credentials).
+    // Without a decision (past the gate), only an owner does.
+    struct Addresses;
+    impl roll_workspace::People for Addresses {
+        fn person(&self, user: &str) -> Option<roll_workspace::Person> {
+            let h = user.strip_prefix("usr_")?;
+            Some(roll_workspace::Person { handle: h.into(), email: Some(format!("{h}@example.com")), admin: false })
+        }
+    }
+    e.ws.set_people(std::sync::Arc::new(Addresses));
+    let (_, url) = e.ws.invite(&roll_workspace::Actor::operator(), &e.project, "v@example.com", "viewer", None).unwrap();
+    e.ws.accept("usr_v", url.split("token=").nth(1).unwrap(), None).unwrap();
+    assert_eq!(call(Some(("usr_v", false)), format!("/v1/previews/{}", p.id)).await.0, 404, "no role decided");
+    let mut req = axum::http::Request::get(format!("/v1/previews/{}", p.id)).body(axum::body::Body::empty()).unwrap();
+    req.extensions_mut().insert(roll_auth::SignedIn { user: "usr_v".into(), handle: "v".into(), admin: false, code_owner: None, session: "ses_v".into() });
+    req.extensions_mut().insert(roll_auth::Grant { id: "ses_v".into(), name: "session".into(), kind: roll_auth::GrantKind::Session, scope: std::sync::Arc::new(roll_auth::scope::Scope(Vec::new())), user: Some("usr_v".into()), ask_otherwise: false });
+    assert_eq!(roll_previews::api::router(e.engine.clone()).oneshot(req).await.unwrap().status().as_u16(), 200, "decided by their role");
     // A token (no signed-in person) and an admin see it.
     assert_eq!(call(None, format!("/v1/previews/{}", p.id)).await.0, 200);
     assert_eq!(call(Some(("usr_c", true)), format!("/v1/previews/{}", p.id)).await.0, 200);
@@ -2018,6 +2065,9 @@ async fn the_project_that_has_had_a_service_longest_speaks_for_its_branches() {
         fn trusts(&self, user: &str, _kind: Res, r: &str) -> bool {
             user == "usr_ada" && r == "svc_shop"
         }
+        fn owns(&self, user: &str, kind: Res, r: &str) -> bool {
+            self.trusts(user, kind, r)
+        }
     }
     let e = env(json!({ "enabled": true, "branches": ["feat/*"] }));
     e.ws.set_owners(Arc::new(Ada));
@@ -2076,6 +2126,9 @@ async fn a_preview_made_by_hand_is_only_of_a_repo_the_project_stands_for() {
     impl roll_workspace::Owners for Ada {
         fn trusts(&self, user: &str, _kind: Res, r: &str) -> bool {
             user == "usr_ada" && r == "acme/api"
+        }
+        fn owns(&self, user: &str, kind: Res, r: &str) -> bool {
+            self.trusts(user, kind, r)
         }
     }
     let e = env(json!({ "enabled": true }));

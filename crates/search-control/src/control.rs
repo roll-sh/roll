@@ -27,7 +27,10 @@
 
 use crate::meter::{Meter, MeterHooks, engine_figures, index_figures, now_ms};
 use crate::pricing::{Cost, Pricing};
-use crate::store::{Caps, DeletedCluster, Inserted, IpRule, Over, Recorded, SearchCluster, Store, UsageTotals};
+mod browser_keys;
+pub use browser_keys::{NewBrowserKey, Revoked};
+
+use crate::store::{Caps, CorsSettings, DeletedCluster, Inserted, IpRule, Over, Recorded, SearchCluster, Store, UsageTotals};
 pub use crate::wake::SqlCatalog;
 use crate::wake::{ControlHooks, GuardedStores, LOAD_WAIT, Wakes};
 use base64::Engine;
@@ -201,6 +204,26 @@ pub struct ClusterOptions {
     /// Who may reach the data plane: CIDRs or addresses, each a string or `{cidr, description?}`
     /// (at most [`search_server::allow::MAX_ENTRIES`]); `[]` opens the cluster to anyone again.
     pub ip_allowlist: Option<Vec<IpRuleInput>>,
+    /// Which web pages may call the cluster from a browser (`http.cors.*`); `null` or no
+    /// `allow_origin` turns CORS off.
+    #[serde(default, deserialize_with = "present")]
+    pub cors: Option<Option<CorsSettings>>,
+    /// Requests per minute all its browser keys may make together; `null`: the node's default.
+    #[serde(default, deserialize_with = "present")]
+    pub browser_per_minute: Option<Option<i64>>,
+}
+
+/// A field that was given, `null` included (`Some(None)`), apart from one left out (`None`).
+fn present<'de, D: serde::Deserializer<'de>, T: Deserialize<'de>>(d: D) -> std::result::Result<Option<T>, D::Error> {
+    T::deserialize(d).map(Some)
+}
+
+/// CORS settings as given: checked as the node reads them and kept as browsers send origins
+/// (`None`: off).
+fn cors_settings(given: Option<CorsSettings>) -> Result<Option<CorsSettings>> {
+    let Some(g) = given.filter(|g| !g.allow_origin.is_empty()) else { return Ok(None) };
+    let cors = search_server::cors::Cors::new(&g.allow_origin, g.allow_methods.as_deref(), g.allow_headers.as_deref(), g.max_age).map_err(|e| ControlError::Invalid(format!("cors: {e}")))?;
+    Ok(Some(CorsSettings { allow_origin: cors.origins().iter().map(|o| o.as_written()).collect(), ..g }))
 }
 
 /// An allowlist entry as given (roll apps' `allow_ips` take the same).
@@ -356,6 +379,15 @@ pub fn spec_for(c: &SearchCluster) -> ClusterSpec {
     spec.max_body_bytes = Some((c.max_body_mb.max(1) as usize) << 20);
     spec.destructive_requires_name = c.destructive_requires_name;
     spec.ip_allowlist = allowlist_of(&c.ip_allowlist);
+    spec.browser_per_minute = c.browser_per_minute.and_then(|n| u64::try_from(n).ok());
+    spec.cors = c.cors.as_ref().and_then(|g| match search_server::cors::Cors::new(&g.allow_origin, g.allow_methods.as_deref(), g.allow_headers.as_deref(), g.max_age) {
+        Ok(c) => Some(Arc::new(c)),
+        // Checked when written; one that no longer parses (a hand-edited catalog) allows nobody.
+        Err(e) => {
+            tracing::error!(cluster = c.name, error = e, "a cluster's CORS settings in the catalog don't parse: CORS is off");
+            None
+        }
+    });
     spec.catalog_id = Some(c.id.clone());
     // Only until its first load has marked what it inherited: a branch made before marking
     // existed, or one already marked, runs its jobs as its own.
@@ -559,6 +591,7 @@ impl Control {
     }
 
     async fn open_with(cfg: SearchConfig, objects: Objects, wal_objects: Option<Objects>, catalog: Option<Arc<Store>>) -> anyhow::Result<Arc<Self>> {
+        search_es::search::check_max_time(&cfg.node_settings)?;
         std::fs::create_dir_all(&cfg.home)?;
         let store = match (catalog, &cfg.catalog) {
             (Some(c), _) => c,
@@ -796,6 +829,15 @@ impl Control {
         if let Some(v) = o.ip_allowlist {
             c.ip_allowlist = ip_rules(v)?;
         }
+        if let Some(v) = o.cors {
+            c.cors = cors_settings(v)?;
+        }
+        if let Some(v) = o.browser_per_minute {
+            if v.is_some_and(|n| !(1..=search_server::browser::MAX_PER_MINUTE as i64).contains(&n)) {
+                return Err(ControlError::Invalid(format!("browser_per_minute: 1 to {}", search_server::browser::MAX_PER_MINUTE)));
+            }
+            c.browser_per_minute = v;
+        }
         if let Some(v) = o.flavor {
             c.flavor = v.to_ascii_lowercase();
         }
@@ -863,6 +905,8 @@ impl Control {
             owner: None,
             restored_at: None,
             ip_allowlist: Vec::new(),
+            cors: None,
+            browser_per_minute: None,
             inherit_pending: false,
         }
     }
@@ -975,6 +1019,15 @@ impl Control {
                     return Err(if msg.contains("already exists") { ControlError::Conflict(msg) } else { ControlError::Internal(e) });
                 }
             }
+            if at.is_some()
+                && let Err(e) = self.adopt_current_security(&p, &c).await
+            {
+                // Never left with security older than its parent's: a revoked key would work.
+                if let Err(e2) = self.data.delete_cluster(&c.name).await {
+                    tracing::warn!(cluster = c.name, error = %e2, "removing a branch whose security couldn't be brought up to date failed");
+                }
+                return Err(ControlError::Internal(e));
+            }
         }
         if let Err(e) = self.insert(&c, caps).await {
             // Lost a race for the name, or the owner is at a cap: don't leave the branch's
@@ -1000,6 +1053,19 @@ impl Control {
             }
         }
         Ok(c)
+    }
+
+    /// A point-in-time branch `c` of `p` takes `p`'s security as it is now, not as it was at the
+    /// point: keys revoked, tokens invalidated, users deleted and passwords changed since stay
+    /// so (`search_es::xpack::security::adopt_current_security`). Written to the branch's
+    /// stored state before it is in the catalog, so nothing can load the older one meanwhile.
+    async fn adopt_current_security(&self, p: &SearchCluster, c: &SearchCluster) -> anyhow::Result<()> {
+        let Some(branch) = self.data.read_cluster(&c.name).await? else { return Ok(()) };
+        let Some(current) = self.data.read_cluster(&p.name).await? else { return Ok(()) };
+        let dialect = dialect(&c.flavor).unwrap_or(Dialect::Elasticsearch);
+        let json = search_es::xpack::security::adopt_current_security(&branch.json, &current.json, dialect, now_ms())?;
+        self.data.write_cluster(&c.name, &search_store::ClusterState::new(json)).await?;
+        Ok(())
     }
 
     fn check_window(&self, p: &SearchCluster, at: i64, now: i64) -> Result<()> {
@@ -2300,6 +2366,8 @@ mod tests {
             owner: None,
             restored_at: None,
             ip_allowlist: vec![IpRule { cidr: "203.0.113.0/24".into(), description: None }],
+            cors: None,
+            browser_per_minute: None,
             inherit_pending: false,
         };
         let s = spec_for(&c);

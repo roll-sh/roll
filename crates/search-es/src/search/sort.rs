@@ -197,6 +197,7 @@ pub fn build(ctx: &QueryCtx, sorts: &[Sort]) -> EsResult<BuiltSort> {
                             SortMissing::Number(text.parse::<f64>().map_err(|_| EsError::number_format(&text))?)
                         }
                     };
+                    ctx.no_scripts()?;
                     let ev = Arc::new(super::runtime::Evaluator::new(&ctx.cluster.scripts, ctx.st, ctx.table, ctx.shard as i32, &ctx.idx.name, rf)?.counted());
                     let (key, format) = super::runtime::sort_key(ev, ctx.searcher.clone(), reverse, sort_mode, missing);
                     out.keys.push(key);
@@ -1059,6 +1060,7 @@ pub fn geo_distance(ctx: &QueryCtx, m: &crate::json::Map) -> EsResult<(SortKey, 
             Some("sum") => return Err(EsError::illegal_argument("sort_mode [sum] isn't supported for sorting by geo distance")),
             Some(m) => Some(mode_of(Some(m), reverse, true)?),
         };
+        ctx.no_scripts()?;
         let ev = super::runtime::Evaluator::new(&ctx.cluster.scripts, ctx.st, ctx.table, ctx.shard as i32, &ctx.idx.name, rf)?.counted();
         return Ok((super::runtime_geo::sort_key(Arc::new(ev), points, dtype, unit, reverse, mode), name));
     }

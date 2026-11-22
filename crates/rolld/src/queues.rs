@@ -259,15 +259,18 @@ impl Queues {
         let stream_listener = bind(a.stream).await?;
         let mqtt = mq_mqtt::Config { listen: a.mqtt, ws_listen: Some(a.web_mqtt), ..mq_mqtt::Config::default() };
         let http = mq_http::Config { listen: a.http, public_url: Some(format!("http://{}", a.http)), ..mq_http::Config::default() };
+        let (amqp_listener, stomp_listener, web_stomp_listener) = (bind(a.amqp).await?, bind(a.stomp).await?, bind(a.web_stomp).await?);
+        let (mqtt_listener, web_mqtt_listener, http_listener) = (bind(a.mqtt).await?, bind(a.web_mqtt).await?, bind(a.http).await?);
 
         tokio::select! {
-            r = mq_amqp::serve(b.clone(), mq_amqp::ServerConfig { listen: a.amqp, amqp10: Some(mq_amqp10::handoff(mq_amqp10::Config { listen: a.amqp, ..Default::default() })) }) => r,
+            r = mq_amqp::serve_listener(b.clone(), amqp_listener, mq_amqp::ServerConfig { listen: a.amqp, amqp10: Some(mq_amqp10::handoff(mq_amqp10::Config { listen: a.amqp, ..Default::default() })) }) => r,
             r = mq_mgmt::serve_mgmt(mgmt, mgmt_listener) => r,
-            r = mq_stomp::serve(b.clone(), stomp.clone()) => r,
-            r = mq_stomp::serve_ws(b.clone(), stomp) => r,
-            r = mq_mqtt::serve(b.clone(), mqtt) => r,
+            r = mq_stomp::serve_listener(b.clone(), stomp_listener, stomp.clone()) => r,
+            r = mq_stomp::serve_ws_listener(b.clone(), web_stomp_listener, stomp) => r,
+            r = mq_mqtt::serve_listener(b.clone(), mqtt_listener, mqtt.clone()) => r,
+            r = mq_mqtt::serve_ws_listener(b.clone(), web_mqtt_listener, mqtt) => r,
             r = self.stream.serve_listener(stream_listener) => r,
-            r = mq_http::serve(b.clone(), http) => r,
+            r = mq_http::serve_listener(b.clone(), http_listener, http) => r,
         }
     }
 
@@ -298,7 +301,7 @@ impl Queues {
 }
 
 async fn bind(addr: SocketAddr) -> anyhow::Result<TcpListener> {
-    TcpListener::bind(addr).await.map_err(|e| anyhow::anyhow!("bind {addr}: {e}"))
+    crate::listen::bind(addr).map_err(|e| anyhow::anyhow!("bind {addr}: {e}"))
 }
 
 /// Stable node name: `HOSTNAME` when exported (containers), else the system hostname.

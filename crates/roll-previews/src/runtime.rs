@@ -746,6 +746,10 @@ impl Runtime {
             tokio::time::sleep(Duration::from_millis(250)).await;
         }
         info!(%preview, %service, %addr, "preview service running");
+        // A preview waiting on this start (its health check) goes on now, not at its next poll.
+        if let Some(e) = self.engine.get().and_then(Weak::upgrade) {
+            e.service_up(preview);
+        }
         Ok(addr)
     }
 
@@ -1592,6 +1596,11 @@ impl Apps for Runtime {
 
     fn status(&self, preview: &str, service: &str) -> Option<ServiceState> {
         self.service_status(preview, service)
+    }
+
+    /// The runtime's own proxy counts on the preview's record as it goes.
+    async fn intercepted(&self, _preview: &str) -> Option<crate::AppsIntercepted> {
+        None
     }
 
     async fn egress_refused(&self, preview: &str) -> Vec<String> {

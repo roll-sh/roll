@@ -71,7 +71,7 @@ impl Redis {
         let secret = c.cluster.resolve(c.code_cluster_secret.as_deref(), None, None).ok().and_then(|r| r.secret);
         let secret = secret.unwrap_or_else(|| roll_cluster::ClusterConfig::random_node_id() + "-redis-local-only");
         let front = Front::new(control.clone(), &secret, public)?;
-        let listeners = (TcpListener::bind(args.redis).await?, TcpListener::bind(args.redis_http).await?);
+        let listeners = (crate::listen::bind(args.redis)?, crate::listen::bind(args.redis_http)?);
         tracing::info!(resp = %args.redis, http = %args.redis_http, tls = tls.is_some(), "redis listening");
         let opts = redis_server::net::ListenOptions { tls, proxy_protocol: args.redis_proxy_protocol };
         Ok(Redis { control, front, opts, listeners: Some(listeners) })
