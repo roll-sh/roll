@@ -156,7 +156,9 @@ the size it was).
 
 A 2026-07-28 client can ask what happened instead of being asked (MCP Events, SEP-3415,
 `io.modelcontextprotocol/events`, offered in `server/discover`): an agent watching a deploy polls
-`apps.event` and hears that it failed, a crash loop or an alert. Poll mode (`events/poll`) and
+`apps.event` and hears that it failed, a crash loop or an alert, and one waiting on a person polls
+`access.approval` (its own approvals as they're decided, `GET /v1/access/approvals/decided`, tied to
+`access_wait_approval`, so every connection has it) instead of holding a call open. Poll mode (`events/poll`) and
 webhook mode (`events/subscribe`, `events/unsubscribe`, below); `events/stream` isn't offered. An event type is a
 feed route read through the gated router with the caller's token, as a tool is, and it's the tool
 for that route's to list and allow (`apps.event` is `apps_events`'s: `GET /v1/apps/events`): a
@@ -164,8 +166,9 @@ connection that can't use the tool doesn't see the type and is refused (`-32024`
 decides and audits each poll (as `events/poll:apps.event`), and lockdown withholds what the tool's
 answer would. roll keeps nothing per client: the cursor (`a1:<seq>`) is the feed's own position.
 No cursor starts from now (`?latest=1`: no events, the newest cursor); one roll can't read answers
-a fresh cursor and `truncated: true`, never an error, as the SEP says. `arguments` filter by
-`kinds` (`deploy.failed`, or a family as `alert.*`), `service` and `environment`; `maxEvents` (at
+a fresh cursor and `truncated: true`, never an error, as the SEP says. `arguments` filter as each
+type's `inputSchema` says: `apps.event` by `kinds` (`deploy.failed`, or a family as `alert.*`),
+`service` and `environment`, `access.approval` by `kinds` (`approved`, `denied`) and `tool`; `maxEvents` (at
 most 100) and `maxAgeMs` are honoured, events older than `maxAgeMs` skipped and marked `truncated`.
 A full page (`hasMore`) means poll again at once; otherwise after `nextPollMs` (15 s).
 
@@ -1216,13 +1219,12 @@ previews are listed once those products are on.
 Ranked; the top item is in progress. A watchdog reads this list. Unblocked work comes first; what
 waits on a sibling PR reaching main is last.
 
-1. **MCP Events' webhook mode (this PR).** ChatGPT takes Events by webhook only, so poll mode
-   (#692) didn't reach it. Now `events/subscribe` and `events/unsubscribe` (see "Events"): a
-   verified callback, Standard Webhooks signing, deliveries read through the gate as the
-   subscriber's grant (`roll_auth::ActAs`, one evaluator), `terminated` when its access ends.
-   Next in this item: more feeds as their products have a log after a cursor (roll code's durable
-   land log, `Store::land_log`, has no route yet; previews becoming ready; approvals decided,
-   roll-access's own; secrets' leaks), and a well-known receiver document
+1. **MCP Events' feeds (this PR: `access.approval`).** Webhook mode landed (#703). Now a second
+   feed: a connection's own approvals as they're decided (`GET /v1/access/approvals/decided`, a
+   place given in the deciding write), so an agent waiting on a person hears the decision by poll
+   or webhook instead of holding a call open. Next in this item: more feeds as their products have
+   a log after a cursor (roll code's durable land log, `Store::land_log`, has no route yet; previews
+   becoming ready; secrets' leaks), and a well-known receiver document
    (`/.well-known/mcp-webhook-receiver.json`) in place of the challenge. From the review: a feed
    whose route runs on its owner node needs `ActAs` carried across the forward (today's isn't
    forwarded); claims use each node's clock (a node more than 2 minutes ahead can deliver beside
@@ -1280,7 +1282,7 @@ waits on a sibling PR reaching main is last.
 7. **Landed 2026-11-22 morning:** operator policy for agent connections: `agents_ask` and
    `mcp_lockdown` / `mcp_read_only` (#678), and `oauth_clients`, the OAuth clients that may connect,
    checked at consent, at every token and on every request, nothing revoked (#680). SQL sessions name who sent them (`application_name`: `roll tok_…`, so `postgres_activity` tells
-   an agent's queries apart; #683), and apps' sandbox tools marked open-world (#684). Output schemas for 2026-07-28 clients, learned from the sweep's real answers (#687). MCP Events in poll mode, starting with apps' event log (#692). VS Code's config to its 1.146 files (#694). Client ID metadata documents checked against draft -03, loopback redirects on any port (#696). **Landed 2026-11-21:** step-up authorization for OAuth clients (#673: a refusal of a connection's own
+   an agent's queries apart; #683), and apps' sandbox tools marked open-world (#684). Output schemas for 2026-07-28 clients, learned from the sweep's real answers (#687). MCP Events in poll mode, starting with apps' event log (#692). VS Code's config to its 1.146 files (#694). Client ID metadata documents checked against draft -03, loopback redirects on any port (#696). MCP Events' webhook mode: verified callbacks, Standard Webhooks signing, deliveries read through the gate as the subscriber's grant (`roll_auth::ActAs`), two security reviews (#703). **Landed 2026-11-21:** step-up authorization for OAuth clients (#673: a refusal of a connection's own
    rules records the one rule it needed, `roll:step-up:<id>` in-band and as a 403 to Claude Code
    from 2.1.288, the consent screen adds roll's record to that connection; two security reviews); the instructions name every product by its tool prefix, search mode's tools
    always load, the 48 KiB cut's reason corrected, and Next ranked from the 2026-11-22 comparison
