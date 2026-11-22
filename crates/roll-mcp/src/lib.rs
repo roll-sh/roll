@@ -282,7 +282,12 @@ enum Principal {
 }
 
 fn unauthorized(c: &Config) -> Response {
-    let mut r = http_error(StatusCode::UNAUTHORIZED, "this MCP server needs a token: connect with OAuth, or send Authorization: Bearer rlt_…");
+    unauthorized_because(c, "this MCP server needs a token: connect with OAuth, or send Authorization: Bearer rlt_…")
+}
+
+/// A 401 with OAuth's discovery challenge (the protected resource's metadata), saying `why`.
+fn unauthorized_because(c: &Config, why: &str) -> Response {
+    let mut r = http_error(StatusCode::UNAUTHORIZED, why);
     let meta = format!("Bearer resource_metadata=\"{}/.well-known/oauth-protected-resource/v1/mcp\"", c.api_url.trim_end_matches('/'));
     if let Ok(v) = HeaderValue::from_str(&meta) {
         r.headers_mut().insert(header::WWW_AUTHENTICATE, v);
@@ -368,6 +373,13 @@ async fn handle(State(m): State<Mcp>, uri: axum::http::Uri, ext: Extensions, hea
         None if roll_auth::Operator::on(&ext) || !m.config.locked => Principal::Operator,
         None => return unauthorized(&m.config),
     };
+    // The operator's policy can take agents only with scoped credentials (roll-access's
+    // `mcp_require_grant`, as Stripe's MCP server refuses full-access keys): the admin token, an
+    // admin's session and an open daemon get OAuth's challenge, so a client connects as a grant
+    // every agent control applies to.
+    if matches!(principal, Principal::Operator) && m.config.access.as_ref().is_some_and(|a| a.policy_now().mcp_require_grant) {
+        return unauthorized_because(&m.config, "roll's policy takes agents only with a token made for them or an OAuth connection, never the admin token: connect with OAuth");
+    }
     // The operator's policy can hold every token's and OAuth connection's MCP to lockdown or to
     // reading, whatever the client's URL asks (roll-access's `mcp_lockdown`, `mcp_read_only`).
     let (lockdown, readonly) = match (&principal, &m.config.access) {
