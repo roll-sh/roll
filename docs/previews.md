@@ -147,6 +147,12 @@ idle instances. Only Neon branches cheaply, and only Postgres. roll previews:
   pattern that doesn't parse, a deploy hook's rebuild or a fork's change (its approval is for one
   head) rebuilds it as before. Like an earlier push, the kept build runs on data the new head's
   release may have migrated. Empty (the default): every push rebuilds it.
+- **Crons**: a roll apps cron service, and a service's scheduled commands and calls, are deployed
+  in a preview like anything else, but the schedule doesn't fire unless the project's `crons` says
+  so (roll apps' `scheduled: false` on each `pv-` environment): a preview nobody looks at runs no jobs, and a nightly digest doesn't mail anyone
+  from its copy of the data (Heroku's review apps leave the scheduler out too). A roll apps
+  without the field refuses it as unknown and the environment is made without it (its schedule
+  runs, as before).
 - **How it came up** (Vercel's and Render's deploy steps): each head's timeline is on the
   preview's record (`timeline`: when converging it started, and when each step first finished:
   `data`, its branches made or kept and masked; `setup`, seed, release and schema read; `deploy`,
