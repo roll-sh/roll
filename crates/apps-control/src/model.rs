@@ -661,6 +661,12 @@ pub struct Run {
     /// woken and spliced per connection; its HTTP names don't serve it.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub tcp: bool,
+    /// Its port speaks UDP (Fly's UDP services: a game server, DNS, WebRTC's media, QUIC of its
+    /// own): each environment answers on a UDP port of its own from the node's range
+    /// (`ROLL_APPS_UDP_PORTS`, one node), each client's datagrams relayed to an instance and back,
+    /// the first one waking it; its HTTP names don't serve it.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub udp: bool,
     /// A deployment that falls into a crash loop within ten minutes of going live is replaced
     /// by the one before it (its image, no build): a gradual rollout's error rollback for an
     /// at-once deploy. Never a rollback's own: no two in a row.
@@ -1252,6 +1258,7 @@ impl Default for Run {
             restart_tries: None,
             affinity: false,
             tcp: false,
+            udp: false,
             rollback_on_crash: false,
             rebuild_on_base: false,
             skew_protection: false,
@@ -1523,6 +1530,14 @@ impl Run {
                 return bad("a TCP service has no HTTP: no health_path, h2c, affinity or gradual rollout (its health is its port accepting)");
             }
         }
+        if self.udp {
+            if self.kind != RunType::Web || self.tcp {
+                return bad("udp is for a service with a port (type web), not a TCP one");
+            }
+            if self.health_path.is_some() || self.health_grpc.is_some() || self.h2c || self.affinity || !self.rollout.steps.is_empty() || !self.sidecars.is_empty() {
+                return bad("a UDP service has no HTTP: no health_path, health_grpc, h2c, affinity, gradual rollout or sidecars (it's up once it runs)");
+            }
+        }
         if self.restart != Restart::Always && self.kind != RunType::Worker {
             return bad("restart is for a worker (a web service starts on its requests, a cron run once)");
         }
@@ -1760,6 +1775,9 @@ pub struct Environment {
     pub port: Option<u16>,
     /// A TCP service's address (`host:port`), once it has its port.
     pub tcp: Option<String>,
+    /// A UDP service's address (`host:port`), once it has its port.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub udp: Option<String>,
     /// Visitors need the environment's access token (`PUT … {access: {token}}`), or to sign in.
     pub private: bool,
     /// People signed in to roll who may open the project get in (`access.signed_in`).
@@ -2972,10 +2990,10 @@ pub enum LinkKind {
 }
 
 impl LinkKind {
-    /// Whether an environment with data of its own (`data: "branch"`) gets a branch of it:
-    /// a database's, roll Postgres' and Redis' (each kind's product branches it).
+    /// Whether an environment with data of its own (`data: "branch"`) gets a branch of it (the
+    /// kinds roll previews branches). Another (search) is left out of such an environment.
     pub fn branches(self) -> bool {
-        matches!(self, LinkKind::Postgres | LinkKind::Redis)
+        matches!(self, LinkKind::Postgres | LinkKind::Redis | LinkKind::Nosql | LinkKind::Bucket | LinkKind::Stream | LinkKind::Queue)
     }
 
     pub const ALL: [LinkKind; 8] = [LinkKind::Postgres, LinkKind::Redis, LinkKind::Bucket, LinkKind::Stream, LinkKind::Queue, LinkKind::Nosql, LinkKind::Search, LinkKind::Service];

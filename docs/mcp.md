@@ -212,7 +212,8 @@ without Docker. It skips itself when nothing changed (`--force`; `--reads` skips
 ### Lockdown
 
 `/v1/mcp?lockdown=1` (or `X-MCP-Lockdown: true`) works like GitHub's MCP server's lockdown mode:
-text written by someone who can't push to the repo never reaches the model.
+text written by someone who can't push to the repo never reaches the model. roll code's own server
+takes the same switch (`/v1/code/mcp?lockdown=1`, docs/code/mcp.md); both use `roll_auth::lockdown`.
 
 The risk it covers: anyone can open an issue on a public GitHub repo, and roll code makes the
 issue a work item that an agent claims and reads. An instruction hidden in the issue would be read
@@ -1105,10 +1106,11 @@ previews are listed once those products are on.
 Ranked; the top item is in progress. A watchdog reads this list. Unblocked work comes first; what
 waits on a sibling PR reaching main is last.
 
-1. **The sweep starts rolld on port 0 (this PR).** It picked 46 free loopback ports and let go of
-   them before rolld bound them, so another build could take one meanwhile and rolld exited
-   ("rolld exited" now and then). Every listener now binds port 0 and the sweep reads the API's
-   address from `--addr-file` (#596); only apps' per-environment range (21 ports) is still picked.
+1. **Invisible text on roll code's own MCP server (this PR).** roll's `/v1/mcp` writes characters a
+   person can't see and a model reads (ASCII smuggled as tag characters, zero-width and bidi
+   controls) as escapes in every text block; `/v1/code/mcp` didn't, so a review comment or a file
+   could hide an instruction from the person and not from the agent. `visible` moved to
+   `roll_auth::lockdown` beside `withhold`, and both servers use it.
 2. **Decision for the user: a sandboxed "code mode"** (Cloudflare's Code Mode, Anthropic's code
    execution with MCP). A model writes a short script against typed tool functions; roll runs it
    and each call still goes through the gate and the audit log as if made one by one. It cuts
@@ -1140,10 +1142,12 @@ waits on a sibling PR reaching main is last.
    owners (they fail only under load and pass alone): code-control's
    `automations::concurrency_cancel_and_retry` and
    `agents_code::roll_code_projects_with_auto_pull_follow_their_default_branch`.
-   Not doing: "remember this browser"; a preset that reveals development's values without asking
+   Not doing: dynamic toolsets (GitHub's: the model turns toolsets on mid-session), since 2026-07-28 is
+   stateless and search mode (`?tools=search`) covers clients that can't take the list; "remember this browser"; a preset that reveals development's values without asking
    (#354); a connection-level `?project=` (only a token's rules bound a project; a default that
    some tools can't honour would look like a boundary).
-6. **Landed 2026-11-21:** the sweep as a member (#647: a viewer signed in by email code calls every
+6. **Landed 2026-11-21:** lockdown on roll code's own MCP server (#650: `/v1/code/mcp?lockdown=1`,
+   `roll_auth::lockdown` shared with `/v1/mcp`); the sweep's rolld on port 0 with `--addr-file` (#648, after #596); the sweep as a member (#647: a viewer signed in by email code calls every
    member-product read their client lists, none refused by their role; first run 197 listed, 75
    called) and `secrets_list_recoverable` (#585's deleted projects; recovering stays a person's); a member's MCP client reaches what their role does (#644: previews in
    `USER_REACH`, held to the gate's rules by rolld's `auth::tests`; `tools/list` within a member's

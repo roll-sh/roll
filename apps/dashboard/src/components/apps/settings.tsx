@@ -103,6 +103,7 @@ interface Form {
   restartTries: string;
   affinity: boolean;
   tcp: boolean;
+  udp: boolean;
   rollbackOnCrash: boolean;
   rebuildOnBase: boolean;
   skewProtection: boolean;
@@ -215,6 +216,7 @@ export function formOf(s: Service): Form {
     restartTries: str(s.run.restart_tries),
     affinity: !!s.run.affinity,
     tcp: !!s.run.tcp,
+    udp: !!s.run.udp,
     rollbackOnCrash: !!s.run.rollback_on_crash,
     rebuildOnBase: !!s.run.rebuild_on_base,
     skewProtection: !!s.run.skew_protection,
@@ -342,6 +344,7 @@ export function patchOf(s: Service, f: Form): ServicePatch {
   if (f.public !== before.public) run.public = f.public ? null : false;
   if (f.affinity !== before.affinity) run.affinity = f.affinity ? true : null;
   if (f.tcp !== before.tcp) run.tcp = f.tcp ? true : null;
+  if (f.udp !== before.udp) run.udp = f.udp ? true : null;
   if (f.rollbackOnCrash !== before.rollbackOnCrash) run.rollback_on_crash = f.rollbackOnCrash ? true : null;
   if (f.rebuildOnBase !== before.rebuildOnBase) run.rebuild_on_base = f.rebuildOnBase ? true : null;
   if (f.skewProtection !== before.skewProtection) run.skew_protection = f.skewProtection ? true : null;
@@ -950,10 +953,18 @@ export function SettingsTab({
                   {t("healthGrpcService", "acme.Orders")}
                 </Field>
               )}
-              <Field label="HTTP or TCP" hint="TCP: a port of its own per environment, no HTTP names (a game server, MQTT)">
-                <select value={form.tcp ? "tcp" : "http"} onChange={(e) => set("tcp", e.target.value === "tcp")} className={`${input} w-full`}>
+              <Field label="HTTP, TCP or UDP" hint="TCP or UDP: a port of its own per environment, no HTTP names (a game server, MQTT, DNS)">
+                <select
+                  value={form.udp ? "udp" : form.tcp ? "tcp" : "http"}
+                  onChange={(e) => {
+                    set("tcp", e.target.value === "tcp");
+                    set("udp", e.target.value === "udp");
+                  }}
+                  className={`${input} w-full`}
+                >
                   <option value="http">HTTP</option>
                   <option value="tcp">TCP</option>
+                  <option value="udp">UDP</option>
                 </select>
               </Field>
               <Field label="Session affinity" hint="each visitor stays on one instance while it's up (a cookie)">
