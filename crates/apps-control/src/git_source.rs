@@ -197,6 +197,19 @@ pub async fn materialize_with(r: &Remote<'_>, sha: &str, dir: &Path, submodules:
     materialize_at(r, sha, dir, submodules.then_some(2), &mut budget).await
 }
 
+/// A submodule's URL as `.gitmodules` has it, against its superproject's: relative ones as git
+/// reads them (the superproject's URL as a directory: `../lib.git` beside it).
+pub fn submodule_url(superproject: &str, raw: &str) -> anyhow::Result<url::Url> {
+    let base = url::Url::parse(&format!("{}/", superproject.trim_end_matches('/')))?;
+    Ok(base.join(raw.trim())?)
+}
+
+/// `materialize_at` for a submodule outside roll code under a roll code repo's tree (`levels`
+/// more below it), sharing the tree's budget.
+pub(crate) async fn materialize_sub(r: &Remote<'_>, sha: &str, dir: &Path, levels: u8, budget: &mut usize) -> anyhow::Result<usize> {
+    materialize_at(r, sha, dir, Some(levels), budget).await
+}
+
 /// The most submodules one tree brings in, every level counted.
 pub const MAX_SUBMODULES: usize = 32;
 /// What a tree's Git LFS objects add up to at most, and one at most.
@@ -272,9 +285,19 @@ pub async fn fetch_lfs(r: &Remote<'_>, dir: &Path) -> anyhow::Result<usize> {
 }
 
 /// A tree's LFS pointer files (regular files, never links): their path, sha256 and size.
+/// Submodules are left out: their objects are their own repositories' LFS servers', never the
+/// superproject's to answer.
 fn lfs_pointers(dir: &Path) -> anyhow::Result<Vec<(std::path::PathBuf, String, u64)>> {
+    let gm = dir.join(".gitmodules");
+    let subs: Vec<std::path::PathBuf> = match std::fs::symlink_metadata(&gm) {
+        Ok(m) if m.is_file() && m.len() <= 64 << 10 => gitmodules(&std::fs::read_to_string(&gm).unwrap_or_default()).into_iter().map(|(p, _)| dir.join(p)).collect(),
+        _ => Vec::new(),
+    };
     let (mut out, mut stack, mut seen) = (Vec::new(), vec![dir.to_path_buf()], 0usize);
     while let Some(d) = stack.pop() {
+        if subs.contains(&d) {
+            continue;
+        }
         for e in std::fs::read_dir(&d)? {
             let e = e?;
             seen += 1;
@@ -319,7 +342,7 @@ fn materialize_at<'a>(r: &'a Remote<'_>, sha: &'a str, dir: &'a Path, levels: Op
             anyhow::ensure!(*budget > 0, "more than {MAX_SUBMODULES} submodules");
             *budget -= 1;
             let Some(raw) = urls.iter().find(|(p, _)| *p == path).map(|(_, u)| u.as_str()) else { anyhow::bail!("submodule {path} isn't in .gitmodules") };
-            let url = base.join(raw.trim()).map_err(|e| anyhow::anyhow!("submodule {path}: {e}"))?.to_string();
+            let url = submodule_url(r.url, raw).map_err(|e| anyhow::anyhow!("submodule {path}: {e}"))?.to_string();
             check_url(&url, r.allow_private).map_err(|e| anyhow::anyhow!("submodule {path}: {}", e.trim_start_matches("source.url: ")))?;
             let same_host = url::Url::parse(&url).ok().and_then(|u| u.host_str().map(str::to_string)) == base.host_str().map(str::to_string);
             let login = r.auth.as_ref().filter(|_| same_host).map(|c| (c.username.clone(), c.password.clone()));
@@ -334,7 +357,7 @@ fn materialize_at<'a>(r: &'a Remote<'_>, sha: &'a str, dir: &'a Path, levels: Op
 }
 
 /// `.gitmodules`' `path` and `url` of each `[submodule "…"]`.
-fn gitmodules(text: &str) -> Vec<(String, String)> {
+pub(crate) fn gitmodules(text: &str) -> Vec<(String, String)> {
     let mut out = Vec::new();
     let (mut path, mut url) = (None::<String>, None::<String>);
     let mut flush = |path: &mut Option<String>, url: &mut Option<String>| {

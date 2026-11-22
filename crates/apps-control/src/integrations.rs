@@ -50,6 +50,18 @@ pub trait Sources: Send + Sync {
     async fn landings(&self, after: i64, limit: usize) -> anyhow::Result<Vec<Landing>>;
     /// The newest landing's sequence number.
     async fn head(&self) -> anyhow::Result<i64>;
+    /// The commit the gitlink at `path` pins (a submodule), or `None` when something else is there.
+    async fn gitlink(&self, _repo: &str, _revision: &str, _path: &str) -> anyhow::Result<Option<String>> {
+        Ok(None)
+    }
+    /// roll code's own Git address (`https://roll.sh`): a submodule URL on it is one of its repos.
+    fn git_base(&self) -> Option<String> {
+        None
+    }
+    /// Whether anyone can read `repo` (a public repo); a missing one isn't.
+    async fn public(&self, _repo: &str) -> anyhow::Result<bool> {
+        Ok(false)
+    }
     /// A file at `revision` (at most 64 KiB; a larger one or a symlink is `None`).
     async fn read_file(&self, _repo: &str, _revision: &str, _path: &str) -> anyhow::Result<Option<Vec<u8>>> {
         Ok(None)
@@ -116,23 +128,28 @@ pub trait SecretSource: Send + Sync {
     /// [`SecretSource::resolve`] gives them. `maker`: who closed the environment (its placeholders
     /// swap only while they may reveal there; none, the project's owner). When they can't, the
     /// keys bound to hosts are withheld and `notice` says so.
-    async fn resolve_closed(&self, project: &str, env: &str, service: &str, _maker: Option<&str>) -> anyhow::Result<ClosedSecrets> {
+    /// `mint`: placeholders made for instances (a deploy); else (a listing, a staleness check) a
+    /// key bound to hosts comes as a marker with its binding, and nothing is made or read.
+    async fn resolve_closed(&self, project: &str, env: &str, service: &str, _maker: Option<&str>, _mint: bool) -> anyhow::Result<ClosedSecrets> {
         Ok(ClosedSecrets { vars: self.resolve(project, env, service).await?, notice: None })
     }
     /// A closed environment's interception, when its secrets have placeholders: the CA its
     /// instances trust and the step its egress proxy runs for a host the keys are bound to. One
     /// a project environment (the consumer `apps:<project>/<env>`), the same one while it stands.
-    async fn intercept(&self, _project: &str, _env: &str) -> anyhow::Result<Option<Intercept>> {
+    /// `hosts`: what its placeholders are bound to now (a CA that names fewer is made again).
+    async fn intercept(&self, _project: &str, _env: &str, _hosts: &[String]) -> anyhow::Result<Option<Intercept>> {
         Ok(None)
     }
     /// The project environment's placeholders and interception ended (it's deleted or opened).
     async fn end_intercept(&self, _project: &str, _env: &str) -> anyhow::Result<()> {
         Ok(())
     }
-    /// Whether `who` may see the project's secrets in `env` in the clear, by roll secrets' own
-    /// rules (protected environments, a token's scope): `…/variables/values` answers them only
-    /// then. No: the safe default.
-    async fn may_reveal(&self, _who: Asker<'_>, _project: &str, _env: &str) -> bool {
+    /// Whether `who` may see what `ask` names of `service`'s variables from roll secrets in `env`
+    /// in the clear: each key resolves for them read as roll secrets' own reveal would read it
+    /// (the environment's base, imports and references only as far as they may reveal; a token's
+    /// scope; protected environments), and so does each `roll://` reference. `…/variables/values`,
+    /// a shell and a job's output answer only then, never in part. No: the safe default.
+    async fn may_reveal(&self, _who: Asker<'_>, _project: &str, _env: &str, _service: &str, _ask: Reveal<'_>) -> bool {
         false
     }
     /// What the project's secrets in `env` are, as a digest with no value in it (roll secrets'
@@ -365,6 +382,9 @@ pub struct SecretVar {
     /// A link field roll secrets says isn't a credential (`Values.plain`: a host, a port, a user,
     /// a database): logs may show it. Every other value from roll secrets is a secret.
     pub plain: bool,
+    /// A closed environment's placeholder: the hosts it's bound to (sorted, `,` between). What
+    /// decides whether a deployment is stale, never the placeholder's text (a new one each time).
+    pub binding: Option<String>,
 }
 
 /// Who asks for variables' values: what rolld's gate put on the request.
@@ -373,6 +393,17 @@ pub struct Asker<'a> {
     pub operator: bool,
     pub user: Option<&'a roll_auth::SignedIn>,
     pub grant: Option<&'a roll_auth::Grant>,
+}
+
+/// What a reveal would show of the variables roll secrets gave ([`SecretSource::may_reveal`]).
+#[derive(Clone, Copy, Default)]
+pub struct Reveal<'a> {
+    /// Keys of the environment's secrets (at its root, as the service reads them).
+    pub keys: &'a [String],
+    /// `roll://` references the service's own variables hold.
+    pub refs: &'a [String],
+    /// Sensitive values too: a shell or a job's output shows the container's environment.
+    pub sensitive: bool,
 }
 
 /// No project secrets (until roll secrets is on this node): services use their own variables.
@@ -404,6 +435,18 @@ pub trait Resources: Send + Sync {
     /// Revoke what [`Resources::link`] made (`kept`: what it said to keep, a key's id) when
     /// the link goes.
     async fn unlink(&self, _kind: LinkKind, _ref: &str, _kept: &str) -> anyhow::Result<()> {
+        Ok(())
+    }
+    /// A branch of the linked resource for one environment (`data: "branch"`; Railway's
+    /// environments' own databases), named `name` (apps' own, unguessable): its own copy of the
+    /// resource's data with credentials of its own (never the resource's own login), its
+    /// variables as the link's (`DATABASE_URL`…) and `kept` what [`Resources::unbranch`] deletes.
+    /// None: this kind has no branches.
+    async fn branch(&self, _kind: LinkKind, _ref: &str, _name: &str) -> anyhow::Result<Option<Minted>> {
+        Ok(None)
+    }
+    /// Delete what [`Resources::branch`] made, once no environment uses it.
+    async fn unbranch(&self, _kind: LinkKind, _ref: &str, _kept: &str) -> anyhow::Result<()> {
         Ok(())
     }
     /// How far `group` is behind on `stream` (messages, every partition): what a worker with

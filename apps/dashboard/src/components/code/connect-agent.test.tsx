@@ -98,6 +98,16 @@ describe("ConnectAgent and AccessTokens: a new token is shown once", () => {
     expect(secretCount()).toBe(0);
   });
 
+  it("lockdown goes in the URL, quoted for the shell, and in the JSON", async () => {
+    render(<OwnerTokens />);
+    await screen.findByText("ci");
+    const u = userEvent.setup();
+    await u.click(screen.getByRole("checkbox", { name: /Lockdown/ }));
+    expect(snippet()).toHaveTextContent(/roll '\S+\/v1\/code\/mcp\?lockdown=1'/);
+    await u.click(screen.getByRole("radio", { name: "JSON" }));
+    expect(snippet()).toHaveTextContent(/"url": "\S+\/v1\/code\/mcp\?lockdown=1"/);
+  });
+
   it("revoking one removes it from the list", async () => {
     api.revokeToken.mockResolvedValue(undefined);
     render(<OwnerTokens />);

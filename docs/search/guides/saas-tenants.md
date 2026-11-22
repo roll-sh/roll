@@ -74,9 +74,14 @@ A key that only searches a tenant's indices comes from the CLI (or `POST
 roll search keys create app-search tenant-acme-web --read-only --indices 'tenant-acme,tenant-acme-*' --expires-in 30d
 ```
 
-The CLI's `--access data --indices …` key can also write, but it can manage the cluster's index
-templates and pipelines too, which other tenants' indices use: keep the role descriptor above for a
-tenant that writes.
+A tenant that writes gets a `data` key on its indices instead. It can do anything to
+`tenant-acme` and `tenant-acme-*` (index, delete, change mappings and settings), and nothing to
+the cluster's index templates, ingest pipelines or lifecycle policies, which other tenants'
+indices use:
+
+```sh
+roll search keys create app-search tenant-acme --access data --indices 'tenant-acme,tenant-acme-*' --expires-in 30d
+```
 
 ## One shared index with filtered keys
 
@@ -114,11 +119,10 @@ Try it: with the new key, `{"query": {"match": {"title": "roadmap"}}}` on `docs`
 `acme-1`. To hide fields as well, add `"field_security": {"grant": ["title", "body"]}` next to the
 query.
 
-Keep these keys on your backend for now, and build the request body there rather than passing a
-body from the browser through. A fix is in progress for a bypass where a request's own
-`runtime_mappings` could shadow the field a document level security filter tests (`## Next`,
-Security, in [../README.md](../README.md)). Until it's on main, a client that can send arbitrary
-bodies with a filtered key could see other tenants' documents.
+The filter holds whatever body the client sends. A request's own `runtime_mappings` can't shadow
+a field the filter tests, because the filter is evaluated without them. For a key a web page ships,
+use a browser key with the same filter ([site-search.md](site-search.md), "Search from the
+browser"); it adds rate limits and refuses writes and expensive queries.
 
 ## Make keys from your backend
 

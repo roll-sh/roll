@@ -15,6 +15,7 @@ pub mod catalog;
 pub mod checkup;
 pub mod evaluate;
 pub mod leaks;
+pub mod members;
 pub mod oauth;
 pub mod rate;
 pub mod sinks;
@@ -301,7 +302,12 @@ impl Resolver for WorkspaceResolver {
     fn place(&self, project: &str, workspace_kind: &str, r#ref: &str) -> Result<()> {
         let kind = roll_workspace::Kind::parse(workspace_kind).map_err(|e| Error::BadRequest(e.to_string()))?;
         // Grants are the operator's: they act on every owner's projects.
-        self.0.place(roll_workspace::Scope::All, project, kind, r#ref, 0.0, 0.0).map(|_| ()).map_err(|e| Error::BadRequest(e.to_string()))
+        self.0.place(roll_workspace::Scope::All, project, kind, r#ref, 0.0, 0.0).map_err(|e| Error::BadRequest(e.to_string()))?;
+        // Made through the project: it's the resource's home (D6), unless it has one.
+        if roll_auth::roles::decisions::HOMES {
+            self.0.set_home(&roll_workspace::Actor::operator(), project, kind, r#ref, true).map_err(|e| Error::BadRequest(e.to_string()))?;
+        }
+        Ok(())
     }
 }
 
@@ -312,7 +318,19 @@ pub struct Resolvers {
     pub workspace: Option<Arc<dyn Resolver>>,
     /// Per product: what an environment named in a path is (`Resolver::environment`).
     pub environments: HashMap<&'static str, Arc<dyn Resolver>>,
+    /// Per product: whether a resource's environment is protected (`Resource::protected`, for
+    /// rules limited to unprotected ones).
+    pub protected: HashMap<&'static str, ProtectedFn>,
+    /// Per product: the workspace project a resource is in, for a product that keeps it itself
+    /// rather than on the canvas (previews: a preview's project).
+    pub projects: HashMap<&'static str, ProjectFn>,
 }
+
+/// The workspace project `product`'s resource `id` is in (`None`: not known, or gone).
+pub type ProjectFn = Arc<dyn Fn(&str) -> Option<String> + Send + Sync>;
+
+/// Whether environment `env` of resource `id` is protected (`None`: not known).
+pub type ProtectedFn = Arc<dyn Fn(&str, &str) -> Option<bool> + Send + Sync>;
 
 impl Resolvers {
     pub fn resolve(&self, kind: &str, id: &str) -> Option<Resolved> {
@@ -333,6 +351,23 @@ impl Resolvers {
     /// see (`"preview"` for a preview's own), or `None` to keep the name.
     pub fn environment_fn(&mut self, product: &'static str, f: impl Fn(&str, &str) -> Option<String> + Send + Sync + 'static) {
         self.environments.insert(product, Arc::new(Fns { id: None, env: Some(Box::new(f)) }));
+    }
+
+    /// Register whether `product`'s environments are protected: `f(id, env)`.
+    pub fn protected_fn(&mut self, product: &'static str, f: impl Fn(&str, &str) -> Option<bool> + Send + Sync + 'static) {
+        self.protected.insert(product, Arc::new(f));
+    }
+
+    /// Register the project `product`'s resources are in, for a product that keeps it itself:
+    /// `f(id)`. A rule naming the project then matches them (a member's role, a token confined to
+    /// the project).
+    pub fn project_fn(&mut self, product: &'static str, f: impl Fn(&str) -> Option<String> + Send + Sync + 'static) {
+        self.projects.insert(product, Arc::new(f));
+    }
+
+    /// Whether `env` of `product`'s resource `id` is protected, as the product says now.
+    pub fn protected(&self, product: &str, id: &str, env: &str) -> Option<bool> {
+        self.protected.get(product).and_then(|f| f(id, env))
     }
 
     /// `env` (named in a path) of `product`'s resource `id`, as rules see it.
@@ -515,6 +550,9 @@ pub struct Access {
     pub sinks: std::sync::OnceLock<Arc<dyn sinks::SinkTransport>>,
     /// Users as they are now, for their own tokens (rolld: roll-accounts' sessions).
     pub people: std::sync::OnceLock<Arc<dyn roll_auth::Sessions>>,
+    /// The workspace: people's memberships, for their sessions' grants (docs/members.md), and what
+    /// is a person's own to place on a canvas.
+    pub workspace: std::sync::OnceLock<Arc<roll_workspace::Workspace>>,
     /// What this node mailed lately (`tell`'s limits).
     pub(crate) mail_gate: std::sync::Mutex<MailGate>,
     /// GitHub's secret scanning keys, cached.
@@ -537,8 +575,9 @@ pub struct Access {
 }
 
 /// What a user who isn't an admin reaches, and so what their tokens can (docs/accounts.md, "What a
-/// session can reach").
-pub const USER_REACH: [&str; 4] = ["code", "agents", "workspace", "search"];
+/// session can reach"): roll code and agents through their own owners, and every product whose
+/// routes rolld's gate lets a person's session call (rolld's `auth::tests` holds the two together).
+pub const USER_REACH: [&str; 6] = ["code", "agents", "workspace", "search", "secrets", "previews"];
 
 impl Access {
     pub fn open(target: &code_sql::Target, pg: code_sql::PgOptions, config: Config, resolvers: Resolvers) -> Result<Arc<Access>> {
@@ -551,7 +590,7 @@ impl Access {
 
     /// On a database already open (tests: `code_sql::Db::open_or_test`, so they run on Postgres too).
     pub fn with_db(db: code_sql::Db, config: Config, resolvers: Resolvers) -> Result<Arc<Access>> {
-        Ok(Arc::new(Access { store: Store::new(db)?, config, resolvers, chat: Default::default(), nodes: Default::default(), revokers: Default::default(), decoy_hooks: Default::default(), limiter: Default::default(), sinks: Default::default(), people: Default::default(), mail_gate: Default::default(), github_keys: Default::default(), registrations: Default::default(), oidc_fetch: Default::default(), oidc_keys: Default::default(), sign_ins: Default::default(), device_starts: Default::default(), device_guesses: Default::default(), policy_cache: Default::default() }))
+        Ok(Arc::new(Access { store: Store::new(db)?, config, resolvers, chat: Default::default(), nodes: Default::default(), revokers: Default::default(), decoy_hooks: Default::default(), limiter: Default::default(), sinks: Default::default(), people: Default::default(), workspace: Default::default(), mail_gate: Default::default(), github_keys: Default::default(), registrations: Default::default(), oidc_fetch: Default::default(), oidc_keys: Default::default(), sign_ins: Default::default(), device_starts: Default::default(), device_guesses: Default::default(), policy_cache: Default::default() }))
     }
 
     /// The resource of `kind` named `id`, with its project and environment filled in.
@@ -567,7 +606,13 @@ impl Access {
         let id = resolved.as_ref().map_or_else(|| id.to_string(), |r| r.id.clone());
         // A workspace project (kind `project`) is in itself, and so is what a product keeps per
         // workspace project (secrets' environments, previews' settings): their routes name it.
-        let mut projects = if kind == "project" { vec![id.clone()] } else { catalog::workspace_kind(product).map(|wk| self.resolvers.projects_of(wk, &id)).unwrap_or_default() };
+        let mut projects = if kind == "project" {
+            vec![id.clone()]
+        } else if let Some(f) = self.resolvers.projects.get(product) {
+            f(&id).into_iter().collect()
+        } else {
+            catalog::workspace_kind(product).map(|wk| self.resolvers.projects_of(wk, &id)).unwrap_or_default()
+        };
         let project = (!projects.is_empty()).then(|| projects.remove(0));
         Resource { product: product.into(), id: Some(id), project, also_in: projects, environment: resolved.and_then(|r| r.environment), ..Default::default() }
     }
@@ -1171,6 +1216,53 @@ pub struct Policy {
     /// request is a gate it must pass.
     #[serde(default)]
     pub approval_rules: Vec<ApprovalRule>,
+    /// What an agent asks a person for first, whatever its token allows: requests made through
+    /// roll's MCP server that one of these covers (Stripe asks before refunds and money movement
+    /// whatever the key may do). CI and scripts calling the API aren't agents here.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub agents_ask: Vec<AskRule>,
+    /// Every MCP connection made with a token or OAuth is in lockdown (`?lockdown=1`, whatever the
+    /// client asks): what people who can't push wrote never reaches the model.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub mcp_lockdown: bool,
+    /// Every MCP connection made with a token or OAuth sees and runs only tools that read
+    /// (`?readonly=1`, whatever the client asks).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub mcp_read_only: bool,
+}
+
+/// One of the policy's `agents_ask`: a product (or `*`), its actions (all when left out) and
+/// environments (`prod*`; all when left out). A request about no one environment is covered.
+#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AskRule {
+    pub product: String,
+    #[serde(default, skip_serializing_if = "no_actions")]
+    pub actions: Actions,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub environments: Option<Vec<String>>,
+}
+
+impl AskRule {
+    /// Whether it covers a request: this product, action and environment.
+    pub fn covers(&self, product: &str, action: Action, environment: Option<&str>) -> bool {
+        (self.product == "*" || self.product == product)
+            && (self.actions.is_empty() || self.actions.has(action))
+            && match (&self.environments, environment) {
+                (Some(list), Some(env)) => list.iter().any(|p| roll_auth::scope::env_covers(p, env)),
+                _ => true,
+            }
+    }
+
+    fn problems(&self, at: &str) -> Option<String> {
+        if self.product != "*" && !roll_auth::scope::PRODUCTS.contains(&self.product.as_str()) {
+            Some(format!("{at}: no product {:?}", self.product))
+        } else if self.environments.as_ref().is_some_and(|l| l.is_empty() || l.len() > 20 || l.iter().any(|s| s.trim().is_empty() || s.len() > 100)) {
+            Some(format!("{at}: environments are 1 to 20 names (or left out)"))
+        } else {
+            None
+        }
+    }
 }
 
 /// A rule of the policy's `approval_rules`, as roll secrets' protected environments name theirs:
@@ -1289,15 +1381,24 @@ impl Policy {
         if self.max_days == Some(0) || self.max_idle_days == Some(0) {
             return Some("max_days and max_idle_days are at least 1 (or null for no limit)".into());
         }
-        if self.approval_rules.len() > 50 {
-            return Some("at most 50 approval rules".into());
+        if self.approval_rules.len() > 50 || self.agents_ask.len() > 50 {
+            return Some("at most 50 approval rules and 50 agent rules".into());
         }
-        self.approval_rules.iter().enumerate().find_map(|(i, r)| r.problems(&format!("approval_rules[{i}]")))
+        self.approval_rules
+            .iter()
+            .enumerate()
+            .find_map(|(i, r)| r.problems(&format!("approval_rules[{i}]")))
+            .or_else(|| self.agents_ask.iter().enumerate().find_map(|(i, r)| r.problems(&format!("agents_ask[{i}]"))))
     }
 
     /// The approval rules covering a request: each is a gate its approvers must pass.
     pub fn gates(&self, a: &store::Approval) -> Vec<ApprovalRule> {
         self.approval_rules.iter().filter(|r| r.covers(a)).cloned().collect()
+    }
+
+    /// Whether an agent's request about this product, action and environment asks a person first.
+    pub fn agent_asks(&self, product: &str, action: Action, environment: Option<&str>) -> bool {
+        self.agents_ask.iter().any(|r| r.covers(product, action, environment))
     }
 
     /// Whether a person's token with these rules waits for an admin.
@@ -1365,6 +1466,17 @@ impl roll_auth::Grants for Access {
             people.person_now(user).ok()??;
         }
         g.usable(code_sql::now_ms()).then(|| roll_auth::Grant { id: g.id.as_str().into(), name: g.name.as_str().into(), kind: g.kind(), scope: Arc::new(g.effective_rules(code_sql::now_ms(), |r| self.policy_now().asks_again(r))), user: g.user.as_deref().map(Into::into), ask_otherwise: g.ask_otherwise })
+    }
+
+    /// A person's session grant now (their memberships), for what they made that acts later:
+    /// `None` once they can't sign in. Blocking; never cached.
+    fn owner(&self, id: &str) -> Option<Option<String>> {
+        self.store.get(id).ok().map(|g| g.user)
+    }
+
+    fn session(&self, user: &str) -> Option<roll_auth::Grant> {
+        self.people.get()?.person_now(user).ok()??;
+        self.session_grant(user, None).ok()
     }
 }
 

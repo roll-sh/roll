@@ -96,6 +96,9 @@ pub struct ClusterConfig {
     /// attributes) or `node.processors`. They show in node info, `_cat/nodeattrs` and the
     /// cluster settings defaults as on Elasticsearch.
     pub node_settings: Vec<(String, String)>,
+    /// Node settings the host changes while the cluster runs (roll's per-cluster `http.cors.*`),
+    /// shown after [`ClusterConfig::node_settings`] wherever those are.
+    pub http_settings: std::sync::Arc<parking_lot::RwLock<Vec<(String, String)>>>,
     /// Publish Elasticsearch's test cluster features too (`-Dtests.testfeatures.enabled`, as
     /// the clusters the YAML REST suites run against do).
     pub test_features: bool,
@@ -112,6 +115,9 @@ pub struct ClusterConfig {
     /// Reaches the roll search clusters this one names as remotes ([`crate::remote::links`]);
     /// `None`: remotes reach only the node itself.
     pub links: Option<std::sync::Arc<dyn crate::remote::links::Links>>,
+    /// Charges browser keys' `_msearch` and `_mget` items to their rate limits
+    /// ([`crate::xpack::security::browser::charge_items`]); `None`: not charged.
+    pub item_charge: Option<std::sync::Arc<dyn crate::xpack::security::browser::ItemCharge>>,
     /// The cluster's id in roll's catalog (`srch_…`), when it has one: how it names itself to
     /// `links` and to [`Self::secret_refs`] (a name can be reused after a delete).
     pub catalog_id: Option<String>,
@@ -131,6 +137,10 @@ pub struct ClusterConfig {
     /// Resolves credentials given as references (`roll://ENV/KEY`, [`crate::secret_refs`]);
     /// `None`: references are refused.
     pub secret_refs: Option<crate::secret_refs::Resolver>,
+    /// What reindex from remote may use on the node, shared by every cluster it serves
+    /// ([`crate::api::remote::RemoteNode`]); `None`: the cluster gets limits of its own, from
+    /// its node settings.
+    pub reindex_node: Option<Arc<crate::api::remote::RemoteNode>>,
 }
 
 impl ClusterConfig {
@@ -141,17 +151,28 @@ impl ClusterConfig {
             node_name: name.to_string(),
             destructive_requires_name: true,
             node_settings: Vec::new(),
+            http_settings: Default::default(),
             test_features: false,
             host_metrics: false,
             sealer: None,
             default_repository: None,
             links: None,
+            item_charge: None,
             catalog_id: None,
             branch_of: None,
             file_service_tokens: false,
             audit: None,
             secret_refs: None,
+            reindex_node: None,
         }
+    }
+
+    /// The node settings as shown now: [`ClusterConfig::node_settings`], then
+    /// [`ClusterConfig::http_settings`].
+    pub fn shown_node_settings(&self) -> Vec<(String, String)> {
+        let mut all = self.node_settings.clone();
+        all.extend(self.http_settings.read().iter().cloned());
+        all
     }
 
     /// A node setting's value.
@@ -196,6 +217,13 @@ pub struct Cluster {
     pub xpack: crate::xpack::Runtime,
     /// The circuit breakers (`indices.breaker.*`).
     pub breakers: crate::breaker::Breakers,
+    /// The node's reindex from remote limits ([`ClusterConfig::reindex_node`]).
+    pub remote: Arc<crate::api::remote::RemoteNode>,
+    /// This cluster's running reindex from remote tasks (counted against `remote`).
+    pub remote_running: Arc<std::sync::atomic::AtomicUsize>,
+    /// The cluster's own `reindex.remote.whitelist` (roll's API sets it, as Elastic Cloud's user
+    /// settings set it); `None`: the node setting's.
+    pub reindex_whitelist: RwLock<Option<Vec<String>>>,
     /// The request thread pools (`search`, `write`, `get`, `analyze`): admission and stats.
     pub thread_pools: crate::thread_pool::ThreadPools,
     /// Shard contents of the snapshots this process took.
@@ -565,6 +593,7 @@ impl Cluster {
         crate::api::snapshots::install_default_repository(&mut state.metadata, config.default_repository.as_deref());
         let (changes, _) = tokio::sync::watch::channel(state.version);
         let thread_pools = crate::thread_pool::ThreadPools::new(&config);
+        let remote_node = config.reindex_node.clone().unwrap_or_else(|| crate::api::remote::RemoteNode::from_settings(&config.node_settings));
         // Runtime-field grok runs inside Painless, which reads the static node setting from here.
         if config.node_setting("runtime_fields.grok.watchdog.max_execution_time").is_some() {
             let ms = config
@@ -605,6 +634,9 @@ impl Cluster {
             ingest: Default::default(),
             xpack: Default::default(),
             breakers: Default::default(),
+            remote: remote_node,
+            remote_running: Default::default(),
+            reindex_whitelist: RwLock::new(None),
             thread_pools,
             snapshot_data: Default::default(),
             ccs: Default::default(),

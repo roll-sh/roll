@@ -1,5 +1,5 @@
 import { HorizonMark } from "@roll/brand";
-import { ArrowLeft, FileUp, GitBranch, KeyRound, Moon, Plus, RefreshCw, Trash2 } from "lucide-react";
+import { ArrowLeft, CloudDownload, FileUp, GitBranch, KeyRound, Moon, Plus, RefreshCw, Trash2 } from "lucide-react";
 import { Link } from "@/components/link";
 import { useNavigate } from "@tanstack/react-router";
 import { useCallback, useEffect, useState } from "react";
@@ -24,10 +24,12 @@ import { ago, btn, Confirm, Connecting, CopyButton, EmptyPanel, ErrorNote, input
 import { AnalyzeTab } from "./analyze";
 import { DataStreams } from "./data-streams";
 import { ImportPanel } from "./import";
+import { MigratePanel } from "./migrate";
 import { NewIndexPanel } from "./new-index";
 import { Templates } from "./templates";
 import { InferenceTab } from "./inference";
 import { ApiKeys } from "./api-keys";
+import { BrowserSearch } from "./browser";
 import { AuditLog } from "./audit-log";
 import { SearchConsole } from "./console";
 import { IndexBrowser } from "./index-browser";
@@ -492,6 +494,7 @@ function IndicesTab({ cluster, onOpenConsole }: { cluster: SearchCluster; onOpen
   const [loading, setLoading] = useState(false);
   const [importing, setImporting] = useState(false);
   const [creating, setCreating] = useState(false);
+  const [migrating, setMigrating] = useState(false);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -524,6 +527,9 @@ function IndicesTab({ cluster, onOpenConsole }: { cluster: SearchCluster; onOpen
             <button onClick={() => setImporting(true)} disabled={importing} className={btn} title="Index a JSON, NDJSON or CSV file" aria-label="Import">
               <FileUp className="size-3.5" /> <span className="hidden sm:inline">Import</span>
             </button>
+            <button onClick={() => setMigrating(true)} disabled={migrating} className={btn} title="Migrate from Elasticsearch / OpenSearch" aria-label="Migrate from Elasticsearch / OpenSearch">
+              <CloudDownload className="size-3.5" /> <span className="hidden sm:inline">Migrate</span>
+            </button>
             <button onClick={load} disabled={loading} className={btn}>
               <RefreshCw className={`size-3.5 ${loading ? "animate-spin motion-reduce:animate-none" : ""}`} /> Refresh
             </button>
@@ -540,6 +546,10 @@ function IndicesTab({ cluster, onOpenConsole }: { cluster: SearchCluster; onOpen
             No indices yet.{" "}
             <button onClick={() => setImporting(true)} className="text-accent hover:underline">
               Import a file
+            </button>
+            ,{" "}
+            <button onClick={() => setMigrating(true)} className="text-accent hover:underline">
+              migrate from Elasticsearch or OpenSearch
             </button>
             ,{" "}
             <button onClick={() => setCreating(true)} className="text-accent hover:underline">
@@ -624,6 +634,7 @@ function IndicesTab({ cluster, onOpenConsole }: { cluster: SearchCluster; onOpen
           }}
         />
       )}
+      {migrating && <MigratePanel cluster={cluster} existing={rows?.map((r) => r.index) ?? []} onClose={() => setMigrating(false)} onChanged={load} />}
       {importing && (
         <ImportPanel
           cluster={cluster}
@@ -1035,6 +1046,8 @@ function SettingsTab({
       </Panel>
 
       <AllowedNetworks cluster={cluster} busy={busy} run={run} />
+
+      <BrowserSearch cluster={cluster} busy={busy} run={run} />
 
       <ApiKeys cluster={cluster} />
 

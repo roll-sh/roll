@@ -951,15 +951,25 @@ impl Apps {
         if let Ok(stored) = self.db(move |s| s.deployment(&did)).await {
             dep.plan = stored.plan;
         }
+        // An environment with data of its own: a branch of each database linked since.
+        self.ensure_branches(&svc, &env.name).await.map_err(|e| anyhow::anyhow!("data: {e:#}"))?;
         // A static site: its files out of the image, so they're served without an instance.
         if dep.plan.as_ref().is_some_and(|p| p["start"] == apps_build::STATIC_START)
             && dep.run.kind == RunType::Web
             && dep.run.volume.is_none()
             && let Some(img) = dep.image.clone()
         {
-            match self.export_site(&img).await {
+            // Its files hold no secret value (Netlify's secrets scan): one that does fails the
+            // deploy (a container would serve the same file).
+            let r = self.checked_vars(&svc, &env, &dep.id).await?;
+            let secrets: Vec<(String, String)> = r.vars.iter().filter(|(k, _)| r.is_secret(k) && !r.placeholders.contains_key(k)).cloned().collect();
+            let checks_secrets = !secrets.is_empty();
+            match self.export_site_checked(&img, secrets).await {
                 Ok(Some(n)) => log.stream(Stream::System).line(format!("static site: {} KiB of files, served without an instance", n.div_ceil(1024))),
                 Ok(None) => {}
+                Err(e) if e.downcast_ref::<crate::sites::SecretInSite>().is_some() => return Err(e),
+                // Unchecked files aren't served either: a container would serve the same ones.
+                Err(e) if checks_secrets => anyhow::bail!("its files couldn't be checked for its secrets' values ({e:#}), so they aren't served: make the site smaller, or keep secret values out of its environment"),
                 Err(e) => log.stream(Stream::System).line(format!("static site: its files couldn't be exported ({e:#}); a container serves it")),
             }
         }
@@ -971,7 +981,7 @@ impl Apps {
         let (sid, e, did) = (svc.id.clone(), env.name.clone(), d.id.clone());
         let snapshot = self.db(move |s| s.seal_snapshot(&did, &sid, &e)).await?;
         let vars_hash = {
-            let r = self.resolve_vars(&svc, &env, &dep.id).await?;
+            let r = self.checked_vars(&svc, &env, &dep.id).await?;
             r.check_refs()?;
             fingerprint(&r.vars_for_hash(), &svc, &env.egress)
         };
@@ -1096,6 +1106,8 @@ impl Apps {
                 .db(move |s| s.switch_active(&Switch { service: &sid, env: &e, from: from.as_deref(), to: &to, ready_ms: ready, epoch, vars_hash: Some(&vh), snapshot: Some(&snap) }))
                 .await?;
             anyhow::ensure!(ok, "another deploy switched this environment meanwhile");
+            // Its tree's edge settings are the environment's gate's now.
+            live.forget_gate();
             // What the old deployment answered isn't this one's.
             self.responses.clear(&crate::env_key(&d.service, &d.environment));
             Ok(())
@@ -1120,7 +1132,20 @@ impl Apps {
                 log.stream(Stream::System).line("the new deployment takes every request");
             }
         }
+        // Its instances trust the next interception CA as well: its proxy moves to it now.
+        self.apply_intercept_pending(&svc.id, &env.name);
         Ok(())
+    }
+
+    /// A closed environment's next CA, kept until the instances that trust it were live: now
+    /// its proxy serves it.
+    pub(crate) fn apply_intercept_pending(&self, service: &str, env: &str) {
+        let key = crate::env_key(service, env);
+        let pending = self.intercept_pending.lock().remove(&key);
+        if let Some((network, next)) = pending {
+            self.deps.runtime.set_interception(&network, Some(next.interception.clone()));
+            self.intercept_cas.lock().insert(key, next);
+        }
     }
 
     /// A gradual rollout's steps (docs/apps/README.md, "Gradual rollouts"): each share of
@@ -1355,6 +1380,13 @@ impl Apps {
                 log.line(format!("checking out {repo} at {}", &rev[..rev.len().min(12)]));
                 let sources = self.deps.sources.as_ref().ok_or_else(|| anyhow::anyhow!("roll code isn't on this node"))?;
                 sources.materialize(repo, rev, &tree).await?;
+                if svc.build.submodules.unwrap_or(false) {
+                    let allowed = svc.build.submodule_repos.clone().unwrap_or_default();
+                    let n = crate::submodules::fetch(sources.as_ref(), repo, rev, &tree, &allowed, self.cfg.allow_private).await?;
+                    if n > 0 {
+                        log.line(format!("fetched {n} submodule(s)"));
+                    }
+                }
                 root.clone()
             }
             (Source::Git { url, root }, _) => {
@@ -1384,6 +1416,11 @@ impl Apps {
         let ephemeral = self.db(move |s| s.environment(&sid, &e)).await?.ephemeral;
         let scope = crate::config::EnvScope { name: &d.environment, ephemeral };
         let file = crate::config::read(&context).map_err(|e| anyhow::anyhow!("{e}"))?;
+        // Its edge settings (headers, firewall, rate limit), kept with the deployment: they're the
+        // gate's once it's live, and travel with its image to a promotion or a rollback.
+        let edge = file.as_ref().map(crate::model::EdgeFile::from_app).transpose().map_err(|e| anyhow::anyhow!("{e}"))?.flatten();
+        let id = d.id.clone();
+        self.db(move |s| s.set_deploy_edge(&id, edge.as_ref())).await?;
         let (mut build_cfg, mut run) = match &file {
             Some(app) => {
                 let (b, r, said) = app.apply(&svc.build, &svc.run, Some(scope)).map_err(|e| anyhow::anyhow!("{e}"))?;
@@ -1548,12 +1585,12 @@ impl Apps {
         }
         // vercel.json's crons: schedules that call their paths, unless the service already
         // calls that path (its own schedules win).
-        if run.kind == RunType::Web && !run.tcp {
+        if run.kind == RunType::Web && !run.tcp && !run.udp {
             for (i, c) in plan.crons.iter().enumerate() {
                 let name = format!("vercel-{}", i + 1);
                 if run.schedules.len() < 20 && !run.schedules.iter().any(|s| s.path.as_deref() == Some(c.path.as_str()) || s.name == name) {
                     log.line(format!("plan: vercel.json's cron {} calls {}", c.schedule, c.path));
-                    run.schedules.push(crate::model::Scheduled { name, schedule: c.schedule.clone(), command: String::new(), path: Some(c.path.clone()), timezone: None, timeout_s: None, auth: None });
+                    run.schedules.push(crate::model::Scheduled { name, schedule: c.schedule.clone(), command: String::new(), path: Some(c.path.clone()), timezone: None, timeout_s: None, auth: None, cpu: None, memory_mb: None });
                 }
             }
         }
@@ -1610,6 +1647,7 @@ impl Apps {
             target: svc.build.target.clone().filter(|_| plan.provider == apps_build::Provider::Dockerfile),
             layers,
             egress: build_egress,
+            priority: !ephemeral,
         };
         // The same inputs built before in this project (Railway's skipped builds): the same tree,
         // Dockerfile, target and build variables, and its image still kept. Never with `no_cache`.
@@ -1713,6 +1751,7 @@ impl Apps {
         }
         let network = if closed { closed_network_name(&svc.project, &env.name) } else { network_name(&svc.project, &env.name) };
         self.deps.runtime.ensure_network(&network, &svc.id, closed).await.map_err(|e| Error::Internal(e.to_string()))?;
+        let mut intercept_hosts = Vec::new();
         if closed && !env.egress.hosts.is_empty() {
             let proxy = self.deps.runtime.egress_proxy(&network, &svc.id, &env.egress.hosts).await.map_err(|e| Error::Internal(e.to_string()))?;
             let sid = svc.project.clone();
@@ -1725,16 +1764,33 @@ impl Apps {
             // Keys used without being seen (roll secrets' placeholders): its proxies swap them for
             // the hosts the keys are bound to, and its instances trust the interception CA (with
             // the host's roots, one file every runtime reads).
-            match self.deps.secrets.intercept(&svc.project, &env.name).await {
+            intercept_hosts = resolved.placeholders.values().flat_map(|b| b.split(',')).filter(|h| !h.is_empty()).map(str::to_string).collect::<std::collections::BTreeSet<_>>().into_iter().collect();
+            match self.deps.secrets.intercept(&svc.project, &env.name, &intercept_hosts).await {
                 Ok(Some(i)) => {
-                    self.deps.runtime.set_interception(&network, Some(i.interception.clone()));
-                    files.push((INTERCEPT_CA.to_string(), trust_bundle(&i.ca_pem)));
+                    let key = crate::env_key(&svc.id, &env.name);
+                    let next = Serving { digest: ca_digest(&i.ca_pem), pem: i.ca_pem.clone(), interception: i.interception.clone() };
+                    let serving = self.intercept_cas.lock().get(&key).cloned();
+                    // Instances that trust only the CA its proxy serves now still run: these trust
+                    // both, and the proxy moves to the new one once they're live (never before:
+                    // the running ones would fail). A CA that's ended has nothing to keep.
+                    let keep = serving.filter(|s| s.digest != next.digest && self.live(&svc.id, &env.name).awake() > 0 && s.interception.live().unwrap_or(false));
+                    match keep {
+                        Some(s) => {
+                            files.push((INTERCEPT_CA.to_string(), trust_bundle(&format!("{}\n{}", s.pem.trim(), next.pem.trim()))));
+                            self.intercept_pending.lock().insert(key, (network.clone(), next));
+                        }
+                        None => {
+                            files.push((INTERCEPT_CA.to_string(), trust_bundle(&next.pem)));
+                            self.deps.runtime.set_interception(&network, Some(next.interception.clone()));
+                            self.intercept_pending.lock().remove(&key);
+                            self.intercept_cas.lock().insert(key, next);
+                        }
+                    }
                     for k in ["NODE_EXTRA_CA_CERTS", "SSL_CERT_FILE", "REQUESTS_CA_BUNDLE", "CURL_CA_BUNDLE"] {
                         if !vars.iter().any(|(n, _)| n == k) {
                             vars.push((k.to_string(), INTERCEPT_CA.to_string()));
                         }
                     }
-                    self.intercept_cas.lock().insert(crate::env_key(&svc.id, &env.name), ca_digest(&i.ca_pem));
                 }
                 Ok(None) => self.deps.runtime.set_interception(&network, None),
                 Err(e) => {
@@ -1791,6 +1847,7 @@ impl Apps {
                 }
                 p
             },
+            udp: run.udp && run.kind == RunType::Web,
             cpu: run.cpu,
             memory_mb: run.memory_mb,
             network: Some(network),
@@ -1825,7 +1882,7 @@ impl Apps {
             None => Vec::new(),
         };
         let edge_service: String = format!("{}-fn", svc.name).chars().take(40).collect();
-        Ok(Template { deployment: dep.id.clone(), spec, run, spa, site, edge, edge_service })
+        Ok(Template { deployment: dep.id.clone(), spec, run, spa, site, edge, edge_service, intercept_hosts })
     }
 
     // ── the owner's background work ──
@@ -2117,6 +2174,14 @@ impl Apps {
                 firing.push(("alert.memory", serde_json::json!({ "value": value, "threshold": a.memory_pct, "limit_mb": limit_mb })));
             }
         }
+        // CPU: what its instances used of their `cpu` (CPU seconds a minute over instances × cpu × 60).
+        if a.cpu_pct > 0 && rows.len() >= 5 && tpl.run.cpu > 0.0 {
+            let share = |r: &crate::store::MinuteRow| r.cpu / (r.instances.max(1) as f64 * tpl.run.cpu * 60.0) * 100.0;
+            if rows.iter().all(|r| r.instances > 0 && share(r) >= a.cpu_pct as f64) {
+                let value = rows.iter().map(share).fold(0.0, f64::max).round();
+                firing.push(("alert.cpu", serde_json::json!({ "value": value, "threshold": a.cpu_pct, "cpu": tpl.run.cpu })));
+            }
+        }
         let (requests, errors): (i64, i64) = rows.iter().fold((0, 0), |(q, e), r| (q + r.requests, e + r.errors));
         if a.error_pct > 0 && requests >= 20 && errors * 100 >= a.error_pct as i64 * requests {
             firing.push(("alert.errors", serde_json::json!({ "value": (errors * 100 / requests), "threshold": a.error_pct, "requests": requests })));
@@ -2160,7 +2225,48 @@ impl Apps {
         {
             firing.push(("alert.slo", serde_json::json!({ "indicator": indicator, "burn_rate": (rate * 10.0).round() / 10.0, "window": window, "objective": slo.objective })));
         }
-        for kind in ["alert.memory", "alert.errors", "alert.latency", "alert.capacity", "alert.log", "alert.slo"] {
+        // The app's own gauges: each judgment that finds one past its threshold counts toward its
+        // run of minutes; one that doesn't (or finds nothing) starts it again.
+        let mut metric_firing: Vec<(String, serde_json::Value)> = Vec::new();
+        for m in &a.metrics {
+            let key = format!("{}/{}/{}/{}", l.service, l.env, m.name, m.sum);
+            let value = self.gauge(&l.service, &l.env, &m.name, m.sum).await.ok();
+            let run = {
+                let mut streaks = self.metric_streaks.lock();
+                let n = streaks.entry(key).or_default();
+                *n = if value.is_some_and(|v| m.breached(v)) { n.saturating_add(1) } else { 0 };
+                *n
+            };
+            if run >= m.minutes {
+                let (op, threshold) = match m.above {
+                    Some(t) => ("above", t),
+                    None => ("below", m.below.unwrap_or_default()),
+                };
+                let mut data = serde_json::json!({ "metric": m.name, "value": value, "minutes": m.minutes });
+                data[op] = serde_json::json!(threshold);
+                metric_firing.push((m.name.clone(), data));
+            }
+        }
+        for m in &a.metrics {
+            let key = format!("{}/{}/alert.metric:{}", l.service, l.env, m.name);
+            match metric_firing.iter().find(|(n, _)| *n == m.name) {
+                Some((_, data)) => {
+                    if self.looping.lock().insert(key) {
+                        let (sid, e, dep, d) = (l.service.clone(), l.env.clone(), tpl.deployment.clone(), data.clone());
+                        let _ = self.db(move |s| s.add_event("alert.metric", &sid, &e, Some(&dep), &d)).await;
+                        l.log.stream(Stream::System).line(format!("alert: alert.metric {data}"));
+                    }
+                }
+                None => {
+                    if self.looping.lock().remove(&key) {
+                        let (sid, e, dep, d) = (l.service.clone(), l.env.clone(), tpl.deployment.clone(), serde_json::json!({ "alert": "alert.metric", "metric": m.name }));
+                        let _ = self.db(move |s| s.add_event("alert.resolved", &sid, &e, Some(&dep), &d)).await;
+                        l.log.stream(Stream::System).line(format!("alert: alert.metric {} resolved", m.name));
+                    }
+                }
+            }
+        }
+        for kind in ["alert.memory", "alert.cpu", "alert.errors", "alert.latency", "alert.capacity", "alert.log", "alert.slo"] {
             let key = format!("{}/{}/{kind}", l.service, l.env);
             match firing.iter().find(|(k, _)| *k == kind) {
                 Some((_, data)) => {
@@ -2647,35 +2753,76 @@ impl Apps {
     /// take the new one at once; running instances are redeployed (the live image again, rolled)
     /// to trust it, and a sleeping environment's next start does (its template's bundle swapped),
     /// with no redeploy. Each minute, on the owner.
-    async fn refresh_intercepts(self: &Arc<Self>, services: &[crate::store::ServiceRow]) {
-        let kept: Vec<(String, String)> = self.intercept_cas.lock().iter().map(|(k, v)| (k.clone(), v.clone())).collect();
-        for (key, trusted) in kept {
+    async fn refresh_intercepts(self: &Arc<Self>, services: &[crate::store::ServiceRow], now: i64) {
+        let kept: Vec<(String, Serving)> = self.intercept_cas.lock().iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+        for (key, serving) in kept {
             let Some((sid, env)) = key.split_once('/').map(|(s, e)| (s.to_string(), e.to_string())) else { continue };
             let Some(svc) = services.iter().find(|s| s.id == sid).filter(|s| self.owns(&s.id)) else { continue };
             let network = crate::closed_network_name(&svc.project, &env);
             let log = self.logs.sink(format!("env:{sid}/{env}"), Stream::System);
-            match self.deps.secrets.intercept(&svc.project, &env).await {
-                Ok(Some(i)) if ca_digest(&i.ca_pem) != trusted => {
-                    self.deps.runtime.set_interception(&network, Some(i.interception.clone()));
-                    let live = self.live(&sid, &env);
-                    if live.awake() > 0 {
-                        match self.redeploy(&sid, &env, json!({ "message": "roll's interception CA renewed" }), Some("roll".into()), None).await {
-                            Ok(d) => log.line(format!("the interception CA changed (near its end, or a key's binding moved): redeploying ({}) to trust the next", d.id)),
-                            Err(e) => log.line(format!("the interception CA changed, and the redeploy that hands the instances the next didn't start: {e}")),
-                        }
-                    } else {
-                        live.set_file(INTERCEPT_CA, &trust_bundle(&i.ca_pem));
-                        self.intercept_cas.lock().insert(key.clone(), ca_digest(&i.ca_pem));
-                        log.line("the interception CA changed while it slept: its next start trusts the new one");
+            // Opened, and what runs was deployed open: its placeholders and interception end once
+            // no service of the project is closed in that environment any more.
+            let (s2, e2) = (sid.clone(), env.clone());
+            let Ok(row) = self.db(move |s| s.environment(&s2, &e2)).await else { continue };
+            if !row.egress.closed() && !self.live(&sid, &env).template().is_some_and(|t| t.spec.closed) {
+                self.intercept_cas.lock().remove(&key);
+                let (p, e2) = (svc.project.clone(), env.clone());
+                let still_closed = self.db(move |s| Ok(s.services(Some(&p))?.into_iter().any(|o| s.environment(&o.id, &e2).is_ok_and(|r| r.egress.closed())))).await.unwrap_or(true);
+                if !still_closed {
+                    self.deps.runtime.set_interception(&network, None);
+                    match self.deps.secrets.end_intercept(&svc.project, &env).await {
+                        Ok(()) => log.line("open again: its placeholders and interception ended"),
+                        Err(e) => log.line(format!("open again, and its placeholders couldn't be ended: {e}")),
                     }
                 }
-                Ok(None) => {
-                    self.deps.runtime.set_interception(&network, None);
-                    self.intercept_cas.lock().remove(&key);
-                    log.line("no key of its is bound to hosts now: its proxies tunnel everything again");
-                }
-                _ => {}
+                continue;
             }
+            // The hosts its live placeholders are bound to (a CA that names fewer is made again).
+            let hosts: Vec<String> = self.live(&sid, &env).template().map(|t| t.intercept_hosts.clone()).unwrap_or_default();
+            let changed = match self.deps.secrets.intercept(&svc.project, &env, &hosts).await {
+                Ok(Some(i)) => ca_digest(&i.ca_pem) != serving.digest,
+                // No live placeholder: they ended (their two days, a revoke) while it still has keys
+                // bound to hosts. Made again, never taken for "nothing bound".
+                Ok(None) => true,
+                Err(e) => {
+                    log.line(format!("its interception CA couldn't be checked: {e:#}"));
+                    false
+                }
+            };
+            if changed {
+                self.renew_intercept(svc, &row, &key, &log, now).await;
+            }
+        }
+    }
+
+    /// A closed environment's CA changed, or its placeholders are gone: awake, its instances move
+    /// to a deployment of the same image whose bundle trusts both CAs (its proxy switches once
+    /// that's live; at most every ten minutes); asleep, its template is made again now (new
+    /// placeholders and the new CA, its proxy switched, nothing started).
+    async fn renew_intercept(self: &Arc<Self>, svc: &crate::store::ServiceRow, row: &crate::store::EnvRow, key: &str, log: &crate::logs::LogSink, now: i64) {
+        if self.intercept_renewing.lock().get(key).is_some_and(|t| now - t < 10 * 60_000) {
+            return;
+        }
+        self.intercept_renewing.lock().insert(key.to_string(), now);
+        let Some(active) = row.active.clone() else { return };
+        let live = self.live(&svc.id, &row.name);
+        if live.awake() > 0 {
+            match self.rollback(&svc.id, &row.name, &active, Some("roll".into()), true, false).await {
+                Ok(d) => log.line(format!("its interception CA changed (near its end, ended, or a host bound since): moving its instances ({}) to trust the next before its proxy serves it", d.id)),
+                Err(e) => log.line(format!("its interception CA changed, and moving its instances to the next didn't start: {e}")),
+            }
+            return;
+        }
+        let made = async {
+            let dep = self.db(move |s| s.deployment(&active)).await?;
+            self.template(svc, row, &dep).await
+        };
+        match made.await {
+            Ok(t) => {
+                live.set_template(Arc::new(t));
+                log.line("its interception CA or its placeholders changed while it slept: its next start has the new ones");
+            }
+            Err(e) => log.line(format!("its interception CA changed while it slept, and its template couldn't be made again: {e}")),
         }
     }
 
@@ -2733,20 +2880,23 @@ impl Apps {
         }
         if now - self.intercepts_checked.load(std::sync::atomic::Ordering::Relaxed) >= 60_000 {
             self.intercepts_checked.store(now, std::sync::atomic::Ordering::Relaxed);
-            self.refresh_intercepts(&services).await;
+            self.refresh_intercepts(&services, now).await;
+            self.retry_orphan_branches().await;
         }
         if now - self.status_swept.load(std::sync::atomic::Ordering::Relaxed) >= 60_000 {
             self.status_swept.store(now, std::sync::atomic::Ordering::Relaxed);
             self.status_sweep(&services).await;
         }
+        let unscheduled = self.db(|s| s.unscheduled()).await.unwrap_or_default();
         for svc in services.into_iter().filter(|s| s.run.kind == RunType::Cron && self.owns(&s.id) && !self.capped(&s.id)) {
             let Some(schedule) = svc.run.schedule.as_deref().and_then(|s| crate::cron::Schedule::parse(s, svc.run.timezone.as_deref()).ok()) else { continue };
             let sid = svc.id.clone();
             let Ok(envs) = self.db(move |s| s.environments(&sid)).await else { continue };
             for e in envs.into_iter().filter(|e| e.active.is_some()) {
                 let key = format!("cron:{}/{}", svc.id, e.name);
-                // Paused: skipped, and its schedule moves on, so resuming doesn't make up the runs.
-                if e.paused {
+                // Paused, or its schedule turned off (`scheduled: false`, a preview's): skipped,
+                // and its schedule moves on, so turning it back on doesn't make up the runs.
+                if e.paused || unscheduled.contains(&(svc.id.clone(), e.name.clone())) {
                     let (k, v) = (key.clone(), now.to_string());
                     let _ = self.db(move |s| s.set_state(&k, &v)).await;
                     continue;
@@ -2777,7 +2927,7 @@ impl Apps {
     /// starts a job, unless the last it started still runs; a paused environment's move on.
     async fn schedules_pass(self: &Arc<Self>, services: &[crate::store::ServiceRow], now: i64) {
         // One read of every environment a pass, not one per service.
-        let Ok(all_envs) = self.db(|s| s.all_environments()).await else { return };
+        let Ok((all_envs, unscheduled)) = self.db(|s| Ok((s.all_environments()?, s.unscheduled()?))).await else { return };
         for svc in services.iter().filter(|s| self.owns(&s.id) && !self.capped(&s.id)) {
             // A preview environment never runs production's schedules (one per open pull request).
             // In maintenance, nothing is called on a schedule (it would be answered roll's page).
@@ -2793,8 +2943,8 @@ impl Apps {
                     let key = format!("sched:{}/{}/{}", svc.id, e.name, sc.name);
                     let k = key.clone();
                     let last: Option<i64> = self.db(move |s| s.get_state(&k)).await.ok().flatten().and_then(|v| v.parse().ok());
-                    // New (or paused): counted from now, so nothing is made up.
-                    let Some(last) = last.filter(|_| !e.paused) else {
+                    // New (or paused, or its schedules off): counted from now, so nothing is made up.
+                    let Some(last) = last.filter(|_| !e.paused && !unscheduled.contains(&(e.service.clone(), e.name.clone()))) else {
                         let (k, v) = (key.clone(), now.to_string());
                         let _ = self.db(move |s| s.set_state(&k, &v)).await;
                         continue;
@@ -2863,7 +3013,7 @@ impl Apps {
                             continue;
                         }
                     }
-                    match self.start_job(&svc.id, &e.name, serde_json::json!({ "command": sc.command, "timeout_s": sc.timeout_s })).await {
+                    match self.start_job(&svc.id, &e.name, serde_json::json!({ "command": sc.command, "timeout_s": sc.timeout_s, "cpu": sc.cpu, "memory_mb": sc.memory_mb })).await {
                         Ok(job) => {
                             log.line(format!("scheduled {}: job {} started", sc.name, job.id));
                             let id = job.id.clone();
@@ -2931,7 +3081,7 @@ impl Apps {
             // Its output stays in the environment's log (drains read it there); its container's
             // name, its own id in it, is what picks its own lines out.
             let name = crate::live::run_name(&sid, &live.env, &run_dep, &id);
-            let (status, code) = match live.run_to_exit(None, &[], timeout, None, cancel, Some(name)).await {
+            let (status, code) = match live.run_to_exit(None, &[], timeout, None, cancel, Some(name), None).await {
                 Ok(x) if x.canceled => (RunStatus::Canceled, None),
                 Ok(x) if x.timed_out => (RunStatus::TimedOut, None),
                 Ok(x) if x.code == Some(0) => (RunStatus::Succeeded, Some(0)),
@@ -3128,6 +3278,15 @@ fn build_timeout(own: Option<u32>, node: Duration, log: &LogSink) -> Duration {
 pub const INTERCEPT_CA: &str = "/etc/roll/intercept-ca.pem";
 
 /// A CA's PEM, as which one instances trust is kept.
+/// A closed environment's CA as its proxy serves it: its PEM's digest, the PEM, and roll secrets'
+/// interception for it.
+#[derive(Clone)]
+pub(crate) struct Serving {
+    pub digest: String,
+    pub pem: String,
+    pub interception: Arc<dyn roll_intercept::Interception>,
+}
+
 fn ca_digest(pem: &str) -> String {
     use sha2::Digest;
     hex::encode(&sha2::Sha256::digest(pem.as_bytes())[..12])

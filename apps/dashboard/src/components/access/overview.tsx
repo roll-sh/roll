@@ -19,8 +19,10 @@ import {
   APPROVABLE,
   ACTIONS,
   describeApprovalRule,
+  describeAskRule,
   PRODUCTS,
   type ApprovalRule,
+  type AskRule,
   type Action,
   KEEP_OLD,
   startsLater,
@@ -776,6 +778,18 @@ function PolicyPanel() {
         </label>
       </div>
       <ApprovalRules rules={p.approval_rules ?? []} save={(approval_rules) => save({ ...p, approval_rules })} />
+      <div className="flex flex-wrap items-center gap-3 text-[12px] text-muted">
+        <span>Agents (through MCP):</span>
+        <label className="flex items-center gap-1.5">
+          <input type="checkbox" checked={Boolean(p.mcp_lockdown)} onChange={(e) => void save({ ...p, mcp_lockdown: e.target.checked })} />
+          always in lockdown
+        </label>
+        <label className="flex items-center gap-1.5">
+          <input type="checkbox" checked={Boolean(p.mcp_read_only)} onChange={(e) => void save({ ...p, mcp_read_only: e.target.checked })} />
+          only read
+        </label>
+      </div>
+      <AgentAsks rules={p.agents_ask ?? []} save={(agents_ask) => save({ ...p, agents_ask })} />
       <ErrorNote error={error} />
     </div>
   );
@@ -785,6 +799,71 @@ function PolicyPanel() {
  * What needs more than one approver (the policy's approval rules): Teleport's and Infisical's
  * two-person rule. Each rule covering a request is a gate; the token's own person never counts.
  */
+/**
+ * What an agent asks a person for first, whatever its token allows (the policy's agents_ask):
+ * Stripe's confirmation before refunds. Only calls through roll's MCP server; CI calling the API
+ * isn't an agent.
+ */
+function AgentAsks({ rules, save }: { rules: AskRule[]; save: (next: AskRule[]) => Promise<void> }) {
+  const [adding, setAdding] = useState(false);
+  const [product, setProduct] = useState("apps");
+  const [action, setAction] = useState("deploy");
+  const [env, setEnv] = useState("production");
+  const add = async () => {
+    const list = env.split(",").map((x) => x.trim()).filter(Boolean);
+    const rule: AskRule = { product };
+    if (action !== "any") rule.actions = [action as Action];
+    if (list.length) rule.environments = list;
+    await save([...rules, rule]);
+    setAdding(false);
+  };
+  return (
+    <div className="flex flex-wrap items-center gap-2 text-[12px] text-muted">
+      <span>Agents always ask before:</span>
+      {rules.length === 0 && !adding && <span className="text-subtle">nothing beyond their token&apos;s rules</span>}
+      {rules.map((r, i) => (
+        <span key={i} className="flex items-center gap-1 rounded-md border border-line px-2 py-0.5">
+          {describeAskRule(r)}
+          <button onClick={() => void save(rules.filter((_, j) => j !== i))} className="text-subtle hover:text-fg" aria-label={`Remove ${describeAskRule(r)}`}>
+            ×
+          </button>
+        </span>
+      ))}
+      {adding ? (
+        <span className="flex flex-wrap items-center gap-1.5">
+          <select value={product} onChange={(e) => setProduct(e.target.value)} className={input} aria-label="Product">
+            {PRODUCTS.map((p) => (
+              <option key={p} value={p}>
+                {productName(p)}
+              </option>
+            ))}
+          </select>
+          <select value={action} onChange={(e) => setAction(e.target.value)} className={input} aria-label="Action">
+            <option value="any">any action</option>
+            {ACTIONS.map((a) => (
+              <option key={a} value={a}>
+                {a}
+              </option>
+            ))}
+          </select>
+          in
+          <input value={env} onChange={(e) => setEnv(e.target.value)} placeholder="every environment" className={`${input} w-32`} aria-label="Environments" />
+          <button onClick={() => void add()} className={primary}>
+            Add
+          </button>
+          <button onClick={() => setAdding(false)} className="text-subtle hover:text-fg">
+            Cancel
+          </button>
+        </span>
+      ) : (
+        <button onClick={() => setAdding(true)} className="text-accent hover:underline">
+          Make agents ask before…
+        </button>
+      )}
+    </div>
+  );
+}
+
 function ApprovalRules({ rules, save }: { rules: ApprovalRule[]; save: (next: ApprovalRule[]) => Promise<void> }) {
   const [adding, setAdding] = useState(false);
   const [product, setProduct] = useState("secrets");

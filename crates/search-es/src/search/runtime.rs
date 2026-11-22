@@ -365,6 +365,8 @@ pub struct Evaluator {
     /// Whether the script runs as a search runs it (no loop statement limit, polling the
     /// search's deadline); off for the `_execute` API.
     pub cancellable: bool,
+    /// The runtime fields its script's `doc[...]` reads see.
+    runtime: RuntimeSource,
 }
 
 impl std::fmt::Debug for Evaluator {
@@ -382,7 +384,13 @@ impl Evaluator {
             }
             None => None,
         };
-        Ok(Evaluator { field, bound, table: table.clone(), shard, index: index.to_string(), id_fielddata: super::id_fielddata::scripts(st), cancellable: true })
+        Ok(Evaluator { field, bound, table: table.clone(), shard, index: index.to_string(), id_fielddata: super::id_fielddata::scripts(st), cancellable: true, runtime: RuntimeSource::Ambient })
+    }
+
+    /// The evaluator with its script's `doc[...]` reads seeing `runtime`'s fields.
+    pub fn with_runtime(mut self, runtime: RuntimeSource) -> Evaluator {
+        self.runtime = runtime;
+        self
     }
 
     /// The evaluator of field data (fetch, aggregations, sorts, `doc[...]` reads): no call
@@ -395,15 +403,16 @@ impl Evaluator {
 
     /// An evaluator for one segment.
     pub fn leaf(&self, seg: &SegmentContext) -> EsResult<EvalLeaf> {
-        self.leaf_chained(seg, vec![self.field.name.as_str().into()])
+        self.leaf_chained(seg, vec![self.field.name.as_str().into()], &self.runtime)
     }
 
     /// An evaluator for one segment whose script resolves `chain` (the runtime fields being
-    /// resolved, this one last): `doc[...]` reads of other runtime fields extend it.
-    pub fn leaf_chained(&self, seg: &SegmentContext, chain: Vec<Box<str>>) -> EsResult<EvalLeaf> {
+    /// resolved, this one last) among `runtime`'s fields: `doc[...]` reads of other runtime
+    /// fields extend it.
+    pub fn leaf_chained(&self, seg: &SegmentContext, chain: Vec<Box<str>>, runtime: &RuntimeSource) -> EsResult<EvalLeaf> {
         let leaf = match self.bound.as_ref().and_then(|b| b.painless().map(|s| (s, b))) {
             Some((s, b)) => {
-                let mut host = DocHost::new(self.table.clone(), seg.clone(), self.shard, self.index.clone()).with_id_fielddata(self.id_fielddata);
+                let mut host = DocHost::new(self.table.clone(), seg.clone(), self.shard, self.index.clone()).with_id_fielddata(self.id_fielddata).with_runtime(runtime);
                 host.chain = chain;
                 let host = if self.cancellable { host } else { host.without_cancellation() };
                 let mut l = Leaf::new(s, &b.params, host);
@@ -416,7 +425,7 @@ impl Evaluator {
             }
             None => None,
         };
-        Ok(EvalLeaf { field: self.field.clone(), leaf, seg: seg.clone() })
+        Ok(EvalLeaf { field: self.field.clone(), leaf, seg: seg.clone(), table: self.table.clone() })
     }
 }
 
@@ -506,6 +515,12 @@ impl RuntimeScope {
         ctl?.ext.clone()?.downcast::<RuntimeScope>().ok()
     }
 
+    /// The scope of a security filter on `idx`: the mapping's runtime fields only, none of the
+    /// request's (`None`: the mapping has none).
+    pub fn of_mapping(scripts: &Arc<crate::scripting::ScriptService>, st: Arc<crate::meta::ClusterState>, idx: &crate::meta::IndexMeta, table: &Arc<FieldTable>, shard: i32) -> EsResult<Option<Arc<RuntimeScope>>> {
+        RuntimeScope::build(scripts, st, idx, table, shard, None)
+    }
+
     /// The scope of the search running on this thread.
     pub fn ambient() -> Option<Arc<RuntimeScope>> {
         RuntimeScope::of_control(search_index::search::ambient_control().as_ref())
@@ -547,6 +562,28 @@ impl RuntimeScope {
     /// mapped field of that name.
     pub fn shadows(&self, name: &str) -> bool {
         self.shared.shadowing.contains(name) || name.rsplit_once('.').is_some_and(|(p, _)| self.shared.shadowing.contains(p))
+    }
+}
+
+/// Where the runtime fields a query or script sees come from.
+#[derive(Clone, Debug, Default)]
+pub enum RuntimeSource {
+    /// The search running on this thread ([`RuntimeScope::ambient`]): the mapping's and the
+    /// request's `runtime_mappings`.
+    #[default]
+    Ambient,
+    /// This scope only (`None`: no runtime fields). A security filter's is
+    /// [`RuntimeScope::of_mapping`]: a request's runtime field can't shadow a field it reads.
+    Fixed(Option<Arc<RuntimeScope>>),
+}
+
+impl RuntimeSource {
+    /// The scope it stands for, on this thread.
+    pub fn scope(&self) -> Option<Arc<RuntimeScope>> {
+        match self {
+            RuntimeSource::Ambient => RuntimeScope::ambient(),
+            RuntimeSource::Fixed(s) => s.clone(),
+        }
     }
 }
 
@@ -648,6 +685,8 @@ pub struct EvalLeaf {
     field: Arc<RtField>,
     leaf: Option<Leaf>,
     seg: SegmentContext,
+    /// The reader's fields: a field without a script reads the `_source` it may see.
+    table: Arc<FieldTable>,
 }
 
 impl EvalLeaf {
@@ -694,7 +733,8 @@ impl EvalLeaf {
                 self.seg.ensure_stored().map_err(crate::engine::convert::index_error)?;
                 let stored = self.seg.reader.stored().document(doc).map_err(|e| EsError::internal(e.to_string()))?;
                 if let Some(b) = crate::fetch::source_bytes(&stored) {
-                    let src = crate::fetch::parse_source(b)?;
+                    // Under field level security, the fields its reader may read only.
+                    let src = self.table.visible_source(crate::fetch::parse_source(b)?);
                     if let Value::Obj(m) = &src {
                         let mut raw = Vec::new();
                         if f.ty == RtType::GeoPoint {

@@ -271,14 +271,26 @@ pub fn synonyms_body(text: &str) -> anyhow::Result<String> {
     Ok(json!({ "synonyms_set": rules }).to_string())
 }
 
-/// `key=value` pairs as a JSON object (a value is JSON when it parses, else a string).
-pub fn pairs(items: &[String]) -> anyhow::Result<Value> {
+/// `key=value` pairs as a JSON object. `typed`: a value is JSON when it parses (settings:
+/// `true`, `5`, `null`), else every value is the string given (a ruleset's criteria:
+/// `query_string=123` is the text "123").
+pub fn pairs(items: &[String], typed: bool) -> anyhow::Result<Value> {
     let mut m = serde_json::Map::new();
     for i in items {
         let (k, v) = i.split_once('=').with_context(|| format!("{i:?} isn't key=value"))?;
-        m.insert(k.trim().to_string(), serde_json::from_str(v).unwrap_or_else(|_| Value::String(v.to_string())));
+        let v = if typed { serde_json::from_str(v).unwrap_or_else(|_| Value::String(v.to_string())) } else { Value::String(v.to_string()) };
+        m.insert(k.trim().to_string(), v);
     }
     Ok(Value::Object(m))
+}
+
+/// `settings set`'s arguments as a body: one JSON body (`{…}`, `@file` or `-` for stdin, looked
+/// at before any `=`: `@cfg=prod.json` is a file), else `key=value` pairs.
+pub fn settings_body(args: &[String]) -> anyhow::Result<String> {
+    match args {
+        [one] if one.starts_with('@') || one == "-" || one.trim_start().starts_with('{') => read_body(one),
+        _ => Ok(pairs(args, true)?.to_string()),
+    }
 }
 
 #[derive(Subcommand)]
@@ -595,10 +607,7 @@ pub async fn run(api: &Api, as_json: bool, cmd: Search) -> anyhow::Result<()> {
                     index_call(api, as_json, Method::GET, &cluster, &index, "/settings", (query, None)).await
                 }
                 Index::Settings(IndexSettings::Set { cluster, index, settings }) => {
-                    let body = match settings.as_slice() {
-                        [one] if !one.contains('=') || one.trim_start().starts_with('{') => read_body(one)?,
-                        _ => pairs(&settings)?.to_string(),
-                    };
+                    let body = settings_body(&settings)?;
                     index_call(api, as_json, Method::PUT, &cluster, &index, "/settings", (vec![], Some((JSON, body)))).await
                 }
             };
@@ -633,7 +642,7 @@ pub async fn run(api: &Api, as_json: bool, cmd: Search) -> anyhow::Result<()> {
                 }
                 Rules::Delete { cluster, ruleset } => cluster_call(api, as_json, Method::DELETE, &cluster, &rs(&ruleset), (vec![], None)).await,
                 Rules::Test { cluster, ruleset, criteria } => {
-                    let body = json!({ "match_criteria": pairs(&criteria)? }).to_string();
+                    let body = json!({ "match_criteria": pairs(&criteria, false)? }).to_string();
                     cluster_call(api, as_json, Method::POST, &cluster, &format!("{}/test", rs(&ruleset)), (vec![], Some((JSON, body)))).await
                 }
             };
@@ -1092,7 +1101,14 @@ mod tests {
         let v: Value = serde_json::from_str(&synonyms_body(r#"[{"id": "a", "synonyms": "x, y"}]"#).unwrap()).unwrap();
         assert_eq!(v, json!({"synonyms_set": [{"id": "a", "synonyms": "x, y"}]}));
         assert!(synonyms_body("# nothing\n").is_err());
-        assert_eq!(pairs(&["a=true".into(), "b=x".into(), "c=null".into()]).unwrap(), json!({"a": true, "b": "x", "c": null}));
+        assert_eq!(pairs(&["a=true".into(), "b=x".into(), "c=null".into()], true).unwrap(), json!({"a": true, "b": "x", "c": null}));
+        assert_eq!(pairs(&["query_string=123".into()], false).unwrap(), json!({"query_string": "123"}), "criteria are text");
+        let dir = std::env::temp_dir().join(format!("roll-settings-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("cfg=prod.json");
+        std::fs::write(&file, r#"{"index.refresh_interval": "5s"}"#).unwrap();
+        assert_eq!(settings_body(&[format!("@{}", file.display())]).unwrap(), r#"{"index.refresh_interval": "5s"}"#, "a file whose name has an =");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

@@ -2597,6 +2597,29 @@ impl Store {
     }
 
     /// Keep what its holder read (`None`: nothing to say); whether that changed what was kept.
+    /// A step of the timeline of `head` (`start` begins it): once each; a new head starts a new one.
+    pub fn mark_step(&self, id: &str, head: &str, step: &str) -> Result<()> {
+        let now = self.now_ms()?;
+        self.db.write(|c| {
+            let json: Option<String> = c.query_row("SELECT json FROM runtime_facts WHERE preview_id = ? AND kind = 'timeline'", [id], |r| r.get(0)).optional()?;
+            let was: Option<crate::Timeline> = json.and_then(|j| serde_json::from_str(&j).ok()).filter(|t: &crate::Timeline| t.head == head);
+            let mut t = match was {
+                Some(t) if step == "start" || t.steps.iter().any(|x| x.step == step) => return Ok::<_, Error>(()),
+                Some(t) => t,
+                None => crate::Timeline { head: head.to_string(), started_at: now, steps: Vec::new() },
+            };
+            if step != "start" {
+                t.steps.push(crate::TimelineStep { step: step.to_string(), at: now });
+            }
+            let json = serde_json::to_string(&t).map_err(|e| Error::Internal(e.to_string()))?;
+            c.execute(
+                "INSERT INTO runtime_facts (preview_id, kind, json) VALUES (?, 'timeline', ?) ON CONFLICT (preview_id, kind) DO UPDATE SET json = excluded.json",
+                params![id, json],
+            )?;
+            Ok(())
+        })
+    }
+
     /// Change a preview's interception record in one write (`f` may run again).
     pub fn update_intercepted(&self, id: &str, f: impl Fn(&mut crate::Intercepted)) -> Result<()> {
         self.db.write(|c| {
@@ -2958,7 +2981,15 @@ impl Store {
         let slower_routes = if settings.traces { self.runtime_fact::<crate::SlowerRoutes>(&r.id, "slower_routes")?.filter(|f| f.head == r.head) } else { None };
         let compared_at = |kind: &str| -> Result<bool> { Ok(self.runtime_fact::<String>(&r.id, kind)?.as_deref() == Some(r.head.as_str())) };
         let regressions_compared = compared_at("compared_errors")? && (!settings.traces || compared_at("compared_routes")?);
-        let intercepted = self.runtime_fact::<crate::Intercepted>(&r.id, "intercepted")?.filter(|x| !x.keys.is_empty());
+        // Its own proxy's record (with the keys it holds), and roll apps' counts for its services there.
+        let closed = settings.egress_for(r.trusted) == crate::settings::EgressRule::Roll;
+        let on_apps = self.runtime_fact::<crate::AppsIntercepted>(&r.id, "intercepted_apps")?.filter(|_| closed);
+        let timeline = self.runtime_fact::<crate::Timeline>(&r.id, "timeline")?.filter(|t| t.head == r.head);
+        let intercepted = match (self.runtime_fact::<crate::Intercepted>(&r.id, "intercepted")?.filter(|x| !x.keys.is_empty()), on_apps) {
+            (Some(x), on_apps) => Some(crate::Intercepted { on_apps, ..x }),
+            (None, Some(a)) => Some(crate::Intercepted { on_apps: Some(a), ..Default::default() }),
+            (None, None) => None,
+        };
         let regressions = match settings.regressions {
             crate::settings::RegressionsRule::Off => None,
             crate::settings::RegressionsRule::Check => Some("check".to_string()),
@@ -3037,6 +3068,7 @@ impl Store {
             regressions_accepted,
             regressions_compared,
             intercepted,
+            timeline,
             page_speed,
             page_health,
             page_a11y,

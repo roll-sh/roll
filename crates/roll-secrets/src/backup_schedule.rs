@@ -139,7 +139,7 @@ impl Secrets {
     pub(crate) fn sweep_backups(&self) -> Result<(usize, usize)> {
         let Some(deliver) = self.deliver.clone() else { return Ok((0, 0)) };
         let now = self.db.now_ms()?;
-        let due: Vec<(String, i64)> = self.db.read(|c| c.query("SELECT project_id, next_at FROM backup_schedules WHERE next_at <= ? ORDER BY next_at LIMIT 10", [now], |r| Ok((r.get(0)?, r.get(1)?))))?;
+        let due: Vec<(String, i64)> = self.db.read(|c| c.query(&format!("SELECT project_id, next_at FROM backup_schedules WHERE next_at <= ? AND {} ORDER BY next_at LIMIT 10", crate::deleted::live("backup_schedules.project_id")), [now], |r| Ok((r.get(0)?, r.get(1)?))))?;
         let (mut made, mut failed) = (0, 0);
         for (project, next_at) in due {
             // Claimed by moving next_at on: another node sees it not due.
@@ -175,9 +175,10 @@ impl Secrets {
     fn scheduled_backup(&self, project: &str, deliver: &dyn crate::Deliver) -> Result<String> {
         let (bucket, recipient, keep, by): (String, String, i64, String) =
             self.db.read(|c| c.query_row("SELECT bucket, recipient, keep, created_by FROM backup_schedules WHERE project_id = ?", [project], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))))?;
-        // As syncs: what a person set up runs while they can still reach the project.
-        if !self.maker_reaches(&by, project)? {
-            return Err(Error::Forbidden(format!("{by} set this schedule up and can't reach the project any more: set it up again")));
+        // A backup holds every value of the project: it runs only while whoever set it up may still
+        // manage the project and reveal all of it, as they are now.
+        if !self.maker_reaches(&by, &[(Action::Admin, Scope::whole(project)), (Action::Reveal, Scope::whole(project))])? {
+            return Err(Error::Forbidden(format!("{by} set this schedule up and may no longer manage and read the whole project: an admin sets it up again")));
         }
         // The bucket may have left the project since.
         if !self.members(project)?.contains(&("bucket".to_string(), bucket.clone())) {

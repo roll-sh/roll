@@ -24,6 +24,32 @@ use search_index::{QueryRef, Searcher};
 use std::cell::RefCell;
 use std::sync::Arc;
 
+/// The filters a shard's documents pass before a request's query sees them.
+#[derive(Clone, Debug, Default)]
+pub struct DocFilter {
+    /// The filters of the filtered aliases the index was reached through. A request's runtime
+    /// fields apply to them, as in Elasticsearch.
+    pub alias: Option<Query>,
+    /// The reader's document level security, built with [`QueryCtx::for_security`].
+    pub security: Option<Query>,
+}
+
+impl DocFilter {
+    /// Both filters as one (`None`: neither applies). Both are the owner's: a browser key's
+    /// policy doesn't hold them ([`QueryCtx::owner_filter`]).
+    pub fn build(&self, ctx: &QueryCtx) -> EsResult<Option<QueryRef>> {
+        let alias = self.alias.as_ref().map(|q| ctx.owner_filter(q)).transpose()?;
+        let security = match &self.security {
+            Some(q) => Some(ctx.for_security()?.owner_filter(q)?),
+            None => None,
+        };
+        Ok(match (alias, security) {
+            (Some(a), Some(s)) => Some(arc(BooleanQuery::new().add(Occur::Filter, a).add(Occur::Filter, s))),
+            (a, s) => a.or(s),
+        })
+    }
+}
+
 /// What converting a query needs: the index's fields, its shard's searcher, the cluster.
 pub struct QueryCtx<'a> {
     pub cluster: &'a Cluster,
@@ -36,8 +62,11 @@ pub struct QueryCtx<'a> {
     pub nested: RefCell<Option<String>>,
     /// Named queries (`_name`), for `matched_queries`.
     pub named: RefCell<Vec<(String, QueryRef)>>,
-    /// `search.allow_expensive_queries`.
+    /// `search.allow_expensive_queries` (a browser key's policy aside: [`Self::allows_expensive`]).
     pub allow_expensive: bool,
+    /// Converting the owner's own filter (an alias filter, a role's document query, a browser
+    /// key's `filter`): a browser key's policy doesn't hold it ([`Self::owner_filter`]).
+    pub owner: std::cell::Cell<bool>,
     /// Inner hits definitions met while converting (`nested`, `has_child`, `has_parent`).
     pub inner_hits: RefCell<Vec<InnerHitsDef>>,
     /// The shard id within the index (random_score salting).
@@ -46,10 +75,13 @@ pub struct QueryCtx<'a> {
     pub warnings: RefCell<Vec<String>>,
     /// The request's `runtime_mappings` (the mapping's `runtime` section applies too).
     pub runtime_mappings: Option<crate::json::Map>,
+    /// Where runtime fields resolve: the search's scope, or a fixed one (a security filter's,
+    /// [`QueryCtx::for_security`]).
+    pub runtime_source: super::runtime::RuntimeSource,
     /// Constant-scoring join queries built so far (see [`super::join`]).
     pub constant_joins: std::cell::Cell<u32>,
-    /// The searched alias's filter: `knn` queries take it as one more pre-filter.
-    pub alias_filter: Option<crate::query::Query>,
+    /// The searched shard's document filters: `knn` queries take them as more pre-filters.
+    pub filter: DocFilter,
     /// Converting the query of nested inner hits: `knn` queries become exact searches over
     /// every vector (`InnerHitsRewriteContext` → `ExactKnnQueryBuilder`).
     pub exact_knn: std::cell::Cell<bool>,
@@ -89,6 +121,14 @@ impl Reader {
             Reader::Unset => Err(EsError::illegal_argument("this query can't read other documents")),
             Reader::Unrestricted => Ok(None),
             Reader::Restricted(s) => Ok(Some(s)),
+        }
+    }
+
+    /// A browser key's policy, when the reader is one.
+    pub fn browser(&self) -> Option<&crate::xpack::security::browser::Policy> {
+        match self {
+            Reader::Restricted(s) => s.browser(),
+            _ => None,
         }
     }
 
@@ -202,12 +242,14 @@ impl<'a> QueryCtx<'a> {
             nested: RefCell::new(None),
             named: RefCell::new(Vec::new()),
             allow_expensive: allow,
+            owner: std::cell::Cell::new(false),
             inner_hits: RefCell::new(Vec::new()),
             shard: 0,
             warnings: RefCell::new(Vec::new()),
             runtime_mappings: None,
+            runtime_source: super::runtime::RuntimeSource::Ambient,
             constant_joins: std::cell::Cell::new(0),
-            alias_filter: None,
+            filter: DocFilter::default(),
             exact_knn: std::cell::Cell::new(false),
             strict_unmapped: std::cell::Cell::new(false),
             unmapped: RefCell::new(None),
@@ -216,11 +258,29 @@ impl<'a> QueryCtx<'a> {
         }
     }
 
+    /// This context for a security filter (document level security: a role's, an API key's role
+    /// descriptors', OpenSearch Security's `dls`). The request's runtime fields don't exist
+    /// there, so none can shadow a field the filter reads (Elasticsearch applies the filter to
+    /// the shard's reader, before the request); the mapping's own runtime fields still do.
+    pub fn for_security(&self) -> EsResult<QueryCtx<'a>> {
+        let scope = super::runtime::RuntimeScope::of_mapping(&self.cluster.scripts, self.cluster.state(), self.idx, self.table, self.shard as i32)?;
+        let mut c = QueryCtx::new(self.cluster, self.st, self.idx, self.table, self.searcher, self.now_ms, self.security.clone());
+        c.shard = self.shard;
+        // The owner's filter: a browser key's policy doesn't hold it (its `filter` is in it).
+        c.owner.set(true);
+        c.nested.replace(self.nested.borrow().clone());
+        c.runtime_source = super::runtime::RuntimeSource::Fixed(scope);
+        Ok(c)
+    }
+
     /// The runtime field `name`: the mapping's `runtime` section shadows concrete fields of
     /// the same name, a request's `runtime_mappings` shadow both.
     pub fn runtime_field(&self, name: &str) -> Option<Arc<super::runtime::RtField>> {
         if self.idx.mapping.runtime.is_empty() && self.runtime_mappings.as_ref().is_none_or(|r| r.is_empty()) {
             return None;
+        }
+        if let super::runtime::RuntimeSource::Fixed(scope) = &self.runtime_source {
+            return scope.as_ref().and_then(|s| s.field(name).cloned());
         }
         // The shard's scope has them parsed already.
         if let Some(scope) = super::runtime::RuntimeScope::ambient()
@@ -237,6 +297,9 @@ impl<'a> QueryCtx<'a> {
             return Vec::new();
         }
         let keep = |rt: &super::runtime::RuntimeFields| rt.matching(pattern).into_iter().filter(|n| rt.get(n).is_some_and(|f| f.ty != super::runtime::RtType::GeoPoint)).collect();
+        if let super::runtime::RuntimeSource::Fixed(scope) = &self.runtime_source {
+            return scope.as_ref().map(|s| keep(s.fields())).unwrap_or_default();
+        }
         if let Some(scope) = super::runtime::RuntimeScope::ambient()
             && scope.index_name() == self.idx.name
         {
@@ -247,10 +310,11 @@ impl<'a> QueryCtx<'a> {
 
     /// A query over runtime field values (`AbstractScriptFieldQuery`, constant scoring).
     pub(crate) fn runtime_query(&self, f: Arc<super::runtime::RtField>, pred: super::runtime::Predicate) -> EsResult<QueryRef> {
-        if !self.allow_expensive {
+        if !self.allows_expensive() {
             return Err(EsError::new(400, "exception", "queries cannot be executed against runtime fields while [search.allow_expensive_queries] is set to [false]."));
         }
-        let ev = super::runtime::Evaluator::new(&self.cluster.scripts, self.st, self.table, self.shard as i32, &self.idx.name, f)?;
+        self.no_scripts()?;
+        let ev = super::runtime::Evaluator::new(&self.cluster.scripts, self.st, self.table, self.shard as i32, &self.idx.name, f)?.with_runtime(self.runtime_source.clone());
         // `AbstractScriptFieldQuery`: constant scoring, its own description and explanation.
         let q = search_index::query::ScriptQuery { script: Arc::new(super::runtime::RuntimeQuery { ev, pred: Arc::new(pred) }) };
         Ok(arc(q))
@@ -343,8 +407,45 @@ impl<'a> QueryCtx<'a> {
         self.to_query(q)
     }
 
+    /// Refuses `what` (an expensive query family) under `search.allow_expensive_queries: false`
+    /// or a browser key that doesn't allow them.
+    pub fn check_expensive(&self, what: &str) -> EsResult<()> {
+        self.expensive(what)
+    }
+
+    /// The browser key policy the query being converted is held to: the reader's, except in
+    /// the owner's own filters.
+    pub fn browser(&self) -> Option<&crate::xpack::security::browser::Policy> {
+        self.security.browser().filter(|_| !self.owner.get())
+    }
+
+    /// Whether expensive queries may run: `search.allow_expensive_queries`, and a browser key's
+    /// queries only when the key allows them ([`crate::xpack::security::browser`]).
+    pub fn allows_expensive(&self) -> bool {
+        self.allow_expensive && self.browser().is_none_or(|p| p.allow_expensive_queries)
+    }
+
+    /// Converts the owner's own filter (an alias filter, with the reader's document level
+    /// security query in it) as a filter: the cluster's settings hold it, a browser key's policy
+    /// doesn't (the filter is the owner's, as an Algolia secured key's filters are).
+    pub fn owner_filter(&self, q: &Query) -> EsResult<QueryRef> {
+        let was = self.owner.replace(true);
+        let r = self.to_filter(q);
+        self.owner.set(was);
+        r
+    }
+
+    /// Refuses painless for a browser key that doesn't allow scripts: called wherever a query,
+    /// sort, highlighter or runtime field compiles one.
+    pub fn no_scripts(&self) -> EsResult<()> {
+        match self.browser() {
+            Some(p) if !p.allows(crate::xpack::security::browser::Banned::Scripts) => Err(crate::xpack::security::browser::refused(crate::xpack::security::browser::Banned::Scripts.describe())),
+            _ => Ok(()),
+        }
+    }
+
     fn expensive(&self, what: &str) -> EsResult<()> {
-        if !self.allow_expensive {
+        if !self.allows_expensive() {
             return Err(EsError::new(
                 400,
                 "exception",
@@ -427,7 +528,13 @@ impl<'a> QueryCtx<'a> {
             Q::MatchBoolPrefix(m) => text::match_bool_prefix(self, m),
             Q::MultiMatch(m) => text::multi_match(self, m),
             Q::CombinedFields(c) => text::combined_fields(self, c),
-            Q::QueryString(qs) => super::query_string::query_string(self, qs),
+            Q::QueryString(qs) => {
+                // Its syntax reaches wildcards, regexps and fuzziness (`?q=` builds one).
+                if self.browser().is_some_and(|p| !p.allow_expensive_queries) {
+                    return Err(crate::xpack::security::browser::refused("a [query_string] query (`q` too)"));
+                }
+                super::query_string::query_string(self, qs)
+            }
             Q::SimpleQueryString(qs) => super::query_string::simple_query_string(self, qs),
             Q::Nested(n) => self.nested_query(n),
             Q::Kql(k) => self.to_query(&super::kql::rewrite(self, k)?),
@@ -940,7 +1047,7 @@ impl<'a> QueryCtx<'a> {
                     return Err(not_searchable(&f));
                 }
                 let walks_terms = || {
-                    if self.allow_expensive {
+                    if self.allows_expensive() {
                         return Ok(());
                     }
                     Err(EsError::new(
@@ -1119,7 +1226,7 @@ impl<'a> QueryCtx<'a> {
 
     fn nested_query(&self, n: &crate::query::joining::Nested) -> EsResult<QueryRef> {
         // `NestedQueryBuilder.doToQuery`: block joins are expensive.
-        if !self.allow_expensive {
+        if !self.allows_expensive() {
             return Err(EsError::new(400, "exception", "[joining] queries cannot be executed when 'search.allow_expensive_queries' is set to false."));
         }
         let Some(o) = self.table.objects.get(&n.path).cloned() else {

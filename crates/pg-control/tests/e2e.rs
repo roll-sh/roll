@@ -474,6 +474,9 @@ async fn read_only_sql_cannot_write() {
     seed(&c, 10).await;
     let rows = h.control.query(&db.ep.id, "SELECT count(*) FROM t", SqlAs::ReadOnly).await.unwrap();
     assert_eq!(rows[0].rows[0][0].as_deref(), Some("10"));
+    // It sees what other sessions run (slow-query and health tools read it), not "<insufficient privilege>".
+    let rows = h.control.query(&db.ep.id, "SELECT count(*) FROM pg_stat_activity WHERE query = '<insufficient privilege>'", SqlAs::ReadOnly).await.unwrap();
+    assert_eq!(rows[0].rows[0][0].as_deref(), Some("0"));
     for sql in [
         "INSERT INTO t VALUES (99, 'x')",
         "SET default_transaction_read_only = off; DELETE FROM t",
@@ -498,7 +501,7 @@ async fn write_sql_is_never_the_superuser() {
     let db = h.project(None).await;
     let c = h.connect(&db, &db.ep.id).await;
     seed(&c, 10).await;
-    let w = |sql: &'static str| h.control.query(&db.ep.id, sql, SqlAs::Writer);
+    let w = |sql: &'static str| h.control.query(&db.ep.id, sql, SqlAs::Writer { may_drop: true });
     for sql in [
         "INSERT INTO t VALUES (99, 'x')",
         "ALTER TABLE t ADD COLUMN extra int",
@@ -527,6 +530,25 @@ async fn write_sql_is_never_the_superuser() {
     // What the superuser's own connection makes later is the writer's to change next time.
     c.batch_execute("CREATE TABLE later (id int)").await.unwrap();
     w("ALTER TABLE later ADD COLUMN x int").await.unwrap();
+    // A grant that may not delete changes rows and schemas but drops nothing, and can't turn the
+    // guard off.
+    let nd = |sql: &'static str| h.control.query(&db.ep.id, sql, SqlAs::Writer { may_drop: false });
+    for sql in ["DELETE FROM t WHERE id = 99", "CREATE TABLE more (id int)", "ALTER TABLE later ADD COLUMN y int"] {
+        nd(sql).await.unwrap_or_else(|e| panic!("{sql} didn't run without delete: {e}"));
+    }
+    for sql in [
+        "DROP TABLE kept",
+        "ALTER TABLE later DROP COLUMN x",
+        "DROP EVENT TRIGGER roll_no_drop",
+        "ALTER EVENT TRIGGER roll_no_drop DISABLE",
+        "CREATE OR REPLACE FUNCTION roll_guard.no_drop() RETURNS event_trigger LANGUAGE plpgsql AS $$ BEGIN END $$",
+    ] {
+        assert!(nd(sql).await.is_err(), "{sql} ran without delete");
+    }
+    assert_eq!(count(&c, "SELECT count(*) FROM pg_tables WHERE tablename = 'kept'").await, 1);
+    assert_eq!(count(&c, "SELECT count(*) FROM pg_event_trigger WHERE evtname = 'roll_no_drop' AND evtenabled = 'O'").await, 1);
+    // The superuser (and a grant that may delete) still drops.
+    w("DROP TABLE kept").await.unwrap();
 }
 
 // ── branching ──

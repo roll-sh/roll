@@ -13,7 +13,7 @@ use axum::routing::{get, post};
 use axum::{Json, Router};
 use code_control::agents::sandbox::agent37::Agent37Config;
 use code_control::agents::sandbox::docker::{Docker, DockerConfig, Runtime};
-use code_control::agents::sandbox::{BackendConfig, BackendState, SandboxBackend, SandboxConfig, SandboxSpec, default_sizes};
+use code_control::agents::sandbox::{BackendConfig, BackendError, BackendState, ExternalBackend, SandboxBackend, SandboxConfig, SandboxSpec, Tagged, default_sizes};
 use common::daemon::Daemon;
 use common::{App, app_with};
 use parking_lot::Mutex;
@@ -473,6 +473,7 @@ async fn sandboxes_need_a_backend_and_a_server_secret() {
     cfg.url = url;
     let a = app_with(|c| {
         c.admin_token = Some(ADMIN.into());
+        c.review.secret_key = None;
         c.sandboxes.backend = Some(BackendConfig::Agent37(cfg));
     });
     a.req("POST", "/v1/code/owners", Some(json!({ "name": "acme", "kind": "org" })), Some(ADMIN)).await;
@@ -481,11 +482,14 @@ async fn sandboxes_need_a_backend_and_a_server_secret() {
     assert!(v["error"].as_str().unwrap().contains("ROLL_SECRET_KEY"));
 }
 
-/// roll secrets as it answers a person: `usr_ada` may reveal acme's development, nobody else may.
+/// roll secrets as it answers a person: `usr_ada` may reveal acme's development (project
+/// `prj_acme`) until `removed`, nobody else may.
 #[derive(Default)]
 struct Reveals {
     /// `consumer by` of every ask that reached it.
     asked: Mutex<Vec<String>>,
+    /// `usr_ada` was taken off the project.
+    removed: std::sync::atomic::AtomicBool,
 }
 
 #[async_trait::async_trait]
@@ -497,9 +501,15 @@ impl code_control::SecretEnv for Reveals {
         let by = who.user.map(|u| u.user.clone()).or(who.operator.then(|| "operator".to_string())).unwrap_or_default();
         self.asked.lock().push(format!("{consumer} {by}"));
         match (by.as_str(), project, environment) {
-            ("usr_ada", "acme", "development") => Ok(code_control::Revealed { by, values: vec![("DATABASE_URL".into(), "postgres://dev-only".into())] }),
+            ("usr_ada", "acme", "development") => Ok(code_control::Revealed { by, project: "prj_acme".into(), values: vec![("DATABASE_URL".into(), "postgres://dev-only".into())] }),
             _ => Err(code_control::Refused(format!("{by} may not reveal {environment}")).into()),
         }
+    }
+    async fn still_reveals(&self, by: &str, source: Option<(&str, &str)>) -> anyhow::Result<()> {
+        if by == "usr_ada" && source == Some(("prj_acme", "development")) && !self.removed.load(std::sync::atomic::Ordering::SeqCst) {
+            return Ok(());
+        }
+        Err(code_control::Refused(format!("{by} may no longer reveal development")).into())
     }
     async fn leaks(&self, _: &str, _: Vec<String>) -> anyhow::Result<Vec<(usize, String, String, String)>> {
         Ok(vec![])
@@ -928,4 +938,92 @@ fn a_database_with_monthly_prices_opens_with_hourly_ones() {
         assert_eq!(live[0].size.hourly_cents, 3, "2000¢ a month is 3¢ a running hour");
         assert_eq!(store::usage(db.sql(), "own_1", "2026-11").unwrap()[0].hourly_cents, 3);
     }
+}
+
+/// A backend in memory that can start an instance without some of what it was made with (as
+/// docker and fargate can): each instance's state and env.
+#[derive(Default)]
+struct Instances(Mutex<BTreeMap<String, Instance>>);
+
+/// An instance's state and env.
+type Instance = (BackendState, BTreeMap<String, String>);
+
+#[async_trait::async_trait]
+impl SandboxBackend for Instances {
+    fn name(&self) -> &'static str {
+        "docker"
+    }
+    async fn create(&self, spec: &SandboxSpec) -> Result<String, BackendError> {
+        self.0.lock().entry(spec.id.clone()).or_insert((BackendState::Running, spec.env.clone()));
+        Ok(spec.id.clone())
+    }
+    async fn tagged(&self) -> Result<Vec<Tagged>, BackendError> {
+        Ok(self.0.lock().keys().map(|id| Tagged { backend_id: id.clone(), sandbox_id: id.clone() }).collect())
+    }
+    async fn status(&self, id: &str) -> Result<BackendState, BackendError> {
+        Ok(self.0.lock().get(id).map_or(BackendState::Gone, |i| i.0.clone()))
+    }
+    async fn start(&self, id: &str) -> Result<(), BackendError> {
+        self.0.lock().get_mut(id).ok_or_else(|| BackendError::Permanent("gone".into()))?.0 = BackendState::Running;
+        Ok(())
+    }
+    async fn start_without(&self, id: &str, _: &SandboxSpec, without: &[String]) -> Result<bool, BackendError> {
+        let mut m = self.0.lock();
+        let i = m.get_mut(id).ok_or_else(|| BackendError::Permanent("gone".into()))?;
+        i.1.retain(|k, _| !without.contains(k));
+        i.0 = BackendState::Running;
+        Ok(true)
+    }
+    async fn stop(&self, id: &str) -> Result<(), BackendError> {
+        self.0.lock().get_mut(id).ok_or_else(|| BackendError::Permanent("gone".into()))?.0 = BackendState::Stopped;
+        Ok(())
+    }
+    async fn delete(&self, id: &str) -> Result<(), BackendError> {
+        self.0.lock().remove(id);
+        Ok(())
+    }
+}
+
+/// Values copied from roll secrets go to a sandbox's code only while their copier may reveal
+/// them: once they're taken off the project, the next start is without them, says so, and keeps
+/// the rest of what the sandbox was made with.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_removed_copiers_sandbox_starts_without_the_values() {
+    let instances = Arc::new(Instances::default());
+    let backend = instances.clone();
+    let w = world(move |c| c.backend = Some(BackendConfig::External(ExternalBackend(backend)))).await;
+    let secrets = Arc::new(Reveals::default());
+    w.a.code.set_secret_env(secrets.clone());
+    let acme = w.a.code.owner_or_404("acme").unwrap().id;
+    let body = json!({ "name": "box", "env": { "ANTHROPIC_API_KEY": "sk-ant-owner-key" }, "secrets": { "project": "acme", "environment": "development" } });
+    let mut req = axum::http::Request::builder().method("POST").uri("/v1/code/agents/acme/sandboxes").header("content-type", "application/json").body(axum::body::Body::from(body.to_string())).unwrap();
+    req.extensions_mut().insert(roll_auth::SignedIn { user: "usr_ada".into(), handle: "ada".into(), admin: false, code_owner: Some(acme), session: "ses_1".into() });
+    let r = w.a.send(req).await;
+    assert_eq!(r.status(), StatusCode::CREATED);
+    let made: Value = serde_json::from_slice(&axum::body::to_bytes(r.into_body(), 1 << 20).await.unwrap()).unwrap();
+    let id = made["sandbox"]["id"].as_str().unwrap().to_string();
+    w.until(&id, "running", status_is("running")).await;
+    let env = |k: &str| instances.0.lock()[&id].1.get(k).cloned();
+    assert_eq!(env("DATABASE_URL").as_deref(), Some("postgres://dev-only"));
+    // Asked again before each start: while ada still may, a stop and a start keep them.
+    let stop = format!("/v1/code/agents/acme/sandboxes/{id}/stop");
+    let start = format!("/v1/code/agents/acme/sandboxes/{id}/start");
+    w.req("POST", &stop, None).await;
+    w.until(&id, "stopped", status_is("stopped")).await;
+    w.req("POST", &start, None).await;
+    w.until(&id, "running", status_is("running")).await;
+    assert_eq!(env("DATABASE_URL").as_deref(), Some("postgres://dev-only"));
+
+    // Ada is taken off the project: the owner's next start is without what she copied.
+    secrets.removed.store(true, std::sync::atomic::Ordering::SeqCst);
+    w.req("POST", &stop, None).await;
+    w.until(&id, "stopped", status_is("stopped")).await;
+    let (s, v) = w.req("POST", &start, None).await;
+    assert_eq!(s, StatusCode::OK, "{v}");
+    let s = w.until(&id, "running without them", |s| s["status"] == "running" && s["secrets_dropped"].is_string()).await;
+    assert!(s["secrets_dropped"].as_str().unwrap().contains("usr_ada may no longer reveal development"), "{s}");
+    assert!(!s.to_string().contains("postgres://dev-only"), "{s}");
+    assert_eq!(env("DATABASE_URL"), None);
+    assert_eq!(env("ANTHROPIC_API_KEY").as_deref(), Some("sk-ant-owner-key"), "the owner's own env stays");
+    assert!(env("ROLL_AGENT_TOKEN").is_some_and(|t| t.starts_with("rlm_")), "it keeps its machine token");
 }

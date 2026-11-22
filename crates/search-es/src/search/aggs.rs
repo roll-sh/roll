@@ -515,9 +515,11 @@ pub fn date_factory() -> search_aggs::wire::DateFactory {
 }
 
 /// The final reduce, rendered.
-pub fn reduce(cluster: &Cluster, st: &ClusterState, req: &AggRequest, parts: Vec<search_aggs::Aggs>, typed_keys: bool) -> EsResult<Value> {
+pub fn reduce(cluster: &Cluster, st: &ClusterState, req: &AggRequest, parts: Vec<search_aggs::Aggs>, typed_keys: bool, browser: Option<crate::xpack::security::browser::Policy>) -> EsResult<Value> {
     let max_buckets = st.metadata.cluster_setting("search.max_buckets").and_then(|v| v.parse::<usize>().ok()).unwrap_or(65536);
-    let host: Arc<dyn search_aggs::ScriptHost> = Arc::new(super::agg_scripts::Host::new(cluster, None, 0, String::new()));
+    // A browser key's `max_buckets` under the cluster's, and no painless in its pipelines.
+    let max_buckets = browser.as_ref().map_or(max_buckets, |p| p.max_buckets.min(max_buckets));
+    let host: Arc<dyn search_aggs::ScriptHost> = Arc::new(super::agg_scripts::Host::new(cluster, None, 0, String::new()).denying(browser.is_some_and(|p| !p.allow_scripts)));
     let opts = search_aggs::ReduceOptions { final_reduce: true, max_buckets, scripts: Some(host), budget: Some(cluster.breakers.request(cluster, st)), ..Default::default() };
     let out = search_aggs::reduce(parts, req, &opts).map_err(|e| reduce_failure(agg_error(e)))?;
     Ok(from_json(&out.to_json(typed_keys)))
@@ -546,7 +548,9 @@ pub struct Lookup<'a> {
     shard: (u32, u32),
     idx: Arc<crate::meta::IndexMeta>,
     searcher: Searcher,
-    alias_filter: Option<crate::query::Query>,
+    filter: super::query::DocFilter,
+    /// The request's `runtime_mappings`: they apply to the alias filter, as to its query.
+    runtime_mappings: Option<crate::json::Map>,
     parent_fields: Arc<Vec<crate::search_source::FieldAndFormat>>,
     rescore: Option<Arc<Vec<super::PreparedRescore>>>,
     security: Option<crate::xpack::security::dls::ReadSecurity>,
@@ -556,6 +560,12 @@ impl<'a> Lookup<'a> {
     /// The search's rescorers, which `top_hits` sorted by score applies to its buckets.
     pub(crate) fn with_rescore(mut self, rescore: Vec<super::PreparedRescore>) -> Self {
         self.rescore = (!rescore.is_empty()).then(|| Arc::new(rescore));
+        self
+    }
+
+    /// The search's `runtime_mappings`.
+    pub fn with_runtime_mappings(mut self, runtime_mappings: Option<crate::json::Map>) -> Self {
+        self.runtime_mappings = runtime_mappings;
         self
     }
 
@@ -576,7 +586,8 @@ impl<'a> Lookup<'a> {
             shard: (t.shard.id, t.idx.number_of_shards()),
             idx: t.idx.clone(),
             searcher: searcher.clone(),
-            alias_filter: t.alias_filter.clone(),
+            filter: t.filter.clone(),
+            runtime_mappings: None,
             parent_fields: Arc::new(Vec::new()),
             rescore: None,
             security: t.security.clone(),
@@ -609,6 +620,7 @@ impl Lookup<'_> {
         let ctx = QueryCtx::new(self.cluster, self.st, &self.idx, &self.table, &self.searcher, self.now, crate::search::query::Reader::of(self.security.clone()));
         let rf = super::runtime::RuntimeScope::ambient().filter(|s| s.index_name() == self.idx.name).and_then(|s| s.field(field).cloned()).or_else(|| ctx.runtime_field(field));
         let Some(rf) = rf.filter(|f| f.ty != super::runtime::RtType::GeoPoint) else { return Ok(None) };
+        ctx.no_scripts().map_err(err)?;
         let ev = super::runtime::Evaluator::new(&self.cluster.scripts, self.st, &self.table, self.shard.0 as i32, &self.idx.name, rf).map_err(err)?.counted();
         Ok(Some(search_aggs::HitSort::Computed { sort: Arc::new(super::computed_sort::RuntimeKey { ev: Arc::new(ev), reverse }), reverse }))
     }
@@ -827,10 +839,13 @@ impl FieldLookup for Lookup<'_> {
             // with nested fields.
             Arc::new(search_index::query::MatchAllQuery)
         };
-        let Some(af) = &self.alias_filter else { return root };
-        let ctx = QueryCtx::new(self.cluster, self.st, &self.idx, &self.table, &self.searcher, self.now, crate::search::query::Reader::of(self.security.clone()));
-        match ctx.to_filter(af) {
-            Ok(f) => Arc::new(search_index::query::BooleanQuery::new().add(search_index::query::Occur::Filter, f).add(search_index::query::Occur::Filter, root)),
+        let mut ctx = QueryCtx::new(self.cluster, self.st, &self.idx, &self.table, &self.searcher, self.now, crate::search::query::Reader::of(self.security.clone()));
+        ctx.runtime_mappings = self.runtime_mappings.clone();
+        match self.filter.build(&ctx) {
+            Ok(Some(f)) => Arc::new(search_index::query::BooleanQuery::new().add(search_index::query::Occur::Filter, f).add(search_index::query::Occur::Filter, root)),
+            Ok(None) => root,
+            // Document level security that doesn't build hides every document.
+            Err(_) if self.filter.security.is_some() => crate::search::query::match_none("document level security"),
             Err(_) => root,
         }
     }
@@ -962,7 +977,8 @@ impl FieldLookup for Lookup<'_> {
     }
 
     fn scripts(&self) -> Option<Arc<dyn search_aggs::ScriptHost>> {
-        Some(Arc::new(super::agg_scripts::Host::new(self.cluster, Some(self.table.clone()), self.shard.0 as i32, self.index.clone())))
+        let deny = self.security.as_ref().and_then(|s| s.browser()).is_some_and(|p| !p.allow_scripts);
+        Some(Arc::new(super::agg_scripts::Host::new(self.cluster, Some(self.table.clone()), self.shard.0 as i32, self.index.clone()).denying(deny)))
     }
 
     fn time_series(&self) -> Option<search_aggs::TimeSeriesInfo> {
@@ -1279,6 +1295,9 @@ impl search_aggs::TopHitsFetcher for Fetcher {
             marker.insert("highlight".into(), h.clone());
         }
         if get("explain").and_then(Value::as_bool) == Some(true) {
+            if let Some(s) = &self.security {
+                s.refuse_for_browser(crate::xpack::security::browser::Banned::Explain).map_err(fetch_err)?;
+            }
             marker.insert("explain".into(), Value::Bool(true));
         }
         if let Some(sf @ Value::Obj(_)) = get("script_fields") {

@@ -97,7 +97,8 @@ pub fn shape_query(ctx: &QueryCtx, f: Arc<RtField>, relation: ShapeRelation, sha
 
 /// `distance_feature` on runtime field `f`.
 pub fn distance_feature(ctx: &QueryCtx, f: Arc<RtField>, lat: f64, lon: f64, pivot: f64) -> EsResult<QueryRef> {
-    let ev = Arc::new(Evaluator::new(&ctx.cluster.scripts, ctx.st, ctx.table, ctx.shard as i32, &ctx.idx.name, f.clone())?);
+    ctx.no_scripts()?;
+    let ev = Arc::new(Evaluator::new(&ctx.cluster.scripts, ctx.st, ctx.table, ctx.shard as i32, &ctx.idx.name, f.clone())?.with_runtime(ctx.runtime_source.clone()));
     let query = ctx.runtime_query(f, Predicate::Exists)?;
     let script = Arc::new(DistanceScore(Arc::new(Distance { ev, lat, lon, pivot })));
     Ok(arc(search_index::query::function_score::ScriptScoreQuery { query, script, min_score: None }))

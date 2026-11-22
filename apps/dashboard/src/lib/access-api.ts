@@ -52,6 +52,29 @@ export function proposedRule(search: string, effect: Effect): Rule | null {
   return { product, resources, actions: { [action as Action]: effect } };
 }
 
+/**
+ * The step-up a client's `scope` names (`roll:step-up:stp_…`: roll's `insufficient_scope` challenge on
+ * a refused call). Only an id: what it proposes is roll's record, looked up as the signed-in person.
+ */
+export function stepUpId(scope: string | undefined | null): string | null {
+  const ids = (scope ?? "").split(/\s+/).filter((s) => s.startsWith("roll:step-up:")).map((s) => s.slice("roll:step-up:".length));
+  return ids.length === 1 && /^stp_[A-Za-z0-9_]{1,60}$/.test(ids[0]) ? ids[0] : null;
+}
+
+/** What a step-up proposes: one rule for one of the person's connections. */
+export interface StepUp {
+  id: string;
+  connection: { id: string; name: string; client_id: string | null };
+  rule: Rule;
+  /** Adding it makes the connection wait for an admin's approval (the token policy). */
+  waits_for_admin: boolean;
+}
+
+/** Whether a rule reaches far: admin or reveal, or every resource of its product. */
+export function broadRule(r: Rule): boolean {
+  return r.resources === "*" || r.actions.admin !== undefined || r.actions.reveal !== undefined;
+}
+
 export interface OAuthClient {
   id: string;
   name: string;
@@ -353,6 +376,25 @@ export interface Policy {
   approve_people?: Action[];
   /** What needs more than one approver, and whose (each rule covering a request is a gate). */
   approval_rules?: ApprovalRule[];
+  /** What an agent (through roll's MCP server) asks a person for first, whatever its token allows. */
+  agents_ask?: AskRule[];
+  /** Every token's and OAuth connection's MCP is in lockdown, whatever its URL asks. */
+  mcp_lockdown?: boolean;
+  /** Every token's and OAuth connection's MCP sees and runs only tools that read. */
+  mcp_read_only?: boolean;
+}
+
+/** One of the policy's `agents_ask`: a product (or "*"), its actions and environments (all when left out). */
+export interface AskRule {
+  product: string;
+  actions?: Action[];
+  environments?: string[];
+}
+
+/** An agents_ask rule in words: "postgres delete in prod*". */
+export function describeAskRule(r: AskRule): string {
+  const what = `${r.product === "*" ? "anything" : r.product} ${r.actions?.length ? r.actions.join(", ") : "any action"}`;
+  return r.environments?.length ? `${what} in ${r.environments.join(", ")}` : what;
 }
 
 /** A rule of the policy: requests it covers need `approvals` approvals from `approvers` (anyone who may decide when left out), never from the token's own person. */
@@ -388,6 +430,8 @@ export interface Allowed {
 }
 
 export interface Consent extends Allowed {
+  /** Step-up: the step-up roll recorded (`stp_…`); its one rule joins its connection, nothing else changes. */
+  step_up?: string;
   client_id: string;
   redirect_uri: string;
   code_challenge: string;
@@ -691,6 +735,8 @@ export const accessApi = {
   removeEnterpriseApp: (id: string) => call<{ revoked: number }>("DELETE", `/v1/access/enterprise/apps/${encodeURIComponent(id)}`),
   catalog: () => call<Catalog>("GET", "/v1/access/catalog"),
   tokens: () => call<Grant[]>("GET", "/v1/access/tokens"),
+  /** A step-up's proposal, the signed-in person's own (an error for anyone else's). */
+  stepUp: (id: string) => call<StepUp>("GET", `/v1/access/oauth/step-ups/${encodeURIComponent(id)}`),
   /** The latest workload tokens (they're not in `tokens`). */
   workloads: () => call<Grant[]>("GET", "/v1/access/tokens?kind=workload"),
   token: (id: string) => call<Grant>("GET", token(id)),

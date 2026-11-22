@@ -77,6 +77,13 @@ pub trait Brancher: Send + Sync {
     /// refused). Ok when it's already gone. Never touches `parent`.
     async fn delete(&self, parent: &str, branch: &str, name: &str) -> anyhow::Result<()>;
 
+    /// Before `branch` is deleted or reset: revoke the credentials it handed out (`kept`), for a
+    /// product that keeps a deleted branch restorable with them (roll search's restore window).
+    /// Ok when they're already gone. Nothing by default.
+    async fn retire(&self, _parent: &str, _branch: &str, _kept: Option<&str>) -> anyhow::Result<()> {
+        Ok(())
+    }
+
     /// How a service reaches the branch, as environment variables (`DATABASE_URL`, …). Read
     /// fresh for every deploy: nothing here is stored.
     async fn connect(&self, parent: &str, branch: &str, kept: Option<&str>) -> anyhow::Result<Vec<(String, String)>>;
@@ -461,6 +468,14 @@ pub struct Target {
     /// With `egress` `roll`: the hosts outside roll it may still reach, through the preview's
     /// egress proxy.
     pub egress_hosts: Vec<String>,
+    /// The project's `crons`: a backend's scheduled work (roll apps' crons, scheduled commands and
+    /// calls) runs in the preview too; off, it's deployed with its schedule off.
+    pub crons: bool,
+    /// With `egress` `roll`, for a backend that resolves the environment's secrets itself (roll
+    /// apps' `closed_by`): who its keys bound to hosts are used as, the person who last saved
+    /// the project's preview rules, or their token. None: nobody (the operator saved them), and
+    /// those keys are withheld. The runtime reads it itself ([`crate::Engine`]'s secrets).
+    pub maker: Option<String>,
     /// The `n`th rebuild a deploy hook asked for: built again at the same head with nothing
     /// cached (a static site reads its content at build time). roll apps builds with `no_cache`;
     /// the runtime builds at each start anyway.
@@ -753,6 +768,10 @@ pub trait Apps: Send + Sync {
     /// The hosts the preview's egress proxy refused lately (its project's `egress_hosts` don't
     /// list them), each once. No default, as `warm`.
     async fn egress_refused(&self, preview: &str) -> Vec<String>;
+    /// What a backend's own egress proxies swapped and refused for the preview's keys, where the
+    /// backend resolves its secrets itself (roll apps' `pv-` environments). None: nothing there.
+    /// No default, as `warm`.
+    async fn intercepted(&self, preview: &str) -> Option<crate::AppsIntercepted>;
     /// A login shell in the running service (started if it sleeps), `cols` by `rows`. `None`
     /// where this backend has none here: roll apps' services have roll apps' own shell, on
     /// their `pv-` environment.

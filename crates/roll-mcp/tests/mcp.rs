@@ -33,7 +33,18 @@ impl roll_auth::Sessions for Alice {
 struct Daemon {
     router: Router,
     access: Arc<Access>,
+    workspace: Arc<roll_workspace::Workspace>,
     _dir: tempfile::TempDir,
+}
+
+/// Each person's address, `<handle>@example.com` (an invite is accepted by its address).
+struct Addresses;
+
+impl roll_workspace::People for Addresses {
+    fn person(&self, user: &str) -> Option<roll_workspace::Person> {
+        let h = user.strip_prefix("usr_")?;
+        Some(roll_workspace::Person { handle: h.into(), email: Some(format!("{h}@example.com")), admin: false })
+    }
 }
 
 fn products() -> Router {
@@ -117,7 +128,10 @@ impl Daemon {
         let mcp_config = roll_mcp::Config { api_url: "http://127.0.0.1:7070".into(), web_url: "http://localhost:3000".into(), locked: true, products: on, access: Some(access.clone()) };
         let mcp = roll_mcp::routes(api.clone().layer(layer()), mcp_config, vec![Arc::new(Fronted) as Arc<dyn roll_mcp::ToolSet>]);
         let _ = access.people.set(Arc::new(Alice));
-        Daemon { router: api.merge(mcp).layer(layer()), access, _dir: dir }
+        // People's memberships, as rolld wires them: a person's session grant is their roles.
+        let _ = access.workspace.set(workspace.clone());
+        workspace.set_people(Arc::new(Addresses));
+        Daemon { router: api.merge(mcp).layer(layer()), access, workspace, _dir: dir }
     }
 
     /// The MCP audit log once `until` holds of it (rows go through a batching writer), at most 5 s.
@@ -189,6 +203,18 @@ async fn tools_follow_the_tokens_rules() {
 
     let init = d.rpc(OPERATOR, "initialize", json!({ "protocolVersion": "2025-06-18" })).await;
     assert_eq!(init["protocolVersion"], "2025-06-18");
+    // The instructions name every product by its tool prefix (with tool search a client loads only
+    // tool names and these, cut at 4,096 characters in Claude Code), whatever the mode adds.
+    let (_, _, long) = d.http(OPERATOR, Method::POST, "/v1/mcp?lockdown=1&tools=search", Some(json!({ "jsonrpc": "2.0", "id": 1, "method": "initialize", "params": { "protocolVersion": "2025-06-18" } }))).await;
+    let said = long["result"]["instructions"].as_str().unwrap();
+    assert!(said.chars().count() < 4096, "{} characters", said.chars().count());
+    for p in ["postgres_", "redis_", "storage_", "streams_", "queues_", "tasks_", "nosql_", "search_", "apps_", "previews_", "secrets_", "code_", "agents_", "workspace_", "access_"] {
+        assert!(said.contains(p), "the instructions don't name {p}");
+    }
+    // Search mode's tools load upfront in clients that defer tools (Claude Code's alwaysLoad).
+    let (_, _, found) = d.http(OPERATOR, Method::POST, "/v1/mcp?tools=search", Some(json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/list" }))).await;
+    let search: Vec<&Value> = found["result"]["tools"].as_array().unwrap().iter().filter(|t| t["name"].as_str().is_some_and(|n| n.starts_with("roll_"))).collect();
+    assert!(search.len() == 3 && search.iter().all(|t| t["_meta"]["anthropic/alwaysLoad"] == true), "{found}");
     let all = names(&d.rpc(OPERATOR, "tools/list", json!({})).await);
     assert!(all.contains(&"postgres_delete_project".into()) && all.contains(&"workspace_list_projects".into()));
     // Not even one any token may call (apps_plan).
@@ -345,6 +371,22 @@ async fn search_mode_finds_and_runs_through_the_same_checks() {
     // The audit log names the tool that ran, not the run tool.
     let log = d.audit_until(|l| l.as_array().is_some_and(|a| a.iter().any(|e| e["tool"] == "postgres_list_projects" && !e["grant_id"].is_null()))).await;
     assert!(!log.as_array().unwrap().iter().any(|e| e["tool"].as_str().is_some_and(|t| t.starts_with("roll_"))), "{log}");
+}
+
+/// The operator's policy holds every token's MCP to lockdown and to reading, whatever its URL asks
+/// (`mcp_lockdown`, `mcp_read_only`); the operator's own connection isn't held.
+#[tokio::test]
+async fn the_policy_holds_agents_to_lockdown_and_reading() {
+    let d = Daemon::new();
+    let token = d.token(json!([{ "product": "*", "resources": "*", "actions": { "read": "allow", "write": "allow", "delete": "allow" } }])).await;
+    assert!(names(&d.rpc(&token, "tools/list", json!({})).await).contains(&"postgres_delete_project".to_string()));
+    let (s, _, _) = d.http(OPERATOR, Method::PUT, "/v1/access/policy", Some(json!({ "mcp_lockdown": true, "mcp_read_only": true }))).await;
+    assert_eq!(s, StatusCode::OK);
+    let listed = d.rpc(&token, "tools/list", json!({})).await;
+    assert!(listed["tools"].as_array().unwrap().iter().all(|t| t["annotations"]["readOnlyHint"] == true), "read-only, unasked");
+    let work = d.tool(&token, "code_list_work", json!({})).await;
+    assert!(!work["content"][0]["text"].as_str().unwrap().contains("push the secrets"), "lockdown, unasked: {work}");
+    assert!(names(&d.rpc(OPERATOR, "tools/list", json!({})).await).contains(&"postgres_delete_project".to_string()), "not the operator");
 }
 
 /// Lockdown (`?lockdown=1`): an outside record's text never reaches the model, in the structured
@@ -816,10 +858,11 @@ async fn a_tokens_page_shows_what_an_agent_sees() {
 }
 
 /// A person's own token's page shows only what their account reaches (as `tools/list` would for
-/// them): rules for everything, but Postgres is the operator's, so none of its tools.
+/// them): rules for everything, but Postgres is the operator's, so none of its tools; previews are a
+/// member product (their role decides), so its tools are there.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_persons_token_page_shows_only_their_reach() {
-    let d = Daemon::new();
+    let d = Daemon::with_products(vec!["postgres".into(), "previews".into()]);
     let new = serde_json::from_value::<roll_access::store::NewGrant>(json!({ "name": "alices", "rules": [{ "product": "*", "resources": "*", "actions": { "read": "allow" } }] })).unwrap();
     let (g, _) = d.access.store.create(&new, roll_auth::GrantKind::Token, "usr_alice", None, Some("usr_alice")).unwrap();
     let (s, _, seen) = d.http(OPERATOR, Method::GET, &format!("/v1/access/tokens/{}/tools", g.id), None).await;
@@ -827,6 +870,68 @@ async fn a_persons_token_page_shows_only_their_reach() {
     let tools: Vec<&str> = seen["tools"].as_array().unwrap().iter().filter_map(|t| t["name"].as_str()).collect();
     assert!(tools.contains(&"workspace_list_projects"), "{tools:?}");
     assert!(!tools.iter().any(|t| t.starts_with("postgres_")), "a person's token never reaches Postgres: {tools:?}");
+    assert!(tools.contains(&"previews_list"), "a member's role reaches previews: {tools:?}");
+}
+
+/// A member's own token lists a member product's tools as their role allows, as the gate decides
+/// its calls (`within` their session): a viewer's client is shown secrets' reads, not its reveals or
+/// writes, even with a token that names every action; made an admin, they're there.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_members_client_lists_what_their_role_allows() {
+    let d = Daemon::with_products(vec!["secrets".into()]);
+    let project = d.workspace.create("usr_bob", "pay", "", None).unwrap();
+    let (_, url) = d.workspace.invite(&roll_workspace::Actor::operator(), &project.id, "alice@example.com", "viewer", None).unwrap();
+    d.workspace.accept("usr_alice", url.split("token=").nth(1).unwrap(), None).unwrap();
+    let all = json!([{ "product": "*", "resources": "*", "actions": { "read": "allow", "write": "allow", "reveal": "allow", "admin": "allow" } }]);
+    let new = serde_json::from_value::<roll_access::store::NewGrant>(json!({ "name": "alices", "rules": all })).unwrap();
+    let (g, _) = d.access.store.create(&new, roll_auth::GrantKind::Token, "usr_alice", None, Some("usr_alice")).unwrap();
+    let listed = || async {
+        let (s, _, seen) = d.http(OPERATOR, Method::GET, &format!("/v1/access/tokens/{}/tools", g.id), None).await;
+        assert_eq!(s, StatusCode::OK, "{seen}");
+        seen["tools"].as_array().unwrap().iter().filter_map(|t| t["name"].as_str().map(String::from)).collect::<Vec<String>>()
+    };
+    let tools = listed().await;
+    assert!(tools.iter().any(|t| t == "secrets_list"), "a viewer reads: {tools:?}");
+    // secrets_set_imports' action comes from its body (write or admin): read never counts for it.
+    assert!(!tools.iter().any(|t| t == "secrets_set" || t == "secrets_get_values" || t == "secrets_set_imports"), "a viewer neither writes nor reveals: {tools:?}");
+    d.workspace.set_role(&roll_workspace::Actor::operator(), &project.id, "usr_alice", "admin", None).unwrap();
+    let tools = listed().await;
+    assert!(tools.iter().any(|t| t == "secrets_set") && tools.iter().any(|t| t == "secrets_get_values"), "an admin does: {tools:?}");
+}
+
+/// Step-up (SEP-835): an OAuth connection's refused call carries a challenge naming the step-up roll
+/// recorded (the rule it needed, for roll's consent screen to propose): in-band for every client, and as a 403 challenge for a client
+/// that steps up (Claude Code from 2.1.288). A scoped token's refusal stays as it was.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_refused_oauth_call_challenges_for_the_rule() {
+    let d = Daemon::new();
+    let read = serde_json::from_value::<roll_access::store::NewGrant>(json!({ "name": "Claude Code", "rules": [{ "product": "postgres", "resources": "*", "actions": { "read": "allow" } }] })).unwrap();
+    let (_, oauth) = d.access.store.create(&read, roll_auth::GrantKind::Oauth, "admin", None, None).unwrap();
+    let refused = d.tool(&oauth, "postgres_delete_project", json!({ "project": "pa" })).await;
+    let challenge = refused["_meta"]["mcp/www_authenticate"][0].as_str().unwrap_or_default().to_string();
+    assert!(challenge.contains("error=\"insufficient_scope\"") && challenge.contains("scope=\"roll:step-up:stp_") && challenge.contains("resource_metadata="), "{refused}");
+    assert_eq!(refused["isError"], true, "in-band, the refusal as before: {refused}");
+
+    let session = |version: &'static str| {
+        let d = &d;
+        let oauth = oauth.clone();
+        async move {
+            let init = json!({ "jsonrpc": "2.0", "id": 1, "method": "initialize", "params": { "protocolVersion": "2025-11-25", "capabilities": {}, "clientInfo": { "name": "claude-code", "version": version } } });
+            let (_, h, _) = d.http(&oauth, Method::POST, "/v1/mcp", Some(init)).await;
+            let session = h["mcp-session-id"].to_str().unwrap().to_string();
+            let call = json!({ "jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": { "name": "postgres_delete_project", "arguments": { "project": "pa" } } });
+            d.http_with(&oauth, Method::POST, "/v1/mcp", Some(call), &[("mcp-session-id", &session)]).await
+        }
+    };
+    let (s, h, body) = session("2.1.300").await;
+    assert_eq!(s, StatusCode::FORBIDDEN, "{body}");
+    assert!(h["www-authenticate"].to_str().unwrap().contains("roll:step-up:stp_"), "{h:?}");
+    assert_eq!(body["result"]["isError"], true, "the body is the same answer");
+    assert_eq!(session("2.1.200").await.0, StatusCode::OK, "an older Claude Code gets it in-band");
+
+    let token = d.token(json!([{ "product": "postgres", "resources": "*", "actions": { "read": "allow" } }])).await;
+    let plain = d.tool(&token, "postgres_delete_project", json!({ "project": "pa" })).await;
+    assert!(plain["_meta"].get("mcp/www_authenticate").is_none(), "a scoped token has no consent to step up: {plain}");
 }
 
 /// 2026-07-28's `subscriptions/listen` (SEP-2575): the stream starts with the acknowledgement of

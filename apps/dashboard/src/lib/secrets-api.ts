@@ -7,7 +7,7 @@
  * revealed value for as long as it's shown and no longer.
  */
 
-import type { Action, SecretType, Environment, NewEnvironment, Overview, Folder, Import, Link, Secret, SetSecret, Batch, Change, Written, Applied, ChangeDetail, Version, Problem, Values, Grid, Compare, RequestState, RequestValue, Insights, ChangeRequest, LinkTarget, Lease, Hosts, PlaceholderRecord, Token, Export, Ensure, Ensured, Suggestion, Identity, NewIdentity, Required, KeyType, Totp, Share, NewShare, ValueRequest, NewValueRequest, NewToken, AuditEntry, AuditFilter, AuditVerification, AuditFormat, Sink, Imported, ImportedAsRequest, ExportFormat, Sync, NewSync, SyncKind, Health, WhoAmI, Place, Rotator, SaasRotator, NewSaasRotator, AwsRole, Finding, ProjectFindings, SyncPreview, FileDiff, OutsideDatabase, Directory, NewDirectory, SnowflakeAccount, NewSnowflakeAccount, AtlasProject, NewAtlasProject, AwsUser, CloudAccount, NewCloudAccount, KubernetesCluster, NewKubernetesCluster, SignedCertificate, CaCertificate, Ca, AcmeSettings, NewAcmeKey, SshCa, HostCertificate, UserCertificate, TransitKey, TransitPublicKey, Rotation, FolderPolicy, Reach, GitHubApp, SinkFormat, Gateway, MadeGateway, NewDecoy, CutOff, CutOffRequest, ValidityProbe, CheckedCredential } from "@roll/secrets/types";
+import type { Action, SecretType, Environment, NewEnvironment, Overview, Folder, Import, Link, Secret, SetSecret, Batch, Change, Written, Applied, ChangeDetail, Version, Problem, Values, Grid, Compare, RequestState, RequestValue, Insights, ChangeRequest, LinkTarget, Lease, Hosts, PlaceholderRecord, Token, Export, Ensure, Ensured, Suggestion, Identity, NewIdentity, Required, KeyType, Totp, Share, NewShare, ValueRequest, NewValueRequest, NewToken, AuditEntry, AuditFilter, AuditVerification, AuditFormat, Sink, Imported, ImportedAsRequest, ExportFormat, Sync, NewSync, SyncKind, Health, WhoAmI, Place, Rotator, SaasRotator, NewSaasRotator, AwsRole, Finding, ProjectFindings, SyncPreview, FileDiff, OutsideDatabase, Directory, NewDirectory, SnowflakeAccount, NewSnowflakeAccount, AtlasProject, NewAtlasProject, AwsUser, CloudAccount, NewCloudAccount, KubernetesCluster, NewKubernetesCluster, SignedCertificate, CaCertificate, Ca, AcmeSettings, NewAcmeKey, SshCa, HostCertificate, UserCertificate, TransitKey, TransitPublicKey, Rotation, FolderPolicy, Reach, GitHubApp, SinkFormat, Gateway, MadeGateway, NewDecoy, CutOff, CutOffRequest, ValidityProbe, CheckedCredential, DeletedProject, Recovered } from "@roll/secrets/types";
 import type { Grant } from "./access-api";
 import { withSession } from "./code-token";
 import { grantFor, tokenOf } from "./secrets-tokens";
@@ -111,7 +111,8 @@ export function secretsApi(project: string) {
     setFolderPolicy: (env: string, path: string, p: { approvals?: number; approvers?: string[] } = {}) => req<FolderPolicy>("PUT", `${E(env)}/folder-policies${qs({ path })}`, p),
     deleteFolderPolicy: (env: string, path: string) => req<null>("DELETE", `${E(env)}/folder-policies${qs({ path })}`),
     /** Destroys older versions' values of a key (all but the current one by default). */
-    /** Binds a key to hosts (an admin's): its value then reaches placeholder-taking consumers only through roll's proxy. */
+    /** Binds a key to hosts (an admin's): its value then reaches placeholder-taking consumers only through roll's proxy, only in
+     * the binding's header or query parameter (`untrusted` needs one: 400 `placement_required`). */
     setHosts: (env: string, key: string, hosts: Hosts, path = "/") => req<Hosts>("PUT", `${K(env, key)}/hosts${qs({ path })}`, hosts),
     clearHosts: (env: string, key: string, path = "/") => req<null>("DELETE", `${K(env, key)}/hosts${qs({ path })}`),
     purge: (env: string, key: string, path = "/", before_version?: number) => req<{ purged: number }>("POST", `${K(env, key)}/purge${qs({ path })}`, before_version ? { before_version } : {}),
@@ -347,6 +348,10 @@ export const secretsIssuer = () => req<{ issuer: string; jwks_uri: string }>("GE
 /** Every project's findings the caller may read, projects with none left out. */
 export const allFindings = () => req<ProjectFindings[]>("GET", "/v1/secrets/findings");
 export const findSecret = (key: string) => req<Place[]>("GET", `/v1/secrets/search?key=${encodeURIComponent(key)}`);
+/** Deleted projects in their recovery window that the caller may recover, soonest purged first. */
+export const deletedProjects = () => req<DeletedProject[]>("GET", "/v1/secrets/deleted");
+/** Brings a deleted project back (its workspace project and canvas too): 410 `gone` once its window ended, 409 `name_taken` if another project has its name now. */
+export const recoverProject = (project: string) => req<Recovered>("POST", `/v1/secrets/projects/${enc(project)}/recover`);
 
 /** The rule for keys (docs/secrets.md, "Secrets"). */
 export const SECRET_KEY = /^[A-Za-z_][A-Za-z0-9_]{0,255}$/;

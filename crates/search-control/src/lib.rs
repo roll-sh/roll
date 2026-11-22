@@ -19,6 +19,7 @@ pub mod api;
 pub mod cluster;
 pub mod control;
 pub mod meter;
+pub mod migrate;
 pub mod pricing;
 pub mod remotes;
 pub mod secret_refs;
@@ -33,3 +34,19 @@ pub use search_es::seal::Sealer;
 pub use search_es::api::snapshots::S3_ALLOW_PRIVATE;
 /// Node setting that lets inference endpoints reach private addresses (local development, tests).
 pub use search_es::xpack::inference::http::ALLOW_PRIVATE as INFERENCE_ALLOW_PRIVATE;
+pub use search_es::api::remote::ALLOW_PRIVATE as REINDEX_ALLOW_PRIVATE;
+pub use search_es::api::remote::MAX_DURATION as REINDEX_MAX_DURATION;
+pub use search_es::api::remote::DENY_ADDRESSES as REINDEX_DENY_ADDRESSES;
+pub use search_es::api::remote::DENY_NAMES as REINDEX_DENY_NAMES;
+
+/// Whether `n` is an address or network the reindex deny list takes.
+pub fn reindex_deny_net_ok(n: &str) -> bool {
+    search_es::api::remote::Net::parse(n).is_some()
+}
+
+/// Checks a time value given to a flag (`24h`, `90m`), as Elasticsearch parses one.
+pub fn check_time_value(v: &str, flag: &str) -> anyhow::Result<()> {
+    search_es::units::TimeValue::parse(v, flag).map(|_| ()).map_err(|e| anyhow::anyhow!("{flag}: {}", e.reason()))
+}
+/// The node setting capping one search's time (`roll.search.max_time`).
+pub use search_es::search::MAX_TIME as SEARCH_MAX_TIME;

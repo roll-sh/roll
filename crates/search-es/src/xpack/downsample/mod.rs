@@ -251,7 +251,7 @@ async fn scan(ctx: &Ctx<'_>, source: &str, fields: &Fields, mut sampler: Sampler
     query.insert("sort".into(), Value::from(vec![obj! { "_tsid" => "asc" }, obj! { TIMESTAMP => "desc" }]));
     query.insert("_source".into(), obj! { "includes" => Value::from(includes) });
     query.insert("docvalue_fields".into(), Value::from(fields.doc_value_fields()));
-    let uri = format!("/{}/_search", enc(source));
+    let uri = format!("/{}/_search?{}", enc(source), internal::STRICT);
     let mut out = Vec::new();
     loop {
         let page = internal::call(ctx.cluster, "POST", &uri, Some(&Value::Obj(query.clone()))).await?;

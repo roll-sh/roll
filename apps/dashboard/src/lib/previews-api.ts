@@ -156,9 +156,21 @@ export interface Preview {
   regressions?: "check" | "required" | null;
   /** Who accepted its regressions at its head. */
   regressions_accepted?: { head: string; by: string; at: number } | null;
+  /** Compared with main's preview at its head (errors; routes too with traces): until then nothing says it has no regressions. */
+  regressions_compared?: boolean;
   /** The keys it holds as placeholders (its egress proxy swaps each in for its hosts only), and
    * how many requests had one swapped in or were refused. Never a value. */
-  intercepted?: { keys: { key: string; hosts: string[] }[]; swapped: number; refused: number } | null;
+  /** How its head came up: when converging it started, and when each step first finished
+   * (`data`, `setup`, `deploy`, `checks`, `ready`, in order). */
+  timeline?: { head: string; started_at: number; steps: { step: string; at: number }[] } | null;
+  intercepted?: {
+    keys: { key: string; hosts: string[] }[];
+    swapped: number;
+    refused: number;
+    /** roll apps' proxies for its services there (their own placeholders): requests filtered,
+     * placeholders swapped, the latest refusals' reasons. */
+    on_apps?: { requests: number; swapped: number; refused?: string[] };
+  } | null;
   /** Its error groups main's preview doesn't have, as its holder last read them. */
   new_errors?: { branch: string; total: number; errors: { service: string; title: string }[] } | null;
   slower_routes?: { branch: string; routes: { name: string; count: number; p50_ms: number; main_p50_ms: number; grew?: GrewSpan | null; /** Its budget, when it's over it. */ budget_ms?: number | null }[] } | null;
@@ -365,6 +377,10 @@ export interface EndpointTime {
 /** Slower than main's by half again and by more than 20 ms (`EndpointAgainst::slower`). */
 export const endpointSlower = (e: EndpointTime) => e.slower ?? (e.main_ms != null && e.ms * 2 > e.main_ms * 3 && e.ms > e.main_ms + 20);
 
+/** Which row of the screenshot's chooser a page check goes in: a page, a view of the first one (a
+ * width or a browser), or a state (`state:<name>`). */
+export const pageGroup = (path: string): "Pages" | "Views" | "States" => (/^@\d+$/.test(path) || path.startsWith("browser:") ? "Views" : path.startsWith("state:") ? "States" : "Pages");
+
 export const pageLabel = (path: string) =>
   /^@\d+$/.test(path) ? `${path.slice(1)} px` : path === "browser:firefox" ? "Firefox" : path === "browser:webkit" ? "WebKit" : path === "browser:webkit-phone" ? "WebKit, phone" : path || "/";
 
@@ -423,6 +439,8 @@ export interface PreviewSettings {
   env_for: Record<string, Record<string, string>>;
   /** Wake the change's services as soon as a new head is deployed (a warm first visit). */
   warm: boolean;
+  /** A roll apps cron service runs its schedule in previews too (off: deployed, schedule off). */
+  crons?: boolean;
   /** Run once on fresh data (after branching or a reset) before the services deploy. */
   seed: PreviewJob | null;
   /** Run at each new head, after the seed and before services deploy (migrations). */
@@ -526,9 +544,10 @@ export const previewsApi = {
   /** Newest first. */
   list: (filter: { project?: string; state?: PreviewState } = {}) => call<Preview[]>("GET", `/v1/previews${query(filter)}`),
   get: (id: string) => call<Preview>("GET", one(id)),
-  /** A preview of a branch (no change) or of a change; the existing one if there is one. */
+  /** A preview of a branch (no change) or of a change; the existing one if there is one. Made in the
+   * project `X-Roll-Project` names, which roll-access decides a member's create by. */
   create: (projectId: string, repo: string, source: PreviewSource) =>
-    call<Preview>("POST", "/v1/previews", { project: projectId, repo, ...source }),
+    call<Preview>("POST", "/v1/previews", { project: projectId, repo, ...source }, { "x-roll-project": projectId }),
   /** Marks it for deletion (`desired: "deleted"`); the reconciler removes it. */
   remove: (id: string) => call<Preview>("DELETE", one(id)),
   refresh: (id: string) => call<Preview>("POST", `${one(id)}/refresh`),
