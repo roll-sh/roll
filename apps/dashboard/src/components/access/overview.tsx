@@ -803,6 +803,10 @@ function PolicyPanel() {
           <input type="checkbox" checked={Boolean(p.mcp_read_only)} onChange={(e) => void save({ ...p, mcp_read_only: e.target.checked })} />
           only read
         </label>
+        <label className="flex items-center gap-1.5">
+          <input type="checkbox" checked={Boolean(p.mcp_require_grant)} onChange={(e) => void save({ ...p, mcp_require_grant: e.target.checked })} />
+          never with the admin token
+        </label>
       </div>
       <AgentAsks rules={p.agents_ask ?? []} save={(agents_ask) => save({ ...p, agents_ask })} />
       <OAuthClients list={p.oauth_clients ?? []} save={(oauth_clients) => save({ ...p, oauth_clients })} />

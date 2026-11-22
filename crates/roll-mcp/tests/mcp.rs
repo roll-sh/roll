@@ -398,6 +398,11 @@ async fn the_policy_holds_agents_to_lockdown_and_reading() {
     let work = d.tool(&token, "code_list_work", json!({})).await;
     assert!(!work["content"][0]["text"].as_str().unwrap().contains("push the secrets"), "lockdown, unasked: {work}");
     assert!(names(&d.rpc(OPERATOR, "tools/list", json!({})).await).contains(&"postgres_delete_project".to_string()), "not the operator");
+    // Agents only as grants: the admin token gets OAuth's challenge, a token goes on.
+    assert_eq!(d.http(OPERATOR, Method::PUT, "/v1/access/policy", Some(json!({ "mcp_require_grant": true }))).await.0, StatusCode::OK);
+    let (s, h, _) = d.http(OPERATOR, Method::POST, "/v1/mcp", Some(json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/list" }))).await;
+    assert!(s == StatusCode::UNAUTHORIZED && h.get("www-authenticate").is_some_and(|v| v.to_str().unwrap().contains("resource_metadata")), "{s}");
+    assert!(!d.rpc(&token, "tools/list", json!({})).await["tools"].as_array().unwrap().is_empty());
 }
 
 /// Lockdown (`?lockdown=1`): an outside record's text never reaches the model, in the structured

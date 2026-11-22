@@ -1058,7 +1058,10 @@ MCP clients for themselves, as GitHub's fine-grained tokens act for the person w
   `production`): only requests made through roll's MCP server, so CI and scripts calling the API
   aren't held; an approval already given still lets the call through. `mcp_lockdown` and
   `mcp_read_only` hold every token's and OAuth connection's MCP to lockdown or to reading,
-  whatever its URL asks (the operator's own connection isn't held). A quiet call (a completion, an MCP Events
+  whatever its URL asks (the operator's own connection isn't held). `mcp_require_grant` takes agents only as
+  grants: the admin token, an admin's session and an open daemon get a 401 with OAuth's challenge at
+  `/v1/mcp` (as Stripe's MCP server refuses full-access keys from 2027-01-11), so no agent connects
+  past these controls. A quiet call (a completion, an MCP Events
   webhook delivery reading for its grant) that `agents_ask` covers is refused, nobody asked. `oauth_clients` lists the
   OAuth clients that may connect (empty: any): a host (`claude.ai`, `*.example.com`), an exact
   `https://` URL, `localhost`, an app scheme (`cursor:`) or `device`; a registered client matches
@@ -1282,7 +1285,7 @@ Under `/v1/access`. Bodies are JSON; errors are `{"error": string, "code"?: stri
 | `PATCH /v1/access/enterprise/apps/{id}` | operator | `{name?, rules?}`: the app as changed; its people's connections take new rules in the same write |
 | `POST /v1/access/enterprise/apps/{id}/rotate` | operator | `{public_jwk?, keep_old_for_s?}`: a new key, or a new `client_secret` answered once; the old secret works that long (at most a week) or stops now with every token its people hold |
 | `DELETE /v1/access/enterprise/apps/{id}` | operator | remove an app, revoking its people's connections: `{revoked}` |
-| `GET /v1/access/policy` | operator | `{max_days, require_expiry, max_idle_days, approve_people, approval_rules, agents_ask, mcp_lockdown, mcp_read_only, oauth_clients, approval_wait_minutes}`: roll's rules for every grant, and what needs several approvers ("Two-person approvals") |
+| `GET /v1/access/policy` | operator | `{max_days, require_expiry, max_idle_days, approve_people, approval_rules, agents_ask, mcp_lockdown, mcp_read_only, mcp_require_grant, oauth_clients, approval_wait_minutes}`: roll's rules for every grant, and what needs several approvers ("Two-person approvals") |
 | `PUT /v1/access/policy` | operator | change them; a grant made, rotated, or whose rules, lifetime or addresses change, must fit (consent too) |
 | `GET /v1/access/notify` | operator | where approvals are posted: `{chat: {install, channel, approvers} \| null}` |
 | `PUT /v1/access/notify` | operator | `{chat: {install, channel, approvers} \| null}` |
