@@ -726,8 +726,11 @@ both with Elasticsearch 9.5.5's shapes, validation and state machines
     value only sealed; one in the clear is refused (`give it again`).
   - A node without `ROLL_SECRET_KEY` has no key to seal with, so it refuses any write that would
     store one (`illegal_argument_exception` naming the field and `ROLL_SECRET_KEY`) instead of
-    keeping it in the clear; nothing of that write is stored. Values stored in the clear before
-    roll ran syncs are sealed in place on the first load with a key (`sync::adopt_existing`).
+    keeping it in the clear; nothing of that write is stored. A sensitive value still stored in
+    the clear (from before roll ran syncs, or an earlier build that let a writer mark a password
+    not sensitive) is sealed in place on the next load (`sync::adopt_existing`, which writes
+    only when there is one) and when a write leaves it unchanged (`********` or the same text);
+    with no key it's cleared instead, and the connector needs configuration.
   - `GET _connector`, its list and job documents' connector snapshots show `********`, and
     writing `********` back keeps the stored value, so a client can round-trip a
     configuration. A sealed value shows as `********` on every connector, self-managed ones

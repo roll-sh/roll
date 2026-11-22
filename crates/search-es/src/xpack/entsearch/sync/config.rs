@@ -173,7 +173,12 @@ fn force_flags(m: &mut Map, service: &str) {
 /// A sensitive field's value as text (a number or anything else written there counts too):
 /// `None` when empty.
 fn secret_text(entry: &Value) -> Option<String> {
-    match entry.get("value")? {
+    value_text(entry.get("value")?)
+}
+
+/// [`secret_text`] of a value itself.
+fn value_text(v: &Value) -> Option<String> {
+    match v {
         Value::Null => None,
         Value::Str(s) if s.is_empty() => None,
         Value::Str(s) => Some(s.clone()),
@@ -189,25 +194,41 @@ fn kind_of(cluster: &str, connector: &str, field: &str) -> String {
     format!("{SECRET_KIND}:{cluster}:{connector}:{field}")
 }
 
-/// Seals in place the sensitive values a connector holds in the clear (written before roll ran
-/// syncs, when they were stored as given): what an upgrade does once per cluster.
+/// Whether connector `c` (one roll runs) holds a sensitive value in the clear: written before
+/// roll ran syncs, when they were stored as given, or by an earlier build that let a writer mark
+/// a password not sensitive.
+pub fn holds_clear_secret(c: &Value) -> bool {
+    let Some(service) = run_service(c) else { return false };
+    c.get("configuration").and_then(Value::as_object).is_some_and(|cfg| {
+        cfg.iter().any(|(k, e)| secret_field(Some(&service), k, e) && secret_text(e).is_some_and(|v| v != REDACTED && !crate::seal::is_sealed(&v)))
+    })
+}
+
+/// Seals in place the sensitive values a connector holds in the clear ([`holds_clear_secret`]),
+/// a number too; with no key to seal them, clears them (the connector then needs configuration).
 pub fn seal_in_place(m: &mut Map, cluster: &str, sealer: Option<&crate::seal::Sealer>) {
     let id = m.get("id").and_then(Value::as_str).unwrap_or_default().to_string();
     let service = run_service(&Value::Obj(m.clone()));
+    let mut cleared = false;
     let Some(Value::Obj(cfg)) = m.get_mut("configuration") else { return };
     for (k, entry) in cfg.iter_mut() {
         if !secret_field(service.as_deref(), k, entry) {
             continue;
         }
-        if let Value::Obj(e) = entry
-            && let Some(Value::Str(v)) = e.get("value")
-            && !v.is_empty()
-            && v != REDACTED
-            && !crate::seal::is_sealed(v)
-        {
-            let sealed = crate::seal::seal_given_with(sealer, &kind_of(cluster, &id, k), v);
-            e.insert("value".into(), sealed.into());
+        let Some(v) = secret_text(entry).filter(|v| v != REDACTED && !crate::seal::is_sealed(v)) else { continue };
+        let next = match sealer {
+            Some(s) => Value::from(crate::seal::seal_given_with(Some(s), &kind_of(cluster, &id, k), &v)),
+            None => {
+                cleared = true;
+                Value::from("")
+            }
+        };
+        if let Value::Obj(e) = entry {
+            e.insert("value".into(), next);
         }
+    }
+    if cleared {
+        m.insert("status".into(), "needs_configuration".into());
     }
 }
 
@@ -303,8 +324,19 @@ pub fn protect(m: &mut Map, before: &Map, sealer: Option<&crate::seal::Sealer>, 
             cleared = true;
             Value::from("")
         } else if unchanged {
-            // The placeholder with nothing stored keeps nothing.
-            stored.unwrap_or_else(|| Value::from(""))
+            match stored.as_ref().and_then(value_text) {
+                // Stored in the clear (an earlier build, or before a key): sealed now, or with no
+                // key to seal it, cleared.
+                Some(s) if s != REDACTED && !crate::seal::is_sealed(&s) => match sealer {
+                    Some(_) => seal(k, &s)?,
+                    None => {
+                        cleared = true;
+                        Value::from("")
+                    }
+                },
+                // The placeholder with nothing stored keeps nothing.
+                _ => stored.unwrap_or_else(|| Value::from("")),
+            }
         } else {
             seal(k, &v)?
         };

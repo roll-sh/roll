@@ -422,9 +422,15 @@ pub fn adopt(st: &mut crate::meta::ClusterState, id: &str, now_ms: i64) -> crate
 /// something to pause, and otherwise by the first write to a connector ([`mark_current`]), so a
 /// connector made under roll's syncs never waits (a branch has its parent's record), and a
 /// cluster without connectors isn't written to on load.
+///
+/// Every load also seals any sensitive value a connector still holds in the clear (one an earlier
+/// build let a writer mark not sensitive), or clears it with no key ([`config::seal_in_place`]);
+/// it writes only when there is one.
 pub async fn adopt_existing(cluster: &Cluster) -> crate::error::EsResult<()> {
     let st = cluster.state();
-    if st.metadata.xpack.get(EXISTING.0, EXISTING.1).is_some() || !st.metadata.xpack.iter(CONNECTORS).any(|(_, c)| config::runs(c)) {
+    let first = st.metadata.xpack.get(EXISTING.0, EXISTING.1).is_none() && st.metadata.xpack.iter(CONNECTORS).any(|(_, c)| config::runs(c));
+    let clear = st.metadata.xpack.iter(CONNECTORS).any(|(_, c)| config::holds_clear_secret(c));
+    if !first && !clear {
         return Ok(());
     }
     drop(st);
@@ -434,6 +440,12 @@ pub async fn adopt_existing(cluster: &Cluster) -> crate::error::EsResult<()> {
     cluster
         .update(move |st| {
             if st.metadata.xpack.get(EXISTING.0, EXISTING.1).is_some() {
+                let held: Vec<(String, Value)> = st.metadata.xpack.iter(CONNECTORS).filter(|(_, c)| config::holds_clear_secret(c)).map(|(k, v)| (k.clone(), v.clone())).collect();
+                for (id, c) in held {
+                    let Value::Obj(mut m) = c else { continue };
+                    config::seal_in_place(&mut m, &me, sealer.as_deref());
+                    store::put(st, CONNECTORS, &id, Value::Obj(m), now)?;
+                }
                 return Ok(());
             }
             let existing: Vec<(String, Value)> = st.metadata.xpack.iter(CONNECTORS).filter(|(_, c)| config::runs(c)).map(|(k, v)| (k.clone(), v.clone())).collect();
@@ -1066,6 +1078,25 @@ mod tests {
         assert_eq!(password(&c), "");
         let x = call(&c, "GET", "/_connector/x", "").await;
         assert_eq!(x.get("status").and_then(Value::as_str), Some("needs_configuration"), "{x:?}");
+
+        // A password an earlier build stored in the clear (marked not sensitive) is sealed on the
+        // next load, and on a write that gives `********` back.
+        let plant = |c: Arc<Cluster>| async move {
+            c.update(|st| {
+                let Some(Value::Obj(mut m)) = st.metadata.xpack.get(CONNECTORS, "x").cloned() else { panic!("no connector") };
+                let Some(Value::Obj(cfg)) = m.get_mut("configuration") else { panic!("no configuration") };
+                cfg.insert("password".into(), obj! { "label" => "p", "sensitive" => false, "value" => "pw-left-clear" });
+                store::put(st, CONNECTORS, "x", Value::Obj(m), 0).map(|_| ())
+            })
+            .await
+            .unwrap();
+        };
+        plant(c.clone()).await;
+        adopt_existing(&c).await.unwrap();
+        assert!(crate::seal::is_sealed(&password(&c)), "sealed on load");
+        plant(c.clone()).await;
+        call(&c, "PUT", "/_connector/x/_configuration", r#"{"values":{"password":"********"}}"#).await;
+        assert!(crate::seal::is_sealed(&password(&c)), "sealed on a write");
     }
 
     /// A credential sealed on one cluster doesn't open on another (a branch's copy of the
