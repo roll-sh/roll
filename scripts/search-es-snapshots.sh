@@ -43,9 +43,10 @@ gen=crates/search-es/tests/fixtures/es-snapshots/generate.py
 python3 -I "$gen" "http://$a955" /repo/es-9.5.5 "$docs" "$work/es-9.5.5.expected.json" "$global"
 python3 -I "$gen" "http://$a8" /repo/es-8.19.7 "$docs" "$work/es-8.19.7.expected.json" "$global"
 if [ $write = 1 ]; then
+  python3 -I "$gen" "http://$a955" /repo/es-9.5.5-large 3 "$work/es-9.5.5-large.expected.json" large
   dest=crates/search-es/tests/fixtures/es-snapshots
-  rm -rf "$dest/es-9.5.5" "$dest/es-8.19.7"
-  cp -r "$work/955/es-9.5.5" "$work/8/es-8.19.7" "$dest/"
+  rm -rf "$dest/es-9.5.5" "$dest/es-8.19.7" "$dest/es-9.5.5-large"
+  cp -r "$work/955/es-9.5.5" "$work/955/es-9.5.5-large" "$work/8/es-8.19.7" "$dest/"
   cp "$work"/es-*.expected.json "$dest/"
   du -sh "$dest"
   exit 0

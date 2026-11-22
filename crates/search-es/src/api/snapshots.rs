@@ -88,6 +88,9 @@ pub struct SnapshotData {
     refs: refs::KeptRefs,
     /// Restores from repositories Elasticsearch wrote, running here.
     elastic: elastic_restore::Running,
+    /// The repository data last parsed of each Elasticsearch repository, by location: a
+    /// generation is written once, so the same generation isn't read and parsed again.
+    elastic_data: parking_lot::Mutex<std::collections::HashMap<String, Arc<elastic::EsData>>>,
 }
 
 impl SnapshotData {

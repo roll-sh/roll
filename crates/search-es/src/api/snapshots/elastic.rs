@@ -50,6 +50,8 @@ pub(super) enum Place {
 /// An Elasticsearch repository's blobs.
 pub(super) struct Source {
     pub(super) repo: String,
+    /// The repository's location ([`Repository::location_key`]).
+    pub(super) location: String,
     pub(super) place: Place,
     /// `indices.recovery.max_bytes_per_sec`, which data reads pay with the repository's own
     /// `max_restore_bytes_per_sec`.
@@ -113,7 +115,8 @@ impl Source {
         let short = |got: usize| repository_exception(&self.repo, format!("[{rel}] gave [{got}] bytes at [{offset}], not the [{len}] wanted"));
         match &self.place {
             Place::Bucket(b, _) => {
-                let Some(mut body) = b.store.open(&self.key(rel), Some((offset, offset + len as u64))).await.map_err(|e| b.fail("reading the Elasticsearch repository", e))? else {
+                let end = offset.checked_add(len as u64).ok_or_else(|| repository_exception(&self.repo, format!("a read of [{rel}] past the end")))?;
+                let Some(mut body) = b.store.open(&self.key(rel), Some((offset, end))).await.map_err(|e| b.fail("reading the Elasticsearch repository", e))? else {
                     return Err(repository_exception(&self.repo, format!("[{rel}] is missing from the repository")));
                 };
                 let mut out = Vec::with_capacity(len);
@@ -134,6 +137,12 @@ impl Source {
                 let path = Self::fs_path(root, rel);
                 let repo = self.repo.clone();
                 let out = tokio::task::spawn_blocking(move || -> Result<Vec<u8>, String> {
+                    // Regular files only, as `get` reads them: a link could point anywhere.
+                    match std::fs::symlink_metadata(&path) {
+                        Ok(m) if m.is_file() => {}
+                        Ok(_) => return Err(format!("[{}] isn't a regular file", path.display())),
+                        Err(e) => return Err(format!("[{}]: {e}", path.display())),
+                    }
                     let mut f = std::fs::File::open(&path).map_err(|e| format!("[{}]: {e}", path.display()))?;
                     f.seek(std::io::SeekFrom::Start(offset)).map_err(|e| e.to_string())?;
                     let mut out = Vec::with_capacity(len);
@@ -174,12 +183,21 @@ pub(super) async fn open(cluster: &crate::Cluster, name: &str, r: &Repository) -
         }
         _ => return Ok(None),
     };
-    let src = Source { repo: name.to_string(), place, recovery };
+    let src = Source { repo: name.to_string(), location: r.location_key(), place, recovery };
     match src.get("index.latest", 64).await? {
-        Some(b) if b.len() == 8 => Ok(Some(src)),
-        Some(_) => Err(damaged(name, "index.latest", "it isn't an 8-byte generation")),
-        None => Ok(None),
+        Some(b) if b.len() == 8 => {}
+        Some(_) => return Err(damaged(name, "index.latest", "it isn't an 8-byte generation")),
+        None => return Ok(None),
     }
+    // A location roll keeps snapshots at stays roll's: an `index.latest` someone put there
+    // mustn't hide them (or stop a bucket's `roll/` from being read).
+    if cluster.state().metadata.repository_data.get(&src.location).is_some_and(|d| !d.elastic && !d.snapshots.is_empty()) {
+        return Ok(None);
+    }
+    if matches!(src.place, Place::Bucket(..)) && src.get("roll/index.latest", 64).await?.is_some() {
+        return Ok(None);
+    }
+    Ok(Some(src))
 }
 
 /// One snapshot in `index-N`.
@@ -234,13 +252,14 @@ impl EsData {
 }
 
 /// Reads `index.latest` and the newest `index-N`.
-pub(super) async fn read_data(cluster: &crate::Cluster, src: &Source) -> EsResult<EsData> {
+pub(super) async fn read_data(cluster: &crate::Cluster, src: &Source) -> EsResult<Arc<EsData>> {
     let latest = src.get("index.latest", 64).await?.ok_or_else(|| repository_exception(&src.repo, "the Elasticsearch repository's [index.latest] is gone"))?;
     let mut generation = i64::from_be_bytes(latest[..8].try_into().map_err(|_| damaged(&src.repo, "index.latest", "short"))?);
-    if generation < 0 {
+    if !(0..i64::MAX - PROBES).contains(&generation) {
         return Err(damaged(&src.repo, "index.latest", format!("generation [{generation}]")));
     }
-    let mut raw = src.get(&format!("index-{generation}"), DATA_MAX).await?;
+    // A newer generation a crash left unnamed wins.
+    let mut raw = None;
     for _ in 0..PROBES {
         match src.get(&format!("index-{}", generation + 1), DATA_MAX).await? {
             Some(b) => {
@@ -250,16 +269,36 @@ pub(super) async fn read_data(cluster: &crate::Cluster, src: &Source) -> EsResul
             None => break,
         }
     }
+    // A generation is written once: the copy parsed last is the same data.
+    if let Some(d) = cluster.snapshot_data.elastic_data.lock().get(&src.location)
+        && d.generation == generation
+    {
+        return Ok(d.clone());
+    }
     let what = format!("index-{generation}");
-    let raw = raw.ok_or_else(|| repository_exception(&src.repo, format!("the Elasticsearch repository's [{what}] is missing")))?;
-    let text = if raw.starts_with(b"DFL\0") { inflate_raw(&raw[4..], DATA_MAX).map_err(|e| damaged(&src.repo, &what, e))? } else { raw.to_vec() };
-    let values = s3::json_values(&text);
+    let raw = match raw {
+        Some(r) => r,
+        None => src.get(&what, DATA_MAX).await?.ok_or_else(|| repository_exception(&src.repo, format!("the Elasticsearch repository's [{what}] is missing")))?,
+    };
     let budget = cluster.breakers.request(cluster, &cluster.state());
     let mut held = crate::breaker::Reservation::new(budget);
+    held.add(raw.len() as u64, "<repository_data>")?;
+    let text = if raw.starts_with(b"DFL\0") {
+        inflate_charged(&raw[4..], DATA_MAX, &mut held).map_err(|e| match e {
+            BlobError::Breaker(e) => e,
+            BlobError::Damaged(why) => damaged(&src.repo, &what, why),
+        })?
+    } else {
+        raw.to_vec()
+    };
+    drop(raw);
+    let values = s3::json_values(&text);
     held.add((values * std::mem::size_of::<Value>() * 2 + text.len()) as u64, "<repository_data>")?;
     let v = crate::json::parse(&text).ok().flatten().ok_or_else(|| damaged(&src.repo, &what, "it isn't JSON"))?;
     drop(text);
-    parse_data(&v, generation).map_err(|e| damaged(&src.repo, &what, e))
+    let data = Arc::new(parse_data(&v, generation).map_err(|e| damaged(&src.repo, &what, e))?);
+    cluster.snapshot_data.elastic_data.lock().insert(src.location.clone(), data.clone());
+    Ok(data)
 }
 
 fn parse_data(v: &Value, generation: i64) -> Result<EsData, String> {
@@ -299,6 +338,25 @@ fn parse_data(v: &Value, generation: i64) -> Result<EsData, String> {
     Ok(EsData { generation, uuid: s(v, "uuid").unwrap_or_default(), snapshots, indices, identifiers })
 }
 
+/// [`inflate_raw`], charging what it inflates to `held` as it grows.
+pub(super) fn inflate_charged(raw: &[u8], max: usize, held: &mut crate::breaker::Reservation) -> Result<Vec<u8>, BlobError> {
+    use std::io::Read;
+    let mut dec = flate2::read::DeflateDecoder::new(raw);
+    let mut out = Vec::new();
+    let mut buf = vec![0u8; 1 << 20];
+    loop {
+        let n = dec.read(&mut buf).map_err(|e| BlobError::Damaged(format!("inflating: {e}")))?;
+        if n == 0 {
+            return Ok(out);
+        }
+        if out.len() + n > max {
+            return Err(BlobError::Damaged(format!("it inflates to more than [{max}] bytes")));
+        }
+        held.add(n as u64, "<snapshot_metadata>").map_err(BlobError::Breaker)?;
+        out.extend_from_slice(&buf[..n]);
+    }
+}
+
 /// Raw DEFLATE, at most `max` bytes out (more is an error, not a bigger buffer).
 pub(super) fn inflate_raw(raw: &[u8], max: usize) -> Result<Vec<u8>, String> {
     use std::io::Read;
@@ -330,6 +388,9 @@ pub(super) enum BlobError {
 /// [`read_blob`] on bytes already read.
 pub(super) fn parse_blob(raw: &[u8], codec: &str, budget: Arc<search_aggs::memory::MemoryBudget>, binary: &mut dyn FnMut(&[u8]) -> Value) -> Result<(Value, crate::breaker::Reservation), BlobError> {
     let d = |e: String| BlobError::Damaged(e);
+    // The blob as read and as inflated are held while it is parsed.
+    let mut held = crate::breaker::Reservation::new(budget);
+    held.add(raw.len() as u64, "<snapshot_metadata>").map_err(BlobError::Breaker)?;
     search_lucene::codec::check_footer(raw).map_err(|e| d(e.to_string()))?;
     let body = search_lucene::codec::body(raw).map_err(|e| d(e.to_string()))?;
     let mut inp = search_lucene::input::Input::new(body);
@@ -337,12 +398,13 @@ pub(super) fn parse_blob(raw: &[u8], codec: &str, budget: Arc<search_aggs::memor
     let content = &body[inp.pos()..];
     let inflated;
     let content = if let Some(rest) = content.strip_prefix(b"DFL\0") {
-        inflated = inflate_raw(rest, INFLATED_MAX).map_err(d)?;
+        inflated = inflate_charged(rest, INFLATED_MAX, &mut held)?;
         &inflated[..]
     } else {
+        inflated = Vec::new();
         content
     };
-    let mut held = crate::breaker::Reservation::new(budget);
+    let transient = raw.len() + inflated.len();
     let mut tripped = None;
     let v = if content.first() == Some(&b'{') {
         held.add((s3::json_values(content) * std::mem::size_of::<Value>() * 2 + content.len()) as u64, "<snapshot_metadata>").map_err(BlobError::Breaker)?;
@@ -361,6 +423,8 @@ pub(super) fn parse_blob(raw: &[u8], codec: &str, budget: Arc<search_aggs::memor
             (Err(e), None) => return Err(d(e)),
         }
     };
+    drop(inflated);
+    held.release(transient as u64);
     Ok((v, held))
 }
 
@@ -407,7 +471,7 @@ fn snapshot_record(s: &EsSnapshot, info: &Value) -> Snapshot {
 /// When repository `name` is one Elasticsearch wrote: reads its data into the cluster's copy
 /// (marked [`RepositoryData::elastic`], so nothing writes to it), reading the `SnapshotInfo` of
 /// snapshots the copy doesn't have yet, and answers its blobs and data. `None` otherwise.
-pub(super) async fn sync(cluster: &crate::Cluster, name: &str, r: &Repository) -> EsResult<Option<(Source, EsData)>> {
+pub(super) async fn sync(cluster: &crate::Cluster, name: &str, r: &Repository) -> EsResult<Option<(Source, Arc<EsData>)>> {
     let Some(src) = open(cluster, name, r).await? else { return Ok(None) };
     let data = read_data(cluster, &src).await?;
     let key = r.location_key();

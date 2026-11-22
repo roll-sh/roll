@@ -1,14 +1,15 @@
 #!/usr/bin/env python3
 """Generates an Elasticsearch snapshot of known data, and what Elasticsearch answers about it.
 
-usage: generate.py <elasticsearch url> <repository location under path.repo> <docs per index> <expected.json> [global]
+usage: generate.py <elasticsearch url> <repository location under path.repo> <docs per index> <expected.json> [global|large]
 
 Indices: `mixed` (2 shards, routing, nested objects, geo points, a dense vector, deletes and
 updates, several segments), `compressed` (best_compression), `excludes` (`_source.excludes`),
 `synthetic` (synthetic _source) and `nosource` (`_source.enabled: false`), snapshotted into an
 `fs` repository with a 4kb `chunk_size` (Lucene files in parts). `global` also snapshots global
 state with a template, a pipeline and a lifecycle policy (Elasticsearch's own templates come
-with it, so the committed fixtures leave it out).
+with it, so the committed fixtures leave it out). `large` snapshots instead an index `big` of
+`<docs>` documents of 4 MiB each (one letter pattern, so they compress to almost nothing).
 
 The expected answers: every live document (_id, _routing, _source with its vectors,
 _seq_no, _version, _primary_term, and _source as Elasticsearch keeps it), counts of a few
@@ -141,7 +142,22 @@ def expected(index, nine):
     return {'count': len(docs), 'docs': docs, 'counts': counts, 'knn': [h['_id'] for h in knn['hits']['hits']]}
 
 
+def large():
+    # A few large, very compressible documents: what a restore holds of them is the breaker's.
+    req('DELETE', '/_snapshot/' + REPO, ok=(404,))
+    req('PUT', '/_snapshot/' + REPO, {'type': 'fs', 'settings': {'location': LOCATION, 'chunk_size': '64kb'}})
+    req('DELETE', '/big', ok=(404,))
+    req('PUT', '/big', {'settings': {'number_of_shards': 1, 'number_of_replicas': 0}, 'mappings': {'properties': {'text': {'type': 'text', 'index': False}}}})
+    for i in range(N):
+        req('PUT', f'/big/_doc/{i}?refresh=true', {'n': i, 'text': 'abcdefgh' * (512 << 10)})
+    req('PUT', f'/_snapshot/{REPO}/snap-1?wait_for_completion=true', {'indices': 'big', 'include_global_state': False})
+    with open(OUT, 'w') as f:
+        json.dump({'big': {'count': N}}, f)
+
+
 def main():
+    if len(sys.argv) > 5 and sys.argv[5] == 'large':
+        return large()
     nine = int(req('GET', '/')['version']['number'].split('.')[0]) >= 9
     # Synthetic _source needs more than the basic licence: without it Elasticsearch stores it.
     req('POST', '/_license/start_trial?acknowledge=true', ok=(403,))

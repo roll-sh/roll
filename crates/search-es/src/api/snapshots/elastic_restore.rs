@@ -18,11 +18,19 @@
 //! - **Takeover.** The restore's state is kept in each index's recovery source: an owner that
 //!   opens a cluster with a restore still running starts that index's restore again (documents
 //!   already indexed are indexed again under the same ids), and one whose repository is gone
-//!   records the failure.
-//! - **Bounds.** Memory held (doc values, vector ordinals, chunk buffers, read windows,
-//!   documents in flight) is charged to the `request` breaker as it is built; a stored fields
-//!   chunk may not decompress past `http.max_content_length` plus a margin; every Lucene file
-//!   read is checksummed.
+//!   records the failure. A document deleted on roll while its index was being restored comes
+//!   back on such a restart once its tombstone is gone (deletions aren't recorded apart: an index
+//!   is meant to be used once its restore is done). The previous owner's task isn't stopped from
+//!   here; its writes fail at the write-ahead log's ownership check (`log.check()` in
+//!   `CopyTarget::index`), as every write of a node that lost a cluster does. A task that panics
+//!   marks its indices failed on the way out, so no owner retries it forever.
+//! - **Bounds.** Memory held (doc values, vector ordinals, chunk buffers, read windows) is
+//!   charged to the `request` breaker as it is built, and each document from the moment it is
+//!   read until it is indexed (at most [`IN_FLIGHT`] wait in the channel, every one of them
+//!   charged, so the channel's memory is the breaker's, not a count's); a stored fields chunk may
+//!   not decompress past `http.max_content_length` plus a margin; every Lucene file read is
+//!   checksummed; sequence numbers must be in `[0, 2^62)` and primary terms and versions at
+//!   least 1, as Elasticsearch writes them.
 
 use super::elastic::{self, EsData, EsSnapshot, Source};
 use super::*;
@@ -342,7 +350,7 @@ fn global_items(g: &Value) -> Vec<(String, String, Value)> {
     let mut out = Vec::new();
     for (name, t) in g.pointer(&["component_template", "component_template"]).and_then(Value::as_object).into_iter().flatten() {
         if !managed(t) && !name.starts_with('.') {
-            out.push((format!("component template [{name}]"), format!("/_component_template/{name}"), t.clone()));
+            out.push((format!("component template [{name}]"), format!("/_component_template/{}", crate::xpack::enc(name)), t.clone()));
         }
     }
     for (name, p) in g.pointer(&["index_lifecycle", "policies"]).and_then(Value::as_object).into_iter().flatten() {
@@ -350,18 +358,18 @@ fn global_items(g: &Value) -> Vec<(String, String, Value)> {
         let mut policy = policy.clone();
         policy.shift_remove("name");
         if !managed(&Value::Obj(policy.clone())) && !name.starts_with('.') {
-            out.push((format!("lifecycle policy [{name}]"), format!("/_ilm/policy/{name}"), obj! { "policy" => Value::Obj(policy) }));
+            out.push((format!("lifecycle policy [{name}]"), format!("/_ilm/policy/{}", crate::xpack::enc(name)), obj! { "policy" => Value::Obj(policy) }));
         }
     }
     for p in g.pointer(&["ingest", "pipeline"]).and_then(Value::as_array).into_iter().flatten() {
         let (Some(id), Some(config)) = (p.get("id").and_then(Value::as_str), p.get("config")) else { continue };
         if !managed(config) && !id.starts_with('.') {
-            out.push((format!("pipeline [{id}]"), format!("/_ingest/pipeline/{id}"), config.clone()));
+            out.push((format!("pipeline [{id}]"), format!("/_ingest/pipeline/{}", crate::xpack::enc(id)), config.clone()));
         }
     }
     for (name, t) in g.pointer(&["index_template", "index_template"]).and_then(Value::as_object).into_iter().flatten() {
         if !managed(t) && !name.starts_with('.') {
-            out.push((format!("index template [{name}]"), format!("/_index_template/{name}"), t.clone()));
+            out.push((format!("index template [{name}]"), format!("/_index_template/{}", crate::xpack::enc(name)), t.clone()));
         }
     }
     for (name, t) in g.get("templates").and_then(Value::as_object).into_iter().flatten() {
@@ -374,7 +382,7 @@ fn global_items(g: &Value) -> Vec<(String, String, Value)> {
         {
             t.insert("mappings".into(), doc.clone());
         }
-        out.push((format!("legacy template [{name}]"), format!("/_template/{name}"), Value::Obj(t)));
+        out.push((format!("legacy template [{name}]"), format!("/_template/{}", crate::xpack::enc(name)), Value::Obj(t)));
     }
     out
 }
@@ -452,6 +460,11 @@ pub(super) async fn restore(ctx: &Ctx<'_>, req: Request, r: Arc<Repository>) -> 
     for p in &planned {
         notes.extend(p.notes.iter().cloned());
     }
+    let busy = &ctx.cluster.snapshot_data.elastic;
+    if busy.busy.compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst).is_err() {
+        return Err(EsError::new(503, "concurrent_snapshot_execution_exception", format!("[{}:{}] a restore from a repository Elasticsearch wrote is already running in this cluster", req.repo, req.snap)));
+    }
+    let busy = Busy(busy);
     // Global state, item by item through the APIs that set them, as the requester.
     if req.include_global_state {
         if !record.include_global_state {
@@ -464,11 +477,6 @@ pub(super) async fn restore(ctx: &Ctx<'_>, req: Request, r: Arc<Repository>) -> 
             }
         }
     }
-    let busy = &ctx.cluster.snapshot_data.elastic;
-    if busy.busy.compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst).is_err() {
-        return Err(EsError::new(503, "concurrent_snapshot_execution_exception", format!("[{}:{}] a restore from a repository Elasticsearch wrote is already running in this cluster", req.repo, req.snap)));
-    }
-    let busy = Busy(busy);
     let (snap_uuid, repo2, snap2) = (s.uuid.clone(), req.repo.clone(), req.snap.clone());
     let now = ctx.now_ms;
     let plan_copy: Vec<Planned> = planned.iter().map(|p| Planned { notes: Vec::new(), ..clone_planned(p) }).collect();
@@ -598,8 +606,33 @@ async fn set_state(cluster: &crate::Cluster, index: &str, state: &str, failure: 
         .await;
 }
 
+/// Marks a restore's indices failed when its task unwinds from a panic (a running state would
+/// have every later owner start it again).
+struct FailOnUnwind<'a> {
+    cluster: &'a crate::Cluster,
+    names: Vec<String>,
+}
+
+impl Drop for FailOnUnwind<'_> {
+    fn drop(&mut self) {
+        if !std::thread::panicking() {
+            return;
+        }
+        let Some(cluster) = self.cluster.handle() else { return };
+        let names = std::mem::take(&mut self.names);
+        if let Ok(rt) = tokio::runtime::Handle::try_current() {
+            rt.spawn(async move {
+                for n in &names {
+                    set_state(&cluster, n, "failed", Some("the restore task stopped unexpectedly".into())).await;
+                }
+            });
+        }
+    }
+}
+
 /// Fills every index of `job`: the shards that failed (the first failure ends the restore).
 async fn run(cluster: &crate::Cluster, job: &Job, cancelled: &Arc<AtomicBool>) -> EsResult<i64> {
+    let _unwind = FailOnUnwind { cluster, names: job.indices.iter().map(|i| i.target.name.clone()).collect() };
     let _permit = POOL.acquire().await.map_err(|e| EsError::internal(e.to_string()))?;
     for ix in &job.indices {
         let result = async {
@@ -636,12 +669,14 @@ struct FileInfo {
 
 /// One live document, read on the blocking side.
 struct Item {
+    /// The document's bytes on the `request` breaker, released once it is indexed.
+    held: crate::breaker::Reservation,
     id: String,
     routing: Option<String>,
     source: Bytes,
-    seq_no: Option<i64>,
-    version: Option<i64>,
-    primary_term: Option<i64>,
+    seq_no: i64,
+    version: i64,
+    primary_term: i64,
 }
 
 /// The files a shard snapshot lists, by Lucene file name.
@@ -927,7 +962,6 @@ async fn restore_shard(cluster: &crate::Cluster, job: &Job, ix: &IndexJob, shard
         let bytes = d.fetch(&commit_name, 0, len as usize)?;
         let commit = search_lucene::segments::read_commit(&bytes, generation).map_err(|e| map(d, &commit_name, e))?;
         drop(bytes);
-        let mut seq_fallback = 0i64;
         for seg in &commit.segments {
             let si_name = format!("{}.si", seg.name);
             let len = d.files.get(&si_name).map(|f| f.length).ok_or_else(|| map(d, &si_name, search_lucene::Error::Corrupt("missing".into())))?;
@@ -937,6 +971,8 @@ async fn restore_shard(cluster: &crate::Cluster, job: &Job, ix: &IndexJob, shard
             let raw = d.fetch(&si_name, 0, len as usize)?;
             let si = search_lucene::segments::read_segment_info(&raw, &seg.id).map_err(|e| map(d, &si_name, e))?;
             let mut stop = None;
+            // A breaker that trips on a document: its own error, not a damaged file's.
+            let mut tripped: Option<EsError> = None;
             let mut on_doc = |doc: segment::Doc| -> search_lucene::Result<bool> {
                 let Some(id) = elastic::decode_id(doc.id) else {
                     return Err(search_lucene::Error::Corrupt(format!("document [{}] has an invalid _id", doc.doc)));
@@ -948,11 +984,25 @@ async fn restore_shard(cluster: &crate::Cluster, job: &Job, ix: &IndexJob, shard
                 if source.len() > source_max {
                     return Err(search_lucene::Error::Unsupported(format!("the _source of [{id}] is [{}] bytes, more than http.max_content_length [{source_max}]", source.len())));
                 }
-                let seq_no = doc.seq_no.or_else(|| {
-                    seq_fallback += 1;
-                    Some(seq_fallback - 1)
-                });
-                let item = Item { id, routing: doc.routing.map(str::to_string), source, seq_no, version: doc.version, primary_term: doc.primary_term };
+                // Elasticsearch 8 and later keep every document's sequence number; the engine
+                // trusts it (it is the next write's base), so only what Elasticsearch writes passes.
+                let seq_no = match doc.seq_no {
+                    Some(n) if (0..1i64 << 62).contains(&n) => n,
+                    Some(n) => return Err(search_lucene::Error::Corrupt(format!("document [{id}] has the sequence number [{n}]"))),
+                    None => return Err(search_lucene::Error::Unsupported(format!("document [{id}] has no _seq_no"))),
+                };
+                let primary_term = doc.primary_term.unwrap_or(1);
+                let version = doc.version.unwrap_or(1);
+                if !(1..1i64 << 62).contains(&primary_term) || !(1..1i64 << 62).contains(&version) {
+                    return Err(search_lucene::Error::Corrupt(format!("document [{id}] has the primary term [{primary_term}] and version [{version}]")));
+                }
+                // Charged before it waits in the channel, released once indexed.
+                let mut held = crate::breaker::Reservation::new(budget2.clone());
+                if let Err(e) = held.add(source.len() as u64, "<elasticsearch_restore>") {
+                    tripped = Some(e);
+                    return Err(search_lucene::Error::Unsupported("circuit breaker".into()));
+                }
+                let item = Item { held, id, routing: doc.routing.map(str::to_string), source, seq_no, version, primary_term };
                 if tx.blocking_send(item).is_err() {
                     stop = Some(());
                     return Ok(false);
@@ -960,7 +1010,13 @@ async fn restore_shard(cluster: &crate::Cluster, job: &Job, ix: &IndexJob, shard
                 Ok(true)
             };
             let name = format!("{}.*", seg.name);
-            segment::read(d, seg, &si, &vectors, &limits, &mut on_doc).map_err(|e| map(d, &name, e))?;
+            let read = segment::read(d, seg, &si, &vectors, &limits, &mut on_doc);
+            if let Err(e) = read {
+                return Err(match tripped.take() {
+                    Some(t) => t,
+                    None => map(d, &name, e),
+                });
+            }
             if stop.is_some() {
                 break;
             }
@@ -974,18 +1030,12 @@ async fn restore_shard(cluster: &crate::Cluster, job: &Job, ix: &IndexJob, shard
             indexed = Err(EsError::new(400, "task_cancelled_exception", "task cancelled [by user request]"));
             break;
         }
+        let Item { held, id, routing, source, seq_no, version, primary_term } = item;
         let r = (|| {
-            let _in_flight = cluster.breakers.charge_in_flight(cluster, &cluster.state(), item.source.len() as u64)?;
-            target.index(&DocCopy {
-                id: item.id,
-                routing: item.routing,
-                source: item.source,
-                seq_no: item.seq_no.unwrap_or(0),
-                primary_term: item.primary_term.unwrap_or(1).max(1),
-                version: item.version.unwrap_or(1).max(1),
-                ignored_source: Vec::new(),
-            })
+            let _in_flight = cluster.breakers.charge_in_flight(cluster, &cluster.state(), source.len() as u64)?;
+            target.index(&DocCopy { id, routing, source, seq_no, primary_term, version, ignored_source: Vec::new() })
         })();
+        drop(held);
         if let Err(e) = r {
             indexed = Err(e);
             break;

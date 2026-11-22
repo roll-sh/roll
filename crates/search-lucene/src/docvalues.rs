@@ -176,14 +176,17 @@ fn skip_sorted_numeric(inp: &mut Input) -> Result<()> {
 fn skip_terms_dict(inp: &mut Input) -> Result<()> {
     let size = inp.vlong()?;
     let shift = inp.i32()?;
-    skip_monotonic(inp, (size + 63) >> 6, shift)?;
+    let Some(blocks) = size.checked_add(63) else { return corrupt(format!("invalid terms dict size [{size}]")) };
+    skip_monotonic(inp, blocks >> 6, shift)?;
     inp.skip(4 + 4 + 8 * 4)?;
     let index_shift = inp.i32()?;
     if !(0..=62).contains(&index_shift) {
         return corrupt(format!("invalid terms dict index shift [{index_shift}]"));
     }
-    let index_size = (size + (1i64 << index_shift) - 1) >> index_shift;
-    skip_monotonic(inp, 1 + index_size, shift)?;
+    let Some(index_size) = size.checked_add((1i64 << index_shift) - 1).map(|n| (n >> index_shift) + 1) else {
+        return corrupt(format!("invalid terms dict size [{size}]"));
+    };
+    skip_monotonic(inp, index_size, shift)?;
     inp.skip(8 * 4)
 }
 
@@ -213,6 +216,11 @@ pub struct Disi<'a> {
     index: u64,
     block: u32,
     kind: Block,
+    max_doc: u32,
+    /// The last block read and document given: both only grow, so a file can't make the
+    /// iteration longer than the segment (a repeated all-docs block costs four bytes).
+    last_block: Option<u32>,
+    last_doc: Option<u32>,
 }
 
 enum Block {
@@ -223,14 +231,17 @@ enum Block {
 }
 
 impl<'a> Disi<'a> {
-    /// `data`: the `IndexedDISI` bytes of `count` documents.
-    pub fn new(data: &'a [u8], dense_rank_power: i8, count: u64) -> Result<Disi<'a>> {
+    /// `data`: the `IndexedDISI` bytes of `count` documents of a segment of `max_doc`.
+    pub fn new(data: &'a [u8], dense_rank_power: i8, count: u64, max_doc: u32) -> Result<Disi<'a>> {
         let rank_bytes = match dense_rank_power {
             -1 => 0,
             7..=15 => 1024 >> (dense_rank_power - 7),
             p => return corrupt(format!("invalid dense rank power {p}")),
         };
-        Ok(Disi { inp: Input::new(data), rank_bytes, left: count, index: 0, block: 0, kind: Block::None })
+        if count > max_doc as u64 {
+            return corrupt(format!("[{count}] documents with values in a segment of [{max_doc}]"));
+        }
+        Ok(Disi { inp: Input::new(data), rank_bytes, left: count, index: 0, block: 0, kind: Block::None, max_doc, last_block: None, last_doc: None })
     }
 
     pub fn next_doc(&mut self) -> Result<Option<(u32, u64)>> {
@@ -241,6 +252,10 @@ impl<'a> Disi<'a> {
             let doc = match &mut self.kind {
                 Block::None => {
                     self.block = (self.inp.u16()? as u32) << 16;
+                    if self.last_block.is_some_and(|b| self.block <= b) || self.block >= self.max_doc {
+                        return corrupt(format!("doc values block [{}] out of order or past the segment", self.block >> 16));
+                    }
+                    self.last_block = Some(self.block);
                     let n = self.inp.u16()? as u32 + 1;
                     self.kind = if n <= 4095 {
                         Block::Sparse { left: n }
@@ -292,10 +307,15 @@ impl<'a> Disi<'a> {
                     (*word as u32) * 64 + b
                 }
             };
+            let doc = self.block | doc;
+            if doc >= self.max_doc || self.last_doc.is_some_and(|l| doc <= l) {
+                return corrupt(format!("doc values document [{doc}] out of order or past the segment of [{}]", self.max_doc));
+            }
+            self.last_doc = Some(doc);
             self.left -= 1;
             let index = self.index;
             self.index += 1;
-            return Ok(Some((self.block | doc, index)));
+            return Ok(Some((doc, index)));
         }
     }
 }
@@ -320,7 +340,7 @@ impl<'a> Numeric<'a> {
     pub fn new(entry: &'a NumericEntry, max_doc: u32, docs: Option<&'a [u8]>, values: &'a [u8]) -> Result<Numeric<'a>> {
         let disi = match (entry.docs_with_field_offset, docs) {
             (-2 | -1, _) => None,
-            (_, Some(d)) => Some(Disi::new(d, entry.dense_rank_power, entry.num_values as u64)?),
+            (_, Some(d)) => Some(Disi::new(d, entry.dense_rank_power, entry.num_values as u64, max_doc)?),
             (_, None) => return corrupt("sparse doc values without their documents"),
         };
         if entry.docs_with_field_offset == -1 && entry.num_values as u64 != max_doc as u64 {
@@ -428,12 +448,44 @@ mod tests {
         d.extend_from_slice(&1u16.to_le_bytes());
         d.extend_from_slice(&0u16.to_le_bytes());
         d.extend_from_slice(&4464u16.to_le_bytes());
-        let mut disi = Disi::new(&d, -1, 2).unwrap();
+        let mut disi = Disi::new(&d, -1, 2, 80000).unwrap();
         assert_eq!(disi.next_doc().unwrap(), Some((3, 0)));
         assert_eq!(disi.next_doc().unwrap(), Some((70000, 1)));
         assert_eq!(disi.next_doc().unwrap(), None);
+        // A block read again (four bytes for 65,536 documents each time) or past the segment.
+        let mut again = Vec::new();
+        for _ in 0..3 {
+            again.extend_from_slice(&0u16.to_le_bytes());
+            again.extend_from_slice(&u16::MAX.to_le_bytes());
+        }
+        let mut disi = Disi::new(&again, -1, 65536, 200_000).unwrap();
+        let mut n = 0;
+        let e = loop {
+            match disi.next_doc() {
+                Ok(Some(_)) => n += 1,
+                Ok(None) => break None,
+                Err(e) => break Some(e),
+            }
+        };
+        assert!(e.is_none() && n == 65536);
+        let mut disi = Disi::new(&again, -1, 70000, 200_000).unwrap();
+        assert!(std::iter::from_fn(|| disi.next_doc().transpose()).any(|r| r.is_err()));
+        assert!(Disi::new(&again, -1, 70000, 100).is_err());
+        // A sparse block repeating a document, and one past the segment.
+        let sparse = |docs: &[u16]| {
+            let mut d = 0u16.to_le_bytes().to_vec();
+            d.extend_from_slice(&(docs.len() as u16 - 1).to_le_bytes());
+            docs.iter().for_each(|x| d.extend_from_slice(&x.to_le_bytes()));
+            d
+        };
+        let d = sparse(&[3, 3]);
+        let mut disi = Disi::new(&d, -1, 2, 10).unwrap();
+        assert!(std::iter::from_fn(|| disi.next_doc().transpose()).any(|r| r.is_err()));
+        let d = sparse(&[3, 12]);
+        let mut disi = Disi::new(&d, -1, 2, 10).unwrap();
+        assert!(std::iter::from_fn(|| disi.next_doc().transpose()).any(|r| r.is_err()));
         // Truncated: an error, not a panic.
-        let mut disi = Disi::new(&d[..9], -1, 2).unwrap();
+        let mut disi = Disi::new(&d[..9], -1, 2, 80000).unwrap();
         assert!(disi.next_doc().is_ok());
         assert!(disi.next_doc().is_err());
     }

@@ -1835,7 +1835,9 @@ the rest are skipped by the tests' own prerequisites.
   `fs` directory under `path.repo`, or the `s3`, `gcs` or `azure` bucket and `base_path`, with
   read credentials) and run Elasticsearch's own `POST _snapshot/{repo}/{snapshot}/_restore`; no
   network route to the old cluster is needed (reindex from remote is the live path). A
-  repository whose base path holds Elasticsearch's `index.latest` is Elasticsearch's:
+  repository whose base path holds Elasticsearch's `index.latest` is Elasticsearch's, unless roll
+  keeps snapshots there (snapshots recorded for the location, or a bucket's `roll/`), which stay
+  roll's whatever someone puts beside them:
   - **Listing** (`GET _snapshot/{repo}/_all`, `_cat/snapshots`) answers from its `index-N` and
     each snapshot's `SnapshotInfo` (`snap-<uuid>.dat`): names, uuids, states, indices, data
     streams, times, shard counts, metadata. `_status` reports one small file per shard (the
@@ -1887,16 +1889,23 @@ the rest are skipped by the tests' own prerequisites.
   - **Hostile input**: everything is read as a tenant's bytes. No allocation is sized from a count
     or length in a file (counts are bounded by the bytes present, lengths checked before
     anything is copied), every CodecUtil checksum is checked (large files as they stream), a
-    stored fields chunk may not decompress past `http.max_content_length` plus 1 MiB, metadata
-    blobs are capped before (64 MiB) and after (256 MiB) inflating, SMILE nesting at 100 levels,
-    and what parsing builds, the doc values and vector ordinals kept per segment (at most
-    512 MiB), read windows and documents in flight are charged to the `request` breaker. Blob
+    stored fields chunk may not decompress past `http.max_content_length` plus 1 MiB nor have
+    more than 64 compressed blocks a piece, metadata blobs are capped before (64 MiB) and after
+    (256 MiB) inflating, SMILE nesting at 100 levels and its numbers at 1,000 digits (Jackson's
+    limit), doc values and vector ordinals must name documents of the segment in order, sequence
+    numbers must be in `[0, 2^62)` and primary terms and versions at least 1, and what is read
+    (metadata as read, inflated and parsed; the doc values and vector ordinals kept per segment,
+    at most 512 MiB; read windows; every document from when it is read until it is indexed) is
+    charged to the `request` breaker. A repository's `index-N` is parsed once per generation. Blob
     names that become keys or paths are checked. Reads pay `max_restore_bytes_per_sec` and
     `indices.recovery.max_bytes_per_sec`; the task obeys cancellation between documents.
   - **On the fleet**, the restore runs on the cluster's owner and its writes are logged and fenced
     like any write; each index's recovery source records the restore, and an owner that opens a
     cluster with one still running restores those indices again from the start (the documents
-    already there are written again under the same ids), or records why it can't.
+    already there are written again under the same ids; one deleted on roll meanwhile comes back
+    once its tombstone is gone), or records why it can't; a task that stops on a panic marks its
+    indices failed. The old owner's task isn't stopped; its writes fail the write-ahead log's
+    ownership check like every write of a node that lost the cluster.
 - Searchable snapshots mount through the snapshot restore API, so a mounted index holds its own
   copy of the snapshot's documents (as `full_copy` does), not one that reads the snapshot's
   segments: roll's snapshots already share segments with the index they were taken of, but a

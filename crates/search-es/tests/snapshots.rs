@@ -695,3 +695,55 @@ async fn elasticsearch_restore_rate() {
     let docs = at(&v, "count").as_i64().unwrap();
     println!("restored {docs} documents in {took:?}: {:.0} docs/s", docs as f64 / took.as_secs_f64());
 }
+
+/// What a restore from an Elasticsearch repository holds of each document, from the moment it
+/// is read until it is indexed, is the `request` breaker's: three 4 MiB documents (compressed to
+/// almost nothing) under a 6mb limit trip it (the chunk being read alone fits), and with room
+/// they restore.
+#[tokio::test]
+async fn documents_a_restore_holds_are_charged_to_the_breaker() {
+    let fixtures = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/es-snapshots");
+    let mut cfg = ClusterConfig::new("es-restore-breaker");
+    cfg.node_settings.push(("path.repo".into(), fixtures.display().to_string()));
+    let c = Cluster::open(cfg, Arc::new(MemoryStore::new())).await.unwrap();
+    assert_eq!(call(&c, "PUT", "/_snapshot/large", Some(r#"{"type":"fs","settings":{"location":"es-9.5.5-large"}}"#)).await.0, 200);
+    let (s, _) = call(&c, "PUT", "/_cluster/settings", Some(r#"{"persistent":{"indices.breaker.request.limit":"6mb"}}"#)).await;
+    assert_eq!(s, 200);
+    let (s, v) = call(&c, "POST", "/_snapshot/large/snap-1/_restore?wait_for_completion=true", Some(r#"{"indices":"big"}"#)).await;
+    assert_eq!((s, at(&v, "error.type").as_str()), (429, Some("circuit_breaking_exception")), "{v:?}");
+    let (_, v) = call(&c, "GET", "/big/_recovery", None).await;
+    assert_eq!(at(&v, "big.shards.0.type").as_str(), Some("SNAPSHOT"));
+    call(&c, "DELETE", "/big", None).await;
+    call(&c, "PUT", "/_cluster/settings", Some(r#"{"persistent":{"indices.breaker.request.limit":null}}"#)).await;
+    let (s, v) = call(&c, "POST", "/_snapshot/large/snap-1/_restore?wait_for_completion=true", Some(r#"{"indices":"big"}"#)).await;
+    assert_eq!(s, 200, "{v:?}");
+    let (_, v) = call(&c, "GET", "/big/_count", None).await;
+    assert_eq!(at(&v, "count").as_i64(), Some(3));
+}
+
+/// An `index.latest` put where roll keeps an `fs` repository's snapshots doesn't make it
+/// Elasticsearch's: roll's snapshots stay listed and the repository writable.
+#[tokio::test]
+async fn a_planted_index_latest_leaves_rolls_snapshots_alone() {
+    let dir = std::env::temp_dir().join(format!("roll-es-planted-{}", std::process::id()));
+    std::fs::create_dir_all(dir.join("mine")).unwrap();
+    let mut cfg = ClusterConfig::new("es-planted");
+    cfg.node_settings.push(("path.repo".into(), dir.display().to_string()));
+    let c = Cluster::open(cfg, Arc::new(MemoryStore::new())).await.unwrap();
+    assert_eq!(call(&c, "PUT", "/_snapshot/mine", Some(r#"{"type":"fs","settings":{"location":"mine"}}"#)).await.0, 200);
+    call(&c, "PUT", "/i/_doc/1?refresh=true", Some(r#"{"a":1}"#)).await;
+    let (s, v) = call(&c, "PUT", "/_snapshot/mine/s1?wait_for_completion=true", Some(r#"{"indices":"i"}"#)).await;
+    assert_eq!(s, 200, "{v:?}");
+    // Elasticsearch's repository data appears at the location.
+    let es = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/es-snapshots/es-9.5.5");
+    for f in ["index.latest", "index-0"] {
+        std::fs::copy(es.join(f), dir.join("mine").join(f)).unwrap();
+    }
+    let (s, v) = call(&c, "GET", "/_snapshot/mine/_all", None).await;
+    assert_eq!(s, 200, "{v:?}");
+    let names: Vec<&str> = at(&v, "snapshots").as_array().unwrap().iter().map(|s| at(s, "snapshot").as_str().unwrap()).collect();
+    assert_eq!(names, ["s1"]);
+    let (s, v) = call(&c, "PUT", "/_snapshot/mine/s2?wait_for_completion=true", Some(r#"{"indices":"i"}"#)).await;
+    assert_eq!(s, 200, "{v:?}");
+    let _ = std::fs::remove_dir_all(&dir);
+}

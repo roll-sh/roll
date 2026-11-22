@@ -37,7 +37,7 @@ pub fn read_entries(cfe: &[u8], id: &Id, cfs_len: u64) -> Result<Vec<Entry>> {
         }
         let offset = inp.i64()?;
         let length = inp.i64()?;
-        if offset < 0 || length < 0 || (offset as u64).checked_add(length as u64).is_none_or(|end| end + codec::FOOTER_LEN as u64 > cfs_len) {
+        if offset < 0 || length < 0 || (offset as u64).checked_add(length as u64).and_then(|end| end.checked_add(codec::FOOTER_LEN as u64)).is_none_or(|end| end > cfs_len) {
             return corrupt(format!("cfs entry [{suffix}] at [{offset}] of [{length}] bytes is outside the [{cfs_len}] bytes of the compound file"));
         }
         out.push(Entry { suffix, offset: offset as u64, length: length as u64 });

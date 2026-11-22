@@ -106,13 +106,14 @@ impl ChunkHeader {
     }
 
     /// Decompresses the chunk (`chunk`: its [`ChunkHeader::len`] bytes) into `out`, which ends
-    /// up [`ChunkHeader::total`] bytes long.
-    pub fn decompress(&self, chunk: &[u8], mode: Mode, chunk_size: u32, out: &mut Vec<u8>) -> Result<()> {
+    /// up [`ChunkHeader::total`] bytes long; `check` runs before each piece (cancellation).
+    pub fn decompress(&self, chunk: &[u8], mode: Mode, chunk_size: u32, out: &mut Vec<u8>, check: &mut dyn FnMut() -> Result<()>) -> Result<()> {
         out.clear();
         let total = self.total();
         let mut inp = Input::new(chunk.get(self.header_len..self.len()).ok_or_else(|| Error::Corrupt("a chunk shorter than its header said".into()))?);
         let piece = if self.sliced { chunk_size as usize } else { total.max(1) };
         while out.len() < total {
+            check()?;
             let n = piece.min(total - out.len());
             decompress_piece(&mut inp, mode, n, out)?;
         }
@@ -261,6 +262,10 @@ fn skip_piece(inp: &mut Input, mode: Mode, len: usize) -> Result<()> {
     }
 }
 
+/// The most blocks a piece may have after its dictionary: Lucene's preset-dictionary modes write
+/// ten (`NUM_SUB_BLOCKS`); a tiny block length would make each byte a decompression of its own.
+const MAX_BLOCKS: usize = 64;
+
 /// Blocks after the dictionary in a piece of `len` bytes.
 fn blocks(len: usize, dict: usize, block: usize) -> Result<usize> {
     if dict > len {
@@ -272,7 +277,11 @@ fn blocks(len: usize, dict: usize, block: usize) -> Result<usize> {
     if block == 0 {
         return corrupt("a block length of 0");
     }
-    Ok((len - dict).div_ceil(block))
+    let n = (len - dict).div_ceil(block);
+    if n > MAX_BLOCKS {
+        return corrupt(format!("[{n}] blocks of [{block}] bytes in a piece of [{len}], more than [{MAX_BLOCKS}]"));
+    }
+    Ok(n)
 }
 
 /// Decompresses one piece of `len` bytes, appending it to `out`.
@@ -321,18 +330,19 @@ fn decompress_piece(inp: &mut Input, mode: Mode, len: usize, out: &mut Vec<u8>) 
             let start = out.len();
             out.resize(start + len, 0);
             let piece = &mut out[start..];
+            // The dictionary, then each block inflated after it in one window: each block is its
+            // own stream with the dictionary as history, and inflating never writes before
+            // `dict`, so the dictionary is put there once.
+            let mut window = vec![0u8; dict + block.min(len - dict)];
             let compressed = inp.vuint()? as usize;
-            inflate(inp.bytes(compressed)?, &mut piece[..dict], 0)?;
+            inflate(inp.bytes(compressed)?, &mut window[..dict], 0)?;
+            piece[..dict].copy_from_slice(&window[..dict]);
             let mut done = dict;
             for _ in 0..n {
                 let m = block.min(len - done);
                 let compressed = inp.vuint()? as usize;
-                // Each block is its own stream with the dictionary as history.
-                let mut window = Vec::with_capacity(dict + m);
-                window.extend_from_slice(&piece[..dict]);
-                window.resize(dict + m, 0);
-                inflate(inp.bytes(compressed)?, &mut window, dict)?;
-                piece[done..done + m].copy_from_slice(&window[dict..]);
+                inflate(inp.bytes(compressed)?, &mut window[..dict + m], dict)?;
+                piece[done..done + m].copy_from_slice(&window[dict..dict + m]);
                 done += m;
             }
             Ok(())
@@ -369,15 +379,27 @@ pub enum Stored<'a> {
     Double(f64),
 }
 
-/// A document's stored values with their field numbers, in order.
-pub fn read_doc(bytes: &[u8], field_count: u32) -> Result<Vec<(u32, Stored<'_>)>> {
-    let mut inp = Input::new(bytes);
+/// A document's stored values with their field numbers, in order, read as they're asked for:
+/// nothing is collected (a document's field count is the file's, so reserving from it would let
+/// a document of small values build far more than its bytes).
+pub fn read_doc(bytes: &[u8], field_count: u32) -> Result<DocFields<'_>> {
     // A value takes at least two bytes.
     if field_count as usize > bytes.len() {
         return corrupt(format!("[{field_count}] stored fields in [{}] bytes", bytes.len()));
     }
-    let mut out = Vec::with_capacity(field_count as usize);
-    for _ in 0..field_count {
+    Ok(DocFields { inp: Input::new(bytes), left: field_count, done: false })
+}
+
+/// [`read_doc`]'s values.
+pub struct DocFields<'a> {
+    inp: Input<'a>,
+    left: u32,
+    done: bool,
+}
+
+impl<'a> DocFields<'a> {
+    fn field(&mut self) -> Result<(u32, Stored<'a>)> {
+        let inp = &mut self.inp;
         let info = inp.vlong()? as u64;
         let number = (info >> 3) as u32;
         let value = match info & 7 {
@@ -387,17 +409,33 @@ pub fn read_doc(bytes: &[u8], field_count: u32) -> Result<Vec<(u32, Stored<'_>)>
                 Stored::Bytes(inp.bytes(n)?)
             }
             2 => Stored::Int(inp.zint()?),
-            3 => Stored::Float(read_zfloat(&mut inp)?),
-            4 => Stored::Long(read_tlong(&mut inp)?),
-            5 => Stored::Double(read_zdouble(&mut inp)?),
+            3 => Stored::Float(read_zfloat(inp)?),
+            4 => Stored::Long(read_tlong(inp)?),
+            5 => Stored::Double(read_zdouble(inp)?),
             t => return corrupt(format!("Unknown type flag: {t:x}")),
         };
-        out.push((number, value));
+        Ok((number, value))
     }
-    if inp.remaining() != 0 {
-        return corrupt(format!("[{}] bytes left after a document's stored fields", inp.remaining()));
+}
+
+impl<'a> Iterator for DocFields<'a> {
+    type Item = Result<(u32, Stored<'a>)>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.done {
+            return None;
+        }
+        if self.left == 0 {
+            self.done = true;
+            return (self.inp.remaining() != 0).then(|| corrupt(format!("[{}] bytes left after a document's stored fields", self.inp.remaining())));
+        }
+        self.left -= 1;
+        let f = self.field();
+        if f.is_err() {
+            self.done = true;
+        }
+        Some(f)
     }
-    Ok(out)
 }
 
 fn read_zfloat(inp: &mut Input) -> Result<f32> {

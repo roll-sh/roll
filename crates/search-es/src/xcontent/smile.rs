@@ -25,6 +25,11 @@ pub const STEP: usize = 64 << 10;
 
 const SHARED_MAX: usize = 1024;
 
+/// Jackson's `StreamReadConstraints` default: numbers of at most 1000 digits. A big integer's
+/// two's complement bytes: 1000 decimal digits take at most 416 of them (and turning more into
+/// digits costs quadratic time).
+const MAX_NUMBER_BYTES: usize = 416;
+
 struct Parser<'a, 'l, 'f> {
     b: &'a [u8],
     pos: usize,
@@ -124,6 +129,15 @@ impl Parser<'_, '_, '_> {
         Err("SMILE integer too long".into())
     }
 
+    /// A big number's byte length, refused past [`MAX_NUMBER_BYTES`].
+    fn number_len(&mut self) -> Result<usize, String> {
+        let n = self.vint()?;
+        if n > MAX_NUMBER_BYTES as u64 {
+            return Err("a SMILE number longer than 1000 digits".into());
+        }
+        Ok(n as usize)
+    }
+
     fn zigzag(v: u64) -> i64 {
         ((v >> 1) as i64) ^ -((v & 1) as i64)
     }
@@ -216,7 +230,7 @@ impl Parser<'_, '_, '_> {
             0x24 => Value::Num(Number::Int(Self::zigzag(self.vint()?) as i32 as i64)),
             0x25 => Value::Num(Number::Int(Self::zigzag(self.vint()?))),
             0x26 => {
-                let n = self.vint()? as usize;
+                let n = self.number_len()?;
                 let raw = self.seven_bit(n)?;
                 Value::Num(big_integer(&raw))
             }
@@ -238,7 +252,7 @@ impl Parser<'_, '_, '_> {
             }
             0x2A => {
                 let scale = Self::zigzag(self.vint()?);
-                let n = self.vint()? as usize;
+                let n = self.number_len()?;
                 let raw = self.seven_bit(n)?;
                 let unscaled = match big_integer(&raw) {
                     Number::Int(i) => i as f64,
@@ -400,6 +414,10 @@ mod tests {
         let mut deep = vec![b':', b')', b'\n', 0];
         deep.extend(std::iter::repeat_n(0xF8, 100));
         assert!(parse_all(&deep).unwrap_err().contains("nested deeper"));
+        // A big integer of 5,000 bytes (12,000 digits).
+        let mut big = vec![b':', b')', b'\n', 0, 0x26, 0x4E, 0x88];
+        big.extend(std::iter::repeat_n(0x7F, 5714));
+        assert!(parse_all(&big).unwrap_err().contains("1000 digits"));
         // A reference to a name never seen.
         assert!(parse_all(&[b':', b')', b'\n', 1, 0xFA, 0x45, 0x21, 0xFB]).is_err());
     }

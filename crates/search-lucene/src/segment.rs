@@ -183,7 +183,7 @@ impl Stream {
 /// file): their bytes, in the order asked.
 fn keep_ranges(files: &mut dyn Files, at: (String, u64, u64), ranges: &[(u64, u64)], limits: &Limits, kept: &mut usize) -> Result<Vec<Vec<u8>>> {
     let (file, base, len) = at;
-    let total: u64 = ranges.iter().map(|r| r.1).sum();
+    let Some(total) = ranges.iter().try_fold(0u64, |t, r| t.checked_add(r.1)) else { return corrupt("doc values ranges overflow") };
     if *kept as u64 + total > limits.kept as u64 {
         return Err(Error::Unsupported(format!("the segment's doc values and vectors need more than [{}] bytes", limits.kept)));
     }
@@ -392,6 +392,9 @@ pub fn read(files: &mut dyn Files, commit: &SegmentCommit, si: &SegmentInfo, vec
         }
         let ord_range: Vec<(u64, u64)> = if entry.docs_offset >= 0 { vec![(entry.docs_offset as u64, entry.docs_length.max(0) as u64)] } else { Vec::new() };
         let ords = keep_ranges(files, at.clone(), &ord_range, limits, &mut kept)?.into_iter().next();
+        if entry.size > max_doc {
+            return corrupt(format!("[{}] vectors of [{field}] in a segment of [{max_doc}]", entry.size));
+        }
         if entry.docs_offset == -1 && entry.size != max_doc {
             return corrupt(format!("dense vectors of [{field}]: [{}] for [{max_doc}] documents", entry.size));
         }
@@ -404,7 +407,7 @@ pub fn read(files: &mut dyn Files, commit: &SegmentCommit, si: &SegmentInfo, vec
     for (v, ords) in vecs.iter().zip(&ord_bytes) {
         match ords {
             Some(o) => {
-                let mut d = docvalues::Disi::new(o, v.entry.dense_rank_power, v.entry.size as u64)?;
+                let mut d = docvalues::Disi::new(o, v.entry.dense_rank_power, v.entry.size as u64, max_doc)?;
                 vec_pending.push(d.next_doc()?);
                 vec_ords.push(Some(d));
             }
@@ -418,10 +421,13 @@ pub fn read(files: &mut dyn Files, commit: &SegmentCommit, si: &SegmentInfo, vec
     let chunk_size = stored::read_chunk_size(&view.small(files, &format!("{name}.fdm"), limits)?, &commit.id)?;
     let at = view.need(files, &format!("{name}.fdt"))?;
     let mut fdt = Stream::new(at.0, at.1, at.2, true, limits.window);
-    let end = at.2 - codec::FOOTER_LEN as u64;
+    let Some(end) = at.2.checked_sub(codec::FOOTER_LEN as u64) else { return corrupt(format!("[{name}.fdt] is [{}] bytes", at.2)) };
     fdt.fill(files, 0, 128)?;
     let (mode, header_len) = stored::read_fdt_header(fdt.have(0), &commit.id)?;
     let mut pos = header_len as u64;
+    if pos > end {
+        return corrupt(format!("[{name}.fdt] is shorter than its header and footer"));
+    }
     let mut out = Vec::new();
     let mut held = 0usize;
     let mut next_doc = 0u32;
@@ -430,10 +436,11 @@ pub fn read(files: &mut dyn Files, commit: &SegmentCommit, si: &SegmentInfo, vec
             let mut want = 4096usize;
             let header = loop {
                 fdt.fill(files, pos, want)?;
-                let avail = &fdt.have(pos)[..fdt.have(pos).len().min((end - pos) as usize)];
+                let left = end - pos;
+                let avail = &fdt.have(pos)[..fdt.have(pos).len().min(left as usize)];
                 match stored::measure(avail, mode, chunk_size, max_doc - next_doc, limits.chunk)? {
                     Some(h) => break h,
-                    None if avail.len() as u64 >= end - pos => return corrupt("the stored fields end inside a chunk"),
+                    None if avail.len() as u64 >= left => return corrupt("the stored fields end inside a chunk"),
                     None if want >= limits.chunk.saturating_mul(2).saturating_add(1 << 20) => {
                         return Err(Error::Unsupported(format!("a stored fields chunk is larger than [{}] bytes", limits.chunk)));
                     }
@@ -449,7 +456,7 @@ pub fn read(files: &mut dyn Files, commit: &SegmentCommit, si: &SegmentInfo, vec
                 files.charge((total - held) as i64)?;
                 held = total;
             }
-            header.decompress(&fdt.have(pos)[..header.len()], mode, chunk_size, &mut out)?;
+            header.decompress(&fdt.have(pos)[..header.len()], mode, chunk_size, &mut out, &mut || files.check())?;
             for i in 0..header.docs() as usize {
                 let doc = next_doc + i as u32;
                 if !live.get(doc) {
@@ -461,13 +468,12 @@ pub fn read(files: &mut dyn Files, commit: &SegmentCommit, si: &SegmentInfo, vec
                     continue;
                 }
                 files.check()?;
-                let values = stored::read_doc(header.doc(&out, i), header.field_counts[i])?;
                 let (mut id, mut source, mut routing) = (None, None, None);
-                for (number, v) in &values {
-                    match v {
-                        Stored::Bytes(b) if Some(*number) == id_field => id = Some(*b),
-                        Stored::Bytes(b) if Some(*number) == source_field => source = Some(*b),
-                        Stored::Str(s) if Some(*number) == routing_field => routing = Some(*s),
+                for f in stored::read_doc(header.doc(&out, i), header.field_counts[i])? {
+                    match f? {
+                        (number, Stored::Bytes(b)) if Some(number) == id_field => id = Some(b),
+                        (number, Stored::Bytes(b)) if Some(number) == source_field => source = Some(b),
+                        (number, Stored::Str(s)) if Some(number) == routing_field => routing = Some(s),
                         _ => {}
                     }
                 }
@@ -528,7 +534,7 @@ pub fn read(files: &mut dyn Files, commit: &SegmentCommit, si: &SegmentInfo, vec
             pos += header.len() as u64;
         }
         if pos != end {
-            return corrupt(format!("[{}] bytes between the last chunk and the footer", end - pos));
+            return corrupt(format!("[{}] bytes between the last chunk and the footer", end.abs_diff(pos)));
         }
         Ok(())
     })();
