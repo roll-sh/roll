@@ -146,6 +146,13 @@ impl Tool {
         PREPARED.get(self.name).map_or_else(|| self.find_open(), |p| p.open)
     }
 
+    /// Whether a person's role decides it too, on top of their token's rules: one resource of a
+    /// member product, as roll-access's gate asks a person's token `within` their session (a list,
+    /// a create or the product as a whole goes on the token's rules alone).
+    pub fn within_session(&self) -> bool {
+        PREPARED.get(self.name).map_or_else(|| self.find_within(), |p| p.within)
+    }
+
     /// Its MCP definition, as `tools/list` shows it.
     pub fn definition(&self) -> Value {
         self.definition_ref().clone()
@@ -167,6 +174,11 @@ impl Tool {
             catalog::Act::Raw(_) => vec![Action::Write, Action::Delete],
             _ => vec![found.row.action(self.method, &[], None)],
         }
+    }
+
+    fn find_within(&self) -> bool {
+        roll_auth::roles::MEMBER_PRODUCTS.contains(&self.product)
+            && catalog::by_path(self.method, &self.sample_path()).is_some_and(|f| !matches!(f.row.target, catalog::Tgt::AnyGrant | catalog::Tgt::List { .. } | catalog::Tgt::Product | catalog::Tgt::Create { .. }))
     }
 
     /// A route any connection may call (its own identity, its own approvals).
@@ -343,7 +355,7 @@ fn secrets_area(method: &str, path: &str) -> Area {
     let area = match parts.as_slice() {
         // A project and its environments: every area starts there.
         ["projects"] | ["projects", "environments"] if read => return Area::Every,
-        ["findings", ..] => "security",
+        ["findings", ..] | ["deleted"] => "security",
         ["search", ..] => "values",
         ["projects", "environments", s, ..] => match *s {
             "secrets" | "changes" | "diff" | "folders" | "import" | "imports" | "exports" | "order" | "promote" | "rollback" | "requests" | "value-requests" | "values" => "values",
@@ -692,7 +704,8 @@ static TOOLS: &[Tool] = &[
     t("workspace_get_project", "Get a project", "A workspace project and its resources.", "workspace", "GET", "/v1/workspace/projects/{id}", &[WS]),
     t("workspace_create_project", "Create a project", "A new workspace project to group resources.", "workspace", "POST", "/v1/workspace/projects", &[breq("name", Ty::Str, "1-48 of a-z, 0-9 and -"), b("description", Ty::Str, "At most 280 characters"), b("icon", Ty::Obj, ICON)]),
     t("workspace_update_project", "Update a project", "Rename a project, or change its description or icon.", "workspace", "PATCH", "/v1/workspace/projects/{id}", &[WS, b("name", Ty::Str, "New name"), b("description", Ty::Str, "New description"), bnull("icon", Ty::Obj, ICON)]),
-    t("workspace_delete_project", "Delete a project", "Delete a workspace project. Its resources stay; only the grouping goes.", "workspace", "DELETE", "/v1/workspace/projects/{id}", &[WS]),
+    t("workspace_delete_project", "Delete a project", "Delete a workspace project. Its resources stay. A project that holds secrets needs a secrets admin's confirmation in the dashboard.", "workspace", "DELETE", "/v1/workspace/projects/{id}", &[WS]),
+    t("workspace_list_roles", "List member roles", "The roles a project member can have (viewer, developer, admin, owner), the rules each one grants, the products those rules cover, and which environments a developer reaches when none are named.", "workspace", "GET", "/v1/workspace/roles", &[]),
     t(
         "workspace_place_resource",
         "Place a resource",
@@ -1196,6 +1209,7 @@ static TOOLS: &[Tool] = &[
     t("secrets_ca_certificates", "A CA's certificates", "The certificates a project's CA has issued (public, with their expiry; never a key).", "secrets", "GET", "/v1/secrets/projects/{project}/cas/{ca}/certificates", &[req("project", "Workspace project"), req("ca", "CA id")]),
     t("secrets_get_values", "Reveal an environment's values", "All of an environment's values (a folder's, with path) at once, resolved (references and imports), as one reveal instead of one per key; what can't be resolved is named, never guessed. dynamic=false leaves dynamic keys out instead of minting fresh credentials. Needs reveal.", "secrets", "GET", "/v1/secrets/projects/{project}/environments/{env}/values", &[SECRET_PROJECT, ENV, q("path", Ty::Str, "Folder"), q("dynamic", Ty::Bool, "false: leave dynamic keys out (named in dynamic)"), q("seq", Ty::Int, "As stored after this change (from secrets_changes): what the folder had then; audited as an export"), q("at", Ty::Int, "As stored at this time (unix seconds), as seq does"), q("strict", Ty::Bool, "Any problem is a 409 naming the keys, instead of values with problems"), q("resolve", Ty::Bool, "false: values as stored, references as written")]),
     t("secrets_list_placeholders", "List placeholders", "The placeholders a project's host-bound keys were handed out as (a sandbox or an agent uses the key without seeing it: the value is swapped in only on the way to the key's hosts), newest first: key, environment, consumer, who issued it, when it expires or was ended. Never the placeholder or the value.", "secrets", "GET", "/v1/secrets/projects/{project}/placeholders", &[SECRET_PROJECT]),
+    t("secrets_list_recoverable", "List deleted projects you can recover", "Workspace projects deleted lately whose secrets are kept for a recovery window, as far as you may recover them: who deleted each, when, and when it goes for good (soonest first). Recovering one is a person's, in the dashboard or roll secrets recover.", "secrets", "GET", "/v1/secrets/deleted", &[]),
     t("secrets_end_placeholder", "End a placeholder", "End one placeholder now: its value is no longer swapped in for anyone holding it (409 when it already ended).", "secrets", "DELETE", "/v1/secrets/projects/{project}/placeholders/{id}", &[SECRET_PROJECT, req("id", "Placeholder id (from secrets_list_placeholders)")]),
     t("secrets_end_consumer_placeholders", "End a consumer's placeholders", "End every live placeholder one consumer (a sandbox, a preview, an agent's run) holds that you may end, at once; answers how many ended.", "secrets", "DELETE", "/v1/secrets/projects/{project}/placeholders", &[SECRET_PROJECT, qreq("consumer", "The consumer, as secrets_list_placeholders names it")]),
     t("secrets_list_leases", "List leases", "A project's live leases on dynamic credentials (a database user, a cloud key made for a reader): who holds each, for what, and when it ends. Never a credential.", "secrets", "GET", "/v1/secrets/projects/{project}/leases", &[SECRET_PROJECT]),
@@ -1253,6 +1267,7 @@ static TOOLS: &[Tool] = &[
         b("held", Ty::Bool, "false: resume deploys a rollback held (held_after shows since when)"),
         b("hostname", Ty::Str, "Its new name on the roll domain (<hostname>.<domain>); the old one stops answering"),
         b("report", Ty::Bool, "false: its deploys post no commit status and no GitHub Deployment (something else reports them)"),
+        bnull("data", Ty::Str, "\"branch\": data of its own, a branch of each Postgres and Redis database it links in place of the databases (admin; not production or a preview); clear it to go back, deleting the branches"),
     ]),
     t("apps_update_service", "Update a service", "Change a service's name, source, build or run settings (fields given are changed; run takes alerts {memory_pct, error_pct, p95_ms} for metric alerts).", "apps", "PATCH", "/v1/apps/services/{service}", &[
         SERVICE,
@@ -1572,11 +1587,12 @@ pub fn all() -> &'static [Tool] {
 struct Prepared {
     actions: Vec<Action>,
     open: bool,
+    within: bool,
     definition: Value,
 }
 
 static PREPARED: std::sync::LazyLock<std::collections::HashMap<&'static str, Prepared>> = std::sync::LazyLock::new(|| {
-    TOOLS.iter().map(|t| (t.name, Prepared { actions: t.find_actions(), open: t.find_open(), definition: t.build_definition() })).collect()
+    TOOLS.iter().map(|t| (t.name, Prepared { actions: t.find_actions(), open: t.find_open(), within: t.find_within(), definition: t.build_definition() })).collect()
 });
 
 #[cfg(test)]
@@ -1872,8 +1888,10 @@ mod tests {
         assert!(missing.is_empty(), "docs/mcp.md doesn't list {missing:?}");
         // A tool a description or a workflow tells the agent to call is one roll has: a renamed
         // tool would otherwise send agents after a name that answers "unknown tool".
-        let names: Vec<String> = all().iter().map(|t| t.name.to_string()).chain([crate::search::FIND, crate::search::RUN_READ, crate::search::RUN].map(String::from)).collect();
-        let products = ["access", "workspace", "postgres", "redis", "storage", "streams", "tasks", "queues", "nosql", "search", "secrets", "apps", "previews", "roll"];
+        // roll code's are another crate's: the ones roll-mcp names are in prompts::FRONTED (rolld's
+        // tests hold each to one roll code fronts).
+        let names: Vec<String> = all().iter().map(|t| t.name.to_string()).chain([crate::search::FIND, crate::search::RUN_READ, crate::search::RUN].map(String::from)).chain(crate::prompts::FRONTED.iter().map(|n| n.to_string())).collect();
+        let products = ["access", "workspace", "postgres", "redis", "storage", "streams", "tasks", "queues", "nosql", "search", "secrets", "apps", "previews", "roll", "code", "agents"];
         // Words that look like a tool and aren't one: Elasticsearch's audit event names.
         let not_tools = ["access_denied"];
         let mut texts: Vec<(String, String)> = all().iter().map(|t| (t.name.to_string(), std::iter::once(t.title).chain([t.description]).chain(t.params.iter().map(|p| p.desc)).collect::<Vec<_>>().join(" "))).collect();

@@ -33,6 +33,10 @@ pub fn router(s: Arc<Secrets>) -> Router {
         .route("/v1/secrets/health", get(health))
         .route("/v1/secrets/whoami", get(whoami))
         .route("/v1/secrets/search", get(find))
+        // Deleted projects in their recovery window (docs/secrets.md, "When a secret, an
+        // environment or the project goes").
+        .route("/v1/secrets/deleted", get(deleted_projects))
+        .route(&format!("{P}/recover"), post(recover_project))
         .route(P, get(overview).patch(project_settings))
         .route(&format!("{P}/grid"), get(grid))
         .route(&format!("{P}/compare"), get(compare))
@@ -176,22 +180,28 @@ pub fn router(s: Arc<Secrets>) -> Router {
         .with_state(s)
 }
 
+/// The status and code an error answers with (the workspace answers secrets' refusals with them).
+pub fn status_of(e: &Error) -> (StatusCode, Option<&'static str>) {
+    match e {
+        Error::BadRequest(_) => (StatusCode::BAD_REQUEST, None),
+        Error::Unauthorized(_) => (StatusCode::UNAUTHORIZED, Some("unauthorized")),
+        Error::Forbidden(_) => (StatusCode::FORBIDDEN, Some("forbidden")),
+        Error::MakerUnreachable(_) => (StatusCode::FORBIDDEN, Some("maker_unreachable")),
+        Error::NotFound(_) => (StatusCode::NOT_FOUND, None),
+        Error::Gone(_) => (StatusCode::GONE, Some("gone")),
+        Error::Conflict(code, _) => (StatusCode::CONFLICT, Some(*code)),
+        Error::TooMany(_) => (StatusCode::TOO_MANY_REQUESTS, Some("rate_limited")),
+        Error::Unavailable(_) => (StatusCode::SERVICE_UNAVAILABLE, Some("no_key")),
+        Error::KeyDenied(_) => (StatusCode::LOCKED, Some("kms_denied")),
+        Error::Frozen(_) => (StatusCode::LOCKED, Some("frozen")),
+        Error::Link(_) => (StatusCode::BAD_GATEWAY, Some("link")),
+        Error::Db(_) | Error::Internal(_) => (StatusCode::INTERNAL_SERVER_ERROR, None),
+    }
+}
+
 impl IntoResponse for Error {
     fn into_response(self) -> Response {
-        let (status, code) = match &self {
-            Error::BadRequest(_) => (StatusCode::BAD_REQUEST, None),
-            Error::Unauthorized(_) => (StatusCode::UNAUTHORIZED, Some("unauthorized")),
-            Error::Forbidden(_) => (StatusCode::FORBIDDEN, Some("forbidden")),
-            Error::NotFound(_) => (StatusCode::NOT_FOUND, None),
-            Error::Gone(_) => (StatusCode::GONE, Some("gone")),
-            Error::Conflict(code, _) => (StatusCode::CONFLICT, Some(*code)),
-            Error::TooMany(_) => (StatusCode::TOO_MANY_REQUESTS, Some("rate_limited")),
-            Error::Unavailable(_) => (StatusCode::SERVICE_UNAVAILABLE, Some("no_key")),
-            Error::KeyDenied(_) => (StatusCode::LOCKED, Some("kms_denied")),
-            Error::Frozen(_) => (StatusCode::LOCKED, Some("frozen")),
-            Error::Link(_) => (StatusCode::BAD_GATEWAY, Some("link")),
-            Error::Db(_) | Error::Internal(_) => (StatusCode::INTERNAL_SERVER_ERROR, None),
-        };
+        let (status, code) = status_of(&self);
         if status == StatusCode::INTERNAL_SERVER_ERROR {
             tracing::error!("roll secrets: {self}");
         }
@@ -275,6 +285,14 @@ async fn find(State(s): S, Who(c): Who, Query(q): Q) -> crate::Result<Response> 
     Ok(ok(blocking(s, move |s| s.find(key.trim(), &c)).await?))
 }
 
+async fn deleted_projects(State(s): S, Who(c): Who) -> crate::Result<Response> {
+    Ok(ok(blocking(s, move |s| s.deleted_projects(&c)).await?))
+}
+
+async fn recover_project(State(s): S, Who(c): Who, Path(project): Path<String>) -> crate::Result<Response> {
+    Ok(ok(blocking(s, move |s| s.recover_project(&project, &c)).await?))
+}
+
 async fn whoami(State(s): S, Who(c): Who) -> Response {
     ok(s.whoami(&c))
 }
@@ -285,7 +303,9 @@ async fn overview(State(s): S, Who(c): Who, Path(project): Path<String>) -> crat
         let previews = envs.iter().filter(|e| e.kind == crate::envs::Kind::Ephemeral).count();
         let history_days = s.history_days(&project)?;
         let validity_checks = if s.validity_checks(&project)? { "on" } else { "off" };
-        Ok(json!({ "project": project, "environments": envs, "previews": previews, "history_days": history_days, "validity_checks": validity_checks }))
+        // What deleting the workspace project would take with it, and for how long it's recoverable.
+        let deletion = s.deletion(&project)?;
+        Ok(json!({ "project": project, "environments": envs, "previews": previews, "history_days": history_days, "validity_checks": validity_checks, "deletion": deletion }))
     })
     .await?;
     Ok(ok(v))

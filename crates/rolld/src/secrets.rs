@@ -489,17 +489,18 @@ pub fn open(args: &crate::Args, home: &Path, workspace: Arc<roll_workspace::Work
         ("member.remove" | "member.leave" | "member.role", Some(user)) => s.member_changed(&e.project, user).map_err(|e| e.to_string()),
         _ => Ok(()),
     }));
-    // A deleted project's secrets go with it.
-    let s = secrets.clone();
-    workspace.on_delete(Box::new(move |id| {
-        let s = s.clone();
-        let id = id.to_string();
-        tokio::task::spawn_blocking(move || {
-            if let Err(e) = s.forget_project(&id) {
-                tracing::error!(project = %id, "forgetting a deleted project's secrets failed: {e}");
-            }
-        });
-    }));
+    // A workspace project that holds secrets goes only when a secrets admin confirms; then its
+    // secrets are kept for a recovery window (1–90 days, 7 unless set), and purged after it.
+    if let Ok(days) = std::env::var("ROLL_SECRETS_DELETE_WINDOW_DAYS") {
+        let days: u32 = days.trim().parse().map_err(|_| anyhow::anyhow!("ROLL_SECRETS_DELETE_WINDOW_DAYS is a number of days (1–{}), not {days:?}", roll_secrets::deleted::WINDOW_DAYS_MAX))?;
+        secrets.set_delete_window_days(days).map_err(|e| anyhow::anyhow!("ROLL_SECRETS_DELETE_WINDOW_DAYS: {e}"))?;
+    }
+    // How long the purge waits for an audit sink that hasn't taken a closed project's last rows.
+    if let Ok(hours) = std::env::var("ROLL_SECRETS_PURGE_SINK_GRACE_HOURS") {
+        let hours: u32 = hours.trim().parse().map_err(|_| anyhow::anyhow!("ROLL_SECRETS_PURGE_SINK_GRACE_HOURS is a number of hours, not {hours:?}"))?;
+        secrets.set_purge_sink_grace_hours(hours).map_err(|e| anyhow::anyhow!("ROLL_SECRETS_PURGE_SINK_GRACE_HOURS: {e}"))?;
+    }
+    secrets.watch_workspace();
     // Two sweepers: work in roll (expired leases and environments, due rotations, old audit
     // rows), and deliveries outside it (notices, syncs, sinks), so a slow platform holds up neither.
     sweeper(secrets.clone(), "local", Secrets::sweep_local);
@@ -1443,9 +1444,10 @@ impl apps_control::integrations::SecretSource for ForApps {
             let ask = roll_secrets::placeholders::Ask { minutes: None, maker: Some(&maker) };
             let v = match secrets.values_with_placeholders(&project, &env, "/", &closed_consumer(&project, &env), false, ask, &caller) {
                 Ok(v) => v,
-                // Its maker can't reveal here now: the keys bound to hosts are withheld (never
-                // their values instead), the rest read as they would be, and said.
-                Err(roll_secrets::Error::Forbidden(why)) => {
+                // Its maker can't reveal here now (`maker_unreachable`: demoted, removed, a token
+                // revoked or narrowed): the keys bound to hosts are withheld (never their values
+                // instead), the rest read as they would be, and said. Any other refusal surfaces.
+                Err(roll_secrets::Error::MakerUnreachable(why)) => {
                     let bound: std::collections::HashSet<String> = secrets.secrets(&project, &env, "/", &caller)?.into_iter().filter(|s| s.hosts.is_some()).map(|s| s.key).collect();
                     let v = secrets.values_for(&project, &env, "/", true, Some(&format!("app:{service}")), false, &caller)?;
                     let sensitive: std::collections::HashSet<String> = v.sensitive.into_iter().collect();
@@ -1756,7 +1758,7 @@ impl search_control::secret_refs::ResourceSecrets for ForSearch {
         tokio::task::spawn_blocking(move || {
             let caller = secrets.caller_of(who.operator, who.user.as_ref(), who.grant.as_ref()).map_err(|e| Refused::Forbidden(e.to_string()))?;
             let maker = secrets.bind_ref(&resource, &reference, &caller).map_err(|e| match e {
-                roll_secrets::Refusal::NotAllowed(_) | roll_secrets::Refusal::NotTrusted(_) | roll_secrets::Refusal::Protected(_) => Refused::Forbidden(e.to_string()),
+                roll_secrets::Refusal::NotAllowed(_) | roll_secrets::Refusal::MakerUnreachable(_) | roll_secrets::Refusal::NotTrusted(_) | roll_secrets::Refusal::Protected(_) => Refused::Forbidden(e.to_string()),
                 e => Refused::Invalid(e.to_string()),
             })?;
             Ok(maker.to_string())
@@ -2091,7 +2093,7 @@ fn for_code(e: Error) -> code_control::Error {
     match e {
         Error::BadRequest(m) => C::Invalid(m),
         Error::Unauthorized(_) => C::Unauthorized,
-        Error::Forbidden(m) => C::Forbidden(m),
+        Error::Forbidden(m) | Error::MakerUnreachable(m) => C::Forbidden(m),
         // "no environment staging" reads "environment staging not found".
         Error::NotFound(m) => C::NotFound(m.strip_prefix("no ").map(str::to_string).unwrap_or(m)),
         Error::Conflict("no_project", m) => C::Unprocessable(m),

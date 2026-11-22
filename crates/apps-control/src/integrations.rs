@@ -431,6 +431,18 @@ pub trait Resources: Send + Sync {
     async fn unlink(&self, _kind: LinkKind, _ref: &str, _kept: &str) -> anyhow::Result<()> {
         Ok(())
     }
+    /// A branch of the linked resource for one environment (`data: "branch"`; Railway's
+    /// environments' own databases): its own copy of the resource's data, made from its main (or
+    /// the one already there by that name: an environment's services share it), its variables
+    /// as the link's (`DATABASE_URL`…) and `kept` what [`Resources::unbranch`] deletes. None:
+    /// this kind has no branches.
+    async fn branch(&self, _kind: LinkKind, _ref: &str, _env: &str) -> anyhow::Result<Option<Minted>> {
+        Ok(None)
+    }
+    /// Delete what [`Resources::branch`] made, once no environment uses it.
+    async fn unbranch(&self, _kind: LinkKind, _ref: &str, _kept: &str) -> anyhow::Result<()> {
+        Ok(())
+    }
     /// How far `group` is behind on `stream` (messages, every partition): what a worker with
     /// `run.scale` follows.
     async fn backlog(&self, _stream: &str, _group: &str) -> anyhow::Result<u64> {

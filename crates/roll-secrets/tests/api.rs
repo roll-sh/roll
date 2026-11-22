@@ -1217,6 +1217,7 @@ impl Api {
         let granted: Arc<dyn roll_auth::Grants> = Arc::new(Granted { gate: gate.clone(), people: people.clone(), ws: ws.clone() });
         let opts = Options { keyring: Ok(Keyring::new(&"k".repeat(32), None).unwrap()), key_source: roll_secrets::KeySource::Env, links, syncs, open: true, trust_forwarded_for: false, web_url: None, deliver: Some(sent.clone()), grants: Some(granted), people: Some(people.clone()), workloads: Some(gate.clone()), kms: Some(kms.clone()), sts: Some(sts.clone()), outside: Some(outside.clone()), directory: Some(directory.clone()), github: Some(github.clone()), clouds: Some(roll_secrets::clouds::Clouds { issuer: ISSUER_URL.into(), tokens: clouds.clone() }), gateways: None };
         let secrets = Arc::new(Secrets::new(db.clone(), ws.clone(), opts).unwrap());
+        secrets.watch_workspace();
         let _ = gate.secrets.set(secrets.clone());
         // As rolld: a member removed, demoted or gone ends what they shared and handed out.
         let s2 = secrets.clone();
@@ -2812,14 +2813,18 @@ async fn a_rotator_outside_roll_issues_and_rotates_a_keys_value() {
     assert_ne!(api.values("production", "/").await["values"]["STRIPE_KEY"], before, "rotated inside its window");
 
     // The project goes while the rotator is down: what it issued is still revoked, by the
-    // sweeper, which keeps the rotator (and the project's key) until then.
+    // sweeper, which keeps the rotator (and the project's key) until then, past the purge.
     api.sent.2.store(true, std::sync::atomic::Ordering::Relaxed);
-    let (s, p) = (api.secrets.clone(), api.project.clone());
-    tokio::task::spawn_blocking(move || s.forget_project(&p).unwrap()).await.unwrap();
+    assert_eq!(delete_project(&api, "?confirm=shop", None).await.0, StatusCode::NO_CONTENT);
     let count = |table: &str| {
         let (sql, p) = (format!("SELECT COUNT(*) FROM {table} WHERE project_id = ?"), api.project.clone());
         api.db.read(move |c| c.query_row(&sql, [p.as_str()], |r| r.get::<_, i64>(0))).unwrap()
     };
+    assert!(count("secrets") > 0, "kept for the recovery window");
+    let p = api.project.clone();
+    api.db.write(move |c| c.execute("UPDATE projects SET purge_at = 0 WHERE project_id = ?", [p.as_str()])).unwrap();
+    let s = api.secrets.clone();
+    tokio::task::spawn_blocking(move || s.sweep().unwrap()).await.unwrap();
     assert_eq!((count("rotators"), count("projects"), count("secrets")), (1, 1, 0));
     api.sent.2.store(false, std::sync::atomic::Ordering::Relaxed);
     let p = api.project.clone();
@@ -3737,6 +3742,37 @@ async fn an_interception_ca_names_only_its_consumers_bound_hosts_and_ends_with_i
     }
 }
 
+/// A consumer's hosts shrinking (a placeholder revoked, a binding taken off) ends its CAs that name a
+/// host it lost, with a revocation row; the next one names only the hosts it still has.
+#[tokio::test]
+async fn an_interception_ca_ends_when_its_consumer_loses_one_of_its_hosts() {
+    use roll_secrets::Error;
+    let api = Api::new().await;
+    let s = &api.secrets;
+    let consumer = "sandbox:sbx_1";
+    for (key, host) in [("STRIPE_KEY", "api.stripe.com"), ("GITHUB_TOKEN", "api.github.com")] {
+        api.ok(Method::PUT, &format!("/environments/staging/secrets/{key}"), Some(json!({ "value": format!("fake_{key}_value_0001") }))).await;
+        api.ok(Method::PUT, &format!("/environments/staging/secrets/{key}/hosts"), Some(json!({ "hosts": [host] }))).await;
+    }
+    api.ok(Method::POST, "/environments/staging/resolve", Some(json!({ "consumer": consumer, "placeholders": true }))).await;
+    let old = s.intercept_ca(consumer, None).unwrap();
+    assert_eq!(old.hosts, ["api.github.com", "api.stripe.com"]);
+    let listed = api.ok(Method::GET, "/placeholders", None).await;
+    let stripe = listed.as_array().unwrap().iter().find(|p| p["key"] == "STRIPE_KEY").unwrap_or_else(|| panic!("{listed}"))["id"].as_str().unwrap().to_string();
+    assert!(api.call(Method::DELETE, &format!("/placeholders/{stripe}"), None).await.0.is_success());
+    // Ended by the revocation itself (before the proxy's next check), with its row.
+    let ended = api.ok(Method::GET, "/audit?action=secrets.intercept_ca.end", None).await.to_string();
+    assert!(ended.contains(&format!("ended interception CA {} for sandbox:sbx_1: api.stripe.com no longer bound", old.id)), "{ended}");
+    assert!(!s.intercept_ca_live(&old.id).unwrap());
+    let new = s.intercept_ca(consumer, None).unwrap();
+    assert_eq!(new.hosts, ["api.github.com"]);
+    // The other key's binding taken off: that one ends too, and nothing is left to intercept.
+    assert!(api.call(Method::DELETE, "/environments/staging/secrets/GITHUB_TOKEN/hosts", None).await.0.is_success());
+    assert_eq!(s.end_intercept_cas(consumer, "again").unwrap(), 0, "already ended");
+    assert!(!s.intercept_ca_live(&new.id).unwrap());
+    assert!(matches!(s.intercept_ca(consumer, None), Err(Error::NotFound(_))));
+}
+
 #[tokio::test]
 async fn an_ssh_ca_signs_short_lived_user_certificates_for_its_principals() {
     use base64::Engine;
@@ -4105,10 +4141,14 @@ async fn only_an_admins_session_can_tell_a_key_is_a_decoy() {
     let (s, _) = api.req(Method::PUT, "/environments/production/policy", Some(json!({ "protected": false, "notify_url": "https://hooks.example/T0/B0/token" })), Some(&admin)).await;
     assert!(s.is_success(), "{s}");
     api.ok(Method::PATCH, "/environments/production", Some(json!({ "max_age_days": 90 }))).await;
-    api.ok(Method::POST, "/environments/production/decoys", Some(json!({ "key": "BACKUP_DB_TOKEN", "kind": "rlt" }))).await;
+    // Planted from an admin's session: the person behind it owns it (and is mailed), not the operator.
+    let base = format!("/v1/secrets/projects/{}", api.project);
+    let (s, planted) = api.signed_in("root", true, Method::POST, &format!("{base}/environments/production/decoys"), Some(json!({ "key": "BACKUP_DB_TOKEN", "kind": "rlt" }))).await;
+    assert!(s.is_success(), "{s} {planted}");
     // Used once.
     let (_, value) = api.req(Method::GET, "/environments/production/secrets/BACKUP_DB_TOKEN/value", None, Some(&dev)).await;
     let value = value["value"].as_str().unwrap().to_string();
+    assert_eq!(api.gate.tokens.lock().unwrap()[&value].user.as_deref(), Some("usr_root"));
     api.req(Method::GET, "/v1/secrets/whoami", None, Some(&value)).await;
     for t in [&dev, &admin] {
         assert_eq!(api.req(Method::POST, "/environments/production/decoys", Some(json!({ "key": "OTHER", "kind": "rlt" })), Some(t)).await.0, StatusCode::FORBIDDEN);
@@ -4132,10 +4172,9 @@ async fn only_an_admins_session_can_tell_a_key_is_a_decoy() {
     let write = |key: &str| rows.iter().rev().find(|r| r["keys"] == json!([key])).map(|r| (r["action"].clone(), r["summary"].as_str().unwrap().split_once(' ').unwrap().1.to_string())).unwrap();
     assert_eq!(write("BACKUP_DB_TOKEN"), write("STRIPE_KEY"), "{all}");
     // An admin's session, as the operator, sees it all: who planted it on the key, its use.
-    let base = format!("/v1/secrets/projects/{}", api.project);
     let (_, listed) = api.signed_in("root", true, Method::GET, &format!("{base}/environments/production/secrets"), None).await;
     let decoy = listed.as_array().unwrap().iter().find(|s| s["key"] == "BACKUP_DB_TOKEN").unwrap()["decoy"].clone();
-    assert_eq!((decoy["uses"].as_i64(), decoy["created_by"].as_str(), decoy["created_at"].is_i64()), (Some(1), Some("operator"), true), "{listed}");
+    assert_eq!((decoy["uses"].as_i64(), decoy["created_by"].as_str(), decoy["created_at"].is_i64()), (Some(1), Some("usr_root"), true), "{listed}");
     assert_eq!((decoy["used_ip"].as_str(), decoy["used_route"].as_str(), decoy["used_endpoint"].as_str(), decoy["used_at"].is_i64()), (Some("203.0.113.7"), Some("/v1/secrets/whoami"), None, true), "{decoy}");
     let (_, health) = api.signed_in("root", true, Method::GET, &format!("{base}/health"), None).await;
     assert_eq!(health[0]["issue"], "decoy_used", "{health}");
@@ -5360,8 +5399,8 @@ async fn a_reference_a_person_chose_reads_only_what_they_may_reveal_now() {
     for flag in [&api.people.root_demoted, &api.people.root_disabled] {
         *flag.lock().unwrap() = true;
         let refused = s.resolve_as(&logs, reference, &root).unwrap_err();
-        assert!(matches!(refused, Refusal::NotAllowed(_)), "{refused}");
-        assert!(matches!(s.digest_as(&logs, reference, &root), Err(Refusal::NotAllowed(_))));
+        assert!(matches!(refused, Refusal::MakerUnreachable(_)), "{refused}");
+        assert!(matches!(s.digest_as(&logs, reference, &root), Err(Refusal::MakerUnreachable(_))));
         *flag.lock().unwrap() = false;
     }
     assert!(s.resolve_as(&logs, reference, &root).is_ok());
@@ -5409,7 +5448,7 @@ async fn a_reference_a_person_chose_reads_only_what_they_may_reveal_now() {
     let by_token = s.bind_ref(&logs, staging, &token).unwrap();
     assert_eq!(s.resolve_as(&logs, staging, &by_token).unwrap().value.expose(), "fake-staging");
     api.gate.tokens.lock().unwrap().remove(&secret);
-    assert!(matches!(s.resolve_as(&logs, staging, &by_token), Err(Refusal::NotAllowed(_))));
+    assert!(matches!(s.resolve_as(&logs, staging, &by_token), Err(Refusal::MakerUnreachable(_))));
 
     // A person's own project: her reference reads while she's in it, and stops once she isn't.
     let (_, mine) = api.as_ada(Method::POST, "/v1/workspace/projects", Some(json!({ "name": "mine" }))).await;
@@ -5430,9 +5469,9 @@ async fn a_reference_a_person_chose_reads_only_what_they_may_reveal_now() {
     api.ws_db.write(|c| c.execute("UPDATE projects SET owner = '' WHERE id = ?", [&mine])).unwrap();
     api.ws_db.write(|c| c.execute("DELETE FROM members WHERE project_id = ? AND user_id = 'usr_ada'", [&mine])).unwrap();
     let refused = s.resolve_as(&site, "roll://production/DEPLOY_KEY", &ada).unwrap_err();
-    assert!(matches!(refused, Refusal::NotAllowed(_)), "{refused}");
+    assert!(matches!(refused, Refusal::MakerUnreachable(_)), "{refused}");
     let refused = s.resolve_as(&site, "roll://production/GIT_TOKEN", &ada_runtime).unwrap_err();
-    assert!(matches!(refused, Refusal::NotAllowed(_)) && !refused.to_string().contains("fake-"), "{refused}");
+    assert!(matches!(refused, Refusal::MakerUnreachable(_)) && !refused.to_string().contains("fake-"), "{refused}");
 }
 
 #[tokio::test]
@@ -5951,9 +5990,13 @@ async fn the_maker_losing_reveal_stops_the_swaps() {
     let (_, reader) = api.gate.grant("reader", read_only, None);
     let sandbox = api.secrets.untrusted(&api.project, &roll_secrets::Caller::consumer("sandbox:sbx_m")).unwrap();
     let issue = |maker: Option<&str>| api.secrets.values_with_placeholders(&api.project, "staging", "/", "sandbox:sbx_m", false, Ask { minutes: None, maker }, &sandbox);
-    // Nobody named, or someone who may not reveal there: refused.
+    // Nobody named, or someone who may not reveal there: refused, the latter with its own code (a
+    // preview resolves without placeholders on it, and surfaces any other 403).
     assert!(matches!(issue(None), Err(roll_secrets::Error::BadRequest(_))));
-    assert!(matches!(issue(Some(&format!("token:{reader}"))), Err(roll_secrets::Error::Forbidden(_))));
+    assert!(matches!(issue(Some(&format!("token:{reader}"))), Err(roll_secrets::Error::MakerUnreachable(_))));
+    let (status, refused) = api.call(Method::POST, "/environments/staging/resolve", Some(json!({ "consumer": "sandbox:sbx_m", "placeholders": true, "maker": format!("token:{reader}") }))).await;
+    assert_eq!((status, refused["code"].as_str()), (StatusCode::FORBIDDEN, Some("maker_unreachable")), "{refused}");
+    assert!(refused["error"].as_str().unwrap().contains("can no longer reveal staging") && !refused.to_string().contains("sk_test_fake_maker"), "{refused}");
     let maker = format!("token:{id}");
     let v = issue(Some(&maker)).unwrap();
     let ph = v.values["STRIPE_KEY"].expose().to_string();
@@ -5961,7 +6004,8 @@ async fn the_maker_losing_reveal_stops_the_swaps() {
     assert_eq!(api.secrets.substitute(&ph, "api.stripe.com", at).unwrap().expose(), "sk_test_fake_maker");
     assert_eq!(api.ok(Method::GET, "/placeholders", None).await[0]["maker"], maker.as_str());
     roll_secrets::Workloads::revoke(&*api.gate, &id).unwrap();
-    assert!(matches!(api.secrets.substitute(&ph, "api.stripe.com", at), Err(Refusal::NotAllowed(_))));
+    assert!(matches!(api.secrets.substitute(&ph, "api.stripe.com", at), Err(Refusal::MakerUnreachable(_))));
+    assert!(matches!(issue(Some(&maker)), Err(roll_secrets::Error::MakerUnreachable(_))));
 }
 
 /// Reach lists a folder's live placeholders, and a cut-off ends them, without a freeze.
@@ -6263,7 +6307,7 @@ async fn a_demoted_members_host_binding_and_placeholders_stop() {
     // A developer may no longer manage staging: her binding swaps nothing, and a read still gets
     // a placeholder, never the value.
     demote("developer").await;
-    assert!(matches!(swap(&roll), Err(Refusal::NotAllowed(_))), "{:?}", swap(&roll));
+    assert!(matches!(swap(&roll), Err(Refusal::MakerUnreachable(_))), "{:?}", swap(&roll));
     let again = api.ok(Method::POST, "/environments/staging/resolve", Some(json!({ "consumer": "sandbox:sbx_m3", "untrusted": true, "placeholders": true }))).await;
     assert!(again["values"]["STRIPE_KEY"].as_str().unwrap().starts_with("rlph_"), "{again}");
 
@@ -6272,8 +6316,11 @@ async fn a_demoted_members_host_binding_and_placeholders_stop() {
     assert!(swap(&roll).is_ok() && swap(&hers).is_ok());
     // A viewer reveals nothing: the placeholder made for her consumer stops; roll's doesn't.
     demote("viewer").await;
-    assert!(matches!(swap(&hers), Err(Refusal::NotAllowed(_))), "{:?}", swap(&hers));
+    assert!(matches!(swap(&hers), Err(Refusal::MakerUnreachable(_))), "{:?}", swap(&hers));
     assert!(swap(&roll).is_ok());
+    // New placeholders for her consumer are refused with the code a preview falls back on.
+    let (s, refused) = api.call(Method::POST, "/environments/staging/resolve", Some(json!({ "consumer": "sandbox:sbx_m4", "untrusted": true, "placeholders": true, "maker": "usr_cat" }))).await;
+    assert_eq!((s, refused["code"].as_str()), (StatusCode::FORBIDDEN, Some("maker_unreachable")), "{refused}");
 }
 
 /// The security review's finding 4: a rotator (a URL outside roll that chooses a key's value)
@@ -6375,4 +6422,131 @@ async fn what_a_member_did_through_their_token_follows_them() {
     api.ok(Method::POST, "/environments/production/requests", Some(json!({ "ops": [{ "op": "set", "key": "DB", "value": "x" }] }))).await;
     sweep().await;
     assert_eq!(sent(), delivered, "no sink batch and no approval notice once she's gone");
+}
+
+/// `DELETE /v1/workspace/projects/{id}` as the operator (or with `token`), `q` its query.
+async fn delete_project(api: &Api, q: &str, token: Option<&str>) -> (StatusCode, Value) {
+    api.req(Method::DELETE, &format!("/v1/workspace/projects/{}{q}", api.project), None, token).await
+}
+
+#[tokio::test]
+async fn deleting_a_project_that_holds_secrets_needs_a_secrets_admins_confirmation() {
+    let api = Api::new().await;
+    // A project with nothing in it goes as before.
+    let (_, empty) = api.call(Method::POST, "/v1/workspace/projects", Some(json!({ "name": "empty" }))).await;
+    let empty = empty["id"].as_str().unwrap().to_string();
+    api.ok(Method::GET, &format!("/v1/secrets/projects/{empty}/environments"), None).await;
+    assert_eq!(api.call(Method::DELETE, &format!("/v1/workspace/projects/{empty}"), None).await.0, StatusCode::NO_CONTENT);
+
+    // An encryption key alone holds it back.
+    api.ok(Method::POST, "/transit", Some(json!({ "name": "cards" }))).await;
+    let (s, e) = delete_project(&api, "", None).await;
+    assert_eq!((s, e["code"].as_str()), (StatusCode::CONFLICT, Some("project_holds_secrets")), "{e}");
+    assert!(e["error"].as_str().unwrap().contains("?confirm=shop"), "{e}");
+    api.set("production", "STRIPE_KEY", "sk_live_never_in_an_error").await;
+    api.ok(Method::PUT, "/environments/production/policy", Some(json!({ "protected": true }))).await;
+    // Workspace `delete` isn't enough: a token that may write the project's secrets, not administer
+    // them, is refused however it confirms.
+    let writer = api.token(json!({ "actions": ["read", "write", "delete"] }));
+    let (s, e) = delete_project(&api, "?confirm=shop", Some(&writer)).await;
+    assert_eq!((s, e["code"].as_str()), (StatusCode::FORBIDDEN, Some("forbidden")), "{e}");
+    let (s, e) = delete_project(&api, "?confirm=production", None).await;
+    assert_eq!(s, StatusCode::CONFLICT, "{e}");
+    assert!(e["error"].as_str().unwrap().contains("1 secret, the protected environment production and 1 encryption key"), "{e}");
+    assert!(!e.to_string().contains("sk_live"));
+    assert_eq!(api.call(Method::GET, "/environments/production/secrets/STRIPE_KEY", None).await.0, StatusCode::OK, "refused: nothing went");
+    // An admin's token, with the project's name.
+    let admin = api.token(json!({ "actions": ["admin"] }));
+    assert_eq!(delete_project(&api, "?confirm=shop", Some(&admin)).await.0, StatusCode::NO_CONTENT);
+}
+
+#[tokio::test]
+async fn a_deleted_project_reads_as_unknown_and_comes_back_within_its_window() {
+    let api = Api::new().await;
+    api.set("production", "STRIPE_KEY", "sk_live_kept").await;
+    let reader = api.token(json!({ "actions": ["read", "reveal"] }));
+    // A workload identity's login: its token is roll-access's, and ends with the delete.
+    let (login, grant) = api.gate.grant("login", roll_secrets::access::rule(&api.project, None, None, &[roll_secrets::Action::Read]), None);
+    let (p, g) = (api.project.clone(), grant.clone());
+    api.db.write(move |c| c.execute("INSERT INTO identity_logins (grant_id, identity, project_id, expires_at) VALUES (?, 'idn_ci', ?, ?)", code_sql::params![g, p, i64::MAX])).unwrap();
+    assert_eq!(api.req(Method::GET, "/environments", None, Some(&login)).await.0, StatusCode::OK);
+    assert_eq!(delete_project(&api, "?confirm=shop", None).await.0, StatusCode::NO_CONTENT);
+    // Nobody reads it: an unknown project, to the operator and to a token that could reveal it.
+    assert_eq!(api.call(Method::GET, "/environments/production/values?path=/", None).await.0, StatusCode::NOT_FOUND);
+    assert_eq!(api.req(Method::GET, "/environments/production/values?path=/", None, Some(&reader)).await.0, StatusCode::NOT_FOUND);
+    assert_eq!(api.ok(Method::GET, "/v1/secrets/search?key=STRIPE_KEY", None).await, json!([]));
+    let deleted = api.ok(Method::GET, "/v1/secrets/deleted", None).await;
+    assert_eq!((deleted[0]["project"].as_str(), deleted[0]["name"].as_str(), deleted[0]["deleted_by"].as_str()), (Some(api.project.as_str()), Some("shop"), Some("operator")), "{deleted}");
+    assert_eq!(deleted[0]["purge_at"].as_i64().unwrap() - deleted[0]["deleted_at"].as_i64().unwrap(), 7 * 86_400_000);
+    // Someone else's: not theirs to see or recover.
+    assert_eq!(api.as_ada(Method::GET, "/v1/secrets/deleted", None).await.1, json!([]));
+    let recover = format!("/v1/secrets/projects/{}/recover", api.project);
+    assert_eq!(api.as_ada(Method::POST, &recover, None).await.0, StatusCode::NOT_FOUND);
+    // Her own: she brings it back herself (even when an admin deleted it).
+    let (_, hers) = api.as_ada(Method::POST, "/v1/workspace/projects", Some(json!({ "name": "notes" }))).await;
+    let hers = hers["id"].as_str().unwrap().to_string();
+    let (s, _) = api.as_ada(Method::PUT, &format!("/v1/secrets/projects/{hers}/environments/development/secrets/TOKEN"), Some(json!({ "value": "x" }))).await;
+    assert_eq!(s, StatusCode::OK);
+    // A token of hers acts as her (her membership), so it follows the window too.
+    let (ada_ci, _) = api.gate.grant("ada-ci", roll_secrets::access::rule(&hers, None, None, &[roll_secrets::Action::Read]), Some("usr_ada"));
+    let envs = format!("/v1/secrets/projects/{hers}/environments");
+    assert_eq!(api.req(Method::GET, &envs, None, Some(&ada_ci)).await.0, StatusCode::OK);
+    assert_eq!(api.call(Method::DELETE, &format!("/v1/workspace/projects/{hers}?confirm=notes"), None).await.0, StatusCode::NO_CONTENT);
+    assert_eq!(api.req(Method::GET, &envs, None, Some(&ada_ci)).await.0, StatusCode::NOT_FOUND);
+    assert_eq!(api.as_ada(Method::GET, "/v1/secrets/deleted", None).await.1[0]["project"], hers.as_str());
+    assert_eq!(api.as_ada(Method::POST, &format!("/v1/secrets/projects/{hers}/recover"), None).await.0, StatusCode::OK);
+    assert_eq!(api.req(Method::GET, &envs, None, Some(&ada_ci)).await.0, StatusCode::OK, "her membership came back with it");
+
+    let back = api.ok(Method::POST, &recover, None).await;
+    assert_eq!(back["name"], "shop");
+    assert_eq!(api.values("production", "/").await["values"]["STRIPE_KEY"], "sk_live_kept");
+    assert_eq!(api.call(Method::GET, &format!("/v1/workspace/projects/{}", api.project), None).await.0, StatusCode::OK, "its workspace project came back with it");
+    let audit = api.ok(Method::GET, "/audit", None).await;
+    let actions: Vec<&str> = audit.as_array().unwrap().iter().map(|e| e["action"].as_str().unwrap()).collect();
+    assert!(actions.contains(&"project.delete") && actions.contains(&"project.recover"), "{actions:?}");
+    assert!(!audit.to_string().contains("sk_live_kept"));
+    assert_eq!(api.call(Method::POST, &recover, None).await.0, StatusCode::NOT_FOUND, "not deleted any more");
+    assert_eq!(api.req(Method::GET, "/environments", None, Some(&login)).await.0, StatusCode::UNAUTHORIZED, "the login's token was revoked at the delete");
+}
+
+#[tokio::test]
+async fn past_its_window_a_deleted_project_ends_its_log_at_a_signed_digest_then_leaves_no_rows() {
+    let api = Api::new().await;
+    api.ok(Method::POST, "/audit/sinks", Some(json!({ "url": "https://siem.example/roll" }))).await;
+    api.set("production", "STRIPE_KEY", "sk_live_purged").await;
+    api.ok(Method::POST, "/transit", Some(json!({ "name": "cards" }))).await;
+    assert_eq!(delete_project(&api, "?confirm=shop", None).await.0, StatusCode::NO_CONTENT);
+    let sweep = || {
+        let s = api.secrets.clone();
+        async move { tokio::task::spawn_blocking(move || s.sweep().unwrap()).await.unwrap() }
+    };
+    let count = |table: &str| {
+        let (sql, p) = (format!("SELECT COUNT(*) FROM {table} WHERE project_id = ?"), api.project.clone());
+        api.db.read(move |c| c.query_row(&sql, [p.as_str()], |r| r.get::<_, i64>(0))).unwrap()
+    };
+    sweep().await;
+    assert_eq!((count("secrets"), count("transit_keys")), (1, 1), "nothing goes within the window");
+
+    // The window over: closed with a last row and a signed digest, kept until the sink has them.
+    let p = api.project.clone();
+    api.db.write(move |c| c.execute("UPDATE projects SET purge_at = 0 WHERE project_id = ?", [p.as_str()])).unwrap();
+    sweep().await;
+    let recover = format!("/v1/secrets/projects/{}/recover", api.project);
+    assert_eq!(api.call(Method::POST, &recover, None).await.0, StatusCode::GONE, "closed: no way back");
+    assert_eq!(count("secrets"), 1, "the sink hasn't had the closing digest yet");
+    api.db.write(|c| c.execute("UPDATE audit SET at = at - 60000", ())).unwrap();
+    sweep().await;
+    let events: Vec<Value> = api.sent.0.lock().unwrap().iter().flat_map(|b| b["events"].as_array().cloned().unwrap_or_default()).collect();
+    let actions: Vec<&str> = events.iter().map(|e| e["action"].as_str().unwrap()).collect();
+    assert!(actions.contains(&"project.delete"), "{actions:?}");
+    assert_eq!(&actions[actions.len() - 2..], ["project.purge", "audit.digest"], "the log ends at a digest");
+    assert!(events.last().unwrap()["digest"].as_str().is_some_and(|d| d.split('.').count() == 3));
+    assert!(!serde_json::to_string(&events).unwrap().contains("sk_live_purged"));
+
+    sweep().await;
+    for t in ["secrets", "versions", "audit", "audit_heads", "audit_sinks", "transit_keys", "environments", "placeholders", "acme_bindings", "gateways", "projects"] {
+        assert_eq!(count(t), 0, "{t}");
+    }
+    assert!(api.ws.deleted(&api.project).unwrap().is_none(), "the workspace let it go too");
+    assert_eq!(api.call(Method::POST, &recover, None).await.0, StatusCode::NOT_FOUND);
 }

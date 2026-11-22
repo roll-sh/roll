@@ -6,6 +6,8 @@
 //!
 //! redis-cli runs in Docker (`REDIS_IMAGE`); without Docker that part is skipped.
 
+mod common;
+
 use serde_json::{Value, json};
 use std::process::{Child, Command};
 use std::sync::Arc;
@@ -19,18 +21,6 @@ use tokio_rustls::rustls::{self, ClientConfig, RootCertStore};
 const TOKEN: &str = "edge-test-operator-token-0123456789";
 /// redis-cli's image, pinned by digest (the multi-arch index), so a rebuilt upstream tag can't change it.
 const REDIS_IMAGE: &str = "redis:8.10.3-alpine@sha256:71885d8cc6e42f2bc0aa2eb853bfc4be200b5108a46ac50e117ae1df0531fb80";
-
-fn free_port() -> u16 {
-    static GIVEN: std::sync::Mutex<Vec<u16>> = std::sync::Mutex::new(Vec::new());
-    loop {
-        let port = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
-        let mut given = GIVEN.lock().unwrap();
-        if !given.contains(&port) {
-            given.push(port);
-            return port;
-        }
-    }
-}
 
 struct Rolld(Child);
 
@@ -70,9 +60,6 @@ async fn edge_routes_by_host_and_sni_and_drains_on_sigterm() {
     let dashboard = format!("http://{}", l.local_addr().unwrap());
     tokio::spawn(async move { axum::serve(l, axum::Router::new().fallback(|| async { "dashboard" })).await });
 
-    let (api, https_port, edge_redis, edge_kafka, edge_nosql) = (free_port(), free_port(), free_port(), free_port(), free_port());
-    let (edge_amqps, edge_mqtts, edge_stomps, edge_stream) = (free_port(), free_port(), free_port(), free_port());
-    let local = |p: u16| format!("127.0.0.1:{p}");
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_rolld"));
     cmd.env_clear()
         .env("PATH", std::env::var("PATH").unwrap_or_default())
@@ -85,44 +72,21 @@ async fn edge_routes_by_host_and_sni_and_drains_on_sigterm() {
         .env("ROLL_EDGE_CERT_DIR", &certs)
         .env("ROLL_EDGE_DRAIN_DELAY", "3")
         .env("ROLL_DASHBOARD_UPSTREAM", &dashboard)
-        .env("ROLL_EDGE_HTTPS", local(https_port))
-        .env("ROLL_EDGE_REDIS", local(edge_redis))
-        .env("ROLL_EDGE_KAFKA", local(edge_kafka))
-        .env("ROLL_EDGE_NOSQL", local(edge_nosql))
-        .env("ROLL_EDGE_PG", local(free_port()))
-        .env("ROLL_EDGE_AMQPS", local(edge_amqps))
-        .env("ROLL_EDGE_MQTTS", local(edge_mqtts))
-        .env("ROLL_EDGE_STOMPS", local(edge_stomps))
-        .env("ROLL_EDGE_MQ_STREAM", local(edge_stream))
         .env("ROLL_QUEUES_USER", "roll-admin")
         .env("ROLL_QUEUES_PASSWORD", "edge-test-queues-password");
-    for var in ["ROLL_QUEUES_AMQP", "ROLL_QUEUES_MANAGEMENT", "ROLL_QUEUES_STOMP", "ROLL_QUEUES_WEB_STOMP", "ROLL_QUEUES_MQTT", "ROLL_QUEUES_WEB_MQTT", "ROLL_QUEUES_STREAM", "ROLL_QUEUES_HTTP"] {
-        cmd.env(var, local(free_port()));
-    }
-    cmd.args(["--home"]).arg(home.path()).args(["--api", &local(api)]);
-    let ports = [
-        ("--proxy", free_port()),
-        ("--redis", free_port()),
-        ("--redis-http", free_port()),
-        ("--kafka", free_port()),
-        ("--s3", free_port()),
-        ("--storage-api", free_port()),
-        ("--nosql-cql", free_port()),
-        ("--nosql-cql-shard-aware", free_port()),
-        ("--nosql-rest", free_port()),
-        ("--nosql-alternator", free_port()),
-        ("--search-http", free_port()),
-    ];
-    for (flag, port) in ports {
-        cmd.args([flag, &local(port)]);
-    }
+    cmd.args(["--home"]).arg(home.path());
+    let listeners: Vec<&str> = common::LISTENERS.iter().chain(common::EDGE).copied().collect();
+    let run = common::on_any_port(&mut cmd, &listeners, home.path());
     let mut rolld = Rolld(cmd.spawn().expect("rolld starts"));
-    let api = format!("http://127.0.0.1:{api}");
+    let addrs = run.addrs(&mut rolld.0).await;
+    let api = addrs.url("api");
+    let [https_port, edge_redis, edge_kafka, edge_nosql] = ["edge-https", "edge-redis", "edge-kafka", "edge-nosql"].map(|n| addrs.port(n));
+    let [edge_amqps, edge_mqtts, edge_stomps, edge_stream] = ["edge-amqps", "edge-mqtts", "edge-stomps", "edge-mq-stream"].map(|n| addrs.port(n));
     let http = reqwest::Client::new();
     let started = Instant::now();
     while healthz(&http, &api).await != 200 {
         assert!(started.elapsed() < Duration::from_secs(60), "rolld didn't become healthy");
-        assert!(rolld.0.try_wait().unwrap().is_none(), "rolld exited");
+        assert!(rolld.0.try_wait().unwrap().is_none(), "rolld exited:\n{}", run.tail());
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
     let mut roots = RootCertStore::empty();

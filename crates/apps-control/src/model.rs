@@ -400,6 +400,11 @@ pub struct Build {
     /// service's repo can't build a repo it can't read into its code by pinning it.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub submodule_repos: Option<Vec<String>>,
+    /// The language's OpenTelemetry agent in a generated Dockerfile (Heroku's Telemetry,
+    /// `@vercel/otel`): Node's and Python's, pinned, started while the environment's traces are
+    /// on (`apps_build::otel`); none in the tree's own Dockerfile.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub otel: Option<bool>,
     /// A Git URL service's Git LFS objects fetched in place of their pointers (Vercel's,
     /// Netlify's), from the repository's LFS server; off, the pointers are built as they are.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -489,6 +494,7 @@ impl Build {
             start: self.start.clone(),
             spa: self.spa,
             packages: self.packages.clone().unwrap_or_default(),
+            otel: self.otel.unwrap_or(false),
             build_env: Vec::new(),
             build_files: Vec::new(),
             process: None,
@@ -602,6 +608,11 @@ pub struct Run {
     /// proxy and its health checks talk HTTP/2 to it (Cloud Run's `--use-http2`).
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub h2c: bool,
+    /// With `h2c`: its health is gRPC's (Cloud Run's and Kubernetes' gRPC probes), a unary
+    /// `grpc.health.v1.Health/Check` for this service (empty: the server as a whole) answering
+    /// SERVING, at start and every `health_every_s`, in place of `health_path`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub health_grpc: Option<String>,
     /// A worker's instances follow its work: a stream consumer group's lag (docs/apps/README.md,
     /// "Workers that follow their work"). Between `min_instances` and `max_instances`.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1220,6 +1231,7 @@ impl Default for Run {
             cpu: 0.5,
             memory_mb: 512,
             health_path: None,
+            health_grpc: None,
             health_timeout_s: 60,
             health_every_s: None,
             health_failures: None,
@@ -1554,6 +1566,14 @@ impl Run {
         {
             return bad("health_path is a path starting with /");
         }
+        if let Some(g) = &self.health_grpc {
+            if !self.h2c || self.kind != RunType::Web {
+                return bad("health_grpc is a gRPC server's: a web service with h2c");
+            }
+            if g.len() > 100 || !g.bytes().all(|b| b.is_ascii_graphic()) {
+                return bad("health_grpc is a gRPC service's full name (grpc.health.v1's `service`), at most 100 characters, or empty for the server");
+            }
+        }
         if self.start.as_ref().is_some_and(|c| c.len() > 2000 || c.contains('\0')) {
             return bad("start is a command of at most 2000 characters");
         }
@@ -1875,6 +1895,10 @@ pub struct Environment {
     /// before that was kept.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub closed_by: Option<serde_json::Value>,
+    /// `"branch"`: data of its own, a branch of each database it links (its view lists them by
+    /// kind and ref, never their credentials); absent: its links reach the databases themselves.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub data: Option<serde_json::Value>,
     /// A closed environment's interception on its owner (roll secrets' placeholders): requests
     /// filtered, placeholders swapped, the latest refusals; none until it has done something.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -2948,6 +2972,12 @@ pub enum LinkKind {
 }
 
 impl LinkKind {
+    /// Whether an environment with data of its own (`data: "branch"`) gets a branch of it:
+    /// a database's, roll Postgres' and Redis' (each kind's product branches it).
+    pub fn branches(self) -> bool {
+        matches!(self, LinkKind::Postgres | LinkKind::Redis)
+    }
+
     pub const ALL: [LinkKind; 8] = [LinkKind::Postgres, LinkKind::Redis, LinkKind::Bucket, LinkKind::Stream, LinkKind::Queue, LinkKind::Nosql, LinkKind::Search, LinkKind::Service];
 
     pub fn as_str(self) -> &'static str {

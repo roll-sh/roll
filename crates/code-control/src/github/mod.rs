@@ -38,7 +38,9 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use tokio::sync::mpsc;
 
-const SCHEMA: &str = r#"
+/// Made at open whether or not the App is on: a change's preview teardown leaves its mark
+/// (`pv-teardown:`) in `github_marks` in the same write, on every daemon.
+pub(crate) const SCHEMA: &str = r#"
 CREATE TABLE IF NOT EXISTS github_deliveries (
     id TEXT PRIMARY KEY,
     at INTEGER NOT NULL

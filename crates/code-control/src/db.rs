@@ -463,6 +463,7 @@ impl Db {
             crate::ai::store::SCHEMA,
             crate::webhooks::SCHEMA,
             crate::leaks::SCHEMA,
+            crate::github::SCHEMA,
             crate::broken::SCHEMA,
             crate::mcp::SCHEMA,
             crate::agents::SCHEMA,

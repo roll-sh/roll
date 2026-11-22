@@ -55,6 +55,8 @@ export interface Build {
   submodules?: boolean;
   /** The private roll code repos (owner/name) a roll code repo's submodules may come from. */
   submodule_repos?: string[];
+  /** The language's OpenTelemetry agent (Node, Python), started while traces are on. */
+  otel?: boolean;
   /** A Git URL service's Git LFS objects in place of their pointers (default: pointers as text). */
   lfs?: boolean;
 }
@@ -156,6 +158,8 @@ export interface Run {
   rollout?: { steps: number[]; step_s: number; error_pct: number; /** Each step waits for a person once it passes. */ manual?: boolean; /** With run.slo: a step fails past this burn rate (default 14.4). */ slo_burn?: number; /** A step fails when the new deployment's p95 is this many percent above the old one's. */ p95_pct?: number; /** false: the old instances stop before the new ones start (two never run at once). */ overlap?: boolean };
   /** The app speaks HTTP/2 without TLS (a gRPC server). */
   h2c?: boolean;
+  /** With h2c: the gRPC service whose grpc.health.v1 check must answer SERVING ("" the whole server). */
+  health_grpc?: string;
   /** false: no public URL, only the project's private network (absent: public). */
   public?: boolean;
   /** A worker that stops: started again always (default), on failure (up to restart_tries in a row), or never. */
@@ -566,6 +570,8 @@ export interface EnvironmentDiff {
 }
 
 export interface EnvironmentPut {
+  /** Data of its own: a branch of each Postgres and Redis database it links (admin); null goes back. */
+  data?: "branch" | null;
   branch?: string | null;
   /** Its name on the roll domain (`<hostname>.<domain>`): the old one stops answering. */
   hostname?: string;
@@ -725,6 +731,8 @@ export interface Environment extends EnvironmentSummary {
   egress_refused?: { host: string; private?: true }[];
   /** Who a closed environment's placeholders are made by; null: no one (its bound keys withheld). */
   closed_by?: string | null;
+  /** Data of its own: a branch of each Postgres and Redis database it links. */
+  data?: { mode: "branch"; branches: { kind: "postgres" | "redis"; ref: string }[] };
   /** A closed environment's interception (roll secrets' placeholders): requests filtered, placeholders swapped, the latest refusals. */
   intercepted?: { requests: number; swapped: number; refused?: string[] };
   /** A push deploys only once its commit's checks pass. */

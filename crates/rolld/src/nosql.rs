@@ -502,7 +502,7 @@ fn connector(cluster: &Arc<roll_cluster::Cluster>) -> anyhow::Result<nosql_contr
 }
 
 async fn bind(addr: SocketAddr) -> anyhow::Result<TcpListener> {
-    TcpListener::bind(addr).await.map_err(|e| anyhow::anyhow!("bind {addr}: {e}"))
+    crate::listen::bind(addr).map_err(|e| anyhow::anyhow!("bind {addr}: {e}"))
 }
 
 #[cfg(test)]

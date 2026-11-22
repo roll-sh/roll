@@ -310,7 +310,7 @@ function Project({ ws, project, tab, children }: { ws: WorkspaceState; project: 
           ) : null}
         </Inspector>
       </div>
-      <footer className="absolute inset-x-0 bottom-0 flex h-7 items-center gap-4 border-t border-line bg-canvas px-3 font-mono text-[10.5px] text-subtle">
+      <footer className="absolute inset-x-0 bottom-0 flex h-7 items-center gap-4 overflow-hidden border-t border-line bg-canvas px-3 font-mono text-[10.5px] whitespace-nowrap text-subtle">
         <span>
           {project.resources.length} {project.resources.length === 1 ? "resource" : "resources"}
         </span>
@@ -325,7 +325,7 @@ function Project({ ws, project, tab, children }: { ws: WorkspaceState; project: 
           only you
         </span>
         <span className="ml-auto">
-          {usd(spend.usd)} this month · ≈ {usd(projectMonth(spend.usd, month))} by {month.end}
+          {usd(spend.usd)} this month<span className="max-sm:hidden"> · ≈ {usd(projectMonth(spend.usd, month))} by {month.end}</span>
         </span>
       </footer>
       <DeployChanges ws={ws} project={project} open={reviewing} onClose={() => setReviewing(false)} />

@@ -134,8 +134,9 @@ export const workspace = {
     const p = await workspaceApi.update(id, patch);
     withProject(id, () => p);
   },
-  async removeProject(id: string) {
-    await workspaceApi.remove(id);
+  /** `confirm` is the project's name, typed by the person deleting it. */
+  async removeProject(id: string, confirm?: string) {
+    await workspaceApi.remove(id, confirm);
     const { [id]: _, ...staged } = state.staged;
     set({ projects: state.projects.filter((p) => p.id !== id), staged });
   },
