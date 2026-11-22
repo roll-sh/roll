@@ -185,7 +185,8 @@ secret: by writing it somewhere it's read.
 ### The sweep
 
 `pnpm test:mcp-sweep` (`scripts/test-mcp-sweep.sh`) builds rolld and starts it with every product
-on, its listeners on free loopback ports and a throwaway home. It then calls every tool through
+on, its listeners on loopback port 0 (the addresses read back from `--addr-file`, #596) and a
+throwaway home. It then calls every tool through
 `/v1/mcp` as an agent would (`scripts/mcp-sweep.py`):
 
 1. It makes fixtures with the write tools.
@@ -1104,16 +1105,10 @@ previews are listed once those products are on.
 Ranked; the top item is in progress. A watchdog reads this list. Unblocked work comes first; what
 waits on a sibling PR reaching main is last.
 
-1. **The sweep as a member (this PR).** #644 made a member's client list a member product's tools
-   by their role, as the gate decides calls; the unit test holds one viewer and one admin, but
-   only a live run sees every tool. `pnpm test:mcp-sweep` now signs a person in (email code from
-   rolld's outbox), makes them a viewer in its project with a token that names every action, and
-   calls every read tool of secrets, previews and workspace their client lists: one refused by
-   their role means the listing and the gate drifted apart (first run: 196 tools listed for a
-   viewer, 74 member-product reads called, none refused). Also here: `secrets_list_recoverable`, the
-   deleted projects a person may recover (#585; recovering stays a person's). Next for the sweep:
-   start rolld on port 0 with `--addr-file` (#596) instead of picking free ports, which ends its
-   occasional "rolld exited" on a port someone took meanwhile.
+1. **The sweep starts rolld on port 0 (this PR).** It picked 46 free loopback ports and let go of
+   them before rolld bound them, so another build could take one meanwhile and rolld exited
+   ("rolld exited" now and then). Every listener now binds port 0 and the sweep reads the API's
+   address from `--addr-file` (#596); only apps' per-environment range (21 ports) is still picked.
 2. **Decision for the user: a sandboxed "code mode"** (Cloudflare's Code Mode, Anthropic's code
    execution with MCP). A model writes a short script against typed tool functions; roll runs it
    and each call still goes through the gate and the audit log as if made one by one. It cuts
@@ -1148,7 +1143,9 @@ waits on a sibling PR reaching main is last.
    Not doing: "remember this browser"; a preset that reveals development's values without asking
    (#354); a connection-level `?project=` (only a token's rules bound a project; a default that
    some tools can't honour would look like a boundary).
-6. **Landed 2026-11-21:** a member's MCP client reaches what their role does (#644: previews in
+6. **Landed 2026-11-21:** the sweep as a member (#647: a viewer signed in by email code calls every
+   member-product read their client lists, none refused by their role; first run 197 listed, 75
+   called) and `secrets_list_recoverable` (#585's deleted projects; recovering stays a person's); a member's MCP client reaches what their role does (#644: previews in
    `USER_REACH`, held to the gate's rules by rolld's `auth::tests`; `tools/list` within a member's
    session, so a viewer isn't shown writes and reveals the gate refuses); an outsider's reply never becomes a reviewer learning (#639: on a public repo
    a reader's reply to roll's finding became what roll's reviewer kept in mind for every later
