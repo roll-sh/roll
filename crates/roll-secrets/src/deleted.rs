@@ -256,11 +256,9 @@ impl Secrets {
                 }
             }
         }
-        for consumer in &consumers {
-            if let Err(e) = self.end_intercept_cas(consumer, "a project whose hosts it covered was deleted") {
-                tracing::warn!(project, %consumer, "ending an interception CA of a deleted project's consumer failed: {e}");
-            }
-        }
+        // Their consumers' interception CAs that name its hosts end (`bound_hosts` leaves a deleted
+        // project out); a CA for other projects' hosts only stays.
+        self.hosts_shrank(consumers.iter().map(String::as_str));
         // Their links close now: a deleted project's gateway opens nothing (`gateway_link`).
         for g in &gateways {
             self.recheck_gateway(g);

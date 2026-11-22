@@ -884,7 +884,7 @@ fn parse_with(src: &str, params: &[V]) -> EsResult<Stmt> {
     if let Some(l) = limit {
         cmds.push(Cmd::Limit(l));
     }
-    Ok(Stmt::Select { query: Query { src: src.to_string(), cmds, sql: true, locale: None, settings: Default::default() }, table, limit, star })
+    Ok(Stmt::Select { query: Query { src: src.to_string(), cmds, sql: true, locale: None, settings: Default::default(), spans: Vec::new() }, table, limit, star })
 }
 
 /// Collects `HAVING`'s aggregate calls as named outputs (named by their text).

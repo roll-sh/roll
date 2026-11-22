@@ -186,6 +186,7 @@ pub fn status_of(e: &Error) -> (StatusCode, Option<&'static str>) {
         Error::BadRequest(_) => (StatusCode::BAD_REQUEST, None),
         Error::Unauthorized(_) => (StatusCode::UNAUTHORIZED, Some("unauthorized")),
         Error::Forbidden(_) => (StatusCode::FORBIDDEN, Some("forbidden")),
+        Error::MakerUnreachable(_) => (StatusCode::FORBIDDEN, Some("maker_unreachable")),
         Error::NotFound(_) => (StatusCode::NOT_FOUND, None),
         Error::Gone(_) => (StatusCode::GONE, Some("gone")),
         Error::Conflict(code, _) => (StatusCode::CONFLICT, Some(*code)),

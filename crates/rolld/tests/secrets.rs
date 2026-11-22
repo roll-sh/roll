@@ -10,6 +10,8 @@
 //! And a sealed start (`ROLL_SECRET_KEY_SEALED`): nothing that needs the deployment key runs until
 //! its shares unseal the node.
 
+mod common;
+
 use serde_json::{Value, json};
 use std::process::{Child, Command, Stdio};
 use std::sync::Arc;
@@ -17,21 +19,9 @@ use std::time::{Duration, Instant};
 
 const TOKEN: &str = "secrets-links-test-operator-token-0123456789";
 
-/// A port nothing listens on, never handed out twice in this process.
-fn free_port() -> u16 {
-    static GIVEN: std::sync::Mutex<Vec<u16>> = std::sync::Mutex::new(Vec::new());
-    loop {
-        let port = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
-        let mut given = GIVEN.lock().unwrap();
-        if !given.contains(&port) {
-            given.push(port);
-            return port;
-        }
-    }
-}
-
 struct Rolld {
     child: Child,
+    started: common::Started,
     home: Arc<tempfile::TempDir>,
     api: String,
     /// roll search's HTTP address.
@@ -42,6 +32,9 @@ struct Rolld {
 
 impl Drop for Rolld {
     fn drop(&mut self) {
+        if std::thread::panicking() {
+            eprintln!("rolld's stderr, last lines:\n{}", self.started.tail());
+        }
         // SAFETY: kill(2) on the rolld this test started; a graceful stop takes its computes down.
         unsafe { libc::kill(self.child.id() as libc::pid_t, libc::SIGTERM) };
         let stopping = Instant::now();
@@ -63,7 +56,7 @@ impl Drop for Rolld {
 }
 
 impl Rolld {
-    /// rolld with `products` on free loopback ports and an operator token (so the products' own
+    /// rolld with `products` on loopback ports of its own and an operator token (so the products' own
     /// credentials, not the operator's, decide their data planes).
     async fn start(products: &str, docker: bool) -> Rolld {
         Rolld::start_in(Arc::new(tempfile::tempdir().unwrap()), products, docker, &[], "/v1/info").await
@@ -71,10 +64,8 @@ impl Rolld {
 
     /// [`Rolld::start`] in `home` with `env` set, started once `ready` answers a success.
     async fn start_in(home: Arc<tempfile::TempDir>, products: &str, docker: bool, env: &[(&str, &str)], ready: &str) -> Rolld {
-        let local = |p: u16| format!("127.0.0.1:{p}");
-        let api = free_port();
         let mut cmd = Command::new(env!("CARGO_BIN_EXE_rolld"));
-        cmd.env_clear().env("RUST_LOG", "warn").env("ROLL_HOME", home.path()).env("ROLL_API", local(api)).env("ROLL_PROXY", local(free_port()));
+        cmd.env_clear().env("RUST_LOG", "warn").env("ROLL_HOME", home.path());
         cmd.env("ROLL_ADMIN_TOKEN", TOKEN).env("ROLL_PRODUCTS", products).envs(env.iter().copied());
         // Without Docker, nothing on PATH: no product may need it.
         if docker {
@@ -84,23 +75,12 @@ impl Rolld {
             std::fs::create_dir_all(&empty).unwrap();
             cmd.env("PATH", empty);
         }
-        for var in [
-            "ROLL_REDIS",
-            "ROLL_REDIS_HTTP",
-            "ROLL_KAFKA",
-            "ROLL_S3",
-            "ROLL_STORAGE_API",
-            "ROLL_NOSQL_CQL",
-            "ROLL_NOSQL_CQL_SHARD_AWARE",
-            "ROLL_NOSQL_ALTERNATOR",
-            "ROLL_NOSQL_REST",
-        ] {
-            cmd.env(var, local(free_port()));
-        }
-        let search = local(free_port());
-        cmd.env("ROLL_SEARCH_HTTP", &search);
-        let child = cmd.stdout(Stdio::null()).spawn().expect("rolld starts");
-        let mut r = Rolld { child, home, api: format!("http://127.0.0.1:{api}"), search, http: reqwest::Client::new(), docker };
+        let started = common::on_any_port(&mut cmd, common::LISTENERS, home.path());
+        let mut child = cmd.stdout(Stdio::null()).spawn().expect("rolld starts");
+        // A sealed start writes it too: the API answers the unseal, the rest come once unsealed.
+        let addrs = started.addrs(&mut child).await;
+        let (api, search) = (addrs.url("api"), addrs.addr("search-http"));
+        let mut r = Rolld { child, started, home, api, search, http: reqwest::Client::new(), docker };
         r.wait_for(ready).await;
         r
     }

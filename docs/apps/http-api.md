@@ -236,6 +236,12 @@ type Build = {
    *  come from. A token that sets it needs read on each (the catalogue lends it), so a writer to
    *  the service's repo can't build a repo it can't read by pinning it. */
   submodule_repos?: string[];
+  /** The language's OpenTelemetry agent in a generated Dockerfile (default false): Node's
+   *  (`@opentelemetry/auto-instrumentations-node`, by NODE_OPTIONS' --require) and Python's
+   *  (`opentelemetry-distro`, bootstrapped, by PYTHONPATH's sitecustomize), pinned; started only
+   *  while the environment's traces are on, joined to the app's own value; the plan's `otel`
+   *  says which. None in the tree's own Dockerfile or another language (a note says so). */
+  otel?: boolean;
   /** A Git URL service's Git LFS objects in place of their pointers (default false): from the
    *  repository's LFS batch API, checked against each pointer's sha256 and size, 2 GiB in all. */
   lfs?: boolean;
@@ -277,6 +283,10 @@ type Run = {
   /** The app speaks HTTP/2 without TLS (a gRPC server): the proxy and health checks use h2c,
    *  `te: trailers` passes, trailers come back. A WebSocket upgrade stays HTTP/1.1. Default false. */
   h2c?: boolean;
+  /** With h2c (a web service): its health is gRPC's, a unary `grpc.health.v1.Health/Check` for
+   *  this service ("" the whole server; at most 100 characters) that must answer SERVING, at
+   *  start and every health_every_s, in place of health_path (Cloud Run's gRPC probes). */
+  health_grpc?: string;
   /** A worker only: its instances follow `group`'s lag on `stream` (a roll stream on the
    *  service's project; another's is never read), one per `per_instance` (default 1000) behind,
    *  within min_instances–max_instances; read every 10 s on the owner, scaled in one at a time. */

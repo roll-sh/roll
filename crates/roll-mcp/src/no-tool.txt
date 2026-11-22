@@ -202,4 +202,3 @@ PUT /v1/workspace/projects/{id}/homes/{product}/{ref}                          a
 GET /v1/workspace/projects/{id}/invites                                        a person's call: invites are a signed-in person's (#501)
 DELETE /v1/workspace/projects/{id}/invites/{invite}                            a person's call: invites are a signed-in person's (#501)
 DELETE /v1/workspace/projects/{id}/members/me                                  a person's call: leaving a project is the person's own (#501)
-GET /v1/workspace/roles                                                        no tool yet: the roles a project member can have (#501)

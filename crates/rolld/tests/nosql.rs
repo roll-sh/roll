@@ -3,6 +3,8 @@
 //! them. Hosted mode with TLS, SNI routing, the PROXY protocol and Alternator over HTTPS, and
 //! rolld's full mode next to the Postgres control plane. On S3 when `ROLL_E2E_S3_BUCKET` is set.
 
+mod common;
+
 use aws_sdk_dynamodb::types::{AttributeDefinition, AttributeValue, BillingMode, KeySchemaElement, KeyType, ScalarAttributeType};
 use nosql_proto::client::{Client, ClientConfig};
 use nosql_proto::{QueryParams, ResultBody};
@@ -10,24 +12,7 @@ use serde_json::{Value, json};
 use std::process::{Child, Command};
 use std::time::Duration;
 
-/// A port nothing listens on, never handed out twice in this process (a released ephemeral
-/// port can come straight back from the next `bind(0)`).
-fn free_port() -> u16 {
-    static GIVEN: std::sync::Mutex<Vec<u16>> = std::sync::Mutex::new(Vec::new());
-    loop {
-        let port = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
-        let mut given = GIVEN.lock().unwrap();
-        if !given.contains(&port) {
-            given.push(port);
-            return port;
-        }
-    }
-}
-
-/// Each test starts its own rolld on picked ports; running them one at a time keeps one test's
-/// daemon from taking a port another test just picked.
-static SERIAL: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
-
+/// The ports a rolld listens on (a restarted one gets new ones).
 struct Ports {
     api: u16,
     cql: u16,
@@ -36,32 +21,46 @@ struct Ports {
     alternator: u16,
 }
 
-struct Rolld(Child);
+impl Ports {
+    fn of(a: &common::Addrs) -> Ports {
+        Ports { api: a.port("api"), cql: a.port("nosql-cql"), shard: a.port("nosql-cql-shard-aware"), rest: a.port("nosql-rest"), alternator: a.port("nosql-alternator") }
+    }
+}
+
+/// `--nosql-only`'s listeners.
+const NOSQL: &[&str] = &["api", "nosql-cql", "nosql-cql-shard-aware", "nosql-rest", "nosql-alternator"];
+
+struct Rolld(Child, common::Started);
 
 impl Drop for Rolld {
     fn drop(&mut self) {
+        if std::thread::panicking() {
+            eprintln!("rolld's stderr, last lines:\n{}", self.1.tail());
+        }
         let _ = self.0.kill();
         let _ = self.0.wait();
     }
 }
 
-fn start(home: &std::path::Path, p: &Ports, extra: &[String]) -> Rolld {
-    let child = Command::new(env!("CARGO_BIN_EXE_rolld"))
-        .env_clear()
-        .env("PATH", std::env::var("PATH").unwrap_or_default())
-        .env("RUST_LOG", "warn")
-        .envs(storage_env(home))
-        .args(["--nosql-only", "--home"])
-        .arg(home)
-        .args(["--api", &format!("127.0.0.1:{}", p.api)])
-        .args(["--nosql-cql", &format!("127.0.0.1:{}", p.cql)])
-        .args(["--nosql-cql-shard-aware", &format!("127.0.0.1:{}", p.shard)])
-        .args(["--nosql-rest", &format!("127.0.0.1:{}", p.rest)])
-        .args(["--nosql-alternator", &format!("127.0.0.1:{}", p.alternator)])
-        .args(extra)
-        .spawn()
-        .expect("rolld starts");
-    Rolld(child)
+/// `cmd` with each of `listeners` on a port of its own, once it listens.
+async fn spawn(mut cmd: Command, listeners: &[&str], home: &std::path::Path) -> (Rolld, common::Addrs) {
+    let started = common::on_any_port(&mut cmd, listeners, home);
+    let mut child = cmd.spawn().expect("rolld starts");
+    let addrs = started.addrs(&mut child).await;
+    (Rolld(child, started), addrs)
+}
+
+fn rolld(home: &std::path::Path) -> Command {
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_rolld"));
+    cmd.env_clear().env("PATH", std::env::var("PATH").unwrap_or_default()).env("RUST_LOG", "warn").envs(storage_env(home)).arg("--home").arg(home);
+    cmd
+}
+
+/// rolld `--nosql-only` with `extra`, once it listens.
+async fn start(home: &std::path::Path, extra: &[String]) -> (Rolld, common::Addrs) {
+    let mut cmd = rolld(home);
+    cmd.arg("--nosql-only").args(extra);
+    spawn(cmd, NOSQL, home).await
 }
 
 /// Object storage for a rolld under `home`: S3 under a prefix unique to `home` when
@@ -80,10 +79,6 @@ fn storage_env(home: &std::path::Path) -> Vec<(String, String)> {
         }
     }
     env
-}
-
-fn ports() -> Ports {
-    Ports { api: free_port(), cql: free_port(), shard: free_port(), rest: free_port(), alternator: free_port() }
 }
 
 async fn wait_api(http: &reqwest::Client, api: &str) -> Value {
@@ -107,13 +102,12 @@ async fn rows(c: &Client, q: &str) -> Vec<Vec<Option<bytes::Bytes>>> {
 
 #[tokio::test]
 async fn nosql_only_serves_and_restarts() {
-    let _serial = SERIAL.lock().await;
     let home = tempfile::tempdir().unwrap();
-    let p = ports();
     let mode = ["--nosql-single".to_string(), "dev".to_string()];
+    let (mut d, addrs) = start(home.path(), &mode).await;
+    let p = Ports::of(&addrs);
     let api = format!("http://127.0.0.1:{}", p.api);
     let http = reqwest::Client::new();
-    let mut d = start(home.path(), &p, &mode);
     let info = wait_api(&http, &api).await;
     assert_eq!(info["endpoints"]["cql"], format!("127.0.0.1:{}", p.cql));
     assert_eq!(info["endpoints"]["cql_shard_aware"], format!("127.0.0.1:{}", p.shard));
@@ -168,7 +162,11 @@ async fn nosql_only_serves_and_restarts() {
     let status = d.0.wait().unwrap();
     assert!(status.success(), "{status:?}");
 
-    let _d = start(home.path(), &p, &mode);
+    let (_d, addrs) = start(home.path(), &mode).await;
+    let p = Ports::of(&addrs);
+    let api = format!("http://127.0.0.1:{}", p.api);
+    let alt = format!("http://127.0.0.1:{}", p.alternator);
+    let app = sdk(&alt, creds["access_key_id"].as_str().unwrap(), creds["secret_access_key"].as_str().unwrap());
     wait_api(&http, &api).await;
     let list: Value = http.get(format!("{api}/v1/nosql/databases")).send().await.unwrap().json().await.unwrap();
     assert_eq!(list.as_array().unwrap().len(), 2, "the single-mode database and app");
@@ -235,7 +233,6 @@ async fn proxy_v1(upstream: u16, client_ip: &'static str) -> std::net::SocketAdd
 /// the API's endpoints and credentials working verbatim, and both surviving a restart.
 #[tokio::test]
 async fn tls_sni_and_proxy_protocol() {
-    let _serial = SERIAL.lock().await;
     use nosql_proto::client::TlsConfig;
     use tokio_rustls::rustls;
     let home = tempfile::tempdir().unwrap();
@@ -243,18 +240,17 @@ async fn tls_sni_and_proxy_protocol() {
     let (cert, key) = (home.path().join("tls.crt"), home.path().join("tls.key"));
     std::fs::write(&cert, ck.cert.pem()).unwrap();
     std::fs::write(&key, ck.signing_key.serialize_pem()).unwrap();
-    let p = ports();
-    let https = free_port();
     let args: Vec<String> = [
         "--nosql-tls-cert", cert.to_str().unwrap(), "--nosql-tls-key", key.to_str().unwrap(), "--nosql-domain", "nosql.test",
-        "--nosql-alternator-https", &format!("127.0.0.1:{https}"), "--nosql-proxy-protocol",
+        "--nosql-alternator-https", "127.0.0.1:0", "--nosql-proxy-protocol",
     ]
     .iter()
     .map(|s| s.to_string())
     .collect();
+    let (mut d, addrs) = start(home.path(), &args).await;
+    let (p, https) = (Ports::of(&addrs), addrs.port("nosql-alternator-https"));
     let api = format!("http://127.0.0.1:{}", p.api);
     let http = reqwest::Client::new();
-    let mut d = start(home.path(), &p, &args);
     let info = wait_api(&http, &api).await;
     assert!(info["single"].is_null(), "{info}");
 
@@ -305,13 +301,16 @@ async fn tls_sni_and_proxy_protocol() {
 
     // Alternator over HTTPS, routed by host: the open database answers unsigned requests, app
     // demands a signature.
-    let alt_http = reqwest::Client::builder()
-        .add_root_certificate(reqwest::Certificate::from_pem(ck.cert.pem().as_bytes()).unwrap())
-        .resolve(&format!("{open_id}.alternator.test"), ([127, 0, 0, 1], https).into())
-        .resolve(&format!("{id}.alternator.test"), ([127, 0, 0, 1], https).into())
-        .build()
-        .unwrap();
-    let open_url = format!("https://{open_id}.alternator.test:{https}");
+    let alternator = |https: u16| {
+        let http = reqwest::Client::builder()
+            .add_root_certificate(reqwest::Certificate::from_pem(ck.cert.pem().as_bytes()).unwrap())
+            .resolve(&format!("{open_id}.alternator.test"), ([127, 0, 0, 1], https).into())
+            .resolve(&format!("{id}.alternator.test"), ([127, 0, 0, 1], https).into())
+            .build()
+            .unwrap();
+        (http, format!("https://{open_id}.alternator.test:{https}"))
+    };
+    let (alt_http, open_url) = alternator(https);
     let (st, v) = dynamodb(&alt_http, &open_url, "CreateTable", json!({"TableName": "kvs", "KeySchema": [{"AttributeName": "k", "KeyType": "HASH"}], "AttributeDefinitions": [{"AttributeName": "k", "AttributeType": "S"}], "BillingMode": "PAY_PER_REQUEST"})).await;
     assert_eq!(st, 200, "{v}");
     let (st, v) = dynamodb(&alt_http, &open_url, "PutItem", json!({"TableName": "kvs", "Item": {"k": {"S": "a"}}})).await;
@@ -335,8 +334,12 @@ async fn tls_sni_and_proxy_protocol() {
     // A restart keeps both, behind the same names.
     unsafe { libc::kill(d.0.id() as i32, libc::SIGTERM) };
     assert!(d.0.wait().unwrap().success());
-    let _d = start(home.path(), &p, &args);
-    wait_api(&http, &api).await;
+    let (_d, addrs) = start(home.path(), &args).await;
+    let (p, https) = (Ports::of(&addrs), addrs.port("nosql-alternator-https"));
+    wait_api(&http, &format!("http://127.0.0.1:{}", p.api)).await;
+    // The load balancer in front of the restarted node's new port.
+    let lb = proxy_v1(p.cql, "198.51.100.7").await;
+    let (alt_http, open_url) = alternator(https);
     let c = Client::connect(conn(lb, format!("{id}.nosql.test"))).await.unwrap();
     assert_eq!(rows(&c, "SELECT v FROM ks.t WHERE k = 1").await[0][0].as_deref(), Some(&b"tls"[..]));
     let (st, v) = dynamodb(&alt_http, &open_url, "GetItem", json!({"TableName": "kvs", "Key": {"k": {"S": "a"}}})).await;
@@ -348,36 +351,18 @@ async fn tls_sni_and_proxy_protocol() {
 /// graceful stop keeps nosql's acknowledged writes.
 #[tokio::test]
 async fn full_mode_with_postgres() {
-    let _serial = SERIAL.lock().await;
     let home = tempfile::tempdir().unwrap();
-    let p = ports();
-    let (proxy, redis, redis_http, kafka) = (free_port(), free_port(), free_port(), free_port());
-    // roll storage's defaults (:59000, :59001) sit in the ephemeral range: any outgoing
-    // connection on the machine can hold one.
-    let (s3, storage_api, search) = (free_port(), free_port(), free_port());
-    let spawn = || {
-        Rolld(
-            Command::new(env!("CARGO_BIN_EXE_rolld"))
-                .env_clear()
-                .env("PATH", std::env::var("PATH").unwrap_or_default())
-                .env("RUST_LOG", "warn")
-                .envs(storage_env(home.path()))
-                .args(["--no-queues", "--home"])
-                .arg(home.path())
-                .args(["--api", &format!("127.0.0.1:{}", p.api), "--proxy", &format!("127.0.0.1:{proxy}")])
-                .args(["--redis", &format!("127.0.0.1:{redis}"), "--redis-http", &format!("127.0.0.1:{redis_http}")])
-                .args(["--kafka", &format!("127.0.0.1:{kafka}")])
-                .args(["--s3", &format!("127.0.0.1:{s3}"), "--storage-api", &format!("127.0.0.1:{storage_api}")])
-                .args(["--nosql-cql", &format!("127.0.0.1:{}", p.cql), "--nosql-cql-shard-aware", &format!("127.0.0.1:{}", p.shard)])
-                .args(["--nosql-rest", &format!("127.0.0.1:{}", p.rest), "--nosql-alternator", &format!("127.0.0.1:{}", p.alternator)])
-                .args(["--search-http", &format!("127.0.0.1:{search}")])
-                .spawn()
-                .expect("rolld starts"),
-        )
+    // Every listener on a port of its own (roll storage's defaults, :59000 and :59001, sit in the
+    // ephemeral range: any outgoing connection on the machine can hold one).
+    let full = || {
+        let mut cmd = rolld(home.path());
+        cmd.arg("--no-queues");
+        spawn(cmd, common::LISTENERS, home.path())
     };
+    let (mut d, addrs) = full().await;
+    let p = Ports::of(&addrs);
     let api = format!("http://127.0.0.1:{}", p.api);
     let http = reqwest::Client::new();
-    let mut d = spawn();
     let info = wait_api(&http, &api).await;
     assert!(info["single"].is_null(), "no single-mode database in full mode: {info}");
     let health = http.get(format!("{api}/v1/health")).send().await.unwrap();
@@ -386,8 +371,8 @@ async fn full_mode_with_postgres() {
 
     let db: Value = http.post(format!("{api}/v1/nosql/databases")).json(&json!({"name": "full", "dialect": "cassandra"})).send().await.unwrap().json().await.unwrap();
     let (user, pass) = (db["credentials"]["username"].as_str().unwrap().to_string(), db["credentials"]["password"].as_str().unwrap().to_string());
-    let cfg = || ClientConfig::new(format!("127.0.0.1:{}", p.cql)).credentials(&user, &pass);
-    let c = Client::connect(cfg()).await.unwrap();
+    let cfg = |cql: u16| ClientConfig::new(format!("127.0.0.1:{cql}")).credentials(&user, &pass);
+    let c = Client::connect(cfg(p.cql)).await.unwrap();
     c.query("CREATE KEYSPACE ks WITH replication = {'class': 'SimpleStrategy', 'replication_factor': 1}", QueryParams::default()).await.unwrap();
     c.query("CREATE TABLE ks.t (k int PRIMARY KEY, v text)", QueryParams::default()).await.unwrap();
     c.query("INSERT INTO ks.t (k, v) VALUES (1, 'full')", QueryParams::default()).await.unwrap();
@@ -395,9 +380,10 @@ async fn full_mode_with_postgres() {
 
     unsafe { libc::kill(d.0.id() as i32, libc::SIGTERM) };
     assert!(d.0.wait().unwrap().success());
-    let _d = spawn();
-    wait_api(&http, &api).await;
-    let c = Client::connect(cfg()).await.unwrap();
+    let (_d, addrs) = full().await;
+    let p = Ports::of(&addrs);
+    wait_api(&http, &format!("http://127.0.0.1:{}", p.api)).await;
+    let c = Client::connect(cfg(p.cql)).await.unwrap();
     assert_eq!(rows(&c, "SELECT v FROM ks.t WHERE k = 1").await[0][0].as_deref(), Some(&b"full"[..]));
 }
 
@@ -405,7 +391,6 @@ async fn full_mode_with_postgres() {
 #[test]
 fn bad_flags_fail_at_start() {
     let home = tempfile::tempdir().unwrap();
-    let p = ports();
     let missing = home.path().join("missing.pem").display().to_string();
     for (args, expect) in [
         (vec!["--nosql-alternator-write-isolation", "sometimes"], "unknown Alternator write isolation"),
@@ -424,9 +409,7 @@ fn bad_flags_fail_at_start() {
             .env("PATH", std::env::var("PATH").unwrap_or_default())
             .args(["--nosql-only", "--home"])
             .arg(home.path())
-            .args(["--api", &format!("127.0.0.1:{}", p.api), "--nosql-cql", &format!("127.0.0.1:{}", p.cql)])
-            .args(["--nosql-cql-shard-aware", &format!("127.0.0.1:{}", p.shard), "--nosql-rest", &format!("127.0.0.1:{}", p.rest)])
-            .args(["--nosql-alternator", &format!("127.0.0.1:{}", p.alternator)])
+            .args(NOSQL.iter().flat_map(|name| [format!("--{name}"), "127.0.0.1:0".to_string()]))
             .args(&args)
             .stderr(std::process::Stdio::piped())
             .spawn()

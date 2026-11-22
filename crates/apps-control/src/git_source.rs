@@ -285,9 +285,19 @@ pub async fn fetch_lfs(r: &Remote<'_>, dir: &Path) -> anyhow::Result<usize> {
 }
 
 /// A tree's LFS pointer files (regular files, never links): their path, sha256 and size.
+/// Submodules are left out: their objects are their own repositories' LFS servers', never the
+/// superproject's to answer.
 fn lfs_pointers(dir: &Path) -> anyhow::Result<Vec<(std::path::PathBuf, String, u64)>> {
+    let gm = dir.join(".gitmodules");
+    let subs: Vec<std::path::PathBuf> = match std::fs::symlink_metadata(&gm) {
+        Ok(m) if m.is_file() && m.len() <= 64 << 10 => gitmodules(&std::fs::read_to_string(&gm).unwrap_or_default()).into_iter().map(|(p, _)| dir.join(p)).collect(),
+        _ => Vec::new(),
+    };
     let (mut out, mut stack, mut seen) = (Vec::new(), vec![dir.to_path_buf()], 0usize);
     while let Some(d) = stack.pop() {
+        if subs.contains(&d) {
+            continue;
+        }
         for e in std::fs::read_dir(&d)? {
             let e = e?;
             seen += 1;
