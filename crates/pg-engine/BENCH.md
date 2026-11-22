@@ -285,6 +285,99 @@ The current checked measurements compare release engine builds and PostgreSQL 18
 the wire. Older rounds below are historical records, with their original methods and
 limits. Their results have not been reverified on the current source.
 
+## Analytic CPU, round 12: the scans under PGO, stored compares with outer and own columns (2026-11-22, agent 286)
+
+HANDOFF "Analytic CPU, round 12" has what changed. Plain dist builds (`tools/dist.sh`): **b0n**
+origin's `2a0f67b0d`; **b0** cand/a283-3's head `e38d7a6cd` (b0 and b0n read the same on every query
+measured); **b3** cand/a286's two code commits on b0n (`94b631fdc`, before the rebase onto
+`2c98eac94`). PGO builds (`tools/dist-pgo.sh`, default training): **p0** of `e38d7a6cd`, **p2** of
+`cbea0b4ba` (both commits, constants still through the general operand path), **p3** of b3's code.
+TPC-H: lane C, agent 283's harness copied to `~/.cache/a286/tpch/` (a fresh engine on a copy of SF1
+loaded by b0, a 2 GB cache, a warm-up of the 22, 3 runs a query in one `perf stat` window over the
+engine's cgroup). Each pair in its own `tools/lane.sh` hold; lane.sh read 3.6-7 foreign cores, the
+pairs' own 1.0-3.5 (no pair met the 1.0 rule): the gates are on user instructions; cycles moved
++-13% with the load. Every result hash equal to the base's.
+
+### The base's scans, plain b0 against PGO p0 (one pair)
+
+q01 7.600 -> 7.734 G (+1.77%), q06 5.251 -> 5.306 (+1.04), q12 5.970 -> 6.054 (+1.40), q15 4.776 ->
+4.878 (+2.14). Foreign cores 1.44 / 1.01.
+
+### b3 against b0n, plain dist (user instructions a run, G; % per pair: b3 b0n, then b0n b3 for the twelve that moved)
+
+| query | b0n | b3 | instructions % |
+|---|---|---|---|
+| q01 | 7.600 | 7.463 | -1.80 / -1.80 |
+| q02 | 2.630 | 2.630 | -0.01 |
+| q03 | 4.198 | 4.178 | -0.47 / -0.48 |
+| q04 | 1.729 | 1.718 | -0.62 / -0.59 |
+| q05 | 3.301 | 3.305 | +0.14 / +0.17 |
+| q06 | 5.251 | 5.151 | -1.92 / -1.90 |
+| q07 | 3.848 | 3.701 | -3.81 / -3.80 |
+| q08 | 1.508 | 1.504 | -0.27 |
+| q09 | 8.648 | 8.594 | -0.62 / -0.60 |
+| q10 | 7.538 | 7.547 | +0.12 / +0.16 |
+| q11 | 0.840 | 0.840 | -0.02 |
+| q12 | 5.970 | 5.979 | +0.15 / +0.16 |
+| q13 | 4.141 | 4.143 | +0.03 |
+| q14 | 1.416 | 1.415 | -0.05 |
+| q15 | 4.776 | 4.711 | -1.36 / -1.35 |
+| q16 | 2.907 | 2.907 | -0.01 |
+| q17 | 5.312 | 5.294 | -0.34 / -0.29 |
+| q18 | 16.296 | 16.272 | -0.15 |
+| q19 | 0.477 | 0.477 | +0.07 |
+| q20 | 1.367 | 1.367 | +0.00 |
+| q21 | 6.922 | 6.785 | -1.98 / -1.96 |
+| q22 | 0.628 | 0.627 | -0.08 |
+| the 22 | 97.30 | 96.61 | -0.71 |
+
+### The 22 on PGO p3 beside plain b3 (same code, one hold, user instructions a run, G)
+
+| query | plain b3 | PGO p3 | % | base: plain b0 / PGO p0 % |
+|---|---|---|---|---|
+| q01 | 7.463 | 7.527 | +0.86 | +1.77 |
+| q02 | 2.629 | 2.254 | -14.29 |  |
+| q03 | 4.169 | 3.766 | -9.66 |  |
+| q04 | 1.718 | 1.610 | -6.30 |  |
+| q05 | 3.307 | 2.973 | -10.09 |  |
+| q06 | 5.151 | 5.112 | -0.76 | +1.04 |
+| q07 | 3.702 | 3.239 | -12.52 |  |
+| q08 | 1.504 | 1.314 | -12.64 |  |
+| q09 | 8.594 | 7.920 | -7.84 |  |
+| q10 | 7.550 | 7.265 | -3.78 |  |
+| q11 | 0.840 | 0.740 | -11.87 |  |
+| q12 | 5.979 | 5.974 | -0.09 | +1.40 |
+| q13 | 4.141 | 3.673 | -11.31 |  |
+| q14 | 1.414 | 1.243 | -12.10 |  |
+| q15 | 4.711 | 4.728 | +0.36 | +2.14 |
+| q16 | 2.906 | 2.560 | -11.92 |  |
+| q17 | 5.297 | 4.698 | -11.30 |  |
+| q18 | 16.266 | 14.724 | -9.48 |  |
+| q19 | 0.478 | 0.439 | -8.05 |  |
+| q20 | 1.367 | 1.111 | -18.71 |  |
+| q21 | 6.786 | 6.394 | -5.77 |  |
+| q22 | 0.627 | 0.547 | -12.69 |  |
+| the 22 | 96.60 | 89.81 | -7.03 | |
+
+### PGO p0 (base) against PGO p2 (both commits, constants through the general path), one pass
+
+| query | p0 | p2 | % |
+|---|---|---|---|
+| q01 | 7.734 | 7.384 | -4.53 |
+| q03 | 3.799 | 3.731 | -1.77 |
+| q04 | 1.621 | 1.580 | -2.50 |
+| q06 | 5.306 | 5.033 | -5.14 |
+| q07 | 3.376 | 3.232 | -4.27 |
+| q12 | 6.054 | 5.935 | -1.96 |
+| q15 | 4.878 | 4.652 | -4.63 |
+| q21 | 6.570 | 6.305 | -4.04 |
+
+Foreign cores per arm (the pairs' own reading): b3 / b0n 3.14 / 2.48 and 1.56 / 2.38; b3 / p3 2.17
+/ 2.00; p0 / p2 2.84 / 3.12. VmHWM b0n 1,678,140, b3 1,681,940 / 1,683,072, p3 1,680,288 kB. Two PGO
+builds of one commit differ by ~0.9% over the 22 (more on single queries: p2 and p3 have the same
+code on q01's path and read 7.384 / 7.527 G), so p3's 89.81 G is 89.0-90.6 G: 0.985-1.003x pgrust's
+PGO-built 90.4 G (round 6's).
+
 ## Analytic CPU, round 11: lookup probes and seeks (2026-11-21, agent 283)
 
 HANDOFF "Analytic CPU, round 11" has what changed. Plain dist builds (`tools/dist.sh`): **h0**

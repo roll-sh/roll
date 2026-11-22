@@ -12395,6 +12395,107 @@ at open, a compaction): older builds ignore the manifest's `format` and fail on 
   the probe needs from the OS page cache, as PostgreSQL's 8 kB page), each a format change for
   its own round.
 
+## Analytic CPU, round 12: the scans under PGO, stored compares with outer and own columns (agent 286)
+
+TPC-H SF1 on lane C (BENCH.md "Analytic CPU, round 12" has the tables). Base: origin's `2a0f67b0d`
+(cand/a283-3, cand/a284-2 and cand/a279-3 landed); plain dist **b0n** built from it. The first
+analysis used **b0** (plain) and **p0** (PGO) of cand/a283-3's head `e38d7a6cd`: b0 and b0n read
+the same instructions on every query measured (q01 7599.8 / 7599.9 M, the others within 0.1%), so
+p0 stands for the base's PGO build. Harness: agent 283's copied to `~/.cache/a286/tpch/` (data
+loaded by b0), ONE pair per `tools/lane.sh c` hold; `prof.sh` takes `PERFEV`; `~/.cache/a286/tools/`
+has `ann.py` (an annotated function from `perf script` sym+offsets and host objdump), `cmpfn.py`
+(two profiles' functions scaled to the measured instructions) and `cmp.py` (a pair file's table).
+Lane C read 3.6-7 foreign cores in lane.sh's reading and 1.0-3.5 in the pairs' own: no pair met
+the 1.0 rule. The gates are on user instructions, which repeated within 0.05% from pair to pair;
+cycles moved +-13% with the foreign load and decide nothing here. Every result hash equal to the
+base's (and so PostgreSQL's).
+
+- **Item 1, why the scans were worse under PGO.** p0 against b0 (one pair): q01 +1.77%, q06 +1.04,
+  q12 +1.40, q15 +2.14% user instructions, as 283 found. By function (precise samples,
+  `instructions:upp`, scaled to the measured counts), `Pre::decode` (the batch decode, with
+  `cols::walk_row`, the typed walk, inlined) was +90 to +150 M in each (+3 to 5%), the rest small
+  or moved between functions by inlining (`Block::read` into `fill_batch_with`, `Lanes::eval`
+  into `partial_chunk`). In the walk's numeric step (3 of q06's 4 columns) the PGO build ran 9
+  instructions more a value: `data.get(pos..pos + 3)`'s two compares (`pos + 3` overflowing, past
+  the end) and the word load's end check were merged into `seta` / `test` pairs (+4), the row's
+  index `r` was reloaded from the stack before each store (+1), one more register move, and 2-3
+  more JCC padding NOPs in the step.
+- **Not the NOPs.** An `instructions:u` profile put 8-10% of the PGO build's samples on NOPs against
+  4-7% of the plain build's; with precise samples it is the other way (PGO 1.6-2.6%, plain
+  3.2-4.4%): the imprecise counter's skid piles samples onto the instruction after a long one.
+  Use `instructions:upp` (PERFEV) for any per-instruction reading. (The imprecise profiles also
+  lost samples under load: 11k where 38k were due at `-c 200003`; the precise ones had them all.)
+- **cand/a286, first commit: the walk's numeric step reads the tag, scale, length and the 8 bytes
+  after them under one bounds check** (`data.get(pos..)` and `first_chunk::<11>()`: no `pos + k`
+  overflow check), the word sign-extended as `num_bytes` does; a value within 11 bytes of the
+  row's end, or longer than 8 bytes, takes the checks as before. 3 compares fewer a value in the
+  plain build and nothing for PGO to merge.
+- **Second commit: `kernel::StoredCmps` compares a column with another column of the row and, in
+  a lookup's inner index scan (`exec::lookup`), with the outer row's columns** (`of_joined`: the
+  inner filter bound to the joined row, `^1#k` as the outer row's columns; the first conjuncts
+  that compare this way, as before only the first ones). A comparison with a constant runs the
+  code it ran before (`Against`); the outer and column operands read their kind (`How`: numbers,
+  strings' bytes / dates of one type, instants) from the comparison. Without an integer operator
+  (the only one that raises an error) the first comparison not true ends it; the columns before
+  a compared one are stepped over inline (`cols::skip`, not `skip_value_fast`'s call). TPC-H
+  q21's semi and anti joins (`l_suppkey <> l1.l_suppkey`, `l_receiptdate > l_commitdate AND
+  l_suppkey <> l1.l_suppkey`) and q04's EXISTS (`l_commitdate < l_receiptdate`) decoded every
+  inner row they read; a scan's own filter of two columns (`a > b`) runs over stored bytes too.
+  Tests: `stored_filters` (column pairs, and an int against a numeric, which a cast keeps off
+  this path), `parallel_scan`'s lookups (a semi and an anti join comparing with the outer row
+  and with their own columns).
+- **Gates, plain dist** (b0n against b3 = both commits, user instructions a run): the 22 in one
+  pair 97.30 -> 96.61 G (-0.71%): q07 -3.81%, q21 -1.98, q06 -1.92, q01 -1.80, q15 -1.36, q04
+  -0.62, q09 -0.62, q03 -0.47, q17 -0.34, q08 -0.27; up q12 +0.15, q05 +0.14, q10 +0.12, q19
+  +0.07, the rest within +-0.05. A second pair of the twelve that moved repeated each within
+  0.05 points. VmHWM 1,678,140 -> 1,681,940 kB.
+- **PGO** (one `tools/dist-pgo.sh` build each, default training): p0 (the base) against p2
+  (cbea0b4ba: both commits, constants still through the general path), one pass of the affected
+  queries: q06 -5.14%, q15 -4.63, q01 -4.53, q07 -4.27, q21 -4.04, q04 -2.50, q12 -1.96, q03
+  -1.77 (39.34 -> 37.85 G). **The 22 on p3** (94b631fdc, both commits as pushed before the rebase)
+  beside plain b3 of the same code, one hold: **96.60 G plain -> 89.81 G PGO** (-7.03%), every
+  hash equal, VmHWM 1,683,072 / 1,680,288 kB, foreign cores 2.17 / 2.00. With two PGO builds'
+  ~0.9% spread, 89.0-90.6 G: **0.985-1.003x pgrust's PGO-built 90.4 G** (round 6's), from
+  0.996-1.013x (283's 90.79): under it, not clearly (the brief's 89.5 G is inside the range).
+  Against plain: q06 -0.76%, q12 -0.09% now (+1.04 / +1.40 at the base), **q01 +0.86%, q15
+  +0.36% still above** (+1.77 / +2.14 at the base); p2, whose code on q01's and q15's paths is
+  p3's, read them at 7.384 / 4.652 G against p3's 7.527 / 4.728: those two are inside the PGO
+  builds' spread, which is wider on them (1.9%) than the 0.9% measured for the 22. Caveats: p0 is
+  cand/a283-3's head, not `2a0f67b0d` (one PGO build fewer; plain b0 and b0n equal); from
+  `2a0f67b0d` the training's regress class counts 26 times more (31.7 G against 1.2 G at p0,
+  weight 2 against 51: cand/a279-3's system views in the golden files, p2 and p3 alike), so p0's
+  training mix differs a little from p2's and p3's. The rebase onto `2c98eac94` brings agent
+  288's planner change (TPC-H plans identical, its commit says) and agent 289's sizing changes;
+  not measured again.
+- **Verification** (`tools/quick-check.sh` on the rebased head `6191c3793`): clippy 16 warnings,
+  none new in a changed file; 434 tests in 25 binaries; crash_random seeds 1-3 x 2,
+  power_cut_at_every_point; regress 51,148 / 51,150, 0 newly differing; isolation 1,647 / 1,648;
+  pg_dump_tap 14,609 passed. Two earlier runs (on `2c98eac94`) stopped at `wire_waits`'
+  `transaction_timeout` cases: the client saw "error communicating with the server" for
+  "connection closed" after the FATAL (a socket close race; `SELECT pg_sleep(3)`, nothing this
+  round touches); alone the binary passed 6 of 7 runs here, the base's 4 of 4. With `QC_CHECKED=1`
+  every verify-checked binary passed but `wire`'s `info_schema_rows`: its first
+  `information_schema.columns` query outlasts the step's quiet window and every answer comes one
+  step late. **That fails on origin as well**: the base's verify-checked `wire` (`2c98eac94`)
+  failed it 4 of 4 runs here, this round's 3 of 4. The batch train's checked stage will meet it.
+- **Measured and dropped: the walk over a slice of the row's values** (`rest`, every step
+  `rest = &rest[k..]`, slice patterns; `~/.cache/a286/patches/dropped-walk-row-slice.patch`):
+  plain q06 +1.4%, q12 +2.0, q15 +1.7 (b0 against b1, one pair; `Pre::decode` +113 M on q06):
+  each step then updates a pointer and a length, and each slice pattern is a length compare. And
+  the general operand path for constants (p2's): q03 +1.0% plain (`passes_with` 383 M against
+  `passes`' 254), replaced by the constants' own code in b3.
+- **Not done (item 2's rest)**: q09's rows over the stages (`K::num` 5.9%, `Lookup::emit` 5.6,
+  `decode_into` 3.9, `joined` / `truncate_row` ~2% each). Most of it is making values: a lookup's
+  inner row decodes every numeric into a `Value::Numeric(Arc<Numeric>)` (an allocation and a
+  free a value, `mi_malloc` / `Value` drops ~3.5% of q09) that `K::num` turns back into an i128;
+  not building them means the lookup handing the aggregation the stored row (as `Lazy` rows do
+  for scans), a change to lookup.rs's batch and pipe.rs. q09's unique probes (one seek per new
+  block) not looked at.
+- **Left**: q01's aggregate kernels under PGO (`Partials::batch_run` +72 M, `Lanes::eval` inlined
+  into `partial_chunk` +45 M against plain, p0); `fill_batch_with` +28-49 M under PGO with
+  `Block::read` inlined; the walk's row index kept in memory under PGO (a store's `v[r]` reloads
+  it); cycles under these changes on a quiet lane.
+
 ## Analytic CPU, round 11: lookup probes and seeks (agent 283)
 
 TPC-H SF1 on lane C, plain dist builds only (BENCH.md "Analytic CPU, round 11" has the tables).
