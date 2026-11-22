@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { stepUpId, broadRule, installLink, accessRequest, approversText, parseApprovers, deciderName, describeApprovalRule, gateProgress, rememberable, proposedRule, approvableTogether, byConcern, catalogFor, denyRedirect, draftOf, expiringSoon, grantMatches, mcpConfig, parseAuthorize, githubIdentity, githubStep, presetFor, presetRules, publicJwk, rulesOf, trustedLabel, statusOf, toolsetCost, pickArea, waitsForAdmin, withToolsets, type Approval, type Preset, idpFromForm, tieForAgents, untieForAgents } from "./access-api";
+import { describeAskRule, stepUpId, broadRule, installLink, accessRequest, approversText, parseApprovers, deciderName, describeApprovalRule, gateProgress, rememberable, proposedRule, approvableTogether, byConcern, catalogFor, denyRedirect, draftOf, expiringSoon, grantMatches, mcpConfig, parseAuthorize, githubIdentity, githubStep, presetFor, presetRules, publicJwk, rulesOf, trustedLabel, statusOf, toolsetCost, pickArea, waitsForAdmin, withToolsets, type Approval, type Preset, idpFromForm, tieForAgents, untieForAgents } from "./access-api";
 
 const presets: Preset[] = [
   { id: "read-only", name: "Read only", description: "", rules: [{ product: "*", resources: "*", actions: { read: "allow" } }] },
@@ -266,5 +266,12 @@ describe("step-up", () => {
     expect(broadRule({ product: "postgres", resources: [{ id: "pa" }], actions: { delete: "allow" } })).toBe(false);
     expect(broadRule({ product: "postgres", resources: "*", actions: { delete: "allow" } })).toBe(true);
     expect(broadRule({ product: "secrets", resources: [{ id: "p" }], actions: { reveal: "allow" } })).toBe(true);
+  });
+});
+
+describe("agents ask", () => {
+  it("says an agents_ask rule in words", () => {
+    expect(describeAskRule({ product: "apps", actions: ["deploy"], environments: ["production"] })).toBe("apps deploy in production");
+    expect(describeAskRule({ product: "*" })).toBe("anything any action");
   });
 });

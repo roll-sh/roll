@@ -376,6 +376,25 @@ export interface Policy {
   approve_people?: Action[];
   /** What needs more than one approver, and whose (each rule covering a request is a gate). */
   approval_rules?: ApprovalRule[];
+  /** What an agent (through roll's MCP server) asks a person for first, whatever its token allows. */
+  agents_ask?: AskRule[];
+  /** Every token's and OAuth connection's MCP is in lockdown, whatever its URL asks. */
+  mcp_lockdown?: boolean;
+  /** Every token's and OAuth connection's MCP sees and runs only tools that read. */
+  mcp_read_only?: boolean;
+}
+
+/** One of the policy's `agents_ask`: a product (or "*"), its actions and environments (all when left out). */
+export interface AskRule {
+  product: string;
+  actions?: Action[];
+  environments?: string[];
+}
+
+/** An agents_ask rule in words: "postgres delete in prod*". */
+export function describeAskRule(r: AskRule): string {
+  const what = `${r.product === "*" ? "anything" : r.product} ${r.actions?.length ? r.actions.join(", ") : "any action"}`;
+  return r.environments?.length ? `${what} in ${r.environments.join(", ")}` : what;
 }
 
 /** A rule of the policy: requests it covers need `approvals` approvals from `approvers` (anyone who may decide when left out), never from the token's own person. */

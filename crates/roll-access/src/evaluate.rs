@@ -705,6 +705,17 @@ async fn judge(mut ctx: Ctx, req: Request, next: Next, j: Judge) -> Response {
     let resource = lent.as_ref().map(|(_, id)| id.clone()).or_else(|| describe(&target));
     let about = lent.as_ref().map_or(row.product, |(p, _)| p);
     ctx.about = lent.as_ref().map(|(p, _)| *p);
+    // An agent (a call through roll's MCP server) asks a person first for what the policy says
+    // agents always ask about, whatever its token allows (a session is a person, never an agent).
+    if outcome == Outcome::Allow && !session && ctx.mcp.as_ref().is_some_and(|m| !m.quiet) {
+        let env = match &target {
+            Target::One(r) => r.environment.clone(),
+            _ => None,
+        };
+        if policy.agent_asks(about, action, env.as_deref()) {
+            outcome = Outcome::Ask;
+        }
+    }
     let mut approved: Option<roll_auth::Approved> = None;
     match outcome {
         Outcome::Deny => {

@@ -1043,6 +1043,13 @@ MCP clients for themselves, as GitHub's fine-grained tokens act for the person w
   `max_idle_days` stops a grant nobody has used for that long (since its last use, or since it was
   made): an unused credential is risk with nothing to show for it. The evaluator reads the policy at
   most every 10 seconds, so a change reaches every node within that.
+- For agents, the policy also holds (Stripe asks a person before refunds whatever a key allows;
+  PlanetScale sets MCP access org-wide): `agents_ask` lists requests an agent asks a person for
+  first, whatever its token allows (`[{product, actions?, environments?}]`, e.g. apps `deploy` in
+  `production`): only requests made through roll's MCP server, so CI and scripts calling the API
+  aren't held; an approval already given still lets the call through. `mcp_lockdown` and
+  `mcp_read_only` hold every token's and OAuth connection's MCP to lockdown or to reading,
+  whatever its URL asks (the operator's own connection isn't held).
 - The secret is shown once, at creation. The store keeps its SHA-256, and a scoped token's `hint`
   (`rlt_…a1b2`: its prefix and last four characters, as Stripe lists keys) so a token found in a
   config or a leak report can be matched to its row; rotating changes it. The last six characters
@@ -1259,7 +1266,7 @@ Under `/v1/access`. Bodies are JSON; errors are `{"error": string, "code"?: stri
 | `PATCH /v1/access/enterprise/apps/{id}` | operator | `{name?, rules?}`: the app as changed; its people's connections take new rules in the same write |
 | `POST /v1/access/enterprise/apps/{id}/rotate` | operator | `{public_jwk?, keep_old_for_s?}`: a new key, or a new `client_secret` answered once; the old secret works that long (at most a week) or stops now with every token its people hold |
 | `DELETE /v1/access/enterprise/apps/{id}` | operator | remove an app, revoking its people's connections: `{revoked}` |
-| `GET /v1/access/policy` | operator | `{max_days, require_expiry, max_idle_days, approve_people, approval_rules}`: roll's rules for every grant, and what needs several approvers ("Two-person approvals") |
+| `GET /v1/access/policy` | operator | `{max_days, require_expiry, max_idle_days, approve_people, approval_rules, agents_ask, mcp_lockdown, mcp_read_only}`: roll's rules for every grant, and what needs several approvers ("Two-person approvals") |
 | `PUT /v1/access/policy` | operator | change them; a grant made, rotated, or whose rules, lifetime or addresses change, must fit (consent too) |
 | `GET /v1/access/notify` | operator | where approvals are posted: `{chat: {install, channel, approvers} \| null}` |
 | `PUT /v1/access/notify` | operator | `{chat: {install, channel, approvers} \| null}` |

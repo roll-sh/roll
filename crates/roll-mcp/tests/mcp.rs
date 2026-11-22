@@ -373,6 +373,22 @@ async fn search_mode_finds_and_runs_through_the_same_checks() {
     assert!(!log.as_array().unwrap().iter().any(|e| e["tool"].as_str().is_some_and(|t| t.starts_with("roll_"))), "{log}");
 }
 
+/// The operator's policy holds every token's MCP to lockdown and to reading, whatever its URL asks
+/// (`mcp_lockdown`, `mcp_read_only`); the operator's own connection isn't held.
+#[tokio::test]
+async fn the_policy_holds_agents_to_lockdown_and_reading() {
+    let d = Daemon::new();
+    let token = d.token(json!([{ "product": "*", "resources": "*", "actions": { "read": "allow", "write": "allow", "delete": "allow" } }])).await;
+    assert!(names(&d.rpc(&token, "tools/list", json!({})).await).contains(&"postgres_delete_project".to_string()));
+    let (s, _, _) = d.http(OPERATOR, Method::PUT, "/v1/access/policy", Some(json!({ "mcp_lockdown": true, "mcp_read_only": true }))).await;
+    assert_eq!(s, StatusCode::OK);
+    let listed = d.rpc(&token, "tools/list", json!({})).await;
+    assert!(listed["tools"].as_array().unwrap().iter().all(|t| t["annotations"]["readOnlyHint"] == true), "read-only, unasked");
+    let work = d.tool(&token, "code_list_work", json!({})).await;
+    assert!(!work["content"][0]["text"].as_str().unwrap().contains("push the secrets"), "lockdown, unasked: {work}");
+    assert!(names(&d.rpc(OPERATOR, "tools/list", json!({})).await).contains(&"postgres_delete_project".to_string()), "not the operator");
+}
+
 /// Lockdown (`?lockdown=1`): an outside record's text never reaches the model, in the structured
 /// answer or the text block a tool set wrote; the rest of the answer stays.
 #[tokio::test]
