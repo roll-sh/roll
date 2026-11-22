@@ -198,10 +198,11 @@ impl Engine {
                     x.state = ResourceState::Pending;
                     x.error = None;
                 })?;
+                self.store.set_base_schema(&r.id, res.kind, &res.parent, None)?;
                 self.store.log(&r.id, &format!("branched {key} as {}", made.r#ref))?;
                 self.store.set_seed_needed(&r.id, true)?;
                 self.mask(&r.id, &b, &key, &made.r#ref, s).await?;
-                self.keep_base(&r.id, &b, &res, &made.r#ref, s, true).await?;
+                self.keep_base(&r.id, &b, &res, &made.r#ref, s).await?;
                 self.store.set_resource(&r.id, res.kind, &res.parent, |x| x.state = ResourceState::Ready)?;
             }
             Some(branch) if reset_due || asked.iter().any(|a| a == "*" || *a == key) => {
@@ -222,20 +223,20 @@ impl Engine {
                     x.error = None;
                     x.bytes = 0;
                 })?;
+                self.store.set_base_schema(&r.id, res.kind, &res.parent, None)?;
                 self.store.log(&r.id, &format!("reset {key} from its parent"))?;
                 self.store.set_seed_needed(&r.id, true)?;
                 self.mask(&r.id, &b, &key, &fresh.r#ref, s).await?;
-                self.keep_base(&r.id, &b, &res, &fresh.r#ref, s, true).await?;
+                self.keep_base(&r.id, &b, &res, &fresh.r#ref, s).await?;
                 self.store.set_resource(&r.id, res.kind, &res.parent, |x| x.state = ResourceState::Ready)?;
                 reset = true;
             }
-            // Made (or reset) but not finished: masks again, then Ready. Also a branch masked again
-            // in place (changed rules, not Postgres), whose data the change's seed and release may
-            // already have written: its base is kept only while nothing has run on it yet.
+            // Made (or reset) but not finished: masks again, then Ready. No base is kept here: a
+            // branch masked again in place (changed rules, not Postgres) holds what the change's
+            // seed and release wrote, and one made just before a crash has none (compared with
+            // its parent alone).
             Some(branch) if res.state != ResourceState::Ready => {
                 self.mask(&r.id, &b, &key, branch, s).await?;
-                let fresh = self.store.released(&r.id)?.is_none() && (s.seed.is_none() || self.store.seed_needed(&r.id)?);
-                self.keep_base(&r.id, &b, &res, branch, s, fresh || true).await?;
                 self.store.set_resource(&r.id, res.kind, &res.parent, |x| {
                     x.state = ResourceState::Ready;
                     x.error = None;
@@ -1227,9 +1228,8 @@ impl Engine {
     /// schema changes later name what the change did, not what production did since
     /// (`schema::diff_since`). Only where a seed or release runs: nothing reads it otherwise. A
     /// failed read keeps none (said): its changes are compared with the parent alone, as before.
-    /// `fresh`: nothing of the change has run on the branch yet; otherwise the base it has stays.
-    async fn keep_base(&self, id: &str, b: &Arc<dyn Brancher>, res: &ResourceRow, branch: &str, s: &Settings, fresh: bool) -> anyhow::Result<()> {
-        if !fresh || !matches!(res.kind, Kind::Postgres | Kind::Search) || (s.seed.is_none() && s.release.is_none()) {
+    async fn keep_base(&self, id: &str, b: &Arc<dyn Brancher>, res: &ResourceRow, branch: &str, s: &Settings) -> anyhow::Result<()> {
+        if !matches!(res.kind, Kind::Postgres | Kind::Search) || (s.seed.is_none() && s.release.is_none()) {
             return Ok(());
         }
         let lines = match b.branch_schema(&res.parent, branch).await {
