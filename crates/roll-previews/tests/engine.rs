@@ -260,6 +260,9 @@ async fn a_visual_change_waits_for_someone_to_accept_it_at_each_head() {
     assert!(matches!(e.engine.accept_visual(&chg.id, "bob", &[], true, Some(Some("own_bob")), Some("cs_1b"), None).await, Err(roll_previews::Error::Forbidden(_))), "no write on its repo");
     let p = e.engine.accept_visual(&chg.id, "ada", &[], true, Some(Some("own_acme")), Some("cs_1b"), Some("/pricing")).await.unwrap();
     assert_eq!(p.visual_review.map(|v| v.state), Some(VisualState::Changed));
+    // Waiting for review is an event for followers.
+    let waits = e.engine.store.events(0, 500).unwrap().into_iter().filter(|x| x.preview == chg.id && x.kind == "visual_change").count();
+    assert_eq!(waits, 1);
     assert_eq!(waiting(), Some(vec!["".to_string()]));
     assert!(e.engine.accept_visual(&chg.id, "ada", &[], true, None, Some("cs_1b"), Some("/nowhere")).await.is_err(), "a page it has no screenshot of");
     let p = e.engine.accept_visual(&chg.id, "ada", &[], true, None, Some("cs_1b"), Some("")).await.unwrap();

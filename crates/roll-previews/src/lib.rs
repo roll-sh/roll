@@ -729,7 +729,7 @@ impl PageA11y {
 
 /// Something that happened to a preview, for followers (`GET /v1/previews/events`, roll MCP's
 /// event feeds): `created`, `ready` (up after a push or its first deploy; never a sleeping one
-/// waking), `failed` or `deleted`. Ids and kinds only: `data` holds the head.
+/// waking), `failed`, `visual_change` (a visual change waits for review, once a head) or `deleted`. Ids and kinds only: `data` holds the head.
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct Event {
     pub seq: i64,

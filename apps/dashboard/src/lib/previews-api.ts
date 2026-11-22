@@ -655,7 +655,7 @@ export type ErrorGroup = { service: string; fingerprint: string; kind: string; t
 
 /** A running service's use right now: cores of CPU, resident bytes (an instance's, on roll apps), and the MB it runs with. */
 /** Something that happened to a preview (`GET /v1/previews/events`). */
-export type PreviewEvent = { seq: number; at: number; kind: "created" | "ready" | "failed" | "deleted"; project: string; preview: string; change: string | null; data: { head?: string } };
+export type PreviewEvent = { seq: number; at: number; kind: "created" | "ready" | "failed" | "visual_change" | "deleted"; project: string; preview: string; change: string | null; data: { head?: string } };
 export type ServiceMetrics = { service: string; cpu: number; memory_bytes: number; memory_mb: number };
 
 /** One of a preview's recent traces: its root span's name and service, when (ms), how long, how many spans, whether any failed. */

@@ -1267,6 +1267,21 @@ impl Store {
         })?)
     }
 
+    /// Record `kind` for preview `id` at `head` unless it's recorded already (`visual_change`:
+    /// once a head, however often it's reported).
+    pub fn emit_once(&self, id: &str, kind: &str, head: &str) -> Result<()> {
+        let now = self.now_ms()?;
+        let data = serde_json::json!({ "head": head });
+        self.db.write(|c| {
+            let Some((project, change)) = c.query_row("SELECT project_id, change_id FROM previews WHERE id = ?", [id], |r| Ok((r.get::<_, String>(0)?, r.get::<_, Option<String>>(1)?))).optional()? else { return Ok(()) };
+            let had: Option<i64> = c.query_row("SELECT seq FROM events WHERE preview_id = ? AND kind = ? AND data = ?", params![id, kind, data.to_string()], |r| r.get(0)).optional()?;
+            if had.is_none() {
+                emit(c, now, kind, &project, id, change.as_deref(), &data)?;
+            }
+            Ok::<_, Error>(())
+        })
+    }
+
     /// The newest event's seq (0 for none): where a follower that wants only what comes next
     /// starts.
     pub fn latest_event(&self) -> Result<i64> {
