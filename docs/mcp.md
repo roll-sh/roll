@@ -191,8 +191,12 @@ A 2026-07-28 client can ask what happened instead of being asked (MCP Events, SE
 `previews_list`, its project's events only, as the gate filters the list). roll code: `code.landed`
 (each change landed on one repo, with its change, ref, changeset and author; `GET
 /v1/code/repos/{owner}/{repo}/landings`, read from the store's durable land log, tied to
-`code_list_refs`). A type whose route names a resource takes it as a required argument (`owner` and
-`repo` for `code.landed`), filled into the feed's path. All three of the SEP's delivery modes:
+`code_list_refs`). roll secrets: `secrets.event` (a leak or scan finding, a failed rotation or sync,
+a value request waiting or decided, a placeholder misused, production left unprotected, an
+environment or the project deleted or recovered; never a value; `GET
+/v1/secrets/projects/{project}/events`, tied to `secrets_audit`; secrets keeps an env-limited
+token to its environments). A type whose route names a resource takes it as a required argument
+(`owner` and `repo` for `code.landed`, `project` for `secrets.event`), filled into the feed's path. All three of the SEP's delivery modes:
 poll (`events/poll`), push (`events/stream`) and webhook (`events/subscribe`, `events/unsubscribe`), below. An event type is a
 feed route read through the gated router with the caller's token, as a tool is, and it's the tool
 for that route's to list and allow (`apps.event` is `apps_events`'s: `GET /v1/apps/events`): a
@@ -203,7 +207,8 @@ No cursor starts from now (`?latest=1`: no events, the newest cursor); one roll 
 a fresh cursor and `truncated: true`, never an error, as the SEP says. `arguments` filter as each
 type's `inputSchema` says: `apps.event` by `kinds` (`deploy.failed`, or a family as `alert.*`),
 `service` and `environment`, `access.approval` by `kinds` (`approved`, `denied`) and `tool`,
-`previews.event` by `kinds` and `project`, `code.landed` by `ref`; `maxEvents` (at
+`previews.event` by `kinds` and `project`, `code.landed` by `ref`, `secrets.event` by `kinds` (a
+family as `request.*`) and `environment`; `maxEvents` (at
 most 100) and `maxAgeMs` are honoured, events older than `maxAgeMs` skipped and marked `truncated`.
 A full page (`hasMore`) means poll again at once; otherwise after `nextPollMs` (15 s).
 
@@ -1309,12 +1314,16 @@ waits on a sibling PR reaching main is last.
    node, so a search across repos goes to each owner: one signed internal request per node with
    the caller's repos, per-repo and overall deadlines, results interleaved by repo, and every repo
    not searched listed in `skipped`. Preview notes once previews has a text search.
-2. **Review findings on #745 and #748** (an independent review running 2026-11-22 21:35): fixed
-   as they're confirmed.
+2. **Fixes from a review of #745 and #748 (this PR).** #748 held up. In `search`, a scoped token
+   (roll code's operator caller, narrowed by the gate) had the page cut before the gate's filter,
+   so a token narrowed to one repo could get nothing when newer matches sat elsewhere: roll code
+   now asks roll-access per repo first (`GrantReach`, rolld's `CodeReach`: the gate's resolution,
+   workspace projects included). Also: a snippet could panic on text whose lowercase shifts byte
+   offsets, a percent-encoded document id skipped owner routing, a database error answered 404,
+   and an owner's search read every repo row.
 3. **MCP Events: more feeds.** All three delivery modes are on main (poll #692, webhook #703,
-   push #710) with `apps.event`, `access.approval` (#708), `previews.event` (#719) and `code.landed`
-   (#739). Next: secrets' events (#732: `project` in the path, `kinds` and `environment` filters)
-   once it lands. From the review: claims use each node's clock (a node more than 2 minutes ahead
+   push #710) with `apps.event`, `access.approval` (#708), `previews.event` (#719), `code.landed`
+   (#739) and `secrets.event` (this PR, on secrets' #732). From the review: claims use each node's clock (a node more than 2 minutes ahead
    can deliver beside another; the fenced cursor and a stable `webhook-id` keep it to duplicates);
    fairness is 20 subscriptions a connection, not a person or owner, and the verification limit is
    per node.

@@ -31,7 +31,7 @@ pub mod settings;
 pub mod streams;
 pub mod webhooks;
 
-pub use ext::{Asker, CredentialValue, PreviewBackend, Refused, Revealed, Runner, SecretEnv, SecretsAsker, StoreCredential, StoreTarget, StoredCredential};
+pub use ext::{Asker, CredentialValue, GrantReach, PreviewBackend, Refused, Revealed, Runner, SecretEnv, SecretsAsker, StoreCredential, StoreTarget, StoredCredential};
 pub use service::{FileWrite, LandOutcome, WriteFiles};
 
 use axum::Json;
@@ -489,6 +489,8 @@ pub struct Code {
     pub(crate) github_listener: std::sync::OnceLock<GitHubListener>,
     /// roll secrets, once rolld plugged it in ([`Code::set_secret_env`]).
     pub(crate) secret_env: std::sync::OnceLock<Arc<dyn SecretEnv>>,
+    /// roll-access's answer to "may this grant read that repo" ([`Code::set_grant_reach`]).
+    pub(crate) grant_reach: std::sync::OnceLock<Arc<dyn GrantReach>>,
     pub(crate) queues: queue::Queues,
     pub(crate) settings_cache: Mutex<HashMap<String, SettingsAt>>,
     /// Checks failing on a head the queue built a batch on.
@@ -636,6 +638,7 @@ impl Code {
             github: std::sync::OnceLock::new(),
             github_listener: std::sync::OnceLock::new(),
             secret_env: std::sync::OnceLock::new(),
+            grant_reach: std::sync::OnceLock::new(),
             queues: queue::Queues::default(),
             settings_cache: Mutex::new(HashMap::new()),
             baselines: Cache::new(1024),
@@ -681,6 +684,11 @@ impl Code {
     /// Plug in roll secrets (sandboxes started with an environment's secrets).
     pub fn set_secret_env(&self, s: Arc<dyn SecretEnv>) {
         let _ = self.secret_env.set(s);
+    }
+
+    /// Plug in roll-access's per-repo answer for scoped grants (searches across repos).
+    pub fn set_grant_reach(&self, r: Arc<dyn GrantReach>) {
+        let _ = self.grant_reach.set(r);
     }
 
     /// The cluster, if this node is part of one.
