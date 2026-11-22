@@ -315,10 +315,20 @@ fn shown(host: &str) -> String {
     host.chars().filter(|c| !c.is_control()).take(255).collect()
 }
 
-/// Swaps counted since each (placeholder, host, refused) pair's last audit row, so a busy one
+/// Swaps counted since each (placeholder, host, what) pair's last audit row, so a busy one
 /// writes a row a minute.
 #[derive(Default)]
-pub(crate) struct Uses(std::sync::Mutex<HashMap<(String, String, bool), Use>>);
+pub(crate) struct Uses(std::sync::Mutex<HashMap<(String, String, Noted), Use>>);
+
+/// What a counted use was: a swap, or a refusal that's an alert.
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+enum Noted {
+    Swap,
+    /// Sent to a host its key isn't bound to.
+    WrongHost,
+    /// Swapped by another consumer's proxy than the one it was issued to.
+    WrongConsumer,
+}
 
 #[derive(Clone)]
 struct Use {
@@ -329,7 +339,8 @@ struct Use {
     consumer: String,
     pending: u64,
     logged_at: i64,
-    /// A refusal's hosts since its last row (at most [`HOST_SAMPLE`]), and whether there were more.
+    /// A refusal's hosts (or, for a wrong consumer, the consumers) since its last row (at most
+    /// [`HOST_SAMPLE`]), and whether there were more.
     hosts: Vec<String>,
     others: bool,
 }
@@ -567,18 +578,25 @@ impl Secrets {
         Ok(self.principal_caller(&row.issued_by)?.unwrap_or_else(|| Caller::consumer(&row.issued_by)))
     }
 
-    /// `placeholder`'s value for a request to `host`, with the placeholder `at` there: refused
-    /// unless it's live, whoever asked for it (and whoever made its consumer) still may, and the
-    /// key is still bound to `host`, goes `at` there, and holds a literal value. A wrong host is
-    /// an alert. Audited once a minute per (placeholder, host). Blocking: in process only, for
-    /// roll's egress proxies (`proxy::filter`).
-    pub fn substitute(&self, placeholder: &str, host: &str, at: Position<'_>) -> std::result::Result<Swap, Refusal> {
+    /// `placeholder`'s value for a request to `host` from the proxy serving `consumer`, with the
+    /// placeholder `at` there: refused unless it was issued to `consumer`, it's live, whoever asked
+    /// for it (and whoever made its consumer) still may, and the key is still bound to `host`, goes
+    /// `at` there, and holds a literal value. Another consumer or a wrong host is an alert.
+    /// Audited once a minute per (placeholder, host). Blocking: in process only, for roll's egress
+    /// proxies (`proxy::filter`).
+    pub fn substitute(&self, placeholder: &str, consumer: &str, host: &str, at: Position<'_>) -> std::result::Result<Swap, Refusal> {
         let failed = |e: Error| Refusal::Failed(e.to_string());
         if !placeholder.starts_with(PREFIX) || !roll_auth::credentials::checksum_ok(placeholder) {
             return Err(Refusal::Unknown);
         }
         let row = self.placeholder_row(placeholder).map_err(failed)?.ok_or(Refusal::Unknown)?;
         let now = self.db.now_ms().map_err(|e| failed(e.into()))?;
+        // First, before anything about it is said: another consumer's proxy holds a leaked one.
+        if row.consumer != consumer {
+            let slug: Option<String> = self.db.read(|c| c.query_row("SELECT slug FROM environments WHERE id = ?", [&row.env_id], |r| r.get(0)).optional()).unwrap_or_default();
+            self.note_use(&row, &slug.unwrap_or_default(), consumer, Noted::WrongConsumer, now);
+            return Err(Refusal::WrongConsumer);
+        }
         if row.revoked_at.is_some() {
             return Err(Refusal::Revoked);
         }
@@ -603,7 +621,7 @@ impl Secrets {
             return Err(Refusal::MakerUnreachable(format!("whoever bound {key} to its hosts can no longer manage {slug}:{path} or can no longer sign in")));
         }
         if !hosts.allows(host) {
-            self.note_use(&row, &slug, host, true, now);
+            self.note_use(&row, &slug, host, Noted::WrongHost, now);
             return Err(Refusal::WrongHost(shown(host)));
         }
         if row.untrusted && !hosts.placed() {
@@ -630,7 +648,7 @@ impl Secrets {
         if let Some(p) = problem {
             return Err(Refusal::Unusable(format!("{key} can't be read: {p}")));
         }
-        self.note_use(&row, &slug, host, false, now);
+        self.note_use(&row, &slug, host, Noted::Swap, now);
         Ok(Swap { value, key: row.key, placeholder: row.id })
     }
 
@@ -669,13 +687,14 @@ impl Secrets {
         }
     }
 
-    /// Count a swap (or a refusal for a wrong host), writing its row when the pair's last is a
-    /// minute old.
-    fn note_use(&self, row: &Row, env: &str, host: &str, refused: bool, now: i64) {
-        let host = normalize_host(host).unwrap_or_else(|| shown(host));
-        // Swaps per (placeholder, host); refusals per placeholder, whatever the host, so a loop
-        // over random hosts is one row a minute, with a count and a few of them.
-        let k = (row.id.clone(), if refused { String::new() } else { host.clone() }, refused);
+    /// Count a swap (or a refusal for a wrong host or consumer), writing its row when the pair's
+    /// last is a minute old. `seen` is the host, or for a wrong consumer the consumer that asked.
+    fn note_use(&self, row: &Row, env: &str, seen: &str, what: Noted, now: i64) {
+        let refused = what != Noted::Swap;
+        let host = if what == Noted::WrongConsumer { shown(seen) } else { normalize_host(seen).unwrap_or_else(|| shown(seen)) };
+        // Swaps per (placeholder, host); refusals per placeholder, whatever the host or consumer,
+        // so a loop over random hosts is one row a minute, with a count and a few of them.
+        let k = (row.id.clone(), if refused { String::new() } else { host.clone() }, what);
         let mut due = vec![];
         {
             let mut uses = self.uses.0.lock().unwrap_or_else(|e| e.into_inner());
@@ -710,17 +729,27 @@ impl Secrets {
         }
     }
 
-    fn write_use(&self, (id, host, refused): &(String, String, bool), u: &Use, now: i64) {
+    fn write_use(&self, (id, host, what): &(String, String, Noted), u: &Use, now: i64) {
         let times = if u.pending == 1 { "once".to_string() } else { format!("{} times", u.pending) };
-        if !refused {
-            let summary = format!("substituted {} for {host} {times} for {} ({id})", u.key, u.consumer);
-            self.audit_now(&u.project, &Caller::consumer(&u.consumer), "secrets.substitute", Some(&u.env), Some(&u.path), std::slice::from_ref(&u.key), &summary);
-            return;
-        }
-        let hosts = u.hosts.join(", ");
-        tracing::warn!(project = %u.project, env = %u.env, key = %u.key, consumer = %u.consumer, placeholder = %id, %hosts, count = u.pending, "a placeholder was sent to hosts its key isn't bound to");
-        let text = format!("placeholder {id} of {}, issued to {}, was sent to hosts {} isn't bound to {times} ({hosts}{}): likely an exfiltration attempt", u.key, u.consumer, u.key, if u.others { " and others" } else { "" });
-        let alert = serde_json::json!({ "kind": "placeholder_host", "placeholder": id, "consumer": u.consumer, "hosts": u.hosts, "more_hosts": u.others, "count": u.pending });
+        let others = if u.others { " and others" } else { "" };
+        let seen = u.hosts.join(", ");
+        let (text, alert) = match what {
+            Noted::Swap => {
+                let summary = format!("substituted {} for {host} {times} for {} ({id})", u.key, u.consumer);
+                self.audit_now(&u.project, &Caller::consumer(&u.consumer), "secrets.substitute", Some(&u.env), Some(&u.path), std::slice::from_ref(&u.key), &summary);
+                return;
+            }
+            Noted::WrongHost => {
+                tracing::warn!(project = %u.project, env = %u.env, key = %u.key, consumer = %u.consumer, placeholder = %id, hosts = %seen, count = u.pending, "a placeholder was sent to hosts its key isn't bound to");
+                let text = format!("placeholder {id} of {}, issued to {}, was sent to hosts {} isn't bound to {times} ({seen}{others}): likely an exfiltration attempt", u.key, u.consumer, u.key);
+                (text, serde_json::json!({ "kind": "placeholder_host", "placeholder": id, "consumer": u.consumer, "hosts": u.hosts, "more_hosts": u.others, "count": u.pending }))
+            }
+            Noted::WrongConsumer => {
+                tracing::warn!(project = %u.project, env = %u.env, key = %u.key, consumer = %u.consumer, placeholder = %id, by = %seen, count = u.pending, "a placeholder was swapped by another consumer's proxy");
+                let text = format!("placeholder {id} of {}, issued to {}, was sent through the proxy of {seen}{others} {times}: likely a leaked placeholder. Revoke it", u.key, u.consumer);
+                (text, serde_json::json!({ "kind": "placeholder_consumer", "placeholder": id, "consumer": u.consumer, "by": u.hosts, "more_by": u.others, "count": u.pending }))
+            }
+        };
         let res = self.keys().and_then(|mac| {
             self.db.write(|c| {
                 crate::audit::record(c, mac, &u.project, &Caller::consumer("roll:placeholders"), "secrets.alert", Some(&u.env), Some(&u.path), std::slice::from_ref(&u.key), &text, now)?;
@@ -894,8 +923,8 @@ impl crate::intercept::BoundHosts for Secrets {
 
 /// roll's egress proxies swap through this, in process ([`crate::proxy::filter`]).
 impl crate::proxy::Substitute for Secrets {
-    fn substitute(&self, placeholder: &str, host: &str, at: Position<'_>) -> std::result::Result<Swap, Refusal> {
-        Secrets::substitute(self, placeholder, host, at)
+    fn substitute(&self, placeholder: &str, consumer: &str, host: &str, at: Position<'_>) -> std::result::Result<Swap, Refusal> {
+        Secrets::substitute(self, placeholder, consumer, host, at)
     }
 }
 

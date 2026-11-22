@@ -1399,6 +1399,32 @@ export interface Backup {
   size: number;
 }
 
+/** A short-lived container to run commands in (docs/apps/http-api.md, `…/sandboxes`). */
+export interface Sandbox {
+  id: string;
+  service: string;
+  environment: string;
+  image: string;
+  cpu: number;
+  memory_mb: number;
+  /** It has the live deployment's variables and files. */
+  variables: boolean;
+  /** `none`: a network of its own (the internet, nothing of the project). */
+  network: "none" | "environment";
+  created_at: number;
+  expires_at: number;
+}
+
+export interface SandboxRun {
+  /** null: killed at its timeout. */
+  exit_code: number | null;
+  timed_out: boolean;
+  stdout: string;
+  stderr: string;
+  /** A stream had more than 1 MiB: the rest was dropped. */
+  truncated: boolean;
+}
+
 export interface Job {
   id: string;
   deployment: string;
@@ -1634,6 +1660,10 @@ export const appsApi = {
   startJob: (id: string, e: string, body: { command: string; timeout_s?: number; tasks?: number; retries?: number; parallelism?: number }) => call<Job>("POST", `${env(id, e)}/jobs`, body),
   job: (id: string, e: string, j: string) => call<Job>("GET", `${env(id, e)}/jobs/${encodeURIComponent(j)}`),
   cancelJob: (id: string, e: string, j: string) => call<Job>("POST", `${env(id, e)}/jobs/${encodeURIComponent(j)}/cancel`),
+  sandboxes: (id: string, e: string) => call<Sandbox[]>("GET", `${env(id, e)}/sandboxes`),
+  createSandbox: (id: string, e: string, body: { image?: string; ttl_s?: number; cpu?: number; memory_mb?: number; variables?: boolean; network?: "none" | "environment" }) => call<Sandbox>("POST", `${env(id, e)}/sandboxes`, body),
+  sandboxExec: (id: string, e: string, s: string, body: { command: string; timeout_s?: number }) => call<SandboxRun>("POST", `${env(id, e)}/sandboxes/${encodeURIComponent(s)}/exec`, body),
+  deleteSandbox: (id: string, e: string, s: string) => call<void>("DELETE", `${env(id, e)}/sandboxes/${encodeURIComponent(s)}`),
 
   /** A shell in a running instance over HTTP (a browser can't send the token on a WebSocket). */
   /** `instance`: that one (default: one that's running, or a woken one). */
