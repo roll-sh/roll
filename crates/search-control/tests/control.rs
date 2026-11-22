@@ -527,7 +527,7 @@ async fn people_are_held_to_their_cluster_caps() {
 #[tokio::test]
 async fn branches() {
     let e = env().await;
-    let c = e.post("/v1/search/clusters", json!({"name": "shop", "max_in_flight": 16})).await;
+    let c = e.post("/v1/search/clusters", json!({"name": "shop", "max_in_flight": 16, "reindex_whitelist": ["es.example.com:443"]})).await;
     let id = c["id"].as_str().unwrap().to_string();
     let (user, pw) = creds(&c);
     // A branch of a cluster that was never written to is empty.
@@ -546,6 +546,8 @@ async fn branches() {
     assert_eq!(b["parent_id"], id.as_str());
     assert_eq!(b["parent_name"], "shop");
     assert_eq!(b["max_in_flight"], 16);
+    // Not the parent's remotes: a branch whitelists its own.
+    assert_eq!((c["reindex_whitelist"].clone(), b["reindex_whitelist"].clone()), (json!(["es.example.com:443"]), json!([])));
     let (bu, bp) = creds(&b);
     assert_ne!(bp, pw);
     // Figures of a branch that never loaded come from its stored state.
@@ -778,6 +780,9 @@ async fn browsers_search_with_browser_keys() {
     assert_eq!(body(&r)["defaults"]["http.cors.allow-origin"], "https://shop.example.com", "{r}");
 
     let made = |k: Value| e.post(&keys, k);
+    // `alias:index` would reach a remote cluster.
+    let (s, v) = e.call(reqwest::Method::POST, &keys, Some(json!({"name": "remote", "indices": ["other:products"]}))).await;
+    assert!(s == 400 && v.to_string().contains("browser keys can't search across clusters"), "{s} {v}");
     let reader = made(json!({"name": "shop page", "indices": ["products"], "filter": {"term": {"public": true}}})).await;
     let runner = made(json!({"name": "app page", "application": "shop-search", "rate_limit": {"per_minute": 3}})).await;
     assert_eq!((reader["rate_limit"]["per_minute"].as_u64(), runner["application"].as_str()), (Some(600), Some("shop-search")));
@@ -4358,7 +4363,7 @@ async fn a_migration_is_bounded() {
     // `inspect`: no oracle for which names point at roll's own addresses.
     let denied = env_with(|c| {
         c.node_settings.push((search_control::REINDEX_ALLOW_PRIVATE.into(), "true".into()));
-        c.node_settings.push((search_control::REINDEX_DENY_ADDRESSES.into(), "127.0.0.0/8,::1".into()));
+        c.node_settings.push((search_control::EGRESS_DENY_ADDRESSES.into(), "127.0.0.0/8,::1".into()));
     })
     .await;
     denied.post("/v1/search/clusters", json!({ "name": "d" })).await;

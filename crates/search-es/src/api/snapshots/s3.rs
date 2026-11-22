@@ -128,13 +128,14 @@ pub(super) fn base_path(settings: &Settings) -> EsResult<()> {
     Ok(())
 }
 
-pub(super) fn allow_private(cluster: &crate::Cluster) -> bool {
-    cluster.config.node_setting(ALLOW_PRIVATE).is_some_and(|v| v.eq_ignore_ascii_case("true"))
+/// The node's egress rules for repositories ([`crate::egress`], private hosts with [`ALLOW_PRIVATE`]).
+pub(super) fn egress(cluster: &crate::Cluster) -> crate::egress::Egress {
+    crate::egress::Egress::of_cluster(cluster, ALLOW_PRIVATE)
 }
 
 fn location(cluster: &crate::Cluster, s: &Settings) -> Result<Location, String> {
     let region = s.get("region").filter(|r| !r.is_empty()).unwrap_or("us-east-1").to_string();
-    let endpoint = client::endpoint(s.get("endpoint"), s.get("protocol"), &region, allow_private(cluster))?;
+    let endpoint = client::endpoint(s.get("endpoint"), s.get("protocol"), &region, &egress(cluster))?;
     Ok(Location { endpoint, bucket: s.get("bucket").unwrap_or_default().to_string(), region, path_style: s.get("path_style_access").is_some_and(|v| v == "true") })
 }
 
@@ -145,7 +146,7 @@ fn s3_client(cluster: &crate::Cluster, name: &str, r: &Repository, creds: &super
         (Some(a), Some(s)) => Some(Credentials { access_key: a.to_string(), secret_key: s.to_string(), session_token: creds.get("session_token").map(str::to_string) }),
         _ => None,
     };
-    client::Client::new(at, creds, allow_private(cluster)).map_err(|e| failed(name, e))
+    client::Client::new(at, creds, &egress(cluster)).map_err(|e| failed(name, e))
 }
 
 /// `<base_path>/roll/`: where a repository keeps everything.

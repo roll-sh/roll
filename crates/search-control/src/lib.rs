@@ -39,12 +39,13 @@ pub use search_es::xpack::entsearch::sync::ALLOW_PRIVATE as CONNECTORS_ALLOW_PRI
 pub use search_es::xpack::inference::http::ALLOW_PRIVATE as INFERENCE_ALLOW_PRIVATE;
 pub use search_es::api::remote::ALLOW_PRIVATE as REINDEX_ALLOW_PRIVATE;
 pub use search_es::api::remote::MAX_DURATION as REINDEX_MAX_DURATION;
-pub use search_es::api::remote::DENY_ADDRESSES as REINDEX_DENY_ADDRESSES;
-pub use search_es::api::remote::DENY_NAMES as REINDEX_DENY_NAMES;
+/// Node settings naming the addresses and names no outbound call reaches (reindex from remote,
+/// migration, connectors, inference, watches, snapshot repositories: [`search_es::egress`]).
+pub use search_es::egress::{DENY_ADDRESSES as EGRESS_DENY_ADDRESSES, DENY_NAMES as EGRESS_DENY_NAMES};
 
-/// Whether `n` is an address or network the reindex deny list takes.
-pub fn reindex_deny_net_ok(n: &str) -> bool {
-    search_es::api::remote::Net::parse(n).is_some()
+/// Whether `n` is an address or network the egress deny list takes.
+pub fn egress_deny_net_ok(n: &str) -> bool {
+    search_es::egress::Net::parse(n).is_some()
 }
 
 /// Checks a time value given to a flag (`24h`, `90m`), as Elasticsearch parses one.

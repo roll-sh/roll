@@ -1268,8 +1268,9 @@ request. So are the other credentials: Azure's `entra_id`, Bedrock's `access_key
 `secret_key`, Vertex AI's `service_account_json` and `custom`'s `secret_parameters`. Each goes only
 to its provider's host (a resource name, region or location must be a host name label before it
 becomes part of one), and the replay tests check that none appears in a listing, an answer, an
-error or an endpoint's `Debug` form. Every URL is fetched through `roll_net::PublicOnly` with no redirects and no proxy,
-refusing private IP literals and `localhost`, reading at most 32 MiB
+error or an endpoint's `Debug` form. Every URL is fetched through the node's egress check
+(`search_es::egress`: public addresses only, never one the node denies) with no redirects and no proxy,
+refusing private and denied IP literals and `localhost`, reading at most 32 MiB
 (`roll.inference.allow_private_hosts` lifts the address rule, for test clusters only). A call
 waits at most the node's `roll.inference.max_timeout` (default 120s), retries and the rate
 limiter's wait included: a larger `timeout` is accepted and clamped to it. Elasticsearch 9.5.5
@@ -1394,6 +1395,13 @@ roll runs the syncs of Elastic-managed (`is_native: true`) `postgresql` and `s3`
   credential goes (a Postgres `host`, `port`, `username`, `database` or TLS setting; an S3
   `endpoint`, `region`, access key id or `buckets`) without giving it again clears it and sets
   the connector to `needs_configuration`.
+- A self-managed connector (`is_native: false`, or a service roll doesn't run) keeps its
+  configuration values as Elasticsearch does: stored and returned in the clear, since the
+  tenant's connector service reads them. The dashboard's Connectors tab blanks `sensitive` ones.
+- A connector roll runs reaches its source through the node's egress check, as reindex from
+  remote does: an address the node denies (its own, the operator's networks) fails the job, even
+  with private hosts allowed. Elasticsearch's connectors run in the tenant's service and reach
+  whatever it can.
 - `postgresql` has incremental syncs (Elastic's has none) through roll's `incremental_column`;
   advanced sync rules (custom SQL) aren't supported yet and make a draft `invalid`.
 - `s3` takes roll's `endpoint` and `region` (any S3-compatible store), not `buckets: *`, and
@@ -1691,12 +1699,12 @@ the rest are skipped by the tests' own prerequisites.
     REST client's 100 MiB (past it, Elasticsearch's own error), and charged to a node-wide budget
     rather than the request breaker (past it, a 429 `circuit_breaking_exception`); a page's hits
     are scanned, never parsed into a tree; a scroll or point-in-time id is kept up to 4 KiB;
-  - addresses the node denies (`roll.reindex.remote.deny_addresses` and the names in
-    `roll.reindex.remote.deny_names`: rolld's own) are refused, checked on the address each
+  - addresses the node denies (`roll.egress.deny_addresses` and the names in
+    `roll.egress.deny_names`: rolld's own, for every outbound call) are refused, checked on the address each
     connection uses; the lists match the host as the client connects to it (percent-decoded,
     IDNA-mapped); `source.remote.headers` can't set `Host` or a pseudo-header;
   - a page with more hits than the `size` asked for is refused;
-  - at most 2 tasks per cluster and 4 per node run at once (a 429
+  - at most 2 tasks per cluster, 2 per owner and 4 per node run at once, taken in turn (a 429
     `es_rejected_execution_exception` past them), and a task stops after
     `roll.reindex.remote.max_duration` (24h; its `canceled` reason says so);
   - a request's whole exchange is capped at 10 minutes, whatever `socket_timeout` (which bounds

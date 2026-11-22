@@ -125,6 +125,10 @@ fn reach(k: &NewBrowserKey) -> Result<Value> {
                 if n.starts_with('.') {
                     return Err(ControlError::Invalid(format!("indices: {n:?} is a hidden or system index: a browser key can't reach those")));
                 }
+                // `alias:index` names an index of a remote cluster (cross-cluster search).
+                if n.contains(':') {
+                    return Err(ControlError::Invalid(format!("indices: {n:?}: browser keys can't search across clusters")));
+                }
             }
             (Some(i.clone()), None)
         }

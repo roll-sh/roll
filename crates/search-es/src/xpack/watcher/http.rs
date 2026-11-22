@@ -5,9 +5,10 @@
 //! host, port, path and params; methods in lower case), printed with its secrets redacted,
 //! rendered with the execution's mustache model, and sent.
 //!
-//! The URL is chosen by the tenant, so roll's rule for such URLs applies (AGENTS.md): a client
-//! that resolves names to public addresses only ([`roll_net::PublicOnly`]), refuses private IP
-//! literals and `localhost` ([`roll_net::literal_private_host`]), follows no redirects, uses no
+//! The URL is chosen by the tenant, so roll's rule for such URLs applies (AGENTS.md), through the
+//! node's egress check ([`crate::egress`]): a client that resolves names to public addresses
+//! only, never to one the node denies, refuses private and denied IP literals and `localhost`,
+//! follows no redirects, uses no
 //! proxy and reads at most `xpack.http.max_response_size` (10 MiB). The node setting
 //! [`ALLOW_PRIVATE`] lifts the address check, for test clusters whose watches call the node
 //! itself; it is off unless set.
@@ -354,20 +355,20 @@ fn connect_error(e: &reqwest::Error, host: &str, port: i64) -> EsError {
 
 /// Sends a request.
 pub async fn send(cluster: &Cluster, req: &Request) -> EsResult<Response> {
-    let allow_private = cluster.config.node_setting(ALLOW_PRIVATE).is_some_and(|v| v.eq_ignore_ascii_case("true"));
+    let egress = crate::egress::Egress::of_cluster(cluster, ALLOW_PRIVATE);
     let url = req.url();
     let parsed = reqwest::Url::parse(&url).map_err(|_| EsError::illegal_argument(format!("Malformed URL [{url}]")))?;
-    if !allow_private && roll_net::literal_private_host(&parsed) {
-        return Err(EsError::illegal_argument(format!("host [{}] is a private address, which watches may not connect to unless [{ALLOW_PRIVATE}] is set", req.host)));
+    match egress.check_url_now(&parsed).await {
+        Err(crate::egress::Refused::Private(_)) => return Err(EsError::illegal_argument(format!("host [{}] is a private address, which watches may not connect to unless [{ALLOW_PRIVATE}] is set", req.host))),
+        Err(e) => return Err(EsError::illegal_argument(format!("host [{}]: {e}", req.host))),
+        Ok(()) => {}
     }
-    let mut b = reqwest::Client::builder()
+    let b = reqwest::Client::builder()
         .connect_timeout(std::time::Duration::from_millis(req.connect_timeout_ms.max(1) as u64))
         .read_timeout(std::time::Duration::from_millis(req.read_timeout_ms.max(1) as u64))
         .redirect(reqwest::redirect::Policy::none())
-        .no_proxy();
-    if !allow_private {
-        b = b.dns_resolver(std::sync::Arc::new(roll_net::PublicOnly));
-    }
+        .no_proxy()
+        .dns_resolver(egress.resolver());
     let client = b.build().map_err(|e| EsError::illegal_state(e.to_string()))?;
     let method = reqwest::Method::from_bytes(req.method.to_ascii_uppercase().as_bytes()).map_err(|_| EsError::illegal_argument(format!("unsupported http method [{}]", req.method)))?;
     let mut rb = client.request(method, parsed).header("Accept-Charset", "UTF-8");

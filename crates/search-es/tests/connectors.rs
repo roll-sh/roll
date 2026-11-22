@@ -18,9 +18,8 @@ fn env(name: &str) -> Option<String> {
     std::env::var(name).ok().filter(|v| !v.is_empty())
 }
 
-fn slots() -> Arc<search_es::xpack::entsearch::sync::slots::Slots> {
-    use search_es::xpack::entsearch::sync::slots::{NODE_MAX, OWNER_MAX, Slots};
-    Slots::new(NODE_MAX, OWNER_MAX)
+fn slots() -> Arc<search_es::slots::Slots> {
+    search_es::slots::Slots::new(search_es::xpack::entsearch::sync::SLOTS)
 }
 
 async fn cluster(settings: &[(&str, &str)]) -> Arc<Cluster> {
@@ -482,6 +481,22 @@ async fn a_huge_message_header_fails_the_sync() {
     assert!(started.elapsed() < Duration::from_secs(10), "took {:?}", started.elapsed());
 }
 
+/// The node's egress rules cover connectors as they cover reindex from remote: a host the node
+/// denies (its own addresses, the operator's networks) is refused with reindex's refusal, written
+/// out or behind a name, even where private hosts are allowed, and nothing connects to it.
+#[tokio::test]
+async fn a_denied_address_is_refused_as_reindex_refuses_it() {
+    let (port, got) = fake_postgres(Fake::Password).await;
+    let c = cluster(&[("roll.egress.deny_addresses", "127.0.0.0/8,::1")]).await;
+    for (id, host) in [("pg", "127.0.0.1"), ("pg-named", "localhost.")] {
+        pg_connector(&c, &format!("{host}:{port}"), id, "content-denied", "*", "pw-denied-1").await;
+        let job = finished(&c, &start(&c, id, "full").await).await;
+        assert_eq!(at(&job, "status").as_str(), Some("error"), "{job:?}");
+        assert!(at(&job, "error").as_str().is_some_and(|e| e.contains(&format!("[{host}] is an address roll may not reach"))), "{host}: {job:?}");
+    }
+    assert!(got.lock().unwrap().is_empty(), "a denied address was reached");
+}
+
 /// A sealed value copied into a self-managed connector isn't shown, and once the connector is
 /// run by roll it's only text: the sync sends the ciphertext, never what it seals.
 #[tokio::test]
@@ -547,8 +562,8 @@ async fn a_detour_through_self_managed_never_sends_the_password_elsewhere() {
 /// the queue: another tenant's sync still runs when a slot frees.
 #[tokio::test]
 async fn a_canceled_queued_job_doesnt_hold_up_other_tenants() {
-    use search_es::xpack::entsearch::sync::slots::Slots;
-    let pool = Slots::new(1, 1);
+    use search_es::slots::{Caps, Slots};
+    let pool = Slots::new(Caps { node: 1, owner: 1, cluster: 1 });
     let tenant = |name: &'static str, owner: &'static str| {
         let pool = pool.clone();
         async move {

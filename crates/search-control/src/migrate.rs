@@ -10,7 +10,8 @@
 //! and never print them (their description names the host alone).
 //!
 //! These are roll's own calls to a remote a tenant named, so they're bounded on their own terms:
-//! one at a time per cluster and [`remote::MAX_CONTROL_PER_NODE`] per node (429 past them), only
+//! [`remote::CONTROL_SLOTS`] (one at a time per cluster, two per owner and four per node, taken in
+//! turn: 429 past them, [`search_es::slots`]), only
 //! the fixed paths below, answers of at most [`remote::CONTROL_ANSWER_LIMIT`] (definitions
 //! [`DEFINITION_LIMIT`]) charged to the node's control budget (a slice of the reindex budget
 //! tasks never draw from), [`DEADLINE`] for the whole call, and errors that never quote the
@@ -358,7 +359,8 @@ impl Control {
 
     /// A place in the node's pool of control calls for cluster `c` (429 when it's taken).
     fn control_slot(&self, c: &SearchCluster) -> Result<remote::ControlSlot> {
-        self.node.reindex().control_slot(&c.name).map_err(|e| ControlError::Busy(e.reason().to_string()))
+        let owner = search_es::slots::owner_of(c.owner.as_deref(), &c.name);
+        self.node.reindex().control_slot(&c.name, &owner).map_err(|e| ControlError::Busy(e.reason().to_string()))
     }
 
     /// Every index and alias name cluster `c` has (an alias of the remote's by one of these
@@ -595,10 +597,13 @@ impl Control {
             }
             return Err(format!("index [{dest}] already exists on roll: give the copy another name"));
         }
-        // Created only while a task slot is free: otherwise nothing is made, and the index waits.
-        let free = || self.node.get_loaded(&c.name).is_some_and(|l| self.node.reindex().has_room(&l.cluster.remote_running));
+        // Created only while a task slot is free for the cluster, in turn with every other
+        // cluster on the node: otherwise nothing is made, and the index waits (keeping the
+        // cluster's place in line while the dashboard asks again).
+        let owner = search_es::slots::owner_of(c.owner.as_deref(), &c.name);
+        let free = || self.node.get_loaded(&c.name).is_some() && self.node.reindex().has_room(&c.name, &owner);
         if !free() {
-            return Ok(json!({ "queued": true, "reason": format!("the cluster copies [{}] indices at a time", self.node.reindex().max_per_cluster()) }));
+            return Ok(json!({ "queued": true, "reason": format!("the node's copy slots are taken (a cluster copies [{}] indices at a time, in turn with the node's other clusters)", self.node.reindex().max_per_cluster()) }));
         }
         let err = |e| match remote_error(host, e) {
             ControlError::Invalid(m) | ControlError::Busy(m) => m,

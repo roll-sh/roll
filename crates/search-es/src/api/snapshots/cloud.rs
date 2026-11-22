@@ -110,7 +110,7 @@ pub(super) fn validate_gcs(cluster: &crate::Cluster, name: &str, settings: &Sett
         return Err(create(EsError::illegal_argument(format!("invalid bucket name [{bucket}]"))));
     }
     s3::base_path(settings).map_err(create)?;
-    let allow = s3::allow_private(cluster);
+    let allow = &s3::egress(cluster);
     gcs::endpoint(settings.get("endpoint"), allow).map_err(|e| create(EsError::illegal_argument(e)))?;
     if let Some(json) = settings.get("credentials_file").filter(|j| !j.is_empty() && crate::secret_refs::classify(cluster, j) == crate::secret_refs::Setting::Value) {
         gcs::ServiceAccount::parse(json, settings.get("token_uri"), allow).map_err(|e| create(EsError::illegal_argument(e)))?;
@@ -150,7 +150,7 @@ fn sizes(r: &Repository) -> transfer::Sizes {
 pub(super) fn gcs_store(cluster: &crate::Cluster, name: &str, r: &Repository, creds: &refs::Creds) -> EsResult<(Store, transfer::Sizes)> {
     let cannot = |why: String| repository_exception(name, "cannot create blob store").caused_by(EsError::illegal_argument(why));
     let s = &r.settings;
-    let allow = s3::allow_private(cluster);
+    let allow = &s3::egress(cluster);
     let endpoint = gcs::endpoint(s.get("endpoint"), allow).map_err(cannot)?;
     let account = match creds.get("credentials_file") {
         Some(json) => Some(gcs::ServiceAccount::parse(json, s.get("token_uri"), allow).map_err(cannot)?),
@@ -171,7 +171,7 @@ pub(super) fn azure_store(cluster: &crate::Cluster, name: &str, r: &Repository, 
     };
     let mode = location_mode(s).map_err(|e| repository_exception(name, "cannot create blob store").caused_by(e))?;
     let auth = azure::Auth::new(account, creds.get("key"), creds.get("sas_token")).map_err(settings_error)?;
-    let allow = s3::allow_private(cluster);
+    let allow = &s3::egress(cluster);
     let (primary, secondary) = azure::endpoints(account, s.get("endpoint_suffix"), s.get("endpoint"), s.get("secondary_endpoint"), mode, allow).map_err(settings_error)?;
     let container = s.get("container").filter(|c| !c.is_empty()).unwrap_or(AZURE_CONTAINER);
     let client = azure::Client::new(account, auth, primary, secondary, mode, container, allow).map_err(|e| settings_error(e.to_string()))?;

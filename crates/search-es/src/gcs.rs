@@ -11,8 +11,9 @@
 //! credentials) are never used for a tenant's bucket.
 //!
 //! The endpoint and the token URI are the tenant's choice, so the client is built as AGENTS.md
-//! requires for any such URL: names resolve to public addresses only ([`roll_net::PublicOnly`]),
-//! private IP literals and `localhost` are refused ([`roll_net::literal_private_host`]), no
+//! requires for any such URL, through the node's egress check ([`crate::egress`]): names
+//! resolve to public addresses only, never to one the node denies; private and denied IP
+//! literals and `localhost` are refused; no
 //! redirect is followed, no proxy is used, and every response body is read up to a bound. A
 //! resumable upload's session URL comes back from the endpoint and is used only on the
 //! endpoint's own origin. Errors carry no URL (a session URL is a capability) and no credential.
@@ -57,7 +58,7 @@ impl std::fmt::Debug for ServiceAccount {
 impl ServiceAccount {
     /// Reads a service account key file. `token_uri` (the client setting) overrides the file's.
     /// No message carries anything from the file.
-    pub fn parse(json: &str, token_uri: Option<&str>, allow_private: bool) -> Result<ServiceAccount, String> {
+    pub fn parse(json: &str, token_uri: Option<&str>, egress: &crate::egress::Egress) -> Result<ServiceAccount, String> {
         const BAD: &str = "the credentials_file isn't a service account key file";
         if json.len() > CREDENTIALS_MAX {
             return Err(format!("the credentials_file is larger than [{CREDENTIALS_MAX}] bytes"));
@@ -71,7 +72,7 @@ impl ServiceAccount {
         let pem = field("private_key").ok_or_else(|| format!("{BAD}: it has no [private_key]"))?;
         let key = jsonwebtoken::EncodingKey::from_rsa_pem(pem.as_bytes()).map_err(|_| format!("{BAD}: its [private_key] isn't an RSA private key"))?;
         let raw_uri = token_uri.filter(|u| !u.is_empty()).or(field("token_uri")).unwrap_or(DEFAULT_TOKEN_URI);
-        let uri = url(raw_uri, true, allow_private).map_err(|e| format!("invalid token_uri: {e}"))?;
+        let uri = url(raw_uri, true, egress).map_err(|e| format!("invalid token_uri: {e}"))?;
         let mut h = Sha256::new();
         for part in [client_email.as_str(), pem, uri.as_str()] {
             h.update(part.as_bytes());
@@ -82,8 +83,8 @@ impl ServiceAccount {
 }
 
 /// A URL a tenant names: http(s), a host, no credentials, query or fragment; a path only when
-/// `path` allows one. A private address written out is refused unless `allow_private`.
-fn url(raw: &str, path: bool, allow_private: bool) -> Result<reqwest::Url, String> {
+/// `path` allows one. An address written out that `egress` refuses (private, denied) is refused.
+fn url(raw: &str, path: bool, egress: &crate::egress::Egress) -> Result<reqwest::Url, String> {
     let u = reqwest::Url::parse(raw.trim()).map_err(|_| format!("[{raw}] isn't a URL"))?;
     if !matches!(u.scheme(), "http" | "https") || u.host_str().is_none_or(str::is_empty) {
         return Err(format!("[{raw}] isn't an http or https URL"));
@@ -91,16 +92,17 @@ fn url(raw: &str, path: bool, allow_private: bool) -> Result<reqwest::Url, Strin
     if !u.username().is_empty() || u.password().is_some() || u.query().is_some() || u.fragment().is_some() || (!path && !matches!(u.path(), "" | "/")) {
         return Err(format!("[{raw}] must be a scheme, host and port only"));
     }
-    if !allow_private && roll_net::literal_private_host(&u) {
-        return Err(format!("[{raw}] is a private address"));
+    match egress.check_url(&u) {
+        Err(crate::egress::Refused::Private(_)) => Err(format!("[{raw}] is a private address")),
+        Err(e) => Err(format!("[{raw}]: {e}")),
+        Ok(()) => Ok(u),
     }
-    Ok(u)
 }
 
 /// The JSON API's base (`endpoint`, Google's by default).
-pub fn endpoint(raw: Option<&str>, allow_private: bool) -> Result<reqwest::Url, String> {
+pub fn endpoint(raw: Option<&str>, egress: &crate::egress::Egress) -> Result<reqwest::Url, String> {
     let raw = raw.map(str::trim).filter(|e| !e.is_empty()).unwrap_or(DEFAULT_ENDPOINT);
-    let mut u = url(raw, false, allow_private).map_err(|e| format!("invalid endpoint {e}"))?;
+    let mut u = url(raw, false, egress).map_err(|e| format!("invalid endpoint {e}"))?;
     u.set_path("");
     Ok(u)
 }
@@ -130,20 +132,20 @@ pub struct Client {
 }
 
 impl Client {
-    /// A client for `bucket` at `endpoint`. Private addresses are refused (as literals here,
-    /// resolved ones at connect time) unless `allow_private`.
-    pub fn new(endpoint: reqwest::Url, bucket: &str, account: Option<ServiceAccount>, application_name: Option<&str>, allow_private: bool) -> Result<Client, Error> {
+    /// A client for `bucket` at `endpoint`. Addresses `egress` refuses are refused (as literals
+    /// here, resolved ones at connect time).
+    pub fn new(endpoint: reqwest::Url, bucket: &str, account: Option<ServiceAccount>, application_name: Option<&str>, egress: &crate::egress::Egress) -> Result<Client, Error> {
         if !valid_bucket(bucket) {
             return Err(err("InvalidBucketName", format!("invalid bucket name [{bucket}]")));
         }
-        let private = |u: &reqwest::Url| !allow_private && roll_net::literal_private_host(u);
-        if private(&endpoint) || account.as_ref().is_some_and(|a| private(&a.token_uri)) {
-            return Err(err("PrivateAddress", "the endpoint is a private address"));
+        for u in std::iter::once(&endpoint).chain(account.as_ref().map(|a| &a.token_uri)) {
+            match egress.check_url(u) {
+                Err(crate::egress::Refused::Private(_)) => return Err(err("PrivateAddress", "the endpoint is a private address")),
+                Err(e) => return Err(err("DeniedAddress", format!("the endpoint: {e}"))),
+                Ok(()) => {}
+            }
         }
-        let mut b = reqwest::Client::builder().connect_timeout(Duration::from_secs(10)).read_timeout(READ_IDLE).redirect(reqwest::redirect::Policy::none()).no_proxy();
-        if !allow_private {
-            b = b.dns_resolver(std::sync::Arc::new(roll_net::PublicOnly));
-        }
+        let b = reqwest::Client::builder().connect_timeout(Duration::from_secs(10)).read_timeout(READ_IDLE).redirect(reqwest::redirect::Policy::none()).no_proxy().dns_resolver(egress.resolver());
         let http = b.build().map_err(|e| err("ClientError", e.to_string()))?;
         // `application_name` goes in the User-Agent, as Google's client puts it there.
         let user_agent = application_name.filter(|n| !n.is_empty() && n.len() <= 256 && n.bytes().all(|c| (0x20..0x7f).contains(&c))).map(|n| format!("{n} roll-search"));
@@ -441,16 +443,17 @@ mod tests {
 
     #[test]
     fn names_and_urls_tenants_may_give() {
+        let e = |private: bool| crate::egress::Egress::of(|_| None, private).unwrap();
         assert!(valid_bucket("my-bucket_1.backups") && !valid_bucket("UP") && !valid_bucket("ab") && !valid_bucket("a..b") && !valid_bucket("x/y"));
-        assert_eq!(endpoint(None, false).unwrap().as_str(), "https://storage.googleapis.com/");
-        assert_eq!(endpoint(Some("http://gcs.example.com:4443"), false).unwrap().as_str(), "http://gcs.example.com:4443/");
+        assert_eq!(endpoint(None, &e(false)).unwrap().as_str(), "https://storage.googleapis.com/");
+        assert_eq!(endpoint(Some("http://gcs.example.com:4443"), &e(false)).unwrap().as_str(), "http://gcs.example.com:4443/");
         for bad in ["http://127.0.0.1:4443", "http://localhost", "https://u:p@gcs.example.com", "https://gcs.example.com/x", "ftp://gcs.example.com"] {
-            assert!(endpoint(Some(bad), false).is_err(), "{bad}");
+            assert!(endpoint(Some(bad), &e(false)).is_err(), "{bad}");
         }
-        assert!(endpoint(Some("http://127.0.0.1:4443"), true).is_ok());
+        assert!(endpoint(Some("http://127.0.0.1:4443"), &e(true)).is_ok());
         // A key file that isn't one fails without quoting it.
         for bad in [r#"{"type":"authorized_user","private_key":"SECRETVALUE"}"#, "SECRETVALUE", r#"{"type":"service_account","client_email":"a@b","private_key":"SECRETVALUE"}"#] {
-            let e = ServiceAccount::parse(bad, None, false).unwrap_err();
+            let e = ServiceAccount::parse(bad, None, &e(false)).unwrap_err();
             assert!(!e.contains("SECRETVALUE"), "{e}");
         }
     }

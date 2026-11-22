@@ -5,8 +5,9 @@
 //! storage configuration) are never used for a tenant's bucket.
 //!
 //! The endpoint is the tenant's choice, so the client is built as AGENTS.md requires for any such
-//! URL: names resolve to public addresses only ([`roll_net::PublicOnly`]), private IP literals
-//! and `localhost` are refused ([`roll_net::literal_private_host`]), no redirect is followed, no
+//! URL, through the node's egress check ([`crate::egress`]): names resolve to public addresses
+//! only, never to one the node denies; private and denied IP literals and `localhost` are
+//! refused; no redirect is followed, no
 //! proxy is used, and every response body is read up to a bound the caller gives (error bodies
 //! up to 64 KiB). Nothing it returns or logs carries a credential.
 
@@ -87,9 +88,9 @@ pub fn valid_bucket(b: &str) -> bool {
 }
 
 /// The endpoint a repository's `endpoint` and `protocol` settings name (AWS's regional
-/// endpoint without one): `host[:port]` or a URL with no path, query or credentials. A private
-/// address written out is refused unless `allow_private`.
-pub fn endpoint(endpoint: Option<&str>, protocol: Option<&str>, region: &str, allow_private: bool) -> Result<reqwest::Url, String> {
+/// endpoint without one): `host[:port]` or a URL with no path, query or credentials. An address
+/// written out that `egress` refuses (private, denied) is refused.
+pub fn endpoint(endpoint: Option<&str>, protocol: Option<&str>, region: &str, egress: &crate::egress::Egress) -> Result<reqwest::Url, String> {
     let scheme = match protocol.unwrap_or("https").to_ascii_lowercase().as_str() {
         "https" => "https",
         "http" => "http",
@@ -107,8 +108,10 @@ pub fn endpoint(endpoint: Option<&str>, protocol: Option<&str>, region: &str, al
     if !url.username().is_empty() || url.password().is_some() || url.query().is_some() || url.fragment().is_some() || !matches!(url.path(), "" | "/") {
         return Err(format!("endpoint [{raw}] must be a scheme, host and port only"));
     }
-    if !allow_private && roll_net::literal_private_host(&url) {
-        return Err(format!("endpoint [{raw}] is a private address"));
+    match egress.check_url(&url) {
+        Err(crate::egress::Refused::Private(_)) => return Err(format!("endpoint [{raw}] is a private address")),
+        Err(e) => return Err(format!("endpoint [{raw}]: {e}")),
+        Ok(()) => {}
     }
     let mut base = url.clone();
     base.set_path("");
@@ -123,23 +126,23 @@ pub struct Client {
 }
 
 impl Client {
-    /// A client for `at`. Private addresses are refused (as literals here, resolved ones at
-    /// connect time) unless `allow_private`.
-    pub fn new(at: Location, creds: Option<Credentials>, allow_private: bool) -> Result<Client, Error> {
+    /// A client for `at`. Addresses `egress` refuses are refused, as literals here and resolved
+    /// ones at connect time.
+    pub fn new(at: Location, creds: Option<Credentials>, egress: &crate::egress::Egress) -> Result<Client, Error> {
         if !valid_bucket(&at.bucket) {
             return Err(err("InvalidBucketName", format!("invalid bucket name [{}]", at.bucket)));
         }
-        if !allow_private && roll_net::literal_private_host(&at.endpoint) {
-            return Err(err("PrivateAddress", "the endpoint is a private address"));
+        match egress.check_url(&at.endpoint) {
+            Err(crate::egress::Refused::Private(_)) => return Err(err("PrivateAddress", "the endpoint is a private address")),
+            Err(e) => return Err(err("DeniedAddress", format!("the endpoint: {e}"))),
+            Ok(()) => {}
         }
-        let mut b = reqwest::Client::builder()
+        let b = reqwest::Client::builder()
             .connect_timeout(Duration::from_secs(10))
             .read_timeout(READ_IDLE)
             .redirect(reqwest::redirect::Policy::none())
-            .no_proxy();
-        if !allow_private {
-            b = b.dns_resolver(std::sync::Arc::new(roll_net::PublicOnly));
-        }
+            .no_proxy()
+            .dns_resolver(egress.resolver());
         let http = b.build().map_err(|e| err("ClientError", e.to_string()))?;
         Ok(Client { http, at, creds })
     }
@@ -613,14 +616,15 @@ mod tests {
 
     #[test]
     fn endpoints_tenants_may_name() {
-        assert_eq!(endpoint(None, None, "eu-west-1", false).unwrap().as_str(), "https://s3.eu-west-1.amazonaws.com/");
-        assert_eq!(endpoint(Some("minio.example.com:9000"), Some("http"), "us-east-1", false).unwrap().as_str(), "http://minio.example.com:9000/");
+        let e = |private: bool| crate::egress::Egress::of(|_| None, private).unwrap();
+        assert_eq!(endpoint(None, None, "eu-west-1", &e(false)).unwrap().as_str(), "https://s3.eu-west-1.amazonaws.com/");
+        assert_eq!(endpoint(Some("minio.example.com:9000"), Some("http"), "us-east-1", &e(false)).unwrap().as_str(), "http://minio.example.com:9000/");
         for private in ["127.0.0.1:9000", "http://10.0.0.5", "localhost", "[::1]:80", "169.254.169.254"] {
-            assert!(endpoint(Some(private), None, "us-east-1", false).is_err(), "{private}");
+            assert!(endpoint(Some(private), None, "us-east-1", &e(false)).is_err(), "{private}");
         }
-        assert!(endpoint(Some("127.0.0.1:9000"), Some("http"), "us-east-1", true).is_ok());
-        assert!(endpoint(Some("https://user:pw@s3.example.com"), None, "us-east-1", false).is_err());
-        assert!(endpoint(Some("https://s3.example.com/elsewhere"), None, "us-east-1", false).is_err());
+        assert!(endpoint(Some("127.0.0.1:9000"), Some("http"), "us-east-1", &e(true)).is_ok());
+        assert!(endpoint(Some("https://user:pw@s3.example.com"), None, "us-east-1", &e(false)).is_err());
+        assert!(endpoint(Some("https://s3.example.com/elsewhere"), None, "us-east-1", &e(false)).is_err());
         assert!(valid_bucket("my-bucket.1") && !valid_bucket("evil.com/x") && !valid_bucket("UP") && !valid_bucket("a..b"));
     }
 }
