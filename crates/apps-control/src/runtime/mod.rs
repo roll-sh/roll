@@ -409,6 +409,9 @@ pub struct PeerSpec {
     pub env: String,
     /// The project network the environment's instances are on.
     pub network: String,
+    /// A closed environment's: a network of the peer's own with a route out, for its endpoint
+    /// (the closed network has none; its instances still reach only the routes' names).
+    pub out_network: Option<String>,
     /// `wg setconf`'s config (keys, peers). Never in `Debug`.
     pub config: String,
     /// The interface's addresses and the routes into the customer's network (CIDRs, checked).
@@ -424,7 +427,7 @@ impl PeerSpec {
     pub fn digest(&self) -> String {
         use sha2::Digest;
         let mut h = sha2::Sha256::new();
-        for part in [&self.network, &self.config, &self.addresses.join(","), &self.routes.join(","), &format!("{:?}", self.mtu), &format!("{:?}", self.forwards)] {
+        for part in [&self.network, &format!("{:?}", self.out_network), &self.config, &self.addresses.join(","), &self.routes.join(","), &format!("{:?}", self.mtu), &format!("{:?}", self.forwards)] {
             h.update(part.as_bytes());
             h.update([0]);
         }
@@ -434,7 +437,7 @@ impl PeerSpec {
 
 impl std::fmt::Debug for PeerSpec {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("PeerSpec").field("name", &self.name).field("network", &self.network).field("addresses", &self.addresses).field("routes", &self.routes).field("forwards", &self.forwards).finish_non_exhaustive()
+        f.debug_struct("PeerSpec").field("name", &self.name).field("network", &self.network).field("out_network", &self.out_network).field("addresses", &self.addresses).field("routes", &self.routes).field("forwards", &self.forwards).finish_non_exhaustive()
     }
 }
 

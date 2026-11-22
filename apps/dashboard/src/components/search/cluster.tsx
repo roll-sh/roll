@@ -133,15 +133,18 @@ export function SearchClusterPage({ id }: { id: string }) {
   };
   const sampleProps = {
     samples,
-    onSamples: (id: SampleId, on: boolean) =>
+    onSamples: (id: SampleId, on: boolean) => {
       setSamples((s) => {
         const next = new Set(s);
         if (on) next.add(id);
         else next.delete(id);
         return next;
-      }),
+      });
+      // The Overview's figures follow at once rather than on the next poll.
+      refresh();
+    },
     onOpenConsole: openConsole,
-    onMakeKey: () => {
+    onManageKeys: () => {
       setTab("settings");
       setScrollTo("api-keys");
     },
@@ -300,13 +303,16 @@ interface SampleProps {
   samples: ReadonlySet<SampleId>;
   onSamples: (id: SampleId, loaded: boolean) => void;
   onOpenConsole: (text: string) => void;
-  onMakeKey: () => void;
+  onManageKeys: () => void;
 }
 
-function OverviewTab({ cluster, info, samples, onSamples, onOpenConsole, onMakeKey }: { cluster: SearchCluster; info: SearchInfo } & SampleProps) {
+function OverviewTab({ cluster, info, samples, onSamples, onOpenConsole, onManageKeys }: { cluster: SearchCluster; info: SearchInfo } & SampleProps) {
   const st = cluster.status;
   const on = st.state === "loaded";
   const empty = (st.indices ?? cluster.indices) === 0;
+  // Once offered, the panel stays while the tab is open: a key made there adds a system index,
+  // and removing a dataset shouldn't take the panel (and the key shown in it) away.
+  const [offered] = useState(empty);
   return (
     <div className="space-y-4">
       <Stats
@@ -331,8 +337,8 @@ function OverviewTab({ cluster, info, samples, onSamples, onOpenConsole, onMakeK
           { label: "In flight", value: on ? formatCount(st.in_flight ?? 0) : "0", hint: `limit ${cluster.max_in_flight} · bodies to ${cluster.max_body_mb} MB` },
         ]}
       />
-      {(empty || samples.size > 0) && (
-        <SampleData cluster={cluster} present={samples} onChanged={onSamples} onOpenConsole={onOpenConsole} onMakeKey={onMakeKey} />
+      {(offered || empty || samples.size > 0) && (
+        <SampleData cluster={cluster} present={samples} onChanged={onSamples} onOpenConsole={onOpenConsole} onManageKeys={onManageKeys} />
       )}
       <div className="grid gap-4 lg:grid-cols-5">
         <Connection cluster={cluster} info={info} />
@@ -516,7 +522,7 @@ function healthDot(h: string) {
   return "bg-accent";
 }
 
-function IndicesTab({ cluster, samples, onSamples, onOpenConsole, onMakeKey }: { cluster: SearchCluster } & SampleProps) {
+function IndicesTab({ cluster, samples, onSamples, onOpenConsole, onManageKeys }: { cluster: SearchCluster } & SampleProps) {
   const [rows, setRows] = useState<SearchIndex[] | null>(null);
   const [selected, setSelected] = useState<string | null>(null);
   const [err, setErr] = useState<string | null>(null);
@@ -556,7 +562,7 @@ function IndicesTab({ cluster, samples, onSamples, onOpenConsole, onMakeKey }: {
             load();
           }}
           onOpenConsole={onOpenConsole}
-          onMakeKey={onMakeKey}
+          onManageKeys={onManageKeys}
           onClose={() => setSampling(false)}
         />
       )}

@@ -666,8 +666,9 @@ route goes on as it did.
 - The roles are fixed rule templates (`crates/roll-auth/src/roles.rs`, one module holding the open
   decisions D1–D9). A rule may carry `unprotected: true`: it matches only a resource whose
   environment the product says isn't protected (`Resource::protected`: secrets, an environment
-  with a protection policy; a resource whose protection isn't known matches no such rule). It only
-  narrows, so a token can carry it too.
+  with a protection policy; a resource whose protection isn't known matches no such rule), and
+  never an environment named `production`, protected or not. It only narrows, so a token can
+  carry it too.
 - A project the session's rules don't name is a 404 (as the workspace answers); one they do is a
   403 that names what the role lacks. A list it can't see whole is filtered; a session never asks.
 - Session requests aren't access-log rows (they aren't a token's), allowed or refused: a refused
@@ -1263,6 +1264,7 @@ Under `/v1/access`. Bodies are JSON; errors are `{"error": string, "code"?: stri
 | `POST /v1/access/tokens/{id}/rotate` | access admin | `{keep_old_for_s?}`: a new secret with the same rules; the old one stops at once, or works that long (at most 604800, a week: Stripe's roll key); in its grace the old one calls products but manages no tokens (403 `rotated_secret` on `/v1/access`) → `{grant, token}`; not for OAuth connections |
 | `GET /v1/access/approvals` | access read | newest first; `?state=pending`, `?grant=<id>` (one token's), `?limit=` (at most 500) |
 | `GET /v1/access/approvals/{id}` | the grant that asked, or access read | an approval; `?wait=55` waits for a decision |
+| `GET /v1/access/approvals/decided` | any grant (its own), a person (their tokens'), the operator (all) | `{events, next}`: approvals decided after `?after=` (each decision's `seq`, given in the deciding write, so none is missed), oldest first, `?limit=` (at most 500); `?latest=1` answers only the newest place (not with `after`). Each says its `id`, `state`, `product`, `action`, `resource`, `tool`, `summary`, `decided_by` and `reason`, never the request's arguments. MCP Events' `access.approval` reads it |
 | `POST /v1/access/approvals/{id}/approve` | operator | `{remember?: "1h" \| "8h" \| "1d" \| "7d" \| "30d" \| "always"}`: also allow the same action on the same resource ("Remembered approvals") |
 | `POST /v1/access/approvals/{id}/deny` | operator | `{reason?}` |
 | `GET /v1/access/audit` | access read | `?grant=&product=&action=&decision=&source=&resource=&before=&limit=`; `resource` is who touched it: that resource or anything under it (`cl_1` finds `cl_1/logs-a`); `&format=jsonl` answers one event per line and `&format=csv` a row each (UTC times, every cell quoted; a formula character is defused with `'` at a cell's start and after a `;`, tab or `|` inside it, which some spreadsheets split on), as a download (the audit page and `roll mcp audit --format csv` or `jsonl`). Rows that name people (`usr_` ids: an account event's actor, a change's `by`, a resource) carry `actor_handle` and `resource_handle`, disabled and deleted people too, looked up for each answer; the CSV has them as its last two columns |
