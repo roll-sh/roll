@@ -96,6 +96,10 @@ DELETE /v1/code/repos/{owner}/{repo} → 204
 
 ```
 GET /refs → [{name /* "main" */, changeset, git: sha | null}]
+GET /landings?after=&limit=&latest= → {events: [/* a `landed` event's data */ & {seq, at, kind: "landed"}], next}
+     what landed on the repo after a place in the land log, oldest first (`limit` 1-500, default 100);
+     `next` is past everything read (other repos' landings too); `latest=1` answers no events and the
+     newest place (400 with `after`). MCP Events' `code.landed` reads it.
 GET /tree/{rev}/{*path} → {rev, changeset, path,
       entries: [{name, path, kind: "file" | "dir" | "symlink" | "submodule", mode /* "100644" */, size: number | null,
                  last_change: null | {changeset, message, time}}]}
