@@ -105,7 +105,7 @@ fn is_reg(ty: &DataType) -> bool {
     )
 }
 
-fn field(raw: &str, ty: &DataType, fmt: &FormatCtx) -> Value {
+pub(super) fn field(raw: &str, ty: &DataType, fmt: &FormatCtx) -> Value {
     let Some(s) = super::system::copy_field(raw) else {
         return Value::Null;
     };

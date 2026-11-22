@@ -28,6 +28,7 @@ pub mod pubsub;
 pub mod relsize;
 pub mod shared;
 pub mod shdepend;
+pub mod split_rows;
 pub mod static_rows;
 pub mod sys_rels;
 pub mod sys_sizes;

@@ -1518,26 +1518,91 @@ fn sql_views() -> &'static std::collections::HashMap<(&'static str, &'static str
 /// query cost 10 to 100 times what generating its rows does (information_schema.columns of
 /// one table: 72.8 M user instructions against 0.67 M).
 fn view_expanded(t: SysTable) -> bool {
-    static EXPANDED: OnceLock<std::collections::HashSet<u32>> = OnceLock::new();
-    EXPANDED
-        .get_or_init(|| {
-            system_view_defs()
-                .iter()
-                .filter(|d| {
-                    let Ok(mut node) = crate::sql::binder::ast::parse_stmt(&d.def) else { return false };
-                    let (mut rels, mut views) = (0, 0);
-                    crate::sql::nodewalk::node(&mut node, &mut |n| {
-                        if let Some(pg_query::NodeEnum::RangeVar(rv)) = &n.node {
-                            rels += 1;
-                            views += system_view_defs().iter().any(|v| v.name == rv.relname) as usize;
-                        }
-                    });
-                    rels <= 2 && views == 0
-                })
-                .map(|d| d.oid)
-                .collect()
+    let schema = if t.schema() == INFORMATION_SCHEMA_OID { "information_schema" } else { "pg_catalog" };
+    EXPANDED.binary_search(&(schema, t.name())).is_ok()
+}
+
+/// The views `view_expanded` takes, sorted: listed, where each process's first query of a
+/// system view parsed all 140 definitions to find them (`expanded_by_definition`;
+/// tests/ddl_scaling.rs checks the list against it).
+const EXPANDED: &[(&str, &str)] = &[
+    ("information_schema", "_pg_foreign_data_wrappers"),
+    ("information_schema", "enabled_roles"),
+    ("information_schema", "information_schema_catalog_name"),
+    ("information_schema", "schemata"),
+    ("pg_catalog", "pg_aios"),
+    ("pg_catalog", "pg_available_extension_versions"),
+    ("pg_catalog", "pg_available_extensions"),
+    ("pg_catalog", "pg_backend_memory_contexts"),
+    ("pg_catalog", "pg_config"),
+    ("pg_catalog", "pg_cursors"),
+    ("pg_catalog", "pg_file_settings"),
+    ("pg_catalog", "pg_group"),
+    ("pg_catalog", "pg_hba_file_rules"),
+    ("pg_catalog", "pg_ident_file_mappings"),
+    ("pg_catalog", "pg_locks"),
+    ("pg_catalog", "pg_prepared_statements"),
+    ("pg_catalog", "pg_prepared_xacts"),
+    ("pg_catalog", "pg_replication_origin_status"),
+    ("pg_catalog", "pg_replication_slots"),
+    ("pg_catalog", "pg_roles"),
+    ("pg_catalog", "pg_settings"),
+    ("pg_catalog", "pg_shadow"),
+    ("pg_catalog", "pg_shmem_allocations"),
+    ("pg_catalog", "pg_shmem_allocations_numa"),
+    ("pg_catalog", "pg_stat_activity"),
+    ("pg_catalog", "pg_stat_archiver"),
+    ("pg_catalog", "pg_stat_bgwriter"),
+    ("pg_catalog", "pg_stat_checkpointer"),
+    ("pg_catalog", "pg_stat_database"),
+    ("pg_catalog", "pg_stat_database_conflicts"),
+    ("pg_catalog", "pg_stat_gssapi"),
+    ("pg_catalog", "pg_stat_io"),
+    ("pg_catalog", "pg_stat_progress_analyze"),
+    ("pg_catalog", "pg_stat_progress_basebackup"),
+    ("pg_catalog", "pg_stat_progress_cluster"),
+    ("pg_catalog", "pg_stat_progress_copy"),
+    ("pg_catalog", "pg_stat_progress_create_index"),
+    ("pg_catalog", "pg_stat_progress_vacuum"),
+    ("pg_catalog", "pg_stat_recovery_prefetch"),
+    ("pg_catalog", "pg_stat_replication"),
+    ("pg_catalog", "pg_stat_slru"),
+    ("pg_catalog", "pg_stat_ssl"),
+    ("pg_catalog", "pg_stat_subscription"),
+    ("pg_catalog", "pg_stat_subscription_stats"),
+    ("pg_catalog", "pg_stat_user_functions"),
+    ("pg_catalog", "pg_stat_wal"),
+    ("pg_catalog", "pg_stat_wal_receiver"),
+    ("pg_catalog", "pg_stat_xact_user_functions"),
+    ("pg_catalog", "pg_statio_all_sequences"),
+    ("pg_catalog", "pg_timezone_abbrevs"),
+    ("pg_catalog", "pg_timezone_names"),
+    ("pg_catalog", "pg_views"),
+    ("pg_catalog", "pg_wait_events"),
+];
+
+/// `EXPANDED` as the definitions say: those whose parse tree has at most two relations, none
+/// of them a system view. For tests.
+#[doc(hidden)]
+pub fn expanded_by_definition() -> (Vec<(String, String)>, Vec<(String, String)>) {
+    let mut found: Vec<(String, String)> = system_view_defs()
+        .iter()
+        .filter(|d| {
+            let Ok(mut node) = crate::sql::binder::ast::parse_stmt(&d.def) else { return false };
+            let (mut rels, mut views) = (0, 0);
+            crate::sql::nodewalk::node(&mut node, &mut |n| {
+                if let Some(pg_query::NodeEnum::RangeVar(rv)) = &n.node {
+                    rels += 1;
+                    views += system_view_defs().iter().any(|v| v.name == rv.relname) as usize;
+                }
+            });
+            rels <= 2 && views == 0
         })
-        .contains(&t.oid())
+        .map(|d| (d.schema.clone(), d.name.clone()))
+        .collect();
+    found.sort();
+    let listed = EXPANDED.iter().map(|(s, n)| (s.to_string(), n.to_string())).collect();
+    (found, listed)
 }
 
 /// A system view a query plans from its definition, as PostgreSQL's rewriter expands every
@@ -1640,21 +1705,65 @@ fn split_view(table: SysTable) -> Option<&'static str> {
 }
 
 /// A split view's rows of pg_catalog's and information_schema's objects: PostgreSQL's
-/// definition run over them once and kept for the database, the role, its memberships, the
-/// system objects' privileges and the search path (what they read that DDL of the user's
-/// objects doesn't change). Running the definition over every relation after each DDL statement cost 30 to
-/// 1,000 times what generating the user's rows does (information_schema.columns: ~617 M
-/// user instructions against ~0.6 M).
+/// exported rows (`split_rows`) when they are what its definition returns for this reader,
+/// else the definition run over them once; kept for the database and the reader (and for the
+/// definition's, the role, its memberships, the system objects' privileges and the search
+/// path: what they read that DDL of the user's objects doesn't change). Running the
+/// definition over every relation after each DDL statement cost 30 to 1,000 times what
+/// generating the user's rows does (information_schema.columns: ~617 M user instructions
+/// against ~0.6 M).
 fn system_part_rows(table: SysTable, col: &str, ctx: &ExecCtx) -> Result<Arc<Vec<Row>>> {
-    Ok(system_part(table, col, ctx)?.0)
+    Ok(system_part(table, col, ctx)?.rows.clone())
 }
 
-/// `system_part_rows` and the same rows as one run of chunks, shared by every version of a
-/// cached split view (`rows_generated_chunked`): a new catalog version takes them by pointer.
-fn system_part(table: SysTable, col: &str, ctx: &ExecCtx) -> Result<(Arc<Vec<Row>>, Vec<Arc<RowChunk>>)> {
+/// A split view's system part: its rows, and the same rows as one run of chunks (made when
+/// a cached scan first wants them), shared by every version of a cached split view
+/// (`rows_generated_chunked`): a new catalog version takes them by pointer.
+struct SystemPart {
+    rows: Arc<Vec<Row>>,
+    chunks: OnceLock<Vec<Arc<RowChunk>>>,
+}
+
+impl SystemPart {
+    fn chunks(&self) -> Vec<Arc<RowChunk>> {
+        let n = self.rows.len() as u32;
+        (self.chunks.get_or_init(|| {
+            if n == 0 { Vec::new() } else { SysRows::rechunk((*self.rows).clone(), vec![(super::sysrows::fixed_key(0), n)]) }
+        }))
+        .clone()
+    }
+}
+
+/// `system_part_rows`' rows with their chunks (`SystemPart`).
+fn system_part(table: SysTable, col: &str, ctx: &ExecCtx) -> Result<Arc<SystemPart>> {
     use std::hash::{Hash, Hasher};
     type Key = (String, u32, u64, u32);
-    type Part = (Arc<Vec<Row>>, Vec<Arc<RowChunk>>);
+    type Part = Arc<SystemPart>;
+    fn part(rows: Vec<Row>) -> Part {
+        Arc::new(SystemPart { rows: Arc::new(rows), chunks: OnceLock::new() })
+    }
+    fn keep<K: Eq + std::hash::Hash>(kept: &parking_lot::Mutex<std::collections::HashMap<K, Part>>, key: K, part: &Part) {
+        let mut k = kept.lock();
+        if k.len() >= 64 {
+            k.clear();
+        }
+        k.insert(key, part.clone());
+    }
+    if let Some(reader) = super::split_rows::reader(ctx) {
+        type FixedKey = (u32, super::split_rows::Reader, String, String);
+        static FIXED: OnceLock<parking_lot::Mutex<std::collections::HashMap<FixedKey, Part>>> = OnceLock::new();
+        let owner = ctx.catalog().roles.get(&super::BOOTSTRAP_SUPERUSER_OID).map(|r| r.name.clone()).unwrap_or_default();
+        let key = (table.oid(), reader, ctx.sess.database.clone(), owner);
+        let fixed = FIXED.get_or_init(Default::default);
+        if let Some(r) = fixed.lock().get(&key) {
+            return Ok(r.clone());
+        }
+        if let Some(rows) = super::split_rows::rows(table, reader, &key.2, &key.3) {
+            let p = part(rows);
+            keep(fixed, key, &p);
+            return Ok(p);
+        }
+    }
     static KEPT: OnceLock<parking_lot::Mutex<std::collections::HashMap<Key, Part>>> = OnceLock::new();
     let cat = ctx.catalog();
     let me = ctx.current_user();
@@ -1676,16 +1785,9 @@ fn system_part(table: SysTable, col: &str, ctx: &ExecCtx) -> Result<(Arc<Vec<Row
         "SELECT * FROM ({}) v WHERE v.{col} IN ('pg_catalog', 'information_schema')",
         def.def.trim().trim_end_matches(';')
     );
-    let rows = sql_view_rows(table, &sql, ctx)?;
-    let n = rows.len() as u32;
-    let chunks = if n == 0 { Vec::new() } else { SysRows::rechunk(rows.clone(), vec![(super::sysrows::fixed_key(0), n)]) };
-    let part = (Arc::new(rows), chunks);
-    let mut k = kept.lock();
-    if k.len() >= 64 {
-        k.clear();
-    }
-    k.insert(key, part.clone());
-    Ok(part)
+    let p = part(sql_view_rows(table, &sql, ctx)?);
+    keep(kept, key, &p);
+    Ok(p)
 }
 
 thread_local! {
@@ -1971,7 +2073,8 @@ pub fn row_count(table: SysTable, ctx: &ExecCtx) -> Option<usize> {
         }
         PgAttrdef => sum(|r| r.attrdef),
         PgIndex => super::static_rows::rows(PgIndex).len() + sum(|r| r.index),
-        IsTables => sum(|r| r.listed) + SysTable::all().count(),
+        // (The system objects' rows: those the reader sees, `system_part_rows`, kept.)
+        IsTables => sum(|r| r.listed) + system_part_rows(table, "table_schema", ctx).ok()?.len(),
         // (The maps count materialized views' columns too, which information_schema.columns
         // doesn't list.)
         IsColumns => {
@@ -1981,7 +2084,7 @@ pub fn row_count(table: SysTable, ctx: &ExecCtx) -> Option<usize> {
                 .filter(|v| v.materialized)
                 .map(|v| v.storage.as_ref().map_or(v.columns.len(), |st| st.live_columns().count()))
                 .sum();
-            sum(|r| r.live) - matviews + SysTable::all().map(|s| s.columns().len()).sum::<usize>()
+            sum(|r| r.live) - matviews + system_part_rows(table, "table_schema", ctx).ok()?.len()
         }
         _ => return None,
     };
@@ -2940,7 +3043,7 @@ fn rows_generated_chunked(
     }
     // (A split view: its system part's shared chunks, then its user rows' own.)
     if let Some(col) = split_view(table) {
-        let mut chunks = system_part(table, col, ctx)?.1;
+        let mut chunks = system_part(table, col, ctx)?.chunks();
         let mut out = Out::chunked(part);
         let saved = USER_PART_ONLY.with(|u| u.replace(true));
         let r = generate(table, ctx, None, &mut out);

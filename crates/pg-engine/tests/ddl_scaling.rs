@@ -194,11 +194,15 @@ fn more_catalogs_after_ddl_are_spliced_or_kept() {
     }
     engine.shutdown();
 }
+/// Racing DDL commits (pg_restore -j's indexes, constraints and comments; round 19, agent
 /// 62): a commit whose catalog's base is no longer current is merged onto the current one
 /// under the commit lock, and that must cost what the transactions changed, not the catalog
 /// (it reindexed and checked every relation's name, and merged the header's comment list
-/// pair by pair). Timed: merged commits over 1,500 tables within 6x those over 100 (a debug
-/// build, whose own checks grow with the catalog).
+/// pair by pair). Timed by the test thread's CPU (the sessions run on it): merged commits
+/// over 1,500 tables within 6x those over 100 (a debug build, whose own checks grow with the
+/// catalog). Wall time failed it on a loaded machine with the work unchanged: an assertions
+/// build sharing a core with a busy loop took 0.128 s and 1.706 s, its thread 0.064 s and
+/// 0.362 s (0.047 / 0.311 s alone).
 #[test]
 fn racing_ddl_commits_dont_grow_with_the_catalog() {
     let dir = tempfile::tempdir().unwrap();
@@ -211,7 +215,7 @@ fn racing_ddl_commits_dont_grow_with_the_catalog() {
             run(a, &format!("CREATE TABLE r{i} (a int, b int CHECK (b > 0));\nCOMMENT ON TABLE r{i} IS 'c'"));
         }
         made = upto;
-        let t = std::time::Instant::now();
+        let t = thread_cpu();
         for i in 0..20 {
             let (x, y) = (i + 20 * round, i + 20 * round + 50);
             run(a, &format!("BEGIN;\nCREATE INDEX ON r{x} (a);\nCOMMENT ON TABLE r{x} IS 'a'"));
@@ -219,13 +223,21 @@ fn racing_ddl_commits_dont_grow_with_the_catalog() {
             run(a, "COMMIT");
             run(b, "COMMIT");
         }
-        t.elapsed().as_secs_f64()
+        thread_cpu() - t
     };
     let small = timed(&mut a, &mut b, 100, 0);
     let large = timed(&mut a, &mut b, 1500, 1);
-    eprintln!("racing commits: {small:.3}s at 100 tables, {large:.3}s at 1,500");
-    assert!(large < small * 6.0 + 0.5, "racing commits: {small:.3}s at 100 tables, {large:.3}s at 1,500");
+    eprintln!("racing commits: {small:.3}s of CPU at 100 tables, {large:.3}s at 1,500");
+    assert!(large < small * 6.0 + 0.5, "racing commits: {small:.3}s of CPU at 100 tables, {large:.3}s at 1,500");
     engine.shutdown();
+}
+
+/// This thread's CPU time in seconds: its work, less the time it waited for a CPU.
+fn thread_cpu() -> f64 {
+    let mut t = libc::timespec { tv_sec: 0, tv_nsec: 0 };
+    // SAFETY: clock_gettime writes the timespec it is given.
+    unsafe { libc::clock_gettime(libc::CLOCK_THREAD_CPUTIME_ID, &mut t) };
+    t.tv_sec as f64 + t.tv_nsec as f64 * 1e-9
 }
 
 /// Concurrent CREATE / DROP TABLE (pgjdbc's TypeCacheDLLStressTest): the merged catalogs'
@@ -258,3 +270,14 @@ fn racing_create_and_drop_keep_catalog_counts() {
     }
     engine.shutdown();
 }
+
+/// The system views planned from their definitions are listed (`system::EXPANDED`), not found
+/// by parsing every definition on a process's first system view query: the list must be what
+/// the definitions say.
+#[test]
+fn expanded_system_views_are_the_definitions_small_ones() {
+    let (found, listed) = pg_engine::catalog::system::expanded_by_definition();
+    let code: Vec<String> = found.iter().map(|(s, n)| format!("(\"{s}\", \"{n}\")")).collect();
+    assert_eq!(found, listed, "system::EXPANDED should be:\n{}", code.join(",\n"));
+}
+

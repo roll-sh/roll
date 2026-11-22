@@ -129,8 +129,7 @@ const PARSE_CHUNK: usize = 256;
 /// `items`' values parsed, in order: on several threads when there are many (a database's
 /// first open reads every record; parsing them is most of it).
 fn parse_all<V: DeserializeOwned + Send>(items: &[(u32, &[u8])]) -> Result<Vec<(u32, V)>> {
-    let threads = std::thread::available_parallelism()
-        .map_or(1, |n| n.get())
+    let threads = super::pmap::cores()
         .min(8)
         .min(items.len() / PARSE_CHUNK)
         .max(1);
@@ -708,7 +707,7 @@ pub fn load(head: &[u8], read: super::pmap::Reader) -> Result<Catalog> {
         let tags: Vec<u8> = (all_tags().into_iter())
             .filter(|t| !lazy || !super::stored_ix::LAZY_TAGS.contains(t))
             .collect();
-        let workers = if lazy { 1 } else { std::thread::available_parallelism().map_or(1, |n| n.get()).clamp(1, 8) };
+        let workers = if lazy { 1 } else { super::pmap::cores().clamp(1, 8) };
         let cat = &c;
         let scan = &read;
         let one = |tag: u8| -> Result<Option<Parsed>> {

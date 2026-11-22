@@ -338,7 +338,7 @@ impl<V> PMap<V> {
             .map(|g| &*g.1)
             .filter(|g| g.chunks().iter().any(|c| c.1.entries.get().is_none()))
             .collect();
-        let threads = std::thread::available_parallelism().map_or(1, |n| n.get()).min(8).min(todo.len());
+        let threads = cores().min(8).min(todo.len());
         if threads < 2 {
             return;
         }
@@ -1158,6 +1158,14 @@ impl<K: Key + std::fmt::Debug, V: std::fmt::Debug> std::fmt::Debug for PHash<K, 
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_map().entries(self.buckets.iter().flat_map(|b| b.map().iter())).finish()
     }
+}
+
+/// `available_parallelism`, once per process: std reads the cgroup's files at every call
+/// (a fifth of a server's first information_schema query's user instructions, asked for by
+/// every stored map's `read_all`).
+pub(crate) fn cores() -> usize {
+    static N: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    *N.get_or_init(|| std::thread::available_parallelism().map_or(1, |n| n.get()))
 }
 
 #[cfg(test)]
