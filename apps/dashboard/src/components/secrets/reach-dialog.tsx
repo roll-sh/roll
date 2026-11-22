@@ -8,9 +8,10 @@ import { ActorMark, ago, button, dangerButton, ErrorNote, errorText, field, ghos
 type Step = { kind: "reach" } | { kind: "confirm" } | { kind: "done"; result: CutOff };
 
 /**
- * Reach (docs/secrets.md, "Reach"): who and what can read a key's value — tokens and identities
- * whose scope covers it, untrusted code, syncs, leases, shares, projects and folders it flows to —
- * and who read it in 30 days. Names only, a project admin's. "Cut off…" cuts all of it at once
+ * Reach (docs/secrets.md, "Reach"): who and what can read a key's value — members whose role
+ * reveals it, their OAuth clients, tokens and identities whose scope covers it, untrusted code,
+ * services and sandboxes that hold it, syncs, leases, shares, projects and folders it flows to —
+ * who read it in 30 days, and who read it and may no longer. Names only, a project admin's. "Cut off…" cuts all of it at once
  * (an incident), after a confirmation that lists exactly what goes; then the key is rotated. A
  * token that reaches beyond the project (`skipped`) only the operator revokes: it's listed apart.
  */
@@ -45,6 +46,8 @@ function Body({ env, path, keyName, link, step, setStep, setBusy, onClose }: { e
     ...r.imported_by.map((f) => `imported by ${f}`),
     ...r.leases.map((l) => `lease of ${l.key} for ${l.consumer}, ends ${until(l.expires_at)}`),
     ...r.shares.map((s) => `one-time share ${s.note || s.id}, ends ${until(s.expires_at)}`),
+    ...r.services.map((s) => `service ${s.name} (${s.environment}) through ${s.through}, ${s.last_deployed_at ? `deployed ${ago(s.last_deployed_at)}` : "not running"}`),
+    ...r.sandboxes.map((s) => `sandbox ${s.name} of ${s.owner}, copied by ${s.by} from ${s.from}`),
     ...(r.truncated ? ["and more folders than were followed (256)"] : []),
   ];
   return (
@@ -54,6 +57,19 @@ function Body({ env, path, keyName, link, step, setStep, setBusy, onClose }: { e
         {r.untrusted ? <ShieldAlert className="mt-0.5 size-3.5 shrink-0 text-danger" /> : <ShieldCheck className="mt-0.5 size-3.5 shrink-0 text-ok" />}
         {r.untrusted ? `Checks, sandboxes and previews running code roll hasn't vetted can read it: protect ${env.name} to stop that.` : `${env.name} is protected: code roll hasn't vetted never reads it.`}
       </p>
+      <Part title="People" empty="No member's role reveals it." note={r.admins ? `And ${r.admins} admin ${r.admins === 1 ? "account" : "accounts"}, which reveal everything.` : undefined}>
+        {r.people.map((p) => (
+          <li key={p.user} className="flex items-center justify-between gap-3 px-3 py-2">
+            <ActorMark who={p.user} />
+            <span className="shrink-0 text-[11.5px] text-subtle">{p.admin ? `${p.role} · admin account` : p.role}</span>
+          </li>
+        ))}
+      </Part>
+      <Part title="Their agents (OAuth)" empty="No OAuth connection reaches it.">
+        {r.clients.map((h) => (
+          <HolderRow key={h.id} h={{ ...h, name: `${h.name} · ${h.created_by}` }} />
+        ))}
+      </Part>
       <Part title="Tokens" empty="No token reaches it.">
         {r.tokens.map((h) => (
           <HolderRow key={h.id} h={h} />
@@ -64,7 +80,7 @@ function Body({ env, path, keyName, link, step, setStep, setBusy, onClose }: { e
           <HolderRow key={h.id} h={h} />
         ))}
       </Part>
-      <Part title="Where it goes by itself" empty="No sync, lease, share or import takes it anywhere.">
+      <Part title="Where it goes by itself" empty="No sync, lease, share, import, service or sandbox takes it anywhere.">
         {flows.map((f) => (
           <li key={f} className="truncate px-3 py-2 font-mono text-[11.5px] text-soft">
             {f}
@@ -81,6 +97,18 @@ function Body({ env, path, keyName, link, step, setStep, setBusy, onClose }: { e
           </li>
         ))}
       </Part>
+      {r.knew.length > 0 && (
+        <Part title="Still know it" empty="" note="They read it and may no longer reveal it: rotate it.">
+          {r.knew.map((k) => (
+            <li key={k.user} className="flex items-center justify-between gap-3 px-3 py-2">
+              <ActorMark who={k.user} />
+              <span className="shrink-0 text-[11.5px] text-subtle">
+                {k.why === "left" ? "left the project" : k.why === "role" ? "role no longer reveals it" : "account gone"} · read {ago(k.last_at)}
+              </span>
+            </li>
+          ))}
+        </Part>
+      )}
       <div className="flex items-center justify-between gap-3 border-t border-line pt-3">
         <p className="text-[11.5px] text-subtle">Leaked? Cut all of this off at once, then rotate.</p>
         <button type="button" className={dangerButton} onClick={() => setStep({ kind: "confirm" })}>
@@ -94,7 +122,7 @@ function Body({ env, path, keyName, link, step, setStep, setBusy, onClose }: { e
 /** What a cut-off would cut, from reach: one line per kind with its count and names. */
 export function plan(r: Reach): { what: string; names: string[] }[] {
   const lines: [string, string, string[]][] = [
-    ["token revoked", "tokens revoked", r.tokens.filter((h) => !h.skipped).map((h) => h.name)],
+    ["token revoked", "tokens revoked", [...r.tokens, ...r.clients].filter((h) => !h.skipped).map((h) => h.name)],
     ["identity disabled, its logins revoked", "identities disabled, their logins revoked", r.identities.filter((h) => !h.disabled_at).map((h) => h.name)],
     ["lease ended, its credential revoked", "leases ended, their credentials revoked", r.leases.map((l) => `${l.key} for ${l.consumer}`)],
     ["one-time share expired", "one-time shares expired", r.shares.map((s) => s.note || s.id)],
@@ -141,7 +169,7 @@ function Confirm({ env, path, keyName, r, setBusy, onBack, onDone }: { env: Envi
       ) : (
         <p className="text-[12px] text-subtle">Nothing reaches {keyName} now. You can still freeze the folder.</p>
       )}
-      <Skipped names={r.tokens.filter((h) => h.skipped).map((h) => h.name)} />
+      <Skipped names={[...r.tokens, ...r.clients].filter((h) => h.skipped).map((h) => h.name)} />
       {r.unattributed_shares > 0 && (
         <p className="text-[11.5px] text-subtle">
           {r.unattributed_shares} other open {r.unattributed_shares === 1 ? "share doesn't" : "shares don't"} say where {r.unattributed_shares === 1 ? "its value" : "their values"} came from and {r.unattributed_shares === 1 ? "stays" : "stay"}: revoke them under Access if they might hold it.

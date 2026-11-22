@@ -284,6 +284,11 @@ impl Access {
         }
         let key = secret_key(secret).ok_or("challenge_failed")?;
         let t = self.event_transport().map_err(|_| "connection_refused".to_string())?;
+        // The callback's origin may say which of its paths take MCP webhook deliveries (the SEP's
+        // receiver document): that proves it as the challenge would, for receivers that can't echo.
+        if receiver_document_names(&t, url).await {
+            return self.mark_receiver(grant_id, url).await;
+        }
         let challenge = crate::random(32);
         let body = serde_json::to_vec(&json!({ "type": "verification", "challenge": challenge })).unwrap_or_default();
         let (id, ts) = (msg_id("verification"), code_sql::now_ms() / 1000);
@@ -302,6 +307,11 @@ impl Access {
         if !roll_auth::constant_eq(echoed.as_bytes(), challenge.as_bytes()) {
             return Err("challenge_failed".into());
         }
+        self.mark_receiver(grant_id, url).await
+    }
+
+    /// Record that this connection's callback proved it wants deliveries (good for a day).
+    async fn mark_receiver(self: &Arc<Self>, grant_id: &str, url: &str) -> std::result::Result<(), String> {
         let (a, g, u, now) = (self.clone(), grant_id.to_string(), url.to_string(), code_sql::now_ms());
         let kept = tokio::task::spawn_blocking(move || {
             a.store.db.write(|c| Ok::<_, Error>(c.execute("INSERT INTO mcp_event_receivers (grant_id, url, verified_at) VALUES (?, ?, ?) ON CONFLICT (grant_id, url) DO UPDATE SET verified_at = excluded.verified_at", params![g, u, now])?))
@@ -312,6 +322,23 @@ impl Access {
             _ => Err("connection_refused".to_string()),
         }
     }
+}
+
+/// Whether `url`'s https origin serves `/.well-known/mcp-webhook-receiver.json` naming a path
+/// prefix `url` is under (`{"receivers": ["/hooks/"]}`), read through the callbacks' guarded
+/// transport. Anything else (no document, another shape, a prefix that isn't a path) is no.
+async fn receiver_document_names(t: &Arc<dyn SinkTransport>, url: &str) -> bool {
+    let Ok(u) = url::Url::parse(url) else { return false };
+    let Some(host) = u.host_str() else { return false };
+    let origin = match u.port() {
+        Some(p) => format!("{}://{host}:{p}", u.scheme()),
+        None => format!("{}://{host}", u.scheme()),
+    };
+    let Ok((200, body)) = t.get(format!("{origin}/.well-known/mcp-webhook-receiver.json")).await else { return false };
+    let Ok(doc) = serde_json::from_slice::<Value>(&body) else { return false };
+    doc["receivers"].as_array().is_some_and(|prefixes| {
+        prefixes.iter().filter_map(Value::as_str).take(50).any(|p| p.starts_with('/') && !p.contains("..") && u.path().starts_with(p))
+    })
 }
 
 /// A subscription claimed for delivery, with the keys its deliveries are signed with (the current
