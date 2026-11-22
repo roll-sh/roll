@@ -412,4 +412,16 @@ mod tests {
             assert!(names.iter().any(|m| m == n), "roll_mcp::prompts::FRONTED names {n}, which roll code doesn't front");
         }
     }
+
+    /// An output schema (roll-mcp's output-schemas.json, learned by the sweep) names a tool roll
+    /// lists, as itself or as roll code's fronted name, and describes an object.
+    #[test]
+    fn output_schemas_name_listed_tools() {
+        let mut names: Vec<String> = code_control::mcp::tools().iter().map(|t| super::rename(t["name"].as_str().unwrap())).collect();
+        names.extend(roll_mcp::tools::all().iter().map(|t| t.name.to_string()));
+        for n in roll_mcp::output::names() {
+            assert!(names.iter().any(|m| m == n), "output-schemas.json has {n}, which no tool is: rerun `pnpm test:mcp-sweep --record`");
+            assert_eq!(roll_mcp::output::schema(n).unwrap()["type"], "object", "{n}'s output schema");
+        }
+    }
 }

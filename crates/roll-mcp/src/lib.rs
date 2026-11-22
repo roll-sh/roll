@@ -31,6 +31,7 @@ pub mod guard;
 /// Lockdown is roll-auth's, so roll code's own MCP server withholds the same text.
 pub use roll_auth::lockdown;
 pub mod modern;
+pub mod output;
 pub mod prompts;
 pub mod resources;
 pub mod search;
@@ -763,6 +764,10 @@ async fn process(ctx: &Arc<Ctx>, messages: Vec<Value>) -> Vec<Value> {
                 // A host that renders MCP Apps shows the tools that answer rows in roll's table.
                 if ctx.ui && !ctx.search {
                     ui::attach(&mut tools);
+                }
+                // A 2026-07-28 client may run code against the tools: it gets their answers' shape.
+                if ctx.modern && !ctx.search {
+                    output::attach(&mut tools);
                 }
                 rpc_result(id, json!({ "tools": tools }))
             }

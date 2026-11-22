@@ -611,6 +611,12 @@ async fn a_2026_client_is_served_without_initialize() {
     assert_eq!((s, out["result"]["cacheScope"].as_str(), out["result"]["ttlMs"].as_u64()), (StatusCode::OK, Some("private"), Some(60_000)), "{out}");
     assert!(!out["result"]["tools"].as_array().unwrap().is_empty() && h.get("mcp-session-id").is_none());
     assert!(out["result"]["_meta"]["io.modelcontextprotocol/serverInfo"].get("icons").is_none(), "only discovery carries the icon");
+    // Its tools say what they answer (output schemas the sweep learned); an older client's list
+    // stays the size it was.
+    let schemas = |list: &Value| list["tools"].as_array().unwrap().iter().filter(|t| t["outputSchema"]["type"] == "object").count();
+    let projects = out["result"]["tools"].as_array().unwrap().iter().find(|t| t["name"] == "postgres_list_projects").unwrap();
+    assert!(projects["outputSchema"]["properties"]["items"]["items"]["properties"]["id"].is_object(), "{}", projects["outputSchema"]);
+    assert_eq!(schemas(&d.rpc(OPERATOR, "tools/list", json!({})).await), 0);
     // A resource that isn't there is Invalid Params in this revision (SEP-2164; -32002 before it).
     let uri = "roll://nothing/here";
     let (_, _, out) = send(OPERATOR, 21, "resources/read", json!({ "uri": uri }), std_headers("resources/read", Some(uri))).await;
