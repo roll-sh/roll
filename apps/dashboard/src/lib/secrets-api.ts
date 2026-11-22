@@ -7,7 +7,7 @@
  * revealed value for as long as it's shown and no longer.
  */
 
-import type { Action, SecretType, Environment, NewEnvironment, Overview, Folder, Import, Link, Secret, SetSecret, Batch, Change, Written, Applied, ChangeDetail, Version, Problem, Values, Grid, Compare, RequestState, RequestValue, Insights, ChangeRequest, LinkTarget, Lease, Hosts, PlaceholderRecord, Token, Export, Ensure, Ensured, Suggestion, Identity, NewIdentity, Required, KeyType, Totp, Share, NewShare, ValueRequest, NewValueRequest, NewToken, AuditEntry, AuditFilter, AuditVerification, AuditFormat, Sink, Imported, ImportedAsRequest, ExportFormat, Sync, NewSync, SyncKind, Health, WhoAmI, Place, Rotator, SaasRotator, NewSaasRotator, AwsRole, Finding, ProjectFindings, SyncPreview, FileDiff, OutsideDatabase, Directory, NewDirectory, SnowflakeAccount, NewSnowflakeAccount, AtlasProject, NewAtlasProject, AwsUser, CloudAccount, NewCloudAccount, KubernetesCluster, NewKubernetesCluster, SignedCertificate, CaCertificate, Ca, AcmeSettings, NewAcmeKey, SshCa, HostCertificate, UserCertificate, TransitKey, TransitPublicKey, Rotation, FolderPolicy, Reach, GitHubApp, SinkFormat, Gateway, MadeGateway, NewDecoy, CutOff, CutOffRequest, ValidityProbe, CheckedCredential } from "@roll/secrets/types";
+import type { Action, SecretType, Environment, NewEnvironment, Overview, Folder, Import, Link, Secret, SetSecret, Batch, Change, Written, Applied, ChangeDetail, Version, Problem, Values, Grid, Compare, RequestState, RequestValue, Insights, ChangeRequest, LinkTarget, Lease, Hosts, PlaceholderRecord, Token, Export, Ensure, Ensured, Suggestion, Identity, NewIdentity, Required, KeyType, Totp, Share, NewShare, ValueRequest, NewValueRequest, NewToken, AuditEntry, AuditFilter, AuditVerification, AuditFormat, Sink, Imported, ImportedAsRequest, ExportFormat, Sync, NewSync, SyncKind, Health, WhoAmI, Place, Rotator, SaasRotator, NewSaasRotator, AwsRole, Finding, ProjectFindings, SyncPreview, FileDiff, OutsideDatabase, Directory, NewDirectory, SnowflakeAccount, NewSnowflakeAccount, AtlasProject, NewAtlasProject, AwsUser, CloudAccount, NewCloudAccount, KubernetesCluster, NewKubernetesCluster, SignedCertificate, CaCertificate, Ca, AcmeSettings, NewAcmeKey, SshCa, HostCertificate, UserCertificate, TransitKey, TransitPublicKey, Rotation, FolderPolicy, Reach, GitHubApp, SinkFormat, Gateway, MadeGateway, NewDecoy, CutOff, CutOffRequest, ValidityProbe, CheckedCredential, DeletedProject, Recovered } from "@roll/secrets/types";
 import type { Grant } from "./access-api";
 import { withSession } from "./code-token";
 import { grantFor, tokenOf } from "./secrets-tokens";
@@ -347,6 +347,10 @@ export const secretsIssuer = () => req<{ issuer: string; jwks_uri: string }>("GE
 /** Every project's findings the caller may read, projects with none left out. */
 export const allFindings = () => req<ProjectFindings[]>("GET", "/v1/secrets/findings");
 export const findSecret = (key: string) => req<Place[]>("GET", `/v1/secrets/search?key=${encodeURIComponent(key)}`);
+/** Deleted projects in their recovery window that the caller may recover, soonest purged first. */
+export const deletedProjects = () => req<DeletedProject[]>("GET", "/v1/secrets/deleted");
+/** Brings a deleted project back (its workspace project and canvas too): 410 `gone` once its window ended, 409 `name_taken` if another project has its name now. */
+export const recoverProject = (project: string) => req<Recovered>("POST", `/v1/secrets/projects/${enc(project)}/recover`);
 
 /** The rule for keys (docs/secrets.md, "Secrets"). */
 export const SECRET_KEY = /^[A-Za-z_][A-Za-z0-9_]{0,255}$/;

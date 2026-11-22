@@ -630,7 +630,7 @@ previews are listed once those products are on.
 | `workspace_get_project` | A workspace project and its resources. | `GET /v1/workspace/projects/{id}` |
 | `workspace_create_project` | A new workspace project to group resources. | `POST /v1/workspace/projects` |
 | `workspace_update_project` | Rename a project, or change its description or icon (a monogram, an emoji or a small image, with a colour; `clear: ["icon"]` goes back to the default). | `PATCH /v1/workspace/projects/{id}` |
-| `workspace_delete_project` | Delete a workspace project. Its resources stay; only the grouping goes. | `DELETE /v1/workspace/projects/{id}` |
+| `workspace_delete_project` | Delete a workspace project. Its resources stay. A project that holds secrets needs a secrets admin's confirmation in the dashboard. | `DELETE /v1/workspace/projects/{id}` |
 | `workspace_list_roles` | The roles a project member can have, the rules each grants, the products they cover, and the environments a developer reaches when none are named. | `GET /v1/workspace/roles` |
 | `workspace_place_resource` | Put a resource on a project's canvas (or move it), at x, y. | `PUT /v1/workspace/projects/{id}/resources/{kind}/{ref}` |
 | `workspace_remove_resource` | Take a resource off a project's canvas (the resource itself stays). | `DELETE /v1/workspace/projects/{id}/resources/{kind}/{ref}` |

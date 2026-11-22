@@ -54,7 +54,9 @@ export type NewEnvironment = {
 };
 /** `history_days`: how long old values are kept (null: for good). */
 /** `validity_checks`: whether credentials found in code are checked with their providers (docs/secrets.md, "Is it live?"). */
-export type Overview = { project: string; environments: Environment[]; previews: number; history_days: number | null; validity_checks: "on" | "off" };
+/** What deleting the workspace project takes from roll secrets (`holds`: `null` for nothing), and how many days it stays recoverable. */
+export type Deletion = { window_days: number; holds: string | null };
+export type Overview = { project: string; environments: Environment[]; previews: number; history_days: number | null; validity_checks: "on" | "off"; deletion: Deletion };
 /** A credential to check: a found value and, for an AWS access key id, the secret access key next to it. */
 export type ValidityProbe = { value: string; pair?: string | null };
 /** What a credential's provider said: never its value. `invalid` is revoked, deleted or never real. */
@@ -405,6 +407,10 @@ export type AwsUser = { id: string; name: string; role: string; user: string; cr
 /** `trust`: `external_id` (roll's AWS role with the project's ExternalId) or `oidc` (roll's issuer: no AWS credential of roll's). */
 export type AwsRole = { id: string; name: string; role_arn: string; trust: "external_id" | "oidc"; created_at: number; created_by: string };
 /** Where a key is set (`GET /v1/secrets/search?key=`): names and versions, never a value. */
+/** A deleted project in its recovery window (`GET /v1/secrets/deleted`): recoverable until `purge_at`. */
+export type DeletedProject = { project: string; name: string; deleted_at: number; deleted_by: string; purge_at: number };
+/** `POST …/recover`: the project is back; managed links got new credentials (`rotated`), or say which didn't. */
+export type Recovered = { project: string; name: string; recovered_at: number; rotated: number; rotation_failed: string[] };
 export type Place = { project: string; project_name: string; environment: string; path: string; key: string; version: number; updated_at: number; linked: boolean };
 /** One thing to fix (`GET …/health`), worst first: where, never a value. */
 export type Finding = { issue: "decoy_used" | "expired" | "rotation_failing" | "revoke_failing" | "missing" | "exposed" | "public" | "weak" | "operator_made" | "expiring" | "certificate_expiring" | "stale" | "unread" | "unreferenced"; environment: string; path: string; key: string; detail: string; owner?: string; decoy?: Decoy };

@@ -125,6 +125,7 @@ async fn start() -> Server {
         gateways: None,
     };
     let secrets = Arc::new(roll_secrets::Secrets::new(db, ws.clone(), opts).unwrap());
+    secrets.watch_workspace();
     let served = secrets.clone();
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let api = format!("http://127.0.0.1:{}", listener.local_addr().unwrap().port());
@@ -736,4 +737,20 @@ async fn a_repos_roll_toml_suggests_where_its_secrets_are_and_the_person_approve
     assert_eq!(ok(&api, &e, &echo, None).await.trim(), "stg");
     let doctor = roll(&api, &e, &["secrets", "doctor"], None).await.stdout;
     assert!(doctor.contains("ok   using shop staging:/ (project from roll.toml, environment from roll.toml (branch release/*), path from the default)") && doctor.contains(": approved"), "{doctor}");
+}
+
+/// A workspace project deleted with its secrets comes back with `roll secrets recover`, by name.
+#[tokio::test]
+async fn roll_secrets_recover_brings_a_deleted_project_back_by_name() {
+    let Server { api, projects, .. } = start().await;
+    ok(&api, &[], &["secrets", "-p", "shop", "-e", "production", "set", "HOST=db.internal"], None).await;
+    let id = projects.list(roll_workspace::Scope::All).unwrap().into_iter().find(|p| p.name == "shop").unwrap().id;
+    let gone = reqwest::Client::new().delete(format!("{api}/v1/workspace/projects/{id}?confirm=shop")).send().await.unwrap();
+    assert_eq!(gone.status(), 204);
+    let listed = ok(&api, &[], &["secrets", "recover"], None).await;
+    assert!(listed.contains("shop") && listed.contains(&id), "{listed}");
+    ok(&api, &[], &["secrets", "recover", "shop"], None).await;
+    let host = ok(&api, &[], &["secrets", "-p", "shop", "-e", "production", "get", "HOST", "--raw"], None).await;
+    assert_eq!(host.trim(), "db.internal");
+    assert!(roll(&api, &[], &["secrets", "recover", "shop"], None).await.code != Some(0), "nothing left to recover");
 }
