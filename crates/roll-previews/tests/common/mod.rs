@@ -261,7 +261,7 @@ pub struct FakeApps {
     /// The build each service runs now, by service: (git commit, its own URL).
     pub live: Mutex<HashMap<String, (String, String)>>,
     /// Builds started again on an earlier push's copy: (service, deployment, the variables).
-    pub views: Mutex<Vec<(String, String, Vec<(String, String)>)>>,
+    pub views: Mutex<Vec<(String, String, Vars)>>,
     /// What a service answers on its health path (unset: the backend can't tell).
     pub answers: Mutex<Option<(u16, String)>>,
     /// How many health checks find the service still starting (asked again later).
