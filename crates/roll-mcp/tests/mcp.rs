@@ -1101,6 +1101,11 @@ impl roll_access::sinks::SinkTransport for Receiver {
         let challenge = if url.ends_with("/good") { sent["challenge"].clone() } else { json!("not it") };
         Box::pin(async move { Ok((200, serde_json::to_vec(&json!({ "challenge": challenge })).unwrap())) })
     }
+    // The origin's receiver document: paths under /doc/ take MCP webhook deliveries.
+    fn get(&self, url: String) -> futures::future::BoxFuture<'static, Result<(u16, Vec<u8>), String>> {
+        let found = url == "https://hooks.example.com/.well-known/mcp-webhook-receiver.json";
+        Box::pin(async move { Ok(if found { (200, br#"{"receivers": ["/doc/"]}"#.to_vec()) } else { (404, Vec::new()) }) })
+    }
 }
 
 /// MCP Events' webhook mode: a token's connection subscribes a callback that proves it wants the
@@ -1146,6 +1151,10 @@ async fn an_agent_subscribes_a_webhook() {
     assert_eq!((&again["result"]["id"], again["result"]["deliveryStatus"]["active"].as_bool()), (&r["id"], Some(true)), "a refresh: {again}");
     assert_eq!(posts.lock().unwrap().len(), 1, "verified once per connection and URL");
 
+    // Under a path its origin's receiver document names: kept without a challenge.
+    let before = posts.lock().unwrap().len();
+    let doc = sub(&token, "https://hooks.example.com/doc/in", secret).await;
+    assert!(doc["error"].is_null() && posts.lock().unwrap().len() == before, "{doc}");
     let bad = sub(&token, "https://hooks.example.com/bad", secret).await;
     assert_eq!((bad["error"]["code"].as_i64(), bad["error"]["data"]["reason"].as_str()), (Some(-32027), Some("challenge_failed")), "{bad}");
     assert_eq!(sub(&token, "https://hooks.example.com/good", "whsec_c2hvcnQ=").await["error"]["code"], -32602, "a secret under 24 bytes");

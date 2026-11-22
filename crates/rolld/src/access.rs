@@ -307,6 +307,25 @@ impl roll_access::sinks::SinkTransport for SinkPost {
             Ok((status, answer))
         })
     }
+
+    fn get(&self, url: String) -> futures::future::BoxFuture<'static, Result<(u16, Vec<u8>), String>> {
+        let client = self.client.clone();
+        let check = self.check(&url);
+        Box::pin(async move {
+            check.map_err(|_| "connection_refused".to_string())?;
+            let category = |e: &reqwest::Error| if e.is_timeout() { "timeout" } else { "connection_refused" };
+            let mut resp = client.get(&url).header("accept", "application/json").send().await.map_err(|e| category(&e).to_string())?;
+            let status = resp.status().as_u16();
+            let mut answer = Vec::new();
+            while answer.len() < 16 << 10 {
+                match resp.chunk().await {
+                    Ok(Some(c)) => answer.extend_from_slice(&c[..c.len().min((16 << 10) - answer.len())]),
+                    _ => break,
+                }
+            }
+            Ok((status, answer))
+        })
+    }
 }
 
 /// Approvals in chat: roll code's chat ops post and edit the cards, and send presses back to

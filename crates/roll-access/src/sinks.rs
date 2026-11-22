@@ -60,6 +60,12 @@ pub trait SinkTransport: Send + Sync {
         let _ = (url, headers, body);
         Box::pin(async { Err("connection_refused".to_string()) })
     }
+    /// GET through the same guard (an MCP Events callback origin's receiver document): its status
+    /// and at most 16 KiB. `Err` is a category, as for `post_answer`.
+    fn get(&self, url: String) -> BoxFuture<'static, std::result::Result<(u16, Vec<u8>), String>> {
+        let _ = url;
+        Box::pin(async { Err("connection_refused".to_string()) })
+    }
 }
 
 #[derive(Clone, Debug, Serialize)]
