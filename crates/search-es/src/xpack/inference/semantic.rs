@@ -92,7 +92,8 @@ impl ModelSettings {
             TaskType::TextEmbedding | TaskType::Embedding => Some(ModelSettings {
                 service: Some(ep.service.clone()),
                 task: ep.task,
-                dimensions: ss.get("dimensions").and_then(Value::as_i64),
+                // E5's are known without asking it (`MultilingualE5SmallModel`).
+                dimensions: ss.get("dimensions").and_then(Value::as_i64).or_else(|| super::services::builtin::is_e5(ep).then_some(super::services::builtin::E5_DIMS)),
                 similarity: Some(ss.get("similarity").map(|v| v.to_es_string()).unwrap_or_else(|| "cosine".into())),
                 element_type: Some(
                     ss.get("element_type").or_else(|| ss.get("embedding_type")).map(|v| v.to_es_string()).map(|t| match t.as_str() {
@@ -434,8 +435,17 @@ fn batch_size(service: &str) -> usize {
     match service {
         "openai" => 2048,
         "cohere" => 96,
+        // `ElasticsearchInternalService.EMBEDDING_MAX_BATCH_SIZE`.
+        "elasticsearch" => 10,
         _ => 512,
     }
+}
+
+/// Batches of one endpoint in flight at once. Elasticsearch runs an ML deployment's batches
+/// one after another so they don't fill its queue; the node's pool takes turns per owner and
+/// caps each queue itself, so a few at a time keep its workers busy. Remote services: one.
+fn batches_in_flight(ep: &super::Endpoint) -> usize {
+    if super::services::builtin::is_e5(ep) { 4 } else { 1 }
 }
 
 /// `inference_exception` for a field whose endpoint failed (`ShardBulkInferenceActionFilter`),
@@ -525,43 +535,55 @@ pub async fn infer_documents(cluster: &crate::cluster::Cluster, docs: &[(&Mappin
     for (id, inputs) in &by_endpoint {
         let ep = &endpoints[id];
         let Some(service) = super::services::Service::find(cluster, &ep.service) else { continue };
-        for batch in inputs.chunks(batch_size(&ep.service)) {
-            // Documents already failed by another field are left out of the call.
-            let live: Vec<&Input> = batch.iter().filter(|i| out[needs[i.need].doc].is_ok()).collect();
-            if live.is_empty() {
-                continue;
-            }
-            let mut req = super::Request::new(live.iter().map(|i| i.text.clone()).collect(), std::time::Duration::from_secs(30));
-            req.input_type = Some("internal_ingest".into());
-            match service.infer(cluster, ep, &req).await {
-                Ok(results) if results.len() == live.len() => {
-                    for (k, input) in live.iter().enumerate() {
-                        let Some(emb) = embedding_value(&results, k) else {
-                            let need = &needs[input.need];
-                            out[need.doc] = Err(field_failure(id, &need.path, EsError::status(400, format!("Inference id [{id}] doesn't produce embeddings ({})", ep.task.name()))));
-                            continue;
-                        };
-                        let mut c = Map::new();
-                        c.insert("start_offset".into(), ((input.span.start + input.adjust) as i64).into());
-                        c.insert("end_offset".into(), ((input.span.end + input.adjust) as i64).into());
-                        c.insert("embeddings".into(), emb);
-                        chunks[input.need].push(Value::Obj(c));
-                    }
+        let batches: Vec<&[Input]> = inputs.chunks(batch_size(&ep.service)).collect();
+        for wave in batches.chunks(batches_in_flight(ep)) {
+            // Documents already failed by another field are left out of the calls.
+            let lives: Vec<Vec<&Input>> = wave.iter().map(|batch| batch.iter().filter(|i| out[needs[i.need].doc].is_ok()).collect()).collect();
+            // No deadline, as Elasticsearch's bulk inference filter calls with
+            // `TimeValue.MAX_VALUE`: remote services are still held to the node's
+            // `roll.inference.max_timeout`. A request dropped while it waits (the client gone)
+            // drops these calls, and the node's pool skips their jobs not yet started.
+            let calls = lives.iter().map(|live| async move {
+                if live.is_empty() {
+                    return None;
                 }
-                Ok(results) => {
-                    let e = EsError::status(500, format!("Inference id [{id}] returned [{}] results for [{}] inputs", results.len(), live.len()));
-                    for input in &live {
-                        let need = &needs[input.need];
-                        if out[need.doc].is_ok() {
-                            out[need.doc] = Err(field_failure(id, &need.path, e.clone()));
+                let mut req = super::Request::new(live.iter().map(|i| i.text.clone()).collect(), super::NO_DEADLINE);
+                req.input_type = Some("internal_ingest".into());
+                Some(service.infer(cluster, ep, &req).await)
+            });
+            let answers = futures::future::join_all(calls).await;
+            for (live, answer) in lives.iter().zip(answers) {
+                let Some(answer) = answer else { continue };
+                match answer {
+                    Ok(results) if results.len() == live.len() => {
+                        for (k, input) in live.iter().enumerate() {
+                            let Some(emb) = embedding_value(&results, k) else {
+                                let need = &needs[input.need];
+                                out[need.doc] = Err(field_failure(id, &need.path, EsError::status(400, format!("Inference id [{id}] doesn't produce embeddings ({})", ep.task.name()))));
+                                continue;
+                            };
+                            let mut c = Map::new();
+                            c.insert("start_offset".into(), ((input.span.start + input.adjust) as i64).into());
+                            c.insert("end_offset".into(), ((input.span.end + input.adjust) as i64).into());
+                            c.insert("embeddings".into(), emb);
+                            chunks[input.need].push(Value::Obj(c));
                         }
                     }
-                }
-                Err(e) => {
-                    for input in &live {
-                        let need = &needs[input.need];
-                        if out[need.doc].is_ok() {
-                            out[need.doc] = Err(field_failure(id, &need.path, e.clone()));
+                    Ok(results) => {
+                        let e = EsError::status(500, format!("Inference id [{id}] returned [{}] results for [{}] inputs", results.len(), live.len()));
+                        for input in live {
+                            let need = &needs[input.need];
+                            if out[need.doc].is_ok() {
+                                out[need.doc] = Err(field_failure(id, &need.path, e.clone()));
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        for input in live {
+                            let need = &needs[input.need];
+                            if out[need.doc].is_ok() {
+                                out[need.doc] = Err(field_failure(id, &need.path, e.clone()));
+                            }
                         }
                     }
                 }

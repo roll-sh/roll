@@ -33,6 +33,7 @@ export interface SearchDefaults {
 export interface SearchPricing {
   usd_per_gib_hour: number;
   usd_per_million_requests: number;
+  usd_per_vcpu_hour: number;
   usd_per_gb_month_s3: number;
   elastic_cloud_usd_per_month: number;
   elastic_cloud_gb_per_block: number;
@@ -238,9 +239,12 @@ export interface SearchUsage {
   peak_loaded_bytes: number;
   stored_gib_months: number;
   stored_bytes: number;
+  /** CPU seconds the node's embedding model (E5) spent on the cluster's inputs. */
+  inference_cpu_seconds: number;
   cost: {
     memory_usd: number;
     requests_usd: number;
+    inference_usd: number;
     storage_usd: number;
     total_usd: number;
     elastic_cloud_usd: number;
