@@ -6025,6 +6025,29 @@ adds roll-access's grant lookup or the accounts' and workspace's.
 
 ## Next
 
+**State, 2026-11-22 19:25.** Landed since 07:55, each with main's CI green:
+- #665 (57deeb0d1): a placeholder swaps only for its own consumer; references never smuggle a bound key's value; fallbacks skip bound keys before decrypting.
+- #697 (a74036a64): item 4, an offboarded person's leases, shares and sandboxes end with them.
+- #688 (03e1d9520): item 1, a new project's production is protected (`approvals: 0` writes directly; existing 0-approval environments kept their requests by migration), and the default developer rule never matches production unless named.
+- #705 (9d5032147): an interception CA stays live until its consumer's hosts change; the per-connection check (`intercept_ca_stands`) is one row read.
+- #707 (01199a351): the first digest after a change is shared per permission view on a node. At 1,000 watchers that's 74.6 → 0.4 CPU-s on SQLite and 72.6 → 1.8 on Postgres.
+- #714 (054e6edb7): item 3, reach names people, OAuth clients, services, sandboxes and who knew.
+- #734 (bfebaa3fc): item 5, agents sandboxes read their copied values fresh as the copier at every start (agent37 edits env in place).
+- #733 (055ab1adb): item 6 part A, reviewer provider keys as `roll://` references (`code:review:<owner>` in reach).
+
+Other threads: previews #686 (CA reuse until hosts change), apps #689 (CA state per network).
+
+In flight:
+- item 2, environment deletes recoverable and a protected one's delete as a change request (#720);
+- item 7, linked fields carry their kind;
+- the event feed (`GET …/projects/{project}/events` for roll MCP's Events; the cursor taken in each row's own write);
+- members v1.1 phase 1 (#681, review fixes done, merging main);
+- agent-host's `pi_compaction` in the shared gate set (item 10).
+
+New since the ranking:
+- **Delta reads for watchers** (performance, M). After a change each pod still reads all its values: about 190 CPU-s per change at 1,000 pods, bound by the database connections. A watcher holding digest X asks for what changed since X and gets only the changed keys.
+- **Item 6, parts B and C** (agents' endpoints and the model gateway's upstreams as `roll://`): a relay-side maker table, an `agent:<machine>` resource, the value sealed to the daemon after each `hello`, `EndpointSpec::check` taking `roll://`.
+
 **State, 2026-11-22 07:55.** The thirty-fifth review's ranking below still stands. Since it:
 - **roll apps' #603 review is closed on apps' side:**
   - #667 (listings and staleness mint nothing, the hash by binding, dynamic keys refused, an opened
