@@ -1071,7 +1071,9 @@ async fn an_agent_polls_what_happened() {
     assert_eq!(poll(OPERATOR, json!("a1:0"), json!({ "nope": 1 })).await["error"]["code"], -32602);
 
     let reader = d.token(json!([{ "product": "postgres", "resources": "*", "actions": { "read": "allow" } }])).await;
-    assert_eq!(send(&reader, "events/list", json!({})).await["result"]["events"], json!([]));
+    let types = send(&reader, "events/list", json!({})).await["result"]["events"].clone();
+    let names: Vec<&str> = types.as_array().unwrap().iter().map(|t| t["name"].as_str().unwrap()).collect();
+    assert_eq!(names, ["access.approval"], "its own approvals' decisions, not apps' events");
     assert_eq!(poll(&reader, Value::Null, json!({})).await["error"]["code"], -32024);
 }
 

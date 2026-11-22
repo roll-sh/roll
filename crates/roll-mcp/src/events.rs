@@ -30,15 +30,61 @@ struct Feed {
     after: &'static str,
     /// The feed's route answering only its newest cursor (a client starting from now).
     latest: &'static str,
+    /// The arguments that filter it: `kinds` a list matched against its field (exact, or a family
+    /// as `x.*`), any other one value its field must equal; with what each means.
+    filters: &'static [(&'static str, &'static str, &'static str)],
+    /// What an event's `data` holds.
+    payload: fn() -> Value,
 }
 
-const FEEDS: &[Feed] = &[Feed {
-    name: "apps.event",
-    description: "Something happened to a service: a deploy going live or failing, a crash loop, a failed cron run or job, a memory, error, latency or capacity alert, a domain or a check, or an audit.* change to its settings. Filter by kinds (deploy.failed, or alert.* for a family), service id and environment.",
-    tool: "apps_events",
-    after: "/v1/apps/events?limit=100&after=",
-    latest: "/v1/apps/events?latest=1",
-}];
+const FEEDS: &[Feed] = &[
+    Feed {
+        name: "apps.event",
+        description: "Something happened to a service: a deploy going live or failing, a crash loop, a failed cron run or job, a memory, error, latency or capacity alert, a domain or a check, or an audit.* change to its settings. Filter by kinds (deploy.failed, or alert.* for a family), service id and environment.",
+        tool: "apps_events",
+        after: "/v1/apps/events?limit=100&after=",
+        latest: "/v1/apps/events?latest=1",
+        filters: &[
+            ("kinds", "kind", "Only these kinds (deploy.failed, crash_loop), or a family ending in .* (alert.*); all when left out"),
+            ("service", "service", "Only this service's (its id, svc_…)"),
+            ("environment", "environment", "Only this environment's (production)"),
+        ],
+        payload: || {
+            json!({ "type": "object", "properties": {
+                "seq": { "type": "integer" },
+                "at": { "type": "integer", "description": "Unix milliseconds" },
+                "kind": { "type": "string" },
+                "service": { "type": "string" },
+                "environment": { "type": "string" },
+                "deployment": { "type": ["string", "null"] },
+                "data": { "description": "The kind's details" },
+            } })
+        },
+    },
+    Feed {
+        name: "access.approval",
+        description: "A person decided an approval this connection asked for (approved or denied): call the original tool again with approval once it's approved. Filter by kinds (approved, denied) and tool.",
+        tool: "access_wait_approval",
+        after: "/v1/access/approvals/decided?limit=100&after=",
+        latest: "/v1/access/approvals/decided?latest=1",
+        filters: &[("kinds", "state", "Only these outcomes (approved, denied); all when left out"), ("tool", "tool", "Only approvals of calls to this tool")],
+        payload: || {
+            json!({ "type": "object", "properties": {
+                "seq": { "type": "integer" },
+                "at": { "type": ["integer", "null"], "description": "When it was decided, Unix milliseconds" },
+                "id": { "type": "string", "description": "The approval (apr_…): pass it as the tool call's approval" },
+                "state": { "type": "string", "description": "approved or denied" },
+                "product": { "type": "string" },
+                "action": { "type": "string" },
+                "resource": { "type": ["string", "null"] },
+                "tool": { "type": ["string", "null"] },
+                "summary": { "type": "string" },
+                "decided_by": { "type": ["string", "null"] },
+                "reason": { "type": ["string", "null"] },
+            } })
+        },
+    },
+];
 
 fn feed(name: &str) -> Option<&'static Feed> {
     FEEDS.iter().find(|f| f.name == name)
@@ -48,31 +94,16 @@ fn tool(f: &Feed) -> Option<&'static tools::Tool> {
     tools::all().iter().find(|t| t.name == f.tool)
 }
 
-fn input_schema() -> Value {
-    json!({
-        "type": "object",
-        "properties": {
-            "kinds": { "type": "array", "items": { "type": "string" }, "maxItems": 30, "description": "Only these kinds (deploy.failed, crash_loop), or a family ending in .* (alert.*); all when left out" },
-            "service": { "type": "string", "description": "Only this service's (its id, svc_…)" },
-            "environment": { "type": "string", "description": "Only this environment's (production)" },
-        },
-        "additionalProperties": false,
-    })
-}
-
-fn payload_schema() -> Value {
-    json!({
-        "type": "object",
-        "properties": {
-            "seq": { "type": "integer" },
-            "at": { "type": "integer", "description": "Unix milliseconds" },
-            "kind": { "type": "string" },
-            "service": { "type": "string" },
-            "environment": { "type": "string" },
-            "deployment": { "type": ["string", "null"] },
-            "data": { "description": "The kind's details" },
-        },
-    })
+fn input_schema(f: &Feed) -> Value {
+    let properties: Map<String, Value> = f
+        .filters
+        .iter()
+        .map(|(arg, _, about)| {
+            let schema = if *arg == "kinds" { json!({ "type": "array", "items": { "type": "string" }, "maxItems": 30, "description": about }) } else { json!({ "type": "string", "description": about }) };
+            (arg.to_string(), schema)
+        })
+        .collect();
+    json!({ "type": "object", "properties": properties, "additionalProperties": false })
 }
 
 /// How this connection can have events: polled, and POSTed to a webhook where roll delivers them
@@ -87,7 +118,7 @@ pub(crate) fn list(ctx: &Ctx) -> Value {
     let events: Vec<Value> = FEEDS
         .iter()
         .filter(|f| tool(f).is_some_and(|t| ctx.usable(t)))
-        .map(|f| json!({ "name": f.name, "description": f.description, "delivery": delivery(ctx), "inputSchema": input_schema(), "payloadSchema": payload_schema() }))
+        .map(|f| json!({ "name": f.name, "description": f.description, "delivery": delivery(ctx), "inputSchema": input_schema(f), "payloadSchema": (f.payload)() }))
         .collect();
     json!({ "events": events })
 }
@@ -99,45 +130,49 @@ fn invalid(message: impl Into<String>) -> Refused {
     (-32602, message.into(), json!({}))
 }
 
-/// The filter a poll's `arguments` ask for.
+/// The filter a poll's `arguments` ask for, over its feed's fields.
 struct Filter {
     kinds: Vec<String>,
-    service: Option<String>,
-    environment: Option<String>,
+    kinds_field: &'static str,
+    exact: Vec<(&'static str, String)>,
 }
 
 impl Filter {
-    fn parse(args: &Value) -> Result<Filter, Refused> {
+    /// Nothing filtered out.
+    fn none() -> Filter {
+        Filter { kinds: Vec::new(), kinds_field: "", exact: Vec::new() }
+    }
+
+    fn parse(f: &Feed, args: &Value) -> Result<Filter, Refused> {
         let empty = Map::new();
         let o = match args {
             Value::Null => &empty,
             Value::Object(o) => o,
             _ => return Err(invalid("arguments is an object")),
         };
-        if let Some(k) = o.keys().find(|k| !matches!(k.as_str(), "kinds" | "service" | "environment")) {
-            return Err(invalid(format!("no argument {k:?}: kinds, service and environment")));
+        if let Some(k) = o.keys().find(|k| !f.filters.iter().any(|(arg, ..)| arg == k)) {
+            let known: Vec<&str> = f.filters.iter().map(|(arg, ..)| *arg).collect();
+            return Err(invalid(format!("no argument {k:?}: {}", known.join(", "))));
         }
-        let text = |k: &str| match o.get(k) {
-            None | Some(Value::Null) => Ok(None),
-            Some(Value::String(s)) if !s.is_empty() && s.len() <= 200 => Ok(Some(s.clone())),
-            _ => Err(invalid(format!("{k} is a string"))),
-        };
-        let kinds = match o.get("kinds") {
-            None | Some(Value::Null) => Vec::new(),
-            Some(Value::Array(a)) if a.len() <= 30 => a
-                .iter()
-                .map(|k| k.as_str().filter(|s| !s.is_empty() && s.len() <= 64).map(str::to_string).ok_or_else(|| invalid("kinds are strings")))
-                .collect::<Result<_, _>>()?,
-            _ => return Err(invalid("kinds is a list of at most 30")),
-        };
-        Ok(Filter { kinds, service: text("service")?, environment: text("environment")? })
+        let mut out = Filter::none();
+        for (arg, field, _) in f.filters {
+            match (o.get(*arg), *arg) {
+                (None | Some(Value::Null), _) => {}
+                (Some(Value::Array(a)), "kinds") if a.len() <= 30 => {
+                    out.kinds = a.iter().map(|k| k.as_str().filter(|s| !s.is_empty() && s.len() <= 64).map(str::to_string).ok_or_else(|| invalid("kinds are strings"))).collect::<Result<_, _>>()?;
+                    out.kinds_field = field;
+                }
+                (_, "kinds") => return Err(invalid("kinds is a list of at most 30")),
+                (Some(Value::String(v)), _) if !v.is_empty() && v.len() <= 200 => out.exact.push((field, v.clone())),
+                _ => return Err(invalid(format!("{arg} is a string"))),
+            }
+        }
+        Ok(out)
     }
 
     fn keeps(&self, e: &Value) -> bool {
-        let kind = e["kind"].as_str().unwrap_or("");
-        (self.kinds.is_empty() || self.kinds.iter().any(|k| k == kind || k.strip_suffix('*').is_some_and(|p| p.ends_with('.') && kind.starts_with(p))))
-            && self.service.as_deref().is_none_or(|s| e["service"] == s)
-            && self.environment.as_deref().is_none_or(|s| e["environment"] == s)
+        let kind = e[self.kinds_field].as_str().unwrap_or("");
+        (self.kinds.is_empty() || self.kinds.iter().any(|k| k == kind || k.strip_suffix('*').is_some_and(|p| p.ends_with('.') && kind.starts_with(p)))) && self.exact.iter().all(|(field, v)| e[*field] == v.as_str())
     }
 }
 
@@ -162,7 +197,7 @@ pub(crate) async fn poll(ctx: &Arc<Ctx>, params: &Value) -> Result<Value, Refuse
     if !tool(f).is_some_and(|t| ctx.usable(t)) {
         return Err((-32024, "Forbidden".into(), json!({ "reason": format!("this connection can't use {}", f.tool) })));
     }
-    let filter = Filter::parse(&params["arguments"])?;
+    let filter = Filter::parse(f, &params["arguments"])?;
     let max = match &params["maxEvents"] {
         Value::Null => 50,
         v => v.as_u64().filter(|n| (1..=MAX_EVENTS as u64).contains(n)).ok_or_else(|| invalid(format!("maxEvents is 1-{MAX_EVENTS}")))? as usize,
@@ -254,7 +289,7 @@ fn keyed<'a>(ctx: &Ctx, params: &'a Value) -> Result<(&'static Feed, Value, &'a 
     if !tool(f).is_some_and(|t| ctx.usable(t)) {
         return Err((-32024, "Forbidden".into(), json!({ "reason": format!("this connection can't use {}", f.tool) })));
     }
-    Filter::parse(&params["arguments"])?;
+    Filter::parse(f, &params["arguments"])?;
     let args = if params["arguments"].is_null() { json!({}) } else { params["arguments"].clone() };
     let url = params["delivery"]["url"].as_str().filter(|u| !u.is_empty() && u.len() <= 2048).ok_or_else(|| invalid("delivery.url is the callback's https URL"))?;
     Ok((f, args, url))
@@ -439,7 +474,7 @@ async fn one(api: axum::Router, access: Arc<roll_access::Access>, c: roll_access
             return out;
         }
     }
-    let filter = Filter::parse(&sub.arguments).unwrap_or(Filter { kinds: Vec::new(), service: None, environment: None });
+    let filter = Filter::parse(f, &sub.arguments).unwrap_or_else(|_| Filter::none());
     let outside = tool(f).map_or(&[][..], |t| t.outside);
     // Lockdown as the subscription asked, or as the policy holds every connection now.
     let a = access.clone();
