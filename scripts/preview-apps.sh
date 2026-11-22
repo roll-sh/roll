@@ -42,7 +42,10 @@ cleanup() {
     for c in $(docker ps -aq --filter "name=roll-apps-egress-closed-${PRJ#prj_}" --filter "name=roll-apps-build-${PRJ#prj_}" --filter "name=roll-apps-egress-build-${PRJ#prj_}"); do docker rm -f "$c" >/dev/null; done
     docker buildx rm -f "roll-apps-build-${PRJ#prj_}" >/dev/null 2>&1 || true
     docker network rm "roll-apps-build-${PRJ#prj_}" >/dev/null 2>&1 || true
-    for n in $(docker network ls --format '{{.Name}}' | grep "^roll-apps-net-${PRJ#prj_}-" || true); do docker network rm "$n" >/dev/null || true; done
+    # roll apps' link relays (`roll-apps-link-…`) stay attached to the project's networks and kept
+    # every run's networks from going: 23 had piled up and Docker's address pools ran out.
+    for c in $(docker ps -aq --filter "name=^roll-apps-link-${PRJ#prj_}-" --filter "name=^roll-apps-link-closed-${PRJ#prj_}."); do docker rm -f "$c" >/dev/null; done
+    for n in $(docker network ls --format '{{.Name}}' | grep -E "^roll-apps-(net-${PRJ#prj_}-|closed-${PRJ#prj_}\.)" || true); do docker network rm "$n" >/dev/null || true; done
   fi
 }
 trap cleanup EXIT
