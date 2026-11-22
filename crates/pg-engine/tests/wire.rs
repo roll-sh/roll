@@ -4959,8 +4959,8 @@ fn protocol_cases() {
         .collect();
     let mut differ = Vec::new();
     for (name, f) in &cases {
-        let got = f(&addr);
         let want = expected.get(*name).map(String::as_str).unwrap_or("(not recorded)");
+        let got = protocol::expecting(expected.get(*name).map(String::as_str), || f(&addr));
         if got != want {
             differ.push(format!("{name}\n  pg:   {want}\n  roll: {got}"));
         }

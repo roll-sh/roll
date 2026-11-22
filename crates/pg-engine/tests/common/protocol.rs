@@ -10,11 +10,44 @@
 
 #![allow(dead_code)]
 
+use std::cell::RefCell;
 use std::io::{Read, Write};
 use std::net::TcpStream;
 use std::time::Duration;
 
 const QUIET: Duration = Duration::from_millis(400);
+/// How long a read waits for a message the case's recording says comes next: a loaded
+/// machine's assertions build answered a server's first information_schema query after more
+/// than QUIET, and every later step's answer was read one step late. (A hang still fails.)
+const ANSWER: Duration = Duration::from_secs(30);
+
+thread_local! {
+    /// The recorded replies of the case running on this thread (`expecting`).
+    static WANT: RefCell<Option<String>> = const { RefCell::new(None) };
+}
+
+/// Run case `f` knowing its recorded replies `want`: a session's reads wait up to ANSWER for
+/// a message the recording has next, QUIET only where it has "quiet" (or the replies already
+/// differ).
+pub fn expecting<T>(want: Option<&str>, f: impl FnOnce() -> T) -> T {
+    let saved = WANT.with(|w| w.replace(want.map(str::to_string)));
+    let r = f();
+    WANT.with(|w| *w.borrow_mut() = saved);
+    r
+}
+
+/// Digits as one "N" (what cases mask: oids), to follow a recording through them.
+fn masked(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        if !c.is_ascii_digit() {
+            out.push(c);
+        } else if !out.ends_with('N') {
+            out.push('N');
+        }
+    }
+    out
+}
 
 pub fn msg(t: u8, body: &[u8]) -> Vec<u8> {
     let mut m = vec![t];
@@ -186,6 +219,9 @@ pub struct Conn {
     buf: Vec<u8>,
     /// How long a read waits before the server counts as quiet.
     quiet: Duration,
+    /// The case's replies so far and the separator before the next one, when they are
+    /// followed against the recording (`window`).
+    said: Option<(String, &'static str)>,
 }
 
 enum Got {
@@ -198,11 +234,31 @@ impl Conn {
     pub fn open(addr: &str, packet: &[u8]) -> Conn {
         let mut s = TcpStream::connect(addr).unwrap();
         s.write_all(packet).unwrap();
-        Conn { s, buf: Vec::new(), quiet: QUIET }
+        Conn { s, buf: Vec::new(), quiet: QUIET, said: None }
+    }
+
+    /// How long the next read waits: ANSWER when the recording has a message next, else
+    /// `quiet`.
+    fn window(&self) -> Duration {
+        let Some((said, sep)) = &self.said else { return self.quiet };
+        let Some(want) = WANT.with(|w| w.borrow().as_deref().map(masked)) else { return self.quiet };
+        match want.strip_prefix(&masked(&format!("{said}{sep}"))) {
+            Some(rest) if !rest.is_empty() && !rest.starts_with("quiet") => ANSWER,
+            _ => self.quiet,
+        }
+    }
+
+    /// A reply the case records (`window`).
+    fn note(&mut self, reply: &str) {
+        if let Some((said, sep)) = &mut self.said {
+            said.push_str(sep);
+            said.push_str(reply);
+            *sep = " ";
+        }
     }
 
     fn fill(&mut self) -> Option<bool> {
-        self.s.set_read_timeout(Some(self.quiet)).unwrap();
+        self.s.set_read_timeout(Some(self.window())).unwrap();
         let mut b = [0u8; 65536];
         match self.s.read(&mut b) {
             Ok(0) => Some(false),
@@ -258,10 +314,12 @@ impl Conn {
                 }
                 Got::Quiet => {
                     out.push("quiet".into());
+                    self.note("quiet");
                     return out;
                 }
                 Got::Msg(t, b) => {
                     out.push(compact(t, &b));
+                    self.note(out.last().unwrap());
                     if t == b'Z' || t == b'G' {
                         return out;
                     }
@@ -285,6 +343,7 @@ impl Conn {
                 }
                 Got::Msg(t, b) => {
                     out.push(compact(t, &b));
+                    self.note(out.last().unwrap());
                     if t == b'Z' {
                         return out;
                     }
@@ -336,10 +395,17 @@ pub fn session_params(addr: &str, params: &[(&str, &str)], steps: &[Vec<u8>]) ->
 
 fn session_as(addr: &str, proto: i32, params: &[(&str, &str)], setup: &[&str], steps: &[Vec<u8>]) -> String {
     let mut c = Conn::open(addr, &startup_packet(proto, params, b"\0"));
+    // (A startup the recording has fail is followed as its replies; one that succeeds
+    // waits for its ReadyForQuery.)
+    if WANT.with(|w| w.borrow().as_deref().is_some_and(|w| !w.starts_with("startup "))) {
+        c.quiet = ANSWER;
+    }
+    c.said = Some(("startup".into(), " "));
     let s = c.startup();
     if s.last().map(String::as_str) != Some("ZI") {
         return format!("startup {}", s.join(" "));
     }
+    c.said = None;
     // (A setup query's replies end with its ReadyForQuery: waited for however long a loaded
     // machine takes, an ANALYZE say, so none is left for the first step.)
     c.quiet = Duration::from_secs(30);
@@ -348,6 +414,7 @@ fn session_as(addr: &str, proto: i32, params: &[(&str, &str)], setup: &[&str], s
         c.rest();
     }
     c.quiet = QUIET;
+    c.said = Some((String::new(), ""));
     let mut out = Vec::new();
     for st in steps {
         if !c.send(st) {
@@ -355,6 +422,9 @@ fn session_as(addr: &str, proto: i32, params: &[(&str, &str)], setup: &[&str], s
             break;
         }
         let r = c.rest();
+        if let Some((_, sep)) = &mut c.said {
+            *sep = " / ";
+        }
         let closed = r.last().map(String::as_str) == Some("closed");
         out.push(r.join(" "));
         if closed {
@@ -373,7 +443,9 @@ pub fn ext(addr: &str, setup: &[&str], ms: &[Vec<u8>]) -> String {
 
 /// The replies to a raw startup packet.
 pub fn startup(addr: &str, packet: &[u8]) -> String {
-    Conn::open(addr, packet).startup().join(" ")
+    let mut c = Conn::open(addr, packet);
+    c.said = Some((String::new(), ""));
+    c.startup().join(" ")
 }
 
 /// Packets answered by a byte (SSLRequest, GSSENCRequest), each sent after the last's
