@@ -2436,15 +2436,17 @@ impl TxnState {
             let data = std::mem::take(&mut s.data);
             {
                 let key = |e: &(u32, u32, u32)| &data[e.0 as usize..(e.0 + e.1) as usize];
-                // (By each key's first 16 bytes, then the keys themselves where those tie.)
-                let word = |k: &[u8]| {
+                // (By each key's first 16 bytes, a byte at a time (`sort::radix_sort_by`: the
+                // index entries of a column in no order, not only rows in key order), then the
+                // keys themselves where those tie. Keys are unique: one order.)
+                let words = |k: &[u8]| {
                     let mut b = [0u8; 16];
                     let n = k.len().min(16);
                     b[..n].copy_from_slice(&k[..n]);
-                    u128::from_be_bytes(b)
+                    [u64::from_be_bytes(b[..8].try_into().unwrap()), u64::from_be_bytes(b[8..].try_into().unwrap())]
                 };
-                let mut order: Vec<(u128, u32)> = s.ents.iter().enumerate().map(|(i, e)| (word(key(e)), i as u32)).collect();
-                order.sort_unstable_by(|a, b| {
+                let mut order: Vec<([u64; 2], u32)> = s.ents.iter().enumerate().map(|(i, e)| (words(key(e)), i as u32)).collect();
+                crate::sort::radix_sort_by(&mut order, |o| o.0, |a, b| {
                     a.0.cmp(&b.0).then_with(|| key(&s.ents[a.1 as usize]).cmp(key(&s.ents[b.1 as usize])))
                 });
                 let ts = self.position() as u64 + 1;
