@@ -335,7 +335,9 @@ impl Egress {
 
     fn literal(&self, host: &str, own: &[IpAddr]) -> Result<(), Refused> {
         let bare = host.trim_start_matches('[').trim_end_matches(']');
-        let h = normal_host(bare);
+        // As `roll_net::literal_private_host` reads it; `localhost.` is a name, which the resolver
+        // checks.
+        let h = bare.to_ascii_lowercase();
         if !self.allow_private && (h == "localhost" || h.ends_with(".localhost")) {
             return Err(Refused::Private(host.to_string()));
         }
@@ -359,9 +361,7 @@ impl Egress {
     async fn resolve_inner(&self, host: &str, port: u16) -> Result<Vec<SocketAddr>, Refused> {
         let own = denied_now(&self.deny_names).await?;
         let bare = host.trim_start_matches('[').trim_end_matches(']');
-        if bare.parse::<IpAddr>().is_ok() || normal_host(bare) == "localhost" || normal_host(bare).ends_with(".localhost") {
-            self.literal(host, &own)?;
-        }
+        self.literal(host, &own)?;
         let addrs: Vec<SocketAddr> = match bare.parse::<IpAddr>() {
             Ok(ip) => vec![SocketAddr::new(ip, port)],
             Err(_) => tokio::time::timeout(LOOKUP_TIMEOUT, tokio::net::lookup_host((bare, port)))
@@ -424,7 +424,7 @@ mod tests {
         assert_eq!(e.check_literal("1.2.3.9"), Err(Refused::Denied("1.2.3.9".into())));
         assert_eq!(e.check_literal("[::ffff:9.9.9.9]"), Err(Refused::Denied("[::ffff:9.9.9.9]".into())), "the old setting's name is read too");
         assert_eq!(e.check_literal("127.0.0.1"), Err(Refused::Private("127.0.0.1".into())));
-        assert_eq!(e.check_literal("LOCALHOST."), Err(Refused::Private("LOCALHOST.".into())));
+        assert_eq!(e.check_literal("LOCALHOST"), Err(Refused::Private("LOCALHOST".into())));
         assert_eq!(e.check_literal("db.example.com"), Ok(()));
         assert!(matches!(e.resolve("1.2.3.9", 5432).await, Err(Refused::Denied(_))));
         let dev = Egress::of(get, true).unwrap();
