@@ -251,6 +251,12 @@ async fn no_such_name(name: &str) -> bool {
     )
 }
 
+/// A check that resolves the node's own names (and maybe the host). Boxed, so the futures of the
+/// many callers that await one (inference, watches, connectors, reindex) don't nest its
+/// resolver's futures in their own types: `search-control`'s deepest handler sits near rustc's
+/// layout depth limit.
+pub type Checking<'a, T> = std::pin::Pin<Box<dyn std::future::Future<Output = Result<T, Refused>> + Send + 'a>>;
+
 /// The node's egress rules for one feature: its own `allow_private`, the node's deny lists.
 #[derive(Clone, Debug)]
 pub struct Egress {
@@ -302,15 +308,20 @@ impl Egress {
 
     /// [`Egress::check_literal`], with the node's names resolved now (again if stale), failing
     /// closed until they've answered: for callers about to connect.
-    pub async fn check_literal_now(&self, host: &str) -> Result<(), Refused> {
-        let own = denied_now(&self.deny_names).await?;
-        self.literal(host, &own)
+    pub fn check_literal_now<'a>(&'a self, host: &'a str) -> Checking<'a, ()> {
+        Box::pin(async move {
+            let own = denied_now(&self.deny_names).await?;
+            self.literal(host, &own)
+        })
     }
 
     /// [`Egress::check_literal_now`] for a URL's host.
-    pub async fn check_url_now(&self, url: &reqwest::Url) -> Result<(), Refused> {
-        self.check_url(url)?;
-        self.check_literal_now(url.host_str().unwrap_or_default()).await
+    pub fn check_url_now<'a>(&'a self, url: &'a reqwest::Url) -> Checking<'a, ()> {
+        Box::pin(async move {
+            self.check_url(url)?;
+            let own = denied_now(&self.deny_names).await?;
+            self.literal(url.host_str().unwrap_or_default(), &own)
+        })
     }
 
     /// [`Egress::check_literal`] for a URL's host.
@@ -341,7 +352,11 @@ impl Egress {
     /// The addresses `host:port` may be reached at, in the resolver's order: an address written
     /// out checked as [`Egress::check_literal_now`] does, a name resolved and every address it
     /// gives checked. Connect to one of these, never to the name.
-    pub async fn resolve(&self, host: &str, port: u16) -> Result<Vec<SocketAddr>, Refused> {
+    pub fn resolve<'a>(&'a self, host: &'a str, port: u16) -> Checking<'a, Vec<SocketAddr>> {
+        Box::pin(self.resolve_inner(host, port))
+    }
+
+    async fn resolve_inner(&self, host: &str, port: u16) -> Result<Vec<SocketAddr>, Refused> {
         let own = denied_now(&self.deny_names).await?;
         let bare = host.trim_start_matches('[').trim_end_matches(']');
         if bare.parse::<IpAddr>().is_ok() || normal_host(bare) == "localhost" || normal_host(bare).ends_with(".localhost") {
