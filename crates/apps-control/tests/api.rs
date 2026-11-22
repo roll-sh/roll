@@ -2230,6 +2230,40 @@ async fn requests_are_access_lines_filtered_by_status() {
     assert_eq!(m["requests"].as_array().unwrap().iter().map(|v| v.as_f64().unwrap()).sum::<f64>(), 3.0, "{m}");
 }
 
+/// Anomaly alerts: the last hour against the same hour of the week before (Vercel's anomaly
+/// alerts): traffic gone where there's usually plenty fires `alert.anomaly`, usual traffic
+/// resolves it; with no past to compare with, nothing fires.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn traffic_unusual_for_the_hour_is_an_anomaly() {
+    let w = world().await;
+    let (svc, _) = image_service(&w, "api", json!({"port": 80, "alerts": {"anomaly": true}})).await;
+    let id = svc["id"].as_str().unwrap().to_string();
+    let live = w.apps.live(&id, "production");
+    let events = |kind: &'static str| {
+        let api = w.api.clone();
+        async move { call(&api, "GET", "/v1/apps/events?after=0", None).await.1["events"].as_array().unwrap().iter().filter(|e| e["kind"] == kind).cloned().collect::<Vec<_>>() }
+    };
+    let minute = |m: i64, requests: i64| apps_control::store::MinuteRow { minute: m, requests, instances: 1, ..Default::default() };
+    w.apps.judge_alerts(&live).await;
+    assert!(events("alert.anomaly").await.is_empty(), "no past: nothing to compare with");
+    // This hour of the week had a thousand requests in each of the last four weeks.
+    let now = code_sql::now_ms() / 60_000;
+    for k in 1..=4 {
+        let hour = now / 60 - k * 168;
+        w.apps.store.put_minutes(&id, "production", &(0..10).map(|j| minute(hour * 60 + j, 100)).collect::<Vec<_>>()).unwrap();
+    }
+    // Past a week, minutes are hours (as the hourly pass rolls them up).
+    w.apps.store.prune_metrics(now - 7 * 24 * 60).unwrap();
+    w.apps.judge_alerts(&live).await;
+    let fired = events("alert.anomaly").await;
+    assert!(fired.len() == 1 && fired[0]["data"]["kind"] == "traffic" && fired[0]["data"]["usual"] == 1000.0, "{fired:?}");
+    // Usual traffic again: resolved.
+    let now = code_sql::now_ms() / 60_000;
+    w.apps.store.put_minutes(&id, "production", &(1..=10).map(|i| minute(now - i, 100)).collect::<Vec<_>>()).unwrap();
+    w.apps.judge_alerts(&live).await;
+    assert!(events("alert.resolved").await.iter().any(|e| e["data"]["alert"] == "alert.anomaly"));
+}
+
 /// Five minutes of 5xx answers past the alert's share make one `alert.errors` event; more of the
 /// same don't make another until it clears.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -4274,7 +4308,7 @@ async fn a_failed_deploy_is_sent_to_the_projects_targets_signed_and_retried() {
     let (st, hook) = call(&w.api, "POST", &base, Some(json!({"url": format!("http://{ok_at}/hook")}))).await;
     assert_eq!(st, StatusCode::CREATED, "{hook}");
     let secret = hook["secret"].as_str().unwrap().to_string();
-    assert_eq!(hook["events"], json!(["check.down", "heartbeat.missed", "alert.slo", "deploy.failed", "rollout.waiting", "deploy.ready", "error.new", "error.regressed", "crash_loop", "spend.alert", "spend.limit", "alert.memory", "alert.cpu", "alert.metric", "alert.errors", "alert.latency", "alert.capacity", "alert.log", "cron.failed", "domain.expiring", "domain.expired", "domain.tls_failed", "volume.backup_failed", "volume.full"]), "the default events");
+    assert_eq!(hook["events"], json!(["check.down", "heartbeat.missed", "alert.slo", "alert.anomaly", "deploy.failed", "rollout.waiting", "deploy.ready", "error.new", "error.regressed", "crash_loop", "spend.alert", "spend.limit", "alert.memory", "alert.cpu", "alert.metric", "alert.errors", "alert.latency", "alert.capacity", "alert.log", "cron.failed", "domain.expiring", "domain.expired", "domain.tls_failed", "volume.backup_failed", "volume.full"]), "the default events");
     let (_, down) = call(&w.api, "POST", &base, Some(json!({"kind": "webhook", "url": format!("http://{bad_at}/x"), "events": ["deploy.failed"]}))).await;
     let (_, list) = call(&w.api, "GET", &base, None).await;
     assert!(!list.to_string().contains(&secret) && !list.to_string().contains("/hook"), "neither the secret nor the URL comes back: {list}");
