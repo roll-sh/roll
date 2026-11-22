@@ -40,7 +40,7 @@ impl Code {
         let (owner, name) = repo.split_once('/').ok_or_else(|| Error::Invalid("a repo is owner/name".into()))?;
         let r = self.find_repo(owner, name)?;
         let no_model = || Error::Unprocessable(format!("{owner} has no model provider: set one (PUT /v1/code/owners/{owner}/review-provider), or the server's (ROLL_REVIEW_PROVIDER)"));
-        let mut chosen = self.choose_provider(&r.owner_id, false)?.ok_or_else(no_model)?;
+        let mut chosen = self.choose_provider(&r.owner_id, false).await?.ok_or_else(no_model)?;
         let public = Self::is_public(&r);
         let month = month_of(crate::db::now());
         let input = |key| PriceInput { kind: Kind::Chat, mode: code_review::Mode::Standard, key, files: 0, public_repo: public, human_author: true };
@@ -50,7 +50,7 @@ impl Code {
             let estimate = |_| pricing::price(&self.config.review.rates, &input(KeySource::Hosted), &Month::default());
             match self.reserve(&r.owner_id, &month, billing.monthly_cap_usd, estimate)? {
                 Some(g) => reservation = Some(g),
-                None => match (billing.on_cap.as_str(), self.choose_provider(&r.owner_id, true)?) {
+                None => match (billing.on_cap.as_str(), self.choose_provider(&r.owner_id, true).await?) {
                     ("byok_fallback", Some(b)) => chosen = b,
                     _ => return Err(Error::Unprocessable(format!("{owner}'s monthly AI cap (${:.2}) is reached", billing.monthly_cap_usd.unwrap_or_default()))),
                 },

@@ -16,7 +16,7 @@
 
 use crate::fargate::{Fargate, Launch, container_override, fargate_size, FETCH};
 use async_trait::async_trait;
-use code_control::agents::sandbox::{BackendError, BackendState, SandboxBackend, SandboxSpec, Tagged};
+use code_control::agents::sandbox::{BackendError, BackendState, EnvChange, SandboxBackend, SandboxSpec, Tagged};
 use code_review::secret::Sealer;
 use object_store::path::Path as ObjPath;
 use object_store::{ObjectStoreExt, PutPayload};
@@ -225,15 +225,15 @@ impl SandboxBackend for FargateSandboxes {
         self.launch(&id).await
     }
 
-    /// What it starts with, less `without`, kept in place of the old, then a fresh task.
-    async fn start_without(&self, backend_id: &str, _spec: &SandboxSpec, without: &[String]) -> Result<bool, BackendError> {
+    /// What it starts with, with `change` made, kept in place of the old, then a fresh task.
+    async fn start_with(&self, backend_id: &str, _spec: &SandboxSpec, change: &EnvChange) -> Result<bool, BackendError> {
         let id = check(backend_id)?;
         let mut kept = self.kept(&id).await?;
-        kept.env.retain(|k, _| !without.contains(k));
+        change.apply(&mut kept.env);
         let json = serde_json::to_string(&kept).map_err(transient)?;
         let sealed = self.sealer.seal(&Self::scope(&id), &json);
         self.fargate.s3().put(&self.kept_key(&id), PutPayload::from(sealed.into_bytes())).await.map_err(transient)?;
-        self.stop_all(backend_id, "roll: the sandbox starts without its copied secrets").await?;
+        self.stop_all(backend_id, "roll: the sandbox starts with its copied secrets read again").await?;
         self.launch(&id).await?;
         Ok(true)
     }

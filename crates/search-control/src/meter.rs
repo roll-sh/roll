@@ -65,12 +65,23 @@ pub struct EngineFigures {
     pub open_indices: usize,
     /// Indices in the cluster's state.
     pub indices: usize,
+    /// Hidden indices (named with a leading `.`: security, tasks, async results) whose engine
+    /// isn't open.
+    pub closed_hidden: usize,
 }
 
 impl EngineFigures {
     /// Whether every index is open, so the figures cover the whole cluster.
     pub fn complete(&self) -> bool {
         self.open_indices == self.indices
+    }
+
+    /// Whether the figures cover every index a person made, so its live document count can be
+    /// shown: a hidden index (making an API key creates `.security`) holds roll's and
+    /// Elasticsearch's own records, and one not open yet would otherwise hide the live count
+    /// behind the last metered sample.
+    pub fn complete_for_display(&self) -> bool {
+        self.open_indices + self.closed_hidden == self.indices
     }
 }
 
@@ -100,6 +111,8 @@ pub fn engine_figures(cluster: &Cluster) -> EngineFigures {
             total.segment_bytes += f.segment_bytes;
             total.heap_bytes += f.heap_bytes;
             total.open_indices += 1;
+        } else if idx.name.starts_with('.') {
+            total.closed_hidden += 1;
         }
     }
     total
@@ -449,6 +462,11 @@ mod tests {
         let f = engine_figures(&c);
         assert_eq!((f.indices, f.open_indices, f.docs, f.deleted_docs), (2, 2, 3, 0), "{f:?}");
         assert!(f.complete());
+        // A hidden index not open yet (as `.security` is once a key is made) keeps the count
+        // shown live, though the figures no longer cover the whole cluster.
+        assert_eq!(rest(&c, "PUT", "/.roll-figures-test", "").await, 200);
+        let h = engine_figures(&c);
+        assert_eq!((h.indices, h.closed_hidden, h.docs, h.complete(), h.complete_for_display()), (3, 1, 3, false, true), "{h:?}");
         assert!(f.heap_bytes > 0 && f.segment_bytes > 0, "{f:?}");
         // Measuring is free of side effects: the same figure twice, and the figures' heap.
         assert_eq!(resident_bytes(&c), LOADED_BASE_BYTES + f.heap_bytes as i64);

@@ -256,7 +256,7 @@ impl Code {
         let public = Self::is_public(&r);
         let month = month_of(crate::db::now());
         let billing = self.db.billing(&r.owner_id)?;
-        let mut chosen = self.choose_provider(&r.owner_id, false)?.ok_or_else(|| Error::Unprocessable("roll's reviewer has no model provider: set one for the owner (PUT /v1/code/owners/{owner}/review-provider) or on the server (ROLL_REVIEW_PROVIDER)".into()))?;
+        let mut chosen = self.choose_provider(&r.owner_id, false).await?.ok_or_else(|| Error::Unprocessable("roll's reviewer has no model provider: set one for the owner (PUT /v1/code/owners/{owner}/review-provider) or on the server (ROLL_REVIEW_PROVIDER)".into()))?;
 
         // The mode.
         let cfg = self.review_config(&r).await;
@@ -283,7 +283,7 @@ impl Code {
                 None => {
                     let cap = billing.monthly_cap_usd.unwrap_or_default();
                     match billing.on_cap.as_str() {
-                        "byok_fallback" => match self.choose_provider(&r.owner_id, true)? {
+                        "byok_fallback" => match self.choose_provider(&r.owner_id, true).await? {
                             Some(b) => chosen = b,
                             None => return self.capped(&r, &c, cap).await,
                         },
@@ -693,7 +693,7 @@ impl Code {
         let r = self.repo_by_id(&c.repo_id)?;
         let th = self.db.thread(&thread_id)?.ok_or_else(|| Error::NotFound(format!("thread {thread_id}")))?;
         let (settings, ..) = self.reviewer_settings(&r).await;
-        let mut chosen = match self.choose_provider(&r.owner_id, false)? {
+        let mut chosen = match self.choose_provider(&r.owner_id, false).await? {
             Some(c) => c,
             None => {
                 self.roll_reply(&r, &c, &th, "I can't answer: roll's reviewer has no model provider configured for this owner.")?;
@@ -712,7 +712,7 @@ impl Code {
                 Some(g) => reservation = Some(g),
                 None => {
                     let cap = billing.monthly_cap_usd.unwrap_or_default();
-                    match (billing.on_cap.as_str(), self.choose_provider(&r.owner_id, true)?) {
+                    match (billing.on_cap.as_str(), self.choose_provider(&r.owner_id, true).await?) {
                         ("byok_fallback", Some(b)) => chosen = b,
                         _ => {
                             self.roll_reply(&r, &c, &th, &format!("I can't answer: the owner's monthly AI review cap (${cap:.2}) is reached."))?;

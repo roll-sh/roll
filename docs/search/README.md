@@ -1391,9 +1391,7 @@ deterministic (#396).
    Overview of a cluster with no indices or from the Indices tab, then three queries run in place
    with Open in Console, copy as curl, JavaScript or Python reading `$ELASTICSEARCH_API_KEY` as the
    guides do; a 30-day `data` key made in the panel goes into the copied code, shown once). Left:
-   a sample dataset for RAG (passages with `semantic_text` on E5); the Overview's document count
-   falls back to the metered figure while any index is closed (a key's security index right after
-   it's made), so it can read 0 until metering's next sample; and
+   a sample dataset for RAG (passages with `semantic_text` on E5); and
    what writing the guides found: an API key's `encoded` value works only at the cluster's own
    host, so clients behind a shared address re-encode it as `<id>@<cluster>:<key>`; a `data` key
    can't post click events, so an app tracking clicks needs a second key; a `semantic_text` field
@@ -1407,12 +1405,14 @@ deterministic (#396).
    on #318's runner) taking Open Crawler's config, fields and ids, fetching through
    `roll_net::PublicOnly` with redirects checked hop by hop, robots.txt always honoured, domain
    verification for more than small crawls, and a purge that a site outage can't empty.
-14. **Semantic search on OpenSearch-flavor clusters** (AWS OpenSearch neural search):
+14. **Semantic search on OpenSearch-flavor clusters** (design in
+   [opensearch-neural.md](opensearch-neural.md); AWS OpenSearch neural search):
    `neural`, `neural_sparse` and `agentic` are names only (`meta/aliases.rs`); ML Commons
    (`_plugins/_ml/connectors`, `models/_register`) and the `text_embedding`/`ml_inference` processors
    aren't served, so OpenSearch customers' neural setups (Bedrock or OpenAI connectors) fail on
    arrival. Map them onto roll's `_inference` services and E5 (#563).
-15. **Relevance evaluation, A/B tests and merchandising** (Algolia A/B Testing, rules that
+15. **Relevance evaluation, A/B tests and merchandising** (design in
+   [relevance-experiments.md](relevance-experiments.md); Algolia A/B Testing, rules that
    boost, bury, filter and redirect, conversion analytics, dynamic re-ranking): `_rank_eval` is served
    without a UI or judgment lists, the Playground's A/B is offline, analytics records clicks only, and
    rules stop at pin and exclude. Live traffic splits through search applications (#358), conversion
@@ -1421,7 +1421,8 @@ deterministic (#396).
    nothing measures the first query and p99 on a node with an empty cache for 1, 10 and 50 GB
    indices loaded from object storage, or on Graviton. Buyers comparing always-on Typesense or Algolia
    will ask (benchmark lane).
-17. **Private networking and customer keys** (Elastic Cloud PrivateLink traffic filters and BYOK,
+17. **Private networking and customer keys** (design in
+   [private-networking.md](private-networking.md); Elastic Cloud PrivateLink traffic filters and BYOK,
    AWS OpenSearch VPC domains and KMS): the data plane is public with IP allowlists; roll apps and
    previews send from per-task public IPs on roll cloud, so an allowlisted cluster refuses them. A
    signed link identity an allowlist can admit ("apps service svc_x"), private endpoints, and a

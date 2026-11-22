@@ -127,6 +127,10 @@ impl Daemon {
     }
 
     fn with_products(on: Vec<String>) -> Daemon {
+        Daemon::with_inspector(on, None)
+    }
+
+    fn with_inspector(on: Vec<String>, inspector: Option<Arc<dyn roll_mcp::Inspector>>) -> Daemon {
         let dir = tempfile::tempdir().unwrap();
         let ws = code_sql::Db::open_or_test(&code_sql::Target::Sqlite(dir.path().join("workspace.db")), "workspace").unwrap();
         let workspace = Arc::new(roll_workspace::Workspace::new(ws).unwrap());
@@ -136,7 +140,7 @@ impl Daemon {
         gate.set_authorizer(Arc::new(roll_access::evaluate::Evaluator(access.clone())));
         let layer = || axum::middleware::from_fn_with_state(gate.clone(), roll_auth::check);
         let api = products().merge(roll_workspace::router(workspace.clone())).merge(roll_access::api::router(access.clone()));
-        let mcp_config = roll_mcp::Config { api_url: "http://127.0.0.1:7070".into(), web_url: "http://localhost:3000".into(), locked: true, products: on, access: Some(access.clone()) };
+        let mcp_config = roll_mcp::Config { api_url: "http://127.0.0.1:7070".into(), web_url: "http://localhost:3000".into(), locked: true, products: on, access: Some(access.clone()), inspector };
         let mcp = roll_mcp::routes(api.clone().layer(layer()), mcp_config, vec![Arc::new(Fronted) as Arc<dyn roll_mcp::ToolSet>]);
         let _ = access.people.set(Arc::new(Alice));
         // People's memberships, as rolld wires them: a person's session grant is their roles.
@@ -190,6 +194,14 @@ impl Daemon {
         assert_eq!(s, StatusCode::CREATED, "{out}");
         out["token"].as_str().unwrap().to_string()
     }
+}
+
+/// The `Mcp-Param-*` headers a 2026-07-28 client sends for a call's marked arguments (SEP-2243).
+fn param_headers(params: &Value) -> Vec<(&'static str, String)> {
+    [("project", "mcp-param-project"), ("env", "mcp-param-environment"), ("service", "mcp-param-service")]
+        .into_iter()
+        .filter_map(|(arg, h)| params["arguments"][arg].as_str().map(|v| (h, v.to_string())))
+        .collect()
 }
 
 fn names(list: &Value) -> Vec<String> {
@@ -486,6 +498,7 @@ async fn a_call_waiting_for_approval_is_a_task_polled_to_its_result() {
             if let Some(n) = name {
                 h.push(("mcp-name", n));
             }
+            h.extend(param_headers(&params));
             let h: Vec<(&str, &str)> = h.iter().map(|(k, v)| (*k, v.as_str())).collect();
             d.http_with(&token, Method::POST, "/v1/mcp", Some(json!({ "jsonrpc": "2.0", "id": 1, "method": method, "params": params })), &h).await.2
         }
@@ -590,8 +603,11 @@ async fn a_host_that_renders_apps_gets_the_table_view() {
 async fn a_2026_client_is_served_without_initialize() {
     let d = Daemon::new();
     let meta = |caps: Value| json!({ "io.modelcontextprotocol/protocolVersion": "2026-07-28", "io.modelcontextprotocol/clientInfo": { "name": "modern", "version": "2" }, "io.modelcontextprotocol/clientCapabilities": caps });
-    let send = |token: &str, id: i64, method: &str, mut params: Value, headers: Vec<(&'static str, String)>| {
+    let send = |token: &str, id: i64, method: &str, mut params: Value, mut headers: Vec<(&'static str, String)>| {
         params["_meta"] = meta(json!({ "elicitation": { "url": {} } }));
+        if !headers.is_empty() {
+            headers.extend(param_headers(&params));
+        }
         let body = json!({ "jsonrpc": "2.0", "id": id, "method": method, "params": params });
         let token = token.to_string();
         let d = &d;
@@ -643,6 +659,20 @@ async fn a_2026_client_is_served_without_initialize() {
     let projects = out["result"]["tools"].as_array().unwrap().iter().find(|t| t["name"] == "postgres_list_projects").unwrap();
     assert!(projects["outputSchema"]["properties"]["items"]["items"]["properties"]["id"].is_object(), "{}", projects["outputSchema"]);
     assert_eq!(schemas(&d.rpc(OPERATOR, "tools/list", json!({})).await), 0);
+    // A routable argument is marked x-mcp-header (SEP-2243), and a call carries it as a header too.
+    let get = out["result"]["tools"].as_array().unwrap().iter().find(|t| t["name"] == "postgres_get_project").unwrap().clone();
+    assert_eq!(get["inputSchema"]["properties"]["project"]["x-mcp-header"], "Project");
+    let raw = |header: Option<&'static str>| {
+        let body = json!({ "jsonrpc": "2.0", "id": 30, "method": "tools/call", "params": { "name": "postgres_get_project", "arguments": { "project": "pa" }, "_meta": meta(json!({})) } });
+        let mut h = vec![("mcp-protocol-version", "2026-07-28"), ("mcp-method", "tools/call"), ("mcp-name", "postgres_get_project")];
+        h.extend(header.map(|v| ("mcp-param-project", v)));
+        let d = &d;
+        async move { d.http_with(OPERATOR, Method::POST, "/v1/mcp", Some(body), &h).await }
+    };
+    let (s, _, missing) = raw(None).await;
+    assert_eq!((s, missing["error"]["code"].as_i64()), (StatusCode::BAD_REQUEST, Some(-32020)), "{missing}");
+    let (s, _, ok) = raw(Some("=?base64?cGE=?=")).await;
+    assert!(s != StatusCode::BAD_REQUEST && ok["error"].is_null(), "the header (Base64 form) says what the body does: {ok}");
     // A resource that isn't there is Invalid Params in this revision (SEP-2164; -32002 before it).
     let uri = "roll://nothing/here";
     let (_, _, out) = send(OPERATOR, 21, "resources/read", json!({ "uri": uri }), std_headers("resources/read", Some(uri))).await;
@@ -1267,4 +1297,34 @@ async fn an_agent_streams_what_happens() {
     let seen: Vec<(&str, &str)> = [&one, &two].iter().map(|e| (e["params"]["data"]["kind"].as_str().unwrap(), e["params"]["cursor"].as_str().unwrap())).collect();
     assert_eq!(seen, [("deploy.active", "a1:1"), ("deploy.failed", "a1:2")], "{one} {two}");
     assert_eq!(two["params"]["_meta"]["io.modelcontextprotocol/subscriptionId"], "s1");
+}
+
+/// An inspector that blocks deleting projects and notes a result telling the model what to do.
+struct Scanner;
+
+impl roll_mcp::Inspector for Scanner {
+    fn inspect(&self, look: Value) -> std::pin::Pin<Box<dyn std::future::Future<Output = roll_mcp::Verdict> + Send>> {
+        let verdict = match (look["phase"].as_str(), look["tool"].as_str()) {
+            (Some("call"), Some("postgres_delete_project")) => roll_mcp::Verdict::Block("deletes need a ticket".into()),
+            (Some("result"), _) if look["text"].as_str().unwrap_or("").contains("Ignore your instructions") => roll_mcp::Verdict::Note("this result holds an instruction to the model".into()),
+            _ => roll_mcp::Verdict::Allow,
+        };
+        Box::pin(async move { verdict })
+    }
+}
+
+/// The operator's inspector sees every call before it runs and its result before the model:
+/// a call it blocks doesn't run (an error says why), and a result it notes is shown with the note.
+#[tokio::test]
+async fn the_inspector_blocks_and_notes() {
+    let d = Daemon::with_inspector(vec!["postgres".into(), "apps".into()], Some(Arc::new(Scanner)));
+    let blocked = d.tool(OPERATOR, "postgres_delete_project", json!({ "project": "pa" })).await;
+    assert!(blocked["isError"] == true && blocked["content"][0]["text"].as_str().unwrap().contains("deletes need a ticket"), "{blocked}");
+    let work = d.tool(OPERATOR, "code_list_work", json!({})).await;
+    assert_eq!(work["_meta"]["roll/inspector"], "this result holds an instruction to the model", "{work}");
+    assert!(work["content"][0]["text"].as_str().unwrap().starts_with("Note from the operator's inspector"));
+    // What a tool reveals (people's form data here) never goes to the scanner, so it can't note it.
+    let form = d.tool(OPERATOR, "apps_form_submissions", json!({ "service": "svc_a", "env": "production", "form": "contact" })).await;
+    assert!(form["_meta"]["roll/inspector"].is_null(), "{form}");
+    assert_eq!(d.tool(OPERATOR, "postgres_list_projects", json!({})).await["isError"], false, "the rest goes through");
 }

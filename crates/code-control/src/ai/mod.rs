@@ -390,7 +390,7 @@ impl Code {
     pub async fn reviewer_view(&self, r: &RepoRow) -> Result<Value> {
         let (s, stored, file, errors) = self.reviewer_settings(r).await;
         let (queued, running, last) = self.db.ai_job_summary(&r.id)?;
-        let provider = self.choose_provider(&r.owner_id, false).ok().flatten();
+        let provider = self.describe_provider(&r.owner_id);
         let index = match &self.ai.index {
             Some(i) => i.repo(&r.id).ok().map(|x| json!({ "head": x.head().ok().flatten(), "stats": x.stats().ok() })),
             None => None,
@@ -400,7 +400,7 @@ impl Code {
             "settings": stored,
             "file": file,
             "errors": errors,
-            "provider": provider.map(|p| json!({ "source": p.key.as_str(), "provider": p.name, "model": p.provider.model() })),
+            "provider": provider.map(|(key, name, model)| json!({ "source": key.as_str(), "provider": name, "model": model })),
             "jobs": { "queued": queued, "running": running, "last": last },
             "index": index,
         }))
@@ -408,12 +408,45 @@ impl Code {
 
     // ── providers and keys ──
 
+    /// Which provider and model the owner's reviews use, without reading a key (nothing is
+    /// audited or decrypted): the reviewer's settings page.
+    fn describe_provider(&self, owner_id: &str) -> Option<(KeySource, &'static str, String)> {
+        match self.db.owner_provider(owner_id).ok()? {
+            Some(p) if p.provider == "openai_compatible" => Some((KeySource::Byok, "openai_compatible", p.model.unwrap_or_default())),
+            Some(p) => Some((KeySource::Byok, "anthropic", p.model.unwrap_or_else(|| code_review::provider::anthropic::DEFAULT_MODEL.to_string()))),
+            None => {
+                let c = hosted_provider(self.config.review.hosted.as_ref()?, &self.config.review.retry).ok()?;
+                Some((c.key, c.name, c.provider.model().to_string()))
+            }
+        }
+    }
+
+    /// The owner's own key: opened here, or read from roll secrets as whoever chose it.
+    async fn owner_key(&self, owner_id: &str, key: &store::OwnerKey) -> Result<String> {
+        match key {
+            store::OwnerKey::Sealed { sealed, .. } => {
+                let sealer = self.ai.sealer.as_ref().ok_or_else(|| Error::Unprocessable("bring-your-own keys need ROLL_SECRET_KEY on the server".into()))?;
+                sealer.open(owner_id, sealed).map_err(|e| Error::Unprocessable(e.to_string()))
+            }
+            store::OwnerKey::Reference { reference, maker } => {
+                let owner = self.db.owner_by_id(owner_id)?.ok_or_else(|| Error::NotFound(format!("owner {owner_id}")))?;
+                let secrets = self.secret_env.get().ok_or_else(|| Error::Unprocessable(format!("{}'s provider key is {reference}, and roll secrets isn't on this server", owner.name)))?;
+                match secrets.owner_key(&owner.name, reference, maker).await {
+                    Ok(v) => Ok(v.0),
+                    Err(e) => Err(Error::Unprocessable(format!(
+                        "{}'s provider key {reference} can't be read from roll secrets: {e:#}. Set the key again as someone who may reveal it (PUT /v1/code/owners/{}/review-provider)",
+                        owner.name, owner.name
+                    ))),
+                }
+            }
+        }
+    }
+
     /// The owner's own provider, else the hosted one. `byok_only`: the owner's or nothing.
-    pub(crate) fn choose_provider(&self, owner_id: &str, byok_only: bool) -> Result<Option<Chosen>> {
+    pub(crate) async fn choose_provider(&self, owner_id: &str, byok_only: bool) -> Result<Option<Chosen>> {
         let cfg = &self.config.review;
         if let Some(p) = self.db.owner_provider(owner_id)? {
-            let sealer = self.ai.sealer.as_ref().ok_or_else(|| Error::Unprocessable("bring-your-own keys need ROLL_SECRET_KEY on the server".into()))?;
-            let key = sealer.open(owner_id, &p.key_sealed).map_err(|e| Error::Unprocessable(e.to_string()))?;
+            let key = self.owner_key(owner_id, &p.key).await?;
             // IP literals never reach the resolver: check them on every use too.
             if !self.private_providers_allowed()
                 && let Some(u) = p.base_url.as_deref().and_then(|u| url::Url::parse(u).ok())
@@ -447,23 +480,23 @@ impl Code {
         Ok(Some(hosted_provider(h, &cfg.retry).map_err(|e| Error::Unprocessable(e.to_string()))?))
     }
 
-    pub fn set_owner_provider(&self, caller: &Caller, owner: &str, body: &Value) -> Result<Value> {
+    /// `PUT /owners/{owner}/review-provider`. `api_key` is the key itself (sealed here) or a
+    /// `roll://ENV[/folder]/KEY` reference, bound to the caller by roll secrets (they must be able
+    /// to reveal it) and read as them on every review.
+    pub async fn set_owner_provider(&self, caller: &Caller, asker: &crate::SecretsAsker, owner: &str, body: &Value) -> Result<Value> {
         let o = self.owner_or_404(owner)?;
         if !Self::manages(caller, &o.id) {
             return Err(Error::Forbidden(format!("not allowed to configure {}", o.name)));
         }
-        let sealer = self.ai.sealer.as_ref().ok_or_else(|| {
-            Error::Unprocessable(match &self.ai.sealer_error {
-                Some(e) => format!("bring-your-own keys are unavailable: {e}"),
-                None => "bring-your-own keys need ROLL_SECRET_KEY on the server".into(),
-            })
-        })?;
         let s = |k: &str| body.get(k).and_then(Value::as_str).map(str::trim).filter(|v| !v.is_empty()).map(str::to_string);
         let provider = s("provider").unwrap_or_else(|| "anthropic".into());
-        let key = s("api_key").ok_or_else(|| Error::Invalid("api_key is required".into()))?;
-        if key.len() > 4096 {
+        let raw = body.get("api_key").and_then(Value::as_str).unwrap_or_default();
+        if raw.len() > 4096 {
             return Err(Error::Invalid("api_key is too long".into()));
         }
+        // roll secrets' own parser decides, on the value as sent (` roll://…` is an error).
+        let reference = roll_secrets::Reference::parse(raw).map_err(|e| Error::Invalid(format!("api_key: {e}")))?.is_some();
+        let key = s("api_key").ok_or_else(|| Error::Invalid("api_key is required".into()))?;
         let (base_url, model) = (s("base_url"), s("model"));
         // An owner's endpoint is the owner's to choose, but not this server's private network
         // (metadata, internal services): refused here when written, and on every connection.
@@ -489,15 +522,20 @@ impl Code {
             }
             p => return Err(Error::Invalid(format!("provider is anthropic or openai_compatible, not {p}"))),
         }
-        let row = store::OwnerProvider {
-            provider,
-            base_url,
-            model,
-            secondary_model: s("secondary_model"),
-            key_sealed: sealer.seal(&o.id, &key),
-            key_last4: code_review::secret::last4(&key),
-            updated_at: crate::db::now(),
+        let key = if reference {
+            let secrets = self.secret_env.get().ok_or_else(|| Error::Unprocessable("roll:// keys need roll secrets on this server".into()))?;
+            let maker = secrets.bind_owner_key(&o.name, &key, asker).await?;
+            store::OwnerKey::Reference { reference: key, maker }
+        } else {
+            let sealer = self.ai.sealer.as_ref().ok_or_else(|| {
+                Error::Unprocessable(match &self.ai.sealer_error {
+                    Some(e) => format!("bring-your-own keys are unavailable: {e}"),
+                    None => "bring-your-own keys need ROLL_SECRET_KEY on the server".into(),
+                })
+            })?;
+            store::OwnerKey::Sealed { sealed: sealer.seal(&o.id, &key), last4: code_review::secret::last4(&key) }
         };
+        let row = store::OwnerProvider { provider, base_url, model, secondary_model: s("secondary_model"), key, updated_at: crate::db::now() };
         self.db.set_owner_provider(&o.id, Some(&row))?;
         self.owner_provider_view(caller, owner)
     }
@@ -527,12 +565,16 @@ impl Code {
         let Some(p) = self.db.owner_provider(&o.id)? else {
             return Ok(json!({
                 "owner": o.name, "provider": null, "base_url": null, "model": null,
-                "secondary_model": null, "key_last4": null, "updated_at": null,
+                "secondary_model": null, "key_last4": null, "key_ref": null, "updated_at": null,
             }));
+        };
+        let (last4, reference) = match &p.key {
+            store::OwnerKey::Sealed { last4, .. } => (Some(last4), None),
+            store::OwnerKey::Reference { reference, .. } => (None, Some(reference)),
         };
         Ok(json!({
             "owner": o.name, "provider": p.provider, "base_url": p.base_url, "model": p.model,
-            "secondary_model": p.secondary_model, "key_last4": p.key_last4, "updated_at": p.updated_at,
+            "secondary_model": p.secondary_model, "key_last4": last4, "key_ref": reference, "updated_at": p.updated_at,
         }))
     }
 

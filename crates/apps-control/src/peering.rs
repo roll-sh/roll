@@ -8,7 +8,7 @@
 //!   of its own, with `NET_ADMIN` there and nothing else; one forwarder a route (`socat`, the link
 //!   relays' pinned image, in the peer's namespace) answers the route's name on the project
 //!   network and connects to its target through the tunnel. The app changes nothing: it connects
-//!   to `db.corp.internal:5432` as it would inside the customer's network.
+//!   to `db.acme.corp:5432` as it would inside the customer's network.
 //! - A closed environment's peer answers on its closed network and reaches its endpoint through
 //!   a network of its own (`<peer>-out`): the instances, with no route out and no way to add one,
 //!   still reach only the routes' names, so the customer's hosts join roll as what it may reach.
@@ -37,7 +37,7 @@ pub enum PeerKind {
 /// One name the app connects to and where in the customer's network it goes.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Route {
-    /// A DNS name on the project network (`db.corp.internal`); the target's port is its port.
+    /// A DNS name on the project network (`db.acme.corp`); the target's port is its port.
     pub name: String,
     /// `host:port` in the customer's network (an address the tunnel routes, or a name its
     /// resolver answers).
@@ -88,13 +88,34 @@ pub fn parse(v: &serde_json::Value) -> Result<PrivateNetwork> {
         let name = r.get("name").and_then(|n| n.as_str()).unwrap_or_default().to_ascii_lowercase();
         let target = r.get("target").and_then(|t| t.as_str()).unwrap_or_default().to_string();
         if !valid_name(&name) {
-            return Err(bad(&format!("{name:?} isn't a DNS name (letters, digits, - and ., a dot in it: db.corp.internal)")));
+            return Err(bad(&format!("{name:?} isn't a DNS name (letters, digits, - and ., a dot in it: db.acme.corp)")));
+        }
+        // `<service>.<env>.internal` are the project's own services' names there, and any of them
+        // can be made later: a route never answers under `.internal` (it would take some of their
+        // callers).
+        if name.ends_with(".internal") {
+            return Err(bad(&format!("{name}: .internal is the project's services' own (<service>.<env>.internal): name it otherwise (db.acme.corp)")));
         }
         let (host, port) = target.rsplit_once(':').ok_or_else(|| bad(&format!("{target:?} isn't host:port")))?;
         let port: u16 = port.parse().ok().filter(|p| *p > 0).ok_or_else(|| bad(&format!("{target:?}: the port is 1–65535")))?;
         let host = host.trim_start_matches('[').trim_end_matches(']');
         if host.is_empty() || host.len() > 253 || !(host.parse::<std::net::IpAddr>().is_ok() || valid_name(host) || host.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')) {
             return Err(bad(&format!("{target:?}: the host is an address or a name")));
+        }
+        // Where a route may go: into the tunnel, never past it (a closed environment's code would
+        // get out through the peer's own way out). WireGuard: an address (checked against the
+        // config's AllowedIPs when it's read); Tailscale: a tailnet address or MagicDNS name.
+        let ip = host.parse::<std::net::IpAddr>().ok();
+        if ip.is_some_and(|ip| ip.is_loopback() || ip.is_unspecified() || ip.is_multicast() || matches!(ip, std::net::IpAddr::V4(v) if v.is_link_local() || v.is_broadcast()) || matches!(ip, std::net::IpAddr::V6(v) if (v.segments()[0] & 0xffc0) == 0xfe80)) {
+            return Err(bad(&format!("{target:?}: not a loopback, link-local or broadcast address")));
+        }
+        match kind {
+            PeerKind::Wireguard if ip.is_none() => return Err(bad(&format!("{target:?}: a WireGuard route goes to an address inside the tunnel (its AllowedIPs), not a name"))),
+            PeerKind::Tailscale if !ip.map_or(host.ends_with(".ts.net"), in_tailnet) => {
+                return Err(bad(&format!("{target:?}: a Tailscale route goes to a tailnet address (100.64.0.0/10, fd7a:115c:a1e0::/48) or a MagicDNS name (….ts.net)")));
+            }
+            PeerKind::Tailscale if port == 1055 => return Err(bad("port 1055 is the node's own (its SOCKS5 server)")),
+            _ => {}
         }
         if routes.iter().any(|x| x.name == name) {
             return Err(bad(&format!("{name} is named twice")));
@@ -108,6 +129,24 @@ pub fn parse(v: &serde_json::Value) -> Result<PrivateNetwork> {
         routes.push(Route { name, target: format!("{host}:{port}") });
     }
     Ok(PrivateNetwork { kind, secret: secret.to_string(), routes, login_server })
+}
+
+/// A tailnet address: Tailscale's CGNAT range or its IPv6 ULA.
+fn in_tailnet(ip: std::net::IpAddr) -> bool {
+    ["100.64.0.0/10", "fd7a:115c:a1e0::/48"].iter().any(|n| n.parse::<ipnet::IpNet>().is_ok_and(|n| n.contains(&ip)))
+}
+
+/// A WireGuard config's routes cover every route's target (an address inside its AllowedIPs).
+pub fn targets_in_tunnel(p: &PrivateNetwork, allowed: &[String]) -> std::result::Result<(), String> {
+    let nets: Vec<ipnet::IpNet> = allowed.iter().filter_map(|a| a.parse().ok()).collect();
+    for r in &p.routes {
+        let host = r.target.rsplit_once(':').map_or("", |(h, _)| h).trim_start_matches('[').trim_end_matches(']');
+        let inside = host.parse::<std::net::IpAddr>().is_ok_and(|ip| nets.iter().any(|n| n.contains(&ip)));
+        if !inside {
+            return Err(format!("{} isn't inside the config's AllowedIPs: a route goes into the tunnel only", r.target));
+        }
+    }
+    Ok(())
 }
 
 /// A Tailscale control server: an http(s) URL with a host, nothing a command line could split
@@ -127,7 +166,7 @@ pub fn tailscale_key(text: &str) -> std::result::Result<String, String> {
     Ok(k.to_string())
 }
 
-/// A route's name: a DNS name with a dot (`db.corp.internal`), so it never shadows a service's
+/// A route's name: a DNS name with a dot (`db.acme.corp`), so it never shadows a service's
 /// own name on the project network.
 fn valid_name(n: &str) -> bool {
     n.len() <= 253
@@ -191,10 +230,18 @@ impl crate::Apps {
         // What it reads must be one roll runs, before it's kept (said without its text).
         let text = self.deps.secrets.resolve_as(&svc.project, env, service, &p.secret, &maker).await.map_err(|e| Error::BadRequest(format!("{}: {e:#}", p.secret)))?;
         match p.kind {
-            PeerKind::Wireguard => wireguard_config(&text).map(drop),
+            PeerKind::Wireguard => wireguard_config(&text).and_then(|wg| targets_in_tunnel(&p, &wg.routes)),
             PeerKind::Tailscale => tailscale_key(&text).map(drop),
         }
         .map_err(|why| Error::BadRequest(format!("{}: {why}", p.secret)))?;
+        // A control server is a URL the tenant chose: a public one (its node fetches it).
+        if let Some(u) = &p.login_server {
+            self.check_target("webhook", u).map_err(|e| Error::BadRequest(format!("login_server: {e}")))?;
+            let host = url::Url::parse(u).ok().and_then(|u| u.host_str().map(str::to_string)).unwrap_or_default();
+            if !self.cfg.allow_private && tokio::net::lookup_host((host.as_str(), 443)).await.map(|mut a| a.any(|a| crate::model::private_ip(a.ip()))).unwrap_or(true) {
+                return Err(Error::BadRequest("login_server: it resolves to a private address (or not at all)".into()));
+            }
+        }
         let (sid, e, q, m) = (service.to_string(), env.to_string(), p.clone(), maker.clone());
         self.db(move |s| s.set_peering(&sid, &e, &q, &m)).await?;
         self.apply_peering(service, env).await;
@@ -215,11 +262,19 @@ impl crate::Apps {
         if !self.db(move |s| s.delete_peering(&sid, &e)).await? {
             return Err(Error::NotFound(format!("{env} has no private network")));
         }
-        let lock = self.peer_lock(&crate::env_key(service, env));
-        let _one = lock.lock().await;
-        self.deps.runtime.remove_peer(&peer_name(service, env)).await;
-        self.peer_status.lock().remove(&crate::env_key(service, env));
+        self.drop_peer(service, env).await;
         Ok(())
+    }
+
+    /// An environment's peer stopped and forgotten, after any change to it in flight (a delete
+    /// of the environment or the service, the private network removed).
+    pub(crate) async fn drop_peer(self: &Arc<Self>, service: &str, env: &str) {
+        let key = crate::env_key(service, env);
+        let lock = self.peer_lock(&key);
+        let _one = lock.lock().await;
+        self.deps.runtime.remove_peer(&peer_name(service, env), service, env).await;
+        self.peer_status.lock().remove(&key);
+        self.peer_backoff.lock().remove(&key);
     }
 
     fn peer_lock(&self, key: &str) -> Arc<tokio::sync::Mutex<()>> {
@@ -243,7 +298,7 @@ impl crate::Apps {
         let made = async {
             let text = self.deps.secrets.resolve_as(&svc.project, env, service, &p.secret, &maker).await.map_err(|e| format!("{}: {e:#}", p.secret))?;
             let wg = match p.kind {
-                PeerKind::Wireguard => wireguard_config(&text),
+                PeerKind::Wireguard => wireguard_config(&text).and_then(|wg| targets_in_tunnel(&p, &wg.routes).map(|()| wg)),
                 PeerKind::Tailscale => tailscale_key(&text).map(|key| WgConfig { setconf: key, addresses: Vec::new(), routes: Vec::new(), mtu: None }),
             }
             .map_err(|why| format!("{}: {why}", p.secret))?;
@@ -270,8 +325,17 @@ impl crate::Apps {
             self.deps.runtime.ensure_peer(&spec).await.map_err(|e| format!("{e:#}"))
         };
         let now = match made.await {
-            Ok(()) => "running".to_string(),
-            Err(why) => format!("failed: {why}"),
+            Ok(()) => {
+                self.peer_backoff.lock().remove(&key);
+                "running".to_string()
+            }
+            Err(why) => {
+                // Tried again by the minute's check after 1, 2, 4… minutes (30 at most).
+                let mut b = self.peer_backoff.lock();
+                let fails = b.get(&key).map_or(0, |(f, _)| *f) + 1;
+                b.insert(key.clone(), (fails, code_sql::now_ms() + (60_000i64 << fails.min(5)).min(30 * 60_000)));
+                format!("failed: {why}")
+            }
         };
         let was = self.peer_status.lock().insert(key, now.clone());
         if was.as_deref() != Some(now.as_str()) {
@@ -286,8 +350,16 @@ impl crate::Apps {
     /// config changed in roll secrets): each minute.
     pub(crate) async fn peering_pass(self: &Arc<Self>) {
         let Ok(all) = self.db(|s| s.peerings()).await else { return };
+        let now = code_sql::now_ms();
         for (service, env) in all.into_iter().filter(|(s, _)| self.owns(s)) {
-            self.apply_peering(&service, &env).await;
+            let key = crate::env_key(&service, &env);
+            // Each on its own (a peer coming up takes a minute; it never holds up the pass), one
+            // at a time, a failing one only once its wait is over.
+            if self.peer_backoff.lock().get(&key).is_some_and(|(_, next)| now < *next) || self.peer_lock(&key).try_lock().is_err() {
+                continue;
+            }
+            let this = self.clone();
+            tokio::spawn(async move { this.apply_peering(&service, &env).await });
         }
     }
 }
@@ -425,8 +497,8 @@ mod tests {
 
     #[test]
     fn routes_are_names_with_their_own_ports() {
-        let ok = parse(&json!({"kind": "wireguard", "secret": "roll://production/WG", "routes": [{"name": "DB.corp.internal", "target": "10.0.3.4:5432"}, {"name": "v6.corp.internal", "target": "[fd00::1]:6379"}]})).unwrap();
-        assert_eq!((ok.routes[0].name.as_str(), ok.routes[0].port()), ("db.corp.internal", 5432));
+        let ok = parse(&json!({"kind": "wireguard", "secret": "roll://production/WG", "routes": [{"name": "DB.acme.corp", "target": "10.0.3.4:5432"}, {"name": "v6.acme.corp", "target": "[fd00::1]:6379"}]})).unwrap();
+        assert_eq!((ok.routes[0].name.as_str(), ok.routes[0].port()), ("db.acme.corp", 5432));
         assert_eq!((ok.routes[1].target.as_str(), ok.routes[1].port()), ("[fd00::1]:6379", 6379), "IPv6 keeps its brackets");
         for body in [
             json!({"kind": "wireguard", "secret": "[Interface]…", "routes": [{"name": "db.corp", "target": "10.0.0.1:5432"}]}),
@@ -435,6 +507,13 @@ mod tests {
             json!({"secret": "roll://p/K", "routes": [{"name": "a.corp", "target": "10.0.0.1:5432"}, {"name": "b.corp", "target": "10.0.0.2:5432"}]}),
             json!({"secret": "roll://p/K", "routes": []}),
             json!({"kind": "wireguard", "login_server": "https://hs.example.com", "secret": "roll://p/K", "routes": [{"name": "db.corp", "target": "10.0.0.1:5432"}]}),
+            // A service's own name there, a name past the tunnel, loopback, a public address on a
+            // tailnet, the node's own port.
+            json!({"secret": "roll://p/K", "routes": [{"name": "web.production.internal", "target": "10.0.0.1:80"}]}),
+            json!({"secret": "roll://p/K", "routes": [{"name": "db.acme.corp", "target": "db.acme.corp:5432"}]}),
+            json!({"secret": "roll://p/K", "routes": [{"name": "db.acme.corp", "target": "127.0.0.1:5432"}]}),
+            json!({"kind": "tailscale", "secret": "roll://p/K", "routes": [{"name": "dns.acme.corp", "target": "8.8.8.8:53"}]}),
+            json!({"kind": "tailscale", "secret": "roll://p/K", "routes": [{"name": "s.acme.corp", "target": "100.64.0.2:1055"}]}),
         ] {
             assert!(parse(&body).is_err(), "{body}");
         }
