@@ -2419,12 +2419,10 @@ Ranked by what a person notices first. Done so far:
   runtime runs, printable schema lines, budget alerts that can't be lost or silenced, followed
   logs that say when lines were missed and stop with a hidden tab).
 
-1. **Earlier pushes on their own data**: an earlier push runs its old code against the preview's
-   data as the newest head's migration left it, so a push that renamed a column breaks the one
-   before it (said today, not solved). Each kept push could keep a copy-on-write branch of the
-   preview's Postgres (and search) branch taken as the next head's release starts: three at most,
-   asleep, paying only the bytes that change, gone with the push. Nobody else can (Vercel's
-   per-commit URLs share one database), and roll's branches make it cheap.
+1. **Earlier pushes on their own data, in review** (feat/roll-previews-pinned-data): each kept
+   push's own copy of the preview's Postgres branch. Next after it: search's copies (a branch of
+   the branch cluster), the copies' bytes in the preview's cost, and roll apps' earlier builds on
+   their copy (their variables are frozen at deploy: a redeploy of the old image with the copy's).
 2. **The data step's Postgres compute start** (pg-control's; watch): with the health checks no
    longer waiting on a poll (#646), the live run's timeline is data 11.0 s · setup 4.4 s · deploy
    0.02 s · checks 6.1 s under load. Most of the data step is the Postgres branch's compute start
