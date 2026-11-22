@@ -707,8 +707,9 @@ LIVE_REDIS=$(redis_of "$JAR" "$HOST")
 EARLIER_REDIS=$(redis_of "$EJAR" "$EARLIER_HOST")
 [ -n "$EARLIER_REDIS" ] && [ "$EARLIER_REDIS" != "$LIVE_REDIS" ] || { echo "the earlier push should have a Redis database of its own: '$EARLIER_REDIS' / '$LIVE_REDIS'"; exit 1; }
 OWN_DATA="$OWN_DATA; Redis its own"
-# And its search cluster (a branch of the preview's, masked as it is).
-es_of() { curl -sS -b "$1" -H "Host: $2" "http://$API/env.txt" | sed -n 's/^ELASTICSEARCH_URL=//p'; }
+# And its search cluster (a branch of the preview's, masked as it is): the cluster its data key
+# names (`base64(<id>@<cluster>:<key>)`; every cluster answers at the node's one URL).
+es_of() { curl -sS -b "$1" -H "Host: $2" "http://$API/env.txt" | sed -n 's/^ELASTICSEARCH_API_KEY=//p' | python3 -c "import base64,sys; k=sys.stdin.read().strip(); print(base64.b64decode(k).decode().split(':')[0].rsplit('@',1)[-1] if k else '')"; }
 LIVE_ES=$(es_of "$JAR" "$HOST")
 EARLIER_ES=$(es_of "$EJAR" "$EARLIER_HOST")
 [ -n "$EARLIER_ES" ] && [ "$EARLIER_ES" != "$LIVE_ES" ] || { echo "the earlier push should have a search cluster of its own: '$EARLIER_ES' / '$LIVE_ES'"; exit 1; }
