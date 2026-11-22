@@ -144,6 +144,22 @@ pub trait SecretEnv: Send + Sync {
         let _ = (repo, found);
         Ok(Vec::new())
     }
+    /// `asker` sets owner `owner`'s (its name) reviewer provider key to `reference`, a `roll://`
+    /// reference (`roll_secrets::Reference::parse` said so): roll secrets checks they may reveal it
+    /// for `code:review:<owner>` (the project whose canvas holds one of the owner's repositories
+    /// and stands for it) and answers who to keep as its maker. [`crate::Error::Forbidden`] when
+    /// they may not, [`crate::Error::Invalid`] when it can't resolve.
+    async fn bind_owner_key(&self, owner: &str, reference: &str, asker: &SecretsAsker) -> crate::Result<String> {
+        let _ = (owner, reference, asker);
+        Err(crate::Error::Unprocessable("roll:// keys need roll secrets on this server".into()))
+    }
+    /// That key's value now, read as `maker` may (re-checked on every read, audited as
+    /// `code:review:<owner>`). The error says why it can't be read (its maker can't reveal it any
+    /// more, it's gone…), never a value.
+    async fn owner_key(&self, owner: &str, reference: &str, maker: &str) -> anyhow::Result<CredentialValue> {
+        let _ = (owner, reference, maker);
+        anyhow::bail!("roll secrets isn't on this server")
+    }
 }
 
 /// Who asks roll secrets, as rolld's gate put them on the request: roll secrets decides with them

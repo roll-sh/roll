@@ -103,6 +103,7 @@ pub fn router(code: Arc<Code>) -> Router {
         .route("/v1/code/repos", get(list_repos).post(create_repo))
         .route(&repo(""), get(get_repo).patch(update_repo).delete(delete_repo))
         .route(&repo("/refs"), get(refs))
+        .route(&repo("/landings"), get(landings))
         .route(&repo("/tree/{rev}"), get(tree_root))
         .route(&repo("/tree/{rev}/"), get(tree_root))
         .route(&repo("/tree/{rev}/{*path}"), get(tree))
@@ -352,6 +353,29 @@ async fn delete_repo(State(code): S, caller: Caller, Path((owner, repo)): Path<(
 }
 
 // ── reading ──
+
+#[derive(Deserialize)]
+struct LandingsQuery {
+    after: Option<i64>,
+    limit: Option<usize>,
+    /// `1`: no landings, only the newest place (a reader starting from now).
+    latest: Option<u8>,
+}
+
+/// `GET /v1/code/repos/{owner}/{repo}/landings?after=&limit=&latest=1`: what landed on the repo
+/// after a place in the land log, oldest first, each as its `landed` event's data (MCP Events'
+/// `code.landed`); `next` is the place to ask from again.
+async fn landings(State(code): S, caller: Caller, Path((owner, repo)): Path<(String, String)>, Q(q): Q<LandingsQuery>) -> Result<Json<Value>> {
+    let r = code.readable(&caller, &owner, &repo)?;
+    match (q.latest, q.after) {
+        (Some(1), None) => return Ok(Json(json!({ "events": [], "next": code.store.land_log_head()? }))),
+        (Some(1), Some(_)) => return Err(Error::Invalid("latest=1 starts from now: leave out after".into())),
+        (Some(_), _) => return Err(Error::Invalid("latest is 1 or left out".into())),
+        (None, _) => {}
+    }
+    let (events, next) = code.landings_after(&r.id, q.after.unwrap_or(0), q.limit.unwrap_or(100).clamp(1, 500))?;
+    Ok(Json(json!({ "events": events, "next": next })))
+}
 
 async fn refs(State(code): S, caller: Caller, Path((owner, repo)): Path<(String, String)>) -> Result<Json<Vec<Value>>> {
     let r = code.readable(&caller, &owner, &repo)?;

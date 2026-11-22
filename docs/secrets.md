@@ -3893,9 +3893,15 @@ Agent's templates do).
   `"secret_access_key": "roll://prj_…@production/AWS_SECRET_ACCESS_KEY"`). A target's references
   name their project by its `prj_…` id: the bucket replicating only proves which projects stand
   for it, so without one, anyone who may set another bucket's replication could point it at the
-  target and have roll sign for the target's endpoint with that bucket's project's credential. Search snapshot
-  repositories, roll code's reviewer provider keys and the agents' gateway upstreams still keep
-  sealed copies. roll search's snapshot repositories take them through `bind_ref` (#361).
+  target and have roll sign for the target's endpoint with that bucket's project's credential. roll search's
+  snapshot repositories take them through `bind_ref` (#361). roll code's reviewer provider keys
+  do too (`PUT /v1/code/owners/{owner}/review-provider` with `"api_key": "roll://production/ANTHROPIC_API_KEY"`):
+  bound to whoever sets it for `code:review:<owner>`, read as them on every review, and a review
+  that can't read it any more says why instead of running. No canvas holds a roll code owner, so
+  its project is the one whose canvas holds one of the owner's repositories and stands for it,
+  named in the reference when there are several. Pasted keys are still sealed in roll code's own
+  table. The agents' endpoints and gateway upstreams still keep their own copies (`op://`,
+  `env:`, a file).
 - **Who reads it.** The product asks rolld in process (`resolve_as` or `resolve_for`), naming the workspace resource that needs the value: a replication target
   resolves for the source bucket that replicates through it. The project is the one whose canvas
   holds that resource *and* that stands for it (`Workspace::trusts`): a person's canvas only
@@ -6019,6 +6025,29 @@ adds roll-access's grant lookup or the accounts' and workspace's.
 
 ## Next
 
+**State, 2026-11-22 19:25.** Landed since 07:55, each with main's CI green:
+- #665 (57deeb0d1): a placeholder swaps only for its own consumer; references never smuggle a bound key's value; fallbacks skip bound keys before decrypting.
+- #697 (a74036a64): item 4, an offboarded person's leases, shares and sandboxes end with them.
+- #688 (03e1d9520): item 1, a new project's production is protected (`approvals: 0` writes directly; existing 0-approval environments kept their requests by migration), and the default developer rule never matches production unless named.
+- #705 (9d5032147): an interception CA stays live until its consumer's hosts change; the per-connection check (`intercept_ca_stands`) is one row read.
+- #707 (01199a351): the first digest after a change is shared per permission view on a node. At 1,000 watchers that's 74.6 → 0.4 CPU-s on SQLite and 72.6 → 1.8 on Postgres.
+- #714 (054e6edb7): item 3, reach names people, OAuth clients, services, sandboxes and who knew.
+- #734 (bfebaa3fc): item 5, agents sandboxes read their copied values fresh as the copier at every start (agent37 edits env in place).
+- #733 (055ab1adb): item 6 part A, reviewer provider keys as `roll://` references (`code:review:<owner>` in reach).
+
+Other threads: previews #686 (CA reuse until hosts change), apps #689 (CA state per network).
+
+In flight:
+- item 2, environment deletes recoverable and a protected one's delete as a change request (#720);
+- item 7, linked fields carry their kind;
+- the event feed (`GET …/projects/{project}/events` for roll MCP's Events; the cursor taken in each row's own write);
+- members v1.1 phase 1 (#681, review fixes done, merging main);
+- agent-host's `pi_compaction` in the shared gate set (item 10).
+
+New since the ranking:
+- **Delta reads for watchers** (performance, M). After a change each pod still reads all its values: about 190 CPU-s per change at 1,000 pods, bound by the database connections. A watcher holding digest X asks for what changed since X and gets only the changed keys.
+- **Item 6, parts B and C** (agents' endpoints and the model gateway's upstreams as `roll://`): a relay-side maker table, an `agent:<machine>` resource, the value sealed to the daemon after each `hello`, `EndpointSpec::check` taking `roll://`.
+
 **State, 2026-11-22 07:55.** The thirty-fifth review's ranking below still stands. Since it:
 - **roll apps' #603 review is closed on apps' side:**
   - #667 (listings and staleness mint nothing, the hash by binding, dynamic keys refused, an opened
@@ -6079,12 +6108,18 @@ Newest entries first; older State and Ranked entries follow further down, as his
    instance's env (`PATCH`, merged; `null` unsets) before its start, on the same disk. A member event
    or a disable stops the copier's running sandboxes (#697).
 6. **roll's own AI and chat credentials can't be `roll://` references** (integration, M):
-   - reviewer provider keys (code-control's own table);
+   - reviewer provider keys (code-control's own table): **done**, `bind_ref` for `code:review:<owner>`;
    - agents' endpoints (pasted or `op://`);
    - the model gateway's upstreams (`env:`/file).
 
    A leaked model key, the commonest leak, gets no reach, health, validity check or rotation.
    Bind with `bind_ref` and read with `resolve_as`. The daemon resolves over its machine link.
+   Left for the endpoints and upstreams: the relay binds a `roll://` `key_ref` at `endpoint.set`
+   (and `gateway.key`) to the sender, for `agent:<machine>` (a `ResourceRef` like
+   `code_owner`'s, through the machine owner's project), keeps the maker in its own table, and
+   after each `hello` sends the value sealed to the daemon's `seal_key` (`open_with`'s context
+   names the endpoint); the daemon keeps it in memory, as `op://`. `EndpointSpec::check` then
+   takes `roll://` too (fixtures, `agents-api.ts`).
 7. **apps' environments with their own data drop every linked key** (S). `Values.linked` gains
    `{name, kind, ref}`, so apps drops only what it branched.
 8. **A local agent outside Lambda** (S–M): the Lambda extension's surface as a sidecar.

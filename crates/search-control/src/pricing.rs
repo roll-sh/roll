@@ -7,6 +7,8 @@
 //! - **loaded GiB-hours**: memory while a cluster is loaded. A sleeping cluster costs nothing
 //!   here;
 //! - **requests**: CPU time;
+//! - **inference CPU**: vCPU time the node's embedding pool spent on the cluster's inputs
+//!   (E5, `semantic_text` and `_inference`), measured per job;
 //! - **stored GiB-months**: segments and metadata on S3, which accrue whether the cluster is
 //!   loaded or not.
 //!
@@ -27,6 +29,9 @@ pub struct Pricing {
     /// vCPU, same page) and a vCPU serves about 2,000 small search or bulk requests a second,
     /// so a million requests take 0.139 vCPU-hours.
     pub usd_per_million_requests: f64,
+    /// Inference CPU: a c7g vCPU-hour is $0.03625 (same page).
+    #[serde(default = "default_vcpu_hour")]
+    pub usd_per_vcpu_hour: f64,
     /// S3 Standard, first 50 TB: $0.023 per GB-month (<https://aws.amazon.com/s3/pricing/>).
     pub usd_per_gb_month_s3: f64,
     /// Elastic Cloud Hosted, Standard: "as low as $99 per month" for its production
@@ -53,6 +58,7 @@ impl Default for Pricing {
         Pricing {
             usd_per_gib_hour: 0.0067,
             usd_per_million_requests: 0.005,
+            usd_per_vcpu_hour: default_vcpu_hour(),
             usd_per_gb_month_s3: 0.023,
             elastic_cloud_usd_per_month: 99.0,
             elastic_cloud_gb_per_block: 120.0,
@@ -70,6 +76,7 @@ impl Default for Pricing {
 pub struct Cost {
     pub memory_usd: f64,
     pub requests_usd: f64,
+    pub inference_usd: f64,
     pub storage_usd: f64,
     pub total_usd: f64,
     /// The same workload on Elastic Cloud Hosted (always on).
@@ -82,6 +89,10 @@ pub struct Cost {
 
 const GIB: f64 = (1u64 << 30) as f64;
 
+fn default_vcpu_hour() -> f64 {
+    0.03625
+}
+
 impl Pricing {
     /// The cost of `totals`, for a cluster that existed `hours` of the window and stores
     /// `stored_bytes` now.
@@ -90,6 +101,7 @@ impl Pricing {
         let months = hours / 720.0;
         let memory_usd = totals.loaded_gib_hours * self.usd_per_gib_hour;
         let requests_usd = totals.requests as f64 / 1e6 * self.usd_per_million_requests;
+        let inference_usd = totals.inference_cpu_seconds.max(0.0) / 3600.0 * self.usd_per_vcpu_hour;
         let storage_usd = totals.stored_gib_months * self.usd_per_gb_month_s3;
         let gb = stored_bytes.max(0) as f64 / GIB;
         let blocks = (gb / self.elastic_cloud_gb_per_block).ceil().max(1.0);
@@ -101,8 +113,9 @@ impl Pricing {
         Cost {
             memory_usd,
             requests_usd,
+            inference_usd,
             storage_usd,
-            total_usd: memory_usd + requests_usd + storage_usd,
+            total_usd: memory_usd + requests_usd + inference_usd + storage_usd,
             elastic_cloud_usd,
             opensearch_service_usd,
             opensearch_serverless_usd,
@@ -134,12 +147,13 @@ mod tests {
     #[test]
     fn busy_cluster() {
         let p = Pricing::default();
-        let t = UsageTotals { loaded_seconds: 3600 * 100, loaded_gib_hours: 50.0, requests: 3_000_000, peak_loaded_bytes: 0, stored_gib_months: 2.5 };
+        let t = UsageTotals { loaded_seconds: 3600 * 100, loaded_gib_hours: 50.0, requests: 3_000_000, peak_loaded_bytes: 0, stored_gib_months: 2.5, inference_cpu_seconds: 7200.0 };
         let c = p.cost(&t, 720.0, 300 << 30);
         assert!(close(c.memory_usd, 50.0 * 0.0067));
         assert!(close(c.requests_usd, 3.0 * 0.005));
         assert!(close(c.storage_usd, 2.5 * 0.023));
-        assert!(close(c.total_usd, c.memory_usd + c.requests_usd + c.storage_usd));
+        assert!(close(c.inference_usd, 2.0 * 0.03625));
+        assert!(close(c.total_usd, c.memory_usd + c.requests_usd + c.inference_usd + c.storage_usd));
         // 300 GiB needs three 120 GB blocks.
         assert!(close(c.elastic_cloud_usd, 3.0 * 99.0));
         assert!(close(c.opensearch_service_usd, 720.0 * 0.068 + 300.0 * 0.122));

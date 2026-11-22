@@ -37,6 +37,8 @@ percent-encoding.workspace = true
 pg-storage.workspace = true
 roll-auth.workspace = true
 roll-net.workspace = true
+# `roll_secrets::Reference::parse`: whether an owner's provider key is a reference.
+roll-secrets.workspace = true
 reqwest = { workspace = true, features = ["rustls"] }
 serde.workspace = true
 serde_json.workspace = true
@@ -55,8 +57,6 @@ agent-host.workspace = true
 hyper = { workspace = true, features = ["server", "http1"] }
 hyper-util = { workspace = true, features = ["service", "tokio"] }
 rand = "0.8"
-# `tests/queue.rs`: "Store in roll" against roll secrets in process.
-roll-secrets.workspace = true
 roll-workspace.workspace = true
 rsa = { version = "0.9", features = ["pem"] }
 tempfile.workspace = true

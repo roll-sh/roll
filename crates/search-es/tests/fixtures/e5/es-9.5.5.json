@@ -1,0 +1,486 @@
+{
+ "elasticsearch": "9.5.5",
+ "note": "Elasticsearch 9.5.5 (trial, one ML node, linux-x86_64) answering roll's E5 flows; embeddings shown as {\"<floats>\": n}; `sent` is what roll's embedder must receive. Step 2 was answered once the deployment had started (on a fresh node the first call waits for it, up to a 408).",
+ "steps": [
+  {
+   "req": "GET /_inference/.multilingual-e5-small-elasticsearch",
+   "status": 200,
+   "response": {
+    "endpoints": [
+     {
+      "inference_id": ".multilingual-e5-small-elasticsearch",
+      "task_type": "text_embedding",
+      "service": "elasticsearch",
+      "service_settings": {
+       "num_threads": 1,
+       "model_id": ".multilingual-e5-small_linux-x86_64",
+       "adaptive_allocations": {
+        "enabled": true,
+        "min_number_of_allocations": 0,
+        "max_number_of_allocations": 32
+       }
+      },
+      "chunking_settings": {
+       "strategy": "sentence",
+       "max_chunk_size": 250,
+       "sentence_overlap": 1
+      }
+     }
+    ]
+   }
+  },
+  {
+   "req": "POST /_inference/text_embedding/.multilingual-e5-small-elasticsearch",
+   "body": {
+    "input": [
+     "hello world",
+     "second"
+    ],
+    "input_type": "ingest"
+   },
+   "sent": [
+    "passage: hello world",
+    "passage: second"
+   ],
+   "status": 200,
+   "response": {
+    "text_embedding": [
+     {
+      "embedding": {
+       "<floats>": 384
+      }
+     },
+     {
+      "embedding": {
+       "<floats>": 384
+      }
+     }
+    ]
+   }
+  },
+  {
+   "req": "POST /_inference/.multilingual-e5-small-elasticsearch",
+   "body": {
+    "input": "hello",
+    "input_type": "search"
+   },
+   "sent": [
+    "query: hello"
+   ],
+   "status": 200,
+   "response": {
+    "text_embedding": [
+     {
+      "embedding": {
+       "<floats>": 384
+      }
+     }
+    ]
+   }
+  },
+  {
+   "req": "POST /_inference/.multilingual-e5-small-elasticsearch",
+   "body": {
+    "input": [
+     "",
+     "hi"
+    ],
+    "input_type": "classification"
+   },
+   "sent": [
+    "",
+    "hi"
+   ],
+   "status": 200,
+   "response": {
+    "text_embedding": [
+     {
+      "embedding": {
+       "<floats>": 384
+      }
+     },
+     {
+      "embedding": {
+       "<floats>": 384
+      }
+     }
+    ]
+   }
+  },
+  {
+   "req": "POST /_inference/sparse_embedding/.multilingual-e5-small-elasticsearch",
+   "body": {
+    "input": [
+     "a"
+    ]
+   },
+   "status": 400,
+   "response": {
+    "error": {
+     "root_cause": [
+      {
+       "type": "status_exception",
+       "reason": "Incompatible task_type, the requested type [sparse_embedding] does not match the model type [text_embedding]"
+      }
+     ],
+     "type": "status_exception",
+     "reason": "Incompatible task_type, the requested type [sparse_embedding] does not match the model type [text_embedding]"
+    },
+    "status": 400
+   }
+  },
+  {
+   "req": "POST /_inference/.multilingual-e5-small-elasticsearch",
+   "body": {
+    "input": [
+     "<queue full>"
+    ]
+   },
+   "captured": "from a deployment started with queue_capacity 1 (an endpoint with its deployment_id), the 12th of 12 concurrent calls of 20 inputs",
+   "status": 429,
+   "response": {
+    "error": {
+     "root_cause": [
+      {
+       "type": "es_rejected_execution_exception",
+       "reason": "inference process queue is full. Unable to execute command"
+      }
+     ],
+     "type": "es_rejected_execution_exception",
+     "reason": "inference process queue is full. Unable to execute command"
+    },
+    "status": 429
+   }
+  },
+  {
+   "req": "POST /_inference/text_embedding/.multilingual-e5-small-elasticsearch?timeout=1ms",
+   "body": {
+    "input": [
+     "<slow>"
+    ]
+   },
+   "captured": "30 inputs of 500 words with timeout=1ms",
+   "status": 408,
+   "response": {
+    "error": {
+     "root_cause": [
+      {
+       "type": "status_exception",
+       "reason": "timeout [1ms] waiting for inference result"
+      }
+     ],
+     "type": "status_exception",
+     "reason": "timeout [1ms] waiting for inference result"
+    },
+    "status": 408
+   }
+  },
+  {
+   "req": "PUT /_inference/text_embedding/compat-e5",
+   "body": {
+    "service": "elasticsearch",
+    "service_settings": {
+     "model_id": ".multilingual-e5-small_linux-x86_64",
+     "adaptive_allocations": {
+      "enabled": true,
+      "min_number_of_allocations": 0,
+      "max_number_of_allocations": 4
+     },
+     "num_threads": 1
+    }
+   },
+   "status": 200,
+   "response": {
+    "inference_id": "compat-e5",
+    "task_type": "text_embedding",
+    "service": "elasticsearch",
+    "service_settings": {
+     "num_threads": 1,
+     "model_id": ".multilingual-e5-small_linux-x86_64",
+     "adaptive_allocations": {
+      "enabled": true,
+      "min_number_of_allocations": 0,
+      "max_number_of_allocations": 4
+     }
+    },
+    "chunking_settings": {
+     "strategy": "sentence",
+     "max_chunk_size": 250,
+     "sentence_overlap": 1
+    }
+   }
+  },
+  {
+   "req": "POST /_inference/text_embedding/compat-e5",
+   "body": {
+    "input": [
+     "x"
+    ]
+   },
+   "sent": [
+    "x"
+   ],
+   "status": 200,
+   "response": {
+    "text_embedding": [
+     {
+      "embedding": {
+       "<floats>": 384
+      }
+     }
+    ]
+   }
+  },
+  {
+   "req": "PUT /_inference/text_embedding/compat-e5-missing",
+   "body": {
+    "service": "elasticsearch",
+    "service_settings": {
+     "model_id": ".multilingual-e5-small",
+     "num_threads": 1
+    }
+   },
+   "status": 400,
+   "response": {
+    "error": {
+     "root_cause": [
+      {
+       "type": "validation_exception",
+       "reason": "Validation Failed: 1: [service_settings] does not contain one of the required settings [num_allocations, adaptive_allocations];"
+      }
+     ],
+     "type": "validation_exception",
+     "reason": "Validation Failed: 1: [service_settings] does not contain one of the required settings [num_allocations, adaptive_allocations];"
+    },
+    "status": 400
+   }
+  },
+  {
+   "req": "PUT /_inference/text_embedding/compat-e5-unknown",
+   "body": {
+    "service": "elasticsearch",
+    "service_settings": {
+     "model_id": ".multilingual-e5-small",
+     "num_allocations": 1,
+     "num_threads": 1,
+     "dimensions": 100
+    }
+   },
+   "status": 400,
+   "response": {
+    "error": {
+     "root_cause": [
+      {
+       "type": "status_exception",
+       "reason": "Configuration contains settings [{dimensions=100}] unknown to the [elasticsearch] service"
+      }
+     ],
+     "type": "status_exception",
+     "reason": "Configuration contains settings [{dimensions=100}] unknown to the [elasticsearch] service"
+    },
+    "status": 400
+   }
+  },
+  {
+   "req": "PUT /compat-e5-idx",
+   "body": {
+    "mappings": {
+     "properties": {
+      "body": {
+       "type": "semantic_text",
+       "inference_id": ".multilingual-e5-small-elasticsearch"
+      }
+     }
+    }
+   },
+   "status": 200,
+   "response": {
+    "acknowledged": true,
+    "shards_acknowledged": true,
+    "index": "compat-e5-idx"
+   }
+  },
+  {
+   "req": "GET /compat-e5-idx/_mapping",
+   "status": 200,
+   "response": {
+    "compat-e5-idx": {
+     "mappings": {
+      "properties": {
+       "body": {
+        "type": "semantic_text",
+        "inference_id": ".multilingual-e5-small-elasticsearch"
+       }
+      }
+     }
+    }
+   }
+  },
+  {
+   "req": "PUT /compat-e5-idx/_doc/1?refresh=true",
+   "body": {
+    "body": "The quick brown fox jumps over the lazy dog"
+   },
+   "sent": [
+    "passage: The quick brown fox jumps over the lazy dog"
+   ],
+   "status": 201,
+   "response": {
+    "_index": "compat-e5-idx",
+    "_id": "1",
+    "_version": 1,
+    "result": "created",
+    "forced_refresh": true,
+    "_shards": {
+     "total": 2,
+     "successful": 1,
+     "failed": 0
+    },
+    "_seq_no": 0,
+    "_primary_term": 1
+   }
+  },
+  {
+   "req": "GET /compat-e5-idx/_mapping",
+   "status": 200,
+   "response": {
+    "compat-e5-idx": {
+     "mappings": {
+      "properties": {
+       "body": {
+        "type": "semantic_text",
+        "inference_id": ".multilingual-e5-small-elasticsearch",
+        "model_settings": {
+         "service": "elasticsearch",
+         "task_type": "text_embedding",
+         "dimensions": 384,
+         "similarity": "cosine",
+         "element_type": "float"
+        }
+       }
+      }
+     }
+    }
+   }
+  },
+  {
+   "req": "POST /compat-e5-idx/_search",
+   "body": {
+    "_source": {
+     "exclude_vectors": false
+    }
+   },
+   "status": 200,
+   "response": {
+    "took": 40,
+    "timed_out": false,
+    "_shards": {
+     "total": 1,
+     "successful": 1,
+     "skipped": 0,
+     "failed": 0
+    },
+    "hits": {
+     "total": {
+      "value": 1,
+      "relation": "eq"
+     },
+     "max_score": 1.0,
+     "hits": [
+      {
+       "_index": "compat-e5-idx",
+       "_id": "1",
+       "_score": 1.0,
+       "_source": {
+        "body": "The quick brown fox jumps over the lazy dog",
+        "_inference_fields": {
+         "body": {
+          "inference": {
+           "inference_id": ".multilingual-e5-small-elasticsearch",
+           "model_settings": {
+            "service": "elasticsearch",
+            "task_type": "text_embedding",
+            "dimensions": 384,
+            "similarity": "cosine",
+            "element_type": "float"
+           },
+           "chunks": {
+            "body": [
+             {
+              "start_offset": 0,
+              "end_offset": 43,
+              "embeddings": {
+               "<floats>": 384
+              }
+             }
+            ]
+           }
+          }
+         }
+        }
+       }
+      }
+     ]
+    }
+   }
+  },
+  {
+   "req": "POST /compat-e5-idx/_search",
+   "body": {
+    "query": {
+     "semantic": {
+      "field": "body",
+      "query": "a fast fox"
+     }
+    }
+   },
+   "sent": [
+    "query: a fast fox"
+   ],
+   "status": 200,
+   "response": {
+    "took": 151,
+    "timed_out": false,
+    "_shards": {
+     "total": 1,
+     "successful": 1,
+     "skipped": 0,
+     "failed": 0
+    },
+    "hits": {
+     "total": {
+      "value": 1,
+      "relation": "eq"
+     },
+     "max_score": 0.9274567,
+     "hits": [
+      {
+       "_index": "compat-e5-idx",
+       "_id": "1",
+       "_score": 0.9274567,
+       "_source": {
+        "body": "The quick brown fox jumps over the lazy dog"
+       }
+      }
+     ]
+    }
+   }
+  },
+  {
+   "req": "DELETE /compat-e5-idx",
+   "status": 200,
+   "response": {
+    "acknowledged": true
+   }
+  },
+  {
+   "req": "DELETE /_inference/compat-e5",
+   "status": 200,
+   "response": {
+    "acknowledged": true,
+    "pipelines": [],
+    "indexes": []
+   }
+  }
+ ]
+}

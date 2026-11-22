@@ -96,6 +96,10 @@ DELETE /v1/code/repos/{owner}/{repo} → 204
 
 ```
 GET /refs → [{name /* "main" */, changeset, git: sha | null}]
+GET /landings?after=&limit=&latest= → {events: [/* a `landed` event's data */ & {seq, at, kind: "landed"}], next}
+     what landed on the repo after a place in the land log, oldest first (`limit` 1-500, default 100);
+     `next` is past everything read (other repos' landings too); `latest=1` answers no events and the
+     newest place (400 with `after`). MCP Events' `code.landed` reads it.
 GET /tree/{rev}/{*path} → {rev, changeset, path,
       entries: [{name, path, kind: "file" | "dir" | "symlink" | "submodule", mode /* "100644" */, size: number | null,
                  last_change: null | {changeset, message, time}}]}
@@ -455,10 +459,17 @@ GET   /v1/code/repos/{owner}/{repo}/search?q=&regex=&case=&path=&limit=&rev= →
 GET   /v1/code/pricing → {currency, hosted: {standard: {per_file, min_per_review}, deep: {multiplier}, max: {multiplier}, chat},
       byok: {standard, deep, max, chat}, public_repos: {free_standard_reviews_per_month},
       human_monthly_cap: {standard, note}, spending_caps: {on_cap: string[]}, competitors: [...]}      public
-GET   /v1/code/owners/{owner}/review-provider → {owner, provider, base_url, model, secondary_model, key_last4, updated_at}
-      every field but `owner` is null without one (hosted); 404 to anyone but the owner or admin (the key itself is never returned)
+GET   /v1/code/owners/{owner}/review-provider → {owner, provider, base_url, model, secondary_model, key_last4, key_ref, updated_at}
+      every field but `owner` is null without one (hosted); 404 to anyone but the owner or admin (the key itself is never returned).
+      `key_last4` for a pasted key, `key_ref` (the reference) for one in roll secrets
 PUT   /v1/code/owners/{owner}/review-provider {provider?: "anthropic" | "openai_compatible", api_key, base_url?, model?,
       secondary_model?} → same      422 without ROLL_SECRET_KEY on the server; 400 openai_compatible without base_url + model
+      `api_key` may be a roll secrets reference, `roll://ENV[/folder]/KEY` (or `roll://PROJECT@ENV/…`), exactly as
+      `roll_secrets::Reference::parse` reads it (a malformed one, or ` roll://…`, is a 400). It's bound to the caller
+      (a session, the operator token or a roll token that may reveal it; 403 otherwise, and for a roll code owner token),
+      through the project whose canvas holds one of the owner's repositories and stands for it, and read as them on
+      every review (`code:review:<owner>` in roll secrets' audit log and reach). Once they can't reveal it, the
+      review says so instead of running. Nothing of it is stored here but the reference and who set it
       `base_url` can't carry credentials, and with an admin token it can't be a loopback, private,
       link-local or metadata address (400). Names resolving to one are refused on every connection;
       redirects aren't followed; answers over 16 MiB are refused. `ROLL_CODE_PROVIDER_ALLOW_PRIVATE=1`

@@ -6,6 +6,10 @@
 //! Object storage is S3 when `ROLL_E2E_S3_BUCKET` is set (`search_store::test_objects`), a
 //! temp directory otherwise.
 
+// Spawned tasks hold the node's request futures, which hold reqwest's HTTP/2 client state (h2,
+// on in builds with crates that enable it); their `Send` proof nests past the default 128.
+#![recursion_limit = "256"]
+
 mod common;
 
 use search_es::EsRequest;

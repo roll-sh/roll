@@ -150,6 +150,10 @@ pub struct SearchConfig {
     /// How long and how much each cluster's security audit log keeps (rolld:
     /// `--search-audit-retention-days`, `--search-audit-max-mb`).
     pub audit: search_server::audit::AuditConfig,
+    /// The node's embedding pool (`multilingual-e5-small` for the E5 inference endpoints;
+    /// rolld: `--search-embed-*`), its CPU metered to each cluster as inference. `None`: E5
+    /// endpoints answer as on a cluster without ML nodes.
+    pub embed: Option<search_server::embed::EmbedConfig>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -203,6 +207,7 @@ impl SearchConfig {
             default_repository: Some("found-snapshots".into()),
             person_caps: Caps { clusters: 50, always_on: 2 },
             audit: search_server::audit::AuditConfig::default(),
+            embed: None,
         }
     }
 }
@@ -817,6 +822,7 @@ impl Control {
                 default_repository: cfg.default_repository.clone(),
                 links: Some(links.clone()),
                 audit: cfg.audit.clone(),
+                embedder: cfg.embed.clone().map(search_server::embed::EmbedPool::new),
                 secret_refs: Some(search_es::secret_refs::Resolver(secret_refs.clone())),
                 ..NodeConfig::default()
             },
@@ -2360,6 +2366,9 @@ impl Control {
         // All keyed by catalog id, never by name (see `crate::meter`).
         for (id, n) in self.node.take_request_counts() {
             self.meter.count_requests(&id, n.min(i64::MAX as u64) as i64);
+        }
+        for (id, cpu) in self.node.take_inference_cpu() {
+            self.meter.count_inference(&id, cpu);
         }
         for (id, o) in self.node.take_observations() {
             // Lost if the catalog can't take them now: they are a picture, not a bill.

@@ -12,6 +12,8 @@
 //! - [`store::ObjectStores`] keeps clusters on object storage through `search-store`: metadata
 //!   as cluster states, shards through [`persist`] (WAL cut records, segments, manifests).
 //!   [`catalog::MemoryStores`] keeps everything in memory.
+//! - [`embed`]: the node's embedding pool (multilingual-e5-small for every cluster's E5
+//!   inference endpoints): fair shares, caps, CPU metering, lazy load and idle drop.
 //! - [`lease`]: cluster ownership for several nodes on one bucket (epochs fence deposed nodes).
 //! - [`audit`]: each cluster's security audit log, kept next to its data.
 //! - [`limits`]: per-tenant rate and byte budgets and the node-wide fair scheduler.
@@ -28,6 +30,7 @@ pub mod auth;
 pub mod browser;
 pub mod catalog;
 pub mod cors;
+pub mod embed;
 pub mod http;
 mod http_head;
 pub mod lease;
