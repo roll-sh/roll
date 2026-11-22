@@ -830,7 +830,7 @@ if (!mask(ctx._source, params.path, 0, params.rule, ctx._id)) { ctx.op = 'noop';
 
 /// A `_mapping` answer as lines: each index (not the system ones, `.…`), and each field with its
 /// type, nested ones by path (`field users.address.city text`) and multi-fields too. Bounded.
-fn mapping_lines(v: &Value) -> Vec<String> {
+fn mapping_lines(v: &Value, skip: &std::collections::BTreeSet<String>) -> Vec<String> {
     fn walk(props: &Value, prefix: &str, depth: usize, out: &mut Vec<String>) {
         let Some(props) = props.as_object() else { return };
         for (name, f) in props {
@@ -845,7 +845,7 @@ fn mapping_lines(v: &Value) -> Vec<String> {
         }
     }
     let mut out = Vec::new();
-    for (index, m) in v.as_object().into_iter().flatten().filter(|(i, _)| !i.starts_with('.')) {
+    for (index, m) in v.as_object().into_iter().flatten().filter(|(i, _)| !i.starts_with('.') && !skip.contains(*i)) {
         out.push(format!("index {index}"));
         walk(&m["mappings"]["properties"], index, 0, &mut out);
     }
@@ -1024,15 +1024,32 @@ impl Brancher for Search {
     }
 
     /// Both clusters' mappings as lines (`index products`, `field products.price float`), through
-    /// the operator's console request (no cluster password needed).
+    /// the operator's console request (no cluster password needed). An index the parent made after
+    /// the branch started (`parent_at`: a connector's first sync, a rollover, a day's `logs-…`)
+    /// that the branch doesn't have is left out: production's new index, not one the change drops.
     async fn schema(&self, parent: &str, branch: &str) -> anyhow::Result<Option<(Vec<String>, Vec<String>)>> {
-        let read = |id: String| async move {
-            let v = self.0.post(&format!("/v1/search/clusters/{}/request", seg(&id)), json!({ "method": "GET", "path": "/_mapping" })).await?;
-            anyhow::ensure!(v["status"].as_u64() == Some(200), "reading {id}'s mappings: {}", v["status"]);
-            let body: Value = serde_json::from_str(v["body"].as_str().unwrap_or("{}"))?;
-            anyhow::Ok(mapping_lines(&body))
+        let get = |id: String, path: &'static str| async move {
+            let v = self.0.post(&format!("/v1/search/clusters/{}/request", seg(&id)), json!({ "method": "GET", "path": path })).await?;
+            anyhow::ensure!(v["status"].as_u64() == Some(200), "reading {id}'s {path}: {}", v["status"]);
+            anyhow::Ok(serde_json::from_str::<Value>(v["body"].as_str().unwrap_or("{}"))?)
         };
-        Ok(Some((read(parent.to_string()).await?, read(branch.to_string()).await?)))
+        let theirs = get(branch.to_string(), "/_mapping").await?;
+        let mut newer = std::collections::BTreeSet::new();
+        if let Some(since) = self.0.get(&format!("/v1/search/clusters/{}", seg(branch))).await?["parent_at"].as_i64() {
+            let listed = get(parent.to_string(), "/_cat/indices?h=index,creation.date&format=json&expand_wildcards=all").await?;
+            for x in listed.as_array().into_iter().flatten() {
+                // `_cat` answers numbers as strings; the creation date is in milliseconds.
+                let made = x["creation.date"].as_i64().or_else(|| x["creation.date"].as_str().and_then(|s| s.parse().ok()));
+                if let (Some(i), Some(made)) = (x["index"].as_str(), made)
+                    && made > since * 1000
+                    && theirs.get(i).is_none()
+                {
+                    newer.insert(i.to_string());
+                }
+            }
+        }
+        let parents = get(parent.to_string(), "/_mapping").await?;
+        Ok(Some((mapping_lines(&parents, &newer), mapping_lines(&theirs, &Default::default()))))
     }
 
     /// Rewrite the masked fields in the branch's documents (`_update_by_query`, Painless): the
@@ -1189,7 +1206,7 @@ mod tests {
             } } }
         });
         assert_eq!(
-            super::mapping_lines(&v),
+            super::mapping_lines(&v, &Default::default()),
             ["index products", "field products.name text", "field products.name.raw keyword", "field products.seller object", "field products.seller.city text"]
         );
     }
