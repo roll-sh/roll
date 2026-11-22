@@ -41,7 +41,10 @@ Lockdown (`?lockdown=1` on the URL, or `X-MCP-Lockdown: 1`), as GitHub's MCP ser
 `/v1/mcp` have it: text written by someone who can't push to the repo (an issue anyone opened, a
 fork's pull request, a stranger's comment on a review thread) comes back as a notice instead, while
 ids and states stay. Use it for an agent that holds write tools and reads public repos. The
-function is `roll_auth::lockdown`, shared with `/v1/mcp`.
+function is `roll_auth::lockdown`, shared with `/v1/mcp`. Lockdown or not, characters a person
+can't see and a model reads (tag characters, zero-width and bidi controls, variation selectors) are
+written as escapes in every text block (`roll_auth::lockdown::visible`); `structuredContent` stays
+exact.
 
 ## Tools
 
