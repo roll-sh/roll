@@ -3476,9 +3476,16 @@ impl Store {
         Ok(())
     }
 
-    /// Whether any service of `project` is closed in `env`: its environment's row, or the live
-    /// deployment it runs (one deployed closed before it was opened).
-    pub fn closed_in_use(&self, project: &str, env: &str) -> Result<bool> {
+    /// Whether any service of `project` is closed in `env`: its environment's row, the live
+    /// deployment it runs (one deployed closed before it was opened), or one of `draining` (still
+    /// finishing its requests) that was deployed closed.
+    pub fn closed_in_use(&self, project: &str, env: &str, draining: &[String]) -> Result<bool> {
+        for d in draining {
+            let n: i64 = self.db.query_row("SELECT COUNT(*) FROM deploy_closed WHERE deployment = ?", [d], |r| r.get(0))?;
+            if n > 0 {
+                return Ok(true);
+            }
+        }
         for svc in self.services(Some(project))? {
             let Ok(row) = self.environment(&svc.id, env) else { continue };
             if row.egress.closed() {
