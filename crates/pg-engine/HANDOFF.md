@@ -19417,3 +19417,24 @@ Not done, found (repros in `~/.cache/a288/probe`):
   (cost_subqueryscan's cpu_tuple_cost per row: with:114's 0.08 against 0.07).
 - `SELECT * FROM seq` is a Seq Scan on the sequence in PostgreSQL (cost 0..1.01, width 17);
   the engine's one-row VALUES is pulled up to a Result (sequence:22, :25).
+
+## Load-sensitive tests and a server's first information_schema query (agent 291, 2026-11-22)
+
+### First candidate (`cand/a291`): protocol_cases waits for the answers its recording has
+
+`wire::protocol_cases`' harness (`tests/common/protocol.rs`) read each step's replies until 400 ms
+passed without a message, and recorded "quiet". A verify-checked build answers a server's first
+`information_schema` query after more than that (`info_schema_rows`: two of two quick-check
+checked runs on `2a0f67b0d` per agent 287, and the batch train's checked stage); the step got
+"quiet" and every later step read the previous step's answer. Agents 269 and 279 saw
+"startup quiet" on other cases under load for the same reason.
+
+Now each case runs knowing its recorded replies (`protocol::expecting`). A read waits up to 30 s
+(`ANSWER`) when the recording has a message next, and 400 ms only where the recording has
+"quiet" (two cases: `failed_flush`, `ps_ext_set_flush`) or once the replies already differ.
+Digits are masked when following the recording, because some cases mask oids. A session's startup
+waits for its ReadyForQuery unless the recording has the startup fail. A real hang still fails:
+after 30 s the step records "quiet", which differs from the recording. Recording runs
+(`PROTOCOL_RECORD`) and the other users of the harness keep the 400 ms window.
+
+The slow first query itself is the next candidate's item.
