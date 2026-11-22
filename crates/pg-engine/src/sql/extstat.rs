@@ -65,6 +65,7 @@ pub fn expr_var(ctx: &ExecCtx, t: &Arc<Table>, tuples: f64, e: &Expr) -> Option<
         expr: Some((rel, col, e.ty())),
         rows: 0.0,
         inh: false,
+        sub: false,
     };
     if let Ok(ixs) = crate::sql::binder::bound_indexes(t, ctx) {
         for bix in &ixs {

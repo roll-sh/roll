@@ -1611,9 +1611,24 @@ impl<'s, 'c, 'a> Search<'s, 'c, 'a> {
         let constant = |e: &Expr| -> Option<Expr> {
             let g = key_col(e)?;
             let l = *self.leaf_of.get(g)?;
-            let (_, rel) = self.leaves[l].scan.as_ref()?;
             let col = g - self.leaves[l].off;
-            rel.quals.iter().find_map(|q| {
+            // (A pulled-up view's projection over its table: the table's restrictions,
+            // the column through the projection.)
+            let (quals, col): (Vec<Expr>, usize) = match (&self.leaves[l].scan, &self.leaves[l].plan) {
+                (Some((_, rel)), _) => (rel.quals.clone(), col),
+                (None, Plan::Project { input, exprs }) => match (&**input, exprs.get(col)) {
+                    (Plan::Scan(sp), Some(Expr::Col(j, _))) => {
+                        let mut q = Vec::new();
+                        if let Some(f) = &sp.filter {
+                            crate::sql::binder::optimize::conjuncts(f.clone(), &mut q);
+                        }
+                        (q, *j)
+                    }
+                    _ => return None,
+                },
+                _ => return None,
+            };
+            quals.iter().find_map(|q| {
                 let Expr::Call(d, args, _) = q else { return None };
                 if d.name != "=" || args.len() != 2 {
                     return None;
@@ -9608,6 +9623,7 @@ impl Planner<'_, '_> {
                                         expr: None,
                                         rows: r.rows,
                                         inh: false,
+                                        sub: false,
                                     }),
                                     None,
                                 )
@@ -9662,6 +9678,7 @@ impl Planner<'_, '_> {
                             expr: None,
                             rows,
                             inh: false,
+                            sub: false,
                         });
                     }
                 }
@@ -9692,6 +9709,7 @@ impl Planner<'_, '_> {
                             expr: None,
                             rows,
                             inh: true,
+                            sub: false,
                         });
                     }
                 }

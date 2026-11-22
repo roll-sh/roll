@@ -1649,8 +1649,10 @@ fn outer_to_params(e: Expr, params: &[Expr]) -> Option<Expr> {
 fn any_join(cat: &Catalog, plan: &Plan, sub: &Subquery, unplanned: &Unplanned) -> Option<Plan> {
     if sub.left.is_empty()
         || sub.left.len() != sub.ops.len()
-        // (Several columns compare as rows: only `=` is a conjunction of joinable ones.)
-        || sub.left.len() > 1 && sub.ops.iter().any(|o| o.name != "=")
+        // (Several columns compare as rows: `=` as a conjunction of joinable ones, an
+        // ordering operator as a RowCompareExpr, convert_ANY_sublink_to_join taking any
+        // test expression.)
+        || sub.left.len() > 1 && sub.ops.iter().any(|o| o.name != "=") && row_order_op(sub).is_none()
         // (A sublink in the left operand stays a SubPlan of the join clause.)
         || sub.left.iter().any(|l| {
             let mut other = false;
@@ -1875,14 +1877,18 @@ fn any_join(cat: &Catalog, plan: &Plan, sub: &Subquery, unplanned: &Unplanned) -
     }
     // (The pulled-up subquery's own WHERE clauses come first: deconstruct_jointree
     // distributes the semi join's right side before its qual.)
-    let cond: Vec<Expr> = corr
-        .into_iter()
-        .map(Some)
-        .chain(sub.left.iter().zip(&exprs).zip(&sub.ops).map(|((l, r), op)| {
+    let tests: Vec<Expr> = sub
+        .left
+        .iter()
+        .zip(&exprs)
+        .zip(&sub.ops)
+        .map(|((l, r), op)| {
             let r = outer_to_params(r.clone().shift_cols(nleft as isize), &sub.params)?;
             Some(Expr::Call(op.clone(), vec![l.clone(), r], crate::types::DataType::Bool))
-        }))
+        })
         .collect::<Option<_>>()?;
+    let tests = row_tests(sub, tests)?;
+    let cond: Vec<Expr> = corr.into_iter().chain(tests).collect();
     Some(super::optimize::join(
         cat,
         JoinKind::Semi,
@@ -1893,6 +1899,38 @@ fn any_join(cat: &Catalog, plan: &Plan, sub: &Subquery, unplanned: &Unplanned) -
         nleft,
         nright,
     ))
+}
+
+/// `(a, b) op ANY (SELECT x, y ...)` with an ordering operator: the operator, its name
+/// the same for every column (make_row_comparison_op's).
+fn row_order_op(sub: &Subquery) -> Option<&'static str> {
+    let name = sub.ops.first()?.name;
+    let op = ["<", "<=", ">", ">="].into_iter().find(|o| *o == name)?;
+    (sub.ops.len() > 1 && sub.ops.iter().all(|o| o.name == op)).then_some(op)
+}
+
+/// A sublink's per-column comparisons as its test expression's conjuncts: themselves for
+/// `=`, one RowCompareExpr for an ordering operator (None: one not made).
+fn row_tests(sub: &Subquery, cmps: Vec<Expr>) -> Option<Vec<Expr>> {
+    match row_order_op(sub) {
+        Some(op) if cmps.len() > 1 => Some(vec![row_compare_of(op, cmps)?]),
+        _ => Some(cmps),
+    }
+}
+
+/// The RowCompareExpr of per-column comparisons `l op r`: each pair's `=` alongside.
+fn row_compare_of(op: &'static str, cmps: Vec<Expr>) -> Option<Expr> {
+    let eqs = cmps
+        .iter()
+        .map(|c| {
+            let Expr::Call(d, a, t) = c else { return None };
+            let r = crate::sql::func::resolve_binop("=", &a[0].ty(), &a[1].ty()).ok()?;
+            let mut eq = (*r.def).clone();
+            eq.coll = d.coll.clone();
+            Some(Expr::Call(Arc::new(eq), a.clone(), t.clone()))
+        })
+        .collect::<Option<Vec<_>>>()?;
+    Some(Expr::RowCompare(Box::new(crate::sql::expr::RowCompare { op, cmps, eqs })))
 }
 
 /// A sub-select's select list (its projections composed, None without one) and the plan
@@ -1992,6 +2030,7 @@ fn any_join_srf(cat: &Catalog, plan: &Plan, sub: &Subquery) -> Option<Plan> {
             )
         })
         .collect();
+    let cond = row_tests(sub, cond)?;
     Some(super::optimize::join(cat, JoinKind::Semi, plan.clone(), rhs, and_all(cond), Vec::new(), nleft, n))
 }
 
@@ -2060,6 +2099,7 @@ fn any_join_lateral(cat: &Catalog, plan: &Plan, sub: &Subquery) -> Option<Plan> 
             Expr::Call(op.clone(), vec![l.clone(), Expr::Col(nleft + i, ty)], crate::types::DataType::Bool)
         })
         .collect();
+    let cond = row_tests(sub, cond)?;
     let kind = if one_row { JoinKind::Inner } else { JoinKind::Semi };
     Some(super::optimize::join(cat, kind, plan.clone(), rhs, and_all(cond), sub.params.clone(), nleft, n))
 }
@@ -2201,7 +2241,21 @@ fn one_row_to_ops(e: Expr) -> Expr {
         .zip(row)
         .map(|((l, op), v)| Expr::Call(op.clone(), vec![l.clone(), v], crate::types::DataType::Bool))
         .collect();
-    if cmps.len() == 1 { cmps.pop().unwrap() } else { Expr::And(cmps) }
+    // (make_row_comparison_op's test: `=` ANDed, `<>` ORed, an ordering operator a
+    // RowCompareExpr.)
+    if cmps.len() == 1 {
+        return cmps.pop().unwrap();
+    }
+    if sub.ops.iter().all(|o| o.name == "<>") {
+        return Expr::Or(cmps);
+    }
+    if let Some(op) = row_order_op(sub) {
+        return row_compare_of(op, cmps).unwrap_or(e);
+    }
+    if sub.ops.iter().any(|o| o.name != "=") {
+        return e;
+    }
+    Expr::And(cmps)
 }
 
 fn values_to_any(e: Expr, ctx: &crate::exec::ExecCtx) -> Expr {

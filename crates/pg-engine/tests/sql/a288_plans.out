@@ -1,0 +1,278 @@
+> create table a288z1 (f1 int primary key)
+-- CREATE TABLE
+
+> create table a288z2 (f2 int primary key)
+-- CREATE TABLE
+
+> create table a288z3 (f3 int primary key)
+-- CREATE TABLE
+
+> insert into a288z1 values (53)
+-- INSERT 0 1
+
+> insert into a288z2 values (53)
+-- INSERT 0 1
+
+> create view a288zv as select *, 'dummy'::text as junk from a288z1
+-- CREATE VIEW
+
+> explain select * from a288z2 left join a288z3 on (f2 = f3) left join a288zv on (f3 = f1) where f2 = 53
+QUERY PLAN:text
+Nested Loop Left Join  (cost=0.46..24.54 rows=1 width=44)
+  ->  Index Only Scan using a288z2_pkey on a288z2  (cost=0.15..8.17 rows=1 width=4)
+        Index Cond: (f2 = 53)
+  ->  Nested Loop Left Join  (cost=0.31..16.36 rows=1 width=40)
+        ->  Index Only Scan using a288z3_pkey on a288z3  (cost=0.15..8.17 rows=1 width=4)
+              Index Cond: (f3 = 53)
+        ->  Index Only Scan using a288z1_pkey on a288z1  (cost=0.15..8.17 rows=1 width=36)
+              Index Cond: (f1 = 53)
+-- EXPLAIN
+
+> explain select * from a288z2 left join a288z3 on (f2 = f3) left join a288z1 on (f3 = f1) where f2 = 53
+QUERY PLAN:text
+Nested Loop Left Join  (cost=0.46..24.54 rows=1 width=12)
+  ->  Index Only Scan using a288z2_pkey on a288z2  (cost=0.15..8.17 rows=1 width=4)
+        Index Cond: (f2 = 53)
+  ->  Nested Loop Left Join  (cost=0.31..16.36 rows=1 width=8)
+        ->  Index Only Scan using a288z3_pkey on a288z3  (cost=0.15..8.17 rows=1 width=4)
+              Index Cond: (f3 = 53)
+        ->  Index Only Scan using a288z1_pkey on a288z1  (cost=0.15..8.17 rows=1 width=4)
+              Index Cond: (f1 = 53)
+-- EXPLAIN
+
+> select * from a288z2 left join a288z3 on (f2 = f3) left join a288zv on (f3 = f1) where f2 = 53
+f2:int4 | f3:int4 | f1:int4 | junk:text
+53 | NULL | NULL | NULL
+-- SELECT 1
+
+> create table a288u (inb bytea, d text primary key) with (autovacuum_enabled = off)
+-- CREATE TABLE
+
+> insert into a288u select null, g::text from generate_series(1, 880) g
+-- INSERT 0 880
+
+> explain with b as materialized (select d, inb from a288u) select * from b b1 join b b2 using (d)
+QUERY PLAN:text
+Hash Join  (cost=47.40..202.72 rows=3872 width=96)
+  Hash Cond: (b1.d = b2.d)
+  CTE b
+    ->  Seq Scan on a288u  (cost=0.00..18.80 rows=880 width=64)
+  ->  CTE Scan on b b1  (cost=0.00..17.60 rows=880 width=64)
+  ->  Hash  (cost=17.60..17.60 rows=880 width=64)
+        ->  CTE Scan on b b2  (cost=0.00..17.60 rows=880 width=64)
+-- EXPLAIN
+
+> explain select * from (select d from a288u offset 0) p join (select d from a288u offset 0) q using (d)
+QUERY PLAN:text
+Hash Join  (cost=29.80..186.32 rows=3872 width=32)
+  Hash Cond: (a288u.d = a288u_1.d)
+  ->  Seq Scan on a288u  (cost=0.00..18.80 rows=880 width=32)
+  ->  Hash  (cost=18.80..18.80 rows=880 width=32)
+        ->  Seq Scan on a288u a288u_1  (cost=0.00..18.80 rows=880 width=32)
+-- EXPLAIN
+
+> create table a288gs (id int, v int, x xid) with (autovacuum_enabled = off)
+-- CREATE TABLE
+
+> explain select x, count(*) from a288gs group by grouping sets ((x), (x)) order by x::text
+QUERY PLAN:text
+Sort  (cost=74.09..75.09 rows=400 width=44)
+  Sort Key: ((x)::text)
+  ->  HashAggregate  (cost=40.60..56.80 rows=400 width=44)
+        Hash Key: x
+        Hash Key: x
+        ->  Seq Scan on a288gs  (cost=0.00..30.40 rows=2040 width=4)
+-- EXPLAIN
+
+> explain select a, b from (values (1, 2), (2, 3)) v(a, b) group by a, b, grouping sets (a)
+QUERY PLAN:text
+Group  (cost=0.04..0.05 rows=2 width=8)
+  Group Key: "*VALUES*".column1, "*VALUES*".column2
+  ->  Sort  (cost=0.04..0.04 rows=2 width=8)
+        Sort Key: "*VALUES*".column1, "*VALUES*".column2
+        ->  Values Scan on "*VALUES*"  (cost=0.00..0.03 rows=2 width=8)
+-- EXPLAIN
+
+> select a, grouping(a), sum(b) from (values (1, 2), (1, 3)) v(a, b) group by a, grouping sets (a)
+a:int4 | grouping:int4 | sum:int8
+1 | 0 | 5
+-- SELECT 1
+
+> create table a288t (u1 int, u2 int, h int, ten int) with (autovacuum_enabled = off)
+-- CREATE TABLE
+
+> insert into a288t select g, 1000 - g, g % 100, g % 10 from generate_series(0, 999) g
+-- INSERT 0 1000
+
+> create index a288t_u1 on a288t (u1)
+-- CREATE INDEX
+
+> analyze a288t
+-- ANALYZE
+
+> explain select u1, u2 from a288t where (u1, u2) < any (select ten, ten from a288t where h < 3) and u1 <= 20 order by 1
+QUERY PLAN:text
+Nested Loop Semi Join  (cost=0.28..34.80 rows=7 width=8)
+  Join Filter: (ROW(a288t.u1, a288t.u2) < ROW(a288t_1.ten, a288t_1.ten))
+  ->  Index Scan using a288t_u1 on a288t  (cost=0.28..8.64 rows=21 width=8)
+        Index Cond: (u1 <= 20)
+  ->  Materialize  (cost=0.00..18.65 rows=30 width=4)
+        ->  Seq Scan on a288t a288t_1  (cost=0.00..18.50 rows=30 width=4)
+              Filter: (h < 3)
+-- EXPLAIN
+
+> select u1, u2 from a288t where (u1, u2) < any (select ten, ten from a288t where h < 3) and u1 <= 20 order by 1
+u1:int4 | u2:int4
+0 | 1000
+1 | 999
+-- SELECT 2
+
+> select (1, 2) < any (select 1, 3), (1, 2) <> any (select 1, 2), (2, 1) < any (select 1, 3)
+?column?:bool | ?column?:bool | ?column?:bool
+t | f | f
+-- SELECT 1
+
+> create function a288f1(int) returns int as 'select $1' language sql
+-- CREATE FUNCTION
+
+> explain select * from a288f1(1) with ordinality as t1(v, o)
+QUERY PLAN:text
+Function Scan on t1  (cost=0.00..0.01 rows=1 width=12)
+-- EXPLAIN
+
+> select * from a288f1(1) with ordinality as t1(v, o)
+v:int4 | o:int8
+1 | 1
+-- SELECT 1
+
+> explain select * from rows from (a288f1(2), generate_series(1, 2)) as r
+QUERY PLAN:text
+Function Scan on r  (cost=0.00..0.02 rows=2 width=8)
+-- EXPLAIN
+
+> explain with a(b) as (values (row(1, 2, 3))) select * from a, coalesce(b) as c(i int, j int, k int)
+QUERY PLAN:text
+Function Scan on c  (cost=0.00..0.01 rows=1 width=44)
+-- EXPLAIN
+
+> create table a288i (c inet) with (autovacuum_enabled = off)
+-- CREATE TABLE
+
+> explain select set_masklen(cidr(text(c)), 24) from a288i
+QUERY PLAN:text
+Seq Scan on a288i  (cost=0.00..37.20 rows=1360 width=32)
+-- EXPLAIN
+
+> create table a288c (a int, b text collate "C", y text collate "POSIX") with (autovacuum_enabled = off)
+-- CREATE TABLE
+
+> explain select a, lower(y) from a288c order by lower(y), a
+QUERY PLAN:text
+Sort  (cost=61.98..64.11 rows=850 width=36)
+  Sort Key: (lower(y)) COLLATE "POSIX", a
+  ->  Seq Scan on a288c  (cost=0.00..20.62 rows=850 width=36)
+-- EXPLAIN
+
+> explain select a, coalesce(b, 'foo') from a288c order by 2
+QUERY PLAN:text
+Sort  (cost=59.86..61.98 rows=850 width=36)
+  Sort Key: (COALESCE(b, 'foo'::text)) COLLATE "C"
+  ->  Seq Scan on a288c  (cost=0.00..18.50 rows=850 width=36)
+-- EXPLAIN
+
+> explain select array_agg(b order by b) from a288c
+QUERY PLAN:text
+Aggregate  (cost=64.11..64.12 rows=1 width=32)
+  ->  Sort  (cost=59.86..61.98 rows=850 width=32)
+        Sort Key: b COLLATE "C"
+        ->  Seq Scan on a288c  (cost=0.00..18.50 rows=850 width=32)
+-- EXPLAIN
+
+> explain select a, b from a288c union all select a, b from a288c order by 2
+QUERY PLAN:text
+Sort  (cost=136.72..140.97 rows=1700 width=36)
+  Sort Key: a288c.b COLLATE "C"
+  ->  Append  (cost=0.00..45.50 rows=1700 width=36)
+        ->  Seq Scan on a288c  (cost=0.00..18.50 rows=850 width=36)
+        ->  Seq Scan on a288c a288c_1  (cost=0.00..18.50 rows=850 width=36)
+-- EXPLAIN
+
+> explain select a288c from a288c
+QUERY PLAN:text
+Seq Scan on a288c  (cost=0.00..18.50 rows=850 width=92)
+-- EXPLAIN
+
+> explain select 33 = any (null::int[]), 33 = any ('{1,2}'::int[])
+QUERY PLAN:text
+Result  (cost=0.00..0.01 rows=1 width=2)
+-- EXPLAIN
+
+> create type a288r as (a int, b text)
+-- CREATE TYPE
+
+> create table a288j (js json) with (autovacuum_enabled = off)
+-- CREATE TABLE
+
+> explain select json_populate_record(null::a288r, '{"a": 0, "b": 1}')
+QUERY PLAN:text
+Result  (cost=0.00..0.01 rows=1 width=32)
+-- EXPLAIN
+
+> explain select (json_populate_record(null::a288r, js)).* from a288j
+QUERY PLAN:text
+Seq Scan on a288j  (cost=0.00..30.40 rows=1360 width=36)
+-- EXPLAIN
+
+> select json_populate_record(null::a288r, '{"a": 0, "b": "x"}')
+json_populate_record:user
+(0,x)
+-- SELECT 1
+
+> create domain a288dp as text collate "POSIX"
+-- CREATE DOMAIN
+
+> explain select a, b::a288dp from a288c order by 2
+QUERY PLAN:text
+Sort  (cost=59.86..61.98 rows=850 width=36)
+  Sort Key: ((b)::a288dp)
+  ->  Seq Scan on a288c  (cost=0.00..18.50 rows=850 width=36)
+-- EXPLAIN
+
+> explain select a, y::a288dp from a288c order by 2
+QUERY PLAN:text
+Sort  (cost=59.86..61.98 rows=850 width=36)
+  Sort Key: ((y)::a288dp)
+  ->  Seq Scan on a288c  (cost=0.00..18.50 rows=850 width=36)
+-- EXPLAIN
+
+> create table a288s (id int) with (fillfactor = 10, autovacuum_enabled = off)
+-- CREATE TABLE
+
+> insert into a288s select g from generate_series(0, 119) g
+-- INSERT 0 120
+
+> analyze a288s
+-- ANALYZE
+
+> explain select id from a288s tablesample system (50) repeatable (0)
+QUERY PLAN:text
+Sample Scan on a288s  (cost=0.00..12.60 rows=60 width=4)
+  Sampling: system ('50'::real) REPEATABLE ('0'::double precision)
+-- EXPLAIN
+
+> explain select id from a288s tablesample bernoulli (25) where id > 10
+QUERY PLAN:text
+Sample Scan on a288s  (cost=0.00..6.38 rows=27 width=4)
+  Sampling: bernoulli ('25'::real)
+  Filter: (id > 10)
+-- EXPLAIN
+
+> explain select * from (values (0), (100)) v(pct), lateral (select count(*) from a288s tablesample bernoulli (pct)) ss
+QUERY PLAN:text
+Nested Loop  (cost=6.15..12.37 rows=2 width=12)
+  ->  Values Scan on "*VALUES*"  (cost=0.00..0.03 rows=2 width=4)
+  ->  Aggregate  (cost=6.15..6.16 rows=1 width=8)
+        ->  Sample Scan on a288s  (cost=0.00..6.12 rows=12 width=0)
+              Sampling: bernoulli ("*VALUES*".column1)
+-- EXPLAIN
+

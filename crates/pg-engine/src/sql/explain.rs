@@ -2223,9 +2223,14 @@ fn group_tlists(root: &Plan) -> GroupTlists {
 /// Scan returns them; `input` the subquery's plan): one with set operations or grouping
 /// sets says nothing of them, one with DISTINCT or GROUP BY only that its sole such key is
 /// unique (as many values as the subquery's rows, get_variable_numdistinct's isunique);
-/// any other passes its columns' statistics on.
+/// any other passes its columns' statistics on, none of them unique (isunique stays false).
 fn subquery_var_stats(input: &Plan, cols: &mut [ColInfo], rows: f64) {
-    let Some(unique) = subquery_grouped_outputs(input, cols.len()) else { return };
+    let Some(unique) = subquery_grouped_outputs(input, cols.len()) else {
+        for v in cols.iter_mut().filter_map(|c| c.var.as_mut()) {
+            v.sub = true;
+        }
+        return;
+    };
     for (c, u) in cols.iter_mut().zip(unique) {
         c.var = None;
         c.distinct = u.then(|| costs::clamp_rows(rows));
@@ -3769,8 +3774,29 @@ fn assign_refnames_skip(
                     later.push(&*s.plan);
                 }
             }
+            // (A CTE's query is planned, and its plan listed, after the CTEs inside it
+            // (SS_process_ctes of each level it holds runs first): their relations are
+            // named before its own.)
             if let Plan::With { ctes, .. } = p {
-                later.extend(ctes.iter().map(|(_, c)| &**c));
+                fn nested<'p>(p: &'p Plan, out: &mut Vec<&'p Plan>) {
+                    if let Plan::With { ctes, .. } = p {
+                        for (_, c) in ctes {
+                            nested(c, out);
+                            out.push(c);
+                        }
+                    }
+                    plan_inputs(p).into_iter().for_each(|c| nested(c, out));
+                }
+                for (_, c) in ctes {
+                    let mut order = Vec::new();
+                    nested(c, &mut order);
+                    order.push(c);
+                    for q in order {
+                        if !later.iter().any(|x| std::ptr::eq(*x, q)) && !queue.iter().any(|x| std::ptr::eq(*x, q)) {
+                            later.push(q);
+                        }
+                    }
+                }
             }
             let mut inputs = plan_inputs(p);
             if let Plan::Append { inh: None, .. } = p {
@@ -4584,6 +4610,67 @@ fn balanced(s: &str) -> bool {
         }
     }
     depth == 0
+}
+
+/// A ProjectSet whose calls are all built-ins pg_proc has returning no set: its input and
+/// its target list with the calls in place.
+fn single_row_calls(p: &Plan) -> Option<(&Arc<Plan>, Vec<Expr>)> {
+    let Plan::ProjectSet { input, exprs, srfs } = p else { return None };
+    if srfs.is_empty() || !srfs.iter().all(|s| s.func.oid != 0 && s.body.is_none() && !costs::returns_set(&s.func)) {
+        return None;
+    }
+    let mut left = false;
+    // (Its expressions read the input row, then each call's value: a row's a record.)
+    let n_in = super::binder::plan_width(input);
+    let values: Vec<Expr> = srfs.iter().map(|s| Expr::Call(s.func.clone(), s.args.clone(), s.ty.clone())).collect();
+    let calls: Vec<Expr> = exprs
+        .iter()
+        .map(|e| {
+            e.clone()
+                .transform(&mut |x| {
+                    Ok(match x {
+                        Expr::Col(j, t) if j >= n_in => match values.get(j - n_in) {
+                            Some(v) => v.clone(),
+                            None => {
+                                left = true;
+                                Expr::Col(j, t)
+                            }
+                        },
+                        Expr::Srf(i, t) => match srfs.get(i) {
+                            Some(s) => Expr::Call(s.func.clone(), s.args.clone(), t),
+                            None => {
+                                left = true;
+                                Expr::Srf(i, t)
+                            }
+                        },
+                        x => x,
+                    })
+                })
+                .unwrap_or_else(|_| e.clone())
+        })
+        .collect();
+    (!left).then_some((input, calls))
+}
+
+/// A sort key over `input` as the expression it is: through a projection's entries.
+fn key_expr<'e>(input: &'e Plan, e: &'e Expr) -> &'e Expr {
+    if let (Expr::Col(j, _), Plan::Project { input: pin, exprs }) = (e, input)
+        && let Some(x) = exprs.get(*j)
+    {
+        return key_expr(pin, x);
+    }
+    e
+}
+
+/// The collation a sort key over `input` derives: through a projection's computed entry,
+/// that expression's over the projection's input.
+fn key_collation(input: &Plan, e: &Expr) -> Option<String> {
+    if let (Expr::Col(j, _), Plan::Project { input: pin, exprs }) = (e, input)
+        && let Some(x) = exprs.get(*j)
+    {
+        return key_collation(pin, x);
+    }
+    derived_collation(input, e)
 }
 
 fn derived_collation(input: &Plan, e: &Expr) -> Option<String> {
@@ -5682,6 +5769,38 @@ impl Builder<'_, '_> {
         if let Plan::Context { input, .. } = &**p {
             return self.node(input);
         }
+        // (Calls of built-ins the engine runs as giving one row but pg_proc has returning
+        // no set (json_populate_record, pg_stat_get_replication_slot): expressions of the
+        // target list, no ProjectSet; a projection over them composed with them.)
+        let flat = match &**p {
+            Plan::ProjectSet { .. } => single_row_calls(p).map(|(input, calls)| Plan::Project { input: input.clone(), exprs: calls }),
+            Plan::Project { input: pin, exprs } => single_row_calls(pin).map(|(input, calls)| Plan::Project {
+                input: input.clone(),
+                exprs: exprs
+                    .iter()
+                    .map(|e| {
+                        e.clone()
+                            .transform(&mut |x| {
+                                Ok(match x {
+                                    Expr::Col(j, t) => calls.get(j).cloned().unwrap_or(Expr::Col(j, t)),
+                                    x => x,
+                                })
+                            })
+                            .unwrap_or_else(|_| e.clone())
+                    })
+                    .collect(),
+            }),
+            _ => None,
+        };
+        if let Some(flat) = flat {
+            let tmp = Arc::new(flat);
+            if let Some(m) = self.needed.get(&addr(p)).cloned() {
+                self.needed.insert(addr(&tmp), m);
+            }
+            let b = self.node(&tmp);
+            self.needed.remove(&addr(&tmp));
+            return b;
+        }
         // (A LATERAL subquery's copies of this level's PlaceHolderVars' sub-selects, made by
         // extract_lateral_references and never run: SubPlans of this level, before the
         // subquery's own; an uncorrelated one an InitPlan of it, a correlated one shown
@@ -6357,7 +6476,10 @@ impl Builder<'_, '_> {
                     .cloned()
                     .unwrap_or_else(|| alias.clone());
                 let mut n = ExNode::new("Function Scan");
-                let object = (calls.len() == 1).then(|| calls[0].func.name);
+                // (An expression that isn't a function's call (a constant the planner
+                // folded it to, a COALESCE): only the alias shows.)
+                let object = (calls.len() == 1 && !(calls[0].func.oid == 0 && calls[0].func.name == "?column?"))
+                    .then(|| calls[0].func.name);
                 // (A CREATE FUNCTION function: its own schema.)
                 let schema = {
                     let cat = self.ctx.catalog();
@@ -6411,6 +6533,8 @@ impl Builder<'_, '_> {
                         .map(|c| {
                             let own = match user(c) {
                                 Some(f) => f.procost() as f64 * costs::CPU_OPERATOR_COST,
+                                // (An expression in the call's place: only its own cost.)
+                                None if c.func.oid == 0 && c.func.name == "?column?" => 0.0,
                                 None => costs::call_cost(&c.func),
                             };
                             own + c.args.iter().map(costs::qual_cost).sum::<f64>()
@@ -6983,6 +7107,21 @@ impl Builder<'_, '_> {
                             // CoerceToDomain is -1.)
                             width: match e {
                                 Expr::CoerceToDomain(..) => type_width(&e.ty().without_typmod()),
+                                // (A table's whole-row Var: a tuple header and its columns'
+                                // widths, set_rel_width's get_relation_data_width.)
+                                Expr::Row(items, DataType::Row(rt))
+                                    if matches!(&**input, Plan::Scan(sc) if sc.table.rowtype == rt.oid && rt.oid != 0)
+                                        && crate::sql::binder::is_whole_row(e)
+                                        && items.iter().all(|x| matches!(x, Expr::Col(j, _) if *j < c.node.cols.len())) =>
+                                {
+                                    24 + items
+                                        .iter()
+                                        .map(|x| match x {
+                                            Expr::Col(j, _) => c.node.cols[*j].width,
+                                            _ => 0,
+                                        })
+                                        .sum::<u32>()
+                                }
                                 _ => type_width(&e.ty()),
                             },
                             var: None,
@@ -7682,6 +7821,7 @@ impl Builder<'_, '_> {
                         };
                         // (A column of a collation other than its type's default shows it
                         // (show_sortorder_options), byte-ordered ones ("C", "POSIX") too.)
+                        // (Not a domain's own collation: its typcollation.)
                         let declared = match &k.expr {
                             Expr::Col(j, ty) if k.using.is_none() => c
                                 .node
@@ -7689,7 +7829,12 @@ impl Builder<'_, '_> {
                                 .get(*j)
                                 .and_then(|ci| ci.var.as_ref())
                                 .filter(|v| v.expr.is_none())
-                                .and_then(|v| v.table.columns.get(v.col).and_then(|col| col.collation.clone()))
+                                .and_then(|v| v.table.columns.get(v.col))
+                                .and_then(|col| {
+                                    let n = col.collation.clone()?;
+                                    let own = col.domain.and_then(|d| self.ctx.catalog().domains.get(&d).and_then(|d| d.collation.clone()));
+                                    (own.as_deref() != Some(n.as_str())).then_some(n)
+                                })
                                 .filter(|n| n != "default" && !(*ty == DataType::Name && n == "C")),
                             _ => None,
                         };
@@ -7714,6 +7859,25 @@ impl Builder<'_, '_> {
                                 }
                             }
                             _ => None,
+                        });
+                        // (Else the collation the key's expression derives, when it isn't
+                        // its type's (show_sortorder_options): a computed key over a column
+                        // of another collation, a set operation's column.)
+                        let declared = declared.or_else(|| {
+                            if k.using.is_some() || !k.expr.ty().collatable() || matches!(k.expr, Expr::Col(..)) && matches!(&**input, Plan::Scan(_)) {
+                                return None;
+                            }
+                            // (A domain declared with a collation gives the value that one, its
+                            // own; one without lets its input's through: assign_collations_walker.)
+                            if let Expr::CoerceToDomain(_, d) = key_expr(keyed, &k.expr)
+                                && !d.array
+                                && self.ctx.catalog().domains.get(&d.oid).is_some_and(|d| d.collation.as_deref().is_some_and(|c| c != "default"))
+                            {
+                                return None;
+                            }
+                            let coll = key_collation(keyed, &k.expr)?;
+                            let own = if k.expr.ty() == DataType::Name { "C" } else { "default" };
+                            (coll != own).then_some(coll)
                         });
                         let t = match declared {
                             Some(n) => format!("{t} COLLATE {}", quote_ident(&n)),
@@ -9453,6 +9617,11 @@ impl Builder<'_, '_> {
                         n.rows = *rows;
                         if ccols.len() == cols.len() {
                             n.cols = ccols.clone();
+                            // (examine_simple_variable into a CTE's query: its columns'
+                            // statistics, none of them unique.)
+                            for v in n.cols.iter_mut().filter_map(|c| c.var.as_mut()) {
+                                v.sub = true;
+                            }
                             // (The width of the columns read above: the relation's target.)
                             let needed = self.needed.get(&key).cloned();
                             n.width = ccols
@@ -11845,6 +12014,7 @@ impl Builder<'_, '_> {
                     expr: None,
                     rows: n.rows,
                     inh: true,
+                    sub: false,
                 });
             }
         }
@@ -11891,6 +12061,7 @@ impl Builder<'_, '_> {
                     expr: None,
                     rows: 0.0,
                     inh: true,
+                    sub: false,
                 });
             }
         }
@@ -11914,6 +12085,10 @@ impl Builder<'_, '_> {
         }
         let cat = self.ctx.catalog();
         let size = costs::rel_size(t, self.ctx);
+        let size = match &s.sample {
+            Some(ts) => super::paths::sample_size(ts, size),
+            None => size,
+        };
         let mut cols: Vec<ColInfo> = (0..t.columns.len())
             .map(|i| ColInfo {
                 width: if t.columns[i].dropped {
@@ -11928,6 +12103,7 @@ impl Builder<'_, '_> {
                     expr: None,
                     rows: 0.0,
                     inh: false,
+                    sub: false,
                 }),
                 distinct: None,
                 groups: None,
@@ -12118,10 +12294,10 @@ impl Builder<'_, '_> {
                 } else {
                     "Seq Scan"
                 });
-                // cost_seqscan.
+                // cost_seqscan (cost_samplescan: the sampled pages and tuples).
                 n.rows = size.tuples;
-                n.total_cost =
-                    size.pages * costs::SEQ_PAGE_COST + size.tuples * costs::CPU_TUPLE_COST;
+                let page = super::paths::sample_page_cost(s, costs::SEQ_PAGE_COST, super::paths::Gucs::read(self.ctx).random_page_cost);
+                n.total_cost = size.pages * page + size.tuples * costs::CPU_TUPLE_COST;
             }
         }
         if let Some(ts) = &s.sample {
@@ -12569,6 +12745,7 @@ impl Builder<'_, '_> {
                             expr: None,
                             rows: 0.0,
                             inh: false,
+                            sub: false,
                         }),
                         distinct: None,
                         groups: None,
@@ -14256,7 +14433,16 @@ impl Builder<'_, '_> {
                         if e.columns().is_empty() && !e.has_outer_refs() {
                             continue;
                         }
-                        let k = self.show(e, &c.exported, Cx::Upper) + &sfx;
+                        // (Under the collation the argument derives when it isn't its
+                        // type's: show_sortorder_options.)
+                        let coll = if e.ty().collatable() && !sfx.contains(" USING ") && !sfx.contains(" COLLATE ") {
+                            key_collation(input, e)
+                                .filter(|n| *n != if e.ty() == DataType::Name { "C" } else { "default" })
+                                .map_or_else(String::new, |n| format!(" COLLATE {}", quote_ident(&n)))
+                        } else {
+                            String::new()
+                        };
+                        let k = self.show(e, &c.exported, Cx::Upper) + &coll + &sfx;
                         if !pk.contains(&k) {
                             pk.push(k);
                         }
@@ -14524,9 +14710,11 @@ impl Builder<'_, '_> {
                     .map(|(chain, cols)| (chain.into_iter().map(|i| sortable[i]).collect(), cols))
                     .collect()
             };
+            // (No set left to sort: no rollup.)
+            let mut all_chains = all_chains;
+            all_chains.retain(|(chain, _)| !chain.is_empty());
             // (One rollup: its columns follow the ORDER BY as far as they can,
             // reorder_grouping_sets.)
-            let mut all_chains = all_chains;
             if let [(chain, cols)] = &mut all_chains[..]
                 && let Some(h) = hint.as_ref().filter(|h| !h.is_empty())
             {
@@ -14579,8 +14767,11 @@ impl Builder<'_, '_> {
             }
             n.details.push(Detail::Text("Grouping Sets", String::new()));
             if !hash_sets.is_empty() {
-                n.strategy = Some("Mixed");
-                n.title = "MixedAggregate".into();
+                // (No rollup left to sort, every set unsortable: consider_groupingsets_paths'
+                // all-hashed path, AGG_HASHED.)
+                let (s, t) = if chains.is_empty() { ("Hashed", "HashAggregate") } else { ("Mixed", "MixedAggregate") };
+                n.strategy = Some(s);
+                n.title = t.into();
                 for (_, cols) in hash_sets.iter().rev() {
                     n.details.push(Detail::List("Hash Key", hash_keys(self, cols)));
                 }

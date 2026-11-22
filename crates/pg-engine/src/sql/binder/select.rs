@@ -1207,6 +1207,14 @@ impl Binder<'_, '_> {
             // A UNION ALL's leaf query Postgres keeps a query level (`*SELECT* n`, a
             // Subquery Scan when not trivial) rather than pulling it up.
             let (plan, cols) = r?;
+            // (A set operation with a WITH of its own is a leaf (transformSetOperationTree),
+            // its subquery planned apart: not merged into this one's arms, though its CTEs
+            // were all inlined.)
+            let plan = if nested && n.with_clause.is_some() && matches!(plan, Plan::SetOp { .. } | Plan::Append { inh: None, .. }) {
+                Plan::With { ctes: Vec::new(), body: Arc::new(plan), names: Vec::new() }
+            } else {
+                plan
+            };
             let plan = match index {
                 Some(i)
                     if union_all
@@ -3596,6 +3604,13 @@ impl Binder<'_, '_> {
                 }
             });
         }
+        // parseCheckAggregates: one grouping set in the expansion, not the empty one, is a
+        // plain GROUP BY (its keys every group expression, in their order).
+        if let [only] = &sets[..]
+            && !only.is_empty()
+        {
+            return Ok((groups, None));
+        }
         Ok((groups, Some(sets)))
     }
 
@@ -5451,6 +5466,18 @@ impl Binder<'_, '_> {
             && !matches!(calls[0].ty, DataType::Row(_) | DataType::Record);
         let results: Vec<(DataType, usize)> = calls.iter().map(|c| (c.ty.clone(), c.ncols)).collect();
         self.mark_rowtype_cols(&mut rel, &results);
+        // eval_const_expressions over the function RTE's calls (the planner's: the query as
+        // written keeps them, its columns named after them): a SQL function not SETOF (never
+        // inlined into FROM) whose call inlines to a constant is that constant; with
+        // ORDINALITY or beside other calls the scan stays (pull_up_constant_function takes
+        // neither), over the value.
+        if !self.deparse && (rf.ordinality || calls.len() > 1) {
+            for c in calls.iter_mut() {
+                if let Some(e) = self.folded_from_call(c) {
+                    *c = const_srf(e);
+                }
+            }
+        }
         let names: Vec<String> = cols.iter().map(|c| c.name.clone()).collect();
         // inline_set_returning_function: a SETOF record SQL function (its column
         // definitions given) alone in FROM is its query, a subquery under its name.
@@ -7195,6 +7222,33 @@ fn srf_stages(
         }
     }
     Ok((plan, pos, last))
+}
+
+impl Binder<'_, '_> {
+    /// A FROM call of a SQL function returning one scalar that inlines to a constant over
+    /// its constant arguments: the constant.
+    fn folded_from_call(&mut self, c: &SrfCall) -> Option<Expr> {
+        if c.body.is_none()
+            || c.ncols != 1
+            || !c.domains.is_empty()
+            || matches!(c.ty, DataType::Row(_) | DataType::Record)
+            || !c.args.iter().all(|a| matches!(a, Expr::Const(..)))
+        {
+            return None;
+        }
+        let f = self.cat.functions.get(&c.func.oid).cloned()?;
+        if f.language != "sql" || f.returns_set || !f.out_cols.is_empty() {
+            return None;
+        }
+        if !self.sql_fn_at(&f, &c.args, super::expr::FnPlace::Scalar).is_some_and(|a| a.inlined()) {
+            return None;
+        }
+        let e = match self.user_call(f, c.args.clone(), -1).ok()? {
+            Expr::Subquery(sq) if sq.call.as_ref().is_some_and(|k| k.inline) => super::expr::inline_scalar(&sq.plan, &c.args)?,
+            e => e,
+        };
+        matches!(e, Expr::Const(..)).then_some(e)
+    }
 }
 
 fn const_srf(e: Expr) -> SrfCall {

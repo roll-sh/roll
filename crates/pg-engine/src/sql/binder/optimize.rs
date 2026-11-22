@@ -712,8 +712,38 @@ fn add_filter_as(cat: &Catalog, plan: Plan, pred: Expr, index: bool) -> Plan {
             for (on_right, old, new) in rewrites {
                 replace_restriction(cat, if on_right { &mut r } else { &mut l }, &old, &new);
             }
-            if !lpush.is_empty() {
+            let into_left = !lpush.is_empty();
+            if into_left {
                 l = add_filter(cat, l, Expr::And(lpush));
+            }
+            // reconsider_outer_join_clauses runs until nothing changes: a constant the
+            // clauses just pushed gave a join inside the preserved side (its nullable
+            // side's key, from its own ON clause) gives this join's nullable side its key's
+            // constant too, as `join` does for the restrictions already there.
+            if into_left && params.is_empty() && matches!(kind, JoinKind::Left | JoinKind::Anti) {
+                let keys: Vec<(Expr, Expr)> = hash
+                    .iter()
+                    .flat_map(|(hl, hr)| hl.iter().cloned().zip(hr.iter().cloned()))
+                    .chain(cond_parts.iter().filter_map(|p| {
+                        let (a, b) = equi_key(p, nleft)?;
+                        Some((a, b.shift_cols(-(nleft as isize))))
+                    }))
+                    .collect();
+                if !keys.is_empty() {
+                    let have = restrictions(&l, true);
+                    for (ov, iv) in keys {
+                        if iv.ty().without_typmod() != ov.ty().without_typmod() {
+                            continue;
+                        }
+                        let Some((_, k, def)) = have.iter().filter_map(col_const).find(|(x, ..)| x.same_as(&ov)) else {
+                            continue;
+                        };
+                        let d = Expr::Call(def, vec![iv, k], DataType::Bool);
+                        if !rpush.iter().any(|e| e.same_as(&d)) && !restrictions(&r, true).iter().any(|e| e.same_as(&d)) {
+                            rpush.push(d);
+                        }
+                    }
+                }
             }
             if !rpush.is_empty() {
                 let nonnull = nonnull_params(&l, &params);

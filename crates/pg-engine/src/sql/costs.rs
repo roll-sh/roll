@@ -319,6 +319,10 @@ pub struct VarRef {
     pub rows: f64,
     /// An inheritance parent's column over its whole tree: its inherited statistics.
     pub inh: bool,
+    /// Read through a subquery's or a CTE's output (examine_simple_variable's recursion
+    /// into it): its statistics only, never unique (the subquery may join it to
+    /// duplicates; isunique stays false).
+    pub sub: bool,
 }
 
 impl VarRef {
@@ -330,6 +334,7 @@ impl VarRef {
             expr: None,
             rows: 0.0,
             inh: false,
+            sub: false,
         }
     }
 
@@ -364,6 +369,9 @@ impl VarRef {
 
     /// A unique index on just this column (no predicate).
     fn unique(&self, cat: &Catalog) -> bool {
+        if self.sub {
+            return false;
+        }
         // (An index expression: unique when the index is, on that one expression
         // (examine_variable's isunique).)
         if let Some((ix, k, _)) = &self.expr {
@@ -671,8 +679,11 @@ pub(crate) fn io_cast(from: &DataType, to: &DataType) -> bool {
             T::Bool | T::Char | T::Name | T::Inet | T::Cidr | T::Xml | T::Regclass
         ) || string(t)
     };
+    // (pg_cast's functions from a string type: "char", name, xml and regclass only;
+    // bool, inet and cidr read one through their input functions.)
+    let from_string = |t: &DataType| matches!(t, T::Char | T::Name | T::Xml | T::Regclass) || string(t);
     // (regclass has text's input function, text(regclass) no cast: CoerceViaIO.)
-    (string(to) && !(with_function(from) && !matches!(from, T::Regclass))) || (string(from) && !with_function(to))
+    (string(to) && !(with_function(from) && !matches!(from, T::Regclass))) || (string(from) && !from_string(to))
 }
 
 pub(crate) fn binary_coercible(from: &DataType, to: &DataType) -> bool {

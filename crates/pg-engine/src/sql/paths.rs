@@ -492,6 +492,7 @@ impl Rel {
                 expr: None,
                 rows: 0.0,
                 inh: false,
+                sub: false,
             })
         }
     }
@@ -2528,6 +2529,7 @@ impl Planner<'_, '_> {
                             expr: None,
                             rows: 0.0,
                             inh: false,
+                            sub: false,
                         }
                         .ndistinct(&self.cat),
                         _ => (costs::DEFAULT_NUM_DISTINCT, true),
@@ -3724,6 +3726,7 @@ impl Planner<'_, '_> {
                 expr: None,
                 rows: 0.0,
                 inh: false,
+                sub: false,
             }
             .ndistinct(&self.cat)
             .0
@@ -4026,6 +4029,10 @@ impl Planner<'_, '_> {
             }
             false => size,
         };
+        let size = match &s.sample {
+            Some(ts) => sample_size(ts, size),
+            None => size,
+        };
         let mut indexes = index_infos(self.ctx, &t, size.tuples);
         if s.with_key || s.mark.is_some() {
             indexes.iter_mut().for_each(|ii| ii.target = true);
@@ -4091,6 +4098,7 @@ impl Planner<'_, '_> {
                             expr: Some((ii.ix.oid, k, key.ty())),
                             rows: 0.0,
                             inh: false,
+                            sub: false,
                         },
                     ));
                 }
@@ -4104,6 +4112,7 @@ impl Planner<'_, '_> {
                             expr: Some((ii.ix.oid, k, key.ty())),
                             rows: 0.0,
                             inh: false,
+                            sub: false,
                         },
                     ));
                 }
@@ -4133,6 +4142,7 @@ impl Planner<'_, '_> {
                                 expr: Some((info.oid, k, x.ty())),
                                 rows: 0.0,
                                 inh: false,
+                                sub: false,
                             },
                         ));
                     }
@@ -4870,6 +4880,35 @@ pub fn describe_foreign(ctx: &ExecCtx, s: &ScanPlan, needed: &[bool]) -> Option<
     describe_need(ctx, s, None, needed)
 }
 
+/// set_tablesample_rel_size: the pages and tuples the sampling method visits and returns
+/// (bernoulli's and system's SampleScanGetSampleSize: a constant percentage, else 10%;
+/// bernoulli reads every page, system that share of them).
+pub(crate) fn sample_size(ts: &crate::sql::plan::TableSample, size: costs::RelSize) -> costs::RelSize {
+    if !matches!(ts.method, "bernoulli" | "system") {
+        return size;
+    }
+    let pct = match &ts.percent {
+        Expr::Const(Value::Float4(f), _) => Some(*f),
+        Expr::Const(Value::Float8(f), _) => Some(*f as f32),
+        _ => None,
+    };
+    let fract: f32 = match pct {
+        Some(f) if (0.0..=100.0).contains(&f) => f / 100.0,
+        _ => 0.1,
+    };
+    let pages = if ts.method == "system" { costs::clamp_rows(size.pages * fract as f64) } else { size.pages };
+    costs::RelSize { pages, tuples: costs::clamp_rows(size.tuples * fract as f64) }
+}
+
+/// cost_samplescan's page cost: random for a method choosing its blocks (NextSampleBlock:
+/// system), sequential for one reading them all (bernoulli).
+pub(crate) fn sample_page_cost(s: &ScanPlan, seq: f64, random: f64) -> f64 {
+    match &s.sample {
+        Some(ts) if ts.method == "system" => random,
+        _ => seq,
+    }
+}
+
 /// CPU per tuple of a sequential scan of `t`: cpu_tuple_cost, or ten times it for a
 /// file_fdw table (its estimate_costs).
 fn seq_cpu_tuple_cost(cat: &crate::catalog::Catalog, t: &Table) -> f64 {
@@ -4901,7 +4940,7 @@ fn describe_need(ctx: &ExecCtx, s: &ScanPlan, par: Option<(usize, f64)>, needed:
             total: rel.fdw.map_or_else(
                 || {
                     rel.qual_startup
-                        + p.g.seq_page_cost * rel.size.pages
+                        + sample_page_cost(s, p.g.seq_page_cost, p.g.random_page_cost) * rel.size.pages
                         + (seq_cpu_tuple_cost(&p.cat, &rel.table) + rel.qual_cost) * rel.size.tuples / div
                 },
                 |c| c.1,

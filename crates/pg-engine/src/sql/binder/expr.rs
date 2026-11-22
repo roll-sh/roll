@@ -3305,7 +3305,9 @@ impl Binder<'_, '_> {
             self.coerce_implicit(r, &DataType::array_of(res.arg_types[1].clone()))?
         };
         let op = self.collated(res.def, &[&l, &r]);
-        Ok(Expr::ArrayOp {
+        // (eval_const_expressions: a ScalarArrayOpExpr of constants with an immutable
+        // operator is evaluated, `x = ANY (NULL::int[])` NULL.)
+        self.fold_in_list(Expr::ArrayOp {
             left: Box::new(l),
             right: Box::new(r),
             op,
