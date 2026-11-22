@@ -1275,7 +1275,7 @@ A link is `{kind, ref, field, mode, options}`:
   - then what it issued is revoked: leases and managed credentials, its decoys, its workload
     identities' tokens (roll-access's grants, so an old one doesn't work after a recovery either),
     its placeholders, and the interception CAs of consumers that held a placeholder of it that name
-    its hosts (`end_unbound_intercept_cas`; they get a new one, without its hosts, from
+    its hosts (`recheck_intercept_cas`; they get a new one, without its hosts, from
     `…/intercept-ca`). Its one-time shares and secret
     requests end, its gateways' links close and open nothing more, and its CAs answer ACME with
     `unauthorized` (their CRLs are still served). The rest is kept for a recovery window
@@ -1344,7 +1344,7 @@ Revoking a role ends
 its sessions and gives what it made (a migration's tables) to `roll` before dropping it, so revoking
 a credential never drops data.
 
-| `search` | `url`, `host`, `port`, `username` | a credential of its own with data access only (no keys or users; `"access": "data"`: a key roll search doesn't say is a data one, whatever else it says or if it says nothing, is deleted and refused), credential `key`: on an Elasticsearch cluster `api_key` (`Authorization: ApiKey …`), on an OpenSearch one an internal user, `user` (`<user>@<cluster>`, which the node routes) and `password`; a link to the field the cluster's flavor doesn't issue is refused when written, and switching a cluster's flavor carries no credential across (link the other fields again); an OpenSearch cluster's fields are offered and suggested under the names its clients read (`OPENSEARCH_URL`, `_HOST`, `_PORT`, `OPENSEARCH_USERNAME`/`_PASSWORD` for its user, `OPENSEARCH_CLUSTER` for the cluster's name); a dynamic one expires by itself 5 minutes after its lease | no (never the cluster's password) |
+| `search` | `url`, `host`, `port`, `username` | a credential of its own with data access only (no keys or users; `"access": "data"`), or narrower with the options `permission` (`read`: searches and reads; `append`: adds to named data streams only, Elasticsearch flavor) and `names` (index names or patterns, a list or a comma-separated string; a data key on names gets none of the cluster's templates, pipelines or lifecycle policies); a key roll search doesn't say is the access and indices asked for, whatever else it says or if it says nothing, is deleted and refused, credential `key`: on an Elasticsearch cluster `api_key` (`Authorization: ApiKey …`), on an OpenSearch one an internal user, `user` (`<user>@<cluster>`, which the node routes) and `password`; a link to the field the cluster's flavor doesn't issue is refused when written, and switching a cluster's flavor carries no credential across (link the other fields again); an OpenSearch cluster's fields are offered and suggested under the names its clients read (`OPENSEARCH_URL`, `_HOST`, `_PORT`, `OPENSEARCH_USERNAME`/`_PASSWORD` for its user, `OPENSEARCH_CLUSTER` for the cluster's name); a dynamic one expires by itself 5 minutes after its lease | no (never the cluster's password) |
 
 roll apps' services have a workspace kind (`service`, `svc_…`); they consume secrets (an app's
 variables, `app:<svc>`) rather than issue credentials, so they have no link provider. Products
@@ -3589,6 +3589,16 @@ agents' sandboxes). Each one does exactly this:
    - It lives a day (`intercept::DEFAULT_TTL`); `ttl` can shorten it, to 5 minutes at least, and
      nothing lengthens it (`MAX_TTL`). Asking again mints a new key and certificate. Earlier ones
      stay valid until they expire, so a container that hasn't reloaded keeps working.
+   - **Keep it while `Secrets::intercept_ca_live(id)` says so, and ask again when it doesn't.** A
+     CA stays live until its hosts change, it nears its end (the last eighth of its life: 3 hours
+     of a day's CA), or its consumer ends. Its hosts change when the consumer is bound to a host
+     the CA doesn't name (a placeholder issued for another key, a binding widened): the CA is
+     then stale, still standing for the hosts it names (step 3) but no longer live. Or the
+     consumer loses a host the CA names, and the CA ends (see Ending). Don't re-mint on a timer:
+     each new CA restarts what trusts it. `intercept_ca_live` is one row read; the bindings are
+     read again only when the CA's last check is a minute old, one of the placeholders its hosts
+     come from has ended since, or a write that couldn't name its consumers (a key or
+     environment deleted, a member's rights changed) marked it.
    - Its name constraints are critical. They permit DNS names for the bound hosts only: an exact
      binding (`api.stripe.com`) is permitted with its subdomains excluded (`.api.stripe.com`)
      unless another binding sits under it, and a wildcard binding (`*.stripe.com`) permits the
@@ -3611,8 +3621,9 @@ agents' sandboxes). Each one does exactly this:
 3. **Terminate TLS only for the bound hosts.** For each connection, take the host the client asked
    for (SNI, or the `CONNECT` target). If `InterceptCa::covers(host)` is false, forward it as a
    `CONNECT` tunnel untouched: no termination, no logging of its bytes. If it covers the host, check
-   `Secrets::intercept_ca_live(id)` (never cached: an ended consumer stops the next connection),
-   then serve `InterceptCa::leaf(host)`, a certificate for exactly that name that lives as long as
+   `Secrets::intercept_ca_stands(id)` (never cached: an ended consumer stops the next connection;
+   a stale CA still stands, so a newly bound host doesn't cut the hosts it names before the
+   consumer swaps it), then serve `InterceptCa::leaf(host)`, a certificate for exactly that name that lives as long as
    the CA. One label under a wildcard binding, never deeper.
 4. **Filter each request** with `roll_secrets::proxy::filter`, which calls `Secrets::substitute`
    for every placeholder. Pass the CA's `consumer` (rolld's `CaInterception` does), never one the
@@ -3638,12 +3649,15 @@ agents' sandboxes). Each one does exactly this:
 revocation row (`revoked_at`, `revoked_why`) and a `secrets.intercept_ca.end` audit row.
 `Secrets::end_consumer` calls it when the sandbox stops or the preview is torn down. A CA also
 ends with its hosts: when the consumer's hosts shrink (one of its placeholders revoked, ended in a
-project or cut off, a key's binding cleared or narrowed), every CA of the consumer that names a
-host it no longer has ends once that write commits (`Secrets::end_unbound_intercept_cas`, reason
-`<hosts> no longer bound`), and the proxy's next `intercept_ca` names only the hosts it still has.
-A shrink nothing announces (a placeholder expiring, a key or environment deleted, a binder demoted
-or removed) ends the CA at its next `intercept_ca_live`, which answers `false` for a CA naming a host no longer bound. The
-proxy then drops the CA and its leaves at its next `intercept_ca_live`. No CRL is published: a
+project or cut off, a key's binding cleared or narrowed, its project deleted), every CA of the
+consumer that names a host it no longer has ends once that write commits
+(`Secrets::recheck_intercept_cas`, reason `<hosts> no longer bound`), and the proxy's next
+`intercept_ca` names only the hosts it still has. The same check marks the consumer's other CAs
+stale when it gained a host. A write that can't name the consumers (a key or environment deleted,
+a member's rights changed) marks their CAs to be checked at their next ask, and a placeholder
+expiring makes the next ask after it check too; a binder's rights changing in roll-access calls in
+nothing, so any check a minute old is made again. A CA naming a host no longer bound ends at that
+check. The proxy then drops the CA and its leaves at its next `intercept_ca_stands`. No CRL is published: a
 trust anchor isn't checked against one, and the CA dies with its container or within a day. Rows
 go a day after they expire.
 
@@ -4680,6 +4694,28 @@ credentials as the tokens list does. Names and metadata only, never a value:
   do there (read, reveal, write, admin; decided by the same scope check requests are), when it was
   last used and when it ends; and whether code roll hasn't vetted (checks, sandboxes, previews)
   can read it, which is so unless the environment is protected.
+- **People** (`people`): the project's members whose role reveals it now (`{user, handle, role,
+  actions, admin?}`), decided by their session grant as their own requests are
+  (docs/members.md); an admin account reveals everything whatever its role (`admin: true`). The
+  operator's admin accounts are a count (`admins`). Members v1.1's groups add the people of a
+  group that holds a role here once they land.
+- **Their agents** (`clients`): live OAuth connections (`rlo_…`: a person's MCP client or app)
+  whose rules reach it, in the shape of `tokens`, by person (`created_by`). A person's connection
+  reaches only what their role does (#644). A cut-off's `tokens` revokes these too.
+- **Services** (`services`): roll apps services the project stands for (the workspace's `trusts`)
+  whose environment reads it, `{service, name, environment, through, last_deployed_at}`. A
+  service environment reads the project's environment of its name (its root folder), so it reads
+  this folder when that's the folder itself or one importing it or based on it (`through:
+  "env:/path"`), or through one of its variables' `roll://` references (`through` is the
+  reference). Whenever it last deployed: what runs holds the value until it's redeployed.
+- **Sandboxes** (`sandboxes`): live agents sandboxes holding a copy of its values, `{id, name,
+  owner, by, from, keys}` (with `key`, only that key).
+- **Who knew** (`knew`): people who read its values in the last 30 days and may no longer reveal
+  them, `{user, last_at, reads, why}` (`why`: `left` the project, their `role` no longer reveals
+  it, or their account is `gone`). They still know what they read: rotate it.
+
+roll secrets knows no product: rolld answers which services and sandboxes hold a project's
+secrets (`reach::Holders`, from roll apps' and roll code's stores; names and references only).
 - **Where it goes by itself**: syncs of that folder (and that key), projects the folder is shared
   with, and this project's folders that import it.
 - **Where it goes by itself** also counts folders that import it and environments based on it
@@ -4693,8 +4729,10 @@ credentials as the tokens list does. Names and metadata only, never a value:
   a `${…}` or `roll://` reference in another key are recorded where they happened and aren't
   counted: the answer says so (`uncounted`).
 
-Who could lists roll-access's live tokens (`rlt_…`) by what each may do here, and workload identities
-by their identity rather than each login. OAuth connections (`rlo_…`) aren't listed yet, though since roll MCP's #644 a member's MCP client reaches what their role does (the thirty-fifth review's item 3).
+Who could lists roll-access's live tokens (`rlt_…`) by what each may do here, workload identities
+by their identity rather than each login, and OAuth connections (`rlo_…`) apart, as `clients`.
+Reach is a project admin's: it names the project's members, which its admins see on the members
+page already.
 
 It also lists what the folder has handed out that's still out: dynamic credentials issued for
 its keys and not yet revoked (`leases`), live placeholders of its keys wherever they were
@@ -5893,6 +5931,42 @@ once after each change and then reused (`Secrets::digest_of`, read.rs):
   gets the same answers now. Each live link is checked as before: its generation (`source_changed`)
   is read again, and its value's fingerprint is read the same way, at most 10 s old. A digest
   where anything failed to read is never kept.
+- **Computed once for every reader with the same answers.** After a change, a rollout's pods
+  (each its own principal) would each compute the same digest. A node offers each folder's digests
+  of its newest state to its other readers: by project, environment, folder, whether the caller is
+  untrusted, and the person, where the caller is one (their own values are in it). A reader takes
+  one only where it gets the same answers to every permission the digest asked and passes every
+  freeze it read past, as the same reader's own reuse does; otherwise it computes its own (up to 8
+  answer sets per folder). While none of the new state is kept, the folder's readers on that node
+  wait for the one computing it rather than all computing it. Nothing is shared between nodes,
+  and values never are: each reader still reads, and is audited for, its own.
+  `readers_share_a_folders_first_digest_only_with_the_same_permissions` (`tests/api.rs`) has
+  readers with different permissions compute in either order after a change: each gets its own
+  digest.
+
+`… --example bench -- stampede 100,1000` has that many identities hold one folder's digest (9,900
+keys), then changes one key and times every identity's conditional read (a miss: the first
+digest after the change) and then its read (`digest=1`, as `roll run --watch` asks), 64 at a
+time, with rolld's pool for secrets on Postgres (4 connections). Measured 2026-11-22 on ai-server,
+pinned to 12 CPUs (`taskset -c 12-17,30-35`, the database on 6-11,24-29), three runs each,
+SQLite and Postgres alternated, under load averages of 37 to 103: the medians for 1,000
+identities, CPU-seconds of rolld plus the database, wall in brackets (no run had an error: every
+identity got the new digest and values).
+
+| | before | after |
+| --- | --- | --- |
+| SQLite, first digest after the change | 74.6 s (16.2 s) | 0.4 s (0.1 s) |
+| SQLite, each identity's read | 213 s (42 s) | 194 s (34 s) |
+| Postgres, first digest after the change | 45.8 + 26.8 s (15.4 s) | 0.7 + 1.1 s (0.6 s) |
+| Postgres, each identity's read | 159 + 58 s (43 s) | 137 + 49 s (28 s) |
+
+Before, the first digest cost 70–78 ms of CPU per identity at 100 identities as at 1,000, so the
+rotation of one key under 1,000 pods cost about 75 CPU-seconds before anyone read a value. Both
+ran on about 4.7 of the 12 cores: a digest is computed inside a database read, and the 4 SQLite
+readers or 4 Postgres connections bound it. Now it is one computation per node and answer set.
+What's left is each identity's read of its own values (182–233 ms each across all runs; the read
+didn't change, and the after runs ran under lower load), on 5.5–7 cores: it is bound by the same
+4 connections, and it is per reader by design.
 
 `tests/nodes.rs` (`a_digest_one_node_keeps_moves_at_once_with_what_another_node_changes`) keeps
 a digest on one node and changes things on another: a write, an import, a write to the imported
@@ -6444,10 +6518,13 @@ found them sound. What's left is at the edges:
 6. **People: groups, SCIM groups and time-boxed elevation** (completeness, L; members v1.1, #445's
    "later"): IdP groups as role holders, SCIM `Groups`, and a person's time-boxed role request through
    roll-access's approvals with the two-person rule.
-7. **The stampede after a change is unmeasured** (performance, M): the first digest after a write is
-   71–157 ms per polling identity, so a rotation under 1,000 pods could cost 100–250 CPU-seconds in
-   one poll interval. Run the load on SQLite and Postgres. If it spikes, share the first digest per
-   (folder, permission fingerprint) on a node.
+7. **The stampede after a change** (performance, M; `perf/secrets-change-stampede`): measured, it
+   spiked. For 1,000 identities on one folder of 9,900 keys, the first digest after a one-key write
+   cost 75 CPU-seconds on SQLite and 73 on Postgres (rolld plus the database), about 73–75 ms per
+   identity at any count. Each identity's read of its values then cost another 213–218 ms. Now a
+   node computes the first digest once for every reader with the same answers: 0.4 and 1.8
+   CPU-seconds, 0.1 and 0.6 s wall ("Performance"). The reads are what's left (~190 CPU-seconds per
+   change at 1,000 pods), bound by secrets' 4 connections, and they are per reader by design.
 8. **Placeholders have no consumer on main yet** (integration): previews' #535 is first; then apps'
    egress and the agents sandbox's proxy. Add one end-to-end swap test through the first real proxy,
    with item 4's scrub.
@@ -6929,8 +7006,8 @@ inconsistencies are fixed in #264:
    ~0.1 core (worked out from single-request latency, not a load run), not ~5.6. A digest reads only the columns it hashes and each folder once, and each node
    keeps it while one read of the database's state (the project's change number, environments,
    imports, required keys, shared folders' projects) says the same, every permission it asked
-   answers the same, and live links' generations and fingerprints hold. Next: the first digest after
-   a write (~70–100 ms per polling identity) if a fleet's numbers call for it.
+   answers the same, and live links' generations and fingerprints hold. The first digest after a
+   write is computed once for every reader with the same answers (the thirty-fourth review's item 7).
 1. **Land the queue**, one at a time when the merge lock is free (the order is in "Landing"):
    four threads share it, so each gate runs before the lock is taken and only main's newest change
    is merged under it.

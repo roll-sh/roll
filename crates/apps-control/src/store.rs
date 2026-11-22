@@ -339,7 +339,8 @@ CREATE TABLE IF NOT EXISTS error_groups (
     PRIMARY KEY (service, env, fingerprint)
 ) WITHOUT ROWID;
 -- Environments' private networks into the customer's own (`peering.rs`): the WireGuard
--- config's roll:// reference and who it's read as, never the config; its routes as JSON.
+-- config's or Tailscale auth key's roll:// reference and who it's read as, never the value; its
+-- routes as JSON. kind: `wireguard`, `tailscale`, or `tailscale <login server URL>`.
 CREATE TABLE IF NOT EXISTS env_peering (
     service TEXT NOT NULL,
     env TEXT NOT NULL,
@@ -948,6 +949,7 @@ fn deploy_row(r: &code_sql::Row<'_>) -> code_sql::Result<Deployment> {
         fix,
         steps: Vec::new(),
         approved_by: Vec::new(),
+        url: None,
     })
 }
 
@@ -3485,16 +3487,17 @@ impl Store {
     pub fn set_peering(&self, service: &str, env: &str, p: &crate::peering::PrivateNetwork, maker: &str) -> Result<()> {
         let routes = serde_json::to_string(&p.routes).map_err(|e| Error::Internal(e.to_string()))?;
         self.db.execute(
-            "INSERT INTO env_peering (service, env, kind, secret, maker, routes) VALUES (?, ?, 'wireguard', ?, ?, ?) ON CONFLICT (service, env) DO UPDATE SET kind = excluded.kind, secret = excluded.secret, maker = excluded.maker, routes = excluded.routes",
-            params![service, env, p.secret, maker, routes],
+            "INSERT INTO env_peering (service, env, kind, secret, maker, routes) VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT (service, env) DO UPDATE SET kind = excluded.kind, secret = excluded.secret, maker = excluded.maker, routes = excluded.routes",
+            params![service, env, crate::peering::kind_column(p), p.secret, maker, routes],
         )?;
         Ok(())
     }
 
     /// An environment's private network and who its reference is read as.
     pub fn peering(&self, service: &str, env: &str) -> Result<Option<(crate::peering::PrivateNetwork, String)>> {
-        Ok(self.db.query_row("SELECT secret, maker, routes FROM env_peering WHERE service = ? AND env = ?", [service, env], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?))).optional()?.map(|(secret, maker, routes)| {
-            (crate::peering::PrivateNetwork { kind: crate::peering::PeerKind::Wireguard, secret, routes: serde_json::from_str(&routes).unwrap_or_default() }, maker)
+        Ok(self.db.query_row("SELECT kind, secret, maker, routes FROM env_peering WHERE service = ? AND env = ?", [service, env], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?, r.get::<_, String>(3)?))).optional()?.map(|(kind, secret, maker, routes)| {
+            let (kind, login_server) = crate::peering::from_kind_column(&kind);
+            (crate::peering::PrivateNetwork { kind, secret, routes: serde_json::from_str(&routes).unwrap_or_default(), login_server }, maker)
         }))
     }
 

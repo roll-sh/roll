@@ -7,6 +7,7 @@
 
 import type { Flavor } from "./search-api";
 import { BulkBatcher } from "./search-import";
+import { KEY_ENV, secretIn, shellQuote } from "./search-playground";
 
 export type SampleId = "sample-products" | "sample-logs";
 
@@ -415,14 +416,14 @@ export const SNIPPET_LANGUAGES: SnippetLanguage[] = ["curl", "javascript", "pyth
 
 /** ES|QL as code (Elasticsearch-flavor only: OpenSearch has no ES|QL). Search requests go
  * through the playground's `copyAs`. */
-export function esqlSnippet(lang: SnippetLanguage, query: string, url: string, keyEnv: string): string {
+export function esqlSnippet(lang: SnippetLanguage, query: string, url: string, apiKey?: string): string {
   const base = url.replace(/\/+$/, "");
   switch (lang) {
     case "curl":
-      return `curl -X POST '${base}/_query?format=txt' \\\n  -H "Authorization: ApiKey $${keyEnv}" \\\n  -H 'content-type: application/json' \\\n  -d '${JSON.stringify({ query }).replace(/'/g, "'\\''")}'`;
+      return `curl -X POST '${base}/_query?format=txt' \\\n  -H ${apiKey === undefined ? `"Authorization: ApiKey $${KEY_ENV}"` : shellQuote(`Authorization: ApiKey ${apiKey}`)} \\\n  -H 'content-type: application/json' \\\n  -d '${JSON.stringify({ query }).replace(/'/g, "'\\''")}'`;
     case "javascript":
-      return `// npm i @elastic/elasticsearch\nimport { Client } from "@elastic/elasticsearch";\n\nconst client = new Client({\n  node: ${JSON.stringify(base)},\n  auth: { apiKey: process.env.${keyEnv} },\n});\nconst resp = await client.esql.query({\n  query: ${JSON.stringify(query)},\n});\nconsole.table(resp.values);\n`;
+      return `// npm i @elastic/elasticsearch\nimport { Client } from "@elastic/elasticsearch";\n\nconst client = new Client({\n  node: ${JSON.stringify(base)},\n  auth: { apiKey: ${secretIn("javascript", KEY_ENV, apiKey)} },\n});\nconst resp = await client.esql.query({\n  query: ${JSON.stringify(query)},\n});\nconsole.table(resp.values);\n`;
     case "python":
-      return `# pip install elasticsearch\nimport os\nfrom elasticsearch import Elasticsearch\n\nclient = Elasticsearch(${JSON.stringify(base)}, api_key=os.environ["${keyEnv}"])\nresp = client.esql.query(query=${JSON.stringify(query)})\nfor row in resp["values"]:\n    print(row)\n`;
+      return `# pip install elasticsearch\n${apiKey === undefined ? "import os\n" : ""}from elasticsearch import Elasticsearch\n\nclient = Elasticsearch(${JSON.stringify(base)}, api_key=${secretIn("python", KEY_ENV, apiKey)})\nresp = client.esql.query(query=${JSON.stringify(query)})\nfor row in resp["values"]:\n    print(row)\n`;
   }
 }

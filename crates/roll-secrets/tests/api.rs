@@ -894,6 +894,10 @@ impl roll_secrets::People for People {
             _ => None,
         })
     }
+
+    fn admins(&self) -> Result<Option<usize>, String> {
+        Ok(Some(usize::from(!*self.root_disabled.lock().unwrap() && !*self.root_demoted.lock().unwrap())))
+    }
 }
 
 /// People's addresses, as roll accounts answers the workspace: `<handle>@example.com`.
@@ -1057,6 +1061,13 @@ impl Gate {
 
     fn issue(&self, name: &str, rule: roll_auth::scope::Rule, user: Option<&str>) -> String {
         self.grant(name, rule, user).0
+    }
+
+    /// `user`'s OAuth connection (`rlo_…`: an MCP client they authorized) with `rule`; its id.
+    fn oauth(&self, name: &str, rule: roll_auth::scope::Rule, user: &str) -> String {
+        let (secret, id) = self.grant(name, rule, Some(user));
+        self.tokens.lock().unwrap().get_mut(&secret).expect("just made").kind = roll_auth::GrantKind::Oauth;
+        id
     }
 }
 
@@ -2041,6 +2052,35 @@ async fn nothing_reaches_an_environment_its_caller_cannot_read() {
     let reader = api.token(json!({ "name": "read", "actions": ["read"] }));
     let (_, list) = api.req(Method::GET, "/environments/staging/secrets", None, Some(reader.as_str())).await;
     assert_eq!(list[0]["fp"], "");
+}
+
+#[tokio::test]
+async fn readers_share_a_folders_first_digest_only_with_the_same_permissions() {
+    let api = Api::new().await;
+    api.set("production", "DB_PASSWORD", "prod-pw").await;
+    api.set("staging", "APP", "a").await;
+    api.ok(Method::PUT, "/environments/staging/imports?path=/", Some(json!([{ "environment": "production", "path": "/" }]))).await;
+    // Staging through production's import for one, without it for the others.
+    let wide = api.token(json!({ "name": "wide", "environments": ["staging", "production"], "actions": ["read", "reveal"] }));
+    let narrow = api.token(json!({ "name": "narrow", "environments": ["staging"], "actions": ["read", "reveal"] }));
+    let also = api.token(json!({ "name": "also", "environments": ["staging"], "actions": ["read", "reveal"] }));
+    let digest = |token: String| {
+        let api = &api;
+        async move { api.req(Method::GET, "/environments/staging/digest", None, Some(&token)).await.1["digest"].as_str().unwrap().to_string() }
+    };
+    let (w, n) = (digest(wide.clone()).await, digest(narrow.clone()).await);
+    assert_ne!(w, n);
+    // A write elsewhere is a new state, and staging's digests come out as before: whoever computes
+    // first after it, the others get their own, and the same permissions the same one.
+    for round in 0..2 {
+        api.set("development", "OTHER", &round.to_string()).await;
+        let mut got = if round == 0 { vec![digest(wide.clone()).await, digest(narrow.clone()).await] } else { vec![digest(narrow.clone()).await, digest(wide.clone()).await] };
+        if round == 1 {
+            got.reverse();
+        }
+        got.push(digest(also.clone()).await);
+        assert_eq!(got, [w.clone(), n.clone(), n.clone()], "round {round}");
+    }
 }
 
 #[tokio::test]
@@ -3782,13 +3822,31 @@ async fn an_interception_ca_names_only_its_consumers_bound_hosts_and_ends_with_i
     }
 }
 
+/// Placeholders' own bindings, counting each time they're read.
+struct CountedBound {
+    secrets: std::sync::Weak<Secrets>,
+    reads: std::sync::atomic::AtomicUsize,
+}
+
+impl roll_secrets::intercept::BoundHosts for CountedBound {
+    fn bound_hosts(&self, consumer: &str) -> roll_secrets::Result<BTreeMap<String, std::collections::BTreeSet<String>>> {
+        self.reads.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        roll_secrets::intercept::BoundHosts::bound_hosts(&*self.secrets.upgrade().unwrap(), consumer)
+    }
+}
+
 /// A consumer's hosts shrinking (a placeholder revoked, a binding taken off) ends its CAs that name a
-/// host it lost, with a revocation row; the next one names only the hosts it still has.
+/// host it lost, with a revocation row; the next one names only the hosts it still has. Growing
+/// (a placeholder for another key, a binding widened) leaves its CAs standing but not live, and
+/// the next one names every host. A connection's check reads one row, never the bindings.
 #[tokio::test]
 async fn an_interception_ca_ends_when_its_consumer_loses_one_of_its_hosts() {
     use roll_secrets::Error;
+    use std::sync::atomic::Ordering;
     let api = Api::new().await;
     let s = &api.secrets;
+    let counted = Arc::new(CountedBound { secrets: Arc::downgrade(s), reads: Default::default() });
+    assert!(s.set_bound_hosts(counted.clone()));
     let consumer = "sandbox:sbx_1";
     for (key, host) in [("STRIPE_KEY", "api.stripe.com"), ("GITHUB_TOKEN", "api.github.com")] {
         api.ok(Method::PUT, &format!("/environments/staging/secrets/{key}"), Some(json!({ "value": format!("fake_{key}_value_0001") }))).await;
@@ -3811,6 +3869,35 @@ async fn an_interception_ca_ends_when_its_consumer_loses_one_of_its_hosts() {
     assert_eq!(s.end_intercept_cas(consumer, "again").unwrap(), 0, "already ended");
     assert!(!s.intercept_ca_live(&new.id).unwrap());
     assert!(matches!(s.intercept_ca(consumer, None), Err(Error::NotFound(_))));
+
+    // Another consumer holding only STRIPE_KEY's placeholder.
+    let grows = "sandbox:sbx_2";
+    api.ok(Method::POST, "/environments/staging/resolve", Some(json!({ "consumer": grows, "placeholders": true }))).await;
+    let first = s.intercept_ca(grows, None).unwrap();
+    assert_eq!(first.hosts, ["api.stripe.com"]);
+    // Connections check its row, never the bindings.
+    let reads = counted.reads.load(Ordering::SeqCst);
+    for _ in 0..50 {
+        assert!(s.intercept_ca_stands(&first.id).unwrap() && s.intercept_ca_live(&first.id).unwrap());
+    }
+    assert_eq!(counted.reads.load(Ordering::SeqCst), reads, "no connection read the bindings");
+    // GITHUB_TOKEN bound again and a placeholder of it issued: the CA doesn't name api.github.com,
+    // so it stops being live, but still stands for api.stripe.com (nothing ended).
+    api.ok(Method::PUT, "/environments/staging/secrets/GITHUB_TOKEN/hosts", Some(json!({ "hosts": ["api.github.com"] }))).await;
+    api.ok(Method::POST, "/environments/staging/resolve", Some(json!({ "consumer": grows, "placeholders": true }))).await;
+    assert!(!s.intercept_ca_live(&first.id).unwrap() && s.intercept_ca_stands(&first.id).unwrap());
+    let both = s.intercept_ca(grows, None).unwrap();
+    assert_eq!(both.hosts, ["api.github.com", "api.stripe.com"]);
+    assert!(s.intercept_ca_live(&both.id).unwrap());
+    // A binding the consumer already holds a placeholder of, widened: stale too.
+    api.ok(Method::PUT, "/environments/staging/secrets/STRIPE_KEY/hosts", Some(json!({ "hosts": ["api.stripe.com", "files.stripe.com"] }))).await;
+    assert!(!s.intercept_ca_live(&both.id).unwrap() && s.intercept_ca_stands(&both.id).unwrap());
+    assert_eq!(s.intercept_ca(grows, None).unwrap().hosts, ["api.github.com", "api.stripe.com", "files.stripe.com"]);
+    let ended = api.ok(Method::GET, "/audit?action=secrets.intercept_ca.end", None).await.to_string();
+    assert!(!ended.contains(&first.id) && !ended.contains(&both.id), "growing ends nothing: {ended}");
+    // The key deleted: its hosts go, and the CAs naming them end at their next check.
+    api.ok(Method::POST, "/environments/staging/changes", Some(json!({ "ops": [{ "op": "delete", "key": "GITHUB_TOKEN" }] }))).await;
+    assert!(!s.intercept_ca_stands(&both.id).unwrap());
 }
 
 #[tokio::test]
@@ -6922,4 +7009,52 @@ async fn past_its_window_a_deleted_environment_is_purged_and_leaves_no_rows() {
     assert_eq!(audit[0]["environment"], "staging", "{audit}");
     assert_eq!(api.call(Method::POST, "/environments/staging/recover", None).await.0, StatusCode::NOT_FOUND);
     api.ok(Method::POST, "/environments", Some(json!({ "slug": "staging" }))).await;
+}
+
+
+/// rolld's services and sandboxes as reach asks for them: `web` deploys staging, `api` reads
+/// production through a `roll://` variable, and a sandbox holds development's KEY and OTHER.
+struct FakeHolders;
+
+impl roll_secrets::reach::Holders for FakeHolders {
+    fn services(&self, _: &str) -> Result<Vec<roll_secrets::reach::ServiceUse>, String> {
+        let svc = |id: &str, environment: &str, references: &[&str]| roll_secrets::reach::ServiceUse { service: id.into(), name: id.into(), environment: environment.into(), last_deployed_at: Some(1), references: references.iter().map(|r| r.to_string()).collect() };
+        Ok(vec![svc("web", "staging", &[]), svc("api", "production", &["roll://production/KEY"])])
+    }
+    fn sandboxes(&self, _: &str) -> Result<Vec<roll_secrets::reach::SandboxCopy>, String> {
+        Ok(vec![roll_secrets::reach::SandboxCopy { id: "sbx_1".into(), name: "try".into(), owner: "ada".into(), by: "usr_ada".into(), from: "development".into(), keys: vec!["KEY".into(), "OTHER".into()] }])
+    }
+}
+
+/// Reach names people (docs/members.md): the members whose role reveals a folder and the
+/// operator's admins as a count, a member's OAuth client, someone who read it and then left
+/// (`knew`), and the services and sandboxes rolld says read it.
+#[tokio::test]
+async fn reach_names_the_people_clients_and_holders_of_a_folder() {
+    let api = Api::new().await;
+    api.secrets.set_reach_holders(Arc::new(FakeHolders));
+    let (_, p) = api.as_ada(Method::POST, "/v1/workspace/projects", Some(json!({ "name": "team" }))).await;
+    let team = p["id"].as_str().unwrap().to_string();
+    let at = |rest: &str| format!("/v1/secrets/projects/{team}{rest}");
+    api.as_ada(Method::PUT, &at("/environments/development/secrets/KEY"), Some(json!({ "value": "fake-dev" }))).await;
+    api.as_ada(Method::PUT, &at("/environments/staging/imports?path=/"), Some(json!([{ "environment": "development", "path": "/" }]))).await;
+    api.join(&team, "bob", "developer", None).await;
+    api.join(&team, "cat", "admin", None).await;
+    api.join(&team, "vic", "developer", None).await;
+    let (s, v) = api.signed_in("vic", false, Method::GET, &at("/environments/development/secrets/KEY/value"), None).await;
+    assert_eq!((s, v["value"].as_str()), (StatusCode::OK, Some("fake-dev")));
+    assert_eq!(api.as_ada(Method::DELETE, &format!("/v1/workspace/projects/{team}/members/usr_vic"), None).await.0, StatusCode::NO_CONTENT);
+    let client = api.gate.oauth("claude", roll_secrets::access::rule(&team, None, None, &[roll_secrets::Action::Read, roll_secrets::Action::Reveal]), "usr_bob");
+
+    let (s, r) = api.as_ada(Method::GET, &at("/environments/development/reach?path=/&key=KEY"), None).await;
+    assert_eq!(s, StatusCode::OK, "{r}");
+    let mut people: Vec<(&str, &str)> = r["people"].as_array().unwrap().iter().map(|p| (p["handle"].as_str().unwrap(), p["role"].as_str().unwrap())).collect();
+    people.sort();
+    assert_eq!(people, [("ada", "owner"), ("bob", "developer"), ("cat", "admin")], "{r}");
+    assert_eq!(r["admins"], 1);
+    assert_eq!((r["clients"][0]["id"].as_str(), r["clients"][0]["created_by"].as_str(), r["tokens"].as_array().unwrap().len()), (Some(client.as_str()), Some("usr_bob"), 0), "{r}");
+    assert_eq!((r["knew"][0]["user"].as_str(), r["knew"][0]["why"].as_str(), r["knew"].as_array().unwrap().len()), (Some("usr_vic"), Some("left"), 1), "{r}");
+    let services: Vec<(&str, &str)> = r["services"].as_array().unwrap().iter().map(|s| (s["name"].as_str().unwrap(), s["through"].as_str().unwrap())).collect();
+    assert_eq!((services, r["sandboxes"][0]["keys"].clone()), (vec![("web", "staging:/")], json!(["KEY"])), "{r}");
+    assert!(!r.to_string().contains("fake-dev"), "names, never a value");
 }

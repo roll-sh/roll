@@ -282,7 +282,12 @@ enum Principal {
 }
 
 fn unauthorized(c: &Config) -> Response {
-    let mut r = http_error(StatusCode::UNAUTHORIZED, "this MCP server needs a token: connect with OAuth, or send Authorization: Bearer rlt_…");
+    unauthorized_because(c, "this MCP server needs a token: connect with OAuth, or send Authorization: Bearer rlt_…")
+}
+
+/// A 401 with OAuth's discovery challenge (the protected resource's metadata), saying `why`.
+fn unauthorized_because(c: &Config, why: &str) -> Response {
+    let mut r = http_error(StatusCode::UNAUTHORIZED, why);
     let meta = format!("Bearer resource_metadata=\"{}/.well-known/oauth-protected-resource/v1/mcp\"", c.api_url.trim_end_matches('/'));
     if let Ok(v) = HeaderValue::from_str(&meta) {
         r.headers_mut().insert(header::WWW_AUTHENTICATE, v);
@@ -368,6 +373,13 @@ async fn handle(State(m): State<Mcp>, uri: axum::http::Uri, ext: Extensions, hea
         None if roll_auth::Operator::on(&ext) || !m.config.locked => Principal::Operator,
         None => return unauthorized(&m.config),
     };
+    // The operator's policy can take agents only with scoped credentials (roll-access's
+    // `mcp_require_grant`, as Stripe's MCP server refuses full-access keys): the admin token, an
+    // admin's session and an open daemon get OAuth's challenge, so a client connects as a grant
+    // every agent control applies to.
+    if matches!(principal, Principal::Operator) && m.config.access.as_ref().is_some_and(|a| a.policy_now().mcp_require_grant) {
+        return unauthorized_because(&m.config, "roll's policy takes agents only with a token made for them or an OAuth connection, never the admin token: connect with OAuth");
+    }
     // The operator's policy can hold every token's and OAuth connection's MCP to lockdown or to
     // reading, whatever the client's URL asks (roll-access's `mcp_lockdown`, `mcp_read_only`).
     let (lockdown, readonly) = match (&principal, &m.config.access) {
@@ -452,6 +464,10 @@ async fn handle(State(m): State<Mcp>, uri: axum::http::Uri, ext: Extensions, hea
     // 2026-07-28's long-lived channel for list changes (SEP-2575): an open stream of its own.
     if ctx.modern && !batch && messages.len() == 1 && messages[0]["method"] == "subscriptions/listen" {
         return listen(ctx, &messages[0]).await;
+    }
+    // MCP Events' push mode: one subscription's stream of its own (SEP-3415).
+    if ctx.modern && !batch && messages.len() == 1 && messages[0]["method"] == "events/stream" {
+        return events::stream(ctx, &messages[0]).await;
     }
     let progress = accepts_sse(&ctx.headers).then(|| messages.iter().find(|m| m["method"] == "tools/call").and_then(|m| m["params"]["_meta"].get("progressToken").cloned())).flatten();
     let mut resp = if progress.is_some() {
@@ -984,10 +1000,12 @@ struct ListenSlot(String);
 static LISTENS: std::sync::LazyLock<std::sync::Mutex<std::collections::HashMap<String, usize>>> = std::sync::LazyLock::new(Default::default);
 
 impl ListenSlot {
-    fn take(who: &str) -> Option<ListenSlot> {
+    /// One of `max` open streams `who` may hold on this node (a listen stream's key is its token,
+    /// an event stream's `events:` and its token).
+    fn take(who: &str, max: usize) -> Option<ListenSlot> {
         let mut open = LISTENS.lock().unwrap_or_else(|e| e.into_inner());
         let n = open.entry(who.to_string()).or_default();
-        if *n >= LISTENS_PER_TOKEN {
+        if *n >= max {
             return None;
         }
         *n += 1;
@@ -1037,7 +1055,7 @@ async fn listen(ctx: Arc<Ctx>, msg: &Value) -> Response {
         Principal::Operator => None,
     };
     // A few open at once per token: each looks at its grant every few seconds.
-    let held = match ListenSlot::take(grant.as_deref().unwrap_or("operator")) {
+    let held = match ListenSlot::take(grant.as_deref().unwrap_or("operator"), LISTENS_PER_TOKEN) {
         Some(h) => h,
         None => return Json(rpc_error(id, -32000, format!("at most {LISTENS_PER_TOKEN} subscriptions open at once per token: close one first"))).into_response(),
     };

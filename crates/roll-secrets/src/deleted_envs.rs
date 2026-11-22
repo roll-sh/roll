@@ -189,7 +189,7 @@ impl Secrets {
             hook(c)?;
             Ok::<_, Error>(consumers)
         })?;
-        self.hosts_shrank(consumers.iter().map(String::as_str));
+        self.hosts_changed(consumers.iter().map(String::as_str));
         if let Err(e) = self.end_decoys() {
             tracing::warn!(project, env = %env.slug, "revoking a deleted environment's decoys failed (the sweeper retries): {e}");
         }

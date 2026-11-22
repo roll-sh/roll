@@ -2,6 +2,7 @@
 # is neither a tool's nor here). `no tool yet` is a gap to close, everything else a decision.
 # One `METHOD route  reason` a line, as the catalogue spells the route; `*` for a row of every method.
 # A line may name a route an open PR is about to add, so that PR's gate passes when it lands.
+GET /v1/access/approvals/decided                                               an MCP Events feed (access.approval): events/poll and webhooks read it, access_wait_approval waits on one
 GET /v1/access/catalog                                                         the dashboard's (the permission catalogue; tools carry their own actions)
 GET /v1/access/oauth/clients                                                   the dashboard's (the OAuth clients a person registered)
 GET /v1/access/oauth/clients/{id}                                              the dashboard's (one registered OAuth client)
@@ -45,6 +46,7 @@ POST /v1/nosql/databases/{id}/flush                                            t
 POST /v1/nosql/databases/{id}/imports                                          the operator's (an SSTable backup import from storage the operator holds)
 POST /v1/nosql/databases/{id}/password                                         answers or sets a credential
 POST /v1/nosql/databases/{id}/unload                                           the operator's (health, migrations, process control)
+GET /v1/previews/events                                                        an MCP Events feed (previews.event): events/poll and webhooks read it; previews_list and previews_get are the tools
 DELETE /v1/previews/projects/{project}/bypass                                  answers or sets a credential
 GET /v1/previews/projects/{project}/bypass                                     answers or sets a credential
 POST /v1/previews/projects/{project}/bypass                                    answers or sets a credential

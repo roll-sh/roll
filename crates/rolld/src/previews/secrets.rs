@@ -51,7 +51,7 @@ impl roll_previews::ports::Reveal for SecretsReveal {
 /// so keys bound to more hosts since are covered; the swap is roll secrets' own filter.
 pub struct SecretsIntercepts {
     pub secrets: Arc<roll_secrets::Secrets>,
-    cas: std::sync::Mutex<std::collections::HashMap<String, (roll_secrets::intercept::InterceptCa, std::time::Instant)>>,
+    cas: std::sync::Mutex<std::collections::HashMap<String, roll_secrets::intercept::InterceptCa>>,
 }
 
 impl SecretsIntercepts {
@@ -60,18 +60,21 @@ impl SecretsIntercepts {
     }
 }
 
-/// How long a preview's CA is reused before roll secrets is asked again.
-const CA_REUSE: std::time::Duration = std::time::Duration::from_secs(3600);
+/// A preview's CA is kept until this close to its end (roll secrets mints them for 24 h). A new CA
+/// restarts the preview's services (they trust it, `i<id>` in their fingerprint), so it's asked for
+/// only then, as roll apps' closed environments do; an ended one is replaced at once.
+const CA_RENEW_MS: i64 = 3 * 3_600_000;
 
 impl roll_previews::ports::Intercepts for SecretsIntercepts {
     fn of(&self, preview: &str) -> anyhow::Result<Option<roll_previews::ports::Intercepted>> {
         let consumer = roll_previews::ports::intercept_consumer(preview);
-        let reused = self.cas.lock().unwrap_or_else(|e| e.into_inner()).get(preview).filter(|(_, at)| at.elapsed() < CA_REUSE).map(|(ca, _)| ca.clone());
+        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis() as i64).unwrap_or(0);
+        let reused = self.cas.lock().unwrap_or_else(|e| e.into_inner()).get(preview).filter(|ca| ca.expires_at - now > CA_RENEW_MS).cloned();
         let ca = match reused {
             Some(ca) if self.secrets.intercept_ca_live(&ca.id).unwrap_or(false) => ca,
             _ => match self.secrets.intercept_ca(&consumer, None) {
                 Ok(ca) => {
-                    self.cas.lock().unwrap_or_else(|e| e.into_inner()).insert(preview.to_string(), (ca.clone(), std::time::Instant::now()));
+                    self.cas.lock().unwrap_or_else(|e| e.into_inner()).insert(preview.to_string(), ca.clone());
                     ca
                 }
                 // No live placeholder of a key bound to hosts: nothing to intercept.

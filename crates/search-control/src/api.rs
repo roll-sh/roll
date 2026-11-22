@@ -79,7 +79,14 @@ pub fn router(control: Arc<Control>) -> Router {
         .route("/v1/search/clusters/{id}/remotes/{alias}", axum::routing::put(link_remote).delete(unlink_remote))
         .route("/v1/search/clusters/{id}/indices/{index}", get(index_get).put(index_create).delete(index_delete))
         .route("/v1/search/clusters/{id}/indices/{index}/mapping", axum::routing::put(index_mapping).get(index_mapping_get))
-        .route("/v1/search/clusters/{id}/indices/{index}/settings", get(index_settings))
+        .route("/v1/search/clusters/{id}/indices/{index}/settings", get(index_settings).put(index_settings_put))
+        .route("/v1/search/clusters/{id}/indices/{index}/explain/{doc}", post(doc_explain))
+        .route("/v1/search/clusters/{id}/synonyms", get(synonyms_list))
+        .route("/v1/search/clusters/{id}/synonyms/{set}", get(synonyms_get).put(synonyms_put).delete(synonyms_delete))
+        .route("/v1/search/clusters/{id}/synonyms/{set}/{rule}", get(synonym_rule_get).put(synonym_rule_put).delete(synonym_rule_delete))
+        .route("/v1/search/clusters/{id}/query_rules", get(rulesets_list))
+        .route("/v1/search/clusters/{id}/query_rules/{ruleset}", get(ruleset_get).put(ruleset_put).delete(ruleset_delete))
+        .route("/v1/search/clusters/{id}/query_rules/{ruleset}/test", post(ruleset_test))
         .route("/v1/search/clusters/{id}/indices/{index}/refresh", post(index_refresh))
         .route("/v1/search/clusters/{id}/indices/{index}/analyze", post(index_analyze))
         .route("/v1/search/clusters/{id}/indices/{index}/search", post(index_search))
@@ -529,7 +536,7 @@ fn index_segment(index: &str, read: bool) -> Result<String, ControlError> {
 }
 
 #[allow(clippy::too_many_arguments)]
-async fn es_route(c: &Control, id: &str, method: Method, api_path: String, es_method: &str, es_path: String, scope: &str, query: Option<&str>, headers: &HeaderMap, body: Body, kind: EsBody) -> Result<Response, ControlError> {
+async fn es_route(c: &Control, id: &str, method: Method, api_path: String, es_method: &str, es_path: String, scope: Option<&str>, query: Option<&str>, headers: &HeaderMap, body: Body, kind: EsBody) -> Result<Response, ControlError> {
     let cluster = c.get(id).await?;
     let bytes = match kind {
         EsBody::None => bytes::Bytes::new(),
@@ -562,7 +569,7 @@ macro_rules! index_route {
     ($name:ident, $es_method:literal, $rest:literal, $es_rest:literal, $read:expr, $kind:expr) => {
         async fn $name(State(c): State<AppState>, Path((id, index)): Path<(String, String)>, method: Method, uri: axum::http::Uri, headers: HeaderMap, body: Body) -> Result<Response, ControlError> {
             let seg = index_segment(&index, $read)?;
-            es_route(&c, &id, method, api_index_path(&id, &index, $rest), $es_method, format!("/{seg}{}", $es_rest), &index, uri.query(), &headers, body, $kind).await
+            es_route(&c, &id, method, api_index_path(&id, &index, $rest), $es_method, format!("/{seg}{}", $es_rest), Some(index.as_str()), uri.query(), &headers, body, $kind).await
         }
     };
 }
@@ -573,6 +580,9 @@ index_route!(index_delete, "DELETE", "", "", false, EsBody::None);
 index_route!(index_mapping, "PUT", "/mapping", "/_mapping", false, EsBody::Json);
 index_route!(index_mapping_get, "GET", "/mapping", "/_mapping", true, EsBody::None);
 index_route!(index_settings, "GET", "/settings", "/_settings", true, EsBody::None);
+// The engine refuses what nobody may set through `_settings` (private, internal and managed
+// settings) to this route as to any client; the index scope keeps it to the one index.
+index_route!(index_settings_put, "PUT", "/settings", "/_settings", false, EsBody::Json);
 index_route!(index_refresh, "POST", "/refresh", "/_refresh", true, EsBody::None);
 index_route!(index_analyze, "POST", "/analyze", "/_analyze", false, EsBody::Json);
 index_route!(index_search, "POST", "/search", "/_search", true, EsBody::Json);
@@ -580,19 +590,74 @@ index_route!(doc_create, "POST", "/docs", "/_doc", false, EsBody::Json);
 index_route!(index_bulk, "POST", "/bulk", "/_bulk", false, EsBody::Ndjson);
 index_route!(index_delete_by_query, "POST", "/delete_by_query", "/_delete_by_query", true, EsBody::Json);
 
+/// One document's route: `…/indices/{index}/<rest>/{doc}` to `/{index}/<es_rest>/{doc}`.
 macro_rules! doc_route {
-    ($name:ident, $es_method:literal, $kind:expr) => {
+    ($name:ident, $es_method:literal, $rest:literal, $es_rest:literal, $kind:expr) => {
         async fn $name(State(c): State<AppState>, Path((id, index, doc)): Path<(String, String, String)>, method: Method, uri: axum::http::Uri, headers: HeaderMap, body: Body) -> Result<Response, ControlError> {
             let seg = index_segment(&index, false)?;
             let d = urlencoding::encode(&doc).into_owned();
-            es_route(&c, &id, method, api_index_path(&id, &index, &format!("/docs/{d}")), $es_method, format!("/{seg}/_doc/{d}"), &index, uri.query(), &headers, body, $kind).await
+            es_route(&c, &id, method, api_index_path(&id, &index, &format!("/{}/{d}", $rest)), $es_method, format!("/{seg}/{}/{d}", $es_rest), Some(index.as_str()), uri.query(), &headers, body, $kind).await
         }
     };
 }
 
-doc_route!(doc_get, "GET", EsBody::None);
-doc_route!(doc_put, "PUT", EsBody::Json);
-doc_route!(doc_delete, "DELETE", EsBody::None);
+doc_route!(doc_get, "GET", "docs", "_doc", EsBody::None);
+doc_route!(doc_put, "PUT", "docs", "_doc", EsBody::Json);
+doc_route!(doc_delete, "DELETE", "docs", "_doc", EsBody::None);
+doc_route!(doc_explain, "POST", "explain", "_explain", EsBody::Json);
+
+// --- synonyms sets and query rulesets: cluster-wide objects (an index's analyzer names a set by
+// `synonyms_set`; a `rule` query or retriever names rulesets), so they run as the cluster's
+// owner, on paths these routes build: `/_synonyms/…` and `/_query_rules/…` only.
+
+/// A route under `/v1/search/clusters/{id}/` for Elasticsearch's `es_api` (`_synonyms`,
+/// `_query_rules`) with up to two names after it (`/{set}/{rule}`, `/{ruleset}`) and an
+/// optional last segment (`_test`).
+macro_rules! cluster_route {
+    ($name:ident, $es_method:literal, $api:literal, $es_api:literal, 0, $kind:expr) => {
+        async fn $name(State(c): State<AppState>, Path(id): Path<String>, method: Method, uri: axum::http::Uri, headers: HeaderMap, body: Body) -> Result<Response, ControlError> {
+            let api_path = format!("/v1/search/clusters/{}/{}", urlencoding::encode(&id), $api);
+            es_route(&c, &id, method, api_path, $es_method, format!("/{}", $es_api), None, uri.query(), &headers, body, $kind).await
+        }
+    };
+    ($name:ident, $es_method:literal, $api:literal, $es_api:literal, 1, $suffix:literal, $es_suffix:literal, $kind:expr) => {
+        async fn $name(State(c): State<AppState>, Path((id, a)): Path<(String, String)>, method: Method, uri: axum::http::Uri, headers: HeaderMap, body: Body) -> Result<Response, ControlError> {
+            let a = name_segment(&a)?;
+            let api_path = format!("/v1/search/clusters/{}/{}/{a}{}", urlencoding::encode(&id), $api, $suffix);
+            es_route(&c, &id, method, api_path, $es_method, format!("/{}/{a}{}", $es_api, $es_suffix), None, uri.query(), &headers, body, $kind).await
+        }
+    };
+    ($name:ident, $es_method:literal, $api:literal, $es_api:literal, 2, $kind:expr) => {
+        async fn $name(State(c): State<AppState>, Path((id, a, b)): Path<(String, String, String)>, method: Method, uri: axum::http::Uri, headers: HeaderMap, body: Body) -> Result<Response, ControlError> {
+            let (a, b) = (name_segment(&a)?, name_segment(&b)?);
+            let api_path = format!("/v1/search/clusters/{}/{}/{a}/{b}", urlencoding::encode(&id), $api);
+            es_route(&c, &id, method, api_path, $es_method, format!("/{}/{a}/{b}", $es_api), None, uri.query(), &headers, body, $kind).await
+        }
+    };
+}
+
+/// A synonyms set's, rule's or ruleset's id as a path segment: never empty, never one of
+/// Elasticsearch's own names (`_…`), which would reach another API, and never `.` or `..`, which
+/// a path normalized anywhere on the way would read as a dot segment (`/_synonyms/../books`).
+fn name_segment(name: &str) -> Result<String, ControlError> {
+    if name.is_empty() || name.starts_with('_') || name == "." || name == ".." {
+        return Err(ControlError::Invalid(format!("invalid id [{name}]")));
+    }
+    Ok(urlencoding::encode(name).into_owned())
+}
+
+cluster_route!(synonyms_list, "GET", "synonyms", "_synonyms", 0, EsBody::None);
+cluster_route!(synonyms_get, "GET", "synonyms", "_synonyms", 1, "", "", EsBody::None);
+cluster_route!(synonyms_put, "PUT", "synonyms", "_synonyms", 1, "", "", EsBody::Json);
+cluster_route!(synonyms_delete, "DELETE", "synonyms", "_synonyms", 1, "", "", EsBody::None);
+cluster_route!(synonym_rule_get, "GET", "synonyms", "_synonyms", 2, EsBody::None);
+cluster_route!(synonym_rule_put, "PUT", "synonyms", "_synonyms", 2, EsBody::Json);
+cluster_route!(synonym_rule_delete, "DELETE", "synonyms", "_synonyms", 2, EsBody::None);
+cluster_route!(rulesets_list, "GET", "query_rules", "_query_rules", 0, EsBody::None);
+cluster_route!(ruleset_get, "GET", "query_rules", "_query_rules", 1, "", "", EsBody::None);
+cluster_route!(ruleset_put, "PUT", "query_rules", "_query_rules", 1, "", "", EsBody::Json);
+cluster_route!(ruleset_delete, "DELETE", "query_rules", "_query_rules", 1, "", "", EsBody::None);
+cluster_route!(ruleset_test, "POST", "query_rules", "_query_rules", 1, "/test", "/_test", EsBody::Json);
 
 /// `PUT /v1/search/clusters/{id}/repositories/{name}`: `PUT _snapshot/{name}` (Elasticsearch's
 /// body and query), the only way a repository's credentials can be roll secrets references: the
@@ -613,11 +678,14 @@ async fn put_repository(State(c): State<AppState>, Path((id, name)): Path<(Strin
 struct NewKey {
     name: String,
     expires_in_s: Option<i64>,
+    /// `admin` (default), `data`, `read` or `append` ([`crate::control::KeyAccess`]).
     access: Option<String>,
+    /// Index names or patterns the key reaches (default every index; not with `admin`).
+    indices: Option<Vec<String>>,
 }
 
 async fn create_key(State(c): State<AppState>, Path(id): Path<String>, Json(k): Json<NewKey>) -> ApiResult<Value> {
-    Ok(Json(c.create_key(&id, &k.name, k.expires_in_s, k.access.as_deref()).await?))
+    Ok(Json(c.create_key(&id, &k.name, k.expires_in_s, k.access.as_deref(), k.indices).await?))
 }
 
 async fn delete_key(State(c): State<AppState>, Path((id, key)): Path<(String, String)>) -> Result<StatusCode, ControlError> {

@@ -1043,7 +1043,9 @@ impl Runtime for Docker {
             let name = name.to_string();
             async move { docker(&["inspect", "-f", &format!("{{{{.State.Running}}}} {{{{index .Config.Labels \"{LABEL}.peer\"}}}}"), &name]).await.is_ok_and(|o| o.trim() == want) }
         };
-        if running(&spec.name, format!("true {digest}")).await && docker(&["exec", &spec.name, "test", "-s", "/run/wg/wg0.conf"]).await.is_ok() {
+        let tailscale = spec.kind == crate::peering::PeerKind::Tailscale;
+        let secret_file = if tailscale { "/run/ts/key" } else { "/run/wg/wg0.conf" };
+        if running(&spec.name, format!("true {digest}")).await && docker(&["exec", &spec.name, "test", "-s", secret_file]).await.is_ok() {
             let mut all = true;
             for f in &forwarders {
                 all &= running(f, format!("true {digest}")).await;
@@ -1062,15 +1064,28 @@ impl Runtime for Docker {
         for l in &labels {
             args.extend(["--label", l]);
         }
-        // The tunnel in a namespace of its own: NET_ADMIN there and nothing else, no root
-        // filesystem to write, its config only in memory.
-        args.extend(["--cap-drop", "ALL", "--cap-add", "NET_ADMIN", "--security-opt", "no-new-privileges", "--read-only", "--tmpfs", "/run/wg:size=64k,mode=0700"]);
-        args.extend(["--memory", "64m", "--pids-limit", "64", "-e", &addrs, "-e", &routes, "-e", &mtu, "--entrypoint", "sh", super::peering_image::WIREGUARD, "-c", super::peering_image::SCRIPT]);
+        let (ts_args, ts_host) = (format!("TS_EXTRA_ARGS=--accept-routes{}", spec.login_server.as_deref().map(|u| format!(" --login-server={u}")).unwrap_or_default()), format!("TS_HOSTNAME=roll-{}-{}", spec.service.trim_start_matches("svc_"), spec.env));
+        if tailscale {
+            // A Tailscale node in userspace: no capability at all, no tun, its key and state only
+            // in memory (an ephemeral node), routes reached through its SOCKS5 server.
+            args.extend(["--cap-drop", "ALL", "--security-opt", "no-new-privileges", "--read-only", "--tmpfs", "/run/ts:size=64k,mode=0700", "--tmpfs", "/tmp:size=16m", "--tmpfs", "/var/lib/tailscale:size=16m"]);
+            args.extend(["--memory", "128m", "--pids-limit", "128", "-e", "TS_AUTHKEY=file:/run/ts/key", "-e", "TS_USERSPACE=true", "-e", "TS_STATE_DIR=/var/lib/tailscale", "-e", "TS_SOCKS5_SERVER=127.0.0.1:1055", "-e", "TS_SOCKET=/tmp/tailscaled.sock", "-e", "TS_ACCEPT_DNS=false", "-e", &ts_host, "-e", &ts_args]);
+            args.extend(["--entrypoint", "sh", super::peering_image::TAILSCALE, "-c", super::peering_image::TAILSCALE_SCRIPT]);
+        } else {
+            // The tunnel in a namespace of its own: NET_ADMIN there and nothing else, no root
+            // filesystem to write, its config only in memory.
+            args.extend(["--cap-drop", "ALL", "--cap-add", "NET_ADMIN", "--security-opt", "no-new-privileges", "--read-only", "--tmpfs", "/run/wg:size=64k,mode=0700"]);
+            args.extend(["--memory", "64m", "--pids-limit", "64", "-e", &addrs, "-e", &routes, "-e", &mtu, "--entrypoint", "sh", super::peering_image::WIREGUARD, "-c", super::peering_image::SCRIPT]);
+        }
         docker_within(&args, Some(Duration::from_secs(300))).await.context("the private network's peer")?;
+        if let Some(out) = &spec.out_network {
+            self.ensure_network(out, &spec.service, false).await?;
+            docker(&["network", "connect", out, &spec.name]).await.context("the peer's way out")?;
+        }
         docker(&["start", &spec.name]).await?;
         // Its config through stdin into its tmpfs: never on disk, in argv or in an env.
         let mut child = Command::new("docker")
-            .args(["exec", "-i", &spec.name, "sh", "-c", "umask 077; cat > /run/wg/.c && mv /run/wg/.c /run/wg/wg0.conf"])
+            .args(["exec", "-i", &spec.name, "sh", "-c", if tailscale { "umask 077; cat > /run/ts/.k && mv /run/ts/.k /run/ts/key" } else { "umask 077; cat > /run/wg/.c && mv /run/wg/.c /run/wg/wg0.conf" }])
             .stdin(Stdio::piped())
             .stdout(Stdio::null())
             .stderr(Stdio::piped())
@@ -1083,13 +1098,20 @@ impl Runtime for Docker {
         }
         let out = tokio::time::timeout(Duration::from_secs(30), child.wait_with_output()).await.context("writing the peer's config")??;
         anyhow::ensure!(out.status.success(), "the peer's config wasn't written");
-        // Up once its interface is (or it says why it stopped).
+        // Up once its interface is, or (Tailscale) once it has its tailnet address; else it says
+        // why it stopped.
         let began = std::time::Instant::now();
+        let within = Duration::from_secs(if tailscale { 60 } else { 15 });
         loop {
-            if docker(&["exec", &spec.name, "ip", "link", "show", "wg0", "up"]).await.is_ok_and(|o| !o.trim().is_empty()) {
+            let up = match tailscale {
+                // (Its daemon's socket is in its tmpfs: the CLI's default isn't writable there.)
+                true => docker(&["exec", &spec.name, "tailscale", "--socket=/tmp/tailscaled.sock", "ip", "-4"]).await,
+                false => docker(&["exec", &spec.name, "ip", "link", "show", "wg0", "up"]).await,
+            };
+            if up.is_ok_and(|o| !o.trim().is_empty()) {
                 break;
             }
-            if !running(&spec.name, format!("true {digest}")).await || began.elapsed() > Duration::from_secs(15) {
+            if !running(&spec.name, format!("true {digest}")).await || began.elapsed() > within {
                 let why = docker_logs_tail(&spec.name).await;
                 self.remove_peer(&spec.name).await;
                 anyhow::bail!("the private network's peer didn't come up: {why}");
@@ -1097,7 +1119,12 @@ impl Runtime for Docker {
             tokio::time::sleep(Duration::from_millis(100)).await;
         }
         for ((_, port, target), name) in spec.forwards.iter().zip(&forwarders) {
-            let (listen, connect, net) = (format!("TCP-LISTEN:{port},fork,reuseaddr"), format!("TCP:{target}"), format!("container:{}", spec.name));
+            // Tailscale's routes through its SOCKS5 server (a MagicDNS name resolved there too).
+            let connect = match tailscale {
+                true => format!("SOCKS5-CONNECT:127.0.0.1:1055:{target}"),
+                false => format!("TCP:{target}"),
+            };
+            let (listen, net) = (format!("TCP-LISTEN:{port},fork,reuseaddr"), format!("container:{}", spec.name));
             let mut args: Vec<&str> = vec!["run", "-d", "--name", name, "--network", &net];
             for l in &labels {
                 args.extend(["--label", l]);
@@ -1117,6 +1144,8 @@ impl Runtime for Docker {
         for n in listed.lines().map(str::trim).filter(|n| *n == name || n.strip_prefix(name).and_then(|r| r.strip_prefix('-')).is_some_and(|p| !p.is_empty() && p.chars().all(|c| c.is_ascii_digit()))) {
             let _ = docker(&["rm", "-f", n]).await;
         }
+        // A closed environment's peer's way out goes with it.
+        self.remove_network(&format!("{name}-out")).await;
     }
 
     async fn remove_network(&self, name: &str) {

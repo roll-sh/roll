@@ -873,6 +873,8 @@ export interface Deployment {
   vulnerabilities?: ScanSummary;
   /** Who approved putting it live, where its environment asks for approvals (single GET only). */
   approved_by?: string[];
+  /** Its own URL (`<id>--<env slug>`), where one answers: null for a worker, a volume, one never built, pruned or waiting for approvals. */
+  url?: string | null;
 }
 
 export interface Slo {
@@ -1401,9 +1403,11 @@ export interface Backup {
 
 /** An environment's private network into the customer's own (docs/apps/http-api.md, `…/private-network`). */
 export interface PrivateNetwork {
-  kind: "wireguard";
-  /** roll://ENV/KEY: the WireGuard config's secret, never the config. */
+  kind: "wireguard" | "tailscale";
+  /** roll://ENV/KEY: the WireGuard config's or Tailscale auth key's secret, never the value. */
   secret: string;
+  /** A Tailscale node's control server when it isn't Tailscale's (Headscale). */
+  login_server?: string | null;
   routes: { name: string; target: string }[];
   /** `running`, `failed: why`, or `waiting for a deploy`. */
   status: string;
@@ -1671,7 +1675,7 @@ export const appsApi = {
   job: (id: string, e: string, j: string) => call<Job>("GET", `${env(id, e)}/jobs/${encodeURIComponent(j)}`),
   cancelJob: (id: string, e: string, j: string) => call<Job>("POST", `${env(id, e)}/jobs/${encodeURIComponent(j)}/cancel`),
   privateNetwork: (id: string, e: string) => call<PrivateNetwork>("GET", `${env(id, e)}/private-network`),
-  setPrivateNetwork: (id: string, e: string, body: { secret: string; routes: { name: string; target: string }[] }) => call<PrivateNetwork>("PUT", `${env(id, e)}/private-network`, body),
+  setPrivateNetwork: (id: string, e: string, body: { secret: string; routes: { name: string; target: string }[]; kind?: "wireguard" | "tailscale"; login_server?: string }) => call<PrivateNetwork>("PUT", `${env(id, e)}/private-network`, body),
   deletePrivateNetwork: (id: string, e: string) => call<void>("DELETE", `${env(id, e)}/private-network`),
   sandboxes: (id: string, e: string) => call<Sandbox[]>("GET", `${env(id, e)}/sandboxes`),
   createSandbox: (id: string, e: string, body: { image?: string; ttl_s?: number; cpu?: number; memory_mb?: number; variables?: boolean; network?: "none" | "environment" }) => call<Sandbox>("POST", `${env(id, e)}/sandboxes`, body),

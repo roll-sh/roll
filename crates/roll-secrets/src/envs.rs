@@ -911,7 +911,9 @@ pub(crate) fn deletable(c: &Conn<'_>, project: &str, env: &EnvRow) -> Result<()>
 /// Every row of an environment (an ephemeral one's delete, a standard one's purge). Its decoys
 /// stay: they end, and their tokens are revoked, once their keys are gone (decoys.rs).
 pub(crate) fn drop_env(c: &Conn<'_>, env: &EnvRow) -> Result<()> {
-    // Its keys' hosts and its placeholders (a preview's, torn down with it) end with it.
+    // Its keys' hosts and its placeholders (a preview's, torn down with it) end with it, and so
+    // do their consumers' CAs naming those hosts, at their next ask.
+    c.execute(&format!("{}env_id = ?)", crate::intercept::RECHECK_HOLDERS), [&env.id])?;
     c.execute("DELETE FROM key_hosts WHERE secret_id IN (SELECT id FROM secrets WHERE env_id = ?)", [&env.id])?;
     for t in ["secrets", "versions", "requests", "leases", "folders", "imports", "exports", "folder_policies", "placeholders", "freezes", "syncs", "notices", "read_bursts", "shares", "value_requests"] {
         c.execute(&format!("DELETE FROM {t} WHERE env_id = ?"), [&env.id])?;
