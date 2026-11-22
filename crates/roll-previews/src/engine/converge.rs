@@ -413,9 +413,17 @@ impl Engine {
                     Err(e) => warn!(preview = %r.id, kind = res.kind.as_str(), error = %e, "previews: reading usage"),
                 }
             }
+            // And the earlier pushes' copies, which count in its cost and size cap too.
+            for d in self.store.pinned_data(&r.id)? {
+                let Ok(b) = self.brancher(d.kind) else { continue };
+                match b.usage(&d.parent, &d.r#ref).await {
+                    Ok(u) => self.store.set_pinned_usage(&r.id, &d, &u)?,
+                    Err(e) => warn!(preview = %r.id, kind = d.kind.as_str(), error = %e, "previews: reading an earlier push's copy's usage"),
+                }
+            }
             self.usage_read.lock().insert(r.id.clone(), now);
         }
-        let bytes: i64 = self.store.resources(&r.id)?.iter().map(|x| x.bytes).sum();
+        let bytes: i64 = self.store.resources(&r.id)?.iter().map(|x| x.bytes).sum::<i64>() + self.store.pinned_usage(&r.id)?.iter().map(|x| x.0).sum::<i64>();
         if bytes as u64 > s.max_bytes {
             for svc in self.store.services(&r.id)? {
                 self.apps.sleep(&r.id, &svc.name).await;

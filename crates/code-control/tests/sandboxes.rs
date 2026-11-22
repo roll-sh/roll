@@ -13,7 +13,7 @@ use axum::routing::{get, post};
 use axum::{Json, Router};
 use code_control::agents::sandbox::agent37::Agent37Config;
 use code_control::agents::sandbox::docker::{Docker, DockerConfig, Runtime};
-use code_control::agents::sandbox::{BackendConfig, BackendError, BackendState, ExternalBackend, SandboxBackend, SandboxConfig, SandboxSpec, Tagged, default_sizes};
+use code_control::agents::sandbox::{BackendConfig, BackendError, BackendState, EnvChange, ExternalBackend, SandboxBackend, SandboxConfig, SandboxSpec, Tagged, default_sizes};
 use common::daemon::Daemon;
 use common::{App, app_with};
 use parking_lot::Mutex;
@@ -43,6 +43,8 @@ enum OnCreate {
 #[derive(Default)]
 struct Mock {
     instances: BTreeMap<String, Value>,
+    /// Each instance's env (write-only: never in an answer), as created and edited.
+    envs: BTreeMap<String, serde_json::Map<String, Value>>,
     /// Create bodies received, in order.
     creates: Vec<Value>,
     /// `METHOD /path` of every call.
@@ -82,6 +84,7 @@ async fn create(State(m): State<M>, h: HeaderMap, Json(body): Json<Value>) -> Re
     let id = format!("inst{:06}", m.next);
     let status = if m.hold_provisioning { "provisioning" } else { "running" };
     let inst = json!({ "id": id, "status": status, "metadata": body["metadata"], "resources": body["resources"], "template": body["template"] });
+    m.envs.insert(id.clone(), body["env"].as_object().cloned().unwrap_or_default());
     m.instances.insert(id, inst.clone());
     if what == OnCreate::LoseAnswer {
         return err(StatusCode::INTERNAL_SERVER_ERROR, "internal_error");
@@ -110,6 +113,24 @@ async fn one(State(m): State<M>, h: HeaderMap, Path(id): Path<String>) -> Respon
     }
 }
 
+/// `PATCH /v1/instances/{id} {env}`: merged into its env, a `null` unsetting one variable.
+async fn edit(State(m): State<M>, h: HeaderMap, Path(id): Path<String>, Json(body): Json<Value>) -> Response {
+    if !authed(&h) {
+        return err(StatusCode::UNAUTHORIZED, "invalid_api_key");
+    }
+    let mut m = m.lock();
+    m.calls.push(format!("PATCH /v1/instances/{id}"));
+    let Some(env) = m.envs.get_mut(&id) else { return err(StatusCode::NOT_FOUND, "not_found") };
+    for (k, v) in body["env"].as_object().cloned().unwrap_or_default() {
+        if v.is_null() {
+            env.remove(&k);
+        } else {
+            env.insert(k, v);
+        }
+    }
+    Json(m.instances[&id].clone()).into_response()
+}
+
 async fn remove(State(m): State<M>, h: HeaderMap, Path(id): Path<String>) -> Response {
     if !authed(&h) {
         return err(StatusCode::UNAUTHORIZED, "invalid_api_key");
@@ -133,7 +154,7 @@ async fn action(State(m): State<M>, h: HeaderMap, Path((id, action)): Path<(Stri
     m.calls.push(format!("POST /v1/instances/{id}/{action}"));
     let Some(i) = m.instances.get_mut(&id) else { return err(StatusCode::NOT_FOUND, "not_found") };
     i["status"] = json!(match action.as_str() {
-        "start" => "running",
+        "start" | "restart" => "running",
         "stop" => "stopped",
         _ => return err(StatusCode::NOT_FOUND, "not_found"),
     });
@@ -145,7 +166,7 @@ async fn agent37() -> (String, M) {
     let m: M = Arc::default();
     let router = Router::new()
         .route("/v1/instances", get(list).post(create))
-        .route("/v1/instances/{id}", get(one).delete(remove))
+        .route("/v1/instances/{id}", get(one).delete(remove).patch(edit))
         .route("/v1/instances/{id}/{action}", post(action))
         .with_state(m.clone());
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -197,6 +218,27 @@ impl World {
         let (s, v) = self.req("POST", "/v1/code/agents/acme/sandboxes", Some(body)).await;
         assert_eq!(s, StatusCode::CREATED, "{v}");
         v
+    }
+
+    /// Create a sandbox as `user`, a signed-in person of acme's (rolld's gate signed them in): its
+    /// id.
+    async fn create_as(&self, user: &str, body: Value) -> String {
+        let acme = self.a.code.owner_or_404("acme").unwrap().id;
+        let mut req = axum::http::Request::builder().method("POST").uri("/v1/code/agents/acme/sandboxes").header("content-type", "application/json").body(axum::body::Body::from(body.to_string())).unwrap();
+        req.extensions_mut().insert(roll_auth::SignedIn { user: user.into(), handle: user.into(), admin: false, code_owner: Some(acme), session: "ses_1".into() });
+        let r = self.a.send(req).await;
+        assert_eq!(r.status(), StatusCode::CREATED);
+        let made: Value = serde_json::from_slice(&axum::body::to_bytes(r.into_body(), 1 << 20).await.unwrap()).unwrap();
+        made["sandbox"]["id"].as_str().unwrap().to_string()
+    }
+
+    /// Stop the sandbox, then start it again: it, running.
+    async fn restart(&self, id: &str) -> Value {
+        self.req("POST", &format!("/v1/code/agents/acme/sandboxes/{id}/stop"), None).await;
+        self.until(id, "stopped", status_is("stopped")).await;
+        let (s, v) = self.req("POST", &format!("/v1/code/agents/acme/sandboxes/{id}/start"), None).await;
+        assert_eq!(s, StatusCode::OK, "{v}");
+        self.until(id, "running", status_is("running")).await
     }
 
     async fn sandbox(&self, id: &str) -> Option<Value> {
@@ -483,13 +525,21 @@ async fn sandboxes_need_a_backend_and_a_server_secret() {
 }
 
 /// roll secrets as it answers a person: `usr_ada` may reveal acme's development (project
-/// `prj_acme`) until `removed`, nobody else may.
+/// `prj_acme`, `DATABASE_URL`) until `removed`, nobody else may.
 #[derive(Default)]
 struct Reveals {
     /// `consumer by` of every ask that reached it.
     asked: Mutex<Vec<String>>,
     /// `usr_ada` was taken off the project.
     removed: std::sync::atomic::AtomicBool,
+    /// `DATABASE_URL` was rotated to this.
+    rotated: Mutex<Option<String>>,
+}
+
+impl Reveals {
+    fn database_url(&self) -> String {
+        self.rotated.lock().clone().unwrap_or_else(|| "postgres://dev-only".into())
+    }
 }
 
 #[async_trait::async_trait]
@@ -501,13 +551,19 @@ impl code_control::SecretEnv for Reveals {
         let by = who.user.map(|u| u.user.clone()).or(who.operator.then(|| "operator".to_string())).unwrap_or_default();
         self.asked.lock().push(format!("{consumer} {by}"));
         match (by.as_str(), project, environment) {
-            ("usr_ada", "acme", "development") => Ok(code_control::Revealed { by, project: "prj_acme".into(), values: vec![("DATABASE_URL".into(), "postgres://dev-only".into())] }),
+            ("usr_ada", "acme", "development") => Ok(code_control::Revealed { by, project: "prj_acme".into(), values: vec![("DATABASE_URL".into(), self.database_url())] }),
             _ => Err(code_control::Refused(format!("{by} may not reveal {environment}")).into()),
         }
     }
     async fn still_reveals(&self, by: &str, source: Option<(&str, &str)>) -> anyhow::Result<()> {
         if by == "usr_ada" && source == Some(("prj_acme", "development")) && !self.removed.load(std::sync::atomic::Ordering::SeqCst) {
             return Ok(());
+        }
+        Err(code_control::Refused(format!("{by} may no longer reveal development")).into())
+    }
+    async fn reveal_as(&self, by: &str, project: &str, environment: &str, _: &str) -> anyhow::Result<Vec<(String, String)>> {
+        if (by, project, environment) == ("usr_ada", "prj_acme", "development") && !self.removed.load(std::sync::atomic::Ordering::SeqCst) {
+            return Ok(vec![("DATABASE_URL".into(), self.database_url())]);
         }
         Err(code_control::Refused(format!("{by} may no longer reveal development")).into())
     }
@@ -940,8 +996,8 @@ fn a_database_with_monthly_prices_opens_with_hourly_ones() {
     }
 }
 
-/// A backend in memory that can start an instance without some of what it was made with (as
-/// docker and fargate can): each instance's state and env.
+/// A backend in memory that can start an instance with its env changed (as docker and fargate
+/// can): each instance's state and env.
 #[derive(Default)]
 struct Instances(Mutex<BTreeMap<String, Instance>>);
 
@@ -967,10 +1023,10 @@ impl SandboxBackend for Instances {
         self.0.lock().get_mut(id).ok_or_else(|| BackendError::Permanent("gone".into()))?.0 = BackendState::Running;
         Ok(())
     }
-    async fn start_without(&self, id: &str, _: &SandboxSpec, without: &[String]) -> Result<bool, BackendError> {
+    async fn start_with(&self, id: &str, _: &SandboxSpec, change: &EnvChange) -> Result<bool, BackendError> {
         let mut m = self.0.lock();
         let i = m.get_mut(id).ok_or_else(|| BackendError::Permanent("gone".into()))?;
-        i.1.retain(|k, _| !without.contains(k));
+        change.apply(&mut i.1);
         i.0 = BackendState::Running;
         Ok(true)
     }
@@ -995,25 +1051,14 @@ async fn a_removed_copiers_sandbox_starts_without_the_values() {
     let w = world(move |c| c.backend = Some(BackendConfig::External(ExternalBackend(backend)))).await;
     let secrets = Arc::new(Reveals::default());
     w.a.code.set_secret_env(secrets.clone());
-    let acme = w.a.code.owner_or_404("acme").unwrap().id;
-    let body = json!({ "name": "box", "env": { "ANTHROPIC_API_KEY": "sk-ant-owner-key" }, "secrets": { "project": "acme", "environment": "development" } });
-    let mut req = axum::http::Request::builder().method("POST").uri("/v1/code/agents/acme/sandboxes").header("content-type", "application/json").body(axum::body::Body::from(body.to_string())).unwrap();
-    req.extensions_mut().insert(roll_auth::SignedIn { user: "usr_ada".into(), handle: "ada".into(), admin: false, code_owner: Some(acme), session: "ses_1".into() });
-    let r = w.a.send(req).await;
-    assert_eq!(r.status(), StatusCode::CREATED);
-    let made: Value = serde_json::from_slice(&axum::body::to_bytes(r.into_body(), 1 << 20).await.unwrap()).unwrap();
-    let id = made["sandbox"]["id"].as_str().unwrap().to_string();
+    let id = w.create_as("usr_ada", json!({ "name": "box", "env": { "ANTHROPIC_API_KEY": "sk-ant-owner-key" }, "secrets": { "project": "acme", "environment": "development" } })).await;
     w.until(&id, "running", status_is("running")).await;
     let env = |k: &str| instances.0.lock()[&id].1.get(k).cloned();
     assert_eq!(env("DATABASE_URL").as_deref(), Some("postgres://dev-only"));
-    // Asked again before each start: while ada still may, a stop and a start keep them.
-    let stop = format!("/v1/code/agents/acme/sandboxes/{id}/stop");
-    let start = format!("/v1/code/agents/acme/sandboxes/{id}/start");
-    w.req("POST", &stop, None).await;
-    w.until(&id, "stopped", status_is("stopped")).await;
-    w.req("POST", &start, None).await;
-    w.until(&id, "running", status_is("running")).await;
+    // Read again at each start: while ada still may, a stop and a start keep them.
+    w.restart(&id).await;
     assert_eq!(env("DATABASE_URL").as_deref(), Some("postgres://dev-only"));
+    let start = format!("/v1/code/agents/acme/sandboxes/{id}/start");
 
     // Ada's account is disabled: rolld's offboarding hook stops the sandbox at once (only the
     // running ones she copied into, once), and the owner's next start is without what she copied.
@@ -1027,6 +1072,36 @@ async fn a_removed_copiers_sandbox_starts_without_the_values() {
     let s = w.until(&id, "running without them", |s| s["status"] == "running" && s["secrets_dropped"].is_string()).await;
     assert!(s["secrets_dropped"].as_str().unwrap().contains("usr_ada may no longer reveal development"), "{s}");
     assert!(!s.to_string().contains("postgres://dev-only"), "{s}");
+    assert_eq!(env("DATABASE_URL"), None);
+    assert_eq!(env("ANTHROPIC_API_KEY").as_deref(), Some("sk-ant-owner-key"), "the owner's own env stays");
+    assert!(env("ROLL_AGENT_TOKEN").is_some_and(|t| t.starts_with("rlm_")), "it keeps its machine token");
+}
+
+/// A value rotated in roll secrets after a sandbox was made reaches it at its next start, read
+/// again as whoever copied it: agent37 has the instance's env edited, then starts it (its disk
+/// kept). Once they may no longer reveal it, the next start unsets it there.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_rotated_value_reaches_the_sandbox_at_its_next_start() {
+    let w = world(|_| {}).await;
+    let secrets = Arc::new(Reveals::default());
+    w.a.code.set_secret_env(secrets.clone());
+    let id = w.create_as("usr_ada", json!({ "name": "box", "env": { "ANTHROPIC_API_KEY": "sk-ant-owner-key" }, "secrets": { "project": "acme", "environment": "development" } })).await;
+    w.until(&id, "running", status_is("running")).await;
+    let instance = w.mock.lock().instances.values().find(|i| i["metadata"]["roll_sandbox"] == id.as_str()).unwrap()["id"].as_str().unwrap().to_string();
+    let env = |k: &str| w.mock.lock().envs[&instance].get(k).and_then(Value::as_str).map(str::to_string);
+    assert_eq!(env("DATABASE_URL").as_deref(), Some("postgres://dev-only"));
+
+    *secrets.rotated.lock() = Some("postgres://rotated".into());
+    let s = w.restart(&id).await;
+    assert_eq!(env("DATABASE_URL").as_deref(), Some("postgres://rotated"));
+    assert!(s["secrets_dropped"].is_null() && !s.to_string().contains("postgres://"), "{s}");
+    let calls = w.mock.lock().calls.clone();
+    let (edit, start) = (calls.iter().rposition(|c| c.starts_with("PATCH")).unwrap(), calls.iter().rposition(|c| c.ends_with("/start")).unwrap());
+    assert!(edit < start, "the env is edited before the start: {calls:?}");
+
+    secrets.removed.store(true, std::sync::atomic::Ordering::SeqCst);
+    let s = w.restart(&id).await;
+    assert!(s["secrets_dropped"].as_str().unwrap().contains("usr_ada may no longer reveal development"), "{s}");
     assert_eq!(env("DATABASE_URL"), None);
     assert_eq!(env("ANTHROPIC_API_KEY").as_deref(), Some("sk-ant-owner-key"), "the owner's own env stays");
     assert!(env("ROLL_AGENT_TOKEN").is_some_and(|t| t.starts_with("rlm_")), "it keeps its machine token");

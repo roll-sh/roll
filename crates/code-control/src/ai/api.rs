@@ -102,11 +102,12 @@ async fn provider(State(code): S, caller: Caller, Path(owner): Path<String>) -> 
     Ok(Json(code.owner_provider_view(&caller, &owner)?))
 }
 
-async fn set_provider(State(code): S, caller: Caller, Path(owner): Path<String>, B(b): B) -> Result<Json<Value>> {
+/// A `roll://` key is bound by roll secrets to the request's own grant, session or operator token.
+async fn set_provider(State(code): S, caller: Caller, ext: axum::http::Extensions, Path(owner): Path<String>, B(b): B) -> Result<Json<Value>> {
     if matches!(caller, Caller::Anonymous) {
         return Err(Error::Unauthorized);
     }
-    Ok(Json(code.set_owner_provider(&caller, &owner, &b)?))
+    Ok(Json(code.set_owner_provider(&caller, &crate::SecretsAsker::of(&ext), &owner, &b).await?))
 }
 
 async fn clear_provider(State(code): S, caller: Caller, Path(owner): Path<String>) -> Result<StatusCode> {
