@@ -119,6 +119,16 @@ pub struct SearchConfig {
     pub stats_interval: Duration,
     /// Memory all loaded clusters may hold together (`None`: no node budget).
     pub memory_budget: Option<u64>,
+    /// Memory documents being inverted may add to every cluster's indexing buffers at once
+    /// (`search_server::NodeConfig::max_analysis_bytes`; `None`: derived from `memory_budget`).
+    pub max_analysis_bytes: Option<usize>,
+    /// Without a sealer, keep the secrets clients give in the clusters in the clear instead of
+    /// refusing them (`search_es::ClusterConfig::unsealed_secrets`): local development only.
+    pub unsealed_secrets: bool,
+    /// Request body bytes all clusters together may have in flight on this node, on top of
+    /// each cluster's own budget (twice its `max_body_mb`); past it, 429 (`None`: no node
+    /// budget).
+    pub max_in_flight_bytes: Option<usize>,
     /// The catalog in a Postgres database every node of a fleet shares (rolld's system
     /// database; `None`: `search.db` under `home`).
     pub catalog: Option<String>,
@@ -175,6 +185,9 @@ impl SearchConfig {
             node_settings: Vec::new(),
             stats_interval: Duration::from_secs(600),
             memory_budget: None,
+            max_in_flight_bytes: None,
+            unsealed_secrets: false,
+            max_analysis_bytes: None,
             catalog: None,
             catalog_connections: 8,
             defaults: Defaults {
@@ -298,19 +311,47 @@ fn ip_rules(given: Vec<IpRuleInput>) -> Result<Vec<IpRule>> {
         .collect()
 }
 
-/// One REST request through the console.
+/// One REST request through the console, borrowed from the bytes it was read from (the body
+/// is sent as a slice of them, never copied).
 #[derive(Clone, Debug, Deserialize)]
-pub struct ConsoleRequest {
+pub struct ConsoleRequest<'a> {
     pub method: String,
     /// `/index/_search?q=…`
     pub path: String,
     /// A JSON value is sent as JSON, byte for byte as the client wrote it (key order and
     /// number spelling matter: Elasticsearch stores `_source` exactly as sent); a string is sent
     /// as is (NDJSON for `_bulk`).
-    #[serde(default)]
-    pub body: Option<Box<serde_json::value::RawValue>>,
+    #[serde(default, borrow)]
+    pub body: Option<&'a serde_json::value::RawValue>,
     #[serde(default)]
     pub headers: Vec<(String, String)>,
+}
+
+impl<'a> ConsoleRequest<'a> {
+    pub fn parse(bytes: &'a [u8]) -> Result<ConsoleRequest<'a>> {
+        serde_json::from_slice(bytes).map_err(|e| ControlError::Invalid(format!("invalid request: {e}")))
+    }
+
+    /// The bytes the request sends, out of `whole` (what [`ConsoleRequest::parse`] read):
+    /// nothing for no body or `null`, a string's contents, or any other JSON value exactly as
+    /// written, as a slice of `whole`.
+    pub fn body_in(&self, whole: &Bytes) -> Result<Bytes> {
+        let Some(text) = self.body.map(|r| r.get().trim()) else { return Ok(Bytes::new()) };
+        if text == "null" {
+            return Ok(Bytes::new());
+        }
+        if text.starts_with('"') {
+            let s: String = serde_json::from_str(text).map_err(|e| ControlError::Invalid(format!("body: {e}")))?;
+            return Ok(Bytes::from(s));
+        }
+        Ok(whole.slice_ref(text.as_bytes()))
+    }
+
+    /// Whether the request answers or sets a credential on cluster `c`, decided on the API the
+    /// cluster's router picks for it ([`search_es::routes::handles_credentials`]).
+    pub fn handles_credentials(&self, c: &SearchCluster) -> bool {
+        search_es::routes::handles_credentials(dialect(&c.flavor).unwrap_or(Dialect::Elasticsearch), &self.method, self.path.trim())
+    }
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -702,7 +743,7 @@ pub struct Control {
     reloads: Mutex<HashSet<String>>,
     reloader: AtomicBool,
     me: OnceLock<Weak<Control>>,
-    /// When each loaded cluster's figures were last read from storage (ms).
+    /// When each loaded cluster's figures were last read from storage (ms), by catalog id.
     refreshed: Mutex<HashMap<String, i64>>,
     /// The roll-cluster fleet this node serves clusters in ([`Control::join`]).
     leases: OnceLock<Arc<crate::cluster::ClusterLeases>>,
@@ -735,6 +776,11 @@ impl Control {
         };
         if let Some(s) = &cfg.sealer {
             store.seal_passwords(s.clone());
+            // Remotes linked before the node had a key: sealed now, or they couldn't be opened.
+            let n = store.seal_remote_credentials(|r| s.seal_text(&crate::remotes::kind(&r.cluster_id, &r.alias, &r.target_id), &r.credentials)).await?;
+            if n > 0 {
+                tracing::info!(remotes = n, "sealed remote credentials stored in the clear");
+            }
         }
         let scfg = StoreConfig {
             node: cfg.node_name.clone(),
@@ -764,7 +810,10 @@ impl Control {
                 test_features: cfg.test_features,
                 node_settings: cfg.node_settings.clone(),
                 memory_budget: cfg.memory_budget,
+                max_in_flight_bytes: cfg.max_in_flight_bytes,
                 sealer: cfg.sealer.clone(),
+                unsealed_secrets: cfg.unsealed_secrets,
+                max_analysis_bytes: cfg.max_analysis_bytes,
                 default_repository: cfg.default_repository.clone(),
                 links: Some(links.clone()),
                 audit: cfg.audit.clone(),
@@ -1110,9 +1159,11 @@ impl Control {
     /// parent's segments, nothing is copied. Settings and the owner come from the parent (settings
     /// unless given), and the branch counts toward the owner's `caps`. In a
     /// fleet, call it on the node holding the parent (the API forwards there): a loaded parent
-    /// is committed first, so the branch sees every acknowledged write.
-    pub async fn branch(&self, parent: &str, name: &str, at: Option<i64>, o: ClusterOptions, caps: Caps) -> Result<SearchCluster> {
-        let p = self.get(parent).await?;
+    /// is committed first, so the branch sees every acknowledged write. `parent` is the cluster
+    /// the caller was checked against: it is read again by its id, never its name, so a cluster
+    /// that took the name meanwhile is never branched in its place.
+    pub async fn branch(&self, parent: &SearchCluster, name: &str, at: Option<i64>, o: ClusterOptions, caps: Caps) -> Result<SearchCluster> {
+        let p = self.store.get(&parent.id).await?.ok_or_else(|| ControlError::NotFound(format!("no search cluster {}", parent.id)))?;
         let now = now();
         if let Some(t) = at {
             self.check_window(&p, t, now)?;
@@ -1180,7 +1231,7 @@ impl Control {
         // The parent's recorded figures may be a metering interval old: read the branch's own
         // from its commit points now, so it shows what it holds at once.
         let mut c = c;
-        match self.refresh_stats(&c.name, now_ms()).await {
+        match self.refresh_stats(&c.id, now_ms()).await {
             Ok(()) => {
                 if let Ok(Some(fresh)) = self.store.get(&c.id).await {
                     (c.indices, c.docs, c.stored_bytes) = (fresh.indices, fresh.docs, fresh.stored_bytes);
@@ -1188,7 +1239,7 @@ impl Control {
             }
             Err(e) => {
                 tracing::warn!(cluster = c.name, error = %e, "reading a new branch's figures failed");
-                self.meter.mark_dirty(&c.name);
+                self.meter.mark_dirty(&c.id);
             }
         }
         Ok(c)
@@ -1327,11 +1378,11 @@ impl Control {
 
     /// Runs when a cluster has loaded (from the node's load hook): its instance was built from
     /// the description the waking request looked up, which a change may have overtaken.
-    pub(crate) async fn reconcile(self: Arc<Self>, name: String, token: Option<u64>) {
+    pub(crate) async fn reconcile(self: Arc<Self>, name: String, id: String, token: Option<u64>) {
         // The node publishes the instance right after the hook; give up if it unloads first.
         let deadline = Instant::now() + Duration::from_secs(10);
         let mut spins = 0u32;
-        while self.node.get_loaded(&name).is_none() && self.meter.is_loaded(&name) && Instant::now() < deadline {
+        while self.node.get_loaded(&name).is_none() && self.meter.is_loaded(&id) && Instant::now() < deadline {
             if spins < 64 {
                 tokio::task::yield_now().await;
             } else {
@@ -1479,6 +1530,9 @@ impl Control {
         // Its audit entries still waiting are written now; the stored ones go with its storage
         // (or move with its kept copy, and back on a restore).
         self.node.audit.forget(&c.name).await;
+        // So are its requests and observations not handed on yet: they are keyed by its id, so
+        // a cluster that takes the name next never sees them, and nothing bills them now.
+        self.node.forget_cluster(&c.id);
         if self.cfg.deleted_retention.is_zero() {
             self.data.delete_cluster(&c.name).await?;
             // Its remotes' keys roll made go with it (a restorable one keeps them for its restore).
@@ -1493,7 +1547,7 @@ impl Control {
         if let Some(l) = self.cluster_leases() {
             l.cluster().retire(&crate::cluster::key(&c.name));
         }
-        self.refreshed.lock().remove(&c.name);
+        self.refreshed.lock().remove(&c.id);
         self.reloads.lock().remove(&c.name);
         Ok(())
     }
@@ -1622,9 +1676,9 @@ impl Control {
             tracing::warn!(cluster = target, kept = d.stored_as, error = %e, "removing a restored search cluster's kept copy failed");
         }
         let c = self.get(&d.cluster.id).await?;
-        if let Err(e) = self.refresh_stats(&c.name, now_ms()).await {
+        if let Err(e) = self.refresh_stats(&c.id, now_ms()).await {
             tracing::warn!(cluster = c.name, error = %e, "reading a restored search cluster's figures failed");
-            self.meter.mark_dirty(&c.name);
+            self.meter.mark_dirty(&c.id);
         }
         self.open_always_on(&c).await;
         self.get(&c.id).await
@@ -1717,9 +1771,9 @@ impl Control {
         if unloaded {
             // Asleep figures come from the commit points the unload just wrote: record them now
             // rather than at the next metering pass, so the cluster's page is right at once.
-            if let Err(e) = self.refresh_stats(&c.name, now_ms()).await {
+            if let Err(e) = self.refresh_stats(&c.id, now_ms()).await {
                 tracing::warn!(cluster = c.name, error = %e, "refreshing search cluster figures failed");
-                self.meter.mark_dirty(&c.name);
+                self.meter.mark_dirty(&c.id);
             }
         }
         Ok(unloaded)
@@ -1746,7 +1800,7 @@ impl Control {
                 // Live documents from shard statistics (no search runs) once every index is
                 // open; the metered `docs` lags until the next sample.
                 let f = crate::meter::engine_figures(&l.cluster);
-                if f.complete() {
+                if f.complete_for_display() {
                     v["docs"] = json!(f.docs);
                 }
                 if let Some(l) = self.cluster_leases() {
@@ -2203,19 +2257,21 @@ impl Control {
 
     /// Runs one REST request (the dashboard console, `roll search request`). The node counts it
     /// for metering like any client's.
-    pub async fn request(&self, id: &str, r: ConsoleRequest) -> Result<ConsoleResponse> {
+    /// Runs a console request (`method`, `path`, `headers` as [`ConsoleRequest`] has them) with
+    /// `body` ([`ConsoleRequest::body_in`]).
+    pub async fn request(&self, id: &str, method: &str, path: &str, headers: Vec<(String, String)>, body: Bytes) -> Result<ConsoleResponse> {
         let c = self.get(id).await?;
-        let method = r.method.trim().to_ascii_uppercase();
+        let shown = method;
+        let method = method.trim().to_ascii_uppercase();
         if !matches!(method.as_str(), "GET" | "POST" | "PUT" | "DELETE" | "HEAD" | "PATCH") {
-            return Err(ControlError::Invalid(format!("unsupported method {}", r.method)));
+            return Err(ControlError::Invalid(format!("unsupported method {shown}")));
         }
-        let path = r.path.trim();
+        let path = path.trim();
         if !path.starts_with('/') {
             return Err(ControlError::Invalid("path must start with /".into()));
         }
-        let body = console_body(r.body.as_deref())?;
         let mut req = EsRequest::new(&method, path);
-        req.headers = r.headers.into_iter().filter(|(k, _)| !k.trim().is_empty()).collect();
+        req.headers = headers.into_iter().filter(|(k, _)| !k.trim().is_empty()).collect();
         if !body.is_empty() && !req.headers.iter().any(|(k, _)| k.eq_ignore_ascii_case("content-type")) {
             let ndjson = path.split('?').next().is_some_and(|p| p.ends_with("/_bulk") || p.ends_with("/_msearch") || p.ends_with("/_msearch/template"));
             req.headers.push(("Content-Type".into(), if ndjson { "application/x-ndjson" } else { "application/json" }.into()));
@@ -2301,24 +2357,25 @@ impl Control {
     /// loaded time and requests, and refreshes the figures of clusters that just loaded or
     /// unloaded, and of loaded ones every `stats_interval`.
     pub async fn sample(&self) -> anyhow::Result<()> {
-        for (name, n) in self.node.take_request_counts() {
-            self.meter.count_requests(&name, n.min(i64::MAX as u64) as i64);
+        // All keyed by catalog id, never by name (see `crate::meter`).
+        for (id, n) in self.node.take_request_counts() {
+            self.meter.count_requests(&id, n.min(i64::MAX as u64) as i64);
         }
-        for (name, o) in self.node.take_observations() {
+        for (id, o) in self.node.take_observations() {
             // Lost if the catalog can't take them now: they are a picture, not a bill.
-            if let Err(e) = self.meter.observe(&name, o).await {
-                tracing::warn!(cluster = name, error = %e, "storing search metrics failed");
+            if let Err(e) = self.meter.observe(&id, o).await {
+                tracing::warn!(cluster = id, error = %e, "storing search metrics failed");
             }
         }
         let at = now_ms();
-        for (name, forced) in self.meter.sample(at).await? {
-            let due = forced || self.refreshed.lock().get(&name).is_none_or(|t| at - t >= self.cfg.stats_interval.as_millis() as i64);
+        for (id, forced) in self.meter.sample(at).await? {
+            let due = forced || self.refreshed.lock().get(&id).is_none_or(|t| at - t >= self.cfg.stats_interval.as_millis() as i64);
             if !due {
                 continue;
             }
-            if let Err(e) = self.refresh_stats(&name, at).await {
-                tracing::warn!(cluster = name, error = %e, "refreshing search cluster figures failed");
-                self.meter.mark_dirty(&name);
+            if let Err(e) = self.refresh_stats(&id, at).await {
+                tracing::warn!(cluster = id, error = %e, "refreshing search cluster figures failed");
+                self.meter.mark_dirty(&id);
             }
         }
         // After the analytics above are in the catalog.
@@ -2348,7 +2405,7 @@ impl Control {
             add(at, &s);
         }
         // Not flushed yet: what the cluster's owner (here) recorded since the last pass.
-        for (minute, s) in self.node.peek_observations(&c.name).minutes {
+        for (minute, s) in self.node.peek_observations(&c.name, &c.id).minutes {
             add(minute.min(i64::MAX as u64 / 60) as i64 * 60, &s);
         }
         let mut total = search_server::metrics::Stats::default();
@@ -2374,7 +2431,7 @@ impl Control {
     /// handed on yet, at most [`search_es::slowlog::MAX_ENTRIES`].
     pub async fn slowlog(&self, id: &str) -> Result<Value> {
         let c = self.get(id).await?;
-        let mut entries: Vec<Value> = self.node.peek_observations(&c.name).slow.iter().rev().map(search_es::slowlog::Entry::to_json).collect();
+        let mut entries: Vec<Value> = self.node.peek_observations(&c.name, &c.id).slow.iter().rev().map(search_es::slowlog::Entry::to_json).collect();
         for row in self.store.slowlog(&c.id).await? {
             if entries.len() >= search_es::slowlog::MAX_ENTRIES {
                 break;
@@ -2386,21 +2443,22 @@ impl Control {
         Ok(json!({ "entries": entries, "max_entries": search_es::slowlog::MAX_ENTRIES }))
     }
 
-    /// Re-reads a cluster's docs and stored bytes from its commit points.
-    pub async fn refresh_stats(&self, name: &str, at_ms: i64) -> anyhow::Result<()> {
-        let Some(c) = self.store.by_name(name).await? else { return Ok(()) };
+    /// Re-reads the docs and stored bytes of the cluster with id `id` from its commit points.
+    pub async fn refresh_stats(&self, id: &str, at_ms: i64) -> anyhow::Result<()> {
+        let Some(c) = self.store.get(id).await? else { return Ok(()) };
+        let name = c.name.as_str();
         let u = self.data.cluster_usage(name).await?;
         let loaded = self.node.get_loaded(name);
         // Loaded with every index open, the engine counts the documents exactly (unflushed
         // writes included); otherwise the commit points do. Stored bytes are always the object
         // store's: they are what is billed.
         let docs = match loaded.as_ref().map(|l| engine_figures(&l.cluster)) {
-            Some(f) if f.complete() => f.docs as i64,
+            Some(f) if f.complete_for_display() => f.docs as i64,
             _ => u.docs as i64,
         };
         let indices = match &loaded {
             Some(l) => l.cluster.state().metadata.indices.len() as i64,
-            None => match self.meter.take_indices(name) {
+            None => match self.meter.take_indices(id) {
                 Some(n) => n,
                 // Asleep and not seen loaded (a fresh branch): count the stored state's indices.
                 None => match self.data.read_cluster(name).await? {
@@ -2416,26 +2474,12 @@ impl Control {
         }
         let mut refreshed = self.refreshed.lock();
         if self.node.get_loaded(name).is_some() {
-            refreshed.insert(name.to_string(), at_ms);
+            refreshed.insert(id.to_string(), at_ms);
         } else {
-            refreshed.remove(name);
+            refreshed.remove(id);
         }
         Ok(())
     }
-}
-
-/// The bytes a console request sends: nothing for no body or `null`, a string's contents, or
-/// any other JSON value exactly as written.
-fn console_body(raw: Option<&serde_json::value::RawValue>) -> Result<Bytes> {
-    let Some(text) = raw.map(|r| r.get().trim()) else { return Ok(Bytes::new()) };
-    if text == "null" {
-        return Ok(Bytes::new());
-    }
-    if text.starts_with('"') {
-        let s: String = serde_json::from_str(text).map_err(|e| ControlError::Invalid(format!("body: {e}")))?;
-        return Ok(Bytes::from(s));
-    }
-    Ok(Bytes::copy_from_slice(text.as_bytes()))
 }
 
 /// The number of indices in a stored cluster state (`search-es`'s `ClusterState::to_json`).
@@ -2471,19 +2515,25 @@ mod tests {
 
     #[test]
     fn console_bodies_keep_their_bytes() {
-        let raw = |t: &str| serde_json::from_str::<Box<serde_json::value::RawValue>>(t).unwrap();
-        let body = |t: Option<&str>| console_body(t.map(raw).as_deref()).unwrap();
+        let body = |b: Option<&str>| {
+            let whole = Bytes::from(match b {
+                Some(b) => format!(r#"{{"method":"PUT","path":"/a","body":{b}}}"#),
+                None => r#"{"method":"GET","path":"/"}"#.to_string(),
+            });
+            let r = ConsoleRequest::parse(&whole).unwrap();
+            let sent = r.body_in(&whole).unwrap();
+            // A JSON value is a slice of what was read, not a copy.
+            if b.is_some_and(|b| !b.starts_with('"') && b != "null") {
+                assert!(whole.as_ptr_range().contains(&sent.as_ptr()));
+            }
+            sent
+        };
         assert_eq!(body(None), Bytes::new());
         assert_eq!(body(Some("null")), Bytes::new());
         // Key order, spacing and number spelling survive (serde_json's Value would sort keys).
         assert_eq!(body(Some(r#"{"z": 1.0, "a": [1e2]}"#)), Bytes::from_static(br#"{"z": 1.0, "a": [1e2]}"#));
         assert_eq!(body(Some(r#""{\"index\":{}}\n{}\n""#)), Bytes::from_static(b"{\"index\":{}}\n{}\n"));
         assert_eq!(body(Some("42")), Bytes::from_static(b"42"));
-        // As it arrives in a request.
-        let r: ConsoleRequest = serde_json::from_str(r#"{"method":"PUT","path":"/a/_doc/1","body":{"title":"x","price":1}}"#).unwrap();
-        assert_eq!(console_body(r.body.as_deref()).unwrap(), Bytes::from_static(br#"{"title":"x","price":1}"#));
-        let r: ConsoleRequest = serde_json::from_str(r#"{"method":"GET","path":"/"}"#).unwrap();
-        assert!(r.body.is_none());
     }
 
     #[test]

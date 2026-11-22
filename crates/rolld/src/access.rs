@@ -328,6 +328,63 @@ impl roll_access::sinks::SinkTransport for SinkPost {
     }
 }
 
+/// The operator's MCP inspector (roll_mcp::Inspector; docs/mcp.md, "Inspector"):
+/// `ROLL_MCP_INSPECTOR_URL` is POSTed each tool call (`{"phase": "call", …}`) and its result
+/// (`{"phase": "result", …}`) and answers `{"action": "allow" | "block" | "note", "reason"?}`, with
+/// `Authorization: Bearer $ROLL_MCP_INSPECTOR_TOKEN` when set. The operator's own endpoint, so it
+/// may be on a private network, but never followed through a redirect, and at most 64 KiB of its
+/// answer read. One that doesn't answer in `ROLL_MCP_INSPECTOR_TIMEOUT_MS` (3,000 by default) or
+/// answers otherwise blocks, unless `ROLL_MCP_INSPECTOR_FAIL=open`.
+pub fn mcp_inspector() -> Option<Arc<dyn roll_mcp::Inspector>> {
+    let url = std::env::var("ROLL_MCP_INSPECTOR_URL").ok().filter(|u| u.starts_with("https://") || u.starts_with("http://"))?;
+    let timeout = std::env::var("ROLL_MCP_INSPECTOR_TIMEOUT_MS").ok().and_then(|v| v.parse::<u64>().ok()).unwrap_or(3_000).clamp(100, 30_000);
+    let client = reqwest::Client::builder().redirect(reqwest::redirect::Policy::none()).timeout(std::time::Duration::from_millis(timeout)).no_proxy().build().ok()?;
+    let token = std::env::var("ROLL_MCP_INSPECTOR_TOKEN").ok().filter(|t| !t.is_empty());
+    let fail_open = std::env::var("ROLL_MCP_INSPECTOR_FAIL").is_ok_and(|v| v.trim() == "open");
+    tracing::info!(fail_open, "MCP tool calls and results go past the operator's inspector");
+    Some(Arc::new(HttpInspector { client, url, token, fail_open }))
+}
+
+struct HttpInspector {
+    client: reqwest::Client,
+    url: String,
+    token: Option<String>,
+    fail_open: bool,
+}
+
+impl roll_mcp::Inspector for HttpInspector {
+    fn inspect(&self, look: serde_json::Value) -> std::pin::Pin<Box<dyn std::future::Future<Output = roll_mcp::Verdict> + Send>> {
+        let (client, url, token, fail_open) = (self.client.clone(), self.url.clone(), self.token.clone(), self.fail_open);
+        Box::pin(async move {
+            let failed = |why: &str| if fail_open { roll_mcp::Verdict::Allow } else { roll_mcp::Verdict::Block(format!("the inspector {why}")) };
+            let mut req = client.post(&url).json(&look);
+            if let Some(t) = &token {
+                req = req.bearer_auth(t);
+            }
+            let Ok(mut resp) = req.send().await else { return failed("didn't answer") };
+            if !resp.status().is_success() {
+                return failed("answered an error");
+            }
+            let mut body = Vec::new();
+            while body.len() < 64 << 10 {
+                match resp.chunk().await {
+                    Ok(Some(c)) => body.extend_from_slice(&c),
+                    Ok(None) => break,
+                    Err(_) => return failed("didn't answer"),
+                }
+            }
+            let Ok(answer) = serde_json::from_slice::<serde_json::Value>(&body) else { return failed("answered something else") };
+            let reason = answer["reason"].as_str().unwrap_or("").chars().filter(|c| !c.is_control()).take(300).collect::<String>();
+            match answer["action"].as_str() {
+                Some("allow") => roll_mcp::Verdict::Allow,
+                Some("block") => roll_mcp::Verdict::Block(if reason.is_empty() { "no reason given".into() } else { reason }),
+                Some("note") if !reason.is_empty() => roll_mcp::Verdict::Note(reason),
+                _ => failed("answered something else"),
+            }
+        })
+    }
+}
+
 /// Approvals in chat: roll code's chat ops post and edit the cards, and send presses back to
 /// roll-access (docs/permissions.md, "Approvals in chat").
 pub fn chat(access: &Arc<Access>, code: &Arc<code_control::Code>) {

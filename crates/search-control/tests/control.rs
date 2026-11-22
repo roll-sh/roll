@@ -59,6 +59,8 @@ async fn env_with(f: impl FnOnce(&mut SearchConfig)) -> Env {
     cfg.node_name = format!("test-{i}");
     cfg.http_port = es_addr.port();
     cfg.gc_interval = None;
+    // Tests without a sealer keep secrets as given (a test of the refusal turns it off).
+    cfg.unsealed_secrets = true;
     f(&mut cfg);
     let control = Control::new(cfg.clone(), objects.clone()).await.unwrap();
     tokio::spawn(search_server::serve(listener, control.node.clone(), search_server::ListenOptions::default()));
@@ -77,6 +79,15 @@ async fn env() -> Env {
 /// carries `Operator`), `usr_…` a signed-in person who isn't one. Without it, an open daemon's
 /// request (neither).
 async fn as_person(mut req: axum::extract::Request, next: axum::middleware::Next) -> axum::response::Response {
+    // `x-test-grant`: a scoped token's rules (JSON), as the gate leaves them for the product, with
+    // `reveal` capable when the rules allow it (the gate's `roll_auth::Capable`).
+    if let Some(rules) = req.headers().get("x-test-grant").and_then(|v| serde_json::from_slice::<roll_auth::scope::Scope>(v.as_bytes()).ok()) {
+        if req.headers().get("x-test-capable").is_some_and(|v| v == "reveal") {
+            req.extensions_mut().insert(roll_auth::Capable(vec![roll_auth::scope::Action::Reveal]));
+        }
+        req.extensions_mut().insert(roll_auth::Operator);
+        req.extensions_mut().insert(roll_auth::Grant { id: "tok_t".into(), name: "t".into(), kind: roll_auth::GrantKind::Token, scope: Arc::new(rules), user: None, ask_otherwise: false });
+    }
     let who = req.headers().get("x-test-as").and_then(|v| v.to_str().ok()).map(str::to_string);
     if let Some(who) = who {
         let admin = who == "admin";
@@ -461,6 +472,173 @@ async fn metrics_and_slow_logs() {
     assert!(!text.contains(&pw) && !text.to_ascii_lowercase().contains("authorization"), "no credential in a slow log");
     // Moved to the catalog by the pass above: still there, newest first.
     assert_eq!(entries.first().map(|x| &x["log.logger"]), Some(&json!("index.search.slowlog.query")));
+}
+
+/// A grant's console request needs `reveal` on the cluster too when the API the cluster routes
+/// it to answers or sets a credential (a new API key, a user's password); everything else,
+/// whatever its path spells, needs only the route's `admin`.
+#[tokio::test]
+async fn console_credentials_need_reveal() {
+    let e = env().await;
+    let id = e.post("/v1/search/clusters", json!({ "name": "vault" })).await["id"].as_str().unwrap().to_string();
+    let rules = |actions: Value| json!([{ "product": "search", "resources": [{ "id": id }], "actions": actions }]).to_string();
+    let (admin, both) = (rules(json!({ "admin": "allow" })), rules(json!({ "admin": "allow", "reveal": "allow" })));
+    let console = |grant: &str, method: &str, path: &str, body: Value| {
+        let capable = if grant.contains("reveal") { "reveal" } else { "" };
+        let req = e.http.post(format!("{}/v1/search/clusters/vault/request", e.api)).header("x-test-grant", grant).header("x-test-capable", capable).json(&json!({ "method": method, "path": path, "body": body }));
+        async move {
+            let r = req.send().await.unwrap();
+            (r.status().as_u16(), r.json::<Value>().await.unwrap_or(Value::Null))
+        }
+    };
+    assert_eq!(console(&admin, "GET", "/_cat/indices", Value::Null).await.0, 200);
+    assert_eq!(console(&admin, "GET", "/enrollments/_search?q=api_key:x", Value::Null).await.0, 200, "an index and a query string named after a credential answer none");
+    for (method, path, body) in [("POST", "/_security/api_key", json!({ "name": "k" })), ("PUT", "/_security/user/ann", json!({ "password": "a-long-password-1", "roles": [] }))] {
+        let (s, v) = console(&admin, method, path, body.clone()).await;
+        assert!(s == 403 && v["error"].as_str().is_some_and(|m| m.contains("needs reveal")), "{method} {path}: {s} {v}");
+        let (s, v) = console(&both, method, path, body).await;
+        assert_eq!((s, v["status"].as_u64()), (200, Some(200)), "{method} {path}: {v}");
+    }
+}
+
+/// What a deleted cluster recorded and nobody had handed on yet (slow log, request metrics,
+/// analytics, requests to bill) goes with it: a cluster that takes its name at once starts with
+/// none of it, before and after the next metering pass.
+#[tokio::test]
+async fn a_reused_name_inherits_nothing_of_the_deleted_cluster() {
+    use reqwest::Method;
+    let e = env().await;
+    let old = e.post("/v1/search/clusters", json!({ "name": "shop" })).await;
+    let (user, pw) = creds(&old);
+    let settings = json!({ "settings": { "index.search.slowlog.threshold.query.warn": "0ms", "index.roll.analytics.enabled": true } });
+    assert_eq!(e.es(&user, &pw, Method::PUT, "/orders", Some(settings)).await.0, 200);
+    for _ in 0..3 {
+        assert_eq!(e.es(&user, &pw, Method::POST, "/orders/_search", Some(json!({ "query": { "match": { "card": "4111 1111" } } }))).await.0, 200);
+    }
+    assert!(!e.get("/v1/search/clusters/shop/slowlog").await["entries"].as_array().unwrap().is_empty());
+    assert_eq!(e.call(Method::DELETE, "/v1/search/clusters/shop", None).await.0, 200);
+    let new = e.post("/v1/search/clusters", json!({ "name": "shop" })).await;
+    assert_ne!(new["id"], old["id"]);
+    let id = new["id"].as_str().unwrap().to_string();
+    for pass in ["before the pass", "after it"] {
+        let log = e.get(&format!("/v1/search/clusters/{id}/slowlog")).await;
+        assert_eq!(log["entries"], json!([]), "{pass}: {log}");
+        let m = e.get(&format!("/v1/search/clusters/{id}/metrics?range=1h")).await;
+        assert_eq!(m["totals"]["all"]["requests"].as_u64().unwrap_or(0), 0, "{pass}: {m}");
+        let a = e.get(&format!("/v1/search/clusters/{id}/analytics?range=24h")).await;
+        assert_eq!(a["totals"]["searches"].as_u64(), Some(0), "{pass}: {a}");
+        let u = e.get(&format!("/v1/search/clusters/{id}/usage?days=1")).await;
+        assert_eq!(u["requests"].as_i64().unwrap_or(0), 0, "{pass}: {u}");
+        e.control.sample().await.unwrap();
+    }
+}
+
+/// Credentials pasted into a snapshot repository or a remote link are never kept in the clear: a
+/// node without a sealing key refuses them (pointing at a `roll://` reference or the key) and
+/// keeps nothing, and a node with one keeps them only sealed, in the cluster state as saved and in
+/// the catalog.
+#[tokio::test]
+async fn pasted_credentials_are_sealed_or_refused() {
+    use reqwest::Method;
+    let (endpoint, _bucket) = MockBucket::start().await;
+    for sealed in [false, true] {
+        let e = env_with(|c| {
+            c.node_settings.push((search_control::S3_ALLOW_PRIVATE.into(), "true".into()));
+            c.unsealed_secrets = false;
+            if sealed {
+                c.sealer = search_control::Sealer::from_secret("0123456789abcdef0123456789abcdef");
+            }
+        })
+        .await;
+        let app = e.post("/v1/search/clusters", json!({ "name": "app" })).await;
+        let (ua, pa) = creds(&app);
+        let (ul, pl) = creds(&e.post("/v1/search/clusters", json!({ "name": "logs" })).await);
+        let repo = json!({ "type": "s3", "settings": {
+            "bucket": "backups", "base_path": "seal", "endpoint": endpoint, "path_style_access": true,
+            "access_key": "AKIDPASTED", "secret_key": "pasted-secret-key",
+        } });
+        let (s, v) = e.es(&ua, &pa, Method::PUT, "/_snapshot/backup?verify=false", Some(repo)).await;
+        let (_, k) = e.es(&ul, &pl, Method::POST, "/_security/cross_cluster/api_key", Some(json!({ "name": "mine", "access": { "search": [{ "names": ["*"] }] } }))).await;
+        let key = k["encoded"].as_str().unwrap_or_else(|| panic!("{k}")).to_string();
+        let (sr, vr) = e.call(Method::PUT, "/v1/search/clusters/app/remotes/logs", Some(json!({ "cluster": "logs", "api_key": key }))).await;
+        if sealed {
+            assert_eq!((s, sr), (200, 200), "{v} {vr}");
+        } else {
+            assert!(s == 400 && v.to_string().contains("roll://"), "{v}");
+            assert!(sr == 400 && vr.to_string().contains("ROLL_SECRET_KEY"), "{vr}");
+        }
+        let state = e.control.node.get_loaded("app").unwrap().cluster.state().to_json().to_json();
+        assert!(!state.contains("pasted-secret-key") && !state.contains("AKIDPASTED"), "sealed={sealed}: a credential in the saved state");
+        assert_eq!(state.contains("::roll_sealed::"), sealed);
+        match e.control.store.remote(app["id"].as_str().unwrap(), "logs").await.unwrap() {
+            Some(r) => assert!(sealed && search_es::seal::is_sealed(&r.credentials) && !r.credentials.contains(&key)),
+            None => assert!(!sealed, "the link is kept"),
+        }
+    }
+}
+
+/// Documents being inverted share the node's memory budget for it (`max_analysis_bytes`):
+/// parallel `ngram` documents with grams of up to 1,000 characters get 429
+/// `circuit_breaking_exception`, their analysis stopped, instead of growing the buffers without
+/// bound; what they left is the budget's until the buffer goes.
+#[tokio::test]
+async fn parallel_ngram_documents_are_held_to_the_node_analysis_budget() {
+    use reqwest::Method;
+    let e = env_with(|c| c.max_analysis_bytes = Some(16 << 20)).await;
+    let (user, pw) = creds(&e.post("/v1/search/clusters", json!({ "name": "grams" })).await);
+    let index = json!({
+        "settings": { "index.max_ngram_diff": 50, "analysis": {
+            "tokenizer": { "g": { "type": "ngram", "min_gram": 950, "max_gram": 1000 } },
+            "analyzer": { "a": { "type": "custom", "tokenizer": "g" } } } },
+        "mappings": { "properties": { "body": { "type": "text", "analyzer": "a" } } },
+    });
+    assert_eq!(e.es(&user, &pw, Method::PUT, "/grams", Some(index)).await.0, 200);
+    // About 3 GB of grams each, were they indexed.
+    let text: String = (0..60_000u32).map(|i| char::from(b'a' + (i.wrapping_mul(2_654_435_761) >> 27) as u8 % 26)).collect();
+    let paths: Vec<String> = (0..4).map(|i| format!("/grams/_doc/{i}")).collect();
+    let results = futures_util::future::join_all(paths.iter().map(|p| e.es(&user, &pw, Method::PUT, p, Some(json!({ "body": text }))))).await;
+    for (s, v) in &results {
+        assert!(*s == 429 && v["error"]["type"] == "circuit_breaking_exception", "{s} {v}");
+    }
+    let l = e.control.node.get_loaded("grams").unwrap();
+    let heap = search_control::meter::engine_figures(&l.cluster).heap_bytes;
+    assert!(heap < 64 << 20, "the buffers stayed near the budget: {heap}");
+}
+
+/// Request bodies in flight are charged to the node's budget too (`max_in_flight_bytes`): two
+/// clusters each within their own budget get 429 once together they pass the node's.
+#[tokio::test]
+async fn bodies_in_flight_are_held_to_the_node_budget() {
+    use base64::Engine;
+    use tokio::io::AsyncWriteExt;
+    let e = env_with(|c| c.max_in_flight_bytes = Some(1_500_000)).await;
+    let (ua, pa) = creds(&e.post("/v1/search/clusters", json!({ "name": "a", "max_body_mb": 1 })).await);
+    let (ub, pb) = creds(&e.post("/v1/search/clusters", json!({ "name": "b", "max_body_mb": 1 })).await);
+    // a's upload: its headers are in, its 1,000,000 bytes aren't yet.
+    let mut held = tokio::net::TcpStream::connect(e.es.trim_start_matches("http://")).await.unwrap();
+    let auth = base64::engine::general_purpose::STANDARD.encode(format!("{ua}:{pa}"));
+    let head = format!("POST /_bulk HTTP/1.1\r\nhost: x\r\nauthorization: Basic {auth}\r\ncontent-type: application/x-ndjson\r\ncontent-length: 1000000\r\n\r\n");
+    held.write_all(head.as_bytes()).await.unwrap();
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while e.control.node.get_loaded("a").is_none_or(|l| l.bytes_in_flight() == 0) {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("a's body is reserved");
+    let doc = json!({ "pad": "x".repeat(900_000) });
+    let (s, v) = e.es(&ub, &pb, reqwest::Method::PUT, "/i/_doc/1", Some(doc.clone())).await;
+    assert_eq!(s, 429, "{v}");
+    assert!(v.to_string().contains("max_coordinating_and_primary_bytes=1500000"), "names the node's budget: {v}");
+    drop(held);
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while e.control.node.get_loaded("a").is_some_and(|l| l.bytes_in_flight() > 0) {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("a's reservation goes with its connection");
+    assert_eq!(e.es(&ub, &pb, reqwest::Method::PUT, "/i/_doc/1", Some(doc)).await.0, 201);
 }
 
 /// A person's clusters and always-on clusters are capped (`--search-max-*-per-person`); branches

@@ -221,7 +221,8 @@ fn options(f: &HlField<'_>, field: &Map, global: &Map, index: &crate::meta::Inde
     }
     o.phrase_limit = usize_of(get(field, global, "phrase_limit"), 256);
     o.require_field_match = get(field, global, "require_field_match").and_then(Value::as_bool).unwrap_or(true);
-    o.index_max_analyzed_offset = index.settings.get("index.highlight.max_analyzed_offset").and_then(|v| v.parse().ok()).unwrap_or(1_000_000);
+    // Bounded for indices set before roll's bound too.
+    o.index_max_analyzed_offset = index.settings.get("index.highlight.max_analyzed_offset").and_then(|v| v.parse::<i64>().ok()).unwrap_or(1_000_000).clamp(1, crate::meta::index_settings::MAX_ANALYZED_OFFSET) as _;
     // `-1` stands for the index limit, applied by truncating instead of failing.
     o.max_analyzed_offset = get(field, global, "max_analyzed_offset")
         .and_then(|v| match v {
