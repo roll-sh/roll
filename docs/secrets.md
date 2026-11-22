@@ -4665,6 +4665,28 @@ credentials as the tokens list does. Names and metadata only, never a value:
   do there (read, reveal, write, admin; decided by the same scope check requests are), when it was
   last used and when it ends; and whether code roll hasn't vetted (checks, sandboxes, previews)
   can read it, which is so unless the environment is protected.
+- **People** (`people`): the project's members whose role reveals it now (`{user, handle, role,
+  actions, admin?}`), decided by their session grant as their own requests are
+  (docs/members.md); an admin account reveals everything whatever its role (`admin: true`). The
+  operator's admin accounts are a count (`admins`). Members v1.1's groups add the people of a
+  group that holds a role here once they land.
+- **Their agents** (`clients`): live OAuth connections (`rlo_…`: a person's MCP client or app)
+  whose rules reach it, in the shape of `tokens`, by person (`created_by`). A person's connection
+  reaches only what their role does (#644). A cut-off's `tokens` revokes these too.
+- **Services** (`services`): roll apps services the project stands for (the workspace's `trusts`)
+  whose environment reads it, `{service, name, environment, through, last_deployed_at}`. A
+  service environment reads the project's environment of its name (its root folder), so it reads
+  this folder when that's the folder itself or one importing it or based on it (`through:
+  "env:/path"`), or through one of its variables' `roll://` references (`through` is the
+  reference). Whenever it last deployed: what runs holds the value until it's redeployed.
+- **Sandboxes** (`sandboxes`): live agents sandboxes holding a copy of its values, `{id, name,
+  owner, by, from, keys}` (with `key`, only that key).
+- **Who knew** (`knew`): people who read its values in the last 30 days and may no longer reveal
+  them, `{user, last_at, reads, why}` (`why`: `left` the project, their `role` no longer reveals
+  it, or their account is `gone`). They still know what they read: rotate it.
+
+roll secrets knows no product: rolld answers which services and sandboxes hold a project's
+secrets (`reach::Holders`, from roll apps' and roll code's stores; names and references only).
 - **Where it goes by itself**: syncs of that folder (and that key), projects the folder is shared
   with, and this project's folders that import it.
 - **Where it goes by itself** also counts folders that import it and environments based on it
@@ -4678,8 +4700,10 @@ credentials as the tokens list does. Names and metadata only, never a value:
   a `${…}` or `roll://` reference in another key are recorded where they happened and aren't
   counted: the answer says so (`uncounted`).
 
-Who could lists roll-access's live tokens (`rlt_…`) by what each may do here, and workload identities
-by their identity rather than each login. OAuth connections (`rlo_…`) aren't listed yet, though since roll MCP's #644 a member's MCP client reaches what their role does (the thirty-fifth review's item 3).
+Who could lists roll-access's live tokens (`rlt_…`) by what each may do here, workload identities
+by their identity rather than each login, and OAuth connections (`rlo_…`) apart, as `clients`.
+Reach is a project admin's: it names the project's members, which its admins see on the members
+page already.
 
 It also lists what the folder has handed out that's still out: dynamic credentials issued for
 its keys and not yet revoked (`leases`), live placeholders of its keys wherever they were
