@@ -39,9 +39,14 @@ CREATE TABLE IF NOT EXISTS agent_sandboxes (
     -- When its machine last did something (a thread running, a command, terminal traffic, a
     -- wake): it sleeps a window after.
     last_active_at INTEGER,
-    -- Who copied a roll secrets environment's values into its env (roll secrets' principal:
+    -- Who copied a roll secrets environment's values into its env (roll secrets' maker:
     -- usr_…, token:…, operator); NULL without one.
-    secrets_by TEXT
+    secrets_by TEXT,
+    -- Where they came from, never the values: {"project", "environment", "keys"} (JSON). Before
+    -- each start roll secrets is asked whether secrets_by still may reveal it.
+    secrets_from TEXT,
+    -- Why the copied values were taken out of it (secrets_by may no longer reveal them).
+    secrets_dropped TEXT
 );
 CREATE INDEX IF NOT EXISTS agent_sandboxes_owner ON agent_sandboxes (owner_id, deleted_at);
 CREATE INDEX IF NOT EXISTS agent_sandboxes_machine ON agent_sandboxes (machine_id);
@@ -77,6 +82,17 @@ pub struct SandboxRow {
     pub deleted_at: Option<i64>,
     pub last_active_at: Option<i64>,
     pub secrets_by: Option<String>,
+    pub secrets_from: Option<SecretsFrom>,
+    pub secrets_dropped: Option<String>,
+}
+
+/// The roll secrets environment a sandbox's env has values of, and which of its variables they
+/// are (names only).
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct SecretsFrom {
+    pub project: String,
+    pub environment: String,
+    pub keys: Vec<String>,
 }
 
 impl SandboxRow {
@@ -101,7 +117,7 @@ impl SandboxRow {
 }
 
 const COLS: &str = "id, owner_id, machine_id, name, backend, backend_id, size, cpu, memory_gb, disk_gb, hourly_cents, status, desired, sealed, error, \
-                    created_at, updated_at, metered_at, deleted_at, last_active_at, secrets_by";
+                    created_at, updated_at, metered_at, deleted_at, last_active_at, secrets_by, secrets_from, secrets_dropped";
 
 pub(crate) fn status_str(s: SandboxStatus) -> &'static str {
     match s {
@@ -145,6 +161,8 @@ fn row(r: &Row<'_>) -> code_sql::Result<SandboxRow> {
         deleted_at: r.get(18)?,
         last_active_at: r.get(19)?,
         secrets_by: r.get(20)?,
+        secrets_from: r.get::<_, Option<String>>(21)?.and_then(|j| serde_json::from_str(&j).ok()),
+        secrets_dropped: r.get(22)?,
     })
 }
 
@@ -200,6 +218,7 @@ pub struct NewSandbox<'a> {
     pub sealed: &'a str,
     pub max: u32,
     pub secrets_by: Option<&'a str>,
+    pub secrets_from: Option<&'a SecretsFrom>,
 }
 
 /// A sandbox and its machine, at once.
@@ -214,7 +233,7 @@ pub fn create(db: &code_sql::Db, n: &NewSandbox<'_>) -> code_sql::Result<Created
             return Ok(Created::TooManyMachines);
         }
         c.execute(
-            &format!("INSERT INTO agent_sandboxes ({COLS}) VALUES (?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, ?, 'creating', 'running', ?, NULL, ?, ?, NULL, NULL, ?, ?)"),
+            &format!("INSERT INTO agent_sandboxes ({COLS}) VALUES (?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, ?, 'creating', 'running', ?, NULL, ?, ?, NULL, NULL, ?, ?, ?, NULL)"),
             params![
                 n.id,
                 n.owner_id,
@@ -230,7 +249,8 @@ pub fn create(db: &code_sql::Db, n: &NewSandbox<'_>) -> code_sql::Result<Created
                 now,
                 now,
                 now,
-                n.secrets_by
+                n.secrets_by,
+                n.secrets_from.map(|f| serde_json::to_string(f).unwrap_or_default())
             ],
         )?;
         let s = get(c, n.id)?.expect("just inserted");
@@ -321,6 +341,15 @@ pub fn set_desired(db: &code_sql::Db, owner_id: &str, id: &str, desired: Desired
         let s = get(c, id)?.expect("still there");
         let m = if s.info() != was { sync_machine(c, &s)? } else { None };
         Ok(Some((s, m)))
+    })
+}
+
+/// Its copied secrets were taken out (`why`, which never holds a value): recorded once, with the
+/// machine synced.
+pub fn secrets_dropped(db: &code_sql::Db, id: &str, why: &str) -> code_sql::Result<Option<SandboxRow>> {
+    db.write(|c| {
+        c.execute("UPDATE agent_sandboxes SET secrets_dropped = ?, updated_at = ? WHERE id = ? AND secrets_dropped IS NULL", params![why, code_sql::now_ms(), id])?;
+        get(c, id)
     })
 }
 

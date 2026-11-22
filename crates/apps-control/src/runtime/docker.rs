@@ -273,6 +273,10 @@ impl Docker {
             for (cp, hp) in &extra {
                 args.extend(["--publish".into(), format!("127.0.0.1:{hp}:{cp}")]);
             }
+            // A UDP service's port over UDP too, on any free loopback port (the relay reads it).
+            if spec.udp {
+                args.extend(["--publish".into(), format!("127.0.0.1::{p}/udp")]);
+            }
         }
         if let Some(net) = &spec.network {
             args.extend(["--network".into(), net.clone()]);
@@ -1459,6 +1463,11 @@ fn engine_config(spec: &InstanceSpec, host_port: Option<u16>, extra: &[(u16, u16
             let k = format!("{cp}/tcp");
             config["ExposedPorts"][&k] = json!({});
             host["PortBindings"][&k] = json!([{"HostIp": "127.0.0.1", "HostPort": hp.to_string()}]);
+        }
+        if spec.udp {
+            let k = format!("{p}/udp");
+            config["ExposedPorts"][&k] = json!({});
+            host["PortBindings"][&k] = json!([{"HostIp": "127.0.0.1", "HostPort": ""}]);
         }
     }
     if let Some(net) = &spec.network {

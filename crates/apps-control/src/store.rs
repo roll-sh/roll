@@ -340,6 +340,20 @@ CREATE TABLE IF NOT EXISTS error_groups (
 ) WITHOUT ROWID;
 -- Who started a deployment, as a person (their session's, their own token's, the operator's): what
 -- an approval is compared with.
+-- Branches whose delete failed, tried again each minute until it works.
+CREATE TABLE IF NOT EXISTS orphan_branches (
+    kind TEXT NOT NULL,
+    ref TEXT NOT NULL,
+    kept TEXT NOT NULL,
+    at INTEGER NOT NULL,
+    PRIMARY KEY (kind, ref, kept)
+) WITHOUT ROWID;
+-- Environments whose schedules don't run (scheduled: false): a cron's and run.schedules.
+CREATE TABLE IF NOT EXISTS env_unscheduled (
+    service TEXT NOT NULL,
+    env TEXT NOT NULL,
+    PRIMARY KEY (service, env)
+) WITHOUT ROWID;
 -- A UDP service's port per environment (run.udp), from the node's UDP range.
 CREATE TABLE IF NOT EXISTS udp_ports (
     service TEXT NOT NULL,
@@ -1141,7 +1155,7 @@ impl Store {
             c.execute("DELETE FROM deploy_steps WHERE deployment IN (SELECT id FROM deployments WHERE service = ?)", [id])?;
             c.execute("DELETE FROM state WHERE key LIKE ?", [format!("%:{id}/%")])?;
             c.execute("DELETE FROM status_days WHERE key LIKE ?", [format!("%:{id}/%")])?;
-            for t in ["environments", "deployments", "deploy_keys", "fences", "env_access", "registry_auth", "git_auth", "git_github", "github_events", "trace_ingest", "runtime_config", "oidc_access", "variable_makers", "variable_runtime_only", "visit_tickets", "visit_sessions", "variable_files", "error_groups", "variables", "links", "domains", "preview_hosts", "runs", "jobs", "metrics", "usage", "form_submissions", "deploy_scans"] {
+            for t in ["environments", "deployments", "deploy_keys", "fences", "env_access", "registry_auth", "git_auth", "git_github", "github_events", "trace_ingest", "runtime_config", "oidc_access", "variable_makers", "variable_runtime_only", "visit_tickets", "visit_sessions", "variable_files", "error_groups", "variables", "links", "domains", "preview_hosts", "runs", "jobs", "metrics", "usage", "form_submissions", "deploy_scans", "env_data", "env_branches", "udp_ports", "env_unscheduled"] {
                 c.execute(&format!("DELETE FROM {t} WHERE service = ?"), [id])?;
             }
             match c.execute("DELETE FROM services WHERE id = ?", [id])? {
@@ -1281,7 +1295,7 @@ impl Store {
             if n == 0 {
                 return Err(Error::NotFound(format!("service {service} has no environment {env}")));
             }
-            for t in ["variables", "variable_files", "error_groups", "domains", "preview_hosts", "runs", "jobs", "metrics", "deploy_keys", "env_access", "trace_ingest", "runtime_config", "oidc_access", "variable_makers", "variable_runtime_only", "visit_tickets", "visit_sessions", "form_submissions", "env_data", "udp_ports"] {
+            for t in ["variables", "variable_files", "error_groups", "domains", "preview_hosts", "runs", "jobs", "metrics", "deploy_keys", "env_access", "trace_ingest", "runtime_config", "oidc_access", "variable_makers", "variable_runtime_only", "visit_tickets", "visit_sessions", "form_submissions", "env_data", "udp_ports", "env_unscheduled"] {
                 c.execute(&format!("DELETE FROM {t} WHERE service = ? AND env = ?"), [service, env])?;
             }
             // Its schedules', challenge's and base images' state goes with it.
@@ -3392,6 +3406,40 @@ impl Store {
             let counted = all.iter().filter(|a| Some(a.as_str()) != author).count() as u32;
             Ok((all, fresh && counted == needed))
         })
+    }
+
+    pub fn add_orphan_branch(&self, kind: LinkKind, r#ref: &str, kept: &str) -> Result<()> {
+        self.db.execute("INSERT INTO orphan_branches (kind, ref, kept, at) VALUES (?, ?, ?, ?) ON CONFLICT (kind, ref, kept) DO NOTHING", params![kind.as_str(), r#ref, kept, self.now()?])?;
+        Ok(())
+    }
+
+    /// The oldest `limit` branches whose delete is still to be done.
+    pub fn orphan_branches(&self, limit: usize) -> Result<Vec<(LinkKind, String, String)>> {
+        let rows: Vec<(String, String, String)> = self.db.query("SELECT kind, ref, kept FROM orphan_branches ORDER BY at LIMIT ?", [limit as i64], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?;
+        rows.into_iter().map(|(k, r, kept)| Ok((LinkKind::parse(&k)?, r, kept))).collect()
+    }
+
+    pub fn forget_orphan_branch(&self, kind: LinkKind, r#ref: &str, kept: &str) -> Result<()> {
+        self.db.execute("DELETE FROM orphan_branches WHERE kind = ? AND ref = ? AND kept = ?", params![kind.as_str(), r#ref, kept])?;
+        Ok(())
+    }
+
+    /// Whether the environment's schedules run (`scheduled`, default true).
+    pub fn scheduled(&self, service: &str, env: &str) -> Result<bool> {
+        Ok(self.db.query_row("SELECT 1 FROM env_unscheduled WHERE service = ? AND env = ?", [service, env], |_| Ok(())).optional()?.is_none())
+    }
+
+    /// Every environment whose schedules don't run, for a tick's one read.
+    pub fn unscheduled(&self) -> Result<std::collections::HashSet<(String, String)>> {
+        Ok(self.db.query("SELECT service, env FROM env_unscheduled", (), |r| Ok((r.get(0)?, r.get(1)?)))?.into_iter().collect())
+    }
+
+    pub fn set_scheduled(&self, service: &str, env: &str, on: bool) -> Result<()> {
+        match on {
+            true => self.db.execute("DELETE FROM env_unscheduled WHERE service = ? AND env = ?", [service, env])?,
+            false => self.db.execute("INSERT INTO env_unscheduled (service, env) VALUES (?, ?) ON CONFLICT (service, env) DO NOTHING", [service, env])?,
+        };
+        Ok(())
     }
 
     /// Whether the environment has data of its own (`data: "branch"`).

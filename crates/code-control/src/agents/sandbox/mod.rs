@@ -13,6 +13,10 @@
 //! - What a sandbox needs to start (its machine token and the provider env the owner gave) is
 //!   sealed with `ROLL_SECRET_KEY` until the backend has it, then dropped. It goes to the backend
 //!   and nowhere else: never into a response, a log or an error.
+//! - Values copied from roll secrets keep only where they came from (`secrets_from`) and who
+//!   copied them. Before each create and start roll secrets is asked whether that person or token
+//!   still may reveal them; when they may not, the backend starts it without them
+//!   ([`SandboxBackend::start_without`]), or, where it can't, it isn't started at all.
 
 pub mod agent37;
 pub mod api;
@@ -327,6 +331,14 @@ pub trait SandboxBackend: Send + Sync {
     async fn tagged(&self) -> Result<Vec<Tagged>, BackendError>;
     async fn status(&self, backend_id: &str) -> Result<BackendState, BackendError>;
     async fn start(&self, backend_id: &str) -> Result<(), BackendError>;
+    /// Start it without the variables `without` names, its data kept: what it was made with, less
+    /// values roll took back (their copier may no longer reveal them). `spec` is its id, name and
+    /// size (its env is ignored). `false`: this backend can't change what an instance was made
+    /// with, so nothing was started.
+    async fn start_without(&self, backend_id: &str, spec: &SandboxSpec, without: &[String]) -> Result<bool, BackendError> {
+        let _ = (backend_id, spec, without);
+        Ok(false)
+    }
     async fn stop(&self, backend_id: &str) -> Result<(), BackendError>;
     /// Delete it and its data. One that's already gone counts as deleted.
     async fn delete(&self, backend_id: &str) -> Result<(), BackendError>;

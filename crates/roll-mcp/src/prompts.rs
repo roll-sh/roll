@@ -94,6 +94,33 @@ const PROMPTS: &[Prompt] = &[
         },
     },
     Prompt {
+        name: "respond_to_leaked_secret",
+        title: "Respond to a leaked secret",
+        description: "A secret that may have leaked: whether it's live, who and what reaches it, a plan to rotate it and redeploy what reads it (asking first), and a check that it's closed.",
+        args: &[
+            Arg { name: "project", description: "Workspace project", required: true },
+            Arg { name: "key", description: "The key, if you know which (else it's found)", required: false },
+        ],
+        needs: &["secrets_health", "secrets_reach", "secrets_rotate"],
+        text: |a| {
+            format!(
+                "A secret may have leaked in project {}; the key is {} (empty: find it). First find it and whether it \
+                 matters: that key, or secrets_health's exposed values; for a credential found in code that the project \
+                 doesn't hold, secrets_credential_check says whether it's still live and whose it is. Then \
+                 secrets_reach for its environment and folder: which tokens and identities reach it, where it flows \
+                 (syncs, shares, imports) and who read it in the last 30 days, names only. Give me a plan before \
+                 doing anything: rotate it with secrets_rotate (a managed link rotates where it lives; a key from \
+                 another provider is rotated there first and then stored with secrets_set), redeploy each service \
+                 that reads it with apps_redeploy (production may ask a person), and which tokens to revoke if \
+                 they shouldn't have reached it. Ask me before rotating, redeploying or revoking anything. After, \
+                 secrets_health again to show it's no longer exposed, and secrets_list_rotations for the rotation. \
+                 Never show a value, old or new.",
+                a("project"),
+                a("key")
+            )
+        },
+    },
+    Prompt {
         name: "fix_secrets_health",
         title: "Fix a project's secrets health",
         description: "What needs fixing in a project's secrets, most urgent first, with the fix for each.",

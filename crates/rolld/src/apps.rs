@@ -611,6 +611,9 @@ impl Resources for RollResources {
         let k: serde_json::Value = serde_json::from_str(kept)?;
         let (id, name) = (k["id"].as_str().unwrap_or_default(), k["name"].as_str().unwrap_or_default());
         anyhow::ensure!(!id.is_empty() && !name.is_empty(), "a branch's record names no branch");
+        // What it handed out goes first (a kind that keeps a deleted branch restorable revokes
+        // it here), as roll previews' deletes do.
+        b.retire(r#ref, id, k["kept"].as_str()).await?;
         b.delete(r#ref, id, name).await
     }
 

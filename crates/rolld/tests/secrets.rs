@@ -9,6 +9,9 @@
 //!
 //! And a sealed start (`ROLL_SECRET_KEY_SEALED`): nothing that needs the deployment key runs until
 //! its shares unseal the node.
+//!
+//! And roll apps (`ForApps`): what a service got from roll secrets is shown only as roll secrets
+//! would show it to whoever asks.
 
 mod common;
 
@@ -400,4 +403,52 @@ async fn a_workspace_delete_asks_roll_secrets_first_and_keeps_the_secrets_for_it
     assert_eq!(deleted[0]["purge_at"].as_i64().unwrap() - deleted[0]["deleted_at"].as_i64().unwrap(), 3 * 86_400_000, "{deleted}");
     r.post(&format!("/v1/secrets/projects/{}/recover", p.id), json!({})).await;
     assert_eq!(p.value("API_KEY").await, "kept-through-the-window");
+}
+
+/// roll apps shows a service's values from roll secrets only as roll secrets would show them to
+/// the asker: a token that may reveal staging, but not production, gets a 403 for staging's
+/// values and shell once a staging key references production (the service reads it), and can't
+/// write such a reference itself.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn apps_shows_a_staging_reference_to_production_only_to_who_may_reveal_production() {
+    // With search: the harness reads every rolld's search address.
+    let r = Rolld::start("apps,search", false).await;
+    let project = Project::new(&r).await.id;
+    let secrets = format!("/v1/secrets/projects/{project}/environments");
+    r.call(reqwest::Method::PUT, &format!("{secrets}/production/secrets/DB_PASSWORD"), Some(json!({ "value": "fake-production-password" }))).await;
+    r.call(reqwest::Method::PUT, &format!("{secrets}/staging/secrets/LOG_LEVEL"), Some(json!({ "value": "debug" }))).await;
+    let svc = r.post("/v1/apps/services", json!({ "project": project, "name": "web", "source": { "kind": "upload" } })).await;
+    let staging = format!("/v1/apps/services/{}/environments/staging", svc["id"].as_str().unwrap());
+    r.call(reqwest::Method::PUT, &staging, Some(json!({}))).await;
+    let rules = json!([
+        { "product": "secrets", "resources": [{ "project": project }], "environments": ["staging"], "actions": { "read": "allow", "write": "allow", "reveal": "allow" } },
+        { "product": "apps", "resources": "*", "actions": { "read": "allow", "write": "allow", "reveal": "allow", "admin": "allow" } },
+    ]);
+    let token = r.post("/v1/access/tokens", json!({ "name": "staging", "rules": rules })).await["token"].as_str().unwrap().to_string();
+    let as_token = |method: reqwest::Method, path: String, body: Option<Value>| {
+        let mut rb = r.http.request(method, format!("{}{path}", r.api)).bearer_auth(&token);
+        if let Some(b) = body {
+            rb = rb.json(&b);
+        }
+        async move {
+            let a = rb.send().await.unwrap();
+            (a.status().as_u16(), a.text().await.unwrap())
+        }
+    };
+    let values = format!("{staging}/variables/values");
+    let (s, v) = as_token(reqwest::Method::GET, values.clone(), None).await;
+    assert!(s == 200 && v.contains("debug"), "staging's own values: {s} {v}");
+
+    // It can't make staging read production itself.
+    let reference = json!({ "value": "${production.DB_PASSWORD}" });
+    let (s, e) = as_token(reqwest::Method::PUT, format!("{secrets}/staging/secrets/DB_URL"), Some(reference.clone())).await;
+    assert_eq!(s, 403, "{e}");
+    // Someone who may reveal production does: the service reads production's value.
+    r.call(reqwest::Method::PUT, &format!("{secrets}/staging/secrets/DB_URL"), Some(reference)).await;
+    assert_eq!(r.get(&values).await["DB_URL"], "fake-production-password");
+    // The token sees none of it, in the values or in a shell.
+    let (s, e) = as_token(reqwest::Method::GET, values, None).await;
+    assert!(s == 403 && e.contains("DB_URL") && !e.contains("fake-production-password"), "{s} {e}");
+    let (s, e) = as_token(reqwest::Method::POST, format!("{staging}/shell/sessions"), Some(json!({}))).await;
+    assert!(s == 403 && e.contains("roll secrets"), "{s} {e}");
 }
