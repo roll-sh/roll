@@ -19,7 +19,7 @@ function madeBy(name: string | null): string | null {
   return null;
 }
 
-function day(ms: number) {
+export function day(ms: number) {
   return new Date(ms).toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" });
 }
 
