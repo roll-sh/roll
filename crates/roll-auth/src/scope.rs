@@ -263,13 +263,19 @@ pub struct Rule {
     /// Only resources with a path under one of these (`/api` covers `/api/x`, not `/apix`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub paths: Option<Vec<String>>,
-    /// Only resources whose environment the product says isn't protected ([`Resource::protected`]):
-    /// a developer's default (docs/members.md, "Per-environment narrowing"), or a CI token for every
-    /// environment but the protected ones. It only narrows.
+    /// Only resources whose environment the product says isn't protected ([`Resource::protected`]),
+    /// and never one named [`PRODUCTION`], protected or not: a developer's default (docs/members.md,
+    /// "Per-environment narrowing", D3), or a CI token for every environment but the protected ones.
+    /// It only narrows.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub unprotected: bool,
     pub actions: BTreeMap<Action, Effect>,
 }
+
+/// The environment an `unprotected` rule never reaches, whatever the product says of it: production
+/// is named, never a default (docs/members.md, D3), also on a project made before it started
+/// protected.
+pub const PRODUCTION: &str = "production";
 
 /// One line of text with no backticks: what a rule names is shown to agents and people as text.
 fn plain(s: &str) -> bool {
@@ -374,7 +380,7 @@ impl Rule {
                     Resources::All => true,
                     Resources::Some(sel) => sel.iter().any(|s| s.matches(r)),
                 };
-                let unprotected = !self.unprotected || r.protected == Some(false);
+                let unprotected = !self.unprotected || (r.protected == Some(false) && r.environment.as_deref() != Some(PRODUCTION));
                 resource && (r.filters_itself || (self.environment_matches(r.environment.as_deref()) && unprotected && self.path_matches(r.path.as_deref())))
             }
             Target::List { .. } => true,

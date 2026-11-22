@@ -9,6 +9,9 @@
 //!   relays' pinned image, in the peer's namespace) answers the route's name on the project
 //!   network and connects to its target through the tunnel. The app changes nothing: it connects
 //!   to `db.corp.internal:5432` as it would inside the customer's network.
+//! - A closed environment's peer answers on its closed network and reaches its endpoint through
+//!   a network of its own (`<peer>-out`): the instances, with no route out and no way to add one,
+//!   still reach only the routes' names, so the customer's hosts join roll as what it may reach.
 //! - A WireGuard config is parsed and written again with only what a peer needs (its key, its
 //!   addresses, each peer's key, endpoint, allowed IPs, preshared key and keepalive): `PostUp`
 //!   and the other hooks would run any command as root in the peer, `DNS` and `Table` change
@@ -113,10 +116,7 @@ impl crate::Apps {
     pub async fn set_private_network(self: &Arc<Self>, service: &str, env: &str, body: serde_json::Value, who: crate::integrations::Asker<'_>) -> Result<serde_json::Value> {
         let p = parse(&body)?;
         let (sid, e) = (service.to_string(), env.to_string());
-        let (svc, row) = self.db(move |s| Ok((s.service(&sid)?, s.environment(&sid, &e)?))).await?;
-        if row.egress.closed() {
-            return Err(Error::Conflict(format!("{env} is closed (egress roll): a closed environment's private network isn't built yet")));
-        }
+        let (svc, _) = self.db(move |s| Ok((s.service(&sid)?, s.environment(&sid, &e)?))).await?;
         match crate::model::secret_ref_env(&p.secret) {
             Some(Ok(e)) if e == env => {}
             Some(Ok(e)) => return Err(Error::BadRequest(format!("the reference names {e}'s secret: a private network reads its own environment's (roll://{env}/…)"))),
@@ -176,17 +176,22 @@ impl crate::Apps {
         let Ok((svc, row, peering)) = self.db(move |s| Ok((s.service(&sid)?, s.environment(&sid, &e)?, s.peering(&sid, &e)?))).await else { return };
         let Some((p, maker)) = peering else { return };
         // Nothing deployed: nothing on its network to reach it yet.
-        if row.active.is_none() || row.egress.closed() {
+        if row.active.is_none() {
             return;
         }
         let log = self.logs.sink(format!("env:{service}/{env}"), crate::logs::Stream::System);
         let made = async {
             let text = self.deps.secrets.resolve_as(&svc.project, env, service, &p.secret, &maker).await.map_err(|e| format!("{}: {e:#}", p.secret))?;
             let wg = wireguard_config(&text).map_err(|why| format!("{}: {why}", p.secret))?;
-            let network = crate::network_name(&svc.project, env);
-            self.deps.runtime.ensure_network(&network, service, false).await.map_err(|e| format!("{e:#}"))?;
+            // A closed environment's instances are on its closed network: the peer answers there,
+            // and reaches its endpoint through a network of its own.
+            let closed = row.egress.closed();
+            let network = if closed { crate::closed_network_name(&svc.project, env) } else { crate::network_name(&svc.project, env) };
+            self.deps.runtime.ensure_network(&network, service, closed).await.map_err(|e| format!("{e:#}"))?;
+            let name = peer_name(service, env);
             let spec = crate::runtime::PeerSpec {
-                name: peer_name(service, env),
+                out_network: closed.then(|| format!("{name}-out")),
+                name,
                 service: service.to_string(),
                 env: env.to_string(),
                 network,

@@ -74,6 +74,9 @@ impl Secrets {
         if manages && member {
             return Ok(());
         }
+        // A key they bound stops counting for its hosts (`binder_reaches`): the project's consumers'
+        // interception CAs are checked at their next ask, and one naming such a host ends.
+        self.db.write(|c| c.execute(&format!("{}project_id = ?)", crate::intercept::RECHECK_HOLDERS), [project]))?;
         let theirs = |by: &str| self.made_by(by, user);
         let now = self.db.now_ms()?;
         let roll = Caller::consumer("roll:members");

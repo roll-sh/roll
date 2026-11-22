@@ -1359,7 +1359,7 @@ static TOOLS: &[Tool] = &[
     t(
         "apps_set_private_network",
         "Connect a private network",
-        "Reach hosts in your own network (Cloud Run's VPC egress, Fly's WireGuard): a WireGuard config kept in roll secrets as this environment's secret (secret: roll://ENV/KEY, read as you at each use; PostUp, DNS, Table and full tunnels are refused) and routes, each a name the app connects to (db.corp.internal) and a host:port in your network; a peer answers each name on the project network. Each route has its own port; not for a closed environment (admin).",
+        "Reach hosts in your own network (Cloud Run's VPC egress, Fly's WireGuard): a WireGuard config kept in roll secrets as this environment's secret (secret: roll://ENV/KEY, read as you at each use; PostUp, DNS, Table and full tunnels are refused) and routes, each a name the app connects to (db.corp.internal) and a host:port in your network; a peer answers each name on the project network. Each route has its own port; a closed environment reaches these and still nothing else (admin).",
         "apps",
         "PUT",
         "/v1/apps/services/{service}/environments/{env}/private-network",
