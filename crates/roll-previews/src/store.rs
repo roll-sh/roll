@@ -141,6 +141,17 @@ CREATE TABLE IF NOT EXISTS events (
     data TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS events_at ON events (at);
+CREATE TABLE IF NOT EXISTS pinned_data (
+    preview_id TEXT NOT NULL,
+    revision TEXT NOT NULL,
+    kind TEXT NOT NULL,
+    parent TEXT NOT NULL,
+    name TEXT NOT NULL,
+    ref TEXT NOT NULL,
+    kept TEXT,
+    at INTEGER NOT NULL,
+    PRIMARY KEY (preview_id, revision, kind, parent)
+) WITHOUT ROWID;
 CREATE TABLE IF NOT EXISTS dismissed (
     change_id TEXT PRIMARY KEY,
     head TEXT NOT NULL,
@@ -588,6 +599,19 @@ pub struct New {
     pub state: State,
     pub expires_at: Option<i64>,
     pub created_by: String,
+}
+
+/// An earlier push's own data: a copy-on-write branch of the preview's branch of `parent`, taken
+/// as the next head's data step began, so `revision`'s code runs on the data it left.
+#[derive(Clone, Debug, PartialEq)]
+pub struct PinnedData {
+    pub revision: String,
+    pub kind: Kind,
+    pub parent: String,
+    /// Its name in the product (the guard its delete checks).
+    pub name: String,
+    pub r#ref: String,
+    pub kept: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -1243,7 +1267,7 @@ impl Store {
             if let Some((project, change, head)) = gone {
                 emit(c, now, "deleted", &project, id, change.as_deref(), &serde_json::json!({ "head": head }))?;
             }
-            for t in ["resources", "services", "pinned", "shares", "visit_tickets", "visit_sessions", "visits", "activity", "screenshots", "page_shots", "visual_page_accepts", "mail", "resolved_notes", "base_history", "leases", "note_crops", "git_pulls", "git_reports", "runtime_facts", "gone_pushes", "previews"] {
+            for t in ["resources", "services", "pinned", "pinned_data", "shares", "visit_tickets", "visit_sessions", "visits", "activity", "screenshots", "page_shots", "visual_page_accepts", "mail", "resolved_notes", "base_history", "leases", "note_crops", "git_pulls", "git_reports", "runtime_facts", "gone_pushes", "previews"] {
                 let col = if t == "previews" { "id" } else { "preview_id" };
                 c.execute(&format!("DELETE FROM {t} WHERE {col} = ?"), [id])?;
             }
@@ -2569,6 +2593,35 @@ impl Store {
             Some((svc, rev)) => c.query_row("SELECT host FROM pinned WHERE preview_id = ? AND service = ? AND revision = ?", [id, svc, rev], |r| r.get(0)).optional(),
             None => c.query_row("SELECT host FROM services WHERE preview_id = ? AND name = ?", [id, name], |r| r.get(0)).optional(),
         })?)
+    }
+
+    /// The data kept for earlier pushes: a snapshot of a branch per head ([`PinnedData`]).
+    pub fn pinned_data(&self, id: &str) -> Result<Vec<PinnedData>> {
+        Ok(self.db.read(|c| {
+            c.query("SELECT revision, kind, parent, name, ref, kept FROM pinned_data WHERE preview_id = ? ORDER BY at", [id], |r| {
+                let kind: String = r.get(1)?;
+                Ok(PinnedData { revision: r.get(0)?, kind: Kind::parse(&kind).unwrap_or(Kind::Postgres), parent: r.get(2)?, name: r.get(3)?, r#ref: r.get(4)?, kept: r.get(5)? })
+            })
+        })?)
+    }
+
+    pub fn add_pinned_data(&self, id: &str, d: &PinnedData) -> Result<()> {
+        let now = self.now_ms()?;
+        self.db.write(|c| {
+            c.execute(
+                "INSERT INTO pinned_data (preview_id, revision, kind, parent, name, ref, kept, at) VALUES (?, ?, ?, ?, ?, ?, ?, ?) \
+                 ON CONFLICT (preview_id, revision, kind, parent) DO UPDATE SET name = excluded.name, ref = excluded.ref, kept = excluded.kept",
+                params![id, d.revision, d.kind.as_str(), d.parent, d.name, d.r#ref, d.kept, now],
+            )?;
+            Ok::<_, Error>(())
+        })
+    }
+
+    pub fn drop_pinned_data(&self, id: &str, d: &PinnedData) -> Result<()> {
+        self.db.write(|c| {
+            c.execute("DELETE FROM pinned_data WHERE preview_id = ? AND revision = ? AND kind = ? AND parent = ?", params![id, d.revision, d.kind.as_str(), d.parent])?;
+            Ok::<_, Error>(())
+        })
     }
 
     /// Keep `revision` of `service` reachable at a host of its own (an earlier push), and the
