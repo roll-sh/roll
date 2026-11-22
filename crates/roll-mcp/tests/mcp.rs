@@ -883,6 +883,41 @@ async fn a_members_client_lists_what_their_role_allows() {
     assert!(tools.iter().any(|t| t == "secrets_set") && tools.iter().any(|t| t == "secrets_get_values"), "an admin does: {tools:?}");
 }
 
+/// Step-up (SEP-835): an OAuth connection's refused call carries a challenge naming the step-up roll
+/// recorded (the rule it needed, for roll's consent screen to propose): in-band for every client, and as a 403 challenge for a client
+/// that steps up (Claude Code from 2.1.288). A scoped token's refusal stays as it was.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_refused_oauth_call_challenges_for_the_rule() {
+    let d = Daemon::new();
+    let read = serde_json::from_value::<roll_access::store::NewGrant>(json!({ "name": "Claude Code", "rules": [{ "product": "postgres", "resources": "*", "actions": { "read": "allow" } }] })).unwrap();
+    let (_, oauth) = d.access.store.create(&read, roll_auth::GrantKind::Oauth, "admin", None, None).unwrap();
+    let refused = d.tool(&oauth, "postgres_delete_project", json!({ "project": "pa" })).await;
+    let challenge = refused["_meta"]["mcp/www_authenticate"][0].as_str().unwrap_or_default().to_string();
+    assert!(challenge.contains("error=\"insufficient_scope\"") && challenge.contains("scope=\"roll:step-up:stp_") && challenge.contains("resource_metadata="), "{refused}");
+    assert_eq!(refused["isError"], true, "in-band, the refusal as before: {refused}");
+
+    let session = |version: &'static str| {
+        let d = &d;
+        let oauth = oauth.clone();
+        async move {
+            let init = json!({ "jsonrpc": "2.0", "id": 1, "method": "initialize", "params": { "protocolVersion": "2025-11-25", "capabilities": {}, "clientInfo": { "name": "claude-code", "version": version } } });
+            let (_, h, _) = d.http(&oauth, Method::POST, "/v1/mcp", Some(init)).await;
+            let session = h["mcp-session-id"].to_str().unwrap().to_string();
+            let call = json!({ "jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": { "name": "postgres_delete_project", "arguments": { "project": "pa" } } });
+            d.http_with(&oauth, Method::POST, "/v1/mcp", Some(call), &[("mcp-session-id", &session)]).await
+        }
+    };
+    let (s, h, body) = session("2.1.300").await;
+    assert_eq!(s, StatusCode::FORBIDDEN, "{body}");
+    assert!(h["www-authenticate"].to_str().unwrap().contains("roll:step-up:stp_"), "{h:?}");
+    assert_eq!(body["result"]["isError"], true, "the body is the same answer");
+    assert_eq!(session("2.1.200").await.0, StatusCode::OK, "an older Claude Code gets it in-band");
+
+    let token = d.token(json!([{ "product": "postgres", "resources": "*", "actions": { "read": "allow" } }])).await;
+    let plain = d.tool(&token, "postgres_delete_project", json!({ "project": "pa" })).await;
+    assert!(plain["_meta"].get("mcp/www_authenticate").is_none(), "a scoped token has no consent to step up: {plain}");
+}
+
 /// 2026-07-28's `subscriptions/listen` (SEP-2575): the stream starts with the acknowledgement of
 /// what roll will send, then says when the connection's tools change (an access request approved),
 /// tagged with the subscription's id.
