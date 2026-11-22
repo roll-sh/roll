@@ -571,6 +571,8 @@ is `-32602`.
 | `tune_slow_query` | `project` | A slow query made faster on a branch first (Neon's query tuning): its plan, an index tried on a copy, both plans compared, main only when you say so. | `postgres_get_project`, `postgres_slow_queries`, `postgres_explain`, `postgres_create_branch`, `postgres_execute`, `postgres_delete_branch` |
 | `security_checkup` | | Which tokens need attention, most serious first: a narrower rule set for each over-broad one, where roaming ones were used from, which to revoke or give an expiry; adds secrets' findings, a project's secrets audit log that doesn't hold (`secrets_verify_audit`), unmasked personal data, over-broad or unused S3 keys, public buckets, search clusters with no IP allowlist, previews shared outside the team and live images with high or critical vulnerabilities when the connection has those tools. Changes nothing. | `access_checkup`, `access_tighten_token`, `access_token_networks` |
 | `debug_failing_service` | `service`, `env` | Why an environment is failing (what roll already flags in its `attention`, the whole timeline, deploys, deploy logs, failing requests and routes, metrics), then a fix or a rollback it asks about first. | `apps_get_environment`, `apps_activity`, `apps_route_stats`, `apps_list_deploys`, `apps_deploy_logs`, `apps_logs`, `apps_metrics` |
+| `ship_a_service` | `project` | A new app service from a repo, a Git URL or an image: what its project file would make (`apps_import`), the service with its links and variables, a deploy outside production first, checked (environment, logs, errors), and production only when you say. | `apps_create_service`, `apps_deploy`, `apps_wait_deploy`, `apps_get_environment`, `apps_logs` |
+| `tune_slow_search` | `cluster` | Why a search cluster answers slowly: its slowest requests, a profile of the worst, the usual causes in mapping and query, and a fix tried on a branch (`search_branch_cluster`) before the cluster. | `search_slowlog`, `search_cluster_metrics`, `search_get_mapping`, `search_query` |
 | `review_preview` | `preview` | Whether a change's preview is ready to land: why it failed or waits for `approve-run`, its schema changes (a dropped column, a `NOT NULL` with no default), new errors, routes slower than main's preview, its pages against the base (screenshots it looks at), people's notes. Changes nothing without asking. | `previews_wait`, `previews_get`, `previews_logs`, `previews_errors`, `previews_routes`, `previews_screenshot`, `previews_list_notes` |
 | `hand_to_agent` | `owner`, `repo` | A problem (an error group, a slow query, a bug described) as a work item with its evidence quoted as data, handed to a coding agent on one of your machines (a thread in its own worktree, `auto_edit`, the prompt shown to you first, the item bound to it), its requests left to you, its branch published as a change, checked and previewed, and queued only when you say. | roll code's and agents' (`code_create_work`, `agents_create_thread`, `agents_claim_work`, `agents_publish_thread`, `code_get_change`, `code_enqueue_change`, …; rolld's tests hold each name to one roll code fronts) |
 | `clear_task_backlog` | | Why roll tasks' messages pile up or fail: a paused or limited queue, dead letters and each delivery's error grouped by cause, then a retry it asks about first (with how many). | `tasks_stats`, `tasks_list_queues`, `tasks_get_queue`, `tasks_list_dead_letters`, `tasks_get_message` |
@@ -1107,11 +1109,11 @@ previews are listed once those products are on.
 Ranked; the top item is in progress. A watchdog reads this list. Unblocked work comes first; what
 waits on a sibling PR reaching main is last.
 
-1. **A leaked-secret workflow (this PR).** roll had a secrets health triage
-   (`fix_secrets_health`) and a pre-commit check, but nothing that walks an incident end to end, as
-   GitHub's secret-scanning remediation does: `respond_to_leaked_secret` confirms whether a
-   credential is live, shows who and what reaches it and who read it in 30 days, proposes rotating
-   it and redeploying what reads it (asking before each), and checks it's closed.
+1. **Workflows for shipping a service and a slow search (this PR).** Apps had a failing-service
+   workflow but none for the first deploy, and search had none: `ship_a_service` (project file
+   checked, service made, links and variables, a deploy outside production first, checked,
+   production on your word) and `tune_slow_search` (slow log, a profile of the worst request, the
+   usual mapping and query causes, a fix tried on a branch first).
 2. **Decision for the user: a sandboxed "code mode"** (Cloudflare's Code Mode, Anthropic's code
    execution with MCP). A model writes a short script against typed tool functions; roll runs it
    and each call still goes through the gate and the audit log as if made one by one. It cuts
@@ -1147,7 +1149,7 @@ waits on a sibling PR reaching main is last.
    stateless and search mode (`?tools=search`) covers clients that can't take the list; "remember this browser"; a preset that reveals development's values without asking
    (#354); a connection-level `?project=` (only a token's rules bound a project; a default that
    some tools can't honour would look like a boundary).
-6. **Landed 2026-11-21:** roll code's connect panel offers lockdown, and `claude mcp add` lines quote a
+6. **Landed 2026-11-21:** `respond_to_leaked_secret`, a leak walked end to end (#661); roll code's connect panel offers lockdown, and `claude mcp add` lines quote a
    URL with a query (#659); roll code's answers cut at 48 KiB on both servers (#654, `roll_auth::lockdown::cut`
    in `mcp::call`); invisible characters escaped on `/v1/code/mcp` (#653, `roll_auth::lockdown::visible`); lockdown on roll code's own MCP server (#650: `/v1/code/mcp?lockdown=1`,
    `roll_auth::lockdown` shared with `/v1/mcp`); the sweep's rolld on port 0 with `--addr-file` (#648, after #596); the sweep as a member (#647: a viewer signed in by email code calls every
