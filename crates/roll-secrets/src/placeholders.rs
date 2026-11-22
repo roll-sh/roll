@@ -849,7 +849,10 @@ impl crate::intercept::BoundHosts for Secrets {
         let now = self.db.now_ms()?;
         let rows: Vec<(String, String, String)> = self.db.read(|c| {
             c.query(
-                "SELECT DISTINCT p.project_id, h.secret_id, h.binding FROM placeholders p JOIN key_hosts h ON h.secret_id = p.secret_id WHERE p.consumer = ? AND p.revoked_at IS NULL AND p.expires_at > ?",
+                &format!(
+                    "SELECT DISTINCT p.project_id, h.secret_id, h.binding FROM placeholders p JOIN key_hosts h ON h.secret_id = p.secret_id WHERE p.consumer = ? AND p.revoked_at IS NULL AND p.expires_at > ? AND {}",
+                    crate::deleted::live("p.project_id")
+                ),
                 params![consumer, now],
                 |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
             )

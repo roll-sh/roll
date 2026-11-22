@@ -10,6 +10,8 @@
 //! And a sealed start (`ROLL_SECRET_KEY_SEALED`): nothing that needs the deployment key runs until
 //! its shares unseal the node.
 
+mod common;
+
 use serde_json::{Value, json};
 use std::process::{Child, Command, Stdio};
 use std::sync::Arc;
@@ -17,21 +19,9 @@ use std::time::{Duration, Instant};
 
 const TOKEN: &str = "secrets-links-test-operator-token-0123456789";
 
-/// A port nothing listens on, never handed out twice in this process.
-fn free_port() -> u16 {
-    static GIVEN: std::sync::Mutex<Vec<u16>> = std::sync::Mutex::new(Vec::new());
-    loop {
-        let port = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
-        let mut given = GIVEN.lock().unwrap();
-        if !given.contains(&port) {
-            given.push(port);
-            return port;
-        }
-    }
-}
-
 struct Rolld {
     child: Child,
+    started: common::Started,
     home: Arc<tempfile::TempDir>,
     api: String,
     /// roll search's HTTP address.
@@ -42,6 +32,9 @@ struct Rolld {
 
 impl Drop for Rolld {
     fn drop(&mut self) {
+        if std::thread::panicking() {
+            eprintln!("rolld's stderr, last lines:\n{}", self.started.tail());
+        }
         // SAFETY: kill(2) on the rolld this test started; a graceful stop takes its computes down.
         unsafe { libc::kill(self.child.id() as libc::pid_t, libc::SIGTERM) };
         let stopping = Instant::now();
@@ -63,7 +56,7 @@ impl Drop for Rolld {
 }
 
 impl Rolld {
-    /// rolld with `products` on free loopback ports and an operator token (so the products' own
+    /// rolld with `products` on loopback ports of its own and an operator token (so the products' own
     /// credentials, not the operator's, decide their data planes).
     async fn start(products: &str, docker: bool) -> Rolld {
         Rolld::start_in(Arc::new(tempfile::tempdir().unwrap()), products, docker, &[], "/v1/info").await
@@ -71,10 +64,8 @@ impl Rolld {
 
     /// [`Rolld::start`] in `home` with `env` set, started once `ready` answers a success.
     async fn start_in(home: Arc<tempfile::TempDir>, products: &str, docker: bool, env: &[(&str, &str)], ready: &str) -> Rolld {
-        let local = |p: u16| format!("127.0.0.1:{p}");
-        let api = free_port();
         let mut cmd = Command::new(env!("CARGO_BIN_EXE_rolld"));
-        cmd.env_clear().env("RUST_LOG", "warn").env("ROLL_HOME", home.path()).env("ROLL_API", local(api)).env("ROLL_PROXY", local(free_port()));
+        cmd.env_clear().env("RUST_LOG", "warn").env("ROLL_HOME", home.path());
         cmd.env("ROLL_ADMIN_TOKEN", TOKEN).env("ROLL_PRODUCTS", products).envs(env.iter().copied());
         // Without Docker, nothing on PATH: no product may need it.
         if docker {
@@ -84,23 +75,12 @@ impl Rolld {
             std::fs::create_dir_all(&empty).unwrap();
             cmd.env("PATH", empty);
         }
-        for var in [
-            "ROLL_REDIS",
-            "ROLL_REDIS_HTTP",
-            "ROLL_KAFKA",
-            "ROLL_S3",
-            "ROLL_STORAGE_API",
-            "ROLL_NOSQL_CQL",
-            "ROLL_NOSQL_CQL_SHARD_AWARE",
-            "ROLL_NOSQL_ALTERNATOR",
-            "ROLL_NOSQL_REST",
-        ] {
-            cmd.env(var, local(free_port()));
-        }
-        let search = local(free_port());
-        cmd.env("ROLL_SEARCH_HTTP", &search);
-        let child = cmd.stdout(Stdio::null()).spawn().expect("rolld starts");
-        let mut r = Rolld { child, home, api: format!("http://127.0.0.1:{api}"), search, http: reqwest::Client::new(), docker };
+        let started = common::on_any_port(&mut cmd, common::LISTENERS, home.path());
+        let mut child = cmd.stdout(Stdio::null()).spawn().expect("rolld starts");
+        // A sealed start writes it too: the API answers the unseal, the rest come once unsealed.
+        let addrs = started.addrs(&mut child).await;
+        let (api, search) = (addrs.url("api"), addrs.addr("search-http"));
+        let mut r = Rolld { child, started, home, api, search, http: reqwest::Client::new(), docker };
         r.wait_for(ready).await;
         r
     }
@@ -397,4 +377,27 @@ async fn a_sealed_rolld_runs_nothing_that_needs_the_key_until_its_shares_unseal_
         assert!(started.elapsed() < Duration::from_secs(30), "the sweeper didn't run once unsealed");
         tokio::time::sleep(Duration::from_millis(200)).await;
     }
+}
+
+/// rolld wires roll secrets into the workspace's deletes: a project holding secrets is refused
+/// until a secrets admin confirms, then its secrets wait out the operator's window, unreadable,
+/// and come back with the workspace project.
+#[tokio::test]
+async fn a_workspace_delete_asks_roll_secrets_first_and_keeps_the_secrets_for_its_window() {
+    const KEY: &str = "fake-deployment-key-for-the-delete-window-test-0000";
+    let r = Rolld::start_in(Arc::new(tempfile::tempdir().unwrap()), "search", false, &[("ROLL_SECRET_KEY", KEY), ("ROLL_SECRETS_DELETE_WINDOW_DAYS", "3")], "/v1/info").await;
+    let p = Project::new(&r).await;
+    r.call(reqwest::Method::PUT, &format!("/v1/secrets/projects/{}/environments/production/secrets/API_KEY", p.id), Some(json!({ "value": "kept-through-the-window" }))).await;
+    let send = |method: reqwest::Method, path: String| r.http.request(method, format!("{}{path}", r.api)).bearer_auth(TOKEN).send();
+    let a = send(reqwest::Method::DELETE, format!("/v1/workspace/projects/{}", p.id)).await.unwrap();
+    assert_eq!(a.status(), 409);
+    assert_eq!(a.json::<Value>().await.unwrap()["code"], "project_holds_secrets");
+    let a = send(reqwest::Method::DELETE, format!("/v1/workspace/projects/{}?confirm=shop", p.id)).await.unwrap();
+    assert_eq!(a.status(), 204);
+    let a = send(reqwest::Method::GET, format!("/v1/secrets/projects/{}/environments/production/values?path=/", p.id)).await.unwrap();
+    assert_eq!(a.status(), 404, "read by nobody in the window");
+    let deleted = r.get("/v1/secrets/deleted").await;
+    assert_eq!(deleted[0]["purge_at"].as_i64().unwrap() - deleted[0]["deleted_at"].as_i64().unwrap(), 3 * 86_400_000, "{deleted}");
+    r.post(&format!("/v1/secrets/projects/{}/recover", p.id), json!({})).await;
+    assert_eq!(p.value("API_KEY").await, "kept-through-the-window");
 }

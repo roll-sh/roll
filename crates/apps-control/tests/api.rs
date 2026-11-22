@@ -173,6 +173,8 @@ impl apps_control::integrations::DomainTls for FakeTls {
 /// roll secrets' search provider, through search's keys route).
 struct FakeResources;
 
+/// What the fake branched and deleted for environments' own data, in order.
+static BRANCHED: Mutex<Vec<String>> = Mutex::new(Vec::new());
 /// What the fake made and revoked for `logs` links, in order.
 static MINTED: Mutex<Vec<String>> = Mutex::new(Vec::new());
 /// While set, a `logs` link waits (a while at most) for a second one to reach the provider too,
@@ -206,6 +208,20 @@ impl apps_control::integrations::Resources for FakeResources {
 
     async fn unlink(&self, _kind: apps_control::model::LinkKind, _ref: &str, kept: &str) -> anyhow::Result<()> {
         MINTED.lock().push(format!("unlink {}", kept.trim_start_matches("key:")));
+        Ok(())
+    }
+
+    /// A Postgres project's branch for an environment, by name (one an environment's services share).
+    async fn branch(&self, kind: apps_control::model::LinkKind, r#ref: &str, env: &str) -> anyhow::Result<Option<apps_control::integrations::Minted>> {
+        if kind != apps_control::model::LinkKind::Postgres {
+            return Ok(None);
+        }
+        BRANCHED.lock().push(format!("branch {ref} {env}"));
+        Ok(Some(apps_control::integrations::Minted { vars: vec![("DATABASE_URL".into(), format!("postgres://app:pw@db.roll.test:5432/{ref}-{env}"))], kept: format!("br_{ref}_{env}") }))
+    }
+
+    async fn unbranch(&self, _kind: apps_control::model::LinkKind, _ref: &str, kept: &str) -> anyhow::Result<()> {
+        BRANCHED.lock().push(format!("unbranch {kept}"));
         Ok(())
     }
 
@@ -1656,6 +1672,28 @@ async fn a_link_puts_its_variables_in_the_instances() {
     let log: Vec<String> = MINTED.lock()[before..].to_vec();
     assert_eq!(log.iter().filter(|l| l.starts_with("link ")).count(), 2, "{log:?}");
     assert_eq!(log.iter().filter(|l| l.starts_with("unlink ")).count(), 1, "the loser's goes: {log:?}");
+}
+
+/// An environment's own data (`data: "branch"`, Railway's environments' own databases): its
+/// Postgres links reach a branch made for it, never production's database; production and
+/// previews can't; deleting the environment deletes the branch.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_environment_with_its_own_data_gets_a_branch_of_each_database() {
+    let w = world().await;
+    let (svc, _) = image_service(&w, "api", json!({"port": 80})).await;
+    let id = svc["id"].as_str().unwrap().to_string();
+    let base = format!("/v1/apps/services/{id}/environments");
+    assert_eq!(call(&w.api, "PUT", &format!("/v1/apps/services/{id}/links/postgres/main"), Some(json!({}))).await.0, StatusCode::OK);
+    assert_eq!(call(&w.api, "PUT", &format!("{base}/production"), Some(json!({"data": "branch"}))).await.0, StatusCode::BAD_REQUEST, "production's is the database itself");
+    let (st, e) = call(&w.api, "PUT", &format!("{base}/staging"), Some(json!({"data": "branch"}))).await;
+    assert_eq!(st, StatusCode::OK, "{e}");
+    assert_eq!(e["data"], json!({"mode": "branch", "branches": [{"kind": "postgres", "ref": "main"}]}), "{e}");
+    let (_, v) = call(&w.api, "GET", &format!("{base}/staging/variables/values"), None).await;
+    assert_eq!(v["DATABASE_URL"], "postgres://app:pw@db.roll.test:5432/main-staging", "{v}");
+    let (_, v) = call(&w.api, "GET", &format!("{base}/production/variables/values"), None).await;
+    assert_eq!(v["DATABASE_URL"], "postgres://app:pw@db.roll.test:5432/main", "production keeps its own");
+    assert_eq!(call(&w.api, "DELETE", &format!("{base}/staging"), None).await.0, StatusCode::NO_CONTENT);
+    assert_eq!(*BRANCHED.lock(), ["branch main staging", "unbranch br_main_staging"]);
 }
 
 /// Requests that pile up past an instance's concurrency start more instances, up to
@@ -5058,7 +5096,15 @@ async fn a_runtime_only_variable_never_reaches_a_build() {
     assert_eq!(call(&w.api, "PATCH", &format!("{env}/variables"), Some(json!({"runtime_only": {"NOPE": true}}))).await.0, StatusCode::BAD_REQUEST);
     let deploy = || async {
         let (_, d) = call(&w.api, "POST", &format!("{env}/deploys"), Some(json!({}))).await;
-        settled(&w, &id, "production", d["id"].as_str().unwrap()).await;
+        let dep = d["id"].as_str().unwrap().to_string();
+        settled(&w, &id, "production", &dep).await;
+        // Active a moment before its template is the live one on a loaded machine: waited for.
+        for _ in 0..200 {
+            if w.apps.live(&id, "production").template().is_some_and(|t| t.deployment == dep) {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
         w.fake.build_vars.lock().last().cloned().unwrap()
     };
     let built = deploy().await;
@@ -6913,6 +6959,37 @@ async fn a_trees_edge_settings_only_tighten_its_environment() {
     assert!(apps_control::config::parse("[app]\nfirewall = [{ action = \"allow\", path = \"/\" }]\n").is_err());
 }
 
+/// OpenTelemetry with no code (`build.otel`): a Node build gets the agent in its image, and its
+/// instances start it (joined to the app's own `NODE_OPTIONS`) only while traces are on.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_builds_otel_agent_starts_while_traces_are_on() {
+    let w = world().await;
+    for (k, v) in [("package.json", r#"{"name":"site","scripts":{"start":"node server.js"}}"#), ("server.js", "x")] {
+        w.code.files.lock().insert(k.to_string(), v.to_string());
+    }
+    let make = json!({ "project": w.project, "name": "api", "source": {"kind": "repo", "repo": "acme/site"}, "build": {"otel": true}, "variables": {"NODE_OPTIONS": "--max-old-space-size=256"} });
+    let (st, svc) = call(&w.api, "POST", "/v1/apps/services", Some(make)).await;
+    assert_eq!(st, StatusCode::CREATED, "{svc}");
+    let id = svc["id"].as_str().unwrap().to_string();
+    let d = settled(&w, &id, "production", svc["environments"][0]["latest"]["id"].as_str().unwrap()).await;
+    assert_eq!((d["status"].as_str(), d["plan"]["otel"].as_str()), (Some("active"), Some("node")), "{d}");
+    assert!(d["plan"]["dockerfile"].as_str().unwrap().contains("@opentelemetry/auto-instrumentations-node@"), "{d}");
+    let h = host(&svc["environments"][0]["url"]);
+    let node_options = || async {
+        // Woken by a visit: what its running instance was started with.
+        visit(&w, &h, "/").await;
+        let tpl = w.apps.live(&id, "production").template().unwrap();
+        let name = w.fake.instances(&id).into_iter().find(|(_, dep, s)| *dep == tpl.deployment && *s == FakeState::Running).map(|(n, ..)| n).expect("a running instance");
+        w.fake.spec(&name).unwrap().vars.into_iter().find(|(k, _)| k == "NODE_OPTIONS").map(|(_, v)| v)
+    };
+    assert_eq!(node_options().await.as_deref(), Some("--max-old-space-size=256"), "off without traces");
+    let env = format!("/v1/apps/services/{id}/environments/production");
+    call(&w.api, "PUT", &env, Some(json!({"traces": true}))).await;
+    let (_, r) = call(&w.api, "POST", &format!("{env}/redeploy"), Some(json!({}))).await;
+    assert_eq!(settled(&w, &id, "production", r["id"].as_str().unwrap()).await["status"], "active");
+    assert_eq!(node_options().await, Some(format!("--max-old-space-size=256 --require {}", apps_build::otel::NODE_REQUIRE)));
+}
+
 /// A Git URL service's Git LFS objects (`build.lfs`): asked of its LFS server, checked against the
 /// pointer's sha256 and size, and built in the pointer's place; without it, the pointer stays.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -8228,11 +8305,18 @@ async fn a_closed_environment_uses_its_keys_without_seeing_them() {
     let (svc, _) = image_service(&w, "api", json!({"port": 80, "min_instances": 1})).await;
     let id = svc["id"].as_str().unwrap().to_string();
     let base = format!("/v1/apps/services/{id}/environments");
+    // The live deployment's running instance (a loaded machine reports a deploy active a moment
+    // before its template and instance are in place: waited for, two seconds at most).
     let live_spec = |env: &str| {
-        let insts = w.fake.instances(&id);
-        let tpl = w.apps.live(&id, env).template().unwrap();
-        let name = insts.into_iter().find(|(_, d, s)| *d == tpl.deployment && *s == FakeState::Running).map(|(n, ..)| n).expect("a running instance");
-        w.fake.spec(&name).unwrap()
+        for _ in 0..200 {
+            if let Some(tpl) = w.apps.live(&id, env).template()
+                && let Some(name) = w.fake.instances(&id).into_iter().find(|(_, d, s)| *d == tpl.deployment && *s == FakeState::Running).map(|(n, ..)| n)
+            {
+                return w.fake.spec(&name).unwrap();
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        panic!("no running instance of {env}'s live deployment");
     };
     let open = live_spec("production");
     assert!(open.vars.iter().any(|(k, v)| k == "STRIPE_KEY" && v == "sk_live_real"), "open: the value");

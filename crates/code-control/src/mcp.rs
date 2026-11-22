@@ -513,6 +513,11 @@ pub fn tools() -> Vec<Value> {
         if t["name"].as_str().is_some_and(|n| DESTRUCTIVE.contains(&n)) {
             t["annotations"]["destructiveHint"] = Value::Bool(true);
         }
+        // Calling it again changes nothing more (MCP's idempotentHint, as roll's own tools say it):
+        // a read, or a tool whose every route is a PUT or DELETE.
+        let name = t["name"].as_str().unwrap_or_default().to_string();
+        let idempotent = t["annotations"]["readOnlyHint"] == true || ROUTES.iter().filter(|r| r.0 == name).all(|r| matches!(r.1, "GET" | "PUT" | "DELETE"));
+        t["annotations"]["idempotentHint"] = Value::Bool(idempotent);
     }
     all
 }
@@ -855,7 +860,7 @@ fn every_tool() -> Vec<Value> {
         tool(
             "list_agent_threads",
             "List agent threads",
-            "Agent threads on the owner's machines (projects, status, what each is doing) and the approvals or questions waiting for an answer.",
+            "Agent threads on the owner's machines (project, status, what each is doing), each machine's projects with the roll code repo each clones (where a new thread can start), and the approvals or questions waiting for an answer.",
             json!({ "owner": owner.clone(), "machine": machine.clone() }),
             &["owner"],
             true,
@@ -1715,7 +1720,13 @@ fn agent_threads(state: &Value, machine: Option<&str>) -> Value {
             r
         })
         .collect();
-    json!({ "threads": threads, "requests": requests })
+    // Each machine's projects, with the roll code repo each clones: where a new thread can start,
+    // threads or not.
+    let projects: Vec<Value> = of("project")
+        .into_iter()
+        .map(|m| json!({ "id": m["entity"]["id"], "name": m["entity"]["name"], "machine": m["machine"], "repo": m["entity"]["repo"] }))
+        .collect();
+    json!({ "threads": threads, "projects": projects, "requests": requests })
 }
 
 /// Land results: landed and queued pass through; a conflict or blockers are outcomes too.

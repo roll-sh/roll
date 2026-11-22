@@ -11,6 +11,11 @@
 //! its members, each with a role ([`members`], docs/members.md); a [`Scope`] says which projects a
 //! caller sees.
 //!
+//! A deleted project is kept apart (`deleted_projects`, `deleted_resources`, and its members and
+//! homes in `deleted_members`, `deleted_homes`) so it can come back ([`Workspace::restore`]) while a
+//! product still keeps its data (roll secrets' recovery window), for at most [`KEEP_DELETED_DAYS`].
+//! A product may refuse a delete first ([`Workspace::before_delete`]).
+//!
 //! [`api::router`] serves it under `/v1/workspace`.
 
 pub mod api;
@@ -45,6 +50,25 @@ CREATE TABLE IF NOT EXISTS resources (
     added_at INTEGER NOT NULL,
     PRIMARY KEY (owner, kind, ref)
 ) WITHOUT ROWID;
+CREATE TABLE IF NOT EXISTS deleted_projects (
+    id TEXT PRIMARY KEY,
+    owner TEXT NOT NULL,
+    name TEXT NOT NULL,
+    description TEXT NOT NULL,
+    icon TEXT,
+    created_at INTEGER NOT NULL,
+    deleted_at INTEGER NOT NULL
+) WITHOUT ROWID;
+CREATE TABLE IF NOT EXISTS deleted_resources (
+    project_id TEXT NOT NULL,
+    owner TEXT NOT NULL,
+    kind TEXT NOT NULL,
+    ref TEXT NOT NULL,
+    x REAL NOT NULL,
+    y REAL NOT NULL,
+    added_at INTEGER NOT NULL,
+    PRIMARY KEY (project_id, kind, ref)
+) WITHOUT ROWID;
 CREATE INDEX IF NOT EXISTS resources_project ON resources (project_id);
 ";
 
@@ -65,6 +89,9 @@ pub const REF_MAX: usize = 200;
 pub const DESCRIPTION_MAX: usize = 280;
 /// The biggest picture an icon may carry, as its `data:` URL.
 pub const IMAGE_MAX: usize = 200 * 1024;
+/// How long a deleted project is kept to be restored, at most (a product drops it sooner with
+/// [`Workspace::forget_deleted`]): longer than any product keeps a deleted project's data.
+pub const KEEP_DELETED_DAYS: i64 = 91;
 /// The colours an icon may have (`--id-<name>` in the dashboard's globals.css).
 pub const COLORS: [&str; 8] = ["slate", "violet", "purple", "pink", "rose", "teal", "cyan", "green"];
 
@@ -83,6 +110,9 @@ pub enum Error {
     /// The change would leave the project without an owner who can sign in.
     #[error("{0}")]
     LastOwner(String),
+    /// A product refused a delete ([`Workspace::before_delete`]).
+    #[error("{}", .0.message)]
+    Refused(Refusal),
     #[error("workspace database: {0}")]
     Db(#[from] code_sql::Error),
     #[error("{0}")]
@@ -158,8 +188,30 @@ pub struct Resource {
     pub added_at: i64,
 }
 
-/// Called with a project's id after the project is deleted (roll secrets forgets its secrets).
-pub type OnDelete = Box<dyn Fn(&str) + Send + Sync>;
+/// A project being deleted, and the request deleting it: what a [`BeforeDelete`] decides on and
+/// an [`OnDelete`] is told.
+pub struct Deleting<'a> {
+    pub project: &'a Project,
+    /// rolld's gate put who's asking on its extensions; a product's own confirmation
+    /// (`?confirm=`) is in its query.
+    pub request: &'a axum::http::request::Parts,
+}
+
+/// A product's no to a delete: the status, a stable code and why, answered as they are.
+#[derive(Debug)]
+pub struct Refusal {
+    pub status: u16,
+    pub code: String,
+    pub message: String,
+}
+
+/// Asked before a project is deleted, outside the transaction (roll secrets refuses while the
+/// project holds secrets, unless a secrets admin confirms).
+pub type BeforeDelete = Box<dyn Fn(&Deleting<'_>) -> std::result::Result<(), Refusal> + Send + Sync>;
+
+/// Called after a project is deleted, outside the transaction (roll secrets keeps its secrets for
+/// a recovery window).
+pub type OnDelete = Box<dyn Fn(&Deleting<'_>) + Send + Sync>;
 
 /// Who owns a product's resource, as far as a person's project may stand for it: rolld answers
 /// from the products' own records (a repo under the person's roll code owner), and an admin's
@@ -178,6 +230,7 @@ pub trait Owners: Send + Sync {
 /// The workspace store.
 pub struct Workspace {
     db: Db,
+    before_delete: std::sync::RwLock<Vec<BeforeDelete>>,
     on_delete: std::sync::RwLock<Vec<OnDelete>>,
     owners: std::sync::OnceLock<std::sync::Arc<dyn Owners>>,
     people: std::sync::OnceLock<std::sync::Arc<dyn People>>,
@@ -221,7 +274,7 @@ impl Workspace {
         })?;
         // Members came after owners: every project's maker is its owner.
         db.migrate("workspace-members", members::migrate)?;
-        Ok(Workspace { db, on_delete: Default::default(), owners: Default::default(), people: Default::default(), grants: Default::default(), web_url: Default::default(), on_event: Default::default() })
+        Ok(Workspace { db, before_delete: Default::default(), on_delete: Default::default(), owners: Default::default(), people: Default::default(), grants: Default::default(), web_url: Default::default(), on_event: Default::default() })
     }
 
     /// Every project `scope` sees, with its resources, oldest first.
@@ -326,20 +379,82 @@ impl Workspace {
         Ok(self.db.read(|c| c.query("SELECT project_id FROM resources WHERE kind = ? AND ref = ? ORDER BY project_id", [kind, r#ref], |r| r.get(0)))?)
     }
 
-    /// Remove a project and its membership rows (never the resources themselves), then tell
-    /// what [`Workspace::on_delete`] registered.
-    pub fn delete(&self, scope: Scope<'_>, id: &str) -> Result<()> {
+    /// Remove a project, its canvas rows, members and homes (never the resources themselves), once
+    /// every [`Workspace::before_delete`] agrees, then tell what [`Workspace::on_delete`]
+    /// registered. The project, its canvas, members and homes are kept apart to be restored
+    /// ([`Workspace::restore`]); its pending invites end.
+    pub fn delete(&self, scope: Scope<'_>, id: &str, request: &axum::http::request::Parts) -> Result<()> {
+        let project = self.get(scope, id)?;
+        for f in self.before_delete.read().expect("before_delete").iter() {
+            f(&Deleting { project: &project, request }).map_err(Error::Refused)?;
+        }
+        let now = self.db.now_ms()?;
         self.db.write(|c| {
             owner_of(c, scope, id)?;
+            let old: Vec<String> = c.query("SELECT id FROM deleted_projects WHERE deleted_at < ? OR id = ?", params![now - KEEP_DELETED_DAYS * 86_400_000, id], |r| r.get(0))?;
+            for p in &old {
+                forget_deleted_rows(c, p)?;
+            }
+            c.execute(&format!("INSERT INTO deleted_projects ({PROJECT_COLUMNS}, deleted_at) SELECT {PROJECT_COLUMNS}, ? FROM projects WHERE id = ?"), params![now, id])?;
+            c.execute("INSERT INTO deleted_resources (project_id, owner, kind, ref, x, y, added_at) SELECT project_id, owner, kind, ref, x, y, added_at FROM resources WHERE project_id = ?", [id])?;
             c.execute("DELETE FROM resources WHERE project_id = ?", [id])?;
-            members::forget(c, id)?;
+            members::put_aside(c, id)?;
             c.execute("DELETE FROM projects WHERE id = ?", [id])?;
             Ok::<_, Error>(())
         })?;
         for f in self.on_delete.read().expect("on_delete").iter() {
-            f(id);
+            f(&Deleting { project: &project, request });
         }
         Ok(())
+    }
+
+    /// A deleted project as it was, while it's kept ([`KEEP_DELETED_DAYS`]).
+    pub fn deleted(&self, id: &str) -> Result<Option<Project>> {
+        self.db.read(|c| {
+            let Some(mut project) = c.query_row(&format!("SELECT {PROJECT_COLUMNS} FROM deleted_projects WHERE id = ?"), [id], project_row).optional()? else { return Ok(None) };
+            project.resources = c.query("SELECT kind, ref, x, y, added_at FROM deleted_resources WHERE project_id = ? ORDER BY added_at, kind, ref", [id], |r| resource_row(r, 0))?;
+            Ok(Some(project))
+        })
+    }
+
+    /// Bring a deleted project back with its canvas, members and homes (a resource since placed in
+    /// another project stays there, and a home set elsewhere since stays). 404 if it isn't kept;
+    /// 409 if its namespace has another project of its name now. A project that exists is answered
+    /// as it is.
+    pub fn restore(&self, id: &str) -> Result<Project> {
+        self.db.write(|c| {
+            if c.query_row("SELECT 1 FROM projects WHERE id = ?", [id], |r| r.get::<_, i64>(0)).optional()?.is_some() {
+                return load(c, id);
+            }
+            let (owner, name): (String, String) = c.query_row("SELECT owner, name FROM deleted_projects WHERE id = ?", [id], |r| Ok((r.get(0)?, r.get(1)?))).optional()?.ok_or_else(|| not_found(id))?;
+            name_free(c, &owner, &name, None).map_err(|_| Error::Conflict(format!("a project named {name} exists now: rename it, then restore this one")))?;
+            c.execute(&format!("INSERT INTO projects ({PROJECT_COLUMNS}) SELECT {PROJECT_COLUMNS} FROM deleted_projects WHERE id = ?"), [id])?;
+            c.execute(
+                "INSERT INTO resources (owner, kind, ref, project_id, x, y, added_at) SELECT owner, kind, ref, project_id, x, y, added_at FROM deleted_resources WHERE project_id = ? ON CONFLICT (owner, kind, ref) DO NOTHING",
+                [id],
+            )?;
+            members::bring_back(c, id)?;
+            forget_deleted_rows(c, id)?;
+            load(c, id)
+        })
+    }
+
+    /// Stop keeping a deleted project (a product purged what it kept of it).
+    pub fn forget_deleted(&self, id: &str) -> Result<()> {
+        self.db.write(|c| forget_deleted_rows(c, id))
+    }
+
+    /// Whether a deleted project's canvas stood for `kind ref` when it was deleted, from its kept
+    /// homes and owners ([`Workspace::trusts`] as it answered then): only for what a product keeps
+    /// doing for it through its recovery window (roll secrets' audit sinks), never to decide who
+    /// may bring it back.
+    pub fn trusts_deleted(&self, project: &Project, kind: Kind, r#ref: &str) -> bool {
+        project.owner.is_empty() || self.trusted_when_deleted(&project.id, &project.owner, kind, r#ref)
+    }
+
+    /// Ask `f` before each project is deleted, outside the transaction: a [`Refusal`] stops it.
+    pub fn before_delete(&self, f: BeforeDelete) {
+        self.before_delete.write().expect("before_delete").push(f);
     }
 
     /// Who owns what a person's canvas holds (set once, by rolld).
@@ -546,4 +661,12 @@ fn new_id() -> String {
     getrandom::fill(&mut b).expect("system randomness");
     let suffix: String = b.iter().map(|x| ALPHABET[(x & 31) as usize] as char).collect();
     format!("prj_{suffix}")
+}
+
+/// A kept deleted project's rows go: the project, its canvas, members and homes.
+fn forget_deleted_rows(c: &code_sql::Conn<'_>, id: &str) -> Result<()> {
+    c.execute("DELETE FROM deleted_resources WHERE project_id = ?", [id])?;
+    members::forget_aside(c, id)?;
+    c.execute("DELETE FROM deleted_projects WHERE id = ?", [id])?;
+    Ok(())
 }
