@@ -768,7 +768,7 @@ deterministic (#396).
    remote cluster's indices, copies mappings, settings and aliases, reindexes with progress
    (`_tasks`), and switches an alias when done. Algolia's export (records, synonyms, rules)
    mapped onto indices, synonym sets and query rules after that. Offline, with no route to the
-   old cluster: its snapshots restore on roll from the bucket they're in (item 8, #ESR).
+   old cluster: its snapshots restore on roll from the bucket they're in (item 8, #652).
 3. **A sweep for the bug classes the 2026-11-19 reviews kept finding** (first pass landed in #434; the follow-up, #492, covers the
    probe's other 15 abort paths). Four
    independent security reviews (connectors #318, cross-cluster search #347 and its gaps #389,
@@ -884,7 +884,7 @@ deterministic (#396).
    settings and never shown, snapshots uploaded as documents per segment (incremental), so
    another cluster restores them (docs/search/architecture.md, "Snapshots"); multipart uploads,
    `chunk_size`, throttling and a real `_analyze` (#237). And restoring snapshots Elasticsearch
-   wrote (#ESR, compatibility.md "Restoring snapshots Elasticsearch wrote"): a team on Elastic
+   wrote (#652, compatibility.md "Restoring snapshots Elasticsearch wrote"): a team on Elastic
    Cloud or its own Elasticsearch registers the bucket (or `fs` directory) it already snapshots
    to and runs Elasticsearch's own `_restore`, with no network route to the old cluster. Such a
    repository is read only whatever its registration says; listing answers from its own
@@ -893,7 +893,7 @@ deterministic (#396).
    values, vectors Elasticsearch 9 leaves out of `_source` from the flat vector files), all as
    hostile input, and indexes every live document again from `_source` as a task `_recovery`
    follows. Indices without a stored `_source` are refused by name and reason (`partial`
-   restores the rest). Measured: a 1M-document restore at RATE docs/s (lane b, one run). Left:
+   restores the rest). Measured: 1M documents (~200 bytes, 2 shards, from an `fs` repository) restored in 22.8 s, 43,900 docs/s (a release build into an in-memory cluster on lane b's 12 build CPUs at nice 19, one run). Left:
    credentials from roll secrets instead of the repository's settings; of the restore, segments
    Lucene 8 wrote (Elasticsearch 7.x indices never merged since), data streams themselves (their backing indices restore), `sparse_vector`
    and `rank_vectors` values and nested dense vectors that Elasticsearch 9 left out of `_source`,
