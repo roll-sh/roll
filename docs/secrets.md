@@ -1304,7 +1304,6 @@ a credential never drops data.
 
 | `search` | `url`, `host`, `port`, `username` | a credential of its own with data access only (no keys or users; `"access": "data"`: a key roll search doesn't say is a data one, whatever else it says or if it says nothing, is deleted and refused), credential `key`: on an Elasticsearch cluster `api_key` (`Authorization: ApiKey …`), on an OpenSearch one an internal user, `user` (`<user>@<cluster>`, which the node routes) and `password`; a link to the field the cluster's flavor doesn't issue is refused when written, and switching a cluster's flavor carries no credential across (link the other fields again); an OpenSearch cluster's fields are offered and suggested under the names its clients read (`OPENSEARCH_URL`, `_HOST`, `_PORT`, `OPENSEARCH_USERNAME`/`_PASSWORD` for its user, `OPENSEARCH_CLUSTER` for the cluster's name); a dynamic one expires by itself 5 minutes after its lease | no (never the cluster's password) |
 
-`search` resources are linkable once roll search's workspace kind lands (`feature/roll-search`).
 roll apps' services have a workspace kind (`service`, `svc_…`); they consume secrets (an app's
 variables, `app:<svc>`) rather than issue credentials, so they have no link provider. Products
 without a link provider yet (tasks) join by registering one. Queues have no owners, so a person's
@@ -6131,6 +6130,45 @@ and webhooks' and review apps' signing secrets sealed. Still open:
 - the #432 decoy-oracle fix: computes pinned by digest, and each image's pre-auth answers learned from a
   compute of that image (about 2 s per image, never waking a suspended endpoint). Its full gate is
   running.
+
+**State, 2026-11-22 05:05.** Every item of the thirty-fourth review that roll secrets owns is on main, with batch 7 (members) and its follow-ups:
+- **Items 1 and 3: landed**, #621 (658cecf0e). apps' reveal and shell read roll secrets as the asker
+  (any `from_secrets` key that doesn't resolve for them is a 403, no partial answer; a bound `roll://`
+  needs reveal on its own folder), and an agents sandbox re-checks its copier's reach on each start,
+  starting without the copied values when refused.
+- **Item 2: landed**, #585 (a2e1d8b2f), after an independent review (1 high, 5 medium, all fixed). A
+  workspace project's delete asks roll secrets first (403 unless a secrets admin; 409
+  `project_holds_secrets` until `?confirm=`). Its secrets are kept for a window (7 days by default,
+  `ROLL_SECRETS_DELETE_WINDOW_DAYS`), unreadable and recoverable (`POST …/recover`, `roll secrets
+  recover`, the dashboard's "Recently deleted"), then purged after a signed closing digest. ACME,
+  interception CAs, gateways and workload grants all stop at the delete, and members and homes come
+  back on recovery.
+- **Item 4: landed**, #628 (8a02a23b8). A binding names its placement (a header template or a query
+  parameter; untrusted bindings must), the filter swaps only there, and `proxy::Scrub` looks for the
+  swapped values (plain, base64, percent-encoded, across chunks) in the response. Responses are scrubbed
+  once previews' #630 wires `Scrub` into `roll-intercept`; until then rolld's adapter drops it.
+- **Item 5:**
+  - previews: done, #581 (4c575f044). The rules' pasted values, a preview's own variables and the
+    screenshot links' key are sealed. Without a key a pasted value is refused, and the signing key
+    lives in memory. An upgraded database keeps nothing in its file or WAL;
+  - search: `fix/search-security-1120` and #318;
+  - roll code: done, #627 (4af6bb3b5). Webhooks' and review apps' URLs are sealed, nothing is made
+    without `ROLL_SECRET_KEY`, and an upgraded database keeps no clear URL or secret.
+- **Batch 6's follow-ups: landed**, #582 (32dd78392). A consumer's CAs end as soon as it loses a host;
+  `maker_unreachable` (403) when a placeholder's or a chosen reference's maker no longer reaches it;
+  a decoy planted from a session mails that person.
+- **The #432 decoy oracle:** fixed, #575 (8e16604f2). Compute images are pinned by digest, and each
+  image's pre-auth answers are learned from a compute of that image, ahead of time at start, so no
+  decoy login waits and none answers with bytes the compute wouldn't.
+- **Members (#501): landed** as 991d98225 (batch 7, 2026-11-21 22:06), carrying #445's design docs.
+  Projects now have members with four roles, session grants and invites, and what a member made runs
+  at their current rights, scoped to what it does.
+- **Item 8** (placeholders had no consumer on main): done. Previews' #535 (a06876bd1) swaps them in
+  `crates/roll-intercept`, shared with apps, and is checked end to end against a TLS echo host
+  (`scripts/preview-intercept.sh`). The echo step flips to expect a 502 once item 4's scrub lands.
+- **Found while gating: fixed**, #596 (518aa3188). rolld's test binaries raced each other for ports
+  (`free_port` only avoided repeats within one process; four gates hit it on 2026-11-21). rolld now
+  binds port 0 and writes its real addresses to `--addr-file`, and its tests read that file.
 
 **Ranked, 2026-11-21 03:40** (the thirty-fourth product review, cold, on main f9bb26c17, against
 Vault/OpenBao, Infisical, Doppler, AWS, 1Password, Akeyless, Bitwarden SM, GitGuardian, Google Secret
