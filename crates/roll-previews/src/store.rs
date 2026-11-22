@@ -131,6 +131,16 @@ CREATE TABLE IF NOT EXISTS pinned (
     at INTEGER NOT NULL,
     PRIMARY KEY (preview_id, service, revision)
 ) WITHOUT ROWID;
+CREATE TABLE IF NOT EXISTS events (
+    seq INTEGER PRIMARY KEY,
+    at INTEGER NOT NULL,
+    kind TEXT NOT NULL,
+    project_id TEXT NOT NULL,
+    preview_id TEXT NOT NULL,
+    change_id TEXT,
+    data TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS events_at ON events (at);
 CREATE TABLE IF NOT EXISTS dismissed (
     change_id TEXT PRIMARY KEY,
     head TEXT NOT NULL,
@@ -1137,6 +1147,7 @@ impl Store {
             )?;
             c.execute("UPDATE previews SET token = ? WHERE id = ?", params![new_token(), id])?;
             append(c, &id, now, "preview created")?;
+            emit(c, now, "created", &n.project_id, &id, n.change_id.as_deref(), &serde_json::json!({ "head": n.head }))?;
             let r = c.query_row(&format!("SELECT {COLUMNS} FROM previews WHERE id = ?"), [&id], row)?;
             Ok((r, true))
         })
@@ -1200,6 +1211,16 @@ impl Store {
                     id
                 ],
             )?;
+            // What a follower of the events hears: up (ready, or asleep once up) after a push or a
+            // first deploy, never a sleeping preview waking; failed, once until it moves.
+            let kind = match (old.state, new.state) {
+                (State::Creating | State::Updating, State::Ready | State::Sleeping) => Some("ready"),
+                (o, State::Failed) if o != State::Failed => Some("failed"),
+                _ => None,
+            };
+            if let Some(kind) = kind {
+                emit(c, now, kind, &new.project_id, id, new.change_id.as_deref(), &serde_json::json!({ "head": new.head }))?;
+            }
             Ok(new)
         })
     }
@@ -1216,7 +1237,12 @@ impl Store {
 
     /// Remove a preview's rows (after its branches and services are gone).
     pub fn remove(&self, id: &str) -> Result<()> {
+        let now = self.now_ms()?;
         self.db.write(|c| {
+            let gone = c.query_row("SELECT project_id, change_id, head FROM previews WHERE id = ?", [id], |r| Ok((r.get::<_, String>(0)?, r.get::<_, Option<String>>(1)?, r.get::<_, String>(2)?))).optional()?;
+            if let Some((project, change, head)) = gone {
+                emit(c, now, "deleted", &project, id, change.as_deref(), &serde_json::json!({ "head": head }))?;
+            }
             for t in ["resources", "services", "pinned", "shares", "visit_tickets", "visit_sessions", "visits", "activity", "screenshots", "page_shots", "visual_page_accepts", "mail", "resolved_notes", "base_history", "leases", "note_crops", "git_pulls", "git_reports", "runtime_facts", "gone_pushes", "previews"] {
                 let col = if t == "previews" { "id" } else { "preview_id" };
                 c.execute(&format!("DELETE FROM {t} WHERE {col} = ?"), [id])?;
@@ -1225,6 +1251,41 @@ impl Store {
             c.execute("DELETE FROM env_refs WHERE scope = ?", [format!("preview:{id}")])?;
             Ok::<_, Error>(())
         })
+    }
+
+    /// The events after `after`, oldest first, at most `limit` (`GET /v1/previews/events`).
+    pub fn events(&self, after: i64, limit: usize) -> Result<Vec<crate::Event>> {
+        Ok(self.db.read(|c| {
+            c.query(
+                "SELECT seq, at, kind, project_id, preview_id, change_id, data FROM events WHERE seq > ? ORDER BY seq LIMIT ?",
+                params![after, limit as i64],
+                |r| {
+                    let data: String = r.get(6)?;
+                    Ok(crate::Event { seq: r.get(0)?, at: r.get(1)?, kind: r.get(2)?, project: r.get(3)?, preview: r.get(4)?, change: r.get(5)?, data: serde_json::from_str(&data).unwrap_or_default() })
+                },
+            )
+        })?)
+    }
+
+    /// Record `kind` for preview `id` at `head` unless it's recorded already (`visual_change`:
+    /// once a head, however often it's reported).
+    pub fn emit_once(&self, id: &str, kind: &str, head: &str) -> Result<()> {
+        let now = self.now_ms()?;
+        let data = serde_json::json!({ "head": head });
+        self.db.write(|c| {
+            let Some((project, change)) = c.query_row("SELECT project_id, change_id FROM previews WHERE id = ?", [id], |r| Ok((r.get::<_, String>(0)?, r.get::<_, Option<String>>(1)?))).optional()? else { return Ok(()) };
+            let had: Option<i64> = c.query_row("SELECT seq FROM events WHERE preview_id = ? AND kind = ? AND data = ?", params![id, kind, data.to_string()], |r| r.get(0)).optional()?;
+            if had.is_none() {
+                emit(c, now, kind, &project, id, change.as_deref(), &data)?;
+            }
+            Ok::<_, Error>(())
+        })
+    }
+
+    /// The newest event's seq (0 for none): where a follower that wants only what comes next
+    /// starts.
+    pub fn latest_event(&self) -> Result<i64> {
+        Ok(self.db.read(|c| c.query_row("SELECT COALESCE(MAX(seq), 0) FROM events", (), |r| r.get(0)))?)
     }
 
     /// A change's preview was deleted while the change stays open (its TTL ran out, or someone
@@ -3229,6 +3290,22 @@ pub struct GonePush {
 }
 /// How many of a preview's evicted pushes still say they're gone.
 pub const GONE_KEPT: usize = 30;
+
+/// How long an event is kept for followers (`GET /v1/previews/events`).
+const EVENTS_KEEP_MS: i64 = 7 * 24 * 3_600_000;
+
+/// Record an event in the write that made it so. Its `seq` is taken inside that write (never a
+/// sequence, whose values are handed out outside it), so on Postgres two writers conflict and one
+/// re-runs: commit order is seq order, and a follower past one never misses an earlier one.
+fn emit(c: &Conn<'_>, at: i64, kind: &str, project: &str, preview: &str, change: Option<&str>, data: &serde_json::Value) -> code_sql::Result<()> {
+    let seq: i64 = c.query_row("SELECT COALESCE(MAX(seq), 0) + 1 FROM events", (), |r| r.get(0))?;
+    c.execute(
+        "INSERT INTO events (seq, at, kind, project_id, preview_id, change_id, data) VALUES (?, ?, ?, ?, ?, ?, ?)",
+        params![seq, at, kind, project, preview, change, data.to_string()],
+    )?;
+    c.execute("DELETE FROM events WHERE at < ?", [at - EVENTS_KEEP_MS])?;
+    Ok(())
+}
 
 fn append(c: &Conn<'_>, id: &str, at: i64, message: &str) -> code_sql::Result<()> {
     let seq: i64 = c.query_row("SELECT COALESCE(MAX(seq), 0) + 1 FROM activity WHERE preview_id = ?", [id], |r| r.get(0))?;

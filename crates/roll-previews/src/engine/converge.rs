@@ -1449,6 +1449,12 @@ impl Engine {
         // stays on its own sheet (`report_on_git`).
         let _ = self.refresh_voice(&row);
         if let Ok(mut p) = self.store.view(row) {
+            // A visual change waiting for review is an event for followers, once a head (the
+            // review is worked out as the preview is shown, so here, where every change of it is
+            // reported).
+            if p.visual_review.as_ref().is_some_and(|v| v.state == crate::VisualState::Changed) {
+                let _ = self.store.emit_once(&p.id, "visual_change", &p.head);
+            }
             // The open notes, newest first (a few), for the pull request's comment.
             if p.change.is_some() {
                 let mut notes = self.open_notes(&p.id).await.unwrap_or_default();
