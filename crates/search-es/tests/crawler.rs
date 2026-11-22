@@ -22,12 +22,15 @@ struct Resp {
     body: Vec<u8>,
 }
 
-/// A site on loopback: routes by request target, a log of (target, Authorization).
+/// Requests a site got: (target, Authorization).
+type Log = Arc<Mutex<Vec<(String, Option<String>)>>>;
+
+/// A site on loopback: routes by request target, and the requests it got.
 #[derive(Clone)]
 struct Site {
     base: String,
     routes: Arc<Mutex<HashMap<String, Resp>>>,
-    log: Arc<Mutex<Vec<(String, Option<String>)>>>,
+    log: Log,
     /// Every request answers 503 (robots.txt too).
     down: Arc<Mutex<bool>>,
 }
