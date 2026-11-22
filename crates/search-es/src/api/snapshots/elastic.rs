@@ -52,6 +52,9 @@ pub(super) struct Source {
     pub(super) repo: String,
     /// The repository's location ([`Repository::location_key`]).
     pub(super) location: String,
+    /// What the repository data cache is keyed by: the location and how it's reached (type,
+    /// endpoint, client), so two places with one bucket path don't share an entry.
+    pub(super) cache_key: String,
     pub(super) place: Place,
     /// `indices.recovery.max_bytes_per_sec`, which data reads pay with the repository's own
     /// `max_restore_bytes_per_sec`.
@@ -106,6 +109,55 @@ impl Source {
                 })
                 .await
                 .map_err(|e| EsError::internal(e.to_string()))?
+            }
+        }
+    }
+
+    /// [`Source::get`], charging the bytes to `held` as they arrive (before they're held).
+    pub(super) async fn get_charged(&self, rel: &str, max: usize, held: &mut crate::breaker::Reservation) -> EsResult<Option<Bytes>> {
+        match &self.place {
+            Place::Bucket(b, _) => {
+                let Some(mut body) = b.store.open(&self.key(rel), None).await.map_err(|e| b.fail("reading the Elasticsearch repository", e))? else { return Ok(None) };
+                let mut out = Vec::new();
+                while let Some(piece) = body.next().await.map_err(|e| b.fail("reading the Elasticsearch repository", e))? {
+                    if out.len() + piece.len() > max {
+                        return Err(repository_exception(&self.repo, format!("[{rel}] is larger than [{max}] bytes")));
+                    }
+                    held.add(piece.len() as u64, "<snapshot_metadata>")?;
+                    out.extend_from_slice(&piece);
+                }
+                Ok(Some(Bytes::from(out)))
+            }
+            Place::Fs(_) => {
+                let Some(len) = self.size(rel).await? else { return Ok(None) };
+                if len > max as u64 {
+                    return Err(repository_exception(&self.repo, format!("[{rel}] is larger than [{max}] bytes")));
+                }
+                held.add(len, "<snapshot_metadata>")?;
+                let got = self.get(rel, max).await?;
+                if let Some(b) = &got
+                    && b.len() as u64 != len
+                {
+                    held.add((b.len() as u64).saturating_sub(len), "<snapshot_metadata>")?;
+                }
+                Ok(got)
+            }
+        }
+    }
+
+    /// The size of blob `rel`, `None` when there's none.
+    pub(super) async fn size(&self, rel: &str) -> EsResult<Option<u64>> {
+        match &self.place {
+            Place::Bucket(b, _) => {
+                let key = self.key(rel);
+                let listed = b.store.list(&key).await.map_err(|e| b.fail("listing the Elasticsearch repository", e))?;
+                Ok(listed.into_iter().find(|(k, _)| *k == key).map(|(_, n)| n))
+            }
+            Place::Fs(root) => {
+                let path = Self::fs_path(root, rel);
+                tokio::task::spawn_blocking(move || std::fs::symlink_metadata(&path).ok().filter(|m| m.is_file()).map(|m| m.len()))
+                    .await
+                    .map_err(|e| EsError::internal(e.to_string()))
             }
         }
     }
@@ -183,7 +235,12 @@ pub(super) async fn open(cluster: &crate::Cluster, name: &str, r: &Repository) -
         }
         _ => return Ok(None),
     };
-    let src = Source { repo: name.to_string(), location: r.location_key(), place, recovery };
+    let reach = |k: &str| r.settings.get(k).unwrap_or_default().to_string();
+    let cache_key = match &place {
+        Place::Fs(root) => format!("fs|{}", root.display()),
+        Place::Bucket(..) => format!("{}|{}|{}|{}|{}", r.location_key(), reach("endpoint"), reach("client"), reach("account"), reach("protocol")),
+    };
+    let src = Source { repo: name.to_string(), location: r.location_key(), cache_key, place, recovery };
     match src.get("index.latest", 64).await? {
         Some(b) if b.len() == 8 => {}
         Some(_) => return Err(damaged(name, "index.latest", "it isn't an 8-byte generation")),
@@ -229,6 +286,14 @@ pub(super) struct EsData {
 }
 
 impl EsData {
+    /// About what the parsed data takes in memory.
+    fn estimate(&self) -> u64 {
+        let snapshots: usize = self.snapshots.iter().map(|s| 128 + s.name.len() + s.uuid.len() + s.index_metadata.iter().map(|(k, v)| 64 + k.len() + v.len()).sum::<usize>()).sum();
+        let indices: usize = self.indices.iter().map(|(n, i)| 64 + n.len() + i.id.len()).sum();
+        let identifiers: usize = self.identifiers.iter().map(|(k, v)| 64 + k.len() + v.len()).sum();
+        (256 + snapshots + indices + identifiers) as u64
+    }
+
     pub(super) fn snapshot(&self, name: &str) -> Option<&EsSnapshot> {
         self.snapshots.iter().find(|s| s.name == name)
     }
@@ -251,38 +316,80 @@ impl EsData {
     }
 }
 
-/// Reads `index.latest` and the newest `index-N`.
+/// The repository data parsed last, per repository place ([`Source::cache_key`]).
+pub(super) struct CachedData {
+    repo: String,
+    generation: i64,
+    /// `index-N`'s length: Elasticsearch numbers generations from 0 again after a wipe, so the
+    /// generation alone doesn't name the data.
+    len: u64,
+    data: Arc<EsData>,
+    /// What the parsed data holds, on the `request` breaker for as long as it's kept.
+    _held: crate::breaker::Reservation,
+    used: u64,
+}
+
+impl CachedData {
+    pub(super) fn repo(&self) -> &str {
+        &self.repo
+    }
+}
+
+/// Repository data kept at most (one per repository place, least recently used dropped).
+const CACHED: usize = 4;
+
+/// Forgets what is kept of repository `repo`'s data (it was changed or unregistered).
+pub(super) fn forget(cluster: &crate::Cluster, repo: &str) {
+    cluster.snapshot_data.elastic_data.lock().retain(|_, c| c.repo != repo);
+}
+
+/// Reads `index.latest` and the newest `index-N`: the copy parsed last when the generation and
+/// the blob's length haven't changed.
 pub(super) async fn read_data(cluster: &crate::Cluster, src: &Source) -> EsResult<Arc<EsData>> {
     let latest = src.get("index.latest", 64).await?.ok_or_else(|| repository_exception(&src.repo, "the Elasticsearch repository's [index.latest] is gone"))?;
     let mut generation = i64::from_be_bytes(latest[..8].try_into().map_err(|_| damaged(&src.repo, "index.latest", "short"))?);
     if !(0..i64::MAX - PROBES).contains(&generation) {
         return Err(damaged(&src.repo, "index.latest", format!("generation [{generation}]")));
     }
+    let budget = cluster.breakers.request(cluster, &cluster.state());
+    let mut held = crate::breaker::Reservation::new(budget.clone());
     // A newer generation a crash left unnamed wins.
-    let mut raw = None;
+    let mut raw: Option<Bytes> = None;
     for _ in 0..PROBES {
-        match src.get(&format!("index-{}", generation + 1), DATA_MAX).await? {
+        let mut probe = crate::breaker::Reservation::new(budget.clone());
+        match src.get_charged(&format!("index-{}", generation + 1), DATA_MAX, &mut probe).await? {
             Some(b) => {
                 generation += 1;
+                held = probe;
                 raw = Some(b);
             }
             None => break,
         }
     }
-    // A generation is written once: the copy parsed last is the same data.
-    if let Some(d) = cluster.snapshot_data.elastic_data.lock().get(&src.location)
-        && d.generation == generation
-    {
-        return Ok(d.clone());
-    }
     let what = format!("index-{generation}");
+    let len = match &raw {
+        Some(r) => Some(r.len() as u64),
+        None => src.size(&what).await?,
+    };
+    let cached = {
+        let mut cache = cluster.snapshot_data.elastic_data.lock();
+        let tick = cache.values().map(|c| c.used).max().unwrap_or(0) + 1;
+        match cache.get_mut(&src.cache_key) {
+            Some(c) if c.generation == generation && Some(c.len) == len => {
+                c.used = tick;
+                Some(c.data.clone())
+            }
+            _ => None,
+        }
+    };
+    if let Some(d) = cached {
+        return Ok(d);
+    }
     let raw = match raw {
         Some(r) => r,
-        None => src.get(&what, DATA_MAX).await?.ok_or_else(|| repository_exception(&src.repo, format!("the Elasticsearch repository's [{what}] is missing")))?,
+        None => src.get_charged(&what, DATA_MAX, &mut held).await?.ok_or_else(|| repository_exception(&src.repo, format!("the Elasticsearch repository's [{what}] is missing")))?,
     };
-    let budget = cluster.breakers.request(cluster, &cluster.state());
-    let mut held = crate::breaker::Reservation::new(budget);
-    held.add(raw.len() as u64, "<repository_data>")?;
+    let len = raw.len() as u64;
     let text = if raw.starts_with(b"DFL\0") {
         inflate_charged(&raw[4..], DATA_MAX, &mut held).map_err(|e| match e {
             BlobError::Breaker(e) => e,
@@ -297,7 +404,18 @@ pub(super) async fn read_data(cluster: &crate::Cluster, src: &Source) -> EsResul
     let v = crate::json::parse(&text).ok().flatten().ok_or_else(|| damaged(&src.repo, &what, "it isn't JSON"))?;
     drop(text);
     let data = Arc::new(parse_data(&v, generation).map_err(|e| damaged(&src.repo, &what, e))?);
-    cluster.snapshot_data.elastic_data.lock().insert(src.location.clone(), data.clone());
+    drop(v);
+    drop(held);
+    // What is kept is charged for as long as it's kept.
+    let mut kept = crate::breaker::Reservation::new(budget);
+    kept.add(data.estimate(), "<repository_data>")?;
+    let mut cache = cluster.snapshot_data.elastic_data.lock();
+    let tick = cache.values().map(|c| c.used).max().unwrap_or(0) + 1;
+    cache.insert(src.cache_key.clone(), CachedData { repo: src.repo.clone(), generation, len, data: data.clone(), _held: kept, used: tick });
+    while cache.len() > CACHED {
+        let Some(oldest) = cache.iter().min_by_key(|(_, c)| c.used).map(|(k, _)| k.clone()) else { break };
+        cache.remove(&oldest);
+    }
     Ok(data)
 }
 
@@ -362,9 +480,10 @@ pub(super) fn inflate_charged(raw: &[u8], max: usize, held: &mut crate::breaker:
 /// when compressed, parsed (SMILE or JSON), charged to the `request` breaker as it is built.
 /// Binary values come back raw through `binary`.
 pub(super) async fn read_blob(cluster: &crate::Cluster, src: &Source, rel: &str, codec: &str, binary: &mut (dyn FnMut(&[u8]) -> Value + Send)) -> EsResult<Option<(Value, crate::breaker::Reservation)>> {
-    let Some(raw) = src.get(rel, BLOB_MAX).await? else { return Ok(None) };
     let budget = cluster.breakers.request(cluster, &cluster.state());
-    parse_blob(&raw, codec, budget, binary).map(Some).map_err(|e| match e {
+    let mut held = crate::breaker::Reservation::new(budget);
+    let Some(raw) = src.get_charged(rel, BLOB_MAX, &mut held).await? else { return Ok(None) };
+    parse_blob(&raw, codec, held, binary).map(Some).map_err(|e| match e {
         BlobError::Breaker(e) => e,
         BlobError::Damaged(why) => damaged(&src.repo, rel, why),
     })
@@ -375,12 +494,10 @@ pub(super) enum BlobError {
     Damaged(String),
 }
 
-/// [`read_blob`] on bytes already read.
-pub(super) fn parse_blob(raw: &[u8], codec: &str, budget: Arc<search_aggs::memory::MemoryBudget>, binary: &mut dyn FnMut(&[u8]) -> Value) -> Result<(Value, crate::breaker::Reservation), BlobError> {
+/// [`read_blob`] on bytes already read and charged to `held`, which the result keeps (with what
+/// the parsed value takes; the bytes as read and as inflated are released once it's parsed).
+pub(super) fn parse_blob(raw: &[u8], codec: &str, mut held: crate::breaker::Reservation, binary: &mut dyn FnMut(&[u8]) -> Value) -> Result<(Value, crate::breaker::Reservation), BlobError> {
     let d = |e: String| BlobError::Damaged(e);
-    // The blob as read and as inflated are held while it is parsed.
-    let mut held = crate::breaker::Reservation::new(budget);
-    held.add(raw.len() as u64, "<snapshot_metadata>").map_err(BlobError::Breaker)?;
     search_lucene::codec::check_footer(raw).map_err(|e| d(e.to_string()))?;
     let body = search_lucene::codec::body(raw).map_err(|e| d(e.to_string()))?;
     let mut inp = search_lucene::input::Input::new(body);
@@ -481,16 +598,35 @@ pub(super) async fn sync(cluster: &crate::Cluster, name: &str, r: &Repository) -
         }
     }
     let copy = RepositoryData { uuid: data.uuid.clone(), generation: data.generation, snapshots, elastic: true };
-    let changed = cluster.state().metadata.repository_data.get(&key).is_none_or(|d| !d.elastic || d.uuid != copy.uuid || d.generation != copy.generation || d.snapshots.len() != copy.snapshots.len());
-    if changed {
-        cluster
-            .update(move |st| {
-                st.metadata.repository_data.insert(key, Arc::new(copy));
-                Ok(())
-            })
-            .await?;
+    if !store_copy(cluster, key, copy).await? {
+        return Ok(None);
     }
     Ok(Some((src, data)))
+}
+
+/// Makes `copy` the cluster's copy of location `key`'s contents, unless roll keeps snapshots
+/// there: decided in the same state update, so a roll snapshot recorded while the Elasticsearch
+/// repository was being read (it took the check in [`open`] before) is never replaced. Whether
+/// the copy is Elasticsearch's.
+async fn store_copy(cluster: &crate::Cluster, key: String, copy: RepositoryData) -> EsResult<bool> {
+    let roll_owned = |st: &ClusterState, key: &str| st.metadata.repository_data.get(key).is_some_and(|d| !d.elastic && !d.snapshots.is_empty());
+    let st = cluster.state();
+    if roll_owned(&st, &key) {
+        return Ok(false);
+    }
+    if st.metadata.repository_data.get(&key).is_some_and(|d| d.elastic && d.uuid == copy.uuid && d.generation == copy.generation && d.snapshots.len() == copy.snapshots.len()) {
+        return Ok(true);
+    }
+    drop(st);
+    cluster
+        .update(move |st| {
+            if roll_owned(st, &key) {
+                return Ok(false);
+            }
+            st.metadata.repository_data.insert(key, Arc::new(copy));
+            Ok(true)
+        })
+        .await
 }
 
 /// `_id` as Elasticsearch keeps it in Lucene, back to the id it was given (as observed:
@@ -526,6 +662,26 @@ pub fn decode_id(b: &[u8]) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The race of a roll snapshot recorded between [`open`]'s check and the copy's insert: the
+    /// insert re-checks, so roll's list stays.
+    #[tokio::test]
+    async fn a_copy_never_replaces_rolls_snapshots() {
+        let c = crate::Cluster::in_memory("es-race").await;
+        let roll = RepositoryData { uuid: "roll".into(), generation: 1, snapshots: vec![Arc::new(snapshot_record(&EsSnapshot { name: "mine".into(), uuid: "u".into(), state: 1, start_ms: 0, end_ms: 0, index_metadata: HashMap::new() }, &Value::Null))], elastic: false };
+        let es = RepositoryData { uuid: "es".into(), generation: 3, snapshots: Vec::new(), elastic: true };
+        assert!(store_copy(&c, "fs:/x".into(), es.clone()).await.unwrap());
+        c.update(move |st| {
+            st.metadata.repository_data.insert("fs:/x".into(), Arc::new(roll));
+            Ok(())
+        })
+        .await
+        .unwrap();
+        assert!(!store_copy(&c, "fs:/x".into(), es).await.unwrap());
+        let st = c.state();
+        let kept = &st.metadata.repository_data["fs:/x"];
+        assert!(!kept.elastic && kept.snapshots[0].name == "mine");
+    }
 
     #[test]
     fn ids_decode_as_elasticsearch_wrote_them() {

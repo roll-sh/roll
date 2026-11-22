@@ -508,11 +508,11 @@ pub(super) async fn restore(ctx: &Ctx<'_>, req: Request, r: Arc<Repository>) -> 
         let Some(idx) = st.metadata.indices.get(&p.target) else { continue };
         let progress: Arc<Vec<ShardProgress>> = Arc::new((0..p.shards).map(|_| ShardProgress::default()).collect());
         ctx.cluster.snapshot_data.elastic.progress.lock().insert(idx.uuid.clone(), progress.clone());
-        jobs.push(IndexJob { target: idx.clone(), index_id: p.index_id.clone(), shards: p.shards, vectors: p.vectors.clone(), progress });
+        jobs.push(IndexJob { target: idx.clone(), index_id: p.index_id.clone(), shards: p.shards, vectors: p.vectors.clone(), progress, finished: AtomicBool::new(false) });
     }
     let total: i64 = planned.iter().map(|p| p.shards as i64).sum();
     let targets: Vec<String> = planned.iter().map(|p| p.target.clone()).collect();
-    let job = Job { src: Arc::new(src), snapshot: s.uuid.clone(), name: snap2.clone(), indices: jobs };
+    let job = Arc::new(Job { src: Arc::new(src), snapshot: s.uuid.clone(), name: snap2.clone(), indices: jobs });
     let guard = ctx.cluster.tasks.start(crate::cluster::NewTask {
         action: "cluster:admin/snapshot/restore".into(),
         description: format!("restore snapshot [{repo2}:{snap2}] from an Elasticsearch repository"),
@@ -523,23 +523,34 @@ pub(super) async fn restore(ctx: &Ctx<'_>, req: Request, r: Arc<Repository>) -> 
         cancelled: None,
     });
     let cancelled = ctx.cluster.tasks.get(guard.id).map(|t| t.cancelled).unwrap_or_default();
-    if !req.wait
-        && let Some(cluster) = ctx.cluster.handle()
-    {
-        let id = guard.detach();
-        std::mem::forget(busy);
-        tokio::spawn(async move {
-            let guard = cluster.tasks.adopt(id);
-            let _busy = Busy(&cluster.snapshot_data.elastic);
-            // A failure is recorded in each index's recovery source (`set_state`).
-            let _ = run(&cluster, &job, &cancelled).await;
+    // The restore runs in a task of its own, the request only waiting for it (if asked to): a
+    // client that goes away drops the wait, never the restore half way.
+    let outcome = match ctx.cluster.handle() {
+        Some(cluster) => {
+            let id = guard.detach();
+            std::mem::forget(busy);
+            let run = tokio::spawn(async move {
+                let guard = cluster.tasks.adopt(id);
+                let busy = Busy(&cluster.snapshot_data.elastic);
+                // A failure is recorded in each index's recovery source (`set_state`).
+                let out = supervise(cluster.clone(), job, cancelled).await;
+                drop(busy);
+                drop(guard);
+                out
+            });
+            if !req.wait {
+                return Reply::ok(obj! { "accepted" => true });
+            }
+            run.await.map_err(|e| EsError::internal(format!("the restore task stopped: {e}")))?
+        }
+        // Without background work (an embedded cluster): in the request.
+        None => {
+            let out = run(ctx.cluster, &job, &cancelled).await;
             drop(guard);
-        });
-        return Reply::ok(obj! { "accepted" => true });
-    }
-    let outcome = run(ctx.cluster, &job, &cancelled).await;
-    drop(guard);
-    drop(busy);
+            drop(busy);
+            out
+        }
+    };
     let failed = outcome?;
     if !req.wait {
         return Reply::ok(obj! { "accepted" => true });
@@ -574,6 +585,8 @@ struct IndexJob {
     shards: u32,
     vectors: Vec<String>,
     progress: Arc<Vec<ShardProgress>>,
+    /// Its outcome is recorded (`done` or `failed`).
+    finished: AtomicBool,
 }
 
 struct Job {
@@ -583,12 +596,14 @@ struct Job {
     indices: Vec<IndexJob>,
 }
 
-/// Records the restore's outcome in the index's recovery source.
-async fn set_state(cluster: &crate::Cluster, index: &str, state: &str, failure: Option<String>) {
-    let (index, state) = (index.to_string(), state.to_string());
+/// Records the restore's outcome in the recovery source of index `index` (the index of that
+/// name only while it's the one restored: `uuid`).
+async fn set_state(cluster: &crate::Cluster, index: &IndexMeta, state: &str, failure: Option<String>) {
+    let (name, uuid, state) = (index.name.clone(), index.uuid.clone(), state.to_string());
+    let index = name;
     let _ = cluster
         .update(move |st| {
-            let Some(idx) = st.metadata.indices.get(&index) else { return Ok(()) };
+            let Some(idx) = st.metadata.indices.get(&index).filter(|i| i.uuid == uuid) else { return Ok(()) };
             let mut idx = (**idx).clone();
             if let Some(rs) = &idx.recovery_source {
                 let mut rs = (**rs).clone();
@@ -606,33 +621,26 @@ async fn set_state(cluster: &crate::Cluster, index: &str, state: &str, failure: 
         .await;
 }
 
-/// Marks a restore's indices failed when its task unwinds from a panic (a running state would
-/// have every later owner start it again).
-struct FailOnUnwind<'a> {
-    cluster: &'a crate::Cluster,
-    names: Vec<String>,
-}
-
-impl Drop for FailOnUnwind<'_> {
-    fn drop(&mut self) {
-        if !std::thread::panicking() {
-            return;
-        }
-        let Some(cluster) = self.cluster.handle() else { return };
-        let names = std::mem::take(&mut self.names);
-        if let Ok(rt) = tokio::runtime::Handle::try_current() {
-            rt.spawn(async move {
-                for n in &names {
-                    set_state(&cluster, n, "failed", Some("the restore task stopped unexpectedly".into())).await;
-                }
-            });
+/// Runs [`run`] in a task of its own: when that task panics, the indices it hadn't finished are
+/// marked failed before this returns (and so before the caller lets another restore start), or
+/// every later owner would start them again.
+async fn supervise(cluster: Arc<crate::Cluster>, job: Arc<Job>, cancelled: Arc<AtomicBool>) -> EsResult<i64> {
+    let (c, j) = (cluster.clone(), job.clone());
+    match tokio::spawn(async move { run(&c, &j, &cancelled).await }).await {
+        Ok(out) => out,
+        Err(e) => {
+            for ix in job.indices.iter().filter(|ix| !ix.finished.load(Ordering::SeqCst)) {
+                cluster.snapshot_data.elastic.progress.lock().remove(&ix.target.uuid);
+                set_state(&cluster, &ix.target, "failed", Some("the restore task stopped unexpectedly".into())).await;
+                ix.finished.store(true, Ordering::SeqCst);
+            }
+            Err(EsError::internal(format!("the restore task stopped: {e}")))
         }
     }
 }
 
 /// Fills every index of `job`: the shards that failed (the first failure ends the restore).
 async fn run(cluster: &crate::Cluster, job: &Job, cancelled: &Arc<AtomicBool>) -> EsResult<i64> {
-    let _unwind = FailOnUnwind { cluster, names: job.indices.iter().map(|i| i.target.name.clone()).collect() };
     let _permit = POOL.acquire().await.map_err(|e| EsError::internal(e.to_string()))?;
     for ix in &job.indices {
         let result = async {
@@ -644,9 +652,13 @@ async fn run(cluster: &crate::Cluster, job: &Job, cancelled: &Arc<AtomicBool>) -
         .await;
         cluster.snapshot_data.elastic.progress.lock().remove(&ix.target.uuid);
         match result {
-            Ok(()) => set_state(cluster, &ix.target.name, "done", None).await,
+            Ok(()) => {
+                set_state(cluster, &ix.target, "done", None).await;
+                ix.finished.store(true, Ordering::SeqCst);
+            }
             Err(e) => {
-                set_state(cluster, &ix.target.name, "failed", Some(e.reason().to_string())).await;
+                set_state(cluster, &ix.target, "failed", Some(e.reason().to_string())).await;
+                ix.finished.store(true, Ordering::SeqCst);
                 for later in &job.indices {
                     cluster.snapshot_data.elastic.progress.lock().remove(&later.target.uuid);
                 }
@@ -1033,9 +1045,10 @@ async fn restore_shard(cluster: &crate::Cluster, job: &Job, ix: &IndexJob, shard
         let Item { held, id, routing, source, seq_no, version, primary_term } = item;
         let r = (|| {
             let _in_flight = cluster.breakers.charge_in_flight(cluster, &cluster.state(), source.len() as u64)?;
+            // Charged once: the in-flight breaker holds it while it's indexed.
+            drop(held);
             target.index(&DocCopy { id, routing, source, seq_no, primary_term, version, ignored_source: Vec::new() })
         })();
-        drop(held);
         if let Err(e) = r {
             indexed = Err(e);
             break;
@@ -1072,13 +1085,13 @@ pub fn resume(cluster: &Arc<crate::Cluster>) {
     for ((repo, snap, uuid), indices) in by_snapshot {
         let cluster = cluster.clone();
         tokio::spawn(async move {
-            let names: Vec<String> = indices.iter().map(|i| i.0.name.clone()).collect();
+            let metas: Vec<Arc<IndexMeta>> = indices.iter().map(|i| i.0.clone()).collect();
             let fail = |why: String| {
                 let cluster = cluster.clone();
-                let names = names.clone();
+                let metas = metas.clone();
                 async move {
-                    for n in &names {
-                        set_state(&cluster, n, "failed", Some(why.clone())).await;
+                    for m in &metas {
+                        set_state(&cluster, m, "failed", Some(why.clone())).await;
                     }
                 }
             };
@@ -1098,9 +1111,9 @@ pub fn resume(cluster: &Arc<crate::Cluster>) {
             for (idx, index_id, shards, vectors) in indices {
                 let progress: Arc<Vec<ShardProgress>> = Arc::new((0..shards).map(|_| ShardProgress::default()).collect());
                 cluster.snapshot_data.elastic.progress.lock().insert(idx.uuid.clone(), progress.clone());
-                jobs.push(IndexJob { target: idx, index_id, shards, vectors, progress });
+                jobs.push(IndexJob { target: idx, index_id, shards, vectors, progress, finished: AtomicBool::new(false) });
             }
-            let job = Job { src: Arc::new(src), snapshot: uuid, name: snap.clone(), indices: jobs };
+            let job = Arc::new(Job { src: Arc::new(src), snapshot: uuid, name: snap.clone(), indices: jobs });
             let guard = cluster.tasks.start(crate::cluster::NewTask {
                 action: "cluster:admin/snapshot/restore".into(),
                 description: format!("restore snapshot [{repo}:{snap}] from an Elasticsearch repository (resumed)"),
@@ -1111,7 +1124,7 @@ pub fn resume(cluster: &Arc<crate::Cluster>) {
                 cancelled: None,
             });
             let cancelled = cluster.tasks.get(guard.id).map(|t| t.cancelled).unwrap_or_default();
-            let _ = run(&cluster, &job, &cancelled).await;
+            let _ = supervise(cluster.clone(), job, cancelled).await;
             drop(guard);
         });
     }

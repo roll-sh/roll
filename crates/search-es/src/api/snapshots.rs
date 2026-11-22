@@ -90,7 +90,7 @@ pub struct SnapshotData {
     elastic: elastic_restore::Running,
     /// The repository data last parsed of each Elasticsearch repository, by location: a
     /// generation is written once, so the same generation isn't read and parsed again.
-    elastic_data: parking_lot::Mutex<std::collections::HashMap<String, Arc<elastic::EsData>>>,
+    elastic_data: parking_lot::Mutex<std::collections::HashMap<String, elastic::CachedData>>,
 }
 
 impl SnapshotData {
@@ -721,6 +721,8 @@ pub async fn put_repository(ctx: &Ctx<'_>) -> EsResult<Reply> {
     ctx.validate_timeouts()?;
     let name = ctx.path_param("repository").unwrap_or_default().to_string();
     let registered_name = name.clone();
+    // Registered again, maybe elsewhere: what was kept of its Elasticsearch data goes.
+    elastic::forget(ctx.cluster, &name);
     let verify = ctx.bool_param("verify", true)?;
     let body = ctx.body_map()?.unwrap_or_default();
     let ty = body.get("type").map(Value::to_es_string);
@@ -894,6 +896,9 @@ pub async fn delete_repository(ctx: &Ctx<'_>) -> EsResult<Reply> {
         })
         .await?;
     refs::forget_unregistered(ctx.cluster, &ctx.state());
+    // What is kept of the data of Elasticsearch repositories no longer registered.
+    let st = ctx.state();
+    ctx.cluster.snapshot_data.elastic_data.lock().retain(|_, c| st.metadata.repositories.contains_key(c.repo()));
     Reply::acknowledged()
 }
 

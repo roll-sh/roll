@@ -61,14 +61,19 @@ pub fn read_fdt_header(head: &[u8], id: &Id) -> Result<(Mode, usize)> {
     Ok((mode, inp.pos()))
 }
 
+/// The smallest chunk size read.
+pub const MIN_CHUNK_SIZE: i32 = 1024;
+
 /// `.fdm`: the chunk size (footer checked first).
 pub fn read_chunk_size(fdm: &[u8], id: &Id) -> Result<u32> {
     codec::check_footer(fdm)?;
     let mut inp = Input::new(codec::body(fdm)?);
     codec::check_index_header(&mut inp, "Lucene90FieldsIndexMeta", 0, 1, id, "")?;
     let chunk_size = inp.vint()?;
-    if chunk_size <= 0 {
-        return corrupt(format!("invalid chunk size [{chunk_size}]"));
+    // Lucene writes chunks of 80 KiB and more, Elasticsearch's zstd ones of several KiB; a tiny
+    // one would cut a sliced document into millions of pieces.
+    if chunk_size < MIN_CHUNK_SIZE {
+        return corrupt(format!("invalid chunk size [{chunk_size}], below [{MIN_CHUNK_SIZE}]"));
     }
     Ok(chunk_size as u32)
 }
@@ -112,10 +117,11 @@ impl ChunkHeader {
         let total = self.total();
         let mut inp = Input::new(chunk.get(self.header_len..self.len()).ok_or_else(|| Error::Corrupt("a chunk shorter than its header said".into()))?);
         let piece = if self.sliced { chunk_size as usize } else { total.max(1) };
+        let mut scratch = Scratch::default();
         while out.len() < total {
             check()?;
             let n = piece.min(total - out.len());
-            decompress_piece(&mut inp, mode, n, out)?;
+            decompress_piece(&mut inp, mode, n, out, &mut scratch)?;
         }
         if inp.remaining() != 0 {
             return corrupt(format!("[{}] bytes left over after a chunk", inp.remaining()));
@@ -285,14 +291,24 @@ fn blocks(len: usize, dict: usize, block: usize) -> Result<usize> {
 }
 
 /// Decompresses one piece of `len` bytes, appending it to `out`.
-fn decompress_piece(inp: &mut Input, mode: Mode, len: usize, out: &mut Vec<u8>) -> Result<()> {
+/// Decompressors one chunk's pieces and blocks reuse.
+#[derive(Default)]
+struct Scratch {
+    inflater: Option<Box<miniz_oxide::inflate::core::DecompressorOxide>>,
+    zstd: Option<zstd::bulk::Decompressor<'static>>,
+}
+
+fn decompress_piece(inp: &mut Input, mode: Mode, len: usize, out: &mut Vec<u8>, scratch: &mut Scratch) -> Result<()> {
     match mode {
         Mode::Zstd => {
             let n = inp.vuint()? as usize;
             let frame = inp.bytes(n)?;
             let start = out.len();
             out.resize(start + len, 0);
-            let mut d = zstd::bulk::Decompressor::new().map_err(|e| Error::Corrupt(format!("zstd: {e}")))?;
+            let d = match &mut scratch.zstd {
+                Some(d) => d,
+                none => none.insert(zstd::bulk::Decompressor::new().map_err(|e| Error::Corrupt(format!("zstd: {e}")))?),
+            };
             let got = d.decompress_to_buffer(frame, &mut out[start..]).map_err(|e| Error::Corrupt(format!("zstd: {e}")))?;
             if got != len {
                 return corrupt(format!("a zstd piece decompressed to [{got}] bytes, not [{len}]"));
@@ -335,13 +351,13 @@ fn decompress_piece(inp: &mut Input, mode: Mode, len: usize, out: &mut Vec<u8>) 
             // `dict`, so the dictionary is put there once.
             let mut window = vec![0u8; dict + block.min(len - dict)];
             let compressed = inp.vuint()? as usize;
-            inflate(inp.bytes(compressed)?, &mut window[..dict], 0)?;
+            inflate(&mut scratch.inflater, inp.bytes(compressed)?, &mut window[..dict], 0)?;
             piece[..dict].copy_from_slice(&window[..dict]);
             let mut done = dict;
             for _ in 0..n {
                 let m = block.min(len - done);
                 let compressed = inp.vuint()? as usize;
-                inflate(inp.bytes(compressed)?, &mut window[..dict + m], dict)?;
+                inflate(&mut scratch.inflater, inp.bytes(compressed)?, &mut window[..dict + m], dict)?;
                 piece[done..done + m].copy_from_slice(&window[dict..dict + m]);
                 done += m;
             }
@@ -352,14 +368,16 @@ fn decompress_piece(inp: &mut Input, mode: Mode, len: usize, out: &mut Vec<u8>) 
 
 /// Inflates raw DEFLATE into exactly `out[start..]`, `out[..start]` being history it may refer
 /// to (a preset dictionary).
-fn inflate(input: &[u8], out: &mut [u8], start: usize) -> Result<()> {
+fn inflate(d: &mut Option<Box<miniz_oxide::inflate::core::DecompressorOxide>>, input: &[u8], out: &mut [u8], start: usize) -> Result<()> {
     use miniz_oxide::inflate::TINFLStatus;
     use miniz_oxide::inflate::core::{DecompressorOxide, decompress, inflate_flags};
     if out.len() == start {
         return Ok(());
     }
-    let mut d = Box::new(DecompressorOxide::new());
-    let (status, _, written) = decompress(&mut d, input, out, start, inflate_flags::TINFL_FLAG_USING_NON_WRAPPING_OUTPUT_BUF);
+    // One decompressor for every stream of a chunk, reset between them.
+    let d = d.get_or_insert_with(|| Box::new(DecompressorOxide::new()));
+    d.init();
+    let (status, _, written) = decompress(d, input, out, start, inflate_flags::TINFL_FLAG_USING_NON_WRAPPING_OUTPUT_BUF);
     match status {
         TINFLStatus::Done if written == out.len() - start => Ok(()),
         TINFLStatus::Done => corrupt(format!("a DEFLATE block inflated to [{written}] bytes, not [{}]", out.len() - start)),
