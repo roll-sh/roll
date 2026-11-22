@@ -465,6 +465,18 @@ async fn handle(State(m): State<Mcp>, uri: axum::http::Uri, ext: Extensions, hea
             let events: Vec<_> = with_list_changed(responses).into_iter().map(|r| Ok::<_, std::convert::Infallible>(Event::default().event("message").data(r.to_string()))).collect();
             return Sse::new(futures::stream::iter(events)).into_response();
         }
+        // One refused call from a client that steps up: the HTTP challenge, so it asks the person to
+        // allow the rule and retries (its body is the same JSON-RPC answer, for a client that reads it).
+        if !batch
+            && responses.len() == 1
+            && steps_up(ctx.client.as_deref())
+            && let Some(challenge) = responses[0]["result"]["_meta"]["mcp/www_authenticate"][0].as_str()
+            && let Ok(v) = HeaderValue::from_str(challenge)
+        {
+            let mut r = (StatusCode::FORBIDDEN, Json(responses.pop().unwrap_or(Value::Null))).into_response();
+            r.headers_mut().insert(header::WWW_AUTHENTICATE, v);
+            return r;
+        }
         match responses.pop() {
             // A method the revision doesn't have is a 404 (with its JSON-RPC error), so a client
             // tells it from a server that has no MCP endpoint here.
@@ -1207,6 +1219,12 @@ async fn call_as(ctx: &Arc<Ctx>, name: &str, args: Value, quiet: bool) -> Option
         let headers = forward_headers(&ctx.headers, &args);
         (set.call(ctx.m.api.clone(), headers, ext, name.to_string(), args.clone()).await, "tool".to_string())
     };
+    // Step-up (SEP-835): an OAuth connection's refusal names the rule it needs as a scope the
+    // consent screen proposes (never grants by itself), in-band for every client and as the HTTP
+    // challenge for clients that step up (`handle`).
+    if let Some(challenge) = step_up_challenge(ctx, &result) {
+        result["_meta"]["mcp/www_authenticate"] = json!([challenge]);
+    }
     // In lockdown, an outside record's text never reaches the model: withheld in the structured
     // answer, and the text block (a fronted set may write its own) rebuilt from what's left.
     if ctx.lockdown && lockdown::withhold(&mut result["structuredContent"]) + lockdown::withhold_fields(&mut result["structuredContent"], outside) > 0 {
@@ -1443,6 +1461,31 @@ fn forward_headers(h: &HeaderMap, args: &Value) -> HeaderMap {
         out.insert(roll_access::evaluate::APPROVAL_HEADER, v);
     }
     out
+}
+
+/// The `WWW-Authenticate` challenge for an OAuth connection's refused call (RFC 6750 §3.1,
+/// `insufficient_scope`; MCP's step-up), when roll recorded a step-up for it (only a refusal of the
+/// connection's own rules, which its person can widen): the scope is `roll:step-up:<id>`, which
+/// roll's consent screen looks up. The client never chooses what's proposed.
+fn step_up_challenge(ctx: &Ctx, result: &Value) -> Option<String> {
+    let Principal::Grant(g) = &ctx.principal else { return None };
+    if g.kind != roll_auth::GrantKind::Oauth || result["isError"] != true {
+        return None;
+    }
+    let id = result["structuredContent"]["step_up"].as_str().filter(|id| id.starts_with("stp_") && id.len() <= 64 && id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_'))?;
+    Some(format!(
+        "Bearer error=\"insufficient_scope\", scope=\"roll:step-up:{id}\", resource_metadata=\"{}/.well-known/oauth-protected-resource/v1/mcp\", error_description=\"this connection's rules don't allow it\"",
+        ctx.m.config.api_url.trim_end_matches('/')
+    ))
+}
+
+/// Clients known to step up on a `403 insufficient_scope` (re-run authorization for the scope and
+/// retry): Claude Code from 2.1.288. Others get the refusal in-band, with the challenge in
+/// `_meta["mcp/www_authenticate"]` (ChatGPT reads it there), so nothing is lost on them.
+fn steps_up(client: Option<&str>) -> bool {
+    let Some((name, version)) = client.and_then(|c| c.split_once(' ')) else { return false };
+    let v: Vec<u32> = version.trim().split('.').map_while(|p| p.parse().ok()).collect();
+    name == "claude-code" && v.len() >= 3 && (v[0], v[1], v[2]) >= (2, 1, 288)
 }
 
 fn tool_error(text: String, data: Value) -> Value {

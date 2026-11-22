@@ -278,6 +278,16 @@ impl Daemon {
         (status, serde_json::from_slice(&bytes).unwrap_or_else(|_| Value::String(String::from_utf8_lossy(&bytes).into())))
     }
 
+    /// [`Daemon::via_mcp`] with the answer's body.
+    async fn via_mcp_body(&self, token: &str, method: Method, path: &str) -> (StatusCode, Value) {
+        let mut req = Request::builder().method(method).uri(path).header("authorization", format!("Bearer {token}")).body(Body::empty()).unwrap();
+        req.extensions_mut().insert(roll_access::evaluate::McpCall { tool: "test_tool".into(), args: Arc::new(json!({})), ip: None, elicits: false, client: None, quiet: false });
+        let resp = self.router.clone().oneshot(req).await.unwrap();
+        let status = resp.status();
+        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+        (status, serde_json::from_slice(&bytes).unwrap_or(Value::Null))
+    }
+
     /// A request roll's MCP server makes for a tool call (its `McpCall` extension), with `token`.
     async fn via_mcp(&self, token: &str, method: Method, path: &str) -> StatusCode {
         let mut req = Request::builder().method(method).uri(path).header("authorization", format!("Bearer {token}")).body(Body::empty()).unwrap();
@@ -865,6 +875,68 @@ async fn oauth_connects_an_mcp_client() {
     let grant = next["grant_id"].as_str().unwrap();
     let (_, g) = d.call(OPERATOR, Method::GET, &format!("/v1/access/tokens/{grant}"), None).await;
     assert!(g["revoked_why"].as_str().is_some_and(|w| w.contains("used again")), "{g}");
+}
+
+/// Step-up (MCP's `insufficient_scope` challenge): an OAuth connection's refused MCP call records
+/// the one rule it needed; its person's consent adds that rule to the same connection (its old
+/// token widens, nothing new is made, nothing else changes). The id is the only thing a client
+/// carries: used once, its person's alone.
+#[tokio::test]
+async fn step_up_widens_the_connection() {
+    let d = Daemon::new(0);
+    d.people.add("usr_bob", "bob");
+    let redirect = "http://127.0.0.1:33418/callback";
+    let (_, client) = d.call("", Method::POST, "/v1/access/oauth/register", Some(json!({ "client_name": "Claude Code", "redirect_uris": [redirect] }))).await;
+    let client_id = client["client_id"].as_str().unwrap();
+    let (verifier, challenge) = ("dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk", "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM");
+    let consent = |extra: Value| {
+        let mut c = json!({ "client_id": client_id, "redirect_uri": redirect, "code_challenge": challenge, "resource": "http://127.0.0.1:7070/v1/mcp", "rules": [{ "product": "postgres", "resources": "*", "actions": { "read": "allow" } }] });
+        c.as_object_mut().unwrap().extend(extra.as_object().cloned().unwrap_or_default());
+        c
+    };
+    let d = &d;
+    let tokens = |out: Value| async move {
+        let url = url::Url::parse(out["redirect"].as_str().unwrap()).unwrap();
+        let code = url.query_pairs().find(|(k, _)| k == "code").unwrap().1.to_string();
+        d.form("/v1/access/oauth/token", &[("grant_type", "authorization_code"), ("code", &code), ("redirect_uri", redirect), ("client_id", client_id), ("code_verifier", verifier), ("resource", "http://127.0.0.1:7070/v1/mcp")]).await.1
+    };
+    let (s, out) = d.call(OPERATOR, Method::POST, "/v1/access/oauth/authorize", Some(consent(json!({ "rate_per_minute": 30 })))).await;
+    assert_eq!(s, StatusCode::OK, "{out}");
+    let first = tokens(out).await;
+    let (old, grant) = (first["access_token"].as_str().unwrap().to_string(), first["grant_id"].as_str().unwrap().to_string());
+
+    // Refused, it carries a step-up: the rule it needed, on that resource.
+    let (s, refused) = d.via_mcp_body(&old, Method::DELETE, "/v1/projects/pa").await;
+    assert_eq!(s, StatusCode::FORBIDDEN, "{refused}");
+    let id = refused["step_up"].as_str().unwrap().to_string();
+    // Never for access's own rules (tokens and approvals): one click wouldn't hand those out.
+    let (s, own) = d.via_mcp_body(&old, Method::DELETE, &format!("/v1/access/tokens/{grant}")).await;
+    assert!(s == StatusCode::FORBIDDEN && own["step_up"].is_null(), "{own}");
+    let (s, view) = d.call(OPERATOR, Method::GET, &format!("/v1/access/oauth/step-ups/{id}"), None).await;
+    assert_eq!(s, StatusCode::OK, "{view}");
+    assert_eq!((view["connection"]["id"].as_str(), &view["rule"]), (Some(grant.as_str()), &json!({ "product": "postgres", "resources": [{ "id": "pa" }], "actions": { "delete": "allow" } })), "{view}");
+    assert_eq!(d.as_user("usr_bob", Method::GET, &format!("/v1/access/oauth/step-ups/{id}"), None).await.0, StatusCode::BAD_REQUEST, "someone else's");
+
+    // Allowed: the same connection, its old token widened, nothing new, its other settings kept.
+    let (s, out) = d.call(OPERATOR, Method::POST, "/v1/access/oauth/authorize", Some(consent(json!({ "step_up": id, "rules": [{ "product": "*", "resources": "*", "actions": { "admin": "allow" } }] })))).await;
+    assert_eq!(s, StatusCode::OK, "{out}");
+    let second = tokens(out).await;
+    assert_eq!(second["grant_id"], grant.as_str(), "the same connection: {second}");
+    assert_ne!(d.via_mcp(&old, Method::DELETE, "/v1/projects/pa").await, StatusCode::FORBIDDEN, "its old token widened too");
+    assert_eq!(d.via_mcp(&old, Method::DELETE, "/v1/projects/pb").await, StatusCode::FORBIDDEN, "only on that resource, whatever the form sent");
+    let (_, g) = d.call(OPERATOR, Method::GET, &format!("/v1/access/tokens/{grant}"), None).await;
+    assert_eq!((g["rules"].as_array().map(Vec::len), g["rate_per_minute"].as_u64()), (Some(2), Some(30)), "{g}");
+    let (_, list) = d.call(OPERATOR, Method::GET, "/v1/access/tokens", None).await;
+    assert_eq!(list.as_array().unwrap().iter().filter(|g| g["kind"] == "oauth").count(), 1, "nothing new made: {list}");
+
+    // Used once; a revoked connection's step-up is no one's.
+    let (s, _) = d.call(OPERATOR, Method::POST, "/v1/access/oauth/authorize", Some(consent(json!({ "step_up": id })))).await;
+    assert_eq!(s, StatusCode::BAD_REQUEST);
+    let (_, again) = d.via_mcp_body(&old, Method::DELETE, "/v1/projects/pb").await;
+    let next = again["step_up"].as_str().unwrap().to_string();
+    d.call(OPERATOR, Method::DELETE, &format!("/v1/access/tokens/{grant}"), None).await;
+    let (s, e) = d.call(OPERATOR, Method::POST, "/v1/access/oauth/authorize", Some(consent(json!({ "step_up": next })))).await;
+    assert_eq!(s, StatusCode::BAD_REQUEST, "{e}");
 }
 
 /// A device signs in with a code (RFC 8628, `roll login` over SSH): it registers without a
