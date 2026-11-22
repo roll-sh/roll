@@ -705,6 +705,7 @@ function PolicyPanel() {
   const [p, setP] = useState<Policy | null>(null);
   const [days, setDays] = useState("");
   const [idle, setIdle] = useState("");
+  const [wait, setWait] = useState("");
   const [error, setError] = useState<string | null>(null);
   useEffect(() => {
     accessApi
@@ -713,6 +714,7 @@ function PolicyPanel() {
         setP(v);
         setDays(v.max_days ? String(v.max_days) : "");
         setIdle(v.max_idle_days ? String(v.max_idle_days) : "");
+        setWait(v.approval_wait_minutes ? String(v.approval_wait_minutes) : "");
       })
       .catch(() => setP(null));
   }, []);
@@ -775,6 +777,19 @@ function PolicyPanel() {
             aria-label="Days unused before a token stops"
           />
           days unused
+        </label>
+        <label className="flex items-center gap-1.5">
+          people have
+          <input
+            value={wait}
+            onChange={(e) => setWait(e.target.value.replace(/\D/g, ""))}
+            onBlur={() => void save({ ...p, approval_wait_minutes: wait ? Number(wait) : null })}
+            placeholder="10"
+            inputMode="numeric"
+            className={`${input} w-16 text-center font-mono text-[12px]`}
+            aria-label="Minutes a request waits for a person"
+          />
+          minutes to decide
         </label>
       </div>
       <ApprovalRules rules={p.approval_rules ?? []} save={(approval_rules) => save({ ...p, approval_rules })} />

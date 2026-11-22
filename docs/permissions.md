@@ -708,7 +708,7 @@ type Approval = {
   tool?: string;         // the MCP tool that made the call
   state: "pending" | "approved" | "denied" | "expired" | "used";
   created_at: number; decided_at: number | null; decided_by: string | null;
-  expires_at: number;    // 10 minutes after created_at
+  expires_at: number;    // pending: created_at + the policy's wait (10 minutes by default); decided: 10 minutes after
 };
 ```
 
@@ -730,7 +730,10 @@ type Approval = {
   API. Only the operator (or an admin) decides, and a person decides their own tokens' requests
   unless the policy asks for someone else ("Two-person approvals"). A grant never approves its own request, not even with `admin` on
   `access`.
-- An approval not decided in 10 minutes expires.
+- An approval not decided in its wait expires: 10 minutes, or what the policy says
+  (`approval_wait_minutes`, 1 to 1,440, as Stripe's confirmations wait a day for agents nobody is
+  watching), or an approval rule covering the request (`wait_minutes`; the shortest of those that
+  cover it). Once approved, it runs within 10 minutes, once.
 - MCP tools hold the call open the same way, with keep-alive events, and return the pending
   approval as a result the agent can wait on (`access_wait_approval`).
 
@@ -1279,7 +1282,7 @@ Under `/v1/access`. Bodies are JSON; errors are `{"error": string, "code"?: stri
 | `PATCH /v1/access/enterprise/apps/{id}` | operator | `{name?, rules?}`: the app as changed; its people's connections take new rules in the same write |
 | `POST /v1/access/enterprise/apps/{id}/rotate` | operator | `{public_jwk?, keep_old_for_s?}`: a new key, or a new `client_secret` answered once; the old secret works that long (at most a week) or stops now with every token its people hold |
 | `DELETE /v1/access/enterprise/apps/{id}` | operator | remove an app, revoking its people's connections: `{revoked}` |
-| `GET /v1/access/policy` | operator | `{max_days, require_expiry, max_idle_days, approve_people, approval_rules, agents_ask, mcp_lockdown, mcp_read_only, oauth_clients}`: roll's rules for every grant, and what needs several approvers ("Two-person approvals") |
+| `GET /v1/access/policy` | operator | `{max_days, require_expiry, max_idle_days, approve_people, approval_rules, agents_ask, mcp_lockdown, mcp_read_only, oauth_clients, approval_wait_minutes}`: roll's rules for every grant, and what needs several approvers ("Two-person approvals") |
 | `PUT /v1/access/policy` | operator | change them; a grant made, rotated, or whose rules, lifetime or addresses change, must fit (consent too) |
 | `GET /v1/access/notify` | operator | where approvals are posted: `{chat: {install, channel, approvers} \| null}` |
 | `PUT /v1/access/notify` | operator | `{chat: {install, channel, approvers} \| null}` |
