@@ -713,9 +713,14 @@ environments and approvals"). Teams add, rename, reorder and delete their own en
   change per environment that had a reference, so nothing breaks.
 - **Name**: what the dashboard shows, 1–48 characters.
 - **Position**: the order of the dashboard's columns and of promotion (dev → staging → prod).
-- **Delete** removes the environment's folders, secrets, versions, requests and leases (leases are
-  revoked first). A protected environment can only be deleted with `?confirm=<slug>`. The last
-  standard environment can't be deleted.
+- **Delete** of a standard environment keeps its folders, secrets, versions, changes and requests
+  for the recovery window, read by nobody, and revokes what it issued at once (see "When a secret,
+  an environment or the project goes"). It takes `?confirm=<slug>` when the environment is
+  protected or anything else reads it (409 `confirm_required`, naming every value that references
+  it and every folder, here or in another project, that imports from it); a protected one whose
+  policy asks for approvals is deleted through a change request. `GET …/environments/{env}/deletion`
+  says all that before anyone asks. An ephemeral environment goes at once. The last standard
+  environment can't be deleted, nor one an ephemeral environment is based on.
 
 ### Ephemeral environments (previews)
 
@@ -1228,15 +1233,39 @@ A link is `{kind, ref, field, mode, options}`:
   the project's key and registries (rotators…) can still reach it. A revocation that fails (the
   product or the customer's endpoint is down) stays as a lease that's already due, and the sweeper
   retries it; a purged project keeps its key and registries until its last lease is revoked, then
-  they go too. Nothing it issued outlives it unrevoked. An environment's delete, unlike a project's,
-  still erases its secrets, versions, changes and requests at once (the thirty-fifth review's item 2:
-  a recovery window and a change request for a protected one are planned); a key's delete makes a
-  tombstone version.
+  they go too. Nothing it issued outlives it unrevoked. A key's delete makes a tombstone version.
+- **Deleting a standard environment** keeps it for the same recovery window as a project
+  (`ROLL_SECRETS_DELETE_WINDOW_DAYS`, 7 days unless set), as Google Secret Manager's delayed
+  destruction and Azure Key Vault's soft delete do:
+  - first the refusal says what breaks: `${staging.X}` in another environment of the project, and
+    folders here or in other projects that import from it (409 `confirm_required` until
+    `?confirm=<slug>`; also asked of every protected environment). Names only, never a value;
+  - a protected environment whose policy asks for approvals (`approvals` ≥ 1) is deleted through a
+    change request with those approvals and every folder policy in it (`"action":
+    "delete_environment"`, answered 202 `{request}`), exactly as deleting one of its folders is;
+    applying it (`delete` there) is the delete, and an admin's `bypass` is audited as any other.
+    With `approvals: 0` (a new project's `production`) the confirmed delete is direct;
+  - then what it issued is revoked (leases, managed credentials, placeholders, and the interception
+    CAs that named their hosts), its one-time shares and secret requests end, and its decoys end.
+    The delete is audited (`environment.delete`: who, and the window's end);
+  - through the window nobody reads it: every route answers 404 for it, it's left out of listings,
+    search, health, insights, syncs and rotations, and a reference to it is a problem that says so
+    ("references staging, which was deleted; recover it or change the reference"). Its slug stays
+    its own until the purge (a new environment of that name is a 409 that says when);
+  - `POST …/environments/{env}/recover` (`admin` there) brings it back: references resolve again,
+    dynamic leases are issued afresh on the next read, and managed links get new credentials at once
+    (`rotated`, `rotation_failed`; audited as `environment.recover`). `GET /v1/secrets/deleted`
+    lists it, with `environment`, for those who may recover it, as does Home's "Recently deleted";
+  - after the window, once nothing it issued waits to be revoked, the sweeper purges every row of it
+    in one write with its audit row (`environment.purge`); then it's a 404. An environment of a
+    deleted project waits for its project.
 - **Deleting the workspace project** (`DELETE /v1/workspace/projects/{id}`) can't destroy secrets
   by accident, as AWS Secrets Manager's and Azure Key Vault's waits can't:
   - while the project holds any value, a protected environment (other than `production` with the
     policy every project starts with: no approvals, no approvers), an encryption key, a certificate
-    authority or a workload identity, roll secrets refuses it
+    authority, a workload identity, a registered resource (a rotator, an outside database, a
+    directory, a Snowflake account, an Atlas project, an AWS user or role, a cloud account, a
+    Kubernetes cluster, a GitHub App, a gateway) or an audit sink, roll secrets refuses it
     (`roll_workspace::Workspace::before_delete`): 403 for anyone who may not `admin` the project's
     secrets (asked of the caller's grant, as every secrets route does; the 403 says nothing about
     what it holds), and 409 `project_holds_secrets`, naming what goes, until a secrets admin
@@ -5202,7 +5231,8 @@ the requester's). Notices aren't signed: an incoming webhook's URL is its own cr
 notice carries nothing a receiver should act on without opening the request in roll.
 **A new project's `production` starts protected with `approvals: 0`.** Protected means developers'
 default, checks, sandboxes and untrusted previews never reach it, and deleting it takes
-`?confirm=production`. With `approvals: 0`, whoever may write there (an owner, an admin, a
+`?confirm=production` (with `approvals` ≥ 1 the delete is a change request too). With
+`approvals: 0`, whoever may write there (an owner, an admin, a
 developer who names it, a token) still writes directly, so a project with one owner never waits on
 a request for its own changes; `PUT …/policy {"protected": true, "approvals": 1}` turns on the
 two-person rule. `approvals` is 0–10; `{"protected": true}` without it means 1. Before #688 a
@@ -5489,7 +5519,9 @@ isn't in the workspace is 404.
 | `GET /environments/{env}` | | `Environment` |
 | `PUT /environments/{env}` | `Ensure` | 201 or 200 `{environment, created, change}` (409 `mismatch`; `branches` on a standard environment is a 400, an addition by anyone but roll previews or the operator a 403) |
 | `PATCH /environments/{env}` | `{slug?, name?, expires_at?, max_age_days?}` | `Environment` |
-| `DELETE /environments/{env}?confirm=` | | 204 |
+| `DELETE /environments/{env}?confirm=` | | 204 for an ephemeral one; 200 `{environment, deleted_at, purge_at}` for a standard one, kept for the window; 202 `{request}` when its policy asks for approvals (409 `confirm_required`, naming what breaks, until `confirm` repeats the slug of a protected or referenced one) |
+| `GET /environments/{env}/deletion` | | `{environment, secrets, window_days, confirm, needs_request, approvals, breaks: {project?, environment, path, key?, via: "reference" \| "import"}[]}` (`delete`) |
+| `POST /environments/{env}/recover` | | `{project, environment, recovered_at, rotated, rotation_failed: string[]}`: a deleted environment back within its window (`admin`; audited as `environment.recover`) |
 | `PUT /environments/{env}/policy` | `{protected, approvals?, approvers?, notify_url?}` | `Environment` |
 | `GET /environments/{env}/folder-policies` | | `FolderPolicy[]` |
 | `PUT /environments/{env}/folder-policies?path=` | `{approvals?, approvers?}` | `FolderPolicy` (`admin`) |
@@ -5683,7 +5715,7 @@ isn't in the workspace is 404.
 | `GET /transit/{name}/public` | | `TransitPublicKey[]`: `{version, public_key (base64), pem, jwk}` for every version (`read`) |
 | `GET /v1/secrets/whoami` | | `{principal, project?, scopes?}` |
 | `GET /v1/secrets/search?key=` | | `Place[]`: every project, environment and folder holding `key` (`PREFIX*` for a prefix) that the caller may read; never values |
-| `GET /v1/secrets/deleted` | | `DeletedProject[]`: `{project, name, deleted_at, deleted_by, purge_at}` for each deleted project in its recovery window that the caller may recover, soonest purged first |
+| `GET /v1/secrets/deleted` | | `DeletedProject[]`: `{project, name, environment?, deleted_at, deleted_by, purge_at}` for each deleted project, and each deleted environment (`environment`) of a project that isn't, in its recovery window that the caller may recover, soonest purged first |
 | `POST /recover` | | `{project, name, recovered_at, rotated, rotation_failed: string[]}`: a deleted project back, with its workspace project and canvas (`admin`, or the person whose project it was; audited as `project.recover`) |
 
 - 400: a bad slug, path, key, value, body or query.
@@ -5693,7 +5725,8 @@ isn't in the workspace is 404.
 - 404: no such project, environment, folder, secret, version, change, request, lease or token.
 - 410: a secret request answered as often as it allowed, expired or cancelled, or a deleted
   project past its recovery window (`gone`).
-- 409: a slug that is taken (`conflict`), a write to a protected environment
+- 409: a slug that is taken (`conflict`; a deleted environment's too, until its purge), an
+  environment's delete that needs `?confirm=` (`confirm_required`), a write to a protected environment
   (`approval_required`), a request that is `stale`, the last standard environment, a recovered
   project's name taken meanwhile (`name_taken`), and, on the workspace's
   `DELETE /v1/workspace/projects/{id}`, a project that holds secrets without `?confirm=`
@@ -6066,8 +6099,10 @@ New since the ranking:
   - item 4, offboarding (`fix/secrets-offboarding`);
   - the stampede measurement (`perf/secrets-change-stampede`);
   - members v1.1 phase 1, groups and SCIM Groups (`feature/members-groups`, option (a)).
+- **Item 2 is on its PR** (`fix/secrets-env-delete-window`): a standard environment's delete is kept
+  for the window and recoverable, a protected one's with approvals is a change request, the 409
+  names what breaks, and `Held` counts registries and sinks.
 - **Next to start, as build slots and disk allow (the server is at 88%):**
-  - item 2, a recoverable environment delete and a protected one's delete as a change request;
   - item 3, reach naming people, clients, services and sandboxes.
 
 **Ranked, 2026-11-22 06:20** (the thirty-fifth product review, cold, on main 6575a213a, against

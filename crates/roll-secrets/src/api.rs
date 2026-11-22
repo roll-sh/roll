@@ -43,6 +43,9 @@ pub fn router(s: Arc<Secrets>) -> Router {
         .route(&format!("{P}/environments"), get(environments).post(create_environment).delete(delete_by_label))
         .route(&format!("{P}/environments/order"), put(order))
         .route(E, get(environment).put(ensure_environment).patch(update_environment).delete(delete_environment))
+        // A deleted environment's window (deleted_envs.rs): what a delete would do, and recovery.
+        .route(&format!("{E}/deletion"), get(env_deletion))
+        .route(&format!("{E}/recover"), post(recover_environment))
         .route(&format!("{E}/policy"), put(policy))
         .route(&format!("{E}/folder-policies"), get(folder_policies).put(set_folder_policy).delete(delete_folder_policy))
         .route(&format!("{E}/folders"), get(folders).post(create_folder).delete(delete_folder))
@@ -431,9 +434,23 @@ async fn update_environment(State(s): S, Who(c): Who, Path((project, env)): Path
     Ok(ok(blocking(s, move |s| s.update_environment(&project, &env, ch, &c)).await?))
 }
 
-async fn delete_environment(State(s): S, Who(c): Who, Path((project, env)): Path<(String, String)>, Query(q): Q) -> crate::Result<StatusCode> {
-    blocking(s, move |s| s.delete_environment(&project, &env, q.get("confirm").map(String::as_str), &c)).await?;
-    Ok(StatusCode::NO_CONTENT)
+/// 204 for an ephemeral environment (gone), 200 `{environment, deleted_at, purge_at}` for a
+/// standard one (kept for the window), 202 `{request}` where its policy asks for approvals.
+async fn delete_environment(State(s): S, Who(c): Who, Path((project, env)): Path<(String, String)>, Query(q): Q) -> crate::Result<Response> {
+    use crate::deleted_envs::Deletion;
+    Ok(match blocking(s, move |s| s.delete_environment(&project, &env, q.get("confirm").map(String::as_str), &c)).await? {
+        Deletion::Erased => StatusCode::NO_CONTENT.into_response(),
+        Deletion::Kept { environment, deleted_at, purge_at } => ok(json!({ "environment": environment, "deleted_at": deleted_at, "purge_at": purge_at })),
+        Deletion::Requested(r) => (StatusCode::ACCEPTED, Json(json!({ "request": r }))).into_response(),
+    })
+}
+
+async fn env_deletion(State(s): S, Who(c): Who, Path((project, env)): Path<(String, String)>) -> crate::Result<Response> {
+    Ok(ok(blocking(s, move |s| s.env_deletion(&project, &env, &c)).await?))
+}
+
+async fn recover_environment(State(s): S, Who(c): Who, Path((project, env)): Path<(String, String)>) -> crate::Result<Response> {
+    Ok(ok(blocking(s, move |s| s.recover_environment(&project, &env, &c)).await?))
 }
 
 async fn folder_policies(State(s): S, Who(c): Who, Path((project, env)): Path<(String, String)>) -> crate::Result<Response> {
