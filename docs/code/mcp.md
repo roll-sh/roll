@@ -116,6 +116,10 @@ Agent tokens may use them to orchestrate agents, within what an agent's commands
 
 ### Results
 
+- Each tool says whether it only reads (`readOnlyHint`), can't be undone (`destructiveHint`:
+  `close_change`, `stop_preview`), reaches outside roll (`openWorldHint`: a model provider or a
+  branch's remote) and is safe to retry (`idempotentHint`: reads, and tools whose every route is a
+  `PUT` or `DELETE`, from `ROUTES`).
 - Results come back twice: as `structuredContent`, which is the API's JSON (arrays are wrapped as
   `{items: […]}`), and as a `text` content block. `read_file`'s text block is the file content itself.
 - **`land` outcomes are results, not errors.** `status` is one of:
