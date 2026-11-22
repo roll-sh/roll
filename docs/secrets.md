@@ -1212,11 +1212,59 @@ A link is `{kind, ref, field, mode, options}`:
 - **When a secret, an environment or the project goes**, what it issued is revoked first, while
   the project's key and registries (rotators…) can still reach it. A revocation that fails (the
   product or the customer's endpoint is down) stays as a lease that's already due, and the sweeper
-  retries it; a deleted project keeps its key and registries (`projects.forgotten_at`) until its
-  last lease is revoked, then they go too. Nothing it issued outlives it unrevoked. Deleting the
-  workspace project erases its secrets, their versions, its encryption keys and its audit chain at
-  once, with no recovery window and no closing digest. A recovery window and a signed closing digest
-  are planned (the thirty-fourth review's item 2).
+  retries it; a purged project keeps its key and registries until its last lease is revoked, then
+  they go too. Nothing it issued outlives it unrevoked.
+- **Deleting the workspace project** (`DELETE /v1/workspace/projects/{id}`) can't destroy secrets
+  by accident, as AWS Secrets Manager's and Azure Key Vault's waits can't:
+  - while the project holds any value, a protected environment, an encryption key, a certificate
+    authority or a workload identity, roll secrets refuses it
+    (`roll_workspace::Workspace::before_delete`): 403 for anyone who may not `admin` the project's
+    secrets (asked of the caller's grant, as every secrets route does; the 403 says nothing about
+    what it holds), and 409 `project_holds_secrets`, naming what goes, until a secrets admin
+    repeats the project's name or id in `?confirm=`. Workspace `delete` alone is never enough. The
+    project's overview says what would go and for how long (`deletion`); the dashboard's dialog
+    says exactly that and passes the name typed into it;
+  - then what it issued is revoked: leases and managed credentials, its decoys, its workload
+    identities' tokens (roll-access's grants, so an old one doesn't work after a recovery either),
+    its placeholders, and the interception CAs of consumers that held a placeholder of it that name
+    its hosts (`end_unbound_intercept_cas`; they get a new one, without its hosts, from
+    `…/intercept-ca`). Its one-time shares and secret
+    requests end, its gateways' links close and open nothing more, and its CAs answer ACME with
+    `unauthorized` (their CRLs are still served). The rest is kept for a recovery window
+    (`ROLL_SECRETS_DELETE_WINDOW_DAYS`, 1–90 days, 7 unless set). The delete is audited in the
+    project's log (`project.delete`: who, and the window's end). Through the window nobody reads
+    it: every route answers as for an unknown project, resolves and placeholders stop with them,
+    and syncs, rotations, reminders and backups wait. Its audit sinks keep delivering;
+  - its members are kept apart with it (docs/members.md), so a member's session and their tokens
+    reach nothing while it's deleted, and its invites end. What members made follows the same
+    rules as everything else: one-time shares end at the delete, syncs and the rest wait, and it
+    all acts for them again only once a recovery brings their membership back;
+  - `POST /v1/secrets/projects/{project}/recover` brings it back within the window (the operator,
+    an admin of its secrets by their grant as it is now, or the person whose namespace it is while
+    they were still one of its owners when it was deleted, so an owner can undo an admin's delete
+    of their project; membership kept from the delete never lets anyone else in;
+    `GET /v1/secrets/deleted` lists what the caller may recover, as do
+    the dashboard's Home, "Recently deleted", and `roll secrets recover [project]`). The workspace
+    keeps a deleted project, its canvas and members apart for this (`deleted_projects`, at most
+    91 days), and recovering brings them back.
+    Recovering claims the project on the secrets side first (one write: a close on another node
+    then finds nothing to close), then puts the workspace project back: 409 `name_taken` if its
+    owner has made another project of that name since, and the claim is undone. Dynamic leases
+    are issued afresh on the next read; managed links get new credentials at once (`rotated`,
+    `rotation_failed`). The recovery is audited (`project.recover`);
+  - after the window the sweeper closes the log, in one write that is its claim: a last row
+    (`project.purge`) and a signed digest right after it, so the chain ends at a digest the way
+    retention cuts it. Nothing is written after it (`audit` refuses a closed log). A head that
+    isn't roll's isn't signed, so such a project isn't closed or purged: it's logged for the
+    operator and asked again hourly. A project whose workspace project is back (a recovery that
+    stopped halfway) is recovered instead. Once every audit sink has taken both rows, every row
+    goes, then the project's data key and registries (its gateways too, their tokens revoked) once
+    nothing it issued waits. Through the window a sink keeps delivering, the closing digest too,
+    while whoever set it up managed the project when it was deleted (the only use of the kept
+    membership besides bringing it back). **A sink still behind after the grace
+    (`ROLL_SECRETS_PURGE_SINK_GRACE_HOURS`, 24 unless set) loses the rows it hadn't taken, the
+    closing digest with them**; the purge logs a warning per sink with how many. After the closing
+    digest it can't be recovered (410 `gone`).
 
 **Suggested links.** `GET …/suggestions` lists each resource on the project's canvas with the
 standard environments that neither link it nor have its usual keys at `/`, and those keys: the
@@ -5281,7 +5329,7 @@ isn't in the workspace is 404.
 | --- | --- | --- |
 | `GET /v1/secrets/health` | | `{ok, key: "env"\|"kms"\|"file"\|"shares"\|"missing", resealed: "all"\|number\|null, customer_managed, issuer_pulled: {kid, pulled_at, detail}[], links: string[], syncs: string[]}` (`links`, `syncs`: the kinds registered; `issuer_pulled`: issuer keys an emergency rotation pulled in the last 30 days) |
 | `GET`, `POST /v1/secrets/unseal` | `{share}` (`POST`) | `{sealed, have?, need?, error?}`: a sealed node's progress (public; see "Starting sealed"); 429 with `Retry-After` past the limits |
-| `GET` | | `{project, environments: Environment[], previews: number, history_days: number \| null, validity_checks: "on" \| "off"}` |
+| `GET` | | `{project, environments: Environment[], previews: number, history_days: number \| null, validity_checks: "on" \| "off", deletion: {window_days, holds: string \| null}}` (`deletion`: what deleting the workspace project takes with it, as its refusal says it, and how many days it stays recoverable) |
 | `PATCH` | `{history_days?, validity_checks?: "on" \| "off"}` | what changed, as given (`admin`; validity checks audited as `validity.checks`) |
 | `GET /grid?path=` | | `Grid` |
 | `GET /environments` | | `Environment[]` in order |
@@ -5485,15 +5533,21 @@ isn't in the workspace is 404.
 | `GET /transit/{name}/public` | | `TransitPublicKey[]`: `{version, public_key (base64), pem, jwk}` for every version (`read`) |
 | `GET /v1/secrets/whoami` | | `{principal, project?, scopes?}` |
 | `GET /v1/secrets/search?key=` | | `Place[]`: every project, environment and folder holding `key` (`PREFIX*` for a prefix) that the caller may read; never values |
+| `GET /v1/secrets/deleted` | | `DeletedProject[]`: `{project, name, deleted_at, deleted_by, purge_at}` for each deleted project in its recovery window that the caller may recover, soonest purged first |
+| `POST /recover` | | `{project, name, recovered_at, rotated, rotation_failed: string[]}`: a deleted project back, with its workspace project and canvas (`admin`, or the person whose project it was; audited as `project.recover`) |
 
 - 400: a bad slug, path, key, value, body or query.
 - 401: no credential, or a token that doesn't exist, is revoked or expired.
 - 403: the caller may not do this (`{"code": "forbidden"}`), or whoever set up placeholders or
   chose a reference can no longer reveal there or sign in (`maker_unreachable`).
 - 404: no such project, environment, folder, secret, version, change, request, lease or token.
-- 410: a secret request answered as often as it allowed, expired or cancelled (`gone`).
+- 410: a secret request answered as often as it allowed, expired or cancelled, or a deleted
+  project past its recovery window (`gone`).
 - 409: a slug that is taken (`conflict`), a write to a protected environment
-  (`approval_required`), a request that is `stale`, the last standard environment.
+  (`approval_required`), a request that is `stale`, the last standard environment, a recovered
+  project's name taken meanwhile (`name_taken`), and, on the workspace's
+  `DELETE /v1/workspace/projects/{id}`, a project that holds secrets without `?confirm=`
+  (`project_holds_secrets`).
 - 503: no deployment key on a node that shares the system database (`no_key`).
 
 ### Shapes
@@ -6043,7 +6097,7 @@ and webhooks' and review apps' signing secrets sealed. Still open:
   as soon as its bound hosts shrink (a placeholder revoked, hosts cleared, a cut-off), not only with
   the consumer, and a decoy planted from an admin's session mails that person, not the operator;
 - the thirty-fourth product review (ranked below): items 1 and 3 are being fixed together in
-  `fix/secrets-reveal-as-asker`;
+  `fix/secrets-reveal-as-asker`, and item 2 in `fix/secrets-project-delete-window`;
 - the #432 decoy-oracle fix: computes pinned by digest, and each image's pre-auth answers learned from a
   compute of that image (about 2 s per image, never waking a suspended endpoint). Its full gate is
   running.
@@ -6095,7 +6149,7 @@ found them sound. What's left is at the edges:
    - the fix: answer as the asker (any `from_secrets` key that doesn't resolve for them is a 403), and
      a bound `roll://` variable needs reveal on its own folder.
 2. **Deleting a workspace project erases its secrets, history, encryption keys and audit at once**
-   (security and data loss, M):
+   (security and data loss, M; fixing in `fix/secrets-project-delete-window`):
    - workspace `delete` is enough: `on_delete` → `forget_project` deletes everything in one write;
    - no protected-environment confirm, no transit-key name, no recovery window, nothing audited;
    - the dashboard says "only the project and its canvas go";

@@ -360,6 +360,15 @@ roll implements the MCP authorization spec (2025-06-18 and 2025-11-25) with OAut
   roll's private-address guard (`roll-net`), without redirects, in 5 seconds, at most 64 KiB, and
   at most once an hour; it must name itself, list valid redirect URIs, and be a public client.
 
+**A person's own connection.** A token or OAuth client of a person who isn't an admin reaches
+what their account does (`roll_access::USER_REACH`, held to rolld's gate by its `auth::tests`):
+roll code and agents through their own owners, and the projects they're members of, with those
+projects' secrets and previews as their role allows (docs/members.md). `tools/list` shows only
+those products' tools, and on one resource of a member product only what their role allows too,
+as the gate decides each call (`within` their session): a viewer's client lists secrets' reads,
+not its reveals or writes, whatever the token names. A list or a create goes on the token's rules
+alone, as at the gate.
+
 ## Protocol
 
 - Streamable HTTP, JSON-RPC 2.0, protocol versions `2026-07-28`, `2025-11-25`, `2025-06-18`,
@@ -621,7 +630,7 @@ previews are listed once those products are on.
 | `workspace_get_project` | A workspace project and its resources. | `GET /v1/workspace/projects/{id}` |
 | `workspace_create_project` | A new workspace project to group resources. | `POST /v1/workspace/projects` |
 | `workspace_update_project` | Rename a project, or change its description or icon (a monogram, an emoji or a small image, with a colour; `clear: ["icon"]` goes back to the default). | `PATCH /v1/workspace/projects/{id}` |
-| `workspace_delete_project` | Delete a workspace project. Its resources stay; only the grouping goes. | `DELETE /v1/workspace/projects/{id}` |
+| `workspace_delete_project` | Delete a workspace project. Its resources stay. A project that holds secrets needs a secrets admin's confirmation in the dashboard. | `DELETE /v1/workspace/projects/{id}` |
 | `workspace_list_roles` | The roles a project member can have, the rules each grants, the products they cover, and the environments a developer reaches when none are named. | `GET /v1/workspace/roles` |
 | `workspace_place_resource` | Put a resource on a project's canvas (or move it), at x, y. | `PUT /v1/workspace/projects/{id}/resources/{kind}/{ref}` |
 | `workspace_remove_resource` | Take a resource off a project's canvas (the resource itself stays). | `DELETE /v1/workspace/projects/{id}/resources/{kind}/{ref}` |
@@ -1090,14 +1099,19 @@ previews are listed once those products are on.
 Ranked; the top item is in progress. A watchdog reads this list. Unblocked work comes first; what
 waits on a sibling PR reaching main is last.
 
-1. **An outsider's reply never becomes a reviewer learning (this PR).** Found while mapping
-   learnings to a tool (#635's review): resolving roll's finding recorded the latest reply as a
-   learning, whoever wrote it, so on a public repo a reader (or a GitHub commenter who can't push)
-   could put words into what roll's reviewer keeps in mind for every later review, and roll's
-   approval can count toward landing. The reason now comes only from a reply that isn't `outside`
-   (`reviewer.rs::outsiders_replies_never_become_learnings`). Learnings made before this can still
-   hold such words, so reading them stays `no tool yet`; a person deletes one with `DELETE
-   …/learnings/{id}`.
+1. **A member's MCP client reaches what their role does (this PR).** Project members (#501) and
+   previews on members (#524) landed, but a person's own token (an OAuth client they connect)
+   still had the pre-members reach: `roll_access::USER_REACH` left out previews, so a member's
+   client never listed the previews tools their role allows, and the token builder never offered
+   previews. And `tools/list` asked only the token's rules, so a viewer with a broad token was
+   shown every secrets reveal and write the gate then refused by their role. Now `USER_REACH`
+   holds previews, and rolld's `auth::tests::a_persons_reach_is_what_the_gate_serves_people`
+   holds it to the gate's rules for people (so apps, the next member product, can't be left out);
+   on one resource of a member product, a tool is listed only when the person's role allows it too
+   (`Tool::within_session`, the gate's own rule: a list or create goes on the token alone). The
+   gate's 403 texts named the old reach too. Test:
+   `a_members_client_lists_what_their_role_allows` (a viewer reads, an admin also writes and
+   reveals).
 2. **Decision for the user: a sandboxed "code mode"** (Cloudflare's Code Mode, Anthropic's code
    execution with MCP). A model writes a short script against typed tool functions; roll runs it
    and each call still goes through the gate and the audit log as if made one by one. It cuts
@@ -1134,7 +1148,10 @@ waits on a sibling PR reaching main is last.
    Not doing: "remember this browser"; a preset that reveals development's values without asking
    (#354); a connection-level `?project=` (only a token's rules bound a project; a default that
    some tools can't honour would look like a boundary).
-6. **Landed 2026-11-21:** `hand_to_agent`, a problem handed to a coding agent and its change brought
+6. **Landed 2026-11-21:** an outsider's reply never becomes a reviewer learning (#639: on a public repo
+   a reader's reply to roll's finding became what roll's reviewer kept in mind for every later
+   review once a writer resolved it; the test fails without the fix); roll code's tools say
+   whether a retry is safe (`idempotentHint`, #642); `hand_to_agent`, a problem handed to a coding agent and its change brought
    back for review, workflows that may need roll code's tools (`prompts::FRONTED`, held by rolld's
    tests), and `list_agent_threads` answering each machine's projects (#637); roll code's second batch of routes with no tool (#635: AI review jobs,
    prices and spend; a repo's reviewer, review rules and audit log; previews made and removed,
