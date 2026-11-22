@@ -1957,8 +1957,15 @@ impl Pipeline {
     /// Runs the stages over a page of rows, which is charged while they work on it (as
     /// Elasticsearch's blocks are) and given back with the rows: whoever keeps them charges them.
     fn run(&self, rows: Vec<Vec<V>>, w: &mut Warnings) -> EsResult<Vec<Vec<V>>> {
+        Ok(self.run_charged(rows, w)?.0)
+    }
+
+    /// [`Pipeline::run`], handing back the page's charge with the rows: a caller that keeps
+    /// them takes the charge over instead of measuring them again.
+    fn run_charged(&self, rows: Vec<Vec<V>>, w: &mut Warnings) -> EsResult<(Vec<Vec<V>>, memory::Held)> {
         let mut page = self.mem.hold(memory::rows_bytes(&rows), memory::LOAD_BLOCKS)?;
-        self.run_on(rows, w, &mut page)
+        let rows = self.run_on(rows, w, &mut page)?;
+        Ok((rows, page))
     }
 
     /// Runs the stages over rows `held` already charges: what they build is charged as it is
@@ -4700,10 +4707,10 @@ async fn execute_plain(cluster: &Cluster, q: Query, filter: Option<Value>, w: &m
                     let mut rows_out: Vec<Vec<V>> = Vec::new();
                     let mut held = Growth::new(&src.mem)?;
                     scan(cluster, &source, query, only_scan_bound.then_some(n), &mut stats, |rows| {
-                        let mut rows = pipe.run(rows, w)?;
+                        let (mut rows, page) = pipe.run_charged(rows, w)?;
                         rows.truncate(n - rows_out.len());
                         rows_out.extend(rows);
-                        held.track(&rows_out)?;
+                        held.take_page(page, rows_out.len());
                         Ok(rows_out.len() < n)
                     })
                     .await?;
@@ -4719,7 +4726,7 @@ async fn execute_plain(cluster: &Cluster, q: Query, filter: Option<Value>, w: &m
                     let cap = part.as_ref().and_then(|p| p.max_bytes);
                     let mut bytes = 0u64;
                     scan(cluster, &source, query, None, &mut stats, |rows| {
-                        let rows = pipe.run(rows, w)?;
+                        let (rows, page) = pipe.run_charged(rows, w)?;
                         if let Some(cap) = cap {
                             bytes = rows.iter().fold(bytes, |b, r| b.saturating_add(super::ccs::row_bytes(r)));
                             if bytes > cap {
@@ -4727,7 +4734,7 @@ async fn execute_plain(cluster: &Cluster, q: Query, filter: Option<Value>, w: &m
                             }
                         }
                         rows_out.extend(rows);
-                        held.track(&rows_out)?;
+                        held.take_page(page, rows_out.len());
                         Ok(true)
                     })
                     .await?;

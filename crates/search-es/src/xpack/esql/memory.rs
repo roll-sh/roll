@@ -217,6 +217,13 @@ impl Growth {
         Ok(())
     }
 
+    /// Takes over a page's charge for rows now kept (`len` of them in all), so they aren't
+    /// measured again.
+    pub fn take_page(&mut self, mut page: Held, len: usize) {
+        self.tally.held.bytes += std::mem::take(&mut page.bytes);
+        self.counted = len;
+    }
+
     /// Leaves what the rows hold on the account until the query ends.
     pub fn keep(self) -> EsResult<()> {
         self.tally.keep()
@@ -229,14 +236,20 @@ impl Growth {
     }
 }
 
-/// What a value holds outside the row's slot for it.
+/// What a value holds outside the row's slot for it (inlined where rows are measured; only a
+/// multi-value goes out of line).
 #[inline]
 pub fn value_heap(v: &V) -> usize {
     match v {
         V::Str(s) | V::Ip(s) => s.capacity(),
-        V::Multi(vs) => vs.capacity() * size_of::<V>() + vs.iter().map(value_heap).sum::<usize>(),
+        V::Multi(vs) => multi_heap(vs),
         _ => 0,
     }
+}
+
+#[inline(never)]
+fn multi_heap(vs: &Vec<V>) -> usize {
+    vs.capacity() * size_of::<V>() + vs.iter().map(value_heap).sum::<usize>()
 }
 
 /// What a row holds: its vector and its values.
