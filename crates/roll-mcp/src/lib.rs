@@ -181,6 +181,7 @@ async fn seen_by(State(m): State<Mcp>, axum::extract::Path(id): axum::extract::P
         readonly: false,
         search: false,
         lockdown: false,
+        pick: Default::default(),
         tasks: false,
         ui: false,
         client: None,
@@ -213,7 +214,7 @@ async fn toolset_costs(State(m): State<Mcp>, ext: Extensions) -> Response {
     if !caller {
         return unauthorized(&m.config);
     }
-    let ctx = Ctx { m, headers: HeaderMap::new(), principal: Principal::Operator, ip: None, session: None, url_elicitation: false, form_elicitation: false, modern: false, toolsets: None, readonly: false, search: false, lockdown: false, tasks: false, ui: false, client: None, as_user: false, names: Default::default() };
+    let ctx = Ctx { m, headers: HeaderMap::new(), principal: Principal::Operator, ip: None, session: None, url_elicitation: false, form_elicitation: false, modern: false, toolsets: None, readonly: false, search: false, lockdown: false, pick: Default::default(), tasks: false, ui: false, client: None, as_user: false, names: Default::default() };
     let mut by: std::collections::BTreeMap<String, (usize, usize, usize)> = Default::default();
     for t in ctx.tools() {
         let e = by.entry(t["_meta"]["roll/product"].as_str().unwrap_or("code").to_string()).or_default();
@@ -282,7 +283,12 @@ enum Principal {
 }
 
 fn unauthorized(c: &Config) -> Response {
-    let mut r = http_error(StatusCode::UNAUTHORIZED, "this MCP server needs a token: connect with OAuth, or send Authorization: Bearer rlt_…");
+    unauthorized_because(c, "this MCP server needs a token: connect with OAuth, or send Authorization: Bearer rlt_…")
+}
+
+/// A 401 with OAuth's discovery challenge (the protected resource's metadata), saying `why`.
+fn unauthorized_because(c: &Config, why: &str) -> Response {
+    let mut r = http_error(StatusCode::UNAUTHORIZED, why);
     let meta = format!("Bearer resource_metadata=\"{}/.well-known/oauth-protected-resource/v1/mcp\"", c.api_url.trim_end_matches('/'));
     if let Ok(v) = HeaderValue::from_str(&meta) {
         r.headers_mut().insert(header::WWW_AUTHENTICATE, v);
@@ -359,15 +365,30 @@ async fn handle(State(m): State<Mcp>, uri: axum::http::Uri, ext: Extensions, hea
         Ok(l) => l,
         Err(e) => return http_error(StatusCode::BAD_REQUEST, &e),
     };
-    let search = match search::asked(&uri, &headers) {
+    let (search, pick) = match search::asked(&uri, &headers) {
         Ok(s) => s,
         Err(e) => return http_error(StatusCode::BAD_REQUEST, &e),
     };
+    if pick.picks() {
+        let mut known: Vec<String> = tools::all().iter().map(|t| t.name.to_string()).collect();
+        known.extend(m.sets.iter().flat_map(|s| s.tools()).filter_map(|t| t["name"].as_str().map(str::to_string)));
+        let unknown = pick.unknown(&known);
+        if !unknown.is_empty() {
+            return http_error(StatusCode::BAD_REQUEST, &format!("no tool named {}: tools/list says which there are", unknown.join(", ")));
+        }
+    }
     let principal = match roll_auth::Grant::on(&ext) {
         Some(g) => Principal::Grant(g.clone()),
         None if roll_auth::Operator::on(&ext) || !m.config.locked => Principal::Operator,
         None => return unauthorized(&m.config),
     };
+    // The operator's policy can take agents only with scoped credentials (roll-access's
+    // `mcp_require_grant`, as Stripe's MCP server refuses full-access keys): the admin token, an
+    // admin's session and an open daemon get OAuth's challenge, so a client connects as a grant
+    // every agent control applies to.
+    if matches!(principal, Principal::Operator) && m.config.access.as_ref().is_some_and(|a| a.policy_now().mcp_require_grant) {
+        return unauthorized_because(&m.config, "roll's policy takes agents only with a token made for them or an OAuth connection, never the admin token: connect with OAuth");
+    }
     // The operator's policy can hold every token's and OAuth connection's MCP to lockdown or to
     // reading, whatever the client's URL asks (roll-access's `mcp_lockdown`, `mcp_read_only`).
     let (lockdown, readonly) = match (&principal, &m.config.access) {
@@ -446,12 +467,16 @@ async fn handle(State(m): State<Mcp>, uri: axum::http::Uri, ext: Extensions, hea
         .map(Arc::from);
     let form_elicitation = modern && modern::form_elicitation(&messages[0]);
     let session = roll_auth::SessionGrant::on(&ext).cloned();
-    let ctx = Arc::new(Ctx { m, headers, principal, ip, as_user, session, url_elicitation, form_elicitation, modern, toolsets, readonly, search, lockdown, tasks, ui, client, names: Default::default() });
+    let ctx = Arc::new(Ctx { m, headers, principal, ip, as_user, session, url_elicitation, form_elicitation, modern, toolsets, readonly, search, lockdown, pick, tasks, ui, client, names: Default::default() });
     // A call that asked for progress, from a client that takes a stream: answered as one, with
     // progress until the answer (MCP's `notifications/progress`).
     // 2026-07-28's long-lived channel for list changes (SEP-2575): an open stream of its own.
     if ctx.modern && !batch && messages.len() == 1 && messages[0]["method"] == "subscriptions/listen" {
         return listen(ctx, &messages[0]).await;
+    }
+    // MCP Events' push mode: one subscription's stream of its own (SEP-3415).
+    if ctx.modern && !batch && messages.len() == 1 && messages[0]["method"] == "events/stream" {
+        return events::stream(ctx, &messages[0]).await;
     }
     let progress = accepts_sse(&ctx.headers).then(|| messages.iter().find(|m| m["method"] == "tools/call").and_then(|m| m["params"]["_meta"].get("progressToken").cloned())).flatten();
     let mut resp = if progress.is_some() {
@@ -608,6 +633,8 @@ struct Ctx {
     search: bool,
     /// Text written by people who can't push to the repo is withheld from results (`?lockdown=1`).
     lockdown: bool,
+    /// The tools it picks or drops by name (`?tools=a,b`, `?exclude_tools=`).
+    pick: search::Pick,
     /// The request declares 2026-07-28's tasks extension: a long call may answer with a task.
     tasks: bool,
     /// The host renders MCP Apps (`ui`): tools that show rows point at roll's table view.
@@ -636,6 +663,7 @@ impl Ctx {
             readonly: self.readonly,
             search: self.search,
             lockdown: self.lockdown,
+            pick: self.pick.clone(),
             tasks: self.tasks,
             ui: self.ui,
             client: self.client.clone(),
@@ -692,7 +720,7 @@ impl Ctx {
     }
 
     fn usable(&self, t: &tools::Tool) -> bool {
-        if !self.asked_area(t.product, t.area()) {
+        if !self.pick.keeps(t.name) || !self.asked_area(t.product, t.area()) {
             return false;
         }
         // One any token may call is still its product's: listed only where the product runs.
@@ -719,7 +747,7 @@ impl Ctx {
                 let product = t["_meta"]["roll/product"].as_str().unwrap_or("code").to_string();
                 let read_only = t["annotations"]["readOnlyHint"].as_bool() == Some(true);
                 let actions: &[Action] = if read_only { &[Action::Read] } else { &[Action::Write, Action::Deploy, Action::Admin] };
-                if self.may(&product, actions) {
+                if self.may(&product, actions) && t["name"].as_str().is_some_and(|n| self.pick.keeps(n)) {
                     out.push(std::borrow::Cow::Owned(t));
                 }
             }
@@ -766,6 +794,13 @@ async fn process(ctx: &Arc<Ctx>, messages: Vec<Value>) -> Vec<Value> {
             }
             "ping" => rpc_result(id, json!({})),
             "events/list" if ctx.modern => rpc_result(id, events::list(ctx)),
+            "events/subscribe" | "events/unsubscribe" if ctx.modern => {
+                let r = if method == "events/subscribe" { events::subscribe(ctx, &params).await } else { events::unsubscribe(ctx, &params).await };
+                match r {
+                    Ok(r) => rpc_result(id, r),
+                    Err((code, message, data)) => json!({ "jsonrpc": "2.0", "id": id, "error": { "code": code, "message": message, "data": data } }),
+                }
+            }
             "events/poll" if ctx.modern => match events::poll(ctx, &params).await {
                 Ok(r) => rpc_result(id, r),
                 Err((code, message, data)) => json!({ "jsonrpc": "2.0", "id": id, "error": { "code": code, "message": message, "data": data } }),
@@ -802,6 +837,8 @@ async fn process(ctx: &Arc<Ctx>, messages: Vec<Value>) -> Vec<Value> {
                     rpc_error(id, -32602, "arguments must be an object")
                 } else if ctx.readonly && !tool_names(ctx).contains(&name) {
                     rpc_result(id, json!({ "content": [{ "type": "text", "text": format!("{name} isn't read-only, and this connection is (?readonly=1): connect without it to change things") }], "isError": true }))
+                } else if ctx.pick.picks() && !ctx.pick.keeps(&name) {
+                    rpc_result(id, json!({ "content": [{ "type": "text", "text": format!("{name} isn't on this connection (it picks its tools with tools= or drops some with exclude_tools=): connect with it listed") }], "isError": true }))
                 } else if let Some(r) = ask_for_missing(ctx, &name, &mut args, &params).await {
                     rpc_result(id, r)
                 } else {
@@ -977,10 +1014,12 @@ struct ListenSlot(String);
 static LISTENS: std::sync::LazyLock<std::sync::Mutex<std::collections::HashMap<String, usize>>> = std::sync::LazyLock::new(Default::default);
 
 impl ListenSlot {
-    fn take(who: &str) -> Option<ListenSlot> {
+    /// One of `max` open streams `who` may hold on this node (a listen stream's key is its token,
+    /// an event stream's `events:` and its token).
+    fn take(who: &str, max: usize) -> Option<ListenSlot> {
         let mut open = LISTENS.lock().unwrap_or_else(|e| e.into_inner());
         let n = open.entry(who.to_string()).or_default();
-        if *n >= LISTENS_PER_TOKEN {
+        if *n >= max {
             return None;
         }
         *n += 1;
@@ -1030,7 +1069,7 @@ async fn listen(ctx: Arc<Ctx>, msg: &Value) -> Response {
         Principal::Operator => None,
     };
     // A few open at once per token: each looks at its grant every few seconds.
-    let held = match ListenSlot::take(grant.as_deref().unwrap_or("operator")) {
+    let held = match ListenSlot::take(grant.as_deref().unwrap_or("operator"), LISTENS_PER_TOKEN) {
         Some(h) => h,
         None => return Json(rpc_error(id, -32000, format!("at most {LISTENS_PER_TOKEN} subscriptions open at once per token: close one first"))).into_response(),
     };
@@ -1213,7 +1252,7 @@ async fn call_as(ctx: &Arc<Ctx>, name: &str, args: Value, quiet: bool) -> Option
     let mut ext = Extensions::new();
     // The audit log says a completion was one (a person typing), not the agent listing.
     let tool: Arc<str> = if quiet { format!("completion/complete:{name}").into() } else { name.into() };
-    ext.insert(McpCall { tool, args: Arc::new(redacted), ip: ctx.ip, elicits: ctx.url_elicitation, client: ctx.client.clone(), quiet });
+    ext.insert(McpCall { tool, args: Arc::new(redacted), ip: ctx.ip, elicits: ctx.url_elicitation, client: ctx.client.clone(), quiet, unattended: false });
     let started = std::time::Instant::now();
     // A credential headed where people and other agents read it is refused before it's sent
     // (guard.rs): a data-loss check, not a permission (the gate decides those).
@@ -1389,7 +1428,7 @@ async fn guard_route(ctx: &Arc<Ctx>, method: &str, route: &str, body: Option<Val
     let mut req = req.body(body.map_or(Body::empty(), |b| Body::from(b.to_string()))).map_err(|e| e.to_string())?;
     // rolld keeps `X-Roll-Guard` on roll secrets' routes only for an in-process call carrying this
     // extension with tool "guard" (secrets' #169): keep both if this ever changes.
-    req.extensions_mut().insert(McpCall { tool: "guard".into(), args: Arc::new(json!({ "route": route })), ip: ctx.ip, elicits: false, client: ctx.client.clone(), quiet: true });
+    req.extensions_mut().insert(McpCall { tool: "guard".into(), args: Arc::new(json!({ "route": route })), ip: ctx.ip, elicits: false, client: ctx.client.clone(), quiet: true, unattended: false });
     let resp = match ctx.m.api.clone().oneshot(req).await {
         Ok(r) => r,
         Err(e) => match e {},
@@ -1444,18 +1483,19 @@ async fn read_me(ctx: &Arc<Ctx>) -> Result<Value, (String, Value)> {
 
 /// A resource's route read through the gated router with the caller's token, like a tool.
 async fn read_route(ctx: &Arc<Ctx>, route: &str, uri: &str) -> Result<Value, (String, Value)> {
-    read_route_as(ctx, route, "resources/read", json!({ "uri": uri })).await
+    read_route_as(ctx, route, "resources/read", json!({ "uri": uri }), false).await
 }
 
-/// A route read through the gated router with the caller's token, audited as `what` with `args`.
-async fn read_route_as(ctx: &Arc<Ctx>, route: &str, what: &str, args: Value) -> Result<Value, (String, Value)> {
+/// A route read through the gated router with the caller's token, audited as `what` with `args`;
+/// `unattended` (nobody waits on it: an MCP Events subscribe's check) refuses what would ask.
+async fn read_route_as(ctx: &Arc<Ctx>, route: &str, what: &str, args: Value, unattended: bool) -> Result<Value, (String, Value)> {
     let fail = |e: String| (e, json!({}));
     let mut req = Request::builder().method("GET").uri(route);
     for (k, v) in forward_headers(&ctx.headers, &Value::Null).iter() {
         req = req.header(k, v);
     }
     let mut req = req.body(Body::empty()).map_err(|e| fail(e.to_string()))?;
-    req.extensions_mut().insert(McpCall { tool: what.into(), args: Arc::new(args), ip: ctx.ip, elicits: false, client: ctx.client.clone(), quiet: false });
+    req.extensions_mut().insert(McpCall { tool: what.into(), args: Arc::new(args), ip: ctx.ip, elicits: false, client: ctx.client.clone(), quiet: false, unattended });
     let resp = match ctx.m.api.clone().oneshot(req).await {
         Ok(r) => r,
         Err(e) => match e {},

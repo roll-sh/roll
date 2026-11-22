@@ -67,6 +67,22 @@ es POST /_security/api_key '{
 A request with this key that names `tenant-globex`, or `tenant-*`, gets a 403 or sees only
 `tenant-acme`'s indices.
 
+A key that only searches a tenant's indices comes from the CLI (or `POST
+/v1/search/clusters/{id}/keys` with `access` and `indices`):
+
+```sh
+roll search keys create app-search tenant-acme-web --read-only --indices 'tenant-acme,tenant-acme-*' --expires-in 30d
+```
+
+A tenant that writes gets a `data` key on its indices instead. It can do anything to
+`tenant-acme` and `tenant-acme-*` (index, delete, change mappings and settings), and nothing to
+the cluster's index templates, ingest pipelines or lifecycle policies, which other tenants'
+indices use:
+
+```sh
+roll search keys create app-search tenant-acme --access data --indices 'tenant-acme,tenant-acme-*' --expires-in 30d
+```
+
 ## One shared index with filtered keys
 
 Every document carries its tenant:

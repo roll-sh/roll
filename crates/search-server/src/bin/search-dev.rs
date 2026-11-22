@@ -184,6 +184,8 @@ async fn run() -> anyhow::Result<()> {
             }
             None => None,
         },
+        // The dev server (and the YAML suites run against it) keeps secrets as given without a key.
+        unsealed_secrets: true,
         ..NodeConfig::default()
     };
     let stores: Arc<dyn search_server::StoreProvider> = match &args.data_dir {

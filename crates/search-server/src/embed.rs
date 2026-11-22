@@ -478,7 +478,8 @@ impl EmbedPool {
         self.shared.state.lock().node.inputs
     }
 
-    /// CPU time each cluster's inputs took since the last call, by cluster name.
+    /// CPU time each cluster's inputs took since the last call, by [`Tenant::cluster`] (the
+    /// cluster's catalog id).
     pub fn take_cpu(&self) -> Vec<(String, Duration)> {
         let mut v: Vec<(String, Duration)> = std::mem::take(&mut *self.shared.cpu.lock()).into_iter().collect();
         v.sort();

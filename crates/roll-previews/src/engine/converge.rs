@@ -198,6 +198,7 @@ impl Engine {
                     x.state = ResourceState::Pending;
                     x.error = None;
                 })?;
+                self.store.set_base_schema(&r.id, res.kind, &res.parent, None)?;
                 self.store.log(&r.id, &format!("branched {key} as {}", made.r#ref))?;
                 self.store.set_seed_needed(&r.id, true)?;
                 self.mask(&r.id, &b, &key, &made.r#ref, s).await?;
@@ -222,6 +223,7 @@ impl Engine {
                     x.error = None;
                     x.bytes = 0;
                 })?;
+                self.store.set_base_schema(&r.id, res.kind, &res.parent, None)?;
                 self.store.log(&r.id, &format!("reset {key} from its parent"))?;
                 self.store.set_seed_needed(&r.id, true)?;
                 self.mask(&r.id, &b, &key, &fresh.r#ref, s).await?;
@@ -229,10 +231,12 @@ impl Engine {
                 self.store.set_resource(&r.id, res.kind, &res.parent, |x| x.state = ResourceState::Ready)?;
                 reset = true;
             }
-            // Made (or reset) but not finished: masks again, then Ready.
+            // Made (or reset) but not finished: masks again, then Ready. No base is kept here: a
+            // branch masked again in place (changed rules, not Postgres) holds what the change's
+            // seed and release wrote, and one made just before a crash has none (compared with
+            // its parent alone).
             Some(branch) if res.state != ResourceState::Ready => {
                 self.mask(&r.id, &b, &key, branch, s).await?;
-                self.keep_base(&r.id, &b, &res, branch, s).await?;
                 self.store.set_resource(&r.id, res.kind, &res.parent, |x| {
                     x.state = ResourceState::Ready;
                     x.error = None;
@@ -611,6 +615,22 @@ impl Engine {
             {
                 for gone in self.store.pin(&r.id, &spec.name, old, &|h| self.cfg.url_in(domain.as_ref(), h))? {
                     self.apps.remove(&r.id, &gone).await.map_err(|e| anyhow::anyhow!("removing {gone}: {e:#}"))?;
+                }
+            }
+            // On roll apps, the head it ran stays reachable at that build's own URL (roll apps
+            // keeps its last builds, each at a deployment URL): asked before the new head deploys,
+            // and kept only while the running build is that head's commit (a later pass may find
+            // the new one live already). roll apps prunes its own builds: nothing to remove.
+            if on_apps
+                && repo == r.repo
+                && r.trusted
+                && let Some(old) = svc.deployed.as_deref().filter(|d| *d != rev && !d.is_empty())
+                && !self.store.pinned(&r.id)?.iter().any(|p| p.service == spec.name && p.revision == old)
+                && let Some((git, url)) = self.apps.live_build(&r.id, &spec.name).await
+            {
+                let ran = if repo.starts_with("git:") { Some(old.to_string()) } else { self.source.git_commit(&repo, old).await.ok().flatten() };
+                if ran.as_deref() == Some(git.as_str()) {
+                    self.store.pin_build(&r.id, &spec.name, old, &url)?;
                 }
             }
             // A deploy the backend is still on is asked about again (until it's live or fails).
@@ -1429,6 +1449,12 @@ impl Engine {
         // stays on its own sheet (`report_on_git`).
         let _ = self.refresh_voice(&row);
         if let Ok(mut p) = self.store.view(row) {
+            // A visual change waiting for review is an event for followers, once a head (the
+            // review is worked out as the preview is shown, so here, where every change of it is
+            // reported).
+            if p.visual_review.as_ref().is_some_and(|v| v.state == crate::VisualState::Changed) {
+                let _ = self.store.emit_once(&p.id, "visual_change", &p.head);
+            }
             // The open notes, newest first (a few), for the pull request's comment.
             if p.change.is_some() {
                 let mut notes = self.open_notes(&p.id).await.unwrap_or_default();

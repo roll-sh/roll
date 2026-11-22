@@ -78,8 +78,9 @@ impl InputKind {
     }
 }
 
-/// Whose inputs these are: the cluster (its name on the node, what its CPU is metered to) and
-/// its owner (turns are taken by owner first; `None`: the operator's).
+/// Whose inputs these are: the cluster (its catalog id, or its name on a node without a catalog:
+/// what its CPU is metered to, like the node's other observations) and its owner (turns are taken
+/// by owner first; `None`: the operator's).
 #[derive(Clone, Copy, Debug)]
 pub struct Tenant<'a> {
     pub cluster: &'a str,

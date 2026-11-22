@@ -170,6 +170,44 @@ impl Api {
         ps.binary_search_by(|p| p.name.cmp(name)).ok().map(|i| &ps[i])
     }
 
+    /// Whether this API's answer holds a credential, or a credential made for the caller: a new
+    /// API key (cross-cluster, granted, cloned), a service account token, an OAuth2, SAML, OIDC
+    /// or PKI token, an enrollment token or password, a connector's or Fleet's stored secret, and
+    /// a connector's configuration with its `sensitive` values (Elasticsearch 9.5.5 returns them
+    /// in the clear from `GET _connector`, its list and its sync jobs, which carry a copy).
+    pub fn answers_credentials(self, _method: Method) -> bool {
+        matches!(
+            self,
+            Api::SecurityCreateApiKey
+                | Api::SecurityCreateCrossClusterApiKey
+                | Api::SecurityGrantApiKey
+                | Api::SecurityCloneApiKey
+                | Api::SecurityCreateServiceToken
+                | Api::SecurityGetToken
+                | Api::SecurityDelegatePki
+                | Api::SecuritySamlAuthenticate
+                | Api::SecurityOidcAuthenticate
+                | Api::SecurityEnrollKibana
+                | Api::SecurityEnrollNode
+                | Api::ConnectorSecretGet
+                | Api::FleetGetSecret
+                | Api::ConnectorGet
+                | Api::ConnectorList
+                | Api::ConnectorSyncJobGet
+                | Api::ConnectorSyncJobList
+        )
+    }
+
+    /// Whether this API sets a durable credential the caller then knows: a native or internal
+    /// user's password (made with the user, or changed), OpenSearch's account password.
+    pub fn sets_credentials(self, method: Method) -> bool {
+        match self {
+            Api::SecurityPutUser | Api::SecurityChangePassword => true,
+            Api::PluginsSecurityInternalusers | Api::PluginsSecurityAccount => matches!(method, Method::Put | Method::Patch | Method::Post),
+            _ => false,
+        }
+    }
+
     /// The spec of query parameter `name` in a dialect's spec of this API.
     pub fn param_in(self, d: Dialect, name: &str) -> Option<&'static ParamSpec> {
         let ps = self.spec_in(d).params;
@@ -466,6 +504,19 @@ pub fn route_in(d: Dialect, method: Method, raw_path: &str) -> Routed {
     Routed::NotFound
 }
 
+/// Whether a request answers or sets a credential ([`Api::answers_credentials`],
+/// [`Api::sets_credentials`]), decided on the API the cluster's router picks for it (`uri` as a
+/// client sends it, query string included): what roll's control plane holds to `reveal`. A
+/// request that doesn't route runs nothing.
+pub fn handles_credentials(d: Dialect, method: &str, uri: &str) -> bool {
+    let raw_path = uri.split_once('?').map_or(uri, |(p, _)| p);
+    let Some(m) = Method::parse(&method.trim().to_ascii_uppercase()) else { return false };
+    match route_in(d, m, if raw_path.is_empty() { "/" } else { raw_path }) {
+        Routed::Found(r) => r.api.answers_credentials(m) || r.api.sets_credentials(m),
+        _ => false,
+    }
+}
+
 /// The methods any route of the dialect accepts for `raw_path` (for `OPTIONS` and 405 `Allow`).
 pub fn allowed_methods(d: Dialect, raw_path: &str) -> Vec<Method> {
     let t = trie(d);
@@ -583,6 +634,23 @@ pub fn percent_decode(s: &str, plus_as_space: bool) -> String {
 
 #[cfg(test)]
 mod tests {
+    /// Decided on the routed API, never on how the path is spelled: an index named after an API
+    /// or a query string naming a key answer nothing, an encoded spelling routes as the cluster
+    /// routes it, and a user's password is set by its API whatever else the request says.
+    #[test]
+    fn credentials_are_decided_on_the_routed_api() {
+        let es = |m: &str, p: &str| super::handles_credentials(Dialect::Elasticsearch, m, p);
+        let os = |m: &str, p: &str| super::handles_credentials(Dialect::OpenSearch, m, p);
+        for (m, p) in [("POST", "/_security/api_key"), ("POST", "/_security/cross_cluster/api_key"), ("GET", "/_fleet/secret/s1"), ("GET", "/_connector/_secret/s1"), ("GET", "/_connector/c1"), ("GET", "/_connector?size=5"), ("GET", "/_connector/_sync_job"), ("PUT", "/_security/user/x"), ("POST", "/_security/user/x/_password"), ("POST", "/_security/oauth2/token"), ("GET", "/_security/enroll/kibana")] {
+            assert!(es(m, p), "{m} {p}");
+        }
+        for (m, p) in [("GET", "/enrollments/_search"), ("GET", "/logs/_search?q=api_key:x"), ("GET", "/_security/api_key"), ("PUT", "/_security/role/r"), ("PUT", "/_security/role_mapping/m"), ("GET", "/_cat/indices"), ("GET", "/nope/nope/nope/nope")] {
+            assert!(!es(m, p), "{m} {p}");
+        }
+        assert!(os("PUT", "/_plugins/_security/api/internalusers/x") && os("PATCH", "/_opendistro/_security/api/internalusers"));
+        assert!(!os("GET", "/_plugins/_security/api/internalusers/x") && !os("PUT", "/_plugins/_security/api/rolesmapping/x"));
+    }
+
     use super::*;
 
     fn found(m: Method, p: &str) -> (Api, Vec<(&'static str, String)>) {

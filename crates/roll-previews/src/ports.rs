@@ -719,6 +719,12 @@ pub trait Apps: Send + Sync {
     async fn metrics(&self, _preview: &str, _service: &str) -> Option<(f64, u64)> {
         None
     }
+    /// The build the service runs now, `(its git commit, its own URL)`, where the backend keeps
+    /// each build reachable at a URL of its own (roll apps' deployment URLs): kept as an earlier
+    /// push when a new head replaces it. None where it doesn't (the runtime keeps its own).
+    async fn live_build(&self, _preview: &str, _service: &str) -> Option<(String, String)> {
+        None
+    }
     /// Its errors in the last `minutes`, grouped (none where the backend can't tell when a line
     /// was written). Text the backend cuts before grouping it is masked first with `masks`' values
     /// (`crate::mask_cut`), read only when there's an error; the engine masks every title and

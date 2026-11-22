@@ -13,7 +13,7 @@ use search_es::{Cluster, ClusterConfig, EsRequest, MemoryStore};
 use std::sync::Arc;
 
 async fn cluster() -> Cluster {
-    Cluster::open(ClusterConfig::new("compat-es"), Arc::new(MemoryStore::new())).await.unwrap()
+    Cluster::open(ClusterConfig { unsealed_secrets: true, ..ClusterConfig::new("compat-es") }, Arc::new(MemoryStore::new())).await.unwrap()
 }
 
 async fn call(c: &Cluster, method: &str, uri: &str, body: Option<&str>) -> (u16, Value) {

@@ -1,11 +1,12 @@
 //! roll secrets as the intercepting egress step's [`roll_intercept::Interception`]: one consumer's
-//! interception CA, live as roll secrets says on every connection, and roll secrets' own filter
+//! interception CA, standing as roll secrets says on every connection, and roll secrets' own filter
 //! for each request. roll previews' egress uses it; roll apps' closed environments can too.
 
 use std::sync::Arc;
 
-/// One CA's interception: live as roll secrets says (asked every connection), its leaves, and
-/// roll secrets' filter against the host connected to.
+/// One CA's interception: standing as roll secrets says (asked every connection: a stale CA, its
+/// consumer bound to a host it doesn't name, still serves the hosts it names until its consumer
+/// swaps it), its leaves, and roll secrets' filter against the host connected to.
 pub struct CaInterception {
     secrets: Arc<roll_secrets::Secrets>,
     ca: roll_secrets::intercept::InterceptCa,
@@ -13,7 +14,7 @@ pub struct CaInterception {
 
 impl roll_intercept::Interception for CaInterception {
     fn live(&self) -> anyhow::Result<bool> {
-        self.secrets.intercept_ca_live(&self.ca.id).map_err(|e| anyhow::anyhow!("{e}"))
+        self.secrets.intercept_ca_stands(&self.ca.id).map_err(|e| anyhow::anyhow!("{e}"))
     }
     fn covers(&self, host: &str) -> bool {
         self.ca.covers(host)

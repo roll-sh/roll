@@ -128,7 +128,8 @@ pub async fn infer(cluster: &Cluster, ep: &Endpoint, req: &Request) -> EsResult<
         Some("search" | "internal_search") => InputKind::Search,
         _ => InputKind::Other,
     };
-    let tenant = super::super::local::Tenant { cluster: &cluster.config.name, owner: cluster.config.owner.as_deref() };
+    let id = cluster.config.catalog_id.as_deref().unwrap_or(&cluster.config.name);
+    let tenant = super::super::local::Tenant { cluster: id, owner: cluster.config.owner.as_deref() };
     let vectors = embedder.embed(tenant, kind, req.input.clone(), req.timeout).await.map_err(|e| e.to_es())?;
     if vectors.len() != req.input.len() {
         return Err(EsError::java(500, "illegal_state_exception", format!("The model returned [{}] embeddings for [{}] inputs", vectors.len(), req.input.len())));
