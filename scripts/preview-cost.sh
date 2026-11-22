@@ -108,7 +108,7 @@ curl -sf -XPUT "$SEARCH_URL_PARENT/products/_doc/3?refresh=true" -H 'content-typ
 curl -sf -XPUT "$SEARCH_URL_PARENT/logs.2024/_doc/1?refresh=true" -H 'content-type: application/json' -d '{"user":{"email":"eve@corp.example"}}' >/dev/null
 curl -sf -XPUT "$SEARCH_URL_PARENT/products/_doc/4?refresh=true" -H 'content-type: application/json' -d '{"name":"dotted","owner.email":"bob@corp.example","stock":3}' >/dev/null
 # A connector on the parent (roll search's native syncs, #318): its branches inherit it, waiting.
-curl -sf -XPUT "$SEARCH_URL_PARENT/_connector/catalog-sync" -H 'content-type: application/json' -d '{"index_name":"synced","is_native":true,"service_type":"s3"}' >/dev/null || { echo "a connector on the parent search cluster"; exit 1; }
+curl -sf -XPUT "$SEARCH_URL_PARENT/_connector/catalog-sync" -H 'content-type: application/json' -d '{"index_name":"content-synced","is_native":true,"service_type":"s3"}' >/dev/null || { echo "a connector on the parent search cluster"; exit 1; }
 PG=$(api POST /v1/projects '{"name":"shop-db"}' | jq_ "d['id']")
 # A real-looking row in the parent, which previews mask.
 PG_PARENT_EP=$(api GET "/v1/projects/$PG" | jq_ "[b['endpoint']['id'] for b in d['branches'] if b['parent_id'] is None][0]")
@@ -363,7 +363,7 @@ for _ in $(seq 1 120); do
   sleep 1
 done
 BSTATE=$(console "$BRANCH_SEARCH" GET "/_connector/_sync_job/$BJOB" | answer status)
-[ "$PSTATE" != pending ] && [ "$BSTATE" = pending ] || { echo "the parent's sync should run (it did: $PSTATE) and the branch's wait for adoption (pending, not $BSTATE)"; exit 1; }
+case "$PSTATE" in in_progress|error|completed) [ "$BSTATE" = pending ] ;; *) false ;; esac || { echo "the parent's sync should run (it did: $PSTATE) and the branch's wait for adoption (pending, not $BSTATE)"; exit 1; }
 [ "$(es "$APP_ES/products/_doc/1" | jq_ "d['_source']['name']")" = "[masked]" ] || { echo "the search branch should stay masked beside its inherited connector"; exit 1; }
 # A field only the branch's documents have (price): its mapping gains it, and the next head's
 # schema changes say so.
