@@ -612,6 +612,35 @@ pub enum AppsCmd {
         #[arg(long)]
         instance: Option<String>,
     },
+    /// The environment's private network into your own (Cloud Run's VPC egress, Fly's
+    /// WireGuard): `--secret roll://production/WG --route db.corp.internal=10.0.3.4:5432` sets it
+    /// (the WireGuard config is the secret, read as you; each route a name the app connects to
+    /// and a host:port in your network), `--remove` takes it away; alone, it shows it. Admin.
+    PrivateNetwork {
+        #[command(flatten)]
+        target: Target,
+        #[arg(long, requires = "route", conflicts_with = "remove")]
+        secret: Option<String>,
+        /// The secret is a Tailscale auth key (the node joins your tailnet) instead of a
+        /// WireGuard config.
+        #[arg(long, requires = "secret")]
+        tailscale: bool,
+        /// With --tailscale: the control server when it isn't Tailscale's (Headscale's URL).
+        #[arg(long, requires = "tailscale")]
+        login_server: Option<String>,
+        /// NAME=HOST:PORT, repeated (each port its own).
+        #[arg(long, value_name = "NAME=HOST:PORT", requires = "secret")]
+        route: Vec<String>,
+        #[arg(long)]
+        remove: bool,
+    },
+    /// Short-lived containers to run commands in (Vercel Sandbox, Fly Machines): the live image
+    /// or a public one, without the environment's variables or network unless asked; removed at
+    /// their end (`--ttl`, default 10 minutes). Admin.
+    Sandbox {
+        #[command(subcommand)]
+        cmd: SandboxCmd,
+    },
     /// Open the environment's address in a browser (and print it); `--print` only prints it.
     Open {
         #[command(flatten)]
@@ -853,6 +882,12 @@ pub enum AppsCmd {
         /// Prefix the variables (`ORDERS` → `ORDERS_DATABASE_URL`).
         #[arg(long)]
         prefix: Option<String>,
+        /// A search link's key only for these indices (names or patterns, repeated).
+        #[arg(long = "index", value_name = "NAME")]
+        indices: Vec<String>,
+        /// A search link's key: `read`, or `append` (create documents on exact names).
+        #[arg(long)]
+        access: Option<String>,
         #[command(flatten)]
         target: Target,
     },
@@ -2831,8 +2866,204 @@ fn print_service(v: &Value) {
     }
 }
 
+#[derive(Subcommand)]
+pub enum SandboxCmd {
+    /// An environment's sandboxes and when each ends.
+    Ls {
+        #[command(flatten)]
+        target: Target,
+    },
+    /// Start one; prints its id.
+    Create {
+        #[command(flatten)]
+        target: Target,
+        /// A public image instead of the live deployment's (`python:3.13-slim`).
+        #[arg(long)]
+        image: Option<String>,
+        /// Seconds it stays up (60–86400; default 600).
+        #[arg(long)]
+        ttl: Option<u32>,
+        /// CPUs (0.25–4; default 0.5).
+        #[arg(long)]
+        cpu: Option<f64>,
+        /// Memory in MB (256–8192; default 512).
+        #[arg(long)]
+        memory: Option<u32>,
+        /// The live deployment's variables and files (default: none of them).
+        #[arg(long)]
+        variables: bool,
+        /// On the environment's private network (default: one of its own, the internet only).
+        #[arg(long)]
+        private_network: bool,
+    },
+    /// Run a command in it: its output here, and its exit code as this command's.
+    Exec {
+        #[command(flatten)]
+        target: Target,
+        id: String,
+        /// Seconds before it's killed (1–600; default 60).
+        #[arg(long)]
+        timeout: Option<u32>,
+        #[arg(trailing_var_arg = true, required = true, allow_hyphen_values = true)]
+        command: Vec<String>,
+    },
+    /// Copy one file to or from it (at most 1 MiB): `:` marks the sandbox's side
+    /// (`roll apps sandbox cp sbx_… ./input.json :/tmp/input.json`).
+    Cp {
+        #[command(flatten)]
+        target: Target,
+        id: String,
+        src: String,
+        dst: String,
+    },
+    /// Stop and remove it now.
+    Rm {
+        #[command(flatten)]
+        target: Target,
+        id: String,
+    },
+}
+
+async fn sandbox(api: &Api, json_out: bool, cmd: SandboxCmd) -> anyhow::Result<()> {
+    let target = match &cmd {
+        SandboxCmd::Ls { target } | SandboxCmd::Create { target, .. } | SandboxCmd::Exec { target, .. } | SandboxCmd::Cp { target, .. } | SandboxCmd::Rm { target, .. } => target,
+    };
+    let svc = service(api, target).await?;
+    let base = format!("{}/sandboxes", env_path(&svc, &target.env));
+    let v = match cmd {
+        SandboxCmd::Ls { .. } => {
+            let v = api.get(&base).await?;
+            if !json_out {
+                let now = chrono::Utc::now().timestamp_millis();
+                for b in v.as_array().into_iter().flatten() {
+                    let left = ago(b["expires_at"].as_i64().unwrap_or(now) - now);
+                    let with = if b["variables"] == true { ", its variables" } else { "" };
+                    println!("{}  {:<32} {} vCPU {} MB, network {}{with}, ends in {}", s(&b["id"]), s(&b["image"]), b["cpu"], b["memory_mb"], s(&b["network"]), left.trim_end_matches(" ago"));
+                }
+                return Ok(());
+            }
+            v
+        }
+        SandboxCmd::Create { image, ttl, cpu, memory, variables, private_network, .. } => {
+            let mut body = json!({ "variables": variables, "network": if private_network { "environment" } else { "none" } });
+            for (k, x) in [("image", image.map(Value::from)), ("ttl_s", ttl.map(Value::from)), ("cpu", cpu.map(Value::from)), ("memory_mb", memory.map(Value::from))] {
+                if let Some(x) = x {
+                    body[k] = x;
+                }
+            }
+            let v = api.post(&base, body).await?;
+            if !json_out {
+                println!("{}", s(&v["id"]));
+                return Ok(());
+            }
+            v
+        }
+        SandboxCmd::Exec { id, timeout, command, .. } => {
+            let mut body = json!({ "command": command.join(" ") });
+            if let Some(t) = timeout {
+                body["timeout_s"] = json!(t);
+            }
+            let v = api.post(&format!("{base}/{}/exec", enc(&id)), body).await?;
+            if !json_out {
+                use std::io::Write;
+                let _ = std::io::stdout().write_all(s(&v["stdout"]).as_bytes());
+                let _ = std::io::stderr().write_all(s(&v["stderr"]).as_bytes());
+                if v["truncated"] == true {
+                    eprintln!("(more than 1 MiB of output: the rest was dropped)");
+                }
+                // A timeout is `timeout`'s 124, as a shell would say.
+                let code = match v["exit_code"].as_i64() {
+                    Some(c) => c as i32,
+                    None => {
+                        eprintln!("killed at its timeout");
+                        124
+                    }
+                };
+                if code != 0 {
+                    std::process::exit(code);
+                }
+                return Ok(());
+            }
+            v
+        }
+        SandboxCmd::Cp { id, src, dst, .. } => {
+            let url = |path: &str| format!("{}{base}/{}/files?path={}", api.base, enc(&id), enc(path));
+            let auth = |req: reqwest::RequestBuilder| match &api.key {
+                Some(k) => req.bearer_auth(k),
+                None => req,
+            };
+            let check = |res: reqwest::Response| async {
+                if !res.status().is_success() {
+                    let code = res.status();
+                    let body: Value = res.json().await.unwrap_or(Value::Null);
+                    bail!("{}", body["error"].as_str().map(str::to_string).unwrap_or_else(|| code.to_string()));
+                }
+                Ok(res)
+            };
+            match (src.strip_prefix(':'), dst.strip_prefix(':')) {
+                (Some(remote), None) => {
+                    let res = check(auth(api.http.get(url(remote))).send().await?).await?;
+                    let bytes = res.bytes().await?;
+                    std::fs::write(&dst, &bytes).with_context(|| format!("writing {dst}"))?;
+                    json!({ "from": remote, "to": dst, "bytes": bytes.len() })
+                }
+                (None, Some(remote)) => {
+                    let data = std::fs::read(&src).with_context(|| format!("reading {src}"))?;
+                    anyhow::ensure!(data.len() <= 1 << 20, "{src} is more than 1 MiB");
+                    let res = check(auth(api.http.put(url(remote))).header("content-type", "application/octet-stream").body(data).send().await?).await?;
+                    res.json().await.unwrap_or(Value::Null)
+                }
+                _ => bail!("one side is the sandbox's, marked with `:` (roll apps sandbox cp sbx_… ./file :/tmp/file)"),
+            }
+        }
+        SandboxCmd::Rm { id, .. } => {
+            api.call(reqwest::Method::DELETE, &format!("{base}/{}", enc(&id)), None).await?;
+            if !json_out {
+                println!("removed {id}");
+                return Ok(());
+            }
+            json!({ "removed": id })
+        }
+    };
+    println!("{}", serde_json::to_string_pretty(&v)?);
+    Ok(())
+}
+
 pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> {
     let out = match cmd {
+        AppsCmd::Sandbox { cmd } => return sandbox(api, json_out, cmd).await,
+        AppsCmd::PrivateNetwork { target, secret, tailscale, login_server, route, remove } => {
+            let svc = service(api, &target).await?;
+            let path = format!("{}/private-network", env_path(&svc, &target.env));
+            let v = if remove {
+                api.call(reqwest::Method::DELETE, &path, None).await?;
+                json!({ "removed": true })
+            } else if let Some(secret) = secret {
+                let routes = route
+                    .iter()
+                    .map(|r| r.split_once('=').map(|(n, t)| json!({ "name": n, "target": t })).ok_or_else(|| anyhow::anyhow!("--route is NAME=HOST:PORT ({r})")))
+                    .collect::<anyhow::Result<Vec<_>>>()?;
+                let mut body = json!({ "secret": secret, "routes": routes, "kind": if tailscale { "tailscale" } else { "wireguard" } });
+                if let Some(u) = login_server {
+                    body["login_server"] = json!(u);
+                }
+                api.call(reqwest::Method::PUT, &path, Some(body)).await?
+            } else {
+                api.get(&path).await?
+            };
+            if !json_out {
+                if v["removed"] == true {
+                    println!("its private network is removed");
+                } else {
+                    println!("{} from {} ({})", if v["kind"] == "tailscale" { "Tailscale" } else { "WireGuard" }, s(&v["secret"]), s(&v["status"]));
+                    for r in v["routes"].as_array().into_iter().flatten() {
+                        println!("  {} → {}", s(&r["name"]), s(&r["target"]));
+                    }
+                }
+                return Ok(());
+            }
+            v
+        }
         AppsCmd::List { project } => {
             let path = match project {
                 Some(p) => format!("/v1/apps/services?project={}", enc(&project_id(api, &p).await?)),
@@ -3937,10 +4168,17 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
             }
             v
         }
-        AppsCmd::Link { kind, r#ref, prefix, target } => {
+        AppsCmd::Link { kind, r#ref, prefix, indices, access, target } => {
             let svc = service(api, &target).await?;
             let path = format!("/v1/apps/services/{}/links/{}/{}", enc(&s(&svc["id"])), enc(&kind), enc(&r#ref));
-            api.call(reqwest::Method::PUT, &path, Some(json!({ "prefix": prefix }))).await?
+            let mut body = json!({ "prefix": prefix });
+            if !indices.is_empty() {
+                body["indices"] = json!(indices);
+            }
+            if let Some(a) = access {
+                body["access"] = json!(a);
+            }
+            api.call(reqwest::Method::PUT, &path, Some(body)).await?
         }
         AppsCmd::Unlink { kind, r#ref, target } => {
             let svc = service(api, &target).await?;

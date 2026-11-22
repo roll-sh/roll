@@ -112,10 +112,32 @@ pub struct SearchArgs {
     /// Let `s3` snapshot repositories reach private addresses (local development with MinIO).
     #[arg(long = "search-repository-allow-private", env = "ROLL_SEARCH_REPOSITORY_ALLOW_PRIVATE", value_parser = clap::builder::BoolishValueParser::new(), default_value_t = false, num_args = 0..=1, default_missing_value = "true")]
     pub search_repository_allow_private: bool,
+    /// Let connectors reach databases and buckets at private addresses (local development only:
+    /// a tenant could otherwise point one at the node's own network).
+    #[arg(long = "search-connectors-allow-private", env = "ROLL_SEARCH_CONNECTORS_ALLOW_PRIVATE", value_parser = clap::builder::BoolishValueParser::new(), default_value_t = false, num_args = 0..=1, default_missing_value = "true")]
+    pub search_connectors_allow_private: bool,
     /// Let inference endpoints reach private addresses (local development with a model server
     /// on this machine, tests).
     #[arg(long = "search-inference-allow-private", env = "ROLL_SEARCH_INFERENCE_ALLOW_PRIVATE", value_parser = clap::builder::BoolishValueParser::new(), default_value_t = false, num_args = 0..=1, default_missing_value = "true")]
     pub search_inference_allow_private: bool,
+    /// Let reindex from remote (and the dashboard's migration) reach private addresses (local
+    /// development with an Elasticsearch on this machine, tests).
+    #[arg(long = "search-reindex-allow-private", env = "ROLL_SEARCH_REINDEX_ALLOW_PRIVATE", value_parser = clap::builder::BoolishValueParser::new(), default_value_t = false, num_args = 0..=1, default_missing_value = "true")]
+    pub search_reindex_allow_private: bool,
+    /// PEM files of certificate authorities reindex from remote trusts besides the platform's
+    /// (Elasticsearch's `reindex.ssl.certificate_authorities`; comma-separated): a remote
+    /// cluster with a private CA.
+    #[arg(long = "search-reindex-ca", env = "ROLL_SEARCH_REINDEX_CA")]
+    pub search_reindex_ca: Option<String>,
+    /// How long one reindex from remote task may run before it stops (an Elasticsearch time
+    /// value: `24h`, `90m`), so a remote that answers slowly forever can't hold a task.
+    #[arg(long = "search-reindex-max-duration", env = "ROLL_SEARCH_REINDEX_MAX_DURATION", default_value = "24h")]
+    pub search_reindex_max_duration: String,
+    /// Networks reindex from remote never reaches, whatever name leads there (CIDRs or
+    /// addresses, comma-separated): the fleet's own networks. This node's public addresses
+    /// are added on their own.
+    #[arg(long = "search-reindex-deny", env = "ROLL_SEARCH_REINDEX_DENY")]
+    pub search_reindex_deny: Option<String>,
     /// The longest one request that searches may run on this node, in seconds (0: no cap),
     /// counted once for all its shards and phases. A request's own larger `timeout` is lowered
     /// to it; past it a search answers with what it collected, `timed_out: true`
@@ -194,6 +216,9 @@ impl Search {
         cfg.deleted_retention = Duration::from_secs(args.search_deleted_retention_days.saturating_mul(86_400));
         cfg.default_repository = Some(args.search_default_repository.trim().to_string()).filter(|n| !n.is_empty());
         cfg.person_caps = search_control::store::Caps { clusters: args.search_max_clusters_per_person.into(), always_on: args.search_max_always_on_per_person.into() };
+        if args.search_connectors_allow_private {
+            cfg.node_settings.push((search_control::CONNECTORS_ALLOW_PRIVATE.to_string(), "true".to_string()));
+        }
         cfg.audit.retention = Duration::from_secs(args.search_audit_retention_days.max(1) * 86_400);
         cfg.audit.max_bytes = args.search_audit_max_mb.max(1) << 20;
         cfg.node_settings.push((search_control::SEARCH_REQUEST_MAX_LIMIT.to_string(), args.search_request_memory_max.trim().to_string()));
@@ -203,16 +228,65 @@ impl Search {
         if args.search_inference_allow_private {
             cfg.node_settings.push((search_control::INFERENCE_ALLOW_PRIVATE.to_string(), "true".to_string()));
         }
+        if args.search_reindex_allow_private {
+            cfg.node_settings.push((search_control::REINDEX_ALLOW_PRIVATE.to_string(), "true".to_string()));
+        }
+        if let Some(ca) = args.search_reindex_ca.as_deref().filter(|c| !c.trim().is_empty()) {
+            cfg.node_settings.push(("reindex.ssl.certificate_authorities".to_string(), ca.to_string()));
+        }
+        search_control::check_time_value(&args.search_reindex_max_duration, "--search-reindex-max-duration")?;
+        cfg.node_settings.push((search_control::REINDEX_MAX_DURATION.to_string(), args.search_reindex_max_duration.clone()));
         match args.search_max_time_s.unwrap_or(if open { 0 } else { DEFAULT_MAX_TIME_S }) {
             0 => {}
             s => cfg.node_settings.push((search_control::SEARCH_MAX_TIME.to_string(), format!("{s}s"))),
         }
         // Watch passwords, connector and Fleet secrets are sealed in cluster state under the
-        // deployment's key; without one they're stored as given (as on Elasticsearch).
+        // deployment's key. Without one, watch and Fleet secrets are stored as given (as on
+        // Elasticsearch), and a connector roll runs refuses its credentials.
         cfg.sealer = secret_key.and_then(search_control::Sealer::from_secret);
         // Behind the edge, cluster URLs name `<cluster>.search.<region>.<domain>` over HTTPS.
         if let Some(p) = public {
             p.search(&mut cfg);
+        }
+        // Reindex from remote never reads this node's own endpoints: a tenant's whitelist naming
+        // them would read other tenants' clusters through roll (fleet nodes' addresses are
+        // private, refused unless private hosts are allowed).
+        let mut blocked = vec![format!("{}:*", public_host.to_ascii_lowercase())];
+        if let Some(d) = &cfg.domain {
+            blocked.push(format!("{d}:*"));
+            blocked.push(format!("*.{d}:*"));
+        }
+        if let Some(h) = cfg.public_url.as_deref().and_then(|u| reqwest::Url::parse(u).ok()).and_then(|u| u.host_str().map(str::to_string)) {
+            blocked.push(format!("{h}:*"));
+        }
+        cfg.node_settings.push(("reindex.remote.blocklist".to_string(), blocked.join(",")));
+        // The same endpoints by address, checked on the address a connection uses: a name
+        // spelled another way, an IP literal or any DNS name pointing here leads nowhere.
+        // Private addresses are refused anyway unless private hosts are allowed (development).
+        let mut deny: Vec<String> = args.search_reindex_deny.as_deref().map(|d| d.split(',').map(str::trim).filter(|x| !x.is_empty()).map(str::to_string).collect()).unwrap_or_default();
+        for n in &deny {
+            anyhow::ensure!(search_control::reindex_deny_net_ok(n), "--search-reindex-deny: [{n}] isn't an address or network");
+        }
+        let mut names: Vec<String> = vec![public_host.to_string()];
+        names.extend(cfg.domain.clone());
+        // A name under the clusters' wildcard: where `<anything>.<domain>` leads.
+        names.extend(cfg.domain.as_deref().map(|d| format!("roll-reindex-probe.{d}")));
+        names.extend(cfg.public_url.as_deref().and_then(|u| reqwest::Url::parse(u).ok()).and_then(|u| u.host_str().map(str::to_string)));
+        // Resolved again on every connection (every 30s at most), so the check follows them.
+        cfg.node_settings.push((search_control::REINDEX_DENY_NAMES.to_string(), names.join(",")));
+        // And their addresses now, for literals (which never reach the resolver).
+        for name in names {
+            let name = name.trim_start_matches('[').trim_end_matches(']').to_string();
+            let addrs: Vec<std::net::IpAddr> = match name.parse::<std::net::IpAddr>() {
+                Ok(ip) => vec![ip],
+                Err(_) => tokio::net::lookup_host((name.as_str(), 0)).await.map(|a| a.map(|s| s.ip()).collect()).unwrap_or_default(),
+            };
+            deny.extend(addrs.into_iter().filter(|ip| !roll_net::private_ip(*ip)).map(|ip| ip.to_string()));
+        }
+        deny.sort();
+        deny.dedup();
+        if !deny.is_empty() {
+            cfg.node_settings.push((search_control::REINDEX_DENY_ADDRESSES.to_string(), deny.join(",")));
         }
         let client = search_server::ClientAddresses::new(args.search_client_ip_header.as_deref(), args.search_trusted_proxies.as_deref())?;
         let mut opts = search_server::ListenOptions { proxy_protocol: args.search_proxy_protocol, client, ..Default::default() };

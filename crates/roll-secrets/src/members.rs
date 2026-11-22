@@ -14,6 +14,50 @@ use crate::{Result, Secrets, audit};
 use code_sql::params;
 
 impl Secrets {
+    /// `user` lost rights in roll (docs/accounts.md, "Offboarding"): disabled, no longer an admin,
+    /// or deleted. [`Secrets::member_changed`] for every project holding something they could
+    /// have made that nothing checks again (an open share, a live lease, a shared folder), which
+    /// covers their projects and those they reached as an admin. Their sessions' grant sees
+    /// nothing once they're disabled, so those end. Safe to run twice; nothing comes back when
+    /// they're enabled again.
+    pub fn person_offboarded(&self, user: &str) -> Result<()> {
+        if !is_person(user) {
+            return Ok(());
+        }
+        let projects: Vec<String> = self.db.read(|c| {
+            c.query(
+                "SELECT project_id FROM shares WHERE ciphertext IS NOT NULL
+                 UNION SELECT project_id FROM leases WHERE revoked_at IS NULL
+                 UNION SELECT e.project_id FROM exports x JOIN environments e ON e.id = x.env_id",
+                (),
+                |r| r.get(0),
+            )
+        })?;
+        let mut failed = None;
+        for project in projects {
+            if let Err(e) = self.member_changed(&project, user) {
+                tracing::warn!(%project, "ending an offboarded person's leases and shares: {e}");
+                failed = Some(e);
+            }
+        }
+        failed.map_or(Ok(()), Err)
+    }
+
+    /// Whether `by` (a person, or a chain of tokens and identities, as roll secrets records who
+    /// made or copied something) ends with `user`. A token already gone stands for whoever it
+    /// was: its owner, as roll-access still knows it.
+    pub fn made_by(&self, by: &str, user: &str) -> Result<bool> {
+        if by == user {
+            return Ok(true);
+        }
+        if let (Some(id), Some(grants)) = (by.strip_prefix("token:"), &self.grants)
+            && grants.owner(id).flatten().as_deref() == Some(user)
+        {
+            return Ok(true);
+        }
+        Ok(matches!(self.maker(by)?, Origin::Person(p) if p == user))
+    }
+
     /// `user`'s rights in `project` are what their session grant says now. Whatever they made,
     /// themselves or through a token of theirs (`token:tok_…` resolves to them through
     /// [`Secrets::maker`]):
@@ -30,19 +74,10 @@ impl Secrets {
         if manages && member {
             return Ok(());
         }
-        // Whether `by` (a person, or a chain of tokens and identities) ends with `user`. A token
-        // already gone stands for whoever it was: its owner, as roll-access still knows it.
-        let theirs = |by: &str| -> Result<bool> {
-            if by == user {
-                return Ok(true);
-            }
-            if let (Some(id), Some(grants)) = (by.strip_prefix("token:"), &self.grants)
-                && grants.owner(id).flatten().as_deref() == Some(user)
-            {
-                return Ok(true);
-            }
-            Ok(matches!(self.maker(by)?, Origin::Person(p) if p == user))
-        };
+        // A key they bound stops counting for its hosts (`binder_reaches`): the project's consumers'
+        // interception CAs are checked at their next ask, and one naming such a host ends.
+        self.db.write(|c| c.execute(&format!("{}project_id = ?)", crate::intercept::RECHECK_HOLDERS), [project]))?;
+        let theirs = |by: &str| self.made_by(by, user);
         let now = self.db.now_ms()?;
         let roll = Caller::consumer("roll:members");
         if !manages {

@@ -131,6 +131,16 @@ CREATE TABLE IF NOT EXISTS pinned (
     at INTEGER NOT NULL,
     PRIMARY KEY (preview_id, service, revision)
 ) WITHOUT ROWID;
+CREATE TABLE IF NOT EXISTS events (
+    seq INTEGER PRIMARY KEY,
+    at INTEGER NOT NULL,
+    kind TEXT NOT NULL,
+    project_id TEXT NOT NULL,
+    preview_id TEXT NOT NULL,
+    change_id TEXT,
+    data TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS events_at ON events (at);
 CREATE TABLE IF NOT EXISTS dismissed (
     change_id TEXT PRIMARY KEY,
     head TEXT NOT NULL,
@@ -428,6 +438,16 @@ fn hook_row(r: &code_sql::Row<'_>) -> code_sql::Result<Hook> {
 /// How many people [`Store::visitors`] names.
 pub const VISITORS: usize = 8;
 
+/// A live share link, as [`Store::share_live`] finds it.
+pub struct LiveShare {
+    pub id: String,
+    pub ends: i64,
+    /// Who made it (`usr_…`: a person, or the person behind their token); none for the operator.
+    pub maker: Option<String>,
+    /// When its maker was last asked whether they still may.
+    pub maker_checked: i64,
+}
+
 /// The SHA-256 (hex) a bypass secret is kept as.
 pub fn bypass_hash(secret: &str) -> String {
     use sha2::Digest;
@@ -722,6 +742,14 @@ impl Store {
                 db.add_column("services", col, "TEXT")?;
             }
         }
+        // Who made a share link (`usr_…`: a person, or the person behind their token; none for the
+        // operator), and when it was last asked whether they still may.
+        if !db.has_column("shares", "maker")? {
+            db.add_column("shares", "maker", "TEXT")?;
+        }
+        if !db.has_column("shares", "maker_checked")? {
+            db.add_column("shares", "maker_checked", "INTEGER NOT NULL DEFAULT 0")?;
+        }
         if !db.has_column("previews", "idled")? {
             db.add_column("previews", "idled", "INTEGER NOT NULL DEFAULT 0")?;
         }
@@ -740,6 +768,10 @@ impl Store {
         }
         if !db.has_column("resources", "mask_digest")? {
             db.add_column("resources", "mask_digest", "TEXT")?;
+        }
+        // The branch's own schema lines as it was made (JSON), for `schema::diff_since`.
+        if !db.has_column("resources", "base_schema")? {
+            db.add_column("resources", "base_schema", "TEXT")?;
         }
         for col in ["text", "links", "page_reports", "api"] {
             if !db.has_column("base_history", col)? {
@@ -1115,6 +1147,7 @@ impl Store {
             )?;
             c.execute("UPDATE previews SET token = ? WHERE id = ?", params![new_token(), id])?;
             append(c, &id, now, "preview created")?;
+            emit(c, now, "created", &n.project_id, &id, n.change_id.as_deref(), &serde_json::json!({ "head": n.head }))?;
             let r = c.query_row(&format!("SELECT {COLUMNS} FROM previews WHERE id = ?"), [&id], row)?;
             Ok((r, true))
         })
@@ -1178,6 +1211,16 @@ impl Store {
                     id
                 ],
             )?;
+            // What a follower of the events hears: up (ready, or asleep once up) after a push or a
+            // first deploy, never a sleeping preview waking; failed, once until it moves.
+            let kind = match (old.state, new.state) {
+                (State::Creating | State::Updating, State::Ready | State::Sleeping) => Some("ready"),
+                (o, State::Failed) if o != State::Failed => Some("failed"),
+                _ => None,
+            };
+            if let Some(kind) = kind {
+                emit(c, now, kind, &new.project_id, id, new.change_id.as_deref(), &serde_json::json!({ "head": new.head }))?;
+            }
             Ok(new)
         })
     }
@@ -1194,7 +1237,12 @@ impl Store {
 
     /// Remove a preview's rows (after its branches and services are gone).
     pub fn remove(&self, id: &str) -> Result<()> {
+        let now = self.now_ms()?;
         self.db.write(|c| {
+            let gone = c.query_row("SELECT project_id, change_id, head FROM previews WHERE id = ?", [id], |r| Ok((r.get::<_, String>(0)?, r.get::<_, Option<String>>(1)?, r.get::<_, String>(2)?))).optional()?;
+            if let Some((project, change, head)) = gone {
+                emit(c, now, "deleted", &project, id, change.as_deref(), &serde_json::json!({ "head": head }))?;
+            }
             for t in ["resources", "services", "pinned", "shares", "visit_tickets", "visit_sessions", "visits", "activity", "screenshots", "page_shots", "visual_page_accepts", "mail", "resolved_notes", "base_history", "leases", "note_crops", "git_pulls", "git_reports", "runtime_facts", "gone_pushes", "previews"] {
                 let col = if t == "previews" { "id" } else { "preview_id" };
                 c.execute(&format!("DELETE FROM {t} WHERE {col} = ?"), [id])?;
@@ -1203,6 +1251,41 @@ impl Store {
             c.execute("DELETE FROM env_refs WHERE scope = ?", [format!("preview:{id}")])?;
             Ok::<_, Error>(())
         })
+    }
+
+    /// The events after `after`, oldest first, at most `limit` (`GET /v1/previews/events`).
+    pub fn events(&self, after: i64, limit: usize) -> Result<Vec<crate::Event>> {
+        Ok(self.db.read(|c| {
+            c.query(
+                "SELECT seq, at, kind, project_id, preview_id, change_id, data FROM events WHERE seq > ? ORDER BY seq LIMIT ?",
+                params![after, limit as i64],
+                |r| {
+                    let data: String = r.get(6)?;
+                    Ok(crate::Event { seq: r.get(0)?, at: r.get(1)?, kind: r.get(2)?, project: r.get(3)?, preview: r.get(4)?, change: r.get(5)?, data: serde_json::from_str(&data).unwrap_or_default() })
+                },
+            )
+        })?)
+    }
+
+    /// Record `kind` for preview `id` at `head` unless it's recorded already (`visual_change`:
+    /// once a head, however often it's reported).
+    pub fn emit_once(&self, id: &str, kind: &str, head: &str) -> Result<()> {
+        let now = self.now_ms()?;
+        let data = serde_json::json!({ "head": head });
+        self.db.write(|c| {
+            let Some((project, change)) = c.query_row("SELECT project_id, change_id FROM previews WHERE id = ?", [id], |r| Ok((r.get::<_, String>(0)?, r.get::<_, Option<String>>(1)?))).optional()? else { return Ok(()) };
+            let had: Option<i64> = c.query_row("SELECT seq FROM events WHERE preview_id = ? AND kind = ? AND data = ?", params![id, kind, data.to_string()], |r| r.get(0)).optional()?;
+            if had.is_none() {
+                emit(c, now, kind, &project, id, change.as_deref(), &data)?;
+            }
+            Ok::<_, Error>(())
+        })
+    }
+
+    /// The newest event's seq (0 for none): where a follower that wants only what comes next
+    /// starts.
+    pub fn latest_event(&self) -> Result<i64> {
+        Ok(self.db.read(|c| c.query_row("SELECT COALESCE(MAX(seq), 0) FROM events", (), |r| r.get(0)))?)
     }
 
     /// A change's preview was deleted while the change stays open (its TTL ran out, or someone
@@ -1392,6 +1475,25 @@ impl Store {
             .db
             .read(|c| c.query_row("SELECT mask_digest FROM resources WHERE preview_id = ? AND kind = ? AND parent = ?", [id, kind.as_str(), parent], |r| r.get(0)).optional())?
             .flatten())
+    }
+
+    /// A branch's schema lines as it was made, if kept ([`crate::schema::diff_since`]).
+    pub fn base_schema(&self, id: &str, kind: Kind, parent: &str) -> Result<Option<Vec<String>>> {
+        let json: Option<String> = self
+            .db
+            .read(|c| c.query_row("SELECT base_schema FROM resources WHERE preview_id = ? AND kind = ? AND parent = ?", [id, kind.as_str(), parent], |r| r.get(0)).optional())?
+            .flatten();
+        Ok(json.and_then(|j| serde_json::from_str(&j).ok()))
+    }
+
+    /// Keep a branch's schema lines as it was made, or none (a new branch whose read failed: its
+    /// changes are then compared with the parent alone, never with an older branch's lines).
+    pub fn set_base_schema(&self, id: &str, kind: Kind, parent: &str, lines: Option<&[String]>) -> Result<()> {
+        let json = lines.map(|l| serde_json::to_string(l).unwrap_or_default());
+        self.db.write(|c| {
+            c.execute("UPDATE resources SET base_schema = ? WHERE preview_id = ? AND kind = ? AND parent = ?", params![json, id, kind.as_str(), parent])?;
+            Ok::<_, Error>(())
+        })
     }
 
     pub fn set_mask_digest(&self, id: &str, kind: Kind, parent: &str, digest: &str) -> Result<()> {
@@ -2473,18 +2575,36 @@ impl Store {
     /// [`PINNED_KEEP`] latest per service. Returns the ones that no longer fit, by
     /// `<service>@<revision>`, whose containers go.
     pub fn pin(&self, id: &str, service: &str, revision: &str, url: &dyn Fn(&str) -> String) -> Result<Vec<String>> {
+        self.pin_at(id, service, revision, None, url)
+    }
+
+    /// [`Store::pin`] for a build its backend keeps at a URL of its own (roll apps' deployment
+    /// URL): nothing of roll previews' answers for it. Its host is kept as `apps:<host>`, which no
+    /// DNS label can be, so roll previews' proxy never takes a request as its.
+    pub fn pin_build(&self, id: &str, service: &str, revision: &str, own_url: &str) -> Result<Vec<String>> {
+        self.pin_at(id, service, revision, Some(own_url), &|_| String::new())
+    }
+
+    fn pin_at(&self, id: &str, service: &str, revision: &str, own_url: Option<&str>, url: &dyn Fn(&str) -> String) -> Result<Vec<String>> {
         let now = self.now_ms()?;
         self.db.write(|c| {
-            let slug: String = c.query_row("SELECT slug FROM previews WHERE id = ?", [id], |r| r.get(0))?;
-            let short: String = revision.strip_prefix("cs_").unwrap_or(revision).chars().take(10).collect();
-            let mut host = crate::label_part(&format!("{service}-{short}-{slug}"), 63);
-            if host_taken(c, &host)? {
-                host = format!("{}-{}", crate::label_part(&host, 58), &id[id.len() - 4..]);
-            }
+            let (host, url) = match own_url {
+                Some(u) => (format!("apps:{}", u.split("://").last().unwrap_or(u).split('/').next().unwrap_or(u)), u.to_string()),
+                None => {
+                    let slug: String = c.query_row("SELECT slug FROM previews WHERE id = ?", [id], |r| r.get(0))?;
+                    let short: String = revision.strip_prefix("cs_").unwrap_or(revision).chars().take(10).collect();
+                    let mut host = crate::label_part(&format!("{service}-{short}-{slug}"), 63);
+                    if host_taken(c, &host)? {
+                        host = format!("{}-{}", crate::label_part(&host, 58), &id[id.len() - 4..]);
+                    }
+                    let u = url(&host);
+                    (host, u)
+                }
+            };
             c.execute(
                 "INSERT INTO pinned (preview_id, service, revision, host, url, at) VALUES (?, ?, ?, ?, ?, ?) \
                  ON CONFLICT (preview_id, service, revision) DO UPDATE SET at = excluded.at",
-                params![id, service, revision, host, url(&host), now],
+                params![id, service, revision, host, url, now],
             )?;
             let old: Vec<String> = c.query(
                 "SELECT revision FROM pinned WHERE preview_id = ? AND service = ? ORDER BY at DESC LIMIT 1000 OFFSET ?",
@@ -2719,7 +2839,7 @@ impl Store {
     /// A link that opens the preview until `expires_at` (Vercel's shareable links), on a token of
     /// its own: only its SHA-256 is kept, so the token is in the answer once. At most
     /// [`SHARES_MAX`] live ones.
-    pub fn create_share(&self, id: &str, expires_at: i64, by: &str) -> Result<(crate::Share, String)> {
+    pub fn create_share(&self, id: &str, expires_at: i64, by: &str, maker: Option<&str>) -> Result<(crate::Share, String)> {
         let now = self.now_ms()?;
         let token = format!("rps_{}", new_token());
         let sid = format!("shr_{}", &new_token()[..12]);
@@ -2729,7 +2849,7 @@ impl Store {
             if live as usize >= SHARES_MAX {
                 return Err(Error::Conflict(format!("the preview has {SHARES_MAX} live share links: revoke one first")));
             }
-            c.execute("INSERT INTO shares (id, preview_id, hash, expires_at, created_by, created_at) VALUES (?, ?, ?, ?, ?, ?)", params![sid, id, hash, expires_at, by, now])?;
+            c.execute("INSERT INTO shares (id, preview_id, hash, expires_at, created_by, created_at, maker, maker_checked) VALUES (?, ?, ?, ?, ?, ?, ?, ?)", params![sid, id, hash, expires_at, by, now, maker, now])?;
             Ok::<_, Error>(())
         })?;
         Ok((crate::Share { id: sid, expires_at, created_by: by.to_string(), created_at: now, revoked: false }, token))
@@ -2749,6 +2869,25 @@ impl Store {
         if n == 0 {
             return Err(Error::NotFound(format!("no share link {share}")));
         }
+        Ok(())
+    }
+
+    /// A live share link `token` of preview `id` (not revoked, not past).
+    pub fn share_live(&self, id: &str, token: &str) -> Result<Option<LiveShare>> {
+        let now = self.now_ms()?;
+        Ok(self.db.read(|c| {
+            c.query_row(
+                "SELECT id, expires_at, maker, maker_checked FROM shares WHERE preview_id = ? AND hash = ? AND revoked = 0 AND expires_at > ?",
+                params![id, bypass_hash(token), now],
+                |r| Ok(LiveShare { id: r.get(0)?, ends: r.get(1)?, maker: r.get(2)?, maker_checked: r.get(3)? }),
+            )
+            .optional()
+        })?)
+    }
+
+    /// A share link's maker was just asked about (and still may).
+    pub fn share_maker_checked(&self, share: &str, now: i64) -> Result<()> {
+        self.db.write(|c| c.execute("UPDATE shares SET maker_checked = ? WHERE id = ?", params![now, share]).map(drop))?;
         Ok(())
     }
 
@@ -3152,6 +3291,22 @@ pub struct GonePush {
 /// How many of a preview's evicted pushes still say they're gone.
 pub const GONE_KEPT: usize = 30;
 
+/// How long an event is kept for followers (`GET /v1/previews/events`).
+const EVENTS_KEEP_MS: i64 = 7 * 24 * 3_600_000;
+
+/// Record an event in the write that made it so. Its `seq` is taken inside that write (never a
+/// sequence, whose values are handed out outside it), so on Postgres two writers conflict and one
+/// re-runs: commit order is seq order, and a follower past one never misses an earlier one.
+fn emit(c: &Conn<'_>, at: i64, kind: &str, project: &str, preview: &str, change: Option<&str>, data: &serde_json::Value) -> code_sql::Result<()> {
+    let seq: i64 = c.query_row("SELECT COALESCE(MAX(seq), 0) + 1 FROM events", (), |r| r.get(0))?;
+    c.execute(
+        "INSERT INTO events (seq, at, kind, project_id, preview_id, change_id, data) VALUES (?, ?, ?, ?, ?, ?, ?)",
+        params![seq, at, kind, project, preview, change, data.to_string()],
+    )?;
+    c.execute("DELETE FROM events WHERE at < ?", [at - EVENTS_KEEP_MS])?;
+    Ok(())
+}
+
 fn append(c: &Conn<'_>, id: &str, at: i64, message: &str) -> code_sql::Result<()> {
     let seq: i64 = c.query_row("SELECT COALESCE(MAX(seq), 0) + 1 FROM activity WHERE preview_id = ?", [id], |r| r.get(0))?;
     let message: String = message.chars().take(2000).collect();
@@ -3232,12 +3387,12 @@ mod tests {
         let (row, _) = store.create(&new("chg_share")).unwrap();
         let id = row.id.as_str();
         let now = store.now_ms().unwrap();
-        let (share, token) = store.create_share(id, now + 3_600_000, "ada").unwrap();
+        let (share, token) = store.create_share(id, now + 3_600_000, "ada", None).unwrap();
         assert!(token.starts_with("rps_") && share.id.starts_with("shr_"));
         assert_eq!(store.share_ends(id, &token).unwrap(), Some(now + 3_600_000));
         assert_eq!(store.share_ends("pv_other", &token).unwrap(), None, "another preview");
         assert_eq!(store.share_ends(id, "rps_guess").unwrap(), None);
-        let (_, ended) = store.create_share(id, now - 1, "ada").unwrap();
+        let (_, ended) = store.create_share(id, now - 1, "ada", None).unwrap();
         assert_eq!(store.share_ends(id, &ended).unwrap(), None, "past its end");
         store.revoke_share(id, &share.id).unwrap();
         assert_eq!(store.share_ends(id, &token).unwrap(), None, "revoked");

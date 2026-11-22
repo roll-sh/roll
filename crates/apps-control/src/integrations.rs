@@ -128,13 +128,16 @@ pub trait SecretSource: Send + Sync {
     /// [`SecretSource::resolve`] gives them. `maker`: who closed the environment (its placeholders
     /// swap only while they may reveal there; none, the project's owner). When they can't, the
     /// keys bound to hosts are withheld and `notice` says so.
-    async fn resolve_closed(&self, project: &str, env: &str, service: &str, _maker: Option<&str>) -> anyhow::Result<ClosedSecrets> {
+    /// `mint`: placeholders made for instances (a deploy); else (a listing, a staleness check) a
+    /// key bound to hosts comes as a marker with its binding, and nothing is made or read.
+    async fn resolve_closed(&self, project: &str, env: &str, service: &str, _maker: Option<&str>, _mint: bool) -> anyhow::Result<ClosedSecrets> {
         Ok(ClosedSecrets { vars: self.resolve(project, env, service).await?, notice: None })
     }
     /// A closed environment's interception, when its secrets have placeholders: the CA its
     /// instances trust and the step its egress proxy runs for a host the keys are bound to. One
     /// a project environment (the consumer `apps:<project>/<env>`), the same one while it stands.
-    async fn intercept(&self, _project: &str, _env: &str) -> anyhow::Result<Option<Intercept>> {
+    /// `hosts`: what its placeholders are bound to now (a CA that names fewer is made again).
+    async fn intercept(&self, _project: &str, _env: &str, _hosts: &[String]) -> anyhow::Result<Option<Intercept>> {
         Ok(None)
     }
     /// The project environment's placeholders and interception ended (it's deleted or opened).
@@ -379,7 +382,13 @@ pub struct SecretVar {
     /// A link field roll secrets says isn't a credential (`Values.plain`: a host, a port, a user,
     /// a database): logs may show it. Every other value from roll secrets is a secret.
     pub plain: bool,
+    /// A closed environment's placeholder: the hosts it's bound to (sorted, `,` between). What
+    /// decides whether a deployment is stale, never the placeholder's text (a new one each time).
+    pub binding: Option<String>,
 }
+
+/// A link's options, as roll secrets' links take them (`roll_secrets::links::Link::options`).
+pub type LinkOptions = serde_json::Map<String, serde_json::Value>;
 
 /// Who asks for variables' values: what rolld's gate put on the request.
 #[derive(Clone, Copy, Default)]
@@ -423,7 +432,10 @@ pub trait Resources: Send + Sync {
     /// A new link's own credentials, made once when the link is made and kept sealed with it
     /// (a search cluster's API key for this service): `None` for a kind whose variables are
     /// read fresh with [`Resources::link_vars`] (a database's own URL).
-    async fn link(&self, _kind: LinkKind, _ref: &str, _service: &str) -> anyhow::Result<Option<Minted>> {
+    ///
+    /// `options` narrow what's made, as roll secrets' link options say (a search key's `names`,
+    /// its indices, and `permission`, `read` or `append`).
+    async fn link(&self, _kind: LinkKind, _ref: &str, _service: &str, _options: &LinkOptions) -> anyhow::Result<Option<Minted>> {
         Ok(None)
     }
     /// Revoke what [`Resources::link`] made (`kept`: what it said to keep, a key's id) when

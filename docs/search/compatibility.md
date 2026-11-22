@@ -1446,6 +1446,31 @@ as given), the multimodal `embedding` task type and the new `semantic` field typ
 a `text_similarity_reranker` inside a compound retriever, its `chunk_rescorer`, and the reranker's
 explanation and profile details.
 
+## Connectors (`_connector`)
+
+roll runs the syncs of Elastic-managed (`is_native: true`) `postgresql` and `s3` connectors
+(docs/search/architecture.md, "Connectors"); every other connector behaves as on Elasticsearch
+9.5.5, its jobs moved by the tenant's own connector service. Where a connector roll runs differs:
+
+- Its `sensitive` configuration values (`password`, `aws_secret_access_key`) are sealed at rest
+  and shown as `********` in `GET _connector`, its list and job snapshots; writing `********`
+  back keeps the stored value. Elasticsearch returns them in the clear. A node without
+  `ROLL_SECRET_KEY` refuses to store one (400, naming `ROLL_SECRET_KEY`). Changing where a
+  credential goes (a Postgres `host`, `port`, `username`, `database` or TLS setting; an S3
+  `endpoint`, `region`, access key id or `buckets`) without giving it again clears it and sets
+  the connector to `needs_configuration`.
+- `postgresql` has incremental syncs (Elastic's has none) through roll's `incremental_column`;
+  advanced sync rules (custom SQL) aren't supported yet and make a draft `invalid`.
+- `s3` takes roll's `endpoint` and `region` (any S3-compatible store), not `buckets: *`, and
+  incremental syncs (objects modified since the last sync). Text comes from plain text, JSON,
+  HTML and XML only: roll has no `attachment` processor, so PDFs and Office files are indexed
+  by their metadata.
+- A connector a branch inherited, or a native one a cluster held before roll ran syncs, waits:
+  its jobs stay `pending` until the connector is put again or its configuration written, and
+  that write keeps only the credentials it gives.
+- Access control syncs fail (neither service syncs permissions on Elastic either). A job's
+  `indexed_document_volume` is in MiB, as Elastic's connectors report it.
+
 ## Per area
 
 `roll` = baseline tests roll passes, `ES` = tests passing on Elasticsearch 9.5.5. The most
@@ -1709,13 +1734,44 @@ the rest are skipped by the tests' own prerequisites.
   Elasticsearch has no limit). The 1,001st fails as OpenSearch 3.9 refuses one past
   `search.max_open_pit_context` (a 429 `rejected_execution_exception`), which
   OpenSearch-flavor clusters now enforce.
-- By-query tasks (`wait_for_completion=false`) run to completion before their task id is
-  returned (their results are stored in the `.tasks` system index), so they are not
-  throttled and `_rethrottle` doesn't reach them; synchronous requests are throttled by
-  `requests_per_second`.
-- Reindex from remote reads over plain HTTP (no TLS client) and needs
-  `reindex.remote.whitelist` (node setting, `search-dev --yaml-test-cluster` sets
-  `127.0.0.1:*`); an empty whitelist rejects every remote, as in Elasticsearch.
+- By-query tasks (`wait_for_completion=false`) run in the background on a served cluster, as
+  in Elasticsearch: `_tasks` shows their status, `_rethrottle` changes their rate and a cancel
+  stops them at once (also mid-throttle or while a remote is slow to answer); their results are
+  stored in the `.tasks` system index. Only a cluster embedded without a background handle
+  (search-es' own tests) runs them before returning the task id.
+- Reindex from remote reads the remote as Elasticsearch 9.5.5 does: a point in time with
+  `search_after` from 7.10 on (`_shard_doc` from 7.12), a scroll before that and for OpenSearch
+  (whose version numbers read as old Elasticsearch ones), one page in memory at a time, over HTTP
+  or HTTPS (the platform's roots plus `reindex.ssl.certificate_authorities`, with
+  `reindex.ssl.verification_mode`). A remote must be in `reindex.remote.whitelist`, as in
+  Elasticsearch (unset or empty refuses every remote); on roll it's the cluster's own setting
+  (README.md, "Migrating into roll"), the node setting otherwise. Differences, because the remote
+  is a URL a tenant chose and a node serves many tenants:
+  - names resolve to public addresses only, and private literals and `localhost` are refused,
+    unless the node sets `roll.reindex.remote.allow_private_hosts` (rolld's
+    `--search-reindex-allow-private`); `reindex.remote.blocklist` also holds rolld's own
+    endpoints;
+  - no redirect is followed (its status comes back as the `status_exception`);
+  - each answer is read to at most `roll.reindex.remote.buffer_limit`, 16 MiB rather than the
+    REST client's 100 MiB (past it, Elasticsearch's own error), and charged to a node-wide budget
+    rather than the request breaker (past it, a 429 `circuit_breaking_exception`); a page's hits
+    are scanned, never parsed into a tree; a scroll or point-in-time id is kept up to 4 KiB;
+  - addresses the node denies (`roll.reindex.remote.deny_addresses` and the names in
+    `roll.reindex.remote.deny_names`: rolld's own) are refused, checked on the address each
+    connection uses; the lists match the host as the client connects to it (percent-decoded,
+    IDNA-mapped); `source.remote.headers` can't set `Host` or a pseudo-header;
+  - a page with more hits than the `size` asked for is refused;
+  - at most 2 tasks per cluster and 4 per node run at once (a 429
+    `es_rejected_execution_exception` past them), and a task stops after
+    `roll.reindex.remote.max_duration` (24h; its `canceled` reason says so);
+  - a request's whole exchange is capped at 10 minutes, whatever `socket_timeout` (which bounds
+    each read) says; an HTTPS remote's default `connect_timeout` is 5s rather than 1s (it covers
+    the TLS handshake too);
+  - an error never quotes the remote's answer to a request that carried credentials: the
+    `status_exception`'s reason and its `response_exception` cause say the answer isn't shown
+    (Elasticsearch puts the body there, `body=…`); status, types and the status line are as
+    Elasticsearch's.
+  `search-dev --yaml-test-cluster` sets the whitelist to `127.0.0.1:*` and allows private hosts.
 - Segment generations in `_segments` / `_cat/segments` number the current segments.
 - Remote clusters (`cluster.remote.<alias>.*`) reach another roll search cluster of the same
   owner with API key based security (README.md, "Cross-cluster search"), or the node itself
@@ -1919,7 +1975,10 @@ the rest are skipped by the tests' own prerequisites.
 - x-pack (`crates/search-es/src/xpack/`): security (native realm, API keys, tokens, role
   mappings, privileges, request authorization), ES|QL, SQL, EQL, enrich, transforms, async
   search, ILM, search applications, query rules, connectors, graph, terms enum, text structure
-  and watcher run for real (watches fire on the cluster's job scheduler and wake a sleeping
+  and watcher run for real (roll runs the syncs of Elastic-managed `postgresql` and `s3`
+  connectors, on demand and on their schedules, as Elastic Cloud runs native connectors:
+  architecture.md "Connectors"; self-managed connectors are left to the tenant's connector
+  service; watches fire on the cluster's job scheduler and wake a sleeping
   cluster; `http` inputs and webhooks reach public addresses only; email, Slack, PagerDuty and
   Jira actions are simulated but never sent); ML jobs/datafeeds/trained models, logstash pipelines, searchable
   snapshots, migration, SSL certificates and streams keep their stored objects, validation,

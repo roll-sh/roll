@@ -338,8 +338,37 @@ CREATE TABLE IF NOT EXISTS error_groups (
     first_seen INTEGER NOT NULL,
     PRIMARY KEY (service, env, fingerprint)
 ) WITHOUT ROWID;
--- Who started a deployment, as a person (their session's, their own token's, the operator's): what
--- an approval is compared with.
+-- Environments' private networks into the customer's own (`peering.rs`): the WireGuard
+-- config's or Tailscale auth key's roll:// reference and who it's read as, never the value; its
+-- routes as JSON. kind: `wireguard`, `tailscale`, or `tailscale <login server URL>`.
+CREATE TABLE IF NOT EXISTS env_peering (
+    service TEXT NOT NULL,
+    env TEXT NOT NULL,
+    kind TEXT NOT NULL,
+    secret TEXT NOT NULL,
+    maker TEXT NOT NULL,
+    routes TEXT NOT NULL,
+    PRIMARY KEY (service, env)
+) WITHOUT ROWID;
+-- Deployments whose instances run closed (egress roll: placeholders and interception), so any
+-- node can tell whether a project environment still uses its placeholders.
+CREATE TABLE IF NOT EXISTS deploy_closed (
+    deployment TEXT PRIMARY KEY
+) WITHOUT ROWID;
+-- Sandboxes (short-lived containers made by API, `sandboxes.rs`): each one's container and its end.
+CREATE TABLE IF NOT EXISTS sandboxes (
+    id TEXT PRIMARY KEY,
+    service TEXT NOT NULL,
+    env TEXT NOT NULL,
+    name TEXT NOT NULL,
+    image TEXT NOT NULL,
+    cpu REAL NOT NULL,
+    memory_mb INTEGER NOT NULL,
+    variables INTEGER NOT NULL,
+    network TEXT NOT NULL,
+    created_at INTEGER NOT NULL,
+    expires_at INTEGER NOT NULL
+) WITHOUT ROWID;
 -- Branches whose delete failed, tried again each minute until it works.
 CREATE TABLE IF NOT EXISTS orphan_branches (
     kind TEXT NOT NULL,
@@ -383,6 +412,8 @@ CREATE TABLE IF NOT EXISTS deploy_edge (
     deployment TEXT PRIMARY KEY,
     file TEXT NOT NULL
 ) WITHOUT ROWID;
+-- Who started a deployment, as a person (their session's, their own token's, the operator's): what
+-- an approval is compared with.
 CREATE TABLE IF NOT EXISTS deploy_people (
     deployment TEXT PRIMARY KEY,
     person TEXT NOT NULL
@@ -918,6 +949,7 @@ fn deploy_row(r: &code_sql::Row<'_>) -> code_sql::Result<Deployment> {
         fix,
         steps: Vec::new(),
         approved_by: Vec::new(),
+        url: None,
     })
 }
 
@@ -1002,6 +1034,8 @@ impl Store {
         db.add_column("environments", "secrets_seen", "TEXT")?;
         db.add_column("environments", "feedback", "INTEGER NOT NULL DEFAULT 0")?;
         db.add_column("links", "minted", "TEXT")?;
+        // A link's options (a search key's indices and access), as JSON: what its key was made with.
+        db.add_column("links", "options", "TEXT")?;
         db.add_column("environments", "maintenance", "TEXT")?;
         db.add_column("environments", "allow_ips", "TEXT")?;
         db.add_column("environments", "rate_limit", "TEXT")?;
@@ -1155,7 +1189,7 @@ impl Store {
             c.execute("DELETE FROM deploy_steps WHERE deployment IN (SELECT id FROM deployments WHERE service = ?)", [id])?;
             c.execute("DELETE FROM state WHERE key LIKE ?", [format!("%:{id}/%")])?;
             c.execute("DELETE FROM status_days WHERE key LIKE ?", [format!("%:{id}/%")])?;
-            for t in ["environments", "deployments", "deploy_keys", "fences", "env_access", "registry_auth", "git_auth", "git_github", "github_events", "trace_ingest", "runtime_config", "oidc_access", "variable_makers", "variable_runtime_only", "visit_tickets", "visit_sessions", "variable_files", "error_groups", "variables", "links", "domains", "preview_hosts", "runs", "jobs", "metrics", "usage", "form_submissions", "deploy_scans", "env_data", "env_branches", "udp_ports", "env_unscheduled"] {
+            for t in ["environments", "deployments", "deploy_keys", "fences", "env_access", "registry_auth", "git_auth", "git_github", "github_events", "trace_ingest", "runtime_config", "oidc_access", "variable_makers", "variable_runtime_only", "visit_tickets", "visit_sessions", "variable_files", "error_groups", "variables", "links", "domains", "preview_hosts", "runs", "jobs", "metrics", "usage", "form_submissions", "deploy_scans", "env_data", "env_branches", "udp_ports", "env_unscheduled", "sandboxes", "env_peering"] {
                 c.execute(&format!("DELETE FROM {t} WHERE service = ?"), [id])?;
             }
             match c.execute("DELETE FROM services WHERE id = ?", [id])? {
@@ -1295,7 +1329,7 @@ impl Store {
             if n == 0 {
                 return Err(Error::NotFound(format!("service {service} has no environment {env}")));
             }
-            for t in ["variables", "variable_files", "error_groups", "domains", "preview_hosts", "runs", "jobs", "metrics", "deploy_keys", "env_access", "trace_ingest", "runtime_config", "oidc_access", "variable_makers", "variable_runtime_only", "visit_tickets", "visit_sessions", "form_submissions", "env_data", "udp_ports", "env_unscheduled"] {
+            for t in ["variables", "variable_files", "error_groups", "domains", "preview_hosts", "runs", "jobs", "metrics", "deploy_keys", "env_access", "trace_ingest", "runtime_config", "oidc_access", "variable_makers", "variable_runtime_only", "visit_tickets", "visit_sessions", "form_submissions", "env_data", "udp_ports", "env_unscheduled", "sandboxes", "env_peering"] {
                 c.execute(&format!("DELETE FROM {t} WHERE service = ? AND env = ?"), [service, env])?;
             }
             // Its schedules', challenge's and base images' state goes with it.
@@ -2156,16 +2190,38 @@ impl Store {
 
     /// Make or update a link. A credential the link already has stays (two requests making it
     /// at once both minted one; the first stored wins): whether `minted` is the one it keeps.
-    pub fn put_link(&self, service: &str, kind: LinkKind, r#ref: &str, prefix: &str, minted: Option<&crate::integrations::Minted>) -> Result<bool> {
+    pub fn put_link(&self, service: &str, kind: LinkKind, r#ref: &str, prefix: &str, minted: Option<&crate::integrations::Minted>, options: &str) -> Result<bool> {
         let sealed = minted.map(|m| self.sealer.seal(&format!("link:{service}:{}:{ref}", kind.as_str()), &serde_json::to_string(m).expect("JSON")));
         self.db.write(|c| {
+            // The options go with the credential the link keeps.
             c.execute(
-                "INSERT INTO links (service, kind, ref, prefix, minted) VALUES (?, ?, ?, ?, ?) ON CONFLICT (service, kind, ref) DO UPDATE SET prefix = excluded.prefix, minted = COALESCE(links.minted, excluded.minted)",
-                params![service, kind.as_str(), r#ref, prefix, sealed],
+                "INSERT INTO links (service, kind, ref, prefix, minted, options) VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT (service, kind, ref) DO UPDATE SET prefix = excluded.prefix, options = CASE WHEN links.minted IS NULL THEN excluded.options ELSE links.options END, minted = COALESCE(links.minted, excluded.minted)",
+                params![service, kind.as_str(), r#ref, prefix, sealed, options],
             )?;
             let kept: Option<String> = c.query_row("SELECT minted FROM links WHERE service = ? AND kind = ? AND ref = ?", [service, kind.as_str(), r#ref], |r| r.get(0))?;
             Ok(sealed.is_none() || kept == sealed)
         })
+    }
+
+    /// A link's credential swapped for one made with other options, if it still has the one
+    /// whose handles are `was` (a compare-and-swap: two changes at once can't both replace it).
+    pub fn swap_link_minted(&self, service: &str, kind: LinkKind, r#ref: &str, was: &str, minted: &crate::integrations::Minted, options: &str) -> Result<bool> {
+        let aad = format!("link:{service}:{}:{ref}", kind.as_str());
+        let sealed = self.sealer.seal(&aad, &serde_json::to_string(minted).expect("JSON"));
+        self.db.write(|c| {
+            let now: Option<Option<String>> = c.query_row("SELECT minted FROM links WHERE service = ? AND kind = ? AND ref = ?", [service, kind.as_str(), r#ref], |r| r.get(0)).optional()?;
+            let kept = now.flatten().map(|s| self.sealer.open(&aad, &s)).transpose()?.and_then(|j| serde_json::from_str::<crate::integrations::Minted>(&j).ok()).map(|m| m.kept);
+            if kept.as_deref() != Some(was) {
+                return Ok(false);
+            }
+            c.execute("UPDATE links SET minted = ?, options = ? WHERE service = ? AND kind = ? AND ref = ?", params![sealed, options, service, kind.as_str(), r#ref])?;
+            Ok(true)
+        })
+    }
+
+    /// Each of a service's links' options (JSON), by kind and ref.
+    pub fn link_options(&self, service: &str) -> Result<std::collections::HashMap<(String, String), String>> {
+        Ok(self.db.query("SELECT kind, ref, COALESCE(options, '{}') FROM links WHERE service = ?", [service], |r| Ok(((r.get(0)?, r.get(1)?), r.get(2)?)))?.into_iter().collect())
     }
 
     /// Every link to a resource that's gone (a service being deleted): how many there were.
@@ -3406,6 +3462,110 @@ impl Store {
             let counted = all.iter().filter(|a| Some(a.as_str()) != author).count() as u32;
             Ok((all, fresh && counted == needed))
         })
+    }
+
+    /// A sandbox made, if its environment has fewer than `max` (one write: two at once can't
+    /// both take the last place).
+    pub fn add_sandbox(&self, s: &crate::sandboxes::Sandbox, name: &str, max: usize) -> Result<bool> {
+        self.db.write(|c| {
+            let n: i64 = c.query_row("SELECT COUNT(*) FROM sandboxes WHERE service = ? AND env = ?", [&s.service, &s.environment], |r| r.get(0))?;
+            if n as usize >= max {
+                return Ok(false);
+            }
+            c.execute(
+                "INSERT INTO sandboxes (id, service, env, name, image, cpu, memory_mb, variables, network, created_at, expires_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                params![s.id, s.service, s.environment, name, s.image, s.cpu, s.memory_mb, s.variables as i64, s.network, s.created_at, s.expires_at],
+            )?;
+            Ok::<_, Error>(true)
+        })
+    }
+
+    /// An environment's sandboxes (every owned one past `expired_before` with None), and each one's container.
+    pub fn sandboxes(&self, service: Option<&str>, env: Option<&str>, expired_before: Option<i64>) -> Result<Vec<(crate::sandboxes::Sandbox, String)>> {
+        let row = |r: &code_sql::Row<'_>| -> code_sql::Result<(crate::sandboxes::Sandbox, String)> {
+            Ok((
+                crate::sandboxes::Sandbox {
+                    id: r.get(0)?,
+                    service: r.get(1)?,
+                    environment: r.get(2)?,
+                    image: r.get(4)?,
+                    cpu: r.get(5)?,
+                    memory_mb: r.get::<_, i64>(6)? as u32,
+                    variables: r.get::<_, i64>(7)? != 0,
+                    network: r.get(8)?,
+                    created_at: r.get(9)?,
+                    expires_at: r.get(10)?,
+                },
+                r.get(3)?,
+            ))
+        };
+        const COLS: &str = "id, service, env, name, image, cpu, memory_mb, variables, network, created_at, expires_at";
+        Ok(match (service, env, expired_before) {
+            (Some(s), Some(e), _) => self.db.query(&format!("SELECT {COLS} FROM sandboxes WHERE service = ? AND env = ? ORDER BY created_at"), [s, e], row)?,
+            (Some(s), None, _) => self.db.query(&format!("SELECT {COLS} FROM sandboxes WHERE service = ? ORDER BY created_at"), [s], row)?,
+            (None, _, Some(t)) => self.db.query(&format!("SELECT {COLS} FROM sandboxes WHERE expires_at <= ? ORDER BY expires_at"), [t], row)?,
+            (None, _, None) => self.db.query(&format!("SELECT {COLS} FROM sandboxes ORDER BY created_at"), (), row)?,
+        })
+    }
+
+    pub fn set_peering(&self, service: &str, env: &str, p: &crate::peering::PrivateNetwork, maker: &str) -> Result<()> {
+        let routes = serde_json::to_string(&p.routes).map_err(|e| Error::Internal(e.to_string()))?;
+        self.db.execute(
+            "INSERT INTO env_peering (service, env, kind, secret, maker, routes) VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT (service, env) DO UPDATE SET kind = excluded.kind, secret = excluded.secret, maker = excluded.maker, routes = excluded.routes",
+            params![service, env, crate::peering::kind_column(p), p.secret, maker, routes],
+        )?;
+        Ok(())
+    }
+
+    /// An environment's private network and who its reference is read as.
+    pub fn peering(&self, service: &str, env: &str) -> Result<Option<(crate::peering::PrivateNetwork, String)>> {
+        Ok(self.db.query_row("SELECT kind, secret, maker, routes FROM env_peering WHERE service = ? AND env = ?", [service, env], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?, r.get::<_, String>(3)?))).optional()?.map(|(kind, secret, maker, routes)| {
+            let (kind, login_server) = crate::peering::from_kind_column(&kind);
+            (crate::peering::PrivateNetwork { kind, secret, routes: serde_json::from_str(&routes).unwrap_or_default(), login_server }, maker)
+        }))
+    }
+
+    /// Every environment with a private network: (service, env).
+    pub fn peerings(&self) -> Result<Vec<(String, String)>> {
+        Ok(self.db.query("SELECT service, env FROM env_peering", (), |r| Ok((r.get(0)?, r.get(1)?)))?)
+    }
+
+    pub fn delete_peering(&self, service: &str, env: &str) -> Result<bool> {
+        Ok(self.db.execute("DELETE FROM env_peering WHERE service = ? AND env = ?", [service, env])? > 0)
+    }
+
+    pub fn mark_deploy_closed(&self, deployment: &str) -> Result<()> {
+        self.db.execute("INSERT INTO deploy_closed (deployment) VALUES (?) ON CONFLICT (deployment) DO NOTHING", [deployment])?;
+        Ok(())
+    }
+
+    /// Whether any service of `project` is closed in `env`: its environment's row, the live
+    /// deployment it runs (one deployed closed before it was opened), or one of `draining` (still
+    /// finishing its requests) that was deployed closed.
+    pub fn closed_in_use(&self, project: &str, env: &str, draining: &[String]) -> Result<bool> {
+        for d in draining {
+            let n: i64 = self.db.query_row("SELECT COUNT(*) FROM deploy_closed WHERE deployment = ?", [d], |r| r.get(0))?;
+            if n > 0 {
+                return Ok(true);
+            }
+        }
+        for svc in self.services(Some(project))? {
+            let Ok(row) = self.environment(&svc.id, env) else { continue };
+            if row.egress.closed() {
+                return Ok(true);
+            }
+            if let Some(active) = row.active {
+                let n: i64 = self.db.query_row("SELECT COUNT(*) FROM deploy_closed WHERE deployment = ?", [&active], |r| r.get(0))?;
+                if n > 0 {
+                    return Ok(true);
+                }
+            }
+        }
+        Ok(false)
+    }
+
+    pub fn delete_sandbox(&self, id: &str) -> Result<bool> {
+        Ok(self.db.execute("DELETE FROM sandboxes WHERE id = ?", [id])? > 0)
     }
 
     pub fn add_orphan_branch(&self, kind: LinkKind, r#ref: &str, kept: &str) -> Result<()> {

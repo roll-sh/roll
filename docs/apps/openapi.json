@@ -56,11 +56,11 @@
     },
     "/v1/apps/events": {
       "get": {
-        "description": "Answers `{ events: Event[], next }`: what happened to services, in order, after a cursor.",
+        "description": "Answers `{ events: Event[], next }`: what happened to services, in order, after a cursor; `latest=1` (never with `after`: 400) answers no events and the newest cursor, for a reader that starts from now.",
         "operationId": "getEvents",
         "responses": {
           "200": {
-            "description": "`{ events: Event[], next }`: what happened to services, in order, after a cursor"
+            "description": "`{ events: Event[], next }`: what happened to services, in order, after a cursor; `latest=1` (never with `after`: 400) answers no events and the newest cursor, for a reader that starts from now"
           },
           "4XX": {
             "$ref": "#/components/responses/Error"
@@ -3190,6 +3190,123 @@
         "x-roll-action": "read"
       }
     },
+    "/v1/apps/services/{id}/environments/{env}/private-network": {
+      "delete": {
+        "description": "Answers 204 (its peer and forwarders stop now).",
+        "operationId": "deleteServicesIdEnvironmentsEnvPrivateNetwork",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "env",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "204 (its peer and forwarders stop now)"
+          },
+          "4XX": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "summary": "Delete private network",
+        "tags": [
+          "services"
+        ],
+        "x-roll-action": "admin"
+      },
+      "get": {
+        "description": "Answers `PrivateNetwork` (404 none).",
+        "operationId": "getServicesIdEnvironmentsEnvPrivateNetwork",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "env",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "`PrivateNetwork` (404 none)"
+          },
+          "4XX": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "summary": "Get private network",
+        "tags": [
+          "services"
+        ],
+        "x-roll-action": "read"
+      },
+      "put": {
+        "description": "Answers `PrivateNetwork` (its peer made now when something is deployed).",
+        "operationId": "putServicesIdEnvironmentsEnvPrivateNetwork",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "env",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object"
+              }
+            }
+          },
+          "description": "`{ secret, routes, kind?, login_server? }` (a private network into the customer's own, Cloud Run's Direct VPC egress and Fly's WireGuard peering: `secret` is `roll://<this env>/…`, the WireGuard config in roll secrets, bound to whoever sets it and read as them at each use (400 another environment's, 403 one they may not reveal); the config must be one `[Interface]` with an `Address` and `[Peer]`s: `PostUp`/`PostDown`/`PreUp`/`PreDown`, `DNS`, `Table`, `FwMark` and a full tunnel (`AllowedIPs` `0.0.0.0/0` or `::/0`) are 400s, said without the config's text; `routes`: 1–20 `{ name, target }`, `name` a DNS name with a dot (`db.corp.internal`) that answers on the project network, `target` `host:port` in the customer's network, each port its own (400), each name one service's in the project environment (409); `kind` `wireguard` (the default) or `tailscale`: the secret is then a Tailscale auth key (one token), the node userspace and ephemeral with no capability, its routes through its SOCKS5 server (a target may be a MagicDNS name), and `login_server` a Headscale control server's http(s) URL (one line, nothing a command line could split). A closed environment's peer answers on its closed network and reaches its endpoint through a network of its own)"
+        },
+        "responses": {
+          "200": {
+            "description": "`PrivateNetwork` (its peer made now when something is deployed)"
+          },
+          "4XX": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "summary": "Set private network",
+        "tags": [
+          "services"
+        ],
+        "x-roll-action": "admin (it reaches into the customer's network, read as the setter)"
+      }
+    },
     "/v1/apps/services/{id}/environments/{env}/promote": {
       "post": {
         "description": "Answers 202 `Deployment` (trigger `promote`: `from`'s live image, no build, with `env`'s variables; `rollback_of` names the promoted deployment).",
@@ -3647,6 +3764,329 @@
           "services"
         ],
         "x-roll-action": "read (they're the environment's log's lines)"
+      }
+    },
+    "/v1/apps/services/{id}/environments/{env}/sandboxes": {
+      "get": {
+        "description": "Answers `Sandbox[]`, oldest first.",
+        "operationId": "getServicesIdEnvironmentsEnvSandboxes",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "env",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "`Sandbox[]`, oldest first"
+          },
+          "4XX": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "summary": "List sandboxes",
+        "tags": [
+          "services"
+        ],
+        "x-roll-action": "read"
+      },
+      "post": {
+        "description": "Answers 201 `Sandbox`.",
+        "operationId": "postServicesIdEnvironmentsEnvSandboxes",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "env",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object"
+              }
+            }
+          },
+          "description": "`{ image?, ttl_s?, cpu?, memory_mb?, variables?, network? }` (a short-lived container to run commands in, Vercel Sandbox's and Fly Machines': the live deployment's image, or `image` (a public one); up for `ttl_s` (60–86400, default 600) then removed by the owner's minute sweep; `cpu` 0.25–4 (0.5), `memory_mb` 256–8192 (512), metered as a console for as long as it ran; `variables` (false): the live deployment's variables and files, as a console has them, its links reached through them; `network`: `none` (default: a network of its own, the internet and nothing of the project) or `environment` (its private network); a closed environment's are always on its network (`none` asked is a 400). At most 10 per environment (409); 409 with nothing deployed; 402 at the spend limit, 409 paused)"
+        },
+        "responses": {
+          "201": {
+            "description": "201 `Sandbox`"
+          },
+          "4XX": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "summary": "Create sandboxe",
+        "tags": [
+          "services"
+        ],
+        "x-roll-action": "admin (it runs anything, with the variables when asked, as a shell)"
+      }
+    },
+    "/v1/apps/services/{id}/environments/{env}/sandboxes/{sbx}": {
+      "delete": {
+        "description": "Answers 204 (stopped and removed now).",
+        "operationId": "deleteServicesIdEnvironmentsEnvSandboxesSbx",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "env",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "sbx",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "204 (stopped and removed now)"
+          },
+          "4XX": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "summary": "Delete sandboxe",
+        "tags": [
+          "services"
+        ],
+        "x-roll-action": "admin"
+      },
+      "get": {
+        "description": "Answers `Sandbox`.",
+        "operationId": "getServicesIdEnvironmentsEnvSandboxesSbx",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "env",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "sbx",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "`Sandbox`"
+          },
+          "4XX": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "summary": "Get sandboxe",
+        "tags": [
+          "services"
+        ],
+        "x-roll-action": "read"
+      }
+    },
+    "/v1/apps/services/{id}/environments/{env}/sandboxes/{sbx}/exec": {
+      "post": {
+        "description": "Answers `{ exit_code: number | null, timed_out, stdout, stderr, truncated }` (each stream's first 1 MiB as text, `truncated` when more was dropped; `exit_code` null when it was killed at its timeout). 409 once the sandbox ended. Audited without its text (`sandbox.command`, its length and exit code).",
+        "operationId": "postServicesIdEnvironmentsEnvSandboxesSbxExec",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "env",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "sbx",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object"
+              }
+            }
+          },
+          "description": "`{ command, timeout_s? }` (`sh -c <command>`, at most 64 KiB; killed after `timeout_s`, 1–600, default 60)"
+        },
+        "responses": {
+          "200": {
+            "description": "`{ exit_code: number | null, timed_out, stdout, stderr, truncated }` (each stream's first 1 MiB as text, `truncated` when more was dropped; `exit_code` null when it was killed at its timeout). 409 once the sandbox ended. Audited without its text (`sandbox.command`, its length and exit code)"
+          },
+          "4XX": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "summary": "Exec sandboxe",
+        "tags": [
+          "services"
+        ],
+        "x-roll-action": "admin"
+      }
+    },
+    "/v1/apps/services/{id}/environments/{env}/sandboxes/{sbx}/files": {
+      "get": {
+        "description": "Answers the file's bytes (`application/octet-stream`, at most 1 MiB; 404 none, 400 a directory or more).",
+        "operationId": "getServicesIdEnvironmentsEnvSandboxesSbxFiles",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "env",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "sbx",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "the file's bytes (`application/octet-stream`, at most 1 MiB; 404 none, 400 a directory or more)"
+          },
+          "4XX": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "summary": "List files",
+        "tags": [
+          "services"
+        ],
+        "x-roll-action": "admin (a file can be anything the sandbox holds)"
+      },
+      "put": {
+        "description": "Answers `{ path, bytes }` (written at `path`, an absolute path without `..`, its directory made).",
+        "operationId": "putServicesIdEnvironmentsEnvSandboxesSbxFiles",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "env",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "sbx",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object"
+              }
+            }
+          },
+          "description": "the file's bytes (at most 1 MiB)"
+        },
+        "responses": {
+          "200": {
+            "description": "`{ path, bytes }` (written at `path`, an absolute path without `..`, its directory made)"
+          },
+          "4XX": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "summary": "Set files",
+        "tags": [
+          "services"
+        ],
+        "x-roll-action": "admin"
       }
     },
     "/v1/apps/services/{id}/environments/{env}/shell": {
@@ -4746,7 +5186,7 @@
         "x-roll-action": "write"
       },
       "put": {
-        "description": "Answers `Link` (a kind that makes a credential per link makes it here, once; setting the link again keeps it).",
+        "description": "Answers `Link` (a kind that makes a credential per link makes it here, once; setting the link again keeps it, unless its `indices` or `access` change: then a new key made with them replaces it and the old one is revoked).",
         "operationId": "putServicesIdLinksKindRef",
         "parameters": [
           {
@@ -4782,11 +5222,11 @@
               }
             }
           },
-          "description": "`{prefix?}`"
+          "description": "`{prefix?, indices?, access?}` (`indices` and `access`: a search link's only, 400 on another kind: its key only for those index names or patterns (1–50, `tenant-*`), and `read` or `append`, create documents on exact names only (400 with a pattern); none: read and write documents. Roll search's keys route checks them again)"
         },
         "responses": {
           "200": {
-            "description": "`Link` (a kind that makes a credential per link makes it here, once; setting the link again keeps it)"
+            "description": "`Link` (a kind that makes a credential per link makes it here, once; setting the link again keeps it, unless its `indices` or `access` change: then a new key made with them replaces it and the old one is revoked)"
           },
           "4XX": {
             "$ref": "#/components/responses/Error"

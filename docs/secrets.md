@@ -42,7 +42,9 @@ Everything below works the same from the dashboard (a project's **Secrets**) and
    The consent screen starts from the `development` preset, where revealing a value asks you first:
    the first `roll run` prints where to approve it and waits.
 2. **Pick a project and its environments.** A workspace project has `development`, `staging` and
-   `production` the first time you open its secrets. Add your own environments (`roll secrets envs
+   `production` the first time you open its secrets. `production` is protected from the start: you
+   still write it directly, but developers see it only when you name it for them, and checks,
+   sandboxes and untrusted previews never get it. Add your own environments (`roll secrets envs
    add qa`) and remember the project for this directory. A project that doesn't exist yet is offered
    to you to create (in a script, `--create` makes it; in the dashboard, Projects → New project):
 
@@ -702,7 +704,8 @@ project (a workspace project, prj_…)
 ### Environments
 
 A project starts with `development`, `staging` and `production`, in that order, the first time
-anything touches its secrets. Teams add, rename, reorder and delete their own environments.
+anything touches its secrets; `production` starts protected with `approvals: 0` (see "Protected
+environments and approvals"). Teams add, rename, reorder and delete their own environments.
 
 - **Slug**: 1–32 characters of `[a-z0-9-]`, not starting or ending with `-`, unique in the project.
   References, the CLI and the URLs use the slug. **Renaming** an environment's slug rewrites every
@@ -1089,7 +1092,12 @@ is one click.
 `GET …/health` (`roll secrets health`, the dashboard's Health view) is every finding above in
 every standard environment and folder at once, worst first, so none waits on someone opening the
 right folder: `decoy_used` (a decoy key's credential was used; only the project's admins see it, signed in or
-the operator, see Decoys), `expired`, `rotation_failing` (a managed key's scheduled rotation fails: the
+the operator, see Decoys), `production_unprotected` (the project's `production` has no protection
+policy, as projects made before new ones started with it protected: checks, sandboxes and
+untrusted previews may read it and nothing there needs approval; the detail names what reaches it,
+owners, admins and developers who name it by handle, and the checks and sandboxes that resolved it
+in the last 90 days from the audit log; `key` is empty; nothing changes it but an admin, the
+dashboard's "Protect production" setting `{"protected": true, "approvals": 0}`), `expired`, `rotation_failing` (a managed key's scheduled rotation fails: the
 database, vendor, product or rotator refused or didn't answer; the detail says why, the old
 credential keeps working, and the sweeper tries again; cleared by the next rotation that works),
 `revoke_failing` (a credential roll retired, or a lease that ended, that it couldn't revoke yet: it
@@ -1208,7 +1216,8 @@ A link is `{kind, ref, field, mode, options}`:
   `rotate_days`, on a managed link.
 - **`dynamic`** (short-lived credentials): each resolve that asks for it (`roll run`, an app's
   start) issues a fresh credential with a TTL (`ttl_minutes`, default 60, at least 15 minutes, at most 7 days), recorded
-  as a **lease**. Leases are revoked when they expire, or at once with `DELETE …/leases/{id}`. A
+  as a **lease**. Leases are revoked when they expire, or at once with `DELETE …/leases/{id}`, and
+  when the person they were issued to leaves the project or their account is disabled. A
   long-running consumer renews instead of restarting: `POST …/leases/{id}/renew` pushes the expiry
   out by the link's TTL (at most 30 days from issue), and the provider follows where the product
   enforces its own expiry (a Postgres role's `VALID UNTIL`). `roll run --watch` renews its leases
@@ -1219,10 +1228,14 @@ A link is `{kind, ref, field, mode, options}`:
   the project's key and registries (rotators…) can still reach it. A revocation that fails (the
   product or the customer's endpoint is down) stays as a lease that's already due, and the sweeper
   retries it; a purged project keeps its key and registries until its last lease is revoked, then
-  they go too. Nothing it issued outlives it unrevoked.
+  they go too. Nothing it issued outlives it unrevoked. An environment's delete, unlike a project's,
+  still erases its secrets, versions, changes and requests at once (the thirty-fifth review's item 2:
+  a recovery window and a change request for a protected one are planned); a key's delete makes a
+  tombstone version.
 - **Deleting the workspace project** (`DELETE /v1/workspace/projects/{id}`) can't destroy secrets
   by accident, as AWS Secrets Manager's and Azure Key Vault's waits can't:
-  - while the project holds any value, a protected environment, an encryption key, a certificate
+  - while the project holds any value, a protected environment (other than `production` with the
+    policy every project starts with: no approvals, no approvers), an encryption key, a certificate
     authority or a workload identity, roll secrets refuses it
     (`roll_workspace::Workspace::before_delete`): 403 for anyone who may not `admin` the project's
     secrets (asked of the caller's grant, as every secrets route does; the 403 says nothing about
@@ -1233,7 +1246,7 @@ A link is `{kind, ref, field, mode, options}`:
   - then what it issued is revoked: leases and managed credentials, its decoys, its workload
     identities' tokens (roll-access's grants, so an old one doesn't work after a recovery either),
     its placeholders, and the interception CAs of consumers that held a placeholder of it that name
-    its hosts (`end_unbound_intercept_cas`; they get a new one, without its hosts, from
+    its hosts (`recheck_intercept_cas`; they get a new one, without its hosts, from
     `…/intercept-ca`). Its one-time shares and secret
     requests end, its gateways' links close and open nothing more, and its CAs answer ACME with
     `unauthorized` (their CRLs are still served). The rest is kept for a recovery window
@@ -1302,7 +1315,7 @@ Revoking a role ends
 its sessions and gives what it made (a migration's tables) to `roll` before dropping it, so revoking
 a credential never drops data.
 
-| `search` | `url`, `host`, `port`, `username` | a credential of its own with data access only (no keys or users; `"access": "data"`: a key roll search doesn't say is a data one, whatever else it says or if it says nothing, is deleted and refused), credential `key`: on an Elasticsearch cluster `api_key` (`Authorization: ApiKey …`), on an OpenSearch one an internal user, `user` (`<user>@<cluster>`, which the node routes) and `password`; a link to the field the cluster's flavor doesn't issue is refused when written, and switching a cluster's flavor carries no credential across (link the other fields again); an OpenSearch cluster's fields are offered and suggested under the names its clients read (`OPENSEARCH_URL`, `_HOST`, `_PORT`, `OPENSEARCH_USERNAME`/`_PASSWORD` for its user, `OPENSEARCH_CLUSTER` for the cluster's name); a dynamic one expires by itself 5 minutes after its lease | no (never the cluster's password) |
+| `search` | `url`, `host`, `port`, `username` | a credential of its own with data access only (no keys or users; `"access": "data"`), or narrower with the options `permission` (`read`: searches and reads; `append`: adds to named data streams only, Elasticsearch flavor) and `names` (index names or patterns, a list or a comma-separated string; a data key on names gets none of the cluster's templates, pipelines or lifecycle policies); a key roll search doesn't say is the access and indices asked for, whatever else it says or if it says nothing, is deleted and refused, credential `key`: on an Elasticsearch cluster `api_key` (`Authorization: ApiKey …`), on an OpenSearch one an internal user, `user` (`<user>@<cluster>`, which the node routes) and `password`; a link to the field the cluster's flavor doesn't issue is refused when written, and switching a cluster's flavor carries no credential across (link the other fields again); an OpenSearch cluster's fields are offered and suggested under the names its clients read (`OPENSEARCH_URL`, `_HOST`, `_PORT`, `OPENSEARCH_USERNAME`/`_PASSWORD` for its user, `OPENSEARCH_CLUSTER` for the cluster's name); a dynamic one expires by itself 5 minutes after its lease | no (never the cluster's password) |
 
 roll apps' services have a workspace kind (`service`, `svc_…`); they consume secrets (an app's
 variables, `app:<svc>`) rather than issue credentials, so they have no link provider. Products
@@ -3393,6 +3406,18 @@ the binding, issues placeholders, decides each swap and audits it, and ships the
     problem ("holds a ${…} reference"), and a swap refuses a key that has come to hold one since.
     Otherwise a writer with no reveal could point a bound key at `${OTHER_SENSITIVE}` and send that
     value to the bound host.
+  - **Never through a reference.** The other way round: in a read for placeholders, a key whose
+    value references a bound key (`AUTH="Bearer ${STRIPE_KEY}"`, directly or through other keys)
+    never resolves to the bound key's value. It's left out with a problem naming both ("references
+    STRIPE_KEY, which is bound to hosts: bind AUTH to them too, or reference it differently"), and a
+    resource's reference to it (`ResourceRef::with_placeholders()`) is refused the same way.
+    Otherwise anyone who may write AUTH would get STRIPE_KEY's value to code that holds only its
+    placeholder. Bind the key the code sends (here AUTH, holding the literal value), or have the code
+    build the header from STRIPE_KEY's placeholder.
+  - **Bound keys withheld.** A read that can't take placeholders but mustn't hand out a bound key
+    (`Secrets::values_without_bound`: roll apps' closed environment when whoever closed it can no
+    longer reveal there, or no one did) leaves every bound key out before anything of it is
+    decrypted or audited, and a key referencing one as above.
   - **The maker.** An in-process consumer (`sandbox:…`, `preview:…`) runs for someone, so it names
     them: `Ask { maker }` in process, `"maker"` over HTTP. That's #440's `secrets_by` for a sandbox,
     and the rule's writer for a preview. The maker is a person (`usr_…`), a token (`token:…`) or the
@@ -3420,9 +3445,15 @@ the binding, issues placeholders, decides each swap and audits it, and ships the
   consumer, placeholder or not: a placeholder would act as production against the host.
 - **Swapping (`Secrets::substitute`).** In process only, behind the `proxy::Substitute` trait: no
   HTTP route trades a placeholder for its value, since holding a placeholder must never be enough
-  to read the value. The proxy passes the placeholder, the host it connects to (the name it
-  verified TLS for, never one a client wrote in a header), and where the placeholder is
-  (`proxy::Position`: a header's name and value, or a query parameter's). Each call checks again:
+  to read the value. The proxy passes the placeholder, the consumer it serves (its interception
+  CA's `consumer`: `apps:<project>/<env>`, `preview:pv-…`, `sandbox:…`; never one the request
+  names), the host it connects to (the name it verified TLS for, never one a client wrote in a
+  header), and where the placeholder is (`proxy::Position`: a header's name and value, or a query
+  parameter's). Each call checks again:
+  - the placeholder was issued to that consumer, first, before anything else about it is said
+    (else `WrongConsumer`, an alert, below): every tenant has a proxy now (roll apps' closed
+    environments, previews), and many bind the same hosts, so a placeholder leaked in a log line or
+    an error page would otherwise swap in someone else's;
   - the placeholder is live (not expired, revoked or ended with its consumer);
   - whoever asked for it still may: the token still exists and may still reveal there, the person
     can still sign in and still owns the project, a product's resource is still on a canvas that
@@ -3452,8 +3483,13 @@ the binding, issues placeholders, decides each swap and audits it, and ships the
   is refused with `WrongHost` and an alert, which is likely an exfiltration attempt: a
   `secrets.alert` row and the environment's notify URL. That's once a minute per placeholder,
   whatever the host, with a count and up to five of the hosts (`… and others`), so a loop over random
-  hosts is one row and one notice a minute, not one per host. The placeholder keeps working for its bound hosts: off the proxy it's useless, and
-  the alert says who to look at. An expired, revoked or unknown placeholder is refused quietly.
+  hosts is one row and one notice a minute, not one per host. Another consumer's proxy is refused
+  with `WrongConsumer` and an alert the same way (`placeholder_consumer`: "placeholder phd_… of
+  STRIPE_KEY, issued to sandbox:sbx_1, was sent through the proxy of apps:prj_2/production…:
+  likely a leaked placeholder"), once a minute per placeholder with up to five of the consumers.
+  The placeholder keeps working for its bound hosts through its own consumer's proxy: off it it's
+  useless, and the alert says who to look at. An expired, revoked or unknown placeholder is refused
+  quietly.
 - **Ending.** A placeholder ends as a lease does: when it expires, with `DELETE …/placeholders/{id}`,
   and with its consumer. `Secrets::end_consumer(consumer)` (or `DELETE …/placeholders?consumer=`)
   ends every placeholder issued to it, when a sandbox stops or a preview is torn down
@@ -3463,8 +3499,9 @@ the binding, issues placeholders, decides each swap and audits it, and ships the
   secret it stands for, so **Reach** lists the live ones of a folder's keys (or one key's) wherever
   they were resolved (here, a folder importing it, an environment based on it), and an incident's
   **cut-off** ends them in its transaction, freeze or not (`"placeholders": false` keeps them).
-- **The filter (`roll_secrets::proxy::filter`).** No I/O. It takes the request's host, path, headers
-  and query, finds every `rlph_` in them and swaps each through `Substitute`, all or nothing:
+- **The filter (`roll_secrets::proxy::filter(req, consumer, with, limits)`).** No I/O. It takes the
+  request's host, path, headers and query and the consumer the proxy serves, finds every `rlph_` in
+  them and swaps each through `Substitute` as that consumer, all or nothing:
   - it swaps only in headers and the query, never in the path or the body (the body isn't passed
     in);
   - the swap goes only to the request's host. A proxy calls the filter per request, so a redirect
@@ -3523,6 +3560,16 @@ agents' sandboxes). Each one does exactly this:
    - It lives a day (`intercept::DEFAULT_TTL`); `ttl` can shorten it, to 5 minutes at least, and
      nothing lengthens it (`MAX_TTL`). Asking again mints a new key and certificate. Earlier ones
      stay valid until they expire, so a container that hasn't reloaded keeps working.
+   - **Keep it while `Secrets::intercept_ca_live(id)` says so, and ask again when it doesn't.** A
+     CA stays live until its hosts change, it nears its end (the last eighth of its life: 3 hours
+     of a day's CA), or its consumer ends. Its hosts change when the consumer is bound to a host
+     the CA doesn't name (a placeholder issued for another key, a binding widened): the CA is
+     then stale, still standing for the hosts it names (step 3) but no longer live. Or the
+     consumer loses a host the CA names, and the CA ends (see Ending). Don't re-mint on a timer:
+     each new CA restarts what trusts it. `intercept_ca_live` is one row read; the bindings are
+     read again only when the CA's last check is a minute old, one of the placeholders its hosts
+     come from has ended since, or a write that couldn't name its consumers (a key or
+     environment deleted, a member's rights changed) marked it.
    - Its name constraints are critical. They permit DNS names for the bound hosts only: an exact
      binding (`api.stripe.com`) is permitted with its subdomains excluded (`.api.stripe.com`)
      unless another binding sits under it, and a wildcard binding (`*.stripe.com`) permits the
@@ -3545,11 +3592,14 @@ agents' sandboxes). Each one does exactly this:
 3. **Terminate TLS only for the bound hosts.** For each connection, take the host the client asked
    for (SNI, or the `CONNECT` target). If `InterceptCa::covers(host)` is false, forward it as a
    `CONNECT` tunnel untouched: no termination, no logging of its bytes. If it covers the host, check
-   `Secrets::intercept_ca_live(id)` (never cached: an ended consumer stops the next connection),
-   then serve `InterceptCa::leaf(host)`, a certificate for exactly that name that lives as long as
+   `Secrets::intercept_ca_stands(id)` (never cached: an ended consumer stops the next connection;
+   a stale CA still stands, so a newly bound host doesn't cut the hosts it names before the
+   consumer swaps it), then serve `InterceptCa::leaf(host)`, a certificate for exactly that name that lives as long as
    the CA. One label under a wildcard binding, never deeper.
 4. **Filter each request** with `roll_secrets::proxy::filter`, which calls `Secrets::substitute`
-   for every placeholder. Pass the host it terminated TLS for, never the request's `Host` header.
+   for every placeholder. Pass the CA's `consumer` (rolld's `CaInterception` does), never one the
+   request or the client names, and the host it terminated TLS for, never the request's `Host`
+   header.
    Send nothing that the filter refuses, and send the headers it rewrote as they are (on a swapped
    request it asks for `Accept-Encoding: identity`). Keep the `Scrub` it answers for step 6.
 5. **Re-dial upstream with real TLS verification**, against the system's roots (never the
@@ -3570,12 +3620,15 @@ agents' sandboxes). Each one does exactly this:
 revocation row (`revoked_at`, `revoked_why`) and a `secrets.intercept_ca.end` audit row.
 `Secrets::end_consumer` calls it when the sandbox stops or the preview is torn down. A CA also
 ends with its hosts: when the consumer's hosts shrink (one of its placeholders revoked, ended in a
-project or cut off, a key's binding cleared or narrowed), every CA of the consumer that names a
-host it no longer has ends once that write commits (`Secrets::end_unbound_intercept_cas`, reason
-`<hosts> no longer bound`), and the proxy's next `intercept_ca` names only the hosts it still has.
-A shrink nothing announces (a placeholder expiring, a key or environment deleted, a binder demoted
-or removed) ends the CA at its next `intercept_ca_live`, which answers `false` for a CA naming a host no longer bound. The
-proxy then drops the CA and its leaves at its next `intercept_ca_live`. No CRL is published: a
+project or cut off, a key's binding cleared or narrowed, its project deleted), every CA of the
+consumer that names a host it no longer has ends once that write commits
+(`Secrets::recheck_intercept_cas`, reason `<hosts> no longer bound`), and the proxy's next
+`intercept_ca` names only the hosts it still has. The same check marks the consumer's other CAs
+stale when it gained a host. A write that can't name the consumers (a key or environment deleted,
+a member's rights changed) marks their CAs to be checked at their next ask, and a placeholder
+expiring makes the next ask after it check too; a binder's rights changing in roll-access calls in
+nothing, so any check a minute old is made again. A CA naming a host no longer bound ends at that
+check. The proxy then drops the CA and its leaves at its next `intercept_ca_stands`. No CRL is published: a
 trust anchor isn't checked against one, and the CA dies with its container or within a day. Rows
 go a day after they expire.
 
@@ -3920,6 +3973,11 @@ open it.
 - Creating, opening (with the opener's address) and revoking are in the project's audit log.
   `GET …/shares` lists a project's shares (never their ciphertext); `DELETE …/shares/{id}` revokes
   one. A project has at most 200 open at once.
+- **It opens at its maker's rights now.** Opening checks that whoever made it may still `reveal`
+  in the project, and where it came from (`registration_reaches`: a person's token stands for its
+  person). One whose maker was removed, demoted or disabled ends unopened (404, a `share.revoke`
+  audit row). A member removed or an account disabled ends their shares at once too
+  (docs/accounts.md, "Offboarding").
 - **Where it came from.** A share of a stored key (the CLI's `share KEY`, a key's "Share once" in
   the dashboard) says so: `from: {environment, path, key}`, checked against the caller's `reveal`
   there. The server can't see that the ciphertext holds that value; it records the claim so an
@@ -4518,8 +4576,8 @@ deployment key's state (`GET /v1/secrets/health`) is the operator's.
 | | viewer | developer | admin and owner |
 | --- | --- | --- | --- |
 | names, versions, history, audit log | yes | yes | yes |
-| values (`reveal`) | no (D2) | in its environments: by default every one without a protection policy, production only when named (D3) | everywhere (D4) |
-| set, change, rollback, promote into | no | in its environments; a protected one takes a change request | yes |
+| values (`reveal`) | no (D2) | in its environments: by default every one without a protection policy and never `production` (protected or not), production only when named (D3) | everywhere (D4) |
+| set, change, rollback, promote into | no | in its environments; a protected one that asks for approvals takes a change request | yes; the same change request where approvals are asked |
 | delete; protection, approvals, syncs, links, tokens, identities, sinks | no | no | yes |
 | review a change request | no | no | yes, or when named as an approver |
 
@@ -4565,7 +4623,10 @@ When a member is removed, leaves, is demoted or deletes their account, rolld als
 `Secrets::member_changed`: the folders they shared with other projects stop being shared once they
 may no longer manage the project, and the one-time shares they made end and the dynamic leases
 issued to them are revoked once they're no longer a member. Their personal overrides stay (only
-they read them, and they can't).
+they read them, and they can't). When their account is disabled (an admin, SCIM), stops being an
+admin's or is deleted, rolld calls `Secrets::person_offboarded`, which runs the same hook in every
+project holding an open share, a live lease or a shared folder: a disabled person counts as no
+member anywhere (docs/accounts.md, "Offboarding"). Enabled again, they get nothing back.
 
 So removing or demoting a member stops or narrows what they made at once. rolld asks roll-accounts
 and roll-access on every use; a lookup that fails is an error, not a disabled account.
@@ -4604,6 +4665,28 @@ credentials as the tokens list does. Names and metadata only, never a value:
   do there (read, reveal, write, admin; decided by the same scope check requests are), when it was
   last used and when it ends; and whether code roll hasn't vetted (checks, sandboxes, previews)
   can read it, which is so unless the environment is protected.
+- **People** (`people`): the project's members whose role reveals it now (`{user, handle, role,
+  actions, admin?}`), decided by their session grant as their own requests are
+  (docs/members.md); an admin account reveals everything whatever its role (`admin: true`). The
+  operator's admin accounts are a count (`admins`). Members v1.1's groups add the people of a
+  group that holds a role here once they land.
+- **Their agents** (`clients`): live OAuth connections (`rlo_…`: a person's MCP client or app)
+  whose rules reach it, in the shape of `tokens`, by person (`created_by`). A person's connection
+  reaches only what their role does (#644). A cut-off's `tokens` revokes these too.
+- **Services** (`services`): roll apps services the project stands for (the workspace's `trusts`)
+  whose environment reads it, `{service, name, environment, through, last_deployed_at}`. A
+  service environment reads the project's environment of its name (its root folder), so it reads
+  this folder when that's the folder itself or one importing it or based on it (`through:
+  "env:/path"`), or through one of its variables' `roll://` references (`through` is the
+  reference). Whenever it last deployed: what runs holds the value until it's redeployed.
+- **Sandboxes** (`sandboxes`): live agents sandboxes holding a copy of its values, `{id, name,
+  owner, by, from, keys}` (with `key`, only that key).
+- **Who knew** (`knew`): people who read its values in the last 30 days and may no longer reveal
+  them, `{user, last_at, reads, why}` (`why`: `left` the project, their `role` no longer reveals
+  it, or their account is `gone`). They still know what they read: rotate it.
+
+roll secrets knows no product: rolld answers which services and sandboxes hold a project's
+secrets (`reach::Holders`, from roll apps' and roll code's stores; names and references only).
 - **Where it goes by itself**: syncs of that folder (and that key), projects the folder is shared
   with, and this project's folders that import it.
 - **Where it goes by itself** also counts folders that import it and environments based on it
@@ -4617,8 +4700,10 @@ credentials as the tokens list does. Names and metadata only, never a value:
   a `${…}` or `roll://` reference in another key are recorded where they happened and aren't
   counted: the answer says so (`uncounted`).
 
-Who could lists roll-access's live tokens (`rlt_…`) by what each may do here, and workload identities
-by their identity rather than each login. OAuth connections (`rlo_…`) aren't listed yet.
+Who could lists roll-access's live tokens (`rlt_…`) by what each may do here, workload identities
+by their identity rather than each login, and OAuth connections (`rlo_…`) apart, as `clients`.
+Reach is a project admin's: it names the project's members, which its admins see on the members
+page already.
 
 It also lists what the folder has handed out that's still out: dynamic credentials issued for
 its keys and not yet revoked (`leases`), live placeholders of its keys wherever they were
@@ -5098,8 +5183,27 @@ as `{text, content, project, environment, request: {id, by, message, keys}, link
 never values; Slack markup in `text` is escaped and Discord mentions are off, since the message is
 the requester's). Notices aren't signed: an incoming webhook's URL is its own credential, and the
 notice carries nothing a receiver should act on without opening the request in roll.
-A write to a protected environment doesn't apply. It answers 409 `approval_required`, and the
-client opens a **change request** with the same operations (`POST …/requests`). A request:
+**A new project's `production` starts protected with `approvals: 0`.** Protected means developers'
+default, checks, sandboxes and untrusted previews never reach it, and deleting it takes
+`?confirm=production`. With `approvals: 0`, whoever may write there (an owner, an admin, a
+developer who names it, a token) still writes directly, so a project with one owner never waits on
+a request for its own changes; `PUT …/policy {"protected": true, "approvals": 1}` turns on the
+two-person rule. `approvals` is 0–10; `{"protected": true}` without it means 1. Before #688 a
+protected environment with `approvals: 0` still took change requests (0 counted as 1), so an
+upgraded server's store migrates each such environment to `approvals: 1` once, when it opens and
+before it serves anything (`secrets-protected-approvals-zero-kept`; one `environment.policy` row
+per environment in its project's audit log, "approvals 0 → 1: kept requests as before (#688)",
+or a logged warning on a sealed start): nothing loosens without someone deciding it. A project made
+before this keeps whatever it had (nothing changes it silently): Health flags an unprotected
+`production` (`production_unprotected`, naming what reaches it), and the dashboard's "Protect
+production" there sets `{"protected": true, "approvals": 0}`. Whether or not it's protected, no
+`unprotected` rule (a developer's default, a CI token's) reaches an environment named `production`
+(docs/members.md, D3).
+
+A write to a protected environment that asks for approvals (`approvals` 1 or more) doesn't apply.
+It answers 409 `approval_required`, and the client opens a **change request** with the same
+operations (`POST …/requests`; one can be opened where `approvals` is 0 too, and needs one
+approval). A request:
 
 - holds its operations with values encrypted, and shows a diff without values; an approver who may
   reveal them sees each value now beside the one proposed (`…/requests/{id}/values`, audited);
@@ -5633,7 +5737,7 @@ type Insights = { path: string; max_age_days: number | null; reads_since: number
 type Required = { key: string; path: string; comment: string; type?: "url" | "int" | "port" | "bool" | "json" | "email"; pattern?: string; owner?: string /* who supplies it */; password?: { length: number; classes?: ("lower" | "upper" | "digit" | "symbol")[]; symbols?: string } };
 type Sink = { id: string; url: string; status: "new" | "ok" | "error"; error: string | null; cursor: number; delivered_at: number | null; created_at: number; created_by: string };
 type ProjectFindings = { project: string; project_name: string; findings: Finding[] };
-type Finding = { issue: "decoy_used" | "expired" | "rotation_failing" | "revoke_failing" | "missing" | "exposed" | "public" | "weak" | "operator_made" | "expiring" | "certificate_expiring" | "stale" | "unread" | "unreferenced"; environment: string; path: string; key: string; detail: string; owner?: string; decoy?: Decoy }; // decoy: on decoy_used only (an admin's session's or the operator's), the key's Decoy
+type Finding = { issue: "decoy_used" | "production_unprotected" | "expired" | "rotation_failing" | "revoke_failing" | "missing" | "exposed" | "public" | "weak" | "unplaced" | "operator_made" | "expiring" | "certificate_expiring" | "stale" | "unread" | "unreferenced"; environment: string; path: string; key: string; detail: string; owner?: string; decoy?: Decoy }; // decoy: on decoy_used only (an admin's session's or the operator's), the key's Decoy
 type Rotation = { environment: string; path: string; keys: string[]; kind: string; ref: string; name: string; rotate_days: number | null; rotate_window: string | null; grace_minutes: number; issued_at: number | null; next_due: number | null; last_error: string | null; failed_at: number | null };
 type Rotator = { id: string; name: string; host: string; created_at: number; created_by: string };
 type SaasRotator = { id: string; name: string; vendor: "sendgrid" | "twilio" | "okta" | "entra" | "auth0"; target: Record<string, unknown>; created_at: number; created_by: string };
@@ -5794,6 +5898,42 @@ once after each change and then reused (`Secrets::digest_of`, read.rs):
   gets the same answers now. Each live link is checked as before: its generation (`source_changed`)
   is read again, and its value's fingerprint is read the same way, at most 10 s old. A digest
   where anything failed to read is never kept.
+- **Computed once for every reader with the same answers.** After a change, a rollout's pods
+  (each its own principal) would each compute the same digest. A node offers each folder's digests
+  of its newest state to its other readers: by project, environment, folder, whether the caller is
+  untrusted, and the person, where the caller is one (their own values are in it). A reader takes
+  one only where it gets the same answers to every permission the digest asked and passes every
+  freeze it read past, as the same reader's own reuse does; otherwise it computes its own (up to 8
+  answer sets per folder). While none of the new state is kept, the folder's readers on that node
+  wait for the one computing it rather than all computing it. Nothing is shared between nodes,
+  and values never are: each reader still reads, and is audited for, its own.
+  `readers_share_a_folders_first_digest_only_with_the_same_permissions` (`tests/api.rs`) has
+  readers with different permissions compute in either order after a change: each gets its own
+  digest.
+
+`… --example bench -- stampede 100,1000` has that many identities hold one folder's digest (9,900
+keys), then changes one key and times every identity's conditional read (a miss: the first
+digest after the change) and then its read (`digest=1`, as `roll run --watch` asks), 64 at a
+time, with rolld's pool for secrets on Postgres (4 connections). Measured 2026-11-22 on ai-server,
+pinned to 12 CPUs (`taskset -c 12-17,30-35`, the database on 6-11,24-29), three runs each,
+SQLite and Postgres alternated, under load averages of 37 to 103: the medians for 1,000
+identities, CPU-seconds of rolld plus the database, wall in brackets (no run had an error: every
+identity got the new digest and values).
+
+| | before | after |
+| --- | --- | --- |
+| SQLite, first digest after the change | 74.6 s (16.2 s) | 0.4 s (0.1 s) |
+| SQLite, each identity's read | 213 s (42 s) | 194 s (34 s) |
+| Postgres, first digest after the change | 45.8 + 26.8 s (15.4 s) | 0.7 + 1.1 s (0.6 s) |
+| Postgres, each identity's read | 159 + 58 s (43 s) | 137 + 49 s (28 s) |
+
+Before, the first digest cost 70–78 ms of CPU per identity at 100 identities as at 1,000, so the
+rotation of one key under 1,000 pods cost about 75 CPU-seconds before anyone read a value. Both
+ran on about 4.7 of the 12 cores: a digest is computed inside a database read, and the 4 SQLite
+readers or 4 Postgres connections bound it. Now it is one computation per node and answer set.
+What's left is each identity's read of its own values (182–233 ms each across all runs; the read
+didn't change, and the after runs ran under lower load), on 5.5–7 cores: it is bound by the same
+4 connections, and it is per reader by design.
 
 `tests/nodes.rs` (`a_digest_one_node_keeps_moves_at_once_with_what_another_node_changes`) keeps
 a digest on one node and changes things on another: a write, an import, a write to the imported
@@ -5867,6 +6007,88 @@ The bench's consumer is an in-process one whose maker is the operator; a token o
 adds roll-access's grant lookup or the accounts' and workspace's.
 
 ## Next
+
+**State, 2026-11-22 07:55.** The thirty-fifth review's ranking below still stands. Since it:
+- **roll apps' #603 review is closed on apps' side:**
+  - #667 (listings and staleness mint nothing, the hash by binding, dynamic keys refused, an opened
+    environment ends its interception);
+  - #669 (the CA renews and restarts without breaking: the next CA rides in the bundle, sleeping
+    environments re-mint, adopted instances roll, new hosts re-mint);
+  - #674 (a deleted environment's interception state goes; which runtimes read the bundle).
+
+  roll-intercept's leaf keys are wiped from memory (previews' #671). The response scrub is live
+  (previews' #630).
+- **Ours from that review:** #665 (a placeholder swaps only for its own consumer, references never
+  smuggle a bound value, fallbacks skip bound keys) is gated green and re-levelling a second time,
+  after apps' #667 and #669 rewrote rolld's `resolve_closed`.
+- **Building:**
+  - item 1, production protected by default (`fix/secrets-production-protected`);
+  - item 4, offboarding (`fix/secrets-offboarding`);
+  - the stampede measurement (`perf/secrets-change-stampede`);
+  - members v1.1 phase 1, groups and SCIM Groups (`feature/members-groups`, option (a)).
+- **Next to start, as build slots and disk allow (the server is at 88%):**
+  - item 2, a recoverable environment delete and a protected one's delete as a change request;
+  - item 3, reach naming people, clients, services and sandboxes.
+
+**Ranked, 2026-11-22 06:20** (the thirty-fifth product review, cold, on main 6575a213a, against
+Vault/OpenBao, Infisical, Doppler, AWS, 1Password, Akeyless, Bitwarden SM, GitGuardian, Google Secret
+Manager and Azure Key Vault). Every item of the thirty-fourth review that roll secrets owns is on main,
+and a cold read found the new code sound where it was aimed. The new seams sit next to those fixes.
+Newest entries first; older State and Ranked entries follow further down, as history.
+
+1. **A new project's production isn't protected** (security, high, S; fixing in
+   `fix/secrets-production-protected`). It's made with `protected: false`, and protection is "has a
+   policy", so members' developer default (`unprotected: true`), checks and sandboxes all reach it, and
+   developers write it with no request. The fix:
+   - a new project's production is protected (with `approvals: 0` writing directly for a solo owner);
+   - the default rule never matches `production` unless named, as D3 promised;
+   - Health flags an unprotected production that others reach, and the invite sheet says what a
+     developer reaches;
+   - a fresh-project test.
+2. **Deleting an environment erases it at once** (security and data loss, M). Its secrets, versions,
+   changes and requests go behind a typed slug (`envs.rs:882`), while deleting one folder there needs a
+   change request. #585's `Held` doesn't count registries (GitHub Apps, cloud accounts, outside
+   databases) or sinks, so a project holding only those goes on workspace delete alone. The fix:
+   - #585's window for environments (`forgotten_at`, recover, purge);
+   - a protected environment's delete as a change request;
+   - the 409 names the references that will break;
+   - `Held` counts registries and sinks.
+3. **Reach doesn't name people, OAuth clients, services or sandboxes** (governance, S–M). roll MCP's
+   leak-response prompt (#661) builds its plan from reach. It gains `people` (members whose role
+   reveals there), `clients` (`rlo_` by person), `services` (apps services resolving the folder, with
+   their last deploy), `sandboxes` (live copies) and `knew` (people who revealed it and no longer can).
+4. **An offboarded person's leases and one-time shares outlive them** (security, medium-low, S).
+   Disabling an account (an admin, or SCIM deactivate or delete) doesn't run `member_changed`, so
+   their dynamic credentials live out their TTL (up to 7 days) and their shares still open.
+   roll-accounts' disable writes an outbox event, and rolld treats a disabled person as no member
+   (fixing in `fix/secrets-offboarding`, with item 5's "a disable stops the copier's running
+   sandboxes").
+5. **Sandbox copies are frozen at create** (S–M). Resolve `secrets_from` afresh at each start as the
+   maker. agent37 recreates the instance on its home. A member event or a disable stops the copier's
+   running sandboxes.
+6. **roll's own AI and chat credentials can't be `roll://` references** (integration, M):
+   - reviewer provider keys (code-control's own table);
+   - agents' endpoints (pasted or `op://`);
+   - the model gateway's upstreams (`env:`/file).
+
+   A leaked model key, the commonest leak, gets no reach, health, validity check or rotation.
+   Bind with `bind_ref` and read with `resolve_as`. The daemon resolves over its machine link.
+7. **apps' environments with their own data drop every linked key** (S). `Values.linked` gains
+   `{name, kind, ref}`, so apps drops only what it branched.
+8. **A local agent outside Lambda** (S–M): the Lambda extension's surface as a sidecar.
+9. **Test gaps** for items 1–4, one per flow.
+10. **Gate hygiene** (S):
+    - `scripts/agents-e2e.mjs` picks rolld ports (use `--addr-file`);
+    - agent-host's `pi_compaction` under the shared gate set, plausibly serde_json's `float_roundtrip`
+      unified through the search crates (compare the numbers as values).
+11. **Search stores cluster passwords in the clear without `ROLL_SECRET_KEY`** (in flight on #601 and
+    #318; track).
+12. **The root of trust beyond AWS KMS, and FIPS** (L; the user's call).
+
+In flight from before: #665 (a placeholder swaps only for its own consumer; references never smuggle a
+bound value; the fallback skips bound keys) is re-levelling on previews' #630, which made the response
+scrub live. Also `perf/secrets-change-stampede` (measuring) and `feature/members-groups` (members v1.1
+phase 1). Elevation waits on the user's D13, D14 and D16.
 
 Done in #20 (merged 2026-11-15 as 1ad248420):
 - the store and its crypto (the deployment key from the environment, a file, or AWS KMS);
@@ -6131,6 +6353,44 @@ and webhooks' and review apps' signing secrets sealed. Still open:
   compute of that image (about 2 s per image, never waking a suspended endpoint). Its full gate is
   running.
 
+**Ranked, 2026-11-22 05:45** (after the thirty-fourth review's items landed; built from a review of
+roll apps' #603 and what gating found). The thirty-fifth cold review is running and will replace this
+list. In order:
+
+1. **A placeholder swaps only for its own consumer** (security, high; fixing in
+   `fix/secrets-placeholder-consumer`). `Secrets::substitute` checked a placeholder's maker, binding,
+   host and liveness, but not who was asking, so a leaked `rlph_` could be swapped through another
+   tenant's proxy (apps' closed environments, fork previews). The proxy passes its interception CA's
+   consumer and a mismatch is refused with an alert (`WrongConsumer`).
+2. **A reference never smuggles a bound key's value** (security, medium; same PR). In a placeholders
+   read, `AUTH="Bearer ${STRIPE_KEY}"` resolved the real value. Such a key is withheld with a problem
+   naming the bound key.
+3. **The maker-refusal fallback reads bound keys** (security, low; same PR). rolld's apps fallback
+   decrypted and audited the host-bound keys it then withheld, and a binding added in between leaked
+   once. A read mode that leaves bound keys out before decrypting.
+4. **The stampede after a change** (performance, M; measuring in `perf/secrets-change-stampede`). The
+   first digest after a write per polling identity times 1,000 pods; a fix only if it spikes.
+5. **Members v1.1** (completeness, L). The design is `docs/members-v1-1.md` (#662).
+   - Phase 1: groups and SCIM `Groups`, building on option (a) in `feature/members-groups`.
+   - Phase 2: time-boxed elevation, waiting on the user's D13, D14 and D16.
+6. **Sandbox copies are frozen at create** (UX/security, M). A rotated value doesn't reach an agents
+   sandbox until it's recreated, and agent37 can't drop keys, so it refuses to start once its copier
+   loses access. Deliver env over the relay link at each start.
+7. **A `kind` on Values' linked fields** (integration, S). roll apps' branch environments drop every
+   linked variable, failing closed, because a linked field doesn't say which resource it came from.
+   With a `kind`, they'd drop only Postgres and Redis.
+8. **Test-infrastructure leftovers** (S):
+   - `scripts/agents-e2e.mjs` still picks a port and releases it before rolld binds (roll MCP owns
+     `test-mcp-sweep.sh`'s);
+   - agent-host's `pi_compaction` fails in the shared gate package set, because search's crates turn
+     on serde_json's `float_roundtrip` through rolld.
+9. **A local agent outside Lambda** (UX, S–M): the Lambda extension's surface as a sidecar.
+10. **The root of trust beyond AWS KMS, and FIPS** (L; the user's call).
+
+Other threads, from the #603 review: roll apps' renewal and restart fixes (H1–H4, M1) in
+`feature/roll-apps-closed-renewal`; search's sealing without a key (item 5) in
+`fix/search-security-1120`.
+
 **State, 2026-11-22 05:05.** Every item of the thirty-fourth review that roll secrets owns is on main, with batch 7 (members) and its follow-ups:
 - **Items 1 and 3: landed**, #621 (658cecf0e). apps' reveal and shell read roll secrets as the asker
   (any `from_secrets` key that doesn't resolve for them is a 403, no partial answer; a bound `roll://`
@@ -6223,10 +6483,13 @@ found them sound. What's left is at the edges:
 6. **People: groups, SCIM groups and time-boxed elevation** (completeness, L; members v1.1, #445's
    "later"): IdP groups as role holders, SCIM `Groups`, and a person's time-boxed role request through
    roll-access's approvals with the two-person rule.
-7. **The stampede after a change is unmeasured** (performance, M): the first digest after a write is
-   71–157 ms per polling identity, so a rotation under 1,000 pods could cost 100–250 CPU-seconds in
-   one poll interval. Run the load on SQLite and Postgres. If it spikes, share the first digest per
-   (folder, permission fingerprint) on a node.
+7. **The stampede after a change** (performance, M; `perf/secrets-change-stampede`): measured, it
+   spiked. For 1,000 identities on one folder of 9,900 keys, the first digest after a one-key write
+   cost 75 CPU-seconds on SQLite and 73 on Postgres (rolld plus the database), about 73–75 ms per
+   identity at any count. Each identity's read of its values then cost another 213–218 ms. Now a
+   node computes the first digest once for every reader with the same answers: 0.4 and 1.8
+   CPU-seconds, 0.1 and 0.6 s wall ("Performance"). The reads are what's left (~190 CPU-seconds per
+   change at 1,000 pods), bound by secrets' 4 connections, and they are per reader by design.
 8. **Placeholders have no consumer on main yet** (integration): previews' #535 is first; then apps'
    egress and the agents sandbox's proxy. Add one end-to-end swap test through the first real proxy,
    with item 4's scrub.
@@ -6396,7 +6659,7 @@ work found). First what can be built now:
    for a product's kind), and resuming what a cut-off paused stays admin only.
 
 Waiting on another thread or on a merge:
-- **Batch 5:** #407, #430, #440; #277, #397, #432; #357, #330 (being levelled and gated); the strict
+- **Batch 5:** #407, #430, #440; #277, #397, #432; #357, #330 (landed 2026-11-20, 8b20ce290); the strict
   parse joins it.
 - **apps:**
   - the git login and `roll://` variables through #407, with the #399 stopgap on main;
@@ -6512,7 +6775,7 @@ cache waited out. Ranked now:
    combined tree gated on main c59fca59c with the live outside-databases check (`batch-3.txt`,
    `batch3-round.sh`). **Batch 3 landed** (2026-11-19 02:56–04:07, one lock turn): #132; #136 + #165;
    #173; #166; #144 (main cd65c5fcb = the gated tree plus #375), with roll redis's auth-bypass fix #375
-   ahead of it in the same turn. Batch 4 (preparing, 2026-11-19 04:15): today's
+   ahead of it in the same turn. Batch 4 (landed 2026-11-19 18:41; this was its plan at 04:15): today's
    PRs (#248 #262 #264 #274 #276 #277 #279 #281 #284 #290 #303 #304 #329 #330, the issuer work) and
    #86 (`batch-4-notes.txt`).
 3. **R2, cut off everything that reaches a folder** (#304): tokens through roll-access's bulk revoke,
@@ -6708,8 +6971,8 @@ inconsistencies are fixed in #264:
    ~0.1 core (worked out from single-request latency, not a load run), not ~5.6. A digest reads only the columns it hashes and each folder once, and each node
    keeps it while one read of the database's state (the project's change number, environments,
    imports, required keys, shared folders' projects) says the same, every permission it asked
-   answers the same, and live links' generations and fingerprints hold. Next: the first digest after
-   a write (~70–100 ms per polling identity) if a fleet's numbers call for it.
+   answers the same, and live links' generations and fingerprints hold. The first digest after a
+   write is computed once for every reader with the same answers (the thirty-fourth review's item 7).
 1. **Land the queue**, one at a time when the merge lock is free (the order is in "Landing"):
    four threads share it, so each gate runs before the lock is taken and only main's newest change
    is merged under it.

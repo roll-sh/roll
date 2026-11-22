@@ -152,6 +152,11 @@ impl std::fmt::Debug for Protected {
 pub trait People: Send + Sync {
     /// `None` when the account is gone or disabled; an error when it couldn't be looked up.
     fn person(&self, user: &str) -> Result<Option<Person>, String>;
+    /// How many accounts are admins now (they reveal everything; reach counts them). `None`:
+    /// nothing tells.
+    fn admins(&self) -> Result<Option<usize>, String> {
+        Ok(None)
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

@@ -108,11 +108,16 @@ type Rule = { …; unprotected?: true }; // only resources whose environment the
 
 The product's resolver sets `Resource.protected` beside `Resource.environment`:
 
-- secrets: an environment with a protection policy;
+- secrets: an environment with a protection policy (a new project's `production` starts with one,
+  `approvals: 0`);
 - apps: `production`;
 - previews: never protected.
 
-A resource whose protection isn't known never matches an `unprotected` rule. The field only
+A resource whose protection isn't known never matches an `unprotected` rule, and neither does an
+environment named `production`, whatever its product says (`roll_auth::scope::PRODUCTION`): a
+project made before production started protected still keeps it out of every developer's default.
+Health says so for such a project (`production_unprotected`), and the dashboard's invite sheet
+lists the environments a developer will reach. The field only
 narrows, so a token can carry it too (a CI token for every environment except protected ones).
 
 ### Custom roles and groups
@@ -186,7 +191,7 @@ Each product does only what's listed. None of them reads a role.
 | product | v1 change |
 | --- | --- |
 | **workspace** | `Scope::Owner(user)` becomes `Scope::Member(user)`: lists and reads cover every project the person is a member of. The project routes go through the evaluator for sessions, so its catalogue rows decide (read, write, delete as in the role table). Placing a resource keeps permissions.md's rule: `write` on the project **and** `admin`, allowed outright, on the resource where it is now. For a person that means admin through another project that trusts it, or `Owners` saying it's theirs (their repo, their cluster). New: members, invites and homes ([Tables](#tables)). |
-| **secrets** | `OwnProjects` is deleted. A person's caller is `GrantGrants(session grant)`. `GrantGrants::sees(project)` answers whether any rule names the project, so a non-member's project stays a 404. `Within(token, own_projects)` becomes `Within(token, session grant)`. `maker_reaches` asks whether the maker can sign in and their session grant **now** allows what the made thing does on the project (an identity's or sync's action), instead of "owns it". Protected environments: `approvers` may name `role:admin` and `role:owner` beside principals, and an empty list stays "anyone with `admin` there". Approvals are counted **as they are when applied**, so an approver who was removed or demoted no longer counts. Reach (`…/reach`) lists the members whose role reveals the folder. |
+| **secrets** | `OwnProjects` is deleted. A person's caller is `GrantGrants(session grant)`. `GrantGrants::sees(project)` answers whether any rule names the project, so a non-member's project stays a 404. `Within(token, own_projects)` becomes `Within(token, session grant)`. `maker_reaches` asks whether the maker can sign in and their session grant **now** allows what the made thing does on the project (an identity's or sync's action), instead of "owns it". Protected environments: `approvers` may name `role:admin` and `role:owner` beside principals, and an empty list stays "anyone with `admin` there". Approvals are counted **as they are when applied**, so an approver who was removed or demoted no longer counts. Reach (`…/reach`) lists the members whose role reveals the folder (`people`, decided by their session grant as their requests are), their OAuth clients (`clients`), and who read it lately and no longer may (`knew`). |
 | **code** | None in v1. Membership doesn't give access to a repo: roll code keeps its owners, orgs and tokens (`Product` routes, its own checks). Only trust changes: a project stands for a repo when `Owners` says the repo is one of the project's **owners'** (their roll code owner, or an org they manage), instead of the project creator's. |
 | **previews** | Member routes (v1.1, built): `/v1/previews` is a person's route, roll-access knows a preview's project (`Resolvers::project_fn`) and that its environment, `preview`, is never protected (`protected_fn`, asked for a row's fixed environment too), so the catalogue's actions decide by role (viewer reads, developer reveals and writes, admin opens shells and manages rules). Previews drops a session's grant before its handlers, which see the person. Previews get project secrets through `counts_for_repo` → `trusts`, which changes only as code's does. |
 | **apps** | Apps' routes become member routes (v1.1). Apps already puts a new service on its project's canvas (`Tgt::Create` with `place: service`); that placement now also sets the service's home. Its resolver says `production` is protected. Production deploys are `deploy` (admin and owner only). Apps still adds no token or scope checks of its own. |
@@ -288,6 +293,9 @@ grant, and the audit log records the adoption. Nothing restarts on its own.
   until then.
 - Deleting an account removes its memberships through the same path as a removal. A project left
   without an owner is flagged the same way.
+- Disabling an account (an admin, SCIM) keeps its memberships, but ends what a removal ends in
+  roll secrets (leases, one-time shares, shared folders) and stops sandboxes holding values they
+  copied: docs/accounts.md, "Offboarding".
 
 ### Audit
 
@@ -453,10 +461,12 @@ There is one test per flow, in the files the repo already uses:
 | test | file | what it proves |
 | --- | --- | --- |
 | members' lifecycle | `crates/roll-workspace/tests/api.rs` | invite, accept by the right address only, change role, remove, leave, `last_owner`, the migration making every creator an owner |
-| roles as rules | `crates/roll-access/tests/access.rs` | each role's grant allows and denies what the role table says; an admin can't make an owner; `unprotected` matches only unprotected environments |
+| roles as rules | `crates/roll-access/tests/access.rs` | each role's grant allows and denies what the role table says; an admin can't make an owner; `unprotected` matches only unprotected environments, never `production` |
 | a canvas proves nothing | `crates/roll-access/tests/access.rs` | an admin of P who drops a foreign resource on P's canvas gains nothing on it; a home makes it count |
 | every route classified | `crates/rolld/tests/auth.rs` | the new routes have rows; a non-member's project is a 404 for a session and for that person's token |
-| secrets by role | `crates/roll-secrets/tests/api.rs` (also on Postgres) | a viewer can't reveal; a developer reveals in development, not production, and their write to a protected environment opens a request; an admin reviews; a removed approver's approval stops counting |
+| secrets by role | `crates/roll-secrets/tests/api.rs` (also on Postgres) | on a project as it's made: a viewer can't reveal; a developer reveals in development, never reveals or writes production (protected from the start, no approvals), and once it asks for approvals their write there opens a request; an admin reviews; a removed approver's approval stops counting |
+| an unprotected production | `crates/roll-secrets/tests/api.rs` | a project whose production isn't protected keeps it out of developers' default, is a Health finding naming what reaches it, and protecting it with no approvals clears it with writes still direct |
+| checks and sandboxes | `crates/rolld/src/secrets.rs` (`a_sandbox_gets_…`) | neither a check nor a sandbox gets a new project's production |
 | removal cuts off what they made | `crates/roll-secrets/tests/api.rs` | after removal, the person's confined token is revoked, their identity's login is refused, their sync pauses, and their bound reference stops resolving; adopt brings them back under the adopter |
 | two nodes | `crates/roll-secrets/tests/nodes.rs` | a removal on one node stops the person on the other at once |
 | the members page | `apps/dashboard/src/lib/workspace-*.test.ts` | which controls each role is offered |
@@ -505,8 +515,9 @@ These are the user's to make. The design above uses the first option of each.
 - **D2. Does a viewer reveal values?** (a) No: viewer is roll's `read`, names and history only;
   (b) yes, in unprotected environments (Doppler's viewer reads secrets).
 - **D3. A developer's default environments.** (a) Every environment that isn't protected, with
-  production only by naming it (needs the `unprotected` rule field); (b) every environment;
-  (c) none until named.
+  production only by naming it (needs the `unprotected` rule field, which never matches an
+  environment named `production`, protected or not; a new project's production also starts
+  protected, with no approvals); (b) every environment; (c) none until named.
 - **D4. Does a project admin see production values by default?** (a) Yes, an admin is everything
   in the project (Infisical's and Doppler's admins); (b) no, managing isn't seeing (1Password):
   admins get `admin` everywhere but `reveal` only in the environments their assignment names.

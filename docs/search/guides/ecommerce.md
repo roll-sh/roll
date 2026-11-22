@@ -192,6 +192,13 @@ es PUT /_query_rules/merch '{
 }'
 ```
 
+With the CLI, keep the rules in a file and check which ones a search would trigger:
+
+```sh
+roll search rules put shop merch @merch.json
+roll search rules test shop merch user_query="running shoes"
+```
+
 Wrap your query in a `rule` query and pass what the shopper typed as `user_query`:
 
 ```sh
@@ -219,6 +226,7 @@ each search so roll records what they typed:
 
 ```sh
 es PUT /products/_settings '{"index.roll.analytics.enabled": true}'
+# or: roll search indices settings set shop products index.roll.analytics.enabled=true
 ```
 
 The **Relevance** tab then shows the top queries, queries that found nothing and queries whose

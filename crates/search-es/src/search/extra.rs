@@ -86,7 +86,7 @@ pub fn painless(ctx: &QueryCtx, s: &crate::query::script::Script, context: searc
     ctx.no_scripts()?;
     let bound = ctx.cluster.scripts.compile(ctx.st, s, context)?;
     let id_fielddata = super::id_fielddata::scripts(ctx.st);
-    Ok(Painless { bound, table: ctx.table.clone(), shard: ctx.shard as i32, index: ctx.idx.name.clone(), id_fielddata, counted: false })
+    Ok(Painless { bound, table: ctx.table.clone(), shard: ctx.shard as i32, index: ctx.idx.name.clone(), id_fielddata, counted: false, runtime: ctx.runtime_source.clone() })
 }
 
 /// `PinnedQueryBuilder.MAX_ORGANIC_SCORE`: `2^127` (the `- 1` is lost to float rounding).
@@ -508,21 +508,24 @@ fn knn_query(ctx: &QueryCtx, k: &crate::query::specialized::Knn) -> EsResult<Que
             Some(p) => arc(TermQuery::new(crate::engine::fields::NESTED_PATH_FIELD, p.as_bytes().to_vec())),
         }
     };
-    // The alias filter is one more pre-filter (`KnnVectorQueryBuilder` gets it from the
-    // `SearchExecutionContext`).
-    // The alias filter is the owner's: a browser key's policy doesn't hold it.
-    let mut filters: Vec<(&Query, bool)> = k.filter.iter().map(|f| (f, false)).collect();
-    if let Some(af) = &ctx.alias_filter {
-        filters.push((af, true));
-    }
+    // The alias filter and document level security are more pre-filters
+    // (`KnnVectorQueryBuilder` gets them from the `SearchExecutionContext`), each built in its
+    // own context. Both are the owner's: a browser key's policy doesn't hold them.
+    let security = match &ctx.filter.security {
+        Some(q) => Some((q, ctx.for_security()?)),
+        None => None,
+    };
+    let mut filters: Vec<(&Query, &QueryCtx, bool)> = k.filter.iter().map(|x| (x, ctx, false)).collect();
+    filters.extend(ctx.filter.alias.iter().map(|x| (x, ctx, true)));
+    filters.extend(security.as_ref().map(|(x, c)| (*x, c, true)));
     if !filters.is_empty() {
         let mut b = search_index::query::BooleanQuery::new();
-        for (x, owners) in filters {
-            let mut fq = if owners { ctx.owner_filter(x)? } else { ctx.to_filter(x)? };
+        for (x, xctx, owners) in filters {
+            let mut fq = if owners { xctx.owner_filter(x)? } else { xctx.to_filter(x)? };
             // Nested vectors: a filter that may match parents is a filter over parents, joined
             // to their children (`KnnVectorQueryBuilder.doToQuery`).
             if let Some(np) = &f.nested_path
-                && might_match_non_nested(ctx, x, np)
+                && might_match_non_nested(xctx, x, np)
             {
                 let parent = parent_of_nested(np);
                 let parents = arc(search_index::query::BooleanQuery::new().add(search_index::query::Occur::Must, fq).add(search_index::query::Occur::Filter, parent.clone()));

@@ -170,6 +170,9 @@ async fn responses_match_elasticsearch() {
     for (file, scenario) in scenarios() {
         let mut cfg = ClusterConfig::new("docker-cluster");
         cfg.node_name = "es-node".into();
+        // Elasticsearch's default (an empty whitelist refuses every remote), which the
+        // recordings were made with; unset, roll lets public remotes through.
+        cfg.node_settings.push(("reindex.remote.whitelist".into(), String::new()));
         let cluster = Cluster::open(cfg, Arc::new(MemoryStore::new())).await.unwrap();
         for (i, step) in scenario.get("steps").and_then(Value::as_array).unwrap().iter().enumerate() {
             let req = step.get("req").and_then(Value::as_str).unwrap();

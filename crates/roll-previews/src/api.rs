@@ -21,6 +21,7 @@ type S = AxState<Arc<Engine>>;
 pub fn router(engine: Arc<Engine>) -> Router {
     Router::new()
         .route("/v1/previews", get(list).post(create))
+        .route("/v1/previews/events", get(events))
         .route("/v1/previews/{id}", get(one).delete(delete))
         .route("/v1/previews/{id}/refresh", post(refresh))
         .route("/v1/previews/{id}/keep", post(keep))
@@ -249,6 +250,37 @@ async fn list(AxState(e): S, axum::Extension(visible): axum::Extension<Visible>,
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
+struct EventsQuery {
+    after: Option<i64>,
+    limit: Option<usize>,
+    latest: Option<String>,
+}
+
+/// What happened to previews after `after`, oldest first (`{events, next}`; `next` is where to
+/// ask from again, past the events the caller doesn't see too). `latest=1`: none, and the newest
+/// seq, to follow from now on.
+async fn events(AxState(e): S, axum::Extension(visible): axum::Extension<Visible>, Query(q): Query<EventsQuery>) -> crate::Result<Json<Value>> {
+    let latest = matches!(q.latest.as_deref(), Some("1" | "true"));
+    if latest && q.after.is_some() {
+        return Err(Error::BadRequest("latest or after, not both".into()));
+    }
+    let limit = q.limit.unwrap_or(100).clamp(1, 500);
+    blocking(e, move |e| {
+        if latest {
+            return Ok(json!({ "events": [], "next": e.store.latest_event()? }));
+        }
+        let after = q.after.unwrap_or(0);
+        let got = e.store.events(after, limit)?;
+        let next = got.last().map_or(after, |x| x.seq);
+        let seen: Vec<crate::Event> = got.into_iter().filter(|x| visible.sees(&x.project)).collect();
+        Ok(json!({ "events": seen, "next": next }))
+    })
+    .await
+    .map(Json)
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct CreateBody {
     project: String,
     repo: String,
@@ -415,11 +447,13 @@ async fn shares(AxState(e): S, Path(id): Path<String>) -> crate::Result<Json<Vec
 }
 
 /// The link is in this answer only (its token isn't kept).
-async fn share(AxState(e): S, Path(id): Path<String>, who: Option<axum::Extension<roll_auth::SignedIn>>, b: Bytes) -> crate::Result<Response> {
+async fn share(AxState(e): S, Path(id): Path<String>, who: Option<axum::Extension<roll_auth::SignedIn>>, grant: Option<axum::Extension<roll_auth::Grant>>, b: Bytes) -> crate::Result<Response> {
     check_id(&id)?;
     let s: ShareBody = body(&b)?;
+    // Whose link it is: the person signed in, or the person behind a token (an operator's: none).
+    let maker = who.as_ref().map(|axum::Extension(u)| u.user.clone()).or_else(|| grant.and_then(|axum::Extension(g)| g.user.map(|u| u.to_string())));
     let by = who.map(|axum::Extension(u)| u.handle).unwrap_or_else(|| "operator".into());
-    let (share, url) = blocking(e, move |e| e.share(&id, s.hours, &by)).await?;
+    let (share, url) = blocking(e, move |e| e.share(&id, s.hours, &by, maker.as_deref())).await?;
     let mut v = serde_json::to_value(&share).unwrap_or_default();
     v["url"] = json!(url);
     Ok((StatusCode::CREATED, Json(v)).into_response())

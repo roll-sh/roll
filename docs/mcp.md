@@ -105,9 +105,14 @@ A run is the tool it names from the first check on: it reaches only a tool `tool
 have listed, then the read-only check, the gate, approvals (`approval` goes in `arguments`) and
 the audit log see that tool as if the client had called it by name. Search mode only changes what
 `tools/list` answers. Toolsets and read-only narrow what it searches. Prompts and the instructions
-stay the same, and the instructions say to run named tools through the run tools. Any value other
-than `search` or `all` is a 400. `GET /v1/mcp/toolsets` reports search mode's cost (`search`), and
-the connect panel has a checkbox for it.
+stay the same, and the instructions say to run named tools through the run tools. `GET
+/v1/mcp/toolsets` reports search mode's cost (`search`), and the connect panel has a checkbox for it.
+
+`tools=` (or `X-MCP-Tools`) also takes a comma list of tool names, as GitHub's server does: only
+those are listed and may be called. `exclude_tools=` (or `X-MCP-Exclude-Tools`) drops tools, and
+dropping wins. A name no tool has is a 400 (a typo would hide a tool otherwise); a call to a tool
+that isn't on the connection is an error result. Like toolsets, this is context size, never
+permission: the token's rules decide every call.
 
 Clients that can't take the whole list get search mode to start with: the connect panel turns it
 on when the picked client's limit is passed (VS Code, Cursor), and `roll mcp config vscode` or
@@ -133,9 +138,92 @@ for it, and it goes with toolsets (`?toolsets=postgres&readonly=1`).
 A tool that has roll reach an address the caller chose says so with MCP's `openWorldHint: true`
 (`Tool::open_world`): publishing a task to a URL, a topic's endpoints, schedules and retries that
 deliver, running the app's own functions, adding or testing a notification or a log drain, a
-service from a Git URL or an image and its deploys, and a managed secret's rotation at its vendor.
+service from a Git URL or an image and its deploys, a sandbox (a public image, the internet by
+default) and the commands run in it, and a managed secret's rotation at its vendor.
 Every other tool's domain is roll's own (`false`). Search mode's `roll_run` is open-world when any
 tool it may run is; `roll_run_read` never is.
+
+### Output schemas
+
+A 2026-07-28 client may run code against tools itself (Claude Code's code mode), so `tools/list`
+gives it each tool's `outputSchema`: the fields its answer has. roll's routes have no response
+schemas, so these are learned from real answers: `pnpm test:mcp-sweep --record` keeps what every
+tool answered on a fresh rolld, and `scripts/mcp_output_schemas.py` widens
+`crates/roll-mcp/src/output-schemas.json` with it. They're loose on purpose, so a client that
+validates answers never trips on a product's next field: every value may be null, more fields are
+always allowed, nothing is required, and nothing past four levels is described. A tool the sweep
+hasn't seen answer has none. The sweep (and the nightly run on main) fails on an answer whose type
+no longer fits the schema its tool publishes; rolld's `output_schemas_name_listed_tools` fails on
+a schema for a tool that's gone. Older clients and search mode don't get them (`tools/list` stays
+the size it was).
+
+### Events
+
+A 2026-07-28 client can ask what happened instead of being asked (MCP Events, SEP-3415,
+`io.modelcontextprotocol/events`, offered in `server/discover`): an agent watching a deploy polls
+`apps.event` and hears that it failed, a crash loop or an alert, and one waiting on a person polls
+`access.approval` (its own approvals as they're decided, `GET /v1/access/approvals/decided`, tied to
+`access_wait_approval`, so every connection has it) instead of holding a call open. Previews: `previews.event`
+(created, ready, failed, a visual change waiting, deleted; `GET /v1/previews/events`, tied to
+`previews_list`, its project's events only, as the gate filters the list). All three of the SEP's delivery modes:
+poll (`events/poll`), push (`events/stream`) and webhook (`events/subscribe`, `events/unsubscribe`), below. An event type is a
+feed route read through the gated router with the caller's token, as a tool is, and it's the tool
+for that route's to list and allow (`apps.event` is `apps_events`'s: `GET /v1/apps/events`): a
+connection that can't use the tool doesn't see the type and is refused (`-32024`), the gate
+decides and audits each poll (as `events/poll:apps.event`), and lockdown withholds what the tool's
+answer would. roll keeps nothing per client: the cursor (`a1:<seq>`) is the feed's own position.
+No cursor starts from now (`?latest=1`: no events, the newest cursor); one roll can't read answers
+a fresh cursor and `truncated: true`, never an error, as the SEP says. `arguments` filter as each
+type's `inputSchema` says: `apps.event` by `kinds` (`deploy.failed`, or a family as `alert.*`),
+`service` and `environment`, `access.approval` by `kinds` (`approved`, `denied`) and `tool`,
+`previews.event` by `kinds` and `project`; `maxEvents` (at
+most 100) and `maxAgeMs` are honoured, events older than `maxAgeMs` skipped and marked `truncated`.
+A full page (`hasMore`) means poll again at once; otherwise after `nextPollMs` (15 s).
+
+Push mode is one subscription's stream of its own, while the client holds the request open (an
+SSE answer to `events/stream`): checked before it opens (an unknown event, a tool the connection
+can't use, bad arguments, a read the gate refuses: the answer is the error, no stream), then
+`notifications/events/active` with its cursor (`truncated` for a gap) and the heartbeat granted
+(what the client asks, 15 s to 2 minutes, 30 s if it doesn't), each event as the stream reads it
+(every 15 seconds, as the caller and unattended, so each read is decided and audited as
+`events/stream:<name>` and nothing asks a person), `notifications/events/heartbeat` with the cursor
+when nothing else went for its interval, `notifications/events/error` when a read failed for a
+moment, and `notifications/events/terminated` when the connection can't read the feed any more. roll
+closes a stream after an hour with its result (the client reconnects with its cursor); a token
+holds at most 10 on a node (`-32025`). Every frame carries the request's id as
+`io.modelcontextprotocol/subscriptionId`.
+
+Webhook mode (ChatGPT's): a token's or an OAuth connection's subscription (the operator's own and a
+person's session can't subscribe: roll looks the connection up again at every delivery; nor can a
+connection held to some addresses, since its deliveries go elsewhere) names a callback (`https`, a
+public host, through roll-net's guard with no redirects, on a transport of its own:
+`ROLL_MCP_EVENTS_ALLOW_PRIVATE` is for local development, apart from audit sinks' switch) and the
+client's `whsec_` secret (24-64 bytes; sealed to the subscription, never shown again). Subscribing
+reads the feed once as the agent, unattended, so what would refuse or ask a person (the token's
+rules, the policy's `agents_ask`) refuses there, before anything is kept, and nobody is asked. Then the callback proves it wants that
+connection's deliveries: a signed `{"type":"verification","challenge"}` it echoes in a 2xx answer,
+good for a day per connection and URL, at most 5 a connection a minute on a node, each refusal in
+the audit log; a callback under a path its https origin's `/.well-known/mcp-webhook-receiver.json`
+names (`{"receivers": ["/hooks/"]}`, read through the same guard) is proved without a challenge (else `-32027 CallbackEndpointError` with a category, never what the endpoint said). A subscription is
+keyed by its connection, URL, event and arguments (canonical JSON), so subscribing again refreshes
+it (the same `sub_…` id, its cursor kept, `deliveryStatus` answered); it lives at most an hour
+unless refreshed, 20 a connection. Every 15 seconds each node claims up to 16 due subscriptions to
+events whose products it runs, again while each claim finds 16 (for up to a minute), one node
+delivering each (only the claim's holder writes back, so a slow round never moves a cursor back),
+8 at a time in tasks of their own, 40 seconds each, and reads each one's feed once a minute (at
+once again while a backlog waits) through the gated router as its grant (`roll_auth::ActAs`: an in-process request, never
+one off the network, that the evaluator resolves by the grant's id with every check its token would
+get, narrowed to reading as a read-only secret's grant is, audited as `events/deliver:<name>`, and
+unattended: what would ask a person, the policy's `agents_ask` included, is refused, never let
+through (roll's quiet probes, a completion or the credential guard's scan, aren't held by it); a
+read for it isn't the token's use, so a subscription never keeps a token from idling). Lockdown is
+the subscription's or the policy's now. What its
+filter keeps is POSTed in order, one event a request, signed as Standard Webhooks (`webhook-id`
+the same on every retry of an event, `webhook-timestamp`, `webhook-signature: v1,…`, both secrets
+for 5 minutes after a new one, `X-MCP-Subscription-Id`); the cursor moves past what the callback
+took. `410` ends it, `413` skips that event, other failures wait 5 minutes (a day of them ends
+it). When its grant can't read the feed any more (revoked, expired, narrowed, a policy's), roll
+sends a signed `terminated` (`-32024`) and drops it.
 
 ### Credentials kept out of what agents write
 
@@ -258,8 +346,10 @@ claude mcp add --transport http roll https://api.roll.sh/v1/mcp
 ```
 
 ```json
-// Cursor (~/.cursor/mcp.json), VS Code (.vscode/mcp.json uses "servers"); Devin's desktop app, where
-// Windsurf's docs now point (~/.config/devin/mcp_config.json), takes the same with "transport": "http"
+// Cursor (~/.cursor/mcp.json); VS Code since 1.146 (~/.copilot/mcp-config.json, or .mcp.json at a
+// workspace's root, never with a token in it) with "type": "http", its old .vscode/mcp.json going in
+// February 2027; Devin's desktop app, where Windsurf's docs now point (~/.config/devin/mcp_config.json),
+// takes the same with "transport": "http"
 { "mcpServers": { "roll": { "url": "https://api.roll.sh/v1/mcp" } } }
 ```
 
@@ -361,10 +451,45 @@ roll implements the MCP authorization spec (2025-06-18 and 2025-11-25) with OAut
   place a connection's rules come from: a client can't widen them.
 - Each connection is a grant: it's listed with its client, last use and rules, and revoking it ends
   every token it has, at once.
+- Step-up (SEP-835): when an OAuth connection's own rules refuse a tool call and adding one rule
+  would let it through (not a refusal by the person's role in a project, a move between projects, a
+  copy or a link, or a rule over tokens and approvals), roll records a step-up: that connection and the
+  one rule the call needed, exactly as the gate decided it (the resource and an index included),
+  kept 10 minutes, at most 10 a connection. The refusal carries
+  `Bearer error="insufficient_scope", scope="roll:step-up:<id>", resource_metadata=…` in
+  `_meta["mcp/www_authenticate"]` (ChatGPT reads it there) beside its text and widen link, and a
+  single, unbatched call from a client known to step up (Claude Code from 2.1.288) answers HTTP
+  `403` with that `WWW-Authenticate` header. The consent screen looks the id up as the signed-in
+  person (`GET /v1/access/oauth/step-ups/{id}`: theirs, live, or one "no such step-up" for any
+  other case), shows the rule and the connection it joins (said plainly when it reaches far, or
+  when the policy has an admin approve it), and "Add it" sends only the id: the rule joins that
+  connection's stored rules in one transaction that rechecks it (live, not waiting on an admin) and
+  meets the token policy, used once, nothing else about the connection changes, and the client's code is for that connection (its other sessions widen too, nothing new
+  is made). A client never chooses what's proposed. A scoped token (`rlt_`) has no consent to step
+  up, and a progress-streamed call keeps the challenge in-band only.
 - Clients either register (dynamic registration) or are known by a client ID metadata document
   (2025-11-25: the `client_id` is an https URL whose JSON names it). A document is fetched through
   roll's private-address guard (`roll-net`), without redirects, in 5 seconds, at most 64 KiB, and
-  at most once an hour; it must name itself, list valid redirect URIs, and be a public client.
+  at most once an hour; it must name itself, list valid redirect URIs, and be a public client
+  (checked against draft -03: no `client_secret`, `none` among its methods, codes among its grants;
+  an id with a user or password in it, or not in normal form, is refused, since the URL fetched is
+  the one compared, and so is roll's own address). A document unreachable for a moment (a timeout,
+  a 5xx) leaves roll's copy in use; one that's become invalid isn't. A loopback redirect matches on
+  any port (RFC 8252), for registered clients too: a native app listens where it can.
+- roll's policy may list the clients that connect (`oauth_clients`; Atlassian's admins allowlist AI
+  clients): a host (`claude.ai`, `*.example.com`), an exact `https://` URL, `localhost`, an app's
+  scheme (`cursor:`) or `device`. A metadata-document client matches by its URL or host; a
+  registered one only by where every one of its redirects goes (its name is anyone's to choose,
+  its redirects are where its codes go); a device client only by `device`. A client the list leaves
+  out isn't offered consent (the screen says why), can't start a device sign-in, trade a code or a
+  refresh token (refused before either is spent), or use the connection it has (`401
+  invalid_token` saying so): nothing is revoked, so allowing it again brings the connection back.
+  Machine clients (client credentials, workload identity, ID-JAG) are an admin's own setup and
+  aren't held to it.
+
+- The operator's policy can take agents only as grants (`mcp_require_grant`): the admin token, an
+  admin's session and an open daemon get a 401 with OAuth's challenge here, so a client connects as a
+  token or an OAuth connection that lockdown, read-only, `agents_ask` and approvals apply to.
 
 **A person's own connection.** A token or OAuth client of a person who isn't an admin reaches
 what their account does (`roll_access::USER_REACH`, held to rolld's gate by its `auth::tests`):
@@ -501,8 +626,8 @@ alone, as at the gate.
 - Requests with an `Origin` header must come from the dashboard's or the API's origin (DNS
   rebinding).
 - Results come back as `structuredContent` (the route's JSON; arrays as `{"items": […]}`) and a
-  `text` block, cut at 48 KiB (inside Claude Code's default 25,000-token limit even for dense JSON;
-  it refuses a longer answer rather than cutting it), saying so and that the tool can be asked for less. Binary content comes back base64 (`content_b64`). An image (a preview's screenshot: PNG, JPEG or WebP, up to
+  `text` block, cut at 48 KiB (inline in Claude Code, which moves an answer past 50,000 characters or
+  its default 25,000 tokens to a file, even for dense JSON), saying so and that the tool can be asked for less. Binary content comes back base64 (`content_b64`). An image (a preview's screenshot: PNG, JPEG or WebP, up to
   4 MiB) comes back as MCP image content the agent can look at.
 - Characters a person can't see but a model reads are escaped in the `text` block: tag characters
   (ASCII smuggled as U+E0000–E007F), zero-width and bidi controls, and variation selectors. They
@@ -575,6 +700,9 @@ is `-32602`.
 | `tune_slow_search` | `cluster` | Why a search cluster answers slowly: its slowest requests, a profile of the worst, the usual causes in mapping and query, and a fix tried on a branch (`search_branch_cluster`) before the cluster. | `search_slowlog`, `search_cluster_metrics`, `search_get_mapping`, `search_query` |
 | `review_preview` | `preview` | Whether a change's preview is ready to land: why it failed or waits for `approve-run`, its schema changes (a dropped column, a `NOT NULL` with no default), new errors, routes slower than main's preview, its pages against the base (screenshots it looks at), people's notes. Changes nothing without asking. | `previews_wait`, `previews_get`, `previews_logs`, `previews_errors`, `previews_routes`, `previews_screenshot`, `previews_list_notes` |
 | `hand_to_agent` | `owner`, `repo` | A problem (an error group, a slow query, a bug described) as a work item with its evidence quoted as data, handed to a coding agent on one of your machines (a thread in its own worktree, `auto_edit`, the prompt shown to you first, the item bound to it), its requests left to you, its branch published as a change, checked and previewed, and queued only when you say. | roll code's and agents' (`code_create_work`, `agents_create_thread`, `agents_claim_work`, `agents_publish_thread`, `code_get_change`, `code_enqueue_change`, …; rolld's tests hold each name to one roll code fronts) |
+| `recover_deleted_objects` | `bucket` | Objects deleted by mistake: what's still in the bucket's trash, narrowed to what you describe, each restored only once you say and checked after. | `storage_list_trash`, `storage_restore_object`, `storage_head_object` |
+| `try_cql_change_on_branch` | `database` | A NoSQL schema or data change tried on a branch (as `try_migration_on_branch` for Postgres): applied there, checked with the branch's schema and `nosql_diff`, then on the database only when you say. | `nosql_schema`, `nosql_create_branch`, `nosql_cql`, `nosql_diff` |
+| `find_redis_memory_hogs` | `database` | What fills a Redis database, reading only: totals (`INFO`, `MEMORY STATS`), a sample of keys by size, type and TTL grouped by prefix, keys over 1 MB, what has no expiry, and what to change. | `redis_usage`, `redis_command` |
 | `clear_task_backlog` | | Why roll tasks' messages pile up or fail: a paused or limited queue, dead letters and each delivery's error grouped by cause, then a retry it asks about first (with how many). | `tasks_stats`, `tasks_list_queues`, `tasks_get_queue`, `tasks_list_dead_letters`, `tasks_get_message` |
 | `drain_queue` | `vhost`, `queue` | Why a queue backs up: no consumers, consumers that don't acknowledge (and which connection), rates, and why its dead-letter queue's messages died; a replay it asks about first, never a purge. | `queues_get_queue`, `queues_queue_rates`, `queues_list_channels`, `queues_peek`, `queues_list_bindings` |
 | `find_consumer_lag` | `stream`, `group` | Why a consumer group falls behind: lag per partition, members against partitions, throughput, and the record a stuck partition stops at; a reset (which skips records) it asks about first. | `streams_get_group`, `streams_get_topic`, `streams_usage`, `streams_read` |
@@ -663,7 +791,7 @@ previews are listed once those products are on.
 | `postgres_execute` | Run SQL that may change data or schema (INSERT, UPDATE, DDL) on an endpoint; without `admin` on the endpoint, as a role that owns the database's objects, never the superuser (decision 6). | `POST /v1/endpoints/{endpoint}/query` |
 | `postgres_describe_schema` | Every table's columns and types on an endpoint (read-only). | `POST /v1/endpoints/{endpoint}/query` |
 | `postgres_explain` | A statement's plan as JSON, without running it (Neon's explain). | `POST /v1/endpoints/{id}/query` (read-only, `EXPLAIN (FORMAT JSON)`) |
-| `postgres_activity` | Every client session now, blocked ones first: user, app, state, what it waits on, `blocked_by`, how long its transaction and query have run, the query. | `POST /v1/endpoints/{endpoint}/query` (fixed, read-only) |
+| `postgres_activity` | Every client session now, blocked ones first: user, app (`roll tok_…`: SQL a token sent through roll), state, what it waits on, `blocked_by`, how long its transaction and query have run, the query. | `POST /v1/endpoints/{endpoint}/query` (fixed, read-only) |
 | `postgres_health_checks` | A database's health in one read (Neon's `inspect_database`): cache and index hit rates, dead-row bloat, the oldest open transaction, idle-in-transaction sessions, connections against the limit, transaction ID age, size; each ok or warn. | `POST /v1/endpoints/{endpoint}/query` (fixed, read-only) |
 | `postgres_slow_queries` | The 20 slowest statements by mean time (Neon's slow queries; `pg_stat_statements`). | `POST /v1/endpoints/{id}/query` (read-only) |
 | `postgres_advisors` | Unused indexes, unindexed foreign keys, tables without a primary key, sequential scans (Supabase's advisors). | `POST /v1/endpoints/{id}/query` (read-only) |
@@ -856,6 +984,20 @@ previews are listed once those products are on.
 | `search_put_mapping` | Add fields to an index's mapping. | `PUT /v1/search/clusters/{cluster}/indices/{index}/mapping` |
 | `search_get_mapping` | An index's field mappings. | `GET /v1/search/clusters/{cluster}/indices/{index}/mapping` |
 | `search_index_settings` | An index's settings. | `GET /v1/search/clusters/{cluster}/indices/{index}/settings` |
+| `search_put_index_settings` | Change an index's dynamic settings; a lifecycle policy needs delete (destructive). | `PUT /v1/search/clusters/{cluster}/indices/{index}/settings` |
+| `search_explain` | Why a document matches a query and how its score adds up. | `POST /v1/search/clusters/{cluster}/indices/{index}/explain/{doc}` |
+| `search_list_synonyms` | A cluster's synonyms sets. | `GET /v1/search/clusters/{cluster}/synonyms` |
+| `search_get_synonyms` | A synonyms set's rules. | `GET /v1/search/clusters/{cluster}/synonyms/{set}` |
+| `search_put_synonyms` | Create a synonyms set or replace its rules (destructive). | `PUT /v1/search/clusters/{cluster}/synonyms/{set}` |
+| `search_delete_synonyms` | Delete a synonyms set. | `DELETE /v1/search/clusters/{cluster}/synonyms/{set}` |
+| `search_get_synonym_rule` | One rule of a synonyms set. | `GET /v1/search/clusters/{cluster}/synonyms/{set}/{rule}` |
+| `search_put_synonym_rule` | Add or change one synonym rule. | `PUT /v1/search/clusters/{cluster}/synonyms/{set}/{rule}` |
+| `search_delete_synonym_rule` | Delete one synonym rule. | `DELETE /v1/search/clusters/{cluster}/synonyms/{set}/{rule}` |
+| `search_list_query_rulesets` | A cluster's query rulesets (pinned and excluded results). | `GET /v1/search/clusters/{cluster}/query_rules` |
+| `search_get_query_ruleset` | A query ruleset's rules. | `GET /v1/search/clusters/{cluster}/query_rules/{ruleset}` |
+| `search_put_query_ruleset` | Create a query ruleset or replace its rules (destructive). | `PUT /v1/search/clusters/{cluster}/query_rules/{ruleset}` |
+| `search_delete_query_ruleset` | Delete a query ruleset. | `DELETE /v1/search/clusters/{cluster}/query_rules/{ruleset}` |
+| `search_test_query_ruleset` | Which of a ruleset's rules match these criteria. | `POST /v1/search/clusters/{cluster}/query_rules/{ruleset}/test` |
 | `search_refresh` | Make what was just indexed searchable now. | `POST /v1/search/clusters/{cluster}/indices/{index}/refresh` |
 | `search_analyze` | The tokens an index's analyzer makes of some text (read). | `POST /v1/search/clusters/{cluster}/indices/{index}/analyze` |
 | `search_add_document` | Index a document under a new id. | `POST /v1/search/clusters/{cluster}/indices/{index}/docs` |
@@ -990,6 +1132,14 @@ previews are listed once those products are on.
 | `apps_list_jobs` | An environment's one-off jobs, newest first. | `GET /v1/apps/services/{service}/environments/{env}/jobs` |
 | `apps_get_job` | One job: status, exit code, timing. | `GET /v1/apps/services/{service}/environments/{env}/jobs/{job}` |
 | `apps_wait_job` | A job once it ends: a task that waits as long as it takes for a client that runs tasks, its status now for any other. | `GET /v1/apps/services/{service}/environments/{env}/jobs/{job}` |
+| `apps_set_private_network` | Reach hosts in your own network over WireGuard: the config as this environment's `roll://` secret (read as you), routes as names on the project network and `host:port` targets; admin. | `PUT /v1/apps/services/{service}/environments/{env}/private-network` |
+| `apps_get_private_network` | An environment's private network: reference, routes, whether its peer runs. | `GET /v1/apps/services/{service}/environments/{env}/private-network` |
+| `apps_delete_private_network` | Remove an environment's private network; admin. | `DELETE /v1/apps/services/{service}/environments/{env}/private-network` |
+| `apps_create_sandbox` | A short-lived container to run commands in: the live image or a public one, without the environment's variables or network unless asked (a closed environment's on its network); admin. | `POST /v1/apps/services/{service}/environments/{env}/sandboxes` |
+| `apps_list_sandboxes` | An environment's sandboxes and when each ends. | `GET /v1/apps/services/{service}/environments/{env}/sandboxes` |
+| `apps_get_sandbox` | One sandbox. | `GET /v1/apps/services/{service}/environments/{env}/sandboxes/{sandbox}` |
+| `apps_sandbox_exec` | A command run in a sandbox: exit code, stdout, stderr (1 MiB each), killed at its timeout; admin. | `POST /v1/apps/services/{service}/environments/{env}/sandboxes/{sandbox}/exec` |
+| `apps_delete_sandbox` | Stop and remove a sandbox now; admin. | `DELETE /v1/apps/services/{service}/environments/{env}/sandboxes/{sandbox}` |
 | `apps_cancel_job` | Stop a running job (production: deploy). | `POST /v1/apps/services/{service}/environments/{env}/jobs/{job}/cancel` |
 | `apps_events` | What happened to services, in order after a cursor. | `GET /v1/apps/events` |
 | `apps_list_variables` | An environment's variables, values masked. | `GET /v1/apps/services/{service}/environments/{env}/variables` |
@@ -1109,12 +1259,39 @@ previews are listed once those products are on.
 Ranked; the top item is in progress. A watchdog reads this list. Unblocked work comes first; what
 waits on a sibling PR reaching main is last.
 
-1. **Workflows for shipping a service and a slow search (this PR).** Apps had a failing-service
-   workflow but none for the first deploy, and search had none: `ship_a_service` (project file
-   checked, service made, links and variables, a deploy outside production first, checked,
-   production on your word) and `tune_slow_search` (slow log, a profile of the worst request, the
-   usual mapping and query causes, a fix tried on a branch first).
-2. **Decision for the user: a sandboxed "code mode"** (Cloudflare's Code Mode, Anthropic's code
+1. **Pick or drop single tools on a connection (this PR).** GitHub's server takes `X-MCP-Tools` as a list of
+   tools and `X-MCP-Exclude-Tools` (exclusion wins); roll's `X-MCP-Tools` takes only `search`/`all`,
+   so a copied GitHub config 400s. Now a list of names there and `?tools=a,b`, plus
+   `?exclude_tools=` / `X-MCP-Exclude-Tools` (see "Search mode"): context size, never permission.
+2. **`search` and `fetch` for ChatGPT's deep research.** OpenAI's docs ask for two read-only tools
+   with those names (results with a canonical `url`) for deep research and company knowledge. Over
+   the user's own data, never roll's design docs: roll code's repos (code-index search), work
+   items, preview notes, each with its roll URL; lockdown applies.
+3. **An operator's inspector for tool calls and results.** Google Cloud's MCP servers can send
+   calls, results and errors through Model Armor (prompt injection, malicious URLs) to inspect or
+   block. Visitors control text in app logs and errors that a debugging agent reads; a hook the
+   operator points at their own scanner (block or annotate, a timeout, fail open or closed).
+4. **A local installer for agents.** Stripe's `stripe agent setup` finds the agents installed,
+   adds the MCP server and its skills, and keeps them updated; GitHub now lets enterprises require
+   MCP servers from plugins or managed settings (2026-11-16). `roll mcp install` writing each found
+   client's config (OAuth, never a token) and roll's skills; publishing a plugin or a registry entry
+   stays the user's call (item 10).
+5. **2026-07-28 loose ends.** `x-mcp-header` on tool arguments a gateway may route on (a project,
+   an environment; SEP-2243), and reading and echoing `application_type` at registration (SEP-837).
+6. **MCP Events: more feeds.** All three delivery modes are on main (poll #692, webhook #703,
+   push #710) with `apps.event` and `access.approval` (#708), and the receiver document (#712). Next: more feeds as their products have
+   a log after a cursor (roll code's durable land log, `Store::land_log`, has no route yet; secrets' events, agreed with secrets: a `project` argument
+   filling the feed's path). From the review: a feed
+   whose route runs on its owner node needs `ActAs` carried across the forward (today's isn't
+   forwarded); claims use each node's clock (a node more than 2 minutes ahead can deliver beside
+   another; the fenced cursor and a stable `webhook-id` keep it to duplicates); fairness is 20
+   subscriptions a connection, not a person or owner, and the verification limit is per node.
+7. **Decision for the user: list roll's server in the MCP Registry.** GitHub Copilot's "Registry
+   only" policy blocks servers missing from the configured registry. Listing needs the `sh.roll`
+   namespace proved by DNS or HTTP on roll.sh (`mcp-publisher login dns --domain roll.sh`) and
+   publishes publicly under roll's name, so it waits for the user; `server.json` would point at
+   `https://api.roll.sh/v1/mcp` (the server card, `/v1/mcp/server-card`, already says the same).
+8. **Decision for the user: a sandboxed "code mode"** (Cloudflare's Code Mode, Anthropic's code
    execution with MCP). A model writes a short script against typed tool functions; roll runs it
    and each call still goes through the gate and the audit log as if made one by one. It cuts
    tokens and round trips for clients with many tools (search mode, `?tools=search`, already
@@ -1123,16 +1300,23 @@ waits on a sibling PR reaching main is last.
    model-written code on fleet nodes, which roll apps' rule keeps customer code off. Options: (a)
    build it in rolld behind a flag; (b) run scripts in a preview-style container, slower to start;
    (c) not now, search mode is enough. Not started until the user picks.
-3. **As siblings land** (`sibling-check.py`, 2026-11-21 21:30, over every open PR): search's
-   migration from a remote cluster (#485: `migrate` and `migrate/inspect`, open-world, since roll fetches an address the caller chose); search's
-   relevance tuning (search-relevance-api, not yet open). #524 (previews on members) adds no routes
+9. **As siblings land** (`sibling-check.py`, 2026-11-22 13:45, over every open PR): members'
+   groups (#681: `GET /v1/workspace/projects/{id}/groups`, `PUT` and `DELETE …/groups/{group}`;
+   tools `workspace_list_groups`, `workspace_set_group`, `workspace_delete_group` once it lands);
+   secrets' event feed (agreed; previews' is item 1). #485's migration landed with both
+   routes kept tool-less on purpose (the remote's credentials go in their bodies). #524 (previews on members) adds no routes
    beyond #501's; #627, #629, #596 and #504 add none. Not a tool: making a search browser key
    (#358's create answers the key; `limits.max_body_bytes` has no schema to join).
-4. **Suggested to other threads** (from the 2026-11-21 comparison of 11 MCP servers): fetching a
+10. **Suggested to other threads** (from the 2026-11-21 comparison of 11 MCP servers): fetching a
    preview's or app's URL through its access gate (Vercel's `web_fetch_vercel_url`; previews,
    apps), Postgres logs, live metrics and migrations as records (Supabase, Neon, PlanetScale), a
    read-only ES|QL route (search), log grouping and field values (apps).
-5. **Later:** a client config for Devin's desktop app (`mcpServers`, `url`, `transport: "http"`)
+11. **Later:** client ID metadata documents' 5 KB read limit and cache headers (draft -03; roll
+   reads 64 KiB and re-fetches hourly) once real clients' documents are measured; the every-row SQL guard: computes run stock Postgres images, which have no
+   safe-update setting (no pg-safeupdate), and an event trigger neither fires for `TRUNCATE` nor
+   sees a `WHERE`, so it needs Postgres's own parser in pg-control (`pg_query`: libpg_query, built
+   with libclang) and would still catch only mistakes, since a `DO` block or a function runs the
+   same statement unseen; branches and point-in-time restore already undo that mistake. a client config for Devin's desktop app (`mcpServers`, `url`, `transport: "http"`)
    once its tool limit and OAuth are checked against a live client; tasks' tools in areas once it
    nears ~60 (47 now), as for any product past ~60; a docs search tool (Supabase, Vercel, Neon,
    Cloudflare and Stripe have one) once roll has user documentation (`docs/` is design notes and
@@ -1149,7 +1333,15 @@ waits on a sibling PR reaching main is last.
    stateless and search mode (`?tools=search`) covers clients that can't take the list; "remember this browser"; a preset that reveals development's values without asking
    (#354); a connection-level `?project=` (only a token's rules bound a project; a default that
    some tools can't honour would look like a boundary).
-6. **Landed 2026-11-21:** `respond_to_leaked_secret`, a leak walked end to end (#661); roll code's connect panel offers lockdown, and `claude mcp add` lines quote a
+12. **Landed 2026-11-22 morning:** operator policy for agent connections: `agents_ask` and
+   `mcp_lockdown` / `mcp_read_only` (#678), and `oauth_clients`, the OAuth clients that may connect,
+   checked at consent, at every token and on every request, nothing revoked (#680). SQL sessions name who sent them (`application_name`: `roll tok_…`, so `postgres_activity` tells
+   an agent's queries apart; #683), and apps' sandbox tools marked open-world (#684). Output schemas for 2026-07-28 clients, learned from the sweep's real answers (#687). MCP Events in poll mode, starting with apps' event log (#692). VS Code's config to its 1.146 files (#694). Client ID metadata documents checked against draft -03, loopback redirects on any port (#696). MCP Events' webhook mode: verified callbacks, Standard Webhooks signing, deliveries read through the gate as the subscriber's grant (`roll_auth::ActAs`), two security reviews (#703); `access.approval`, a connection's approvals as they're decided (#708). Push mode (`events/stream`, #710) and the receiver document in place of the challenge (#712). How long a request waits for a person is the policy's (`approval_wait_minutes`, an approval rule's `wait_minutes`; up to a day, #716). Search's 14 relevance tools (#677) and `secrets_reach`'s new lists in `respond_to_leaked_secret` (#714), both in #717. Agents only as grants when the policy says (`mcp_require_grant`: the admin token gets OAuth's challenge at `/v1/mcp`, #718). `previews.event`, previews' events as an MCP Events feed (#719). **Landed 2026-11-21:** step-up authorization for OAuth clients (#673: a refusal of a connection's own
+   rules records the one rule it needed, `roll:step-up:<id>` in-band and as a 403 to Claude Code
+   from 2.1.288, the consent screen adds roll's record to that connection; two security reviews); the instructions name every product by its tool prefix, search mode's tools
+   always load, the 48 KiB cut's reason corrected, and Next ranked from the 2026-11-22 comparison
+   (#670); workflows for storage, NoSQL and Redis (#666: `recover_deleted_objects`,
+   `try_cql_change_on_branch`, `find_redis_memory_hogs`; every product has one now); `ship_a_service` and `tune_slow_search` (#663); `respond_to_leaked_secret`, a leak walked end to end (#661); roll code's connect panel offers lockdown, and `claude mcp add` lines quote a
    URL with a query (#659); roll code's answers cut at 48 KiB on both servers (#654, `roll_auth::lockdown::cut`
    in `mcp::call`); invisible characters escaped on `/v1/code/mcp` (#653, `roll_auth::lockdown::visible`); lockdown on roll code's own MCP server (#650: `/v1/code/mcp?lockdown=1`,
    `roll_auth::lockdown` shared with `/v1/mcp`); the sweep's rolld on port 0 with `--addr-file` (#648, after #596); the sweep as a member (#647: a viewer signed in by email code calls every
@@ -1188,14 +1380,14 @@ waits on a sibling PR reaching main is last.
    `secrets_credential_check` and placeholders (#572, #573), `apps_wait_deploy` and deploy
    approvals (#577). What has no tool goes in `no-tool.txt` with why; a product's new route fails
    roll-mcp's tests until it has a tool or a line.
-7. **Landed 2026-11-20, evening (main 32352f2fc, ci green):** secrets' toolset in areas (#538);
+13. **Landed 2026-11-20, evening (main 32352f2fc, ci green):** secrets' toolset in areas (#538);
    the coming routes of #501 and #520 declared (#540); a second outside review's fixes:
    `secrets_ensure_environment` never deletes keys, `previews_set_rules` leaves GitHub's visual
    checks alone, `secrets_apply_changes` described truly and destructive, code resources refuse
    dot-only names (#542); a test that an area lists only its tools, `debug_failing_service` reads
    grouped errors and asks why a deploy failed (#543); `roll mcp config --toolsets` takes areas and
    refuses an unknown product (#548).
-8. **Landed 2026-11-20, fourth turn (main 1f29e2feb, ci green):** roll code files as resources
+14. **Landed 2026-11-20, fourth turn (main 1f29e2feb, ci green):** roll code files as resources
    (#516); apps' explain and config rotate as tools (#521); every catalogued route a tool's or in
    `no-tool.txt` with why, a test failing on neither (#519); its `no tool yet` lines worked down:
    overviews, replicas, a vhost's suspend and wake, storage and tasks' reads and revokes (#527),
@@ -1205,12 +1397,12 @@ waits on a sibling PR reaching main is last.
    push status (#531), secrets' change requests without bypass (#534), value requests on #277's
    `rlq_` token and pulled audit keys in `security_checkup` (#536); the destructive hint derived
    for every `DELETE` (#510); secrets' read tools (#506).
-9. **Landed 2026-11-20, third turn (main 52220afbe, ci green):** apps' runtime config, deploy
+15. **Landed 2026-11-20, third turn (main 52220afbe, ci green):** apps' runtime config, deploy
    freeze (admin by the body), drains' new sources and format, and error triage as tools (#495,
    37180c509, after apps' #474 and #480); apps' toolset in areas, `apps.observe`, `.deploy`,
    `.configure` and `.project`, each with the lookups every area needs, placed by route with a
    test for any route it doesn't place (#497); the connect panel offering them (#500).
-10. **Landed 2026-11-20, second turn (main 3b1aa5823, ci green):** roll code's `list_repos` and a
+16. **Landed 2026-11-20, second turn (main 3b1aa5823, ci green):** roll code's `list_repos` and a
    form's repo and owner choices (#462, 573e2691e); apps' and previews' everyday routes as tools
    (#471); taking a status page down (#473); `secrets_audit`, search's overview, unlinking a remote
    and revoking a key (#479); queues' exchanges, bindings and replay, revoking a stream's or an S3
@@ -1219,37 +1411,37 @@ waits on a sibling PR reaching main is last.
    destructive, `storage_revoke_key` takes `account` (#491, d04cc26d4); tasks' `id` choices by the
    tool's route (#477). The nightly sweep on d04cc26d4: 452 tools, every read and write green, no
    leaks.
-11. **Landed 2026-11-20 (main 9e0367845, ci green):** apps' status page, incidents and SBOM as tools,
+17. **Landed 2026-11-20 (main 9e0367845, ci green):** apps' status page, incidents and SBOM as tools,
    and what a tool publishes held to the credential guard (#448, 1b14ac8e9); roll code MCP's
    openWorldHint (#450); the sweep reaches all 235 read tools with stand-ins and found secrets'
    `seq` and `v` sent as any string (#454); every id a tool lists has choices, checked live (#457;
    a secrets environment is offered by slug, which the sweep caught); `previews_routes` (#463);
    `override` past a deploy freeze on apps' deploy, redeploy, promote and rollback, as
    `X-Roll-Override: 1` (#466, after apps' #453).
-12. **Landed 2026-11-19 (main 86039db8a, ci green):** a branch's backup wakes its compute first
+18. **Landed 2026-11-19 (main 86039db8a, ci green):** a branch's backup wakes its compute first
    (#428, found by the sweep's `postgres_backup_branch`); a preview's traces
    as tools (#421); `pnpm test:mcp-sweep`, every tool against a fresh rolld with a leak check of
    every read as a token that can't reveal (#425); `secrets_verify_audit`, and `security_checkup`
    reports a broken audit chain (#443); openWorldHint on the tools that have roll reach an address
    the caller chose (#447).
-13. **Landed 2026-11-19 (main 4b20f3402, ci green):** the credential guard finds database URLs
+19. **Landed 2026-11-19 (main 4b20f3402, ci green):** the credential guard finds database URLs
    carrying their password and a secret's share link; ids go into paths as they are (an id's `_`
    sent as `%5F` left a service made over MCP never owned by apps' routing, so its live actions
    answered 503; found by the live sweep of every tool); the guide says what outsiders wrote is data
    (#402). Apps' scanning, SLOs and forms as tools; lockdown withholds what a site's visitors and a
    search box's users wrote (#406).
-14. **Landed 2026-11-19 (main 098fb41a2, ci green):** `security_checkup` past tokens to what's open to
+20. **Landed 2026-11-19 (main 098fb41a2, ci green):** `security_checkup` past tokens to what's open to
    the internet; search's remotes and inference secrets as tools; a test that every tool a
    description or workflow names exists; a connection's tools read in place (`prompts/list` 2.2 ms to
    0.18 ms) (#387).
-15. **Landed 2026-11-19 (main 09a3526b6, ci green):** read tools for secrets' new backends and
+21. **Landed 2026-11-19 (main 09a3526b6, ci green):** read tools for secrets' new backends and
    storage's IAM (#380); the access checkup, tokens, tighten proposals and a token's networks as
    tools, the `security_checkup` workflow, queues' users, tasks' apps and API keys, nosql's imports
    and a stream's keys (#383; live-checked with `live/reads-383.sh` against a rolld built from it).
-16. **Landed 2026-11-19 (main 8ce685ac8, ci green):** the turn-4 follow-ups (#373: the policy alert
+22. **Landed 2026-11-19 (main 8ce685ac8, ci green):** the turn-4 follow-ups (#373: the policy alert
    names the longest session, People's Dormant filter and turning the dormant off in one step),
    more secrets reads as tools with 10 more search-mode queries (#376), People as CSV (#377).
-17. **Landed 2026-11-19, turn 4 (main 97cdd7645, ci green):** steadier timing tests (#348), passkey
+23. **Landed 2026-11-19, turn 4 (main 97cdd7645, ci green):** steadier timing tests (#348), passkey
    autofill (#322), an admin's per-person security log (#328), admin alerts (#333), search's audit
    and analytics tools (#334), the longest session (#337), how each session signed in (#338),
    signing out of the others (#342), People's search (#345), dormant people, token use counting
@@ -1257,7 +1449,7 @@ waits on a sibling PR reaching main is last.
    clients' limits (#355), approvals remembered for a week or 30 days (#360), debugging reads as
    tools (#362). An independent security review fixed six of them before landing; checked in a
    real Chromium (`users-live/review-turn4.sh`).
-18. **Landed 2026-11-18, turn 3 (main e84194b6f, ci green):** a person's own data export (#283),
+24. **Landed 2026-11-18, turn 3 (main e84194b6f, ci green):** a person's own data export (#283),
    hardware keys only (#286), one provider for people and agents (#287), an SSO connection's
    session length (#289) and back-channel logout (#292), allowed networks (#294), a second factor
    for everyone (#298) and who has one (#299), an idle timeout (#302), phishing-resistant sign-in
@@ -1267,10 +1459,10 @@ waits on a sibling PR reaching main is last.
    Kubernetes clusters (#310), and the audit log naming people by handle (#313). Gated as one tree,
    then landed one per round (`turn3-land.sh`: the queue drops stacked PRs that share anchors once
    a squash breaks their ancestry).
-19. **Landed 2026-11-18 (main 1a60b43be):** passkeys (#256), sudo mode (#257, #260), new-sign-in mail
+25. **Landed 2026-11-18 (main 1a60b43be):** passkeys (#256), sudo mode (#257, #260), new-sign-in mail
    (#258), second-factor resets (#263), refused codes in the security log (#254); for roll secrets,
    `revoke_many` and the public detectors (#267) and decoy tokens (#270).
-20. **People's accounts, enterprise-grade:** on main: SSO (#225), SCIM provisioning (#231) with
+26. **People's accounts, enterprise-grade:** on main: SSO (#225), SCIM provisioning (#231) with
    checksummed `rlp_` tokens revoked on a leak (#250), accounts in roll's audit log (#236), a
    person's own security log (#239), one place for identity providers (#252: an enterprise
    provider with `sso` vouches for its SSO connection's proven domains), and one provider for
@@ -1280,7 +1472,7 @@ waits on a sibling PR reaching main is last.
    - Provider groups to roles over SCIM: **blocked.** roll has no org or team membership for people
      yet (docs/accounts.md phase 2, "Orgs"), and its one role, admin, is never SCIM's to grant.
      Groups map to org membership once orgs exist.
-21. **Gate flakes under load, for their owners:** code-sql's `writes_are_serializable_and_retried`
+27. **Gate flakes under load, for their owners:** code-sql's `writes_are_serializable_and_retried`
    and `killed_connections_never_lose_or_repeat_acknowledged_writes` (16 threads on one row exhaust
    the 40 conflict re-runs), and code-control's Linear e2e (30 s for the elicitation). Measured
    2026-11-20 on Postgres 18 at load 40-48: the first took 633-727 runs for its 400 increments
@@ -1290,18 +1482,18 @@ waits on a sibling PR reaching main is last.
    machine was the cause. A test-side deadline, not more retries in production, stays the fix. (The 2026-11-18 turn's combined
    gate passed without them: #208, #209, #210, #225, #226, #231, #236 and #239 landed as one gated
    tree, main 53b939213.)
-22. **Enterprise sign-in (#210), what's left:** a live check with a real provider's ID-JAG (Okta's
+28. **Enterprise sign-in (#210), what's left:** a live check with a real provider's ID-JAG (Okta's
    Cross App Access sandbox needs an account: the review pack's decision 5). The draft names the
    tenant `tenant`; a provider whose assertions say it another way (Entra's own tokens use `tid`)
    gets a mapping once its ID-JAGs are checked, never a guess.
-23. **Outsiders' text reaching roll's own agents:** checked 2026-11-19. An issue or comment from
+29. **Outsiders' text reaching roll's own agents:** checked 2026-11-19. An issue or comment from
    someone GitHub says can't push starts no automation unless its trigger says `anyone`
    (`chatops/github.rs`, as GitHub's lockdown does), forks' code waits for `approve-run`, and only
    an install's members drive roll from Slack or Discord. Left, the agents area's call: when a
    trigger says `anyone`, run its agent with a read-only grant (or ask before every write), since
    the outsider's text is then the agent's task. roll's agents don't connect to `/v1/mcp` (their
    MCP server is the orchestrator's), so `?lockdown` isn't where this belongs.
-24. **More MCP Apps views:** a rollback button on a deploy (calling `apps_rollback` through the
+30. **More MCP Apps views:** a rollback button on a deploy (calling `apps_rollback` through the
    host, so through the gate, as deploy), once a host that renders views is confirmed (the review
    pack's decision 4). A preview's screenshot against its baseline needs no view: hosts render
    `previews_screenshot`'s image (`diff=base`) themselves, and accepting a visual change stays a
@@ -1309,7 +1501,7 @@ waits on a sibling PR reaching main is last.
    (`examples/basic-host` v2.0.4: `users-live/host-shot.mjs`, with its one-line patch declaring
    the extension) and the stand-in; Claude.ai or ChatGPT need a public HTTPS rolld and the user's
    account.
-25. **More tools that wait:** `apps_wait_deploy`, `apps_wait_job`, `tasks_wait_run` and, since
+31. **More tools that wait:** `apps_wait_deploy`, `apps_wait_job`, `tasks_wait_run` and, since
    2026-11-20, `previews_wait` (until a preview is ready, failed, sleeping, going or waiting on a
    person's `approve-run`). Rechecked on main (05:50): Postgres
    branch backups and restores answer once done (nothing to wait on); search's reindexes are
@@ -1317,19 +1509,20 @@ waits on a sibling PR reaching main is last.
    can use `until` once their routes answer a state to wait on (search's reindex is an
    Elasticsearch task today, with no roll route to watch). Recheck with `mcpc` (`~/.local/share/roll-mcp/live/mcpc-tasks.sh`), and with the
    TypeScript SDK's `client/ext/tasks` once it ships.
-26. **Dry-merge the sibling heads after each of their pushes** that touches the gate, the catalogue or
+32. **Dry-merge the sibling heads after each of their pushes** that touches the gate, the catalogue or
    rolld, and send each thread its conflicts and their resolutions (`sibling-auth.sh`: every
    route classified, per method, with #25; agreed conflicts resolved by `known-conflicts.py`), and
    compare each product's routes with its tools (an everyday route with no tool is a gap: apps'
    were found this way). #24 and #25 are on main, so `feature/mcp-on-landing` is retired:
    secrets' #64 lands on main directly.
-27. **The operator's steps:** only if a load balancer that terminates HTTP sits in front of rolld (not
+33. **The operator's steps:** only if a load balancer that terminates HTTP sits in front of rolld (not
    roll's own edge, which needs nothing), set `ROLL_TRUSTED_PROXIES` to its addresses; and register `rlt_`, `rlo_`, `rlf_`, `rlc_`, `rlk_`, `rlp_`, `rlb_` and `rlq_` (`[a-z2-7]{40}` with a
    checksum) with GitHub's secret scanning partner program, so leaks on GitHub reach
    `/v1/access/leaks/github`.
-28. **Postgres e2e:** five history/replica e2e tests fail on this server because computes can't
+34. **Postgres e2e:** five history/replica e2e tests fail on this server because computes can't
    reach the daemon on the Docker bridge; run `pnpm test:pg` where they can (CI) before merging.
-29. **Step-up authorization (SEP-835), once clients do it:** a refused call could answer `403`
+35. **Step-up authorization (SEP-835): moved up to item 2 (2026-11-22), clients do it now.** The
+   design as first written: a refused call could answer `403`
    `WWW-Authenticate: Bearer error="insufficient_scope", scope=…` so the client reopens roll's
    consent screen for the refused rule (as the refusal's widen link proposes it now). Not yet: today
    it would take the refusal's explanation and `access_request_access` away from the main clients,
@@ -1349,8 +1542,7 @@ the route's tool doesn't take and no line explains, as `no-tool.txt` does for ro
 it: `follow` (a live stream; a tool answers once), files and exports for people (`format`), a
 cache validator (`digest`), and a protected environment's delete confirmation (`confirm`). A docs search tool (Supabase's `search_docs`): roll's docs are design docs (plans, `## Next` lists, test maps), and serving them would hand agents roadmap notes as how roll works; `roll://guide` covers using roll over MCP, until user-facing docs exist; a smaller default toolset (see Toolsets: it would drop tools from connections that use them; search mode is opt-in); a connection narrowed to one project (Supabase's `project_ref`): their
 tokens are account-wide; a roll token's rules already name projects, and the builder's presets
-start from one. `outputSchema` per tool: it would double `tools/list` for clients that read
-`structuredContent` as JSON anyway.
+start from one.
 
 Done lately: #231 (SCIM provisioning; review: an admin's disable stays, deactivation always finishes, UPN userNames) and #236 (accounts in the audit log; review: events survive dropped connections, what changed, who linked) opened; #225 opened (enterprise SSO for people; an agent's review before its first build found three highs, all fixed: links held to verified domains, no silent re-link, domains proven by DNS); #226 opened (MCP tools for apps' stack and previews' requests); the restore of an apps service is a deploy row of its own (agreed with apps for #230); #114 on main as 93fc949b5; #208, #209, #210 opened; MCP clients' OAuth tokens held to the MCP server (RFC 8707: the API refuses them directly, so lockdown, the credential guard and a read-only URL can't be stepped around; `roll login` keeps API tokens; #210); enterprise sign-in checked against the ID-JAG draft -06 (one audience, a multi-tenant issuer pinned to a tenant, the token held to the assertion's resource, the grant profile in metadata; #210); enterprise apps rotate, change rules, and a leaked app secret is revoked (#210); #179 on main as fc1d44f61 (roll-net refuses 198.18.0.0/15, 192.88.99.0/24, Teredo and IPv4-compatible IPv6, found by previews' egress review); #108 (skills, waits, missing ids asked for, install links) on main as 886fcdd54; products are told which approval let a request run (`roll_auth::Approved {id, by, until}`), so roll secrets' audit can say who approved a reveal instead of building access requests of its own (asked for by the secrets thread; #114); #104 (server card) on main as 22d58038d; the last everyday tasks routes as tools (`tasks_delete_queue`, `tasks_cancel_messages`; batch publishing is `tasks_publish` repeated; #114); everyday routes rechecked after apps #115, search #103 and #127, and previews #107 (what has no tool is a credential, a shell, files or a spend cap: admin by design); "Asked for" names the project and shows the rule on its own line (#114); a refusal links to where a person can allow it (the token page proposes the rule: allow, ask each time, not now; #114); a `set-up-ci` skill (#108); the panel's Rotate moves a client to GitHub Actions, a key or a new secret (#114); #101 (machine clients) on main as fb01574c8; `roll token client rotate --github/--gitlab/--issuer` (#114); one-click installs for Cursor and VS Code on the connect panel, never with a token (#108); everyday routes rechecked after apps #99 and search #100 (what has no tool is interactive, a credential or admin); the checkup nudges machine clients on a secret toward a key or CI's identity, and counts their sign-ins as use (#114); any CI's identity from the CLI (`--issuer --subject --claim --jwks`; #114); every machine client's sign-ins capped, counted once the credential checks out; the list says when each last signed in and what a trusting client trusts; the audit page reads client rows in full (#114); a missing id asked for, checked live with the official TypeScript SDK v2 (#108); a missing id asked for through form elicitation (2026-07-28 clients; #108); secrets' #87 roll-auth lines reviewed and approved (a key-limited rule now passes `filters_itself` rows; health and leaks still show such a token nothing); machine clients in the audit log (`create_client`, `rotate_client`, `revoke_client`, and a `sign_in` row for each token with its credential, CI subject and address; #114); a machine client's token narrowed by `scope=read-only` (#114); deploys and jobs in the MCP Apps view (#108); the machine-client security review's fixes (a device flow can't name a machine client, sign-ins issue at the checked credential generation; #101, #114); #98 (MCP Apps) on main; trusted clients from GitLab CI (`--gitlab group/project`) and in the GitHub Action (`client-id`, reviewed with the secrets thread; #114); `apps_wait_job` (#108); trusted machine clients (CI's own OIDC token, RFC 7523's `jwt-bearer` grant, for any product's rules; roll secrets' verifier moved to `crates/roll-oidc`, reviewed by the secrets thread; `roll token client create --github owner/repo`); #93 (MCP tasks) on main; `apps_wait_deploy` (#108); everyday routes rechecked after secrets #85 and apps' latest: what has no tool is an operator's or admin by design (`visual/accept`, previews' coming `approve`); skills over MCP (SEP-2640: the workflows and the guide as Agent Skills, exact digests; #108); rotating a machine client (`/rotate`, `roll token client rotate`: a new key or secret, the same id; the old one kept a while or stopped with its tokens); an MCP Apps approval card (`access_wait_approval`: what waits, and roll's page to open through the host, never decided from the view) and links opened through the host; the MCP Apps table checked in ext-apps' reference host (its handshake fixed: `protocolVersion`; times shown as UTC, always-empty columns dropped); the server card (SEP-2127: `/v1/mcp/server-card` and `/.well-known/ai-catalog.json`, checked against the extension's schema; #104); a person's own machine clients (acting as them within their reach, waiting for an admin past the policy, theirs alone to see and revoke); a "Machine clients" panel on MCP & access (a pasted PEM or JWK, or a secret shown once with the `curl` that trades it); `roll token client create|list|revoke` (an openssl PEM public key, Ed25519 or P-256, or a JWK; without one, a secret shown once); machine clients (OAuth client credentials: a secret or a key's JWT traded for an hour's token bounded by the client's rules; replays refused; a leaked `rlc_` secret revokes its client); MCP Apps (`ui://roll/table`: tools that answer rows show them as a table in hosts that render apps); the other products' operator checks reviewed: apps' references were the only one a grant got past (fixed in #80); tasks, storage's console, streams and secrets check the grant first or only skip their own keys; tools that wait (`tasks_wait_run`, `access_wait_approval`) wait on as tasks until it's over; MCP tasks checked live with apify's `mcpc` 0.8 (task, approval, result); MCP tasks (2026-07-28's extension: a long call, or one waiting for approval, is a task its owner polls from any node; sealed results, an hour's TTL, 16 per token); `roll_find_tools` ranks by how much of a name the query covers, and a test holds 30 everyday queries to their tool (titles now say what a tool acts on: "Roll back a deployment", "Upload an object to a bucket"); search mode for clients that can't take the list (the connect panel and `roll mcp config` turn it on for VS Code and Cursor; `claude mcp add` lines quote a URL with a mode); credentials read tokens could see are hidden (a project's preview variables, tasks' forwarded headers, agents' share links); `tests/admin_only.rs` (every "needs the admin token" refusal is admin in the catalogue); apps' notifications and log drains and secrets' key workflows as tools; write and deploy tokens no longer pass roll code's admin-only checks (connecting a GitHub repository, landing with `bypass`), shorten a stream's retention (now `delete`), mint agents machine tokens (`admin`) or share threads (`reveal`); a rule can grant one transit key (`{"id": "prj_x", "index": "payments"}`: the per-key rows name it); loosening a NoSQL database's masking policy or read-only flag is `admin` (it was `write`, so a token that could read and write could drop the masking and read raw values); postgres, Redis, storage, queues, streams and tasks tools for their everyday routes; lockdown (`?lockdown=1`: work items from GitHub issues, reviews and review comments whose author can't push, and changes from forks, are `outside`, and their text is withheld from the model); search mode (`?tools=search`: `roll_find_tools`, `roll_run_read` and `roll_run` instead of ~240 tools; a run is the tool it names to every check, the audit log included; the connect panel offers it past a client's limit); a token's "last day" counts only its own requests (its change history and roll's
 revocations were counted as asks: "1 asked" on a token that never made a request; seen in the review

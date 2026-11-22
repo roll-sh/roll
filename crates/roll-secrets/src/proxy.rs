@@ -51,6 +51,10 @@ pub enum Refusal {
     /// Likely an exfiltration attempt: roll secrets records an alert.
     #[error("{0} isn't a host the key is bound to")]
     WrongHost(String),
+    /// The placeholder was issued to another consumer than the proxy serves: likely a leaked one
+    /// (a log line, an error page) used from someone else's proxy. roll secrets records an alert.
+    #[error("the placeholder wasn't issued to this consumer")]
+    WrongConsumer,
     #[error("{0}")]
     WrongPlace(String),
     /// The key's binding names no header or query parameter, and the placeholder is an untrusted
@@ -82,9 +86,11 @@ pub struct Swap {
 }
 
 /// What swaps a placeholder for its value: [`Secrets`](crate::Secrets) in process (blocking: call
-/// it off the async runtime). Checked again on every call; nothing is cached.
+/// it off the async runtime). `consumer` is the one the proxy serves (its interception CA's:
+/// `apps:<project>/<env>`, `preview:…`, `sandbox:…`), never one the request names: a placeholder
+/// swaps only for the consumer it was issued to. Checked again on every call; nothing is cached.
 pub trait Substitute: Send + Sync {
-    fn substitute(&self, placeholder: &str, host: &str, at: Position<'_>) -> Result<Swap, Refusal>;
+    fn substitute(&self, placeholder: &str, consumer: &str, host: &str, at: Position<'_>) -> Result<Swap, Refusal>;
 }
 
 /// The bounds a request must fit before anything is asked.
@@ -128,9 +134,11 @@ pub enum Blocked {
 
 /// Swap every placeholder in `req`'s headers and query for its value, or none, and answer the
 /// [`Scrub`] for its response (empty when nothing was swapped, which leaves the request as it
-/// was). A request that was swapped into asks for `Accept-Encoding: identity`, so the response
-/// can be scrubbed as it arrives.
-pub fn filter(req: &mut Outgoing<'_>, with: &dyn Substitute, limits: &Limits) -> Result<Scrub, Blocked> {
+/// was). `consumer` is the one the proxy serves (its interception CA's), never taken from the
+/// request: a placeholder issued to another is refused ([`Refusal::WrongConsumer`]). A request
+/// that was swapped into asks for `Accept-Encoding: identity`, so the response can be scrubbed as
+/// it arrives.
+pub fn filter(req: &mut Outgoing<'_>, consumer: &str, with: &dyn Substitute, limits: &Limits) -> Result<Scrub, Blocked> {
     let header_bytes: usize = req.headers.iter().map(|(n, v)| n.len() + v.len()).sum();
     if header_bytes > limits.header_bytes {
         return Err(Blocked::TooLarge("headers"));
@@ -174,7 +182,7 @@ pub fn filter(req: &mut Outgoing<'_>, with: &dyn Substitute, limits: &Limits) ->
         let at = || format!("header {n}");
         let mut out = v.clone();
         for t in tokens(v).map_err(|w| refused(at(), w))? {
-            let swap = with.substitute(t, req.host, Position { place: Place::Header, name: n.as_str(), value: v.as_str() }).map_err(|w| refused(at(), w))?;
+            let swap = with.substitute(t, consumer, req.host, Position { place: Place::Header, name: n.as_str(), value: v.as_str() }).map_err(|w| refused(at(), w))?;
             let value = swap.value.expose();
             if value.len() > limits.value_bytes {
                 return Err(refused(at(), Refusal::Unusable("the value is too large to send".into())));
@@ -196,7 +204,7 @@ pub fn filter(req: &mut Outgoing<'_>, with: &dyn Substitute, limits: &Limits) ->
             match tokens(v).map_err(|w| refused(at(), w))?.as_slice() {
                 [] => parts.push(raw.to_string()),
                 [t] => {
-                    let swap = with.substitute(t, req.host, Position { place: Place::Query, name: n, value: v }).map_err(|w| refused(at(), w))?;
+                    let swap = with.substitute(t, consumer, req.host, Position { place: Place::Query, name: n, value: v }).map_err(|w| refused(at(), w))?;
                     if swap.value.expose().len() > limits.value_bytes {
                         return Err(refused(at(), Refusal::Unusable("the value is too large to send".into())));
                     }
@@ -391,7 +399,7 @@ mod tests {
     }
 
     impl Substitute for Fake {
-        fn substitute(&self, placeholder: &str, host: &str, at: Position<'_>) -> Result<Swap, Refusal> {
+        fn substitute(&self, placeholder: &str, _consumer: &str, host: &str, at: Position<'_>) -> Result<Swap, Refusal> {
             self.calls.lock().unwrap().push((host.to_string(), at.place, at.name.to_string()));
             let (_, v) = self.known.iter().find(|(p, _)| p == placeholder).ok_or(Refusal::Unknown)?;
             if host != "api.example.com" {
@@ -413,7 +421,7 @@ mod tests {
     type Headers = Vec<(String, String)>;
 
     fn run(with: &Fake, host: &str, path: &str, headers: &mut Vec<(String, String)>, query: Option<&mut String>, limits: &Limits) -> Result<usize, Blocked> {
-        filter(&mut Outgoing { host, path, headers, query }, with, limits).map(|s| s.swapped())
+        filter(&mut Outgoing { host, path, headers, query }, "sandbox:sbx_1", with, limits).map(|s| s.swapped())
     }
 
     #[test]

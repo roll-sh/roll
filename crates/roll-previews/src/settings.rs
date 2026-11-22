@@ -97,6 +97,11 @@ pub struct Settings {
     /// Wake the change's services as soon as a new head is deployed, so the first visit (often
     /// the pull request comment's link) doesn't wait for a cold start.
     pub warm: bool,
+    /// Scheduled work runs in previews too: roll apps' cron services and services' scheduled
+    /// commands and calls. Off (the default): deployed, but the schedule doesn't fire (roll apps'
+    /// `scheduled: false`), so a preview nobody looks at runs no jobs, and a nightly digest doesn't
+    /// mail anyone from its data.
+    pub crons: bool,
     /// A command run once on the preview's fresh data (after branching, and after each reset)
     /// before its services deploy: anonymise, migrate, load fixtures.
     pub seed: Option<Seed>,
@@ -401,6 +406,7 @@ impl Default for Settings {
             data_at: None,
             feedback: true,
             warm: true,
+            crons: false,
             seed: None,
             release: None,
             teardown: None,

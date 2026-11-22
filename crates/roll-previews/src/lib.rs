@@ -727,6 +727,20 @@ impl PageA11y {
     }
 }
 
+/// Something that happened to a preview, for followers (`GET /v1/previews/events`, roll MCP's
+/// event feeds): `created`, `ready` (up after a push or its first deploy; never a sleeping one
+/// waking), `failed`, `visual_change` (a visual change waits for review, once a head) or `deleted`. Ids and kinds only: `data` holds the head.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct Event {
+    pub seq: i64,
+    pub at: i64,
+    pub kind: String,
+    pub project: String,
+    pub preview: String,
+    pub change: Option<String>,
+    pub data: serde_json::Value,
+}
+
 /// What a preview's service uses right now (Render's and Railway's metrics): cores of CPU and
 /// resident memory, against the memory it runs with. Only a running service has any.
 #[derive(Clone, Debug, PartialEq, Serialize, serde::Deserialize)]
@@ -1453,5 +1467,38 @@ mod tests {
         assert_eq!(label_part("abcdef", 4), "abcd");
         assert_eq!(label_part("ab-cd", 3), "ab");
         assert_eq!(branch_name("pv_abc"), "pv-abc");
+    }
+}
+
+#[cfg(test)]
+mod contract {
+    /// Fields `src`'s `pub struct <name>` serializes (not `#[serde(skip)]`) that docs/previews.md's
+    /// `type <name> = { … }` doesn't name.
+    fn undocumented<'a>(src: &'a str, name: &str) -> Vec<&'a str> {
+        let doc = include_str!("../../../docs/previews.md");
+        let s = &src[src.find(&format!("pub struct {name} {{")).unwrap()..];
+        let s = &s[..s.find("\n}\n").unwrap()];
+        let shape = &doc[doc.find(&format!("type {name} = {{")).unwrap()..];
+        let shape = &shape[..shape.find("\n};").unwrap()];
+        let (mut skipped, mut missing) = (false, Vec::new());
+        for line in s.lines().map(str::trim) {
+            if line.starts_with("#[serde(skip)]") {
+                skipped = true;
+            } else if let Some(name) = line.strip_prefix("pub ").filter(|r| !r.starts_with("struct ")).and_then(|r| r.split(':').next()) {
+                if !skipped && !shape.contains(&format!(" {name}:")) && !shape.contains(&format!(" {name}?:")) {
+                    missing.push(name);
+                }
+                skipped = false;
+            }
+        }
+        missing
+    }
+
+    /// docs/previews.md's `Preview` and `Settings` (the API's contract with every client) name
+    /// each field the record and the rules answer: the shapes had fallen 23 fields behind.
+    #[test]
+    fn the_documented_shapes_name_every_field_they_answer() {
+        assert_eq!(undocumented(include_str!("lib.rs"), "Preview"), Vec::<&str>::new(), "docs/previews.md's Preview");
+        assert_eq!(undocumented(include_str!("settings.rs"), "Settings"), Vec::<&str>::new(), "docs/previews.md's Settings");
     }
 }

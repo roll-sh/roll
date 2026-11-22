@@ -156,6 +156,8 @@ export interface Preview {
   regressions?: "check" | "required" | null;
   /** Who accepted its regressions at its head. */
   regressions_accepted?: { head: string; by: string; at: number } | null;
+  /** Compared with main's preview at its head (errors; routes too with traces): until then nothing says it has no regressions. */
+  regressions_compared?: boolean;
   /** The keys it holds as placeholders (its egress proxy swaps each in for its hosts only), and
    * how many requests had one swapped in or were refused. Never a value. */
   /** How its head came up: when converging it started, and when each step first finished
@@ -437,6 +439,8 @@ export interface PreviewSettings {
   env_for: Record<string, Record<string, string>>;
   /** Wake the change's services as soon as a new head is deployed (a warm first visit). */
   warm: boolean;
+  /** A roll apps cron service runs its schedule in previews too (off: deployed, schedule off). */
+  crons?: boolean;
   /** Run once on fresh data (after branching or a reset) before the services deploy. */
   seed: PreviewJob | null;
   /** Run at each new head, after the seed and before services deploy (migrations). */
@@ -588,6 +592,7 @@ export const previewsApi = {
   requests: (id: string) => call<{ requests: RequestLine[] }>("GET", `${one(id)}/requests`),
   /** What its running services use right now (cores of CPU, resident memory, the memory each runs with). */
   metrics: (id: string) => call<{ services: ServiceMetrics[] }>("GET", `${one(id)}/metrics`),
+  events: (after = 0, limit = 100) => call<{ events: PreviewEvent[]; next: number }>("GET", `/v1/previews/events?after=${after}&limit=${limit}`),
   /** Its services' errors in the last `minutes` (5–1440, 60 by default, rounded up to 15-minute steps), grouped, newest first; masked as its logs are. */
   errors: (id: string, minutes?: number) => call<{ minutes: number; groups: ErrorGroup[] }>("GET", `${one(id)}/errors${query({ minutes })}`),
   /** How many errors its services wrote in that span (a list's rows: nothing to mask, so no values are read). */
@@ -649,6 +654,8 @@ export function parseSse(rest: string, text: string): { events: { event: string;
 export type ErrorGroup = { service: string; fingerprint: string; kind: string; title: string; count: number; first_seen: number; last_seen: number; sample: string; /** The trace its newest sample names, when the preview keeps it. */ trace?: string };
 
 /** A running service's use right now: cores of CPU, resident bytes (an instance's, on roll apps), and the MB it runs with. */
+/** Something that happened to a preview (`GET /v1/previews/events`). */
+export type PreviewEvent = { seq: number; at: number; kind: "created" | "ready" | "failed" | "visual_change" | "deleted"; project: string; preview: string; change: string | null; data: { head?: string } };
 export type ServiceMetrics = { service: string; cpu: number; memory_bytes: number; memory_mb: number };
 
 /** One of a preview's recent traces: its root span's name and service, when (ms), how long, how many spans, whether any failed. */

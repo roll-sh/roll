@@ -115,6 +115,13 @@ CREATE TABLE IF NOT EXISTS settings (
     key TEXT PRIMARY KEY,
     value TEXT NOT NULL
 ) WITHOUT ROWID;
+CREATE TABLE IF NOT EXISTS oauth_step_ups (
+    id TEXT PRIMARY KEY,
+    grant_id TEXT NOT NULL,
+    rule TEXT NOT NULL,
+    expires_at INTEGER NOT NULL
+) WITHOUT ROWID;
+CREATE INDEX IF NOT EXISTS oauth_step_ups_grant ON oauth_step_ups (grant_id, expires_at);
 CREATE TABLE IF NOT EXISTS oauth_codes (
     hash TEXT PRIMARY KEY,
     client_id TEXT NOT NULL,
@@ -181,6 +188,8 @@ pub const REFRESH_TTL_MS: i64 = 30 * 24 * 3600 * 1000;
 pub const REFRESH_GRACE_MS: i64 = 30 * 1000;
 /// An authorization code is good for one minute, once.
 pub const CODE_TTL_MS: i64 = 60 * 1000;
+/// A step-up waits this long for the person to allow it on the consent screen.
+pub const STEP_UP_TTL_MS: i64 = 10 * 60 * 1000;
 /// `last_used_at` is written at most this often per grant.
 const TOUCH_MS: i64 = 60 * 1000;
 /// Live grants kept at most, and per person.
@@ -511,9 +520,11 @@ pub struct Ask<'a> {
     pub environment: Option<&'a str>,
     pub scope_path: Option<&'a str>,
     pub scope_index: Option<&'a str>,
+    /// How long it waits for its people (the policy's `approval_wait_ms`).
+    pub wait_ms: i64,
 }
 
-/// An approval stays pending this long.
+/// An approved request runs within this long (and a decided one is shown this long).
 pub const APPROVAL_TTL_MS: i64 = 10 * 60 * 1000;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -863,6 +874,7 @@ impl Store {
     pub fn new(db: Db) -> Result<Store> {
         db.ensure_schema(SCHEMA)?;
         db.ensure_schema(crate::sinks::SCHEMA)?;
+        db.ensure_schema(crate::event_subs::SCHEMA)?;
         // Machine clients (client credentials): a confidential client's secret hash or key.
         // `add_column` checks for itself, so every database gets them, however old.
         db.add_column("oauth_clients", "confidential", "INTEGER NOT NULL DEFAULT 0")?;
@@ -901,6 +913,12 @@ impl Store {
                 db.add_column("approvals", col, "TEXT")?;
             }
         }
+        // Decisions in the order they were made (MCP Events' `access.approval` reads after one):
+        // given in the deciding write, so a reader past one never misses an earlier one.
+        if !db.has_column("approvals", "decided_seq")? {
+            db.add_column("approvals", "decided_seq", "INTEGER")?;
+        }
+        db.ensure_schema("CREATE INDEX IF NOT EXISTS approvals_decided ON approvals (decided_seq);")?;
         if !db.has_column("grants", "rate_per_minute")? {
             db.add_column("grants", "rate_per_minute", "INTEGER")?;
         }
@@ -1513,7 +1531,7 @@ impl Store {
                     args,
                     a.tool,
                     now,
-                    now + APPROVAL_TTL_MS,
+                    now + a.wait_ms,
                     a.request_hash,
                     a.environment,
                     a.scope_path,
@@ -1594,6 +1612,29 @@ impl Store {
             .collect())
     }
 
+    /// Decisions after `after` (their `decided_seq`), oldest first, for these grants (all: `None`),
+    /// with each one's place.
+    pub fn decided_after(&self, after: i64, limit: usize, grants: Option<&[String]>) -> Result<Vec<(i64, Approval)>> {
+        let mut args: Vec<code_sql::Value> = vec![code_sql::Value::Int(after)];
+        let only = match grants {
+            Some([]) => return Ok(Vec::new()),
+            Some(gs) => {
+                args.extend(gs.iter().map(|g| code_sql::Value::Text(g.clone())));
+                format!(" AND grant_id IN ({})", vec!["?"; gs.len()].join(", "))
+            }
+            None => String::new(),
+        };
+        args.push(code_sql::Value::Int(limit.clamp(1, 500) as i64));
+        let sql = format!("SELECT {APPROVAL_COLUMNS}, decided_seq FROM approvals WHERE decided_seq > ?{only} ORDER BY decided_seq LIMIT ?");
+        let width = APPROVAL_COLUMNS.split(',').count();
+        Ok(self.db.read(|c| c.query(&sql, args.as_slice(), |r| Ok((r.get::<_, i64>(width)?, approval_row(r)?))))?)
+    }
+
+    /// The newest decision's place (0: none yet).
+    pub fn latest_decided(&self) -> Result<i64> {
+        Ok(self.db.read(|c| c.query_row("SELECT COALESCE(MAX(decided_seq), 0) FROM approvals", (), |r| r.get(0)))?)
+    }
+
     /// Decide a pending approval. Approving adds `by` to who approved it; it's approved once
     /// `enough` says they are (one person when no policy rule covers it), and stays pending until
     /// then. A person approves once. Denying decides at once.
@@ -1612,7 +1653,7 @@ impl Store {
             }
             if !approve {
                 c.execute(
-                    "UPDATE approvals SET state = 'denied', decided_at = ?, decided_by = ?, reason = ?, expires_at = ? WHERE id = ?",
+                    "UPDATE approvals SET state = 'denied', decided_at = ?, decided_by = ?, reason = ?, expires_at = ?, decided_seq = (SELECT COALESCE(MAX(decided_seq), 0) + 1 FROM approvals) WHERE id = ?",
                     params![now, by, reason, now + APPROVAL_TTL_MS, id],
                 )?;
                 return Ok(true);
@@ -1626,7 +1667,7 @@ impl Store {
             if enough(&who) {
                 // An approved request may run within the next ten minutes, once.
                 c.execute(
-                    "UPDATE approvals SET state = 'approved', decided_at = ?, decided_by = ?, approved_by = ?, expires_at = ? WHERE id = ?",
+                    "UPDATE approvals SET state = 'approved', decided_at = ?, decided_by = ?, approved_by = ?, expires_at = ?, decided_seq = (SELECT COALESCE(MAX(decided_seq), 0) + 1 FROM approvals) WHERE id = ?",
                     params![now, by, list, now + APPROVAL_TTL_MS, id],
                 )?;
                 if let Some((rule, for_ms, gated)) = grants {
@@ -1949,6 +1990,84 @@ impl Store {
             Ok::<_, Error>(())
         })?;
         Ok((code, grant_id))
+    }
+
+    /// A step-up (MCP's `insufficient_scope` challenge) for an OAuth connection's refused call: the
+    /// one rule the gate refused, kept for 10 minutes for the consent screen to propose. A client
+    /// never chooses it; its challenge carries only the id. At most 10 live per connection.
+    pub fn create_step_up(&self, grant_id: &str, rule: &roll_auth::scope::Rule) -> Result<String> {
+        let id = new_id("stp");
+        let now = code_sql::now_ms();
+        let json = serde_json::to_string(rule).unwrap_or_default();
+        self.db.write(|c| {
+            c.execute("DELETE FROM oauth_step_ups WHERE expires_at <= ?", [now])?;
+            c.execute(
+                "DELETE FROM oauth_step_ups WHERE grant_id = ? AND id NOT IN (SELECT id FROM oauth_step_ups WHERE grant_id = ? ORDER BY expires_at DESC LIMIT 9)",
+                params![grant_id, grant_id],
+            )?;
+            c.execute("INSERT INTO oauth_step_ups (id, grant_id, rule, expires_at) VALUES (?, ?, ?, ?)", params![id, grant_id, json, now + STEP_UP_TTL_MS])?;
+            Ok::<_, Error>(())
+        })?;
+        Ok(id)
+    }
+
+    /// A live step-up: its connection's id and the rule it proposes.
+    pub fn step_up(&self, id: &str) -> Result<Option<(String, roll_auth::scope::Rule)>> {
+        let now = code_sql::now_ms();
+        let row: Option<(String, String)> = self
+            .db
+            .read(|c| c.query_row("SELECT grant_id, rule FROM oauth_step_ups WHERE id = ? AND expires_at > ?", params![id, now], |r| Ok((r.get(0)?, r.get(1)?))).optional())?;
+        Ok(row.and_then(|(g, r)| serde_json::from_str(&r).ok().map(|rule| (g, rule))))
+    }
+
+    /// Use a step-up, once: its rule joins its connection's rules (unless one the same is there),
+    /// all in one transaction that rechecks the connection (live, not waiting on an admin) and
+    /// decides on the merged rules whether it waits for an admin now (`needs_approval`), so a change
+    /// made meanwhile is never lost or approved unseen. Nothing else about it changes. Answers the
+    /// connection and whether the rule was new.
+    pub fn apply_step_up(&self, id: &str, grant_id: &str, needs_approval: &dyn Fn(&Scope, bool) -> bool) -> Result<(Grant, bool)> {
+        let now = code_sql::now_ms();
+        let added = self.db.write(|c| {
+            let rule: Option<String> = c.query_row("SELECT rule FROM oauth_step_ups WHERE id = ? AND grant_id = ? AND expires_at > ?", params![id, grant_id, now], |r| r.get(0)).optional()?;
+            c.execute("DELETE FROM oauth_step_ups WHERE id = ?", [id])?;
+            let rule: roll_auth::scope::Rule = rule.and_then(|r| serde_json::from_str(&r).ok()).ok_or_else(|| Error::BadRequest("that step-up is used or expired: retry the call".into()))?;
+            let (rules, revoked, expires, pending, ask): (String, Option<i64>, Option<i64>, bool, bool) = c.query_row(
+                "SELECT rules, revoked_at, expires_at, pending, ask_otherwise FROM grants WHERE id = ?",
+                [grant_id],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
+            )?;
+            if revoked.is_some() || expires.is_some_and(|e| e <= now) {
+                return Err(Error::BadRequest("no such step-up of yours: retry the call that was refused".into()));
+            }
+            if pending {
+                return Err(Error::Conflict("that connection waits for an admin's approval: its rules can't change until they decide".into()));
+            }
+            let mut scope: Scope = serde_json::from_str(&rules).unwrap_or_default();
+            if scope.0.contains(&rule) {
+                return Ok(false);
+            }
+            scope.0.push(rule);
+            check_rules(&scope)?;
+            let waits = needs_approval(&scope, ask);
+            c.execute("UPDATE grants SET rules = ?, pending = ? WHERE id = ?", params![serde_json::to_string(&scope).unwrap_or_default(), waits, grant_id])?;
+            Ok::<_, Error>(true)
+        })?;
+        Ok((self.get(grant_id)?, added))
+    }
+
+    /// A code for an existing connection (step-up: the person widened it on the consent screen),
+    /// so the client's next tokens are that connection's and nothing new is made.
+    pub fn issue_code_for(&self, client_id: &str, grant_id: &str, redirect_uri: &str, challenge: &str, resource: Option<&str>) -> Result<String> {
+        let code = new_secret("rlz_");
+        let now = code_sql::now_ms();
+        self.db.write(|c| {
+            c.execute(
+                "INSERT INTO oauth_codes (hash, client_id, grant_id, redirect_uri, challenge, resource, expires_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                params![hash(&code), client_id, grant_id, redirect_uri, challenge, resource, now + CODE_TTL_MS],
+            )?;
+            Ok::<_, Error>(())
+        })?;
+        Ok(code)
     }
 
     /// Exchange a code (once) for an access and a refresh token. `verify(challenge)` checks PKCE.

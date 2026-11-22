@@ -90,9 +90,9 @@ pub fn visible(text: &str) -> String {
 }
 
 /// Text returned to the model at most; longer answers are cut (the structured content stays whole).
-/// 48 KiB stays inside Claude Code's default 25,000-token limit on a tool's answer
-/// (`MAX_MCP_OUTPUT_TOKENS`, which refuses a longer one outright rather than cutting it) even for
-/// dense JSON of ids and hashes (about 3 characters a token).
+/// 48 KiB (about 49,000 characters) stays inline in Claude Code: past 50,000 characters, or its
+/// default 25,000 tokens (`MAX_MCP_OUTPUT_TOKENS`) even for dense JSON of ids and hashes at about 3
+/// characters a token, it saves the answer to a file and the model reads it from there.
 pub const MAX_TEXT: usize = 48 << 10;
 
 /// `text` as the model gets it: invisible characters escaped, cut at MAX_TEXT. `whole` says the

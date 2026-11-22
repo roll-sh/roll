@@ -74,6 +74,9 @@ pub struct WriteArgs {
     /// The content type the document came in (JSON when unset): synthetic `_source` encodes
     /// the objects it keeps verbatim in it (`_ignored_source`).
     pub source_type: Option<crate::xcontent::XContentType>,
+    /// A connector sync's bulk item ([`crate::xpack::internal::index_only`]): the document
+    /// must land in the index it was sent to, so no pipeline may move it.
+    pub index_only: Option<String>,
 }
 
 /// The outcome of one write.

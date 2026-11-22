@@ -140,6 +140,11 @@ pub fn router(apps: Arc<Apps>) -> Router {
         .route(&format!("{env}/shell/sessions/{{sh}}/screen"), get(session_screen))
         .route(&format!("{env}/shell/sessions/{{sh}}/keys"), post(session_keys))
         .route(&format!("{env}/shell/sessions/{{sh}}/resize"), post(session_resize))
+        .route(&format!("{env}/private-network"), get(private_network).put(set_private_network).delete(delete_private_network))
+        .route(&format!("{env}/sandboxes"), get(sandboxes).post(create_sandbox))
+        .route(&format!("{env}/sandboxes/{{sbx}}"), get(get_sandbox).delete(delete_sandbox))
+        .route(&format!("{env}/sandboxes/{{sbx}}/exec"), post(sandbox_exec))
+        .route(&format!("{env}/sandboxes/{{sbx}}/files"), get(sandbox_get_file).put(sandbox_put_file).layer(DefaultBodyLimit::max(crate::sandboxes::MAX_FILE)))
         .route(&format!("{env}/jobs"), get(jobs).post(start_job))
         .route(&format!("{env}/jobs/{{job}}"), get(get_job))
         .route(&format!("{env}/jobs/{{job}}/logs"), get(job_logs))
@@ -629,11 +634,22 @@ async fn deliveries(State(apps): S, Path((project, nid)): Path<(String, String)>
 struct EventsQuery {
     after: Option<i64>,
     limit: Option<usize>,
+    /// `1`: no events, only the newest cursor (a reader that starts from now).
+    latest: Option<u8>,
 }
 
 /// `GET /v1/apps/events?after=&limit=`: what happened to services, in order, after a cursor;
-/// `next` is the cursor for the following call.
+/// `next` is the cursor for the following call. `?latest=1` answers only the newest cursor.
 async fn events(State(apps): S, Query(q): Query<EventsQuery>) -> R {
+    match (q.latest, q.after) {
+        (Some(1), None) => {
+            let next = apps.db(|s| s.last_event_seq()).await?;
+            return ok(json!({ "events": [], "next": next }));
+        }
+        (Some(1), Some(_)) => return Err(Error::BadRequest("latest=1 starts from now: leave out after".into())),
+        (Some(_), _) => return Err(Error::BadRequest("latest is 1 or left out".into())),
+        (None, _) => {}
+    }
     let after = q.after.unwrap_or(0);
     let limit = q.limit.unwrap_or(100);
     let events = apps.db(move |s| s.events(after, limit)).await?;
@@ -1694,6 +1710,75 @@ async fn run_logs(State(apps): S, Path((id, env, run)): Path<(String, String, St
 async fn run_now(State(apps): S, Path((id, env)): Path<(String, String)>) -> R {
     let r = apps.run_cron(&id, &env).await?;
     Ok((StatusCode::ACCEPTED, Json(r)).into_response())
+}
+
+async fn private_network(State(apps): S, Path((id, env)): Path<(String, String)>) -> R {
+    apps.environment(&id, &env).await?;
+    ok(apps.private_network(&id, &env).await?.ok_or_else(|| Error::NotFound(format!("{env} has no private network")))?)
+}
+
+/// Its WireGuard config's reference is bound to whoever sets it (read as them at each use).
+async fn set_private_network(State(apps): S, Path((id, env)): Path<(String, String)>, ext: Extensions, b: Bytes) -> R {
+    apps.environment(&id, &env).await?;
+    let v = apps.set_private_network(&id, &env, body(&b)?, asker(&ext)).await?;
+    apps.audit("private_network.set", &id, &env, actor(&ext), json!({ "secret": v["secret"], "routes": v["routes"] })).await;
+    ok(v)
+}
+
+async fn delete_private_network(State(apps): S, Path((id, env)): Path<(String, String)>, ext: Extensions) -> R {
+    apps.environment(&id, &env).await?;
+    apps.delete_private_network(&id, &env).await?;
+    apps.audit("private_network.removed", &id, &env, actor(&ext), json!({})).await;
+    Ok(StatusCode::NO_CONTENT.into_response())
+}
+
+async fn sandboxes(State(apps): S, Path((id, env)): Path<(String, String)>) -> R {
+    apps.environment(&id, &env).await?;
+    ok(apps.sandboxes(&id, &env).await?)
+}
+
+async fn create_sandbox(State(apps): S, Path((id, env)): Path<(String, String)>, ext: Extensions, b: Bytes) -> R {
+    apps.environment(&id, &env).await?;
+    let sb = apps.create_sandbox(&id, &env, body(&b)?).await?;
+    apps.audit("sandbox.created", &id, &env, actor(&ext), json!({ "sandbox": sb.id, "image": sb.image, "variables": sb.variables, "network": sb.network })).await;
+    Ok((StatusCode::CREATED, Json(sb)).into_response())
+}
+
+async fn get_sandbox(State(apps): S, Path((id, env, sbx)): Path<(String, String, String)>) -> R {
+    ok(apps.sandbox(&id, &env, &sbx).await?)
+}
+
+async fn delete_sandbox(State(apps): S, Path((id, env, sbx)): Path<(String, String, String)>, ext: Extensions) -> R {
+    apps.delete_sandbox(&id, &env, &sbx).await?;
+    apps.audit("sandbox.deleted", &id, &env, actor(&ext), json!({ "sandbox": sbx })).await;
+    Ok(StatusCode::NO_CONTENT.into_response())
+}
+
+/// A command's run (its text isn't audited: it can hold a secret).
+async fn sandbox_exec(State(apps): S, Path((id, env, sbx)): Path<(String, String, String)>, ext: Extensions, b: Bytes) -> R {
+    let body = body(&b)?;
+    let out = apps.sandbox_exec(&id, &env, &sbx, body.clone()).await?;
+    let len = body.get("command").and_then(Value::as_str).map_or(0, str::len);
+    apps.audit("sandbox.command", &id, &env, actor(&ext), json!({ "sandbox": sbx, "command_bytes": len, "exit_code": out["exit_code"] })).await;
+    ok(out)
+}
+
+#[derive(Deserialize)]
+struct SandboxPath {
+    path: String,
+}
+
+async fn sandbox_get_file(State(apps): S, Path((id, env, sbx)): Path<(String, String, String)>, Query(q): Query<SandboxPath>, ext: Extensions) -> R {
+    let data = apps.sandbox_get_file(&id, &env, &sbx, &q.path).await?;
+    apps.audit("sandbox.file_read", &id, &env, actor(&ext), json!({ "sandbox": sbx, "path": q.path })).await;
+    Ok(([(header::CONTENT_TYPE, "application/octet-stream")], data).into_response())
+}
+
+async fn sandbox_put_file(State(apps): S, Path((id, env, sbx)): Path<(String, String, String)>, Query(q): Query<SandboxPath>, ext: Extensions, b: Bytes) -> R {
+    let bytes = b.len();
+    apps.sandbox_put_file(&id, &env, &sbx, &q.path, b).await?;
+    apps.audit("sandbox.file_written", &id, &env, actor(&ext), json!({ "sandbox": sbx, "path": q.path, "bytes": bytes })).await;
+    ok(json!({ "path": q.path, "bytes": bytes }))
 }
 
 async fn domains(State(apps): S, Path((id, env)): Path<(String, String)>) -> R {

@@ -52,7 +52,7 @@ route as. "deploy*" means `deploy` when `{env}` is `production`, else `write`.
 | `POST /v1/apps/services/{id}/restore` | | `Service`: a deleted service back as it was, its live deployments loaded again and its card placed on the canvas; 409 when it isn't deleted | deploy |
 | `GET /v1/apps/services/{id}/activity?all=` | | `Event[]` (`audit.*`, newest first, 200): who changed what, never a value; `all=1`: every kind (deploys, failures, crash loops, alerts, domains, spend), the service's timeline | read |
 | `GET /v1/apps/services/{id}/links` | | `Link[]` | read |
-| `PUT /v1/apps/services/{id}/links/{kind}/{ref}` | `{prefix?}` | `Link` (a kind that makes a credential per link makes it here, once; setting the link again keeps it) | write |
+| `PUT /v1/apps/services/{id}/links/{kind}/{ref}` | `{prefix?, indices?, access?}` (`indices` and `access`: a search link's only, 400 on another kind: its key only for those index names or patterns (1–50, `tenant-*`), and `read` or `append`, create documents on exact names only (400 with a pattern); none: read and write documents. Roll search's keys route checks them again) | `Link` (a kind that makes a credential per link makes it here, once; setting the link again keeps it, unless its `indices` or `access` change: then a new key made with them replaces it and the old one is revoked) | write |
 | `DELETE /v1/apps/services/{id}/links/{kind}/{ref}` | | 204 (revokes a credential the link made) | write |
 | `GET /v1/apps/projects/{project}/notifications` | | `NotifyTarget[]` (the URL never returned, only its host) | read |
 | `POST /v1/apps/projects/{project}/notifications` | `{ kind?: "webhook" \| "slack" \| "discord" \| "email" \| "pagerduty" \| "opsgenie", url, routing_key?, api_key?, region?, events?, environments?, services?, previews? }` (environments: names; services: names or ids, kept as ids; previews: default false; `email` takes no `url`: it's the project's owner, 400 with one, for a project without an owner, or where mail isn't set up; `pagerduty` takes its integration's `routing_key`, `opsgenie` its `api_key`, each sealed and never returned, and `region` `us` or `eu`, no `url`: the service's own API) | 201 `NotifyTarget` (+ `secret` once, for a webhook) | reveal for a webhook (its secret comes back), write for Slack, Discord, email, PagerDuty and Opsgenie |
@@ -68,7 +68,7 @@ route as. "deploy*" means `deploy` when `{env}` is `production`, else `write`.
 | `GET /v1/apps/projects/{project}/limits` | | `SpendLimits` | read |
 | `GET /v1/apps/projects/{project}/usage?month=` | | `ProjectUsage`: a month's use (`YYYY-MM`, this one by default; 400 for a month to come) by service and environment at roll's prices, each service's previews as one row (`previews: true`), deleted services as one (`deleted: true`), most costly first; this month's projected to its end at the pace so far | read |
 | `PUT /v1/apps/projects/{project}/limits` | `{ alert_usd: number \| null, hard_usd: number \| null }` | `SpendLimits` (this month's alert and cap are decided again within 30 s) | admin (the hard limit pauses the whole project) |
-| `GET /v1/apps/events?after=&limit=` | | `{ events: Event[], next }`: what happened to services, in order, after a cursor | read |
+| `GET /v1/apps/events?after=&limit=&latest=` | | `{ events: Event[], next }`: what happened to services, in order, after a cursor; `latest=1` (never with `after`: 400) answers no events and the newest cursor, for a reader that starts from now | read |
 | `GET /v1/apps/services/{id}/changes` | | server-sent events: `ready`, then a `changed` (data `{}`) whenever a deploy moves, an instance wakes, sleeps or crashes, or someone changes the service; the page reads it again (on the owner, in memory; it carries nothing itself) | read |
 | `PUT /v1/apps/services/{id}/registry` | `{ username, password, server? }`, or for an image on ECR `{ kind: "ecr", access_key_id, secret_access_key, region? }` (region defaults to the registry's; another is a 400) | `Service` (a private registry's login for an image source; sealed, never returned; an ECR key is exchanged for ECR's 12-hour token at a pull, user `AWS`, kept until it has an hour left and then fetched again for what runs) | write |
 | `DELETE /v1/apps/services/{id}/registry` | | `Service` | write |
@@ -148,6 +148,16 @@ route as. "deploy*" means `deploy` when `{env}` is `production`, else `write`.
 | `GET /v1/apps/services/{id}/environments/{env}/jobs/{job}` | | `Job` | read |
 | `GET /v1/apps/services/{id}/environments/{env}/jobs/{job}/logs?follow=&tail=` | | `LogLine[]` or SSE (ends with the job, then `end`) | reveal (a job's output can be the variables) |
 | `POST /v1/apps/services/{id}/environments/{env}/jobs/{job}/cancel` | | `Job` | deploy* |
+| `GET /v1/apps/services/{id}/environments/{env}/private-network` | | `PrivateNetwork` (404 none) | read |
+| `PUT /v1/apps/services/{id}/environments/{env}/private-network` | `{ secret, routes, kind?, login_server? }` (a private network into the customer's own, Cloud Run's Direct VPC egress and Fly's WireGuard peering: `secret` is `roll://<this env>/…`, the WireGuard config in roll secrets, bound to whoever sets it and read as them at each use (400 another environment's, 403 one they may not reveal); the config must be one `[Interface]` with an `Address` and `[Peer]`s: `PostUp`/`PostDown`/`PreUp`/`PreDown`, `DNS`, `Table`, `FwMark` and a full tunnel (`AllowedIPs` `0.0.0.0/0` or `::/0`) are 400s, said without the config's text; `routes`: 1–20 `{ name, target }`, `name` a DNS name with a dot (`db.corp.internal`) that answers on the project network, `target` `host:port` in the customer's network, each port its own (400), each name one service's in the project environment (409); `kind` `wireguard` (the default) or `tailscale`: the secret is then a Tailscale auth key (one token), the node userspace and ephemeral with no capability, its routes through its SOCKS5 server (a target may be a MagicDNS name), and `login_server` a Headscale control server's http(s) URL (one line, nothing a command line could split). A closed environment's peer answers on its closed network and reaches its endpoint through a network of its own) | `PrivateNetwork` (its peer made now when something is deployed) | admin (it reaches into the customer's network, read as the setter) |
+| `DELETE /v1/apps/services/{id}/environments/{env}/private-network` | | 204 (its peer and forwarders stop now) | admin |
+| `GET /v1/apps/services/{id}/environments/{env}/sandboxes` | | `Sandbox[]`, oldest first | read |
+| `POST /v1/apps/services/{id}/environments/{env}/sandboxes` | `{ image?, ttl_s?, cpu?, memory_mb?, variables?, network? }` (a short-lived container to run commands in, Vercel Sandbox's and Fly Machines': the live deployment's image, or `image` (a public one); up for `ttl_s` (60–86400, default 600) then removed by the owner's minute sweep; `cpu` 0.25–4 (0.5), `memory_mb` 256–8192 (512), metered as a console for as long as it ran; `variables` (false): the live deployment's variables and files, as a console has them, its links reached through them; `network`: `none` (default: a network of its own, the internet and nothing of the project) or `environment` (its private network); a closed environment's are always on its network (`none` asked is a 400). At most 10 per environment (409); 409 with nothing deployed; 402 at the spend limit, 409 paused) | 201 `Sandbox` | admin (it runs anything, with the variables when asked, as a shell) |
+| `GET /v1/apps/services/{id}/environments/{env}/sandboxes/{sbx}` | | `Sandbox` | read |
+| `DELETE /v1/apps/services/{id}/environments/{env}/sandboxes/{sbx}` | | 204 (stopped and removed now) | admin |
+| `POST /v1/apps/services/{id}/environments/{env}/sandboxes/{sbx}/exec` | `{ command, timeout_s? }` (`sh -c <command>`, at most 64 KiB; killed after `timeout_s`, 1–600, default 60) | `{ exit_code: number \| null, timed_out, stdout, stderr, truncated }` (each stream's first 1 MiB as text, `truncated` when more was dropped; `exit_code` null when it was killed at its timeout). 409 once the sandbox ended. Audited without its text (`sandbox.command`, its length and exit code) | admin |
+| `GET /v1/apps/services/{id}/environments/{env}/sandboxes/{sbx}/files?path=` | | the file's bytes (`application/octet-stream`, at most 1 MiB; 404 none, 400 a directory or more) | admin (a file can be anything the sandbox holds) |
+| `PUT /v1/apps/services/{id}/environments/{env}/sandboxes/{sbx}/files?path=` | the file's bytes (at most 1 MiB) | `{ path, bytes }` (written at `path`, an absolute path without `..`, its directory made) | admin |
 | `GET /v1/apps/services/{id}/environments/{env}/domains` | | `Domain[]` | read |
 | `POST /v1/apps/services/{id}/environments/{env}/domains` | `{hostname}` | 201 `Domain` | deploy* |
 | `POST /v1/apps/services/{id}/environments/{env}/domains/{host}/verify` | | `Domain` | read |
@@ -622,6 +632,7 @@ type Deployment = {
   status: DeployStatus;
   trigger: "push" | "manual" | "rollback" | "upload" | "api" | "settings" | "promote"; // settings: a redeploy
   approved_by?: string[];   // who approved putting it live, where its environment asks for approvals (a single deployment's GET)
+  url: string | null;        // its own URL (`<id>--<env slug>` under the apps domain, the environment's scheme, port and access rules; never a project's preview domain): null for a worker, a service with a volume, one not public over HTTP, one never built, removed, pruned or waiting for its approvals
   actor: string | null;     // who asked: "git:<name>" for a push (its commit's author, as the commit claims it), the calling token or connection ("operator" for the operator's token); null when roll did it on its own
   revision: string | null;   // git commit of a repo source
   message: string;
@@ -693,7 +704,7 @@ type Plan = {
 
 /** Wired on a node today: postgres (DATABASE_URL), redis (REDIS_URL, REDIS_REST_URL/TOKEN) and search. */
 type LinkKind = "postgres" | "redis" | "bucket" | "stream" | "queue" | "nosql" | "search" | "service";
-type Link = { kind: LinkKind; ref: string; prefix: string; vars: string[] };
+type Link = { kind: LinkKind; ref: string; prefix: string; vars: string[]; indices?: string[] /* a search link's key's indices */; access?: "read" | "append" };
 // `search`: `ref` is a roll search cluster (id or name). The link makes a data-only credential of
 // its own, once (never the cluster's password): ELASTICSEARCH_URL and ELASTICSEARCH_API_KEY, or on
 // an OpenSearch-flavor cluster OPENSEARCH_URL, OPENSEARCH_USERNAME and OPENSEARCH_PASSWORD (an
@@ -800,6 +811,8 @@ type RunStatus = "running" | "succeeded" | "failed" | "skipped" | "timed_out" | 
 type CronRun = { id: string; deployment: string; status: RunStatus; exit_code: number | null; started_at: number; finished_at: number | null; attempt: number /* which try of its due time: 1, then up to run.retries more after a failure */ };
 /** A one-off command in a fresh container of the active deployment: its variables and project
  *  network, no port, no volume. timeout_s 1–86400 (default 3600). */
+type PrivateNetwork = { kind: "wireguard" | "tailscale"; secret: string /* roll://ENV/KEY, never the config or key */; routes: { name: string; target: string }[]; login_server: string | null; status: string /* running, failed: why, waiting for a deploy */ };
+type Sandbox = { id: string /* sbx_… */; service: string; environment: string; image: string; cpu: number; memory_mb: number; variables: boolean; network: "none" | "environment"; created_at: number; expires_at: number };
 type Job = { id: string; deployment: string; command: string; tasks: number; retries?: number /* tries after a task's failure */; parallelism: number /* tasks at once */; status: RunStatus; exit_code: number | null; started_at: number; finished_at: number | null };
 
 type Domain = {

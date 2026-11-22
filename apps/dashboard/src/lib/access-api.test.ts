@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { installLink, accessRequest, approversText, parseApprovers, deciderName, describeApprovalRule, gateProgress, rememberable, proposedRule, approvableTogether, byConcern, catalogFor, denyRedirect, draftOf, expiringSoon, grantMatches, mcpConfig, parseAuthorize, githubIdentity, githubStep, presetFor, presetRules, publicJwk, rulesOf, trustedLabel, statusOf, toolsetCost, pickArea, waitsForAdmin, withToolsets, type Approval, type Preset, idpFromForm, tieForAgents, untieForAgents } from "./access-api";
+import { describeAskRule, redirectRegistered, stepUpId, broadRule, installLink, accessRequest, approversText, parseApprovers, deciderName, describeApprovalRule, gateProgress, rememberable, proposedRule, approvableTogether, byConcern, catalogFor, denyRedirect, draftOf, expiringSoon, grantMatches, mcpConfig, parseAuthorize, githubIdentity, githubStep, presetFor, presetRules, publicJwk, rulesOf, trustedLabel, statusOf, toolsetCost, pickArea, waitsForAdmin, withToolsets, type Approval, type Preset, idpFromForm, tieForAgents, untieForAgents } from "./access-api";
 
 const presets: Preset[] = [
   { id: "read-only", name: "Read only", description: "", rules: [{ product: "*", resources: "*", actions: { read: "allow" } }] },
@@ -15,7 +15,7 @@ describe("access", () => {
     expect(mcpConfig("claude-code", `${url}?tools=search&lockdown=1`).text).toBe(`claude mcp add --transport http roll '${url}?tools=search&lockdown=1'`);
     expect(mcpConfig("cursor", url).text).not.toContain("Authorization");
     expect(mcpConfig("claude-code", url, "rlt_x").text).toContain('--header "Authorization: Bearer rlt_x"');
-    expect(JSON.parse(mcpConfig("vscode", url, "rlt_x").text).servers.roll).toEqual({ type: "http", url, headers: { Authorization: "Bearer rlt_x" } });
+    expect(JSON.parse(mcpConfig("vscode", url, "rlt_x").text).mcpServers.roll).toEqual({ type: "http", url, headers: { Authorization: "Bearer rlt_x" } });
   });
 
   it("reads the consent request, starts from the asked preset, and fills in the project", () => {
@@ -250,5 +250,38 @@ describe("an SSO connection for agents too", () => {
     expect(tied).toEqual([{ issuer: "https://other.example", domains: ["x.com"] }, { issuer: "https://acme.okta.com", name: "Okta", matching: "email", sso: "sso_okta" }]);
     expect(tieForAgents(tied, c)).toBe(tied);
     expect(untieForAgents(tied, "sso_okta")).toEqual([{ issuer: "https://other.example", domains: ["x.com"] }]);
+  });
+});
+
+describe("step-up", () => {
+  it("reads one roll:step-up id from a scope, nothing else", () => {
+    expect(stepUpId("agent roll:step-up:stp_ab12")).toBe("stp_ab12");
+    expect(stepUpId("roll:step-up:stp_a roll:step-up:stp_b")).toBeNull();
+    expect(stepUpId("roll:step-up:tok_a")).toBeNull();
+    expect(stepUpId("roll:add:postgres:admin")).toBeNull();
+    expect(stepUpId(undefined)).toBeNull();
+  });
+
+  it("calls a rule broad when it's admin, reveal or every resource", () => {
+    expect(broadRule({ product: "postgres", resources: [{ id: "pa" }], actions: { delete: "allow" } })).toBe(false);
+    expect(broadRule({ product: "postgres", resources: "*", actions: { delete: "allow" } })).toBe(true);
+    expect(broadRule({ product: "secrets", resources: [{ id: "p" }], actions: { reveal: "allow" } })).toBe(true);
+  });
+});
+
+describe("agents ask", () => {
+  it("says an agents_ask rule in words", () => {
+    expect(describeAskRule({ product: "apps", actions: ["deploy"], environments: ["production"] })).toBe("apps deploy in production");
+    expect(describeAskRule({ product: "*" })).toBe("anything any action");
+  });
+});
+
+describe("redirectRegistered", () => {
+  it("takes a loopback redirect on any port, as roll-access does", () => {
+    const uris = ["http://127.0.0.1:43111/cb", "https://app.example.com/cb"];
+    expect(redirectRegistered(uris, "http://127.0.0.1:50123/cb")).toBe(true);
+    expect(redirectRegistered(uris, "http://127.0.0.1:50123/other")).toBe(false);
+    expect(redirectRegistered(uris, "https://app.example.com:8443/cb")).toBe(false);
+    expect(redirectRegistered(uris, "http://localhost:43111/cb")).toBe(false);
   });
 });

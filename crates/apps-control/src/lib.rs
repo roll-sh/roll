@@ -54,6 +54,8 @@ pub mod public;
 pub mod push;
 pub mod resp_cache;
 pub mod runtime;
+pub mod sandboxes;
+pub mod peering;
 pub mod shell;
 pub mod spend;
 pub mod store;
@@ -299,9 +301,28 @@ pub struct Apps {
     status_swept: std::sync::atomic::AtomicI64,
     /// When owned environments' logs were last expired (hourly, [`Apps::expire_logs_pass`]).
     logs_expired: std::sync::atomic::AtomicI64,
-    /// The interception CA each closed environment's instances trust (its PEM's digest): when
-    /// roll secrets answers another (near its end, or ended early), they're moved to it.
-    pub(crate) intercept_cas: Mutex<HashMap<String, String>>,
+    /// The interception CA each closed network's proxy serves, by network: one CA a project
+    /// environment (roll secrets' consumer), shared by every closed service there. When roll
+    /// secrets answers another (near its end, ended early, a host bound since), the services'
+    /// instances are moved to bundles trusting both before the proxy switches.
+    pub(crate) intercept_cas: Mutex<HashMap<String, crate::deploy::Serving>>,
+    /// The next CA a closed network's proxy switches to once every service on it trusts it.
+    pub(crate) intercept_pending: Mutex<HashMap<String, crate::deploy::Serving>>,
+    /// When each closed environment's instances were last moved to a new CA (at most every ten
+    /// minutes, an hour after a move that failed, whatever answers in between).
+    pub(crate) intercept_renewing: Mutex<HashMap<String, i64>>,
+    /// Closed environments whose running instances may trust a CA their proxy doesn't serve
+    /// (adopted after a takeover, woken while their template was made again): moved again until
+    /// a deploy of theirs is live.
+    pub(crate) intercept_stale: Mutex<std::collections::HashSet<String>>,
+    /// Templates made for deployment URLs (`deployment_template`), kept a minute: each would make
+    /// a closed environment's placeholders again.
+    viewed_templates: Mutex<HashMap<String, (Arc<live::Template>, std::time::Instant)>>,
+    /// Each private network's peer as it last went (`running`, `failed: …`), by environment.
+    pub(crate) peer_status: Mutex<HashMap<String, String>>,
+    /// One change to an environment's peer at a time (a PUT, a deploy and the minute's check
+    /// would otherwise take down each other's half-made peer).
+    pub(crate) peer_locks: Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
     /// When closed environments' CAs were last checked (each minute).
     intercepts_checked: std::sync::atomic::AtomicI64,
     /// Private environments' token hashes, by environment, as the owner last read or set them.
@@ -540,6 +561,8 @@ pub struct ResolvedVars {
     /// What roll secrets said about the resolve (a closed environment's keys withheld): said in
     /// the environment's log at each deploy.
     pub notices: Vec<String>,
+    /// A closed environment's placeholders: each variable's binding (the hosts it's for).
+    pub placeholders: BTreeMap<String, String>,
 }
 
 impl ResolvedVars {
@@ -648,6 +671,12 @@ impl Apps {
             status_swept: std::sync::atomic::AtomicI64::new(0),
             logs_expired: std::sync::atomic::AtomicI64::new(0),
             intercept_cas: Mutex::new(HashMap::new()),
+            intercept_pending: Mutex::new(HashMap::new()),
+            intercept_renewing: Mutex::new(HashMap::new()),
+            intercept_stale: Mutex::new(Default::default()),
+            viewed_templates: Mutex::new(HashMap::new()),
+            peer_status: Mutex::new(HashMap::new()),
+            peer_locks: Mutex::new(HashMap::new()),
             intercepts_checked: std::sync::atomic::AtomicI64::new(0),
             access: Mutex::new(HashMap::new()),
             access_gen: std::sync::atomic::AtomicU64::new(0),
@@ -1424,6 +1453,7 @@ impl Apps {
         for e in self.db(move |s| s.environments(&sid)).await? {
             self.teardown_live(id, &e.name).await;
         }
+        self.drop_sandboxes(id, None).await;
         for name in self.deps.runtime.list(Some(id)).await {
             self.deps.runtime.remove(&name).await;
         }
@@ -1505,6 +1535,7 @@ impl Apps {
             self.teardown_live(id, &e.name).await;
             self.drop_branches(id, &e.name, None).await;
         }
+        self.drop_sandboxes(id, None).await;
         // Each environment's volume goes with it (a last backup first, kept a week).
         for e in &envs {
             let had = row.for_env(e).map(|s| s.run.volume.is_some()).unwrap_or(row.run.volume.is_some());
@@ -2717,9 +2748,15 @@ impl Apps {
         // Its branches first (deleted once no other environment uses them): the rows naming them
         // would go with it.
         self.drop_branches(service, env, None).await;
+        self.drop_sandboxes(service, Some(env)).await;
         let (sid, e) = (service.to_string(), env.to_string());
         self.db(move |s| s.delete_environment(&sid, &e)).await?;
         self.hosts_changed();
+        // Its interception's state here goes with it (the network's, and the CA itself, with the
+        // project environment's last closed service: `drop_network_if_unused`).
+        let key = env_key(service, env);
+        self.intercept_renewing.lock().remove(&key);
+        self.intercept_stale.lock().remove(&key);
         self.release_domains(&domains).await;
         self.teardown_live(service, env).await;
         self.set_access_cache(service, env, None);
@@ -2750,6 +2787,8 @@ impl Apps {
         if let Ok(false) = self.db(move |s| s.env_in_use(&p, &e, &l)).await {
             self.deps.runtime.remove_network(&network_name(project, env)).await;
             self.deps.runtime.remove_network(&closed_network_name(project, env)).await;
+            self.intercept_cas.lock().remove(&closed_network_name(project, env));
+            self.intercept_pending.lock().remove(&closed_network_name(project, env));
             // Its build caches too: no service of the project builds there any more; and its
             // placeholders and interception end.
             let (p, e) = (project.to_string(), env.to_string());
@@ -2866,8 +2905,24 @@ impl Apps {
         let dep = self.db(move |s| s.deployment(&active)).await?;
         let sid = service.to_string();
         let svc = self.db(move |s| s.service(&sid)).await?;
+        // No CA kept for it here (a restart, a takeover): its interception CA's key lived only in
+        // the node that made it, so the instances this adopts trust one no proxy can serve.
+        let unknown_ca = row.egress.closed() && !self.intercept_cas.lock().contains_key(&closed_network_name(&svc.project, env));
         let tpl = self.template(&svc, &row, &dep).await?;
         live.adopt(Arc::new(tpl)).await;
+        // So they're moved to the CA its proxy serves now (the same image, a new deployment);
+        // marked, so the minute's check moves them again if this doesn't go live.
+        if unknown_ca && live.awake() > 0 {
+            self.intercept_stale.lock().insert(env_key(service, env));
+            let (this, sid, en, active) = (self.clone(), service.to_string(), env.to_string(), row.active.clone().unwrap_or_default());
+            tokio::spawn(async move {
+                let log = this.logs.sink(format!("env:{sid}/{en}"), crate::logs::Stream::System);
+                match this.rollback(&sid, &en, &active, Some("roll".into()), true, false).await {
+                    Ok(d) => log.line(format!("taken over with instances that trust an interception CA this node never had: moving them ({}) to the one its proxy serves", d.id)),
+                    Err(e) => log.line(format!("taken over with instances that trust an interception CA this node never had, and moving them didn't start: {e}")),
+                }
+            });
+        }
         Ok(live)
     }
 
@@ -2875,16 +2930,24 @@ impl Apps {
 
     /// An instance's variables, `roll://` references read (a deploy).
     pub async fn resolve_vars(self: &Arc<Self>, svc: &ServiceRow, env: &EnvRow, deployment: &str) -> Result<ResolvedVars> {
-        self.resolve_vars_as(svc, env, deployment, true).await
+        self.resolve_vars_as(svc, env, deployment, true, true).await
+    }
+
+    /// A deploy's variables for its hash and its checks (`roll://` read, a closed environment's
+    /// placeholders not made: the instances' are, once, with their template).
+    pub async fn checked_vars(self: &Arc<Self>, svc: &ServiceRow, env: &EnvRow, deployment: &str) -> Result<ResolvedVars> {
+        self.resolve_vars_as(svc, env, deployment, true, false).await
     }
 
     /// The same for a listing or a staleness check: a `roll://` reference is its text, never read
     /// (no secret decrypted, no read audited as the service for a person's page view).
     pub async fn listed_vars(self: &Arc<Self>, svc: &ServiceRow, env: &EnvRow, deployment: &str) -> Result<ResolvedVars> {
-        self.resolve_vars_as(svc, env, deployment, false).await
+        self.resolve_vars_as(svc, env, deployment, false, false).await
     }
 
-    async fn resolve_vars_as(self: &Arc<Self>, svc: &ServiceRow, env: &EnvRow, deployment: &str, read_refs: bool) -> Result<ResolvedVars> {
+    /// `mint`: a closed environment's placeholders made (an instance's variables); else its keys
+    /// bound to hosts are markers with their binding, nothing made.
+    async fn resolve_vars_as(self: &Arc<Self>, svc: &ServiceRow, env: &EnvRow, deployment: &str, read_refs: bool, mint: bool) -> Result<ResolvedVars> {
         let mut vars: BTreeMap<String, (String, &'static str)> = BTreeMap::new();
         let port = svc.run.port.unwrap_or(8080);
         let roll = [
@@ -3021,8 +3084,9 @@ impl Apps {
         let (mut from_secrets, mut plain_secrets) = (BTreeSet::new(), BTreeSet::new());
         // A closed environment's keys bound to hosts come as placeholders its egress proxy swaps.
         let mut notices = branch_notices;
+        let mut placeholders = BTreeMap::new();
         let resolved = match env.egress.closed() {
-            true => self.deps.secrets.resolve_closed(&svc.project, &env.name, &svc.id, env.egress_by.as_deref()).await.map(|c| {
+            true => self.deps.secrets.resolve_closed(&svc.project, &env.name, &svc.id, env.egress_by.as_deref(), mint).await.map(|c| {
                 notices.extend(c.notice);
                 c.vars
             }),
@@ -3032,6 +3096,9 @@ impl Apps {
             Ok(secrets) => {
                 let mut parents = Vec::new();
                 for s in secrets {
+                    if let Some(b) = &s.binding {
+                        placeholders.insert(s.name.clone(), b.clone());
+                    }
                     // An environment with data of its own never gets a linked resource's
                     // credentials or address through roll secrets: they name the resource itself
                     // (production's database), and its branches come through its own links.
@@ -3174,7 +3241,9 @@ impl Apps {
         }
         // After the agent's join: a value roll composed says so.
         let sources = vars.iter().map(|(k, (_, s))| (k.clone(), *s)).collect();
-        Ok(ResolvedVars { vars: vars.into_iter().map(|(k, (v, _))| (k, v)).collect(), sources, unresolved, refused, ref_texts, sealed, from_secrets, plain_secrets, notices })
+        // A placeholder the service's own variable of the same name replaced isn't one.
+        placeholders.retain(|k, _| vars.get(k).is_some_and(|(_, s)| *s == "secret"));
+        Ok(ResolvedVars { vars: vars.into_iter().map(|(k, (v, _))| (k, v)).collect(), sources, unresolved, refused, ref_texts, sealed, from_secrets, plain_secrets, notices, placeholders })
     }
 
     /// Fill the `${{ … }}` in the service's own variables ([`refs`]); what named nothing. A
@@ -3464,12 +3533,13 @@ impl Apps {
         let sid = service.to_string();
         let svc = self.db(move |s| s.service(&sid)).await?;
         let sid = service.to_string();
-        let rows = self.db(move |s| s.links_minted(&sid)).await?;
+        let (rows, options) = self.db(move |s| Ok((s.links_minted(&sid)?, s.link_options(&sid)?))).await?;
         let mut out = Vec::new();
         for (kind, r, prefix, minted) in rows {
             let names = self.link_values(&svc, kind, &r, "production", minted).await;
             let vars = names.map(|v| v.into_iter().map(|(k, _)| format!("{prefix}{k}")).collect()).unwrap_or_default();
-            out.push(Link { kind, r#ref: r, prefix, vars });
+            let opts: integrations::LinkOptions = options.get(&(kind.as_str().to_string(), r.clone())).and_then(|o| serde_json::from_str(o).ok()).unwrap_or_default();
+            out.push(Link { kind, r#ref: r, prefix, vars, indices: None, access: None }.narrowed(&opts));
         }
         Ok(out)
     }
@@ -3503,18 +3573,39 @@ impl Apps {
             }
             Some(_) => return Err(Error::BadRequest("prefix is a variable name prefix".into())),
         };
+        // A search link narrowed: its key for some indices only, and read or append only.
+        let options = link_options(kind, &body)?;
+        let opts_text = Value::Object(options.clone()).to_string();
         // Credentials the link makes for itself, once: a link that's there already keeps its own
-        // (setting its prefix again never makes another).
+        // (setting its prefix again never makes another), unless it's narrowed otherwise now:
+        // then a new key with the new options replaces it, and the old one is revoked.
+        let (sid, r) = (service.to_string(), r#ref.to_string());
+        let (had, had_opts) = self
+            .db(move |s| {
+                let m = s.links_minted(&sid)?.into_iter().find(|(k, rr, _, _)| *k == kind && *rr == r).and_then(|(_, _, _, m)| m);
+                let o = s.link_options(&sid)?.remove(&(kind.as_str().to_string(), r));
+                Ok((m, o))
+            })
+            .await?;
+        if let Some(old) = had.as_ref().filter(|_| had_opts.as_deref().unwrap_or("{}") != opts_text) {
+            let new = self.deps.resources.link(kind, r#ref, service, &options).await.map_err(|e| Error::BadRequest(e.to_string()))?.ok_or_else(|| Error::BadRequest(format!("{} made no credential for the link", kind.as_str())))?;
+            let (sid, r, was, n, o) = (service.to_string(), r#ref.to_string(), old.kept.clone(), new.clone(), opts_text.clone());
+            if !self.db(move |s| s.swap_link_minted(&sid, kind, &r, &was, &n, &o)).await? {
+                let _ = self.deps.resources.unlink(kind, r#ref, &new.kept).await;
+                return Err(Error::Conflict("the link changed meanwhile: try again".into()));
+            }
+            self.revoke_link(service, kind, r#ref, &old.kept).await;
+        }
         let (sid, r) = (service.to_string(), r#ref.to_string());
         let had = self.db(move |s| s.links_minted(&sid)).await?.into_iter().find(|(k, rr, _, _)| *k == kind && *rr == r).and_then(|(_, _, _, m)| m);
         let fresh = had.is_none();
         let minted = match had {
             Some(m) => Some(m),
-            None => self.deps.resources.link(kind, r#ref, service).await.map_err(|e| Error::BadRequest(e.to_string()))?,
+            None => self.deps.resources.link(kind, r#ref, service, &options).await.map_err(|e| Error::BadRequest(e.to_string()))?,
         };
         let vars = self.link_values(&svc, kind, r#ref, "production", minted.clone()).await.map_err(|e| Error::BadRequest(e.to_string()))?;
-        let (sid, r, p, m) = (service.to_string(), r#ref.to_string(), prefix.clone(), minted.clone());
-        let vars = match self.db(move |s| s.put_link(&sid, kind, &r, &p, m.as_ref())).await {
+        let (sid, r, p, m, o) = (service.to_string(), r#ref.to_string(), prefix.clone(), minted.clone(), opts_text.clone());
+        let vars = match self.db(move |s| s.put_link(&sid, kind, &r, &p, m.as_ref(), &o)).await {
             Ok(true) => vars,
             // Another request made the link first, with credentials of its own: those stay,
             // and what this one made goes again.
@@ -3533,7 +3624,7 @@ impl Apps {
                 return Err(e);
             }
         };
-        Ok(Link { kind, r#ref: r#ref.to_string(), vars: vars.into_iter().map(|(k, _)| format!("{prefix}{k}")).collect(), prefix })
+        Ok(Link { kind, r#ref: r#ref.to_string(), vars: vars.into_iter().map(|(k, _)| format!("{prefix}{k}")).collect(), prefix, indices: None, access: None }.narrowed(&options))
     }
 
     /// A link's variables now, as `service` gets them in `env`: another service's URLs (apps'
@@ -4164,7 +4255,21 @@ impl Apps {
         if row.approvals > 0 && d.status == DeployStatus::Ready {
             return Err(Error::Conflict(format!("{dep} waits for {} approval(s): it runs once approved", row.approvals)));
         }
-        self.template(&svc.for_env(&row)?, &row, &d).await
+        // What the live state serves of it (the active one, a canary, one viewed by its URL), or
+        // one made a minute ago: each made again would make a closed environment's placeholders.
+        if let Some(t) = self.live(service, env).serving(dep) {
+            return Ok((*t).clone());
+        }
+        if let Some((t, _)) = self.viewed_templates.lock().get(dep).filter(|(_, at)| at.elapsed() < Duration::from_secs(60)) {
+            return Ok((**t).clone());
+        }
+        let t = self.template(&svc.for_env(&row)?, &row, &d).await?;
+        let mut kept = self.viewed_templates.lock();
+        kept.retain(|_, (_, at)| at.elapsed() < Duration::from_secs(60));
+        if kept.len() < 256 {
+            kept.insert(dep.to_string(), (Arc::new(t.clone()), std::time::Instant::now()));
+        }
+        Ok(t)
     }
 
     // ── logs, metrics, usage ──
@@ -4400,7 +4505,8 @@ impl ResolvedVars {
             // `ROLL_AWAKE_URL` is roll's own on every web service: its arrival isn't a change of
             // the service's to deploy (each deployment gets it).
             .filter(|(k, _)| !matches!(k.as_str(), "ROLL_DEPLOYMENT" | "ROLL_GIT_COMMIT" | "ROLL_GIT_BRANCH" | "ROLL_AWAKE_URL"))
-            .map(|(k, v)| (k.clone(), self.ref_texts.get(k).cloned().unwrap_or_else(|| v.clone())))
+            // A placeholder is new random text each time it's made: its binding decides.
+            .map(|(k, v)| (k.clone(), self.placeholders.get(k).map(|b| format!("placeholder:{b}")).or_else(|| self.ref_texts.get(k).cloned()).unwrap_or_else(|| v.clone())))
             .collect()
     }
 }
@@ -4491,6 +4597,38 @@ fn git_host(url: &str) -> Option<String> {
     })
 }
 
+/// A link's options from its body (roll secrets' link options): a search link's `indices` (its
+/// key's index names or patterns, `tenant-*`) and `access` (`read`, or `append`: create documents
+/// on exact names only; none: read and write documents). Search's provider checks them again.
+fn link_options(kind: LinkKind, body: &Value) -> Result<integrations::LinkOptions> {
+    let mut out = integrations::LinkOptions::new();
+    let (indices, access) = (body.get("indices").filter(|v| !v.is_null()), body.get("access").filter(|v| !v.is_null()));
+    if kind != LinkKind::Search {
+        return match indices.or(access) {
+            Some(_) => Err(Error::BadRequest("indices and access are a search link's".into())),
+            None => Ok(out),
+        };
+    }
+    if let Some(v) = indices {
+        let list: Vec<String> = v.as_array().filter(|a| !a.is_empty() && a.len() <= 50).ok_or_else(|| Error::BadRequest("indices is 1–50 index names or patterns".into()))?.iter().map(|i| i.as_str().unwrap_or_default().to_string()).collect();
+        if let Some(bad) = list.iter().find(|i| i.is_empty() || i.len() > 255 || i.starts_with(['-', '_', '+']) || !i.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || matches!(c, '.' | '_' | '-' | '*' | '+'))) {
+            return Err(Error::BadRequest(format!("{bad:?} isn't an index name or pattern (lower case, digits, . _ - + and *)")));
+        }
+        out.insert("names".into(), json!(list));
+    }
+    match access.map(|a| a.as_str()) {
+        None => {}
+        Some(Some(a @ ("read" | "append"))) => {
+            if a == "append" && !out.get("names").and_then(|n| n.as_array()).is_some_and(|n| n.iter().all(|i| !i.as_str().unwrap_or("*").contains('*'))) {
+                return Err(Error::BadRequest("append takes exact index names (a data stream's): name them in indices, no patterns".into()));
+            }
+            out.insert("permission".into(), json!(a));
+        }
+        Some(_) => return Err(Error::BadRequest("access is read or append (none: read and write documents)".into())),
+    }
+    Ok(out)
+}
+
 #[cfg(test)]
 mod fingerprint_tests {
     use super::*;
@@ -4505,4 +4643,3 @@ mod fingerprint_tests {
         assert_eq!(set_only(&run, &Run::default()), json!({"memory_mb": 1024, "alerts": {"error_pct": 10}}));
     }
 }
-

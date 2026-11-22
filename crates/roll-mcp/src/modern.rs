@@ -91,7 +91,7 @@ pub fn check(h: &HeaderMap, msg: &Value, legacy: &[&str]) -> Result<(), (StatusC
         None => return mismatch("Mcp-Method is missing".into()),
     }
     let named = match method {
-        "tools/call" | "prompts/get" => msg["params"]["name"].as_str(),
+        "tools/call" | "prompts/get" | "events/poll" | "events/stream" | "events/subscribe" | "events/unsubscribe" => msg["params"]["name"].as_str(),
         "resources/read" => msg["params"]["uri"].as_str(),
         // The tasks extension's methods name their task (SEP-2663, over Streamable HTTP).
         "tasks/get" | "tasks/update" | "tasks/cancel" => msg["params"]["taskId"].as_str(),

@@ -1109,6 +1109,38 @@ const OPENSEARCH_FIELDS: &[Field] = &[
 ];
 
 impl Search {
+    /// What a link's options ask the keys route for: `permission` (`read`, `append`; left out,
+    /// today's `data`) as its `access`, and `names` (index names or patterns: a list or a
+    /// comma-separated string, as a certificate link's names) as its `indices`. An append link
+    /// names its data streams exactly.
+    fn key_options(link: &Link) -> roll_secrets::Result<(&'static str, Option<Vec<String>>)> {
+        let access = match link.options.get("permission") {
+            None | Some(Json::Null) => "data",
+            Some(Json::String(p)) if p == "read" => "read",
+            Some(Json::String(p)) if p == "append" => "append",
+            Some(_) => return Err(Error::BadRequest("a search link's permission is read or append (left out: data, which also writes)".into())),
+        };
+        let bad = || Error::BadRequest("a search link's names are index names or patterns: a list, or a comma-separated string".into());
+        let names: Option<Vec<String>> = match link.options.get("names") {
+            None | Some(Json::Null) => None,
+            Some(Json::Array(a)) => Some(a.iter().map(|n| n.as_str().map(|n| n.trim().to_string()).ok_or_else(bad)).collect::<Result<Vec<_>, _>>()?),
+            Some(Json::String(s)) => Some(s.split(',').map(|n| n.trim().to_string()).collect()),
+            Some(_) => return Err(bad()),
+        };
+        let names = names.map(|n| n.into_iter().filter(|n| !n.is_empty()).collect::<Vec<_>>());
+        if names.as_ref().is_some_and(Vec::is_empty) {
+            return Err(bad());
+        }
+        if access == "append" {
+            match &names {
+                None => return Err(Error::BadRequest("an append link names its data streams (names)".into())),
+                Some(n) if n.iter().any(|n| n.contains(['*', '?'])) => return Err(Error::BadRequest("an append link names its data streams exactly: no patterns in names".into())),
+                _ => {}
+            }
+        }
+        Ok((access, names))
+    }
+
     /// The cluster's flavor (`elasticsearch`, `opensearch`), when roll search says; kept 30 s.
     fn flavor(&self, r#ref: &str) -> Option<String> {
         if let Some((at, f)) = self.1.lock().expect("flavors").get(r#ref)
@@ -1158,22 +1190,27 @@ impl LinkProvider for Search {
             f => text(&c, &format!("/{f}")),
         }
     }
-    fn issue(&self, r#ref: &str, _: &str, _: &Link, label: &str, ttl: Option<u64>) -> roll_secrets::Result<Issued> {
-        // Data access only (indices, templates, pipelines, lifecycle): a leaked app key can't make
-        // more keys or users.
-        let mut body = json!({ "name": label.chars().take(64).collect::<String>(), "access": "data" });
+    fn issue(&self, r#ref: &str, _: &str, link: &Link, label: &str, ttl: Option<u64>) -> roll_secrets::Result<Issued> {
+        // Never admin: a leaked app key can't make more keys or users. `data` (indices,
+        // templates, pipelines, lifecycle) unless the link narrows it ([`Search::key_options`]).
+        let (access, names) = Self::key_options(link)?;
+        let mut body = json!({ "name": label.chars().take(64).collect::<String>(), "access": access });
+        if let Some(n) = &names {
+            body["indices"] = json!(n);
+        }
         // A dynamic key expires by itself a little after its lease, should a revoke fail.
         if let Some(m) = ttl {
             body["expires_in_s"] = json!((m + 5) * 60);
         }
         let k = self.0.call(Method::POST, &format!("/v1/search/clusters/{}/keys", enc(r#ref)), Some(body))?;
         let id = text(&k, "/id")?;
-        // roll search says what it made (#29): anything but a data key, or a key that doesn't
-        // say, is deleted and refused (docs/secrets.md, "Links": search).
-        if k["access"].as_str() != Some("data") {
+        // roll search says what it made (#29): a key of another access or other indices than
+        // asked, or one that doesn't say, is deleted and refused (docs/secrets.md, "Links": search).
+        let indices_ok = names.as_ref().is_none_or(|n| k["indices"] == json!(n));
+        if k["access"].as_str() != Some(access) || !indices_ok {
             let _ = self.0.delete_gone(&format!("/v1/search/clusters/{}/keys/{}", enc(r#ref), enc(id.expose())));
-            let made = k["access"].as_str().map_or("a key without its access".to_string(), |a| format!("an {a} key"));
-            return Err(Error::Link(format!("roll search made {made}, not a data one: refused (and deleted)")));
+            let made = k["access"].as_str().map_or("a key without its access".to_string(), |a| format!("a {a} key on {}", k["indices"]));
+            return Err(Error::Link(format!("roll search made {made}, not the {access} key asked for: refused (and deleted)")));
         }
         Ok(Issued { parts: search_parts(&k)?, handle: json!({ "id": id.expose() }) })
     }
@@ -1181,7 +1218,11 @@ impl LinkProvider for Search {
     /// Elasticsearch) is refused when the link is written. A build of roll search that doesn't
     /// say its flavor is taken at its word later, at the first issue.
     fn check(&self, link: &Link) -> roll_secrets::Result<()> {
+        let (access, _) = Self::key_options(link)?;
         let c = self.0.call(Method::GET, &format!("/v1/search/clusters/{}", enc(&link.r#ref)), None)?;
+        if c["flavor"].as_str() == Some("opensearch") && access == "append" {
+            return Err(Error::BadRequest("an OpenSearch cluster has no append keys (its index action also overwrites): link data with names".into()));
+        }
         match (c["flavor"].as_str(), link.field.as_str()) {
             (Some("opensearch"), "api_key") => Err(Error::BadRequest("an OpenSearch cluster has no API keys: link user and password (OPENSEARCH_USERNAME, OPENSEARCH_PASSWORD)".into())),
             (Some("elasticsearch"), "user" | "password") => Err(Error::BadRequest("an Elasticsearch cluster issues API keys: link api_key (ELASTICSEARCH_API_KEY)".into())),
@@ -1253,6 +1294,54 @@ impl roll_secrets::People for People {
             _ => None,
         };
         Ok(Some(roll_secrets::Person { admin: u.admin, code_owner }))
+    }
+
+    fn admins(&self) -> Result<Option<usize>, String> {
+        let users = self.accounts.users().map_err(|e| e.to_string())?;
+        Ok(Some(users.iter().filter(|u| u.admin && !u.disabled).count()))
+    }
+}
+
+/// What roll apps and roll code hold of a project's secrets, for roll secrets' reach: services
+/// the project stands for (their environments and `roll://` variables) and live sandboxes with a
+/// copy. Names and metadata only: a variable's text goes back only when it's a reference.
+pub struct ReachHolders {
+    pub workspace: Arc<roll_workspace::Workspace>,
+    pub apps: Option<Arc<apps_control::Apps>>,
+    pub code: Option<Arc<code_control::Code>>,
+}
+
+impl roll_secrets::reach::Holders for ReachHolders {
+    fn services(&self, project: &str) -> Result<Vec<roll_secrets::reach::ServiceUse>, String> {
+        let Some(apps) = &self.apps else { return Ok(vec![]) };
+        let Ok(p) = self.workspace.get(roll_workspace::Scope::All, project) else { return Ok(vec![]) };
+        let mut out = vec![];
+        for svc in apps.store.services(Some(project)).map_err(|e| e.to_string())? {
+            // As `ForApps::resolve`: a project that doesn't stand for the service gives it nothing.
+            if !self.workspace.trusts(&p, roll_workspace::Kind::Service, &svc.id) {
+                continue;
+            }
+            for env in apps.store.environments(&svc.id).map_err(|e| e.to_string())? {
+                let last_deployed_at = env.active.as_deref().and_then(|d| apps.store.deployment(d).ok()).map(|d| d.finished_at.unwrap_or(d.created_at));
+                // A variable goes back only when it is a `roll://` reference (its text, as roll
+                // secrets parses it); every other value is dropped here.
+                let references = apps.store.variables(&svc.id, &env.name).map_err(|e| e.to_string())?.into_values().filter(|v| matches!(roll_secrets::Reference::parse(v), Ok(Some(_)))).collect();
+                out.push(roll_secrets::reach::ServiceUse { service: svc.id.clone(), name: svc.name.clone(), environment: env.name, last_deployed_at, references });
+            }
+        }
+        Ok(out)
+    }
+
+    fn sandboxes(&self, project: &str) -> Result<Vec<roll_secrets::reach::SandboxCopy>, String> {
+        let Some(code) = &self.code else { return Ok(vec![]) };
+        let rows = code_control::agents::sandbox::store::holding_secrets_of(code.db.sql(), project).map_err(|e| e.to_string())?;
+        let mut out = vec![];
+        for r in rows {
+            let Some(from) = r.secrets_from else { continue };
+            let owner = code.db.owner_by_id(&r.owner_id).map_err(|e| e.to_string())?.map_or(r.owner_id, |o| o.name);
+            out.push(roll_secrets::reach::SandboxCopy { id: r.id, name: r.name, owner, by: r.secrets_by.unwrap_or_default(), from: from.environment, keys: from.keys });
+        }
+        Ok(out)
     }
 }
 
@@ -1398,7 +1487,7 @@ impl apps_control::integrations::SecretSource for ForApps {
             let sensitive: std::collections::HashSet<String> = v.sensitive.into_iter().collect();
             // Link fields that aren't credentials (a host, a port): apps' logs may show these.
             let plain: std::collections::HashSet<String> = v.plain.into_iter().collect();
-            Ok(v.values.into_iter().map(|(name, value)| apps_control::integrations::SecretVar { linked: linked.contains(&name), sensitive: sensitive.contains(&name), plain: plain.contains(&name), value: value.expose().to_string(), name }).collect())
+            Ok(v.values.into_iter().map(|(name, value)| apps_control::integrations::SecretVar { binding: None, linked: linked.contains(&name), sensitive: sensitive.contains(&name), plain: plain.contains(&name), value: value.expose().to_string(), name }).collect())
         })
         .await?
     }
@@ -1407,7 +1496,7 @@ impl apps_control::integrations::SecretSource for ForApps {
     /// a placeholder for the project environment's consumer ([`closed_consumer`]), made by the
     /// project's owner (the operator for the operator's projects): it swaps only while they may
     /// reveal there.
-    async fn resolve_closed(&self, project: &str, env: &str, service: &str, maker: Option<&str>) -> anyhow::Result<apps_control::integrations::ClosedSecrets> {
+    async fn resolve_closed(&self, project: &str, env: &str, service: &str, maker: Option<&str>, mint: bool) -> anyhow::Result<apps_control::integrations::ClosedSecrets> {
         let (secrets, ws) = self.0.get().cloned().ok_or_else(|| anyhow::anyhow!("roll secrets is starting: deploy again in a moment"))?;
         let (project, env, service, asked) = (project.to_string(), env.to_string(), service.to_string(), maker.map(str::to_string));
         tokio::task::spawn_blocking(move || {
@@ -1419,12 +1508,12 @@ impl apps_control::integrations::SecretSource for ForApps {
             // Who closed it, else (before that was kept) the project's owner; the operator only
             // for the operator's own projects, never as the maker of a person's.
             // Named as no one (`closed_by: null`, roll previews' rules saved by the operator): the
-            // keys bound to hosts are withheld.
+            // keys bound to hosts are withheld before anything of them is decrypted
+            // (`values_without_bound`), and so is a key whose value references one.
             if asked.as_deref() == Some("") {
-                let v = secrets.values_for(&project, &env, "/", true, Some(&format!("app:{service}")), false, &roll_secrets::Caller::consumer(&format!("app:{service}")))?;
-                let bound: std::collections::HashSet<String> = secrets.secrets(&project, &env, "/", &roll_secrets::Caller::consumer(&format!("app:{service}")))?.into_iter().filter(|s| s.hosts.is_some()).map(|s| s.key).collect();
+                let v = secrets.values_without_bound(&project, &env, "/", &format!("app:{service}"), false, &roll_secrets::Caller::consumer(&format!("app:{service}")))?;
                 let sensitive: std::collections::HashSet<String> = v.sensitive.into_iter().collect();
-                let vars = v.values.into_iter().filter(|(k, _)| !bound.contains(k)).map(|(name, value)| apps_control::integrations::SecretVar { linked: false, sensitive: sensitive.contains(&name), plain: false, value: value.expose().to_string(), name }).collect();
+                let vars = v.values.into_iter().map(|(name, value)| apps_control::integrations::SecretVar { binding: None, linked: false, sensitive: sensitive.contains(&name), plain: false, value: value.expose().to_string(), name }).collect();
                 return Ok(apps_control::integrations::ClosedSecrets { vars, notice: Some(format!("keys bound to hosts withheld: no one who may reveal {env} closed it")) });
             }
             let maker = match asked {
@@ -1441,17 +1530,42 @@ impl apps_control::integrations::SecretSource for ForApps {
             // An untrusted preview (a fork's) reads as code nobody vetted: no protected
             // environment, and placeholders only where a binding opts in.
             let caller = if untrusted { secrets.untrusted(&project, &consumer_caller)? } else { consumer_caller };
-            let ask = roll_secrets::placeholders::Ask { minutes: None, maker: Some(&maker) };
+            // A listing or a staleness check: no placeholder made (each is a record, an audit row
+            // and a new random text), a key bound to hosts a marker with its binding.
+            if !mint {
+                let bound: std::collections::HashMap<String, String> = secrets
+                    .secrets(&project, &env, "/", &caller)?
+                    .into_iter()
+                    .filter_map(|s| {
+                        // The hosts as its placeholder's record names them (what a deploy's binding is).
+                        let mut h = s.hosts?.hosts;
+                        h.sort();
+                        Some((s.key, h.join(",")))
+                    })
+                    .collect();
+                // The rest without decrypting a bound key, or resolving a reference to one.
+                let v = secrets.values_without_bound(&project, &env, "/", &format!("app:{service}"), false, &caller)?;
+                let (linked, sensitive, plain): (std::collections::HashSet<String>, std::collections::HashSet<String>, std::collections::HashSet<String>) = (v.linked.into_iter().collect(), v.sensitive.into_iter().collect(), v.plain.into_iter().collect());
+                let mut vars: Vec<apps_control::integrations::SecretVar> = v
+                    .values
+                    .into_iter()
+                    .map(|(name, value)| apps_control::integrations::SecretVar { binding: None, linked: linked.contains(&name), sensitive: sensitive.contains(&name), plain: plain.contains(&name), value: value.expose().to_string(), name })
+                    .collect();
+                vars.extend(bound.into_iter().map(|(name, hosts)| apps_control::integrations::SecretVar { binding: Some(hosts), linked: false, sensitive: false, plain: false, value: "rlph_(made at deploy)".into(), name }));
+                return Ok(apps_control::integrations::ClosedSecrets { vars, notice: None });
+            }
+            // Two days: past one CA renewal (they're made again with each), so an environment
+            // asleep across one wakes with live ones; each swap still checks everything.
+            let ask = roll_secrets::placeholders::Ask { minutes: Some(48 * 60), maker: Some(&maker) };
             let v = match secrets.values_with_placeholders(&project, &env, "/", &closed_consumer(&project, &env), false, ask, &caller) {
                 Ok(v) => v,
                 // Its maker can't reveal here now (`maker_unreachable`: demoted, removed, a token
                 // revoked or narrowed): the keys bound to hosts are withheld (never their values
                 // instead), the rest read as they would be, and said. Any other refusal surfaces.
                 Err(roll_secrets::Error::MakerUnreachable(why)) => {
-                    let bound: std::collections::HashSet<String> = secrets.secrets(&project, &env, "/", &caller)?.into_iter().filter(|s| s.hosts.is_some()).map(|s| s.key).collect();
-                    let v = secrets.values_for(&project, &env, "/", true, Some(&format!("app:{service}")), false, &caller)?;
+                    let v = secrets.values_without_bound(&project, &env, "/", &format!("app:{service}"), false, &caller)?;
                     let sensitive: std::collections::HashSet<String> = v.sensitive.into_iter().collect();
-                    let vars = v.values.into_iter().filter(|(k, _)| !bound.contains(k)).map(|(name, value)| apps_control::integrations::SecretVar { linked: false, sensitive: sensitive.contains(&name), plain: false, value: value.expose().to_string(), name }).collect();
+                    let vars = v.values.into_iter().map(|(name, value)| apps_control::integrations::SecretVar { binding: None, linked: false, sensitive: sensitive.contains(&name), plain: false, value: value.expose().to_string(), name }).collect();
                     let notice = format!("keys bound to hosts withheld: {maker}, who closed {env}, can no longer reveal it ({why}); whoever may sets its egress again to turn them back on");
                     return Ok(apps_control::integrations::ClosedSecrets { vars, notice: Some(notice) });
                 }
@@ -1464,10 +1578,24 @@ impl apps_control::integrations::SecretSource for ForApps {
             } else if let Some(p) = v.problems.first() {
                 anyhow::bail!("{} of {env}'s secrets didn't resolve ({}: {})", v.problems.len(), p.key, p.problem);
             }
+            // A dynamic credential ends with its lease: refused as the open path refuses it.
+            if let Some(k) = v.dynamic.first().filter(|_| !untrusted) {
+                anyhow::bail!("{k} in {env} is a dynamic credential, which ends with its lease: link it as managed or live for a service");
+            }
             let linked: std::collections::HashSet<String> = v.linked.into_iter().collect();
             let sensitive: std::collections::HashSet<String> = v.sensitive.into_iter().collect();
             let plain: std::collections::HashSet<String> = v.plain.into_iter().collect();
-            Ok(apps_control::integrations::ClosedSecrets { vars: v.values.into_iter().map(|(name, value)| apps_control::integrations::SecretVar { linked: linked.contains(&name), sensitive: sensitive.contains(&name), plain: plain.contains(&name), value: value.expose().to_string(), name }).collect(), notice: None })
+            // Each placeholder's binding: what its staleness is judged by.
+            let bindings: std::collections::HashMap<String, String> = v
+                .placeholders
+                .iter()
+                .map(|p| {
+                    let mut h = p.hosts.clone();
+                    h.sort();
+                    (p.key.clone(), h.join(","))
+                })
+                .collect();
+            Ok(apps_control::integrations::ClosedSecrets { vars: v.values.into_iter().map(|(name, value)| apps_control::integrations::SecretVar { binding: bindings.get(&name).cloned(), linked: linked.contains(&name), sensitive: sensitive.contains(&name), plain: plain.contains(&name), value: value.expose().to_string(), name }).collect(), notice: None })
         })
         .await?
     }
@@ -1475,15 +1603,18 @@ impl apps_control::integrations::SecretSource for ForApps {
     /// The project environment's interception CA (roll secrets' `intercept_ca`), kept while it
     /// stands and isn't near its end, and roll secrets' filter (rolld's `CaInterception`). None:
     /// no live placeholder of a key bound to hosts.
-    async fn intercept(&self, project: &str, env: &str) -> anyhow::Result<Option<apps_control::integrations::Intercept>> {
+    async fn intercept(&self, project: &str, env: &str, hosts: &[String]) -> anyhow::Result<Option<apps_control::integrations::Intercept>> {
         let (secrets, _) = self.0.get().cloned().ok_or_else(|| anyhow::anyhow!("roll secrets is starting"))?;
         let consumer = closed_consumer(project, env);
         let cache = self.1.clone();
+        let hosts: Vec<String> = hosts.iter().map(|h| h.trim().to_ascii_lowercase()).collect();
         tokio::task::spawn_blocking(move || {
             let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis() as i64).unwrap_or(0);
             let kept = cache.lock().unwrap_or_else(|p| p.into_inner()).get(&consumer).cloned();
             let ca = match kept {
-                Some(ca) if ca.expires_at - now > CA_RENEW_MS && secrets.intercept_ca_live(&ca.id).unwrap_or(false) => ca,
+                // Kept while it stands, isn't near its end, and names every host its placeholders
+                // are bound to now (one bound since gets a CA that names it).
+                Some(ca) if ca.expires_at - now > CA_RENEW_MS && hosts.iter().all(|h| ca.hosts.contains(h)) && secrets.intercept_ca_live(&ca.id).unwrap_or(false) => ca,
                 _ => match secrets.intercept_ca(&consumer, None) {
                     Ok(ca) => {
                         cache.lock().unwrap_or_else(|p| p.into_inner()).insert(consumer.clone(), ca.clone());
@@ -2121,7 +2252,7 @@ mod tests {
     fn only_roll_mcps_guard_keeps_the_guard_header() {
         let req = || super::Request::builder().uri("/v1/secrets/projects/p/leaks").header("x-roll-guard", "1").body(super::Body::empty()).unwrap();
         assert!(super::keep_guard_header(req()).headers().get("x-roll-guard").is_none(), "a caller's own header is dropped");
-        let call = |tool: &str| roll_access::evaluate::McpCall { tool: tool.into(), args: Arc::new(json!({})), ip: None, elicits: false, client: None, quiet: false };
+        let call = |tool: &str| roll_access::evaluate::McpCall { tool: tool.into(), args: Arc::new(json!({})), ip: None, elicits: false, client: None, quiet: false, unattended: false };
         let mut other = req();
         other.extensions_mut().insert(call("secrets_scan"));
         assert!(super::keep_guard_header(other).headers().get("x-roll-guard").is_none(), "another tool's isn't the guard");
@@ -2212,15 +2343,15 @@ mod tests {
         assert!(send(&router, "PUT", &format!("{at}/hosts"), Some(json!({ "hosts": ["api.stripe.com"] }))).await.0 < 300);
         let open = apps.resolve(&project, "production", "svc_web").await.unwrap();
         assert_eq!(open.iter().find(|v| v.name == "STRIPE_KEY").map(|v| v.value.as_str()), Some("sk_test_apps_closed"), "open: the value");
-        let closed = apps.resolve_closed(&project, "production", "svc_web", Some("operator")).await.unwrap();
+        let closed = apps.resolve_closed(&project, "production", "svc_web", Some("operator"), true).await.unwrap();
         let v = closed.vars.iter().find(|v| v.name == "STRIPE_KEY").map(|v| v.value.clone()).unwrap();
         assert!(v.starts_with("rlph_") && !v.contains("sk_test"), "closed: a placeholder: {v}");
-        let i = apps.intercept(&project, "production").await.unwrap().expect("a CA for its bound host");
+        let i = apps.intercept(&project, "production", &[]).await.unwrap().expect("a CA for its bound host");
         assert!(i.ca_pem.contains("BEGIN CERTIFICATE") && i.interception.covers("api.stripe.com") && !i.interception.covers("evil.example"));
         assert!(i.interception.live().unwrap());
         apps.end_intercept(&project, "production").await.unwrap();
         assert!(!i.interception.live().unwrap(), "ended with its consumer");
-        assert!(apps.intercept(&project, "production").await.unwrap().is_none(), "no placeholders left, no CA");
+        assert!(apps.intercept(&project, "production", &[]).await.unwrap().is_none(), "no placeholders left, no CA");
     }
 
     /// A search link takes whichever credential the cluster's flavor issues.
@@ -2672,7 +2803,8 @@ mod tests {
     }
 
     /// A sandbox gets a project's environment only as far as whoever creates it may reveal it in
-    /// roll secrets: managing the code owner isn't enough, and the audit row names them.
+    /// roll secrets: managing the code owner isn't enough, and the audit row names them. Neither a
+    /// sandbox nor a check gets a new project's production.
     #[tokio::test(flavor = "multi_thread")]
     async fn a_sandbox_gets_an_environment_only_for_someone_who_may_reveal_it() {
         use code_control::SecretEnv;
@@ -2730,6 +2862,11 @@ mod tests {
         assert_eq!((got.by.as_str(), got.values), ("token:tok_mine", vec![("DB_URL".to_string(), "postgres://dev".to_string())]));
         let got = code.for_owner("acme", "shop", "development", "sandbox:sbx_3", code_control::Asker { operator: true, user: None, grant: None }).await.unwrap();
         assert_eq!(got.by, "operator");
+        // Never production as a project starts (protected, nobody set it so), not even the
+        // operator's copy, and not for a check naming it.
+        let protected = |e: Option<anyhow::Error>| e.is_some_and(|e| e.to_string().contains("production is protected"));
+        assert!(protected(code.for_owner("acme", "shop", "production", "sandbox:sbx_4", code_control::Asker { operator: true, user: None, grant: None }).await.err()));
+        assert!(protected(code.resolve(project.clone(), "production", "check:acme/api#deploy", None).await.err()));
         let audit = secrets.audit(&project, roll_secrets::AuditFilter::default(), &roll_secrets::Caller::operator()).unwrap();
         // The read is the person's or token's own, for the sandbox.
         let reads: Vec<(&str, &str)> = audit.iter().filter(|a| a.summary.contains("sandbox:")).map(|a| (a.actor.as_str(), a.summary.as_str())).collect();
