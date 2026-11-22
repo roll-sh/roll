@@ -158,10 +158,14 @@ async fn seen_by(State(m): State<Mcp>, axum::extract::Path(id): axum::extract::P
     let as_user = grant.user.as_deref().is_some_and(|u| {
         m.config.access.as_ref().and_then(|a| a.people.get()).and_then(|p| p.person_now(u).ok().flatten()).is_some_and(|p| !p.admin)
     });
+    // As the gate would decide them: unreadable roles show nothing rather than everything.
     let session = match (&m.config.access, grant.user.clone()) {
         (Some(a), Some(u)) if as_user => {
             let a = a.clone();
-            tokio::task::spawn_blocking(move || a.session_grant(&u, None).ok()).await.ok().flatten()
+            match tokio::task::spawn_blocking(move || a.session_grant(&u, None).ok()).await.ok().flatten() {
+                Some(s) => Some(s),
+                None => return Json(json!({ "tools": [], "prompts": [], "live": false })).into_response(),
+            }
         }
         _ => None,
     };
@@ -598,14 +602,14 @@ struct Ctx {
 
 impl Ctx {
     /// The same request's view, as a grant is now (a subscription looks again while it's open).
-    fn as_now(&self, g: roll_auth::Grant) -> Ctx {
+    fn as_now(&self, g: roll_auth::Grant, session: Option<roll_auth::Grant>) -> Ctx {
         Ctx {
             m: self.m.clone(),
             headers: self.headers.clone(),
             principal: Principal::Grant(g),
             ip: self.ip,
             as_user: self.as_user,
-            session: self.session.clone(),
+            session,
             url_elicitation: self.url_elicitation,
             form_elicitation: self.form_elicitation,
             modern: self.modern,
@@ -678,8 +682,9 @@ impl Ctx {
         }
         // A person's token on one resource of a member product: their role decides too (a session
         // never asks), so a viewer's client isn't shown writes the gate would refuse.
+        // A write's candidate actions can include read (a body-decided row): it never counts.
         if let Some(w) = self.session.as_ref().filter(|_| t.within_session())
-            && !t.actions().iter().any(|a| w.scope.may(t.product, *a))
+            && !t.actions().iter().filter(|a| t.method == "GET" || **a != Action::Read).any(|a| w.scope.may(t.product, *a))
         {
             return false;
         }
@@ -1001,8 +1006,14 @@ async fn listen(ctx: Arc<Ctx>, msg: &Value) -> Response {
     // The tools it's offered as the grant is now (`None`: it no longer works).
     let now = move |ctx: Arc<Ctx>, grant: String, access: Option<Arc<roll_access::Access>>| async move {
         let a = access?;
+        let a2 = a.clone();
         let g = tokio::task::spawn_blocking(move || roll_auth::Grants::grant(&*a, &grant)).await.ok()??;
-        Some(tool_names(&ctx.as_now(g)))
+        // A person's roles as they are now too: a role changed while it listens changes its tools.
+        let session = match (&ctx.session, g.user.clone()) {
+            (Some(_), Some(u)) => Some(tokio::task::spawn_blocking(move || a2.session_grant(&u, None).ok()).await.ok()??),
+            _ => None,
+        };
+        Some(tool_names(&ctx.as_now(g, session)))
     };
     struct State {
         ctx: Arc<Ctx>,

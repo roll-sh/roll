@@ -864,7 +864,8 @@ async fn a_members_client_lists_what_their_role_allows() {
     };
     let tools = listed().await;
     assert!(tools.iter().any(|t| t == "secrets_list"), "a viewer reads: {tools:?}");
-    assert!(!tools.iter().any(|t| t == "secrets_set" || t == "secrets_get_values"), "a viewer neither writes nor reveals: {tools:?}");
+    // secrets_set_imports' action comes from its body (write or admin): read never counts for it.
+    assert!(!tools.iter().any(|t| t == "secrets_set" || t == "secrets_get_values" || t == "secrets_set_imports"), "a viewer neither writes nor reveals: {tools:?}");
     d.workspace.set_role(&roll_workspace::Actor::operator(), &project.id, "usr_alice", "admin", None).unwrap();
     let tools = listed().await;
     assert!(tools.iter().any(|t| t == "secrets_set") && tools.iter().any(|t| t == "secrets_get_values"), "an admin does: {tools:?}");
