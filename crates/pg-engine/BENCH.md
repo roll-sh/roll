@@ -502,11 +502,39 @@ order after COPY in the same (`md5(string_agg(ctid::text, ',' ORDER BY id))`, a 
 script for this run; its sort set both runs' VmHWM, 474 / 496 MB, after COPY's 142 / 146).
 Data directory after the script 10 MB on both.
 
-Not yet gated on the PGO build when handed in (HANDOFF): a PGO pair follows in `cand/a284-2`.
+### PGO builds, b0 against n2
 
-Against the numbers that stand (agent 260's same-day runs, 2026-11-19): COPY in 6.57 against
-PostgreSQL 18.6's 6.48 (1.013x) and pgrust's 4.97; all steps 43.72 against PostgreSQL's 52.33
-(0.835x) and pgrust's 44.92 (0.973x). Not re-run on PostgreSQL or pgrust.
+`tools/dist-pgo.sh` of each, trained separately (pgo-b0 from `79806dd6c`, pgo-n2 from `648b5ca99`,
+`cand/a284`; one bench client for both trainings). Foreign load 4.2-4.4 cores (lane.sh).
+
+| step | pgo-b0 | pgo-n2 | % per pair |
+|---|---|---|---|
+| COPY in (2 pairs) | 7.517 / 7.517 | 5.947 / 5.972 | -20.9 / -20.6 |
+| INSERT … SELECT (2 pairs) | 5.123 / 5.133 | 5.115 / 5.118 | -0.2 / -0.3 |
+
+The whole script once each (one hold, n2 first):
+
+| step | pgo-b0 | pgo-n2 | % |
+|---|---|---|---|
+| COPY in | 7.517 | 5.946 | -20.9 |
+| CREATE INDEX | 3.453 | 3.468 | +0.4 |
+| CREATE UNIQUE INDEX | 3.080 | 3.092 | +0.4 |
+| COPY out | 2.507 | 2.497 | -0.4 |
+| INSERT … SELECT | 4.406 | 4.398 | -0.2 |
+| UPDATE half | 9.804 | 9.816 | +0.1 |
+| DELETE a quarter, with its compaction | 6.686 | 6.689 | +0.0 |
+| VACUUM | 1.319 | 1.323 | +0.3 |
+| ANALYZE | 0.428 | 0.433 | +1.2 |
+| count_after and the four scans | | | within +0.6% |
+| **all steps** (12) | 39.57 | 38.03 | -3.9 |
+
+(Two PGO builds of one commit differ by about 0.9% instructions; the rises are inside that.)
+Rows and the ctid hash equal.
+
+Against the numbers that stand (agent 260's same-day runs, 2026-11-19): COPY in 6.57 plain
+(5.95 PGO) against PostgreSQL 18.6's 6.48 (1.013x; 0.92x) and pgrust's PGO-built 4.97; all steps
+43.72 plain (38.03 PGO) against PostgreSQL's 52.33 and pgrust's 44.92. Not re-run on PostgreSQL or
+pgrust.
 
 ## Bulk writes, round 21: the size model's per-row costs, INSERT … SELECT's modelled rows as stored (2026-11-21, agent 281)
 

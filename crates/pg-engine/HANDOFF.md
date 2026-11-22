@@ -10628,8 +10628,9 @@ Agent 218's short-transaction stack (ten steps, `wip/a218`) was gated this way a
 ## Bulk writes, round 22: COPY's plain lines as stored rows, number fast paths (agent 284)
 
 BENCH.md "Bulk writes, round 22" has the measurements (lane C, the 1M-row bulk script with joined
-windows, plain dist builds). `cand/a284`: two code commits on origin's `79806dd6c` and this
-section; the second depends on the first. No format change: the same rows, TIDs (a hash of every
+windows, plain dist builds and a PGO pair). `cand/a284`: two code commits on origin's `79806dd6c`
+and this section, the second depending on the first; `cand/a284-2`: the same with the PGO gate
+and n2's profile added to this section (the same code). No format change: the same rows, TIDs (a hash of every
 row's ctid in id order equal after COPY), files and bytes written.
 
 **Where COPY in's 8.74 G went** (b0 = `79806dd6c`, `instructions:upp` samples of the joined
@@ -10706,10 +10707,14 @@ VACUUM +0.3%: the spread one build shows run to run); rows equal, the ctid hash 
 written per step equal (COPY 33.7 MB), COPY in's VmHWM 142-147 MB on all three builds. Cycles
 (under 6.4-7.6 foreign cores on lane C in every pair, a reading only): COPY in 5.8-6.4 -> 4.6-4.7 G.
 
-**Not yet gated on the PGO build** when this was handed in: the first commit splits `parse_int` and
-`parse_float` (their general paths now out of line) and adds `#[inline]` fast paths, a change of
-function boundaries; a PGO pair (b0 and n2, each trained by `tools/dist-pgo.sh`) was started after
-quick-check and its numbers follow in `cand/a284-2` (same code).
+Gated on the PGO build too (the first commit splits `parse_int` and `parse_float`, their general
+paths now out of line, and adds `#[inline]` fast paths: a change of function boundaries): b0 and
+n2 each built and trained by `tools/dist-pgo.sh` (pgo-b0 from `79806dd6c`, pgo-n2 from
+`648b5ca99`, `cand/a284`), two alternating pairs: COPY in 7.517 -> 5.947 / 5.972 (-20.9 / -20.6%),
+INSERT … SELECT -0.2 / -0.3%; the whole script once each: all steps 39.57 -> 38.03 (-3.9%), CREATE
+INDEX and CREATE UNIQUE INDEX +0.4%, ANALYZE +1.2% (0.005 G), VACUUM +0.3%, every other step level
+(two PGO builds of one commit differ by about 0.9%), rows and the ctid hash equal. With PGO, COPY
+in 5.95 G against PostgreSQL 18.6's 6.48 (0.92x) and pgrust's PGO-built 4.97.
 
 Verification: `tools/quick-check.sh` with `QC_CHECKED=1` on `59ca75115` (both commits on
 `79806dd6c`): Clippy 16 warnings, none new in a changed file; 460 tests in 29 binaries, again built
@@ -10720,19 +10725,24 @@ checked stage caught the word conversions' products overflowing under overflow c
 `wrapping_add` (release builds wrap them the same, so the measured builds computed the same).
 
 **Considered, not built:**
-- A word-at-a-time delimiter scan of the line (the brief's field splitting): `memchr`'s calls are
-  under 1% of COPY in here (one `memchr2` pass a chunk finds lines and backslashes; a field's
-  delimiter is one short `memchr` call); its char-boundary checks a few instructions a field.
+- A word-at-a-time delimiter scan of the line (the brief's field splitting): `memchr`'s calls were
+  under 1% of b0's COPY in (one `memchr2` pass a chunk finds lines and backslashes; a field's
+  delimiter is one short `memchr` call); 2.9% of n2's, the next item below.
 - `SstWriter::add`'s per-entry work (three `put_varint` pushes, the key's copy into `prev_key`,
   `derived_tail`, ~290 instructions an entry, shared by COPY and INSERT … SELECT): agent 275 measured
   a held previous key and dropped it (index builds rose).
 
 **Left (G user instructions, n2 against PostgreSQL 18.6's):**
-1. COPY in 6.57 against 6.48 (pgrust 4.97): the runs' zstd (now ~20% of the step) and the writer
-   (`SstWriter::add`, the bloom filter); the line splitting and its per-row bookkeeping
-   (`Vec<(Cow, Rec)>` of records, the rows' and lines' vectors moved into the feed's `VecDeque`,
-   a `CopyRaw` with an `Arc` clone a row); `StoredInsert`'s second pass over the values
-   (`stored_tuple_len_with`: the length could come from `stored_values` as it encodes).
+1. COPY in 6.57 against 6.48 (pgrust 4.97). n2's profile (`instructions:upp`, inclusive shares of
+   the step): the insert of the stored rows 51% (the put and its runs 33%: zstd 19%,
+   `SstWriter::add` 25% with the compression, the bloom filter 2.8%; `StoredInsert::insert_data`
+   itself 7.8%, `CopyLoad::model` for the first 400,000 rows 11.6%, `inserted_stored` 3.2%),
+   parsing 24% (`stored_values` 16.5% with `float_fast` 4.4% and the field ends' `memchr` calls
+   2.9%; `parse_copy_data` 3%), `InsertNode::next` itself 9.2% (per row: the error-context
+   frame with its two `Arc` clones and drops, the sink checks, `CopyLoad::row_done`, the
+   multi-insert counts), mimalloc 4.7%. Next: the frame and `CopyRaw` per row (a range into the
+   chunk without an `Arc` each), the field ends found by one pass over the line, the tuple length
+   computed as `stored_values` encodes (`insert_data` reads the values again for it).
 2. COPY into a table with indexes still takes the decoded path (index entries need the values);
    a stored row could carry its index columns' values.
 3. INSERT … SELECT 5.10 against 4.31: zstd of the runs and of the source's blocks (~35%), the
