@@ -28,7 +28,8 @@
 pub mod ask;
 pub mod card;
 pub mod guard;
-pub mod lockdown;
+/// Lockdown is roll-auth's, so roll code's own MCP server withholds the same text.
+pub use roll_auth::lockdown;
 pub mod modern;
 pub mod prompts;
 pub mod resources;
@@ -76,11 +77,6 @@ const SSE_KEEPALIVE: std::time::Duration = std::time::Duration::from_secs(15);
 const PROGRESS_EVERY: std::time::Duration = std::time::Duration::from_secs(10);
 /// An answer read at most.
 const MAX_ANSWER: usize = 32 << 20;
-/// Text returned to the model at most; longer answers are cut (the structured content stays whole).
-/// 48 KiB stays inside Claude Code's default 25,000-token limit on a tool's answer
-/// (`MAX_MCP_OUTPUT_TOKENS`, which refuses a longer one outright rather than cutting it) even for
-/// dense JSON of ids and hashes (about 3 characters a token).
-const MAX_TEXT: usize = 48 << 10;
 /// Images a tool answers come back as MCP image content, up to this size (a screenshot).
 const IMAGES: [&str; 3] = ["image/png", "image/jpeg", "image/webp"];
 const MAX_IMAGE: usize = 4 << 20;
@@ -158,11 +154,23 @@ async fn seen_by(State(m): State<Mcp>, axum::extract::Path(id): axum::extract::P
     let as_user = grant.user.as_deref().is_some_and(|u| {
         m.config.access.as_ref().and_then(|a| a.people.get()).and_then(|p| p.person_now(u).ok().flatten()).is_some_and(|p| !p.admin)
     });
+    // As the gate would decide them: unreadable roles show nothing rather than everything.
+    let session = match (&m.config.access, grant.user.clone()) {
+        (Some(a), Some(u)) if as_user => {
+            let a = a.clone();
+            match tokio::task::spawn_blocking(move || a.session_grant(&u, None).ok()).await.ok().flatten() {
+                Some(s) => Some(s),
+                None => return Json(json!({ "tools": [], "prompts": [], "live": false })).into_response(),
+            }
+        }
+        _ => None,
+    };
     let ctx = Ctx {
         m,
         headers: HeaderMap::new(),
         principal: Principal::Grant(grant),
         as_user,
+        session,
         ip: None,
         url_elicitation: false,
         form_elicitation: false,
@@ -203,7 +211,7 @@ async fn toolset_costs(State(m): State<Mcp>, ext: Extensions) -> Response {
     if !caller {
         return unauthorized(&m.config);
     }
-    let ctx = Ctx { m, headers: HeaderMap::new(), principal: Principal::Operator, ip: None, url_elicitation: false, form_elicitation: false, modern: false, toolsets: None, readonly: false, search: false, lockdown: false, tasks: false, ui: false, client: None, as_user: false, names: Default::default() };
+    let ctx = Ctx { m, headers: HeaderMap::new(), principal: Principal::Operator, ip: None, session: None, url_elicitation: false, form_elicitation: false, modern: false, toolsets: None, readonly: false, search: false, lockdown: false, tasks: false, ui: false, client: None, as_user: false, names: Default::default() };
     let mut by: std::collections::BTreeMap<String, (usize, usize, usize)> = Default::default();
     for t in ctx.tools() {
         let e = by.entry(t["_meta"]["roll/product"].as_str().unwrap_or("code").to_string()).or_default();
@@ -426,7 +434,8 @@ async fn handle(State(m): State<Mcp>, uri: axum::http::Uri, ext: Extensions, hea
         .or_else(|| headers.get(header::USER_AGENT).and_then(|v| v.to_str().ok()).and_then(roll_access::evaluate::client_name))
         .map(Arc::from);
     let form_elicitation = modern && modern::form_elicitation(&messages[0]);
-    let ctx = Arc::new(Ctx { m, headers, principal, ip, as_user, url_elicitation, form_elicitation, modern, toolsets, readonly, search, lockdown, tasks, ui, client, names: Default::default() });
+    let session = roll_auth::SessionGrant::on(&ext).cloned();
+    let ctx = Arc::new(Ctx { m, headers, principal, ip, as_user, session, url_elicitation, form_elicitation, modern, toolsets, readonly, search, lockdown, tasks, ui, client, names: Default::default() });
     // A call that asked for progress, from a client that takes a stream: answered as one, with
     // progress until the answer (MCP's `notifications/progress`).
     // 2026-07-28's long-lived channel for list changes (SEP-2575): an open stream of its own.
@@ -559,6 +568,9 @@ struct Ctx {
     ip: Option<std::net::IpAddr>,
     /// A signed-in user's own token: tools only for what their account reaches.
     as_user: bool,
+    /// That person's session grant (their roles in their projects, now): a member product's tool
+    /// is listed only when their role allows it too, as the gate decides its calls.
+    session: Option<roll_auth::Grant>,
     /// The client opens URLs for elicitation: an approval comes back as one to open, then retry.
     url_elicitation: bool,
     /// A 2026-07-28 client that fills in forms: a call missing an id asks for it (`ask`).
@@ -586,13 +598,14 @@ struct Ctx {
 
 impl Ctx {
     /// The same request's view, as a grant is now (a subscription looks again while it's open).
-    fn as_now(&self, g: roll_auth::Grant) -> Ctx {
+    fn as_now(&self, g: roll_auth::Grant, session: Option<roll_auth::Grant>) -> Ctx {
         Ctx {
             m: self.m.clone(),
             headers: self.headers.clone(),
             principal: Principal::Grant(g),
             ip: self.ip,
             as_user: self.as_user,
+            session,
             url_elicitation: self.url_elicitation,
             form_elicitation: self.form_elicitation,
             modern: self.modern,
@@ -662,6 +675,14 @@ impl Ctx {
         // One any token may call is still its product's: listed only where the product runs.
         if t.open() {
             return self.on(t.product) && self.reaches(t.product);
+        }
+        // A person's token on one resource of a member product: their role decides too (a session
+        // never asks), so a viewer's client isn't shown writes the gate would refuse.
+        // A write's candidate actions can include read (a body-decided row): it never counts.
+        if let Some(w) = self.session.as_ref().filter(|_| t.within_session())
+            && !t.actions().iter().filter(|a| t.method == "GET" || **a != Action::Read).any(|a| w.scope.may(t.product, *a))
+        {
+            return false;
         }
         self.may(t.product, &t.actions())
     }
@@ -981,8 +1002,14 @@ async fn listen(ctx: Arc<Ctx>, msg: &Value) -> Response {
     // The tools it's offered as the grant is now (`None`: it no longer works).
     let now = move |ctx: Arc<Ctx>, grant: String, access: Option<Arc<roll_access::Access>>| async move {
         let a = access?;
+        let a2 = a.clone();
         let g = tokio::task::spawn_blocking(move || roll_auth::Grants::grant(&*a, &grant)).await.ok()??;
-        Some(tool_names(&ctx.as_now(g)))
+        // A person's roles as they are now too: a role changed while it listens changes its tools.
+        let session = match (&ctx.session, g.user.clone()) {
+            (Some(_), Some(u)) => Some(tokio::task::spawn_blocking(move || a2.session_grant(&u, None).ok()).await.ok()??),
+            _ => None,
+        };
+        Some(tool_names(&ctx.as_now(g, session)))
     };
     struct State {
         ctx: Arc<Ctx>,
@@ -1420,55 +1447,7 @@ fn tool_error(text: String, data: Value) -> Value {
     json!({ "content": [{ "type": "text", "text": visible(&text) }], "structuredContent": d, "isError": true })
 }
 
-/// Characters a person can't see that a model reads: tag characters (ASCII smuggled as
-/// U+E0000–E007F), zero-width and bidi controls, and variation selectors (bytes hidden after an
-/// emoji). Third-party text reaches the model in results (review comments, a preview's notes and
-/// mail, task messages, objects), so the text block escapes them.
-fn invisible(c: char) -> bool {
-    matches!(c as u32,
-        0x00AD | 0x180E | 0x200B..=0x200F | 0x202A..=0x202E | 0x2060..=0x2064 | 0x2066..=0x2069 | 0xFE00..=0xFE0F | 0xFEFF | 0xE0000..=0xE007F | 0xE0100..=0xE01EF)
-}
-
-/// `text` with each invisible character written as a JSON escape (`\u200b`, a surrogate pair past
-/// U+FFFF): the model sees that it's there, a JSON text still parses to the same value, and
-/// `structuredContent` stays exact.
-pub(crate) fn visible(text: &str) -> String {
-    if !text.chars().any(invisible) {
-        return text.to_string();
-    }
-    let mut out = String::with_capacity(text.len() + 16);
-    for c in text.chars() {
-        if invisible(c) {
-            let mut units = [0u16; 2];
-            for u in c.encode_utf16(&mut units) {
-                out.push_str(&format!("\\u{u:04x}"));
-            }
-        } else {
-            out.push(c);
-        }
-    }
-    out
-}
-
-/// `text` as the model gets it: invisible characters escaped, cut at MAX_TEXT. `whole` says the
-/// structured content holds the whole answer (JSON answers); otherwise the cut is all there is.
-fn cut(text: String, whole: bool) -> String {
-    let text = visible(&text);
-    if text.len() <= MAX_TEXT {
-        return text;
-    }
-    let mut end = MAX_TEXT;
-    while !text.is_char_boundary(end) {
-        end -= 1;
-    }
-    format!(
-        "{}\n… (cut at {} KiB of {} bytes: ask for less, as most list tools take a limit, a filter or a page cursor{})",
-        &text[..end],
-        MAX_TEXT >> 10,
-        text.len(),
-        if whole { "; the structured content has all of it" } else { "" }
-    )
-}
+use roll_auth::lockdown::{cut, visible};
 
 async fn run(ctx: &Arc<Ctx>, t: &tools::Tool, args: &Value, ext: Extensions) -> Value {
     let built = match t.request(args) {
@@ -1568,9 +1547,9 @@ mod cut_tests {
     /// A long answer's text fits a client's limit and says how to get less; a short one is whole.
     #[test]
     fn long_answers_are_cut_to_fit_a_clients_limit() {
-        let long = "x".repeat(super::MAX_TEXT * 3);
+        let long = "x".repeat(roll_auth::lockdown::MAX_TEXT * 3);
         let text = super::cut(long.clone(), true);
-        assert!(text.len() < super::MAX_TEXT + 300 && text.contains("ask for less"), "{}", &text[text.len() - 200..]);
+        assert!(text.len() < roll_auth::lockdown::MAX_TEXT + 300 && text.contains("ask for less"), "{}", &text[text.len() - 200..]);
         assert_eq!(super::cut("short".into(), true), "short");
         // A text answer has no structured copy: the note doesn't promise one.
         assert!(!super::cut(long, false).contains("structured content"));
@@ -1626,7 +1605,7 @@ mod visible_tests {
         let comment = format!("looks good{hidden}\u{200b}!");
         let value = serde_json::json!({ "body": comment });
         let text = super::cut(serde_json::to_string(&value).unwrap(), true);
-        assert!(text.contains("\\udb40\\udc69") && text.contains("\\u200b") && !text.chars().any(super::invisible), "{text}");
+        assert!(text.contains("\\udb40\\udc69") && text.contains("\\u200b") && !text.chars().any(roll_auth::lockdown::invisible), "{text}");
         assert_eq!(serde_json::from_str::<serde_json::Value>(&text).unwrap(), value, "the same value");
         assert_eq!(super::visible("plain text, émoji 🚀"), "plain text, émoji 🚀");
     }

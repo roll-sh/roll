@@ -105,6 +105,10 @@ impl IntoResponse for Error {
             Error::Conflict(_) => (StatusCode::CONFLICT, None),
             Error::Forbidden(_) => (StatusCode::FORBIDDEN, Some("forbidden")),
             Error::LastOwner(_) => (StatusCode::CONFLICT, Some("last_owner")),
+            Error::Refused(r) => {
+                let status = StatusCode::from_u16(r.status).unwrap_or(StatusCode::CONFLICT);
+                return (status, Json(json!({ "error": r.message, "code": r.code }))).into_response();
+            }
             Error::Db(_) | Error::Internal(_) => (StatusCode::INTERNAL_SERVER_ERROR, None),
         };
         let mut body = json!({ "error": self.to_string() });
@@ -184,8 +188,10 @@ async fn update(State(ws): S, me: Caller, Path(id): Path<String>, b: Bytes) -> c
     Ok(Json(blocking(ws, move |ws| ws.update(me.scope(), &id, &change)).await?).into_response())
 }
 
-async fn delete_project(State(ws): S, me: Caller, Path(id): Path<String>) -> crate::Result<StatusCode> {
-    blocking(ws, move |ws| ws.delete(me.scope(), &id)).await?;
+/// A product may refuse (roll secrets: `409 project_holds_secrets` until a secrets admin passes
+/// `?confirm=<the project's name or id>`); the request goes to it as it came.
+async fn delete_project(State(ws): S, me: Caller, Path(id): Path<String>, request: axum::http::request::Parts) -> crate::Result<StatusCode> {
+    blocking(ws, move |ws| ws.delete(me.scope(), &id, &request)).await?;
     Ok(StatusCode::NO_CONTENT)
 }
 

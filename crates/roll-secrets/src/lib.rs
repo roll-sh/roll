@@ -15,6 +15,7 @@ pub mod access;
 pub mod acme;
 mod alerts;
 pub mod decoys;
+pub mod deleted;
 pub mod api;
 pub mod health;
 pub mod outside;
@@ -282,10 +283,18 @@ pub type Result<T, E = Error> = std::result::Result<T, E>;
 pub enum Error {
     #[error("{0}")]
     BadRequest(String),
+    /// 400 with a code: `placement_required`.
+    #[error("{1}")]
+    Invalid(&'static str, String),
     #[error("{0}")]
     Unauthorized(String),
     #[error("{0}")]
     Forbidden(String),
+    /// 403 `maker_unreachable`: whoever set up placeholders or chose a reference can no longer
+    /// reveal there, or sign in. A product falls back on it (a preview resolves without
+    /// placeholders); any other 403 is `forbidden`.
+    #[error("{0}")]
+    MakerUnreachable(String),
     #[error("{0}")]
     NotFound(String),
     /// 409 with a code: `conflict`, `approval_required`, `stale`, `last_environment`.
@@ -454,6 +463,10 @@ pub struct Secrets {
     recorder: audit::Recorder,
     /// Another source of interception CAs' hosts than placeholders' bindings (intercept.rs).
     bound_hosts: std::sync::OnceLock<Arc<dyn intercept::BoundHosts>>,
+    /// Days a deleted project's secrets are kept to be recovered (deleted.rs).
+    delete_window_days: std::sync::atomic::AtomicU32,
+    /// Hours the purge waits for an audit sink behind on a closed project (deleted.rs).
+    purge_sink_grace_hours: std::sync::atomic::AtomicU32,
 }
 
 impl std::fmt::Debug for Secrets {
@@ -540,11 +553,33 @@ impl Secrets {
         // Who a dynamic lease was issued to (the caller's principal; `consumer` is a name it chose):
         // a reader may end its own leases, not another's.
         db.add_column("leases", "issued_by", "TEXT")?;
-        // A deleted project kept only until what it issued is revoked (forget_project).
+        // A deleted project (deleted.rs): when, by whom, its recovery window's end, its closing
+        // digest, and its purge (then only its key and registries wait for revocations).
         db.add_column("projects", "forgotten_at", "INTEGER")?;
+        db.add_column("projects", "forgotten_by", "TEXT")?;
+        db.add_column("projects", "purge_at", "INTEGER")?;
+        db.add_column("projects", "closed_at", "INTEGER")?;
+        db.add_column("projects", "purged_at", "INTEGER")?;
+        // Deleted before the window: already erased, waiting only for revocations.
+        db.migrate("secrets-deleted-before-the-window", |c| {
+            c.execute("UPDATE projects SET closed_at = forgotten_at, purged_at = forgotten_at WHERE forgotten_at IS NOT NULL AND purge_at IS NULL", ())?;
+            Ok(())
+        })?;
         db.ensure_schema(notices::SCHEMA)?;
         // Validity checks of credentials found in code (validity.rs): a project's switch, the answers.
         db.ensure_schema(validity::SCHEMA)?;
+        // What erasing a deleted project before the window left behind: audit heads (their rows
+        // went; the signer kept signing them) and validity answers, of those projects and of ones
+        // whose row is gone too.
+        db.migrate("secrets-deleted-before-the-window-leftovers", |c| {
+            c.execute(
+                "DELETE FROM audit_heads WHERE project_id IN (SELECT project_id FROM projects WHERE purged_at IS NOT NULL)
+                 OR (NOT EXISTS (SELECT 1 FROM projects p WHERE p.project_id = audit_heads.project_id) AND NOT EXISTS (SELECT 1 FROM audit a WHERE a.project_id = audit_heads.project_id))",
+                (),
+            )?;
+            c.execute("DELETE FROM validity WHERE project_id IN (SELECT project_id FROM projects WHERE purged_at IS NOT NULL) OR NOT EXISTS (SELECT 1 FROM projects p WHERE p.project_id = validity.project_id)", ())?;
+            Ok(())
+        })?;
         db.add_column("projects", "validity_checks", "INTEGER")?;
         db.ensure_schema(alerts::SCHEMA)?;
         db.ensure_schema(decoys::SCHEMA)?;
@@ -680,7 +715,7 @@ impl Secrets {
         if let (Some(github), Ok(keys)) = (&opts.github, &opts.keyring) {
             links.register(Arc::new(github_app::Provider { db: db.clone(), keys: keys.clone(), unwrap: unwrap.clone(), github: github.clone() }));
         }
-        Ok(Secrets { db, keys: opts.keyring, key_source: opts.key_source, workspace, links, syncs: opts.syncs, deliver: opts.deliver, grants: opts.grants, people: opts.people, workloads: opts.workloads, gateway_links: opts.gateways, unwrap: unwrap.clone(), open: opts.open, trust_forwarded_for: opts.trust_forwarded_for, web_url: opts.web_url, outside: opts.outside, directory: opts.directory, github: opts.github, oidc: Default::default(), logins: Default::default(), answers: Default::default(), reads_per_minute: read::READS_PER_MINUTE.into(), code_refs: Default::default(), sts: opts.sts.clone(), clouds: opts.clouds, public_api, aws_server_id: Default::default(), crls, live_fps: Default::default(), issuer_keys: Default::default(), issuer_rotate_days: issuer::ROTATE_DAYS.into(), audit_keys: Default::default(), audit_rotate_days: audit_key::ROTATE_DAYS.into(), digests: Default::default(), counters: Default::default(), acme: Default::default(), recorder: Default::default(), validity: Default::default(), bound_hosts: Default::default(), uses: Default::default() })
+        Ok(Secrets { db, keys: opts.keyring, key_source: opts.key_source, workspace, links, syncs: opts.syncs, deliver: opts.deliver, grants: opts.grants, people: opts.people, workloads: opts.workloads, gateway_links: opts.gateways, unwrap: unwrap.clone(), open: opts.open, trust_forwarded_for: opts.trust_forwarded_for, web_url: opts.web_url, outside: opts.outside, directory: opts.directory, github: opts.github, oidc: Default::default(), logins: Default::default(), answers: Default::default(), reads_per_minute: read::READS_PER_MINUTE.into(), code_refs: Default::default(), sts: opts.sts.clone(), clouds: opts.clouds, public_api, aws_server_id: Default::default(), crls, live_fps: Default::default(), issuer_keys: Default::default(), issuer_rotate_days: issuer::ROTATE_DAYS.into(), audit_keys: Default::default(), audit_rotate_days: audit_key::ROTATE_DAYS.into(), digests: Default::default(), counters: Default::default(), acme: Default::default(), recorder: Default::default(), validity: Default::default(), bound_hosts: Default::default(), uses: Default::default(), delete_window_days: deleted::WINDOW_DAYS.into(), purge_sink_grace_hours: deleted::SINK_GRACE_HOURS.into() })
     }
 
     pub fn links(&self) -> &Links {
@@ -692,16 +727,18 @@ impl Secrets {
     }
 
     /// The project's data key, creating the project's secrets (its key and default
-    /// environments) the first time. 404 if the workspace has no such project.
+    /// environments) the first time. 404 if the workspace has no such project, or its secrets
+    /// are a deleted project's (deleted.rs): every value goes through here, so none is read.
     fn project(&self, project: &str) -> Result<crypto::Dek> {
         let keys = self.keys()?;
         self.workspace.get(roll_workspace::Scope::All, project).map_err(|e| match e {
             roll_workspace::Error::NotFound(m) => Error::NotFound(m),
             e => Error::Internal(e.to_string()),
         })?;
-        let stored = self.db.read(|c| c.query_row("SELECT dek FROM projects WHERE project_id = ?", [project], |r| r.get::<_, String>(0)).optional())?;
+        let stored = self.db.read(|c| c.query_row("SELECT dek, forgotten_at FROM projects WHERE project_id = ?", [project], |r| Ok((r.get::<_, String>(0)?, r.get::<_, Option<i64>>(1)?))).optional())?;
         let sealed = match stored {
-            Some(s) => s,
+            Some((_, Some(_))) => return Err(Error::NotFound(format!("no project {project}"))),
+            Some((s, None)) => s,
             None => {
                 let (_, sealed) = keys.new_dek(project);
                 let now = self.db.now_ms()?;
@@ -719,6 +756,20 @@ impl Secrets {
                 })?
             }
         };
+        self.open_key(project, sealed)
+    }
+
+    /// The data key of a project roll secrets holds, deleted or not, without asking the workspace:
+    /// only for what a deleted project's window still does (its audit sinks' deliveries).
+    fn stored_key(&self, project: &str) -> Result<crypto::Dek> {
+        let sealed = self.db.read(|c| c.query_row("SELECT dek FROM projects WHERE project_id = ?", [project], |r| r.get::<_, String>(0)).optional())?;
+        self.open_key(project, sealed.ok_or_else(|| Error::NotFound(format!("no project {project}")))?)
+    }
+
+    /// Open a project's sealed data key, resealing it with the current deployment key when an
+    /// older one sealed it.
+    fn open_key(&self, project: &str, sealed: String) -> Result<crypto::Dek> {
+        let keys = self.keys()?;
         let inner = self.unwrap.inner(project, &sealed).inspect_err(|e| {
             if matches!(e, Error::KeyDenied(_)) {
                 metrics::Counters::add(&self.counters.kms_refusals, 1);
@@ -778,86 +829,6 @@ impl Secrets {
             .collect();
         Ok(serde_json::json!({ "ok": self.keys.is_ok(), "key": self.key_source, "resealed": resealed, "customer_managed": customer_managed, "issuer_pulled": pulled, "links": self.links.kinds().map(|p| p.kind().to_string()).collect::<Vec<_>>(), "syncs": self.syncs.kinds().map(|t| t.kind().to_string()).collect::<Vec<_>>() }))
     }
-
-    /// Forget everything about a project (its workspace project was deleted). What it issued is
-    /// revoked first, while the project's key and registries can still reach it. Anything that
-    /// couldn't be revoked stays as a lease the sweeper retries, with what revoking it needs (the
-    /// project's key, its registries), until [`Secrets::sweep_forgotten`] finds nothing left.
-    pub fn forget_project(&self, project: &str) -> Result<()> {
-        self.revoke_leases_where("project_id = ?", project);
-        let failed = self.revoke_managed(self.managed_where("project_id = ?", project));
-        let now = self.db.now_ms()?;
-        self.db.write(|c| {
-            for t in ["secrets", "versions", "changes", "requests", "audit", "required", "shares", "value_requests", "syncs", "audit_sinks", "notices", "identities", "identity_logins", "transit_keys", "oidc_issued", "placeholders", "key_hosts"] {
-                c.execute(&format!("DELETE FROM {t} WHERE project_id = ?"), [project])?;
-            }
-            c.execute("DELETE FROM leases WHERE project_id = ? AND revoked_at IS NOT NULL", [project])?;
-            for (link, handle) in &failed {
-                c.execute(
-                    "INSERT INTO leases (id, project_id, env_id, key, kind, link, handle, consumer, issued_at, expires_at, revoked_at) VALUES (?, ?, '', '', 'retired', ?, ?, 'roll:forget', ?, ?, NULL)",
-                    code_sql::params![names::new_id("lse", 16), project, json(link), json(handle), now, now],
-                )?;
-            }
-            let envs = c.query("SELECT id FROM environments WHERE project_id = ?", [project], |r| r.get::<_, String>(0))?;
-            for e in &envs {
-                c.execute("DELETE FROM folders WHERE env_id = ?", [e])?;
-                c.execute("DELETE FROM imports WHERE env_id = ? OR from_env_id = ?", [e, e])?;
-                c.execute("DELETE FROM exports WHERE env_id = ?", [e])?;
-                c.execute("DELETE FROM folder_policies WHERE env_id = ?", [e])?;
-            }
-            // Its CAs' ACME accounts and bindings stop now (the CAs wait for their revocations).
-            for ca in c.query("SELECT id FROM cas WHERE project_id = ?", [project], |r| r.get::<_, String>(0))? {
-                acme::forget_ca(c, &ca)?;
-            }
-            // What other projects shared with this one goes with it.
-            c.execute("DELETE FROM exports WHERE to_project = ?", [project])?;
-            c.execute("DELETE FROM environments WHERE project_id = ?", [project])?;
-            c.execute("UPDATE projects SET forgotten_at = ? WHERE project_id = ?", code_sql::params![now, project])?;
-            // Its decoys end with it: their tokens are revoked next.
-            c.execute("UPDATE decoys SET ended_at = ? WHERE project_id = ? AND ended_at IS NULL", code_sql::params![now, project])?;
-            forget_if_done(c, project, now)
-        })?;
-        if let Err(e) = self.end_decoys() {
-            tracing::warn!(project, "revoking a deleted project's decoys failed (the sweeper retries): {e}");
-        }
-        Ok(())
-    }
-
-    /// Forgotten projects whose last lease is revoked: their key and registries go.
-    pub(crate) fn sweep_forgotten(&self) -> Result<()> {
-        let now = self.db.now_ms()?;
-        self.db.write(|c| {
-            // Those still serving revocations (pki.rs) wait apart, so they don't crowd out the rest.
-            let due = c.query(
-                "SELECT project_id FROM projects p WHERE forgotten_at IS NOT NULL AND NOT EXISTS (SELECT 1 FROM ca_certs k WHERE k.project_id = p.project_id AND k.revoked_at IS NOT NULL AND k.not_after >= ?) LIMIT 100",
-                [now],
-                |r| r.get::<_, String>(0),
-            )?;
-            for p in due {
-                forget_if_done(c, &p, now)?;
-            }
-            Ok(())
-        })
-    }
-}
-
-/// Registries of the project's own resources (rotators…): a lease's revocation reads them.
-const REGISTRIES: &[&str] = &["rotators", "saas_rotators", "outside_dbs", "directories", "snowflake_accounts", "atlas_projects", "aws_users", "aws_roles", "cloud_accounts", "kubernetes_clusters", "cas", "ca_certs", "ssh_cas", "github_apps", "backup_schedules"];
-
-/// Drop a forgotten project's key and registries once no lease of its waits to be revoked, and no
-/// certificate its CAs revoked is still within its lifetime (their CRLs, signed with the CA's key,
-/// keep being served until then: a client that can't fetch one would trust the certificate again).
-fn forget_if_done(c: &code_sql::Conn<'_>, project: &str, now: i64) -> Result<()> {
-    let waiting: i64 = c.query_row("SELECT COUNT(*) FROM leases WHERE project_id = ? AND revoked_at IS NULL", [project], |r| r.get(0))?;
-    let revoked: i64 = c.query_row("SELECT COUNT(*) FROM ca_certs WHERE project_id = ? AND revoked_at IS NOT NULL AND not_after >= ?", code_sql::params![project, now], |r| r.get(0))?;
-    if waiting == 0 && revoked == 0 {
-        c.execute("DELETE FROM leases WHERE project_id = ?", [project])?;
-        for t in REGISTRIES {
-            c.execute(&format!("DELETE FROM {t} WHERE project_id = ?"), [project])?;
-        }
-        c.execute("DELETE FROM projects WHERE project_id = ?", [project])?;
-    }
-    Ok(())
 }
 
 fn json<T: serde::Serialize>(v: &T) -> String {

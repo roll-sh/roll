@@ -143,8 +143,9 @@ impl Secrets {
         if exists {
             return Err(Error::Conflict("exists", format!("{} is already in {env}:{path}: a decoy is a new key", n.key)));
         }
-        // Whose it is: they're mailed when it's used, as the admins are.
-        let owner = match self.maker(&caller.principal)? {
+        // Whose it is: they're mailed when it's used, as the admins are. An admin's session plants
+        // as the person behind it (`made_by`), never as the operator.
+        let owner = match self.maker(caller.made_by())? {
             Origin::Person(u) => Some(u),
             Origin::Operator => None,
             Origin::Gone => return Err(Error::Forbidden("whoever made this token can't make decoys any more".into())),

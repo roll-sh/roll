@@ -891,6 +891,10 @@ A value can include other values:
 - References are resolved on the server when values are read with `resolve` (the default for
   `values`, `export` and `roll run`). A reference to another environment needs `reveal` access to
   that environment too.
+- Writing one needs it too: a value that references another folder (`${production.KEY}` written
+  into staging) is a 403 unless the writer may reveal that folder, as for an import or a base.
+  Every reader of the folder reads through it, runtimes included, and a service's runtime read
+  follows it whoever reads staging.
 - Resolution follows references up to 8 deep, and a cycle is reported with its path:
   `cycle: DB_URL → DATABASE_URL → DB_URL`. A missing key or an unreadable environment leaves the
   reference unresolved. Reads report it in `problems`, and `roll run` fails on it unless
@@ -1094,7 +1098,9 @@ the Health view's "Managed credentials" list every managed credential with its s
 failure; `roll secrets rotations --rotate-due 7` rotates every one due within a week, or failing,
 in one run, for an operator's maintenance window, and fails if one does), `missing` (a required key an environment doesn't define, through its
 imports and base), `exposed` (a protected value also in an unprotected environment), `public`,
-`weak`, `expiring`, `certificate_expiring` (a certificate a project CA signed for a CSR that ends
+`weak`, `unplaced` (a key bound to hosts without a `header` or `query`, from before a placement
+was required: a trusted reader's placeholder may ride in any header, and an untrusted consumer's
+doesn't swap; see "Using a key without seeing it"), `expiring`, `certificate_expiring` (a certificate a project CA signed for a CSR that ends
 within two weeks: links' certificates are replaced by roll, a CSR's only by whoever asked; `key` is
 its names, `path` its CA), `operator_made` (a sync or a workload identity made as the
 operator account: "made by the operator account: re-save to bind it to a person". Before makers
@@ -1212,11 +1218,62 @@ A link is `{kind, ref, field, mode, options}`:
 - **When a secret, an environment or the project goes**, what it issued is revoked first, while
   the project's key and registries (rotators…) can still reach it. A revocation that fails (the
   product or the customer's endpoint is down) stays as a lease that's already due, and the sweeper
-  retries it; a deleted project keeps its key and registries (`projects.forgotten_at`) until its
-  last lease is revoked, then they go too. Nothing it issued outlives it unrevoked. Deleting the
-  workspace project erases its secrets, their versions, its encryption keys and its audit chain at
-  once, with no recovery window and no closing digest. A recovery window and a signed closing digest
-  are planned (the thirty-fourth review's item 2).
+  retries it; a purged project keeps its key and registries until its last lease is revoked, then
+  they go too. Nothing it issued outlives it unrevoked. An environment's delete, unlike a project's,
+  still erases its secrets, versions, changes and requests at once (the thirty-fifth review's item 2:
+  a recovery window and a change request for a protected one are planned); a key's delete makes a
+  tombstone version.
+- **Deleting the workspace project** (`DELETE /v1/workspace/projects/{id}`) can't destroy secrets
+  by accident, as AWS Secrets Manager's and Azure Key Vault's waits can't:
+  - while the project holds any value, a protected environment, an encryption key, a certificate
+    authority or a workload identity, roll secrets refuses it
+    (`roll_workspace::Workspace::before_delete`): 403 for anyone who may not `admin` the project's
+    secrets (asked of the caller's grant, as every secrets route does; the 403 says nothing about
+    what it holds), and 409 `project_holds_secrets`, naming what goes, until a secrets admin
+    repeats the project's name or id in `?confirm=`. Workspace `delete` alone is never enough. The
+    project's overview says what would go and for how long (`deletion`); the dashboard's dialog
+    says exactly that and passes the name typed into it;
+  - then what it issued is revoked: leases and managed credentials, its decoys, its workload
+    identities' tokens (roll-access's grants, so an old one doesn't work after a recovery either),
+    its placeholders, and the interception CAs of consumers that held a placeholder of it that name
+    its hosts (`end_unbound_intercept_cas`; they get a new one, without its hosts, from
+    `…/intercept-ca`). Its one-time shares and secret
+    requests end, its gateways' links close and open nothing more, and its CAs answer ACME with
+    `unauthorized` (their CRLs are still served). The rest is kept for a recovery window
+    (`ROLL_SECRETS_DELETE_WINDOW_DAYS`, 1–90 days, 7 unless set). The delete is audited in the
+    project's log (`project.delete`: who, and the window's end). Through the window nobody reads
+    it: every route answers as for an unknown project, resolves and placeholders stop with them,
+    and syncs, rotations, reminders and backups wait. Its audit sinks keep delivering;
+  - its members are kept apart with it (docs/members.md), so a member's session and their tokens
+    reach nothing while it's deleted, and its invites end. What members made follows the same
+    rules as everything else: one-time shares end at the delete, syncs and the rest wait, and it
+    all acts for them again only once a recovery brings their membership back;
+  - `POST /v1/secrets/projects/{project}/recover` brings it back within the window (the operator,
+    an admin of its secrets by their grant as it is now, or the person whose namespace it is while
+    they were still one of its owners when it was deleted, so an owner can undo an admin's delete
+    of their project; membership kept from the delete never lets anyone else in;
+    `GET /v1/secrets/deleted` lists what the caller may recover, as do
+    the dashboard's Home, "Recently deleted", and `roll secrets recover [project]`). The workspace
+    keeps a deleted project, its canvas and members apart for this (`deleted_projects`, at most
+    91 days), and recovering brings them back.
+    Recovering claims the project on the secrets side first (one write: a close on another node
+    then finds nothing to close), then puts the workspace project back: 409 `name_taken` if its
+    owner has made another project of that name since, and the claim is undone. Dynamic leases
+    are issued afresh on the next read; managed links get new credentials at once (`rotated`,
+    `rotation_failed`). The recovery is audited (`project.recover`);
+  - after the window the sweeper closes the log, in one write that is its claim: a last row
+    (`project.purge`) and a signed digest right after it, so the chain ends at a digest the way
+    retention cuts it. Nothing is written after it (`audit` refuses a closed log). A head that
+    isn't roll's isn't signed, so such a project isn't closed or purged: it's logged for the
+    operator and asked again hourly. A project whose workspace project is back (a recovery that
+    stopped halfway) is recovered instead. Once every audit sink has taken both rows, every row
+    goes, then the project's data key and registries (its gateways too, their tokens revoked) once
+    nothing it issued waits. Through the window a sink keeps delivering, the closing digest too,
+    while whoever set it up managed the project when it was deleted (the only use of the kept
+    membership besides bringing it back). **A sink still behind after the grace
+    (`ROLL_SECRETS_PURGE_SINK_GRACE_HOURS`, 24 unless set) loses the rows it hadn't taken, the
+    closing digest with them**; the purge logs a warning per sink with how many. After the closing
+    digest it can't be recovered (410 `gone`).
 
 **Suggested links.** `GET …/suggestions` lists each resource on the project's canvas with the
 standard environments that neither link it nor have its usual keys at `/`, and those keys: the
@@ -1250,7 +1307,6 @@ a credential never drops data.
 
 | `search` | `url`, `host`, `port`, `username` | a credential of its own with data access only (no keys or users; `"access": "data"`: a key roll search doesn't say is a data one, whatever else it says or if it says nothing, is deleted and refused), credential `key`: on an Elasticsearch cluster `api_key` (`Authorization: ApiKey …`), on an OpenSearch one an internal user, `user` (`<user>@<cluster>`, which the node routes) and `password`; a link to the field the cluster's flavor doesn't issue is refused when written, and switching a cluster's flavor carries no credential across (link the other fields again); an OpenSearch cluster's fields are offered and suggested under the names its clients read (`OPENSEARCH_URL`, `_HOST`, `_PORT`, `OPENSEARCH_USERNAME`/`_PASSWORD` for its user, `OPENSEARCH_CLUSTER` for the cluster's name); a dynamic one expires by itself 5 minutes after its lease | no (never the cluster's password) |
 
-`search` resources are linkable once roll search's workspace kind lands (`feature/roll-search`).
 roll apps' services have a workspace kind (`service`, `svc_…`); they consume secrets (an app's
 variables, `app:<svc>`) rather than issue credentials, so they have no link provider. Products
 without a link provider yet (tasks) join by registering one. Queues have no owners, so a person's
@@ -2676,6 +2732,7 @@ roll secrets import  .env [--overwrite]                         # one change (.e
 roll secrets edit                                               # the folder in $EDITOR, one change
 roll secrets set     KEY --generate 48                          # a random value made locally
 roll secrets health                                            # every finding, every environment, worst first
+roll secrets bind    KEY --host api.stripe.com… [--header 'Authorization: Bearer {}' | --query NAME] [--untrusted]   # for placeholders; unbind KEY takes it off
 roll secrets setup   [-p P -e ENV --path /] | --approve | --show | --clear   # this directory's project (alone: approve roll.toml's, or pick)
 roll secrets doctor                                            # this machine's setup, checked
 roll secrets check   [.env.example] [--strict]                # keys a template names that the environment lacks
@@ -2900,6 +2957,13 @@ unresolved reference or a dynamic credential fails the deploy, saying which. It 
   &caller)` for code nobody vetted. Dynamic links issue leases owned by the consumer, and the call
   is audited as `resolve` by `app:<service>`. `Secrets::digest(project, env, path, &caller)` (no
   decryption, unaudited) moves whenever the values would: compare it to decide a redeploy.
+- **Showing them is the asker's read.** apps' `…/variables/values`, shell, files and job output
+  show what the service got, so `ForApps::may_reveal` reads the environment again as the person or
+  token asking (`Secrets::values_seen_by`: the service's read, shared values only, with the
+  asker's rights, audited as an export by `app:<service> (shown to <who>)`). Every key shown must
+  resolve for them, so staging's `${production.KEY}`, an import or a base they can't reveal is a
+  403, never a partial answer; a shell asks for sensitive values too, and each `roll://` variable's
+  key in its own folder.
 - **Preview environments are untrusted themselves.** An ephemeral environment that wasn't made
   `trusted` never reads a protected environment, whoever resolves it: an app deployed into a
   preview's environment as `app:<service>` gets its overrides and the unprotected rest, never
@@ -2978,8 +3042,11 @@ cluster, instead of a key pasted into it: the Inference tab's "A roll secret", o
   and nothing is copied. A roll code owner token isn't anyone to roll secrets, so it can't copy
   secrets, and an agent token never manages the owner. The values are sealed with the rest of the
   sandbox's env until the backend has them. The sandbox records who copied them (`secrets_by`, the
-  principal), and the read is theirs in the audit log (its actor), resolved for `sandbox:<id> for
-  <principal>`.
+  maker: an admin's session is the person), and the read is theirs in the audit log (its actor),
+  resolved for `sandbox:<id> for <principal>`. Only where they came from is kept: before each
+  start roll code asks `Secrets::maker_may_reveal` (they still reach the project and may reveal the
+  environment, read untrusted), and once they may not the sandbox starts without those variables
+  (docs/code/http-api.md, "Sandboxes").
 - **Previews**: roll previews (docs/previews.md) makes an ephemeral environment per change (see
   "Ephemeral environments") and resolves it as `preview:<slug>`. A preview runs a change's code, so
   it resolves with `"untrusted": true`: an ephemeral environment based on a protected one gets its
@@ -3299,12 +3366,21 @@ the binding, issues placeholders, decides each swap and audits it, and ships the
     sandbox could send the key to a subdomain of its own. Bind the exact host there
     (`myproject.supabase.co`); a wildcard under someone's own name there (`*.shop.vercel.app`) is
     fine. Matched case-insensitively, without the request's port or a final dot.
-  - Placement: `header: "Authorization: Bearer {}"` (or `"X-Api-Key: {}"`) swaps the placeholder
+  - Placement: where the placeholder goes, so the code holding it can't pick a header the host
+    echoes. `header: "Authorization: Bearer {}"` (or `"X-Api-Key: {}"`, `{}` exactly once) swaps it
     only in that header, written exactly as the template says; `query: "api_key"` only as that query
-    parameter's whole value. With neither, any request header may carry it, and never the query.
-    Not both. `Host`, `Content-Length`, `Transfer-Encoding` and `Connection` can't be templates.
+    parameter's whole value. Not both. `Host`, `Content-Length`, `Transfer-Encoding` and
+    `Connection` can't be templates. A placeholder anywhere else blocks the request. The dashboard's
+    binding form (a key's menu, "Bind to hosts…") and `roll secrets bind KEY --host api.stripe.com`
+    default to `Authorization: Bearer {}` (`--header` or `--query` for another).
+  - A binding with neither (made before a placement was required) stays valid for trusted readers,
+    whose placeholder may ride in any request header (never the query). Health lists it
+    (`unplaced`: "a placeholder for STRIPE_KEY may ride in any header"), and an untrusted
+    consumer's swap through it is refused (`PlacementRequired`). Binding it again with a placement
+    fixes both.
   - `untrusted: true` lets a **sensitive** key's placeholder reach readers that couldn't read its
-    value themselves: untrusted code (a fork's preview, a sandbox) and people's tokens. Off (the
+    value themselves: untrusted code (a fork's preview, a sandbox) and people's tokens. It needs a
+    placement (else 400 `placement_required`). Off (the
     default), only roll's trusted runtimes get a placeholder for a sensitive key, and everyone else
     has it withheld, as without placeholders. The binding's audit row says "untrusted consumers
     too".
@@ -3323,8 +3399,10 @@ the binding, issues placeholders, decides each swap and audits it, and ships the
   - **The maker.** An in-process consumer (`sandbox:…`, `preview:…`) runs for someone, so it names
     them: `Ask { maker }` in process, `"maker"` over HTTP. That's #440's `secrets_by` for a sandbox,
     and the rule's writer for a preview. The maker is a person (`usr_…`), a token (`token:…`) or the
-    operator, and must reveal the folder when the placeholders are issued (else 403). Each swap asks
-    again (below). A resolve by a token or a person over HTTP is its own maker; a product's resource
+    operator, and must reveal the folder when the placeholders are issued (else 403
+    `maker_unreachable`: they can no longer reveal there, or sign in; a preview resolves without
+    placeholders on it, and surfaces any other 403). Each swap asks again (below) and refuses with
+    `proxy::Refusal::MakerUnreachable`. A resolve by a token or a person over HTTP is its own maker; a product's resource
     stands for itself on its project's canvas (`ResourceRef`).
   - A placeholder is `rlph_`, 34 random characters and a 6-character checksum
     (`roll_auth::credentials::new_secret`, one of `SECRET_PREFIXES`): roll's guard refuses it where
@@ -3358,11 +3436,15 @@ the binding, issues placeholders, decides each swap and audits it, and ships the
   - the environment still exists, isn't frozen (an incident's cut-off), and isn't protected for an
     untrusted consumer;
   - the key still exists and is still bound, and whoever bound it (`set_by`, `Caller::made_by`) may
-    still `admin` its folder: a member demoted or removed stops every swap through their binding,
-    which still counts as one everywhere else (a read gets a placeholder, never the value) until an
+    still `admin` its folder: a member demoted or removed stops every swap through their binding
+    (`Refusal::MakerUnreachable`), which still counts as one everywhere else (a read gets a placeholder, never the value) until an
     admin binds the key again or takes the binding off;
-  - the host and the place match its binding; a sensitive
-    key's binding still opts in, for a reader that couldn't read it; the value holds no reference.
+  - the host and the place match its binding, which names a placement for an untrusted consumer; a
+    sensitive key's binding still opts in, for a reader that couldn't read it; the value holds no
+    reference.
+
+  It answers a `proxy::Swap`: the value, the key and the placeholder's record (`phd_…`), which the
+  response's scrub names.
 
   Then the key's own value is read as stored, never resolved. Nothing
   is cached, so a revocation, a binding taken off, or a freeze stops the next request. A rotation
@@ -3395,13 +3477,32 @@ the binding, issues placeholders, decides each swap and audits it, and ships the
   - a value with CR, LF or NUL is refused in a header; a query value is percent-encoded;
   - it's bounded: 64 KiB of headers, 16 KiB of query, 8 KiB of path, 16 placeholders and 16 KiB
     per value (`Limits`), or the request is refused before anything is asked;
-  - its errors say where and why, never the value or the placeholder.
-- **Not covered.** Responses aren't scrubbed. A binding with no `header` or `query` lets the
-  placeholder ride in any request header, and the code holding it picks which, so a bound host that
-  echoes any request header (request ids, debug endpoints) hands the key back. Until a placement is
-  required and responses are scrubbed (the thirty-fourth review's item 4), give every binding a
-  `header` (`Authorization: Bearer {}`). A placeholder inside Basic auth (base64) or a signed request (AWS SigV4) can't be swapped: use a
-  bearer header. Bodies are never rewritten.
+  - its errors say where and why, never the value or the placeholder;
+  - a request it swapped into asks for `Accept-Encoding: identity` (any other `Accept-Encoding` is
+    dropped), so its response can be scrubbed as it arrives;
+  - it answers the request's `proxy::Scrub` (below), empty when nothing was swapped.
+- **The response scrub (`roll_secrets::proxy::Scrub`).** No I/O. A bound host that echoes what it's
+  sent (a request id, a debug endpoint) would hand the value back to the code that never held it.
+  - It holds the forms of each value swapped into the request: as is, base64 (standard and URL-safe,
+    padded or not) and percent-encoded (upper and lower case hex). A value under 8 bytes isn't
+    looked for: it would match ordinary bytes, and every match ends the placeholder.
+  - `headers(&HeaderMap)` looks at each response header's name and value; `chunk(&[u8])` at the body
+    as it arrives, carrying the last (longest form − 1) bytes over, so a value split between two
+    reads is still found. Each answers `Err(Echoed { key, host, placeholder })`, the key, the host
+    and the placeholder's record, never the value or the placeholder, and keeps answering it.
+  - The forms live in memory only: `Debug` shows none, and they're wiped on drop. It's bounded by the
+    filter's limits (16 placeholders, 16 KiB per value), and a response costs one pass per form
+    over its bytes.
+  - `Secrets::echoed(placeholder, host)` (in process only; no HTTP route) ends the placeholder (a
+    host that echoes once will again) and records a `secrets.alert` row ("api.example.com echoed
+    STRIPE_KEY back…") with a notice to the environment's notify URL (`placeholder_echo`). As any
+    placeholder ending does, it then ends the consumer's interception CAs that name a host it no
+    longer has.
+- **Not covered.** A host that transforms the value before echoing it (hashes it, splits it across
+  fields, encrypts it), or one that echoes it compressed when asked not to (the proxy refuses those):
+  placement is what keeps the code from choosing an echoing header in the first place. A placeholder
+  inside Basic auth (base64) or a signed request (AWS SigV4) can't be swapped: use a bearer header.
+  Bodies are never rewritten.
 
 ### Using a key without seeing it: the proxy's contract
 
@@ -3452,14 +3553,31 @@ agents' sandboxes). Each one does exactly this:
    the CA. One label under a wildcard binding, never deeper.
 4. **Filter each request** with `roll_secrets::proxy::filter`, which calls `Secrets::substitute`
    for every placeholder. Pass the host it terminated TLS for, never the request's `Host` header.
-   Send nothing that the filter refuses.
+   Send nothing that the filter refuses, and send the headers it rewrote as they are (on a swapped
+   request it asks for `Accept-Encoding: identity`). Keep the `Scrub` it answers for step 6.
 5. **Re-dial upstream with real TLS verification**, against the system's roots (never the
    interception CA, never `insecure`), for the same host, so the consumer can't make the proxy
    trust a server the consumer controls.
+6. **Scrub the response** of a request that was swapped into (`Scrub::swapped() > 0`), before any
+   of it reaches the consumer:
+   - a response with a `Content-Encoding` other than `identity` is refused (the consumer gets a
+     502), never inflated;
+   - pass its headers to `Scrub::headers`, then each body chunk to `Scrub::chunk` before forwarding
+     that chunk;
+   - on `Echoed`, stop the response: the consumer gets a 502 if nothing was sent yet, or the
+     connection is cut, and none of the remaining bytes. Then call
+     `Secrets::echoed(&e.placeholder, &e.host)` (blocking, off the async runtime), which records the
+     alert, notifies, and ends the placeholder.
 
 **Ending.** `Secrets::end_intercept_cas(consumer, why)` ends every live CA of the consumer, with a
 revocation row (`revoked_at`, `revoked_why`) and a `secrets.intercept_ca.end` audit row.
-`Secrets::end_consumer` calls it when the sandbox stops or the preview is torn down. The
+`Secrets::end_consumer` calls it when the sandbox stops or the preview is torn down. A CA also
+ends with its hosts: when the consumer's hosts shrink (one of its placeholders revoked, ended in a
+project or cut off, a key's binding cleared or narrowed), every CA of the consumer that names a
+host it no longer has ends once that write commits (`Secrets::end_unbound_intercept_cas`, reason
+`<hosts> no longer bound`), and the proxy's next `intercept_ca` names only the hosts it still has.
+A shrink nothing announces (a placeholder expiring, a key or environment deleted, a binder demoted
+or removed) ends the CA at its next `intercept_ca_live`, which answers `false` for a CA naming a host no longer bound. The
 proxy then drops the CA and its leaves at its next `intercept_ca_live`. No CRL is published: a
 trust anchor isn't checked against one, and the CA dies with its container or within a day. Rows
 go a day after they expire.
@@ -3741,9 +3859,10 @@ Agent's templates do).
   (`storage:bucket:photos`, `search:search:logs (untrusted)` for an untrusted copy), with the one
   key read.
 - **Refusals** say which part failed, never the value: no project, not trusted, not allowed (the
-  maker may not reveal it, or can't reach roll secrets any more), no such key, protected, or can't
-  be used (a dynamic credential, a sensitive key for anyone but a trusted runtime, a reference
-  inside the value that doesn't resolve). `digest_for` and `digest_as` refuse exactly what their
+  caller choosing it may not reveal it), maker unreachable (`Refusal::MakerUnreachable`: the maker
+  can no longer reveal it, or sign in; 403 `maker_unreachable` over HTTP), no such key, protected,
+  or can't be used (a dynamic credential, a sensitive key for anyone but a trusted runtime, a
+  reference inside the value that doesn't resolve). `digest_for` and `digest_as` refuse exactly what their
   resolve would; `bind_ref` refuses what `digest_as` would for the caller (it decrypts nothing, so
   a `${…}` reaching a sensitive key fails at the first read).
 - **Rotation.** Nothing is cached across calls in roll secrets. A product keeps what it built
@@ -4502,7 +4621,7 @@ credentials as the tokens list does. Names and metadata only, never a value:
   counted: the answer says so (`uncounted`).
 
 Who could lists roll-access's live tokens (`rlt_…`) by what each may do here, and workload identities
-by their identity rather than each login. OAuth connections (`rlo_…`) aren't listed yet.
+by their identity rather than each login. OAuth connections (`rlo_…`) aren't listed yet, though since roll MCP's #644 a member's MCP client reaches what their role does (the thirty-fifth review's item 3).
 
 It also lists what the folder has handed out that's still out: dynamic credentials issued for
 its keys and not yet revoked (`leases`), live placeholders of its keys wherever they were
@@ -4605,9 +4724,9 @@ a decoy credential:
 - **`rlt`**: a roll token that roll-access made as a decoy (docs/permissions.md, "Decoy tokens").
   It allows nothing, whatever its rules say. Any use is refused as an unknown token is, so whoever
   holds it learns nothing. roll-access records the use on the token, writes its own audit row,
-  mails the decoy's owner (whoever planted it) and the admins, and tells roll secrets
-  (`Access::on_decoy`). roll secrets keeps no token store: rolld mints the decoy through
-  `Workloads::mint_decoy`.
+  mails the decoy's owner (whoever planted it; from an admin's session, the person behind it, never
+  the operator) and the admins, and tells roll secrets (`Access::on_decoy`). roll secrets keeps no
+  token store: rolld mints the decoy through `Workloads::mint_decoy`.
 - **`postgres`**: a connection string for a role of `resource`, a roll Postgres database the
   project may link (on its canvas, as a link's). It's the root branch's connection string with a
   role and password shaped like the ones links issue (`roll_` and 12 letters and digits, 32
@@ -5242,7 +5361,7 @@ isn't in the workspace is 404.
 | --- | --- | --- |
 | `GET /v1/secrets/health` | | `{ok, key: "env"\|"kms"\|"file"\|"shares"\|"missing", resealed: "all"\|number\|null, customer_managed, issuer_pulled: {kid, pulled_at, detail}[], links: string[], syncs: string[]}` (`links`, `syncs`: the kinds registered; `issuer_pulled`: issuer keys an emergency rotation pulled in the last 30 days) |
 | `GET`, `POST /v1/secrets/unseal` | `{share}` (`POST`) | `{sealed, have?, need?, error?}`: a sealed node's progress (public; see "Starting sealed"); 429 with `Retry-After` past the limits |
-| `GET` | | `{project, environments: Environment[], previews: number, history_days: number \| null, validity_checks: "on" \| "off"}` |
+| `GET` | | `{project, environments: Environment[], previews: number, history_days: number \| null, validity_checks: "on" \| "off", deletion: {window_days, holds: string \| null}}` (`deletion`: what deleting the workspace project takes with it, as its refusal says it, and how many days it stays recoverable) |
 | `PATCH` | `{history_days?, validity_checks?: "on" \| "off"}` | what changed, as given (`admin`; validity checks audited as `validity.checks`) |
 | `GET /grid?path=` | | `Grid` |
 | `GET /environments` | | `Environment[]` in order |
@@ -5446,14 +5565,21 @@ isn't in the workspace is 404.
 | `GET /transit/{name}/public` | | `TransitPublicKey[]`: `{version, public_key (base64), pem, jwk}` for every version (`read`) |
 | `GET /v1/secrets/whoami` | | `{principal, project?, scopes?}` |
 | `GET /v1/secrets/search?key=` | | `Place[]`: every project, environment and folder holding `key` (`PREFIX*` for a prefix) that the caller may read; never values |
+| `GET /v1/secrets/deleted` | | `DeletedProject[]`: `{project, name, deleted_at, deleted_by, purge_at}` for each deleted project in its recovery window that the caller may recover, soonest purged first |
+| `POST /recover` | | `{project, name, recovered_at, rotated, rotation_failed: string[]}`: a deleted project back, with its workspace project and canvas (`admin`, or the person whose project it was; audited as `project.recover`) |
 
 - 400: a bad slug, path, key, value, body or query.
 - 401: no credential, or a token that doesn't exist, is revoked or expired.
-- 403: the caller may not do this (`{"code": "forbidden"}`).
+- 403: the caller may not do this (`{"code": "forbidden"}`), or whoever set up placeholders or
+  chose a reference can no longer reveal there or sign in (`maker_unreachable`).
 - 404: no such project, environment, folder, secret, version, change, request, lease or token.
-- 410: a secret request answered as often as it allowed, expired or cancelled (`gone`).
+- 410: a secret request answered as often as it allowed, expired or cancelled, or a deleted
+  project past its recovery window (`gone`).
 - 409: a slug that is taken (`conflict`), a write to a protected environment
-  (`approval_required`), a request that is `stale`, the last standard environment.
+  (`approval_required`), a request that is `stale`, the last standard environment, a recovered
+  project's name taken meanwhile (`name_taken`), and, on the workspace's
+  `DELETE /v1/workspace/projects/{id}`, a project that holds secrets without `?confirm=`
+  (`project_holds_secrets`).
 - 503: no deployment key on a node that shares the system database (`no_key`).
 
 ### Shapes
@@ -5745,6 +5871,64 @@ adds roll-access's grant lookup or the accounts' and workspace's.
 
 ## Next
 
+**Ranked, 2026-11-22 06:20** (the thirty-fifth product review, cold, on main 6575a213a, against
+Vault/OpenBao, Infisical, Doppler, AWS, 1Password, Akeyless, Bitwarden SM, GitGuardian, Google Secret
+Manager and Azure Key Vault). Every item of the thirty-fourth review that roll secrets owns is on main,
+and a cold read found the new code sound where it was aimed. The new seams sit next to those fixes.
+Newest entries first; older State and Ranked entries follow further down, as history.
+
+1. **A new project's production isn't protected** (security, high, S; fixing in
+   `fix/secrets-production-protected`). It's made with `protected: false`, and protection is "has a
+   policy", so members' developer default (`unprotected: true`), checks and sandboxes all reach it, and
+   developers write it with no request. The fix:
+   - a new project's production is protected (with `approvals: 0` writing directly for a solo owner);
+   - the default rule never matches `production` unless named, as D3 promised;
+   - Health flags an unprotected production that others reach, and the invite sheet says what a
+     developer reaches;
+   - a fresh-project test.
+2. **Deleting an environment erases it at once** (security and data loss, M). Its secrets, versions,
+   changes and requests go behind a typed slug (`envs.rs:882`), while deleting one folder there needs a
+   change request. #585's `Held` doesn't count registries (GitHub Apps, cloud accounts, outside
+   databases) or sinks, so a project holding only those goes on workspace delete alone. The fix:
+   - #585's window for environments (`forgotten_at`, recover, purge);
+   - a protected environment's delete as a change request;
+   - the 409 names the references that will break;
+   - `Held` counts registries and sinks.
+3. **Reach doesn't name people, OAuth clients, services or sandboxes** (governance, S–M). roll MCP's
+   leak-response prompt (#661) builds its plan from reach. It gains `people` (members whose role
+   reveals there), `clients` (`rlo_` by person), `services` (apps services resolving the folder, with
+   their last deploy), `sandboxes` (live copies) and `knew` (people who revealed it and no longer can).
+4. **An offboarded person's leases and one-time shares outlive them** (security, medium-low, S).
+   Disabling an account (an admin, or SCIM deactivate or delete) doesn't run `member_changed`, so
+   their dynamic credentials live out their TTL (up to 7 days) and their shares still open.
+   roll-accounts' disable writes an outbox event, and rolld treats a disabled person as no member.
+5. **Sandbox copies are frozen at create** (S–M). Resolve `secrets_from` afresh at each start as the
+   maker. agent37 recreates the instance on its home. A member event or a disable stops the copier's
+   running sandboxes.
+6. **roll's own AI and chat credentials can't be `roll://` references** (integration, M):
+   - reviewer provider keys (code-control's own table);
+   - agents' endpoints (pasted or `op://`);
+   - the model gateway's upstreams (`env:`/file).
+
+   A leaked model key, the commonest leak, gets no reach, health, validity check or rotation.
+   Bind with `bind_ref` and read with `resolve_as`. The daemon resolves over its machine link.
+7. **apps' environments with their own data drop every linked key** (S). `Values.linked` gains
+   `{name, kind, ref}`, so apps drops only what it branched.
+8. **A local agent outside Lambda** (S–M): the Lambda extension's surface as a sidecar.
+9. **Test gaps** for items 1–4, one per flow.
+10. **Gate hygiene** (S):
+    - `scripts/agents-e2e.mjs` picks rolld ports (use `--addr-file`);
+    - agent-host's `pi_compaction` under the shared gate set, plausibly serde_json's `float_roundtrip`
+      unified through the search crates (compare the numbers as values).
+11. **Search stores cluster passwords in the clear without `ROLL_SECRET_KEY`** (in flight on #601 and
+    #318; track).
+12. **The root of trust beyond AWS KMS, and FIPS** (L; the user's call).
+
+In flight from before: #665 (a placeholder swaps only for its own consumer; references never smuggle a
+bound value; the fallback skips bound keys) is re-levelling on previews' #630, which made the response
+scrub live. Also `perf/secrets-change-stampede` (measuring) and `feature/members-groups` (members v1.1
+phase 1). Elevation waits on the user's D13, D14 and D16.
+
 Done in #20 (merged 2026-11-15 as 1ad248420):
 - the store and its crypto (the deployment key from the environment, a file, or AWS KMS);
 - rolld's mount and link providers (Postgres, Redis, streams, buckets, NoSQL, search: checked
@@ -6003,10 +6187,93 @@ and webhooks' and review apps' signing secrets sealed. Still open:
   as soon as its bound hosts shrink (a placeholder revoked, hosts cleared, a cut-off), not only with
   the consumer, and a decoy planted from an admin's session mails that person, not the operator;
 - the thirty-fourth product review (ranked below): items 1 and 3 are being fixed together in
-  `fix/secrets-reveal-as-asker`;
+  `fix/secrets-reveal-as-asker`, and item 2 in `fix/secrets-project-delete-window`;
 - the #432 decoy-oracle fix: computes pinned by digest, and each image's pre-auth answers learned from a
   compute of that image (about 2 s per image, never waking a suspended endpoint). Its full gate is
   running.
+
+**Ranked, 2026-11-22 05:45** (after the thirty-fourth review's items landed; built from a review of
+roll apps' #603 and what gating found). The thirty-fifth cold review is running and will replace this
+list. In order:
+
+1. **A placeholder swaps only for its own consumer** (security, high; fixing in
+   `fix/secrets-placeholder-consumer`). `Secrets::substitute` checked a placeholder's maker, binding,
+   host and liveness, but not who was asking, so a leaked `rlph_` could be swapped through another
+   tenant's proxy (apps' closed environments, fork previews). The proxy passes its interception CA's
+   consumer and a mismatch is refused with an alert (`WrongConsumer`).
+2. **A reference never smuggles a bound key's value** (security, medium; same PR). In a placeholders
+   read, `AUTH="Bearer ${STRIPE_KEY}"` resolved the real value. Such a key is withheld with a problem
+   naming the bound key.
+3. **The maker-refusal fallback reads bound keys** (security, low; same PR). rolld's apps fallback
+   decrypted and audited the host-bound keys it then withheld, and a binding added in between leaked
+   once. A read mode that leaves bound keys out before decrypting.
+4. **The stampede after a change** (performance, M; measuring in `perf/secrets-change-stampede`). The
+   first digest after a write per polling identity times 1,000 pods; a fix only if it spikes.
+5. **Members v1.1** (completeness, L). The design is `docs/members-v1-1.md` (#662).
+   - Phase 1: groups and SCIM `Groups`, building on option (a) in `feature/members-groups`.
+   - Phase 2: time-boxed elevation, waiting on the user's D13, D14 and D16.
+6. **Sandbox copies are frozen at create** (UX/security, M). A rotated value doesn't reach an agents
+   sandbox until it's recreated, and agent37 can't drop keys, so it refuses to start once its copier
+   loses access. Deliver env over the relay link at each start.
+7. **A `kind` on Values' linked fields** (integration, S). roll apps' branch environments drop every
+   linked variable, failing closed, because a linked field doesn't say which resource it came from.
+   With a `kind`, they'd drop only Postgres and Redis.
+8. **Test-infrastructure leftovers** (S):
+   - `scripts/agents-e2e.mjs` still picks a port and releases it before rolld binds (roll MCP owns
+     `test-mcp-sweep.sh`'s);
+   - agent-host's `pi_compaction` fails in the shared gate package set, because search's crates turn
+     on serde_json's `float_roundtrip` through rolld.
+9. **A local agent outside Lambda** (UX, S–M): the Lambda extension's surface as a sidecar.
+10. **The root of trust beyond AWS KMS, and FIPS** (L; the user's call).
+
+Other threads, from the #603 review: roll apps' renewal and restart fixes (H1–H4, M1) in
+`feature/roll-apps-closed-renewal`; search's sealing without a key (item 5) in
+`fix/search-security-1120`.
+
+**State, 2026-11-22 05:05.** Every item of the thirty-fourth review that roll secrets owns is on main, with batch 7 (members) and its follow-ups:
+- **Items 1 and 3: landed**, #621 (658cecf0e). apps' reveal and shell read roll secrets as the asker
+  (any `from_secrets` key that doesn't resolve for them is a 403, no partial answer; a bound `roll://`
+  needs reveal on its own folder), and an agents sandbox re-checks its copier's reach on each start,
+  starting without the copied values when refused.
+- **Item 2: landed**, #585 (a2e1d8b2f), after an independent review (1 high, 5 medium, all fixed). A
+  workspace project's delete asks roll secrets first (403 unless a secrets admin; 409
+  `project_holds_secrets` until `?confirm=`). Its secrets are kept for a window (7 days by default,
+  `ROLL_SECRETS_DELETE_WINDOW_DAYS`), unreadable and recoverable (`POST …/recover`, `roll secrets
+  recover`, the dashboard's "Recently deleted"), then purged after a signed closing digest. ACME,
+  interception CAs, gateways and workload grants all stop at the delete, and members and homes come
+  back on recovery.
+- **Item 4: landed**, #628 (8a02a23b8). A binding names its placement (a header template or a query
+  parameter; untrusted bindings must), the filter swaps only there, and `proxy::Scrub` looks for the
+  swapped values (plain, base64, percent-encoded, across chunks) in the response. Responses are scrubbed
+  once previews' #630 wires `Scrub` into `roll-intercept`; until then rolld's adapter drops it.
+- **Item 5:**
+  - previews: done, #581 (4c575f044). The rules' pasted values, a preview's own variables and the
+    screenshot links' key are sealed. Without a key a pasted value is refused, and the signing key
+    lives in memory. An upgraded database keeps nothing in its file or WAL;
+  - search: `fix/search-security-1120` and #318;
+  - roll code: done, #627 (4af6bb3b5). Webhooks' and review apps' URLs are sealed, nothing is made
+    without `ROLL_SECRET_KEY`, and an upgraded database keeps no clear URL or secret.
+- **Item 6: designed**, in [members-v1-1.md](members-v1-1.md) (docs only, not built). Groups hold
+  viewer, developer or admin roles on projects (never owner), and roles add up, read in one query
+  with the session grant. SCIM `Groups` is opt-in per connection. A member's time-boxed elevation is
+  a roll-access `ELEVATE` approval with the two-person rule. It lapses at `until` with nothing to
+  revoke, and it never counts for deciding for others (reviews, accepts, approvers, members,
+  tokens, decoys). Its open decisions are D10–D18.
+- **Batch 6's follow-ups: landed**, #582 (32dd78392). A consumer's CAs end as soon as it loses a host;
+  `maker_unreachable` (403) when a placeholder's or a chosen reference's maker no longer reaches it;
+  a decoy planted from a session mails that person.
+- **The #432 decoy oracle:** fixed, #575 (8e16604f2). Compute images are pinned by digest, and each
+  image's pre-auth answers are learned from a compute of that image, ahead of time at start, so no
+  decoy login waits and none answers with bytes the compute wouldn't.
+- **Members (#501): landed** as 991d98225 (batch 7, 2026-11-21 22:06), carrying #445's design docs.
+  Projects now have members with four roles, session grants and invites, and what a member made runs
+  at their current rights, scoped to what it does.
+- **Item 8** (placeholders had no consumer on main): done. Previews' #535 (a06876bd1) swaps them in
+  `crates/roll-intercept`, shared with apps, and is checked end to end against a TLS echo host
+  (`scripts/preview-intercept.sh`). The echo step flips to expect a 502 once item 4's scrub lands.
+- **Found while gating: fixed**, #596 (518aa3188). rolld's test binaries raced each other for ports
+  (`free_port` only avoided repeats within one process; four gates hit it on 2026-11-21). rolld now
+  binds port 0 and writes its real addresses to `--addr-file`, and its tests read that file.
 
 **Ranked, 2026-11-21 03:40** (the thirty-fourth product review, cold, on main f9bb26c17, against
 Vault/OpenBao, Infisical, Doppler, AWS, 1Password, Akeyless, Bitwarden SM, GitGuardian, Google Secret
@@ -6024,7 +6291,7 @@ found them sound. What's left is at the edges:
    - the fix: answer as the asker (any `from_secrets` key that doesn't resolve for them is a 403), and
      a bound `roll://` variable needs reveal on its own folder.
 2. **Deleting a workspace project erases its secrets, history, encryption keys and audit at once**
-   (security and data loss, M):
+   (security and data loss, M; fixing in `fix/secrets-project-delete-window`):
    - workspace `delete` is enough: `on_delete` → `forget_project` deletes everything in one write;
    - no protected-environment confirm, no transit-key name, no recovery window, nothing audited;
    - the dashboard says "only the project and its canvas go";
@@ -6040,7 +6307,7 @@ found them sound. What's left is at the edges:
    them out on every start. The fix: store `{project, environment, by}` and resolve as the maker on
    each start.
 4. **A placeholder may ride in any header, and responses aren't scrubbed** (security, S; the
-   mechanism is confirmed, an echoing host isn't):
+   mechanism is confirmed, an echoing host isn't; fixing in `fix/secrets-placeholder-placement-scrub`):
    - a placement is required (the dashboard and CLI default to `Authorization: Bearer {}`), and
      untrusted bindings need one;
    - the proxy contract adds a bounded scrub of the swapped value (plain, base64, URL-encoded), as
@@ -6228,7 +6495,7 @@ work found). First what can be built now:
    for a product's kind), and resuming what a cut-off paused stays admin only.
 
 Waiting on another thread or on a merge:
-- **Batch 5:** #407, #430, #440; #277, #397, #432; #357, #330 (being levelled and gated); the strict
+- **Batch 5:** #407, #430, #440; #277, #397, #432; #357, #330 (landed 2026-11-20, 8b20ce290); the strict
   parse joins it.
 - **apps:**
   - the git login and `roll://` variables through #407, with the #399 stopgap on main;
@@ -6344,7 +6611,7 @@ cache waited out. Ranked now:
    combined tree gated on main c59fca59c with the live outside-databases check (`batch-3.txt`,
    `batch3-round.sh`). **Batch 3 landed** (2026-11-19 02:56–04:07, one lock turn): #132; #136 + #165;
    #173; #166; #144 (main cd65c5fcb = the gated tree plus #375), with roll redis's auth-bypass fix #375
-   ahead of it in the same turn. Batch 4 (preparing, 2026-11-19 04:15): today's
+   ahead of it in the same turn. Batch 4 (landed 2026-11-19 18:41; this was its plan at 04:15): today's
    PRs (#248 #262 #264 #274 #276 #277 #279 #281 #284 #290 #303 #304 #329 #330, the issuer work) and
    #86 (`batch-4-notes.txt`).
 3. **R2, cut off everything that reaches a folder** (#304): tokens through roll-access's bulk revoke,

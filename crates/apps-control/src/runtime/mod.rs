@@ -46,6 +46,9 @@ pub struct InstanceSpec {
     /// Other ports of the app a custom domain sends to (published as `port` is; never a closed
     /// instance's), each reached through [`Runtime::port_address`].
     pub ports: Vec<u16>,
+    /// `port` speaks UDP (`run.udp`): published over UDP too, reached through
+    /// [`Runtime::udp_address`].
+    pub udp: bool,
     pub cpu: f64,
     pub memory_mb: u32,
     /// The project's private network for this environment, and the names it answers to there.
@@ -205,6 +208,11 @@ pub trait Runtime: Send + Sync {
     async fn start(&self, name: &str, log: LogSink) -> anyhow::Result<Option<SocketAddr>>;
     /// Where a started instance answers on another of its ports ([`InstanceSpec::ports`]).
     async fn port_address(&self, _name: &str, _port: u16) -> Option<SocketAddr> {
+        None
+    }
+    /// Where a UDP service's instance takes its datagrams on this host (its port published over
+    /// UDP on loopback). None: not published so (a runtime without UDP).
+    async fn udp_address(&self, _name: &str, _port: u16) -> Option<SocketAddr> {
         None
     }
     /// The instance is up: it runs within its CPU limit from here.
@@ -410,6 +418,9 @@ pub struct BuildJob {
     pub layers: Option<String>,
     /// A closed environment's build: on this network, through its proxy, not the default one.
     pub egress: Option<BuildEgress>,
+    /// Not a preview's (Vercel's prioritized production builds): a builder with a queue lets it
+    /// past a burst of previews' builds.
+    pub priority: bool,
 }
 
 impl std::fmt::Debug for BuildJob {
@@ -539,6 +550,7 @@ mod tests {
             target: None,
             layers: None,
             egress: None,
+            priority: true,
         };
         assert_eq!(build_args(&job), ["NPM_TOKEN", "A"]);
         job.own_dockerfile = false;

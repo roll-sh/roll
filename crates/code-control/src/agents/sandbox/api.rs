@@ -50,6 +50,7 @@ pub fn sandbox_json(s: &SandboxRow) -> Value {
         "updated_at": s.updated_at,
         "last_active_at": s.last_active_at,
         "secrets_by": s.secrets_by,
+        "secrets_dropped": s.secrets_dropped,
     })
 }
 
@@ -120,8 +121,9 @@ async fn create(State(code): S, caller: Caller, ext: axum::http::Extensions, Pat
     let (id, machine_id, token) = (crate::new_id("sbx"), crate::new_id("mch"), new_machine_token());
     // `secrets: {project, environment}`: an environment of a project with one of the owner's
     // repos on its canvas (docs/secrets.md), under the env given explicitly. Managing the owner
-    // isn't enough: the caller must be able to reveal the environment themselves.
-    let mut secrets_by = None;
+    // isn't enough: the caller must be able to reveal the environment themselves, and roll secrets
+    // is asked again before each start whether they still may (only where they came from is kept).
+    let (mut secrets_by, mut secrets_from) = (None, None);
     if let Some(sec) = b.get("secrets").filter(|v| !v.is_null()) {
         let field = |k: &str| sec.get(k).and_then(Value::as_str).filter(|s| !s.is_empty());
         let (Some(project), Some(environment)) = (field("project"), field("environment")) else {
@@ -135,9 +137,15 @@ async fn create(State(code): S, caller: Caller, ext: axum::http::Extensions, Pat
         secrets_by = Some(revealed.by);
         let as_json: serde_json::Map<String, Value> = revealed.values.into_iter().map(|(k, v)| (k, Value::String(v))).collect();
         let values = parse_env(Some(&Value::Object(as_json))).map_err(|e| Error::Invalid(format!("the secrets of {environment} can't all go in a sandbox: {e}")))?;
+        let mut keys = Vec::new();
         for (k, v) in values {
-            env.entry(k).or_insert(v);
+            // The owner's own variable of that name wins, and isn't the copier's to take back.
+            if let std::collections::btree_map::Entry::Vacant(e) = env.entry(k.clone()) {
+                e.insert(v);
+                keys.push(k);
+            }
         }
+        secrets_from = Some(store::SecretsFrom { project: revealed.project, environment: environment.to_string(), keys });
     }
     let api_url = cfg.api_url.clone().unwrap_or_else(|| code.config.api_url.clone());
     let mut full = env;
@@ -161,6 +169,7 @@ async fn create(State(code): S, caller: Caller, ext: axum::http::Extensions, Pat
         sealed: &sealed,
         max: cfg.max_per_owner,
         secrets_by: secrets_by.as_deref(),
+        secrets_from: secrets_from.as_ref(),
     };
     let (s, m) = match store::create(code.db.sql(), &new)? {
         Created::Ok(s, m) => (s, m),

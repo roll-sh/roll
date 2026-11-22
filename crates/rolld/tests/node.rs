@@ -1,26 +1,17 @@
 //! rolld as a fleet node: products switched off with `ROLL_PRODUCTS` (no Docker needed without
 //! Postgres), and `ROLL_LOG_FORMAT=json` access lines (docs/cloud/README.md, "Logs").
 
+mod common;
+
 use serde_json::Value;
 use std::io::BufRead;
 use std::process::{Child, Command, Stdio};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-fn free_port() -> u16 {
-    static GIVEN: Mutex<Vec<u16>> = Mutex::new(Vec::new());
-    loop {
-        let port = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
-        let mut given = GIVEN.lock().unwrap();
-        if !given.contains(&port) {
-            given.push(port);
-            return port;
-        }
-    }
-}
-
 struct Rolld {
     child: Child,
+    started: common::Started,
     api: String,
     stdout: Arc<Mutex<Vec<String>>>,
 }
@@ -32,36 +23,14 @@ impl Drop for Rolld {
     }
 }
 
-/// rolld on free loopback ports with nothing on PATH (no `docker`), `env` on top.
-fn start(home: &std::path::Path, env: &[(&str, &str)]) -> (Rolld, u16) {
+/// rolld on loopback ports of its own with nothing on PATH (no `docker`), `env` on top, and
+/// where it listens.
+async fn start(home: &std::path::Path, env: &[(&str, &str)]) -> (Rolld, common::Addrs) {
     let empty = home.join("bin");
     std::fs::create_dir_all(&empty).unwrap();
-    let local = |p: u16| format!("127.0.0.1:{p}");
-    let (api, proxy) = (free_port(), free_port());
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_rolld"));
-    cmd.env_clear().env("PATH", &empty).env("RUST_LOG", "info").env("ROLL_HOME", home).env("ROLL_API", local(api)).env("ROLL_PROXY", local(proxy));
-    for var in [
-        "ROLL_REDIS",
-        "ROLL_REDIS_HTTP",
-        "ROLL_KAFKA",
-        "ROLL_S3",
-        "ROLL_STORAGE_API",
-        "ROLL_NOSQL_CQL",
-        "ROLL_NOSQL_CQL_SHARD_AWARE",
-        "ROLL_NOSQL_ALTERNATOR",
-        "ROLL_NOSQL_REST",
-        "ROLL_QUEUES_AMQP",
-        "ROLL_QUEUES_MANAGEMENT",
-        "ROLL_QUEUES_STOMP",
-        "ROLL_QUEUES_WEB_STOMP",
-        "ROLL_QUEUES_MQTT",
-        "ROLL_QUEUES_WEB_MQTT",
-        "ROLL_QUEUES_STREAM",
-        "ROLL_QUEUES_HTTP",
-        "ROLL_SEARCH_HTTP",
-    ] {
-        cmd.env(var, local(free_port()));
-    }
+    cmd.env_clear().env("PATH", &empty).env("RUST_LOG", "info").env("ROLL_HOME", home);
+    let started = common::on_any_port(&mut cmd, common::LISTENERS, home);
     cmd.envs(env.iter().copied()).stdout(Stdio::piped());
     let mut child = cmd.spawn().expect("rolld starts");
     let stdout = Arc::new(Mutex::new(Vec::new()));
@@ -71,7 +40,8 @@ fn start(home: &std::path::Path, env: &[(&str, &str)]) -> (Rolld, u16) {
             lines.lock().unwrap().push(l);
         }
     });
-    (Rolld { child, api: format!("http://127.0.0.1:{api}"), stdout }, proxy)
+    let addrs = started.addrs(&mut child).await;
+    (Rolld { child, started, api: addrs.url("api"), stdout }, addrs)
 }
 
 impl Rolld {
@@ -84,7 +54,7 @@ impl Rolld {
                 return r.json().await.unwrap();
             }
             assert!(started.elapsed() < Duration::from_secs(60), "rolld didn't answer");
-            assert!(self.child.try_wait().unwrap().is_none(), "rolld exited: {}", self.stdout.lock().unwrap().join("\n"));
+            assert!(self.child.try_wait().unwrap().is_none(), "rolld exited: {}\n{}", self.stdout.lock().unwrap().join("\n"), self.started.tail());
             tokio::time::sleep(Duration::from_millis(100)).await;
         }
     }
@@ -100,7 +70,7 @@ impl Rolld {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn every_product_but_postgres_runs_without_docker() {
     let home = tempfile::tempdir().unwrap();
-    let (mut rolld, proxy) = start(home.path(), &[("ROLL_PRODUCTS", "redis,streams,tasks,storage,nosql,queues,code,search")]);
+    let (mut rolld, addrs) = start(home.path(), &[("ROLL_PRODUCTS", "redis,streams,tasks,storage,nosql,queues,code,search")]).await;
     let http = reqwest::Client::new();
     let info = rolld.info(&http).await;
     assert_eq!(info["products"], serde_json::json!(["redis", "streams", "tasks", "storage", "nosql", "queues", "code", "search"]));
@@ -111,7 +81,7 @@ async fn every_product_but_postgres_runs_without_docker() {
     let (status, body) = rolld.get(&http, "/v1/projects").await;
     assert_eq!(status, 404);
     assert!(body.contains("postgres is off"), "{body}");
-    assert!(std::net::TcpStream::connect(("127.0.0.1", proxy)).is_err(), "the Postgres proxy's port isn't bound");
+    assert_eq!(addrs.get("proxy"), None, "the Postgres proxy doesn't listen");
 }
 
 /// JSON logs: every line is an object with `level`, `target` and `msg`; a request gets an access
@@ -120,7 +90,7 @@ async fn every_product_but_postgres_runs_without_docker() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn json_access_lines_have_the_route_and_no_secrets() {
     let home = tempfile::tempdir().unwrap();
-    let (mut rolld, _) = start(home.path(), &[("ROLL_PRODUCTS", "code"), ("ROLL_LOG_FORMAT", "json")]);
+    let (mut rolld, _) = start(home.path(), &[("ROLL_PRODUCTS", "code"), ("ROLL_LOG_FORMAT", "json")]).await;
     let http = reqwest::Client::new();
     rolld.info(&http).await;
     let r = http
@@ -207,7 +177,7 @@ async fn an_inference_endpoint_keyed_by_a_secret_follows_its_rotation() {
         ("ROLL_SECRET_KEY", "node-test-secret-key-0123456789abcdef"),
         ("ROLL_SEARCH_INFERENCE_ALLOW_PRIVATE", "true"),
     ];
-    let (mut rolld, _) = start(home.path(), &env);
+    let (mut rolld, _) = start(home.path(), &env).await;
     let http = reqwest::Client::new();
     rolld.info(&http).await;
     let api = rolld.api.clone();

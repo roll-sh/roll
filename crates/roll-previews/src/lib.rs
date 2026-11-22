@@ -393,6 +393,10 @@ pub struct Preview {
     /// (docs/previews.md, "Keys a preview never holds"). Never a value or a placeholder.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub intercepted: Option<Intercepted>,
+    /// How its head came up, step by step (Vercel's and Render's deploy steps): when converging
+    /// that head started, and when each step first finished.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timeline: Option<Timeline>,
     /// The screenshot's signed link (`(expiry, signature)`), for roll code's summary; never in
     /// API answers.
     #[serde(skip)]
@@ -428,6 +432,22 @@ pub struct Intercepted {
     /// placeholders, apps' `intercepted`), since those proxies came up.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub on_apps: Option<AppsIntercepted>,
+}
+
+/// A head's way up: `started_at`, then each step once, in order: `data` (its branches made or
+/// kept, masked), `setup` (seed, release, schema read), `deploy` (every service live), `checks`
+/// (health paths answered), `ready`. A new head starts a new one; a reset at the same head keeps it.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct Timeline {
+    pub head: String,
+    pub started_at: i64,
+    pub steps: Vec<TimelineStep>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct TimelineStep {
+    pub step: String,
+    pub at: i64,
 }
 
 /// roll apps' interception for a preview's `pv-` environments: requests filtered, placeholders

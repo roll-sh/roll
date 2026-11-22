@@ -117,7 +117,8 @@ narrows, so a token can carry it too (a CI token for every environment except pr
 
 ### Custom roles and groups
 
-Both are later, not v1:
+Neither is in v1. Groups are designed for v1.1 in [members-v1-1.md](members-v1-1.md), and
+custom roles come later:
 
 - **Custom roles** (Infisical Enterprise, Doppler): a role becomes a row of rules in roll-access,
   named per project or per server. The evaluation doesn't change: a membership names a role, and
@@ -176,7 +177,7 @@ canvas and gain `admin` on it. The operator's tokens keep today's meaning. See
   (`usr_…`), not a token. It is never listed in `/v1/access/tokens`, and it can't be revoked
   there: ending a session or removing a membership ends it.
 - An approval (`ask`) never applies to a session grant (`ask_otherwise: false`, and roles only
-  `allow`). A person asking for more is roll-access's access request, later ([Phasing](#phasing)).
+  `allow`). A person asking for more is an elevation (v1.1, [members-v1-1.md](members-v1-1.md)).
 
 ## What changes for each product
 
@@ -185,9 +186,9 @@ Each product does only what's listed. None of them reads a role.
 | product | v1 change |
 | --- | --- |
 | **workspace** | `Scope::Owner(user)` becomes `Scope::Member(user)`: lists and reads cover every project the person is a member of. The project routes go through the evaluator for sessions, so its catalogue rows decide (read, write, delete as in the role table). Placing a resource keeps permissions.md's rule: `write` on the project **and** `admin`, allowed outright, on the resource where it is now. For a person that means admin through another project that trusts it, or `Owners` saying it's theirs (their repo, their cluster). New: members, invites and homes ([Tables](#tables)). |
-| **secrets** | `OwnProjects` is deleted. A person's caller is `GrantGrants(session grant)`. `GrantGrants::sees(project)` answers whether any rule names the project, so a non-member's project stays a 404. `Within(token, own_projects)` becomes `Within(token, session grant)`. `maker_reaches` asks whether the maker can sign in and their session grant **now** allows what the made thing does on the project (an identity's or sync's action), instead of "owns it". Protected environments: `approvers` may name `role:admin` and `role:owner` beside principals, and an empty list stays "anyone with `admin` there". Approvals are counted **as they are when applied**, so an approver who was removed or demoted no longer counts. Reach (`…/reach`) lists the members whose role reveals the folder. |
+| **secrets** | `OwnProjects` is deleted. A person's caller is `GrantGrants(session grant)`. `GrantGrants::sees(project)` answers whether any rule names the project, so a non-member's project stays a 404. `Within(token, own_projects)` becomes `Within(token, session grant)`. `maker_reaches` asks whether the maker can sign in and their session grant **now** allows what the made thing does on the project (an identity's or sync's action), instead of "owns it". Protected environments: `approvers` may name `role:admin` and `role:owner` beside principals, and an empty list stays "anyone with `admin` there". Approvals are counted **as they are when applied**, so an approver who was removed or demoted no longer counts. Reach (`…/reach`) is to list the members whose role reveals the folder (not built yet: the thirty-fifth review's item 3 in docs/secrets.md's `## Next`). |
 | **code** | None in v1. Membership doesn't give access to a repo: roll code keeps its owners, orgs and tokens (`Product` routes, its own checks). Only trust changes: a project stands for a repo when `Owners` says the repo is one of the project's **owners'** (their roll code owner, or an org they manage), instead of the project creator's. |
-| **previews** | Previews' routes become member routes (v1.1). Their resolver already gives the environment `preview`. Previews get project secrets through `counts_for_repo` → `trusts`, which changes only as code's does. |
+| **previews** | Member routes (v1.1, built): `/v1/previews` is a person's route, roll-access knows a preview's project (`Resolvers::project_fn`) and that its environment, `preview`, is never protected (`protected_fn`, asked for a row's fixed environment too), so the catalogue's actions decide by role (viewer reads, developer reveals and writes, admin opens shells and manages rules). Previews drops a session's grant before its handlers, which see the person. Previews get project secrets through `counts_for_repo` → `trusts`, which changes only as code's does. |
 | **apps** | Apps' routes become member routes (v1.1). Apps already puts a new service on its project's canvas (`Tgt::Create` with `place: service`); that placement now also sets the service's home. Its resolver says `production` is protected. Production deploys are `deploy` (admin and owner only). Apps still adds no token or scope checks of its own. |
 | **search** | `/v1/search` stops scoping by `SignedIn` owner and goes through the evaluator (v1.1). A cluster's existing `owner` stays a source of trust (`Owners`). A cluster made in a project gets that project as its home. |
 | **storage** | None in v1. Storage's people are IAM users with console sessions (its own evaluator). A bucket on a project's canvas counts for the project's secrets only through its home. Mapping project roles onto IAM is later. |
@@ -341,7 +342,10 @@ homes(kind TEXT NOT NULL, ref TEXT NOT NULL, project_id TEXT NOT NULL,
       set_by TEXT NOT NULL, set_at INTEGER NOT NULL, PRIMARY KEY (kind, ref)) WITHOUT ROWID;
 ```
 
-Deleting a project deletes its members, invites and homes in the same write.
+Deleting a project ends its invites and keeps its members and homes apart (`deleted_members`,
+`deleted_homes`) in the same write, with the project itself (docs/workspace.md): nobody's grant
+names it while it's deleted, and restoring it (roll secrets' recovery window, docs/secrets.md)
+brings them back as they were.
 
 ## API and UI
 
@@ -426,16 +430,19 @@ Accepting an invite isn't a tool, because it's a person's.
 - the dashboard's Members tab and Invites page, the CLI, the MCP tools.
 
 **v1.1: the products that already know their project.** Apps, previews and search become member
-products.
+products. Previews is built (#524).
+
+**v1.1: groups, SCIM groups and time-boxed elevation** (design: [members-v1-1.md](members-v1-1.md)).
+Groups hold roles on projects, and roles add up. A company's provider keeps a group's members over
+SCIM. A member asks for a role on one project or environment for a few hours, and someone else
+approves it through roll-access's approvals.
 
 **Later:**
 
 - the other products, one at a time, as each places its creates and resolves its project;
-- groups, with SCIM groups;
 - custom roles;
 - time-boxed memberships (`expires_at` on a member, Infisical's temporary access);
-- people's access requests (a viewer asking to reveal one key for an hour, approved by a project
-  admin through roll-access's approvals, scoped to the project);
+- elevation to one folder or key, and approval chains in sequence;
 - project admins approving `ask` requests of their project's tokens;
 - storage roles mapped onto IAM.
 
