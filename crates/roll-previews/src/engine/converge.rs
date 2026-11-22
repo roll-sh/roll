@@ -648,10 +648,16 @@ impl Engine {
                 && r.trusted
                 && let Some(old) = svc.deployed.as_deref().filter(|d| *d != rev && !d.is_empty())
                 && !self.store.pinned(&r.id)?.iter().any(|p| p.service == spec.name && p.revision == old)
-                && let Some(live) = self.apps.live_build(&r.id, &spec.name).await
             {
                 let ran = if repo.starts_with("git:") { Some(old.to_string()) } else { self.source.git_commit(&repo, old).await.ok().flatten() };
-                if ran.as_deref() == Some(live.revision.as_str()) {
+                let live = self.apps.live_build(&r.id, &spec.name).await.filter(|l| ran.as_deref() == Some(l.revision.as_str()));
+                if live.is_none() {
+                    // Not kept (no URL of its own, or the new head is live already): its copies
+                    // of the data go, nothing would use them.
+                    let old = old.to_string();
+                    self.drop_pinned_data(&r.id, |d| d.revision == old).await?;
+                }
+                if let Some(live) = live {
                     // On its own copy of the data where one was kept: the same build again,
                     // taking no traffic, pointed at the copy (roll apps' rollback with variables).
                     // Else, or if that fails, the build itself, on the preview's data (its copies
