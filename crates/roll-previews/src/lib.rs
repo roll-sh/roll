@@ -727,6 +727,20 @@ impl PageA11y {
     }
 }
 
+/// Something that happened to a preview, for followers (`GET /v1/previews/events`, roll MCP's
+/// event feeds): `created`, `ready` (up after a push or its first deploy; never a sleeping one
+/// waking), `failed`, `visual_change` (a visual change waits for review, once a head) or `deleted`. Ids and kinds only: `data` holds the head.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct Event {
+    pub seq: i64,
+    pub at: i64,
+    pub kind: String,
+    pub project: String,
+    pub preview: String,
+    pub change: Option<String>,
+    pub data: serde_json::Value,
+}
+
 /// What a preview's service uses right now (Render's and Railway's metrics): cores of CPU and
 /// resident memory, against the memory it runs with. Only a running service has any.
 #[derive(Clone, Debug, PartialEq, Serialize, serde::Deserialize)]
@@ -1156,6 +1170,9 @@ pub struct Pinned {
     pub share_url: Option<String>,
     /// When it stopped being the latest.
     pub at: i64,
+    /// The data products it has its own copy of (as its head left them); the rest it shares with
+    /// the preview.
+    pub own_data: Vec<Kind>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]

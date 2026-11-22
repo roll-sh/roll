@@ -1,7 +1,7 @@
 //! A deleted workspace project's secrets (docs/secrets.md, "When a secret, an environment or the
 //! project goes"). The workspace asks first ([`Secrets::may_forget_project`]): a project that
-//! holds values, a protected environment (other than production as a project starts) or an
-//! encryption key goes only when a secrets admin confirms. Then what it issued is revoked and the rest is kept for a recovery window, read by
+//! holds values, a protected environment (other than production as a project starts), an
+//! encryption key, a registered resource or an audit sink goes only when a secrets admin confirms. Then what it issued is revoked and the rest is kept for a recovery window, read by
 //! nobody ([`Secrets::forget_project`]), and recoverable ([`Secrets::recover_project`]). After
 //! the window the sweeper closes the audit chain with a final row and a signed digest, lets the
 //! sinks have them, and purges every row; the project's data key and registries go once nothing
@@ -31,7 +31,7 @@ const DAY_MS: i64 = 86_400_000;
 /// A project's rows by `project_id`, gone at the purge (its registries wait for revocations:
 /// [`REGISTRIES`]).
 const DATA: &[&str] = &[
-    "secrets", "versions", "changes", "requests", "audit", "audit_heads", "required", "shares", "value_requests", "syncs", "audit_sinks", "notices", "identities", "identity_logins", "transit_keys", "oidc_issued", "placeholders", "key_hosts", "validity", "backup_schedules",
+    "secrets", "versions", "changes", "requests", "audit", "audit_heads", "required", "shares", "value_requests", "syncs", "audit_sinks", "notices", "identities", "identity_logins", "transit_keys", "oidc_issued", "placeholders", "key_hosts", "validity", "backup_schedules", "event_marks",
 ];
 
 /// Gone at the delete itself: links that hand something out to whoever holds them, and logins
@@ -48,12 +48,16 @@ pub(crate) fn live(col: &str) -> String {
     format!("NOT EXISTS (SELECT 1 FROM projects fp WHERE fp.project_id = {col} AND fp.forgotten_at IS NOT NULL)")
 }
 
-/// A deleted project in its recovery window (`GET /v1/secrets/deleted`).
+/// A deleted project, or a deleted environment of a project that isn't, in its recovery window
+/// (`GET /v1/secrets/deleted`).
 #[derive(Debug, Serialize)]
 pub struct Deleted {
     pub project: String,
-    /// Its workspace name when it went.
+    /// Its workspace name when it went (an environment's: its project's name now).
     pub name: String,
+    /// A deleted environment's slug (deleted_envs.rs); absent for a deleted project.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub environment: Option<String>,
     pub deleted_at: i64,
     pub deleted_by: String,
     /// When it's purged: recoverable until then.
@@ -69,7 +73,28 @@ struct Held {
     /// Certificate authorities, X.509 and SSH: their keys go too.
     cas: i64,
     identities: i64,
+    /// Its registered resources and audit sinks, as `3 GitHub Apps`: their credentials (an app's
+    /// private key, a cloud account's keys, a sink's token) go too.
+    registered: Vec<String>,
 }
+
+/// What [`Held`] counts besides values and keys, with how it's named: [`REGISTRIES`] but the CAs
+/// (counted as such) and their certificates, and the audit sinks.
+const REGISTERED: &[(&str, &str, &str)] = &[
+    ("rotators", "rotator", "rotators"),
+    ("saas_rotators", "SaaS rotator", "SaaS rotators"),
+    ("outside_dbs", "outside database", "outside databases"),
+    ("directories", "directory", "directories"),
+    ("snowflake_accounts", "Snowflake account", "Snowflake accounts"),
+    ("atlas_projects", "Atlas project", "Atlas projects"),
+    ("aws_users", "AWS user", "AWS users"),
+    ("aws_roles", "AWS role", "AWS roles"),
+    ("cloud_accounts", "cloud account", "cloud accounts"),
+    ("kubernetes_clusters", "Kubernetes cluster", "Kubernetes clusters"),
+    ("github_apps", "GitHub App", "GitHub Apps"),
+    ("gateways", "gateway", "gateways"),
+    ("audit_sinks", "audit sink", "audit sinks"),
+];
 
 impl Held {
     fn of(c: &code_sql::Conn<'_>, project: &str) -> code_sql::Result<Held> {
@@ -79,18 +104,26 @@ impl Held {
             // A protection someone set; not the one a new project's production starts with
             // (no approvals, no approvers), which every project has.
             protected: c.query(
-                "SELECT slug FROM environments WHERE project_id = ? AND protected = 1 AND NOT (slug = ? AND approvals = 0 AND approvers = '[]') ORDER BY position",
+                "SELECT slug FROM environments WHERE project_id = ? AND protected = 1 AND forgotten_at IS NULL AND NOT (slug = ? AND approvals = 0 AND approvers = '[]') ORDER BY position",
                 code_sql::params![project, crate::PRODUCTION],
                 |r| r.get(0),
             )?,
             keys: n("SELECT COUNT(*) FROM transit_keys WHERE project_id = ?")?,
             cas: n("SELECT COUNT(*) FROM cas WHERE project_id = ?")? + n("SELECT COUNT(*) FROM ssh_cas WHERE project_id = ?")?,
             identities: n("SELECT COUNT(*) FROM identities WHERE project_id = ?")?,
+            registered: REGISTERED
+                .iter()
+                .map(|(t, one, many)| Ok((n(&format!("SELECT COUNT(*) FROM {t} WHERE project_id = ?"))?, one, many)))
+                .collect::<code_sql::Result<Vec<_>>>()?
+                .into_iter()
+                .filter(|(k, _, _)| *k > 0)
+                .map(|(k, one, many)| format!("{k} {}", if k == 1 { one } else { many }))
+                .collect(),
         })
     }
 
     fn is_empty(&self) -> bool {
-        self.values == 0 && self.protected.is_empty() && self.keys == 0 && self.cas == 0 && self.identities == 0
+        self.values == 0 && self.protected.is_empty() && self.keys == 0 && self.cas == 0 && self.identities == 0 && self.registered.is_empty()
     }
 
     /// `3 secrets, the protected environment production and 1 encryption key`.
@@ -114,6 +147,7 @@ impl Held {
         if self.identities > 0 {
             parts.push(n(self.identities, "workload identity", "workload identities"));
         }
+        parts.extend(self.registered.iter().cloned());
         match parts.len() {
             0 | 1 => parts.concat(),
             _ => {
@@ -125,7 +159,7 @@ impl Held {
 }
 
 /// UTC to the minute, for summaries.
-fn utc(ms: i64) -> String {
+pub(crate) fn utc(ms: i64) -> String {
     let t = time::OffsetDateTime::from_unix_timestamp(ms.div_euclid(1000)).unwrap_or(time::OffsetDateTime::UNIX_EPOCH);
     format!("{:04}-{:02}-{:02} {:02}:{:02} UTC", t.year(), u8::from(t.month()), t.day(), t.hour(), t.minute())
 }
@@ -251,7 +285,8 @@ impl Secrets {
             c.execute("UPDATE decoys SET ended_at = ? WHERE project_id = ? AND ended_at IS NULL", params![now, project])?;
             if let Some(keys) = keys {
                 let summary = format!("the workspace project was deleted: what it issued is revoked, and its secrets, history and keys are kept unreadable until {}, then purged", utc(purge_at));
-                audit::record(c, keys, project, by, "project.delete", None, None, &[], &summary, now)?;
+                let event = crate::events::Event::new(crate::events::Kind::ProjectDeleted, serde_json::json!({ "purge_at": purge_at }));
+                audit::record_event(c, keys, project, by, "project.delete", None, None, &[], &summary, now, event)?;
             }
             Ok::<_, Error>((grants, consumers, gateways))
         })?;
@@ -321,7 +356,8 @@ impl Secrets {
         })
     }
 
-    /// The deleted projects in their window that `caller` may recover, soonest purged first.
+    /// The deleted projects and environments in their window that `caller` may recover, soonest
+    /// purged first.
     pub fn deleted_projects(&self, caller: &Caller) -> Result<Vec<Deleted>> {
         let rows: Vec<(String, i64, i64, Option<String>)> = self.db.read(|c| {
             c.query("SELECT project_id, forgotten_at, purge_at, forgotten_by FROM projects WHERE forgotten_at IS NOT NULL AND closed_at IS NULL AND purge_at IS NOT NULL ORDER BY purge_at, project_id", (), |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))
@@ -332,8 +368,10 @@ impl Secrets {
                 continue;
             }
             let name = self.workspace.deleted(&project).ok().flatten().map(|p| p.name).unwrap_or_else(|| project.clone());
-            out.push(Deleted { project, name, deleted_at, deleted_by: by.unwrap_or_default(), purge_at });
+            out.push(Deleted { project, name, environment: None, deleted_at, deleted_by: by.unwrap_or_default(), purge_at });
         }
+        out.extend(self.deleted_environments(caller)?);
+        out.sort_by_key(|d| d.purge_at);
         Ok(out)
     }
 
@@ -382,11 +420,11 @@ impl Secrets {
         };
         let now = self.db.now_ms()?;
         let summary = "recovered within its window: what it issued was revoked at the delete (dynamic leases are issued again, managed links get new credentials)";
-        self.db.write(|c| audit::record(c, self.keys()?, project, caller, "project.recover", None, None, &[], summary, now))?;
+        self.db.write(|c| audit::record_event(c, self.keys()?, project, caller, "project.recover", None, None, &[], summary, now, crate::events::Event::new(crate::events::Kind::ProjectRecovered, serde_json::json!({}))))?;
         // Managed links: one new credential each (their old ones were revoked at the delete).
         let managed: Vec<(String, String, String, String)> = self.db.read(|c| {
             c.query(
-                "SELECT e.slug, s.path, s.key, s.link_state FROM secrets s JOIN environments e ON e.id = s.env_id WHERE s.project_id = ? AND s.owner = '' AND s.link_state IS NOT NULL AND s.link LIKE '%\"mode\":\"managed\"%' ORDER BY e.position, s.path, s.key",
+                "SELECT e.slug, s.path, s.key, s.link_state FROM secrets s JOIN environments e ON e.id = s.env_id WHERE s.project_id = ? AND e.forgotten_at IS NULL AND s.owner = '' AND s.link_state IS NOT NULL AND s.link LIKE '%\"mode\":\"managed\"%' ORDER BY e.position, s.path, s.key",
                 [project],
                 |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
             )
@@ -413,6 +451,9 @@ impl Secrets {
     /// in one write that is the claim), then purged once every audit sink has both (or a day
     /// after), and their key and registries dropped once nothing they issued waits.
     pub(crate) fn sweep_deleted(&self) -> Result<()> {
+        if let Err(e) = self.sweep_deleted_envs() {
+            tracing::warn!("purging deleted environments failed: {e}");
+        }
         let now = self.db.now_ms()?;
         let due: Vec<String> = self.db.read(|c| c.query("SELECT project_id FROM projects WHERE forgotten_at IS NOT NULL AND closed_at IS NULL AND purge_at <= ? LIMIT 50", [now], |r| r.get(0)))?;
         if !due.is_empty()
@@ -427,7 +468,7 @@ impl Secrets {
                     let roll = Caller::consumer("roll:sweeper");
                     self.db.write(|c| {
                         if c.execute("UPDATE projects SET forgotten_at = NULL, purge_at = NULL, forgotten_by = NULL WHERE project_id = ? AND forgotten_at IS NOT NULL AND closed_at IS NULL", [&project])? == 1 {
-                            audit::record(c, mac, &project, &roll, "project.recover", None, None, &[], "recovered: its workspace project was back", now)?;
+                            audit::record_event(c, mac, &project, &roll, "project.recover", None, None, &[], "recovered: its workspace project was back", now, crate::events::Event::new(crate::events::Kind::ProjectRecovered, serde_json::json!({})))?;
                         }
                         Ok::<_, Error>(())
                     })?;

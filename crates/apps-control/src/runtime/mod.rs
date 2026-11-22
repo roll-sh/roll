@@ -201,6 +201,11 @@ pub trait Runtime: Send + Sync {
     async fn remote_digest(&self, image: &str, login: Option<&RegistryLogin>) -> anyhow::Result<String> {
         crate::registry::Registry::new(None)?.digest(image, login).await
     }
+    /// A pinned image's cosign signature verified with one of `keys` (PEM public keys) from its
+    /// registry ([`crate::registry::Registry::verify_cosign`]): which key, or why none.
+    async fn verify_signature(&self, pinned: &str, keys: &[String], login: Option<&RegistryLogin>) -> anyhow::Result<usize> {
+        crate::registry::Registry::new(None)?.verify_cosign(pinned, keys, login).await
+    }
     /// Make the instance, ready to start; nothing runs yet.
     async fn create(&self, spec: &InstanceSpec) -> anyhow::Result<()>;
     /// Start a created (or stopped) instance and say where its port answers. Its output goes
@@ -328,8 +333,9 @@ pub trait Runtime: Send + Sync {
     async fn ensure_peer(&self, _spec: &PeerSpec) -> anyhow::Result<()> {
         anyhow::bail!("this runtime can't run a private network")
     }
-    /// A private network's peer and forwarders gone (`name` is [`PeerSpec::name`]).
-    async fn remove_peer(&self, _name: &str) {}
+    /// A private network's peer and forwarders gone (`name` is [`PeerSpec::name`]; they're
+    /// found by the environment's labels, never by a name another environment's could hold).
+    async fn remove_peer(&self, _name: &str, _service: &str, _env: &str) {}
     /// Remove a volume (an environment's teardown).
     async fn remove_volume(&self, name: &str);
     /// The files under `dir` in `image`, as a tar stream (a static site's, to serve without an
@@ -372,6 +378,11 @@ pub trait Runtime: Send + Sync {
     async fn exec_output(&self, _name: &str, _command: &str, _timeout: std::time::Duration, _max: usize) -> anyhow::Result<ExecOutput> {
         anyhow::bail!("this runtime can't run a command in a container")
     }
+    /// A connection to `port` inside a running instance (any port, any network: its own
+    /// namespace's loopback), as a byte stream.
+    async fn dial(&self, _name: &str, _port: u16) -> anyhow::Result<Box<dyn ShellStream>> {
+        anyhow::bail!("this runtime can't reach an instance's other ports")
+    }
     async fn resize_shell(&self, _shell: &str, _cols: u16, _rows: u16) -> anyhow::Result<()> {
         Ok(())
     }
@@ -383,6 +394,12 @@ impl<T: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send> ShellStream
 
 /// What a private network's peer runs ([`crate::peering`]).
 pub mod peering_image {
+    /// Tailscale's own image, pinned: `tailscaled` in userspace (no capabilities, no tun) with a
+    /// SOCKS5 server the forwarders connect through.
+    pub const TAILSCALE: &str = "tailscale/tailscale@sha256:72c1e19e0aedca96b8533bbb0b4368564410ff20b17e53b804eb6c1f04a31be4";
+    /// Waits for its auth key (written into its tmpfs after it starts; `tailscale up` reads it
+    /// as `file:`), then runs the image's own entrypoint.
+    pub const TAILSCALE_SCRIPT: &str = "while [ ! -s /run/ts/key ]; do sleep 0.1; done; exec /usr/local/bin/containerboot";
     /// WireGuard's tools (`wg`, `ip`), pinned; its own init is never run (`--entrypoint sh`).
     pub const WIREGUARD: &str = "linuxserver/wireguard@sha256:10db56ad834f94541307d5dfdbe87370e26d155bb341a5bf65789f970f24ab5c";
     /// Waits for its config (written into its tmpfs after it starts), makes the interface, its
@@ -412,8 +429,11 @@ pub struct PeerSpec {
     /// A closed environment's: a network of the peer's own with a route out, for its endpoint
     /// (the closed network has none; its instances still reach only the routes' names).
     pub out_network: Option<String>,
-    /// `wg setconf`'s config (keys, peers). Never in `Debug`.
+    pub kind: crate::peering::PeerKind,
+    /// `wg setconf`'s config (keys, peers), or the Tailscale auth key. Never in `Debug`.
     pub config: String,
+    /// A Tailscale node's control server when it isn't Tailscale's.
+    pub login_server: Option<String>,
     /// The interface's addresses and the routes into the customer's network (CIDRs, checked).
     pub addresses: Vec<String>,
     pub routes: Vec<String>,
@@ -427,7 +447,7 @@ impl PeerSpec {
     pub fn digest(&self) -> String {
         use sha2::Digest;
         let mut h = sha2::Sha256::new();
-        for part in [&self.network, &format!("{:?}", self.out_network), &self.config, &self.addresses.join(","), &self.routes.join(","), &format!("{:?}", self.mtu), &format!("{:?}", self.forwards)] {
+        for part in [&format!("{:?} {:?}", self.kind, self.login_server), &self.network, &format!("{:?}", self.out_network), &self.config, &self.addresses.join(","), &self.routes.join(","), &format!("{:?}", self.mtu), &format!("{:?}", self.forwards)] {
             h.update(part.as_bytes());
             h.update([0]);
         }

@@ -17,10 +17,18 @@
 //! - pauses every SLM policy (`_roll.inherited`; `last_failure` says why): it doesn't run or
 //!   apply its retention until the branch puts the policy again.
 //! - deactivates every watch, as `_watcher/watch/{id}/_deactivate` does; activating one is the
-//!   branch owner's decision.
+//!   branch owner's decision. Its passwords and `Authorization` headers are sealed to the parent
+//!   (`xpack::watcher::http`), so they don't open on the branch until it gives them again.
 //! - records the connectors, so syncs that read a source with stored credentials stay paused
 //!   on the branch ([`inherited_connector`]): no job of theirs becomes due or starts there until
 //!   the branch puts the connector again or writes its configuration ([`adopt_connector`]).
+//!
+//! Inference endpoints come with the branch and keep working there, their sealed keys included: a
+//! branch is where people try changes on real data, `semantic_text` fields included. Nothing
+//! that updates the parent's key afterwards (a roll secret's `search-inference` sync names the
+//! parent's id) reaches the branch, so a rotated or deleted key lives on in the branch's copy
+//! until the branch's owner deletes the endpoint or the provider revokes the key (docs/secrets.md,
+//! "roll search's inference endpoints").
 //!
 //! Everything else that runs on a schedule (ILM and ISM, data stream lifecycle, transforms,
 //! rollups) works inside the branch's own indices and keeps running; the steps of theirs that

@@ -1181,11 +1181,17 @@ pub struct Alerts {
     /// some minutes running (Cloud Monitoring's metric alerts): `alert.metric`.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub metrics: Vec<MetricAlert>,
+    /// Unusual against its own past (Vercel Observability's anomaly alerts): the last hour
+    /// against the same hour of the week over the last four weeks (two at least), for requests
+    /// dropping, errors or p95 rising, where no fixed threshold would fire: `alert.anomaly`. Off by
+    /// default.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub anomaly: bool,
 }
 
 impl Default for Alerts {
     fn default() -> Self {
-        Alerts { memory_pct: 90, error_pct: 5, p95_ms: 0, capacity_pct: 10, log_match: None, log_count: 10, cpu_pct: 0, metrics: Vec::new() }
+        Alerts { memory_pct: 90, error_pct: 5, p95_ms: 0, capacity_pct: 10, log_match: None, log_count: 10, cpu_pct: 0, metrics: Vec::new(), anomaly: false }
     }
 }
 
@@ -3030,6 +3036,21 @@ pub struct Link {
     pub r#ref: String,
     pub prefix: String,
     pub vars: Vec<String>,
+    /// A search link's key: only these indices (patterns, `tenant-*`), and its access (`read`,
+    /// `append`; none: read and write documents).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub indices: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub access: Option<String>,
+}
+
+impl Link {
+    /// Its options as the store keeps them (roll secrets' link options: `names`, `permission`).
+    pub fn narrowed(mut self, options: &crate::integrations::LinkOptions) -> Link {
+        self.indices = options.get("names").and_then(|n| n.as_array()).map(|a| a.iter().filter_map(|v| v.as_str().map(str::to_string)).collect());
+        self.access = options.get("permission").and_then(|p| p.as_str()).map(str::to_string);
+        self
+    }
 }
 
 /// The environment a `roll://ENV[/folder…]/KEY` value names (roll secrets' references; its

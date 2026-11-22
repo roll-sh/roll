@@ -62,7 +62,7 @@ fn resolvers(p: Products<'_>, workspace: Arc<roll_workspace::Workspace>) -> Reso
     if let Some(code) = p.code {
         let c = code.clone();
         r.by_fn("default-branch", move |repo: &str| c.default_branch_of(repo));
-        for kind in ["change", "thread", "work"] {
+        for kind in ["change", "thread", "work", "document"] {
             let code = code.clone();
             r.by_fn(kind, move |id: &str| code.repo_of(kind, id));
         }
@@ -316,6 +316,82 @@ impl roll_access::sinks::SinkTransport for SinkPost {
             Ok((status, answer))
         })
     }
+
+    fn get(&self, url: String) -> futures::future::BoxFuture<'static, Result<(u16, Vec<u8>), String>> {
+        let client = self.client.clone();
+        let check = self.check(&url);
+        Box::pin(async move {
+            check.map_err(|_| "connection_refused".to_string())?;
+            let category = |e: &reqwest::Error| if e.is_timeout() { "timeout" } else { "connection_refused" };
+            let mut resp = client.get(&url).header("accept", "application/json").send().await.map_err(|e| category(&e).to_string())?;
+            let status = resp.status().as_u16();
+            let mut answer = Vec::new();
+            while answer.len() < 16 << 10 {
+                match resp.chunk().await {
+                    Ok(Some(c)) => answer.extend_from_slice(&c[..c.len().min((16 << 10) - answer.len())]),
+                    _ => break,
+                }
+            }
+            Ok((status, answer))
+        })
+    }
+}
+
+/// The operator's MCP inspector (roll_mcp::Inspector; docs/mcp.md, "Inspector"):
+/// `ROLL_MCP_INSPECTOR_URL` is POSTed each tool call (`{"phase": "call", …}`) and its result
+/// (`{"phase": "result", …}`) and answers `{"action": "allow" | "block" | "note", "reason"?}`, with
+/// `Authorization: Bearer $ROLL_MCP_INSPECTOR_TOKEN` when set. The operator's own endpoint, so it
+/// may be on a private network, but never followed through a redirect, and at most 64 KiB of its
+/// answer read. One that doesn't answer in `ROLL_MCP_INSPECTOR_TIMEOUT_MS` (3,000 by default) or
+/// answers otherwise blocks, unless `ROLL_MCP_INSPECTOR_FAIL=open`.
+pub fn mcp_inspector() -> Option<Arc<dyn roll_mcp::Inspector>> {
+    let url = std::env::var("ROLL_MCP_INSPECTOR_URL").ok().filter(|u| u.starts_with("https://") || u.starts_with("http://"))?;
+    let timeout = std::env::var("ROLL_MCP_INSPECTOR_TIMEOUT_MS").ok().and_then(|v| v.parse::<u64>().ok()).unwrap_or(3_000).clamp(100, 30_000);
+    let client = reqwest::Client::builder().redirect(reqwest::redirect::Policy::none()).timeout(std::time::Duration::from_millis(timeout)).no_proxy().build().ok()?;
+    let token = std::env::var("ROLL_MCP_INSPECTOR_TOKEN").ok().filter(|t| !t.is_empty());
+    let fail_open = std::env::var("ROLL_MCP_INSPECTOR_FAIL").is_ok_and(|v| v.trim() == "open");
+    tracing::info!(fail_open, "MCP tool calls and results go past the operator's inspector");
+    Some(Arc::new(HttpInspector { client, url, token, fail_open }))
+}
+
+struct HttpInspector {
+    client: reqwest::Client,
+    url: String,
+    token: Option<String>,
+    fail_open: bool,
+}
+
+impl roll_mcp::Inspector for HttpInspector {
+    fn inspect(&self, look: serde_json::Value) -> std::pin::Pin<Box<dyn std::future::Future<Output = roll_mcp::Verdict> + Send>> {
+        let (client, url, token, fail_open) = (self.client.clone(), self.url.clone(), self.token.clone(), self.fail_open);
+        Box::pin(async move {
+            let failed = |why: &str| if fail_open { roll_mcp::Verdict::Allow } else { roll_mcp::Verdict::Block(format!("the inspector {why}")) };
+            let mut req = client.post(&url).json(&look);
+            if let Some(t) = &token {
+                req = req.bearer_auth(t);
+            }
+            let Ok(mut resp) = req.send().await else { return failed("didn't answer") };
+            if !resp.status().is_success() {
+                return failed("answered an error");
+            }
+            let mut body = Vec::new();
+            while body.len() < 64 << 10 {
+                match resp.chunk().await {
+                    Ok(Some(c)) => body.extend_from_slice(&c),
+                    Ok(None) => break,
+                    Err(_) => return failed("didn't answer"),
+                }
+            }
+            let Ok(answer) = serde_json::from_slice::<serde_json::Value>(&body) else { return failed("answered something else") };
+            let reason = answer["reason"].as_str().unwrap_or("").chars().filter(|c| !c.is_control()).take(300).collect::<String>();
+            match answer["action"].as_str() {
+                Some("allow") => roll_mcp::Verdict::Allow,
+                Some("block") => roll_mcp::Verdict::Block(if reason.is_empty() { "no reason given".into() } else { reason }),
+                Some("note") if !reason.is_empty() => roll_mcp::Verdict::Note(reason),
+                _ => failed("answered something else"),
+            }
+        })
+    }
 }
 
 /// Approvals in chat: roll code's chat ops post and edit the cards, and send presses back to
@@ -407,6 +483,19 @@ impl roll_access::ApprovalChat for ChatCards {
 }
 
 /// roll code's MCP tools, fronted by `/v1/mcp` under product-prefixed names (`code_…`, `agents_…`).
+/// roll-access's answer for roll code's searches across repos: whether the request's grant (and a
+/// person's session grant beside it) may read a repo, resolved as the gate's list filter resolves
+/// each item (`Access::resource` with the product as the kind: the repo's workspace projects too).
+pub struct CodeReach(pub Arc<Access>);
+
+impl code_control::GrantReach for CodeReach {
+    fn reads(&self, ext: &axum::http::Extensions, repo: &str) -> bool {
+        let r = self.0.resource("code", "code", repo);
+        let ok = |g: &roll_auth::Grant| g.allows(&r, roll_auth::scope::Action::Read) == roll_auth::scope::Outcome::Allow;
+        roll_auth::Grant::on(ext).is_none_or(ok) && roll_auth::SessionGrant::on(ext).is_none_or(ok)
+    }
+}
+
 pub struct CodeTools;
 
 /// roll code's tool name → the roll-wide one.
@@ -416,6 +505,8 @@ fn rename(name: &str) -> String {
     }
     match name {
         "search_code" => "code_search".into(),
+        // ChatGPT's deep research and company knowledge ask for these two names exactly.
+        "search" | "fetch" => name.into(),
         n => format!("code_{n}"),
     }
 }

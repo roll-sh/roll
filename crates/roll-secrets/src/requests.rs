@@ -58,7 +58,14 @@ pub struct Request {
     /// with the approvals it has.
     pub gates: Vec<GateView>,
     pub applied_seq: Option<i64>,
+    /// What it does instead of changing keys: `delete_environment` (a protected environment's
+    /// delete, applied as [`Secrets::forget_environment`]).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub action: Option<String>,
 }
+
+/// A request that deletes its environment.
+pub(crate) const DELETE_ENVIRONMENT: &str = "delete_environment";
 
 #[derive(Debug, Serialize)]
 pub struct GateView {
@@ -107,9 +114,10 @@ struct RequestRow {
     items: String,
     reviews: String,
     applied_seq: Option<i64>,
+    action: Option<String>,
 }
 
-const COLUMNS: &str = "id, env_id, path, message, by, at, base_seq, state, ops, items, reviews, applied_seq";
+const COLUMNS: &str = "id, env_id, path, message, by, at, base_seq, state, ops, items, reviews, applied_seq, action";
 
 fn request_row(r: &code_sql::Row<'_>) -> code_sql::Result<RequestRow> {
     Ok(RequestRow {
@@ -124,6 +132,7 @@ fn request_row(r: &code_sql::Row<'_>) -> code_sql::Result<RequestRow> {
         items: r.get(9)?,
         reviews: r.get(10)?,
         applied_seq: r.get(11)?,
+        action: r.get(12)?,
     })
 }
 
@@ -153,11 +162,17 @@ fn view(c: &Conn<'_>, env: &EnvRow, r: RequestRow, st: &Standing) -> Result<Requ
         items: from_json(&r.items),
         reviews,
         applied_seq: r.applied_seq,
+        action: r.action,
     })
 }
 
-/// A request's gates, from the folders of the keys it changes.
+/// A request's gates, from the folders of the keys it changes (an environment's delete: every
+/// folder policy in it, since all its folders go).
 fn request_gates(c: &Conn<'_>, env: &EnvRow, r: &RequestRow) -> Result<Vec<crate::folder_policy::Gate>> {
+    if r.action.as_deref() == Some(DELETE_ENVIRONMENT) {
+        let policies: Vec<String> = crate::folder_policy::all(c, &env.id)?.into_iter().map(|p| p.path).collect();
+        return crate::folder_policy::gates(c, env, &policies.iter().map(String::as_str).collect::<Vec<_>>());
+    }
     let items: Vec<ItemDiff> = from_json(&r.items);
     let paths: Vec<&str> = items.iter().map(|i| i.path.as_str()).collect();
     crate::folder_policy::gates(c, env, &paths)
@@ -360,11 +375,12 @@ impl Secrets {
             }
             let base_seq: i64 = c.query_row("SELECT seq FROM projects WHERE project_id = ?", [project], |r| r.get(0))?;
             c.execute(
-                &format!("INSERT INTO requests ({COLUMNS}, project_id) VALUES (?, ?, ?, ?, ?, ?, ?, 'open', ?, ?, '[]', NULL, ?)"),
+                &format!("INSERT INTO requests ({COLUMNS}, project_id) VALUES (?, ?, ?, ?, ?, ?, ?, 'open', ?, ?, '[]', NULL, NULL, ?)"),
                 params![id, env.id, path, message, caller.principal, now, base_seq, json(&ops).into_bytes(), json(&diff), project],
             )?;
             let keys: Vec<String> = diff.iter().map(|d| d.key.clone()).collect();
-            audit::record(c, self.keys()?, project, caller, "request.open", Some(slug), Some(&path), &keys, &format!("opened {id}: {}", crate::write::summarize(&diff)), now)?;
+            let event = crate::events::Event::new(crate::events::Kind::RequestPending, serde_json::json!({ "request": id, "type": "change" }));
+            audit::record_event(c, self.keys()?, project, caller, "request.open", Some(slug), Some(&path), &keys, &format!("opened {id}: {}", crate::write::summarize(&diff)), now, event)?;
             // The approvers hear about it (delivered by the sweeper, never from here).
             let notify: Option<i64> = c.query_row("SELECT 1 FROM environments WHERE id = ? AND notify_url IS NOT NULL", [&env.id], |r| r.get(0)).optional()?;
             if notify.is_some() {
@@ -430,7 +446,15 @@ impl Secrets {
                 "open"
             };
             c.execute("UPDATE requests SET reviews = ?, state = ? WHERE id = ?", params![json(&reviews), state, id])?;
-            audit::record(c, self.keys()?, project, caller, &format!("request.{}", v.verdict), Some(slug), Some(&r.path), &[], &format!("{}d {id}", v.verdict.trim_end_matches('e')), now)?;
+            let (action, summary) = (format!("request.{}", v.verdict), format!("{}d {id}", v.verdict.trim_end_matches('e')));
+            // Decided once its state moves: an approval that leaves it waiting on more isn't.
+            match state {
+                "open" => audit::record(c, self.keys()?, project, caller, &action, Some(slug), Some(&r.path), &[], &summary, now)?,
+                _ => {
+                    let event = crate::events::Event::new(crate::events::Kind::RequestDecided, serde_json::json!({ "request": id, "type": "change", "state": state }));
+                    audit::record_event(c, self.keys()?, project, caller, &action, Some(slug), Some(&r.path), &[], &summary, now, event)?
+                }
+            }
             view(c, &env, load(c, &env, id)?, &st)
         })
     }
@@ -458,6 +482,9 @@ impl Secrets {
             "open" if bypass => {}
             "approved" | "open" => return Err(Error::Conflict("approval_required", format!("{id} doesn't have the approvals what it changes needs ({} so far)", approvals(&from_json::<Vec<Review>>(&r.reviews), &r.by)))),
             s => return Err(Error::Conflict("conflict", format!("{id} is {s}"))),
+        }
+        if r.action.as_deref() == Some(DELETE_ENVIRONMENT) {
+            return self.apply_env_delete(project, slug, r, bypass, &st, caller);
         }
         let ops: Vec<StoredOp> = serde_json::from_slice(&r.ops).map_err(|_| Error::Internal("a request's operations aren't JSON".into()))?;
         let mut items = Vec::with_capacity(ops.len());
@@ -532,13 +559,68 @@ impl Secrets {
                 return Err(Error::Conflict("conflict", format!("{id} is {}", r.state)));
             }
             c.execute("UPDATE requests SET state = 'closed' WHERE id = ?", [id])?;
-            audit::record(c, self.keys()?, project, caller, "request.close", Some(slug), Some(&r.path), &[], &format!("closed {id}"), now)?;
+            let event = crate::events::Event::new(crate::events::Kind::RequestDecided, serde_json::json!({ "request": id, "type": "change", "state": "closed" }));
+            audit::record_event(c, self.keys()?, project, caller, "request.close", Some(slug), Some(&r.path), &[], &format!("closed {id}"), now, event)?;
             view(c, &env, load(c, &env, id)?, &st)
         })
     }
 }
 
 impl Secrets {
+    /// A protected environment's delete, as a change request with its approvals (the confirm and
+    /// the checks are done): applied, it's kept for the window like any other delete.
+    pub(crate) fn request_env_delete(&self, project: &str, env: &EnvRow, caller: &Caller) -> Result<Request> {
+        let st = self.standing(project, &env.slug, None);
+        let id = names::new_id("req", 12);
+        let message = format!("delete the environment {}", env.slug);
+        let now = self.db.now_ms()?;
+        self.db.write(|c| {
+            let env = envs::by_slug(c, project, &env.slug)?;
+            let open: Option<String> = c.query_row("SELECT id FROM requests WHERE env_id = ? AND action = ? AND state IN ('open', 'approved')", params![env.id, DELETE_ENVIRONMENT], |r| r.get(0)).optional()?;
+            if let Some(open) = open {
+                return Err(Error::Conflict("conflict", format!("{open} already asks to delete {}", env.slug)));
+            }
+            let base_seq: i64 = c.query_row("SELECT seq FROM projects WHERE project_id = ?", [project], |r| r.get(0))?;
+            c.execute(
+                &format!("INSERT INTO requests ({COLUMNS}, project_id) VALUES (?, ?, '/', ?, ?, ?, ?, 'open', ?, '[]', '[]', NULL, ?, ?)"),
+                params![id, env.id, message, caller.principal, now, base_seq, "[]".as_bytes().to_vec(), DELETE_ENVIRONMENT, project],
+            )?;
+            audit::record(c, self.keys()?, project, caller, "request.open", Some(&env.slug), Some("/"), &[], &format!("opened {id}: delete the environment {}", env.slug), now)?;
+            let notify: Option<i64> = c.query_row("SELECT 1 FROM environments WHERE id = ? AND notify_url IS NOT NULL", [&env.id], |r| r.get(0)).optional()?;
+            if notify.is_some() {
+                let link = self.web_url.as_ref().map(|w| format!("{}/dashboard/projects/{project}/secrets?env={}", w.trim_end_matches('/'), env.slug));
+                crate::notices::queue(c, project, &env.id, &env.slug, &id, &caller.principal, &message, &[], link, now)?;
+            }
+            view(c, &env, load(c, &env, &id)?, &st)
+        })
+    }
+
+    /// Apply an approved request to delete its environment: the environment is kept for the
+    /// window, and the request marked applied in the same write.
+    fn apply_env_delete(&self, project: &str, slug: &str, r: RequestRow, bypass: bool, st: &Standing, caller: &Caller) -> Result<Request> {
+        caller.need(Action::Delete, &Scope::env(project, slug))?;
+        let env = self.db.read(|c| envs::by_slug(c, project, slug))?;
+        let id = r.id.clone();
+        let now = self.db.now_ms()?;
+        self.forget_environment(project, &env, caller, &|c| {
+            let current = load(c, &env, &id)?;
+            if current.state != r.state {
+                return Err(Error::Conflict("conflict", format!("{id} is {} now", current.state)));
+            }
+            let met_now = crate::folder_policy::satisfied(&request_gates(c, &env, &current)?, &from_json::<Vec<Review>>(&current.reviews), &current.by, st);
+            if !met_now && !bypass {
+                return Err(Error::Conflict("approval_required", format!("{id} doesn't have the approvals deleting {slug} needs")));
+            }
+            c.execute("UPDATE requests SET state = 'applied' WHERE id = ? AND state = ?", [id.as_str(), r.state.as_str()])?;
+            if bypass && !met_now {
+                audit::record(c, self.keys()?, project, caller, "approval.bypass", Some(slug), Some("/"), &[], &format!("applied {id} without approval"), now)?;
+            }
+            Ok(())
+        })?;
+        // The environment is deleted now: its request is read by id.
+        self.db.read(|c| view(c, &env, load(c, &env, &id)?, st))
+    }
+
     /// The project's members' roles now and, for a request being applied, which of its reviewers
     /// still count for each gate: the operator and tokens as recorded, a person while they're an
     /// admin account or their session still has admin where the gate is.

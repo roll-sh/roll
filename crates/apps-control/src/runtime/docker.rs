@@ -1043,7 +1043,9 @@ impl Runtime for Docker {
             let name = name.to_string();
             async move { docker(&["inspect", "-f", &format!("{{{{.State.Running}}}} {{{{index .Config.Labels \"{LABEL}.peer\"}}}}"), &name]).await.is_ok_and(|o| o.trim() == want) }
         };
-        if running(&spec.name, format!("true {digest}")).await && docker(&["exec", &spec.name, "test", "-s", "/run/wg/wg0.conf"]).await.is_ok() {
+        let tailscale = spec.kind == crate::peering::PeerKind::Tailscale;
+        let secret_file = if tailscale { "/run/ts/key" } else { "/run/wg/wg0.conf" };
+        if running(&spec.name, format!("true {digest}")).await && docker(&["exec", &spec.name, "test", "-s", secret_file]).await.is_ok() {
             let mut all = true;
             for f in &forwarders {
                 all &= running(f, format!("true {digest}")).await;
@@ -1052,7 +1054,7 @@ impl Runtime for Docker {
                 return Ok(());
             }
         }
-        self.remove_peer(&spec.name).await;
+        self.remove_peer(&spec.name, &spec.service, &spec.env).await;
         let labels = [format!("{LABEL}={}", spec.service), format!("{LABEL}.env={}", spec.env), format!("{LABEL}.role=peer"), format!("{LABEL}.peer={digest}")];
         let (addrs, routes, mtu) = (format!("ADDRS={}", spec.addresses.join(" ")), format!("ROUTES={}", spec.routes.join(" ")), format!("MTU={}", spec.mtu.map(|m| m.to_string()).unwrap_or_default()));
         let mut args: Vec<&str> = vec!["create", "--name", &spec.name, "--network", &spec.network];
@@ -1062,10 +1064,19 @@ impl Runtime for Docker {
         for l in &labels {
             args.extend(["--label", l]);
         }
-        // The tunnel in a namespace of its own: NET_ADMIN there and nothing else, no root
-        // filesystem to write, its config only in memory.
-        args.extend(["--cap-drop", "ALL", "--cap-add", "NET_ADMIN", "--security-opt", "no-new-privileges", "--read-only", "--tmpfs", "/run/wg:size=64k,mode=0700"]);
-        args.extend(["--memory", "64m", "--pids-limit", "64", "-e", &addrs, "-e", &routes, "-e", &mtu, "--entrypoint", "sh", super::peering_image::WIREGUARD, "-c", super::peering_image::SCRIPT]);
+        let (ts_args, ts_host) = (format!("TS_EXTRA_ARGS=--accept-routes --shields-up{}", spec.login_server.as_deref().map(|u| format!(" --login-server={u}")).unwrap_or_default()), format!("TS_HOSTNAME=roll-{}-{}", spec.service.trim_start_matches("svc_"), spec.env));
+        if tailscale {
+            // A Tailscale node in userspace: no capability at all, no tun, its key and state only
+            // in memory (an ephemeral node), routes reached through its SOCKS5 server.
+            args.extend(["--cap-drop", "ALL", "--security-opt", "no-new-privileges", "--read-only", "--tmpfs", "/run/ts:size=64k,mode=0700", "--tmpfs", "/tmp:size=16m", "--tmpfs", "/var/lib/tailscale:size=16m"]);
+            args.extend(["--memory", "128m", "--pids-limit", "128", "-e", "TS_AUTHKEY=file:/run/ts/key", "-e", "TS_USERSPACE=true", "-e", "TS_STATE_DIR=/var/lib/tailscale", "-e", "TS_SOCKS5_SERVER=127.0.0.1:1055", "-e", "TS_SOCKET=/tmp/tailscaled.sock", "-e", "TS_ACCEPT_DNS=false", "-e", &ts_host, "-e", &ts_args]);
+            args.extend(["--entrypoint", "sh", super::peering_image::TAILSCALE, "-c", super::peering_image::TAILSCALE_SCRIPT]);
+        } else {
+            // The tunnel in a namespace of its own: NET_ADMIN there and nothing else, no root
+            // filesystem to write, its config only in memory.
+            args.extend(["--cap-drop", "ALL", "--cap-add", "NET_ADMIN", "--security-opt", "no-new-privileges", "--read-only", "--tmpfs", "/run/wg:size=64k,mode=0700"]);
+            args.extend(["--memory", "64m", "--pids-limit", "64", "-e", &addrs, "-e", &routes, "-e", &mtu, "--entrypoint", "sh", super::peering_image::WIREGUARD, "-c", super::peering_image::SCRIPT]);
+        }
         docker_within(&args, Some(Duration::from_secs(300))).await.context("the private network's peer")?;
         if let Some(out) = &spec.out_network {
             self.ensure_network(out, &spec.service, false).await?;
@@ -1074,7 +1085,7 @@ impl Runtime for Docker {
         docker(&["start", &spec.name]).await?;
         // Its config through stdin into its tmpfs: never on disk, in argv or in an env.
         let mut child = Command::new("docker")
-            .args(["exec", "-i", &spec.name, "sh", "-c", "umask 077; cat > /run/wg/.c && mv /run/wg/.c /run/wg/wg0.conf"])
+            .args(["exec", "-i", &spec.name, "sh", "-c", if tailscale { "umask 077; cat > /run/ts/.k && mv /run/ts/.k /run/ts/key" } else { "umask 077; cat > /run/wg/.c && mv /run/wg/.c /run/wg/wg0.conf" }])
             .stdin(Stdio::piped())
             .stdout(Stdio::null())
             .stderr(Stdio::piped())
@@ -1087,21 +1098,33 @@ impl Runtime for Docker {
         }
         let out = tokio::time::timeout(Duration::from_secs(30), child.wait_with_output()).await.context("writing the peer's config")??;
         anyhow::ensure!(out.status.success(), "the peer's config wasn't written");
-        // Up once its interface is (or it says why it stopped).
+        // Up once its interface is, or (Tailscale) once it has its tailnet address; else it says
+        // why it stopped.
         let began = std::time::Instant::now();
+        let within = Duration::from_secs(if tailscale { 60 } else { 15 });
         loop {
-            if docker(&["exec", &spec.name, "ip", "link", "show", "wg0", "up"]).await.is_ok_and(|o| !o.trim().is_empty()) {
+            let up = match tailscale {
+                // (Its daemon's socket is in its tmpfs: the CLI's default isn't writable there.)
+                true => docker(&["exec", &spec.name, "tailscale", "--socket=/tmp/tailscaled.sock", "ip", "-4"]).await,
+                false => docker(&["exec", &spec.name, "ip", "link", "show", "wg0", "up"]).await,
+            };
+            if up.is_ok_and(|o| !o.trim().is_empty()) {
                 break;
             }
-            if !running(&spec.name, format!("true {digest}")).await || began.elapsed() > Duration::from_secs(15) {
+            if !running(&spec.name, format!("true {digest}")).await || began.elapsed() > within {
                 let why = docker_logs_tail(&spec.name).await;
-                self.remove_peer(&spec.name).await;
+                self.remove_peer(&spec.name, &spec.service, &spec.env).await;
                 anyhow::bail!("the private network's peer didn't come up: {why}");
             }
             tokio::time::sleep(Duration::from_millis(100)).await;
         }
         for ((_, port, target), name) in spec.forwards.iter().zip(&forwarders) {
-            let (listen, connect, net) = (format!("TCP-LISTEN:{port},fork,reuseaddr"), format!("TCP:{target}"), format!("container:{}", spec.name));
+            // Tailscale's routes through its SOCKS5 server (a MagicDNS name resolved there too).
+            let connect = match tailscale {
+                true => format!("SOCKS5-CONNECT:127.0.0.1:1055:{target}"),
+                false => format!("TCP:{target}"),
+            };
+            let (listen, net) = (format!("TCP-LISTEN:{port},fork,reuseaddr"), format!("container:{}", spec.name));
             let mut args: Vec<&str> = vec!["run", "-d", "--name", name, "--network", &net];
             for l in &labels {
                 args.extend(["--label", l]);
@@ -1112,13 +1135,15 @@ impl Runtime for Docker {
         Ok(())
     }
 
-    async fn remove_peer(&self, name: &str) {
+    async fn remove_peer(&self, name: &str, service: &str, env: &str) {
         if !name.starts_with(super::PREFIX) {
             return;
         }
-        let Ok(listed) = docker(&["ps", "-a", "--filter", &format!("name={name}"), "--format", "{{.Names}}"]).await else { return };
-        // The peer and its forwarders (`<name>-<port>`), never another name holding it.
-        for n in listed.lines().map(str::trim).filter(|n| *n == name || n.strip_prefix(name).and_then(|r| r.strip_prefix('-')).is_some_and(|p| !p.is_empty() && p.chars().all(|c| c.is_ascii_digit()))) {
+        // The environment's peer and forwarders, by its labels (a name prefix would take
+        // `staging-2`'s along with `staging`'s).
+        let (s, e, r) = (format!("label={LABEL}={service}"), format!("label={LABEL}.env={env}"), format!("label={LABEL}.role=peer"));
+        let Ok(listed) = docker(&["ps", "-a", "--filter", &s, "--filter", &e, "--filter", &r, "--format", "{{.Names}}"]).await else { return };
+        for n in listed.lines().map(str::trim).filter(|n| !n.is_empty()) {
             let _ = docker(&["rm", "-f", n]).await;
         }
         // A closed environment's peer's way out goes with it.
@@ -1153,6 +1178,46 @@ impl Runtime for Docker {
         out.split_whitespace().next()?.parse::<u64>().ok().map(|kib| kib * 1024)
     }
 
+    async fn dial(&self, name: &str, port: u16) -> anyhow::Result<Box<dyn super::ShellStream>> {
+        anyhow::ensure!(name.starts_with(super::PREFIX), "{name} isn't a roll apps instance");
+        // A relay in the instance's own network namespace (whatever network it's on, closed
+        // ones too), its stdin and stdout one connection to the port on its loopback: the link
+        // relays' pinned socat, no capability, gone with the connection.
+        let target = self.network_container(name).await.unwrap_or_else(|| name.to_string());
+        let mut child = Command::new("docker")
+            .args(["run", "-i", "--rm", "--network", &format!("container:{target}"), "--cap-drop", "ALL", "--security-opt", "no-new-privileges", "--read-only", "--memory", "32m", "--pids-limit", "16", "--label", &format!("{LABEL}.role=dial")])
+            .args([super::links::IMAGE, "-", &format!("TCP:127.0.0.1:{port}")])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .kill_on_drop(true)
+            .spawn()
+            .context("running the relay")?;
+        let (stdin, stdout) = (child.stdin.take().context("no stdin")?, child.stdout.take().context("no stdout")?);
+        // The child lives as long as the stream (dropping the stream ends it).
+        struct Dialed {
+            io: tokio::io::Join<tokio::process::ChildStdout, tokio::process::ChildStdin>,
+            _child: tokio::process::Child,
+        }
+        impl tokio::io::AsyncRead for Dialed {
+            fn poll_read(mut self: std::pin::Pin<&mut Self>, cx: &mut std::task::Context<'_>, buf: &mut tokio::io::ReadBuf<'_>) -> std::task::Poll<std::io::Result<()>> {
+                std::pin::Pin::new(&mut self.io).poll_read(cx, buf)
+            }
+        }
+        impl tokio::io::AsyncWrite for Dialed {
+            fn poll_write(mut self: std::pin::Pin<&mut Self>, cx: &mut std::task::Context<'_>, buf: &[u8]) -> std::task::Poll<std::io::Result<usize>> {
+                std::pin::Pin::new(&mut self.io).poll_write(cx, buf)
+            }
+            fn poll_flush(mut self: std::pin::Pin<&mut Self>, cx: &mut std::task::Context<'_>) -> std::task::Poll<std::io::Result<()>> {
+                std::pin::Pin::new(&mut self.io).poll_flush(cx)
+            }
+            fn poll_shutdown(mut self: std::pin::Pin<&mut Self>, cx: &mut std::task::Context<'_>) -> std::task::Poll<std::io::Result<()>> {
+                std::pin::Pin::new(&mut self.io).poll_shutdown(cx)
+            }
+        }
+        Ok(Box::new(Dialed { io: tokio::io::join(stdout, stdin), _child: child }))
+    }
+
     async fn exec_output(&self, name: &str, command: &str, timeout: Duration, max: usize) -> anyhow::Result<super::ExecOutput> {
         use tokio::io::AsyncReadExt;
         anyhow::ensure!(name.starts_with(super::PREFIX), "{name} isn't a roll apps instance");
@@ -1160,43 +1225,58 @@ impl Runtime for Docker {
         // here leaves the command running, and `timeout` kills only its own child. It runs in a
         // process group of its own (`setsid`, busybox's and util-linux's) that a watcher kills
         // whole (`kill -9 -<group>`, the one spelling both dash and busybox take); without
-        // `setsid`, just its shell. The command goes as `$0`, never spliced into the script.
+        // `setsid`, just its shell. The command comes on stdin (never in the host's process list or
+        // Docker's exec record) and runs as `$c`, never spliced into the script; it reads no stdin
+        // of its own.
         let secs = timeout.as_secs().max(1).to_string();
-        let wrap = r#"if command -v setsid >/dev/null 2>&1; then setsid sh -c "$0" & p=$!; setsid sh -c 'sleep "$0"; kill -9 -"$1"' "$1" "$p" >/dev/null 2>&1 & w=$!; else sh -c "$0" & p=$!; (sleep "$1"; kill -9 "$p") >/dev/null 2>&1 & w=$!; fi; wait "$p"; c=$?; kill -9 -"$w" 2>/dev/null || kill -9 "$w" 2>/dev/null; exit "$c""#;
+        let wrap = r#"c=$(cat); if command -v setsid >/dev/null 2>&1; then setsid sh -c "$c" </dev/null & p=$!; setsid sh -c 'sleep "$0"; kill -9 -"$1"' "$0" "$p" >/dev/null 2>&1 & w=$!; else sh -c "$c" </dev/null & p=$!; (sleep "$0"; kill -9 "$p") >/dev/null 2>&1 & w=$!; fi; wait "$p"; r=$?; kill -9 -"$w" 2>/dev/null || kill -9 "$w" 2>/dev/null; exit "$r""#;
         let mut child = Command::new("docker")
-            .args(["exec", name, "sh", "-c", wrap, command, &secs])
-            .stdin(Stdio::null())
+            .args(["exec", "-i", name, "sh", "-c", wrap, &secs])
+            .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .kill_on_drop(true)
             .spawn()
             .context("running docker exec")?;
-        let (mut out, mut err) = (child.stdout.take().context("no stdout")?, child.stderr.take().context("no stderr")?);
-        // Each stream read to its end (so the command never blocks on a full pipe), kept to `max`.
-        async fn read_kept(r: &mut (impl tokio::io::AsyncRead + Unpin), max: usize) -> (Vec<u8>, bool) {
-            let (mut kept, mut buf, mut over) = (Vec::new(), vec![0u8; 16 << 10], false);
-            while let Ok(n) = r.read(&mut buf).await {
-                if n == 0 {
-                    break;
+        {
+            use tokio::io::AsyncWriteExt;
+            let mut stdin = child.stdin.take().context("no stdin")?;
+            stdin.write_all(command.as_bytes()).await?;
+        }
+        let (out, err) = (child.stdout.take().context("no stdout")?, child.stderr.take().context("no stderr")?);
+        // Each stream read to its end (so the command never blocks on a full pipe), kept to `max`
+        // as it comes: what was read stays even if the streams never end (a process left holding
+        // them).
+        type Kept = std::sync::Arc<parking_lot::Mutex<(Vec<u8>, bool)>>;
+        fn read_kept(mut r: impl tokio::io::AsyncRead + Unpin + Send + 'static, max: usize, kept: Kept) -> tokio::task::JoinHandle<()> {
+            tokio::spawn(async move {
+                let mut buf = vec![0u8; 16 << 10];
+                while let Ok(n) = r.read(&mut buf).await {
+                    if n == 0 {
+                        break;
+                    }
+                    let mut k = kept.lock();
+                    let room = max.saturating_sub(k.0.len());
+                    k.0.extend_from_slice(&buf[..n.min(room)]);
+                    k.1 |= n > room;
                 }
-                let room = max.saturating_sub(kept.len());
-                kept.extend_from_slice(&buf[..n.min(room)]);
-                over |= n > room;
-            }
-            (kept, over)
+            })
         }
+        let (o, e): (Kept, Kept) = Default::default();
+        let (ro, re) = (read_kept(out, max, o.clone()), read_kept(err, max, e.clone()));
         let began = std::time::Instant::now();
-        let run = async {
-            let ((stdout, a), (stderr, b)) = tokio::join!(read_kept(&mut out, max), read_kept(&mut err, max));
-            let status = child.wait().await?;
-            // Killed at its timeout (in the container): no exit code of its own.
-            let code = status.code().filter(|_| began.elapsed() < timeout);
-            anyhow::Ok(super::ExecOutput { code, stdout, stderr, truncated: a || b })
+        let ended = tokio::time::timeout(timeout + Duration::from_secs(5), async {
+            let _ = tokio::join!(ro, re);
+            child.wait().await
+        })
+        .await;
+        // Killed at its timeout (in the container), or still holding its streams: no exit code.
+        let code = match ended {
+            Ok(Ok(status)) => status.code().filter(|_| began.elapsed() < timeout),
+            _ => None,
         };
-        match tokio::time::timeout(timeout + Duration::from_secs(5), run).await {
-            Ok(r) => r,
-            Err(_) => Ok(super::ExecOutput { code: None, ..Default::default() }),
-        }
+        let (o, e) = (std::mem::take(&mut *o.lock()), std::mem::take(&mut *e.lock()));
+        Ok(super::ExecOutput { code, stdout: o.0, stderr: e.0, truncated: o.1 || e.1 })
     }
 
     async fn copy_from(&self, name: &str, path: &str) -> anyhow::Result<super::VolumeStream> {

@@ -24,8 +24,13 @@ const CURSOR: &str = "a1:";
 struct Feed {
     name: &'static str,
     description: &'static str,
-    /// The tool for the feed's route: its rules, listing and lockdown are the type's.
+    /// The tool for the feed's route: its rules, listing and lockdown are the type's (roll's own,
+    /// or a fronted set's: roll code's).
     tool: &'static str,
+    /// The product whose route it reads (deliveries run where it does).
+    product: &'static str,
+    /// Arguments that fill the routes' path (`{owner}`, `{repo}`): required, never filters.
+    path: &'static [(&'static str, &'static str)],
     /// The feed's route, after a cursor (`{after}`).
     after: &'static str,
     /// The feed's route answering only its newest cursor (a client starting from now).
@@ -42,6 +47,8 @@ const FEEDS: &[Feed] = &[
         name: "apps.event",
         description: "Something happened to a service: a deploy going live or failing, a crash loop, a failed cron run or job, a memory, error, latency or capacity alert, a domain or a check, or an audit.* change to its settings. Filter by kinds (deploy.failed, or alert.* for a family), service id and environment.",
         tool: "apps_events",
+        product: "apps",
+        path: &[],
         after: "/v1/apps/events?limit=100&after=",
         latest: "/v1/apps/events?latest=1",
         filters: &[
@@ -62,9 +69,32 @@ const FEEDS: &[Feed] = &[
         },
     },
     Feed {
+        name: "previews.event",
+        description: "Something happened to a preview: created, ready (up after a push, never a sleeping one waking), failed, a visual change waiting for review, or deleted. Filter by kinds and project; only your projects' previews.",
+        tool: "previews_list",
+        product: "previews",
+        path: &[],
+        after: "/v1/previews/events?limit=100&after=",
+        latest: "/v1/previews/events?latest=1",
+        filters: &[("kinds", "kind", "Only these kinds (ready, failed, visual_change, created, deleted); all when left out"), ("project", "project", "Only this workspace project's")],
+        payload: || {
+            json!({ "type": "object", "properties": {
+                "seq": { "type": "integer" },
+                "at": { "type": "integer", "description": "Unix milliseconds" },
+                "kind": { "type": "string" },
+                "project": { "type": "string" },
+                "preview": { "type": "string", "description": "The preview's id: previews_get has its issues and URLs" },
+                "change": { "type": ["string", "null"] },
+                "data": { "type": "object", "description": "head: the commit it was built from" },
+            } })
+        },
+    },
+    Feed {
         name: "access.approval",
         description: "A person decided an approval this connection asked for (approved or denied): call the original tool again with approval once it's approved. Filter by kinds (approved, denied) and tool.",
         tool: "access_wait_approval",
+        product: "access",
+        path: &[],
         after: "/v1/access/approvals/decided?limit=100&after=",
         latest: "/v1/access/approvals/decided?latest=1",
         filters: &[("kinds", "state", "Only these outcomes (approved, denied); all when left out"), ("tool", "tool", "Only approvals of calls to this tool")],
@@ -84,6 +114,45 @@ const FEEDS: &[Feed] = &[
             } })
         },
     },
+    Feed {
+        name: "secrets.event",
+        description: "Something happened to a project's secrets: a secret leaked or a scan found one, a rotation or sync failed, a value request waiting or decided, a placeholder echoed or sent to the wrong place, production left unprotected, an environment or the project deleted or recovered. Never a value. Give the project; filter by kinds (secret.leaked, or request.* for a family) and environment.",
+        tool: "secrets_audit",
+        product: "secrets",
+        path: &[("project", "The project (prj_…)")],
+        after: "/v1/secrets/projects/{project}/events?limit=100&after=",
+        latest: "/v1/secrets/projects/{project}/events?latest=1",
+        filters: &[("kinds", "kind", "Only these kinds (secret.leaked, rotation.failed, or request.* for a family); all when left out"), ("environment", "environment", "Only this environment's")],
+        payload: || {
+            json!({ "type": "object", "properties": {
+                "seq": { "type": "integer" },
+                "at": { "type": "integer", "description": "Unix milliseconds" },
+                "kind": { "type": "string" },
+                "environment": { "type": ["string", "null"] },
+                "key": { "type": ["string", "null"] },
+                "data": { "type": "object", "description": "Names, ids, counts and reasons, with the actor; never a value" },
+            } })
+        },
+    },
+    Feed {
+        name: "code.landed",
+        description: "A change landed on a roll code repo (its default branch or another ref): the change, the commit and what it brought. Give the repo by owner and repo; filter by ref.",
+        tool: "code_list_refs",
+        product: "code",
+        path: &[("owner", "The repo's owner"), ("repo", "The repo's name")],
+        after: "/v1/code/repos/{owner}/{repo}/landings?limit=100&after=",
+        latest: "/v1/code/repos/{owner}/{repo}/landings?latest=1",
+        filters: &[("ref", "ref", "Only landings on this ref (refs/heads/main)")],
+        payload: || {
+            json!({ "type": "object", "properties": {
+                "seq": { "type": "integer" },
+                "at": { "type": "integer", "description": "Unix milliseconds" },
+                "kind": { "type": "string" },
+                "change": { "type": ["string", "null"], "description": "The change that landed (get_change)" },
+                "ref": { "type": "string" },
+            } })
+        },
+    },
 ];
 
 fn feed(name: &str) -> Option<&'static Feed> {
@@ -94,30 +163,57 @@ fn tool(f: &Feed) -> Option<&'static tools::Tool> {
     tools::all().iter().find(|t| t.name == f.tool)
 }
 
+/// Whether this connection has the feed's tool (roll's own, or a fronted set's it's offered).
+fn usable(ctx: &Ctx, f: &Feed) -> bool {
+    match tool(f) {
+        Some(t) => ctx.usable(t),
+        None => ctx.usable_tools().iter().any(|t| t["name"] == f.tool),
+    }
+}
+
+/// A subscription's feed as its arguments give it: the filter, and the routes with the path filled.
+struct Opened {
+    filter: Filter,
+    /// The route after a cursor (the cursor's number goes at its end).
+    after: String,
+    latest: String,
+}
+
+/// Check a subscription's arguments against its feed, and fill the routes' path from them.
+fn open(f: &Feed, args: &Value) -> Result<Opened, Refused> {
+    let filter = Filter::parse(f, args)?;
+    let (mut after, mut latest) = (f.after.to_string(), f.latest.to_string());
+    for (arg, _) in f.path {
+        let v = args[*arg].as_str().filter(|v| !v.is_empty() && v.len() <= 200).ok_or_else(|| invalid(format!("{arg} is required")))?;
+        let seg = percent_encoding::utf8_percent_encode(v, tools::SEGMENT).to_string();
+        after = after.replace(&format!("{{{arg}}}"), &seg);
+        latest = latest.replace(&format!("{{{arg}}}"), &seg);
+    }
+    Ok(Opened { filter, after, latest })
+}
+
 fn input_schema(f: &Feed) -> Value {
-    let properties: Map<String, Value> = f
-        .filters
-        .iter()
-        .map(|(arg, _, about)| {
-            let schema = if *arg == "kinds" { json!({ "type": "array", "items": { "type": "string" }, "maxItems": 30, "description": about }) } else { json!({ "type": "string", "description": about }) };
-            (arg.to_string(), schema)
-        })
-        .collect();
-    json!({ "type": "object", "properties": properties, "additionalProperties": false })
+    let mut properties: Map<String, Value> = f.path.iter().map(|(arg, about)| (arg.to_string(), json!({ "type": "string", "description": about }))).collect();
+    properties.extend(f.filters.iter().map(|(arg, _, about)| {
+        let schema = if *arg == "kinds" { json!({ "type": "array", "items": { "type": "string" }, "maxItems": 30, "description": about }) } else { json!({ "type": "string", "description": about }) };
+        (arg.to_string(), schema)
+    }));
+    let required: Vec<&str> = f.path.iter().map(|(arg, _)| *arg).collect();
+    json!({ "type": "object", "properties": properties, "required": required, "additionalProperties": false })
 }
 
 /// How this connection can have events: polled, and POSTed to a webhook where roll delivers them
 /// (a server with a sealing key) and the connection can be looked up later (a token or OAuth).
 fn delivery(ctx: &Ctx) -> Value {
     let hooks = subscriber(ctx).is_ok();
-    if hooks { json!(["poll", "webhook"]) } else { json!(["poll"]) }
+    if hooks { json!(["poll", "push", "webhook"]) } else { json!(["poll", "push"]) }
 }
 
 /// `events/list`: the types this connection may poll (its tool is listed for it).
 pub(crate) fn list(ctx: &Ctx) -> Value {
     let events: Vec<Value> = FEEDS
         .iter()
-        .filter(|f| tool(f).is_some_and(|t| ctx.usable(t)))
+        .filter(|f| usable(ctx, f))
         .map(|f| json!({ "name": f.name, "description": f.description, "delivery": delivery(ctx), "inputSchema": input_schema(f), "payloadSchema": (f.payload)() }))
         .collect();
     json!({ "events": events })
@@ -150,8 +246,8 @@ impl Filter {
             Value::Object(o) => o,
             _ => return Err(invalid("arguments is an object")),
         };
-        if let Some(k) = o.keys().find(|k| !f.filters.iter().any(|(arg, ..)| arg == k)) {
-            let known: Vec<&str> = f.filters.iter().map(|(arg, ..)| *arg).collect();
+        if let Some(k) = o.keys().find(|k| !f.filters.iter().any(|(arg, ..)| arg == k) && !f.path.iter().any(|(arg, _)| arg == k)) {
+            let known: Vec<&str> = f.path.iter().map(|(arg, _)| *arg).chain(f.filters.iter().map(|(arg, ..)| *arg)).collect();
             return Err(invalid(format!("no argument {k:?}: {}", known.join(", "))));
         }
         let mut out = Filter::none();
@@ -194,10 +290,11 @@ pub(crate) async fn poll(ctx: &Arc<Ctx>, params: &Value) -> Result<Value, Refuse
         return Err((-32023, format!("no event {name:?}: events/list says which there are"), json!({ "kind": "event" })));
     };
     // Its tool isn't this connection's (the token's rules, the URL's toolsets, read-only).
-    if !tool(f).is_some_and(|t| ctx.usable(t)) {
+    if !usable(ctx, f) {
         return Err((-32024, "Forbidden".into(), json!({ "reason": format!("this connection can't use {}", f.tool) })));
     }
-    let filter = Filter::parse(f, &params["arguments"])?;
+    let opened = open(f, &params["arguments"])?;
+    let filter = &opened.filter;
     let max = match &params["maxEvents"] {
         Value::Null => 50,
         v => v.as_u64().filter(|n| (1..=MAX_EVENTS as u64).contains(n)).ok_or_else(|| invalid(format!("maxEvents is 1-{MAX_EVENTS}")))? as usize,
@@ -217,11 +314,11 @@ pub(crate) async fn poll(ctx: &Arc<Ctx>, params: &Value) -> Result<Value, Refuse
     // version's, made up): a fresh one, and a possible gap.
     let truncated = after == Some(-1);
     let Some(after) = after.filter(|n| *n >= 0) else {
-        let page = crate::read_route_as(ctx, f.latest, &what, audit, false).await.map_err(|e| refused(f, e))?;
+        let page = crate::read_route_as(ctx, &opened.latest, &what, audit, false).await.map_err(|e| refused(f, e))?;
         let next = page["next"].as_i64().unwrap_or(0);
         return Ok(json!({ "events": [], "cursor": format!("{CURSOR}{next}"), "truncated": truncated, "hasMore": false, "nextPollMs": POLL_MS }));
     };
-    let page = crate::read_route_as(ctx, &format!("{}{after}", f.after), &what, audit, false).await.map_err(|e| refused(f, e))?;
+    let page = crate::read_route_as(ctx, &format!("{}{after}", opened.after), &what, audit, false).await.map_err(|e| refused(f, e))?;
     let read = page["events"].as_array().cloned().unwrap_or_default();
     let outside = tool(f).map_or(&[][..], |t| t.outside);
     let (mut events, mut cursor, mut aged) = (Vec::new(), after, false);
@@ -274,7 +371,11 @@ async fn blocking<T: Send + 'static>(access: &Arc<roll_access::Access>, f: impl 
         Ok(Ok(v)) => Ok(v),
         Ok(Err(roll_access::Error::Forbidden(why))) => Err((-32024, "Forbidden".into(), json!({ "reason": why }))),
         Ok(Err(roll_access::Error::BadRequest(why))) => Err(invalid(why)),
-        Ok(Err(roll_access::Error::TooMany(why))) => Err((-32025, why, json!({ "limit": "subscriptions", "max": roll_access::event_subs::PER_GRANT }))),
+        Ok(Err(roll_access::Error::TooMany(why))) => {
+            // A connection's allowance, or its person's across all their connections.
+            let (scope, max) = if why.contains("person") { ("person", roll_access::event_subs::PER_PERSON) } else { ("connection", roll_access::event_subs::PER_GRANT) };
+            Err((-32025, why, json!({ "limit": "subscriptions", "scope": scope, "max": max })))
+        }
         Ok(Err(e)) => Err(internal(e)),
         Err(e) => Err(internal(e)),
     }
@@ -286,10 +387,10 @@ fn keyed<'a>(ctx: &Ctx, params: &'a Value) -> Result<(&'static Feed, Value, &'a 
     let Some(f) = feed(name) else {
         return Err((-32023, format!("no event {name:?}: events/list says which there are"), json!({ "kind": "event" })));
     };
-    if !tool(f).is_some_and(|t| ctx.usable(t)) {
+    if !usable(ctx, f) {
         return Err((-32024, "Forbidden".into(), json!({ "reason": format!("this connection can't use {}", f.tool) })));
     }
-    Filter::parse(f, &params["arguments"])?;
+    open(f, &params["arguments"])?;
     let args = if params["arguments"].is_null() { json!({}) } else { params["arguments"].clone() };
     let url = params["delivery"]["url"].as_str().filter(|u| !u.is_empty() && u.len() <= 2048).ok_or_else(|| invalid("delivery.url is the callback's https URL"))?;
     Ok((f, args, url))
@@ -320,7 +421,8 @@ pub(crate) async fn subscribe(ctx: &Arc<Ctx>, params: &Value) -> Result<Value, R
     // Its grant may have them (not one held to some addresses), and the feed answers it now.
     let g = grant.clone();
     blocking(&access, move |a| a.event_subscriber_ok(&g)).await?;
-    let probe = crate::read_route_as(ctx, f.latest, &format!("events/subscribe:{}", f.name), json!({ "name": f.name, "arguments": args }), true).await.map_err(|e| refused(f, e))?;
+    let latest = open(f, &args)?.latest;
+    let probe = crate::read_route_as(ctx, &latest, &format!("events/subscribe:{}", f.name), json!({ "name": f.name, "arguments": args }), true).await.map_err(|e| refused(f, e))?;
     let (g, u, n, a2) = (grant.clone(), url.to_string(), f.name, args.clone());
     let existing = blocking(&access, move |a| a.event_sub(&g, &u, n, &a2)).await?;
     // A new one starts where the client says, or now; a refresh keeps the cursor roll delivered to.
@@ -416,7 +518,8 @@ pub struct Delivered {
 /// cursor moving past what the callback took.
 pub async fn deliver(api: axum::Router, access: Arc<roll_access::Access>, products: &[String]) -> Delivered {
     use futures::StreamExt;
-    let names: Vec<&'static str> = FEEDS.iter().filter(|f| tool(f).is_some_and(|t| products.iter().any(|p| p == t.product))).map(|f| f.name).collect();
+    // Access and workspace run on every node (they're never in the list of products that are on).
+    let names: Vec<&'static str> = FEEDS.iter().filter(|f| matches!(f.product, "access" | "workspace") || products.iter().any(|p| p == f.product)).map(|f| f.name).collect();
     let a = access.clone();
     let Ok(Ok(claimed)) = tokio::task::spawn_blocking(move || a.claim_event_subs(CLAIM_MAX, &names)).await else { return Delivered::default() };
     let n = claimed.len();
@@ -449,8 +552,13 @@ async fn one(api: axum::Router, access: Arc<roll_access::Access>, c: roll_access
         out.ended = 1;
         return out;
     };
+    let Ok(opened) = open(f, &sub.arguments) else {
+        terminate(&access, c, -32026, "Unsupported", json!({ "feature": "inputSchema", "reason": "schema_changed" })).await;
+        out.ended = 1;
+        return out;
+    };
     let after = sub.cursor.strip_prefix(CURSOR).and_then(|n| n.parse::<i64>().ok()).unwrap_or(0);
-    let mut req = axum::http::Request::builder().method("GET").uri(format!("{}{after}", f.after)).body(axum::body::Body::empty()).expect("a feed route is a URI");
+    let mut req = axum::http::Request::builder().method("GET").uri(format!("{}{after}", opened.after)).body(axum::body::Body::empty()).expect("a feed route is a URI");
     req.extensions_mut().insert(roll_auth::ActAs(sub.grant_id.as_str().into()));
     let label: Arc<str> = format!("events/deliver:{}", f.name).into();
     req.extensions_mut().insert(roll_access::evaluate::McpCall { tool: label, args: Arc::new(json!({ "name": f.name, "arguments": sub.arguments })), ip: None, elicits: false, client: None, quiet: true, unattended: true });
@@ -474,7 +582,7 @@ async fn one(api: axum::Router, access: Arc<roll_access::Access>, c: roll_access
             return out;
         }
     }
-    let filter = Filter::parse(f, &sub.arguments).unwrap_or_else(|_| Filter::none());
+    let filter = opened.filter;
     let outside = tool(f).map_or(&[][..], |t| t.outside);
     // Lockdown as the subscription asked, or as the policy holds every connection now.
     let a = access.clone();
@@ -575,6 +683,192 @@ pub fn spawn_deliveries(api: axum::Router, access: Arc<roll_access::Access>, pro
 fn internal(e: impl std::fmt::Display) -> Refused {
     tracing::warn!(error = %e, "MCP events");
     (-32603, "internal error".into(), json!({}))
+}
+
+/// Event streams one token may hold open on a node.
+const STREAMS_PER_TOKEN: usize = 10;
+/// How often an open stream reads its feed (each read the caller's request, in the audit log).
+const STREAM_READ_EVERY: std::time::Duration = std::time::Duration::from_secs(15);
+/// The heartbeat a stream grants: what the client asks, within these (30 s if it doesn't say).
+const HEARTBEAT_MIN_MS: u64 = 15_000;
+const HEARTBEAT_MAX_MS: u64 = 120_000;
+/// How long a stream stays open: then roll closes it with its result, and the client reconnects
+/// with its cursor (a token's rules change, a node drains).
+const STREAM_FOR: std::time::Duration = std::time::Duration::from_secs(3600);
+
+/// What one read of a feed gave a subscription: its notifications, where it got to, whether more
+/// is waiting, and whether `maxAgeMs` skipped any.
+struct Read {
+    out: Vec<Value>,
+    cursor: i64,
+    more: bool,
+    aged: bool,
+}
+
+/// Read a feed after `after` as the caller (unattended: nothing asks a person) and turn what the
+/// filter keeps into event notifications, each with its cursor.
+async fn read_feed(ctx: &Arc<Ctx>, f: &'static Feed, route: &str, filter: &Filter, after: i64, floor: Option<i64>, meta: &Value) -> Result<Read, Refused> {
+    let audit = json!({ "name": f.name });
+    let page = crate::read_route_as(ctx, &format!("{route}{after}"), &format!("events/stream:{}", f.name), audit, true).await.map_err(|e| refused(f, e))?;
+    let events = page["events"].as_array().cloned().unwrap_or_default();
+    let more = events.len() >= PAGE;
+    let outside = tool(f).map_or(&[][..], |t| t.outside);
+    let (mut out, mut cursor, mut aged) = (Vec::new(), after, false);
+    for mut e in events {
+        cursor = e["seq"].as_i64().unwrap_or(cursor);
+        if floor.is_some_and(|fl| e["at"].as_i64().unwrap_or(0) < fl) {
+            aged = true;
+            continue;
+        }
+        if !filter.keeps(&e) {
+            continue;
+        }
+        if ctx.lockdown {
+            lockdown::withhold(&mut e);
+            lockdown::withhold_fields(&mut e, outside);
+        }
+        let at = e["at"].as_i64().unwrap_or(0);
+        out.push(json!({ "jsonrpc": "2.0", "method": "notifications/events/event", "params": {
+            "eventId": format!("{}:{cursor}", f.name), "name": f.name, "timestamp": iso8601(at), "data": e, "cursor": format!("{CURSOR}{cursor}"), "_meta": meta,
+        } }));
+    }
+    if !more {
+        cursor = page["next"].as_i64().unwrap_or(cursor).max(cursor);
+    }
+    Ok(Read { out, cursor, more, aged })
+}
+
+/// `events/stream` (push mode): one subscription's events on a stream of its own, while the
+/// client holds it. Checked before it opens (an error is the answer, no stream); then
+/// `notifications/events/active` (its cursor and heartbeat), each event as it's read (every 15
+/// seconds, as the caller: its token's rules decide each read, so a revoked one ends the stream with
+/// `notifications/events/terminated`), a heartbeat with the cursor when nothing else went for its
+/// interval, `notifications/events/error` when a read failed for a moment, and its result when roll
+/// closes it after an hour (the client reconnects with its cursor).
+pub(crate) async fn stream(ctx: Arc<Ctx>, msg: &Value) -> axum::response::Response {
+    use axum::response::IntoResponse;
+    use axum::response::sse::{Event, KeepAlive, Sse};
+    use futures::StreamExt;
+    let id = msg.get("id").cloned().unwrap_or(Value::Null);
+    let params = msg["params"].clone();
+    let fail = |(code, message, data): Refused| axum::Json(json!({ "jsonrpc": "2.0", "id": id, "error": { "code": code, "message": message, "data": data } })).into_response();
+    let name = params["name"].as_str().unwrap_or("");
+    let Some(f) = feed(name) else {
+        return fail((-32023, format!("no event {name:?}: events/list says which there are"), json!({ "kind": "event" })));
+    };
+    if !usable(&ctx, f) {
+        return fail((-32024, "Forbidden".into(), json!({ "reason": format!("this connection can't use {}", f.tool) })));
+    }
+    let Opened { filter, after: route, latest } = match open(f, &params["arguments"]) {
+        Ok(x) => x,
+        Err(e) => return fail(e),
+    };
+    let heartbeat = match &params["heartbeatMs"] {
+        Value::Null => 30_000,
+        v => match v.as_u64() {
+            Some(n) => n.clamp(HEARTBEAT_MIN_MS, HEARTBEAT_MAX_MS),
+            None => return fail(invalid("heartbeatMs is a number of milliseconds")),
+        },
+    };
+    let floor = match &params["maxAgeMs"] {
+        Value::Null => None,
+        v => match v.as_i64().filter(|n| *n >= 0) {
+            Some(n) => Some(crate::code_sql_now() - n),
+            None => return fail(invalid("maxAgeMs is a number of milliseconds")),
+        },
+    };
+    let who = match &ctx.principal {
+        crate::Principal::Grant(g) => g.id.to_string(),
+        crate::Principal::Operator => "operator".to_string(),
+    };
+    let Some(slot) = crate::ListenSlot::take(&format!("events:{who}"), STREAMS_PER_TOKEN) else {
+        return fail((-32025, "ResourceExhausted".into(), json!({ "limit": "streams", "max": STREAMS_PER_TOKEN })));
+    };
+    let meta = json!({ "io.modelcontextprotocol/subscriptionId": id });
+    // Where it starts: now (no cursor; `maxAgeMs` doesn't apply), the client's cursor, or now with a
+    // possible gap for one roll can't read. The first read happens before the stream opens, so a
+    // refusal is the answer and a gap is said on `active`.
+    let (start, mut truncated, floor) = match &params["cursor"] {
+        Value::String(c) if c.strip_prefix(CURSOR).is_some_and(|n| n.parse::<i64>().is_ok_and(|n| n >= 0)) => (c[CURSOR.len()..].parse::<i64>().ok(), false, floor),
+        Value::String(_) => (None, true, None),
+        _ => (None, false, None),
+    };
+    let (cursor, first) = match start {
+        Some(after) => match read_feed(&ctx, f, &route, &filter, after, floor, &meta).await {
+            Ok(r) => (r.cursor, Some(r)),
+            Err(e) => return fail(e),
+        },
+        None => match crate::read_route_as(&ctx, &latest, &format!("events/stream:{}", f.name), json!({ "name": f.name }), true).await {
+            Ok(page) => (page["next"].as_i64().unwrap_or(0), None),
+            Err(e) => return fail(refused(f, e)),
+        },
+    };
+    truncated |= first.as_ref().is_some_and(|r| r.aged);
+    let mut queue = vec![json!({ "jsonrpc": "2.0", "method": "notifications/events/active", "params": { "cursor": format!("{CURSOR}{cursor}"), "truncated": truncated, "heartbeatMs": heartbeat, "_meta": meta } })];
+    let more = first.as_ref().is_some_and(|r| r.more);
+    queue.extend(first.map(|r| r.out).unwrap_or_default());
+    struct State {
+        ctx: Arc<Ctx>,
+        filter: Filter,
+        route: String,
+        cursor: i64,
+        queue: std::collections::VecDeque<Value>,
+        more: bool,
+        sent: tokio::time::Instant,
+        done: bool,
+        _slot: crate::ListenSlot,
+    }
+    let deadline = tokio::time::Instant::now() + STREAM_FOR;
+    let state = State { ctx, filter, route, cursor, queue: queue.into(), more, sent: tokio::time::Instant::now(), done: false, _slot: slot };
+    let beat = std::time::Duration::from_millis(heartbeat);
+    let stream = futures::stream::unfold(state, move |mut s| {
+        let (meta, id) = (meta.clone(), id.clone());
+        async move {
+            loop {
+                if let Some(next) = s.queue.pop_front() {
+                    s.sent = tokio::time::Instant::now();
+                    return Some((next, s));
+                }
+                if s.done {
+                    return None;
+                }
+                if tokio::time::Instant::now() >= deadline {
+                    s.done = true;
+                    s.queue.push_back(json!({ "jsonrpc": "2.0", "id": id, "result": { "resultType": "complete", "_meta": meta } }));
+                    continue;
+                }
+                // A full page reads on at once; otherwise the next read waits its turn.
+                if !s.more {
+                    tokio::time::sleep(STREAM_READ_EVERY).await;
+                }
+                match read_feed(&s.ctx, f, &s.route, &s.filter, s.cursor, None, &meta).await {
+                    Ok(r) => {
+                        (s.cursor, s.more) = (r.cursor, r.more);
+                        s.queue.extend(r.out);
+                    }
+                    // The connection can't read it any more (its token's rules, a policy), or the
+                    // event type is gone: the subscription ends, and the stream with it.
+                    Err((code @ (-32024 | -32023), message, data)) => {
+                        s.done = true;
+                        s.queue.push_back(json!({ "jsonrpc": "2.0", "method": "notifications/events/terminated", "params": { "error": { "code": code, "message": message, "data": data }, "_meta": meta } }));
+                        s.queue.push_back(json!({ "jsonrpc": "2.0", "id": id, "result": { "resultType": "complete", "_meta": meta } }));
+                        continue;
+                    }
+                    Err(_) => {
+                        s.more = false;
+                        s.queue.push_back(json!({ "jsonrpc": "2.0", "method": "notifications/events/error", "params": { "error": { "code": -32603, "message": "UpstreamError", "data": { "reason": "the feed didn't answer this time; roll reads it again" } }, "_meta": meta } }));
+                        continue;
+                    }
+                }
+                // Quiet past the next read: a heartbeat now, so the client's cursor moves.
+                if s.queue.is_empty() && s.sent.elapsed() + STREAM_READ_EVERY > beat {
+                    s.queue.push_back(json!({ "jsonrpc": "2.0", "method": "notifications/events/heartbeat", "params": { "cursor": format!("{CURSOR}{}", s.cursor), "_meta": meta } }));
+                }
+            }
+        }
+    })
+    .map(|v| Ok::<_, std::convert::Infallible>(Event::default().event("message").data(v.to_string())));
+    Sse::new(stream).keep_alive(KeepAlive::new().interval(crate::SSE_KEEPALIVE)).into_response()
 }
 
 /// Unix milliseconds as ISO 8601 in UTC (`2026-11-22T09:30:00.123Z`).

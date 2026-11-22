@@ -46,7 +46,7 @@ impl Secrets {
             let mut linked = BTreeSet::new();
             let mut keys: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
             let rows: Vec<(String, String, Option<String>, String)> = c.query(
-                "SELECT e.slug, s.key, s.link, s.path FROM secrets s JOIN environments e ON e.id = s.env_id WHERE s.project_id = ? AND s.owner = ''",
+                "SELECT e.slug, s.key, s.link, s.path FROM secrets s JOIN environments e ON e.id = s.env_id AND e.forgotten_at IS NULL WHERE s.project_id = ? AND s.owner = ''",
                 [project],
                 |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
             )?;

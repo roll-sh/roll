@@ -3,6 +3,10 @@
 //! cold wake latency of a small cluster with its segments cached and uncached, RSS of an idle
 //! node (a `search-dev --data-dir` process) and RSS per loaded small cluster.
 
+// Spawned tasks hold the node's request futures, which hold reqwest's HTTP/2 client state (h2,
+// on in builds with crates that enable it); their `Send` proof nests past the default 128.
+#![recursion_limit = "256"]
+
 mod common;
 
 use search_es::EsRequest;

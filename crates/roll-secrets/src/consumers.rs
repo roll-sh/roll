@@ -32,6 +32,11 @@
 //! reference): what only comes from there is refused as protected. No dynamic credential: a
 //! product keeps its connection past any lease.
 //!
+//! **A roll code owner's own settings** (its reviewer's provider key; [`ResourceRef::code_owner`]):
+//! no canvas holds an owner, so its project is the one whose canvas holds one of the owner's
+//! repositories and stands for it (`Workspace::trusts` for that repo, as its checks read), named
+//! in the reference when there are several. Audited as `code:review:<owner>`.
+//!
 //! **Untrusted copies.** A resource whose code or data didn't come through its owner (a search
 //! branch keeps its cluster's id, as a preview keeps its service's) asks with
 //! [`ResourceRef::untrusted`]: it then reads as checks, sandboxes and previews do
@@ -56,11 +61,19 @@ pub struct ResourceRef {
     pub r#ref: String,
     untrusted: bool,
     placeholders: bool,
+    /// A roll code owner (`r#ref`), not a canvas resource: [`ResourceRef::code_owner`].
+    owner: bool,
 }
 
 impl ResourceRef {
     pub fn new(kind: Kind, r#ref: impl Into<String>) -> ResourceRef {
-        ResourceRef { kind, r#ref: r#ref.into(), untrusted: false, placeholders: false }
+        ResourceRef { kind, r#ref: r#ref.into(), untrusted: false, placeholders: false, owner: false }
+    }
+
+    /// roll code owner `owner`'s reviewer (its provider key): `code:review:<owner>`, read through
+    /// the project whose canvas holds one of the owner's repositories and stands for it.
+    pub fn code_owner(owner: impl Into<String>) -> ResourceRef {
+        ResourceRef { owner: true, ..ResourceRef::new(Kind::Repo, owner) }
     }
 
     /// The same resource as a copy nobody vetted (a branch, a clone, anything whose code or data
@@ -90,6 +103,9 @@ impl ResourceRef {
     /// Who it is in the audit log: `storage:bucket:<ref>`, `search:search:<ref>`, …, with
     /// ` (untrusted)` after it for an untrusted copy.
     pub fn consumer(&self) -> String {
+        if self.owner {
+            return format!("code:review:{}", self.r#ref);
+        }
         let product = match self.kind {
             Kind::Bucket => "storage",
             Kind::Stream => "streams",
@@ -291,26 +307,34 @@ impl Secrets {
     fn as_maker(&self, resource: &ResourceRef, reference: &str, maker: &Maker) -> Result<(String, Reference, Caller), Refusal> {
         let r = Reference::required(reference)?;
         let project = self.project_for(resource, r.project.as_deref())?;
+        let out = self.as_maker_in(resource, &project, &r, maker);
+        if let Err(Refusal::MakerUnreachable(why)) = &out {
+            self.note_unreachable(&project, &r.env, &r.path, maker.parts().0, &resource.consumer(), why);
+        }
+        out.map(|c| (project, r, c))
+    }
+
+    fn as_maker_in(&self, resource: &ResourceRef, project: &str, r: &Reference, maker: &Maker) -> Result<Caller, Refusal> {
         let (by, runtime_env) = maker.parts();
         let gone = || Refusal::MakerUnreachable(format!("{by}, who chose it, can no longer reveal {}:{} or can no longer sign in", r.env, r.path));
         let caller = self.maker_caller(by, &resource.consumer()).map_err(|e| match e {
             Error::Forbidden(_) => gone(),
             e => e.into(),
         })?;
-        self.may_reveal_for(&project, &r, &caller).map_err(|e| match e {
+        self.may_reveal_for(project, r, &caller).map_err(|e| match e {
             Refusal::NotAllowed(_) => gone(),
             e => e,
         })?;
-        let Some(env) = runtime_env else { return Ok((project, r, caller.not_runtime())) };
+        let Some(env) = runtime_env else { return Ok(caller.not_runtime()) };
         if r.env != env {
             return Err(Refusal::NotAllowed(format!("{by} chose this for {env}'s runtime, not {}'s", r.env)));
         }
         // While its maker may still reveal what it reads, as they are now (a member removed or
         // demoted, or no longer an admin, stops it at once).
-        if !self.maker_reaches(by, &[(crate::access::Action::Reveal, crate::access::Scope::at(&project, &r.env, &r.path))])? {
+        if !self.maker_reaches(by, &[(crate::access::Action::Reveal, crate::access::Scope::at(project, &r.env, &r.path))])? {
             return Err(gone());
         }
-        Ok((project, r, Caller::consumer(&format!("{} (runtime read for {by})", resource.consumer()))))
+        Ok(Caller::consumer(&format!("{} (runtime read for {by})", resource.consumer())))
     }
 
     /// Whether `caller` may reveal `r`'s folder in `project`. Never says more than a reveal's 403.
@@ -350,16 +374,26 @@ impl Secrets {
     pub(crate) fn project_for(&self, resource: &ResourceRef, named: Option<&str>) -> Result<String, Refusal> {
         let who = resource.consumer();
         let ws = |e: roll_workspace::Error| Error::Internal(e.to_string());
-        let ids = self.workspace.projects_of(resource.kind.as_str(), &resource.r#ref).map_err(ws)?;
-        if ids.is_empty() {
-            return Err(Refusal::NoProject(format!("{who} isn't on any project's canvas")));
-        }
         let mut trusting = vec![];
-        for id in &ids {
-            match self.workspace.get(roll_workspace::Scope::All, id) {
-                Ok(p) if self.workspace.trusts(&p, resource.kind, &resource.r#ref) => trusting.push(p),
-                Ok(_) | Err(roll_workspace::Error::NotFound(_)) => {}
-                Err(e) => return Err(ws(e).into()),
+        if resource.owner {
+            // One of the owner's repositories on its canvas, which it stands for.
+            let prefix = format!("{}/", resource.r#ref);
+            let theirs = |p: &roll_workspace::Project| p.resources.iter().any(|x| x.kind == Kind::Repo && x.r#ref.starts_with(&prefix) && self.workspace.trusts(p, Kind::Repo, &x.r#ref));
+            trusting = self.workspace.list(roll_workspace::Scope::All).map_err(ws)?.into_iter().filter(theirs).collect();
+            if trusting.is_empty() {
+                return Err(Refusal::NoProject(format!("no project's canvas holds one of {}'s repositories and stands for it", resource.r#ref)));
+            }
+        } else {
+            let ids = self.workspace.projects_of(resource.kind.as_str(), &resource.r#ref).map_err(ws)?;
+            if ids.is_empty() {
+                return Err(Refusal::NoProject(format!("{who} isn't on any project's canvas")));
+            }
+            for id in &ids {
+                match self.workspace.get(roll_workspace::Scope::All, id) {
+                    Ok(p) if self.workspace.trusts(&p, resource.kind, &resource.r#ref) => trusting.push(p),
+                    Ok(_) | Err(roll_workspace::Error::NotFound(_)) => {}
+                    Err(e) => return Err(ws(e).into()),
+                }
             }
         }
         let mut found: Vec<_> = match named {
@@ -392,5 +426,6 @@ mod tests {
         }
         assert_eq!(ResourceRef::new(Kind::Bucket, "photos").consumer(), "storage:bucket:photos");
         assert_eq!(ResourceRef::new(Kind::Bucket, "photos").untrusted().consumer(), "storage:bucket:photos (untrusted)");
+        assert_eq!(ResourceRef::code_owner("acme").consumer(), "code:review:acme");
     }
 }

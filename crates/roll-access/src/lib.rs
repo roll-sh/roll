@@ -118,6 +118,20 @@ pub fn find_secrets(text: &str) -> Vec<String> {
 
 #[cfg(test)]
 mod policy_tests {
+    /// How long a request waits for its people: the shortest wait a covering rule says, else the
+    /// policy's, else ten minutes.
+    #[test]
+    fn approvals_wait_as_the_policy_says() {
+        let rule = |product: &str, wait: Option<u32>| super::ApprovalRule { product: product.into(), actions: Default::default(), environments: Some(vec!["production".into()]), approvals: 1, approvers: None, wait_minutes: wait };
+        let mut p = super::Policy::default();
+        assert_eq!(p.approval_wait_ms("postgres", "delete", None), 600_000);
+        p.approval_wait_minutes = Some(1_440);
+        p.approval_rules = vec![rule("postgres", Some(5)), rule("*", Some(30)), rule("apps", None)];
+        assert_eq!(p.approval_wait_ms("postgres", "delete", Some("production")), 300_000, "the shortest covering rule");
+        assert_eq!(p.approval_wait_ms("apps", "deploy", Some("production")), 1_800_000);
+        assert_eq!(p.approval_wait_ms("postgres", "delete", Some("dev")), 86_400_000, "no rule covers it: the policy's");
+    }
+
     #[test]
     fn a_grant_unused_too_long_is_idle() {
         let p = super::Policy { max_idle_days: Some(30), ..Default::default() };
@@ -597,8 +611,6 @@ pub struct Access {
     pub(crate) github_keys: leaks::GithubKeys,
     /// OAuth registrations lately, per network (open registration's limit).
     pub(crate) registrations: std::sync::Mutex<Window>,
-    /// Callback URLs each connection asked roll to verify lately (MCP Events' webhooks).
-    pub(crate) event_verifies: std::sync::Mutex<Window>,
     /// How OIDC issuers' keys are fetched for trusted machine clients: rolld's guarded client.
     /// Unset: only clients with pinned keys sign in that way.
     pub oidc_fetch: std::sync::OnceLock<Arc<dyn roll_oidc::Fetch + Send + Sync>>,
@@ -630,7 +642,7 @@ impl Access {
 
     /// On a database already open (tests: `code_sql::Db::open_or_test`, so they run on Postgres too).
     pub fn with_db(db: code_sql::Db, config: Config, resolvers: Resolvers) -> Result<Arc<Access>> {
-        Ok(Arc::new(Access { store: Store::new(db)?, config, resolvers, chat: Default::default(), nodes: Default::default(), revokers: Default::default(), decoy_hooks: Default::default(), limiter: Default::default(), sinks: Default::default(), event_hooks: Default::default(), people: Default::default(), workspace: Default::default(), mail_gate: Default::default(), github_keys: Default::default(), registrations: Default::default(), event_verifies: Default::default(), oidc_fetch: Default::default(), oidc_keys: Default::default(), sign_ins: Default::default(), device_starts: Default::default(), device_guesses: Default::default(), policy_cache: Default::default() }))
+        Ok(Arc::new(Access { store: Store::new(db)?, config, resolvers, chat: Default::default(), nodes: Default::default(), revokers: Default::default(), decoy_hooks: Default::default(), limiter: Default::default(), sinks: Default::default(), event_hooks: Default::default(), people: Default::default(), workspace: Default::default(), mail_gate: Default::default(), github_keys: Default::default(), registrations: Default::default(), oidc_fetch: Default::default(), oidc_keys: Default::default(), sign_ins: Default::default(), device_starts: Default::default(), device_guesses: Default::default(), policy_cache: Default::default() }))
     }
 
     /// The resource of `kind` named `id`, with its project and environment filled in.
@@ -1269,6 +1281,11 @@ pub struct Policy {
     /// (`?readonly=1`, whatever the client asks).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub mcp_read_only: bool,
+    /// roll's MCP server takes only grants (a token, an OAuth connection): the admin token, an
+    /// admin's session and an open daemon are answered with OAuth's challenge, so every agent is
+    /// held by the controls above.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub mcp_require_grant: bool,
     /// The OAuth clients that may connect (empty: any), as Atlassian's admins list the AI clients
     /// their site allows. Each is a host (`claude.ai`, `*.example.com`: a client whose metadata
     /// document is there, or whose redirects all go there), an exact `https://` URL (a metadata
@@ -1278,7 +1295,15 @@ pub struct Policy {
     /// made before stops at once and comes back if the list allows it again.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub oauth_clients: Vec<String>,
+    /// How long a request that asks a person waits for one, in minutes (1 to 1,440; 10 when left
+    /// out), as Stripe's confirmations wait a day: a background agent's (a task, a webhook
+    /// subscription) needs longer than someone watching. An approval rule covering it can say its own.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub approval_wait_minutes: Option<u32>,
 }
+
+/// The longest a request waits for its people: a day.
+pub const MAX_WAIT_MINUTES: u32 = 1_440;
 
 /// Whether an `oauth_clients` host entry (`claude.ai`, `*.example.com`) names `host`.
 fn host_entry_covers(entry: &str, host: &str) -> bool {
@@ -1377,6 +1402,11 @@ pub struct ApprovalRule {
     /// Who may (`operator`, a person's `usr_…`, a chat approver's `slack:U…` or `discord:…`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub approvers: Option<Vec<String>>,
+    /// How long a request it covers waits for its people, in minutes (1 to 1,440): shorter for
+    /// what must be decided now, longer for an agent that works unwatched. The policy's
+    /// `approval_wait_minutes` when left out.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wait_minutes: Option<u32>,
 }
 
 fn no_actions(a: &Actions) -> bool {
@@ -1384,6 +1414,17 @@ fn no_actions(a: &Actions) -> bool {
 }
 
 impl ApprovalRule {
+    /// Whether it's about a request for this product, action and environment (before there's an
+    /// approval to ask [`ApprovalRule::covers`] about).
+    pub fn covers_request(&self, product: &str, action: &str, environment: Option<&str>) -> bool {
+        (self.product == "*" || self.product == product)
+            && (self.actions.is_empty() || Action::parse(action).is_some_and(|x| self.actions.has(x)))
+            && match (&self.environments, environment) {
+                (Some(list), Some(env)) => list.iter().any(|p| roll_auth::scope::env_covers(p, env)),
+                _ => true,
+            }
+    }
+
     /// Whether it's about this approval's request.
     pub fn covers(&self, a: &store::Approval) -> bool {
         (self.product == "*" || self.product == a.product)
@@ -1427,6 +1468,8 @@ impl ApprovalRule {
             Some(format!("{at}: no product {:?}", self.product))
         } else if !(1..=10).contains(&self.approvals) {
             Some(format!("{at}: approvals is 1 to 10"))
+        } else if self.wait_minutes.is_some_and(|m| !(1..=MAX_WAIT_MINUTES).contains(&m)) {
+            Some(format!("{at}: wait_minutes is 1 to {MAX_WAIT_MINUTES}"))
         } else if names(&self.environments) || names(&self.approvers) {
             Some(format!("{at}: environments and approvers are 1 to 20 names (or left out)"))
         } else if self.approvers.as_ref().is_some_and(|l| l.len() < usize::from(self.approvals)) {
@@ -1468,10 +1511,27 @@ impl Policy {
         self.approval_rules.iter().any(|gate| gate.covers_rule(rule))
     }
 
+    /// How long a request for this product, action and environment waits for its people: the
+    /// shortest wait an approval rule covering it says, else the policy's, else 10 minutes.
+    pub fn approval_wait_ms(&self, product: &str, action: &str, environment: Option<&str>) -> i64 {
+        let minutes = self
+            .approval_rules
+            .iter()
+            .filter(|r| r.covers_request(product, action, environment))
+            .filter_map(|r| r.wait_minutes)
+            .min()
+            .or(self.approval_wait_minutes)
+            .unwrap_or(10);
+        i64::from(minutes.clamp(1, MAX_WAIT_MINUTES)) * 60_000
+    }
+
     /// What's wrong with it, if anything.
     pub fn problems(&self) -> Option<String> {
         if self.max_days == Some(0) || self.max_idle_days == Some(0) {
             return Some("max_days and max_idle_days are at least 1 (or null for no limit)".into());
+        }
+        if self.approval_wait_minutes.is_some_and(|m| !(1..=MAX_WAIT_MINUTES).contains(&m)) {
+            return Some(format!("approval_wait_minutes is 1 to {MAX_WAIT_MINUTES}"));
         }
         if self.approval_rules.len() > 50 || self.agents_ask.len() > 50 || self.oauth_clients.len() > 50 {
             return Some("at most 50 approval rules, 50 agent rules and 50 OAuth clients".into());

@@ -13,10 +13,13 @@
 //! - What a sandbox needs to start (its machine token and the provider env the owner gave) is
 //!   sealed with `ROLL_SECRET_KEY` until the backend has it, then dropped. It goes to the backend
 //!   and nowhere else: never into a response, a log or an error.
-//! - Values copied from roll secrets keep only where they came from (`secrets_from`) and who
-//!   copied them. Before each create and start roll secrets is asked whether that person or token
-//!   still may reveal them; when they may not, the backend starts it without them
-//!   ([`SandboxBackend::start_without`]), or, where it can't, it isn't started at all.
+//! - Values copied from roll secrets aren't sealed with the rest: only where they came from
+//!   (`secrets_from`) and who copied them (`secrets_by`) are kept. At each create and start they
+//!   are read again as that person or token may now, so a rotated value reaches the sandbox, and
+//!   the backend starts it with them ([`SandboxBackend::start_with`]); once they may not, without
+//!   them (`secrets_dropped`). A backend that can't change an instance's env starts it as it was
+//!   made, or not at all once its copier may not. A sandbox from before `secrets_from` was kept
+//!   only has its copier's right asked again, and keeps what it was made with.
 
 pub mod agent37;
 pub mod api;
@@ -285,6 +288,29 @@ impl std::fmt::Debug for SandboxSpec {
     }
 }
 
+/// How a start changes a sandbox's env ([`SandboxBackend::start_with`]): the values copied from
+/// roll secrets as their copier reads them now, and the variables to take out. `Debug` shows only
+/// names.
+#[derive(Clone, Default, PartialEq, Eq)]
+pub struct EnvChange {
+    pub set: BTreeMap<String, String>,
+    pub unset: Vec<String>,
+}
+
+impl EnvChange {
+    /// `env` with the change made.
+    pub fn apply(&self, env: &mut BTreeMap<String, String>) {
+        env.retain(|k, _| !self.unset.contains(k));
+        env.extend(self.set.iter().map(|(k, v)| (k.clone(), v.clone())));
+    }
+}
+
+impl std::fmt::Debug for EnvChange {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("EnvChange").field("set", &self.set.keys().collect::<Vec<_>>()).field("unset", &self.unset).finish()
+    }
+}
+
 /// What a backend says a sandbox is doing.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum BackendState {
@@ -331,12 +357,12 @@ pub trait SandboxBackend: Send + Sync {
     async fn tagged(&self) -> Result<Vec<Tagged>, BackendError>;
     async fn status(&self, backend_id: &str) -> Result<BackendState, BackendError>;
     async fn start(&self, backend_id: &str) -> Result<(), BackendError>;
-    /// Start it without the variables `without` names, its data kept: what it was made with, less
-    /// values roll took back (their copier may no longer reveal them). `spec` is its id, name and
-    /// size (its env is ignored). `false`: this backend can't change what an instance was made
-    /// with, so nothing was started.
-    async fn start_without(&self, backend_id: &str, spec: &SandboxSpec, without: &[String]) -> Result<bool, BackendError> {
-        let _ = (backend_id, spec, without);
+    /// Start it with its env changed by `change`, its data kept: what it was made with, with the
+    /// copied values read again (`set`) and the ones roll took back or that are gone (`unset`).
+    /// `spec` is its id, name and size (its env is ignored). `false`: this backend can't change
+    /// what an instance was made with, so nothing was started.
+    async fn start_with(&self, backend_id: &str, spec: &SandboxSpec, change: &EnvChange) -> Result<bool, BackendError> {
+        let _ = (backend_id, spec, change);
         Ok(false)
     }
     async fn stop(&self, backend_id: &str) -> Result<(), BackendError>;

@@ -119,7 +119,7 @@ struct Daemon {
 /// What the stand-in products saw: the operator's marker and a grant.
 fn seen(ext: &axum::http::Extensions) -> Value {
     let approved = roll_auth::Approved::on(ext).map(|a| json!({ "id": &*a.id, "by": a.by.iter().map(|b| &**b).collect::<Vec<_>>(), "until": a.until }));
-    json!({ "operator": roll_auth::Operator::on(ext), "grant": roll_auth::Grant::on(ext).map(|g| g.id.to_string()), "approved": approved })
+    json!({ "operator": roll_auth::Operator::on(ext), "grant": roll_auth::Grant::on(ext).map(|g| g.id.to_string()), "approved": approved, "acting": ext.get::<roll_cluster::Acting>().map(|a| a.0.clone()) })
 }
 
 fn postgres() -> Router {
@@ -155,8 +155,9 @@ fn postgres() -> Router {
         .route("/v1/search/clusters/{id}/indices/{index}/search", post(|| async { axum::Json(json!({ "hits": [] })) }))
         .route("/v1/search/clusters", post(|| async { axum::Json(json!({ "id": "cl_new", "password": "fresh" })) }))
         .route("/v1/search/clusters/{id}/indices", get(|| async { axum::Json(json!([])) }))
-        .route("/v1/search/clusters/{id}/request", post(|| async { axum::Json(json!({})) }))
+        .route("/v1/search/clusters/{id}/request", post(|ext: axum::http::Extensions| async move { axum::Json(json!({ "reveal": ext.get::<roll_auth::Capable>().is_some_and(|c| c.has(roll_auth::scope::Action::Reveal)) })) }))
         .route("/v1/search/clusters/{id}/indices/{index}/bulk", post(|body: String| async move { axum::Json(json!({ "lines": body.lines().count() })) }))
+        .route("/v1/search/clusters/{id}/indices/{index}/settings", axum::routing::put(|| async { axum::Json(json!({ "acknowledged": true })) }))
         .route("/v1/secrets/projects/{project}/environments/{env}/secrets", get(|| async { axum::Json(json!([])) }))
         .route("/v1/secrets/projects/{project}/health", get(|| async { axum::Json(json!({ "findings": [] })) }))
         .route("/v1/secrets/projects/{project}/transit", get(|| async { axum::Json(json!([])) }))
@@ -385,6 +386,11 @@ async fn a_scoped_token_does_only_what_its_rules_say() {
     assert_eq!(bulk("{\"index\":{}}\n{\"msg\":\"hi\"}\n").await, (StatusCode::OK, json!({ "lines": 2 })));
     let (s, e) = bulk("{\"index\":{}}\n{\"msg\":\"hi\"}\n{\"delete\":{\"_id\":\"1\"}}\n").await;
     assert_eq!((s, e["needs"]["action"].as_str()), (StatusCode::FORBIDDEN, Some("delete")));
+    // An index's settings are write, but a lifecycle policy can delete the index: it needs delete.
+    let settings = |body: &'static str| d.raw(&indexer, Method::PUT, "/v1/search/clusters/c1/indices/logs/settings", Body::from(body), &[], None);
+    assert_eq!(settings(r#"{"index.roll.suggestions.enabled": true}"#).await.0, StatusCode::OK);
+    let (s, e) = settings(r#"{"index.lifecycle.name": "30-days-default", "index.lifecycle.indexing_complete": true, "index.lifecycle.origination_date": 0}"#).await;
+    assert_eq!((s, e["needs"]["action"].as_str()), (StatusCode::FORBIDDEN, Some("delete")));
 
     // A bucket in another storage account is `<account>/<bucket>`: a rule for one doesn't reach
     // the same name in the default account or in a third.
@@ -536,14 +542,39 @@ async fn escalation_paths_are_shut() {
     // A signed hop from a node that decided it for this grant: no second approval, and the
     // client's address is the one that node saw. A hop that names another grant is decided again.
     let (fleet, grant) = d.token(json!([{ "product": "postgres", "resources": "*", "actions": { "delete": "ask" } }]), json!({ "ip_allow": ["10.1.2.0/24"] })).await;
-    let hop = |decided: &str| Some(roll_cluster::Forwarded { node: "n1".into(), hops: 1, client: Some("10.1.2.3".into()), decided: Some(decided.into()) });
+    let hop = |decided: &str| Some(roll_cluster::Forwarded { node: "n1".into(), hops: 1, client: Some("10.1.2.3".into()), decided: Some(decided.into()), acting: None });
     let (s, out) = d.raw(&fleet, Method::DELETE, "/v1/projects/pa", Body::empty(), &[], hop(&grant)).await;
     assert_eq!((s, out["grant"].as_str()), (StatusCode::OK, Some(grant.as_str())), "{out}");
     let (_, out) = d.raw(&fleet, Method::DELETE, "/v1/projects/pa", Body::empty(), &[], hop("tok_other")).await;
     assert_eq!(out["code"], "approval_pending", "{out}");
-    let stranger = Some(roll_cluster::Forwarded { node: "n1".into(), hops: 1, client: Some("192.0.2.9".into()), decided: Some(grant.clone()) });
+    let stranger = Some(roll_cluster::Forwarded { node: "n1".into(), hops: 1, client: Some("192.0.2.9".into()), decided: Some(grant.clone()), acting: None });
     let (_, out) = d.raw(&fleet, Method::DELETE, "/v1/projects/pa", Body::empty(), &[], stranger).await;
     assert_eq!(out["code"], "ip_not_allowed", "{out}");
+
+    // roll's own work for a grant (ActAs: an MCP Events delivery reading a feed, no token) is marked
+    // for a forward to carry signed, and the owner, acting for the hop's grant again, serves it as
+    // that grant. A token's own request is never marked.
+    let acting = |id: String, hop: Option<roll_cluster::Forwarded>| {
+        let d = &d;
+        async move {
+            let mut req = Request::builder().method(Method::GET).uri("/v1/previews/pv1").body(Body::empty()).unwrap();
+            req.extensions_mut().insert(roll_auth::ActAs(id.as_str().into()));
+            if let Some(f) = hop {
+                req.extensions_mut().insert(f);
+            }
+            let resp = d.router.clone().oneshot(req).await.unwrap();
+            let status = resp.status();
+            (status, serde_json::from_slice::<Value>(&resp.into_body().collect().await.unwrap().to_bytes()).unwrap_or(Value::Null))
+        }
+    };
+    let (viewer, viewer_id) = d.token(json!([{ "product": "previews", "resources": "*", "actions": { "read": "allow" } }]), json!({})).await;
+    let (s, out) = acting(viewer_id.clone(), None).await;
+    assert_eq!((s, out["grant"].as_str(), out["acting"].as_str()), (StatusCode::OK, Some(viewer_id.as_str()), Some(viewer_id.as_str())), "{out}");
+    let (_, out) = d.raw(&viewer, Method::GET, "/v1/previews/pv1", Body::empty(), &[], None).await;
+    assert!(out["grant"].is_string() && out["acting"].is_null(), "{out}");
+    let owner_hop = Some(roll_cluster::Forwarded { node: "n1".into(), hops: 1, client: None, decided: Some(viewer_id.clone()), acting: Some(viewer_id.clone()) });
+    let (s, out) = acting(viewer_id.clone(), owner_hop).await;
+    assert_eq!((s, out["grant"].as_str(), out["acting"].as_str()), (StatusCode::OK, Some(viewer_id.as_str()), Some(viewer_id.as_str())), "on the owner: {out}");
 }
 
 /// An `ask` action waits for a person: approved, the request runs as sent (once); denied, it's
@@ -834,6 +865,12 @@ async fn oauth_connects_an_mcp_client() {
     assert!(d.access.store.client(&forged).unwrap().is_none(), "a forged id is no client");
     let bad = d.call("", Method::POST, "/v1/access/oauth/register", Some(json!({ "redirect_uris": ["http://evil.example/cb"] }))).await;
     assert_eq!(bad.1["error"], "invalid_redirect_uri");
+    // 2026-07-28 clients say what they are (SEP-837): a native one with a loopback redirect is
+    // echoed, a web one has https redirects only.
+    let native = d.call("", Method::POST, "/v1/access/oauth/register", Some(json!({ "redirect_uris": [redirect], "application_type": "native" }))).await;
+    assert_eq!((native.0, native.1["application_type"].as_str()), (StatusCode::CREATED, Some("native")), "{}", native.1);
+    let web = d.call("", Method::POST, "/v1/access/oauth/register", Some(json!({ "redirect_uris": [redirect], "application_type": "web" }))).await;
+    assert_eq!(web.1["error"], "invalid_redirect_uri");
 
     // RFC 7636's example pair.
     let (verifier, challenge) = ("dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk", "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM");
@@ -956,13 +993,17 @@ async fn agents_ask_what_the_policy_says() {
     let (token, _) = d.token(json!([{ "product": "postgres", "resources": "*", "actions": { "read": "allow", "delete": "allow" } }]), json!({})).await;
     let (s, e) = d.call(OPERATOR, Method::PUT, "/v1/access/policy", Some(json!({ "agents_ask": [{ "product": "nope" }] }))).await;
     assert_eq!(s, StatusCode::BAD_REQUEST, "{e}");
-    assert_eq!(d.call(OPERATOR, Method::PUT, "/v1/access/policy", Some(json!({ "agents_ask": [{ "product": "postgres", "actions": ["delete"] }] }))).await.0, StatusCode::OK);
+    assert_eq!(d.call(OPERATOR, Method::PUT, "/v1/access/policy", Some(json!({ "approval_wait_minutes": 0 }))).await.0, StatusCode::BAD_REQUEST);
+    // Agents ask first, and a person has two hours to answer (the policy's wait).
+    assert_eq!(d.call(OPERATOR, Method::PUT, "/v1/access/policy", Some(json!({ "agents_ask": [{ "product": "postgres", "actions": ["delete"] }], "approval_wait_minutes": 120 }))).await.0, StatusCode::OK);
     let (_, now) = d.call(&token, Method::GET, "/v1/access/approvals/decided?latest=1", None).await;
     let (s, pending) = d.via_mcp_body(&token, Method::DELETE, "/v1/projects/pa").await;
     assert_eq!((s, pending["code"].as_str()), (StatusCode::FORBIDDEN, Some("approval_pending")), "{pending}");
     // Decided, it's in the connection's feed of decisions (MCP Events' access.approval), after the
     // place it started from; another connection's feed hasn't it.
     let id = pending["approval"].as_str().unwrap();
+    let (_, asked) = d.call(OPERATOR, Method::GET, &format!("/v1/access/approvals/{id}"), None).await;
+    assert_eq!(asked["expires_at"].as_i64().unwrap() - asked["created_at"].as_i64().unwrap(), 2 * 3_600_000, "{asked}");
     assert_eq!(d.call(OPERATOR, Method::POST, &format!("/v1/access/approvals/{id}/approve"), None).await.0, StatusCode::OK);
     let (_, feed) = d.call(&token, Method::GET, &format!("/v1/access/approvals/decided?after={}", now["next"]), None).await;
     assert_eq!((feed["events"][0]["id"].as_str(), feed["events"][0]["state"].as_str()), (Some(id), Some("approved")), "{feed}");
@@ -2055,6 +2096,21 @@ async fn a_rule_can_grant_one_encryption_key() {
     // A rule on the whole project still reaches every key.
     let (all, _) = d.token(json!([{ "product": "secrets", "resources": [{ "id": "prj_a" }], "actions": { "write": "allow" } }]), json!({})).await;
     assert_eq!(d.call(&all, Method::POST, "/v1/secrets/projects/prj_a/transit/billing/encrypt", Some(json!({ "plaintext": "aGk=" }))).await.0, StatusCode::OK);
+}
+
+/// The search console is decided from its route alone: the gate reads no body (a large `_bulk`
+/// through it isn't refused as too large), and tells search whether the grant may also reveal
+/// (`capable`), for a request search finds answers a credential.
+#[tokio::test]
+async fn the_console_is_decided_without_its_body() {
+    let d = Daemon::new(50);
+    let (admin, _) = d.token(json!([{ "product": "search", "resources": [{ "id": "cl_1" }], "actions": { "admin": "allow" } }]), json!({})).await;
+    let (both, _) = d.token(json!([{ "product": "search", "resources": [{ "id": "cl_1" }], "actions": { "admin": "allow", "reveal": "allow" } }]), json!({})).await;
+    let big = json!({ "method": "POST", "path": "/_bulk", "body": "x".repeat(6 << 20) });
+    let (s, v) = d.call(&admin, Method::POST, "/v1/search/clusters/cl_1/request", Some(big)).await;
+    assert_eq!((s, v["reveal"].as_bool()), (StatusCode::OK, Some(false)), "{v}");
+    let (s, v) = d.call(&both, Method::POST, "/v1/search/clusters/cl_1/request", Some(json!({ "method": "GET", "path": "/" }))).await;
+    assert_eq!((s, v["reveal"].as_bool()), (StatusCode::OK, Some(true)), "{v}");
 }
 
 /// A rule can grant some indices of a search cluster: index routes are decided name by name, the

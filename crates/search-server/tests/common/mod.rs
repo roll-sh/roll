@@ -60,7 +60,7 @@ pub async fn start(cfg: NodeConfig, opts: ListenOptions) -> TestNode {
 
 /// A dev-mode node (one cluster, no auth).
 pub async fn start_dev() -> TestNode {
-    start(NodeConfig { default_cluster: Some("dev".into()), ..NodeConfig::default() }, ListenOptions::default()).await
+    start(NodeConfig { default_cluster: Some("dev".into()), unsealed_secrets: true, ..NodeConfig::default() }, ListenOptions::default()).await
 }
 
 #[derive(Debug)]

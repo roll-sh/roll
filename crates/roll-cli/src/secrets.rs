@@ -805,6 +805,21 @@ pub enum Secrets {
         #[arg(long)]
         revoke: Option<String>,
     },
+    /// What happened that someone acts on, in order (never values): a leaked value, a failing
+    /// rotation or sync, a request waiting. `--follow` keeps reading as more happen.
+    Events {
+        /// Only these kinds, comma-separated (`secret.leaked,request.*`).
+        #[arg(long)]
+        kinds: Option<String>,
+        /// Only this environment's.
+        #[arg(long)]
+        env: Option<String>,
+        /// After this cursor (an earlier line's seq); from the start without it, from now with `--follow`.
+        #[arg(long)]
+        after: Option<i64>,
+        #[arg(long)]
+        follow: bool,
+    },
     /// Who read and changed what (never values). `audit verify` checks it wasn't tampered with.
     #[command(args_conflicts_with_subcommands = true)]
     Audit {
@@ -2549,12 +2564,21 @@ pub async fn run(api: &Api, json_out: bool, args: AtArgs, cmd: Secrets) -> anyho
             let what = key.as_deref().map(|k| format!("{k} in ")).unwrap_or_default();
             println!("{what}{}:{}", c.at.env, c.at.path);
             println!("  {}", if v["untrusted"] == true { "untrusted code (checks, sandboxes, previews) can read it: the environment isn't protected" } else { "protected: untrusted code never reads it" });
-            for (title, list) in [("tokens", &v["tokens"]), ("identities", &v["identities"])] {
+            for p in v["people"].as_array().into_iter().flatten() {
+                let actions = p["actions"].as_array().map(|a| a.iter().map(s).collect::<Vec<_>>().join(",")).unwrap_or_default();
+                let admin = if p["admin"] == true { " (admin account)" } else { "" };
+                println!("  {:<10} {:<32} {actions:<22} {}{admin}", "person", s(&p["handle"]), s(&p["role"]));
+            }
+            if let Some(n) = v["admins"].as_u64().filter(|n| *n > 0) {
+                println!("  {:<10} {n} admin account{} (they reveal everything)", "admins", if n == 1 { "" } else { "s" });
+            }
+            for (title, list) in [("tokens", &v["tokens"]), ("clients", &v["clients"]), ("identities", &v["identities"])] {
                 for h in list.as_array().into_iter().flatten() {
                     let actions = h["actions"].as_array().map(|a| a.iter().map(s).collect::<Vec<_>>().join(",")).unwrap_or_default();
                     let used = h["last_used_at"].as_i64().map(|t| format!("used {}", ago(t))).unwrap_or_else(|| "never used".into());
                     let skipped = h["skipped"].as_str().map(|w| format!(" ({w})")).unwrap_or_default();
-                    println!("  {:<10} {:<32} {actions:<22} {used}{skipped}", &title[..title.len() - 1], s(&h["name"]));
+                    let name = if title == "clients" { format!("{} ({})", s(&h["name"]), s(&h["created_by"])) } else { s(&h["name"]) };
+                    println!("  {:<10} {name:<32} {actions:<22} {used}{skipped}", &title[..title.len() - 1]);
                 }
             }
             for sy in v["syncs"].as_array().into_iter().flatten() {
@@ -2566,8 +2590,18 @@ pub async fn run(api: &Api, json_out: bool, args: AtArgs, cmd: Secrets) -> anyho
             for f in v["imported_by"].as_array().into_iter().flatten() {
                 println!("  imported   by {}", s(f));
             }
+            for sv in v["services"].as_array().into_iter().flatten() {
+                let deployed = sv["last_deployed_at"].as_i64().map(|t| format!("deployed {}", ago(t))).unwrap_or_else(|| "not running".into());
+                println!("  service    {:<32} through {:<22} {deployed}", format!("{} ({})", s(&sv["name"]), s(&sv["environment"])), s(&sv["through"]));
+            }
+            for sb in v["sandboxes"].as_array().into_iter().flatten() {
+                println!("  sandbox    {:<32} copied by {} from {}", format!("{} ({})", s(&sb["name"]), s(&sb["owner"])), s(&sb["by"]), s(&sb["from"]));
+            }
             for r in v["readers"].as_array().into_iter().flatten() {
                 println!("  read       by {:<32} {} reads, last {}", s(&r["actor"]), r["reads"], ago(r["last_at"].as_i64().unwrap_or_default()));
+            }
+            for k in v["knew"].as_array().into_iter().flatten() {
+                println!("  knew       {:<32} {} reads, last {} (may no longer reveal it: {})", s(&k["user"]), k["reads"], ago(k["last_at"].as_i64().unwrap_or_default()), s(&k["why"]));
             }
             eprintln!("Not counted: {}.", s(&v["uncounted"]));
         }
@@ -3809,6 +3843,39 @@ pub async fn run(api: &Api, json_out: bool, args: AtArgs, cmd: Secrets) -> anyho
             for l in v.as_array().into_iter().flatten() {
                 let state = if l["revoked_at"].is_number() { "revoked".to_string() } else { format!("ends {}", chrono::DateTime::from_timestamp_millis(l["expires_at"].as_i64().unwrap_or(0)).map(|t| t.to_rfc3339()).unwrap_or_default()) };
                 println!("{}  {:<8} {:<12} {:<24} {}  {state}", s(&l["id"]), s(&l["kind"]), s(&l["environment"]), s(&l["key"]), s(&l["consumer"]));
+            }
+        }
+        Secrets::Events { kinds, env, after, follow } => {
+            let mut filter = String::new();
+            if let Some(k) = &kinds {
+                filter.push_str(&format!("&kinds={}", enc(k)));
+            }
+            if let Some(e) = &env {
+                filter.push_str(&format!("&environment={}", enc(e)));
+            }
+            let mut after = match after {
+                Some(a) => a,
+                None if follow => c.call(Method::GET, &format!("{}/events?latest=1", c.base()), None).await?["next"].as_i64().unwrap_or(0),
+                None => 0,
+            };
+            loop {
+                let v = c.call(Method::GET, &format!("{}/events?after={after}&limit=500{filter}", c.base()), None).await?;
+                let events = v["events"].as_array().cloned().unwrap_or_default();
+                for e in &events {
+                    if json_out {
+                        println!("{e}");
+                    } else {
+                        let at = [&e["environment"], &e["key"]].iter().filter_map(|x| x.as_str()).collect::<Vec<_>>().join(" ");
+                        println!("{:<8} {:<8} {:<28} {:<24} {}", e["seq"], ago(e["at"].as_i64().unwrap_or(0)), s(&e["kind"]), at, e["data"]);
+                    }
+                }
+                after = v["next"].as_i64().unwrap_or(after);
+                if events.is_empty() {
+                    if !follow {
+                        break;
+                    }
+                    tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+                }
             }
         }
         Secrets::Audit { cmd: Some(AuditCmd::Key { .. }), .. } => unreachable!("handled above"),

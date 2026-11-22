@@ -60,7 +60,7 @@ impl Secrets {
         let dead = self.dead_exports("x.to_project = ?", project)?;
         let rows: Vec<(String, crate::Import)> = self.db.read(|c| {
             c.query(
-                "SELECT x.env_id, e.project_id, e.slug, x.path FROM exports x JOIN environments e ON e.id = x.env_id WHERE x.to_project = ? ORDER BY e.project_id, e.slug, x.path",
+                "SELECT x.env_id, e.project_id, e.slug, x.path FROM exports x JOIN environments e ON e.id = x.env_id AND e.forgotten_at IS NULL WHERE x.to_project = ? ORDER BY e.project_id, e.slug, x.path",
                 [project],
                 |r| Ok((r.get(0)?, crate::Import { project: Some(r.get(1)?), environment: r.get(2)?, path: r.get(3)? })),
             )

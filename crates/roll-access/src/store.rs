@@ -520,9 +520,11 @@ pub struct Ask<'a> {
     pub environment: Option<&'a str>,
     pub scope_path: Option<&'a str>,
     pub scope_index: Option<&'a str>,
+    /// How long it waits for its people (the policy's `approval_wait_ms`).
+    pub wait_ms: i64,
 }
 
-/// An approval stays pending this long.
+/// An approved request runs within this long (and a decided one is shown this long).
 pub const APPROVAL_TTL_MS: i64 = 10 * 60 * 1000;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -1534,7 +1536,7 @@ impl Store {
                     args,
                     a.tool,
                     now,
-                    now + APPROVAL_TTL_MS,
+                    now + a.wait_ms,
                     a.request_hash,
                     a.environment,
                     a.scope_path,
