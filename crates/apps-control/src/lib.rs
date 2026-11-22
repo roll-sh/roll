@@ -3533,12 +3533,13 @@ impl Apps {
         let sid = service.to_string();
         let svc = self.db(move |s| s.service(&sid)).await?;
         let sid = service.to_string();
-        let rows = self.db(move |s| s.links_minted(&sid)).await?;
+        let (rows, options) = self.db(move |s| Ok((s.links_minted(&sid)?, s.link_options(&sid)?))).await?;
         let mut out = Vec::new();
         for (kind, r, prefix, minted) in rows {
             let names = self.link_values(&svc, kind, &r, "production", minted).await;
             let vars = names.map(|v| v.into_iter().map(|(k, _)| format!("{prefix}{k}")).collect()).unwrap_or_default();
-            out.push(Link { kind, r#ref: r, prefix, vars });
+            let opts: integrations::LinkOptions = options.get(&(kind.as_str().to_string(), r.clone())).and_then(|o| serde_json::from_str(o).ok()).unwrap_or_default();
+            out.push(Link { kind, r#ref: r, prefix, vars, indices: None, access: None }.narrowed(&opts));
         }
         Ok(out)
     }
@@ -3572,18 +3573,39 @@ impl Apps {
             }
             Some(_) => return Err(Error::BadRequest("prefix is a variable name prefix".into())),
         };
+        // A search link narrowed: its key for some indices only, and read or append only.
+        let options = link_options(kind, &body)?;
+        let opts_text = Value::Object(options.clone()).to_string();
         // Credentials the link makes for itself, once: a link that's there already keeps its own
-        // (setting its prefix again never makes another).
+        // (setting its prefix again never makes another), unless it's narrowed otherwise now:
+        // then a new key with the new options replaces it, and the old one is revoked.
+        let (sid, r) = (service.to_string(), r#ref.to_string());
+        let (had, had_opts) = self
+            .db(move |s| {
+                let m = s.links_minted(&sid)?.into_iter().find(|(k, rr, _, _)| *k == kind && *rr == r).and_then(|(_, _, _, m)| m);
+                let o = s.link_options(&sid)?.remove(&(kind.as_str().to_string(), r));
+                Ok((m, o))
+            })
+            .await?;
+        if let Some(old) = had.as_ref().filter(|_| had_opts.as_deref().unwrap_or("{}") != opts_text) {
+            let new = self.deps.resources.link(kind, r#ref, service, &options).await.map_err(|e| Error::BadRequest(e.to_string()))?.ok_or_else(|| Error::BadRequest(format!("{} made no credential for the link", kind.as_str())))?;
+            let (sid, r, was, n, o) = (service.to_string(), r#ref.to_string(), old.kept.clone(), new.clone(), opts_text.clone());
+            if !self.db(move |s| s.swap_link_minted(&sid, kind, &r, &was, &n, &o)).await? {
+                let _ = self.deps.resources.unlink(kind, r#ref, &new.kept).await;
+                return Err(Error::Conflict("the link changed meanwhile: try again".into()));
+            }
+            self.revoke_link(service, kind, r#ref, &old.kept).await;
+        }
         let (sid, r) = (service.to_string(), r#ref.to_string());
         let had = self.db(move |s| s.links_minted(&sid)).await?.into_iter().find(|(k, rr, _, _)| *k == kind && *rr == r).and_then(|(_, _, _, m)| m);
         let fresh = had.is_none();
         let minted = match had {
             Some(m) => Some(m),
-            None => self.deps.resources.link(kind, r#ref, service).await.map_err(|e| Error::BadRequest(e.to_string()))?,
+            None => self.deps.resources.link(kind, r#ref, service, &options).await.map_err(|e| Error::BadRequest(e.to_string()))?,
         };
         let vars = self.link_values(&svc, kind, r#ref, "production", minted.clone()).await.map_err(|e| Error::BadRequest(e.to_string()))?;
-        let (sid, r, p, m) = (service.to_string(), r#ref.to_string(), prefix.clone(), minted.clone());
-        let vars = match self.db(move |s| s.put_link(&sid, kind, &r, &p, m.as_ref())).await {
+        let (sid, r, p, m, o) = (service.to_string(), r#ref.to_string(), prefix.clone(), minted.clone(), opts_text.clone());
+        let vars = match self.db(move |s| s.put_link(&sid, kind, &r, &p, m.as_ref(), &o)).await {
             Ok(true) => vars,
             // Another request made the link first, with credentials of its own: those stay,
             // and what this one made goes again.
@@ -3602,7 +3624,7 @@ impl Apps {
                 return Err(e);
             }
         };
-        Ok(Link { kind, r#ref: r#ref.to_string(), vars: vars.into_iter().map(|(k, _)| format!("{prefix}{k}")).collect(), prefix })
+        Ok(Link { kind, r#ref: r#ref.to_string(), vars: vars.into_iter().map(|(k, _)| format!("{prefix}{k}")).collect(), prefix, indices: None, access: None }.narrowed(&options))
     }
 
     /// A link's variables now, as `service` gets them in `env`: another service's URLs (apps'
@@ -4575,6 +4597,38 @@ fn git_host(url: &str) -> Option<String> {
     })
 }
 
+/// A link's options from its body (roll secrets' link options): a search link's `indices` (its
+/// key's index names or patterns, `tenant-*`) and `access` (`read`, or `append`: create documents
+/// on exact names only; none: read and write documents). Search's provider checks them again.
+fn link_options(kind: LinkKind, body: &Value) -> Result<integrations::LinkOptions> {
+    let mut out = integrations::LinkOptions::new();
+    let (indices, access) = (body.get("indices").filter(|v| !v.is_null()), body.get("access").filter(|v| !v.is_null()));
+    if kind != LinkKind::Search {
+        return match indices.or(access) {
+            Some(_) => Err(Error::BadRequest("indices and access are a search link's".into())),
+            None => Ok(out),
+        };
+    }
+    if let Some(v) = indices {
+        let list: Vec<String> = v.as_array().filter(|a| !a.is_empty() && a.len() <= 50).ok_or_else(|| Error::BadRequest("indices is 1–50 index names or patterns".into()))?.iter().map(|i| i.as_str().unwrap_or_default().to_string()).collect();
+        if let Some(bad) = list.iter().find(|i| i.is_empty() || i.len() > 255 || i.starts_with(['-', '_', '+']) || !i.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || matches!(c, '.' | '_' | '-' | '*' | '+'))) {
+            return Err(Error::BadRequest(format!("{bad:?} isn't an index name or pattern (lower case, digits, . _ - + and *)")));
+        }
+        out.insert("names".into(), json!(list));
+    }
+    match access.map(|a| a.as_str()) {
+        None => {}
+        Some(Some(a @ ("read" | "append"))) => {
+            if a == "append" && !out.get("names").and_then(|n| n.as_array()).is_some_and(|n| n.iter().all(|i| !i.as_str().unwrap_or("*").contains('*'))) {
+                return Err(Error::BadRequest("append takes exact index names (a data stream's): name them in indices, no patterns".into()));
+            }
+            out.insert("permission".into(), json!(a));
+        }
+        Some(_) => return Err(Error::BadRequest("access is read or append (none: read and write documents)".into())),
+    }
+    Ok(out)
+}
+
 #[cfg(test)]
 mod fingerprint_tests {
     use super::*;
@@ -4589,4 +4643,3 @@ mod fingerprint_tests {
         assert_eq!(set_only(&run, &Run::default()), json!({"memory_mb": 1024, "alerts": {"error_pct": 10}}));
     }
 }
-

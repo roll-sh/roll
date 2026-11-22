@@ -52,7 +52,7 @@ route as. "deploy*" means `deploy` when `{env}` is `production`, else `write`.
 | `POST /v1/apps/services/{id}/restore` | | `Service`: a deleted service back as it was, its live deployments loaded again and its card placed on the canvas; 409 when it isn't deleted | deploy |
 | `GET /v1/apps/services/{id}/activity?all=` | | `Event[]` (`audit.*`, newest first, 200): who changed what, never a value; `all=1`: every kind (deploys, failures, crash loops, alerts, domains, spend), the service's timeline | read |
 | `GET /v1/apps/services/{id}/links` | | `Link[]` | read |
-| `PUT /v1/apps/services/{id}/links/{kind}/{ref}` | `{prefix?}` | `Link` (a kind that makes a credential per link makes it here, once; setting the link again keeps it) | write |
+| `PUT /v1/apps/services/{id}/links/{kind}/{ref}` | `{prefix?, indices?, access?}` (`indices` and `access`: a search link's only, 400 on another kind: its key only for those index names or patterns (1–50, `tenant-*`), and `read` or `append`, create documents on exact names only (400 with a pattern); none: read and write documents. Roll search's keys route checks them again) | `Link` (a kind that makes a credential per link makes it here, once; setting the link again keeps it, unless its `indices` or `access` change: then a new key made with them replaces it and the old one is revoked) | write |
 | `DELETE /v1/apps/services/{id}/links/{kind}/{ref}` | | 204 (revokes a credential the link made) | write |
 | `GET /v1/apps/projects/{project}/notifications` | | `NotifyTarget[]` (the URL never returned, only its host) | read |
 | `POST /v1/apps/projects/{project}/notifications` | `{ kind?: "webhook" \| "slack" \| "discord" \| "email" \| "pagerduty" \| "opsgenie", url, routing_key?, api_key?, region?, events?, environments?, services?, previews? }` (environments: names; services: names or ids, kept as ids; previews: default false; `email` takes no `url`: it's the project's owner, 400 with one, for a project without an owner, or where mail isn't set up; `pagerduty` takes its integration's `routing_key`, `opsgenie` its `api_key`, each sealed and never returned, and `region` `us` or `eu`, no `url`: the service's own API) | 201 `NotifyTarget` (+ `secret` once, for a webhook) | reveal for a webhook (its secret comes back), write for Slack, Discord, email, PagerDuty and Opsgenie |
@@ -704,7 +704,7 @@ type Plan = {
 
 /** Wired on a node today: postgres (DATABASE_URL), redis (REDIS_URL, REDIS_REST_URL/TOKEN) and search. */
 type LinkKind = "postgres" | "redis" | "bucket" | "stream" | "queue" | "nosql" | "search" | "service";
-type Link = { kind: LinkKind; ref: string; prefix: string; vars: string[] };
+type Link = { kind: LinkKind; ref: string; prefix: string; vars: string[]; indices?: string[] /* a search link's key's indices */; access?: "read" | "append" };
 // `search`: `ref` is a roll search cluster (id or name). The link makes a data-only credential of
 // its own, once (never the cluster's password): ELASTICSEARCH_URL and ELASTICSEARCH_API_KEY, or on
 // an OpenSearch-flavor cluster OPENSEARCH_URL, OPENSEARCH_USERNAME and OPENSEARCH_PASSWORD (an

@@ -5186,7 +5186,7 @@
         "x-roll-action": "write"
       },
       "put": {
-        "description": "Answers `Link` (a kind that makes a credential per link makes it here, once; setting the link again keeps it).",
+        "description": "Answers `Link` (a kind that makes a credential per link makes it here, once; setting the link again keeps it, unless its `indices` or `access` change: then a new key made with them replaces it and the old one is revoked).",
         "operationId": "putServicesIdLinksKindRef",
         "parameters": [
           {
@@ -5222,11 +5222,11 @@
               }
             }
           },
-          "description": "`{prefix?}`"
+          "description": "`{prefix?, indices?, access?}` (`indices` and `access`: a search link's only, 400 on another kind: its key only for those index names or patterns (1–50, `tenant-*`), and `read` or `append`, create documents on exact names only (400 with a pattern); none: read and write documents. Roll search's keys route checks them again)"
         },
         "responses": {
           "200": {
-            "description": "`Link` (a kind that makes a credential per link makes it here, once; setting the link again keeps it)"
+            "description": "`Link` (a kind that makes a credential per link makes it here, once; setting the link again keeps it, unless its `indices` or `access` change: then a new key made with them replaces it and the old one is revoked)"
           },
           "4XX": {
             "$ref": "#/components/responses/Error"

@@ -440,7 +440,7 @@ impl RollResources {
     /// now, and (`label`: the credential's name in the product) each credential issued once,
     /// its handles kept to revoke, and which variables those are. None: a kind that has no
     /// provider.
-    async fn provided(&self, kind: LinkKind, r#ref: &str, label: Option<String>) -> anyhow::Result<Option<Provided>> {
+    async fn provided(&self, kind: LinkKind, r#ref: &str, label: Option<String>, options: apps_control::integrations::LinkOptions) -> anyhow::Result<Option<Provided>> {
         use roll_secrets::links::{Link, Mode};
         let Some(p) = crate::secrets::link_provider(&self.products, kind.as_str()) else { return Ok(None) };
         let r = r#ref.to_string();
@@ -452,7 +452,7 @@ impl RollResources {
             let mut made = || -> anyhow::Result<()> {
                 for (field, mode) in p.suggested_for(&r) {
                     let Some(f) = fields.iter().find(|f| f.field == field) else { continue };
-                    let link = Link { kind: kind.as_str().to_string(), r#ref: r.clone(), field: field.to_string(), mode, options: Default::default() };
+                    let link = Link { kind: kind.as_str().to_string(), r#ref: r.clone(), field: field.to_string(), mode, options: options.clone() };
                     let value = match (mode, &label) {
                         (Mode::Live, _) => p.read(&r, field, &link)?,
                         // Listing what a link sets: only what's read, never a credential made.
@@ -646,7 +646,7 @@ impl Resources for RollResources {
                 })
                 .await
             }
-            LinkKind::Bucket | LinkKind::Stream | LinkKind::Nosql | LinkKind::Search | LinkKind::Queue => match self.provided(kind, r#ref, None).await? {
+            LinkKind::Bucket | LinkKind::Stream | LinkKind::Nosql | LinkKind::Search | LinkKind::Queue => match self.provided(kind, r#ref, None, Default::default()).await? {
                 Some(p) => Ok(p.vars),
                 None => anyhow::bail!("links to {} aren't wired on this node yet", kind.as_str()),
             },
@@ -657,11 +657,13 @@ impl Resources for RollResources {
     /// A bucket's, a stream's or a search cluster's link gets credentials of its own (a key named
     /// for the service; a search key has data access only, never the cluster's password), made once, revoked when the link goes; only those are kept with the link, and
     /// what's read (an endpoint, NoSQL's login, a database's URL) is read again at each deploy.
-    async fn link(&self, kind: LinkKind, r#ref: &str, service: &str) -> anyhow::Result<Option<apps_control::integrations::Minted>> {
+    async fn link(&self, kind: LinkKind, r#ref: &str, service: &str, options: &apps_control::integrations::LinkOptions) -> anyhow::Result<Option<apps_control::integrations::Minted>> {
         if !matches!(kind, LinkKind::Bucket | LinkKind::Stream | LinkKind::Nosql | LinkKind::Search | LinkKind::Queue) {
             return Ok(None);
         }
-        let Some(p) = self.provided(kind, r#ref, Some(format!("roll apps {service}"))).await? else { return Ok(None) };
+        // Its options (a search key's indices and access) go to the product's provider as roll
+        // secrets' links would give them.
+        let Some(p) = self.provided(kind, r#ref, Some(format!("roll apps {service}")), options.clone()).await? else { return Ok(None) };
         if p.issued.is_empty() {
             return Ok(None);
         }
@@ -1035,7 +1037,7 @@ mod tests {
         let products = crate::secrets::Api::default();
         products.set(router);
         let r = RollResources { postgres: None, redis: None, api: (String::new(), None, reqwest::Client::new()), products, branches: None };
-        let m = r.link(LinkKind::Bucket, "photos", "svc_a").await.unwrap().expect("credentials of its own");
+        let m = r.link(LinkKind::Bucket, "photos", "svc_a", &Default::default()).await.unwrap().expect("credentials of its own");
         // Only what it issued is kept with the link: the rest is read at each deploy.
         assert_eq!(m.vars.iter().map(|(k, _)| k.as_str()).collect::<Vec<_>>(), ["AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY"]);
         let mut vars: std::collections::BTreeMap<String, String> = r.link_vars(LinkKind::Bucket, "photos").await.unwrap().into_iter().collect();
@@ -1074,7 +1076,7 @@ mod tests {
         let products = crate::secrets::Api::default();
         products.set(router);
         let r = RollResources { postgres: None, redis: None, api: (String::new(), None, reqwest::Client::new()), products, branches: None };
-        let m = r.link(LinkKind::Queue, "orders", "svc_a").await.unwrap().expect("a user of its own");
+        let m = r.link(LinkKind::Queue, "orders", "svc_a", &Default::default()).await.unwrap().expect("a user of its own");
         let url = &m.vars.iter().find(|(k, _)| k == "AMQP_URL").expect("AMQP_URL").1;
         assert!(url.starts_with("amqp://roll-") && url.ends_with("@127.0.0.1:5672/orders") && !url.contains("admin"), "{url}");
         r.unlink(LinkKind::Queue, "orders", &m.kept).await.unwrap();
