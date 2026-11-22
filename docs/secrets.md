@@ -1219,7 +1219,10 @@ A link is `{kind, ref, field, mode, options}`:
   the project's key and registries (rotators…) can still reach it. A revocation that fails (the
   product or the customer's endpoint is down) stays as a lease that's already due, and the sweeper
   retries it; a purged project keeps its key and registries until its last lease is revoked, then
-  they go too. Nothing it issued outlives it unrevoked.
+  they go too. Nothing it issued outlives it unrevoked. An environment's delete, unlike a project's,
+  still erases its secrets, versions, changes and requests at once (the thirty-fifth review's item 2:
+  a recovery window and a change request for a protected one are planned); a key's delete makes a
+  tombstone version.
 - **Deleting the workspace project** (`DELETE /v1/workspace/projects/{id}`) can't destroy secrets
   by accident, as AWS Secrets Manager's and Azure Key Vault's waits can't:
   - while the project holds any value, a protected environment, an encryption key, a certificate
@@ -4618,7 +4621,7 @@ credentials as the tokens list does. Names and metadata only, never a value:
   counted: the answer says so (`uncounted`).
 
 Who could lists roll-access's live tokens (`rlt_…`) by what each may do here, and workload identities
-by their identity rather than each login. OAuth connections (`rlo_…`) aren't listed yet.
+by their identity rather than each login. OAuth connections (`rlo_…`) aren't listed yet, though since roll MCP's #644 a member's MCP client reaches what their role does (the thirty-fifth review's item 3).
 
 It also lists what the folder has handed out that's still out: dynamic credentials issued for
 its keys and not yet revoked (`leases`), live placeholders of its keys wherever they were
@@ -5868,6 +5871,64 @@ adds roll-access's grant lookup or the accounts' and workspace's.
 
 ## Next
 
+**Ranked, 2026-11-22 06:20** (the thirty-fifth product review, cold, on main 6575a213a, against
+Vault/OpenBao, Infisical, Doppler, AWS, 1Password, Akeyless, Bitwarden SM, GitGuardian, Google Secret
+Manager and Azure Key Vault). Every item of the thirty-fourth review that roll secrets owns is on main,
+and a cold read found the new code sound where it was aimed. The new seams sit next to those fixes.
+Newest entries first; older State and Ranked entries follow further down, as history.
+
+1. **A new project's production isn't protected** (security, high, S; fixing in
+   `fix/secrets-production-protected`). It's made with `protected: false`, and protection is "has a
+   policy", so members' developer default (`unprotected: true`), checks and sandboxes all reach it, and
+   developers write it with no request. The fix:
+   - a new project's production is protected (with `approvals: 0` writing directly for a solo owner);
+   - the default rule never matches `production` unless named, as D3 promised;
+   - Health flags an unprotected production that others reach, and the invite sheet says what a
+     developer reaches;
+   - a fresh-project test.
+2. **Deleting an environment erases it at once** (security and data loss, M). Its secrets, versions,
+   changes and requests go behind a typed slug (`envs.rs:882`), while deleting one folder there needs a
+   change request. #585's `Held` doesn't count registries (GitHub Apps, cloud accounts, outside
+   databases) or sinks, so a project holding only those goes on workspace delete alone. The fix:
+   - #585's window for environments (`forgotten_at`, recover, purge);
+   - a protected environment's delete as a change request;
+   - the 409 names the references that will break;
+   - `Held` counts registries and sinks.
+3. **Reach doesn't name people, OAuth clients, services or sandboxes** (governance, S–M). roll MCP's
+   leak-response prompt (#661) builds its plan from reach. It gains `people` (members whose role
+   reveals there), `clients` (`rlo_` by person), `services` (apps services resolving the folder, with
+   their last deploy), `sandboxes` (live copies) and `knew` (people who revealed it and no longer can).
+4. **An offboarded person's leases and one-time shares outlive them** (security, medium-low, S).
+   Disabling an account (an admin, or SCIM deactivate or delete) doesn't run `member_changed`, so
+   their dynamic credentials live out their TTL (up to 7 days) and their shares still open.
+   roll-accounts' disable writes an outbox event, and rolld treats a disabled person as no member.
+5. **Sandbox copies are frozen at create** (S–M). Resolve `secrets_from` afresh at each start as the
+   maker. agent37 recreates the instance on its home. A member event or a disable stops the copier's
+   running sandboxes.
+6. **roll's own AI and chat credentials can't be `roll://` references** (integration, M):
+   - reviewer provider keys (code-control's own table);
+   - agents' endpoints (pasted or `op://`);
+   - the model gateway's upstreams (`env:`/file).
+
+   A leaked model key, the commonest leak, gets no reach, health, validity check or rotation.
+   Bind with `bind_ref` and read with `resolve_as`. The daemon resolves over its machine link.
+7. **apps' environments with their own data drop every linked key** (S). `Values.linked` gains
+   `{name, kind, ref}`, so apps drops only what it branched.
+8. **A local agent outside Lambda** (S–M): the Lambda extension's surface as a sidecar.
+9. **Test gaps** for items 1–4, one per flow.
+10. **Gate hygiene** (S):
+    - `scripts/agents-e2e.mjs` picks rolld ports (use `--addr-file`);
+    - agent-host's `pi_compaction` under the shared gate set, plausibly serde_json's `float_roundtrip`
+      unified through the search crates (compare the numbers as values).
+11. **Search stores cluster passwords in the clear without `ROLL_SECRET_KEY`** (in flight on #601 and
+    #318; track).
+12. **The root of trust beyond AWS KMS, and FIPS** (L; the user's call).
+
+In flight from before: #665 (a placeholder swaps only for its own consumer; references never smuggle a
+bound value; the fallback skips bound keys) is re-levelling on previews' #630, which made the response
+scrub live. Also `perf/secrets-change-stampede` (measuring) and `feature/members-groups` (members v1.1
+phase 1). Elevation waits on the user's D13, D14 and D16.
+
 Done in #20 (merged 2026-11-15 as 1ad248420):
 - the store and its crypto (the deployment key from the environment, a file, or AWS KMS);
 - rolld's mount and link providers (Postgres, Redis, streams, buckets, NoSQL, search: checked
@@ -6434,7 +6495,7 @@ work found). First what can be built now:
    for a product's kind), and resuming what a cut-off paused stays admin only.
 
 Waiting on another thread or on a merge:
-- **Batch 5:** #407, #430, #440; #277, #397, #432; #357, #330 (being levelled and gated); the strict
+- **Batch 5:** #407, #430, #440; #277, #397, #432; #357, #330 (landed 2026-11-20, 8b20ce290); the strict
   parse joins it.
 - **apps:**
   - the git login and `roll://` variables through #407, with the #399 stopgap on main;
@@ -6550,7 +6611,7 @@ cache waited out. Ranked now:
    combined tree gated on main c59fca59c with the live outside-databases check (`batch-3.txt`,
    `batch3-round.sh`). **Batch 3 landed** (2026-11-19 02:56–04:07, one lock turn): #132; #136 + #165;
    #173; #166; #144 (main cd65c5fcb = the gated tree plus #375), with roll redis's auth-bypass fix #375
-   ahead of it in the same turn. Batch 4 (preparing, 2026-11-19 04:15): today's
+   ahead of it in the same turn. Batch 4 (landed 2026-11-19 18:41; this was its plan at 04:15): today's
    PRs (#248 #262 #264 #274 #276 #277 #279 #281 #284 #290 #303 #304 #329 #330, the issuer work) and
    #86 (`batch-4-notes.txt`).
 3. **R2, cut off everything that reaches a folder** (#304): tokens through roll-access's bulk revoke,
