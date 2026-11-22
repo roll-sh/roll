@@ -1596,6 +1596,10 @@ static ROWS: &[Row] = &[
     row("GET", "/v1/apps/projects/{project}/limits", "apps", R, one(&["project"], "project")),
     row("GET", "/v1/apps/projects/{project}/usage", "apps", R, one(&["project"], "project")),
     row("PUT", "/v1/apps/projects/{project}/limits", "apps", ADMIN, one(&["project"], "project")),
+    // Which images may run (signed ones): a supply-chain policy, an admin's call; reading it is read.
+    row("GET", "/v1/apps/projects/{project}/signing", "apps", R, one(&["project"], "project")),
+    row("PUT", "/v1/apps/projects/{project}/signing", "apps", ADMIN, one(&["project"], "project")),
+    row("DELETE", "/v1/apps/projects/{project}/signing", "apps", ADMIN, one(&["project"], "project")),
     row("GET", "/v1/apps/projects/{project}/notifications", "apps", R, one(&["project"], "project")),
     row("POST", "/v1/apps/projects/{project}/notifications", "apps", Act::Body(apps_notification_action), one(&["project"], "project")),
     row("DELETE", "/v1/apps/projects/{project}/notifications/{nid}", "apps", W, one(&["project"], "project")),

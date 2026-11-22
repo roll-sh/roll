@@ -56,6 +56,7 @@ pub mod resp_cache;
 pub mod runtime;
 pub mod sandboxes;
 pub mod peering;
+pub mod signing;
 pub mod shell;
 pub mod spend;
 pub mod store;

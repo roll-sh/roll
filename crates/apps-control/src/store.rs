@@ -338,6 +338,13 @@ CREATE TABLE IF NOT EXISTS error_groups (
     first_seen INTEGER NOT NULL,
     PRIMARY KEY (service, env, fingerprint)
 ) WITHOUT ROWID;
+-- A project's image signing keys (PEM) and whether its image services must meet them
+-- (`signing.rs`).
+CREATE TABLE IF NOT EXISTS project_signing (
+    project TEXT PRIMARY KEY,
+    keys TEXT NOT NULL,
+    required INTEGER NOT NULL
+) WITHOUT ROWID;
 -- Environments' private networks into the customer's own (`peering.rs`): the WireGuard
 -- config's or Tailscale auth key's roll:// reference and who it's read as, never the value; its
 -- routes as JSON. kind: `wireguard`, `tailscale`, or `tailscale <login server URL>`.
@@ -3533,6 +3540,23 @@ impl Store {
 
     pub fn delete_peering(&self, service: &str, env: &str) -> Result<bool> {
         Ok(self.db.execute("DELETE FROM env_peering WHERE service = ? AND env = ?", [service, env])? > 0)
+    }
+
+    pub fn project_signing(&self, project: &str) -> Result<Option<(Vec<String>, bool)>> {
+        Ok(self.db.query_row("SELECT keys, required FROM project_signing WHERE project = ?", [project], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?))).optional()?.map(|(k, r)| (serde_json::from_str(&k).unwrap_or_default(), r != 0)))
+    }
+
+    pub fn set_project_signing(&self, project: &str, keys: &[String], required: bool) -> Result<()> {
+        self.db.execute(
+            "INSERT INTO project_signing (project, keys, required) VALUES (?, ?, ?) ON CONFLICT (project) DO UPDATE SET keys = excluded.keys, required = excluded.required",
+            params![project, serde_json::to_string(keys).map_err(|e| Error::Internal(e.to_string()))?, required as i64],
+        )?;
+        Ok(())
+    }
+
+    pub fn delete_project_signing(&self, project: &str) -> Result<()> {
+        self.db.execute("DELETE FROM project_signing WHERE project = ?", [project])?;
+        Ok(())
     }
 
     pub fn mark_deploy_closed(&self, deployment: &str) -> Result<()> {
