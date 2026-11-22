@@ -373,6 +373,22 @@ async fn search_mode_finds_and_runs_through_the_same_checks() {
     assert!(!log.as_array().unwrap().iter().any(|e| e["tool"].as_str().is_some_and(|t| t.starts_with("roll_"))), "{log}");
 }
 
+/// The operator's policy holds every token's MCP to lockdown and to reading, whatever its URL asks
+/// (`mcp_lockdown`, `mcp_read_only`); the operator's own connection isn't held.
+#[tokio::test]
+async fn the_policy_holds_agents_to_lockdown_and_reading() {
+    let d = Daemon::new();
+    let token = d.token(json!([{ "product": "*", "resources": "*", "actions": { "read": "allow", "write": "allow", "delete": "allow" } }])).await;
+    assert!(names(&d.rpc(&token, "tools/list", json!({})).await).contains(&"postgres_delete_project".to_string()));
+    let (s, _, _) = d.http(OPERATOR, Method::PUT, "/v1/access/policy", Some(json!({ "mcp_lockdown": true, "mcp_read_only": true }))).await;
+    assert_eq!(s, StatusCode::OK);
+    let listed = d.rpc(&token, "tools/list", json!({})).await;
+    assert!(listed["tools"].as_array().unwrap().iter().all(|t| t["annotations"]["readOnlyHint"] == true), "read-only, unasked");
+    let work = d.tool(&token, "code_list_work", json!({})).await;
+    assert!(!work["content"][0]["text"].as_str().unwrap().contains("push the secrets"), "lockdown, unasked: {work}");
+    assert!(names(&d.rpc(OPERATOR, "tools/list", json!({})).await).contains(&"postgres_delete_project".to_string()), "not the operator");
+}
+
 /// Lockdown (`?lockdown=1`): an outside record's text never reaches the model, in the structured
 /// answer or the text block a tool set wrote; the rest of the answer stays.
 #[tokio::test]
@@ -881,6 +897,41 @@ async fn a_members_client_lists_what_their_role_allows() {
     d.workspace.set_role(&roll_workspace::Actor::operator(), &project.id, "usr_alice", "admin", None).unwrap();
     let tools = listed().await;
     assert!(tools.iter().any(|t| t == "secrets_set") && tools.iter().any(|t| t == "secrets_get_values"), "an admin does: {tools:?}");
+}
+
+/// Step-up (SEP-835): an OAuth connection's refused call carries a challenge naming the step-up roll
+/// recorded (the rule it needed, for roll's consent screen to propose): in-band for every client, and as a 403 challenge for a client
+/// that steps up (Claude Code from 2.1.288). A scoped token's refusal stays as it was.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_refused_oauth_call_challenges_for_the_rule() {
+    let d = Daemon::new();
+    let read = serde_json::from_value::<roll_access::store::NewGrant>(json!({ "name": "Claude Code", "rules": [{ "product": "postgres", "resources": "*", "actions": { "read": "allow" } }] })).unwrap();
+    let (_, oauth) = d.access.store.create(&read, roll_auth::GrantKind::Oauth, "admin", None, None).unwrap();
+    let refused = d.tool(&oauth, "postgres_delete_project", json!({ "project": "pa" })).await;
+    let challenge = refused["_meta"]["mcp/www_authenticate"][0].as_str().unwrap_or_default().to_string();
+    assert!(challenge.contains("error=\"insufficient_scope\"") && challenge.contains("scope=\"roll:step-up:stp_") && challenge.contains("resource_metadata="), "{refused}");
+    assert_eq!(refused["isError"], true, "in-band, the refusal as before: {refused}");
+
+    let session = |version: &'static str| {
+        let d = &d;
+        let oauth = oauth.clone();
+        async move {
+            let init = json!({ "jsonrpc": "2.0", "id": 1, "method": "initialize", "params": { "protocolVersion": "2025-11-25", "capabilities": {}, "clientInfo": { "name": "claude-code", "version": version } } });
+            let (_, h, _) = d.http(&oauth, Method::POST, "/v1/mcp", Some(init)).await;
+            let session = h["mcp-session-id"].to_str().unwrap().to_string();
+            let call = json!({ "jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": { "name": "postgres_delete_project", "arguments": { "project": "pa" } } });
+            d.http_with(&oauth, Method::POST, "/v1/mcp", Some(call), &[("mcp-session-id", &session)]).await
+        }
+    };
+    let (s, h, body) = session("2.1.300").await;
+    assert_eq!(s, StatusCode::FORBIDDEN, "{body}");
+    assert!(h["www-authenticate"].to_str().unwrap().contains("roll:step-up:stp_"), "{h:?}");
+    assert_eq!(body["result"]["isError"], true, "the body is the same answer");
+    assert_eq!(session("2.1.200").await.0, StatusCode::OK, "an older Claude Code gets it in-band");
+
+    let token = d.token(json!([{ "product": "postgres", "resources": "*", "actions": { "read": "allow" } }])).await;
+    let plain = d.tool(&token, "postgres_delete_project", json!({ "project": "pa" })).await;
+    assert!(plain["_meta"].get("mcp/www_authenticate").is_none(), "a scoped token has no consent to step up: {plain}");
 }
 
 /// 2026-07-28's `subscriptions/listen` (SEP-2575): the stream starts with the acknowledgement of

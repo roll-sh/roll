@@ -969,6 +969,7 @@ static ROWS: &[Row] = &[
     row("GET", "/v1/access/audit", "access", R, Tgt::Product),
     row("GET", "/v1/access/oauth/clients", "access", R, Tgt::Product),
     row("GET", "/v1/access/oauth/clients/{id}", "access", R, Tgt::Product),
+    row("GET", "/v1/access/oauth/step-ups/{id}", "access", R, Tgt::Product),
     // The MCP server: every tool call is its own request through the gate.
     row("*", "/v1/mcp", "access", R, Tgt::AnyGrant),
     // rolld's own.
@@ -1247,6 +1248,13 @@ static ROWS: &[Row] = &[
     // changes the cluster as the console does; roll secrets checks `reveal` on each reference
     // itself (search_control::secret_refs).
     row("PUT", "/v1/search/clusters/{id}/repositories/{name}", "search", ADMIN, one(PG, "cluster")),
+    // A migration's listing reads another Elasticsearch or OpenSearch through roll with
+    // credentials the caller gives (never kept) and changes nothing on roll: a write. The
+    // migration itself adds to the cluster's reindex whitelist (an admin's setting), creates
+    // indices with the remote's settings and aliases and starts reindex tasks as the cluster's
+    // own user (what the console does, an admin's): admin.
+    row("POST", "/v1/search/clusters/{id}/migrate/inspect", "search", W, one(PG, "cluster")),
+    row("POST", "/v1/search/clusters/{id}/migrate", "search", ADMIN, one(PG, "cluster")),
     row("GET", "/v1/search/clusters/{id}/remotes", "search", R, one(PG, "cluster")),
     row("PUT", "/v1/search/clusters/{id}/remotes/{alias}", "search", ADMIN, one(PG, "cluster")).lends(Lend::Each(search_remote)),
     row("DELETE", "/v1/search/clusters/{id}/remotes/{alias}", "search", ADMIN, one(PG, "cluster")),

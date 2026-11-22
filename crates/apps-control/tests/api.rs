@@ -8468,8 +8468,11 @@ async fn a_closed_environment_uses_its_keys_without_seeing_them() {
     let bundle = moved.files.iter().find(|(p, _)| p == apps_control::deploy::INTERCEPT_CA).map(|(_, c)| c.clone()).unwrap_or_default();
     assert!(bundle.contains("FAKECA\n") && bundle.contains("FAKECA2"), "both CAs: {e}");
     // Renewed while it sleeps: its template is made again now (the new CA, a placeholder made
-    // again), nothing deployed or started.
+    // again), nothing deployed or started. (Asleep once the move above settled: until then its
+    // deploy can still start an instance.)
+    settled(&w, &id, "staging", e["active"]["id"].as_str().unwrap()).await;
     w.apps.live(&id, "staging").sleep().await;
+    assert_eq!(w.apps.live(&id, "staging").awake(), 0);
     let (was, minted_before) = (e["active"]["id"].clone(), minted());
     *vault.1.lock() = "FAKECA3".into();
     w.apps.cron_pass(t + 11 * 60_000).await;

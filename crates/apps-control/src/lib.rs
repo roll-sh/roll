@@ -2731,6 +2731,12 @@ impl Apps {
         let (sid, e) = (service.to_string(), env.to_string());
         self.db(move |s| s.delete_environment(&sid, &e)).await?;
         self.hosts_changed();
+        // Its interception's state here goes with it (the CA itself ends with the project
+        // environment's last closed service, `drop_network_if_unused`).
+        let key = env_key(service, env);
+        self.intercept_cas.lock().remove(&key);
+        self.intercept_pending.lock().remove(&key);
+        self.intercept_renewing.lock().remove(&key);
         self.release_domains(&domains).await;
         self.teardown_live(service, env).await;
         self.set_access_cache(service, env, None);

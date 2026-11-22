@@ -3302,7 +3302,14 @@ roll and nothing else, so a fork's preview can't send its branched data anywhere
   secrets' filter, and re-dial with real verification (`crates/roll-intercept`, shared with roll
   previews, and rolld's `CaInterception`). Its instances trust the CA: a file of the host's roots
   and the CA at `/etc/roll/intercept-ca.pem`, named by `NODE_EXTRA_CA_CERTS`, `SSL_CERT_FILE`,
-  `REQUESTS_CA_BUNDLE` and `CURL_CA_BUNDLE` (the app's own win). The CA lives a day, and can end
+  `REQUESTS_CA_BUNDLE` and `CURL_CA_BUNDLE` (the app's own win). That covers Node, Python
+  (requests, httpx through `SSL_CERT_FILE`), Ruby, PHP, Go, curl and OpenSSL-based clients. It
+  doesn't cover a JVM (its truststore is its own: add the file with `keytool`, or
+  `-Djavax.net.ssl.trustStore`), .NET on Linux before it reads `SSL_CERT_FILE`, rustls with
+  `webpki-roots` (compiled-in roots: use `rustls-native-certs`), or an app that sets its own
+  `SSL_CERT_FILE`. Those need the CA added by the app's image or start command. The services of
+  one project environment share one CA (the consumer is the project environment), and an awake
+  closed environment moves its instances to the next CA about once a day. The CA lives a day, and can end
   early (a binding narrowed, a placeholder revoked; roll secrets' proxy then refuses its
   connections). Each minute the owner asks roll secrets which CA stands: a new one comes three
   hours before the old one's end, or when its placeholders are bound to a host the CA doesn't

@@ -78,7 +78,9 @@ pub trait ResponseScrub: Send + Sync {
 #[derive(Clone)]
 pub struct Leaf {
     pub cert_pem: String,
-    pub key_pem: String,
+    /// The leaf's private key: wiped from memory when the last copy goes (the [`Leaves`] cache
+    /// keeps one per host for the CA's life).
+    pub key_pem: zeroize::Zeroizing<String>,
 }
 
 /// A request as the filter sees it: `host` is the one connected to (the name TLS is verified for
@@ -481,7 +483,7 @@ mod tests {
     fn leaf_of(issuer: &rcgen::Issuer<'static, rcgen::KeyPair>, host: &str) -> Leaf {
         let key = rcgen::KeyPair::generate().unwrap();
         let cert = rcgen::CertificateParams::new(vec![host.to_string()]).unwrap().signed_by(&key, issuer).unwrap();
-        Leaf { cert_pem: cert.pem(), key_pem: key.serialize_pem() }
+        Leaf { cert_pem: cert.pem(), key_pem: key.serialize_pem().into() }
     }
 
     fn roots(pem: &str) -> rustls::RootCertStore {
