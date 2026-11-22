@@ -8381,14 +8381,15 @@ async fn a_push_rule_with_oidc_carries_rolls_token() {
 /// What it was asked, in order, and the CA it answers (a test swaps it: a renewal).
 struct FakeVault(Mutex<Vec<String>>, Mutex<String>);
 
-struct FakeInterception;
+/// Its CA's name answers `covers("ca:<name>")`: which CA a network's proxy serves.
+struct FakeInterception(String);
 
 impl roll_intercept::Interception for FakeInterception {
     fn live(&self) -> anyhow::Result<bool> {
         Ok(true)
     }
     fn covers(&self, host: &str) -> bool {
-        host == "api.stripe.com"
+        host == "api.stripe.com" || host.strip_prefix("ca:") == Some(self.0.as_str())
     }
     fn leaf(&self, _host: &str) -> anyhow::Result<roll_intercept::Leaf> {
         anyhow::bail!("no leaves in the fake")
@@ -8423,7 +8424,7 @@ impl apps_control::integrations::SecretSource for FakeVault {
     async fn intercept(&self, project: &str, env: &str, _hosts: &[String]) -> anyhow::Result<Option<apps_control::integrations::Intercept>> {
         self.0.lock().push(format!("intercept {project}/{env}"));
         let ca = self.1.lock().clone();
-        Ok(Some(apps_control::integrations::Intercept { ca_pem: format!("-----BEGIN CERTIFICATE-----\n{ca}\n-----END CERTIFICATE-----"), expires_at: code_sql::now_ms() + 86_400_000, interception: Arc::new(FakeInterception) }))
+        Ok(Some(apps_control::integrations::Intercept { ca_pem: format!("-----BEGIN CERTIFICATE-----\n{ca}\n-----END CERTIFICATE-----"), expires_at: code_sql::now_ms() + 86_400_000, interception: Arc::new(FakeInterception(ca)) }))
     }
     async fn end_intercept(&self, project: &str, env: &str) -> anyhow::Result<()> {
         self.0.lock().push(format!("end {project}/{env}"));
@@ -8545,6 +8546,67 @@ async fn a_closed_environment_uses_its_keys_without_seeing_them() {
     assert_eq!((minted() > minted_before, call(&w.api, "GET", &format!("{base}/staging"), None).await.1["active"]["id"].clone()), (true, was), "a placeholder made again, no deploy");
     assert!(call(&w.api, "DELETE", &format!("{base}/staging"), None).await.0.is_success());
     assert!(vault.0.lock().contains(&format!("end {}/staging", w.project)), "{:?}", vault.0.lock());
+}
+
+/// A project environment's closed services share one network and its proxy, so one CA: a renewal
+/// never switches the proxy while another service there runs instances that trust only the old
+/// one (a sleeping service's template trusts both meanwhile), and opening them again ends the
+/// placeholders only once none of them runs what was deployed closed.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn closed_services_on_one_network_move_to_a_new_ca_together() {
+    let vault = Arc::new(FakeVault(Default::default(), Mutex::new("FAKECA".into())));
+    let v2 = vault.clone();
+    let w = world_full(|_| {}, false, move |d| d.secrets = v2).await;
+    let mut ids = Vec::new();
+    for (name, min) in [("api", 0), ("web", 1)] {
+        let (svc, _) = image_service(&w, name, json!({"port": 80, "min_instances": min})).await;
+        let id = svc["id"].as_str().unwrap().to_string();
+        let set = |egress: Value| {
+            let mut req = Request::builder().method("PUT").uri(format!("/v1/apps/services/{id}/environments/staging")).header("content-type", "application/json").body(Body::from(json!({ "egress": egress }).to_string())).unwrap();
+            req.extensions_mut().insert(roll_auth::SignedIn { user: "usr_ada".into(), handle: "ada".into(), admin: true, code_owner: None, session: "ses_1".into() });
+            req
+        };
+        assert!(w.api.clone().oneshot(set(json!({"mode": "roll", "hosts": ["api.stripe.com"]}))).await.unwrap().status().is_success());
+        let (_, d) = call(&w.api, "POST", &format!("/v1/apps/services/{id}/environments/staging/deploys"), Some(json!({}))).await;
+        assert_eq!(settled(&w, &id, "staging", d["id"].as_str().unwrap()).await["status"], "active");
+        ids.push(id);
+    }
+    let (api, web) = (ids[0].clone(), ids[1].clone());
+    let network = apps_control::closed_network_name(&w.project, "staging");
+    let serves = |ca: &str| w.fake.interceptions.lock().get(&network).is_some_and(|i| i.covers(&format!("ca:{ca}")));
+    assert!(serves("FAKECA"));
+    let bundle = |id: &str| w.apps.live(id, "staging").template().unwrap().spec.files.iter().find(|(p, _)| p == apps_control::deploy::INTERCEPT_CA).map(|(_, c)| c.clone()).unwrap_or_default();
+    // api sleeps, web runs; the CA is renewed.
+    w.apps.live(&api, "staging").sleep().await;
+    assert!(w.apps.live(&web, "staging").awake() > 0);
+    let was = call(&w.api, "GET", &format!("/v1/apps/services/{web}/environments/staging"), None).await.1["active"]["id"].clone();
+    *vault.1.lock() = "FAKECA2".into();
+    w.apps.cron_pass(code_sql::now_ms() + 61_000).await;
+    // Sleeping api's template trusts both (web's instances still trust only the old CA), and the
+    // proxy moves once web's move to both is live.
+    assert!(bundle(&api).contains("FAKECA\n") && bundle(&api).contains("FAKECA2"), "{}", bundle(&api));
+    get_until(&w.api, &format!("/v1/apps/services/{web}/environments/staging"), |e| e["active"]["id"] != was && e["active"]["id"].is_string()).await;
+    for _ in 0..200 {
+        if serves("FAKECA2") {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert!(serves("FAKECA2") && bundle(&web).contains("FAKECA2"), "{}", bundle(&web));
+    // Both opened; api redeploys open, web still runs what was deployed closed: its placeholders
+    // stay until web is open too.
+    for id in [&api, &web] {
+        assert!(call(&w.api, "PUT", &format!("/v1/apps/services/{id}/environments/staging"), Some(json!({"egress": {"mode": "open"}}))).await.0.is_success());
+    }
+    let (_, d) = call(&w.api, "POST", &format!("/v1/apps/services/{api}/environments/staging/deploys"), Some(json!({}))).await;
+    settled(&w, &api, "staging", d["id"].as_str().unwrap()).await;
+    let ended = || vault.0.lock().iter().any(|l| l.starts_with("end "));
+    w.apps.cron_pass(code_sql::now_ms() + 30 * 60_000).await;
+    assert!(!ended(), "web still uses them: {:?}", vault.0.lock());
+    let (_, d) = call(&w.api, "POST", &format!("/v1/apps/services/{web}/environments/staging/deploys"), Some(json!({}))).await;
+    settled(&w, &web, "staging", d["id"].as_str().unwrap()).await;
+    w.apps.cron_pass(code_sql::now_ms() + 60 * 60_000).await;
+    assert!(ended(), "{:?}", vault.0.lock());
 }
 
 /// Work after an answer (Vercel's `waitUntil`): an instance that asks at `ROLL_AWAKE_URL` isn't

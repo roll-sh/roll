@@ -338,6 +338,11 @@ CREATE TABLE IF NOT EXISTS error_groups (
     first_seen INTEGER NOT NULL,
     PRIMARY KEY (service, env, fingerprint)
 ) WITHOUT ROWID;
+-- Deployments whose instances run closed (egress roll: placeholders and interception), so any
+-- node can tell whether a project environment still uses its placeholders.
+CREATE TABLE IF NOT EXISTS deploy_closed (
+    deployment TEXT PRIMARY KEY
+) WITHOUT ROWID;
 -- Sandboxes (short-lived containers made by API, `sandboxes.rs`): each one's container and its end.
 CREATE TABLE IF NOT EXISTS sandboxes (
     id TEXT PRIMARY KEY,
@@ -3464,6 +3469,29 @@ impl Store {
             (None, _, Some(t)) => self.db.query(&format!("SELECT {COLS} FROM sandboxes WHERE expires_at <= ? ORDER BY expires_at"), [t], row)?,
             (None, _, None) => self.db.query(&format!("SELECT {COLS} FROM sandboxes ORDER BY created_at"), (), row)?,
         })
+    }
+
+    pub fn mark_deploy_closed(&self, deployment: &str) -> Result<()> {
+        self.db.execute("INSERT INTO deploy_closed (deployment) VALUES (?) ON CONFLICT (deployment) DO NOTHING", [deployment])?;
+        Ok(())
+    }
+
+    /// Whether any service of `project` is closed in `env`: its environment's row, or the live
+    /// deployment it runs (one deployed closed before it was opened).
+    pub fn closed_in_use(&self, project: &str, env: &str) -> Result<bool> {
+        for svc in self.services(Some(project))? {
+            let Ok(row) = self.environment(&svc.id, env) else { continue };
+            if row.egress.closed() {
+                return Ok(true);
+            }
+            if let Some(active) = row.active {
+                let n: i64 = self.db.query_row("SELECT COUNT(*) FROM deploy_closed WHERE deployment = ?", [&active], |r| r.get(0))?;
+                if n > 0 {
+                    return Ok(true);
+                }
+            }
+        }
+        Ok(false)
     }
 
     pub fn delete_sandbox(&self, id: &str) -> Result<bool> {

@@ -98,6 +98,8 @@ pub struct Fake {
     pub commands_run: Mutex<Vec<(String, String)>>,
     /// Each closed network's interception: whether its egress proxies have one.
     pub intercepted: Mutex<std::collections::HashMap<String, bool>>,
+    /// Each closed network's interception as its proxies have it now (which CA they serve).
+    pub interceptions: Mutex<std::collections::HashMap<String, std::sync::Arc<dyn roll_intercept::Interception>>>,
     /// The manifests of the image archives it loaded.
     pub loaded: Mutex<Vec<String>>,
     /// Images removed ([`Builder::remove_image`]).
@@ -384,6 +386,10 @@ async fn serve(spec: InstanceSpec, listener: tokio::net::TcpListener, log: LogSi
 impl Runtime for Fake {
     fn set_interception(&self, network: &str, i: Option<std::sync::Arc<dyn roll_intercept::Interception>>) {
         self.intercepted.lock().insert(network.to_string(), i.is_some());
+        match i {
+            Some(i) => self.interceptions.lock().insert(network.to_string(), i),
+            None => self.interceptions.lock().remove(network),
+        };
     }
 
     fn intercepted(&self, network: &str) -> Option<super::egress::Intercepted> {
