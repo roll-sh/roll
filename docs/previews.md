@@ -2413,20 +2413,18 @@ Ranked by what a person notices first. Done so far:
   runtime runs, printable schema lines, budget alerts that can't be lost or silenced, followed
   logs that say when lines were missed and stop with a hidden tab).
 
-1. **A preview event feed for roll MCP, in review** (feat/roll-previews-events, roll MCP's ask):
-   `GET /v1/previews/events` (created, ready, failed, visual_change, deleted; each seq taken in
-   the write that made it so), which roll MCP's Events follow, so an agent hears "ready" or "a
-   visual change waits" instead of polling.
-2. **The data step's Postgres compute start** (pg-control's; watch): with the health checks no
+1. **The data step's Postgres compute start** (pg-control's; watch): with the health checks no
    longer waiting on a poll (#646), the live run's timeline is data 11.0 s · setup 4.4 s · deploy
    0.02 s · checks 6.1 s under load. Most of the data step is the Postgres branch's compute start
    (3.3 s in its log) and its masking, which needs that compute up: pg-control's to shorten.
-3. **Previews for the members thread's next products**: once roll apps' and roll search's routes
+2. **Previews for the members thread's next products**: once roll apps' and roll search's routes
    become member routes (docs/members.md, v1.1), a preview's roll apps services and search branch
    follow the same roles, checked live against a member's session.
-4. **Cheap Postgres branches on ext4: overlay volumes over a frozen base** (pg-control; measured
+3. **Cheap Postgres branches on ext4: overlay volumes over a frozen base** (pg-control; measured
    2026-11-17): 0.97 s against 3.5 s for a 1.4 GB copy, but a write copies the whole table file.
-5. **Watch: pg-control's recovery to a time seconds old** (unowned).
+4. **Watch: pg-control's recovery to a time seconds old** (unowned).
+
+Landed 2026-11-22, late afternoon: a preview event feed (#713, roll MCP's ask: `GET /v1/previews/events`, created, ready, failed, visual_change and deleted, each seq taken in the write that made it so; checked live by `scripts/preview-cost.sh`), which roll MCP's Events follow.
 
 Landed 2026-11-22, afternoon: a preview's interception CA kept until its hosts change or it nears its end (#686, on roll secrets' #705: no more hourly restarts of an intercepted preview's services), and a roll apps service's earlier pushes at each build's own deployment URL (#709, on roll apps' #711: they had been `roll.toml` services' only).
 
