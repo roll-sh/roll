@@ -1252,6 +1252,21 @@ pub enum AppsCmd {
         #[arg(long)]
         hard: Option<f64>,
     },
+    /// The project's image signing rule (Binary Authorization): `--key cosign.pub` (repeated)
+    /// requires its image services' images to carry a cosign signature by one of them,
+    /// `--not-required` keeps the keys without enforcing, `--remove` drops the rule; alone, it
+    /// shows it. Admin.
+    Signing {
+        #[command(flatten)]
+        target: Target,
+        /// A public key file in PEM (cosign generate-key-pair's cosign.pub).
+        #[arg(long = "key", value_name = "FILE", conflicts_with = "remove")]
+        keys: Vec<PathBuf>,
+        #[arg(long, requires = "keys")]
+        not_required: bool,
+        #[arg(long)]
+        remove: bool,
+    },
     /// This month's use and what it costs.
     Usage {
         #[command(flatten)]
@@ -4877,6 +4892,29 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
                 }
                 json!({ "page": p, "incidents": inc["incidents"] })
             }
+        }
+        AppsCmd::Signing { target, keys, not_required, remove } => {
+            let svc = service(api, &target).await?;
+            let path = format!("/v1/apps/projects/{}/signing", enc(&s(&svc["project"])));
+            let v = if remove {
+                api.call(reqwest::Method::DELETE, &path, None).await?;
+                json!({ "keys": [], "required": false })
+            } else if !keys.is_empty() {
+                let pems = keys.iter().map(|k| std::fs::read_to_string(k).with_context(|| format!("reading {}", k.display()))).collect::<anyhow::Result<Vec<_>>>()?;
+                api.call(reqwest::Method::PUT, &path, Some(json!({ "keys": pems, "required": !not_required }))).await?
+            } else {
+                api.get(&path).await?
+            };
+            if !json_out {
+                let n = v["keys"].as_array().map_or(0, Vec::len);
+                println!("{}", match (n, v["required"].as_bool().unwrap_or(false)) {
+                    (0, _) => "no signing rule: any image deploys".to_string(),
+                    (n, true) => format!("image services' images must be signed by one of {n} key(s)"),
+                    (n, false) => format!("{n} key(s) kept, not required"),
+                });
+                return Ok(());
+            }
+            v
         }
         AppsCmd::Limits { target, alert, hard } => {
             let svc = service(api, &target).await?;

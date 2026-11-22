@@ -396,7 +396,7 @@ fn apps_area(method: &str, path: &str) -> Area {
         },
         ["services", "activity"] | ["events"] => "observe",
         ["services", "links"] | ["services", "restore"] | ["import"] | ["plan"] => "configure",
-        ["projects", "drains" | "notifications" | "limits" | "usage" | "status-page" | "preview-domain" | "export", ..] => "project",
+        ["projects", "drains" | "notifications" | "limits" | "usage" | "status-page" | "preview-domain" | "export" | "signing", ..] => "project",
         _ => return Area::Unplaced,
     };
     Area::One(area)
@@ -1456,6 +1456,17 @@ static TOOLS: &[Tool] = &[
     t("apps_cron_run_logs", "A cron run's logs", "A cron run's output (its lines in the environment's log).", "apps", "GET", "/v1/apps/services/{service}/environments/{env}/runs/{run}/logs", &[SERVICE, ENV, req("run", "Run id"), q("tail", Ty::Int, "Last lines")]),
     t("apps_cancel_cron_run", "Cancel a cron run", "Stop a running cron run (production is a \"deploy\" action).", "apps", "POST", "/v1/apps/services/{service}/environments/{env}/runs/{run}/cancel", &[SERVICE, ENV, req("run", "Run id")]),
     t("apps_run_cron", "Run a cron now", "Run a cron service's job now (in production this is a deploy action).", "apps", "POST", "/v1/apps/services/{service}/environments/{env}/runs", &[SERVICE, ENV]),
+    t("apps_signing", "Image signing rule", "A project's signing keys (cosign public keys) and whether its image services must be signed by one of them to deploy.", "apps", "GET", "/v1/apps/projects/{project}/signing", &[req("project", "Workspace project")]),
+    t(
+        "apps_set_signing",
+        "Require signed images",
+        "Binary Authorization for a project's image services: with required (the default), a deploy pins the image and needs its cosign signature (cosign sign --key) by one of keys, P-256 public keys in PEM (cosign.pub), or it fails before anything switches. roll's own builds pass. An admin's call.",
+        "apps",
+        "PUT",
+        "/v1/apps/projects/{project}/signing",
+        &[req("project", "Workspace project"), breq("keys", Ty::Arr, "1-10 public keys in PEM (cosign generate-key-pair's cosign.pub)"), b("required", Ty::Bool, "Refuse unsigned images (default true; false keeps the keys without enforcing)")],
+    ),
+    t("apps_delete_signing", "Stop requiring signed images", "Remove a project's signing keys and rule (an admin's call).", "apps", "DELETE", "/v1/apps/projects/{project}/signing", &[req("project", "Workspace project")]).destructive(),
     t("apps_limits", "Spend limits", "A project's apps spend limits and how much of them is used.", "apps", "GET", "/v1/apps/projects/{project}/limits", &[req("project", "Workspace project")]),
     t("apps_project_usage", "A project's apps cost by service", "What a project's apps used and cost in a month (YYYY-MM, this one by default) by service and environment at roll's prices, most costly first: CPU and memory time, requests, egress and build time. Each service's previews are one row, deleted services one; this month's total is projected to its end at the pace so far. Which service costs the most starts here.", "apps", "GET", "/v1/apps/projects/{project}/usage", &[req("project", "Workspace project"), q("month", Ty::Str, "YYYY-MM (this month by default; not one to come)")]),
     t("apps_set_limits", "Set spend limits", "A project's monthly apps spend: alert_usd notifies, hard_usd pauses the whole project once reached (null: none). An admin's call.", "apps", "PUT", "/v1/apps/projects/{project}/limits", &[req("project", "Workspace project"), bnull("alert_usd", Ty::Num, "Notify past this many dollars a month (left out or cleared: no alert; both are set each time)"), bnull("hard_usd", Ty::Num, "Pause the project past this (left out or cleared: no cap; both are set each time)")]),
