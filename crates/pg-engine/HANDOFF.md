@@ -14261,8 +14261,8 @@ note, still open).
 
 ## Short write transactions, round 11: the standing table, a big table's estimate records (agent 289)
 
-BENCH.md "Short write transactions, round 11" has the tables. The PGO row of the standing table is
-not in this candidate (its build waited for the gate): it follows in a docs-only `cand/a289-2`. Lane A through `tools/lane.sh`, one
+BENCH.md "Short write transactions, round 11" has the tables (the PGO row measured five hours
+after the others: its build waited for this round's gate). Lane A through `tools/lane.sh`, one
 server (or one pair) a hold, harness `~/.cache/a289/bench` (`lib.sh`: pgbench from PostgreSQL
 18.6's image, `pgbench -i -s 32`, `-M prepared`, 10 s runs; counts from `perf stat -a -C <server
 CPUs> -G <server cgroup>` over 8 s of the run: user and kernel instructions and cycles, switches
@@ -14276,7 +14276,10 @@ both on instructions (40.2-40.6k user a read against PostgreSQL's 44.7-45.4k and
 six syscalls, pgrust four) but trails pgrust on cycles (95-102k against 71-84k) and tps (72-82k
 against 86-89k). TPC-B-like was far behind: 1.38-1.40 M user instructions a transaction against
 320-326k (PostgreSQL) and 386-391k (pgrust), 3,664-3,922 tps against 5,764-7,663, p99 13-38 ms
-against 3-12. Each statement alone (8 clients, one autocommitted statement a transaction) put
+against 3-12. The PGO build (`621de3f17`, one run a cell): select-only 32.0-32.2k user
+instructions and 61-67k user cycles a read, ahead of pgrust on both (99,223 tps against 88,900
+at 32 clients; at 8 clients 65,652 against 85,942, that run at 1.27 foreign cores); TPC-B-like
+1.13-1.34 M user instructions, the same per-commit estimate work. Each statement alone (8 clients, one autocommitted statement a transaction) put
 all of it in one: **`UPDATE pgbench_accounts` 698k user instructions against 93k and 95k** (6,285
 tps against 14,529 and 19,739); tellers 80k (PostgreSQL 88k, pgrust 98k), branches 323k (161k,
 194k: 32 rows under 8 clients), the history INSERT 56k (52k, 54k), BEGIN/END 24k (25k, 38k).

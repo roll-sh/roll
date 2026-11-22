@@ -1664,7 +1664,9 @@ min. Foreign cores: other tenants' busy time on the four server CPUs during the 
 select-only transactions, 20% of TPC-B's). ONE run per cell (the brief's rule): tps and latency
 are readings under that load; instructions and the counted quantities hold under it.
 
-The PGO row (`tools/dist-pgo.sh` of `621de3f17`) follows in `cand/a289-2`.
+The PGO row is `tools/dist-pgo.sh` of `621de3f17` (its own training run), measured at 09:55 UTC,
+five hours after the others (its build waited for this round's gate): the same lane and
+settings, not the same sitting.
 
 Same-day table, 2026-11-22 04:50-05:20 UTC (roll: origin `621de3f17`; pgrust's published image is
 PGO-built; the `c2` row is this round's two commits on `621de3f17`, run at 06:50 while a
@@ -1673,18 +1675,22 @@ quick-check built on other CPUs):
 | workload | clients | server | tps | p50 / p99 ms | user instr/txn | user cycles/txn | kernel instr/txn | kernel cycles/txn | CPU µs/txn | syscalls/txn | yields/txn | futex/txn | switches vol / invol per txn | foreign cores |
 |---|---:|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
 | select-only | 8 | roll, plain dist | 72,139 | 0.10 / 0.25 | 40,600 | 94,911 | 38,228 | 64,781 | 45.2 | 2.1 | 0.00 | 0.00 | 0.96 / 0.18 | 0.42 |
+| select-only | 8 | roll, PGO | 65,652 | 0.10 / 0.29 | 31,988 | 60,629 | 39,225 | 61,024 | 39.1 | 2.2 | 0.00 | 0.00 | 0.96 / 0.13 | 1.27 |
 | select-only | 8 | roll, plain dist + round 11 | 55,166 | 0.13 / 0.35 | 40,837 | 97,439 | 39,723 | 69,535 | 52.2 | 2.1 | 0.00 | 0.00 | 0.97 / 0.17 | 1.18 |
 | select-only | 8 | PostgreSQL 18.6 | 45,623 | 0.17 / 0.41 | 45,366 | 112,851 | 72,988 | 129,963 | 72.4 | 6.1 | 0.00 | 0.00 | 1.00 / 0.23 | 0.6 |
 | select-only | 8 | pgrust (published, PGO) | 85,942 | 0.08 / 0.21 | 42,371 | 71,236 | 41,989 | 65,965 | 38.6 | 3.9 | 0.00 | 0.00 | 0.96 / 0.18 | 0.34 |
 | select-only | 32 | roll, plain dist | 82,278 | 0.35 / 0.90 | 40,235 | 101,879 | 36,893 | 64,772 | 47.2 | 2.0 | 0.00 | 0.00 | 0.98 / 0.02 | 0.17 |
+| select-only | 32 | roll, PGO | 99,223 | 0.25 / 0.96 | 32,213 | 67,238 | 37,858 | 58,584 | 38.1 | 2.0 | 0.00 | 0.00 | 1.00 / 0.03 | 0.34 |
 | select-only | 32 | roll, plain dist + round 11 | 68,224 | 0.40 / 1.76 | 40,579 | 103,164 | 38,369 | 67,586 | 53.1 | 2.0 | 0.00 | 0.00 | 0.99 / 0.03 | 0.84 |
 | select-only | 32 | PostgreSQL 18.6 | 51,509 | 0.58 / 1.50 | 44,710 | 124,904 | 73,286 | 135,179 | 77.8 | 6.0 | 0.00 | 0.00 | 1.00 / 0.02 | 0.26 |
 | select-only | 32 | pgrust (published, PGO) | 88,900 | 0.31 / 0.99 | 41,655 | 83,779 | 41,201 | 67,899 | 43.1 | 4.0 | 0.00 | 0.08 | 0.98 / 0.02 | 0.5 |
 | TPC-B-like | 8 | roll, plain dist | 3,922 | 1.44 / 13.28 | 1,400,456 | 2,004,127 | 397,725 | 771,073 | 829.6 | 24.8 | 2.69 | 1.96 | 8.33 / 4.03 | 0.65 |
+| TPC-B-like | 8 | roll, PGO | 4,217 | 1.26 / 15.39 | 1,335,091 | 1,576,635 | 396,419 | 709,568 | 695.2 | 25.5 | 2.31 | 1.84 | 8.34 / 3.45 | 0.89 |
 | TPC-B-like | 8 | roll, plain dist + round 11 | 4,356 | 1.44 / 7.16 | 680,732 | 1,335,561 | 349,712 | 692,041 | 620.9 | 20.4 | 2.31 | 1.84 | 8.38 / 3.52 | 1.26 |
 | TPC-B-like | 8 | PostgreSQL 18.6 | 6,794 | 1.04 / 2.95 | 319,772 | 738,937 | 426,664 | 817,115 | 482.2 | 36.4 | 0.00 | 1.25 | 7.95 / 2.03 | 0.58 |
 | TPC-B-like | 8 | pgrust (published, PGO) | 5,764 | 1.20 / 5.36 | 390,825 | 820,994 | 350,236 | 665,596 | 470.2 | 31.6 | 0.00 | 2.54 | 8.76 / 1.75 | 1.16 |
 | TPC-B-like | 32 | roll, plain dist | 3,664 | 6.41 / 38.35 | 1,376,687 | 2,218,978 | 420,384 | 841,417 | 947.6 | 27.2 | 3.27 | 4.36 | 9.58 / 3.67 | 0.56 |
+| TPC-B-like | 32 | roll, PGO | 4,665 | 4.60 / 36.15 | 1,127,024 | 1,523,022 | 422,151 | 755,960 | 697.4 | 27.3 | 3.10 | 4.40 | 9.71 / 3.55 | 0.55 |
 | TPC-B-like | 32 | roll, plain dist + round 11 | 4,011 | 6.09 / 33.80 | 972,356 | 1,694,286 | 368,677 | 748,019 | 780.5 | 25.1 | 2.83 | 4.12 | 9.33 / 3.41 | 1.02 |
 | TPC-B-like | 32 | PostgreSQL 18.6 | 7,274 | 3.99 / 9.95 | 325,956 | 977,799 | 468,688 | 912,673 | 540.7 | 40.1 | 0.00 | 2.29 | 8.88 / 0.48 | 0.16 |
 | TPC-B-like | 32 | pgrust (published, PGO) | 7,663 | 3.62 / 11.84 | 385,828 | 997,236 | 340,841 | 639,526 | 488.1 | 32.6 | 0.00 | 3.71 | 9.22 / 0.50 | 0.46 |
