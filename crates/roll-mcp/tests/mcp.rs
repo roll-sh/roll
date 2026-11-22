@@ -378,7 +378,17 @@ async fn search_mode_finds_and_runs_through_the_same_checks() {
     let (_, _, ro) = d.http(OPERATOR, Method::POST, &at("&readonly=1"), Some(json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/list" }))).await;
     assert!(!names(&ro["result"]).contains(&"roll_run".into()), "{ro}");
     let (s, _, _) = d.http(OPERATOR, Method::POST, "/v1/mcp?tools=some", Some(json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/list" }))).await;
-    assert_eq!(s, StatusCode::BAD_REQUEST);
+    assert_eq!(s, StatusCode::BAD_REQUEST, "a name no tool has: refused, not silently empty");
+    // Single tools picked (GitHub's X-MCP-Tools list) or dropped (exclusion wins): what's shown and
+    // may be called, never what's allowed.
+    let list = |path: &'static str, h: &'static [(&'static str, &'static str)]| {
+        let d = &d;
+        async move { names(&d.http_with(OPERATOR, Method::POST, path, Some(json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/list" })), h).await.2["result"]) }
+    };
+    assert_eq!(list("/v1/mcp", &[("x-mcp-tools", "postgres_list_projects,postgres_delete_project")]).await, ["postgres_list_projects", "postgres_delete_project"]);
+    assert_eq!(list("/v1/mcp?tools=postgres_list_projects,postgres_delete_project&exclude_tools=postgres_delete_project", &[]).await, ["postgres_list_projects"]);
+    let (_, _, dropped) = d.http(OPERATOR, Method::POST, "/v1/mcp?exclude_tools=postgres_delete_project", Some(json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": { "name": "postgres_delete_project", "arguments": { "project": "pa" } } }))).await;
+    assert_eq!(dropped["result"]["isError"], true, "{dropped}");
     // The audit log names the tool that ran, not the run tool.
     let log = d.audit_until(|l| l.as_array().is_some_and(|a| a.iter().any(|e| e["tool"] == "postgres_list_projects" && !e["grant_id"].is_null()))).await;
     assert!(!log.as_array().unwrap().iter().any(|e| e["tool"].as_str().is_some_and(|t| t.starts_with("roll_"))), "{log}");
