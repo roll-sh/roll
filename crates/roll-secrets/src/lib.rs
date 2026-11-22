@@ -590,6 +590,11 @@ impl Secrets {
         db.ensure_schema(alerts::SCHEMA)?;
         db.ensure_schema(decoys::SCHEMA)?;
         db.ensure_schema(intercept::SCHEMA)?;
+        // When a CA's hosts were last checked against the bindings, when one of the placeholders
+        // they come from ends, and when the consumer gained a host it doesn't name (intercept.rs).
+        db.add_column("intercept_cas", "checked_at", "INTEGER")?;
+        db.add_column("intercept_cas", "bound_until", "INTEGER")?;
+        db.add_column("intercept_cas", "stale_at", "INTEGER")?;
         db.ensure_schema(placeholders::SCHEMA)?;
         db.ensure_schema(rotators::SCHEMA)?;
         db.ensure_schema(saas::SCHEMA)?;

@@ -1246,7 +1246,7 @@ A link is `{kind, ref, field, mode, options}`:
   - then what it issued is revoked: leases and managed credentials, its decoys, its workload
     identities' tokens (roll-access's grants, so an old one doesn't work after a recovery either),
     its placeholders, and the interception CAs of consumers that held a placeholder of it that name
-    its hosts (`end_unbound_intercept_cas`; they get a new one, without its hosts, from
+    its hosts (`recheck_intercept_cas`; they get a new one, without its hosts, from
     `…/intercept-ca`). Its one-time shares and secret
     requests end, its gateways' links close and open nothing more, and its CAs answer ACME with
     `unauthorized` (their CRLs are still served). The rest is kept for a recovery window
@@ -3560,6 +3560,16 @@ agents' sandboxes). Each one does exactly this:
    - It lives a day (`intercept::DEFAULT_TTL`); `ttl` can shorten it, to 5 minutes at least, and
      nothing lengthens it (`MAX_TTL`). Asking again mints a new key and certificate. Earlier ones
      stay valid until they expire, so a container that hasn't reloaded keeps working.
+   - **Keep it while `Secrets::intercept_ca_live(id)` says so, and ask again when it doesn't.** A
+     CA stays live until its hosts change, it nears its end (the last eighth of its life: 3 hours
+     of a day's CA), or its consumer ends. Its hosts change when the consumer is bound to a host
+     the CA doesn't name (a placeholder issued for another key, a binding widened): the CA is
+     then stale, still standing for the hosts it names (step 3) but no longer live. Or the
+     consumer loses a host the CA names, and the CA ends (see Ending). Don't re-mint on a timer:
+     each new CA restarts what trusts it. `intercept_ca_live` is one row read; the bindings are
+     read again only when the CA's last check is a minute old, one of the placeholders its hosts
+     come from has ended since, or a write that couldn't name its consumers (a key or
+     environment deleted, a member's rights changed) marked it.
    - Its name constraints are critical. They permit DNS names for the bound hosts only: an exact
      binding (`api.stripe.com`) is permitted with its subdomains excluded (`.api.stripe.com`)
      unless another binding sits under it, and a wildcard binding (`*.stripe.com`) permits the
@@ -3582,8 +3592,9 @@ agents' sandboxes). Each one does exactly this:
 3. **Terminate TLS only for the bound hosts.** For each connection, take the host the client asked
    for (SNI, or the `CONNECT` target). If `InterceptCa::covers(host)` is false, forward it as a
    `CONNECT` tunnel untouched: no termination, no logging of its bytes. If it covers the host, check
-   `Secrets::intercept_ca_live(id)` (never cached: an ended consumer stops the next connection),
-   then serve `InterceptCa::leaf(host)`, a certificate for exactly that name that lives as long as
+   `Secrets::intercept_ca_stands(id)` (never cached: an ended consumer stops the next connection;
+   a stale CA still stands, so a newly bound host doesn't cut the hosts it names before the
+   consumer swaps it), then serve `InterceptCa::leaf(host)`, a certificate for exactly that name that lives as long as
    the CA. One label under a wildcard binding, never deeper.
 4. **Filter each request** with `roll_secrets::proxy::filter`, which calls `Secrets::substitute`
    for every placeholder. Pass the CA's `consumer` (rolld's `CaInterception` does), never one the
@@ -3609,12 +3620,15 @@ agents' sandboxes). Each one does exactly this:
 revocation row (`revoked_at`, `revoked_why`) and a `secrets.intercept_ca.end` audit row.
 `Secrets::end_consumer` calls it when the sandbox stops or the preview is torn down. A CA also
 ends with its hosts: when the consumer's hosts shrink (one of its placeholders revoked, ended in a
-project or cut off, a key's binding cleared or narrowed), every CA of the consumer that names a
-host it no longer has ends once that write commits (`Secrets::end_unbound_intercept_cas`, reason
-`<hosts> no longer bound`), and the proxy's next `intercept_ca` names only the hosts it still has.
-A shrink nothing announces (a placeholder expiring, a key or environment deleted, a binder demoted
-or removed) ends the CA at its next `intercept_ca_live`, which answers `false` for a CA naming a host no longer bound. The
-proxy then drops the CA and its leaves at its next `intercept_ca_live`. No CRL is published: a
+project or cut off, a key's binding cleared or narrowed, its project deleted), every CA of the
+consumer that names a host it no longer has ends once that write commits
+(`Secrets::recheck_intercept_cas`, reason `<hosts> no longer bound`), and the proxy's next
+`intercept_ca` names only the hosts it still has. The same check marks the consumer's other CAs
+stale when it gained a host. A write that can't name the consumers (a key or environment deleted,
+a member's rights changed) marks their CAs to be checked at their next ask, and a placeholder
+expiring makes the next ask after it check too; a binder's rights changing in roll-access calls in
+nothing, so any check a minute old is made again. A CA naming a host no longer bound ends at that
+check. The proxy then drops the CA and its leaves at its next `intercept_ca_stands`. No CRL is published: a
 trust anchor isn't checked against one, and the CA dies with its container or within a day. Rows
 go a day after they expire.
 
