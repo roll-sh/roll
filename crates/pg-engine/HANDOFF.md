@@ -16757,6 +16757,44 @@ builds are most of its 78 minutes). (2) The difftest guard is still separate fro
 `PUSH_REMOVAL_REVIEW` after its green train. (4) Quick-check alone on an idle machine is
 unmeasured; the storage case is ~22 minutes under load.
 
+## Two test faults: a reset after a FATAL, the idle read's timing test (agent 293, 2026-11-22)
+
+No speed change to measure (the connection's end and a test). The batch train's retry of a lib
+unit test is in "Verification tooling, round 3" (cand/a293).
+
+**wire_waits' `transaction_timeout while running` cases: a server fault.** Agent 286 saw them end
+with "error communicating with the server" (the binary passed 6 of 7 alone) where PostgreSQL's
+connection ends with "connection closed". A probe (the case repeated, the I/O error's source
+printed, `transaction_timeout = 20`) showed ECONNRESET, os error 104, at 4 of 400 runs, 1% to 2%
+in bursts with contention. The client hadn't sent anything the server should answer: an
+instrumented build showed the client's next query (`SELECT 2`, sent the moment it read the FATAL)
+already unread in the server's socket at the session's `shutdown(Write)` in 0.5-1% of runs.
+Closing a socket with input unread makes Linux abort the connection (tcp_close's
+"data was unread": an RST at once, dropping what is still queued to send). The FIN that
+`shutdown(Write)` queued (79b7e4b59) goes with it when it hasn't left yet, so the client got the
+RST without a FIN, and reads ECONNRESET. A FIN that has arrived first turns a later RST into a
+plain end of file (checked with a socket probe: FIN, then RST, gives the client EOF; RST alone
+gives ECONNRESET). Not the test's client: it sends the next query after the FATAL as any client
+may, and PostgreSQL's backend just exits sooner after its FATAL.
+Fix (`server::Closing`, dropped last in `handle`, after the session's teardown): shut the write
+side if the session hasn't, then close only once the client has acknowledged everything up to
+the FIN (SIOCOUTQ 0), or the connection is in TCP_CLOSE, or 200 ms passed (`CLOSE_ACK_WAIT`). On
+loopback the acknowledgement is normally in before the teardown is done, so a normal end doesn't wait; a
+remote client's end holds the finished thread up to one round trip, after the session's locks
+are gone. Probe, 6-8 copies at once on the build CPUs, base and fixed alternating:
+base 144 resets in 15,000 runs (bursts of 88 and 56), fixed 0 in 15,000.
+
+**`server::tests::wait_spin_polls_only_for_a_quick_client` is deterministic.** It slept 20 ms and
+5 ms against a 5 ms poll; under load the reader's poll could be preempted past the writer's
+20 ms, find the byte and keep polling (`left: ([2], true)`, the train of 2026-11-22). Now
+`IdleRead` times its client on `idle_clock()` (`Instant::now()` outside tests; a test's own
+thread-local clock under `cfg(test)`), and a `cfg(test)` hook runs just before the read
+waits: the late reply is written from that hook, with the clock moved 20 ms, so the poll can't
+see it, and the quick replies take no time on the test's clock. It still checks the same
+things: a late reply means no poll before the next read, a quick one turns polling back on, and the
+late read really waited. 800 of 800 runs passed under 8 parallel copies at load 48-64; it takes
+under a millisecond, where the old one slept for 25 ms or more. Release builds are unchanged (both hooks are `cfg(test)`).
+
 ## Verification tooling, round 2: logs, reasons, flakes, ports, lanes (agent 252, 2026-11-18)
 
 Tooling only; no engine change, so nothing to measure for speed. What two days of the batch

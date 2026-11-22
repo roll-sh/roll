@@ -273,6 +273,18 @@ fn spin_read(s: &TcpStream, buf: &mut [u8]) -> Option<std::io::Result<usize>> {
     r
 }
 
+/// The clock `IdleRead` times its client with: whether to poll before the next wait is a rule
+/// about how long the client took, which a test drives on a clock of its own (`tests::CLOCK`)
+/// rather than on how its threads happened to run.
+#[cfg(not(test))]
+fn idle_clock() -> std::time::Instant {
+    std::time::Instant::now()
+}
+#[cfg(test)]
+fn idle_clock() -> std::time::Instant {
+    tests::CLOCK.with(|c| c.get()).unwrap_or_else(std::time::Instant::now)
+}
+
 /// A connection's reading side: a read that waits past `IDLE_TRIM` runs the idle hook (once
 /// until the client sends something again) and goes on waiting; one waiting past `deadline`
 /// (an idle timeout) fails with `IdleTimeout`.
@@ -341,7 +353,7 @@ impl Read for IdleRead {
             self.s.set_read_timeout(self.wait_for())?;
         }
         // (How long the client takes, for whether to poll next time.)
-        let began = self.counted.then(std::time::Instant::now);
+        let began = self.counted.then(idle_clock);
         if let Some(r) = self.spin.then(|| spin_read(&self.s, buf)).flatten() {
             let n = r?;
             if !std::mem::replace(&mut self.armed, true) {
@@ -349,11 +361,14 @@ impl Read for IdleRead {
             }
             return Ok(n);
         }
+        #[cfg(test)]
+        tests::before_wait();
         loop {
             match (&*self.s).read(buf) {
                 Ok(n) => {
                     if let Some(b) = began {
-                        self.spin = b.elapsed().as_nanos() as u64 <= WAIT_SPIN_NS.load(Ordering::Relaxed);
+                        self.spin = idle_clock().saturating_duration_since(b).as_nanos() as u64
+                            <= WAIT_SPIN_NS.load(Ordering::Relaxed);
                     }
                     if !std::mem::replace(&mut self.armed, true) {
                         self.s.set_read_timeout(self.wait_for())?;
@@ -873,6 +888,49 @@ impl Drop for BackendGuard<'_> {
     }
 }
 
+/// The connection's socket as its thread lets it go (dropped last in `handle`, after the
+/// session's teardown): the FIN goes out if the session hasn't sent it, and the socket closes
+/// once the client has acknowledged everything up to the FIN, or the connection is gone, or
+/// `CLOSE_ACK_WAIT` passed. A socket closed with the client's input unread (a query it sent
+/// before it read the session's FATAL) is reset at once, and the reset drops what is still
+/// queued, a FIN not yet out with it: the client read "connection reset" where PostgreSQL's
+/// connection just ends (wire_waits' transaction_timeout cases, 1% of runs under load). A FIN
+/// the client acknowledged can't be overtaken. (On loopback the acknowledgement is in by the
+/// time the teardown is done: nothing waits.)
+struct Closing(Arc<TcpStream>);
+
+const CLOSE_ACK_WAIT: std::time::Duration = std::time::Duration::from_millis(200);
+
+impl Drop for Closing {
+    fn drop(&mut self) {
+        let _ = self.0.shutdown(std::net::Shutdown::Write);
+        #[cfg(target_os = "linux")]
+        {
+            use std::os::fd::AsRawFd;
+            let fd = self.0.as_raw_fd();
+            let unacked = || {
+                // SAFETY: tcp_info is plain data; getsockopt writes at most `len` bytes of it
+                // and TIOCOUTQ (SIOCOUTQ: bytes sent or queued, not yet acknowledged) one int.
+                unsafe {
+                    let mut info: libc::tcp_info = std::mem::zeroed();
+                    let mut len = std::mem::size_of::<libc::tcp_info>() as libc::socklen_t;
+                    let mut queued: libc::c_int = 0;
+                    libc::getsockopt(fd, libc::IPPROTO_TCP, libc::TCP_INFO, (&raw mut info).cast(), &mut len) == 0
+                        && info.tcpi_state != 7 // TCP_CLOSE: reset, or the FIN acknowledged
+                        && libc::ioctl(fd, libc::TIOCOUTQ, &mut queued) == 0
+                        && queued > 0
+                }
+            };
+            let until = std::time::Instant::now() + CLOSE_ACK_WAIT;
+            let mut pause = std::time::Duration::from_micros(20);
+            while unacked() && std::time::Instant::now() < until {
+                std::thread::sleep(pause);
+                pause = (pause * 2).min(std::time::Duration::from_millis(5));
+            }
+        }
+    }
+}
+
 fn handle(
     engine: Arc<Engine>,
     stream: TcpStream,
@@ -886,6 +944,7 @@ fn handle(
     crate::published::keep_on_this_thread();
     stream.set_nodelay(true)?;
     let stream = Arc::new(stream);
+    let _closing = Closing(stream.clone());
     let mut c = Conn {
         rd: BufReader::with_capacity(16 << 10, IdleRead::new(stream.clone())?),
         wr: stream.clone(),
@@ -1262,7 +1321,8 @@ fn handle(
     // when a backend exits, not after the session's teardown below (rollback, locks, the
     // backend's entry). In that window a client that had read a FATAL could send its next
     // query, still unread when the socket closed: a reset ("error communicating with the
-    // server") instead of the end of the connection.
+    // server") instead of the end of the connection. (The socket closes only once the client
+    // has the FIN: `Closing`.)
     let _ = c.wr.shutdown(std::net::Shutdown::Write);
     r
 }
@@ -3198,6 +3258,21 @@ fn close_msg(c: &mut Conn, s: &mut Session, body: &[u8]) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::parse_options;
+    use std::cell::{Cell, RefCell};
+
+    thread_local! {
+        /// `idle_clock` on this thread (None: the real one).
+        pub(super) static CLOCK: Cell<Option<std::time::Instant>> = const { Cell::new(None) };
+        /// Run once when an `IdleRead` on this thread goes to wait (its poll found nothing, or
+        /// it doesn't poll).
+        static BEFORE_WAIT: RefCell<Option<Box<dyn FnOnce()>>> = const { RefCell::new(None) };
+    }
+
+    pub(super) fn before_wait() {
+        if let Some(f) = BEFORE_WAIT.with(|b| b.borrow_mut().take()) {
+            f();
+        }
+    }
 
     #[test]
     fn idle_read_parks_after_trimming_and_rearms_on_data() {
@@ -3238,31 +3313,37 @@ mod tests {
         use super::{IdleRead, set_wait_spin};
         use std::io::{Read, Write};
         use std::net::{TcpListener, TcpStream};
-        use std::time::Duration;
+        use std::time::{Duration, Instant};
 
-        // (5 ms, not performance mode's 50 µs: a loaded machine can preempt a read for longer.)
-        set_wait_spin(Duration::from_millis(5));
+        // The reader times its client on this test's clock, which moves only when the test
+        // moves it: what it decides can't depend on how the threads were scheduled.
+        let t0 = Instant::now();
+        CLOCK.with(|c| c.set(Some(t0)));
+        set_wait_spin(Duration::from_millis(1));
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let mut client = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
         let mut reader = IdleRead::new(std::sync::Arc::new(listener.accept().unwrap().0)).unwrap();
         let mut b = [0u8; 1];
         client.write_all(&[1]).unwrap();
         reader.read_exact(&mut b).unwrap();
-        assert_eq!(b, [1]);
-        // A reply past the poll's time: read when it comes, and no poll before the next.
-        let late = std::thread::spawn(move || {
-            std::thread::sleep(Duration::from_millis(20));
-            client.write_all(&[2]).unwrap();
-            client
+        assert_eq!((b, reader.spin), ([1], true));
+        // A reply past the poll's time: the poll finds nothing, the reply comes once the
+        // reader waits, 20 ms on; read then, and no poll before the next.
+        let mut late = client.try_clone().unwrap();
+        BEFORE_WAIT.with(|w| {
+            *w.borrow_mut() = Some(Box::new(move || {
+                late.write_all(&[2]).unwrap();
+                CLOCK.with(|c| c.set(Some(t0 + Duration::from_millis(20))));
+            }))
         });
         reader.read_exact(&mut b).unwrap();
-        let mut client = late.join().unwrap();
+        assert!(BEFORE_WAIT.with(|w| w.borrow().is_none()), "the reader didn't wait");
         assert_eq!((b, reader.spin), ([2], false));
-        // A quick one again: polls again.
+        // A quick one again (no time passes): polls again.
         client.write_all(&[3]).unwrap();
-        std::thread::sleep(Duration::from_millis(5));
         reader.read_exact(&mut b).unwrap();
         set_wait_spin(Duration::ZERO);
+        CLOCK.with(|c| c.set(None));
         assert_eq!((b, reader.spin), ([3], true));
     }
 
