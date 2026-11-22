@@ -2400,9 +2400,10 @@ Ranked by what a person notices first. Done so far:
 1. **A preview's interception CA kept until its hosts change or it nears its end, in review**
    (fix/roll-previews-ca-reuse, after roll secrets' fix/secrets-ca-live-fit): today a new CA every
    hour restarts an intercepted preview's services, about 24 times a day.
-2. **Search connectors on a branch, checked live** (after roll search's #318): a branch's
-   inherited connectors start paused and its parent's secrets don't open there; the live run makes
-   a cluster with a connector, branches it into a preview, and expects no sync and its masks kept.
+2. **Schema changes that name only what the change made, in review** (#695): today another
+   change's migration landing on production while a preview is open reads as this one dropping
+   its table; each branch's own schema is kept as it's made, and only what the change did since
+   is shown.
 3. **The data step's Postgres compute start** (pg-control's; watch): with the health checks no
    longer waiting on a poll (#646), the live run's timeline is data 11.0 s · setup 4.4 s · deploy
    0.02 s · checks 6.1 s under load. Most of the data step is the Postgres branch's compute start
@@ -2413,6 +2414,8 @@ Ranked by what a person notices first. Done so far:
 5. **Cheap Postgres branches on ext4: overlay volumes over a frozen base** (pg-control; measured
    2026-11-17): 0.97 s against 3.5 s for a 1.4 GB copy, but a write copies the whole table file.
 6. **Watch: pg-control's recovery to a time seconds old** (unowned).
+
+Landed 2026-11-22, late morning: a search branch's inherited connector checked live, its sync waiting for adoption while the parent's runs (#690, roll search's #318), and an index production makes after the branch (a connector's first sync, a rollover) no longer read as a drop.
 
 Landed 2026-11-22, mid-morning: a share link works only while its maker may still open the project's previews (#679: someone who left the project no longer keeps a working link), and the live run checks that another consumer's placeholder is refused on a preview's socket (#685, roll secrets' #665).
 
