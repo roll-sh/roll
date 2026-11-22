@@ -1052,6 +1052,52 @@ impl Runtime for Docker {
         out.split_whitespace().next()?.parse::<u64>().ok().map(|kib| kib * 1024)
     }
 
+    async fn exec_output(&self, name: &str, command: &str, timeout: Duration, max: usize) -> anyhow::Result<super::ExecOutput> {
+        use tokio::io::AsyncReadExt;
+        anyhow::ensure!(name.starts_with(super::PREFIX), "{name} isn't a roll apps instance");
+        // Killed in the container at its timeout, with everything it started: ending `docker exec`
+        // here leaves the command running, and `timeout` kills only its own child. It runs in a
+        // process group of its own (`setsid`, busybox's and util-linux's) that a watcher kills
+        // whole (`kill -9 -<group>`, the one spelling both dash and busybox take); without
+        // `setsid`, just its shell. The command goes as `$0`, never spliced into the script.
+        let secs = timeout.as_secs().max(1).to_string();
+        let wrap = r#"if command -v setsid >/dev/null 2>&1; then setsid sh -c "$0" & p=$!; setsid sh -c 'sleep "$0"; kill -9 -"$1"' "$1" "$p" >/dev/null 2>&1 & w=$!; else sh -c "$0" & p=$!; (sleep "$1"; kill -9 "$p") >/dev/null 2>&1 & w=$!; fi; wait "$p"; c=$?; kill -9 -"$w" 2>/dev/null || kill -9 "$w" 2>/dev/null; exit "$c""#;
+        let mut child = Command::new("docker")
+            .args(["exec", name, "sh", "-c", wrap, command, &secs])
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .kill_on_drop(true)
+            .spawn()
+            .context("running docker exec")?;
+        let (mut out, mut err) = (child.stdout.take().context("no stdout")?, child.stderr.take().context("no stderr")?);
+        // Each stream read to its end (so the command never blocks on a full pipe), kept to `max`.
+        async fn read_kept(r: &mut (impl tokio::io::AsyncRead + Unpin), max: usize) -> (Vec<u8>, bool) {
+            let (mut kept, mut buf, mut over) = (Vec::new(), vec![0u8; 16 << 10], false);
+            while let Ok(n) = r.read(&mut buf).await {
+                if n == 0 {
+                    break;
+                }
+                let room = max.saturating_sub(kept.len());
+                kept.extend_from_slice(&buf[..n.min(room)]);
+                over |= n > room;
+            }
+            (kept, over)
+        }
+        let began = std::time::Instant::now();
+        let run = async {
+            let ((stdout, a), (stderr, b)) = tokio::join!(read_kept(&mut out, max), read_kept(&mut err, max));
+            let status = child.wait().await?;
+            // Killed at its timeout (in the container): no exit code of its own.
+            let code = status.code().filter(|_| began.elapsed() < timeout);
+            anyhow::Ok(super::ExecOutput { code, stdout, stderr, truncated: a || b })
+        };
+        match tokio::time::timeout(timeout + Duration::from_secs(5), run).await {
+            Ok(r) => r,
+            Err(_) => Ok(super::ExecOutput { code: None, ..Default::default() }),
+        }
+    }
+
     async fn copy_from(&self, name: &str, path: &str) -> anyhow::Result<super::VolumeStream> {
         anyhow::ensure!(name.starts_with(super::PREFIX), "{name} isn't a roll apps instance");
         let mut child = Command::new("docker")
