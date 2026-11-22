@@ -45,8 +45,9 @@ fn pattern(needle: &str) -> String {
 /// The text around the needle's first match (or the start), on character boundaries.
 fn snippet(text: &str, needle: &str) -> String {
     let lower = text.to_lowercase();
-    // Lowercasing can change byte lengths; fall back to the start when the offsets don't line up.
-    let at = lower.find(&needle.to_lowercase()).filter(|_| lower.len() == text.len()).unwrap_or(0);
+    // Lowercasing can change byte lengths (one character longer, another shorter, the total the
+    // same): an offset in `lower` is used only where it's a character boundary in `text` too.
+    let at = lower.find(&needle.to_lowercase()).filter(|&i| lower.len() == text.len() && text.is_char_boundary(i)).unwrap_or(0);
     let start = text[..at].char_indices().rev().nth(SNIPPET / 4).map_or(0, |(i, _)| i);
     let mut out: String = text[start..].chars().take(SNIPPET).collect();
     out = out.split_whitespace().collect::<Vec<_>>().join(" ");
@@ -75,13 +76,19 @@ impl Code {
 
     /// Changes and work items in the caller's repos whose title or text holds `q` (any case),
     /// most recently updated first.
-    pub fn search_documents(&self, caller: &Caller, q: &str, limit: usize) -> Result<Value> {
+    /// `reads` keeps the repos a scoped grant may read (all of them otherwise).
+    pub fn search_documents(&self, caller: &Caller, q: &str, limit: usize, reads: &dyn Fn(&str) -> bool) -> Result<Value> {
         let q = q.trim();
         if q.is_empty() || q.chars().count() > 200 {
             return Err(Error::Invalid("q is 1-200 characters".into()));
         }
         let limit = limit.clamp(1, MAX_RESULTS);
-        let repos: Vec<RepoRow> = self.db.repos(None)?.into_iter().filter(|r| Self::searchable(caller, r)).collect();
+        let owner = match caller {
+            Caller::Owner { id, .. } => Some(id.as_str()),
+            Caller::App { owner_id, .. } => Some(owner_id.as_str()),
+            _ => None,
+        };
+        let repos: Vec<RepoRow> = self.db.repos(owner)?.into_iter().filter(|r| Self::searchable(caller, r) && reads(&r.full_name())).collect();
         let like = pattern(q);
         let mut hits = Vec::new();
         for chunk in repos.chunks(REPOS_PER_QUERY) {
@@ -138,12 +145,14 @@ impl Code {
     /// says what it is.
     pub fn document(&self, caller: &Caller, id: &str) -> Result<Value> {
         let missing = || Error::NotFound(format!("document {id}"));
+        // Not found stays not found (whatever was missing); anything else (the database) is itself.
+        let hide = |e: Error| if matches!(e, Error::NotFound(_)) { missing() } else { e };
         let (r, kind, number, title, body, state, outside, extra) = if id.starts_with("chg_") {
-            let (r, c) = self.readable_change(caller, id).map_err(|_| missing())?;
+            let (r, c) = self.readable_change(caller, id).map_err(hide)?;
             let extra = json!({ "author": c.author, "branch": c.branch, "work_item": c.work_item, "github_url": c.github_url });
             (r, "change", c.number as i64, c.title, c.body, c.state.as_str().to_string(), c.outside, extra)
         } else if id.starts_with("wi_") {
-            let (r, w) = self.readable_work(caller, id).map_err(|_| missing())?;
+            let (r, w) = self.readable_work(caller, id).map_err(hide)?;
             let extra = json!({ "labels": w.labels, "priority": w.priority, "changes": w.changes, "github_url": w.github_url });
             (r, "work_item", w.number as i64, w.title, w.body, w.state.as_str().to_string(), w.outside, extra)
         } else {

@@ -515,7 +515,7 @@ def modern(method, params):
 types = modern("events/list", {}).get("result", {}).get("events", [])
 ebad, seen_events = [], 0
 # A feed's path arguments (a repo's owner and name, a project) come from the fixtures above.
-feed_args = {"owner": "sweep", "repo": "app", "project": ws}
+feed_args = {"owner": "sweep", "repo": "app", "project": seen.get(("secrets", "project"), ws)}
 for t in types:
     args = {k: feed_args.get(k) for k in t.get("inputSchema", {}).get("required", [])}
     poll = {"name": t["name"], **({"arguments": args} if args else {})}

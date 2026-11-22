@@ -609,9 +609,12 @@ fn classify(path: &str) -> Option<Target> {
         ["v1", "code", "changes", id, ..] => Target::Change(decode(id)),
         ["v1", "code", "threads", id, ..] => Target::Thread(decode(id)),
         ["v1", "code", "work", id, ..] => Target::Work(decode(id)),
-        // A document is a change or a work item, by its id's prefix.
-        ["v1", "code", "documents", id] if id.starts_with("chg_") => Target::Change(decode(id)),
-        ["v1", "code", "documents", id] if id.starts_with("wi_") => Target::Work(decode(id)),
+        // A document is a change or a work item, by its (decoded) id's prefix, as the handler reads it.
+        ["v1", "code", "documents", id] => match decode(id) {
+            id if id.starts_with("chg_") => Target::Change(id),
+            id if id.starts_with("wi_") => Target::Work(id),
+            _ => return None,
+        },
         // `login/poll` and `shares/{id}` are global (`login` and `shares` are reserved owner names).
         ["v1", "code", "agents", owner, _, ..] if !matches!(*owner, "login" | "shares") => Target::Agents(decode(owner)),
         ["git", owner, repo, ..] => {

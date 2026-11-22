@@ -474,6 +474,19 @@ impl roll_access::ApprovalChat for ChatCards {
 }
 
 /// roll code's MCP tools, fronted by `/v1/mcp` under product-prefixed names (`code_…`, `agents_…`).
+/// roll-access's answer for roll code's searches across repos: whether the request's grant (and a
+/// person's session grant beside it) may read a repo, resolved as the gate's list filter resolves
+/// each item (`Access::resource` with the product as the kind: the repo's workspace projects too).
+pub struct CodeReach(pub Arc<Access>);
+
+impl code_control::GrantReach for CodeReach {
+    fn reads(&self, ext: &axum::http::Extensions, repo: &str) -> bool {
+        let r = self.0.resource("code", "code", repo);
+        let ok = |g: &roll_auth::Grant| g.allows(&r, roll_auth::scope::Action::Read) == roll_auth::scope::Outcome::Allow;
+        roll_auth::Grant::on(ext).is_none_or(ok) && roll_auth::SessionGrant::on(ext).is_none_or(ok)
+    }
+}
+
 pub struct CodeTools;
 
 /// roll code's tool name → the roll-wide one.
