@@ -714,6 +714,18 @@ LIVE_ES=$(es_of "$JAR" "$HOST")
 EARLIER_ES=$(es_of "$EJAR" "$EARLIER_HOST")
 [ -n "$EARLIER_ES" ] && [ "$EARLIER_ES" != "$LIVE_ES" ] || { echo "the earlier push should have a search cluster of its own: '$EARLIER_ES' / '$LIVE_ES'"; exit 1; }
 OWN_DATA="$OWN_DATA, search its own"
+# And its bucket (a branch of the preview's, with a key of its own).
+bucket_of() { curl -sS -b "$1" -H "Host: $2" "http://$API/env.txt" | sed -n 's/^S3_BUCKET=//p'; }
+LIVE_BUCKET=$(bucket_of "$JAR" "$HOST")
+EARLIER_BUCKET=$(bucket_of "$EJAR" "$EARLIER_HOST")
+[ -n "$EARLIER_BUCKET" ] && [ "$EARLIER_BUCKET" != "$LIVE_BUCKET" ] || { echo "the earlier push should have a bucket of its own: '$EARLIER_BUCKET' / '$LIVE_BUCKET'"; exit 1; }
+OWN_DATA="$OWN_DATA, bucket its own"
+# And its stream (a branch of the preview's: its own SASL user).
+stream_of() { curl -sS -b "$1" -H "Host: $2" "http://$API/env.txt" | sed -n 's/^KAFKA_SASL_USERNAME=//p'; }
+LIVE_STREAM=$(stream_of "$JAR" "$HOST")
+EARLIER_STREAM=$(stream_of "$EJAR" "$EARLIER_HOST")
+[ -n "$EARLIER_STREAM" ] && [ "$EARLIER_STREAM" != "$LIVE_STREAM" ] || { echo "the earlier push should have a stream of its own: '$EARLIER_STREAM' / '$LIVE_STREAM'"; exit 1; }
+OWN_DATA="$OWN_DATA, stream its own"
 
 # Screenshots stayed on through the pushes: the page's change since the head before is known.
 VISUAL=""
@@ -1069,6 +1081,10 @@ PARENTS_OK=$( (api GET "/v1/redis/databases/$REDIS" | jq_ "d['id']"; api GET /v1
 SEARCH_BRANCH_GONE=$(curl -s -o /dev/null -w '%{http_code}' -H "Authorization: Bearer ${ROLL_ADMIN_TOKEN:-}" "http://$API/v1/search/clusters/$BRANCH_SEARCH")
 [ "$SEARCH_BRANCH_GONE" = 404 ] || { echo "the search branch should be gone after landing ($SEARCH_BRANCH_GONE)"; exit 1; }
 # Nor an earlier push's copy of it.
+BUCKETS_LEFT=$(api GET /v1/storage/buckets | jq_ "len([b for b in (d if isinstance(d, list) else d.get('buckets', [])) if b['name'].startswith('assets-')])")
+[ "$BUCKETS_LEFT" = 0 ] || { echo "no bucket branch of the preview's (nor an earlier push's copy) should outlive it: $BUCKETS_LEFT"; exit 1; }
+STREAMS_LEFT=$(api GET /v1/streams | jq_ "len([x for x in (d if isinstance(d, list) else d.get('streams', [])) if x['name'].startswith('pv-')])")
+[ "$STREAMS_LEFT" = 0 ] || { echo "no stream of the preview's (nor an earlier push's copy) should outlive it: $STREAMS_LEFT"; exit 1; }
 SEARCH_LEFT=$(api GET /v1/search/clusters | jq_ "len([c for c in (d if isinstance(d, list) else d.get('clusters', [])) if c['name'].startswith('pv-')])")
 [ "$SEARCH_LEFT" = 0 ] || { echo "no search cluster of the preview's should outlive it: $SEARCH_LEFT"; exit 1; }
 BRANCHES_LEFT=$(api GET /v1/redis/databases | jq_ "len([x for x in d if x['name'].startswith('pv-')])")
@@ -1086,7 +1102,7 @@ cat <<EOF
 | Change opened → preview ready ($(echo "$P" | jq_ "len(d['resources'])") branches made, the service deployed) | $((T1 - T0)) ms |
 | The preview's bucket key: its branch / production's bucket | $OWN_LS / $PARENT_LS |
 | … step by step (its timeline: data, setup, deploy, checks) | $STEPS |
-| An earlier push's own copy of the data: a table made after it is absent there / present in the preview's; its Redis and search | $OWN_DATA |
+| An earlier push's own copy of the data: a table made after it is absent there / present in the preview's; its Redis, search, bucket and stream | $OWN_DATA |
 | What a follower of the events hears (\`GET /v1/previews/events\`, roll MCP's Events) | $EVENTS |
 | Search: a sync of the parent's connector on the parent / asked of the branch (inherited, waits for adoption) | $PSTATE / $BSTATE |
 | Parent bucket bytes / the branch's own bytes after writing 1 MiB / objects the branch sees | $PARENT_OBJECTS / $BRANCH_OBJECTS / $BRANCH_SEES |
@@ -1141,5 +1157,5 @@ cat <<EOF
 | Search: products.name in the branch / in the parent / the branch's term dictionary | $ES_READ / $ES_PARENT / $ES_TERMS |
 | Search: the branch's data-only ELASTICSEARCH_API_KEY reads / makes a key | $KEY_READ / $KEY_MINT |
 | Search: an address in an array of objects / under a dotted key / in an index named logs.2024, in the branch | $ES_DEEP / $ES_DOTTED |
-| After landing: parents present / preview Redis branches left / Postgres branches left / search clusters left (earlier pushes' copies too) | $PARENTS_OK of 4 / $BRANCHES_LEFT / $PG_LEFT / $SEARCH_LEFT |
+| After landing: parents present / preview Redis branches left / Postgres branches left / search clusters left / bucket branches left / streams left (earlier pushes' copies too) | $PARENTS_OK of 4 / $BRANCHES_LEFT / $PG_LEFT / $SEARCH_LEFT / $BUCKETS_LEFT / $STREAMS_LEFT |
 EOF
