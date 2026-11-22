@@ -389,6 +389,8 @@ export interface Policy {
    * `https://` URL, `localhost`, `device`, or an app scheme (`cursor:`).
    */
   oauth_clients?: string[];
+  /** Minutes a request that asks a person waits for one (1 to 1,440; 10 when left out). */
+  approval_wait_minutes?: number | null;
 }
 
 /** One of the policy's `agents_ask`: a product (or "*"), its actions and environments (all when left out). */
@@ -414,13 +416,15 @@ export interface ApprovalRule {
   environments?: string[];
   approvals: number;
   approvers?: string[];
+  /** Minutes a request it covers waits (1 to 1,440); the policy's when left out. */
+  wait_minutes?: number;
 }
 
 /** "Postgres · delete · production: 2 approvals (from usr_a, usr_b)". */
 export function describeApprovalRule(r: ApprovalRule): string {
   const what = [productName(r.product), r.actions?.length ? r.actions.join(", ") : "anything", r.environments?.join(", ")].filter(Boolean).join(" · ");
   const n = r.approvals === 1 ? "1 approval" : `${r.approvals} approvals`;
-  return `${what}: ${n}${r.approvers?.length ? ` from ${r.approvers.join(", ")}` : ""}`;
+  return `${what}: ${n}${r.approvers?.length ? ` from ${r.approvers.join(", ")}` : ""}${r.wait_minutes ? `, within ${r.wait_minutes} min` : ""}`;
 }
 
 /** The actions an admin may require approval for in people's tokens, strongest first. */
@@ -1076,23 +1080,47 @@ export function withToolsets(url: string, products: string[], mode: McpMode = {}
   return u.toString().replace(/%2C/g, ",");
 }
 
+/**
+ * Whether `uri` is one of a client's redirects: the same string, or a loopback one on another port
+ * (RFC 8252 7.3): a native app listens where it can. The same rule as roll-access's.
+ */
+export function redirectRegistered(uris: string[], uri: string): boolean {
+  if (uris.includes(uri)) return true;
+  const loopback = (s: string) => {
+    try {
+      const u = new URL(s);
+      const host = u.hostname.replace(/^\[|\]$/g, "");
+      return u.protocol === "http:" && !u.username && !u.password && (host === "localhost" || /^127\./.test(host) || host === "::1") ? u : null;
+    } catch {
+      return null;
+    }
+  };
+  const asked = loopback(uri);
+  if (!asked || asked.hash) return false;
+  return uris.some((r) => {
+    const v = loopback(r);
+    return v !== null && v.hostname === asked.hostname && v.pathname === asked.pathname && v.search === asked.search;
+  });
+}
+
 /** A word as a shell reads it: a URL with a query (`?`, `&`) quoted, so `&` doesn't end the command. */
 export const shellWord = (s: string) => (/^[A-Za-z0-9_./:@%+=,-]+$/.test(s) ? s : `'${s.replace(/'/g, `'\\''`)}'`);
 
 export function mcpConfig(client: McpClient, url: string, token?: string): { lang: "sh" | "json" | "toml" | "text"; text: string } {
   const header = token ? `Bearer ${token}` : undefined;
-  const server = (wrap: "mcpServers" | "servers", typed: boolean) => {
+  const server = (typed: boolean) => {
     const s: Record<string, unknown> = typed ? { type: "http", url } : { url };
     if (header) s.headers = { Authorization: header };
-    return JSON.stringify({ [wrap]: { roll: s } }, null, 2);
+    return JSON.stringify({ mcpServers: { roll: s } }, null, 2);
   };
   switch (client) {
     case "claude-code":
       return { lang: "sh", text: `claude mcp add --transport http roll ${shellWord(url)}${header ? ` --header "Authorization: ${header}"` : ""}` };
     case "cursor":
-      return { lang: "json", text: server("mcpServers", false) };
+      return { lang: "json", text: server(false) };
     case "vscode":
-      return { lang: "json", text: server("servers", true) };
+      // VS Code 1.146's own files (its .vscode/mcp.json goes in February 2027).
+      return { lang: "json", text: server(true) };
     case "codex":
       return {
         lang: "toml",
@@ -1103,7 +1131,7 @@ export function mcpConfig(client: McpClient, url: string, token?: string): { lan
     case "claude-ai":
       return { lang: "text", text: `Settings → Connectors → Add custom connector\nName: roll\nURL: ${url}` };
     case "other":
-      return { lang: "json", text: server("mcpServers", true) };
+      return { lang: "json", text: server(true) };
   }
 }
 
@@ -1111,7 +1139,7 @@ export function mcpConfig(client: McpClient, url: string, token?: string): { lan
 export const CLIENT_WHERE: Record<McpClient, string> = {
   "claude-code": "Run in a terminal. Claude Code opens the browser for you to approve the connection.",
   cursor: "~/.cursor/mcp.json (or .cursor/mcp.json in a project). Cursor asks you to sign in.",
-  vscode: ".vscode/mcp.json in a workspace. VS Code asks you to sign in.",
+  vscode: "~/.copilot/mcp-config.json (or .mcp.json at a workspace's root, with no token in it). VS Code asks you to sign in.",
   "claude-ai": "Claude.ai and Claude Desktop connect with OAuth: you approve the connection here.",
   codex: "~/.codex/config.toml.",
   other: "Streamable HTTP. OAuth 2.1 with dynamic registration, or Authorization: Bearer with a token.",

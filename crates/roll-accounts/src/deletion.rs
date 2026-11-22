@@ -88,10 +88,14 @@ impl Accounts {
             )?;
             // The outbox: other products act on it after this write, until each has.
             c.execute("INSERT INTO account_deletions (user_id, at) VALUES (?, ?) ON CONFLICT (user_id) DO NOTHING", params![user, now])?;
+            // And what was handed out on their say outside their projects' memberships (an
+            // admin's leases elsewhere, sandboxes holding values they copied).
+            crate::offboarding::record(c, user, now)?;
             Ok::<_, code_sql::Error>(Ok(()))
         })?;
         done?;
         self.run_deletions();
+        self.run_offboardings();
         // Their roll code owner's own tokens and machine links (another database: after the write).
         if let Some(owners) = &self.owners
             && let Some(owner) = self.db.read(|c| c.query_row("SELECT code_owner_id FROM users WHERE id = ?", [user], |r| r.get::<_, Option<String>>(0)))?

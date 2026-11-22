@@ -612,6 +612,28 @@ pub enum AppsCmd {
         #[arg(long)]
         instance: Option<String>,
     },
+    /// The environment's private network into your own (Cloud Run's VPC egress, Fly's
+    /// WireGuard): `--secret roll://production/WG --route db.corp.internal=10.0.3.4:5432` sets it
+    /// (the WireGuard config is the secret, read as you; each route a name the app connects to
+    /// and a host:port in your network), `--remove` takes it away; alone, it shows it. Admin.
+    PrivateNetwork {
+        #[command(flatten)]
+        target: Target,
+        #[arg(long, requires = "route", conflicts_with = "remove")]
+        secret: Option<String>,
+        /// The secret is a Tailscale auth key (the node joins your tailnet) instead of a
+        /// WireGuard config.
+        #[arg(long, requires = "secret")]
+        tailscale: bool,
+        /// With --tailscale: the control server when it isn't Tailscale's (Headscale's URL).
+        #[arg(long, requires = "tailscale")]
+        login_server: Option<String>,
+        /// NAME=HOST:PORT, repeated (each port its own).
+        #[arg(long, value_name = "NAME=HOST:PORT", requires = "secret")]
+        route: Vec<String>,
+        #[arg(long)]
+        remove: bool,
+    },
     /// Short-lived containers to run commands in (Vercel Sandbox, Fly Machines): the live image
     /// or a public one, without the environment's variables or network unless asked; removed at
     /// their end (`--ttl`, default 10 minutes). Admin.
@@ -3004,6 +3026,38 @@ async fn sandbox(api: &Api, json_out: bool, cmd: SandboxCmd) -> anyhow::Result<(
 pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> {
     let out = match cmd {
         AppsCmd::Sandbox { cmd } => return sandbox(api, json_out, cmd).await,
+        AppsCmd::PrivateNetwork { target, secret, tailscale, login_server, route, remove } => {
+            let svc = service(api, &target).await?;
+            let path = format!("{}/private-network", env_path(&svc, &target.env));
+            let v = if remove {
+                api.call(reqwest::Method::DELETE, &path, None).await?;
+                json!({ "removed": true })
+            } else if let Some(secret) = secret {
+                let routes = route
+                    .iter()
+                    .map(|r| r.split_once('=').map(|(n, t)| json!({ "name": n, "target": t })).ok_or_else(|| anyhow::anyhow!("--route is NAME=HOST:PORT ({r})")))
+                    .collect::<anyhow::Result<Vec<_>>>()?;
+                let mut body = json!({ "secret": secret, "routes": routes, "kind": if tailscale { "tailscale" } else { "wireguard" } });
+                if let Some(u) = login_server {
+                    body["login_server"] = json!(u);
+                }
+                api.call(reqwest::Method::PUT, &path, Some(body)).await?
+            } else {
+                api.get(&path).await?
+            };
+            if !json_out {
+                if v["removed"] == true {
+                    println!("its private network is removed");
+                } else {
+                    println!("{} from {} ({})", if v["kind"] == "tailscale" { "Tailscale" } else { "WireGuard" }, s(&v["secret"]), s(&v["status"]));
+                    for r in v["routes"].as_array().into_iter().flatten() {
+                        println!("  {} → {}", s(&r["name"]), s(&r["target"]));
+                    }
+                }
+                return Ok(());
+            }
+            v
+        }
         AppsCmd::List { project } => {
             let path = match project {
                 Some(p) => format!("/v1/apps/services?project={}", enc(&project_id(api, &p).await?)),

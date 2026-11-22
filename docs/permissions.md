@@ -666,8 +666,9 @@ route goes on as it did.
 - The roles are fixed rule templates (`crates/roll-auth/src/roles.rs`, one module holding the open
   decisions D1–D9). A rule may carry `unprotected: true`: it matches only a resource whose
   environment the product says isn't protected (`Resource::protected`: secrets, an environment
-  with a protection policy; a resource whose protection isn't known matches no such rule). It only
-  narrows, so a token can carry it too.
+  with a protection policy; a resource whose protection isn't known matches no such rule), and
+  never an environment named `production`, protected or not. It only narrows, so a token can
+  carry it too.
 - A project the session's rules don't name is a 404 (as the workspace answers); one they do is a
   403 that names what the role lacks. A list it can't see whole is filtered; a session never asks.
 - Session requests aren't access-log rows (they aren't a token's), allowed or refused: a refused
@@ -707,7 +708,7 @@ type Approval = {
   tool?: string;         // the MCP tool that made the call
   state: "pending" | "approved" | "denied" | "expired" | "used";
   created_at: number; decided_at: number | null; decided_by: string | null;
-  expires_at: number;    // 10 minutes after created_at
+  expires_at: number;    // pending: created_at + the policy's wait (10 minutes by default); decided: 10 minutes after
 };
 ```
 
@@ -729,7 +730,10 @@ type Approval = {
   API. Only the operator (or an admin) decides, and a person decides their own tokens' requests
   unless the policy asks for someone else ("Two-person approvals"). A grant never approves its own request, not even with `admin` on
   `access`.
-- An approval not decided in 10 minutes expires.
+- An approval not decided in its wait expires: 10 minutes, or what the policy says
+  (`approval_wait_minutes`, 1 to 1,440, as Stripe's confirmations wait a day for agents nobody is
+  watching), or an approval rule covering the request (`wait_minutes`; the shortest of those that
+  cover it). Once approved, it runs within 10 minutes, once.
 - MCP tools hold the call open the same way, with keep-alive events, and return the pending
   approval as a result the agent can wait on (`access_wait_approval`).
 
@@ -994,7 +998,12 @@ MCP clients for themselves, as GitHub's fine-grained tokens act for the person w
 - **It acts as them, never as more.** On every request the evaluator looks the person up as they
   are now (`roll_auth::Sessions::person`, never cached): disabled or gone, the token answers 401.
   A product's own background work that looks a stored grant up (`roll_auth::Grants::grant`: a
-  sync a token made) gets `None` for it then too (`Sessions::person_now`).
+  sync a token made) gets `None` for it then too (`Sessions::person_now`), as it does for an OAuth
+  connection the policy's `oauth_clients` no longer lists. roll's own work for a grant that must be
+  decided as the grant's request (MCP Events' webhook deliveries reading their feed) goes through
+  the gate in process with `roll_auth::ActAs(<grant id>)`: never on a request off the network, never
+  with an `Authorization` header; the evaluator looks the grant up by id, as usable as its token is
+  now, narrows it to reading, and decides and audits as for that token (not counted as its use).
   An admin's token runs as the operator's, narrowed. Anyone else's token runs as their session
   would: only routes their session may call (the gate's `User`, `UserOrCredential`, `Product` and
   `Public` rules, which it hands the evaluator as `roll_auth::RouteAccess`), as them
@@ -1049,7 +1058,8 @@ MCP clients for themselves, as GitHub's fine-grained tokens act for the person w
   `production`): only requests made through roll's MCP server, so CI and scripts calling the API
   aren't held; an approval already given still lets the call through. `mcp_lockdown` and
   `mcp_read_only` hold every token's and OAuth connection's MCP to lockdown or to reading,
-  whatever its URL asks (the operator's own connection isn't held). `oauth_clients` lists the
+  whatever its URL asks (the operator's own connection isn't held). A quiet call (a completion, an MCP Events
+  webhook delivery reading for its grant) that `agents_ask` covers is refused, nobody asked. `oauth_clients` lists the
   OAuth clients that may connect (empty: any): a host (`claude.ai`, `*.example.com`), an exact
   `https://` URL, `localhost`, an app scheme (`cursor:`) or `device`; a registered client matches
   only when every redirect it registered does (docs/mcp.md, "Authorization"). One left out gets
@@ -1257,6 +1267,7 @@ Under `/v1/access`. Bodies are JSON; errors are `{"error": string, "code"?: stri
 | `POST /v1/access/tokens/{id}/rotate` | access admin | `{keep_old_for_s?}`: a new secret with the same rules; the old one stops at once, or works that long (at most 604800, a week: Stripe's roll key); in its grace the old one calls products but manages no tokens (403 `rotated_secret` on `/v1/access`) → `{grant, token}`; not for OAuth connections |
 | `GET /v1/access/approvals` | access read | newest first; `?state=pending`, `?grant=<id>` (one token's), `?limit=` (at most 500) |
 | `GET /v1/access/approvals/{id}` | the grant that asked, or access read | an approval; `?wait=55` waits for a decision |
+| `GET /v1/access/approvals/decided` | any grant (its own), a person (their tokens'), the operator (all) | `{events, next}`: approvals decided after `?after=` (each decision's `seq`, given in the deciding write, so none is missed), oldest first, `?limit=` (at most 500); `?latest=1` answers only the newest place (not with `after`). Each says its `id`, `state`, `product`, `action`, `resource`, `tool`, `summary`, `decided_by` and `reason`, never the request's arguments. MCP Events' `access.approval` reads it |
 | `POST /v1/access/approvals/{id}/approve` | operator | `{remember?: "1h" \| "8h" \| "1d" \| "7d" \| "30d" \| "always"}`: also allow the same action on the same resource ("Remembered approvals") |
 | `POST /v1/access/approvals/{id}/deny` | operator | `{reason?}` |
 | `GET /v1/access/audit` | access read | `?grant=&product=&action=&decision=&source=&resource=&before=&limit=`; `resource` is who touched it: that resource or anything under it (`cl_1` finds `cl_1/logs-a`); `&format=jsonl` answers one event per line and `&format=csv` a row each (UTC times, every cell quoted; a formula character is defused with `'` at a cell's start and after a `;`, tab or `|` inside it, which some spreadsheets split on), as a download (the audit page and `roll mcp audit --format csv` or `jsonl`). Rows that name people (`usr_` ids: an account event's actor, a change's `by`, a resource) carry `actor_handle` and `resource_handle`, disabled and deleted people too, looked up for each answer; the CSV has them as its last two columns |
@@ -1271,7 +1282,7 @@ Under `/v1/access`. Bodies are JSON; errors are `{"error": string, "code"?: stri
 | `PATCH /v1/access/enterprise/apps/{id}` | operator | `{name?, rules?}`: the app as changed; its people's connections take new rules in the same write |
 | `POST /v1/access/enterprise/apps/{id}/rotate` | operator | `{public_jwk?, keep_old_for_s?}`: a new key, or a new `client_secret` answered once; the old secret works that long (at most a week) or stops now with every token its people hold |
 | `DELETE /v1/access/enterprise/apps/{id}` | operator | remove an app, revoking its people's connections: `{revoked}` |
-| `GET /v1/access/policy` | operator | `{max_days, require_expiry, max_idle_days, approve_people, approval_rules, agents_ask, mcp_lockdown, mcp_read_only, oauth_clients}`: roll's rules for every grant, and what needs several approvers ("Two-person approvals") |
+| `GET /v1/access/policy` | operator | `{max_days, require_expiry, max_idle_days, approve_people, approval_rules, agents_ask, mcp_lockdown, mcp_read_only, oauth_clients, approval_wait_minutes}`: roll's rules for every grant, and what needs several approvers ("Two-person approvals") |
 | `PUT /v1/access/policy` | operator | change them; a grant made, rotated, or whose rules, lifetime or addresses change, must fit (consent too) |
 | `GET /v1/access/notify` | operator | where approvals are posted: `{chat: {install, channel, approvers} \| null}` |
 | `PUT /v1/access/notify` | operator | `{chat: {install, channel, approvers} \| null}` |

@@ -134,6 +134,13 @@ pub trait Brancher: Send + Sync {
     async fn schema(&self, _parent: &str, _branch: &str) -> anyhow::Result<Option<(Vec<String>, Vec<String>)>> {
         Ok(None)
     }
+
+    /// The branch's schema alone, as [`Brancher::schema`] reads it: kept as the branch is made, so
+    /// the changes shown later are the change's ([`crate::schema::diff_since`]). Never reads the
+    /// parent (no compute of production's started for it).
+    async fn branch_schema(&self, _parent: &str, _branch: &str) -> anyhow::Result<Option<Vec<String>>> {
+        Ok(None)
+    }
 }
 
 /// A change (or branch) as previews see it.
@@ -710,6 +717,12 @@ pub trait Apps: Send + Sync {
     /// What the service uses right now, `(cores, resident bytes)`: `None` when it isn't running
     /// (or the backend can't tell).
     async fn metrics(&self, _preview: &str, _service: &str) -> Option<(f64, u64)> {
+        None
+    }
+    /// The build the service runs now, `(its git commit, its own URL)`, where the backend keeps
+    /// each build reachable at a URL of its own (roll apps' deployment URLs): kept as an earlier
+    /// push when a new head replaces it. None where it doesn't (the runtime keeps its own).
+    async fn live_build(&self, _preview: &str, _service: &str) -> Option<(String, String)> {
         None
     }
     /// Its errors in the last `minutes`, grouped (none where the backend can't tell when a line
