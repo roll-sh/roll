@@ -3093,7 +3093,7 @@ impl Store {
     pub fn pinned(&self, id: &str) -> Result<Vec<crate::Pinned>> {
         Ok(self.db.read(|c| {
             c.query("SELECT service, revision, url, at FROM pinned WHERE preview_id = ? ORDER BY at DESC", [id], |r| {
-                Ok(crate::Pinned { service: r.get(0)?, revision: r.get(1)?, url: r.get(2)?, share_url: None, at: r.get(3)? })
+                Ok(crate::Pinned { service: r.get(0)?, revision: r.get(1)?, url: r.get(2)?, share_url: None, at: r.get(3)?, own_data: Vec::new() })
             })
         })?)
     }
@@ -3232,8 +3232,12 @@ impl Store {
             Some(at) => Some(self.link_at(&r.id, at, Some("diff=base"))?),
             None => None,
         };
+        let copies = self.pinned_data(&r.id)?;
         let earlier = self.pinned(&r.id)?.into_iter().map(|mut p| {
             p.share_url = Some(share(&p.url));
+            p.own_data = copies.iter().filter(|d| d.revision == p.revision).map(|d| d.kind).collect();
+            p.own_data.sort();
+            p.own_data.dedup();
             p
         });
         let earlier = earlier.collect();

@@ -1361,6 +1361,9 @@ async fn an_earlier_push_runs_on_its_own_copy_of_the_data() {
     let (_, earlier) = e.engine.env(&p.id, "web@cs_7a").await.unwrap();
     assert!(db(&earlier).contains("-7a") && db(&earlier) != db(&live), "{} / {}", db(&earlier), db(&live));
     assert!(var(&earlier, "REDIS_URL").contains("-7a") && var(&earlier, "REDIS_URL") != var(&live, "REDIS_URL"), "Redis too");
+    // And it says so, wherever its link is shown.
+    let shown = e.engine.store.preview(&p.id).unwrap().earlier;
+    assert_eq!(shown.iter().find(|x| x.revision == "cs_7a").map(|x| x.own_data.clone()), Some(vec![roll_previews::Kind::Postgres, roll_previews::Kind::Redis]));
     // Kept with its push: the fourth push since evicts cs_7a, and its copy goes.
     for head in ["cs_7c", "cs_7d", "cs_7e"] {
         e.code.edit("chg_od", |c| c.head = head.into());

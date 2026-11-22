@@ -1690,7 +1690,7 @@ type Preview = {
   change: string | null; number: number | null; github_pr: number | null; branch: string | null;
   title: string; head: string; trusted: boolean;
   runs: string | null;                // the earlier head its services run (later pushes touched only ignored paths)
-  earlier: {service: string; revision: string; url: string; share_url: string | null; at: number}[]; // earlier pushes, still reachable
+  earlier: {service: string; revision: string; url: string; share_url: string | null; at: number; own_data: string[]}[]; // earlier pushes, still reachable; own_data: the products it has its own copy of (as its head left them)
   goes_at: number | null;             // when it goes (TTL, keep or expiry running out), once a day away (or a quarter of a shorter TTL)
   reported_by: string | null;         // the project that reports a Git URL branch's pull request, when another one does (one voice per pull request)
   desired: "active" | "deleted";
@@ -2422,9 +2422,10 @@ Ranked by what a person notices first. Done so far:
 
 1. **Earlier pushes on their own data**: each kept
    push's own copy of the preview's Postgres branch (#726) and its bytes in the cost (#731),
-   landed; Redis's and search's copies in review (roll search: a branch of a branch is safe,
-   made without `at` after masking). Next: roll apps' earlier builds on their copy, once roll
-   apps' `POST …/deploys/{dep}/rollback {no_traffic, variables}` lands (it's building it).
+   Redis's and search's copies (#740), landed; each earlier push saying which data is its own (the
+   sheet, `roll preview show`, the PR comment), in review. Next: roll apps' earlier builds on
+   their copy, once roll apps' `POST …/deploys/{dep}/rollback {no_traffic, variables}` lands
+   (it's building it); NoSQL, buckets and streams share the preview's for now.
 2. **The data step's Postgres compute start** (pg-control's; watch): with the health checks no
    longer waiting on a poll (#646), the live run's timeline is data 11.0 s · setup 4.4 s · deploy
    0.02 s · checks 6.1 s under load. Most of the data step is the Postgres branch's compute start
