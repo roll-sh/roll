@@ -2161,7 +2161,7 @@ impl TestBucket {
         }
         let at = search_es::s3::Location { endpoint: reqwest::Url::parse(&endpoint).unwrap(), bucket, region: "us-east-1".into(), path_style: true };
         let creds = keys.map(|(access_key, secret_key)| search_es::s3::Credentials { access_key, secret_key, session_token: None });
-        let client = search_es::s3::Client::new(at, creds, true).unwrap();
+        let client = search_es::s3::Client::new(at, creds, &search_es::egress::Egress::of(|_| None, true).unwrap()).unwrap();
         TestBucket { mock, settings, client, base }
     }
 
