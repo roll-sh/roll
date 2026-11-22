@@ -10720,6 +10720,26 @@ estimate of a secondary index whose keys come in no order is 3.7x PostgreSQL's s
 model (b0, b1 and n2 alike; the sink path's is within a page). Dropped by the gate's rule
 (instructions first); the size finding is item 2 below.
 
+**Second candidate: the sink's sort a byte at a time** (`cand/a287-2`: one code commit, stacked on
+`cand/a287` for these docs; its code is independent, `txn/mod.rs` only). A bulk load's sink
+(`Txn::flush_sink`) sorted its entries by their first 16 bytes and the keys where those tie with
+`sort_unstable_by`: rows come in key order, but a secondary index's entries over a column in no
+order don't, and the sort was 13.8% of COPYing the 1M rows into a table with one secondary index
+(`bulks`, below). Now `sort::radix_sort_by` (agent 271's, the parallel index build's) on the same
+16 bytes as two words, the comparison where they tie; keys are unique, so the order is the same.
+Results (BENCH "Bulk writes, round 23"; plain dist, b1 against n3 = the commit on `2a0f67b0d`,
+two alternating pairs): that COPY 24.031 -> 23.631 G user instructions (-1.7% both pairs;
+PostgreSQL 18.6's 18.92); rows, the ctid hash, sizes and bytes written equal. The whole script
+once: all steps 43.643 -> 43.636, INSERT … SELECT -0.14%, COPY in -0.12%, ANALYZE +0.85% (0.004 G:
+the step's spread run to run, 0.472 / 0.476 on one build in rounds 19 and 22), VACUUM +0.23%,
+every other step level. Not gated on the PGO build: one call replaced by another, once a run.
+Verification: `tools/quick-check.sh` on `ce7948799` (the commit on `2a0f67b0d`): Clippy 16
+warnings, none new; 383 tests in 19 binaries; crash_random seeds 1-3 x 2, power_cut_at_every_point;
+regress 51,148 / 51,150, 0 newly differing; isolation 1,647 / 1,648; pg_dump_tap 14,609 passed.
+Without `QC_CHECKED` (its checked stage stops at `info_schema_rows`, above): the lib tests (the
+sort's own), `txn_spill`, `crash_bulk`, `big_tables`, `storage_linked_gc` and `wire_waits` under
+`--profile verify-checked` instead: the lib's 246, `big_tables`' 23, `crash_bulk`'s 6, `storage_linked_gc`'s 4, `txn_spill` and `wire_waits` passed.
+
 **Left:**
 1. COPY into the indexed table 31.4 against PostgreSQL's 24.7: the write buffer (`put_fresh`
    38% of n1x's step: `record` 20%, the BTreeMap, `Runs::write_file` 14%), the background

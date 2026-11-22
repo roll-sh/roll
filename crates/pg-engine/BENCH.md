@@ -498,6 +498,11 @@ b0 24.046 G (cycles 14.1, written 90.5 MB, `bulks_a` 9,641,984 bytes), PostgreSQ
 (12.3, 454.3 MB, 9,650,176): this COPY already went through the sink. Its profile: the sink's
 comparison sort 13.8%, the btree model's inserts (`btsim`) 17.8%.
 
+`cand/a287-2`'s sort (n3, its commit on `2a0f67b0d`, against b1, two alternating pairs): b1
+24.031 x3, n3 23.631 / 23.631 (-1.7%), cycles 14.8-22.7 / 14.9-15.9; rows, the ctid hash, both
+sizes and bytes written (90.5 MB) equal. The whole script once: all steps 43.643 -> 43.636 (every
+step within ±0.25% but ANALYZE +0.85%, 0.004 G, its spread).
+
 ## Bulk writes, round 22: COPY's plain lines as stored rows, number fast paths (2026-11-21, agent 284)
 
 HANDOFF "Bulk writes, round 22" has what changed. Lane C, the 1M-row bulk script with joined
