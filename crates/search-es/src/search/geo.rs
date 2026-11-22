@@ -289,6 +289,10 @@ fn analyzer_for(ctx: &QueryCtx, f: &FieldInfo, name: Option<&str>) -> EsResult<s
 fn interval_source(ctx: &QueryCtx, f: &Arc<FieldInfo>, s: &crate::query::full_text::IntervalsSource) -> EsResult<search_index::query::IntervalsSource> {
     use crate::query::full_text::IntervalsSource as D;
     use search_index::query::IntervalsSource as S;
+    // Rules that walk the term dictionary are expensive queries.
+    if matches!(s, D::Prefix { .. } | D::Wildcard { .. } | D::Regexp { .. } | D::Fuzzy { .. }) {
+        ctx.check_expensive("intervals")?;
+    }
     let field_of = |use_field: &Option<String>| -> EsResult<Arc<FieldInfo>> {
         match use_field {
             Some(u) => ctx.field(u).ok_or_else(|| EsError::illegal_argument(format!("Cannot create interval source for unmapped field [{u}]"))),
@@ -422,6 +426,7 @@ fn apply_filter(ctx: &QueryCtx, f: &Arc<FieldInfo>, src: search_index::query::In
             })
         }
         IntervalFilter::Script(script) => {
+            ctx.no_scripts()?;
             let bound = ctx.cluster.scripts.compile(ctx.st, script, search_painless::Context::Interval)?;
             let Some(compiled) = bound.painless().cloned() else {
                 return Err(EsError::illegal_argument(format!("script_lang not supported [{}]", script.lang.as_deref().unwrap_or("painless"))));
@@ -558,13 +563,9 @@ pub fn more_like_this(ctx: &QueryCtx, m: &crate::query::specialized::MoreLikeThi
                 if !m.include {
                     exclude_ids.push(id.clone());
                 }
-                let st = ctx.st;
                 match like_item_index(ctx, item.index.as_deref()) {
-                    Some(idx) => {
-                        let engine = ctx.cluster.engine.index(ctx.cluster, st, &idx)?;
-                        let sh = crate::meta::routing::shard_for(&idx, id, item.routing.as_deref());
-                        engine.shard(sh).shard.get(id.as_bytes(), true).map_err(index_err)?.and_then(|d| crate::fetch::source_bytes(&d.fields).map(crate::fetch::parse_source)).transpose()?
-                    }
+                    // Read as the request's reader may read it, as a terms lookup is.
+                    Some(idx) => super::lookup_source(ctx, &idx, id, item.routing.as_deref())?.and_then(|(_, src)| src),
                     None => None,
                 }
             }
@@ -604,11 +605,7 @@ pub fn more_like_this(ctx: &QueryCtx, m: &crate::query::specialized::MoreLikeThi
             (Some(d), _) => Some(d.clone()),
             (None, Some(id)) => {
                 match like_item_index(ctx, item.index.as_deref()) {
-                    Some(idx) => {
-                        let engine = ctx.cluster.engine.index(ctx.cluster, ctx.st, &idx)?;
-                        let sh = crate::meta::routing::shard_for(&idx, id, item.routing.as_deref());
-                        engine.shard(sh).shard.get(id.as_bytes(), true).map_err(index_err)?.and_then(|d| crate::fetch::source_bytes(&d.fields).map(crate::fetch::parse_source)).transpose()?
-                    }
+                    Some(idx) => super::lookup_source(ctx, &idx, id, item.routing.as_deref())?.and_then(|(_, src)| src),
                     None => None,
                 }
             }

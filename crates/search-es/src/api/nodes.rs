@@ -384,10 +384,10 @@ fn info_inner(ctx: &Ctx) -> EsResult<Reply> {
                 s.set(format!("node.attr.{k}"), v);
             }
             s.set("node.name", node.name.clone());
-            for (k, v) in &ctx.cluster.config.node_settings {
+            for (k, v) in ctx.cluster.config.shown_node_settings() {
                 // `roll.security.*` holds credentials (file-realm users): never printed.
                 if !k.starts_with("node.attr.") && !k.starts_with("roll.security.") {
-                    s.set(k.clone(), v.clone());
+                    s.set(k, v);
                 }
             }
             s.set("discovery.type", "single-node");

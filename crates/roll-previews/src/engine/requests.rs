@@ -73,9 +73,17 @@ impl Engine {
         }
     }
 
-    /// The ids of `owner`'s workspace projects (a signed-in person's).
+    /// The ids of the workspace projects `owner` (a signed-in person) is a member of: what their
+    /// role lets them do in each, roll-access decides by the catalogue (previews are a member
+    /// product, docs/members.md).
     pub fn projects_of(&self, owner: &str) -> Result<std::collections::HashSet<String>> {
-        Ok(self.workspace.list(roll_workspace::Scope::Owner(owner))?.into_iter().map(|p| p.id).collect())
+        Ok(self.workspace.list(roll_workspace::Scope::Member(owner))?.into_iter().map(|p| p.id).collect())
+    }
+
+    /// The ids of the workspace projects `owner` owns (role `owner`): all a person reaches when no
+    /// role was decided for the request (it didn't come through roll-access's gate).
+    pub fn projects_owned(&self, owner: &str) -> Result<std::collections::HashSet<String>> {
+        Ok(self.workspace.list(roll_workspace::Scope::Member(owner))?.into_iter().filter(|p| p.role.is_some_and(|r| r.as_str() == "owner")).map(|p| p.id).collect())
     }
 
     /// A workspace project, or a 404.

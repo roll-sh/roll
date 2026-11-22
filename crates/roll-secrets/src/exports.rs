@@ -39,8 +39,16 @@ pub struct Export {
     pub created_by: String,
 }
 
-/// Whether `from_env_id`'s `path` is shared with `to_project` (inside a read or a write).
-pub(crate) fn exported(c: &Conn<'_>, from_env_id: &str, path: &str, to_project: &str) -> Result<bool> {
+/// Exports whose maker may no longer manage what they share (`Secrets::dead_exports`, computed
+/// before a read's transaction): `(env_id, path, to_project)`.
+pub(crate) type Dead = std::collections::HashSet<(String, String, String)>;
+
+/// Whether `from_env_id`'s `path` is shared with `to_project` (inside a read or a write), and its
+/// maker still may (`dead`).
+pub(crate) fn exported(c: &Conn<'_>, from_env_id: &str, path: &str, to_project: &str, dead: &Dead) -> Result<bool> {
+    if dead.contains(&(from_env_id.to_string(), path.to_string(), to_project.to_string())) {
+        return Ok(false);
+    }
     Ok(c.query_row("SELECT 1 FROM exports WHERE env_id = ? AND path = ? AND to_project = ?", [from_env_id, path, to_project], |r| r.get::<_, i64>(0)).optional()?.is_some())
 }
 
@@ -49,13 +57,15 @@ impl Secrets {
     pub fn shared_with(&self, project: &str, caller: &Caller) -> Result<Vec<crate::Import>> {
         caller.need(Action::Read, &Scope::whole(project))?;
         self.project(project)?;
-        self.db.read(|c| {
-            Ok(c.query(
-                "SELECT e.project_id, e.slug, x.path FROM exports x JOIN environments e ON e.id = x.env_id WHERE x.to_project = ? ORDER BY e.project_id, e.slug, x.path",
+        let dead = self.dead_exports("x.to_project = ?", project)?;
+        let rows: Vec<(String, crate::Import)> = self.db.read(|c| {
+            c.query(
+                "SELECT x.env_id, e.project_id, e.slug, x.path FROM exports x JOIN environments e ON e.id = x.env_id WHERE x.to_project = ? ORDER BY e.project_id, e.slug, x.path",
                 [project],
-                |r| Ok(crate::Import { project: Some(r.get(0)?), environment: r.get(1)?, path: r.get(2)? }),
-            )?)
-        })
+                |r| Ok((r.get(0)?, crate::Import { project: Some(r.get(1)?), environment: r.get(2)?, path: r.get(3)? })),
+            )
+        })?;
+        Ok(rows.into_iter().filter(|(env, i)| !dead.contains(&(env.clone(), i.path.clone(), project.to_string()))).map(|(_, i)| i).collect())
     }
 
     /// The projects `slug`'s `path` is shared with.

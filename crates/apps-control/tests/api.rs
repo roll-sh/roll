@@ -173,6 +173,8 @@ impl apps_control::integrations::DomainTls for FakeTls {
 /// roll secrets' search provider, through search's keys route).
 struct FakeResources;
 
+/// What the fake branched and deleted for environments' own data, in order.
+static BRANCHED: Mutex<Vec<String>> = Mutex::new(Vec::new());
 /// What the fake made and revoked for `logs` links, in order.
 static MINTED: Mutex<Vec<String>> = Mutex::new(Vec::new());
 /// While set, a `logs` link waits (a while at most) for a second one to reach the provider too,
@@ -206,6 +208,20 @@ impl apps_control::integrations::Resources for FakeResources {
 
     async fn unlink(&self, _kind: apps_control::model::LinkKind, _ref: &str, kept: &str) -> anyhow::Result<()> {
         MINTED.lock().push(format!("unlink {}", kept.trim_start_matches("key:")));
+        Ok(())
+    }
+
+    /// A Postgres project's branch named `name`, with a login of its own.
+    async fn branch(&self, kind: apps_control::model::LinkKind, r#ref: &str, name: &str) -> anyhow::Result<Option<apps_control::integrations::Minted>> {
+        if kind != apps_control::model::LinkKind::Postgres {
+            return Ok(None);
+        }
+        BRANCHED.lock().push(format!("branch {ref} {name}"));
+        Ok(Some(apps_control::integrations::Minted { vars: vec![("DATABASE_URL".into(), format!("postgres://branch:own@db.roll.test:5432/{ref}?branch={name}"))], kept: name.to_string() }))
+    }
+
+    async fn unbranch(&self, _kind: apps_control::model::LinkKind, _ref: &str, kept: &str) -> anyhow::Result<()> {
+        BRANCHED.lock().push(format!("unbranch {kept}"));
         Ok(())
     }
 
@@ -1658,6 +1674,40 @@ async fn a_link_puts_its_variables_in_the_instances() {
     assert_eq!(log.iter().filter(|l| l.starts_with("unlink ")).count(), 1, "the loser's goes: {log:?}");
 }
 
+/// An environment's own data (`data: "branch"`, Railway's environments' own databases): its
+/// Postgres links reach a branch made for it, never production's database; production and
+/// previews can't; deleting the environment deletes the branch.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_environment_with_its_own_data_gets_a_branch_of_each_database() {
+    let w = world().await;
+    let (svc, _) = image_service(&w, "api", json!({"port": 80})).await;
+    let id = svc["id"].as_str().unwrap().to_string();
+    let base = format!("/v1/apps/services/{id}/environments");
+    assert_eq!(call(&w.api, "PUT", &format!("/v1/apps/services/{id}/links/postgres/main"), Some(json!({}))).await.0, StatusCode::OK);
+    assert_eq!(call(&w.api, "PUT", &format!("{base}/production"), Some(json!({"data": "branch"}))).await.0, StatusCode::BAD_REQUEST, "production's is the database itself");
+    let (st, e) = call(&w.api, "PUT", &format!("{base}/staging"), Some(json!({"data": "branch"}))).await;
+    assert_eq!(st, StatusCode::OK, "{e}");
+    assert_eq!(e["data"], json!({"mode": "branch", "branches": [{"kind": "postgres", "ref": "main"}]}), "{e}");
+    let (_, v) = call(&w.api, "GET", &format!("{base}/staging/variables/values"), None).await;
+    let url = v["DATABASE_URL"].as_str().unwrap_or_default().to_string();
+    assert!(url.starts_with("postgres://branch:own@db.roll.test:5432/main?branch=roll-apps-"), "its branch's own login: {v}");
+    let (_, v) = call(&w.api, "GET", &format!("{base}/production/variables/values"), None).await;
+    assert_eq!(v["DATABASE_URL"], "postgres://app:pw@db.roll.test:5432/main", "production keeps its own");
+    // Another service of the project in the same environment shares that branch.
+    let (other, _) = image_service(&w, "worker", json!({"port": 80})).await;
+    let oid = other["id"].as_str().unwrap().to_string();
+    call(&w.api, "PUT", &format!("/v1/apps/services/{oid}/links/postgres/main"), Some(json!({}))).await;
+    assert_eq!(call(&w.api, "PUT", &format!("/v1/apps/services/{oid}/environments/staging"), Some(json!({"data": "branch"}))).await.0, StatusCode::OK);
+    let (_, v) = call(&w.api, "GET", &format!("/v1/apps/services/{oid}/environments/staging/variables/values"), None).await;
+    assert_eq!(v["DATABASE_URL"].as_str(), Some(url.as_str()), "shared");
+    let name = url.rsplit_once("branch=").unwrap().1.to_string();
+    // Deleted only once neither environment uses it.
+    assert_eq!(call(&w.api, "DELETE", &format!("{base}/staging"), None).await.0, StatusCode::NO_CONTENT);
+    assert_eq!(*BRANCHED.lock(), [format!("branch main {name}")]);
+    assert_eq!(call(&w.api, "DELETE", &format!("/v1/apps/services/{oid}/environments/staging"), None).await.0, StatusCode::NO_CONTENT);
+    assert_eq!(*BRANCHED.lock(), [format!("branch main {name}"), format!("unbranch {name}")]);
+}
+
 /// Requests that pile up past an instance's concurrency start more instances, up to
 /// `max_instances`; once they've gone, the extra instances go one at a time, the newest
 /// request's instance last.
@@ -2202,6 +2252,57 @@ async fn a_5xx_rate_past_the_alert_is_an_event_once() {
     let resolved: Vec<&Value> = ev["events"].as_array().unwrap().iter().filter(|e| e["kind"] == "alert.resolved").collect();
     assert_eq!(resolved.len(), 1, "{ev}");
     assert_eq!(resolved[0]["data"]["alert"], "alert.errors");
+}
+
+/// CPU past its alert for five minutes is `alert.cpu`; one of the app's own gauges past its
+/// threshold for its minutes running is `alert.metric` naming it, once, and resolved once it's
+/// back under.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn cpu_and_the_apps_own_gauges_alert() {
+    let w = world().await;
+    let run = json!({"port": 80, "cpu": 0.5, "alerts": {"error_pct": 0, "cpu_pct": 80, "metrics": [{"name": "queue_depth", "above": 3, "minutes": 2}]}});
+    let (svc, _) = image_service(&w, "api", run).await;
+    let id = svc["id"].as_str().unwrap().to_string();
+    let bad = json!({"run": {"alerts": {"metrics": [{"name": "queue_depth", "above": 1, "below": 0}]}}});
+    assert_eq!(call(&w.api, "PATCH", &format!("/v1/apps/services/{id}"), Some(bad)).await.0, StatusCode::BAD_REQUEST, "one threshold");
+    let into = code_sql::now_ms() % 60_000;
+    if into > 50_000 {
+        tokio::time::sleep(Duration::from_millis((60_000 - into + 100) as u64)).await;
+    }
+    // 27 CPU seconds a minute of one instance's 0.5 vCPU: 90%.
+    let minute = |m: i64| apps_control::store::MinuteRow { minute: m, requests: 10, instances: 1, cpu: 27.0, memory_bytes: 64 << 20, ..Default::default() };
+    let live = w.apps.live(&id, "production");
+    let events = || async { call(&w.api, "GET", "/v1/apps/events?after=0", None).await.1["events"].as_array().unwrap().clone() };
+    // Its gauge as its metrics endpoint or OTLP writes it: the newest point of each series counts.
+    let sink = w.apps.logs.sink(format!("metric:{id}/production"), apps_control::logs::Stream::System);
+    let point = |value: f64| json!({"name": "queue_depth", "kind": "gauge", "unit": "", "time": code_sql::now_ms() as u64 * 1_000_000, "value": value, "counter": false, "attrs": []}).to_string();
+    sink.line(point(5.0));
+    for _ in 0..100 {
+        let now = code_sql::now_ms() / 60_000;
+        w.apps.store.put_minutes(&id, "production", &(1..=5).map(|i| minute(now - i)).collect::<Vec<_>>()).unwrap();
+        w.apps.judge_alerts(&live).await;
+        let ev = events().await;
+        if ev.iter().any(|e| e["kind"] == "alert.cpu") && ev.iter().any(|e| e["kind"] == "alert.metric") {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    w.apps.judge_alerts(&live).await;
+    let ev = events().await;
+    let of = |k: &str| ev.iter().filter(|e| e["kind"] == k).cloned().collect::<Vec<_>>();
+    assert_eq!(of("alert.cpu").len(), 1, "{ev:?}");
+    assert_eq!((of("alert.cpu")[0]["data"]["value"].as_f64(), of("alert.cpu")[0]["data"]["threshold"].as_i64()), (Some(90.0), Some(80)));
+    let metric = of("alert.metric");
+    assert_eq!(metric.len(), 1, "{ev:?}");
+    assert_eq!((&metric[0]["data"]["metric"], &metric[0]["data"]["above"], &metric[0]["data"]["value"]), (&json!("queue_depth"), &json!(3.0), &json!(5.0)));
+    // A newer point under the threshold: it clears, said once and naming the gauge.
+    tokio::time::sleep(Duration::from_millis(5)).await;
+    sink.line(point(0.0));
+    w.apps.judge_alerts(&live).await;
+    w.apps.judge_alerts(&live).await;
+    let r: Vec<Value> = events().await.into_iter().filter(|e| e["kind"] == "alert.resolved" && e["data"]["alert"] == "alert.metric").collect();
+    assert_eq!(r.len(), 1, "{r:?}");
+    assert_eq!(r[0]["data"]["metric"], "queue_depth");
 }
 
 /// An objective (Cloud Monitoring's SLOs): its budget over its window on `…/slo`, and a burn
@@ -3939,7 +4040,7 @@ async fn a_failed_deploy_is_sent_to_the_projects_targets_signed_and_retried() {
     let (st, hook) = call(&w.api, "POST", &base, Some(json!({"url": format!("http://{ok_at}/hook")}))).await;
     assert_eq!(st, StatusCode::CREATED, "{hook}");
     let secret = hook["secret"].as_str().unwrap().to_string();
-    assert_eq!(hook["events"], json!(["check.down", "heartbeat.missed", "alert.slo", "deploy.failed", "rollout.waiting", "deploy.ready", "error.new", "error.regressed", "crash_loop", "spend.alert", "spend.limit", "alert.memory", "alert.errors", "alert.latency", "alert.capacity", "alert.log", "cron.failed", "domain.expiring", "domain.expired", "domain.tls_failed", "volume.backup_failed", "volume.full"]), "the default events");
+    assert_eq!(hook["events"], json!(["check.down", "heartbeat.missed", "alert.slo", "deploy.failed", "rollout.waiting", "deploy.ready", "error.new", "error.regressed", "crash_loop", "spend.alert", "spend.limit", "alert.memory", "alert.cpu", "alert.metric", "alert.errors", "alert.latency", "alert.capacity", "alert.log", "cron.failed", "domain.expiring", "domain.expired", "domain.tls_failed", "volume.backup_failed", "volume.full"]), "the default events");
     let (_, down) = call(&w.api, "POST", &base, Some(json!({"kind": "webhook", "url": format!("http://{bad_at}/x"), "events": ["deploy.failed"]}))).await;
     let (_, list) = call(&w.api, "GET", &base, None).await;
     assert!(!list.to_string().contains(&secret) && !list.to_string().contains("/hook"), "neither the secret nor the URL comes back: {list}");
@@ -4325,11 +4426,19 @@ async fn a_deployment_without_traffic_answers_on_its_own_url_until_put_live() {
 }
 
 /// An h2c app (a gRPC server) is spoken HTTP/2 to, with `te: trailers`, and its trailers reach
-/// the client; an HTTP/1 app still gets HTTP/1.1.
+/// the client; an HTTP/1 app still gets HTTP/1.1. With `health_grpc` its health is gRPC's: a
+/// server whose grpc.health.v1 check answers SERVING goes live, one answering NOT_SERVING doesn't.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn an_h2c_app_gets_http2_and_its_trailers_pass() {
     let w = world().await;
-    let (svc, _) = image_service(&w, "grpc", json!({"port": 80, "h2c": true})).await;
+    let (svc, d) = image_service(&w, "grpc", json!({"port": 80, "h2c": true, "health_grpc": ""})).await;
+    assert_eq!(d["status"], "active", "{d}");
+    let sick = json!({ "project": w.project, "name": "sick", "source": {"kind": "image", "image": "nginx:1.27"}, "run": {"port": 80, "h2c": true, "health_grpc": "acme.Orders", "health_timeout_s": 2}, "variables": {"FAKE_UNHEALTHY": "1"} });
+    let (st, s) = call(&w.api, "POST", "/v1/apps/services", Some(sick)).await;
+    assert_eq!(st, StatusCode::CREATED, "{s}");
+    let d = settled(&w, s["id"].as_str().unwrap(), "production", s["environments"][0]["latest"]["id"].as_str().unwrap()).await;
+    assert_eq!(d["status"], "failed", "NOT_SERVING never goes live: {d}");
+    assert_eq!(call(&w.api, "PATCH", &format!("/v1/apps/services/{}", svc["id"].as_str().unwrap()), Some(json!({"run": {"h2c": false}}))).await.0, StatusCode::BAD_REQUEST, "gRPC's health needs h2c");
     let (_, env) = call(&w.api, "GET", &format!("/v1/apps/services/{}/environments/production", svc["id"].as_str().unwrap()), None).await;
     let h = host(&env["url"]);
     let req = Request::builder().uri("/").header("host", &h).header("te", "trailers").body(Body::empty()).unwrap();
@@ -4444,6 +4553,24 @@ async fn a_worker_follows_its_streams_backlog() {
     let states: Vec<&str> = env["instances"].as_array().unwrap().iter().map(|i| i["state"].as_str().unwrap()).collect();
     assert!(!states.contains(&"crashed"), "{states:?}");
     assert_eq!(Fake::count(&w.fake.counts.starts), starts, "none started again");
+    // A floor of 0 (KEDA's scale to zero): caught up, the last one goes; a backlog starts one.
+    let (st, s) = call(&w.api, "PATCH", &format!("/v1/apps/services/{id}"), Some(json!({"run": {"min_instances": 0}}))).await;
+    assert_eq!((st, &s["run"]["min_instances"]), (StatusCode::OK, &json!(0)), "{s}");
+    let (_, r) = call(&w.api, "POST", &format!("/v1/apps/services/{id}/environments/production/redeploy"), Some(json!({}))).await;
+    assert_eq!(settled(&w, &id, "production", r["id"].as_str().unwrap()).await["status"], "active");
+    for (lag, want) in [(0, 0), (5, 1)] {
+        BACKLOG.store(lag, Ordering::SeqCst);
+        for _ in 0..200 {
+            w.apps.scale_workers().await;
+            live.tick().await;
+            if up(&w) == want {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert_eq!(up(&w), want, "{lag} behind with a floor of 0");
+    }
+    BACKLOG.store(0, Ordering::SeqCst);
     assert_eq!(call(&w.api, "PATCH", &format!("/v1/apps/services/{id}"), Some(json!({"run": {"scale": {"stream": "orders", "group": "g"}}}))).await.0, StatusCode::BAD_REQUEST, "a stream by its id, never a name");
     // Becoming a web service drops it (a web service scales on its requests).
     let (st, s) = call(&w.api, "PATCH", &format!("/v1/apps/services/{id}"), Some(json!({"run": {"type": "web"}}))).await;
@@ -4981,7 +5108,15 @@ async fn a_runtime_only_variable_never_reaches_a_build() {
     assert_eq!(call(&w.api, "PATCH", &format!("{env}/variables"), Some(json!({"runtime_only": {"NOPE": true}}))).await.0, StatusCode::BAD_REQUEST);
     let deploy = || async {
         let (_, d) = call(&w.api, "POST", &format!("{env}/deploys"), Some(json!({}))).await;
-        settled(&w, &id, "production", d["id"].as_str().unwrap()).await;
+        let dep = d["id"].as_str().unwrap().to_string();
+        settled(&w, &id, "production", &dep).await;
+        // Active a moment before its template is the live one on a loaded machine: waited for.
+        for _ in 0..200 {
+            if w.apps.live(&id, "production").template().is_some_and(|t| t.deployment == dep) {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
         w.fake.build_vars.lock().last().cloned().unwrap()
     };
     let built = deploy().await;
@@ -5412,7 +5547,7 @@ async fn secret_values_are_revealed_only_as_roll_secrets_allows() {
                 apps_control::integrations::SecretVar { name: "SIGNING_KEY".into(), value: "only-for-runtimes".into(), linked: false, sensitive: true, plain: false },
             ])
         }
-        async fn may_reveal(&self, who: apps_control::integrations::Asker<'_>, _: &str, _: &str) -> bool {
+        async fn may_reveal(&self, who: apps_control::integrations::Asker<'_>, _: &str, _: &str, _: &str, _: apps_control::integrations::Reveal<'_>) -> bool {
             who.operator
         }
         async fn ensure(&self, _: &str, env: &str) -> anyhow::Result<()> {
@@ -5774,6 +5909,42 @@ async fn affinity_keeps_a_visitor_on_one_instance() {
     let (inst, _, set) = get(Some(key)).await;
     assert_ne!(inst, second);
     assert!(set.is_some_and(|s| s.starts_with(&format!("roll_instance={};", apps_control::live::affinity_key(&inst)))), "the cookie follows the instance that answered");
+}
+
+/// A UDP service (`run.udp`, Fly's): its environment answers on a UDP port of its own, a
+/// client's first datagram waking an instance and its answer coming back from that port; a UDP
+/// service has no HTTP and isn't a TCP one.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_udp_service_answers_on_its_own_port() {
+    let free = std::net::UdpSocket::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
+    let w = world_with(|c| {
+        c.udp_ports = Some((free, free));
+        c.tcp_host = "127.0.0.1".into();
+    })
+    .await;
+    let bad = json!({ "project": w.project, "name": "bad", "source": {"kind": "image", "image": "nginx:1.27"}, "run": {"port": 80, "udp": true, "tcp": true} });
+    assert_eq!(call(&w.api, "POST", "/v1/apps/services", Some(bad)).await.0, StatusCode::BAD_REQUEST);
+    let (svc, _) = image_service(&w, "game", json!({"port": 7777, "udp": true})).await;
+    let id = svc["id"].as_str().unwrap().to_string();
+    w.apps.live(&id, "production").sleep().await;
+    tokio::spawn(w.apps.clone().serve_udp_ports("127.0.0.1".parse().unwrap()));
+    let env = get_until(&w.api, &format!("/v1/apps/services/{id}/environments/production"), |e| e["udp"].is_string()).await;
+    assert_eq!(env["udp"], format!("127.0.0.1:{free}"), "{env}");
+    let client = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    client.connect(("127.0.0.1", free)).await.unwrap();
+    let mut buf = [0u8; 512];
+    let mut got = None;
+    // Sent until it's answered: the port is bound a moment after its address shows, and the
+    // first datagram wakes the instance.
+    for _ in 0..100 {
+        let _ = client.send(b"ping").await;
+        if let Ok(Ok(n)) = tokio::time::timeout(Duration::from_millis(100), client.recv(&mut buf)).await {
+            got = Some(String::from_utf8_lossy(&buf[..n]).into_owned());
+            break;
+        }
+    }
+    let got = got.expect("an answer");
+    assert!(got.starts_with("roll-apps-") && got.ends_with(" ping"), "{got}");
 }
 
 /// A TCP service answers each environment on a port of its own, woken and spliced per
@@ -6225,6 +6396,27 @@ async fn a_paused_cron_skips_its_runs_and_pausing_stops_one() {
     call(&w.api, "PUT", &env, Some(json!({ "paused": true }))).await;
     let ended = get_until(&w.api, &runs, |r| r[0]["status"] != "running").await;
     assert_eq!(ended[0]["status"], "canceled", "{ended}");
+}
+
+/// An environment's schedules turned off (`scheduled: false`, roll previews' pv- ones): what
+/// falls due is skipped, while a run asked for and a deploy still go.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_unscheduled_environment_runs_only_what_is_asked() {
+    let w = world().await;
+    let (_, cron) = call(&w.api, "POST", "/v1/apps/services", Some(json!({ "project": w.project, "name": "every-minute", "source": {"kind": "image", "image": "busybox"}, "run": {"type": "cron", "schedule": "* * * * *"} }))).await;
+    let cid = cron["id"].as_str().unwrap().to_string();
+    assert_eq!(settled(&w, &cid, "production", cron["environments"][0]["latest"]["id"].as_str().unwrap()).await["status"], "active");
+    let (env, runs) = (format!("/v1/apps/services/{cid}/environments/production"), format!("/v1/apps/services/{cid}/environments/production/runs"));
+    let (st, e) = call(&w.api, "PUT", &env, Some(json!({ "scheduled": false }))).await;
+    assert_eq!((st, &e["scheduled"]), (StatusCode::OK, &json!(false)), "{e}");
+    let t = (code_sql::now_ms() / 60_000 + 60) * 60_000 + 30_000;
+    for m in 0..=10 {
+        w.apps.cron_pass(t + m * 60_000).await;
+    }
+    assert_eq!(call(&w.api, "GET", &runs, None).await.1, json!([]), "nothing on its schedule");
+    assert_eq!(call(&w.api, "POST", &runs, Some(json!({}))).await.0, StatusCode::ACCEPTED, "a run asked for still goes");
+    let (_, e) = call(&w.api, "PUT", &env, Some(json!({ "scheduled": true }))).await;
+    assert!(e.get("scheduled").is_none(), "{e}");
 }
 
 /// A failed cron run is tried again as `run.retries` allows (Cloud Run Jobs' retries), each try
@@ -6792,6 +6984,79 @@ async fn a_repos_submodules_come_from_roll_code_and_from_elsewhere() {
     for f in ["lib/lib.js", "ui/ui.js", "vendor/v.js"] {
         assert!(tree.iter().any(|p| p == f), "{f}: {tree:?}");
     }
+    // Allowed for this repo, not for whatever it's built from next.
+    let (st, s) = call(&w.api, "PATCH", &format!("/v1/apps/services/{id}"), Some(json!({ "source": {"kind": "image", "image": "nginx:1.27"} }))).await;
+    assert_eq!(st, StatusCode::OK, "{s}");
+    assert!(s["build"]["submodule_repos"].is_null(), "{s}");
+}
+
+/// roll.toml's edge settings (fly.toml's, vercel.json's): a live deployment's headers, firewall
+/// rules and rate limit go on its environment's gate, only ever tightening it: a rule of the
+/// tree's denies past the environment's allow, the environment's header wins over the tree's of the
+/// same name, and the lower rate limit holds. An allow rule in the tree isn't read at all.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_trees_edge_settings_only_tighten_its_environment() {
+    let w = world().await;
+    let file = "[app]\nheaders = [{ set = { \"x-from-file\" = \"1\", \"x-frame-options\" = \"SAMEORIGIN\" } }]\n[app.environments.production]\nfirewall = [{ action = \"deny\", path = \"/admin/*\" }]\nrate_limit = { per_minute = 1000, burst = 3 }\n";
+    for (k, v) in [("package.json", r#"{"name":"site","scripts":{"start":"node server.js"}}"#), ("server.js", "x"), ("roll.toml", file)] {
+        w.code.files.lock().insert(k.to_string(), v.to_string());
+    }
+    let (st, svc) = call(&w.api, "POST", "/v1/apps/services", Some(json!({ "project": w.project, "name": "site", "source": {"kind": "repo", "repo": "acme/site"} }))).await;
+    assert_eq!(st, StatusCode::CREATED, "{svc}");
+    let id = svc["id"].as_str().unwrap().to_string();
+    let d = settled(&w, &id, "production", svc["environments"][0]["latest"]["id"].as_str().unwrap()).await;
+    assert_eq!(d["status"], "active", "{d}");
+    let env = json!({"headers": [{"set": {"x-frame-options": "DENY"}}], "firewall": [{"action": "allow", "path": "/admin/*"}], "rate_limit": {"per_minute": 100000}});
+    let (st, e) = call(&w.api, "PUT", &format!("/v1/apps/services/{id}/environments/production"), Some(env)).await;
+    assert_eq!(st, StatusCode::OK, "{e}");
+    let h = host(&svc["environments"][0]["url"]);
+    let get = |path: &str| {
+        let req = Request::builder().uri(path).header("host", &h).body(Body::empty()).unwrap();
+        let public = w.public.clone();
+        async move { public.oneshot(req).await.unwrap() }
+    };
+    assert_eq!(get("/admin/users").await.status(), StatusCode::FORBIDDEN, "the tree's deny past the environment's allow");
+    let r = get("/").await;
+    assert_eq!(r.status(), StatusCode::OK);
+    assert_eq!((r.headers()["x-from-file"].to_str().unwrap(), r.headers()["x-frame-options"].to_str().unwrap()), ("1", "DENY"), "the environment's header wins");
+    // A burst of 3 (the tree's, lower than the environment's): one was taken above (the denied
+    // request never reached the limit).
+    for _ in 0..2 {
+        assert_eq!(get("/").await.status(), StatusCode::OK);
+    }
+    assert_eq!(get("/").await.status(), StatusCode::TOO_MANY_REQUESTS);
+    assert!(apps_control::config::parse("[app]\nfirewall = [{ action = \"allow\", path = \"/\" }]\n").is_err());
+}
+
+/// OpenTelemetry with no code (`build.otel`): a Node build gets the agent in its image, and its
+/// instances start it (joined to the app's own `NODE_OPTIONS`) only while traces are on.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_builds_otel_agent_starts_while_traces_are_on() {
+    let w = world().await;
+    for (k, v) in [("package.json", r#"{"name":"site","scripts":{"start":"node server.js"}}"#), ("server.js", "x")] {
+        w.code.files.lock().insert(k.to_string(), v.to_string());
+    }
+    let make = json!({ "project": w.project, "name": "api", "source": {"kind": "repo", "repo": "acme/site"}, "build": {"otel": true}, "variables": {"NODE_OPTIONS": "--max-old-space-size=256"} });
+    let (st, svc) = call(&w.api, "POST", "/v1/apps/services", Some(make)).await;
+    assert_eq!(st, StatusCode::CREATED, "{svc}");
+    let id = svc["id"].as_str().unwrap().to_string();
+    let d = settled(&w, &id, "production", svc["environments"][0]["latest"]["id"].as_str().unwrap()).await;
+    assert_eq!((d["status"].as_str(), d["plan"]["otel"].as_str()), (Some("active"), Some("node")), "{d}");
+    assert!(d["plan"]["dockerfile"].as_str().unwrap().contains("@opentelemetry/auto-instrumentations-node@"), "{d}");
+    let h = host(&svc["environments"][0]["url"]);
+    let node_options = || async {
+        // Woken by a visit: what its running instance was started with.
+        visit(&w, &h, "/").await;
+        let tpl = w.apps.live(&id, "production").template().unwrap();
+        let name = w.fake.instances(&id).into_iter().find(|(_, dep, s)| *dep == tpl.deployment && *s == FakeState::Running).map(|(n, ..)| n).expect("a running instance");
+        w.fake.spec(&name).unwrap().vars.into_iter().find(|(k, _)| k == "NODE_OPTIONS").map(|(_, v)| v)
+    };
+    assert_eq!(node_options().await.as_deref(), Some("--max-old-space-size=256"), "off without traces");
+    let env = format!("/v1/apps/services/{id}/environments/production");
+    call(&w.api, "PUT", &env, Some(json!({"traces": true}))).await;
+    let (_, r) = call(&w.api, "POST", &format!("{env}/redeploy"), Some(json!({}))).await;
+    assert_eq!(settled(&w, &id, "production", r["id"].as_str().unwrap()).await["status"], "active");
+    assert_eq!(node_options().await, Some(format!("--max-old-space-size=256 --require {}", apps_build::otel::NODE_REQUIRE)));
 }
 
 /// A Git URL service's Git LFS objects (`build.lfs`): asked of its LFS server, checked against the
@@ -7735,12 +8000,13 @@ async fn a_stream_is_pushed_to_a_web_service() {
     assert_eq!(st, StatusCode::CREATED, "{svc}");
     let id = svc["id"].as_str().unwrap().to_string();
     assert_eq!(settled(&w, &id, "production", svc["environments"][0]["latest"]["id"].as_str().unwrap()).await["status"], "active");
-    // Not on its project: off, and said why.
+    // Not on its project: off, and said why (the push loop says so a moment later: waited for).
     w.apps.cron_pass(code_sql::now_ms()).await;
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    let logs = format!("/v1/apps/services/{id}/environments/production/logs");
+    let said = |l: &Value| l.as_array().is_some_and(|a| a.iter().any(|l| l["text"].as_str().is_some_and(|t| t.contains("isn't on this service's project"))));
+    let log = get_until(&w.api, &logs, said).await;
+    assert!(said(&log), "{log}");
     assert!(stream.committed.lock().is_empty());
-    let (_, log) = call(&w.api, "GET", &format!("/v1/apps/services/{id}/environments/production/logs"), None).await;
-    assert!(log.as_array().unwrap().iter().any(|l| l["text"].as_str().unwrap().contains("isn't on this service's project")), "{log}");
     let ws = w.apps.deps.workspace.clone().unwrap();
     ws.place(roll_workspace::Scope::All, &w.project, roll_workspace::Kind::Stream, "st_ag2345678abc", 0.0, 0.0).unwrap();
     let done = || {
@@ -8070,8 +8336,8 @@ impl roll_intercept::Interception for FakeInterception {
     fn leaf(&self, _host: &str) -> anyhow::Result<roll_intercept::Leaf> {
         anyhow::bail!("no leaves in the fake")
     }
-    fn filter(&self, _req: roll_intercept::Outgoing<'_>) -> Result<usize, String> {
-        Ok(0)
+    fn filter(&self, _req: roll_intercept::Outgoing<'_>) -> Result<roll_intercept::Filtered, String> {
+        Ok(Default::default())
     }
 }
 
@@ -8109,11 +8375,18 @@ async fn a_closed_environment_uses_its_keys_without_seeing_them() {
     let (svc, _) = image_service(&w, "api", json!({"port": 80, "min_instances": 1})).await;
     let id = svc["id"].as_str().unwrap().to_string();
     let base = format!("/v1/apps/services/{id}/environments");
+    // The live deployment's running instance (a loaded machine reports a deploy active a moment
+    // before its template and instance are in place: waited for, two seconds at most).
     let live_spec = |env: &str| {
-        let insts = w.fake.instances(&id);
-        let tpl = w.apps.live(&id, env).template().unwrap();
-        let name = insts.into_iter().find(|(_, d, s)| *d == tpl.deployment && *s == FakeState::Running).map(|(n, ..)| n).expect("a running instance");
-        w.fake.spec(&name).unwrap()
+        for _ in 0..200 {
+            if let Some(tpl) = w.apps.live(&id, env).template()
+                && let Some(name) = w.fake.instances(&id).into_iter().find(|(_, d, s)| *d == tpl.deployment && *s == FakeState::Running).map(|(n, ..)| n)
+            {
+                return w.fake.spec(&name).unwrap();
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        panic!("no running instance of {env}'s live deployment");
     };
     let open = live_spec("production");
     assert!(open.vars.iter().any(|(k, v)| k == "STRIPE_KEY" && v == "sk_live_real"), "open: the value");
@@ -8143,6 +8416,13 @@ async fn a_closed_environment_uses_its_keys_without_seeing_them() {
     assert_eq!(put(Some(roll_auth::SignedIn { user: "usr_ada".into(), handle: "ada".into(), admin: false, code_owner: None, session: "ses_1".into() }), false).await, StatusCode::FORBIDDEN);
     // No one at all on a locked daemon (an open one's caller is the operator: `AppsConfig::open`).
     assert_eq!(put(None, false).await, StatusCode::FORBIDDEN);
+    // Nor a token, even one the operator made (it carries the operator marker beside its grant).
+    let scope: roll_auth::scope::Scope = serde_json::from_value(json!([{"product": "apps", "resources": "*", "actions": {"admin": "allow"}}])).unwrap();
+    let grant = roll_auth::Grant { id: "tok_ci".into(), name: "ci".into(), kind: roll_auth::GrantKind::Token, scope: Arc::new(scope), user: None, ask_otherwise: false };
+    let mut req = Request::builder().method("PUT").uri(format!("{base}/staging")).header("content-type", "application/json").body(Body::from(json!({"closed_by": "usr_admin"}).to_string())).unwrap();
+    req.extensions_mut().insert(grant);
+    req.extensions_mut().insert(roll_auth::Operator);
+    assert_eq!(w.api.clone().oneshot(req).await.unwrap().status(), StatusCode::FORBIDDEN, "an operator-made token names no maker");
     assert!(put(None, true).await.is_success());
     let (_, d) = call(&w.api, "POST", &format!("{base}/staging/deploys"), Some(json!({}))).await;
     settled(&w, &id, "staging", d["id"].as_str().unwrap()).await;

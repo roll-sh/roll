@@ -4,6 +4,8 @@
 //! land on the cluster's one owner; SIGTERM on the owner hands the cluster over with every
 //! acknowledged document; the restarted node serves it again. Skipped unless `ROLL_E2E=1`.
 
+mod common;
+
 use serde_json::{Value, json};
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
@@ -21,10 +23,6 @@ fn docker(args: &[&str]) -> String {
     String::from_utf8_lossy(&out.stdout).trim().to_string()
 }
 
-fn free_port() -> u16 {
-    std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port()
-}
-
 /// Containers named for this run, removed on drop.
 struct Containers(Vec<String>);
 
@@ -38,12 +36,16 @@ impl Drop for Containers {
 
 struct Node {
     child: Child,
+    started: common::Started,
     api: String,
     rest: String,
 }
 
 impl Drop for Node {
     fn drop(&mut self) {
+        if std::thread::panicking() {
+            eprintln!("{}'s stderr, last lines:\n{}", self.api, self.started.tail());
+        }
         let _ = self.child.kill();
         let _ = self.child.wait();
     }
@@ -56,9 +58,12 @@ struct Env {
 }
 
 impl Env {
-    fn start(&self, id: &str, api: u16, rest: u16) -> Node {
+    /// Node `id` on ports of its own (others reach it at its API's: the default advertised URL).
+    async fn start(&self, id: &str) -> Node {
         let home = self.home.path().join(id);
-        let child = Command::new(env!("CARGO_BIN_EXE_rolld"))
+        std::fs::create_dir_all(&home).unwrap();
+        let mut cmd = Command::new(env!("CARGO_BIN_EXE_rolld"));
+        cmd
             .env_clear()
             .env("PATH", std::env::var("PATH").unwrap_or_default())
             .env("RUST_LOG", "warn")
@@ -66,18 +71,17 @@ impl Env {
             .env("ROLL_CLUSTER_SECRET", SECRET)
             .env("ROLL_SYSTEM_DATABASE", &self.pg)
             .env("ROLL_NODE_ID", id)
-            .env("ROLL_ADVERTISE_URL", format!("http://127.0.0.1:{api}"))
             .env("ROLL_DRAIN_TIMEOUT", "20")
             .env("AWS_ACCESS_KEY_ID", S3_USER)
             .env("AWS_SECRET_ACCESS_KEY", S3_PASS)
             .env("AWS_REGION", "us-east-1")
-            .args(["--home", home.to_str().unwrap(), "--api", &format!("127.0.0.1:{api}")])
+            .args(["--home", home.to_str().unwrap()])
             .args(["--s3-bucket", "roll", "--s3-endpoint", &self.s3, "--s3-prefix", "search-e2e"])
-            .args(["--search-http", &format!("127.0.0.1:{rest}")])
-            .stdout(Stdio::null())
-            .spawn()
-            .expect("rolld starts");
-        Node { child, api: format!("http://127.0.0.1:{api}"), rest: format!("http://127.0.0.1:{rest}") }
+            .stdout(Stdio::null());
+        let started = common::on_any_port(&mut cmd, &["api", "search-http", "previews-smtp"], &home);
+        let mut child = cmd.spawn().expect("rolld starts");
+        let addrs = started.addrs(&mut child).await;
+        Node { child, started, api: addrs.url("api"), rest: addrs.url("search-http") }
     }
 }
 
@@ -126,8 +130,7 @@ async fn a_cluster_moves_between_rolld_nodes_with_every_write() {
     }
 
     let http = reqwest::Client::builder().timeout(Duration::from_secs(60)).build().unwrap();
-    let ports = [(free_port(), free_port()), (free_port(), free_port())];
-    let mut nodes = vec![env.start("n1", ports[0].0, ports[0].1), env.start("n2", ports[1].0, ports[1].1)];
+    let mut nodes = vec![env.start("n1").await, env.start("n2").await];
     for n in &nodes {
         up(&http, n).await;
     }
@@ -165,7 +168,7 @@ async fn a_cluster_moves_between_rolld_nodes_with_every_write() {
 
     // The stopped node comes back and serves it again (wherever it's owned now).
     let id = if stop == 0 { "n1" } else { "n2" };
-    nodes[stop] = env.start(id, ports[stop].0, ports[stop].1);
+    nodes[stop] = env.start(id).await;
     up(&http, &nodes[stop]).await;
     let (s, v) = es(&http, &nodes[stop], auth, reqwest::Method::GET, "/items/_count", None).await;
     assert_eq!((s, v["count"].as_i64()), (200, Some(20)), "{v}");

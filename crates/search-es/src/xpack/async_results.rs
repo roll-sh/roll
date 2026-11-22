@@ -48,6 +48,42 @@ pub struct Entry {
     pub bytes: usize,
     /// Extra state a kind needs (SQL cursors: the remaining rows and columns).
     pub extra: Value,
+    /// Who opened it ([`crate::xpack::security::resource_owner`]): anyone else finds it missing.
+    /// `None` for results stored before owners were recorded: the superuser's alone.
+    pub owner: Option<String>,
+}
+
+/// Stored result `id` of `kind` if the request's caller opened it: anyone else's answers as a
+/// missing one (`AsyncTaskIndexService.ensureAuthenticatedUserIsSame`), whatever its roles.
+/// A deferred result is read back first ([`crate::Cluster::kept_result`]): the breaker's 429
+/// while there is no room for it.
+pub fn get_own(ctx: &crate::rest::Ctx, id: &str, kind: Kind) -> crate::error::EsResult<Option<Entry>> {
+    Ok(ctx.cluster.kept_result(id, kind, ctx.now_ms)?.filter(|e| opened_by_caller(ctx, e)))
+}
+
+/// Removes stored result `id` of `kind` if the caller opened it, or may cancel tasks
+/// (`cancel_task`); `false` when it's missing to the caller.
+pub fn remove_own(ctx: &crate::rest::Ctx, id: &str, kind: Kind) -> bool {
+    // A deferred result is read back to check its owner (missing while there's no room for it).
+    let may = match ctx.cluster.kept_result(id, kind, ctx.now_ms).ok().flatten() {
+        Some(e) => opened_by_caller(ctx, &e) || crate::xpack::security::allows_cluster_action(ctx, "cluster:admin/tasks/cancel"),
+        None => false,
+    };
+    may && ctx.cluster.xpack.results.remove(id, kind)
+}
+
+/// The owner a result the request stores gets.
+pub fn owner(ctx: &crate::rest::Ctx) -> Option<String> {
+    Some(crate::xpack::security::resource_owner(ctx))
+}
+
+/// Whether the caller opened `e`. A result stored before owners were recorded has none: only the
+/// cluster's superuser reaches it (to read, extend or delete).
+fn opened_by_caller(ctx: &crate::rest::Ctx, e: &Entry) -> bool {
+    match e.owner.as_deref() {
+        Some(o) => o == crate::xpack::security::resource_owner(ctx),
+        None => crate::xpack::security::principal(ctx).is_superuser(),
+    }
 }
 
 /// At most this many stored results per cluster...
@@ -423,7 +459,7 @@ mod tests {
     use crate::obj;
 
     fn entry(kind: Kind, exp: i64) -> Entry {
-        Entry { kind, response: obj! { "a" => 1 }, start_ms: 0, expiration_ms: exp, bytes: 0, extra: Value::Null }
+        Entry { kind, response: obj! { "a" => 1 }, start_ms: 0, expiration_ms: exp, bytes: 0, extra: Value::Null, owner: None }
     }
 
     #[test]

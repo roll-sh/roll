@@ -14,6 +14,8 @@ const EVENTS: { value: NotifyEvent; label: string }[] = [
   { value: "spend.alert", label: "Spend alert" },
   { value: "spend.limit", label: "Spend limit" },
   { value: "alert.memory", label: "Memory alert" },
+  { value: "alert.cpu", label: "CPU alert" },
+  { value: "alert.metric", label: "Metric alert (its own gauges)" },
   { value: "alert.errors", label: "5xx alert" },
   { value: "alert.latency", label: "Latency alert" },
   { value: "alert.capacity", label: "At capacity" },
@@ -54,7 +56,7 @@ export function NotificationsPanel({ project, projectName, runner }: { project: 
   const [url, setUrl] = useState("");
   const [region, setRegion] = useState<"us" | "eu">("us");
   const oncall = kind === "pagerduty" || kind === "opsgenie";
-  const [events, setEvents] = useState<NotifyEvent[]>(["check.down", "heartbeat.missed", "alert.slo", "deploy.failed", "rollout.waiting", "deploy.ready", "error.new", "error.regressed", "crash_loop", "spend.alert", "spend.limit", "alert.memory", "alert.errors", "alert.latency", "alert.capacity", "alert.log", "cron.failed", "domain.expiring", "domain.expired", "domain.tls_failed", "volume.backup_failed", "volume.full"]);
+  const [events, setEvents] = useState<NotifyEvent[]>(["check.down", "heartbeat.missed", "alert.slo", "deploy.failed", "rollout.waiting", "deploy.ready", "error.new", "error.regressed", "crash_loop", "spend.alert", "spend.limit", "alert.memory", "alert.cpu", "alert.metric", "alert.errors", "alert.latency", "alert.capacity", "alert.log", "cron.failed", "domain.expiring", "domain.expired", "domain.tls_failed", "volume.backup_failed", "volume.full"]);
   const [envs, setEnvs] = useState("");
   const [previews, setPreviews] = useState(false);
   // Only some of the project's services (none chosen: every one).

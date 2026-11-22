@@ -6,6 +6,12 @@
 //! roll runs it on the coordinator around the search: the child retriever's search returns the
 //! window, the endpoint ranks it, and the page is cut from that. The reranker is supported at the
 //! top of the request's `retriever` (`field` read from `_source`).
+//!
+//! A browser key ([`crate::xpack::security::browser`]) reranks only with an endpoint its owner
+//! lists in `limits.inference_endpoints`, a window of at most `max_rerank_window` (100); the
+//! call counts against its `max_inference`, and the window is charged to its rate limits (one
+//! item per [`RERANK_DOCS_PER_ITEM`](crate::xpack::security::browser::RERANK_DOCS_PER_ITEM)
+//! documents) before the search runs.
 
 use crate::error::{EsError, EsResult};
 use crate::json::Value;
@@ -34,7 +40,7 @@ fn parse_err(msg: String) -> EsError {
 
 /// Takes a top-level `text_similarity_reranker` out of a search body: the body keeps its child
 /// retriever and asks for the window from the first hit.
-pub fn take(body: &mut Option<Value>) -> EsResult<Option<Reranker>> {
+pub fn take(ctx: &crate::rest::Ctx<'_>, body: &mut Option<Value>) -> EsResult<Option<Reranker>> {
     let Some(Value::Obj(b)) = body else { return Ok(None) };
     let Some(Value::Obj(r)) = b.get("retriever") else { return Ok(None) };
     let Some(Value::Obj(spec)) = r.get("text_similarity_reranker") else { return Ok(None) };
@@ -62,6 +68,7 @@ pub fn take(body: &mut Option<Value>) -> EsResult<Option<Reranker>> {
             rr.window, rr.size
         )]));
     }
+    admit(ctx, &rr)?;
     // The child, with the reranker's filters, fetches the window.
     let mut child = child;
     if let Some(f) = spec.get("filter")
@@ -74,6 +81,23 @@ pub fn take(body: &mut Option<Value>) -> EsResult<Option<Reranker>> {
     b.insert("from".into(), 0.into());
     b.insert("size".into(), rr.window.into());
     Ok(Some(rr))
+}
+
+/// A browser key's reranker: a listed endpoint, a window within `max_rerank_window`, one call
+/// of its `max_inference`, and the window charged before the search runs.
+fn admit(ctx: &crate::rest::Ctx<'_>, rr: &Reranker) -> EsResult<()> {
+    use crate::xpack::security::browser;
+    let Some(sec) = crate::xpack::security::dls::ReadSecurity::of(ctx) else { return Ok(()) };
+    let Some(p) = sec.browser() else { return Ok(()) };
+    if !p.inference_endpoints.contains(&rr.inference_id) {
+        return Err(browser::refused(format!("[text_similarity_reranker] with inference endpoint [{}] (one its limits.inference_endpoints name)", rr.inference_id)));
+    }
+    if rr.window > p.max_rerank_window {
+        return Err(browser::refused(format!("a [text_similarity_reranker] [rank_window_size] over [{}] (the key's max_rerank_window)", p.max_rerank_window)));
+    }
+    browser::check_inference_text(&rr.text)?;
+    sec.spend_inference(1)?;
+    browser::charge_work(ctx, "rerank", (rr.window.max(1) as u64).div_ceil(browser::RERANK_DOCS_PER_ITEM as u64))
 }
 
 /// Reranks a rendered search answer's hits.
@@ -123,7 +147,7 @@ pub async fn apply(ctx: &crate::rest::Ctx<'_>, rr: &Reranker, answer: &mut Value
         let mut req = super::Request::new(inputs, std::time::Duration::from_secs(30));
         req.query = Some(rr.text.clone());
         let run = match checked {
-            Ok(()) => super::run(ctx.cluster, &rr.inference_id, &req).await,
+            Ok(()) => super::run(ctx.cluster, &rr.inference_id, super::Use::Rerank, &req).await,
             Err(e) => Err(e),
         };
         let ranked = match run {

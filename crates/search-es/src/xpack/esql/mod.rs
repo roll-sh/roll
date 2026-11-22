@@ -11,6 +11,7 @@
 //! come as JSON (row-wise or `columnar`), `txt`, `csv`, `tsv` or the other xcontent formats.
 
 pub mod capabilities;
+pub mod ccs;
 pub mod columnar;
 pub mod datasources;
 pub mod exec;
@@ -180,6 +181,10 @@ struct Request {
     column_metadata: bool,
     /// `settings.approximation`.
     approximation: bool,
+    /// `include_ccs_metadata` or `include_execution_metadata`: the response's `_clusters`.
+    include_clusters: bool,
+    /// `include_execution_metadata`: `_clusters` for a query over this cluster alone too.
+    include_execution: bool,
 }
 
 fn parse_request(ctx: &Ctx, body: &Value, async_api: bool) -> EsResult<Request> {
@@ -215,6 +220,8 @@ fn parse_request(ctx: &Ctx, body: &Value, async_api: bool) -> EsResult<Request> 
         profile: m.get("profile").and_then(Value::as_bool).unwrap_or(false),
         column_metadata: m.get("settings").and_then(|s| s.get("column_metadata")).is_some_and(|v| v.as_bool() == Some(true) || v.as_str() == Some("true")),
         approximation: m.get("settings").and_then(|s| s.get("approximation")).is_some_and(|v| !matches!(v, Value::Null | Value::Bool(false))),
+        include_clusters: ["include_ccs_metadata", "include_execution_metadata"].iter().any(|k| m.get(*k).and_then(Value::as_bool) == Some(true)),
+        include_execution: m.get("include_execution_metadata").and_then(Value::as_bool) == Some(true),
     })
 }
 
@@ -290,8 +297,66 @@ fn body_time_zone(ctx: &Ctx, m: &Map) -> EsResult<Option<String>> {
 }
 
 /// Runs a request: the JSON response and the table (for text formats), both charged to `mem`
-/// until it drops (after the response is rendered).
-async fn run(ctx: &Ctx<'_>, req: &Request, mem: &memory::Memory) -> EsResult<(Map, exec::Table)> {
+/// until it drops (after the response is rendered). A linked remote's part
+/// ([`ccs::requested`]) runs as one and answers its result for the coordinating cluster.
+async fn run(ctx: &Ctx<'_>, req: &Request, body: &Value, part: Option<std::sync::Arc<ccs::Part>>, mem: &memory::Memory) -> EsResult<(Map, exec::Table)> {
+    // A remote's part runs only what it is, as this cluster parses it ([`ccs::admit_part`]): its
+    // shape, its `ENRICH`es' `monitor_enrich` here (the `remote_cluster` privilege the link
+    // carries) and their policies.
+    let mut enrich = Vec::new();
+    let part = match part {
+        Some(p) => {
+            let parsed = parser::parse_with(&req.query, &req.params)?;
+            ccs::admit_part(ctx, &parsed, &p)?;
+            enrich = ccs::enrich_fields(&ctx.state(), &parsed.cmds, &p);
+            // A rows part with nothing to bound it answers at most this cluster's own cap when
+            // the request names none: never everything it reads.
+            let bounded = parsed.cmds.iter().any(|c| matches!(c, parser::Cmd::Limit(_)));
+            if p.mode == ccs::Mode::Rows && !bounded && p.max_bytes.is_none() {
+                let b = ctx.cluster.breakers.request(ctx.cluster, &ctx.state());
+                let mut capped = (*p).clone();
+                capped.max_bytes = Some(b.limit().saturating_sub(b.used()));
+                Some(std::sync::Arc::new(capped))
+            } else {
+                Some(p)
+            }
+        }
+        None => None,
+    };
+    let remotes = if part.is_some() { None } else { ccs::Ccs::of(ctx, body, &req.params) };
+    let is_part = part.clone();
+    let (mut out, table, stats) = ccs::part_scope(part, ccs::scope(remotes, run_query(ctx, req, mem))).await?;
+    if let Some(p) = is_part {
+        // Defensive: `admit_part` runs only `STATS` parts the executor answers with states;
+        // one that didn't would be read as no groups, so it's an error, never empty.
+        if p.mode == ccs::Mode::Stats && stats.partial.is_none() {
+            return Err(EsError::illegal_state("this cluster's part of the query can't answer STATS partially"));
+        }
+        let shards = ccs::shards_of(ctx.cluster, stats.indices.as_deref());
+        out.insert(ccs::PART_FIELD.into(), ccs::encode_answer(&table, p.mode, stats.partial.as_ref(), shards, &enrich));
+        out.shift_remove("columns");
+        out.shift_remove("values");
+        return Ok((out, table));
+    }
+    let took = out.get("took").and_then(Value::as_i64).unwrap_or(0);
+    let clusters = match (stats.clusters, req.include_execution, &stats.indices) {
+        (Some(c), _, _) => Some(c),
+        // `include_execution_metadata` shows the local cluster alone too.
+        (None, true, Some(indices)) => Some(vec![ccs::ClusterInfo { name: "(local)".into(), indices: stats.sources.clone().unwrap_or_else(|| indices.join(",")), status: "successful", took: None, shards: ccs::shards_of(ctx.cluster, Some(indices)), failures: Vec::new() }]),
+        _ => None,
+    };
+    if let Some(c) = clusters {
+        if c.iter().any(|i| i.status != "successful") {
+            out.insert("is_partial".into(), true.into());
+        }
+        if req.include_clusters {
+            out.insert("_clusters".into(), ccs::clusters_section(&c, took));
+        }
+    }
+    Ok((out, table))
+}
+
+async fn run_query(ctx: &Ctx<'_>, req: &Request, mem: &memory::Memory) -> EsResult<(Map, exec::Table, exec::Stats)> {
     let started = std::time::Instant::now();
     let start_ms = ctx.now_ms;
     let kibana = ctx.request.header("x-elastic-product-origin").is_some_and(|o| o.eq_ignore_ascii_case("kibana"));
@@ -400,7 +465,7 @@ async fn run(ctx: &Ctx<'_>, req: &Request, mem: &memory::Memory) -> EsResult<(Ma
     if req.profile {
         out.insert("profile".into(), profile::build(ctx.cluster, start_ms, took.as_nanos() as i64, unmapped, &shape, &stats, &table));
     }
-    Ok((out, table))
+    Ok((out, table, stats))
 }
 
 /// Adds `original_types` (and, for several, Elasticsearch's `suggested_cast`) to the
@@ -471,10 +536,11 @@ fn reply(ctx: &Ctx, out: Map, table: &exec::Table, mem: &memory::Memory) -> EsRe
 }
 
 pub async fn query(ctx: &Ctx<'_>) -> EsResult<Reply> {
-    let body = ctx.body()?.unwrap_or_else(Value::object);
+    let mut body = ctx.body()?.unwrap_or_else(Value::object);
+    let part = ccs::requested(ctx, &mut body)?;
     let req = parse_request(ctx, &body, false)?;
     let mem = memory::Memory::for_query(ctx.cluster);
-    let (out, table) = run(ctx, &req, &mem).await?;
+    let (out, table) = run(ctx, &req, &body, part, &mem).await?;
     reply(ctx, out, &table, &mem)
 }
 
@@ -492,7 +558,7 @@ pub async fn async_query(ctx: &Ctx<'_>) -> EsResult<Reply> {
     let body = ctx.body()?.unwrap_or_else(Value::object);
     let req = parse_request(ctx, &body, true)?;
     let mem = memory::Memory::for_query(ctx.cluster);
-    let (out, table) = run(ctx, &req, &mem).await?;
+    let (out, table) = run(ctx, &req, &body, None, &mem).await?;
     // Every query completes before answering; it is kept only when asked to be.
     if !req.keep_on_completion {
         let mut m = Map::with_capacity(out.len() + 1);
@@ -503,7 +569,7 @@ pub async fn async_query(ctx: &Ctx<'_>) -> EsResult<Reply> {
     let id = async_results::async_id(&ctx.cluster.node.id);
     ctx.cluster.xpack.results.put(
         id.clone(),
-        Entry { kind: Kind::Esql, response: Value::Obj(out.clone()), start_ms: ctx.now_ms, expiration_ms: ctx.now_ms + req.keep_alive, bytes: 0, extra: Value::Null },
+        Entry { kind: Kind::Esql, response: Value::Obj(out.clone()), start_ms: ctx.now_ms, expiration_ms: ctx.now_ms + req.keep_alive, bytes: 0, extra: Value::Null, owner: crate::xpack::async_results::owner(ctx) },
         ctx.now_ms,
     )?;
     // The stored copy is the store's (charged there); `out` moves into the reply.
@@ -522,7 +588,7 @@ pub fn async_get(ctx: &Ctx) -> EsResult<Reply> {
     let id = ctx.path_param("id").unwrap_or_default();
     // An id that doesn't decode is a bad request, before any lookup.
     async_results::check_id(id)?;
-    let Some(e) = ctx.cluster.kept_result(id, Kind::Esql, ctx.now_ms)? else { return Err(not_found(id)) };
+    let Some(e) = crate::xpack::async_results::get_own(ctx, id, Kind::Esql)? else { return Err(not_found(id)) };
     if let Some(k) = ctx.query("keep_alive") {
         let ms = crate::units::TimeValue::parse(k, "keep_alive")?.as_millis();
         ctx.cluster.xpack.results.touch(id, ctx.now_ms + ms);
@@ -538,7 +604,7 @@ pub fn async_stop(ctx: &Ctx) -> EsResult<Reply> {
 pub fn async_delete(ctx: &Ctx) -> EsResult<Reply> {
     let id = ctx.path_param("id").unwrap_or_default();
     async_results::check_id(id)?;
-    if ctx.cluster.xpack.results.remove(id, Kind::Esql) {
+    if crate::xpack::async_results::remove_own(ctx, id, Kind::Esql) {
         Reply::acknowledged()
     } else {
         Err(not_found(id))

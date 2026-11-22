@@ -4,11 +4,12 @@ import { ROLL_API } from "./roll-api";
 
 /** A fetch that answers from a table (`METHOD /path?query`) and records what it was asked. */
 function fakeFetch(answers: Record<string, [number, unknown]>) {
-  const asked: { method: string; path: string; body: unknown }[] = [];
+  const asked: { method: string; path: string; body: unknown; project?: string }[] = [];
   const f = vi.fn(async (url: string, init: RequestInit) => {
     const method = init.method ?? "GET";
     const path = url.slice(ROLL_API.length);
-    asked.push({ method, path, body: init.body ? JSON.parse(String(init.body)) : undefined });
+    const project = (init.headers as Record<string, string> | undefined)?.["x-roll-project"];
+    asked.push({ method, path, body: init.body ? JSON.parse(String(init.body)) : undefined, ...(project ? { project } : {}) });
     const [status, body] = answers[`${method} ${path}`] ?? [404, { error: "not here" }];
     return new Response(JSON.stringify(body), { status });
   });
@@ -53,6 +54,8 @@ describe("previews api", () => {
     expect((await previewsApi.usage("prj_1")).month_to_date_usd).toBe(1.5);
 
     const bodies = asked.filter((a) => a.body !== undefined).map((a) => [a.method, a.path, a.body]);
+    // A create names its project for roll-access too (a member's role there decides it).
+    expect(asked.filter((a) => a.path === "/v1/previews" && a.method === "POST").map((a) => a.project)).toEqual(["prj_1", "prj_1"]);
     expect(bodies).toEqual([
       ["POST", "/v1/previews", { project: "prj_1", repo: "acme/web", branch: "feat-x" }],
       ["POST", "/v1/previews", { project: "prj_1", repo: "acme/web", change: "chg_1" }],

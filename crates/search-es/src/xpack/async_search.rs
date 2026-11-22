@@ -107,7 +107,15 @@ pub async fn submit(ctx: &Ctx<'_>) -> EsResult<Reply> {
         }
         ctx.cluster.xpack.results.put(
             id.clone(),
-            Entry { kind: Kind::Search, response: stored, start_ms: start, expiration_ms: start + keep_alive, bytes: 0, extra: Value::from(status as i64) },
+            Entry {
+                kind: Kind::Search,
+                response: stored,
+                start_ms: start,
+                expiration_ms: start + keep_alive,
+                bytes: 0,
+                extra: Value::from(status as i64),
+                owner: async_results::owner(ctx),
+            },
             ctx.now_ms,
         )?;
         let mut with_id = Map::new();
@@ -118,13 +126,20 @@ pub async fn submit(ctx: &Ctx<'_>) -> EsResult<Reply> {
     Ok(Reply::Body(status, Value::Obj(m)))
 }
 
+/// The stored result the request names, if the caller opened it: anyone else's answers as a
+/// missing one (`AsyncTaskIndexService.ensureAuthenticatedUserIsSame`), whatever their roles.
 fn stored(ctx: &Ctx) -> EsResult<(String, Entry)> {
     let id = ctx.path_param("id").unwrap_or_default().to_string();
     async_results::check_id(&id)?;
-    match ctx.cluster.kept_result(&id, Kind::Search, ctx.now_ms)? {
+    match async_results::get_own(ctx, &id, Kind::Search)? {
         Some(e) => Ok((id, e)),
         None => Err(EsError::resource_not_found(id)),
     }
+}
+
+/// The HTTP status the stored search answered with.
+fn stored_status(e: &Entry) -> i64 {
+    e.extra.as_i64().unwrap_or(200)
 }
 
 fn with_id(id: &str, v: &Value, expiration: i64) -> Map {
@@ -150,7 +165,7 @@ pub fn get(ctx: &Ctx) -> EsResult<Reply> {
         e.expiration_ms = e.expiration_ms.max(ctx.now_ms + ka);
         ctx.cluster.xpack.results.touch(&id, e.expiration_ms);
     }
-    let status = e.extra.as_i64().unwrap_or(200) as u16;
+    let status = stored_status(&e) as u16;
     Ok(Reply::Body(status, Value::Obj(with_id(&id, &e.response, e.expiration_ms))))
 }
 
@@ -166,7 +181,7 @@ pub fn status(ctx: &Ctx) -> EsResult<Reply> {
             m.insert(k.into(), if k == "expiration_time_in_millis" { e.expiration_ms.into() } else { v.clone() });
         }
     }
-    let status = e.extra.as_i64().unwrap_or(200);
+    let status = stored_status(&e);
     if let Some(shards) = r.get("response").and_then(|x| x.get("_shards")) {
         m.insert("_shards".into(), shards.clone());
     }
@@ -180,7 +195,7 @@ pub fn status(ctx: &Ctx) -> EsResult<Reply> {
 pub fn delete(ctx: &Ctx) -> EsResult<Reply> {
     let id = ctx.path_param("id").unwrap_or_default().to_string();
     async_results::check_id(&id)?;
-    if ctx.cluster.xpack.results.remove(&id, Kind::Search) {
+    if async_results::remove_own(ctx, &id, Kind::Search) {
         Reply::ok(obj! { "acknowledged" => true })
     } else {
         Err(EsError::resource_not_found(id))

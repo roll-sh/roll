@@ -884,7 +884,7 @@ fn parse_with(src: &str, params: &[V]) -> EsResult<Stmt> {
     if let Some(l) = limit {
         cmds.push(Cmd::Limit(l));
     }
-    Ok(Stmt::Select { query: Query { src: src.to_string(), cmds, sql: true, locale: None, settings: Default::default() }, table, limit, star })
+    Ok(Stmt::Select { query: Query { src: src.to_string(), cmds, sql: true, locale: None, settings: Default::default(), spans: Vec::new() }, table, limit, star })
 }
 
 /// Collects `HAVING`'s aggregate calls as named outputs (named by their text).
@@ -1197,7 +1197,7 @@ fn page(ctx: &Ctx, result: &Result, fetch: usize) -> EsResult<Option<String>> {
         "text" => Value::Arr(result.text_rows[fetch..].iter().map(|r| Value::Arr(r.iter().map(|s| Value::from(s.clone())).collect())).collect()),
         "fetch" => fetch,
     };
-    ctx.cluster.xpack.results.put(cursor.clone(), Entry { kind: Kind::SqlCursor, response: Value::Null, start_ms: ctx.now_ms, expiration_ms: ctx.now_ms + CURSOR_KEEP_MS, bytes: 0, extra: rest }, ctx.now_ms)?;
+    ctx.cluster.xpack.results.put(cursor.clone(), Entry { kind: Kind::SqlCursor, response: Value::Null, start_ms: ctx.now_ms, expiration_ms: ctx.now_ms + CURSOR_KEEP_MS, bytes: 0, extra: rest, owner: crate::xpack::async_results::owner(ctx) }, ctx.now_ms)?;
     Ok(Some(cursor))
 }
 
@@ -1212,13 +1212,13 @@ fn bad_cursor() -> EsError {
 }
 
 fn next_page(ctx: &Ctx, cursor: &str) -> EsResult<Reply> {
-    let Some(e) = ctx.cluster.kept_result(cursor, Kind::SqlCursor, ctx.now_ms)? else {
+    let Some(e) = crate::xpack::async_results::get_own(ctx, cursor, Kind::SqlCursor)? else {
         if foreign_cursor(cursor) {
             return Err(bad_cursor());
         }
         return Err(EsError::illegal_argument("Unknown or expired cursor"));
     };
-    ctx.cluster.xpack.results.remove(cursor, Kind::SqlCursor);
+    crate::xpack::async_results::remove_own(ctx, cursor, Kind::SqlCursor);
     let rows: Vec<Vec<Value>> = e.extra.get("rows").and_then(Value::as_array).map(|a| a.iter().map(|r| r.as_array().cloned().unwrap_or_default()).collect()).unwrap_or_default();
     let text: Vec<Vec<String>> = e.extra.get("text").and_then(Value::as_array).map(|a| a.iter().map(|r| r.as_array().map(|x| x.iter().map(Value::to_es_string).collect()).unwrap_or_default()).collect()).unwrap_or_default();
     let fetch = e.extra.get("fetch").and_then(Value::as_i64).unwrap_or(1000).max(1) as usize;
@@ -1266,7 +1266,7 @@ pub async fn query(ctx: &Ctx<'_>) -> EsResult<Reply> {
         if let Some(c) = &cursor {
             m.insert("cursor".into(), c.clone().into());
         }
-        ctx.cluster.xpack.results.put(id.clone(), Entry { kind: Kind::Sql, response: Value::Obj(m), start_ms: ctx.now_ms, expiration_ms: ctx.now_ms + keep, bytes: 0, extra: Value::Null }, ctx.now_ms)?;
+        ctx.cluster.xpack.results.put(id.clone(), Entry { kind: Kind::Sql, response: Value::Obj(m), start_ms: ctx.now_ms, expiration_ms: ctx.now_ms + keep, bytes: 0, extra: Value::Null, owner: crate::xpack::async_results::owner(ctx) }, ctx.now_ms)?;
         let mut head = Map::new();
         head.insert("id".into(), id.into());
         head.insert("is_partial".into(), false.into());
@@ -1281,7 +1281,7 @@ pub fn clear_cursor(ctx: &Ctx) -> EsResult<Reply> {
     let Some(c) = body.get("cursor").and_then(Value::as_str) else {
         return Err(EsError::action_request_validation(&["[cursor] is required".into()]));
     };
-    let removed = ctx.cluster.xpack.results.remove(c, Kind::SqlCursor);
+    let removed = crate::xpack::async_results::remove_own(ctx, c, Kind::SqlCursor);
     if !removed && foreign_cursor(c) {
         return Err(bad_cursor());
     }
@@ -1324,7 +1324,7 @@ pub fn get_async(ctx: &Ctx) -> EsResult<Reply> {
     let format = negotiated_format(ctx)?;
     let id = ctx.path_param("id").unwrap_or_default();
     async_results::check_id(id)?;
-    let Some(e) = ctx.cluster.kept_result(id, Kind::Sql, ctx.now_ms)? else { return Err(EsError::resource_not_found(id.to_string())) };
+    let Some(e) = crate::xpack::async_results::get_own(ctx, id, Kind::Sql)? else { return Err(EsError::resource_not_found(id.to_string())) };
     if matches!(format, "txt" | "csv" | "tsv") {
         let names: Vec<String> = e.response.get("columns").and_then(Value::as_array).into_iter().flatten().filter_map(|c| c.get("name").map(Value::to_es_string)).collect();
         let rows: Vec<Vec<String>> = e
@@ -1357,7 +1357,7 @@ pub fn get_async(ctx: &Ctx) -> EsResult<Reply> {
 pub fn get_async_status(ctx: &Ctx) -> EsResult<Reply> {
     let id = ctx.path_param("id").unwrap_or_default();
     async_results::check_id(id)?;
-    let Some(e) = ctx.cluster.kept_result(id, Kind::Sql, ctx.now_ms)? else { return Err(EsError::resource_not_found(id.to_string())) };
+    let Some(e) = crate::xpack::async_results::get_own(ctx, id, Kind::Sql)? else { return Err(EsError::resource_not_found(id.to_string())) };
     Reply::ok(obj! {
         "id" => id, "is_running" => false, "is_partial" => false, "start_time_in_millis" => e.start_ms,
         "expiration_time_in_millis" => e.expiration_ms, "completion_status" => 200,
@@ -1367,7 +1367,7 @@ pub fn get_async_status(ctx: &Ctx) -> EsResult<Reply> {
 pub fn delete_async(ctx: &Ctx) -> EsResult<Reply> {
     let id = ctx.path_param("id").unwrap_or_default();
     async_results::check_id(id)?;
-    if ctx.cluster.xpack.results.remove(id, Kind::Sql) { Reply::acknowledged() } else { Err(EsError::resource_not_found(id.to_string())) }
+    if crate::xpack::async_results::remove_own(ctx, id, Kind::Sql) { Reply::acknowledged() } else { Err(EsError::resource_not_found(id.to_string())) }
 }
 
 /// `POST _sql/translate`: the search a `SELECT` reads its table with.

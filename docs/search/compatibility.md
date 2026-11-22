@@ -1098,6 +1098,27 @@ Checked against Elasticsearch 9.5.5 (captures in
   answers; later heads on a kept-alive connection are hyper's (it closes on the malformed
   ones and frames a `Content-Length` next to `Transfer-Encoding` by the latter); and roll sends
   `Content-Length` where Elasticsearch streams some responses chunked (`_cat`).
+- CORS (`http.cors.*`, set per cluster through roll's API: README, "Search from the
+  browser"): diffed against Elasticsearch 9.5.5 with `http.cors.enabled: true`. Preflights are
+  answered before authentication (200 with one `Access-Control-Allow-Methods` and one
+  `Access-Control-Allow-Headers` line per value, in Elasticsearch's order, and
+  `Access-Control-Max-Age`; an empty 403 for another origin); authenticated requests from an
+  origin that isn't allowed get an empty 403, unauthenticated ones their 401 without CORS
+  headers; answers to an allowed origin, errors included, carry `Access-Control-Allow-Origin`,
+  `Vary: origin` and `Access-Control-Expose-Headers: X-elastic-product`; the request's own host
+  counts as allowed. Differences: `*` is answered with `Vary: origin` too, a preflight carries no
+  `Date` (roll sends none anywhere), `allow-credentials` can't be turned on, and the settings
+  apply per cluster without a restart. A browser key's rate limit answers 429
+  `es_rejected_execution_exception` with `Retry-After`, which Elasticsearch has no setting for.
+- Document level security around a filter, as Elasticsearch keeps it: documents another query
+  reads (a terms lookup, an indexed shape, `more_like_this` items, `percolate`'s stored
+  document) are read as the caller, so one its filter hides is missing and hidden fields are left
+  out; term vectors of a hidden document are `found: false`; `suggest` and `profile` are refused
+  (400 `action_request_validation_exception`) where the caller's documents are restricted. A
+  stored result (async search, ES|QL, EQL, SQL, and SQL cursors) is its opener's (the API key, or
+  the user and realm): anyone else gets 404 for it, its status and its delete (a cursor: unknown),
+  except that `cancel_task` may delete it. One stored before owners were recorded is the
+  cluster's superuser's alone.
 - Slow logs: `index.search.slowlog.threshold.{query,fetch}.*` and
   `index.indexing.slowlog.threshold.index.*` log a shard's query or fetch phase, or an index
   operation on the primary, that took longer than a threshold (`took > threshold`, the highest
@@ -1708,7 +1729,42 @@ the rest are skipped by the tests' own prerequisites.
   hits. A remote that fails a later scroll page while it may not be skipped
   (`skip_unavailable: false`) fails that page, and the hits the clusters after it sent for that
   page are lost to the scroll (Elasticsearch fails the shards' parts alike). Not across clusters
-  yet: suggesters and ES|QL `FROM <alias>:<index>`.
+  yet: suggesters.
+- ES|QL across clusters (README.md, "Cross-cluster search") differs from Elasticsearch 9.5.5
+  where roll plans per cluster rather than sending one physical plan: a field mapped with
+  different types on different clusters is unsupported (null) in every cluster's part, where
+  Elasticsearch resolves the union type and its conversion functions across clusters;
+  `FORK`, subqueries, views, `TS`, `PROMQL` and `SET unmapped_fields` over remote indices read
+  the remotes' rows through cross-cluster search on the coordinating cluster (no `_clusters`).
+  There, a command Elasticsearch runs with each cluster's own resources (`LOOKUP JOIN`,
+  `ENRICH _remote`, `ENRICH` in `_any` mode before any `LIMIT`, `STATS`, `FORK` or
+  `ENRICH _coordinator`; inside a `FORK` branch or a subquery too) is refused, with
+  Elasticsearch's placement error where it has one; `ENRICH _coordinator`, and `_any` after one
+  of those commands, use the local policy, as in Elasticsearch. A quoted `METADATA` name is unresolved as in Elasticsearch, but one holding
+  characters Elasticsearch's lexer refuses there (a `|`) is that verification error rather than
+  Elasticsearch's lexer error. A command that reads each cluster's own resources (`ENRICH _remote`, `ENRICH` in
+  `_any` mode before any `LIMIT`, `STATS` or `ENRICH _coordinator`, `LOOKUP JOIN`) runs in the
+  clusters' parts or is refused: Elasticsearch first drops an `INLINE STATS` whose columns
+  nothing reads, and then runs such a command after it, where roll refuses it as after one
+  that's read (`… can't be executed after [INLINE STATS …]`), runs an `ENRICH` in `_any` mode
+  after an `INLINE STATS` with each cluster's policy, where roll refuses it, and drops a `SORT`
+  before a `STATS`, where roll refuses an `ENRICH _remote` between them. Elasticsearch also runs
+  `SORT | WHERE ... | ENRICH _remote | LIMIT` in each cluster; roll refuses an `ENRICH _remote`
+  after a `SORT` whose `LIMIT` a `WHERE` (or another command that isn't `EVAL`, `KEEP`, `DROP`,
+  `RENAME` or `ENRICH`) separates it from. A lookup index's field the clusters map with
+  different types is a union type, as in Elasticsearch: using it after the `LOOKUP JOIN` is
+  Elasticsearch's 400 (`Cannot use field [lab] due to ambiguities ...`) before any part runs.
+  An enrich field the clusters' policy indices map with different types is found once the
+  parts answer: the commands after the merge can't use it (the same 400, and a `STATS` over it
+  in the parts is a 400 too), but the parts' own commands after the `ENRICH` still read it on
+  each cluster, where Elasticsearch refuses any use. roll doesn't require the local
+  `monitor_enrich` an ENRICH's policy resolution
+  needs in Elasticsearch (the remote's is required, as there). A
+  remote that can't be reached while it may not be skipped fails the query with roll's own
+  `connect_transport_exception` reason (502, as Elasticsearch's status). A policy a remote lacks
+  is reported once that remote's part answered (it fails before reading anything), not before
+  any part starts, and so is a policy whose enrich fields differ between clusters. `_clusters.details.*._shards` counts each part's indices' primary shards,
+  and a remote's `took` is its part's.
 - OpenSearch-flavor clusters' `cluster.remote.*` and `_remote/info` follow OpenSearch 3.9
   (`skip_unavailable` defaults to `false`, a seed or proxy address must be `host:port`, no
   `cluster_credentials`), but a search naming `alias:index` on them is refused (400), loopback

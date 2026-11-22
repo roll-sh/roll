@@ -951,6 +951,8 @@ impl Apps {
         if let Ok(stored) = self.db(move |s| s.deployment(&did)).await {
             dep.plan = stored.plan;
         }
+        // An environment with data of its own: a branch of each database linked since.
+        self.ensure_branches(&svc, &env.name).await.map_err(|e| anyhow::anyhow!("data: {e:#}"))?;
         // A static site: its files out of the image, so they're served without an instance.
         if dep.plan.as_ref().is_some_and(|p| p["start"] == apps_build::STATIC_START)
             && dep.run.kind == RunType::Web
@@ -961,10 +963,13 @@ impl Apps {
             // deploy (a container would serve the same file).
             let r = self.resolve_vars(&svc, &env, &dep.id).await?;
             let secrets: Vec<(String, String)> = r.vars.iter().filter(|(k, _)| r.is_secret(k)).cloned().collect();
+            let checks_secrets = !secrets.is_empty();
             match self.export_site_checked(&img, secrets).await {
                 Ok(Some(n)) => log.stream(Stream::System).line(format!("static site: {} KiB of files, served without an instance", n.div_ceil(1024))),
                 Ok(None) => {}
                 Err(e) if e.downcast_ref::<crate::sites::SecretInSite>().is_some() => return Err(e),
+                // Unchecked files aren't served either: a container would serve the same ones.
+                Err(e) if checks_secrets => anyhow::bail!("its files couldn't be checked for its secrets' values ({e:#}), so they aren't served: make the site smaller, or keep secret values out of its environment"),
                 Err(e) => log.stream(Stream::System).line(format!("static site: its files couldn't be exported ({e:#}); a container serves it")),
             }
         }
@@ -1101,6 +1106,8 @@ impl Apps {
                 .db(move |s| s.switch_active(&Switch { service: &sid, env: &e, from: from.as_deref(), to: &to, ready_ms: ready, epoch, vars_hash: Some(&vh), snapshot: Some(&snap) }))
                 .await?;
             anyhow::ensure!(ok, "another deploy switched this environment meanwhile");
+            // Its tree's edge settings are the environment's gate's now.
+            live.forget_gate();
             // What the old deployment answered isn't this one's.
             self.responses.clear(&crate::env_key(&d.service, &d.environment));
             Ok(())
@@ -1396,6 +1403,11 @@ impl Apps {
         let ephemeral = self.db(move |s| s.environment(&sid, &e)).await?.ephemeral;
         let scope = crate::config::EnvScope { name: &d.environment, ephemeral };
         let file = crate::config::read(&context).map_err(|e| anyhow::anyhow!("{e}"))?;
+        // Its edge settings (headers, firewall, rate limit), kept with the deployment: they're the
+        // gate's once it's live, and travel with its image to a promotion or a rollback.
+        let edge = file.as_ref().map(crate::model::EdgeFile::from_app).transpose().map_err(|e| anyhow::anyhow!("{e}"))?.flatten();
+        let id = d.id.clone();
+        self.db(move |s| s.set_deploy_edge(&id, edge.as_ref())).await?;
         let (mut build_cfg, mut run) = match &file {
             Some(app) => {
                 let (b, r, said) = app.apply(&svc.build, &svc.run, Some(scope)).map_err(|e| anyhow::anyhow!("{e}"))?;
@@ -1560,7 +1572,7 @@ impl Apps {
         }
         // vercel.json's crons: schedules that call their paths, unless the service already
         // calls that path (its own schedules win).
-        if run.kind == RunType::Web && !run.tcp {
+        if run.kind == RunType::Web && !run.tcp && !run.udp {
             for (i, c) in plan.crons.iter().enumerate() {
                 let name = format!("vercel-{}", i + 1);
                 if run.schedules.len() < 20 && !run.schedules.iter().any(|s| s.path.as_deref() == Some(c.path.as_str()) || s.name == name) {
@@ -1622,6 +1634,7 @@ impl Apps {
             target: svc.build.target.clone().filter(|_| plan.provider == apps_build::Provider::Dockerfile),
             layers,
             egress: build_egress,
+            priority: !ephemeral,
         };
         // The same inputs built before in this project (Railway's skipped builds): the same tree,
         // Dockerfile, target and build variables, and its image still kept. Never with `no_cache`.
@@ -1803,6 +1816,7 @@ impl Apps {
                 }
                 p
             },
+            udp: run.udp && run.kind == RunType::Web,
             cpu: run.cpu,
             memory_mb: run.memory_mb,
             network: Some(network),
@@ -2129,6 +2143,14 @@ impl Apps {
                 firing.push(("alert.memory", serde_json::json!({ "value": value, "threshold": a.memory_pct, "limit_mb": limit_mb })));
             }
         }
+        // CPU: what its instances used of their `cpu` (CPU seconds a minute over instances × cpu × 60).
+        if a.cpu_pct > 0 && rows.len() >= 5 && tpl.run.cpu > 0.0 {
+            let share = |r: &crate::store::MinuteRow| r.cpu / (r.instances.max(1) as f64 * tpl.run.cpu * 60.0) * 100.0;
+            if rows.iter().all(|r| r.instances > 0 && share(r) >= a.cpu_pct as f64) {
+                let value = rows.iter().map(share).fold(0.0, f64::max).round();
+                firing.push(("alert.cpu", serde_json::json!({ "value": value, "threshold": a.cpu_pct, "cpu": tpl.run.cpu })));
+            }
+        }
         let (requests, errors): (i64, i64) = rows.iter().fold((0, 0), |(q, e), r| (q + r.requests, e + r.errors));
         if a.error_pct > 0 && requests >= 20 && errors * 100 >= a.error_pct as i64 * requests {
             firing.push(("alert.errors", serde_json::json!({ "value": (errors * 100 / requests), "threshold": a.error_pct, "requests": requests })));
@@ -2172,7 +2194,48 @@ impl Apps {
         {
             firing.push(("alert.slo", serde_json::json!({ "indicator": indicator, "burn_rate": (rate * 10.0).round() / 10.0, "window": window, "objective": slo.objective })));
         }
-        for kind in ["alert.memory", "alert.errors", "alert.latency", "alert.capacity", "alert.log", "alert.slo"] {
+        // The app's own gauges: each judgment that finds one past its threshold counts toward its
+        // run of minutes; one that doesn't (or finds nothing) starts it again.
+        let mut metric_firing: Vec<(String, serde_json::Value)> = Vec::new();
+        for m in &a.metrics {
+            let key = format!("{}/{}/{}/{}", l.service, l.env, m.name, m.sum);
+            let value = self.gauge(&l.service, &l.env, &m.name, m.sum).await.ok();
+            let run = {
+                let mut streaks = self.metric_streaks.lock();
+                let n = streaks.entry(key).or_default();
+                *n = if value.is_some_and(|v| m.breached(v)) { n.saturating_add(1) } else { 0 };
+                *n
+            };
+            if run >= m.minutes {
+                let (op, threshold) = match m.above {
+                    Some(t) => ("above", t),
+                    None => ("below", m.below.unwrap_or_default()),
+                };
+                let mut data = serde_json::json!({ "metric": m.name, "value": value, "minutes": m.minutes });
+                data[op] = serde_json::json!(threshold);
+                metric_firing.push((m.name.clone(), data));
+            }
+        }
+        for m in &a.metrics {
+            let key = format!("{}/{}/alert.metric:{}", l.service, l.env, m.name);
+            match metric_firing.iter().find(|(n, _)| *n == m.name) {
+                Some((_, data)) => {
+                    if self.looping.lock().insert(key) {
+                        let (sid, e, dep, d) = (l.service.clone(), l.env.clone(), tpl.deployment.clone(), data.clone());
+                        let _ = self.db(move |s| s.add_event("alert.metric", &sid, &e, Some(&dep), &d)).await;
+                        l.log.stream(Stream::System).line(format!("alert: alert.metric {data}"));
+                    }
+                }
+                None => {
+                    if self.looping.lock().remove(&key) {
+                        let (sid, e, dep, d) = (l.service.clone(), l.env.clone(), tpl.deployment.clone(), serde_json::json!({ "alert": "alert.metric", "metric": m.name }));
+                        let _ = self.db(move |s| s.add_event("alert.resolved", &sid, &e, Some(&dep), &d)).await;
+                        l.log.stream(Stream::System).line(format!("alert: alert.metric {} resolved", m.name));
+                    }
+                }
+            }
+        }
+        for kind in ["alert.memory", "alert.cpu", "alert.errors", "alert.latency", "alert.capacity", "alert.log", "alert.slo"] {
             let key = format!("{}/{}/{kind}", l.service, l.env);
             match firing.iter().find(|(k, _)| *k == kind) {
                 Some((_, data)) => {
@@ -2746,19 +2809,22 @@ impl Apps {
         if now - self.intercepts_checked.load(std::sync::atomic::Ordering::Relaxed) >= 60_000 {
             self.intercepts_checked.store(now, std::sync::atomic::Ordering::Relaxed);
             self.refresh_intercepts(&services).await;
+            self.retry_orphan_branches().await;
         }
         if now - self.status_swept.load(std::sync::atomic::Ordering::Relaxed) >= 60_000 {
             self.status_swept.store(now, std::sync::atomic::Ordering::Relaxed);
             self.status_sweep(&services).await;
         }
+        let unscheduled = self.db(|s| s.unscheduled()).await.unwrap_or_default();
         for svc in services.into_iter().filter(|s| s.run.kind == RunType::Cron && self.owns(&s.id) && !self.capped(&s.id)) {
             let Some(schedule) = svc.run.schedule.as_deref().and_then(|s| crate::cron::Schedule::parse(s, svc.run.timezone.as_deref()).ok()) else { continue };
             let sid = svc.id.clone();
             let Ok(envs) = self.db(move |s| s.environments(&sid)).await else { continue };
             for e in envs.into_iter().filter(|e| e.active.is_some()) {
                 let key = format!("cron:{}/{}", svc.id, e.name);
-                // Paused: skipped, and its schedule moves on, so resuming doesn't make up the runs.
-                if e.paused {
+                // Paused, or its schedule turned off (`scheduled: false`, a preview's): skipped,
+                // and its schedule moves on, so turning it back on doesn't make up the runs.
+                if e.paused || unscheduled.contains(&(svc.id.clone(), e.name.clone())) {
                     let (k, v) = (key.clone(), now.to_string());
                     let _ = self.db(move |s| s.set_state(&k, &v)).await;
                     continue;
@@ -2789,7 +2855,7 @@ impl Apps {
     /// starts a job, unless the last it started still runs; a paused environment's move on.
     async fn schedules_pass(self: &Arc<Self>, services: &[crate::store::ServiceRow], now: i64) {
         // One read of every environment a pass, not one per service.
-        let Ok(all_envs) = self.db(|s| s.all_environments()).await else { return };
+        let Ok((all_envs, unscheduled)) = self.db(|s| Ok((s.all_environments()?, s.unscheduled()?))).await else { return };
         for svc in services.iter().filter(|s| self.owns(&s.id) && !self.capped(&s.id)) {
             // A preview environment never runs production's schedules (one per open pull request).
             // In maintenance, nothing is called on a schedule (it would be answered roll's page).
@@ -2805,8 +2871,8 @@ impl Apps {
                     let key = format!("sched:{}/{}/{}", svc.id, e.name, sc.name);
                     let k = key.clone();
                     let last: Option<i64> = self.db(move |s| s.get_state(&k)).await.ok().flatten().and_then(|v| v.parse().ok());
-                    // New (or paused): counted from now, so nothing is made up.
-                    let Some(last) = last.filter(|_| !e.paused) else {
+                    // New (or paused, or its schedules off): counted from now, so nothing is made up.
+                    let Some(last) = last.filter(|_| !e.paused && !unscheduled.contains(&(e.service.clone(), e.name.clone()))) else {
                         let (k, v) = (key.clone(), now.to_string());
                         let _ = self.db(move |s| s.set_state(&k, &v)).await;
                         continue;

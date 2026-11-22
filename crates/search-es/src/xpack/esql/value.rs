@@ -1252,6 +1252,27 @@ pub enum Acc {
     Present(i64, bool),
 }
 
+/// Whether `v` is a value a column of type `ty` holds: of the type's family (any number for a
+/// numeric type, a date or long for dates, text for the string types). Null always fits, and a
+/// multi-value whose every value fits does.
+pub fn fits(ty: DataType, v: &V) -> bool {
+    use DataType as T;
+    match v {
+        V::Null => true,
+        V::Multi(vs) => vs.iter().all(|x| !matches!(x, V::Multi(_)) && fits(ty, x)),
+        _ => match ty {
+            T::Boolean => matches!(v, V::Bool(_)),
+            T::Integer | T::Long | T::UnsignedLong | T::Double | T::CounterLong | T::CounterInteger | T::CounterDouble => matches!(v, V::Int(_) | V::Long(_) | V::ULong(_) | V::Double(_)),
+            T::Date | T::DateNanos => matches!(v, V::Date(_) | V::Long(_)),
+            T::Ip => matches!(v, V::Ip(_) | V::Str(_)),
+            T::Keyword | T::Text | T::Version | T::Source | T::Tsid | T::Flattened => matches!(v, V::Str(_)),
+            T::Geohash | T::Geotile | T::Geohex => matches!(v, V::Long(_) | V::Str(_)),
+            T::Null => false,
+            _ => true,
+        },
+    }
+}
+
 impl Acc {
     pub fn new(name: &str) -> Acc {
         match name {
@@ -1455,6 +1476,123 @@ impl Acc {
                 *any |= !v.is_null();
             }
         }
+    }
+
+    /// Merges another cluster's state of the same aggregation (`name`) into this one, as one
+    /// cluster holding both parts' rows would have accumulated them (the other's rows after
+    /// this one's). `Err`: states of different kinds, which no part of one query makes.
+    pub fn merge(&mut self, name: &str, other: Acc) -> Result<(), &'static str> {
+        match (self, other) {
+            (Acc::Count(a), Acc::Count(b)) => *a = a.saturating_add(b),
+            (Acc::Amd { part }, Acc::Amd { part: o }) => {
+                let merge = |a: Option<f64>, b: Option<f64>, f: fn(f64, f64) -> f64| match (a, b) {
+                    (Some(a), Some(b)) => Some(f(a, b)),
+                    (a, b) => a.or(b),
+                };
+                part[0] = merge(part[0], o[0], f64::min);
+                part[1] = merge(part[1], o[1], f64::max);
+                part[2] = merge(part[2], o[2], |a, b| a + b);
+                part[3] = merge(part[3], o[3], |a, b| a + b);
+            }
+            (Acc::Points(a), Acc::Points(b)) => a.extend(b),
+            (Acc::Distinct { hll, .. }, Acc::Distinct { hll: o, .. }) => {
+                if hll.precision() != o.precision() {
+                    return Err("count_distinct states of different precisions");
+                }
+                hll.merge(&o);
+            }
+            (Acc::Sum { int, float, comp, any, overflow }, Acc::Sum { int: i, float: f, comp: c, any: y, overflow: o }) => {
+                match int.checked_add(i) {
+                    Some(s) => *int = s,
+                    None => *overflow = true,
+                }
+                kahan(float, comp, f);
+                kahan(float, comp, -c);
+                *any |= y;
+                *overflow |= o;
+            }
+            (Acc::Avg { int, float, comp, n }, Acc::Avg { int: i, float: f, comp: c, n: m }) => {
+                *int = int.saturating_add(i);
+                kahan(float, comp, f);
+                kahan(float, comp, -c);
+                *n = n.saturating_add(m);
+            }
+            (Acc::MinMax(cur), Acc::MinMax(o)) => {
+                if let Some(x) = o {
+                    let better = match cur {
+                        None => true,
+                        Some(c) => {
+                            let o = cmp(&x, c);
+                            if name == "min" { o == Ordering::Less } else { o == Ordering::Greater }
+                        }
+                    };
+                    if better {
+                        *cur = Some(x);
+                    }
+                }
+            }
+            // The other's distinct values after this one's, each once.
+            (me @ Acc::Values { .. }, Acc::Values { out, .. }) => {
+                for v in out {
+                    me.add(name, &v, false);
+                }
+            }
+            // As Elasticsearch merges digests across nodes.
+            (Acc::Quantile(d), Acc::Quantile(mut o)) => d.merge(&mut o).map_err(|_| "quantile states that don't merge")?,
+            // `WelfordAlgorithm.add(mean, m2, count)`: the parallel combination.
+            (Acc::Welford { n, mean, m2 }, Acc::Welford { n: n2, mean: mean2, m2: m22 }) => {
+                if n2 > 0 {
+                    let total = *n + n2;
+                    let delta = mean2 - *mean;
+                    *m2 += m22 + delta * delta * (*n as f64) * (n2 as f64) / total as f64;
+                    *mean += delta * n2 as f64 / total as f64;
+                    *n = total;
+                }
+            }
+            // The other's values after this one's, trimmed back as more arrive.
+            (Acc::Top { n, desc, buf, heap }, Acc::Top { buf: other, .. }) => {
+                for v in other {
+                    *heap += super::memory::value_heap(&v);
+                    buf.push(v);
+                }
+                if let Some(n) = *n
+                    && buf.len() >= n.saturating_mul(2).max(64)
+                {
+                    top_trim(buf, n, *desc);
+                    *heap = buf.iter().map(super::memory::value_heap).sum();
+                }
+            }
+            // Two uniform reservoirs make one: each value kept with a weight of the rows its
+            // reservoir stands for (A-Res: the largest `rand^(1/w)` keys).
+            (Acc::Sample { n, seen, buf, heap }, Acc::Sample { seen: seen2, buf: other, .. }) => {
+                use rand::Rng;
+                let total = *seen + seen2;
+                let (w1, w2) = (*seen as f64 / buf.len().max(1) as f64, seen2 as f64 / other.len().max(1) as f64);
+                let mut keyed: Vec<(f64, V)> = std::mem::take(buf).into_iter().map(|v| (w1, v)).chain(other.into_iter().map(|v| (w2, v))).map(|(w, v)| (rand::thread_rng().r#gen::<f64>().powf(1.0 / w.max(f64::MIN_POSITIVE)), v)).collect();
+                if let Some(n) = *n {
+                    keyed.sort_by(|a, b| b.0.total_cmp(&a.0));
+                    keyed.truncate(n);
+                }
+                *buf = keyed.into_iter().map(|(_, v)| v).collect();
+                *heap = buf.iter().map(super::memory::value_heap).sum();
+                *seen = total;
+            }
+            (Acc::Edge { first, v }, Acc::Edge { v: o, .. }) => {
+                if (*first && v.is_none()) || (!*first && o.is_some()) {
+                    *v = o;
+                }
+            }
+            (Acc::Weighted(s, t), Acc::Weighted(s2, t2)) => {
+                *s += s2;
+                *t += t2;
+            }
+            (Acc::Present(rows, any), Acc::Present(r, y)) => {
+                *rows = rows.saturating_add(r);
+                *any |= y;
+            }
+            _ => return Err("aggregation states of different kinds"),
+        }
+        Ok(())
     }
 
     /// `WEIGHTED_AVG(value, weight)`'s row (multi-values: every pair, like Elasticsearch).

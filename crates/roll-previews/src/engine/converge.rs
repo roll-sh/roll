@@ -281,6 +281,8 @@ impl Engine {
         if self.store.ran_head(&r.id)?.as_deref() != Some(r.build()) {
             self.store.set_ran_head(&r.id, Some(r.build()))?;
         }
+        // How this head comes up: started now (once), each step marked as it first finishes.
+        self.store.mark_step(&r.id, &r.head, "start")?;
         let project = self.workspace.get(roll_workspace::Scope::All, &r.project_id)?;
         let name = branch_name(&r.id);
 
@@ -371,6 +373,7 @@ impl Engine {
         if let Some(e) = first_error {
             return Err(e);
         }
+        self.store.mark_step(&r.id, &r.head, "data")?;
         if reset_any || reset_due || !asked.is_empty() {
             self.store.update(&r.id, |row| {
                 // Only what this converge did: a reset asked for meanwhile stays asked.
@@ -493,6 +496,7 @@ impl Engine {
         } else if self.store.schema_head(&r.id)?.as_deref() != Some(r.build()) {
             self.read_schema(r).await;
         }
+        self.store.mark_step(&r.id, &r.head, "setup")?;
 
         // 4. Services: the change's repo at its head, every other repo at its default head.
         // From roll apps' catalog when the project has services there, else the repos'
@@ -561,6 +565,8 @@ impl Engine {
             }
             _ => None,
         };
+        // Who a closed preview's keys bound to hosts are used as on roll apps (it resolves them).
+        let maker = if s.egress_for(r.trusted) == crate::settings::EgressRule::Roll { self.store.rules_maker(&r.project_id)? } else { None };
         for (spec, repo, rev, on_apps) in wanted {
             keep.push(spec.name.clone());
             if let Some(path) = &spec.health {
@@ -585,6 +591,7 @@ impl Engine {
                 // roll apps' environment turns its own on and redeploys.
                 + if s.traces { "o" } else { "" }
                 + &ca.as_deref().filter(|_| !on_apps).map(|id| format!("i{id}")).unwrap_or_default()
+                + &maker.as_deref().filter(|_| on_apps).map(|m| format!("m{m}")).unwrap_or_default()
                 + &rebuilt;
             let was = self.store.service_config(&r.id, &spec.name)?;
             let config_moved = was.as_deref() != Some(fingerprint.as_str());
@@ -631,6 +638,7 @@ impl Engine {
                     feedback,
                     egress: s.egress_for(r.trusted),
                     egress_hosts: s.egress_hosts.clone(),
+                    maker: maker.clone(),
                     rebuild: fresh.then_some(rebuilds),
                     traces: s.traces,
                 };
@@ -693,6 +701,7 @@ impl Engine {
             self.store.update(&r.id, |row| row.next_at = if row.generation == r.generation { again } else { 0 })?;
             return Ok(());
         }
+        self.store.mark_step(&r.id, &r.head, "deploy")?;
         for svc in self.store.services(&r.id)? {
             if !keep.contains(&svc.name) {
                 self.apps.remove(&r.id, &svc.name).await.map_err(|e| anyhow::anyhow!("removing {}: {e:#}", svc.name))?;
@@ -746,6 +755,8 @@ impl Engine {
             }
         }
 
+        self.store.mark_step(&r.id, &r.head, "checks")?;
+
         // 5. Settled.
         let running = self.store.services(&r.id)?.iter().any(|x| x.state == ServiceState::Running);
         let error = (!problems.is_empty()).then(|| problems.join("; "));
@@ -760,6 +771,7 @@ impl Engine {
             self.store.log(&r.id, row.state.as_str())?;
         }
         let ready = row.state == State::Ready;
+        self.store.mark_step(&r.id, &r.head, "ready")?;
         self.report(row).await;
         // 5b. Warm: the change's own services just deployed are woken after the pass, so the first
         // visit after a push doesn't wait for a cold start.

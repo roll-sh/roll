@@ -436,6 +436,9 @@ const COLUMNS: &[(&str, &str, &str)] = &[
     ("agent_sandboxes", "last_active_at", "INTEGER"),
     // Sandboxes from before they recorded who copied a secrets environment into them.
     ("agent_sandboxes", "secrets_by", "TEXT"),
+    // Sandboxes from before they kept where copied secrets came from, and whether they went.
+    ("agent_sandboxes", "secrets_from", "TEXT"),
+    ("agent_sandboxes", "secrets_dropped", "TEXT"),
     // Automation runs from before a wake during a step's attempt was kept.
     ("automation_runs", "woken", "INTEGER NOT NULL DEFAULT 0"),
     // Work items from before issues said whether their author can push (the next sync says).
@@ -443,9 +446,11 @@ const COLUMNS: &[(&str, &str, &str)] = &[
     // Reviews and comments from before they said whether their author can push.
     ("reviews", "outside", "INTEGER NOT NULL DEFAULT 0"),
     ("review_comments", "outside", "INTEGER NOT NULL DEFAULT 0"),
-    // Signing secrets from before they were sealed (`crate::signing::seal_at_rest` seals them).
+    // Signing secrets and URLs from before they were sealed (`crate::kept::seal_at_rest` seals them).
     ("repo_webhooks", "secret_sealed", "INTEGER NOT NULL DEFAULT 0"),
     ("review_apps", "secret_sealed", "INTEGER NOT NULL DEFAULT 0"),
+    ("repo_webhooks", "url_sealed", "INTEGER NOT NULL DEFAULT 0"),
+    ("review_apps", "url_sealed", "INTEGER NOT NULL DEFAULT 0"),
 ];
 
 impl Db {
@@ -458,6 +463,7 @@ impl Db {
             crate::ai::store::SCHEMA,
             crate::webhooks::SCHEMA,
             crate::leaks::SCHEMA,
+            crate::github::SCHEMA,
             crate::broken::SCHEMA,
             crate::mcp::SCHEMA,
             crate::agents::SCHEMA,

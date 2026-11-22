@@ -72,8 +72,22 @@ fn decode_index(encoded: u32, p: u32) -> usize {
     (index >> (P2 - p)) as usize
 }
 
-/// One bucket's HyperLogLog++ state.
+/// Whether `v` is a hash [`encode_hash`] makes at precision `p`: one carrying its run length
+/// (1 to `65 - P2`) has the low `P2 - p` bits of its index clear; one without has some set.
+fn valid_hash(v: u32, p: u32) -> bool {
+    let mask = (1u32 << (P2 - p)) - 1;
+    if v & 1 == 1 {
+        (1..=65 - P2).contains(&((v >> 1) & 0x3f)) && (v >> 7) & mask == 0
+    } else {
+        let e = v >> 1;
+        e < 1 << P2 && e & mask != 0
+    }
+}
+
+/// One bucket's HyperLogLog++ state. Another node's (`wire`) is decoded through
+/// [`Hll::from_parts`], so a crafted one is refused rather than indexing past the registers.
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(try_from = "HllWire")]
 pub struct Hll {
     p: u32,
     /// Linear counting: an open-addressing set of encoded hashes (0 = empty).
@@ -81,6 +95,24 @@ pub struct Hll {
     lc_size: usize,
     /// Registers (`2^p` run lengths) once upgraded.
     regs: Option<Vec<u8>>,
+}
+
+/// [`Hll`]'s serialized layout, as it comes from another node.
+#[derive(serde::Deserialize)]
+struct HllWire {
+    p: u32,
+    lc: Vec<u32>,
+    #[allow(dead_code)]
+    lc_size: usize,
+    regs: Option<Vec<u8>>,
+}
+
+impl TryFrom<HllWire> for Hll {
+    type Error = String;
+
+    fn try_from(w: HllWire) -> std::result::Result<Hll, String> {
+        Hll::from_table(w.p, w.lc, w.regs).ok_or_else(|| "a cardinality sketch no node makes".to_string())
+    }
 }
 
 impl Hll {
@@ -170,6 +202,54 @@ impl Hll {
         self.lc = Vec::new();
         self.lc_size = 0;
         self.regs = Some(regs);
+    }
+
+    /// The state as plain parts: its precision, its linear-counting hashes (none once upgraded)
+    /// and its registers (once upgraded). [`Hll::from_parts`] rebuilds it.
+    pub fn parts(&self) -> (u32, Vec<u32>, Option<&[u8]>) {
+        (self.p, self.lc.iter().copied().filter(|v| *v != 0).collect(), self.regs.as_deref())
+    }
+
+    /// A state from [`Hll::parts`] another node sent: `None` unless the precision is one roll
+    /// uses (4 to 18), the registers are exactly `2^p`, and every hash is one [`Hll::collect`]
+    /// could have made (so merging it never indexes past the registers). The table is rebuilt
+    /// from the hashes, never sized from what was sent.
+    pub fn from_parts(p: u32, lc: impl IntoIterator<Item = u32>, regs: Option<Vec<u8>>) -> Option<Hll> {
+        if !(4..=18).contains(&p) {
+            return None;
+        }
+        let mut h = Hll::new(p);
+        if let Some(r) = regs {
+            // A register holds a run length of at most `65 - p` (`collect`).
+            if r.len() != 1usize << p || r.iter().any(|x| u32::from(*x) > 65 - p) {
+                return None;
+            }
+            h.regs = Some(r);
+        }
+        for v in lc {
+            if !valid_hash(v, p) {
+                return None;
+            }
+            h.add_encoded(v);
+        }
+        Some(h)
+    }
+
+    /// [`Hll::from_parts`] keeping a serialized linear-counting table as it is (its slots a
+    /// power of two, every hash valid; its size counted, never taken from the sender).
+    fn from_table(p: u32, table: Vec<u32>, regs: Option<Vec<u8>>) -> Option<Hll> {
+        if regs.is_some() || table.is_empty() {
+            return Hll::from_parts(p, table.into_iter().filter(|v| *v != 0), regs);
+        }
+        if !(4..=18).contains(&p) || !table.len().is_power_of_two() || table.iter().any(|v| *v != 0 && !valid_hash(*v, p)) {
+            return None;
+        }
+        let lc_size = table.iter().filter(|v| **v != 0).count();
+        let mut h = Hll { p, lc: table, lc_size, regs: None };
+        if h.lc_size > h.lc_threshold() {
+            h.upgrade();
+        }
+        Some(h)
     }
 
     /// Merges another state of the same precision.
@@ -829,5 +909,43 @@ mod tests {
         assert!(h.regs.is_some());
         let c = h.cardinality() as f64;
         assert!((c - 200_000.0).abs() / 200_000.0 < 0.03, "{c}");
+    }
+
+    /// A state another node sent comes back equal, and one no [`Hll::collect`] makes (a hash
+    /// indexing past the registers, registers of another size, a precision roll never uses)
+    /// is refused instead of panicking later.
+    #[test]
+    fn parts_round_trip_and_hostile_ones_are_refused() {
+        for n in [10u64, 100_000] {
+            let mut h = Hll::new(14);
+            (0..n).for_each(|i| h.collect(mix64(i)));
+            let (p, lc, regs) = h.parts();
+            let back = Hll::from_parts(p, lc, regs.map(<[u8]>::to_vec)).unwrap();
+            assert_eq!(back.cardinality(), h.cardinality());
+        }
+        assert!(Hll::from_parts(14, [u32::MAX - 1], None).is_none());
+        assert!(Hll::from_parts(14, [0], None).is_none());
+        assert!(Hll::from_parts(14, [], Some(vec![0; 10])).is_none());
+        assert!(Hll::from_parts(30, [], None).is_none());
+        // The wire (`wire`, serde) keeps a valid table exactly and refuses a crafted one.
+        let mut h = Hll::new(14);
+        (0..100u64).for_each(|i| h.collect(mix64(i)));
+        assert_eq!(serde_json::from_value::<Hll>(serde_json::to_value(&h).unwrap()).unwrap(), h);
+        let crafted = serde_json::json!({ "p": 14, "lc": [u32::MAX - 1, 0], "lc_size": 1, "regs": null });
+        assert!(serde_json::from_value::<Hll>(crafted).is_err());
+        // Registers past `65 - p`; a run length past 40; a run-length hash whose low index bits
+        // are set; a plain hash whose low index bits are clear.
+        let mut regs = vec![0u8; 1 << 14];
+        regs[0] = 52;
+        assert!(Hll::from_parts(14, [], Some(regs.clone())).is_none());
+        regs[0] = 51;
+        assert!(Hll::from_parts(14, [], Some(regs)).is_some());
+        let mask = (1u32 << (P2 - 14)) - 1;
+        let run = |e: u32, rl: u32| (e << 7) | (rl << 1) | 1;
+        assert!(Hll::from_parts(14, [run(mask + 1, 40)], None).is_some());
+        assert!(Hll::from_parts(14, [run(mask + 1, 41)], None).is_none());
+        assert!(Hll::from_parts(14, [run(mask + 2, 3)], None).is_none());
+        assert!(Hll::from_parts(14, [(mask + 1) << 1], None).is_none());
+        assert!(Hll::from_parts(14, [(mask + 2) << 1], None).is_some());
     }
 }

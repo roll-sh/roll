@@ -239,7 +239,7 @@ impl Search {
         if let Some(c) = &fleet {
             control.join(c.clone())?;
         }
-        let listener = tokio::net::TcpListener::bind(args.search_http).await.map_err(|e| anyhow::anyhow!("bind {}: {e}", args.search_http))?;
+        let listener = crate::listen::bind(args.search_http).map_err(|e| anyhow::anyhow!("bind {}: {e}", args.search_http))?;
         info!(addr = %args.search_http, tls = control.cfg.tls, domain = ?control.cfg.domain, storage = %control.objects().description, clustered = fleet.is_some(), "search listening");
         Ok(Search { control, cluster: fleet, listener: tokio::sync::Mutex::new(Some(listener)), opts, stop: search_server::Shutdown::new() })
     }
