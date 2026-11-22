@@ -509,12 +509,21 @@ impl Apps {
 
     pub async fn deployments(self: &Arc<Self>, service: &str, env: &str, before: Option<i64>) -> Result<Vec<Deployment>> {
         let (sid, e) = (service.to_string(), env.to_string());
-        let deps = self.db(move |s| {
-            s.environment(&sid, &e)?;
-            s.deployments(&sid, &e, 100, before)
-        })
-        .await?;
-        self.with_scans(service, deps).await
+        let (svc, row, deps) = self.db(move |s| Ok((s.service(&sid)?, s.environment(&sid, &e)?, s.deployments(&sid, &e, 100, before)?))).await?;
+        let mut deps = self.with_scans(service, deps).await?;
+        for d in &mut deps {
+            d.url = self.deployment_url(&svc, &row, d);
+        }
+        Ok(deps)
+    }
+
+    /// A deployment's own URL, where one answers ([`Apps::deployment_template`]'s rules).
+    fn deployment_url(&self, svc: &crate::store::ServiceRow, row: &crate::store::EnvRow, d: &Deployment) -> Option<String> {
+        // The environment's own run settings (its overrides), as `deployment_template` reads them.
+        let run = svc.for_env(row).map_or_else(|_| svc.run.clone(), |s| s.run);
+        let serves = run.public && !run.tcp && !run.udp && d.image.is_some() && d.pruned_at.is_none() && d.status != DeployStatus::Removed && d.run.kind == RunType::Web && d.run.volume.is_none();
+        let waiting = row.approvals > 0 && d.status == DeployStatus::Ready;
+        (serves && !waiting).then(|| self.url(&format!("{}--{}", d.id.trim_start_matches("dep_"), row.slug)))
     }
 
     /// Old deployments of the services this node owns, past what each environment keeps
@@ -578,6 +587,9 @@ impl Apps {
         d.vulnerabilities = self.db(move |s| s.scan(&id)).await?.map(|(sum, _)| sum);
         let id = dep.to_string();
         d.approved_by = self.db(move |s| s.approvals_of(&id)).await?;
+        let (sid, e) = (service.to_string(), env.to_string());
+        let (svc, row) = self.db(move |s| Ok((s.service(&sid)?, s.environment(&sid, &e)?))).await?;
+        d.url = self.deployment_url(&svc, &row, &d);
         Ok(d)
     }
 

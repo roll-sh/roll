@@ -16,6 +16,11 @@ impl Postgres {
     /// A branch of `parent` named `name` (`at`: as the parent was then), with its own role; one
     /// made just before a crash is found and finished instead.
     async fn create(&self, parent: &str, name: &str, mode: Mode, at: Option<i64>) -> anyhow::Result<Branched> {
+        self.create_from(parent, None, name, mode, at).await
+    }
+
+    /// [`Self::create`] from one of the project's branches (`from`, its id) instead of `main`.
+    async fn create_from(&self, parent: &str, from: Option<&str>, name: &str, mode: Mode, at: Option<i64>) -> anyhow::Result<Branched> {
         let (id, has_role) = match self.find(parent, name).await? {
             Some(b) => {
                 let id = s(&b["id"]).unwrap_or_default();
@@ -25,7 +30,7 @@ impl Postgres {
                 }
                 (id, false)
             }
-            None => match self.0.post(&format!("/v1/projects/{}/branches", seg(parent)), json!({ "name": name, "schema_only": mode == Mode::Schema, "app_role": true, "at": at })).await {
+            None => match self.0.post(&format!("/v1/projects/{}/branches", seg(parent)), json!({ "name": name, "parent": from, "schema_only": mode == Mode::Schema, "app_role": true, "at": at })).await {
                 Ok(v) => (s(&v["branch"]["id"]).ok_or_else(|| anyhow::anyhow!("a branch without an id"))?, v["app_connection_uri"].is_string()),
                 Err(e) if conflict_is_ours(&e) => {
                     let b = self.find(parent, name).await?.ok_or(e)?;
@@ -65,6 +70,12 @@ impl Brancher for Postgres {
     /// branch gets a role of its own for the preview's code (pg-control's `app_role`).
     async fn branch(&self, parent: &str, name: &str, mode: Mode) -> anyhow::Result<Branched> {
         self.create(parent, name, mode, None).await
+    }
+
+    /// A branch of the preview's own branch (pg-control's `parent`), with a role of its own: an
+    /// earlier push's data, copy-on-write.
+    async fn snapshot(&self, parent: &str, branch: &str, name: &str) -> anyhow::Result<Option<Branched>> {
+        self.create_from(parent, Some(branch), name, Mode::Branch, None).await.map(Some)
     }
 
     /// From the parent's history (pg-control's point in time: unix seconds).

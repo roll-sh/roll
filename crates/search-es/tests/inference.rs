@@ -228,6 +228,7 @@ async fn cohere_and_anthropic_speak_their_own_apis() {
 async fn endpoints_cannot_reach_private_addresses_unless_the_node_allows_it() {
     let (m, log) = mock().await;
     let mut cfg = ClusterConfig::new("c");
+    cfg.unsealed_secrets = true;
     cfg.node_settings.push(("roll.inference.cohere.url".into(), m.clone()));
     let c = Cluster::open(cfg, Arc::new(MemoryStore::new())).await.unwrap();
     let put = format!(r#"{{"service":"openai","service_settings":{{"api_key":"k","model_id":"m","url":"{m}/v1/embeddings"}}}}"#);
@@ -424,7 +425,7 @@ async fn field_level_security_hides_semantic_text_from_queries_and_highlights() 
 async fn a_planted_sealed_key_is_not_opened_for_the_client() {
     let (m, log) = mock().await;
     let c = cluster(&m, &[]).await;
-    let planted = search_es::seal::seal(&c, "inference api key", "sk-victim");
+    let planted = search_es::seal::seal(&c, "inference api key", "sk-victim").unwrap();
     let put = format!(r#"{{"service":"openai","service_settings":{{"api_key":"{planted}","model_id":"emb","url":"{m}/v1/embeddings"}}}}"#);
     assert_eq!(call(&c, "PUT", "/_inference/text_embedding/thief", &put).await.0, 200);
     let calls = seen(&log);

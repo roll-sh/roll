@@ -387,6 +387,9 @@ pub struct SecretVar {
     pub binding: Option<String>,
 }
 
+/// A link's options, as roll secrets' links take them (`roll_secrets::links::Link::options`).
+pub type LinkOptions = serde_json::Map<String, serde_json::Value>;
+
 /// Who asks for variables' values: what rolld's gate put on the request.
 #[derive(Clone, Copy, Default)]
 pub struct Asker<'a> {
@@ -429,7 +432,10 @@ pub trait Resources: Send + Sync {
     /// A new link's own credentials, made once when the link is made and kept sealed with it
     /// (a search cluster's API key for this service): `None` for a kind whose variables are
     /// read fresh with [`Resources::link_vars`] (a database's own URL).
-    async fn link(&self, _kind: LinkKind, _ref: &str, _service: &str) -> anyhow::Result<Option<Minted>> {
+    ///
+    /// `options` narrow what's made, as roll secrets' link options say (a search key's `names`,
+    /// its indices, and `permission`, `read` or `append`).
+    async fn link(&self, _kind: LinkKind, _ref: &str, _service: &str, _options: &LinkOptions) -> anyhow::Result<Option<Minted>> {
         Ok(None)
     }
     /// Revoke what [`Resources::link`] made (`kept`: what it said to keep, a key's id) when

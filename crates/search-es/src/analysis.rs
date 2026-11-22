@@ -71,9 +71,10 @@ fn int_setting(settings: &Settings, key: &str, default: i64) -> i64 {
 /// The index-level options analysis components read.
 pub fn index_options(settings: &Settings, index: Option<&str>, synonyms: Option<Arc<dyn SynonymSets>>) -> IndexOptions {
     IndexOptions {
-        max_ngram_diff: int_setting(settings, "index.max_ngram_diff", 1) as i32,
-        max_shingle_diff: int_setting(settings, "index.max_shingle_diff", 3) as i32,
-        max_token_count: int_setting(settings, "index.analyze.max_token_count", 10_000).max(0) as usize,
+        // Bounded for indices made before roll's bound too (`MAX_GRAM_DIFF`).
+        max_ngram_diff: int_setting(settings, "index.max_ngram_diff", 1).clamp(0, crate::meta::index_settings::MAX_GRAM_DIFF) as i32,
+        max_shingle_diff: int_setting(settings, "index.max_shingle_diff", 3).clamp(0, crate::meta::index_settings::MAX_GRAM_DIFF) as i32,
+        max_token_count: int_setting(settings, "index.analyze.max_token_count", 10_000).clamp(0, crate::meta::index_settings::MAX_ANALYZE_TOKENS) as usize,
         index_name: index.map(str::to_string),
         synonym_sets: synonyms,
         scripts: Some(crate::scripting::analysis_scripts()),

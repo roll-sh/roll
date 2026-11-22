@@ -712,6 +712,8 @@ async fn run_with(mut args: Args) -> anyhow::Result<()> {
     if let Some(c) = &code {
         secrets.set_code_refs(std::sync::Arc::new(secrets::CodeRefs(c.code.clone())));
     }
+    // Reach names the services and sandboxes that hold a folder's values.
+    secrets.set_reach_holders(std::sync::Arc::new(secrets::ReachHolders { workspace: workspace.clone(), apps: apps.as_ref().map(|a| a.apps.clone()), code: code.as_ref().map(|c| c.code.clone()) }));
     // Secret requests' answer tokens found leaked (`rlq_`) cancel their requests.
     {
         let secrets = secrets.clone();
@@ -760,7 +762,7 @@ async fn run_with(mut args: Args) -> anyhow::Result<()> {
         Some(_) => vec![std::sync::Arc::new(access::CodeTools)],
         None => Vec::new(),
     };
-    let mcp_config = roll_mcp::Config { api_url: access::api_url(&args), web_url: args.web_url.clone(), locked: auth.enforcing(), products: mcp_products, access: Some(access.clone()) };
+    let mcp_config = roll_mcp::Config { api_url: access::api_url(&args), web_url: args.web_url.clone(), locked: auth.enforcing(), products: mcp_products, access: Some(access.clone()), inspector: access::mcp_inspector() };
     let gated = auth.layer(router.clone());
     // roll code's agents relay acts on a caller's behalf through the gate too.
     if let Some(c) = &code {

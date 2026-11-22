@@ -3,12 +3,15 @@
 //! `deploy/agent/Dockerfile`, registered once by the operator — so an instance boots straight into
 //! `roll agent up`. The instance's `env` carries the machine token and the owner's provider env
 //! (write-only on agent37's side: it's never returned by their API); `metadata.roll_sandbox` names
-//! roll's sandbox, so a create whose answer was lost is found again by listing.
+//! roll's sandbox, so a create whose answer was lost is found again by listing. Its env is changed in
+//! place (`PATCH /v1/instances/{id}` merges `env`, a `null` unsetting one variable, in any state
+//! but deleted) and reaches the container at its next start or restart, never a wake: a start with
+//! fresh or fewer copied values edits it, then starts it (restarts a sleeping one), its disk kept.
 //!
 //! Every call has timeouts, follows no redirects and reads at most a bounded body. The API key is
 //! sent as a bearer token and never logged, returned or put in an error.
 
-use super::{BackendError, BackendState, SandboxBackend, SandboxSpec, Tagged};
+use super::{BackendError, BackendState, EnvChange, SandboxBackend, SandboxSpec, Tagged};
 use async_trait::async_trait;
 use reqwest::{Method, StatusCode};
 use serde_json::{Value, json};
@@ -223,6 +226,26 @@ impl SandboxBackend for Agent37 {
 
     async fn start(&self, backend_id: &str) -> Result<(), BackendError> {
         self.lifecycle(backend_id, "start").await
+    }
+
+    /// Edit its env (`set` set, `unset` unset; the rest of what it was made with stays), then start
+    /// it: a sleeping one is restarted, since a wake keeps the old env.
+    async fn start_with(&self, backend_id: &str, _spec: &SandboxSpec, change: &EnvChange) -> Result<bool, BackendError> {
+        let id = check_id(backend_id)?;
+        let mut env: serde_json::Map<String, Value> = change.unset.iter().map(|k| (k.clone(), Value::Null)).collect();
+        env.extend(change.set.iter().map(|(k, v)| (k.clone(), Value::String(v.clone()))));
+        if !env.is_empty() {
+            let a = self.call(Method::PATCH, &format!("/v1/instances/{id}"), Some(&json!({ "env": env })), self.config.timeout, MAX_BODY).await?;
+            match a.status {
+                s if s.is_success() => {}
+                StatusCode::NOT_FOUND => return Err(BackendError::Permanent(format!("agent37 has no instance {id}"))),
+                _ => return Err(a.error()),
+            }
+        }
+        let a = self.call(Method::GET, &format!("/v1/instances/{id}"), None, self.config.timeout, MAX_BODY).await?;
+        let action = if a.status.is_success() && a.body["status"] == "sleeping" { "restart" } else { "start" };
+        self.lifecycle(id, action).await?;
+        Ok(true)
     }
 
     async fn stop(&self, backend_id: &str) -> Result<(), BackendError> {

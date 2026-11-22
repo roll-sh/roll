@@ -427,8 +427,12 @@ def form_call(name, args):
     meta = {"io.modelcontextprotocol/protocolVersion": "2026-07-28", "io.modelcontextprotocol/clientInfo": {"name": "sweep", "version": "1"},
             "io.modelcontextprotocol/clientCapabilities": {"elicitation": {"form": {}}}}
     body = {"jsonrpc": "2.0", "id": n, "method": "tools/call", "params": {"name": name, "arguments": args, "_meta": meta}}
-    req = urllib.request.Request(f"{api}/v1/mcp", data=json.dumps(body).encode(), headers={"authorization": f"Bearer {tok}", "content-type": "application/json",
-                                 "accept": "application/json", "mcp-protocol-version": "2026-07-28", "mcp-method": "tools/call", "mcp-name": name})
+    h = {"authorization": f"Bearer {tok}", "content-type": "application/json", "accept": "application/json", "mcp-protocol-version": "2026-07-28", "mcp-method": "tools/call", "mcp-name": name}
+    # 2026-07-28's x-mcp-header (SEP-2243): the arguments roll marks are mirrored into headers.
+    for param, header in (("project", "Project"), ("env", "Environment"), ("service", "Service")):
+        if isinstance(args.get(param), str):
+            h[f"mcp-param-{header.lower()}"] = args[param] if args[param].isascii() and args[param] == args[param].strip() else "=?base64?" + __import__("base64").b64encode(args[param].encode()).decode() + "?="
+    req = urllib.request.Request(f"{api}/v1/mcp", data=json.dumps(body).encode(), headers=h)
     with urllib.request.urlopen(req, timeout=60) as r:
         return json.load(r)
 offered, no_form = 0, []

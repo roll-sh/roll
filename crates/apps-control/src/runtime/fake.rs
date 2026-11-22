@@ -391,7 +391,7 @@ impl Runtime for Fake {
         Ok(())
     }
 
-    async fn remove_peer(&self, name: &str) {
+    async fn remove_peer(&self, name: &str, _service: &str, _env: &str) {
         self.peers.lock().remove(name);
     }
 

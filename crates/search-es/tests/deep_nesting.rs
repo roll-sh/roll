@@ -30,6 +30,7 @@ fn run_in(dialect: search_es::Dialect, reqs: Vec<(&'static str, String, String)>
             let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
             rt.block_on(async move {
                 let mut cfg = search_es::ClusterConfig::new("deep");
+                cfg.unsealed_secrets = true;
                 cfg.dialect = dialect;
                 let c = Cluster::open(cfg, std::sync::Arc::new(search_es::MemoryStore::new())).await.unwrap();
                 let mut out = Vec::new();

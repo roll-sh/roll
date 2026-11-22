@@ -76,7 +76,8 @@ impl EnvSource for Engine {
         self.keep_leases(&r, service, &leases).await?;
         // A reference (`roll://…`) is roll secrets' to resolve (`secrets` has its value): never set as its text.
         let own: Vec<(String, String)> = project_env(&s, r.branch.as_deref()).into_iter().chain(self.store.vars(preview)?).filter(|(_, v)| !crate::settings::is_reference(v)).collect();
-        let branches = self.resource_env(preview).await?;
+        // An earlier push runs on its own copy of the data, where one was kept.
+        let branches = self.resource_env_at(preview, earlier).await?;
         // Its logs hide what this start is given (its dynamic credentials included).
         self.add_masks(preview, masks::secret_values(&secrets, &plain, &own, &branches));
         for (k, v) in secrets.into_iter().chain(own).chain(branches) {

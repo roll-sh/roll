@@ -119,6 +119,16 @@ pub struct SearchConfig {
     pub stats_interval: Duration,
     /// Memory all loaded clusters may hold together (`None`: no node budget).
     pub memory_budget: Option<u64>,
+    /// Memory documents being inverted may add to every cluster's indexing buffers at once
+    /// (`search_server::NodeConfig::max_analysis_bytes`; `None`: derived from `memory_budget`).
+    pub max_analysis_bytes: Option<usize>,
+    /// Without a sealer, keep the secrets clients give in the clusters in the clear instead of
+    /// refusing them (`search_es::ClusterConfig::unsealed_secrets`): local development only.
+    pub unsealed_secrets: bool,
+    /// Request body bytes all clusters together may have in flight on this node, on top of
+    /// each cluster's own budget (twice its `max_body_mb`); past it, 429 (`None`: no node
+    /// budget).
+    pub max_in_flight_bytes: Option<usize>,
     /// The catalog in a Postgres database every node of a fleet shares (rolld's system
     /// database; `None`: `search.db` under `home`).
     pub catalog: Option<String>,
@@ -175,6 +185,9 @@ impl SearchConfig {
             node_settings: Vec::new(),
             stats_interval: Duration::from_secs(600),
             memory_budget: None,
+            max_in_flight_bytes: None,
+            unsealed_secrets: false,
+            max_analysis_bytes: None,
             catalog: None,
             catalog_connections: 8,
             defaults: Defaults {
@@ -298,19 +311,47 @@ fn ip_rules(given: Vec<IpRuleInput>) -> Result<Vec<IpRule>> {
         .collect()
 }
 
-/// One REST request through the console.
+/// One REST request through the console, borrowed from the bytes it was read from (the body
+/// is sent as a slice of them, never copied).
 #[derive(Clone, Debug, Deserialize)]
-pub struct ConsoleRequest {
+pub struct ConsoleRequest<'a> {
     pub method: String,
     /// `/index/_search?q=…`
     pub path: String,
     /// A JSON value is sent as JSON, byte for byte as the client wrote it (key order and
     /// number spelling matter: Elasticsearch stores `_source` exactly as sent); a string is sent
     /// as is (NDJSON for `_bulk`).
-    #[serde(default)]
-    pub body: Option<Box<serde_json::value::RawValue>>,
+    #[serde(default, borrow)]
+    pub body: Option<&'a serde_json::value::RawValue>,
     #[serde(default)]
     pub headers: Vec<(String, String)>,
+}
+
+impl<'a> ConsoleRequest<'a> {
+    pub fn parse(bytes: &'a [u8]) -> Result<ConsoleRequest<'a>> {
+        serde_json::from_slice(bytes).map_err(|e| ControlError::Invalid(format!("invalid request: {e}")))
+    }
+
+    /// The bytes the request sends, out of `whole` (what [`ConsoleRequest::parse`] read):
+    /// nothing for no body or `null`, a string's contents, or any other JSON value exactly as
+    /// written, as a slice of `whole`.
+    pub fn body_in(&self, whole: &Bytes) -> Result<Bytes> {
+        let Some(text) = self.body.map(|r| r.get().trim()) else { return Ok(Bytes::new()) };
+        if text == "null" {
+            return Ok(Bytes::new());
+        }
+        if text.starts_with('"') {
+            let s: String = serde_json::from_str(text).map_err(|e| ControlError::Invalid(format!("body: {e}")))?;
+            return Ok(Bytes::from(s));
+        }
+        Ok(whole.slice_ref(text.as_bytes()))
+    }
+
+    /// Whether the request answers or sets a credential on cluster `c`, decided on the API the
+    /// cluster's router picks for it ([`search_es::routes::handles_credentials`]).
+    pub fn handles_credentials(&self, c: &SearchCluster) -> bool {
+        search_es::routes::handles_credentials(dialect(&c.flavor).unwrap_or(Dialect::Elasticsearch), &self.method, self.path.trim())
+    }
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -473,30 +514,138 @@ fn connection_of(cfg: &SearchConfig, name: &str) -> Value {
     json!({ "url": format!("{scheme}://{host}{port_part}"), "host": host, "port": port, "username": name })
 }
 
-/// What a link's credential may do: all of the indices' data and their templates, pipelines
-/// and lifecycle policies, as an app uses a cluster; no security (users, roles, keys).
-fn link_role() -> Value {
-    json!({
-        "cluster": ["monitor", "manage_index_templates", "manage_ingest_pipelines", "manage_ilm"],
-        "indices": [{ "names": ["*"], "privileges": ["all"] }]
-    })
+/// What a link's credential may do (`None`): every index's data and the cluster's templates,
+/// pipelines and lifecycle policies, as an app uses a cluster; no security (users, roles, keys).
+/// Named indices (`Some`) get their data only: templates, pipelines and lifecycle policies are
+/// the whole cluster's (a template for `tenant-a-*` could match `tenant-b-*`), so they go.
+fn link_role(indices: Option<&[String]>) -> Value {
+    match indices {
+        None => json!({
+            "cluster": ["monitor", "manage_index_templates", "manage_ingest_pipelines", "manage_ilm"],
+            "indices": [{ "names": ["*"], "privileges": ["all"] }]
+        }),
+        Some(names) => json!({ "cluster": ["monitor"], "indices": [{ "names": names, "privileges": ["all"] }] }),
+    }
 }
 
 /// [`link_role`] in OpenSearch Security's terms (the opensearch dialect): the same action
-/// groups and actions (ISM for ILM), no `restapi:` permission.
-fn os_link_role() -> Value {
+/// groups and actions (ISM for ILM), no `restapi:` permission. Named indices keep the composite
+/// and scroll actions, which OpenSearch checks as the cluster's (`_bulk`, `_mget`, `_msearch`).
+fn os_link_role(indices: Option<&[String]>) -> Value {
+    let mut cluster = vec!["cluster_monitor", "cluster_composite_ops", "indices:data/read/scroll*"];
+    if indices.is_none() {
+        cluster.extend(["cluster_manage_index_templates", "cluster_manage_pipelines", "cluster:admin/opendistro/ism/*"]);
+    }
+    let all = ["*".to_string()];
     json!({
-        "description": "roll: an app's link (data, templates, pipelines, ISM; no security)",
-        "cluster_permissions": [
-            "cluster_monitor",
-            "cluster_composite_ops",
-            "indices:data/read/scroll*",
-            "cluster_manage_index_templates",
-            "cluster_manage_pipelines",
-            "cluster:admin/opendistro/ism/*"
-        ],
-        "index_permissions": [{ "index_patterns": ["*"], "allowed_actions": ["indices_all"] }]
+        "description": if indices.is_none() { "roll: an app's link (data, templates, pipelines, ISM; no security)" } else { "roll: a key's data on its indices" },
+        "cluster_permissions": cluster,
+        "index_permissions": [{ "index_patterns": indices.unwrap_or(&all[..]), "allowed_actions": ["indices_all"] }]
     })
+}
+
+/// What an API key from the keys route may do ([`Control::create_key`]'s `access`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum KeyAccess {
+    /// Everything the cluster's own user may do (whole-cluster: no `indices`).
+    Admin,
+    /// [`link_role`]: every index's data plus templates, pipelines and lifecycle policies, or
+    /// with named `indices` their data only.
+    Data,
+    /// `read` and `view_index_metadata` on `indices`, no cluster privilege: a frontend's key.
+    Read,
+    /// `create_doc` and `auto_configure` on exactly the named `indices` (data streams), no
+    /// cluster privilege: an append-only log drain, which can't read what it wrote.
+    Append,
+}
+
+impl KeyAccess {
+    pub fn parse(s: &str) -> Result<KeyAccess> {
+        Ok(match s {
+            "admin" => KeyAccess::Admin,
+            "data" => KeyAccess::Data,
+            "read" => KeyAccess::Read,
+            "append" => KeyAccess::Append,
+            a => return Err(ControlError::Invalid(format!("access must be admin, data, read or append, not {a:?}"))),
+        })
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            KeyAccess::Admin => "admin",
+            KeyAccess::Data => "data",
+            KeyAccess::Read => "read",
+            KeyAccess::Append => "append",
+        }
+    }
+
+    /// The key's role descriptor on an Elasticsearch-flavor cluster (`None`: the owner's own).
+    /// `named`: the caller gave `indices` (else they're the default, every index).
+    fn es_role(self, indices: &[String], named: bool) -> Option<Value> {
+        match self {
+            KeyAccess::Admin => None,
+            KeyAccess::Data => Some(link_role(named.then_some(indices))),
+            KeyAccess::Read => Some(json!({ "cluster": [], "indices": [{ "names": indices, "privileges": ["read", "view_index_metadata"] }] })),
+            KeyAccess::Append => Some(json!({ "cluster": [], "indices": [{ "names": indices, "privileges": ["create_doc", "auto_configure"] }] })),
+        }
+    }
+
+    /// The key user's role on an OpenSearch-flavor cluster (`None`: `all_access`). `read` holds
+    /// `cluster_composite_ops_ro` too: OpenSearch checks `_msearch`, `_mget` and scrolls as
+    /// cluster actions. `append` has no OpenSearch equivalent (its index action also overwrites).
+    fn os_role(self, indices: &[String], named: bool) -> Result<Option<Value>> {
+        Ok(match self {
+            KeyAccess::Admin => None,
+            KeyAccess::Data => Some(os_link_role(named.then_some(indices))),
+            KeyAccess::Read => Some(json!({
+                "description": "roll: a read-only key",
+                "cluster_permissions": ["cluster_composite_ops_ro"],
+                "index_permissions": [{ "index_patterns": indices, "allowed_actions": ["read", "indices:admin/get", "indices:admin/mappings/get*"] }]
+            })),
+            KeyAccess::Append => {
+                return Err(ControlError::Invalid(
+                    "append keys need Elasticsearch's create_doc privilege, which an OpenSearch-flavor cluster doesn't have: use data with indices".into(),
+                ));
+            }
+        })
+    }
+}
+
+/// Most index patterns one key may name.
+const MAX_KEY_INDICES: usize = 100;
+
+/// A key's `indices` (default every index, `["*"]`): Elasticsearch index names or wildcards of
+/// them, never a remote cluster's (`alias:…`), a hidden or system index (`.…`), an exclusion
+/// (`-…`) or `_all`. `concrete`: names only, no wildcards (`append`).
+fn key_indices(indices: Option<Vec<String>>, concrete: bool) -> Result<Vec<String>> {
+    let Some(list) = indices else {
+        if concrete {
+            return Err(ControlError::Invalid("an append key names its indices (data streams): indices".into()));
+        }
+        return Ok(vec!["*".into()]);
+    };
+    if list.is_empty() || list.len() > MAX_KEY_INDICES {
+        return Err(ControlError::Invalid(format!("indices: 1 to {MAX_KEY_INDICES} index names or patterns")));
+    }
+    for i in &list {
+        let bad = |why: &str| ControlError::Invalid(format!("indices: [{i}] {why}"));
+        if i.is_empty() || i.len() > 255 {
+            return Err(bad("must be 1 to 255 bytes"));
+        }
+        if i.contains(':') {
+            return Err(bad("names a remote cluster's indices, which a key of this cluster can't"));
+        }
+        if i.starts_with(['.', '-', '_', '+']) {
+            return Err(bad("must not start with '.', '-', '_' or '+'"));
+        }
+        if i.chars().any(|c| c.is_uppercase() || matches!(c, '\\' | '/' | '"' | '<' | '>' | '|' | ' ' | ',' | '#')) {
+            return Err(bad("isn't an index name or pattern (lowercase, no \\ / \" < > | , # or spaces)"));
+        }
+        if concrete && i.contains(['*', '?']) {
+            return Err(bad("is a pattern: an append key names its data streams exactly"));
+        }
+    }
+    Ok(list)
 }
 
 /// The name prefix of the internal users the keys route makes on OpenSearch-flavor clusters.
@@ -601,7 +750,7 @@ pub struct Control {
     reloads: Mutex<HashSet<String>>,
     reloader: AtomicBool,
     me: OnceLock<Weak<Control>>,
-    /// When each loaded cluster's figures were last read from storage (ms).
+    /// When each loaded cluster's figures were last read from storage (ms), by catalog id.
     refreshed: Mutex<HashMap<String, i64>>,
     /// The roll-cluster fleet this node serves clusters in ([`Control::join`]).
     leases: OnceLock<Arc<crate::cluster::ClusterLeases>>,
@@ -634,6 +783,11 @@ impl Control {
         };
         if let Some(s) = &cfg.sealer {
             store.seal_passwords(s.clone());
+            // Remotes linked before the node had a key: sealed now, or they couldn't be opened.
+            let n = store.seal_remote_credentials(|r| s.seal_text(&crate::remotes::kind(&r.cluster_id, &r.alias, &r.target_id), &r.credentials)).await?;
+            if n > 0 {
+                tracing::info!(remotes = n, "sealed remote credentials stored in the clear");
+            }
         }
         let scfg = StoreConfig {
             node: cfg.node_name.clone(),
@@ -663,7 +817,10 @@ impl Control {
                 test_features: cfg.test_features,
                 node_settings: cfg.node_settings.clone(),
                 memory_budget: cfg.memory_budget,
+                max_in_flight_bytes: cfg.max_in_flight_bytes,
                 sealer: cfg.sealer.clone(),
+                unsealed_secrets: cfg.unsealed_secrets,
+                max_analysis_bytes: cfg.max_analysis_bytes,
                 default_repository: cfg.default_repository.clone(),
                 links: Some(links.clone()),
                 audit: cfg.audit.clone(),
@@ -1009,9 +1166,11 @@ impl Control {
     /// parent's segments, nothing is copied. Settings and the owner come from the parent (settings
     /// unless given), and the branch counts toward the owner's `caps`. In a
     /// fleet, call it on the node holding the parent (the API forwards there): a loaded parent
-    /// is committed first, so the branch sees every acknowledged write.
-    pub async fn branch(&self, parent: &str, name: &str, at: Option<i64>, o: ClusterOptions, caps: Caps) -> Result<SearchCluster> {
-        let p = self.get(parent).await?;
+    /// is committed first, so the branch sees every acknowledged write. `parent` is the cluster
+    /// the caller was checked against: it is read again by its id, never its name, so a cluster
+    /// that took the name meanwhile is never branched in its place.
+    pub async fn branch(&self, parent: &SearchCluster, name: &str, at: Option<i64>, o: ClusterOptions, caps: Caps) -> Result<SearchCluster> {
+        let p = self.store.get(&parent.id).await?.ok_or_else(|| ControlError::NotFound(format!("no search cluster {}", parent.id)))?;
         let now = now();
         if let Some(t) = at {
             self.check_window(&p, t, now)?;
@@ -1079,7 +1238,7 @@ impl Control {
         // The parent's recorded figures may be a metering interval old: read the branch's own
         // from its commit points now, so it shows what it holds at once.
         let mut c = c;
-        match self.refresh_stats(&c.name, now_ms()).await {
+        match self.refresh_stats(&c.id, now_ms()).await {
             Ok(()) => {
                 if let Ok(Some(fresh)) = self.store.get(&c.id).await {
                     (c.indices, c.docs, c.stored_bytes) = (fresh.indices, fresh.docs, fresh.stored_bytes);
@@ -1087,7 +1246,7 @@ impl Control {
             }
             Err(e) => {
                 tracing::warn!(cluster = c.name, error = %e, "reading a new branch's figures failed");
-                self.meter.mark_dirty(&c.name);
+                self.meter.mark_dirty(&c.id);
             }
         }
         Ok(c)
@@ -1226,11 +1385,11 @@ impl Control {
 
     /// Runs when a cluster has loaded (from the node's load hook): its instance was built from
     /// the description the waking request looked up, which a change may have overtaken.
-    pub(crate) async fn reconcile(self: Arc<Self>, name: String, token: Option<u64>) {
+    pub(crate) async fn reconcile(self: Arc<Self>, name: String, id: String, token: Option<u64>) {
         // The node publishes the instance right after the hook; give up if it unloads first.
         let deadline = Instant::now() + Duration::from_secs(10);
         let mut spins = 0u32;
-        while self.node.get_loaded(&name).is_none() && self.meter.is_loaded(&name) && Instant::now() < deadline {
+        while self.node.get_loaded(&name).is_none() && self.meter.is_loaded(&id) && Instant::now() < deadline {
             if spins < 64 {
                 tokio::task::yield_now().await;
             } else {
@@ -1378,6 +1537,9 @@ impl Control {
         // Its audit entries still waiting are written now; the stored ones go with its storage
         // (or move with its kept copy, and back on a restore).
         self.node.audit.forget(&c.name).await;
+        // So are its requests and observations not handed on yet: they are keyed by its id, so
+        // a cluster that takes the name next never sees them, and nothing bills them now.
+        self.node.forget_cluster(&c.id);
         if self.cfg.deleted_retention.is_zero() {
             self.data.delete_cluster(&c.name).await?;
             // Its remotes' keys roll made go with it (a restorable one keeps them for its restore).
@@ -1392,7 +1554,7 @@ impl Control {
         if let Some(l) = self.cluster_leases() {
             l.cluster().retire(&crate::cluster::key(&c.name));
         }
-        self.refreshed.lock().remove(&c.name);
+        self.refreshed.lock().remove(&c.id);
         self.reloads.lock().remove(&c.name);
         Ok(())
     }
@@ -1521,9 +1683,9 @@ impl Control {
             tracing::warn!(cluster = target, kept = d.stored_as, error = %e, "removing a restored search cluster's kept copy failed");
         }
         let c = self.get(&d.cluster.id).await?;
-        if let Err(e) = self.refresh_stats(&c.name, now_ms()).await {
+        if let Err(e) = self.refresh_stats(&c.id, now_ms()).await {
             tracing::warn!(cluster = c.name, error = %e, "reading a restored search cluster's figures failed");
-            self.meter.mark_dirty(&c.name);
+            self.meter.mark_dirty(&c.id);
         }
         self.open_always_on(&c).await;
         self.get(&c.id).await
@@ -1616,9 +1778,9 @@ impl Control {
         if unloaded {
             // Asleep figures come from the commit points the unload just wrote: record them now
             // rather than at the next metering pass, so the cluster's page is right at once.
-            if let Err(e) = self.refresh_stats(&c.name, now_ms()).await {
+            if let Err(e) = self.refresh_stats(&c.id, now_ms()).await {
                 tracing::warn!(cluster = c.name, error = %e, "refreshing search cluster figures failed");
-                self.meter.mark_dirty(&c.name);
+                self.meter.mark_dirty(&c.id);
             }
         }
         Ok(unloaded)
@@ -1645,7 +1807,7 @@ impl Control {
                 // Live documents from shard statistics (no search runs) once every index is
                 // open; the metered `docs` lags until the next sample.
                 let f = crate::meter::engine_figures(&l.cluster);
-                if f.complete() {
+                if f.complete_for_display() {
                     v["docs"] = json!(f.docs);
                 }
                 if let Some(l) = self.cluster_leases() {
@@ -1752,12 +1914,15 @@ impl Control {
 
     /// One Elasticsearch request on cluster `id` as its owner narrowed to the index names of
     /// `scope` (the per-index routes of the API: the request reaches no other index, also through
-    /// a bulk line's `_index` or an expression): the answer's status, content type and body,
-    /// unchanged. Wakes the cluster.
-    pub async fn es(&self, id: &str, method: &str, uri: &str, scope: &str, content_type: Option<&str>, body: bytes::Bytes) -> Result<(u16, String, bytes::Bytes)> {
+    /// a bulk line's `_index` or an expression), or as the owner (`None`: the routes of one
+    /// cluster-wide API, synonyms sets and query rulesets, whose path the route builds): the
+    /// answer's status, content type and body, unchanged. Wakes the cluster.
+    pub async fn es(&self, id: &str, method: &str, uri: &str, scope: Option<&str>, content_type: Option<&str>, body: bytes::Bytes) -> Result<(u16, String, bytes::Bytes)> {
         let c = self.get(id).await?;
         let mut req = EsRequest::new(method, uri);
-        req.headers.push((search_es::xpack::security::INDEX_SCOPE_HEADER.into(), scope.to_string()));
+        if let Some(scope) = scope {
+            req.headers.push((search_es::xpack::security::INDEX_SCOPE_HEADER.into(), scope.to_string()));
+        }
         if let Some(ct) = content_type.filter(|_| !body.is_empty()) {
             req.headers.push(("Content-Type".into(), ct.to_string()));
         }
@@ -1781,7 +1946,7 @@ impl Control {
         if c.flavor == "opensearch" {
             return self.mint_os_link(&c, &url).await;
         }
-        let body = serde_json::to_vec(&json!({ "name": format!("link {owner}"), "role_descriptors": { "roll_link": link_role() } })).unwrap_or_default();
+        let body = serde_json::to_vec(&json!({ "name": format!("link {owner}"), "role_descriptors": { "roll_link": link_role(None) } })).unwrap_or_default();
         let resp = self.call(&c, EsRequest::json("POST", "/_security/api_key", body)).await;
         let v: Value = serde_json::from_slice(&resp.body).unwrap_or(Value::Null);
         let (200, Some(key_id), Some(key)) = (resp.status, v["id"].as_str(), v["api_key"].as_str()) else {
@@ -1794,7 +1959,7 @@ impl Control {
     /// An OpenSearch-flavor cluster's link: a role and an internal user named
     /// `roll-link-<random>`, the user holding only that role.
     async fn mint_os_link(&self, c: &SearchCluster, url: &str) -> Result<LinkCredential> {
-        let (name, password) = self.os_user(c, "roll-link-", true, "roll: an app's link", None).await?;
+        let (name, password) = self.os_user(c, "roll-link-", Some(os_link_role(None)), "roll: an app's link", None).await?;
         let mut u = reqwest::Url::parse(url).map_err(|e| ControlError::Internal(anyhow::anyhow!("cluster {} has no URL: {e}", c.name)))?;
         let userinfo = (u.set_username(&format!("{name}@{}", c.name)), u.set_password(Some(&password)));
         if userinfo != (Ok(()), Ok(())) {
@@ -1804,17 +1969,18 @@ impl Control {
     }
 
     /// A new internal user of an OpenSearch-flavor cluster named `<prefix><random>`, with a random
-    /// password: a role of its own with [`os_link_role`]'s permissions (`data`: no security REST
-    /// API, the security index restricted), else `all_access`, which can use the security REST
+    /// password: a role of its own, `role` (one of [`KeyAccess::os_role`]'s: no security REST
+    /// API, the security index restricted), else (`None`) `all_access`, which can use the security REST
     /// API like the cluster's own admin (an `admin` key is the cluster's password by another
     /// name, so it could also make a user without an expiry). `expires_ms`: it can't sign in from then on
     /// (`EXPIRES_ATTRIBUTE`, checked by the cluster). Returns its name and password.
-    async fn os_user(&self, c: &SearchCluster, prefix: &str, data: bool, description: &str, expires_ms: Option<i64>) -> Result<(String, String)> {
+    async fn os_user(&self, c: &SearchCluster, prefix: &str, role: Option<Value>, description: &str, expires_ms: Option<i64>) -> Result<(String, String)> {
         let name = format!("{prefix}{}", random_string(12));
         let password = random_string(40);
         let api = "/_plugins/_security/api";
-        if data {
-            let role = self.call(c, EsRequest::json("PUT", &format!("{api}/roles/{name}"), serde_json::to_vec(&os_link_role()).unwrap_or_default())).await;
+        let data = role.is_some();
+        if let Some(role) = role {
+            let role = self.call(c, EsRequest::json("PUT", &format!("{api}/roles/{name}"), serde_json::to_vec(&role).unwrap_or_default())).await;
             if role.status >= 300 {
                 return Err(ControlError::Internal(anyhow::anyhow!("making a role of cluster {} failed ({})", c.name, role.status)));
             }
@@ -1931,34 +2097,41 @@ impl Control {
     /// mustn't share the cluster's password: `api_key` is `base64(<key id>@<cluster>:<key>)`,
     /// sent as `Authorization: ApiKey …`, and works on any host (the `@<cluster>` names the
     /// cluster). The key is in this answer only. `expires_in_s`: it stops working after that.
-    /// `access`: `admin` (the default: everything the cluster's own user may do) or `data` (a
-    /// link's role: data, templates, pipelines and lifecycle policies, no security).
-    pub async fn create_key(&self, id: &str, name: &str, expires_in_s: Option<i64>, access: Option<&str>) -> Result<Value> {
+    /// `access` ([`KeyAccess`], default `admin`) on `indices` (default every index; `admin`
+    /// takes none, it's the whole cluster's).
+    pub async fn create_key(&self, id: &str, name: &str, expires_in_s: Option<i64>, access: Option<&str>, indices: Option<Vec<String>>) -> Result<Value> {
         let c = self.get(id).await?;
         if name.trim().is_empty() || name.len() > 1024 {
             return Err(ControlError::Invalid("name: 1 to 1024 characters".into()));
         }
-        let data = match access.unwrap_or("admin") {
-            "admin" => false,
-            "data" => true,
-            a => return Err(ControlError::Invalid(format!("access must be admin or data, not {a:?}"))),
-        };
+        let access = KeyAccess::parse(access.unwrap_or("admin"))?;
+        if access == KeyAccess::Admin && indices.is_some() {
+            return Err(ControlError::Invalid("an admin key is the whole cluster's: indices goes with data, read or append".into()));
+        }
+        let named = indices.is_some();
+        let indices = key_indices(indices, access == KeyAccess::Append)?;
         if expires_in_s.is_some_and(|s| s <= 0) {
             return Err(ControlError::Invalid("expires_in_s must be positive".into()));
         }
         // OpenSearch clients sign in with a user: the key is an internal user of its own.
         if c.flavor == "opensearch" {
+            let role = access.os_role(&indices, named)?;
             let expires_ms = expires_in_s.map(|s| crate::meter::now_ms().saturating_add(s.saturating_mul(1000)));
-            let (user, password) = self.os_user(&c, OS_KEY_PREFIX, data, &format!("roll key: {name}"), expires_ms).await?;
-            let mut out = json!({ "id": user, "name": name, "access": if data { "data" } else { "admin" }, "username": format!("{user}@{}", c.name), "password": password, "url": connection_of(&self.cfg, &c.name)["url"] });
+            let (user, password) = self.os_user(&c, OS_KEY_PREFIX, role, &format!("roll key: {name}"), expires_ms).await?;
+            let mut out = json!({ "id": user, "name": name, "access": access.as_str(), "username": format!("{user}@{}", c.name), "password": password, "url": connection_of(&self.cfg, &c.name)["url"] });
+            if access != KeyAccess::Admin {
+                out["indices"] = json!(indices);
+            }
             if let Some(ms) = expires_ms {
                 out["expires_at"] = json!(ms / 1000);
             }
             return Ok(out);
         }
         let mut body = json!({ "name": name });
-        if data {
-            body["role_descriptors"] = json!({ "roll_link": link_role() });
+        if let Some(role) = access.es_role(&indices, named) {
+            // Named by access, a data key's as it always was (the dashboard and the CLI read it).
+            let named = if access == KeyAccess::Data { "roll_link".to_string() } else { format!("roll_{}", access.as_str()) };
+            body["role_descriptors"] = json!({ named: role });
         }
         if let Some(s) = expires_in_s {
             body["expiration"] = json!(format!("{s}s"));
@@ -1973,7 +2146,10 @@ impl Control {
         };
         let api_key = base64::engine::general_purpose::STANDARD.encode(format!("{key_id}@{}:{key}", c.name));
         // The access the key was made with: a client (roll secrets) checks it got what it asked.
-        let mut out = json!({ "id": key_id, "name": name, "access": if data { "data" } else { "admin" }, "api_key": api_key, "url": connection_of(&self.cfg, &c.name)["url"] });
+        let mut out = json!({ "id": key_id, "name": name, "access": access.as_str(), "api_key": api_key, "url": connection_of(&self.cfg, &c.name)["url"] });
+        if access != KeyAccess::Admin {
+            out["indices"] = json!(indices);
+        }
         if let Some(ms) = v["expiration"].as_i64() {
             out["expires_at"] = json!(ms / 1000);
         }
@@ -2088,19 +2264,21 @@ impl Control {
 
     /// Runs one REST request (the dashboard console, `roll search request`). The node counts it
     /// for metering like any client's.
-    pub async fn request(&self, id: &str, r: ConsoleRequest) -> Result<ConsoleAnswer> {
+    /// Runs a console request (`method`, `path`, `headers` as [`ConsoleRequest`] has them) with
+    /// `body` ([`ConsoleRequest::body_in`]).
+    pub async fn request(&self, id: &str, method: &str, path: &str, headers: Vec<(String, String)>, body: Bytes) -> Result<ConsoleAnswer> {
         let c = self.get(id).await?;
-        let method = r.method.trim().to_ascii_uppercase();
+        let shown = method;
+        let method = method.trim().to_ascii_uppercase();
         if !matches!(method.as_str(), "GET" | "POST" | "PUT" | "DELETE" | "HEAD" | "PATCH") {
-            return Err(ControlError::Invalid(format!("unsupported method {}", r.method)));
+            return Err(ControlError::Invalid(format!("unsupported method {shown}")));
         }
-        let path = r.path.trim();
+        let path = path.trim();
         if !path.starts_with('/') {
             return Err(ControlError::Invalid("path must start with /".into()));
         }
-        let body = console_body(r.body.as_deref())?;
         let mut req = EsRequest::new(&method, path);
-        req.headers = r.headers.into_iter().filter(|(k, _)| !k.trim().is_empty()).collect();
+        req.headers = headers.into_iter().filter(|(k, _)| !k.trim().is_empty()).collect();
         if !body.is_empty() && !req.headers.iter().any(|(k, _)| k.eq_ignore_ascii_case("content-type")) {
             let ndjson = path.split('?').next().is_some_and(|p| p.ends_with("/_bulk") || p.ends_with("/_msearch") || p.ends_with("/_msearch/template"));
             req.headers.push(("Content-Type".into(), if ndjson { "application/x-ndjson" } else { "application/json" }.into()));
@@ -2189,24 +2367,25 @@ impl Control {
     /// loaded time and requests, and refreshes the figures of clusters that just loaded or
     /// unloaded, and of loaded ones every `stats_interval`.
     pub async fn sample(&self) -> anyhow::Result<()> {
-        for (name, n) in self.node.take_request_counts() {
-            self.meter.count_requests(&name, n.min(i64::MAX as u64) as i64);
+        // All keyed by catalog id, never by name (see `crate::meter`).
+        for (id, n) in self.node.take_request_counts() {
+            self.meter.count_requests(&id, n.min(i64::MAX as u64) as i64);
         }
-        for (name, o) in self.node.take_observations() {
+        for (id, o) in self.node.take_observations() {
             // Lost if the catalog can't take them now: they are a picture, not a bill.
-            if let Err(e) = self.meter.observe(&name, o).await {
-                tracing::warn!(cluster = name, error = %e, "storing search metrics failed");
+            if let Err(e) = self.meter.observe(&id, o).await {
+                tracing::warn!(cluster = id, error = %e, "storing search metrics failed");
             }
         }
         let at = now_ms();
-        for (name, forced) in self.meter.sample(at).await? {
-            let due = forced || self.refreshed.lock().get(&name).is_none_or(|t| at - t >= self.cfg.stats_interval.as_millis() as i64);
+        for (id, forced) in self.meter.sample(at).await? {
+            let due = forced || self.refreshed.lock().get(&id).is_none_or(|t| at - t >= self.cfg.stats_interval.as_millis() as i64);
             if !due {
                 continue;
             }
-            if let Err(e) = self.refresh_stats(&name, at).await {
-                tracing::warn!(cluster = name, error = %e, "refreshing search cluster figures failed");
-                self.meter.mark_dirty(&name);
+            if let Err(e) = self.refresh_stats(&id, at).await {
+                tracing::warn!(cluster = id, error = %e, "refreshing search cluster figures failed");
+                self.meter.mark_dirty(&id);
             }
         }
         // After the analytics above are in the catalog.
@@ -2236,7 +2415,7 @@ impl Control {
             add(at, &s);
         }
         // Not flushed yet: what the cluster's owner (here) recorded since the last pass.
-        for (minute, s) in self.node.peek_observations(&c.name).minutes {
+        for (minute, s) in self.node.peek_observations(&c.name, &c.id).minutes {
             add(minute.min(i64::MAX as u64 / 60) as i64 * 60, &s);
         }
         let mut total = search_server::metrics::Stats::default();
@@ -2262,7 +2441,7 @@ impl Control {
     /// handed on yet, at most [`search_es::slowlog::MAX_ENTRIES`].
     pub async fn slowlog(&self, id: &str) -> Result<Value> {
         let c = self.get(id).await?;
-        let mut entries: Vec<Value> = self.node.peek_observations(&c.name).slow.iter().rev().map(search_es::slowlog::Entry::to_json).collect();
+        let mut entries: Vec<Value> = self.node.peek_observations(&c.name, &c.id).slow.iter().rev().map(search_es::slowlog::Entry::to_json).collect();
         for row in self.store.slowlog(&c.id).await? {
             if entries.len() >= search_es::slowlog::MAX_ENTRIES {
                 break;
@@ -2274,21 +2453,22 @@ impl Control {
         Ok(json!({ "entries": entries, "max_entries": search_es::slowlog::MAX_ENTRIES }))
     }
 
-    /// Re-reads a cluster's docs and stored bytes from its commit points.
-    pub async fn refresh_stats(&self, name: &str, at_ms: i64) -> anyhow::Result<()> {
-        let Some(c) = self.store.by_name(name).await? else { return Ok(()) };
+    /// Re-reads the docs and stored bytes of the cluster with id `id` from its commit points.
+    pub async fn refresh_stats(&self, id: &str, at_ms: i64) -> anyhow::Result<()> {
+        let Some(c) = self.store.get(id).await? else { return Ok(()) };
+        let name = c.name.as_str();
         let u = self.data.cluster_usage(name).await?;
         let loaded = self.node.get_loaded(name);
         // Loaded with every index open, the engine counts the documents exactly (unflushed
         // writes included); otherwise the commit points do. Stored bytes are always the object
         // store's: they are what is billed.
         let docs = match loaded.as_ref().map(|l| engine_figures(&l.cluster)) {
-            Some(f) if f.complete() => f.docs as i64,
+            Some(f) if f.complete_for_display() => f.docs as i64,
             _ => u.docs as i64,
         };
         let indices = match &loaded {
             Some(l) => l.cluster.state().metadata.indices.len() as i64,
-            None => match self.meter.take_indices(name) {
+            None => match self.meter.take_indices(id) {
                 Some(n) => n,
                 // Asleep and not seen loaded (a fresh branch): count the stored state's indices.
                 None => match self.data.read_cluster(name).await? {
@@ -2304,26 +2484,12 @@ impl Control {
         }
         let mut refreshed = self.refreshed.lock();
         if self.node.get_loaded(name).is_some() {
-            refreshed.insert(name.to_string(), at_ms);
+            refreshed.insert(id.to_string(), at_ms);
         } else {
-            refreshed.remove(name);
+            refreshed.remove(id);
         }
         Ok(())
     }
-}
-
-/// The bytes a console request sends: nothing for no body or `null`, a string's contents, or
-/// any other JSON value exactly as written.
-fn console_body(raw: Option<&serde_json::value::RawValue>) -> Result<Bytes> {
-    let Some(text) = raw.map(|r| r.get().trim()) else { return Ok(Bytes::new()) };
-    if text == "null" {
-        return Ok(Bytes::new());
-    }
-    if text.starts_with('"') {
-        let s: String = serde_json::from_str(text).map_err(|e| ControlError::Invalid(format!("body: {e}")))?;
-        return Ok(Bytes::from(s));
-    }
-    Ok(Bytes::copy_from_slice(text.as_bytes()))
 }
 
 /// The number of indices in a stored cluster state (`search-es`'s `ClusterState::to_json`).
@@ -2359,19 +2525,25 @@ mod tests {
 
     #[test]
     fn console_bodies_keep_their_bytes() {
-        let raw = |t: &str| serde_json::from_str::<Box<serde_json::value::RawValue>>(t).unwrap();
-        let body = |t: Option<&str>| console_body(t.map(raw).as_deref()).unwrap();
+        let body = |b: Option<&str>| {
+            let whole = Bytes::from(match b {
+                Some(b) => format!(r#"{{"method":"PUT","path":"/a","body":{b}}}"#),
+                None => r#"{"method":"GET","path":"/"}"#.to_string(),
+            });
+            let r = ConsoleRequest::parse(&whole).unwrap();
+            let sent = r.body_in(&whole).unwrap();
+            // A JSON value is a slice of what was read, not a copy.
+            if b.is_some_and(|b| !b.starts_with('"') && b != "null") {
+                assert!(whole.as_ptr_range().contains(&sent.as_ptr()));
+            }
+            sent
+        };
         assert_eq!(body(None), Bytes::new());
         assert_eq!(body(Some("null")), Bytes::new());
         // Key order, spacing and number spelling survive (serde_json's Value would sort keys).
         assert_eq!(body(Some(r#"{"z": 1.0, "a": [1e2]}"#)), Bytes::from_static(br#"{"z": 1.0, "a": [1e2]}"#));
         assert_eq!(body(Some(r#""{\"index\":{}}\n{}\n""#)), Bytes::from_static(b"{\"index\":{}}\n{}\n"));
         assert_eq!(body(Some("42")), Bytes::from_static(b"42"));
-        // As it arrives in a request.
-        let r: ConsoleRequest = serde_json::from_str(r#"{"method":"PUT","path":"/a/_doc/1","body":{"title":"x","price":1}}"#).unwrap();
-        assert_eq!(console_body(r.body.as_deref()).unwrap(), Bytes::from_static(br#"{"title":"x","price":1}"#));
-        let r: ConsoleRequest = serde_json::from_str(r#"{"method":"GET","path":"/"}"#).unwrap();
-        assert!(r.body.is_none());
     }
 
     #[test]
