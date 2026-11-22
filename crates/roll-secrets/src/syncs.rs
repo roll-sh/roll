@@ -327,7 +327,7 @@ impl Secrets {
     pub fn list_syncs(&self, project: &str, caller: &Caller) -> Result<Vec<SecretSync>> {
         caller.need(Action::Read, &Scope::project(project))?;
         self.project(project)?;
-        let rows = self.db.read(|c| c.query(&format!("SELECT {COLUMNS} FROM syncs s JOIN environments e ON e.id = s.env_id WHERE s.project_id = ? ORDER BY s.created_at"), [project], row))?;
+        let rows = self.db.read(|c| c.query(&format!("SELECT {COLUMNS} FROM syncs s JOIN environments e ON e.id = s.env_id AND e.forgotten_at IS NULL WHERE s.project_id = ? ORDER BY s.created_at"), [project], row))?;
         Ok(rows.into_iter().map(|r| masked(r.info)).filter(|s| caller.allows(Action::Read, &Scope::at(project, &s.environment, &s.path))).collect())
     }
 
@@ -345,7 +345,7 @@ impl Secrets {
         target.check(project, &self.members(project)?, &n.target)?;
         let creds: BTreeSet<String> = target.credentials(&n.target).into_iter().collect();
         let others: Vec<(String, Json)> = self.db.read(|c| {
-            c.query("SELECT s.kind, s.target FROM syncs s JOIN environments e ON e.id = s.env_id WHERE s.project_id = ? AND e.slug = ? AND s.path = ?", params![project, n.environment, path], |x| {
+            c.query("SELECT s.kind, s.target FROM syncs s JOIN environments e ON e.id = s.env_id AND e.forgotten_at IS NULL WHERE s.project_id = ? AND e.slug = ? AND s.path = ?", params![project, n.environment, path], |x| {
                 Ok((x.get::<_, String>(0)?, serde_json::from_str::<Json>(&x.get::<_, String>(1)?).unwrap_or(Json::Null)))
             })
         })?;
@@ -469,7 +469,7 @@ impl Secrets {
 
     fn sync_row(&self, project: &str, id: &str) -> Result<Row> {
         self.db
-            .read(|c| c.query_row(&format!("SELECT {COLUMNS} FROM syncs s JOIN environments e ON e.id = s.env_id WHERE s.id = ? AND s.project_id = ?"), [id, project], row).optional())?
+            .read(|c| c.query_row(&format!("SELECT {COLUMNS} FROM syncs s JOIN environments e ON e.id = s.env_id AND e.forgotten_at IS NULL WHERE s.id = ? AND s.project_id = ?"), [id, project], row).optional())?
             .ok_or_else(|| Error::NotFound(format!("no sync {id}")))
     }
 
@@ -598,7 +598,7 @@ impl Secrets {
             let batch: Vec<(Row, Option<i64>)> = self.db.write(|c| {
                 // Least recently checked first: every sync gets its turn, however many there are.
                 let rows = c.query(
-                    &format!("SELECT {COLUMNS}, s.checked_at FROM syncs s JOIN environments e ON e.id = s.env_id WHERE s.paused_at IS NULL AND {live} AND s.running_until <= ? AND s.retry_at <= ? AND COALESCE(s.checked_at, 0) < ?{marked} ORDER BY COALESCE(s.checked_at, 0), s.id LIMIT {CLAIM}"),
+                    &format!("SELECT {COLUMNS}, s.checked_at FROM syncs s JOIN environments e ON e.id = s.env_id AND e.forgotten_at IS NULL WHERE s.paused_at IS NULL AND {live} AND s.running_until <= ? AND s.retry_at <= ? AND COALESCE(s.checked_at, 0) < ?{marked} ORDER BY COALESCE(s.checked_at, 0), s.id LIMIT {CLAIM}"),
                     params![now, now, now],
                     |r| Ok((row(r)?, r.get::<_, Option<i64>>(18)?)),
                 )?;
@@ -701,7 +701,7 @@ impl Secrets {
         let creds = target.credentials(&r.info.target);
         // No sync pushes a platform credential, whichever sync of this folder it belongs to.
         let others: Vec<(String, Json)> = self.db.read(|c| {
-            c.query("SELECT s.kind, s.target FROM syncs s JOIN environments e ON e.id = s.env_id WHERE s.project_id = ? AND e.slug = ? AND s.path = ?", params![project, env, path], |x| {
+            c.query("SELECT s.kind, s.target FROM syncs s JOIN environments e ON e.id = s.env_id AND e.forgotten_at IS NULL WHERE s.project_id = ? AND e.slug = ? AND s.path = ?", params![project, env, path], |x| {
                 Ok((x.get::<_, String>(0)?, serde_json::from_str::<Json>(&x.get::<_, String>(1)?).unwrap_or(Json::Null)))
             })
         })?;

@@ -127,6 +127,10 @@ impl Daemon {
     }
 
     fn with_products(on: Vec<String>) -> Daemon {
+        Daemon::with_inspector(on, None)
+    }
+
+    fn with_inspector(on: Vec<String>, inspector: Option<Arc<dyn roll_mcp::Inspector>>) -> Daemon {
         let dir = tempfile::tempdir().unwrap();
         let ws = code_sql::Db::open_or_test(&code_sql::Target::Sqlite(dir.path().join("workspace.db")), "workspace").unwrap();
         let workspace = Arc::new(roll_workspace::Workspace::new(ws).unwrap());
@@ -136,7 +140,7 @@ impl Daemon {
         gate.set_authorizer(Arc::new(roll_access::evaluate::Evaluator(access.clone())));
         let layer = || axum::middleware::from_fn_with_state(gate.clone(), roll_auth::check);
         let api = products().merge(roll_workspace::router(workspace.clone())).merge(roll_access::api::router(access.clone()));
-        let mcp_config = roll_mcp::Config { api_url: "http://127.0.0.1:7070".into(), web_url: "http://localhost:3000".into(), locked: true, products: on, access: Some(access.clone()) };
+        let mcp_config = roll_mcp::Config { api_url: "http://127.0.0.1:7070".into(), web_url: "http://localhost:3000".into(), locked: true, products: on, access: Some(access.clone()), inspector };
         let mcp = roll_mcp::routes(api.clone().layer(layer()), mcp_config, vec![Arc::new(Fronted) as Arc<dyn roll_mcp::ToolSet>]);
         let _ = access.people.set(Arc::new(Alice));
         // People's memberships, as rolld wires them: a person's session grant is their roles.
@@ -190,6 +194,14 @@ impl Daemon {
         assert_eq!(s, StatusCode::CREATED, "{out}");
         out["token"].as_str().unwrap().to_string()
     }
+}
+
+/// The `Mcp-Param-*` headers a 2026-07-28 client sends for a call's marked arguments (SEP-2243).
+fn param_headers(params: &Value) -> Vec<(&'static str, String)> {
+    [("project", "mcp-param-project"), ("env", "mcp-param-environment"), ("service", "mcp-param-service")]
+        .into_iter()
+        .filter_map(|(arg, h)| params["arguments"][arg].as_str().map(|v| (h, v.to_string())))
+        .collect()
 }
 
 fn names(list: &Value) -> Vec<String> {
@@ -378,7 +390,17 @@ async fn search_mode_finds_and_runs_through_the_same_checks() {
     let (_, _, ro) = d.http(OPERATOR, Method::POST, &at("&readonly=1"), Some(json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/list" }))).await;
     assert!(!names(&ro["result"]).contains(&"roll_run".into()), "{ro}");
     let (s, _, _) = d.http(OPERATOR, Method::POST, "/v1/mcp?tools=some", Some(json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/list" }))).await;
-    assert_eq!(s, StatusCode::BAD_REQUEST);
+    assert_eq!(s, StatusCode::BAD_REQUEST, "a name no tool has: refused, not silently empty");
+    // Single tools picked (GitHub's X-MCP-Tools list) or dropped (exclusion wins): what's shown and
+    // may be called, never what's allowed.
+    let list = |path: &'static str, h: &'static [(&'static str, &'static str)]| {
+        let d = &d;
+        async move { names(&d.http_with(OPERATOR, Method::POST, path, Some(json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/list" })), h).await.2["result"]) }
+    };
+    assert_eq!(list("/v1/mcp", &[("x-mcp-tools", "postgres_list_projects,postgres_delete_project")]).await, ["postgres_list_projects", "postgres_delete_project"]);
+    assert_eq!(list("/v1/mcp?tools=postgres_list_projects,postgres_delete_project&exclude_tools=postgres_delete_project", &[]).await, ["postgres_list_projects"]);
+    let (_, _, dropped) = d.http(OPERATOR, Method::POST, "/v1/mcp?exclude_tools=postgres_delete_project", Some(json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": { "name": "postgres_delete_project", "arguments": { "project": "pa" } } }))).await;
+    assert_eq!(dropped["result"]["isError"], true, "{dropped}");
     // The audit log names the tool that ran, not the run tool.
     let log = d.audit_until(|l| l.as_array().is_some_and(|a| a.iter().any(|e| e["tool"] == "postgres_list_projects" && !e["grant_id"].is_null()))).await;
     assert!(!log.as_array().unwrap().iter().any(|e| e["tool"].as_str().is_some_and(|t| t.starts_with("roll_"))), "{log}");
@@ -398,6 +420,11 @@ async fn the_policy_holds_agents_to_lockdown_and_reading() {
     let work = d.tool(&token, "code_list_work", json!({})).await;
     assert!(!work["content"][0]["text"].as_str().unwrap().contains("push the secrets"), "lockdown, unasked: {work}");
     assert!(names(&d.rpc(OPERATOR, "tools/list", json!({})).await).contains(&"postgres_delete_project".to_string()), "not the operator");
+    // Agents only as grants: the admin token gets OAuth's challenge, a token goes on.
+    assert_eq!(d.http(OPERATOR, Method::PUT, "/v1/access/policy", Some(json!({ "mcp_require_grant": true }))).await.0, StatusCode::OK);
+    let (s, h, _) = d.http(OPERATOR, Method::POST, "/v1/mcp", Some(json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/list" }))).await;
+    assert!(s == StatusCode::UNAUTHORIZED && h.get("www-authenticate").is_some_and(|v| v.to_str().unwrap().contains("resource_metadata")), "{s}");
+    assert!(!d.rpc(&token, "tools/list", json!({})).await["tools"].as_array().unwrap().is_empty());
 }
 
 /// Lockdown (`?lockdown=1`): an outside record's text never reaches the model, in the structured
@@ -471,6 +498,7 @@ async fn a_call_waiting_for_approval_is_a_task_polled_to_its_result() {
             if let Some(n) = name {
                 h.push(("mcp-name", n));
             }
+            h.extend(param_headers(&params));
             let h: Vec<(&str, &str)> = h.iter().map(|(k, v)| (*k, v.as_str())).collect();
             d.http_with(&token, Method::POST, "/v1/mcp", Some(json!({ "jsonrpc": "2.0", "id": 1, "method": method, "params": params })), &h).await.2
         }
@@ -575,8 +603,11 @@ async fn a_host_that_renders_apps_gets_the_table_view() {
 async fn a_2026_client_is_served_without_initialize() {
     let d = Daemon::new();
     let meta = |caps: Value| json!({ "io.modelcontextprotocol/protocolVersion": "2026-07-28", "io.modelcontextprotocol/clientInfo": { "name": "modern", "version": "2" }, "io.modelcontextprotocol/clientCapabilities": caps });
-    let send = |token: &str, id: i64, method: &str, mut params: Value, headers: Vec<(&'static str, String)>| {
+    let send = |token: &str, id: i64, method: &str, mut params: Value, mut headers: Vec<(&'static str, String)>| {
         params["_meta"] = meta(json!({ "elicitation": { "url": {} } }));
+        if !headers.is_empty() {
+            headers.extend(param_headers(&params));
+        }
         let body = json!({ "jsonrpc": "2.0", "id": id, "method": method, "params": params });
         let token = token.to_string();
         let d = &d;
@@ -628,6 +659,20 @@ async fn a_2026_client_is_served_without_initialize() {
     let projects = out["result"]["tools"].as_array().unwrap().iter().find(|t| t["name"] == "postgres_list_projects").unwrap();
     assert!(projects["outputSchema"]["properties"]["items"]["items"]["properties"]["id"].is_object(), "{}", projects["outputSchema"]);
     assert_eq!(schemas(&d.rpc(OPERATOR, "tools/list", json!({})).await), 0);
+    // A routable argument is marked x-mcp-header (SEP-2243), and a call carries it as a header too.
+    let get = out["result"]["tools"].as_array().unwrap().iter().find(|t| t["name"] == "postgres_get_project").unwrap().clone();
+    assert_eq!(get["inputSchema"]["properties"]["project"]["x-mcp-header"], "Project");
+    let raw = |header: Option<&'static str>| {
+        let body = json!({ "jsonrpc": "2.0", "id": 30, "method": "tools/call", "params": { "name": "postgres_get_project", "arguments": { "project": "pa" }, "_meta": meta(json!({})) } });
+        let mut h = vec![("mcp-protocol-version", "2026-07-28"), ("mcp-method", "tools/call"), ("mcp-name", "postgres_get_project")];
+        h.extend(header.map(|v| ("mcp-param-project", v)));
+        let d = &d;
+        async move { d.http_with(OPERATOR, Method::POST, "/v1/mcp", Some(body), &h).await }
+    };
+    let (s, _, missing) = raw(None).await;
+    assert_eq!((s, missing["error"]["code"].as_i64()), (StatusCode::BAD_REQUEST, Some(-32020)), "{missing}");
+    let (s, _, ok) = raw(Some("=?base64?cGE=?=")).await;
+    assert!(s != StatusCode::BAD_REQUEST && ok["error"].is_null(), "the header (Base64 form) says what the body does: {ok}");
     // A resource that isn't there is Invalid Params in this revision (SEP-2164; -32002 before it).
     let uri = "roll://nothing/here";
     let (_, _, out) = send(OPERATOR, 21, "resources/read", json!({ "uri": uri }), std_headers("resources/read", Some(uri))).await;
@@ -1057,7 +1102,7 @@ async fn an_agent_polls_what_happened() {
     let found = send(OPERATOR, "server/discover", json!({})).await;
     assert!(found["result"]["capabilities"]["extensions"]["io.modelcontextprotocol/events"].is_object(), "{found}");
     let list = send(OPERATOR, "events/list", json!({})).await;
-    assert_eq!((list["result"]["events"][0]["name"].as_str(), &list["result"]["events"][0]["delivery"]), (Some("apps.event"), &json!(["poll"])), "{list}");
+    assert_eq!((list["result"]["events"][0]["name"].as_str(), &list["result"]["events"][0]["delivery"]), (Some("apps.event"), &json!(["poll", "push"])), "{list}");
 
     let poll = |token: &str, cursor: Value, args: Value| send(token, "events/poll", json!({ "name": "apps.event", "cursor": cursor, "arguments": args }));
     let now = poll(OPERATOR, Value::Null, json!({})).await["result"].clone();
@@ -1071,6 +1116,215 @@ async fn an_agent_polls_what_happened() {
     assert_eq!(poll(OPERATOR, json!("a1:0"), json!({ "nope": 1 })).await["error"]["code"], -32602);
 
     let reader = d.token(json!([{ "product": "postgres", "resources": "*", "actions": { "read": "allow" } }])).await;
-    assert_eq!(send(&reader, "events/list", json!({})).await["result"]["events"], json!([]));
+    let types = send(&reader, "events/list", json!({})).await["result"]["events"].clone();
+    let names: Vec<&str> = types.as_array().unwrap().iter().map(|t| t["name"].as_str().unwrap()).collect();
+    assert_eq!(names, ["access.approval"], "its own approvals' decisions, not apps' events");
     assert_eq!(poll(&reader, Value::Null, json!({})).await["error"]["code"], -32024);
+}
+
+/// A callback that echoes MCP Events' challenge (`/good`) or doesn't (`/bad`), keeping each POST.
+/// One POST: its headers and body.
+type Post = (Vec<(String, String)>, Vec<u8>);
+struct Receiver(Arc<std::sync::Mutex<Vec<Post>>>);
+
+impl roll_access::sinks::SinkTransport for Receiver {
+    fn check(&self, url: &str) -> Result<(), String> {
+        if url.starts_with("https://hooks.example.com/") { Ok(()) } else { Err("an https URL on a public host".into()) }
+    }
+    fn seal(&self, id: &str, secret: &str) -> Result<String, String> {
+        Ok(format!("{id}:{secret}"))
+    }
+    fn open(&self, id: &str, sealed: &str) -> Result<String, String> {
+        sealed.strip_prefix(&format!("{id}:")).map(str::to_string).ok_or_else(|| "not this row's".into())
+    }
+    fn post(&self, _: String, _: Vec<(String, String)>, _: Vec<u8>) -> futures::future::BoxFuture<'static, Result<(), String>> {
+        Box::pin(async { Ok(()) })
+    }
+    fn post_answer(&self, url: String, headers: Vec<(String, String)>, body: Vec<u8>) -> futures::future::BoxFuture<'static, Result<(u16, Vec<u8>), String>> {
+        let sent: Value = serde_json::from_slice(&body).unwrap();
+        self.0.lock().unwrap().push((headers, body));
+        let challenge = if url.ends_with("/good") { sent["challenge"].clone() } else { json!("not it") };
+        Box::pin(async move { Ok((200, serde_json::to_vec(&json!({ "challenge": challenge })).unwrap())) })
+    }
+    // The origin's receiver document: paths under /doc/ take MCP webhook deliveries.
+    fn get(&self, url: String) -> futures::future::BoxFuture<'static, Result<(u16, Vec<u8>), String>> {
+        let found = url == "https://hooks.example.com/.well-known/mcp-webhook-receiver.json";
+        Box::pin(async move { Ok(if found { (200, br#"{"receivers": ["/doc/"]}"#.to_vec()) } else { (404, Vec::new()) }) })
+    }
+}
+
+/// MCP Events' webhook mode: a token's connection subscribes a callback that proves it wants the
+/// deliveries (a challenge signed with the client's secret, echoed once per connection and URL), and
+/// a refresh keeps the same subscription; one that doesn't echo it is refused and nothing is kept;
+/// the operator's own connection can't subscribe (nothing to look up later), nor a bad secret.
+#[tokio::test]
+async fn an_agent_subscribes_a_webhook() {
+    let d = Daemon::with_products(vec!["postgres".into(), "apps".into()]);
+    let posts = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let _ = d.access.event_hooks.set(Arc::new(Receiver(posts.clone())));
+    let token = d.token(json!([{ "product": "apps", "resources": "*", "actions": { "read": "allow" } }])).await;
+    let send = |token: &str, method: &str, mut params: Value| {
+        params["_meta"] = json!({ "io.modelcontextprotocol/protocolVersion": "2026-07-28", "io.modelcontextprotocol/clientInfo": { "name": "hooks", "version": "1" }, "io.modelcontextprotocol/clientCapabilities": { "extensions": { "io.modelcontextprotocol/events": {} } } });
+        let mut h = vec![("mcp-protocol-version", "2026-07-28".to_string()), ("mcp-method", method.to_string())];
+        if let Some(n) = params["name"].as_str() {
+            h.push(("mcp-name", n.to_string()));
+        }
+        let (token, body, d) = (token.to_string(), json!({ "jsonrpc": "2.0", "id": 1, "method": method, "params": params }), &d);
+        async move {
+            let h: Vec<(&str, &str)> = h.iter().map(|(k, v)| (*k, v.as_str())).collect();
+            d.http_with(&token, Method::POST, "/v1/mcp", Some(body), &h).await.2
+        }
+    };
+    let secret = "whsec_MfKQ9r8GKYqrTwjUPD8ILPZIo2LaLaSw";
+    let sub = |token: &str, url: &str, secret: &str| send(token, "events/subscribe", json!({ "name": "apps.event", "arguments": { "kinds": ["deploy.failed"] }, "delivery": { "mode": "webhook", "url": url, "secret": secret } }));
+    assert_eq!(send(&token, "events/list", json!({})).await["result"]["events"][0]["delivery"], json!(["poll", "push", "webhook"]));
+    assert_eq!(sub(OPERATOR, "https://hooks.example.com/good", secret).await["error"]["code"], -32024, "the operator's connection");
+
+    let made = sub(&token, "https://hooks.example.com/good", secret).await;
+    let r = &made["result"];
+    assert!(r["id"].as_str().is_some_and(|i| i.starts_with("sub_")) && r["cursor"] == "a1:3" && r["refreshBefore"].is_string(), "{made}");
+    {
+        let sent = posts.lock().unwrap();
+        assert_eq!(sent.len(), 1, "one challenge");
+        let (headers, body) = &sent[0];
+        let h = |k: &str| headers.iter().find(|(n, _)| n == k).map(|(_, v)| v.clone()).unwrap();
+        let key = roll_access::event_subs::secret_key(secret).unwrap();
+        assert_eq!(h("webhook-signature"), roll_access::event_subs::sign(&key, &h("webhook-id"), h("webhook-timestamp").parse().unwrap(), body), "signed as Standard Webhooks");
+        assert_eq!(h("x-mcp-subscription-id"), r["id"].as_str().unwrap());
+    }
+    let again = sub(&token, "https://hooks.example.com/good", secret).await;
+    assert_eq!((&again["result"]["id"], again["result"]["deliveryStatus"]["active"].as_bool()), (&r["id"], Some(true)), "a refresh: {again}");
+    assert_eq!(posts.lock().unwrap().len(), 1, "verified once per connection and URL");
+
+    // Under a path its origin's receiver document names: kept without a challenge.
+    let before = posts.lock().unwrap().len();
+    let doc = sub(&token, "https://hooks.example.com/doc/in", secret).await;
+    assert!(doc["error"].is_null() && posts.lock().unwrap().len() == before, "{doc}");
+    let bad = sub(&token, "https://hooks.example.com/bad", secret).await;
+    assert_eq!((bad["error"]["code"].as_i64(), bad["error"]["data"]["reason"].as_str()), (Some(-32027), Some("challenge_failed")), "{bad}");
+    assert_eq!(sub(&token, "https://hooks.example.com/good", "whsec_c2hvcnQ=").await["error"]["code"], -32602, "a secret under 24 bytes");
+    assert_eq!(sub(&token, "http://10.0.0.1/good", secret).await["error"]["code"], -32602, "not https, not public");
+
+    // Delivered: a subscription from the feed's start gets what its filter keeps, in order, each
+    // signed with its secret; the one made from now has nothing yet.
+    let from_start = send(&token, "events/subscribe", json!({ "name": "apps.event", "arguments": { "kinds": ["deploy.*"] }, "cursor": "a1:0", "delivery": { "mode": "webhook", "url": "https://hooks.example.com/good", "secret": secret } })).await;
+    assert!(from_start["error"].is_null(), "{from_start}");
+    let before = posts.lock().unwrap().len();
+    let round = roll_mcp::events::deliver(d.router.clone(), d.access.clone(), &["apps".to_string()]).await;
+    assert_eq!((round.delivered, round.failed, round.ended), (2, 0, 0), "{round:?}");
+    {
+        let sent = posts.lock().unwrap();
+        let key = roll_access::event_subs::secret_key(secret).unwrap();
+        let ids: Vec<String> = sent[before..]
+            .iter()
+            .map(|(headers, body)| {
+                let h = |k: &str| headers.iter().find(|(n, _)| n == k).map(|(_, v)| v.clone()).unwrap();
+                assert_eq!(h("webhook-signature"), roll_access::event_subs::sign(&key, &h("webhook-id"), h("webhook-timestamp").parse().unwrap(), body));
+                serde_json::from_slice::<Value>(body).unwrap()["eventId"].as_str().unwrap().to_string()
+            })
+            .collect();
+        assert_eq!(ids, ["apps.event:1", "apps.event:2"]);
+    }
+    // A revoked connection's subscription ends with a signed `terminated`, and is gone.
+    let other = d.token(json!([{ "product": "apps", "resources": "*", "actions": { "read": "allow" } }])).await;
+    assert!(sub(&other, "https://hooks.example.com/good", secret).await["error"].is_null());
+    let (_, _, list) = d.http(OPERATOR, Method::GET, "/v1/access/tokens", None).await;
+    let newest = list.as_array().unwrap()[0]["id"].as_str().unwrap().to_string();
+    d.http(OPERATOR, Method::DELETE, &format!("/v1/access/tokens/{newest}"), None).await;
+    let round = roll_mcp::events::deliver(d.router.clone(), d.access.clone(), &["apps".to_string()]).await;
+    assert_eq!(round.ended, 1, "{round:?}");
+    let last: Value = serde_json::from_slice(&posts.lock().unwrap().last().unwrap().1).unwrap();
+    assert_eq!((last["type"].as_str(), last["error"]["code"].as_i64()), (Some("terminated"), Some(-32024)), "{last}");
+
+    let unsub = |url: &str| send(&token, "events/unsubscribe", json!({ "name": "apps.event", "arguments": { "kinds": ["deploy.failed"] }, "delivery": { "url": url } }));
+    let ended = unsub("https://hooks.example.com/good").await;
+    assert!(ended["error"].is_null() && ended["result"]["resultType"] == "complete", "{ended}");
+    assert_eq!(unsub("https://hooks.example.com/good").await["error"]["code"], -32023);
+    assert_eq!(unsub("https://hooks.example.com/bad").await["error"]["code"], -32023, "the refused one was never kept");
+    // What the policy has agents ask a person about is never delivered unasked: subscribing reads
+    // the feed once as the agent, and that asks, so nothing is kept.
+    assert_eq!(d.http(OPERATOR, Method::PUT, "/v1/access/policy", Some(json!({ "agents_ask": [{ "product": "apps" }] }))).await.0, StatusCode::OK);
+    assert_eq!(sub(&token, "https://hooks.example.com/good", secret).await["error"]["code"], -32024);
+}
+
+/// MCP Events' push mode: `events/stream` answers a bad subscription with an error and no stream;
+/// a good one opens with `active` (its cursor and heartbeat), then what the filter keeps, each event
+/// with its cursor, every frame tagged with the request's id.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_agent_streams_what_happens() {
+    let d = Daemon::with_products(vec!["postgres".into(), "apps".into()]);
+    let meta = json!({ "io.modelcontextprotocol/protocolVersion": "2026-07-28", "io.modelcontextprotocol/clientInfo": { "name": "t", "version": "1" }, "io.modelcontextprotocol/clientCapabilities": { "extensions": { "io.modelcontextprotocol/events": {} } } });
+    let call = |name: &str, params: Value| {
+        let mut params = params;
+        params["_meta"] = meta.clone();
+        params["name"] = json!(name);
+        let body = json!({ "jsonrpc": "2.0", "id": "s1", "method": "events/stream", "params": params });
+        Request::builder()
+            .method(Method::POST)
+            .uri("/v1/mcp")
+            .header("content-type", "application/json")
+            .header("accept", "application/json, text/event-stream")
+            .header("mcp-protocol-version", "2026-07-28")
+            .header("mcp-method", "events/stream")
+            .header("mcp-name", name)
+            .header("authorization", format!("Bearer {OPERATOR}"))
+            .body(Body::from(body.to_string()))
+            .unwrap()
+    };
+    let refused = d.router.clone().oneshot(call("nope.event", json!({}))).await.unwrap().into_body().collect().await.unwrap().to_bytes();
+    assert_eq!(serde_json::from_slice::<Value>(&refused).unwrap()["error"]["code"], -32023, "no stream for an event roll doesn't have");
+    let mut body = d.router.clone().oneshot(call("apps.event", json!({ "cursor": "a1:0", "arguments": { "kinds": ["deploy.*"] }, "heartbeatMs": 20000 }))).await.unwrap().into_body();
+    let mut buf = String::new();
+    let mut next = async move || -> Value {
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(15);
+        loop {
+            if let Some(i) = buf.find("\n\n") {
+                let event: String = buf.drain(..i + 2).collect();
+                if let Some(data) = event.lines().find_map(|l| l.strip_prefix("data: ").or_else(|| l.strip_prefix("data:"))) {
+                    return serde_json::from_str(data).unwrap();
+                }
+                continue;
+            }
+            let frame = tokio::time::timeout_at(deadline, body.frame()).await.expect("a message within 15 s").unwrap_or_else(|| panic!("the stream ended: {buf}")).unwrap();
+            if let Ok(data) = frame.into_data() {
+                buf.push_str(&String::from_utf8_lossy(&data));
+            }
+        }
+    };
+    let active = next().await;
+    assert_eq!((active["method"].as_str(), active["params"]["heartbeatMs"].as_u64(), &active["params"]["_meta"]["io.modelcontextprotocol/subscriptionId"]), (Some("notifications/events/active"), Some(20000), &json!("s1")), "{active}");
+    let (one, two) = (next().await, next().await);
+    let seen: Vec<(&str, &str)> = [&one, &two].iter().map(|e| (e["params"]["data"]["kind"].as_str().unwrap(), e["params"]["cursor"].as_str().unwrap())).collect();
+    assert_eq!(seen, [("deploy.active", "a1:1"), ("deploy.failed", "a1:2")], "{one} {two}");
+    assert_eq!(two["params"]["_meta"]["io.modelcontextprotocol/subscriptionId"], "s1");
+}
+
+/// An inspector that blocks deleting projects and notes a result telling the model what to do.
+struct Scanner;
+
+impl roll_mcp::Inspector for Scanner {
+    fn inspect(&self, look: Value) -> std::pin::Pin<Box<dyn std::future::Future<Output = roll_mcp::Verdict> + Send>> {
+        let verdict = match (look["phase"].as_str(), look["tool"].as_str()) {
+            (Some("call"), Some("postgres_delete_project")) => roll_mcp::Verdict::Block("deletes need a ticket".into()),
+            (Some("result"), _) if look["text"].as_str().unwrap_or("").contains("Ignore your instructions") => roll_mcp::Verdict::Note("this result holds an instruction to the model".into()),
+            _ => roll_mcp::Verdict::Allow,
+        };
+        Box::pin(async move { verdict })
+    }
+}
+
+/// The operator's inspector sees every call before it runs and its result before the model:
+/// a call it blocks doesn't run (an error says why), and a result it notes is shown with the note.
+#[tokio::test]
+async fn the_inspector_blocks_and_notes() {
+    let d = Daemon::with_inspector(vec!["postgres".into(), "apps".into()], Some(Arc::new(Scanner)));
+    let blocked = d.tool(OPERATOR, "postgres_delete_project", json!({ "project": "pa" })).await;
+    assert!(blocked["isError"] == true && blocked["content"][0]["text"].as_str().unwrap().contains("deletes need a ticket"), "{blocked}");
+    let work = d.tool(OPERATOR, "code_list_work", json!({})).await;
+    assert_eq!(work["_meta"]["roll/inspector"], "this result holds an instruction to the model", "{work}");
+    assert!(work["content"][0]["text"].as_str().unwrap().starts_with("Note from the operator's inspector"));
+    // What a tool reveals (people's form data here) never goes to the scanner, so it can't note it.
+    let form = d.tool(OPERATOR, "apps_form_submissions", json!({ "service": "svc_a", "env": "production", "form": "contact" })).await;
+    assert!(form["_meta"]["roll/inspector"].is_null(), "{form}");
+    assert_eq!(d.tool(OPERATOR, "postgres_list_projects", json!({})).await["isError"], false, "the rest goes through");
 }

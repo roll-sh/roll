@@ -104,6 +104,22 @@ pub fn redirect_ok(uri: &str) -> bool {
     }
 }
 
+/// Whether `uri` is one of a client's redirects: the same string, or a loopback one on another port
+/// (RFC 8252 7.3, client ID metadata documents -03 4.2): a native app listens where it can.
+pub fn redirect_registered(uris: &[String], uri: &str) -> bool {
+    if uris.iter().any(|r| r == uri) {
+        return true;
+    }
+    let loopback = |u: &url::Url| {
+        u.scheme() == "http"
+            && u.username().is_empty()
+            && u.password().is_none()
+            && (matches!(u.host(), Some(url::Host::Domain("localhost"))) || matches!(u.host(), Some(url::Host::Ipv4(ip)) if ip.is_loopback()) || matches!(u.host(), Some(url::Host::Ipv6(ip)) if ip.is_loopback()))
+    };
+    let Some(asked) = url::Url::parse(uri).ok().filter(loopback) else { return false };
+    uris.iter().filter_map(|r| url::Url::parse(r).ok()).filter(loopback).any(|r| r.host() == asked.host() && r.path() == asked.path() && r.query() == asked.query() && asked.fragment().is_none())
+}
+
 #[derive(Deserialize)]
 struct Registration {
     #[serde(default)]
@@ -116,6 +132,9 @@ struct Registration {
     token_endpoint_auth_method: Option<String>,
     #[serde(default)]
     grant_types: Option<Vec<String>>,
+    /// `native` or `web` (OpenID Connect's; MCP 2026-07-28 has clients send it, SEP-837).
+    #[serde(default)]
+    application_type: Option<String>,
 }
 
 fn too_many(desc: &str) -> Response {
@@ -149,6 +168,14 @@ async fn register(State(a): S, req: axum::extract::Request) -> Response {
     if (r.redirect_uris.is_empty() && !device_only) || r.redirect_uris.len() > 10 || !r.redirect_uris.iter().all(|u| redirect_ok(u)) {
         return reg_error("invalid_redirect_uri", "redirect_uris: 1-10 URIs, each https, http on localhost, or an app scheme");
     }
+    // A web client's redirects are https (OpenID Connect's rule); a native one may use loopback or
+    // its own scheme. Left out, roll takes either (clients before 2026-07-28 don't send it).
+    match r.application_type.as_deref() {
+        None | Some("native") => {}
+        Some("web") if r.redirect_uris.iter().all(|u| u.starts_with("https://")) => {}
+        Some("web") => return reg_error("invalid_redirect_uri", "a web client's redirect_uris are https (loopback and app schemes are a native client's)"),
+        Some(_) => return reg_error("invalid_client_metadata", "application_type is native or web"),
+    }
     if r.token_endpoint_auth_method.as_deref().is_some_and(|m| m != "none") {
         return reg_error("invalid_client_metadata", "only public clients (token_endpoint_auth_method \"none\", with PKCE) can register");
     }
@@ -178,6 +205,9 @@ async fn register(State(a): S, req: axum::extract::Request) -> Response {
     // RFC 7591: a field the client didn't set is left out, never null (clients' schemas refuse it).
     if let Some(uri) = client.uri {
         out["client_uri"] = Value::String(uri);
+    }
+    if let Some(t) = r.application_type {
+        out["application_type"] = Value::String(t);
     }
     (StatusCode::CREATED, Json(out)).into_response()
 }
@@ -286,7 +316,7 @@ pub async fn authorize(State(a): S, ext: Extensions, body: axum::body::Bytes) ->
         return Err(Error::BadRequest(format!("resource must be {}", resource(&a))));
     }
     let client = known_client(&a, &c.client_id).await?.ok_or_else(|| Error::BadRequest("unknown client_id".into()))?;
-    if !client.redirect_uris.contains(&c.redirect_uri) {
+    if !redirect_registered(&client.redirect_uris, &c.redirect_uri) {
         return Err(Error::BadRequest("redirect_uri isn't one the client registered".into()));
     }
     if !a.policy_now().allows_client(&client) {
@@ -408,57 +438,86 @@ pub async fn known_client(a: &Arc<Access>, id: &str) -> crate::Result<Option<cra
     if !document {
         return Ok(stored);
     }
+    // roll itself is never a client (CIMD 10.1: a client id equal to the issuer or the resource).
+    if [api(a), resource(a)].iter().any(|own| id.trim_end_matches('/') == own.trim_end_matches('/')) {
+        return Err(Error::BadRequest("roll's own address isn't a client".into()));
+    }
     if let Some(c) = &stored
         && code_sql::now_ms() - c.created_at < METADATA_TTL_MS
     {
         return Ok(stored);
     }
-    let fetched = fetch_metadata(id, a.config.metadata_allow_private).await.map_err(Error::BadRequest)?;
+    let fetched = match fetch_metadata(id, a.config.metadata_allow_private).await {
+        Ok(c) => c,
+        // Unreachable a moment (a timeout, a 5xx): the copy roll has stays good (CIMD 6.1).
+        Err(Fetch::Transient(_)) if stored.is_some() => return Ok(stored),
+        Err(Fetch::Transient(e) | Fetch::Terminal(e)) => return Err(Error::BadRequest(e)),
+    };
     let (a2, f2) = (a.clone(), fetched.clone());
     tokio::task::spawn_blocking(move || a2.store.put_metadata_client(&f2)).await.map_err(|e| Error::Internal(e.to_string()))??;
     Ok(Some(fetched))
 }
 
-/// A client ID metadata document: `id` is its URL (https, with a path, no fragment). Fetched
-/// through roll's private-address guard (`roll-net`), without redirects, in 5 seconds, at most
-/// 64 KiB; it must name itself (`client_id` is the URL) and list redirects a client may use.
-pub async fn fetch_metadata(id: &str, allow_private: bool) -> Result<crate::store::Client, String> {
-    let url = url::Url::parse(id).map_err(|_| "client_id isn't a URL".to_string())?;
+/// Why a metadata document wasn't had: for a moment (the copy roll has stays good), or for good.
+pub enum Fetch {
+    Transient(String),
+    Terminal(String),
+}
+
+/// A client ID metadata document (draft-ietf-oauth-client-id-metadata-document-03): `id` is its URL
+/// (https, a path, no fragment or userinfo, in normal form: the URL fetched is the one compared).
+/// Fetched through roll's private-address guard (`roll-net`), without redirects, in 5 seconds, at
+/// most 64 KiB; it must name itself (`client_id` is the URL), list redirects a client may use, and
+/// be a public client roll can serve (no secret, `none` among its methods, codes among its grants).
+pub async fn fetch_metadata(id: &str, allow_private: bool) -> Result<crate::store::Client, Fetch> {
+    let bad = |e: &str| Fetch::Terminal(e.to_string());
+    let url = url::Url::parse(id).map_err(|_| bad("client_id isn't a URL"))?;
     if url.scheme() != "https" && !(allow_private && url.scheme() == "http") {
-        return Err("a client metadata document is https".into());
+        return Err(bad("a client metadata document is https"));
     }
     if url.fragment().is_some() || url.path() == "/" || url.path().is_empty() || id.len() > 2000 {
-        return Err("a client metadata URL has a path and no fragment".into());
+        return Err(bad("a client metadata URL has a path and no fragment"));
+    }
+    if !url.username().is_empty() || url.password().is_some() || url.as_str() != id {
+        return Err(bad("a client metadata URL has no user or password and is in normal form (no dot segments, a lowercase host, no default port)"));
     }
     if !allow_private && roll_net::literal_private_host(&url) {
-        return Err("a client metadata document can't be at a private address".into());
+        return Err(bad("a client metadata document can't be at a private address"));
     }
     let mut b = reqwest::Client::builder().redirect(reqwest::redirect::Policy::none()).timeout(std::time::Duration::from_secs(5)).no_proxy();
     if !allow_private {
         b = b.dns_resolver(roll_net::PublicOnly);
     }
-    let client = b.build().map_err(|e| e.to_string())?;
-    let mut resp = client.get(url.clone()).header("accept", "application/json").send().await.map_err(|e| format!("fetching the client's metadata: {e}"))?;
-    if !resp.status().is_success() {
-        return Err(format!("the client's metadata answered {}", resp.status()));
+    let client = b.build().map_err(|e| Fetch::Transient(e.to_string()))?;
+    let mut resp = client.get(url.clone()).header("accept", "application/json").send().await.map_err(|e| Fetch::Transient(format!("fetching the client's metadata: {e}")))?;
+    let status = resp.status();
+    if !status.is_success() {
+        let e = format!("the client's metadata answered {status}");
+        return Err(if status.is_server_error() || status == reqwest::StatusCode::TOO_MANY_REQUESTS { Fetch::Transient(e) } else { Fetch::Terminal(e) });
     }
     let mut body = Vec::new();
-    while let Some(chunk) = resp.chunk().await.map_err(|e| e.to_string())? {
+    while let Some(chunk) = resp.chunk().await.map_err(|e| Fetch::Transient(e.to_string()))? {
         body.extend_from_slice(&chunk);
         if body.len() > METADATA_MAX {
-            return Err("the client's metadata is over 64 KiB".into());
+            return Err(bad("the client's metadata is over 64 KiB"));
         }
     }
-    let doc: Value = serde_json::from_slice(&body).map_err(|_| "the client's metadata isn't JSON".to_string())?;
+    let doc: Value = serde_json::from_slice(&body).map_err(|_| bad("the client's metadata isn't JSON"))?;
     if doc["client_id"].as_str() != Some(id) {
-        return Err("the client's metadata names another client_id".into());
+        return Err(bad("the client's metadata names another client_id"));
     }
-    if doc["token_endpoint_auth_method"].as_str().is_some_and(|m| m != "none") {
-        return Err("only public clients (token_endpoint_auth_method \"none\", with PKCE) can connect".into());
+    // A public client only: no secret, and `none` its method (what it says, or what's left unsaid).
+    let methods: Vec<&str> = doc["token_endpoint_auth_methods_supported"].as_array().into_iter().flatten().filter_map(Value::as_str).chain(doc["token_endpoint_auth_method"].as_str()).collect();
+    if doc.get("client_secret").is_some() || doc.get("client_secret_expires_at").is_some() || (!methods.is_empty() && !methods.contains(&"none")) {
+        return Err(bad("only public clients (token_endpoint_auth_method \"none\", with PKCE, no client_secret) can connect"));
+    }
+    let has = |field: &str, want: &[&str]| doc[field].as_array().is_none_or(|l| l.iter().any(|v| v.as_str().is_some_and(|v| want.contains(&v))));
+    if !has("grant_types", &["authorization_code", "refresh_token"]) || !has("response_types", &["code"]) {
+        return Err(bad("the client's metadata asks for no grant roll has (authorization_code with response type code)"));
     }
     let redirect_uris: Vec<String> = doc["redirect_uris"].as_array().into_iter().flatten().filter_map(|u| u.as_str().map(str::to_string)).collect();
     if redirect_uris.is_empty() || redirect_uris.len() > 10 || !redirect_uris.iter().all(|u| redirect_ok(u)) {
-        return Err("the client's metadata needs 1-10 redirect_uris, each https, http on localhost, or an app scheme".into());
+        return Err(bad("the client's metadata needs 1-10 redirect_uris, each https, http on localhost, or an app scheme"));
     }
     let name: String = doc["client_name"].as_str().map(str::trim).filter(|n| !n.is_empty()).unwrap_or(url.host_str().unwrap_or("MCP client")).chars().filter(|c| shown(*c)).take(80).collect();
     let uri = doc["client_uri"].as_str().filter(|u| u.starts_with("https://") && u.len() <= 500).map(str::to_string);

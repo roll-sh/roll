@@ -16,6 +16,11 @@ impl Postgres {
     /// A branch of `parent` named `name` (`at`: as the parent was then), with its own role; one
     /// made just before a crash is found and finished instead.
     async fn create(&self, parent: &str, name: &str, mode: Mode, at: Option<i64>) -> anyhow::Result<Branched> {
+        self.create_from(parent, None, name, mode, at).await
+    }
+
+    /// [`Self::create`] from one of the project's branches (`from`, its id) instead of `main`.
+    async fn create_from(&self, parent: &str, from: Option<&str>, name: &str, mode: Mode, at: Option<i64>) -> anyhow::Result<Branched> {
         let (id, has_role) = match self.find(parent, name).await? {
             Some(b) => {
                 let id = s(&b["id"]).unwrap_or_default();
@@ -25,7 +30,7 @@ impl Postgres {
                 }
                 (id, false)
             }
-            None => match self.0.post(&format!("/v1/projects/{}/branches", seg(parent)), json!({ "name": name, "schema_only": mode == Mode::Schema, "app_role": true, "at": at })).await {
+            None => match self.0.post(&format!("/v1/projects/{}/branches", seg(parent)), json!({ "name": name, "parent": from, "schema_only": mode == Mode::Schema, "app_role": true, "at": at })).await {
                 Ok(v) => (s(&v["branch"]["id"]).ok_or_else(|| anyhow::anyhow!("a branch without an id"))?, v["app_connection_uri"].is_string()),
                 Err(e) if conflict_is_ours(&e) => {
                     let b = self.find(parent, name).await?.ok_or(e)?;
@@ -65,6 +70,12 @@ impl Brancher for Postgres {
     /// branch gets a role of its own for the preview's code (pg-control's `app_role`).
     async fn branch(&self, parent: &str, name: &str, mode: Mode) -> anyhow::Result<Branched> {
         self.create(parent, name, mode, None).await
+    }
+
+    /// A branch of the preview's own branch (pg-control's `parent`), with a role of its own: an
+    /// earlier push's data, copy-on-write.
+    async fn snapshot(&self, parent: &str, branch: &str, name: &str) -> anyhow::Result<Option<Branched>> {
+        self.create_from(parent, Some(branch), name, Mode::Branch, None).await.map(Some)
     }
 
     /// From the parent's history (pg-control's point in time: unix seconds).
@@ -157,17 +168,17 @@ impl Brancher for Postgres {
         let branches = p["branches"].as_array().cloned().unwrap_or_default();
         let b = branches.iter().find(|b| b["id"] == branch).ok_or_else(|| anyhow::anyhow!("no Postgres branch {branch}"))?;
         let from = branches.iter().find(|x| x["id"] == b["parent_id"]).ok_or_else(|| anyhow::anyhow!("Postgres branch {branch} has no parent"))?;
-        let lines = |ep: Option<String>, role: Option<String>| async move {
-            let ep = ep.ok_or_else(|| anyhow::anyhow!("a Postgres branch without an endpoint"))?;
-            let set_role = role.map(|r| format!("SET ROLE \"{}\"; ", r.replace('"', "\"\""))).unwrap_or_default();
-            let sql = format!("{set_role}SET search_path = pg_catalog, pg_temp; {SCHEMA_SQL}");
-            let v = self.0.post(&format!("/v1/endpoints/{}/query", seg(&ep)), json!({ "sql": sql })).await?;
-            let rows = v["results"].as_array().and_then(|r| r.last()).and_then(|r| r["rows"].as_array()).cloned().unwrap_or_default();
-            anyhow::Ok(rows.iter().filter_map(|r| r[0].as_str().map(str::to_string)).collect::<Vec<_>>())
-        };
         // pg-control names a branch's role after the branch.
         let role = b["app_connection_uri"].is_string().then(|| s(&b["id"])).flatten();
-        Ok(Some((lines(s(&from["endpoint"]["id"]), None).await?, lines(s(&b["endpoint"]["id"]), role).await?)))
+        Ok(Some((pg_schema_lines(&self.0, s(&from["endpoint"]["id"]), None).await?, pg_schema_lines(&self.0, s(&b["endpoint"]["id"]), role).await?)))
+    }
+
+    /// The branch's lines alone, as `schema` reads them (as its own role), the parent untouched.
+    async fn branch_schema(&self, parent: &str, branch: &str) -> anyhow::Result<Option<Vec<String>>> {
+        let p = self.0.get(&format!("/v1/projects/{}", seg(parent))).await?;
+        let b = p["branches"].as_array().and_then(|bs| bs.iter().find(|b| b["id"] == branch).cloned()).ok_or_else(|| anyhow::anyhow!("no Postgres branch {branch}"))?;
+        let role = b["app_connection_uri"].is_string().then(|| s(&b["id"])).flatten();
+        Ok(Some(pg_schema_lines(&self.0, s(&b["endpoint"]["id"]), role).await?))
     }
 
     /// The parent's table columns (`main`, the branch previews start from), as the superuser
@@ -830,7 +841,18 @@ if (!mask(ctx._source, params.path, 0, params.rule, ctx._id)) { ctx.op = 'noop';
 
 /// A `_mapping` answer as lines: each index (not the system ones, `.…`), and each field with its
 /// type, nested ones by path (`field users.address.city text`) and multi-fields too. Bounded.
-fn mapping_lines(v: &Value) -> Vec<String> {
+/// One Postgres endpoint's schema lines (`SCHEMA_SQL`), as `role` when given (a branch's own),
+/// with only the catalog's names in reach.
+async fn pg_schema_lines(api: &Api, ep: Option<String>, role: Option<String>) -> anyhow::Result<Vec<String>> {
+    let ep = ep.ok_or_else(|| anyhow::anyhow!("a Postgres branch without an endpoint"))?;
+    let set_role = role.map(|r| format!("SET ROLE \"{}\"; ", r.replace('"', "\"\""))).unwrap_or_default();
+    let sql = format!("{set_role}SET search_path = pg_catalog, pg_temp; {SCHEMA_SQL}");
+    let v = api.post(&format!("/v1/endpoints/{}/query", seg(&ep)), json!({ "sql": sql })).await?;
+    let rows = v["results"].as_array().and_then(|r| r.last()).and_then(|r| r["rows"].as_array()).cloned().unwrap_or_default();
+    Ok(rows.iter().filter_map(|r| r[0].as_str().map(str::to_string)).collect())
+}
+
+fn mapping_lines(v: &Value, skip: &std::collections::BTreeSet<String>) -> Vec<String> {
     fn walk(props: &Value, prefix: &str, depth: usize, out: &mut Vec<String>) {
         let Some(props) = props.as_object() else { return };
         for (name, f) in props {
@@ -845,7 +867,7 @@ fn mapping_lines(v: &Value) -> Vec<String> {
         }
     }
     let mut out = Vec::new();
-    for (index, m) in v.as_object().into_iter().flatten().filter(|(i, _)| !i.starts_with('.')) {
+    for (index, m) in v.as_object().into_iter().flatten().filter(|(i, _)| !i.starts_with('.') && !skip.contains(*i)) {
         out.push(format!("index {index}"));
         walk(&m["mappings"]["properties"], index, 0, &mut out);
     }
@@ -1024,15 +1046,39 @@ impl Brancher for Search {
     }
 
     /// Both clusters' mappings as lines (`index products`, `field products.price float`), through
-    /// the operator's console request (no cluster password needed).
+    /// the operator's console request (no cluster password needed). An index the parent made after
+    /// the branch started (`parent_at`: a connector's first sync, a rollover, a day's `logs-…`)
+    /// that the branch doesn't have is left out: production's new index, not one the change drops.
     async fn schema(&self, parent: &str, branch: &str) -> anyhow::Result<Option<(Vec<String>, Vec<String>)>> {
-        let read = |id: String| async move {
-            let v = self.0.post(&format!("/v1/search/clusters/{}/request", seg(&id)), json!({ "method": "GET", "path": "/_mapping" })).await?;
-            anyhow::ensure!(v["status"].as_u64() == Some(200), "reading {id}'s mappings: {}", v["status"]);
-            let body: Value = serde_json::from_str(v["body"].as_str().unwrap_or("{}"))?;
-            anyhow::Ok(mapping_lines(&body))
+        let get = |id: String, path: &'static str| async move {
+            let v = self.0.post(&format!("/v1/search/clusters/{}/request", seg(&id)), json!({ "method": "GET", "path": path })).await?;
+            anyhow::ensure!(v["status"].as_u64() == Some(200), "reading {id}'s {path}: {}", v["status"]);
+            anyhow::Ok(serde_json::from_str::<Value>(v["body"].as_str().unwrap_or("{}"))?)
         };
-        Ok(Some((read(parent.to_string()).await?, read(branch.to_string()).await?)))
+        let theirs = get(branch.to_string(), "/_mapping").await?;
+        let mut newer = std::collections::BTreeSet::new();
+        if let Some(since) = self.0.get(&format!("/v1/search/clusters/{}", seg(branch))).await?["parent_at"].as_i64() {
+            let listed = get(parent.to_string(), "/_cat/indices?h=index,creation.date&format=json&expand_wildcards=all").await?;
+            for x in listed.as_array().into_iter().flatten() {
+                // `_cat` answers numbers as strings; the creation date is in milliseconds.
+                let made = x["creation.date"].as_i64().or_else(|| x["creation.date"].as_str().and_then(|s| s.parse().ok()));
+                if let (Some(i), Some(made)) = (x["index"].as_str(), made)
+                    && made > since * 1000
+                    && theirs.get(i).is_none()
+                {
+                    newer.insert(i.to_string());
+                }
+            }
+        }
+        let parents = get(parent.to_string(), "/_mapping").await?;
+        Ok(Some((mapping_lines(&parents, &newer), mapping_lines(&theirs, &Default::default()))))
+    }
+
+    /// The branch's mapping lines alone, as `schema` reads them.
+    async fn branch_schema(&self, _parent: &str, branch: &str) -> anyhow::Result<Option<Vec<String>>> {
+        let v = self.0.post(&format!("/v1/search/clusters/{}/request", seg(branch)), json!({ "method": "GET", "path": "/_mapping" })).await?;
+        anyhow::ensure!(v["status"].as_u64() == Some(200), "reading {branch}'s mappings: {}", v["status"]);
+        Ok(Some(mapping_lines(&serde_json::from_str(v["body"].as_str().unwrap_or("{}"))?, &Default::default())))
     }
 
     /// Rewrite the masked fields in the branch's documents (`_update_by_query`, Painless): the
@@ -1189,7 +1235,7 @@ mod tests {
             } } }
         });
         assert_eq!(
-            super::mapping_lines(&v),
+            super::mapping_lines(&v, &Default::default()),
             ["index products", "field products.name text", "field products.name.raw keyword", "field products.seller object", "field products.seller.city text"]
         );
     }

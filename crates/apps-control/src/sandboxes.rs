@@ -70,10 +70,10 @@ impl Apps {
             Some(Value::Bool(b)) => *b,
             Some(_) => return Err(Error::BadRequest("variables is a boolean".into())),
         };
-        let network = match o.get("network").and_then(Value::as_str) {
+        let network = match o.get("network").map(|n| n.as_str()) {
             None => "none",
-            Some("none") => "none",
-            Some("environment") => "environment",
+            Some(Some("none")) => "none",
+            Some(Some("environment")) => "environment",
             Some(_) => return Err(Error::BadRequest("network is \"none\" (the runtime's own: the internet, nothing of the project) or \"environment\"".into())),
         };
         let image = match o.get("image") {
@@ -119,8 +119,10 @@ impl Apps {
         let now = self.store.now()?;
         let sb = Sandbox { id, service: service.to_string(), environment: env.to_string(), image: spec.image.clone(), cpu, memory_mb, variables, network: network.to_string(), created_at: now, expires_at: now + ttl as i64 * 1000 };
         let (row, n) = (sb.clone(), name.clone());
-        if !self.db(move |s| s.add_sandbox(&row, &n, MAX_PER_ENV)).await? {
+        let added = self.db(move |s| s.add_sandbox(&row, &n, MAX_PER_ENV)).await;
+        if !matches!(added, Ok(true)) {
             self.deps.runtime.remove_network(&network_name(&name)).await;
+            added?;
             return Err(Error::Conflict(format!("{env} has {MAX_PER_ENV} sandboxes: delete one first")));
         }
         if let Err(e) = live.start_sandbox(&tpl, name.clone()).await {
@@ -226,9 +228,13 @@ impl Apps {
 
     /// The owned services' sandboxes past their end, removed (the owner's minute sweep).
     pub(crate) async fn reap_sandboxes(self: &Arc<Self>, now: i64) {
-        let Ok(due) = self.db(move |s| s.sandboxes(None, None, Some(now))).await else { return };
-        for (sb, name) in due.into_iter().filter(|(sb, _)| self.owns(&sb.service)) {
-            self.end_sandbox(&sb, &name).await;
+        let Ok(all) = self.db(|s| s.sandboxes(None, None, None)).await else { return };
+        // Past its end, or its service capped or its environment paused (refused at creation,
+        // and stopped once that happens, as instances are).
+        for (sb, name) in all.into_iter().filter(|(sb, _)| self.owns(&sb.service)) {
+            if sb.expires_at <= now || self.capped.lock().contains(&sb.service) || self.live(&sb.service, &sb.environment).paused() {
+                self.end_sandbox(&sb, &name).await;
+            }
         }
     }
 }

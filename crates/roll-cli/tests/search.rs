@@ -302,6 +302,42 @@ async fn api_keys() {
     assert_eq!(e.roll(&["search", "keys", "list", "oskeyed"]).await.trim(), "no keys");
 }
 
+/// Relevance tuning from the CLI: synonyms from a Solr-format file, a ruleset and its test, an
+/// index setting, an explanation, and a read-only key narrowed to one index.
+#[tokio::test]
+async fn relevance_tuning() {
+    let e = env().await;
+    e.roll(&["search", "clusters", "create", "shop"]).await;
+    let file = e.home.join("synonyms.txt");
+    std::fs::write(&file, "# furniture\ncouch, sofa\n").unwrap();
+    e.roll(&["search", "synonyms", "put", "shop", "furniture", file.to_str().unwrap()]).await;
+    let set = e.roll_json(&["search", "synonyms", "get", "shop", "furniture"]).await;
+    assert_eq!(set["synonyms_set"][0]["synonyms"], "couch, sofa", "{set}");
+    let index = r#"{"settings":{"analysis":{"filter":{"syn":{"type":"synonym_graph","synonyms_set":"furniture","updateable":true}},"analyzer":{"syn":{"tokenizer":"standard","filter":["lowercase","syn"]}}}},"mappings":{"properties":{"title":{"type":"text","search_analyzer":"syn"}}}}"#;
+    e.roll(&["search", "index", "create", "shop", "items", index]).await;
+    e.roll(&["search", "docs", "put", "shop", "items", "1", r#"{"title":"red sofa"}"#, "--refresh"]).await;
+    let hits = e.roll_json(&["search", "index", "search", "shop", "items", "--q", "title:couch"]).await;
+    assert_eq!(hits["hits"]["total"]["value"], 1, "{hits}");
+    let out = e.roll(&["search", "explain", "shop", "items", "1", "--q", "title:couch"]).await;
+    assert!(out.contains("\"matched\" : true"), "{out}");
+    e.roll(&["search", "rules", "put", "shop", "promos", r#"[{"rule_id":"r","type":"pinned","criteria":[{"type":"exact","metadata":"q","values":["sofa"]}],"actions":{"ids":["1"]}}]"#]).await;
+    let t = e.roll_json(&["search", "rules", "test", "shop", "promos", "q=sofa"]).await;
+    assert_eq!(t["total_matched_rules"], 1, "{t}");
+    e.roll(&["search", "indices", "settings", "set", "shop", "items", "index.roll.suggestions.enabled=true"]).await;
+    let s = e.roll_json(&["search", "indices", "settings", "get", "shop", "items"]).await;
+    assert_eq!(s["items"]["settings"]["index"]["roll"]["suggestions"]["enabled"], "true", "{s}");
+    let out = e.roll_with(&["search", "indices", "settings", "set", "shop", "items", "index.roll.suggestions.source=items"], None).await;
+    assert!(!out.status.success() && String::from_utf8_lossy(&out.stdout).contains("private setting"), "{out:?}");
+    let out = e.roll(&["search", "keys", "create", "shop", "web", "--read-only", "--indices", "items"]).await;
+    assert!(out.contains("read access to items"), "{out}");
+    let key = field(&out, "api_key");
+    let url = out.lines().find_map(|l| l.strip_prefix("ELASTICSEARCH_URL=")).and_then(|r| r.split_whitespace().next()).unwrap().to_string();
+    let http = reqwest::Client::new();
+    let auth = format!("ApiKey {key}");
+    assert_eq!(http.post(format!("{url}/items/_search")).header("Authorization", &auth).json(&serde_json::json!({})).send().await.unwrap().status().as_u16(), 200);
+    assert_eq!(http.put(format!("{url}/items/_doc/2")).header("Authorization", &auth).json(&serde_json::json!({"t": 1})).send().await.unwrap().status().as_u16(), 403);
+}
+
 /// `roll search inference`: the built-in endpoints are listed, a create without a key in the
 /// environment stops before anything is sent (the key never goes on the command line), and an
 /// unknown endpoint is named.

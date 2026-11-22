@@ -96,7 +96,7 @@ impl Secrets {
                         |r| r.get(0),
                     )?;
                     if n >= VOLUME {
-                        let env_id: Option<String> = c.query_row("SELECT id FROM environments WHERE project_id = ? AND slug = ?", [&project, &env], |r| r.get(0)).optional()?;
+                        let env_id: Option<String> = c.query_row("SELECT id FROM environments WHERE project_id = ? AND slug = ? AND forgotten_at IS NULL", [&project, &env], |r| r.get(0)).optional()?;
                         if let Some(env_id) = env_id
                             && c.execute("INSERT INTO read_bursts (actor, env_id, hour) VALUES (?, ?, ?) ON CONFLICT (actor, env_id, hour) DO NOTHING", params![actor, env_id, at / HOUR_MS])? == 1
                         {
@@ -126,7 +126,7 @@ impl Secrets {
     /// write: whether the environment has one to say it to.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn queue_alert(&self, c: &code_sql::Conn<'_>, project: &str, env: &str, text: &str, alert: serde_json::Value, at: i64, now: i64) -> Result<bool> {
-        let target: Option<String> = c.query_row("SELECT id FROM environments WHERE project_id = ? AND slug = ? AND notify_url IS NOT NULL", [project, env], |r| r.get(0)).optional()?;
+        let target: Option<String> = c.query_row("SELECT id FROM environments WHERE project_id = ? AND slug = ? AND forgotten_at IS NULL AND notify_url IS NOT NULL", [project, env], |r| r.get(0)).optional()?;
         let Some(env_id) = target else { return Ok(false) };
         let link = self.web_url.as_ref().map(|w| format!("{}/dashboard/projects/{project}/secrets?env={env}&tab=activity", w.trim_end_matches('/')));
         let mut text = format!("roll secrets: {text}.");

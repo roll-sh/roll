@@ -47,6 +47,44 @@ pub fn client(msg: &Value) -> (bool, Option<String>) {
 }
 
 /// A header's value, decoded from the `=?base64?…?=` form when it's in it (non-ASCII names).
+/// The tool arguments a gateway may route on, mirrored into `Mcp-Param-{name}` headers for a
+/// 2026-07-28 client (SEP-2243, `x-mcp-header`): a workspace project, an environment, a service.
+const PARAM_HEADERS: &[(&str, &str)] = &[("project", "Project"), ("env", "Environment"), ("service", "Service")];
+
+/// A tool's arguments that carry `x-mcp-header`, with their header names: string properties at the
+/// schema's top level named in [`PARAM_HEADERS`].
+pub fn param_headers(tool: &Value) -> Vec<(&'static str, &'static str)> {
+    let props = &tool["inputSchema"]["properties"];
+    PARAM_HEADERS.iter().copied().filter(|(p, _)| props[*p]["type"] == "string").collect()
+}
+
+/// Mark each listed tool's routable arguments with `x-mcp-header` (a 2026-07-28 client mirrors
+/// them into headers, and the call is checked against them).
+pub fn annotate(tools: &mut [Value]) {
+    for t in tools {
+        for (p, h) in param_headers(t) {
+            t["inputSchema"]["properties"][p]["x-mcp-header"] = Value::String(h.into());
+        }
+    }
+}
+
+/// Whether a call's `Mcp-Param-*` headers say what its arguments do: a value given has its header
+/// (decoded from the Base64 form), and a header names a value given. Else why not.
+pub fn check_params(tool: &Value, args: &Value, h: &HeaderMap) -> Result<(), String> {
+    for (p, name) in param_headers(tool) {
+        let header = format!("mcp-param-{}", name.to_ascii_lowercase());
+        let sent = h.contains_key(header.as_str()).then(|| header_value(h, &header));
+        match (args[p].as_str(), sent) {
+            (None, None) => {}
+            (Some(v), Some(Some(hv))) if hv == v => {}
+            (Some(_), None) => return Err(format!("Mcp-Param-{name} is missing for argument {p}")),
+            (None, Some(_)) => return Err(format!("Mcp-Param-{name} names an argument {p} the call doesn't have")),
+            _ => return Err(format!("Mcp-Param-{name} isn't the body's {p}")),
+        }
+    }
+    Ok(())
+}
+
 fn header_value(h: &HeaderMap, name: &str) -> Option<String> {
     use base64::Engine;
     let v = h.get(name)?.to_str().ok()?;
@@ -91,7 +129,7 @@ pub fn check(h: &HeaderMap, msg: &Value, legacy: &[&str]) -> Result<(), (StatusC
         None => return mismatch("Mcp-Method is missing".into()),
     }
     let named = match method {
-        "tools/call" | "prompts/get" | "events/poll" => msg["params"]["name"].as_str(),
+        "tools/call" | "prompts/get" | "events/poll" | "events/stream" | "events/subscribe" | "events/unsubscribe" => msg["params"]["name"].as_str(),
         "resources/read" => msg["params"]["uri"].as_str(),
         // The tasks extension's methods name their task (SEP-2663, over Streamable HTTP).
         "tasks/get" | "tasks/update" | "tasks/cancel" => msg["params"]["taskId"].as_str(),

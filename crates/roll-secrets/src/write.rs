@@ -395,8 +395,13 @@ impl<'a> Steps<'a> {
 
     /// `{head} IN (ids…)`, after `lead`'s parameters.
     fn in_list(&mut self, head: &str, lead: &[ValueRef<'a>], ids: &'a [&'a str]) {
+        self.in_list_then(head, lead, ids, "");
+    }
+
+    /// [`Steps::in_list`] with `tail` after the list (a subquery's `)`).
+    fn in_list_then(&mut self, head: &str, lead: &[ValueRef<'a>], ids: &'a [&'a str], tail: &str) {
         for chunk in chunks(ids, self.rows) {
-            self.push(format!("{head} IN ({})", marks(chunk.len())), lead.iter().copied().chain(chunk.iter().map(|id| ValueRef::Text(id))).collect());
+            self.push(format!("{head} IN ({}){tail}", marks(chunk.len())), lead.iter().copied().chain(chunk.iter().map(|id| ValueRef::Text(id))).collect());
         }
     }
 
@@ -624,8 +629,11 @@ pub(crate) fn apply(c: &Conn<'_>, dek: &Dek, mac: &crate::Keyring, env: &EnvRow,
         let mut steps = Steps::new(c);
         steps.in_list("UPDATE decoys SET ended_at = ? WHERE ended_at IS NULL AND secret_id", &[Int(now)], &ended);
         steps.in_list("DELETE FROM secrets WHERE id", &[], &gone);
-        // Its hosts go with it: set again, a key is bound again only by an admin.
+        // Its hosts go with it: set again, a key is bound again only by an admin. Its placeholders'
+        // consumers' CAs naming them end at their next ask.
         steps.in_list("DELETE FROM key_hosts WHERE secret_id", &[], &gone);
+        let recheck = format!("{}secret_id", crate::intercept::RECHECK_HOLDERS);
+        steps.in_list_then(&recheck, &[], &gone, ")");
         // A key's row keeps its id: an existing one is updated in place.
         steps.insert(
             "INSERT INTO secrets (id, project_id, env_id, path, key, owner, version, value, fp, comment, tags, link, link_state, refs, updated_at, updated_by, expires_at, weak, public)",
@@ -885,7 +893,7 @@ impl Secrets {
     fn holder(&self, project: &str, env_slug: &str, link: &Link, items: &[Item]) -> Result<Option<String>> {
         let rows: Vec<(String, String, String, String, String)> = self.db.read(|c| {
             Ok::<_, Error>(c.query(
-                "SELECT e.slug, s.path, s.key, s.owner, s.link FROM secrets s JOIN environments e ON e.id = s.env_id WHERE s.project_id = ? AND s.link_state IS NOT NULL AND s.link LIKE ? AND s.link LIKE ?",
+                "SELECT e.slug, s.path, s.key, s.owner, s.link FROM secrets s JOIN environments e ON e.id = s.env_id AND e.forgotten_at IS NULL WHERE s.project_id = ? AND s.link_state IS NOT NULL AND s.link LIKE ? AND s.link LIKE ?",
                 params![project, format!("%\"kind\":\"{}\"%", link.kind), format!("%\"ref\":\"{}\"%", link.r#ref)],
                 |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
             )?)
@@ -962,7 +970,7 @@ impl Secrets {
             // Stale before protected: a writer whose read is out of date learns that, rather than
             // opening a request for it.
             check_versions(c, &env.id, &items, expect)?;
-            if env.protected && !force {
+            if env.needs_request() && !force {
                 return Err(Error::Conflict("approval_required", format!("{} is protected: open a change request", env.slug)));
             }
             if !force {
@@ -1142,7 +1150,7 @@ impl Secrets {
         let guarded = self.db.read(|c| {
             let env = envs::by_slug(c, project, to)?;
             let paths: Vec<&str> = items.iter().map(|i| i.path.as_str()).collect();
-            Ok::<_, Error>(env.protected || !crate::folder_policy::covering(c, &env.id, &paths)?.is_empty())
+            Ok::<_, Error>(env.needs_request() || !crate::folder_policy::covering(c, &env.id, &paths)?.is_empty())
         })?;
         if guarded {
             if items.is_empty() {

@@ -62,6 +62,13 @@ pub trait Brancher: Send + Sync {
     /// Make `branch` the parent's current state again. Its ref may be new.
     async fn reset(&self, parent: &str, branch: &str, kept: Option<&str>, name: &str, mode: Mode) -> anyhow::Result<Branched>;
 
+    /// A copy-on-write branch of the preview's own `branch` (masked, as it is now) named `name`,
+    /// or the one already named so: an earlier push's data as its head left it. `None` from a
+    /// product that can't branch a branch (the earlier push then shares the preview's branch).
+    async fn snapshot(&self, _parent: &str, _branch: &str, _name: &str) -> anyhow::Result<Option<Branched>> {
+        Ok(None)
+    }
+
     /// [`Brancher::branch`] from the parent as it was at `at` (unix seconds), where the product
     /// keeps history: `None` from one that doesn't (the caller branches as of now and says so).
     async fn branch_at(&self, _parent: &str, _name: &str, _mode: Mode, _at: i64) -> anyhow::Result<Option<Branched>> {
@@ -132,6 +139,13 @@ pub trait Brancher: Send + Sync {
     /// The parent's schema and the branch's, one line per object, for [`crate::schema::diff`].
     /// `None` from products without a schema to compare.
     async fn schema(&self, _parent: &str, _branch: &str) -> anyhow::Result<Option<(Vec<String>, Vec<String>)>> {
+        Ok(None)
+    }
+
+    /// The branch's schema alone, as [`Brancher::schema`] reads it: kept as the branch is made, so
+    /// the changes shown later are the change's ([`crate::schema::diff_since`]). Never reads the
+    /// parent (no compute of production's started for it).
+    async fn branch_schema(&self, _parent: &str, _branch: &str) -> anyhow::Result<Option<Vec<String>>> {
         Ok(None)
     }
 }
@@ -710,6 +724,12 @@ pub trait Apps: Send + Sync {
     /// What the service uses right now, `(cores, resident bytes)`: `None` when it isn't running
     /// (or the backend can't tell).
     async fn metrics(&self, _preview: &str, _service: &str) -> Option<(f64, u64)> {
+        None
+    }
+    /// The build the service runs now, `(its git commit, its own URL)`, where the backend keeps
+    /// each build reachable at a URL of its own (roll apps' deployment URLs): kept as an earlier
+    /// push when a new head replaces it. None where it doesn't (the runtime keeps its own).
+    async fn live_build(&self, _preview: &str, _service: &str) -> Option<(String, String)> {
         None
     }
     /// Its errors in the last `minutes`, grouped (none where the backend can't tell when a line

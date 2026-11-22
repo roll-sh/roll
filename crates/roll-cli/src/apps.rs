@@ -612,6 +612,28 @@ pub enum AppsCmd {
         #[arg(long)]
         instance: Option<String>,
     },
+    /// The environment's private network into your own (Cloud Run's VPC egress, Fly's
+    /// WireGuard): `--secret roll://production/WG --route db.acme.corp=10.0.3.4:5432` sets it
+    /// (the WireGuard config is the secret, read as you; each route a name the app connects to
+    /// and a host:port in your network), `--remove` takes it away; alone, it shows it. Admin.
+    PrivateNetwork {
+        #[command(flatten)]
+        target: Target,
+        #[arg(long, requires = "route", conflicts_with = "remove")]
+        secret: Option<String>,
+        /// The secret is a Tailscale auth key (the node joins your tailnet) instead of a
+        /// WireGuard config.
+        #[arg(long, requires = "secret")]
+        tailscale: bool,
+        /// With --tailscale: the control server when it isn't Tailscale's (Headscale's URL).
+        #[arg(long, requires = "tailscale")]
+        login_server: Option<String>,
+        /// NAME=HOST:PORT, repeated (each port its own).
+        #[arg(long, value_name = "NAME=HOST:PORT", requires = "secret")]
+        route: Vec<String>,
+        #[arg(long)]
+        remove: bool,
+    },
     /// Short-lived containers to run commands in (Vercel Sandbox, Fly Machines): the live image
     /// or a public one, without the environment's variables or network unless asked; removed at
     /// their end (`--ttl`, default 10 minutes). Admin.
@@ -860,6 +882,12 @@ pub enum AppsCmd {
         /// Prefix the variables (`ORDERS` → `ORDERS_DATABASE_URL`).
         #[arg(long)]
         prefix: Option<String>,
+        /// A search link's key only for these indices (names or patterns, repeated).
+        #[arg(long = "index", value_name = "NAME")]
+        indices: Vec<String>,
+        /// A search link's key: `read`, or `append` (create documents on exact names).
+        #[arg(long)]
+        access: Option<String>,
         #[command(flatten)]
         target: Target,
     },
@@ -1094,6 +1122,16 @@ pub enum AppsCmd {
         /// With `--bucket`: where in it, `logs/web` (letters, digits, - _ . /).
         #[arg(long, requires = "bucket")]
         prefix: Option<String>,
+        /// Add a drain into a roll search cluster on the project: its own data stream
+        /// (`logs-roll.apps-<namespace>`), ECS documents, an append-only key minted for it.
+        #[arg(long, value_name = "CLUSTER", conflicts_with_all = ["add", "bucket", "remove", "edit", "test"])]
+        search: Option<String>,
+        /// With `--search`: the data stream's namespace (a-z, 0-9, _).
+        #[arg(long, requires = "search")]
+        namespace: Option<String>,
+        /// With `--search`: how long the stream keeps them (1–3650 days, default 30).
+        #[arg(long, requires = "search")]
+        retention_days: Option<u32>,
         /// With `--add`: how its lines go: `ndjson` (the default, signed), `otlp` (OpenTelemetry
         /// logs over OTLP/HTTP JSON) or `syslog` (RFC 5424 over TLS).
         #[arg(long, requires = "add", value_parser = ["ndjson", "otlp", "syslog", "s3"])]
@@ -3004,6 +3042,38 @@ async fn sandbox(api: &Api, json_out: bool, cmd: SandboxCmd) -> anyhow::Result<(
 pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> {
     let out = match cmd {
         AppsCmd::Sandbox { cmd } => return sandbox(api, json_out, cmd).await,
+        AppsCmd::PrivateNetwork { target, secret, tailscale, login_server, route, remove } => {
+            let svc = service(api, &target).await?;
+            let path = format!("{}/private-network", env_path(&svc, &target.env));
+            let v = if remove {
+                api.call(reqwest::Method::DELETE, &path, None).await?;
+                json!({ "removed": true })
+            } else if let Some(secret) = secret {
+                let routes = route
+                    .iter()
+                    .map(|r| r.split_once('=').map(|(n, t)| json!({ "name": n, "target": t })).ok_or_else(|| anyhow::anyhow!("--route is NAME=HOST:PORT ({r})")))
+                    .collect::<anyhow::Result<Vec<_>>>()?;
+                let mut body = json!({ "secret": secret, "routes": routes, "kind": if tailscale { "tailscale" } else { "wireguard" } });
+                if let Some(u) = login_server {
+                    body["login_server"] = json!(u);
+                }
+                api.call(reqwest::Method::PUT, &path, Some(body)).await?
+            } else {
+                api.get(&path).await?
+            };
+            if !json_out {
+                if v["removed"] == true {
+                    println!("its private network is removed");
+                } else {
+                    println!("{} from {} ({})", if v["kind"] == "tailscale" { "Tailscale" } else { "WireGuard" }, s(&v["secret"]), s(&v["status"]));
+                    for r in v["routes"].as_array().into_iter().flatten() {
+                        println!("  {} → {}", s(&r["name"]), s(&r["target"]));
+                    }
+                }
+                return Ok(());
+            }
+            v
+        }
         AppsCmd::List { project } => {
             let path = match project {
                 Some(p) => format!("/v1/apps/services?project={}", enc(&project_id(api, &p).await?)),
@@ -4108,10 +4178,17 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
             }
             v
         }
-        AppsCmd::Link { kind, r#ref, prefix, target } => {
+        AppsCmd::Link { kind, r#ref, prefix, indices, access, target } => {
             let svc = service(api, &target).await?;
             let path = format!("/v1/apps/services/{}/links/{}/{}", enc(&s(&svc["id"])), enc(&kind), enc(&r#ref));
-            api.call(reqwest::Method::PUT, &path, Some(json!({ "prefix": prefix }))).await?
+            let mut body = json!({ "prefix": prefix });
+            if !indices.is_empty() {
+                body["indices"] = json!(indices);
+            }
+            if let Some(a) = access {
+                body["access"] = json!(a);
+            }
+            api.call(reqwest::Method::PUT, &path, Some(body)).await?
         }
         AppsCmd::Unlink { kind, r#ref, target } => {
             let svc = service(api, &target).await?;
@@ -4533,9 +4610,9 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
             }
             v
         }
-        AppsCmd::Drains { target, add, bucket, prefix, format, source, only_env, only_service, previews, every_env, every_service, header, edit, test, remove } => {
+        AppsCmd::Drains { target, add, bucket, prefix, search, namespace, retention_days, format, source, only_env, only_service, previews, every_env, every_service, header, edit, test, remove } => {
             let given = source.is_some() || !only_env.is_empty() || !only_service.is_empty() || previews.is_some() || !header.is_empty();
-            if given && add.is_none() && edit.is_none() && bucket.is_none() {
+            if given && add.is_none() && edit.is_none() && bucket.is_none() && search.is_none() {
                 bail!("--source, --only-env, --only-service, --previews and --header go with --add or --edit");
             }
             let svc = service(api, &target).await?;
@@ -4585,6 +4662,20 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
                 let d = api.call(reqwest::Method::PATCH, &format!("{path}/{}", enc(&id)), Some(Value::Object(settings))).await?;
                 if !json_out {
                     println!("{}", row(&d));
+                    return Ok(());
+                }
+                d
+            } else if let Some(c) = search {
+                settings.insert("search".into(), json!(c));
+                if let Some(n) = namespace {
+                    settings.insert("namespace".into(), json!(n));
+                }
+                if let Some(d) = retention_days {
+                    settings.insert("retention_days".into(), json!(d));
+                }
+                let d = api.post(&path, Value::Object(settings)).await?;
+                if !json_out {
+                    println!("{}  into {}", row(&d), s(&d["stream"]));
                     return Ok(());
                 }
                 d

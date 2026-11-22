@@ -2792,6 +2792,10 @@ pub struct Deployment {
     /// deployment's GET.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub approved_by: Vec<String>,
+    /// Its own URL (`<id>--<env slug>` under the apps domain, the environment's access rules):
+    /// none for a worker, a service with a volume, one not public over HTTP, one never built,
+    /// removed, pruned or waiting for its approvals.
+    pub url: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize)]
@@ -3026,6 +3030,21 @@ pub struct Link {
     pub r#ref: String,
     pub prefix: String,
     pub vars: Vec<String>,
+    /// A search link's key: only these indices (patterns, `tenant-*`), and its access (`read`,
+    /// `append`; none: read and write documents).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub indices: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub access: Option<String>,
+}
+
+impl Link {
+    /// Its options as the store keeps them (roll secrets' link options: `names`, `permission`).
+    pub fn narrowed(mut self, options: &crate::integrations::LinkOptions) -> Link {
+        self.indices = options.get("names").and_then(|n| n.as_array()).map(|a| a.iter().filter_map(|v| v.as_str().map(str::to_string)).collect());
+        self.access = options.get("permission").and_then(|p| p.as_str()).map(str::to_string);
+        self
+    }
 }
 
 /// The environment a `roll://ENV[/folder…]/KEY` value names (roll secrets' references; its

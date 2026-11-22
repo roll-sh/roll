@@ -335,7 +335,7 @@ export function emParts(passage: string): { text: string; em: boolean }[] {
 export type Language = "curl" | "python" | "javascript";
 export const LANGUAGES: Language[] = ["curl", "python", "javascript"];
 
-/** The environment variable copied code reads the key from: never a real key. */
+/** The environment variable copied code reads the key from, unless it was given one (`Target.key`). */
 export const KEY_ENV = "ELASTICSEARCH_API_KEY";
 
 const IDENT = /^[A-Za-z_$][\w$]*$/;
@@ -371,13 +371,25 @@ function pyKeyword(k: string): string | null {
   return IDENT.test(k) && !k.includes("$") && !PY_KEYWORDS.has(k) ? k : null;
 }
 
-const shellQuote = (s: string) => `'${s.replace(/'/g, "'\\''")}'`;
+/** A key made for the copied code (sample data's first queries), written in instead of the
+ * environment variables. */
+export type SnippetKey = { apiKey: string } | { username: string; password: string };
 
 /** Where the copied code connects, and how it authenticates. */
 export interface Target {
   url: string;
   flavor: Flavor;
+  key?: SnippetKey;
 }
+
+/** A credential in copied code: the given value as a literal, or the environment variable. */
+export function secretIn(lang: "python" | "javascript", env: string, value: string | undefined): string {
+  if (value !== undefined) return JSON.stringify(value);
+  return lang === "python" ? `os.environ["${env}"]` : `process.env.${env}`;
+}
+
+/** Single-quoted for a shell. */
+export const shellQuote = (s: string) => `'${s.replace(/'/g, "'\\''")}'`;
 
 /**
  * The request as code. Elasticsearch-flavor clusters get an API key from `$ELASTICSEARCH_API_KEY` (as the guides export it)
@@ -388,19 +400,29 @@ export interface Target {
 export function copyAs(lang: Language, req: PlaygroundRequest, target: Target): string {
   const url = target.url.replace(/\/+$/, "");
   const os = target.flavor === "opensearch";
+  const k = target.key;
+  const apiKey = k && "apiKey" in k ? k.apiKey : undefined;
+  const user = k && "username" in k ? k : undefined;
+  const importOs = k ? "" : "import os\n";
   const parsed = JSON.parse(req.body) as Record<string, unknown>;
   const index = indexOf(req.path);
   switch (lang) {
     case "curl": {
-      const auth = os ? `-u "$OPENSEARCH_USERNAME:$OPENSEARCH_PASSWORD"` : `-H "Authorization: ApiKey $${KEY_ENV}"`;
+      const auth = os
+        ? user
+          ? `-u ${shellQuote(`${user.username}:${user.password}`)}`
+          : `-u "$OPENSEARCH_USERNAME:$OPENSEARCH_PASSWORD"`
+        : apiKey !== undefined
+          ? `-H ${shellQuote(`Authorization: ApiKey ${apiKey}`)}`
+          : `-H "Authorization: ApiKey $${KEY_ENV}"`;
       // A built body is indented; a raw one is sent as typed (`1.0` and long integers stay exact).
       const data = JSON.stringify(parsed) === req.body ? JSON.stringify(parsed, null, 2) : req.body;
       return `curl -X ${req.method} ${shellQuote(url + req.path)} \\\n  ${auth} \\\n  -H 'content-type: application/json' \\\n  -d ${shellQuote(data)}`;
     }
     case "python": {
       const head = os
-        ? `# pip install opensearch-py\nimport os\nfrom opensearchpy import OpenSearch\n\nclient = OpenSearch(\n    hosts=[${JSON.stringify(url)}],\n    http_auth=(os.environ["OPENSEARCH_USERNAME"], os.environ["OPENSEARCH_PASSWORD"]),\n)\n`
-        : `# pip install elasticsearch\nimport os\nfrom elasticsearch import Elasticsearch\n\nclient = Elasticsearch(${JSON.stringify(url)}, api_key=os.environ["${KEY_ENV}"])\n`;
+        ? `# pip install opensearch-py\n${importOs}from opensearchpy import OpenSearch\n\nclient = OpenSearch(\n    hosts=[${JSON.stringify(url)}],\n    http_auth=(${secretIn("python", "OPENSEARCH_USERNAME", user?.username)}, ${secretIn("python", "OPENSEARCH_PASSWORD", user?.password)}),\n)\n`
+        : `# pip install elasticsearch\n${importOs}from elasticsearch import Elasticsearch\n\nclient = Elasticsearch(${JSON.stringify(url)}, api_key=${secretIn("python", KEY_ENV, apiKey)})\n`;
       const keys = Object.keys(parsed);
       const kwargs = !os && keys.every((k) => pyKeyword(k) !== null);
       const args = kwargs
@@ -410,9 +432,9 @@ export function copyAs(lang: Language, req: PlaygroundRequest, target: Target): 
     }
     case "javascript": {
       if (os) {
-        return `// npm i @opensearch-project/opensearch\nimport { Client } from "@opensearch-project/opensearch";\n\nconst client = new Client({\n  node: ${JSON.stringify(url)},\n  auth: { username: process.env.OPENSEARCH_USERNAME, password: process.env.OPENSEARCH_PASSWORD },\n});\nconst { body } = await client.search(${literal({ index, body: parsed }, "javascript")});\nfor (const hit of body.hits.hits) console.log(hit._score, hit._id);\n`;
+        return `// npm i @opensearch-project/opensearch\nimport { Client } from "@opensearch-project/opensearch";\n\nconst client = new Client({\n  node: ${JSON.stringify(url)},\n  auth: { username: ${secretIn("javascript", "OPENSEARCH_USERNAME", user?.username)}, password: ${secretIn("javascript", "OPENSEARCH_PASSWORD", user?.password)} },\n});\nconst { body } = await client.search(${literal({ index, body: parsed }, "javascript")});\nfor (const hit of body.hits.hits) console.log(hit._score, hit._id);\n`;
       }
-      return `// npm i @elastic/elasticsearch\nimport { Client } from "@elastic/elasticsearch";\n\nconst client = new Client({\n  node: ${JSON.stringify(url)},\n  auth: { apiKey: process.env.${KEY_ENV} },\n});\nconst resp = await client.search(${literal({ index, ...parsed }, "javascript")});\nfor (const hit of resp.hits.hits) console.log(hit._score, hit._id);\n`;
+      return `// npm i @elastic/elasticsearch\nimport { Client } from "@elastic/elasticsearch";\n\nconst client = new Client({\n  node: ${JSON.stringify(url)},\n  auth: { apiKey: ${secretIn("javascript", KEY_ENV, apiKey)} },\n});\nconst resp = await client.search(${literal({ index, ...parsed }, "javascript")});\nfor (const hit of resp.hits.hits) console.log(hit._score, hit._id);\n`;
     }
   }
 }

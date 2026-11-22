@@ -193,8 +193,21 @@ export type Reach = {
   key: string | null;
   protected: boolean;
   untrusted: boolean;
+  /** roll-access tokens (`rlt_…`) whose rules reach it. */
   tokens: Holder[];
   identities: Holder[];
+  /** The project's members whose role reveals it now (`admin`: an admin account, which reveals everything). */
+  people: { user: string; handle: string; role: string; actions: Action[]; admin?: boolean }[];
+  /** How many accounts are the operator's admins (null: nothing tells). */
+  admins: number | null;
+  /** Live OAuth connections (`rlo_…`: a person's MCP client or app) that reach it, by person (`created_by`). A cut-off's `tokens` revokes them too. */
+  clients: Holder[];
+  /** roll apps services that read it: `through` the folder they deploy with (`env:/path`) or a `roll://` variable. */
+  services: { service: string; name: string; environment: string; through: string; last_deployed_at: number | null }[];
+  /** Live agents sandboxes holding a copy of its values (`from`: `env` or `env:/path`). */
+  sandboxes: { id: string; name: string; owner: string; by: string; from: string; keys: string[] }[];
+  /** People who read it in 30 days and may no longer reveal it (`why`): they still know it. */
+  knew: { user: string; last_at: number; reads: number; why: "left" | "role" | "gone" }[];
   syncs: { id: string; kind: string; target: unknown; last_synced_at: number | null; paused_at: number | null }[];
   /** Live dynamic credentials issued for its keys. */
   leases: { id: string; key: string; consumer: string; issued_at: number; expires_at: number }[];
@@ -251,7 +264,17 @@ export type ChangeRequest = {
   /** What it must pass: the environment's policy (no `path`) and each folder policy covering a key it changes. */
   gates: { path?: string; approvals: number; approvers?: string[]; approved: number }[];
   applied_seq: number | null;
+  /** What it does instead of changing keys: a protected environment's delete, kept for the recovery window once applied. */
+  action?: "delete_environment";
 };
+/** Something that stops working when an environment goes: a value elsewhere in the project that references it (`key`), or a folder here or in another project (`project`) that imports from it. Names only. */
+export type EnvironmentBreak = { project?: string; environment: string; path: string; key?: string; via: "reference" | "import" };
+/** `GET …/environments/{env}/deletion`: what deleting it would do, before it's asked. */
+export type EnvironmentDeletion = { environment: string; secrets: number; window_days: number; confirm: boolean; needs_request: boolean; approvals: number; breaks: EnvironmentBreak[] };
+/** `DELETE …/environments/{env}`: null for an ephemeral one (gone), the window for a standard one, or the change request that deletes a protected one once approved. */
+export type EnvironmentDeleted = null | { environment: string; deleted_at: number; purge_at: number } | { request: ChangeRequest };
+/** `POST …/environments/{env}/recover`: the environment is back; managed links got new credentials (`rotated`), or say which didn't. */
+export type RecoveredEnvironment = { project: string; environment: string; recovered_at: number; rotated: number; rotation_failed: string[] };
 /** A folder's own change policy: its keys change only through approved requests. */
 export type FolderPolicy = { path: string; approvals: number; approvers: string[]; created_at: number; created_by: string };
 export type LinkField = { field: string; label: string; modes: LinkMode[]; secret: boolean; suggest: string; credential?: string };
@@ -410,12 +433,13 @@ export type AwsUser = { id: string; name: string; role: string; user: string; cr
 export type AwsRole = { id: string; name: string; role_arn: string; trust: "external_id" | "oidc"; created_at: number; created_by: string };
 /** Where a key is set (`GET /v1/secrets/search?key=`): names and versions, never a value. */
 /** A deleted project in its recovery window (`GET /v1/secrets/deleted`): recoverable until `purge_at`. */
-export type DeletedProject = { project: string; name: string; deleted_at: number; deleted_by: string; purge_at: number };
+/** A deleted project, or a deleted environment (`environment`) of a project that isn't, in its recovery window. */
+export type DeletedProject = { project: string; name: string; environment?: string; deleted_at: number; deleted_by: string; purge_at: number };
 /** `POST …/recover`: the project is back; managed links got new credentials (`rotated`), or say which didn't. */
 export type Recovered = { project: string; name: string; recovered_at: number; rotated: number; rotation_failed: string[] };
 export type Place = { project: string; project_name: string; environment: string; path: string; key: string; version: number; updated_at: number; linked: boolean };
 /** One thing to fix (`GET …/health`), worst first: where, never a value. */
-export type Finding = { issue: "decoy_used" | "expired" | "rotation_failing" | "revoke_failing" | "missing" | "exposed" | "public" | "weak" | "unplaced" | "operator_made" | "expiring" | "certificate_expiring" | "stale" | "unread" | "unreferenced"; environment: string; path: string; key: string; detail: string; owner?: string; decoy?: Decoy };
+export type Finding = { issue: "decoy_used" | "production_unprotected" | "expired" | "rotation_failing" | "revoke_failing" | "missing" | "exposed" | "public" | "weak" | "unplaced" | "operator_made" | "expiring" | "certificate_expiring" | "stale" | "unread" | "unreferenced"; environment: string; path: string; key: string; detail: string; owner?: string; decoy?: Decoy };
 /** One project's findings (`GET /v1/secrets/findings`). */
 export type ProjectFindings = { project: string; project_name: string; findings: Finding[] };
 /** A URL roll calls to issue and revoke a value that lives outside roll (`rotator` links). */
