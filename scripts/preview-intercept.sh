@@ -98,7 +98,9 @@ BOUND=$(curl -s -o "$HOME_DIR/bind.json" -w '%{http_code}' -X PUT "http://$API/v
 case "$BOUND" in 200|201|204) ;; *) echo "binding STRIPE_KEY to echo.localhost: HTTP $BOUND $(cat "$HOME_DIR/bind.json")"; exit 1;; esac
 
 say "a token saves the rules (the placeholders' maker): Roll only, echo.localhost allowed, public"
-TOKEN=$(api POST /v1/access/tokens "{\"name\":\"rules\",\"rules\":[{\"product\":\"previews\",\"resources\":\"*\",\"actions\":{\"read\":\"allow\",\"write\":\"allow\",\"admin\":\"allow\"}},{\"product\":\"secrets\",\"resources\":[{\"project\":\"$PRJ\"}],\"actions\":{\"read\":\"allow\",\"reveal\":\"allow\"}}]}" | jq_ "d['token']")
+TOKEN_JSON=$(api POST /v1/access/tokens "{\"name\":\"rules\",\"rules\":[{\"product\":\"previews\",\"resources\":\"*\",\"actions\":{\"read\":\"allow\",\"write\":\"allow\",\"admin\":\"allow\"}},{\"product\":\"secrets\",\"resources\":[{\"project\":\"$PRJ\"}],\"actions\":{\"read\":\"allow\",\"reveal\":\"allow\"}}]}")
+TOKEN=$(echo "$TOKEN_JSON" | jq_ "d['token']")
+TOKEN_ID=$(echo "$TOKEN_JSON" | jq_ "d['id']")
 SAVED=$(curl -s -o "$HOME_DIR/rules.json" -w '%{http_code}' -X PUT "http://$API/v1/previews/projects/$PRJ/settings" -H "authorization: Bearer $TOKEN" -H 'content-type: application/json' \
   -d '{"enabled":true,"egress":"roll","egress_hosts":["echo.localhost"],"access":"public"}')
 [ "$SAVED" = 200 ] || { echo "the token saving the rules: HTTP $SAVED $(cat "$HOME_DIR/rules.json")"; exit 1; }
@@ -168,4 +170,18 @@ case "$AFTER" in 403*) ;; *) echo "the echoed placeholder should be ended (403 a
 ACT=$(api GET "/v1/previews/$PV/activity" | jq_ "[a['message'] for a in d]")
 echo "$ACT" | grep -q "echoed STRIPE_KEY" || { echo "the activity should say the host echoed STRIPE_KEY: $ACT"; exit 1; }
 echo "$ACT" | grep -q "$KEY_VALUE" && { echo "the activity should never show the key"; exit 1; }
-say "ok: the service held $(echo "$PLACEHOLDER" | cut -c1-9)…, the host got the key, a dead placeholder was refused, an echo was stopped and ended its placeholder"
+say "the rules' saver loses access (its token revoked): the keys go without placeholders, said (roll secrets' maker_unreachable)"
+api DELETE "/v1/access/tokens/$TOKEN_ID" >/dev/null
+api POST "/v1/previews/$PV/sleep" >/dev/null
+ENV2=""
+for _ in $(seq 1 120); do
+  ENV2=$(curl -s --max-time 30 -H "Host: $HOST" "http://$API/env.txt")
+  echo "$ENV2" | grep -q '^STRIPE_KEY=' && break
+  sleep 1
+done
+NOW_KEY=$(echo "$ENV2" | sed -n 's/^STRIPE_KEY=//p')
+# A trusted preview: what it gets without placeholders, as before them (never another person's rights).
+[ "$NOW_KEY" = "$KEY_VALUE" ] || { echo "with the rules' saver gone the preview should get STRIPE_KEY without a placeholder: '${NOW_KEY:0:9}…'"; exit 1; }
+ACT=$(api GET "/v1/previews/$PV/activity" | jq_ "[a['message'] for a in d]")
+echo "$ACT" | grep -q "placeholders off" || { echo "the activity should say placeholders are off and why: $ACT"; exit 1; }
+say "ok: the service held $(echo "$PLACEHOLDER" | cut -c1-9)…, the host got the key, a dead placeholder was refused, an echo was stopped and ended its placeholder, and without the rules' saver its keys went without placeholders, said"
