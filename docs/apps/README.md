@@ -1869,15 +1869,17 @@ said in its log. Branches are made by the products when it's set, and at each de
 made since. Their
 credentials are sealed with the environment (`env_branches`), and its view lists the branches by
 kind and ref, never with what reaches them. Its link variables are the branch's. A database
-without a branch yet is left out (the log says so), never production's. So is everything roll
-secrets' own links put in its folder (a `postgres` or `redis` link's credentials and address
-name the resource itself): left out, said in the log, while its own branches come through its
-apps links. Turning it off (`--data
+without a branch yet is left out (the log says so), never production's. So is every key roll
+secrets links to a resource the service links itself (`Values.links` names each key's kind and
+resource; its credentials and address name the resource, production's database): left out,
+named in the log, while its branches come through its apps links. roll secrets' links to
+anything else (a bucket the service doesn't link, a SaaS key a rotator keeps) stay. Turning it off (`--data
 none`), deleting the environment, unlinking the database or deleting the service deletes each
 branch that no other environment still uses. Production's data is the databases themselves, and
 a preview's is roll previews' to branch: both are refused (400). It's an admin field, since a
 branch copies production's data to code the environment runs
-(`api.rs::an_environment_with_its_own_data_gets_a_branch_of_each_database`).
+(`api.rs::an_environment_with_its_own_data_gets_a_branch_of_each_database`,
+`a_branch_environment_keeps_roll_secrets_links_to_what_it_didnt_branch`).
 
 ## Edge settings as code
 

@@ -3046,6 +3046,9 @@ impl Apps {
         let (sid, e) = (svc.id.clone(), env.name.clone());
         let (links, own_data, branches) = self.db(move |s| Ok((s.links_minted(&sid)?, s.env_data(&sid, &e)?, s.env_branches(&sid, &e)?))).await?;
         let mut branch_notices = Vec::new();
+        // The resources it links itself: in an environment with data of its own, each is its
+        // branch or left out, so roll secrets' links to them are left out too.
+        let own_links: BTreeSet<(&'static str, String)> = links.iter().filter(|l| l.0 != LinkKind::Service).map(|l| (l.0.as_str(), l.1.clone())).collect();
         for (kind, r, prefix, minted) in links {
             // A preview (an ephemeral environment) never gets a resource's production variables:
             // roll previews sets the branched ones itself, by name; another service's URLs stay.
@@ -3099,10 +3102,11 @@ impl Apps {
                     if let Some(b) = &s.binding {
                         placeholders.insert(s.name.clone(), b.clone());
                     }
-                    // An environment with data of its own never gets a linked resource's
-                    // credentials or address through roll secrets: they name the resource itself
-                    // (production's database), and its branches come through its own links.
-                    if own_data && s.linked {
+                    // An environment with data of its own never gets, through roll secrets, the
+                    // credentials or address of a resource it links itself: they name the resource
+                    // (production's database), and its branches come through its own links. Links
+                    // to anything else (a SaaS key, an outside database) stay.
+                    if own_data && s.link.as_ref().is_some_and(|(k, r)| own_links.iter().any(|(ok, or)| ok == k && or == r)) {
                         parents.push(s.name);
                         continue;
                     }
@@ -3114,11 +3118,11 @@ impl Apps {
                         plain_secrets.insert(s.name.clone());
                     }
                     // A linked resource's address, rewritten for the container as apps' own links.
-                    let v = if s.linked { self.deps.runtime.reach(&s.value) } else { s.value };
+                    let v = if s.link.is_some() { self.deps.runtime.reach(&s.value) } else { s.value };
                     vars.insert(s.name, (v, "secret"));
                 }
                 if !parents.is_empty() {
-                    notices.push(format!("{} from roll secrets' links left out: {} has data of its own, and they reach the resources themselves (its branches come through its own links)", parents.join(", "), env.name));
+                    notices.push(format!("{} from roll secrets' links left out: {} has data of its own, and they reach resources it links itself (its branches come through its own links)", parents.join(", "), env.name));
                 }
             }
             Err(e) => return Err(Error::Internal(format!("the project's {} secrets couldn't be read: {e}", env.name))),

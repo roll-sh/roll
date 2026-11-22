@@ -160,6 +160,11 @@ pub struct Values {
     /// Keys whose value comes from a link to a resource (any mode): a consumer that reaches
     /// resources another way (a container on a private network) knows which addresses to rewrite.
     pub linked: Vec<String>,
+    /// `linked`'s keys with what each links: the provider's kind and the resource. A consumer
+    /// that replaces some resources with its own (roll apps' environments with data of their own)
+    /// leaves out only the keys that reach those. Names only, never a value.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub links: Vec<Linked>,
     /// Of `linked`, the keys whose link field isn't a credential (a host, a port, a user name, a
     /// database): a consumer that hides secret values in logs (roll apps) may show these. Every
     /// other value here is a secret, whatever its name or tags.
@@ -173,6 +178,22 @@ pub struct Values {
     /// asked for them: roll's egress proxy swaps each for the value, for those hosts only.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub placeholders: Vec<crate::placeholders::Placeholder>,
+}
+
+/// A key whose value comes from a link (`Values.links`).
+#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
+pub struct Linked {
+    pub name: String,
+    /// The link provider's resource kind (`postgres`, `bucket`, `search`…).
+    pub kind: String,
+    /// The resource (the link's `ref`).
+    pub r#ref: String,
+}
+
+impl Linked {
+    fn of(name: &str, l: &Link) -> Linked {
+        Linked { name: name.to_string(), kind: l.kind.clone(), r#ref: l.r#ref.clone() }
+    }
 }
 
 /// A key left out because it links a resource the environment's preview branched.
@@ -1128,9 +1149,10 @@ impl Secrets {
         self.audit_now(project, caller, action, Some(slug), Some(&path), &keys, &summary);
         let ours = |e: &&Entry| !followed.iter().any(|f| f.name == e.row.key);
         let dynamic = entries.iter().filter(ours).filter(|e| e.row.link.as_ref().is_some_and(|l| l.mode == Mode::Dynamic)).map(|e| e.row.key.clone()).collect();
-        let linked = entries.iter().filter(ours).filter(|e| e.row.link.is_some()).map(|e| e.row.key.clone()).collect();
+        let links: Vec<Linked> = entries.iter().filter(ours).filter_map(|e| e.row.link.as_ref().map(|l| Linked::of(&e.row.key, l))).collect();
+        let linked = links.iter().map(|l| l.name.clone()).collect();
         let plain = entries.iter().filter(ours).filter(|e| e.row.link.as_ref().is_some_and(|l| self.plain_field(l))).map(|e| e.row.key.clone()).collect();
-        Ok(Values { values, problems, leases, dynamic, linked, plain, withheld, sensitive, followed, placeholders })
+        Ok(Values { values, problems, leases, dynamic, linked, links, plain, withheld, sensitive, followed, placeholders })
     }
 
     /// A folder's own values as they were after change `seq` (or at time `at`): what was stored
@@ -1155,6 +1177,7 @@ impl Secrets {
         let mut values = BTreeMap::new();
         let mut problems = vec![];
         let mut linked = vec![];
+        let mut links = vec![];
         let mut plain = vec![];
         let mut withheld = vec![];
         let mut followed = vec![];
@@ -1178,6 +1201,7 @@ impl Secrets {
             }
             if let Some(l) = &link {
                 linked.push(v.key.clone());
+                links.push(Linked::of(&v.key, l));
                 if self.plain_field(l) {
                     plain.push(v.key.clone());
                 }
@@ -1197,7 +1221,7 @@ impl Secrets {
         }
         let keys: Vec<String> = values.keys().cloned().collect();
         self.audit_now(project, caller, "secrets.export", Some(slug), Some(&path), &keys, &format!("exported {} as of change #{seq}", crate::write::plural(keys.len(), "value")));
-        Ok((seq, Values { values, problems, leases: vec![], dynamic: vec![], linked, plain, withheld, sensitive: vec![], followed, placeholders: vec![] }))
+        Ok((seq, Values { values, problems, leases: vec![], dynamic: vec![], linked, links, plain, withheld, sensitive: vec![], followed, placeholders: vec![] }))
     }
 
     /// What moves when the project's values may have: its change counter and its resources'

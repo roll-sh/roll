@@ -1843,6 +1843,11 @@ async fn links_read_live_values_issue_managed_credentials_rotate_and_lease_dynam
     // Of the linked keys, only the one whose field isn't a credential is plain (a log may show it).
     let all = api.values("production", "/").await;
     assert_eq!(all["plain"], json!(["AWS_ACCESS_KEY_ID"]), "{all}");
+    // Each linked key names what it links (a consumer replacing some resources drops only theirs).
+    let mut links = all["links"].as_array().cloned().unwrap_or_default();
+    links.sort_by_key(|l| l["name"].as_str().unwrap_or_default().to_string());
+    let of = |name: &str| json!({ "name": name, "kind": "bucket", "ref": "assets" });
+    assert_eq!(links, [of("AWS_ACCESS_KEY_ID"), of("AWS_SECRET_ACCESS_KEY"), of("BUCKET_URL")], "{all}");
     let leases = api.ok(Method::GET, "/leases", None).await;
     assert_eq!(leases[0]["kind"], "retired");
     api.ok(Method::DELETE, &format!("/leases/{}", leases[0]["id"].as_str().unwrap()), None).await;
