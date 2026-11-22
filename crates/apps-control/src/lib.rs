@@ -2997,6 +2997,28 @@ impl Apps {
         // Reference variables, one level deep: against what resolved above, and other services'.
         let unresolved = self.fill_references(svc, &env.name, &mut vars, &mut sealed).await;
         let sources = vars.iter().map(|(k, (_, s))| (k.clone(), *s)).collect();
+        // The build's OpenTelemetry agent (`build.otel`), started only while its traces go to
+        // roll: last, joined to the app's own value of the same variable.
+        if trace_endpoint && !deployment.is_empty() {
+            let d = deployment.to_string();
+            let agent = self.db(move |s| s.deployment(&d)).await.ok().and_then(|d| d.plan).and_then(|p| p["otel"].as_str().map(str::to_string));
+            let join = |own: Option<&(String, &'static str)>, ours: &str, sep: &str, first: bool| match own.map(|(v, _)| v.trim()).filter(|v| !v.is_empty()) {
+                Some(v) if first => format!("{ours}{sep}{v}"),
+                Some(v) => format!("{v}{sep}{ours}"),
+                None => ours.to_string(),
+            };
+            match agent.as_deref() {
+                Some("node") => {
+                    let v = join(vars.get("NODE_OPTIONS"), &format!("--require {}", apps_build::otel::NODE_REQUIRE), " ", false);
+                    vars.insert("NODE_OPTIONS".into(), (v, "roll"));
+                }
+                Some("python") => {
+                    let v = join(vars.get("PYTHONPATH"), apps_build::otel::PYTHON_PATH, ":", true);
+                    vars.insert("PYTHONPATH".into(), (v, "roll"));
+                }
+                _ => {}
+            }
+        }
         Ok(ResolvedVars { vars: vars.into_iter().map(|(k, (v, _))| (k, v)).collect(), sources, unresolved, refused, ref_texts, sealed, from_secrets, plain_secrets, notices })
     }
 

@@ -484,7 +484,7 @@ envelope `{event, delivery, webhook, repo{id, full_name, default_branch, visibil
 | a revoked token ends its session (401) and can't start one | `tokens.rs::tokens_are_listed_and_revoked_everywhere_at_once` |
 | all four versions and the default, initialize inside a batch (400), empty batch, client responses and notification-only batches (202), one bad entry in a batch, `resources/list` and `prompts/list`, `tools/call` without arguments or a name, Origin edge cases, `GET` `Allow`, `DELETE` without a session | `mcp.rs::protocol_edges` |
 | a never-valid token: 401 on initialize, and it ends the session it's used on; anonymous callers can't use or end another token's session | `mcp.rs::invalid_tokens_and_foreign_sessions` |
-| `tools/list` is exactly the tools of mcp.md, each with `readOnlyHint`, and `destructiveHint` only where it can't be undone (`close_change`, `stop_preview`) | `mcp.rs::transport_sessions_and_protocol` |
+| `tools/list` is exactly the tools of mcp.md, each with `readOnlyHint`, `destructiveHint` only where it can't be undone (`close_change`, `stop_preview`), and `idempotentHint` on reads and on what only PUTs or DELETEs | `mcp.rs::transport_sessions_and_protocol` |
 | event-stream answers hold one of the caller's stream slots (429 past the limit) | `streams.rs::mcp_event_stream_answers_share_the_callers_slots` |
 
 ## CLI (`roll code`)
@@ -876,7 +876,7 @@ every request.
 | `auto` heuristic (deep_paths → deep with repository context and confidence; small → standard), `classifier: model` (secondary model, metered), code search (path glob, bad regex 400, private repo 404), index stats in the reviewer view | `reviewer.rs::auto_mode_deep_context_and_classifier` |
 | `fast` streams threads without duplicating them in the review; `max` drops unverified findings | `reviewer.rs::fast_streams_threads_and_max_verifies` |
 | `@roll` explain, question, don't flag (learning used by later reviews), pause/resume, review deep (forced mode), fix (a revision with the suggestion), resolve; chats metered; non-writers ignored | `reviewer.rs::roll_commands_in_threads` |
-| learnings from a resolved thread with a reason (once), a dismissed roll review, the API (path-scoped), delete, auth | `reviewer.rs::learnings_from_resolving_and_dismissing` |
+| learnings from a resolved thread with a reason (once), a dismissed roll review, the API (path-scoped), delete, auth; a reply from outside (a reader on a public repo) never becomes one | `reviewer.rs::learnings_from_resolving_and_dismissing`, `reviewer.rs::outsiders_replies_never_become_learnings` |
 | public-repo allowance, human monthly cap, spending caps (`pause` without a model call, `byok_fallback`, `standard_only` downgrade), BYOK (used first, BYOK fee, owner's key in the request, key never returned nor in the database file, auth, validation, delete), pricing endpoint, billing validation and auth, bad month | `reviewer.rs::pricing_caps_allowances_and_byok` |
 | BYOK refused without (or with a weak) `ROLL_SECRET_KEY` | `reviewer.rs::byok_needs_a_server_secret` |
 | another product's question (`Code::ask_model`, roll apps' "Why did it fail?"): the owner's model at medium effort, metered as its kind and counted with chats, refused past a paused cap without a model call | `reviewer.rs::another_products_question_is_metered_and_capped` |

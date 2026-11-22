@@ -1356,7 +1356,8 @@ async fn a_users_token_acts_as_them() {
     assert_eq!((s, e["code"].as_str()), (StatusCode::FORBIDDEN, Some("operator_only")));
     // And it says so when asked what it may do (MCP's roll://access/me reads this).
     let (_, me) = d.call(&token, Method::GET, "/v1/access", None).await;
-    assert_eq!((me["as_user"].as_str(), me["reach"].as_array().map(Vec::len)), (Some("alice"), Some(5)), "{me}");
+    assert_eq!((me["as_user"].as_str(), me["reach"].as_array().map(Vec::len)), (Some("alice"), Some(roll_access::USER_REACH.len())), "{me}");
+    assert!(me["reach"].as_array().unwrap().iter().any(|p| p == "previews") && !me["reach"].to_string().contains("postgres"), "{me}");
 
     // She sees and manages only her own tokens; bob can't touch hers.
     let (_, op_id) = d.token(json!([{ "product": "*", "resources": "*", "actions": { "read": "allow" } }]), json!({})).await;
