@@ -288,11 +288,12 @@ limits. Their results have not been reverified on the current source.
 ## Analytic CPU, round 11: lookup probes and seeks (2026-11-21, agent 283)
 
 HANDOFF "Analytic CPU, round 11" has what changed. Plain dist builds (`tools/dist.sh`): **h0**
-origin's `79806dd6c`; **b1** cand/a283's three code commits on it. TPC-H: lane C, agent 280's
+origin's `79806dd6c`; **b1** cand/a283's three code commits on it; **b2v** cand/a283-2's two on b1
+(`dbb7053a0`); **b2** b2v with the dropped `seek_on` and end-memo commits. TPC-H: lane C, agent 280's
 harness copied to `~/.cache/a283/tpch/` (a fresh engine on a copy of SF1 loaded by h0, a 2 GB
 cache, a warm-up of the 22, 3 runs a query in one `perf stat` window over the engine's cgroup).
 Point selects and 100-row range reads: agent 277's harness (`~/.cache/a283/bench/`), 100,000 rows,
-8 clients, 10 s. Each pair in its own `tools/lane.sh` hold; lane.sh read 3.6-6.8 foreign cores
+8 clients, 10 s. Each pair in its own `tools/lane.sh` hold; lane.sh read 3.6-7.4 foreign cores
 (no pair met the 1.0 rule): the gates are on user instructions.
 
 ### The 22 at the head (h0, one pass, 1 run a query)
@@ -323,6 +324,105 @@ Foreign cores per arm (the pair's own reading): h0 1.86 1.59, b1 1.53 1.49. Hash
 |---|---|---|---|---|---|
 | point select (lane A) | 38,865 | 38,292 | -1.47 | -0.9 | 1.43 / 1.07 |
 | range read, 100 rows (lane B) | 348,549 | 348,620 | +0.02 | +2.0 | 1.28 / 1.52 |
+
+### cand/a283-2: b2v against b1, the 22 (one pair, 1 run a query)
+
+| query | b1 | b2v | instructions % per pair | cycles % per pair |
+|---|---|---|---|---|
+| q01 | 7.755 | 7.600 | -2.00 | +5.8 |
+| q02 | 2.702 | 2.637 | -2.40 | -1.3 |
+| q03 | 4.302 | 4.189 | -2.62 | -0.9 |
+| q04 | 1.783 | 1.729 | -3.03 | -11.1 |
+| q05 | 3.373 | 3.301 | -2.13 | -7.6 |
+| q06 | 5.412 | 5.249 | -3.01 | -8.1 |
+| q07 | 3.902 | 3.821 | -2.08 | -6.8 |
+| q08 | 1.509 | 1.462 | -3.09 | -7.7 |
+| q09 | 8.770 | 8.595 | -1.99 | -10.5 |
+| q10 | 7.723 | 7.537 | -2.40 | -6.4 |
+| q11 | 0.862 | 0.846 | -1.87 | -5.0 |
+| q12 | 6.150 | 5.970 | -2.93 | -2.7 |
+| q13 | 4.178 | 4.141 | -0.90 | -2.5 |
+| q14 | 1.440 | 1.417 | -1.61 | -2.3 |
+| q15 | 4.934 | 4.777 | -3.18 | -3.1 |
+| q16 | 2.922 | 2.894 | -0.95 | +1.3 |
+| q17 | 5.546 | 5.315 | -4.15 | +2.0 |
+| q18 | 16.573 | 16.298 | -1.66 | -0.1 |
+| q19 | 0.489 | 0.477 | -2.35 | +1.8 |
+| q20 | 1.408 | 1.368 | -2.85 | +6.0 |
+| q21 | 7.162 | 6.919 | -3.40 | -0.4 |
+| q22 | 0.644 | 0.628 | -2.41 | -5.5 |
+
+99.54 -> 97.17 G (-2.38%); foreign cores b1 3.13, b2v 3.32; every hash equal; VmHWM 1,681,156 ->
+1,680,084 kB. From h0: 100.35 -> 97.17 G (-3.2%).
+
+### b2 against b1, the 22 (2 pairs, b1 b2 then b2 b1; b2 = b2v + the dropped commits)
+
+| query | b1 | b2 | instructions % per pair | cycles % per pair |
+|---|---|---|---|---|
+| q01 | 7.755 | 7.601 | -1.99 / -1.99 | -3.8 / -0.9 |
+| q02 | 2.702 | 2.637 | -2.39 / -2.40 | +8.1 / -3.2 |
+| q03 | 4.299 | 4.230 | -1.55 / -1.68 | -5.2 / +0.8 |
+| q04 | 1.783 | 1.735 | -2.74 / -2.69 | +5.3 / -3.0 |
+| q05 | 3.372 | 3.313 | -1.78 / -1.72 | +2.9 / -8.4 |
+| q06 | 5.412 | 5.250 | -3.01 / -2.99 | -0.8 / -3.9 |
+| q07 | 3.901 | 3.823 | -2.03 / -2.00 | -5.2 / -1.4 |
+| q08 | 1.508 | 1.464 | -2.88 / -2.94 | +3.8 / -10.2 |
+| q09 | 8.768 | 8.586 | -2.07 / -2.08 | +0.3 / -4.0 |
+| q10 | 7.722 | 7.536 | -2.44 / -2.38 | -0.6 / -4.2 |
+| q11 | 0.862 | 0.846 | -1.86 / -1.86 | +0.8 / +1.6 |
+| q12 | 6.150 | 5.971 | -2.90 / -2.92 | +0.4 / -5.9 |
+| q13 | 4.171 | 4.143 | -0.70 / -0.64 | -1.9 / -5.5 |
+| q14 | 1.438 | 1.423 | -1.25 / -0.80 | +0.8 / -3.1 |
+| q15 | 4.934 | 4.778 | -3.18 / -3.17 | -2.7 / -3.5 |
+| q16 | 2.923 | 2.905 | -0.59 / -0.62 | -1.0 / +2.7 |
+| q17 | 5.545 | 5.312 | -4.24 / -4.17 | -11.0 / -3.0 |
+| q18 | 16.576 | 16.299 | -1.65 / -1.69 | -2.8 / +0.6 |
+| q19 | 0.489 | 0.476 | -2.49 / -2.50 | -6.5 / -8.2 |
+| q20 | 1.408 | 1.368 | -2.85 / -2.83 | -0.6 / +1.8 |
+| q21 | 7.158 | 6.941 | -3.09 / -2.98 | -7.3 / -3.0 |
+| q22 | 0.644 | 0.628 | -2.44 / -2.47 | -6.8 / -6.5 |
+
+99.52 -> 97.27 G (-2.28 / -2.26%); foreign cores b1 3.54 3.34, b2 3.46 3.22; hashes equal.
+
+### Dropped: `seek_on` passing entries and the end memo (b2 against b2v, 2 pairs, b2v b2 then b2 b2v)
+
+| query | b2v | b2 | instructions % | cycles % |
+|---|---|---|---|---|
+| q01 | 7.600 | 7.601 | +0.01 / +0.01 | -3.6 / -0.2 |
+| q02 | 2.630 | 2.630 | +0.01 / +0.02 | -5.0 / -16.6 |
+| q03 | 4.193 | 4.224 | +0.65 / +0.82 | -4.9 / -1.8 |
+| q04 | 1.728 | 1.734 | +0.35 / +0.35 | -1.8 / -2.5 |
+| q05 | 3.301 | 3.313 | +0.32 / +0.39 | -2.7 / -2.2 |
+| q07 | 3.848 | 3.848 | -0.03 / +0.02 | -0.5 / -4.9 |
+| q08 | 1.507 | 1.508 | +0.10 / +0.14 | -4.3 / -8.1 |
+| q09 | 8.648 | 8.637 | -0.13 / -0.13 | -3.8 / +1.1 |
+| q20 | 1.370 | 1.370 | +0.04 / +0.03 | +2.0 / -9.0 |
+| q21 | 6.917 | 6.938 | +0.28 / +0.30 | +1.8 / -2.3 |
+| q22 | 0.628 | 0.627 | -0.11 / -0.03 | -5.6 / -1.4 |
+
+Foreign cores per arm: b2v 3.46 2.81, b2 2.67 2.42.
+
+### cand/a283-2: point selects and range reads (b1 against b2v, 8 clients, per op)
+
+| workload | b1 instructions | b2v instructions | % | tps b1 / b2v | foreign cores b1 / b2v |
+|---|---|---|---|---|---|
+| point select (lane A), b1 b2v | 38,330 | 38,873 | +1.42 | 52,344 / 30,461 | 1.20 / 2.34 |
+| point select (lane A), b2v b1 | 38,315 | 38,220 | -0.25 | 52,506 / 56,914 | 1.23 / 1.01 |
+| range read, 100 rows (lane B) | 348,469 | 348,393 | -0.02 | 21,549 / 18,361 | 0.65 / 1.09 |
+
+(b2v's first point-select run was starved by other tenants; b1 read 38,292-38,330 in its three
+runs.)
+
+### q03 / q09 with the decoders' uops (h0 against b1, 2 pairs, `tpch/pairm.sh`; G a run)
+
+| arm, pair | q03 cycles | q03 MITE uops | q03 DSB uops | q09 cycles | q09 MITE uops |
+|---|---|---|---|---|---|
+| h0, 1 | 3.662 | 2.063 | 2.440 | 11.422 | 5.577 |
+| b1, 1 | 3.945 | 1.933 | 2.375 | 12.645 | 5.377 |
+| b1, 2 | 3.775 | 1.860 | 2.444 | 12.670 | 5.385 |
+| h0, 2 | 3.972 | 2.136 | 2.372 | 12.619 | 5.693 |
+
+Foreign cores per arm 2.4-3.2. One binary's q03 cycles moved 8.5% between pairs.
 
 ## Bulk writes, round 21: the size model's per-row costs, INSERT … SELECT's modelled rows as stored (2026-11-21, agent 281)
 

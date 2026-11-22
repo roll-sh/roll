@@ -12112,7 +12112,7 @@ TPC-H SF1 on lane C, plain dist builds only (BENCH.md "Analytic CPU, round 11" h
 Base **h0** = origin's `79806dd6c` (cand/a277-2 and cand/a280 landed); data loaded by h0. Harness:
 agent 280's copied to `~/.cache/a283/tpch/` (`pair.sh`, ONE pair per `tools/lane.sh c` hold;
 `proflbr.sh` adds `perf script` output; `under.py` / `leafpar.py` break an LBR profile down by a
-frame and by a leaf's callers). Lane C read 3.6-6.8 foreign cores in lane.sh's reading, 1.5-3.3
+frame and by a leaf's callers). Lane C read 3.6-7.4 foreign cores in lane.sh's reading, 1.5-3.5
 in the pairs' own: no pair met the 1.0 rule, and the gates are on user instructions, which
 repeated within 0.2% from pair to pair. Every result hash equal to h0's (and so PostgreSQL's).
 
@@ -12153,6 +12153,62 @@ repeated within 0.2% from pair to pair. Every result hash equal to h0's (and so 
   0 newly differing; isolation 1,647 / 1,648; pg_dump_tap 14,609 passed. `first_in_l1` is
   exercised by the storage model tests' `check_at` (`first_with` of every range at every snapshot,
   after flushes and compactions: L1 alone, versions newer than the snapshot, deletions).
+- **cand/a283-2 (on cand/a283), first commit: a block entry's header reads two-byte numbers
+  inline** (`sst::head`, which every seek, step and scan run reads entries through), and longer
+  ones by `varint_at`, a call that returns the number and where it ends. A number of 128 or more
+  (a table row's value length: every row entry) went to `get_varint_long(b, &mut pos)`, a call
+  given the position itself: every caller's position then lived in memory, stored and loaded at
+  each byte of every entry it read (the hottest loop of q09's `multi_get` in an objdump of its
+  profile: `seek_from`'s scan with a store of the position after every varint byte). The scans'
+  `run_rows` and `read` take the same path, so every query moved, not only the lookups.
+- **Second commit: `Scan::reseek` keeps the decided key's buffer**, emptied (none decided, as
+  `fill_batch_with` leaves it), instead of dropping it: every lookup's first row allocated it
+  again (`mi_malloc` under `Scan::position` in q21's profile).
+- **Gates** (plain dist, user instructions a run; b2 = b1 + both commits + the two dropped below,
+  b2v = b1 + both commits): b1 against b2, the 22 in 2 pairs: 99.52 -> 97.27 G (-2.28 / -2.26%),
+  every query down in both (q17 -4.24 / -4.17%, q15 -3.18 / -3.17, q21 -3.09 / -2.98, q06 -3.01 /
+  -2.99, q12 -2.90 / -2.92, q09 -2.07 / -2.08, q18 -1.65 / -1.69, q16 -0.59 / -0.62 the least);
+  b2v against b2 (2 pairs, the lookup queries and q01): the dropped pair below costs q03 +0.65 /
+  +0.82%, q04 +0.35, q05 +0.32 / +0.39, q21 +0.28 / +0.30, q08 +0.10 / +0.14, q09 -0.13, q01
+  +0.01. **b1 against b2v, the 22 in one pair: 99.54 -> 97.17 G (-2.38%)**, q17 -4.15%, q21 -3.40,
+  q15 -3.18, q08 -3.09, q04 -3.03, q06 -3.01, q12 -2.93, q20 -2.85, q03 -2.62, q01 -2.00, q09
+  -1.99, q18 -1.66, q13 -0.90 the least; every hash equal; VmHWM 1,681,156 -> 1,680,084 kB. From
+  h0: **100.35 -> 97.17 G (-3.2%)**. Point selects (lane A, 2 pairs): 38,330 -> 38,873 (+1.4%,
+  b2v's run starved: 2.34 foreign cores, 30k tps against 52k) and 38,315 -> 38,220 (-0.25%, both
+  ~1.1 foreign cores); b1 read 38,292-38,330 in its three runs: level. Range reads (lane B, one
+  pair) 348,469 -> 348,393 (-0.02%).
+- **Measured and dropped: `seek_on` passing the entries that share more with the key before than
+  that key shares with the sought one, and level cursors' end comparisons remembered**
+  (`~/.cache/a283/patches/dropped-seek-on-pass-and-end-memo.patch`; b2 against b2v above: up to
+  +0.8% on q03). `seek_on` stepped up to 4 entries, each made (`read`) and compared whole (memcmp);
+  the version passed an entry sharing more than `m` without making it and compared the others'
+  tails (`common_prefix`), up to 16 entries. `Cursor::head` (asked two or three times an entry,
+  each a memcmp with the end) remembered the last entry found below the end and passed the next
+  one when it shared more with it than it shares with the end. In q03's profile both rose
+  (`seek_on` +428 samples, `Cursor::head` +142) while libc's fell less: an inline
+  `common_prefix` of a ~26-byte key is more instructions than avx2 memcmp's call, and a lookup
+  passes too few entries for the saved `read`s to pay for it (the brief's memory note again). Not
+  measured apart.
+- **Item 3 (q03's cycles under 277's sorts)**: not resolved, and nothing found to fix. The same
+  h0 binary read q03 at 3.66 and 3.97 G cycles in two pairs (8.5% apart; 2.4-3.2 foreign cores in
+  the pairs' own reading), so 277's +3.9 / +7.1% is inside one binary's spread. `idq.mite_uops`
+  (`tpch/pairm.sh`): legacy-decoded uops are ~45% of q03's (2.06-2.14 G MITE against 2.37-2.44 G
+  from the DSB on h0) and repeat within ~3.5% for one binary (h0 2.06 / 2.14 G, b1 1.93 / 1.86 G),
+  a large share that code placement moves. No build of 277's base was made to compare with (a
+  same-code control costs a 65-minute build here under load 50-100); on a quiet lane, q03's
+  cycles and MITE uops at `edc4e0144` against `218f8737b`, 3 pairs, would decide it.
+- **Verification of cand/a283-2** (`tools/quick-check.sh` with `QC_CHECKED=1` on `dbb7053a0`):
+  clippy 16 warnings, none new in a changed file; 430 tests in 25 binaries, and again `--profile
+  verify-checked`; crash_random seeds 1-3 x 2, power_cut_at_every_point; regress 51,148 / 51,150,
+  0 newly differing; isolation 1,647 / 1,648; pg_dump_tap 14,609 passed.
+- **Left** (largest first, q09 on b2): the unique probes are still 10.9% of q09 (one seek each in
+  a new block: `Block::seek` 4.2%, `find_block` 0.9%, `block_with` 0.5%, `Hot::scan`'s lock and map
+  per probe 0.7%; a derived value copied into a `Bytes` and the key into a `Vec` for each, which
+  the lookup only appends to its buffer); the executor's rows over the stages (`K::num` 5.9%,
+  `Lookup::emit` 5.6, `decode_into` 3.9, `pipe::joined` 2.5, `truncate_row` 2.1, `Value` drops
+  2.1); q21's lookups' filter (`l_suppkey <> outer l_suppkey`) decodes every inner row, as
+  `StoredCmps` takes only constants (`add` 9.4% of q21 at h0); the store's key compares that are
+  left are calls to memcmp, which only fewer compares will cut.
 
 ## Analytic CPU, round 10 (agent 280)
 
