@@ -471,6 +471,17 @@ impl Brancher for Nosql {
         }
     }
 
+    /// A branch of the preview's own database: an earlier push's data. A NoSQL branch inherits
+    /// its parent's masking policy, so the copy reads masked as the preview's branch does (and
+    /// goes when the rules change).
+    async fn snapshot(&self, _parent: &str, branch: &str, name: &str) -> anyhow::Result<Option<Branched>> {
+        self.branch(branch, name, Mode::Branch).await.map(Some)
+    }
+
+    async fn delete_snapshot(&self, _parent: &str, from: &str, snapshot: &str, _kept: Option<&str>, name: &str) -> anyhow::Result<()> {
+        self.delete(from, snapshot, name).await
+    }
+
     async fn delete(&self, parent: &str, branch: &str, name: &str) -> anyhow::Result<()> {
         let d = match self.0.get(&format!("/v1/nosql/databases/{}", seg(branch))).await {
             Ok(d) => d,

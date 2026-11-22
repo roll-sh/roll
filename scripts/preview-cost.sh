@@ -726,6 +726,12 @@ LIVE_STREAM=$(stream_of "$JAR" "$HOST")
 EARLIER_STREAM=$(stream_of "$EJAR" "$EARLIER_HOST")
 [ -n "$EARLIER_STREAM" ] && [ "$EARLIER_STREAM" != "$LIVE_STREAM" ] || { echo "the earlier push should have a stream of its own: '$EARLIER_STREAM' / '$LIVE_STREAM'"; exit 1; }
 OWN_DATA="$OWN_DATA, stream its own"
+# And its NoSQL database: a branch of the preview's, still masked (it inherits the read policy).
+nosql_of() { curl -sS -b "$1" -H "Host: $2" "http://$API/env.txt" | sed -n 's/^CASSANDRA_USERNAME=//p'; }
+[ "$(nosql_of "$EJAR" "$EARLIER_HOST")" != "$(nosql_of "$JAR" "$HOST")" ] || { echo "the earlier push should have a NoSQL database of its own"; exit 1; }
+NOSQL_COPY_MASK=$(api GET /v1/nosql/databases | jq_ "[x.get('masking', {}).get('app.users.email', '') for x in (d if isinstance(d, list) else d.get('databases', [])) if x['name'].startswith('pv-') and x['id'] != '$BRANCH_NOSQL'][0] if [x for x in (d if isinstance(d, list) else d.get('databases', [])) if x['name'].startswith('pv-') and x['id'] != '$BRANCH_NOSQL'] else 'no copy'")
+[ "$NOSQL_COPY_MASK" = "$MASKED" ] || { echo "the earlier push's NoSQL copy should be masked as the preview's branch is ($MASKED), not '$NOSQL_COPY_MASK'"; exit 1; }
+OWN_DATA="$OWN_DATA, NoSQL its own and masked"
 
 # Screenshots stayed on through the pushes: the page's change since the head before is known.
 VISUAL=""
@@ -1102,7 +1108,7 @@ cat <<EOF
 | Change opened → preview ready ($(echo "$P" | jq_ "len(d['resources'])") branches made, the service deployed) | $((T1 - T0)) ms |
 | The preview's bucket key: its branch / production's bucket | $OWN_LS / $PARENT_LS |
 | … step by step (its timeline: data, setup, deploy, checks) | $STEPS |
-| An earlier push's own copy of the data: a table made after it is absent there / present in the preview's; its Redis, search, bucket and stream | $OWN_DATA |
+| An earlier push's own copy of the data: a table made after it is absent there / present in the preview's; its Redis, search, bucket, stream and NoSQL | $OWN_DATA |
 | What a follower of the events hears (\`GET /v1/previews/events\`, roll MCP's Events) | $EVENTS |
 | Search: a sync of the parent's connector on the parent / asked of the branch (inherited, waits for adoption) | $PSTATE / $BSTATE |
 | Parent bucket bytes / the branch's own bytes after writing 1 MiB / objects the branch sees | $PARENT_OBJECTS / $BRANCH_OBJECTS / $BRANCH_SEES |
