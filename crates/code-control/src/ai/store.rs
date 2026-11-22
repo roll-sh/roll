@@ -94,9 +94,13 @@ CREATE TABLE IF NOT EXISTS owner_review_providers (
     base_url TEXT,
     model TEXT,
     secondary_model TEXT,
+    -- Empty for a roll secrets reference (key_ref).
     key_sealed TEXT NOT NULL,
     key_last4 TEXT NOT NULL,
-    updated_at INTEGER NOT NULL
+    updated_at INTEGER NOT NULL,
+    -- roll://ENV[/folder]/KEY, read as key_maker (who chose it, as roll secrets returned it).
+    key_ref TEXT,
+    key_maker TEXT
 );
 CREATE TABLE IF NOT EXISTS owner_billing (
     owner_id TEXT PRIMARY KEY,
@@ -220,9 +224,17 @@ pub struct OwnerProvider {
     pub base_url: Option<String>,
     pub model: Option<String>,
     pub secondary_model: Option<String>,
-    pub key_sealed: String,
-    pub key_last4: String,
+    pub key: OwnerKey,
     pub updated_at: i64,
+}
+
+/// Where an owner's provider key is: sealed here, or in roll secrets.
+#[derive(Clone, Debug)]
+pub enum OwnerKey {
+    Sealed { sealed: String, last4: String },
+    /// `roll://…`, read as `maker` (who chose it: only roll's control plane writes it), its rights
+    /// looked up again on every read.
+    Reference { reference: String, maker: String },
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -688,18 +700,14 @@ impl Db {
         Ok(self
             .sql()
             .query_row(
-                "SELECT provider, base_url, model, secondary_model, key_sealed, key_last4, updated_at FROM owner_review_providers WHERE owner_id = ?",
+                "SELECT provider, base_url, model, secondary_model, key_sealed, key_last4, updated_at, key_ref, key_maker FROM owner_review_providers WHERE owner_id = ?",
                 [owner_id],
                 |r| {
-                    Ok(OwnerProvider {
-                        provider: r.get(0)?,
-                        base_url: r.get(1)?,
-                        model: r.get(2)?,
-                        secondary_model: r.get(3)?,
-                        key_sealed: r.get(4)?,
-                        key_last4: r.get(5)?,
-                        updated_at: r.get(6)?,
-                    })
+                    let key = match (r.get::<_, Option<String>>(7)?, r.get::<_, Option<String>>(8)?) {
+                        (Some(reference), Some(maker)) => OwnerKey::Reference { reference, maker },
+                        _ => OwnerKey::Sealed { sealed: r.get(4)?, last4: r.get(5)? },
+                    };
+                    Ok(OwnerProvider { provider: r.get(0)?, base_url: r.get(1)?, model: r.get(2)?, secondary_model: r.get(3)?, key, updated_at: r.get(6)? })
                 },
             )
             .optional()?)
@@ -707,13 +715,19 @@ impl Db {
 
     pub fn set_owner_provider(&self, owner_id: &str, p: Option<&OwnerProvider>) -> Result<()> {
         match p {
-            Some(p) => self.sql().execute(
-                "INSERT INTO owner_review_providers (owner_id, provider, base_url, model, secondary_model, key_sealed, key_last4, updated_at) \
-                 VALUES (?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT (owner_id) DO UPDATE SET provider = excluded.provider, base_url = excluded.base_url, \
-                 model = excluded.model, secondary_model = excluded.secondary_model, key_sealed = excluded.key_sealed, \
-                 key_last4 = excluded.key_last4, updated_at = excluded.updated_at",
-                params![owner_id, p.provider, p.base_url, p.model, p.secondary_model, p.key_sealed, p.key_last4, now()],
-            )?,
+            Some(p) => {
+                let (sealed, last4, reference, maker) = match &p.key {
+                    OwnerKey::Sealed { sealed, last4 } => (sealed.as_str(), last4.as_str(), None, None),
+                    OwnerKey::Reference { reference, maker } => ("", "", Some(reference.as_str()), Some(maker.as_str())),
+                };
+                self.sql().execute(
+                    "INSERT INTO owner_review_providers (owner_id, provider, base_url, model, secondary_model, key_sealed, key_last4, updated_at, key_ref, key_maker) \
+                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT (owner_id) DO UPDATE SET provider = excluded.provider, base_url = excluded.base_url, \
+                     model = excluded.model, secondary_model = excluded.secondary_model, key_sealed = excluded.key_sealed, \
+                     key_last4 = excluded.key_last4, updated_at = excluded.updated_at, key_ref = excluded.key_ref, key_maker = excluded.key_maker",
+                    params![owner_id, p.provider, p.base_url, p.model, p.secondary_model, sealed, last4, now(), reference, maker],
+                )?
+            }
             None => self.sql().execute("DELETE FROM owner_review_providers WHERE owner_id = ?", [owner_id])?,
         };
         Ok(())
