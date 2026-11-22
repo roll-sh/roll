@@ -651,6 +651,9 @@ impl Secrets {
         // may read back (a webhook sealed to their key, a cluster of theirs), so sensitive keys
         // stay out (named under "not synced"; the target keeps what it had).
         let caller = self.sync_caller(&r);
+        if let Err(Error::Forbidden(why)) = &caller {
+            self.note_unreachable(&r.project, &r.info.environment, &r.info.path, &r.info.created_by, &format!("sync:{}", r.info.id), why);
+        }
         let outcome = caller.and_then(|caller| self.push_once(&r, &caller, digest, force));
         let now = self.db.now_ms().unwrap_or(hold - HOLD_MS);
         let (project, id, env, path) = (r.project.as_str(), r.info.id.as_str(), r.info.environment.as_str(), r.info.path.as_str());
@@ -674,7 +677,10 @@ impl Secrets {
                 Ok(o) if !o.keys.is_empty() || force => audit::record(c, self.keys()?, project, &actor, "sync.push", Some(env), Some(path), &o.keys, &o.summary, now)?,
                 Ok(_) => {}
                 // Which keys reached the target before it failed isn't known: the row says so.
-                Err(e) => audit::record(c, self.keys()?, project, &actor, "sync.push", Some(env), Some(path), &[], &clip(format!("{} sync failed (values may have reached the target in part): {e}", r.info.kind)), now)?,
+                Err(e) => {
+                    let event = crate::events::Event::new(crate::events::Kind::SyncFailed, serde_json::json!({ "sync": id, "target": r.info.kind, "reason": clip(e.to_string()) }));
+                    audit::record_event(c, self.keys()?, project, &actor, "sync.push", Some(env), Some(path), &[], &clip(format!("{} sync failed (values may have reached the target in part): {e}", r.info.kind)), now, event)?
+                }
             }
             Ok::<_, Error>(())
         });

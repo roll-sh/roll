@@ -97,6 +97,7 @@ pub fn router(s: Arc<Secrets>) -> Router {
         .route("/v1/secrets/audit/jwks", get(audit_jwks))
         .route("/v1/secrets/audit/key/rotate", post(rotate_audit_key))
         .route(&format!("{P}/audit"), get(audit))
+        .route(&format!("{P}/events"), get(events))
         .route(&format!("{P}/audit/verify"), get(verify_audit))
         .route(&format!("{P}/audit/sinks"), get(sinks).post(create_sink))
         .route(&format!("{P}/audit/sinks/{{id}}"), axum::routing::delete(delete_sink))
@@ -1313,6 +1314,11 @@ async fn answer_value_request(State(s): S, Path(token): Path<String>, parts: Par
     let a: crate::Answer = body(&b)?;
     blocking(s, move |s| s.answer_value_request(&token, a, ip)).await?;
     Ok(StatusCode::NO_CONTENT)
+}
+
+/// `GET …/events?after=&limit=&kinds=&environment=&latest=`: the project's events feed (events.rs).
+async fn events(State(s): S, Who(c): Who, Path(project): Path<String>, Query(q): Query<crate::EventsQuery>) -> crate::Result<Response> {
+    Ok(ok(blocking(s, move |s| s.events(&project, q, &c)).await?))
 }
 
 async fn audit(State(s): S, Who(c): Who, Path(project): Path<String>, Query(q): Query<crate::audit::AuditFilter>) -> crate::Result<Response> {

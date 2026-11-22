@@ -2178,7 +2178,7 @@ impl code_control::SecretEnv for ForCode {
         tokio::task::spawn_blocking(move || {
             let mut out = Vec::new();
             for p in ws.projects_of(roll_workspace::Kind::Repo.as_str(), &r)?.into_iter().filter(|p| secrets.counts_for_repo(p, &r)) {
-                out.extend(secrets.leak_matches(&p, &candidates)?.into_iter().map(|(i, l)| (i, l.key, l.environment, l.path)));
+                out.extend(secrets.leaks_in_code(&p, &candidates, &r)?.into_iter().map(|(i, l)| (i, l.key, l.environment, l.path)));
             }
             Ok(out)
         })

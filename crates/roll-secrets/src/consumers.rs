@@ -291,26 +291,34 @@ impl Secrets {
     fn as_maker(&self, resource: &ResourceRef, reference: &str, maker: &Maker) -> Result<(String, Reference, Caller), Refusal> {
         let r = Reference::required(reference)?;
         let project = self.project_for(resource, r.project.as_deref())?;
+        let out = self.as_maker_in(resource, &project, &r, maker);
+        if let Err(Refusal::MakerUnreachable(why)) = &out {
+            self.note_unreachable(&project, &r.env, &r.path, maker.parts().0, &resource.consumer(), why);
+        }
+        out.map(|c| (project, r, c))
+    }
+
+    fn as_maker_in(&self, resource: &ResourceRef, project: &str, r: &Reference, maker: &Maker) -> Result<Caller, Refusal> {
         let (by, runtime_env) = maker.parts();
         let gone = || Refusal::MakerUnreachable(format!("{by}, who chose it, can no longer reveal {}:{} or can no longer sign in", r.env, r.path));
         let caller = self.maker_caller(by, &resource.consumer()).map_err(|e| match e {
             Error::Forbidden(_) => gone(),
             e => e.into(),
         })?;
-        self.may_reveal_for(&project, &r, &caller).map_err(|e| match e {
+        self.may_reveal_for(project, r, &caller).map_err(|e| match e {
             Refusal::NotAllowed(_) => gone(),
             e => e,
         })?;
-        let Some(env) = runtime_env else { return Ok((project, r, caller.not_runtime())) };
+        let Some(env) = runtime_env else { return Ok(caller.not_runtime()) };
         if r.env != env {
             return Err(Refusal::NotAllowed(format!("{by} chose this for {env}'s runtime, not {}'s", r.env)));
         }
         // While its maker may still reveal what it reads, as they are now (a member removed or
         // demoted, or no longer an admin, stops it at once).
-        if !self.maker_reaches(by, &[(crate::access::Action::Reveal, crate::access::Scope::at(&project, &r.env, &r.path))])? {
+        if !self.maker_reaches(by, &[(crate::access::Action::Reveal, crate::access::Scope::at(project, &r.env, &r.path))])? {
             return Err(gone());
         }
-        Ok((project, r, Caller::consumer(&format!("{} (runtime read for {by})", resource.consumer()))))
+        Ok(Caller::consumer(&format!("{} (runtime read for {by})", resource.consumer())))
     }
 
     /// Whether `caller` may reveal `r`'s folder in `project`. Never says more than a reveal's 403.

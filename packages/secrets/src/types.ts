@@ -374,6 +374,28 @@ export type Approval = { id: string; by?: string[]; until?: number };
 /** `since`: rows at or after this time (ms); `before`: rows older than this id. */
 export type AuditFilter = { env?: string; key?: string; actor?: string; action?: string; before?: number; since?: number; limit?: number; digests?: boolean };
 export type AuditFormat = "csv" | "jsonl";
+/** What a project's events feed says happened (docs/secrets.md, "Events"); a family is `request.*`. */
+export type SecretsEventKind =
+  | "secret.leaked"
+  | "scan.finding"
+  | "rotation.failed"
+  | "request.pending"
+  | "request.decided"
+  | "sync.failed"
+  | "decoy.used"
+  | "maker.unreachable"
+  | "placeholder.echoed"
+  | "placeholder.wrong_consumer"
+  | "placeholder.wrong_host"
+  | "production.unprotected"
+  | "env.deleted"
+  | "project.deleted"
+  | "project.recovered";
+/** One event: `seq` is the audit chain's row number, so events come in commit order. `data` holds names, ids, counts and reasons (always `actor`; `path` and `keys` when the row has them), never a value. */
+export type SecretsEvent = { seq: number; at: number; kind: SecretsEventKind; environment?: string; key?: string; data: Record<string, unknown> };
+/** `latest: true` answers no events and the head (never with `after`); `limit` 1–500 (100). */
+export type EventsQuery = { after?: number; limit?: number; kinds?: (SecretsEventKind | `${string}.*`)[]; environment?: string; latest?: boolean };
+export type EventPage = { events: SecretsEvent[]; next: number };
 /** An audit stream to a SIEM: signed batches of new rows, in order. */
 /** `format`: how a batch goes (`roll` signed JSON; `splunk`, `datadog` and `bearer` carry a token that is never shown). */
 export type SinkFormat = "roll" | "splunk" | "datadog" | "bearer";

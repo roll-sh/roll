@@ -38,6 +38,7 @@ pub mod backup;
 pub mod crypto;
 pub mod dotenv;
 mod envs;
+pub mod events;
 pub mod exports;
 pub mod find;
 mod found;
@@ -89,6 +90,7 @@ pub use crypto::{Keyring, Value};
 pub use audit::{AuditEntry, AuditFilter, VerifyQuery};
 pub use chain::Verification;
 pub use consumers::{Maker, Reference, Refusal, Resolved, ResourceRef};
+pub use events::{EventPage, EventsQuery, FeedEvent};
 pub use envs::{Branch, EnvChange, Ensure, Ensured, Environment, Folder, Import, Kind as EnvironmentKind, NewEnvironment, Policy};
 pub use leaks::Leak;
 pub use found::{FoundStored, FoundTarget};
@@ -525,6 +527,10 @@ impl Secrets {
         db.ensure_schema(audit::SCHEMA)?;
         // The head's MAC (audit.rs, `head_msg`): a head without one isn't roll's.
         db.add_column("audit_heads", "mac", "TEXT")?;
+        // The events feed (events.rs): a row's event, written with it.
+        db.add_column("audit", "event", "TEXT")?;
+        db.add_column("audit", "event_data", "TEXT")?;
+        db.ensure_schema(events::SCHEMA)?;
         // Workload identities (identities.rs); their logins' tokens are roll-access's.
         db.ensure_schema(identities::SCHEMA)?;
         // Secrets' own `rlst_` tokens are gone (roll-access's grants instead); never on main.

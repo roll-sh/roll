@@ -364,7 +364,8 @@ impl Secrets {
                 params![id, env.id, path, message, caller.principal, now, base_seq, json(&ops).into_bytes(), json(&diff), project],
             )?;
             let keys: Vec<String> = diff.iter().map(|d| d.key.clone()).collect();
-            audit::record(c, self.keys()?, project, caller, "request.open", Some(slug), Some(&path), &keys, &format!("opened {id}: {}", crate::write::summarize(&diff)), now)?;
+            let event = crate::events::Event::new(crate::events::Kind::RequestPending, serde_json::json!({ "request": id, "type": "change" }));
+            audit::record_event(c, self.keys()?, project, caller, "request.open", Some(slug), Some(&path), &keys, &format!("opened {id}: {}", crate::write::summarize(&diff)), now, event)?;
             // The approvers hear about it (delivered by the sweeper, never from here).
             let notify: Option<i64> = c.query_row("SELECT 1 FROM environments WHERE id = ? AND notify_url IS NOT NULL", [&env.id], |r| r.get(0)).optional()?;
             if notify.is_some() {
@@ -430,7 +431,15 @@ impl Secrets {
                 "open"
             };
             c.execute("UPDATE requests SET reviews = ?, state = ? WHERE id = ?", params![json(&reviews), state, id])?;
-            audit::record(c, self.keys()?, project, caller, &format!("request.{}", v.verdict), Some(slug), Some(&r.path), &[], &format!("{}d {id}", v.verdict.trim_end_matches('e')), now)?;
+            let (action, summary) = (format!("request.{}", v.verdict), format!("{}d {id}", v.verdict.trim_end_matches('e')));
+            // Decided once its state moves: an approval that leaves it waiting on more isn't.
+            match state {
+                "open" => audit::record(c, self.keys()?, project, caller, &action, Some(slug), Some(&r.path), &[], &summary, now)?,
+                _ => {
+                    let event = crate::events::Event::new(crate::events::Kind::RequestDecided, serde_json::json!({ "request": id, "type": "change", "state": state }));
+                    audit::record_event(c, self.keys()?, project, caller, &action, Some(slug), Some(&r.path), &[], &summary, now, event)?
+                }
+            }
             view(c, &env, load(c, &env, id)?, &st)
         })
     }
@@ -532,7 +541,8 @@ impl Secrets {
                 return Err(Error::Conflict("conflict", format!("{id} is {}", r.state)));
             }
             c.execute("UPDATE requests SET state = 'closed' WHERE id = ?", [id])?;
-            audit::record(c, self.keys()?, project, caller, "request.close", Some(slug), Some(&r.path), &[], &format!("closed {id}"), now)?;
+            let event = crate::events::Event::new(crate::events::Kind::RequestDecided, serde_json::json!({ "request": id, "type": "change", "state": "closed" }));
+            audit::record_event(c, self.keys()?, project, caller, "request.close", Some(slug), Some(&r.path), &[], &format!("closed {id}"), now, event)?;
             view(c, &env, load(c, &env, id)?, &st)
         })
     }

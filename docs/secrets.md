@@ -2755,6 +2755,7 @@ roll secrets history [KEY]   roll secrets rollback --to SEQ | --at TIME
 roll secrets diff    --from development --to staging | --file .env   # two environments, or a local copy
 roll secrets promote --from development --to staging [KEY…]
 roll secrets audit   [--key KEY] [--format csv|jsonl] | verify [--since TIME] [--file F --jwks F]
+roll secrets events  [--kinds K,…] [--env ENV] [--after SEQ] [--follow]   # the events feed ("Events")
 roll secrets syncs   ls | add KIND --target name=value… | run ID | rm ID
 roll secrets sinks   ls | add URL [--from-start] [--format splunk|datadog|bearer] (token on stdin) | rm ID
 roll secrets purge   KEY [--before N]        roll secrets retention 365|forever
@@ -5290,6 +5291,58 @@ every delivery), writes each batch as an object `roll-secrets/audit/<sink>/<deli
   audit `id`, through roll streams in process: consumers react as it's written. A retried batch can
   produce an event again, so a consumer dedupes by key.
 
+### Events
+
+`GET …/events?after=<seq>&limit=&kinds=&environment=` is what happened in a project that someone (an
+agent, a script) acts on, in order after a cursor: a follower asks with its last `next` instead of
+polling health or the audit log. roll MCP's Events serve it as `secrets.event` (poll, push and
+webhooks, with a `project` argument; docs/mcp.md, "Events"). It answers
+`{events: [{seq, at, kind, environment?, key?, data}], next}`; `?latest=1` (never with `after`: 400)
+answers `{events: [], next}` at the head, for a follower that starts from now. `limit` is 1–500
+(default 100).
+
+**The cursor.** An event is an audit row that carries one (`audit.event`, `audit.event_data`), so
+`seq` is the row's number in the project's chain ("Tamper evidence"): taken from `audit_heads` in
+the row's own write, under the head's row lock (on Postgres a second writer waits for it, or loses a
+serializable race and runs again; on SQLite there's one writer). Rows therefore commit in `seq`
+order, and a follower past 7 has already been able to see 6. Never number events from a Postgres
+sequence: sequence values commit out of order, and a follower would skip one forever. `next` is past
+the rows read, the ones a filter left out too. The event's kind and data aren't in the row's hash;
+the row is. `nodes.rs`'s `two_nodes_writing_events_never_leave_a_gap_a_follower_has_passed` checks it
+on Postgres.
+
+**Filtered by the route.** `kinds` (exact, or a family as `request.*`) and `environment` (which needs
+`read` there) are applied here, and every event in an environment the caller may not read (its
+grant asked for each one, as the audit log does) is left out, so roll-access lets a token limited to
+some environments call it (`filters_itself`). `decoy.used` is only for those who see decoys. A
+deleted project's feed stays readable through its recovery window, so a follower sees
+`project.deleted` and `project.recovered`.
+
+**Never a value.** `data` holds names, ids, counts and reasons, and always `actor`; `path` and `keys`
+(when there's more than one; one is `key`) come from the row. Never a value, a hash of one, or its
+length.
+
+| Kind | When | `data` |
+| --- | --- | --- |
+| `secret.leaked` | a stored value turned up in a roll code repository (a change's added lines or a scan; in the project holding the value, once a day for the same keys and repo), or GitHub's secret scanning found a placeholder (`secrets.placeholders.end`) | `repo` (and `project`, the repo's, when the value came from another's shared folder), or `placeholder`, `consumer`, `reason` |
+| `scan.finding` | `roll secrets scan` or roll MCP's credential guard (`POST …/leaks`) matched values: a row per folder | `candidates`, `matched`, `guard` |
+| `rotation.failed` | a managed key's scheduled rotation failed: once as a failing run starts (health's `rotation_failing` until one works) | `reason` |
+| `request.pending` | a change request or a secret request opened | `request`, `type` (`change` or `value`), `expires_at` (a secret request's) |
+| `request.decided` | a change request approved or rejected (once its state moves) or closed; a secret request answered or cancelled | `request`, `type`, `state` |
+| `sync.failed` | a sync's push failed | `sync`, `target`, `reason` |
+| `decoy.used` | a decoy's credential was used (as often as its alert) | `decoy`, `route`, `ip` |
+| `maker.unreachable` | whoever chose a reference, set up placeholders or made a sync can no longer reach it (once a day per maker and consumer) | `maker`, `consumer`, `reason` |
+| `placeholder.echoed` | a host echoed a placeholder's value back | `placeholder`, `consumer`, `host` |
+| `placeholder.wrong_consumer` | another consumer's proxy sent a placeholder | `placeholder`, `consumer`, `by`, `more_by`, `count` |
+| `placeholder.wrong_host` | a placeholder went to hosts its key isn't bound to | `placeholder`, `consumer`, `hosts`, `more_hosts`, `count` |
+| `production.unprotected` | `production` went from protected to not (health's `production_unprotected`) | |
+| `env.deleted` | a standard environment was deleted (ephemeral ones, previews', aren't events) | |
+| `project.deleted`, `project.recovered` | the workspace project was deleted (its recovery window starts), or recovered | `purge_at` (deleted) |
+
+`env.recovered` comes with environments' recovery window. Rows that don't happen once (a leak found
+on every check of the same change, a maker noticed on every use) are deduplicated through
+`event_marks`, claimed in the row's own write, so two nodes never both write one.
+
 ### Tamper evidence
 
 Audit rows sit in the same database as everything else, so someone who can write it could edit or
@@ -5540,6 +5593,7 @@ isn't in the workspace is 404.
 | `PUT /identities/{id}/jwks` | `{jwks}` | `Identity` (admin; a person's): its pinned keys replaced, its id kept (400 for an `aws` one) |
 | `POST /v1/secrets/login` | `{identity, token}` or `{identity, aws: {method, url, headers, body}}` | `{token, expires_at, project, identity}` (public; `aws`: a signed `GetCallerIdentity`, "AWS IAM") |
 | `GET /audit?env=&key=&actor=&action=&before=&since=&limit=&digests=&format=` | | `AuditEntry[]` newest first, or CSV/JSONL with `format`; `digests=false` leaves out `audit.digest` rows |
+| `GET /events?after=&limit=&kinds=&environment=&latest=` | | `{events: SecretsEvent[], next}` in commit order after the cursor (`limit` 1–500, default 100; `kinds` comma-separated, a family as `request.*`, 400 for an unknown one; `environment` needs read there); `latest=1` answers `{events: [], next}` at the head, 400 with `after` ("Events") |
 | `GET /required` | | `Required[]` |
 | `PUT /required` | `Required[]` | `Required[]` (replaces the list; `admin`) |
 | `GET /shares` | | `Share[]` newest first |
@@ -5804,8 +5858,9 @@ tokens(id PK, project_id, name, hash UNIQUE, prefix, environments, paths, action
 identities(id PK, project_id, name, issuer, audience, subject, claims, environments, paths,
        actions, ttl_minutes, created_at, created_by, last_used_at, last_subject)
 audit(id INTEGER PK, project_id, at, actor, action, env_id, path, keys, summary, ip, approval,
-      seq, hash, digest)  -- UNIQUE (project_id, seq); digest: an audit.digest row's JWS
+      seq, hash, digest, event, event_data)  -- UNIQUE (project_id, seq); digest: an audit.digest row's JWS; event: the feed's kind ("Events")
 audit_heads(project_id PK, seq, hash, at, digest_seq, digest_at, start_seq, mac)  -- mac: HMAC under ROLL_SECRET_KEY
+event_marks(project_id, mark, at, PRIMARY KEY (project_id, mark))  -- events written once a day
 audit_keys(kid PK, sealed_dek, private BLOB, x, legacy, created_at, retired_at, pulled_at)
       -- the digest key (Ed25519): private sealed with kid + legacy as AAD, wiped when pulled;
       -- legacy: issuer kids whose RS256 digests from before it count

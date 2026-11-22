@@ -331,10 +331,20 @@ impl Secrets {
         let failure = failure.map(|f| f.chars().take(300).collect::<String>());
         let at = failure.as_ref().map(|_| now);
         let done = self.db.write(|c| {
+            let was: Option<Option<String>> = c
+                .query_row("SELECT rotation_error FROM secrets WHERE project_id = ? AND path = ? AND key = ? AND owner = '' AND env_id = (SELECT id FROM environments WHERE project_id = ? AND slug = ?)", params![project, path, key, project, slug], |r| r.get(0))
+                .optional()?;
             c.execute(
                 "UPDATE secrets SET rotation_error = ?, rotation_failed_at = ? WHERE project_id = ? AND path = ? AND key = ? AND owner = '' AND env_id = (SELECT id FROM environments WHERE project_id = ? AND slug = ?)",
                 params![failure, at, project, path, key, project, slug],
-            )
+            )?;
+            // The feed hears of a failing run once, as it starts (health lists it until one works).
+            if let (Some(why), Some(None)) = (&failure, was) {
+                let event = crate::events::Event::new(crate::events::Kind::RotationFailed, serde_json::json!({ "reason": why }));
+                let keys = [key.to_string()];
+                crate::audit::record_event(c, self.keys()?, project, &Caller::consumer("roll:rotations"), "secrets.rotation_failed", Some(slug), Some(path), &keys, &format!("{key}'s scheduled rotation failed: {why}"), now, event)?;
+            }
+            Ok::<_, Error>(())
         });
         if let Err(e) = done {
             tracing::warn!(%project, env = %slug, %key, "keeping a rotation's outcome failed: {e}");
