@@ -864,8 +864,9 @@ through its proxy ("Roll only", a fork's default) resolves with placeholders for
 operator is no one, so rules it saved make none). When that person may no longer reveal there,
 it resolves as without placeholders and says "placeholders off: …; a writer saving the rules
 again turns them back on" in its activity, never with anyone else's rights. rolld's
-`SecretsIntercepts` asks `intercept_ca` for the consumer (reused while it lives, asked again
-after an hour so newly bound hosts are covered; none while the preview holds no placeholder),
+`SecretsIntercepts` asks `intercept_ca` for the consumer (reused while it's live and more than
+3 h from its end: a new CA restarts the preview's services, and roll secrets ends one that no
+longer fits its bound hosts; none while the preview holds no placeholder),
 `intercept_ca_live` on every connection, and roll secrets' `proxy::filter` for each request; the
 preview's teardown calls `end_consumer`, ending its placeholders and CAs at once. Each preview's
 socket lives under `<home>/previews/intercept`. `a_roll_only_preview_takes_placeholders_made_by_who_saved_its_rules`.
