@@ -1290,7 +1290,8 @@ deterministic (#396).
    web crawler (item 13) on this runner, and alerts on failed syncs through roll's webhooks or
    chat ops (Algolia's connectors notify on failed runs). A whole-product review on 2026-11-22
    found connectors refusing private addresses but not reindex's deny rules, and no per-owner cap on
-   remote reindex slots: being fixed together as one node-wide egress check and owner-fair slots.
+   remote reindex slots: fixed together as one node-wide egress check (`search_es::egress`) and
+   owner-fair slots (`search_es::slots`), "Migrating into roll" above.
 8. **Semantic search with no keys** (built in #563, in review: roll's float build of E5 equals
    Elasticsearch's float deployment, cosine 1.000000 on 64 of 64 cases; Elastic Cloud's `.multilingual-e5-small-elasticsearch`
    and Elastic Inference Service, Typesense's and Meilisearch's built-in embedding models,
