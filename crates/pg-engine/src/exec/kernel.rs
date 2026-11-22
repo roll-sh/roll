@@ -1188,3 +1188,45 @@ impl K {
         Some(truthy(&self.run(row)?) == Some(true))
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::{NumOp, num_op};
+
+    /// `num_op`'s fast paths give what the checked i128 arithmetic gives, overflows (None)
+    /// included, around the i64 and i128 limits and numeric's scale limit.
+    #[test]
+    fn num_op_is_the_checked_arithmetic() {
+        let reference = |op: NumOp, x: i128, sx: u32, y: i128, sy: u32| -> Option<(i128, u32)> {
+            let pow = |n: u32| 10i128.checked_pow(n);
+            Some(match op {
+                NumOp::Add | NumOp::Sub => {
+                    let s = sx.max(sy);
+                    let (x, y) = (x.checked_mul(pow(s - sx)?)?, y.checked_mul(pow(s - sy)?)?);
+                    (if op == NumOp::Add { x.checked_add(y)? } else { x.checked_sub(y)? }, s)
+                }
+                NumOp::Mul => {
+                    let s = sx + sy;
+                    if s as i64 > crate::types::numeric::DSCALE_MAX {
+                        return None;
+                    }
+                    (x.checked_mul(y)?, s)
+                }
+            })
+        };
+        let big = [0, 1, -1, 7, 10_000, i64::MAX as i128, i64::MIN as i128, i64::MAX as i128 + 1, i64::MIN as i128 - 1, 1 << 100, -(1 << 100), i128::MAX, i128::MIN];
+        let scales = [0, 2, 4, 18, 19, 38, 39, 40, 16383];
+        for op in [NumOp::Add, NumOp::Sub, NumOp::Mul] {
+            for &x in &big {
+                for &y in &big {
+                    for &sx in &scales {
+                        for &sy in &scales[..4] {
+                            assert_eq!(num_op(op, x, sx, y, sy), reference(op, x, sx, y, sy), "{op:?} {x} {sx} {y} {sy}");
+                            assert_eq!(num_op(op, y, sy, x, sx), reference(op, y, sy, x, sx), "{op:?} {y} {sy} {x} {sx}");
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
