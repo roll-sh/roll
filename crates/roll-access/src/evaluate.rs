@@ -326,7 +326,12 @@ async fn decide(access: Arc<Access>, req: Request, next: Next) -> Response {
     let lookup = {
         let (a, t, id) = (access.clone(), token.clone(), acting.clone());
         blocking(move || match id {
-            Some(id) => Ok(a.store.get(&id).ok().filter(|g| g.usable(code_sql::now_ms()))),
+            // Narrowed to reading, as a read-only secret's grant is: roll's work for a grant only
+            // reads, and never sees a credential its token could reveal.
+            Some(id) => Ok(a.store.get(&id).ok().filter(|g| g.usable(code_sql::now_ms())).map(|mut g| {
+                g.read_only();
+                g
+            })),
             None => a.store.by_secret(&t),
         })
         .await
@@ -728,7 +733,9 @@ async fn judge(mut ctx: Ctx, req: Request, next: Next, j: Judge) -> Response {
     ctx.about = lent.as_ref().map(|(p, _)| *p);
     // An agent (a call through roll's MCP server) asks a person first for what the policy says
     // agents always ask about, whatever its token allows (a session is a person, never an agent).
-    if outcome == Outcome::Allow && !session && ctx.mcp.as_ref().is_some_and(|m| !m.quiet) {
+    // A quiet call (a completion, a webhook delivery reading for its grant) asks nobody: it's
+    // refused instead (`would_ask`), never let through.
+    if outcome == Outcome::Allow && !session && ctx.mcp.is_some() {
         let env = match &target {
             Target::One(r) => r.environment.clone(),
             _ => None,

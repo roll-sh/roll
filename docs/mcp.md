@@ -170,19 +170,27 @@ most 100) and `maxAgeMs` are honoured, events older than `maxAgeMs` skipped and 
 A full page (`hasMore`) means poll again at once; otherwise after `nextPollMs` (15 s).
 
 Webhook mode (ChatGPT's): a token's or an OAuth connection's subscription (the operator's own and a
-person's session can't subscribe: roll looks the connection up again at every delivery) names a
-callback (`https`, a public host, through roll-net's guard with no redirects) and the client's
-`whsec_` secret (24-64 bytes; sealed, never shown again). Before roll keeps one, the callback
-proves it wants that connection's deliveries: a signed `{"type":"verification","challenge"}` it
-echoes in a 2xx answer, once per connection and URL, at most 5 a connection a minute (else
-`-32027 CallbackEndpointError` with a category, never what the endpoint said). A subscription is
+person's session can't subscribe: roll looks the connection up again at every delivery; nor can a
+connection held to some addresses, since its deliveries go elsewhere) names a callback (`https`, a
+public host, through roll-net's guard with no redirects, on a transport of its own:
+`ROLL_MCP_EVENTS_ALLOW_PRIVATE` is for local development, apart from audit sinks' switch) and the
+client's `whsec_` secret (24-64 bytes; sealed to the subscription, never shown again). Subscribing
+reads the feed once as the agent, so what would refuse or ask a person (the token's rules, the
+policy's `agents_ask`) refuses there, before anything is kept. Then the callback proves it wants that
+connection's deliveries: a signed `{"type":"verification","challenge"}` it echoes in a 2xx answer,
+good for a day per connection and URL, at most 5 a connection a minute on a node, each refusal in
+the audit log (else `-32027 CallbackEndpointError` with a category, never what the endpoint said). A subscription is
 keyed by its connection, URL, event and arguments (canonical JSON), so subscribing again refreshes
 it (the same `sub_…` id, its cursor kept, `deliveryStatus` answered); it lives at most an hour
-unless refreshed, 20 a connection. Every 15 seconds each node claims due subscriptions (one node
-delivers each) and reads each one's feed once a minute through the gated router as its grant
-(`roll_auth::ActAs`: an in-process request the evaluator resolves by the grant's id, with every
-check its token would get, audited as `events/deliver:<name>`, quiet so nothing asks a person; a
-read for it isn't the token's use, so a subscription never keeps a token from idling). What its
+unless refreshed, 20 a connection. Every 15 seconds each node claims up to 16 due subscriptions to
+events whose products it runs (one node delivers each; only the claim's holder writes back, so a
+slow round never moves a cursor back), 8 at a time, 40 seconds each, and reads each one's feed once
+a minute through the gated router as its grant (`roll_auth::ActAs`: an in-process request, never
+one off the network, that the evaluator resolves by the grant's id with every check its token would
+get, narrowed to reading as a read-only secret's grant is, audited as `events/deliver:<name>`, and
+quiet: what would ask a person, the policy's `agents_ask` included, is refused, never let through; a
+read for it isn't the token's use, so a subscription never keeps a token from idling). Lockdown is
+the subscription's or the policy's now. What its
 filter keeps is POSTed in order, one event a request, signed as Standard Webhooks (`webhook-id`
 the same on every retry of an event, `webhook-timestamp`, `webhook-signature: v1,…`, both secrets
 for 5 minutes after a new one, `X-MCP-Subscription-Id`); the cursor moves past what the callback

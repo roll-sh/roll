@@ -1109,7 +1109,7 @@ impl roll_access::sinks::SinkTransport for Receiver {
 async fn an_agent_subscribes_a_webhook() {
     let d = Daemon::with_products(vec!["postgres".into(), "apps".into()]);
     let posts = Arc::new(std::sync::Mutex::new(Vec::new()));
-    let _ = d.access.sinks.set(Arc::new(Receiver(posts.clone())));
+    let _ = d.access.event_hooks.set(Arc::new(Receiver(posts.clone())));
     let token = d.token(json!([{ "product": "apps", "resources": "*", "actions": { "read": "allow" } }])).await;
     let send = |token: &str, method: &str, mut params: Value| {
         params["_meta"] = json!({ "io.modelcontextprotocol/protocolVersion": "2026-07-28", "io.modelcontextprotocol/clientInfo": { "name": "hooks", "version": "1" }, "io.modelcontextprotocol/clientCapabilities": { "extensions": { "io.modelcontextprotocol/events": {} } } });
@@ -1154,7 +1154,7 @@ async fn an_agent_subscribes_a_webhook() {
     let from_start = send(&token, "events/subscribe", json!({ "name": "apps.event", "arguments": { "kinds": ["deploy.*"] }, "cursor": "a1:0", "delivery": { "mode": "webhook", "url": "https://hooks.example.com/good", "secret": secret } })).await;
     assert!(from_start["error"].is_null(), "{from_start}");
     let before = posts.lock().unwrap().len();
-    let round = roll_mcp::events::deliver(d.router.clone(), d.access.clone()).await;
+    let round = roll_mcp::events::deliver(d.router.clone(), d.access.clone(), &["apps".to_string()]).await;
     assert_eq!((round.delivered, round.failed, round.ended), (2, 0, 0), "{round:?}");
     {
         let sent = posts.lock().unwrap();
@@ -1175,7 +1175,7 @@ async fn an_agent_subscribes_a_webhook() {
     let (_, _, list) = d.http(OPERATOR, Method::GET, "/v1/access/tokens", None).await;
     let newest = list.as_array().unwrap()[0]["id"].as_str().unwrap().to_string();
     d.http(OPERATOR, Method::DELETE, &format!("/v1/access/tokens/{newest}"), None).await;
-    let round = roll_mcp::events::deliver(d.router.clone(), d.access.clone()).await;
+    let round = roll_mcp::events::deliver(d.router.clone(), d.access.clone(), &["apps".to_string()]).await;
     assert_eq!(round.ended, 1, "{round:?}");
     let last: Value = serde_json::from_slice(&posts.lock().unwrap().last().unwrap().1).unwrap();
     assert_eq!((last["type"].as_str(), last["error"]["code"].as_i64()), (Some("terminated"), Some(-32024)), "{last}");
@@ -1185,4 +1185,8 @@ async fn an_agent_subscribes_a_webhook() {
     assert!(ended["error"].is_null() && ended["result"]["resultType"] == "complete", "{ended}");
     assert_eq!(unsub("https://hooks.example.com/good").await["error"]["code"], -32023);
     assert_eq!(unsub("https://hooks.example.com/bad").await["error"]["code"], -32023, "the refused one was never kept");
+    // What the policy has agents ask a person about is never delivered unasked: subscribing reads
+    // the feed once as the agent, and that asks, so nothing is kept.
+    assert_eq!(d.http(OPERATOR, Method::PUT, "/v1/access/policy", Some(json!({ "agents_ask": [{ "product": "apps" }] }))).await.0, StatusCode::OK);
+    assert_eq!(sub(&token, "https://hooks.example.com/good", secret).await["error"]["code"], -32024);
 }

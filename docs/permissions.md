@@ -994,7 +994,12 @@ MCP clients for themselves, as GitHub's fine-grained tokens act for the person w
 - **It acts as them, never as more.** On every request the evaluator looks the person up as they
   are now (`roll_auth::Sessions::person`, never cached): disabled or gone, the token answers 401.
   A product's own background work that looks a stored grant up (`roll_auth::Grants::grant`: a
-  sync a token made) gets `None` for it then too (`Sessions::person_now`).
+  sync a token made) gets `None` for it then too (`Sessions::person_now`), as it does for an OAuth
+  connection the policy's `oauth_clients` no longer lists. roll's own work for a grant that must be
+  decided as the grant's request (MCP Events' webhook deliveries reading their feed) goes through
+  the gate in process with `roll_auth::ActAs(<grant id>)`: never on a request off the network, never
+  with an `Authorization` header; the evaluator looks the grant up by id, as usable as its token is
+  now, narrows it to reading, and decides and audits as for that token (not counted as its use).
   An admin's token runs as the operator's, narrowed. Anyone else's token runs as their session
   would: only routes their session may call (the gate's `User`, `UserOrCredential`, `Product` and
   `Public` rules, which it hands the evaluator as `roll_auth::RouteAccess`), as them
@@ -1049,7 +1054,8 @@ MCP clients for themselves, as GitHub's fine-grained tokens act for the person w
   `production`): only requests made through roll's MCP server, so CI and scripts calling the API
   aren't held; an approval already given still lets the call through. `mcp_lockdown` and
   `mcp_read_only` hold every token's and OAuth connection's MCP to lockdown or to reading,
-  whatever its URL asks (the operator's own connection isn't held). `oauth_clients` lists the
+  whatever its URL asks (the operator's own connection isn't held). A quiet call (a completion, an MCP Events
+  webhook delivery reading for its grant) that `agents_ask` covers is refused, nobody asked. `oauth_clients` lists the
   OAuth clients that may connect (empty: any): a host (`claude.ai`, `*.example.com`), an exact
   `https://` URL, `localhost`, an app scheme (`cursor:`) or `device`; a registered client matches
   only when every redirect it registered does (docs/mcp.md, "Authorization"). One left out gets

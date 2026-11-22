@@ -63,6 +63,8 @@ const HOLD_MS: i64 = 2 * 60_000;
 /// After a delivery fails, the wait before trying again; failing this long, it's dropped.
 const RETRY_MS: i64 = 5 * 60_000;
 const GIVE_UP_MS: i64 = 24 * 3_600_000;
+/// A callback's proof lasts a day: one whose domain now points elsewhere proves it again.
+const VERIFIED_FOR_MS: i64 = 24 * 3_600_000;
 /// Callback URLs one connection may ask roll to verify a minute: each is one POST to an address it
 /// chose, so a token can't make roll knock on many.
 const VERIFIES_PER_MINUTE: usize = 5;
@@ -166,12 +168,25 @@ const COLUMNS: &str = "id, grant_id, name, arguments, url, cursor, lockdown, exp
 
 impl Access {
     fn event_transport(&self) -> Result<Arc<dyn SinkTransport>> {
-        self.sinks.get().cloned().ok_or_else(|| Error::BadRequest("webhook delivery isn't set up on this server".into()))
+        self.event_hooks.get().cloned().ok_or_else(|| Error::BadRequest("webhook delivery isn't set up on this server".into()))
     }
 
-    /// Whether `url` may be a callback (https and public; what rolld's transport allows).
+    /// Whether `url` may be a callback (https and public; what rolld's transport for them allows).
     pub fn event_url_ok(&self, url: &str) -> Result<()> {
-        self.event_transport()?.check(url).map_err(Error::BadRequest)
+        self.event_transport()?.check(url).map_err(|_| Error::BadRequest("delivery.url is https on a public host".into()))
+    }
+
+    /// Whether this grant may have webhook deliveries: not one held to some addresses (a delivery
+    /// goes to an address its list doesn't name, and roll's reads for it come from none).
+    pub fn event_subscriber_ok(&self, grant_id: &str) -> Result<()> {
+        let g = self.store.get(grant_id)?;
+        if g.ip_allow.is_empty() { Ok(()) } else { Err(Error::Forbidden("a connection held to some addresses gets no webhook deliveries: poll instead".into())) }
+    }
+
+    /// How many live subscriptions this grant holds.
+    pub fn event_subs_held(&self, grant_id: &str) -> Result<i64> {
+        let now = code_sql::now_ms();
+        Ok(self.store.db.query("SELECT COUNT(*) FROM mcp_event_subs WHERE grant_id = ? AND expires_at > ?", params![grant_id, now], |r| r.get(0))?.into_iter().next().unwrap_or(0))
     }
 
     /// The subscription a key names, if it's live.
@@ -198,9 +213,9 @@ impl Access {
                 Some(old) => {
                     let rotated = t.open(&id, &old).map(|o| o != n.secret).unwrap_or(true);
                     if rotated {
-                        c.execute("UPDATE mcp_event_subs SET old_secret = secret, old_until = ?, secret = ?, expires_at = ?, lockdown = ? WHERE id = ?", params![now + ROTATION_GRACE_MS, sealed, expires, n.lockdown, id])?;
+                        c.execute("UPDATE mcp_event_subs SET old_secret = secret, old_until = ?, secret = ?, expires_at = ?, lockdown = ? WHERE id = ? AND grant_id = ?", params![now + ROTATION_GRACE_MS, sealed, expires, n.lockdown, id, n.grant_id])?;
                     } else {
-                        c.execute("UPDATE mcp_event_subs SET expires_at = ?, lockdown = ? WHERE id = ?", params![expires, n.lockdown, id])?;
+                        c.execute("UPDATE mcp_event_subs SET expires_at = ?, lockdown = ? WHERE id = ? AND grant_id = ?", params![expires, n.lockdown, id, n.grant_id])?;
                     }
                 }
                 None => {
@@ -256,7 +271,8 @@ impl Access {
 
     /// Whether this connection's callback URL proved it wants deliveries.
     pub fn event_receiver_verified(&self, grant_id: &str, url: &str) -> Result<bool> {
-        Ok(self.store.db.query("SELECT 1 FROM mcp_event_receivers WHERE grant_id = ? AND url = ?", params![grant_id, url], |_| Ok(()))?.into_iter().next().is_some())
+        let since = code_sql::now_ms() - VERIFIED_FOR_MS;
+        Ok(self.store.db.query("SELECT 1 FROM mcp_event_receivers WHERE grant_id = ? AND url = ? AND verified_at > ?", params![grant_id, url, since], |_| Ok(()))?.into_iter().next().is_some())
     }
 
     /// Ask `url` to prove it wants this connection's deliveries: a signed
@@ -300,22 +316,33 @@ impl Access {
 pub struct Claimed {
     pub sub: EventSub,
     pub keys: Vec<Vec<u8>>,
+    /// The claim's hold: what this round writes back only while it's still the one holding it.
+    pub claim: i64,
 }
 
 impl Access {
-    /// Claim up to `limit` subscriptions due a read, in one write, so no two nodes deliver one.
-    pub fn claim_event_subs(&self, limit: i64) -> Result<Vec<Claimed>> {
+    /// Claim up to `limit` subscriptions to these events (the ones whose product runs here) due a
+    /// read, in one write, so no two nodes deliver one.
+    pub fn claim_event_subs(&self, limit: i64, names: &[&str]) -> Result<Vec<Claimed>> {
+        if names.is_empty() {
+            return Ok(Vec::new());
+        }
         let t = self.event_transport()?;
         let now = code_sql::now_ms();
+        let claim = now + HOLD_MS;
+        let marks = vec!["?"; names.len()].join(", ");
         let rows: Vec<(EventSub, String, Option<String>, Option<i64>)> = self.store.db.write(|c| {
             c.execute("DELETE FROM mcp_event_subs WHERE expires_at <= ?", [now])?;
+            let mut args: Vec<code_sql::Value> = vec![code_sql::Value::Int(now), code_sql::Value::Int(now)];
+            args.extend(names.iter().map(|n| code_sql::Value::Text(n.to_string())));
+            args.push(code_sql::Value::Int(limit));
             let due = c.query(
-                &format!("SELECT {COLUMNS}, secret, old_secret, old_until FROM mcp_event_subs WHERE running_until < ? AND next_at <= ? ORDER BY next_at LIMIT ?"),
-                params![now, now, limit],
+                &format!("SELECT {COLUMNS}, secret, old_secret, old_until FROM mcp_event_subs WHERE running_until < ? AND next_at <= ? AND name IN ({marks}) ORDER BY next_at LIMIT ?"),
+                args.as_slice(),
                 |r| Ok((row(r)?, r.get::<_, String>(11)?, r.get::<_, Option<String>>(12)?, r.get::<_, Option<i64>>(13)?)),
             )?;
             for (s, ..) in &due {
-                c.execute("UPDATE mcp_event_subs SET running_until = ? WHERE id = ?", params![now + HOLD_MS, s.id])?;
+                c.execute("UPDATE mcp_event_subs SET running_until = ? WHERE id = ?", params![claim, s.id])?;
             }
             Ok::<_, Error>(due)
         })?;
@@ -329,26 +356,29 @@ impl Access {
                 {
                     keys.push(k);
                 }
-                Claimed { sub, keys }
+                Claimed { sub, keys, claim }
             })
             .collect())
     }
 
     /// A claimed subscription's round: where it got to, and whether a delivery failed (`error`, a
     /// category). A success clears the failure; one failing a day is dropped.
-    pub fn event_sub_done(&self, id: &str, cursor: &str, delivered: bool, error: Option<&str>) -> Result<()> {
-        let now = code_sql::now_ms();
+    /// A claimed subscription's round: where it got to, and whether a delivery failed (`error`, a
+    /// category). A success clears the failure; one failing a day is dropped. Written only while
+    /// this round still holds the claim (a slower node's round never moves a cursor back).
+    pub fn event_sub_done(&self, c: &Claimed, cursor: &str, delivered: bool, error: Option<&str>) -> Result<()> {
+        let (id, claim, now) = (&c.sub.id, c.claim, code_sql::now_ms());
         self.store.db.write(|c| {
             match error {
                 None => c.execute(
-                    "UPDATE mcp_event_subs SET cursor = ?, running_until = 0, next_at = ?, last_error = NULL, failed_since = NULL, last_delivery_at = CASE WHEN ? THEN ? ELSE last_delivery_at END WHERE id = ?",
-                    params![cursor, now + READ_EVERY_MS, delivered, now, id],
+                    "UPDATE mcp_event_subs SET cursor = ?, running_until = 0, next_at = ?, last_error = NULL, failed_since = NULL, last_delivery_at = CASE WHEN ? THEN ? ELSE last_delivery_at END WHERE id = ? AND running_until = ?",
+                    params![cursor, now + READ_EVERY_MS, delivered, now, id, claim],
                 )?,
                 Some(e) => {
-                    c.execute("DELETE FROM mcp_event_subs WHERE id = ? AND failed_since IS NOT NULL AND failed_since < ?", params![id, now - GIVE_UP_MS])?;
+                    c.execute("DELETE FROM mcp_event_subs WHERE id = ? AND running_until = ? AND failed_since IS NOT NULL AND failed_since < ?", params![id, claim, now - GIVE_UP_MS])?;
                     c.execute(
-                        "UPDATE mcp_event_subs SET cursor = ?, running_until = 0, next_at = ?, last_error = ?, failed_since = COALESCE(failed_since, ?), last_delivery_at = CASE WHEN ? THEN ? ELSE last_delivery_at END WHERE id = ?",
-                        params![cursor, now + RETRY_MS, e, now, delivered, now, id],
+                        "UPDATE mcp_event_subs SET cursor = ?, running_until = 0, next_at = ?, last_error = ?, failed_since = COALESCE(failed_since, ?), last_delivery_at = CASE WHEN ? THEN ? ELSE last_delivery_at END WHERE id = ? AND running_until = ?",
+                        params![cursor, now + RETRY_MS, e, now, delivered, now, id, claim],
                     )?
                 }
             };
@@ -356,10 +386,18 @@ impl Access {
         })
     }
 
-    /// End a subscription roll can't deliver any more (its grant's access ended, its endpoint said
-    /// it's gone).
-    pub fn drop_event_sub(&self, id: &str) -> Result<()> {
-        self.store.db.write(|c| Ok::<_, Error>(c.execute("DELETE FROM mcp_event_subs WHERE id = ?", [id]).map(|_| ())?))
+    /// A claimed subscription read nothing this round (its feed's product was busy): the next
+    /// read waits as usual, its delivery state as it was.
+    pub fn event_sub_retry(&self, c: &Claimed) -> Result<()> {
+        let (id, claim, next) = (&c.sub.id, c.claim, code_sql::now_ms() + READ_EVERY_MS);
+        self.store.db.write(|c| Ok::<_, Error>(c.execute("UPDATE mcp_event_subs SET running_until = 0, next_at = ? WHERE id = ? AND running_until = ?", params![next, id, claim]).map(|_| ())?))
+    }
+
+    /// End a claimed subscription roll can't deliver any more (its grant's access ended, its
+    /// endpoint said it's gone).
+    pub fn drop_event_sub(&self, c: &Claimed) -> Result<()> {
+        let (id, claim) = (&c.sub.id, c.claim);
+        self.store.db.write(|c| Ok::<_, Error>(c.execute("DELETE FROM mcp_event_subs WHERE id = ? AND running_until = ?", params![id, claim]).map(|_| ())?))
     }
 
     /// POST a signed message to a subscription's callback: `Ok(status)` for any answer, `Err` a
@@ -379,14 +417,15 @@ impl Access {
     }
 }
 
-/// One event's message id on one subscription: the same on every retry of it (a keyed hash of the
-/// subscription and the event's position, so a receiver drops repeats), unique across them.
-pub fn event_msg_id(key: &[u8], sub_id: &str, seq: i64) -> String {
+/// One event's message id on one subscription: the same on every retry of it, a new secret too (a
+/// hash of the subscription and the event's position, so a receiver drops repeats), unique across
+/// them.
+pub fn event_msg_id(sub_id: &str, seq: i64) -> String {
     use base64::Engine;
-    use hmac::Mac;
-    let mut mac = hmac::Hmac::<sha2::Sha256>::new_from_slice(key).expect("HMAC takes any key");
+    use sha2::Digest;
+    let mut mac = sha2::Sha256::new();
     mac.update(format!("roll-mcp-event\0{sub_id}\0{seq}").as_bytes());
-    let b = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(mac.finalize().into_bytes());
+    let b = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(mac.finalize());
     format!("msg_event_{}", &b[..22])
 }
 
