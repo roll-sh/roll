@@ -361,8 +361,9 @@ roll implements the MCP authorization spec (2025-06-18 and 2025-11-25) with OAut
   place a connection's rules come from: a client can't widen them.
 - Each connection is a grant: it's listed with its client, last use and rules, and revoking it ends
   every token it has, at once.
-- Step-up (SEP-835): when an OAuth connection's own rules refuse a tool call (a refusal its person
-  can widen, not one by their role in a project), roll records a step-up: that connection and the
+- Step-up (SEP-835): when an OAuth connection's own rules refuse a tool call and adding one rule
+  would let it through (not a refusal by the person's role in a project, a move between projects, a
+  copy or a link, or a rule over tokens and approvals), roll records a step-up: that connection and the
   one rule the call needed, exactly as the gate decided it (the resource and an index included),
   kept 10 minutes, at most 10 a connection. The refusal carries
   `Bearer error="insufficient_scope", scope="roll:step-up:<id>", resource_metadata=…` in
@@ -372,8 +373,8 @@ roll implements the MCP authorization spec (2025-06-18 and 2025-11-25) with OAut
   person (`GET /v1/access/oauth/step-ups/{id}`: theirs, live, or one "no such step-up" for any
   other case), shows the rule and the connection it joins (said plainly when it reaches far, or
   when the policy has an admin approve it), and "Add it" sends only the id: the rule joins that
-  connection's stored rules in one transaction, used once, nothing else about the connection
-  changes, and the client's code is for that connection (its other sessions widen too, nothing new
+  connection's stored rules in one transaction that rechecks it (live, not waiting on an admin) and
+  meets the token policy, used once, nothing else about the connection changes, and the client's code is for that connection (its other sessions widen too, nothing new
   is made). A client never chooses what's proposed. A scoped token (`rlt_`) has no consent to step
   up, and a progress-streamed call keeps the challenge in-band only.
 - Clients either register (dynamic registration) or are known by a client ID metadata document
@@ -1136,7 +1137,10 @@ waits on a sibling PR reaching main is last.
    rules, the screen ticking them on the person's connection) found a client could pre-tick any
    rule, role refusals would loop, a resource it couldn't encode widened to every one, a widen reset
    other settings or took an expired or the wrong connection: hence the recorded step-up, which a
-   client can't shape. Tests: `step_up_widens_the_connection` (roll-access),
+   client can't shape. A second review of that design found placement refusals would still loop,
+   the token policy was skipped, `access` rules could be handed out in one click, and a concurrent
+   change could be approved unseen: a step-up is now recorded only when its rule would let the call
+   through, never for `access`, and applied in one transaction that rechecks the connection. Tests: `step_up_widens_the_connection` (roll-access),
    `a_refused_oauth_call_challenges_for_the_rule` (roll-mcp), `consent.test.tsx`.
 2. **Operator policy for agent connections.** Stripe asks a person for refunds and money movement
    whatever the key allows and switches MCP per environment; PlanetScale has an org-wide MCP query

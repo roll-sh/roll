@@ -121,6 +121,7 @@ CREATE TABLE IF NOT EXISTS oauth_step_ups (
     rule TEXT NOT NULL,
     expires_at INTEGER NOT NULL
 ) WITHOUT ROWID;
+CREATE INDEX IF NOT EXISTS oauth_step_ups_grant ON oauth_step_ups (grant_id, expires_at);
 CREATE TABLE IF NOT EXISTS oauth_codes (
     hash TEXT PRIMARY KEY,
     client_id TEXT NOT NULL,
@@ -1988,27 +1989,38 @@ impl Store {
     }
 
     /// Use a step-up, once: its rule joins its connection's rules (unless one the same is there),
-    /// read and written in one transaction so nothing changed meanwhile is lost, and the
-    /// connection waits for an admin again when `pending`. Nothing else about it changes.
-    pub fn apply_step_up(&self, id: &str, grant_id: &str, pending: bool) -> Result<Grant> {
+    /// all in one transaction that rechecks the connection (live, not waiting on an admin) and
+    /// decides on the merged rules whether it waits for an admin now (`needs_approval`), so a change
+    /// made meanwhile is never lost or approved unseen. Nothing else about it changes. Answers the
+    /// connection and whether the rule was new.
+    pub fn apply_step_up(&self, id: &str, grant_id: &str, needs_approval: &dyn Fn(&Scope, bool) -> bool) -> Result<(Grant, bool)> {
         let now = code_sql::now_ms();
-        self.db.write(|c| {
+        let added = self.db.write(|c| {
             let rule: Option<String> = c.query_row("SELECT rule FROM oauth_step_ups WHERE id = ? AND grant_id = ? AND expires_at > ?", params![id, grant_id, now], |r| r.get(0)).optional()?;
             c.execute("DELETE FROM oauth_step_ups WHERE id = ?", [id])?;
             let rule: roll_auth::scope::Rule = rule.and_then(|r| serde_json::from_str(&r).ok()).ok_or_else(|| Error::BadRequest("that step-up is used or expired: retry the call".into()))?;
-            let rules: String = c.query_row("SELECT rules FROM grants WHERE id = ?", [grant_id], |r| r.get(0))?;
-            let mut scope: Scope = serde_json::from_str(&rules).unwrap_or_default();
-            if !scope.0.contains(&rule) {
-                scope.0.push(rule);
+            let (rules, revoked, expires, pending, ask): (String, Option<i64>, Option<i64>, bool, bool) = c.query_row(
+                "SELECT rules, revoked_at, expires_at, pending, ask_otherwise FROM grants WHERE id = ?",
+                [grant_id],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
+            )?;
+            if revoked.is_some() || expires.is_some_and(|e| e <= now) {
+                return Err(Error::BadRequest("no such step-up of yours: retry the call that was refused".into()));
             }
-            check_rules(&scope)?;
-            c.execute("UPDATE grants SET rules = ? WHERE id = ?", params![serde_json::to_string(&scope).unwrap_or_default(), grant_id])?;
             if pending {
-                c.execute("UPDATE grants SET pending = ? WHERE id = ?", params![true, grant_id])?;
+                return Err(Error::Conflict("that connection waits for an admin's approval: its rules can't change until they decide".into()));
             }
-            Ok::<_, Error>(())
+            let mut scope: Scope = serde_json::from_str(&rules).unwrap_or_default();
+            if scope.0.contains(&rule) {
+                return Ok(false);
+            }
+            scope.0.push(rule);
+            check_rules(&scope)?;
+            let waits = needs_approval(&scope, ask);
+            c.execute("UPDATE grants SET rules = ?, pending = ? WHERE id = ?", params![serde_json::to_string(&scope).unwrap_or_default(), waits, grant_id])?;
+            Ok::<_, Error>(true)
         })?;
-        self.get(grant_id)
+        Ok((self.get(grant_id)?, added))
     }
 
     /// A code for an existing connection (step-up: the person widened it on the consent screen),

@@ -741,7 +741,16 @@ async fn judge(mut ctx: Ctx, req: Request, next: Next, j: Judge) -> Response {
             // Step-up (MCP's `insufficient_scope` challenge): an OAuth connection's refused tool call
             // keeps the one rule it needed, for the consent screen to propose to its person; the
             // challenge carries only the id, so a client never chooses what's proposed.
-            let step_up = if ctx.grant.kind == "oauth" && ctx.mcp.is_some() && widen.is_some() {
+            // Only where adding that rule would let the call through: not a move between projects, a
+            // copy or a link (another check decided), not access's own rules, not roll's quiet probes.
+            let worth = ctx.grant.kind == "oauth"
+                && ctx.mcp.as_ref().is_some_and(|m| !m.quiet)
+                && widen.is_some()
+                && about != "access"
+                && lent.is_none()
+                && asked_env.is_none()
+                && catalog::placement(row, &params).is_none();
+            let step_up = if worth {
                 let resources = match (&lent, &target) {
                     (Some((_, id)), _) => roll_auth::scope::Resources::Some(vec![roll_auth::scope::Selector::Id { id: id.clone(), index: None }]),
                     (None, Target::One(r)) if r.id.is_some() => roll_auth::scope::Resources::Some(vec![roll_auth::scope::Selector::Id { id: r.id.clone().unwrap_or_default(), index: r.index.clone() }]),
@@ -755,8 +764,14 @@ async fn judge(mut ctx: Ctx, req: Request, next: Next, j: Judge) -> Response {
                     unprotected: false,
                     actions: [(action, roll_auth::scope::Effect::Allow)].into_iter().collect(),
                 };
-                let (a2, gid) = (access.clone(), ctx.grant.id.to_string());
-                tokio::task::spawn_blocking(move || a2.store.create_step_up(&gid, &rule)).await.ok().and_then(Result::ok)
+                let mut wider = (*scope).clone();
+                wider.0.push(rule.clone());
+                if weakest(&needs, |a| wider.outcome(&target, a)).0 == Outcome::Allow {
+                    let (a2, gid) = (access.clone(), ctx.grant.id.to_string());
+                    tokio::task::spawn_blocking(move || a2.store.create_step_up(&gid, &rule)).await.ok().and_then(Result::ok)
+                } else {
+                    None
+                }
             } else {
                 None
             };

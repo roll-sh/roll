@@ -349,17 +349,20 @@ pub(crate) async fn own_step_up(
 /// to any widened token, and the client gets a code for that connection: its other sessions widen
 /// too and nothing new is made.
 async fn step_up(a: &Arc<Access>, ext: &Extensions, c: &Consent, client: &crate::store::Client, id: String, res: Option<String>) -> crate::Result<Response> {
-    let (g, rule, asker) = own_step_up(a, ext, &id, Some(&client.id)).await?;
-    let mut rules = g.rules.clone();
-    if !rules.0.contains(&rule) {
-        rules.0.push(rule);
-    }
-    let pending = asker.is_some() && a.policy_now().needs_approval(&rules, g.ask_otherwise);
+    let (g, _rule, asker) = own_step_up(a, ext, &id, Some(&client.id)).await?;
+    // The token policy as it is now, as editing the connection would meet it.
+    a.check_policy(g.expires_at)?;
+    let policy = a.policy_now();
+    let person = asker.is_some();
     let (a2, id2, gid) = (a.clone(), id.clone(), g.id.clone());
-    let updated = tokio::task::spawn_blocking(move || a2.store.apply_step_up(&id2, &gid, pending)).await.map_err(|e| Error::Internal(e.to_string()))??;
-    a.tell_added(&updated, crate::api::Added::Client(&client.name), ext);
-    if pending && let Some(h) = &asker {
-        a.tell_admins_waiting(&updated, h);
+    let (updated, added) = tokio::task::spawn_blocking(move || a2.store.apply_step_up(&id2, &gid, &|rules, ask| person && policy.needs_approval(rules, ask)))
+        .await
+        .map_err(|e| Error::Internal(e.to_string()))??;
+    if added {
+        a.tell_added(&updated, crate::api::Added::Client(&client.name), ext);
+        if updated.pending && let Some(h) = &asker {
+            a.tell_admins_waiting(&updated, h);
+        }
     }
     let (a2, cid, gid, uri, ch) = (a.clone(), client.id.clone(), g.id.clone(), c.redirect_uri.clone(), c.code_challenge.clone());
     let code = tokio::task::spawn_blocking(move || a2.store.issue_code_for(&cid, &gid, &uri, &ch, res.as_deref())).await.map_err(|e| Error::Internal(e.to_string()))??;
@@ -381,6 +384,7 @@ async fn step_up(a: &Arc<Access>, ext: &Extensions, c: &Consent, client: &crate:
 /// (the connection and the one rule), or one "no such step-up" for anyone else.
 pub async fn step_up_view(State(a): S, ext: Extensions, axum::extract::Path(id): axum::extract::Path<String>) -> crate::Result<Json<Value>> {
     let (g, rule, asker) = own_step_up(&a, &ext, &id, None).await?;
+    a.check_policy(g.expires_at)?;
     let mut rules = g.rules.clone();
     rules.0.push(rule.clone());
     let waits = asker.is_some() && a.policy_now().needs_approval(&rules, g.ask_otherwise);
