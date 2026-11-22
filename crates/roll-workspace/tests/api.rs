@@ -464,6 +464,79 @@ async fn invites_follow_their_inviter_and_admin_owners_add_nothing() {
     assert!(log.contains(&"member.invite_revoke usr_cat".to_string()), "cat's demotion revoked hers: {log:?}");
 }
 
+/// docs/members-v1-1.md, "Groups": a group's role reaches its people on their next request, roles add
+/// up, a group never holds owner, only the operator or a project admin who is in the group gives
+/// it a role, a SCIM group's members are its provider's, and taking someone out (or the role away)
+/// cuts them off at once, with one `group.lost` per person for what follows.
+#[tokio::test]
+async fn groups_hold_roles_that_add_up_and_go_at_once() {
+    let api = Api::new();
+    let events = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+    let ev = events.clone();
+    api.ws.on_event(Box::new(move |e| {
+        ev.lock().unwrap().push(format!("{} {}", e.action, e.subject.as_deref().unwrap_or("-")));
+        Ok(())
+    }));
+    let (_, p) = api.call_as(Some("usr_ada"), Method::POST, "/v1/workspace/projects", Some(json!({ "name": "shop" }))).await;
+    let id = p["id"].as_str().unwrap().to_string();
+    let at = |rest: &str| format!("/v1/workspace/projects/{id}{rest}");
+    // Groups are the operator's: a person can't make one (D12).
+    assert_eq!(api.call_as(Some("usr_ada"), Method::POST, "/v1/workspace/groups", Some(json!({ "name": "eng" }))).await.0, StatusCode::FORBIDDEN);
+    let (s, g) = api.call(Method::POST, "/v1/workspace/groups", Some(json!({ "name": "eng" }))).await;
+    assert_eq!((s, g["source"].as_str()), (StatusCode::CREATED, Some("roll")), "{g}");
+    let eng = g["id"].as_str().unwrap().to_string();
+    for who in ["usr_bob", "usr_cat"] {
+        assert_eq!(api.call(Method::PUT, &format!("/v1/workspace/groups/{eng}/members/{who}"), None).await.0, StatusCode::NO_CONTENT);
+    }
+    // Ada (an owner, not in eng) can't give it a role; once she's in it, she can. Never owner.
+    let role = at(&format!("/groups/{eng}"));
+    let (s, e) = api.call_as(Some("usr_ada"), Method::PUT, &role, Some(json!({ "role": "developer" }))).await;
+    assert_eq!((s, e["code"].as_str()), (StatusCode::FORBIDDEN, Some("forbidden")), "{e}");
+    assert_eq!(api.call(Method::PUT, &format!("/v1/workspace/groups/{eng}/members/usr_ada"), None).await.0, StatusCode::NO_CONTENT);
+    assert_eq!(api.call_as(Some("usr_ada"), Method::PUT, &role, Some(json!({ "role": "owner" }))).await.0, StatusCode::BAD_REQUEST, "a group never holds owner");
+    let (s, r) = api.call_as(Some("usr_ada"), Method::PUT, &role, Some(json!({ "role": "developer" }))).await;
+    assert_eq!((s, r["role"].as_str(), r["members"].as_i64()), (StatusCode::OK, Some("developer"), Some(3)), "{r}");
+    // Bob reaches the project now, through the group alone; ada is still its only owner.
+    let (s, p) = api.call_as(Some("usr_bob"), Method::GET, &at(""), None).await;
+    assert_eq!((s, p["role"].as_str()), (StatusCode::OK, Some("developer")), "{p}");
+    let (_, list) = api.call_as(Some("usr_bob"), Method::GET, "/v1/workspace/projects", None).await;
+    assert_eq!(names(&list), vec!["shop"]);
+    assert_eq!(api.ws.owners_of(&id).unwrap(), vec!["usr_ada".to_string()]);
+    // Roles add up: cat, a viewer in her own right, is a developer through the group; an admin
+    // group role on top makes bob an admin.
+    let (_, inv) = api.call_as(Some("usr_ada"), Method::POST, &at("/invites"), Some(json!({ "email": "cat@example.com", "role": "viewer" }))).await;
+    let token = inv["url"].as_str().unwrap().split("token=").nth(1).unwrap().to_string();
+    assert_eq!(api.call_as(Some("usr_cat"), Method::POST, &format!("/v1/workspace/invites/{token}/accept"), None).await.0, StatusCode::OK);
+    assert_eq!(api.ws.role_in(&id, "usr_cat").unwrap(), Some(roll_auth::roles::Role::Developer));
+    assert_eq!(api.ws.direct_role(&id, "usr_cat").unwrap(), Some(roll_auth::roles::Role::Viewer));
+    // A SCIM group: its provider keeps its members, roll gives it roles.
+    let (ops, _) = api.ws.scim_create("sso_acme", "ops", Some("okta-1"), &["usr_bob".into()]).unwrap();
+    assert_eq!(api.call(Method::PUT, &format!("/v1/workspace/groups/{}/members/usr_cat", ops.id), None).await.1["code"], "managed");
+    assert_eq!(api.call(Method::PUT, &at(&format!("/groups/{}", ops.id)), Some(json!({ "role": "admin" }))).await.0, StatusCode::OK);
+    assert_eq!(api.ws.role_in(&id, "usr_bob").unwrap(), Some(roll_auth::roles::Role::Admin));
+    // Cat sees the group she is in, not one that only has a role on a project she doesn't manage.
+    let (_, mine) = api.call_as(Some("usr_cat"), Method::GET, "/v1/workspace/groups", None).await;
+    assert_eq!(mine.as_array().unwrap().iter().map(|g| g["name"].as_str().unwrap()).collect::<Vec<_>>(), vec!["eng"]);
+    assert_eq!(api.call_as(Some("usr_cat"), Method::GET, &format!("/v1/workspace/groups/{}", ops.id), None).await.0, StatusCode::NOT_FOUND);
+
+    // The provider takes bob out of ops: he's a developer again at once, and one `group.lost`
+    // follows for him. Out of eng too, he doesn't reach the project at all.
+    events.lock().unwrap().clear();
+    let n = api.ws.scim_patch("sso_acme", &ops.id, &[roll_workspace::GroupOp::RemoveMembers(vec!["usr_bob".into()])]).unwrap();
+    assert_eq!(n.removed, 1);
+    assert_eq!(api.ws.role_in(&id, "usr_bob").unwrap(), Some(roll_auth::roles::Role::Developer));
+    assert!(events.lock().unwrap().contains(&"group.lost usr_bob".to_string()), "{:?}", events.lock().unwrap());
+    assert_eq!(api.call(Method::DELETE, &format!("/v1/workspace/groups/{eng}/members/usr_bob"), None).await.0, StatusCode::NO_CONTENT);
+    assert_eq!(api.call_as(Some("usr_bob"), Method::GET, &at(""), None).await.0, StatusCode::NOT_FOUND);
+    // Eng's role taken away: cat is back to her own viewer, and each of its people gets a
+    // `group.lost` once the group's event fans out.
+    events.lock().unwrap().clear();
+    assert_eq!(api.call_as(Some("usr_ada"), Method::DELETE, &role, None).await.0, StatusCode::NO_CONTENT);
+    assert_eq!(api.ws.role_in(&id, "usr_cat").unwrap(), Some(roll_auth::roles::Role::Viewer));
+    let log = events.lock().unwrap().clone();
+    assert!(log.contains(&"group.lost usr_cat".to_string()) && log.contains(&"group.lost usr_ada".to_string()) && log.contains(&"group.role_remove -".to_string()), "{log:?}");
+}
+
 #[tokio::test]
 async fn a_product_may_refuse_a_delete_and_a_deleted_project_comes_back_with_its_canvas_and_members() {
     let api = Api::new();
@@ -480,6 +553,15 @@ async fn a_product_may_refuse_a_delete_and_a_deleted_project_comes_back_with_its
     let bob = invite(&api, &at("/invites"), "bob@example.com", "developer").await;
     assert_eq!(api.call_as(Some("usr_bob"), Method::POST, &format!("/v1/workspace/invites/{bob}/accept"), None).await.0, StatusCode::OK);
     let carol = invite(&api, &at("/invites"), "carol@example.com", "viewer").await;
+    // Two groups with roles: dan through one, eve through one deleted while the project is.
+    let mut groups = vec![];
+    for (name, who) in [("ops", "usr_dan"), ("temp", "usr_eve")] {
+        let (_, g) = api.call(Method::POST, "/v1/workspace/groups", Some(json!({ "name": name }))).await;
+        let g = g["id"].as_str().unwrap().to_string();
+        api.call(Method::PUT, &format!("/v1/workspace/groups/{g}/members/{who}"), None).await;
+        assert_eq!(api.call(Method::PUT, &at(&format!("/groups/{g}")), Some(json!({ "role": "viewer" }))).await.0, StatusCode::OK);
+        groups.push(g);
+    }
 
     // A product's no, answered as it gave it, until the request carries what it asks for.
     api.ws.before_delete(Box::new(|d| match d.request.uri.query() {
@@ -497,8 +579,10 @@ async fn a_product_may_refuse_a_delete_and_a_deleted_project_comes_back_with_its
     assert_eq!(*told.lock().unwrap(), vec![id.clone()]);
     assert_eq!(api.call(Method::GET, &at(""), None).await.0, StatusCode::NOT_FOUND);
     assert_eq!(api.ws.deleted(&id).unwrap().unwrap().resources.len(), 1);
-    // Its members reach nothing while it's deleted, and its invites ended.
+    // Its members reach nothing while it's deleted (through groups neither), and its invites ended.
     assert!(api.ws.memberships_of("usr_bob").unwrap().is_empty());
+    assert!(api.ws.memberships_of("usr_dan").unwrap().is_empty());
+    assert_eq!(api.call(Method::DELETE, &format!("/v1/workspace/groups/{}", groups[1]), None).await.0, StatusCode::NO_CONTENT);
     assert_eq!(api.call_as(Some("usr_carol"), Method::POST, &format!("/v1/workspace/invites/{carol}/accept"), None).await.0, StatusCode::NOT_FOUND);
 
     // Its name taken meanwhile: not restored over another project.
@@ -509,9 +593,12 @@ async fn a_product_may_refuse_a_delete_and_a_deleted_project_comes_back_with_its
     let back = api.ws.restore(&id).unwrap();
     assert_eq!((back.name.as_str(), back.resources.len(), back.resources[0].x), ("shop", 1, 1.0));
     assert!(api.ws.deleted(&id).unwrap().is_none());
-    // Back with its members, as they were.
+    // Back with its members and groups' roles, as they were; the deleted group's role isn't.
     let (s, p) = api.call_as(Some("usr_bob"), Method::GET, &at(""), None).await;
     assert_eq!((s, p["role"].as_str()), (StatusCode::OK, Some("developer")));
+    assert_eq!(api.call_as(Some("usr_dan"), Method::GET, &at(""), None).await.1["role"], "viewer");
+    let (_, roles) = api.call(Method::GET, &at("/groups"), None).await;
+    assert_eq!(roles.as_array().unwrap().iter().map(|r| r["group"].as_str().unwrap()).collect::<Vec<_>>(), vec![groups[0].as_str()]);
     // Once a product purged it, it's gone for good.
     assert_eq!(api.call(Method::DELETE, &at("?confirm=shop"), None).await.0, StatusCode::NO_CONTENT);
     api.ws.forget_deleted(&id).unwrap();

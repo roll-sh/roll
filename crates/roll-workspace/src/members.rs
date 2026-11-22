@@ -112,6 +112,12 @@ pub trait People: Send + Sync {
     fn mail(&self, email: &str, subject: &str, text: &str) {
         let _ = (email, subject, text);
     }
+    /// Whether SSO connection `connection`'s SCIM groups are on now (its provider keeps its
+    /// groups, so roll's routes don't delete them).
+    fn scim_groups_on(&self, connection: &str) -> bool {
+        let _ = connection;
+        false
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -160,7 +166,7 @@ impl Actor {
         self.manages(project) && ok(&self.grant) && ok(&self.session)
     }
 
-    fn scope(&self) -> Scope<'_> {
+    pub(crate) fn scope(&self) -> Scope<'_> {
         match &self.user {
             Some(u) => Scope::Member(u),
             None => Scope::All,
@@ -207,7 +213,11 @@ pub struct MemberEvent {
     pub id: String,
     pub at: i64,
     /// `member.invite`, `member.invite_revoke`, `member.accept`, `member.decline`, `member.role`,
-    /// `member.remove`, `member.leave`, `home.set`.
+    /// `member.remove`, `member.leave`, `home.set`; a group's `group.create`, `group.update`,
+    /// `group.delete`, `group.member_add`, `group.member_remove`, `group.role` and
+    /// `group.role_remove` (a server-wide one has no project); and `group.lost`, one per person
+    /// and project a group change may have narrowed or cut off (`subject`), made from the group's
+    /// event after its write.
     pub action: String,
     pub project: String,
     pub actor: String,
@@ -232,14 +242,14 @@ fn hash_token(token: &str) -> String {
     hex::encode(Sha256::digest(token.as_bytes()))
 }
 
-fn random(n: usize) -> String {
+pub(crate) fn random(n: usize) -> String {
     const ALPHABET: &[u8; 32] = b"abcdefghijklmnopqrstuvwxyz234567";
     let mut b = vec![0u8; n];
     getrandom::fill(&mut b).expect("system randomness");
     b.iter().map(|x| ALPHABET[(x & 31) as usize] as char).collect()
 }
 
-fn check_envs(role: Role, environments: &Option<Vec<String>>) -> Result<()> {
+pub(crate) fn check_envs(role: Role, environments: &Option<Vec<String>>) -> Result<()> {
     let Some(envs) = environments else { return Ok(()) };
     if role != Role::Developer {
         return Err(Error::BadRequest("only a developer's role is narrowed to environments".into()));
@@ -255,11 +265,11 @@ fn parse_role(s: &str) -> Result<Role> {
     Role::parse(s).ok_or_else(|| Error::BadRequest(format!("unknown role {s:?}: one of viewer, developer, admin, owner")))
 }
 
-fn envs_json(e: &Option<Vec<String>>) -> Option<String> {
+pub(crate) fn envs_json(e: &Option<Vec<String>>) -> Option<String> {
     e.as_ref().map(|e| serde_json::to_string(e).expect("JSON"))
 }
 
-fn envs_of(s: Option<String>) -> Option<Vec<String>> {
+pub(crate) fn envs_of(s: Option<String>) -> Option<Vec<String>> {
     s.and_then(|s| serde_json::from_str(&s).ok())
 }
 
@@ -269,7 +279,7 @@ fn normal_email(e: &str) -> Result<String> {
     if ok { Ok(e) } else { Err(Error::BadRequest("email isn't an email address".into())) }
 }
 
-fn record(c: &Conn<'_>, now: i64, action: &str, project: &str, actor: &Actor, subject: Option<&str>, detail: Value) -> Result<()> {
+pub(crate) fn record(c: &Conn<'_>, now: i64, action: &str, project: &str, actor: &Actor, subject: Option<&str>, detail: Value) -> Result<()> {
     c.execute(
         "INSERT INTO member_events (id, at, action, project_id, actor, subject, detail, ip) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
         params![format!("mev_{}", random(16)), now, action, project, actor.id, subject, detail.to_string(), actor.ip],
@@ -363,7 +373,7 @@ impl Workspace {
         self.on_event.write().expect("on_event").push(f);
     }
 
-    fn person(&self, user: &str) -> Option<Person> {
+    pub(crate) fn person(&self, user: &str) -> Option<Person> {
         self.people.get().and_then(|p| p.person(user))
     }
 
@@ -372,18 +382,42 @@ impl Workspace {
         Ok(self.owners_of(project)?.into_iter().filter(|o| self.person(o).is_some()).collect())
     }
 
-    /// `user`'s memberships, for their session's grant: one indexed read, never cached.
+    /// `user`'s memberships, for their session's grant: their own and their groups' roles
+    /// (docs/members-v1-1.md, "Roles add up"), in one indexed read, never cached. Their own come
+    /// first, then group roles by project, up to [`PROJECTS_MAX`] distinct projects (only SCIM
+    /// can put someone past it; roll's own writes refuse to).
     pub fn memberships_of(&self, user: &str) -> Result<Vec<roles::Membership>> {
-        Ok(self.db.read(|c| {
-            c.query("SELECT project_id, role, environments FROM members WHERE user_id = ? ORDER BY project_id", [user], |r| {
-                let role: String = r.get(1)?;
-                Ok(roles::Membership { project: r.get(0)?, role: Role::parse(&role).unwrap_or(Role::Viewer), environments: envs_of(r.get(2)?) })
-            })
-        })?)
+        let rows: Vec<(String, String, Option<String>, bool)> = self.db.read(|c| {
+            c.query(
+                "SELECT project_id, role, environments, 0 AS via FROM members WHERE user_id = ?1 \
+                 UNION ALL SELECT gr.project_id, gr.role, gr.environments, 1 AS via FROM group_members gm JOIN group_roles gr ON gr.group_id = gm.group_id WHERE gm.user_id = ?1 \
+                 ORDER BY via, project_id",
+                [user],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get::<_, i64>(3)? == 1)),
+            )
+        })?;
+        let mut projects: HashSet<String> = HashSet::new();
+        let mut out = Vec::with_capacity(rows.len());
+        for (project, role, environments, via_group) in rows {
+            if !projects.contains(&project) {
+                if projects.len() as i64 >= PROJECTS_MAX {
+                    continue;
+                }
+                projects.insert(project.clone());
+            }
+            let role = if via_group { crate::groups::group_role(&role) } else { Role::parse(&role).unwrap_or(Role::Viewer) };
+            out.push(roles::Membership { project, role, environments: envs_of(environments) });
+        }
+        Ok(out)
     }
 
-    /// `user`'s role in `project`, if they're a member.
+    /// `user`'s highest role in `project`, through their membership or a group (what lists show).
     pub fn role_in(&self, project: &str, user: &str) -> Result<Option<Role>> {
+        self.db.read(|c| crate::groups::effective_role(c, project, user))
+    }
+
+    /// `user`'s own membership's role in `project`, groups aside (the last owner, the member list).
+    pub fn direct_role(&self, project: &str, user: &str) -> Result<Option<Role>> {
         Ok(self.db.read(|c| role_of(c, project, user))?.map(|(r, _)| r))
     }
 
@@ -670,7 +704,7 @@ impl Workspace {
                 Some(_) if only_if_none => return Ok(false),
                 Some(from) => {
                     if let Some(user) = &actor.user
-                        && !matches!(role_of(c, &from, user)?, Some((Role::Admin | Role::Owner, _)))
+                        && !matches!(crate::groups::effective_role(c, &from, user)?, Some(Role::Admin | Role::Owner))
                     {
                         return Err(Error::Forbidden(format!("{} {} is at home in another project: only its admins move it", kind.as_str(), r#ref)));
                     }
@@ -696,10 +730,20 @@ impl Workspace {
     /// don't run one at once, and done once every hook took it. rolld also calls this now and
     /// then, for what a crash left.
     pub fn run_events(&self) {
-        if self.on_event.read().expect("on_event").is_empty() {
-            return;
+        // A group's fan-out writes more events: a few rounds now, the rest on rolld's next tick.
+        for _ in 0..20 {
+            if self.run_events_once() == 0 {
+                break;
+            }
         }
-        let Ok(now) = self.db.now_ms() else { return };
+    }
+
+    /// One round of [`Workspace::run_events`]: how many events it claimed.
+    fn run_events_once(&self) -> usize {
+        if self.on_event.read().expect("on_event").is_empty() {
+            return 0;
+        }
+        let Ok(now) = self.db.now_ms() else { return 0 };
         let claimed = self.db.write(|c| {
             let due: Vec<MemberEvent> = c.query(
                 "SELECT id, at, action, project_id, actor, subject, detail, ip FROM member_events WHERE done = 0 AND (claimed_at IS NULL OR claimed_at < ?) ORDER BY at, id LIMIT 50",
@@ -714,9 +758,22 @@ impl Workspace {
             }
             Ok::<_, Error>(due)
         });
-        let Ok(claimed) = claimed else { return };
+        let Ok(claimed) = claimed else { return 0 };
+        let n = claimed.len();
         let hooks = self.on_event.read().expect("on_event");
         for e in claimed {
+            // A group's event first becomes one `group.lost` per person and project it cut off,
+            // a page per round; its own hooks (the audit) run once that's done.
+            if e.detail.get("fanout") == Some(&Value::Bool(true)) {
+                match self.fan_out(&e) {
+                    Ok(true) => {}
+                    Ok(false) => continue,
+                    Err(err) => {
+                        tracing::warn!(event = %e.id, error = %err, "workspace: a group event's fan-out failed; it's tried again");
+                        continue;
+                    }
+                }
+            }
             let mut ok = true;
             for f in hooks.iter() {
                 if let Err(err) = f(&e) {
@@ -728,6 +785,7 @@ impl Workspace {
                 let _ = self.db.write(|c| c.execute("UPDATE member_events SET done = 1 WHERE id = ?", [e.id.as_str()]));
             }
         }
+        n
     }
 
     /// Whether `project` trusts `kind ref` through its home or its owners' resources
@@ -871,7 +929,7 @@ pub(crate) fn put_aside(c: &Conn<'_>, project: &str) -> Result<()> {
     for t in ["members", "project_invites", "homes"] {
         c.execute(&format!("DELETE FROM {t} WHERE project_id = ?"), [project])?;
     }
-    Ok(())
+    crate::groups::put_aside(c, project)
 }
 
 /// A restored project's members and homes, back as they were (a home another project took since
@@ -889,5 +947,5 @@ pub(crate) fn bring_back(c: &Conn<'_>, project: &str) -> Result<()> {
 pub(crate) fn forget_aside(c: &Conn<'_>, project: &str) -> Result<()> {
     c.execute("DELETE FROM deleted_members WHERE project_id = ?", [project])?;
     c.execute("DELETE FROM deleted_homes WHERE project_id = ?", [project])?;
-    Ok(())
+    crate::groups::forget_aside(c, project)
 }

@@ -1219,10 +1219,11 @@ impl Api {
         let secrets = Arc::new(Secrets::new(db.clone(), ws.clone(), opts).unwrap());
         secrets.watch_workspace();
         let _ = gate.secrets.set(secrets.clone());
-        // As rolld: a member removed, demoted or gone ends what they shared and handed out.
+        // As rolld: a member removed, demoted or gone (or narrowed by a group) ends what they
+        // shared and handed out.
         let s2 = secrets.clone();
         ws.on_event(Box::new(move |e| match (e.action.as_str(), &e.subject) {
-            ("member.remove" | "member.leave" | "member.role", Some(user)) => s2.member_changed(&e.project, user).map_err(|e| e.to_string()),
+            ("member.remove" | "member.leave" | "member.role" | "group.lost", Some(user)) => s2.member_changed(&e.project, user).map_err(|e| e.to_string()),
             _ => Ok(()),
         }));
         let router = roll_workspace::router(ws.clone()).merge(roll_secrets::router(secrets.clone())).layer(axum::middleware::from_fn_with_state(gate.clone(), fake_gate));
@@ -6274,6 +6275,57 @@ async fn a_removed_members_token_sync_and_identity_stop() {
     assert_eq!(api.call(Method::POST, "/v1/secrets/login", Some(login.clone())).await.0, StatusCode::OK);
 
     assert_eq!(api.as_ada(Method::DELETE, &format!("/v1/workspace/projects/{team}/members/usr_bob"), None).await.0, StatusCode::NO_CONTENT);
+    assert_eq!(api.req(Method::GET, &at("/environments/development/values"), None, Some(&token)).await.0, StatusCode::NOT_FOUND, "his token reaches only what his session does");
+    api.as_ada(Method::PUT, &at("/environments/development/secrets/A"), Some(json!({ "value": "2" }))).await;
+    api.secrets.sweep().unwrap();
+    assert_eq!(api.sync.pushes.lock().unwrap().len(), pushed, "his sync stopped");
+    let (s, e) = api.call(Method::POST, "/v1/secrets/login", Some(login)).await;
+    assert!(!s.is_success(), "his identity's logins are refused: {s} {e}");
+}
+
+/// docs/members-v1-1.md, "When a group loses a role": bob is an admin only through a group. What he
+/// made through it (a token, a sync, an identity) works while he's in the group, and stops as soon
+/// as he's taken out of it (`maker_reaches` reads his grant now).
+#[tokio::test]
+async fn a_removed_group_members_token_sync_and_identity_stop() {
+    let api = Api::new().await;
+    let (_, p) = api.as_ada(Method::POST, "/v1/workspace/projects", Some(json!({ "name": "team" }))).await;
+    let team = p["id"].as_str().unwrap().to_string();
+    let at = |rest: &str| format!("/v1/secrets/projects/{team}{rest}");
+    for key in ["PLATFORM_TOKEN", "A"] {
+        api.as_ada(Method::PUT, &at(&format!("/environments/development/secrets/{key}")), Some(json!({ "value": "1" }))).await;
+    }
+    // The operator makes the group and puts bob in it; ada, an owner but not in it, can't give it
+    // a role (D11), and the operator can.
+    let (s, g) = api.call(Method::POST, "/v1/workspace/groups", Some(json!({ "name": "platform" }))).await;
+    assert_eq!(s, StatusCode::CREATED, "{g}");
+    let group = g["id"].as_str().unwrap().to_string();
+    assert_eq!(api.call(Method::PUT, &format!("/v1/workspace/groups/{group}/members/usr_bob"), None).await.0, StatusCode::NO_CONTENT);
+    let role = format!("/v1/workspace/projects/{team}/groups/{group}");
+    let (s, e) = api.as_ada(Method::PUT, &role, Some(json!({ "role": "admin" }))).await;
+    assert_eq!((s, e["code"].as_str()), (StatusCode::FORBIDDEN, Some("forbidden")), "{e}");
+    let (s, e) = api.call(Method::PUT, &role, Some(json!({ "role": "admin" }))).await;
+    assert_eq!(s, StatusCode::OK, "{e}");
+
+    let token = api.gate.issue("bob's", roll_secrets::access::rule(&team, None, None, &[roll_secrets::Action::Read, roll_secrets::Action::Reveal]), Some("usr_bob"));
+    assert_eq!(api.req(Method::GET, &at("/environments/development/values"), None, Some(&token)).await.0, StatusCode::OK);
+    let (s, e) = api.signed_in("bob", false, Method::POST, &at("/syncs"), Some(json!({ "environment": "development", "kind": "fake", "target": { "name": "x", "token_key": "PLATFORM_TOKEN" } }))).await;
+    assert_eq!(s, StatusCode::CREATED, "{e}");
+    api.secrets.sweep().unwrap();
+    let pushed = api.sync.pushes.lock().unwrap().len();
+    assert!(pushed >= 1);
+    let issuer = Issuer::new();
+    *api.sent.1.lock().unwrap() = Some(issuer.jwks());
+    let identity = json!({ "name": "deploy", "issuer": ISSUER, "audience": "roll", "subject": "repo:acme/web:ref:refs/heads/main", "environments": ["development"], "actions": ["read", "reveal"], "ttl_minutes": 10 });
+    let (s, i) = api.signed_in("bob", false, Method::POST, &at("/identities"), Some(identity)).await;
+    assert_eq!(s, StatusCode::CREATED, "{i}");
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() as i64;
+    let jwt = issuer.sign(json!({ "iss": ISSUER, "aud": "roll", "sub": "repo:acme/web:ref:refs/heads/main", "exp": now + 300, "iat": now }));
+    let login = json!({ "identity": i["id"], "token": jwt });
+    assert_eq!(api.call(Method::POST, "/v1/secrets/login", Some(login.clone())).await.0, StatusCode::OK);
+
+    // Out of the group: everything he made through it stops at once.
+    assert_eq!(api.call(Method::DELETE, &format!("/v1/workspace/groups/{group}/members/usr_bob"), None).await.0, StatusCode::NO_CONTENT);
     assert_eq!(api.req(Method::GET, &at("/environments/development/values"), None, Some(&token)).await.0, StatusCode::NOT_FOUND, "his token reaches only what his session does");
     api.as_ada(Method::PUT, &at("/environments/development/secrets/A"), Some(json!({ "value": "2" }))).await;
     api.secrets.sweep().unwrap();

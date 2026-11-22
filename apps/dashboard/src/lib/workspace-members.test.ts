@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
-import type { Member, Role } from "./workspace-api";
-import { controlsFor, describeEnvironments, grantable, parseEnvironments } from "./workspace-members";
+import type { GroupRole, Member, Role } from "./workspace-api";
+import { controlsFor, describeEnvironments, grantable, groupControlsFor, groupGrantable, parseEnvironments } from "./workspace-members";
 
 const member = (user: string, role: Role): Member => ({ project: "prj_a", user, handle: user.slice(4), role, environments: null, added_by: "usr_ada", added_at: 0 });
 
@@ -23,6 +23,17 @@ describe("the members page offers what each role may do", () => {
     expect(controlsFor("developer", "usr_bob", dev, 1)).toEqual({ changeRole: false, remove: false, leave: true });
     expect(controlsFor("viewer", "usr_vic", dev, 1)).toEqual({ changeRole: false, remove: false, leave: false });
     expect(controlsFor(undefined, undefined, owner, 1).remove).toBe(false);
+  });
+
+  it("offers groups' roles below owner, changed only by someone in the group", () => {
+    expect(groupGrantable(undefined)).toEqual(["viewer", "developer", "admin"]);
+    expect(groupGrantable("owner")).toEqual(["viewer", "developer", "admin"]);
+    expect(groupGrantable("developer")).toEqual([]);
+    const g: GroupRole = { project: "prj_a", group: "grp_eng", name: "eng", source: "roll", role: "admin", environments: null, members: 3, added_by: "operator", added_at: 0 };
+    expect(groupControlsFor(undefined, g, undefined)).toEqual({ change: true, remove: true });
+    expect(groupControlsFor("admin", g, new Set())).toEqual({ change: false, remove: true });
+    expect(groupControlsFor("admin", g, new Set(["grp_eng"]))).toEqual({ change: true, remove: true });
+    expect(groupControlsFor("viewer", g, new Set(["grp_eng"]))).toEqual({ change: false, remove: false });
   });
 
   it("reads environments as the server takes them", () => {

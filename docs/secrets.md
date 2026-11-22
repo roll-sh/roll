@@ -6253,7 +6253,8 @@ Other threads, from the #603 review: roll apps' renewal and restart fixes (H1–
   - search: `fix/search-security-1120` and #318;
   - roll code: done, #627 (4af6bb3b5). Webhooks' and review apps' URLs are sealed, nothing is made
     without `ROLL_SECRET_KEY`, and an upgraded database keeps no clear URL or secret.
-- **Item 6: designed**, in [members-v1-1.md](members-v1-1.md) (docs only, not built). Groups hold
+- **Item 6: phase 1 built** (groups and SCIM `Groups`, D10–D12 and D18 as option (a)); elevation is
+  still designed only, in [members-v1-1.md](members-v1-1.md). Groups hold
   viewer, developer or admin roles on projects (never owner), and roles add up, read in one query
   with the session grant. SCIM `Groups` is opt-in per connection. A member's time-boxed elevation is
   a roll-access `ELEVATE` approval with the two-person rule. It lapses at `until` with nothing to

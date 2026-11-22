@@ -482,11 +482,12 @@ pub fn open(args: &crate::Args, home: &Path, workspace: Arc<roll_workspace::Work
     tell_decoys(&access, secrets.clone());
     // ACME's http-01 and dns-01 checks: public addresses only, as webhooks.
     secrets.set_acme_checks(Arc::new(acme::Checks::new(allow_private)));
-    // A member removed, demoted or gone (docs/members.md): their shared folders, one-time shares
-    // and leases end once they no longer hold what those need.
+    // A member removed, demoted or gone (docs/members.md), or narrowed by a group change (one
+    // `group.lost` per person and project, docs/members-v1-1.md): their shared folders, one-time
+    // shares and leases end once they no longer hold what those need.
     let s = secrets.clone();
     workspace.on_event(Box::new(move |e| match (e.action.as_str(), &e.subject) {
-        ("member.remove" | "member.leave" | "member.role", Some(user)) => s.member_changed(&e.project, user).map_err(|e| e.to_string()),
+        ("member.remove" | "member.leave" | "member.role" | "group.lost", Some(user)) => s.member_changed(&e.project, user).map_err(|e| e.to_string()),
         _ => Ok(()),
     }));
     // A workspace project that holds secrets goes only when a secrets admin confirms; then its
@@ -1263,6 +1264,10 @@ impl roll_workspace::People for People {
     fn person(&self, user: &str) -> Option<roll_workspace::Person> {
         let u = self.accounts.user(user).ok().filter(|u| !u.disabled)?;
         Some(roll_workspace::Person { handle: u.handle, email: Some(u.email).filter(|e| !e.is_empty()), admin: u.admin })
+    }
+
+    fn scim_groups_on(&self, connection: &str) -> bool {
+        self.accounts.scim_groups_on(connection)
     }
 
     fn mail(&self, email: &str, subject: &str, text: &str) {

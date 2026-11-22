@@ -543,7 +543,8 @@ impl Secrets {
     /// still count for each gate: the operator and tokens as recorded, a person while they're an
     /// admin account or their session still has admin where the gate is.
     pub(crate) fn standing(&self, project: &str, slug: &str, applying: Option<(&[crate::folder_policy::Gate], &[Review])>) -> Standing {
-        let roles = self.workspace.members(roll_workspace::Scope::All, project, false).map(|ms| ms.into_iter().filter(|m| !m.inactive).map(|m| (m.user, m.role)).collect()).unwrap_or_default();
+        // Their own role or a group's, the highest (a group admin is a `role:admin` approver).
+        let roles = self.workspace.roles_in(project).map(|rs| rs.into_iter().collect()).unwrap_or_default();
         let counts = applying.map(|(gates, reviews)| {
             let mut out = std::collections::HashSet::new();
             for r in reviews.iter().filter(|r| r.verdict == "approve") {

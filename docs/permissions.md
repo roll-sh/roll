@@ -1308,6 +1308,7 @@ classify, so the check skips them):
 | `/v1/code/review-apps` | review apps' own tokens |
 | `/v1/accounts` | people's accounts (docs/accounts.md): sign-in, sessions and invites are a person's, never a token's |
 | `/v1/workspace/invites` | a person's own project invites (docs/members.md): listing, accepting and declining take their session, never a token |
+| `/v1/workspace/groups` | groups (docs/members-v1-1.md): making, changing and filling them is the operator's and roll's admins' (D12); a person's session lists the groups it's in and those with a role on a project it manages; never a token |
 | `/v1/code/mcp` | roll code's MCP server calls roll code without the gate; grants use `/v1/mcp` |
 | `/v1/access/approvals/{id}/approve` and `/deny`, `/v1/access/oauth/authorize`, `/v1/access/oauth/devices/{code}`, `/v1/access/notify`, `/v1/access/policy`, `/v1/access/audit/sinks` | the operator decides |
 

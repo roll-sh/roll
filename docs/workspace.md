@@ -79,6 +79,11 @@ project_invites(id, project_id, token_hash UNIQUE, email, role, environments,
         created_by, created_at, expires_at, used_by, used_at)
 homes(kind, ref, project_id, set_by, set_at, PRIMARY KEY (kind, ref))
 member_events(id, at, action, project_id, actor, subject, detail, ip, claimed_at, done)
+groups(id, name, description, source, external_id, created_by, created_at, UNIQUE (source, name))
+group_members(group_id, user_id, added_by, added_at, PRIMARY KEY (group_id, user_id))
+group_roles(project_id, group_id, role, environments, added_by, added_at, PRIMARY KEY (group_id, project_id))
+deleted_group_roles(...the same columns..., PRIMARY KEY (project_id, group_id))
+group_fanout(event_id, user_id, PRIMARY KEY (event_id, user_id))  -- who a group event may have cut off
 ```
 
 Projects from before owners become the operator's: a one-time migration moves the old tables
@@ -89,7 +94,10 @@ a project deletes its members, invites and homes in the same write.
 `member_events` is the outbox: every membership change records its event in its own transaction,
 and rolld acts on it after the write (roll's audit log, `product=workspace`; a removal revokes the
 person's tokens confined to the project, D7), claiming each for a minute first and retrying until
-it's done.
+it's done. A group change that may cut people off keeps them in `group_fanout` in its write; the
+outbox then turns it into one `group.lost` event per person and project, 500 at a time, before the
+group event's own hooks run. A `group.lost` revokes the person's confined tokens only when they
+reach the project in no other way, and roll secrets checks what they made.
 
 - A project id is `prj_` followed by 12 random characters of lowercase base32.
 - Times are unix milliseconds.
@@ -132,6 +140,17 @@ Bodies are JSON. Every error is `{"error": string}`, plus a `code` when a produc
 | `GET /v1/workspace/invites` | | the signed-in person's pending `Invite[]` |
 | `POST /v1/workspace/invites/{token}/accept` | | `Member` |
 | `POST /v1/workspace/invites/{token}/decline` | | 204 |
+| `GET /v1/workspace/projects/{id}/groups` | | `GroupRole[]` |
+| `PUT /v1/workspace/projects/{id}/groups/{group}` | `{role, environments?}` | `GroupRole` |
+| `DELETE /v1/workspace/projects/{id}/groups/{group}` | | 204 |
+| `GET /v1/workspace/groups` | | `Group[]` the caller sees, by name |
+| `POST /v1/workspace/groups` | `{name, description?}` | 201 `Group` |
+| `GET /v1/workspace/groups/{group}` | | `Group` |
+| `PATCH /v1/workspace/groups/{group}` | `{name?, description?}` | `Group` |
+| `DELETE /v1/workspace/groups/{group}` | | 204 |
+| `GET /v1/workspace/groups/{group}/members?after=&limit=` | | `GroupMember[]`, by user id, up to 500 |
+| `PUT /v1/workspace/groups/{group}/members/{user}` | | 204 |
+| `DELETE /v1/workspace/groups/{group}/members/{user}` | | 204 |
 
 - `PUT` adds the resource, moves it on the canvas, or moves it from another project of the same
   owner, in one write.
@@ -181,6 +200,37 @@ docs/members.md is the design; these are its v1 routes.
 - A new invite to an address replaces a pending one only when the caller may give the role it
   names (409 otherwise); a member removed or demoted loses the pending invites their role no longer
   gives, in the same write.
+
+### Groups
+
+docs/members-v1-1.md is the design; these are its phase 1 routes (groups and SCIM groups; not
+time-boxed elevation).
+
+- `Group`: `{id, name, description, source, external_id?, members, created_by, created_at, yours?}`. `id`
+  is `grp_` and 12 random characters of lowercase base32; `source` is `roll`, or
+  `scim:<SSO connection>` for a group an identity provider keeps over SCIM (docs/accounts.md);
+  `members` is how many people are in it; `yours` (a person's list only) says the caller is in it.
+- `GroupRole`: `{project, group, name, source, role, environments, members, added_by, added_at}`.
+  `role` is `viewer`, `developer` or `admin`: a group never holds `owner` (D10, a 400).
+- `GroupMember`: `{user, handle, email?, added_at}`; `email` only for the operator.
+- A person's rules on a project are the union of their own membership's and each of their groups'
+  roles there, read in one query on every request (never cached). `Project.role` is the highest.
+  A project a person reaches only through a group lists for them as any other.
+- `POST`, `PATCH`, `DELETE /v1/workspace/groups…` and its members are the operator's and roll's
+  admins' (D12; a person gets 403). A SCIM group's name and members are its provider's: 403
+  `{code: "managed"}`; deleting one works once its connection's SCIM groups are off.
+- `GET /v1/workspace/groups` (and one group, and its members) shows the operator every group, and a
+  person the groups they're in and those with a role on a project they're an admin of; any other
+  is a 404.
+- `PUT …/groups/{group}` needs `admin` on the project; the role, and the one it replaces, must be
+  covered by the caller's own rules (403 `forbidden`), and a person must be in the group (D11: the
+  operator, or a project admin who is in the group). `DELETE` needs the old role covered.
+- Limits, each a 409 `{code: "limit"}` naming it: 10,000 groups; 10,000 people in a group; 100 groups
+  a person is in; 200 projects a group has a role on; 50 groups with a role on a project; 1,000
+  projects in a person's grant (any member who'd pass it refuses the group role).
+- A deleted project's group roles are kept apart with it (`deleted_group_roles`) and come back with
+  `Workspace::restore`, except those of groups deleted since (dropped, each a `group.role_remove`
+  in the audit log).
 
 ## Shapes
 

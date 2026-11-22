@@ -82,6 +82,9 @@ pub struct Connection {
     /// How long a session it signs in lasts at most, in hours (none: roll's 30 days), as Okta's
     /// and Google Workspace's session lengths: then the person signs in through it again.
     pub session_hours: Option<u32>,
+    /// Its provider keeps groups over SCIM (`/Groups`; docs/members-v1-1.md). Off until an admin
+    /// turns it on (D18).
+    pub groups: bool,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -123,6 +126,9 @@ pub struct ConnectionChange {
     /// The longest a session it signs in lasts, in hours (1 to 720); 0 takes the cap off.
     #[serde(default)]
     pub session_hours: Option<u32>,
+    /// SCIM `Groups` on or off for it. Off stops new group changes; its groups stay as they are.
+    #[serde(default)]
+    pub groups: Option<bool>,
 }
 
 /// TXT records, for proving domains (DNS over HTTPS by default; a table in tests).
@@ -204,7 +210,7 @@ fn is_entra(issuer: &str) -> bool {
     url::Url::parse(issuer).ok().and_then(|u| u.host_str().map(str::to_ascii_lowercase)).is_some_and(|h| h == "login.microsoftonline.com" || h == "sts.windows.net")
 }
 
-const COLUMNS: &str = "id, name, issuer, client_id, domains, verified, enforce, provision, created_at, challenge, (SELECT COUNT(*) FROM scim_tokens t WHERE t.connection_id = sso_connections.id AND t.leaked IS NULL) AS scim, (SELECT leaked FROM scim_tokens t WHERE t.connection_id = sso_connections.id) AS scim_leaked, session_hours";
+const COLUMNS: &str = "id, name, issuer, client_id, domains, verified, enforce, provision, created_at, challenge, (SELECT COUNT(*) FROM scim_tokens t WHERE t.connection_id = sso_connections.id AND t.leaked IS NULL) AS scim, (SELECT leaked FROM scim_tokens t WHERE t.connection_id = sso_connections.id) AS scim_leaked, session_hours, groups";
 
 impl Accounts {
     fn sso_redirect_uri(&self, id: &str) -> String {
@@ -231,11 +237,17 @@ impl Accounts {
             scim: r.get::<_, i64>(10)? > 0,
             scim_leaked: r.get(11)?,
             session_hours: r.get::<_, Option<i64>>(12)?.and_then(|h| u32::try_from(h).ok()).filter(|h| *h > 0),
+            groups: r.get::<_, Option<bool>>(13)?.unwrap_or(roll_auth::roles::decisions::SCIM_GROUPS_BY_DEFAULT),
         })
     }
 
     pub fn sso_connections(&self) -> Result<Vec<Connection>> {
         Ok(self.db.read(|c| c.query(&format!("SELECT {COLUMNS} FROM sso_connections ORDER BY created_at"), (), |r| self.connection_row(r)))?)
+    }
+
+    /// Whether connection `id`'s provider keeps groups over SCIM now (looked up every time).
+    pub fn scim_groups_on(&self, id: &str) -> bool {
+        self.sso_connection(id).is_ok_and(|c| c.groups)
     }
 
     fn sso_connection(&self, id: &str) -> Result<Connection> {
@@ -357,6 +369,9 @@ impl Accounts {
             if let Some(p) = ch.provision {
                 c.execute("UPDATE sso_connections SET provision = ? WHERE id = ?", params![p, id])?;
             }
+            if let Some(g) = ch.groups {
+                c.execute("UPDATE sso_connections SET groups = ? WHERE id = ?", params![g, id])?;
+            }
             if let Some(h) = ch.session_hours {
                 if h > 720 {
                     return Err(Error::BadRequest("a session lasts 1 to 720 hours (0 takes the cap off)".into(), None));
@@ -437,7 +452,15 @@ impl Accounts {
             c.execute("DELETE FROM scim_tokens WHERE connection_id = ?", [id])?;
             c.execute("DELETE FROM scim_users WHERE connection_id = ?", [id])?;
             Ok(())
-        })
+        })?;
+        // Its groups go with it, as if its provider deleted each (their people lose what the
+        // groups gave them on their next request).
+        if let Some(d) = self.directory()
+            && let Err(e) = d.forget_connection(id)
+        {
+            tracing::warn!(connection = %id, error = %e, "accounts: a removed SSO connection's groups weren't deleted; an admin deletes them");
+        }
+        Ok(())
     }
 
     /// The provider's endpoints (and keys, once read), reused for [`DISCOVERY_TTL`]; one that

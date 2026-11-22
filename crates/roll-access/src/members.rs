@@ -7,8 +7,13 @@ use crate::{Access, Error, Result, new_id};
 use std::sync::Arc;
 
 impl Access {
-    /// `user`'s session grant now: the rules of every project they're a member of. `session`: the
-    /// session's id (`ses_…`), else it's named for the person.
+    /// `user`'s session grant now: the rules of every project they're a member of, directly or
+    /// through their groups (docs/members-v1-1.md: roles add up). `session`: the session's id
+    /// (`ses_…`), else it's named for the person.
+    ///
+    /// Every rule here is a standing rule. Time-boxed elevation (members v1.1's D13–D17, not built)
+    /// adds its live rows here, and `Grant` then carries the standing rules apart, for the checks
+    /// an elevation never counts for (granting, decoys, `role:` approvers).
     pub fn session_grant(&self, user: &str, session: Option<&str>) -> Result<roll_auth::Grant> {
         let memberships = match self.workspace.get() {
             Some(ws) => ws.memberships_of(user).map_err(|e| Error::Internal(format!("reading memberships: {e}")))?,
@@ -23,6 +28,15 @@ impl Access {
     /// one audit row each, the removal named in why. Their other tokens only stop reaching the
     /// project, as their session does.
     pub fn member_event(&self, e: &roll_workspace::MemberEvent) -> Result<()> {
+        // One person a group change may have cut off (its own event is the audit row): only when
+        // they reach the project in no other way now are their confined tokens revoked.
+        if e.action == "group.lost" {
+            let (Some(user), Some(ws)) = (e.subject.as_deref(), self.workspace.get()) else { return Ok(()) };
+            if ws.reaches(&e.project, user).map_err(|err| Error::Internal(format!("reading memberships: {err}")))? {
+                return Ok(());
+            }
+            return self.revoke_confined(user, &e.project, &format!("lost project {} with group {} ({})", e.project, e.detail["group"].as_str().unwrap_or("?"), e.detail["event"].as_str().unwrap_or(&e.id)));
+        }
         self.store.audit(&AuditEvent {
             id: new_id("aud"),
             at: e.at,
@@ -44,6 +58,17 @@ impl Access {
             client: None,
         });
         let Some(user) = e.removal() else { return Ok(()) };
+        // Still in through a group: their tokens confined to it keep working, narrowed by the grant.
+        if let Some(ws) = self.workspace.get()
+            && ws.reaches(&e.project, user).map_err(|err| Error::Internal(format!("reading memberships: {err}")))?
+        {
+            return Ok(());
+        }
+        self.revoke_confined(user, &e.project, &format!("removed from project {} ({})", e.project, e.id))
+    }
+
+    /// D7: `user`'s live tokens confined to `project` are revoked, one audit row each.
+    fn revoke_confined(&self, user: &str, project: &str, why: &str) -> Result<()> {
         if !roll_auth::roles::decisions::REVOKE_CONFINED_ON_REMOVE {
             return Ok(());
         }
@@ -53,12 +78,11 @@ impl Access {
             .list()?
             .into_iter()
             .filter(|g| g.user.as_deref() == Some(user) && g.live(now) && !g.decoy)
-            .filter(|g| roll_auth::roles::confined_to(&g.rules, g.ask_otherwise, &e.project))
+            .filter(|g| roll_auth::roles::confined_to(&g.rules, g.ask_otherwise, project))
             .map(|g| g.id)
             .collect();
-        let why = format!("removed from project {} ({})", e.project, e.id);
         for ids in confined.chunks(crate::store::MAX_REVOKE) {
-            for g in self.store.revoke_many(ids, &why)? {
+            for g in self.store.revoke_many(ids, why)? {
                 self.store.audit(&AuditEvent {
                     id: new_id("aud"),
                     at: now,
@@ -70,7 +94,7 @@ impl Access {
                     route: String::new(),
                     product: Some("access".into()),
                     action: Some("admin".into()),
-                    resource: Some(why.clone()),
+                    resource: Some(why.to_string()),
                     decision: "revoke".into(),
                     approval: None,
                     status: 200,

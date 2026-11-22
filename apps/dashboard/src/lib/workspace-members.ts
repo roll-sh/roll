@@ -7,7 +7,7 @@
  * owner makes, changes or removes owners). The operator and roll's admins (no role) manage all.
  */
 
-import { ROLES, type Member, type Role } from "./workspace-api";
+import { GROUP_ROLES, ROLES, type GroupRole, type GroupRoleName, type Member, type Role } from "./workspace-api";
 
 const rank = (r: Role) => ROLES.indexOf(r);
 
@@ -55,4 +55,20 @@ export function describeEnvironments(m: Pick<Member, "role" | "environments">, d
   if (m.role !== "developer") return "all";
   if (m.environments?.length) return m.environments.join(", ");
   return def === "unprotected" ? "unprotected" : def;
+}
+
+/** The roles a caller with `me` may give a group: up to their own, never owner (groups never hold it). */
+export function groupGrantable(me: Role | undefined): GroupRoleName[] {
+  const mine = grantable(me);
+  return GROUP_ROLES.filter((r) => mine.includes(r));
+}
+
+/**
+ * What `me` may do to group role `g`: change or remove it when its role is theirs to give. Giving
+ * a group a role also takes being in it (`inGroups`: the ids of the caller's groups; `undefined`
+ * for the operator, who may give any group one).
+ */
+export function groupControlsFor(me: Role | undefined, g: GroupRole, inGroups: Set<string> | undefined): { change: boolean; remove: boolean } {
+  const within = groupGrantable(me).includes(g.role);
+  return { change: within && (inGroups === undefined || inGroups.has(g.group)), remove: within };
 }

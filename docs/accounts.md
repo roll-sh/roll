@@ -381,8 +381,34 @@ over SCIM 2.0 (RFC 7643 and 7644), so someone who leaves loses roll at once.
   by filter; `Location` on the 201), `PUT` and `PATCH /Users/{id}` (name, `externalId`,
   `userName`, `active`: `"False"` and `false` both count, anything else is a 400; `remove` of what
   roll keeps nothing of is fine), `DELETE /Users/{id}` (deactivates). `ServiceProviderConfig`,
-  `ResourceTypes` and `Schemas` describe this: users only, no groups, no bulk; any other path is a
-  SCIM 404 (turn group provisioning off in the provider).
+  `ResourceTypes` and `Schemas` describe this (no bulk); any other path is a SCIM 404.
+- **Groups** (docs/members-v1-1.md, "SCIM Groups") are off for each connection until an admin
+  turns them on (`PATCH /v1/accounts/sso/{id} {groups: true}`, D18); while off, `/Groups` is a SCIM
+  404 and `ResourceTypes` and `Schemas` describe users only. Turning them on imports nothing (the
+  provider pushes on its next sync); turning them off stops changes and keeps the groups as they
+  are (the operator may then delete them); removing the connection deletes its groups.
+  - Each SCIM group is one roll group of the connection (`scim:<connection>`, its `id` the group's
+    `grp_…`), made by `POST /Groups` (`displayName`, `externalId?`, `members?`; 409 `uniqueness`
+    for a name the connection has). roll never links one to an existing group by name. The provider
+    keeps its members; roll gives it roles on projects (docs/workspace.md, "Groups").
+  - `GET /Groups` (`filter=displayName eq`, `externalId eq` or `id eq`; `startIndex`, `count` up to
+    200, paged in the database; a page never carries members), `GET /Groups/{id}` (with `members`
+    unless `excludedAttributes=members`), `PUT /Groups/{id}` (name, `externalId` and members
+    replaced in one write), `PATCH /Groups/{id}` (`add`, `remove` and `replace` on `members`,
+    `displayName` and `externalId`, Entra's `members[value eq "usr_…"]` remove path and Okta's
+    whole-list `replace`, in order, in one write), `DELETE /Groups/{id}` (204: its members and
+    project roles go).
+  - Members are the `usr_…` ids `/Users` gave the provider. Someone the connection doesn't reach
+    (outside its domains, an admin, an unknown id) is skipped and counted in the audit row
+    (`scim.group.create`, `scim.group.update`, `scim.group.delete` with `added`, `removed`,
+    `skipped`), never an error.
+  - A person taken out of a group loses its roles on their next request, on every node; their
+    tokens confined to a project they no longer reach are revoked after the write, and what they
+    made stops by `maker_reaches`.
+  - Bounds: a body is read up to 1 MiB (413 `tooLarge` past it, nothing parsed); at most 1,000
+    member values of at most 64 bytes in one request, 100 operations in a `PATCH` and 256 bytes a
+    path (400 `tooMany` or `invalidValue`); a group holds at most 10,000 people (400 `tooMany`,
+    nothing applied).
 - Deactivating is roll's own disable, done every time it's asked (a retry finishes cutting off
   what a failure left): the person's sessions end, and their roll code owner (its tokens and
   machine links) is cut off. Their own roll tokens and connections pause with the account, and
@@ -739,10 +765,10 @@ same callback; on success it redirects to `return_to` (default `/dashboard/accou
 | `GET /v1/accounts/users/{id}/sessions` | | `Session[]`: the person's sessions (none `current`) |
 | `DELETE /v1/accounts/users/{id}/sessions/{session}` | | 204: ends that one session (a lost laptop); 404 if it isn't theirs |
 | `GET /v1/accounts/users/{id}/activity` | query `before?`, `limit?` | `{events}`: the person's security log, the same events they see of themselves (Okta's per-user System Log); "Security log" on a person in People |
-| `GET /v1/accounts/sso` | | `SsoConnection[]` (`{id, name, issuer, client_id, domains, verified, enforce, provision, created_at, redirect_uri, dns: {name, value}, scim}`; never the secret) |
+| `GET /v1/accounts/sso` | | `SsoConnection[]` (`{id, name, issuer, client_id, domains, verified, enforce, provision, created_at, redirect_uri, dns: {name, value}, scim, groups}`; never the secret) |
 | `POST /v1/accounts/sso` | `{name?, issuer, client_id, client_secret, domains, enforce?, provision?}` | 201 `SsoConnection`; 400 when the issuer's discovery doesn't answer, `public_domain`; 409 a domain has a connection already; 503 `{code: "secret_key"}` without `ROLL_SECRET_KEY` |
 | `POST /v1/accounts/sso/{id}/verify` | | `SsoConnection`: its claimed domains whose `_roll-sso.<domain>` TXT record has its value are verified |
-| `PATCH /v1/accounts/sso/{id}` | `{name?, client_id?, client_secret?, domains?, enforce?, provision?}` | `SsoConnection` |
+| `PATCH /v1/accounts/sso/{id}` | `{name?, client_id?, client_secret?, domains?, enforce?, provision?, session_hours?, groups?}` | `SsoConnection` |
 | `DELETE /v1/accounts/sso/{id}` | | 204: its people's links go; their accounts stay; its SCIM token stops |
 | `POST /v1/accounts/sso/{id}/scim` | | 201 `{token, base_url}`: its SCIM token, shown once (replacing the old one) |
 | `DELETE /v1/accounts/sso/{id}/scim` | | 204: SCIM off (the token stops at once) |
@@ -762,7 +788,8 @@ and the SIEM sinks), as Okta's System Log and GitHub's audit log keep them:
 - every sign-in that ended, well or not (`sign_in`): the person (or `anonymous`), the method
   (`email`, `github`, `google`, `sso:<connection>`, `totp`, `recovery_code`) and why it was refused
   (`bad_code`, `sso_required`, `disabled`, `not_invited`…);
-- SCIM's changes (`scim.create`, `scim.update` with `active`), as `scim:<connection>`.
+- SCIM's changes (`scim.create`, `scim.update` with `active`; `scim.group.create`, `.update` and
+  `.delete` with the members added, removed and skipped), as `scim:<connection>`.
 
 Never a body: no code, token, secret or password is in an event. Starting a sign-in isn't
 recorded (its end is).
