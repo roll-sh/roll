@@ -455,6 +455,49 @@ pgrust's PGO-built 90.4 G 0.996-1.013x.
 
 Foreign cores per arm 2.4-3.2. One binary's q03 cycles moved 8.5% between pairs.
 
+## Bulk writes, round 23: COPY into unique indexes without reading them (2026-11-22, agent 287)
+
+HANDOFF "Bulk writes, round 23" has what changed. Lane C, agent 246's `bulkx.sh` with `JOIN=1`
+(copied to `~/.cache/a287/bench`, steps `pk_setup copy_pk checkp pk_idx ctidsp`): `bulk1m.tsv`
+COPYed into `bulkp (id int PRIMARY KEY, a int NOT NULL, b text, c float8)` with `CREATE INDEX
+bulkp_a ON bulkp (a)`, both made before the COPY (outside the window). Plain dist builds
+(`tools/dist.sh`) of **b1**, origin's `2a0f67b0d`, and **n2**, `cand/a287`'s commit on it
+(`1c8d42112`); first measured on **b0**, `dc9151d8f` (`cand/a284-2` on `621de3f17`), against
+**n1x**, the same change with the sink variant switched off (`A287_NOSINK=1`). Each pair one
+`tools/lane.sh` hold. G user instructions of the server's cgroup; every counter ran 100% of its
+window. **Foreign load was over 1.0 core in every run** (1.2-3.4 cores by the harness's
+wall-weighted reading, 2.8-5.6 by lane.sh): instruction counts repeat within 0.05%; cycles are a
+reading only. PostgreSQL 18.6: the bench image with the script's settings, two runs the same day.
+
+### COPY of 1M rows into a table with a primary key and a secondary index
+
+| run | G instructions | G cycles | written MB | `bulkp_pkey` / `bulkp_a` bytes |
+|---|---|---|---|---|
+| PostgreSQL 18.6 | 24.699 / 24.699 | 16.9-23.2 | 708.7 | 22,487,040 / 9,650,176 |
+| b1 | 54.586 / 54.607 / 54.608 | 40.2-54.2 | 346.0 | 22,429,696 / 36,061,184 |
+| n2 | 31.429 / 31.429 (-42.4 / -42.4%) | 27.2-39.8 | 346.0 | 22,429,696 / 36,061,184 |
+| b0 | 56.596 x3 | 40.6-51.5 | 346.0 | the same |
+| n1x (b0 + the change) | 31.455 / 31.455 / 31.434 (-44.4%) | 28.3-34.9 | 346.0 | the same |
+| n1 (+ the sink, dropped) | 34.983 / 34.963 | 22.8-23.8 | 110.1 | 22,454,272 / 9,641,984 |
+
+Rows (count and sums of every column), the hash of every row's ctid in id order and the heap's
+size (68,747,264 bytes, PostgreSQL's) equal on every run; index scans of both indexes count every
+row. VmHWM 270-309 MB (b1) and 285-314 MB (n2).
+
+### The whole script once each, b1 against n2
+
+All steps 43.643 -> 43.664 G: every step within ±0.05% (CREATE INDEX -0.05%, CREATE UNIQUE INDEX
+-0.03%, INSERT … SELECT -0.04%) but COPY in 6.566 -> 6.595; two COPY-in pairs after it: b1
+6.592 / 6.566, n2 6.569 / 6.595 (both builds read one of the two values run to run). Rows and
+the ctid hash equal. Against the numbers that stand (agent 260's, 2026-11-19): 0.834x
+PostgreSQL's 52.33, 0.972x pgrust's 44.92 (not re-run on either).
+
+### A secondary index only (no unique index): `bulks`, the same data
+
+b0 24.046 G (cycles 14.1, written 90.5 MB, `bulks_a` 9,641,984 bytes), PostgreSQL 18.6 18.922 G
+(12.3, 454.3 MB, 9,650,176): this COPY already went through the sink. Its profile: the sink's
+comparison sort 13.8%, the btree model's inserts (`btsim`) 17.8%.
+
 ## Bulk writes, round 22: COPY's plain lines as stored rows, number fast paths (2026-11-21, agent 284)
 
 HANDOFF "Bulk writes, round 22" has what changed. Lane C, the 1M-row bulk script with joined

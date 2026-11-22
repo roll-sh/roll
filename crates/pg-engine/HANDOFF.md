@@ -10625,6 +10625,122 @@ and confirm on PGO:
 Agent 218's short-transaction stack (ten steps, `wip/a218`) was gated this way and landed: BENCH
 "Profile-guided build", part 2.
 
+## Bulk writes, round 23: COPY into unique indexes without reading them (agent 287)
+
+BENCH.md "Bulk writes, round 23" has the measurements (lane C, a variant of the 1M-row bulk script:
+the same `bulk1m.tsv` COPYed into `bulkp (id int PRIMARY KEY, a int NOT NULL, b text, c float8)`
+with `CREATE INDEX bulkp_a ON bulkp (a)`, both made before the COPY; plain dist builds).
+`cand/a287`: one code commit on origin's `2a0f67b0d` and this section. No format change: the same
+rows, TIDs, files, relation and index sizes.
+
+**Where COPY into the indexed table went** (b0 = `dc9151d8f`, `cand/a284-2` on `621de3f17`,
+`instructions:upp` samples of the joined window; inclusive shares): 56.6 G, against PostgreSQL
+18.6's 24.7 G (2.29x). The table's primary key is a unique index with its own entries (rows are
+keyed by row ids unless `roll_pk_clustered`), so the COPY took the general row path, and each
+row's unique check (`find_conflict` -> `committed_conflict`) was 42% of the step: once the
+transaction's writes spill (`first_latest` answers only without runs), every check is a merging
+scan seeking into each spilled run (`Block::seek` 21%, `SstReader::find_block` 4.9%), so a check
+costs more the further the load has got. The write buffer (`put_fresh`: `record`, the BTreeMap,
+`maybe_spill`, `Runs::write_file`) 24%; the background compaction 10%. A unique index also kept
+the COPY off the sink (`bulk` requires no row-checking index).
+
+**FreshUnique** (`exec/dml.rs`, `txn/xids.rs`). A multi-insert COPY into a table keyed by row ids
+whose row-checking indexes are all unique btree indexes over columns (no expression, predicate,
+deferral, exclusion constraint or `record_image_ops` column), outside serializable tracking, finds
+which of them hold no entry as it starts (one `scan_latest` of each index's prefix, which sees
+the latest committed entries and this transaction's own) and records `Xids::completions`, the
+count of transaction ends (PostgreSQL's xactCompletionCount), read before those scans. Each row's
+check of such an index (`find_conflict`, through `Entering::fresh`) takes the key's lock and
+waits for another writer of the key exactly as before; then, instead of reading the index, it
+looks the key up in an exact set of the keys this statement entered (the `unique_lock_key`s past
+their lock tag, end to end in one buffer, a `hashbrown::HashTable` of offsets): found, a
+violation; else, while the completion count is the one recorded, no conflict, and the key goes
+into the set. Why no other row can hold the key then: the index held no entry at the start; a
+transaction storing rows commits them to the store before `finish_xid` counts its end, and
+releases its key locks after (`TxnState::commit`: `commit_grouped`, `finish_xid`,
+`release_locks`), so a writer of the key that ended after the start moved the count, and one
+still running holds the key's lock, which the check waits for (and the count has moved once
+it is free). Once the count has moved (any transaction's end, in any database: conservative), the
+check reads the index as before (`committed_conflict`) after the set. Such a COPY's rows go the
+plain way (`plain_row`, which runs the same `index_entries_checked`), their pg_stat counts held
+to the buffer's flush as the general path holds them (`hold` for a plain COPY with `fresh`: a
+row failing its unique check leaves a dead tuple counted as before). An index with entries at
+the start, or any other row-checking index, keeps the old path. The memory: about 22 bytes a
+key (VmHWM 285-314 MB on both builds at 1M rows; the key locks the general path takes too are
+the larger part).
+
+Tests: golden `a287_copy_unique` (recorded from PostgreSQL 18.6): a duplicate primary key at line
+1050 of 1,100 (found at the second buffer's flush, the serial defaults of the buffer's later rows
+evaluated first: nextval as PostgreSQL's), one within the first buffer (line 7), a duplicate in a
+second unique column (NULLs don't clash), a clean load's ctids, counts, sums and index scans, a
+clash with a committed row (the index read as before), this transaction's own rows in the index
+(a second COPY in one transaction), and the pg_stat counts after them. `big_tables::
+copy_into_fresh_unique_index_waits_for_writers`: another session inserts key 11000 and holds
+it; the COPY of 12,000 rows waits for it (`pg_stat_activity` shows the Lock wait), then fails on
+line 11000 with the key's DETAIL when the other commits, and goes in whole when it rolls back.
+
+Results (BENCH "Bulk writes, round 23"; plain dist, b1 = `2a0f67b0d` against n2 = the commit
+on it, two alternating pairs, G user instructions): COPY into the PK + secondary index table
+54.586 / 54.607 / 54.608 -> 31.429 / 31.429 (-42.4% both pairs), against PostgreSQL 18.6's 24.70
+(2.21x -> 1.27x). Rows, the ctid hash, the heap's and both indexes' sizes equal; bytes written
+346.0 MB on both. The whole bulk script once each: every step within ±0.05% but COPY in, 6.566
+-> 6.595 (+0.44%): two COPY-in pairs after it read b1 6.592 / 6.566 and n2 6.569 / 6.595 (the step
+reads one of two values run to run on either build: not a change). The same change first
+measured on b0 (`dc9151d8f`): 56.596 x3 -> 31.455 / 31.455 / 31.434 (-44.4%). Foreign load was
+over 1.0 core in every run (1.2-3.4 cores by the harness, 2.8-5.6 by lane.sh); instruction counts
+repeat within 0.05% regardless; cycles (b1 40.2-54.2, n2 27.2-39.8 G) are a reading only.
+
+Not gated on the PGO build: no inline attribute added or removed, no hot function split; the new
+checks are calls of their own on a path only this COPY takes.
+
+Verification: `tools/quick-check.sh` with `QC_CHECKED=1` on `1c8d42112`: Clippy 16 warnings, none
+new in a changed file; 187 tests in 24 binaries; crash_random seeds 1-3 x 2,
+power_cut_at_every_point; regress 51,148 / 51,150, 0 newly differing; isolation 1,647 / 1,648;
+pg_dump_tap 14,609 passed (two runs: the first, with `QC_CHECKED=1`, stopped at its checked stage
+on `wire::protocol_cases`' `info_schema_rows`, and the second ran without it). The checked stage's
+other binaries passed under `--profile verify-checked`, `big_tables` among them; `wire_waits`,
+which it didn't reach, passed on its own afterwards. **`info_schema_rows` fails under
+`verify-checked` on origin's `2a0f67b0d` too** (two runs of the base's build, the same output, and
+`plf_cte_unread` once): the first information_schema query of the case answers after the step's
+quiet window, so every later step reads one place early. It passes in the verify build's tests
+stage. The golden case also passed in-process, shuffled and over the wire before it.
+
+**Measured and dropped: such a COPY through the sink** (`~/.cache/a287/patches/n1-a-plus-b-toggle.patch`,
+the `bulk` condition taking indexes `fresh` covers; `A287_NOSINK=1` turned it off for the A-only
+runs). Its rows and entries went through the sink and held rows (nothing reads the unique
+indexes now), as a COPY into a table with non-unique indexes does. Against FreshUnique alone (one
+build, three runs): 31.455 -> 34.98 / 34.96 G user instructions (+11%), cycles 28.3 -> 22.8-23.8 G,
+bytes written 346.0 -> 110.1 MB (-68%). The added instructions: the held rows' model
+(`CopyLoad::model`, 18.6% of the step) places the first 400,000 rows' index entries in the btree
+models exactly (`btsim::Btree::insert` 16.2%: ~7,000 instructions an entry for the secondary
+index's keys, which come in no order), and the sink sorts its entries by comparison (9.7%). It
+also changed the index sizes: `bulkp_pkey` 22,429,696 -> 22,454,272 bytes and `bulkp_a` 36,061,184
+-> 9,641,984 against PostgreSQL 18.6's 22,487,040 and 9,650,176. That is, **the decoded path's
+estimate of a secondary index whose keys come in no order is 3.7x PostgreSQL's size** past the
+model (b0, b1 and n2 alike; the sink path's is within a page). Dropped by the gate's rule
+(instructions first); the size finding is item 2 below.
+
+**Left:**
+1. COPY into the indexed table 31.4 against PostgreSQL's 24.7: the write buffer (`put_fresh`
+   38% of n1x's step: `record` 20%, the BTreeMap, `Runs::write_file` 14%), the background
+   compaction (15%), the unique keys' locks (4.6%: one lock entry a row, as PostgreSQL has none
+   but the index tuple), `inserted_with` (11%). Through the sink (above) the buffer's cost goes
+   but the exact btree model costs more: a cheaper `btsim` insert for keys in no order would let
+   the sink win (its `Leaf::get` / `take` / `put`, `descend_for`, `insert_pos` re-reading the
+   encoded leaf).
+2. Index sizes past the model: a COPY (or INSERT) of rows through the decoded path into a table
+   with a secondary index over keys in no order estimates the index at 3.7x PostgreSQL's size
+   (`bulkp_a` above: 36.1 MB against 9.65 MB); the sink path gets it within a page.
+3. A failed multi-insert COPY's buffer: PostgreSQL's heap_multi_insert stores the whole buffer
+   before its index entries find a clash, so the buffer's later rows stay as dead tuples (the
+   next rows' ctids start after them); roll's model leaves them out (the general path did before
+   this change too: the golden case avoids ctids after a failed COPY).
+4. Stored rows (`CopyRow::Stored`) for indexed tables: the stored-row path needs the model's
+   placement with index entries (`inserted_stored_modelled` takes none, `inserted_stored` has no
+   btree estimate) and index values read from the stored bytes; not built.
+5. The brief's items 2 and 3 (INSERT … SELECT 5.10 against 4.31; COPY's per-row frame, field
+   ends, `insert_data`'s re-read): not started.
+
 ## Bulk writes, round 22: COPY's plain lines as stored rows, number fast paths (agent 284)
 
 BENCH.md "Bulk writes, round 22" has the measurements (lane C, the 1M-row bulk script with joined
