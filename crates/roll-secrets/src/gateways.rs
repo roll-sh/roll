@@ -282,6 +282,11 @@ impl Secrets {
         };
         let found: Option<(String, String, String)> = self.db.read(|c| c.query_row("SELECT project_id, name, created_by FROM gateways WHERE id = ?", [id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?))).optional())?;
         let (project, name, created_by) = found.ok_or_else(|| Error::NotFound(format!("no gateway {id}: it was deleted")))?;
+        // A deleted project's gateways open nothing, in its window or after (deleted.rs).
+        let live: i64 = self.db.read(|c| c.query_row("SELECT COUNT(*) FROM projects WHERE project_id = ? AND forgotten_at IS NULL", [&project], |r| r.get(0)))?;
+        if live == 0 {
+            return Err(Error::NotFound(format!("no gateway {id}: its project was deleted")));
+        }
         if let Some(caller) = caller {
             caller.need(Action::Admin, &Scope::project(&project)).map_err(|_| denied())?;
         }
@@ -319,7 +324,11 @@ impl Secrets {
         self.db.write(|c| {
             let Some(project) = c.query_row("SELECT project_id FROM gateways WHERE id = ?", [id], |r| r.get::<_, String>(0)).optional()? else { return Ok(()) };
             c.execute("UPDATE gateways SET conn = NULL WHERE id = ? AND conn = ?", params![id, conn])?;
-            audit::record(c, self.keys()?, &project, &link_caller(id), "gateway.disconnect", None, None, &[], why, now)
+            // A deleted project's log closed meanwhile: nothing more goes in it.
+            match audit::record(c, self.keys()?, &project, &link_caller(id), "gateway.disconnect", None, None, &[], why, now) {
+                Err(Error::Gone(_)) => Ok(()),
+                r => r,
+            }
         })
     }
 
