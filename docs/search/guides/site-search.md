@@ -33,6 +33,13 @@ es PUT /_synonyms/site '{
 }'
 ```
 
+Or keep them in a file, one Solr-format rule a line, and load it with the CLI:
+
+```sh
+printf 'sign in, log in, login\nk8s => kubernetes\n' > synonyms.txt
+roll search synonyms put docs site synonyms.txt
+```
+
 ## Create the index
 
 ```sh
@@ -172,7 +179,8 @@ Replace or add one rule:
 es PUT /_synonyms/site/k8s '{"synonyms": "k8s, kube => kubernetes"}'
 ```
 
-Or replace the whole set with `PUT /_synonyms/site` as before. The answer says which analyzers it
+Or replace the whole set with `PUT /_synonyms/site` (or `roll search synonyms put docs site
+synonyms.txt`) as before. The answer says which analyzers it
 reloaded; the next search uses the new rules. In the dashboard, the cluster's **Relevance** tab
 edits synonym sets as rows or as text.
 
@@ -188,6 +196,9 @@ es PUT /pages/_settings '{
   "index.roll.suggestions.min_count": 5
 }'
 ```
+
+The CLI does the same: `roll search indices settings set docs pages index.roll.analytics.enabled=true
+index.roll.suggestions.enabled=true index.roll.suggestions.min_count=5`.
 
 When your backend searches for someone, send their text in the `X-Roll-Search-Query` header so
 analytics records exactly what they typed, not your query's internals:
@@ -289,21 +300,15 @@ Allowed origins only bind browsers. The limits a browser key works under are lis
 ### Or keep a backend
 
 If you'd rather not ship a key, put a small endpoint in front of search. Give it a key that can
-only read `pages` and `pages-suggestions` (creating a key with `role_descriptors` needs the admin
-key):
+only read `pages` and `pages-suggestions`:
 
 ```sh
-es POST /_security/api_key '{
-  "name": "site-search-backend",
-  "role_descriptors": {
-    "search": {"indices": [{"names": ["pages", "pages-suggestions"], "privileges": ["read"]}]}
-  }
-}'
+roll search keys create docs site-search-backend --read-only --indices pages,pages-suggestions
 ```
 
-Use the `encoded` value from the answer as the endpoint's key. It works against the cluster's own
-host (`https://docs.search.…`); on a shared address such as `http://127.0.0.1:59200`, encode
-`<id>@docs:<api_key>` in base64 instead, so the address knows which cluster the key belongs to.
+Use the printed `api_key` as the endpoint's key. It names the cluster, so it works on any of its
+addresses. The key can search and read those two indices and nothing else: no writes, no other
+index, no cluster settings.
 
 ```js
 // server.mjs: SEARCH_KEY=… node server.mjs, then GET http://localhost:3000/search?q=…

@@ -262,6 +262,22 @@ impl Chain {
         cf_stage: &mut dyn FnMut(usize, &str),
         sink: &mut dyn FnMut(&Tok),
     ) -> Result<End, crate::error::AnalysisError> {
+        let end = self.run_until(text, nfilters, cf_stage, &mut |t| {
+            sink(t);
+            true
+        })?;
+        Ok(end.expect("a sink that never stops"))
+    }
+
+    /// [`Chain::run`] with a sink that may stop the analysis (`false`): no further token is
+    /// produced, and the result is `None`.
+    pub fn run_until(
+        &mut self,
+        text: &str,
+        nfilters: usize,
+        cf_stage: &mut dyn FnMut(usize, &str),
+        sink: &mut dyn FnMut(&Tok) -> bool,
+    ) -> Result<Option<End>, crate::error::AnalysisError> {
         let buf = self.char_filter(text, cf_stage)?;
         let Chain {
             tokenizer,
@@ -291,17 +307,20 @@ impl Chain {
         };
         tok.error = None;
         while up.next(tok) {
-            sink(tok);
+            if !sink(tok) {
+                tok.error = None;
+                return Ok(None);
+            }
         }
         if let Some(e) = tok.error.take() {
             return Err(*e);
         }
         tok.clear_for_end();
         up.end(tok);
-        Ok(End {
+        Ok(Some(End {
             final_offset: tok.end,
             pos_inc: tok.pos_inc,
-        })
+        }))
     }
 }
 

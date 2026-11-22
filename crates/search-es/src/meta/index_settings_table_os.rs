@@ -5,7 +5,7 @@
 //! Elasticsearch registry where the key exists in both. Generated; edit by hand only to track a
 //! new OpenSearch version.
 
-use super::index_settings::{Dflt, EnumErr, IndexSetting, Scope, Ty};
+use super::index_settings::{Dflt, EnumErr, IndexSetting, MAX_ANALYZE_TOKENS, MAX_ANALYZED_OFFSET, MAX_GRAM_DIFF, Scope, Ty};
 
 use Dflt::{List as L, Str as D};
 use Ty::*;
@@ -21,7 +21,7 @@ pub static OS_INDEX_SETTINGS: &[IndexSetting] = &[
     s!("index.aggregation.streaming.min_segment_size", D("1000"), Long(-1, i64::MAX), Dynamic),
     s!("index.allocation.existing_shards_allocator", D("gateway_allocator"), Str, Private),
     s!("index.allocation.max_retries", D("5"), Int(0, i32::MAX as i64), Dynamic),
-    s!("index.analyze.max_token_count", D("10000"), Int(1, i32::MAX as i64), Dynamic),
+    s!("index.analyze.max_token_count", D("10000"), Int(1, MAX_ANALYZE_TOKENS), Dynamic),
     s!("index.append_only.enabled", D("false"), Bool, Final),
     s!("index.auto_expand_replicas", D("false"), AutoExpandReplicas, Dynamic),
     s!("index.auto_expand_search_replicas", D("false"), Bool, Dynamic),
@@ -64,7 +64,7 @@ pub static OS_INDEX_SETTINGS: &[IndexSetting] = &[
     s!("index.format", D("0"), Int(0, i32::MAX as i64), Final),
     s!("index.gc_deletes", D("60s"), Time(-1), Dynamic),
     s!("index.hidden", D("false"), Bool, Dynamic),
-    s!("index.highlight.max_analyzed_offset", D("1000000"), Int(1, i32::MAX as i64), Dynamic),
+    s!("index.highlight.max_analyzed_offset", D("1000000"), Int(1, MAX_ANALYZED_OFFSET), Dynamic),
     s!("index.history.uuid", D("_na_"), Str, Private),
     s!("index.indexing.slowlog.level", D("TRACE"), Str, Dynamic),
     s!("index.indexing.slowlog.reformat", D("true"), Bool, Dynamic),
@@ -111,13 +111,13 @@ pub static OS_INDEX_SETTINGS: &[IndexSetting] = &[
     s!("index.max_adjacency_matrix_filters", D("100"), Int(2, i32::MAX as i64), Dynamic),
     s!("index.max_docvalue_fields_search", D("100"), Int(0, i32::MAX as i64), Dynamic),
     s!("index.max_inner_result_window", D("100"), Int(1, i32::MAX as i64), Dynamic),
-    s!("index.max_ngram_diff", D("1"), Int(0, i32::MAX as i64), Dynamic),
+    s!("index.max_ngram_diff", D("1"), Int(0, MAX_GRAM_DIFF), Dynamic),
     s!("index.max_refresh_listeners", D("1000"), Int(0, i32::MAX as i64), Dynamic),
     s!("index.max_regex_length", D("1000"), Int(1, i32::MAX as i64), Dynamic),
     s!("index.max_rescore_window", Dflt::Computed, Int(1, i32::MAX as i64), Dynamic),
     s!("index.max_result_window", D("10000"), Int(1, i32::MAX as i64), Dynamic),
     s!("index.max_script_fields", D("32"), Int(0, i32::MAX as i64), Dynamic),
-    s!("index.max_shingle_diff", D("3"), Int(0, i32::MAX as i64), Dynamic),
+    s!("index.max_shingle_diff", D("3"), Int(0, MAX_GRAM_DIFF), Dynamic),
     s!("index.max_slices_per_pit", D("1024"), Long(-1, i64::MAX), Dynamic),
     s!("index.max_slices_per_scroll", D("1024"), Int(1, i32::MAX as i64), Dynamic),
     s!("index.max_terms_count", D("65536"), Int(1, i32::MAX as i64), Dynamic),

@@ -1,8 +1,10 @@
 //! Reach (docs/secrets.md, "Reach"): every way a folder's values (or one key's) can leave roll,
-//! for a security review or before rotating after a leak. Who could (tokens and workload
-//! identities whose scope covers it, untrusted code when the environment isn't protected), where it
-//! goes by itself (syncs, other projects it's shared with, folders that import it), and who
-//! actually read it lately (the audit log). Names and metadata only; never a value.
+//! for a security review or before rotating after a leak. Who could (members whose role reveals
+//! it, their OAuth clients, tokens and workload identities whose scope covers it, untrusted code
+//! when the environment isn't protected), where it goes by itself (syncs, other projects it's
+//! shared with, folders that import it, services that read it, sandboxes holding a copy), who
+//! actually read it lately (the audit log), and who read it and no longer may. Names and metadata
+//! only; never a value.
 
 use crate::access::{Action, Caller, GrantGrants, Grants, Scope};
 use crate::{Error, Result, Secrets, envs, from_json, names};
@@ -24,8 +26,24 @@ pub struct Reach {
     /// Checks, sandboxes and previews running code roll hasn't vetted may read it: the
     /// environment isn't protected (they never read a protected one).
     pub untrusted: bool,
+    /// roll-access tokens (`rlt_…`) whose rules reach it.
     pub tokens: Vec<Holder>,
     pub identities: Vec<Holder>,
+    /// The project's members whose role reveals it now, decided as their session's requests are.
+    pub people: Vec<PersonReach>,
+    /// How many accounts are the operator's admins: they reveal everything (`None`: nothing tells).
+    pub admins: Option<usize>,
+    /// Live OAuth connections (`rlo_…`, a person's MCP client or app) whose rules reach it, by
+    /// person (`created_by`). A cut-off's `tokens` revokes them too.
+    pub clients: Vec<Holder>,
+    /// roll apps services the project stands for whose environment reads it (its own folder, through
+    /// a base or an import, or a `roll://` variable), with their last deploy.
+    pub services: Vec<ServiceReach>,
+    /// Live agents sandboxes whose environment holds a copy of its values.
+    pub sandboxes: Vec<SandboxReach>,
+    /// People who read its values in the last [`READ_DAYS`] days and may no longer reveal them:
+    /// they still know what they read (rotate it).
+    pub knew: Vec<Knew>,
     pub syncs: Vec<SyncReach>,
     /// Live dynamic credentials issued for its keys (or the key): their holders keep them until
     /// they end.
@@ -53,6 +71,94 @@ pub struct Reach {
     pub uncounted: &'static str,
     /// The folder is frozen (`…/reach/cut-off` with `freeze`): only its admins read it.
     pub frozen: Option<crate::cutoff::Freeze>,
+}
+
+/// A member whose role reveals the folder.
+#[derive(Debug, Serialize)]
+pub struct PersonReach {
+    pub user: String,
+    pub handle: String,
+    /// Their role in the project (`owner`, `admin`, `developer`, `viewer`).
+    pub role: String,
+    /// Of read, reveal, write and admin: what their role may do here.
+    pub actions: Vec<Action>,
+    /// An admin account: the operator's equal, whatever the role says.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub admin: bool,
+}
+
+/// A service environment that reads the folder.
+#[derive(Debug, Serialize)]
+pub struct ServiceReach {
+    pub service: String,
+    pub name: String,
+    pub environment: String,
+    /// How it reads it: a folder it deploys with (`env:/path`, its own or one importing this one or
+    /// based on it), or the `roll://` reference of one of its variables.
+    pub through: String,
+    /// When what runs now was deployed (`None`: nothing runs; its next deploy reads it).
+    pub last_deployed_at: Option<i64>,
+}
+
+/// A sandbox whose environment holds values copied from the folder.
+#[derive(Debug, Serialize)]
+pub struct SandboxReach {
+    pub id: String,
+    pub name: String,
+    /// The roll code owner it runs for.
+    pub owner: String,
+    /// Who copied the values in (roll secrets' maker: `usr_…`, `token:…`, `operator`).
+    pub by: String,
+    /// Where they were copied from (`env` or `env:/path`).
+    pub from: String,
+    /// The copied keys (names only); with `key`, only that one.
+    pub keys: Vec<String>,
+}
+
+/// Someone who read the folder lately and may no longer reveal it.
+#[derive(Debug, Serialize)]
+pub struct Knew {
+    pub user: String,
+    pub last_at: i64,
+    pub reads: usize,
+    /// `left`: no longer a member; `role`: their role no longer reveals it; `gone`: their account
+    /// can't sign in.
+    pub why: &'static str,
+}
+
+/// What other products hold of a project's secrets, for reach: rolld asks roll apps and roll code
+/// (roll secrets knows no product). Names and metadata only, never a value.
+pub trait Holders: Send + Sync {
+    /// roll apps services the project stands for ([`roll_workspace::Workspace::trusts`]): each
+    /// environment, which reads the project's environment of its name (its root folder), with its
+    /// variables' `roll://` references (their text, never what they read).
+    fn services(&self, project: &str) -> std::result::Result<Vec<ServiceUse>, String>;
+    /// Live agents sandboxes holding values copied from the project's secrets.
+    fn sandboxes(&self, project: &str) -> std::result::Result<Vec<SandboxCopy>, String>;
+}
+
+/// One environment of a roll apps service ([`Holders::services`]).
+#[derive(Clone, Debug)]
+pub struct ServiceUse {
+    pub service: String,
+    pub name: String,
+    /// The apps environment's name: the project's secrets environment it reads.
+    pub environment: String,
+    pub last_deployed_at: Option<i64>,
+    /// Its variables' `roll://` references.
+    pub references: Vec<String>,
+}
+
+/// One sandbox's copy ([`Holders::sandboxes`]).
+#[derive(Clone, Debug)]
+pub struct SandboxCopy {
+    pub id: String,
+    pub name: String,
+    pub owner: String,
+    pub by: String,
+    /// `env` or `env:/path`.
+    pub from: String,
+    pub keys: Vec<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -134,6 +240,10 @@ pub struct Reader {
     pub reads: usize,
 }
 
+/// The people who read a folder lately, by user: when last, how often, and which reading folders
+/// (`env`, `path`) they read it through.
+type ReadBy = BTreeMap<String, (i64, usize, Vec<(String, String)>)>;
+
 const ACTIONS: [Action; 4] = [Action::Read, Action::Reveal, Action::Write, Action::Admin];
 
 /// What a scope (a token's, an identity's) may do at `slug:path`.
@@ -163,7 +273,7 @@ impl Secrets {
         };
         // A project's admin cuts off only what stays inside the project; the operator, anything.
         let operator = caller.grants.everything();
-        let tokens = all
+        let (clients, tokens): (Vec<_>, Vec<_>) = all
             .into_iter()
             .filter_map(|g| {
                 // As each of its requests is judged here: a person's own token only within their own
@@ -171,9 +281,14 @@ impl Secrets {
                 let grants = self.grant_grants(&g).ok()?;
                 let actions: Vec<Action> = ACTIONS.into_iter().filter(|a| grants.allows(*a, &Scope::at(project, slug, &path))).collect();
                 let skipped = (!operator && !crate::access::confined_to(&g, project)).then_some(BEYOND);
-                (!actions.is_empty()).then(|| Holder { id: g.id.to_string(), name: g.name.to_string(), actions, expires_at: None, last_used_at: None, created_by: g.user.as_deref().unwrap_or("operator").to_string(), disabled_at: None, skipped })
+                let oauth = g.kind == roll_auth::GrantKind::Oauth;
+                (!actions.is_empty()).then(|| (oauth, Holder { id: g.id.to_string(), name: g.name.to_string(), actions, expires_at: None, last_used_at: None, created_by: g.user.as_deref().unwrap_or("operator").to_string(), disabled_at: None, skipped }))
             })
-            .collect();
+            .partition(|(oauth, _)| *oauth);
+        let tokens: Vec<Holder> = tokens.into_iter().map(|(_, h)| h).collect();
+        let mut clients: Vec<Holder> = clients.into_iter().map(|(_, h)| h).collect();
+        clients.sort_by(|a, b| (&a.created_by, &a.name).cmp(&(&b.created_by, &b.name)));
+        let (people, admins) = self.people_reach(project, slug, &path)?;
         let identities = self
             .identities(project, caller)?
             .into_iter()
@@ -248,7 +363,7 @@ impl Secrets {
                 let mut next = vec![];
                 for (eid, eproject, at) in frontier {
                     let importers: Vec<(String, String, String, String)> = c.query(
-                        "SELECT e.id, e.project_id, e.slug, i.path FROM imports i JOIN environments e ON e.id = i.env_id WHERE i.from_env_id = ? AND i.from_path = ? ORDER BY e.project_id, e.slug, i.path",
+                        "SELECT e.id, e.project_id, e.slug, i.path FROM imports i JOIN environments e ON e.id = i.env_id AND e.forgotten_at IS NULL WHERE i.from_env_id = ? AND i.from_path = ? ORDER BY e.project_id, e.slug, i.path",
                         params![eid, at],
                         |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
                     )?;
@@ -317,9 +432,21 @@ impl Secrets {
             }
         }
         let mut readers: BTreeMap<String, Reader> = BTreeMap::new();
+        let mut read_by: ReadBy = BTreeMap::new();
         for ((sp, se, spath), actor, at, keys) in reads {
             if key.is_some_and(|k| !from_json::<Vec<String>>(&keys).iter().any(|x| x == k)) {
                 continue;
+            }
+            // The person behind a read here (themselves, or their own token), for `knew`.
+            if sp == project
+                && let Some(user) = self.reader_person(&actor)
+            {
+                let k = read_by.entry(user).or_insert((at, 0, vec![]));
+                k.0 = k.0.max(at);
+                k.1 += 1;
+                if !k.2.contains(&(se.clone(), spath.clone())) {
+                    k.2.push((se.clone(), spath.clone()));
+                }
             }
             // Another project's readers are its own: named by the project, not their tokens.
             let who = if sp != project {
@@ -335,6 +462,148 @@ impl Secrets {
         }
         let mut readers: Vec<Reader> = readers.into_values().collect();
         readers.sort_by_key(|r| std::cmp::Reverse(r.last_at));
-        Ok(Reach { environment: slug.to_string(), path, key: key.map(String::from), protected: env.protected, untrusted: !env.protected, tokens, identities, syncs, leases, placeholders, shares, unattributed_shares, projects, imported_by, truncated, readers, uncounted: UNCOUNTED, frozen })
+        let knew = self.knew(project, slug, &path, read_by)?;
+        // Folders of this project whose readers read it: here, and those importing it or based on it.
+        let reading: Vec<(&str, &str)> = std::iter::once((slug, path.as_str())).chain(sources.iter().filter(|s| s.0 == project).map(|s| (s.1.as_str(), s.2.as_str()))).collect();
+        let (services, sandboxes) = self.held_by(project, key, &reading)?;
+        Ok(Reach {
+            environment: slug.to_string(),
+            path,
+            key: key.map(String::from),
+            protected: env.protected,
+            untrusted: !env.protected,
+            tokens,
+            identities,
+            people,
+            admins,
+            clients,
+            services,
+            sandboxes,
+            knew,
+            syncs,
+            leases,
+            placeholders,
+            shares,
+            unattributed_shares,
+            projects,
+            imported_by,
+            truncated,
+            readers,
+            uncounted: UNCOUNTED,
+            frozen,
+        })
+    }
+}
+
+impl Secrets {
+    /// The project's members whose role reveals `slug:path` now, as their session's requests are
+    /// decided (`GrantGrants` over roll-access's session grant), and how many admin accounts the
+    /// operator has.
+    fn people_reach(&self, project: &str, slug: &str, path: &str) -> Result<(Vec<PersonReach>, Option<usize>)> {
+        let mut people = vec![];
+        for m in self.candidates(project)? {
+            let Some(person) = self.person(&m.user)? else { continue };
+            let actions: Vec<Action> = if person.admin {
+                ACTIONS.to_vec()
+            } else {
+                let session = self.session_grants(&m.user);
+                ACTIONS.into_iter().filter(|a| session.allows(*a, &Scope::at(project, slug, path))).collect()
+            };
+            if actions.contains(&Action::Reveal) {
+                people.push(PersonReach { user: m.user, handle: m.handle, role: m.role.as_str().to_string(), actions, admin: person.admin });
+            }
+        }
+        let admins = match &self.people {
+            Some(p) => p.admins().map_err(|e| Error::Internal(format!("counting the operator's admins: {e}")))?,
+            None => None,
+        };
+        Ok((people, admins))
+    }
+
+    /// Who might reach a project through a role: its members. Members v1.1's groups
+    /// (`feature/members-groups`) add the people of the groups that hold a role here; their
+    /// session grants already carry the group's rules, so only this list changes.
+    fn candidates(&self, project: &str) -> Result<Vec<roll_workspace::members::Member>> {
+        match self.workspace.members(roll_workspace::Scope::All, project, false) {
+            Ok(m) => Ok(m),
+            // A project the workspace no longer has (its recovery window) has no members.
+            Err(roll_workspace::Error::NotFound(_)) => Ok(vec![]),
+            Err(e) => Err(Error::Internal(e.to_string())),
+        }
+    }
+
+    /// The person behind an audit row's actor: a person, or a person's own token (`token:…`, as
+    /// roll-access still knows it after it ends).
+    fn reader_person(&self, actor: &str) -> Option<String> {
+        if crate::access::is_person(actor) {
+            return Some(actor.to_string());
+        }
+        let id = actor.strip_prefix("token:")?;
+        self.grants.as_ref()?.owner(id).flatten()
+    }
+
+    /// Of the people who read the folder lately (`read_by`: when last, how often, which reading
+    /// folders), those who may reveal neither it nor where they read it now.
+    fn knew(&self, project: &str, slug: &str, path: &str, read_by: ReadBy) -> Result<Vec<Knew>> {
+        let mut knew = vec![];
+        for (user, (last_at, reads, at)) in read_by {
+            let why = match self.person(&user)? {
+                None => "gone",
+                Some(p) if p.admin => continue,
+                Some(_) => {
+                    let session = self.session_grants(&user);
+                    let reveals = |e: &str, p: &str| session.allows(Action::Reveal, &Scope::at(project, e, p));
+                    if reveals(slug, path) || at.iter().any(|(e, p)| reveals(e, p)) {
+                        continue;
+                    }
+                    if session.sees(project) { "role" } else { "left" }
+                }
+            };
+            knew.push(Knew { user, last_at, reads, why });
+        }
+        knew.sort_by_key(|k| std::cmp::Reverse(k.last_at));
+        Ok(knew)
+    }
+
+    /// Services and sandboxes that read a folder (one key's, with `key`): through rolld's
+    /// [`Holders`]. `reading`: this project's folders whose readers read it (the folder itself
+    /// first). Nothing without a provider (roll apps and roll code aren't on this server).
+    fn held_by(&self, project: &str, key: Option<&str>, reading: &[(&str, &str)]) -> Result<(Vec<ServiceReach>, Vec<SandboxReach>)> {
+        let Some(h) = self.reach_holders.get() else { return Ok((vec![], vec![])) };
+        let reads = |e: &str, p: &str| reading.iter().any(|(re, rp)| *re == e && *rp == p);
+        let mut services = vec![];
+        for s in h.services(project).map_err(|e| Error::Internal(format!("listing roll apps' services: {e}")))? {
+            // Its environment's root folder, as a deploy reads it.
+            let mut through = reads(&s.environment, "/").then(|| format!("{}:/", s.environment));
+            if through.is_none() {
+                through = s.references.iter().find(|r| match crate::consumers::Reference::parse(r) {
+                    // Its key read there: this folder's, or an importing one's that may be this folder's.
+                    Ok(Some(r)) => r.project.as_deref().is_none_or(|p| p == project) && reads(&r.env, &r.path) && key.is_none_or(|k| k == r.key),
+                    _ => false,
+                }).cloned();
+            }
+            if let Some(through) = through {
+                services.push(ServiceReach { service: s.service, name: s.name, environment: s.environment, through, last_deployed_at: s.last_deployed_at });
+            }
+        }
+        let mut sandboxes = vec![];
+        for c in h.sandboxes(project).map_err(|e| Error::Internal(format!("listing agents' sandboxes: {e}")))? {
+            let (e, p) = c.from.split_once(':').unwrap_or((c.from.as_str(), "/"));
+            if !reads(e, p) {
+                continue;
+            }
+            let keys: Vec<String> = c.keys.iter().filter(|k| key.is_none_or(|x| x == k.as_str())).cloned().collect();
+            if keys.is_empty() {
+                continue;
+            }
+            sandboxes.push(SandboxReach { id: c.id, name: c.name, owner: c.owner, by: c.by, from: c.from, keys });
+        }
+        Ok((services, sandboxes))
+    }
+
+    /// Where reach asks which services and sandboxes hold a project's secrets (rolld, once roll
+    /// apps and roll code are open).
+    pub fn set_reach_holders(&self, holders: std::sync::Arc<dyn Holders>) {
+        let _ = self.reach_holders.set(holders);
     }
 }

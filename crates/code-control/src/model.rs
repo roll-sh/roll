@@ -671,6 +671,9 @@ pub struct PreviewEarlier {
     pub service: String,
     pub head: String,
     pub url: String,
+    /// It runs on its own copy of the data, as its head left it (else the preview's).
+    #[serde(default)]
+    pub own_data: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]

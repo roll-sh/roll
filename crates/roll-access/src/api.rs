@@ -1239,6 +1239,7 @@ async fn request_access(State(a): S, ext: Extensions, Json(r): Json<AccessReques
     let args = json!({ "for": r.for_, "reason": reason });
     let (env, path, index) = (r.environment.clone(), r.path.clone(), r.index.clone());
     let (product, action, g2) = (r.product.clone(), r.action.as_str().to_string(), grant.clone());
+    let wait_ms = a.policy_now().approval_wait_ms(&product, &action, env.as_deref());
     let asked = blocking(a.clone(), move |a| {
         a.store.ask(crate::store::Ask {
             grant: &g2,
@@ -1255,6 +1256,7 @@ async fn request_access(State(a): S, ext: Extensions, Json(r): Json<AccessReques
             environment: env.as_deref(),
             scope_path: path.as_deref(),
             scope_index: index.as_deref(),
+            wait_ms,
         })
     })
     .await?;

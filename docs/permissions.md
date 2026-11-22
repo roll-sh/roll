@@ -425,7 +425,7 @@ first, so they can't hide what runs, and anything that makes or changes credenti
 - A route whose product filters its answer per environment and path itself, asking the caller's
   `Grant` for each finding, can be matched by rules limited to some environments or paths too
   (`Row::filters_itself`): a token for staging would get staging's findings, never production's,
-  rather than a 403. Secrets' health and leak scan have it; secrets' cross-project routes
+  rather than a 403. Secrets' health, leak scan and events feed have it; secrets' cross-project routes
   (`GET /v1/secrets/search`, `GET /v1/secrets/findings`) take any grant and keep each project's
   results only where it may read. An approval on such a route is approved once (a rule from it
   would drop the token's environments).
@@ -465,6 +465,19 @@ first, so they can't hide what runs, and anything that makes or changes credenti
   cluster, a copy of its indices: it also needs `write` on the parent, as
   `POST /v1/search/clusters/{id}/branches` does there, so a token whose rules name one project
   can't branch a cluster outside it.
+- The search console (`POST /v1/search/clusters/{id}/request`, any method and path as the
+  cluster's owner) is `admin` at the gate. A console request that answers or sets a credential
+  also needs `reveal` on the cluster, as `POST …/keys` does: search decides it on the API the
+  cluster's own router picks for the request (`search_es::routes::handles_credentials`:
+  `Api::answers_credentials`, new API keys, service, OAuth2, SAML, OIDC and PKI tokens,
+  enrollment, connector and Fleet secrets, connectors' configurations, which Elasticsearch returns
+  with their sensitive values; `Api::sets_credentials`, a user's password), and runs it only when
+  the gate says the grant may reveal there too (the row's `capable: [reveal]`,
+  `roll_auth::Capable`). Anything short of allowed is a 403: the gate asks for approvals before a
+  request reaches a product, and it can't know this request needs one without reading the body,
+  so a rule that asks for `reveal` isn't asked here (the 403 says so). A token that should do this
+  needs `reveal` allowed, or can use `POST …/keys`, which asks as any route does. The gate reads
+  no console body.
 - Agents' machine commands, by `policy::agent_may`'s tiers: diffs and file reads `read`; working
   threads `write`; publishing with `land` `deploy`; a shell, writing files, rolling back, raising a
   thread's runtime or interaction mode, answering an agent's approval, endpoints, the gateway,
@@ -650,7 +663,12 @@ take only signed requests, so nobody outside the cluster can put a path there. O
   (`x-roll-code-decided: <grant id>`, `roll_cluster::Decided`). For that grant the owner doesn't
   ask a person a second time, and doesn't log the request again; it still denies whatever the
   grant's rules deny there, and a revoked token stops there too. A hop from a node that didn't
-  decide it (a public listener in front of the tasks leader) is decided in full.
+  decide it (a public listener in front of the tasks leader) is decided in full;
+- roll's own work for a grant (`roll_auth::ActAs`: an MCP Events webhook delivery reading its feed)
+  has no token to forward, so the hop names the grant (`x-roll-code-acting: <grant id>`,
+  `roll_cluster::Acting`, signed with a tag of its own) and the owner's gate acts for it again
+  (rolld's `act_as_from_hop`: only from a verified hop, never beside a token), looking the grant up
+  as it is now.
 
 ### People's sessions
 
@@ -708,7 +726,7 @@ type Approval = {
   tool?: string;         // the MCP tool that made the call
   state: "pending" | "approved" | "denied" | "expired" | "used";
   created_at: number; decided_at: number | null; decided_by: string | null;
-  expires_at: number;    // 10 minutes after created_at
+  expires_at: number;    // pending: created_at + the policy's wait (10 minutes by default); decided: 10 minutes after
 };
 ```
 
@@ -730,7 +748,10 @@ type Approval = {
   API. Only the operator (or an admin) decides, and a person decides their own tokens' requests
   unless the policy asks for someone else ("Two-person approvals"). A grant never approves its own request, not even with `admin` on
   `access`.
-- An approval not decided in 10 minutes expires.
+- An approval not decided in its wait expires: 10 minutes, or what the policy says
+  (`approval_wait_minutes`, 1 to 1,440, as Stripe's confirmations wait a day for agents nobody is
+  watching), or an approval rule covering the request (`wait_minutes`; the shortest of those that
+  cover it). Once approved, it runs within 10 minutes, once.
 - MCP tools hold the call open the same way, with keep-alive events, and return the pending
   approval as a result the agent can wait on (`access_wait_approval`).
 
@@ -1055,7 +1076,10 @@ MCP clients for themselves, as GitHub's fine-grained tokens act for the person w
   `production`): only requests made through roll's MCP server, so CI and scripts calling the API
   aren't held; an approval already given still lets the call through. `mcp_lockdown` and
   `mcp_read_only` hold every token's and OAuth connection's MCP to lockdown or to reading,
-  whatever its URL asks (the operator's own connection isn't held). A quiet call (a completion, an MCP Events
+  whatever its URL asks (the operator's own connection isn't held). `mcp_require_grant` takes agents only as
+  grants: the admin token, an admin's session and an open daemon get a 401 with OAuth's challenge at
+  `/v1/mcp` (as Stripe's MCP server refuses full-access keys from 2027-01-11), so no agent connects
+  past these controls. A quiet call (a completion, an MCP Events
   webhook delivery reading for its grant) that `agents_ask` covers is refused, nobody asked. `oauth_clients` lists the
   OAuth clients that may connect (empty: any): a host (`claude.ai`, `*.example.com`), an exact
   `https://` URL, `localhost`, an app scheme (`cursor:`) or `device`; a registered client matches
@@ -1279,7 +1303,7 @@ Under `/v1/access`. Bodies are JSON; errors are `{"error": string, "code"?: stri
 | `PATCH /v1/access/enterprise/apps/{id}` | operator | `{name?, rules?}`: the app as changed; its people's connections take new rules in the same write |
 | `POST /v1/access/enterprise/apps/{id}/rotate` | operator | `{public_jwk?, keep_old_for_s?}`: a new key, or a new `client_secret` answered once; the old secret works that long (at most a week) or stops now with every token its people hold |
 | `DELETE /v1/access/enterprise/apps/{id}` | operator | remove an app, revoking its people's connections: `{revoked}` |
-| `GET /v1/access/policy` | operator | `{max_days, require_expiry, max_idle_days, approve_people, approval_rules, agents_ask, mcp_lockdown, mcp_read_only, oauth_clients}`: roll's rules for every grant, and what needs several approvers ("Two-person approvals") |
+| `GET /v1/access/policy` | operator | `{max_days, require_expiry, max_idle_days, approve_people, approval_rules, agents_ask, mcp_lockdown, mcp_read_only, mcp_require_grant, oauth_clients, approval_wait_minutes}`: roll's rules for every grant, and what needs several approvers ("Two-person approvals") |
 | `PUT /v1/access/policy` | operator | change them; a grant made, rotated, or whose rules, lifetime or addresses change, must fit (consent too) |
 | `GET /v1/access/notify` | operator | where approvals are posted: `{chat: {install, channel, approvers} \| null}` |
 | `PUT /v1/access/notify` | operator | `{chat: {install, channel, approvers} \| null}` |

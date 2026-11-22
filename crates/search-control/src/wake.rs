@@ -259,7 +259,7 @@ impl LifecycleHooks for ControlHooks {
             // The node publishes the instance after this hook returns, so the reconcile waits
             // for it on its own task.
             Some(control) => {
-                tokio::spawn(control.reconcile(cluster.name.clone(), token));
+                tokio::spawn(control.reconcile(cluster.name.clone(), crate::meter::id_of(cluster).to_string(), token));
             }
             None => {
                 if let Some(t) = token {

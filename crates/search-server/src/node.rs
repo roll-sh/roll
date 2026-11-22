@@ -47,7 +47,10 @@
 //!   files); past the node's `memory_budget`, the least recently used clusters with nothing in
 //!   flight are unloaded.
 //! - **Metering** ([`Node::take_request_counts`]): requests admitted per cluster since the last
-//!   call, counted per instance and carried over when an instance unloads.
+//!   call, counted per instance and carried over when an instance unloads. Counts and
+//!   observations are keyed by the cluster's catalog id ([`Loaded::id`]), never its name: a
+//!   name freed by a delete may be taken again before the next pass, and what the old cluster
+//!   left goes with it ([`Node::forget_cluster`]), never to the new one.
 //! - **Observability** ([`Node::take_observations`]): each loaded cluster's request metrics
 //!   ([`crate::metrics`]: requests, responses by class, 429 rejections and latency per kind of
 //!   request, by the minute) and its slow log entries (`search_es::slowlog`), handed to whoever
@@ -65,7 +68,7 @@ use crate::allow::Origin;
 use crate::auth::{self, Presented};
 use crate::catalog::{Catalog, ClusterSpec, StoreProvider};
 use crate::lease::Leases;
-use crate::limits::{ByteBudget, FairPermit, FairScheduler, RateLimiter, Reservation};
+use crate::limits::{ByteBudget, FairPermit, FairScheduler, Full, RateLimiter, Reservation};
 use crate::persist::{self, ClusterData, TaskCount, TaskGuard};
 use async_trait::async_trait;
 use parking_lot::Mutex;
@@ -121,11 +124,19 @@ pub struct NodeConfig {
     pub max_running: usize,
     /// Lease time to live, with [`Node::set_leases`].
     pub lease_ttl: Duration,
+    /// Request body bytes all clusters together may have in flight; each cluster's own budget
+    /// (`ClusterSpec::max_in_flight_bytes`) is charged to it too, and a body past it gets 429.
+    /// `None`: no node budget.
+    pub max_in_flight_bytes: Option<usize>,
     /// Memory all loaded clusters together may hold (indexing buffers, in-heap segments,
     /// version maps; [`Usage::resident_bytes`]). Past it, the least recently used clusters with
     /// no request in flight are unloaded, and waking another cluster first makes room.
     /// `None`: no node budget.
     pub memory_budget: Option<u64>,
+    /// Memory documents being inverted may add to the indexing buffers of every cluster at once
+    /// (`search_index::buffer::AnalysisBudget`); past it a document is refused with a 429
+    /// `circuit_breaking_exception`. `None`: a quarter of `memory_budget`, or 1 GiB without one.
+    pub max_analysis_bytes: Option<usize>,
     /// Let idle and memory-budget unloads drop clusters whose documents live only in memory
     /// (a [`StoreProvider`] without [`StoreProvider::data`]): they lose every document and keep
     /// only their metadata. For tests and throwaway nodes. Off: such a cluster stays loaded
@@ -135,8 +146,12 @@ pub struct NodeConfig {
     /// and recording a snapshot) must be before the sweep after a wake drops it
     /// ([`search_es::api::snapshots::sweep_leftover_copies`]).
     pub snapshot_leftover_grace: Duration,
-    /// Seals the secrets clusters store (`search_es::seal`; `None`: stored as given).
+    /// Seals the secrets clusters store (`search_es::seal`; `None`: refused, see
+    /// `unsealed_secrets`).
     pub sealer: Option<Arc<search_es::seal::Sealer>>,
+    /// Without a sealer, store the secrets clients give in the clear instead of refusing them
+    /// (`search_es::ClusterConfig::unsealed_secrets`): local development and tests only.
+    pub unsealed_secrets: bool,
     /// The name roll's default snapshot repository is registered under in every cluster whose
     /// data is in object storage (`search_es::api::snapshots::install_default_repository`;
     /// `None`: none).
@@ -146,9 +161,20 @@ pub struct NodeConfig {
     pub links: Option<Arc<dyn search_es::remote::links::Links>>,
     /// How long and how much each cluster's audit log keeps ([`crate::audit`]).
     pub audit: crate::audit::AuditConfig,
+    /// The embedding pool every cluster's E5 inference endpoints run on ([`crate::embed`]);
+    /// `None`: they answer as on a cluster without ML nodes. Its memory counts against
+    /// `memory_budget`.
+    pub embedder: Option<Arc<crate::embed::EmbedPool>>,
     /// Resolves the credential references clusters' snapshot repositories name
     /// (`search_es::secret_refs`); `None`: they're refused.
     pub secret_refs: Option<search_es::secret_refs::Resolver>,
+}
+
+impl NodeConfig {
+    /// [`NodeConfig::max_analysis_bytes`] as it applies.
+    pub fn analysis_limit(&self) -> usize {
+        self.max_analysis_bytes.unwrap_or_else(|| self.memory_budget.map_or(1 << 30, |m| usize::try_from(m / 4).unwrap_or(usize::MAX)))
+    }
 }
 
 impl Default for NodeConfig {
@@ -165,13 +191,17 @@ impl Default for NodeConfig {
             host_metrics: false,
             max_running: 0,
             lease_ttl: DEFAULT_LEASE_TTL,
+            max_in_flight_bytes: None,
             memory_budget: None,
+            max_analysis_bytes: None,
             unload_memory_only: false,
             snapshot_leftover_grace: search_es::api::snapshots::LEFTOVER_GRACE,
             sealer: None,
+            unsealed_secrets: false,
             default_repository: None,
             links: None,
             audit: crate::audit::AuditConfig::default(),
+            embedder: None,
             secret_refs: None,
         }
     }
@@ -237,6 +267,12 @@ impl Loaded {
 
     pub fn in_flight(&self) -> usize {
         self.in_flight.load(Ordering::SeqCst)
+    }
+
+    /// What metering and observations key the cluster by: its catalog id
+    /// (`ClusterSpec::catalog_id`), or its name on a node without a catalog.
+    pub fn id(&self) -> &str {
+        self.cluster.config.catalog_id.as_deref().unwrap_or(&self.name)
     }
 
     /// Requests served since the cluster loaded.
@@ -343,9 +379,11 @@ pub struct Node {
     leases: OnceLock<Arc<dyn Leases>>,
     /// Spec updates that arrived while their cluster was loading ([`Node::update_spec`]).
     pending_specs: Mutex<HashMap<String, ClusterSpec>>,
-    /// Requests of unloaded instances not reported yet ([`Node::take_request_counts`]).
+    /// Requests of unloaded instances not reported yet ([`Node::take_request_counts`]), by
+    /// [`Loaded::id`].
     unmetered: Mutex<HashMap<String, u64>>,
-    /// Observations of unloaded instances not handed on yet ([`Node::take_observations`]).
+    /// Observations of unloaded instances not handed on yet ([`Node::take_observations`]), by
+    /// [`Loaded::id`].
     unobserved: Mutex<HashMap<String, Observed>>,
     /// Makes a running reaper re-plan its tick (a cluster with a memory budget loaded).
     reaper_kick: Arc<tokio::sync::Notify>,
@@ -356,6 +394,11 @@ pub struct Node {
     pub unloads: AtomicU64,
     /// Every cluster's security audit log.
     pub audit: Arc<crate::audit::AuditLogs>,
+    /// Request body bytes in flight across clusters (`NodeConfig::max_in_flight_bytes`).
+    body_bytes: Arc<ByteBudget>,
+    /// Memory documents being inverted may add to every cluster's buffers at once
+    /// (`NodeConfig::max_analysis_bytes`).
+    analysis: Arc<search_index::buffer::AnalysisBudget>,
 }
 
 /// Holds a cluster's transition lock; drops the map entry when nobody else wants it.
@@ -450,8 +493,9 @@ impl Lease {
         }
     }
 
-    /// Reserves `bytes` of the cluster's in-flight body budget (from `Content-Length`, before
-    /// the body is read); 429 like Elasticsearch's indexing pressure past it.
+    /// Reserves `bytes` of the cluster's in-flight body budget, and the node's (from
+    /// `Content-Length`, before the body is read); 429 like Elasticsearch's indexing pressure
+    /// past either.
     pub fn reserve_body(&mut self, req: &EsRequest, bytes: usize) -> Result<(), Rejected> {
         self.reserve_more(req, bytes)
     }
@@ -461,17 +505,17 @@ impl Lease {
     pub fn reserve_more(&mut self, req: &EsRequest, bytes: usize) -> Result<(), Rejected> {
         match self.loaded.bytes.grow(&mut self.bytes, bytes) {
             Ok(()) => Ok(()),
-            Err(used) => Err(self.over_budget(req, used, self.bytes.bytes() + bytes)),
+            Err(full) => Err(self.over_budget(req, full, self.bytes.bytes() + bytes)),
         }
     }
 
-    /// The 429 for a body past the cluster's in-flight byte budget.
-    pub fn over_budget(&self, req: &EsRequest, used: usize, bytes: usize) -> Rejected {
+    /// The 429 for a body past the cluster's or the node's in-flight byte budget (`full`).
+    pub fn over_budget(&self, req: &EsRequest, full: Full, bytes: usize) -> Rejected {
         Self::refused(&self.loaded, req);
+        let Full { used, limit } = full;
         Rejected {
             error: EsError::too_many_requests(format!(
-                "rejected execution of coordinating operation [coordinating_and_primary_bytes={used}, replica_bytes=0, all_bytes={used}, coordinating_operation_bytes={bytes}, max_coordinating_and_primary_bytes={}] for REST request [{} {}]",
-                self.loaded.bytes.limit(),
+                "rejected execution of coordinating operation [coordinating_and_primary_bytes={used}, replica_bytes=0, all_bytes={used}, coordinating_operation_bytes={bytes}, max_coordinating_and_primary_bytes={limit}] for REST request [{} {}]",
                 req.method,
                 req.uri
             )),
@@ -912,6 +956,8 @@ impl Node {
         let reindex = search_es::api::remote::RemoteNode::from_settings(&cfg.node_settings);
         Arc::new(Node {
             audit,
+            body_bytes: ByteBudget::new(cfg.max_in_flight_bytes.unwrap_or(usize::MAX)),
+            analysis: search_index::buffer::AnalysisBudget::new(cfg.analysis_limit()),
             reindex,
             catalog,
             stores,
@@ -1159,7 +1205,7 @@ impl Node {
         *cluster.config.http_settings.write() = http_settings(&spec);
         let permits = spec.max_in_flight.max(1);
         let max_body = spec.max_body_bytes.unwrap_or(self.cfg.max_body_bytes);
-        let bytes = ByteBudget::new(spec.max_in_flight_bytes.unwrap_or(max_body.saturating_mul(2)));
+        let bytes = ByteBudget::within(spec.max_in_flight_bytes.unwrap_or(max_body.saturating_mul(2)), Some(self.body_bytes.clone()));
         let rate = spec.max_requests_per_second.map(|r| Arc::new(RateLimiter::new(r, r.max(1.0))));
         let wake_time = started.elapsed();
         tracing::debug!(cluster = name, ms = wake_time.as_secs_f64() * 1e3, shards = recovery.shards, records = recovery.records, "cluster loaded");
@@ -1222,7 +1268,9 @@ impl Node {
         cfg.test_features = self.cfg.test_features;
         cfg.host_metrics = self.cfg.host_metrics;
         cfg.sealer = self.cfg.sealer.clone();
+        cfg.unsealed_secrets = self.cfg.unsealed_secrets;
         cfg.links = self.cfg.links.clone();
+        cfg.embedder = self.cfg.embedder.clone().map(|p| p as Arc<dyn search_es::xpack::inference::local::Embedder>);
         cfg.catalog_id = spec.catalog_id.clone();
         cfg.owner = spec.owner.clone();
         cfg.secret_refs = self.cfg.secret_refs.clone();
@@ -1242,6 +1290,12 @@ impl Node {
         }
         // Before any job can run: a branch's inherited jobs must not act as its parent's.
         Box::pin(search_es::branch::mark_inherited(&cluster)).await.map_err(|e| anyhow::anyhow!("marking what the branch inherited: {}", e.reason()))?;
+        // Secrets a node without a key kept in the clear are sealed now that this one has one.
+        match Box::pin(search_es::seal::seal_leftovers(&cluster)).await {
+            Ok(0) => {}
+            Ok(n) => tracing::info!(cluster = spec.name, records = n, "sealed secrets stored in the clear"),
+            Err(e) => tracing::warn!(cluster = spec.name, error = %e.reason(), "sealing secrets stored in the clear failed"),
+        }
         Box::pin(search_es::xpack::entsearch::sync::adopt_existing(&cluster)).await.map_err(|e| anyhow::anyhow!("pausing the connectors from before roll ran syncs: {}", e.reason()))?;
         let mut stats = persist::RecoveryStats::default();
         let data = match data_store {
@@ -1251,6 +1305,7 @@ impl Node {
                 data.set_lease_deadline(deadline);
                 data.set_lease_check(self.leases.get().and_then(|l| l.validity(&spec.name)));
                 data.set_verify_owner(verify_owner);
+                data.set_analysis_budget(self.analysis.clone());
                 cluster.engine = search_es::engine::Engine::with_storage(data.clone());
                 stats = data.recover(&cluster).await?;
                 // Async results an earlier instance stored; their changes are stored from now on.
@@ -1398,11 +1453,11 @@ impl Node {
         self.stores.release(name).await;
         let left = loaded.unmetered();
         if left > 0 {
-            *self.unmetered.lock().entry(name.to_string()).or_default() += left;
+            *self.unmetered.lock().entry(loaded.id().to_string()).or_default() += left;
         }
         let seen = Observed::take_from(&loaded);
         if !seen.is_empty() {
-            self.unobserved.lock().entry(name.to_string()).or_default().extend(seen);
+            self.unobserved.lock().entry(loaded.id().to_string()).or_default().extend(seen);
         }
         drop(loaded);
         self.unloads.fetch_add(1, Ordering::Relaxed);
@@ -1571,14 +1626,14 @@ impl Node {
 
     /// Requests served per cluster since the previous call (metering): loaded clusters and
     /// those unloaded meanwhile, each request counted once. Only requests admitted to their
-    /// cluster count (not ones refused by authentication or limits).
+    /// cluster count (not ones refused by authentication or limits). Keyed by [`Loaded::id`].
     pub fn take_request_counts(&self) -> Vec<(String, u64)> {
         let loaded: Vec<Arc<Loaded>> = self.clusters.read().values().filter_map(|s| s.get().cloned()).collect();
         let mut out: HashMap<String, u64> = std::mem::take(&mut *self.unmetered.lock());
         for l in loaded {
             let n = l.unmetered();
             if n > 0 {
-                *out.entry(l.name.to_string()).or_default() += n;
+                *out.entry(l.id().to_string()).or_default() += n;
             }
         }
         let mut v: Vec<(String, u64)> = out.into_iter().collect();
@@ -1586,15 +1641,21 @@ impl Node {
         v
     }
 
+    /// The CPU time each cluster's inputs took on the embedding pool since the previous call,
+    /// keyed by [`Loaded::id`] like the other observations (metered as inference).
+    pub fn take_inference_cpu(&self) -> Vec<(String, Duration)> {
+        self.cfg.embedder.as_ref().map(|e| e.take_cpu()).unwrap_or_default()
+    }
+
     /// Every cluster's request metrics and slow log entries since the previous call (loaded
-    /// clusters and those unloaded meanwhile), each handed on once.
+    /// clusters and those unloaded meanwhile), each handed on once. Keyed by [`Loaded::id`].
     pub fn take_observations(&self) -> Vec<(String, Observed)> {
         let loaded: Vec<Arc<Loaded>> = self.clusters.read().values().filter_map(|s| s.get().cloned()).collect();
         let mut out: HashMap<String, Observed> = std::mem::take(&mut *self.unobserved.lock());
         for l in loaded {
             let seen = Observed::take_from(&l);
             if !seen.is_empty() {
-                out.entry(l.name.to_string()).or_default().extend(seen);
+                out.entry(l.id().to_string()).or_default().extend(seen);
             }
         }
         let mut v: Vec<(String, Observed)> = out.into_iter().collect();
@@ -1602,24 +1663,39 @@ impl Node {
         v
     }
 
-    /// What [`Node::take_observations`] would hand on for `name`, left in place (an API read
-    /// between two metering passes).
-    pub fn peek_observations(&self, name: &str) -> Observed {
+    /// What [`Node::take_observations`] would hand on for the cluster `name` with id `id`
+    /// ([`Loaded::id`]), left in place (an API read between two metering passes). An instance
+    /// loaded under `name` with another id is another cluster, and isn't read.
+    pub fn peek_observations(&self, name: &str, id: &str) -> Observed {
         let mut out = Observed::default();
-        if let Some(o) = self.unobserved.lock().get(name) {
+        if let Some(o) = self.unobserved.lock().get(id) {
             out.minutes.extend(o.minutes.iter().cloned());
             out.slow.extend(o.slow.iter().cloned());
             out.analytics.cleared = o.analytics.cleared.clone();
             out.analytics.enabled = o.analytics.enabled.clone();
             out.analytics.hours = o.analytics.hours.clone();
         }
-        if let Some(l) = self.get_loaded(name) {
+        if let Some(l) = self.get_loaded(name).filter(|l| l.id() == id) {
             let analytics = search_es::analytics::Taken { hours: l.cluster.analytics.peek(), ..Default::default() };
             out.extend(Observed { minutes: l.metrics.peek(), slow: l.cluster.engine.slowlog.peek(), analytics });
             // Loaded here: which indices have analytics on now decides what reads may show.
             out.analytics.enabled = Some(l.cluster.analytics.enabled_names());
         }
         out
+    }
+
+    /// Request body bytes in flight across clusters (`NodeConfig::max_in_flight_bytes`): what a
+    /// front end that buffers a body before handing it on (roll's control plane) charges while
+    /// it reads.
+    pub fn body_budget(&self) -> &Arc<ByteBudget> {
+        &self.body_bytes
+    }
+
+    /// Drops what an unloaded cluster with id `id` ([`Loaded::id`]) left for the next metering
+    /// pass: its requests and observations (it was deleted, so nothing may bill or show them).
+    pub fn forget_cluster(&self, id: &str) {
+        self.unmetered.lock().remove(id);
+        self.unobserved.lock().remove(id);
     }
 
     /// Applies memory budgets: commits clusters over their own `max_resident_bytes` (moving
@@ -1651,7 +1727,9 @@ impl Node {
         }
         let mut evicted = Vec::new();
         let Some(budget) = self.cfg.memory_budget else { return evicted };
-        let mut total: u64 = sizes.iter().map(|(_, r)| *r).sum();
+        // The embedding model and its running batches are the node's, and stay: clusters make
+        // room for them.
+        let mut total: u64 = sizes.iter().map(|(_, r)| *r).sum::<u64>() + self.cfg.embedder.as_ref().map_or(0, |e| e.resident_bytes());
         if total.saturating_add(room) <= budget {
             return evicted;
         }

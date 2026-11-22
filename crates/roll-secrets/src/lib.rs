@@ -38,6 +38,8 @@ pub mod backup;
 pub mod crypto;
 pub mod dotenv;
 mod envs;
+pub mod deleted_envs;
+pub mod events;
 pub mod exports;
 pub mod find;
 mod found;
@@ -89,6 +91,7 @@ pub use crypto::{Keyring, Value};
 pub use audit::{AuditEntry, AuditFilter, VerifyQuery};
 pub use chain::Verification;
 pub use consumers::{Maker, Reference, Refusal, Resolved, ResourceRef};
+pub use events::{EventPage, EventsQuery, FeedEvent};
 pub use envs::{Branch, EnvChange, Ensure, Ensured, Environment, Folder, Import, Kind as EnvironmentKind, NewEnvironment, Policy};
 pub use leaks::Leak;
 pub use found::{FoundStored, FoundTarget};
@@ -438,6 +441,9 @@ pub struct Secrets {
     reads_per_minute: std::sync::atomic::AtomicU32,
     /// roll code's search, once rolld has it (health's `code` check).
     code_refs: std::sync::OnceLock<Arc<dyn health::CodeRefs>>,
+    /// Which services and sandboxes hold a project's secrets, for reach (rolld, once roll apps and
+    /// roll code are open).
+    reach_holders: std::sync::OnceLock<Arc<dyn reach::Holders>>,
     /// Where clients reach rolld's API, once rolld says (certificates' CRL distribution point).
     public_api: Arc<std::sync::OnceLock<String>>,
     /// What AWS identities' logins must name in `X-Roll-Server-ID` (`ROLL_SECRETS_AWS_SERVER_ID`,
@@ -522,6 +528,10 @@ impl Secrets {
         db.ensure_schema(audit::SCHEMA)?;
         // The head's MAC (audit.rs, `head_msg`): a head without one isn't roll's.
         db.add_column("audit_heads", "mac", "TEXT")?;
+        // The events feed (events.rs): a row's event, written with it.
+        db.add_column("audit", "event", "TEXT")?;
+        db.add_column("audit", "event_data", "TEXT")?;
+        db.ensure_schema(events::SCHEMA)?;
         // Workload identities (identities.rs); their logins' tokens are roll-access's.
         db.ensure_schema(identities::SCHEMA)?;
         // Secrets' own `rlst_` tokens are gone (roll-access's grants instead); never on main.
@@ -566,6 +576,13 @@ impl Secrets {
         db.add_column("projects", "purge_at", "INTEGER")?;
         db.add_column("projects", "closed_at", "INTEGER")?;
         db.add_column("projects", "purged_at", "INTEGER")?;
+        // A deleted standard environment (envs.rs, `forget_environment`): when, by whom, and its
+        // recovery window's end. Its slug stays taken until the purge.
+        db.add_column("environments", "forgotten_at", "INTEGER")?;
+        db.add_column("environments", "forgotten_by", "TEXT")?;
+        db.add_column("environments", "purge_at", "INTEGER")?;
+        // What a change request does besides changing keys: `delete_environment` (requests.rs).
+        db.add_column("requests", "action", "TEXT")?;
         // Deleted before the window: already erased, waiting only for revocations.
         db.migrate("secrets-deleted-before-the-window", |c| {
             c.execute("UPDATE projects SET closed_at = forgotten_at, purged_at = forgotten_at WHERE forgotten_at IS NOT NULL AND purge_at IS NULL", ())?;
@@ -744,7 +761,7 @@ impl Secrets {
         if let (Some(github), Ok(keys)) = (&opts.github, &opts.keyring) {
             links.register(Arc::new(github_app::Provider { db: db.clone(), keys: keys.clone(), unwrap: unwrap.clone(), github: github.clone() }));
         }
-        Ok(Secrets { db, keys: opts.keyring, key_source: opts.key_source, workspace, links, syncs: opts.syncs, deliver: opts.deliver, grants: opts.grants, people: opts.people, workloads: opts.workloads, gateway_links: opts.gateways, unwrap: unwrap.clone(), open: opts.open, trust_forwarded_for: opts.trust_forwarded_for, web_url: opts.web_url, outside: opts.outside, directory: opts.directory, github: opts.github, oidc: Default::default(), logins: Default::default(), answers: Default::default(), reads_per_minute: read::READS_PER_MINUTE.into(), code_refs: Default::default(), sts: opts.sts.clone(), clouds: opts.clouds, public_api, aws_server_id: Default::default(), crls, live_fps: Default::default(), issuer_keys: Default::default(), issuer_rotate_days: issuer::ROTATE_DAYS.into(), audit_keys: Default::default(), audit_rotate_days: audit_key::ROTATE_DAYS.into(), digests: Default::default(), counters: Default::default(), acme: Default::default(), recorder: Default::default(), validity: Default::default(), bound_hosts: Default::default(), uses: Default::default(), delete_window_days: deleted::WINDOW_DAYS.into(), purge_sink_grace_hours: deleted::SINK_GRACE_HOURS.into() })
+        Ok(Secrets { db, keys: opts.keyring, key_source: opts.key_source, workspace, links, syncs: opts.syncs, deliver: opts.deliver, grants: opts.grants, people: opts.people, workloads: opts.workloads, gateway_links: opts.gateways, unwrap: unwrap.clone(), open: opts.open, trust_forwarded_for: opts.trust_forwarded_for, web_url: opts.web_url, outside: opts.outside, directory: opts.directory, github: opts.github, oidc: Default::default(), logins: Default::default(), answers: Default::default(), reads_per_minute: read::READS_PER_MINUTE.into(), code_refs: Default::default(), reach_holders: Default::default(), sts: opts.sts.clone(), clouds: opts.clouds, public_api, aws_server_id: Default::default(), crls, live_fps: Default::default(), issuer_keys: Default::default(), issuer_rotate_days: issuer::ROTATE_DAYS.into(), audit_keys: Default::default(), audit_rotate_days: audit_key::ROTATE_DAYS.into(), digests: Default::default(), counters: Default::default(), acme: Default::default(), recorder: Default::default(), validity: Default::default(), bound_hosts: Default::default(), uses: Default::default(), delete_window_days: deleted::WINDOW_DAYS.into(), purge_sink_grace_hours: deleted::SINK_GRACE_HOURS.into() })
     }
 
     pub fn links(&self) -> &Links {

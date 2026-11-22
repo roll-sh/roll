@@ -613,7 +613,7 @@ pub enum AppsCmd {
         instance: Option<String>,
     },
     /// The environment's private network into your own (Cloud Run's VPC egress, Fly's
-    /// WireGuard): `--secret roll://production/WG --route db.corp.internal=10.0.3.4:5432` sets it
+    /// WireGuard): `--secret roll://production/WG --route db.acme.corp=10.0.3.4:5432` sets it
     /// (the WireGuard config is the secret, read as you; each route a name the app connects to
     /// and a host:port in your network), `--remove` takes it away; alone, it shows it. Admin.
     PrivateNetwork {
@@ -621,6 +621,13 @@ pub enum AppsCmd {
         target: Target,
         #[arg(long, requires = "route", conflicts_with = "remove")]
         secret: Option<String>,
+        /// The secret is a Tailscale auth key (the node joins your tailnet) instead of a
+        /// WireGuard config.
+        #[arg(long, requires = "secret")]
+        tailscale: bool,
+        /// With --tailscale: the control server when it isn't Tailscale's (Headscale's URL).
+        #[arg(long, requires = "tailscale")]
+        login_server: Option<String>,
         /// NAME=HOST:PORT, repeated (each port its own).
         #[arg(long, value_name = "NAME=HOST:PORT", requires = "secret")]
         route: Vec<String>,
@@ -661,9 +668,13 @@ pub enum AppsCmd {
     Proxy {
         #[command(flatten)]
         target: Target,
-        /// The port here (default: the service's own).
+        /// The port here (default: the service's own, or `--port`).
         #[arg(long)]
         local_port: Option<u16>,
+        /// Another port of the app than its own, reached inside its instance (a debugger's 9229,
+        /// JMX, pprof), as Fly's `fly proxy` and Heroku's `ps:forward`.
+        #[arg(long)]
+        port: Option<u16>,
     },
     /// A shell in a running instance (a web service asleep is woken and kept up while it's
     /// open); leave with `exit` or Ctrl-D.
@@ -706,6 +717,10 @@ pub enum AppsCmd {
         /// Tasks running at once (1–10; default ten, or fewer tasks).
         #[arg(long)]
         parallelism: Option<u32>,
+        /// With `-i`: a console in another kept deployment's image (one that won't come up, to see
+        /// why), as Fly's `fly console --image`.
+        #[arg(long, requires = "interactive")]
+        deployment: Option<String>,
         #[arg(trailing_var_arg = true, required_unless_present = "interactive", allow_hyphen_values = true)]
         command: Vec<String>,
     },
@@ -875,6 +890,12 @@ pub enum AppsCmd {
         /// Prefix the variables (`ORDERS` → `ORDERS_DATABASE_URL`).
         #[arg(long)]
         prefix: Option<String>,
+        /// A search link's key only for these indices (names or patterns, repeated).
+        #[arg(long = "index", value_name = "NAME")]
+        indices: Vec<String>,
+        /// A search link's key: `read`, or `append` (create documents on exact names).
+        #[arg(long)]
+        access: Option<String>,
         #[command(flatten)]
         target: Target,
     },
@@ -1109,6 +1130,16 @@ pub enum AppsCmd {
         /// With `--bucket`: where in it, `logs/web` (letters, digits, - _ . /).
         #[arg(long, requires = "bucket")]
         prefix: Option<String>,
+        /// Add a drain into a roll search cluster on the project: its own data stream
+        /// (`logs-roll.apps-<namespace>`), ECS documents, an append-only key minted for it.
+        #[arg(long, value_name = "CLUSTER", conflicts_with_all = ["add", "bucket", "remove", "edit", "test"])]
+        search: Option<String>,
+        /// With `--search`: the data stream's namespace (a-z, 0-9, _).
+        #[arg(long, requires = "search")]
+        namespace: Option<String>,
+        /// With `--search`: how long the stream keeps them (1–3650 days, default 30).
+        #[arg(long, requires = "search")]
+        retention_days: Option<u32>,
         /// With `--add`: how its lines go: `ndjson` (the default, signed), `otlp` (OpenTelemetry
         /// logs over OTLP/HTTP JSON) or `syslog` (RFC 5424 over TLS).
         #[arg(long, requires = "add", value_parser = ["ndjson", "otlp", "syslog", "s3"])]
@@ -1228,6 +1259,21 @@ pub enum AppsCmd {
         alert: Option<f64>,
         #[arg(long)]
         hard: Option<f64>,
+    },
+    /// The project's image signing rule (Binary Authorization): `--key cosign.pub` (repeated)
+    /// requires its image services' images to carry a cosign signature by one of them,
+    /// `--not-required` keeps the keys without enforcing, `--remove` drops the rule; alone, it
+    /// shows it. Admin.
+    Signing {
+        #[command(flatten)]
+        target: Target,
+        /// A public key file in PEM (cosign generate-key-pair's cosign.pub).
+        #[arg(long = "key", value_name = "FILE", conflicts_with = "remove")]
+        keys: Vec<PathBuf>,
+        #[arg(long, requires = "keys")]
+        not_required: bool,
+        #[arg(long)]
+        remove: bool,
     },
     /// This month's use and what it costs.
     Usage {
@@ -1570,10 +1616,13 @@ fn secret_env_file(name: &str) -> bool {
 }
 
 /// `…/tunnel` for each connection to `127.0.0.1:local`: its bytes copied both ways.
-async fn proxy(api: &Api, env: &str, what: &str, port: u16, local: u16) -> anyhow::Result<()> {
+async fn proxy(api: &Api, env: &str, what: &str, port: u16, local: u16, other: bool) -> anyhow::Result<()> {
     let l = tokio::net::TcpListener::bind(("127.0.0.1", local)).await.map_err(|e| anyhow::anyhow!("127.0.0.1:{local} is taken ({e}): pick another with --local-port"))?;
     eprintln!("127.0.0.1:{local} → {what}:{port} (Ctrl-C ends it)");
-    let (url, headers) = tunnel_to(api, env);
+    let (mut url, headers) = tunnel_to(api, env);
+    if other {
+        url.push_str(&format!("?port={port}"));
+    }
     tokio::select! {
         r = tunnels(url, headers, l) => r,
         _ = tokio::signal::ctrl_c() => Ok(()),
@@ -3019,7 +3068,7 @@ async fn sandbox(api: &Api, json_out: bool, cmd: SandboxCmd) -> anyhow::Result<(
 pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> {
     let out = match cmd {
         AppsCmd::Sandbox { cmd } => return sandbox(api, json_out, cmd).await,
-        AppsCmd::PrivateNetwork { target, secret, route, remove } => {
+        AppsCmd::PrivateNetwork { target, secret, tailscale, login_server, route, remove } => {
             let svc = service(api, &target).await?;
             let path = format!("{}/private-network", env_path(&svc, &target.env));
             let v = if remove {
@@ -3030,7 +3079,11 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
                     .iter()
                     .map(|r| r.split_once('=').map(|(n, t)| json!({ "name": n, "target": t })).ok_or_else(|| anyhow::anyhow!("--route is NAME=HOST:PORT ({r})")))
                     .collect::<anyhow::Result<Vec<_>>>()?;
-                api.call(reqwest::Method::PUT, &path, Some(json!({ "secret": secret, "routes": routes }))).await?
+                let mut body = json!({ "secret": secret, "routes": routes, "kind": if tailscale { "tailscale" } else { "wireguard" } });
+                if let Some(u) = login_server {
+                    body["login_server"] = json!(u);
+                }
+                api.call(reqwest::Method::PUT, &path, Some(body)).await?
             } else {
                 api.get(&path).await?
             };
@@ -3038,7 +3091,7 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
                 if v["removed"] == true {
                     println!("its private network is removed");
                 } else {
-                    println!("WireGuard from {} ({})", s(&v["secret"]), s(&v["status"]));
+                    println!("{} from {} ({})", if v["kind"] == "tailscale" { "Tailscale" } else { "WireGuard" }, s(&v["secret"]), s(&v["status"]));
                     for r in v["routes"].as_array().into_iter().flatten() {
                         println!("  {} → {}", s(&r["name"]), s(&r["target"]));
                     }
@@ -4002,14 +4055,17 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
             let query = instance.map(|i| format!("&instance={}", enc(&i))).unwrap_or_default();
             return ssh(api, &env_path(&svc, &target.env), &query).await;
         }
-        AppsCmd::Proxy { target, local_port } => {
+        AppsCmd::Proxy { target, local_port, port: other } => {
             let svc = service(api, &target).await?;
-            let port = svc["run"]["port"].as_u64().unwrap_or(8080) as u16;
-            return proxy(api, &env_path(&svc, &target.env), &format!("{}/{}", s(&svc["name"]), target.env), port, local_port.unwrap_or(port)).await;
+            let port = other.unwrap_or(svc["run"]["port"].as_u64().unwrap_or(8080) as u16);
+            return proxy(api, &env_path(&svc, &target.env), &format!("{}/{}", s(&svc["name"]), target.env), port, local_port.unwrap_or(port), other.is_some()).await;
         }
-        AppsCmd::Run { target, interactive: true, cpu, memory, command, .. } => {
+        AppsCmd::Run { target, interactive: true, cpu, memory, command, deployment, .. } => {
             let svc = service(api, &target).await?;
             let mut query = "&console=true".to_string();
+            if let Some(d) = deployment {
+                query.push_str(&format!("&deployment={}", enc(&d)));
+            }
             if !command.is_empty() {
                 query.push_str(&format!("&command={}", enc(&shell_join(&command))));
             }
@@ -4151,10 +4207,17 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
             }
             v
         }
-        AppsCmd::Link { kind, r#ref, prefix, target } => {
+        AppsCmd::Link { kind, r#ref, prefix, indices, access, target } => {
             let svc = service(api, &target).await?;
             let path = format!("/v1/apps/services/{}/links/{}/{}", enc(&s(&svc["id"])), enc(&kind), enc(&r#ref));
-            api.call(reqwest::Method::PUT, &path, Some(json!({ "prefix": prefix }))).await?
+            let mut body = json!({ "prefix": prefix });
+            if !indices.is_empty() {
+                body["indices"] = json!(indices);
+            }
+            if let Some(a) = access {
+                body["access"] = json!(a);
+            }
+            api.call(reqwest::Method::PUT, &path, Some(body)).await?
         }
         AppsCmd::Unlink { kind, r#ref, target } => {
             let svc = service(api, &target).await?;
@@ -4576,9 +4639,9 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
             }
             v
         }
-        AppsCmd::Drains { target, add, bucket, prefix, format, source, only_env, only_service, previews, every_env, every_service, header, edit, test, remove } => {
+        AppsCmd::Drains { target, add, bucket, prefix, search, namespace, retention_days, format, source, only_env, only_service, previews, every_env, every_service, header, edit, test, remove } => {
             let given = source.is_some() || !only_env.is_empty() || !only_service.is_empty() || previews.is_some() || !header.is_empty();
-            if given && add.is_none() && edit.is_none() && bucket.is_none() {
+            if given && add.is_none() && edit.is_none() && bucket.is_none() && search.is_none() {
                 bail!("--source, --only-env, --only-service, --previews and --header go with --add or --edit");
             }
             let svc = service(api, &target).await?;
@@ -4628,6 +4691,20 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
                 let d = api.call(reqwest::Method::PATCH, &format!("{path}/{}", enc(&id)), Some(Value::Object(settings))).await?;
                 if !json_out {
                     println!("{}", row(&d));
+                    return Ok(());
+                }
+                d
+            } else if let Some(c) = search {
+                settings.insert("search".into(), json!(c));
+                if let Some(n) = namespace {
+                    settings.insert("namespace".into(), json!(n));
+                }
+                if let Some(d) = retention_days {
+                    settings.insert("retention_days".into(), json!(d));
+                }
+                let d = api.post(&path, Value::Object(settings)).await?;
+                if !json_out {
+                    println!("{}  into {}", row(&d), s(&d["stream"]));
                     return Ok(());
                 }
                 d
@@ -4829,6 +4906,29 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
                 }
                 json!({ "page": p, "incidents": inc["incidents"] })
             }
+        }
+        AppsCmd::Signing { target, keys, not_required, remove } => {
+            let svc = service(api, &target).await?;
+            let path = format!("/v1/apps/projects/{}/signing", enc(&s(&svc["project"])));
+            let v = if remove {
+                api.call(reqwest::Method::DELETE, &path, None).await?;
+                json!({ "keys": [], "required": false })
+            } else if !keys.is_empty() {
+                let pems = keys.iter().map(|k| std::fs::read_to_string(k).with_context(|| format!("reading {}", k.display()))).collect::<anyhow::Result<Vec<_>>>()?;
+                api.call(reqwest::Method::PUT, &path, Some(json!({ "keys": pems, "required": !not_required }))).await?
+            } else {
+                api.get(&path).await?
+            };
+            if !json_out {
+                let n = v["keys"].as_array().map_or(0, Vec::len);
+                println!("{}", match (n, v["required"].as_bool().unwrap_or(false)) {
+                    (0, _) => "no signing rule: any image deploys".to_string(),
+                    (n, true) => format!("image services' images must be signed by one of {n} key(s)"),
+                    (n, false) => format!("{n} key(s) kept, not required"),
+                });
+                return Ok(());
+            }
+            v
         }
         AppsCmd::Limits { target, alert, hard } => {
             let svc = service(api, &target).await?;

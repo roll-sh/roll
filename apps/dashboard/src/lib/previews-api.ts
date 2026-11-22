@@ -174,8 +174,8 @@ export interface Preview {
   /** Its error groups main's preview doesn't have, as its holder last read them. */
   new_errors?: { branch: string; total: number; errors: { service: string; title: string }[] } | null;
   slower_routes?: { branch: string; routes: { name: string; count: number; p50_ms: number; main_p50_ms: number; grew?: GrewSpan | null; /** Its budget, when it's over it. */ budget_ms?: number | null }[] } | null;
-  /** Earlier pushes of the change's services, still reachable on the same data (newest first). */
-  earlier?: { service: string; revision: string; url: string; share_url: string | null; at: number }[];
+  /** Earlier pushes of the change's services, still reachable (newest first), each on its own copy of the data where `own_data` names products. */
+  earlier?: { service: string; revision: string; url: string; share_url: string | null; at: number; own_data?: string[] }[];
   /** When its screenshot was taken (`screenshot` below), if it has one. */
   screenshot_at?: number | null;
   last_reset_at: number | null;
@@ -592,6 +592,7 @@ export const previewsApi = {
   requests: (id: string) => call<{ requests: RequestLine[] }>("GET", `${one(id)}/requests`),
   /** What its running services use right now (cores of CPU, resident memory, the memory each runs with). */
   metrics: (id: string) => call<{ services: ServiceMetrics[] }>("GET", `${one(id)}/metrics`),
+  events: (after = 0, limit = 100) => call<{ events: PreviewEvent[]; next: number }>("GET", `/v1/previews/events?after=${after}&limit=${limit}`),
   /** Its services' errors in the last `minutes` (5–1440, 60 by default, rounded up to 15-minute steps), grouped, newest first; masked as its logs are. */
   errors: (id: string, minutes?: number) => call<{ minutes: number; groups: ErrorGroup[] }>("GET", `${one(id)}/errors${query({ minutes })}`),
   /** How many errors its services wrote in that span (a list's rows: nothing to mask, so no values are read). */
@@ -653,6 +654,8 @@ export function parseSse(rest: string, text: string): { events: { event: string;
 export type ErrorGroup = { service: string; fingerprint: string; kind: string; title: string; count: number; first_seen: number; last_seen: number; sample: string; /** The trace its newest sample names, when the preview keeps it. */ trace?: string };
 
 /** A running service's use right now: cores of CPU, resident bytes (an instance's, on roll apps), and the MB it runs with. */
+/** Something that happened to a preview (`GET /v1/previews/events`). */
+export type PreviewEvent = { seq: number; at: number; kind: "created" | "ready" | "failed" | "visual_change" | "deleted"; project: string; preview: string; change: string | null; data: { head?: string } };
 export type ServiceMetrics = { service: string; cpu: number; memory_bytes: number; memory_mb: number };
 
 /** One of a preview's recent traces: its root span's name and service, when (ms), how long, how many spans, whether any failed. */

@@ -243,7 +243,12 @@ export function PreviewSheet({
                     <li key={`${x.service}@${x.revision}`} className="flex items-center gap-2 text-[12px]">
                       <span className="shrink-0 text-soft">{x.service}</span>
                       <span className="shrink-0 font-mono text-[10.5px] text-subtle">{x.revision.replace(/^cs_/, "").slice(0, 10)}</span>
-                      <a href={openUrl(x)} target="_blank" rel="noreferrer" className="ml-auto flex min-w-0 items-center gap-1 font-mono text-[11px] text-accent hover:underline" title="On the same data, asleep until opened">
+                      {!!x.own_data?.length && (
+                        <span className="shrink-0 text-[10.5px] text-subtle" title={`Its own copy of the ${x.own_data.join(", ")} data as this push left it; the rest is the preview's`}>
+                          own data
+                        </span>
+                      )}
+                      <a href={openUrl(x)} target="_blank" rel="noreferrer" className="ml-auto flex min-w-0 items-center gap-1 font-mono text-[11px] text-accent hover:underline" title={x.own_data?.length ? "On its own copy of the data, asleep until opened" : "On the preview's data, asleep until opened"}>
                         <span className="truncate">{host(x.url)}</span>
                         <ExternalLink className="size-3 shrink-0" />
                       </a>

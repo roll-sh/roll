@@ -587,7 +587,7 @@ fn digest_state(c: &Conn<'_>, project: &str, dead: &crate::exports::Dead) -> Res
     // Each import as (the project it's from, its environment and folder, the whole row).
     let imports = c.query(
         "SELECT i.env_id, i.path, i.position, i.from_env_id, i.from_path, f.project_id, f.slug, f.protected FROM imports i
-         JOIN environments e ON e.id = i.env_id LEFT JOIN environments f ON f.id = i.from_env_id WHERE e.project_id = ? ORDER BY i.env_id, i.path, i.position",
+         JOIN environments e ON e.id = i.env_id LEFT JOIN environments f ON f.id = i.from_env_id AND f.forgotten_at IS NULL WHERE e.project_id = ? ORDER BY i.env_id, i.path, i.position",
         [project],
         |r| {
             let (from, at, of): (String, String, Option<String>) = (r.get(3)?, r.get(4)?, r.get(5)?);
@@ -1950,7 +1950,11 @@ impl<'a> Resolver<'a> {
                     let got = if !self.caller.allows(Action::Reveal, &Scope::at(self.project, &env, &path)) {
                         Err(format!("{}: no access to {env}", r.display()))
                     } else if self.env(&env).is_none() {
-                        Err(format!("{}: no environment {env}", r.display()))
+                        if self.s.db.read(|c| crate::deleted_envs::deleted(c, self.project, &env)).unwrap_or(false) {
+                            Err(format!("{}: references {env}, which was deleted; recover it or change the reference", r.display()))
+                        } else {
+                            Err(format!("{}: no environment {env}", r.display()))
+                        }
                     } else {
                         self.lookup(&env, &path, &r.key).map_err(|p| format!("{} {p}", r.display())).and_then(|e| match self.entry(&e) {
                             (v, None) => Ok(v),

@@ -1454,7 +1454,12 @@ routes: docs/code/http-api.md, "Sandboxes".
 - **Creating** makes the machine and its token at once and records the sandbox as `creating`; the
   token and the owner's env (provider keys such as `ANTHROPIC_API_KEY`) are sealed with
   `ROLL_SECRET_KEY`, bound to the sandbox, until the backend has them, then dropped. They go to the
-  backend and nowhere else.
+  backend and nowhere else. Values copied from roll secrets (`secrets`) aren't sealed: the
+  reconciler reads them as their copier may at the create and again at each start, and hands them
+  to the backend the same way (`SandboxBackend::start_with`: docker a new container on the home
+  volume, fargate its kept env, agent37 an edit of the instance's env before its start), so a
+  rotated value reaches the sandbox and a revoked one leaves it (docs/code/http-api.md,
+  "Sandboxes").
 - **The reconciler** (one per owner, on the node holding `agents:<owner id>`; kicked by the
   owner's requests, started by taking the lease, on a single node by `Code::start_sandboxes`)
   looks every 30 s: it creates what isn't created yet (retrying capacity errors, adopting a create

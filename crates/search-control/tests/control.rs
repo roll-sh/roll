@@ -59,6 +59,8 @@ async fn env_with(f: impl FnOnce(&mut SearchConfig)) -> Env {
     cfg.node_name = format!("test-{i}");
     cfg.http_port = es_addr.port();
     cfg.gc_interval = None;
+    // Tests without a sealer keep secrets as given (a test of the refusal turns it off).
+    cfg.unsealed_secrets = true;
     f(&mut cfg);
     let control = Control::new(cfg.clone(), objects.clone()).await.unwrap();
     tokio::spawn(search_server::serve(listener, control.node.clone(), search_server::ListenOptions::default()));
@@ -77,6 +79,15 @@ async fn env() -> Env {
 /// carries `Operator`), `usr_…` a signed-in person who isn't one. Without it, an open daemon's
 /// request (neither).
 async fn as_person(mut req: axum::extract::Request, next: axum::middleware::Next) -> axum::response::Response {
+    // `x-test-grant`: a scoped token's rules (JSON), as the gate leaves them for the product, with
+    // `reveal` capable when the rules allow it (the gate's `roll_auth::Capable`).
+    if let Some(rules) = req.headers().get("x-test-grant").and_then(|v| serde_json::from_slice::<roll_auth::scope::Scope>(v.as_bytes()).ok()) {
+        if req.headers().get("x-test-capable").is_some_and(|v| v == "reveal") {
+            req.extensions_mut().insert(roll_auth::Capable(vec![roll_auth::scope::Action::Reveal]));
+        }
+        req.extensions_mut().insert(roll_auth::Operator);
+        req.extensions_mut().insert(roll_auth::Grant { id: "tok_t".into(), name: "t".into(), kind: roll_auth::GrantKind::Token, scope: Arc::new(rules), user: None, ask_otherwise: false });
+    }
     let who = req.headers().get("x-test-as").and_then(|v| v.to_str().ok()).map(str::to_string);
     if let Some(who) = who {
         let admin = who == "admin";
@@ -461,6 +472,173 @@ async fn metrics_and_slow_logs() {
     assert!(!text.contains(&pw) && !text.to_ascii_lowercase().contains("authorization"), "no credential in a slow log");
     // Moved to the catalog by the pass above: still there, newest first.
     assert_eq!(entries.first().map(|x| &x["log.logger"]), Some(&json!("index.search.slowlog.query")));
+}
+
+/// A grant's console request needs `reveal` on the cluster too when the API the cluster routes
+/// it to answers or sets a credential (a new API key, a user's password); everything else,
+/// whatever its path spells, needs only the route's `admin`.
+#[tokio::test]
+async fn console_credentials_need_reveal() {
+    let e = env().await;
+    let id = e.post("/v1/search/clusters", json!({ "name": "vault" })).await["id"].as_str().unwrap().to_string();
+    let rules = |actions: Value| json!([{ "product": "search", "resources": [{ "id": id }], "actions": actions }]).to_string();
+    let (admin, both) = (rules(json!({ "admin": "allow" })), rules(json!({ "admin": "allow", "reveal": "allow" })));
+    let console = |grant: &str, method: &str, path: &str, body: Value| {
+        let capable = if grant.contains("reveal") { "reveal" } else { "" };
+        let req = e.http.post(format!("{}/v1/search/clusters/vault/request", e.api)).header("x-test-grant", grant).header("x-test-capable", capable).json(&json!({ "method": method, "path": path, "body": body }));
+        async move {
+            let r = req.send().await.unwrap();
+            (r.status().as_u16(), r.json::<Value>().await.unwrap_or(Value::Null))
+        }
+    };
+    assert_eq!(console(&admin, "GET", "/_cat/indices", Value::Null).await.0, 200);
+    assert_eq!(console(&admin, "GET", "/enrollments/_search?q=api_key:x", Value::Null).await.0, 200, "an index and a query string named after a credential answer none");
+    for (method, path, body) in [("POST", "/_security/api_key", json!({ "name": "k" })), ("PUT", "/_security/user/ann", json!({ "password": "a-long-password-1", "roles": [] }))] {
+        let (s, v) = console(&admin, method, path, body.clone()).await;
+        assert!(s == 403 && v["error"].as_str().is_some_and(|m| m.contains("needs reveal")), "{method} {path}: {s} {v}");
+        let (s, v) = console(&both, method, path, body).await;
+        assert_eq!((s, v["status"].as_u64()), (200, Some(200)), "{method} {path}: {v}");
+    }
+}
+
+/// What a deleted cluster recorded and nobody had handed on yet (slow log, request metrics,
+/// analytics, requests to bill) goes with it: a cluster that takes its name at once starts with
+/// none of it, before and after the next metering pass.
+#[tokio::test]
+async fn a_reused_name_inherits_nothing_of_the_deleted_cluster() {
+    use reqwest::Method;
+    let e = env().await;
+    let old = e.post("/v1/search/clusters", json!({ "name": "shop" })).await;
+    let (user, pw) = creds(&old);
+    let settings = json!({ "settings": { "index.search.slowlog.threshold.query.warn": "0ms", "index.roll.analytics.enabled": true } });
+    assert_eq!(e.es(&user, &pw, Method::PUT, "/orders", Some(settings)).await.0, 200);
+    for _ in 0..3 {
+        assert_eq!(e.es(&user, &pw, Method::POST, "/orders/_search", Some(json!({ "query": { "match": { "card": "4111 1111" } } }))).await.0, 200);
+    }
+    assert!(!e.get("/v1/search/clusters/shop/slowlog").await["entries"].as_array().unwrap().is_empty());
+    assert_eq!(e.call(Method::DELETE, "/v1/search/clusters/shop", None).await.0, 200);
+    let new = e.post("/v1/search/clusters", json!({ "name": "shop" })).await;
+    assert_ne!(new["id"], old["id"]);
+    let id = new["id"].as_str().unwrap().to_string();
+    for pass in ["before the pass", "after it"] {
+        let log = e.get(&format!("/v1/search/clusters/{id}/slowlog")).await;
+        assert_eq!(log["entries"], json!([]), "{pass}: {log}");
+        let m = e.get(&format!("/v1/search/clusters/{id}/metrics?range=1h")).await;
+        assert_eq!(m["totals"]["all"]["requests"].as_u64().unwrap_or(0), 0, "{pass}: {m}");
+        let a = e.get(&format!("/v1/search/clusters/{id}/analytics?range=24h")).await;
+        assert_eq!(a["totals"]["searches"].as_u64(), Some(0), "{pass}: {a}");
+        let u = e.get(&format!("/v1/search/clusters/{id}/usage?days=1")).await;
+        assert_eq!(u["requests"].as_i64().unwrap_or(0), 0, "{pass}: {u}");
+        e.control.sample().await.unwrap();
+    }
+}
+
+/// Credentials pasted into a snapshot repository or a remote link are never kept in the clear: a
+/// node without a sealing key refuses them (pointing at a `roll://` reference or the key) and
+/// keeps nothing, and a node with one keeps them only sealed, in the cluster state as saved and in
+/// the catalog.
+#[tokio::test]
+async fn pasted_credentials_are_sealed_or_refused() {
+    use reqwest::Method;
+    let (endpoint, _bucket) = MockBucket::start().await;
+    for sealed in [false, true] {
+        let e = env_with(|c| {
+            c.node_settings.push((search_control::S3_ALLOW_PRIVATE.into(), "true".into()));
+            c.unsealed_secrets = false;
+            if sealed {
+                c.sealer = search_control::Sealer::from_secret("0123456789abcdef0123456789abcdef");
+            }
+        })
+        .await;
+        let app = e.post("/v1/search/clusters", json!({ "name": "app" })).await;
+        let (ua, pa) = creds(&app);
+        let (ul, pl) = creds(&e.post("/v1/search/clusters", json!({ "name": "logs" })).await);
+        let repo = json!({ "type": "s3", "settings": {
+            "bucket": "backups", "base_path": "seal", "endpoint": endpoint, "path_style_access": true,
+            "access_key": "AKIDPASTED", "secret_key": "pasted-secret-key",
+        } });
+        let (s, v) = e.es(&ua, &pa, Method::PUT, "/_snapshot/backup?verify=false", Some(repo)).await;
+        let (_, k) = e.es(&ul, &pl, Method::POST, "/_security/cross_cluster/api_key", Some(json!({ "name": "mine", "access": { "search": [{ "names": ["*"] }] } }))).await;
+        let key = k["encoded"].as_str().unwrap_or_else(|| panic!("{k}")).to_string();
+        let (sr, vr) = e.call(Method::PUT, "/v1/search/clusters/app/remotes/logs", Some(json!({ "cluster": "logs", "api_key": key }))).await;
+        if sealed {
+            assert_eq!((s, sr), (200, 200), "{v} {vr}");
+        } else {
+            assert!(s == 400 && v.to_string().contains("roll://"), "{v}");
+            assert!(sr == 400 && vr.to_string().contains("ROLL_SECRET_KEY"), "{vr}");
+        }
+        let state = e.control.node.get_loaded("app").unwrap().cluster.state().to_json().to_json();
+        assert!(!state.contains("pasted-secret-key") && !state.contains("AKIDPASTED"), "sealed={sealed}: a credential in the saved state");
+        assert_eq!(state.contains("::roll_sealed::"), sealed);
+        match e.control.store.remote(app["id"].as_str().unwrap(), "logs").await.unwrap() {
+            Some(r) => assert!(sealed && search_es::seal::is_sealed(&r.credentials) && !r.credentials.contains(&key)),
+            None => assert!(!sealed, "the link is kept"),
+        }
+    }
+}
+
+/// Documents being inverted share the node's memory budget for it (`max_analysis_bytes`):
+/// parallel `ngram` documents with grams of up to 1,000 characters get 429
+/// `circuit_breaking_exception`, their analysis stopped, instead of growing the buffers without
+/// bound; what they left is the budget's until the buffer goes.
+#[tokio::test]
+async fn parallel_ngram_documents_are_held_to_the_node_analysis_budget() {
+    use reqwest::Method;
+    let e = env_with(|c| c.max_analysis_bytes = Some(16 << 20)).await;
+    let (user, pw) = creds(&e.post("/v1/search/clusters", json!({ "name": "grams" })).await);
+    let index = json!({
+        "settings": { "index.max_ngram_diff": 50, "analysis": {
+            "tokenizer": { "g": { "type": "ngram", "min_gram": 950, "max_gram": 1000 } },
+            "analyzer": { "a": { "type": "custom", "tokenizer": "g" } } } },
+        "mappings": { "properties": { "body": { "type": "text", "analyzer": "a" } } },
+    });
+    assert_eq!(e.es(&user, &pw, Method::PUT, "/grams", Some(index)).await.0, 200);
+    // About 3 GB of grams each, were they indexed.
+    let text: String = (0..60_000u32).map(|i| char::from(b'a' + (i.wrapping_mul(2_654_435_761) >> 27) as u8 % 26)).collect();
+    let paths: Vec<String> = (0..4).map(|i| format!("/grams/_doc/{i}")).collect();
+    let results = futures_util::future::join_all(paths.iter().map(|p| e.es(&user, &pw, Method::PUT, p, Some(json!({ "body": text }))))).await;
+    for (s, v) in &results {
+        assert!(*s == 429 && v["error"]["type"] == "circuit_breaking_exception", "{s} {v}");
+    }
+    let l = e.control.node.get_loaded("grams").unwrap();
+    let heap = search_control::meter::engine_figures(&l.cluster).heap_bytes;
+    assert!(heap < 64 << 20, "the buffers stayed near the budget: {heap}");
+}
+
+/// Request bodies in flight are charged to the node's budget too (`max_in_flight_bytes`): two
+/// clusters each within their own budget get 429 once together they pass the node's.
+#[tokio::test]
+async fn bodies_in_flight_are_held_to_the_node_budget() {
+    use base64::Engine;
+    use tokio::io::AsyncWriteExt;
+    let e = env_with(|c| c.max_in_flight_bytes = Some(1_500_000)).await;
+    let (ua, pa) = creds(&e.post("/v1/search/clusters", json!({ "name": "a", "max_body_mb": 1 })).await);
+    let (ub, pb) = creds(&e.post("/v1/search/clusters", json!({ "name": "b", "max_body_mb": 1 })).await);
+    // a's upload: its headers are in, its 1,000,000 bytes aren't yet.
+    let mut held = tokio::net::TcpStream::connect(e.es.trim_start_matches("http://")).await.unwrap();
+    let auth = base64::engine::general_purpose::STANDARD.encode(format!("{ua}:{pa}"));
+    let head = format!("POST /_bulk HTTP/1.1\r\nhost: x\r\nauthorization: Basic {auth}\r\ncontent-type: application/x-ndjson\r\ncontent-length: 1000000\r\n\r\n");
+    held.write_all(head.as_bytes()).await.unwrap();
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while e.control.node.get_loaded("a").is_none_or(|l| l.bytes_in_flight() == 0) {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("a's body is reserved");
+    let doc = json!({ "pad": "x".repeat(900_000) });
+    let (s, v) = e.es(&ub, &pb, reqwest::Method::PUT, "/i/_doc/1", Some(doc.clone())).await;
+    assert_eq!(s, 429, "{v}");
+    assert!(v.to_string().contains("max_coordinating_and_primary_bytes=1500000"), "names the node's budget: {v}");
+    drop(held);
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while e.control.node.get_loaded("a").is_some_and(|l| l.bytes_in_flight() > 0) {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("a's reservation goes with its connection");
+    assert_eq!(e.es(&ub, &pb, reqwest::Method::PUT, "/i/_doc/1", Some(doc)).await.0, 201);
 }
 
 /// A person's clusters and always-on clusters are capped (`--search-max-*-per-person`); branches
@@ -1354,6 +1532,133 @@ async fn api_keys() {
     assert_eq!(send(reqwest::Method::PUT, "/_security/user/x", json!({"password": "pw-pw-pw-pw", "roles": ["superuser"]})).await, 403);
     let (s, _) = e.call(reqwest::Method::POST, "/v1/search/clusters/keys/keys", Some(json!({"name": "x", "access": "root"}))).await;
     assert_eq!(s, 400);
+}
+
+/// Keys narrowed by `indices` and `access`: `read` searches but writes nothing, `append` adds to
+/// its data stream but reads nothing and writes nowhere else, and an OpenSearch-flavor `read`
+/// user is held to its indices as well.
+#[tokio::test]
+async fn narrowed_keys() {
+    let e = env().await;
+    let e = &e;
+    let c = e.post("/v1/search/clusters", json!({"name": "narrow"})).await;
+    let (user, pw) = creds(&c);
+    for (path, doc) in [("/products/_doc/1?refresh=true", json!({"t": "shoe"})), ("/private/_doc/1?refresh=true", json!({"t": "x"}))] {
+        assert_eq!(e.es(&user, &pw, reqwest::Method::PUT, path, Some(doc)).await.0, 201);
+    }
+    let (s, v) = e.es(&user, &pw, reqwest::Method::PUT, "/_index_template/logs", Some(json!({"index_patterns": ["logs-*"], "data_stream": {}}))).await;
+    assert_eq!(s, 200, "{v}");
+    let key = |body: Value| async move { e.post("/v1/search/clusters/narrow/keys", body).await };
+    let send = |k: &Value, m: reqwest::Method, path: &str, body: Option<Value>| {
+        let mut r = e.http.request(m, format!("{}{path}", e.es)).header("Authorization", format!("ApiKey {}", k["api_key"].as_str().unwrap()));
+        if let Some(b) = body {
+            r = r.json(&b);
+        }
+        async move { r.send().await.unwrap().status().as_u16() }
+    };
+    let read = key(json!({"name": "web", "access": "read", "indices": ["prod*"]})).await;
+    assert_eq!((read["access"].as_str(), &read["indices"]), (Some("read"), &json!(["prod*"])));
+    assert_eq!(send(&read, reqwest::Method::POST, "/products/_search", Some(json!({}))).await, 200);
+    assert_eq!(send(&read, reqwest::Method::PUT, "/products/_doc/2", Some(json!({"t": "y"}))).await, 403);
+    assert_eq!(send(&read, reqwest::Method::POST, "/private/_search", Some(json!({}))).await, 403);
+    let drain = key(json!({"name": "drain", "access": "append", "indices": ["logs-app"]})).await;
+    assert_eq!(send(&drain, reqwest::Method::POST, "/logs-app/_doc?refresh=true", Some(json!({"@timestamp": "2026-11-21T00:00:00Z", "m": "hi"}))).await, 201);
+    assert_eq!(send(&drain, reqwest::Method::POST, "/logs-app/_search", Some(json!({}))).await, 403);
+    assert_eq!(send(&drain, reqwest::Method::POST, "/logs-other/_doc", Some(json!({"@timestamp": "2026-11-21T00:00:00Z"}))).await, 403);
+    assert_eq!(send(&drain, reqwest::Method::PUT, "/products/_doc/3", Some(json!({"t": "z"}))).await, 403);
+    let (_, v) = e.es(&user, &pw, reqwest::Method::GET, "/logs-app/_count", None).await;
+    assert_eq!(v["count"], 1, "{v}");
+    // A data key restricted to its indices.
+    let data = key(json!({"name": "app", "access": "data", "indices": ["products"]})).await;
+    assert_eq!(send(&data, reqwest::Method::PUT, "/products/_doc/4", Some(json!({"t": "w"}))).await, 201);
+    assert_eq!(send(&data, reqwest::Method::PUT, "/private/_doc/4", Some(json!({"t": "w"}))).await, 403);
+    // Templates are the whole cluster's (this one would match `private`): not a narrowed key's.
+    assert_eq!(send(&data, reqwest::Method::PUT, "/_index_template/sneaky", Some(json!({"index_patterns": ["priv*"]}))).await, 403);
+    for (bad, why) in [
+        (json!({"name": "x", "access": "admin", "indices": ["a"]}), "admin"),
+        (json!({"name": "x", "access": "append", "indices": ["logs-*"]}), "pattern"),
+        (json!({"name": "x", "access": "append"}), "names its indices"),
+        (json!({"name": "x", "access": "read", "indices": ["other:logs"]}), "remote"),
+        (json!({"name": "x", "access": "read", "indices": [".security"]}), "start with"),
+    ] {
+        let (s, v) = e.call(reqwest::Method::POST, "/v1/search/clusters/narrow/keys", Some(bad.clone())).await;
+        assert!(s == 400 && v.to_string().contains(why), "{bad}: {s} {v}");
+    }
+    // OpenSearch: a read user of its own, on its indices only.
+    let c = e.post("/v1/search/clusters", json!({"name": "narrow-os", "flavor": "opensearch"})).await;
+    let (user, pw) = creds(&c);
+    for path in ["/products/_doc/1?refresh=true", "/private/_doc/1?refresh=true"] {
+        assert_eq!(e.es(&user, &pw, reqwest::Method::PUT, path, Some(json!({"t": "x"}))).await.0, 201);
+    }
+    let k = e.post("/v1/search/clusters/narrow-os/keys", json!({"name": "web", "access": "read", "indices": ["products"]})).await;
+    let (ku, kp) = (k["username"].as_str().unwrap(), k["password"].as_str().unwrap());
+    assert_eq!(e.es(ku, kp, reqwest::Method::POST, "/products/_search", Some(json!({}))).await.0, 200);
+    assert_eq!(e.es(ku, kp, reqwest::Method::PUT, "/products/_doc/2", Some(json!({"t": "y"}))).await.0, 403);
+    assert_eq!(e.es(ku, kp, reqwest::Method::POST, "/private/_search", Some(json!({}))).await.0, 403);
+}
+
+/// Relevance tuning through `/v1/search`: a synonyms set a search then uses, a query ruleset that
+/// pins a document, an index's settings (roll's suggestions on; a private setting refused) and
+/// one document's explanation.
+#[tokio::test]
+async fn relevance_tuning_routes() {
+    let e = env().await;
+    let e = &e;
+    e.post("/v1/search/clusters", json!({"name": "rel"})).await;
+    let base = "/v1/search/clusters/rel";
+    let call = |m: reqwest::Method, path: &str, body: Option<Value>| {
+        let p = format!("{base}{path}");
+        async move { e.call(m, &p, body).await }
+    };
+    let (s, v) = call(reqwest::Method::PUT, "/synonyms/furniture", Some(json!({"synonyms_set": [{"id": "couch", "synonyms": "couch, sofa"}]}))).await;
+    assert_eq!((s, v["result"].as_str()), (201, Some("created")), "Elasticsearch's status comes through: {v}");
+    let index = json!({
+        "settings": {"analysis": {"filter": {"syn": {"type": "synonym_graph", "synonyms_set": "furniture", "updateable": true}}, "analyzer": {"syn": {"tokenizer": "standard", "filter": ["lowercase", "syn"]}}}},
+        "mappings": {"properties": {"title": {"type": "text", "analyzer": "standard", "search_analyzer": "syn"}}}
+    });
+    assert_eq!(call(reqwest::Method::PUT, "/indices/shop", Some(index)).await.0, 200);
+    for (id, title) in [("1", "red sofa"), ("2", "blue chair"), ("3", "green lamp")] {
+        assert_eq!(call(reqwest::Method::PUT, &format!("/indices/shop/docs/{id}?refresh=true"), Some(json!({"title": title}))).await.0, 201);
+    }
+    let search = |q: Value| call(reqwest::Method::POST, "/indices/shop/search", Some(q));
+    let (s, v) = search(json!({"query": {"match": {"title": "couch"}}})).await;
+    assert_eq!((s, v["hits"]["hits"][0]["_id"].as_str()), (200, Some("1")), "the set's synonym matched: {v}");
+    // One rule more, then the set lists it.
+    assert!(call(reqwest::Method::PUT, "/synonyms/furniture/seat", Some(json!({"synonyms": "seat, chair"}))).await.0 < 300);
+    let (s, v) = call(reqwest::Method::GET, "/synonyms/furniture", None).await;
+    assert_eq!((s, v["count"].as_i64()), (200, Some(2)), "{v}");
+    let (s, v) = search(json!({"query": {"match": {"title": "seat"}}})).await;
+    assert_eq!((s, v["hits"]["hits"][0]["_id"].as_str()), (200, Some("2")), "{v}");
+    let (s, v) = call(reqwest::Method::GET, "/synonyms", None).await;
+    assert_eq!((s, v["count"].as_i64()), (200, Some(1)), "{v}");
+    // A ruleset pins the lamp to the top of a search for "sofa".
+    let rules = json!({"rules": [{"rule_id": "lamp", "type": "pinned", "criteria": [{"type": "exact", "metadata": "q", "values": ["sofa"]}], "actions": {"ids": ["3"]}}]});
+    let (s, v) = call(reqwest::Method::PUT, "/query_rules/promos", Some(rules)).await;
+    assert!(s < 300, "{s} {v}");
+    let (s, v) = call(reqwest::Method::POST, "/query_rules/promos/test", Some(json!({"match_criteria": {"q": "sofa"}}))).await;
+    assert_eq!((s, v["total_matched_rules"].as_i64()), (200, Some(1)), "{v}");
+    let (s, v) = search(json!({"retriever": {"rule": {"retriever": {"standard": {"query": {"match": {"title": "sofa"}}}}, "match_criteria": {"q": "sofa"}, "ruleset_ids": ["promos"]}}})).await;
+    let ids: Vec<&str> = v["hits"]["hits"].as_array().unwrap().iter().filter_map(|h| h["_id"].as_str()).collect();
+    assert_eq!((s, ids), (200, vec!["3", "1"]), "{v}");
+    assert_eq!(call(reqwest::Method::GET, "/query_rules", None).await.1["count"], 1);
+    // Settings: roll's suggestions on, a private setting refused as Elasticsearch refuses it.
+    let (s, v) = call(reqwest::Method::PUT, "/indices/shop/settings", Some(json!({"index.roll.analytics.enabled": true, "index.roll.suggestions.enabled": true}))).await;
+    assert_eq!(s, 200, "{v}");
+    let (_, v) = call(reqwest::Method::GET, "/indices/shop/settings?flat_settings=true", None).await;
+    assert_eq!(v["shop"]["settings"]["index.roll.suggestions.enabled"], "true", "{v}");
+    let (s, v) = call(reqwest::Method::PUT, "/indices/shop/settings", Some(json!({"index.roll.suggestions.source": "shop"}))).await;
+    assert!(s == 400 && v.to_string().contains("can not update private setting"), "{s} {v}");
+    // A write names one index.
+    assert_eq!(call(reqwest::Method::PUT, "/indices/shop*/settings", Some(json!({"index.refresh_interval": "1s"}))).await.0, 400);
+    // Why a document matched.
+    let (s, v) = call(reqwest::Method::POST, "/indices/shop/explain/1", Some(json!({"query": {"match": {"title": "sofa"}}}))).await;
+    assert_eq!((s, &v["matched"]), (200, &json!(true)), "{v}");
+    // Elasticsearch's answers come through: a set in use isn't deleted; `_` ids are refused.
+    let (s, v) = call(reqwest::Method::DELETE, "/synonyms/furniture", None).await;
+    assert_eq!(s, 400, "{v}");
+    assert_eq!(call(reqwest::Method::GET, "/synonyms/_all", None).await.0, 400);
+    assert_eq!(call(reqwest::Method::DELETE, "/query_rules/promos", None).await.0, 200);
+    assert_eq!(call(reqwest::Method::GET, "/query_rules/promos", None).await.0, 404);
 }
 
 /// A cluster's audit log entries (`GET …/audit`), and the one of them that is `event` and
@@ -4341,6 +4646,103 @@ async fn suggestions_never_touch_a_name_they_did_not_build() {
     let v = ok(Method::GET, "/_cat/indices?format=json&h=index", None).await;
     let names: Vec<&str> = v.as_array().unwrap().iter().filter_map(|r| r["index"].as_str()).collect();
     assert!(!names.iter().any(|n| n.starts_with("orders-suggestions-") || n.starts_with("crm-suggestions-")), "{names:?}");
+}
+
+/// The node's embedding pool across tenants, on the tiny made-up model (`search_embed::tiny`):
+/// `semantic_text` with the E5 endpoint end to end, a reindex into it on two workers (a smoke
+/// test: the batches of 10 with no deadline are search-es's `tests/e5.rs`), each cluster's queue capped with Elasticsearch's 429, the per-call cap, an input
+/// with no spaces cut instead of refused, the CPU each cluster's inputs took metered to it, and
+/// the model dropped once idle. (The order of turns is `search_server::embed`'s unit tests'.)
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_embedding_pool_takes_turns_caps_queues_and_meters_cpu() {
+    use search_server::embed::{EmbedConfig, ModelSource};
+    let model = std::env::temp_dir().join(format!("roll-search-e5-tiny-{}", std::process::id()));
+    search_embed::tiny::write(&model).unwrap();
+    let dir = model.clone();
+    let e = env_with(move |c| {
+        let mut ec = EmbedConfig::new(ModelSource::Dir(dir), c.home.join("models"));
+        ec.unchecked = true;
+        ec.workers = 2;
+        ec.queue_inputs = 72;
+        ec.max_inputs = 100;
+        ec.idle_unload = Duration::from_secs(2);
+        c.embed = Some(ec);
+    })
+    .await;
+    let mut clusters = Vec::new();
+    for name in ["a", "b"] {
+        let c = e.post("/v1/search/clusters", json!({"name": name})).await;
+        clusters.push((c["id"].as_str().unwrap().to_string(), creds(&c)));
+    }
+    let ((a_id, (au, ap)), (b_id, (bu, bp))) = (clusters[0].clone(), clusters[1].clone());
+    let e5 = "/_inference/text_embedding/.multilingual-e5-small-elasticsearch?timeout=120s";
+
+    // semantic_text on the preconfigured endpoint, no key anywhere.
+    let mapping = json!({"mappings": {"properties": {"body": {"type": "semantic_text", "inference_id": ".multilingual-e5-small-elasticsearch"}}}});
+    let (s, v) = e.es(&au, &ap, reqwest::Method::PUT, "/docs", Some(mapping)).await;
+    assert_eq!(s, 200, "{v}");
+    let mut bulk = String::new();
+    for i in 0..20 {
+        bulk.push_str(&format!("{{\"index\":{{\"_id\":\"{i}\"}}}}\n{{\"body\":\"document number {i} about foxes and dogs\"}}\n"));
+    }
+    let r = e.http.post(format!("{}/docs/_bulk?refresh=true", e.es)).basic_auth(&au, Some(&ap)).header("content-type", "application/x-ndjson").body(bulk).send().await.unwrap();
+    let v: Value = r.json().await.unwrap();
+    assert_eq!(v["errors"], false, "{v}");
+    let (s, v) = e.es(&au, &ap, reqwest::Method::POST, "/docs/_search", Some(json!({"query": {"semantic": {"field": "body", "query": "foxes"}}}))).await;
+    assert_eq!(s, 200, "{v}");
+    assert!(v["hits"]["total"]["value"].as_i64().unwrap() >= 10, "{v}");
+
+    // A reindex into semantic_text through the pool (smoke test).
+    let mut bulk = String::new();
+    for i in 0..200 {
+        bulk.push_str(&format!("{{\"index\":{{\"_id\":\"{i}\"}}}}\n{{\"body\":\"source document {i} on reindexing\"}}\n"));
+    }
+    let r = e.http.post(format!("{}/src/_bulk?refresh=true", e.es)).basic_auth(&au, Some(&ap)).header("content-type", "application/x-ndjson").body(bulk).send().await.unwrap();
+    assert_eq!(r.json::<Value>().await.unwrap()["errors"], false);
+    let (s, v) = e.es(&au, &ap, reqwest::Method::PUT, "/docs2", Some(json!({"mappings": {"properties": {"body": {"type": "semantic_text", "inference_id": ".multilingual-e5-small-elasticsearch"}}}}))).await;
+    assert_eq!(s, 200, "{v}");
+    let (s, v) = e.es(&au, &ap, reqwest::Method::POST, "/_reindex?refresh=true", Some(json!({"source": {"index": "src"}, "dest": {"index": "docs2"}}))).await;
+    assert_eq!((s, v["created"].as_i64(), v["failures"].as_array().map(Vec::len)), (200, Some(200), Some(0)), "{v}");
+    let (s, v) = e.es(&bu, &bp, reqwest::Method::POST, e5, Some(json!({"input": "short"}))).await;
+    assert_eq!(s, 200, "{v}");
+    assert_eq!(v["text_embedding"][0]["embedding"].as_array().unwrap().len(), 384);
+    // Past a cluster's queue (72 inputs) a call is refused whole, as a full deployment refuses.
+    let many: Vec<String> = (0..73).map(|i| format!("more {i}")).collect();
+    let (s, v) = e.es(&au, &ap, reqwest::Method::POST, e5, Some(json!({"input": many}))).await;
+    assert_eq!((s, v["error"]["type"].as_str(), v["error"]["reason"].as_str()), (429, Some("es_rejected_execution_exception"), Some("inference process queue is full. Unable to execute command")), "{v}");
+    let (s, v) = e.es(&bu, &bp, reqwest::Method::POST, e5, Some(json!({"input": many[..72]}))).await;
+    assert_eq!(s, 200, "{v}");
+    // The model is held on the node's memory while loaded.
+    let pool = e.control.node.cfg.embedder.clone().unwrap();
+    assert!(pool.resident_bytes() > 0);
+
+    // The per-call cap; a long input without a space is cut to its first 512 tokens, not
+    // refused.
+    let many: Vec<String> = (0..101).map(|i| i.to_string()).collect();
+    let (s, v) = e.es(&bu, &bp, reqwest::Method::POST, e5, Some(json!({"input": many}))).await;
+    assert_eq!(s, 400, "{v}");
+    let (s, v) = e.es(&au, &ap, reqwest::Method::POST, e5, Some(json!({"input": "x".repeat(300_000)}))).await;
+    assert_eq!(s, 200, "{v}");
+
+    // Each cluster is billed the CPU its inputs took: a's 220 documents and a 512-token input
+    // more than b's 74 short inputs.
+    e.control.sample().await.unwrap();
+    let ua = e.get(&format!("/v1/search/clusters/{a_id}/usage?days=1")).await;
+    let ub = e.get(&format!("/v1/search/clusters/{b_id}/usage?days=1")).await;
+    let (ca, cb) = (ua["inference_cpu_seconds"].as_f64().unwrap(), ub["inference_cpu_seconds"].as_f64().unwrap());
+    assert!(ca > cb && cb > 0.0, "a {ca}, b {cb}");
+    assert!(ua["cost"]["inference_usd"].as_f64().unwrap() > 0.0, "{ua}");
+
+    // Idle: the model leaves memory.
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while pool.loaded() {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .expect("the model stays loaded while idle");
+    assert_eq!(pool.resident_bytes(), 0);
+    let _ = std::fs::remove_dir_all(&model);
 }
 
 /// A migration's bounds: a host that isn't a name or an address (`https://*`) is refused and

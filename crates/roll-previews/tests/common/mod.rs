@@ -18,6 +18,8 @@ pub struct FakeCode {
     pub heads: Mutex<HashMap<String, String>>,
     /// The paths a head changes, by head (unlisted: not known).
     pub paths: Mutex<HashMap<String, Vec<String>>>,
+    /// Each head's git commit (unlisted: none).
+    pub git: Mutex<HashMap<String, String>>,
     /// The paths between two heads, by `"<from>..<to>"` (unlisted: not known).
     pub between: Mutex<HashMap<String, Vec<String>>>,
     /// What every repo's service watches (`roll.toml` `watch`).
@@ -57,6 +59,9 @@ impl FakeCode {
 impl Source for FakeCode {
     async fn open_changes(&self, repo: &str) -> anyhow::Result<Vec<ChangeInfo>> {
         Ok(self.changes.lock().values().filter(|c| c.repo == repo && c.open).cloned().collect())
+    }
+    async fn git_commit(&self, _repo: &str, revision: &str) -> anyhow::Result<Option<String>> {
+        Ok(self.git.lock().get(revision).cloned())
     }
     async fn screenshots(&self, _repo: &str, _revision: &str, root: &str) -> anyhow::Result<Option<code_preview::config::Screenshots>> {
         self.app_roots.lock().push(root.to_string());
@@ -181,6 +186,15 @@ impl Brancher for FakeData {
         self.at.lock().push(at);
         self.branch(parent, name, mode).await.map(Some)
     }
+    async fn snapshot(&self, parent: &str, branch: &str, name: &str) -> anyhow::Result<Option<Branched>> {
+        if !matches!(self.kind, Kind::Postgres | Kind::Redis) {
+            return Ok(None);
+        }
+        anyhow::ensure!(self.branches.lock().contains(branch), "no branch {branch} to copy");
+        let id = format!("{parent}~{name}");
+        self.branches.lock().insert(id.clone());
+        Ok(Some(Branched::plain(id)))
+    }
     async fn mask(&self, _parent: &str, branch: &str, _kept: Option<&str>, columns: &std::collections::BTreeMap<String, String>) -> anyhow::Result<()> {
         self.masks.lock().push((branch.to_string(), columns.clone()));
         Ok(())
@@ -244,6 +258,8 @@ pub struct FakeApps {
     pub memory: Mutex<Option<u32>>,
     /// Services woken (warmed after a push, or asked to wake).
     pub woken: Mutex<Vec<(String, String)>>,
+    /// The build each service runs now, by service: (git commit, its own URL).
+    pub live: Mutex<HashMap<String, (String, String)>>,
     /// What a service answers on its health path (unset: the backend can't tell).
     pub answers: Mutex<Option<(u16, String)>>,
     /// How many health checks find the service still starting (asked again later).
@@ -371,6 +387,9 @@ impl Apps for FakeApps {
     }
     async fn metrics(&self, _: &str, service: &str) -> Option<(f64, u64)> {
         self.metrics.lock().get(service).copied()
+    }
+    async fn live_build(&self, _: &str, service: &str) -> Option<(String, String)> {
+        self.live.lock().get(service).cloned()
     }
     async fn errors(&self, preview: &str, service: &str, _: i64, _: Option<&roll_previews::engine::ErrorMasks<'_>>) -> roll_previews::Result<Vec<roll_previews::ErrorGroup>> {
         // `pv_…/web` (one preview's) over `web` (every preview's).

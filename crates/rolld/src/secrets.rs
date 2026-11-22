@@ -58,7 +58,7 @@ impl Api {
 
     /// Call a product's route as the operator: its status and JSON answer, whatever the status.
     /// Runs on the store's blocking threads.
-    fn call_status(&self, method: Method, path: &str, body: Option<Json>) -> roll_secrets::Result<(axum::http::StatusCode, Json)> {
+    pub(crate) fn call_status(&self, method: Method, path: &str, body: Option<Json>) -> roll_secrets::Result<(axum::http::StatusCode, Json)> {
         self.call_status_as(method, path, body, |e| {
             e.insert(roll_auth::Operator);
         })
@@ -1109,6 +1109,38 @@ const OPENSEARCH_FIELDS: &[Field] = &[
 ];
 
 impl Search {
+    /// What a link's options ask the keys route for: `permission` (`read`, `append`; left out,
+    /// today's `data`) as its `access`, and `names` (index names or patterns: a list or a
+    /// comma-separated string, as a certificate link's names) as its `indices`. An append link
+    /// names its data streams exactly.
+    fn key_options(link: &Link) -> roll_secrets::Result<(&'static str, Option<Vec<String>>)> {
+        let access = match link.options.get("permission") {
+            None | Some(Json::Null) => "data",
+            Some(Json::String(p)) if p == "read" => "read",
+            Some(Json::String(p)) if p == "append" => "append",
+            Some(_) => return Err(Error::BadRequest("a search link's permission is read or append (left out: data, which also writes)".into())),
+        };
+        let bad = || Error::BadRequest("a search link's names are index names or patterns: a list, or a comma-separated string".into());
+        let names: Option<Vec<String>> = match link.options.get("names") {
+            None | Some(Json::Null) => None,
+            Some(Json::Array(a)) => Some(a.iter().map(|n| n.as_str().map(|n| n.trim().to_string()).ok_or_else(bad)).collect::<Result<Vec<_>, _>>()?),
+            Some(Json::String(s)) => Some(s.split(',').map(|n| n.trim().to_string()).collect()),
+            Some(_) => return Err(bad()),
+        };
+        let names = names.map(|n| n.into_iter().filter(|n| !n.is_empty()).collect::<Vec<_>>());
+        if names.as_ref().is_some_and(Vec::is_empty) {
+            return Err(bad());
+        }
+        if access == "append" {
+            match &names {
+                None => return Err(Error::BadRequest("an append link names its data streams (names)".into())),
+                Some(n) if n.iter().any(|n| n.contains(['*', '?'])) => return Err(Error::BadRequest("an append link names its data streams exactly: no patterns in names".into())),
+                _ => {}
+            }
+        }
+        Ok((access, names))
+    }
+
     /// The cluster's flavor (`elasticsearch`, `opensearch`), when roll search says; kept 30 s.
     fn flavor(&self, r#ref: &str) -> Option<String> {
         if let Some((at, f)) = self.1.lock().expect("flavors").get(r#ref)
@@ -1158,22 +1190,27 @@ impl LinkProvider for Search {
             f => text(&c, &format!("/{f}")),
         }
     }
-    fn issue(&self, r#ref: &str, _: &str, _: &Link, label: &str, ttl: Option<u64>) -> roll_secrets::Result<Issued> {
-        // Data access only (indices, templates, pipelines, lifecycle): a leaked app key can't make
-        // more keys or users.
-        let mut body = json!({ "name": label.chars().take(64).collect::<String>(), "access": "data" });
+    fn issue(&self, r#ref: &str, _: &str, link: &Link, label: &str, ttl: Option<u64>) -> roll_secrets::Result<Issued> {
+        // Never admin: a leaked app key can't make more keys or users. `data` (indices,
+        // templates, pipelines, lifecycle) unless the link narrows it ([`Search::key_options`]).
+        let (access, names) = Self::key_options(link)?;
+        let mut body = json!({ "name": label.chars().take(64).collect::<String>(), "access": access });
+        if let Some(n) = &names {
+            body["indices"] = json!(n);
+        }
         // A dynamic key expires by itself a little after its lease, should a revoke fail.
         if let Some(m) = ttl {
             body["expires_in_s"] = json!((m + 5) * 60);
         }
         let k = self.0.call(Method::POST, &format!("/v1/search/clusters/{}/keys", enc(r#ref)), Some(body))?;
         let id = text(&k, "/id")?;
-        // roll search says what it made (#29): anything but a data key, or a key that doesn't
-        // say, is deleted and refused (docs/secrets.md, "Links": search).
-        if k["access"].as_str() != Some("data") {
+        // roll search says what it made (#29): a key of another access or other indices than
+        // asked, or one that doesn't say, is deleted and refused (docs/secrets.md, "Links": search).
+        let indices_ok = names.as_ref().is_none_or(|n| k["indices"] == json!(n));
+        if k["access"].as_str() != Some(access) || !indices_ok {
             let _ = self.0.delete_gone(&format!("/v1/search/clusters/{}/keys/{}", enc(r#ref), enc(id.expose())));
-            let made = k["access"].as_str().map_or("a key without its access".to_string(), |a| format!("an {a} key"));
-            return Err(Error::Link(format!("roll search made {made}, not a data one: refused (and deleted)")));
+            let made = k["access"].as_str().map_or("a key without its access".to_string(), |a| format!("a {a} key on {}", k["indices"]));
+            return Err(Error::Link(format!("roll search made {made}, not the {access} key asked for: refused (and deleted)")));
         }
         Ok(Issued { parts: search_parts(&k)?, handle: json!({ "id": id.expose() }) })
     }
@@ -1181,7 +1218,11 @@ impl LinkProvider for Search {
     /// Elasticsearch) is refused when the link is written. A build of roll search that doesn't
     /// say its flavor is taken at its word later, at the first issue.
     fn check(&self, link: &Link) -> roll_secrets::Result<()> {
+        let (access, _) = Self::key_options(link)?;
         let c = self.0.call(Method::GET, &format!("/v1/search/clusters/{}", enc(&link.r#ref)), None)?;
+        if c["flavor"].as_str() == Some("opensearch") && access == "append" {
+            return Err(Error::BadRequest("an OpenSearch cluster has no append keys (its index action also overwrites): link data with names".into()));
+        }
         match (c["flavor"].as_str(), link.field.as_str()) {
             (Some("opensearch"), "api_key") => Err(Error::BadRequest("an OpenSearch cluster has no API keys: link user and password (OPENSEARCH_USERNAME, OPENSEARCH_PASSWORD)".into())),
             (Some("elasticsearch"), "user" | "password") => Err(Error::BadRequest("an Elasticsearch cluster issues API keys: link api_key (ELASTICSEARCH_API_KEY)".into())),
@@ -1253,6 +1294,54 @@ impl roll_secrets::People for People {
             _ => None,
         };
         Ok(Some(roll_secrets::Person { admin: u.admin, code_owner }))
+    }
+
+    fn admins(&self) -> Result<Option<usize>, String> {
+        let users = self.accounts.users().map_err(|e| e.to_string())?;
+        Ok(Some(users.iter().filter(|u| u.admin && !u.disabled).count()))
+    }
+}
+
+/// What roll apps and roll code hold of a project's secrets, for roll secrets' reach: services
+/// the project stands for (their environments and `roll://` variables) and live sandboxes with a
+/// copy. Names and metadata only: a variable's text goes back only when it's a reference.
+pub struct ReachHolders {
+    pub workspace: Arc<roll_workspace::Workspace>,
+    pub apps: Option<Arc<apps_control::Apps>>,
+    pub code: Option<Arc<code_control::Code>>,
+}
+
+impl roll_secrets::reach::Holders for ReachHolders {
+    fn services(&self, project: &str) -> Result<Vec<roll_secrets::reach::ServiceUse>, String> {
+        let Some(apps) = &self.apps else { return Ok(vec![]) };
+        let Ok(p) = self.workspace.get(roll_workspace::Scope::All, project) else { return Ok(vec![]) };
+        let mut out = vec![];
+        for svc in apps.store.services(Some(project)).map_err(|e| e.to_string())? {
+            // As `ForApps::resolve`: a project that doesn't stand for the service gives it nothing.
+            if !self.workspace.trusts(&p, roll_workspace::Kind::Service, &svc.id) {
+                continue;
+            }
+            for env in apps.store.environments(&svc.id).map_err(|e| e.to_string())? {
+                let last_deployed_at = env.active.as_deref().and_then(|d| apps.store.deployment(d).ok()).map(|d| d.finished_at.unwrap_or(d.created_at));
+                // A variable goes back only when it is a `roll://` reference (its text, as roll
+                // secrets parses it); every other value is dropped here.
+                let references = apps.store.variables(&svc.id, &env.name).map_err(|e| e.to_string())?.into_values().filter(|v| matches!(roll_secrets::Reference::parse(v), Ok(Some(_)))).collect();
+                out.push(roll_secrets::reach::ServiceUse { service: svc.id.clone(), name: svc.name.clone(), environment: env.name, last_deployed_at, references });
+            }
+        }
+        Ok(out)
+    }
+
+    fn sandboxes(&self, project: &str) -> Result<Vec<roll_secrets::reach::SandboxCopy>, String> {
+        let Some(code) = &self.code else { return Ok(vec![]) };
+        let rows = code_control::agents::sandbox::store::holding_secrets_of(code.db.sql(), project).map_err(|e| e.to_string())?;
+        let mut out = vec![];
+        for r in rows {
+            let Some(from) = r.secrets_from else { continue };
+            let owner = code.db.owner_by_id(&r.owner_id).map_err(|e| e.to_string())?.map_or(r.owner_id, |o| o.name);
+            out.push(roll_secrets::reach::SandboxCopy { id: r.id, name: r.name, owner, by: r.secrets_by.unwrap_or_default(), from: from.environment, keys: from.keys });
+        }
+        Ok(out)
     }
 }
 
@@ -2059,6 +2148,25 @@ impl code_control::SecretEnv for ForCode {
         .await?
     }
 
+    /// As roll secrets reads for `by` now (`values_as_maker`: the check and the read in one), what a
+    /// sandbox it copied into starts with. Never a protected environment or an unresolved reference.
+    async fn reveal_as(&self, by: &str, project: &str, environment: &str, consumer: &str) -> anyhow::Result<Vec<(String, String)>> {
+        let (secrets, _) = self.0.get().cloned().ok_or_else(|| anyhow::anyhow!("roll secrets is starting"))?;
+        let (by, project, environment, consumer) = (by.to_string(), project.to_string(), environment.to_string(), consumer.to_string());
+        tokio::task::spawn_blocking(move || {
+            let (slug, path) = environment.split_once(':').unwrap_or((&environment, "/"));
+            let v = secrets.values_as_maker(&by, &project, slug, path, &consumer).map_err(|e| match e {
+                roll_secrets::Error::Forbidden(m) | roll_secrets::Error::NotFound(m) | roll_secrets::Error::MakerUnreachable(m) => code_control::Refused(m).into(),
+                e => anyhow::Error::from(e),
+            })?;
+            if let Some(p) = v.problems.first() {
+                anyhow::bail!("{} of {slug} didn't resolve ({}: {})", v.problems.len(), p.key, p.problem);
+            }
+            Ok(v.values.into_iter().map(|(k, v)| (k, v.expose().to_string())).collect())
+        })
+        .await?
+    }
+
     /// The first project with the repo on its canvas that may reach it and has validity checks on
     /// asks (and keeps, and audits, as `roll:code`); none: nothing is asked.
     async fn validity(&self, repo: &str, found: Vec<(String, Option<String>)>) -> anyhow::Result<Vec<code_control::model::CredentialValidity>> {
@@ -2089,7 +2197,7 @@ impl code_control::SecretEnv for ForCode {
         tokio::task::spawn_blocking(move || {
             let mut out = Vec::new();
             for p in ws.projects_of(roll_workspace::Kind::Repo.as_str(), &r)?.into_iter().filter(|p| secrets.counts_for_repo(p, &r)) {
-                out.extend(secrets.leak_matches(&p, &candidates)?.into_iter().map(|(i, l)| (i, l.key, l.environment, l.path)));
+                out.extend(secrets.leaks_in_code(&p, &candidates, &r)?.into_iter().map(|(i, l)| (i, l.key, l.environment, l.path)));
             }
             Ok(out)
         })
@@ -2120,6 +2228,40 @@ impl code_control::SecretEnv for ForCode {
         .map_err(|e| code_control::Error::Internal(e.into()))?
         .map_err(for_code)?;
         Ok(code_control::StoredCredential { project: s.project, environment: s.environment, path: s.path, change: s.change, request: s.request })
+    }
+
+    /// An owner's reviewer key that's a `roll://` reference: bound to whoever sets it
+    /// (`Secrets::bind_ref` for `code:review:<owner>`), never a runtime read.
+    async fn bind_owner_key(&self, owner: &str, reference: &str, asker: &code_control::SecretsAsker) -> code_control::Result<String> {
+        let secrets = self.secrets()?;
+        let (owner, reference, asker) = (owner.to_string(), reference.to_string(), asker.clone());
+        tokio::task::spawn_blocking(move || {
+            let caller = secrets.caller_of(asker.operator, asker.user.as_ref(), asker.grant.as_ref()).map_err(|e| match e {
+                // A roll code owner token is no one to roll secrets.
+                Error::Unauthorized(_) => code_control::Error::Forbidden("a roll:// key is set by someone roll secrets knows: a session, the operator token or a roll token (rlt_…) that may reveal it".into()),
+                e => for_code(e),
+            })?;
+            let maker = secrets.bind_ref(&roll_secrets::ResourceRef::code_owner(&owner), &reference, &caller).map_err(|e| match e {
+                roll_secrets::Refusal::NotAllowed(_) | roll_secrets::Refusal::MakerUnreachable(_) | roll_secrets::Refusal::NotTrusted(_) | roll_secrets::Refusal::Protected(_) => code_control::Error::Forbidden(e.to_string()),
+                roll_secrets::Refusal::Failed(e) => for_code(e),
+                e => code_control::Error::Invalid(e.to_string()),
+            })?;
+            Ok(serde_json::to_value(&maker).map_err(|e| code_control::Error::Internal(e.into()))?.as_str().unwrap_or_default().to_string())
+        })
+        .await
+        .map_err(|e| code_control::Error::Internal(e.into()))?
+    }
+
+    /// That key for a review, as its maker may read it now (audited as `code:review:<owner>`).
+    async fn owner_key(&self, owner: &str, reference: &str, maker: &str) -> anyhow::Result<code_control::CredentialValue> {
+        let secrets = self.secrets().map_err(|e| anyhow::anyhow!("{e}"))?;
+        let maker: roll_secrets::Maker = serde_json::from_value(serde_json::Value::String(maker.to_string()))?;
+        let (owner, reference) = (owner.to_string(), reference.to_string());
+        tokio::task::spawn_blocking(move || {
+            let v = secrets.resolve_as(&roll_secrets::ResourceRef::code_owner(&owner), &reference, &maker).map_err(|e| anyhow::anyhow!("{e}"))?;
+            Ok(code_control::CredentialValue(v.value.expose().to_string()))
+        })
+        .await?
     }
 }
 

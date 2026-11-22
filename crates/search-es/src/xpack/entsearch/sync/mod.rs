@@ -448,13 +448,14 @@ pub fn adopt(st: &mut crate::meta::ClusterState, id: &str, now_ms: i64) -> crate
 pub async fn adopt_existing(cluster: &Cluster) -> crate::error::EsResult<()> {
     let st = cluster.state();
     let first = st.metadata.xpack.get(EXISTING.0, EXISTING.1).is_none() && st.metadata.xpack.iter(CONNECTORS).any(|(_, c)| config::runs(c));
-    let clear = st.metadata.xpack.iter(CONNECTORS).any(|(_, c)| config::holds_clear_secret(c));
+    let (sealer, unsealed) = (cluster.config.sealer.clone(), cluster.config.unsealed_secrets);
+    // A node that keeps secrets as given (local development, no key) has nothing to seal.
+    let clear = (sealer.is_some() || !unsealed) && st.metadata.xpack.iter(CONNECTORS).any(|(_, c)| config::holds_clear_secret(c));
     if !first && !clear {
         return Ok(());
     }
     drop(st);
     let me = crate::branch::cluster_id(cluster);
-    let sealer = cluster.config.sealer.clone();
     let now = crate::time::now_millis();
     cluster
         .update(move |st| {
@@ -462,7 +463,7 @@ pub async fn adopt_existing(cluster: &Cluster) -> crate::error::EsResult<()> {
                 let held: Vec<(String, Value)> = st.metadata.xpack.iter(CONNECTORS).filter(|(_, c)| config::holds_clear_secret(c)).map(|(k, v)| (k.clone(), v.clone())).collect();
                 for (id, c) in held {
                     let Value::Obj(mut m) = c else { continue };
-                    config::seal_in_place(&mut m, &me, sealer.as_deref());
+                    config::seal_in_place(&mut m, &me, sealer.as_deref(), unsealed);
                     store::put(st, CONNECTORS, &id, Value::Obj(m), now)?;
                 }
                 return Ok(());
@@ -470,7 +471,7 @@ pub async fn adopt_existing(cluster: &Cluster) -> crate::error::EsResult<()> {
             let existing: Vec<(String, Value)> = st.metadata.xpack.iter(CONNECTORS).filter(|(_, c)| config::runs(c)).map(|(k, v)| (k.clone(), v.clone())).collect();
             for (id, c) in existing {
                 let Value::Obj(mut m) = c else { continue };
-                config::seal_in_place(&mut m, &me, sealer.as_deref());
+                config::seal_in_place(&mut m, &me, sealer.as_deref(), unsealed);
                 store::put(st, CONNECTORS, &id, Value::Obj(m), now)?;
                 let mut rec = st.metadata.xpack.get(RECORDS, &id).and_then(Value::as_object).cloned().unwrap_or_default();
                 rec.insert("waiting".into(), true.into());
