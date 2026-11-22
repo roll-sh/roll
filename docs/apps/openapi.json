@@ -4267,7 +4267,7 @@
     },
     "/v1/apps/services/{id}/environments/{env}/variables/values": {
       "get": {
-        "description": "Answers `{[name]: value}`, never a sealed variable (nor a reference that reads one); 403 naming them when some come from roll secrets and roll secrets wouldn't show them to the caller (`SecretSource::may_reveal`).",
+        "description": "Answers `{[name]: value}`, never a sealed variable (nor a reference that reads one); 403 naming them when some come from roll secrets and roll secrets wouldn't show them to the caller (`SecretSource::may_reveal`: each key read as the caller, its base, imports and `${env.KEY}` references only as far as they may reveal), never a partial answer.",
         "operationId": "getServicesIdEnvironmentsEnvVariablesValues",
         "parameters": [
           {
@@ -4289,7 +4289,7 @@
         ],
         "responses": {
           "200": {
-            "description": "`{[name]: value}`, never a sealed variable (nor a reference that reads one); 403 naming them when some come from roll secrets and roll secrets wouldn't show them to the caller (`SecretSource::may_reveal`)"
+            "description": "`{[name]: value}`, never a sealed variable (nor a reference that reads one); 403 naming them when some come from roll secrets and roll secrets wouldn't show them to the caller (`SecretSource::may_reveal`: each key read as the caller, its base, imports and `${env.KEY}` references only as far as they may reveal), never a partial answer"
           },
           "4XX": {
             "$ref": "#/components/responses/Error"
