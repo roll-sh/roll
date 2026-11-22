@@ -3368,6 +3368,18 @@ async fn a_project_that_requires_signed_images_refuses_unsigned_ones() {
     assert_eq!(settled(&w, &id, "production", &dep).await["status"], "active");
     let (_, logs) = call(&w.api, "GET", &format!("{deploys}/{dep}/logs"), None).await;
     assert!(logs.to_string().contains("cosign signature verifies"), "{logs}");
+    // A sidecar runs with the app's values: its image too.
+    assert!(call(&w.api, "PATCH", &format!("/v1/apps/services/{id}"), Some(json!({"run": {"sidecars": [{"name": "cache", "image": "redis:7"}]}}))).await.0.is_success());
+    let (_, d) = call(&w.api, "POST", &deploys, Some(json!({}))).await;
+    let d = settled(&w, &id, "production", d["id"].as_str().unwrap()).await;
+    assert!(d["status"] == "failed" && d["error"].as_str().unwrap_or_default().contains("sidecar cache"), "{d}");
+    w.fake.signatures.lock().insert("redis:7".into(), 0);
+    let (_, d) = call(&w.api, "POST", &deploys, Some(json!({}))).await;
+    assert_eq!(settled(&w, &id, "production", d["id"].as_str().unwrap()).await["status"], "active");
+    // A sandbox of another image: checked as a deploy's, refused unsigned; the live one's runs.
+    let sandboxes = format!("/v1/apps/services/{id}/environments/production/sandboxes");
+    assert_eq!(call(&w.api, "POST", &sandboxes, Some(json!({"image": "python:3.13-slim"}))).await.0, StatusCode::FORBIDDEN);
+    assert_eq!(call(&w.api, "POST", &sandboxes, None).await.0, StatusCode::CREATED);
     assert_eq!(call(&w.api, "DELETE", &signing, None).await.0, StatusCode::NO_CONTENT);
     assert_eq!(call(&w.api, "GET", &signing, None).await.1, json!({"keys": [], "required": false}));
 }

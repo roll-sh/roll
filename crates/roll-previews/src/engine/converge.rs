@@ -352,6 +352,8 @@ impl Engine {
                 reset_any = true;
                 remask = true;
             } else if rules_moved {
+                // Earlier pushes' copies carry the old policy: they go.
+                self.drop_pinned_data(&r.id, |d| d.kind == res.kind && d.parent == res.parent).await?;
                 // A read policy (NoSQL): changed in place, nothing serving meanwhile.
                 self.store.set_resource(&r.id, res.kind, &res.parent, |x| x.state = ResourceState::Pending)?;
                 self.store.log(&r.id, &format!("{}:{}: the masking rules changed: masking again", res.kind.as_str(), res.parent))?;
