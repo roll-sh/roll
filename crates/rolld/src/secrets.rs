@@ -1465,7 +1465,9 @@ impl apps_control::integrations::SecretSource for ForApps {
                 vars.extend(bound.into_iter().map(|(name, hosts)| apps_control::integrations::SecretVar { binding: Some(hosts), linked: false, sensitive: false, plain: false, value: "rlph_(made at deploy)".into(), name }));
                 return Ok(apps_control::integrations::ClosedSecrets { vars, notice: None });
             }
-            let ask = roll_secrets::placeholders::Ask { minutes: None, maker: Some(&maker) };
+            // Two days: past one CA renewal (they're made again with each), so an environment
+            // asleep across one wakes with live ones; each swap still checks everything.
+            let ask = roll_secrets::placeholders::Ask { minutes: Some(48 * 60), maker: Some(&maker) };
             let v = match secrets.values_with_placeholders(&project, &env, "/", &closed_consumer(&project, &env), false, ask, &caller) {
                 Ok(v) => v,
                 // Its maker can't reveal here now (`maker_unreachable`: demoted, removed, a token
@@ -1512,15 +1514,18 @@ impl apps_control::integrations::SecretSource for ForApps {
     /// The project environment's interception CA (roll secrets' `intercept_ca`), kept while it
     /// stands and isn't near its end, and roll secrets' filter (rolld's `CaInterception`). None:
     /// no live placeholder of a key bound to hosts.
-    async fn intercept(&self, project: &str, env: &str) -> anyhow::Result<Option<apps_control::integrations::Intercept>> {
+    async fn intercept(&self, project: &str, env: &str, hosts: &[String]) -> anyhow::Result<Option<apps_control::integrations::Intercept>> {
         let (secrets, _) = self.0.get().cloned().ok_or_else(|| anyhow::anyhow!("roll secrets is starting"))?;
         let consumer = closed_consumer(project, env);
         let cache = self.1.clone();
+        let hosts: Vec<String> = hosts.iter().map(|h| h.trim().to_ascii_lowercase()).collect();
         tokio::task::spawn_blocking(move || {
             let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis() as i64).unwrap_or(0);
             let kept = cache.lock().unwrap_or_else(|p| p.into_inner()).get(&consumer).cloned();
             let ca = match kept {
-                Some(ca) if ca.expires_at - now > CA_RENEW_MS && secrets.intercept_ca_live(&ca.id).unwrap_or(false) => ca,
+                // Kept while it stands, isn't near its end, and names every host its placeholders
+                // are bound to now (one bound since gets a CA that names it).
+                Some(ca) if ca.expires_at - now > CA_RENEW_MS && hosts.iter().all(|h| ca.hosts.contains(h)) && secrets.intercept_ca_live(&ca.id).unwrap_or(false) => ca,
                 _ => match secrets.intercept_ca(&consumer, None) {
                     Ok(ca) => {
                         cache.lock().unwrap_or_else(|p| p.into_inner()).insert(consumer.clone(), ca.clone());
@@ -2252,12 +2257,12 @@ mod tests {
         let closed = apps.resolve_closed(&project, "production", "svc_web", Some("operator"), true).await.unwrap();
         let v = closed.vars.iter().find(|v| v.name == "STRIPE_KEY").map(|v| v.value.clone()).unwrap();
         assert!(v.starts_with("rlph_") && !v.contains("sk_test"), "closed: a placeholder: {v}");
-        let i = apps.intercept(&project, "production").await.unwrap().expect("a CA for its bound host");
+        let i = apps.intercept(&project, "production", &[]).await.unwrap().expect("a CA for its bound host");
         assert!(i.ca_pem.contains("BEGIN CERTIFICATE") && i.interception.covers("api.stripe.com") && !i.interception.covers("evil.example"));
         assert!(i.interception.live().unwrap());
         apps.end_intercept(&project, "production").await.unwrap();
         assert!(!i.interception.live().unwrap(), "ended with its consumer");
-        assert!(apps.intercept(&project, "production").await.unwrap().is_none(), "no placeholders left, no CA");
+        assert!(apps.intercept(&project, "production", &[]).await.unwrap().is_none(), "no placeholders left, no CA");
     }
 
     /// A search link takes whichever credential the cluster's flavor issues.
