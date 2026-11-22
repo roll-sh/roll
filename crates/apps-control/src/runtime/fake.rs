@@ -43,6 +43,9 @@ struct FakeInstance {
     addr: Option<SocketAddr>,
     /// Where its other ports answer ([`InstanceSpec::ports`]), while running.
     extra: HashMap<u16, SocketAddr>,
+    /// A UDP service's port (`InstanceSpec::udp`): an echo that answers each datagram with
+    /// `<instance> <datagram>`, while running.
+    udp: Option<SocketAddr>,
     /// An app that listens elsewhere: its port held, bound but not listening, so a connection is
     /// refused and no other test's server on this machine can be handed the port and answer.
     reserved: Option<tokio::net::TcpSocket>,
@@ -85,6 +88,16 @@ pub struct Fake {
     pub build_networks: Mutex<Vec<Option<String>>>,
     /// Each build's CPUs and memory (`build.size`), in order.
     pub build_sizes: Mutex<Vec<(f64, u32)>>,
+    /// Each build's context's files (paths under it), in order.
+    pub build_trees: Mutex<Vec<Vec<String>>>,
+    /// Each build's small files' contents by path (at most 4 KiB each), in order.
+    pub build_files: Mutex<Vec<std::collections::HashMap<String, String>>>,
+    /// Each instance made with its own command (a job, a run): the command, its CPUs and memory.
+    pub commands_made: Mutex<Vec<(String, f64, u32)>>,
+    /// Each command run in a container without a terminal (`exec_output`): the container, the command.
+    pub commands_run: Mutex<Vec<(String, String)>>,
+    /// Each closed network's interception: whether its egress proxies have one.
+    pub intercepted: Mutex<std::collections::HashMap<String, bool>>,
     /// The manifests of the image archives it loaded.
     pub loaded: Mutex<Vec<String>>,
     /// Images removed ([`Builder::remove_image`]).
@@ -294,6 +307,17 @@ async fn serve(spec: InstanceSpec, listener: tokio::net::TcpListener, log: LogSi
             if req.uri().path() == "/page" {
                 return ([(axum::http::header::CONTENT_TYPE, "text/html")], format!("<html><head><title>{dep}</title></head><body><h1>{dep}</h1></body></html>")).into_response();
             }
+            // gRPC's health service (grpc.health.v1): SERVING, or NOT_SERVING while it's unhealthy.
+            if req.uri().path() == "/grpc.health.v1.Health/Check" {
+                let status = if unhealthy || sick.lock().contains(&name) { 2u8 } else { 1 };
+                let mut t = axum::http::HeaderMap::new();
+                t.insert("grpc-status", axum::http::HeaderValue::from_static("0"));
+                let frame = bytes::Bytes::from(vec![0, 0, 0, 0, 2, 0x08, status]);
+                let frames = futures::stream::iter([Ok::<_, std::convert::Infallible>(hyper::body::Frame::data(frame)), Ok(hyper::body::Frame::trailers(t))]);
+                let mut r = axum::response::Response::new(axum::body::Body::new(http_body_util::StreamBody::new(frames)));
+                r.headers_mut().insert(axum::http::header::CONTENT_TYPE, axum::http::HeaderValue::from_static("application/grpc"));
+                return r;
+            }
             // As a gRPC server answers: data, then its status in a trailer.
             if req.uri().path() == "/trailers" {
                 let mut t = axum::http::HeaderMap::new();
@@ -358,6 +382,14 @@ async fn serve(spec: InstanceSpec, listener: tokio::net::TcpListener, log: LogSi
 
 #[async_trait]
 impl Runtime for Fake {
+    fn set_interception(&self, network: &str, i: Option<std::sync::Arc<dyn roll_intercept::Interception>>) {
+        self.intercepted.lock().insert(network.to_string(), i.is_some());
+    }
+
+    fn intercepted(&self, network: &str) -> Option<super::egress::Intercepted> {
+        self.intercepted.lock().get(network).filter(|on| **on).map(|_| super::egress::Intercepted { requests: 3, swapped: 2, refused: vec!["api.stripe.com: a placeholder in the query".into()] })
+    }
+
     fn name(&self) -> &'static str {
         "fake"
     }
@@ -387,9 +419,12 @@ impl Runtime for Fake {
 
     async fn create(&self, spec: &InstanceSpec) -> anyhow::Result<()> {
         self.counts.creates.fetch_add(1, Ordering::SeqCst);
+        if let Some(c) = &spec.command {
+            self.commands_made.lock().push((c.clone(), spec.cpu, spec.memory_mb));
+        }
         let mut m = self.instances.lock();
         anyhow::ensure!(!m.contains_key(&spec.name), "{} exists", spec.name);
-        m.insert(spec.name.clone(), FakeInstance { spec: spec.clone(), state: FakeState::Created, server: None, addr: None, extra: HashMap::new(), reserved: None, exited: watch::channel(None).0, killed: Default::default() });
+        m.insert(spec.name.clone(), FakeInstance { spec: spec.clone(), state: FakeState::Created, server: None, addr: None, extra: HashMap::new(), udp: None, reserved: None, exited: watch::channel(None).0, killed: Default::default() });
         Ok(())
     }
 
@@ -450,12 +485,38 @@ impl Runtime for Fake {
                     extra.insert(*p, l2.local_addr()?);
                     tokio::spawn(serve(InstanceSpec { port: Some(*p), ..spec.clone() }, l2, log.clone(), self.sick.clone(), killed.clone()));
                 }
+                let udp = match spec.udp {
+                    true => {
+                        let sock = tokio::net::UdpSocket::bind("127.0.0.1:0").await?;
+                        let at = sock.local_addr()?;
+                        let (me, k) = (spec.name.clone(), killed.clone());
+                        tokio::spawn(async move {
+                            let mut buf = vec![0u8; 2048];
+                            loop {
+                                tokio::select! {
+                                    r = sock.recv_from(&mut buf) => match r {
+                                        Ok((n, from)) => {
+                                            let mut out = format!("{me} ").into_bytes();
+                                            out.extend_from_slice(&buf[..n]);
+                                            let _ = sock.send_to(&out, from).await;
+                                        }
+                                        Err(_) => return,
+                                    },
+                                    _ = k.cancelled() => return,
+                                }
+                            }
+                        });
+                        Some(at)
+                    }
+                    false => None,
+                };
                 let server = tokio::spawn(serve(spec.clone(), l, log, self.sick.clone(), killed.clone()));
                 let mut m = self.instances.lock();
                 let i = m.get_mut(name).expect("exists");
                 i.server = Some(server);
                 i.killed = killed;
                 i.extra = extra;
+                i.udp = udp;
                 Some(addr)
             }
             None => None,
@@ -472,6 +533,27 @@ impl Runtime for Fake {
         let m = self.instances.lock();
         let i = m.get(name)?;
         (i.state == FakeState::Running).then(|| i.extra.get(&port).copied()).flatten()
+    }
+
+    /// A command as a shell would take the two the tests use: `echo <words>` (its stdout) and
+    /// `exit <n>`; anything else answers its own text.
+    async fn exec_output(&self, name: &str, command: &str, _timeout: std::time::Duration, max: usize) -> anyhow::Result<super::ExecOutput> {
+        anyhow::ensure!(self.instances.lock().get(name).is_some_and(|i| i.state == FakeState::Running), "{name} isn't running");
+        self.commands_run.lock().push((name.to_string(), command.to_string()));
+        let (code, mut stdout) = match command.split_once(' ') {
+            Some(("echo", words)) => (0, format!("{words}\n").into_bytes()),
+            Some(("exit", n)) => (n.trim().parse().unwrap_or(1), Vec::new()),
+            _ => (0, command.as_bytes().to_vec()),
+        };
+        let truncated = stdout.len() > max;
+        stdout.truncate(max);
+        Ok(super::ExecOutput { code: Some(code), stdout, stderr: Vec::new(), truncated })
+    }
+
+    async fn udp_address(&self, name: &str, _port: u16) -> Option<SocketAddr> {
+        let m = self.instances.lock();
+        let i = m.get(name)?;
+        (i.state == FakeState::Running).then_some(i.udp).flatten()
     }
 
     async fn suspend(&self, name: &str) -> anyhow::Result<()> {
@@ -586,7 +668,13 @@ impl Runtime for Fake {
 
     async fn copy_from(&self, name: &str, path: &str) -> anyhow::Result<super::VolumeStream> {
         anyhow::ensure!(self.state(name) == Some(FakeState::Running), "{name} isn't running");
-        let got = self.copied.lock().get(&(name.to_string(), path.to_string())).cloned();
+        let copied = self.copied.lock();
+        // A path copied in itself, or a file in a tar copied into its directory (as `docker cp`
+        // reads it back out).
+        let (dir, file) = path.rsplit_once('/').map(|(d, f)| (if d.is_empty() { "/" } else { d }, f)).unwrap_or(("", path));
+        let within = copied.get(&(name.to_string(), dir.to_string())).filter(|t| tar::Archive::new(&t[..]).entries().is_ok_and(|mut es| es.any(|e| e.is_ok_and(|e| e.path().is_ok_and(|p| p.to_str() == Some(file))))));
+        let got = copied.get(&(name.to_string(), path.to_string())).or(within).cloned();
+        drop(copied);
         let bytes = got.ok_or_else(|| anyhow::anyhow!("no such file or directory: {path}"))?;
         Ok(Box::new(std::io::Cursor::new(bytes)))
     }
@@ -773,6 +861,23 @@ impl Builder for Fake {
         self.build_vars.lock().push(job.env.iter().map(|(k, _)| k.clone()).collect());
         self.build_networks.lock().push(job.egress.as_ref().map(|e| e.network.clone()));
         self.build_sizes.lock().push((job.cpu, job.memory_mb));
+        let (mut seen, mut contents) = (Vec::new(), std::collections::HashMap::new());
+        let mut stack = vec![job.context.clone()];
+        while let Some(d) = stack.pop() {
+            for e in std::fs::read_dir(&d).into_iter().flatten().flatten().take(1000) {
+                let p = e.path();
+                if p.is_dir() {
+                    stack.push(p);
+                } else if let Ok(rel) = p.strip_prefix(&job.context) {
+                    seen.push(rel.to_string_lossy().into_owned());
+                    if let Ok(text) = std::fs::read_to_string(&p).map(|t| t.chars().take(4096).collect::<String>()) {
+                        contents.insert(rel.to_string_lossy().into_owned(), text);
+                    }
+                }
+            }
+        }
+        self.build_trees.lock().push(seen);
+        self.build_files.lock().push(contents);
         log.line("#2 DONE");
         Ok(job.tag.clone())
     }

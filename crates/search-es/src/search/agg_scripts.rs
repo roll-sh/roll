@@ -69,14 +69,24 @@ pub struct Host {
     pub table: Option<Arc<FieldTable>>,
     pub shard: i32,
     pub index: String,
+    /// A browser key's aggregations: no painless compiles ([`crate::xpack::security::browser`]).
+    pub deny: bool,
 }
 
 impl Host {
     pub fn new(cluster: &Cluster, table: Option<Arc<FieldTable>>, shard: i32, index: String) -> Host {
-        Host { scripts: cluster.scripts.clone(), state: cluster.state(), table, shard, index }
+        Host { scripts: cluster.scripts.clone(), state: cluster.state(), table, shard, index, deny: false }
+    }
+
+    pub fn denying(mut self, deny: bool) -> Host {
+        self.deny = deny;
+        self
     }
 
     fn compile(&self, s: &search_aggs::Script, ctx: Context) -> search_aggs::Result<crate::scripting::Bound> {
+        if self.deny {
+            return Err(agg_err(crate::xpack::security::browser::refused("painless")));
+        }
         self.scripts.compile(&self.state, &to_script(s), ctx).map_err(agg_err)
     }
 }
@@ -370,6 +380,9 @@ impl ScriptedMetricReduce for Reduce {
 
 impl ScriptHost for Host {
     fn values(&self, script: &search_aggs::Script) -> search_aggs::Result<Arc<dyn ValuesScript>> {
+        if self.deny {
+            return Err(agg_err(crate::xpack::security::browser::refused("painless")));
+        }
         // A runtime field aggregated by name.
         let params = super::aggs::from_json(&script.params);
         if let Some(f) = super::runtime::from_agg_params(&params) {

@@ -283,7 +283,7 @@ fn unfrozen(c: &Conn<'_>, env: &EnvRow, path: &str, pass: Pass<'_>) -> Result<()
 /// [`DIGEST_COLUMNS`] for a digest. `only`: just that key's entry (each folder read by its key,
 /// so one key of a large folder is a few indexed rows): the same entry the whole view has for it.
 #[allow(clippy::too_many_arguments)]
-fn view_in(c: &Conn<'_>, env: &EnvRow, path: &str, principal: Option<&str>, through: Through<'_>, pass: Pass<'_>, untrusted: bool, cols: &str, only: Option<&str>, depth: usize, seen: &mut HashSet<(String, String)>) -> Result<Vec<Entry>> {
+fn view_in(c: &Conn<'_>, env: &EnvRow, path: &str, principal: Option<&str>, through: Through<'_>, pass: Pass<'_>, untrusted: bool, cols: &str, only: Option<&str>, depth: usize, seen: &mut HashSet<(String, String)>, dead: &crate::exports::Dead) -> Result<Vec<Entry>> {
     if depth > DEPTH || !seen.insert((env.id.clone(), path.to_string())) {
         return Ok(vec![]);
     }
@@ -314,7 +314,7 @@ fn view_in(c: &Conn<'_>, env: &EnvRow, path: &str, principal: Option<&str>, thro
                 if !through(&from.slug, &imp.path) {
                     continue;
                 }
-                view_in(c, &from, &imp.path, principal, through, pass, untrusted, cols, only, depth + 1, seen)?
+                view_in(c, &from, &imp.path, principal, through, pass, untrusted, cols, only, depth + 1, seen, dead)?
             }
             // Another project's folder, while it's shared with this one: its own stored values
             // (no personal ones, nothing it imports, no reference or live link, which would
@@ -322,7 +322,7 @@ fn view_in(c: &Conn<'_>, env: &EnvRow, path: &str, principal: Option<&str>, thro
             Some(p) => {
                 let Ok(from) = envs::by_slug(c, p, &imp.environment) else { continue };
                 // An untrusted consumer never reads a protected environment, shared or not.
-                if (untrusted && from.protected) || !crate::exports::exported(c, &from.id, &imp.path, &env.project_id)? {
+                if (untrusted && from.protected) || !crate::exports::exported(c, &from.id, &imp.path, &env.project_id, dead)? {
                     continue;
                 }
                 unfrozen(c, &from, &imp.path, pass)?;
@@ -347,7 +347,7 @@ fn view_in(c: &Conn<'_>, env: &EnvRow, path: &str, principal: Option<&str>, thro
     }
     if let Some(base) = &env.base_id {
         let base = envs::by_id(c, base)?;
-        let inherited = if through(&base.slug, path) { view_in(c, &base, path, principal, through, pass, untrusted, cols, only, depth + 1, seen)? } else { vec![] };
+        let inherited = if through(&base.slug, path) { view_in(c, &base, path, principal, through, pass, untrusted, cols, only, depth + 1, seen, dead)? } else { vec![] };
         for mut e in inherited {
             if have.insert(e.row.key.clone()) {
                 if e.source == Source::Own {
@@ -482,7 +482,7 @@ impl Digests {
 /// change number (every write of a stored value takes one: `write::apply`), its environments, their
 /// imports, its required keys, and for each folder another project shares into it, that project's
 /// change number and whether it still shares it.
-fn digest_state(c: &Conn<'_>, project: &str) -> Result<String> {
+fn digest_state(c: &Conn<'_>, project: &str, dead: &crate::exports::Dead) -> Result<String> {
     use sha2::{Digest, Sha256};
     let seq = |p: &str| c.query_row("SELECT seq FROM projects WHERE project_id = ?", [p], |r| r.get::<_, i64>(0)).optional();
     let mut h = Sha256::new();
@@ -503,7 +503,7 @@ fn digest_state(c: &Conn<'_>, project: &str) -> Result<String> {
     )?;
     for (of, from, at, row) in imports {
         if let Some(other) = of.as_deref().filter(|p| *p != project) {
-            h.update(format!("{:?}\0{}\n", seq(other)?, crate::exports::exported(c, &from, &at, project)?));
+            h.update(format!("{:?}\0{}\n", seq(other)?, crate::exports::exported(c, &from, &at, project, dead)?));
         }
         h.update(format!("{row}\n"));
     }
@@ -569,7 +569,7 @@ impl Secrets {
         {
             return fp.clone();
         }
-        let fp = match self.links.get(&l.kind).and_then(|p| p.read(&l.r#ref, &l.field, l)) {
+        let fp = match self.provider_for(&l.kind, &l.r#ref).and_then(|p| p.read(&l.r#ref, &l.field, l)) {
             Ok(v) => dek.fingerprint(v.expose()),
             // A product that doesn't answer for a moment (an owner handing over, a timeout) leaves
             // the digest as it was: flipping it would redeploy apps and push syncs twice. Its
@@ -658,9 +658,10 @@ impl Secrets {
         let through = |e: &str, p: &str| caller.allows(action, &Scope::at(project, e, p));
         let passes = |p: &str, e: &str, at: &str| caller.passes_freeze(p, e, at);
         let pass: Pass<'_> = (action == Action::Reveal).then_some(&passes);
+        let dead = self.dead_exports("x.to_project = ?", project)?;
         self.db.read(|c| {
             let env = envs::by_slug(c, project, slug)?;
-            view_in(c, &env, path, principal, &through, pass, caller.grants.untrusted(), ROW_COLUMNS, only, 0, &mut HashSet::new())
+            view_in(c, &env, path, principal, &through, pass, caller.grants.untrusted(), ROW_COLUMNS, only, 0, &mut HashSet::new(), &dead)
         })
     }
 
@@ -845,8 +846,13 @@ impl Secrets {
         let dek = self.project(project)?;
         let mut r = Resolver::new(self, project, slug, &dek, &narrowed, true, consumer)?;
         r.no_dynamic = true;
+        r.withhold_bound = resource.wants_placeholders();
         let (value, problem) = r.entry(&e);
+        let through = r.through_bound(&e).map(str::to_string);
         r.finish(slug)?;
+        if let Some(b) = through {
+            return Err(Refusal::Unusable(format!("{key} references {b}, which is bound to hosts: bind {key} to them too, or reference it differently")));
+        }
         if let Some(p) = problem {
             return Err(Refusal::Unusable(format!("{key} doesn't resolve: {p}")));
         }
@@ -865,14 +871,37 @@ impl Secrets {
     /// issuing a fresh credential each read.
     #[allow(clippy::too_many_arguments)]
     pub fn values_for(&self, project: &str, slug: &str, path: &str, resolve: bool, consumer: Option<&str>, dynamic: bool, caller: &Caller) -> Result<Values> {
-        self.values_inner(project, slug, path, resolve, consumer, dynamic, None, caller)
+        self.values_inner(project, slug, path, resolve, consumer, dynamic, Bound::Values, caller)
+    }
+
+    /// [`Secrets::values_for`] (resolved) for `consumer`, with every key bound to hosts left out
+    /// before anything of it is decrypted or audited, and so is any key whose value references one
+    /// (a problem naming both): a consumer whose placeholders can't be issued (its maker can't
+    /// reveal there any more) still never gets a bound key's value.
+    pub fn values_without_bound(&self, project: &str, slug: &str, path: &str, consumer: &str, dynamic: bool, caller: &Caller) -> Result<Values> {
+        self.values_inner(project, slug, path, true, Some(consumer), dynamic, Bound::Withheld, caller)
+    }
+
+    /// A folder as `consumer`'s runtime reads it (shared values only, never the caller's personal
+    /// ones), with `caller`'s rights: what another product may show `caller` of the values it gave
+    /// `consumer` (roll apps' reveal, shell and job output). Its base, imports and references read
+    /// only as far as `caller` may reveal; what stays out is missing or a problem. `runtime`: a
+    /// sensitive value too (a shell sees the container's environment). No dynamic credential is
+    /// issued. Audited as an export by `<consumer> (shown to <caller>)`.
+    pub fn values_seen_by(&self, project: &str, slug: &str, path: &str, consumer: &str, runtime: bool, caller: &Caller) -> Result<Values> {
+        // Named for both, with a `:` so it reads no person's own overrides (`Caller::personal`).
+        let mut seen = caller.clone().acting_as(format!("{consumer} (shown to {})", caller.made_by()));
+        seen.runtime = runtime;
+        self.values_inner(project, slug, path, true, None, false, Bound::Values, &seen)
     }
 
     /// [`Secrets::values_for`] (resolved) for `consumer`, with every key bound to hosts answered
     /// as a placeholder (docs/secrets.md, "Using a key without seeing it"). Not a sensitive key's
     /// for a reader that couldn't read it, unless its binding opts in; not a key whose value holds
-    /// a reference (left out, as a problem). An in-process consumer (`sandbox:…`, `preview:…`)
-    /// names who made it in `ask.maker`: its placeholders swap only while they may reveal here.
+    /// a reference (left out, as a problem). A key whose value references a bound key is left out
+    /// too, as a problem naming both: a reference never carries a bound key's value. An in-process
+    /// consumer (`sandbox:…`, `preview:…`) names who made it in `ask.maker`: its placeholders swap
+    /// only while they may reveal here.
     #[allow(clippy::too_many_arguments)]
     pub fn values_with_placeholders(&self, project: &str, slug: &str, path: &str, consumer: &str, dynamic: bool, ask: crate::placeholders::Ask<'_>, caller: &Caller) -> Result<Values> {
         if caller.principal.starts_with("identity:") {
@@ -883,15 +912,22 @@ impl Secrets {
             None if in_process => return Err(Error::BadRequest(format!("{} is an in-process consumer: name who made it (a sandbox's secrets_by, a preview rule's writer) to take placeholders", caller.principal))),
             Some(m) => {
                 let at = names::path(path)?;
-                self.maker_may(m, project, slug, &at, caller.grants.untrusted()).map_err(|r| Error::Forbidden(r.to_string()))?;
+                self.maker_may(m, project, slug, &at, caller.grants.untrusted()).map_err(|r| match r {
+                    crate::proxy::Refusal::MakerUnreachable(m) => Error::MakerUnreachable(m),
+                    r => Error::Forbidden(r.to_string()),
+                })?;
             }
             None => {}
         }
-        self.values_inner(project, slug, path, true, Some(consumer), dynamic, Some(ask), caller)
+        self.values_inner(project, slug, path, true, Some(consumer), dynamic, Bound::Placeholders(ask), caller)
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn values_inner(&self, project: &str, slug: &str, path: &str, resolve: bool, consumer: Option<&str>, dynamic: bool, ph: Option<crate::placeholders::Ask<'_>>, caller: &Caller) -> Result<Values> {
+    fn values_inner(&self, project: &str, slug: &str, path: &str, resolve: bool, consumer: Option<&str>, dynamic: bool, how: Bound<'_>, caller: &Caller) -> Result<Values> {
+        let ph = match how {
+            Bound::Placeholders(ask) => Some(ask),
+            _ => None,
+        };
         let path = names::path(path)?;
         caller.need(Action::Reveal, &Scope::at(project, slug, &path))?;
         self.read_quota(caller)?;
@@ -908,6 +944,8 @@ impl Secrets {
         // Left out and named in `dynamic` (not a problem) for code nobody vetted too.
         let dynamic = dynamic && !caller.grants.untrusted();
         r.no_dynamic = r.no_dynamic || !dynamic;
+        // A bound key's value never leaves through a reference to it either.
+        r.withhold_bound = !matches!(how, Bound::Values);
         let mut values = BTreeMap::new();
         let mut problems = vec![];
         let mut withheld = vec![];
@@ -915,15 +953,20 @@ impl Secrets {
         // Set, but not in this answer (withheld, or dynamic under `dynamic=false`): not missing.
         let mut left_out = vec![];
         let mut followed = vec![];
-        let bound = match &ph {
-            Some(_) => self.bindings(project)?,
-            None => HashMap::new(),
+        let bound = match how {
+            Bound::Values => HashMap::new(),
+            _ => self.bindings(project)?,
         };
         let mut to_issue = vec![];
         for e in &entries {
             // First: nothing of the parent's is read, issued or decrypted for it.
             if let Some(l) = r.followed(e) {
                 followed.push(Followed { name: e.row.key.clone(), kind: l.kind, parent: l.r#ref, field: l.field });
+                left_out.push(e.row.key.clone());
+                continue;
+            }
+            // A sharing project's key has its binding there.
+            if matches!(how, Bound::Withheld) && (bound.contains_key(&e.row.id) || (e.row.project_id != project && !matches!(self.binding(&e.row.id), Ok(None)))) {
                 left_out.push(e.row.key.clone());
                 continue;
             }
@@ -950,6 +993,11 @@ impl Secrets {
                 continue;
             }
             let (v, problem) = r.entry(e);
+            if let Some(b) = r.through_bound(e) {
+                problems.push(Problem { key: e.row.key.clone(), problem: format!("references {b}, which is bound to hosts: bind {} to them too, or reference it differently", e.row.key) });
+                left_out.push(e.row.key.clone());
+                continue;
+            }
             if r.tainted(e) {
                 sensitive.push(e.row.key.clone());
             }
@@ -1090,7 +1138,8 @@ impl Secrets {
         let dek = self.project(project)?;
         // Read first: a digest computed after it reflects at least this state, so one kept with it
         // is never newer than what it vouches for.
-        let state = self.db.read(|c| digest_state(c, project))?;
+        let dead = self.dead_exports("x.to_project = ?", project)?;
+        let state = self.db.read(|c| digest_state(c, project, &dead))?;
         let key = (project.to_string(), slug.to_string(), path.clone(), caller.principal.clone(), caller.grants.untrusted());
         if let Some(d) = self.digests.get(&key, &state)
             && self.still(project, &dek, &d, caller)?
@@ -1126,6 +1175,7 @@ impl Secrets {
         use std::rc::Rc;
         let principal = caller.personal().then_some(caller.principal.as_str());
         let untrusted = caller.grants.untrusted();
+        let dead = self.dead_exports("x.to_project = ?", project)?;
         // Every permission the digest depends on, with its answer: a kept digest is reused only
         // for a caller who gets the same answers (`still`).
         let asked: RefCell<BTreeMap<(Action, String, String), bool>> = RefCell::default();
@@ -1145,7 +1195,7 @@ impl Secrets {
         let passes = |p: &str, e: &str, at: &str| caller.passes_freeze(p, e, at);
         let (branches, entries) = self.db.read(|c| {
             let env = envs::by_slug(c, project, slug)?;
-            let entries = view_in(c, &env, path, principal, &reveal, Some(&passes), untrusted, DIGEST_COLUMNS, None, 0, &mut HashSet::new())?;
+            let entries = view_in(c, &env, path, principal, &reveal, Some(&passes), untrusted, DIGEST_COLUMNS, None, 0, &mut HashSet::new(), &dead)?;
             Ok::<_, Error>((env.branches, entries))
         })?;
         let mut h = Sha256::new();
@@ -1210,7 +1260,7 @@ impl Secrets {
                 let view = match views.get(&(env.clone(), at.clone())) {
                     Some(v) => v.clone(),
                     None => {
-                        let v = match self.db.read(|c| view_in(c, &envs::by_slug(c, project, &env)?, &at, principal, &read, None, untrusted, DIGEST_COLUMNS, None, 0, &mut HashSet::new())) {
+                        let v = match self.db.read(|c| view_in(c, &envs::by_slug(c, project, &env)?, &at, principal, &read, None, untrusted, DIGEST_COLUMNS, None, 0, &mut HashSet::new(), &dead)) {
                             Ok(v) => v,
                             // A reference to an environment that isn't there reaches nothing.
                             Err(Error::NotFound(_)) => vec![],
@@ -1360,6 +1410,7 @@ impl Secrets {
         caller.need(Action::Read, &Scope::project(project))?;
         let dek = self.project(project)?;
         let principal = caller.personal().then_some(caller.principal.as_str());
+        let dead = self.dead_exports("x.to_project = ?", project)?;
         let (envs, views, folders, previews) = self.db.read(|c| {
             let all = envs::all(c, project)?;
             let previews = all.iter().filter(|e| e.kind == Kind::Ephemeral).count() as i64;
@@ -1368,7 +1419,7 @@ impl Secrets {
             let mut folders = BTreeSet::new();
             for e in &envs {
                 let through = |x: &str, p: &str| caller.allows(Action::Read, &Scope::at(project, x, p));
-                views.push(view_in(c, e, &path, principal, &through, None, caller.grants.untrusted(), ROW_COLUMNS, None, 0, &mut HashSet::new())?);
+                views.push(view_in(c, e, &path, principal, &through, None, caller.grants.untrusted(), ROW_COLUMNS, None, 0, &mut HashSet::new(), &dead)?);
                 for f in c.query("SELECT path FROM folders WHERE env_id = ?", [&e.id], |r| r.get::<_, String>(0))? {
                     if f != path && names::parents(&f).last() == Some(&path) {
                         folders.insert(f);
@@ -1558,6 +1609,22 @@ pub(crate) struct Resolver<'a> {
     /// The read environment's branched resources: a link to one is never followed, however it's
     /// reached (asked for, by reference, through an import or the base).
     branches: Vec<Branch>,
+    /// A read whose bound keys never leave as values (placeholders, or left out): a reference to
+    /// one doesn't resolve, and every entry it was reached through is [`Resolver::through_bound`].
+    pub withhold_bound: bool,
+    /// Entries whose value references a key bound to hosts, by id: that key's name.
+    through_bound: HashMap<String, String>,
+}
+
+/// How a read answers keys bound to hosts.
+#[derive(Clone, Copy)]
+enum Bound<'a> {
+    /// As values (an export, a trusted runtime's read).
+    Values,
+    /// As placeholders.
+    Placeholders(crate::placeholders::Ask<'a>),
+    /// Left out.
+    Withheld,
 }
 
 impl<'a> Resolver<'a> {
@@ -1568,7 +1635,7 @@ impl<'a> Resolver<'a> {
         // resolve, one key's reveal).
         let no_dynamic = caller.grants.untrusted();
         let branches = s.db.read(|c| envs::by_slug(c, project, slug))?.branches;
-        Ok(Resolver { s, project, dek, caller, resolve, consumer: consumer.into(), envs: HashMap::new(), views: HashMap::new(), done: HashMap::new(), stack: vec![], tainted: Default::default(), members: None, issued: BTreeMap::new(), no_dynamic, deks: HashMap::new(), branches })
+        Ok(Resolver { s, project, dek, caller, resolve, consumer: consumer.into(), envs: HashMap::new(), views: HashMap::new(), done: HashMap::new(), stack: vec![], tainted: Default::default(), members: None, issued: BTreeMap::new(), no_dynamic, deks: HashMap::new(), branches, withhold_bound: false, through_bound: HashMap::new() })
     }
 
     /// `e`'s link, when it names a resource the read environment branched.
@@ -1598,6 +1665,12 @@ impl<'a> Resolver<'a> {
         self.tainted.contains(&format!("{}:{}:{}", e.row.env_id, e.row.path, e.row.key))
     }
 
+    /// The key bound to hosts that `e`'s value references, itself or through others (after
+    /// [`Resolver::entry`], with `withhold_bound`).
+    pub(crate) fn through_bound(&self, e: &Entry) -> Option<&str> {
+        self.through_bound.get(&format!("{}:{}:{}", e.row.env_id, e.row.path, e.row.key)).map(String::as_str)
+    }
+
     /// An entry's value and the first problem resolving it (the value then keeps the
     /// unresolved reference's text).
     pub fn entry(&mut self, e: &Entry) -> (Value, Option<String>) {
@@ -1612,6 +1685,24 @@ impl<'a> Resolver<'a> {
         if names::sensitive(&e.row.tags) || self.tainted.contains(&id) {
             let chain: Vec<String> = self.stack.iter().cloned().chain([id.clone()]).collect();
             self.tainted.extend(chain);
+        }
+        // Reached through a reference in a read that never gives out a bound key's value: never
+        // decrypted, and whatever references it (now or from the cache) says so. A binding that
+        // can't be read counts as one.
+        if self.withhold_bound {
+            let bound = match self.through_bound.get(&id) {
+                Some(b) => Some(b.clone()),
+                None if !self.stack.is_empty() && !matches!(self.s.binding(&e.row.id), Ok(None)) => Some(e.row.key.clone()),
+                None => None,
+            };
+            if let Some(b) = bound {
+                for s in &self.stack {
+                    self.through_bound.entry(s.clone()).or_insert_with(|| b.clone());
+                }
+                if !self.stack.is_empty() {
+                    return (Value::default(), Some(format!("{b} is bound to hosts: a reference never carries its value")));
+                }
+            }
         }
         if let Some(d) = self.done.get(&id) {
             return d.clone();
@@ -1655,7 +1746,7 @@ impl<'a> Resolver<'a> {
         }
         match &e.row.link {
             Some(l) if l.mode == Mode::Live => {
-                let p = self.s.links.get(&l.kind).map_err(|e| e.to_string())?;
+                let p = self.s.provider_for(&l.kind, &l.r#ref).map_err(|e| e.to_string())?;
                 p.read(&l.r#ref, &l.field, l).map_err(|err| format!("{} {}: {err}", l.kind, l.r#ref))
             }
             Some(l) if l.mode == Mode::Dynamic && self.no_dynamic => Err(format!("{} {} is dynamic: short-lived credentials aren't issued to a sync or a read with dynamic=false", l.kind, l.r#ref)),
@@ -1667,8 +1758,7 @@ impl<'a> Resolver<'a> {
                     let lease = names::new_id("lse", 16);
                     let r = self
                         .s
-                        .links
-                        .get(&l.kind)
+                        .provider_for(&l.kind, &l.r#ref)
                         .and_then(|p| p.issue_lease(&l.r#ref, &cred, l, &label, l.ttl_minutes(), &lease))
                         .map(|i| (i.parts, i.handle, l.clone(), (e.row.key.clone(), e.row.path.clone()), lease))
                         .map_err(|err| format!("{} {}: {err}", l.kind, l.r#ref));

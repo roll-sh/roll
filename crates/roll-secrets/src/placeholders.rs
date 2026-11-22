@@ -12,7 +12,7 @@
 use crate::access::{Action, Caller, Scope};
 use crate::consumers::ResourceRef;
 use crate::links::Mode;
-use crate::proxy::{PREFIX, Place, Position, Refusal};
+use crate::proxy::{PREFIX, Place, Position, Refusal, Swap};
 use crate::{Error, Result, Secrets, Value, envs, json, names};
 use code_sql::{OptionalExtension, params};
 use serde::{Deserialize, Serialize};
@@ -79,7 +79,8 @@ pub struct Hosts {
 }
 
 impl Hosts {
-    /// The binding as stored: lower-cased hosts, each checked, and at most one placement.
+    /// The binding as stored: lower-cased hosts, each checked, and at most one placement, which
+    /// `untrusted` needs.
     pub fn checked(mut self) -> Result<Hosts> {
         let bad = Error::BadRequest;
         if self.hosts.is_empty() || self.hosts.len() > 16 {
@@ -102,7 +103,16 @@ impl Hosts {
         {
             return Err(bad("query: a parameter name, 1 to 64 of A-Z, a-z, 0-9, _ - . ~".into()));
         }
+        if self.untrusted && !self.placed() {
+            return Err(Error::Invalid("placement_required", "untrusted: true needs a placement: a header (\"Authorization: Bearer {}\") or a query parameter, so the code holding the placeholder can't pick a header the host echoes".into()));
+        }
         Ok(self)
+    }
+
+    /// Whether it names the header or query parameter that carries the key. One without (bound
+    /// before a placement was required) lets a trusted reader's placeholder ride in any header.
+    pub fn placed(&self) -> bool {
+        self.header.is_some() || self.query.is_some()
     }
 
     /// Whether `host` (as the proxy connects to it, port and final dot allowed) is one of these.
@@ -305,10 +315,20 @@ fn shown(host: &str) -> String {
     host.chars().filter(|c| !c.is_control()).take(255).collect()
 }
 
-/// Swaps counted since each (placeholder, host, refused) pair's last audit row, so a busy one
+/// Swaps counted since each (placeholder, host, what) pair's last audit row, so a busy one
 /// writes a row a minute.
 #[derive(Default)]
-pub(crate) struct Uses(std::sync::Mutex<HashMap<(String, String, bool), Use>>);
+pub(crate) struct Uses(std::sync::Mutex<HashMap<(String, String, Noted), Use>>);
+
+/// What a counted use was: a swap, or a refusal that's an alert.
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+enum Noted {
+    Swap,
+    /// Sent to a host its key isn't bound to.
+    WrongHost,
+    /// Swapped by another consumer's proxy than the one it was issued to.
+    WrongConsumer,
+}
 
 #[derive(Clone)]
 struct Use {
@@ -319,7 +339,8 @@ struct Use {
     consumer: String,
     pending: u64,
     logged_at: i64,
-    /// A refusal's hosts since its last row (at most [`HOST_SAMPLE`]), and whether there were more.
+    /// A refusal's hosts (or, for a wrong consumer, the consumers) since its last row (at most
+    /// [`HOST_SAMPLE`]), and whether there were more.
     hosts: Vec<String>,
     others: bool,
 }
@@ -355,6 +376,23 @@ impl Secrets {
         Ok(b.and_then(|b| serde_json::from_str(&b).ok()))
     }
 
+    /// Whether whoever bound `secret_id` to hosts may still manage its folder, asked now as
+    /// everything a person made is: a demoted or removed member's binding swaps nothing more. It
+    /// still counts as a binding everywhere else (a read gets a placeholder, never the value), so
+    /// it fails closed until an admin binds the key again or clears it.
+    fn binder_reaches(&self, secret_id: &str) -> Result<bool> {
+        let row: Option<(String, String, String, String)> = self.db.read(|c| {
+            c.query_row(
+                "SELECT h.set_by, h.project_id, e.slug, s.path FROM key_hosts h JOIN secrets s ON s.id = h.secret_id JOIN environments e ON e.id = s.env_id WHERE h.secret_id = ?",
+                [secret_id],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+            )
+            .optional()
+        })?;
+        let Some((by, project, slug, path)) = row else { return Ok(false) };
+        self.registration_reaches(&by, &[(Action::Admin, Scope::at(&project, &slug, &path))])
+    }
+
     /// Bind shared key `key` of `slug`'s own folder `path` to `hosts`: an admin's, audited.
     pub fn set_hosts(&self, project: &str, slug: &str, path: &str, key: &str, hosts: Hosts, caller: &Caller) -> Result<Hosts> {
         let path = names::path(path)?;
@@ -362,7 +400,7 @@ impl Secrets {
         let dek = self.project(project)?;
         let hosts = hosts.checked()?;
         let now = self.db.now_ms()?;
-        self.db.write(|c| {
+        let held = self.db.write(|c| {
             let env = envs::by_slug(c, project, slug)?;
             type Found = (String, Option<String>, Option<String>, Option<Vec<u8>>, i64);
             let row: Option<Found> = c
@@ -380,11 +418,13 @@ impl Secrets {
             }
             c.execute(
                 "INSERT INTO key_hosts (secret_id, project_id, binding, set_by, set_at) VALUES (?, ?, ?, ?, ?) ON CONFLICT (secret_id) DO UPDATE SET binding = excluded.binding, set_by = excluded.set_by, set_at = excluded.set_at",
-                params![id, project, json(&hosts), caller.principal, now],
+                params![id, project, json(&hosts), caller.made_by().to_string(), now],
             )?;
-            Ok::<_, Error>(())
+            holders(c, &id)
         })?;
         self.audit_now(project, caller, "secrets.hosts", Some(slug), Some(&path), &[key.to_string()], &format!("bound {key} to {}", hosts.describe()));
+        // Narrowed: their CAs naming a host it dropped end.
+        self.hosts_shrank(held.iter().map(String::as_str));
         Ok(hosts)
     }
 
@@ -393,14 +433,17 @@ impl Secrets {
         let path = names::path(path)?;
         caller.need(Action::Admin, &Scope::at(project, slug, &path))?;
         self.project(project)?;
-        let gone = self.db.write(|c| {
+        let (gone, held) = self.db.write(|c| {
             let env = envs::by_slug(c, project, slug)?;
-            Ok::<_, Error>(c.execute("DELETE FROM key_hosts WHERE secret_id IN (SELECT id FROM secrets WHERE env_id = ? AND path = ? AND key = ? AND owner = '')", params![env.id, path, key])?)
+            let secret: Option<String> = c.query_row("SELECT id FROM secrets WHERE env_id = ? AND path = ? AND key = ? AND owner = ''", params![env.id, path, key], |r| r.get(0)).optional()?;
+            let Some(secret) = secret else { return Ok::<_, Error>((0, vec![])) };
+            Ok((c.execute("DELETE FROM key_hosts WHERE secret_id = ?", [&secret])?, holders(c, &secret)?))
         })?;
         if gone == 0 {
             return Err(Error::NotFound(format!("{key} in {slug}:{path} isn't bound to hosts")));
         }
         self.audit_now(project, caller, "secrets.hosts", Some(slug), Some(&path), &[key.to_string()], &format!("unbound {key} from its hosts"));
+        self.hosts_shrank(held.iter().map(String::as_str));
         Ok(())
     }
 
@@ -472,14 +515,46 @@ impl Secrets {
     /// `slug:path`, read as the consumer is (`untrusted`): asked again on every use.
     pub(crate) fn maker_may(&self, maker: &str, project: &str, slug: &str, path: &str, untrusted: bool) -> std::result::Result<(), Refusal> {
         let failed = |e: Error| Refusal::Failed(e.to_string());
-        let gone = || Refusal::NotAllowed(format!("{maker}, who made the consumer, may no longer reveal {slug}:{path}"));
-        if !self.maker_reaches(maker, project).map_err(failed)? {
+        let gone = || Refusal::MakerUnreachable(format!("{maker}, who set these placeholders up, can no longer reveal {slug}:{path} or can no longer sign in"));
+        if maker.starts_with("identity:") {
+            return Err(Refusal::NotAllowed("a workload identity's login doesn't take placeholders".into()));
+        }
+        if !self.maker_reaches(maker, &[(Action::Reveal, Scope::at(project, slug, path))]).map_err(failed)? {
             return Err(gone());
         }
-        let c = self.principal_caller(maker)?.ok_or_else(|| Refusal::NotAllowed(format!("{maker} isn't a person, a token or the operator")))?;
+        let c = match self.principal_caller(maker) {
+            Ok(Some(c)) => c,
+            Ok(None) => return Err(Refusal::NotAllowed(format!("{maker} isn't a person, a token or the operator"))),
+            // Its token gone, or its person unable to sign in.
+            Err(Refusal::NotAllowed(_)) => return Err(gone()),
+            Err(e) => return Err(e),
+        };
         let c = if untrusted { self.untrusted(project, &c).map_err(failed)?.not_runtime() } else { c };
         let c = self.caller_for(project, slug, &c).map_err(failed)?;
         if c.allows(Action::Reveal, &Scope::at(project, slug, path)) { Ok(()) } else { Err(gone()) }
+    }
+
+    /// Whether what `maker` copied out of `slug:path` of `project` into code nobody vetted (a
+    /// sandbox's env) may still be used there: they still reach the project and may reveal it, as
+    /// an untrusted reader does (no protected environment). Asked again before each use; a no is
+    /// `Forbidden`.
+    pub fn maker_may_reveal(&self, maker: &str, project: &str, slug: &str, path: &str) -> Result<()> {
+        match self.maker_may(maker, project, slug, path, true) {
+            Ok(()) => Ok(()),
+            Err(Refusal::Failed(e)) => Err(Error::Internal(e)),
+            Err(r) => Err(Error::Forbidden(r.to_string())),
+        }
+    }
+
+    /// Whether `maker` can still act at all (a person who can sign in, a token that lives, the
+    /// operator), for what was copied before roll kept where it came from; a no is `Forbidden`.
+    pub fn maker_acts(&self, maker: &str) -> Result<()> {
+        let gone = || Error::Forbidden(format!("{maker}, who copied them, can't reach roll secrets any more"));
+        match self.maker_caller(maker, "check") {
+            Ok(_) if !matches!(self.maker(maker)?, crate::caller::Origin::Gone) => Ok(()),
+            Ok(_) | Err(Error::Forbidden(_)) => Err(gone()),
+            Err(e) => Err(e),
+        }
     }
 
     /// Who reads for a placeholder now: the resource it was issued for, if its project still
@@ -503,18 +578,25 @@ impl Secrets {
         Ok(self.principal_caller(&row.issued_by)?.unwrap_or_else(|| Caller::consumer(&row.issued_by)))
     }
 
-    /// `placeholder`'s value for a request to `host`, with the placeholder `at` there: refused
-    /// unless it's live, whoever asked for it (and whoever made its consumer) still may, and the
-    /// key is still bound to `host`, goes `at` there, and holds a literal value. A wrong host is
-    /// an alert. Audited once a minute per (placeholder, host). Blocking: in process only, for
-    /// roll's egress proxies (`proxy::filter`).
-    pub fn substitute(&self, placeholder: &str, host: &str, at: Position<'_>) -> std::result::Result<Value, Refusal> {
+    /// `placeholder`'s value for a request to `host` from the proxy serving `consumer`, with the
+    /// placeholder `at` there: refused unless it was issued to `consumer`, it's live, whoever asked
+    /// for it (and whoever made its consumer) still may, and the key is still bound to `host`, goes
+    /// `at` there, and holds a literal value. Another consumer or a wrong host is an alert.
+    /// Audited once a minute per (placeholder, host). Blocking: in process only, for roll's egress
+    /// proxies (`proxy::filter`).
+    pub fn substitute(&self, placeholder: &str, consumer: &str, host: &str, at: Position<'_>) -> std::result::Result<Swap, Refusal> {
         let failed = |e: Error| Refusal::Failed(e.to_string());
         if !placeholder.starts_with(PREFIX) || !roll_auth::credentials::checksum_ok(placeholder) {
             return Err(Refusal::Unknown);
         }
         let row = self.placeholder_row(placeholder).map_err(failed)?.ok_or(Refusal::Unknown)?;
         let now = self.db.now_ms().map_err(|e| failed(e.into()))?;
+        // First, before anything about it is said: another consumer's proxy holds a leaked one.
+        if row.consumer != consumer {
+            let slug: Option<String> = self.db.read(|c| c.query_row("SELECT slug FROM environments WHERE id = ?", [&row.env_id], |r| r.get(0)).optional()).unwrap_or_default();
+            self.note_use(&row, &slug.unwrap_or_default(), consumer, Noted::WrongConsumer, now);
+            return Err(Refusal::WrongConsumer);
+        }
         if row.revoked_at.is_some() {
             return Err(Refusal::Revoked);
         }
@@ -535,9 +617,15 @@ impl Secrets {
         }
         let e = self.entry_for(project, &slug, path, key, &reader)?;
         let hosts = self.binding(&e.row.id).map_err(failed)?.ok_or_else(|| Refusal::Unusable(format!("{key} isn't bound to hosts any more")))?;
+        if !self.binder_reaches(&e.row.id).map_err(failed)? {
+            return Err(Refusal::MakerUnreachable(format!("whoever bound {key} to its hosts can no longer manage {slug}:{path} or can no longer sign in")));
+        }
         if !hosts.allows(host) {
-            self.note_use(&row, &slug, host, true, now);
+            self.note_use(&row, &slug, host, Noted::WrongHost, now);
             return Err(Refusal::WrongHost(shown(host)));
+        }
+        if row.untrusted && !hosts.placed() {
+            return Err(Refusal::PlacementRequired);
         }
         hosts.place(placeholder, &at).map_err(Refusal::WrongPlace)?;
         if !hosts.admits(&e.row.tags, reader.runtime) {
@@ -560,8 +648,33 @@ impl Secrets {
         if let Some(p) = problem {
             return Err(Refusal::Unusable(format!("{key} can't be read: {p}")));
         }
-        self.note_use(&row, &slug, host, false, now);
-        Ok(value)
+        self.note_use(&row, &slug, host, Noted::Swap, now);
+        Ok(Swap { value, key: row.key, placeholder: row.id })
+    }
+
+    /// `host` echoed back the value placeholder `id` (`phd_…`) stood for, in the response to a
+    /// request it was swapped into (`proxy::Scrub`'s [`Echoed`](crate::proxy::Echoed)): the
+    /// placeholder ends (a host that echoes once will again), with a `secrets.alert` row and the
+    /// environment's notify URL, and so do the consumer's interception CAs naming a host it no
+    /// longer has. In process only, for roll's egress proxies.
+    pub fn echoed(&self, id: &str, host: &str) -> Result<()> {
+        let now = self.db.now_ms()?;
+        let host = normalize_host(host).unwrap_or_else(|| shown(host));
+        let mac = self.keys()?;
+        let consumer = self.db.write(|c| {
+            let row: Option<(String, String, String, String, String)> = c
+                .query_row("SELECT p.project_id, COALESCE(e.slug, ''), p.path, p.key, p.consumer FROM placeholders p LEFT JOIN environments e ON e.id = p.env_id WHERE p.id = ?", [id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)))
+                .optional()?;
+            let Some((project, env, path, key, consumer)) = row else { return Err(Error::NotFound(format!("no placeholder {id}"))) };
+            c.execute("UPDATE placeholders SET revoked_at = ? WHERE id = ? AND revoked_at IS NULL", params![now, id])?;
+            let text = format!("{host} echoed {key} back in a response to {consumer}: placeholder {id} is ended, and the response was stopped. Bind {key} to a header or query parameter {host} doesn't echo");
+            let alert = serde_json::json!({ "kind": "placeholder_echo", "placeholder": id, "consumer": consumer, "host": host });
+            crate::audit::record(c, mac, &project, &Caller::consumer("roll:placeholders"), "secrets.alert", Some(&env), Some(&path), std::slice::from_ref(&key), &text, now)?;
+            self.queue_alert(c, &project, &env, &text, alert, now, now)?;
+            Ok::<_, Error>(consumer)
+        })?;
+        self.hosts_shrank([consumer.as_str()]);
+        Ok(())
     }
 
     /// `key`'s effective entry in `slug:path` for `reader`, or why not.
@@ -574,13 +687,14 @@ impl Secrets {
         }
     }
 
-    /// Count a swap (or a refusal for a wrong host), writing its row when the pair's last is a
-    /// minute old.
-    fn note_use(&self, row: &Row, env: &str, host: &str, refused: bool, now: i64) {
-        let host = normalize_host(host).unwrap_or_else(|| shown(host));
-        // Swaps per (placeholder, host); refusals per placeholder, whatever the host, so a loop
-        // over random hosts is one row a minute, with a count and a few of them.
-        let k = (row.id.clone(), if refused { String::new() } else { host.clone() }, refused);
+    /// Count a swap (or a refusal for a wrong host or consumer), writing its row when the pair's
+    /// last is a minute old. `seen` is the host, or for a wrong consumer the consumer that asked.
+    fn note_use(&self, row: &Row, env: &str, seen: &str, what: Noted, now: i64) {
+        let refused = what != Noted::Swap;
+        let host = if what == Noted::WrongConsumer { shown(seen) } else { normalize_host(seen).unwrap_or_else(|| shown(seen)) };
+        // Swaps per (placeholder, host); refusals per placeholder, whatever the host or consumer,
+        // so a loop over random hosts is one row a minute, with a count and a few of them.
+        let k = (row.id.clone(), if refused { String::new() } else { host.clone() }, what);
         let mut due = vec![];
         {
             let mut uses = self.uses.0.lock().unwrap_or_else(|e| e.into_inner());
@@ -615,17 +729,27 @@ impl Secrets {
         }
     }
 
-    fn write_use(&self, (id, host, refused): &(String, String, bool), u: &Use, now: i64) {
+    fn write_use(&self, (id, host, what): &(String, String, Noted), u: &Use, now: i64) {
         let times = if u.pending == 1 { "once".to_string() } else { format!("{} times", u.pending) };
-        if !refused {
-            let summary = format!("substituted {} for {host} {times} for {} ({id})", u.key, u.consumer);
-            self.audit_now(&u.project, &Caller::consumer(&u.consumer), "secrets.substitute", Some(&u.env), Some(&u.path), std::slice::from_ref(&u.key), &summary);
-            return;
-        }
-        let hosts = u.hosts.join(", ");
-        tracing::warn!(project = %u.project, env = %u.env, key = %u.key, consumer = %u.consumer, placeholder = %id, %hosts, count = u.pending, "a placeholder was sent to hosts its key isn't bound to");
-        let text = format!("placeholder {id} of {}, issued to {}, was sent to hosts {} isn't bound to {times} ({hosts}{}): likely an exfiltration attempt", u.key, u.consumer, u.key, if u.others { " and others" } else { "" });
-        let alert = serde_json::json!({ "kind": "placeholder_host", "placeholder": id, "consumer": u.consumer, "hosts": u.hosts, "more_hosts": u.others, "count": u.pending });
+        let others = if u.others { " and others" } else { "" };
+        let seen = u.hosts.join(", ");
+        let (text, alert) = match what {
+            Noted::Swap => {
+                let summary = format!("substituted {} for {host} {times} for {} ({id})", u.key, u.consumer);
+                self.audit_now(&u.project, &Caller::consumer(&u.consumer), "secrets.substitute", Some(&u.env), Some(&u.path), std::slice::from_ref(&u.key), &summary);
+                return;
+            }
+            Noted::WrongHost => {
+                tracing::warn!(project = %u.project, env = %u.env, key = %u.key, consumer = %u.consumer, placeholder = %id, hosts = %seen, count = u.pending, "a placeholder was sent to hosts its key isn't bound to");
+                let text = format!("placeholder {id} of {}, issued to {}, was sent to hosts {} isn't bound to {times} ({seen}{others}): likely an exfiltration attempt", u.key, u.consumer, u.key);
+                (text, serde_json::json!({ "kind": "placeholder_host", "placeholder": id, "consumer": u.consumer, "hosts": u.hosts, "more_hosts": u.others, "count": u.pending }))
+            }
+            Noted::WrongConsumer => {
+                tracing::warn!(project = %u.project, env = %u.env, key = %u.key, consumer = %u.consumer, placeholder = %id, by = %seen, count = u.pending, "a placeholder was swapped by another consumer's proxy");
+                let text = format!("placeholder {id} of {}, issued to {}, was sent through the proxy of {seen}{others} {times}: likely a leaked placeholder. Revoke it", u.key, u.consumer);
+                (text, serde_json::json!({ "kind": "placeholder_consumer", "placeholder": id, "consumer": u.consumer, "by": u.hosts, "more_by": u.others, "count": u.pending }))
+            }
+        };
         let res = self.keys().and_then(|mac| {
             self.db.write(|c| {
                 crate::audit::record(c, mac, &u.project, &Caller::consumer("roll:placeholders"), "secrets.alert", Some(&u.env), Some(&u.path), std::slice::from_ref(&u.key), &text, now)?;
@@ -666,9 +790,9 @@ impl Secrets {
     /// and its interception CAs ([`Secrets::end_intercept_cas`]): the proxy drops them at its next
     /// check. Answers how many placeholders ended.
     pub fn end_consumer(&self, consumer: &str) -> Result<usize> {
-        let ended = self.end_placeholders("consumer = ?", consumer, None)?;
+        // Its CAs first, so they end as its consumer's (not as hosts no longer bound).
         self.end_intercept_cas(consumer, "its consumer ended")?;
-        Ok(ended)
+        self.end_placeholders("consumer = ?", consumer, None)
     }
 
     /// End the placeholders matching `cond` (one `?`, `arg`) and, with `caller`, only those of its
@@ -698,9 +822,10 @@ impl Secrets {
             *by_project.entry(key.clone()).or_default() += 1;
         }
         let actor = caller.map_or_else(|| Caller::consumer("roll:placeholders"), |(_, c)| c.clone());
-        for ((project, consumer), n) in by_project {
-            self.audit_now(&project, &actor, "secrets.placeholders.end", None, None, &[], &format!("ended {} of {consumer}", crate::write::plural(n, "placeholder")));
+        for ((project, consumer), n) in &by_project {
+            self.audit_now(project, &actor, "secrets.placeholders.end", None, None, &[], &format!("ended {} of {consumer}", crate::write::plural(*n, "placeholder")));
         }
+        self.hosts_shrank(by_project.keys().map(|(_, consumer)| consumer.as_str()));
         Ok(ended.len())
     }
 
@@ -747,6 +872,7 @@ impl Secrets {
         }
         let why: String = why.chars().filter(|c| !c.is_control()).take(200).collect();
         self.audit_now(&row.project, &Caller::consumer("roll:leaks"), "secrets.placeholders.end", None, Some(&row.path), std::slice::from_ref(&row.key), &format!("revoked leaked placeholder {} of {} for {}: {why}", row.id, row.key, row.consumer));
+        self.hosts_shrank([row.consumer.as_str()]);
         Some(format!("roll secrets placeholder {} of {}", row.id, row.key))
     }
 
@@ -762,20 +888,32 @@ impl Secrets {
     }
 }
 
+/// The consumers holding live placeholders of secret `id`: whose interception CAs a change to its
+/// binding may shrink.
+fn holders(c: &code_sql::Conn<'_>, id: &str) -> Result<Vec<String>> {
+    Ok(c.query("SELECT DISTINCT consumer FROM placeholders WHERE secret_id = ? AND revoked_at IS NULL", [id], |r| r.get(0))?)
+}
+
 /// Interception CAs' hosts ([`crate::intercept`]): by project, the hosts of the keys `consumer`
 /// holds live placeholders for, as bound now.
 impl crate::intercept::BoundHosts for Secrets {
     fn bound_hosts(&self, consumer: &str) -> Result<std::collections::BTreeMap<String, std::collections::BTreeSet<String>>> {
         let now = self.db.now_ms()?;
-        let rows: Vec<(String, String)> = self.db.read(|c| {
+        let rows: Vec<(String, String, String)> = self.db.read(|c| {
             c.query(
-                "SELECT DISTINCT p.project_id, h.binding FROM placeholders p JOIN key_hosts h ON h.secret_id = p.secret_id WHERE p.consumer = ? AND p.revoked_at IS NULL AND p.expires_at > ?",
+                &format!(
+                    "SELECT DISTINCT p.project_id, h.secret_id, h.binding FROM placeholders p JOIN key_hosts h ON h.secret_id = p.secret_id WHERE p.consumer = ? AND p.revoked_at IS NULL AND p.expires_at > ? AND {}",
+                    crate::deleted::live("p.project_id")
+                ),
                 params![consumer, now],
-                |r| Ok((r.get(0)?, r.get(1)?)),
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
             )
         })?;
         let mut out: std::collections::BTreeMap<String, std::collections::BTreeSet<String>> = Default::default();
-        for (project, binding) in rows {
+        for (project, secret, binding) in rows {
+            if !self.binder_reaches(&secret)? {
+                continue;
+            }
             let b: Hosts = serde_json::from_str(&binding).map_err(|e| Error::Internal(format!("a key's hosts: {e}")))?;
             out.entry(project).or_default().extend(b.hosts);
         }
@@ -785,8 +923,8 @@ impl crate::intercept::BoundHosts for Secrets {
 
 /// roll's egress proxies swap through this, in process ([`crate::proxy::filter`]).
 impl crate::proxy::Substitute for Secrets {
-    fn substitute(&self, placeholder: &str, host: &str, at: Position<'_>) -> std::result::Result<Value, Refusal> {
-        Secrets::substitute(self, placeholder, host, at)
+    fn substitute(&self, placeholder: &str, consumer: &str, host: &str, at: Position<'_>) -> std::result::Result<Swap, Refusal> {
+        Secrets::substitute(self, placeholder, consumer, host, at)
     }
 }
 

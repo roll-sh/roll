@@ -338,6 +338,63 @@ CREATE TABLE IF NOT EXISTS error_groups (
     first_seen INTEGER NOT NULL,
     PRIMARY KEY (service, env, fingerprint)
 ) WITHOUT ROWID;
+-- Sandboxes (short-lived containers made by API, `sandboxes.rs`): each one's container and its end.
+CREATE TABLE IF NOT EXISTS sandboxes (
+    id TEXT PRIMARY KEY,
+    service TEXT NOT NULL,
+    env TEXT NOT NULL,
+    name TEXT NOT NULL,
+    image TEXT NOT NULL,
+    cpu REAL NOT NULL,
+    memory_mb INTEGER NOT NULL,
+    variables INTEGER NOT NULL,
+    network TEXT NOT NULL,
+    created_at INTEGER NOT NULL,
+    expires_at INTEGER NOT NULL
+) WITHOUT ROWID;
+-- Branches whose delete failed, tried again each minute until it works.
+CREATE TABLE IF NOT EXISTS orphan_branches (
+    kind TEXT NOT NULL,
+    ref TEXT NOT NULL,
+    kept TEXT NOT NULL,
+    at INTEGER NOT NULL,
+    PRIMARY KEY (kind, ref, kept)
+) WITHOUT ROWID;
+-- Environments whose schedules don't run (scheduled: false): a cron's and run.schedules.
+CREATE TABLE IF NOT EXISTS env_unscheduled (
+    service TEXT NOT NULL,
+    env TEXT NOT NULL,
+    PRIMARY KEY (service, env)
+) WITHOUT ROWID;
+-- A UDP service's port per environment (run.udp), from the node's UDP range.
+CREATE TABLE IF NOT EXISTS udp_ports (
+    service TEXT NOT NULL,
+    env TEXT NOT NULL,
+    port INTEGER NOT NULL UNIQUE,
+    PRIMARY KEY (service, env)
+) WITHOUT ROWID;
+-- Environments with data of their own (data: branch), and the branch each linked database
+-- made for one: its sealed variables and what deletes it (shared by an environment's services).
+CREATE TABLE IF NOT EXISTS env_data (
+    service TEXT NOT NULL,
+    env TEXT NOT NULL,
+    PRIMARY KEY (service, env)
+) WITHOUT ROWID;
+CREATE TABLE IF NOT EXISTS env_branches (
+    service TEXT NOT NULL,
+    env TEXT NOT NULL,
+    kind TEXT NOT NULL,
+    ref TEXT NOT NULL,
+    kept TEXT NOT NULL,
+    vars TEXT NOT NULL,
+    PRIMARY KEY (service, env, kind, ref)
+) WITHOUT ROWID;
+-- A deployment's edge settings from its tree's roll.toml (`EdgeFile`, every block), copied to a
+-- promotion or a rollback of it: they travel with the image.
+CREATE TABLE IF NOT EXISTS deploy_edge (
+    deployment TEXT PRIMARY KEY,
+    file TEXT NOT NULL
+) WITHOUT ROWID;
 -- Who started a deployment, as a person (their session's, their own token's, the operator's): what
 -- an approval is compared with.
 CREATE TABLE IF NOT EXISTS deploy_people (
@@ -600,6 +657,9 @@ pub struct EnvRow {
     pub approvals: u32,
     /// Its deploy status badge answers (`/_roll/badge/…`), for anyone.
     pub badge: bool,
+    /// Who last set its egress (a person, their token's user, the operator): a closed
+    /// environment's placeholders are made by them. None: set before it was kept.
+    pub egress_by: Option<String>,
     /// Its deploys are reported to the Git host (commit statuses, GitHub Deployments); false:
     /// someone else reports them (roll previews for its `pv-` environments).
     pub report: bool,
@@ -724,7 +784,7 @@ fn name_taken(name: &str, deleted: Option<i64>) -> String {
         Some(_) => format!("a deleted service named {name} holds the name: restore it, or delete it again to delete it for good"),
     }
 }
-const ENV_COLS: &str = "service, name, branch, ephemeral, active, slug, port, created_at, wait_for_ci, run, hook_hash, follow_tag, tag_seen, feedback, maintenance, allow_ips, rate_limit, tcp_port, firewall, pages, redeploy_on_secrets, secrets_seen, headers, paused, held_by, egress, vitals, routes, report, checks, heartbeats, split, freeze, mirror, pause_schedule, snippets, log_retention_days, approvals, badge";
+const ENV_COLS: &str = "service, name, branch, ephemeral, active, slug, port, created_at, wait_for_ci, run, hook_hash, follow_tag, tag_seen, feedback, maintenance, allow_ips, rate_limit, tcp_port, firewall, pages, redeploy_on_secrets, secrets_seen, headers, paused, held_by, egress, vitals, routes, report, checks, heartbeats, split, freeze, mirror, pause_schedule, snippets, log_retention_days, approvals, badge, egress_by";
 /// A deployment [`Store::prune_deployments`] pruned, with its image when nothing else names it.
 pub struct Pruned {
     pub id: String,
@@ -814,6 +874,7 @@ fn env_row(r: &code_sql::Row<'_>) -> code_sql::Result<EnvRow> {
         log_retention_days: r.get::<_, Option<i64>>(36)?.map(|d| d as u32),
         approvals: r.get::<_, Option<i64>>(37)?.unwrap_or(0) as u32,
         badge: r.get::<_, i64>(38)? != 0,
+        egress_by: r.get(39)?,
     })
 }
 
@@ -973,6 +1034,7 @@ impl Store {
         db.add_column("environments", "log_retention_days", "INTEGER")?;
         db.add_column("environments", "approvals", "INTEGER")?;
         db.add_column("environments", "badge", "INTEGER NOT NULL DEFAULT 0")?;
+        db.add_column("environments", "egress_by", "TEXT")?;
         db.add_column("usage", "stored_gb_hours", "REAL NOT NULL DEFAULT 0")?;
         db.add_column("project_usage", "stored_gb_hours", "REAL NOT NULL DEFAULT 0")?;
         // A custom domain sent to another of the app's ports.
@@ -1107,7 +1169,7 @@ impl Store {
             c.execute("DELETE FROM deploy_steps WHERE deployment IN (SELECT id FROM deployments WHERE service = ?)", [id])?;
             c.execute("DELETE FROM state WHERE key LIKE ?", [format!("%:{id}/%")])?;
             c.execute("DELETE FROM status_days WHERE key LIKE ?", [format!("%:{id}/%")])?;
-            for t in ["environments", "deployments", "deploy_keys", "fences", "env_access", "registry_auth", "git_auth", "git_github", "github_events", "trace_ingest", "runtime_config", "oidc_access", "variable_makers", "variable_runtime_only", "visit_tickets", "visit_sessions", "variable_files", "error_groups", "variables", "links", "domains", "preview_hosts", "runs", "jobs", "metrics", "usage", "form_submissions", "deploy_scans"] {
+            for t in ["environments", "deployments", "deploy_keys", "fences", "env_access", "registry_auth", "git_auth", "git_github", "github_events", "trace_ingest", "runtime_config", "oidc_access", "variable_makers", "variable_runtime_only", "visit_tickets", "visit_sessions", "variable_files", "error_groups", "variables", "links", "domains", "preview_hosts", "runs", "jobs", "metrics", "usage", "form_submissions", "deploy_scans", "env_data", "env_branches", "udp_ports", "env_unscheduled", "sandboxes"] {
                 c.execute(&format!("DELETE FROM {t} WHERE service = ?"), [id])?;
             }
             match c.execute("DELETE FROM services WHERE id = ?", [id])? {
@@ -1151,6 +1213,30 @@ impl Store {
             c.execute("INSERT INTO state (key, value) VALUES ('apps.tcp.last', ?) ON CONFLICT (key) DO UPDATE SET value = excluded.value", [p.to_string()])?;
             Ok(Some(p as u16))
         })
+    }
+
+    /// A UDP service's port here (`run.udp`), from the node's UDP range: the one it has, or the
+    /// next free one after the last given (one write). None: the range is full.
+    pub fn assign_udp_port(&self, service: &str, env: &str, range: (u16, u16)) -> Result<Option<u16>> {
+        self.db.write(|c| {
+            let had: Option<i64> = c.query_row("SELECT port FROM udp_ports WHERE service = ? AND env = ?", [service, env], |r| r.get(0)).optional()?;
+            if let Some(p) = had {
+                return Ok(Some(p as u16));
+            }
+            let used: std::collections::HashSet<i64> = c.query("SELECT port FROM udp_ports", (), |r| r.get(0))?.into_iter().collect();
+            let last: Option<i64> = c.query_row("SELECT value FROM state WHERE key = 'apps.udp.last'", (), |r| r.get::<_, String>(0)).optional()?.and_then(|v| v.parse().ok());
+            let (lo, hi) = (range.0 as i64, range.1 as i64);
+            let start = last.filter(|l| (lo..=hi).contains(l)).map_or(lo, |l| l + 1);
+            let span = hi - lo + 1;
+            let Some(p) = (0..span).map(|i| lo + (start - lo + i).rem_euclid(span)).find(|p| !used.contains(p)) else { return Ok(None) };
+            c.execute("INSERT INTO udp_ports (service, env, port) VALUES (?, ?, ?)", params![service, env, p])?;
+            c.execute("INSERT INTO state (key, value) VALUES ('apps.udp.last', ?) ON CONFLICT (key) DO UPDATE SET value = excluded.value", [p.to_string()])?;
+            Ok(Some(p as u16))
+        })
+    }
+
+    pub fn udp_port(&self, service: &str, env: &str) -> Result<Option<u16>> {
+        Ok(self.db.query_row("SELECT port FROM udp_ports WHERE service = ? AND env = ?", [service, env], |r| r.get::<_, i64>(0)).optional()?.map(|p| p as u16))
     }
 
     pub fn all_environments(&self) -> Result<Vec<EnvRow>> {
@@ -1206,7 +1292,7 @@ impl Store {
                     None => None,
                 };
                 c.execute(
-                    &format!("INSERT INTO environments ({ENV_COLS}) VALUES (?, ?, ?, ?, NULL, ?, ?, ?, 0, '{{}}', NULL, 0, NULL, 0, NULL, NULL, NULL, NULL, NULL, NULL, 0, NULL, NULL, 0, NULL, NULL, 0, NULL, 1, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, 0)"),
+                    &format!("INSERT INTO environments ({ENV_COLS}) VALUES (?, ?, ?, ?, NULL, ?, ?, ?, 0, '{{}}', NULL, 0, NULL, 0, NULL, NULL, NULL, NULL, NULL, NULL, 0, NULL, NULL, 0, NULL, NULL, 0, NULL, 1, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, 0, NULL)"),
                     params![service, env, branch.flatten(), ephemeral.unwrap_or(false) as i64, slug, port, now],
                 )?;
             }
@@ -1223,7 +1309,7 @@ impl Store {
             if n == 0 {
                 return Err(Error::NotFound(format!("service {service} has no environment {env}")));
             }
-            for t in ["variables", "variable_files", "error_groups", "domains", "preview_hosts", "runs", "jobs", "metrics", "deploy_keys", "env_access", "trace_ingest", "runtime_config", "oidc_access", "variable_makers", "variable_runtime_only", "visit_tickets", "visit_sessions", "form_submissions"] {
+            for t in ["variables", "variable_files", "error_groups", "domains", "preview_hosts", "runs", "jobs", "metrics", "deploy_keys", "env_access", "trace_ingest", "runtime_config", "oidc_access", "variable_makers", "variable_runtime_only", "visit_tickets", "visit_sessions", "form_submissions", "env_data", "udp_ports", "env_unscheduled", "sandboxes"] {
                 c.execute(&format!("DELETE FROM {t} WHERE service = ? AND env = ?"), [service, env])?;
             }
             // Its schedules', challenge's and base images' state goes with it.
@@ -1566,6 +1652,10 @@ impl Store {
             )?;
             if d.no_traffic {
                 c.execute("INSERT INTO deploy_no_traffic (deployment) VALUES (?)", [&id])?;
+            }
+            // A promotion or a rollback runs its source's image: and its tree's edge settings.
+            if let Some(of) = &d.rollback_of {
+                c.execute("INSERT INTO deploy_edge (deployment, file) SELECT ?, file FROM deploy_edge WHERE deployment = ? ON CONFLICT (deployment) DO NOTHING", params![id, of])?;
             }
             if d.no_cache {
                 c.execute("INSERT INTO deploy_no_cache (deployment) VALUES (?)", [&id])?;
@@ -3182,9 +3272,10 @@ impl Store {
         Ok(())
     }
 
-    pub fn set_egress(&self, service: &str, env: &str, egress: &crate::model::Egress) -> Result<()> {
+    /// Its egress, and who set it (the person a closed environment's placeholders are made by).
+    pub fn set_egress(&self, service: &str, env: &str, egress: &crate::model::Egress, by: Option<&str>) -> Result<()> {
         let j = egress.closed().then(|| serde_json::to_string(egress).expect("JSON"));
-        self.db.execute("UPDATE environments SET egress = ? WHERE service = ? AND name = ?", params![j, service, env])?;
+        self.db.execute("UPDATE environments SET egress = ?, egress_by = ? WHERE service = ? AND name = ?", params![j, by, service, env])?;
         Ok(())
     }
 
@@ -3329,6 +3420,172 @@ impl Store {
             let counted = all.iter().filter(|a| Some(a.as_str()) != author).count() as u32;
             Ok((all, fresh && counted == needed))
         })
+    }
+
+    /// A sandbox made, if its environment has fewer than `max` (one write: two at once can't
+    /// both take the last place).
+    pub fn add_sandbox(&self, s: &crate::sandboxes::Sandbox, name: &str, max: usize) -> Result<bool> {
+        self.db.write(|c| {
+            let n: i64 = c.query_row("SELECT COUNT(*) FROM sandboxes WHERE service = ? AND env = ?", [&s.service, &s.environment], |r| r.get(0))?;
+            if n as usize >= max {
+                return Ok(false);
+            }
+            c.execute(
+                "INSERT INTO sandboxes (id, service, env, name, image, cpu, memory_mb, variables, network, created_at, expires_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                params![s.id, s.service, s.environment, name, s.image, s.cpu, s.memory_mb, s.variables as i64, s.network, s.created_at, s.expires_at],
+            )?;
+            Ok::<_, Error>(true)
+        })
+    }
+
+    /// An environment's sandboxes (every owned one past `expired_before` with None), and each one's container.
+    pub fn sandboxes(&self, service: Option<&str>, env: Option<&str>, expired_before: Option<i64>) -> Result<Vec<(crate::sandboxes::Sandbox, String)>> {
+        let row = |r: &code_sql::Row<'_>| -> code_sql::Result<(crate::sandboxes::Sandbox, String)> {
+            Ok((
+                crate::sandboxes::Sandbox {
+                    id: r.get(0)?,
+                    service: r.get(1)?,
+                    environment: r.get(2)?,
+                    image: r.get(4)?,
+                    cpu: r.get(5)?,
+                    memory_mb: r.get::<_, i64>(6)? as u32,
+                    variables: r.get::<_, i64>(7)? != 0,
+                    network: r.get(8)?,
+                    created_at: r.get(9)?,
+                    expires_at: r.get(10)?,
+                },
+                r.get(3)?,
+            ))
+        };
+        const COLS: &str = "id, service, env, name, image, cpu, memory_mb, variables, network, created_at, expires_at";
+        Ok(match (service, env, expired_before) {
+            (Some(s), Some(e), _) => self.db.query(&format!("SELECT {COLS} FROM sandboxes WHERE service = ? AND env = ? ORDER BY created_at"), [s, e], row)?,
+            (Some(s), None, _) => self.db.query(&format!("SELECT {COLS} FROM sandboxes WHERE service = ? ORDER BY created_at"), [s], row)?,
+            (None, _, Some(t)) => self.db.query(&format!("SELECT {COLS} FROM sandboxes WHERE expires_at <= ? ORDER BY expires_at"), [t], row)?,
+            (None, _, None) => self.db.query(&format!("SELECT {COLS} FROM sandboxes ORDER BY created_at"), (), row)?,
+        })
+    }
+
+    pub fn delete_sandbox(&self, id: &str) -> Result<bool> {
+        Ok(self.db.execute("DELETE FROM sandboxes WHERE id = ?", [id])? > 0)
+    }
+
+    pub fn add_orphan_branch(&self, kind: LinkKind, r#ref: &str, kept: &str) -> Result<()> {
+        self.db.execute("INSERT INTO orphan_branches (kind, ref, kept, at) VALUES (?, ?, ?, ?) ON CONFLICT (kind, ref, kept) DO NOTHING", params![kind.as_str(), r#ref, kept, self.now()?])?;
+        Ok(())
+    }
+
+    /// The oldest `limit` branches whose delete is still to be done.
+    pub fn orphan_branches(&self, limit: usize) -> Result<Vec<(LinkKind, String, String)>> {
+        let rows: Vec<(String, String, String)> = self.db.query("SELECT kind, ref, kept FROM orphan_branches ORDER BY at LIMIT ?", [limit as i64], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?;
+        rows.into_iter().map(|(k, r, kept)| Ok((LinkKind::parse(&k)?, r, kept))).collect()
+    }
+
+    pub fn forget_orphan_branch(&self, kind: LinkKind, r#ref: &str, kept: &str) -> Result<()> {
+        self.db.execute("DELETE FROM orphan_branches WHERE kind = ? AND ref = ? AND kept = ?", params![kind.as_str(), r#ref, kept])?;
+        Ok(())
+    }
+
+    /// Whether the environment's schedules run (`scheduled`, default true).
+    pub fn scheduled(&self, service: &str, env: &str) -> Result<bool> {
+        Ok(self.db.query_row("SELECT 1 FROM env_unscheduled WHERE service = ? AND env = ?", [service, env], |_| Ok(())).optional()?.is_none())
+    }
+
+    /// Every environment whose schedules don't run, for a tick's one read.
+    pub fn unscheduled(&self) -> Result<std::collections::HashSet<(String, String)>> {
+        Ok(self.db.query("SELECT service, env FROM env_unscheduled", (), |r| Ok((r.get(0)?, r.get(1)?)))?.into_iter().collect())
+    }
+
+    pub fn set_scheduled(&self, service: &str, env: &str, on: bool) -> Result<()> {
+        match on {
+            true => self.db.execute("DELETE FROM env_unscheduled WHERE service = ? AND env = ?", [service, env])?,
+            false => self.db.execute("INSERT INTO env_unscheduled (service, env) VALUES (?, ?) ON CONFLICT (service, env) DO NOTHING", [service, env])?,
+        };
+        Ok(())
+    }
+
+    /// Whether the environment has data of its own (`data: "branch"`).
+    pub fn env_data(&self, service: &str, env: &str) -> Result<bool> {
+        Ok(self.db.query_row("SELECT 1 FROM env_data WHERE service = ? AND env = ?", [service, env], |_| Ok(())).optional()?.is_some())
+    }
+
+    pub fn set_env_data(&self, service: &str, env: &str, on: bool) -> Result<()> {
+        match on {
+            true => self.db.execute("INSERT INTO env_data (service, env) VALUES (?, ?) ON CONFLICT (service, env) DO NOTHING", [service, env])?,
+            false => self.db.execute("DELETE FROM env_data WHERE service = ? AND env = ?", [service, env])?,
+        };
+        Ok(())
+    }
+
+    /// The environment's branches of its linked databases.
+    pub fn env_branches(&self, service: &str, env: &str) -> Result<Vec<(LinkKind, String, crate::integrations::Minted)>> {
+        let rows: Vec<(String, String, String, String)> = self.db.query("SELECT kind, ref, kept, vars FROM env_branches WHERE service = ? AND env = ? ORDER BY kind, ref", [service, env], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))?;
+        rows.into_iter()
+            .map(|(k, r, kept, sealed)| {
+                let vars = serde_json::from_str(&self.sealer.open(&format!("branch:{service}:{env}:{k}:{r}"), &sealed)?).unwrap_or_default();
+                Ok((LinkKind::parse(&k)?, r, crate::integrations::Minted { vars, kept }))
+            })
+            .collect()
+    }
+
+    /// A branch made for the environment, kept sealed; one already there (two deploys at once)
+    /// stays.
+    pub fn put_env_branch(&self, service: &str, env: &str, kind: LinkKind, r#ref: &str, m: &crate::integrations::Minted) -> Result<()> {
+        let sealed = self.sealer.seal(&format!("branch:{service}:{env}:{}:{}", kind.as_str(), r#ref), &to_json(&m.vars));
+        self.db.execute("INSERT INTO env_branches (service, env, kind, ref, kept, vars) VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT (service, env, kind, ref) DO NOTHING", params![service, env, kind.as_str(), r#ref, m.kept, sealed])?;
+        Ok(())
+    }
+
+    /// The branch another service of `project` made for the same environment of the same
+    /// resource, kept for `service` too (an environment's services share one), in one write:
+    /// whether there was one. A drop running beside it sees this row and keeps the branch.
+    pub fn share_env_branch(&self, service: &str, project: &str, env: &str, kind: LinkKind, r#ref: &str) -> Result<bool> {
+        self.db.write(|c| {
+            let row: Option<(String, String, String)> = c
+                .query_row(
+                    "SELECT b.service, b.kept, b.vars FROM env_branches b JOIN services s ON s.id = b.service WHERE s.project = ? AND b.env = ? AND b.kind = ? AND b.ref = ? AND b.service <> ? LIMIT 1",
+                    params![project, env, kind.as_str(), r#ref, service],
+                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+                )
+                .optional()?;
+            let Some((other, kept, sealed)) = row else { return Ok(false) };
+            let vars = self.sealer.open(&format!("branch:{other}:{env}:{}:{}", kind.as_str(), r#ref), &sealed)?;
+            let mine = self.sealer.seal(&format!("branch:{service}:{env}:{}:{}", kind.as_str(), r#ref), &vars);
+            c.execute("INSERT INTO env_branches (service, env, kind, ref, kept, vars) VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT (service, env, kind, ref) DO NOTHING", params![service, env, kind.as_str(), r#ref, kept, mine])?;
+            Ok::<_, Error>(true)
+        })
+    }
+
+    /// The environment's branches taken off it (one link's, with `only`), in one write: each,
+    /// and whether another environment still uses it (then it stays).
+    pub fn take_env_branches(&self, service: &str, env: &str, only: Option<(LinkKind, &str)>) -> Result<Vec<(LinkKind, String, String, bool)>> {
+        let only = only.map(|(k, r)| (k.as_str().to_string(), r.to_string()));
+        let taken: Vec<(String, String, String, bool)> = self.db.write(|c| {
+            let rows: Vec<(String, String, String)> = c.query("SELECT kind, ref, kept FROM env_branches WHERE service = ? AND env = ?", [service, env], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?;
+            let mut out = Vec::new();
+            for (k, r, kept) in rows.into_iter().filter(|(k, r, _)| only.as_ref().is_none_or(|(ok, or)| ok == k && or == r)) {
+                c.execute("DELETE FROM env_branches WHERE service = ? AND env = ? AND kind = ? AND ref = ?", params![service, env, k, r])?;
+                let used = c.query_row("SELECT 1 FROM env_branches WHERE kind = ? AND ref = ? AND kept = ?", params![k, r, kept], |_| Ok(())).optional()?.is_some();
+                out.push((k, r, kept, used));
+            }
+            Ok::<_, Error>(out)
+        })?;
+        taken.into_iter().map(|(k, r, kept, used)| Ok((LinkKind::parse(&k)?, r, kept, used))).collect()
+    }
+
+    /// A build's edge settings from its tree (none: what an earlier build of it said goes).
+    pub fn set_deploy_edge(&self, deployment: &str, file: Option<&crate::model::EdgeFile>) -> Result<()> {
+        match file {
+            Some(f) => self.db.execute("INSERT INTO deploy_edge (deployment, file) VALUES (?, ?) ON CONFLICT (deployment) DO UPDATE SET file = excluded.file", params![deployment, to_json(f)])?,
+            None => self.db.execute("DELETE FROM deploy_edge WHERE deployment = ?", [deployment])?,
+        };
+        Ok(())
+    }
+
+    /// The edge settings of what's live in an environment, if its tree had any.
+    pub fn active_edge(&self, service: &str, env: &str) -> Result<Option<crate::model::EdgeFile>> {
+        let f: Option<String> = self.db.query_row("SELECT d.file FROM deploy_edge d JOIN environments e ON e.active = d.deployment WHERE e.service = ? AND e.name = ?", [service, env], |r| r.get(0)).optional()?;
+        Ok(f.and_then(|f| serde_json::from_str(&f).ok()))
     }
 
     pub fn set_deploy_person(&self, deployment: &str, person: &str) -> Result<()> {

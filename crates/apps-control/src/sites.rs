@@ -222,6 +222,45 @@ pub fn key(image: &str) -> Option<String> {
 /// The index of a site's tar: its regular files by path (no leading `/`), each with its data's
 /// offset and length. Anything else (directories, links, devices, `..`, absolute paths) is left
 /// out. Bounded by [`MAX_FILES`].
+/// A static site's published file that holds a secret's value: the deploy fails on it.
+#[derive(Debug)]
+pub struct SecretInSite {
+    pub file: String,
+    pub variable: String,
+}
+
+impl std::fmt::Display for SecretInSite {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "the static site's {} holds the value of {} (a secret): a build step wrote it into a published file; read it at runtime instead, or don't make it a secret if it's meant to be public", self.file, self.variable)
+    }
+}
+
+impl std::error::Error for SecretInSite {}
+
+/// The first of a site's files (its tar) that holds one of `secrets`' values (eight characters
+/// or more), as which file and which variable.
+pub fn secret_in(r: impl Read, secrets: &[(String, String)]) -> anyhow::Result<Option<SecretInSite>> {
+    let wanted: Vec<&(String, String)> = secrets.iter().filter(|(_, v)| v.len() >= 8).collect();
+    if wanted.is_empty() {
+        return Ok(None);
+    }
+    let ac = aho_corasick::AhoCorasick::new(wanted.iter().map(|(_, v)| v.as_bytes()))?;
+    let mut a = tar::Archive::new(r);
+    for e in a.entries()? {
+        let mut e = e?;
+        if !matches!(e.header().entry_type(), tar::EntryType::Regular | tar::EntryType::Continuous) {
+            continue;
+        }
+        let file = e.path()?.to_string_lossy().trim_start_matches("./").to_string();
+        let mut data = Vec::new();
+        e.read_to_end(&mut data)?;
+        if let Some(m) = ac.find(&data) {
+            return Ok(Some(SecretInSite { file, variable: wanted[m.pattern().as_usize()].0.clone() }));
+        }
+    }
+    Ok(None)
+}
+
 pub fn index(r: impl Read + Seek) -> anyhow::Result<HashMap<String, (u64, u64)>> {
     let mut a = tar::Archive::new(r);
     let mut files = HashMap::new();
@@ -254,12 +293,21 @@ impl Apps {
         self.cfg.home.join("sites").join(format!("{key}.tar"))
     }
 
-    /// After a build whose plan serves static files: its files out of the image, kept by digest.
-    /// `None` when this runtime can't export them (the deployment runs a container as before).
-    pub(crate) async fn export_site(self: &Arc<Self>, image: &str) -> anyhow::Result<Option<u64>> {
+    /// A static site's files out of `image` (kept by its digest; see the module doc), first checked for `secrets` (a variable's name and its
+    /// value, eight characters or more; Netlify's secrets scan): one a file holds fails it with
+    /// [`SecretInSite`] (the file and the variable, never the value), and nothing is kept.
+    pub(crate) async fn export_site_checked(self: &Arc<Self>, image: &str, secrets: Vec<(String, String)>) -> anyhow::Result<Option<u64>> {
         let Some(key) = key(image) else { return Ok(None) };
         let k = key.clone();
         if let Some(size) = self.db(move |s| s.site(&k)).await? {
+            // Exported before (the same image): checked again, against today's secrets.
+            let path = self.site_path(&key);
+            if !secrets.is_empty() && path.exists() {
+                let found = tokio::task::spawn_blocking(move || secret_in(std::fs::File::open(&path)?, &secrets)).await??;
+                if let Some(f) = found {
+                    return Err(anyhow::Error::new(f));
+                }
+            }
             return Ok(Some(size));
         }
         let Ok(mut tar) = self.deps.runtime.export_files(image, ROOT).await else { return Ok(None) };
@@ -281,9 +329,17 @@ impl Apps {
                 return Err(e);
             }
         };
-        // It must index before anything relies on it.
+        // It must index before anything relies on it, and hold no secret value.
         let p = part.clone();
-        if let Err(e) = tokio::task::spawn_blocking(move || index(std::fs::File::open(&p)?)).await? {
+        let checked = tokio::task::spawn_blocking(move || -> anyhow::Result<()> {
+            index(std::fs::File::open(&p)?)?;
+            if let Some(found) = secret_in(std::fs::File::open(&p)?, &secrets)? {
+                return Err(anyhow::Error::new(found));
+            }
+            Ok(())
+        })
+        .await?;
+        if let Err(e) = checked {
             let _ = tokio::fs::remove_file(&part).await;
             return Err(e);
         }

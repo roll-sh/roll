@@ -115,6 +115,15 @@ pub fn follow(kind: Kind, field: &str, branch_vars: Vec<(String, String)>) -> St
     with_standard(kind, branch_vars).into_iter().find(|(n, _)| n == name).map(|(_, v)| v).unwrap_or_default()
 }
 
+/// Whether a search branch's kept link (its JSON variables) holds the branch's own login: one
+/// made before a preview got only a data credential (a login in `ELASTICSEARCH_URL` beside an
+/// API key, or one that isn't its data user's). The branch is made again, which changes it.
+pub fn search_link_holds_branch_login(kept: &str) -> bool {
+    let Ok(v) = serde_json::from_str::<serde_json::Value>(kept) else { return false };
+    let Some(u) = v["ELASTICSEARCH_URL"].as_str().and_then(Url::parse) else { return false };
+    !u.user.is_empty() && (v.get("ELASTICSEARCH_API_KEY").is_some() || v["OPENSEARCH_USERNAME"].as_str() != Some(u.user.as_str()))
+}
+
 /// The parts of a `scheme://user:password@host:port/path?query` URL, percent-decoded.
 struct Url {
     scheme: String,

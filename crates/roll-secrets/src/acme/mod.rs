@@ -431,26 +431,35 @@ impl Secrets {
         Ok(Account { id, binding, thumbprint: jwk.thumbprint(), jwk, status, contact: crate::from_json(&contact) })
     }
 
-    /// The binding an account acts with, looked up on every request: revoked, past its end, or
-    /// made by someone who can no longer reach the project, and the account stops.
+    /// The binding an account acts with, looked up on every request: revoked, past its end, made
+    /// by someone who can no longer reach the project, or of a deleted project, and the account
+    /// stops.
     fn live(&self, ca: &str, binding: &str) -> Acme<Live> {
-        type Row = (String, String, Option<String>, Option<i64>, Option<i64>, String, String, String, Option<i64>);
+        type Row = (String, String, Option<String>, Option<i64>, Option<i64>, String, String, String, Option<i64>, i64);
         let row: Option<Row> = self.db.read(|c| {
             c.query_row(
-                "SELECT b.project_id, b.label, b.names, b.expires_at, b.revoked_at, b.created_by, a.policy, a.name, a.acme_preauthorize FROM acme_bindings b JOIN cas a ON a.id = b.ca_id WHERE b.id = ? AND b.ca_id = ?",
+                "SELECT b.project_id, b.label, b.names, b.expires_at, b.revoked_at, b.created_by, a.policy, a.name, a.acme_preauthorize,
+                        (SELECT COUNT(*) FROM projects p WHERE p.project_id = b.project_id AND p.forgotten_at IS NULL)
+                 FROM acme_bindings b JOIN cas a ON a.id = b.ca_id WHERE b.id = ? AND b.ca_id = ?",
                 [binding, ca],
-                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?, r.get(6)?, r.get(7)?, r.get(8)?)),
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?, r.get(6)?, r.get(7)?, r.get(8)?, r.get(9)?)),
             )
             .optional()
         })?;
-        let (project, label, names, expires_at, revoked_at, created_by, policy, ca_name, pre) = row.ok_or_else(|| Problem::unauthorized("no such external account binding on this CA"))?;
+        let (project, label, names, expires_at, revoked_at, created_by, policy, ca_name, pre, live) = row.ok_or_else(|| Problem::unauthorized("no such external account binding on this CA"))?;
+        // A deleted project's CA issues nothing (its CRL is still served); it issues again if the
+        // project is recovered.
+        if live == 0 {
+            return Err(Problem::unauthorized("the CA's project was deleted"));
+        }
         if revoked_at.is_some() {
             return Err(Problem::unauthorized("the external account binding was revoked"));
         }
         if expires_at.is_some_and(|t| t <= code_sql::now_ms()) {
             return Err(Problem::unauthorized("the external account binding has expired"));
         }
-        if !self.maker_reaches(&created_by, &project)? {
+        // An external account binding is the project admin's: it works while its maker still is one.
+        if !self.maker_reaches(&created_by, &[(crate::access::Action::Admin, crate::access::Scope::whole(&project))])? {
             return Err(Problem::unauthorized("whoever made the external account binding can no longer reach its project"));
         }
         let policy = serde_json::from_str(&policy).map_err(|_| Error::Internal("a CA's policy isn't JSON".into()))?;

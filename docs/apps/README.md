@@ -79,6 +79,20 @@ every deployment is immutable with instant rollback.
   --build-timeout 1800`; Render's, Cloud Build's) from a minute to six hours, held to the node's
   (the build log says when it is). A build past it fails as `the build took longer than N
   minutes`.
+- **A roll code repo's submodules** (Vercel's, Netlify's, Render's): left out (empty directories)
+  unless `build.submodules: true`, as a Git URL service's are. Then each one `.gitmodules` names
+  that the tree has a gitlink at is written at its path, at the commit the gitlink pins, two
+  levels deep and 32 at most (`crates/apps-control/src/submodules.rs`). A relative URL resolves
+  as git reads it (`../lib.git` beside the repo); one on roll code's own Git address is a roll
+  code repo, built from roll code with the hostile-tree rules if it's public, or if it's private
+  and the service's `build.submodule_repos` names it (`roll apps set --submodule-repos
+  acme/lib`). The catalogue lends read on each name, so a token can only name what it can read,
+  and a writer to the service's repo can't build a repo it can't read into its code by pinning
+  it. Any other private one fails the build: "acme/lib isn't public; name it in
+  build.submodule_repos". A URL anywhere else is fetched from its public address with no login,
+  as a Git URL service's submodule is
+  (`api.rs::a_repos_submodules_come_from_roll_code_and_from_elsewhere`). A roll code repo's Git
+  LFS pointers stay text: roll code has no LFS server yet.
 - **Auto-detect** (`crates/apps-build`): Railpack/Nixpacks-style providers read the tree and
   produce a **plan**: a base image, install, build and start commands, the port, and the
   Dockerfile they make. Providers, in order: Dockerfile (when one exists, it wins), Node (npm,
@@ -134,7 +148,9 @@ every deployment is immutable with instant rollback.
   starts scale with image size), and one build path (Dockerfile → BuildKit) serves detected and
   user Dockerfiles alike.
 - **Where builds run**: locally, `docker build` (BuildKit) on this host, at most
-  `ROLL_APPS_BUILDS` (2) at once per node; more wait their turn, saying so in their log.
+  `ROLL_APPS_BUILDS` (2) at once per node; more wait their turn, saying so in their log. A build
+  that isn't a preview's has one more slot of its own when every one is taken (Vercel's
+  prioritized production builds), so a burst of pull requests' builds never holds up a hotfix.
   BuildKit takes no per-build CPU or memory limit through `docker build`, so the cap on
   concurrent builds is what bounds them on one node. A service's `build.size` (Vercel's, Render's
   and Netlify's bigger build machines: `small`, 2 vCPU and 4 GiB, the default; `medium`, 4 and 8;
@@ -350,7 +366,11 @@ every deployment is immutable with instant rollback.
   the active deployment, with its variables on the project network (no port, no volume: the
   service's instance may have it), as Render's one-off jobs and `heroku run` are. Its output is a
   log of its own (followed over SSE, kept like build logs); it ends at its exit, `timeout_s` or a
-  cancel, and its container goes. `roll apps run` exits with the command's exit code. A node
+  cancel, and its container goes. `roll apps run` exits with the command's exit code. It runs at
+  the service's size unless it names its own (`cpu` 0.25–8, `memory_mb` 256–16384; `roll apps run
+  --cpu 4 --memory 8192 -- …`, Heroku's `run --size`, Cloud Run jobs' resources), metered at it; a
+  schedule's command can too (`run.schedules[].cpu`, `memory_mb`)
+  (`api.rs::a_job_runs_at_its_own_size`). A node
   that takes the service over marks jobs a lost node was running as failed. With `tasks`
   (`roll apps run --tasks N`, Cloud Run Jobs'), it's N containers, ten at a time, each with
   `ROLL_TASK_INDEX` (0…) and `ROLL_TASK_COUNT` to split the work by; their output is the job's one
@@ -361,6 +381,24 @@ every deployment is immutable with instant rollback.
   again in a fresh container with `ROLL_TASK_ATTEMPT` (1…), as a cron run's retries wait (30 s,
   doubling), its slot let go meanwhile, never after a cancel, and never once another deployment
   went live (a try runs the job's own deployment); each try's end is a line in the log. `api.rs::a_one_off_job_runs_the_live_image_to_its_exit_and_can_be_canceled`.
+- **Sandboxes** (`POST …/sandboxes`, `roll apps sandbox create`; Vercel Sandbox's, Fly
+  Machines'): a short-lived container to run commands in, for code nobody vetted (an agent's, a
+  tenant's) or a quick try. It's the live deployment's image, or a public one (`image`), up for
+  `ttl_s` (60 s to a day, ten minutes by default) and then removed by the owner's minute sweep; a
+  takeover keeps it until then. By default it has none of the environment's variables or files
+  and a network of its own: the internet, nothing of the project. `variables: true` gives it the
+  live deployment's, as a console has them (its links' databases reached through them), and
+  `network: "environment"` the environment's network; a closed environment's are always on its
+  network (`none` asked there is a 400), so they reach nothing but roll, as its code does.
+  `POST …/sandboxes/{id}/exec` runs `sh -c <command>` for its exit code, stdout and stderr (1 MiB
+  each, `truncated` past it), killed in the container at `timeout_s` (`roll apps sandbox exec`
+  exits with the command's code); `GET` and `PUT …/files?path=` read and write one file of up to
+  1 MiB (`roll apps sandbox cp`). At most ten an environment, 0.25–4 vCPUs and 256–8192 MB, metered
+  as a console for as long as each ran, refused at the spend limit or paused. Everything but
+  listing is admin, as a shell is; a command is audited by its length and exit code, never its
+  text. The MCP tools are `apps_create_sandbox`, `apps_sandbox_exec`, `apps_list_sandboxes`,
+  `apps_get_sandbox` and `apps_delete_sandbox`.
+  `api.rs::a_sandbox_runs_commands_apart_from_the_environment_until_its_end`.
 - **Files to and from an instance** (Fly's `sftp`, Render's `scp`): `GET …/files?path=` answers
   what's at an absolute path in an instance as a tar, `PUT …/files?path=` (a tar, at most
   100 MiB) writes its files under a directory there; Docker's `docker cp` both ways. The
@@ -608,6 +646,13 @@ whole. The environment's log
   environment's log. The environment's `schedules` say when each is next due and the job it last
   started (Heroku Scheduler's "Next due"): the Jobs tab shows both with a Run now (the same
   command as a job, its schedule untouched), `roll apps jobs` lists them.
+- **An environment whose schedules don't run** (Heroku review apps don't get the scheduler):
+  `scheduled: false` on an environment skips what falls due on it, a cron service's schedule and
+  `run.schedules` alike, and nothing is made up when it's turned back on. Deploys and Run now
+  still go, so a broken cron build in a change still shows. roll previews sets it on its pv-
+  environments unless the project's rule turns their crons on, so a preview doesn't email real
+  users from its copy of the data on a schedule nobody watches
+  (`api.rs::an_unscheduled_environment_runs_only_what_is_asked`).
 - **Schedules that call a path** (Vercel's crons): a web service's schedule can be `{name,
   schedule, path: "/api/cron"}` instead of a command (`roll apps jobs --schedule NAME --at …
   --path /api/cron`; in the Jobs tab, a "command" starting with `/`). Each due time the owner
@@ -1299,9 +1344,20 @@ Each minute the owner of an environment reads its last five finished minutes aga
 deployment's `run.alerts` (Railway's monitors, Heroku's alerts): memory at or above
 `memory_pct` of the limit per instance in every minute (default 90), 5xx answers at or above
 `error_pct` of at least 20 requests (default 5), p95 latency at or above `p95_ms` in three of the
-minutes (default off). Each is one event (`alert.memory`, `alert.errors`, `alert.latency`) when it
-starts, notified like a crash loop, and can fire again once it has cleared. Settings has the
-thresholds, as does `roll.toml` `[app.run.alerts]`.
+minutes (default off), each instance's CPU at or above `cpu_pct` of its vCPU in every minute
+(default off; Railway's CPU monitor). Each is one event (`alert.memory`, `alert.errors`,
+`alert.latency`, `alert.cpu`) when it starts, notified like a crash loop, and can fire again once
+it has cleared. Settings has the thresholds, as does `roll.toml` `[app.run.alerts]`.
+
+**Alerts on the app's own gauges** (Cloud Monitoring's metric alerts): `alerts.metrics`, at
+most 10 entries like `{ name = "queue_depth", above = 1000, minutes = 5 }`. They're Settings'
+"Alerts on its own gauges" (`queue_depth > 1000 for 5m`) and `roll apps set --alert-metric
+'queue_depth>1000 for 5m'`. Each is read once a minute, the same way scaling on a gauge reads
+one: each series' newest point in the last minute, from its Prometheus endpoint, OTLP or a log
+metric, taking the largest, or the sum with `sum`. It fires as `alert.metric` (naming the gauge,
+its value and the threshold) after `minutes` judgments running (1–5, default 3) find it past its
+one threshold, above or below. A judgment that finds it back, or finds nothing, starts the run
+again, and the resolution names the gauge (`api.rs::cpu_and_the_apps_own_gauges_alert`).
 
 **Metrics past a week** (Cloud Run keeps six weeks): minute rows are kept a week; before they go
 they're rolled up into hours in the same transaction (`metrics_hourly`: counts summed, latency,
@@ -1477,8 +1533,12 @@ and the password in any URL variable taken out as `***` before it's kept, follow
 drained (`logs::Redact`, one Aho–Corasick pass a line, set as each deployment is made and kept for
 the eight before it). A value under six characters is left, and so is each line of a multi-line
 value under that; a value split across lines by the app isn't found. Unsealed variables are
-shown in Variables anyway and aren't hidden. Not yet: a static site's exported files aren't
-scanned for them (Netlify fails a build that would ship one). `logs.rs::secret_values_are_taken_out_of_a_logs_lines`
+shown in Variables anyway and aren't hidden. A static site's published files are checked for
+them too (Netlify's secrets scan): a file that holds a secret's value (sealed, a roll secrets
+value that isn't plain, a link's credential, eight characters or more) fails the deploy, naming
+the file and the variable, never the value, since a container would serve the same file; a site
+exported before (the same image) is checked again against today's secrets
+(`api.rs::a_static_site_holding_a_secret_isnt_published`). `logs.rs::secret_values_are_taken_out_of_a_logs_lines`
 and `api.rs::a_sealed_value_never_reaches_the_log`.
 
 ## Variables as files
@@ -1735,7 +1795,10 @@ existing service. Making new services and databases needs a project and other pr
 that stays `roll up --all`'s. Nothing is ever deleted: a service or database removed
 from the file stays until removed by hand. The file is checked before anything is made: one of
 `root` or `image`, a root inside the directory, links to declared databases, kinds `postgres`
-or `redis`. `roll apps import-compose [file] [--write]` turns a Compose file into these entries
+or `redis`. `roll apps import [file] [--write]` turns another platform's file into these entries
+locally, knowing each by its name (a Compose file, render.yaml, fly.toml, railway.json or
+railway.toml, Heroku's app.json with the Procfile beside it; `--from` when the name doesn't
+say; `import-compose` is the same command), with the converters the API's import uses. A Compose file goes in like this
 (Railway's Compose import): image and build services become `[apps]` (the container's port,
 its environment as variables), Postgres and Redis containers become roll databases linked from
 what `depends_on` them, and what isn't carried over (volumes, networks, commands, health checks)
@@ -1784,6 +1847,76 @@ and the file is checked as `roll up --all` checks it before it's answered. The c
 test reads one of each; `api.rs::a_compose_file_is_read_as_a_project_without_making_anything`
 reads a Render Blueprint over the API.
 
+## An environment's own data
+
+A staging environment that writes to production's database isn't staging (Railway's environments
+each have their own databases; Render's and Heroku's previews make theirs). `data: "branch"` on
+an environment (`roll apps env staging --data branch`, admin) gives it a branch of each resource
+the service links, in place of the resources themselves: roll Postgres, Redis, NoSQL, storage
+buckets, streams and queues, made the way roll previews branches its data (its adapters, through
+rolld's own API, so on a fleet each reaches the resource's owner):
+- **Credentials of its own:** a Postgres branch gets a role of its own (never the project's
+  superuser login, which would reach production's endpoint too), and every kind connects as the
+  branch.
+- **An unguessable name:** `roll-apps-<random>`. Redis' names are global, and a name someone
+  made first is refused, never adopted (the adapters check it's the parent's branch).
+- **Shared:** an environment's services share one branch per resource. The second service takes
+  the first's in the same write that checks it's still there, so a delete running beside it
+  sees the new user and keeps it.
+
+A linked kind that can't be branched (a search cluster) is left out of such an environment,
+said in its log. Branches are made by the products when it's set, and at each deploy for a link
+made since. Their
+credentials are sealed with the environment (`env_branches`), and its view lists the branches by
+kind and ref, never with what reaches them. Its link variables are the branch's. A database
+without a branch yet is left out (the log says so), never production's. So is everything roll
+secrets' own links put in its folder (a `postgres` or `redis` link's credentials and address
+name the resource itself): left out, said in the log, while its own branches come through its
+apps links. Turning it off (`--data
+none`), deleting the environment, unlinking the database or deleting the service deletes each
+branch that no other environment still uses. Production's data is the databases themselves, and
+a preview's is roll previews' to branch: both are refused (400). It's an admin field, since a
+branch copies production's data to code the environment runs
+(`api.rs::an_environment_with_its_own_data_gets_a_branch_of_each_database`).
+
+## Edge settings as code
+
+fly.toml's, vercel.json's and render.yaml's headers, firewall and limits live in the repository,
+reviewed with the code they protect. roll.toml's `[app]`, `[app.previews]` and
+`[app.environments.<env>]` take the same shapes as an environment's settings:
+
+```toml
+[app]
+headers = [{ path = "/assets/*", set = { "cache-control" = "public, max-age=31536000, immutable" } }]
+
+[app.environments.production]
+firewall = [
+  { action = "deny", path = "/debug/*" },
+  { action = "limit", path = "/api/login", methods = ["POST"], per_minute = 10 },
+]
+rate_limit = { per_minute = 600 }
+```
+
+They belong to the deployment built from that tree. The build checks them as the API checks an
+environment's (a bad rule fails the build, and the build log says what the file set). They go
+on the environment's gate when the deployment goes live, and they travel with its image to a
+promotion or a rollback. Each block is kept, so a staging build promoted to production reads
+`[app.environments.production]`. The last block that sets a key decides it, as with the file's
+other keys.
+
+A file in the tree only ever tightens what the environment's own settings let through. A writer
+to the repository is not necessarily someone who manages the environment.
+- Firewall rules are `deny`, `limit` or `challenge`; an `allow` fails the build. They're judged
+  on their own, beside the environment's, and the stricter answer wins: deny, then a challenge,
+  then the lower limit, each in a bucket of its own. So a deny in the file holds past the
+  environment's allow, and a limit in the file never lets in what the environment denies.
+- Headers are added after the environment's and never over a header the environment set.
+- The rate limit is the lower of the two, and so is the burst.
+
+The environment's settings stay its own (Settings, `roll apps env`, the API).
+`api.rs::a_trees_edge_settings_only_tighten_its_environment` covers a deny past an allow, the
+environment's header winning, the lower limit holding, and an `allow` refused.
+
 ## Comparing two environments
 
 Settings → an environment → Compare (Railway's environment sync; `roll apps env-diff --from
@@ -1821,7 +1954,8 @@ minute. At most two transforms run at once on a node. `roll_up_deploys_an_upload
 A project can have a domain of its own for its previews (Vercel's preview deployment suffix), so
 a preview answers at `web-pr12.preview.acme.dev` and cookies on the team's domain and OAuth
 redirect allowlists work: `POST /v1/apps/projects/{project}/preview-domain {hostname:
-"*.preview.acme.dev"}` (the project's Settings → Apps → Preview domain). It's a wildcard verified
+"*.preview.acme.dev"}` (the project's Settings → Apps → Preview domain; `roll apps
+preview-domain <service> --set '*.preview.acme.dev'`, then `--verify`, or `--remove`). It's a wildcard verified
 as a custom domain is (the CNAME to its own target, `previews-<project>.<domain>`, or the
 `_roll-challenge` TXT), one a project, and no other project's or service's domain. Each preview
 environment answers to its `preview_host`, one DNS label unique in the project, which roll
@@ -2145,7 +2279,8 @@ and the whole file for several ranges or an `If-Range` that names another versio
 
 ## Forms
 
-A static site's forms take submissions with no backend (Netlify Forms): a `<form>` marked
+A static site's forms take submissions with no backend (Netlify Forms; `roll apps forms`, with
+`--form NAME` for what was sent and `--delete` for one of them): a `<form>` marked
 `data-roll-form`, or Netlify's `data-netlify="true"` or `netlify`, with a `name`, is found when
 the site's files are read (the first 500 HTML files, each at most 256 KiB; at most 50 forms). A
 POST to its `action` (a path on the site) or to the page it's on, urlencoded and at most 64 KiB,
@@ -2174,7 +2309,25 @@ Cloud Run's Cloud Trace, Heroku's OpenTelemetry): `traces: true` on an environme
 `OTEL_EXPORTER_OTLP_PROTOCOL=http/protobuf`, `OTEL_TRACES_EXPORTER=otlp`,
 `OTEL_METRICS_EXPORTER=otlp`, `OTEL_LOGS_EXPORTER=none` (logs only when the app sets `otlp`
 itself: most apps also print them, and the environment's log would hold each twice) and
-`OTEL_SERVICE_NAME` from the next deploy (the app's own variables win). The endpoint is a sealed
+`OTEL_SERVICE_NAME` from the next deploy (the app's own variables win).
+
+**With no SDK at all** (Heroku's Telemetry, `@vercel/otel`, the OpenTelemetry Operator's
+injection): `build.otel` (Settings' "OpenTelemetry agent", `roll apps set --otel true`) adds the
+language's zero-code agent to a generated Dockerfile, pinned (`apps_build::otel`).
+- **Node:** `@opentelemetry/auto-instrumentations-node` goes in `/opt/roll-otel`, outside the
+  app's `node_modules`.
+- **Python:** `opentelemetry-distro` and the OTLP exporter go into the app's virtualenv (with
+  uv's installer when the venv has no pip). `opentelemetry-bootstrap` adds the instrumentations
+  for the libraries it finds there.
+
+The plan's `otel` says which agent was added. It starts only while the environment's traces are
+on: `NODE_OPTIONS=--require …/register.js`, or the agent's `sitecustomize` directory first on
+`PYTHONPATH`, each joined to the app's own value. Off, the image just carries the agent.
+Another language (Java's agent wants a pinned jar and its checksum) and the tree's own
+Dockerfile get a note instead. `api.rs::a_builds_otel_agent_starts_while_traces_are_on` and
+`otel::tests` cover it; the pinned packages are checked by a real build in `docker.rs`.
+
+The endpoint is a sealed
 variable: its token is in no answer, the instances still get it. The address is the apps
 listener's, public traffic's, as the runtime reaches it from an instance (`ROLL_APPS_OTLP_URL` on a
 fleet: the public apps address), never the API's: a relay serves what it reaches to every
@@ -2300,7 +2453,8 @@ doesn't scan, a scan that didn't finish) fails too, since a hold that can't look
 rollback is never held: it's the way out of a bad deploy. Changing `block_on` is a deploy in the
 permissions catalogue, as any run key that decides what production runs.
 The same run lists every package it found and converts that to an SBOM (CycloneDX JSON; Docker
-Scout's, GitHub's dependency graph): `GET …/deploys/{dep}/sbom` (and the Deployments tab's
+Scout's, GitHub's dependency graph): `GET …/deploys/{dep}/sbom` (`roll apps deploys --sbom DEP
+[-o sbom.json]`, and the Deployments tab's
 "SBOM" download), kept with the scan up to 8 MiB and dropped with the findings when the
 deployment is pruned; `sbom: true` on the scan says it's there.
 `api.rs::images_are_scanned_and_block_on_holds_a_deploy`, `scan::tests`.
@@ -2308,7 +2462,7 @@ deployment is pruned; `sbom: true` on the scan says it's there.
 ## SLOs
 
 A web service's `run.slo: {objective, latency_ms?, window_days?}` (Cloud Monitoring's SLOs;
-Settings' "Objective", roll.toml's `[app.run] slo`) says what share of its requests must succeed,
+Settings' "Objective", roll.toml's `[app.run] slo`; `roll apps slo` shows the budget) says what share of its requests must succeed,
 not 5xx, over `window_days` (1–60, default 28), and with `latency_ms` what share of its minutes
 with requests must keep p95 under it (a window-based indicator: the proxy's minutes keep
 percentiles, not each request's time). What may fail is the error budget. `GET
@@ -2804,6 +2958,33 @@ against rolld on Docker: a busybox echo server, asleep, echoed the first connect
 (the wake) and the next in 5 ms; `a_tcp_service_and_a_tunnel_reach_a_sleeping_port` (`pnpm
 test:apps --docker`) keeps it measured: 156 ms over its port from asleep, 168 ms over a tunnel.
 
+## UDP services
+
+A service whose port speaks UDP (a game server, DNS, WebRTC's media, QUIC of its own) sets
+`run.udp` (Fly's UDP services; Settings' "HTTP, TCP or UDP", `roll apps set --udp true`).
+- **Its port:** each environment gets one from the node's range (`ROLL_APPS_UDP_PORTS=21000-21099`,
+  kept in `udp_ports`); `Environment.udp` is the `host:port` clients use at `ROLL_PUBLIC_HOST`.
+- **Flows:** each client address is a flow. Its first datagram is let in by the environment's
+  allow list, maintenance and rate limit (flows per client), as a TCP connection is. It wakes an
+  instance and holds it while the flow lives, and up to 64 datagrams wait meanwhile. Its
+  datagrams go to the instance's port, published over UDP on loopback, from a socket of the
+  flow's own. The instance's answers go back to the client from the environment's port.
+- **Ending:** a flow ends after 60 s without a datagram either way, so the instance can sleep. An
+  environment relays 1,024 flows at most, and a new client past that is dropped, as a network
+  would.
+- **What it isn't:** there's nothing to ask over UDP, so an instance is up once it runs. A UDP
+  service has no HTTP and isn't a TCP one (no health path, gRPC health, h2c, affinity, gradual
+  rollout or sidecars). A closed environment has no UDP port, since its sandbox carries only its
+  own sockets. One node for now: the fleet's edge doesn't carry UDP.
+
+`api.rs::a_udp_service_answers_on_its_own_port` covers a sleeping instance woken by a datagram,
+with its answer coming back from the port. On real Docker, `docker.rs::a_udp_service_answers_from_asleep_on_its_port`
+(`pnpm test:apps --docker`) runs socat, asleep, and measures the first answer: 289 ms (2026-11-22).
+That test found what the fake couldn't: an instance without a sandbox published no UDP, and a
+port asked for as any free one has its number only where Docker bound it (`NetworkSettings.Ports`),
+never in the container's settings. Both are fixed. An instance not published over UDP (from
+before `udp` was set) ends the flow and is left alone, rather than replaced as broken.
+
 ## Reaching a service from your machine
 
 `roll apps proxy [-s service] [--local-port N]` (Fly's `fly proxy`) forwards `127.0.0.1:N` (default:
@@ -2860,6 +3041,14 @@ instance sees the same queue) or with `sum` their total (jobs in flight per inst
 one instance per `per_instance` of it. A counter or histogram isn't a level: it's said in the
 log and not followed. A stopped worker reports nothing, so this needs `min_instances` of at least
 one. `api.rs::a_worker_scales_on_its_own_gauge`.
+**Scaling to zero** (KEDA's `minReplicaCount: 0`): a worker that follows a stream's lag may have
+`min_instances: 0` (`roll apps set --min 0`). Caught up for `scale_down_after`, its last
+instance goes, and an idle worker costs nothing (only running instances are metered). The next
+read that finds a lag (within ten seconds) starts one. A deploy still starts one, so it's seen
+to boot, and it goes once the worker is caught up. While the lag can't be read (an error, or the
+stream not followable) it keeps one, so nothing it can't see leaves its work undone. A worker
+that follows its own gauge keeps at least one: stopped, it reports nothing.
+`api.rs::a_worker_follows_its_streams_backlog`.
 A deploy starts a scaled-out worker at the instances it wants, not back at its floor; a note
 about scaling is logged when it changes, not every ten seconds; and a web service's `scale` is
 dropped (it scales on its requests); the reaper starts instances at once and
@@ -2968,6 +3157,14 @@ client; this was true of no response before, since the proxy only copied data fr
 WebSocket upgrade stays HTTP/1.1. Clients reach it over HTTP/2 on rolld's own apps listener (h2c
 or HTTP/1.1); on the fleet the edge's HTTPS listener offers only `http/1.1` today, so gRPC from the
 internet waits for it to offer `h2` (in `## Next`).
+
+A gRPC server's health is gRPC's own with `run.health_grpc` (Cloud Run's and Kubernetes' gRPC
+probes; Settings' "Health check" with h2c, `roll apps set --health-grpc acme.Orders`, or `.` for the
+server as a whole). It's a unary `grpc.health.v1.Health/Check` for that service, over h2c, at start
+and every `health_every_s`, in place of `health_path`. It passes only on a 200, a `grpc-status` of
+0 and a `SERVING` status, with the answer read to 1 KiB. So a server that's up but `NOT_SERVING`
+never goes live, and one that turns `NOT_SERVING` is replaced after `health_failures` checks. It
+needs `h2c`, on a web service (`api.rs::an_h2c_app_gets_http2_and_its_trailers_pass`).
 
 ## A deployment's own URL
 
@@ -3097,6 +3294,62 @@ roll and nothing else, so a fork's preview can't send its branched data anywhere
   reach, another there can reach through its proxy. Instances get `HTTP_PROXY`/`HTTPS_PROXY` (and lower case), with
   `NO_PROXY` naming roll's own (`.internal`, the relays, the project's services); their own
   variables win.
+- **Keys used without being seen** (roll secrets' placeholders; docs/secrets.md, "Using a key
+  without seeing it"). A key bound to hosts (`PUT …/secrets/{key}/hosts`, `api.stripe.com`) comes
+  to a closed environment's instances as a placeholder (`rlph_…`), never its value: the project
+  environment is the consumer (`apps:<project>/<env>`), made by whoever last set its egress
+  (recorded in that write: a person, or the token itself, so revoking or narrowing it stops what
+  it made; roll previews, calling as the operator, names its rules' maker with `closed_by`, or
+  `null` for no one, which withholds the bound keys: the operator's alone, any caller on an open
+  daemon, a token only with admin, never a user's token or a signed-in person; for an environment closed before
+  that was kept, the project's owner; the operator only for the operator's own projects), so it
+  swaps only while they may reveal there. When they no longer may (roll secrets' 403
+  `maker_unreachable`: demoted or removed from the project, a token revoked or narrowed; any
+  other refusal fails the deploy), the keys bound to hosts are
+  withheld (never their values instead) and the environment's log says so; an untrusted preview
+  (a fork's) resolves as code nobody vetted (no protected environment, a placeholder only where a
+  binding opts in to untrusted readers). Placeholders are made only for instances, once a
+  deploy for its build and once for its instances. A listing or the staleness check never makes
+  one (a key bound to hosts is a marker there), since each one made is a record, an audit row and
+  new random text. A deployment's staleness hash takes a placeholder's binding (its hosts), never
+  its text. A dynamic credential is refused, as the open path refuses it. Once an environment is
+  open again and what runs was deployed open, its placeholders and interception end, unless
+  another service of the project is still closed there. Its egress proxies
+  terminate TLS for a listed host its keys are bound to (and only those: every other listed host
+  stays a tunnel) with the interception CA's leaf, swap each request's placeholders through roll
+  secrets' filter, and re-dial with real verification (`crates/roll-intercept`, shared with roll
+  previews, and rolld's `CaInterception`). Its instances trust the CA: a file of the host's roots
+  and the CA at `/etc/roll/intercept-ca.pem`, named by `NODE_EXTRA_CA_CERTS`, `SSL_CERT_FILE`,
+  `REQUESTS_CA_BUNDLE` and `CURL_CA_BUNDLE` (the app's own win). That covers Node, Python
+  (requests, httpx through `SSL_CERT_FILE`), Ruby, PHP, Go, curl and OpenSSL-based clients. It
+  doesn't cover a JVM (its truststore is its own: add the file with `keytool`, or
+  `-Djavax.net.ssl.trustStore`), .NET on Linux before it reads `SSL_CERT_FILE`, rustls with
+  `webpki-roots` (compiled-in roots: use `rustls-native-certs`), or an app that sets its own
+  `SSL_CERT_FILE`. Those need the CA added by the app's image or start command. The services of
+  one project environment share one CA (the consumer is the project environment), and an awake
+  closed environment moves its instances to the next CA about once a day. The CA lives a day, and can end
+  early (a binding narrowed, a placeholder revoked; roll secrets' proxy then refuses its
+  connections). Each minute the owner asks roll secrets which CA stands: a new one comes three
+  hours before the old one's end, or when its placeholders are bound to a host the CA doesn't
+  name. The CA's key lives only in the node that made it.
+  - **While instances run:** they move to the live image again (a rollback to the active
+    deployment, keeping its variables), with a bundle that trusts both the CA its proxies serve
+    and the new one. The proxies switch to the new CA only once that deployment is live, so no
+    running instance meets a CA it doesn't trust. This happens at most every ten minutes, and a
+    freeze or approvals don't hold it (it's the same image).
+  - **While it sleeps:** its template is made again at once, with the new CA and new
+    placeholders, and its proxies switch then. Nothing starts.
+  - **Placeholders:** they last two days, past one CA's renewal, and no live placeholder while
+    it's still closed means they're made again, never that nothing is bound. So an environment
+    asleep past a day wakes with live ones.
+  - **After a restart or a takeover:** the instances it adopts trust a CA no node can serve now,
+    so they're moved to the one its proxies serve.
+
+  Its placeholders end with the project environment's last service there. What its interception did (requests filtered,
+  placeholders swapped, the latest refusals' reasons) is on the environment as `intercepted`, as
+  `egress_refused` is, for roll previews' sheet.
+  `api.rs::a_closed_environment_uses_its_keys_without_seeing_them`,
+  `egress.rs::a_covered_listed_host_is_intercepted`.
 - **Never open by accident.** A runtime that can't close a network refuses `roll` (409), and a
   deploy of a closed environment on one fails instead of running open. Fargate can't yet (a
   security group per task with no outbound rule is in "Next").
@@ -3121,9 +3374,20 @@ app installed and no roll code mirror. `git_source.rs` is the whole of it:
   commit id), then the build fetches that one commit shallowly (`depth 1`, `code_git::Client`),
   so a large history costs nothing. The tree is written with the hostile-tree rules: a name is
   one path segment (never `.`, `..` or `.git`), nothing is written over (a repeated name fails),
-  symlinks and submodules are left out (a link out of the tree would build from the host), at
-  most 100,000 files and 64 levels; the pack is bounded by `code_git::Limits`. Then it's a build
-  like a repo's: its root's `roll.toml` `[app]`, a JS workspace's root, the generated Dockerfile.
+  symlinks are left out (a link out of the tree would build from the host), at most 100,000
+  files and 64 levels; the pack is bounded by `code_git::Limits`. Submodules are left out unless
+  `build.submodules: true` (Vercel's, Netlify's, Render's; Settings' "Submodules", `roll apps set
+  --submodules true`): then each one `.gitmodules` names is fetched shallowly at the commit its
+  gitlink pins, from its own URL (relative ones against the repository's; checked as a service's
+  own URL is, through the same public-only client; the service's Git login only on the same host)
+  and written at its path by the same rules, two levels deep at most and 32 in all
+  (`api.rs::a_git_url_services_submodules_are_built_with_it`). Git LFS pointers are built as text
+  unless `build.lfs: true` (Settings' "Git LFS", `roll apps set --lfs true`): then each pointer's
+  object is asked of the repository's LFS batch API (with the service's Git login), downloaded
+  from the address it answers through the public-only client (an `https` one), checked against
+  the pointer's sha256 and size as it streams, and written in the pointer's place, 2 GiB in all and
+  1 GiB each (`api.rs::a_git_url_services_lfs_objects_are_built_in_place`). Then it's a build like a repo's:
+  its root's `roll.toml` `[app]`, a JS workspace's root, the generated Dockerfile.
 - **Fetched safely**: the URL is `https://` (`http://` only where private addresses are allowed),
   carries no credentials, and goes through the same public-only client as webhooks and drains
   (`net::client`: every resolved address checked, no redirects, a timeout), plus the
@@ -3751,117 +4015,99 @@ dropped `_`, missed `"""…"""` and had no tree of its own without a plugin; a d
 static site into a container. Firewall rules on more than the path were built next, then PagerDuty and Opsgenie targets
 ("Notifications"), then external proxy rewrites and conditional rules ("Static sites"), then uptime
 checks ("Uptime checks"), then heartbeats ("Heartbeats"), then image scans ("Vulnerability
-scanning"), then objectives ("SLOs"), then Prometheus scraping ("The app's Prometheus endpoint"), then split tests ("Split tests"), then edge functions ("Edge functions"). A review that morning (the product against Railway, Render, Fly, Vercel, Netlify, Heroku and Cloud Run, each gap grepped in the code) put items 2–6 in; autoscaling on the app's own gauges was built first ("Workers that follow their work"), then a password ("A password for an environment"), then deploy freezes ("Deploy freezes"), then status pages ("Status pages"), then Teams and Google Chat targets ("Notifications"). A review after them (the same seven, and what they offer past the basics, each gap grepped in the code) put items 2–6 in; SBOMs came first ("Vulnerability scanning"), then rollouts that watch the objective ("Gradual rollouts"), then floors by the clock ("Floors by the clock"), then traffic mirroring ("Traffic mirroring"), then log-based metrics ("The app's Prometheus endpoint"). A review after the 17-PR turn landed (2026-11-19 10:00: the product against the same seven, and the other threads' branches: secrets' maker references for `roll://` and Git logins, MCP's tools for the new routes, previews' environments) put pause schedules first (built: "Paused by the clock") and items 2–4 in; status page incidents came next ("Status pages"), then rollouts that watch latency ("Gradual rollouts"), then audit log streaming ("Log drains"). A review after them (2026-11-19 afternoon: the product against the same seven, each gap grepped in the code, and a bug and security review of the day's stack, #408–#423) put items 1–8 in and found twelve bugs, fixed: an incident a check opened stayed open after a restart, a removed check or a paused environment; putting a never-live build live, a base image's rebuild and a secrets change went past a freeze (the last one never retried); incidents named what the page doesn't show (previews' heartbeats among them); every visit to a status page read every tenant's environments; mirrored copies were unbounded and judged by the target's rollout; a busy incident couldn't be resolved, and a page's incidents outlived it; a Teams card rendered links from tenant text; a p95 step was a bucket wide (41%); an upload couldn't override a freeze; one failed try read as down on the page. Skew protection for web services was built first ("Skew protection"), then a hard concurrency limit ("Saturation"), then the CLI for freezes, any environment setting and status pages ("Deploy freezes", "Status pages"), then the dashboard's Files panel (under Shell), cache purge and log metrics editor, then snippets ("Snippets"), then `roll://` variables ("Secrets and environments"), then the freeze override as admin (MCP's review), then queue links, then a deploy under traffic on real Docker and the deployments and variables component tests, then runtime config, edge functions' `context.config` included ("Runtime config"). A review after them (2026-11-20 00:40: the product against the same seven, each gap grepped in the code, and a bug and security review of chain6 and the runtime config) put items 1–7 in and found eight bugs, fixed: a deploy token could lift a freeze and then deploy (a `freeze` in the PUT is admin now); snippets never reached a compressed page, and a 304 kept a removed one; emptying runtime config dropped its token; long polls were unbounded and re-read the whole config; a deleted service's config still answered; a reference could read another service's `/services/<id>` folder; every listing read `roll://` values (and audited them as the service); the move swallowed an approval refusal and could leave the value in two places. Telemetry drains were built first ("Log drains"), then error groups' lifecycle ("Errors"), then a project's Metrics view, then scaling on latency ("Scaling on CPU and memory"), and the tests the review asked for (a rollback and a prune on real Docker, the Domains and Jobs tabs), then "Why did it fail?" from the repo owner's model ("A failed deploy says how to fix it"), then a stream pushed to a web service ("A stream pushed to a web service"), then rotating runtime config's address ("Runtime config"). A review after them (2026-11-20 morning: the product against the same seven, each gap grepped in the code, the other threads' open PRs, and a bug and security review of the stack #502–#509) found that `run.push` let an apps token consume any stream on its project and roll.toml subscribe to one (now the catalogue lends read, write with a dead letter, and push is the service's setting only), and that a finished build's, job's or run's log was read again every half second (now it ends with an `end` event), and put items 1–8 in; push throughput and status were built first ("A stream pushed to a web service"), then stop-first rollouts ("Gradual rollouts"), then deploying a branch or tag by name ("Deploy another revision once"), then job retries and parallelism ("One-off jobs"), then `roll apps set --latency-target` and `--push`, then ECR logins ("Private registries"), then the dashboard's rough edges (log views show their newest thousand rows and render only new ones, one `/changes` stream a service, hidden tabs follow nothing, Settings keeps edits when a panel beside it saves, an incomplete push rule can't be saved, the latency target on the latency chart, "Redeploy now" after rotating the config address, failed loads said, removing a notification target asks). Push across a takeover and Settings' save were tested next, then instances' OIDC tokens once roll secrets' #357 landed ("Instances' identity (OIDC)"). Then references into another environment and a Git login's `roll://` secret, bound to their makers (roll secrets' #407; "Secrets and environments", "Private Git repositories"), and `explain`'s own catalogue row (MCP's review). Then runtime config's address and the trace intake as `rlr_` secrets with the leak hook ("Instances' identity (OIDC)"). Then bound references' folders in the environment's digest (`digest_as`). A review after them (2026-11-20 evening: the product against the same seven, each gap grepped in the code, and a bug review of the day's newest work) put items 1–6 in (work after the answer was built first: "Work after the answer"; then cost by service: "Spend limits"; then error groups for Ruby, PHP, .NET, Rust and Elixir: "Errors"; then pushes and scheduled calls signed with roll's OIDC token: "A stream pushed to a web service"; then instances held awake while their CPU is busy: "Work after the answer"; then log retention, which found that nothing deleted stored logs at all: "Observability and cost"; then a remote build cache for Turborepo and Nx: "A remote build cache"). A review after them (2026-11-21 02:30: the product against the same seven, each gap grepped in the code, and a bug and security review of #562, #566 and the open log-retention and build-cache work) put items 1–9 in and found nine bugs, fixed: any service could ask its `ROLL_OIDC_URL` for a token whose audience is another environment's URL and sign pushes and scheduled calls to it (audiences on the apps domain are refused now, and apps are told to check `sub`); a leaked build cache token's artifacts stayed and kept being read, and a deploy without the cache still used it (a leak empties the cache, `no_cache` gets none); the cache's rows could name another upload's or a deleted object (each upload has its own key, swapped in one write); caches were never deleted and their cap was hourly; one cache served every source of an environment (now one a source); every closed environment would have read as needing a deploy after the upgrade (the fingerprint's `3:` form); job logs outlived their retention and their environment; the network sweep could take a network a build was setting up; closed previews' costs each had a row. Runtime-only variables were built first ("Variables in builds"), then deploy approvals ("Deploy approvals"), then bigger build machines ("Where builds run"), then `s3` log drains ("Log drains"), then status badges ("Status badges"), then stored logs metered ("Prices"), then drains into the project's own bucket ("Log drains"), then build caches metered ("A remote build cache"). A review after them (2026-11-21 07:30: the product against the same seven, each gap grepped in the code, and a bug and security review of #576–#590) put items 2–9 in and found eight bugs, fixed: anyone who could deploy to production could turn approvals off (now an admin's call, as a freeze is); a person could approve their own deploy made with their own token (an approval is compared with the person behind the deploy); a second or late approval put an old build live again (only the approval that makes the count acts, and one of a build older than what's live is a 409); a waiting build ran with production's values on its own URL before anyone approved it (nothing of it runs until then); a bucket drain's fields weren't in the TypeScript client or the CLI; stored-data metering counted an hour twice after a restart or a takeover (marked once an hour in the same write); the badge's link was the loopback address on one node; a bucket drain and its key's record were two writes. (per-instance CPU and memory, which it took for missing, is Metrics' `by_instance`) and found seven bugs, fixed: scale-in and sleep stopped an instance in 10 s whatever its `drain_s`; ECR tokens were refreshed only from one node's memory, so a restart or a takeover let the 12-hour token lapse; a job's retry could run a deployment that went live after it started; one environment's job could take every job container on a node (`parallelism` 1–100, now 1–10); a leaked address's redeploy was refused by a freeze and shipped staged settings (now a rollback to the live deployment); a push loop stuck on one record past its lease let another take the partition and deliver past it; a failed "Why did it fail?" could be asked again at once (each try charged).
+scanning"), then objectives ("SLOs"), then Prometheus scraping ("The app's Prometheus endpoint"), then split tests ("Split tests"), then edge functions ("Edge functions"). A review that morning (the product against Railway, Render, Fly, Vercel, Netlify, Heroku and Cloud Run, each gap grepped in the code) put items 2–6 in; autoscaling on the app's own gauges was built first ("Workers that follow their work"), then a password ("A password for an environment"), then deploy freezes ("Deploy freezes"), then status pages ("Status pages"), then Teams and Google Chat targets ("Notifications"). A review after them (the same seven, and what they offer past the basics, each gap grepped in the code) put items 2–6 in; SBOMs came first ("Vulnerability scanning"), then rollouts that watch the objective ("Gradual rollouts"), then floors by the clock ("Floors by the clock"), then traffic mirroring ("Traffic mirroring"), then log-based metrics ("The app's Prometheus endpoint"). A review after the 17-PR turn landed (2026-11-19 10:00: the product against the same seven, and the other threads' branches: secrets' maker references for `roll://` and Git logins, MCP's tools for the new routes, previews' environments) put pause schedules first (built: "Paused by the clock") and items 2–4 in; status page incidents came next ("Status pages"), then rollouts that watch latency ("Gradual rollouts"), then audit log streaming ("Log drains"). A review after them (2026-11-19 afternoon: the product against the same seven, each gap grepped in the code, and a bug and security review of the day's stack, #408–#423) put items 1–8 in and found twelve bugs, fixed: an incident a check opened stayed open after a restart, a removed check or a paused environment; putting a never-live build live, a base image's rebuild and a secrets change went past a freeze (the last one never retried); incidents named what the page doesn't show (previews' heartbeats among them); every visit to a status page read every tenant's environments; mirrored copies were unbounded and judged by the target's rollout; a busy incident couldn't be resolved, and a page's incidents outlived it; a Teams card rendered links from tenant text; a p95 step was a bucket wide (41%); an upload couldn't override a freeze; one failed try read as down on the page. Skew protection for web services was built first ("Skew protection"), then a hard concurrency limit ("Saturation"), then the CLI for freezes, any environment setting and status pages ("Deploy freezes", "Status pages"), then the dashboard's Files panel (under Shell), cache purge and log metrics editor, then snippets ("Snippets"), then `roll://` variables ("Secrets and environments"), then the freeze override as admin (MCP's review), then queue links, then a deploy under traffic on real Docker and the deployments and variables component tests, then runtime config, edge functions' `context.config` included ("Runtime config"). A review after them (2026-11-20 00:40: the product against the same seven, each gap grepped in the code, and a bug and security review of chain6 and the runtime config) put items 1–7 in and found eight bugs, fixed: a deploy token could lift a freeze and then deploy (a `freeze` in the PUT is admin now); snippets never reached a compressed page, and a 304 kept a removed one; emptying runtime config dropped its token; long polls were unbounded and re-read the whole config; a deleted service's config still answered; a reference could read another service's `/services/<id>` folder; every listing read `roll://` values (and audited them as the service); the move swallowed an approval refusal and could leave the value in two places. Telemetry drains were built first ("Log drains"), then error groups' lifecycle ("Errors"), then a project's Metrics view, then scaling on latency ("Scaling on CPU and memory"), and the tests the review asked for (a rollback and a prune on real Docker, the Domains and Jobs tabs), then "Why did it fail?" from the repo owner's model ("A failed deploy says how to fix it"), then a stream pushed to a web service ("A stream pushed to a web service"), then rotating runtime config's address ("Runtime config"). A review after them (2026-11-20 morning: the product against the same seven, each gap grepped in the code, the other threads' open PRs, and a bug and security review of the stack #502–#509) found that `run.push` let an apps token consume any stream on its project and roll.toml subscribe to one (now the catalogue lends read, write with a dead letter, and push is the service's setting only), and that a finished build's, job's or run's log was read again every half second (now it ends with an `end` event), and put items 1–8 in; push throughput and status were built first ("A stream pushed to a web service"), then stop-first rollouts ("Gradual rollouts"), then deploying a branch or tag by name ("Deploy another revision once"), then job retries and parallelism ("One-off jobs"), then `roll apps set --latency-target` and `--push`, then ECR logins ("Private registries"), then the dashboard's rough edges (log views show their newest thousand rows and render only new ones, one `/changes` stream a service, hidden tabs follow nothing, Settings keeps edits when a panel beside it saves, an incomplete push rule can't be saved, the latency target on the latency chart, "Redeploy now" after rotating the config address, failed loads said, removing a notification target asks). Push across a takeover and Settings' save were tested next, then instances' OIDC tokens once roll secrets' #357 landed ("Instances' identity (OIDC)"). Then references into another environment and a Git login's `roll://` secret, bound to their makers (roll secrets' #407; "Secrets and environments", "Private Git repositories"), and `explain`'s own catalogue row (MCP's review). Then runtime config's address and the trace intake as `rlr_` secrets with the leak hook ("Instances' identity (OIDC)"). Then bound references' folders in the environment's digest (`digest_as`). A review after them (2026-11-20 evening: the product against the same seven, each gap grepped in the code, and a bug review of the day's newest work) put items 1–6 in (work after the answer was built first: "Work after the answer"; then cost by service: "Spend limits"; then error groups for Ruby, PHP, .NET, Rust and Elixir: "Errors") (per-instance CPU and memory, which it took for missing, is Metrics' `by_instance`) and found seven bugs, fixed: scale-in and sleep stopped an instance in 10 s whatever its `drain_s`; ECR tokens were refreshed only from one node's memory, so a restart or a takeover let the 12-hour token lapse; a job's retry could run a deployment that went live after it started; one environment's job could take every job container on a node (`parallelism` 1–100, now 1–10); a leaked address's redeploy was refused by a freeze and shipped staged settings (now a rollback to the live deployment); a push loop stuck on one record past its lease let another take the partition and deliver past it; a failed "Why did it fail?" could be asked again at once (each try charged). Pushes and scheduled calls signed with roll's OIDC token were built next ("A stream pushed to a web service"), then instances held awake while their CPU is busy ("Work after the answer"), then log retention, which found that nothing deleted stored logs at all ("Observability and cost"), then a remote build cache for Turborepo and Nx ("A remote build cache"). A review after them (2026-11-21 02:30: the product against the same seven, each gap grepped in the code, and a bug and security review of #562, #566 and the open log-retention and build-cache work) put items 1–9 in and found nine bugs, fixed: any service could ask its `ROLL_OIDC_URL` for a token whose audience is another environment's URL and sign pushes and scheduled calls to it (audiences on the apps domain are refused now, and apps are told to check `sub`); a leaked build cache token's artifacts stayed and kept being read, and a deploy without the cache still used it (a leak empties the cache, `no_cache` gets none); the cache's rows could name another upload's or a deleted object (each upload has its own key, swapped in one write); caches were never deleted and their cap was hourly; one cache served every source of an environment (now one a source); every closed environment would have read as needing a deploy after the upgrade (the fingerprint's `3:` form); job logs outlived their retention and their environment; the network sweep could take a network a build was setting up; closed previews' costs each had a row. Runtime-only variables were built first ("Variables in builds"), then deploy approvals ("Deploy approvals"), then bigger build machines ("Where builds run"), then `s3` log drains ("Log drains"), then status badges ("Status badges"), then stored logs metered ("Prices"), then drains into the project's own bucket ("Log drains"), then build caches metered ("A remote build cache"). A review after them (2026-11-21 07:30: the product against the same seven, each gap grepped in the code, and a bug and security review of #576–#590) put items 2–9 in and found eight bugs, fixed: anyone who could deploy to production could turn approvals off (now an admin's call, as a freeze is); a person could approve their own deploy made with their own token (an approval is compared with the person behind the deploy); a second or late approval put an old build live again (only the approval that makes the count acts, and one of a build older than what's live is a 409); a waiting build ran with production's values on its own URL before anyone approved it (nothing of it runs until then); a bucket drain's fields weren't in the TypeScript client or the CLI; stored-data metering counted an hour twice after a restart or a takeover (marked once an hour in the same write); the badge's link was the loopback address on one node; a bucket drain and its key's record were two writes. A Git URL service's submodules were built first ("Deploying from a Git URL"), then keys a closed environment uses without seeing them, once roll previews' #535 put `roll-intercept` on main ("Egress"), then a Git URL service's LFS objects ("Deploying from a Git URL"), then CPU and memory for jobs and scheduled commands ("One-off jobs"), then roll previews' `closed_by` (its rules' maker for a pv- environment's placeholders, "Egress"), then the secrets scan of a static site's files ("Secret values in logs"), then a closed environment's interception counts ("Egress"), then a roll code repo's submodules ("Builds"), then `closed_by` on an open daemon (roll previews' gate found it refused there) and as an admin field, then edge settings as code ("Edge settings as code"), then alerts on CPU and on the app's own gauges ("Metric and log alerts"), then workers that scale to zero ("Workers that follow their work"), then `roll apps import` for any platform's file and the CLI for SBOMs, objectives, forms and the preview domain, then gRPC health checks ("HTTP/2 and gRPC"). A review after them (2026-11-21 evening: the product against the same seven, each gap grepped in the code, and a bug and security review of #603, #610, #612 and the roll code submodules) put items 3–6 in and found six bugs, fixed: a token the operator made could name a closed environment's maker (no token can now); a service's allowed private submodule repos stayed when its source moved to another repo, whose writers could then pin them; submodules had no file budget between them; Git LFS asked the superproject for a submodule's objects; a static site whose export failed was served by a container without its secrets scan; the allowed list compared names by case. Production builds were given a slot of their own past previews' ("Builds"), then OpenTelemetry with no code for Node and Python ("Traces"), then an environment's own data ("An environment's own data"); a review of it found that the Postgres branch's URL held the project's superuser login, that branch names could be another tenant's (Redis') and that Redis was branched off its owner on a fleet, fixed by going through roll previews' branch adapters; then UDP services ("UDP services"), then an environment whose schedules don't run (roll previews' pv- environments). A review of #603 by roll secrets found that every listing and staleness check made placeholders (a closed environment needed a deploy forever), that opening one didn't end them, that a dynamic credential was dropped silently, and that renewal and restart broke running instances. The first three are fixed ("Egress"); renewal and restart came next: both CAs in the bundle until the new one is served, placeholders made again asleep, adopted instances moved after a restart ("Egress"). Then containers made by an API ("Sandboxes" under One-off jobs).
 
-1. *Waiting on roll previews' #535 (`crates/roll-intercept`, rolld's `CaInterception`).* **Keys a
-   closed environment uses without seeing them** (roll secrets' #520, Infisical's Agent Vault): a
-   closed environment's resolves take placeholders (consumer `apps:service:<id> (untrusted)`), its
-   egress proxy hands a covered `CONNECT` host to `roll_intercept::serve` (TLS terminated for the
-   hosts its keys are bound to only, `rlph_` placeholders swapped by `proxy::filter`, upstream
-   re-dialled with real verification), the CA goes in instances' trust store (variable files and
-   `NODE_EXTRA_CA_CERTS`, `SSL_CERT_FILE`, `REQUESTS_CA_BUNDLE`, `CURL_CA_BUNDLE`), a new CA
-   redeploys, `end_consumer` at teardown; everything else stays a tunnel.
-2. **Git submodules and LFS in builds** (Vercel's, Netlify's, Render's): a Git URL service's
-   submodules aren't followed (`git_source.rs`) and LFS pointers are built as text; `build.submodules`
-   and `build.lfs`, fetched through the public-only client with the service's Git login, bounded
-   by the bytes present, written by `materialize`'s rules.
-3. **Edge settings as code** (fly.toml, vercel.json, render.yaml): headers, routes, checks, the
-   firewall and the rate limit in roll.toml's `[app.environments.<env>]`, read from the default
-   branch, only tightening access; in `roll apps export` and the schema too.
-4. **Alerts on CPU and on the app's own metrics** (Railway's, Cloud Monitoring): `alerts.cpu_pct`
-   and `alerts.metrics[]` over the Prometheus, OTLP and log-metric series, judged each minute.
-5. **CPU and memory for jobs and cron runs** (Heroku's `run --size`, Cloud Run jobs): `cpu` and
-   `memory_mb` on a job and on `run.schedules[]`, metered by size (the CLI's `--parallelism` help
-   says 1–100: it's 1–10).
-6. **Workers that scale to zero on their stream's lag** (KEDA): a worker with `run.scale` on a
-   stream may have `min_instances: 0`, an instance starting while lag is above 0.
-7. **`roll apps import` for any file**: render.yaml, fly.toml, railway.json, app.json detected and
-   posted to `/v1/apps/import` (only compose has a command), and `deploys --sbom`, `slo`, `forms`
-   and `preview-domain` in the CLI.
-8. **gRPC health checks** (Cloud Run's, Kubernetes'): `run.health_grpc` over h2c, a unary
-   `grpc.health.v1.Health/Check`.
-9. **Secrets in a static site's published files** (Netlify's scan): its exported files run through
-   `logs::Redact` before they're served, failing the deploy naming the file and the variable.
-10. **A private network into the customer's own** (Cloud Run's Direct VPC egress, Fly's WireGuard,
+1. *Waiting on roll search's `feature/search-relevance-api` (keys with `indices` and `access: read|append`).* **Narrowed search links** (roll search's review): a search link's key is a `data` key over every
+   index; a link's `indices` (patterns, `tenant-*`) and `access` (read, write), in roll.toml's
+   `[databases]` and the links API, passed through to search's keys route, so a SaaS limits a
+   service to its tenants' indices and gives a frontend a read-only key.
+2. *Waiting on the same.* **A log drain into a roll search data stream** (Elastic's, OpenSearch's ingestion): a drain
+   naming a search cluster on the project, its lines as ECS documents into
+   `logs-roll.apps-<env>` through the cluster's `_bulk` (`create` actions only) with a key minted
+   for the drain (as a bucket drain's), revoked with it: `create_doc` and `auto_configure` on that
+   exact data stream and nothing else, so a leaked one appends and never reads, overwrites or
+   deletes; the stream's index template and lifecycle (retention) set once through the cluster's
+   admin path when the drain is made (roll search reviews the key and the template).
+3. **A private network into the customer's own** (Cloud Run's Direct VPC egress, Fly's WireGuard,
    Heroku's Private Spaces): a project's peer (WireGuard config or a Tailscale key, a sealed
    `roll://` secret) run as a relay on the environment's network, as egress relays are, with
    `run.private_routes` that closed egress allows.
-11. **Signed images and provenance** (Cloud Run's Binary Authorization): SLSA provenance and a
+4. **Signed images and provenance** (Cloud Run's Binary Authorization): SLSA provenance and a
    cosign signature on roll's builds, and a project's `require_signed` that image services meet
    before switching.
-12. **Browser checks** (Checkly through Vercel, Netlify's Lighthouse): a `checks[].browser`
+5. **Browser checks** (Checkly through Vercel, Netlify's Lighthouse): a `checks[].browser`
    Playwright script run through `Runtime`, gating rollouts as objectives do. It needs a checker
    image of roll's own: Playwright's (`mcr.microsoft.com/playwright`) holds the browsers but not
    the library, and a check mustn't install packages at each run.
-13. **GPUs** (Cloud Run's, Fly's), ranked down: `run.gpu`, Docker's device requests, the node's
+6. **GPUs** (Cloud Run's, Fly's), ranked down: `run.gpu`, Docker's device requests, the node's
    capacity in placement, a price; Fargate refuses it.
-14. *Waiting on the user (who pays).* **"Why did it fail?" for any source and for crash loops**
+7. *Waiting on the user (who pays).* **"Why did it fail?" for any source and for crash loops**
    (Vercel's, Netlify's): a Git URL, GitHub App or upload service has no roll code owner to ask;
    the operator's provider under a per-project cap would do, and a crash loop after going live
    (`…/crashes/explain`). Also open: a service may name any repo that resolves, so its failures
    are explained on that repo owner's bill until projects and roll code owners are linked
    (#501's members).
-15. **An ignore command** (Vercel's `ignoreCommand`, Netlify's `[build] ignore`), ranked down:
+8. **An ignore command** (Vercel's `ignoreCommand`, Netlify's `[build] ignore`), ranked down:
    watch paths already skip a deploy that touches nothing relevant, and the usual command
    (`git diff --quiet HEAD^ HEAD ./`) needs git history, which a deploy's fetched tree doesn't
    have. It needs a sandboxed run of the command on a checkout with the previous revision.
-16. **Page-level component tests**, ranked down: Saving Settings is covered
+9. **Page-level component tests**, ranked down: Saving Settings is covered
    (`settings-tab.test.tsx`), and push across a takeover and against the real broker
    (`cluster.rs`, rolld's `apps::tests`); the Deploy button, following logs, applying an import,
    notifications and rotating the address render inside the whole service page (router, shell,
    every tab), and their flows are covered at the API (`api.rs`) and in `deployments.test.tsx`.
    Worth it once the page splits its tabs into components of their own.
-17. *Waiting on the user.* **Signed-in people, not just admins** (every competitor; roll search and
+10. *Waiting on the user.* **Signed-in people, not just admins** (every competitor; roll search and
    secrets do): `roll_auth::SignedIn` scoped through `Workspace::trusts`, others' services 404.
    Letting non-admins run code on a node's Docker is the user's call first.
-18. *Waiting on the fleet's first run.* **Cached answers across nodes and at the edge** (Vercel's, Netlify's): today the owner's
+11. *Waiting on the fleet's first run.* **Cached answers across nodes and at the edge** (Vercel's, Netlify's): today the owner's
    proxy alone keeps them; the storage CDN's purge outbox could carry the purges.
    Across nodes means a node that doesn't own the service answering from its own copy, which
    needs the owner's say that the environment has no gate (access, allow list, firewall, rate
    limit) on each answer, a generation per environment for purges, and hits metered and logged
    where the owner reads them: only worth it once the fleet serves traffic.
-19. **Egress on the fleet** (Fargate): a security group per closed environment's tasks with no
+12. **Egress on the fleet** (Fargate): a security group per closed environment's tasks with no
    outbound rule but the egress proxy's, and the proxy as a task or on the node; until then
    Fargate refuses `egress: roll` (409). *Waiting on the fleet's first run.*
-20. *Waiting on queues as a workspace resource.* **Workers that follow a queue's depth**, as they
+13. *Waiting on queues as a workspace resource.* **Workers that follow a queue's depth**, as they
    follow a stream group's lag now (a queue's project is what keeps another tenant's depth
    unread).
-21. **Region**: the region shown on the overview and each environment, defaulting to the project's
+14. **Region**: the region shown on the overview and each environment, defaulting to the project's
    databases', then a choice per environment once the fleet has a second region (Railway's,
    Fly's). *Waiting on the fleet.*
-22. **Static outbound IPs**: a NAT gateway with Elastic IPs on the fleet's subnets, listed in
+15. **Static outbound IPs**: a NAT gateway with Elastic IPs on the fleet's subnets, listed in
    Settings, without stopping services from sleeping (Railway's and Render's). A roll-hosted app
    linked to a search cluster with an IP allowlist (search #243) needs them on the list; until
    then such a cluster stays open (on one node, the link relay's loopback is what it sees). *Waiting on the
    user's first AWS run.*
-23. *Waiting on the edge's owner (roll cloud).* **gRPC from the internet**: roll-edge's HTTPS
+16. *Waiting on the edge's owner (roll cloud).* **gRPC from the internet**: roll-edge's HTTPS
    listener offering `h2` (ALPN `h2, http/1.1`; hyper's `http2::Builder` when `h2` is chosen,
    with the same graceful drain) and setting `Host` from `:authority` (HTTP/2 has no `Host`,
    and every product behind the edge routes on it), so Cloudflare's gRPC reaches h2c apps.
    Done here: `run.h2c` to the app, trailers through the proxy. Then TCP services.
-24. **roll secrets as the env store**: the wiring is done (deploys resolve the project's secrets,
+17. **roll secrets as the env store**: the wiring is done (deploys resolve the project's secrets,
    digests mark "needs deploy", roll secrets' reveal rules, linked and sensitive keys, dynamic
    credentials refused, new environments ensured); what's left is service variables kept in roll
    secrets at `/services/<name>` (one store for both), and links as per-environment secrets
    links.
-25. *Waiting on the user.* The fleet runtime in the stack: the roles, project, security group and
+18. *Waiting on the user.* The fleet runtime in the stack: the roles, project, security group and
    settings listed in "Not done yet", a first run against AWS with its cold starts measured (a
    warm window or `min_instances` 1 by default there until a wake is fast), and
    allocation-based metering for Fargate.
-26. *Waiting on the edge's owner (roll cloud).* **Wildcard certificates**: DNS-01 on a delegated
+19. *Waiting on the edge's owner (roll cloud).* **Wildcard certificates**: DNS-01 on a delegated
    `_acme-challenge.<base>` CNAME into a zone roll writes (`roll_edge::acme`'s DNS solver at
    another name), then `DomainTls::wildcards` true there; the routing and verification are done.
-27. *Waiting on the edge's owner (roll cloud).* **Bring your own certificate** (Vercel's,
+20. *Waiting on the edge's owner (roll cloud).* **Bring your own certificate** (Vercel's,
    Heroku's SNI, Fly's import): `PUT …/domains/{host}/certificate {cert_pem, key_pem}`, sealed,
    served by SNI at the edge (and Cloudflare's custom certificates), expiry through
    `domain.expiring`.
-28. *Waiting on a static build (no musl target on ai-server, and adding one is the shared toolchain's).* **A waker that takes every caller while the app starts**: busybox `nc -l` takes one, so a burst
+21. *Waiting on a static build (no musl target on ai-server, and adding one is the shared toolchain's).* **A waker that takes every caller while the app starts**: busybox `nc -l` takes one, so a burst
    of private calls to a stopped service loses all but the first (refused). A waker of roll's own
    (roll-fetch's `wake` mode, a static binary mounted read-only) that accepts each, holds them,
    and hands them over once the app listens; the cheap accept count already tells rolld.
-29. Custom domains' TLS on the fleet for real (the zone settings in "Not done yet", authenticated
+22. Custom domains' TLS on the fleet for real (the zone settings in "Not done yet", authenticated
     origin pulls for custom hostnames, then a first domain through Let's Encrypt and Cloudflare).
-30. **The rest of a cold start**: done: the network in a sandbox (258 → 175 ms); next, snapshot
+23. **The rest of a cold start**: done: the network in a sandbox (258 → 175 ms); next, snapshot
     restore (CRIU, which needs the host's Docker daemon with checkpoints on: the user's call), or
     Firecracker microVM hosts on the fleet.
-31. EFS volumes and Cloud Map private DNS on the fleet; TCP services on the fleet (the edge carrying TCP to a service's owner).
+24. EFS volumes and Cloud Map private DNS on the fleet; TCP services on the fleet (the edge carrying TCP to a service's owner).

@@ -385,6 +385,14 @@ async fn shell(api: &Api, preview: &str, service: Option<&str>) -> anyhow::Resul
 }
 
 /// A project by id or name.
+/// The API with `X-Roll-Project` naming `project`: what roll-access decides a create by (a member's
+/// role there, a token's rule); previews refuses one whose body names another project.
+fn in_project(api: &Api, project: &str) -> Api {
+    let mut headers = api.headers.clone();
+    headers.push(("x-roll-project".into(), project.into()));
+    Api { base: api.base.clone(), http: api.http.clone(), key: api.key.clone(), headers, login: api.login.clone() }
+}
+
 async fn project_id(api: &Api, p: &str) -> anyhow::Result<String> {
     if p.starts_with("prj_") {
         return Ok(p.to_string());
@@ -687,6 +695,9 @@ fn print_preview(p: &Value) {
     if let Some(runs) = p["runs"].as_str() {
         println!("runs {} (later pushes touched only ignored paths)", &runs[..runs.len().min(12)]);
     }
+    if let Some(t) = timeline_line(p) {
+        println!("{t}");
+    }
     for x in p["earlier"].as_array().into_iter().flatten() {
         let rev = s(&x["revision"]);
         println!("earlier  {} at {}  {}", s(&x["service"]), rev.trim_start_matches("cs_").chars().take(10).collect::<String>(), s(&x["share_url"]));
@@ -707,6 +718,30 @@ fn print_preview(p: &Value) {
             println!("  {l}");
         }
     }
+}
+
+/// How its head came up: "up in 9.4 s: data 4.1 s · setup 1.2 s · deploy 0.0 s · checks 0.4 s", or
+/// "so far: …" while it's on its way (its `timeline`).
+fn timeline_line(p: &Value) -> Option<String> {
+    let t = &p["timeline"];
+    let started = t["started_at"].as_i64()?;
+    let steps: Vec<(&str, i64)> = t["steps"].as_array()?.iter().filter_map(|x| Some((x["step"].as_str()?, x["at"].as_i64()?))).collect();
+    if steps.is_empty() {
+        return None;
+    }
+    let secs = |ms: i64| format!("{:.1} s", ms as f64 / 1000.0);
+    let mut prev = started;
+    let mut parts = Vec::new();
+    for (step, at) in &steps {
+        if *step != "ready" {
+            parts.push(format!("{step} {}", secs(at - prev)));
+        }
+        prev = *at;
+    }
+    Some(match steps.iter().find(|(s, _)| *s == "ready") {
+        Some((_, at)) => format!("up in {}: {}", secs(at - started), parts.join(" · ")),
+        None => format!("so far: {}", parts.join(" · ")),
+    })
 }
 
 /// `roll preview wait`: poll the preview until it's ready (or sleeping: ready and idle) at the
@@ -753,6 +788,10 @@ async fn wait(api: &Api, as_json: bool, preview: Option<String>, change: Option<
                     if as_json {
                         println!("{}", serde_json::to_string_pretty(p)?);
                     } else {
+                        // Where its time went, beside the URL (stderr: a script reads the URL).
+                        if let Some(t) = timeline_line(p) {
+                            eprintln!("{}: {t}", s(&p["id"]));
+                        }
                         println!("{url}");
                     }
                     return Ok(());
@@ -853,8 +892,9 @@ pub async fn run(api: &Api, as_json: bool, cmd: Preview) -> anyhow::Result<()> {
             v
         }
         Preview::Create { project, repo, branch, change, wait: then_wait, timeout } => {
-            let body = json!({ "project": project_id(api, &project).await?, "repo": repo, "branch": branch, "change": change });
-            let v = api.post("/v1/previews", body).await?;
+            let project = project_id(api, &project).await?;
+            let body = json!({ "project": project, "repo": repo, "branch": branch, "change": change });
+            let v = in_project(api, &project).post("/v1/previews", body).await?;
             if then_wait {
                 let id = v["id"].as_str().unwrap_or_default().to_string();
                 return wait(api, as_json, Some(id), None, None, timeout).await;
@@ -876,7 +916,7 @@ pub async fn run(api: &Api, as_json: bool, cmd: Preview) -> anyhow::Result<()> {
             if !as_json {
                 eprintln!("pushed {} to {} in {}", &commit[..12], w.branch, w.repo);
             }
-            let v = api.post("/v1/previews", json!({ "project": project, "repo": w.repo, "branch": w.branch })).await?;
+            let v = in_project(api, &project).post("/v1/previews", json!({ "project": project, "repo": w.repo, "branch": w.branch })).await?;
             if !no_wait {
                 return wait(api, as_json, Some(s(&v["id"])), None, None, timeout).await;
             }

@@ -236,6 +236,8 @@ pub struct FakeApps {
     pub woken: Mutex<Vec<(String, String)>>,
     /// What a service answers on its health path (unset: the backend can't tell).
     pub answers: Mutex<Option<(u16, String)>>,
+    /// How many health checks find the service still starting (asked again later).
+    pub starting: std::sync::atomic::AtomicUsize,
     /// The variables each service was last deployed with.
     pub vars: Mutex<HashMap<(String, String), Vars>>,
     pub removed: Mutex<Vec<(String, String)>>,
@@ -335,6 +337,10 @@ impl Apps for FakeApps {
         *self.memory.lock()
     }
     async fn probe(&self, _: &str, _: &str, _path: &str) -> anyhow::Result<Option<(u16, String)>> {
+        if self.starting.load(Ordering::SeqCst) > 0 {
+            self.starting.fetch_sub(1, Ordering::SeqCst);
+            return Err(roll_previews::ports::StillDeploying("starting".into()).into());
+        }
         Ok(self.answers.lock().clone())
     }
     async fn wake(&self, preview: &str, service: &str) -> anyhow::Result<()> {
@@ -450,6 +456,9 @@ impl Apps for FakeApps {
     async fn egress_refused(&self, _: &str) -> Vec<String> {
         Vec::new()
     }
+    async fn intercepted(&self, _: &str) -> Option<roll_previews::AppsIntercepted> {
+        None
+    }
 }
 
 /// roll secrets as previews see it: every `ensure` (environment, trusted). With `dynamic`, each
@@ -527,6 +536,8 @@ pub struct FakeSecrets {
     pub refs: Mutex<Vec<(String, String)>>,
     /// Resolves that asked for placeholders: (consumer, maker).
     pub placeholders: Mutex<Vec<(String, String)>>,
+    /// What those resolves answer as placeholders: (key, its bound hosts).
+    pub placeholder_hosts: Mutex<Vec<(String, Vec<String>)>>,
     /// Values every resolve answers (static secrets).
     pub values: Mutex<Vec<(String, String)>>,
     /// Why each resolve was asked for (`logs`: values read to mask output).
@@ -544,7 +555,9 @@ impl roll_previews::ports::Secrets for FakeSecrets {
     }
     async fn resolve_with_placeholders(&self, project: &str, env: &str, untrusted: bool, dynamic: bool, consumer: &str, maker: &str) -> anyhow::Result<roll_previews::ports::Resolved> {
         self.placeholders.lock().push((consumer.to_string(), maker.to_string()));
-        self.resolve(project, env, untrusted, dynamic, consumer).await
+        let mut got = self.resolve(project, env, untrusted, dynamic, consumer).await?;
+        got.placeholders = self.placeholder_hosts.lock().clone();
+        Ok(got)
     }
     async fn resolve(&self, _: &str, _: &str, _: bool, dynamic: bool, reason: &str) -> anyhow::Result<roll_previews::ports::Resolved> {
         self.reasons.lock().push(reason.to_string());
@@ -555,7 +568,7 @@ impl roll_previews::ports::Secrets for FakeSecrets {
         }
         let n = self.issued.fetch_add(1, Ordering::SeqCst) + 1;
         let values = values.into_iter().chain([("DB_PASSWORD".into(), format!("pw-{n}"))]).collect();
-        Ok(roll_previews::ports::Resolved { values, problems: Vec::new(), leases: vec![format!("lease-{n}")], followed, plain: Vec::new() })
+        Ok(roll_previews::ports::Resolved { values, problems: Vec::new(), leases: vec![format!("lease-{n}")], followed, plain: Vec::new(), placeholders: Vec::new() })
     }
     async fn links(&self, _: &str, _: &str) -> anyhow::Result<Vec<(String, Kind, String, String)>> {
         Ok(self.links.lock().clone())

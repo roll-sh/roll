@@ -72,6 +72,16 @@ pub fn allowed(hosts: &[String], ports: &[u16], host: &str, port: u16) -> bool {
         })
 }
 
+/// What a closed network's interception did (roll previews' sheet shows it): requests filtered,
+/// placeholders swapped, and the latest refusals' reasons (never a value or a placeholder).
+#[derive(Clone, Debug, Default, PartialEq, serde::Serialize)]
+pub struct Intercepted {
+    pub requests: u64,
+    pub swapped: u64,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub refused: Vec<String>,
+}
+
 /// A host the proxy refused: not listed, or listed but resolving only to private addresses.
 #[derive(Clone, Debug, PartialEq, serde::Serialize)]
 pub struct Refused {
@@ -85,6 +95,11 @@ struct Proxy {
     hosts: Vec<String>,
     ports: Vec<u16>,
     refused: Mutex<VecDeque<Refused>>,
+    /// The network's interception: a listed host it covers has its TLS terminated and each
+    /// request filtered (roll secrets' placeholders swapped), never tunnelled.
+    intercept: Mutex<Option<Arc<dyn roll_intercept::Interception>>>,
+    /// Every network's interception counts ([`Proxies::intercepted`]).
+    counts: Arc<Mutex<HashMap<String, Intercepted>>>,
 }
 
 impl Proxy {
@@ -104,13 +119,33 @@ pub struct Proxies {
     /// Connect to private addresses too (local development and tests).
     allow_private: bool,
     serving: Mutex<HashMap<String, Arc<Proxy>>>,
+    /// Each closed network's interception, for its proxies (one made later takes it too).
+    intercepts: Mutex<HashMap<String, Arc<dyn roll_intercept::Interception>>>,
+    /// What each network's interception did, since this process started.
+    counts: Arc<Mutex<HashMap<String, Intercepted>>>,
 }
 
 impl Proxies {
     /// Sockets under `dir`. A previous process's directories stay: a relay still running
     /// mounts one, and sees the socket made in it again ([`Proxies::serve`] replaces the file).
     pub fn new(dir: PathBuf, allow_private: bool) -> Proxies {
-        Proxies { dir, allow_private, serving: Mutex::new(HashMap::new()) }
+        Proxies { dir, allow_private, serving: Mutex::new(HashMap::new()), intercepts: Mutex::new(HashMap::new()), counts: Arc::new(Mutex::new(HashMap::new())) }
+    }
+
+    /// What `network`'s interception did (none: nothing yet on this node).
+    pub fn intercepted(&self, network: &str) -> Option<Intercepted> {
+        self.counts.lock().get(network).cloned()
+    }
+
+    /// `network`'s interception from now on (none: its proxies tunnel every listed host).
+    pub fn set_interception(&self, network: &str, i: Option<Arc<dyn roll_intercept::Interception>>) {
+        match &i {
+            Some(i) => self.intercepts.lock().insert(network.to_string(), i.clone()),
+            None => self.intercepts.lock().remove(network),
+        };
+        for p in self.serving.lock().values().filter(|p| p.network == network) {
+            *p.intercept.lock() = i.clone();
+        }
     }
 
     /// The list's socket directory (its relays mount it).
@@ -140,7 +175,8 @@ impl Proxies {
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o666))?;
         l.set_nonblocking(true)?;
         let listener = tokio::net::UnixListener::from_std(l)?;
-        let proxy = Arc::new(Proxy { network: network.to_string(), hosts: sorted, ports: WEB_PORTS.to_vec(), refused: Mutex::new(VecDeque::new()) });
+        let intercept = self.intercepts.lock().get(network).cloned();
+        let proxy = Arc::new(Proxy { network: network.to_string(), hosts: sorted, ports: WEB_PORTS.to_vec(), refused: Mutex::new(VecDeque::new()), intercept: Mutex::new(intercept), counts: self.counts.clone() });
         self.serving.lock().insert(d.clone(), proxy.clone());
         let allow_private = self.allow_private;
         tokio::spawn(async move {
@@ -209,7 +245,7 @@ impl<C: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static> J
 
 /// One caller: its request's head read and checked, its target connected. A refusal answers
 /// 403 and keeps the host.
-async fn handle<C: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin>(mut caller: C, proxy: &Proxy, allow_private: bool) -> Option<Joined<C>> {
+async fn handle<C: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static>(mut caller: C, proxy: &Proxy, allow_private: bool) -> Option<Joined<C>> {
     let mut head = Vec::with_capacity(1024);
     let end = loop {
         if let Some(i) = head.windows(4).position(|w| w == b"\r\n\r\n") {
@@ -247,6 +283,37 @@ async fn handle<C: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin>(mut cal
         let body = format!("roll apps: {why}\n");
         format!("HTTP/1.1 {status}\r\ncontent-type: text/plain\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}", body.len())
     };
+    // A listed host the network's keys are bound to: its TLS terminated with the interception
+    // CA's leaf and each request filtered (placeholders swapped), re-dialled with real
+    // verification (`roll_intercept::serve`). Listed first: the list decides what's reached.
+    let intercept = proxy.intercept.lock().clone().filter(|i| connect && allowed(&proxy.hosts, &proxy.ports, &host, port) && i.covers(&host.trim_end_matches('.').to_ascii_lowercase()));
+    if let Some(i) = intercept {
+        if caller.write_all(b"HTTP/1.1 200 Connection established\r\n\r\n").await.is_err() {
+            return None;
+        }
+        // Whatever followed the CONNECT's head (a ClientHello sent at once) is the TLS's start.
+        let early = head[end..].to_vec();
+        let dial = if allow_private { roll_intercept::any_dial() } else { roll_intercept::public_dial() };
+        let (counts, network) = (proxy.counts.clone(), proxy.network.clone());
+        tokio::spawn(async move {
+            let (r, w) = tokio::io::split(caller);
+            let client = tokio::io::join(std::io::Cursor::new(early).chain(r), w);
+            let served = roll_intercept::serve(client, &host, port, i, roll_intercept::system_upstream(), dial).await;
+            let mut all = counts.lock();
+            let c = all.entry(network).or_default();
+            match served {
+                Ok(s) => {
+                    c.requests += s.requests as u64;
+                    c.swapped += s.swapped as u64;
+                    c.refused.extend(s.blocked);
+                }
+                Err(e) => c.refused.push(format!("{host}: {e}")),
+            }
+            let over = c.refused.len().saturating_sub(KEEP_REFUSED);
+            c.refused.drain(..over);
+        });
+        return None;
+    }
     let up = match connect_to(&proxy.hosts, &proxy.ports, &host, port, allow_private).await {
         Ok(up) => up,
         Err(Refusal::Policy(why, private)) => {
@@ -367,7 +434,7 @@ mod tests {
     /// What the proxy answers a caller's `req` with, and what it kept as refused: `hosts` on
     /// `port` (a test server's, standing in for 443 and 80).
     async fn through(hosts: &[&str], port: u16, allow_private: bool, req: String) -> (String, Vec<Refused>) {
-        let proxy = Proxy { network: "n".into(), hosts: hosts.iter().map(|h| h.to_string()).collect(), ports: vec![port], refused: Mutex::new(VecDeque::new()) };
+        let proxy = Proxy { network: "n".into(), hosts: hosts.iter().map(|h| h.to_string()).collect(), ports: vec![port], refused: Mutex::new(VecDeque::new()), intercept: Mutex::new(None), counts: Default::default() };
         let (mut a, b) = tokio::io::duplex(1 << 16);
         a.write_all(req.as_bytes()).await.unwrap();
         if let Some(j) = handle(b, &proxy, allow_private).await {
@@ -426,5 +493,50 @@ mod tests {
         // An https:// URL without CONNECT isn't a request a proxy forwards.
         let (out, _) = through(&["localhost"], port, true, "GET https://localhost/ HTTP/1.1\r\n\r\n".into()).await;
         assert!(out.starts_with("HTTP/1.1 400"), "{out}");
+    }
+
+    /// A listed host the network's keys are bound to is intercepted (its CONNECT answered 200
+    /// and handed to the interception, which is asked if it stands), never tunnelled.
+    #[tokio::test]
+    async fn a_covered_listed_host_is_intercepted() {
+        struct Counting(std::sync::atomic::AtomicUsize);
+        impl roll_intercept::Interception for Counting {
+            fn live(&self) -> anyhow::Result<bool> {
+                self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                Ok(false)
+            }
+            fn covers(&self, host: &str) -> bool {
+                host == "api.stripe.com"
+            }
+            fn leaf(&self, _host: &str) -> anyhow::Result<roll_intercept::Leaf> {
+                anyhow::bail!("none")
+            }
+            fn filter(&self, _req: roll_intercept::Outgoing<'_>) -> Result<roll_intercept::Filtered, String> {
+                Ok(Default::default())
+            }
+        }
+        let i = Arc::new(Counting(std::sync::atomic::AtomicUsize::new(0)));
+        let proxy = Proxy { network: "n".into(), hosts: vec!["api.stripe.com".into()], ports: WEB_PORTS.to_vec(), refused: Mutex::new(VecDeque::new()), intercept: Mutex::new(Some(i.clone())), counts: Default::default() };
+        let (mut client, server) = tokio::io::duplex(4096);
+        client.write_all(b"CONNECT api.stripe.com:443 HTTP/1.1\r\nhost: api.stripe.com:443\r\n\r\n").await.unwrap();
+        assert!(handle(server, &proxy, false).await.is_none(), "not a tunnel");
+        let mut got = [0u8; 39];
+        client.read_exact(&mut got).await.unwrap();
+        assert!(got.starts_with(b"HTTP/1.1 200 Connection established"), "{:?}", String::from_utf8_lossy(&got));
+        for _ in 0..100 {
+            if i.0.load(std::sync::atomic::Ordering::SeqCst) > 0 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert!(i.0.load(std::sync::atomic::Ordering::SeqCst) > 0, "handed to the interception");
+        // Its refusal counted for the network (the CA no longer stands).
+        for _ in 0..100 {
+            if proxy.counts.lock().get("n").is_some_and(|c| !c.refused.is_empty()) {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert!(proxy.counts.lock().get("n").is_some_and(|c| c.refused.iter().any(|r| r.starts_with("api.stripe.com"))), "{:?}", proxy.counts.lock());
     }
 }

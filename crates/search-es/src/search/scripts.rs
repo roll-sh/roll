@@ -173,7 +173,7 @@ impl DocHost {
                     let e = HostError::illegal_argument(format!("Field requires resolving too many dependent fields: {}", names.join(" -> ")));
                     return Err(super::runtime::with_fork_frames(e, ty, 134));
                 }
-                let leaf = ev.leaf_chained(&self.seg, chain).map_err(|e| HostError::illegal_argument(super::runtime::innermost_reason(&e)))?;
+                let leaf = ev.leaf_chained(&self.seg, chain, &super::runtime::RuntimeSource::Fixed(self.runtime.clone())).map_err(|e| HostError::illegal_argument(super::runtime::innermost_reason(&e)))?;
                 self.rt_leaves.push((field.into(), Box::new(leaf)));
                 self.rt_leaves.len() - 1
             }
@@ -196,6 +196,14 @@ impl DocHost {
     pub fn with_memory(mut self, memory: Option<ScriptMemory>) -> DocHost {
         if memory.is_some() {
             self.memory = memory;
+        }
+        self
+    }
+
+    /// The host with `doc[...]` reading `runtime`'s runtime fields.
+    pub fn with_runtime(mut self, runtime: &super::runtime::RuntimeSource) -> DocHost {
+        if let super::runtime::RuntimeSource::Fixed(s) = runtime {
+            self.runtime = s.clone();
         }
         self
     }
@@ -1179,12 +1187,14 @@ pub struct Painless {
     /// The script counts loop statements (`max_loop_counter`) even in a search: the call
     /// site gives it no cancellation check (`function_score` script functions).
     pub counted: bool,
+    /// The runtime fields its `doc[...]` reads see.
+    pub runtime: super::runtime::RuntimeSource,
 }
 
 impl Painless {
     /// A document host for `seg`.
     pub fn host(&self, seg: &SegmentContext) -> DocHost {
-        let mut h = DocHost::new(self.table.clone(), seg.clone(), self.shard, self.index.clone());
+        let mut h = DocHost::new(self.table.clone(), seg.clone(), self.shard, self.index.clone()).with_runtime(&self.runtime);
         h.id_fielddata = self.id_fielddata;
         if self.counted { h.without_cancellation() } else { h }
     }

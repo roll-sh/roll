@@ -140,6 +140,10 @@ pub fn router(apps: Arc<Apps>) -> Router {
         .route(&format!("{env}/shell/sessions/{{sh}}/screen"), get(session_screen))
         .route(&format!("{env}/shell/sessions/{{sh}}/keys"), post(session_keys))
         .route(&format!("{env}/shell/sessions/{{sh}}/resize"), post(session_resize))
+        .route(&format!("{env}/sandboxes"), get(sandboxes).post(create_sandbox))
+        .route(&format!("{env}/sandboxes/{{sbx}}"), get(get_sandbox).delete(delete_sandbox))
+        .route(&format!("{env}/sandboxes/{{sbx}}/exec"), post(sandbox_exec))
+        .route(&format!("{env}/sandboxes/{{sbx}}/files"), get(sandbox_get_file).put(sandbox_put_file).layer(DefaultBodyLimit::max(crate::sandboxes::MAX_FILE)))
         .route(&format!("{env}/jobs"), get(jobs).post(start_job))
         .route(&format!("{env}/jobs/{{job}}"), get(get_job))
         .route(&format!("{env}/jobs/{{job}}/logs"), get(job_logs))
@@ -747,7 +751,12 @@ async fn rotate_config(State(apps): S, Path((id, env)): Path<(String, String)>, 
 
 async fn put_env(State(apps): S, Path((id, env)): Path<(String, String)>, ext: Extensions, b: Bytes) -> R {
     let put = body(&b)?;
-    let e = apps.put_environment(&id, &env, put.clone()).await?;
+    // Naming another maker is the operator's (roll previews in process), never anyone else's.
+    // No token names one, even the operator's own: it would make another's reach its code's.
+    if put.get("closed_by").is_some() && (roll_auth::Grant::on(&ext).is_some() || ext.get::<roll_auth::SignedIn>().is_some() || !(roll_auth::Operator::on(&ext) || apps.cfg.open)) {
+        return Err(Error::Forbidden("closed_by is the operator's to set (roll previews names its rules' maker)".into()));
+    }
+    let e = apps.put_environment_by(&id, &env, put.clone(), maker(&ext)).await?;
     apps.settings_changed();
     // The access token is a secret: the trail says it changed, never what it is.
     apps.audit("environment", &id, &env, actor(&ext), json!({ "changed": put.as_object().map(|o| o.keys().cloned().collect::<Vec<_>>()).unwrap_or_default() })).await;
@@ -1098,6 +1107,16 @@ fn person(ext: &Extensions) -> Option<String> {
         return Some(u.user.clone());
     }
     roll_auth::Operator::on(ext).then(|| "operator".to_string())
+}
+
+/// Who makes what a request sets up on someone's behalf (a closed environment's placeholders):
+/// the token itself when one asks (`token:<id>`: revoking or narrowing it stops what it made, as
+/// roll secrets' `maker_reaches` checks), else the signed-in person or the operator.
+fn maker(ext: &Extensions) -> Option<String> {
+    if let Some(g) = roll_auth::Grant::on(ext) {
+        return Some(format!("token:{}", g.id));
+    }
+    person(ext)
 }
 
 fn actor(ext: &Extensions) -> Option<String> {
@@ -1679,6 +1698,55 @@ async fn run_logs(State(apps): S, Path((id, env, run)): Path<(String, String, St
 async fn run_now(State(apps): S, Path((id, env)): Path<(String, String)>) -> R {
     let r = apps.run_cron(&id, &env).await?;
     Ok((StatusCode::ACCEPTED, Json(r)).into_response())
+}
+
+async fn sandboxes(State(apps): S, Path((id, env)): Path<(String, String)>) -> R {
+    apps.environment(&id, &env).await?;
+    ok(apps.sandboxes(&id, &env).await?)
+}
+
+async fn create_sandbox(State(apps): S, Path((id, env)): Path<(String, String)>, ext: Extensions, b: Bytes) -> R {
+    apps.environment(&id, &env).await?;
+    let sb = apps.create_sandbox(&id, &env, body(&b)?).await?;
+    apps.audit("sandbox.created", &id, &env, actor(&ext), json!({ "sandbox": sb.id, "image": sb.image, "variables": sb.variables, "network": sb.network })).await;
+    Ok((StatusCode::CREATED, Json(sb)).into_response())
+}
+
+async fn get_sandbox(State(apps): S, Path((id, env, sbx)): Path<(String, String, String)>) -> R {
+    ok(apps.sandbox(&id, &env, &sbx).await?)
+}
+
+async fn delete_sandbox(State(apps): S, Path((id, env, sbx)): Path<(String, String, String)>, ext: Extensions) -> R {
+    apps.delete_sandbox(&id, &env, &sbx).await?;
+    apps.audit("sandbox.deleted", &id, &env, actor(&ext), json!({ "sandbox": sbx })).await;
+    Ok(StatusCode::NO_CONTENT.into_response())
+}
+
+/// A command's run (its text isn't audited: it can hold a secret).
+async fn sandbox_exec(State(apps): S, Path((id, env, sbx)): Path<(String, String, String)>, ext: Extensions, b: Bytes) -> R {
+    let body = body(&b)?;
+    let out = apps.sandbox_exec(&id, &env, &sbx, body.clone()).await?;
+    let len = body.get("command").and_then(Value::as_str).map_or(0, str::len);
+    apps.audit("sandbox.command", &id, &env, actor(&ext), json!({ "sandbox": sbx, "command_bytes": len, "exit_code": out["exit_code"] })).await;
+    ok(out)
+}
+
+#[derive(Deserialize)]
+struct SandboxPath {
+    path: String,
+}
+
+async fn sandbox_get_file(State(apps): S, Path((id, env, sbx)): Path<(String, String, String)>, Query(q): Query<SandboxPath>, ext: Extensions) -> R {
+    let data = apps.sandbox_get_file(&id, &env, &sbx, &q.path).await?;
+    apps.audit("sandbox.file_read", &id, &env, actor(&ext), json!({ "sandbox": sbx, "path": q.path })).await;
+    Ok(([(header::CONTENT_TYPE, "application/octet-stream")], data).into_response())
+}
+
+async fn sandbox_put_file(State(apps): S, Path((id, env, sbx)): Path<(String, String, String)>, Query(q): Query<SandboxPath>, ext: Extensions, b: Bytes) -> R {
+    let bytes = b.len();
+    apps.sandbox_put_file(&id, &env, &sbx, &q.path, b).await?;
+    apps.audit("sandbox.file_written", &id, &env, actor(&ext), json!({ "sandbox": sbx, "path": q.path, "bytes": bytes })).await;
+    ok(json!({ "path": q.path, "bytes": bytes }))
 }
 
 async fn domains(State(apps): S, Path((id, env)): Path<(String, String)>) -> R {

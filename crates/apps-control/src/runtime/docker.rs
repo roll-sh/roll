@@ -273,6 +273,10 @@ impl Docker {
             for (cp, hp) in &extra {
                 args.extend(["--publish".into(), format!("127.0.0.1:{hp}:{cp}")]);
             }
+            // A UDP service's port over UDP too, on any free loopback port (the relay reads it).
+            if spec.udp {
+                args.extend(["--publish".into(), format!("127.0.0.1::{p}/udp")]);
+            }
         }
         if let Some(net) = &spec.network {
             args.extend(["--network".into(), net.clone()]);
@@ -742,6 +746,19 @@ impl Runtime for Docker {
         }
         Ok(())
     }
+    async fn udp_address(&self, name: &str, port: u16) -> Option<SocketAddr> {
+        for c in [sandbox_name(name), name.to_string()] {
+            let hp = match &self.engine {
+                Some(e) => e.inspect(&c).await.ok().and_then(|i| i.published_udp.get(&port).copied()),
+                None => docker(&["port", &c, &format!("{port}/udp")]).await.ok().and_then(|o| o.lines().next()?.rsplit_once(':')?.1.trim().parse().ok()),
+            };
+            if let Some(hp) = hp {
+                return Some(SocketAddr::from(([127, 0, 0, 1], hp)));
+            }
+        }
+        None
+    }
+
     async fn port_address(&self, name: &str, port: u16) -> Option<SocketAddr> {
         // Published on the sandbox when it has one, else on the instance.
         for c in [sandbox_name(name), name.to_string()] {
@@ -1035,6 +1052,52 @@ impl Runtime for Docker {
         out.split_whitespace().next()?.parse::<u64>().ok().map(|kib| kib * 1024)
     }
 
+    async fn exec_output(&self, name: &str, command: &str, timeout: Duration, max: usize) -> anyhow::Result<super::ExecOutput> {
+        use tokio::io::AsyncReadExt;
+        anyhow::ensure!(name.starts_with(super::PREFIX), "{name} isn't a roll apps instance");
+        // Killed in the container at its timeout, with everything it started: ending `docker exec`
+        // here leaves the command running, and `timeout` kills only its own child. It runs in a
+        // process group of its own (`setsid`, busybox's and util-linux's) that a watcher kills
+        // whole (`kill -9 -<group>`, the one spelling both dash and busybox take); without
+        // `setsid`, just its shell. The command goes as `$0`, never spliced into the script.
+        let secs = timeout.as_secs().max(1).to_string();
+        let wrap = r#"if command -v setsid >/dev/null 2>&1; then setsid sh -c "$0" & p=$!; setsid sh -c 'sleep "$0"; kill -9 -"$1"' "$1" "$p" >/dev/null 2>&1 & w=$!; else sh -c "$0" & p=$!; (sleep "$1"; kill -9 "$p") >/dev/null 2>&1 & w=$!; fi; wait "$p"; c=$?; kill -9 -"$w" 2>/dev/null || kill -9 "$w" 2>/dev/null; exit "$c""#;
+        let mut child = Command::new("docker")
+            .args(["exec", name, "sh", "-c", wrap, command, &secs])
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .kill_on_drop(true)
+            .spawn()
+            .context("running docker exec")?;
+        let (mut out, mut err) = (child.stdout.take().context("no stdout")?, child.stderr.take().context("no stderr")?);
+        // Each stream read to its end (so the command never blocks on a full pipe), kept to `max`.
+        async fn read_kept(r: &mut (impl tokio::io::AsyncRead + Unpin), max: usize) -> (Vec<u8>, bool) {
+            let (mut kept, mut buf, mut over) = (Vec::new(), vec![0u8; 16 << 10], false);
+            while let Ok(n) = r.read(&mut buf).await {
+                if n == 0 {
+                    break;
+                }
+                let room = max.saturating_sub(kept.len());
+                kept.extend_from_slice(&buf[..n.min(room)]);
+                over |= n > room;
+            }
+            (kept, over)
+        }
+        let began = std::time::Instant::now();
+        let run = async {
+            let ((stdout, a), (stderr, b)) = tokio::join!(read_kept(&mut out, max), read_kept(&mut err, max));
+            let status = child.wait().await?;
+            // Killed at its timeout (in the container): no exit code of its own.
+            let code = status.code().filter(|_| began.elapsed() < timeout);
+            anyhow::Ok(super::ExecOutput { code, stdout, stderr, truncated: a || b })
+        };
+        match tokio::time::timeout(timeout + Duration::from_secs(5), run).await {
+            Ok(r) => r,
+            Err(_) => Ok(super::ExecOutput { code: None, ..Default::default() }),
+        }
+    }
+
     async fn copy_from(&self, name: &str, path: &str) -> anyhow::Result<super::VolumeStream> {
         anyhow::ensure!(name.starts_with(super::PREFIX), "{name} isn't a roll apps instance");
         let mut child = Command::new("docker")
@@ -1114,6 +1177,16 @@ impl Runtime for Docker {
         let out = child.wait_with_output().await?;
         anyhow::ensure!(out.status.success(), "the restore failed: {}", String::from_utf8_lossy(&out.stderr).trim());
         Ok(())
+    }
+
+    fn intercepted(&self, network: &str) -> Option<super::egress::Intercepted> {
+        self.egress.as_ref().and_then(|p| p.intercepted(network))
+    }
+
+    fn set_interception(&self, network: &str, i: Option<std::sync::Arc<dyn roll_intercept::Interception>>) {
+        if let Some(p) = &self.egress {
+            p.set_interception(network, i);
+        }
     }
 
     fn closes_egress(&self) -> bool {
@@ -1271,6 +1344,12 @@ fn sandbox_config(spec: &InstanceSpec, host_port: Option<u16>, extra: &[(u16, u1
                 let k = format!("{cp}/tcp");
                 config["ExposedPorts"][&k] = json!({});
                 host["PortBindings"][&k] = json!([{"HostIp": "127.0.0.1", "HostPort": hp.to_string()}]);
+            }
+            // A UDP service's port over UDP too, on loopback (any free port: the relay reads it).
+            if spec.udp {
+                let k = format!("{p}/udp");
+                config["ExposedPorts"][&k] = json!({});
+                host["PortBindings"][&k] = json!([{"HostIp": "127.0.0.1", "HostPort": ""}]);
             }
         }
         if spec.closed {
@@ -1431,6 +1510,11 @@ fn engine_config(spec: &InstanceSpec, host_port: Option<u16>, extra: &[(u16, u16
             config["ExposedPorts"][&k] = json!({});
             host["PortBindings"][&k] = json!([{"HostIp": "127.0.0.1", "HostPort": hp.to_string()}]);
         }
+        if spec.udp {
+            let k = format!("{p}/udp");
+            config["ExposedPorts"][&k] = json!({});
+            host["PortBindings"][&k] = json!([{"HostIp": "127.0.0.1", "HostPort": ""}]);
+        }
     }
     if let Some(net) = &spec.network {
         host["NetworkMode"] = json!(net);
@@ -1553,12 +1637,15 @@ impl tokio::io::AsyncRead for ChildReader {
 /// burst of pushes queues instead of taking every CPU and all memory of the node.
 pub struct DockerBuilder {
     slots: tokio::sync::Semaphore,
+    /// One more, for a build that isn't a preview's when every slot is taken (Vercel's
+    /// prioritized production builds): ten pull requests' builds don't hold up a hotfix.
+    reserved: tokio::sync::Semaphore,
     scanner: super::scan::Scanner,
 }
 
 impl DockerBuilder {
     pub fn new(at_once: usize) -> DockerBuilder {
-        DockerBuilder { slots: tokio::sync::Semaphore::new(at_once), scanner: Default::default() }
+        DockerBuilder { slots: tokio::sync::Semaphore::new(at_once), reserved: tokio::sync::Semaphore::new(1), scanner: Default::default() }
     }
 }
 
@@ -1571,6 +1658,17 @@ impl Builder for DockerBuilder {
     async fn build(&self, job: &BuildJob, log: &LogSink, cancel: tokio_util::sync::CancellationToken) -> anyhow::Result<String> {
         let _slot = match self.slots.try_acquire() {
             Ok(s) => s,
+            Err(_) if job.priority => match self.reserved.try_acquire() {
+                Ok(s) => s,
+                Err(_) => {
+                    log.line("waiting for another build on this node to finish");
+                    tokio::select! {
+                        s = self.slots.acquire() => s?,
+                        s = self.reserved.acquire() => s?,
+                        _ = cancel.cancelled() => bail!("canceled"),
+                    }
+                }
+            },
             Err(_) => {
                 log.line("waiting for another build on this node to finish");
                 tokio::select! {
@@ -1706,6 +1804,7 @@ mod tests {
             vars: vec![("TLS_KEY".into(), pem.into())],
             port: Some(8080),
             ports: vec![9000],
+            udp: false,
             cpu: 0.5,
             memory_mb: 512,
             network: Some("roll-apps-net-p-production".into()),

@@ -643,6 +643,41 @@ async fn deploy_container(w: &World, name: &str) -> (String, String) {
     (id, env["url"].as_str().unwrap().trim_start_matches("http://").split(':').next().unwrap().to_string())
 }
 
+/// A sandbox on real Docker: a command's output and exit code, one killed in the container at
+/// its timeout (not left running), a file in and out, and its own network gone with it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_sandbox_runs_commands_and_files_on_docker() {
+    let Some(w) = docker_world().await else { return };
+    let (id, _) = deploy_container(&w, "sbx").await;
+    let base = format!("/v1/apps/services/{id}/environments/production/sandboxes");
+    let (st, sb) = call(&w.api, "POST", &base, Some(json!({"ttl_s": 300})), "application/json", None).await;
+    assert_eq!(st, StatusCode::CREATED, "{sb}");
+    let sid = sb["id"].as_str().unwrap().to_string();
+    let exec = |command: &str, timeout: u64| {
+        let (api, path, command) = (w.api.clone(), format!("{base}/{sid}/exec"), command.to_string());
+        async move { call(&api, "POST", &path, Some(json!({"command": command, "timeout_s": timeout})), "application/json", None).await.1 }
+    };
+    let out = exec("echo hi; echo err >&2; exit 4", 30).await;
+    assert_eq!((out["stdout"].as_str(), out["stderr"].as_str(), out["exit_code"].as_i64()), (Some("hi\n"), Some("err\n"), Some(4)), "{out}");
+    let began = std::time::Instant::now();
+    let out = exec("sleep 299", 1).await;
+    assert_eq!((out["timed_out"].as_bool(), out["exit_code"].as_i64()), (Some(true), None), "{out}");
+    assert!(began.elapsed() < Duration::from_secs(8), "{:?}", began.elapsed());
+    assert_eq!(exec("ps | grep -c '[s]leep 299'", 30).await["stdout"].as_str().map(str::trim), Some("0"), "killed in the container, with its shell");
+    let file = format!("{base}/{sid}/files?path=%2Ftmp%2Fin%2Fdata.txt");
+    assert_eq!(call(&w.api, "PUT", &file, None, "application/octet-stream", Some(b"from here".to_vec())).await.0, StatusCode::OK);
+    assert_eq!(exec("cat /tmp/in/data.txt", 30).await["stdout"], "from here");
+    let got = w.api.clone().oneshot(Request::get(&file).body(Body::empty()).unwrap()).await.unwrap();
+    assert_eq!(got.into_body().collect().await.unwrap().to_bytes(), "from here");
+    // Its own network, gone with it.
+    let name = format!("roll-apps-{}-production-sbx-{}", id.trim_start_matches("svc_"), sid.trim_start_matches("sbx_"));
+    let inspect = |what: &str| std::process::Command::new("docker").args([what, "inspect", &format!("{name}{}", if what == "network" { "-n" } else { "" })]).output().unwrap().status.success();
+    assert!(inspect("network") && inspect("container"));
+    assert_eq!(call(&w.api, "DELETE", &format!("{base}/{sid}"), None, "application/json", None).await.0, StatusCode::NO_CONTENT);
+    assert!(!inspect("network") && !inspect("container"));
+    delete_for_good(&w.api, &id).await;
+}
+
 /// An instant rollback on real Docker (Heroku's, Railway's): back to v1 its image runs again, no
 /// build; once v2 is pruned past what's kept, a rollback to it says to deploy its revision again.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -844,6 +879,58 @@ async fn a_private_caller_wakes_a_sleeping_service() {
     let _ = docker(&["network", "rm", &net]).await;
     let left = docker(&["ps", "-aq", "--filter", &format!("label=sh.roll.apps={id}")]).await.unwrap();
     assert!(left.is_empty(), "the instance, its sandbox and its waker are gone: {left}");
+    w.apps.shutdown().await;
+}
+
+/// A UDP service on real Docker (its port published over UDP from the sandbox): socat, asleep,
+/// answers a datagram to its environment's port, and the first answer's time is measured.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_udp_service_answers_from_asleep_on_its_port() {
+    let free = std::net::UdpSocket::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
+    let Some(w) = docker_world_with(None, |c| {
+        c.udp_ports = Some((free, free));
+        c.tcp_host = "127.0.0.1".into();
+    })
+    .await
+    else {
+        return;
+    };
+    // socat answers each datagram with "pong", then the datagram back (two datagrams).
+    let run = json!({"port": 9000, "udp": true, "start": "socat UDP4-RECVFROM:9000,fork SYSTEM:'printf pong; cat'", "memory_mb": 256, "cpu": 0.25});
+    let (st, svc) = call(&w.api, "POST", "/v1/apps/services", Some(json!({ "project": w.project, "name": "dns", "source": {"kind": "image", "image": apps_control::runtime::links::IMAGE}, "run": run })), "application/json", None).await;
+    assert_eq!(st, StatusCode::CREATED, "{svc}");
+    let id = svc["id"].as_str().unwrap().to_string();
+    let base = format!("/v1/apps/services/{id}/environments/production");
+    tokio::spawn(w.apps.clone().serve_udp_ports("127.0.0.1".parse().unwrap()));
+    for _ in 0..1200 {
+        let (_, e) = call(&w.api, "GET", &base, None, "application/json", None).await;
+        if e["active"].is_object() && e["udp"].is_string() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    w.apps.live(&id, "production").sleep().await;
+    let client = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    client.connect(("127.0.0.1", free)).await.unwrap();
+    let began = std::time::Instant::now();
+    let (mut buf, mut got) = ([0u8; 512], None);
+    for _ in 0..200 {
+        let _ = client.send(b"ping").await;
+        if let Ok(Ok(n)) = tokio::time::timeout(Duration::from_millis(100), client.recv(&mut buf)).await {
+            got = Some(String::from_utf8_lossy(&buf[..n]).into_owned());
+            break;
+        }
+    }
+    if got.is_none() {
+        let ps = apps_control::runtime::docker::docker(&["ps", "-a", "--filter", &format!("label=sh.roll.apps={id}"), "--format", "{{.Names}} {{.Status}} {{.Ports}}"]).await.unwrap_or_default();
+        let (_, log) = call(&w.api, "GET", &format!("{base}/logs"), None, "application/json", None).await;
+        let lines: Vec<&str> = log.as_array().into_iter().flatten().filter_map(|l| l["text"].as_str()).collect();
+        eprintln!("DEBUG ps:\n{ps}\nDEBUG log:\n{}", lines.join("\n"));
+    }
+    assert_eq!(got.as_deref(), Some("pong"), "an answer from its port");
+    eprintln!("MEASURED a UDP service's first answer from asleep: {} ms", began.elapsed().as_millis());
+    assert_eq!(delete_for_good(&w.api, &id).await.0, StatusCode::NO_CONTENT);
+    let _ = apps_control::runtime::docker::docker(&["network", "rm", &apps_control::network_name(&w.project, "production")]).await;
     w.apps.shutdown().await;
 }
 
@@ -1216,9 +1303,18 @@ async fn deno_dotnet_and_elixir_trees_build_and_answer() {
 
 /// An uploaded tree, built as roll detects it, deployed, and asked for `/`: it says `want`.
 async fn builds_and_answers(w: &World, name: &str, files: &[(&str, &str)], want: &str, build: Value) {
+    builds_and_answers_in(w, name, files, want, build, Value::Null).await
+}
+
+/// [`builds_and_answers`] with the environment's settings put first (`env`, unless null).
+async fn builds_and_answers_in(w: &World, name: &str, files: &[(&str, &str)], want: &str, build: Value, env: Value) {
     let (st, svc) = call(&w.api, "POST", "/v1/apps/services", Some(json!({ "project": w.project, "name": name, "source": {"kind": "upload"}, "build": build, "run": {"memory_mb": 1024, "cpu": 1.0, "health_timeout_s": 120} })), "application/json", None).await;
     assert_eq!(st, StatusCode::CREATED, "{svc}");
     let id = svc["id"].as_str().unwrap().to_string();
+    if !env.is_null() {
+        let (st, e) = call(&w.api, "PUT", &format!("/v1/apps/services/{id}/environments/production"), Some(env), "application/json", None).await;
+        assert_eq!(st, StatusCode::OK, "{e}");
+    }
     let tree = tempfile::tempdir().unwrap();
     for (f, body) in files {
         let at = tree.path().join(f);
@@ -1249,6 +1345,30 @@ async fn builds_and_answers(w: &World, name: &str, files: &[(&str, &str)], want:
     let body = String::from_utf8(resp.into_body().collect().await.unwrap().to_bytes().to_vec()).unwrap();
     assert!(body.contains(want), "{name}: {body}");
     assert_eq!(delete_for_good(&w.api, &id).await.0, StatusCode::NO_CONTENT);
+}
+
+/// The pinned OpenTelemetry agents (`build.otel`) install and start: a Node and a Python app built
+/// with them, their traces on (to an intake that isn't there: an exporter's failure never stops
+/// the app), still answer.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_otel_agents_install_and_start() {
+    let Some(w) = docker_world_with(None, |c| c.otlp_base = Some("http://127.0.0.1:9".into())).await else { return };
+    let traces = json!({"traces": true});
+    builds_and_answers_in(&w, "node-otel", &[
+        ("package.json", r#"{"name": "n", "version": "1.0.0", "scripts": {"start": "node server.js"}}"#),
+        ("server.js", "require('http').createServer((q, r) => r.end('node ' + (process.env.NODE_OPTIONS || ''))).listen(process.env.PORT)"),
+    ], "auto-instrumentations-node", json!({"otel": true}), traces.clone()).await;
+    builds_and_answers_in(&w, "python-otel", &[
+        ("requirements.txt", ""),
+        ("main.py", "import os, sys, http.server
+class H(http.server.BaseHTTPRequestHandler):
+    def do_GET(self):
+        ok = 'opentelemetry' in sys.modules
+        self.send_response(200); self.end_headers(); self.wfile.write(b'python otel ' + str(ok).encode())
+http.server.HTTPServer(('0.0.0.0', int(os.environ['PORT'])), H).serve_forever()
+"),
+    ], "python otel True", json!({"otel": true}), traces).await;
+    w.apps.shutdown().await;
 }
 
 /// Clojure (Leiningen), Gleam and a root start.sh, as roll detects them: each built, deployed and

@@ -1,9 +1,9 @@
 import { ArrowUpRight, KeyRound } from "lucide-react";
 import { useEffect, useState } from "react";
 import { Link } from "@/components/link";
-import { allFindings, type ProjectFindings } from "@/lib/secrets-api";
+import { allFindings, deletedProjects, recoverProject, type DeletedProject, type ProjectFindings } from "@/lib/secrets-api";
 import { KIND_LABEL, monthOf, projectMonth, resourceKey, usd } from "@/lib/workspace-resources";
-import { spendOf, useWorkspace } from "@/lib/workspace-store";
+import { loadWorkspace, spendOf, useWorkspace } from "@/lib/workspace-store";
 import { AppShell } from "../app-shell";
 import { KindTile } from "./kind";
 import { openNewProject } from "./new-project";
@@ -84,6 +84,7 @@ export function Home() {
       </section>
 
       <SecretsToFix />
+      <RecentlyDeleted />
 
       <section id="usage" className="rise mt-10 scroll-mt-16">
         <h2 className="text-[15px] font-semibold tracking-[-0.03em]">{month.label}</h2>
@@ -187,3 +188,56 @@ function SecretsToFix() {
   );
 }
 
+/** Deleted projects whose secrets are still recoverable (roll secrets' window): nothing when none. */
+function RecentlyDeleted() {
+  const [deleted, setDeleted] = useState<DeletedProject[]>([]);
+  const [busy, setBusy] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  useEffect(() => {
+    let live = true;
+    deletedProjects().then(
+      (all) => live && setDeleted(all),
+      () => live && setDeleted([]),
+    );
+    return () => {
+      live = false;
+    };
+  }, []);
+  if (!deleted.length) return null;
+  const recover = async (p: DeletedProject) => {
+    setBusy(p.project);
+    setError(null);
+    try {
+      await recoverProject(p.project);
+      setDeleted((all) => all.filter((d) => d.project !== p.project));
+      await loadWorkspace();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(null);
+    }
+  };
+  return (
+    <section className="rise mt-10">
+      <h2 className="text-[15px] font-semibold tracking-[-0.03em]">Recently deleted</h2>
+      <p className="mt-0.5 text-[12.5px] text-muted">Their secrets are kept until the date shown; restoring brings the project and its canvas back.</p>
+      {error && <p className="mt-2 rounded-lg border border-danger/40 bg-danger/10 px-3 py-2 text-[12px] text-danger">{error}</p>}
+      <div className="mt-3 divide-y divide-line rounded-xl border border-line-2 bg-panel">
+        {deleted.map((p) => (
+          <div key={p.project} className="flex items-center gap-3 px-3 py-2 text-[12.5px]">
+            <span className="text-fg">{p.name}</span>
+            <span className="font-mono text-[11px] text-subtle">{p.project}</span>
+            <span className="ml-auto text-[11.5px] text-muted">until {new Date(p.purge_at).toLocaleDateString()}</span>
+            <button
+              disabled={busy !== null}
+              onClick={() => void recover(p)}
+              className="h-7 rounded-lg border border-line-2 px-2.5 text-[12px] text-fg transition-colors hover:bg-fg/[0.04] disabled:opacity-40"
+            >
+              {busy === p.project ? "Restoring…" : "Restore"}
+            </button>
+          </div>
+        ))}
+      </div>
+    </section>
+  );
+}

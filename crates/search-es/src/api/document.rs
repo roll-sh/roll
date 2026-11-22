@@ -71,6 +71,7 @@ pub fn write_args(ctx: &Ctx) -> EsResult<WriteArgs> {
         list_executed_pipelines: false,
         principal: Some(std::sync::Arc::new(crate::xpack::security::principal(ctx).clone())),
         source_type: None,
+        index_only: None,
     })
 }
 
@@ -415,6 +416,11 @@ async fn index_resolved(ctx: &Ctx<'_>, target: write::Target, mut args: WriteArg
             // A pipeline that moved the document (`_index`, `reroute`): the write is authorized
             // again where it lands.
             if t.index.name != requested {
+                // A connector's sync writes only its own index (the pipeline refuses the move
+                // first; this holds for any path that doesn't).
+                if let Some(only) = &args.index_only {
+                    return Err(EsError::illegal_argument(format!("a connector's sync can't write document [{id}] outside [{only}] (to [{}])", t.index.name)));
+                }
                 crate::xpack::security::check_moved_write(ctx, &t.index.name)?;
             }
             if let Some(ingested) = ingested {
@@ -683,7 +689,7 @@ pub fn get_one(ctx: &Ctx, idx: &Arc<IndexMeta>, id: &str, args: &GetArgs) -> EsR
     // Document level security: a document the reader may not see is not found.
     if let Some(sec) = crate::xpack::security::dls::ReadSecurity::of(ctx)
         && let Some(q) = sec.documents(ctx.cluster, crate::xpack::security::dls::READ, &idx.name)?
-        && !crate::search::matches_doc(ctx.cluster, &st, idx, &engine, shard, id, &q)?
+        && !crate::search::matches_doc(ctx.cluster, &st, idx, &engine, shard, id, &q, args.realtime)?
     {
         return Ok(None);
     }
@@ -908,6 +914,8 @@ pub fn mget(ctx: &Ctx) -> EsResult<Reply> {
     if !errs.is_empty() {
         return Err(EsError::action_request_validation(&errs));
     }
+    // A browser key pays for every document, as parsed here, before any is read.
+    crate::xpack::security::browser::charge_items(ctx, items.len())?;
     // Documents are read per shard, each shard request authorized on the names its documents
     // were asked by; one that doesn't resolve fails on its own first.
     let denied = if crate::xpack::security::checks_items(ctx) {

@@ -53,7 +53,7 @@ you pin one).
 | `ROLL_CODE_ADVERTISE_URL` | `http://<this node's private address>:7070`: where the other nodes reach this one. Each node's own. |
 | `ROLL_ADMIN_TOKEN` | The operator token (32 characters or more), the same on every node: roll code's admin. rolld won't listen off loopback without it. |
 | `ROLL_CODE_TOKEN` | Optional: a second admin token for roll code only, the same on every node. |
-| `ROLL_SECRET_KEY` | At least 32 characters, the same on every node: it seals owners' own model API keys. Losing it makes those keys unreadable (owners enter them again). |
+| `ROLL_SECRET_KEY` | At least 32 characters, the same on every node: it seals owners' own model API keys, and webhooks' and review apps' URLs and signing secrets (without it, none can be made). Losing it makes those unreadable (owners enter keys again, and webhooks and review apps are made again). |
 | `ROLL_CODE_PUBLIC_URL` | The load balancer's URL (`https://code.example.com`), for links and clone URLs. `ROLL_CODE_GIT_URL` overrides the clone URL base. |
 | `ROLL_CODE_NODE_ID` | Optional. A stable id per node (a StatefulSet ordinal, an instance id). Without it each process gets a random one. A restarted process with a pinned id waits until its previous incarnation looks dead (about 5 s). |
 | `ROLL_CODE_DRAIN_TIMEOUT` | Seconds a stopping node waits for its repos to move (30). |

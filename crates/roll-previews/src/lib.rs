@@ -389,6 +389,14 @@ pub struct Preview {
     /// project keeps traces): until then nothing above says "no regressions".
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub regressions_compared: bool,
+    /// The keys it holds as placeholders, and what its egress proxy swapped or refused for them
+    /// (docs/previews.md, "Keys a preview never holds"). Never a value or a placeholder.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub intercepted: Option<Intercepted>,
+    /// How its head came up, step by step (Vercel's and Render's deploy steps): when converging
+    /// that head started, and when each step first finished.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timeline: Option<Timeline>,
     /// The screenshot's signed link (`(expiry, signature)`), for roll code's summary; never in
     /// API answers.
     #[serde(skip)]
@@ -409,6 +417,53 @@ pub struct Preview {
     pub baseline: bool,
     pub created_at: i64,
     pub updated_at: i64,
+}
+
+/// A preview's keys held as placeholders: each named with the hosts it's bound to, and how many
+/// requests through its egress proxy had a key swapped in, or were refused.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct Intercepted {
+    pub keys: Vec<HeldKey>,
+    #[serde(default)]
+    pub swapped: u64,
+    #[serde(default)]
+    pub refused: u64,
+    /// What roll apps' proxies did for its services there (their `pv-` environments' own
+    /// placeholders, apps' `intercepted`), since those proxies came up.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub on_apps: Option<AppsIntercepted>,
+}
+
+/// A head's way up: `started_at`, then each step once, in order: `data` (its branches made or
+/// kept, masked), `setup` (seed, release, schema read), `deploy` (every service live), `checks`
+/// (health paths answered), `ready`. A new head starts a new one; a reset at the same head keeps it.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct Timeline {
+    pub head: String,
+    pub started_at: i64,
+    pub steps: Vec<TimelineStep>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct TimelineStep {
+    pub step: String,
+    pub at: i64,
+}
+
+/// roll apps' interception for a preview's `pv-` environments: requests filtered, placeholders
+/// swapped, and the latest refusals' reasons (masked as its logs are; never a value).
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct AppsIntercepted {
+    pub requests: u64,
+    pub swapped: u64,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub refused: Vec<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct HeldKey {
+    pub key: String,
+    pub hosts: Vec<String>,
 }
 
 impl Preview {
@@ -1398,5 +1453,38 @@ mod tests {
         assert_eq!(label_part("abcdef", 4), "abcd");
         assert_eq!(label_part("ab-cd", 3), "ab");
         assert_eq!(branch_name("pv_abc"), "pv-abc");
+    }
+}
+
+#[cfg(test)]
+mod contract {
+    /// Fields `src`'s `pub struct <name>` serializes (not `#[serde(skip)]`) that docs/previews.md's
+    /// `type <name> = { … }` doesn't name.
+    fn undocumented<'a>(src: &'a str, name: &str) -> Vec<&'a str> {
+        let doc = include_str!("../../../docs/previews.md");
+        let s = &src[src.find(&format!("pub struct {name} {{")).unwrap()..];
+        let s = &s[..s.find("\n}\n").unwrap()];
+        let shape = &doc[doc.find(&format!("type {name} = {{")).unwrap()..];
+        let shape = &shape[..shape.find("\n};").unwrap()];
+        let (mut skipped, mut missing) = (false, Vec::new());
+        for line in s.lines().map(str::trim) {
+            if line.starts_with("#[serde(skip)]") {
+                skipped = true;
+            } else if let Some(name) = line.strip_prefix("pub ").filter(|r| !r.starts_with("struct ")).and_then(|r| r.split(':').next()) {
+                if !skipped && !shape.contains(&format!(" {name}:")) && !shape.contains(&format!(" {name}?:")) {
+                    missing.push(name);
+                }
+                skipped = false;
+            }
+        }
+        missing
+    }
+
+    /// docs/previews.md's `Preview` and `Settings` (the API's contract with every client) name
+    /// each field the record and the rules answer: the shapes had fallen 23 fields behind.
+    #[test]
+    fn the_documented_shapes_name_every_field_they_answer() {
+        assert_eq!(undocumented(include_str!("lib.rs"), "Preview"), Vec::<&str>::new(), "docs/previews.md's Preview");
+        assert_eq!(undocumented(include_str!("settings.rs"), "Settings"), Vec::<&str>::new(), "docs/previews.md's Settings");
     }
 }

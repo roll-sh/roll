@@ -81,8 +81,9 @@ pub fn router(engine: Arc<Engine>) -> Router {
         .with_state(engine)
 }
 
-/// The projects a signed-in person who isn't an admin may see previews of: their own, as the
-/// workspace API scopes them. `None`: every project (tokens, the operator, admins).
+/// The projects a signed-in person who isn't an admin may see previews of: the ones they're a
+/// member of, as the workspace API scopes them (what their role lets them do there, roll-access
+/// decides). `None`: every project (tokens, the operator, admins).
 #[derive(Clone)]
 struct Visible(Option<std::collections::HashSet<String>>);
 
@@ -96,11 +97,15 @@ impl Visible {
 /// projects are), so they can't learn it exists. The screenshot's signed link stays public.
 async fn scoped(AxState(e): S, mut req: axum::extract::Request, next: axum::middleware::Next) -> Response {
     let who = req.extensions().get::<roll_auth::SignedIn>().filter(|u| !u.admin).map(|u| u.user.clone());
+    // roll-access decided a person's request by their role (their session's grant, or their token's,
+    // is beside it). Without one it came another way (in process, past the gate): only the
+    // projects they own, so reaching this router directly never widens a member's role.
+    let decided = req.extensions().get::<roll_auth::Grant>().is_some();
     let visible = match who {
         None => Visible(None),
         Some(user) => {
             let e2 = e.clone();
-            match blocking(e2, move |e| e.projects_of(&user)).await {
+            match blocking(e2, move |e| if decided { e.projects_of(&user) } else { e.projects_owned(&user) }).await {
                 Ok(ids) => Visible(Some(ids)),
                 Err(err) => return err.into_response(),
             }
@@ -125,6 +130,12 @@ async fn scoped(AxState(e): S, mut req: axum::extract::Request, next: axum::midd
         return Error::NotFound("no such preview or project".into()).into_response();
     }
     req.extensions_mut().insert(visible);
+    // A person's session on a member route (docs/members.md): roll-access decided it by their role
+    // in the project, and its grant is them, not a token. Without it the handlers see the person,
+    // as they did before members (their name, a person's accept).
+    if req.extensions().get::<roll_auth::Grant>().is_some_and(|g| g.kind == roll_auth::GrantKind::Session) {
+        req.extensions_mut().remove::<roll_auth::Grant>();
+    }
     next.run(req).await
 }
 
@@ -245,10 +256,17 @@ struct CreateBody {
     change: Option<String>,
 }
 
-async fn create(AxState(e): S, axum::Extension(visible): axum::Extension<Visible>, who: Option<axum::Extension<roll_auth::SignedIn>>, b: Bytes) -> crate::Result<Response> {
+async fn create(AxState(e): S, axum::Extension(visible): axum::Extension<Visible>, who: Option<axum::Extension<roll_auth::SignedIn>>, headers: axum::http::HeaderMap, b: Bytes) -> crate::Result<Response> {
     let b: CreateBody = body(&b)?;
     if b.branch.is_some() == b.change.is_some() {
         return Err(Error::BadRequest("give one of branch or change".into()));
+    }
+    // roll-access decides a create by the project `X-Roll-Project` names (a member's role there, a
+    // token's rule): the preview is made in that one, never in another the body names.
+    if let Some(named) = headers.get("x-roll-project").map(|v| v.to_str().unwrap_or_default().trim())
+        && named != b.project
+    {
+        return Err(Error::BadRequest(format!("X-Roll-Project names {named}, the body {}: they must be the same project", b.project)));
     }
     if !visible.sees(&b.project) {
         return Err(Error::NotFound("no such preview or project".into()));
@@ -397,11 +415,13 @@ async fn shares(AxState(e): S, Path(id): Path<String>) -> crate::Result<Json<Vec
 }
 
 /// The link is in this answer only (its token isn't kept).
-async fn share(AxState(e): S, Path(id): Path<String>, who: Option<axum::Extension<roll_auth::SignedIn>>, b: Bytes) -> crate::Result<Response> {
+async fn share(AxState(e): S, Path(id): Path<String>, who: Option<axum::Extension<roll_auth::SignedIn>>, grant: Option<axum::Extension<roll_auth::Grant>>, b: Bytes) -> crate::Result<Response> {
     check_id(&id)?;
     let s: ShareBody = body(&b)?;
+    // Whose link it is: the person signed in, or the person behind a token (an operator's: none).
+    let maker = who.as_ref().map(|axum::Extension(u)| u.user.clone()).or_else(|| grant.and_then(|axum::Extension(g)| g.user.map(|u| u.to_string())));
     let by = who.map(|axum::Extension(u)| u.handle).unwrap_or_else(|| "operator".into());
-    let (share, url) = blocking(e, move |e| e.share(&id, s.hours, &by)).await?;
+    let (share, url) = blocking(e, move |e| e.share(&id, s.hours, &by, maker.as_deref())).await?;
     let mut v = serde_json::to_value(&share).unwrap_or_default();
     v["url"] = json!(url);
     Ok((StatusCode::CREATED, Json(v)).into_response())

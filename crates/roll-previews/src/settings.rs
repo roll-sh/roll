@@ -97,6 +97,11 @@ pub struct Settings {
     /// Wake the change's services as soon as a new head is deployed, so the first visit (often
     /// the pull request comment's link) doesn't wait for a cold start.
     pub warm: bool,
+    /// Scheduled work runs in previews too: roll apps' cron services and services' scheduled
+    /// commands and calls. Off (the default): deployed, but the schedule doesn't fire (roll apps'
+    /// `scheduled: false`), so a preview nobody looks at runs no jobs, and a nightly digest doesn't
+    /// mail anyone from its data.
+    pub crons: bool,
     /// A command run once on the preview's fresh data (after branching, and after each reset)
     /// before its services deploy: anonymise, migrate, load fixtures.
     pub seed: Option<Seed>,
@@ -322,6 +327,21 @@ pub const MAX_PAGES: usize = 10;
 /// The most hosts `egress_hosts` lists.
 pub const MAX_EGRESS_HOSTS: usize = 20;
 
+/// Whether `egress_hosts` lets a preview reach `host` (a key's binding: a name, or `*.` and one),
+/// as its egress proxy matches them: a name exactly, `*.example.com` any name under it.
+pub fn egress_allows(egress_hosts: &[String], host: &str) -> bool {
+    let host = host.trim_end_matches('.').to_ascii_lowercase();
+    egress_hosts.iter().any(|p| {
+        let p = p.to_ascii_lowercase();
+        match (p.strip_prefix('*'), host.strip_prefix('*')) {
+            // A wildcard binding: only a wildcard as wide or wider reaches all it names.
+            (Some(under), Some(bound)) => bound.ends_with(under),
+            (Some(under), None) => host.ends_with(under) && host.len() > under.len(),
+            (None, _) => p == host,
+        }
+    })
+}
+
 /// A host `egress_hosts` may name: lowercase DNS labels, at least two, optionally `*.` first
 /// (its subdomains), never an address (a name is what the proxy checks).
 pub fn egress_host_ok(h: &str) -> bool {
@@ -386,6 +406,7 @@ impl Default for Settings {
             data_at: None,
             feedback: true,
             warm: true,
+            crons: false,
             seed: None,
             release: None,
             teardown: None,

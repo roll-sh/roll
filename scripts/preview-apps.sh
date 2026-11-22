@@ -42,7 +42,10 @@ cleanup() {
     for c in $(docker ps -aq --filter "name=roll-apps-egress-closed-${PRJ#prj_}" --filter "name=roll-apps-build-${PRJ#prj_}" --filter "name=roll-apps-egress-build-${PRJ#prj_}"); do docker rm -f "$c" >/dev/null; done
     docker buildx rm -f "roll-apps-build-${PRJ#prj_}" >/dev/null 2>&1 || true
     docker network rm "roll-apps-build-${PRJ#prj_}" >/dev/null 2>&1 || true
-    for n in $(docker network ls --format '{{.Name}}' | grep "^roll-apps-net-${PRJ#prj_}-" || true); do docker network rm "$n" >/dev/null || true; done
+    # roll apps' link relays (`roll-apps-link-…`) stay attached to the project's networks and kept
+    # every run's networks from going: 23 had piled up and Docker's address pools ran out.
+    for c in $(docker ps -aq --filter "name=^roll-apps-link-${PRJ#prj_}-" --filter "name=^roll-apps-link-closed-${PRJ#prj_}."); do docker rm -f "$c" >/dev/null; done
+    for n in $(docker network ls --format '{{.Name}}' | grep -E "^roll-apps-(net-${PRJ#prj_}-|closed-${PRJ#prj_}\.)" || true); do docker network rm "$n" >/dev/null || true; done
   fi
 }
 trap cleanup EXIT
@@ -156,6 +159,12 @@ done
 [ "$(echo "$E" | jq_ "(d.get('egress') or {}).get('mode')")" = roll ] || { echo "the pv- environment should be closed: $(echo "$E" | jq_ "d.get('egress')")"; exit 1; }
 # One voice on the pull request: previews reports the pv- environment, roll apps doesn't (#249).
 [ "$(echo "$E" | jq_ "d.get('report')")" = False ] || { echo "the pv- environment should leave reporting to previews (report: false): $(echo "$E" | jq_ "d.get('report')")"; exit 1; }
+# Its keys bound to hosts are used as the rules' writer (closed_by, apps' #610): the operator
+# saved these rules, so no one, and they're withheld (without previews' field, roll apps would
+# name whoever set the egress: the operator).
+[ "$(echo "$E" | jq_ "d.get('closed_by', 'absent')")" = None ] || { echo "the closed pv- environment should name no one as its placeholders' maker (closed_by: null): $(echo "$E" | jq_ "d.get('closed_by', 'absent')")"; exit 1; }
+# Its schedules don't fire (the project's crons off, the default): roll apps' scheduled: false.
+[ "$(echo "$E" | jq_ "d.get('scheduled', 'absent')")" = False ] || { echo "a pv- environment's schedules shouldn't fire unless the project's crons says so (scheduled: false): $(echo "$E" | jq_ "d.get('scheduled', 'absent')")"; exit 1; }
 curl -sS -o /dev/null -H "Host: $HOSTPART" "http://127.0.0.1:${PORTS}080/" --max-time 120
 INST=""
 # The closed deployment's instance (its id's first six characters are in the name).

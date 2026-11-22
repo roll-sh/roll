@@ -73,9 +73,17 @@ impl Engine {
         }
     }
 
-    /// The ids of `owner`'s workspace projects (a signed-in person's).
+    /// The ids of the workspace projects `owner` (a signed-in person) is a member of: what their
+    /// role lets them do in each, roll-access decides by the catalogue (previews are a member
+    /// product, docs/members.md).
     pub fn projects_of(&self, owner: &str) -> Result<std::collections::HashSet<String>> {
-        Ok(self.workspace.list(roll_workspace::Scope::Owner(owner))?.into_iter().map(|p| p.id).collect())
+        Ok(self.workspace.list(roll_workspace::Scope::Member(owner))?.into_iter().map(|p| p.id).collect())
+    }
+
+    /// The ids of the workspace projects `owner` owns (role `owner`): all a person reaches when no
+    /// role was decided for the request (it didn't come through roll-access's gate).
+    pub fn projects_owned(&self, owner: &str) -> Result<std::collections::HashSet<String>> {
+        Ok(self.workspace.list(roll_workspace::Scope::Member(owner))?.into_iter().filter(|p| p.role.is_some_and(|r| r.as_str() == "owner")).map(|p| p.id).collect())
     }
 
     /// A workspace project, or a 404.
@@ -419,7 +427,9 @@ impl Engine {
     /// A link to the preview for someone outside the team, open for `hours` (1–720), on its own
     /// token: the answer is the only time the link is shown. Only where the preview isn't public
     /// (`access: link` or `team`); a public one needs none.
-    pub fn share(&self, id: &str, hours: u32, by: &str) -> Result<(crate::Share, String)> {
+    /// `maker`: who it is (`usr_…`, a person or the person behind their token; none for the
+    /// operator): the link works only while they may still open the project's previews.
+    pub fn share(&self, id: &str, hours: u32, by: &str, maker: Option<&str>) -> Result<(crate::Share, String)> {
         if !(1..=KEEP_MAX_HOURS).contains(&hours) {
             return Err(Error::BadRequest(format!("hours: 1 to {KEEP_MAX_HOURS}")));
         }
@@ -431,7 +441,7 @@ impl Engine {
             return Err(Error::Conflict("the preview is public: anyone can open it without a link".into()));
         }
         let url = self.store.services(id)?.into_iter().next().map(|s| s.url).ok_or_else(|| Error::Conflict("the preview has no service to share yet".into()))?;
-        let (share, token) = self.store.create_share(id, self.store.now_ms()? + hours as i64 * 3_600_000, by)?;
+        let (share, token) = self.store.create_share(id, self.store.now_ms()? + hours as i64 * 3_600_000, by, maker)?;
         self.store.log(id, &format!("shared for {hours} hours by {by} ({})", share.id))?;
         Ok((share, format!("{}/?roll_share={token}", url.trim_end_matches('/'))))
     }

@@ -51,6 +51,14 @@ export interface Build {
   timeout_s?: number;
   /** Its builder: small (2 vCPU, 4 GiB; default), medium (4, 8 GiB) or large (8, 16 GiB), minutes metered by size on the fleet. */
   size?: "small" | "medium" | "large";
+  /** Submodules fetched into the tree (default: left out): a Git URL's, or a roll code repo's. */
+  submodules?: boolean;
+  /** The private roll code repos (owner/name) a roll code repo's submodules may come from. */
+  submodule_repos?: string[];
+  /** The language's OpenTelemetry agent (Node, Python), started while traces are on. */
+  otel?: boolean;
+  /** A Git URL service's Git LFS objects in place of their pointers (default: pointers as text). */
+  lfs?: boolean;
 }
 
 export type ServiceType = "web" | "worker" | "cron";
@@ -84,6 +92,15 @@ export interface PushState extends Push {
   last_delivered_at?: number;
   failing_since?: number;
   last_error?: string;
+}
+
+/** An alert on one of the app's own gauges: above or below a threshold for 1–5 minutes running. */
+export interface MetricAlert {
+  name: string;
+  above?: number;
+  below?: number;
+  minutes?: number;
+  sum?: boolean;
 }
 
 export interface Run {
@@ -129,7 +146,7 @@ export interface Run {
   volume?: { mount: string; size_gb: number; backups?: { every_hours: number; keep: number } };
   /** Metric alerts (`alert.*` events), over five minutes; each 0 is off. */
   /** log_match: text its output holds log_count times in five minutes (alert.log). */
-  alerts?: { memory_pct: number; error_pct: number; p95_ms: number; capacity_pct?: number; log_match?: string; log_count?: number };
+  alerts?: { memory_pct: number; error_pct: number; p95_ms: number; capacity_pct?: number; log_match?: string; log_count?: number; cpu_pct?: number; metrics?: MetricAlert[] };
   /** Its service level objective: `objective`% of requests not 5xx (and of minutes under `latency_ms` at p95) over `window_days`; `alert.slo` when its budget burns fast. */
   slo?: Slo;
   /** Its own Prometheus endpoint, scraped every 15 s on each running instance (port: the app's own by default). */
@@ -141,6 +158,8 @@ export interface Run {
   rollout?: { steps: number[]; step_s: number; error_pct: number; /** Each step waits for a person once it passes. */ manual?: boolean; /** With run.slo: a step fails past this burn rate (default 14.4). */ slo_burn?: number; /** A step fails when the new deployment's p95 is this many percent above the old one's. */ p95_pct?: number; /** false: the old instances stop before the new ones start (two never run at once). */ overlap?: boolean };
   /** The app speaks HTTP/2 without TLS (a gRPC server). */
   h2c?: boolean;
+  /** With h2c: the gRPC service whose grpc.health.v1 check must answer SERVING ("" the whole server). */
+  health_grpc?: string;
   /** false: no public URL, only the project's private network (absent: public). */
   public?: boolean;
   /** A worker that stops: started again always (default), on failure (up to restart_tries in a row), or never. */
@@ -150,6 +169,8 @@ export interface Run {
   affinity?: boolean;
   /** Its port speaks TCP, not HTTP: each environment answers on a port of its own. */
   tcp?: boolean;
+  /** Its port speaks UDP: a UDP port of its own per environment (one node). */
+  udp?: boolean;
   /** A deployment that crash-loops within ten minutes of going live is replaced by the one before it. */
   rollback_on_crash?: boolean;
   /** Build the same revision again, without the cache, when one of its base images moves. */
@@ -551,6 +572,10 @@ export interface EnvironmentDiff {
 }
 
 export interface EnvironmentPut {
+  /** false: its schedules don't run (deploys and runs still do). */
+  scheduled?: boolean;
+  /** Data of its own: a branch of each Postgres and Redis database it links (admin); null goes back. */
+  data?: "branch" | null;
   branch?: string | null;
   /** Its name on the roll domain (`<hostname>.<domain>`): the old one stops answering. */
   hostname?: string;
@@ -665,6 +690,8 @@ export interface Environment extends EnvironmentSummary {
   port: number | null;
   /** A TCP service's address (`host:port`), once it has its port. */
   tcp?: string | null;
+  /** A UDP service's address (host:port). */
+  udp?: string;
   /** Its hostnames answer only visitors with its access token (a preview). */
   private: boolean;
   /** A cron service's next scheduled run, once deployed. */
@@ -708,6 +735,14 @@ export interface Environment extends EnvironmentSummary {
   egress?: Egress;
   /** Hosts its egress proxy refused lately: not listed, or (`private`) resolving only to private addresses. */
   egress_refused?: { host: string; private?: true }[];
+  /** Who a closed environment's placeholders are made by; null: no one (its bound keys withheld). */
+  closed_by?: string | null;
+  /** Data of its own: a branch of each Postgres and Redis database it links. */
+  data?: { mode: "branch"; branches: { kind: "postgres" | "redis"; ref: string }[] };
+  /** false: its schedules don't run. */
+  scheduled?: false;
+  /** A closed environment's interception (roll secrets' placeholders): requests filtered, placeholders swapped, the latest refusals. */
+  intercepted?: { requests: number; swapped: number; refused?: string[] };
   /** A push deploys only once its commit's checks pass. */
   wait_for_ci?: boolean;
   /** The push (sha) waiting for its checks, if one is. */
@@ -1233,6 +1268,8 @@ export type NotifyEvent =
   | "spend.alert"
   | "spend.limit"
   | "alert.memory"
+  | "alert.cpu"
+  | "alert.metric"
   | "alert.errors"
   | "alert.latency"
   | "alert.capacity"
@@ -1360,6 +1397,32 @@ export interface Backup {
   id: string;
   at: number;
   size: number;
+}
+
+/** A short-lived container to run commands in (docs/apps/http-api.md, `…/sandboxes`). */
+export interface Sandbox {
+  id: string;
+  service: string;
+  environment: string;
+  image: string;
+  cpu: number;
+  memory_mb: number;
+  /** It has the live deployment's variables and files. */
+  variables: boolean;
+  /** `none`: a network of its own (the internet, nothing of the project). */
+  network: "none" | "environment";
+  created_at: number;
+  expires_at: number;
+}
+
+export interface SandboxRun {
+  /** null: killed at its timeout. */
+  exit_code: number | null;
+  timed_out: boolean;
+  stdout: string;
+  stderr: string;
+  /** A stream had more than 1 MiB: the rest was dropped. */
+  truncated: boolean;
 }
 
 export interface Job {
@@ -1597,6 +1660,10 @@ export const appsApi = {
   startJob: (id: string, e: string, body: { command: string; timeout_s?: number; tasks?: number; retries?: number; parallelism?: number }) => call<Job>("POST", `${env(id, e)}/jobs`, body),
   job: (id: string, e: string, j: string) => call<Job>("GET", `${env(id, e)}/jobs/${encodeURIComponent(j)}`),
   cancelJob: (id: string, e: string, j: string) => call<Job>("POST", `${env(id, e)}/jobs/${encodeURIComponent(j)}/cancel`),
+  sandboxes: (id: string, e: string) => call<Sandbox[]>("GET", `${env(id, e)}/sandboxes`),
+  createSandbox: (id: string, e: string, body: { image?: string; ttl_s?: number; cpu?: number; memory_mb?: number; variables?: boolean; network?: "none" | "environment" }) => call<Sandbox>("POST", `${env(id, e)}/sandboxes`, body),
+  sandboxExec: (id: string, e: string, s: string, body: { command: string; timeout_s?: number }) => call<SandboxRun>("POST", `${env(id, e)}/sandboxes/${encodeURIComponent(s)}/exec`, body),
+  deleteSandbox: (id: string, e: string, s: string) => call<void>("DELETE", `${env(id, e)}/sandboxes/${encodeURIComponent(s)}`),
 
   /** A shell in a running instance over HTTP (a browser can't send the token on a WebSocket). */
   /** `instance`: that one (default: one that's running, or a woken one). */

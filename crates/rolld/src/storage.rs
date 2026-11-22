@@ -140,8 +140,8 @@ pub async fn start(args: &StorageOpts, home: &Path, storage: &StorageConfig, clu
     });
     let class = class.filter(|_| matches!(storage, StorageConfig::S3 { .. }));
     // Bind first: a node that can't serve shouldn't take over the metadata log.
-    let listener = tokio::net::TcpListener::bind(args.s3).await?;
-    let api_listener = tokio::net::TcpListener::bind(args.storage_api).await?;
+    let listener = crate::listen::bind(args.s3)?;
+    let api_listener = crate::listen::bind(args.storage_api)?;
     let backend = s3_store::from_config(storage, class.as_deref()).await?;
     let mut scfg = s3_server::Config {
         virtual_host_domain: args.s3_domain.clone(),

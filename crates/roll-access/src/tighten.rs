@@ -60,7 +60,7 @@ pub fn tighten(rules: &Scope, used: &[Used]) -> Scope {
                 };
             }
             narrow.retain(|a, _| !wide.contains_key(a));
-            let base = Rule { product: p.to_string(), resources: r.resources.clone(), environments: r.environments.clone(), paths: r.paths.clone(), actions: BTreeMap::new() };
+            let base = Rule { product: p.to_string(), resources: r.resources.clone(), environments: r.environments.clone(), paths: r.paths.clone(), unprotected: r.unprotected, actions: BTreeMap::new() };
             if !wide.is_empty() {
                 out.push(Rule { actions: wide, ..base.clone() });
             }

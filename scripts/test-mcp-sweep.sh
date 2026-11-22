@@ -8,20 +8,23 @@
 # Only runs when something it covers changed since the last green run. `--force` runs regardless;
 # `--reads` skips the write tools. Needs nothing outside this machine. Postgres computes run in
 # Docker when it's there (removed on exit: the containers that mount the throwaway home); without it
-# their tools answer refusals the sweep counts as fine.
+# their tools answer refusals the sweep counts as fine. An answer that no longer fits the output
+# schema its tool publishes fails it; `--record` widens those schemas with what this run saw
+# (crates/roll-mcp/src/output-schemas.json, scripts/mcp_output_schemas.py).
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-PATHS=(crates Cargo.toml Cargo.lock scripts/test-mcp-sweep.sh scripts/mcp-sweep.py)
+PATHS=(crates Cargo.toml Cargo.lock scripts/test-mcp-sweep.sh scripts/mcp-sweep.py scripts/mcp_output_schemas.py)
 STAMP=target/.test-mcp-sweep.hash
 
-force=0 writes=--writes verbose=
+force=0 writes=--writes verbose= record=()
 for a in "$@"; do
   case "$a" in
     --force) force=1 ;;
     --reads) writes= ;;
     --verbose) verbose=-v ;;
-    *) echo "unknown argument $a (--force, --reads, --verbose)" >&2; exit 2 ;;
+    --record) force=1 record=(--record target/mcp-sweep-samples.json) ;;
+    *) echo "unknown argument $a (--force, --reads, --verbose, --record)" >&2; exit 2 ;;
   esac
 done
 
@@ -34,7 +37,8 @@ fi
 cargo build -q -p rolld
 bin=${CARGO_TARGET_DIR:-target}/debug/rolld
 
-# 25 single ports and a range of 21 for apps' per-environment ports, all free on loopback now.
+# Every listener on port 0 (the OS picks each as rolld binds it; #596's --addr-file says which). Only
+# apps' per-environment ports are a range rolld can't pick: 21 free on loopback now.
 read -r -a ports < <(python3 -I - <<'EOF'
 import random, socket
 def free(p):
@@ -47,11 +51,11 @@ def free(p):
         s.close()
 for _ in range(200):
     base = random.randrange(20000, 30000)
-    if all(free(p) for p in range(base, base + 46)):
-        print(" ".join(str(p) for p in range(base, base + 46))); break
+    if all(free(p) for p in range(base, base + 21)):
+        print(" ".join(str(p) for p in range(base, base + 21))); break
 EOF
 )
-[[ ${#ports[@]} == 46 ]] || { echo "mcp sweep: no 46 free loopback ports in a row" >&2; exit 1; }
+[[ ${#ports[@]} == 21 ]] || { echo "mcp sweep: no 21 free loopback ports in a row" >&2; exit 1; }
 
 home=$(mktemp -d)
 pid=
@@ -71,25 +75,37 @@ trap cleanup EXIT
 umask 077
 head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \n' > "$home/token"
 export ROLL_ADMIN_TOKEN=$(cat "$home/token") ROLL_SECRET_KEY=$(head -c 32 /dev/urandom | base64)
-L=127.0.0.1 p=("${ports[@]}")
-flags=(--home "$home/rolld" --api $L:${p[0]} --proxy $L:${p[1]} --redis $L:${p[2]} --redis-http $L:${p[3]}
-  --kafka $L:${p[4]} --s3 $L:${p[5]} --storage-api $L:${p[6]} --queues-amqp $L:${p[7]} --queues-stomp $L:${p[8]}
-  --queues-mqtt $L:${p[9]} --queues-stream $L:${p[10]} --nosql-cql $L:${p[11]} --queues-management $L:${p[12]}
-  --queues-web-stomp $L:${p[13]} --queues-web-mqtt $L:${p[14]} --queues-http $L:${p[15]}
-  --nosql-cql-shard-aware $L:${p[16]} --nosql-alternator $L:${p[17]} --nosql-rest $L:${p[18]}
-  --previews-smtp $L:${p[19]} --apps-listen $L:${p[20]} --search-http $L:${p[21]}
-  --apps-ports "${p[25]}-${p[45]}" --apps-ports-host $L)
+# Sign-in codes land here: the member pass signs a person in by email code (docs/accounts.md).
+export ROLL_ACCOUNTS_OUTBOX="$home/outbox" MCP_SWEEP_OUTBOX="$home/outbox"
+L=127.0.0.1
+flags=(--home "$home/rolld" --addr-file "$home/addrs.json" --apps-ports "${ports[0]}-${ports[20]}" --apps-ports-host $L)
+for name in api proxy redis redis-http kafka s3 storage-api queues-amqp queues-stomp queues-mqtt queues-stream nosql-cql \
+  queues-management queues-web-stomp queues-web-mqtt queues-http nosql-cql-shard-aware nosql-alternator nosql-rest \
+  previews-smtp apps-listen search-http; do
+  flags+=(--$name $L:0)
+done
 "$bin" "${flags[@]}" > "$home/rolld.log" 2>&1 &
 pid=$!
-api=http://$L:${p[0]}
+# The API's address once every listener is bound (rolld writes the file then).
+for _ in $(seq 120); do
+  [[ -s "$home/addrs.json" ]] && break
+  kill -0 "$pid" 2>/dev/null || { echo "mcp sweep: rolld exited:" >&2; tail -20 "$home/rolld.log" >&2; exit 1; }
+  sleep 1
+done
+api=http://$(python3 -I -c 'import json,sys; print(json.load(open(sys.argv[1]))["api"])' "$home/addrs.json") || { echo "mcp sweep: no API address from rolld" >&2; exit 1; }
 for _ in $(seq 120); do
   [[ "$(curl -s -m 3 -o /dev/null -w '%{http_code}' "$api/v1/access")" == 401 ]] && break
   kill -0 "$pid" 2>/dev/null || { echo "mcp sweep: rolld exited:" >&2; tail -20 "$home/rolld.log" >&2; exit 1; }
   sleep 1
 done
 
-if python3 -I scripts/mcp-sweep.py "$api" "$home/token" $writes $verbose; then
-  mkdir -p target && echo "$hash" > "$STAMP"
+mkdir -p target
+if python3 -I scripts/mcp-sweep.py "$api" "$home/token" $writes $verbose ${record[@]+"${record[@]}"}; then
+  if [[ ${#record[@]} -gt 0 ]]; then
+    python3 -I scripts/mcp_output_schemas.py target/mcp-sweep-samples.json
+  else
+    echo "$hash" > "$STAMP"
+  fi
 else
   mkdir -p target && cp "$home/rolld.log" target/mcp-sweep-rolld.log
   echo "mcp sweep: failures above (rolld's log kept in target/mcp-sweep-rolld.log)" >&2

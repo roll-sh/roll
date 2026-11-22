@@ -581,6 +581,8 @@ impl Secrets {
     fn sweep_syncs_from(&self, due_only: bool) -> Result<(usize, usize)> {
         let now = self.db.now_ms()?;
         let marked = if due_only { " AND s.checked_at IS NULL" } else { "" };
+        // A deleted project's syncs wait out its recovery window (deleted.rs).
+        let live = crate::deleted::live("s.project_id");
         let (mut pushed, mut failed) = (0, 0);
         // A digest of a large folder takes a tenth of a second: a sweep checks for so long, and
         // the next one goes on from the least recently checked. Every node sweeps: each claims a
@@ -596,7 +598,7 @@ impl Secrets {
             let batch: Vec<(Row, Option<i64>)> = self.db.write(|c| {
                 // Least recently checked first: every sync gets its turn, however many there are.
                 let rows = c.query(
-                    &format!("SELECT {COLUMNS}, s.checked_at FROM syncs s JOIN environments e ON e.id = s.env_id WHERE s.paused_at IS NULL AND s.running_until <= ? AND s.retry_at <= ? AND COALESCE(s.checked_at, 0) < ?{marked} ORDER BY COALESCE(s.checked_at, 0), s.id LIMIT {CLAIM}"),
+                    &format!("SELECT {COLUMNS}, s.checked_at FROM syncs s JOIN environments e ON e.id = s.env_id WHERE s.paused_at IS NULL AND {live} AND s.running_until <= ? AND s.retry_at <= ? AND COALESCE(s.checked_at, 0) < ?{marked} ORDER BY COALESCE(s.checked_at, 0), s.id LIMIT {CLAIM}"),
                     params![now, now, now],
                     |r| Ok((row(r)?, r.get::<_, Option<i64>>(18)?)),
                 )?;

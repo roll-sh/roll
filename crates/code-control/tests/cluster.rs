@@ -781,7 +781,11 @@ async fn hook_receiver() -> (String, Arc<Mutex<Vec<(String, String)>>>) {
 #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
 async fn the_land_forwarder_moves_with_its_singleton() {
     let (url, got) = hook_receiver().await;
-    let net = net_with("forwarder", 3, Arc::new(|c: &mut Config| c.review_app_retry_ms = 50)).await;
+    let net = net_with("forwarder", 3, Arc::new(|c: &mut Config| {
+        c.review_app_retry_ms = 50;
+        c.review.secret_key = Some(common::HARNESS_SECRET_KEY.into());
+    }))
+    .await;
     for n in &net.nodes {
         n.code.start_webhooks();
     }
@@ -858,7 +862,11 @@ async fn landings_on_one_node_wake_the_forwarder_on_another() {
     let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let url = format!("http://{}/hook", l.local_addr().unwrap());
     tokio::spawn(async move { axum::serve(l, app).await.unwrap() });
-    let net = net_with("wake", 3, Arc::new(|c: &mut Config| c.review_app_retry_ms = 50)).await;
+    let net = net_with("wake", 3, Arc::new(|c: &mut Config| {
+        c.review_app_retry_ms = 50;
+        c.review.secret_key = Some(common::HARNESS_SECRET_KEY.into());
+    }))
+    .await;
     for n in &net.nodes {
         n.code.start_webhooks();
     }

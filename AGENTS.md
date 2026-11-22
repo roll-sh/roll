@@ -91,6 +91,9 @@ The product should feel alive: dots react to the cursor and the marks "think". E
     `--no-*`/`--*-only` flags are shorthands). A product's new top-level API prefix goes in
     `Product::prefixes`: off products' 404s and the metrics read it. Access lines and EMF metrics
     are `crates/rolld/src/logs.rs`: log route patterns, never a path, query or header.
+    rolld's listeners bind through `src/listen.rs`; its tests start it with every listener on port 0
+    and read the addresses from `--addr-file` (`tests/common`). Never pick a port for rolld and let
+    it go first: another test binary can take it in between.
   - After touching anything Postgres-related, run `pnpm test:pg` (Docker e2e; it skips itself when nothing relevant changed). New Postgres features need an e2e test in `crates/pg-control/tests/e2e.rs`.
 - **Streams (Kafka-compatible):**
   - `crates/stream-log` is the partition log. It holds Kafka record batches v2 in segment files, group-commit fsync (the high watermark is the durable end), idempotent producer state and transactions, plus hooks for tiering. It does no network or object-storage I/O.
@@ -301,7 +304,8 @@ The product should feel alive: dots react to the cursor and the marks "think". E
   - After touching access or MCP, run `pnpm test:code` (it runs roll-auth, roll-access, roll-mcp
     and roll-net with roll code's suites; `--docker` runs them on Postgres too) and
     `cargo test -p rolld --test auth` (every route classified). Read-only must be enforced by the
-    product (Postgres runs `read_only` SQL as a role that can only read), not by parsing.
+    product (Postgres runs `read_only` SQL as a role that can only read, and a write-only grant's
+    SQL as a member of the database's owner role, never the superuser), not by parsing.
   - roll's MCP server is `crates/roll-mcp` (`/v1/mcp`): a tool is one route (`tools.rs`), called
     through the gated router, its hints from the catalogue; list it in docs/mcp.md (a test checks).
     A body field or query parameter added to a route that has a tool goes in the tool's arguments,
@@ -383,11 +387,20 @@ The product should feel alive: dots react to the cursor and the marks "think". E
   - Tokens are roll-access's: a project's token is a grant with one secrets rule made through
     `POST /v1/access/tokens`, and identities' logins get `workload` grants (`Workloads`). Never
     add a token store to secrets; it asks the caller's `Grant` (`GrantGrants`).
-  - Signed-in people manage their own projects' secrets (`OwnProjects`; others' projects 404). A
-    canvas proves nothing about who owns what's on it: anything acting on a resource through a
-    project asks `roll_workspace::Workspace::trusts` (secrets' `members`, `counts_for_repo`, roll
-    previews), never membership alone. What a person made (tokens and their tokens, identities,
-    syncs) acts only while they can sign in and still reach the project (`maker_reaches`).
+  - Signed-in people reach the secrets of the projects they're members of, as their role there
+    allows (docs/members.md): their session is a `GrantKind::Session` grant of their memberships'
+    rules, decided by roll-access and asked again inside secrets (`GrantGrants`); others' projects
+    404. A person's token acts `Within` their session. A canvas proves nothing about who owns
+    what's on it: anything acting on a resource through a project asks
+    `roll_workspace::Workspace::trusts` (secrets' `members`, `counts_for_repo`, roll previews),
+    never membership alone, and a person's own grant never proves a resource is theirs (placing and
+    homing take `Owners`). What a person made acts later only at their rights now, checked on every
+    use with the action and scope it exercises: `maker_reaches(by, needs)` for identities (their
+    rule), backups, gateways, ACME bindings and placeholders' makers; `registration_reaches` for
+    sinks, notify URLs, host bindings and every registered provider (`LinkProvider::maker`, through `Secrets::provider_for`); exports on
+    every read (`dead_exports`); syncs push as them (`person_caller`). A registration stores the
+    person, never their token (`Caller::made_by`); shares and leases follow their maker through
+    `Secrets::maker` (`member_changed`).
   - Workload identities (`identities.rs`) log CI in with its own OIDC token: an issuer is a URL a
     tenant chose, fetched only through rolld's guarded client (`Deliver::get`), and a shared issuer
     (GitHub, GitLab) needs a subject that names one repo.
