@@ -542,6 +542,7 @@ async fn handle(State(m): State<Mcp>, uri: axum::http::Uri, ext: Extensions, hea
             // A method the revision doesn't have is a 404 (with its JSON-RPC error), so a client
             // tells it from a server that has no MCP endpoint here.
             Some(r) if modern && r["error"]["code"] == -32601 => (StatusCode::NOT_FOUND, Json(r)).into_response(),
+            Some(r) if modern && r["error"]["code"] == modern::HEADER_MISMATCH => (StatusCode::BAD_REQUEST, Json(r)).into_response(),
             Some(r) if !batch => Json(r).into_response(),
             last => {
                 responses.extend(last);
@@ -839,6 +840,7 @@ async fn process(ctx: &Arc<Ctx>, messages: Vec<Value>) -> Vec<Value> {
                 // A 2026-07-28 client may run code against the tools: it gets their answers' shape.
                 if ctx.modern && !ctx.search {
                     output::attach(&mut tools);
+                    modern::annotate(&mut tools);
                 }
                 rpc_result(id, json!({ "tools": tools }))
             }
@@ -860,6 +862,8 @@ async fn process(ctx: &Arc<Ctx>, messages: Vec<Value>) -> Vec<Value> {
                     rpc_result(id, search::find(&ctx.tools(), &args))
                 } else if !args.is_object() {
                     rpc_error(id, -32602, "arguments must be an object")
+                } else if let Some(Err(why)) = (ctx.modern && !ctx.search).then(|| ctx.usable_tools().into_iter().find(|t| t["name"] == name.as_str()).map_or(Ok(()), |t| modern::check_params(&t, &args, &ctx.headers))) {
+                    rpc_error(id, modern::HEADER_MISMATCH, format!("Header mismatch: {why}"))
                 } else if ctx.readonly && !tool_names(ctx).contains(&name) {
                     rpc_result(id, json!({ "content": [{ "type": "text", "text": format!("{name} isn't read-only, and this connection is (?readonly=1): connect without it to change things") }], "isError": true }))
                 } else if ctx.pick.picks() && !ctx.pick.keeps(&name) {
