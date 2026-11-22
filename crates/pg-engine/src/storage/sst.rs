@@ -239,6 +239,54 @@ pub struct SstMeta {
     /// Its blocks are compressed with a zstd dictionary it holds (format 4, `FORMAT_DICT`).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub dict: bool,
+    /// Its blocks a compaction may copy as they are (`SstWriter::copy_block`), as its writer
+    /// saw them: every user key in one version, none a deletion, none sharing its key with
+    /// the block before or after. Known only to the process that wrote the file (not stored:
+    /// a file of an earlier session is written again whole once).
+    #[serde(skip)]
+    pub clean: Option<Arc<CleanBlocks>>,
+}
+
+/// A file's blocks that hold one version of each of their user keys, no deletion, and no user
+/// key of the block before or after (`SstMeta::clean`): what a compaction would write of such
+/// a block when nothing newer has a key in its range is the block itself.
+#[derive(Debug, Default)]
+pub struct CleanBlocks {
+    bits: Vec<u64>,
+    len: usize,
+}
+
+impl CleanBlocks {
+    pub fn len(&self) -> usize {
+        self.len
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+
+    pub fn get(&self, b: usize) -> bool {
+        b < self.len && self.bits[b / 64] >> (b % 64) & 1 != 0
+    }
+
+    fn push(&mut self, clean: bool) {
+        if self.len.is_multiple_of(64) {
+            self.bits.push(0);
+        }
+        self.bits[self.len / 64] |= (clean as u64) << (self.len % 64);
+        self.len += 1;
+    }
+
+    fn unset(&mut self, b: usize) {
+        if b < self.len {
+            self.bits[b / 64] &= !(1 << (b % 64));
+        }
+    }
+
+    /// How many are clean.
+    pub fn count(&self) -> usize {
+        self.bits.iter().map(|w| w.count_ones() as usize).sum()
+    }
 }
 
 fn is_zero(n: &u64) -> bool {
@@ -520,6 +568,19 @@ pub struct SstWriter {
     /// The dictionary and a compressor with it (or none, when training found none: plain
     /// zstd blocks).
     zdict: Option<Option<(Vec<u8>, zstd::bulk::Compressor<'static>)>>,
+    /// Its blocks so far (held or written) that are clean (`CleanBlocks`), and whether the
+    /// block being made is not.
+    clean: CleanBlocks,
+    dirty: bool,
+    /// The file whose dictionary and bloom filter it took to copy blocks of (`adopt`), the
+    /// blocks it copied, and the filter (empty: the file had none).
+    adopted: Option<Arc<SstReader>>,
+    copied: Vec<u32>,
+    carried: Vec<u8>,
+    /// How many entries the copied blocks hold (each a user key of its own: clean blocks).
+    copied_keys: u64,
+    /// The block being made may grow to twice its target (`stretch`).
+    stretched: bool,
 }
 
 /// A file with fewer bytes of blocks than this gets no dictionary (its blocks are plain zstd).
@@ -685,7 +746,115 @@ impl SstWriter {
             held: Vec::new(),
             held_bytes: 0,
             zdict: None,
+            clean: CleanBlocks::default(),
+            dirty: false,
+            adopted: None,
+            copied: Vec::new(),
+            carried: Vec::new(),
+            copied_keys: 0,
+            stretched: false,
         })
+    }
+
+    /// Whether blocks of `f` can be copied into it (`copy_block`): it took `f`'s dictionary
+    /// and filter (`adopt`), or can still take them: a format 2 writer that wrote no block yet
+    /// (blocks held for a dictionary are written with `f`'s), compressing as `f`'s blocks are
+    /// read (a file with a dictionary; without one, a writer that doesn't compress).
+    pub fn can_copy_from(&self, f: &Arc<SstReader>) -> bool {
+        match &self.adopted {
+            Some(a) => Arc::ptr_eq(a, f),
+            None => {
+                self.v2
+                    && f.v2
+                    && f.meta.commit_ts.is_none()
+                    && f.retag.is_none()
+                    && self.index.is_empty()
+                    && self.zdict.is_none()
+                    && !self.index_run
+                    && self.bloom.is_none()
+                    && match self.codec {
+                        Codec::Zstd => f.ddict.is_some(),
+                        Codec::None => f.ddict.is_none(),
+                        Codec::Lz4 => false,
+                    }
+            }
+        }
+    }
+
+    /// Take `f`'s dictionary for its blocks (the ones held back for training one too) and its
+    /// bloom filter, to copy `f`'s blocks (`can_copy_from` first).
+    pub fn adopt(&mut self, f: &Arc<SstReader>) -> Result<()> {
+        if self.adopted.is_some() {
+            return Ok(());
+        }
+        debug_assert!(self.can_copy_from(f));
+        self.zdict = Some(match f.dict_bytes()? {
+            Some(d) => {
+                let c = zstd::bulk::Compressor::with_dictionary(ZSTD_LEVEL, &d).map_err(|e| internal(format!("zstd: {e}")))?;
+                Some((d, c))
+            }
+            None => None,
+        });
+        self.dict = None;
+        for (raw, last, n) in std::mem::take(&mut self.held) {
+            self.write_block(&raw, last, n)?;
+        }
+        self.held_bytes = 0;
+        self.carried = f.bloom.clone();
+        self.min_ts = self.min_ts.min(f.meta.min_ts);
+        self.max_ts = self.max_ts.max(f.meta.max_ts);
+        self.adopted = Some(f.clone());
+        Ok(())
+    }
+
+    /// Block `b` of the file it adopted (`adopt`), copied as it is stored: `data` (its codec
+    /// byte to its crc), its last key and entry count from the file's index, its first key
+    /// when it is this file's first entry. The block being made ends first. Every key of it
+    /// must come after the keys added so far and before those added next.
+    pub fn copy_block(&mut self, b: usize, data: &[u8], last: &[u8], n: u32, first: Option<&[u8]>) -> Result<()> {
+        self.finish_block()?;
+        if self.first_key.is_none() {
+            self.first_key = Some(first.ok_or_else(|| internal("a copied block's first key"))?.to_vec());
+        }
+        self.out.write_all(data)?;
+        self.index.push((last.to_vec(), self.offset, data.len() as u32, n));
+        self.offset += data.len() as u64;
+        self.entries += n as u64;
+        self.prev_key.clear();
+        self.prev_key.extend_from_slice(last);
+        self.last_user_hash = None;
+        self.rows |= !self.carried.is_empty();
+        self.clean.push(true);
+        self.copied.push(b as u32);
+        self.copied_keys += n as u64;
+        Ok(())
+    }
+
+    /// Whether the block being made holds entries, but under a quarter of its target: a
+    /// block copied after it would leave it that small.
+    pub fn pending_small(&self) -> bool {
+        self.block_entries > 0 && self.block_bytes1() < self.target(index_entry(user_key(&self.prev_key))) / 4
+    }
+
+    /// Let the block being made grow to twice its target (until it ends, or `false`): it
+    /// takes in a block that would otherwise be copied after it small (`pending_small`).
+    pub fn stretch(&mut self, on: bool) {
+        self.stretched = on;
+    }
+
+    /// Where a block of a table's rows (or index entries, `index`) ends.
+    fn target(&self, index: bool) -> usize {
+        match self.block_target {
+            Some(t) => t,
+            None if !self.v2 => BLOCK_TARGET,
+            None if index => INDEX_BLOCK,
+            None => ROW_BLOCK,
+        }
+    }
+
+    /// How many blocks it copied.
+    pub fn copied_blocks(&self) -> usize {
+        self.copied.len()
     }
 
     /// Compress its blocks with a zstd dictionary of about `size` bytes trained from its first
@@ -717,6 +886,7 @@ impl SstWriter {
         if self.first_key.is_none() {
             self.first_key = Some(key.to_vec());
         }
+        let at_start = self.block_entries == 0;
         if self.v2 {
             self.put2(key, value);
         } else {
@@ -731,6 +901,7 @@ impl SstWriter {
             Some(v) => self.tagged && v.first().is_none_or(|t| t & 1 == 0),
         };
         self.deletes += deleted as u64;
+        self.dirty |= deleted;
         let ts = key_ts(key);
         self.min_ts = self.min_ts.min(ts);
         self.max_ts = self.max_ts.max(ts);
@@ -744,14 +915,19 @@ impl SstWriter {
                     None => self.hashes.push(h),
                 }
                 self.last_user_hash = Some(h);
+            } else {
+                // (Another version of the key before: this block isn't clean, nor the one
+                // before when that one ended with it. Equal hashes of two keys only cost a
+                // copy.)
+                self.dirty = true;
+                if at_start && let Some(b) = self.clean.len().checked_sub(1) {
+                    self.clean.unset(b);
+                }
             }
+        } else {
+            self.dirty = true;
         }
-        let target = match self.block_target {
-            Some(t) => t,
-            None if !self.v2 => BLOCK_TARGET,
-            None if index => INDEX_BLOCK,
-            None => ROW_BLOCK,
-        };
+        let target = self.target(index) << self.stretched as u32;
         if self.block_bytes1() >= target {
             self.finish_block()?;
         }
@@ -860,6 +1036,9 @@ impl SstWriter {
         let n = self.block_entries as u32;
         self.block_entries = 0;
         self.raw1 = 0;
+        self.clean.push(!self.dirty);
+        self.dirty = false;
+        self.stretched = false;
         if let (Some((_, sample)), None) = (self.dict, &self.zdict) {
             self.held_bytes += raw.len();
             self.held.push((raw, self.prev_key.clone(), n));
@@ -974,6 +1153,7 @@ impl SstWriter {
             // this one too.)
             _ if !self.rows || self.index_run => Vec::new(),
             Some((b, _)) => b,
+            None if !self.copied.is_empty() => self.copied_bloom()?,
             None => {
                 let nbits = (self.hashes.len() * BLOOM_BITS_PER_KEY).max(64);
                 let mut bloom = vec![0u8; nbits.div_ceil(8)];
@@ -1029,7 +1209,51 @@ impl SstWriter {
             dv: None,
             dead: 0,
             dict: dict.is_some(),
+            clean: self.v2.then(|| Arc::new(std::mem::take(&mut self.clean))),
         })
+    }
+
+    /// The bloom filter of a file with copied blocks: the adopted file's with the bits of the
+    /// keys added set too (a superset of the keys: no key it holds is turned away), while
+    /// that is about what a filter made for its keys would be (no more than twice the bits,
+    /// at most 60% of them set: 10 bits a key with 7 set each sets about half); else made
+    /// for its keys, the copied blocks' read again for theirs.
+    fn copied_bloom(&mut self) -> Result<Vec<u8>> {
+        let keys = self.copied_keys as usize + self.hashes.len();
+        let mut b = std::mem::take(&mut self.carried);
+        if !b.is_empty() {
+            let m = FastMod::new(b.len() as u64 * 8);
+            for h in &self.hashes {
+                bloom_set(&mut b, m, *h);
+            }
+            let bits = b.len() * 8;
+            let set: usize = b.iter().map(|x| x.count_ones() as usize).sum();
+            if keys * BLOOM_BITS_PER_KEY * 2 >= bits && set * 10 <= bits * 6 {
+                return Ok(b);
+            }
+        }
+        let f = self.adopted.clone().ok_or_else(|| internal("copied blocks without their file"))?;
+        let mut pos = BlockPos::default();
+        for &i in &self.copied {
+            let blk = f.raw_block(i as usize)?;
+            let mut last = None;
+            blk.at(0, &mut pos);
+            while pos.index() < blk.len() {
+                let h = hash64_2(user_key(pos.key()));
+                if last != Some(h) {
+                    self.hashes.push(h);
+                    last = Some(h);
+                }
+                blk.step(&mut pos);
+            }
+        }
+        let nbits = (self.hashes.len() * BLOOM_BITS_PER_KEY).max(64);
+        let mut bloom = vec![0u8; nbits.div_ceil(8)];
+        let m = FastMod::new(bloom.len() as u64 * 8);
+        for h in &self.hashes {
+            bloom_set(&mut bloom, m, *h);
+        }
+        Ok(bloom)
     }
 
     pub fn abandon(self) {
@@ -1058,8 +1282,12 @@ pub struct SstReader {
     /// A newer reader of the file has another dead-entry set: this one's file goes when it
     /// does (the sst file stays).
     dead_obsolete: AtomicBool,
-    /// The dictionary its codec 3 blocks were compressed with (format 4).
+    /// The dictionary its codec 3 blocks were compressed with (format 4), and where it is
+    /// in the file (with its crc32).
     ddict: Option<zstd::dict::DecoderDictionary<'static>>,
+    dict_at: Option<(u64, u64)>,
+    /// Where its block index is in the file.
+    index_at: (u64, u64),
 }
 
 /// The longest key `Block::run_rows` makes in a buffer of its own (a table's row keys are 12 to
@@ -2713,7 +2941,62 @@ impl SstReader {
             dead_obsolete: AtomicBool::new(false),
             retag: None,
             ddict,
+            dict_at: dict,
+            index_at: (f(0), f(1)),
         })
+    }
+
+    /// Its dictionary as the file holds it (None: it has none), read again (a compaction
+    /// copying its blocks writes it into its output, `SstWriter::adopt`).
+    pub fn dict_bytes(&self) -> Result<Option<Vec<u8>>> {
+        let Some((off, n)) = self.dict_at else { return Ok(None) };
+        let mut d = vec![0u8; n as usize];
+        self.file.read_exact_at(&mut d, off)?;
+        d.truncate(d.len().saturating_sub(4));
+        Ok(Some(d))
+    }
+
+    /// Each block's entry count, from its index read again (format 2: `SstWriter::finish`).
+    pub fn block_entries(&self) -> Result<Vec<u32>> {
+        if !self.v2 {
+            return Err(internal("format 1 indexes hold no entry counts"));
+        }
+        let mut b = vec![0u8; self.index_at.1 as usize];
+        self.file.read_exact_at(&mut b, self.index_at.0)?;
+        let mut pos = 0;
+        let n = get_varint(&b, &mut pos)? as usize;
+        let mut out = Vec::with_capacity(n);
+        for _ in 0..n {
+            let kl = get_varint(&b, &mut pos)? as usize;
+            pos += kl;
+            get_varint(&b, &mut pos)?;
+            get_varint(&b, &mut pos)?;
+            out.push(get_varint(&b, &mut pos)? as u32);
+        }
+        if out.len() != self.block_count() {
+            return Err(internal("bad sst index"));
+        }
+        Ok(out)
+    }
+
+    /// Block `i` as the file stores it (its codec byte to its crc), checked, into `out`.
+    pub fn stored_block(&self, i: usize, out: &mut Vec<u8>) -> Result<()> {
+        let (off, len) = self.index.at[i];
+        out.resize(len as usize, 0);
+        self.file.read_exact_at(out, off)?;
+        let c = out.len().checked_sub(4).filter(|&c| c > 0).ok_or_else(|| internal("sst block too short"))?;
+        if crc32fast::hash(&out[..c]).to_le_bytes() != out[c..] {
+            return Err(crate::error::Error::new(
+                crate::error::code::DATA_CORRUPTED,
+                format!("checksum mismatch in {} block {i}", self.path.display()),
+            ));
+        }
+        Ok(())
+    }
+
+    /// Block `i`'s last key (from the index).
+    pub fn block_last_key(&self, i: usize) -> &[u8] {
+        self.index.key(i)
     }
 
     /// A run of format 2 (`SstWriter::create_run`), every entry of command `cid`, read as

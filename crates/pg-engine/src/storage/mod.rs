@@ -107,6 +107,256 @@ fn deletions_due(l0: &[Arc<SstReader>], l1: &[Arc<SstReader>]) -> bool {
     deletes * 8 >= under
 }
 
+/// A compaction's outputs as it writes them (`Store::compact_within`): each entry of its inputs
+/// in key order, every version (`entry`), and blocks of its L1 inputs copied as they are
+/// (`copy_blocks`).
+struct Compacted<'a> {
+    store: &'a Store,
+    view: &'a View,
+    /// The L1 files left in place, in key order: an output ends before each.
+    kept: &'a [Arc<SstReader>],
+    horizon: u64,
+    discarded: discard::Filter,
+    writer: Option<SstWriter>,
+    outputs: Vec<SstMeta>,
+    /// The user key of the last entry taken (or of a copied block's last), whether there was
+    /// one, and whether a version of it at or before the horizon was kept.
+    cur_user: Vec<u8>,
+    started: bool,
+    kept_old: bool,
+    /// The first 8 bytes of the last key the writer took, and how many: `part_ends`.
+    part: ([u8; 8], usize),
+    /// The next of `kept` the outputs reach.
+    next_kept: usize,
+    /// Blocks copied.
+    copied: usize,
+}
+
+impl Compacted<'_> {
+    /// Entry `k` (a storage key) of an input, in key order: written, or dropped when no one
+    /// reads it any more. (Called through a reference from the merge and its zipped blocks:
+    /// one body.)
+    #[inline(never)]
+    fn entry(&mut self, k: &[u8], v: Option<&[u8]>) -> Result<()> {
+        let uk = user_key(k);
+        let ts = key_ts(k);
+        let first_version = !self.started || !sst::short_eq(&self.cur_user, uk);
+        if first_version {
+            self.started = true;
+            self.cur_user.clear();
+            self.cur_user.extend_from_slice(uk);
+            self.kept_old = false;
+        }
+        // (Discarded: no one reads it any more.)
+        if self.discarded.drops(uk) {
+            return Ok(());
+        }
+        // (Deleted with its range before anyone still reading: its older versions too.)
+        if !self.view.rdels.is_empty() && self.view.rdels.covering(uk, ts, self.horizon).is_some() {
+            return Ok(());
+        }
+        if ts <= self.horizon {
+            if self.kept_old {
+                return Ok(());
+            }
+            self.kept_old = true;
+            // L1 is the bottom level, so a tombstone nobody can see past can go.
+            if v.is_none() {
+                return Ok(());
+            }
+        }
+        // Only split between user keys: a key's versions all in one L1 file, as point
+        // reads look for them (`point::newest` reads the one file whose range has the key).
+        if first_version {
+            self.end_before(uk, uk, false)?;
+        }
+        if self.writer.is_none() {
+            self.writer = Some(self.store.sst_writer(self.store.next_id.fetch_add(1, Ordering::Relaxed), true)?);
+        }
+        self.writer.as_mut().unwrap().add(k, v)?;
+        if first_version || self.part.1 == 0 {
+            self.set_part(uk);
+        }
+        Ok(())
+    }
+
+    fn set_part(&mut self, uk: &[u8]) {
+        self.part = match uk.first_chunk::<8>() {
+            Some(p) => (*p, 8),
+            None => {
+                let mut p = [0u8; 8];
+                p[..uk.len()].copy_from_slice(uk);
+                (p, uk.len())
+            }
+        };
+    }
+
+    /// Whether the output ends before user key `uk`, whose keys from `first` on come next:
+    /// past a file left in place, at its target size, or where a table's or an index's keys
+    /// end (`part_ends`).
+    fn would_end(&self, first: &[u8], uk: &[u8]) -> bool {
+        let past_kept = self.next_kept < self.kept.len() && sst::short_cmp(user_key(&self.kept[self.next_kept].meta.first_key), first).is_lt();
+        self.writer.as_ref().is_some_and(|w| {
+            past_kept || w.approx_size() >= self.store.opts.target_file_bytes || part_ends(w, &self.part.0[..self.part.1], uk)
+        })
+    }
+
+    /// `would_end` (or `end`), and the output finished if so. (Past a file left in place: no key
+    /// of an input is in its range, so `first` is past all of it.)
+    fn end_before(&mut self, first: &[u8], uk: &[u8], end: bool) -> Result<()> {
+        let end = end || self.would_end(first, uk);
+        while self.next_kept < self.kept.len() && sst::short_cmp(user_key(&self.kept[self.next_kept].meta.first_key), first).is_lt() {
+            self.next_kept += 1;
+        }
+        if end {
+            let w = self.writer.take().unwrap();
+            self.outputs.push(w.finish()?);
+        }
+        Ok(())
+    }
+
+    /// The L1 input's blocks next in key order (of `merge`'s source `li`, none of the block
+    /// read yet) copied into the output as they are stored, while each is one the compaction
+    /// would write unchanged: a clean block (`sst::CleanBlocks`: one version of each key, no
+    /// deletion) without dead entries, of a file no range deletion or discarded range meets
+    /// (`Copies`), whose range holds no key of the other inputs (every one of their heads is
+    /// past its last user key; what they had before it was taken before the block's first
+    /// key), within one table's or index's keys. Its entries are then what a full rewrite
+    /// writes: each key's one version is its newest, kept at or after the horizon, and not a
+    /// deletion. The output takes the file's dictionary and bloom filter (`SstWriter::adopt`)
+    /// when it wrote no block yet; one that has another's ends once it holds `PART_MIN` bytes
+    /// (and writes the block again before that). Only the blocks a batch of UPDATEs meets are
+    /// read and written again (HANDOFF "Short write transactions, round 13").
+    fn copy_blocks(&mut self, merge: &mut Merge, li: usize, copies: &mut Copies) -> Result<()> {
+        loop {
+            let Some((fi, b)) = merge.sources[li].unread_block() else { return Ok(()) };
+            // (A block stretched for the block before ends where it ends.)
+            if let Some(w) = &mut self.writer {
+                w.stretch(false);
+            }
+            let Some(c) = copies.files[fi].as_mut() else { return Ok(()) };
+            let f = c.file.clone();
+            if !c.clean.get(b) || f.dead().is_some_and(|d| d.block(b).is_some()) {
+                return Ok(());
+            }
+            let ulast = user_key(f.block_last_key(b));
+            for j in 0..li {
+                merge.sources[j].fill()?;
+                if merge.sources[j].head().is_some_and(|(k, _)| user_key(k) <= ulast) {
+                    return Ok(());
+                }
+            }
+            // (Every key of the block is past `ufirst`; its first key's 8 bytes are the last
+            // key's when these are.)
+            let ufirst = if b == 0 { user_key(&f.meta.first_key) } else { user_key(f.block_last_key(b - 1)) };
+            if !sst::short_eq(&ufirst[..ufirst.len().min(8)], &ulast[..ulast.len().min(8)]) {
+                return Ok(());
+            }
+            let mut end = self.would_end(ufirst, ulast);
+            if !end && let Some(w) = &mut self.writer {
+                // (An output that took another file's dictionary, or trained its own, ends here
+                // once it holds `PART_MIN` bytes, and the next one takes this file's: else the
+                // rest of the file would be written again, up to the output's target size.)
+                if !w.can_copy_from(&f) {
+                    if w.approx_size() < PART_MIN {
+                        return Ok(());
+                    }
+                    end = true;
+                }
+                // (A block copied after the one being made would leave that one small: the
+                // block is taken into it instead, which may grow to twice its size for it,
+                // so rewritten ranges between copied blocks don't leave ever more small
+                // blocks behind.)
+                if w.pending_small() {
+                    w.stretch(true);
+                    return Ok(());
+                }
+            }
+            self.end_before(ufirst, ulast, end)?;
+            if self.writer.is_none() {
+                self.writer = Some(self.store.sst_writer(self.store.next_id.fetch_add(1, Ordering::Relaxed), true)?);
+            }
+            let w = self.writer.as_mut().unwrap();
+            if !w.can_copy_from(&f) {
+                return Ok(());
+            }
+            w.adopt(&f)?;
+            let n = c.entries()?[b];
+            let first = match w.entries() {
+                0 if b == 0 => Some(f.meta.first_key.clone()),
+                0 => {
+                    let blk = f.raw_block(b)?;
+                    let mut pos = sst::BlockPos::default();
+                    blk.at(0, &mut pos);
+                    Some(pos.key().to_vec())
+                }
+                _ => None,
+            };
+            f.stored_block(b, &mut copies.buf)?;
+            w.copy_block(b, &copies.buf, f.block_last_key(b), n, first.as_deref())?;
+            self.copied += 1;
+            self.started = true;
+            self.cur_user.clear();
+            self.cur_user.extend_from_slice(ulast);
+            self.set_part(ulast);
+            merge.sources[li].skip_block();
+            merge.cur = None;
+        }
+    }
+}
+
+/// A compaction's L1 inputs whose clean blocks it may copy (`Compacted::copy_blocks`), by their
+/// place among the inputs: files of the format its outputs are written in (with a dictionary
+/// when they are compressed), not a linked run, that no range deletion or discarded range
+/// meets (whose entries it would drop).
+struct Copies {
+    files: Vec<Option<CopyFile>>,
+    any: bool,
+    /// A copied block's bytes.
+    buf: Vec<u8>,
+}
+
+struct CopyFile {
+    file: Arc<SstReader>,
+    clean: Arc<sst::CleanBlocks>,
+    /// Each block's entry count (from its index, read at the first block copied).
+    entries: Option<Vec<u32>>,
+}
+
+impl CopyFile {
+    fn entries(&mut self) -> Result<&[u32]> {
+        if self.entries.is_none() {
+            self.entries = Some(self.file.block_entries()?);
+        }
+        Ok(self.entries.as_deref().unwrap_or_default())
+    }
+}
+
+impl Copies {
+    fn new(store: &Store, view: &View, inputs: &[Arc<SstReader>]) -> Copies {
+        let discarded = store.discard.ranges();
+        let format = if store.opts.compress { sst::FORMAT_DICT } else { sst::FORMAT };
+        let files: Vec<Option<CopyFile>> = inputs
+            .iter()
+            .map(|f| {
+                let clean = f.meta.clean.clone()?;
+                let (a, b) = (user_key(&f.meta.first_key), user_key(&f.meta.last_key));
+                let meets = |s: &[u8], e: &[u8]| s <= b && a < e;
+                let ok = store.opts.copy_blocks
+                    && store.opts.format >= 2
+                    && clean.len() == f.block_count()
+                    && clean.count() > 0
+                    && f.meta.commit_ts.is_none()
+                    && f.format() == format
+                    && !view.rdels.iter().any(|r| meets(&r.start, &r.end))
+                    && !discarded.iter().any(|(s, e)| meets(s, e));
+                ok.then(|| CopyFile { file: f.clone(), clean, entries: None })
+            })
+            .collect();
+        Copies { any: files.iter().any(Option::is_some), files, buf: Vec::new() }
+    }
+}
+
 /// What a compaction does with an L1 file it merges (`Store::mark_dead`).
 enum Marked {
     /// Written again with L0's entries in its range.
@@ -158,6 +408,9 @@ pub struct StoreOptions {
     pub format: u32,
     /// When the store writes files with dead entries again by itself (`schedule_reclaim`).
     pub reclaim: Reclaim,
+    /// A compaction copies the blocks of its L1 inputs it would write unchanged as they are
+    /// (`Compacted::copy_blocks`; off: every one is written again, for tests comparing them).
+    pub copy_blocks: bool,
 }
 
 /// When a store writes its marked files (`Store::mark_dead`) again without their dead
@@ -235,6 +488,7 @@ impl Default for StoreOptions {
             txn_spill_bytes: default_spill_bytes(),
             format: sst::FORMAT,
             reclaim: Reclaim::default(),
+            copy_blocks: true,
         }
     }
 }
@@ -504,6 +758,8 @@ pub struct Store {
     closing: AtomicBool,
     /// A commit's run went to L1 as it was since `maybe_compact` last looked (`alone_at_bottom`).
     linked_bottom: AtomicBool,
+    /// L1 blocks compactions copied as they were (`Compacted::copy_blocks`).
+    copied_blocks: AtomicU64,
     closed: AtomicBool,
     /// Small ranges scanned whole again and again, kept as version chains (`hot`).
     hot: hot::Hot,
@@ -776,6 +1032,7 @@ impl Store {
             reclaim: Mutex::new(()),
             closing: AtomicBool::new(false),
             linked_bottom: AtomicBool::new(false),
+            copied_blocks: AtomicU64::new(0),
             closed: AtomicBool::new(false),
             hot: hot::Hot::default(),
             dead: Arc::default(),
@@ -2311,8 +2568,6 @@ impl Store {
             .chain(merged_l0.iter().filter(|l| !only_deletions(l)))
             .map(|f| (user_key(&f.meta.first_key), user_key(&f.meta.last_key)))
             .reduce(|(a, b), (c, d)| (a.min(c), b.max(d)));
-        // (The next L1 file left in place that the outputs reach: one ends before it.)
-        let mut next_kept = 0;
         let mut sources: Vec<Cursor> = merged_l0
             .iter()
             .map(|s| match reach {
@@ -2329,95 +2584,47 @@ impl Store {
             })
             .collect();
         sources.push(Cursor::level_uncached(inputs_l1.clone()));
+        let li = sources.len() - 1;
         let mut merge = Merge::new(sources, Vec::new());
-        let mut outputs: Vec<SstMeta> = Vec::new();
-        let mut writer: Option<SstWriter> = None;
-        let mut cur_user: Vec<u8> = Vec::new();
-        let mut started = false;
-        let mut kept_old = false;
-        // (The first 8 bytes of the last key the writer took, and how many: `part_ends`.)
-        let mut part = ([0u8; 8], 0usize);
-        let mut discarded = self.discard.filter();
-        // (Each entry in key order, every version: what is written of it. One body, called
-        // through the reference on both paths.)
-        let entry: &mut dyn FnMut(&[u8], Option<&[u8]>) -> Result<()> = &mut |k: &[u8], v: Option<&[u8]>| -> Result<()> {
-            let uk = user_key(k);
-            let ts = key_ts(k);
-            let first_version = !started || !sst::short_eq(&cur_user, uk);
-            if first_version {
-                started = true;
-                cur_user.clear();
-                cur_user.extend_from_slice(uk);
-                kept_old = false;
-            }
-            // (Discarded: no one reads it any more.)
-            if discarded.drops(uk) {
-                return Ok(());
-            }
-            // (Deleted with its range before anyone still reading: its older versions too.)
-            if !view.rdels.is_empty() && view.rdels.covering(uk, ts, horizon).is_some() {
-                return Ok(());
-            }
-            if ts <= horizon {
-                if kept_old {
-                    return Ok(());
-                }
-                kept_old = true;
-                // L1 is the bottom level, so a tombstone nobody can see past can go.
-                if v.is_none() {
-                    return Ok(());
-                }
-            }
-            // Only split between user keys: a key's versions all in one L1 file, as point
-            // reads look for them (`point::newest` reads the one file whose range has the key).
-            // (Past a file left in place: no key of an input is in its range, so `uk` is past
-            // all of it.)
-            let mut past_kept = false;
-            while first_version && next_kept < kept.len() && sst::short_cmp(user_key(&kept[next_kept].meta.first_key), uk).is_lt() {
-                past_kept = true;
-                next_kept += 1;
-            }
-            if first_version
-                && writer.as_ref().is_some_and(|w| {
-                    past_kept || w.approx_size() >= self.opts.target_file_bytes || part_ends(w, &part.0[..part.1], uk)
-                })
-            {
-                let w = writer.take().unwrap();
-                outputs.push(w.finish()?);
-            }
-            if writer.is_none() {
-                writer = Some(self.sst_writer(self.next_id.fetch_add(1, Ordering::Relaxed), true)?);
-            }
-            writer.as_mut().unwrap().add(k, v)?;
-            if first_version || part.1 == 0 {
-                part = match uk.first_chunk::<8>() {
-                    Some(p) => (*p, 8),
-                    None => {
-                        let mut p = [0u8; 8];
-                        p[..uk.len()].copy_from_slice(uk);
-                        (p, uk.len())
-                    }
-                };
-            }
-            Ok(())
+        let mut out = Compacted {
+            store: self,
+            view: &view,
+            kept: &kept,
+            horizon,
+            discarded: self.discard.filter(),
+            writer: None,
+            outputs: Vec::new(),
+            cur_user: Vec::new(),
+            started: false,
+            kept_old: false,
+            part: ([0u8; 8], 0),
+            next_kept: 0,
+            copied: 0,
         };
-        while let Some(i) = merge.min()? {
+        let mut copies = Copies::new(self, &view, &inputs_l1);
+        loop {
+            if copies.any {
+                out.copy_blocks(&mut merge, li, &mut copies)?;
+            }
+            let Some(i) = merge.min()? else { break };
             // (Interleaved files, an UPDATE's versions over the table, a block at a time.)
-            if merge.rank.len() > 1 && merge.with_zip(|srcs, bound| sst::zip_entries(srcs, bound, &mut *entry)).transpose()? == Some(true) {
+            if merge.rank.len() > 1 && merge.with_zip(|srcs, bound| sst::zip_entries(srcs, bound, &mut |k, v| out.entry(k, v))).transpose()? == Some(true) {
                 merge.cur = None;
                 continue;
             }
             let (k, v) = merge.sources[i].head().expect("a head entry");
-            entry(k, v)?;
+            out.entry(k, v)?;
             merge.sources[i].advance();
         }
-        if let Some(w) = writer {
+        if let Some(w) = out.writer.take() {
             if w.entries() > 0 {
-                outputs.push(w.finish()?);
+                out.outputs.push(w.finish()?);
             } else {
                 w.abandon();
             }
         }
+        let (outputs, copied) = (out.outputs, out.copied);
+        self.copied_blocks.fetch_add(copied as u64, Ordering::Relaxed);
         let mut readers = outputs
             .iter()
             .map(|m| SstReader::open(&self.dir, m.clone(), self.opts.cache.clone()).map(Arc::new))
@@ -2460,7 +2667,7 @@ impl Store {
         for (old, _) in &marked {
             old.mark_dead_obsolete();
         }
-        info!(dir = %self.dir.display(), files = outputs.len(), marked = marked.len(), "compacted");
+        info!(dir = %self.dir.display(), files = outputs.len(), marked = marked.len(), copied, "compacted");
         Ok(())
     }
 
@@ -2939,6 +3146,40 @@ impl Cursor {
             *fill = false;
         }
         c
+    }
+
+    /// A level cursor between blocks (the one before read to its end, or none read yet, over
+    /// every key): the file and block it reads next, none of which is read (None: inside a
+    /// block, at the end, or a memtable's). (`Compacted::copy_blocks`.)
+    fn unread_block(&mut self) -> Option<(usize, usize)> {
+        let Cursor::Level { ssts, file, block, block_idx, pos, start, started, .. } = self else {
+            return None;
+        };
+        if !*started {
+            if !start.is_empty() {
+                return None;
+            }
+            *started = true;
+        }
+        if let Some(b) = block {
+            if pos.index() < b.len() {
+                return None;
+            }
+            *block = None;
+            *block_idx += 1;
+        }
+        while *file < ssts.len() && *block_idx >= ssts[*file].block_count() {
+            *file += 1;
+            *block_idx = 0;
+        }
+        (*file < ssts.len()).then_some((*file, *block_idx))
+    }
+
+    /// Past the block `unread_block` named, unread.
+    fn skip_block(&mut self) {
+        if let Cursor::Level { block: None, block_idx, .. } = self {
+            *block_idx += 1;
+        }
     }
 
     /// Position on the next entry (reading a batch or a block when needed); `head` then
@@ -5686,6 +5927,98 @@ mod tests {
         s.collect_ranges().unwrap();
         assert_eq!(s.view().l0.len() + s.view().l1.len(), 0);
         assert!(keys(&s).is_empty());
+    }
+
+    /// A compaction that copies L1 blocks as they are leaves the same entries, every version
+    /// and deletion, as one writing each again: over rounds of updates, deletions and new
+    /// keys, one with a snapshot holding old versions (blocks it leaves unclean are written
+    /// again later), and without leaving more blocks.
+    #[test]
+    fn copied_blocks_compact_as_a_full_rewrite() {
+        // (One L1 file for the table, and files of 40 kB, a few for it: outputs that pass from
+        // one input file into the next.)
+        copied_blocks_compact_with(64 << 20);
+        copied_blocks_compact_with(40 << 10);
+    }
+
+    fn copied_blocks_compact_with(target_file_bytes: u64) {
+        let open = |dir: &Path, copy_blocks: bool| {
+            Store::open(dir, StoreOptions { sync: false, background: false, copy_blocks, target_file_bytes, ..StoreOptions::default() }).unwrap()
+        };
+        let (d1, d2) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+        let stores = [open(d1.path(), true), open(d2.path(), false)];
+        let key = |i: u32| format!("tabl0001{i:06}").into_bytes();
+        let mut model: Model = BTreeMap::new();
+        let write = |s: &Arc<Store>, writes: Vec<(Vec<u8>, Option<Bytes>)>, model: Option<&mut Model>| {
+            let ts = s.commit(writes.clone(), |_| Ok(())).unwrap();
+            if let Some(m) = model {
+                for (k, v) in writes {
+                    m.entry(k).or_default().push((ts, v));
+                }
+            }
+            ts
+        };
+        let dump = |s: &Arc<Store>| {
+            let mut out = Vec::new();
+            let mut pos = sst::BlockPos::default();
+            for f in s.view().l1.iter() {
+                for b in 0..f.block_count() {
+                    let blk = f.block(b).unwrap();
+                    blk.at(0, &mut pos);
+                    while pos.index() < blk.len() {
+                        out.push((pos.key().to_vec(), blk.value(&pos)));
+                        blk.step(&mut pos);
+                    }
+                }
+            }
+            out
+        };
+        let blocks = |s: &Arc<Store>| s.view().l1.iter().map(|f| f.block_count()).sum::<usize>();
+        for (n, s) in stores.iter().enumerate() {
+            let m = (n == 0).then_some(&mut model);
+            write(s, (0..20_000).map(|i| (key(i), Some(Bytes::from(format!("v0-{i}-{}", "x".repeat(40)))))).collect(), m);
+            s.rotate().unwrap();
+            s.flush_all().unwrap();
+            s.compact().unwrap();
+        }
+        for round in 1..8u32 {
+            let mut pins = Vec::new();
+            for (n, s) in stores.iter().enumerate() {
+                // (Round 3 holds a snapshot across its compaction: both versions stay.)
+                if round == 3 {
+                    pins.push(s.pin_visible());
+                }
+                let mut writes: Vec<(Vec<u8>, Option<Bytes>)> = (0..20_000u32)
+                    .filter(|i| (i.wrapping_mul(2_654_435_761) >> 7) % 61 == round)
+                    .map(|i| (key(i), (i % 7 != 0).then(|| Bytes::from(format!("v{round}-{i}")))))
+                    .collect();
+                writes.extend((0..50).map(|j| (key(20_000 + round * 100 + j), Some(Bytes::from(format!("new{round}-{j}"))))));
+                writes.sort();
+                let m = (n == 0).then_some(&mut model);
+                write(s, writes, m);
+                s.rotate().unwrap();
+                s.flush_all().unwrap();
+                s.compact().unwrap();
+            }
+            drop(pins);
+            let (a, b) = (dump(&stores[0]), dump(&stores[1]));
+            assert!(a.len() > 19_000 && stores.iter().all(|s| s.view().l0.is_empty()), "round {round}: L1 holds {} entries", a.len());
+            assert_eq!(a.len(), b.len(), "round {round}");
+            assert!(a == b, "round {round}: the copying compaction's entries differ");
+            assert!(target_file_bytes > 1 << 20 || stores[0].view().l1.len() > 2, "{} files", stores[0].view().l1.len());
+            assert!(blocks(&stores[0]) <= blocks(&stores[1]) * 21 / 20, "round {round}: {} blocks against {}", blocks(&stores[0]), blocks(&stores[1]));
+        }
+        let copied = stores[0].copied_blocks.load(Ordering::Relaxed);
+        assert!(copied > 100, "{copied} blocks copied");
+        assert_eq!(stores[1].copied_blocks.load(Ordering::Relaxed), 0);
+        // (With small files the two split their outputs in other places: a writer that took a
+        // file's dictionary knows its size, one holding blocks back for its own estimates it.
+        // Files under 64 kB of blocks get none, in either store.)
+        if target_file_bytes > 1 << 20 {
+            let dicts = |s: &Arc<Store>| s.view().l1.iter().map(|f| f.meta.dict).collect::<Vec<_>>();
+            assert_eq!(dicts(&stores[0]), dicts(&stores[1]), "outputs keep a dictionary as a rewrite's have one");
+        }
+        check_at(&stores[0], &model, stores[0].visible_ts(), "copied");
     }
 
     #[test]
