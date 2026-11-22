@@ -646,10 +646,16 @@ async fn run_with(mut args: Args) -> anyhow::Result<()> {
             loop {
                 tick.tick().await;
                 let a = a.clone();
-                let _ = tokio::task::spawn_blocking(move || a.run_deletions()).await;
+                let _ = tokio::task::spawn_blocking(move || {
+                    a.run_deletions();
+                    a.run_offboardings();
+                })
+                .await;
             }
         });
     }
+    // Someone disabled, no longer an admin or deleted: roll secrets' hook below, from the outbox.
+    let offboarding = accounts.clone();
     let people = secrets::People { accounts, code: code.as_ref().map(|c| c.code.clone()), search: search.as_ref().map(|s| s.control.clone()) };
     workspace.set_owners(std::sync::Arc::new(people.clone()));
     // Members' handles and addresses, and invite links to the dashboard (docs/members.md).
@@ -672,6 +678,22 @@ async fn run_with(mut args: Args) -> anyhow::Result<()> {
         s.control.set_secrets(std::sync::Arc::new(secrets::ForSearch(secrets.clone())));
     }
     let _ = secrets_envs.0.set(secrets.clone());
+    // Someone disabled (an admin, SCIM), no longer an admin, or deleted (docs/accounts.md,
+    // "Offboarding"): what was handed out on their say ends now, not at its TTL. Their leases are
+    // revoked and their open shares end (roll secrets, as for a removed member), and agents
+    // sandboxes holding values they copied stop (a start asks roll secrets again). Run from roll
+    // accounts' outbox after the write, off the async threads, until it succeeds.
+    {
+        let (s, code) = (secrets.clone(), code.as_ref().map(|c| c.code.clone()));
+        offboarding.on_offboarded(Box::new(move |user| {
+            s.person_offboarded(user).map_err(|e| e.to_string())?;
+            if let Some(code) = &code {
+                let theirs = |by: &str| s.made_by(by, user).map_err(|e| e.to_string());
+                tokio::runtime::Handle::current().block_on(code.stop_sandboxes_copied_by(theirs)).map_err(|e| e.to_string())?;
+            }
+            Ok(())
+        }));
+    }
     // roll secrets' placeholders found leaked (`rlph_`) stop working, like tokens.
     {
         let secrets = secrets.clone();

@@ -338,6 +338,17 @@ CREATE TABLE IF NOT EXISTS error_groups (
     first_seen INTEGER NOT NULL,
     PRIMARY KEY (service, env, fingerprint)
 ) WITHOUT ROWID;
+-- Environments' private networks into the customer's own (`peering.rs`): the WireGuard
+-- config's roll:// reference and who it's read as, never the config; its routes as JSON.
+CREATE TABLE IF NOT EXISTS env_peering (
+    service TEXT NOT NULL,
+    env TEXT NOT NULL,
+    kind TEXT NOT NULL,
+    secret TEXT NOT NULL,
+    maker TEXT NOT NULL,
+    routes TEXT NOT NULL,
+    PRIMARY KEY (service, env)
+) WITHOUT ROWID;
 -- Deployments whose instances run closed (egress roll: placeholders and interception), so any
 -- node can tell whether a project environment still uses its placeholders.
 CREATE TABLE IF NOT EXISTS deploy_closed (
@@ -1174,7 +1185,7 @@ impl Store {
             c.execute("DELETE FROM deploy_steps WHERE deployment IN (SELECT id FROM deployments WHERE service = ?)", [id])?;
             c.execute("DELETE FROM state WHERE key LIKE ?", [format!("%:{id}/%")])?;
             c.execute("DELETE FROM status_days WHERE key LIKE ?", [format!("%:{id}/%")])?;
-            for t in ["environments", "deployments", "deploy_keys", "fences", "env_access", "registry_auth", "git_auth", "git_github", "github_events", "trace_ingest", "runtime_config", "oidc_access", "variable_makers", "variable_runtime_only", "visit_tickets", "visit_sessions", "variable_files", "error_groups", "variables", "links", "domains", "preview_hosts", "runs", "jobs", "metrics", "usage", "form_submissions", "deploy_scans", "env_data", "env_branches", "udp_ports", "env_unscheduled", "sandboxes"] {
+            for t in ["environments", "deployments", "deploy_keys", "fences", "env_access", "registry_auth", "git_auth", "git_github", "github_events", "trace_ingest", "runtime_config", "oidc_access", "variable_makers", "variable_runtime_only", "visit_tickets", "visit_sessions", "variable_files", "error_groups", "variables", "links", "domains", "preview_hosts", "runs", "jobs", "metrics", "usage", "form_submissions", "deploy_scans", "env_data", "env_branches", "udp_ports", "env_unscheduled", "sandboxes", "env_peering"] {
                 c.execute(&format!("DELETE FROM {t} WHERE service = ?"), [id])?;
             }
             match c.execute("DELETE FROM services WHERE id = ?", [id])? {
@@ -1314,7 +1325,7 @@ impl Store {
             if n == 0 {
                 return Err(Error::NotFound(format!("service {service} has no environment {env}")));
             }
-            for t in ["variables", "variable_files", "error_groups", "domains", "preview_hosts", "runs", "jobs", "metrics", "deploy_keys", "env_access", "trace_ingest", "runtime_config", "oidc_access", "variable_makers", "variable_runtime_only", "visit_tickets", "visit_sessions", "form_submissions", "env_data", "udp_ports", "env_unscheduled", "sandboxes"] {
+            for t in ["variables", "variable_files", "error_groups", "domains", "preview_hosts", "runs", "jobs", "metrics", "deploy_keys", "env_access", "trace_ingest", "runtime_config", "oidc_access", "variable_makers", "variable_runtime_only", "visit_tickets", "visit_sessions", "form_submissions", "env_data", "udp_ports", "env_unscheduled", "sandboxes", "env_peering"] {
                 c.execute(&format!("DELETE FROM {t} WHERE service = ? AND env = ?"), [service, env])?;
             }
             // Its schedules', challenge's and base images' state goes with it.
@@ -3469,6 +3480,31 @@ impl Store {
             (None, _, Some(t)) => self.db.query(&format!("SELECT {COLS} FROM sandboxes WHERE expires_at <= ? ORDER BY expires_at"), [t], row)?,
             (None, _, None) => self.db.query(&format!("SELECT {COLS} FROM sandboxes ORDER BY created_at"), (), row)?,
         })
+    }
+
+    pub fn set_peering(&self, service: &str, env: &str, p: &crate::peering::PrivateNetwork, maker: &str) -> Result<()> {
+        let routes = serde_json::to_string(&p.routes).map_err(|e| Error::Internal(e.to_string()))?;
+        self.db.execute(
+            "INSERT INTO env_peering (service, env, kind, secret, maker, routes) VALUES (?, ?, 'wireguard', ?, ?, ?) ON CONFLICT (service, env) DO UPDATE SET kind = excluded.kind, secret = excluded.secret, maker = excluded.maker, routes = excluded.routes",
+            params![service, env, p.secret, maker, routes],
+        )?;
+        Ok(())
+    }
+
+    /// An environment's private network and who its reference is read as.
+    pub fn peering(&self, service: &str, env: &str) -> Result<Option<(crate::peering::PrivateNetwork, String)>> {
+        Ok(self.db.query_row("SELECT secret, maker, routes FROM env_peering WHERE service = ? AND env = ?", [service, env], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?))).optional()?.map(|(secret, maker, routes)| {
+            (crate::peering::PrivateNetwork { kind: crate::peering::PeerKind::Wireguard, secret, routes: serde_json::from_str(&routes).unwrap_or_default() }, maker)
+        }))
+    }
+
+    /// Every environment with a private network: (service, env).
+    pub fn peerings(&self) -> Result<Vec<(String, String)>> {
+        Ok(self.db.query("SELECT service, env FROM env_peering", (), |r| Ok((r.get(0)?, r.get(1)?)))?)
+    }
+
+    pub fn delete_peering(&self, service: &str, env: &str) -> Result<bool> {
+        Ok(self.db.execute("DELETE FROM env_peering WHERE service = ? AND env = ?", [service, env])? > 0)
     }
 
     pub fn mark_deploy_closed(&self, deployment: &str) -> Result<()> {

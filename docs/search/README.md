@@ -689,7 +689,7 @@ origins (browser search), once they're on main.
 | GET | `/v1/search` | version, endpoint, defaults, pricing; for a person their `caps`; for the operator and admins also `storage`, `loaded` clusters and the `cache` |
 | GET | `/v1/search/clusters` | list (a person: their own); `?deleted=true`: recently deleted clusters kept for restoring, newest first, with `deleted_at` and `purge_at` (Unix seconds), the name each had and its last figures (`stored_bytes` is still billed) |
 | POST | `/v1/search/clusters` | create `{name, flavor?, parent?, at?, idle_timeout_s?, max_in_flight?, max_body_mb?, destructive_requires_name?}`; answers with `url`, `username`, `password` (once) and `id` — the shape `search-yaml run --cluster-hook` expects; `owner` is the signed-in person who isn't an admin, and a branch's is its parent's |
-| GET | `/v1/search/clusters/{id or name}` | settings, `status` (`loaded` with live index count and requests in flight, and live `docs` once every index is open, or `asleep` with `wakes_at`, unix seconds, when a background job is due to wake it), last metered `indices`/`docs`/`stored_bytes` and `own_bytes` (what a branch references that its parent's latest commit points don't; all of `stored_bytes` for a cluster that isn't a branch), `url`, `branches` |
+| GET | `/v1/search/clusters/{id or name}` | settings, `status` (`loaded` with live index count and requests in flight, and live `docs` once every index is open, or `asleep` with `wakes_at`, unix seconds, when a background job is due to wake it), last metered `indices`/`docs`/`stored_bytes` and `own_bytes` (what a branch references that its parent's latest commit points don't; all of `stored_bytes` for a cluster that isn't a branch), `url`, `branches` (each `{id, name, parent_at, created_at}`); a branch's `parent_id`, `parent_name` and `parent_at` (Unix seconds: the parent's state it started from). roll previews compares `parent_at` with `_cat/indices`' `creation.date` (Unix milliseconds) to leave out indices the parent made after the branch, so both fields stay |
 | PATCH | `/v1/search/clusters/{id}` | `flavor`, `idle_timeout_s` (0: always loaded), `max_in_flight`, `max_body_mb`, `destructive_requires_name`, `ip_allowlist` (below), `cors` and `browser_per_minute` (above: browser search), `reindex_whitelist` (`host:port` patterns reindex from remote may read, "Migrating into roll"); the idle timeout, body limit, `max_in_flight`, allowlist and CORS apply at once (also to a cluster that is waking up); a new flavor or `destructive_requires_name` needs a reload: the cluster is put to sleep now, or as soon as no request runs (always-on clusters included), and keeps its current ones until then |
 | DELETE | `/v1/search/clusters/{id}` | waits for running requests and for a wake in progress (which is locked out and unloaded, never left serving); the cluster leaves the list, its REST endpoint answers as for a missing cluster and its name is free at once, but its storage is kept for `--search-deleted-retention-days` (7) and billed as storage, for `restore` (0 days: removed at once); branches keep working |
 | POST | `/v1/search/clusters/{id}/restore` | a deleted cluster (by its id) back as it was within its window: data, snapshots, settings, owner, password and API keys; under its own name, else 409 and `{"name": "…"}` restores it under another (the new name is its Basic auth user, API key id suffix and host label; the password stays). Scoped like every per-cluster route (owner, admins, the operator); 404 once purged |
@@ -1118,8 +1118,14 @@ deterministic (#396).
 
 1. **Search from the browser** (landed in #358 after six reviews, its policy enforced in the
    engine on the parsed request: per-cluster CORS, browser keys with rate limits and their own body
-   cap, a Browser search section and the site-search guide's browser page; what remains is RAG's
-   chat limits for browser keys, item 11; Algolia's search-only and secured API keys,
+   cap, a Browser search section and the site-search guide's browser page; what remains: RAG's
+   chat limits for browser keys (item 11); keys derived without a call to roll (Algolia's
+   `generateSecuredApiKey`, Typesense's `generateScopedSearchKey`, Meilisearch's tenant tokens: a
+   SaaS signs a short-lived key per end customer from one parent key, where today it's 20 browser
+   keys a cluster and one control-plane call each); browser search on previews (a branch keeps the
+   parent's origins but no browser key works there: give it one and the preview's URL, roll
+   previews' side); and usage and 429s per browser key in the Browser search section (Algolia's
+   per-key usage and logs); Algolia's search-only and secured API keys,
    Typesense's scoped keys, Meilisearch's tenant tokens, Elastic's search applications): a web
    page can't call a roll cluster today. There's no CORS (`http.cors.*` are static settings no
    tenant can set), so every site needs a backend in front of search, which is the first thing
@@ -1138,8 +1144,10 @@ deterministic (#396).
    it's sent), copies mappings, settings and aliases, reindexes with progress and switches an
    alias when done. Elastic Cloud restores from other deployments, AWS OpenSearch Service has
    migration assistants, Algolia and Typesense import from each other): left, Algolia's export
-   (records, synonyms, rules) mapped onto indices, synonym sets and query rules, and a Typesense
-   and Meilisearch import (their dump formats onto indices and settings).
+   (records, synonyms, rules) mapped onto indices, synonym sets and query rules, a Typesense
+   and Meilisearch import (their dump formats onto indices and settings), and catch-up and cutover
+   (AWS OpenSearch Migration Assistant's capture and replay): a copy is one point in time today, so
+   writes made during the copy are lost unless the client double-writes.
 3. **One memory account per request** (in progress: ES|QL and aggregations in #549, Painless per execution in #591, and a
    node-wide body budget in #601, each in review; ES|QL and aggregations against a node budget
    no tenant setting can raise in #549, Painless per execution, and a node-wide body budget; Elasticsearch charges every request's
@@ -1252,7 +1260,10 @@ deterministic (#396).
    adopted with new credentials. Elastic's connectors, Algolia's and Typesense's data sync): left,
    linking a person's own roll Postgres or bucket with a read-only credential of its own,
    credentials from roll secrets after #134, Postgres advanced rules, PDF and Office text, and the
-   web crawler (item 13) on this runner.
+   web crawler (item 13) on this runner, and alerts on failed syncs through roll's webhooks or
+   chat ops (Algolia's connectors notify on failed runs). A whole-product review on 2026-11-22
+   found connectors refusing private addresses but not reindex's deny rules, and no per-owner cap on
+   remote reindex slots: being fixed together as one node-wide egress check and owner-fair slots.
 8. **Semantic search with no keys** (built in #563, in review: roll's float build of E5 equals
    Elasticsearch's float deployment, cosine 1.000000 on 64 of 64 cases; Elastic Cloud's `.multilingual-e5-small-elasticsearch`
    and Elastic Inference Service, Typesense's and Meilisearch's built-in embedding models,

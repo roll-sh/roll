@@ -572,6 +572,9 @@ say "migrate the preview's Postgres branch, push: the next head's schema changes
 if [ -n "$PG_BRANCH" ]; then
   PG_EP=$(api GET "/v1/projects/$PG" | jq_ "[b['endpoint']['id'] for b in d['branches'] if b['id']=='$PG_BRANCH'][0]")
   api POST "/v1/endpoints/$PG_EP/query" '{"sql":"CREATE TABLE preview_only (id int PRIMARY KEY, note text NOT NULL DEFAULT '"'"'x'"'"'); ALTER TABLE users ALTER COLUMN email SET NOT NULL"}' >/dev/null
+  # Another change's migration lands on production first: a table the preview's branch doesn't
+  # have, which isn't this change dropping it (neither a change nor a risk).
+  api POST "/v1/endpoints/$PG_PARENT_EP/query" '{"sql":"CREATE TABLE landed_first (id int PRIMARY KEY)"}' >/dev/null
   # The preview's code tries to get the superuser to run it (a function shadowing one the schema
   # diff calls, pg_get_indexdef(oid), the database's search_path pointed at it): the diff runs as the branch's role
   # with only the catalog's names, so the role stays what it is.
@@ -596,6 +599,7 @@ if [ -n "$PG_BRANCH" ]; then
   done
   case "$SCHEMA" in *"+ table public.preview_only"*) ;; *) echo "the schema changes should name the new table: $SCHEMA"; exit 1;; esac
   case "$SCHEMA" in *"+ field products.price "*) ;; *) echo "the schema changes should name the search branch's new field: $SCHEMA"; exit 1;; esac
+  case "$SCHEMA" in *landed_first*) echo "a table production made after the branch isn't this change's: $SCHEMA"; exit 1;; esac
   # A column made NOT NULL is named as a migration risk; the new table isn't one.
   RISKS=$(api GET "/v1/previews/$PV" | jq_ "' | '.join(d.get('schema_risks') or [])")
   case "$RISKS" in "makes public.users.email (postgres:$PG) NOT NULL: "*) ;; *) echo "the schema's risks should name the NOT NULL column (and its database), and only it: $RISKS"; exit 1;; esac

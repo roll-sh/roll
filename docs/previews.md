@@ -653,7 +653,13 @@ migrations (a fork's too), so each line is made printable once, where the diff i
 control characters escaped (a newline in a name can't fake a line, an escape sequence can't reach
 a terminal), lines cut at 300 characters, 200 lines at most; the comment keeps them inside a fence
 they can't close. A failure to read is
-logged and read again on the next converge; it never fails the preview.
+logged and read again on the next converge; it never fails the preview. Only what the change made is
+named: each branch's own lines are kept as it's made (masked, before any seed or release runs;
+`base_schema` on its resource row, read from the branch alone), and a line counts only when the
+branch also differs in it from that base (`schema::diff_since`). Another change's migration that
+lands on production while the preview is open isn't read as this one dropping its table, in the
+lines or the risks. A branch made before bases were kept, or whose base couldn't be read (said in
+its activity), is compared with its parent alone.
 
 What in those lines would hurt production when the change lands is named above them
 (`schema_risks`, `roll_previews::schema::risks`; PlanetScale's deploy request warnings, Atlas's

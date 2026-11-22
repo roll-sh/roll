@@ -134,6 +134,13 @@ pub trait Brancher: Send + Sync {
     async fn schema(&self, _parent: &str, _branch: &str) -> anyhow::Result<Option<(Vec<String>, Vec<String>)>> {
         Ok(None)
     }
+
+    /// The branch's schema alone, as [`Brancher::schema`] reads it: kept as the branch is made, so
+    /// the changes shown later are the change's ([`crate::schema::diff_since`]). Never reads the
+    /// parent (no compute of production's started for it).
+    async fn branch_schema(&self, _parent: &str, _branch: &str) -> anyhow::Result<Option<Vec<String>>> {
+        Ok(None)
+    }
 }
 
 /// A change (or branch) as previews see it.
