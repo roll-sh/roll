@@ -1315,7 +1315,7 @@ Revoking a role ends
 its sessions and gives what it made (a migration's tables) to `roll` before dropping it, so revoking
 a credential never drops data.
 
-| `search` | `url`, `host`, `port`, `username` | a credential of its own with data access only (no keys or users; `"access": "data"`: a key roll search doesn't say is a data one, whatever else it says or if it says nothing, is deleted and refused), credential `key`: on an Elasticsearch cluster `api_key` (`Authorization: ApiKey …`), on an OpenSearch one an internal user, `user` (`<user>@<cluster>`, which the node routes) and `password`; a link to the field the cluster's flavor doesn't issue is refused when written, and switching a cluster's flavor carries no credential across (link the other fields again); an OpenSearch cluster's fields are offered and suggested under the names its clients read (`OPENSEARCH_URL`, `_HOST`, `_PORT`, `OPENSEARCH_USERNAME`/`_PASSWORD` for its user, `OPENSEARCH_CLUSTER` for the cluster's name); a dynamic one expires by itself 5 minutes after its lease | no (never the cluster's password) |
+| `search` | `url`, `host`, `port`, `username` | a credential of its own with data access only (no keys or users; `"access": "data"`), or narrower with the options `permission` (`read`: searches and reads; `append`: adds to named data streams only, Elasticsearch flavor) and `names` (index names or patterns, a list or a comma-separated string; a data key on names gets none of the cluster's templates, pipelines or lifecycle policies); a key roll search doesn't say is the access and indices asked for, whatever else it says or if it says nothing, is deleted and refused, credential `key`: on an Elasticsearch cluster `api_key` (`Authorization: ApiKey …`), on an OpenSearch one an internal user, `user` (`<user>@<cluster>`, which the node routes) and `password`; a link to the field the cluster's flavor doesn't issue is refused when written, and switching a cluster's flavor carries no credential across (link the other fields again); an OpenSearch cluster's fields are offered and suggested under the names its clients read (`OPENSEARCH_URL`, `_HOST`, `_PORT`, `OPENSEARCH_USERNAME`/`_PASSWORD` for its user, `OPENSEARCH_CLUSTER` for the cluster's name); a dynamic one expires by itself 5 minutes after its lease | no (never the cluster's password) |
 
 roll apps' services have a workspace kind (`service`, `svc_…`); they consume secrets (an app's
 variables, `app:<svc>`) rather than issue credentials, so they have no link provider. Products
@@ -3022,6 +3022,13 @@ cluster, instead of a key pasted into it: the Inference tab's "A roll secret", o
   no sync is made; the tab offers "A roll secret" only for the others.
 - Deleting the endpoint from the tab deletes its sync; one deleted another way leaves the sync,
   whose next push says the endpoint is gone. Deleting the key leaves the endpoint its last value.
+- A branch of the cluster (`POST …/branches`, or a create with `parent`) copies its endpoints,
+  sealed keys included, and keeps them working there (its `semantic_text` fields go on embedding).
+  The sync follows the cluster it names, never its branches: rotating the key leaves each branch
+  the value it copied, and deleting the endpoint and its sync leaves theirs. The tab's delete names
+  the branches copied since the endpoint was bound (`bound_at` in `GET …/inference/secrets`); delete
+  the endpoint there too, or rotate the key at its provider. Pausing them on the branch instead
+  (as inherited SLM policies are) would stop a branch's embedding, its main use.
 - The sync names the cluster by its id (`srch_…`, never a name: a name has no `_`) and pushes
   through roll search's control plane (`/v1/search/clusters/{id}/request`, on the cluster's owner
   on a fleet), not the cluster's endpoint, so its Basic auth user and IP allowlist don't apply. A
@@ -4665,6 +4672,28 @@ credentials as the tokens list does. Names and metadata only, never a value:
   do there (read, reveal, write, admin; decided by the same scope check requests are), when it was
   last used and when it ends; and whether code roll hasn't vetted (checks, sandboxes, previews)
   can read it, which is so unless the environment is protected.
+- **People** (`people`): the project's members whose role reveals it now (`{user, handle, role,
+  actions, admin?}`), decided by their session grant as their own requests are
+  (docs/members.md); an admin account reveals everything whatever its role (`admin: true`). The
+  operator's admin accounts are a count (`admins`). Members v1.1's groups add the people of a
+  group that holds a role here once they land.
+- **Their agents** (`clients`): live OAuth connections (`rlo_…`: a person's MCP client or app)
+  whose rules reach it, in the shape of `tokens`, by person (`created_by`). A person's connection
+  reaches only what their role does (#644). A cut-off's `tokens` revokes these too.
+- **Services** (`services`): roll apps services the project stands for (the workspace's `trusts`)
+  whose environment reads it, `{service, name, environment, through, last_deployed_at}`. A
+  service environment reads the project's environment of its name (its root folder), so it reads
+  this folder when that's the folder itself or one importing it or based on it (`through:
+  "env:/path"`), or through one of its variables' `roll://` references (`through` is the
+  reference). Whenever it last deployed: what runs holds the value until it's redeployed.
+- **Sandboxes** (`sandboxes`): live agents sandboxes holding a copy of its values, `{id, name,
+  owner, by, from, keys}` (with `key`, only that key).
+- **Who knew** (`knew`): people who read its values in the last 30 days and may no longer reveal
+  them, `{user, last_at, reads, why}` (`why`: `left` the project, their `role` no longer reveals
+  it, or their account is `gone`). They still know what they read: rotate it.
+
+roll secrets knows no product: rolld answers which services and sandboxes hold a project's
+secrets (`reach::Holders`, from roll apps' and roll code's stores; names and references only).
 - **Where it goes by itself**: syncs of that folder (and that key), projects the folder is shared
   with, and this project's folders that import it.
 - **Where it goes by itself** also counts folders that import it and environments based on it
@@ -4678,8 +4707,10 @@ credentials as the tokens list does. Names and metadata only, never a value:
   a `${…}` or `roll://` reference in another key are recorded where they happened and aren't
   counted: the answer says so (`uncounted`).
 
-Who could lists roll-access's live tokens (`rlt_…`) by what each may do here, and workload identities
-by their identity rather than each login. OAuth connections (`rlo_…`) aren't listed yet, though since roll MCP's #644 a member's MCP client reaches what their role does (the thirty-fifth review's item 3).
+Who could lists roll-access's live tokens (`rlt_…`) by what each may do here, workload identities
+by their identity rather than each login, and OAuth connections (`rlo_…`) apart, as `clients`.
+Reach is a project admin's: it names the project's members, which its admins see on the members
+page already.
 
 It also lists what the folder has handed out that's still out: dynamic credentials issued for
 its keys and not yet revoked (`leases`), live placeholders of its keys wherever they were

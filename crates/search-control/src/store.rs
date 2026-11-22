@@ -1012,6 +1012,27 @@ impl Store {
         })?)
     }
 
+    /// Seals every remote's credentials still in the clear (linked on a node without a sealing
+    /// key), each with `seal`, only where the row still holds what was read: a node that gains a
+    /// key seals them as it starts, rather than failing to open them.
+    pub async fn seal_remote_credentials(&self, seal: impl Fn(&RemoteLink) -> String) -> anyhow::Result<usize> {
+        let rows: Vec<RemoteLink> = self.db.read(|x| x.query(&format!("SELECT {REMOTE_COLS} FROM search_remotes"), params![], remote_row))?;
+        let legacy: Vec<(RemoteLink, String)> = rows.into_iter().filter(|r| !is_sealed(&r.credentials)).map(|r| {
+            let sealed = seal(&r);
+            (r, sealed)
+        }).collect();
+        if legacy.is_empty() {
+            return Ok(0);
+        }
+        self.db.write(|x| {
+            for (r, sealed) in &legacy {
+                x.execute("UPDATE search_remotes SET credentials = ?3 WHERE cluster_id = ?1 AND alias = ?2 AND credentials = ?4", params![r.cluster_id, r.alias, sealed, r.credentials])?;
+            }
+            Ok::<_, code_sql::Error>(())
+        })?;
+        Ok(legacy.len())
+    }
+
     /// Cluster `cluster_id`'s credentials for its remote `alias`.
     pub async fn remote(&self, cluster_id: &str, alias: &str) -> anyhow::Result<Option<RemoteLink>> {
         Ok(self.db.read(|x| x.query_row(&format!("SELECT {REMOTE_COLS} FROM search_remotes WHERE cluster_id = ?1 AND alias = ?2"), params![cluster_id, alias], remote_row).optional())?)

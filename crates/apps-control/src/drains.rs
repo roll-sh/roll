@@ -320,7 +320,7 @@ impl Apps {
         let vars: HashMap<String, String> = self.deps.resources.link_vars(crate::model::LinkKind::Bucket, bucket).await.map_err(|e| Error::BadRequest(format!("bucket {bucket}: {e:#}")))?.into_iter().collect();
         let (Some(endpoint), Some(name)) = (vars.get("AWS_ENDPOINT_URL"), vars.get("S3_BUCKET")) else { return Err(Error::Conflict("roll storage gave no endpoint for the bucket".into())) };
         let region = vars.get("AWS_REGION").cloned().unwrap_or_else(|| "us-east-1".into());
-        let m = self.deps.resources.link(crate::model::LinkKind::Bucket, bucket, &format!("drain:{project}")).await.map_err(|e| Error::Conflict(format!("a key for bucket {bucket}: {e:#}")))?.ok_or_else(|| Error::Conflict("roll storage made no key for the drain".into()))?;
+        let m = self.deps.resources.link(crate::model::LinkKind::Bucket, bucket, &format!("drain:{project}"), &Default::default()).await.map_err(|e| Error::Conflict(format!("a key for bucket {bucket}: {e:#}")))?.ok_or_else(|| Error::Conflict("roll storage made no key for the drain".into()))?;
         let get = |k: &str| m.vars.iter().find(|(n, _)| n == k).map(|(_, v)| v.clone());
         let (Some(id), Some(key)) = (get("AWS_ACCESS_KEY_ID"), get("AWS_SECRET_ACCESS_KEY")) else {
             let _ = self.deps.resources.unlink(crate::model::LinkKind::Bucket, bucket, &m.kept).await;

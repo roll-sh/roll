@@ -179,6 +179,8 @@ static BRANCHED: Mutex<Vec<String>> = Mutex::new(Vec::new());
 static MINTED: Mutex<Vec<String>> = Mutex::new(Vec::new());
 /// While set, a `logs` link waits (a while at most) for a second one to reach the provider too,
 /// so two requests racing to make one link both get there whatever the machine's load.
+/// The options each link was made with (a search key's indices and access).
+static LINK_OPTIONS: Mutex<Vec<Value>> = Mutex::new(Vec::new());
 static RACING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 static RACE: std::sync::LazyLock<tokio::sync::Barrier> = std::sync::LazyLock::new(|| tokio::sync::Barrier::new(2));
 
@@ -191,7 +193,8 @@ impl apps_control::integrations::Resources for FakeResources {
         }
     }
 
-    async fn link(&self, kind: apps_control::model::LinkKind, r#ref: &str, service: &str) -> anyhow::Result<Option<apps_control::integrations::Minted>> {
+    async fn link(&self, kind: apps_control::model::LinkKind, r#ref: &str, service: &str, options: &apps_control::integrations::LinkOptions) -> anyhow::Result<Option<apps_control::integrations::Minted>> {
+        LINK_OPTIONS.lock().push(serde_json::Value::Object(options.clone()));
         if (kind.as_str(), r#ref) != ("search", "logs") {
             return Ok(None);
         }
@@ -1677,6 +1680,21 @@ async fn a_link_puts_its_variables_in_the_instances() {
     let log: Vec<String> = MINTED.lock()[before..].to_vec();
     assert_eq!(log.iter().filter(|l| l.starts_with("link ")).count(), 2, "{log:?}");
     assert_eq!(log.iter().filter(|l| l.starts_with("unlink ")).count(), 1, "the loser's goes: {log:?}");
+    // Narrowed (roll search's keys: a SaaS's tenants' indices, read only): a new key made with
+    // the options replaces the link's, and the old one is revoked; the same options again make
+    // nothing; append takes exact names only; other kinds take none.
+    assert_eq!(call(&w.api, "PUT", &path, Some(json!({"indices": ["tenant-*"], "access": "append"}))).await.0, StatusCode::BAD_REQUEST);
+    assert_eq!(call(&w.api, "PUT", &format!("/v1/apps/services/{rid}/links/postgres/main"), Some(json!({"indices": ["x"]}))).await.0, StatusCode::BAD_REQUEST);
+    let before = MINTED.lock().len();
+    let (st, l) = call(&w.api, "PUT", &path, Some(json!({"indices": ["tenant-*"], "access": "read"}))).await;
+    assert_eq!((st, &l["indices"], &l["access"]), (StatusCode::OK, &json!(["tenant-*"]), &json!("read")), "{l}");
+    assert_eq!(LINK_OPTIONS.lock().last(), Some(&json!({"names": ["tenant-*"], "permission": "read"})));
+    let log: Vec<String> = MINTED.lock()[before..].to_vec();
+    assert!(log.len() == 2 && log[0].starts_with("link ") && log[1].starts_with("unlink "), "a new key, the old revoked: {log:?}");
+    assert_eq!(call(&w.api, "PUT", &path, Some(json!({"indices": ["tenant-*"], "access": "read"}))).await.0, StatusCode::OK);
+    assert_eq!(MINTED.lock().len(), before + 2, "the same options make nothing");
+    let listed = call(&w.api, "GET", &format!("/v1/apps/services/{rid}/links"), None).await.1;
+    assert!(listed.as_array().unwrap().iter().any(|l| l["kind"] == "search" && l["access"] == "read" && l["indices"] == json!(["tenant-*"])), "{listed}");
 }
 
 /// An environment's own data (`data: "branch"`, Railway's environments' own databases): its
@@ -3664,7 +3682,7 @@ impl apps_control::integrations::Resources for FakeBucket {
     async fn link_vars(&self, _kind: apps_control::model::LinkKind, r#ref: &str) -> anyhow::Result<Vec<(String, String)>> {
         Ok(vec![("S3_BUCKET".into(), r#ref.into()), ("AWS_ENDPOINT_URL".into(), self.endpoint.clone()), ("AWS_REGION".into(), "eu-central-1".into())])
     }
-    async fn link(&self, _kind: apps_control::model::LinkKind, r#ref: &str, to: &str) -> anyhow::Result<Option<apps_control::integrations::Minted>> {
+    async fn link(&self, _kind: apps_control::model::LinkKind, r#ref: &str, to: &str, _options: &apps_control::integrations::LinkOptions) -> anyhow::Result<Option<apps_control::integrations::Minted>> {
         self.seen.lock().push(format!("key {to} {ref}"));
         Ok(Some(apps_control::integrations::Minted { vars: vec![("AWS_ACCESS_KEY_ID".into(), "AKIAMINTED".into()), ("AWS_SECRET_ACCESS_KEY".into(), "minted-secret".into())], kept: "AKIAMINTED".into() }))
     }
@@ -4460,6 +4478,10 @@ async fn a_deployment_without_traffic_answers_on_its_own_url_until_put_live() {
     let (st, v) = visit(&w, &own(&d2["id"]), "/").await;
     assert_eq!((st, v["deployment"].clone()), (StatusCode::OK, d2["id"].clone()), "its own URL runs it");
     assert_eq!(visit(&w, &own(&d1["id"]), "/").await.1["deployment"], d1["id"], "the live one has its own URL too");
+    // Each deployment says its own URL (roll previews' per-commit links): the host just visited.
+    assert_eq!(host(&d2["url"]), own(&d2["id"]), "{d2}");
+    let listed = call(&w.api, "GET", &format!("{base}/deploys"), None).await.1;
+    assert!(listed.as_array().unwrap().iter().all(|d| host(&d["url"]) == own(&d["id"])), "{listed}");
     assert_eq!(visit(&w, &format!("aaaaaaaaaaaa--{h}"), "/").await.0, StatusCode::NOT_FOUND);
     // No environment's hostname can look like a deployment's: slugs never hold `--`.
     let (other, _) = image_service(&w, "abcdefghijkl--victim", json!({"port": 80})).await;
@@ -7618,6 +7640,15 @@ async fn a_private_network_reaches_the_customers_hosts_through_a_peer() {
     assert_eq!(call(&w.api, "PUT", &staging, Some(body("roll://staging/WG"))).await.1["status"], "running");
     let peer = w.fake.peers.lock().get(&format!("roll-apps-peer-{}-staging", id.trim_start_matches("svc_"))).cloned().unwrap();
     assert_eq!((peer.network.clone(), peer.out_network.clone()), (apps_control::closed_network_name(&w.project, "staging"), Some(format!("roll-apps-peer-{}-staging-out", id.trim_start_matches("svc_")))));
+    // A Tailscale node instead: its auth key from roll secrets, a Headscale server if named.
+    let ts = json!({"kind": "tailscale", "secret": "roll://staging/WG", "login_server": "https://hs.example.com/", "routes": [{"name": "api.corp.internal", "target": "api.tail1234.ts.net:443"}]});
+    assert_eq!(call(&w.api, "PUT", &staging, Some(ts.clone())).await.0, StatusCode::BAD_REQUEST, "a WireGuard config isn't an auth key");
+    *CONF.lock() = "tskey-auth-k1234567CNTRL-abcdefghijklmnop".into();
+    let (st, v) = call(&w.api, "PUT", &staging, Some(ts)).await;
+    assert_eq!((st, v["kind"].as_str(), v["login_server"].as_str()), (StatusCode::OK, Some("tailscale"), Some("https://hs.example.com")), "{v}");
+    let peer = w.fake.peers.lock().get(&format!("roll-apps-peer-{}-staging", id.trim_start_matches("svc_"))).cloned().unwrap();
+    assert_eq!((peer.kind, peer.login_server.as_deref(), peer.config.as_str()), (apps_control::peering::PeerKind::Tailscale, Some("https://hs.example.com"), "tskey-auth-k1234567CNTRL-abcdefghijklmnop"));
+    assert_eq!(call(&w.api, "PUT", &staging, Some(json!({"kind": "tailscale", "secret": "roll://staging/WG", "login_server": "https://x --advertise-exit-node", "routes": [{"name": "a.corp", "target": "a:1"}]}))).await.0, StatusCode::BAD_REQUEST, "no flags through the login server");
 }
 
 /// A Git login whose password is one of the project's secrets: read at each fetch, so a rotated

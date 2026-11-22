@@ -66,7 +66,7 @@ impl Control {
             t - t.rem_euclid(r.res) + r.res
         };
         // Turned off or deleted and not handed on yet: the catalog's rows are gone already.
-        let pending = self.node.peek_observations(&c.name).analytics;
+        let pending = self.node.peek_observations(&c.name, &c.id).analytics;
         let gone = |i: &str| pending.cleared.iter().any(|c| c == i) || pending.enabled.as_ref().is_some_and(|on| !on.iter().any(|o| o == i));
         let mut total = Bucket::new(4 * LIST_ROWS, 2 * LIST_ROWS);
         let mut indices: Vec<String> = Vec::new();

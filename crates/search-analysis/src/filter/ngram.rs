@@ -222,6 +222,7 @@ impl TokenStream for ReverseInput<'_> {
 pub(crate) fn ngram_factory(ctx: &Ctx, s: &Settings) -> Result<Arc<dyn FilterFactory>> {
     let min = s.get_int("min_gram", 1)?;
     let max = s.get_int("max_gram", 2)?;
+    crate::check_max_gram(max)?;
     let diff = max - min;
     if diff > ctx.opts.max_ngram_diff {
         return Err(AnalysisError::illegal(format!(
@@ -243,6 +244,7 @@ pub(crate) fn ngram_factory(ctx: &Ctx, s: &Settings) -> Result<Arc<dyn FilterFac
 pub(crate) fn edge_ngram_factory(s: &Settings) -> Result<Arc<dyn FilterFactory>> {
     let min = s.get_int("min_gram", 1)?;
     let max = s.get_int("max_gram", 2)?;
+    crate::check_max_gram(max)?;
     let back = match s.get("side").as_deref() {
         None | Some("front") => false,
         Some("back") => true,

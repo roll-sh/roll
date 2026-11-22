@@ -384,11 +384,15 @@ export interface Policy {
   mcp_lockdown?: boolean;
   /** Every token's and OAuth connection's MCP sees and runs only tools that read. */
   mcp_read_only?: boolean;
+  /** roll's MCP server takes only tokens and OAuth connections, never the admin token. */
+  mcp_require_grant?: boolean;
   /**
    * The OAuth clients that may connect (empty: any): a host (`claude.ai`, `*.example.com`), an
    * `https://` URL, `localhost`, `device`, or an app scheme (`cursor:`).
    */
   oauth_clients?: string[];
+  /** Minutes a request that asks a person waits for one (1 to 1,440; 10 when left out). */
+  approval_wait_minutes?: number | null;
 }
 
 /** One of the policy's `agents_ask`: a product (or "*"), its actions and environments (all when left out). */
@@ -414,13 +418,15 @@ export interface ApprovalRule {
   environments?: string[];
   approvals: number;
   approvers?: string[];
+  /** Minutes a request it covers waits (1 to 1,440); the policy's when left out. */
+  wait_minutes?: number;
 }
 
 /** "Postgres · delete · production: 2 approvals (from usr_a, usr_b)". */
 export function describeApprovalRule(r: ApprovalRule): string {
   const what = [productName(r.product), r.actions?.length ? r.actions.join(", ") : "anything", r.environments?.join(", ")].filter(Boolean).join(" · ");
   const n = r.approvals === 1 ? "1 approval" : `${r.approvals} approvals`;
-  return `${what}: ${n}${r.approvers?.length ? ` from ${r.approvers.join(", ")}` : ""}`;
+  return `${what}: ${n}${r.approvers?.length ? ` from ${r.approvers.join(", ")}` : ""}${r.wait_minutes ? `, within ${r.wait_minutes} min` : ""}`;
 }
 
 /** The actions an admin may require approval for in people's tokens, strongest first. */

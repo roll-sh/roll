@@ -119,7 +119,7 @@ impl Control {
             let t = now() - cfg.lookback_ms / 1000;
             t - t.rem_euclid(res) + res
         };
-        let pending = self.node.peek_observations(&c.name).analytics;
+        let pending = self.node.peek_observations(&c.name, &c.id).analytics;
         // Turned off (or replaced) and not handed on yet: the catalog's rows are going.
         let gone = pending.cleared.iter().any(|i| i == index) || pending.enabled.as_ref().is_some_and(|on| !on.iter().any(|o| o == index));
         let mut total = Bucket::new(MAX_CANDIDATES, 0);

@@ -5,7 +5,9 @@
 //! - [`ByteBudget`]: request body bytes in flight per cluster (Elasticsearch's indexing
 //!   pressure: past it, 429), reserved from `Content-Length` before the body is read, and
 //!   grown as bytes arrive when there is none (chunked bodies) or as a compressed body
-//!   inflates ([`ByteBudget::grow`]), so no body is buffered beyond its tenant's budget.
+//!   inflates ([`ByteBudget::grow`]), so no body is buffered beyond its tenant's budget. Every
+//!   cluster's budget is charged to the node's too (`NodeConfig::max_in_flight_bytes`): one
+//!   person's many clusters can't hold more body bytes than the node allows all of them.
 //! - [`FairScheduler`]: a node-wide cap on requests *running* at once, granted round-robin
 //!   across clusters. Each cluster still has its own in-flight cap and queue
 //!   ([`crate::node::Lease::acquire`]); this decides whose queued request runs next when the
@@ -53,10 +55,18 @@ impl RateLimiter {
     }
 }
 
-/// Bytes in flight under a limit.
+/// Bytes in flight under a limit, and under the limit of the budget it is part of (`parent`).
 pub struct ByteBudget {
     limit: AtomicUsize,
     used: AtomicUsize,
+    parent: Option<Arc<ByteBudget>>,
+}
+
+/// A budget that refused a reservation: the bytes it had in flight and its limit.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Full {
+    pub used: usize,
+    pub limit: usize,
 }
 
 /// Bytes reserved from a [`ByteBudget`]; returned when dropped.
@@ -68,7 +78,7 @@ pub struct Reservation {
 impl Drop for Reservation {
     fn drop(&mut self) {
         if let Some(b) = &self.budget {
-            b.used.fetch_sub(self.bytes, Ordering::SeqCst);
+            b.release(self.bytes);
         }
     }
 }
@@ -87,7 +97,7 @@ impl Reservation {
     pub fn shrink(&mut self, bytes: usize) {
         let n = bytes.min(self.bytes);
         if let Some(b) = &self.budget {
-            b.used.fetch_sub(n, Ordering::SeqCst);
+            b.release(n);
         }
         self.bytes -= n;
     }
@@ -95,46 +105,61 @@ impl Reservation {
 
 impl ByteBudget {
     pub fn new(limit: usize) -> Arc<ByteBudget> {
-        Arc::new(ByteBudget { limit: AtomicUsize::new(limit), used: AtomicUsize::new(0) })
+        Self::within(limit, None)
     }
 
-    /// Reserves `bytes`, or returns the bytes in use when that would pass the limit. A single
-    /// request larger than the whole budget is still let through when nothing else is in
-    /// flight (the body limit bounds it).
-    pub fn reserve(self: &Arc<Self>, bytes: usize) -> Result<Reservation, usize> {
-        let mut cur = self.used.load(Ordering::SeqCst);
-        loop {
-            if cur > 0 && cur.saturating_add(bytes) > self.limit() {
-                return Err(cur);
-            }
-            match self.used.compare_exchange(cur, cur + bytes, Ordering::SeqCst, Ordering::SeqCst) {
-                Ok(_) => return Ok(Reservation { budget: Some(self.clone()), bytes }),
-                Err(v) => cur = v,
-            }
-        }
+    /// A budget whose reservations are charged to `parent` too, and refused when either is full.
+    pub fn within(limit: usize, parent: Option<Arc<ByteBudget>>) -> Arc<ByteBudget> {
+        Arc::new(ByteBudget { limit: AtomicUsize::new(limit), used: AtomicUsize::new(0), parent })
     }
 
-    /// Adds `bytes` to `r` (a reservation of this budget, or none yet), or returns the bytes in
-    /// use when that would pass the limit. As with [`ByteBudget::reserve`], a request may grow
-    /// past the limit only while nothing else is in flight.
-    pub fn grow(self: &Arc<Self>, r: &mut Reservation, bytes: usize) -> Result<(), usize> {
+    /// Reserves `bytes`, or says which budget is full. A single request larger than the whole
+    /// budget is still let through when nothing else is in flight (the body limit bounds it).
+    pub fn reserve(self: &Arc<Self>, bytes: usize) -> Result<Reservation, Full> {
+        let mut r = Reservation::none();
+        self.grow(&mut r, bytes)?;
+        Ok(r)
+    }
+
+    /// Adds `bytes` to `r` (a reservation of this budget, or none yet), or says which budget
+    /// (this one or its parent) is full. As with [`ByteBudget::reserve`], a request may grow
+    /// past a limit only while nothing else is in flight under it.
+    pub fn grow(self: &Arc<Self>, r: &mut Reservation, bytes: usize) -> Result<(), Full> {
         debug_assert!(r.budget.as_ref().is_none_or(|b| Arc::ptr_eq(b, self)));
-        let mut cur = self.used.load(Ordering::SeqCst);
-        loop {
-            let others = cur.saturating_sub(r.bytes);
-            if others > 0 && cur.saturating_add(bytes) > self.limit() {
-                return Err(cur);
-            }
-            match self.used.compare_exchange(cur, cur + bytes, Ordering::SeqCst, Ordering::SeqCst) {
-                Ok(_) => break,
-                Err(v) => cur = v,
-            }
+        self.add(r.bytes, bytes)?;
+        if let Some(p) = &self.parent
+            && let Err(full) = p.add(r.bytes, bytes)
+        {
+            self.used.fetch_sub(bytes, Ordering::SeqCst);
+            return Err(full);
         }
         if r.budget.is_none() {
             r.budget = Some(self.clone());
         }
         r.bytes += bytes;
         Ok(())
+    }
+
+    /// Adds `bytes` to what's in use here, by a reservation already holding `held`.
+    fn add(&self, held: usize, bytes: usize) -> Result<(), Full> {
+        let mut cur = self.used.load(Ordering::SeqCst);
+        loop {
+            let others = cur.saturating_sub(held);
+            if others > 0 && cur.saturating_add(bytes) > self.limit() {
+                return Err(Full { used: cur, limit: self.limit() });
+            }
+            match self.used.compare_exchange(cur, cur + bytes, Ordering::SeqCst, Ordering::SeqCst) {
+                Ok(_) => return Ok(()),
+                Err(v) => cur = v,
+            }
+        }
+    }
+
+    fn release(&self, bytes: usize) {
+        self.used.fetch_sub(bytes, Ordering::SeqCst);
+        if let Some(p) = &self.parent {
+            p.used.fetch_sub(bytes, Ordering::SeqCst);
+        }
     }
 
     pub fn used(&self) -> usize {
@@ -272,7 +297,7 @@ mod tests {
     fn byte_budget() {
         let b = ByteBudget::new(100);
         let a = b.reserve(60).unwrap();
-        assert_eq!(b.reserve(50).err(), Some(60));
+        assert_eq!(b.reserve(50).err(), Some(Full { used: 60, limit: 100 }));
         let c = b.reserve(40).unwrap();
         drop(a);
         drop(c);
@@ -293,7 +318,7 @@ mod tests {
         assert_eq!((b.used(), first.bytes()), (900, 900));
         // A second upload can't take what's left plus more.
         let mut second = Reservation::none();
-        assert_eq!(b.grow(&mut second, 200), Err(900));
+        assert_eq!(b.grow(&mut second, 200), Err(Full { used: 900, limit: 1000 }));
         b.grow(&mut second, 100).unwrap();
         assert_eq!(b.used(), 1000);
         assert!(b.reserve(1).is_err());
@@ -308,6 +333,16 @@ mod tests {
         assert_eq!((b.used(), first.bytes()), (0, 0));
         drop(first);
         assert_eq!(b.used(), 0);
+        // Charged to the node's budget too: two clusters within their own limits are refused
+        // once together they pass the node's, and the refusal names the node's.
+        let node = ByteBudget::new(1500);
+        let (x, y) = (ByteBudget::within(1000, Some(node.clone())), ByteBudget::within(1000, Some(node.clone())));
+        let a = x.reserve(1000).unwrap();
+        assert_eq!(y.reserve(600).err(), Some(Full { used: 1000, limit: 1500 }));
+        assert_eq!((y.used(), node.used()), (0, 1000));
+        let b = y.reserve(500).unwrap();
+        drop((a, b));
+        assert_eq!(node.used(), 0);
     }
 
     #[tokio::test]

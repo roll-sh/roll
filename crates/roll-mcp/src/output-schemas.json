@@ -15002,9 +15002,43 @@
   },
   "type": "object"
  },
+ "search_list_query_rulesets": {
+  "properties": {
+   "count": {
+    "type": [
+     "number",
+     "null"
+    ]
+   },
+   "results": {
+    "type": [
+     "array",
+     "null"
+    ]
+   }
+  },
+  "type": "object"
+ },
  "search_list_remotes": {
   "properties": {
    "remotes": {
+    "type": [
+     "array",
+     "null"
+    ]
+   }
+  },
+  "type": "object"
+ },
+ "search_list_synonyms": {
+  "properties": {
+   "count": {
+    "type": [
+     "number",
+     "null"
+    ]
+   },
+   "results": {
     "type": [
      "array",
      "null"
@@ -15764,6 +15798,12 @@
       "at": {
        "type": [
         "number",
+        "null"
+       ]
+      },
+      "digest": {
+       "type": [
+        "string",
         "null"
        ]
       },
@@ -16959,6 +16999,18 @@
  },
  "secrets_reach": {
   "properties": {
+   "admins": {
+    "type": [
+     "number",
+     "null"
+    ]
+   },
+   "clients": {
+    "type": [
+     "array",
+     "null"
+    ]
+   },
    "environment": {
     "type": [
      "string",
@@ -16985,6 +17037,12 @@
     ]
    },
    "key": {},
+   "knew": {
+    "type": [
+     "array",
+     "null"
+    ]
+   },
    "leases": {
     "type": [
      "array",
@@ -16994,6 +17052,12 @@
    "path": {
     "type": [
      "string",
+     "null"
+    ]
+   },
+   "people": {
+    "type": [
+     "array",
      "null"
     ]
    },
@@ -17042,6 +17106,18 @@
       "null"
      ]
     },
+    "type": [
+     "array",
+     "null"
+    ]
+   },
+   "sandboxes": {
+    "type": [
+     "array",
+     "null"
+    ]
+   },
+   "services": {
     "type": [
      "array",
      "null"

@@ -383,6 +383,12 @@ impl<T: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send> ShellStream
 
 /// What a private network's peer runs ([`crate::peering`]).
 pub mod peering_image {
+    /// Tailscale's own image, pinned: `tailscaled` in userspace (no capabilities, no tun) with a
+    /// SOCKS5 server the forwarders connect through.
+    pub const TAILSCALE: &str = "tailscale/tailscale@sha256:72c1e19e0aedca96b8533bbb0b4368564410ff20b17e53b804eb6c1f04a31be4";
+    /// Waits for its auth key (written into its tmpfs after it starts; `tailscale up` reads it
+    /// as `file:`), then runs the image's own entrypoint.
+    pub const TAILSCALE_SCRIPT: &str = "while [ ! -s /run/ts/key ]; do sleep 0.1; done; exec /usr/local/bin/containerboot";
     /// WireGuard's tools (`wg`, `ip`), pinned; its own init is never run (`--entrypoint sh`).
     pub const WIREGUARD: &str = "linuxserver/wireguard@sha256:10db56ad834f94541307d5dfdbe87370e26d155bb341a5bf65789f970f24ab5c";
     /// Waits for its config (written into its tmpfs after it starts), makes the interface, its
@@ -412,8 +418,11 @@ pub struct PeerSpec {
     /// A closed environment's: a network of the peer's own with a route out, for its endpoint
     /// (the closed network has none; its instances still reach only the routes' names).
     pub out_network: Option<String>,
-    /// `wg setconf`'s config (keys, peers). Never in `Debug`.
+    pub kind: crate::peering::PeerKind,
+    /// `wg setconf`'s config (keys, peers), or the Tailscale auth key. Never in `Debug`.
     pub config: String,
+    /// A Tailscale node's control server when it isn't Tailscale's.
+    pub login_server: Option<String>,
     /// The interface's addresses and the routes into the customer's network (CIDRs, checked).
     pub addresses: Vec<String>,
     pub routes: Vec<String>,
@@ -427,7 +436,7 @@ impl PeerSpec {
     pub fn digest(&self) -> String {
         use sha2::Digest;
         let mut h = sha2::Sha256::new();
-        for part in [&self.network, &format!("{:?}", self.out_network), &self.config, &self.addresses.join(","), &self.routes.join(","), &format!("{:?}", self.mtu), &format!("{:?}", self.forwards)] {
+        for part in [&format!("{:?} {:?}", self.kind, self.login_server), &self.network, &format!("{:?}", self.out_network), &self.config, &self.addresses.join(","), &self.routes.join(","), &format!("{:?}", self.mtu), &format!("{:?}", self.forwards)] {
             h.update(part.as_bytes());
             h.update([0]);
         }

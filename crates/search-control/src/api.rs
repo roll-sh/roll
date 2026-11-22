@@ -28,6 +28,7 @@ use axum::routing::{get, post};
 use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+use search_server::limits::{ByteBudget, Full, Reservation};
 use std::sync::Arc;
 use tower_http::cors::CorsLayer;
 
@@ -79,7 +80,14 @@ pub fn router(control: Arc<Control>) -> Router {
         .route("/v1/search/clusters/{id}/remotes/{alias}", axum::routing::put(link_remote).delete(unlink_remote))
         .route("/v1/search/clusters/{id}/indices/{index}", get(index_get).put(index_create).delete(index_delete))
         .route("/v1/search/clusters/{id}/indices/{index}/mapping", axum::routing::put(index_mapping).get(index_mapping_get))
-        .route("/v1/search/clusters/{id}/indices/{index}/settings", get(index_settings))
+        .route("/v1/search/clusters/{id}/indices/{index}/settings", get(index_settings).put(index_settings_put))
+        .route("/v1/search/clusters/{id}/indices/{index}/explain/{doc}", post(doc_explain))
+        .route("/v1/search/clusters/{id}/synonyms", get(synonyms_list))
+        .route("/v1/search/clusters/{id}/synonyms/{set}", get(synonyms_get).put(synonyms_put).delete(synonyms_delete))
+        .route("/v1/search/clusters/{id}/synonyms/{set}/{rule}", get(synonym_rule_get).put(synonym_rule_put).delete(synonym_rule_delete))
+        .route("/v1/search/clusters/{id}/query_rules", get(rulesets_list))
+        .route("/v1/search/clusters/{id}/query_rules/{ruleset}", get(ruleset_get).put(ruleset_put).delete(ruleset_delete))
+        .route("/v1/search/clusters/{id}/query_rules/{ruleset}/test", post(ruleset_test))
         .route("/v1/search/clusters/{id}/indices/{index}/refresh", post(index_refresh))
         .route("/v1/search/clusters/{id}/indices/{index}/analyze", post(index_analyze))
         .route("/v1/search/clusters/{id}/indices/{index}/search", post(index_search))
@@ -366,10 +374,17 @@ async fn create(State(c): State<AppState>, caller: Caller, method: Method, heade
             // A branch is cut on the node holding the parent, which commits it first. It is the
             // parent owner's.
             let parent = caller.get(&c, p).await?;
-            if let Some(resp) = forward(&c, &parent.name, method, "/v1/search/clusters", &headers, body.clone()).await {
+            // The owner gets the parent checked here by its id: a cluster that took its name in
+            // between is never branched in its place.
+            let mut forwarded: Value = serde_json::from_slice(&body).map_err(|e| ControlError::Invalid(format!("invalid request: {e}")))?;
+            forwarded["parent"] = json!(parent.id);
+            let forwarded = bytes::Bytes::from(serde_json::to_vec(&forwarded).map_err(|e| ControlError::Internal(e.into()))?);
+            let mut headers = headers;
+            headers.remove(axum::http::header::CONTENT_LENGTH);
+            if let Some(resp) = forward(&c, &parent.name, method, "/v1/search/clusters", &headers, forwarded).await {
                 return Ok(resp);
             }
-            c.branch(p, &r.name, r.at, r.opts, caller.caps(&c)).await?
+            c.branch(&parent, &r.name, r.at, r.opts, caller.caps(&c)).await?
         }
         None if r.at.is_some() => return Err(ControlError::Invalid("at needs a parent".into())),
         None => c.create(&r.name, r.opts, caller.owner(), caller.caps(&c)).await?,
@@ -408,7 +423,7 @@ async fn branch(State(c): State<AppState>, caller: Caller, Path(id): Path<String
     if let Some(resp) = forward(&c, &parent.name, method, &format!("/v1/search/clusters/{id}/branches"), &headers, body.clone()).await {
         return Ok(resp);
     }
-    let d = c.branch(&id, &r.name, r.at, r.opts, caller.caps(&c)).await?;
+    let d = c.branch(&parent, &r.name, r.at, r.opts, caller.caps(&c)).await?;
     Ok(Json(view(&c, &caller, d, true).await?).into_response())
 }
 
@@ -443,33 +458,93 @@ async fn indices(State(c): State<AppState>, Path(id): Path<String>, method: Meth
 /// client talking to it directly) plus room for its JSON envelope, instead of axum's 2 MB
 /// default: a body sent as a JSON string grows by its escapes. The cluster then enforces its
 /// limit exactly, with Elasticsearch's 413.
-async fn request(State(c): State<AppState>, Path(id): Path<String>, method: Method, headers: HeaderMap, body: Body) -> Result<Response, ControlError> {
+async fn request(State(c): State<AppState>, Path(id): Path<String>, method: Method, headers: HeaderMap, ext: Extensions, body: Body) -> Result<Response, ControlError> {
     let cluster = c.get(&id).await?;
-    let limit = console_limit(cluster.max_body_mb);
-    let bytes = read_limited(body, limit).await.map_err(|e| match e {
-        Some(e) => ControlError::Invalid(format!("reading the request failed: {e}")),
-        None => ControlError::TooLarge(format!("the request is larger than cluster {}'s body limit allows ({} MiB, max_body_mb)", cluster.name, cluster.max_body_mb)),
-    })?;
-    let r: ConsoleRequest = serde_json::from_slice(&bytes).map_err(|e| ControlError::Invalid(format!("invalid request: {e}")))?;
+    // Charged to the node's body budget while it's read and handed on.
+    let mut held = Reservation::none();
+    let bytes = read_limited(body, console_limit(cluster.max_body_mb), declared(&headers), c.node.body_budget(), &mut held).await.map_err(|e| read_error(&cluster, e))?;
+    let r = ConsoleRequest::parse(&bytes)?;
+    console_reveal(&cluster, &r, &ext)?;
     if let Some(resp) = forward(&c, &cluster.name, method, &format!("/v1/search/clusters/{id}/request"), &headers, bytes.clone()).await {
         return Ok(resp);
     }
-    let out: ConsoleResponse = c.request(&cluster.id, r).await?;
+    let send = r.body_in(&bytes)?;
+    // A string body (NDJSON) was decoded into a copy of its own: charged before the read bytes go.
+    if !bytes.as_ptr_range().contains(&send.as_ptr()) {
+        c.node.body_budget().grow(&mut held, send.len()).map_err(|f| read_error(&cluster, ReadError::Busy(f)))?;
+    }
+    let (m, p, h) = (r.method.clone(), r.path.clone(), r.headers.clone());
+    drop(r);
+    drop(bytes);
+    // The node charges what it runs from here.
+    drop(held);
+    let out: ConsoleResponse = c.request(&cluster.id, &m, &p, h, send).await?;
     Ok(Json(out).into_response())
+}
+
+/// A grant's console request whose routed API answers or sets a credential (a new API key, a
+/// connector's secrets, a user's password) needs `reveal` on the cluster too, as `POST …/keys`
+/// does: the gate says whether the grant has it on this cluster (the catalogue row's `capable`,
+/// `roll_auth::Capable`; docs/permissions.md). The operator and people on their own clusters
+/// carry no grant.
+fn console_reveal(cluster: &SearchCluster, r: &ConsoleRequest, ext: &Extensions) -> Result<(), ControlError> {
+    if roll_auth::Grant::on(ext).is_none() || !r.handles_credentials(cluster) {
+        return Ok(());
+    }
+    match ext.get::<roll_auth::Capable>().is_some_and(|c| c.has(roll_auth::scope::Action::Reveal)) {
+        true => Ok(()),
+        // An approval is the gate's to ask for, before the request reaches a product: a rule
+        // that would ask for reveal isn't asked here (docs/permissions.md).
+        false => Err(ControlError::Forbidden(format!(
+            "{} {} answers or sets a credential: it needs reveal allowed on cluster {} (a rule that asks for reveal isn't asked here; use POST …/keys, or a token that may reveal)",
+            r.method.trim(),
+            r.path.trim(),
+            cluster.name
+        ))),
+    }
+}
+
+/// Why a body wasn't read ([`read_limited`]).
+#[derive(Debug, PartialEq)]
+enum ReadError {
+    Failed(String),
+    /// Longer than the limit.
+    TooLarge,
+    /// The node's body budget is full.
+    Busy(Full),
+}
+
+/// The request's `Content-Length`, when it gives one.
+fn declared(headers: &HeaderMap) -> Option<usize> {
+    headers.get(axum::http::header::CONTENT_LENGTH).and_then(|v| v.to_str().ok()).and_then(|v| v.trim().parse().ok())
+}
+
+fn read_error(cluster: &SearchCluster, e: ReadError) -> ControlError {
+    match e {
+        ReadError::Failed(e) => ControlError::Invalid(format!("reading the request failed: {e}")),
+        ReadError::TooLarge => ControlError::TooLarge(format!("the request is larger than cluster {}'s body limit allows ({} MiB, max_body_mb)", cluster.name, cluster.max_body_mb)),
+        ReadError::Busy(f) => ControlError::Busy(format!("request bodies in flight on this node are at its limit ({} of {} bytes): retry", f.used, f.limit)),
+    }
 }
 
 /// Bytes past the limit read (and dropped) before answering 413, and for how long.
 const DRAIN_BYTES: usize = 64 << 20;
 const DRAIN_FOR: std::time::Duration = std::time::Duration::from_secs(10);
 
-/// Reads `body` up to `limit` bytes; `Err(None)` when it is longer. An oversized body is still
-/// read to its end (dropping the rest, within [`DRAIN_BYTES`] and [`DRAIN_FOR`]) before the
-/// 413 goes out: answering while the client is still uploading closes the connection under it,
-/// and the client then sees a reset instead of the reason.
-async fn read_limited(body: Body, limit: usize) -> Result<bytes::Bytes, Option<String>> {
+/// Reads `body` up to `limit` bytes, charging the buffer it keeps (its capacity, not just its
+/// length) to `budget` in `held` as it grows; `TooLarge` when it is longer. A `declared` length
+/// within the limit sizes the buffer exactly up front. An oversized body is still read to its end (dropping
+/// the rest, within [`DRAIN_BYTES`] and [`DRAIN_FOR`]) before the 413 goes out: answering while
+/// the client is still uploading closes the connection under it, and the client then sees a
+/// reset instead of the reason.
+async fn read_limited(body: Body, limit: usize, declared: Option<usize>, budget: &Arc<ByteBudget>, held: &mut Reservation) -> Result<bytes::Bytes, ReadError> {
     use http_body_util::BodyExt;
     let mut body = body;
     let mut buf = bytes::BytesMut::new();
+    if let Some(n) = declared.filter(|n| *n <= limit) {
+        budget.grow(held, n).map_err(ReadError::Busy)?;
+        buf.reserve(n);
+    }
     let mut over = 0usize;
     let deadline = tokio::time::Instant::now() + DRAIN_FOR;
     loop {
@@ -478,25 +553,31 @@ async fn read_limited(body: Body, limit: usize) -> Result<bytes::Bytes, Option<S
         } else {
             match tokio::time::timeout_at(deadline, body.frame()).await {
                 Ok(f) => f,
-                Err(_) => return Err(None),
+                Err(_) => return Err(ReadError::TooLarge),
             }
         };
         let Some(frame) = frame else { break };
-        let frame = frame.map_err(|e| Some(e.to_string()))?;
+        let frame = frame.map_err(|e| ReadError::Failed(e.to_string()))?;
         let Ok(data) = frame.into_data() else { continue };
         if over == 0 && buf.len() + data.len() <= limit {
+            if buf.capacity() - buf.len() < data.len() {
+                buf.reserve(data.len());
+                // `held` is what the buffer held before: its growth is charged.
+                budget.grow(held, buf.capacity().saturating_sub(held.bytes())).map_err(ReadError::Busy)?;
+            }
             buf.extend_from_slice(&data);
             continue;
         }
         if over == 0 {
             buf = bytes::BytesMut::new();
+            *held = Reservation::none();
         }
         over += data.len();
         if over > DRAIN_BYTES {
-            return Err(None);
+            return Err(ReadError::TooLarge);
         }
     }
-    if over > 0 { Err(None) } else { Ok(buf.freeze()) }
+    if over > 0 { Err(ReadError::TooLarge) } else { Ok(buf.freeze()) }
 }
 
 /// Bytes of a console request for a cluster whose bodies may be `max_body_mb` MiB: twice that
@@ -529,14 +610,12 @@ fn index_segment(index: &str, read: bool) -> Result<String, ControlError> {
 }
 
 #[allow(clippy::too_many_arguments)]
-async fn es_route(c: &Control, id: &str, method: Method, api_path: String, es_method: &str, es_path: String, scope: &str, query: Option<&str>, headers: &HeaderMap, body: Body, kind: EsBody) -> Result<Response, ControlError> {
+async fn es_route(c: &Control, id: &str, method: Method, api_path: String, es_method: &str, es_path: String, scope: Option<&str>, query: Option<&str>, headers: &HeaderMap, body: Body, kind: EsBody) -> Result<Response, ControlError> {
     let cluster = c.get(id).await?;
+    let mut held = Reservation::none();
     let bytes = match kind {
         EsBody::None => bytes::Bytes::new(),
-        _ => read_limited(body, (cluster.max_body_mb.max(1) as usize) << 20).await.map_err(|e| match e {
-            Some(e) => ControlError::Invalid(format!("reading the request failed: {e}")),
-            None => ControlError::TooLarge(format!("the request is larger than cluster {}'s body limit allows ({} MiB, max_body_mb)", cluster.name, cluster.max_body_mb)),
-        })?,
+        _ => read_limited(body, (cluster.max_body_mb.max(1) as usize) << 20, declared(headers), c.node.body_budget(), &mut held).await.map_err(|e| read_error(&cluster, e))?,
     };
     if kind == EsBody::Json && !bytes.is_empty() && serde_json::from_slice::<serde::de::IgnoredAny>(&bytes).is_err() {
         return Err(ControlError::Invalid("the body isn't JSON".into()));
@@ -549,6 +628,8 @@ async fn es_route(c: &Control, id: &str, method: Method, api_path: String, es_me
         EsBody::Ndjson => Some("application/x-ndjson"),
         _ => Some("application/json"),
     };
+    // The node charges what it runs from here.
+    drop(held);
     let (status, ct, body) = c.es(&cluster.id, es_method, &format!("{es_path}{q}"), scope, ct, bytes).await?;
     let status = StatusCode::from_u16(status).unwrap_or(StatusCode::BAD_GATEWAY);
     Ok((status, [(axum::http::header::CONTENT_TYPE, ct)], body).into_response())
@@ -562,7 +643,7 @@ macro_rules! index_route {
     ($name:ident, $es_method:literal, $rest:literal, $es_rest:literal, $read:expr, $kind:expr) => {
         async fn $name(State(c): State<AppState>, Path((id, index)): Path<(String, String)>, method: Method, uri: axum::http::Uri, headers: HeaderMap, body: Body) -> Result<Response, ControlError> {
             let seg = index_segment(&index, $read)?;
-            es_route(&c, &id, method, api_index_path(&id, &index, $rest), $es_method, format!("/{seg}{}", $es_rest), &index, uri.query(), &headers, body, $kind).await
+            es_route(&c, &id, method, api_index_path(&id, &index, $rest), $es_method, format!("/{seg}{}", $es_rest), Some(index.as_str()), uri.query(), &headers, body, $kind).await
         }
     };
 }
@@ -573,6 +654,9 @@ index_route!(index_delete, "DELETE", "", "", false, EsBody::None);
 index_route!(index_mapping, "PUT", "/mapping", "/_mapping", false, EsBody::Json);
 index_route!(index_mapping_get, "GET", "/mapping", "/_mapping", true, EsBody::None);
 index_route!(index_settings, "GET", "/settings", "/_settings", true, EsBody::None);
+// The engine refuses what nobody may set through `_settings` (private, internal and managed
+// settings) to this route as to any client; the index scope keeps it to the one index.
+index_route!(index_settings_put, "PUT", "/settings", "/_settings", false, EsBody::Json);
 index_route!(index_refresh, "POST", "/refresh", "/_refresh", true, EsBody::None);
 index_route!(index_analyze, "POST", "/analyze", "/_analyze", false, EsBody::Json);
 index_route!(index_search, "POST", "/search", "/_search", true, EsBody::Json);
@@ -580,19 +664,74 @@ index_route!(doc_create, "POST", "/docs", "/_doc", false, EsBody::Json);
 index_route!(index_bulk, "POST", "/bulk", "/_bulk", false, EsBody::Ndjson);
 index_route!(index_delete_by_query, "POST", "/delete_by_query", "/_delete_by_query", true, EsBody::Json);
 
+/// One document's route: `…/indices/{index}/<rest>/{doc}` to `/{index}/<es_rest>/{doc}`.
 macro_rules! doc_route {
-    ($name:ident, $es_method:literal, $kind:expr) => {
+    ($name:ident, $es_method:literal, $rest:literal, $es_rest:literal, $kind:expr) => {
         async fn $name(State(c): State<AppState>, Path((id, index, doc)): Path<(String, String, String)>, method: Method, uri: axum::http::Uri, headers: HeaderMap, body: Body) -> Result<Response, ControlError> {
             let seg = index_segment(&index, false)?;
             let d = urlencoding::encode(&doc).into_owned();
-            es_route(&c, &id, method, api_index_path(&id, &index, &format!("/docs/{d}")), $es_method, format!("/{seg}/_doc/{d}"), &index, uri.query(), &headers, body, $kind).await
+            es_route(&c, &id, method, api_index_path(&id, &index, &format!("/{}/{d}", $rest)), $es_method, format!("/{seg}/{}/{d}", $es_rest), Some(index.as_str()), uri.query(), &headers, body, $kind).await
         }
     };
 }
 
-doc_route!(doc_get, "GET", EsBody::None);
-doc_route!(doc_put, "PUT", EsBody::Json);
-doc_route!(doc_delete, "DELETE", EsBody::None);
+doc_route!(doc_get, "GET", "docs", "_doc", EsBody::None);
+doc_route!(doc_put, "PUT", "docs", "_doc", EsBody::Json);
+doc_route!(doc_delete, "DELETE", "docs", "_doc", EsBody::None);
+doc_route!(doc_explain, "POST", "explain", "_explain", EsBody::Json);
+
+// --- synonyms sets and query rulesets: cluster-wide objects (an index's analyzer names a set by
+// `synonyms_set`; a `rule` query or retriever names rulesets), so they run as the cluster's
+// owner, on paths these routes build: `/_synonyms/…` and `/_query_rules/…` only.
+
+/// A route under `/v1/search/clusters/{id}/` for Elasticsearch's `es_api` (`_synonyms`,
+/// `_query_rules`) with up to two names after it (`/{set}/{rule}`, `/{ruleset}`) and an
+/// optional last segment (`_test`).
+macro_rules! cluster_route {
+    ($name:ident, $es_method:literal, $api:literal, $es_api:literal, 0, $kind:expr) => {
+        async fn $name(State(c): State<AppState>, Path(id): Path<String>, method: Method, uri: axum::http::Uri, headers: HeaderMap, body: Body) -> Result<Response, ControlError> {
+            let api_path = format!("/v1/search/clusters/{}/{}", urlencoding::encode(&id), $api);
+            es_route(&c, &id, method, api_path, $es_method, format!("/{}", $es_api), None, uri.query(), &headers, body, $kind).await
+        }
+    };
+    ($name:ident, $es_method:literal, $api:literal, $es_api:literal, 1, $suffix:literal, $es_suffix:literal, $kind:expr) => {
+        async fn $name(State(c): State<AppState>, Path((id, a)): Path<(String, String)>, method: Method, uri: axum::http::Uri, headers: HeaderMap, body: Body) -> Result<Response, ControlError> {
+            let a = name_segment(&a)?;
+            let api_path = format!("/v1/search/clusters/{}/{}/{a}{}", urlencoding::encode(&id), $api, $suffix);
+            es_route(&c, &id, method, api_path, $es_method, format!("/{}/{a}{}", $es_api, $es_suffix), None, uri.query(), &headers, body, $kind).await
+        }
+    };
+    ($name:ident, $es_method:literal, $api:literal, $es_api:literal, 2, $kind:expr) => {
+        async fn $name(State(c): State<AppState>, Path((id, a, b)): Path<(String, String, String)>, method: Method, uri: axum::http::Uri, headers: HeaderMap, body: Body) -> Result<Response, ControlError> {
+            let (a, b) = (name_segment(&a)?, name_segment(&b)?);
+            let api_path = format!("/v1/search/clusters/{}/{}/{a}/{b}", urlencoding::encode(&id), $api);
+            es_route(&c, &id, method, api_path, $es_method, format!("/{}/{a}/{b}", $es_api), None, uri.query(), &headers, body, $kind).await
+        }
+    };
+}
+
+/// A synonyms set's, rule's or ruleset's id as a path segment: never empty, never one of
+/// Elasticsearch's own names (`_…`), which would reach another API, and never `.` or `..`, which
+/// a path normalized anywhere on the way would read as a dot segment (`/_synonyms/../books`).
+fn name_segment(name: &str) -> Result<String, ControlError> {
+    if name.is_empty() || name.starts_with('_') || name == "." || name == ".." {
+        return Err(ControlError::Invalid(format!("invalid id [{name}]")));
+    }
+    Ok(urlencoding::encode(name).into_owned())
+}
+
+cluster_route!(synonyms_list, "GET", "synonyms", "_synonyms", 0, EsBody::None);
+cluster_route!(synonyms_get, "GET", "synonyms", "_synonyms", 1, "", "", EsBody::None);
+cluster_route!(synonyms_put, "PUT", "synonyms", "_synonyms", 1, "", "", EsBody::Json);
+cluster_route!(synonyms_delete, "DELETE", "synonyms", "_synonyms", 1, "", "", EsBody::None);
+cluster_route!(synonym_rule_get, "GET", "synonyms", "_synonyms", 2, EsBody::None);
+cluster_route!(synonym_rule_put, "PUT", "synonyms", "_synonyms", 2, EsBody::Json);
+cluster_route!(synonym_rule_delete, "DELETE", "synonyms", "_synonyms", 2, EsBody::None);
+cluster_route!(rulesets_list, "GET", "query_rules", "_query_rules", 0, EsBody::None);
+cluster_route!(ruleset_get, "GET", "query_rules", "_query_rules", 1, "", "", EsBody::None);
+cluster_route!(ruleset_put, "PUT", "query_rules", "_query_rules", 1, "", "", EsBody::Json);
+cluster_route!(ruleset_delete, "DELETE", "query_rules", "_query_rules", 1, "", "", EsBody::None);
+cluster_route!(ruleset_test, "POST", "query_rules", "_query_rules", 1, "/test", "/_test", EsBody::Json);
 
 /// `PUT /v1/search/clusters/{id}/repositories/{name}`: `PUT _snapshot/{name}` (Elasticsearch's
 /// body and query), the only way a repository's credentials can be roll secrets references: the
@@ -613,11 +752,14 @@ async fn put_repository(State(c): State<AppState>, Path((id, name)): Path<(Strin
 struct NewKey {
     name: String,
     expires_in_s: Option<i64>,
+    /// `admin` (default), `data`, `read` or `append` ([`crate::control::KeyAccess`]).
     access: Option<String>,
+    /// Index names or patterns the key reaches (default every index; not with `admin`).
+    indices: Option<Vec<String>>,
 }
 
 async fn create_key(State(c): State<AppState>, Path(id): Path<String>, Json(k): Json<NewKey>) -> ApiResult<Value> {
-    Ok(Json(c.create_key(&id, &k.name, k.expires_in_s, k.access.as_deref()).await?))
+    Ok(Json(c.create_key(&id, &k.name, k.expires_in_s, k.access.as_deref(), k.indices).await?))
 }
 
 async fn delete_key(State(c): State<AppState>, Path((id, key)): Path<(String, String)>) -> Result<StatusCode, ControlError> {
@@ -775,23 +917,34 @@ mod tests {
         Body::from_stream(s)
     }
 
+    async fn read(body: Body, limit: usize, budget: &Arc<ByteBudget>) -> Result<bytes::Bytes, ReadError> {
+        read_limited(body, limit, None, budget, &mut Reservation::none()).await
+    }
+
     #[tokio::test]
     async fn bodies_within_the_limit_are_read_whole() {
-        let sent = Arc::new(AtomicUsize::new(0));
-        let b = read_limited(chunks(4, 1000, sent.clone()), 4000).await.unwrap();
+        let (sent, budget) = (Arc::new(AtomicUsize::new(0)), ByteBudget::new(usize::MAX));
+        let b = read(chunks(4, 1000, sent.clone()), 4000, &budget).await.unwrap();
         assert_eq!(b.len(), 4000);
-        assert_eq!(read_limited(Body::empty(), 0).await.unwrap().len(), 0);
+        assert_eq!(read(Body::empty(), 0, &budget).await.unwrap().len(), 0);
+        assert_eq!(budget.used(), 0, "given back");
+        // Charged while it's read: a body past what the node has left is refused as it arrives.
+        let node = ByteBudget::new(1500);
+        let mut other = node.reserve(1000).unwrap();
+        assert!(matches!(read(chunks(4, 1000, sent.clone()), 4000, &node).await, Err(ReadError::Busy(_))));
+        other.shrink(1000);
+        assert_eq!(node.used(), 0);
     }
 
     #[tokio::test]
     async fn an_oversized_body_is_read_to_its_end_before_the_refusal() {
-        let sent = Arc::new(AtomicUsize::new(0));
-        assert_eq!(read_limited(chunks(10, 1000, sent.clone()), 4500).await.unwrap_err(), None);
+        let (sent, budget) = (Arc::new(AtomicUsize::new(0)), ByteBudget::new(usize::MAX));
+        assert_eq!(read(chunks(10, 1000, sent.clone()), 4500, &budget).await.unwrap_err(), ReadError::TooLarge);
         assert_eq!(sent.load(Ordering::SeqCst), 10, "the rest was drained, so the client sees the 413");
         // Past the drain allowance it stops reading (the connection then closes).
         let sent = Arc::new(AtomicUsize::new(0));
         let n = (DRAIN_BYTES >> 20) + 50;
-        assert_eq!(read_limited(chunks(n, 1 << 20, sent.clone()), 1 << 20).await.unwrap_err(), None);
+        assert_eq!(read(chunks(n, 1 << 20, sent.clone()), 1 << 20, &budget).await.unwrap_err(), ReadError::TooLarge);
         assert!(sent.load(Ordering::SeqCst) < n);
     }
 

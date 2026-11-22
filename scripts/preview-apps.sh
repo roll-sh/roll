@@ -358,13 +358,29 @@ hook_push "$(gitc rev-parse HEAD)" "feature 2" >/dev/null
 hook_push "$(gitc rev-parse HEAD)" "feature 2" >/dev/null
 serves "site feature 2"
 [ "$GPV" = "$FIRST" ] || { echo "the next push should move the branch's preview, not make $GPV"; exit 1; }
+# feature 1's build stays reachable as it was, at its own roll apps deployment URL (an earlier
+# push), through the preview's link.
+EARLY=""
+for _ in $(seq 1 60); do
+  EARLY=$(api GET "/v1/previews/$GPV" | jq_ "([e.get('share_url') or e['url'] for e in d.get('earlier', []) if e['service'] == 'site'] + [''])[0]")
+  [ -n "$EARLY" ] && break
+  sleep 0.5
+done
+[ -n "$EARLY" ] || { echo "feature 1's build should be an earlier push of the site: $(api GET "/v1/previews/$GPV" | jq_ "d.get('earlier')")"; exit 1; }
+EARLY_GOT=""
+for _ in $(seq 1 30); do
+  EARLY_GOT=$(curl -sS -L --connect-to "::127.0.0.1:${PORTS}080" -c "$H/early.jar" -b "$H/early.jar" "$EARLY" --max-time 30 2>/dev/null || true)
+  [ "$EARLY_GOT" = "site feature 1" ] && break
+  sleep 1
+done
+[ "$EARLY_GOT" = "site feature 1" ] || { echo "feature 1's earlier push should serve it at $EARLY, not '$EARLY_GOT'"; exit 1; }
 GCOUNT=$(git_preview | python3 -c "import sys,ast; print(len(ast.literal_eval(sys.stdin.read())))")
 [ "$GCOUNT" = 1 ] || { echo "the same push twice should keep one preview: $(git_preview)"; exit 1; }
 gitc push -q origin :refs/heads/feature
 hook_push 0000000000000000000000000000000000000000 "" >/dev/null
 for _ in $(seq 1 240); do [ "$(git_preview)" = "[]" ] && break; sleep 0.5; done
 [ "$(git_preview)" = "[]" ] || { echo "deleting the branch should delete its preview: $(git_preview)"; exit 1; }
-GIT_SAID="made and serving in $((T8 - T7)) ms; moved by the next push (the same preview); deleted with the branch"
+GIT_SAID="made and serving in $((T8 - T7)) ms; moved by the next push (the same preview), the first push's build still serving at its own deployment URL; deleted with the branch"
 
 say "a pull request of the Git URL service: a same-repo one names its branch's preview; a fork's runs only once a writer approves its head; a close deletes it"
 pr_event() { # pr_event <action> <number> <head branch> <sha> <head repo id> [hook]: GitHub's pull_request event

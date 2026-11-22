@@ -791,6 +791,75 @@ fn bulk_action(b: &[u8]) -> Action {
     Action::Write
 }
 
+/// Writing an index's settings: `delete` when the body names a lifecycle (ILM's
+/// `index.lifecycle.*`, OpenSearch ISM's `…index_state_management…`), whose policy can delete the
+/// index, which `write` can't; or when it isn't JSON (it fails closed); else `write`. Every key is
+/// read, duplicates included, in every form a settings body takes (`{"index": {"lifecycle": …}}`,
+/// `"index.lifecycle.name"`, under `settings`).
+fn index_settings_action(b: &[u8]) -> Action {
+    let mut keys = Vec::new();
+    let mut de = serde_json::Deserializer::from_slice(b);
+    let read = serde::de::DeserializeSeed::deserialize(KeyPaths { prefix: String::new(), out: &mut keys }, &mut de).and_then(|()| de.end());
+    let lifecycle = |k: &String| {
+        let k = k.to_ascii_lowercase();
+        k.contains("lifecycle") || k.contains("index_state_management")
+    };
+    if read.is_err() || keys.iter().any(lifecycle) { Action::Delete } else { Action::Write }
+}
+
+/// Collects every key of a JSON document as a dotted path, as it's parsed: a duplicate key is
+/// seen as often as it appears (a `Value` would keep only the last).
+struct KeyPaths<'a> {
+    prefix: String,
+    out: &'a mut Vec<String>,
+}
+
+impl<'de> serde::de::DeserializeSeed<'de> for KeyPaths<'_> {
+    type Value = ();
+    fn deserialize<D: serde::Deserializer<'de>>(self, d: D) -> Result<(), D::Error> {
+        d.deserialize_any(self)
+    }
+}
+
+impl<'de> serde::de::Visitor<'de> for KeyPaths<'_> {
+    type Value = ();
+    fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        f.write_str("JSON")
+    }
+    fn visit_map<M: serde::de::MapAccess<'de>>(self, mut m: M) -> Result<(), M::Error> {
+        let out = self.out;
+        while let Some(k) = m.next_key::<String>()? {
+            let path = if self.prefix.is_empty() { k } else { format!("{}.{k}", self.prefix) };
+            out.push(path.clone());
+            m.next_value_seed(KeyPaths { prefix: path, out: &mut *out })?;
+        }
+        Ok(())
+    }
+    fn visit_seq<S: serde::de::SeqAccess<'de>>(self, mut s: S) -> Result<(), S::Error> {
+        let out = self.out;
+        while s.next_element_seed(KeyPaths { prefix: self.prefix.clone(), out: &mut *out })?.is_some() {}
+        Ok(())
+    }
+    fn visit_bool<E>(self, _: bool) -> Result<(), E> {
+        Ok(())
+    }
+    fn visit_i64<E>(self, _: i64) -> Result<(), E> {
+        Ok(())
+    }
+    fn visit_u64<E>(self, _: u64) -> Result<(), E> {
+        Ok(())
+    }
+    fn visit_f64<E>(self, _: f64) -> Result<(), E> {
+        Ok(())
+    }
+    fn visit_str<E>(self, _: &str) -> Result<(), E> {
+        Ok(())
+    }
+    fn visit_unit<E>(self) -> Result<(), E> {
+        Ok(())
+    }
+}
+
 /// Secrets' imports (`[{project?, environment, path}]`): importing another project's folder is
 /// admin on the importing folder (that project's admin exports it too); in-project ones are write,
 /// plus reveal on each source ([`secrets_import_sources`]).
@@ -1230,7 +1299,10 @@ static ROWS: &[Row] = &[
     row("POST", "/v1/search/clusters/{id}/password", "search", REVEAL, one(PG, "cluster")),
     // A deleted cluster back (its id still resolves while it is kept): a write, like a create.
     row("POST", "/v1/search/clusters/{id}/restore", "search", W, one(PG, "cluster")),
-    row("POST", "/v1/search/clusters/{id}/request", "search", ADMIN, one(PG, "cluster")),
+    // Any request as the cluster's owner. One that answers or sets a credential (decided by
+    // search on the API the cluster routes it to) needs reveal too: the gate says whether the
+    // grant has it (`capable`), without reading the body.
+    row("POST", "/v1/search/clusters/{id}/request", "search", ADMIN, one(PG, "cluster")).capable(&[Action::Reveal]),
     // An API key: its secret is in the answer.
     row("POST", "/v1/search/clusters/{id}/keys", "search", REVEAL, one(PG, "cluster")),
     row("DELETE", "/v1/search/clusters/{id}/keys/{key}", "search", ADMIN, one(PG, "cluster")),
@@ -1281,6 +1353,27 @@ static ROWS: &[Row] = &[
     // text, like the analytics) and rebuilding its suggestions index now (a write of the cluster).
     row("GET", "/v1/search/clusters/{id}/indices/{index}/suggestions", "search", R, one(PG, "cluster")).index("index"),
     row("POST", "/v1/search/clusters/{id}/indices/{index}/suggestions/rebuild", "search", W, one(PG, "cluster")).index("index"),
+    // Relevance tuning: an index's settings (the engine refuses private, internal and managed
+    // ones to every caller) change how it searches, as a mapping does, so they're write, except a
+    // lifecycle policy, which can delete the index (`index_settings_action`); `_explain` reads one
+    // document's score.
+    row("PUT", "/v1/search/clusters/{id}/indices/{index}/settings", "search", Act::Raw(index_settings_action), one(PG, "cluster")).index("index"),
+    row("POST", "/v1/search/clusters/{id}/indices/{index}/explain/{doc}", "search", R, one(PG, "cluster")).index("index"),
+    // Synonyms sets and query rulesets are the cluster's (any index's analyzer or query may name
+    // one): reading them is read; putting or deleting a set, a rule or a ruleset changes search
+    // behaviour, never a credential, so it's write; testing a ruleset reads it.
+    row("GET", "/v1/search/clusters/{id}/synonyms", "search", R, one(PG, "cluster")),
+    row("GET", "/v1/search/clusters/{id}/synonyms/{set}", "search", R, one(PG, "cluster")),
+    row("PUT", "/v1/search/clusters/{id}/synonyms/{set}", "search", W, one(PG, "cluster")),
+    row("DELETE", "/v1/search/clusters/{id}/synonyms/{set}", "search", W, one(PG, "cluster")),
+    row("GET", "/v1/search/clusters/{id}/synonyms/{set}/{rule}", "search", R, one(PG, "cluster")),
+    row("PUT", "/v1/search/clusters/{id}/synonyms/{set}/{rule}", "search", W, one(PG, "cluster")),
+    row("DELETE", "/v1/search/clusters/{id}/synonyms/{set}/{rule}", "search", W, one(PG, "cluster")),
+    row("GET", "/v1/search/clusters/{id}/query_rules", "search", R, one(PG, "cluster")),
+    row("GET", "/v1/search/clusters/{id}/query_rules/{ruleset}", "search", R, one(PG, "cluster")),
+    row("PUT", "/v1/search/clusters/{id}/query_rules/{ruleset}", "search", W, one(PG, "cluster")),
+    row("DELETE", "/v1/search/clusters/{id}/query_rules/{ruleset}", "search", W, one(PG, "cluster")),
+    row("POST", "/v1/search/clusters/{id}/query_rules/{ruleset}/test", "search", R, one(PG, "cluster")),
     // ── secrets (feature/roll-secrets, docs/secrets.md) ──
     // The caller and its grant's project (`roll run`), and health: any grant.
     row("GET", "/v1/secrets/whoami", "secrets", R, Tgt::AnyGrant),
@@ -1641,6 +1734,9 @@ static ROWS: &[Row] = &[
     // ones'): the link is a credential, as its QR code is.
     row("GET", "/v1/previews", "previews", R, list("id")).reveals(&["share_url"]),
     row("POST", "/v1/previews", "previews", W, Tgt::Create { project: None, place: None, id_field: "id" }).env(EnvFrom::Fixed("preview")),
+    // Each event is its project's: a member, or a token held to some projects, follows theirs
+    // (a deleted preview's event too: its project still resolves).
+    row("GET", "/v1/previews/events", "previews", R, Tgt::List { items: Some("events"), id_field: "project", kind: Some("project") }),
     row("*", "/v1/previews/projects/{project}/", "previews", ADMIN, one(&["project"], "project")),
     row("GET", "/v1/previews/projects/{project}/", "previews", R, one(&["project"], "project")),
     // A project's preview settings carry the variable values every preview's services get
@@ -1909,6 +2005,19 @@ mod tests {
         assert_eq!(bulk_action(b"{\"index\":{\"_id\":\"1\"}}\n{\"title\":\"a\"}\n"), Action::Write);
         assert_eq!(bulk_action(b"{\"index\":{}}\n{\"t\":1}\n{\"delete\":{\"_id\":\"2\"}}\n"), Action::Delete);
         assert_eq!(bulk_action(b"{\"update\":{\"_id\":\"3\"}}\n{\"script\":{\"source\":\"ctx.op = 'delete'\"}}\n"), Action::Delete);
+        assert_eq!(index_settings_action(br#"{"index.roll.suggestions.enabled": true, "index": {"number_of_replicas": 0}}"#), Action::Write);
+        let lifecycles: [&[u8]; 7] = [
+            br#"{"index.lifecycle.name": "30-days-default"}"#,
+            br#"{"settings": {"index": {"lifecycle": {"name": "x"}}}}"#,
+            br#"{"lifecycle.origination_date": 0}"#,
+            br#"{"index.plugins.index_state_management.policy_id": "p"}"#,
+            br#"{"index.refresh_interval": "1s", "index.refresh_interval": "1s", "index.lifecycle.indexing_complete": true}"#,
+            br#"{"index.lifecycle.name": "x", "index.lifecycle.name": null}"#,
+            b"not json",
+        ];
+        for lifecycle in lifecycles {
+            assert_eq!(index_settings_action(lifecycle), Action::Delete, "{}", String::from_utf8_lossy(lifecycle));
+        }
         assert_eq!(apps_notification_action(&serde_json::json!({ "url": "https://example.com/h" })), Action::Reveal);
         assert_eq!(apps_git_login_action(&serde_json::json!({ "username": "x", "secret": "GIT_TOKEN" })), Action::Deploy, "a project secret sent to the source's host");
         assert_eq!(apps_git_login_action(&serde_json::json!({ "username": "x", "password": "p" })), Action::Write);
