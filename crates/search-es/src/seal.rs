@@ -80,7 +80,12 @@ impl Sealer {
 /// client must not plant one (copied from a snapshot, or another cluster on the node) for the
 /// node to open and send where the client chooses.
 pub fn seal_given(cluster: &Cluster, kind: &str, plain: &str) -> String {
-    match &cluster.config.sealer {
+    seal_given_with(cluster.config.sealer.as_deref(), kind, plain)
+}
+
+/// [`seal_given`] with the node's sealer in hand (inside a state update).
+pub fn seal_given_with(sealer: Option<&Sealer>, kind: &str, plain: &str) -> String {
+    match sealer {
         Some(s) => s.seal(kind, plain),
         None => plain.to_string(),
     }

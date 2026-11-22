@@ -187,8 +187,12 @@ are then paused too (put them again to resume them).
   `step_info` that says why (one already waiting when the branch was made keeps the parent's).
 - Watches are inactive (`status.state.active: false`, as `_deactivate` leaves them), so a
   webhook or email isn't sent twice. Activating one is the branch owner's decision.
-- Connectors are recorded too, for syncs that read a source with stored credentials (#318) to
-  stay paused on the branch.
+- Connectors stay paused: a sync reads its source with the parent's stored credentials, so no
+  job of an inherited connector becomes due or starts on the branch (one already waiting stays
+  `pending`, and its schedule makes none). Putting the connector again, or writing its
+  configuration, makes it the branch's own, and its syncs run from then on, as an SLM policy
+  put again does. The parent's credentials don't come along: the branch gives them again in
+  that write (or later), since sealed values are bound to the cluster they were written on.
 - ILM, ISM, data stream lifecycles, transforms and rollups work inside the branch's own indices
   and keep running. A step of theirs that writes to an inherited repository is refused like
   any write there, and ILM's `cleanup-snapshot` leaves a snapshot in one alone (it is the
@@ -1141,7 +1145,9 @@ deterministic (#396).
    page of rows charged to the request breaker as it is built and released when dropped,
    `circuit_breaking_exception` past the limit, and a node-level limit no tenant setting can
    raise. Time has its own cap (#530, landed: one limit per request, by-query scans and internal pagers included). Rule: charge what a structure costs as it is
-   built, never a multiple of the bytes it came from.
+   built, never a multiple of the bytes it came from. Also left: `_bulk`'s own preparation (`bulk_ahead`
+   parses each source into a tree) is charged only as the body's `inflight_requests`, for
+   clients' bulks and connector syncs' alike (#318's pages are text until then).
 4. **A sweep for the bug classes the 2026-11-19 reviews kept finding** (first pass landed in #434, the follow-up in #492; what
    today's reviews still find is resource accounting, item 3). Four
    independent security reviews (connectors #318, cross-cluster search #347 and its gaps #389,
