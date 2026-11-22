@@ -77,11 +77,6 @@ const SSE_KEEPALIVE: std::time::Duration = std::time::Duration::from_secs(15);
 const PROGRESS_EVERY: std::time::Duration = std::time::Duration::from_secs(10);
 /// An answer read at most.
 const MAX_ANSWER: usize = 32 << 20;
-/// Text returned to the model at most; longer answers are cut (the structured content stays whole).
-/// 48 KiB stays inside Claude Code's default 25,000-token limit on a tool's answer
-/// (`MAX_MCP_OUTPUT_TOKENS`, which refuses a longer one outright rather than cutting it) even for
-/// dense JSON of ids and hashes (about 3 characters a token).
-const MAX_TEXT: usize = 48 << 10;
 /// Images a tool answers come back as MCP image content, up to this size (a screenshot).
 const IMAGES: [&str; 3] = ["image/png", "image/jpeg", "image/webp"];
 const MAX_IMAGE: usize = 4 << 20;
@@ -1452,55 +1447,7 @@ fn tool_error(text: String, data: Value) -> Value {
     json!({ "content": [{ "type": "text", "text": visible(&text) }], "structuredContent": d, "isError": true })
 }
 
-/// Characters a person can't see that a model reads: tag characters (ASCII smuggled as
-/// U+E0000–E007F), zero-width and bidi controls, and variation selectors (bytes hidden after an
-/// emoji). Third-party text reaches the model in results (review comments, a preview's notes and
-/// mail, task messages, objects), so the text block escapes them.
-fn invisible(c: char) -> bool {
-    matches!(c as u32,
-        0x00AD | 0x180E | 0x200B..=0x200F | 0x202A..=0x202E | 0x2060..=0x2064 | 0x2066..=0x2069 | 0xFE00..=0xFE0F | 0xFEFF | 0xE0000..=0xE007F | 0xE0100..=0xE01EF)
-}
-
-/// `text` with each invisible character written as a JSON escape (`\u200b`, a surrogate pair past
-/// U+FFFF): the model sees that it's there, a JSON text still parses to the same value, and
-/// `structuredContent` stays exact.
-pub(crate) fn visible(text: &str) -> String {
-    if !text.chars().any(invisible) {
-        return text.to_string();
-    }
-    let mut out = String::with_capacity(text.len() + 16);
-    for c in text.chars() {
-        if invisible(c) {
-            let mut units = [0u16; 2];
-            for u in c.encode_utf16(&mut units) {
-                out.push_str(&format!("\\u{u:04x}"));
-            }
-        } else {
-            out.push(c);
-        }
-    }
-    out
-}
-
-/// `text` as the model gets it: invisible characters escaped, cut at MAX_TEXT. `whole` says the
-/// structured content holds the whole answer (JSON answers); otherwise the cut is all there is.
-fn cut(text: String, whole: bool) -> String {
-    let text = visible(&text);
-    if text.len() <= MAX_TEXT {
-        return text;
-    }
-    let mut end = MAX_TEXT;
-    while !text.is_char_boundary(end) {
-        end -= 1;
-    }
-    format!(
-        "{}\n… (cut at {} KiB of {} bytes: ask for less, as most list tools take a limit, a filter or a page cursor{})",
-        &text[..end],
-        MAX_TEXT >> 10,
-        text.len(),
-        if whole { "; the structured content has all of it" } else { "" }
-    )
-}
+use roll_auth::lockdown::{cut, visible};
 
 async fn run(ctx: &Arc<Ctx>, t: &tools::Tool, args: &Value, ext: Extensions) -> Value {
     let built = match t.request(args) {
@@ -1600,9 +1547,9 @@ mod cut_tests {
     /// A long answer's text fits a client's limit and says how to get less; a short one is whole.
     #[test]
     fn long_answers_are_cut_to_fit_a_clients_limit() {
-        let long = "x".repeat(super::MAX_TEXT * 3);
+        let long = "x".repeat(roll_auth::lockdown::MAX_TEXT * 3);
         let text = super::cut(long.clone(), true);
-        assert!(text.len() < super::MAX_TEXT + 300 && text.contains("ask for less"), "{}", &text[text.len() - 200..]);
+        assert!(text.len() < roll_auth::lockdown::MAX_TEXT + 300 && text.contains("ask for less"), "{}", &text[text.len() - 200..]);
         assert_eq!(super::cut("short".into(), true), "short");
         // A text answer has no structured copy: the note doesn't promise one.
         assert!(!super::cut(long, false).contains("structured content"));
@@ -1658,7 +1605,7 @@ mod visible_tests {
         let comment = format!("looks good{hidden}\u{200b}!");
         let value = serde_json::json!({ "body": comment });
         let text = super::cut(serde_json::to_string(&value).unwrap(), true);
-        assert!(text.contains("\\udb40\\udc69") && text.contains("\\u200b") && !text.chars().any(super::invisible), "{text}");
+        assert!(text.contains("\\udb40\\udc69") && text.contains("\\u200b") && !text.chars().any(roll_auth::lockdown::invisible), "{text}");
         assert_eq!(serde_json::from_str::<serde_json::Value>(&text).unwrap(), value, "the same value");
         assert_eq!(super::visible("plain text, émoji 🚀"), "plain text, émoji 🚀");
     }

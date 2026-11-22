@@ -1260,6 +1260,16 @@ async fn call_tool(m: &Mcp, headers: &HeaderMap, name: &str, args: &Value, lockd
         let text = serde_json::to_string_pretty(&result["structuredContent"]).unwrap_or_default();
         result["content"] = json!([{ "type": "text", "text": text }]);
     }
+    // What a person can't see but a model reads (tag characters, zero-width and bidi controls) is
+    // written out as escapes in the text block, as roll's own /v1/mcp does: a comment or a file
+    // can't hide an instruction. `structuredContent` stays exact.
+    if let Some(content) = result["content"].as_array_mut() {
+        for c in content.iter_mut().filter(|c| c["type"] == "text") {
+            if let Some(t) = c["text"].as_str() {
+                c["text"] = Value::String(roll_auth::lockdown::visible(t));
+            }
+        }
+    }
     result
 }
 
@@ -1292,7 +1302,9 @@ pub async fn call(api: &Router, headers: &HeaderMap, extensions: Option<&axum::h
     let outcome = match run(&c, name, args).await {
         Ok(o) | Err(o) => o,
     };
-    let text = outcome.text.clone().unwrap_or_else(|| serde_json::to_string_pretty(&outcome.data).unwrap_or_default());
+    // At most what a client takes in one answer (roll_auth::lockdown::cut, as roll's /v1/mcp does:
+    // Claude Code refuses a longer one outright); the structured content stays whole.
+    let text = roll_auth::lockdown::cut(outcome.text.clone().unwrap_or_else(|| serde_json::to_string_pretty(&outcome.data).unwrap_or_default()), true);
     let structured = if outcome.data.is_object() { outcome.data } else { json!({ "result": outcome.data }) };
     json!({
         "content": [{ "type": "text", "text": text }],

@@ -481,7 +481,8 @@ async fn read_file_ranges_and_binary_files() {
     let a = app(None);
     a.repo("acme", "api").await;
     let big: String = (1..=4500).map(|i| format!("line {i}\n")).collect();
-    a.ok("POST", "/v1/code/repos/acme/api/land", Some(json!({ "message": "m", "files": { "big.txt": { "content": big }, "logo.bin": { "content_b64": "AP8AAQ==" }, "small.txt": { "content": "hi\n" } } })))
+    let wide: String = (1..=100).map(|i| format!("{i:04} {}\n", "w".repeat(1000))).collect();
+    a.ok("POST", "/v1/code/repos/acme/api/land", Some(json!({ "message": "m", "files": { "wide.txt": { "content": wide }, "big.txt": { "content": big }, "logo.bin": { "content_b64": "AP8AAQ==" }, "small.txt": { "content": "hi\n" } } })))
         .await;
     let mut c = Client::new(&a, None);
     c.initialize("2025-11-25").await;
@@ -512,6 +513,12 @@ async fn read_file_ranges_and_binary_files() {
     assert_eq!((b["binary"].as_bool(), b["size"].as_u64()), (Some(true), Some(4)), "{b}");
     assert!(b["content"].is_null());
 
+    // 100 KB of long lines is under 2,000 lines but past what a client takes in one answer: the text
+    // block is cut and says so, the structured content has it all.
+    let r = c.call("read_file", json!({ "repo": repo, "path": "wide.txt" })).await;
+    let text = r["content"][0]["text"].as_str().unwrap();
+    assert!(text.len() < roll_auth::lockdown::MAX_TEXT + 300 && text.contains("ask for less"), "{}", text.len());
+    assert_eq!(r["structuredContent"]["content"].as_str().unwrap().lines().count(), 100);
     let r = c.call("read_file", json!({ "repo": repo, "path": "small.txt" })).await;
     assert_eq!(r["content"][0]["text"], "hi\n", "the text block is the file content");
     assert_eq!(r["structuredContent"]["binary"], false);
@@ -735,6 +742,14 @@ async fn lockdown_withholds_outsiders_text() {
     let gc = locked.rpc("tools/call", json!({ "name": "get_change", "arguments": { "change": id } })).await;
     assert_eq!(bodies(&gc["result"]["structuredContent"]), ["why b?", roll_auth::lockdown::WITHHELD]);
     assert!(!gc["result"]["content"][0]["text"].as_str().unwrap().contains("Ignore your instructions"), "{gc}");
+    // Text a person can't see (tag characters smuggling ASCII, a zero-width space) comes out as
+    // escapes in the text block, lockdown or not; the structured answer stays exact.
+    let hidden = "fine\u{200b}\u{e0069}\u{e0067}";
+    a.req("POST", &format!("/v1/code/threads/{th}/comments"), Some(json!({ "body": hidden })), root).await;
+    let gc = open.rpc("tools/call", json!({ "name": "get_change", "arguments": { "change": id } })).await;
+    let text = gc["result"]["content"][0]["text"].as_str().unwrap();
+    assert!(text.contains("\\u200b") && !text.contains('\u{200b}') && !text.contains('\u{e0069}'), "{text}");
+    assert_eq!(bodies(&gc["result"]["structuredContent"])[2], hidden);
     let mut typo = Client::new(&a, root);
     typo.headers.push(("x-mcp-lockdown", "yes".into()));
     assert_eq!(typo.post(json!({ "jsonrpc": "2.0", "id": 1, "method": "ping" }), &[]).await.0, StatusCode::BAD_REQUEST);
