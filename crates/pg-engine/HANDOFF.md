@@ -18362,8 +18362,9 @@ Dropped:
 Left (repros in `~/.cache/a285/probe`):
 - join:67 runs with `geqo = on`, `geqo_threshold = 2`: PostgreSQL's genetic search keeps the
   other of two equal-cost nestings of the semi joins; not the exhaustive search's order.
-- A FROM call that folds to a constant (pull_up_constant_function; tsearch:280-295,
-  polymorphism:181-184; `fc.sql`): `select * from abs(-3) u` stays a Function Scan because
+- (Done in the second candidate, below.) A FROM call that folds to a constant
+  (pull_up_constant_function; tsearch:280-295, polymorphism:181-184; `fc.sql`): `select * from
+  abs(-3) u` stays a Function Scan because
   `pull_up_consts` replaces a constant item only under a projection all of whose outputs fold
   (or in a join); PostgreSQL makes the item an RTE_RESULT and substitutes the value either way
   (`ts_rewrite(query, ...)` over it stays a volatile call over the constant).
@@ -18380,3 +18381,31 @@ Left (repros in `~/.cache/a285/probe`):
   (`PathKey::ident` None: matched by sort behaviour as before).
 - `count(*)` over `(WITH ... VALUES (true)) s` costs its Aggregate 0.01 less than PostgreSQL
   (base too).
+
+### Second candidate (`cand/a285-2`, on top of the first: it extends the first's `pull_up_consts` changes in `paths/pullup.rs`)
+
+- **A FROM call folding to a constant is an RTE_RESULT** (tsearch:280-295, hash_func:17, :18,
+  :31, :32; pull_up_constant_function): `pull_up_consts` replaced a constant FROM item only
+  under a projection all of whose outputs fold, or in a join. Now a bare one (`select * from
+  abs(-3) u`) is a Result returning the value, and a projection over one puts the value in
+  even when a call doesn't fold (`ts_rewrite(query, ...)`, volatile, stays a call over
+  `'''moscow'''::tsquery`); not one with a sub-select, whose parameters may read the item.
+- **A scan's system columns have their types' widths when read** (tid:8, :9, tidscan:8, :9,
+  tidrangescan:17, transactions:27, :28, :30, privileges:107, :112, join_hash:45, :46, merge:1):
+  EXPLAIN gave the scan names for ctid, xmin, cmin, xmax, cmax and tableoid but no widths, so a
+  read one counted 0 (tid 6; xid, cid, oid 4).
+- Golden `a285_consts`.
+
+Regression files' EXPLAINs, both candidates (full pass, `out-d2`, against `out-base`): 123 more
+of the 17,654 match than on the base, none newly differ (2,308 differ). (Two catalog plans,
+pg_database's 5 rows for 4, differed in one pass because a probe's database was left in that
+engine; both match on a fresh one.) TPC-H: base against new on one copied SF 0.05 data
+directory, 22 of 22 plans identical in text, costs x1.000.
+Verification: quick-check with `QC_CHECKED=1` on `372718fc1` (both candidates on `79806dd6c`):
+build, clippy (16 warnings, none new), tests 146 passed in 10 binaries, the same 146 with
+`--profile verify-checked`, regress 51,148 / 51,150 with 0 newly differing, isolation
+1,647 / 1,648, pg_dump 14,609 passed. No performance gate (planning only: one more match per
+FROM call node, a width per system column).
+
+Left: `select a, ctid from t for update` scans 10 wide (PostgreSQL 16: the row mark's ctid is a
+column of its own beside the one selected; the engine reads one); combocid:7.
