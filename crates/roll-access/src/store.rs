@@ -195,8 +195,7 @@ pub const UNCONSENTED_CLIENT_MS: i64 = 90 * 24 * 3600 * 1000;
 /// is kept as a key once consented: under Postgres's index row limit).
 pub const MAX_CLIENT_PAYLOAD: usize = 1500;
 
-#[derive(Clone, Debug, Serialize)]
-
+#[derive(Clone, Debug, Default, Serialize)]
 pub struct Grant {
     pub id: String,
     pub name: String,
@@ -305,7 +304,11 @@ impl Grant {
     }
 
     pub fn kind(&self) -> GrantKind {
-        if self.kind == "oauth" { GrantKind::Oauth } else { GrantKind::Token }
+        match self.kind {
+            "oauth" => GrantKind::Oauth,
+            "session" => GrantKind::Session,
+            _ => GrantKind::Token,
+        }
     }
 
     /// Not revoked, not expired (it may not have started: [`Grant::usable`]).
@@ -1012,6 +1015,8 @@ impl Store {
         let (prefix, secret_kind, secret_expiry) = match kind {
             GrantKind::Token => (TOKEN_PREFIX, "token", None),
             GrantKind::Oauth => (ACCESS_PREFIX, "access", Some(now + ACCESS_TTL_MS)),
+            // A session's grant is built per request from memberships, never stored.
+            GrantKind::Session => return Err(Error::BadRequest("a session's grant isn't stored".into())),
         };
         let token = new_secret(prefix);
         let rules = serde_json::to_string(&new.rules).map_err(|e| Error::Internal(e.to_string()))?;

@@ -340,6 +340,13 @@ pub enum AppsCmd {
         /// With `--alert-log`: how many times (default 10).
         #[arg(long)]
         alert_log_count: Option<u32>,
+        /// Alert when each instance's CPU stays at this share of its vCPU for five minutes (0 off).
+        #[arg(long, value_name = "PERCENT")]
+        alert_cpu: Option<u8>,
+        /// An alert on one of its own gauges, `name>100` or `name<1`, with ` for 5m` (1–5, default
+        /// 3) and ` sum` after it; repeat for more, `none` clears them.
+        #[arg(long, value_name = "RULE")]
+        alert_metric: Vec<String>,
         #[arg(long)]
         schedule: Option<String>,
         /// The zone a cron schedule's fields are in (IANA: `Europe/Budapest`).
@@ -382,6 +389,17 @@ pub enum AppsCmd {
         /// (8, 16 GiB), its minutes metered by size on the fleet's builders.
         #[arg(long, value_name = "SIZE", value_parser = ["small", "medium", "large"])]
         build_size: Option<String>,
+        /// Submodules fetched into the tree (`true`), or left out (`false`): a Git URL service's,
+        /// or a roll code repo's.
+        #[arg(long)]
+        submodules: Option<bool>,
+        /// The private roll code repos a roll code repo's submodules may come from (`acme/lib,acme/ui`;
+        /// `none` clears it).
+        #[arg(long, value_name = "REPOS")]
+        submodule_repos: Option<String>,
+        /// A Git URL service's Git LFS objects fetched in place of their pointers (`true`).
+        #[arg(long)]
+        lfs: Option<bool>,
         /// A gradual rollout: the shares of requests a new deployment takes in turn (`10,50`);
         /// `none` switches at once.
         #[arg(long, value_name = "PERCENTS")]
@@ -597,11 +615,12 @@ pub enum AppsCmd {
         /// A terminal to it: `roll apps run -i -- rails console`.
         #[arg(short = 'i', long, conflicts_with_all = ["timeout", "tasks", "retries", "parallelism"])]
         interactive: bool,
-        /// A console's CPUs (0.25–8; default the environment's size).
-        #[arg(long, requires = "interactive")]
+        /// A console's or a job's CPUs (0.25–8; default the environment's size), Heroku's
+        /// `run --size`.
+        #[arg(long)]
         cpu: Option<f64>,
-        /// A console's memory in MB (256–16384; default the environment's size).
-        #[arg(long, requires = "interactive")]
+        /// A console's or a job's memory in MB (256–16384; default the environment's size).
+        #[arg(long)]
         memory: Option<u32>,
         /// The job's limit, in seconds (default 3600).
         #[arg(long)]
@@ -614,7 +633,7 @@ pub enum AppsCmd {
         /// `ROLL_TASK_ATTEMPT`, as a cron run's retries wait.
         #[arg(long)]
         retries: Option<u32>,
-        /// Tasks running at once (1–100; default ten, or fewer tasks).
+        /// Tasks running at once (1–10; default ten, or fewer tasks).
         #[arg(long)]
         parallelism: Option<u32>,
         #[arg(trailing_var_arg = true, required_unless_present = "interactive", allow_hyphen_values = true)]
@@ -2800,7 +2819,7 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
             }
             v
         }
-        AppsCmd::Set { target, name, repo, root, image, upload, builder, dockerfile, stage, install, build_command, build_start, health_timeout, health_every, health_failures, health_command, alert_memory, alert_errors, alert_p95, alert_log, alert_log_count, min, max, cpu, memory, port, start, pre_deploy, health, schedule, timezone, kind, concurrency, suspend_after, sleep_after, timeout, retries, volume, watch, packages, build_timeout, build_size, rollout, rollout_step, rollout_errors, rollout_manual, overlap, h2c, scale, public, drain, cpu_target, busy_cpu, memory_target, latency_target, oidc_audience, push, restart, restart_tries, affinity, tcp, rollback_on_crash, rebuild_on_base, block_on } => {
+        AppsCmd::Set { target, name, repo, root, image, upload, builder, dockerfile, stage, install, build_command, build_start, health_timeout, health_every, health_failures, health_command, alert_memory, alert_errors, alert_p95, alert_log, alert_log_count, alert_cpu, alert_metric, min, max, cpu, memory, port, start, pre_deploy, health, schedule, timezone, kind, concurrency, suspend_after, sleep_after, timeout, retries, volume, watch, packages, build_timeout, build_size, submodules, submodule_repos, lfs, rollout, rollout_step, rollout_errors, rollout_manual, overlap, h2c, scale, public, drain, cpu_target, busy_cpu, memory_target, latency_target, oidc_audience, push, restart, restart_tries, affinity, tcp, rollback_on_crash, rebuild_on_base, block_on } => {
             let svc = service(api, &target).await?;
             // The service's rollout with what was given replaced (the API takes it whole).
             let rollout = if rollout.is_some() || rollout_step.is_some() || rollout_errors.is_some() || rollout_manual.is_some() || overlap.is_some() {
@@ -2870,6 +2889,15 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
             if let Some(z) = &build_size {
                 build.insert("size".into(), if z == "small" { Value::Null } else { json!(z) });
             }
+            if let Some(on) = submodules {
+                build.insert("submodules".into(), if on { json!(true) } else { Value::Null });
+            }
+            if let Some(r) = &submodule_repos {
+                build.insert("submodule_repos".into(), if r == "none" { Value::Null } else { json!(r.split(',').map(str::trim).filter(|s| !s.is_empty()).collect::<Vec<_>>()) });
+            }
+            if let Some(on) = lfs {
+                build.insert("lfs".into(), if on { json!(true) } else { Value::Null });
+            }
             match build_timeout.as_deref() {
                 None => {}
                 Some("none") => {
@@ -2898,9 +2926,13 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
                 body.insert("build".into(), Value::Object(build));
             }
             // The service's alerts with what was given replaced (the API takes them whole).
-            let alerts = if alert_memory.is_some() || alert_errors.is_some() || alert_p95.is_some() || alert_log.is_some() || alert_log_count.is_some() {
+            let alerts = if alert_memory.is_some() || alert_errors.is_some() || alert_p95.is_some() || alert_log.is_some() || alert_log_count.is_some() || alert_cpu.is_some() || !alert_metric.is_empty() {
                 let mut a = svc["run"]["alerts"].as_object().cloned().unwrap_or_default();
-                for (k, v) in [("memory_pct", alert_memory.map(Value::from)), ("error_pct", alert_errors.map(Value::from)), ("p95_ms", alert_p95.map(Value::from)), ("log_count", alert_log_count.map(Value::from))] {
+                if !alert_metric.is_empty() {
+                    let rules = alert_metric.iter().filter(|r| *r != "none").map(|r| metric_alert(r)).collect::<anyhow::Result<Vec<_>>>()?;
+                    a.insert("metrics".into(), Value::Array(rules));
+                }
+                for (k, v) in [("memory_pct", alert_memory.map(Value::from)), ("error_pct", alert_errors.map(Value::from)), ("p95_ms", alert_p95.map(Value::from)), ("log_count", alert_log_count.map(Value::from)), ("cpu_pct", alert_cpu.map(Value::from))] {
                     if let Some(v) = v {
                         a.insert(k.into(), v);
                     }
@@ -3603,10 +3635,10 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
             }
             return ssh(api, &env_path(&svc, &target.env), &query).await;
         }
-        AppsCmd::Run { target, timeout, tasks, retries, parallelism, command, .. } => {
+        AppsCmd::Run { target, timeout, tasks, retries, parallelism, cpu, memory, command, .. } => {
             let svc = service(api, &target).await?;
             let base = format!("{}/jobs", env_path(&svc, &target.env));
-            let job = api.post(&base, json!({ "command": shell_join(&command), "timeout_s": timeout, "tasks": tasks, "retries": retries, "parallelism": parallelism })).await?;
+            let job = api.post(&base, json!({ "command": shell_join(&command), "timeout_s": timeout, "tasks": tasks, "retries": retries, "parallelism": parallelism, "cpu": cpu, "memory_mb": memory })).await?;
             if !json_out {
                 let id = s(&job["id"]);
                 follow(api, &format!("{base}/{}/logs?follow=1", enc(&id))).await?;
@@ -4789,6 +4821,26 @@ fn internal_rewritten(v: &str, host: &str, local: &str) -> Option<String> {
     }
     out.push_str(rest);
     hit.then_some(out)
+}
+
+/// `--alert-metric`: `name>100` or `name<1`, then ` for 5m` and ` sum`, as an `alerts.metrics` entry.
+fn metric_alert(rule: &str) -> anyhow::Result<Value> {
+    let bad = || anyhow::anyhow!("--alert-metric is name>N or name<N, with \" for 1m\"–\" for 5m\" and \" sum\" after it: {rule}");
+    let (head, rest) = rule.trim().split_once(' ').map_or((rule.trim(), ""), |(h, r)| (h, r));
+    let (at, op) = head.find(['>', '<']).map(|i| (i, &head[i..i + 1])).ok_or_else(bad)?;
+    let (name, value) = (&head[..at], head[at + 1..].parse::<f64>().map_err(|_| bad())?);
+    let mut m = serde_json::Map::new();
+    m.insert("name".into(), json!(name));
+    m.insert(if op == ">" { "above" } else { "below" }.into(), json!(value));
+    let mut words = rest.split_whitespace();
+    while let Some(w) = words.next() {
+        match w {
+            "for" => m.insert("minutes".into(), json!(words.next().and_then(|d| d.strip_suffix('m')).and_then(|d| d.parse::<u8>().ok()).ok_or_else(bad)?)),
+            "sum" => m.insert("sum".into(), json!(true)),
+            _ => return Err(bad()),
+        };
+    }
+    Ok(Value::Object(m))
 }
 
 #[cfg(test)]

@@ -179,6 +179,9 @@ fn indexed_document(ctx: &QueryCtx, p: &Percolate) -> EsResult<Value> {
 
 /// `PercolateQueryBuilder.doToQuery`: the stored queries matching the documents.
 pub fn percolate(ctx: &QueryCtx, p: &Percolate) -> EsResult<QueryRef> {
+    // Before anything else, as Elasticsearch 9.5.5 checks it: the stored queries run with the
+    // index owner's reach (a browser key's policy refuses it the same way).
+    ctx.check_expensive("percolate")?;
     let Some(f) = ctx.table.get(&p.field).cloned() else {
         return Err(qse(ctx, format!("field [{}] does not exist", p.field)));
     };

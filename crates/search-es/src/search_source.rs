@@ -960,6 +960,27 @@ fn rescore(p: &mut XParser<'_>) -> EsResult<Rescore> {
     Ok(r)
 }
 
+/// The fields `InnerHitBuilder.PARSER` declares (Elasticsearch 9.5.5): any other is
+/// `[inner_hits] unknown field [..]`.
+const INNER_HIT_FIELDS: &[Field] = &[
+    Field::new("name", Tokens::ANY),
+    Field::new("ignore_unmapped", Tokens::ANY),
+    Field::new("from", Tokens::ANY),
+    Field::new("size", Tokens::ANY),
+    Field::new("explain", Tokens::ANY),
+    Field::new("version", Tokens::ANY),
+    Field::new("seq_no_primary_term", Tokens::ANY),
+    Field::new("track_scores", Tokens::ANY),
+    Field::new("stored_fields", Tokens::ANY),
+    Field::new("docvalue_fields", Tokens::ANY),
+    Field::new("fields", Tokens::ANY),
+    Field::new("script_fields", Tokens::ANY),
+    Field::new("sort", Tokens::ANY),
+    Field::new("_source", Tokens::ANY),
+    Field::new("highlight", Tokens::ANY),
+    Field::new("collapse", Tokens::ANY),
+];
+
 /// `CollapseBuilder.fromXContent`.
 fn collapse(p: &mut XParser<'_>) -> EsResult<Collapse> {
     const F: &[Field] = &[
@@ -973,7 +994,14 @@ fn collapse(p: &mut XParser<'_>) -> EsResult<Collapse> {
             0 => field = Some(p.text()?),
             1 => {
                 inner_hits = p.array_items(|p| {
-                    let v = p.take_value();
+                    // `InnerHitBuilder.PARSER`'s fields only: a group's search is no full search
+                    // (no `query`, `aggs`, `suggest`, `knn` or `rescore` of its own).
+                    let mut m = Map::new();
+                    p.object("inner_hits", INNER_HIT_FIELDS, |p, i| {
+                        m.insert(INNER_HIT_FIELDS[i].name.to_string(), p.take_value());
+                        Ok(())
+                    })?;
+                    let v = Value::Obj(m);
                     // `InnerHitBuilder`: a name is required, and its own `collapse` takes only a
                     // field (no `inner_hits` or `collapse` of its own).
                     // (`p.object` adds the `[collapse] failed to parse field [inner_hits]` layer.)

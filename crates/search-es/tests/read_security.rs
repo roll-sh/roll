@@ -185,6 +185,26 @@ async fn request_runtime_fields_dont_reach_an_api_keys_role_descriptors() {
     assert_eq!((s, hits(&v)), (200, 1), "{}", v.to_json());
 }
 
+/// A browser key's `filter` is its owner's document level security: the key's own bans
+/// (expensive queries such as this `prefix`, scripts) don't refuse it, and a request runtime
+/// field shadowing its field doesn't widen it.
+#[tokio::test]
+async fn a_browser_keys_filter_ignores_request_runtime_fields() {
+    let c = cluster(r#""none""#).await;
+    assert_eq!(call(&c, "PUT", "/_security/user/o", r#"{"password":"o-password-1","roles":["superuser"]}"#, None).await.0, 200);
+    let key = r#"{"name":"page","metadata":{"roll_browser":{"limits":{"allow_scripts":true}}},"role_descriptors":{"roll_browser":{"indices":[{"names":["p"],"privileges":["read"],"query":{"prefix":{"team":"re"}}}]}}}"#;
+    let (s, k) = call(&c, "POST", "/_security/api_key", key, Some("o")).await;
+    assert_eq!(s, 200, "{}", k.to_json());
+    let field = |f: &str| k.get(f).and_then(Value::as_str).unwrap_or_default().to_string();
+    let auth = format!("ApiKey {}", base64::engine::general_purpose::STANDARD.encode(format!("{}:{}", field("id"), field("api_key"))));
+    // The key is a browser key: the same query in its request is refused.
+    let (s, v) = call_as(&c, "POST", "/p/_search", r#"{"query":{"prefix":{"team":"re"}}}"#, Some(auth.clone())).await;
+    assert_eq!(s, 400, "{}", v.to_json());
+    let search = format!(r#"{{{SHADOW},"query":{{"match_all":{{}}}},"aggs":{{"all":{{"global":{{}}}}}}}}"#);
+    let (s, v) = call_as(&c, "POST", "/p/_search", &search, Some(auth)).await;
+    assert_eq!((s, hits(&v), global_count(&v)), (200, 1, Some(1)), "{}", v.to_json());
+}
+
 /// A filtered alias's filter is not security: a request's runtime fields apply to it, as
 /// Elasticsearch 9.5.5 applies them (a search through the alias with a runtime field shadowing
 /// its filter's field reads every document).

@@ -1235,6 +1235,27 @@ pub enum Acc {
     Present(i64, bool),
 }
 
+/// Whether `v` is a value a column of type `ty` holds: of the type's family (any number for a
+/// numeric type, a date or long for dates, text for the string types). Null always fits, and a
+/// multi-value whose every value fits does.
+pub fn fits(ty: DataType, v: &V) -> bool {
+    use DataType as T;
+    match v {
+        V::Null => true,
+        V::Multi(vs) => vs.iter().all(|x| !matches!(x, V::Multi(_)) && fits(ty, x)),
+        _ => match ty {
+            T::Boolean => matches!(v, V::Bool(_)),
+            T::Integer | T::Long | T::UnsignedLong | T::Double | T::CounterLong | T::CounterInteger | T::CounterDouble => matches!(v, V::Int(_) | V::Long(_) | V::ULong(_) | V::Double(_)),
+            T::Date | T::DateNanos => matches!(v, V::Date(_) | V::Long(_)),
+            T::Ip => matches!(v, V::Ip(_) | V::Str(_)),
+            T::Keyword | T::Text | T::Version | T::Source | T::Tsid | T::Flattened => matches!(v, V::Str(_)),
+            T::Geohash | T::Geotile | T::Geohex => matches!(v, V::Long(_) | V::Str(_)),
+            T::Null => false,
+            _ => true,
+        },
+    }
+}
+
 impl Acc {
     pub fn new(name: &str) -> Acc {
         match name {
@@ -1347,6 +1368,73 @@ impl Acc {
                 *any |= !v.is_null();
             }
         }
+    }
+
+    /// Merges another cluster's state of the same aggregation (`name`) into this one, as one
+    /// cluster holding both parts' rows would have accumulated them (the other's rows after
+    /// this one's). `Err`: states of different kinds, which no part of one query makes.
+    pub fn merge(&mut self, name: &str, other: Acc) -> Result<(), &'static str> {
+        match (self, other) {
+            (Acc::Count(a), Acc::Count(b)) => *a = a.saturating_add(b),
+            (Acc::Amd { part }, Acc::Amd { part: o }) => {
+                let merge = |a: Option<f64>, b: Option<f64>, f: fn(f64, f64) -> f64| match (a, b) {
+                    (Some(a), Some(b)) => Some(f(a, b)),
+                    (a, b) => a.or(b),
+                };
+                part[0] = merge(part[0], o[0], f64::min);
+                part[1] = merge(part[1], o[1], f64::max);
+                part[2] = merge(part[2], o[2], |a, b| a + b);
+                part[3] = merge(part[3], o[3], |a, b| a + b);
+            }
+            (Acc::Points(a), Acc::Points(b)) => a.extend(b),
+            (Acc::Distinct { hll, .. }, Acc::Distinct { hll: o, .. }) => {
+                if hll.precision() != o.precision() {
+                    return Err("count_distinct states of different precisions");
+                }
+                hll.merge(&o);
+            }
+            (Acc::Sum { int, float, comp, any, overflow }, Acc::Sum { int: i, float: f, comp: c, any: y, overflow: o }) => {
+                match int.checked_add(i) {
+                    Some(s) => *int = s,
+                    None => *overflow = true,
+                }
+                kahan(float, comp, f);
+                kahan(float, comp, -c);
+                *any |= y;
+                *overflow |= o;
+            }
+            (Acc::Avg { int, float, comp, n }, Acc::Avg { int: i, float: f, comp: c, n: m }) => {
+                *int = int.saturating_add(i);
+                kahan(float, comp, f);
+                kahan(float, comp, -c);
+                *n = n.saturating_add(m);
+            }
+            (Acc::MinMax(cur), Acc::MinMax(o)) => {
+                if let Some(x) = o {
+                    let better = match cur {
+                        None => true,
+                        Some(c) => {
+                            let o = cmp(&x, c);
+                            if name == "min" { o == Ordering::Less } else { o == Ordering::Greater }
+                        }
+                    };
+                    if better {
+                        *cur = Some(x);
+                    }
+                }
+            }
+            (Acc::Collect(a), Acc::Collect(b)) => a.extend(b),
+            (Acc::Weighted(s, t), Acc::Weighted(s2, t2)) => {
+                *s += s2;
+                *t += t2;
+            }
+            (Acc::Present(rows, any), Acc::Present(r, y)) => {
+                *rows = rows.saturating_add(r);
+                *any |= y;
+            }
+            _ => return Err("aggregation states of different kinds"),
+        }
+        Ok(())
     }
 
     /// `WEIGHTED_AVG(value, weight)`'s row (multi-values: every pair, like Elasticsearch).

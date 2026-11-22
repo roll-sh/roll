@@ -33,7 +33,7 @@ pub struct JoinInner {
 }
 
 fn expensive_check(ctx: &QueryCtx) -> EsResult<()> {
-    if !ctx.allow_expensive {
+    if !ctx.allows_expensive() {
         return Err(EsError::new(400, "exception", "[joining] queries cannot be executed when 'search.allow_expensive_queries' is set to false."));
     }
     Ok(())
@@ -262,6 +262,11 @@ pub fn inner_hits(qctx: &QueryCtx, t: &Target, r: &ShardResult, doc: u32, def: &
         Some(Value::Obj(hl)) => Some(super::highlight::Spec::parse(hl)?),
         _ => None,
     };
+    if spec.explain
+        && let Some(sec) = qctx.security.restricted()
+    {
+        sec.refuse_for_browser(crate::xpack::security::browser::Banned::Explain)?;
+    }
     let mut hits = Vec::new();
     for (i, (d, score)) in matches.iter().enumerate().skip(from).take(size) {
         let stored = searcher.stored(*d).map_err(ie)?;

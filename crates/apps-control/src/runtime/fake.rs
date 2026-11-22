@@ -85,6 +85,14 @@ pub struct Fake {
     pub build_networks: Mutex<Vec<Option<String>>>,
     /// Each build's CPUs and memory (`build.size`), in order.
     pub build_sizes: Mutex<Vec<(f64, u32)>>,
+    /// Each build's context's files (paths under it), in order.
+    pub build_trees: Mutex<Vec<Vec<String>>>,
+    /// Each build's small files' contents by path (at most 4 KiB each), in order.
+    pub build_files: Mutex<Vec<std::collections::HashMap<String, String>>>,
+    /// Each instance made with its own command (a job, a run): the command, its CPUs and memory.
+    pub commands_made: Mutex<Vec<(String, f64, u32)>>,
+    /// Each closed network's interception: whether its egress proxies have one.
+    pub intercepted: Mutex<std::collections::HashMap<String, bool>>,
     /// The manifests of the image archives it loaded.
     pub loaded: Mutex<Vec<String>>,
     /// Images removed ([`Builder::remove_image`]).
@@ -358,6 +366,14 @@ async fn serve(spec: InstanceSpec, listener: tokio::net::TcpListener, log: LogSi
 
 #[async_trait]
 impl Runtime for Fake {
+    fn set_interception(&self, network: &str, i: Option<std::sync::Arc<dyn roll_intercept::Interception>>) {
+        self.intercepted.lock().insert(network.to_string(), i.is_some());
+    }
+
+    fn intercepted(&self, network: &str) -> Option<super::egress::Intercepted> {
+        self.intercepted.lock().get(network).filter(|on| **on).map(|_| super::egress::Intercepted { requests: 3, swapped: 2, refused: vec!["api.stripe.com: a placeholder in the query".into()] })
+    }
+
     fn name(&self) -> &'static str {
         "fake"
     }
@@ -387,6 +403,9 @@ impl Runtime for Fake {
 
     async fn create(&self, spec: &InstanceSpec) -> anyhow::Result<()> {
         self.counts.creates.fetch_add(1, Ordering::SeqCst);
+        if let Some(c) = &spec.command {
+            self.commands_made.lock().push((c.clone(), spec.cpu, spec.memory_mb));
+        }
         let mut m = self.instances.lock();
         anyhow::ensure!(!m.contains_key(&spec.name), "{} exists", spec.name);
         m.insert(spec.name.clone(), FakeInstance { spec: spec.clone(), state: FakeState::Created, server: None, addr: None, extra: HashMap::new(), reserved: None, exited: watch::channel(None).0, killed: Default::default() });
@@ -773,6 +792,23 @@ impl Builder for Fake {
         self.build_vars.lock().push(job.env.iter().map(|(k, _)| k.clone()).collect());
         self.build_networks.lock().push(job.egress.as_ref().map(|e| e.network.clone()));
         self.build_sizes.lock().push((job.cpu, job.memory_mb));
+        let (mut seen, mut contents) = (Vec::new(), std::collections::HashMap::new());
+        let mut stack = vec![job.context.clone()];
+        while let Some(d) = stack.pop() {
+            for e in std::fs::read_dir(&d).into_iter().flatten().flatten().take(1000) {
+                let p = e.path();
+                if p.is_dir() {
+                    stack.push(p);
+                } else if let Ok(rel) = p.strip_prefix(&job.context) {
+                    seen.push(rel.to_string_lossy().into_owned());
+                    if let Ok(text) = std::fs::read_to_string(&p).map(|t| t.chars().take(4096).collect::<String>()) {
+                        contents.insert(rel.to_string_lossy().into_owned(), text);
+                    }
+                }
+            }
+        }
+        self.build_trees.lock().push(seen);
+        self.build_files.lock().push(contents);
         log.line("#2 DONE");
         Ok(job.tag.clone())
     }

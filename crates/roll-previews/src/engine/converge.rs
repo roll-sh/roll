@@ -304,6 +304,15 @@ impl Engine {
             self.store.drop_resource(&r.id, res.kind, &res.parent)?;
             self.store.log(&r.id, &format!("{}:{} moves to {} mode: branched again", res.kind.as_str(), res.parent, res.mode.as_str()))?;
         }
+        // A search branch whose link was made with the branch's own login (before a preview got
+        // only a data credential): made again, so that login stops working wherever it went.
+        for res in self.store.resources(&r.id)? {
+            if res.kind == Kind::Search && res.kept.as_deref().is_some_and(crate::names::search_link_holds_branch_login) {
+                self.delete_branch(&r.id, &res, &name).await?;
+                self.store.drop_resource(&r.id, res.kind, &res.parent)?;
+                self.store.log(&r.id, &format!("search:{}: its link held the branch's own login: branched again, with a data-only credential", res.parent))?;
+            }
+        }
         for gone in self.store.want_resources(&r.id, &wanted)? {
             self.delete_branch(&r.id, &gone, &name).await?;
             self.store.drop_resource(&r.id, gone.kind, &gone.parent)?;
@@ -552,6 +561,8 @@ impl Engine {
             }
             _ => None,
         };
+        // Who a closed preview's keys bound to hosts are used as on roll apps (it resolves them).
+        let maker = if s.egress_for(r.trusted) == crate::settings::EgressRule::Roll { self.store.rules_maker(&r.project_id)? } else { None };
         for (spec, repo, rev, on_apps) in wanted {
             keep.push(spec.name.clone());
             if let Some(path) = &spec.health {
@@ -576,6 +587,7 @@ impl Engine {
                 // roll apps' environment turns its own on and redeploys.
                 + if s.traces { "o" } else { "" }
                 + &ca.as_deref().filter(|_| !on_apps).map(|id| format!("i{id}")).unwrap_or_default()
+                + &maker.as_deref().filter(|_| on_apps).map(|m| format!("m{m}")).unwrap_or_default()
                 + &rebuilt;
             let was = self.store.service_config(&r.id, &spec.name)?;
             let config_moved = was.as_deref() != Some(fingerprint.as_str());
@@ -622,6 +634,7 @@ impl Engine {
                     feedback,
                     egress: s.egress_for(r.trusted),
                     egress_hosts: s.egress_hosts.clone(),
+                    maker: maker.clone(),
                     rebuild: fresh.then_some(rebuilds),
                     traces: s.traces,
                 };
@@ -1297,6 +1310,7 @@ impl Engine {
             anyhow::bail!("refusing to delete {} {branch}: it's the preview's parent", res.kind.as_str());
         }
         self.store.set_resource(id, res.kind, &res.parent, |x| x.state = ResourceState::Deleting)?;
+        self.brancher(res.kind)?.retire(&res.parent, branch, res.kept.as_deref()).await.map_err(|e| anyhow::anyhow!("revoking what the {} branch {branch} handed out: {e:#}", res.kind.as_str()))?;
         self.brancher(res.kind)?.delete(&res.parent, branch, name).await.map_err(|e| anyhow::anyhow!("deleting the {} branch {branch}: {e:#}", res.kind.as_str()))?;
         self.store.log(id, &format!("deleted the {} branch {branch}", res.kind.as_str()))?;
         Ok(())

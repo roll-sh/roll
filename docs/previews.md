@@ -480,7 +480,7 @@ behind the `Apps` trait:
      | Stream | `KAFKA_BOOTSTRAP_SERVERS`, `KAFKA_SASL_USERNAME`, `KAFKA_SASL_PASSWORD` |
      | Queue | `AMQP_URL` |
      | Tasks | `ROLL_TASKS_URL`, `ROLL_TASKS_TOKEN` |
-     | Search | `ELASTICSEARCH_URL` (the branch's own login in it), and a data-only credential of the branch as production's link gets: `ELASTICSEARCH_API_KEY`, or `OPENSEARCH_USERNAME`/`OPENSEARCH_PASSWORD` on OpenSearch |
+     | Search | Only a data-only credential of the branch, as production's link gets (roll search's keys route, `access: data`): `ELASTICSEARCH_URL` with no login and `ELASTICSEARCH_API_KEY`, or on OpenSearch the data user in the URL and `OPENSEARCH_USERNAME`/`OPENSEARCH_PASSWORD`. Never the branch's own login: no data credential, no link (the branch fails and is made again). A branch whose link held that login (made before 2026-11-21) is branched again at the next converge. roll search keeps a deleted cluster restorable with its keys and password, so before a search branch is deleted or reset its data key is revoked (`Brancher::retire`) and its password changed (no change, no delete). `a_search_branch_gives_only_a_data_credential` |
 
      A search branch starts with its parent's IP allowlist (`ip_allowlist`, search's #243). Masking
      a branch goes through roll search's own console route, so it works whatever the list says.
@@ -764,8 +764,16 @@ this: they get no secrets, or all of them.
 
 - `egress_hosts` decides first. A key's bound hosts never open egress by themselves: a fork's
   preview reaches a bound host only when the project lists it too (agreed with roll secrets), and
-  the preview's status names a key bound to a host its egress doesn't allow, so a call that fails
-  says why.
+  its activity names a key bound to a host its egress doesn't allow ("keys bound to hosts its
+  egress doesn't allow (add them to egress_hosts, or calls there fail): STRIPE_KEY →
+  api.stripe.com", once until it changes), so a call that fails says why.
+- What it holds is on its record (`intercepted`: each key with the hosts it's bound to, and how
+  many requests through its egress proxy had a key swapped in or were refused; never a value or
+  a placeholder) and the sheet ("Keys it never holds: STRIPE_KEY → api.stripe.com · 12 swapped
+  in, 1 refused"). Its services on roll apps are counted by roll apps' proxies (their `pv-`
+  environments' `intercepted`, apps' #612: since each proxy came up, not kept across its
+  restarts), which previews reads with the egress refusals and adds as `on_apps` (requests,
+  swapped, the latest refusals' reasons, masked as its logs are): "on roll apps, 3 swapped in".
 - For a host the preview's interception CA (#517) covers, `egress.js` hands the client's
   connection to rolld over a unix socket in the preview's own directory, mounted into the egress
   container (containers can't reach the host's TCP ports on ai-server, and no port is opened).
@@ -785,6 +793,14 @@ this: they get no secrets, or all of them.
   CAs stop at once.
 - The preview resolves as the rule's writer (`Ask { maker }`, from `env_refs`), so a placeholder
   works only while that person still may reveal the key.
+- Services on roll apps: roll apps resolves the `pv-` environment's secrets itself, and its
+  closed environments swap placeholders with the same step (`roll-intercept`, consumer
+  `apps:<project>/pv-…`, apps' #603). Previews names the maker there too: the environment's PUT
+  carries `closed_by` (the rules' writer, or `null` for none, when keys bound to hosts are
+  withheld), which only the operator may send, so a fork's preview on roll apps uses a key only
+  while the person who wrote the rules may reveal it, not whoever owns the project. A roll apps
+  without the field refuses it as unknown and the environment is made without it (its maker is
+  who set the egress, as before). A change of writer deploys it again.
 - Limits: a host that echoes a request's headers back (an echo service) hands the key back in its
   response; roll secrets' response scrub (its #579: the request swapped into is sent with
   `Accept-Encoding: identity`, and a response that echoes it is stopped with a 502 and the
@@ -2330,22 +2346,35 @@ Ranked by what a person notices first. Done so far:
    `preview`, admin, owner); a create only in the project roll-access decided it on, the dashboard
    and the CLI naming it; a request no role was decided for (past the gate) reaches only what the
    person owns. Members' fix merged in and gated; lands after #501.
-2. **Keys a fork's preview never holds, in review** (#535, live-checked; roll
-   secrets' #520 and #517, its batch 6): see "Keys a preview never holds". Built: the swap, the
-   handoff, the runtime's socket and the services' trust, bounded per preview after review. Next:
-   the live check end to end.
-3. **Credentials at rest, in review** (#581, roll secrets' thirty-fourth review): the rules'
-   pasted values, a preview's own variables and the screenshot links' key sealed with the
-   deployment key, refused in the clear without one, an upgraded database sealed with nothing
-   left in its file or WAL.
-4. **A key bound to a host egress refuses, said**: roll secrets' suggestion; a preview whose
-   placeholders name a host `egress_hosts` doesn't list says so on its status.
-5. **Previews for the members thread's next products**: once roll apps' and roll search's routes
+2. **Keys on roll apps as the rules' writer, in review** (#608, after roll apps' `closed_by`):
+   a closed preview's `pv-` environment names the person who wrote the rules as its
+   placeholders' maker (`null`: keys bound to hosts withheld), as previews' own runtime does;
+   the apps live check then asserts it.
+3. **Roll secrets' response scrub in `roll-intercept`** (after its #579): a response that echoes
+   a swapped key is stopped (502) and its placeholder ended; the live check's echo step then
+   expects that. And `maker_unreachable` (its #582): the fallback without placeholders takes it.
+   roll apps' closed environments get the scrub through the same crate.
+4. **Previews for the members thread's next products**: once roll apps' and roll search's routes
    become member routes (docs/members.md, v1.1), a preview's roll apps services and search branch
    follow the same roles, checked live against a member's session.
-6. **Cheap Postgres branches on ext4: overlay volumes over a frozen base** (pg-control; measured
+5. **Cheap Postgres branches on ext4: overlay volumes over a frozen base** (pg-control; measured
    2026-11-17): 0.97 s against 3.5 s for a 1.4 GB copy, but a write copies the whole table file.
-7. **Watch: pg-control's recovery to a time seconds old** (unowned).
+6. **Watch: pg-control's recovery to a time seconds old** (unowned).
+
+Landed 2026-11-21 midday: a search branch's link holds only its data-only credential (#607,
+roll search's report: never the branch's own login; old links branched again; its data key revoked
+and its password changed before a delete, since roll search's deletes are restorable), the keys a
+preview never holds on its record and sheet (#599), roll apps' closed environments on
+`roll-intercept` (apps' #603), roll apps' interception counts for a preview's services there on
+its record and sheet (#613), and an erasing write's checkpoint tried again until the WAL is empty
+(#615: a busy checkpoint had left what #581 rewrote sealed in the WAL).
+
+Landed 2026-11-21 morning: credentials sealed at rest (#581: the rules' pasted values, a
+preview's own variables and the screenshot links' key, refused in the clear without a key, an
+upgraded database left with nothing in its file or WAL), keys a fork's preview never holds (#535:
+placeholders swapped by its egress proxy over roll secrets' batch 6, the intercepting step its own
+crate `roll-intercept` shared with roll apps, live-checked by `scripts/preview-intercept.sh`), and
+a key bound to a host its egress doesn't allow said in the activity (#593).
 
 Landed 2026-11-21 (main c4b6561c9; turn 15): the gone page tested at the edge (#559), the live
 check's leaked build networks fixed (#567), `@roll preview` in any of a change's threads (#568)

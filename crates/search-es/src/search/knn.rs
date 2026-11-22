@@ -263,7 +263,7 @@ pub fn dfs(ctx: &crate::cluster::Cluster, st: &crate::meta::ClusterState, now: i
             let mut qctx = QueryCtx::new(ctx, st, &t.idx, &table, &searcher, now, t.reader());
             // The boost applies once, to the score-doc queries below; the alias filter and
             // document level security are more pre-filters of the vector search
-            // (`filtersInitial`).
+            // (`filtersInitial`), the owner's.
             qctx.filter = t.filter.clone();
             let mut kq = k.clone();
             kq.common.boost = 1.0;
