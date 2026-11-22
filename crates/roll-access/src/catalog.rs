@@ -1620,6 +1620,15 @@ static ROWS: &[Row] = &[
     row("GET", "/v1/apps/services/{id}/environments/{env}/pending", "apps", R, one(PG, "service")).env(EnvFrom::Param("env")),
     // A job is a command run with the environment's variables: its output can be them.
     row("GET", "/v1/apps/services/{id}/environments/{env}/jobs/{job}/logs", "apps", REVEAL, one(PG, "service")).env(EnvFrom::Param("env")),
+    // A sandbox runs any command, with the environment's variables when asked, and reads back
+    // any file: admin, as a shell is (seeing which there are is read).
+    row("GET", "/v1/apps/services/{id}/environments/{env}/sandboxes", "apps", R, one(PG, "service")).env(EnvFrom::Param("env")),
+    row("POST", "/v1/apps/services/{id}/environments/{env}/sandboxes", "apps", ADMIN, one(PG, "service")).env(EnvFrom::Param("env")),
+    row("GET", "/v1/apps/services/{id}/environments/{env}/sandboxes/{sbx}", "apps", R, one(PG, "service")).env(EnvFrom::Param("env")),
+    row("DELETE", "/v1/apps/services/{id}/environments/{env}/sandboxes/{sbx}", "apps", ADMIN, one(PG, "service")).env(EnvFrom::Param("env")),
+    row("POST", "/v1/apps/services/{id}/environments/{env}/sandboxes/{sbx}/exec", "apps", ADMIN, one(PG, "service")).env(EnvFrom::Param("env")),
+    row("GET", "/v1/apps/services/{id}/environments/{env}/sandboxes/{sbx}/files", "apps", ADMIN, one(PG, "service")).env(EnvFrom::Param("env")),
+    row("PUT", "/v1/apps/services/{id}/environments/{env}/sandboxes/{sbx}/files", "apps", ADMIN, one(PG, "service")).env(EnvFrom::Param("env")),
     // ── previews (feature/roll-previews, docs/previews.md) ──
     // A preview's link carries its access token (`share_url`, also each service's and earlier
     // ones'): the link is a credential, as its QR code is.

@@ -1472,7 +1472,12 @@ async fn client(State(a): S, ext: Extensions, Path(id): Path<String>) -> crate::
         }
     };
     let c = c.ok_or_else(|| Error::NotFound("no such client".into()))?;
-    Ok(Json(json!(c)))
+    let mut out = json!(c);
+    // The consent screen says so before a person fills it in.
+    if !a.policy_now().allows_client(&c) {
+        out["not_allowed"] = json!(crate::evaluate::CLIENT_NOT_ALLOWED);
+    }
+    Ok(Json(out))
 }
 
 #[cfg(test)]

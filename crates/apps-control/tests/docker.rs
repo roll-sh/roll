@@ -643,6 +643,41 @@ async fn deploy_container(w: &World, name: &str) -> (String, String) {
     (id, env["url"].as_str().unwrap().trim_start_matches("http://").split(':').next().unwrap().to_string())
 }
 
+/// A sandbox on real Docker: a command's output and exit code, one killed in the container at
+/// its timeout (not left running), a file in and out, and its own network gone with it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_sandbox_runs_commands_and_files_on_docker() {
+    let Some(w) = docker_world().await else { return };
+    let (id, _) = deploy_container(&w, "sbx").await;
+    let base = format!("/v1/apps/services/{id}/environments/production/sandboxes");
+    let (st, sb) = call(&w.api, "POST", &base, Some(json!({"ttl_s": 300})), "application/json", None).await;
+    assert_eq!(st, StatusCode::CREATED, "{sb}");
+    let sid = sb["id"].as_str().unwrap().to_string();
+    let exec = |command: &str, timeout: u64| {
+        let (api, path, command) = (w.api.clone(), format!("{base}/{sid}/exec"), command.to_string());
+        async move { call(&api, "POST", &path, Some(json!({"command": command, "timeout_s": timeout})), "application/json", None).await.1 }
+    };
+    let out = exec("echo hi; echo err >&2; exit 4", 30).await;
+    assert_eq!((out["stdout"].as_str(), out["stderr"].as_str(), out["exit_code"].as_i64()), (Some("hi\n"), Some("err\n"), Some(4)), "{out}");
+    let began = std::time::Instant::now();
+    let out = exec("sleep 299", 1).await;
+    assert_eq!((out["timed_out"].as_bool(), out["exit_code"].as_i64()), (Some(true), None), "{out}");
+    assert!(began.elapsed() < Duration::from_secs(8), "{:?}", began.elapsed());
+    assert_eq!(exec("ps | grep -c '[s]leep 299'", 30).await["stdout"].as_str().map(str::trim), Some("0"), "killed in the container, with its shell");
+    let file = format!("{base}/{sid}/files?path=%2Ftmp%2Fin%2Fdata.txt");
+    assert_eq!(call(&w.api, "PUT", &file, None, "application/octet-stream", Some(b"from here".to_vec())).await.0, StatusCode::OK);
+    assert_eq!(exec("cat /tmp/in/data.txt", 30).await["stdout"], "from here");
+    let got = w.api.clone().oneshot(Request::get(&file).body(Body::empty()).unwrap()).await.unwrap();
+    assert_eq!(got.into_body().collect().await.unwrap().to_bytes(), "from here");
+    // Its own network, gone with it.
+    let name = format!("roll-apps-{}-production-sbx-{}", id.trim_start_matches("svc_"), sid.trim_start_matches("sbx_"));
+    let inspect = |what: &str| std::process::Command::new("docker").args([what, "inspect", &format!("{name}{}", if what == "network" { "-n" } else { "" })]).output().unwrap().status.success();
+    assert!(inspect("network") && inspect("container"));
+    assert_eq!(call(&w.api, "DELETE", &format!("{base}/{sid}"), None, "application/json", None).await.0, StatusCode::NO_CONTENT);
+    assert!(!inspect("network") && !inspect("container"));
+    delete_for_good(&w.api, &id).await;
+}
+
 /// An instant rollback on real Docker (Heroku's, Railway's): back to v1 its image runs again, no
 /// build; once v2 is pruned past what's kept, a rollback to it says to deploy its revision again.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

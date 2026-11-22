@@ -82,6 +82,8 @@ export interface OAuthClient {
   redirect_uris: string[];
   created_at: number;
   last_used_at: number | null;
+  /** Why roll's policy (`oauth_clients`) won't let it connect; absent when it may. */
+  not_allowed?: string;
 }
 
 /** A token's MCP offer: its tools, its prompts and what the list costs an agent's context. */
@@ -382,6 +384,11 @@ export interface Policy {
   mcp_lockdown?: boolean;
   /** Every token's and OAuth connection's MCP sees and runs only tools that read. */
   mcp_read_only?: boolean;
+  /**
+   * The OAuth clients that may connect (empty: any): a host (`claude.ai`, `*.example.com`), an
+   * `https://` URL, `localhost`, `device`, or an app scheme (`cursor:`).
+   */
+  oauth_clients?: string[];
 }
 
 /** One of the policy's `agents_ask`: a product (or "*"), its actions and environments (all when left out). */
@@ -449,6 +456,8 @@ export interface DeviceRequest {
   network?: string | null;
   /** Whether it asked from this browser's network: when not, someone may have sent you the code. */
   same_network?: boolean;
+  /** Why roll's policy won't let it sign in (its list of clients changed since it asked). */
+  not_allowed?: string | null;
   created_at: number;
   expires_at: number;
 }
