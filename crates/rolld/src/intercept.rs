@@ -25,7 +25,7 @@ impl roll_intercept::Interception for CaInterception {
     fn filter(&self, req: roll_intercept::Outgoing<'_>) -> Result<usize, String> {
         let mut out = roll_secrets::proxy::Outgoing { host: req.host, path: req.path, headers: req.headers, query: req.query };
         // The response's scrub (the proxy contract's step 6) isn't wired into roll-intercept yet.
-        roll_secrets::proxy::filter(&mut out, &*self.secrets, &roll_secrets::proxy::Limits::default()).map(|s| s.swapped()).map_err(|b| b.to_string())
+        roll_secrets::proxy::filter(&mut out, &self.ca.consumer, &*self.secrets, &roll_secrets::proxy::Limits::default()).map(|s| s.swapped()).map_err(|b| b.to_string())
     }
 }
 
