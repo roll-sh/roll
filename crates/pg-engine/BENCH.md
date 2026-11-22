@@ -285,6 +285,31 @@ The current checked measurements compare release engine builds and PostgreSQL 18
 the wire. Older rounds below are historical records, with their original methods and
 limits. Their results have not been reverified on the current source.
 
+## Analytic CPU, round 13: q09's rows over the lookup stages, unique probes (2026-11-22, agent 294)
+
+HANDOFF "Analytic CPU, round 13" has what changed. Plain dist builds (`tools/dist.sh`): **b0**
+cand/a286's head `5282ae819` (TPC-H code as origin's `52feabc3d`); **b1** b0 + cand/a294's first
+commit; **b2** b0 + both code commits. TPC-H: lane C, 286's harness copied to `~/.cache/a294/tpch/`
+(a fresh engine on a copy of SF1 loaded by b0, a 2 GB cache, a warm-up of the 22, 3 runs a query in
+one `perf stat` window over the engine's cgroup), each pair in its own `tools/lane.sh` hold.
+lane.sh read 5.0-6.8 foreign cores, the pairs' own 1.8-3.4 (no pair met the 1.0 rule): the gates
+are on user instructions. Every result hash equal to the base's.
+
+### User instructions a run (G; % per pair, the pairs in both orders)
+
+| query | b0 | b1 | b0 -> b1 % | b2 | b1 -> b2 % |
+|---|---|---|---|---|---|
+| q01 | 7.463 | 7.410 | -0.71 / -0.71 | | |
+| q05 | 3.305 | 3.147 | -4.77 / -4.78 | 3.122 | -0.84 / -0.81 |
+| q07 | 3.702 | 3.533 | -4.55 / -4.53 | 3.522 | -0.35 / -0.34 |
+| q08 | 1.504 | 1.472 | -2.11 / -2.12 | 1.456 | -1.15 / -1.10 |
+| q09 | 8.594 | 7.987 | -7.09 / -7.05 | 7.875 | -1.52 / -1.36 |
+| q21 | 6.792 | 6.766 | -0.37 / -0.38 | 6.764 | -0.03 |
+
+Foreign cores (the pairs' own reading): 2.63 / 1.87, 2.75 / 3.38, 2.34 / 1.98, 3.16 / 1.79. VmHWM b0
+1,655,808 kB, b1 1,653,760 kB. Cycles moved with the foreign load (q09 11.0-13.6 G a run) and decide
+nothing here.
+
 ## Analytic CPU, round 12: the scans under PGO, stored compares with outer and own columns (2026-11-22, agent 286)
 
 HANDOFF "Analytic CPU, round 12" has what changed. Plain dist builds (`tools/dist.sh`): **b0n**

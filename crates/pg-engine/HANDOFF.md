@@ -12395,6 +12395,63 @@ at open, a compaction): older builds ignore the manifest's `format` and fail on 
   the probe needs from the OS page cache, as PostgreSQL's 8 kB page), each a format change for
   its own round.
 
+## Analytic CPU, round 13: q09's rows over the lookup stages, unique probes (agent 294)
+
+TPC-H SF1 on lane C (BENCH.md "Analytic CPU, round 13" has the tables). Base **b0**: cand/a286's
+head `5282ae819`, whose TPC-H code is origin's `52feabc3d` (cand/a286, cand/a290 and cand/a291-2
+landed); its plain dist build read q09 at 8.594 G, as 286's b3. Harness: 286's copied to
+`~/.cache/a294/tpch/` (data loaded by b0), ONE pair per `tools/lane.sh c` hold. Lane C read 5.0-6.8
+foreign cores in lane.sh's reading and 1.8-3.4 in the pairs' own: no pair met the 1.0 rule; the
+gates are on user instructions, which repeated within 0.05% (q09 within 0.15%) from pair to pair.
+Every result hash equal to the base's (and so PostgreSQL's).
+
+- **Where q09's instructions were** (b0, `instructions:upp` and an LBR profile): `Lookup::batch`
+  15% (the multi-get's block scans inlined), the joined rows' copies from stage to stage ~10%
+  (`Lookup::emit`'s `joined_from_taken` 6%, `pipe::joined` 2.6%, `truncate_row` 2.5%, `run_stages`,
+  `Value` clones and drops), the inner rows' decoding 6.4% (`decode_into`, `decode_value`: a
+  `Value::Numeric` an `Arc` each), `K::num` 3.4%, the orders probes (`first_with`) ~10%. A joined
+  row is 40-50 columns of which a handful are read above; every stage tested `keep` and the value
+  of every column to copy it.
+- **cand/a294, first commit.** `pipe::Copies`: per stage (made per worker at its first row), the
+  outer columns its `keep` keeps, those it doesn't keep that may hold a value (an inner join's
+  rows hold only its `keep`'s columns: after one, few), and the inner columns it keeps; its copies
+  (`joined`, `joined_from`, `joined_from_taken`) write NULLs in runs and touch only those columns
+  (another width: the copy by `keep` as before). `kernel::num_op` (K::num's and the column
+  kernels' + - x of exact numbers) multiplies by one widening product when both operands fit an
+  i64 and takes powers of ten from a table (`mul_exact`, `scale_up`): `10i128.checked_pow` was a
+  loop and `i128::checked_mul` a call to the 128-bit overflow multiply, a row each; `SumNum`'s adds
+  take the same. A lookup batch's unique probes take their range's end in the worker's buffer
+  (`prefix_end` allocated one a probe).
+- **Second commit.** A lookup stage with a stage after it makes the next stage's rows itself and
+  moves its inner rows' values into them (`pipe::joined_taking_by`; the caller is done with the
+  batch's rows): no clone and drop a value. An inner row is decoded into its slots made NULL first
+  (`pipe::nulls` / `put`), not pushed a value at a time. A batch's unique probes lend the entry's
+  value to the batch (`Store::first_to`, `PointReader::first_raw_to`): `First::Row` copied the key
+  into a Vec and the derived value (the row's key, made from the entry's) into a new `Bytes` a
+  probe, which the batch only appended to its buffer. A third commit tests `num_op` against the
+  checked arithmetic it replaced.
+- **Gates** (plain dist, user instructions a run, 2 pairs each, alternating): b0 against b1 (first
+  commit): **q09 -7.09 / -7.05%**, q05 -4.77 / -4.78, q07 -4.55 / -4.53, q08 -2.11 / -2.12, q01
+  -0.71 / -0.71, q21 -0.37 / -0.38. b1 against b2 (second commit): q09 -1.52 / -1.36%, q08 -1.15 /
+  -1.10, q05 -0.84 / -0.81, q07 -0.35 / -0.34, q21 -0.03. **b0 against b2: q09 8.594 -> 7.88 G
+  (-8.4%)**, q05 -5.5%, q07 -4.9, q08 -3.2, q01 -0.7, q21 -0.4. VmHWM 1,655,808 -> 1,653,760 kB.
+- **Verification** (`tools/quick-check.sh` with `QC_CHECKED=1` on `0404e88c6`): clippy 16 warnings,
+  none new in a changed file; 447 tests in 28 binaries, and again `--profile verify-checked`;
+  crash_random seeds 1-3 x 2, power_cut_at_every_point; regress 51,148 / 51,150, 0 newly
+  differing; isolation 1,647 / 1,648; pg_dump_tap 14,609 passed. The stages' copies are exercised
+  by `parallel_scan`'s lookup and hash-join pipelines (inner, left, semi and anti stages) and
+  TPC-H's hashes.
+- **Item 2 (unique probes in key order)**: a batch's probes already go in key order (`order`,
+  sorted by the keys' words) and a lookup's reader holds the last block; q09's 64 orders keys a
+  batch fall in 64 of `orders_pkey`'s ~11,500 blocks, so consecutive keys seldom share one, and a
+  larger batch would share few more. What a probe made beside its seek is gone (above); the seeks
+  themselves (`find_block`, `Block::seek`) were left.
+- **Left**: item 3 (q01's aggregates under PGO) and the PGO total of the 22 follow in cand/a294-2;
+  in q09, the multi-get's block scans inside `Lookup::batch`, an inner numeric still decoded into
+  an `Arc` (a `Value` has no inline numeric; a row left to the executor's thread must hold real
+  values), the inner filters' recheck of the index condition over stored rows (`passes_with`
+  1.9%), and the orders probes' seeks.
+
 ## Analytic CPU, round 12: the scans under PGO, stored compares with outer and own columns (agent 286)
 
 TPC-H SF1 on lane C (BENCH.md "Analytic CPU, round 12" has the tables). Base: origin's `2a0f67b0d`
