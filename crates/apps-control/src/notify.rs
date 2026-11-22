@@ -18,7 +18,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 /// What a target can ask for; a new one gets the two that need someone.
-pub const EVENTS: [&str; 31] = [
+pub const EVENTS: [&str; 32] = [
     "deploy.failed",
     "deploy.base_updated",
     "rollout.waiting",
@@ -49,10 +49,11 @@ pub const EVENTS: [&str; 31] = [
     "heartbeat.missed",
     "deploy.vulnerable",
     "alert.slo",
+    "alert.anomaly",
     // Every `audit.*` entry (who changed what), for a SIEM's webhook; never an on-call page.
     "audit",
 ];
-const DEFAULT_EVENTS: [&str; 24] = ["check.down", "heartbeat.missed", "alert.slo", "deploy.failed", "rollout.waiting", "deploy.ready", "error.new", "error.regressed", "crash_loop", "spend.alert", "spend.limit", "alert.memory", "alert.cpu", "alert.metric", "alert.errors", "alert.latency", "alert.capacity", "alert.log", "cron.failed", "domain.expiring", "domain.expired", "domain.tls_failed", "volume.backup_failed", "volume.full"];
+const DEFAULT_EVENTS: [&str; 25] = ["check.down", "heartbeat.missed", "alert.slo", "alert.anomaly", "deploy.failed", "rollout.waiting", "deploy.ready", "error.new", "error.regressed", "crash_loop", "spend.alert", "spend.limit", "alert.memory", "alert.cpu", "alert.metric", "alert.errors", "alert.latency", "alert.capacity", "alert.log", "cron.failed", "domain.expiring", "domain.expired", "domain.tls_failed", "volume.backup_failed", "volume.full"];
 /// Whether a target with `events` hears an event: its own kind, or for a resolution, the alert's
 /// (whoever heard an alert hears it clear; there's nothing else to ask for).
 fn wants(events: &[String], kind: &str, data: &Value, oncall: bool) -> bool {
@@ -486,6 +487,14 @@ impl Apps {
             "error.regressed" => (format!("{what}: {} is back", e.data["name"].as_str().unwrap_or("an error")), format!("An error marked resolved is in its log again{rev}. The Metrics tab's Errors shows it; resolve it again once it's fixed, or mute it.")),
             "alert.log" => (format!("{what}: its log says {}", e.data["pattern"]), format!("{} lines in five minutes matched (the alert is at {}).", e.data["count"], e.data["threshold"])),
             "volume.full" => (format!("{what}: its volume is {}% full", e.data["pct"]), format!("It holds {:.1} GB of its {} GB: give it more room (`roll apps set --volume`) or delete what it doesn't need before it fills up.", e.data["used_bytes"].as_f64().unwrap_or(0.0) / 1_073_741_824.0, e.data["size_gb"])),
+            "alert.anomaly" => {
+                let (v, usual) = (&e.data["value"], &e.data["usual"]);
+                match e.data["kind"].as_str() {
+                    Some("traffic") => (format!("{what}: traffic dropped"), format!("{v} requests in the last hour, where this hour of the week usually has {usual}. Is something in front of it (a domain, a client, a schedule) broken?")),
+                    Some("errors") => (format!("{what}: errors are unusual"), format!("{v}% of the last hour's requests failed, where this hour of the week usually sees {usual}%.")),
+                    _ => (format!("{what}: slower than usual"), format!("p95 {v} ms in the last hour, where this hour of the week is usually {usual} ms.")),
+                }
+            }
             "volume.backup_failed" => (format!("{what}: volume backup failed"), format!("The daily backup of its volume failed: {}. The last one that worked is still there.", e.data["error"].as_str().unwrap_or("no reason given"))),
             "alert.resolved" => {
                 let which = match e.data["alert"].as_str() {
@@ -494,6 +503,7 @@ impl Apps {
                     Some("alert.metric") => e.data["metric"].as_str().unwrap_or("a metric"),
                     Some("alert.errors") => "errors",
                     Some("alert.slo") => "error budget burn",
+                    Some("alert.anomaly") => "unusual behaviour",
                     Some("alert.latency") => "latency",
                     Some("alert.capacity") => "capacity",
                     Some("alert.log") => "log",
