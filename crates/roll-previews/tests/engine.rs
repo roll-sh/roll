@@ -1178,6 +1178,18 @@ async fn a_service_with_a_health_path_is_ready_only_once_it_answers_well() {
     e.engine.store.update(&p.id, |r| r.next_at = 0).unwrap();
     e.engine.pass().await.unwrap();
     assert_eq!(e.engine.store.row(&p.id).unwrap().state, State::Ready);
+    // A push whose service is still starting when it's asked: left for the next poll, it goes on
+    // as soon as the service is up (the live run's preview spent 13 of 32 s waiting so).
+    e.apps.starting.store(1, Ordering::SeqCst);
+    e.code.edit("chg_hc", |c| c.head = "cs_5b".into());
+    e.engine.pass().await.unwrap();
+    let now = e.engine.store.now_ms().unwrap();
+    let waiting = e.engine.store.row(&p.id).unwrap();
+    assert!(waiting.state == State::Updating && waiting.next_at > now, "{waiting:?}");
+    e.engine.service_up(&p.id);
+    assert!(e.engine.store.row(&p.id).unwrap().next_at <= e.engine.store.now_ms().unwrap(), "due at once");
+    e.engine.pass().await.unwrap();
+    assert_eq!(e.engine.store.row(&p.id).unwrap().state, State::Ready);
 }
 
 #[tokio::test]
