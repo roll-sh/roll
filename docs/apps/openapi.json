@@ -886,6 +886,99 @@
         "x-roll-action": "deploy* (as above)"
       }
     },
+    "/v1/apps/projects/{project}/signing": {
+      "delete": {
+        "description": "Answers 204.",
+        "operationId": "deleteProjectsProjectSigning",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "project",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "204"
+          },
+          "4XX": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "summary": "Delete signing",
+        "tags": [
+          "projects"
+        ],
+        "x-roll-action": "admin"
+      },
+      "get": {
+        "description": "Answers `{ keys: string[], required: boolean }` (none set: no keys, not required).",
+        "operationId": "getProjectsProjectSigning",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "project",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "`{ keys: string[], required: boolean }` (none set: no keys, not required)"
+          },
+          "4XX": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "summary": "Get signing",
+        "tags": [
+          "projects"
+        ],
+        "x-roll-action": "read"
+      },
+      "put": {
+        "description": "Answers `{ keys, required }` (with `required`, an image service's deploy needs its pinned digest's cosign signature by one of the keys, or fails before switching; roll's builds pass).",
+        "operationId": "putProjectsProjectSigning",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "project",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object"
+              }
+            }
+          },
+          "description": "`{ keys, required? }` (1–10 P-256 public keys in PEM, cosign.pub; `required` true by default)"
+        },
+        "responses": {
+          "200": {
+            "description": "`{ keys, required }` (with `required`, an image service's deploy needs its pinned digest's cosign signature by one of the keys, or fails before switching; roll's builds pass)"
+          },
+          "4XX": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "summary": "Set signing",
+        "tags": [
+          "projects"
+        ],
+        "x-roll-action": "admin (which images may run)"
+      }
+    },
     "/v1/apps/projects/{project}/status-page": {
       "delete": {
         "description": "Answers 204: taken down.",

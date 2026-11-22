@@ -66,6 +66,7 @@ pub fn router(apps: Arc<Apps>) -> Router {
         .route("/v1/apps/services/{id}/changes", get(changes))
         .route("/v1/apps/projects/{project}/notifications", get(targets).post(add_target))
         .route("/v1/apps/projects/{project}/limits", get(limits).put(set_limits))
+        .route("/v1/apps/projects/{project}/signing", get(signing).put(set_signing).delete(delete_signing))
         .route("/v1/apps/projects/{project}/usage", get(project_usage))
         .route("/v1/apps/projects/{project}/drains", get(drains).post(add_drain))
         .route("/v1/apps/projects/{project}/export", post(export_project))
@@ -594,6 +595,22 @@ struct MonthQuery {
 /// A month's use by service and environment, with this month's projection.
 async fn project_usage(State(apps): S, Path(project): Path<String>, Query(q): Query<MonthQuery>) -> R {
     ok(apps.project_usage_view(&project, q.month.as_deref()).await?)
+}
+
+async fn signing(State(apps): S, Path(project): Path<String>) -> R {
+    ok(apps.signing(&project).await?)
+}
+
+async fn set_signing(State(apps): S, Path(project): Path<String>, ext: Extensions, b: Bytes) -> R {
+    let v = apps.set_signing(&project, body(&b)?).await?;
+    apps.audit("signing.set", "", "", actor(&ext), json!({ "project": project, "keys": v["keys"].as_array().map_or(0, Vec::len), "required": v["required"] })).await;
+    ok(v)
+}
+
+async fn delete_signing(State(apps): S, Path(project): Path<String>, ext: Extensions) -> R {
+    apps.delete_signing(&project).await?;
+    apps.audit("signing.removed", "", "", actor(&ext), json!({ "project": project })).await;
+    Ok(StatusCode::NO_CONTENT.into_response())
 }
 
 async fn limits(State(apps): S, Path(project): Path<String>) -> R {

@@ -56,6 +56,8 @@ Repos are `"owner/repo"`. Changes are `"chg_…"` or `"owner/repo#N"`, and work 
 
 | tool | what it does | HTTP route |
 | --- | --- | --- |
+| `search` | changes and work items in the caller's own repos that mention the query, with ids for `fetch` and roll URLs (the name ChatGPT's deep research asks for) | `GET /search` |
+| `fetch` | one `search` result (`chg_…`, `wi_…`) in full: title, text, URL, metadata | `GET /documents/{id}` |
 | `search_code` | literal or regex search; `rev` searches a change's head or a branch | `GET /repos/{r}/search` |
 | `read_file` | a file at a revision; long files come back in line ranges (`start_line`, `end_line`) | `GET /repos/{r}/blob/{rev}/{path}` |
 | `list_tree` | a directory, with each entry's last change | `GET /repos/{r}/tree/{rev}/{path}` |

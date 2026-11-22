@@ -35,7 +35,13 @@ roll code had an MCP server of its own at `/v1/code/mcp`, and it stays for roll 
 (docs/code/mcp.md). `/v1/mcp` fronts all of its tools under product names (`search_code` is
 `code_search`, `land` is `code_land`, `list_agent_machines` is `agents_list_machines`), through the
 gate. Scoped tokens can't call `/v1/code/mcp`: that server calls roll code's routes without the
-gate.
+gate. Two keep their names: `search` and `fetch`, which ChatGPT's deep research and company
+knowledge ask an MCP server for. `search` finds the changes and work items of the caller's own repos
+that mention a query (`GET /v1/code/search`: never someone else's public repo, a scoped token's
+results kept to its repos by the gate), each with an id and its roll URL; `fetch` reads one in full
+(`GET /v1/code/documents/{id}`). Text from someone who can't push is marked `outside`, so lockdown
+withholds it. `?tools=search,fetch` gives a connection just those two (`?tools=search` alone is
+search mode).
 
 ## Connect
 
@@ -1212,6 +1218,9 @@ previews are listed once those products are on.
 | `apps_cron_run_logs` | A cron run's output (read: its lines are in the environment's log). | `GET /v1/apps/services/{id}/environments/{env}/runs/{run}/logs` |
 | `apps_cancel_cron_run` | Stop a running cron run (production: deploy). | `POST /v1/apps/services/{id}/environments/{env}/runs/{run}/cancel` |
 | `apps_run_cron` | Run a cron job now (deploy in production). | `POST …/environments/{env}/runs` |
+| `apps_signing` | A project's image signing keys and whether image services must be signed. | `GET /v1/apps/projects/{project}/signing` |
+| `apps_set_signing` | Require image services' images to carry a cosign signature by one of the project's keys (Binary Authorization); admin. | `PUT /v1/apps/projects/{project}/signing` |
+| `apps_delete_signing` | Remove a project's signing rule; admin. | `DELETE /v1/apps/projects/{project}/signing` |
 | `apps_limits` | A project's apps spend limits. | `GET /v1/apps/projects/{project}/limits` |
 | `apps_project_usage` | A month's apps cost by service and environment (previews and deleted services as a row each), most costly first, this month's projected. | `GET /v1/apps/projects/{project}/usage` |
 | `apps_set_limits` | Set a project's monthly apps alert and hard cap (the cap pauses the project; admin). | `PUT /v1/apps/projects/{project}/limits` |
@@ -1224,7 +1233,7 @@ previews are listed once those products are on.
 | `apps_test_notification` | Send a test event now (not retried): whether it arrived. | `POST /v1/apps/projects/{project}/notifications/{nid}/test` |
 | `apps_notification_deliveries` | A notification's last 50 deliveries, newest first: what was sent and whether it arrived. | `GET /v1/apps/projects/{project}/notifications/{nid}/deliveries` |
 | `apps_list_drains` | Where a project's logs are sent (the URL's host only). | `GET /v1/apps/projects/{project}/drains` |
-| `apps_add_drain` | Send every matching service's logs out of roll: an HTTPS endpoint (signed; its signing secret comes back once), an OTLP collector, syslog over TLS, or an S3 bucket (apps #580; the AWS keys go as headers, which the audit log redacts), or the project's own roll storage bucket with nothing to paste (`bucket`, apps #590). | `POST /v1/apps/projects/{project}/drains` |
+| `apps_add_drain` | Send every matching service's logs out of roll: an HTTPS endpoint (signed; its signing secret comes back once), an OTLP collector, syslog over TLS, or an S3 bucket (apps #580; the AWS keys go as headers, which the audit log redacts), or the project's own roll storage bucket with nothing to paste (`bucket`, apps #590), or a data stream of the project's own roll search cluster as ECS documents with an append-only key (`search`). | `POST /v1/apps/projects/{project}/drains` |
 | `apps_update_drain` | Change what a drain sends or its headers: given ones replace (a new URL is a new drain). | `PATCH /v1/apps/projects/{project}/drains/{did}` |
 | `apps_delete_drain` | Stop sending a project's logs there. | `DELETE /v1/apps/projects/{project}/drains/{did}` |
 | `apps_test_drain` | Send one signed test line now (not retried): whether it arrived. | `POST /v1/apps/projects/{project}/drains/{did}/test` |
@@ -1295,12 +1304,11 @@ previews are listed once those products are on.
 Ranked; the top item is in progress. A watchdog reads this list. Unblocked work comes first; what
 waits on a sibling PR reaching main is last.
 
-1. **`search` and `fetch` for ChatGPT's deep research.** OpenAI's docs ask for two read-only tools
-   with those names (results with a canonical `url`) for deep research and company knowledge. Over
-   the user's own data, never roll's design docs: roll code's repos (code-index search), work
-   items, preview notes, each with its roll URL; lockdown applies. A tool is one route, and roll code searches one repo at a
-   time: this needs a search route across the caller's repos in code-control first, which
-   in a cluster fans out to each repo's owner node: a design for roll code's API.
+1. **`search` and `fetch` for ChatGPT's deep research (this PR).** Changes and work items of the
+   caller's own repos, from control.db (shared by every node, so no fan-out), with roll URLs and
+   lockdown. Next for it: files by content, which code-index keeps per repo on its owner node, so a
+   search across repos fans out to each owner (a design for roll code's API: a bounded scatter
+   with per-repo deadlines, results merged by score); preview notes once previews has a text search.
 2. **MCP Events: more feeds.** All three delivery modes are on main (poll #692, webhook #703,
    push #710) with `apps.event`, `access.approval` (#708), `previews.event` (#719) and `code.landed`
    with path arguments (this PR). Next: secrets' events (#732: `project` in the path, `kinds` and

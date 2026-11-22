@@ -73,7 +73,7 @@ function Work() {
           {shown.map((w) => {
             const left = w.lease_until != null ? w.lease_until - now : null;
             return (
-              <li key={w.id} className="border-b border-line last:border-0">
+              <li key={w.id} id={`w${w.number}`} className="scroll-mt-16 border-b border-line last:border-0">
                 <details className="group">
                   <summary className="flex cursor-pointer list-none items-start gap-3 px-4 py-3 transition hover:bg-panel-2/40">
                     <span
