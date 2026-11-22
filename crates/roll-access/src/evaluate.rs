@@ -310,15 +310,26 @@ impl Ctx {
 
 async fn decide(access: Arc<Access>, req: Request, next: Next) -> Response {
     let started = Instant::now();
-    let Some(token) = roll_auth::grant_credential(req.headers()) else { return invalid_token(&access) };
+    // roll's own work for a grant (roll_auth::ActAs, in process only): the grant by id, as usable
+    // as its token would be now; then every check below as for that token.
+    let acting = req.extensions().get::<roll_auth::ActAs>().map(|a| a.0.to_string()).filter(|_| !req.headers().contains_key(header::AUTHORIZATION));
+    let token = match (&acting, roll_auth::grant_credential(req.headers())) {
+        (Some(_), _) => String::new(),
+        (None, Some(t)) => t,
+        (None, None) => return invalid_token(&access),
+    };
     // A refresh token opens nothing here; one whose checksum is wrong isn't roll's (no lookup: a
     // flood of made-up tokens costs nothing).
-    if token.starts_with(REFRESH_PREFIX) || !crate::checksum_ok(&token) {
+    if acting.is_none() && (token.starts_with(REFRESH_PREFIX) || !crate::checksum_ok(&token)) {
         return invalid_token(&access);
     }
     let lookup = {
-        let (a, t) = (access.clone(), token.clone());
-        blocking(move || a.store.by_secret(&t)).await
+        let (a, t, id) = (access.clone(), token.clone(), acting.clone());
+        blocking(move || match id {
+            Some(id) => Ok(a.store.get(&id).ok().filter(|g| g.usable(code_sql::now_ms()))),
+            None => a.store.by_secret(&t),
+        })
+        .await
     };
     let grant = match lookup {
         // A decoy (docs/permissions.md, "Decoy tokens"): nobody should ever use it, so whoever did
@@ -358,7 +369,7 @@ async fn decide(access: Arc<Access>, req: Request, next: Next) -> Response {
     // A secret a rotation left working for a while (it may have leaked: that's why one rotates)
     // keeps calling products, but manages no tokens: it can't rotate, change or make one that
     // outlives its grace.
-    if route.starts_with("/v1/access") {
+    if route.starts_with("/v1/access") && acting.is_none() {
         let (a, t) = (access.clone(), token.clone());
         if blocking(move || a.store.in_grace(&t)).await.unwrap_or(true) {
             return deny(StatusCode::FORBIDDEN, "rotated_secret", "this secret was rotated: it works until its grace ends, but can't manage tokens (use the new one)".into(), json!({}));
@@ -402,8 +413,9 @@ async fn decide(access: Arc<Access>, req: Request, next: Next) -> Response {
         }
     }
     // Used: from an address it may be used from (a refused address neither keeps it from idling
-    // nor becomes its last address).
-    if !decided_before && access.store.touch_due(&crate::store::use_key(&ctx.grant.id, ip.map(|i| i.to_string()).as_deref())) {
+    // nor becomes its last address). roll's own work for it (ActAs) isn't its use: a webhook
+    // subscription alone never keeps a token from idling.
+    if !decided_before && acting.is_none() && access.store.touch_due(&crate::store::use_key(&ctx.grant.id, ip.map(|i| i.to_string()).as_deref())) {
         let (a, id, name, user, ip) = (access.clone(), ctx.grant.id.clone(), ctx.grant.name.clone(), ctx.grant.user.clone(), ip.map(|i| i.to_string()));
         let workload = ctx.grant.kind == "workload";
         tokio::spawn(async move {

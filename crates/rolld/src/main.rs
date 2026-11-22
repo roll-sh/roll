@@ -743,6 +743,8 @@ async fn run_with(mut args: Args) -> anyhow::Result<()> {
     if let Some(c) = &code {
         c.code.relay_through(gated.clone());
     }
+    // MCP Events' webhooks: each due subscription's feed read through the gate as its grant.
+    roll_mcp::events::spawn_deliveries(gated.clone(), access.clone());
     let mcp = roll_mcp::routes(gated, mcp_config, tool_sets);
     router = router.merge(mcp);
     // The operator token in front of every product's routes (auth.rs); `/v1/info`, OAuth's public

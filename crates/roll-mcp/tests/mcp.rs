@@ -1147,8 +1147,40 @@ async fn an_agent_subscribes_a_webhook() {
     assert_eq!(sub(&token, "https://hooks.example.com/good", "whsec_c2hvcnQ=").await["error"]["code"], -32602, "a secret under 24 bytes");
     assert_eq!(sub(&token, "http://10.0.0.1/good", secret).await["error"]["code"], -32602, "not https, not public");
 
+    // Delivered: a subscription from the feed's start gets what its filter keeps, in order, each
+    // signed with its secret; the one made from now has nothing yet.
+    let from_start = send(&token, "events/subscribe", json!({ "name": "apps.event", "arguments": { "kinds": ["deploy.*"] }, "cursor": "a1:0", "delivery": { "mode": "webhook", "url": "https://hooks.example.com/good", "secret": secret } })).await;
+    assert!(from_start["error"].is_null(), "{from_start}");
+    let before = posts.lock().unwrap().len();
+    let round = roll_mcp::events::deliver(d.router.clone(), d.access.clone()).await;
+    assert_eq!((round.delivered, round.failed, round.ended), (2, 0, 0), "{round:?}");
+    {
+        let sent = posts.lock().unwrap();
+        let key = roll_access::event_subs::secret_key(secret).unwrap();
+        let ids: Vec<String> = sent[before..]
+            .iter()
+            .map(|(headers, body)| {
+                let h = |k: &str| headers.iter().find(|(n, _)| n == k).map(|(_, v)| v.clone()).unwrap();
+                assert_eq!(h("webhook-signature"), roll_access::event_subs::sign(&key, &h("webhook-id"), h("webhook-timestamp").parse().unwrap(), body));
+                serde_json::from_slice::<Value>(body).unwrap()["eventId"].as_str().unwrap().to_string()
+            })
+            .collect();
+        assert_eq!(ids, ["apps.event:1", "apps.event:2"]);
+    }
+    // A revoked connection's subscription ends with a signed `terminated`, and is gone.
+    let other = d.token(json!([{ "product": "apps", "resources": "*", "actions": { "read": "allow" } }])).await;
+    assert!(sub(&other, "https://hooks.example.com/good", secret).await["error"].is_null());
+    let (_, _, list) = d.http(OPERATOR, Method::GET, "/v1/access/tokens", None).await;
+    let newest = list.as_array().unwrap()[0]["id"].as_str().unwrap().to_string();
+    d.http(OPERATOR, Method::DELETE, &format!("/v1/access/tokens/{newest}"), None).await;
+    let round = roll_mcp::events::deliver(d.router.clone(), d.access.clone()).await;
+    assert_eq!(round.ended, 1, "{round:?}");
+    let last: Value = serde_json::from_slice(&posts.lock().unwrap().last().unwrap().1).unwrap();
+    assert_eq!((last["type"].as_str(), last["error"]["code"].as_i64()), (Some("terminated"), Some(-32024)), "{last}");
+
     let unsub = |url: &str| send(&token, "events/unsubscribe", json!({ "name": "apps.event", "arguments": { "kinds": ["deploy.failed"] }, "delivery": { "url": url } }));
-    assert_eq!(unsub("https://hooks.example.com/good").await["result"], json!({}));
+    let ended = unsub("https://hooks.example.com/good").await;
+    assert!(ended["error"].is_null() && ended["result"]["resultType"] == "complete", "{ended}");
     assert_eq!(unsub("https://hooks.example.com/good").await["error"]["code"], -32023);
     assert_eq!(unsub("https://hooks.example.com/bad").await["error"]["code"], -32023, "the refused one was never kept");
 }

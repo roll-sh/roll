@@ -1576,8 +1576,9 @@ impl roll_auth::Grants for Access {
         if g.decoy {
             return None;
         }
-        // Stopped for being idle (the token policy), as the evaluator answers its requests.
-        if self.policy_now().idle(&g, code_sql::now_ms()) {
+        // Stopped for being idle (the token policy), or an OAuth client the policy no longer lists,
+        // as the evaluator answers its requests.
+        if self.policy_now().idle(&g, code_sql::now_ms()) || !self.policy_now().allows_grant(&g) {
             return None;
         }
         if let Some(user) = g.user.as_deref() {

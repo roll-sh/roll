@@ -321,6 +321,148 @@ pub(crate) async fn unsubscribe(ctx: &Arc<Ctx>, params: &Value) -> Result<Value,
     }
 }
 
+/// Events one round delivers to a subscription, at most (the next round goes on from there).
+const DELIVER_MAX: usize = 20;
+
+/// What a delivery round did: events delivered, deliveries that failed, subscriptions ended.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct Delivered {
+    pub delivered: usize,
+    pub failed: usize,
+    pub ended: usize,
+}
+
+/// One delivery round (rolld runs one every 15 seconds on each node; a claim keeps two nodes from
+/// delivering one subscription). Each due subscription's feed is read through the gated router as
+/// its grant (`roll_auth::ActAs`: as it is now, decided and audited as `events/deliver:<name>`,
+/// quiet, so nothing asks a person); a refusal ends it with a signed `terminated` envelope, and
+/// otherwise what its filter keeps is POSTed in order, the cursor moving past what the callback took.
+pub async fn deliver(api: axum::Router, access: Arc<roll_access::Access>) -> Delivered {
+    let mut out = Delivered::default();
+    let Ok(claimed) = access.claim_event_subs(100) else { return out };
+    for c in claimed {
+        let sub = &c.sub;
+        if c.keys.is_empty() {
+            let _ = access.drop_event_sub(&sub.id);
+            out.ended += 1;
+            continue;
+        }
+        let Some(f) = feed(&sub.name) else {
+            terminate(&access, &c, -32023, "NotFound", json!({ "kind": "event" })).await;
+            out.ended += 1;
+            continue;
+        };
+        let after = sub.cursor.strip_prefix(CURSOR).and_then(|n| n.parse::<i64>().ok()).unwrap_or(0);
+        let mut req = axum::http::Request::builder().method("GET").uri(format!("{}{after}", f.after)).body(axum::body::Body::empty()).expect("a feed route is a URI");
+        req.extensions_mut().insert(roll_auth::ActAs(sub.grant_id.as_str().into()));
+        let label: Arc<str> = format!("events/deliver:{}", f.name).into();
+        req.extensions_mut().insert(roll_access::evaluate::McpCall { tool: label, args: Arc::new(json!({ "name": f.name, "arguments": sub.arguments })), ip: None, elicits: false, client: None, quiet: true });
+        let resp = match tower::ServiceExt::oneshot(api.clone(), req).await {
+            Ok(r) => r,
+            Err(e) => match e {},
+        };
+        let status = resp.status();
+        let page: Value = axum::body::to_bytes(resp.into_body(), crate::MAX_ANSWER).await.ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default();
+        match status.as_u16() {
+            200..=299 => {}
+            // Its grant can't read the feed any more: revoked, expired, narrowed, or a policy's.
+            401 | 403 => {
+                terminate(&access, &c, -32024, "Forbidden", json!({ "reason": "access ended" })).await;
+                out.ended += 1;
+                continue;
+            }
+            404 => {
+                terminate(&access, &c, -32023, "NotFound", json!({ "kind": "event" })).await;
+                out.ended += 1;
+                continue;
+            }
+            // The product is busy: the next round tries again from the same place.
+            _ => {
+                let _ = access.event_sub_done(&sub.id, &sub.cursor, false, None);
+                continue;
+            }
+        }
+        let filter = Filter::parse(&sub.arguments).unwrap_or(Filter { kinds: Vec::new(), service: None, environment: None });
+        let outside = tool(f).map_or(&[][..], |t| t.outside);
+        let read = page["events"].as_array().cloned().unwrap_or_default();
+        let (mut cursor, mut sent, mut error, mut gone) = (after, 0, None, false);
+        let full = read.len() >= PAGE;
+        for mut e in read {
+            let seq = e["seq"].as_i64().unwrap_or(cursor);
+            if sent == DELIVER_MAX {
+                break;
+            }
+            if !filter.keeps(&e) {
+                cursor = seq;
+                continue;
+            }
+            if sub.lockdown {
+                lockdown::withhold(&mut e);
+                lockdown::withhold_fields(&mut e, outside);
+            }
+            let at = e["at"].as_i64().unwrap_or(0);
+            let body = serde_json::to_vec(&json!({ "eventId": format!("{}:{seq}", f.name), "name": f.name, "timestamp": iso8601(at), "data": e, "cursor": format!("{CURSOR}{seq}") })).unwrap_or_default();
+            let id = roll_access::event_subs::event_msg_id(&c.keys[0], &sub.id, seq);
+            match access.post_event(&c, &id, body).await {
+                Ok(200..=299) => {
+                    (cursor, sent) = (seq, sent + 1);
+                    out.delivered += 1;
+                }
+                // Gone: the receiver wants no more (non-retryable). Too large: this one is skipped.
+                Ok(410) => {
+                    gone = true;
+                    break;
+                }
+                Ok(413) => cursor = seq,
+                Ok(s) => {
+                    error = Some(roll_access::event_subs::endpoint_error(&format!("http_{s}")).to_string());
+                    break;
+                }
+                Err(category) => {
+                    error = Some(category);
+                    break;
+                }
+            }
+        }
+        if gone {
+            let _ = access.drop_event_sub(&sub.id);
+            out.ended += 1;
+            continue;
+        }
+        // Read to the end with nothing left over: the cursor moves to the feed's own next.
+        if error.is_none() && !full && sent < DELIVER_MAX {
+            cursor = page["next"].as_i64().unwrap_or(cursor).max(cursor);
+        }
+        out.failed += usize::from(error.is_some());
+        let _ = access.event_sub_done(&sub.id, &format!("{CURSOR}{cursor}"), sent > 0, error.as_deref());
+    }
+    out
+}
+
+/// End a subscription with its signed `terminated` envelope (best effort: it ends either way).
+async fn terminate(access: &roll_access::Access, c: &roll_access::event_subs::Claimed, code: i64, message: &str, data: Value) {
+    let body = serde_json::to_vec(&json!({ "type": "terminated", "error": { "code": code, "message": message, "data": data } })).unwrap_or_default();
+    let _ = access.post_event(c, &roll_access::event_subs::msg_id("terminated"), body).await;
+    let _ = access.drop_event_sub(&c.sub.id);
+}
+
+/// rolld's delivery loop: a round every 15 seconds, where roll can deliver (a sealing key).
+pub fn spawn_deliveries(api: axum::Router, access: Arc<roll_access::Access>) {
+    if access.sinks.get().is_none() {
+        return;
+    }
+    tokio::spawn(async move {
+        let mut tick = tokio::time::interval(std::time::Duration::from_secs(15));
+        loop {
+            tick.tick().await;
+            let d = deliver(api.clone(), access.clone()).await;
+            if d.failed > 0 {
+                tracing::info!(delivered = d.delivered, failed = d.failed, ended = d.ended, "MCP event webhooks");
+            }
+        }
+    });
+}
+
 fn internal(e: roll_access::Error) -> Refused {
     (-32603, e.to_string(), json!({}))
 }

@@ -34,7 +34,9 @@ CREATE TABLE IF NOT EXISTS mcp_event_subs (
     created_at INTEGER NOT NULL,
     last_delivery_at INTEGER,
     last_error TEXT,
-    failed_since INTEGER
+    failed_since INTEGER,
+    running_until INTEGER NOT NULL DEFAULT 0,
+    next_at INTEGER NOT NULL DEFAULT 0
 ) WITHOUT ROWID;
 CREATE INDEX IF NOT EXISTS mcp_event_subs_grant ON mcp_event_subs (grant_id);
 CREATE INDEX IF NOT EXISTS mcp_event_subs_expires ON mcp_event_subs (expires_at);
@@ -54,6 +56,13 @@ pub const MAX_TTL_MS: i64 = 3_600_000;
 pub const MIN_TTL_MS: i64 = 60_000;
 /// How long an old secret still signs after a new one replaces it.
 const ROTATION_GRACE_MS: i64 = 5 * 60_000;
+/// How often a subscription's feed is read (each read is its grant's request, in the audit log).
+pub const READ_EVERY_MS: i64 = 60_000;
+/// How long a claim holds a subscription for one node's delivery.
+const HOLD_MS: i64 = 2 * 60_000;
+/// After a delivery fails, the wait before trying again; failing this long, it's dropped.
+const RETRY_MS: i64 = 5 * 60_000;
+const GIVE_UP_MS: i64 = 24 * 3_600_000;
 /// Callback URLs one connection may ask roll to verify a minute: each is one POST to an address it
 /// chose, so a token can't make roll knock on many.
 const VERIFIES_PER_MINUTE: usize = 5;
@@ -241,7 +250,7 @@ impl Access {
             client: None,
         };
         if let Some(e) = self.store.queue_audit(e) {
-            let _ = self.store.audit(&e);
+            self.store.audit(&e);
         }
     }
 
@@ -284,6 +293,101 @@ impl Access {
             .map_err(|_| "connection_refused".to_string())?;
         Ok(())
     }
+}
+
+/// A subscription claimed for delivery, with the keys its deliveries are signed with (the current
+/// secret's, and an old one's during its grace: both signatures go, either verifies).
+pub struct Claimed {
+    pub sub: EventSub,
+    pub keys: Vec<Vec<u8>>,
+}
+
+impl Access {
+    /// Claim up to `limit` subscriptions due a read, in one write, so no two nodes deliver one.
+    pub fn claim_event_subs(&self, limit: i64) -> Result<Vec<Claimed>> {
+        let t = self.event_transport()?;
+        let now = code_sql::now_ms();
+        let rows: Vec<(EventSub, String, Option<String>, Option<i64>)> = self.store.db.write(|c| {
+            c.execute("DELETE FROM mcp_event_subs WHERE expires_at <= ?", [now])?;
+            let due = c.query(
+                &format!("SELECT {COLUMNS}, secret, old_secret, old_until FROM mcp_event_subs WHERE running_until < ? AND next_at <= ? ORDER BY next_at LIMIT ?"),
+                params![now, now, limit],
+                |r| Ok((row(r)?, r.get::<_, String>(11)?, r.get::<_, Option<String>>(12)?, r.get::<_, Option<i64>>(13)?)),
+            )?;
+            for (s, ..) in &due {
+                c.execute("UPDATE mcp_event_subs SET running_until = ? WHERE id = ?", params![now + HOLD_MS, s.id])?;
+            }
+            Ok::<_, Error>(due)
+        })?;
+        Ok(rows
+            .into_iter()
+            .map(|(sub, secret, old, until)| {
+                let mut keys: Vec<Vec<u8>> = t.open(&sub.id, &secret).ok().and_then(|s| secret_key(&s)).into_iter().collect();
+                if let (Some(o), Some(u)) = (old, until)
+                    && u > now
+                    && let Some(k) = t.open(&sub.id, &o).ok().and_then(|s| secret_key(&s))
+                {
+                    keys.push(k);
+                }
+                Claimed { sub, keys }
+            })
+            .collect())
+    }
+
+    /// A claimed subscription's round: where it got to, and whether a delivery failed (`error`, a
+    /// category). A success clears the failure; one failing a day is dropped.
+    pub fn event_sub_done(&self, id: &str, cursor: &str, delivered: bool, error: Option<&str>) -> Result<()> {
+        let now = code_sql::now_ms();
+        self.store.db.write(|c| {
+            match error {
+                None => c.execute(
+                    "UPDATE mcp_event_subs SET cursor = ?, running_until = 0, next_at = ?, last_error = NULL, failed_since = NULL, last_delivery_at = CASE WHEN ? THEN ? ELSE last_delivery_at END WHERE id = ?",
+                    params![cursor, now + READ_EVERY_MS, delivered, now, id],
+                )?,
+                Some(e) => {
+                    c.execute("DELETE FROM mcp_event_subs WHERE id = ? AND failed_since IS NOT NULL AND failed_since < ?", params![id, now - GIVE_UP_MS])?;
+                    c.execute(
+                        "UPDATE mcp_event_subs SET cursor = ?, running_until = 0, next_at = ?, last_error = ?, failed_since = COALESCE(failed_since, ?), last_delivery_at = CASE WHEN ? THEN ? ELSE last_delivery_at END WHERE id = ?",
+                        params![cursor, now + RETRY_MS, e, now, delivered, now, id],
+                    )?
+                }
+            };
+            Ok::<_, Error>(())
+        })
+    }
+
+    /// End a subscription roll can't deliver any more (its grant's access ended, its endpoint said
+    /// it's gone).
+    pub fn drop_event_sub(&self, id: &str) -> Result<()> {
+        self.store.db.write(|c| Ok::<_, Error>(c.execute("DELETE FROM mcp_event_subs WHERE id = ?", [id]).map(|_| ())?))
+    }
+
+    /// POST a signed message to a subscription's callback: `Ok(status)` for any answer, `Err` a
+    /// category when there was none.
+    pub async fn post_event(&self, c: &Claimed, msg_id: &str, body: Vec<u8>) -> std::result::Result<u16, String> {
+        let t = self.event_transport().map_err(|_| "connection_refused".to_string())?;
+        let ts = code_sql::now_ms() / 1000;
+        let sigs: Vec<String> = c.keys.iter().map(|k| sign(k, msg_id, ts, &body)).collect();
+        let headers = vec![
+            ("content-type".to_string(), "application/json".to_string()),
+            ("webhook-id".to_string(), msg_id.to_string()),
+            ("webhook-timestamp".to_string(), ts.to_string()),
+            ("webhook-signature".to_string(), sigs.join(" ")),
+            ("x-mcp-subscription-id".to_string(), c.sub.id.clone()),
+        ];
+        t.post_answer(c.sub.url.clone(), headers, body).await.map(|(s, _)| s).map_err(|e| endpoint_error(&e).to_string())
+    }
+}
+
+/// One event's message id on one subscription: the same on every retry of it (a keyed hash of the
+/// subscription and the event's position, so a receiver drops repeats), unique across them.
+pub fn event_msg_id(key: &[u8], sub_id: &str, seq: i64) -> String {
+    use base64::Engine;
+    use hmac::Mac;
+    let mut mac = hmac::Hmac::<sha2::Sha256>::new_from_slice(key).expect("HMAC takes any key");
+    mac.update(format!("roll-mcp-event\0{sub_id}\0{seq}").as_bytes());
+    let b = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(mac.finalize().into_bytes());
+    format!("msg_event_{}", &b[..22])
 }
 
 #[cfg(test)]
