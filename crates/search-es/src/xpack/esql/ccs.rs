@@ -1584,12 +1584,14 @@ pub async fn run(cluster: &crate::cluster::Cluster, ccs: &Ccs, q: &Query, filter
             }
         }
     };
+    // The answers are this table now, which the query's account charges from here on
+    // ([`super::memory`]): holding them as well would count the same rows twice.
+    drop(held);
     let t = super::exec::run_rest(&src, table, &cut.rest, w)?;
     stats.rows_emitted = t.rows.len() as i64;
     stats.col_meta.extend(std::mem::take(&mut *src.res.col_meta.lock()));
     stats.approx = std::mem::take(&mut *src.res.approx.lock());
     stats.clusters = Some(infos);
-    drop(held);
     Ok(Some((t, stats)))
 }
 
