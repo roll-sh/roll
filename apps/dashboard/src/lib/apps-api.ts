@@ -1399,6 +1399,16 @@ export interface Backup {
   size: number;
 }
 
+/** An environment's private network into the customer's own (docs/apps/http-api.md, `…/private-network`). */
+export interface PrivateNetwork {
+  kind: "wireguard";
+  /** roll://ENV/KEY: the WireGuard config's secret, never the config. */
+  secret: string;
+  routes: { name: string; target: string }[];
+  /** `running`, `failed: why`, or `waiting for a deploy`. */
+  status: string;
+}
+
 /** A short-lived container to run commands in (docs/apps/http-api.md, `…/sandboxes`). */
 export interface Sandbox {
   id: string;
@@ -1660,6 +1670,9 @@ export const appsApi = {
   startJob: (id: string, e: string, body: { command: string; timeout_s?: number; tasks?: number; retries?: number; parallelism?: number }) => call<Job>("POST", `${env(id, e)}/jobs`, body),
   job: (id: string, e: string, j: string) => call<Job>("GET", `${env(id, e)}/jobs/${encodeURIComponent(j)}`),
   cancelJob: (id: string, e: string, j: string) => call<Job>("POST", `${env(id, e)}/jobs/${encodeURIComponent(j)}/cancel`),
+  privateNetwork: (id: string, e: string) => call<PrivateNetwork>("GET", `${env(id, e)}/private-network`),
+  setPrivateNetwork: (id: string, e: string, body: { secret: string; routes: { name: string; target: string }[] }) => call<PrivateNetwork>("PUT", `${env(id, e)}/private-network`, body),
+  deletePrivateNetwork: (id: string, e: string) => call<void>("DELETE", `${env(id, e)}/private-network`),
   sandboxes: (id: string, e: string) => call<Sandbox[]>("GET", `${env(id, e)}/sandboxes`),
   createSandbox: (id: string, e: string, body: { image?: string; ttl_s?: number; cpu?: number; memory_mb?: number; variables?: boolean; network?: "none" | "environment" }) => call<Sandbox>("POST", `${env(id, e)}/sandboxes`, body),
   sandboxExec: (id: string, e: string, s: string, body: { command: string; timeout_s?: number }) => call<SandboxRun>("POST", `${env(id, e)}/sandboxes/${encodeURIComponent(s)}/exec`, body),

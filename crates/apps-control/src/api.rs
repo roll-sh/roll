@@ -140,6 +140,7 @@ pub fn router(apps: Arc<Apps>) -> Router {
         .route(&format!("{env}/shell/sessions/{{sh}}/screen"), get(session_screen))
         .route(&format!("{env}/shell/sessions/{{sh}}/keys"), post(session_keys))
         .route(&format!("{env}/shell/sessions/{{sh}}/resize"), post(session_resize))
+        .route(&format!("{env}/private-network"), get(private_network).put(set_private_network).delete(delete_private_network))
         .route(&format!("{env}/sandboxes"), get(sandboxes).post(create_sandbox))
         .route(&format!("{env}/sandboxes/{{sbx}}"), get(get_sandbox).delete(delete_sandbox))
         .route(&format!("{env}/sandboxes/{{sbx}}/exec"), post(sandbox_exec))
@@ -1709,6 +1710,26 @@ async fn run_logs(State(apps): S, Path((id, env, run)): Path<(String, String, St
 async fn run_now(State(apps): S, Path((id, env)): Path<(String, String)>) -> R {
     let r = apps.run_cron(&id, &env).await?;
     Ok((StatusCode::ACCEPTED, Json(r)).into_response())
+}
+
+async fn private_network(State(apps): S, Path((id, env)): Path<(String, String)>) -> R {
+    apps.environment(&id, &env).await?;
+    ok(apps.private_network(&id, &env).await?.ok_or_else(|| Error::NotFound(format!("{env} has no private network")))?)
+}
+
+/// Its WireGuard config's reference is bound to whoever sets it (read as them at each use).
+async fn set_private_network(State(apps): S, Path((id, env)): Path<(String, String)>, ext: Extensions, b: Bytes) -> R {
+    apps.environment(&id, &env).await?;
+    let v = apps.set_private_network(&id, &env, body(&b)?, asker(&ext)).await?;
+    apps.audit("private_network.set", &id, &env, actor(&ext), json!({ "secret": v["secret"], "routes": v["routes"] })).await;
+    ok(v)
+}
+
+async fn delete_private_network(State(apps): S, Path((id, env)): Path<(String, String)>, ext: Extensions) -> R {
+    apps.environment(&id, &env).await?;
+    apps.delete_private_network(&id, &env).await?;
+    apps.audit("private_network.removed", &id, &env, actor(&ext), json!({})).await;
+    Ok(StatusCode::NO_CONTENT.into_response())
 }
 
 async fn sandboxes(State(apps): S, Path((id, env)): Path<(String, String)>) -> R {
