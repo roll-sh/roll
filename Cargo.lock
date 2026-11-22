@@ -7180,6 +7180,7 @@ dependencies = [
  "tempfile",
  "tokio",
  "tokio-rustls 0.26.6",
+ "zeroize",
 ]
 
 [[package]]
@@ -7289,6 +7290,7 @@ dependencies = [
  "http-body-util",
  "instant-acme",
  "ipnet",
+ "memchr",
  "rand 0.8.8",
  "rcgen",
  "regex",

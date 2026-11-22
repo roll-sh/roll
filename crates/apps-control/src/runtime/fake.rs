@@ -43,6 +43,9 @@ struct FakeInstance {
     addr: Option<SocketAddr>,
     /// Where its other ports answer ([`InstanceSpec::ports`]), while running.
     extra: HashMap<u16, SocketAddr>,
+    /// A UDP service's port (`InstanceSpec::udp`): an echo that answers each datagram with
+    /// `<instance> <datagram>`, while running.
+    udp: Option<SocketAddr>,
     /// An app that listens elsewhere: its port held, bound but not listening, so a connection is
     /// refused and no other test's server on this machine can be handed the port and answer.
     reserved: Option<tokio::net::TcpSocket>,
@@ -419,7 +422,7 @@ impl Runtime for Fake {
         }
         let mut m = self.instances.lock();
         anyhow::ensure!(!m.contains_key(&spec.name), "{} exists", spec.name);
-        m.insert(spec.name.clone(), FakeInstance { spec: spec.clone(), state: FakeState::Created, server: None, addr: None, extra: HashMap::new(), reserved: None, exited: watch::channel(None).0, killed: Default::default() });
+        m.insert(spec.name.clone(), FakeInstance { spec: spec.clone(), state: FakeState::Created, server: None, addr: None, extra: HashMap::new(), udp: None, reserved: None, exited: watch::channel(None).0, killed: Default::default() });
         Ok(())
     }
 
@@ -480,12 +483,38 @@ impl Runtime for Fake {
                     extra.insert(*p, l2.local_addr()?);
                     tokio::spawn(serve(InstanceSpec { port: Some(*p), ..spec.clone() }, l2, log.clone(), self.sick.clone(), killed.clone()));
                 }
+                let udp = match spec.udp {
+                    true => {
+                        let sock = tokio::net::UdpSocket::bind("127.0.0.1:0").await?;
+                        let at = sock.local_addr()?;
+                        let (me, k) = (spec.name.clone(), killed.clone());
+                        tokio::spawn(async move {
+                            let mut buf = vec![0u8; 2048];
+                            loop {
+                                tokio::select! {
+                                    r = sock.recv_from(&mut buf) => match r {
+                                        Ok((n, from)) => {
+                                            let mut out = format!("{me} ").into_bytes();
+                                            out.extend_from_slice(&buf[..n]);
+                                            let _ = sock.send_to(&out, from).await;
+                                        }
+                                        Err(_) => return,
+                                    },
+                                    _ = k.cancelled() => return,
+                                }
+                            }
+                        });
+                        Some(at)
+                    }
+                    false => None,
+                };
                 let server = tokio::spawn(serve(spec.clone(), l, log, self.sick.clone(), killed.clone()));
                 let mut m = self.instances.lock();
                 let i = m.get_mut(name).expect("exists");
                 i.server = Some(server);
                 i.killed = killed;
                 i.extra = extra;
+                i.udp = udp;
                 Some(addr)
             }
             None => None,
@@ -502,6 +531,12 @@ impl Runtime for Fake {
         let m = self.instances.lock();
         let i = m.get(name)?;
         (i.state == FakeState::Running).then(|| i.extra.get(&port).copied()).flatten()
+    }
+
+    async fn udp_address(&self, name: &str, _port: u16) -> Option<SocketAddr> {
+        let m = self.instances.lock();
+        let i = m.get(name)?;
+        (i.state == FakeState::Running).then_some(i.udp).flatten()
     }
 
     async fn suspend(&self, name: &str) -> anyhow::Result<()> {

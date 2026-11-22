@@ -511,8 +511,8 @@ mod tests {
             fn leaf(&self, _host: &str) -> anyhow::Result<roll_intercept::Leaf> {
                 anyhow::bail!("none")
             }
-            fn filter(&self, _req: roll_intercept::Outgoing<'_>) -> Result<usize, String> {
-                Ok(0)
+            fn filter(&self, _req: roll_intercept::Outgoing<'_>) -> Result<roll_intercept::Filtered, String> {
+                Ok(Default::default())
             }
         }
         let i = Arc::new(Counting(std::sync::atomic::AtomicUsize::new(0)));

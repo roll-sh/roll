@@ -63,10 +63,11 @@ impl<'a> Asker<'a> {
     }
 }
 
-/// An environment's values, and who revealed them (roll secrets' principal: `usr_…`,
-/// `token:…`, `operator`).
+/// An environment's values, who revealed them (who made the copy, as roll secrets records a
+/// maker: `usr_…`, `token:…`, `operator`), and the project they're from (its id).
 pub struct Revealed {
     pub by: String,
+    pub project: String,
     pub values: Vec<(String, String)>,
 }
 
@@ -95,6 +96,14 @@ pub trait SecretEnv: Send + Sync {
     /// `environment` themselves ([`Refused`] when they can't). The audit row is `consumer` for
     /// [`Revealed::by`].
     async fn for_owner(&self, owner: &str, project: &str, environment: &str, consumer: &str, who: Asker<'_>) -> anyhow::Result<Revealed>;
+    /// Whether what `by` copied out of `environment` of `project` (a [`Revealed`]'s) may still be
+    /// in a sandbox: they still reach the project and may reveal it. Asked before each start;
+    /// [`Refused`] when they can't. `None`: a sandbox from before its source was kept, whose
+    /// copier must still be able to act at all.
+    async fn still_reveals(&self, by: &str, source: Option<(&str, &str)>) -> anyhow::Result<()> {
+        let _ = (by, source);
+        Err(Refused("roll secrets can't tell whether its copier still may".into()).into())
+    }
     /// (candidate index, key, environment, folder) for every secret, in any environment of the
     /// projects that have repo `owner/name` on their canvas, whose value is one of `candidates`
     /// (matched by fingerprint; values never come back). Empty for a repo on no project's canvas.

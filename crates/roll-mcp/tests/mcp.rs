@@ -33,7 +33,18 @@ impl roll_auth::Sessions for Alice {
 struct Daemon {
     router: Router,
     access: Arc<Access>,
+    workspace: Arc<roll_workspace::Workspace>,
     _dir: tempfile::TempDir,
+}
+
+/// Each person's address, `<handle>@example.com` (an invite is accepted by its address).
+struct Addresses;
+
+impl roll_workspace::People for Addresses {
+    fn person(&self, user: &str) -> Option<roll_workspace::Person> {
+        let h = user.strip_prefix("usr_")?;
+        Some(roll_workspace::Person { handle: h.into(), email: Some(format!("{h}@example.com")), admin: false })
+    }
 }
 
 fn products() -> Router {
@@ -117,7 +128,10 @@ impl Daemon {
         let mcp_config = roll_mcp::Config { api_url: "http://127.0.0.1:7070".into(), web_url: "http://localhost:3000".into(), locked: true, products: on, access: Some(access.clone()) };
         let mcp = roll_mcp::routes(api.clone().layer(layer()), mcp_config, vec![Arc::new(Fronted) as Arc<dyn roll_mcp::ToolSet>]);
         let _ = access.people.set(Arc::new(Alice));
-        Daemon { router: api.merge(mcp).layer(layer()), access, _dir: dir }
+        // People's memberships, as rolld wires them: a person's session grant is their roles.
+        let _ = access.workspace.set(workspace.clone());
+        workspace.set_people(Arc::new(Addresses));
+        Daemon { router: api.merge(mcp).layer(layer()), access, workspace, _dir: dir }
     }
 
     /// The MCP audit log once `until` holds of it (rows go through a batching writer), at most 5 s.
@@ -189,6 +203,18 @@ async fn tools_follow_the_tokens_rules() {
 
     let init = d.rpc(OPERATOR, "initialize", json!({ "protocolVersion": "2025-06-18" })).await;
     assert_eq!(init["protocolVersion"], "2025-06-18");
+    // The instructions name every product by its tool prefix (with tool search a client loads only
+    // tool names and these, cut at 4,096 characters in Claude Code), whatever the mode adds.
+    let (_, _, long) = d.http(OPERATOR, Method::POST, "/v1/mcp?lockdown=1&tools=search", Some(json!({ "jsonrpc": "2.0", "id": 1, "method": "initialize", "params": { "protocolVersion": "2025-06-18" } }))).await;
+    let said = long["result"]["instructions"].as_str().unwrap();
+    assert!(said.chars().count() < 4096, "{} characters", said.chars().count());
+    for p in ["postgres_", "redis_", "storage_", "streams_", "queues_", "tasks_", "nosql_", "search_", "apps_", "previews_", "secrets_", "code_", "agents_", "workspace_", "access_"] {
+        assert!(said.contains(p), "the instructions don't name {p}");
+    }
+    // Search mode's tools load upfront in clients that defer tools (Claude Code's alwaysLoad).
+    let (_, _, found) = d.http(OPERATOR, Method::POST, "/v1/mcp?tools=search", Some(json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/list" }))).await;
+    let search: Vec<&Value> = found["result"]["tools"].as_array().unwrap().iter().filter(|t| t["name"].as_str().is_some_and(|n| n.starts_with("roll_"))).collect();
+    assert!(search.len() == 3 && search.iter().all(|t| t["_meta"]["anthropic/alwaysLoad"] == true), "{found}");
     let all = names(&d.rpc(OPERATOR, "tools/list", json!({})).await);
     assert!(all.contains(&"postgres_delete_project".into()) && all.contains(&"workspace_list_projects".into()));
     // Not even one any token may call (apps_plan).
@@ -816,10 +842,11 @@ async fn a_tokens_page_shows_what_an_agent_sees() {
 }
 
 /// A person's own token's page shows only what their account reaches (as `tools/list` would for
-/// them): rules for everything, but Postgres is the operator's, so none of its tools.
+/// them): rules for everything, but Postgres is the operator's, so none of its tools; previews are a
+/// member product (their role decides), so its tools are there.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_persons_token_page_shows_only_their_reach() {
-    let d = Daemon::new();
+    let d = Daemon::with_products(vec!["postgres".into(), "previews".into()]);
     let new = serde_json::from_value::<roll_access::store::NewGrant>(json!({ "name": "alices", "rules": [{ "product": "*", "resources": "*", "actions": { "read": "allow" } }] })).unwrap();
     let (g, _) = d.access.store.create(&new, roll_auth::GrantKind::Token, "usr_alice", None, Some("usr_alice")).unwrap();
     let (s, _, seen) = d.http(OPERATOR, Method::GET, &format!("/v1/access/tokens/{}/tools", g.id), None).await;
@@ -827,6 +854,33 @@ async fn a_persons_token_page_shows_only_their_reach() {
     let tools: Vec<&str> = seen["tools"].as_array().unwrap().iter().filter_map(|t| t["name"].as_str()).collect();
     assert!(tools.contains(&"workspace_list_projects"), "{tools:?}");
     assert!(!tools.iter().any(|t| t.starts_with("postgres_")), "a person's token never reaches Postgres: {tools:?}");
+    assert!(tools.contains(&"previews_list"), "a member's role reaches previews: {tools:?}");
+}
+
+/// A member's own token lists a member product's tools as their role allows, as the gate decides
+/// its calls (`within` their session): a viewer's client is shown secrets' reads, not its reveals or
+/// writes, even with a token that names every action; made an admin, they're there.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_members_client_lists_what_their_role_allows() {
+    let d = Daemon::with_products(vec!["secrets".into()]);
+    let project = d.workspace.create("usr_bob", "pay", "", None).unwrap();
+    let (_, url) = d.workspace.invite(&roll_workspace::Actor::operator(), &project.id, "alice@example.com", "viewer", None).unwrap();
+    d.workspace.accept("usr_alice", url.split("token=").nth(1).unwrap(), None).unwrap();
+    let all = json!([{ "product": "*", "resources": "*", "actions": { "read": "allow", "write": "allow", "reveal": "allow", "admin": "allow" } }]);
+    let new = serde_json::from_value::<roll_access::store::NewGrant>(json!({ "name": "alices", "rules": all })).unwrap();
+    let (g, _) = d.access.store.create(&new, roll_auth::GrantKind::Token, "usr_alice", None, Some("usr_alice")).unwrap();
+    let listed = || async {
+        let (s, _, seen) = d.http(OPERATOR, Method::GET, &format!("/v1/access/tokens/{}/tools", g.id), None).await;
+        assert_eq!(s, StatusCode::OK, "{seen}");
+        seen["tools"].as_array().unwrap().iter().filter_map(|t| t["name"].as_str().map(String::from)).collect::<Vec<String>>()
+    };
+    let tools = listed().await;
+    assert!(tools.iter().any(|t| t == "secrets_list"), "a viewer reads: {tools:?}");
+    // secrets_set_imports' action comes from its body (write or admin): read never counts for it.
+    assert!(!tools.iter().any(|t| t == "secrets_set" || t == "secrets_get_values" || t == "secrets_set_imports"), "a viewer neither writes nor reveals: {tools:?}");
+    d.workspace.set_role(&roll_workspace::Actor::operator(), &project.id, "usr_alice", "admin", None).unwrap();
+    let tools = listed().await;
+    assert!(tools.iter().any(|t| t == "secrets_set") && tools.iter().any(|t| t == "secrets_get_values"), "an admin does: {tools:?}");
 }
 
 /// 2026-07-28's `subscriptions/listen` (SEP-2575): the stream starts with the acknowledgement of

@@ -132,6 +132,7 @@ mod tests {
             restart_tries: Some(1),
             affinity: true,
             tcp: true,
+            udp: true,
             rollback_on_crash: true,
             rebuild_on_base: true,
             skew_protection: true,

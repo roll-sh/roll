@@ -15,7 +15,7 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
-mod data;
+pub(crate) mod data;
 mod secrets;
 mod services;
 pub mod fleet;
