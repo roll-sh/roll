@@ -478,11 +478,11 @@ mod tests {
             docs.iter().for_each(|x| d.extend_from_slice(&x.to_le_bytes()));
             d
         };
-        let d = sparse(&[3, 3]);
-        let mut disi = Disi::new(&d, -1, 2, 10).unwrap();
+        let repeated = sparse(&[3, 3]);
+        let mut disi = Disi::new(&repeated, -1, 2, 10).unwrap();
         assert!(std::iter::from_fn(|| disi.next_doc().transpose()).any(|r| r.is_err()));
-        let d = sparse(&[3, 12]);
-        let mut disi = Disi::new(&d, -1, 2, 10).unwrap();
+        let past = sparse(&[3, 12]);
+        let mut disi = Disi::new(&past, -1, 2, 10).unwrap();
         assert!(std::iter::from_fn(|| disi.next_doc().transpose()).any(|r| r.is_err()));
         // Truncated: an error, not a panic.
         let mut disi = Disi::new(&d[..9], -1, 2, 80000).unwrap();
