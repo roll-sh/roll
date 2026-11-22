@@ -19438,3 +19438,103 @@ after 30 s the step records "quiet", which differs from the recording. Recording
 (`PROTOCOL_RECORD`) and the other users of the harness keep the 400 ms window.
 
 The slow first query itself is the next candidate's item.
+
+### Second candidate (`cand/a291-2`, on `cand/a291`): the split views' system rows as data, racing DDL timed by CPU
+
+**A server's first information_schema query.** Agent 279's split views (information_schema.tables,
+columns, table_constraints, key_column_usage, constraint_column_usage, check_constraints,
+pg_tables, pg_indexes: `system::split_view`) took their rows of pg_catalog's and
+information_schema's objects from PostgreSQL's definition, run over the system objects once per
+process, database, role and search path. The key held the session's temporary schema
+(`pg_temp_N`), so each new connection slot ran it again. Those rows depend on nothing the user's
+DDL changes, so they are now data: `tools/export-split-views.sh <container>` exports them from a
+fresh PostgreSQL 18.6 UTF8 database (the pinned image, `--locale=C`) as the superuser and as a
+role of no memberships, into `src/catalog/data/split_rows/*.tsv.zst` (8 files, 30 KB). Each row is
+flagged with whether the plain role sees it. The script checks that the database owner sees the
+plain role's rows, that the plain rows are a subset of the superuser's, and that the database name
+appears only in the `*_catalog` columns and the superuser's name only in pg_tables.tableowner.
+`catalog/split_rows.rs` parses a view's file on its first read (`split_rows::rows`) and fills in
+the database name and the bootstrap superuser's current name. Those parts and the reader are the
+cache key (`system_part`'s `FIXED`).
+
+The exported rows apply (`split_rows::reader`) when the reader is a superuser, or a role whose
+privileges on the system relations are PUBLIC's: no stored ACL on a system relation or column, a
+member of no role below `FIRST_USER_OID` except the database owner's `pg_database_owner`. They
+also need a UTF8 database (columns' octet lengths follow the encoding) and pg_catalog first in the
+search path (after `pg_temp`) or not named in it. Anything else runs the definition as before.
+That covers a role granted pg_read_all_data or pg_monitor, a GRANT on a system catalog, a LATIN1
+database and `search_path = x, pg_catalog`.
+
+`system::row_count` (the planner's catalog estimate, and `count(*)` without a filter) counted
+information_schema.tables' and columns' system rows as the superuser's (213, 2,119) for every
+reader. It now counts the reader's system part, so a plain role's `count(*)` is PostgreSQL's 191 /
+1,943 rows. A checked build asserted the estimate against the rows, which failed for a database
+owner in a new database.
+
+Rows: inside the engine, each view's exported rows against its definition run on a fresh
+database (an EXCEPT ALL both ways, as superuser, as a plain role, and as the owner of a new
+database; `~/.cache/a291/a291_tmp.rs`). As superuser all 8 views are the same except 6 rows: the
+`is_insertable_into` / `is_updatable` of pg_group and pg_stat_database_conflicts, where the export
+has PostgreSQL's YES and the engine's definition NO (agent 279's known 2 + 4 rows). As a plain role or owner, the
+definition in the engine also listed 7 objects PostgreSQL withholds from PUBLIC (information_schema's
+`_pg_foreign_*` views, `_pg_user_mappings`, `transforms`, `sql_parts`, and
+pg_subscription.subconninfo's column: 198 tables against 191, 1,991 columns against 1,943). The
+exported rows are PostgreSQL's in all three cases.
+
+Two more first-use costs came out of the same measurement. **Which system views are planned
+from their definitions** (`system::view_expanded`, agent 279's third candidate) was found by
+parsing all 140 definitions with pg_query on the first query of any system view (~140 M user
+instructions in a verify build). It is now a sorted list of the 53 views (`system::EXPANDED`).
+`ddl_scaling::expanded_system_views_are_the_definitions_small_ones` checks the list against the
+old computation (`expanded_by_definition`). **`std::thread::available_parallelism`** reads the
+cgroup's files on every call; each stored map's `read_all` called it, even with nothing left to
+read, and so did the record parsers (`persist`). It is now read once per process
+(`pmap::cores`). The system part's chunks are made only when a cached scan wants them
+(`SystemPart`); before, every system part held its rows twice. Exported rows parse without the
+double copy, and a repeated text is one allocation.
+
+Measured: plain dist builds (`tools/dist.sh`) of `06c1b249f` (`cand/a291`, i.e. the origin head
+`2c98eac94` plus test-only changes) and of this candidate. `~/.cache/a291/first.py` starts a fresh
+server and makes a schema of two tables, a view, keys, a CHECK and an index. It then runs one
+psql session of 8 queries (columns of a table, tables of a schema, table_constraints,
+key_column_usage, constraint_column_usage, check_constraints, pg_indexes, pg_tables) three times,
+with `perf stat -e instructions:u` on the server around each session. Two alternating pairs, one
+per `tools/lane.sh a` hold. Lane A carried 7.1 and 7.6 foreign cores, so by the rule neither pair
+counts; the instruction counts agree within 0.1%.
+
+| user instructions | old | new |
+|---|---:|---:|
+| first session over the second (the first queries' own cost) | 588.85 / 588.78 M | 73.28 / 73.32 M |
+| second / third session | 1.80, 1.79 / 1.77, 1.78 M | 1.65, 1.62 / 1.62, 1.63 M |
+| first session wall | 403 / 317 ms | 151 / 129 ms |
+
+The 73 M left is first-use work that isn't these views': the session's first parse of each query
+text (the later sessions hit the parse cache), the static catalogs' rows, the binder's and
+planner's one-time tables. Parsing the exported rows (zstd included) is about a fifth of it in a
+profile (`~/.cache/a291/prof.py`, verify build). The verify build steps: base 588 M; exported rows
+253.6 M; with the list of views 112 M; with the parse, chunks and core count 83 M.
+
+Binary: 73,106,056 -> 73,157,160 bytes (+51,104, +0.07%). Idle footprint, 100 sessions, trust,
+RSS after 6 s (agent 279's `idle.py`, lane A): old 48.7 / 48.2 MB, new 47.9 / 48.1 MB.
+
+**Racing DDL commits.** `ddl_scaling::racing_ddl_commits_dont_grow_with_the_catalog` failed twice in
+the batch train's checked stage (0.057 s at 100 tables against 1.279 s at 1,500; 0.077 against
+0.975) and passed on rerun. The thread's CPU time shows the work doesn't change. In a verify-checked
+build alone at load ~26, wall / thread CPU were 0.047 / 0.047 s and 0.317 / 0.311 s, then 0.059 /
+0.058 and 0.523 / 0.316, then 0.074 / 0.056 and 0.493 / 0.351. Pinned to one core beside a busy
+loop it took 0.128 / 0.064 s and 1.706 / 0.362 s, and failed as in the train. The test now bounds
+the test thread's CPU (`thread_cpu`, CLOCK_THREAD_CPUTIME_ID: the sessions run on it, thread CPU
+equalled wall when alone) with the same 6x + 0.5 s. On the loaded core it passes at 0.071 / 0.466
+s of CPU. Instructions would be better, but perf_event_open is closed to unprivileged processes
+here (perf_event_paranoid 3). Also restored the doc comment's first line, which an earlier edit had dropped.
+
+### Left
+
+- The engine's privileges for a non-superuser on the 7 objects above. PostgreSQL's
+  information_schema.sql and system_views.sql grant SELECT to PUBLIC only on the public views,
+  and revoke pg_subscription.subconninfo. The other information_schema views over privileges
+  (table_privileges, column_privileges, ...) still show them to a plain role.
+- pg_group's and pg_stat_database_conflicts' updatability (`pg_relation_is_updatable` of an
+  auto-updatable view over a catalog), shown by the definition path and pg_views.
+- The fallback (a predefined role's member, changed system ACLs, another encoding or path) still
+  runs the definition once per key, the temporary schema included.
