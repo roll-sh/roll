@@ -338,7 +338,8 @@ fn parse_data(v: &Value, generation: i64) -> Result<EsData, String> {
     Ok(EsData { generation, uuid: s(v, "uuid").unwrap_or_default(), snapshots, indices, identifiers })
 }
 
-/// [`inflate_raw`], charging what it inflates to `held` as it grows.
+/// Raw DEFLATE, at most `max` bytes out (more is an error, not a bigger buffer), charging what
+/// it inflates to `held` as it grows.
 pub(super) fn inflate_charged(raw: &[u8], max: usize, held: &mut crate::breaker::Reservation) -> Result<Vec<u8>, BlobError> {
     use std::io::Read;
     let mut dec = flate2::read::DeflateDecoder::new(raw);
@@ -355,17 +356,6 @@ pub(super) fn inflate_charged(raw: &[u8], max: usize, held: &mut crate::breaker:
         held.add(n as u64, "<snapshot_metadata>").map_err(BlobError::Breaker)?;
         out.extend_from_slice(&buf[..n]);
     }
-}
-
-/// Raw DEFLATE, at most `max` bytes out (more is an error, not a bigger buffer).
-pub(super) fn inflate_raw(raw: &[u8], max: usize) -> Result<Vec<u8>, String> {
-    use std::io::Read;
-    let mut out = Vec::new();
-    flate2::read::DeflateDecoder::new(raw).take(max as u64 + 1).read_to_end(&mut out).map_err(|e| format!("inflating: {e}"))?;
-    if out.len() > max {
-        return Err(format!("it inflates to more than [{max}] bytes"));
-    }
-    Ok(out)
 }
 
 /// A metadata blob's content: CodecUtil header (codec `codec`) and footer checked, inflated
