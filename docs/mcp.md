@@ -1106,11 +1106,10 @@ previews are listed once those products are on.
 Ranked; the top item is in progress. A watchdog reads this list. Unblocked work comes first; what
 waits on a sibling PR reaching main is last.
 
-1. **roll code's answers cut at what a client takes (this PR).** roll's own tools cut a text block
-   at 48 KiB (Claude Code refuses a longer answer outright), but roll code's weren't, neither on
-   `/v1/code/mcp` nor fronted on `/v1/mcp`: a long file of wide lines, a big search or change list
-   failed in the client. `cut` moved to `roll_auth::lockdown` and runs in code-control's
-   `mcp::call`, which both servers use; the structured content stays whole.
+1. **Lockdown from roll code's connect panel (this PR).** #650 gave `/v1/code/mcp` lockdown, but the
+   owner page's "Connect an agent" panel, where people copy roll code's MCP snippet, had no way to
+   ask for it: a checkbox now puts `?lockdown=1` in the URL, as the access page's panel does for
+   `/v1/mcp`, and `claude mcp add` lines quote a URL with a query (zsh reads `?` as a glob).
 2. **Decision for the user: a sandboxed "code mode"** (Cloudflare's Code Mode, Anthropic's code
    execution with MCP). A model writes a short script against typed tool functions; roll runs it
    and each call still goes through the gate and the audit log as if made one by one. It cuts
@@ -1146,7 +1145,8 @@ waits on a sibling PR reaching main is last.
    stateless and search mode (`?tools=search`) covers clients that can't take the list; "remember this browser"; a preset that reveals development's values without asking
    (#354); a connection-level `?project=` (only a token's rules bound a project; a default that
    some tools can't honour would look like a boundary).
-6. **Landed 2026-11-21:** invisible characters escaped on `/v1/code/mcp` (#653, `roll_auth::lockdown::visible`); lockdown on roll code's own MCP server (#650: `/v1/code/mcp?lockdown=1`,
+6. **Landed 2026-11-21:** roll code's answers cut at 48 KiB on both servers (#654, `roll_auth::lockdown::cut`
+   in `mcp::call`); invisible characters escaped on `/v1/code/mcp` (#653, `roll_auth::lockdown::visible`); lockdown on roll code's own MCP server (#650: `/v1/code/mcp?lockdown=1`,
    `roll_auth::lockdown` shared with `/v1/mcp`); the sweep's rolld on port 0 with `--addr-file` (#648, after #596); the sweep as a member (#647: a viewer signed in by email code calls every
    member-product read their client lists, none refused by their role; first run 197 listed, 75
    called) and `secrets_list_recoverable` (#585's deleted projects; recovering stays a person's); a member's MCP client reaches what their role does (#644: previews in
