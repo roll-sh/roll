@@ -1,4 +1,4 @@
-import { CircleCheck, Dices, FileSearch, RotateCw } from "lucide-react";
+import { CircleCheck, Dices, FileSearch, RotateCw, ShieldCheck } from "lucide-react";
 import { useState } from "react";
 import { Link } from "@/components/link";
 import { needsApproval, type Finding, type Op, type SecretsApi, type SetSecret } from "@/lib/secrets-api";
@@ -9,6 +9,7 @@ import { ago, card, errorText, ErrorNote, ghost, Section, sized, useLoad } from 
 
 const ISSUES: { issue: Finding["issue"]; title: string; what: string; serious: boolean }[] = [
   { issue: "decoy_used", title: "Decoy used", what: "Someone used a decoy key's credential (its token or database login): they found it where it was planted. Cut off whatever could reach that place, rotate the real credentials beside it, then delete the decoy and plant a new one.", serious: true },
+  { issue: "production_unprotected", title: "Production isn't protected", what: "Checks, sandboxes and untrusted previews may read production, and no change there needs approval. New projects start with it protected; this one was made before. Protecting it keeps writes direct for whoever may write (no approvals until you ask for them) and keeps everything else out.", serious: true },
   { issue: "expired", title: "Expired", what: "Their values stopped working outside roll.", serious: true },
   { issue: "rotation_failing", title: "Rotation failing", what: "Their scheduled rotation fails: the database, vendor or rotator refused or didn't answer. The old credential keeps working; roll tries again.", serious: true },
   { issue: "revoke_failing", title: "Not revoked yet", what: "Credentials roll retired or that expired but couldn't revoke yet: they still work until it can. roll keeps trying.", serious: true },
@@ -49,6 +50,18 @@ export function HealthView() {
     }
   };
   const name = (slug: string) => standard.find((e) => e.slug === slug)?.name ?? slug;
+  // As a new project's: protected, no approvals, so writes stay direct for whoever may write.
+  const protect = async (env: string) => {
+    setError(null);
+    try {
+      await api.policy(env, { protected: true, approvals: 0 });
+      setNote(`${name(env)} is protected: checks, sandboxes, untrusted previews and developers who don't name it are out`);
+      found.reload();
+      reloadEnvs();
+    } catch (e) {
+      setError(errorText(e));
+    }
+  };
   // Every weak key of one environment, a new random value each: one change, or one request.
   const fixAll = async (env: string, rows: Finding[]) => {
     setError(null);
@@ -118,7 +131,9 @@ export function HealthView() {
             <div className={`${card} divide-y divide-line`}>
               {rows.map((f) => (
                 <div key={`${f.environment}/${f.path}/${f.key}`} className="flex flex-wrap items-center gap-x-3 gap-y-0.5 px-3 py-1.5 text-[12.5px]">
-                  {f.issue === "certificate_expiring" || f.issue === "operator_made" ? (
+                  {f.issue === "production_unprotected" ? (
+                    <span className="text-fg">{name(f.environment)}</span>
+                  ) : f.issue === "certificate_expiring" || f.issue === "operator_made" ? (
                     <span className="flex min-w-0 items-center gap-3">
                       <span className="font-mono text-fg">{f.key}</span>
                       <span className="text-subtle">{f.issue === "certificate_expiring" ? `CA ${f.path}` : f.environment ? `${name(f.environment)}${f.path === "/" ? "" : ` ${f.path}`}` : ""}</span>
@@ -143,6 +158,11 @@ export function HealthView() {
                   {f.issue === "weak" && (
                     <button className={`${ghost} h-6`} onClick={() => fix(f, { value: fresh(f) }, "a new random value")} title="48 random letters and digits (or what the key's password policy asks), made here; a change request where the environment is protected">
                       <Dices className="size-3.5" /> New value
+                    </button>
+                  )}
+                  {f.issue === "production_unprotected" && (
+                    <button className={`${ghost} h-6`} onClick={() => void protect(f.environment)} title="Protect it with no approvals, as new projects start: writes stay direct for whoever may write">
+                      <ShieldCheck className="size-3.5" /> Protect {name(f.environment).toLowerCase()}
                     </button>
                   )}
                   {(f.issue === "expired" || f.issue === "expiring") && <NewDate onSet={(at) => fix(f, { expires_at: at }, "dated again")} />}

@@ -108,11 +108,16 @@ type Rule = { …; unprotected?: true }; // only resources whose environment the
 
 The product's resolver sets `Resource.protected` beside `Resource.environment`:
 
-- secrets: an environment with a protection policy;
+- secrets: an environment with a protection policy (a new project's `production` starts with one,
+  `approvals: 0`);
 - apps: `production`;
 - previews: never protected.
 
-A resource whose protection isn't known never matches an `unprotected` rule. The field only
+A resource whose protection isn't known never matches an `unprotected` rule, and neither does an
+environment named `production`, whatever its product says (`roll_auth::scope::PRODUCTION`): a
+project made before production started protected still keeps it out of every developer's default.
+Health says so for such a project (`production_unprotected`), and the dashboard's invite sheet
+lists the environments a developer will reach. The field only
 narrows, so a token can carry it too (a CI token for every environment except protected ones).
 
 ### Custom roles and groups
@@ -456,10 +461,12 @@ There is one test per flow, in the files the repo already uses:
 | test | file | what it proves |
 | --- | --- | --- |
 | members' lifecycle | `crates/roll-workspace/tests/api.rs` | invite, accept by the right address only, change role, remove, leave, `last_owner`, the migration making every creator an owner |
-| roles as rules | `crates/roll-access/tests/access.rs` | each role's grant allows and denies what the role table says; an admin can't make an owner; `unprotected` matches only unprotected environments |
+| roles as rules | `crates/roll-access/tests/access.rs` | each role's grant allows and denies what the role table says; an admin can't make an owner; `unprotected` matches only unprotected environments, never `production` |
 | a canvas proves nothing | `crates/roll-access/tests/access.rs` | an admin of P who drops a foreign resource on P's canvas gains nothing on it; a home makes it count |
 | every route classified | `crates/rolld/tests/auth.rs` | the new routes have rows; a non-member's project is a 404 for a session and for that person's token |
-| secrets by role | `crates/roll-secrets/tests/api.rs` (also on Postgres) | a viewer can't reveal; a developer reveals in development, not production, and their write to a protected environment opens a request; an admin reviews; a removed approver's approval stops counting |
+| secrets by role | `crates/roll-secrets/tests/api.rs` (also on Postgres) | on a project as it's made: a viewer can't reveal; a developer reveals in development, never reveals or writes production (protected from the start, no approvals), and once it asks for approvals their write there opens a request; an admin reviews; a removed approver's approval stops counting |
+| an unprotected production | `crates/roll-secrets/tests/api.rs` | a project whose production isn't protected keeps it out of developers' default, is a Health finding naming what reaches it, and protecting it with no approvals clears it with writes still direct |
+| checks and sandboxes | `crates/rolld/src/secrets.rs` (`a_sandbox_gets_…`) | neither a check nor a sandbox gets a new project's production |
 | removal cuts off what they made | `crates/roll-secrets/tests/api.rs` | after removal, the person's confined token is revoked, their identity's login is refused, their sync pauses, and their bound reference stops resolving; adopt brings them back under the adopter |
 | two nodes | `crates/roll-secrets/tests/nodes.rs` | a removal on one node stops the person on the other at once |
 | the members page | `apps/dashboard/src/lib/workspace-*.test.ts` | which controls each role is offered |
@@ -508,8 +515,9 @@ These are the user's to make. The design above uses the first option of each.
 - **D2. Does a viewer reveal values?** (a) No: viewer is roll's `read`, names and history only;
   (b) yes, in unprotected environments (Doppler's viewer reads secrets).
 - **D3. A developer's default environments.** (a) Every environment that isn't protected, with
-  production only by naming it (needs the `unprotected` rule field); (b) every environment;
-  (c) none until named.
+  production only by naming it (needs the `unprotected` rule field, which never matches an
+  environment named `production`, protected or not; a new project's production also starts
+  protected, with no approvals); (b) every environment; (c) none until named.
 - **D4. Does a project admin see production values by default?** (a) Yes, an admin is everything
   in the project (Infisical's and Doppler's admins); (b) no, managing isn't seeing (1Password):
   admins get `admin` everywhere but `reveal` only in the environments their assignment names.

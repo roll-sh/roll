@@ -273,8 +273,14 @@ CREATE TABLE IF NOT EXISTS required (
 ) WITHOUT ROWID;
 ";
 
-/// The environments a project starts with, in order.
+/// The environments a project starts with, in order. `production` starts protected with no
+/// approvals ([`PRODUCTION`]).
 pub const DEFAULT_ENVIRONMENTS: [(&str, &str); 3] = [("development", "Development"), ("staging", "Staging"), ("production", "Production")];
+
+/// The slug of the environment a new project protects (with `approvals: 0`: whoever may write
+/// still writes directly), and that a rule's `unprotected` never reaches (roll-auth's
+/// `scope::PRODUCTION`, docs/members.md D3).
+pub const PRODUCTION: &str = roll_auth::scope::PRODUCTION;
 
 pub type Result<T, E = Error> = std::result::Result<T, E>;
 
@@ -663,6 +669,24 @@ impl Secrets {
         if let Ok(keys) = &opts.keyring {
             audit_key::ensure_key(&db, keys, &audit_keys, &issuer_keys)?;
         }
+        // Before #688, a protected environment with `approvals: 0` took change requests with one
+        // approval (the gates count 0 as 1); since, 0 means direct writes (`EnvRow::needs_request`).
+        // Every such environment from before keeps its requests: 0 becomes 1, once, before this
+        // store serves anything (so before any new project's production is made with 0). Each
+        // change is in the project's audit log, when the deployment key is open (a sealed start
+        // logs it instead).
+        db.migrate("secrets-protected-approvals-zero-kept", |c| {
+            let rows: Vec<(String, String)> = c.query("SELECT project_id, slug FROM environments WHERE protected = 1 AND approvals = 0 ORDER BY project_id, position", (), |r| Ok((r.get(0)?, r.get(1)?)))?;
+            c.execute("UPDATE environments SET approvals = 1 WHERE protected = 1 AND approvals = 0", ())?;
+            let now = code_sql::now_ms();
+            for (project, slug) in &rows {
+                match &opts.keyring {
+                    Ok(keys) => audit::record(c, keys, project, &Caller::operator(), "environment.policy", Some(slug), None, &[], "approvals 0 → 1: kept requests as before (#688)", now).map_err(|e| code_sql::Error::Other(e.to_string()))?,
+                    Err(_) => tracing::warn!(project, environment = slug.as_str(), "approvals 0 → 1: kept requests as before (#688); not in the audit log (the deployment key is sealed)"),
+                }
+            }
+            Ok(())
+        })?;
         if let (Some(c), Ok(keys)) = (&opts.clouds, &opts.keyring) {
             // The issuer's key exists before anyone asks for its public half.
             issuer::ensure_key(&db, keys)?;
@@ -749,7 +773,13 @@ impl Secrets {
                     )?;
                     if n == 1 {
                         for (i, (slug, name)) in DEFAULT_ENVIRONMENTS.iter().enumerate() {
-                            envs::insert(c, project, slug, name, i as i64, envs::Kind::Standard, None, &Default::default(), None, now)?;
+                            let e = envs::insert(c, project, slug, name, i as i64, envs::Kind::Standard, None, &Default::default(), None, now)?;
+                            // Protected from the start, so developers' default, checks, sandboxes
+                            // and untrusted previews never reach it; no approvals, so writes stay
+                            // direct for whoever may write until someone asks for them.
+                            if *slug == PRODUCTION {
+                                c.execute("UPDATE environments SET protected = 1, approvals = 0 WHERE id = ?", [&e.id])?;
+                            }
                         }
                     }
                     Ok::<_, Error>(c.query_row("SELECT dek FROM projects WHERE project_id = ?", [project], |r| r.get::<_, String>(0))?)

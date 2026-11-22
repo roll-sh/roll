@@ -1122,8 +1122,14 @@ deterministic (#396).
 
 1. **Search from the browser** (landed in #358 after six reviews, its policy enforced in the
    engine on the parsed request: per-cluster CORS, browser keys with rate limits and their own body
-   cap, a Browser search section and the site-search guide's browser page; what remains is RAG's
-   chat limits for browser keys, item 11; Algolia's search-only and secured API keys,
+   cap, a Browser search section and the site-search guide's browser page; what remains: RAG's
+   chat limits for browser keys (item 11); keys derived without a call to roll (Algolia's
+   `generateSecuredApiKey`, Typesense's `generateScopedSearchKey`, Meilisearch's tenant tokens: a
+   SaaS signs a short-lived key per end customer from one parent key, where today it's 20 browser
+   keys a cluster and one control-plane call each); browser search on previews (a branch keeps the
+   parent's origins but no browser key works there: give it one and the preview's URL, roll
+   previews' side); and usage and 429s per browser key in the Browser search section (Algolia's
+   per-key usage and logs); Algolia's search-only and secured API keys,
    Typesense's scoped keys, Meilisearch's tenant tokens, Elastic's search applications): a web
    page can't call a roll cluster today. There's no CORS (`http.cors.*` are static settings no
    tenant can set), so every site needs a backend in front of search, which is the first thing
@@ -1142,8 +1148,10 @@ deterministic (#396).
    it's sent), copies mappings, settings and aliases, reindexes with progress and switches an
    alias when done. Elastic Cloud restores from other deployments, AWS OpenSearch Service has
    migration assistants, Algolia and Typesense import from each other): left, Algolia's export
-   (records, synonyms, rules) mapped onto indices, synonym sets and query rules, and a Typesense
-   and Meilisearch import (their dump formats onto indices and settings).
+   (records, synonyms, rules) mapped onto indices, synonym sets and query rules, a Typesense
+   and Meilisearch import (their dump formats onto indices and settings), and catch-up and cutover
+   (AWS OpenSearch Migration Assistant's capture and replay): a copy is one point in time today, so
+   writes made during the copy are lost unless the client double-writes.
 3. **One memory account per request** (in progress: ES|QL and aggregations in #549, Painless per execution in #591, and a
    node-wide body budget in #601, each in review; ES|QL and aggregations against a node budget
    no tenant setting can raise in #549, Painless per execution, and a node-wide body budget; Elasticsearch charges every request's
@@ -1256,7 +1264,10 @@ deterministic (#396).
    adopted with new credentials. Elastic's connectors, Algolia's and Typesense's data sync): left,
    linking a person's own roll Postgres or bucket with a read-only credential of its own,
    credentials from roll secrets after #134, Postgres advanced rules, PDF and Office text, and the
-   web crawler (item 13) on this runner.
+   web crawler (item 13) on this runner, and alerts on failed syncs through roll's webhooks or
+   chat ops (Algolia's connectors notify on failed runs). A whole-product review on 2026-11-22
+   found connectors refusing private addresses but not reindex's deny rules, and no per-owner cap on
+   remote reindex slots: being fixed together as one node-wide egress check and owner-fair slots.
 8. **Semantic search with no keys** (built in #563, in review: roll's float build of E5 equals
    Elasticsearch's float deployment, cosine 1.000000 on 64 of 64 cases; Elastic Cloud's `.multilingual-e5-small-elasticsearch`
    and Elastic Inference Service, Typesense's and Meilisearch's built-in embedding models,

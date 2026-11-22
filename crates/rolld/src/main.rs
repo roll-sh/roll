@@ -746,6 +746,7 @@ async fn run_with(mut args: Args) -> anyhow::Result<()> {
     }
     // The audit log streamed to SIEMs (it needs ROLL_SECRET_KEY to keep each sink's secret).
     access::sinks(&access, args.secret_key().as_deref().map(String::as_str));
+    access::event_hooks(&access, args.secret_key().as_deref().map(String::as_str));
     // Trusted machine clients' issuers' keys: the guarded client roll secrets' identities use.
     let _ = access.oidc_fetch.set(secrets::oidc_fetch(&args, !auth.enforcing()));
     // Approvals can be posted to a Slack channel through roll code's chat ops.
@@ -765,6 +766,8 @@ async fn run_with(mut args: Args) -> anyhow::Result<()> {
     if let Some(c) = &code {
         c.code.relay_through(gated.clone());
     }
+    // MCP Events' webhooks: each due subscription's feed read through the gate as its grant.
+    roll_mcp::events::spawn_deliveries(gated.clone(), access.clone(), mcp_config.products.clone());
     let mcp = roll_mcp::routes(gated, mcp_config, tool_sets);
     router = router.merge(mcp);
     // The operator token in front of every product's routes (auth.rs); `/v1/info`, OAuth's public

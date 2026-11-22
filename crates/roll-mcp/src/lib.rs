@@ -766,6 +766,13 @@ async fn process(ctx: &Arc<Ctx>, messages: Vec<Value>) -> Vec<Value> {
             }
             "ping" => rpc_result(id, json!({})),
             "events/list" if ctx.modern => rpc_result(id, events::list(ctx)),
+            "events/subscribe" | "events/unsubscribe" if ctx.modern => {
+                let r = if method == "events/subscribe" { events::subscribe(ctx, &params).await } else { events::unsubscribe(ctx, &params).await };
+                match r {
+                    Ok(r) => rpc_result(id, r),
+                    Err((code, message, data)) => json!({ "jsonrpc": "2.0", "id": id, "error": { "code": code, "message": message, "data": data } }),
+                }
+            }
             "events/poll" if ctx.modern => match events::poll(ctx, &params).await {
                 Ok(r) => rpc_result(id, r),
                 Err((code, message, data)) => json!({ "jsonrpc": "2.0", "id": id, "error": { "code": code, "message": message, "data": data } }),
@@ -1213,7 +1220,7 @@ async fn call_as(ctx: &Arc<Ctx>, name: &str, args: Value, quiet: bool) -> Option
     let mut ext = Extensions::new();
     // The audit log says a completion was one (a person typing), not the agent listing.
     let tool: Arc<str> = if quiet { format!("completion/complete:{name}").into() } else { name.into() };
-    ext.insert(McpCall { tool, args: Arc::new(redacted), ip: ctx.ip, elicits: ctx.url_elicitation, client: ctx.client.clone(), quiet });
+    ext.insert(McpCall { tool, args: Arc::new(redacted), ip: ctx.ip, elicits: ctx.url_elicitation, client: ctx.client.clone(), quiet, unattended: false });
     let started = std::time::Instant::now();
     // A credential headed where people and other agents read it is refused before it's sent
     // (guard.rs): a data-loss check, not a permission (the gate decides those).
@@ -1389,7 +1396,7 @@ async fn guard_route(ctx: &Arc<Ctx>, method: &str, route: &str, body: Option<Val
     let mut req = req.body(body.map_or(Body::empty(), |b| Body::from(b.to_string()))).map_err(|e| e.to_string())?;
     // rolld keeps `X-Roll-Guard` on roll secrets' routes only for an in-process call carrying this
     // extension with tool "guard" (secrets' #169): keep both if this ever changes.
-    req.extensions_mut().insert(McpCall { tool: "guard".into(), args: Arc::new(json!({ "route": route })), ip: ctx.ip, elicits: false, client: ctx.client.clone(), quiet: true });
+    req.extensions_mut().insert(McpCall { tool: "guard".into(), args: Arc::new(json!({ "route": route })), ip: ctx.ip, elicits: false, client: ctx.client.clone(), quiet: true, unattended: false });
     let resp = match ctx.m.api.clone().oneshot(req).await {
         Ok(r) => r,
         Err(e) => match e {},
@@ -1444,18 +1451,19 @@ async fn read_me(ctx: &Arc<Ctx>) -> Result<Value, (String, Value)> {
 
 /// A resource's route read through the gated router with the caller's token, like a tool.
 async fn read_route(ctx: &Arc<Ctx>, route: &str, uri: &str) -> Result<Value, (String, Value)> {
-    read_route_as(ctx, route, "resources/read", json!({ "uri": uri })).await
+    read_route_as(ctx, route, "resources/read", json!({ "uri": uri }), false).await
 }
 
-/// A route read through the gated router with the caller's token, audited as `what` with `args`.
-async fn read_route_as(ctx: &Arc<Ctx>, route: &str, what: &str, args: Value) -> Result<Value, (String, Value)> {
+/// A route read through the gated router with the caller's token, audited as `what` with `args`;
+/// `unattended` (nobody waits on it: an MCP Events subscribe's check) refuses what would ask.
+async fn read_route_as(ctx: &Arc<Ctx>, route: &str, what: &str, args: Value, unattended: bool) -> Result<Value, (String, Value)> {
     let fail = |e: String| (e, json!({}));
     let mut req = Request::builder().method("GET").uri(route);
     for (k, v) in forward_headers(&ctx.headers, &Value::Null).iter() {
         req = req.header(k, v);
     }
     let mut req = req.body(Body::empty()).map_err(|e| fail(e.to_string()))?;
-    req.extensions_mut().insert(McpCall { tool: what.into(), args: Arc::new(args), ip: ctx.ip, elicits: false, client: ctx.client.clone(), quiet: false });
+    req.extensions_mut().insert(McpCall { tool: what.into(), args: Arc::new(args), ip: ctx.ip, elicits: false, client: ctx.client.clone(), quiet: false, unattended });
     let resp = match ctx.m.api.clone().oneshot(req).await {
         Ok(r) => r,
         Err(e) => match e {},
