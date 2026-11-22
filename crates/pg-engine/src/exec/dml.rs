@@ -783,6 +783,9 @@ pub struct Entering<'a> {
     pub row: Option<&'a Arc<Vec<Value>>>,
     /// The row's storage key (its heap tuple, named by a wait's CONTEXT).
     pub key: Option<&'a [u8]>,
+    /// A multi-insert COPY's keys of an index that was empty when it started
+    /// (`FreshUnique`): what the check reads instead of the index.
+    pub fresh: Option<&'a FreshUnique>,
 }
 
 /// The lock of a unique key (`locks::UNIQUE_KEY`): per key value, or the whole index under a
@@ -874,7 +877,21 @@ fn find_conflict(
                 )?;
             }
         }
+        // (A fresh index's key, its lock ours: this statement's rows hold it, or, once
+        // another transaction has ended since the statement began, a committed row.)
+        if let Some(f) = entering.and_then(|e| e.fresh).filter(|f| f.covers(bix)) {
+            if f.holds(&lock_key) {
+                return Ok(Some(Vec::new()));
+            }
+            if !f.others_ended(ctx) {
+                f.add(&lock_key);
+                return Ok(None);
+            }
+        }
         let Some(dkey) = committed_conflict(t, bix, vals, own, &nondet, ctx)? else {
+            if let Some(f) = entering.and_then(|e| e.fresh).filter(|f| f.covers(bix)) {
+                f.add(&lock_key);
+            }
             return Ok(None);
         };
         let latest = if exprs { ctx.txn.borrow().get_latest(&dkey)? } else { None };
@@ -1398,7 +1415,7 @@ fn defer_recheck(
     let Some(con) = bix.constraint.as_ref().filter(|c| c.deferral.0) else {
         return Ok(false);
     };
-    if index_conflict(t, bix, vals, exclude, Some(&Entering { token: None, row: None, key: Some(dkey) }), Dirty::Partial, false, ctx)?.is_none() {
+    if index_conflict(t, bix, vals, exclude, Some(&Entering { token: None, row: None, key: Some(dkey), fresh: None }), Dirty::Partial, false, ctx)?.is_none() {
         return Ok(true);
     }
     let deferred = ctx.txn.borrow().is_deferred(con.oid, con.deferral);
@@ -1423,7 +1440,7 @@ fn recheck_row(t: &Table, bix: &BoundIndex, dkey: &[u8], ctx: &ExecCtx) -> Resul
     let Some(vals) = index_values(bix, &row, ctx)? else {
         return Ok(());
     };
-    if let Some((_, other)) = index_conflict(t, bix, &vals, Some(dkey), Some(&Entering { token: None, row: None, key: Some(dkey) }), Dirty::Wait, false, ctx)? {
+    if let Some((_, other)) = index_conflict(t, bix, &vals, Some(dkey), Some(&Entering { token: None, row: None, key: Some(dkey), fresh: None }), Dirty::Wait, false, ctx)? {
         return Err(index_violation(t, bix, &vals, other.as_deref(), ctx));
     }
     Ok(())
@@ -3151,7 +3168,7 @@ pub fn update_row_rls(
             if defer_recheck(t, bix, nv, &new_key, Some(dkey), ctx)? {
                 break 'unique;
             }
-            let entering = Entering { token: None, row: None, key: Some(new_key.as_slice()) };
+            let entering = Entering { token: None, row: None, key: Some(new_key.as_slice()), fresh: None };
             if let Some((_, other)) =
                 index_conflict(t, bix, nv, Some(dkey), Some(&entering), Dirty::Wait, false, ctx)?
             {
@@ -3480,7 +3497,7 @@ pub fn insert_prepared(
         // SSI: heap_insert's check at the relation, then each btree entry's at its leaf
         // page (before a unique check fails: _bt_check_unique).
         ssi_insert(t, &rules.indexes, &p.dkey, &p.row, ctx)?;
-        let vals = index_entries_checked(rules, &p, None, shared.as_ref(), ctx)?;
+        let vals = index_entries_checked(rules, &p, None, shared.as_ref(), None, ctx)?;
         let (row, dkey) = store_inserted(rules, p, &vals, after, ctx)?;
         return Ok(Inserted::Stored(row, dkey));
     };
@@ -3528,7 +3545,7 @@ pub fn insert_prepared(
         }
         ssi_insert(t, &rules.indexes, &p.dkey, &p.row, ctx)?;
         let token = ctx.txn.borrow_mut().begin_speculative()?;
-        let r = index_entries_checked(rules, &p, Some((token, &arbiter_of)), shared.as_ref(), ctx);
+        let r = index_entries_checked(rules, &p, Some((token, &arbiter_of)), shared.as_ref(), None, ctx);
         let r = match r {
             Ok(vals) => match vals.conflict {
                 // specConflict: the tuple (and its entries) went in and is killed; start
@@ -3602,6 +3619,7 @@ fn index_entries_checked(
     p: &Prepared,
     spec: Option<(u32, &dyn Fn(&BoundIndex) -> bool)>,
     shared: Option<&Arc<Vec<Value>>>,
+    fresh: Option<&FreshUnique>,
     ctx: &ExecCtx,
 ) -> Result<CheckedEntries> {
     let t = &rules.table;
@@ -3635,7 +3653,7 @@ fn index_entries_checked(
                         let nondet = unkeyed_nondet(t, bix, ctx);
                         let lk = unique_lock_key(t, bix, v, !nondet.is_empty());
                         let had = ctx.txn.borrow().holds_lock_mode(&lk, LockMode::Exclusive);
-                        let entering = Entering { key: Some(p.dkey.as_slice()), token: Some(token), row: shared };
+                        let entering = Entering { key: Some(p.dkey.as_slice()), token: Some(token), row: shared, fresh: None };
                         let found = find_conflict(t, bix, v, None, Some(&entering), Dirty::Partial, false, ctx)?;
                         if ctx.txn.borrow().holds_lock_mode(&lk, LockMode::Exclusive) {
                             if !had {
@@ -3662,7 +3680,7 @@ fn index_entries_checked(
                 _ => {
                     check_without_overlaps(t, bix, v)?;
                     if !defer_recheck(t, bix, v, &p.dkey, None, ctx)? {
-                        let entering = Entering { key: Some(p.dkey.as_slice()), token: None, row: shared };
+                        let entering = Entering { key: Some(p.dkey.as_slice()), token: None, row: shared, fresh };
                         if let Some((_, other)) =
                             index_conflict(t, bix, v, None, Some(&entering), Dirty::Wait, false, ctx)?
                         {
@@ -3703,6 +3721,89 @@ fn index_entries_checked(
         out.vals.push(vals);
     }
     Ok(out)
+}
+
+/// A multi-insert COPY's unique checks of the indexes that held no entry when it started
+/// (`start`): a key's check, its lock taken as before (`find_conflict`), finds a conflict in
+/// the keys this statement entered (an exact set, `holds`), and reads the index only once
+/// another transaction has ended since: until then no row but this statement's can hold the
+/// key (`Xids::completions`: a transaction's rows are stored before its end counts, and its
+/// key locks released after). PostgreSQL's _bt_check_unique finds the same rows in the index.
+pub struct FreshUnique {
+    /// The indexes it answers for (oids).
+    indexes: Vec<u32>,
+    /// `Xids::completions` when they were found empty.
+    completions: u64,
+    keys: std::cell::RefCell<FreshKeys>,
+}
+
+/// The keys (`unique_lock_key`s past their lock tag) end to end, a table of (offset, length).
+#[derive(Default)]
+struct FreshKeys {
+    bytes: Vec<u8>,
+    table: hashbrown::HashTable<(u32, u32)>,
+    hasher: hashbrown::DefaultHashBuilder,
+}
+
+impl FreshUnique {
+    /// For a multi-insert COPY into `rules`' table whose row-checking indexes are all unique
+    /// btree indexes over columns (no expression, predicate, deferral, exclusion or
+    /// record_image_ops column) of a table keyed by row ids, outside serializable tracking:
+    /// those of them holding no entry now (None if none).
+    fn start(rules: &TableRules, ctx: &ExecCtx) -> Result<Option<FreshUnique>> {
+        let t = &rules.table;
+        let checked: Vec<&BoundIndex> = rules.indexes.iter().filter(|b| checks_rows(b)).collect();
+        if checked.is_empty()
+            || !t.has_rowid()
+            || ctx.txn.borrow().serializable_tracked()
+            || !checked.iter().all(|b| {
+                b.index.unique
+                    && b.index.id != 0
+                    && b.index.method == "btree"
+                    && !index_has_exprs(b)
+                    && b.constraint.as_ref().is_none_or(|c| c.exclusion.is_none() && !c.deferral.0)
+                    && b.index.columns.iter().all(|c| c.opclass != RECORD_IMAGE_OPS)
+            })
+        {
+            return Ok(None);
+        }
+        // (The count before the reads: a transaction storing rows meanwhile ends after.)
+        let completions = ctx.sess.db.xids().completions();
+        let mut indexes = Vec::new();
+        for b in checked {
+            let start = index_prefix(t.oid, b.index.id);
+            if ctx.txn.borrow().scan_latest(&start, &prefix_end(&start)).next().transpose()?.is_none() {
+                indexes.push(b.index.oid);
+            }
+        }
+        Ok((!indexes.is_empty()).then(|| FreshUnique { indexes, completions, keys: Default::default() }))
+    }
+
+    fn covers(&self, bix: &BoundIndex) -> bool {
+        self.indexes.contains(&bix.index.oid)
+    }
+
+    /// Whether a transaction has ended since the indexes were found empty.
+    fn others_ended(&self, ctx: &ExecCtx) -> bool {
+        ctx.sess.db.xids().completions() != self.completions
+    }
+
+    fn holds(&self, lock_key: &[u8]) -> bool {
+        let k = &lock_key[8..];
+        let keys = self.keys.borrow();
+        let h = std::hash::BuildHasher::hash_one(&keys.hasher, k);
+        keys.table.find(h, |&(o, l)| &keys.bytes[o as usize..(o + l) as usize] == k).is_some()
+    }
+
+    fn add(&self, lock_key: &[u8]) {
+        let k = &lock_key[8..];
+        let keys = &mut *self.keys.borrow_mut();
+        let h = std::hash::BuildHasher::hash_one(&keys.hasher, k);
+        let at = (keys.bytes.len() as u32, k.len() as u32);
+        keys.bytes.extend_from_slice(k);
+        let (bytes, hasher) = (&keys.bytes, &keys.hasher);
+        keys.table.insert_unique(h, at, |&(o, l)| std::hash::BuildHasher::hash_one(hasher, &bytes[o as usize..(o + l) as usize]));
+    }
 }
 
 /// Rows a bulk load (a held COPY, an INSERT … SELECT) stores through the write buffer before
@@ -3900,8 +4001,8 @@ pub struct InsertNode {
     retry: Option<(Option<usize>, Prepared)>,
     /// A plain COPY or INSERT … SELECT: multi-insert (or a source running nothing volatile),
     /// into a table without triggers, RLS, generated columns, partitions, foreign storage,
-    /// view checks or unique / exclusion indexes, no ON CONFLICT or RETURNING
-    /// (`insert_plain`).
+    /// view checks or unique / exclusion indexes (but a COPY's unique indexes `fresh`
+    /// covers), no ON CONFLICT or RETURNING (`insert_plain`).
     plain: bool,
     /// Its rows not counted in pg_stat yet (`flush_plain_counts`).
     plain_counts: std::cell::Cell<i64>,
@@ -3916,6 +4017,8 @@ pub struct InsertNode {
     copy_stored: Option<Option<StoredInsert>>,
     /// Its source handed out all its rows that way (`Node::each_stored`).
     source_done: bool,
+    /// A plain multi-insert COPY's unique checks of indexes empty as it started.
+    fresh: Option<FreshUnique>,
 }
 
 /// Rows INSERT … SELECT copied as stored (`StoredInsert::insert`), for tests.
@@ -4098,6 +4201,20 @@ impl InsertNode {
         let source = source(&plan, ctx)?;
         let last_table = plan.rules.table.oid;
         let copied = plan.copy.as_ref().filter(|_| !rules.view && rules.table.partkey.is_none());
+        // (And an INSERT … SELECT whose source runs nothing volatile: `model_deferrable`.)
+        let simple = plan.on_conflict.is_none()
+            && plan.returning.is_empty()
+            && rules.triggers.is_empty()
+            && rules.rls_checks.is_empty()
+            && rules.view_checks.is_empty()
+            && rules.part_check.is_none()
+            && rules.table.foreign.is_none()
+            && rules.generated.iter().all(Option::is_none);
+        // (A multi-insert COPY into unique indexes empty as it starts: `FreshUnique`.)
+        let fresh = match copied {
+            Some(c) if c.multi && simple && rules.indexes.iter().any(checks_rows) => FreshUnique::start(rules, ctx)?,
+            _ => None,
+        };
         // A COPY whose rows and entries nothing reads before it ends (COPY's multi-insert
         // rule, no RETURNING, RLS or unique / exclusion check, plain btree indexes; AFTER
         // triggers fire once the sink is closed) writes them through the sink, each row once
@@ -4132,16 +4249,8 @@ impl InsertNode {
             && deferrable()
             && !ctx.txn.borrow().sink_open();
         let sink = (bulk || select_bulk).then_some(false);
-        // (And an INSERT … SELECT whose source runs nothing volatile: `model_deferrable`.)
-        let plain = plan.on_conflict.is_none()
-            && plan.returning.is_empty()
-            && rules.triggers.is_empty()
-            && rules.rls_checks.is_empty()
-            && rules.view_checks.is_empty()
-            && rules.part_check.is_none()
-            && rules.table.foreign.is_none()
-            && rules.generated.iter().all(Option::is_none)
-            && rules.indexes.iter().all(|b| !checks_rows(b))
+        let plain = simple
+            && rules.indexes.iter().all(|b| !checks_rows(b) || fresh.as_ref().is_some_and(|f| f.covers(b)))
             && (copied.is_some_and(|c| c.multi)
                 || plan.copy.is_none()
                     && !rules.view
@@ -4180,6 +4289,7 @@ impl InsertNode {
             stored: None,
             copy_stored: None,
             source_done: false,
+            fresh,
         })
     }
 
@@ -4366,7 +4476,8 @@ impl InsertNode {
             f.len() - 1
         };
         let mut at_flush = false;
-        let hold = multi && !self.plain;
+        // (A plain row's unique violation leaves a dead tuple counted as the general path's.)
+        let hold = multi && (!self.plain || self.fresh.is_some());
         if hold {
             super::pgstat::hold_inserts(ctx);
         }
@@ -4430,7 +4541,7 @@ impl InsertNode {
 
     /// `plain_row` of this insert's row.
     fn insert_plain(&mut self, src: Row, ctx: &ExecCtx) -> Result<Option<(Row, Vec<u8>, Option<Row>)>> {
-        Self::plain_row(&self.plan, &self.plain_counts, src, ctx)
+        Self::plain_row(&self.plan, &self.plain_counts, self.fresh.as_ref(), src, ctx)
     }
 
     /// A plain COPY's stored row (`CopyRow::Stored`): copied as it is by the COPY's
@@ -4472,7 +4583,7 @@ impl InsertNode {
                 }
                 super::Stored::Cols(..) => return Ok(false),
                 super::Stored::Row(r) => {
-                    Self::plain_row(plan, plain_counts, r, ctx)?;
+                    Self::plain_row(plan, plain_counts, None, r, ctx)?;
                 }
             }
             ctx.processed.set(ctx.processed.get() + 1);
@@ -4484,13 +4595,14 @@ impl InsertNode {
 
     /// A plain COPY's or INSERT … SELECT's row (`plain`): what `insert_new` does for a table without
     /// triggers, RLS, generated columns, partitions, foreign storage, view checks or unique /
-    /// exclusion indexes, in the same order (defaults, domains, NOT NULL and CHECK, the row
-    /// id, SSI, the index values, the model, the write, the entries), without the general
+    /// exclusion indexes (but those `fresh` checks, a COPY's), in the same order (defaults,
+    /// domains, NOT NULL and CHECK, the row id, SSI, the index values and unique checks, the
+    /// model, the write, the entries), without the general
     /// path's per-row checks. A COPY's pg_stat counts go in as its multi-insert buffer is
     /// flushed (CopyMultiInsertBufferFlush's heap_multi_insert): a row failing its
     /// constraints drops the buffer's rows before it uncounted. (A temporary table's I/O
     /// counts follow its model row by row.)
-    fn plain_row(plan: &InsertPlan, plain_counts: &std::cell::Cell<i64>, src: Row, ctx: &ExecCtx) -> Result<Option<(Row, Vec<u8>, Option<Row>)>> {
+    fn plain_row(plan: &InsertPlan, plain_counts: &std::cell::Cell<i64>, fresh: Option<&FreshUnique>, src: Row, ctx: &ExecCtx) -> Result<Option<(Row, Vec<u8>, Option<Row>)>> {
         let rules = &plan.rules;
         let t = &rules.table;
         // (A COPY row's defaults and constraints fail it before it is buffered, as
@@ -4505,7 +4617,7 @@ impl InsertNode {
         let dkey = data_key(t, &row, rowid);
         let p = Prepared { row, dkey };
         ssi_insert(t, &rules.indexes, &p.dkey, &p.row, ctx)?;
-        let vals = index_entries_checked(rules, &p, None, None, ctx)?;
+        let vals = index_entries_checked(rules, &p, None, None, fresh, ctx)?;
         let Prepared { row, dkey } = p;
         let tid = super::sizing::inserted_with(t, &rules.indexes, &dkey, &row, Some(&vals.vals), ctx)?;
         if !t.temporary && (plan.copy.is_some() || rules.checks.is_empty()) {

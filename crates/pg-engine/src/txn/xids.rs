@@ -417,6 +417,13 @@ impl Xids {
         s.running.first().copied().unwrap_or(s.next)
     }
 
+    /// How many transaction ends there have been (`completions`). A transaction's writes are
+    /// in the store before its end counts here, and its locks go after: a unique key locked
+    /// while the count stands was written by no transaction that ended meanwhile.
+    pub fn completions(&self) -> u64 {
+        self.completions.load(std::sync::atomic::Ordering::Acquire)
+    }
+
     /// The next id to hand out.
     pub fn next(&self) -> u64 {
         self.state.lock().next

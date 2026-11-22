@@ -1028,3 +1028,48 @@ SELECT ctid, id, pg_relation_size('rm') / 8192 FROM rm WHERE id IN (1, 3000) ORD
         if big { with_max_versions(1000, go) } else { go() }
     }
 }
+
+/// A multi-insert COPY into unique indexes empty as it starts (`dml::FreshUnique`: its keys
+/// checked against those it entered) still waits for another transaction writing one of its
+/// keys, then fails when that one commits (a transaction has ended since the COPY began: the
+/// index is read) and goes in when it rolls back, as PostgreSQL's _bt_check_unique waits and
+/// looks again.
+#[test]
+fn copy_into_fresh_unique_index_waits_for_writers() {
+    let dir = tempfile::tempdir().unwrap();
+    let eng = open(dir.path());
+    let mut s = eng.connect(1, "postgres", "postgres", "t").unwrap();
+    run(&mut s, "CREATE TABLE fu (id int PRIMARY KEY, a int NOT NULL);\nCREATE INDEX fu_a ON fu (a)");
+    let data: String = (1..=12_000).map(|i| format!("{i}\t{}\n", i % 101)).collect();
+    for commit in [true, false] {
+        let mut w = eng.connect(2, "postgres", "postgres", "t").unwrap();
+        run(&mut w, "BEGIN;\nINSERT INTO fu VALUES (11000, 7)");
+        let (e2, d) = (eng.clone(), data.clone());
+        let copy = std::thread::spawn(move || {
+            let mut c = e2.connect(3, "postgres", "postgres", "t").unwrap();
+            c.query_copy("COPY fu FROM STDIN", d.as_bytes()).map(|_| ()).map_err(|e| format!("{e:?}"))
+        });
+        // (Until the COPY waits for the key; whenever the writer ends, the answer is the same.)
+        for _ in 0..200 {
+            if rows(&mut s, "SELECT count(*) FROM pg_stat_activity WHERE wait_event_type = 'Lock'") == ["[Int8(1)]"] {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(25));
+        }
+        run(&mut w, if commit { "COMMIT" } else { "ROLLBACK" });
+        let r = copy.join().unwrap();
+        if commit {
+            let e = r.unwrap_err();
+            assert!(e.contains("duplicate key value violates unique constraint \\\"fu_pkey\\\"") && e.contains("Key (id)=(11000) already exists.") && e.contains("COPY fu, line 11000"), "{e}");
+            assert_eq!(rows(&mut s, "SELECT count(*), sum(a) FROM fu"), ["[Int8(1), Int8(7)]"]);
+        } else {
+            r.unwrap();
+            assert_eq!(rows(&mut s, "SELECT count(*), sum(id) FROM fu"), ["[Int8(12000), Int8(72006000)]"]);
+            run(&mut s, "SET enable_seqscan = off");
+            assert_eq!(rows(&mut s, "SELECT count(*) FROM fu WHERE id > 0"), ["[Int8(12000)]"]);
+            assert_eq!(rows(&mut s, "SELECT count(*) FROM fu WHERE a >= 0"), ["[Int8(12000)]"]);
+            run(&mut s, "RESET enable_seqscan");
+        }
+        run(&mut s, "TRUNCATE fu");
+    }
+}
