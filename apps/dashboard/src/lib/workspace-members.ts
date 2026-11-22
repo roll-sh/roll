@@ -72,3 +72,20 @@ export function groupControlsFor(me: Role | undefined, g: GroupRole, inGroups: S
   const within = groupGrantable(me).includes(g.role);
   return { change: within && (inGroups === undefined || inGroups.has(g.group)), remove: within };
 }
+
+/** An environment as a developer's reach reads it. */
+export type ReachedEnvironment = { slug: string; kind: "standard" | "ephemeral"; protected: boolean };
+
+/**
+ * The standard environments a developer reaches in full (docs/members.md, D3): the ones named
+ * (`pv-*` covers `pv-42`), or by default every one that isn't protected, never `production`
+ * unless it's named (roll-auth's `scope::PRODUCTION`).
+ */
+export function developerReach(envs: ReachedEnvironment[], named: string[] | null, def: "unprotected" | "all" | "none" = "unprotected"): string[] {
+  const standard = envs.filter((e) => e.kind === "standard");
+  const covers = (pattern: string, slug: string) => pattern === slug || (pattern.endsWith("*") && pattern.length > 1 && slug.startsWith(pattern.slice(0, -1)));
+  if (named) return standard.filter((e) => named.some((n) => covers(n, e.slug))).map((e) => e.slug);
+  if (def === "all") return standard.map((e) => e.slug);
+  if (def === "none") return [];
+  return standard.filter((e) => !e.protected && e.slug !== "production").map((e) => e.slug);
+}

@@ -21,6 +21,17 @@ pub fn diff(parent: &[String], branch: &[String]) -> Vec<String> {
     cap(diff_all(parent, branch))
 }
 
+/// [`diff_all`]'s lines that the change made: those its branch also differs in from `base`, the
+/// branch's own schema as it was made (before any seed or release ran). What production did since
+/// (another change's migration landing first, a new search index) isn't the change's: landing it
+/// doesn't undo that. Without a base (a branch made before bases were kept), every line.
+pub fn diff_since(parent: &[String], base: Option<&[String]>, branch: &[String]) -> Vec<String> {
+    let lines = diff_all(parent, branch);
+    let Some(base) = base else { return lines };
+    let made: BTreeSet<String> = diff_all(base, branch).into_iter().collect();
+    lines.into_iter().filter(|l| made.contains(l)).collect()
+}
+
 /// [`diff`] without the cap: what [`risks`] reads, so nothing past the shown lines is missed.
 pub fn diff_all(parent: &[String], branch: &[String]) -> Vec<String> {
     let (p, b): (BTreeSet<&str>, BTreeSet<&str>) = (parent.iter().map(String::as_str).collect(), branch.iter().map(String::as_str).collect());

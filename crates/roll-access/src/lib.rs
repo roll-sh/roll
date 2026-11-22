@@ -16,6 +16,7 @@ pub mod checkup;
 pub mod evaluate;
 pub mod leaks;
 pub mod members;
+pub mod event_subs;
 pub mod oauth;
 pub mod rate;
 pub mod sinks;
@@ -582,6 +583,9 @@ pub struct Access {
     pub limiter: rate::Limiter,
     /// Delivers audit sinks, when rolld can (it needs `ROLL_SECRET_KEY`).
     pub sinks: std::sync::OnceLock<Arc<dyn sinks::SinkTransport>>,
+    /// MCP Events' webhook callbacks: their own transport (an agent chooses these URLs, an admin
+    /// a sink's), with its own private-address switch and sealing.
+    pub event_hooks: std::sync::OnceLock<Arc<dyn sinks::SinkTransport>>,
     /// Users as they are now, for their own tokens (rolld: roll-accounts' sessions).
     pub people: std::sync::OnceLock<Arc<dyn roll_auth::Sessions>>,
     /// The workspace: people's memberships, for their sessions' grants (docs/members.md), and what
@@ -593,6 +597,8 @@ pub struct Access {
     pub(crate) github_keys: leaks::GithubKeys,
     /// OAuth registrations lately, per network (open registration's limit).
     pub(crate) registrations: std::sync::Mutex<Window>,
+    /// Callback URLs each connection asked roll to verify lately (MCP Events' webhooks).
+    pub(crate) event_verifies: std::sync::Mutex<Window>,
     /// How OIDC issuers' keys are fetched for trusted machine clients: rolld's guarded client.
     /// Unset: only clients with pinned keys sign in that way.
     pub oidc_fetch: std::sync::OnceLock<Arc<dyn roll_oidc::Fetch + Send + Sync>>,
@@ -624,7 +630,7 @@ impl Access {
 
     /// On a database already open (tests: `code_sql::Db::open_or_test`, so they run on Postgres too).
     pub fn with_db(db: code_sql::Db, config: Config, resolvers: Resolvers) -> Result<Arc<Access>> {
-        Ok(Arc::new(Access { store: Store::new(db)?, config, resolvers, chat: Default::default(), nodes: Default::default(), revokers: Default::default(), decoy_hooks: Default::default(), limiter: Default::default(), sinks: Default::default(), people: Default::default(), workspace: Default::default(), mail_gate: Default::default(), github_keys: Default::default(), registrations: Default::default(), oidc_fetch: Default::default(), oidc_keys: Default::default(), sign_ins: Default::default(), device_starts: Default::default(), device_guesses: Default::default(), policy_cache: Default::default() }))
+        Ok(Arc::new(Access { store: Store::new(db)?, config, resolvers, chat: Default::default(), nodes: Default::default(), revokers: Default::default(), decoy_hooks: Default::default(), limiter: Default::default(), sinks: Default::default(), event_hooks: Default::default(), people: Default::default(), workspace: Default::default(), mail_gate: Default::default(), github_keys: Default::default(), registrations: Default::default(), event_verifies: Default::default(), oidc_fetch: Default::default(), oidc_keys: Default::default(), sign_ins: Default::default(), device_starts: Default::default(), device_guesses: Default::default(), policy_cache: Default::default() }))
     }
 
     /// The resource of `kind` named `id`, with its project and environment filled in.
@@ -1573,8 +1579,9 @@ impl roll_auth::Grants for Access {
         if g.decoy {
             return None;
         }
-        // Stopped for being idle (the token policy), as the evaluator answers its requests.
-        if self.policy_now().idle(&g, code_sql::now_ms()) {
+        // Stopped for being idle (the token policy), or an OAuth client the policy no longer lists,
+        // as the evaluator answers its requests.
+        if self.policy_now().idle(&g, code_sql::now_ms()) || !self.policy_now().allows_grant(&g) {
             return None;
         }
         if let Some(user) = g.user.as_deref() {

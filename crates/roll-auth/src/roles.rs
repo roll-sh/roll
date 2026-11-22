@@ -64,7 +64,8 @@ pub enum GroupAssigners {
 /// environments.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum DeveloperDefault {
-    /// Every environment the product says isn't protected (`unprotected` rules).
+    /// Every environment the product says isn't protected (`unprotected` rules), never `production`
+    /// unless named.
     Unprotected,
     /// Every environment.
     All,
@@ -219,11 +220,17 @@ mod tests {
         assert_eq!(viewer.outcome(&secret("development", false), Action::Read), Outcome::Allow);
         assert_eq!(viewer.outcome(&secret("development", false), Action::Reveal), Outcome::Deny, "D2: a viewer sees no values");
         assert_eq!(dev.outcome(&secret("development", false), Action::Reveal), Outcome::Allow);
+        // What a new project has: development and staging plain, production protected.
+        assert_eq!(dev.outcome(&secret("staging", false), Action::Write), Outcome::Allow);
         assert_eq!(dev.outcome(&secret("production", true), Action::Reveal), Outcome::Deny, "D3: not a protected environment");
         assert_eq!(dev.outcome(&secret("production", true), Action::Read), Outcome::Allow);
+        // A project made before production started protected: still only when named.
+        assert_eq!(dev.outcome(&secret("production", false), Action::Reveal), Outcome::Deny, "D3: production only when named");
+        assert_eq!(dev.outcome(&secret("production", false), Action::Write), Outcome::Deny);
         assert_eq!(dev.outcome(&secret("development", false), Action::Delete), Outcome::Deny);
         let named = scope(Role::Developer, Some(vec!["production".into()]));
         assert_eq!(named.outcome(&secret("production", true), Action::Reveal), Outcome::Allow, "production when named");
+        assert_eq!(named.outcome(&secret("production", false), Action::Reveal), Outcome::Allow);
         assert_eq!(named.outcome(&secret("development", false), Action::Reveal), Outcome::Deny, "only the named ones");
         assert_eq!(admin.outcome(&secret("production", true), Action::Reveal), Outcome::Allow, "D4");
         assert_eq!(admin.outcome(&secret("production", true), Action::Admin), Outcome::Allow);

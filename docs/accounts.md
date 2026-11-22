@@ -79,6 +79,10 @@ sign_in_places(user_id TEXT, place TEXT, first_at INTEGER, last_at INTEGER,  -- 
 passkey_challenges(id TEXT PRIMARY KEY, user_id TEXT, purpose TEXT NOT NULL,  -- register | signin
          challenge TEXT NOT NULL, expires_at INTEGER NOT NULL)     -- used once, 5 minutes
 throttle(key TEXT PRIMARY KEY, n INTEGER NOT NULL, since INTEGER NOT NULL)
+account_deletions(user_id TEXT PRIMARY KEY, at INTEGER NOT NULL,     -- outboxes: other products
+         claimed_at INTEGER, done INTEGER NOT NULL)                   -- act after the write
+account_offboardings(user_id TEXT PRIMARY KEY, at INTEGER NOT NULL,  -- (Deleting your account,
+         claimed_at INTEGER, done INTEGER NOT NULL)                   -- Offboarding)
 ```
 
 ## Secrets at rest
@@ -417,8 +421,10 @@ over SCIM 2.0 (RFC 7643 and 7644), so someone who leaves loses roll at once.
 - Deactivating is roll's own disable, done every time it's asked (a retry finishes cutting off
   what a failure left): the person's sessions end, and their roll code owner (its tokens and
   machine links) is cut off. Their own roll tokens and connections pause with the account, and
-  come back if it's reactivated. SCIM reactivates only an account it deactivated: one an admin
-  disabled stays so (403 `admin_disabled`).
+  come back if it's reactivated. What was handed out on their say ends ([Offboarding](#offboarding)):
+  their leases are revoked, their one-time shares end and sandboxes holding values they copied
+  stop. SCIM reactivates only an account it deactivated: one an admin disabled stays so (403
+  `admin_disabled`).
 
 ### Second factor
 
@@ -667,6 +673,31 @@ being the person's handle, answers 204 and clears the session cookie.
   left with no owner who can sign in is the operator's or an admin's to give one. The deletion's
   write records it in an outbox (`account_deletions`), and other products' hooks
   (`Accounts::on_deleted`) run from it after the write, and again until each succeeds.
+- It's an offboarding too ([Offboarding](#offboarding)), for what an admin reached outside their
+  memberships and for sandboxes holding values they copied.
+
+### Offboarding
+
+Someone loses rights in roll when an admin disables them (`PATCH /users/{id} {disabled: true}`),
+when SCIM deactivates them (`active: false` or `DELETE`), when an admin makes them no longer an
+admin (`{admin: false}`), or when they delete their account. Their sessions end in that write, and
+their tokens stop at their next use, but their memberships stay (a disabled person is still listed,
+and an enabled one is back where they were). What was handed out on their say, and that nothing
+checks again, ends at once rather than at its TTL, as Vault revokes a token's leases with it:
+
+- **roll secrets** runs the member-removal hook (`Secrets::member_changed`) for every project
+  holding an open share, a live lease or a shared folder (`Secrets::person_offboarded`). A disabled
+  person's session grant sees nothing, so their dynamic database and cloud credentials are revoked
+  (outside the write, as a removal's are), their one-time shares end and their shared folders stop
+  being shared. A demoted admin keeps what their memberships still allow.
+- **Agents sandboxes** whose copied secrets they gave (`secrets_by` is them, or a token of theirs)
+  are stopped (`Code::stop_sandboxes_copied_by`). The next start or wake asks roll secrets again,
+  and takes the values out.
+
+The write records it in an outbox (`account_offboardings`, one row per person), and the hooks
+(`Accounts::on_offboarded`) run from it after the write, then every minute until each succeeds.
+Disabling again records it again (a retry finishes what a failure left). Enabling the account
+gives nothing back: revoked leases stay revoked, and the person asks for new ones.
 
 ## Routes
 
@@ -765,7 +796,7 @@ same callback; on success it redirects to `return_to` (default `/dashboard/accou
 | `DELETE /v1/accounts/invites/{id}` | | 204 (unused invites only; 409 once used) |
 | `POST /v1/accounts/invites/{id}/resend` | | `Invite` with a fresh `token` and `url`, valid another 7 days, mailed again; the old link stops at once, and so do sign-ins already begun with it (sudo mode for an invite that makes an admin); 409 used, or the address has an account now |
 | `GET /v1/accounts/users` | | `User[]`, oldest first; each with `last_active_at` (a sign-in or a session's use, noted every five minutes; `null` if not since roll began keeping it). People (exported as CSV from the page: handle, name, address, admin, turned off, second factors, dormant, last active, made; cells defused as the audit export's are) marks anyone with none in 90 days as dormant, as GitHub Enterprise's dormant users report does: turning off accounts nobody uses closes a way in |
-| `PATCH /v1/accounts/users/{id}` | `{admin?, disabled?}` | `User`; disabling deletes the user's sessions and cuts off their roll code owner (its tokens are revoked and its machines' links closed; turning the account back on gives none of them back) |
+| `PATCH /v1/accounts/users/{id}` | `{admin?, disabled?}` | `User`; disabling deletes the user's sessions and cuts off their roll code owner (its tokens are revoked and its machines' links closed; turning the account back on gives none of them back); disabling or dropping `admin` offboards them ([Offboarding](#offboarding)) |
 | `DELETE /v1/accounts/users/{id}/sessions` | | 204: signs the user out everywhere |
 | `GET /v1/accounts/users/{id}/sessions` | | `Session[]`: the person's sessions (none `current`) |
 | `DELETE /v1/accounts/users/{id}/sessions/{session}` | | 204: ends that one session (a lost laptop); 404 if it isn't theirs |

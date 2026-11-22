@@ -653,7 +653,13 @@ migrations (a fork's too), so each line is made printable once, where the diff i
 control characters escaped (a newline in a name can't fake a line, an escape sequence can't reach
 a terminal), lines cut at 300 characters, 200 lines at most; the comment keeps them inside a fence
 they can't close. A failure to read is
-logged and read again on the next converge; it never fails the preview.
+logged and read again on the next converge; it never fails the preview. Only what the change made is
+named: each branch's own lines are kept as it's made (masked, before any seed or release runs;
+`base_schema` on its resource row, read from the branch alone), and a line counts only when the
+branch also differs in it from that base (`schema::diff_since`). Another change's migration that
+lands on production while the preview is open isn't read as this one dropping its table, in the
+lines or the risks. A branch made before bases were kept, or whose base couldn't be read (said in
+its activity), is compared with its parent alone.
 
 What in those lines would hurt production when the change lands is named above them
 (`schema_risks`, `roll_previews::schema::risks`; PlanetScale's deploy request warnings, Atlas's
@@ -675,8 +681,11 @@ Search branches the same way: each one's `_mapping` and its parent's, read throu
 operator console request (no cluster password), become `index <name>` and `field <index>.<path>
 <type>` lines (nested fields and multi-fields by path, system indices left out), so a change
 whose code adds or retypes a field says so (live: `+ field products.price float` after the
-preview wrote a document with a price). With several such resources, each one's lines follow a
-`# <kind>:<ref>` heading.
+preview wrote a document with a price). An index the parent made after the branch started (the
+cluster's `parent_at`: a connector's first sync, a rollover, a day's `logs-…` index) that the
+branch doesn't have is left out: production's new index, not one the change drops (live: a
+connector's index the parent's sync makes after the preview is no risk). With several such
+resources, each one's lines follow a `# <kind>:<ref>` heading.
 
 ## Egress
 
@@ -866,7 +875,7 @@ it resolves as without placeholders and says "placeholders off: …; a writer sa
 again turns them back on" in its activity, never with anyone else's rights. rolld's
 `SecretsIntercepts` asks `intercept_ca` for the consumer (reused while it lives, asked again
 after an hour so newly bound hosts are covered; none while the preview holds no placeholder),
-`intercept_ca_live` on every connection, and roll secrets' `proxy::filter` for each request; the
+`intercept_ca_stands` on every connection, and roll secrets' `proxy::filter` for each request; the
 preview's teardown calls `end_consumer`, ending its placeholders and CAs at once. Each preview's
 socket lives under `<home>/previews/intercept`. `a_roll_only_preview_takes_placeholders_made_by_who_saved_its_rules`.
 Only roll secrets' `maker_unreachable` refusal falls back without placeholders; any other 403 is
@@ -1608,7 +1617,7 @@ previews in it), the operator and admins see every project.
 | `POST /v1/previews/{id}/reset` | `{resources?: ["postgres:prj_…"]}` | `Preview`: re-branch from the parents |
 | `GET /v1/previews/{id}/screenshot` | | `image/png`: the first service's page at the preview's head (404 when it has none); `?previous=1` the one before, `?view=phone` at a phone's width, `?base=1` the default branch's preview's, `?page=/pricing` another of `github.pages`, `?diff=base` or `?diff=previous` where it differs from that one or the one before (the page faded, changed pixels marked red) |
 | `GET /v1/previews/{id}/screenshot.png?exp=&sig=` | | `image/png` behind a signed, expiring link, without credentials (403 otherwise): the pull request comment's image; `&diff=base` under its own signature, the diff against main |
-| `GET`/`POST /v1/previews/{id}/shares` | `{hours}` (1–720) for a new one | `Share[]` (never a token), or 201 `Share` with `url`, the only time the link is shown; 409 for a public preview or past 20 live ones |
+| `GET`/`POST /v1/previews/{id}/shares` | `{hours}` (1–720) for a new one | `Share[]` (never a token), or 201 `Share` with `url`, the only time the link is shown; 409 for a public preview or past 20 live ones. A link works only while its maker (the person, or the person behind the token, that made it; not the operator's) may still open the project's previews: an account that still signs in, with a role that reveals a preview. Asked again at most every few minutes while it's used; one whose maker may not ends at once ("ada's share link ended: …" in the activity). `visit::tests::a_signed_in_person_gets_into_a_team_preview` |
 | `DELETE /v1/previews/{id}/shares/{share}` | | 204: the link stops at the visitor's next request |
 | `GET`/`PUT /v1/previews/{id}/env` | `{vars: {NAME: value \| null}}` (`null` removes; at most 100, 32 KiB each; a value may be `roll://ENV[/folder]/KEY`) | `{vars}`: the preview's own variables; its services redeploy with them. 403 for a reference to an environment other than the base without the caller's reveal on its folder; 400 for a malformed one or a look-alike |
 | `POST /v1/previews/{id}/approve` | `{head}` (the head looked at) | `Preview`: that head of a fork's pull request on a Git URL service runs (`pull.approved_head`); the next push waits again. 409 when the preview moved on to another head or isn't a fork's pull request. Admin in the permissions catalogue, and no MCP tool: letting outside code run with the project's data is a person's call |

@@ -76,6 +76,8 @@ pub struct Runtime {
     pub rollups: rollup::Runs,
     /// Snapshot lifecycle policies taking a snapshot right now.
     pub slm_running: std::sync::atomic::AtomicUsize,
+    /// Connectors syncing right now.
+    pub connector_syncs: entsearch::sync::Syncs,
     /// What the audit log records, as of a state version ([`security::audit::snapshot`]).
     pub audit: parking_lot::Mutex<Option<(u64, std::sync::Arc<security::audit::Snapshot>)>>,
 }

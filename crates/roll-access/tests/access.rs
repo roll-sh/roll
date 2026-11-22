@@ -281,7 +281,7 @@ impl Daemon {
     /// [`Daemon::via_mcp`] with the answer's body.
     async fn via_mcp_body(&self, token: &str, method: Method, path: &str) -> (StatusCode, Value) {
         let mut req = Request::builder().method(method).uri(path).header("authorization", format!("Bearer {token}")).body(Body::empty()).unwrap();
-        req.extensions_mut().insert(roll_access::evaluate::McpCall { tool: "test_tool".into(), args: Arc::new(json!({})), ip: None, elicits: false, client: None, quiet: false });
+        req.extensions_mut().insert(roll_access::evaluate::McpCall { tool: "test_tool".into(), args: Arc::new(json!({})), ip: None, elicits: false, client: None, quiet: false, unattended: false });
         let resp = self.router.clone().oneshot(req).await.unwrap();
         let status = resp.status();
         let bytes = resp.into_body().collect().await.unwrap().to_bytes();
@@ -291,7 +291,7 @@ impl Daemon {
     /// A request roll's MCP server makes for a tool call (its `McpCall` extension), with `token`.
     async fn via_mcp(&self, token: &str, method: Method, path: &str) -> StatusCode {
         let mut req = Request::builder().method(method).uri(path).header("authorization", format!("Bearer {token}")).body(Body::empty()).unwrap();
-        req.extensions_mut().insert(roll_access::evaluate::McpCall { tool: "test_tool".into(), args: Arc::new(json!({})), ip: None, elicits: false, client: None, quiet: false });
+        req.extensions_mut().insert(roll_access::evaluate::McpCall { tool: "test_tool".into(), args: Arc::new(json!({})), ip: None, elicits: false, client: None, quiet: false, unattended: false });
         self.router.clone().oneshot(req).await.unwrap().status()
     }
 
@@ -777,24 +777,33 @@ async fn clients_connect_by_their_metadata_document() {
     let d = Daemon::new(50);
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let base = format!("http://{}", listener.local_addr().unwrap());
-    let (b1, b2) = (base.clone(), base.clone());
+    let (b1, b2, b3, b4) = (base.clone(), base.clone(), base.clone(), base.clone());
     let docs = Router::new()
         .route("/client.json", get(move || async move { axum::Json(json!({ "client_id": format!("{b1}/client.json"), "client_name": "Doc Client", "redirect_uris": ["http://127.0.0.1:43111/cb"] })) }))
-        .route("/liar.json", get(move || async move { axum::Json(json!({ "client_id": format!("{b2}/other.json"), "redirect_uris": ["http://127.0.0.1:43111/cb"] })) }));
+        .route("/liar.json", get(move || async move { axum::Json(json!({ "client_id": format!("{b2}/other.json"), "redirect_uris": ["http://127.0.0.1:43111/cb"] })) }))
+        // Draft -03: a confidential client's document, by its secret or by its only method.
+        .route("/secret.json", get(move || async move { axum::Json(json!({ "client_id": format!("{b3}/secret.json"), "client_secret": "s", "redirect_uris": ["http://127.0.0.1:43111/cb"] })) }))
+        .route("/basic.json", get(move || async move { axum::Json(json!({ "client_id": format!("{b4}/basic.json"), "token_endpoint_auth_methods_supported": ["client_secret_basic"], "redirect_uris": ["http://127.0.0.1:43111/cb"] })) }));
     tokio::spawn(async move { axum::serve(listener, docs).await.unwrap() });
     let id = format!("{base}/client.json");
     let enc = |s: &str| url::form_urlencoded::byte_serialize(s.as_bytes()).collect::<String>();
     let (s, c) = d.call(OPERATOR, Method::GET, &format!("/v1/access/oauth/clients/{}", enc(&id)), None).await;
     assert_eq!((s, c["name"].as_str()), (StatusCode::OK, Some("Doc Client")), "{c}");
-    let (s, _) = d.call(OPERATOR, Method::GET, &format!("/v1/access/oauth/clients/{}", enc(&format!("{base}/liar.json"))), None).await;
-    assert_eq!(s, StatusCode::BAD_REQUEST);
+    // Refused: one naming another client, a confidential one, and an id with a user in it or not in
+    // normal form (the URL fetched is the one compared).
+    let userinfo = base.replace("http://", "http://u:p@");
+    for doc in [format!("{base}/liar.json"), format!("{base}/secret.json"), format!("{base}/basic.json"), format!("{userinfo}/client.json"), format!("{base}/x/../client.json")] {
+        let (s, e) = d.call(OPERATOR, Method::GET, &format!("/v1/access/oauth/clients/{}", enc(&doc)), None).await;
+        assert_eq!(s, StatusCode::BAD_REQUEST, "{doc}: {e}");
+    }
 
     let (verifier, challenge) = ("dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk", "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM");
-    let consent = json!({ "client_id": id, "redirect_uri": "http://127.0.0.1:43111/cb", "code_challenge": challenge, "rules": [{ "product": "workspace", "resources": "*", "actions": { "read": "allow" } }] });
+    // Its loopback redirect on whatever port the app listens on today (RFC 8252 7.3).
+    let consent = json!({ "client_id": id, "redirect_uri": "http://127.0.0.1:50123/cb", "code_challenge": challenge, "rules": [{ "product": "workspace", "resources": "*", "actions": { "read": "allow" } }] });
     let (s, out) = d.call(OPERATOR, Method::POST, "/v1/access/oauth/authorize", Some(consent)).await;
     assert_eq!(s, StatusCode::OK, "{out}");
     let code = url::Url::parse(out["redirect"].as_str().unwrap()).unwrap().query_pairs().find(|(k, _)| k == "code").unwrap().1.to_string();
-    let (s, tokens) = d.form("/v1/access/oauth/token", &[("grant_type", "authorization_code"), ("code", &code), ("redirect_uri", "http://127.0.0.1:43111/cb"), ("client_id", &id), ("code_verifier", verifier)]).await;
+    let (s, tokens) = d.form("/v1/access/oauth/token", &[("grant_type", "authorization_code"), ("code", &code), ("redirect_uri", "http://127.0.0.1:50123/cb"), ("client_id", &id), ("code_verifier", verifier)]).await;
     assert_eq!(s, StatusCode::OK, "{tokens}");
     assert_eq!(d.call(tokens["access_token"].as_str().unwrap(), Method::GET, "/v1/workspace/projects", None).await.0, StatusCode::OK);
 }
@@ -948,8 +957,17 @@ async fn agents_ask_what_the_policy_says() {
     let (s, e) = d.call(OPERATOR, Method::PUT, "/v1/access/policy", Some(json!({ "agents_ask": [{ "product": "nope" }] }))).await;
     assert_eq!(s, StatusCode::BAD_REQUEST, "{e}");
     assert_eq!(d.call(OPERATOR, Method::PUT, "/v1/access/policy", Some(json!({ "agents_ask": [{ "product": "postgres", "actions": ["delete"] }] }))).await.0, StatusCode::OK);
+    let (_, now) = d.call(&token, Method::GET, "/v1/access/approvals/decided?latest=1", None).await;
     let (s, pending) = d.via_mcp_body(&token, Method::DELETE, "/v1/projects/pa").await;
     assert_eq!((s, pending["code"].as_str()), (StatusCode::FORBIDDEN, Some("approval_pending")), "{pending}");
+    // Decided, it's in the connection's feed of decisions (MCP Events' access.approval), after the
+    // place it started from; another connection's feed hasn't it.
+    let id = pending["approval"].as_str().unwrap();
+    assert_eq!(d.call(OPERATOR, Method::POST, &format!("/v1/access/approvals/{id}/approve"), None).await.0, StatusCode::OK);
+    let (_, feed) = d.call(&token, Method::GET, &format!("/v1/access/approvals/decided?after={}", now["next"]), None).await;
+    assert_eq!((feed["events"][0]["id"].as_str(), feed["events"][0]["state"].as_str()), (Some(id), Some("approved")), "{feed}");
+    let (other, _) = d.token(json!([{ "product": "postgres", "resources": "*", "actions": { "read": "allow" } }]), json!({})).await;
+    assert_eq!(d.call(&other, Method::GET, "/v1/access/approvals/decided?after=0", None).await.1["events"], json!([]));
     assert_ne!(d.via_mcp(&token, Method::GET, "/v1/projects").await, StatusCode::FORBIDDEN, "reads go on");
     assert_ne!(d.call(&token, Method::DELETE, "/v1/projects/pb", None).await.0, StatusCode::FORBIDDEN, "the API itself: not an agent");
 }
