@@ -24,6 +24,32 @@ use search_index::{QueryRef, Searcher};
 use std::cell::RefCell;
 use std::sync::Arc;
 
+/// The filters a shard's documents pass before a request's query sees them.
+#[derive(Clone, Debug, Default)]
+pub struct DocFilter {
+    /// The filters of the filtered aliases the index was reached through. A request's runtime
+    /// fields apply to them, as in Elasticsearch.
+    pub alias: Option<Query>,
+    /// The reader's document level security, built with [`QueryCtx::for_security`].
+    pub security: Option<Query>,
+}
+
+impl DocFilter {
+    /// Both filters as one (`None`: neither applies). Both are the owner's: a browser key's
+    /// policy doesn't hold them ([`QueryCtx::owner_filter`]).
+    pub fn build(&self, ctx: &QueryCtx) -> EsResult<Option<QueryRef>> {
+        let alias = self.alias.as_ref().map(|q| ctx.owner_filter(q)).transpose()?;
+        let security = match &self.security {
+            Some(q) => Some(ctx.for_security()?.owner_filter(q)?),
+            None => None,
+        };
+        Ok(match (alias, security) {
+            (Some(a), Some(s)) => Some(arc(BooleanQuery::new().add(Occur::Filter, a).add(Occur::Filter, s))),
+            (a, s) => a.or(s),
+        })
+    }
+}
+
 /// What converting a query needs: the index's fields, its shard's searcher, the cluster.
 pub struct QueryCtx<'a> {
     pub cluster: &'a Cluster,
@@ -49,10 +75,13 @@ pub struct QueryCtx<'a> {
     pub warnings: RefCell<Vec<String>>,
     /// The request's `runtime_mappings` (the mapping's `runtime` section applies too).
     pub runtime_mappings: Option<crate::json::Map>,
+    /// Where runtime fields resolve: the search's scope, or a fixed one (a security filter's,
+    /// [`QueryCtx::for_security`]).
+    pub runtime_source: super::runtime::RuntimeSource,
     /// Constant-scoring join queries built so far (see [`super::join`]).
     pub constant_joins: std::cell::Cell<u32>,
-    /// The searched alias's filter: `knn` queries take it as one more pre-filter.
-    pub alias_filter: Option<crate::query::Query>,
+    /// The searched shard's document filters: `knn` queries take them as more pre-filters.
+    pub filter: DocFilter,
     /// Converting the query of nested inner hits: `knn` queries become exact searches over
     /// every vector (`InnerHitsRewriteContext` → `ExactKnnQueryBuilder`).
     pub exact_knn: std::cell::Cell<bool>,
@@ -218,8 +247,9 @@ impl<'a> QueryCtx<'a> {
             shard: 0,
             warnings: RefCell::new(Vec::new()),
             runtime_mappings: None,
+            runtime_source: super::runtime::RuntimeSource::Ambient,
             constant_joins: std::cell::Cell::new(0),
-            alias_filter: None,
+            filter: DocFilter::default(),
             exact_knn: std::cell::Cell::new(false),
             strict_unmapped: std::cell::Cell::new(false),
             unmapped: RefCell::new(None),
@@ -228,11 +258,29 @@ impl<'a> QueryCtx<'a> {
         }
     }
 
+    /// This context for a security filter (document level security: a role's, an API key's role
+    /// descriptors', OpenSearch Security's `dls`). The request's runtime fields don't exist
+    /// there, so none can shadow a field the filter reads (Elasticsearch applies the filter to
+    /// the shard's reader, before the request); the mapping's own runtime fields still do.
+    pub fn for_security(&self) -> EsResult<QueryCtx<'a>> {
+        let scope = super::runtime::RuntimeScope::of_mapping(&self.cluster.scripts, self.cluster.state(), self.idx, self.table, self.shard as i32)?;
+        let mut c = QueryCtx::new(self.cluster, self.st, self.idx, self.table, self.searcher, self.now_ms, self.security.clone());
+        c.shard = self.shard;
+        // The owner's filter: a browser key's policy doesn't hold it (its `filter` is in it).
+        c.owner.set(true);
+        c.nested.replace(self.nested.borrow().clone());
+        c.runtime_source = super::runtime::RuntimeSource::Fixed(scope);
+        Ok(c)
+    }
+
     /// The runtime field `name`: the mapping's `runtime` section shadows concrete fields of
     /// the same name, a request's `runtime_mappings` shadow both.
     pub fn runtime_field(&self, name: &str) -> Option<Arc<super::runtime::RtField>> {
         if self.idx.mapping.runtime.is_empty() && self.runtime_mappings.as_ref().is_none_or(|r| r.is_empty()) {
             return None;
+        }
+        if let super::runtime::RuntimeSource::Fixed(scope) = &self.runtime_source {
+            return scope.as_ref().and_then(|s| s.field(name).cloned());
         }
         // The shard's scope has them parsed already.
         if let Some(scope) = super::runtime::RuntimeScope::ambient()
@@ -249,6 +297,9 @@ impl<'a> QueryCtx<'a> {
             return Vec::new();
         }
         let keep = |rt: &super::runtime::RuntimeFields| rt.matching(pattern).into_iter().filter(|n| rt.get(n).is_some_and(|f| f.ty != super::runtime::RtType::GeoPoint)).collect();
+        if let super::runtime::RuntimeSource::Fixed(scope) = &self.runtime_source {
+            return scope.as_ref().map(|s| keep(s.fields())).unwrap_or_default();
+        }
         if let Some(scope) = super::runtime::RuntimeScope::ambient()
             && scope.index_name() == self.idx.name
         {
@@ -263,7 +314,7 @@ impl<'a> QueryCtx<'a> {
             return Err(EsError::new(400, "exception", "queries cannot be executed against runtime fields while [search.allow_expensive_queries] is set to [false]."));
         }
         self.no_scripts()?;
-        let ev = super::runtime::Evaluator::new(&self.cluster.scripts, self.st, self.table, self.shard as i32, &self.idx.name, f)?;
+        let ev = super::runtime::Evaluator::new(&self.cluster.scripts, self.st, self.table, self.shard as i32, &self.idx.name, f)?.with_runtime(self.runtime_source.clone());
         // `AbstractScriptFieldQuery`: constant scoring, its own description and explanation.
         let q = search_index::query::ScriptQuery { script: Arc::new(super::runtime::RuntimeQuery { ev, pred: Arc::new(pred) }) };
         Ok(arc(q))
