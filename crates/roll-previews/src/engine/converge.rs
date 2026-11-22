@@ -198,6 +198,7 @@ impl Engine {
                     x.state = ResourceState::Pending;
                     x.error = None;
                 })?;
+                self.store.set_base_schema(&r.id, res.kind, &res.parent, None)?;
                 self.store.log(&r.id, &format!("branched {key} as {}", made.r#ref))?;
                 self.store.set_seed_needed(&r.id, true)?;
                 self.mask(&r.id, &b, &key, &made.r#ref, s).await?;
@@ -222,6 +223,7 @@ impl Engine {
                     x.error = None;
                     x.bytes = 0;
                 })?;
+                self.store.set_base_schema(&r.id, res.kind, &res.parent, None)?;
                 self.store.log(&r.id, &format!("reset {key} from its parent"))?;
                 self.store.set_seed_needed(&r.id, true)?;
                 self.mask(&r.id, &b, &key, &fresh.r#ref, s).await?;
@@ -229,10 +231,12 @@ impl Engine {
                 self.store.set_resource(&r.id, res.kind, &res.parent, |x| x.state = ResourceState::Ready)?;
                 reset = true;
             }
-            // Made (or reset) but not finished: masks again, then Ready.
+            // Made (or reset) but not finished: masks again, then Ready. No base is kept here: a
+            // branch masked again in place (changed rules, not Postgres) holds what the change's
+            // seed and release wrote, and one made just before a crash has none (compared with
+            // its parent alone).
             Some(branch) if res.state != ResourceState::Ready => {
                 self.mask(&r.id, &b, &key, branch, s).await?;
-                self.keep_base(&r.id, &b, &res, branch, s).await?;
                 self.store.set_resource(&r.id, res.kind, &res.parent, |x| {
                     x.state = ResourceState::Ready;
                     x.error = None;

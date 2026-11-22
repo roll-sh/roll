@@ -2,7 +2,8 @@ import { Check, Copy, LogOut, Trash2, UserPlus, X } from "lucide-react";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { useSession } from "@/lib/accounts-api";
 import { ROLES, workspaceApi, type Invite, type Member, type Role, type RoleRules, type WorkspaceProject } from "@/lib/workspace-api";
-import { controlsFor, describeEnvironments, grantable, manages, parseEnvironments } from "@/lib/workspace-members";
+import { secretsApi } from "@/lib/secrets-api";
+import { controlsFor, describeEnvironments, developerReach, grantable, manages, parseEnvironments, type ReachedEnvironment } from "@/lib/workspace-members";
 import { btn, danger, ErrorNote, input, panel, primary, useCopy } from "../ui";
 
 const ROLE_NOTE: Record<Role, string> = {
@@ -27,6 +28,8 @@ export function ProjectMembers({ project, onLeft }: { project: WorkspaceProject;
   const [rules, setRules] = useState<RoleRules | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [inviting, setInviting] = useState(false);
+  // The project's environments, for the invite sheet to say what a developer will reach.
+  const [envs, setEnvs] = useState<ReachedEnvironment[] | null>(null);
   const [link, setLink] = useState<{ email: string; url: string } | null>(null);
   const { copied, copy } = useCopy();
 
@@ -38,6 +41,9 @@ export function ProjectMembers({ project, onLeft }: { project: WorkspaceProject;
   useEffect(() => {
     workspaceApi.roles().then(setRules, () => setRules(null));
   }, []);
+  useEffect(() => {
+    if (inviting) secretsApi(project.id).environments().then(setEnvs, () => setEnvs(null));
+  }, [inviting, project.id]);
 
   const owners = useMemo(() => (members ?? []).filter((m) => m.role === "owner" && !m.inactive).length, [members]);
   const act = async (f: () => Promise<unknown>) => {
@@ -79,6 +85,7 @@ export function ProjectMembers({ project, onLeft }: { project: WorkspaceProject;
         <InviteForm
           roles={grantable(me)}
           def={rules?.developer_default ?? "unprotected"}
+          envs={envs}
           onCancel={() => setInviting(false)}
           onInvite={async (email, role, envs) => {
             setError(null);
@@ -272,17 +279,19 @@ function MemberRow({
 function InviteForm({
   roles,
   def,
+  envs,
   onInvite,
   onCancel,
 }: {
   roles: Role[];
   def: "unprotected" | "all" | "none";
+  envs: ReachedEnvironment[] | null;
   onInvite: (email: string, role: Role, envs: string[] | null) => Promise<void>;
   onCancel: () => void;
 }) {
   const [email, setEmail] = useState("");
   const [role, setRole] = useState<Role>(roles.includes("developer") ? "developer" : roles[0]!);
-  const [envs, setEnvs] = useState("");
+  const [named, setNamed] = useState("");
   const [busy, setBusy] = useState(false);
   return (
     <form
@@ -290,7 +299,7 @@ function InviteForm({
       onSubmit={async (e) => {
         e.preventDefault();
         setBusy(true);
-        await onInvite(email.trim(), role, role === "developer" ? parseEnvironments(envs) : null);
+        await onInvite(email.trim(), role, role === "developer" ? parseEnvironments(named) : null);
         setBusy(false);
       }}
     >
@@ -315,9 +324,10 @@ function InviteForm({
       {role === "developer" && (
         <label className="flex flex-col gap-1">
           <span className="text-[11px] text-subtle">Environments, comma separated</span>
-          <input value={envs} onChange={(e) => setEnvs(e.target.value)} placeholder={def === "unprotected" ? "Leave empty: every environment that isn't protected" : def} className={`${input} font-mono text-[12px]`} />
+          <input value={named} onChange={(e) => setNamed(e.target.value)} placeholder={def === "unprotected" ? "Leave empty: every environment that isn't protected, never production" : def} className={`${input} font-mono text-[12px]`} />
         </label>
       )}
+      {role === "developer" && envs && <Reach slugs={developerReach(envs, parseEnvironments(named), def)} />}
       <div className="flex gap-2">
         <button type="submit" disabled={busy || !email.trim()} className={primary}>
           {busy ? <span className="shimmer">Inviting…</span> : "Send invite"}
@@ -327,5 +337,21 @@ function InviteForm({
         </button>
       </div>
     </form>
+  );
+}
+
+/** What a developer invited this way reads and writes values in. */
+function Reach({ slugs }: { slugs: string[] }) {
+  return (
+    <p className="text-[12px] text-muted" role="status">
+      {slugs.length ? (
+        <>
+          They'll read and write values in <span className="font-mono text-fg">{slugs.join(", ")}</span>
+          {slugs.includes("production") ? "." : "; production only if you name it."}
+        </>
+      ) : (
+        "They'll see names only: no environment here matches."
+      )}
+    </p>
   );
 }

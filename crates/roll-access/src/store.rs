@@ -872,6 +872,7 @@ impl Store {
     pub fn new(db: Db) -> Result<Store> {
         db.ensure_schema(SCHEMA)?;
         db.ensure_schema(crate::sinks::SCHEMA)?;
+        db.ensure_schema(crate::event_subs::SCHEMA)?;
         // Machine clients (client credentials): a confidential client's secret hash or key.
         // `add_column` checks for itself, so every database gets them, however old.
         db.add_column("oauth_clients", "confidential", "INTEGER NOT NULL DEFAULT 0")?;
@@ -910,6 +911,12 @@ impl Store {
                 db.add_column("approvals", col, "TEXT")?;
             }
         }
+        // Decisions in the order they were made (MCP Events' `access.approval` reads after one):
+        // given in the deciding write, so a reader past one never misses an earlier one.
+        if !db.has_column("approvals", "decided_seq")? {
+            db.add_column("approvals", "decided_seq", "INTEGER")?;
+        }
+        db.ensure_schema("CREATE INDEX IF NOT EXISTS approvals_decided ON approvals (decided_seq);")?;
         if !db.has_column("grants", "rate_per_minute")? {
             db.add_column("grants", "rate_per_minute", "INTEGER")?;
         }
@@ -1603,6 +1610,29 @@ impl Store {
             .collect())
     }
 
+    /// Decisions after `after` (their `decided_seq`), oldest first, for these grants (all: `None`),
+    /// with each one's place.
+    pub fn decided_after(&self, after: i64, limit: usize, grants: Option<&[String]>) -> Result<Vec<(i64, Approval)>> {
+        let mut args: Vec<code_sql::Value> = vec![code_sql::Value::Int(after)];
+        let only = match grants {
+            Some([]) => return Ok(Vec::new()),
+            Some(gs) => {
+                args.extend(gs.iter().map(|g| code_sql::Value::Text(g.clone())));
+                format!(" AND grant_id IN ({})", vec!["?"; gs.len()].join(", "))
+            }
+            None => String::new(),
+        };
+        args.push(code_sql::Value::Int(limit.clamp(1, 500) as i64));
+        let sql = format!("SELECT {APPROVAL_COLUMNS}, decided_seq FROM approvals WHERE decided_seq > ?{only} ORDER BY decided_seq LIMIT ?");
+        let width = APPROVAL_COLUMNS.split(',').count();
+        Ok(self.db.read(|c| c.query(&sql, args.as_slice(), |r| Ok((r.get::<_, i64>(width)?, approval_row(r)?))))?)
+    }
+
+    /// The newest decision's place (0: none yet).
+    pub fn latest_decided(&self) -> Result<i64> {
+        Ok(self.db.read(|c| c.query_row("SELECT COALESCE(MAX(decided_seq), 0) FROM approvals", (), |r| r.get(0)))?)
+    }
+
     /// Decide a pending approval. Approving adds `by` to who approved it; it's approved once
     /// `enough` says they are (one person when no policy rule covers it), and stays pending until
     /// then. A person approves once. Denying decides at once.
@@ -1621,7 +1651,7 @@ impl Store {
             }
             if !approve {
                 c.execute(
-                    "UPDATE approvals SET state = 'denied', decided_at = ?, decided_by = ?, reason = ?, expires_at = ? WHERE id = ?",
+                    "UPDATE approvals SET state = 'denied', decided_at = ?, decided_by = ?, reason = ?, expires_at = ?, decided_seq = (SELECT COALESCE(MAX(decided_seq), 0) + 1 FROM approvals) WHERE id = ?",
                     params![now, by, reason, now + APPROVAL_TTL_MS, id],
                 )?;
                 return Ok(true);
@@ -1635,7 +1665,7 @@ impl Store {
             if enough(&who) {
                 // An approved request may run within the next ten minutes, once.
                 c.execute(
-                    "UPDATE approvals SET state = 'approved', decided_at = ?, decided_by = ?, approved_by = ?, expires_at = ? WHERE id = ?",
+                    "UPDATE approvals SET state = 'approved', decided_at = ?, decided_by = ?, approved_by = ?, expires_at = ?, decided_seq = (SELECT COALESCE(MAX(decided_seq), 0) + 1 FROM approvals) WHERE id = ?",
                     params![now, by, list, now + APPROVAL_TTL_MS, id],
                 )?;
                 if let Some((rule, for_ms, gated)) = grants {

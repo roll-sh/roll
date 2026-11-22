@@ -50,6 +50,16 @@ pub(crate) struct EnvRow {
     pub branches: Vec<Branch>,
 }
 
+impl EnvRow {
+    /// Whether a write here is a change request: a protected environment that asks for approvals.
+    /// Protected with `approvals: 0` (a new project's production) still keeps developers' default,
+    /// checks, sandboxes and untrusted readers out, and asks for a confirm to delete, but whoever
+    /// may write writes directly: a solo owner isn't sent to request their own changes.
+    pub(crate) fn needs_request(&self) -> bool {
+        self.protected && self.approvals > 0
+    }
+}
+
 /// A resource an ephemeral environment's preview branched (docs/secrets.md, "Ephemeral
 /// environments (previews)"): a key linked to `(kind, parent)` doesn't resolve there, so no value
 /// of the parent's ever leaves roll secrets; the answer names it in `followed` and roll previews
@@ -767,7 +777,7 @@ impl Secrets {
         let now = self.db.now_ms()?;
         self.db.write(|c| {
             let env = by_slug(c, project, slug)?;
-            if env.protected {
+            if env.needs_request() {
                 return Err(Error::Conflict("approval_required", format!("{slug} is protected: deleting a folder needs a change request")));
             }
             // A folder with a change policy, or one holding one, goes only through change requests.
@@ -880,7 +890,9 @@ pub(crate) fn ensure_folders(c: &Conn<'_>, env_id: &str, path: &str, now: i64) -
 }
 
 fn drop_env(c: &Conn<'_>, env: &EnvRow) -> Result<()> {
-    // Its keys' hosts and its placeholders (a preview's, torn down with it) end with it.
+    // Its keys' hosts and its placeholders (a preview's, torn down with it) end with it, and so
+    // do their consumers' CAs naming those hosts, at their next ask.
+    c.execute(&format!("{}env_id = ?)", crate::intercept::RECHECK_HOLDERS), [&env.id])?;
     c.execute("DELETE FROM key_hosts WHERE secret_id IN (SELECT id FROM secrets WHERE env_id = ?)", [&env.id])?;
     for t in ["secrets", "versions", "requests", "leases", "folders", "imports", "exports", "folder_policies", "placeholders"] {
         c.execute(&format!("DELETE FROM {t} WHERE env_id = ?"), [&env.id])?;

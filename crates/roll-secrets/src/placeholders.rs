@@ -423,8 +423,8 @@ impl Secrets {
             holders(c, &id)
         })?;
         self.audit_now(project, caller, "secrets.hosts", Some(slug), Some(&path), &[key.to_string()], &format!("bound {key} to {}", hosts.describe()));
-        // Narrowed: their CAs naming a host it dropped end.
-        self.hosts_shrank(held.iter().map(String::as_str));
+        // Narrowed, their CAs naming a host it dropped end; widened, those missing one are stale.
+        self.hosts_changed(held.iter().map(String::as_str));
         Ok(hosts)
     }
 
@@ -443,7 +443,7 @@ impl Secrets {
             return Err(Error::NotFound(format!("{key} in {slug}:{path} isn't bound to hosts")));
         }
         self.audit_now(project, caller, "secrets.hosts", Some(slug), Some(&path), &[key.to_string()], &format!("unbound {key} from its hosts"));
-        self.hosts_shrank(held.iter().map(String::as_str));
+        self.hosts_changed(held.iter().map(String::as_str));
         Ok(())
     }
 
@@ -474,6 +474,8 @@ impl Secrets {
             }
             Ok::<_, Error>(())
         })?;
+        // The consumer's CAs missing a host these keys are bound to are stale now.
+        self.hosts_changed([how.consumer]);
         Ok(out.into_iter().map(|(t, p, _)| (t, p)).collect())
     }
 
@@ -692,7 +694,7 @@ impl Secrets {
             self.queue_alert(c, &project, &env, &text, alert, now, now)?;
             Ok::<_, Error>(consumer)
         })?;
-        self.hosts_shrank([consumer.as_str()]);
+        self.hosts_changed([consumer.as_str()]);
         Ok(())
     }
 
@@ -844,7 +846,7 @@ impl Secrets {
         for ((project, consumer), n) in &by_project {
             self.audit_now(project, &actor, "secrets.placeholders.end", None, None, &[], &format!("ended {} of {consumer}", crate::write::plural(*n, "placeholder")));
         }
-        self.hosts_shrank(by_project.keys().map(|(_, consumer)| consumer.as_str()));
+        self.hosts_changed(by_project.keys().map(|(_, consumer)| consumer.as_str()));
         Ok(ended.len())
     }
 
@@ -891,7 +893,7 @@ impl Secrets {
         }
         let why: String = why.chars().filter(|c| !c.is_control()).take(200).collect();
         self.audit_now(&row.project, &Caller::consumer("roll:leaks"), "secrets.placeholders.end", None, Some(&row.path), std::slice::from_ref(&row.key), &format!("revoked leaked placeholder {} of {} for {}: {why}", row.id, row.key, row.consumer));
-        self.hosts_shrank([row.consumer.as_str()]);
+        self.hosts_changed([row.consumer.as_str()]);
         Some(format!("roll secrets placeholder {} of {}", row.id, row.key))
     }
 

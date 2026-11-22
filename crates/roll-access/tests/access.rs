@@ -157,6 +157,7 @@ fn postgres() -> Router {
         .route("/v1/search/clusters/{id}/indices", get(|| async { axum::Json(json!([])) }))
         .route("/v1/search/clusters/{id}/request", post(|| async { axum::Json(json!({})) }))
         .route("/v1/search/clusters/{id}/indices/{index}/bulk", post(|body: String| async move { axum::Json(json!({ "lines": body.lines().count() })) }))
+        .route("/v1/search/clusters/{id}/indices/{index}/settings", axum::routing::put(|| async { axum::Json(json!({ "acknowledged": true })) }))
         .route("/v1/secrets/projects/{project}/environments/{env}/secrets", get(|| async { axum::Json(json!([])) }))
         .route("/v1/secrets/projects/{project}/health", get(|| async { axum::Json(json!({ "findings": [] })) }))
         .route("/v1/secrets/projects/{project}/transit", get(|| async { axum::Json(json!([])) }))
@@ -281,7 +282,7 @@ impl Daemon {
     /// [`Daemon::via_mcp`] with the answer's body.
     async fn via_mcp_body(&self, token: &str, method: Method, path: &str) -> (StatusCode, Value) {
         let mut req = Request::builder().method(method).uri(path).header("authorization", format!("Bearer {token}")).body(Body::empty()).unwrap();
-        req.extensions_mut().insert(roll_access::evaluate::McpCall { tool: "test_tool".into(), args: Arc::new(json!({})), ip: None, elicits: false, client: None, quiet: false });
+        req.extensions_mut().insert(roll_access::evaluate::McpCall { tool: "test_tool".into(), args: Arc::new(json!({})), ip: None, elicits: false, client: None, quiet: false, unattended: false });
         let resp = self.router.clone().oneshot(req).await.unwrap();
         let status = resp.status();
         let bytes = resp.into_body().collect().await.unwrap().to_bytes();
@@ -291,7 +292,7 @@ impl Daemon {
     /// A request roll's MCP server makes for a tool call (its `McpCall` extension), with `token`.
     async fn via_mcp(&self, token: &str, method: Method, path: &str) -> StatusCode {
         let mut req = Request::builder().method(method).uri(path).header("authorization", format!("Bearer {token}")).body(Body::empty()).unwrap();
-        req.extensions_mut().insert(roll_access::evaluate::McpCall { tool: "test_tool".into(), args: Arc::new(json!({})), ip: None, elicits: false, client: None, quiet: false });
+        req.extensions_mut().insert(roll_access::evaluate::McpCall { tool: "test_tool".into(), args: Arc::new(json!({})), ip: None, elicits: false, client: None, quiet: false, unattended: false });
         self.router.clone().oneshot(req).await.unwrap().status()
     }
 
@@ -384,6 +385,11 @@ async fn a_scoped_token_does_only_what_its_rules_say() {
     let bulk = |ndjson: &'static str| d.raw(&indexer, Method::POST, "/v1/search/clusters/c1/indices/logs/bulk", Body::from(ndjson), &[], None);
     assert_eq!(bulk("{\"index\":{}}\n{\"msg\":\"hi\"}\n").await, (StatusCode::OK, json!({ "lines": 2 })));
     let (s, e) = bulk("{\"index\":{}}\n{\"msg\":\"hi\"}\n{\"delete\":{\"_id\":\"1\"}}\n").await;
+    assert_eq!((s, e["needs"]["action"].as_str()), (StatusCode::FORBIDDEN, Some("delete")));
+    // An index's settings are write, but a lifecycle policy can delete the index: it needs delete.
+    let settings = |body: &'static str| d.raw(&indexer, Method::PUT, "/v1/search/clusters/c1/indices/logs/settings", Body::from(body), &[], None);
+    assert_eq!(settings(r#"{"index.roll.suggestions.enabled": true}"#).await.0, StatusCode::OK);
+    let (s, e) = settings(r#"{"index.lifecycle.name": "30-days-default", "index.lifecycle.indexing_complete": true, "index.lifecycle.origination_date": 0}"#).await;
     assert_eq!((s, e["needs"]["action"].as_str()), (StatusCode::FORBIDDEN, Some("delete")));
 
     // A bucket in another storage account is `<account>/<bucket>`: a rule for one doesn't reach
@@ -957,8 +963,17 @@ async fn agents_ask_what_the_policy_says() {
     let (s, e) = d.call(OPERATOR, Method::PUT, "/v1/access/policy", Some(json!({ "agents_ask": [{ "product": "nope" }] }))).await;
     assert_eq!(s, StatusCode::BAD_REQUEST, "{e}");
     assert_eq!(d.call(OPERATOR, Method::PUT, "/v1/access/policy", Some(json!({ "agents_ask": [{ "product": "postgres", "actions": ["delete"] }] }))).await.0, StatusCode::OK);
+    let (_, now) = d.call(&token, Method::GET, "/v1/access/approvals/decided?latest=1", None).await;
     let (s, pending) = d.via_mcp_body(&token, Method::DELETE, "/v1/projects/pa").await;
     assert_eq!((s, pending["code"].as_str()), (StatusCode::FORBIDDEN, Some("approval_pending")), "{pending}");
+    // Decided, it's in the connection's feed of decisions (MCP Events' access.approval), after the
+    // place it started from; another connection's feed hasn't it.
+    let id = pending["approval"].as_str().unwrap();
+    assert_eq!(d.call(OPERATOR, Method::POST, &format!("/v1/access/approvals/{id}/approve"), None).await.0, StatusCode::OK);
+    let (_, feed) = d.call(&token, Method::GET, &format!("/v1/access/approvals/decided?after={}", now["next"]), None).await;
+    assert_eq!((feed["events"][0]["id"].as_str(), feed["events"][0]["state"].as_str()), (Some(id), Some("approved")), "{feed}");
+    let (other, _) = d.token(json!([{ "product": "postgres", "resources": "*", "actions": { "read": "allow" } }]), json!({})).await;
+    assert_eq!(d.call(&other, Method::GET, "/v1/access/approvals/decided?after=0", None).await.1["events"], json!([]));
     assert_ne!(d.via_mcp(&token, Method::GET, "/v1/projects").await, StatusCode::FORBIDDEN, "reads go on");
     assert_ne!(d.call(&token, Method::DELETE, "/v1/projects/pb", None).await.0, StatusCode::FORBIDDEN, "the API itself: not an agent");
 }
