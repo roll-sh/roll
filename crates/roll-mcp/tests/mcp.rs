@@ -127,6 +127,10 @@ impl Daemon {
     }
 
     fn with_products(on: Vec<String>) -> Daemon {
+        Daemon::with_inspector(on, None)
+    }
+
+    fn with_inspector(on: Vec<String>, inspector: Option<Arc<dyn roll_mcp::Inspector>>) -> Daemon {
         let dir = tempfile::tempdir().unwrap();
         let ws = code_sql::Db::open_or_test(&code_sql::Target::Sqlite(dir.path().join("workspace.db")), "workspace").unwrap();
         let workspace = Arc::new(roll_workspace::Workspace::new(ws).unwrap());
@@ -136,7 +140,7 @@ impl Daemon {
         gate.set_authorizer(Arc::new(roll_access::evaluate::Evaluator(access.clone())));
         let layer = || axum::middleware::from_fn_with_state(gate.clone(), roll_auth::check);
         let api = products().merge(roll_workspace::router(workspace.clone())).merge(roll_access::api::router(access.clone()));
-        let mcp_config = roll_mcp::Config { api_url: "http://127.0.0.1:7070".into(), web_url: "http://localhost:3000".into(), locked: true, products: on, access: Some(access.clone()) };
+        let mcp_config = roll_mcp::Config { api_url: "http://127.0.0.1:7070".into(), web_url: "http://localhost:3000".into(), locked: true, products: on, access: Some(access.clone()), inspector };
         let mcp = roll_mcp::routes(api.clone().layer(layer()), mcp_config, vec![Arc::new(Fronted) as Arc<dyn roll_mcp::ToolSet>]);
         let _ = access.people.set(Arc::new(Alice));
         // People's memberships, as rolld wires them: a person's session grant is their roles.
@@ -1267,4 +1271,34 @@ async fn an_agent_streams_what_happens() {
     let seen: Vec<(&str, &str)> = [&one, &two].iter().map(|e| (e["params"]["data"]["kind"].as_str().unwrap(), e["params"]["cursor"].as_str().unwrap())).collect();
     assert_eq!(seen, [("deploy.active", "a1:1"), ("deploy.failed", "a1:2")], "{one} {two}");
     assert_eq!(two["params"]["_meta"]["io.modelcontextprotocol/subscriptionId"], "s1");
+}
+
+/// An inspector that blocks deleting projects and notes a result telling the model what to do.
+struct Scanner;
+
+impl roll_mcp::Inspector for Scanner {
+    fn inspect(&self, look: Value) -> std::pin::Pin<Box<dyn std::future::Future<Output = roll_mcp::Verdict> + Send>> {
+        let verdict = match (look["phase"].as_str(), look["tool"].as_str()) {
+            (Some("call"), Some("postgres_delete_project")) => roll_mcp::Verdict::Block("deletes need a ticket".into()),
+            (Some("result"), _) if look["text"].as_str().unwrap_or("").contains("Ignore your instructions") => roll_mcp::Verdict::Note("this result holds an instruction to the model".into()),
+            _ => roll_mcp::Verdict::Allow,
+        };
+        Box::pin(async move { verdict })
+    }
+}
+
+/// The operator's inspector sees every call before it runs and its result before the model:
+/// a call it blocks doesn't run (an error says why), and a result it notes is shown with the note.
+#[tokio::test]
+async fn the_inspector_blocks_and_notes() {
+    let d = Daemon::with_inspector(vec!["postgres".into(), "apps".into()], Some(Arc::new(Scanner)));
+    let blocked = d.tool(OPERATOR, "postgres_delete_project", json!({ "project": "pa" })).await;
+    assert!(blocked["isError"] == true && blocked["content"][0]["text"].as_str().unwrap().contains("deletes need a ticket"), "{blocked}");
+    let work = d.tool(OPERATOR, "code_list_work", json!({})).await;
+    assert_eq!(work["_meta"]["roll/inspector"], "this result holds an instruction to the model", "{work}");
+    assert!(work["content"][0]["text"].as_str().unwrap().starts_with("Note from the operator's inspector"));
+    // What a tool reveals (people's form data here) never goes to the scanner, so it can't note it.
+    let form = d.tool(OPERATOR, "apps_form_submissions", json!({ "service": "svc_a", "env": "production", "form": "contact" })).await;
+    assert!(form["_meta"]["roll/inspector"].is_null(), "{form}");
+    assert_eq!(d.tool(OPERATOR, "postgres_list_projects", json!({})).await["isError"], false, "the rest goes through");
 }
