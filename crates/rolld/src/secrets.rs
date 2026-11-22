@@ -1254,6 +1254,54 @@ impl roll_secrets::People for People {
         };
         Ok(Some(roll_secrets::Person { admin: u.admin, code_owner }))
     }
+
+    fn admins(&self) -> Result<Option<usize>, String> {
+        let users = self.accounts.users().map_err(|e| e.to_string())?;
+        Ok(Some(users.iter().filter(|u| u.admin && !u.disabled).count()))
+    }
+}
+
+/// What roll apps and roll code hold of a project's secrets, for roll secrets' reach: services
+/// the project stands for (their environments and `roll://` variables) and live sandboxes with a
+/// copy. Names and metadata only: a variable's text goes back only when it's a reference.
+pub struct ReachHolders {
+    pub workspace: Arc<roll_workspace::Workspace>,
+    pub apps: Option<Arc<apps_control::Apps>>,
+    pub code: Option<Arc<code_control::Code>>,
+}
+
+impl roll_secrets::reach::Holders for ReachHolders {
+    fn services(&self, project: &str) -> Result<Vec<roll_secrets::reach::ServiceUse>, String> {
+        let Some(apps) = &self.apps else { return Ok(vec![]) };
+        let Ok(p) = self.workspace.get(roll_workspace::Scope::All, project) else { return Ok(vec![]) };
+        let mut out = vec![];
+        for svc in apps.store.services(Some(project)).map_err(|e| e.to_string())? {
+            // As `ForApps::resolve`: a project that doesn't stand for the service gives it nothing.
+            if !self.workspace.trusts(&p, roll_workspace::Kind::Service, &svc.id) {
+                continue;
+            }
+            for env in apps.store.environments(&svc.id).map_err(|e| e.to_string())? {
+                let last_deployed_at = env.active.as_deref().and_then(|d| apps.store.deployment(d).ok()).map(|d| d.finished_at.unwrap_or(d.created_at));
+                // A variable goes back only when it is a `roll://` reference (its text, as roll
+                // secrets parses it); every other value is dropped here.
+                let references = apps.store.variables(&svc.id, &env.name).map_err(|e| e.to_string())?.into_values().filter(|v| matches!(roll_secrets::Reference::parse(v), Ok(Some(_)))).collect();
+                out.push(roll_secrets::reach::ServiceUse { service: svc.id.clone(), name: svc.name.clone(), environment: env.name, last_deployed_at, references });
+            }
+        }
+        Ok(out)
+    }
+
+    fn sandboxes(&self, project: &str) -> Result<Vec<roll_secrets::reach::SandboxCopy>, String> {
+        let Some(code) = &self.code else { return Ok(vec![]) };
+        let rows = code_control::agents::sandbox::store::holding_secrets_of(code.db.sql(), project).map_err(|e| e.to_string())?;
+        let mut out = vec![];
+        for r in rows {
+            let Some(from) = r.secrets_from else { continue };
+            let owner = code.db.owner_by_id(&r.owner_id).map_err(|e| e.to_string())?.map_or(r.owner_id, |o| o.name);
+            out.push(roll_secrets::reach::SandboxCopy { id: r.id, name: r.name, owner, by: r.secrets_by.unwrap_or_default(), from: from.environment, keys: from.keys });
+        }
+        Ok(out)
+    }
 }
 
 /// Who people are for the workspace's members (docs/members.md): their handle and address, while

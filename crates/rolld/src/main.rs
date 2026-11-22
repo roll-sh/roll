@@ -690,6 +690,8 @@ async fn run_with(mut args: Args) -> anyhow::Result<()> {
     if let Some(c) = &code {
         secrets.set_code_refs(std::sync::Arc::new(secrets::CodeRefs(c.code.clone())));
     }
+    // Reach names the services and sandboxes that hold a folder's values.
+    secrets.set_reach_holders(std::sync::Arc::new(secrets::ReachHolders { workspace: workspace.clone(), apps: apps.as_ref().map(|a| a.apps.clone()), code: code.as_ref().map(|c| c.code.clone()) }));
     // Secret requests' answer tokens found leaked (`rlq_`) cancel their requests.
     {
         let secrets = secrets.clone();

@@ -894,6 +894,10 @@ impl roll_secrets::People for People {
             _ => None,
         })
     }
+
+    fn admins(&self) -> Result<Option<usize>, String> {
+        Ok(Some(usize::from(!*self.root_disabled.lock().unwrap() && !*self.root_demoted.lock().unwrap())))
+    }
 }
 
 /// People's addresses, as roll accounts answers the workspace: `<handle>@example.com`.
@@ -1057,6 +1061,13 @@ impl Gate {
 
     fn issue(&self, name: &str, rule: roll_auth::scope::Rule, user: Option<&str>) -> String {
         self.grant(name, rule, user).0
+    }
+
+    /// `user`'s OAuth connection (`rlo_…`: an MCP client they authorized) with `rule`; its id.
+    fn oauth(&self, name: &str, rule: roll_auth::scope::Rule, user: &str) -> String {
+        let (secret, id) = self.grant(name, rule, Some(user));
+        self.tokens.lock().unwrap().get_mut(&secret).expect("just made").kind = roll_auth::GrantKind::Oauth;
+        id
     }
 }
 
@@ -6648,4 +6659,51 @@ async fn past_its_window_a_deleted_project_ends_its_log_at_a_signed_digest_then_
     }
     assert!(api.ws.deleted(&api.project).unwrap().is_none(), "the workspace let it go too");
     assert_eq!(api.call(Method::POST, &recover, None).await.0, StatusCode::NOT_FOUND);
+}
+
+/// rolld's services and sandboxes as reach asks for them: `web` deploys staging, `api` reads
+/// production through a `roll://` variable, and a sandbox holds development's KEY and OTHER.
+struct FakeHolders;
+
+impl roll_secrets::reach::Holders for FakeHolders {
+    fn services(&self, _: &str) -> Result<Vec<roll_secrets::reach::ServiceUse>, String> {
+        let svc = |id: &str, environment: &str, references: &[&str]| roll_secrets::reach::ServiceUse { service: id.into(), name: id.into(), environment: environment.into(), last_deployed_at: Some(1), references: references.iter().map(|r| r.to_string()).collect() };
+        Ok(vec![svc("web", "staging", &[]), svc("api", "production", &["roll://production/KEY"])])
+    }
+    fn sandboxes(&self, _: &str) -> Result<Vec<roll_secrets::reach::SandboxCopy>, String> {
+        Ok(vec![roll_secrets::reach::SandboxCopy { id: "sbx_1".into(), name: "try".into(), owner: "ada".into(), by: "usr_ada".into(), from: "development".into(), keys: vec!["KEY".into(), "OTHER".into()] }])
+    }
+}
+
+/// Reach names people (docs/members.md): the members whose role reveals a folder and the
+/// operator's admins as a count, a member's OAuth client, someone who read it and then left
+/// (`knew`), and the services and sandboxes rolld says read it.
+#[tokio::test]
+async fn reach_names_the_people_clients_and_holders_of_a_folder() {
+    let api = Api::new().await;
+    api.secrets.set_reach_holders(Arc::new(FakeHolders));
+    let (_, p) = api.as_ada(Method::POST, "/v1/workspace/projects", Some(json!({ "name": "team" }))).await;
+    let team = p["id"].as_str().unwrap().to_string();
+    let at = |rest: &str| format!("/v1/secrets/projects/{team}{rest}");
+    api.as_ada(Method::PUT, &at("/environments/development/secrets/KEY"), Some(json!({ "value": "fake-dev" }))).await;
+    api.as_ada(Method::PUT, &at("/environments/staging/imports?path=/"), Some(json!([{ "environment": "development", "path": "/" }]))).await;
+    api.join(&team, "bob", "developer", None).await;
+    api.join(&team, "cat", "admin", None).await;
+    api.join(&team, "vic", "developer", None).await;
+    let (s, v) = api.signed_in("vic", false, Method::GET, &at("/environments/development/secrets/KEY/value"), None).await;
+    assert_eq!((s, v["value"].as_str()), (StatusCode::OK, Some("fake-dev")));
+    assert_eq!(api.as_ada(Method::DELETE, &format!("/v1/workspace/projects/{team}/members/usr_vic"), None).await.0, StatusCode::NO_CONTENT);
+    let client = api.gate.oauth("claude", roll_secrets::access::rule(&team, None, None, &[roll_secrets::Action::Read, roll_secrets::Action::Reveal]), "usr_bob");
+
+    let (s, r) = api.as_ada(Method::GET, &at("/environments/development/reach?path=/&key=KEY"), None).await;
+    assert_eq!(s, StatusCode::OK, "{r}");
+    let mut people: Vec<(&str, &str)> = r["people"].as_array().unwrap().iter().map(|p| (p["handle"].as_str().unwrap(), p["role"].as_str().unwrap())).collect();
+    people.sort();
+    assert_eq!(people, [("ada", "owner"), ("bob", "developer"), ("cat", "admin")], "{r}");
+    assert_eq!(r["admins"], 1);
+    assert_eq!((r["clients"][0]["id"].as_str(), r["clients"][0]["created_by"].as_str(), r["tokens"].as_array().unwrap().len()), (Some(client.as_str()), Some("usr_bob"), 0), "{r}");
+    assert_eq!((r["knew"][0]["user"].as_str(), r["knew"][0]["why"].as_str(), r["knew"].as_array().unwrap().len()), (Some("usr_vic"), Some("left"), 1), "{r}");
+    let services: Vec<(&str, &str)> = r["services"].as_array().unwrap().iter().map(|s| (s["name"].as_str().unwrap(), s["through"].as_str().unwrap())).collect();
+    assert_eq!((services, r["sandboxes"][0]["keys"].clone()), (vec![("web", "staging:/")], json!(["KEY"])), "{r}");
+    assert!(!r.to_string().contains("fake-dev"), "names, never a value");
 }
