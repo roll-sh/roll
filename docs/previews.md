@@ -2396,27 +2396,25 @@ Ranked by what a person notices first. Done so far:
   runtime runs, printable schema lines, budget alerts that can't be lost or silenced, followed
   logs that say when lines were missed and stop with a hidden tab).
 
-1. **Roll secrets' response scrub wired into `roll-intercept`, in review** (stacked on roll
-   secrets' #628): a response that echoes a swapped key is stopped (a 502, or the connection cut
-   before those bytes), the placeholder ended and the echo in the activity; roll apps' closed
-   environments get it through the same port. Live-checked by `scripts/preview-intercept.sh`, which also gets a step for roll secrets' `maker_unreachable`
-   (#582, landed): the rules' saver loses access, the preview says "placeholders off" and its old
-   placeholder is refused.
-2. **A preview's crons and scheduled commands off unless the project says so, in review** (#656,
-   after roll apps' `scheduled`): each preview of a project with a cron ran it on schedule.
-3. **Search connectors on a branch, checked live** (after roll search's #318): a branch's
+1. **A placeholder swaps only for its own consumer, checked live** (after roll secrets' #665, H5):
+   roll secrets refuses a placeholder through another consumer's proxy (`Refusal::WrongConsumer`);
+   `scripts/preview-intercept.sh` then shows another preview's placeholder refused on this one's
+   socket.
+2. **Search connectors on a branch, checked live** (after roll search's #318): a branch's
    inherited connectors start paused and its parent's secrets don't open there; the live run makes
    a cluster with a connector, branches it into a preview, and expects no sync and its masks kept.
-4. **The data step's Postgres compute start** (pg-control's; watch): with the health checks no
+3. **The data step's Postgres compute start** (pg-control's; watch): with the health checks no
    longer waiting on a poll (#646), the live run's timeline is data 11.0 s · setup 4.4 s · deploy
    0.02 s · checks 6.1 s under load. Most of the data step is the Postgres branch's compute start
    (3.3 s in its log) and its masking, which needs that compute up: pg-control's to shorten.
-5. **Previews for the members thread's next products**: once roll apps' and roll search's routes
+4. **Previews for the members thread's next products**: once roll apps' and roll search's routes
    become member routes (docs/members.md, v1.1), a preview's roll apps services and search branch
    follow the same roles, checked live against a member's session.
-6. **Cheap Postgres branches on ext4: overlay volumes over a frozen base** (pg-control; measured
+5. **Cheap Postgres branches on ext4: overlay volumes over a frozen base** (pg-control; measured
    2026-11-17): 0.97 s against 3.5 s for a 1.4 GB copy, but a write copies the whole table file.
-7. **Watch: pg-control's recovery to a time seconds old** (unowned).
+6. **Watch: pg-control's recovery to a time seconds old** (unowned).
+
+Landed 2026-11-22, later that morning: roll secrets' response scrub wired into `roll-intercept` (#630: an echoed key stopped, its placeholder ended; and the `maker_unreachable` fallback checked live), a preview's crons and scheduled commands off unless the project says so (#656, on roll apps' `scheduled`), the API contract's `Preview` and `Settings` complete again with a test that keeps them so (#656: 23 fields had fallen out), and a leaf's private key zeroized in memory with `preview-apps.sh` no longer leaking Docker networks (#671: 23 had used up the address pools).
 
 Landed 2026-11-22 morning: a preview's bucket key checked live against production's bucket (#643), and `roll preview show`/`wait` printing the timeline (#651).
 
