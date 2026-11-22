@@ -1452,7 +1452,7 @@ fn tool_error(text: String, data: Value) -> Value {
     json!({ "content": [{ "type": "text", "text": visible(&text) }], "structuredContent": d, "isError": true })
 }
 
-use roll_auth::lockdown::{invisible, visible};
+use roll_auth::lockdown::visible;
 
 /// `text` as the model gets it: invisible characters escaped, cut at MAX_TEXT. `whole` says the
 /// structured content holds the whole answer (JSON answers); otherwise the cut is all there is.
@@ -1630,7 +1630,7 @@ mod visible_tests {
         let comment = format!("looks good{hidden}\u{200b}!");
         let value = serde_json::json!({ "body": comment });
         let text = super::cut(serde_json::to_string(&value).unwrap(), true);
-        assert!(text.contains("\\udb40\\udc69") && text.contains("\\u200b") && !text.chars().any(super::invisible), "{text}");
+        assert!(text.contains("\\udb40\\udc69") && text.contains("\\u200b") && !text.chars().any(roll_auth::lockdown::invisible), "{text}");
         assert_eq!(serde_json::from_str::<serde_json::Value>(&text).unwrap(), value, "the same value");
         assert_eq!(super::visible("plain text, émoji 🚀"), "plain text, émoji 🚀");
     }
