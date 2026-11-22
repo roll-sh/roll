@@ -44,7 +44,9 @@ ids and states stay. Use it for an agent that holds write tools and reads public
 function is `roll_auth::lockdown`, shared with `/v1/mcp`. Lockdown or not, characters a person
 can't see and a model reads (tag characters, zero-width and bidi controls, variation selectors) are
 written as escapes in every text block (`roll_auth::lockdown::visible`); `structuredContent` stays
-exact.
+exact. A text block is cut at 48 KiB and says so (Claude Code refuses a longer answer outright); the
+structured content keeps all of it. This runs in `mcp::call`, so roll's `/v1/mcp` fronting these
+tools cuts them too.
 
 ## Tools
 

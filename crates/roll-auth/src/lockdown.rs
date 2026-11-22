@@ -89,6 +89,32 @@ pub fn visible(text: &str) -> String {
     out
 }
 
+/// Text returned to the model at most; longer answers are cut (the structured content stays whole).
+/// 48 KiB stays inside Claude Code's default 25,000-token limit on a tool's answer
+/// (`MAX_MCP_OUTPUT_TOKENS`, which refuses a longer one outright rather than cutting it) even for
+/// dense JSON of ids and hashes (about 3 characters a token).
+pub const MAX_TEXT: usize = 48 << 10;
+
+/// `text` as the model gets it: invisible characters escaped, cut at MAX_TEXT. `whole` says the
+/// structured content holds the whole answer (JSON answers); otherwise the cut is all there is.
+pub fn cut(text: String, whole: bool) -> String {
+    let text = visible(&text);
+    if text.len() <= MAX_TEXT {
+        return text;
+    }
+    let mut end = MAX_TEXT;
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!(
+        "{}\n… (cut at {} KiB of {} bytes: ask for less, as most list tools take a limit, a filter or a page cursor{})",
+        &text[..end],
+        MAX_TEXT >> 10,
+        text.len(),
+        if whole { "; the structured content has all of it" } else { "" }
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

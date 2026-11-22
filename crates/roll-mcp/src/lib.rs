@@ -77,11 +77,6 @@ const SSE_KEEPALIVE: std::time::Duration = std::time::Duration::from_secs(15);
 const PROGRESS_EVERY: std::time::Duration = std::time::Duration::from_secs(10);
 /// An answer read at most.
 const MAX_ANSWER: usize = 32 << 20;
-/// Text returned to the model at most; longer answers are cut (the structured content stays whole).
-/// 48 KiB stays inside Claude Code's default 25,000-token limit on a tool's answer
-/// (`MAX_MCP_OUTPUT_TOKENS`, which refuses a longer one outright rather than cutting it) even for
-/// dense JSON of ids and hashes (about 3 characters a token).
-const MAX_TEXT: usize = 48 << 10;
 /// Images a tool answers come back as MCP image content, up to this size (a screenshot).
 const IMAGES: [&str; 3] = ["image/png", "image/jpeg", "image/webp"];
 const MAX_IMAGE: usize = 4 << 20;
@@ -1452,27 +1447,7 @@ fn tool_error(text: String, data: Value) -> Value {
     json!({ "content": [{ "type": "text", "text": visible(&text) }], "structuredContent": d, "isError": true })
 }
 
-use roll_auth::lockdown::visible;
-
-/// `text` as the model gets it: invisible characters escaped, cut at MAX_TEXT. `whole` says the
-/// structured content holds the whole answer (JSON answers); otherwise the cut is all there is.
-fn cut(text: String, whole: bool) -> String {
-    let text = visible(&text);
-    if text.len() <= MAX_TEXT {
-        return text;
-    }
-    let mut end = MAX_TEXT;
-    while !text.is_char_boundary(end) {
-        end -= 1;
-    }
-    format!(
-        "{}\n… (cut at {} KiB of {} bytes: ask for less, as most list tools take a limit, a filter or a page cursor{})",
-        &text[..end],
-        MAX_TEXT >> 10,
-        text.len(),
-        if whole { "; the structured content has all of it" } else { "" }
-    )
-}
+use roll_auth::lockdown::{cut, visible};
 
 async fn run(ctx: &Arc<Ctx>, t: &tools::Tool, args: &Value, ext: Extensions) -> Value {
     let built = match t.request(args) {
@@ -1572,9 +1547,9 @@ mod cut_tests {
     /// A long answer's text fits a client's limit and says how to get less; a short one is whole.
     #[test]
     fn long_answers_are_cut_to_fit_a_clients_limit() {
-        let long = "x".repeat(super::MAX_TEXT * 3);
+        let long = "x".repeat(roll_auth::lockdown::MAX_TEXT * 3);
         let text = super::cut(long.clone(), true);
-        assert!(text.len() < super::MAX_TEXT + 300 && text.contains("ask for less"), "{}", &text[text.len() - 200..]);
+        assert!(text.len() < roll_auth::lockdown::MAX_TEXT + 300 && text.contains("ask for less"), "{}", &text[text.len() - 200..]);
         assert_eq!(super::cut("short".into(), true), "short");
         // A text answer has no structured copy: the note doesn't promise one.
         assert!(!super::cut(long, false).contains("structured content"));
