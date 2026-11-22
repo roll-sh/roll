@@ -7068,3 +7068,71 @@ async fn reach_names_the_people_clients_and_holders_of_a_folder() {
     assert_eq!((services, r["sandboxes"][0]["keys"].clone()), (vec![("web", "staging:/")], json!(["KEY"])), "{r}");
     assert!(!r.to_string().contains("fake-dev"), "names, never a value");
 }
+
+#[tokio::test]
+async fn the_events_feed_answers_in_commit_order_filtered_by_kind_environment_and_access_and_never_holds_a_value() {
+    let api = Api::new().await;
+    let (staging, production) = ("sk_live_feedstaging0123456789", "sk_live_feedproduction987654");
+    api.set("staging", "STRIPE_KEY", staging).await;
+    api.set("production", "STRIPE_KEY", production).await;
+    let start = api.ok(Method::GET, "/events?latest=1", None).await;
+    assert_eq!(start["events"], json!([]));
+    let start = start["next"].as_i64().unwrap();
+    assert!(start > 0, "the head moved with the writes: {start}");
+    assert_eq!(api.call(Method::GET, "/events?latest=1&after=0", None).await.0, StatusCode::BAD_REQUEST);
+    assert_eq!(api.call(Method::GET, "/events?kinds=secret", None).await.0, StatusCode::BAD_REQUEST);
+
+    // A scan matching both (a row per environment), production losing its protection, an
+    // environment deleted and recovered.
+    api.ok(Method::POST, "/leaks", Some(json!({ "candidates": [staging, production, "not-a-stored-value-123"] }))).await;
+    api.ok(Method::PUT, "/environments/production/policy", Some(json!({ "protected": false }))).await;
+    api.ok(Method::POST, "/environments", Some(json!({ "slug": "qa" }))).await;
+    api.ok(Method::DELETE, "/environments/qa", None).await;
+    api.ok(Method::POST, "/environments/qa/recover", None).await;
+
+    let all = api.ok(Method::GET, &format!("/events?after={start}"), None).await;
+    let events = all["events"].as_array().unwrap();
+    let got: Vec<(&str, Option<&str>)> = events.iter().map(|e| (e["kind"].as_str().unwrap(), e["environment"].as_str())).collect();
+    assert_eq!(got, [("scan.finding", Some("production")), ("scan.finding", Some("staging")), ("production.unprotected", Some("production")), ("env.deleted", Some("qa")), ("env.recovered", Some("qa"))]);
+    let seqs: Vec<i64> = events.iter().map(|e| e["seq"].as_i64().unwrap()).collect();
+    assert!(seqs.windows(2).all(|w| w[0] < w[1]) && seqs[0] > start, "{seqs:?}");
+    assert_eq!(all["next"], json!(seqs[4]));
+    assert_eq!(events[0]["key"], "STRIPE_KEY");
+    assert_eq!(events[0]["data"]["matched"], 2);
+    // Never a value, or anything made from one: names, kinds, ids, counts and reasons.
+    let text = all.to_string();
+    assert!(!text.contains(staging) && !text.contains(production) && !text.contains("feedstaging") && !text.contains("feedproduction"), "{text}");
+    for e in events {
+        for field in e["data"].as_object().unwrap().keys() {
+            assert!(["actor", "path", "keys", "candidates", "matched", "guard", "purge_at"].contains(&field.as_str()), "{field} in {e}");
+        }
+    }
+
+    // Filtered by the route: kinds (a family too), the environment, and a page at a time.
+    let kinds = |q: &str| {
+        let api = &api;
+        let q = q.to_string();
+        async move { api.ok(Method::GET, &format!("/events?after={start}&{q}"), None).await["events"].as_array().unwrap().iter().map(|e| e["kind"].as_str().unwrap().to_string()).collect::<Vec<_>>() }
+    };
+    assert_eq!(kinds("kinds=scan.*").await, ["scan.finding", "scan.finding"]);
+    assert_eq!(kinds("kinds=env.deleted,production.unprotected").await, ["production.unprotected", "env.deleted"]);
+    assert_eq!(kinds("environment=staging").await, ["scan.finding"]);
+    let page = api.ok(Method::GET, &format!("/events?after={start}&limit=1&kinds=production.unprotected,env.deleted"), None).await;
+    assert_eq!((page["events"].as_array().unwrap().len(), &page["next"]), (1, &json!(seqs[2])));
+    let rest = api.ok(Method::GET, &format!("/events?after={}&kinds=production.unprotected,env.deleted", seqs[2]), None).await;
+    assert_eq!(rest["events"][0]["seq"], json!(seqs[3]));
+
+    // A token that reads only staging: production's and qa's events are left out, and naming
+    // production is a 403.
+    let token = api.token(json!({ "environments": ["staging"], "actions": ["read"] }));
+    let (s, mine) = api.req(Method::GET, &format!("/events?after={start}"), None, Some(&token)).await;
+    assert_eq!(s, StatusCode::OK, "{mine}");
+    let mine: Vec<&str> = mine["events"].as_array().unwrap().iter().map(|e| e["environment"].as_str().unwrap()).collect();
+    assert_eq!(mine, ["staging"]);
+    assert_eq!(api.req(Method::GET, "/events?environment=production", None, Some(&token)).await.0, StatusCode::FORBIDDEN);
+
+    // `latest` is the head, past every event.
+    let head = api.ok(Method::GET, "/events?latest=1", None).await["next"].as_i64().unwrap();
+    assert!(head >= seqs[4]);
+    assert_eq!(api.ok(Method::GET, &format!("/events?after={head}"), None).await["events"], json!([]));
+}

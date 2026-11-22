@@ -1409,7 +1409,7 @@ impl Engine {
                 let snap = format!("{name}-{}", crate::label_part(old.strip_prefix("cs_").unwrap_or(old), 10));
                 let key = format!("{}:{}", res.kind.as_str(), res.parent);
                 if let Some(made) = b.snapshot(&res.parent, branch, &snap).await.map_err(|e| anyhow::anyhow!("keeping {key}'s data for its earlier push: {e:#}"))? {
-                    self.store.add_pinned_data(&r.id, &crate::store::PinnedData { revision: old.clone(), kind: res.kind, parent: res.parent.clone(), name: snap, r#ref: made.r#ref, kept: made.kept })?;
+                    self.store.add_pinned_data(&r.id, &crate::store::PinnedData { revision: old.clone(), kind: res.kind, parent: res.parent.clone(), name: snap, r#ref: made.r#ref, kept: made.kept, source: branch.clone() })?;
                     self.store.log(&r.id, &format!("kept {key}'s data as {} left it, for its earlier push", short(old)))?;
                 }
             }
@@ -1422,7 +1422,7 @@ impl Engine {
     async fn drop_pinned_data(&self, id: &str, which: impl Fn(&crate::store::PinnedData) -> bool) -> anyhow::Result<()> {
         for d in self.store.pinned_data(id)?.into_iter().filter(|d| which(d)) {
             if let Ok(b) = self.brancher(d.kind) {
-                b.delete(&d.parent, &d.r#ref, &d.name).await.map_err(|e| anyhow::anyhow!("deleting an earlier push's copy of {}:{}: {e:#}", d.kind.as_str(), d.parent))?;
+                b.delete_snapshot(&d.parent, &d.source, &d.r#ref, d.kept.as_deref(), &d.name).await.map_err(|e| anyhow::anyhow!("deleting an earlier push's copy of {}:{}: {e:#}", d.kind.as_str(), d.parent))?;
             }
             self.store.drop_pinned_data(id, &d)?;
         }

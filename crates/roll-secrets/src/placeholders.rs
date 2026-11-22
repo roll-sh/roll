@@ -633,8 +633,13 @@ impl Secrets {
         if !reader.allows(Action::Reveal, &Scope::at(project, &slug, path)) {
             return Err(Refusal::NotAllowed(format!("{slug} is protected, or whoever asked for the placeholder may no longer read it")));
         }
-        if let Some(m) = &row.maker {
-            self.maker_may(m, project, &slug, path, row.untrusted)?;
+        if let Some(m) = &row.maker
+            && let Err(e) = self.maker_may(m, project, &slug, path, row.untrusted)
+        {
+            if let Refusal::MakerUnreachable(why) = &e {
+                self.note_unreachable(project, &slug, path, m, &row.consumer, why);
+            }
+            return Err(e);
         }
         let e = self.entry_for(project, &slug, path, key, &reader)?;
         let hosts = self.binding(&e.row.id).map_err(failed)?.ok_or_else(|| Refusal::Unusable(format!("{key} isn't bound to hosts any more")))?;
@@ -690,7 +695,8 @@ impl Secrets {
             c.execute("UPDATE placeholders SET revoked_at = ? WHERE id = ? AND revoked_at IS NULL", params![now, id])?;
             let text = format!("{host} echoed {key} back in a response to {consumer}: placeholder {id} is ended, and the response was stopped. Bind {key} to a header or query parameter {host} doesn't echo");
             let alert = serde_json::json!({ "kind": "placeholder_echo", "placeholder": id, "consumer": consumer, "host": host });
-            crate::audit::record(c, mac, &project, &Caller::consumer("roll:placeholders"), "secrets.alert", Some(&env), Some(&path), std::slice::from_ref(&key), &text, now)?;
+            let event = crate::events::Event::new(crate::events::Kind::PlaceholderEchoed, serde_json::json!({ "placeholder": id, "consumer": consumer, "host": host }));
+            crate::audit::record_event(c, mac, &project, &Caller::consumer("roll:placeholders"), "secrets.alert", Some(&env), Some(&path), std::slice::from_ref(&key), &text, now, event)?;
             self.queue_alert(c, &project, &env, &text, alert, now, now)?;
             Ok::<_, Error>(consumer)
         })?;
@@ -754,7 +760,7 @@ impl Secrets {
         let times = if u.pending == 1 { "once".to_string() } else { format!("{} times", u.pending) };
         let others = if u.others { " and others" } else { "" };
         let seen = u.hosts.join(", ");
-        let (text, alert) = match what {
+        let (text, alert, kind) = match what {
             Noted::Swap => {
                 let summary = format!("substituted {} for {host} {times} for {} ({id})", u.key, u.consumer);
                 self.audit_now(&u.project, &Caller::consumer(&u.consumer), "secrets.substitute", Some(&u.env), Some(&u.path), std::slice::from_ref(&u.key), &summary);
@@ -763,17 +769,23 @@ impl Secrets {
             Noted::WrongHost => {
                 tracing::warn!(project = %u.project, env = %u.env, key = %u.key, consumer = %u.consumer, placeholder = %id, hosts = %seen, count = u.pending, "a placeholder was sent to hosts its key isn't bound to");
                 let text = format!("placeholder {id} of {}, issued to {}, was sent to hosts {} isn't bound to {times} ({seen}{others}): likely an exfiltration attempt", u.key, u.consumer, u.key);
-                (text, serde_json::json!({ "kind": "placeholder_host", "placeholder": id, "consumer": u.consumer, "hosts": u.hosts, "more_hosts": u.others, "count": u.pending }))
+                (text, serde_json::json!({ "kind": "placeholder_host", "placeholder": id, "consumer": u.consumer, "hosts": u.hosts, "more_hosts": u.others, "count": u.pending }), crate::events::Kind::PlaceholderWrongHost)
             }
             Noted::WrongConsumer => {
                 tracing::warn!(project = %u.project, env = %u.env, key = %u.key, consumer = %u.consumer, placeholder = %id, by = %seen, count = u.pending, "a placeholder was swapped by another consumer's proxy");
                 let text = format!("placeholder {id} of {}, issued to {}, was sent through the proxy of {seen}{others} {times}: likely a leaked placeholder. Revoke it", u.key, u.consumer);
-                (text, serde_json::json!({ "kind": "placeholder_consumer", "placeholder": id, "consumer": u.consumer, "by": u.hosts, "more_by": u.others, "count": u.pending }))
+                (text, serde_json::json!({ "kind": "placeholder_consumer", "placeholder": id, "consumer": u.consumer, "by": u.hosts, "more_by": u.others, "count": u.pending }), crate::events::Kind::PlaceholderWrongConsumer)
             }
         };
         let res = self.keys().and_then(|mac| {
             self.db.write(|c| {
-                crate::audit::record(c, mac, &u.project, &Caller::consumer("roll:placeholders"), "secrets.alert", Some(&u.env), Some(&u.path), std::slice::from_ref(&u.key), &text, now)?;
+                // The feed's data is the alert's, without its own kind.
+                let mut data = alert.clone();
+                if let Some(m) = data.as_object_mut() {
+                    m.remove("kind");
+                }
+                let event = crate::events::Event::new(kind, data);
+                crate::audit::record_event(c, mac, &u.project, &Caller::consumer("roll:placeholders"), "secrets.alert", Some(&u.env), Some(&u.path), std::slice::from_ref(&u.key), &text, now, event)?;
                 self.queue_alert(c, &u.project, &u.env, &text, alert.clone(), now, now)?;
                 Ok::<_, Error>(())
             })
@@ -892,7 +904,10 @@ impl Secrets {
             return None;
         }
         let why: String = why.chars().filter(|c| !c.is_control()).take(200).collect();
-        self.audit_now(&row.project, &Caller::consumer("roll:leaks"), "secrets.placeholders.end", None, Some(&row.path), std::slice::from_ref(&row.key), &format!("revoked leaked placeholder {} of {} for {}: {why}", row.id, row.key, row.consumer));
+        let slug: Option<String> = self.db.read(|c| c.query_row("SELECT slug FROM environments WHERE id = ?", [&row.env_id], |r| r.get(0)).optional()).ok().flatten();
+        let event = crate::events::Event::new(crate::events::Kind::SecretLeaked, serde_json::json!({ "placeholder": row.id, "consumer": row.consumer, "reason": why }));
+        let summary = format!("revoked leaked placeholder {} of {} for {}: {why}", row.id, row.key, row.consumer);
+        self.audit_now_event(&row.project, &Caller::consumer("roll:leaks"), "secrets.placeholders.end", slug.as_deref(), Some(&row.path), std::slice::from_ref(&row.key), &summary, Some(event));
         self.hosts_changed([row.consumer.as_str()]);
         Some(format!("roll secrets placeholder {} of {}", row.id, row.key))
     }

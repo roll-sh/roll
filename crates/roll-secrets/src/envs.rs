@@ -668,7 +668,13 @@ impl Secrets {
             }
             c.execute("UPDATE environments SET protected = ?, approvals = ?, approvers = ? WHERE id = ?", params![p.protected as i64, approvals, json(&approvers), env.id])?;
             let summary = if p.protected { format!("protected, {approvals} approval{}", if approvals == 1 { "" } else { "s" }) } else { "unprotected".into() };
-            audit::record(c, self.keys()?, project, caller, "environment.policy", Some(slug), None, &[], &summary, now)?;
+            // Health's `production_unprotected`, as it starts.
+            if slug == crate::PRODUCTION && env.protected && !p.protected {
+                let event = crate::events::Event::new(crate::events::Kind::ProductionUnprotected, serde_json::json!({}));
+                audit::record_event(c, self.keys()?, project, caller, "environment.policy", Some(slug), None, &[], &summary, now, event)?;
+            } else {
+                audit::record(c, self.keys()?, project, caller, "environment.policy", Some(slug), None, &[], &summary, now)?;
+            }
             let env = by_id(c, &env.id)?;
             one(c, env)
         })

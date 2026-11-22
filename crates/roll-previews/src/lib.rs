@@ -1170,6 +1170,9 @@ pub struct Pinned {
     pub share_url: Option<String>,
     /// When it stopped being the latest.
     pub at: i64,
+    /// The data products it has its own copy of (as its head left them); the rest it shares with
+    /// the preview.
+    pub own_data: Vec<Kind>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]

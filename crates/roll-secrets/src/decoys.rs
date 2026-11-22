@@ -225,7 +225,8 @@ impl Secrets {
             let text = format!("decoy {key} in {slug}:{path} was used{from}, calling {route}");
             let mut who = Caller::consumer("roll:decoys");
             who.ip = ip.clone();
-            audit::record(c, self.keys()?, &project, &who, "secrets.alert.decoy_used", Some(&slug), Some(&path), std::slice::from_ref(&key), &text, now)?;
+            let event = crate::events::Event::new(crate::events::Kind::DecoyUsed, json!({ "decoy": id, "route": route, "ip": ip }));
+            audit::record_event(c, self.keys()?, &project, &who, "secrets.alert.decoy_used", Some(&slug), Some(&path), std::slice::from_ref(&key), &text, now, event)?;
             if notify {
                 let link = web.as_ref().map(|w| format!("{}/dashboard/projects/{project}/secrets?env={slug}&tab=activity", w.trim_end_matches('/')));
                 let mut said = format!("roll secrets: {text}. Whoever used it found it where it was planted: cut them off and rotate what sits beside it.");

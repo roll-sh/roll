@@ -1334,8 +1334,10 @@ deterministic (#396).
    chat ops (Algolia's connectors notify on failed runs). A whole-product review on 2026-11-22
    found connectors refusing private addresses but not reindex's deny rules, and no per-owner cap on
    remote reindex slots: being fixed together as one node-wide egress check and owner-fair slots.
-8. **Semantic search with no keys** (built in #563, in review: roll's float build of E5 equals
-   Elasticsearch's float deployment, cosine 1.000000 on 64 of 64 cases; Elastic Cloud's `.multilingual-e5-small-elasticsearch`
+8. **Semantic search with no keys** (landed in #563, d756be014: roll's float build of E5 equals
+   Elasticsearch's float deployment, cosine 1.000000 on 68 of 68 cases, and its CPU is billed by the
+   cluster's catalog id; left: a RAG sample dataset on it (item 12) and OpenSearch-flavor local
+   models mapped onto it (item 14); Elastic Cloud's `.multilingual-e5-small-elasticsearch`
    and Elastic Inference Service, Typesense's and Meilisearch's built-in embedding models,
    Algolia's NeuralSearch): every `semantic_text` field and `text_embedding` endpoint on roll needs
    the customer's own provider key today, so the first semantic search means an OpenAI or Cohere
@@ -1651,7 +1653,23 @@ deterministic (#396).
    the same run) plus ~1 s to load the cluster from S3 and replay its WAL. Search's part is the
    load; the TTL is roll cloud's fleet-wide choice.
 28. **CI**: the merge gate runs `search-codec`'s lib tests (`rust (search)`, 54 s on PR #29 with
-   main's cache: under the minute, no room for another crate). (`search-store`'s mass-recovery
+   main's cache: under the minute, no room for another crate). Test gaps a read-only analysis found on 2026-11-22
+   (main at d9aecc990), ranked; each test goes in `test:search`, not the merge gate:
+   (1) connectors refusing private addresses: every `connectors.rs` cluster sets
+   `allow_private_hosts`, so deleting the check fails nothing (being added with the egress fix,
+   `a_connector_never_reaches_a_private_address`); (2) a search link refusing and deleting a key
+   wider than asked (`rolld/src/secrets.rs` ~1207, untested; previews' twin is tested);
+   (3) previews' `Search::mask` end to end (previews' code, sent to that thread); (4) an apps
+   search link narrowed by `names`/`permission` and unlinking revoking its key, and the drain's key
+   401 after the drain is deleted (`rolld/tests/secrets.rs`); (5) owner-node jobs across a drain: a
+   watch, an ILM rollover and a sync running once on the next owner (`cluster.rs`); (6) ES|QL over a
+   remote on another node and a migration reported across a drain (`cluster.rs`); (7) MCP with a
+   person's project token against real search (sent to the MCP thread); (8) `roll://` repository
+   keys following rotation against real roll secrets (`rolld/tests/secrets.rs`); (9) the
+   dashboard's connectors tab and (10) migration wizard as Testing Library flows; (11) `roll
+   search docs add|delete`, `synonyms`/`rules list|delete` and `inference test` as lines in the
+   existing CLI flows. `rolld/tests/search_cluster_e2e.rs` never runs (no script sets `ROLL_E2E` for
+   it) and `fleet_e2e.rs` covers it: delete it or wire it into `test:search --docker`. (`search-store`'s mass-recovery
    WAL test flaked on a loaded host: a replay counted itself in the shared replay cache only
    after listing, so one could finish and empty it while the others listed; it now counts first.
    12 of 40 runs on one CPU failed before, 0 of 40 after.) `search-server`'s parked-governor
@@ -1682,7 +1700,10 @@ deterministic (#396).
    field could shadow the field the filter tests. Security filters (roles, API keys' role
    descriptors, OpenSearch Security's `dls`, a browser key's `filter`) are now built without the
    request's runtime fields on every read path, and a runtime field without a script reads only the
-   `_source` its reader may see. #601 (in review) carries the whole-product
+   `_source` its reader may see. #601 (landed, 27a29ffa6: the console decided on the routed API with
+   reveal-capable grants, an analysis memory budget per document and per node, one sealing path that
+   refuses secrets on a node without `ROLL_SECRET_KEY`, watch secrets bound to their cluster)
+   carried the whole-product
    review's fixes. A third, whole-product review on 2026-11-20 (main at 21708aef1) found no
    cross-tenant reach through branches, links or internal calls. Being fixed: Painless memory per
    execution, aggregation memory across the node (#549), observations keyed by name (a reused

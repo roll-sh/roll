@@ -31,7 +31,7 @@ const DAY_MS: i64 = 86_400_000;
 /// A project's rows by `project_id`, gone at the purge (its registries wait for revocations:
 /// [`REGISTRIES`]).
 const DATA: &[&str] = &[
-    "secrets", "versions", "changes", "requests", "audit", "audit_heads", "required", "shares", "value_requests", "syncs", "audit_sinks", "notices", "identities", "identity_logins", "transit_keys", "oidc_issued", "placeholders", "key_hosts", "validity", "backup_schedules",
+    "secrets", "versions", "changes", "requests", "audit", "audit_heads", "required", "shares", "value_requests", "syncs", "audit_sinks", "notices", "identities", "identity_logins", "transit_keys", "oidc_issued", "placeholders", "key_hosts", "validity", "backup_schedules", "event_marks",
 ];
 
 /// Gone at the delete itself: links that hand something out to whoever holds them, and logins
@@ -285,7 +285,8 @@ impl Secrets {
             c.execute("UPDATE decoys SET ended_at = ? WHERE project_id = ? AND ended_at IS NULL", params![now, project])?;
             if let Some(keys) = keys {
                 let summary = format!("the workspace project was deleted: what it issued is revoked, and its secrets, history and keys are kept unreadable until {}, then purged", utc(purge_at));
-                audit::record(c, keys, project, by, "project.delete", None, None, &[], &summary, now)?;
+                let event = crate::events::Event::new(crate::events::Kind::ProjectDeleted, serde_json::json!({ "purge_at": purge_at }));
+                audit::record_event(c, keys, project, by, "project.delete", None, None, &[], &summary, now, event)?;
             }
             Ok::<_, Error>((grants, consumers, gateways))
         })?;
@@ -419,7 +420,7 @@ impl Secrets {
         };
         let now = self.db.now_ms()?;
         let summary = "recovered within its window: what it issued was revoked at the delete (dynamic leases are issued again, managed links get new credentials)";
-        self.db.write(|c| audit::record(c, self.keys()?, project, caller, "project.recover", None, None, &[], summary, now))?;
+        self.db.write(|c| audit::record_event(c, self.keys()?, project, caller, "project.recover", None, None, &[], summary, now, crate::events::Event::new(crate::events::Kind::ProjectRecovered, serde_json::json!({}))))?;
         // Managed links: one new credential each (their old ones were revoked at the delete).
         let managed: Vec<(String, String, String, String)> = self.db.read(|c| {
             c.query(
@@ -467,7 +468,7 @@ impl Secrets {
                     let roll = Caller::consumer("roll:sweeper");
                     self.db.write(|c| {
                         if c.execute("UPDATE projects SET forgotten_at = NULL, purge_at = NULL, forgotten_by = NULL WHERE project_id = ? AND forgotten_at IS NOT NULL AND closed_at IS NULL", [&project])? == 1 {
-                            audit::record(c, mac, &project, &roll, "project.recover", None, None, &[], "recovered: its workspace project was back", now)?;
+                            audit::record_event(c, mac, &project, &roll, "project.recover", None, None, &[], "recovered: its workspace project was back", now, crate::events::Event::new(crate::events::Kind::ProjectRecovered, serde_json::json!({})))?;
                         }
                         Ok::<_, Error>(())
                     })?;
