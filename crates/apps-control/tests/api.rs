@@ -3236,6 +3236,57 @@ async fn roll_up_deploys_an_uploaded_tree_and_cron_runs_on_demand() {
     let _ = Ordering::SeqCst;
 }
 
+/// Sandboxes (Vercel Sandbox, Fly Machines): a container of the live image (or a public one)
+/// with none of the environment's variables and a network of its own unless asked, commands run
+/// for their exit code and output, a file in and out, at most ten, removed at their end.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_sandbox_runs_commands_apart_from_the_environment_until_its_end() {
+    let w = world().await;
+    let (svc, _) = image_service(&w, "api", json!({"port": 80})).await;
+    let id = svc["id"].as_str().unwrap().to_string();
+    let env = format!("/v1/apps/services/{id}/environments/production");
+    let base = format!("{env}/sandboxes");
+    assert_eq!(call(&w.api, "POST", &base, Some(json!({"ttl_s": 5}))).await.0, StatusCode::BAD_REQUEST, "a minute at least");
+    assert_eq!(call(&w.api, "POST", &base, Some(json!({"network": "host"}))).await.0, StatusCode::BAD_REQUEST);
+    let (st, sb) = call(&w.api, "POST", &base, Some(json!({"image": "python:3.13-slim", "ttl_s": 120}))).await;
+    assert_eq!(st, StatusCode::CREATED, "{sb}");
+    let sid = sb["id"].as_str().unwrap().to_string();
+    let name = w.fake.instances(&id).into_iter().map(|(n, _, _)| n).find(|n| n.contains("-sbx-")).expect("its container");
+    let spec = w.fake.spec(&name).unwrap();
+    assert_eq!((spec.image.as_str(), spec.port), ("python:3.13-slim", None));
+    assert!(spec.vars.iter().all(|(k, _)| k == "ROLL_INSTANCE"), "none of the environment's variables: {:?}", spec.vars.iter().map(|(k, _)| k).collect::<Vec<_>>());
+    let net = spec.network.clone().unwrap();
+    assert!(net.ends_with("-n") && w.fake.networks().contains(&net), "a network of its own: {net}");
+    // Commands: their output and exit code.
+    let (st, out) = call(&w.api, "POST", &format!("{base}/{sid}/exec"), Some(json!({"command": "echo hello"}))).await;
+    assert_eq!((st, out["stdout"].as_str(), out["exit_code"].as_i64()), (StatusCode::OK, Some("hello\n"), Some(0)), "{out}");
+    assert_eq!(call(&w.api, "POST", &format!("{base}/{sid}/exec"), Some(json!({"command": "exit 3"}))).await.1["exit_code"], 3);
+    // A file in and back out.
+    let file = format!("{base}/{sid}/files?path=%2Ftmp%2Fin%2Fdata.json");
+    let put = w.api.clone().oneshot(Request::put(&file).body(Body::from("{\"n\":1}")).unwrap()).await.unwrap();
+    assert_eq!(put.status(), StatusCode::OK);
+    let got = w.api.clone().oneshot(Request::get(&file).body(Body::empty()).unwrap()).await.unwrap();
+    assert_eq!(got.into_body().collect().await.unwrap().to_bytes(), "{\"n\":1}");
+    let bad = w.api.clone().oneshot(Request::get(format!("{base}/{sid}/files?path=..%2Fetc%2Fpasswd")).body(Body::empty()).unwrap()).await.unwrap();
+    assert_eq!(bad.status(), StatusCode::BAD_REQUEST);
+    // With the environment's variables when asked; ten at once at most.
+    let (_, with) = call(&w.api, "POST", &base, Some(json!({"variables": true, "network": "environment"}))).await;
+    let with_name = w.fake.instances(&id).into_iter().map(|(n, _, _)| n).find(|n| n.ends_with(with["id"].as_str().unwrap().trim_start_matches("sbx_"))).unwrap();
+    let spec = w.fake.spec(&with_name).unwrap();
+    assert!(spec.vars.iter().any(|(k, _)| k == "PORT") && !spec.network.unwrap().ends_with("-n"));
+    for _ in 2..10 {
+        assert_eq!(call(&w.api, "POST", &base, None).await.0, StatusCode::CREATED);
+    }
+    assert_eq!(call(&w.api, "POST", &base, None).await.0, StatusCode::CONFLICT, "ten at most");
+    assert_eq!(call(&w.api, "GET", &base, None).await.1.as_array().map(Vec::len), Some(10));
+    // Deleted: its container and network go; past its end, the owner's minute sweep takes it.
+    assert_eq!(call(&w.api, "DELETE", &format!("{base}/{}", with["id"].as_str().unwrap()), None).await.0, StatusCode::NO_CONTENT);
+    assert!(w.fake.state(&with_name).is_none());
+    w.apps.cron_pass(code_sql::now_ms() + 121_000).await;
+    assert_eq!(call(&w.api, "GET", &format!("{base}/{sid}"), None).await.0, StatusCode::NOT_FOUND, "ended at its TTL");
+    assert!(w.fake.state(&name).is_none() && !w.fake.networks().contains(&net));
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_one_off_job_runs_the_live_image_to_its_exit_and_can_be_canceled() {
     let w = world_with(|c| c.cron_retry_after = Duration::from_millis(20)).await;
@@ -8454,6 +8505,13 @@ async fn a_closed_environment_uses_its_keys_without_seeing_them() {
     assert!(closed.files.iter().any(|(p, c)| p == apps_control::deploy::INTERCEPT_CA && c.contains("FAKECA")), "the CA in its trust bundle");
     let network = apps_control::closed_network_name(&w.project, "staging");
     assert_eq!(w.fake.intercepted.lock().get(&network).copied(), Some(true), "its proxies intercept");
+    // Its sandboxes reach nothing but roll either: on its network, never one of their own.
+    assert_eq!(call(&w.api, "POST", &format!("{base}/staging/sandboxes"), Some(json!({"network": "none"}))).await.0, StatusCode::BAD_REQUEST);
+    let (st, sb) = call(&w.api, "POST", &format!("{base}/staging/sandboxes"), None).await;
+    assert_eq!((st, sb["network"].as_str()), (StatusCode::CREATED, Some("environment")), "{sb}");
+    let sbx = w.fake.instances(&id).into_iter().map(|(n, _, _)| n).find(|n| n.contains("-sbx-")).unwrap();
+    assert_eq!(w.fake.spec(&sbx).map(|s| (s.network, s.closed)), Some((Some(network.clone()), true)));
+    assert_eq!(call(&w.api, "DELETE", &format!("{base}/staging/sandboxes/{}", sb["id"].as_str().unwrap()), None).await.0, StatusCode::NO_CONTENT);
     // What its interception did, on the environment (roll previews' sheet).
     let (_, e) = call(&w.api, "GET", &format!("{base}/staging"), None).await;
     assert_eq!((e["intercepted"]["requests"].as_u64(), e["intercepted"]["swapped"].as_u64()), (Some(3), Some(2)), "{e}");

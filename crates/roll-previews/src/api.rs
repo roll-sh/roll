@@ -415,11 +415,13 @@ async fn shares(AxState(e): S, Path(id): Path<String>) -> crate::Result<Json<Vec
 }
 
 /// The link is in this answer only (its token isn't kept).
-async fn share(AxState(e): S, Path(id): Path<String>, who: Option<axum::Extension<roll_auth::SignedIn>>, b: Bytes) -> crate::Result<Response> {
+async fn share(AxState(e): S, Path(id): Path<String>, who: Option<axum::Extension<roll_auth::SignedIn>>, grant: Option<axum::Extension<roll_auth::Grant>>, b: Bytes) -> crate::Result<Response> {
     check_id(&id)?;
     let s: ShareBody = body(&b)?;
+    // Whose link it is: the person signed in, or the person behind a token (an operator's: none).
+    let maker = who.as_ref().map(|axum::Extension(u)| u.user.clone()).or_else(|| grant.and_then(|axum::Extension(g)| g.user.map(|u| u.to_string())));
     let by = who.map(|axum::Extension(u)| u.handle).unwrap_or_else(|| "operator".into());
-    let (share, url) = blocking(e, move |e| e.share(&id, s.hours, &by)).await?;
+    let (share, url) = blocking(e, move |e| e.share(&id, s.hours, &by, maker.as_deref())).await?;
     let mut v = serde_json::to_value(&share).unwrap_or_default();
     v["url"] = json!(url);
     Ok((StatusCode::CREATED, Json(v)).into_response())

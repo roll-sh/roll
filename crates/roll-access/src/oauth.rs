@@ -193,6 +193,11 @@ pub struct Consent {
     pub state: Option<String>,
     #[serde(default)]
     pub resource: Option<String>,
+    /// Step-up: the id (`stp_…`) of the step-up roll recorded when this client's connection was
+    /// refused (its `insufficient_scope` challenge). Its one rule joins that connection; the
+    /// consent's other fields aren't used.
+    #[serde(default)]
+    pub step_up: Option<String>,
     #[serde(flatten)]
     pub allowed: Allowed,
 }
@@ -284,10 +289,16 @@ pub async fn authorize(State(a): S, ext: Extensions, body: axum::body::Bytes) ->
     if !client.redirect_uris.contains(&c.redirect_uri) {
         return Err(Error::BadRequest("redirect_uri isn't one the client registered".into()));
     }
-    let Consented { new, by, user, asker } = consented(&a, &ext, &client, &c.allowed)?;
+    if !a.policy_now().allows_client(&client) {
+        return Err(Error::Forbidden(crate::evaluate::CLIENT_NOT_ALLOWED.into()));
+    }
     // The resource the client asked for (RFC 8707; MCP clients always name the MCP server): its
     // tokens are for that server only. One that named none (`roll login`) gets API tokens.
     let res = c.resource.as_ref().map(|_| resource(&a));
+    if let Some(id) = c.step_up.clone() {
+        return step_up(&a, &ext, &c, &client, id, res).await;
+    }
+    let Consented { new, by, user, asker } = consented(&a, &ext, &client, &c.allowed)?;
     let (a2, cl, uri, ch) = (a.clone(), client.clone(), c.redirect_uri.clone(), c.code_challenge.clone());
     let (code, grant_id) = tokio::task::spawn_blocking(move || a2.store.issue_code(&cl, &new, crate::store::Issuer { created_by: &by, user: user.as_deref() }, &uri, &ch, res.as_deref()))
         .await
@@ -305,6 +316,82 @@ pub async fn authorize(State(a): S, ext: Extensions, body: axum::body::Bytes) ->
     let mut res = Json(json!({ "redirect": redirect.to_string() })).into_response();
     res.extensions_mut().insert(crate::api::Changed(grant_id));
     Ok(res)
+}
+
+/// The step-up `id` and its connection, when it's the caller's own live connection of `client`
+/// (any client when `None`) and not waiting on an admin: else one answer for every other case, so
+/// an id tells nothing about whose it is.
+pub(crate) async fn own_step_up(
+    a: &Arc<Access>,
+    ext: &Extensions,
+    id: &str,
+    client: Option<&str>,
+) -> crate::Result<(crate::store::Grant, roll_auth::scope::Rule, Option<String>)> {
+    let (user, asker) = match crate::api::who(a, ext)? {
+        crate::api::Who::Operator => (ext.get::<roll_auth::SignedIn>().map(|u| u.user.clone()), None),
+        crate::api::Who::User(u) => (Some(u.user), Some(u.handle)),
+        crate::api::Who::Grant(_) => return Err(Error::Forbidden("a token never connects an MCP client".into())),
+    };
+    let none = || Error::BadRequest("no such step-up of yours: retry the call that was refused".into());
+    let (a2, id2) = (a.clone(), id.to_string());
+    let (gid, rule) = tokio::task::spawn_blocking(move || a2.store.step_up(&id2)).await.map_err(|e| Error::Internal(e.to_string()))??.ok_or_else(none)?;
+    let a2 = a.clone();
+    let g = tokio::task::spawn_blocking(move || a2.store.get(&gid)).await.map_err(|e| Error::Internal(e.to_string()))?.map_err(|_| none())?;
+    let theirs = g.kind == "oauth" && g.user == user && g.live(code_sql::now_ms()) && client.is_none_or(|c| g.client.as_ref().is_some_and(|cl| cl.id == c));
+    if !theirs {
+        return Err(none());
+    }
+    if g.pending {
+        return Err(Error::Conflict("that connection waits for an admin's approval: its rules can't change until they decide".into()));
+    }
+    Ok((g, rule, asker))
+}
+
+/// Step-up's consent: the step-up's one rule joins the person's connection (read and written in
+/// one transaction; nothing else about it changes), the policy and an admin's approval applying as
+/// to any widened token, and the client gets a code for that connection: its other sessions widen
+/// too and nothing new is made.
+async fn step_up(a: &Arc<Access>, ext: &Extensions, c: &Consent, client: &crate::store::Client, id: String, res: Option<String>) -> crate::Result<Response> {
+    let (g, _rule, asker) = own_step_up(a, ext, &id, Some(&client.id)).await?;
+    // The token policy as it is now, as editing the connection would meet it.
+    a.check_policy(g.expires_at)?;
+    let policy = a.policy_now();
+    let person = asker.is_some();
+    let (a2, id2, gid) = (a.clone(), id.clone(), g.id.clone());
+    let (updated, added) = tokio::task::spawn_blocking(move || a2.store.apply_step_up(&id2, &gid, &|rules, ask| person && policy.needs_approval(rules, ask)))
+        .await
+        .map_err(|e| Error::Internal(e.to_string()))??;
+    if added {
+        a.tell_added(&updated, crate::api::Added::Client(&client.name), ext);
+        if updated.pending && let Some(h) = &asker {
+            a.tell_admins_waiting(&updated, h);
+        }
+    }
+    let (a2, cid, gid, uri, ch) = (a.clone(), client.id.clone(), g.id.clone(), c.redirect_uri.clone(), c.code_challenge.clone());
+    let code = tokio::task::spawn_blocking(move || a2.store.issue_code_for(&cid, &gid, &uri, &ch, res.as_deref())).await.map_err(|e| Error::Internal(e.to_string()))??;
+    let mut redirect = url::Url::parse(&c.redirect_uri).map_err(|_| Error::BadRequest("redirect_uri isn't a URL".into()))?;
+    {
+        let mut q = redirect.query_pairs_mut();
+        q.append_pair("code", &code);
+        if let Some(s) = &c.state {
+            q.append_pair("state", s);
+        }
+        q.append_pair("iss", &api(a));
+    }
+    let mut out = Json(json!({ "redirect": redirect.to_string() })).into_response();
+    out.extensions_mut().insert(crate::api::Changed(g.id));
+    Ok(out)
+}
+
+/// `GET /v1/access/oauth/step-ups/{id}`: what a step-up proposes, for its person's consent screen
+/// (the connection and the one rule), or one "no such step-up" for anyone else.
+pub async fn step_up_view(State(a): S, ext: Extensions, axum::extract::Path(id): axum::extract::Path<String>) -> crate::Result<Json<Value>> {
+    let (g, rule, asker) = own_step_up(&a, &ext, &id, None).await?;
+    a.check_policy(g.expires_at)?;
+    let mut rules = g.rules.clone();
+    rules.0.push(rule.clone());
+    let waits = asker.is_some() && a.policy_now().needs_approval(&rules, g.ask_otherwise);
+    Ok(Json(json!({ "id": id, "connection": { "id": g.id, "name": g.name, "client_id": g.client.as_ref().map(|c| c.id.clone()) }, "rule": rule, "waits_for_admin": waits })))
 }
 
 /// A metadata document is fetched at most this often (it's kept between).
@@ -442,6 +529,16 @@ async fn token(State(a): S, req: axum::extract::Request) -> Response {
         };
     }
     let Some(client_id) = get("client_id") else { return Error::OAuth("invalid_client", "client_id is required".into()).into_response() };
+    // roll's policy may list the clients that connect: checked before a code or refresh token is
+    // spent (the store holds the grant to this client id), from what roll keeps (no fetch).
+    let policy = a.policy_now();
+    if !policy.oauth_clients.is_empty() {
+        let (a2, id) = (a.clone(), client_id.clone());
+        let known = tokio::task::spawn_blocking(move || a2.store.client(&id)).await;
+        if !matches!(&known, Ok(Ok(Some(c))) if policy.allows_client(c)) {
+            return Error::OAuth("unauthorized_client", crate::evaluate::CLIENT_NOT_ALLOWED.into()).into_response();
+        }
+    }
     let r = match get("grant_type").as_deref() {
         Some("authorization_code") => {
             let (Some(code), Some(redirect), Some(verifier)) = (get("code"), get("redirect_uri"), get("code_verifier")) else {
@@ -533,6 +630,9 @@ async fn device_authorization(State(a): S, req: axum::extract::Request) -> Respo
     match known_client(&a, &client_id).await {
         // Only a client registered to sign devices in (no redirect): one registered with a
         // redirect is bound to it, and doesn't get tokens around it.
+        Ok(Some(c)) if c.redirect_uris.is_empty() && !a.policy_now().allows_client(&c) => {
+            return Error::OAuth("unauthorized_client", crate::evaluate::CLIENT_NOT_ALLOWED.into()).into_response();
+        }
         Ok(Some(c)) if c.redirect_uris.is_empty() => {}
         Ok(Some(_)) => return Error::OAuth("unauthorized_client", "this client signs in with a redirect: register one without redirect_uris for the device flow".into()).into_response(),
         Ok(None) => return Error::OAuth("invalid_client", "unknown client_id: register first".into()).into_response(),
@@ -595,6 +695,7 @@ pub async fn device_view(State(a): S, ext: Extensions, axum::extract::Path(code)
     Ok(Json(json!({
         "user_code": crate::store::show_user_code(&r.user_code),
         "client": { "id": client.id, "name": client.name, "uri": client.uri },
+        "not_allowed": (!a.policy_now().allows_client(&client)).then_some(crate::evaluate::CLIENT_NOT_ALLOWED),
         "scope": r.scope,
         "network": r.network,
         // Asked from another network than this browser's: someone may have sent the code.
@@ -610,6 +711,9 @@ pub async fn device_approve(State(a): S, ext: Extensions, axum::extract::Path(co
     let allowed: Allowed = serde_json::from_slice(&body).map_err(|e| Error::BadRequest(format!("invalid body: {e}")))?;
     let r = device_lookup(&a, &ext, &code).await?;
     let client = known_client(&a, &r.client_id).await?.ok_or_else(|| Error::NotFound("the device's client is gone".into()))?;
+    if !a.policy_now().allows_client(&client) {
+        return Err(Error::Forbidden(crate::evaluate::CLIENT_NOT_ALLOWED.into()));
+    }
     let Consented { new, by, user, asker } = consented(&a, &ext, &client, &allowed)?;
     let waits = asker.is_some();
     let (client_name, asked_from) = (client.name.clone(), r.network.clone());
