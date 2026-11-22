@@ -58,7 +58,7 @@ pub use analyze::analyze_repository;
 pub use elastic::decode_id as decode_elasticsearch_id;
 pub use elastic_restore::{ShardView as RestoringShard, resume as resume_elasticsearch_restores};
 pub use s3::ALLOW_PRIVATE as S3_ALLOW_PRIVATE;
-pub(crate) use cloud::AZURE_CONTAINER;
+pub(crate) use cloud::{AZURE_CONTAINER, seal_stored_secrets};
 
 /// The settings of repository type `ty` that are credentials (`s3`'s `access_key`, …): any of
 /// them may be a roll secrets reference, set only through roll's control plane.
@@ -743,7 +743,7 @@ pub async fn put_repository(ctx: &Ctx<'_>) -> EsResult<Reply> {
     let mut settings = settings;
     validate_repository(ctx, &name, &ty, &settings)?;
     let maker = refs::check(ctx, &name, &ty, &settings).await?;
-    let secrets = cloud::take_secrets(ctx.cluster, &ty, &mut settings);
+    let secrets = cloud::take_secrets(ctx.cluster, &ty, &mut settings)?;
     let mut repo = Repository { ty, settings, secrets, refs_by: maker };
     // A branch registers its parent's bucket read-only unless told otherwise.
     if repo.settings.get("readonly").is_none() && crate::branch::inherited_location(ctx.cluster, &ctx.state(), &repo) {

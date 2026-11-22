@@ -20,7 +20,7 @@ pub const CONNECTORS: &str = "connector";
 pub const SYNC_JOBS: &str = "connector.sync_job";
 pub const SECRETS: &str = "connector_secret";
 /// What a connector secret's value is sealed as ([`crate::seal`]).
-const SECRET_KIND: &str = "connector secret";
+pub(crate) const SECRET_KIND: &str = "connector secret";
 
 const CONNECTOR_STATUSES: [&str; 5] = ["created", "needs_configuration", "configured", "connected", "error"];
 
@@ -853,7 +853,7 @@ pub async fn update(ctx: &Ctx<'_>) -> EsResult<Reply> {
     }
     let id = ctx.path_param("connector_id").unwrap_or_default().to_string();
     let now_ms = ctx.now_ms;
-    let sealer = ctx.cluster.config.sealer.clone();
+    let (sealer, unsealed) = (ctx.cluster.config.sealer.clone(), ctx.cluster.config.unsealed_secrets);
     let user = crate::xpack::internal::stored_user(crate::xpack::security::principal(ctx));
     let cluster = ctx.cluster;
     let me = crate::branch::cluster_id(cluster);
@@ -1015,7 +1015,7 @@ pub async fn update(ctx: &Ctx<'_>) -> EsResult<Reply> {
                 }
                 _ => {}
             }
-            sync::config::protect(&mut m, &before, sealer.as_deref(), &me, adopting.as_deref()).map_err(|field| {
+            sync::config::protect(&mut m, &before, sealer.as_deref(), unsealed, &me, adopting.as_deref()).map_err(|field| {
                 EsError::illegal_argument(format!(
                     "[{field}] is a sensitive value, and this node has no key to seal it with: set ROLL_SECRET_KEY on the node to store a connector's credentials (roll never stores them in the clear)"
                 ))
@@ -1371,7 +1371,7 @@ pub async fn secret_post(ctx: &Ctx<'_>) -> EsResult<Reply> {
     };
     let id = crate::meta::names::time_based_id();
     let out = id.clone();
-    let entry = crate::seal::seal_value(ctx.cluster, SECRET_KIND, v.clone());
+    let entry = crate::seal::seal_value(ctx.cluster, SECRET_KIND, v.clone())?;
     let now = ctx.now_ms;
     ctx.cluster.update(move |st| store::put(st, SECRETS, &id, entry, now).map(|_| ())).await?;
     Reply::ok(obj! { "id" => out })
@@ -1383,7 +1383,7 @@ pub async fn secret_put(ctx: &Ctx<'_>) -> EsResult<Reply> {
     let Some(v) = body.get("value").filter(|v| !v.is_null()).cloned() else {
         return Err(EsError::action_request_validation(&["[value] of the connector secret cannot be [null] or [\"\"]".into()]));
     };
-    let entry = crate::seal::seal_value(ctx.cluster, SECRET_KIND, v);
+    let entry = crate::seal::seal_value(ctx.cluster, SECRET_KIND, v)?;
     let now = ctx.now_ms;
     let created = ctx.cluster.update(move |st| store::put(st, SECRETS, &id, entry, now)).await?;
     Ok(Reply::Body(if created { 201 } else { 200 }, obj! { "result" => if created { "created" } else { "updated" } }))

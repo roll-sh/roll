@@ -292,6 +292,12 @@ scylla = { version = "1.9", default-features = false, features = ["rustls-023"] 
 # `roll nosql cqlsh`: line editing, history and completion; terminal display widths.
 rustyline = { version = "19", default-features = false, features = ["with-file-history"] }
 unicode-width = "0.2"
+# roll search: the multilingual-e5-small embedding model run on CPU (search-embed), pure Rust:
+# gemm (the f32 products candle uses, here single-threaded, no rayon), the safetensors format and
+# Hugging Face's tokenizers.
+gemm = { version = "0.19", default-features = false, features = ["std"] }
+safetensors = "0.8"
+tokenizers = { version = "0.23.2", default-features = false, features = ["fancy-regex"] }
 # roll search (Elasticsearch-compatible).
 fst = "0.4"
 memmap2 = "0.9"
@@ -304,6 +310,7 @@ icu_locale_core = "2.3"
 icu_properties = { version = "2.3", features = ["alloc", "unstable"] }
 regex-syntax = "0.8"
 search-analysis = { path = "crates/search-analysis" }
+search-embed = { path = "crates/search-embed" }
 search-codec = { path = "crates/search-codec" }
 search-index = { path = "crates/search-index" }
 search-lucene = { path = "crates/search-lucene" }
@@ -359,6 +366,19 @@ opt-level = 3
 [profile.dev.package.image]
 opt-level = 3
 [profile.dev.package.s3-image]
+opt-level = 3
+
+# The built-in embedding model (search-embed): unoptimised, its products, tokenizer and kernels
+# make a 1,000-document semantic_text reindex on the tiny test model take minutes.
+[profile.dev.package.search-embed]
+opt-level = 3
+[profile.dev.package.gemm]
+opt-level = 3
+[profile.dev.package.gemm-common]
+opt-level = 3
+[profile.dev.package.gemm-f32]
+opt-level = 3
+[profile.dev.package.tokenizers]
 opt-level = 3
 
 [profile.release]

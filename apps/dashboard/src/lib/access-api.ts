@@ -384,6 +384,8 @@ export interface Policy {
   mcp_lockdown?: boolean;
   /** Every token's and OAuth connection's MCP sees and runs only tools that read. */
   mcp_read_only?: boolean;
+  /** roll's MCP server takes only tokens and OAuth connections, never the admin token. */
+  mcp_require_grant?: boolean;
   /**
    * The OAuth clients that may connect (empty: any): a host (`claude.ai`, `*.example.com`), an
    * `https://` URL, `localhost`, `device`, or an app scheme (`cursor:`).

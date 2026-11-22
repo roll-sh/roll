@@ -48,6 +48,14 @@ pub trait Runner: Send + Sync {
     async fn remove_leftovers(&self) {}
 }
 
+/// Whether the grant rolld's gate put on a request (and a person's session grant beside it) may
+/// read a repo, as roll-access decides it, the repo's workspace projects resolved: a request that
+/// reads many repos at once (`GET /v1/code/search`) keeps only those before it cuts to a page, so
+/// the gate's filter afterwards never empties a page that had answers.
+pub trait GrantReach: Send + Sync {
+    fn reads(&self, ext: &axum::http::Extensions, repo: &str) -> bool;
+}
+
 /// Who asks for an environment's values, as rolld's gate put them on the request: roll secrets
 /// answers as it would a request of theirs to it.
 #[derive(Clone, Copy, Default)]
@@ -104,6 +112,14 @@ pub trait SecretEnv: Send + Sync {
         let _ = (by, source);
         Err(Refused("roll secrets can't tell whether its copier still may".into()).into())
     }
+    /// `environment` of `project` (a [`Revealed`]'s) read again as `by` (its copier) may now, for
+    /// `consumer` (`sandbox:<id>`), as code nobody vetted reads it: asked at each create and start
+    /// of a sandbox, so a rotated value reaches it. [`Refused`] when they may no longer reveal it;
+    /// the check and the read are one call.
+    async fn reveal_as(&self, by: &str, project: &str, environment: &str, consumer: &str) -> anyhow::Result<Vec<(String, String)>> {
+        let _ = (by, project, environment, consumer);
+        Err(Refused("roll secrets can't read as its copier".into()).into())
+    }
     /// (candidate index, key, environment, folder) for every secret, in any environment of the
     /// projects that have repo `owner/name` on their canvas, whose value is one of `candidates`
     /// (matched by fingerprint; values never come back). Empty for a repo on no project's canvas.
@@ -135,6 +151,22 @@ pub trait SecretEnv: Send + Sync {
     async fn validity(&self, repo: &str, found: Vec<(String, Option<String>)>) -> anyhow::Result<Vec<crate::model::CredentialValidity>> {
         let _ = (repo, found);
         Ok(Vec::new())
+    }
+    /// `asker` sets owner `owner`'s (its name) reviewer provider key to `reference`, a `roll://`
+    /// reference (`roll_secrets::Reference::parse` said so): roll secrets checks they may reveal it
+    /// for `code:review:<owner>` (the project whose canvas holds one of the owner's repositories
+    /// and stands for it) and answers who to keep as its maker. [`crate::Error::Forbidden`] when
+    /// they may not, [`crate::Error::Invalid`] when it can't resolve.
+    async fn bind_owner_key(&self, owner: &str, reference: &str, asker: &SecretsAsker) -> crate::Result<String> {
+        let _ = (owner, reference, asker);
+        Err(crate::Error::Unprocessable("roll:// keys need roll secrets on this server".into()))
+    }
+    /// That key's value now, read as `maker` may (re-checked on every read, audited as
+    /// `code:review:<owner>`). The error says why it can't be read (its maker can't reveal it any
+    /// more, it's gone…), never a value.
+    async fn owner_key(&self, owner: &str, reference: &str, maker: &str) -> anyhow::Result<CredentialValue> {
+        let _ = (owner, reference, maker);
+        anyhow::bail!("roll secrets isn't on this server")
     }
 }
 

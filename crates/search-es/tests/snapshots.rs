@@ -10,6 +10,7 @@ use std::sync::Arc;
 
 async fn cluster() -> Cluster {
     let mut cfg = ClusterConfig::new("snap-test");
+    cfg.unsealed_secrets = true;
     cfg.node_settings.push(("path.repo".into(), "/repo".into()));
     Cluster::open(cfg, Arc::new(MemoryStore::new())).await.unwrap()
 }

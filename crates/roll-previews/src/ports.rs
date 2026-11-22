@@ -62,6 +62,20 @@ pub trait Brancher: Send + Sync {
     /// Make `branch` the parent's current state again. Its ref may be new.
     async fn reset(&self, parent: &str, branch: &str, kept: Option<&str>, name: &str, mode: Mode) -> anyhow::Result<Branched>;
 
+    /// A copy-on-write branch of the preview's own `branch` (masked, as it is now) named `name`,
+    /// or the one already named so: an earlier push's data as its head left it. `None` from a
+    /// product that can't branch a branch (the earlier push then shares the preview's branch).
+    async fn snapshot(&self, _parent: &str, _branch: &str, _name: &str) -> anyhow::Result<Option<Branched>> {
+        Ok(None)
+    }
+
+    /// Delete a [`Brancher::snapshot`] of branch `from` named `name`. By default as a branch of
+    /// `parent` (Postgres: a branch of the project); a product whose branch guard checks the
+    /// direct parent checks `from` instead.
+    async fn delete_snapshot(&self, parent: &str, _from: &str, snapshot: &str, _kept: Option<&str>, name: &str) -> anyhow::Result<()> {
+        self.delete(parent, snapshot, name).await
+    }
+
     /// [`Brancher::branch`] from the parent as it was at `at` (unix seconds), where the product
     /// keeps history: `None` from one that doesn't (the caller branches as of now and says so).
     async fn branch_at(&self, _parent: &str, _name: &str, _mode: Mode, _at: i64) -> anyhow::Result<Option<Branched>> {

@@ -16,6 +16,11 @@ impl Postgres {
     /// A branch of `parent` named `name` (`at`: as the parent was then), with its own role; one
     /// made just before a crash is found and finished instead.
     async fn create(&self, parent: &str, name: &str, mode: Mode, at: Option<i64>) -> anyhow::Result<Branched> {
+        self.create_from(parent, None, name, mode, at).await
+    }
+
+    /// [`Self::create`] from one of the project's branches (`from`, its id) instead of `main`.
+    async fn create_from(&self, parent: &str, from: Option<&str>, name: &str, mode: Mode, at: Option<i64>) -> anyhow::Result<Branched> {
         let (id, has_role) = match self.find(parent, name).await? {
             Some(b) => {
                 let id = s(&b["id"]).unwrap_or_default();
@@ -25,7 +30,7 @@ impl Postgres {
                 }
                 (id, false)
             }
-            None => match self.0.post(&format!("/v1/projects/{}/branches", seg(parent)), json!({ "name": name, "schema_only": mode == Mode::Schema, "app_role": true, "at": at })).await {
+            None => match self.0.post(&format!("/v1/projects/{}/branches", seg(parent)), json!({ "name": name, "parent": from, "schema_only": mode == Mode::Schema, "app_role": true, "at": at })).await {
                 Ok(v) => (s(&v["branch"]["id"]).ok_or_else(|| anyhow::anyhow!("a branch without an id"))?, v["app_connection_uri"].is_string()),
                 Err(e) if conflict_is_ours(&e) => {
                     let b = self.find(parent, name).await?.ok_or(e)?;
@@ -65,6 +70,12 @@ impl Brancher for Postgres {
     /// branch gets a role of its own for the preview's code (pg-control's `app_role`).
     async fn branch(&self, parent: &str, name: &str, mode: Mode) -> anyhow::Result<Branched> {
         self.create(parent, name, mode, None).await
+    }
+
+    /// A branch of the preview's own branch (pg-control's `parent`), with a role of its own: an
+    /// earlier push's data, copy-on-write.
+    async fn snapshot(&self, parent: &str, branch: &str, name: &str) -> anyhow::Result<Option<Branched>> {
+        self.create_from(parent, Some(branch), name, Mode::Branch, None).await.map(Some)
     }
 
     /// From the parent's history (pg-control's point in time: unix seconds).
@@ -328,6 +339,18 @@ impl Brancher for Redis {
     async fn reset(&self, parent: &str, branch: &str, _kept: Option<&str>, name: &str, mode: Mode) -> anyhow::Result<Branched> {
         self.delete(parent, branch, name).await?;
         self.branch(parent, name, mode).await
+    }
+
+    /// A branch of the preview's own branch: an earlier push's data (redis-control branches any
+    /// database, and keeps a parent's history while its branches use it).
+    async fn snapshot(&self, _parent: &str, branch: &str, name: &str) -> anyhow::Result<Option<Branched>> {
+        self.branch(branch, name, Mode::Branch).await.map(Some)
+    }
+
+    /// Its parent is the preview's branch it was copied from (gone after a reset: the guard then
+    /// reads the copy's own `parent_id`).
+    async fn delete_snapshot(&self, _parent: &str, from: &str, snapshot: &str, _kept: Option<&str>, name: &str) -> anyhow::Result<()> {
+        self.delete(from, snapshot, name).await
     }
 
     async fn delete(&self, parent: &str, branch: &str, name: &str) -> anyhow::Result<()> {
@@ -996,6 +1019,21 @@ impl Brancher for Search {
         self.retire(parent, branch, kept).await?;
         self.delete(parent, branch, name).await?;
         self.branch(parent, name, mode).await
+    }
+
+    /// A branch of the preview's own branch cluster (roll search branches any cluster; its
+    /// manifests share the branch's segments, the masked ones rewritten and expunged, never the
+    /// parent's originals), with a data key of its own. Never with `at`: a point-in-time branch
+    /// replays the log, which could rebuild what masking removed.
+    async fn snapshot(&self, _parent: &str, branch: &str, name: &str) -> anyhow::Result<Option<Branched>> {
+        self.branch(branch, name, Mode::Branch).await.map(Some)
+    }
+
+    /// As the preview's branch goes: its data key revoked, its password changed, then deleted;
+    /// its parent is the branch it was copied from (`parent_id` stays when that's gone).
+    async fn delete_snapshot(&self, _parent: &str, from: &str, snapshot: &str, kept: Option<&str>, name: &str) -> anyhow::Result<()> {
+        self.retire(from, snapshot, kept).await?;
+        self.delete(from, snapshot, name).await
     }
 
     /// roll search keeps a deleted cluster restorable with its keys and password: so first the

@@ -1283,6 +1283,11 @@ pub struct Policy {
     /// (`?readonly=1`, whatever the client asks).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub mcp_read_only: bool,
+    /// roll's MCP server takes only grants (a token, an OAuth connection): the admin token, an
+    /// admin's session and an open daemon are answered with OAuth's challenge, so every agent is
+    /// held by the controls above.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub mcp_require_grant: bool,
     /// The OAuth clients that may connect (empty: any), as Atlassian's admins list the AI clients
     /// their site allows. Each is a host (`claude.ai`, `*.example.com`: a client whose metadata
     /// document is there, or whose redirects all go there), an exact `https://` URL (a metadata

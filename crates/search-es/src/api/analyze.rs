@@ -294,7 +294,8 @@ pub fn analyze(ctx: &Ctx) -> EsResult<Reply> {
                 _ => None,
             };
             let limits = AnalyzeLimits {
-                max_token_count: limit(&idx.settings, "index.analyze.max_token_count", 10_000),
+                // Bounded for indices set before roll's bound too (`MAX_ANALYZE_TOKENS`).
+                max_token_count: limit(&idx.settings, "index.analyze.max_token_count", 10_000).min(crate::meta::index_settings::MAX_ANALYZE_TOKENS as usize),
                 max_char_count: limit(&idx.settings, "index.analyze.max_char_count", 1_000_000),
             };
             analysis.analyze(&req, field.as_ref(), limits).map_err(es_error)?

@@ -1,4 +1,5 @@
 mod access;
+mod mcp_install;
 mod agent;
 mod automation;
 mod code;

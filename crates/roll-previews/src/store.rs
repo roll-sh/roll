@@ -131,6 +131,27 @@ CREATE TABLE IF NOT EXISTS pinned (
     at INTEGER NOT NULL,
     PRIMARY KEY (preview_id, service, revision)
 ) WITHOUT ROWID;
+CREATE TABLE IF NOT EXISTS events (
+    seq INTEGER PRIMARY KEY,
+    at INTEGER NOT NULL,
+    kind TEXT NOT NULL,
+    project_id TEXT NOT NULL,
+    preview_id TEXT NOT NULL,
+    change_id TEXT,
+    data TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS events_at ON events (at);
+CREATE TABLE IF NOT EXISTS pinned_data (
+    preview_id TEXT NOT NULL,
+    revision TEXT NOT NULL,
+    kind TEXT NOT NULL,
+    parent TEXT NOT NULL,
+    name TEXT NOT NULL,
+    ref TEXT NOT NULL,
+    kept TEXT,
+    at INTEGER NOT NULL,
+    PRIMARY KEY (preview_id, revision, kind, parent)
+) WITHOUT ROWID;
 CREATE TABLE IF NOT EXISTS dismissed (
     change_id TEXT PRIMARY KEY,
     head TEXT NOT NULL,
@@ -580,6 +601,21 @@ pub struct New {
     pub created_by: String,
 }
 
+/// An earlier push's own data: a copy-on-write branch of the preview's branch of `parent`, taken
+/// as the next head's data step began, so `revision`'s code runs on the data it left.
+#[derive(Clone, Debug, PartialEq)]
+pub struct PinnedData {
+    pub revision: String,
+    pub kind: Kind,
+    pub parent: String,
+    /// Its name in the product (the guard its delete checks).
+    pub name: String,
+    pub r#ref: String,
+    pub kept: Option<String>,
+    /// The preview's branch it was copied from.
+    pub source: String,
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct ResourceRow {
     pub kind: Kind,
@@ -760,6 +796,13 @@ impl Store {
             db.add_column("resources", "mask_digest", "TEXT")?;
         }
         // The branch's own schema lines as it was made (JSON), for `schema::diff_since`.
+        // What an earlier push's copy of the data holds and costs (read with the branches').
+        // And the branch it was copied from (its delete's guard, for products that check it).
+        for (col, ty) in [("bytes", "INTEGER NOT NULL DEFAULT 0"), ("usd_month", "REAL NOT NULL DEFAULT 0"), ("spent_usd", "REAL NOT NULL DEFAULT 0"), ("source", "TEXT NOT NULL DEFAULT ''")] {
+            if !db.has_column("pinned_data", col)? {
+                db.add_column("pinned_data", col, ty)?;
+            }
+        }
         if !db.has_column("resources", "base_schema")? {
             db.add_column("resources", "base_schema", "TEXT")?;
         }
@@ -1137,6 +1180,7 @@ impl Store {
             )?;
             c.execute("UPDATE previews SET token = ? WHERE id = ?", params![new_token(), id])?;
             append(c, &id, now, "preview created")?;
+            emit(c, now, "created", &n.project_id, &id, n.change_id.as_deref(), &serde_json::json!({ "head": n.head }))?;
             let r = c.query_row(&format!("SELECT {COLUMNS} FROM previews WHERE id = ?"), [&id], row)?;
             Ok((r, true))
         })
@@ -1200,6 +1244,16 @@ impl Store {
                     id
                 ],
             )?;
+            // What a follower of the events hears: up (ready, or asleep once up) after a push or a
+            // first deploy, never a sleeping preview waking; failed, once until it moves.
+            let kind = match (old.state, new.state) {
+                (State::Creating | State::Updating, State::Ready | State::Sleeping) => Some("ready"),
+                (o, State::Failed) if o != State::Failed => Some("failed"),
+                _ => None,
+            };
+            if let Some(kind) = kind {
+                emit(c, now, kind, &new.project_id, id, new.change_id.as_deref(), &serde_json::json!({ "head": new.head }))?;
+            }
             Ok(new)
         })
     }
@@ -1216,8 +1270,13 @@ impl Store {
 
     /// Remove a preview's rows (after its branches and services are gone).
     pub fn remove(&self, id: &str) -> Result<()> {
+        let now = self.now_ms()?;
         self.db.write(|c| {
-            for t in ["resources", "services", "pinned", "shares", "visit_tickets", "visit_sessions", "visits", "activity", "screenshots", "page_shots", "visual_page_accepts", "mail", "resolved_notes", "base_history", "leases", "note_crops", "git_pulls", "git_reports", "runtime_facts", "gone_pushes", "previews"] {
+            let gone = c.query_row("SELECT project_id, change_id, head FROM previews WHERE id = ?", [id], |r| Ok((r.get::<_, String>(0)?, r.get::<_, Option<String>>(1)?, r.get::<_, String>(2)?))).optional()?;
+            if let Some((project, change, head)) = gone {
+                emit(c, now, "deleted", &project, id, change.as_deref(), &serde_json::json!({ "head": head }))?;
+            }
+            for t in ["resources", "services", "pinned", "pinned_data", "shares", "visit_tickets", "visit_sessions", "visits", "activity", "screenshots", "page_shots", "visual_page_accepts", "mail", "resolved_notes", "base_history", "leases", "note_crops", "git_pulls", "git_reports", "runtime_facts", "gone_pushes", "previews"] {
                 let col = if t == "previews" { "id" } else { "preview_id" };
                 c.execute(&format!("DELETE FROM {t} WHERE {col} = ?"), [id])?;
             }
@@ -1225,6 +1284,41 @@ impl Store {
             c.execute("DELETE FROM env_refs WHERE scope = ?", [format!("preview:{id}")])?;
             Ok::<_, Error>(())
         })
+    }
+
+    /// The events after `after`, oldest first, at most `limit` (`GET /v1/previews/events`).
+    pub fn events(&self, after: i64, limit: usize) -> Result<Vec<crate::Event>> {
+        Ok(self.db.read(|c| {
+            c.query(
+                "SELECT seq, at, kind, project_id, preview_id, change_id, data FROM events WHERE seq > ? ORDER BY seq LIMIT ?",
+                params![after, limit as i64],
+                |r| {
+                    let data: String = r.get(6)?;
+                    Ok(crate::Event { seq: r.get(0)?, at: r.get(1)?, kind: r.get(2)?, project: r.get(3)?, preview: r.get(4)?, change: r.get(5)?, data: serde_json::from_str(&data).unwrap_or_default() })
+                },
+            )
+        })?)
+    }
+
+    /// Record `kind` for preview `id` at `head` unless it's recorded already (`visual_change`:
+    /// once a head, however often it's reported).
+    pub fn emit_once(&self, id: &str, kind: &str, head: &str) -> Result<()> {
+        let now = self.now_ms()?;
+        let data = serde_json::json!({ "head": head });
+        self.db.write(|c| {
+            let Some((project, change)) = c.query_row("SELECT project_id, change_id FROM previews WHERE id = ?", [id], |r| Ok((r.get::<_, String>(0)?, r.get::<_, Option<String>>(1)?))).optional()? else { return Ok(()) };
+            let had: Option<i64> = c.query_row("SELECT seq FROM events WHERE preview_id = ? AND kind = ? AND data = ?", params![id, kind, data.to_string()], |r| r.get(0)).optional()?;
+            if had.is_none() {
+                emit(c, now, kind, &project, id, change.as_deref(), &data)?;
+            }
+            Ok::<_, Error>(())
+        })
+    }
+
+    /// The newest event's seq (0 for none): where a follower that wants only what comes next
+    /// starts.
+    pub fn latest_event(&self) -> Result<i64> {
+        Ok(self.db.read(|c| c.query_row("SELECT COALESCE(MAX(seq), 0) FROM events", (), |r| r.get(0)))?)
     }
 
     /// A change's preview was deleted while the change stays open (its TTL ran out, or someone
@@ -2510,6 +2604,51 @@ impl Store {
         })?)
     }
 
+    /// The data kept for earlier pushes: a snapshot of a branch per head ([`PinnedData`]).
+    pub fn pinned_data(&self, id: &str) -> Result<Vec<PinnedData>> {
+        Ok(self.db.read(|c| {
+            c.query("SELECT revision, kind, parent, name, ref, kept, source FROM pinned_data WHERE preview_id = ? ORDER BY at", [id], |r| {
+                let kind: String = r.get(1)?;
+                Ok(PinnedData { revision: r.get(0)?, kind: Kind::parse(&kind).unwrap_or(Kind::Postgres), parent: r.get(2)?, name: r.get(3)?, r#ref: r.get(4)?, kept: r.get(5)?, source: r.get(6)? })
+            })
+        })?)
+    }
+
+    pub fn add_pinned_data(&self, id: &str, d: &PinnedData) -> Result<()> {
+        let now = self.now_ms()?;
+        self.db.write(|c| {
+            c.execute(
+                "INSERT INTO pinned_data (preview_id, revision, kind, parent, name, ref, kept, at, source) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) \
+                 ON CONFLICT (preview_id, revision, kind, parent) DO UPDATE SET name = excluded.name, ref = excluded.ref, kept = excluded.kept, source = excluded.source",
+                params![id, d.revision, d.kind.as_str(), d.parent, d.name, d.r#ref, d.kept, now, d.source],
+            )?;
+            Ok::<_, Error>(())
+        })
+    }
+
+    /// What an earlier push's copy holds and costs, as its product last said.
+    pub fn set_pinned_usage(&self, id: &str, d: &PinnedData, u: &crate::ports::Usage) -> Result<()> {
+        self.db.write(|c| {
+            c.execute(
+                "UPDATE pinned_data SET bytes = ?, usd_month = ?, spent_usd = ? WHERE preview_id = ? AND revision = ? AND kind = ? AND parent = ?",
+                params![u.bytes, u.storage_usd_month, u.month_to_date_usd, id, d.revision, d.kind.as_str(), d.parent],
+            )?;
+            Ok::<_, Error>(())
+        })
+    }
+
+    /// The earlier pushes' copies' `(bytes, usd a month kept, billed this month)`.
+    pub fn pinned_usage(&self, id: &str) -> Result<Vec<(i64, f64, f64)>> {
+        Ok(self.db.read(|c| c.query("SELECT bytes, usd_month, spent_usd FROM pinned_data WHERE preview_id = ?", [id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?))))?)
+    }
+
+    pub fn drop_pinned_data(&self, id: &str, d: &PinnedData) -> Result<()> {
+        self.db.write(|c| {
+            c.execute("DELETE FROM pinned_data WHERE preview_id = ? AND revision = ? AND kind = ? AND parent = ?", params![id, d.revision, d.kind.as_str(), d.parent])?;
+            Ok::<_, Error>(())
+        })
+    }
+
     /// Keep `revision` of `service` reachable at a host of its own (an earlier push), and the
     /// [`PINNED_KEEP`] latest per service. Returns the ones that no longer fit, by
     /// `<service>@<revision>`, whose containers go.
@@ -2954,7 +3093,7 @@ impl Store {
     pub fn pinned(&self, id: &str) -> Result<Vec<crate::Pinned>> {
         Ok(self.db.read(|c| {
             c.query("SELECT service, revision, url, at FROM pinned WHERE preview_id = ? ORDER BY at DESC", [id], |r| {
-                Ok(crate::Pinned { service: r.get(0)?, revision: r.get(1)?, url: r.get(2)?, share_url: None, at: r.get(3)? })
+                Ok(crate::Pinned { service: r.get(0)?, revision: r.get(1)?, url: r.get(2)?, share_url: None, at: r.get(3)?, own_data: Vec::new() })
             })
         })?)
     }
@@ -2985,6 +3124,13 @@ impl Store {
             // Storage since the start of the month at today's size, plus what the product
             // metered for compute.
             cost.month_to_date_usd += res.usd_month * held_hours / MONTH_HOURS + res.spent_usd;
+        }
+        // Earlier pushes' copies of the data: kept like the branches (storage only; their compute
+        // runs as the preview's does, when someone opens one).
+        for (bytes, usd_month, spent) in self.pinned_usage(&r.id)? {
+            cost.bytes += bytes;
+            cost.sleeping_usd_month += usd_month;
+            cost.month_to_date_usd += usd_month * held_hours / MONTH_HOURS + spent;
         }
         for (s, active_ms) in services {
             let gib = s.memory_mb as f64 / 1024.0;
@@ -3086,8 +3232,12 @@ impl Store {
             Some(at) => Some(self.link_at(&r.id, at, Some("diff=base"))?),
             None => None,
         };
+        let copies = self.pinned_data(&r.id)?;
         let earlier = self.pinned(&r.id)?.into_iter().map(|mut p| {
             p.share_url = Some(share(&p.url));
+            p.own_data = copies.iter().filter(|d| d.revision == p.revision).map(|d| d.kind).collect();
+            p.own_data.sort();
+            p.own_data.dedup();
             p
         });
         let earlier = earlier.collect();
@@ -3229,6 +3379,22 @@ pub struct GonePush {
 }
 /// How many of a preview's evicted pushes still say they're gone.
 pub const GONE_KEPT: usize = 30;
+
+/// How long an event is kept for followers (`GET /v1/previews/events`).
+const EVENTS_KEEP_MS: i64 = 7 * 24 * 3_600_000;
+
+/// Record an event in the write that made it so. Its `seq` is taken inside that write (never a
+/// sequence, whose values are handed out outside it), so on Postgres two writers conflict and one
+/// re-runs: commit order is seq order, and a follower past one never misses an earlier one.
+fn emit(c: &Conn<'_>, at: i64, kind: &str, project: &str, preview: &str, change: Option<&str>, data: &serde_json::Value) -> code_sql::Result<()> {
+    let seq: i64 = c.query_row("SELECT COALESCE(MAX(seq), 0) + 1 FROM events", (), |r| r.get(0))?;
+    c.execute(
+        "INSERT INTO events (seq, at, kind, project_id, preview_id, change_id, data) VALUES (?, ?, ?, ?, ?, ?, ?)",
+        params![seq, at, kind, project, preview, change, data.to_string()],
+    )?;
+    c.execute("DELETE FROM events WHERE at < ?", [at - EVENTS_KEEP_MS])?;
+    Ok(())
+}
 
 fn append(c: &Conn<'_>, id: &str, at: i64, message: &str) -> code_sql::Result<()> {
     let seq: i64 = c.query_row("SELECT COALESCE(MAX(seq), 0) + 1 FROM activity WHERE preview_id = ?", [id], |r| r.get(0))?;
@@ -3415,6 +3581,22 @@ mod tests {
         let sealed: String = store.db.read(|c| c.query_row("SELECT vars FROM previews WHERE id = ?", [a.id.as_str()], |r| r.get(0))).unwrap();
         store.db.write(|c| c.execute("UPDATE previews SET vars = ? WHERE id = ?", params![sealed, b.id]).map(drop)).unwrap();
         assert!(store.vars(&b.id).is_err());
+    }
+
+    /// An earlier push's copy of the data costs what it holds, in the preview's cost (and its
+    /// budget and size cap with it).
+    #[test]
+    fn an_earlier_pushs_copy_of_the_data_counts_in_the_previews_cost() {
+        let (_dir, store) = store();
+        let (row, _) = store.create(&new("chg_copy")).unwrap();
+        let before = store.cost(&row).unwrap();
+        let d = PinnedData { revision: "cs_1".into(), kind: Kind::Postgres, parent: "prj_db".into(), name: "pv-x-1".into(), r#ref: "br_1".into(), kept: None, source: "br_0".into() };
+        store.add_pinned_data(&row.id, &d).unwrap();
+        store.set_pinned_usage(&row.id, &d, &crate::ports::Usage { bytes: 3 << 20, storage_usd_month: 0.5, active_usd_hour: 0.0, month_to_date_usd: 0.25 }).unwrap();
+        let after = store.cost(&row).unwrap();
+        assert_eq!(after.bytes - before.bytes, 3 << 20);
+        assert!((after.sleeping_usd_month - before.sleeping_usd_month - 0.5).abs() < 1e-9);
+        assert!(after.month_to_date_usd - before.month_to_date_usd >= 0.25);
     }
 
     fn store() -> (tempfile::TempDir, Store) {

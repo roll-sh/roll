@@ -186,6 +186,15 @@ impl Brancher for FakeData {
         self.at.lock().push(at);
         self.branch(parent, name, mode).await.map(Some)
     }
+    async fn snapshot(&self, parent: &str, branch: &str, name: &str) -> anyhow::Result<Option<Branched>> {
+        if !matches!(self.kind, Kind::Postgres | Kind::Redis) {
+            return Ok(None);
+        }
+        anyhow::ensure!(self.branches.lock().contains(branch), "no branch {branch} to copy");
+        let id = format!("{parent}~{name}");
+        self.branches.lock().insert(id.clone());
+        Ok(Some(Branched::plain(id)))
+    }
     async fn mask(&self, _parent: &str, branch: &str, _kept: Option<&str>, columns: &std::collections::BTreeMap<String, String>) -> anyhow::Result<()> {
         self.masks.lock().push((branch.to_string(), columns.clone()));
         Ok(())
