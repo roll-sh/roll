@@ -2422,9 +2422,10 @@ Ranked by what a person notices first. Done so far:
 
 1. **Earlier pushes on their own data**: each kept
    push's own copy of the preview's Postgres branch (#726) and its bytes in the cost (#731),
-   landed; Redis's and search's copies in review (roll search: a branch of a branch is safe,
-   made without `at` after masking). Next: roll apps' earlier builds on their copy, once roll
-   apps' `POST …/deploys/{dep}/rollback {no_traffic, variables}` lands (it's building it).
+   Redis's and search's copies (#740), landed; each earlier push saying which data is its own (the
+   sheet, `roll preview show`, the PR comment), in review. Next: roll apps' earlier builds on
+   their copy, once roll apps' `POST …/deploys/{dep}/rollback {no_traffic, variables}` lands
+   (it's building it); NoSQL, buckets and streams share the preview's for now.
 2. **The data step's Postgres compute start** (pg-control's; watch): with the health checks no
    longer waiting on a poll (#646), the live run's timeline is data 11.0 s · setup 4.4 s · deploy
    0.02 s · checks 6.1 s under load. Most of the data step is the Postgres branch's compute start
