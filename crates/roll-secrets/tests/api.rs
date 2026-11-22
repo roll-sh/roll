@@ -6347,6 +6347,8 @@ async fn an_unprotected_production_is_a_health_finding_until_protected() {
 #[tokio::test]
 async fn an_upgrade_keeps_requests_where_approvals_were_zero() {
     let api = Api::new().await;
+    // Its environments are made on first use.
+    api.ok(Method::GET, "/environments", None).await;
     api.db
         .write(|c| {
             c.execute("DELETE FROM code_migrations WHERE name = 'secrets-protected-approvals-zero-kept'", ())?;
