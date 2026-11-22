@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { describeAskRule, stepUpId, broadRule, installLink, accessRequest, approversText, parseApprovers, deciderName, describeApprovalRule, gateProgress, rememberable, proposedRule, approvableTogether, byConcern, catalogFor, denyRedirect, draftOf, expiringSoon, grantMatches, mcpConfig, parseAuthorize, githubIdentity, githubStep, presetFor, presetRules, publicJwk, rulesOf, trustedLabel, statusOf, toolsetCost, pickArea, waitsForAdmin, withToolsets, type Approval, type Preset, idpFromForm, tieForAgents, untieForAgents } from "./access-api";
+import { describeAskRule, redirectRegistered, stepUpId, broadRule, installLink, accessRequest, approversText, parseApprovers, deciderName, describeApprovalRule, gateProgress, rememberable, proposedRule, approvableTogether, byConcern, catalogFor, denyRedirect, draftOf, expiringSoon, grantMatches, mcpConfig, parseAuthorize, githubIdentity, githubStep, presetFor, presetRules, publicJwk, rulesOf, trustedLabel, statusOf, toolsetCost, pickArea, waitsForAdmin, withToolsets, type Approval, type Preset, idpFromForm, tieForAgents, untieForAgents } from "./access-api";
 
 const presets: Preset[] = [
   { id: "read-only", name: "Read only", description: "", rules: [{ product: "*", resources: "*", actions: { read: "allow" } }] },
@@ -273,5 +273,15 @@ describe("agents ask", () => {
   it("says an agents_ask rule in words", () => {
     expect(describeAskRule({ product: "apps", actions: ["deploy"], environments: ["production"] })).toBe("apps deploy in production");
     expect(describeAskRule({ product: "*" })).toBe("anything any action");
+  });
+});
+
+describe("redirectRegistered", () => {
+  it("takes a loopback redirect on any port, as roll-access does", () => {
+    const uris = ["http://127.0.0.1:43111/cb", "https://app.example.com/cb"];
+    expect(redirectRegistered(uris, "http://127.0.0.1:50123/cb")).toBe(true);
+    expect(redirectRegistered(uris, "http://127.0.0.1:50123/other")).toBe(false);
+    expect(redirectRegistered(uris, "https://app.example.com:8443/cb")).toBe(false);
+    expect(redirectRegistered(uris, "http://localhost:43111/cb")).toBe(false);
   });
 });

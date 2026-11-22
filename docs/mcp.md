@@ -414,7 +414,12 @@ roll implements the MCP authorization spec (2025-06-18 and 2025-11-25) with OAut
 - Clients either register (dynamic registration) or are known by a client ID metadata document
   (2025-11-25: the `client_id` is an https URL whose JSON names it). A document is fetched through
   roll's private-address guard (`roll-net`), without redirects, in 5 seconds, at most 64 KiB, and
-  at most once an hour; it must name itself, list valid redirect URIs, and be a public client.
+  at most once an hour; it must name itself, list valid redirect URIs, and be a public client
+  (checked against draft -03: no `client_secret`, `none` among its methods, codes among its grants;
+  an id with a user or password in it, or not in normal form, is refused, since the URL fetched is
+  the one compared, and so is roll's own address). A document unreachable for a moment (a timeout,
+  a 5xx) leaves roll's copy in use; one that's become invalid isn't. A loopback redirect matches on
+  any port (RFC 8252), for registered clients too: a native app listens where it can.
 - roll's policy may list the clients that connect (`oauth_clients`; Atlassian's admins allowlist AI
   clients): a host (`claude.ai`, `*.example.com`), an exact `https://` URL, `localhost`, an app's
   scheme (`cursor:`) or `device`. A metadata-document client matches by its URL or host; a
@@ -1177,17 +1182,15 @@ previews are listed once those products are on.
 Ranked; the top item is in progress. A watchdog reads this list. Unblocked work comes first; what
 waits on a sibling PR reaching main is last.
 
-1. **Housekeeping before deadlines (this PR: VS Code's new files).** VS Code 1.146 (2026-11-11)
-   deprecates its Local harness (removal February 2027) and its `.vscode/mcp.json`: `roll mcp
-   config vscode` and the connect panel now write `~/.copilot/mcp-config.json` (a user's file, so a
-   token never lands in a repository) or a workspace-root `.mcp.json` without a token, both
-   `mcpServers` with `"type": "http"`. Next in this item: roll's client ID metadata document checks
-   against draft-ietf-oauth-client-id-metadata-document-03 (2026-11-02): a client id with userinfo
-   or not in normal form refused (the URL fetched is the one compared), documents with
-   `client_secret`, with `token_endpoint_auth_methods_supported` lacking `none`, or with grant or
-   response types leaving nothing in common refused, a loopback redirect matched on any port, a
-   cached document kept through a transient fetch failure, and roll's own issuer refused as a
-   client id.
+1. **Housekeeping before deadlines (this PR: client ID metadata documents against draft -03).**
+   VS Code's new files landed (#694). Now draft-ietf-oauth-client-id-metadata-document-03
+   (2026-11-02): a client id with userinfo or not in normal form refused (the URL fetched is the one
+   compared), documents with `client_secret`, with `token_endpoint_auth_methods_supported` lacking
+   `none`, or with grant or response types leaving nothing in common refused, a loopback redirect
+   matched on any port (RFC 8252 7.3; the consent screen too), a cached document kept through a
+   transient fetch failure, and roll's own issuer refused as a client id. Not done: the draft's 5 KB
+   read limit (roll reads 64 KiB: real clients' documents haven't been measured) and its cache
+   headers (roll re-fetches hourly).
 2. **MCP Events, more feeds and webhook mode.** Poll mode landed with `apps.event` (#692; see
    "Events"). Each next feed needs its product's log after a cursor: roll code's durable land log
    (`Store::land_log`, no route yet) and broken-main items, previews becoming ready, approvals
@@ -1245,7 +1248,7 @@ waits on a sibling PR reaching main is last.
 8. **Landed 2026-11-22 morning:** operator policy for agent connections: `agents_ask` and
    `mcp_lockdown` / `mcp_read_only` (#678), and `oauth_clients`, the OAuth clients that may connect,
    checked at consent, at every token and on every request, nothing revoked (#680). SQL sessions name who sent them (`application_name`: `roll tok_…`, so `postgres_activity` tells
-   an agent's queries apart; #683), and apps' sandbox tools marked open-world (#684). Output schemas for 2026-07-28 clients, learned from the sweep's real answers (#687). MCP Events in poll mode, starting with apps' event log (#692). **Landed 2026-11-21:** step-up authorization for OAuth clients (#673: a refusal of a connection's own
+   an agent's queries apart; #683), and apps' sandbox tools marked open-world (#684). Output schemas for 2026-07-28 clients, learned from the sweep's real answers (#687). MCP Events in poll mode, starting with apps' event log (#692). VS Code's config to its 1.146 files (#694). **Landed 2026-11-21:** step-up authorization for OAuth clients (#673: a refusal of a connection's own
    rules records the one rule it needed, `roll:step-up:<id>` in-band and as a 403 to Claude Code
    from 2.1.288, the consent screen adds roll's record to that connection; two security reviews); the instructions name every product by its tool prefix, search mode's tools
    always load, the 48 KiB cut's reason corrected, and Next ranked from the 2026-11-22 comparison
