@@ -767,6 +767,8 @@ async fn run_with(mut args: Args) -> anyhow::Result<()> {
     // roll code's agents relay acts on a caller's behalf through the gate too.
     if let Some(c) = &code {
         c.code.relay_through(gated.clone());
+        // Searches across repos keep a scoped grant's repos before cutting a page.
+        c.code.set_grant_reach(std::sync::Arc::new(access::CodeReach(access.clone())));
     }
     // MCP Events' webhooks: each due subscription's feed read through the gate as its grant.
     roll_mcp::events::spawn_deliveries(gated.clone(), access.clone(), mcp_config.products.clone());

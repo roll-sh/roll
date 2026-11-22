@@ -757,6 +757,15 @@ async fn search_and_fetch_read_your_own_repos() {
     assert!(doc["url"].as_str().unwrap().ends_with(&format!("/acme/api/work#w{wn}")) && doc["text"] == "fails on CI 1 in 10", "{doc}");
     assert!(acme.tool("search", json!({ "query": "%" })).await["results"].as_array().unwrap().is_empty(), "a wildcard is text");
 
+    // A scoped grant (the operator's caller, narrowed) keeps its repos before the page is cut: newer
+    // matches elsewhere don't push its own out of a one-result page.
+    let narrowed = a.code.search_documents(&code_control::Caller::Admin, "login", 1, &|repo: &str| repo == "acme/api").unwrap();
+    assert_eq!(narrowed["results"][0]["repo"], "acme/api", "{narrowed}");
+    // Text whose lowercase is the same length but shifted (İ grows, ẞ shrinks) is still snippeted.
+    ok("POST", "/v1/code/repos/acme/api/work".into(), json!({ "title": "unicode", "body": "İ éclair ẞ" })).await;
+    let found = acme.tool("search", json!({ "query": "éclair" })).await;
+    assert_eq!(found["results"].as_array().map(Vec::len), Some(1), "found, no panic: {found}");
+
     let mut eve = Client::new(&a, Some(&tokens[1]));
     eve.initialize("2025-06-18").await;
     let theirs = eve.tool("search", json!({ "query": "login" })).await;

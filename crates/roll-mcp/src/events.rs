@@ -115,6 +115,26 @@ const FEEDS: &[Feed] = &[
         },
     },
     Feed {
+        name: "secrets.event",
+        description: "Something happened to a project's secrets: a secret leaked or a scan found one, a rotation or sync failed, a value request waiting or decided, a placeholder echoed or sent to the wrong place, production left unprotected, an environment or the project deleted or recovered. Never a value. Give the project; filter by kinds (secret.leaked, or request.* for a family) and environment.",
+        tool: "secrets_audit",
+        product: "secrets",
+        path: &[("project", "The project (prj_…)")],
+        after: "/v1/secrets/projects/{project}/events?limit=100&after=",
+        latest: "/v1/secrets/projects/{project}/events?latest=1",
+        filters: &[("kinds", "kind", "Only these kinds (secret.leaked, rotation.failed, or request.* for a family); all when left out"), ("environment", "environment", "Only this environment's")],
+        payload: || {
+            json!({ "type": "object", "properties": {
+                "seq": { "type": "integer" },
+                "at": { "type": "integer", "description": "Unix milliseconds" },
+                "kind": { "type": "string" },
+                "environment": { "type": ["string", "null"] },
+                "key": { "type": ["string", "null"] },
+                "data": { "type": "object", "description": "Names, ids, counts and reasons, with the actor; never a value" },
+            } })
+        },
+    },
+    Feed {
         name: "code.landed",
         description: "A change landed on a roll code repo (its default branch or another ref): the change, the commit and what it brought. Give the repo by owner and repo; filter by ref.",
         tool: "code_list_refs",
