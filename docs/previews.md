@@ -1680,6 +1680,23 @@ type Preview = {
   last_reset_at: number | null; last_active_at: number; expires_at: number | null;
   created_by: string; created_at: number; updated_at: number;
   baseline: boolean;                  // roll keeps it to compare the project's changes with (github.baseline)
+  // Checks against main's preview (types as in apps/dashboard/src/lib/previews-api.ts):
+  release?: { head: string; ms: number; before_ms: number | null } | null;
+  reaches?: "open" | "roll";
+  visual_change?: { since: string; percent: number; phone_percent?: number | null } | null;
+  phone_screenshot?: boolean;
+  base_change?: { branch: string; percent: number; phone_percent: number | null; head?: string | null; load_ms?: number | null; lcp_ms?: number | null; a11y_added?: number | null; errors_added?: number | null; text?: TextDiff | null; links_added?: number | null; seo_added?: number | null; api?: TextDiff | null; api_breaking?: string[]; api_unread?: boolean; endpoints?: EndpointTime[] } | null;
+  pages?: PageCheck[];
+  visual_review?: { state: "unchanged" | "changed" | "accepted"; branch: string; percent: number; by: string | null; at: number | null; required: boolean; head: string; pages: { path: string; percent: number; by: string | null; at: number | null; unstable?: boolean }[]; } | null;
+  page_speed?: { now: PageSpeed; before: PageSpeed | null } | null;
+  page_health?: { errors: number; first_error: string | null; failed: number; first_failed: string | null } | null;
+  page_a11y?: { issues: A11yIssue[]; lang: boolean; title: boolean; seo?: PageSeo | null } | null;
+  page_links?: { checked: number; broken: { path: string; status: number }[] } | null;
+  slower_routes?: { branch: string; routes: { name: string; count: number; p50_ms: number; main_p50_ms: number; grew?: GrewSpan | null; budget_ms?: number | null }[] } | null;
+  new_errors?: { branch: string; total: number; errors: { service: string; title: string }[] } | null;
+  regressions?: "check" | "required" | null;
+  regressions_accepted?: { head: string; by: string; at: number } | null;
+  regressions_compared?: boolean;     // compared with main's preview at its head (errors; routes too with traces)
   timeline?: { head: string; started_at: number; steps: { step: "data" | "setup" | "deploy" | "checks" | "ready"; at: number }[] };
                                       // how its head came up: each step once, when it first finished
   intercepted?: { keys: { key: string; hosts: string[] }[]; swapped: number; refused: number;

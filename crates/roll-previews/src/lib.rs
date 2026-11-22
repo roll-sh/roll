@@ -1455,3 +1455,30 @@ mod tests {
         assert_eq!(branch_name("pv_abc"), "pv-abc");
     }
 }
+
+#[cfg(test)]
+mod contract {
+    /// docs/previews.md's `Preview` (the API's contract with every client) names each field the
+    /// record answers: the shape had fallen 19 fields behind.
+    #[test]
+    fn the_documented_preview_names_every_field_it_answers() {
+        let src = include_str!("lib.rs");
+        let doc = include_str!("../../../docs/previews.md");
+        let s = &src[src.find("pub struct Preview {").unwrap()..];
+        let s = &s[..s.find("\n}\n").unwrap()];
+        let shape = &doc[doc.find("type Preview = {").unwrap()..];
+        let shape = &shape[..shape.find("\n};").unwrap()];
+        let (mut skipped, mut missing) = (false, Vec::new());
+        for line in s.lines().map(str::trim) {
+            if line.starts_with("#[serde(skip)]") {
+                skipped = true;
+            } else if let Some(name) = line.strip_prefix("pub ").filter(|r| !r.starts_with("struct ")).and_then(|r| r.split(':').next()) {
+                if !skipped && !shape.contains(&format!(" {name}:")) && !shape.contains(&format!(" {name}?:")) {
+                    missing.push(name);
+                }
+                skipped = false;
+            }
+        }
+        assert!(missing.is_empty(), "docs/previews.md's Preview doesn't name {missing:?}");
+    }
+}
