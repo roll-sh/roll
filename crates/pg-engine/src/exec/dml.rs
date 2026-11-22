@@ -1065,6 +1065,8 @@ pub const NEED_COPY_ROWS: &str = "XXCPY";
 enum Copied {
     Values(Row),
     Stored(Vec<u8>),
+    /// A stored row `StoredInsert` didn't take: decoded and inserted as its values.
+    Decoded(Vec<u8>),
 }
 
 /// COPY FROM's next row (its values, line number and text); None: the data has all been
@@ -4437,8 +4439,8 @@ impl InsertNode {
     /// after the line is gone, so a unique violation names only the line number.
     fn insert_copied(&mut self, src: Copied, ctx: &ExecCtx) -> Result<Option<(Row, Vec<u8>, Option<Row>)>> {
         // (What the row needs of the plan's COPY, so the plan isn't held across the insert.)
-        let (table, multi, binary) = match &self.plan.copy {
-            Some(c) => (c.table.clone(), c.multi, c.binary),
+        let (multi, binary) = match &self.plan.copy {
+            Some(c) => (c.multi, c.binary),
             None => return Ok(None),
         };
         // (The sink opens once the rows stored are left alone until the load ends; its writes
@@ -4466,13 +4468,33 @@ impl InsertNode {
         let (line, raw) = std::mem::take(&mut self.copy_line);
         let raw_len = raw.len();
         let frames = &ctx.sess.frames;
+        // (A stored row its `StoredInsert` takes runs nothing that stacks a context of its own
+        // (no default, domain, trigger or index): its line's frame is pushed only for an error
+        // of it, and for a row it won't take, which goes in decoded.)
+        let mut raw = Some(raw);
+        let src = match src {
+            Copied::Stored(data) if self.plain => match self.insert_stored_copy(&data, ctx) {
+                Ok(true) => None,
+                Ok(false) => Some(Copied::Decoded(data)),
+                Err(e) => {
+                    let e = {
+                        let mut f = frames.borrow_mut();
+                        f.push(Self::copy_frame(&self.plan, line, raw.take(), binary));
+                        let e = e.in_frames(&f);
+                        f.pop();
+                        e
+                    };
+                    return self.copied_row_done(raw_len, Err(e), ctx);
+                }
+            },
+            src => Some(src),
+        };
+        let Some(src) = src else {
+            return self.copied_row_done(raw_len, Ok(Some((Vec::new(), Vec::new(), None))), ctx);
+        };
         let n = {
             let mut f = frames.borrow_mut();
-            f.push(Frame::Copy {
-                table,
-                line,
-                raw: (!binary).then_some(raw),
-            });
+            f.push(Self::copy_frame(&self.plan, line, raw.take(), binary));
             f.len() - 1
         };
         let mut at_flush = false;
@@ -4482,7 +4504,11 @@ impl InsertNode {
             super::pgstat::hold_inserts(ctx);
         }
         let r = match src {
-            Copied::Stored(data) => self.insert_stored_copy(&data, ctx),
+            Copied::Stored(data) | Copied::Decoded(data) => match crate::storage::row::decode_row(&data) {
+                Ok(row) if self.plain => self.insert_plain(row, ctx),
+                Ok(row) => self.insert(row, ctx),
+                Err(e) => Err(e),
+            },
             Copied::Values(src) if self.plain => self.insert_plain(src, ctx),
             Copied::Values(src) => self.insert(src, ctx),
         };
@@ -4518,6 +4544,24 @@ impl InsertNode {
             }
             r => r,
         };
+        self.copied_row_done(raw_len, r, ctx)
+    }
+
+    /// The CONTEXT frame of a COPY's line (`line`, its text `raw` unless the COPY is binary).
+    fn copy_frame(plan: &InsertPlan, line: usize, raw: Option<crate::sql::plan::CopyRaw>, binary: bool) -> Frame {
+        let table = plan.copy.as_ref().map_or_else(|| "".into(), |c| c.table.clone());
+        Frame::Copy { table, line, raw: raw.filter(|_| !binary) }
+    }
+
+    /// A COPY row's insert done (`r`; `raw_len`: its line's length): its multi-insert
+    /// buffer's counts, and its flush.
+    fn copied_row_done(
+        &mut self,
+        raw_len: usize,
+        r: Result<Option<(Row, Vec<u8>, Option<Row>)>>,
+        ctx: &ExecCtx,
+    ) -> Result<Option<(Row, Vec<u8>, Option<Row>)>> {
+        let multi = self.plan.copy.as_ref().is_some_and(|c| c.multi);
         if let Some(l) = &self.copy_load {
             let done = l.row_done(raw_len, ctx);
             if r.is_ok() && done? {
@@ -4544,20 +4588,17 @@ impl InsertNode {
         Self::plain_row(&self.plan, &self.plain_counts, self.fresh.as_ref(), src, ctx)
     }
 
-    /// A plain COPY's stored row (`CopyRow::Stored`): copied as it is by the COPY's
-    /// `StoredInsert` where it takes the row, else decoded and inserted as its values would
-    /// be. (The row returned is never read: a plain insert has no RETURNING.)
-    fn insert_stored_copy(&mut self, data: &[u8], ctx: &ExecCtx) -> Result<Option<(Row, Vec<u8>, Option<Row>)>> {
-        let InsertNode { plan, plain, plain_counts, copy_stored, .. } = &mut *self;
-        if *plain
-            && let Some(si) = copy_stored.get_or_insert_with(|| StoredInsert::of_copy(plan, ctx))
+    /// A plain COPY's stored row (`CopyRow::Stored`): whether the COPY's `StoredInsert` took
+    /// it, copied as it is (else the caller decodes it and inserts its values).
+    fn insert_stored_copy(&mut self, data: &[u8], ctx: &ExecCtx) -> Result<bool> {
+        let InsertNode { plan, plain_counts, copy_stored, .. } = &mut *self;
+        if let Some(si) = copy_stored.get_or_insert_with(|| StoredInsert::of_copy(plan, ctx))
             && si.insert_data(plan, data, plain_counts, ctx)?
         {
             STORED_COPY_ROWS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            return Ok(Some((Vec::new(), Vec::new(), None)));
+            return Ok(true);
         }
-        let row = crate::storage::row::decode_row(data)?;
-        if self.plain { self.insert_plain(row, ctx) } else { self.insert(row, ctx) }
+        Ok(false)
     }
 
     /// A plain INSERT … SELECT's rows from its source as stored (`StoredInsert`), each one
@@ -5026,7 +5067,7 @@ impl Node for InsertNode {
             };
             let inserted = match (&self.plan.copy, src) {
                 (Some(_), src) => self.insert_copied(src, ctx).inspect_err(|_| self.counts_on_error(ctx))?,
-                (None, Copied::Stored(_)) => unreachable!("only COPY's rows come stored"),
+                (None, Copied::Stored(_) | Copied::Decoded(_)) => unreachable!("only COPY's rows come stored"),
                 (None, Copied::Values(src)) => {
                     // (Its rows are stored as they go, final: the sink takes them once there
                     // are enough to be worth its room.)
