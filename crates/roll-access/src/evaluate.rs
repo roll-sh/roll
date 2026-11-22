@@ -1190,6 +1190,7 @@ async fn ask(ctx: &Ctx, row: &Row, action: Action, resource: Option<String>, req
             let (product, method, route, path, tool) =
                 (about.to_string(), ctx.method.clone(), ctx.route.clone(), path.to_string(), ctx.mcp.as_ref().map(|m| m.tool.to_string()));
             let res = resource.clone();
+            let wait_ms = access.policy_now().approval_wait_ms(&product, action.as_str(), environment.as_deref());
             blocking(move || {
                 a.store.ask(Ask {
                     grant: &grant,
@@ -1206,6 +1207,7 @@ async fn ask(ctx: &Ctx, row: &Row, action: Action, resource: Option<String>, req
                     environment: environment.as_deref(),
                     scope_path: scope_path.as_deref(),
                     scope_index: scope_index.as_deref(),
+                    wait_ms,
                 })
             })
             .await

@@ -62,6 +62,25 @@ const FEEDS: &[Feed] = &[
         },
     },
     Feed {
+        name: "previews.event",
+        description: "Something happened to a preview: created, ready (up after a push, never a sleeping one waking), failed, a visual change waiting for review, or deleted. Filter by kinds and project; only your projects' previews.",
+        tool: "previews_list",
+        after: "/v1/previews/events?limit=100&after=",
+        latest: "/v1/previews/events?latest=1",
+        filters: &[("kinds", "kind", "Only these kinds (ready, failed, visual_change, created, deleted); all when left out"), ("project", "project", "Only this workspace project's")],
+        payload: || {
+            json!({ "type": "object", "properties": {
+                "seq": { "type": "integer" },
+                "at": { "type": "integer", "description": "Unix milliseconds" },
+                "kind": { "type": "string" },
+                "project": { "type": "string" },
+                "preview": { "type": "string", "description": "The preview's id: previews_get has its issues and URLs" },
+                "change": { "type": ["string", "null"] },
+                "data": { "type": "object", "description": "head: the commit it was built from" },
+            } })
+        },
+    },
+    Feed {
         name: "access.approval",
         description: "A person decided an approval this connection asked for (approved or denied): call the original tool again with approval once it's approved. Filter by kinds (approved, denied) and tool.",
         tool: "access_wait_approval",

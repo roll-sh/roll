@@ -12,6 +12,8 @@
 //!
 //! And roll apps (`ForApps`): what a service got from roll secrets is shown only as roll secrets
 //! would show it to whoever asks.
+//!
+//! And reach (`ReachHolders`): the services that read a folder.
 
 mod common;
 
@@ -467,4 +469,31 @@ async fn apps_shows_a_staging_reference_to_production_only_to_who_may_reveal_pro
     assert!(s == 403 && e.contains("DB_URL") && !e.contains("fake-production-password"), "{s} {e}");
     let (s, e) = as_token(reqwest::Method::POST, format!("{staging}/shell/sessions"), Some(json!({}))).await;
     assert!(s == 403 && e.contains("roll secrets"), "{s} {e}");
+}
+
+/// Reach names the roll apps services that read a folder (rolld's `ReachHolders`): one deploying
+/// the environment reads its root, and one whose `roll://` variable names a key of a subfolder
+/// reads that folder too.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn reach_names_the_services_that_read_a_folder() {
+    // With search: the harness reads every rolld's search address.
+    let r = Rolld::start("apps,search", false).await;
+    let project = Project::new(&r).await.id;
+    let secrets = format!("/v1/secrets/projects/{project}/environments");
+    r.call(reqwest::Method::PUT, &format!("{secrets}/production/secrets/LOG_LEVEL"), Some(json!({ "value": "debug" }))).await;
+    r.call(reqwest::Method::PUT, &format!("{secrets}/production/secrets/API_TOKEN?path=/api"), Some(json!({ "value": "fake-api-token" }))).await;
+    for name in ["web", "worker"] {
+        let svc = r.post("/v1/apps/services", json!({ "project": project, "name": name, "source": { "kind": "upload" } })).await;
+        let env = format!("/v1/apps/services/{}/environments/production", svc["id"].as_str().unwrap());
+        r.call(reqwest::Method::PUT, &env, Some(json!({}))).await;
+        if name == "worker" {
+            r.call(reqwest::Method::PATCH, &format!("{env}/variables"), Some(json!({ "set": { "TOKEN": "roll://production/api/API_TOKEN" } }))).await;
+        }
+    }
+    let through = |reach: &Value| -> Vec<(String, String)> { reach["services"].as_array().unwrap().iter().map(|s| (s["name"].as_str().unwrap().to_string(), s["through"].as_str().unwrap().to_string())).collect() };
+    let root = r.get(&format!("{secrets}/production/reach?path=/")).await;
+    assert_eq!(through(&root), [("web".to_string(), "production:/".to_string()), ("worker".to_string(), "production:/".to_string())], "{root}");
+    let api = r.get(&format!("{secrets}/production/reach?path=/api")).await;
+    assert_eq!(through(&api), [("worker".to_string(), "roll://production/api/API_TOKEN".to_string())], "{api}");
+    assert!(!api.to_string().contains("fake-api-token"), "names, never a value");
 }
