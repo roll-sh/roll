@@ -945,6 +945,12 @@ impl Apps {
             Some(img) if matches!(d.trigger, Trigger::Rollback | Trigger::Settings | Trigger::Promote) => {
                 self.db(move |s| s.set_status(&id, &[DeployStatus::Queued, DeployStatus::Building], DeployStatus::Deploying, None)).await?;
                 log.line(format!("using the image of {}", d.rollback_of.as_deref().unwrap_or("the deployment it redeploys")));
+                // An image service's image meets the signing rule as it stands now (it may have
+                // been turned on since that image went live).
+                if matches!(svc.source, Source::Image { .. }) {
+                    let login = self.pull_login(&svc.id, img).await?;
+                    self.check_signed(&svc.project, img, login.as_ref(), log).await?;
+                }
                 (img.clone(), d.run.clone())
             }
             Some(img) => {
@@ -1001,6 +1007,11 @@ impl Apps {
             }
             let (id, img, r) = (d.id.clone(), image.clone(), run.clone());
             self.db(move |s| s.set_built(&id, &img, None, Some(&r))).await?;
+        }
+        // A project that requires signed images: every sidecar's too (they run beside the app,
+        // with its values), pinned or not.
+        for sc in &run.sidecars {
+            self.check_signed(&svc.project, &sc.image, None, log).await.map_err(|e| e.context(format!("sidecar {}", sc.name)))?;
         }
         // Its image's known vulnerabilities: before the rollout with `run.block_on` (never a
         // rollback's: it's how out of a bad deploy), else beside it.

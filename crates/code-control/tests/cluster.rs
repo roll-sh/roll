@@ -929,6 +929,42 @@ async fn search_ready(net: &Net, node: usize) {
     }
 }
 
+/// A file search across repos (`GET /v1/code/search?kinds=files`, roll MCP's `search`) through
+/// one node finds a match in every repo, each repo's part run on its owner from the owner's own
+/// index: no node builds an index for a repo it doesn't own, and nothing is skipped.
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+async fn a_file_search_runs_each_repo_on_its_owner() {
+    let net = net_with("files", 3, Arc::new(|c: &mut Config| c.review.index = true)).await;
+    let names = ["api", "web", "cli"];
+    let mut ids = Vec::new();
+    for name in names {
+        let id = net.repo(0, name).await;
+        let files = json!({ format!("src/{name}.rs"): { "content": format!("fn needle_in_{name}() {{}}\n") } });
+        net.ok(1, "POST", &format!("/v1/code/repos/acme/{name}/land"), Some(json!({ "message": "needle", "files": files }))).await;
+        ids.push(id);
+    }
+    let ask = "/v1/code/search?kinds=files&q=needle_in_";
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let found = loop {
+        let v = net.ok(2, "GET", ask, None).await;
+        if v["skipped"].as_array().is_some_and(Vec::is_empty) && v["results"].as_array().is_some_and(|r| r.len() >= 3) {
+            break v;
+        }
+        assert!(Instant::now() < deadline, "the indexes never answered: {v}");
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    };
+    let mut repos: Vec<&str> = found["results"].as_array().unwrap().iter().map(|r| r["repo"].as_str().unwrap()).collect();
+    repos.sort_unstable();
+    repos.dedup();
+    assert_eq!(repos, ["acme/api", "acme/cli", "acme/web"], "{found}");
+    for id in &ids {
+        let o = net.owner(id).expect("owned");
+        for (i, n) in net.nodes.iter().enumerate() {
+            assert_eq!(index_file(n, id).exists(), i == o, "{id}'s index on node {i} (owner {o})");
+        }
+    }
+}
+
 /// A node that loses a repo removes its code index; deleting a repo (through a node that
 /// doesn't own it) stops its work on the owner, removes the owner's index and deletes its lease
 /// row, which no node takes back.
