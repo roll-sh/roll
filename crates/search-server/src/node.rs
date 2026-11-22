@@ -142,8 +142,12 @@ pub struct NodeConfig {
     /// and recording a snapshot) must be before the sweep after a wake drops it
     /// ([`search_es::api::snapshots::sweep_leftover_copies`]).
     pub snapshot_leftover_grace: Duration,
-    /// Seals the secrets clusters store (`search_es::seal`; `None`: stored as given).
+    /// Seals the secrets clusters store (`search_es::seal`; `None`: refused, see
+    /// `unsealed_secrets`).
     pub sealer: Option<Arc<search_es::seal::Sealer>>,
+    /// Without a sealer, store the secrets clients give in the clear instead of refusing them
+    /// (`search_es::ClusterConfig::unsealed_secrets`): local development and tests only.
+    pub unsealed_secrets: bool,
     /// The name roll's default snapshot repository is registered under in every cluster whose
     /// data is in object storage (`search_es::api::snapshots::install_default_repository`;
     /// `None`: none).
@@ -177,6 +181,7 @@ impl Default for NodeConfig {
             unload_memory_only: false,
             snapshot_leftover_grace: search_es::api::snapshots::LEFTOVER_GRACE,
             sealer: None,
+            unsealed_secrets: false,
             default_repository: None,
             links: None,
             audit: crate::audit::AuditConfig::default(),
@@ -1145,6 +1150,7 @@ impl Node {
         cfg.test_features = self.cfg.test_features;
         cfg.host_metrics = self.cfg.host_metrics;
         cfg.sealer = self.cfg.sealer.clone();
+        cfg.unsealed_secrets = self.cfg.unsealed_secrets;
         cfg.links = self.cfg.links.clone();
         cfg.catalog_id = spec.catalog_id.clone();
         cfg.secret_refs = self.cfg.secret_refs.clone();
@@ -1162,6 +1168,12 @@ impl Node {
         }
         // Before any job can run: a branch's inherited jobs must not act as its parent's.
         Box::pin(search_es::branch::mark_inherited(&cluster)).await.map_err(|e| anyhow::anyhow!("marking what the branch inherited: {}", e.reason()))?;
+        // Secrets a node without a key kept in the clear are sealed now that this one has one.
+        match Box::pin(search_es::seal::seal_leftovers(&cluster)).await {
+            Ok(0) => {}
+            Ok(n) => tracing::info!(cluster = spec.name, records = n, "sealed secrets stored in the clear"),
+            Err(e) => tracing::warn!(cluster = spec.name, error = %e.reason(), "sealing secrets stored in the clear failed"),
+        }
         let mut stats = persist::RecoveryStats::default();
         let data = match data_store {
             Some(ds) => {
@@ -1527,6 +1539,13 @@ impl Node {
             out.analytics.enabled = Some(l.cluster.analytics.enabled_names());
         }
         out
+    }
+
+    /// Request body bytes in flight across clusters (`NodeConfig::max_in_flight_bytes`): what a
+    /// front end that buffers a body before handing it on (roll's control plane) charges while
+    /// it reads.
+    pub fn body_budget(&self) -> &Arc<ByteBudget> {
+        &self.body_bytes
     }
 
     /// Drops what an unloaded cluster with id `id` ([`Loaded::id`]) left for the next metering

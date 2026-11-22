@@ -96,7 +96,7 @@ const B: Ty = Bool;
 
 /// The most `index.max_ngram_diff` and `index.max_shingle_diff` may be. Elasticsearch allows up
 /// to `Integer.MAX_VALUE` (defaults 1 and 3); every step of either multiplies the tokens a value
-/// makes, so roll stops at 50 (the token cap per field, `search_index::buffer::MAX_FIELD_TOKENS`,
+/// makes, so roll stops at 50 (the term budget per document, `search_index::buffer::MAX_DOC_TERM_BYTES`,
 /// bounds what's left).
 pub const MAX_GRAM_DIFF: i64 = 50;
 const DUR: &[&str] = &["request", "async", "REQUEST", "ASYNC"];

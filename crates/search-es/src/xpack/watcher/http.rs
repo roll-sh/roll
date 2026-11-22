@@ -131,22 +131,22 @@ const PASSWORD: &str = "watch password";
 const AUTH_HEADER: &str = "watch authorization header";
 
 /// A normalized template as the cluster stores it: its password and `Authorization` headers
-/// sealed ([`crate::seal`]).
-pub fn seal(cluster: &Cluster, stored: &Value) -> Value {
+/// sealed ([`crate::seal`]; refused in the clear on a node without a key).
+pub fn seal(cluster: &Cluster, stored: &Value) -> EsResult<Value> {
     let mut v = stored.clone();
     if let Some(Value::Obj(a)) = v.as_object_mut().and_then(|m| m.get_mut("auth")).and_then(|a| a.as_object_mut()).and_then(|a| a.get_mut("basic"))
         && let Some(p) = a.get("password").map(Value::to_es_string)
     {
-        a.insert("password".into(), crate::seal::seal(cluster, PASSWORD, &p).into());
+        a.insert("password".into(), crate::seal::seal(cluster, PASSWORD, &p)?.into());
     }
     if let Some(Value::Obj(h)) = v.as_object_mut().and_then(|m| m.get_mut("headers")) {
         for (k, val) in h.iter_mut() {
             if k.eq_ignore_ascii_case("authorization") && let Value::Str(s) = val {
-                *val = Value::from(crate::seal::seal(cluster, AUTH_HEADER, s));
+                *val = Value::from(crate::seal::seal(cluster, AUTH_HEADER, s)?);
             }
         }
     }
-    v
+    Ok(v)
 }
 
 /// A stored template as it is printed: the password and any `Authorization` header redacted.

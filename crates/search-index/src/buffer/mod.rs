@@ -44,11 +44,17 @@ use termhash::TermHash;
 /// Longest term Lucene accepts (`IndexWriter.MAX_TERM_LENGTH`).
 pub const MAX_TERM_LENGTH: usize = 32766;
 
-/// The most tokens one field of one document may produce at index time
-/// ([`crate::ShardConfig::max_field_tokens`]'s default). Elasticsearch has no such limit (only
-/// Lucene's per-thread RAM limit, near 2 GB); roll's keeps an `ngram` or `shingle` chain from
-/// turning one body into billions of postings on a shared node.
-pub const MAX_FIELD_TOKENS: usize = 10_000_000;
+/// The most bytes of analyzed terms one document, its nested children included, may produce at
+/// index time, across every field and analyzer (multi-fields and `copy_to` targets are fields of
+/// their own): [`crate::ShardConfig::max_doc_term_bytes`]'s default. Each token costs its term's
+/// bytes plus [`TOKEN_COST`]. Elasticsearch has no such limit (only Lucene's per-thread RAM limit,
+/// near 2 GB); roll's keeps an `ngram` or `shingle` chain from turning one body into gigabytes of
+/// postings on a shared node, and stops the analysis there rather than finish it.
+pub const MAX_DOC_TERM_BYTES: usize = 256 << 20;
+
+/// What one token costs against [`MAX_DOC_TERM_BYTES`] besides its term (its posting and
+/// position), so that many empty or one-byte terms count too.
+pub const TOKEN_COST: usize = 16;
 /// Largest position (`IndexWriter.MAX_POSITION`).
 pub const MAX_POSITION: i64 = i32::MAX as i64 - 128;
 
@@ -322,8 +328,10 @@ pub struct Buffer {
     pub(crate) max_seq_no: i64,
     /// Field numbers touched by the doc being indexed.
     touched: Vec<u32>,
-    /// The most tokens one field of a document may produce ([`MAX_FIELD_TOKENS`]).
-    pub(crate) max_field_tokens: usize,
+    /// The most analyzed term bytes a document may produce ([`MAX_DOC_TERM_BYTES`]).
+    pub(crate) max_doc_term_bytes: usize,
+    /// What the document being indexed has left of it.
+    doc_terms_left: usize,
     stored_scratch: Vec<u8>,
     tv_scratch: Vec<u8>,
     ram: usize,
@@ -343,7 +351,8 @@ impl Buffer {
             has_nested: false,
             max_seq_no: -1,
             touched: Vec::new(),
-            max_field_tokens: MAX_FIELD_TOKENS,
+            max_doc_term_bytes: MAX_DOC_TERM_BYTES,
+            doc_terms_left: MAX_DOC_TERM_BYTES,
             stored_scratch: Vec::new(),
             tv_scratch: Vec::new(),
             ram: 0,
@@ -425,6 +434,7 @@ impl Buffer {
                 search_codec::MAX_DOCS
             )));
         }
+        self.doc_terms_left = self.max_doc_term_bytes;
         let r = self.add_rec(doc, meta, true);
         if r.is_err() {
             for d in first..self.max_doc {
@@ -526,8 +536,10 @@ impl Buffer {
             IndexableField::Tokens { field, tokens } => {
                 let number = *field;
                 check_indexed(self.touch(number)?)?;
-                if tokens.len() > self.max_field_tokens {
-                    return Err(too_many_tokens(self.schema.field(number).map_or("", |f| f.name.as_str()), self.max_field_tokens));
+                let cost = tokens.iter().fold(0usize, |n, t| n.saturating_add(t.term.len() + TOKEN_COST));
+                match self.doc_terms_left.checked_sub(cost) {
+                    Some(left) => self.doc_terms_left = left,
+                    None => return Err(too_many_term_bytes(self.schema.field(number).map_or("", |f| f.name.as_str()), self.max_doc_term_bytes)),
                 }
                 let pool = &mut self.pool;
                 let fb = self.fields[number as usize].as_deref_mut().unwrap();
@@ -615,17 +627,17 @@ impl Buffer {
         let mut err: Option<Error> = None;
         let mut last_abs: i64 = -1;
         let mut any = false;
-        let (max_tokens, mut tokens) = (self.max_field_tokens, 0usize);
+        let (max, left) = (self.max_doc_term_bytes, &mut self.doc_terms_left);
         // The field's name goes into Lucene's position errors (`IndexingChain.invertTokenStream`).
         let name = self.schema.field(number).map_or("", |f| f.name.as_str());
-        let r = analyzer.try_analyze_field(name, values, &mut |t| {
-            if err.is_some() {
-                return;
-            }
-            tokens += 1;
-            if tokens > max_tokens {
-                err = Some(too_many_tokens(name, max_tokens));
-                return;
+        let r = analyzer.try_analyze_field_until(name, values, &mut |t| {
+            // Past the document's budget the analysis stops: no more terms are produced.
+            match left.checked_sub(t.term.len() + TOKEN_COST) {
+                Some(l) => *left = l,
+                None => {
+                    err = Some(too_many_term_bytes(name, max));
+                    return std::ops::ControlFlow::Break(());
+                }
             }
             any = true;
             let pos = base_pos + t.position as i64;
@@ -644,12 +656,15 @@ impl Buffer {
                 false,
             ) {
                 err = Some(e);
+                return std::ops::ControlFlow::Break(());
             }
+            std::ops::ControlFlow::Continue(())
         });
         if let Some(e) = err {
             return Err(e);
         }
-        r?;
+        // Stopped only with `err` set.
+        let _ = r?;
         // State after the values: Lucene adds the final increment (0 here), the final offset
         // and the gap after each value.
         let gap = analyzer.position_increment_gap() as i64;
@@ -839,10 +854,11 @@ fn check_indexed(fb: &FieldBuf) -> Result<()> {
     Ok(())
 }
 
-/// roll's refusal of a field past [`Buffer::max_field_tokens`] (no Elasticsearch counterpart).
-fn too_many_tokens(field: &str, max: usize) -> Error {
+/// roll's refusal of a document past [`MAX_DOC_TERM_BYTES`] (no Elasticsearch counterpart),
+/// naming the field that passed it.
+fn too_many_term_bytes(field: &str, max: usize) -> Error {
     Error::illegal(format!(
-        "Document field=\"{field}\" produced more than [{max}] tokens, the most one field of a document may produce at index time on roll. Index a smaller document, or analyze the field into fewer tokens (a smaller [max_gram] or [max_shingle_size])"
+        "Document field=\"{field}\" took the document past [{max}] bytes of analyzed terms, the most one document may produce at index time on roll. Index a smaller document, or analyze it into fewer, shorter terms (a smaller [max_gram] or [max_shingle_size])"
     ))
 }
 

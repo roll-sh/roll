@@ -8,10 +8,11 @@
 //! another kind's slot. A sealed value is a string, `::roll_sealed::v1:` and the base64 of the
 //! nonce and ciphertext, so it travels through cluster state, snapshots and branches unchanged.
 //!
-//! Without a key (the dev server, tests) values are stored as given, as on Elasticsearch, except
-//! a snapshot repository's credentials, which such a node refuses (`api::snapshots`: a `roll://`
-//! reference or a key on the node instead); a node that gains a key seals what was kept in the
-//! clear as the cluster opens.
+//! A node without a key refuses to store a secret a client gives (a 400 naming
+//! `ROLL_SECRET_KEY`) rather than keep it in the clear, unless it opts in for local development
+//! ([`crate::ClusterConfig::unsealed_secrets`]: the dev server, tests), when values are stored as
+//! given, as on Elasticsearch. A node that gains a key seals what was kept in the clear as each
+//! cluster opens ([`seal_leftovers`]), and persists it at once.
 //! Values are opened only where they are used (a request sent, a secret read back through its
 //! own API); everything that prints them redacts them as before.
 
@@ -78,14 +79,28 @@ impl Sealer {
     }
 }
 
+/// The refusal of a node without a key to store a `kind` in the clear.
+pub fn keyless(kind: &str) -> EsError {
+    EsError::illegal_argument(format!(
+        "this node has no sealing key (ROLL_SECRET_KEY), so a {kind} would be stored in the clear: it isn't stored. Have the operator set ROLL_SECRET_KEY"
+    ))
+}
+
+/// Whether the cluster may keep a secret: sealed under a key, or in the clear on a node that
+/// opted in ([`crate::ClusterConfig::unsealed_secrets`]).
+pub fn may_store(cluster: &Cluster) -> bool {
+    cluster.config.sealer.is_some() || cluster.config.unsealed_secrets
+}
+
 /// A secret a client just gave, as the cluster stores it: sealed when the node has a key, even
 /// when it looks sealed already. Unlike [`seal`], nothing given is kept as a sealed value: a
 /// client must not plant one (copied from a snapshot, or another cluster on the node) for the
-/// node to open and send where the client chooses.
-pub fn seal_given(cluster: &Cluster, kind: &str, plain: &str) -> String {
+/// node to open and send where the client chooses. Refused on a node without a key ([`keyless`]).
+pub fn seal_given(cluster: &Cluster, kind: &str, plain: &str) -> EsResult<String> {
     match &cluster.config.sealer {
-        Some(s) => s.seal(kind, plain),
-        None => plain.to_string(),
+        Some(s) => Ok(s.seal(kind, plain)),
+        None if cluster.config.unsealed_secrets => Ok(plain.to_string()),
+        None => Err(keyless(kind)),
     }
 }
 
@@ -95,11 +110,12 @@ pub fn is_sealed(v: &str) -> bool {
 }
 
 /// `plain` as the cluster stores it: sealed when the node has a key (a value sealed already is
-/// kept as it is).
-pub fn seal(cluster: &Cluster, kind: &str, plain: &str) -> String {
+/// kept as it is); in the clear refused on a node without a key ([`keyless`]).
+pub fn seal(cluster: &Cluster, kind: &str, plain: &str) -> EsResult<String> {
     match &cluster.config.sealer {
-        Some(s) if !is_sealed(plain) => s.seal(kind, plain),
-        _ => plain.to_string(),
+        Some(s) if !is_sealed(plain) => Ok(s.seal(kind, plain)),
+        None if !is_sealed(plain) && !cluster.config.unsealed_secrets => Err(keyless(kind)),
+        _ => Ok(plain.to_string()),
     }
 }
 
@@ -116,13 +132,77 @@ pub fn open(cluster: &Cluster, kind: &str, stored: &str) -> EsResult<String> {
         .ok_or_else(|| EsError::new(500, "illegal_state_exception", format!("a sealed {kind} can't be opened on this node (its sealing key differs)")))
 }
 
-/// A secret store's entry for `value` (connector and Fleet secrets): `{"value": …}` as given,
-/// or `{"sealed": …}` holding its JSON sealed when the node has a key.
-pub fn seal_value(cluster: &Cluster, kind: &str, value: crate::json::Value) -> crate::json::Value {
+/// A secret store's entry for `value` (connector and Fleet secrets): `{"sealed": …}` holding its
+/// JSON sealed when the node has a key, `{"value": …}` as given on a node that opted in, refused
+/// otherwise ([`keyless`]).
+pub fn seal_value(cluster: &Cluster, kind: &str, value: crate::json::Value) -> EsResult<crate::json::Value> {
     match &cluster.config.sealer {
-        Some(s) => crate::obj! { "sealed" => s.seal(kind, &value.to_json()) },
-        None => crate::obj! { "value" => value },
+        Some(s) => Ok(crate::obj! { "sealed" => s.seal(kind, &value.to_json()) }),
+        None if cluster.config.unsealed_secrets => Ok(crate::obj! { "value" => value }),
+        None => Err(keyless(kind)),
     }
+}
+
+/// Seals every secret a cluster keeps in the clear (stored on a node without a key), with this
+/// node's key, and persists it at once: inference endpoints' keys, watches' passwords and
+/// `Authorization` headers, connector and Fleet secrets, snapshot repositories' credentials.
+/// Run as the cluster opens; a record changed meanwhile is left for the next open. Returns how
+/// many records it sealed.
+pub async fn seal_leftovers(cluster: &Cluster) -> EsResult<usize> {
+    use crate::json::Value;
+    use crate::xpack::store;
+    let Some(sealer) = cluster.config.sealer.clone() else { return Ok(0) };
+    let st = cluster.state();
+    // (family, id, as read, sealed)
+    let mut changes: Vec<(&'static str, String, Value, Value)> = Vec::new();
+    for (id, rec) in st.metadata.xpack.iter(crate::xpack::inference::SECRETS) {
+        let Value::Obj(m) = rec else { continue };
+        if m.values().all(|v| v.as_str().is_none_or(is_sealed)) {
+            continue;
+        }
+        let sealed = m.iter().map(|(k, v)| (k.clone(), match v.as_str() {
+            Some(s) if !is_sealed(s) => Value::from(sealer.seal(crate::xpack::inference::SECRET_KIND, s)),
+            _ => v.clone(),
+        }));
+        changes.push((crate::xpack::inference::SECRETS, id.clone(), rec.clone(), Value::Obj(sealed.collect())));
+    }
+    for (family, kind) in [(crate::xpack::entsearch::connectors::SECRETS, crate::xpack::entsearch::connectors::SECRET_KIND), (crate::xpack::fleet::SECRETS, crate::xpack::fleet::SECRET_KIND)] {
+        for (id, rec) in st.metadata.xpack.iter(family) {
+            if let Some(v) = rec.get("value") {
+                changes.push((family, id.clone(), rec.clone(), crate::obj! { "sealed" => sealer.seal(kind, &v.to_json()) }));
+            }
+        }
+    }
+    for (id, rec) in st.metadata.xpack.iter(crate::xpack::watcher::WATCHES) {
+        let Some(Value::Obj(w)) = rec.get("watch") else { continue };
+        let sealed = crate::xpack::watcher::parse::sealed_watch(cluster, w)?;
+        if &sealed != w {
+            let mut r = rec.clone();
+            if let Value::Obj(m) = &mut r {
+                m.insert("watch".into(), Value::Obj(sealed));
+            }
+            changes.push((crate::xpack::watcher::WATCHES, id.clone(), rec.clone(), r));
+        }
+    }
+    let repos = st.metadata.repositories.values().any(|r| r.secrets.values().any(|v| !is_sealed(v)));
+    drop(st);
+    if changes.is_empty() && !repos {
+        return Ok(0);
+    }
+    let n = changes.len() + usize::from(repos);
+    let now = crate::time::now_millis();
+    cluster
+        .update(move |st| {
+            for (family, id, read, sealed) in changes {
+                if st.metadata.xpack.get(family, &id) == Some(&read) {
+                    store::put(st, family, &id, sealed, now)?;
+                }
+            }
+            crate::api::snapshots::seal_stored_secrets(&mut st.metadata, Some(&sealer));
+            Ok(())
+        })
+        .await?;
+    Ok(n)
 }
 
 /// The value of an entry [`seal_value`] made.
@@ -177,5 +257,40 @@ mod tests {
         assert!(String::from_utf8_lossy(&got.body).contains("conn-3"));
         let shown = call("GET", "/_watcher/watch/w", "").await;
         assert!(!String::from_utf8_lossy(&shown.body).contains(PREFIX), "redacted, not sealed text");
+    }
+
+    /// A node without a key refuses the secrets clients give; one that gains a key seals, as the
+    /// cluster opens, what a keyless node that opted in kept in the clear, and saves it at once.
+    #[tokio::test]
+    async fn keyless_nodes_refuse_and_keyed_ones_seal_leftovers() {
+        use crate::cluster::{ClusterConfig, MemoryStore, MetaStore};
+        let store = Arc::new(MemoryStore::new());
+        async fn call(c: &Cluster, method: &str, uri: &str, body: &str) -> crate::EsResponse {
+            crate::rest::handle(c, crate::EsRequest::json(method, uri, body.to_string())).await
+        }
+        let watch = r#"{"trigger":{"schedule":{"interval":"1h"}},"input":{"http":{"request":{"url":"http://h.example/x","auth":{"basic":{"username":"u","password":"pw-1"}}}}},"actions":{}}"#;
+        let c = Cluster::open(ClusterConfig::new("c"), store.clone()).await.unwrap();
+        for (uri, body) in [("/_connector/_secret", r#"{"value":"conn-3"}"#), ("/_watcher/watch/w?active=false", watch)] {
+            let r = call(&c, if uri.contains("watch") { "PUT" } else { "POST" }, uri, body).await;
+            assert!(r.status == 400 && String::from_utf8_lossy(&r.body).contains("ROLL_SECRET_KEY"), "{uri}: {}", String::from_utf8_lossy(&r.body));
+        }
+        drop(c);
+        let c = Cluster::open(ClusterConfig { unsealed_secrets: true, ..ClusterConfig::new("c") }, store.clone()).await.unwrap();
+        assert_eq!(call(&c, "PUT", "/_watcher/watch/w?active=false", watch).await.status, 201);
+        let r = call(&c, "POST", "/_connector/_secret", r#"{"value":"conn-3"}"#).await;
+        let id = crate::json::parse(&r.body).unwrap().unwrap().get("id").and_then(crate::json::Value::as_str).unwrap().to_string();
+        assert_eq!(call(&c, "POST", "/_fleet/secret", r#"{"value":"fleet-4"}"#).await.status, 200);
+        drop(c);
+        let mut cfg = ClusterConfig::new("c");
+        cfg.sealer = Sealer::from_secret("0123456789abcdef0123456789abcdef-k");
+        let c = Cluster::open(cfg, store.clone()).await.unwrap();
+        assert_eq!(seal_leftovers(&c).await.unwrap(), 3);
+        let saved = String::from_utf8_lossy(&store.load().await.unwrap().unwrap()).into_owned();
+        for secret in ["pw-1", "conn-3", "fleet-4"] {
+            assert!(!saved.contains(secret), "{secret} still in the clear in the saved state");
+        }
+        let got = call(&c, "GET", &format!("/_connector/_secret/{id}"), "").await;
+        assert!(String::from_utf8_lossy(&got.body).contains("conn-3"), "still opens");
+        assert_eq!(seal_leftovers(&c).await.unwrap(), 0);
     }
 }

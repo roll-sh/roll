@@ -85,7 +85,7 @@ pub(super) fn take_secrets(cluster: &crate::Cluster, ty: &str, settings: &mut Se
         if settings.get(k).is_some_and(|v| crate::secret_refs::classify(cluster, v) != crate::secret_refs::Setting::Value) {
             continue;
         }
-        if settings.get(k).is_some_and(|v| !v.is_empty()) && cluster.config.sealer.is_none() {
+        if settings.get(k).is_some_and(|v| !v.is_empty()) && !crate::seal::may_store(cluster) {
             return Err(EsError::new(
                 400,
                 "settings_exception",
@@ -95,15 +95,14 @@ pub(super) fn take_secrets(cluster: &crate::Cluster, ty: &str, settings: &mut Se
         if let Some(v) = settings.remove(k)
             && let Some(v) = v.as_str().filter(|v| !v.is_empty())
         {
-            out.insert(k.to_string(), crate::seal::seal_given(cluster, secret_kind(ty), v));
+            out.insert(k.to_string(), crate::seal::seal_given(cluster, secret_kind(ty), v)?);
         }
     }
     Ok(out)
 }
 
-/// Seals repositories' credentials still in the clear (registered on a node without a key):
-/// run as a cluster opens and with every state change, so a node that gains a key keeps none in
-/// the clear past the next write.
+/// Seals repositories' credentials still in the clear (registered on a node without a key),
+/// for [`crate::seal::seal_leftovers`].
 pub(crate) fn seal_stored_secrets(md: &mut crate::meta::Metadata, sealer: Option<&crate::seal::Sealer>) {
     let Some(sealer) = sealer else { return };
     for r in md.repositories.values_mut() {

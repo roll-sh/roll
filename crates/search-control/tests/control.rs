@@ -59,6 +59,8 @@ async fn env_with(f: impl FnOnce(&mut SearchConfig)) -> Env {
     cfg.node_name = format!("test-{i}");
     cfg.http_port = es_addr.port();
     cfg.gc_interval = None;
+    // Tests without a sealer keep secrets as given (a test of the refusal turns it off).
+    cfg.unsealed_secrets = true;
     f(&mut cfg);
     let control = Control::new(cfg.clone(), objects.clone()).await.unwrap();
     tokio::spawn(search_server::serve(listener, control.node.clone(), search_server::ListenOptions::default()));
@@ -77,6 +79,11 @@ async fn env() -> Env {
 /// carries `Operator`), `usr_…` a signed-in person who isn't one. Without it, an open daemon's
 /// request (neither).
 async fn as_person(mut req: axum::extract::Request, next: axum::middleware::Next) -> axum::response::Response {
+    // `x-test-grant`: a scoped token's rules (JSON), as the gate leaves them for the product.
+    if let Some(rules) = req.headers().get("x-test-grant").and_then(|v| serde_json::from_slice::<roll_auth::scope::Scope>(v.as_bytes()).ok()) {
+        req.extensions_mut().insert(roll_auth::Operator);
+        req.extensions_mut().insert(roll_auth::Grant { id: "tok_t".into(), name: "t".into(), kind: roll_auth::GrantKind::Token, scope: Arc::new(rules), user: None, ask_otherwise: false });
+    }
     let who = req.headers().get("x-test-as").and_then(|v| v.to_str().ok()).map(str::to_string);
     if let Some(who) = who {
         let admin = who == "admin";
@@ -463,6 +470,32 @@ async fn metrics_and_slow_logs() {
     assert_eq!(entries.first().map(|x| &x["log.logger"]), Some(&json!("index.search.slowlog.query")));
 }
 
+/// A grant's console request needs `reveal` on the cluster too when the API the cluster routes
+/// it to answers or sets a credential (a new API key, a user's password); everything else,
+/// whatever its path spells, needs only the route's `admin`.
+#[tokio::test]
+async fn console_credentials_need_reveal() {
+    let e = env().await;
+    let id = e.post("/v1/search/clusters", json!({ "name": "vault" })).await["id"].as_str().unwrap().to_string();
+    let rules = |actions: Value| json!([{ "product": "search", "resources": [{ "id": id }], "actions": actions }]).to_string();
+    let (admin, both) = (rules(json!({ "admin": "allow" })), rules(json!({ "admin": "allow", "reveal": "allow" })));
+    let console = |grant: &str, method: &str, path: &str, body: Value| {
+        let req = e.http.post(format!("{}/v1/search/clusters/vault/request", e.api)).header("x-test-grant", grant).json(&json!({ "method": method, "path": path, "body": body }));
+        async move {
+            let r = req.send().await.unwrap();
+            (r.status().as_u16(), r.json::<Value>().await.unwrap_or(Value::Null))
+        }
+    };
+    assert_eq!(console(&admin, "GET", "/_cat/indices", Value::Null).await.0, 200);
+    assert_eq!(console(&admin, "GET", "/enrollments/_search?q=api_key:x", Value::Null).await.0, 200, "an index and a query string named after a credential answer none");
+    for (method, path, body) in [("POST", "/_security/api_key", json!({ "name": "k" })), ("PUT", "/_security/user/ann", json!({ "password": "a-long-password-1", "roles": [] }))] {
+        let (s, v) = console(&admin, method, path, body.clone()).await;
+        assert!(s == 403 && v["error"].as_str().is_some_and(|m| m.contains("needs reveal")), "{method} {path}: {s} {v}");
+        let (s, v) = console(&both, method, path, body).await;
+        assert_eq!((s, v["status"].as_u64()), (200, Some(200)), "{method} {path}: {v}");
+    }
+}
+
 /// What a deleted cluster recorded and nobody had handed on yet (slow log, request metrics,
 /// analytics, requests to bill) goes with it: a cluster that takes its name at once starts with
 /// none of it, before and after the next metering pass.
@@ -506,6 +539,7 @@ async fn pasted_credentials_are_sealed_or_refused() {
     for sealed in [false, true] {
         let e = env_with(|c| {
             c.node_settings.push((search_control::S3_ALLOW_PRIVATE.into(), "true".into()));
+            c.unsealed_secrets = false;
             if sealed {
                 c.sealer = search_control::Sealer::from_secret("0123456789abcdef0123456789abcdef");
             }

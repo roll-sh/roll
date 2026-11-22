@@ -27,7 +27,7 @@
 mod compare;
 pub mod exec;
 pub mod http;
-mod parse;
+pub(crate) mod parse;
 pub mod schedule;
 
 use crate::cluster::Cluster;
@@ -185,7 +185,7 @@ pub async fn put_watch(ctx: &Ctx<'_>) -> EsResult<Reply> {
     let raw = ctx.body_map()?.unwrap_or_default();
     let previous = if_seq.and_then(|_| ctx.state().metadata.xpack.get(WATCHES, &id).and_then(|w| w.get("watch").cloned()));
     let body = parse::normalize_watch(ctx.cluster, &id, &raw, previous.as_ref())?;
-    let body = parse::sealed_watch(ctx.cluster, &body);
+    let body = parse::sealed_watch(ctx.cluster, &body)?;
     if parse::uses_ignore_throttled(&Value::Obj(raw)) {
         ctx.warn(parse::IGNORE_THROTTLED);
     }

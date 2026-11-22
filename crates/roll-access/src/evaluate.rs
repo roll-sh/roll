@@ -675,6 +675,9 @@ async fn decide(access: Arc<Access>, req: Request, next: Next) -> Response {
     if let Some(a) = approved.clone() {
         parts.extensions.insert(a);
     }
+    if let Target::One(r) = &target {
+        parts.extensions.insert(roll_auth::DecidedOn(r.clone()));
+    }
     parts.extensions.insert(roll_auth::Grant {
         id: ctx.grant.id.as_str().into(),
         name: ctx.grant.name.as_str().into(),

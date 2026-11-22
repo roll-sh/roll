@@ -63,6 +63,11 @@ pub struct SearchArgs {
     /// past it, requests get 429.
     #[arg(long = "search-max-in-flight-body-mb", env = "ROLL_SEARCH_MAX_IN_FLIGHT_BODY_MB", default_value_t = 4096)]
     pub search_max_in_flight_body_mb: u64,
+    /// Without ROLL_SECRET_KEY, keep the secrets clients give search clusters (inference keys,
+    /// watch passwords, connector secrets, repository credentials) in the clear instead of
+    /// refusing them. Local development only.
+    #[arg(long = "search-allow-unsealed-secrets", env = "ROLL_SEARCH_ALLOW_UNSEALED_SECRETS", value_parser = clap::builder::BoolishValueParser::new(), default_value_t = false, num_args = 0..=1, default_missing_value = "true")]
+    pub search_allow_unsealed_secrets: bool,
     /// Acknowledge writes once the WAL is in object storage (for nodes with ephemeral disks;
     /// always on in a cluster).
     #[arg(long = "search-sync-objects", env = "ROLL_SEARCH_SYNC_OBJECTS", value_parser = clap::builder::BoolishValueParser::new(), default_value_t = false, num_args = 0..=1, default_missing_value = "true")]
@@ -187,6 +192,7 @@ impl Search {
         // Watch passwords, connector and Fleet secrets are sealed in cluster state under the
         // deployment's key; without one they're stored as given (as on Elasticsearch).
         cfg.sealer = secret_key.and_then(search_control::Sealer::from_secret);
+        cfg.unsealed_secrets = args.search_allow_unsealed_secrets;
         // Behind the edge, cluster URLs name `<cluster>.search.<region>.<domain>` over HTTPS.
         if let Some(p) = public {
             p.search(&mut cfg);

@@ -151,6 +151,13 @@ impl Grant {
     }
 }
 
+/// In a grant's request about one resource: that resource as the gate resolved it (its project
+/// and environment included), so a product asking [`Grant::allows`] about a second action on it
+/// (search's console answering a credential: `reveal`) decides as the gate would. Set only by
+/// the gate.
+#[derive(Clone, Debug)]
+pub struct DecidedOn(pub scope::Resource);
+
 impl fmt::Debug for Grant {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Grant").field("id", &self.id).field("name", &self.name).field("kind", &self.kind).field("user", &self.user).finish()

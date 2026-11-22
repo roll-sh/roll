@@ -166,7 +166,7 @@ pub fn parse(cluster: &Cluster, task: TaskType, cfg: &mut Config) -> EsResult<(M
         .map_err(|e| validation(&[format!("Failed to validate model configuration: {}", e.reason())]))?;
     let mut secrets = Map::new();
     if !secret_params.is_empty() {
-        secrets.insert("secret_parameters".into(), crate::seal::seal_given(cluster, super::super::SECRET_KIND, &Value::Obj(secret_params).to_json()).into());
+        secrets.insert("secret_parameters".into(), crate::seal::seal_given(cluster, super::super::SECRET_KIND, &Value::Obj(secret_params).to_json())?.into());
     }
     Ok((ss, ts, secrets))
 }
@@ -196,7 +196,7 @@ pub fn update(cluster: &Cluster, ep: &mut Endpoint, ss: &mut Map) -> EsResult<()
     match ss.shift_remove("secret_parameters") {
         None => {}
         Some(Value::Obj(m)) if m.values().all(|v| v.as_str().is_some()) => {
-            ep.secrets.insert("secret_parameters".into(), crate::seal::seal_given(cluster, super::super::SECRET_KIND, &Value::Obj(m).to_json()).into());
+            ep.secrets.insert("secret_parameters".into(), crate::seal::seal_given(cluster, super::super::SECRET_KIND, &Value::Obj(m).to_json())?.into());
         }
         Some(_) => return Err(validation(&["[service_settings] [secret_parameters] must be a map of strings".into()])),
     }

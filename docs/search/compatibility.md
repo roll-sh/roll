@@ -1575,9 +1575,14 @@ the rest are skipped by the tests' own prerequisites.
     Elasticsearch and OpenSearch fail with a `StackOverflowError` somewhere deeper).
 - `index.max_ngram_diff` and `index.max_shingle_diff` go up to 50 (roll's own; Elasticsearch
   and OpenSearch allow up to `Integer.MAX_VALUE`): past it, the settings' usual range error
-  (`must be <= 50`). One field of one document may produce at most 10,000,000 tokens at index time
-  (`search_index::buffer::MAX_FIELD_TOKENS`; Elasticsearch has only Lucene's per-thread RAM limit
-  near 2 GB): past it the document fails with a 400 `illegal_argument_exception` naming the field.
+  (`must be <= 50`), and indices made before the bound are analyzed as if it were 50. An `ngram`
+  or `edge_ngram` tokenizer or filter's `max_gram` goes up to 1,000 characters (Elasticsearch has
+  no bound; `[max_gram] may be at most [1000] on roll`). One document, its nested children
+  included, may produce at most 256 MiB of analyzed terms at index time across all its fields
+  (multi-fields and `copy_to` targets included; each token costs its bytes plus 16;
+  `search_index::buffer::MAX_DOC_TERM_BYTES`; Elasticsearch has only Lucene's per-thread RAM limit
+  near 2 GB): the analysis stops there and the document fails with a 400
+  `illegal_argument_exception` naming the field that passed it.
 - An Elasticsearch-flavor cluster holds at most 1,000 open points in time (roll's own;
   Elasticsearch has no limit). The 1,001st fails as OpenSearch 3.9 refuses one past
   `search.max_open_pit_context` (a 429 `rejected_execution_exception`), which

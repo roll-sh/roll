@@ -59,6 +59,9 @@ pub enum ControlError {
     /// Refused to this caller (HTTP 403): roll secrets wouldn't let them reveal a reference.
     #[error("{0}")]
     Forbidden(String),
+    /// The node's in-flight body budget is full (HTTP 429).
+    #[error("{0}")]
+    Busy(String),
     #[error(transparent)]
     Internal(#[from] anyhow::Error),
 }
@@ -113,6 +116,9 @@ pub struct SearchConfig {
     pub stats_interval: Duration,
     /// Memory all loaded clusters may hold together (`None`: no node budget).
     pub memory_budget: Option<u64>,
+    /// Without a sealer, keep the secrets clients give in the clusters in the clear instead of
+    /// refusing them (`search_es::ClusterConfig::unsealed_secrets`): local development only.
+    pub unsealed_secrets: bool,
     /// Request body bytes all clusters together may have in flight on this node, on top of
     /// each cluster's own budget (twice its `max_body_mb`); past it, 429 (`None`: no node
     /// budget).
@@ -174,6 +180,7 @@ impl SearchConfig {
             stats_interval: Duration::from_secs(600),
             memory_budget: None,
             max_in_flight_bytes: None,
+            unsealed_secrets: false,
             catalog: None,
             catalog_connections: 8,
             defaults: Defaults {
@@ -249,19 +256,47 @@ fn ip_rules(given: Vec<IpRuleInput>) -> Result<Vec<IpRule>> {
         .collect()
 }
 
-/// One REST request through the console.
+/// One REST request through the console, borrowed from the bytes it was read from (the body
+/// is sent as a slice of them, never copied).
 #[derive(Clone, Debug, Deserialize)]
-pub struct ConsoleRequest {
+pub struct ConsoleRequest<'a> {
     pub method: String,
     /// `/index/_search?q=…`
     pub path: String,
     /// A JSON value is sent as JSON, byte for byte as the client wrote it (key order and
     /// number spelling matter: Elasticsearch stores `_source` exactly as sent); a string is sent
     /// as is (NDJSON for `_bulk`).
-    #[serde(default)]
-    pub body: Option<Box<serde_json::value::RawValue>>,
+    #[serde(default, borrow)]
+    pub body: Option<&'a serde_json::value::RawValue>,
     #[serde(default)]
     pub headers: Vec<(String, String)>,
+}
+
+impl<'a> ConsoleRequest<'a> {
+    pub fn parse(bytes: &'a [u8]) -> Result<ConsoleRequest<'a>> {
+        serde_json::from_slice(bytes).map_err(|e| ControlError::Invalid(format!("invalid request: {e}")))
+    }
+
+    /// The bytes the request sends, out of `whole` (what [`ConsoleRequest::parse`] read):
+    /// nothing for no body or `null`, a string's contents, or any other JSON value exactly as
+    /// written, as a slice of `whole`.
+    pub fn body_in(&self, whole: &Bytes) -> Result<Bytes> {
+        let Some(text) = self.body.map(|r| r.get().trim()) else { return Ok(Bytes::new()) };
+        if text == "null" {
+            return Ok(Bytes::new());
+        }
+        if text.starts_with('"') {
+            let s: String = serde_json::from_str(text).map_err(|e| ControlError::Invalid(format!("body: {e}")))?;
+            return Ok(Bytes::from(s));
+        }
+        Ok(whole.slice_ref(text.as_bytes()))
+    }
+
+    /// Whether the request answers or sets a credential on cluster `c`, decided on the API the
+    /// cluster's router picks for it ([`search_es::routes::handles_credentials`]).
+    pub fn handles_credentials(&self, c: &SearchCluster) -> bool {
+        search_es::routes::handles_credentials(dialect(&c.flavor).unwrap_or(Dialect::Elasticsearch), &self.method, self.path.trim())
+    }
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -601,6 +636,7 @@ impl Control {
                 memory_budget: cfg.memory_budget,
                 max_in_flight_bytes: cfg.max_in_flight_bytes,
                 sealer: cfg.sealer.clone(),
+                unsealed_secrets: cfg.unsealed_secrets,
                 default_repository: cfg.default_repository.clone(),
                 links: Some(links.clone()),
                 audit: cfg.audit.clone(),
@@ -1981,19 +2017,21 @@ impl Control {
 
     /// Runs one REST request (the dashboard console, `roll search request`). The node counts it
     /// for metering like any client's.
-    pub async fn request(&self, id: &str, r: ConsoleRequest) -> Result<ConsoleResponse> {
+    /// Runs a console request (`method`, `path`, `headers` as [`ConsoleRequest`] has them) with
+    /// `body` ([`ConsoleRequest::body_in`]).
+    pub async fn request(&self, id: &str, method: &str, path: &str, headers: Vec<(String, String)>, body: Bytes) -> Result<ConsoleResponse> {
         let c = self.get(id).await?;
-        let method = r.method.trim().to_ascii_uppercase();
+        let shown = method;
+        let method = method.trim().to_ascii_uppercase();
         if !matches!(method.as_str(), "GET" | "POST" | "PUT" | "DELETE" | "HEAD" | "PATCH") {
-            return Err(ControlError::Invalid(format!("unsupported method {}", r.method)));
+            return Err(ControlError::Invalid(format!("unsupported method {shown}")));
         }
-        let path = r.path.trim();
+        let path = path.trim();
         if !path.starts_with('/') {
             return Err(ControlError::Invalid("path must start with /".into()));
         }
-        let body = console_body(r.body.as_deref())?;
         let mut req = EsRequest::new(&method, path);
-        req.headers = r.headers.into_iter().filter(|(k, _)| !k.trim().is_empty()).collect();
+        req.headers = headers.into_iter().filter(|(k, _)| !k.trim().is_empty()).collect();
         if !body.is_empty() && !req.headers.iter().any(|(k, _)| k.eq_ignore_ascii_case("content-type")) {
             let ndjson = path.split('?').next().is_some_and(|p| p.ends_with("/_bulk") || p.ends_with("/_msearch") || p.ends_with("/_msearch/template"));
             req.headers.push(("Content-Type".into(), if ndjson { "application/x-ndjson" } else { "application/json" }.into()));
@@ -2204,20 +2242,6 @@ impl Control {
     }
 }
 
-/// The bytes a console request sends: nothing for no body or `null`, a string's contents, or
-/// any other JSON value exactly as written.
-fn console_body(raw: Option<&serde_json::value::RawValue>) -> Result<Bytes> {
-    let Some(text) = raw.map(|r| r.get().trim()) else { return Ok(Bytes::new()) };
-    if text == "null" {
-        return Ok(Bytes::new());
-    }
-    if text.starts_with('"') {
-        let s: String = serde_json::from_str(text).map_err(|e| ControlError::Invalid(format!("body: {e}")))?;
-        return Ok(Bytes::from(s));
-    }
-    Ok(Bytes::copy_from_slice(text.as_bytes()))
-}
-
 /// The number of indices in a stored cluster state (`search-es`'s `ClusterState::to_json`).
 fn stored_index_count(json: &[u8]) -> Option<i64> {
     let v: Value = serde_json::from_slice(json).ok()?;
@@ -2251,19 +2275,25 @@ mod tests {
 
     #[test]
     fn console_bodies_keep_their_bytes() {
-        let raw = |t: &str| serde_json::from_str::<Box<serde_json::value::RawValue>>(t).unwrap();
-        let body = |t: Option<&str>| console_body(t.map(raw).as_deref()).unwrap();
+        let body = |b: Option<&str>| {
+            let whole = Bytes::from(match b {
+                Some(b) => format!(r#"{{"method":"PUT","path":"/a","body":{b}}}"#),
+                None => r#"{"method":"GET","path":"/"}"#.to_string(),
+            });
+            let r = ConsoleRequest::parse(&whole).unwrap();
+            let sent = r.body_in(&whole).unwrap();
+            // A JSON value is a slice of what was read, not a copy.
+            if b.is_some_and(|b| !b.starts_with('"') && b != "null") {
+                assert!(whole.as_ptr_range().contains(&sent.as_ptr()));
+            }
+            sent
+        };
         assert_eq!(body(None), Bytes::new());
         assert_eq!(body(Some("null")), Bytes::new());
         // Key order, spacing and number spelling survive (serde_json's Value would sort keys).
         assert_eq!(body(Some(r#"{"z": 1.0, "a": [1e2]}"#)), Bytes::from_static(br#"{"z": 1.0, "a": [1e2]}"#));
         assert_eq!(body(Some(r#""{\"index\":{}}\n{}\n""#)), Bytes::from_static(b"{\"index\":{}}\n{}\n"));
         assert_eq!(body(Some("42")), Bytes::from_static(b"42"));
-        // As it arrives in a request.
-        let r: ConsoleRequest = serde_json::from_str(r#"{"method":"PUT","path":"/a/_doc/1","body":{"title":"x","price":1}}"#).unwrap();
-        assert_eq!(console_body(r.body.as_deref()).unwrap(), Bytes::from_static(br#"{"title":"x","price":1}"#));
-        let r: ConsoleRequest = serde_json::from_str(r#"{"method":"GET","path":"/"}"#).unwrap();
-        assert!(r.body.is_none());
     }
 
     #[test]

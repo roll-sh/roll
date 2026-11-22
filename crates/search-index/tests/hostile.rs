@@ -38,19 +38,30 @@ fn err_text(r: search_index::Result<impl std::fmt::Debug>) -> String {
     }
 }
 
-/// One document's field may produce at most `max_field_tokens` tokens, analyzed or given: past
-/// it the document is refused whole, so an `ngram` chain can't turn one body into billions of
-/// postings.
+/// A document may produce at most `max_doc_term_bytes` of analyzed terms across its fields:
+/// an `ngram` document that would produce gigabytes of terms is refused naming the field, its
+/// analysis stopped at the budget, so the buffer stays small; given tokens count the same way,
+/// and `max_gram` itself is bounded.
 #[test]
-fn a_field_past_the_token_cap_is_refused() {
-    let s = Shard::open(ShardConfig { merge_threads: 0, max_field_tokens: 5, ..Default::default() }, schema(), Vec::new()).unwrap();
-    let a = search_analysis::Analysis::global().analyzer("standard").unwrap();
-    let text = |id: &str, v: &str| IndexableDoc::new(id.as_bytes().to_vec()).field(IndexableField::Text { field: BODY, analyzer: a.clone(), values: vec![v.to_string()] });
-    let e = err_text(s.index(IndexOp::new(text("x1", "a b c d e f"))));
-    assert!(e.contains("field=\"body\" produced more than [5] tokens"), "{e}");
-    let tokens = (0..6).map(|i| PreToken::new(vec![b'a' + i], 1, i as u32, i as u32 + 1)).collect();
-    assert!(err_text(s.index(IndexOp::new(IndexableDoc::new(b"x2".to_vec()).field(IndexableField::Tokens { field: BODY, tokens })))).contains("more than [5] tokens"));
-    s.index(IndexOp::new(text("ok", "a b c d e"))).unwrap();
+fn a_document_past_its_term_budget_is_refused_with_memory_flat() {
+    let budget = 4 << 20;
+    let s = Shard::open(ShardConfig { merge_threads: 0, max_doc_term_bytes: budget, ..Default::default() }, schema(), Vec::new()).unwrap();
+    let opts = search_analysis::IndexOptions { max_ngram_diff: 50, ..Default::default() };
+    let grams = |max: i32| search_analysis::Analysis::from_settings(&serde_json::json!({ "tokenizer": { "g": { "type": "ngram", "min_gram": max - 50, "max_gram": max } }, "analyzer": { "a": { "type": "custom", "tokenizer": "g" } } }), &opts);
+    assert!(grams(1001).err().is_some_and(|e| e.reason.contains("[max_gram] may be at most [1000]")));
+    let a = grams(51).unwrap().analyzer("a").unwrap();
+    // 2 MB of text: about 100 million grams, some 4 GB of terms.
+    let text: String = (0..2_000_000u32).map(|i| char::from(b'a' + (i.wrapping_mul(2_654_435_761) >> 27) as u8 % 26)).collect();
+    let started = std::time::Instant::now();
+    let doc = IndexableDoc::new(b"x1".to_vec()).field(IndexableField::Text { field: BODY, analyzer: a, values: vec![text] });
+    let e = err_text(s.index(IndexOp::new(doc)));
+    assert!(e.contains("field=\"body\" took the document past [4194304] bytes of analyzed terms"), "{e}");
+    assert!(started.elapsed() < std::time::Duration::from_secs(20), "the analysis stopped at the budget: {:?}", started.elapsed());
+    assert!(s.stats().buffer_bytes < 4 * budget as u64, "the buffer holds about the budget: {}", s.stats().buffer_bytes);
+    let tokens = (0..6).map(|i| PreToken::new(vec![b'a' + i; 1 << 20], 1, i as u32, i as u32 + 1)).collect();
+    assert!(err_text(s.index(IndexOp::new(IndexableDoc::new(b"x2".to_vec()).field(IndexableField::Tokens { field: BODY, tokens })))).contains("bytes of analyzed terms"));
+    let std = search_analysis::Analysis::global().analyzer("standard").unwrap();
+    s.index(IndexOp::new(IndexableDoc::new(b"ok".to_vec()).field(IndexableField::Text { field: BODY, analyzer: std, values: vec!["a b c".into()] }))).unwrap();
     s.refresh().unwrap();
     assert_eq!(s.searcher().num_docs(), 1);
 }

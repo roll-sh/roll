@@ -455,11 +455,15 @@ first, so they can't hide what runs, and anything that makes or changes credenti
   `POST /v1/search/clusters/{id}/branches` does there, so a token whose rules name one project
   can't branch a cluster outside it.
 - The search console (`POST /v1/search/clusters/{id}/request`, any method and path as the
-  cluster's owner) is `admin`. A console request whose answer can hold a credential (a new API
-  key, cross-cluster or granted, a service account token, an OAuth2, SAML, OIDC or PKI token, an
-  enrollment token, `_connector/_secret/{id}`, `_fleet/secret/{id}`) also needs `reveal` on the
-  cluster, as `POST …/keys` does (`Row::reveals_if`; the path is matched loosely, decoded, whatever
-  the method, so a false match only asks for `reveal` too), and gets the weaker of the two decisions.
+  cluster's owner) is `admin` at the gate. A console request that answers or sets a credential
+  also needs `reveal` on the cluster, as `POST …/keys` does: search decides it on the API the
+  cluster's own router picks for the request (`search_es::routes::handles_credentials`:
+  `Api::answers_credentials`, new API keys, service, OAuth2, SAML, OIDC and PKI tokens,
+  enrollment, connector and Fleet secrets, connectors' configurations, which Elasticsearch returns
+  with their sensitive values; `Api::sets_credentials`, a user's password), and asks the grant
+  (`Grant::allows`, on the resource the gate decided, `roll_auth::DecidedOn`). Anything short of
+  allowed is a 403; an approval isn't asked there, so a token that should do this needs `reveal`
+  allowed. The gate reads no console body.
 - Agents' machine commands, by `policy::agent_may`'s tiers: diffs and file reads `read`; working
   threads `write`; publishing with `land` `deploy`; a shell, writing files, rolling back, raising a
   thread's runtime or interaction mode, answering an agent's approval, endpoints, the gateway,

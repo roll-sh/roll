@@ -142,7 +142,7 @@ fn postgres() -> Router {
         .route("/v1/search/clusters/{id}/indices/{index}/search", post(|| async { axum::Json(json!({ "hits": [] })) }))
         .route("/v1/search/clusters", post(|| async { axum::Json(json!({ "id": "cl_new", "password": "fresh" })) }))
         .route("/v1/search/clusters/{id}/indices", get(|| async { axum::Json(json!([])) }))
-        .route("/v1/search/clusters/{id}/request", post(|| async { axum::Json(json!({})) }))
+        .route("/v1/search/clusters/{id}/request", post(|ext: axum::http::Extensions| async move { axum::Json(json!({ "decided_on": ext.get::<roll_auth::DecidedOn>().and_then(|d| d.0.id.clone()) })) }))
         .route("/v1/search/clusters/{id}/indices/{index}/bulk", post(|body: String| async move { axum::Json(json!({ "lines": body.lines().count() })) }))
         .route("/v1/secrets/projects/{project}/environments/{env}/secrets", get(|| async { axum::Json(json!([])) }))
         .route("/v1/secrets/projects/{project}/health", get(|| async { axum::Json(json!({ "findings": [] })) }))
@@ -1888,6 +1888,18 @@ async fn a_rule_can_grant_one_encryption_key() {
     // A rule on the whole project still reaches every key.
     let (all, _) = d.token(json!([{ "product": "secrets", "resources": [{ "id": "prj_a" }], "actions": { "write": "allow" } }]), json!({})).await;
     assert_eq!(d.call(&all, Method::POST, "/v1/secrets/projects/prj_a/transit/billing/encrypt", Some(json!({ "plaintext": "aGk=" }))).await.0, StatusCode::OK);
+}
+
+/// The search console is decided from its route alone: the gate reads no body (a large `_bulk`
+/// through it isn't refused as too large), and the product gets the resource it was decided on,
+/// to ask about `reveal` itself when the request answers a credential.
+#[tokio::test]
+async fn the_console_is_decided_without_its_body() {
+    let d = Daemon::new(50);
+    let (admin, _) = d.token(json!([{ "product": "search", "resources": [{ "id": "cl_1" }], "actions": { "admin": "allow" } }]), json!({})).await;
+    let big = json!({ "method": "POST", "path": "/_bulk", "body": "x".repeat(6 << 20) });
+    let (s, v) = d.call(&admin, Method::POST, "/v1/search/clusters/cl_1/request", Some(big)).await;
+    assert_eq!((s, v["decided_on"].as_str()), (StatusCode::OK, Some("cl_1")), "{v}");
 }
 
 /// A rule can grant some indices of a search cluster: index routes are decided name by name, the
